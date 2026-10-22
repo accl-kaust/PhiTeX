@@ -1077,6 +1077,8 @@ fn the_critical_chain_falls_by_one_through_reads_ranges_and_waits() {
                     assert_eq!((*to, *by), (h, Some(next)), "seed {seed}: {w:?}");
                     assert_eq!(hn + 1, h, "seed {seed}: {w:?}");
                 }
+                // (A round value: the round's last commit, at any height.)
+                Cause::Loop { .. } => {}
                 // (A hold, as a wait: its node may have risen since.)
                 Cause::Woken { by, .. } | Cause::Held { by, .. } => {
                     assert_eq!(*by, next, "seed {seed}: {w:?}");

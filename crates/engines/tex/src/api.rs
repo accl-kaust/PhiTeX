@@ -660,7 +660,7 @@ pub(crate) fn tree_from_bytes(v: &Values, b: &[u8]) -> Option<ValueId> {
     r.0.is_empty().then(|| import(v, &t))
 }
 
-type Env = Arc<Vec<(String, Tree)>>;
+type Env = Arc<crate::fmtenv::FormatEnv>;
 
 /// A prelude's environment with what it read: each file's name and the
 /// hash of what the finder gave (0: absent).
@@ -675,6 +675,12 @@ struct Cached {
     /// at their places in its files: reported with every build on it,
     /// and such a prelude is never exported.
     diags: Vec<Diagnostic>,
+    /// The definitions harvested from its text and files
+    /// ([`prelude_defs`]), as the exported prelude kept them: read when
+    /// first asked, not harvested again.
+    defs_bytes: Option<Vec<u8>>,
+    /// Its harvested definitions, once made or read.
+    defs: OnceLock<Defs>,
 }
 
 /// Prelude environments by the hash of the prelude's text; each is good
@@ -1026,7 +1032,9 @@ impl Rd<'_> {
 /// under another layout is refused (rebuilt), never loaded.
 // (4: fonts by key, `crate::fonts::key_of`; the format's font order
 // `fontorder`)
-pub const PRELUDE_LAYOUT: u32 = 4;
+// (5: the environment a table of distinct value nodes and the bindings
+// by field, `crate::fmtenv`)
+pub const PRELUDE_LAYOUT: u32 = 5;
 
 /// The exported prelude's magic, before the layout and the engine's
 /// identity.
@@ -1123,10 +1131,15 @@ fn serialise_as(c: &Cached, layout: u32, engine: u64) -> Vec<u8> {
         put_bytes(&mut out, n.as_bytes());
         out.extend_from_slice(&h.to_le_bytes());
     }
-    out.extend_from_slice(&(c.env.len() as u64).to_le_bytes());
-    for (k, t) in c.env.iter() {
-        put_bytes(&mut out, k.as_bytes());
-        put_tree(&mut out, t);
+    c.env.write(&mut out);
+    // (its harvested definitions: as read, else as made in this process)
+    let made = c.defs.get().map(|d| d.to_bytes());
+    match c.defs_bytes.as_ref().or(made.as_ref()) {
+        Some(d) => {
+            out.push(1);
+            put_bytes(&mut out, d);
+        }
+        None => out.push(0),
     }
     out
 }
@@ -1157,13 +1170,22 @@ fn deserialise_as(b: &[u8], layout: u32, engine: u64) -> Option<Cached> {
         let name = r.string()?;
         reads.push((name, r.u64()?));
     }
-    let n = usize::try_from(r.u64()?).ok()?;
-    let mut env = Vec::new();
-    for _ in 0..n {
-        let k = r.string()?;
-        env.push((k, r.tree()?));
+    let (env, rest) = crate::fmtenv::FormatEnv::read(r.0)?;
+    let mut r = Rd(rest);
+    let defs_bytes = match r.take(1)?[0] {
+        0 => None,
+        1 => {
+            let n = usize::try_from(r.u64()?).ok()?;
+            Some(r.take(n)?.to_vec())
+        }
+        _ => return None,
+    };
+    if !r.0.is_empty() {
+        return None;
     }
     Some(Cached {
+        defs_bytes,
+        defs: OnceLock::new(),
         key,
         text_key,
         reads,
@@ -2263,42 +2285,6 @@ impl Graph {
         }
     }
 
-    /// [`Graph::supply`] of every file of `names` in order, the files
-    /// found, read, hashed and made values on the pool (spec-final §9b:
-    /// the cold build's serial part), recorded in the same order.
-    fn supply_all(&mut self, finder: &Finder, names: &[String]) {
-        let mut seen = phitex_defuse::FxHashSet::default();
-        let todo: Vec<(&str, Field)> = names
-            .iter()
-            .filter(|n| seen.insert(n.as_str()))
-            .map(|n| (n.as_str(), self.eng.values().field(&format!("file:{n}"))))
-            .filter(|&(n, f)| {
-                !(self.files.iter().any(|(g, _)| *g == f)
-                    || self.absent.contains(&f)
-                    || self.written.iter().any(|w| w == n))
-            })
-            .collect();
-        let v = self.eng.values();
-        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(self.threads));
-        let got: Vec<(u64, Option<ValueId>)> = crate::exec::map_on(&mut ex, todo.len(), &|k| {
-            let found = finder(todo[k].0);
-            let hash = file_hash(found.as_ref());
-            let val = found.map(|(path, bytes)| {
-                let text = latin1(&bytes);
-                v.list(vec![v.str(&path), v.str(&text)])
-            });
-            (hash, val)
-        });
-        for (&(name, f), (hash, val)) in todo.iter().zip(got) {
-            self.queries.push((name.to_owned(), val.is_some()));
-            self.reads.push((name.to_owned(), hash));
-            match val {
-                Some(x) => self.files.push((f, x)),
-                None => self.absent.push(f),
-            }
-        }
-    }
-
     /// Installs the environment provider: a run reading a file the
     /// environment does not hold gets it from the finder in place, as
     /// [`Graph::supply`] would have supplied it, instead of stopping;
@@ -2673,31 +2659,7 @@ impl Graph {
         // it; the job's bindings first, by field once for the job
         // ([`job_env`]), merged with the few entries here: the format's
         // bindings neither hashed nor sorted again per push)
-        let env = by_field(env);
-        let mut merged = Vec::with_capacity(self.job.len() + env.len());
-        let (mut i, mut j) = (0, 0);
-        while i < self.job.len() || j < env.len() {
-            match (self.job.get(i), env.get(j)) {
-                (Some(a), Some(b)) if a.0 == b.0 => {
-                    merged.push(*b);
-                    (i, j) = (i + 1, j + 1);
-                }
-                (Some(a), Some(b)) if a.0.0.raw() > b.0.0.raw() => {
-                    merged.push(*b);
-                    j += 1;
-                }
-                (Some(a), _) => {
-                    merged.push(*a);
-                    i += 1;
-                }
-                (None, Some(b)) => {
-                    merged.push(*b);
-                    j += 1;
-                }
-                (None, None) => break,
-            }
-        }
-        let env = merged;
+        let env = merge_by_field(&self.job, &by_field(env));
         let mut absent = self.absent.clone();
         absent.sort_unstable_by_key(|f| f.0.raw());
         absent.dedup();
@@ -3889,9 +3851,25 @@ fn is_tex_text(name: &str) -> bool {
 /// evaluation), for a prelude evaluated here or imported from bytes.
 fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
     static C: OnceLock<Mutex<FxHashMap<[u8; 32], Defs>>> = OnceLock::new();
+    if let Some(d) = c.defs.get() {
+        return d.clone();
+    }
     let cache = C.get_or_init(|| Mutex::new(FxHashMap::default()));
     if let Some(d) = cache.locked().get(&c.key) {
+        let _ = c.defs.set(d.clone());
         return d.clone();
+    }
+    // (as the exported prelude kept them: its key covers the text, every
+    // file read and this build of the harvest, `engine_identity`)
+    if let Some(d) = c
+        .defs_bytes
+        .as_deref()
+        .and_then(pass::Definitions::from_bytes)
+    {
+        let d: Defs = Arc::new(d);
+        let _ = c.defs.set(d.clone());
+        cache.locked().insert(c.key, d.clone());
+        return d;
     }
     let t0 = std::time::Instant::now();
     let mut defs = pass::Definitions::new();
@@ -3923,6 +3901,7 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
         );
     }
     let d: Defs = Arc::new(defs);
+    let _ = c.defs.set(d.clone());
     cache.locked().insert(c.key, d.clone());
     d
 }
@@ -4084,8 +4063,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let t_bindings = t_start.elapsed();
     let m_bindings = mem_mb();
     let v = g.eng.values();
-    let out: Vec<(String, Tree)> = env.into_iter().map(|(k, x)| (k, export(v, x))).collect();
-    let e = Arc::new(out);
+    let e = Arc::new(crate::fmtenv::FormatEnv::of(v, &env));
     if time {
         eprintln!(
             "prelude: freshness check {t_check:?}, supply known files {:?}, run (settle) {:?}, final bindings {:?}, export {:?}; {} bindings",
@@ -4104,6 +4082,8 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         );
     }
     let c = Arc::new(Cached {
+        defs_bytes: None,
+        defs: OnceLock::new(),
         key: prelude_key_of(key, &g.reads),
         text_key: key,
         reads: g.reads.clone(),
@@ -4433,27 +4413,11 @@ impl Build {
         }
         let unit = g.eng.new_unit();
         crate::timeline::lap("engine: the graph made");
-        // the files the format read (fonts, data) are supplied before the
-        // document's first evaluation: a run reading one never stops
-        let t_sup = std::time::Instant::now();
-        g.supply_all(
-            &opts.finder,
-            &cached
-                .reads
-                .iter()
-                .map(|(n, _)| n.clone())
-                .collect::<Vec<_>>(),
-        );
-        crate::timeline::lap("engine: the format's files supplied (fonts, data)");
+        // (the files the format read are not supplied up front: a run
+        // reading one gets it from the provider in place, `Graph::provide`,
+        // and one no run reads is never read, hashed or made a value)
         g.guesses(&opts);
         crate::timeline::lap("engine: the guesses (read-back keys)");
-        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
-            eprintln!(
-                "time: supply the format's {} files (fonts, data) {:?}",
-                cached.reads.len(),
-                t_sup.elapsed()
-            );
-        }
         // (a document's nodes hold its canonical text, [`canonical_text`],
         // unless it has none: a comment-only edit changes no node)
         let canon_text = (is_doc(prelude, document))
@@ -4479,7 +4443,9 @@ impl Build {
             g.push_env(env);
         }
         crate::timeline::lap("engine: the environment pushed");
-        job_env(&mut g, unit, &env, &opts);
+        // (the values the job made of the format's nodes: each once)
+        let made = Arc::new(env.made());
+        job_env(&mut g, unit, &env, &made, &opts);
         // (the page builder, one node where the job begins: it folds the
         // pieces' profiles to the unit's end and places every page's
         // finisher, `crate::pages::Pages`)
@@ -4488,10 +4454,7 @@ impl Build {
             g.eng.push(unit, pages, Vec::new());
         }
         // §1337: `\everyjob`, before the job's first line
-        let every = env
-            .iter()
-            .find(|(k, _)| k == "param:everyjob")
-            .map(|(_, t)| import(g.eng.values(), t));
+        let every = env.get(g.eng.values(), "param:everyjob", &made);
         if let Some(t) = every {
             let v = g.eng.values();
             let toks = crate::val::toks_of(v, Some(t));
@@ -4547,9 +4510,7 @@ impl Build {
             let v = g.eng.values();
             cached
                 .env
-                .iter()
-                .find(|(k, _)| k == FONT_ORDER)
-                .map(|(_, t)| import(v, t))
+                .get(v, FONT_ORDER, &made)
                 .and_then(|x| list_of(v, x).first().map(|&k| int_of(v, k)))
         };
         if let Some(k) = first_font {
@@ -5564,8 +5525,8 @@ impl Build {
             let mut names: Vec<String> = self
                 .prelude
                 .env
-                .iter()
-                .filter_map(|(k, _)| k.strip_prefix("cs:").map(str::to_owned))
+                .names()
+                .filter_map(|k| k.strip_prefix("cs:").map(str::to_owned))
                 .collect();
             // TeX82's primitives live in the primitive table, not the
             // environment (INITEX's §226 `primitive` calls)
@@ -6382,28 +6343,25 @@ fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
 
 /// The job's environment: the format's parameters, the job name, the
 /// PDF options and the date (§241), set on `unit` before the first line.
-fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
+fn job_env(g: &mut Graph, unit: UnitId, env: &Env, made: &Arc<crate::fmtenv::Made>, opts: &Options) {
+    // (the format's bindings the environment's base: each made when a
+    // run first reads it, a value two bindings share made once; one no
+    // run reads is never made, nor its name)
+    {
+        let (fmt, made) = (Arc::clone(env), Arc::clone(made));
+        g.eng
+            .set_environment_base(Arc::new(move |v, f| fmt.get_field(v, f, &made)));
+    }
     let v = g.eng.values();
-    // (the format's bindings made values on the pool, in their order)
-    let mut ex = crate::exec::Coarse(crate::exec::Threads::new(g.threads));
-    let chunk = env.len().div_ceil(g.threads.max(1) * 4).max(1);
-    let mut sets: Vec<(Field, ValueId)> =
-        crate::exec::map_on(&mut ex, env.len().div_ceil(chunk), &|c| {
-            env[c * chunk..((c + 1) * chunk).min(env.len())]
-                .iter()
-                .map(|(k, t)| (v.field(k), import(v, t)))
-                .collect::<Vec<_>>()
-        })
-        .into_iter()
-        .flatten()
-        .collect();
-    sets.push((v.field("jobname"), v.str(&opts.jobname)));
-    sets.push((v.field("dvicomment"), v.str(&opts.comment)));
-    sets.push((v.field("shellescape"), v.int(i64::from(opts.shell_escape))));
-    sets.push((
-        v.field("pdfdate"),
-        v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
-    ));
+    let mut sets = vec![
+        (v.field("jobname"), v.str(&opts.jobname)),
+        (v.field("dvicomment"), v.str(&opts.comment)),
+        (v.field("shellescape"), v.int(i64::from(opts.shell_escape))),
+        (
+            v.field("pdfdate"),
+            v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
+        ),
+    ];
     if let Some(t) = opts.epoch {
         // §241 fix_date_and_time, at the job's start
         for (k, x) in date_params(t) {
@@ -6411,7 +6369,9 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
         }
     }
     if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
-        g.start_env.extend(sets.iter().copied());
+        // (the check reads the format's bindings too: all of them made)
+        g.start_env
+            .extend(env.bindings(v, made, 0..env.len()).iter().chain(&sets).copied());
     }
     // (spec-final §4.5: the job's bindings go with the environment, one
     // push for all of them, made again only where an entry changed; the
@@ -6421,6 +6381,35 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
     g.job = by_field(sets);
     let env = g.environment(opts.fixpoint);
     g.push_env(env);
+}
+
+/// `base` with `over` over it, both by field with each field once: by
+/// field, `over`'s entry for a field both give.
+fn merge_by_field(base: &[(Field, ValueId)], over: &[(Field, ValueId)]) -> Vec<(Field, ValueId)> {
+    let mut merged = Vec::with_capacity(base.len() + over.len());
+    let (mut i, mut j) = (0, 0);
+    loop {
+        match (base.get(i), over.get(j)) {
+            (Some(a), Some(b)) if a.0 == b.0 => {
+                merged.push(*b);
+                (i, j) = (i + 1, j + 1);
+            }
+            (Some(a), Some(b)) if a.0.0.raw() > b.0.0.raw() => {
+                merged.push(*b);
+                j += 1;
+            }
+            (Some(a), _) => {
+                merged.push(*a);
+                i += 1;
+            }
+            (None, Some(b)) => {
+                merged.push(*b);
+                j += 1;
+            }
+            (None, None) => break,
+        }
+    }
+    merged
 }
 
 /// Bindings by field, each field once: the last given for it.
@@ -6764,10 +6753,15 @@ mod prelude_tests {
     #[test]
     fn another_layout_or_engine_is_refused() {
         let c = Cached {
+            defs_bytes: None,
+            defs: OnceLock::new(),
             key: [3; 32],
             text_key: 5,
             reads: vec![("a.tex".to_owned(), 9)],
-            env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
+            env: {
+                let v = Values::new();
+                Arc::new(crate::fmtenv::FormatEnv::of(&v, &[("x".to_owned(), v.int(1))]))
+            },
             errors: Vec::new(),
             diags: Vec::new(),
         };

@@ -181,6 +181,11 @@ struct Heights {
     woke: FxHashMap<Id, (Id, Option<Field>)>,
     /// What held each node back before its run (`Cause::Held`).
     held: FxHashMap<Id, (Id, crate::api::Hold)>,
+    /// The run committed last, and the one that ended the last round: a
+    /// read of a loop-back field's round value waited for it (its link,
+    /// `Cause::Loop`).
+    last: Option<Id>,
+    round_end: Option<Id>,
     /// The evaluation's start, and for each node's last committed run
     /// when it was queued, started, ended and committed (ns since).
     epoch: Option<std::time::Instant>,
@@ -212,6 +217,7 @@ struct Link {
 impl Heights {
     /// Node `id`'s run committed now.
     fn committed(&mut self, id: Id) {
+        self.last = Some(id);
         let c = self.epoch.map_or(0, |e| super::core::ns_since(Some(e)));
         if let Some(a) = self.at.get_mut(&id) {
             a[3] = c;
@@ -464,6 +470,8 @@ impl Engine {
                                 moved_vs_old |= had_old;
                             }
                         }
+                        // (The round's last commit: its loop readers' link.)
+                        hs.round_end = hs.last;
                         moved_vs_old |= self.set_loops(&mut s, &next) && from_old;
                         continue;
                     }
@@ -2211,6 +2219,8 @@ impl Engine {
                     });
                 }
                 Read::Out { node, .. } => offer(hs, *node, Cause::Output { of: NodeId(*node) }),
+                // (A round value: there when the round before ended.)
+                Read::Loop { f, .. } if let Some(x) = hs.round_end => offer(hs, x, Cause::Loop { field: *f }),
                 // (A placed output read with the reader's guess standing in
                 // is a link only when it made the run, as a guessed fold.)
                 Read::Placed { node, val, or, .. } => {

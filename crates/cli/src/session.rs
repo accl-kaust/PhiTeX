@@ -485,6 +485,9 @@ impl Session {
         phitex_tex::timeline::lap("session: the main file read");
         let text = Arc::from(tex::chars_owned(text));
         phitex_tex::timeline::lap("session: its characters");
+        // (the `ls-R` databases kept in the cache: read, not parsed, by
+        // the next process while they are unchanged)
+        phitex_kpse::set_db_cache(Some(tex::cache_dir().join("kpse")));
         let tree = Arc::new(tex::Tree::open(&job.engine));
         phitex_tex::timeline::lap("session: kpathsea opened (texmf.cnf, ls-R)");
         let format_tree = Arc::new(tex::Tree::open_format(&job.engine));

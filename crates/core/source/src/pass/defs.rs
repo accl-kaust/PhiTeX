@@ -11,6 +11,8 @@ type HashMap<K, V, S = std::hash::BuildHasherDefault<crate::pass::hints::Fx>> =
 type HashSet<K, S = std::hash::BuildHasherDefault<crate::pass::hints::Fx>> =
     std::collections::HashSet<K, S>;
 
+mod codec;
+
 use super::FileKind;
 use super::atoms::{self, Atom, AtomKind};
 use super::hints::{Closure, DefSet, Effects, effects};
