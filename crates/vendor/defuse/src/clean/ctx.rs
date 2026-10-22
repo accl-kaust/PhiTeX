@@ -107,6 +107,9 @@ pub struct Ctx<'a> {
     /// What it took by index and by key through each view since the last
     /// mark ([`Ctx::get`]), read as one at the next (`flush_gets`).
     pub(crate) gets: Vec<Gets>,
+    /// The lists it took elements of by index lately (a few, most recent
+    /// last): a get looks its list up once.
+    lists: Vec<(ValueId, Arc<crate::values::Value>)>,
     /// The marks this attempt made, the token it keeps for a later run
     /// (`checkpoint`, `keep_after`), the run it resumes from a mark of
     /// (`resumed`), and the old mark it was cut off at (its index).
@@ -234,6 +237,7 @@ impl<'a> Ctx<'a> {
             views,
             composed,
             gets: Vec::new(),
+            lists: Vec::new(),
             // (Resumed at a mark: the marks before it stand.)
             passes: Vec::new(),
             out_from: None,
@@ -893,7 +897,10 @@ impl<'a> Ctx<'a> {
                     }
                 };
                 match s {
-                    Step::Index(i) => g.ix.push(i),
+                    Step::Index(i) => {
+                        g.ix.push(i);
+                        return self.index_of(x, i);
+                    }
                     Step::Key(k) => g.keys.push(k),
                     _ => {}
                 }
@@ -901,6 +908,30 @@ impl<'a> Ctx<'a> {
             _ => self.view_read(root, self.core.extend_path(path, s)),
         }
         self.core.step(s, x)
+    }
+
+    /// Element `i` of `x` (as `Step::Index`), a list's looked up once
+    /// for the gets that follow.
+    fn index_of(&mut self, x: ValueId, i: u32) -> Option<ValueId> {
+        use crate::values::Value;
+        let at = match self.lists.iter().rposition(|l| l.0 == x) {
+            Some(k) => k,
+            None => {
+                let val = self.core.values.get(x);
+                if !matches!(*val, Value::List(_)) {
+                    return self.core.step(crate::api::Step::Index(i), x);
+                }
+                if self.lists.len() == 4 {
+                    self.lists.remove(0);
+                }
+                self.lists.push((x, val));
+                self.lists.len() - 1
+            }
+        };
+        match &*self.lists[at].1 {
+            Value::List(l) => l.get(i as usize).copied(),
+            _ => None,
+        }
     }
 
     /// Reads what the run took by index and by key through each view since
