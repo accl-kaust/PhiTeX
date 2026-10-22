@@ -9,14 +9,18 @@ DIR holds the document (MAIN, amsldoc's text: the sites are found by
 shape, at fractions of the file); FLAGs go to both `watch` and `build`
 (`--exact-pdf`). The watch runs with PHITEX_ROUND_ACCT=1 (the caller's
 environment): each edit's `acct-edit:` line gives its rounds, runs, nodes
-run and cutoffs (nodes run whose output did not change). GATE_EDIT_STDERR
-keeps the watch's stderr there.
+run and cutoffs (nodes run whose output did not change); with
+PHITEX_RUN_AUDIT=1 too, its `acct-edit: audit` line gives the reruns, the
+wasted ones (every effect outside the run as before), their time and the
+top causes. GATE_EDIT_STDERR keeps the watch's stderr there.
 
 Red: an edit whose PDF is not the cold build's, or a watch that gives no
 build event. Times are recorded against each kind's target (at -j 8, end
 to end), never red. OUT_JSON: `{"j", "cold_watch_ms", "verdict": "same" |
 "differs" | "watch failed", "edits": [{"kind", "class", "what", "ms",
-"target_ms", "same", "rounds", "runs", "nodes_run", "cutoffs", "by_op"}]}`.
+"target_ms", "same", "rounds", "runs", "nodes_run", "cutoffs", "by_op",
+"reruns", "rerun_ms", "wasted", "wasted_ms", "wasted_by_cause": [[cause,
+count, ms], ...]}]}`.
 """
 import hashlib
 import json
@@ -104,6 +108,7 @@ KINDS = [
     ("sentence after", "page", sentence, 0.7),
 ]
 
+AUDIT = re.compile(r"^acct-edit: audit reruns (\d+) in ([\d.]+) ms, wasted (\d+) in ([\d.]+) ms, top \[(.*)\]$", re.M)
 ACCT = re.compile(
     r"^acct-edit: wall [\d.]+ ms, (\d+) rounds, .*?, (\d+) runs, (\d+) nodes run, (?:(\d+) cutoffs, )?runs by op \[(.*)\]",
     re.M,
@@ -123,6 +128,7 @@ def main():
         cwd=d, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
     )
     seen = 0  # (the stderr's acct lines read so far)
+    seen_audit = 0
 
     def next_build(timeout=900):
         t = time.monotonic()
@@ -138,12 +144,31 @@ def main():
         return None, time.monotonic() - t
 
     def acct():
-        nonlocal seen
+        nonlocal seen, seen_audit
         err.flush()
-        ms = ACCT.findall(open(errp, errors="replace").read())
+        text = open(errp, errors="replace").read()
+        ms = ACCT.findall(text)
         new, seen = ms[seen:], len(ms)
+        au = AUDIT.findall(text)
+        new_au, seen_audit = au[seen_audit:], len(au)
         if not new:
             return {}
+        # (the run audit, PHITEX_RUN_AUDIT: the wasted reruns by cause,
+        # `op kind field count ms`, summed over the edit's evaluations)
+        causes = {}
+        for a in new_au:
+            for c in filter(None, a[4].split("; ")):
+                k, n, t, _ = c.rsplit(" ", 3)
+                x = causes.setdefault(k, [0, 0.0])
+                x[0] += int(n)
+                x[1] += float(t)
+        audit = {
+            "reruns": sum(int(a[0]) for a in new_au),
+            "rerun_ms": round(sum(float(a[1]) for a in new_au), 1),
+            "wasted": sum(int(a[2]) for a in new_au),
+            "wasted_ms": round(sum(float(a[3]) for a in new_au), 1),
+            "wasted_by_cause": sorted(([k, n, round(t, 3)] for k, (n, t) in causes.items()), key=lambda x: -x[2]),
+        } if new_au else {}
         # (the edit's evaluations summed: one, unless the watch built twice)
         by = {}
         for m in new:
@@ -155,6 +180,7 @@ def main():
             "nodes_run": sum(int(m[2]) for m in new),
             "cutoffs": sum(int(m[3] or 0) for m in new),
             "by_op": by,
+            **audit,
         }
 
     ev, w0 = next_build()
@@ -206,13 +232,16 @@ def main():
     json.dump(res, open(out, "w"), indent=1)
     # (the table: one line an edit)
     print(f"-j {j}: cold watch build {res['cold_watch_ms']} ms; verdict {res['verdict']}")
-    print(f"  {'kind':21s} {'ms':>9s} {'target':>6s}  {'pdf':7s} {'rounds':>6s} {'runs':>5s} {'nodes':>5s} {'cutoffs':>7s}  runs by op; edit")
+    print(f"  {'kind':21s} {'ms':>9s} {'target':>6s}  {'pdf':7s} {'rounds':>6s} {'runs':>5s} {'nodes':>5s} {'cutoffs':>7s} {'wasted':>6s} {'w_ms':>7s}  top wasted causes (op kind field n ms); runs by op; edit")
     for e in res["edits"]:
         # (a time over its target marked `!`: recorded, not red)
         ms = "-" if e.get("ms") is None else f"{e['ms']:.1f}" + ("!" if e["ms"] > e["target_ms"] else " ")
         by = " ".join(f"{k}:{v}" for k, v in sorted(e.get("by_op", {}).items()))
+        top = ", ".join(f"{k} {n} {t:.1f}" for k, n, t in e.get("wasted_by_cause", [])[:3]) or "-"
+        wms = "-" if e.get("wasted_ms") is None else f"{e['wasted_ms']:.1f}"
         print(f"  {e['kind']:21s} {ms:>9s} {'<=' + str(e['target_ms']):>6s}  {'exact' if e['same'] else 'DIFFERS':7s} "
-              f"{e.get('rounds', '-'):>6} {e.get('runs', '-'):>5} {e.get('nodes_run', '-'):>5} {e.get('cutoffs', '-'):>7}  {by}; {e['what']}")
+              f"{e.get('rounds', '-'):>6} {e.get('runs', '-'):>5} {e.get('nodes_run', '-'):>5} {e.get('cutoffs', '-'):>7} "
+              f"{e.get('wasted', '-'):>6} {wms:>7}  {top}; {by}; {e['what']}")
 
 
 if __name__ == "__main__":
