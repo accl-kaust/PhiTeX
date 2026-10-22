@@ -684,7 +684,7 @@ pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u
     let was = SIDE_SEEN.with(|c| c.replace(0));
     let mut fonts = FontIds::default();
     let mut plain = true;
-    let mut last = u32::MAX;
+    let mut font_was = u32::MAX;
     // (a line's interword glue is one node many times: the last glue
     // encoded is kept, as [`encode_list`] does)
     let mut glue: Option<(&GlueNode, ValueId)> = None;
@@ -692,9 +692,9 @@ pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u
     for n in list {
         let x = match n {
             Node::Char { font, ch } => {
-                if *font != last {
+                if *font != font_was {
                     fonts.insert(*font);
-                    last = *font;
+                    font_was = *font;
                 }
                 char_value(v, *font, *ch)
             }
