@@ -304,7 +304,10 @@ fn parallel_counters() {
         assert_eq!(one.peak_running, usize::from(counted));
         assert_eq!(one.batches, one.batches_inline);
         assert!(one.busy <= one.wall);
-        let (_, out16) = run(16);
+        // (at most as many runs at once as threads asked for: the
+        // engine's thread running a batch's job counts as one of them)
+        let (sixteen, out16) = run(16);
+        assert!(sixteen.peak_running <= 16);
         assert!(
             out1 == out4 && out1 == out16,
             "{name}: output differs across threads"
