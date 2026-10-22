@@ -18,6 +18,14 @@
 #                                       timings ($w/gate-control/CTL)
 #   gate-shard.sh amsedit J             amsldoc's edit history at -j J
 #                                       (GATE_AMS_EDITS one-word edits, 10)
+#   gate-shard.sh editkinds             amsldoc in one watch session per
+#                                       -j (8, then 1), every edit kind in
+#                                       turn (gate-editkinds.py): each
+#                                       edit's PDF against a cold build of
+#                                       its text (red if not the same),
+#                                       its save-to-build ms against its
+#                                       kind's target, rounds, runs and
+#                                       cutoffs (recorded, not red)
 #   gate-shard.sh control CTL           control CTL's CLI built, its cold
 #                                       watch timings at -j 1/8/16 (recorded
 #                                       by `gate-fast control`)
@@ -329,6 +337,26 @@ for l in open(sys.argv[1]):
       timeout 2400 python3 -I scripts/accl/gate-edits.py "$bin" "$w/amsh" amsldoc.tex $j $n $j "$r/edits-j$j.json" --exact-pdf) >> "$r/ams.txt" 2>&1
     grep -E '^acct-edit:' "$r/edits-j$j.err" 2>/dev/null | cut -c1-400 >> "$r/ams.txt"
     grep -q '"verdict": "same"' "$r/edits-j$j.json" 2>/dev/null || red "amsldoc edit history -j $j: $(python3 -c "import json;print(json.load(open('$r/edits-j$j.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
+    ;;
+  editkinds)
+    # editkinds: every edit kind on amsldoc, one watch session per -j,
+    # on the timings' CLI (profile: the acct lines); the script staged
+    # with this one (GATE_EDITKINDS), else the checkout's
+    fetched
+    bin=$w/bin/cli/prof/phitex
+    py=${GATE_EDITKINDS:-scripts/accl/gate-editkinds.py}
+    for j in 8 1; do
+      rm -rf "$w/ek" "$w/ek-cold" && cp -a bench/amsldoc "$w/ek"
+      (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_CACHE_DIR=$w/ekcache \
+        PHITEX_ROUND_ACCT=1 GATE_EDIT_STDERR="$r/editkinds-j$j.err" \
+        timeout 2400 python3 -I "$py" "$bin" "$w/ek" amsldoc.tex $j "$r/editkinds-j$j.json" --exact-pdf) >> "$r/editkinds.txt" 2>&1
+      v=$(python3 -I -c '
+import json, sys
+r = json.load(open(sys.argv[1]))
+bad = [e["kind"] for e in r["edits"] if not e["same"]]
+print(r["verdict"] + (": " + ", ".join(bad) if bad else ""))' "$r/editkinds-j$j.json" 2>/dev/null || echo 'no result')
+      [ "$v" = same ] || red "amsldoc edit kinds -j $j: $v"
+    done
     ;;
   control)
     # control CTL: the control commit's release CLI built, its cold watch
