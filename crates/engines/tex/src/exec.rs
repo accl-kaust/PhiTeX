@@ -548,7 +548,7 @@ impl Executor for Threads {
         let longest = AtomicU64::new(0);
         // one job a task: each costs a run
         let t0 = now();
-        on_pool(self.n, n, 1, &|i| {
+        on_pool_here(self.n, n, &|i| {
             let t = now();
             let _ = slots[i].set(self.node_job(|| run(i)));
             if let (Some(a), Some(b)) = (t, now()) {
@@ -698,6 +698,28 @@ fn on_pool(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
     pool(threads).install(|| {
         (0..n).into_par_iter().with_min_len(grain).for_each(f);
     });
+}
+
+/// `f(i)` for every `i < n`, one job a task: the first on this thread,
+/// the others on the pool. The engine's thread runs a job of its batch
+/// itself, warm, instead of waiting while a woken worker runs it cold (a
+/// batch of two, a page's finisher and its neighbour, ran both on the
+/// pool at twice its time on this thread).
+#[cfg(feature = "rayon")]
+fn on_pool_here(threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
+    pool(threads).in_place_scope(|s| {
+        for i in 1..n {
+            s.spawn(move |_| f(i));
+        }
+        if n > 0 {
+            f(0);
+        }
+    });
+}
+
+#[cfg(not(feature = "rayon"))]
+fn on_pool_here(threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
+    on_pool(threads, n, 1, f);
 }
 
 /// Every worker of the pool of `threads` adds its probe counts and spans
