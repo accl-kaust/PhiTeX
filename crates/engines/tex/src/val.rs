@@ -451,7 +451,14 @@ impl Tok {
     #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn field_name(&self) -> Option<String> {
         match self.as_cs() {
-            Some(n) => Some(format!("cs:{n}")),
+            Some(n) => {
+                // (built, not formatted: a lookup's name, made often)
+                let n = n.name();
+                let mut s = String::with_capacity(3 + n.len());
+                s.push_str("cs:");
+                s.push_str(n);
+                Some(s)
+            }
             None if self.cat() == Some(13) => Some(format!("act:{}", self.chr())),
             None => None,
         }
@@ -461,7 +468,13 @@ impl Tok {
     pub(crate) fn encode(&self, v: &Values) -> ValueId {
         match self.as_cs() {
             None => v.int(i64::from(self.0)),
-            Some(n) => v.str(&format!("\\{n}")),
+            Some(n) => {
+                let n = n.name();
+                let mut s = String::with_capacity(1 + n.len());
+                s.push('\\');
+                s.push_str(n);
+                v.str(&s)
+            }
         }
     }
 

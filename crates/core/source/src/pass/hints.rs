@@ -473,7 +473,10 @@ fn expl3_setter(name: &str) -> Option<bool> {
         return None;
     }
     let verb = base.rsplit_once('_').map_or(base, |x| x.1);
-    let verb2 = base.split('_').skip(1).collect::<Vec<_>>().join("_");
+    // (what follows the module, borrowed: no pieces split and joined)
+    let verb2 = base.split_once('_').map_or("", |x| x.1);
+    // (`s` is `v` or starts with `v_`)
+    let is = |s: &str, v: &str| s.strip_prefix(v).is_some_and(|r| r.is_empty() || r.starts_with('_'));
     let local = [
         "set",
         "put_left",
@@ -501,18 +504,18 @@ fn expl3_setter(name: &str) -> Option<bool> {
     }
     if global_only
         .iter()
-        .any(|v| verb2 == *v || verb2.starts_with(&format!("{v}_")))
+        .any(|v| is(verb2, v))
         || verb == "new"
         || verb == "const"
     {
         return Some(true);
     }
     for v in local {
-        if verb2 == v || verb2.starts_with(&format!("{v}_")) {
+        if is(verb2, v) {
             return Some(false);
         }
         if let Some(g) = verb2.strip_prefix('g')
-            && (g == v || g.starts_with(&format!("{v}_")))
+            && is(g, v)
         {
             return Some(true);
         }
