@@ -899,14 +899,23 @@ impl Run<'_, '_> {
         stretches.sort_unstable_by_key(|x| (x.0.raw(), x.3));
         // (one list of the stretches in a row, five values each: no list
         // made per stretch)
+        // (and the stretches without their values, five values each, the
+        // value's kind in its place, [`names_index_at`]: a finisher reads
+        // which names stand at its candidate through this, and a name's
+        // value only where it uses it, [`Run::fin_lazy_value`])
+        let n = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
+        let mut index = Vec::with_capacity(stretches.len() * 5);
+        for &(f, g, kv, lo, hi) in &stretches {
+            index.extend([f, v.int(i64::from(g)), v.int(kv_kind(v, kv)), n(lo), n(hi)]);
+        }
         let stretches = stretches
             .into_iter()
-            .flat_map(|(f, g, kv, lo, hi)| {
-                let n = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
-                [f, v.int(i64::from(g)), kv, n(lo), n(hi)]
-            })
+            .flat_map(|(f, g, kv, lo, hi)| [f, v.int(i64::from(g)), kv, n(lo), n(hi)])
             .collect();
-        (v.list(rs), v.list(vec![v.list(stretches), v.list(cuts)]))
+        (
+            v.list(rs),
+            v.list(vec![v.list(stretches), v.list(cuts), v.list(index)]),
+        )
     }
 
     /// A piece's end when no page needs finding in its own run: its
@@ -1078,10 +1087,14 @@ impl Run<'_, '_> {
             {
                 // (the routine left it as it was at the candidate: its
                 // definition changes nothing there)
-                let at_k = xs
-                    .get(2)
-                    .filter(|&&kv| kv != ValueId::UNIT)
-                    .map(|&kv| list_of(v, kv).first().copied());
+                let at_k = match xs.get(2).filter(|&&kv| kv != ValueId::UNIT) {
+                    Some(&kv) if self.is_lazy(kv) => {
+                        let y = self.fin_lazy_value(kv)?;
+                        Some(list_of(v, y).first().copied())
+                    }
+                    Some(&kv) => Some(list_of(v, kv).first().copied()),
+                    None => None,
+                };
                 if at_k == Some(Some(y)) {
                     kept.push(Field(f));
                 } else {
@@ -1742,29 +1755,33 @@ fn merge_stable(
     out
 }
 
-/// A piece's names at candidate `k` from its check data
-/// ([`Run::check_data`]): the names list (each `[field, standing,
-/// value]`, by field) and whether the run could end there; `UNIT` and
-/// `false` past its candidates. Kept as stretches of candidates each
-/// name stands over, one list for the piece, not a list per candidate:
-/// a piece with thousands of candidates has its definitions after each.
-pub(crate) fn names_at(v: &Values, data: ValueId, k: u32) -> (ValueId, bool) {
-    let d = list_of(v, data);
-    let (Some(&stretches), Some(&cuts)) = (d.first(), d.get(1)) else {
-        return (ValueId::UNIT, false);
-    };
+/// The kind of a name's value in a piece's check data: 0 none (`UNIT`), 1
+/// what reached the piece ([`BEFORE_PIECE`]), 2 a value (`[value]` or
+/// `[]`).
+fn kv_kind(v: &Values, kv: ValueId) -> i64 {
+    if kv == ValueId::UNIT {
+        0
+    } else if kv == v.str(BEFORE_PIECE) {
+        1
+    } else {
+        2
+    }
+}
+
+/// The names standing at candidate `k` from a piece's check data's
+/// index (the third part, without values): each `(field, standing,
+/// kind, stretch)`, the stretch's number in the check data; and the
+/// candidates' cut flags' list.
+pub(crate) fn names_index_at(v: &Values, index: ValueId, k: u32) -> Vec<(ValueId, ValueId, i64, usize)> {
     let k = i64::from(k);
-    let Some(&cut) = list_of(v, cuts).get(usize::try_from(k).unwrap_or(usize::MAX)) else {
-        return (ValueId::UNIT, false);
-    };
-    let names = list_of(v, stretches)
+    list_of(v, index)
         .as_chunks::<5>()
         .0
         .iter()
-        .filter(|s| int_of(v, s[3]) <= k && k < int_of(v, s[4]))
-        .map(|s| v.list(s[..3].to_vec()))
-        .collect();
-    (v.list(names), int_of(v, cut) != 0)
+        .enumerate()
+        .filter(|(_, s)| int_of(v, s[3]) <= k && k < int_of(v, s[4]))
+        .map(|(i, s)| (s[0], s[1], int_of(v, s[2]), i))
+        .collect()
 }
 
 /// A definition the run made: its field, whether it stands, its

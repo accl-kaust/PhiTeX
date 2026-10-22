@@ -2039,16 +2039,23 @@ impl Engine {
 
     /// Early loop-back fields `fs` take the values published for them now
     /// (a field published two values waits for the round's end); each
-    /// field's changes count against the round cap. Not `quiet`, a field
-    /// published by none now (its publications withdrawn by reruns, say)
-    /// waits: its initial value would be a dip, not a publication.
+    /// field's changes count against the round cap. A field published by
+    /// none now (its publications withdrawn by reruns, a publisher not run
+    /// yet) is not moved early: its initial value would be a dip, not a
+    /// publication. The round's end takes it.
     fn move_early(&mut self, s: &mut Sched, rep: &mut Report, hs: &mut Heights, fs: &[Field], quiet: bool) -> Result<(), EvalError> {
         let mut vals = Vec::new();
         for &f in fs {
             if self.early_frozen.contains(&f) {
                 continue;
             }
-            if !quiet && self.w.pub_ix.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX))).next().is_none() {
+            let range = || self.w.pub_ix.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX)));
+            if loop_trace() {
+                let any = self.w.pub_any.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX))).count();
+                let v = self.published(f).map_or("held".to_string(), |x| self.core.values.render(x));
+                eprintln!("EARLY {} quiet {quiet}: done publishers {}, any {any}, value {v}", self.core.values.render(f.0), range().count());
+            }
+            if range().next().is_none() {
                 continue;
             }
             let Some(v) = self.published(f) else { continue };
