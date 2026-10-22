@@ -741,8 +741,15 @@ pub(crate) const CAND: &str = "cand";
 
 /// Whether `e` is a candidate marker `["cand", piece, c]`, not an entry.
 pub(crate) fn is_cand_marker(v: &Values, e: ValueId) -> bool {
-    let xs = list_of(v, e);
-    xs.len() == 3 && v.as_str(xs[0]).as_deref() == Some(CAND)
+    // (the list and its tag looked at in place: no copy of either per
+    // entry)
+    let tag = v
+        .with_list(e, |xs| (xs.len() == 3).then(|| xs[0]))
+        .unwrap_or_else(|| {
+            let xs = list_of(v, e);
+            (xs.len() == 3).then(|| xs[0])
+        });
+    tag.is_some_and(|t| v.with_str(t, |s| s == CAND).unwrap_or(false))
 }
 
 /// A `streams` entry without its page tag (`[j, entry]` or
@@ -759,12 +766,22 @@ pub(crate) fn stream_entry(v: &Values, e: ValueId) -> ValueId {
 /// A page-tagged entry's page and, for a page whose break is inside a
 /// piece, that piece and candidate.
 fn page_tag(v: &Values, e: ValueId) -> Option<(i64, Option<(i64, i64)>)> {
-    let xs = list_of(v, e);
-    match xs.as_slice() {
-        [j, _] => Some((v.as_int(*j)?, None)),
-        [j, _, p, k] => Some((v.as_int(*j)?, Some((v.as_int(*p)?, v.as_int(*k)?)))),
+    // (the entry's ids looked at in place: no copy of the list)
+    let ids = |xs: &[ValueId]| match xs {
+        [j, _] => Some((*j, None)),
+        [j, _, p, k] => Some((*j, Some((*p, *k)))),
         _ => None,
-    }
+    };
+    let (j, pk) = v
+        .with_list(e, ids)
+        .unwrap_or_else(|| ids(&list_of(v, e)))?;
+    Some((
+        v.as_int(j)?,
+        match pk {
+            None => None,
+            Some((p, k)) => Some((v.as_int(p)?, v.as_int(k)?)),
+        },
+    ))
 }
 
 /// The `streams` entries (an accumulator's, in the nodes' order) in the
