@@ -209,8 +209,8 @@ pub(crate) struct Ops {
     pub fin_defs_start: std::sync::Arc<std::sync::Mutex<std::sync::Arc<FinTable>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// [`crate::Options::early_loopbacks`]: the read-back loop-backs
-    /// declared early (`crate::ops`).
+    /// [`crate::Rounds::Relaxed`]: the read-back loop-backs declared
+    /// early (`crate::ops`).
     pub early_loops: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The class projection of meanings ([`crate::val::class_projection`],
     /// registered with the engine): a lookup that only stores its token

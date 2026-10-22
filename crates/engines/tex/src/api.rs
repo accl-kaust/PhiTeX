@@ -166,17 +166,9 @@ pub struct Options {
     /// round ran with, and a warning names the fields still moving
     /// ([`Build::diagnostics`]).
     pub max_rounds: u64,
-    /// The relaxed mode's rounds: the loop-backs of the files the job
-    /// reads back (its `.aux`, `.toc`, `.out`, `.idx` and their kin)
-    /// move as soon as a run changes what they publish, and their
-    /// readers run again within the round, instead of waiting for the
-    /// round to end as latexmk's runs do. Fewer rounds; the result is
-    /// usually the same, but a document whose read-backs change more
-    /// than once or reach the round cap may differ from the exact
-    /// rounds' (a warning says so, [`Build::diagnostics`]), and even
-    /// one that settles cleanly is not proved to match. `false` (the
-    /// default): the exact rounds, byte for byte latexmk's.
-    pub early_loopbacks: bool,
+    /// How the loop-back rounds run ([`Rounds`]): exact (the default) or
+    /// relaxed.
+    pub rounds: Rounds,
     /// Where a tool's support files come from (bibliography styles and
     /// databases, index styles: [`ToolSearch`]); `None` asks
     /// [`Options::finder`] by name.
@@ -583,6 +575,23 @@ fn apply_text(
     true
 }
 
+/// How a build's loop-back rounds run (the files the job writes and
+/// reads back: its `.aux`, `.toc`, `.out`, `.idx` and their kin).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Rounds {
+    /// As latexmk's runs: a file read back moves only between rounds,
+    /// so the output is byte for byte pdfTeX's under latexmk.
+    #[default]
+    Exact,
+    /// A file read back moves as soon as a run changes what it holds,
+    /// and its readers run again within the round: fewer rounds. The
+    /// result is usually the same, but a document whose read-backs
+    /// change more than once or reach the round cap may differ from the
+    /// exact rounds' (a warning says so, [`Build::diagnostics`]), and
+    /// one that settles cleanly is not proved to match either.
+    Relaxed,
+}
+
 impl Default for Options {
     fn default() -> Self {
         Options {
@@ -612,7 +621,7 @@ impl Default for Options {
             speculation: Speculation::Predicted,
             speculation_budget: 256,
             max_rounds: 5,
-            early_loopbacks: false,
+            rounds: Rounds::Exact,
             tool_finder: None,
             bibtex: phitex_bibtex::Options::default(),
             out_name_ok: None,
@@ -2549,7 +2558,7 @@ impl Graph {
     }
 
     /// Declares the read-back loop-backs `decl`, early in the relaxed
-    /// mode ([`Options::early_loopbacks`]).
+    /// rounds ([`Rounds::Relaxed`]).
     fn decl_loops(&mut self, decl: &[(Field, ValueId)]) {
         if self.ops.early_loops.load(std::sync::atomic::Ordering::Relaxed) {
             for &(f, x) in decl {
@@ -2817,7 +2826,7 @@ impl Graph {
                     names.join(", ")
                 ));
             }
-            // (the relaxed rounds, [`Options::early_loopbacks`]: a field
+            // (the relaxed rounds, [`Rounds::Relaxed`]: a field
             // read back that changed more than once, or reached the round
             // limit, may have left another output than the exact rounds')
             if r.early_may_differ() {
@@ -4449,7 +4458,7 @@ impl Build {
         );
         g.ops
             .early_loops
-            .store(opts.early_loopbacks, std::sync::atomic::Ordering::Relaxed);
+            .store(opts.rounds == Rounds::Relaxed, std::sync::atomic::Ordering::Relaxed);
         // (observe: `PHITEX_MAX_ROUNDS`, a lower cap, so the warning names
         // the fields still moving after that round)
         let cap = crate::exec::obs_str!("PHITEX_MAX_ROUNDS")

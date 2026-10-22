@@ -785,7 +785,7 @@ impl Operation for Files {
 }
 
 /// Declares loop-back `f` of the files' nodes: its round values early in
-/// the relaxed mode (`early`, [`crate::Options::early_loopbacks`]: a
+/// the relaxed rounds (`early`, [`crate::Rounds::Relaxed`]: a
 /// change of a value they publish moves it at once, its readers run again
 /// within the round), at the round's end otherwise, as latexmk's runs.
 fn declare_loop(cx: &mut Ctx<'_>, early: bool, f: Field, init: ValueId) {

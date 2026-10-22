@@ -138,7 +138,7 @@ pub struct Job {
     /// between latexmk's runs, so the output is pdfTeX's under latexmk,
     /// byte for byte (`--exact`, `--exact-pdf`; the compatible mode
     /// always). False: the relaxed rounds (`--relaxed`, the default),
-    /// [`phitex_tex::Options::early_loopbacks`].
+    /// [`phitex_tex::Rounds::Relaxed`].
     pub exact: bool,
     /// `--spec`: when the engine runs steps ahead of their inputs (none:
     /// its default).
@@ -687,7 +687,11 @@ impl Session {
                         Some("predicted") => phitex_tex::Speculation::Predicted,
                         _ => Options::default().speculation,
                     },
-                    early_loopbacks: !self.job.exact,
+                    rounds: if self.job.exact {
+                        phitex_tex::Rounds::Exact
+                    } else {
+                        phitex_tex::Rounds::Relaxed
+                    },
                     wkeys: self.load_wkeys(),
                     written_init: self.written_init(),
                     // (the package loads' records: machine-wide, beside the
