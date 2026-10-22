@@ -73,7 +73,12 @@ pub fn end(label: &str) {
         return;
     };
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
-    let min = Duration::from_micros(300);
+    // (`PHITEX_TIMELINE_ALL`: every phase shown, however short)
+    let min = if crate::exec::prof_flag!("PHITEX_TIMELINE_ALL") {
+        Duration::ZERO
+    } else {
+        Duration::from_micros(300)
+    };
     let total = l.last - l.start;
     let mut out = format!("timeline ({label}): {:.2} ms from its start\n", ms(total));
     let mut small = (Duration::ZERO, 0usize);
