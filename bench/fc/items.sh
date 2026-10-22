@@ -18,6 +18,9 @@ for line in open(sys.argv[1],errors="replace"):
     if not m: continue
     node,unit,k,h,txt=m.groups()
     runs[(ev,node)].append((unit,int(k),h,txt))
+parts=collections.defaultdict(dict)
+for line in open(sys.argv[1],errors="replace"):
+    pass
 edited=[n for (e,n) in runs if e==1]
 print("finishers reading in the edit:",len(set(edited)))
 shown=0
@@ -32,5 +35,24 @@ for n in sorted(set(edited)):
             shown+=1
             print("   before:", before.get(x,("","-"))[1][:300]); print("   after: ", after[x][1][:300])
 PY
+python3 -I - "$r/e.err" <<'PY2'
+import sys,re,collections
+ev=0; seen=collections.defaultdict(dict)
+for line in open(sys.argv[1],errors="replace"):
+    if line.startswith("acct-edit: wall"): ev+=1; continue
+    for tag in ("fin-parts","fin-part3","fin-locals"):
+        if line.startswith(tag+":"):
+            m=re.match(tag+r": node (\d+) (.*)",line)
+            if m: seen[(tag,m.group(1))].setdefault(ev,[]).append(m.group(2))
+n=0
+for (tag,node),evs in sorted(seen.items()):
+    if 1 in evs and 0 in evs and evs[1][-1]!=evs[0][-1]:
+        n+=1
+        if n<=12:
+            a=evs[0][-1]; b=evs[1][-1]
+            i=next((j for j in range(min(len(a),len(b))) if a[j]!=b[j]),min(len(a),len(b)))
+            print(f"{tag} node {node} differs at {i}:\n   before ...{a[max(0,i-150):i+150]}\n   after  ...{b[max(0,i-150):i+150]}")
+print("differing part lines:",n)
+PY2
 grep -a "rerun class" "$r/e.err" | cut -c1-160
 gzip -f "$r/e.err"

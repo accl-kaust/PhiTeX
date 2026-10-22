@@ -576,7 +576,32 @@ impl Run<'_, '_> {
             let defs_k;
             (defs_k, cuttable) = super::piece::names_at(v, part(self, 4), fire.k);
             let reads = part(self, 3);
+            if crate::exec::prof_flag!("PHITEX_FIN_ITEMS") {
+                let d4 = part(self, 4);
+                eprintln!(
+                    "fin-parts: node {} piece {pid} k {} part3 {:016x} part4 {:016x} names {:016x} {}",
+                    self.cx.node().raw(),
+                    fire.k,
+                    reads.raw(),
+                    d4.raw(),
+                    defs_k.raw(),
+                    v.render(defs_k).chars().take(4000).collect::<String>()
+                );
+                eprintln!(
+                    "fin-part3: node {} {}",
+                    self.cx.node().raw(),
+                    v.render(reads).chars().take(4000).collect::<String>()
+                );
+            }
             args.extend([v.list(rest.clone()), v.int(pid), v.int(i64::from(fire.k)), reads, defs_k]);
+        }
+        if crate::exec::prof_flag!("PHITEX_FIN_ITEMS") {
+            eprintln!(
+                "fin-locals: node {} {:016x} {}",
+                self.cx.node().raw(),
+                args[3].raw(),
+                v.render(args[3]).chars().take(2000).collect::<String>()
+            );
         }
         args.extend(pos.get(arg::HINT..arg::PAGE).unwrap_or_default().iter().copied());
         args.resize(12, ValueId::UNIT);
