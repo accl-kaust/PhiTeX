@@ -27,3 +27,5 @@ run { e = x * 0  f = e + 5 }
 run { a = x + 1  b = y * 2  c = b + 1 }
 run { a = x * 3  b = 4  c = b + y  d = c }
 run { e = y + x  f = 2  e = f + 1 }
+run { a = x + 1  emit a  b = a * 2  emit b + y }
+run { emit x  d = y * 2  emit d }

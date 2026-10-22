@@ -77,3 +77,27 @@ fn a_run_given_another_text_with_a_read_broken_starts_over() {
     assert_eq!(p.result(&e), interpret(&p.lines).unwrap());
     assert!(e.check_reads().is_empty(), "{:?}", e.check_reads());
 }
+
+#[test]
+fn a_run_resumed_at_a_mark_keeps_what_it_placed_before_it() {
+    // (`emit` in a run places a child: the one before the mark resumed at
+    // stands.)
+    let (mut e, mut p) = Program::load(lines(&["print z", "y = x + 1", "run { emit x  d = y * 2  emit d }"]));
+    e.evaluate_sequential().unwrap();
+    apply(&mut e, &mut p, &Ed::Set(0, "x = 2".into()));
+    let rep = e.evaluate_sequential().unwrap();
+    assert_eq!(rep.resumed_at_mark, 1, "{rep:?}");
+    assert_eq!(p.result(&e), interpret(&p.lines).unwrap());
+    assert!(e.check_reads().is_empty(), "{:?}", e.check_reads());
+}
+
+#[test]
+fn a_run_cut_off_keeps_what_it_placed() {
+    let (mut e, mut p) = Program::load(lines(&["x = 1", "run { a = x * 0 + 4  emit a  b = a + 1  emit b }", "print b"]));
+    e.evaluate_sequential().unwrap();
+    apply(&mut e, &mut p, &Ed::Set(0, "x = 2".into()));
+    let rep = e.evaluate_sequential().unwrap();
+    assert_eq!((rep.resumed_at_mark, rep.cut_in_run), (1, 1), "{rep:?}");
+    assert_eq!(p.result(&e), interpret(&p.lines).unwrap());
+    assert!(e.check_reads().is_empty(), "{:?}", e.check_reads());
+}

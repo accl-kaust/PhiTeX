@@ -1304,6 +1304,9 @@ fn run_marked(cx: &mut Ctx<'_>, ops: Ops, stmts: &[ValueId]) -> Result<ValueId, 
             env.retain(|b| b.0 != sa[0] || b.2 != g);
             env.push((sa[0], x, g));
             cx.define_with(v.field(&text(v, sa[0])), x, loc(g));
+        } else if st == "emit" {
+            // (A child after the run, its bindings so far substituted.)
+            cx.child(ops.stmt, vec![v.list(vec![v.str("emit"), subst(v, sa[0], &env)])]);
         }
         i += 1;
     }
@@ -1339,6 +1342,8 @@ fn patch_at(v: &Values, stmts: &[ValueId], i: usize, env: &[(ValueId, ValueId, b
         if st == "assign" {
             free_vars(v, sa[1], &mut Vec::new(), &mut read);
             assigned.push(text(v, sa[0]));
+        } else if st == "emit" {
+            free_vars(v, sa[0], &mut Vec::new(), &mut read);
         }
     }
     if diff.iter().any(|&k| read.contains(&text(v, env[k].0))) {
@@ -1355,7 +1360,7 @@ fn patch_at(v: &Values, stmts: &[ValueId], i: usize, env: &[(ValueId, ValueId, b
 
 /// Expression `e` with the variables bound in `env` replaced by their
 /// values (the run's last binding of each).
-fn subst(v: &Values, e: ValueId, env: &[(ValueId, ValueId, bool)]) -> ValueId {
+pub fn subst(v: &Values, e: ValueId, env: &[(ValueId, ValueId, bool)]) -> ValueId {
     if let Value::Int(_) = *v.get(e) {
         return e;
     }
