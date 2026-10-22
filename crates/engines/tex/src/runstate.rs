@@ -895,11 +895,12 @@ impl State {
         if self.undo.is_some() {
             self.log_slot(loc);
         }
-        if loc & SPILL == 0 {
-            &mut self.eq[loc as usize].e
+        let s = if loc & SPILL == 0 {
+            &mut self.eq[loc as usize]
         } else {
-            &mut self.spill[(loc & !SPILL) as usize].e
-        }
+            &mut self.spill[(loc & !SPILL) as usize]
+        };
+        &mut s.e
     }
 
     /// The local definitions at the base level of locations a
@@ -1772,6 +1773,46 @@ impl State {
         }
     }
 
+    /// Each touched slot's entry, saved entry and publication encoded
+    /// once ([`State::id_of`]): a run's marks park its table again and
+    /// again ([`State::park`]), the entries it did not change since not
+    /// encoded again. No access stamped, nothing logged: the entries'
+    /// values are as they were.
+    fn cache_ids(&mut self, v: &Values) {
+        fn enc(st: &State, e: &Entry, v: &Values) -> Option<Entry> {
+            (e.flags & HAS_ID == 0 && e.kind != K_RAW).then(|| Entry {
+                id: st.encode(e, v),
+                flags: e.flags | HAS_ID,
+                ..*e
+            })
+        }
+        for i in 0..self.touched.len() {
+            let l = self.touched[i];
+            let Some(sl) = self.slot_ref(l) else { continue };
+            if let Some(e) = enc(self, &sl.e, v) {
+                let sl = if l & SPILL == 0 {
+                    &mut self.eq[l as usize]
+                } else {
+                    &mut self.spill[(l & !SPILL) as usize]
+                };
+                sl.e = e;
+            }
+        }
+        for i in 0..self.save.len() {
+            if let Some(e) = enc(self, &self.save[i].prev, v) {
+                self.save[i].prev = e;
+            }
+        }
+        for i in 0..self.metas.len() {
+            if let Some((x, _)) = &self.metas[i].publ
+                && let Some(e) = enc(self, x, v)
+                && let Some((x, _)) = &mut self.metas[i].publ
+            {
+                *x = e;
+            }
+        }
+    }
+
     /// The table without `Rc`, for a parked run ([`PState`]): the table
     /// the run had, so the run resumed from it holds what a run that never
     /// parked would (whether a run parks is the schedule's choice): every
@@ -1779,6 +1820,7 @@ impl State {
     /// values (they still hold when the engine gives the park back), its
     /// definitions' bookkeeping in its order.
     pub(crate) fn park(&mut self, v: &Values) -> PState {
+        self.cache_ids(v);
         let ploc = |s: &State, l: Loc| -> PLoc {
             if l & SPILL == 0 {
                 PLoc::Fixed(l)
@@ -1970,16 +2012,19 @@ impl State {
 
 /// A location of a parked table: a fixed one or a meaning's (stable for
 /// the process), or a spill one by its field.
+#[derive(Clone)]
 enum PLoc {
     Fixed(Loc),
     Spill(Field),
 }
 
+#[derive(Clone)]
 struct PEntry {
     id: Option<ValueId>,
     flags: u8,
 }
 
+#[derive(Clone)]
 struct PMeta {
     // None: not read; Some(None): read, undefined in the engine
     #[allow(clippy::option_option)]
@@ -1990,6 +2035,7 @@ struct PMeta {
     ldef_gid: Option<u32>,
 }
 
+#[derive(Clone)]
 struct PSlot {
     loc: PLoc,
     e: PEntry,
@@ -1999,6 +2045,19 @@ struct PSlot {
     meta: Option<PMeta>,
 }
 
+impl PSlot {
+    /// Whether the slot only holds what the run read of its field (no
+    /// definition, no group's save of it, not made inert by one): the
+    /// engine's value, which every run reaching here with the same reads
+    /// has, loaded or not as its path went (a lookahead that fetched the
+    /// next command's name before a mark, a memo kept over a park that
+    /// spared a lookup). Not part of the state a mark compares.
+    fn is_read_cache(&self) -> bool {
+        self.meta.is_none() && self.save_gid == 0 && self.ginert == 0
+    }
+}
+
+#[derive(Clone)]
 struct PSaved {
     loc: PLoc,
     prev: PEntry,
@@ -2009,6 +2068,7 @@ struct PSaved {
 }
 
 /// A run's table, parked ([`State::park`]).
+#[derive(Clone)]
 pub(crate) struct PState {
     cands: Vec<(u64, Vec<(PLoc, PEntry)>)>,
     cont_locs: Vec<PLoc>,
@@ -2024,6 +2084,191 @@ pub(crate) struct PState {
     kinds: Option<Vec<(PLoc, bool)>>,
     stamp: u64,
     next_gid: u32,
+}
+
+impl PLoc {
+    fn word(&self) -> u64 {
+        match self {
+            PLoc::Fixed(l) => u64::from(*l),
+            PLoc::Spill(f) => f.0.raw() ^ (1 << 63),
+        }
+    }
+
+    fn key(&self) -> PLocKey {
+        match self {
+            PLoc::Fixed(l) => PLocKey::Fixed(*l),
+            PLoc::Spill(f) => PLocKey::Spill(*f),
+        }
+    }
+}
+
+/// A slot whose value differs between two parked tables
+/// ([`PState::value_diff`]): its location, the values groups saved of
+/// it, its old and new value, its old and new base-level publication,
+/// the value it read from the engine.
+#[allow(clippy::option_option)]
+pub(crate) type ValueDiff = (
+    PLocKey,
+    Vec<Option<ValueId>>,
+    Option<ValueId>,
+    Option<ValueId>,
+    Option<Option<ValueId>>,
+    Option<Option<ValueId>>,
+    Option<Option<ValueId>>,
+);
+
+/// A parked table's location as a caller names it: a fixed location, or
+/// a spill one by its field.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PLocKey {
+    Fixed(Loc),
+    Spill(Field),
+}
+
+impl PState {
+    /// A slot's part of [`PState::slot_sum`].
+    fn slot_hash(s: &PSlot) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let ent = |e: &PEntry| (e.id.map(ValueId::raw), e.flags);
+        let mut h = phitex_defuse::FxHasher::default();
+        (s.loc.word(), ent(&s.e), s.save_gid, s.save_stamp, s.ginert).hash(&mut h);
+        // (the engine's value the run read before its definition is a
+        // read's cache too, [`PSlot::is_read_cache`]: left out)
+        if let Some(m) = &s.meta {
+            (
+                m.publ.map(|(x, l)| (x.map(ValueId::raw), l)),
+                m.ldef_stamp,
+                m.ldef_local,
+                m.ldef_gid,
+            )
+                .hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// (observe) The slots whose digests differ from `old`'s ([`PState::slot_hash`]):
+    /// each with its value in `old` and here (`None`: no such slot).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn slot_diffs(&self, old: &PState) -> Vec<(PLocKey, Option<(Option<ValueId>, u8)>, Option<(Option<ValueId>, u8)>)> {
+        let by: FxHashMap<u64, &PSlot> = old.slots.iter().map(|s| (s.loc.word(), s)).collect();
+        let mine: FxHashMap<u64, &PSlot> = self.slots.iter().map(|s| (s.loc.word(), s)).collect();
+        let mut out = Vec::new();
+        // (a read's cache in one state and none in the other is no
+        // difference; two caches of one read differ only where their
+        // values do, a read that did not hold)
+        for s in &self.slots {
+            match by.get(&s.loc.word()) {
+                Some(o) if Self::slot_hash(o) == Self::slot_hash(s) => {}
+                Some(o) if o.is_read_cache() && s.is_read_cache() && o.e.id == s.e.id => {}
+                None if s.is_read_cache() => {}
+                o => out.push((s.loc.key(), o.map(|o| (o.e.id, o.e.flags)), Some((s.e.id, s.e.flags)))),
+            }
+        }
+        for o in &old.slots {
+            if !mine.contains_key(&o.loc.word()) && !o.is_read_cache() {
+                out.push((o.loc.key(), Some((o.e.id, o.e.flags)), None));
+            }
+        }
+        out
+    }
+
+    /// The slots' digests summed: their order, the run's, left out, and
+    /// the slots that only cache a read ([`PSlot::is_read_cache`]).
+    pub(crate) fn slot_sum(&self) -> u64 {
+        self.slots
+            .iter()
+            .filter(|s| !s.is_read_cache())
+            .fold(0u64, |a, s| a.wrapping_add(Self::slot_hash(s)))
+    }
+
+    /// The slots that differ from `old`'s only in their value (and the
+    /// value their definition publishes), each as (location, the old
+    /// value, the new value, the old and new values published at the
+    /// base level, the value read from the engine); `None` if another
+    /// slot differs otherwise, or one is in only one of the tables.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn value_diff(
+        &self,
+        old: &PState,
+    ) -> Option<Vec<ValueDiff>> {
+        if self.slots.len() != old.slots.len() {
+            return None;
+        }
+        let by: FxHashMap<u64, &PSlot> = old.slots.iter().map(|s| (s.loc.word(), s)).collect();
+        // (the values the groups saved of each slot: what a scope
+        // publishes of a slot may be one of those, not its own)
+        let mut saved: FxHashMap<u64, Vec<Option<ValueId>>> = FxHashMap::default();
+        for x in &old.save {
+            saved.entry(x.loc.word()).or_default().push(x.prev.id);
+        }
+        let mut out = Vec::new();
+        for s in &self.slots {
+            let o = by.get(&s.loc.word())?;
+            if Self::slot_hash(s) == Self::slot_hash(o) {
+                continue;
+            }
+
+            let same_shape = s.e.flags == o.e.flags
+                && s.save_gid == o.save_gid
+                && s.save_stamp == o.save_stamp
+                && s.ginert == o.ginert
+                && match (&s.meta, &o.meta) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => {
+                        a.eng == b.eng
+                            && a.ldef_stamp == b.ldef_stamp
+                            && a.ldef_local == b.ldef_local
+                            && a.ldef_gid == b.ldef_gid
+                            && a.publ.map(|x| x.1) == b.publ.map(|x| x.1)
+                    }
+                    _ => false,
+                };
+            if !same_shape {
+                return None;
+            }
+            out.push((
+                s.loc.key(),
+                saved.get(&s.loc.word()).cloned().unwrap_or_default(),
+                o.e.id,
+                s.e.id,
+                o.meta.as_ref().and_then(|m| m.publ.map(|x| x.0)),
+                s.meta.as_ref().and_then(|m| m.publ.map(|x| x.0)),
+                s.meta.as_ref().and_then(|m| m.eng),
+            ));
+        }
+        Some(out)
+    }
+
+    /// The table's digest but for its slots ([`PState::slot_sum`]).
+    pub(crate) fn rest_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let ent = |e: &PEntry| (e.id.map(ValueId::raw), e.flags);
+        let mut h = phitex_defuse::FxHasher::default();
+        for s in &self.save {
+            (s.loc.word(), ent(&s.prev), s.gid, s.stamp, s.at, s.ldef).hash(&mut h);
+        }
+        for l in self.defined.iter().chain(&self.base_defs).chain(&self.cont_locs) {
+            l.word().hash(&mut h);
+        }
+        for (st, xs) in &self.cands {
+            st.hash(&mut h);
+            for (l, e) in xs {
+                (l.word(), ent(e)).hash(&mut h);
+            }
+        }
+        if let Some(k) = &self.kinds {
+            // (summed: the map's order is its insertions')
+            let mut sum: u64 = 0;
+            for (l, a) in k {
+                let mut e = phitex_defuse::FxHasher::default();
+                (l.word(), a).hash(&mut e);
+                sum = sum.wrapping_add(e.finish());
+            }
+            sum.hash(&mut h);
+        }
+        (self.pp_dirty, self.stamp, self.next_gid).hash(&mut h);
+        h.finish()
+    }
 }
 
 /// An entry as a definition stores it: loaded, its engine value and

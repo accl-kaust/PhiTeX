@@ -88,21 +88,78 @@ pub(crate) fn run_node_parking(
     } else {
         None
     };
-    let parked = if parks { cx.parked() } else { None };
-    let mut r = match parked.map(<Box<dyn std::any::Any + Send>>::downcast::<crate::run::Parked>) {
-        Some(Ok(p)) => match Run::from_parked(cx, o, *p) {
-            Ok(r) => r,
-            Err(cx) => {
+    // (marks, `Run::take_mark`: an exec or a finisher run that parks and
+    // is not speculative; one resumed at a mark of its last run starts
+    // from that mark's state)
+    // (observe: `PHITEX_MARKS=off|exec|finish|all` for the measures)
+    let which = crate::exec::obs_str!("PHITEX_MARKS");
+    let marks_ok = parks
+        && !cx.is_speculative()
+        && match which {
+            Some("exec") => cx.op() == o.exec,
+            Some("finish") => cx.op() == o.finish,
+            Some("all") => cx.op() == o.exec || cx.op() == o.finish,
+            // (`off`, or none given: measured on amsldoc, marks every 2000
+            // commands cost 3-6% of a cold build (their snapshots and the
+            // memory they keep) while no edit kind was cut off at one and
+            // the few resumed gained nothing at -j 8; `PHITEX_MARKS` (observe)
+            // takes them for exec runs, finishers or both)
+            _ => false,
+        };
+    let resumed_at = if marks_ok { cx.resumed() } else { None };
+    let mut r = if let Some((tok, k)) = resumed_at {
+        match tok.downcast::<crate::run::KeptMarks>() {
+            Ok(km) if (k as usize) < km.snaps.len() && crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") => {
+                let (p, h) = km.snaps[k as usize].clone();
+                cx.restart();
+                let mut r = Run::new(cx, o);
+                r.verify_at = Some((k, p, h, km.args.clone()));
+                r
+            }
+            Ok(km) if (k as usize) < km.snaps.len() => {
+                let (p, h) = km.snaps[k as usize].clone();
+                let tr = crate::prof::start();
+                let from = Run::from_parked(cx, o, (*p).clone());
+                crate::prof::add(crate::prof::RESUME, tr);
+                match from {
+                    Ok(mut r) => {
+                        r.mark_snaps = km.snaps[..=k as usize].to_vec();
+                        r.old_marks = Some(km.clone());
+                        // (the mark again: the engine keeps the marks
+                        // before it; the run is never cut off at its own)
+                        let state = r.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
+                        let _ = r.cx.checkpoint(k, state);
+                        r
+                    }
+                    Err(cx) => {
+                        cx.restart();
+                        Run::new(cx, o)
+                    }
+                }
+            }
+            _ => {
                 cx.restart();
                 Run::new(cx, o)
             }
-        },
-        Some(Err(_)) => {
-            cx.restart();
-            Run::new(cx, o)
         }
-        None => Run::new(cx, o),
+    } else {
+        let parked = if parks { cx.parked() } else { None };
+        match parked.map(<Box<dyn std::any::Any + Send>>::downcast::<crate::run::Parked>) {
+            Some(Ok(p)) => match Run::from_parked(cx, o, *p) {
+                Ok(r) => r,
+                Err(cx) => {
+                    cx.restart();
+                    Run::new(cx, o)
+                }
+            },
+            Some(Err(_)) => {
+                cx.restart();
+                Run::new(cx, o)
+            }
+            None => Run::new(cx, o),
+        }
     };
+    r.marks_on = marks_ok;
     let t_body = std::time::Instant::now();
     let mut res = body(&mut r);
     // (a second pass from the start, ending at the candidate the first
@@ -112,6 +169,8 @@ pub(crate) fn run_node_parking(
         cx.restart();
         r = Run::new(cx, o);
         r.stop_at = Some(k);
+        // (a second pass to a candidate takes no marks)
+        r.marks_on = false;
         res = body(&mut r);
     }
     // the run's end on the page (`crate::pages`): its items folded into
@@ -202,6 +261,72 @@ pub(crate) fn run_node_parking(
             {
                 return Err(s);
             }
+            // (the marks kept with the result: a later run resumes at one;
+            // with the latest mark after which each field was accessed)
+            if !r.mark_snaps.is_empty() && !crate::exec::obs_flag!("PHITEX_MARKS_NOKEEP") {
+                let tk = crate::prof::start();
+                let snaps = std::mem::take(&mut r.mark_snaps);
+                let outs = if crate::exec::obs_flag!("PHITEX_MARK_CHECK") {
+                    let v = r.v;
+                    let pubd = r.st.published(v, r.rec_load);
+                    let mut o: Vec<String> = pubd
+                        .into_iter()
+                        .map(|(l, x, loc)| format!("def {} {loc:?} {}", crate::val::field_name(v, r.loc_field(l)), x.raw()))
+                        .collect();
+                    o.extend(r.contribs.iter().map(|(f, x)| format!("contrib {} {}", crate::val::field_name(v, *f), x.raw())));
+                    o.extend(r.kids.iter().map(|(op, a)| format!("kid {op:?} {:?}", a.iter().map(|x| x.raw()).collect::<Vec<_>>())));
+                    o.push(format!("effect {:?}", r.effect));
+                    o
+                } else {
+                    Vec::new()
+                };
+                if let Some(k) = r.cut_check
+                    && let Some(old) = &r.old_marks
+                {
+                    let mine: std::collections::BTreeSet<&String> = outs.iter().collect();
+                    let theirs: std::collections::BTreeSet<&String> = old.outs.iter().collect();
+                    let only_mine: Vec<&&String> = mine.difference(&theirs).take(6).collect();
+                    let only_theirs: Vec<&&String> = theirs.difference(&mine).take(6).collect();
+                    if !only_mine.is_empty() || !only_theirs.is_empty() {
+                        eprintln!(
+                            "mark-check: node {} cut at mark {k} would differ: this run {only_mine:?}; the last run {only_theirs:?}",
+                            r.cx.node().raw()
+                        );
+                    } else {
+                        eprintln!("mark-check: node {} cut at mark {k} holds", r.cx.node().raw());
+                    }
+                }
+                let args = if crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") { r.cx.args() } else { Vec::new() };
+                r.cx.keep_after(std::sync::Arc::new(crate::run::KeptMarks {
+                    snaps,
+                    outs,
+                    args,
+                }));
+                crate::prof::add(crate::prof::KEEP, tk);
+            }
+            // (observe, `PHITEX_MARK_TRACE=1`: a finisher's or exec run's
+            // outputs, to compare a run resumed at a mark with a full one)
+            if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
+                let v = r.v;
+                let node = r.cx.node().raw();
+                let mut pubd: Vec<String> = r
+                    .st
+                    .published(v, r.rec_load)
+                    .into_iter()
+                    .map(|(l, x, loc)| format!("{}{loc:?}={}", crate::val::field_name(v, r.loc_field(l)), x.raw()))
+                    .collect();
+                pubd.sort();
+                let contribs: Vec<String> = r
+                    .contribs
+                    .iter()
+                    .map(|(f, x)| format!("{}+={}", crate::val::field_name(v, *f), x.raw()))
+                    .collect();
+                let kids: Vec<String> = r.kids.iter().map(|(o, a)| format!("{o:?}{:?}", a.iter().map(|x| x.raw()).collect::<Vec<_>>())).collect();
+                eprintln!(
+                    "mark-trace: node {node} resumed {} effect {:?} pub {pubd:?} contribs {contribs:?} kids {kids:?}",
+                    r.resumed, r.effect
+                );
+            }
             let t = std::time::Instant::now();
             let tf = pp.and_then(|_| crate::prof::start());
             let x = r.finish();
@@ -219,6 +344,8 @@ pub(crate) fn run_node_parking(
             }
             Ok(x)
         }
+        // (cut off at a mark: the last run's result stands, nothing kept)
+        Err(Halt::Stop(s)) if r.cut_off => Err(s),
         Err(Halt::Stop(s)) => {
             if parks
                 && !r.cx.is_speculative()

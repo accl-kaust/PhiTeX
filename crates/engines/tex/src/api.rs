@@ -3013,6 +3013,10 @@ impl Graph {
                     r.cutoffs
                 );
                 eprintln!("acct-edit: quick path held {}", r.quick_held);
+                eprintln!(
+                    "acct-edit: marks: runs resumed at a mark {}, cut off at a later mark {} (patched {})",
+                    r.resumed_at_mark, r.cut_in_run, r.cut_patched
+                );
                 if let Some(a) = &r.audit {
                     print_audit(&self.eng, a);
                 }
@@ -5956,6 +5960,8 @@ impl Build {
         // (an `\input` file's text, read once a call, not once an entry)
         let mut files: phitex_defuse::FxHashMap<String, Arc<str>> =
             phitex_defuse::FxHashMap::default();
+        // (each text node's move since it was sliced, by its index)
+        let mut shifts: phitex_defuse::FxHashMap<usize, i64> = phitex_defuse::FxHashMap::default();
         for e in entries {
             let xs = list_of(v, e);
             let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
@@ -5968,8 +5974,28 @@ impl Build {
             let file_text: Arc<str>;
             let (file, text, at): (String, &str, usize) = if int(3) >= 0 && in_doc {
                 // a line of the document's own text: the position the
-                // node's frame carries is the byte in the document
-                let at = usize::try_from(int(3)).unwrap_or(0)
+                // node's frame carries is the byte in the document as the
+                // text node was sliced, moved by as much as an edit since
+                // moved that node (a node an edit left keeps its text, and
+                // the positions in it, [`apply_text`])
+                let node = u64::from_ne_bytes(int(4).to_ne_bytes());
+                let i = top(node);
+                let shift = *shifts.entry(i).or_insert_with(|| {
+                    let n = self.nodes.get(i).map(|x| x.1);
+                    let sliced = n
+                        .and_then(|n| self.g.eng.node_info(n))
+                        .and_then(|info| info.args.first().copied())
+                        .and_then(|fs| list_of(v, fs).first().copied())
+                        .map(|f| list_of(v, f))
+                        .filter(|xs| xs.first().is_some_and(|&t| str_of(v, t) == "s"))
+                        .and_then(|xs| xs.get(6).map(|&p| int_of(v, p)));
+                    let now = spans.get(i).copied().and_then(|s| i64::try_from(s).ok());
+                    match (sliced, now) {
+                        (Some(a), Some(b)) if contiguous => b - a,
+                        _ => 0,
+                    }
+                });
+                let at = usize::try_from(int(3) + shift).unwrap_or(0)
                     + seg.chars().take(loc).map(char::len_utf8).sum::<usize>();
                 (docname.clone(), doc, at)
             } else if int(3) >= 0
