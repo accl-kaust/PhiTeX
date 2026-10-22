@@ -1728,6 +1728,43 @@ impl<'c, 'a> Run<'c, 'a> {
     /// then redefines what the file's lines use (makes a command an
     /// error from then on) leaves the lines read under the meanings at
     /// the read-back point.
+    /// The field `wpre:<f>` of field `f` ([`Run::note_pre`]), none for a
+    /// field whose value at a read-back point is not kept (`wpre:`,
+    /// `wpoint:`, `cat:`, `wread:` and [`REREAD`] fields): made once per
+    /// field and values epoch on this thread, not formatted per
+    /// definition.
+    fn wpre_of(&self, f: Field) -> Option<Field> {
+        thread_local! {
+            static C: std::cell::RefCell<(u64, u64, phitex_defuse::FxHashMap<u64, Option<Field>>)> =
+                std::cell::RefCell::default();
+        }
+        let v = self.v;
+        let (inst, epoch) = (v.instance(), self.cx.values_epoch());
+        let hit = C.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 != inst || c.1 != epoch {
+                *c = (inst, epoch, phitex_defuse::FxHashMap::default());
+            }
+            c.2.get(&f.0.raw()).copied()
+        });
+        if let Some(x) = hit {
+            return x;
+        }
+        let name = crate::val::field_name(v, f);
+        let x = (!["wpre:", "wpoint:", "cat:", "wread:", REREAD]
+            .iter()
+            .any(|p| name.starts_with(p)))
+        .then(|| v.field(&format!("wpre:{name}")));
+        C.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.2.len() >= 1 << 16 {
+                c.2.clear();
+            }
+            c.2.insert(f.0.raw(), x);
+        });
+        x
+    }
+
     pub(crate) fn note_pre(&mut self, loc: Loc) {
         let v = self.v;
         // (only while the macro that read the file back runs:
@@ -1763,15 +1800,10 @@ impl<'c, 'a> Run<'c, 'a> {
             return;
         }
         let f = self.loc_field(loc);
-        let name = crate::val::field_name(v, f);
-        if ["wpre:", "wpoint:", "cat:", "wread:", REREAD]
-            .iter()
-            .any(|p| name.starts_with(p))
-        {
+        let Some(pre) = self.wpre_of(f) else {
             self.pre_noted.insert(loc);
             return;
-        }
-        let pre = v.field(&format!("wpre:{name}"));
+        };
         let pl = self.loc_of(pre);
         if self.st.defined_after(pl, 0) {
             self.pre_noted.insert(loc);
