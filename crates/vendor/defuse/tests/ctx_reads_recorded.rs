@@ -38,6 +38,7 @@ const WRITES: &[&str] = &[
     "define_in_scope",
     "define_in_scope_at",
     "declare_loopback",
+    "declare_loopback_early",
     "publish",
     "child",
     "follow",

@@ -901,6 +901,25 @@ impl MergeTimes {
     }
 }
 
+/// An early loop-back field's evaluation (`Engine::declare_loopback_early`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EarlyLoop {
+    pub field: Field,
+    /// How often its value changed (the first: its first publication).
+    pub changes: u32,
+    /// Its changes reached the round cap: under [`CapPolicy::Finalize`] it
+    /// kept the value it had then.
+    pub capped: bool,
+}
+
+impl EarlyLoop {
+    /// It changed more than once after its first publication.
+    #[must_use]
+    pub fn oscillated(&self) -> bool {
+        self.changes > 2
+    }
+}
+
 /// What an evaluation did. The first seven counters (`nodes_run` ..
 /// `restarts`) are canonical: functions of the texts before and after,
 /// equal under every schedule.
@@ -1041,6 +1060,10 @@ pub struct Report {
     /// Under [`CapPolicy::Finalize`], when the round cap was reached: the
     /// loop-back fields that were still moving.
     pub capped: Option<Vec<Field>>,
+    /// The early loop-back fields (`Engine::declare_loopback_early`) that
+    /// changed this evaluation, by field (not canonical: their changes, and
+    /// with them `rounds`, depend on the schedule).
+    pub early_loops: Vec<EarlyLoop>,
     /// Under [`LoopStart::PerRound`]: the quick path held (the edits were
     /// evaluated from the last fixed point only).
     pub quick_held: bool,
@@ -1051,6 +1074,13 @@ pub struct Report {
 }
 
 impl Report {
+    /// Some early loop-back field was capped or oscillated: the result may
+    /// differ from the rounds' (see `Engine::declare_loopback_early`).
+    #[must_use]
+    pub fn early_may_differ(&self) -> bool {
+        self.early_loops.iter().any(|e| e.capped || e.oscillated())
+    }
+
     /// The count for operation `name` in a per-operation list.
     #[must_use]
     pub fn by_op(list: &[(&'static str, u64)], name: &str) -> u64 {

@@ -487,7 +487,7 @@ impl<'a> Builder<'a> {
                 let mut readers: Vec<((Pos, Id), ())> = c.readers.iter().map(|(&(p, id), ())| ((remap(p), id), ())).collect();
                 readers.sort_by_key(|x| x.0);
                 readers.dedup_by_key(|x| x.0);
-                let mut ranges: Vec<((Pos, Id), Pos)> = c.range_readers.iter().map(|(&(p, id), &lo)| ((bound(p), id), bound(lo))).collect();
+                let mut ranges: Vec<((Pos, Id, Pos), Pos)> = c.range_readers.iter().map(|(&(p, id, lo), _)| ((bound(p), id, bound(lo)), bound(lo))).collect();
                 ranges.sort_by_key(|x| x.0);
                 ranges.dedup_by_key(|x| x.0);
                 rd.set_field(
@@ -2221,7 +2221,7 @@ fn index_key(w: &World, id: Id, k: ReadKey, on: bool) {
         (ReadKey::Out(x), true) => w.add_out_reader(x, id),
         (ReadKey::Out(x), false) => w.drop_out_reader(x, id),
         (ReadKey::Range(ru, f, lo, hi), true) => w.add_range_reader(ru, f, lo, hi, id),
-        (ReadKey::Range(ru, f, _, hi), false) => w.drop_range_reader(ru, f, hi, id),
+        (ReadKey::Range(ru, f, lo, hi), false) => w.drop_range_reader(ru, f, lo, hi, id),
     }
 }
 

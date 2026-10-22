@@ -57,7 +57,7 @@ pub(crate) struct Core {
     pub loops: FxHashMap<Field, ValueId>,
     /// Loop-backs declared by runs, taken in when the evaluation is quiet.
     /// Loop-back fields runs declared, each with its run's node.
-    pub loops_later: Mutex<Vec<(Field, ValueId, u64)>>,
+    pub loops_later: Mutex<Vec<(Field, ValueId, u64, bool)>>,
     pub env: RwLock<Env>,
     pub provider: Option<Box<crate::api::EnvProvider>>,
     /// Held while the provider is asked (runs asking for the same field at
@@ -414,9 +414,9 @@ impl Core {
         self.loops.contains_key(&f)
     }
 
-    pub(crate) fn declare_loop_later(&self, f: Field, init: ValueId, by: u64) {
-        if !self.loops.contains_key(&f) {
-            lock(&self.loops_later).push((f, init, by));
+    pub(crate) fn declare_loop_later(&self, f: Field, init: ValueId, by: u64, early: bool) {
+        if early || !self.loops.contains_key(&f) {
+            lock(&self.loops_later).push((f, init, by, early));
         }
     }
 }

@@ -1871,13 +1871,13 @@ impl World {
 
     pub(crate) fn add_range_reader(&self, u: u32, f: Field, lo: Pos, hi: Pos, id: Id) {
         self.rd.with_field(u, f, |c| {
-            c.range_readers.insert((hi, id), lo, &super::live::LeastStart);
+            c.range_readers.insert((hi, id, lo), lo, &super::live::LeastStart);
         });
     }
 
-    pub(crate) fn drop_range_reader(&self, u: u32, f: Field, hi: Pos, id: Id) {
+    pub(crate) fn drop_range_reader(&self, u: u32, f: Field, lo: Pos, hi: Pos, id: Id) {
         self.rd.with_field(u, f, |c| {
-            c.range_readers.remove(&(hi, id), &super::live::LeastStart);
+            c.range_readers.remove(&(hi, id, lo), &super::live::LeastStart);
         });
     }
 

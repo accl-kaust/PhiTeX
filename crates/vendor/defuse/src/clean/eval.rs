@@ -317,12 +317,12 @@ impl Engine {
         // The provider is asked again about fields it did not know.
         self.core.env.write().unwrap_or_else(std::sync::PoisonError::into_inner).unknown.clear();
         self.core.env_provided.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.core.hold_fin.store(self.loop_start != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
+        self.core.hold_fin.store(self.loop_start_now() != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
         let mut s = Sched::default();
         // Per-round worlds: each round starts from its own old world (the
         // edits already applied to it), the final phase from the old final
         // world (the current one, unless it is the last round's).
-        let per_round = self.loop_start != LoopStart::Previous && !self.core.loops.is_empty();
+        let per_round = self.loop_start_now() != LoopStart::Previous && !self.core.loops.is_empty();
         self.ev_olds = std::mem::take(&mut self.rounds)
             .into_iter()
             .zip(std::mem::take(&mut self.round_dirty))
@@ -373,6 +373,9 @@ impl Engine {
         // middle of per-round rounds starts another.
         'pass: loop {
             self.ev_prev = None;
+            self.early_changes.clear();
+            self.early_frozen.clear();
+            self.early_live = true;
             if per_round {
                 if let Some((w, d)) = self.ev_olds.pop_front() {
                     self.w = w;
@@ -438,19 +441,35 @@ impl Engine {
                 let later = std::mem::take(&mut *super::core::lock(&self.core.loops_later));
                 if !later.is_empty() {
                     // (Each field's declaring run: its readers' link.)
-                    for &(f, _, by) in &later {
+                    let mut early = Vec::new();
+                    for &(f, _, by, e) in &later {
                         hs.loop_decl.entry(f).or_insert(by);
+                        if e && self.early.insert(f) {
+                            early.push(f);
+                        }
                     }
-                    let later: Vec<(Field, ValueId)> = later.into_iter().map(|(f, x, _)| (f, x)).collect();
+                    let later: Vec<(Field, ValueId)> = later.into_iter().map(|(f, x, _, _)| (f, x)).collect();
                     // (All at once: one pass over the runs' reads.)
                     self.declare_loopbacks(&later);
                     for id in std::mem::take(&mut self.pending) {
                         self.enqueue(&mut s, id);
                     }
+                    // (Early ones take what is published already.)
+                    self.move_early(&mut s, &mut rep, &mut hs, &early)?;
                     continue;
                 }
-                // The next round's loop-back values.
-                let next = self.publications()?;
+                // The next round's loop-back values (a capped early field
+                // keeps its own).
+                let mut next = self.publications()?;
+                if !self.early_frozen.is_empty() {
+                    for (f, x) in &mut next {
+                        if self.early_frozen.contains(f)
+                            && let Some(&v) = self.w.loops.get(f)
+                        {
+                            *x = v;
+                        }
+                    }
+                }
                 let moved: Vec<Field> = next.iter().filter(|(f, x)| self.w.loops.get(f) != Some(x)).map(|&(f, _)| f).collect();
                 if !moved.is_empty() && !self.loop_readers(&moved).is_empty() {
                     if rounds >= self.max_rounds {
@@ -479,6 +498,11 @@ impl Engine {
                                 moved_vs_old |= had_old;
                             }
                         }
+                        for f in &moved {
+                            if self.early.contains(f) {
+                                *self.early_changes.entry(*f).or_default() += 1;
+                            }
+                        }
                         // (The round's last commit: its loop readers' link.)
                         hs.round_end = hs.last;
                         moved_vs_old |= self.set_loops(&mut s, &next) && from_old;
@@ -489,6 +513,7 @@ impl Engine {
                     self.set_loops(&mut s, &next);
                 }
                 // The final phase: held nodes run once, in the final world.
+                self.early_live = false;
                 let held = !self.w.fins_in(St::Held).is_empty();
                 self.round_done(&mut rep, &mut round_runs, from_old);
                 if !held {
@@ -575,6 +600,20 @@ impl Engine {
                 break;
             }
             break;
+        }
+        self.early_live = false;
+        if !self.early_changes.is_empty() || !self.early_frozen.is_empty() {
+            let mut fs: Vec<Field> = self.early_changes.keys().chain(self.early_frozen.iter()).copied().collect();
+            fs.sort_by_key(|f| f.0.raw());
+            fs.dedup();
+            rep.early_loops = fs
+                .into_iter()
+                .map(|field| crate::api::EarlyLoop {
+                    field,
+                    changes: self.early_changes.get(&field).copied().unwrap_or(0),
+                    capped: self.early_frozen.contains(&field),
+                })
+                .collect();
         }
         if per_round {
             let done = std::mem::take(&mut self.ev_done);
@@ -697,7 +736,7 @@ impl Engine {
         // (Complete runs: a stopped attempt is not one; the limits count
         // attempts.)
         rep.runs -= self.stopped;
-        self.core.hold_fin.store(self.loop_start != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
+        self.core.hold_fin.store(self.loop_start_now() != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
         super::core::prof::dump();
         Ok(rep)
     }
@@ -1787,10 +1826,90 @@ impl Engine {
         fresh: bool,
     ) -> Result<(), EvalError> {
         let t = super::core::now();
+        // (Early loop-back fields: those it published before and after.)
+        let mut early = Vec::new();
+        if self.early_live && !self.early.is_empty() {
+            self.early_published(id, &mut early);
+        }
         let r = self.apply_one(s, rep, ran, cut, hs, id, outcome, fresh);
         rep.merge.total += super::core::ns_since(t);
         rep.merged += 1;
-        r
+        r?;
+        if self.early_live && !self.early.is_empty() {
+            self.early_published(id, &mut early);
+            if !early.is_empty() {
+                early.sort_by_key(|f| f.0.raw());
+                early.dedup();
+                self.move_early(s, rep, hs, &early)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Where the loop-backs start: with an early field, from the last
+    /// values (its rounds are not kept, `LoopStart::Previous`).
+    pub(crate) fn loop_start_now(&self) -> LoopStart {
+        if self.early.is_empty() { self.loop_start } else { LoopStart::Previous }
+    }
+
+    /// Pushes the early loop-back fields node `id`'s result publishes.
+    fn early_published(&self, id: Id, out: &mut Vec<Field>) {
+        if let Some(r) = self.w.node(id).and_then(|n| n.res.as_ref()) {
+            out.extend(r.pubs.iter().map(|p| p.0).filter(|f| self.early.contains(f)));
+        }
+    }
+
+    /// Early loop-back fields `fs` take the values published for them now
+    /// (a field published two values waits for the round's end); each
+    /// field's changes count against the round cap.
+    fn move_early(&mut self, s: &mut Sched, rep: &mut Report, hs: &mut Heights, fs: &[Field]) -> Result<(), EvalError> {
+        let mut vals = Vec::new();
+        for &f in fs {
+            if self.early_frozen.contains(&f) {
+                continue;
+            }
+            let Some(v) = self.published(f) else { continue };
+            if self.w.loops.get(&f) == Some(&v) {
+                continue;
+            }
+            let c = self.early_changes.entry(f).or_default();
+            if u64::from(*c) >= self.max_rounds {
+                match self.cap_policy {
+                    CapPolicy::Error => return Err(EvalError::NonConvergence { rounds: u64::from(*c) }),
+                    CapPolicy::Finalize => {
+                        self.early_frozen.insert(f);
+                        rep.capped.get_or_insert_with(Vec::new).push(f);
+                        continue;
+                    }
+                }
+            }
+            *c += 1;
+            vals.push((f, v));
+        }
+        if !vals.is_empty() {
+            // (The commit that moved them: their readers' link.)
+            hs.round_end = hs.last;
+            self.set_loops(s, &vals);
+        }
+        Ok(())
+    }
+
+    /// The value published for loop-back field `f` in the current world
+    /// (none published: its initial value; two: `None`).
+    fn published(&self, f: Field) -> Option<ValueId> {
+        let mut v = None;
+        for (id, _) in self.w.publishers.iter() {
+            let Some(r) = self.w.node(*id).and_then(|n| n.res.as_ref()) else { continue };
+            for &(g, x) in &r.pubs {
+                if g == f {
+                    if v.is_some_and(|y| y != x) {
+                        return None;
+                    }
+                    v = Some(x);
+                }
+            }
+        }
+        v.or_else(|| self.core.loops.get(&f).copied())
     }
 
     /// [`Self::apply`] untimed.
@@ -3204,6 +3323,14 @@ impl Merge<'_> {
         };
         let Some(n) = eng.w.node(id) else { return true };
         let old = n.res.as_deref();
+        // (An early loop-back's publisher moves it in its commit: no field
+        // write is recorded around that.)
+        if eng.early_live
+            && !eng.early.is_empty()
+            && r.res.pubs.iter().chain(old.map_or(&[][..], |x| &x.pubs[..])).any(|p| eng.early.contains(&p.0))
+        {
+            return true;
+        }
         if !r.kids.is_empty() || !r.conts.is_empty() || old.is_some_and(|x| !x.kids.is_empty() || !x.conts.is_empty()) {
             count(7);
             return true;

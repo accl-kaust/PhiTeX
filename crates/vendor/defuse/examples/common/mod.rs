@@ -1122,6 +1122,12 @@ pub fn out_field(v: &Values) -> Field {
     v.field("out")
 }
 
+/// Whether loop-back fields are declared early (`FUZZ_LOOP_EARLY`).
+pub fn loop_early() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FUZZ_LOOP_EARLY").is_some())
+}
+
 /// Whether `var` reads go through `Ctx::use_fields` (`FUZZ_READ_MANY`).
 fn read_many() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1933,7 +1939,13 @@ impl Lang {
                 let name = text(v, a[0]);
                 let f = v.field(&name);
                 let init = a[1];
-                eng.declare_loopback(f, init);
+                // FUZZ_LOOP_EARLY=1: early round values (not deterministic;
+                // the check takes a result the report warns of).
+                if loop_early() {
+                    eng.declare_loopback_early(f, init);
+                } else {
+                    eng.declare_loopback(f, init);
+                }
                 names.push(name);
             }
         }

@@ -775,7 +775,20 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn declare_loopback_inner(&mut self, f: Field, init: ValueId) {
-        self.core.declare_loop_later(f, init, self.me);
+        self.core.declare_loop_later(f, init, self.me, false);
+    }
+
+    /// Declares loop-back field `f` (as `declare_loopback`), its round
+    /// values early: see [`Engine::declare_loopback_early`] (not
+    /// deterministic).
+    ///
+    /// [`Engine::declare_loopback_early`]: crate::Engine::declare_loopback_early
+    pub fn declare_loopback_early(&mut self, f: Field, init: ValueId) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &init, )) } else { serde_json::Value::Null };
+        self.core.declare_loop_later(f, init, self.me, true);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "declare_loopback_early", a, serde_json::Value::Null);
     }
 
     /// Publishes a loop-back field's next round value.

@@ -83,6 +83,15 @@ pub struct Engine {
     pub(crate) loop_start: LoopStart,
     pub(crate) max_rounds: u64,
     pub(crate) cap_policy: CapPolicy,
+    /// The loop-back fields that take their round values early
+    /// (`declare_loopback_early`).
+    pub(crate) early: FxHashSet<Field>,
+    /// This pass: whether early values are taken (not in the final phase),
+    /// each early field's value changes, and those capped (kept as they
+    /// are).
+    pub(crate) early_live: bool,
+    pub(crate) early_changes: FxHashMap<Field, u32>,
+    pub(crate) early_frozen: FxHashSet<Field>,
     pub(crate) limits: Limits,
     pub(crate) roots: Vec<NodeId>,
     pub(crate) version: u64,
@@ -154,6 +163,10 @@ impl Engine {
             loop_start: LoopStart::Initial,
             max_rounds: 64,
             cap_policy: CapPolicy::Error,
+            early: FxHashSet::default(),
+            early_live: false,
+            early_changes: FxHashMap::default(),
+            early_frozen: FxHashSet::default(),
             limits: Limits::default(),
             roots: Vec::new(),
             version: 0,
@@ -586,6 +599,43 @@ impl Engine {
         self.declare_loopbacks_inner(&[(f, init)]);
         #[cfg(feature = "observe")]
         self.rec_call("declare_loopback", crate::record::rec().map(|_| crate::record::j(&(&f, &init))), &());
+    }
+
+    /// Declares loop-back field `f` (as [`Self::declare_loopback`]; a
+    /// field declared already keeps its initial value) and opts it in to
+    /// early round values: when a commit changes the value published for
+    /// `f`, its readers (and the definitions forwarding it,
+    /// `Ctx::define_forward`) take that value at once, not when the round
+    /// ends. The round ends as before, when nothing moves; a field moved
+    /// early does not move at its end.
+    ///
+    /// # Determinism
+    ///
+    /// This is chaotic (asynchronous) iteration, not rounds: readers of
+    /// the next value run while the round still runs, and what they give
+    /// feeds it. It is **not deterministic**: when the fields' loop has
+    /// one fixed point and the rounds reach it, the result is the rounds'
+    /// result; otherwise it can depend on the schedule (the thread count
+    /// among it) and differ from the rounds'. A loop that oscillates, or
+    /// has more than one fixed point, can settle on another fixed point, or
+    /// on one where the rounds would not settle at all. With no field
+    /// declared early, evaluations are as without this (deterministic).
+    /// With one, every evaluation starts the loop-back fields from their
+    /// last values ([`crate::LoopStart::Previous`], whatever
+    /// `set_loop_start` says): rounds are not kept to start again from.
+    /// [`Report::early_loops`] says, per field, how often it changed and
+    /// whether its changes reached the round cap
+    /// ([`EarlyLoop::capped`], [`EarlyLoop::oscillated`]); the cap counts
+    /// each field's changes, as rounds do.
+    ///
+    /// [`Report::early_loops`]: crate::Report::early_loops
+    /// [`EarlyLoop::capped`]: crate::EarlyLoop::capped
+    /// [`EarlyLoop::oscillated`]: crate::EarlyLoop::oscillated
+    pub fn declare_loopback_early(&mut self, f: Field, init: ValueId) {
+        self.declare_loopbacks_inner(&[(f, init)]);
+        self.early.insert(f);
+        #[cfg(feature = "observe")]
+        self.rec_call("declare_loopback_early", crate::record::rec().map(|_| crate::record::j(&(&f, &init))), &());
     }
 
     /// Declares several loop-back fields at once: one pass over the runs
