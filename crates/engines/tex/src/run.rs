@@ -5641,7 +5641,7 @@ pub(crate) struct KeptMarks {
 
 /// The commands between two marks of a run ([`Run::take_mark`]):
 /// `PHITEX_MARK_EVERY` (observe), else this.
-pub(crate) const MARK_EVERY: u64 = 2000;
+pub(crate) const MARK_EVERY: u64 = 4000;
 
 fn mark_every() -> u64 {
     crate::exec::obs_str!("PHITEX_MARK_EVERY")
@@ -5652,8 +5652,9 @@ fn mark_every() -> u64 {
 impl Run<'_, '_> {
     /// Takes a mark between commands, at the first one from each
     /// multiple of [`MARK_EVERY`] commands since the run's start
-    /// ([`Run::next_mark`]; 2000 by the cold and edit measures: at 500 the
-    /// snapshots cost 5-7% of a cold build and the edits gained nothing): the
+    /// ([`Run::next_mark`]; 4000 by the cold measure: a run's first mark
+    /// parks its whole table, the later ones its changes, 0.7% of a cold
+    /// amsldoc build at 4000, 1.3% at 2000): the
     /// run's state as a parked run's ([`Run::snapshot`]) and its digest,
     /// given to the engine ([`phitex_defuse::Ctx::checkpoint`]). `Err`
     /// when the engine cuts the run off there: its last run's result
