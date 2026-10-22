@@ -645,6 +645,18 @@ impl Run<'_, '_> {
                 }
                 None => Vec::new(),
             };
+            // (`PHITEX_FIN_ITEMS=1`, profile: each unit's items a
+            // finisher reads, one line each, to compare two evaluations)
+            if crate::exec::prof_flag!("PHITEX_FIN_ITEMS") {
+                for (k, &x) in raw.iter().enumerate() {
+                    eprintln!(
+                        "fin-items: node {} unit {p} item {k} {:016x} {}",
+                        self.cx.node().raw(),
+                        x.raw(),
+                        v.render(x).chars().take(300).collect::<String>()
+                    );
+                }
+            }
             self.resolve_params_of(p, &mut raw)?;
             // (the own piece's last candidate; its other parts read later)
             let shape = if p == pid {
