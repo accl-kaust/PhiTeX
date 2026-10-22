@@ -267,9 +267,39 @@ pub(crate) fn run_node_parking(
                     .map(|(l, x, loc)| (r.loc_field(l), loc, x))
                     .collect();
                 defs.sort_by_key(|x| x.0.0.raw());
+                let outs = if crate::exec::obs_flag!("PHITEX_MARK_CHECK") {
+                    let v = r.v;
+                    let mut o: Vec<String> = defs
+                        .iter()
+                        .map(|(f, l, x)| format!("def {} {l:?} {}", crate::val::field_name(v, *f), v.render(*x).chars().take(200).collect::<String>()))
+                        .collect();
+                    o.extend(r.contribs.iter().map(|(f, x)| format!("contrib {} {}", crate::val::field_name(v, *f), v.render(*x).chars().take(300).collect::<String>())));
+                    o.extend(r.kids.iter().map(|(op, a)| format!("kid {op:?} {}", a.iter().map(|x| v.render(*x).chars().take(80).collect::<String>()).collect::<Vec<_>>().join(" | "))));
+                    o.push(format!("effect {:?}", r.effect));
+                    o
+                } else {
+                    Vec::new()
+                };
+                if let Some(k) = r.cut_check
+                    && let Some(old) = &r.old_marks
+                {
+                    let mine: std::collections::BTreeSet<&String> = outs.iter().collect();
+                    let theirs: std::collections::BTreeSet<&String> = old.outs.iter().collect();
+                    let only_mine: Vec<&&String> = mine.difference(&theirs).take(6).collect();
+                    let only_theirs: Vec<&&String> = theirs.difference(&mine).take(6).collect();
+                    if !only_mine.is_empty() || !only_theirs.is_empty() {
+                        eprintln!(
+                            "mark-check: node {} cut at mark {k} would differ: this run {only_mine:?}; the last run {only_theirs:?}",
+                            r.cx.node().raw()
+                        );
+                    } else {
+                        eprintln!("mark-check: node {} cut at mark {k} holds", r.cx.node().raw());
+                    }
+                }
                 r.cx.keep_after(std::sync::Arc::new(crate::run::KeptMarks {
                     snaps,
                     defs,
+                    outs,
                     last,
                 }));
             }

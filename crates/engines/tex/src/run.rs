@@ -676,6 +676,10 @@ pub(crate) struct Run<'c, 'a> {
     /// The engine cut the run off at a mark: its last run's result stands
     /// ([`phitex_defuse::Ctx::checkpoint`]).
     pub cut_off: bool,
+    /// (observe, `PHITEX_MARK_CHECK=1`) The mark the engine would have cut
+    /// the run off at: it runs on, and compares its result with the last
+    /// run's at its end.
+    pub cut_check: Option<u32>,
     /// Changes to the run's state a stopped command cannot undo (own
     /// definitions, a buffer reduced in place): a stop after one does
     /// not park ([`Run::rewind`]).
@@ -939,6 +943,7 @@ impl<'c, 'a> Run<'c, 'a> {
             old_marks: None,
             marks_on: false,
             cut_off: false,
+            cut_check: None,
             muts: 0,
             interp: None,
             interp_short: false,
@@ -5346,6 +5351,9 @@ pub(crate) struct KeptMarks {
     /// The definitions its table published at its end
     /// ([`crate::runstate::State::published`]), by field.
     pub defs: Vec<(Field, Locality, ValueId)>,
+    /// (observe, `PHITEX_MARK_CHECK`) Its contributions and children, to
+    /// compare a run the engine would cut off with.
+    pub outs: Vec<String>,
     /// Each field a command of the run accessed after its first mark,
     /// with the latest mark it accessed it after (numbered from 1:
     /// after `snaps[m - 1]`), by field.
@@ -5420,6 +5428,10 @@ impl Run<'_, '_> {
             None => self.cx.checkpoint(k, state),
         };
         if let Err(s) = r {
+            if crate::exec::obs_flag!("PHITEX_MARK_CHECK") {
+                self.cut_check.get_or_insert(k);
+                return Ok(());
+            }
             self.cut_off = true;
             return Err(Halt::Stop(s));
         }
