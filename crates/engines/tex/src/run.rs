@@ -5441,19 +5441,17 @@ impl Run<'_, '_> {
             .collect();
         let fields = |r: &Self, xs: &[Loc]| -> Vec<Field> { xs.iter().map(|&l| r.loc_field(l)).collect() };
         let skip_first = fields(self, &self.skip_first);
-        let reg_pending = self
-            .reg_pending
-            .iter()
-            .map(|&(l, m)| (self.loc_field(l), m))
-            .collect();
-        let class_memo = self.class_memo.iter().map(|&(l, c)| (self.loc_field(l), c)).collect();
-        let outer_memo = self.outer_memo.iter().map(|&(l, o)| (self.loc_field(l), o)).collect();
-        let step_memo = self.step_memo.iter().map(|&(l, k)| (self.loc_field(l), k)).collect();
-        let defined_memo = self
-            .defined_memo
-            .iter()
-            .map(|&(l, d)| (self.loc_field(l), d))
-            .collect();
+        // (the memos by field: their order the same for equal memos)
+        fn by_field<T: Copy>(r: &Run<'_, '_>, m: impl Iterator<Item = (Loc, T)>) -> Vec<(Field, T)> {
+            let mut xs: Vec<(Field, T)> = m.map(|(l, x)| (r.loc_field(l), x)).collect();
+            xs.sort_by_key(|x| x.0.0.raw());
+            xs
+        }
+        let reg_pending = by_field(self, self.reg_pending.iter().map(|(&l, &m)| (l, m)));
+        let class_memo = by_field(self, self.class_memo.iter().map(|(&l, &c)| (l, c)));
+        let outer_memo = by_field(self, self.outer_memo.iter().map(|(&l, &o)| (l, o)));
+        let step_memo = by_field(self, self.step_memo.iter().map(|(&l, &k)| (l, k)));
+        let defined_memo = by_field(self, self.defined_memo.iter().map(|(&l, &d)| (l, d)));
         let pending_pre = self
             .pending_pre
             .iter()
