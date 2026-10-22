@@ -99,7 +99,10 @@ pub(crate) fn run_node_parking(
             Some("off") => false,
             Some("exec") => cx.op() == o.exec,
             Some("finish") => cx.op() == o.finish,
-            _ => cx.op() == o.exec || cx.op() == o.finish,
+            Some("all") => cx.op() == o.exec || cx.op() == o.finish,
+            // (a finisher resumed at a mark has given other results than
+            // its full run: off until that is understood)
+            _ => cx.op() == o.exec,
         };
     let resumed_at = if marks_ok { cx.resumed() } else { None };
     let mut r = if let Some((tok, k)) = resumed_at {
