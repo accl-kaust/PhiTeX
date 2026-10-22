@@ -111,7 +111,7 @@ pub(crate) fn run_node_parking(
                 let (p, h) = km.snaps[k as usize].clone();
                 cx.restart();
                 let mut r = Run::new(cx, o);
-                r.verify_at = Some((k, p, h));
+                r.verify_at = Some((k, p, h, km.args.clone()));
                 r
             }
             Ok(km) if (k as usize) < km.snaps.len() => {
@@ -307,11 +307,13 @@ pub(crate) fn run_node_parking(
                         eprintln!("mark-check: node {} cut at mark {k} holds", r.cx.node().raw());
                     }
                 }
+                let args = if crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") { r.cx.args() } else { Vec::new() };
                 r.cx.keep_after(std::sync::Arc::new(crate::run::KeptMarks {
                     snaps,
                     defs,
                     outs,
                     last,
+                    args,
                 }));
                 crate::prof::add(crate::prof::KEEP, tk);
             }

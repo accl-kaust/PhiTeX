@@ -679,7 +679,7 @@ pub(crate) struct Run<'c, 'a> {
     /// (observe, `PHITEX_RESUME_VERIFY=1`) The mark the engine resumed
     /// this run at, with the last run's state there: the run goes from its
     /// start instead and compares its state at that mark.
-    pub verify_at: Option<(u32, std::sync::Arc<Parked>, u64)>,
+    pub verify_at: Option<(u32, std::sync::Arc<Parked>, u64, Vec<ValueId>)>,
     /// (observe, `PHITEX_MARK_CHECK=1`) The mark the engine would have cut
     /// the run off at: it runs on, and compares its result with the last
     /// run's at its end.
@@ -5363,6 +5363,8 @@ pub(crate) struct KeptMarks {
     /// with the latest mark it accessed it after (numbered from 1:
     /// after `snaps[m - 1]`), by field.
     pub last: Vec<(Field, u32)>,
+    /// (observe, `PHITEX_RESUME_VERIFY`) Its node's text.
+    pub args: Vec<ValueId>,
 }
 
 /// The commands between two marks of a run ([`Run::take_mark`]):
@@ -5416,10 +5418,10 @@ impl Run<'_, '_> {
         let tp = crate::prof::start();
         let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
         self.mark_snaps.push((std::sync::Arc::new(p), h));
-        if let Some((vk, op, oh)) = self.verify_at.clone()
+        if let Some((vk, op, oh, args)) = self.verify_at.clone()
             && vk == k
         {
-            self.resume_verify(k, &op, oh, h);
+            self.resume_verify(k, &op, oh, h, &args);
         }
         // (the accesses from here on stamped with this mark, numbered
         // from 1)
@@ -5457,9 +5459,15 @@ impl Run<'_, '_> {
     /// (observe, `PHITEX_RESUME_VERIFY=1`) Whether this full run's state
     /// at mark `k` is the last run's there, which a run resumed at `k`
     /// starts from ([`Run::verify_at`]); where not, how they differ.
-    fn resume_verify(&mut self, k: u32, op: &Parked, oh: u64, h: u64) {
+    fn resume_verify(&mut self, k: u32, op: &Parked, oh: u64, h: u64, old_args: &[ValueId]) {
         let node = self.cx.node().raw();
         let fin = self.cx.op() == self.ops.finish;
+        let args = self.cx.args();
+        if args != old_args {
+            let v = self.v;
+            let r = |a: &[ValueId]| a.iter().map(|&x| v.render(x).chars().take(200).collect::<String>()).collect::<Vec<_>>();
+            eprintln!("resume-verify: node {node} (finisher {fin}) RETEXTED: last {:?} this {:?}", r(old_args), r(&args));
+        }
         if oh == h {
             eprintln!("resume-verify: node {node} (finisher {fin}) mark {k} holds");
             return;
