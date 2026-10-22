@@ -638,6 +638,19 @@ pub enum EvalError {
     ConflictingPublication {
         field: Field,
     },
+    /// Loop-back field `field` declared with `options` by `by` (`None`: the
+    /// engine's API) after `first` declared it with `first_options`: the
+    /// options differ (early, or last wins). Reported only with the check
+    /// on ([`crate::Engine::set_loop_option_check`]; on in debug and
+    /// `observe` builds); otherwise the field is early, and last wins, if
+    /// any declaration says so.
+    ConflictingLoopOptions {
+        field: Field,
+        first: Option<NodeId>,
+        first_options: LoopOptions,
+        by: Option<NodeId>,
+        options: LoopOptions,
+    },
     UndeclaredDefinition {
         node: NodeId,
         field: Field,
@@ -718,6 +731,10 @@ impl std::fmt::Display for EvalError {
             EvalError::NonConvergence { rounds } => write!(f, "no fixpoint after {rounds} rounds"),
             EvalError::ConflictingPublication { field } => {
                 write!(f, "conflicting publications for {field:?}")
+            }
+            EvalError::ConflictingLoopOptions { field, first, first_options, by, options } => {
+                let who = |n: &Option<NodeId>| n.map_or_else(|| "the engine's API".to_string(), |n| format!("node {n:?}"));
+                write!(f, "loop-back {field:?} declared {options:?} by {} after {first_options:?} by {}", who(by), who(first))
             }
             EvalError::UndeclaredDefinition { node, field } => {
                 write!(f, "node {node:?}: definition of {field:?} contradicts its declaration")

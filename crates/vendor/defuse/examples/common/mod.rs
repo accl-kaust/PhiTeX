@@ -1670,6 +1670,7 @@ impl Operation for StmtOp {
             // Declares nothing: its definition refutes the list.
             "sneak" => Some(Vec::new()),
             "alias" | "pack" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
+            "page" => Some(vec![(v.field("pg"), Locality::Local)]),
             // A contribution is a definition of the sequence.
             "take" | "replace" => Some(vec![(items_seq(v), Locality::Local)]),
             "fold" => Some(vec![
@@ -2140,8 +2141,32 @@ impl Operation for StmtOp {
                 // A layout consumer: reads only its segment of the output.
                 let stmt = ops.stmt;
                 let prev = cx.prev_sibling_where(&|op, args| op == stmt && tag(v, args[0]).0 == "page");
+                // (FUZZ_PATHS=2: through a view of the window, an element
+                // at a time; =1: its length through a path, then whole.)
+                if fuzz_paths() == 2 {
+                    let me = cx.node();
+                    let m = cx.acc_view(out_field(v), prev, Some(me))?;
+                    // (`pg`, its first element: passed on from the view.)
+                    if let Some(e) = cx.at(m, defuse::Step::Index(0)) {
+                        cx.define_from(v.field("pg"), e, Locality::Local);
+                    }
+                    let n = cx.len(m).unwrap_or(0);
+                    let mut sum = 0i64;
+                    for i in 0..n {
+                        let x = cx.get(m, defuse::Step::Index(u32::try_from(i).unwrap_or(u32::MAX)));
+                        sum = sum.wrapping_add(x.and_then(|x| v.as_int(x)).unwrap_or(0));
+                    }
+                    return Ok(v.list(vec![v.int(i64::try_from(n).unwrap_or(0)), v.int(sum)]));
+                }
+                if fuzz_paths() == 1 {
+                    let p = cx.path(&[defuse::Step::Len]);
+                    let _ = cx.acc_range_path(out_field(v), prev, p)?;
+                }
                 let seg = cx.acc_range(out_field(v), prev)?;
                 let xs = v.seq_to_vec(seg);
+                if let Some(&x0) = xs.first() {
+                    cx.define_with(v.field("pg"), x0, Locality::Local);
+                }
                 let sum = xs
                     .iter()
                     .map(|&x| v.as_int(x).unwrap_or(0))
@@ -2411,6 +2436,9 @@ impl Program {
     /// Loads `lines` into a fresh engine.
     pub fn load(lines: Vec<String>) -> (Engine, Program) {
         let mut eng = Engine::new();
+        // (Conflicting loop-back declarations are the client's bug: an
+        // error here.)
+        eng.set_loop_option_check(true);
         let lang = Lang::install(&mut eng);
         if std::env::var_os("FUZZ_STABLE").is_some() {
             // Stable is a hint: marked on fields the programs define often

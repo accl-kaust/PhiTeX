@@ -339,7 +339,7 @@ impl<'a> Builder<'a> {
     /// value and is filed again (its readers re-asked), the node not run
     /// again.
     fn refile_passes(&mut self, id: Id, res: &Arc<Res>, on: Option<&[Field]>) {
-        let Some((r, defs, contribs, out)) = passes_now(self.core, &self.w, res, on) else { return };
+        let Some((r, defs, contribs, out)) = passes_now(self.core, &self.w, id, res, on) else { return };
         let Some(mut n) = self.w.node(id).cloned() else { return };
         self.core.passes_refiled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let after = r.contribs.clone();
@@ -1707,7 +1707,7 @@ impl<'a> Builder<'a> {
         // (The values it passed on, taken now: it read them in the world it
         // ran in, and its presence reads hold here.)
         if !res.passes.is_empty()
-            && let Some((r, ..)) = passes_now(self.core, &self.w, &res, None)
+            && let Some((r, ..)) = passes_now(self.core, &self.w, id, &res, None)
         {
             res = r;
         }
@@ -1941,6 +1941,46 @@ pub(crate) struct Asker<'w> {
     /// The last field asked at the last point, and its value there (`Err`:
     /// a definer in work): reads of it through other paths ask no further.
     last: Option<(Field, Result<Option<ValueId>, ()>)>,
+    /// The last window a path's fold read asked, and its fold now.
+    range: LastRange,
+}
+
+/// The last window a fold read through a path asked (field, ends, past),
+/// and its fold now (`None`: the window gone): reads of it through other
+/// paths (a view's) fold no further.
+pub(crate) type LastRange = Option<((Field, Id, Id, bool), Option<ValueId>)>;
+
+/// As [`holds`] for fold read `r` through a path, the window the last one
+/// asked folded once (`last`).
+fn holds_range(core: &Core, w: &World, me: Id, r: &Read, last: &mut LastRange) -> bool {
+    let Read::Range { f, from, to, val, past, path } = r else { return holds(core, w, me, r) };
+    let k = (*f, *from, *to, *past);
+    let now = match *last {
+        Some((lk, now)) if lk == k => now,
+        _ => {
+            let now = range_now(core, w, me, *f, *from, *to, *past);
+            *last = Some((k, now));
+            now
+        }
+    };
+    now.is_some_and(|now| now == *val || core.eval_path(*path, now) == core.eval_path(*path, *val))
+}
+
+/// The fold a read of `f` over the window (`from`, `to`, `past`) of node
+/// `me` gets now (`None`: an end or the window gone).
+fn range_now(core: &Core, w: &World, me: Id, f: Field, from: Id, to: Id, past: bool) -> Option<ValueId> {
+    if [from, to].iter().any(|&x| x != NONE && w.node(x).is_none()) {
+        return None;
+    }
+    let Some(mo) = core.acc(f) else {
+        return Some(ValueId::UNIT);
+    };
+    let m = AccMeasure {
+        m: &**mo,
+        v: &core.values,
+    };
+    let (u, lo, hi) = w.window(me, from, to, past)?;
+    Some(w.fold(&m, u, f, lo, hi))
 }
 
 /// The last path read asked by [`holds_paths`]: its field and point, and
@@ -1950,8 +1990,10 @@ pub(crate) type LastUse = Option<((Field, Id, bool, bool), Option<ValueId>)>;
 /// As [`holds`], a path read of the field at the point the last one asked
 /// taking that one's value (a plain read asks as `holds`, nothing kept);
 /// checked against [`holds`] under `CLEAN_KEPT_CHECK`.
-pub(crate) fn holds_paths(core: &Core, w: &World, me: Id, r: &Read, last: &mut LastUse) -> bool {
+pub(crate) fn holds_paths(core: &Core, w: &World, me: Id, r: &Read, memo: &mut (LastUse, LastRange)) -> bool {
+    let last = &mut memo.0;
     let ok = match r {
+        Read::Range { path, .. } if *path >= super::core::PATH0 => holds_range(core, w, me, r, &mut memo.1),
         Read::Use { f, at, after, own, val, path, .. } if *path >= super::core::PATH0 => {
             let k = (*f, *at, *after, *own);
             let v2 = match *last {
@@ -1989,6 +2031,11 @@ fn use_value(core: &Core, w: &World, r: &Read) -> Option<Option<ValueId>> {
 /// As [`holds`], with `a`'s lookups (of `w`, unchanged since).
 pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &mut Asker<'w>) -> bool {
     let Read::Use { f, at, after, own, val, path, .. } = r else {
+        if let Read::Range { path, .. } = r
+            && *path >= super::core::PATH0
+        {
+            return holds_range(core, w, me, r, &mut a.range);
+        }
         return holds_with(core, w, me, r, false);
     };
     if w.loops.get(f).is_some() {
@@ -2053,7 +2100,7 @@ pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &m
 /// changed; else the result, and the targets changed (definitions; the
 /// contributions; the output).
 #[allow(clippy::type_complexity)]
-fn passes_now(core: &Core, w: &World, res: &Res, on: Option<&[Field]>) -> Option<(Res, Vec<(Field, Locality, ValueId)>, bool, bool)> {
+fn passes_now(core: &Core, w: &World, me: Id, res: &Res, on: Option<&[Field]>) -> Option<(Res, Vec<(Field, Locality, ValueId)>, bool, bool)> {
     let mut new: Option<Res> = None;
     let (mut defs, mut contribs, mut out) = (Vec::new(), false, false);
     // (A composition's holes taken again: (composition, part, value,
@@ -2063,14 +2110,15 @@ fn passes_now(core: &Core, w: &World, res: &Res, on: Option<&[Field]>) -> Option
         ups.clear();
         let (x, raw) = if p.read & super::world::COMPOSED != 0 {
             let k = (p.read & !super::world::COMPOSED) as usize;
-            let Some(x) = compose_now(core, w, res, k, on, &mut ups) else { continue };
+            let Some(x) = compose_now(core, w, me, res, k, on, &mut ups) else { continue };
             (x, None)
         } else {
-            let Some(rd @ Read::Use { f, .. }) = res.reads.get(p.read as usize) else { continue };
-            if on.is_some_and(|fs| !fs.contains(f)) {
+            let Some(rd) = res.reads.get(p.read as usize) else { continue };
+            let Some(f) = root_field(rd) else { continue };
+            if on.is_some_and(|fs| !fs.contains(&f)) {
                 continue;
             }
-            let Some(raw) = use_now(core, w, rd) else { continue };
+            let Some(raw) = root_now(core, w, me, rd) else { continue };
             let Some(x) = core.eval_path(p.path, raw) else { continue };
             (x, Some(raw))
         };
@@ -2080,8 +2128,10 @@ fn passes_now(core: &Core, w: &World, res: &Res, on: Option<&[Field]>) -> Option
         let r = new.get_or_insert_with(|| res.clone());
         r.passes[i].val = x;
         for (rx, raw) in raw.map(|raw| (p.read, raw)).into_iter().chain(ups.iter().map(|u| (u.3, u.4))) {
-            if let Some(Read::Use { val, .. }) = r.reads.get_mut(rx as usize) {
-                *val = Some(raw);
+            match r.reads.get_mut(rx as usize) {
+                Some(Read::Use { val, .. }) => *val = Some(raw),
+                Some(Read::Range { val, .. }) => *val = raw,
+                _ => {}
             }
         }
         for &(k, j, v, read, _) in &ups {
@@ -2118,7 +2168,7 @@ fn passes_now(core: &Core, w: &World, res: &Res, on: Option<&[Field]>) -> Option
 /// fields `on` (or all) taken again, those that changed added to `ups`
 /// as (composition, part, value, root read, its value); `None` if one's
 /// answer is not there.
-fn compose_now(core: &Core, w: &World, res: &Res, k: usize, on: Option<&[Field]>, ups: &mut Vec<(usize, usize, ValueId, u32, ValueId)>) -> Option<ValueId> {
+fn compose_now(core: &Core, w: &World, me: Id, res: &Res, k: usize, on: Option<&[Field]>, ups: &mut Vec<(usize, usize, ValueId, u32, ValueId)>) -> Option<ValueId> {
     let parts = res.composed.get(k)?;
     let mut xs = Vec::with_capacity(parts.len());
     for (j, part) in parts.iter().enumerate() {
@@ -2126,22 +2176,40 @@ fn compose_now(core: &Core, w: &World, res: &Res, k: usize, on: Option<&[Field]>
             super::world::CPart::Val(x) => xs.push(x),
             super::world::CPart::Hole { read, path, val } => {
                 let rd = res.reads.get(read as usize)?;
-                let Read::Use { f, .. } = rd else { return None };
-                if on.is_some_and(|fs| !fs.contains(f)) {
+                let f = root_field(rd)?;
+                if on.is_some_and(|fs| !fs.contains(&f)) {
                     xs.push(val);
                     continue;
                 }
-                let raw = use_now(core, w, rd)?;
+                let raw = root_now(core, w, me, rd)?;
                 let x = core.eval_path(path, raw)?;
                 if x != val {
                     ups.push((k, j, x, read, raw));
                 }
                 xs.push(x);
             }
-            super::world::CPart::Nested(i) => xs.push(compose_now(core, w, res, i as usize, on, ups)?),
+            super::world::CPart::Nested(i) => xs.push(compose_now(core, w, me, res, i as usize, on, ups)?),
         }
     }
     Some(core.values.list(xs))
+}
+
+/// The field a pass's root read reads (a use or a fold), if one passes.
+fn root_field(r: &Read) -> Option<Field> {
+    match r {
+        Read::Use { f, .. } | Read::Range { f, .. } => Some(*f),
+        _ => None,
+    }
+}
+
+/// The value a pass's root read gets now, raw: a use's
+/// ([`use_now`]), or a fold's over its window ([`range_now`]; `None`: the
+/// window gone, its read broken).
+fn root_now(core: &Core, w: &World, me: Id, r: &Read) -> Option<ValueId> {
+    match r {
+        Read::Range { f, from, to, past, .. } => range_now(core, w, me, *f, *from, *to, *past),
+        _ => use_now(core, w, r),
+    }
 }
 
 /// The raw value use `r` gets now (`None`: none, a loop-back field's, or

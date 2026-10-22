@@ -212,3 +212,95 @@ fn a_composition_follows_its_holes_without_its_composer_running() {
     assert!(ran.contains(&"pk"), "{ran:?}");
     assert_eq!(t.out("rz"), "\"none\"");
 }
+
+/// A fold's view passed on: `pv` views the fold of `sq` (contributions of
+/// `q1`, `q2`, `q3`) and defines `w` as its element 1; `rw` reads `w`.
+mod fold_root {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use defuse::{Ctx, Engine, Field, Locality, NodeId, Operation, SeqMonoid, Step, Stop, ValueId, Values};
+
+    struct Ops(Arc<Mutex<HashMap<String, usize>>>);
+
+    impl Operation for Ops {
+        fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+            Some(match v.as_str(a[0]).as_deref() {
+                Some("pv") => vec![(v.field("w"), Locality::Local)],
+                _ => Vec::new(),
+            })
+        }
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let v = cx.values();
+            let a = cx.args();
+            let tag = v.as_str(a[0]).unwrap();
+            *self.0.lock().unwrap().entry(tag.clone()).or_default() += 1;
+            let sq = v.field("sq");
+            Ok(match tag.as_str() {
+                t if t.starts_with('q') => {
+                    if v.as_int(a[1]).is_some_and(|x| x >= 0) {
+                        cx.contribute(sq, v.seq_unit(a[1]));
+                    }
+                    ValueId::UNIT
+                }
+                "pv" => {
+                    let me = cx.node();
+                    let m = cx.acc_view(sq, None, Some(me))?;
+                    if let Some(e) = cx.at(m, Step::Index(1)) {
+                        cx.define_from(v.field("w"), e, Locality::Local);
+                    }
+                    ValueId::UNIT
+                }
+                "rw" => cx.use_field(v.field("w"))?.unwrap_or_else(|| v.str("none")),
+                _ => ValueId::UNIT,
+            })
+        }
+    }
+
+    fn build(xs: [i64; 3]) -> (Engine, defuse::OpId, Arc<Mutex<HashMap<String, usize>>>, HashMap<&'static str, NodeId>) {
+        let runs = Arc::new(Mutex::new(HashMap::new()));
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(Ops(runs.clone())));
+        let sq = eng.values().field("sq");
+        eng.declare_accumulator(sq, Arc::new(SeqMonoid));
+        let u = eng.new_unit();
+        let mut nodes = HashMap::new();
+        for (k, x) in [("q1", Some(xs[0])), ("q2", Some(xs[1])), ("q3", Some(xs[2])), ("pv", None), ("rw", None)] {
+            let v = eng.values();
+            let mut a = vec![v.str(k)];
+            if let Some(x) = x {
+                a.push(v.int(x));
+            }
+            nodes.insert(k, eng.push(u, op, a));
+        }
+        eng.evaluate_sequential().expect("evaluate");
+        (eng, op, runs, nodes)
+    }
+
+    #[test]
+    fn a_fold_element_passed_on_follows_and_a_shift_reruns() {
+        let (mut eng, op, runs, nodes) = build([1, 2, 3]);
+        let out = |eng: &Engine| eng.values().render(eng.output(nodes["rw"]).unwrap());
+        assert_eq!(out(&eng), "2");
+        let mut edit = |eng: &mut Engine, k: &'static str, x: i64| -> bool {
+            let before = runs.lock().unwrap().get("pv").copied();
+            let a = vec![eng.values().str(k), eng.values().int(x)];
+            eng.replace(nodes[k], op, a);
+            eng.evaluate_sequential().expect("evaluate");
+            assert!(eng.check_reads().is_empty(), "{:?}", eng.check_reads());
+            runs.lock().unwrap().get("pv").copied() != before
+        };
+        // Element 1's content: refiled, `pv` not run.
+        assert!(!edit(&mut eng, "q2", 7));
+        assert_eq!(out(&eng), "7");
+        // Element 2's: nothing for `w`.
+        assert!(!edit(&mut eng, "q3", 9));
+        assert_eq!(out(&eng), "7");
+        // `q1` gone from the window (contributes nothing): element 1 is
+        // `q3`'s now. As a fresh engine has it.
+        edit(&mut eng, "q1", -1);
+        assert_eq!(out(&eng), "9");
+        let (fresh, _, _, fnodes) = build([-1, 7, 9]);
+        assert_eq!(out(&eng), fresh.values().render(fresh.output(fnodes["rw"]).unwrap()));
+    }
+}
