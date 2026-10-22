@@ -345,7 +345,7 @@ impl Run<'_, '_> {
         // whole and the own piece's other parts; a unit of the window
         // the page does not name changing (its items, its check) leaves
         // this finisher standing)
-        let (pids, units) = self.window_units(fin, pid)?;
+        let (pids, units, own_view) = self.window_units(fin, pid)?;
         let names_own = fin.spans.iter().any(|s| {
             matches!(s.src, Src::Piece { piece, .. } | Src::Held { piece, .. } if piece == pid)
         });
@@ -553,7 +553,14 @@ impl Run<'_, '_> {
         } else {
             std::mem::take(&mut fire.rest)
         };
-        let locals = list_of(v, a(5));
+        // (the own unit's other parts read as they are used: its locals
+        // always, its check only where the candidate is inside it)
+        let part = |r: &mut Self, k: u32| {
+            own_view
+                .and_then(|w| r.cx.get(w, phitex_defuse::Step::Index(k)))
+                .unwrap_or(ValueId::UNIT)
+        };
+        let locals = list_of(v, part(self, 5));
         let mut args = vec![
             pos.first().copied().unwrap_or(ValueId::UNIT),
             fire.data,
@@ -567,8 +574,9 @@ impl Run<'_, '_> {
             // (the names at the candidate, and whether the run could end
             // there)
             let defs_k;
-            (defs_k, cuttable) = super::piece::names_at(v, a(4), fire.k);
-            args.extend([v.list(rest.clone()), v.int(pid), v.int(i64::from(fire.k)), a(3), defs_k]);
+            (defs_k, cuttable) = super::piece::names_at(v, part(self, 4), fire.k);
+            let reads = part(self, 3);
+            args.extend([v.list(rest.clone()), v.int(pid), v.int(i64::from(fire.k)), reads, defs_k]);
         }
         args.extend(pos.get(arg::HINT..arg::PAGE).unwrap_or_default().iter().copied());
         args.resize(12, ValueId::UNIT);
@@ -592,15 +600,15 @@ impl Run<'_, '_> {
     /// piece `pid`) read through paths: every unit's piece (one read),
     /// then for each unit whose piece the page's spans name (or `pid`)
     /// its items, whole, with their markers resolved where the piece is,
-    /// and for `pid` the unit's other parts one by one (its last
-    /// candidate, its check, its locals, its cut) in the unit's shape
-    /// (the items left out). The finisher depends on those alone.
+    /// and for `pid` its last candidate (`[pid, last]` as the unit's
+    /// shape) and its view, through which the finisher reads its other
+    /// parts as it uses them. The finisher depends on those alone.
     #[allow(clippy::type_complexity)]
     pub(crate) fn window_units(
         &mut self,
         fin: &FinishIn,
         pid: i64,
-    ) -> R<(Vec<i64>, Vec<(i64, ValueId, Vec<ValueId>)>)> {
+    ) -> R<(Vec<i64>, Vec<(i64, ValueId, Vec<ValueId>)>, Option<phitex_defuse::View>)> {
         use phitex_defuse::Step;
         let v = self.v;
         if cfg!(feature = "observe") {
@@ -622,6 +630,7 @@ impl Run<'_, '_> {
             }
         }
         let mut units: Vec<(i64, ValueId, Vec<ValueId>)> = Vec::new();
+        let mut own = None;
         for (i, &p) in pids.iter().enumerate() {
             if !want.contains(&p) || units.iter().any(|u| u.0 == p) {
                 continue;
@@ -637,23 +646,17 @@ impl Run<'_, '_> {
                 None => Vec::new(),
             };
             self.resolve_params_of(p, &mut raw)?;
-            // (the own piece's parts but its items, as the unit has them)
+            // (the own piece's last candidate; its other parts read later)
             let shape = if p == pid {
-                let mut xs = Vec::with_capacity(7);
-                for k in 0..7u32 {
-                    xs.push(if k == 2 {
-                        ValueId::UNIT
-                    } else {
-                        self.cx.get(u, Step::Index(k)).unwrap_or(ValueId::UNIT)
-                    });
-                }
-                v.list(xs)
+                own = Some(u);
+                let last = self.cx.get(u, Step::Index(1)).unwrap_or(ValueId::UNIT);
+                v.list(vec![v.int(p), last])
             } else {
                 ValueId::UNIT
             };
             units.push((p, shape, raw));
         }
-        Ok((pids, units))
+        Ok((pids, units, own))
     }
 
     /// Where the next page begins, for the text after this finisher
