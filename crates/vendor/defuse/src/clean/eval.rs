@@ -1917,28 +1917,30 @@ impl Engine {
     fn flush_early(&mut self, s: &mut Sched, rep: &mut Report, hs: &mut Heights, all: bool) -> Result<bool, EvalError> {
         use std::ops::Bound::{Excluded, Included, Unbounded};
         let low = Field(ValueId::from_raw(0));
-        let mut fields = Vec::new();
+        // The first ready publisher's moves only, in unit and text order
+        // (ready: nothing before it in its unit in work, or `all`): its
+        // readers run before a later one's moves are taken. Moved together,
+        // two loop-backs read crosswise each move on the other's old value,
+        // and may swap two states for good.
         let mut u = self.early_pending.first().map(|x| x.0);
         while let Some(unit) = u {
-            let first = if all { None } else { self.w.work_of(unit).and_then(|m| m.at_or_above(&0)).map(|(&p, _)| p) };
-            let hi = match first {
-                Some(p) => Excluded((unit, p, low)),
-                None => Excluded((unit.saturating_add(1), 0, low)),
-            };
-            let ready: Vec<(u32, Pos, Field)> = self.early_pending.range((Included((unit, 0, low)), hi)).copied().collect();
-            for k in ready {
-                self.early_pending.remove(&k);
-                fields.push(k.2);
+            let Some(&(_, pos, _)) = self.early_pending.range((Included((unit, 0, low)), Unbounded)).next() else { break };
+            let ready = all || self.w.work_of(unit).and_then(|m| m.at_or_above(&0)).is_none_or(|(&p, _)| pos < p);
+            if ready {
+                let group: Vec<(u32, Pos, Field)> = self.early_pending.range((Included((unit, pos, low)), Excluded((unit, pos.saturating_add(1), low)))).copied().collect();
+                let mut fields = Vec::with_capacity(group.len());
+                for k in group {
+                    self.early_pending.remove(&k);
+                    fields.push(k.2);
+                }
+                fields.sort_by_key(|f| f.0.raw());
+                fields.dedup();
+                self.move_early(s, rep, hs, &fields)?;
+                return Ok(true);
             }
             u = self.early_pending.range((Excluded((unit, Pos::MAX, Field(ValueId::from_raw(u64::MAX)))), Unbounded)).next().map(|x| x.0);
         }
-        if fields.is_empty() {
-            return Ok(false);
-        }
-        fields.sort_by_key(|f| f.0.raw());
-        fields.dedup();
-        self.move_early(s, rep, hs, &fields)?;
-        Ok(true)
+        Ok(false)
     }
 
     /// The run audit's account of node `id`'s run (of `t`), which replaced
