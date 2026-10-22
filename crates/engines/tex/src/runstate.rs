@@ -1971,7 +1971,8 @@ impl State {
     /// definition, save or load of it), its entry encoded once.
     fn park_slot(&mut self, v: &Values, l: Loc) -> Option<PSlot> {
         let s = self.slot_ref(l)?;
-        if s.meta == 0 && s.save_gid == 0 && s.ginert == 0 && s.e.flags & LOADED == 0 {
+        // (a read's cache is none of a mark's: [`PSlot::is_read_cache`])
+        if s.meta == 0 && s.save_gid == 0 && s.ginert == 0 && s.e.flags & PRELOADED == 0 {
             return None;
         }
         let e = s.e;
@@ -2320,9 +2321,11 @@ impl PSlot {
     /// engine's value, which every run reaching here with the same reads
     /// has, loaded or not as its path went (a lookahead that fetched the
     /// next command's name before a mark, a memo kept over a park that
-    /// spared a lookup). Not part of the state a mark compares.
+    /// spared a lookup). Not part of the state a mark compares, nor of
+    /// a mark's table: a run resumed there reads it again. A value the
+    /// run preloaded (from its text: a candidate's bindings) is no read's.
     fn is_read_cache(&self) -> bool {
-        self.meta.is_none() && self.save_gid == 0 && self.ginert == 0
+        self.meta.is_none() && self.save_gid == 0 && self.ginert == 0 && self.e.flags & PRELOADED == 0
     }
 }
 

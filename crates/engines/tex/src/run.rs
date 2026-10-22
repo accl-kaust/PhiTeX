@@ -694,6 +694,13 @@ pub(crate) struct Run<'c, 'a> {
     /// The slots' digests as the run's last mark saw them
     /// ([`crate::runstate::MarkImage`]).
     pub(crate) mark_img: crate::runstate::MarkImage,
+    /// The groups open when the run took a mark before an `\inputlineno`
+    /// read ([`Run::mark_before_read`]): a mark is due at the first
+    /// boundary with fewer open.
+    pub(crate) watch_exit: Option<usize>,
+    /// The commands begun when a run resumed at such a mark begins that
+    /// command again: no mark taken before the read again there.
+    pub(crate) anchor_skip_at: Option<u64>,
     /// The marks of the run this one resumed from ([`Run::take_mark`]'s
     /// patched cutoff compares its marks with theirs).
     pub old_marks: Option<std::sync::Arc<KeptMarks>>,
@@ -984,6 +991,8 @@ impl<'c, 'a> Run<'c, 'a> {
             mark_snaps: Vec::new(),
             next_mark: 0,
             mark_img: crate::runstate::MarkImage::default(),
+            watch_exit: None,
+            anchor_skip_at: None,
             old_marks: None,
             marks_on: false,
             cut_off: false,
@@ -5373,6 +5382,9 @@ pub(crate) struct Parked {
     /// is the whole table.
     mark_gone: Vec<crate::runstate::PLoc>,
     mark_sum: Option<u64>,
+    /// A mark before an `\inputlineno` read ([`Run::mark_before_read`]):
+    /// the groups open there.
+    watch: Option<usize>,
     contribs: Vec<(Field, ValueId)>,
     kids: Vec<(OpId, Vec<ValueId>)>,
     effect: Effect,
@@ -5562,6 +5574,7 @@ impl Run<'_, '_> {
             st: self.st.park(self.v),
             mark_gone: Vec::new(),
             mark_sum: None,
+            watch: None,
             contribs: std::mem::take(&mut self.contribs),
             kids: std::mem::take(&mut self.kids),
             effect: self.effect,
@@ -5667,7 +5680,11 @@ impl Run<'_, '_> {
         if self.next_mark == 0 {
             self.next_mark = (at / every + 1) * every;
         }
-        if at < self.next_mark || self.mark.active {
+        // (the first boundary after the group a mark before an
+        // `\inputlineno` read was in closed, [`Run::mark_before_read`]: a
+        // mark there, where the line's number is gone with the group)
+        let forced = self.watch_exit.is_some_and(|w| self.group_count() < w);
+        if (at < self.next_mark && !forced) || self.mark.active {
             return Ok(());
         }
         // (not where siblings were pulled: their places are the text's
@@ -5691,7 +5708,9 @@ impl Run<'_, '_> {
         {
             return Ok(());
         }
-        self.next_mark = (at / every + 1) * every;
+        if at >= self.next_mark {
+            self.next_mark = (at / every + 1) * every;
+        }
         let tp = crate::prof::start();
         // (the table as changed since the last mark: none where it went
         // back since, the marks stop)
@@ -5704,6 +5723,17 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let p = self.snapshot_of(Some(delta));
+        if forced {
+            self.watch_exit = None;
+        }
+        self.commit_mark(p, tp)
+    }
+
+    /// A mark's snapshot `p` kept, its digest given to the engine
+    /// ([`phitex_defuse::Ctx::checkpoint`]); `Err` where the engine cuts
+    /// the run off there. `tp`: the mark's profile probe.
+    fn commit_mark(&mut self, p: Parked, tp: Option<std::time::Instant>) -> R<()> {
+        let v = self.v;
         let td = crate::prof::start();
         let h = parked_digest(&p);
         crate::prof::add(crate::prof::MARK_DIGEST, td);
@@ -5744,6 +5774,68 @@ impl Run<'_, '_> {
             return Err(Halt::Stop(s));
         }
         Ok(())
+    }
+
+    /// The groups of the run open now ([`Level::group`]).
+    fn group_count(&self) -> usize {
+        self.nest.iter().filter(|l| l.group != 0).count()
+    }
+
+    /// A mark at the start of the command in progress, before it reads
+    /// the lines before this node (`\inputlineno`, the `lines`
+    /// accumulator): where an edit moved the lines (a line inserted or
+    /// deleted before), the run resumes here, and with a mark at the
+    /// first boundary after the group open now closes ([`Run::take_mark`]),
+    /// where the number read is gone with it (`\@currenvline`), it is cut
+    /// off there; only the group's commands run again. Taken where the
+    /// command has changed nothing yet (its input as it found it, read
+    /// without putting it back, [`crate::input::Input::segs_at_command_start`]).
+    pub(crate) fn mark_before_read(&mut self) -> R<()> {
+        if !self.marks_on || self.cut_off || self.watch_exit.is_some() || !self.mark.active {
+            return Ok(());
+        }
+        let at = self.cmds_before + self.cmds;
+        if self.anchor_skip_at == Some(at)
+            || self.mutations() != self.mark.sig
+            || Some(self.effect) != self.mark.effect
+            || self.chars_live.is_some()
+            || !self.lig_buf.is_empty()
+            || self.interp.is_some()
+            || !self.pre_noted.is_empty()
+            || !self.pull_at.is_empty()
+        {
+            return Ok(());
+        }
+        let Some((segs, tys, text_at)) = self.input.segs_at_command_start(&self.mark.snap) else {
+            return Ok(());
+        };
+        let groups = self.group_count();
+        let tp = crate::prof::start();
+        let v = self.v;
+        let Some(delta) = self.st.mark_delta(v, &mut self.mark_img) else {
+            self.marks_on = false;
+            return Ok(());
+        };
+        let mut p = self.snapshot_of(Some(delta));
+        let text_at = text_at.min(self.input.text.len());
+        p.nlev = segs.len() + self.parked_levels.saturating_sub(text_at);
+        let mut segs = segs;
+        segs.extend(self.input.text[text_at..].iter().cloned());
+        p.segs = segs;
+        p.level_tys = tys;
+        p.text_at = text_at;
+        // (the command it is at begins again where it resumes)
+        p.at_cmds = at.saturating_sub(1);
+        p.astate = self.mark.astate;
+        p.aopen = self.mark.aopen;
+        p.radix = self.mark.radix;
+        if let Some(o) = self.mark.cur_order {
+            p.cur_order = o;
+        }
+        p.no_pull = self.mark.no_pull;
+        p.watch = Some(groups);
+        self.watch_exit = Some(groups);
+        self.commit_mark(p, tp)
     }
 
     /// (observe, `PHITEX_RESUME_VERIFY=1`) Whether this full run's state
@@ -5926,6 +6018,7 @@ impl Run<'_, '_> {
             st,
             mark_gone,
             mark_sum,
+            watch: None,
             contribs: self.contribs.clone(),
             kids: self.kids.clone(),
             effect: self.effect,
@@ -6348,6 +6441,8 @@ impl<'c, 'a> Run<'c, 'a> {
         r.cand_marks = p.cand_marks;
         r.ins_pending = p.ins_pending;
         r.fin = p.fin;
+        r.watch_exit = p.watch;
+        r.anchor_skip_at = p.watch.map(|_| p.at_cmds + 1);
         r.sealed = p.sealed;
         r.cmds_before = p.at_cmds;
         r.resumed = true;

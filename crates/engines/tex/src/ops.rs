@@ -151,12 +151,11 @@ pub(crate) fn run_node_parking(
             Some("exec") => cx.op() == o.exec,
             Some("finish") => cx.op() == o.finish,
             Some("all") => cx.op() == o.exec || cx.op() == o.finish,
-            // (`off`, or none given: measured on amsldoc, marks every 2000
-            // commands cost 3-6% of a cold build (their snapshots and the
-            // memory they keep) while no edit kind was cut off at one and
-            // the few resumed gained nothing at -j 8; `PHITEX_MARKS` (observe)
-            // takes them for exec runs, finishers or both)
-            _ => false,
+            Some("off") => false,
+            // (exec runs' by default: a mark holds the table's changes
+            // since the one before, its digest kept up to date by them,
+            // `crate::runstate::State::mark_delta`)
+            _ => cx.op() == o.exec,
         };
     let resumed_at = if marks_ok { cx.resumed() } else { None };
     // (observe, `PHITEX_RETEXT_POTENTIAL=1`: a node run again with another
