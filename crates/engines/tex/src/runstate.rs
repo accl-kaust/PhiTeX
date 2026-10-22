@@ -117,6 +117,9 @@ struct Slot {
     /// Its definition record, plus one (0: never defined).
     meta: u32,
     touched: bool,
+    /// Changed (or looked at mutably) since the run's last mark, while
+    /// marks are kept ([`State::track`]): in [`State::mdirty`].
+    mdirty: bool,
     field: Option<Field>,
 }
 
@@ -129,6 +132,7 @@ impl Default for Slot {
             ginert: 0,
             meta: 0,
             touched: false,
+            mdirty: false,
             field: None,
         }
     }
@@ -252,6 +256,14 @@ pub(crate) struct State {
     /// The table as it stood at [`State::checkpoint`], kept as it
     /// changes: [`State::rollback`] puts it back.
     undo: Option<Box<Undo>>,
+    /// The run keeps marks: each slot changed since the last is noted
+    /// ([`State::mdirty`], [`State::mark_delta`]).
+    pub(crate) track: bool,
+    /// The slots changed since the last mark, while [`State::track`].
+    mdirty: Vec<Loc>,
+    /// A rollback since marks began: the marks' deltas no longer add up
+    /// to the table ([`State::rollback`]).
+    mbroken: bool,
 }
 
 /// What [`State::rollback`] puts back: each slot and metas entry as it
@@ -358,6 +370,9 @@ impl Clone for State {
             muts: self.muts,
             cands: self.cands.clone(),
             undo: None,
+            track: false,
+            mdirty: Vec::new(),
+            mbroken: false,
         }
     }
 }
@@ -460,6 +475,9 @@ impl State {
             muts: 0,
             cands: Vec::new(),
             undo: None,
+            track: false,
+            mdirty: Vec::new(),
+            mbroken: false,
         }
     }
 
@@ -504,6 +522,9 @@ impl State {
 
     /// The table as it stood at the [`State::checkpoint`].
     pub(crate) fn rollback(&mut self) {
+        if self.track {
+            self.mbroken = true;
+        }
         let Some(u) = self.undo.take() else {
             return;
         };
@@ -572,12 +593,39 @@ impl State {
         u.slots.push((loc, old.unwrap_or_default()));
     }
 
+    /// Notes slot `loc` as changed since the last mark ([`State::track`]),
+    /// once. The slot need not exist yet ([`State::slot`] makes it).
+    #[inline]
+    fn note_mark_change(&mut self, loc: Loc) {
+        let s = if loc & SPILL == 0 {
+            let i = loc as usize;
+            if i >= self.eq.len() {
+                self.eq.resize_with(i + 1 + 1024, Slot::default);
+            }
+            &mut self.eq[i]
+        } else {
+            let i = (loc & !SPILL) as usize;
+            if i >= self.spill.len() {
+                self.spill.resize_with(i + 1, Slot::default);
+            }
+            &mut self.spill[i]
+        };
+        if !s.mdirty {
+            s.mdirty = true;
+            self.mdirty.push(loc);
+        }
+    }
+
     /// Metas entry `mi`, to change, noted first while a checkpoint
     /// stands.
     #[inline]
     fn meta_mut(&mut self, mi: usize) -> &mut Meta {
         if self.undo.is_some() {
             self.log_meta(mi);
+        }
+        if self.track {
+            let loc = self.metas[mi].loc;
+            self.note_mark_change(loc);
         }
         &mut self.metas[mi]
     }
@@ -665,6 +713,9 @@ impl State {
     fn slot(&mut self, loc: Loc) -> &mut Slot {
         if self.undo.is_some() {
             self.log_slot(loc);
+        }
+        if self.track {
+            self.note_mark_change(loc);
         }
         let s = if loc & SPILL == 0 {
             let i = loc as usize;
@@ -894,6 +945,9 @@ impl State {
     fn entry_mut(&mut self, loc: Loc) -> &mut Entry {
         if self.undo.is_some() {
             self.log_slot(loc);
+        }
+        if self.track {
+            self.note_mark_change(loc);
         }
         let s = if loc & SPILL == 0 {
             &mut self.eq[loc as usize]
@@ -1911,6 +1965,220 @@ impl State {
         }
     }
 
+    /// One slot as [`State::park`] parks it (`None`: left out, no
+    /// definition, save or load of it), its entry encoded once.
+    fn park_slot(&mut self, v: &Values, l: Loc) -> Option<PSlot> {
+        let s = self.slot_ref(l)?;
+        if s.meta == 0 && s.save_gid == 0 && s.ginert == 0 && s.e.flags & LOADED == 0 {
+            return None;
+        }
+        let e = s.e;
+        let e = if e.flags & HAS_ID == 0 && e.kind != K_RAW {
+            let id = self.encode(&e, v);
+            let sl = if l & SPILL == 0 {
+                &mut self.eq[l as usize]
+            } else {
+                &mut self.spill[(l & !SPILL) as usize]
+            };
+            sl.e.id = id;
+            sl.e.flags |= HAS_ID;
+            sl.e
+        } else {
+            e
+        };
+        let s = self.slot_ref(l)?;
+        let meta = if s.meta != 0 {
+            let mi = s.meta as usize - 1;
+            let publ = match self.metas[mi].publ {
+                Some((x, lc)) => Some((self.encode(&x, v), lc)),
+                None => None,
+            };
+            let m = &self.metas[mi];
+            Some(PMeta {
+                eng: m.eng,
+                publ,
+                ldef_stamp: m.ldef_stamp,
+                ldef_local: m.ldef_local,
+                ldef_gid: m.ldef_gid,
+            })
+        } else {
+            None
+        };
+        Some(PSlot {
+            loc: self.ploc(l),
+            e: PEntry {
+                id: e.id,
+                flags: (e.flags | HAS_ID) & !CC,
+            },
+            save_gid: s.save_gid,
+            save_stamp: s.save_stamp,
+            ginert: s.ginert,
+            meta,
+        })
+    }
+
+    /// A location as parked ([`PLoc`]).
+    fn ploc(&self, l: Loc) -> PLoc {
+        if l & SPILL == 0 {
+            PLoc::Fixed(l)
+        } else {
+            PLoc::Spill(self.field(l).unwrap_or(Field(ValueId::UNIT)))
+        }
+    }
+
+    /// A mark's table: what changed since the run's last mark
+    /// ([`State::track`]), the table's whole state but its slots, and the
+    /// slots' digest kept up to date in `img` ([`MarkImage`]): the slots
+    /// changed since, parked again, the rest as before. The first mark
+    /// of a run (an `img` not begun) parks every slot. `None` where the
+    /// table went back since (a rollback): the deltas no longer add up.
+    pub(crate) fn mark_delta(&mut self, v: &Values, img: &mut MarkImage) -> Option<MarkDelta> {
+        if self.mbroken
+            || self.touched.len() < img.touched
+            || self.metas.len() < img.metas
+        {
+            return None;
+        }
+        let first = !img.begun;
+        let changed: Vec<Loc> = if first {
+            img.begun = true;
+            self.track = true;
+            for &l in &self.mdirty {
+                if let Some(sl) = self.slot_mut_raw(l) {
+                    sl.mdirty = false;
+                }
+            }
+            self.mdirty.clear();
+            self.touched.clone()
+        } else {
+            let ls = std::mem::take(&mut self.mdirty);
+            for &l in &ls {
+                if let Some(sl) = self.slot_mut_raw(l) {
+                    sl.mdirty = false;
+                }
+            }
+            ls
+        };
+        let mut slots = Vec::new();
+        let mut gone = Vec::new();
+        for l in changed {
+            let ps = self.park_slot(v, l);
+            let h = ps
+                .as_ref()
+                .filter(|p| !p.is_read_cache())
+                .map_or(0, PState::slot_hash);
+            let old = match ps {
+                Some(p) => {
+                    slots.push(p);
+                    img.hashes.insert(l, h)
+                }
+                None => {
+                    if img.hashes.contains_key(&l) {
+                        gone.push(self.ploc(l));
+                    }
+                    img.hashes.remove(&l)
+                }
+            };
+            img.sum = img.sum.wrapping_sub(old.unwrap_or(0)).wrapping_add(h);
+        }
+        let touched: Vec<PLoc> = self.touched[img.touched..].iter().map(|&l| self.ploc(l)).collect();
+        let meta_order: Vec<PLoc> = self.metas[img.metas..].iter().map(|m| self.ploc(m.loc)).collect();
+        img.touched = self.touched.len();
+        img.metas = self.metas.len();
+        let rest = self.park_rest(v);
+        Some(MarkDelta {
+            st: PState {
+                slots,
+                touched,
+                meta_order,
+                ..rest
+            },
+            gone,
+            sum: img.sum,
+        })
+    }
+
+    /// A slot to change, as it is (no change noted).
+    fn slot_mut_raw(&mut self, l: Loc) -> Option<&mut Slot> {
+        if l & SPILL == 0 {
+            self.eq.get_mut(l as usize)
+        } else {
+            self.spill.get_mut((l & !SPILL) as usize)
+        }
+    }
+
+    /// [`State::park`]'s state but the slots, the touched list and the
+    /// metas' order.
+    fn park_rest(&mut self, v: &Values) -> PState {
+        let pent = |st: &State, e: &Entry| -> PEntry {
+            let id = if e.flags & HAS_ID != 0 { e.id } else { st.encode(e, v) };
+            PEntry {
+                id,
+                flags: (e.flags | HAS_ID) & !CC,
+            }
+        };
+        let save = self
+            .save
+            .iter()
+            .map(|s| PSaved {
+                loc: self.ploc(s.loc),
+                prev: pent(self, &s.prev),
+                gid: s.gid,
+                stamp: s.stamp,
+                at: s.at,
+                ldef: s.ldef,
+            })
+            .collect();
+        let defined = self.defined.iter().map(|&l| self.ploc(l)).collect();
+        let base_defs = self.base_defs.iter().map(|&l| self.ploc(l)).collect();
+        let kinds = self
+            .kinds
+            .as_ref()
+            .map(|k| k.iter().map(|(&l, &a)| (self.ploc(l), a)).collect());
+        let cont_locs = self.cont_locs.iter().map(|&l| self.ploc(l)).collect();
+        let cands = self
+            .cands
+            .iter()
+            .map(|(st, xs)| (*st, xs.iter().map(|(l, e)| (self.ploc(*l), pent(self, e))).collect()))
+            .collect();
+        PState {
+            cands,
+            cont_locs,
+            touched: Vec::new(),
+            meta_order: Vec::new(),
+            slots: Vec::new(),
+            save,
+            defined,
+            base_defs,
+            pp_dirty: self.pp_dirty,
+            kinds,
+            stamp: self.stamp,
+            next_gid: self.next_gid,
+        }
+    }
+
+    /// The table a run resumed at a mark goes on from, its marks' image
+    /// begun from it ([`MarkImage`]): each slot's digest, and changes noted
+    /// from here.
+    pub(crate) fn begin_marks_from(&mut self, v: &Values, img: &mut MarkImage, touched: usize) {
+        *img = MarkImage::default();
+        img.begun = true;
+        for i in 0..self.touched.len() {
+            let l = self.touched[i];
+            if let Some(p) = self.park_slot(v, l) {
+                let h = if p.is_read_cache() { 0 } else { PState::slot_hash(&p) };
+                img.hashes.insert(l, h);
+                img.sum = img.sum.wrapping_add(h);
+            }
+        }
+        // (the touched list as the marks' tables hold it: locations its
+        // resumption touched since come with the next mark's)
+        img.touched = touched.min(self.touched.len());
+        img.metas = self.metas.len();
+        self.track = true;
+        self.mdirty.clear();
+    }
+
     /// The table of a parked run ([`State::park`]).
     pub(crate) fn unpark(p: PState) -> State {
         let mut st = State::new();
@@ -2013,7 +2281,7 @@ impl State {
 /// A location of a parked table: a fixed one or a meaning's (stable for
 /// the process), or a spill one by its field.
 #[derive(Clone)]
-enum PLoc {
+pub(crate) enum PLoc {
     Fixed(Loc),
     Spill(Field),
 }
@@ -2065,6 +2333,80 @@ struct PSaved {
     stamp: u64,
     at: u64,
     ldef: Ldef,
+}
+
+/// The slots' digests as a run's last mark saw them ([`State::mark_delta`]):
+/// by location, and their sum (read caches counted 0,
+/// [`PSlot::is_read_cache`]); with the touched list's and the metas'
+/// lengths then.
+#[derive(Default)]
+pub(crate) struct MarkImage {
+    begun: bool,
+    hashes: FxHashMap<Loc, u64>,
+    sum: u64,
+    touched: usize,
+    metas: usize,
+}
+
+/// A mark's table ([`State::mark_delta`]): the slots changed since the
+/// mark before (all, at a run's first), those gone since, the locations
+/// touched and the metas made since, and the rest of the table whole;
+/// with the slots' digest.
+#[derive(Clone)]
+pub(crate) struct MarkDelta {
+    pub(crate) st: PState,
+    pub(crate) gone: Vec<PLoc>,
+    pub(crate) sum: u64,
+}
+
+impl PState {
+    /// The number of locations its run had touched.
+    pub(crate) fn touched_len(&self) -> usize {
+        self.touched.len()
+    }
+}
+
+impl MarkDelta {
+    /// The table at the last of `ds`, a run's marks from its first (each
+    /// its table and the slots gone since the one before): their slots
+    /// folded in order.
+    pub(crate) fn fold(ds: &[(&PState, &[PLoc])]) -> PState {
+        let mut map: FxHashMap<u64, PSlot> = FxHashMap::default();
+        let mut touched = Vec::new();
+        let mut meta_order = Vec::new();
+        for (st, gone) in ds {
+            for s in &st.slots {
+                map.insert(s.loc.word(), s.clone());
+            }
+            for g in *gone {
+                map.remove(&g.word());
+            }
+            touched.extend(st.touched.iter().cloned());
+            meta_order.extend(st.meta_order.iter().cloned());
+        }
+        let slots = touched.iter().filter_map(|l: &PLoc| map.remove(&l.word())).collect();
+        let last = ds.last().map(|(st, _)| (*st).clone());
+        let rest = last.unwrap_or_else(|| PState {
+            cands: Vec::new(),
+            cont_locs: Vec::new(),
+            touched: Vec::new(),
+            meta_order: Vec::new(),
+            slots: Vec::new(),
+            save: Vec::new(),
+            defined: Vec::new(),
+            base_defs: Vec::new(),
+            pp_dirty: false,
+            kinds: None,
+            stamp: 0,
+            next_gid: 0,
+        });
+        PState {
+            slots,
+            touched,
+            meta_order,
+            ..rest
+        }
+    }
 }
 
 /// A run's table, parked ([`State::park`]).

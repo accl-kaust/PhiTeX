@@ -691,6 +691,9 @@ pub(crate) struct Run<'c, 'a> {
     /// attempt or mark it began at, takes its marks at the same places in
     /// its text (0: the first, not set yet).
     pub next_mark: u64,
+    /// The slots' digests as the run's last mark saw them
+    /// ([`crate::runstate::MarkImage`]).
+    pub(crate) mark_img: crate::runstate::MarkImage,
     /// The marks of the run this one resumed from ([`Run::take_mark`]'s
     /// patched cutoff compares its marks with theirs).
     pub old_marks: Option<std::sync::Arc<KeptMarks>>,
@@ -972,6 +975,7 @@ impl<'c, 'a> Run<'c, 'a> {
             resumed: false,
             mark_snaps: Vec::new(),
             next_mark: 0,
+            mark_img: crate::runstate::MarkImage::default(),
             old_marks: None,
             marks_on: false,
             cut_off: false,
@@ -5341,6 +5345,12 @@ pub(crate) struct Parked {
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
+    /// A mark's ([`Run::take_mark`]): `st` holds the slots changed since
+    /// the mark before only, these the slots gone since, and this the
+    /// slots' digest ([`crate::runstate::State::mark_delta`]); `None`: `st`
+    /// is the whole table.
+    mark_gone: Vec<crate::runstate::PLoc>,
+    mark_sum: Option<u64>,
     contribs: Vec<(Field, ValueId)>,
     kids: Vec<(OpId, Vec<ValueId>)>,
     effect: Effect,
@@ -5376,6 +5386,11 @@ pub(crate) struct Parked {
 }
 
 impl Parked {
+    /// Its table.
+    pub(crate) fn table(&self) -> &crate::runstate::PState {
+        &self.st
+    }
+
     /// The commands its run began before it.
     pub(crate) fn at_cmds(&self) -> u64 {
         self.at_cmds
@@ -5522,6 +5537,8 @@ impl Run<'_, '_> {
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
+            mark_gone: Vec::new(),
+            mark_sum: None,
             contribs: std::mem::take(&mut self.contribs),
             kids: std::mem::take(&mut self.kids),
             effect: self.effect,
@@ -5644,7 +5661,17 @@ impl Run<'_, '_> {
         }
         self.next_mark = (at / every + 1) * every;
         let tp = crate::prof::start();
-        let p = self.snapshot();
+        // (the table as changed since the last mark: none where it went
+        // back since, the marks stop)
+        let tm = crate::prof::start();
+        let v = self.v;
+        let delta = self.st.mark_delta(v, &mut self.mark_img);
+        crate::prof::add(crate::prof::MARK_STATE, tm);
+        let Some(delta) = delta else {
+            self.marks_on = false;
+            return Ok(());
+        };
+        let p = self.snapshot_of(Some(delta));
         let td = crate::prof::start();
         let h = parked_digest(&p);
         crate::prof::add(crate::prof::MARK_DIGEST, td);
@@ -5652,6 +5679,22 @@ impl Run<'_, '_> {
         let tp = crate::prof::start();
         let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
         self.mark_snaps.push((std::sync::Arc::new(p), h));
+        // (observe, `PHITEX_MARK_TABLE_CHECK=1`: the marks' tables folded
+        // against the table parked whole, and the digest kept up to date
+        // against the one made again)
+        if crate::exec::obs_flag!("PHITEX_MARK_TABLE_CHECK") {
+            let folded = mark_table(&self.mark_snaps, k as usize);
+            let whole = self.st.park(v);
+            let (a, b) = (folded.table(), &whole);
+            let ok_sum = a.slot_sum() == b.slot_sum();
+            let ok_touched = a.touched_len() == b.touched_len();
+            let ok_rest = a.rest_hash() == b.rest_hash();
+            let ok_inc = self.mark_snaps[k as usize].0.mark_sum == Some(b.slot_sum());
+            eprintln!(
+                "mark-table-check: node {} mark {k}: folded slots {ok_sum}, touched {ok_touched}, rest {ok_rest}, digest kept {ok_inc}",
+                self.cx.node().raw()
+            );
+        }
         let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
         let r = self.cx.checkpoint(k, state);
         crate::prof::add(crate::prof::MARK_CK, tp);
@@ -5709,6 +5752,12 @@ impl Run<'_, '_> {
     /// copied: the run goes on.
     #[allow(clippy::too_many_lines, reason = "one state field a line")]
     pub(crate) fn snapshot(&mut self) -> Parked {
+        self.snapshot_of(None)
+    }
+
+    /// [`Run::snapshot`] with the table as `delta` holds it (a mark's,
+    /// [`crate::runstate::State::mark_delta`]), else parked whole.
+    pub(crate) fn snapshot_of(&mut self, delta: Option<crate::runstate::MarkDelta>) -> Parked {
         let v = self.v;
         let ti = crate::prof::start();
         let mut segs = Vec::new();
@@ -5799,7 +5848,10 @@ impl Run<'_, '_> {
             .collect();
         let level_tys = self.input.levels.iter().rev().map(|l| l.ty).collect();
         let ts = crate::prof::start();
-        let st = self.st.park(v);
+        let (st, mark_gone, mark_sum) = match delta {
+            Some(d) => (d.st, d.gone, Some(d.sum)),
+            None => (self.st.park(v), Vec::new(), None),
+        };
         crate::prof::add(crate::prof::MARK_STATE, ts);
         Parked {
             epoch: self.cx.values_epoch(),
@@ -5835,6 +5887,8 @@ impl Run<'_, '_> {
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st,
+            mark_gone,
+            mark_sum,
             contribs: self.contribs.clone(),
             kids: self.kids.clone(),
             effect: self.effect,
@@ -5922,7 +5976,7 @@ fn mark_why(node: u64, k: usize, old: &Parked, new: &Parked) {
 /// contributions and children so far: kept in the run until then, the
 /// engine's own comparison does not see them).
 fn parked_digest(p: &Parked) -> u64 {
-    parked_digest_with(parked_rest(p), p.st.slot_sum())
+    parked_digest_with(parked_rest(p), p.mark_sum.unwrap_or_else(|| p.st.slot_sum()))
 }
 
 /// [`parked_digest`] from its two parts: the state but the table's slots
@@ -5936,6 +5990,21 @@ fn sorted_lazy(m: &phitex_defuse::FxHashMap<Field, ValueId>) -> Vec<(Field, Valu
     let mut xs: Vec<(Field, ValueId)> = m.iter().map(|(&f, &x)| (f, x)).collect();
     xs.sort_by_key(|x| x.0.0.raw());
     xs
+}
+
+/// The whole table at `snaps[k]`, a run's marks from its first: a mark
+/// holds its changes since the one before only
+/// ([`crate::runstate::MarkDelta`]); `snaps[k]` itself where it is whole.
+pub(crate) fn mark_table(snaps: &[(std::sync::Arc<Parked>, u64)], k: usize) -> Parked {
+    let mut p = (*snaps[k].0).clone();
+    if p.mark_sum.is_some() {
+        let parts: Vec<(&crate::runstate::PState, &[crate::runstate::PLoc])> =
+            snaps[..=k].iter().map(|(x, _)| (&x.st, x.mark_gone.as_slice())).collect();
+        p.st = crate::runstate::MarkDelta::fold(&parts);
+        p.mark_gone = Vec::new();
+        p.mark_sum = None;
+    }
+    p
 }
 
 /// A run's memo by field, in the fields' order: the same for equal memos

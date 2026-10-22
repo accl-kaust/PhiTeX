@@ -168,19 +168,26 @@ pub(crate) fn run_node_parking(
     let mut r = if let Some((tok, k)) = resumed_at {
         match tok.downcast::<crate::run::KeptMarks>() {
             Ok(km) if (k as usize) < km.snaps.len() && crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") => {
-                let (p, h) = km.snaps[k as usize].clone();
+                let h = km.snaps[k as usize].1;
+                let p = std::sync::Arc::new(crate::run::mark_table(&km.snaps, k as usize));
                 cx.restart();
                 let mut r = Run::new(cx, o);
                 r.verify_at = Some((k, p, h, km.args.clone()));
                 r
             }
             Ok(km) if (k as usize) < km.snaps.len() => {
-                let (p, h) = km.snaps[k as usize].clone();
+                let h = km.snaps[k as usize].1;
                 let tr = crate::prof::start();
-                let from = Run::from_parked(cx, o, (*p).clone());
+                // (the mark's table whole: its marks hold their changes)
+                let p = crate::run::mark_table(&km.snaps, k as usize);
+                let base = p.table().touched_len();
+                let from = Run::from_parked(cx, o, p);
                 crate::prof::add(crate::prof::RESUME, tr);
                 match from {
                     Ok(mut r) => {
+                        // (the marks after it note changes from its table)
+                        let v = r.v;
+                        r.st.begin_marks_from(v, &mut r.mark_img, base);
                         r.mark_snaps = km.snaps[..=k as usize].to_vec();
                         r.old_marks = Some(km.clone());
                         // (the mark again: the engine keeps the marks
