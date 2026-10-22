@@ -72,6 +72,23 @@ fn neg_glue(g: &Glue) -> Glue {
     }
 }
 
+/// The `chr` a number scan's first token is given where it is a macro
+/// whose body is a number ([`Run::num_reads`]): its command is `\relax`'s,
+/// and only [`Run::scan_int_num`] and `\numexpr`'s first factor look
+/// at it.
+pub(crate) const NUM_CHR: i32 = i32::MIN + 7;
+
+/// An `\ifnum` operand ([`Run::scan_int_num`]): a number, or a macro's
+/// number not read (the macro's token, whether negated), which the
+/// comparison reads as its outcome alone (`Run::num_order`): only a
+/// page whose test's outcome changes runs again when the macro's number
+/// changes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Num {
+    Int(i32),
+    Macro(Tok, bool),
+}
+
 impl Run<'_, '_> {
     /// §406: the next non-blank non-call token.
     pub(crate) fn skip_blanks_x(&mut self) -> R<()> {
@@ -170,8 +187,73 @@ impl Run<'_, '_> {
     /// `scan_int` (§440).
     pub(crate) fn scan_int(&mut self) -> R<i32> {
         self.radix = 0;
-        let mut ok_so_far = true;
         let negative = self.skip_signs()?;
+        self.scan_int_from(negative)
+    }
+
+    /// `scan_int` (§440) for an `\ifnum` operand ([`Num`]): a number
+    /// that is a macro's whole body, the macro not this run's own, is kept
+    /// as that macro (its meaning not read), directly or as all of an
+    /// `\numexpr`; any other number as it is.
+    pub(crate) fn scan_int_num(&mut self) -> R<Num> {
+        self.radix = 0;
+        self.num_reads = true;
+        let negative = self.skip_signs();
+        self.num_reads = false;
+        let negative = negative?;
+        if self.cur.cmd == cmd::RELAX && self.cur.chr == NUM_CHR {
+            let tok = self.cur.tok;
+            // (the macro's digits read, the scan reads on, §444: a digit
+            // after them goes on with the number, an optional space ends
+            // it)
+            self.radix = 10;
+            self.get_x_token();
+            self.ck()?;
+            let (cat, c) = (self.cur.tok.cat(), self.cur.tok.chr());
+            if !self.cur.is_cs() && cat == Some(12) && (48..=57).contains(&c) {
+                // (the number goes on: its digits as the macro's body
+                // gives them, then the scan as TeX's)
+                self.back_cur();
+                let n = self.num_value(tok)?;
+                let digits: Vec<Tok> = n
+                    .to_string()
+                    .bytes()
+                    .map(|d| Tok::ch(12, u32::from(d)))
+                    .collect();
+                self.push_toks(digits);
+                self.get_x_token();
+                self.ck()?;
+                return Ok(Num::Int(self.scan_int_from(negative)?));
+            }
+            if self.cur.cmd != cmd::SPACER {
+                self.back_cur();
+            }
+            return Ok(Num::Macro(tok, negative));
+        }
+        if self.cur.cmd == cmd::LAST_ITEM && self.cur.chr == crate::etex::li::NUM_EXPR {
+            let n = crate::etex::scan_numexpr_num(self)?;
+            return Ok(match n {
+                Num::Int(x) => Num::Int(if negative { -x } else { x }),
+                Num::Macro(t, neg) => Num::Macro(t, neg != negative),
+            });
+        }
+        Ok(Num::Int(self.scan_int_from(negative)?))
+    }
+
+    /// The value of `n`, reading its macro's number where it is one.
+    pub(crate) fn num_int(&mut self, n: Num) -> R<i32> {
+        Ok(match n {
+            Num::Int(x) => x,
+            Num::Macro(t, neg) => {
+                let x = self.num_value(t)?;
+                if neg { -x } else { x }
+            }
+        })
+    }
+
+    /// `scan_int` (§440) from its first token after the signs.
+    fn scan_int_from(&mut self, negative: bool) -> R<i32> {
+        let mut ok_so_far = true;
         let mut val: i32;
         if self.is_other(b'`') {
             // §442

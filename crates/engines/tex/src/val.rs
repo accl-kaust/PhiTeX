@@ -1033,6 +1033,35 @@ pub(crate) fn step_projection(x: ValueId, v: &Values) -> ValueId {
     v.int(c)
 }
 
+/// The number a meaning gives a number scan (§440, §444): a macro
+/// without parameters, not `\outer`, whose body is decimal digits
+/// (category 12) making a number TeX takes without error, gives that
+/// number; anything else -1. A pure projection for the engine: a
+/// comparison of such a macro's number reads the comparison's outcome
+/// through it (`Step::Cmp`, [`crate::run::Run::num_order`]), so a
+/// redefinition that keeps the outcome leaves the reading run standing.
+pub(crate) fn num_projection(x: ValueId, v: &Values) -> ValueId {
+    let n = match Mean::decode(v, Some(x)) {
+        Mean::Macro(m) if m.params.is_empty() && m.flags & 2 == 0 && !m.body.is_empty() => {
+            let mut n: i64 = 0;
+            for t in m.body.iter() {
+                if t.is_cs_or_active() || t.cat() != Some(12) || !(48..=57).contains(&t.chr()) {
+                    n = -1;
+                    break;
+                }
+                n = n * 10 + i64::from(t.chr() - 48);
+                if n > i64::from(i32::MAX) {
+                    n = -1;
+                    break;
+                }
+            }
+            n
+        }
+        _ => -1,
+    };
+    v.int(n)
+}
+
 /// Whether a meaning is defined, as `\csname` needs it (§372): a name
 /// it makes that is undefined becomes `\relax`; nothing else of the
 /// meaning is used there. A pure projection for the engine: a

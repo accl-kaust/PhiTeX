@@ -233,6 +233,10 @@ pub(crate) struct Ops {
     /// ([`crate::val::tail_projection`]): a reader of its kind reads that,
     /// not the item ([`Run::list_last_kind`]).
     pub tail_proj: phitex_defuse::ProjId,
+    /// The number projection of meanings ([`crate::val::num_projection`]):
+    /// `\ifnum` comparing a macro's number reads the comparison's outcome
+    /// ([`Run::num_order`]).
+    pub num_proj: phitex_defuse::ProjId,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -604,6 +608,14 @@ pub(crate) struct Run<'c, 'a> {
     /// The meanings this run read as defined or not only
     /// ([`Run::defined_lookup`]; kept over a park like [`Run::class_memo`]).
     pub defined_memo: phitex_defuse::FxHashMap<Loc, bool>,
+    /// Set while a number scan of an `\ifnum` operand looks for its first
+    /// token (§440): a macro not this run's own whose body is a number
+    /// is not read, the scan keeps it as that macro's number
+    /// ([`Run::num_lookup`], [`crate::scan::Num`]).
+    pub num_reads: bool,
+    /// The meanings this run found to be numbers, read through the
+    /// number projection's test only ([`Run::num_lookup`]).
+    pub num_memo: phitex_defuse::FxHashMap<Loc, bool>,
     pub contribs: Vec<(Field, ValueId)>,
     /// Set while `\advance` defines its register ([`State::note_kind`]).
     pub in_advance: bool,
@@ -890,6 +902,8 @@ impl<'c, 'a> Run<'c, 'a> {
             outer_memo: phitex_defuse::FxHashMap::default(),
             step_memo: phitex_defuse::FxHashMap::default(),
             defined_memo: phitex_defuse::FxHashMap::default(),
+            num_reads: false,
+            num_memo: phitex_defuse::FxHashMap::default(),
             contribs: Vec::new(),
             in_advance: false,
             kids: Vec::new(),
@@ -3870,6 +3884,22 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
+        // (the first token of an `\ifnum` operand's number scan: a
+        // macro whose body is a number, kept as that macro's number, its
+        // meaning not read, [`crate::scan::Num`])
+        if self.num_reads
+            && self.interp.is_none()
+            && !self.rec_load
+            && !tok.is_internal_cs()
+            && self.num_lookup(tok)?
+        {
+            self.cur = Cur {
+                tok,
+                cmd: cmd::RELAX,
+                chr: crate::scan::NUM_CHR,
+            };
+            return Ok(());
+        }
         if self.class_reads
             && let Some(c) = self.class_lookup(tok)?
         {
@@ -3937,6 +3967,63 @@ impl<'c, 'a> Run<'c, 'a> {
         let k = int_of(self.v, x);
         self.step_memo.insert(l, k);
         Ok(Some(k))
+    }
+
+    /// Whether `tok`'s meaning is a macro whose body is a number
+    /// ([`crate::val::num_projection`]), where the run has not bound it
+    /// itself: read as that test alone (the number against -1), so the
+    /// reading run depends on the number only where it compares it
+    /// ([`Run::num_order`]) or uses it ([`Run::num_value`]).
+    #[inline(never)]
+    fn num_lookup(&mut self, tok: Tok) -> R<bool> {
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(false);
+        };
+        if self.st.is_loaded(l) {
+            return Ok(false);
+        }
+        if let Some(&b) = self.num_memo.get(&l) {
+            return Ok(b);
+        }
+        let f = self.loc_field(l);
+        let v = self.v;
+        let p = self.cx.path(&[
+            phitex_defuse::Step::Proj(self.ops.num_proj),
+            phitex_defuse::Step::Cmp(v.int(-1)),
+        ]);
+        let b = self.cx.use_field_path(f, p)?.is_some_and(|x| int_of(v, x) > 0);
+        self.num_memo.insert(l, b);
+        Ok(b)
+    }
+
+    /// The order of the number of `tok`'s meaning (a macro
+    /// [`Run::num_lookup`] found to be a number) against `k`: -1, 0 or 1,
+    /// read as that alone.
+    pub(crate) fn num_order(&mut self, tok: Tok, k: i64) -> R<i64> {
+        let v = self.v;
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(0);
+        };
+        let f = self.loc_field(l);
+        let p = self.cx.path(&[
+            phitex_defuse::Step::Proj(self.ops.num_proj),
+            phitex_defuse::Step::Cmp(v.int(k)),
+        ]);
+        Ok(self.cx.use_field_path(f, p)?.map_or(0, |x| int_of(v, x)))
+    }
+
+    /// The number of `tok`'s meaning (a macro [`Run::num_lookup`] found
+    /// to be a number), read as that number.
+    pub(crate) fn num_value(&mut self, tok: Tok) -> R<i32> {
+        let v = self.v;
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(0);
+        };
+        let f = self.loc_field(l);
+        Ok(self
+            .cx
+            .use_field_proj(f, self.ops.num_proj)?
+            .map_or(0, |x| i32::try_from(int_of(v, x)).unwrap_or(0)))
     }
 
     /// Whether `tok`'s meaning is defined, read through the engine's
