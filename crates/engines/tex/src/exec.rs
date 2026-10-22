@@ -1086,7 +1086,8 @@ impl NodeTimer {
             }
             (o, clock().now(), kind)
         });
-        let trace = prof_flag!("PHITEX_TEX_TIME").then(|| (std::time::Instant::now(), op, node));
+        let trace = (prof_flag!("PHITEX_TEX_TIME") || prof_flag!("PHITEX_RUN_TIMES"))
+            .then(|| (std::time::Instant::now(), op, node));
         NodeTimer { trace, ops }
     }
 }
@@ -1106,10 +1107,22 @@ impl Drop for NodeTimer {
             }
         }
         if let Some((t, op, node)) = self.trace {
-            later(format!(
-                "nodetime: {op} {node} {:.3}",
-                t.elapsed().as_secs_f64() * 1e3
-            ));
+            // (`PHITEX_RUN_TIMES=1`, profile: each run's start and end in
+            // ms since the process's first run, for a timeline of an edit)
+            if prof_flag!("PHITEX_RUN_TIMES") {
+                static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+                let z = *T0.get_or_init(|| t);
+                eprintln!(
+                    "runtime: {op} {node} {:.3} {:.3}",
+                    t.saturating_duration_since(z).as_secs_f64() * 1e3,
+                    z.elapsed().as_secs_f64() * 1e3
+                );
+            } else {
+                later(format!(
+                    "nodetime: {op} {node} {:.3}",
+                    t.elapsed().as_secs_f64() * 1e3
+                ));
+            }
         }
     }
 }
