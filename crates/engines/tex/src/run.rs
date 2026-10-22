@@ -705,6 +705,8 @@ pub(crate) struct Run<'c, 'a> {
     /// The values at a pending read-back point of the locations defined
     /// or restored after it ([`Run::note_pre`]).
     pub pending_pre: Vec<(Loc, ValueId)>,
+    /// The locations of [`Run::pending_pre`], to look one up there.
+    pub pending_locs: phitex_defuse::FxHashSet<Loc>,
     /// `scanner_status` and `warning_index` (§305): what a token list
     /// being scanned is (`SCAN_DEFINING`, `SCAN_MATCHING`,
     /// `SCAN_ABSORBING`) and whose; `None` is `normal`. Kept only for
@@ -922,6 +924,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cont_lines: Vec::new(),
             read_point_pending: None,
             pending_pre: Vec::new(),
+            pending_locs: phitex_defuse::FxHashSet::default(),
             scanner: None,
             outer_call: false,
             interp_base: 0,
@@ -1814,6 +1817,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.pre_noted.contains(&loc) {
             return;
         }
+        // (one kept at a pending read-back point: its value there kept
+        // once, not encoded again at each definition)
+        if self.read_point_pending.is_some() && self.pending_locs.contains(&loc) {
+            return;
+        }
         let f = self.loc_field(loc);
         let Some(pre) = self.wpre_of(f) else {
             self.pre_noted.insert(loc);
@@ -1830,7 +1838,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let old = self.st.id_of(loc, v).unwrap_or(ValueId::UNIT);
         if self.read_point_pending.is_some() {
-            if !self.pending_pre.iter().any(|&(l, _)| l == loc) {
+            if self.pending_locs.insert(loc) {
                 self.muts += 1;
                 self.pending_pre.push((loc, old));
             }
@@ -2662,6 +2670,7 @@ impl<'c, 'a> Run<'c, 'a> {
     fn note_read_point(&mut self) {
         self.read_point_pending = None;
         self.pending_pre.clear();
+        self.pending_locs.clear();
         self.read_back_at = self
             .input
             .levels
@@ -2680,6 +2689,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         }
         self.read_point_pending = None;
+        self.pending_locs.clear();
         for (loc, old) in std::mem::take(&mut self.pending_pre) {
             self.set_pre(loc, old);
         }
@@ -5153,6 +5163,8 @@ impl Run<'_, '_> {
                 ag: l.ag,
             })
             .collect();
+        // (the pending values go with the parked run)
+        self.pending_locs.clear();
         Some(Parked {
             epoch: self.cx.values_epoch(),
             segs,
@@ -5356,6 +5368,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .into_iter()
             .map(|(f, x)| (r.loc_of(f), x))
             .collect();
+        r.pending_locs = r.pending_pre.iter().map(|&(l, _)| l).collect();
         r.cand = p.cand;
         r.cand_marks = p.cand_marks;
         r.ins_pending = p.ins_pending;

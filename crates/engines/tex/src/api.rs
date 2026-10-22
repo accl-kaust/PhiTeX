@@ -2637,10 +2637,34 @@ impl Graph {
     /// call to the engine).
     fn push_env(&mut self, env: Vec<(Field, ValueId)>) {
         // (a field given twice: the later entry, as the engine's map has
-        // it; the job's bindings first)
-        let map: FxHashMap<Field, ValueId> = self.job.iter().copied().chain(env).collect();
-        let mut env: Vec<(Field, ValueId)> = map.into_iter().collect();
-        env.sort_unstable_by_key(|e| e.0.0.raw());
+        // it; the job's bindings first, by field once for the job
+        // ([`job_env`]), merged with the few entries here: the format's
+        // bindings neither hashed nor sorted again per push)
+        let env = by_field(env);
+        let mut merged = Vec::with_capacity(self.job.len() + env.len());
+        let (mut i, mut j) = (0, 0);
+        while i < self.job.len() || j < env.len() {
+            match (self.job.get(i), env.get(j)) {
+                (Some(a), Some(b)) if a.0 == b.0 => {
+                    merged.push(*b);
+                    (i, j) = (i + 1, j + 1);
+                }
+                (Some(a), Some(b)) if a.0.0.raw() > b.0.0.raw() => {
+                    merged.push(*b);
+                    j += 1;
+                }
+                (Some(a), _) => {
+                    merged.push(*a);
+                    i += 1;
+                }
+                (None, Some(b)) => {
+                    merged.push(*b);
+                    j += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        let env = merged;
         let mut absent = self.absent.clone();
         absent.sort_unstable_by_key(|f| f.0.raw());
         absent.dedup();
@@ -6340,9 +6364,19 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
     // graph has one unit, so the unit's start and the environment are
     // one place to read them)
     let _ = unit;
-    g.job = sets;
+    g.job = by_field(sets);
     let env = g.environment(opts.fixpoint);
     g.push_env(env);
+}
+
+/// Bindings by field, each field once: the last given for it.
+fn by_field(mut xs: Vec<(Field, ValueId)>) -> Vec<(Field, ValueId)> {
+    // (reversed, then a stable sort: the last given first among a
+    // field's, which the dedup keeps)
+    xs.reverse();
+    xs.sort_by_key(|e| e.0.0.raw());
+    xs.dedup_by_key(|e| e.0);
+    xs
 }
 
 /// The graph's accumulators and loop-backs (their round-one values).
