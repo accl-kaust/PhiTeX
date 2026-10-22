@@ -270,6 +270,29 @@ pub(crate) fn run_node_parking(
                     last,
                 }));
             }
+            // (observe, `PHITEX_MARK_TRACE=1`: a finisher's or exec run's
+            // outputs, to compare a run resumed at a mark with a full one)
+            if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
+                let v = r.v;
+                let node = r.cx.node().raw();
+                let mut pubd: Vec<String> = r
+                    .st
+                    .published(v, r.rec_load)
+                    .into_iter()
+                    .map(|(l, x, loc)| format!("{}{loc:?}={}", crate::val::field_name(v, r.loc_field(l)), x.raw()))
+                    .collect();
+                pubd.sort();
+                let contribs: Vec<String> = r
+                    .contribs
+                    .iter()
+                    .map(|(f, x)| format!("{}+={}", crate::val::field_name(v, *f), x.raw()))
+                    .collect();
+                let kids: Vec<String> = r.kids.iter().map(|(o, a)| format!("{o:?}{:?}", a.iter().map(|x| x.raw()).collect::<Vec<_>>())).collect();
+                eprintln!(
+                    "mark-trace: node {node} resumed {} effect {:?} pub {pubd:?} contribs {contribs:?} kids {kids:?}",
+                    r.resumed, r.effect
+                );
+            }
             let t = std::time::Instant::now();
             let tf = pp.and_then(|_| crate::prof::start());
             let x = r.finish();
