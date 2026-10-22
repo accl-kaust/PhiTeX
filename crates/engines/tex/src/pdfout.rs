@@ -3265,6 +3265,11 @@ fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: boo
         t_try += tt.elapsed();
         let tt = std::time::Instant::now();
         if i > start && (i - start).is_multiple_of(LINK_SNAP) {
+            // (the writer's digests' sums brought up to date first: a
+            // later link comparing a writer with this snapshot, or going
+            // on from it, hashes only what changed after it, not every
+            // object written since the link began)
+            st.refresh_digests();
             snaps.push(LinkSnap {
                 at: i,
                 digests: None,
@@ -3502,6 +3507,7 @@ fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: boo
     for c in chunks_of.iter().flatten() {
         bytes.push(c.clone());
     }
+    st.refresh_digests();
     let end = LinkSnap {
         at: xpages.len(),
         digests: None,
