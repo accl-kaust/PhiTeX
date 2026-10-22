@@ -954,6 +954,62 @@ impl Run<'_, '_> {
         self.font_view_with(list, &[])
     }
 
+    /// [`Self::font_view`] of `list`, the characters it holds marked in
+    /// `seen` on the same walk (for the hyphenator's `\\lccode`s).
+    pub(crate) fn font_view_chars(&mut self, list: &[Node], seen: &mut [bool; 256]) -> R<crate::fonts::View> {
+        fn mark(seen: &mut [bool; 256], c: u16) {
+            if let Some(s) = seen.get_mut(usize::from(c)) {
+                *s = true;
+            }
+        }
+        fn walk(l: &[Node], ids: &mut std::collections::BTreeSet<u32>, seen: &mut [bool; 256]) {
+            let mut last = None;
+            for n in l {
+                match n {
+                    Node::Char { font, ch } => {
+                        mark(seen, *ch);
+                        if last != Some(*font) {
+                            ids.insert(*font);
+                            last = Some(*font);
+                        }
+                    }
+                    Node::Lig(g) => {
+                        mark(seen, g.ch);
+                        for &c in &g.original {
+                            mark(seen, c);
+                        }
+                        if last != Some(g.font) {
+                            ids.insert(g.font);
+                            last = Some(g.font);
+                        }
+                    }
+                    Node::Box(b) => walk(&b.list, ids, seen),
+                    Node::Unset(u) => walk(&u.list, ids, seen),
+                    Node::Disc(d) => {
+                        walk(&d.pre, ids, seen);
+                        walk(&d.post, ids, seen);
+                        walk(&d.replace, ids, seen);
+                    }
+                    Node::Ins(i) => walk(&i.list, ids, seen),
+                    Node::Adjust(a) => walk(a, ids, seen),
+                    Node::Glue(g) => {
+                        if let Some(l) = &g.leader {
+                            walk(std::slice::from_ref(l), ids, seen);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        walk(list, &mut ids, seen);
+        let mut view = crate::fonts::View::default();
+        for f in ids {
+            self.add_font_metrics(&mut view, f)?;
+        }
+        Ok(view)
+    }
+
     /// [`Self::font_view`] with fonts `extra` too (a page's sealed lines',
     /// `crate::pages`).
     pub(crate) fn font_view_with(&mut self, list: &[Node], extra: &[u32]) -> R<crate::fonts::View> {
@@ -1137,7 +1193,11 @@ impl Run<'_, '_> {
             .collect();
         crate::prof::add(crate::prof::LB_DEC, t0);
         let t0 = crate::prof::start();
-        let view = self.font_view(&list)?;
+        // \lccode of the characters the hyphenator can meet: those of the
+        // list (a character not in it is never asked for), found on the
+        // walk that finds its fonts ([`Self::font_view_chars`])
+        let mut seen = [false; 256];
+        let view = self.font_view_chars(&list, &mut seen)?;
         let shape = self
             .get_loc(crate::fields::cell::PARSHAPE)?
             .map(|x| list_of(v, x))
@@ -1191,11 +1251,7 @@ impl Run<'_, '_> {
             pack: self.pack_params(true)?,
         };
         let patterns = self.patterns()?;
-        // \lccode of the characters the hyphenator can meet: those of the
-        // list (a character not in it is never asked for)
         let mut lc = [0u16; 256];
-        let mut seen = [false; 256];
-        chars_of(&list, &mut seen);
         for (c, x) in lc.iter_mut().enumerate() {
             if seen[c] {
                 *x = u16::try_from(i64::from(self.code(0, c)?)).unwrap_or(0);
@@ -2991,42 +3047,6 @@ pub(crate) fn _unused(_: ValueId) -> Option<Glue> {
     None
 }
 
-/// Marks in `seen` the character codes below 256 of `list`, its
-/// ligatures' originals and its nested lists included.
-fn chars_of(list: &[Node], seen: &mut [bool; 256]) {
-    fn mark(seen: &mut [bool; 256], c: u16) {
-        if let Some(s) = seen.get_mut(usize::from(c)) {
-            *s = true;
-        }
-    }
-    for n in list {
-        match n {
-            Node::Char { ch, .. } => mark(seen, *ch),
-            Node::Lig(l) => {
-                mark(seen, l.ch);
-                for &c in &l.original {
-                    mark(seen, c);
-                }
-            }
-            Node::Disc(d) => {
-                chars_of(&d.pre, seen);
-                chars_of(&d.post, seen);
-                chars_of(&d.replace, seen);
-            }
-            Node::Box(b) => chars_of(&b.list, seen),
-            Node::Ins(i) => chars_of(&i.list, seen),
-            Node::Adjust(l) => chars_of(l, seen),
-            Node::Unset(u) => chars_of(&u.list, seen),
-            Node::Glue(g) => {
-                if let Some(l) = &g.leader {
-                    chars_of(std::slice::from_ref(&**l), seen);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 thread_local! {
     /// A character run's node buffer, kept for the worker's next run
     /// ([`Run::char_run`]).
@@ -3148,7 +3168,7 @@ pub(crate) fn fold_item(
             let lsl = i32::try_from(crate::val::int_at(v, n, 4)).unwrap_or(0);
             let ht = nodes::box_dim(v, b, 3);
             if let Some(g) = phitex_typeset::linebreak::interline_glue(st.pd, ht, bs, ls, lsl) {
-                out.push_v(nodes::encode(v, &g, &Side::default()));
+                out.push_node(v, g);
                 st.since_bp += 1;
             }
             out.push_v(b);
@@ -3175,8 +3195,32 @@ pub(crate) fn fold_item(
 /// reader), or a list of this run's items ([`crate::nest::Item`]).
 pub(crate) trait FoldOut {
     fn push_v(&mut self, x: ValueId);
+    /// A node the fold made (interline glue): its value.
+    fn push_node(&mut self, v: &Values, n: Node) {
+        self.push_v(nodes::encode(v, &n, &Side::default()));
+    }
     /// Removes the last item that is not a page builder's marker.
     fn delete_last(&mut self, v: &Values);
+}
+
+/// What [`MainTail::after`] folds into: the items as the fold leaves
+/// them, a node it made kept native until it is the last (only the last
+/// item and the count are read).
+#[derive(Default)]
+struct TailOut(Vec<Result<ValueId, Node>>);
+
+impl FoldOut for TailOut {
+    fn push_v(&mut self, x: ValueId) {
+        self.0.push(Ok(x));
+    }
+    fn push_node(&mut self, _v: &Values, n: Node) {
+        self.0.push(Err(n));
+    }
+    fn delete_last(&mut self, v: &Values) {
+        if let Some(i) = self.0.iter().rposition(|x| x.as_ref().is_ok_and(|&x| !is_marker(v, x)) || x.is_err()) {
+            self.0.remove(i);
+        }
+    }
 }
 
 impl FoldOut for Vec<ValueId> {
@@ -3392,7 +3436,7 @@ impl MainTail {
     /// The main list's end after `items` (a piece's own main-list items)
     /// folded onto this one.
     pub(crate) fn after(self, v: &Values, items: &[ValueId]) -> MainTail {
-        let mut out: Vec<ValueId> = self.last.into_iter().collect();
+        let mut out = TailOut(self.last.into_iter().map(Ok).collect());
         let mut st = FoldState {
             sf: self.sf,
             pd: self.pd,
@@ -3402,7 +3446,11 @@ impl MainTail {
             fold_item(v, 0, x, &mut st, &mut out);
         }
         MainTail {
-            last: out.iter().rev().find(|&&x| !is_marker(v, x)).copied(),
+            last: out.0.iter().rev().find_map(|x| match x {
+                Ok(x) if is_marker(v, *x) => None,
+                Ok(x) => Some(*x),
+                Err(n) => Some(nodes::encode(v, n, &Side::default())),
+            }),
             since: st.since_bp,
             sf: st.sf,
             pd: st.pd,

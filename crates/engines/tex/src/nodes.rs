@@ -688,6 +688,9 @@ pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u
     // (a line's interword glue is one node many times: the last glue
     // encoded is kept, as [`encode_list`] does)
     let mut glue: Option<(&GlueNode, ValueId)> = None;
+    // (the line's characters' values, direct-mapped by character: a line
+    // repeats few, and the run's cache is a thread-local away)
+    let mut chars = [(u32::MAX, 0u16, ValueId::UNIT); 64];
     let mut xs = Vec::with_capacity(list.len());
     for n in list {
         let x = match n {
@@ -696,7 +699,14 @@ pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u
                     fonts.insert(*font);
                     font_was = *font;
                 }
-                char_value(v, *font, *ch)
+                let e = &mut chars[usize::from(*ch) & 63];
+                if e.0 == *font && e.1 == *ch {
+                    e.2
+                } else {
+                    let x = char_value(v, *font, *ch);
+                    *e = (*font, *ch, x);
+                    x
+                }
             }
             Node::Glue(g) if g.leader.is_none() => match glue {
                 Some((h, x)) if h == g => x,

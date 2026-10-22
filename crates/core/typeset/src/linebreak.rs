@@ -1057,9 +1057,11 @@ fn post_line_break(
     right_skip: Glue,
 ) -> Vec<Line> {
     // (the nodes not yet placed: `front`, a discretionary's post-break
-    // material still to come, last first, then the list from `it`; a
-    // node from the list carries its index, the others none)
-    let mut it = list.into_iter().enumerate().peekable();
+    // material still to come, last first, then the list from `it`, whose
+    // next node is the list's `pos`; a line's run of the list's nodes
+    // is moved in one go)
+    let mut it = list.into_iter();
+    let mut pos = 0usize;
     let mut front: Vec<Node> = Vec::new();
     let mut lines = Vec::with_capacity(breaks.len());
     let mut cur_line = params.prev_graf + 1;
@@ -1076,23 +1078,21 @@ fn post_line_break(
         match brk {
             None => {
                 line.extend(front.drain(..).rev());
-                line.extend(it.by_ref().map(|x| x.1));
+                line.extend(it.by_ref());
                 line.push(Node::param_glue(param::RIGHT_SKIP, right_skip));
             }
             Some(at) => {
                 last_at = at;
-                loop {
-                    let (idx, n) = if let Some(n) = front.pop() {
-                        (None, n)
-                    } else if let Some((i, n)) = it.next() {
-                        (Some(i), n)
-                    } else {
-                        break;
-                    };
-                    if idx != Some(at) {
-                        line.push(n);
-                        continue;
-                    }
+                line.extend(front.drain(..).rev());
+                let n = at.saturating_sub(pos);
+                let before = it.len();
+                line.extend(it.by_ref().take(n));
+                pos += before - it.len();
+                // (the break node, where the list reaches it)
+                if pos == at
+                    && let Some(n) = it.next()
+                {
+                    pos += 1;
                     match n {
                         Node::Glue(_) => line.push(Node::param_glue(param::RIGHT_SKIP, right_skip)),
                         Node::Disc(d) => {
@@ -1119,7 +1119,9 @@ fn post_line_break(
                             line.push(Node::param_glue(param::RIGHT_SKIP, right_skip));
                         }
                     }
-                    break;
+                } else {
+                    pos += it.len();
+                    line.extend(it.by_ref());
                 }
             }
         }
@@ -1178,8 +1180,8 @@ fn post_line_break(
             loop {
                 let (idx, n) = if let Some(n) = front.last() {
                     (None, n)
-                } else if let Some((i, n)) = it.peek() {
-                    (Some(*i), n)
+                } else if let Some(n) = it.as_slice().first() {
+                    (Some(pos), n)
                 } else {
                     break;
                 };
@@ -1195,6 +1197,7 @@ fn post_line_break(
                 }
                 if front.pop().is_none() {
                     it.next();
+                    pos += 1;
                 }
             }
         }
