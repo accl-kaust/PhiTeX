@@ -1231,6 +1231,14 @@ impl Run<'_, '_> {
             self.box_report(true, line.packed.report, true);
             let (list, seen) = nodes::encode_list_side_free(v, &line.packed.node.list, &side);
             let b = nodes::encode_box_with(v, &line.packed.node, list);
+            // (its fonts from its nodes, for its unit's shape: not walked
+            // again through its value, `crate::nodes::unit_shape`)
+            if seen == 0 {
+                let f = nodes::native_fonts(&line.packed.node.list).map(|ids| {
+                    v.list(ids.into_iter().map(|f| v.int(i64::from(f))).collect())
+                });
+                self.line_fonts.insert(b, f);
+            }
             out.push(v.list(vec![tv, b, bs, ls, lsl]));
             for a in &line.packed.adjustments {
                 out.push(nodes::encode(v, a, &side));

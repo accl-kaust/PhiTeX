@@ -642,12 +642,17 @@ impl Run<'_, '_> {
             let Some(u) = self.cx.at(w, Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) else {
                 continue;
             };
+            // (a PDF page's unit read by its shape, its items' view kept
+            // for its sealed lines, `crate::pages::seal`)
+            let shape = if seal {
+                self.cx.get(u, Step::Index(7)).filter(|&x| x != ValueId::UNIT)
+            } else {
+                None
+            };
             let mut raw = match self.cx.at(u, Step::Index(2)) {
-                Some(x) if seal => {
-                    let shape = self.cx.get(x, Step::Proj(self.ops.unit_shape)).unwrap_or(ValueId::UNIT);
-                    let mut xs = list_of(v, shape);
-                    self.seal_items(x, &mut xs);
-                    xs
+                Some(x) if shape.is_some() => {
+                    self.seal_unit(p, x);
+                    list_of(v, shape.unwrap_or(ValueId::UNIT))
                 }
                 Some(x) => {
                     let x = self.cx.whole(x);
@@ -1111,7 +1116,7 @@ impl Run<'_, '_> {
             .lazy
             .iter()
             .filter_map(|&l| nodes::sealed_of(v, l))
-            .flat_map(|(_, f)| list_of(v, f))
+            .flat_map(|s| list_of(v, s.fonts))
             .filter_map(|f| u32::try_from(int_of(v, f)).ok())
             .collect();
         let view = self.font_view_with(std::slice::from_ref(&page_box), &sealed_fonts)?;

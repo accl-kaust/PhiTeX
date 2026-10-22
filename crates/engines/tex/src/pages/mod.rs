@@ -70,11 +70,12 @@ pub(crate) use seal::*;
 
 /// The pieces' main-list items, one unit per piece (and per paragraph's
 /// lines, `crate::parbreak`) beside its profile: `[piece, last, items,
-/// reads, defs, locals, cut]` (its raw node id, its last candidate when
-/// nothing came after it, its items with their markers resolved, what a
-/// finisher's check needs, [`Run::check_cut`], and for a piece cut at its
-/// last candidate the bindings local to the groups open there, which the
-/// routine sees). Read by range by a finisher: its page's real items.
+/// reads, defs, locals, cut, shape]` (its raw node id, its last candidate
+/// when nothing came after it, its items with their markers resolved,
+/// what a finisher's check needs, [`Run::check_cut`], for a piece cut at
+/// its last candidate the bindings local to the groups open there, which
+/// the routine sees, and its items' shape, [`crate::nodes::unit_shape`],
+/// unit where no line is sealed). Read by range by a finisher: its page's real items.
 pub(crate) const PITEMS: &str = "pitems";
 
 /// A cut's continuation, `[cont, cutting node, text kind, claim guess,

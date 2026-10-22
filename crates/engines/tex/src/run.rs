@@ -233,10 +233,6 @@ pub(crate) struct Ops {
     /// ([`crate::val::tail_projection`]): a reader of its kind reads that,
     /// not the item ([`Run::list_last_kind`]).
     pub tail_proj: phitex_defuse::ProjId,
-    /// The shape projection of a page unit's items
-    /// ([`crate::nodes::unit_shape`]): a finisher reads its lines'
-    /// dimensions and fonts, not their characters (`crate::pages`).
-    pub unit_shape: phitex_defuse::ProjId,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -827,9 +823,12 @@ pub(crate) struct Run<'c, 'a> {
     /// A finisher's `\box255`, native, from its page's assembly to its
     /// routine ([`crate::pages::Fire::b255`]).
     pub fin_box: Option<(phitex_typeset::node::BoxNode, crate::nodes::Side)>,
-    /// A finisher's sealed lines (`crate::pages::Run::seal_items`): the
-    /// view of each one's unit's items and its index there.
-    pub(crate) sealed: Vec<(phitex_defuse::View, u32)>,
+    /// A finisher's sealed lines (`crate::pages::Run::seal_items`).
+    pub(crate) sealed: crate::pages::Sealing,
+    /// The fonts of the lines this run made (by their box values), from
+    /// their nodes; `None` for a line not sealed
+    /// ([`crate::nodes::unit_shape`]).
+    pub(crate) line_fonts: crate::FxHashMap<ValueId, Option<ValueId>>,
     /// A finisher's shipped page boxes as the run has them, for
     /// [`crate::pages::REALPAGES`] (`crate::pages::Run::contribute_real_pages`).
     pub(crate) real_pages: Vec<ValueId>,
@@ -978,7 +977,8 @@ impl<'c, 'a> Run<'c, 'a> {
             cell_eng: phitex_defuse::FxHashMap::default(),
             rec_sig: (0, 0, 0, 0),
             fin_box: None,
-            sealed: Vec::new(),
+            sealed: crate::pages::Sealing::default(),
+            line_fonts: crate::FxHashMap::default(),
             real_pages: Vec::new(),
             lig_buf: Vec::new(),
             reach_reads: 0,
@@ -5162,7 +5162,7 @@ pub(crate) struct Parked {
     cand_marks: Vec<crate::pages::CandMark>,
     ins_pending: Vec<u16>,
     fin: Option<crate::pages::FinCtx>,
-    sealed: Vec<(phitex_defuse::View, u32)>,
+    sealed: crate::pages::Sealing,
     real_pages: Vec<ValueId>,
 }
 

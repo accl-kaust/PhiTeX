@@ -53,16 +53,13 @@ pub(crate) const T_VBOX: i64 = 95;
 /// A previous depth transition (`\\prevdepth`, a rule, an alignment's
 /// end): `[t, depth]`.
 pub(crate) const T_PD: i64 = 94;
-/// A sealed line's list in a finisher's run (`crate::pages`): `[tag, n,
-/// fonts]`, the run's `n`th line whose list it did not read, its fonts
-/// (sorted ids). Decoded, its box stays shallow ([`decode_box`]); the
-/// run puts the line's list in its place where a value leaves it.
+/// A sealed line's list as a unit's shape has it ([`unit_shape`]):
+/// `[tag, piece, k, fonts, head]`, the piece and the index of the line's
+/// item in its items, its characters' fonts (sorted ids), its head's
+/// hash ([`head_hash`]). Decoded, its box stays shallow ([`decode_box`]);
+/// a finisher puts the line's list in its place where a value leaves
+/// its run (`crate::pages::seal`).
 pub(crate) const T_SEALED: i64 = 84;
-/// A box's list as a unit's shape has it ([`unit_shape`]): `[tag,
-/// fonts]`, the fonts its characters use (sorted ids); a list with a
-/// mark, whatsit, insertion, adjustment, leaders or unset node at any
-/// depth is never summarised.
-pub(crate) const T_SUMMARY: i64 = 83;
 /// `\end` (§1054): `[tag, null box, fill glue, penalty]`, the material
 /// the page builder appends each time round until the page is empty.
 pub(crate) const T_END: i64 = 93;
@@ -988,53 +985,72 @@ pub(crate) fn int_field(v: &Values, x: ValueId, k: usize) -> i32 {
 
 /// Whether list value `l` is a sealed line's stand-in ([`T_SEALED`]).
 pub(crate) fn is_sealed(v: &Values, l: ValueId) -> bool {
-    v.with_list(l, |ys| ys.len() == 3 && v.as_int(ys[0]) == Some(T_SEALED))
+    v.with_list(l, |ys| ys.len() == 5 && v.as_int(ys[0]) == Some(T_SEALED))
         .unwrap_or(false)
 }
 
-/// A sealed line's stand-in: its number in the run and its fonts.
-pub(crate) fn sealed_of(v: &Values, l: ValueId) -> Option<(u32, ValueId)> {
+/// A sealed line's stand-in, read ([`T_SEALED`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Sealed {
+    /// The piece whose unit holds the line (its node's raw id).
+    pub piece: i64,
+    /// The line's item's index in the unit's items.
+    pub k: u32,
+    /// The fonts of its characters (a list of sorted ids).
+    pub fonts: ValueId,
+    /// A hash of its box's head as the piece made it.
+    pub head: i64,
+}
+
+/// The stand-in `l` read, if it is one.
+pub(crate) fn sealed_of(v: &Values, l: ValueId) -> Option<Sealed> {
     v.with_list(l, |ys| {
-        (ys.len() == 3 && v.as_int(ys[0]) == Some(T_SEALED))
-            .then(|| (u32::try_from(v.as_int(ys[1]).unwrap_or(0)).unwrap_or(0), ys[2]))
+        (ys.len() == 5 && v.as_int(ys[0]) == Some(T_SEALED)).then(|| Sealed {
+            piece: v.as_int(ys[1]).unwrap_or(0),
+            k: u32::try_from(v.as_int(ys[2]).unwrap_or(0)).unwrap_or(0),
+            fonts: ys[3],
+            head: v.as_int(ys[4]).unwrap_or(0),
+        })
     })
     .flatten()
 }
 
-/// The stand-in of the run's `n`th sealed line, its fonts `fonts`.
-pub(crate) fn sealed(v: &Values, n: u32, fonts: ValueId) -> ValueId {
-    v.list(vec![v.int(T_SEALED), v.int(i64::from(n)), fonts])
+/// The hash of a box's head (its value's words before its list).
+pub(crate) fn head_hash(head: &[ValueId]) -> i64 {
+    let words: Vec<u64> = head.iter().map(|x| x.raw()).collect();
+    i64::from_ne_bytes(phitex_defuse::hash_words(0x7365_616c_6564_0001, &words).to_ne_bytes())
 }
 
-/// The fonts a summary names ([`T_SUMMARY`]), if `l` is one.
-pub(crate) fn summary_fonts(v: &Values, l: ValueId) -> Option<ValueId> {
-    v.with_list(l, |ys| (ys.len() == 2 && v.as_int(ys[0]) == Some(T_SUMMARY)).then(|| ys[1]))
-        .flatten()
+/// [`list_fonts`] of a native list (its fonts' ids, sorted).
+pub(crate) fn native_fonts(list: &[Node]) -> Option<Vec<u32>> {
+    fn walk(l: &[Node], out: &mut std::collections::BTreeSet<u32>) -> bool {
+        l.iter().all(|n| match n {
+            Node::Char { font, .. } => {
+                out.insert(*font);
+                true
+            }
+            Node::Lig(g) => {
+                out.insert(g.font);
+                true
+            }
+            Node::Box(b) => walk(&b.list, out),
+            Node::Disc(d) => walk(&d.pre, out) && walk(&d.post, out) && walk(&d.replace, out),
+            Node::Glue(g) => g.leader.is_none(),
+            Node::Rule(_) | Node::Language { .. } | Node::Math(..) | Node::Kern(..) | Node::Penalty(_) => true,
+            _ => false,
+        })
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(list, &mut out).then(|| out.into_iter().collect())
 }
 
 /// The fonts of box list `l`'s characters at any depth (sorted ids), or
 /// `None` where a node of it is one a page's writer looks for (a mark,
 /// a whatsit, an insertion, an adjustment, leaders, an unset box) or one
-/// it does not know; kept by `l`.
+/// it does not know.
 fn list_fonts(v: &Values, l: ValueId) -> Option<ValueId> {
-    // (the ids kept, not a value: a value sweep may free a list made for
-    // an earlier build)
-    type Memo = std::sync::Mutex<crate::FxHashMap<ValueId, Option<std::sync::Arc<[i64]>>>>;
-    static MEMO: std::sync::OnceLock<Memo> = std::sync::OnceLock::new();
-    let memo = MEMO.get_or_init(Memo::default);
-    let got = memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&l).cloned();
-    let ids = got.unwrap_or_else(|| {
-        let mut fonts = std::collections::BTreeSet::new();
-        let x: Option<std::sync::Arc<[i64]>> =
-            list_fonts_walk(v, l, &mut fonts).then(|| fonts.into_iter().collect());
-        let mut m = memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if m.len() >= 1 << 16 {
-            m.clear();
-        }
-        m.insert(l, x.clone());
-        x
-    })?;
-    Some(v.list(ids.iter().map(|&f| v.int(f)).collect()))
+    let mut fonts = std::collections::BTreeSet::new();
+    list_fonts_walk(v, l, &mut fonts).then(|| v.list(fonts.into_iter().map(|f| v.int(f)).collect()))
 }
 
 fn list_fonts_walk(v: &Values, l: ValueId, fonts: &mut std::collections::BTreeSet<i64>) -> bool {
@@ -1065,21 +1081,26 @@ fn list_fonts_walk(v: &Values, l: ValueId, fonts: &mut std::collections::BTreeSe
     .unwrap_or(false)
 }
 
-/// A unit's items as its shape (a client projection,
-/// `phitex_defuse::Step::Proj`): each box a `T_VBOX` item appends whose
-/// list a page's writer need not look into ([`list_fonts`]) with its
-/// glue setting zero and its list its summary (`[T_SUMMARY, fonts]`);
-/// the rest as they are. A finisher reading the shape depends on the
-/// lines' dimensions and fonts, not on their characters: the page's
-/// writer reads those (spec: compose-lines).
-pub(crate) fn unit_shape(x: ValueId, v: &Values) -> ValueId {
-    let Some(items) = v.with_list(x, <[ValueId]>::to_vec) else {
-        return x;
-    };
+/// Piece `piece`'s items as their shape, made where the piece makes
+/// its unit (`crate::pages`, `PITEMS`' `shape`): each box a `T_VBOX`
+/// item appends whose list a page's writer need not look into
+/// ([`list_fonts`]) with its glue setting zero and a stand-in for its
+/// list ([`T_SEALED`]: the piece, the item's index, the fonts, the
+/// head's hash); the rest as they are. A finisher reading the shape
+/// depends on the lines' dimensions and fonts, not on their characters:
+/// the page's writer reads those (`crate::pages::seal`). `None` where
+/// no item is sealed (the shape is the items).
+pub(crate) fn unit_shape(
+    v: &Values,
+    piece: i64,
+    items: &[ValueId],
+    known: &crate::FxHashMap<ValueId, Option<ValueId>>,
+) -> Option<ValueId> {
     let mut changed = false;
     let out: Vec<ValueId> = items
         .iter()
-        .map(|&it| {
+        .enumerate()
+        .map(|(k, &it)| {
             let shaped = v
                 .with_list(it, |ys| {
                     if ys.len() != 5 || v.as_int(ys[0]) != Some(T_VBOX) {
@@ -1089,13 +1110,24 @@ pub(crate) fn unit_shape(x: ValueId, v: &Values) -> ValueId {
                     if bx.len() != 10 || v.as_int(bx[0]) != Some(T_BOX) {
                         return None;
                     }
-                    let fonts = list_fonts(v, bx[9])?;
+                    // (a line this run made: its fonts known from its nodes)
+                    let fonts = match known.get(&ys[1]) {
+                        Some(&f) => f?,
+                        None => list_fonts(v, bx[9])?,
+                    };
                     let zero = v.int(0);
                     let mut b = bx;
+                    let head = head_hash(&b[..6]);
                     b[6] = zero;
                     b[7] = zero;
                     b[8] = zero;
-                    b[9] = v.list(vec![v.int(T_SUMMARY), fonts]);
+                    b[9] = v.list(vec![
+                        v.int(T_SEALED),
+                        v.int(piece),
+                        v.int(i64::try_from(k).unwrap_or(i64::MAX)),
+                        fonts,
+                        v.int(head),
+                    ]);
                     let mut y = ys.to_vec();
                     y[1] = v.list(b);
                     Some(v.list(y))
@@ -1110,7 +1142,7 @@ pub(crate) fn unit_shape(x: ValueId, v: &Values) -> ValueId {
             }
         })
         .collect();
-    if changed { v.list(out) } else { x }
+    changed.then(|| v.list(out))
 }
 
 #[cfg(test)]
@@ -1133,30 +1165,32 @@ mod tests {
         v.list(vec![v.int(T_VBOX), b, ValueId::UNIT, ValueId::UNIT, v.int(0)])
     }
 
-    /// A line of characters is summarised (its glue setting zero, its
-    /// list its fonts); a line with a mark is not; a stand-in decodes as
-    /// a shallow box and encodes back as it was.
+    /// A line of characters is sealed (its glue setting zero, its list a
+    /// stand-in naming the piece, the item and the fonts); a line with a
+    /// mark is not; a stand-in decodes as a shallow box and encodes back
+    /// as it was.
     #[test]
     fn unit_shape_seals_plain_lines_only() {
         let v = Values::new();
         let ch = |f: i64, c: i64| v.list(vec![v.int(T_CHAR), v.int(f), v.int(c)]);
         let plain = line(&v, vec![ch(3, 65), ch(1, 66), ch(3, 67)]);
         let marked = line(&v, vec![ch(3, 65), v.list(vec![v.int(T_MARK), v.str("m")])]);
-        let shape = unit_shape(v.list(vec![plain, marked]), &v);
+        let none = crate::FxHashMap::default();
+        let shape = unit_shape(&v, 77, &[marked, plain], &none).expect("a line sealed");
         let items = list_of(&v, shape);
-        let b = list_of(&v, list_of(&v, items[0])[1]);
-        assert_eq!(b[2..6], list_of(&v, list_of(&v, plain)[1])[2..6]);
+        assert_eq!(items[0], marked);
+        let b = list_of(&v, list_of(&v, items[1])[1]);
+        let real = list_of(&v, list_of(&v, plain)[1]);
+        assert_eq!(b[..6], real[..6]);
         assert_eq!(v.as_int(b[8]), Some(0));
-        let fonts = summary_fonts(&v, b[9]).expect("summarised");
-        assert_eq!(list_of(&v, fonts).iter().map(|&f| v.as_int(f)).collect::<Vec<_>>(), [Some(1), Some(3)]);
-        assert_eq!(items[1], marked);
-        // (a stand-in: decoded shallow, encoded back unchanged)
-        let mut bx = b.clone();
-        bx[9] = sealed(&v, 0, fonts);
-        let x = v.list(bx);
+        let s = sealed_of(&v, b[9]).expect("a stand-in");
+        assert_eq!((s.piece, s.k, s.head), (77, 1, head_hash(&real[..6])));
+        assert_eq!(list_of(&v, s.fonts).iter().map(|&f| v.as_int(f)).collect::<Vec<_>>(), [Some(1), Some(3)]);
+        assert_eq!(unit_shape(&v, 77, &[marked], &none), None);
+        let x = v.list(b.clone());
         let mut side = Side::default();
         let Some(Node::Box(d)) = decode(&v, x, &mut side) else { panic!("a box") };
-        assert!(lazy_list(&d, &side).is_some_and(|l| sealed_of(&v, l) == Some((0, fonts))));
+        assert!(lazy_list(&d, &side).is_some_and(|l| is_sealed(&v, l)));
         assert_eq!(encode_box(&v, &d, &side), x);
     }
 }

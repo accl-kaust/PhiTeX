@@ -1800,9 +1800,13 @@ fn ship_apart(
 /// [`Linked::errors`]).
 fn write_page(v: &Values, pc: &PagePiece, real: ValueId) -> Made {
     let bx = {
+        // (its lines' lists as their runs made them, where kept: not
+        // decoded again, `crate::nodes::take_made`)
         let prev = crate::val::NO_KEEP.with(|c| c.replace(true));
+        let take = crate::nodes::TAKE_MADE.with(|c| c.replace(true));
         let mut side = crate::nodes::Side::default();
         let d = crate::nodes::decode(v, real, &mut side);
+        crate::nodes::TAKE_MADE.with(|c| c.set(take));
         crate::val::NO_KEEP.with(|c| c.set(prev));
         match d {
             Some(phitex_typeset::node::Node::Box(b)) => b,
