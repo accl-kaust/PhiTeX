@@ -121,6 +121,10 @@ pub struct Ctx<'a> {
     point: Option<((Id, bool, bool), Option<(u32, Pos, FrameId, Id)>, u64)>,
     chain: Option<((u32, FrameId), Vec<(FrameId, Pos)>)>,
     cells: FxHashMap<(u32, Field), Option<&'a FieldCell>>,
+    /// The last pending-set entry before the last read position asked
+    /// (`World::last_pset_below`): reads there whose definition is past it
+    /// wait on none.
+    pset_near: Option<((u32, Pos), Option<Pos>)>,
 }
 
 impl<'a> Ctx<'a> {
@@ -175,6 +179,7 @@ impl<'a> Ctx<'a> {
             point: None,
             chain: None,
             cells: FxHashMap::with_capacity_and_hasher(hint / 2, Default::default()),
+            pset_near: None,
         }
     }
 
@@ -307,8 +312,9 @@ impl<'a> Ctx<'a> {
         // (speculating, the read guesses past it; a definition it makes
         // re-asks the reader).
         let from = reach.map_or(0, |r| r.0);
-        if !self.predict
-            && let Some(x) = super::core::prof::time(19, || self.w.pending_set_between(self.core, u, f, from, pos, self.me))
+        if (!self.predict || self.core.wait_pending.contains(&f))
+            && self.pset_after(u, pos, from)
+            && let Some(x) = super::core::prof::time(19, || self.w.pending_set_wait(self.core, u, f, from, pos, self.me))
         {
             if super::core::debug() && self.w.node(x).is_some_and(|n| !matches!(n.st, St::Dirty | St::Held)) {
                 eprintln!("read {} of {f:?}: pending set of {x} in state {:?}", self.me, self.w.node(x).map(|n| n.st));
@@ -383,6 +389,20 @@ impl<'a> Ctx<'a> {
                 Ok(val.map(|v| (v, NONE)))
             }
         }
+    }
+
+    /// Whether a pending-set entry lies between `from` and read position
+    /// `pos` of unit `u` (asked of the world once per position).
+    fn pset_after(&mut self, u: u32, pos: Pos, from: Pos) -> bool {
+        let near = match self.pset_near {
+            Some((k, p)) if k == (u, pos) => p,
+            _ => {
+                let p = self.w.last_pset_below(u, pos, self.me);
+                self.pset_near = Some(((u, pos), p));
+                p
+            }
+        };
+        near.is_some_and(|p| p > from)
     }
 
     /// What this node's last result from a previous evaluation read of `f`
@@ -559,6 +579,74 @@ impl<'a> Ctx<'a> {
     fn use_field_proj_inner(&mut self, f: Field, p: crate::api::ProjId) -> Result<Option<ValueId>, Stop> {
         let r = self.read_at(f, self.me, false, false, p.0)?;
         Ok(r.map(|(x, _)| self.core.project(p.0, x)))
+    }
+
+    /// Reads each of `fs` as [`Ctx::use_field`] reads one, in order, into
+    /// `out` (cleared first): the same reads, recorded alike, with the
+    /// fields' lookups made together (many fields read at once, a run's
+    /// first touch of each, cost less so than one at a time).
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] at the first that stops (those before it read, in `out`).
+    pub fn use_fields(&mut self, fs: &[Field], out: &mut Vec<Option<ValueId>>) -> Result<(), Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&fs, )) } else { serde_json::Value::Null };
+        out.clear();
+        self.prefetch_cells(fs.iter().copied());
+        let mut r = Ok(());
+        for &f in fs {
+            match self.use_field_inner(f) {
+                Ok(v) => out.push(v),
+                Err(s) => {
+                    r = Err(s);
+                    break;
+                }
+            }
+        }
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "use_fields", a, if r.is_ok() { serde_json::json!({"ok": crate::record::j(&*out)}) } else { serde_json::json!("stop") });
+        r
+    }
+
+    /// [`Ctx::use_fields`] through projections: each as
+    /// [`Ctx::use_field_proj`] reads one.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] at the first that stops (those before it read, in `out`).
+    pub fn use_fields_proj(&mut self, fs: &[(Field, crate::api::ProjId)], out: &mut Vec<Option<ValueId>>) -> Result<(), Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&fs, )) } else { serde_json::Value::Null };
+        out.clear();
+        self.prefetch_cells(fs.iter().map(|p| p.0));
+        let mut r = Ok(());
+        for &(f, p) in fs {
+            match self.use_field_proj_inner(f, p) {
+                Ok(v) => out.push(v),
+                Err(s) => {
+                    r = Err(s);
+                    break;
+                }
+            }
+        }
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "use_fields_proj", a, if r.is_ok() { serde_json::json!({"ok": crate::record::j(&*out)}) } else { serde_json::json!("stop") });
+        r
+    }
+
+    /// Looks up the cells of fields `fs` read at this node not looked up
+    /// yet, together.
+    fn prefetch_cells(&mut self, fs: impl Iterator<Item = Field>) {
+        let u = self.unit;
+        let todo: Vec<Field> = fs.filter(|f| !self.cells.contains_key(&(u, *f))).collect();
+        // (A few are as cheap one at a time.)
+        if todo.len() < 8 {
+            return;
+        }
+        for (f, c) in self.w.fields_of_many(u, todo.into_iter()) {
+            self.cells.insert((u, f), c);
+        }
     }
 
     /// The environment's value of `f`; waits while it is neither supplied

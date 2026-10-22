@@ -19,20 +19,6 @@ pub(crate) struct Env {
     pub unknown: FxHashSet<Field>,
 }
 
-impl Env {
-    /// What a read of `f` finds: `Some(answer)`, or `None` unknown.
-    #[allow(clippy::option_option)]
-    pub(crate) fn get(&self, f: Field) -> Option<Option<ValueId>> {
-        if let Some(&x) = self.known.get(&f) {
-            return Some(Some(x));
-        }
-        if self.absent.contains(&f) {
-            return Some(None);
-        }
-        self.provided.get(&f).copied()
-    }
-}
-
 pub(crate) struct Core {
     pub values: Values,
     pub ops: Vec<Arc<dyn Operation>>,
@@ -42,6 +28,10 @@ pub(crate) struct Core {
     pub op_reads: Vec<std::sync::atomic::AtomicU32>,
     pub projs: Vec<Projection>,
     pub accs: FxHashMap<Field, Arc<dyn Monoid>>,
+    /// The environment's base layer (`Engine::set_environment_base`) and
+    /// its answers, each asked once for the engine's life.
+    pub base: Option<Arc<crate::api::EnvBase>>,
+    pub base_memo: crate::sync::Table<Option<ValueId>>,
     /// Accumulators declared by field-name prefix, first declared first,
     /// and each field's resolution among them (made on first use).
     pub acc_prefixes: Vec<(String, Arc<dyn Monoid>)>,
@@ -51,9 +41,15 @@ pub(crate) struct Core {
     /// Fields a reader guesses from its last evaluation's read of them
     /// while their definer is declared, not made (`Engine::guess_from_last`).
     pub guess_last: FxHashSet<Field>,
+    /// Fields whose readers wait on a pending definition set that may hold
+    /// them even when predicting (`Engine::wait_on_pending`).
+    pub wait_pending: FxHashSet<Field>,
     /// The siblings a pending claimer with no reach holds back
     /// (`Engine::set_claim_window`; `None`: all after it).
     pub claim_window: Option<usize>,
+    /// With a claim window, a pending claimer is not held by the pending
+    /// claimer before it (`Engine::set_claim_chain`).
+    pub claim_chain: bool,
     /// The evaluation running (or last run): counted from 1 at each start.
     pub eval_no: std::sync::atomic::AtomicU64,
 
@@ -124,10 +120,14 @@ impl Core {
             accs: FxHashMap::default(),
             acc_prefixes: Vec::new(),
             acc_memo: crate::sync::Table::new(),
+            base: None,
+            base_memo: crate::sync::Table::new(),
             seqs: FxHashSet::default(),
             stable: FxHashSet::default(),
             guess_last: FxHashSet::default(),
             claim_window: None,
+            claim_chain: false,
+            wait_pending: FxHashSet::default(),
             eval_no: std::sync::atomic::AtomicU64::new(0),
 
             loops: FxHashMap::default(),
@@ -298,6 +298,13 @@ impl Core {
         }
     }
 
+    /// Whether node text (`op`, `args`), a pending definer of `f`, likely
+    /// defines it (`Operation::likely_defines`).
+    pub(crate) fn likely_defines(&self, op: OpId, args: &[ValueId], f: Field) -> bool {
+        let o = &self.ops[op.0 as usize];
+        self.hook(None, op, "likely_defines", || true, || o.likely_defines(args, &self.values, f))
+    }
+
     pub(crate) fn project(&self, p: u16, x: ValueId) -> ValueId {
         let v = &self.values;
         if p == 1 {
@@ -319,10 +326,29 @@ impl Core {
     /// What an environment read of `f` finds: `Some(answer)`, or `None`
     /// unknown (the provider asked once per evaluation).
     #[allow(clippy::option_option)]
+    /// What the environment answers for `f` without asking the provider:
+    /// supplied, declared absent, the base layer's (asked once per field),
+    /// or a provider answer already given.
+    #[allow(clippy::option_option)]
+    pub(crate) fn env_answer(&self, e: &Env, f: Field) -> Option<Option<ValueId>> {
+        if let Some(&x) = e.known.get(&f) {
+            return Some(Some(x));
+        }
+        if e.absent.contains(&f) {
+            return Some(None);
+        }
+        if let Some(b) = &self.base
+            && let Some(x) = *self.base_memo.get_or_insert(f.0.raw(), || b(&self.values, f))
+        {
+            return Some(Some(x));
+        }
+        e.provided.get(&f).copied()
+    }
+
     pub(crate) fn env_get(&self, _w: &World, f: Field) -> Option<Option<ValueId>> {
         {
             let e = self.env.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(a) = e.get(f) {
+            if let Some(a) = self.env_answer(&e, f) {
                 return Some(a);
             }
             if e.unknown.contains(&f) {
@@ -334,7 +360,7 @@ impl Core {
         {
             // (Answered while waiting for the turn.)
             let e = self.env.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(a) = e.get(f) {
+            if let Some(a) = self.env_answer(&e, f) {
                 return Some(a);
             }
             if e.unknown.contains(&f) {
@@ -361,7 +387,7 @@ impl Core {
     /// What the environment holds for `f` without asking the provider:
     /// supplied, declared absent, or a provider answer already given.
     pub(crate) fn env_known(&self, f: Field) -> Option<Option<ValueId>> {
-        self.env.read().unwrap_or_else(std::sync::PoisonError::into_inner).get(f)
+        self.env_answer(&self.env.read().unwrap_or_else(std::sync::PoisonError::into_inner), f)
     }
 
     /// Notes why node `id` runs again.

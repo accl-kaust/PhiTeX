@@ -667,6 +667,16 @@ impl World {
         self.fields.get(&FKey::new(u, f)).map(|c| &**c)
     }
 
+    /// The cells of fields `fs` of unit `u`, looked up together (sorted,
+    /// one walk of the field map), each with its field.
+    pub(crate) fn fields_of_many(&self, u: u32, fs: impl Iterator<Item = Field>) -> Vec<(Field, Option<&FieldCell>)> {
+        let mut ks: Vec<FKey> = fs.map(|f| FKey::new(u, f)).collect();
+        ks.sort_unstable();
+        let mut got = Vec::with_capacity(ks.len());
+        self.fields.get_sorted(&ks, &mut got);
+        ks.iter().zip(got).map(|(k, c)| (k.field(), c.map(|c| &**c))).collect()
+    }
+
     /// Changes field `f` of unit `u` (made if new).
     #[inline]
     pub(crate) fn with_field<R>(&mut self, u: u32, f: Field, g: impl FnOnce(&mut FieldCell) -> R) -> R {
@@ -1632,7 +1642,9 @@ impl World {
                     return Err(working(e.node));
                 }
             }
-            if !predict && let Some(x) = self.pending_set_between(core, u, f, reach.map_or(0, |r| r.0), pos, id) {
+            if (!predict || core.wait_pending.contains(&f))
+                && let Some(x) = self.pending_set_wait(core, u, f, reach.map_or(0, |r| r.0), pos, id)
+            {
                 return Err(working(x));
             }
         }
@@ -1682,11 +1694,45 @@ impl World {
         });
     }
 
+    /// The position of the last pending-set entry of unit `u` before `hi`
+    /// (other than `me`'s): a window `(lo, hi)` with `lo` at or past it has
+    /// none (`pending_set_between` is then `None`, whatever the field).
+    pub(crate) fn last_pset_below(&self, u: u32, hi: Pos, me: Id) -> Option<Pos> {
+        let m = &self.unit_opt(u)?.pset_nodes;
+        let mut k = hi;
+        while let Some((&p, &x)) = m.below(&k) {
+            if x != me {
+                return Some(p);
+            }
+            k = p;
+        }
+        None
+    }
+
     pub(crate) fn pending_set_between(&self, core: &super::core::Core, u: u32, f: Field, lo: Pos, hi: Pos, me: Id) -> Option<Id> {
+        self.pending_set_in(core, u, f, lo, hi, me, false)
+    }
+
+    /// The pending definition set a reader of `f` waits on: the first in
+    /// the window, but for a field waited on when predicting
+    /// (`Engine::wait_on_pending`), the last before `hi` that likely
+    /// defines it (`Operation::likely_defines`), woken by last when commits
+    /// come in text order (not by each before it in turn).
+    pub(crate) fn pending_set_wait(&self, core: &super::core::Core, u: u32, f: Field, lo: Pos, hi: Pos, me: Id) -> Option<Id> {
+        self.pending_set_in(core, u, f, lo, hi, me, core.wait_pending.contains(&f))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pending_set_in(&self, core: &super::core::Core, u: u32, f: Field, lo: Pos, hi: Pos, me: Id, last: bool) -> Option<Id> {
         // (Usually none in the window at all; when few, each is asked
-        // directly, the first that may hold `f` in text order.)
+        // directly, the first (last, likely) that may hold `f` in text
+        // order.)
         let pending = |x: Id| {
-            self.node(x).is_some_and(|n| n.text.stat.defs.is_none() && (n.wide || core.may_cover(n.may(), n.text.op, &n.text.args, f)))
+            self.node(x).is_some_and(|n| {
+                n.text.stat.defs.is_none()
+                    && (n.wide || core.may_cover(n.may(), n.text.op, &n.text.args, f))
+                    && (!last || core.likely_defines(n.text.op, &n.text.args, f))
+            })
         };
         let un = self.unit_opt(u)?;
         let m = &un.pset_nodes;
@@ -1710,7 +1756,7 @@ impl World {
             return None;
         }
         if k <= few.len() {
-            return few[..k].iter().copied().find(|&x| pending(x));
+            return if last { few[..k].iter().rev().copied().find(|&x| pending(x)) } else { few[..k].iter().copied().find(|&x| pending(x)) };
         }
         // The sets that may hold `f`: any field, its name, its prefixes
         // (rolled over the name in one pass).
@@ -1721,6 +1767,19 @@ impl World {
                 return;
             }
             let Some(m) = un.psets.get(&k) else { return };
+            let found = |x: Id| x != me && pending(x);
+            if last {
+                let downto = best.map_or(lo, |b| b.0);
+                let mut at = hi;
+                while let Some((&p, &x)) = m.below(&at).filter(|e| *e.0 > downto) {
+                    at = p;
+                    if found(x) {
+                        best = Some((p, x));
+                        break;
+                    }
+                }
+                return;
+            }
             let upto = best.map_or(hi, |b| b.0);
             let mut at = lo;
             while let Some((&p, &x)) = m.above(&at).filter(|e| *e.0 < upto) {

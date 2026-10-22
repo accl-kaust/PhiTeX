@@ -86,6 +86,9 @@ struct Sched {
     /// Nodes whose committed result folded contributors as they last
     /// contributed (`Monoid::guess_ran`).
     fold_ran: FxHashSet<Id>,
+    /// The pending claimer each node was last held back by before it ran
+    /// (its start's link in the chain, as a wait's).
+    claim_held: FxHashMap<Id, Id>,
     /// Whether the scheduler predicts (runs guess).
     predict: bool,
     /// Nodes whose run stopped on an accumulator range, with the range.
@@ -1682,6 +1685,7 @@ impl Engine {
         }
         // Held back by an earlier claimer whose claim is pending.
         if let Some(c) = super::core::prof::time(5, || self.w.held_by(&self.core, id)) {
+            s.claim_held.insert(id, c);
             s.parked.insert(id, Wait::Node(c, None));
             s.waiters.entry(c).or_default().push(id);
             rep.stops += 1;
@@ -1846,6 +1850,9 @@ impl Engine {
                         let t_ns = s.time.get(&id).map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
                         let t = super::core::now();
                         let span = r.span.map(|(a, b)| (s.ran_ready.get(&id).copied().unwrap_or(a).min(a), a, b));
+                        if let Some(c) = s.claim_held.remove(&id) {
+                            hs.woke.insert(id, (c, None));
+                        }
                         self.height(hs, id, &r.res, r.fold_redo, span, t_ns, false);
                         rep.merge.heights += super::core::ns_since(t);
                     }
@@ -1909,6 +1916,9 @@ impl Engine {
                     if hs.on && (matches!(wait, Wait::Child(_)) || !r.kids.is_empty() || !r.conts.is_empty()) {
                         let t_ns = s.time.get(&id).map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
                         let span = r.span.map(|(a, b)| (s.ran_ready.get(&id).copied().unwrap_or(a).min(a), a, b));
+                        if let Some(c) = s.claim_held.remove(&id) {
+                            hs.woke.insert(id, (c, None));
+                        }
                         self.height(hs, id, &r.res, r.fold_redo, span, t_ns, true);
                         hs.committed(id);
                     }
@@ -2068,6 +2078,7 @@ impl Engine {
                     };
                     if let Wait::Node(x, f) = &wait {
                         hs.woke.insert(id, (*x, *f));
+                        s.claim_held.remove(&id);
                     }
                     s.parked.insert(id, wait);
                     if let Some(x) = subject {
@@ -3405,7 +3416,13 @@ fn run_job(
     let ahead = w.node(id).is_some_and(|n| w.work_of(n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
     let t_start = super::core::now();
     let mut cx = Ctx::new(core, w, id, kept);
-    cx.reads = reads;
+    if !reads.is_empty() {
+        // (Its earlier attempts' reads, with room for as many as its
+        // operation's runs read.)
+        let mut reads = reads;
+        reads.reserve(cx.reads.capacity().saturating_sub(reads.len()));
+        cx.reads = reads;
+    }
     // (Continuing: the placements its earlier attempts made stand.)
     if let Some(b) = base.flatten() {
         cx.base = Some(b);

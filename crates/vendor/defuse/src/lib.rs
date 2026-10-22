@@ -18,7 +18,7 @@ mod sync;
 mod values;
 
 pub use api::{
-    Brackets, Candidate, CapPolicy, Cause, Claim, Edit, EditQueue, EditSource, Effect, EnvProvider, EvalError,
+    Brackets, Candidate, CapPolicy, Cause, Claim, Edit, EditQueue, EditSource, Effect, EnvBase, EnvProvider, EvalError,
     Executor, FieldAt, Greedy, Job, Lifted, Limits, Locality, LoopStart, MayDefine, Monoid, NoEdits, NodeId,
     NodeInfo, NodeState, OpId, Operation, ProjId, Projection, RandomScheduler, Report, Rerun, RoundTimes, LinkTimes, MergeTimes, RunResult,
     Scheduler, SeqMonoid, Sequential, Settled, Speculation, Stop, SumMonoid, UnitId, Until, WaitKind, WaitOn, Waiter,

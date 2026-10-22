@@ -1122,6 +1122,12 @@ pub fn out_field(v: &Values) -> Field {
     v.field("out")
 }
 
+/// Whether `var` reads go through `Ctx::use_fields` (`FUZZ_READ_MANY`).
+fn read_many() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FUZZ_READ_MANY").is_some())
+}
+
 fn eval_expr(cx: &mut Ctx<'_>, ops: Ops, e: ValueId) -> Result<ValueId, Stop> {
     cx.tick(1)?;
     let v = cx.values();
@@ -1137,7 +1143,20 @@ fn eval_expr(cx: &mut Ctx<'_>, ops: Ops, e: ValueId) -> Result<ValueId, Stop> {
             let s = cx.contributions_before_me(items_seq(v))?;
             v.list(v.seq_to_vec(s))
         }
-        "var" => cx.use_field(v.field(&text(v, a[0])))?.unwrap_or(ValueId::UNIT),
+        "var" => {
+            let f = v.field(&text(v, a[0]));
+            // FUZZ_READ_MANY=1: read with the common names, all at once
+            // (`Ctx::use_fields`); results must not change.
+            if read_many() {
+                let mut fs = vec![f];
+                fs.extend(["x", "y", "u", "w", "g", "s", "k", "z", "q", "r", "cap"].iter().map(|n| v.field(n)));
+                let mut out = Vec::new();
+                cx.use_fields(&fs, &mut out)?;
+                out[0].unwrap_or(ValueId::UNIT)
+            } else {
+                cx.use_field(f)?.unwrap_or(ValueId::UNIT)
+            }
+        }
         "op" => {
             let x = eval_expr(cx, ops, a[1])?;
             let y = eval_expr(cx, ops, a[2])?;
@@ -1287,6 +1306,17 @@ impl Operation for StmtOp {
             }
             _ => Some(Vec::new()),
         }
+    }
+
+    // FUZZ_UNLIKELY=1: about half the pending definers are said unlikely to
+    // define what they may (a speed hint: results must not change).
+    fn likely_defines(&self, args: &[ValueId], _: &Values, f: Field) -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var_os("FUZZ_UNLIKELY").is_some()) {
+            return true;
+        }
+        let h = args.iter().fold(f.0.raw(), |h, a| (h ^ a.raw()).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        h >> 63 == 0
     }
 
     fn may_define_field(&self, args: &[ValueId], v: &Values, f: Field) -> bool {
@@ -1955,6 +1985,15 @@ impl Program {
         // FUZZ_CLAIM_WINDOW=w: pending claimers hold back `w` siblings.
         if let Some(w) = std::env::var("FUZZ_CLAIM_WINDOW").ok().and_then(|w| w.parse().ok()) {
             eng.set_claim_window(Some(w));
+            // FUZZ_CLAIM_CHAIN=1: pending claimers not held by the one before.
+            eng.set_claim_chain(std::env::var_os("FUZZ_CLAIM_CHAIN").is_some());
+        }
+        if std::env::var_os("FUZZ_WAIT_PENDING").is_some() {
+            // Readers wait on pending definition sets: results must not change.
+            for name in ["x", "y", "u", "w", "g", "s", "k", "z", "q", "r", "cap"] {
+                let f = eng.values().field(name);
+                eng.wait_on_pending(f);
+            }
         }
         if std::env::var_os("FUZZ_GUESS_LAST").is_some() {
             // Guessed from the last evaluation: results must not change.

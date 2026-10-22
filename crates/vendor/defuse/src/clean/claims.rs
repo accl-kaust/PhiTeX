@@ -200,6 +200,15 @@ impl World {
         if until == Until::Yes {
             return false;
         }
+        // (With a claim window, a pending claimer is not held by the one
+        // before it: guessed not claimed, as most are not, taken back when
+        // it is. A run of them goes on together.)
+        if core.claim_chain
+            && core.claim_window.is_some()
+            && self.claims.get(&s).is_some_and(|t| t.decl == Claim::Pending && t.run.is_none())
+        {
+            return false;
+        }
         match st.early.or_else(|| reach(st.limit, core.claim_window)) {
             Some(0) => false,
             Some(k) => self.forward(c, |_, x| self.taken_from(c, x)).take(k).any(|x| x == s),
@@ -674,6 +683,7 @@ impl Builder<'_> {
         let Some(n) = self.w.node(x).cloned() else { return };
         let old_b = n.brackets();
         if let Some(res) = n.res.clone() {
+            self.counts.claimed_after_run += 1;
             for &k in res.kids.iter().chain(&res.conts) {
                 if self.w.node(k).is_some_and(|m| m.parent == x) {
                     self.free(k);
