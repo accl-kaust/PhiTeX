@@ -626,6 +626,10 @@ pub(crate) fn export(v: &Values, x: ValueId) -> Tree {
 
 pub(crate) fn import(v: &Values, t: &Tree) -> ValueId {
     match t {
+        // (a string or a number interned from where it is: no copy of the
+        // leaf made first)
+        Tree::Leaf(Value::Str(x)) => v.str(x),
+        Tree::Leaf(Value::Int(i)) => v.int(*i),
         Tree::Leaf(x) => v.intern(x.clone()),
         Tree::List(xs) => {
             let ys = xs.iter().map(|y| import(v, y)).collect();

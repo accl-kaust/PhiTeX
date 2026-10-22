@@ -1772,15 +1772,13 @@ impl<'c, 'a> Run<'c, 'a> {
         x
     }
 
-    pub(crate) fn note_pre(&mut self, loc: Loc) {
-        let v = self.v;
-        // (only while the macro that read the file back runs:
-        // `\document`'s rest, not the text after it)
-        // (a level's position moves as it is read; its start and end
-        // stay)
-        let still = self.read_back_at.is_some_and(|m| {
-            let same =
-                |l: &crate::input::Level| l.kind == m.kind && l.ty == m.ty && l.c == m.c && l.b == m.b;
+    /// Whether the macro that read a job-written file back still runs:
+    /// its level on the input stack ([`Run::read_back_at`]).
+    fn read_back_running(&self) -> bool {
+        self.read_back_at.is_some_and(|m| {
+            let same = |l: &crate::input::Level| {
+                l.kind == m.kind && l.ty == m.ty && l.c == m.c && l.b == m.b
+            };
             // (where it was found last: a level stays at its place on the
             // stack while it is there; else looked for again)
             if self
@@ -1793,11 +1791,21 @@ impl<'c, 'a> Run<'c, 'a> {
             let i = self.input.levels.iter().position(same);
             self.read_back_ix.set(i);
             i.is_some()
-        });
+        })
+    }
+
+    pub(crate) fn note_pre(&mut self, loc: Loc) {
+        let v = self.v;
+        // (only while the macro that read the file back runs:
+        // `\document`'s rest, not the text after it)
+        // (a level's position moves as it is read; its start and end
+        // stay)
+        // (asked only where it decides: the run that is the read-back
+        // point notes every definition whether the macro runs or not)
         // (the run that is a file's read-back point: to its end, as the
         // lines read the rest of the state at the end of its node,
         // [`Run::pre_value`])
-        if !still && !self.read_point_here {
+        if !self.read_point_here && !self.read_back_running() {
             self.read_back_done = false;
             return;
         }
