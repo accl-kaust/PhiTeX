@@ -3972,9 +3972,9 @@ impl<'c, 'a> Run<'c, 'a> {
     /// A NUL read from a document line: the mark of a comment of the
     /// canonical text (`api::canonical_text`), read as text where `%` was
     /// no comment (a verbatim's): the comment put back in the line in
-    /// its place from `doc:marks` (the line's, by its number, §304's
-    /// `line`), and the line read on from there, as TeX reads the
-    /// document's own text. Whether it was one.
+    /// place of the mark (its NUL and id) from `doc:mark:<id>`, and the
+    /// line read on from there, as TeX reads the document's own text.
+    /// Whether it was one.
     #[cold]
     pub(crate) fn splice_mark(&mut self) -> R<bool> {
         let v = self.v;
@@ -3985,23 +3985,32 @@ impl<'c, 'a> Run<'c, 'a> {
         if !doc {
             return Ok(false);
         }
-        let Some(marks) = self.cx.use_env(v.field(crate::api::DOC_MARKS))? else {
+        // (the mark's id, the 16 hex digits after its NUL in the line,
+        // `api::CommentMark`: its comment read by that id alone, nothing
+        // of where the line is in the file)
+        let Some(id) = self.input.top_line().and_then(|s| {
+            let ds: String = s
+                .buf
+                .get(s.loc..s.loc + 16)?
+                .iter()
+                .filter_map(|&c| char::from_u32(c))
+                .collect();
+            (ds.len() == 16 && ds.bytes().all(|c| c.is_ascii_hexdigit())).then_some(ds)
+        }) else {
             return Ok(false);
         };
-        let n = i64::from(self.input_line_no()?);
-        let Some(text) = list_of(v, marks).into_iter().find_map(|e| {
-            let xs = list_of(v, e);
-            (xs.first().map(|&x| int_of(v, x)) == Some(n))
-                .then(|| xs.get(1).map(|&t| str_of(v, t)))
-                .flatten()
-        }) else {
+        if crate::exec::obs_flag!("PHITEX_SPLICE_TRACE") {
+            eprintln!("splice: node {} mark {id}", self.cx.node().raw());
+        }
+        let field = v.field(&format!("{}{id}", crate::api::DOC_MARKS));
+        let Some(text) = self.cx.use_field(field)?.map(|t| str_of(v, t)) else {
             return Ok(false);
         };
         let Some(s) = self.input.top_line_mut() else {
             return Ok(false);
         };
         let i = s.loc - 1;
-        s.buf.splice(i..=i, text.chars().map(u32::from));
+        s.buf.splice(i..i + 17, text.chars().map(u32::from));
         s.loc = i;
         Ok(true)
     }
