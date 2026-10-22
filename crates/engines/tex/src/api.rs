@@ -159,6 +159,12 @@ pub struct Options {
     /// ([`crate::runtimes`], [`Build::export_runtimes`]): a cold build's
     /// long pieces are held from their first attempt. Empty: none known.
     pub runtimes: Vec<u8>,
+    /// Whether a long piece's readers wait for it on the fields it is
+    /// known to define last before them ([`crate::waitfields`]): `Some`
+    /// with what an earlier build learned ([`Build::export_wait_fields`];
+    /// empty: nothing yet), `None` (the default): they guess past it.
+    /// Speed only.
+    pub wait_fields: Option<Vec<u8>>,
     /// Whether a page's finisher is given the definitions the last
     /// finisher running its routine made as its prediction (on by
     /// default; off, the readers after it wait for its run: a test that
@@ -625,6 +631,7 @@ impl Default for Options {
             pkg_predict: false,
             long_runs: Some(LONG_RUNS),
             runtimes: Vec::new(),
+            wait_fields: None,
             finisher_predictions: true,
             shell_escape: 2,
             prelude_jobname: "texput".to_owned(),
@@ -4713,6 +4720,10 @@ pub struct Build {
     /// The pieces' run times by text ([`crate::runtimes`]): those the
     /// build was given, updated by its evaluations.
     runtimes: phitex_defuse::FxHashMap<u64, u64>,
+    /// The fields long pieces' readers wait on, by text
+    /// ([`crate::waitfields`]): those the build was given, updated by its
+    /// evaluations ([`Options::wait_fields`]).
+    wait_fields: crate::waitfields::WaitFields,
 }
 
 impl Drop for Build {
@@ -4913,6 +4924,7 @@ impl Build {
             lines: Mutex::default(),
             loads_ran: false,
             runtimes: phitex_defuse::FxHashMap::default(),
+            wait_fields: crate::waitfields::WaitFields::default(),
         };
         // (cost-aware speculation, with the run times an earlier build
         // measured for the cold build's first attempts)
@@ -4923,6 +4935,24 @@ impl Build {
                 if let Some(&us) = b.runtimes.get(&crate::runtimes::key(src.text(&b.text))) {
                     b.g.eng.set_run_time_hint(*n, std::time::Duration::from_micros(us));
                 }
+            }
+        }
+        // (the fields long pieces of this text define last before their
+        // readers: those readers wait for them, `crate::waitfields`)
+        if let Some(bytes) = &b.opts.wait_fields {
+            b.wait_fields = crate::waitfields::parse(bytes);
+            let mut fs: Vec<String> = b
+                .nodes
+                .iter()
+                .filter_map(|(_, _, src)| b.wait_fields.get(&crate::runtimes::key(src.text(&b.text))))
+                .flatten()
+                .cloned()
+                .collect();
+            fs.sort_unstable();
+            fs.dedup();
+            for f in fs {
+                let f = b.g.eng.values().field(&f);
+                b.g.eng.wait_on_pending(f);
             }
         }
         b.settle();
@@ -5163,6 +5193,7 @@ impl Build {
         self.merge_load_records();
         crate::timeline::lap("engine: package load records merged");
         self.note_run_times(&stats);
+        self.note_wait_fields(&stats);
         self.stats = stats;
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             self.note_edit_phases(t_all, t_before, t_apply, t_settle);
@@ -5485,6 +5516,65 @@ impl Build {
 
     /// The run times of the pieces the last evaluation ran, by text: a
     /// long one kept, one that ran short dropped.
+    /// The fields a long piece defines last before its readers that the
+    /// last evaluation refuted readers on ([`crate::waitfields`]), learned
+    /// by the piece's text; a learned one kept while it still holds.
+    fn note_wait_fields(&mut self, stats: &Stats) {
+        let Some(limit) = self.opts.long_runs else { return };
+        if self.opts.wait_fields.is_none() || stats.piece_times.is_empty() {
+            return;
+        }
+        let limit_us = u64::try_from(limit.as_micros()).unwrap_or(u64::MAX);
+        let times: phitex_defuse::FxHashMap<u64, u64> = stats.piece_times.iter().copied().collect();
+        let refuted_all: u64 = stats.refuted_by_field.iter().map(|e| e.1).sum();
+        let need = crate::waitfields::MIN_REFUTED.max(refuted_all / 10);
+        let refuted: phitex_defuse::FxHashMap<&str, u64> =
+            stats.refuted_by_field.iter().map(|(f, n)| (f.as_str(), *n)).collect();
+        let eng = &self.g.eng;
+        let v = eng.values();
+        // (the fields defined after each piece: a pass from the end)
+        let defs: Vec<Vec<phitex_defuse::Field>> =
+            self.nodes.iter().map(|(_, n, _)| eng.defs_of(*n).into_iter().map(|d| d.0).collect()).collect();
+        let mut later: phitex_defuse::FxHashSet<phitex_defuse::Field> = phitex_defuse::FxHashSet::default();
+        for (i, (_, n, src)) in self.nodes.iter().enumerate().rev() {
+            let long = times.get(&n.raw()).is_some_and(|&t| t >= limit_us);
+            if long {
+                let k = crate::runtimes::key(src.text(&self.text));
+                let mine: phitex_defuse::FxHashSet<phitex_defuse::Field> = defs[i].iter().copied().collect();
+                let last = |f: &phitex_defuse::Field| mine.contains(f) && !later.contains(f);
+                let mut fs: Vec<String> = self
+                    .wait_fields
+                    .get(&k)
+                    .map(|old| old.iter().filter(|f| last(&v.field(f))).cloned().collect())
+                    .unwrap_or_default();
+                for f in &defs[i] {
+                    let name = crate::val::field_name(v, *f);
+                    if last(f) && refuted.get(name.as_str()).is_some_and(|&c| c >= need) && !fs.contains(&name) {
+                        fs.push(name);
+                    }
+                }
+                if fs.is_empty() {
+                    self.wait_fields.remove(&k);
+                } else {
+                    self.wait_fields.insert(k, fs);
+                }
+            }
+            later.extend(defs[i].iter().copied());
+        }
+    }
+
+    /// The fields long pieces' readers wait on, for a later build's
+    /// [`Options::wait_fields`] ([`crate::waitfields`]; empty unless it is
+    /// `Some`).
+    #[must_use]
+    pub fn export_wait_fields(&self) -> Vec<u8> {
+        if self.opts.wait_fields.is_some() {
+            crate::waitfields::serialise(&self.wait_fields)
+        } else {
+            Vec::new()
+        }
+    }
+
     fn note_run_times(&mut self, stats: &Stats) {
         if self.opts.long_runs.is_none() || stats.piece_times.is_empty() {
             return;
