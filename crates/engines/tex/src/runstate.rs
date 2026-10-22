@@ -2361,6 +2361,20 @@ pub(crate) struct MarkDelta {
 }
 
 impl PState {
+    /// (observe) The touched locations of `other` missing here, by their
+    /// place in `other`'s list.
+    pub(crate) fn touched_missing(&self, other: &PState) -> Vec<(usize, String)> {
+        let mine: std::collections::HashSet<u64> = self.touched.iter().map(PLoc::word).collect();
+        other
+            .touched
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !mine.contains(&l.word()))
+            .map(|(i, l)| (i, format!("{:?}", l.key())))
+            .take(8)
+            .collect()
+    }
+
     /// The number of locations its run had touched.
     pub(crate) fn touched_len(&self) -> usize {
         self.touched.len()

@@ -5696,6 +5696,9 @@ impl Run<'_, '_> {
                 a.touched_len(),
                 b.touched_len()
             );
+            if !ok_touched {
+                eprintln!("mark-table-check: missing {:?}; extra {:?}", a.touched_missing(b), b.touched_missing(a));
+            }
         }
         let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
         let r = self.cx.checkpoint(k, state);
