@@ -5694,6 +5694,17 @@ impl Run<'_, '_> {
         // character run not on the list yet and its ligature stack, §1034;
         // a read-back line being interpreted; the locations a read-back
         // point noted)
+        if forced && crate::exec::obs_flag!("PHITEX_ANCHOR_TRACE") {
+            eprintln!(
+                "anchor: node {} exit due at {at}: chars {} lig {} interp {} pre {} pull {}",
+                self.cx.node().raw(),
+                self.chars_live.is_some(),
+                !self.lig_buf.is_empty(),
+                self.interp.is_some(),
+                !self.pre_noted.is_empty(),
+                !self.pull_at.is_empty()
+            );
+        }
         if self.chars_live.is_some()
             || !self.lig_buf.is_empty()
             || self.interp.is_some()
@@ -5740,6 +5751,19 @@ impl Run<'_, '_> {
         crate::prof::add(crate::prof::MARK, tp);
         let tp = crate::prof::start();
         let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
+        if crate::exec::obs_flag!("PHITEX_ANCHOR_TRACE") {
+            let old = self.old_marks.as_ref().and_then(|km| {
+                km.snaps.iter().enumerate().find(|(_, (q, _))| q.at_cmds == p.at_cmds && q.watch.is_some() == p.watch.is_some())
+            });
+            eprintln!(
+                "anchor: node {} mark {k} at {} {} groups {:?}; last run's there: {:?}",
+                self.cx.node().raw(),
+                p.at_cmds,
+                if p.watch.is_some() { "before a read" } else { "boundary" },
+                p.watch,
+                old.map(|(j, (_, oh))| (j, *oh == h))
+            );
+        }
         self.mark_snaps.push((std::sync::Arc::new(p), h));
         // (observe, `PHITEX_MARK_TABLE_CHECK=1`: the marks' tables folded
         // against the table parked whole, and the digest kept up to date
