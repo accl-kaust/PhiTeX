@@ -217,6 +217,9 @@ pub(crate) struct Res {
     pub text: usize,
     /// The evaluation its run ran in (`Core::eval_no`; 0: none).
     pub eval: u64,
+    /// Its definitions that forward a loop-back field (target, locality,
+    /// the field): their values follow the field's round value.
+    pub forwards: Vec<(Field, Locality, Field)>,
     /// What the node's last result from an earlier evaluation read of the
     /// fields guessed from the last (`Engine::guess_from_last`), carried
     /// through its commits in this one (`Res::last_reads`).
@@ -249,6 +252,11 @@ impl Res {
             }
         }
         (!l.vals.is_empty()).then(|| Arc::new(l))
+    }
+
+    /// The loop-back fields its definitions forward (`Ctx::define_forward`).
+    pub(crate) fn forwards_from(&self, from: Field) -> impl Iterator<Item = &(Field, Locality, Field)> {
+        self.forwards.iter().filter(move |x| x.2 == from)
     }
 
     /// The value it defines for `f` (defined at more than one locality,
@@ -286,6 +294,7 @@ impl Default for Res {
             def_ix: std::sync::OnceLock::new(),
             text: 0,
             eval: 0,
+            forwards: Vec::new(),
             last: None,
         }
     }
@@ -467,6 +476,17 @@ fn publishes(n: &Node) -> bool {
     n.st == St::Done && n.res.as_ref().is_some_and(|r| !r.pubs.is_empty())
 }
 
+/// The loop-back fields a done node's definitions forward (`fwds` keys).
+fn forwarded(n: &Node) -> Vec<u64> {
+    let mut v: Vec<u64> = match &n.res {
+        Some(r) if n.st == St::Done => r.forwards.iter().map(|x| x.2.0.raw()).collect(),
+        _ => Vec::new(),
+    };
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 /// Whether a node in state `st` is in work.
 pub(crate) fn in_work(st: St) -> bool {
     matches!(st, St::Dirty | St::Held)
@@ -556,6 +576,10 @@ pub(crate) struct World {
     pub fins: PMap<Id, ()>,
     /// The done nodes that publish loop-back fields.
     pub publishers: PMap<Id, ()>,
+    /// The nodes whose results forward a loop-back field into a
+    /// definition (`Ctx::define_forward`), by that field (`Field` raw,
+    /// node); checked against their results when asked.
+    pub fwds: PMap<(u64, Id), ()>,
     /// Placed nodes whose placer runs again for a change (a read that
     /// broke, a new text) and has not placed them again yet: they wait for
     /// it (their texts may be stale).
@@ -659,6 +683,7 @@ impl World {
             && self.claims.ptr_eq(&other.claims)
             && self.fins.ptr_eq(&other.fins)
             && self.publishers.ptr_eq(&other.publishers)
+            && self.fwds.ptr_eq(&other.fwds)
     }
 
     /// Field `f` of unit `u`, if anything is filed under it.
@@ -1327,6 +1352,16 @@ impl World {
                 self.publishers.remove(&id, &NoMeasure);
             }
         }
+        let fw = forwarded(&n);
+        let fw_was = self.nodes.get(&id).map(|o| forwarded(o)).unwrap_or_default();
+        if fw != fw_was {
+            for &k in &fw_was {
+                self.fwds.remove(&(k, id), &NoMeasure);
+            }
+            for &k in &fw {
+                self.fwds.insert((k, id), (), &NoMeasure);
+            }
+        }
         let was = self.nodes.get(&id).map(|o| (o.unit, o.pos, in_work(o.st)));
         let now = (n.unit, n.pos, in_work(n.st));
         if was != Some(now) {
@@ -1365,6 +1400,9 @@ impl World {
     pub(crate) fn drop_node(&mut self, id: Id) {
         self.note(Change::Node(id));
         if let Some(o) = self.nodes.get(&id) {
+            for k in forwarded(o) {
+                self.fwds.remove(&(k, id), &NoMeasure);
+            }
             let (u, p, w, ks) = (o.unit, o.pos, in_work(o.st), pset_keys(o));
             let o = w.then(|| o.clone());
             if let Some(o) = o {

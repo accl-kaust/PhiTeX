@@ -186,6 +186,10 @@ struct Heights {
     /// `Cause::Loop`).
     last: Option<Id>,
     round_end: Option<Id>,
+    /// The run that declared each loop-back field declared in the
+    /// evaluation: a reader made to run again by the declaration waited
+    /// for it.
+    loop_decl: FxHashMap<Field, Id>,
     /// The evaluation's start, and for each node's last committed run
     /// when it was queued, started, ended and committed (ns since).
     epoch: Option<std::time::Instant>,
@@ -433,6 +437,11 @@ impl Engine {
                 // Loop-backs runs declared: taken in now, their readers run.
                 let later = std::mem::take(&mut *super::core::lock(&self.core.loops_later));
                 if !later.is_empty() {
+                    // (Each field's declaring run: its readers' link.)
+                    for &(f, _, by) in &later {
+                        hs.loop_decl.entry(f).or_insert(by);
+                    }
+                    let later: Vec<(Field, ValueId)> = later.into_iter().map(|(f, x, _)| (f, x)).collect();
                     // (All at once: one pass over the runs' reads.)
                     self.declare_loopbacks(&later);
                     for id in std::mem::take(&mut self.pending) {
@@ -2219,8 +2228,16 @@ impl Engine {
                     });
                 }
                 Read::Out { node, .. } => offer(hs, *node, Cause::Output { of: NodeId(*node) }),
-                // (A round value: there when the round before ended.)
-                Read::Loop { f, .. } if let Some(x) = hs.round_end => offer(hs, x, Cause::Loop { field: *f }),
+                // (A round value: there when the round before ended, or when
+                // a run declared the field.)
+                Read::Loop { f, .. } => {
+                    if let Some(x) = hs.round_end {
+                        offer(hs, x, Cause::Loop { field: *f });
+                    }
+                    if let Some(&x) = hs.loop_decl.get(f) {
+                        offer(hs, x, Cause::Loop { field: *f });
+                    }
+                }
                 // (A placed output read with the reader's guess standing in
                 // is a link only when it made the run, as a guessed fold.)
                 Read::Placed { node, val, or, .. } => {
@@ -2594,8 +2611,21 @@ impl Engine {
         let w = std::mem::take(&mut self.w);
         let mut b = Builder::new(&self.core, w);
         for &id in &readers {
-            b.make_dirty_for(id, crate::api::Rerun::Loop { field: moved[0] });
+            // (The moved field it read, the first.)
+            let field = b
+                .w
+                .node(id)
+                .and_then(|n| n.res.as_ref())
+                .and_then(|r| {
+                    r.reads.iter().find_map(|rd| match rd {
+                        Read::Loop { f, .. } if moved.contains(f) => Some(*f),
+                        _ => None,
+                    })
+                })
+                .unwrap_or(moved[0]);
+            b.make_dirty_for(id, crate::api::Rerun::Loop { field });
         }
+        b.refile_forwards(&moved);
         let m = b.finish();
         self.w = m.w;
         for id in m.dirty {
@@ -3483,6 +3513,7 @@ fn run_job(
             last: cx.last_reads(),
             out,
             defs: cx.defs,
+            forwards: cx.forwards,
             contribs: cx.contribs,
             pubs: cx.pubs,
             effect: cx.effect,

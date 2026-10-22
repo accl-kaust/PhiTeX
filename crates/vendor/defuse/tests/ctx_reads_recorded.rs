@@ -30,6 +30,7 @@ const READS: &[&str] = &[
     "contributions_before_me",
     "take_prev_contribution",
     "is_loopback",
+    "define_forward",
 ];
 const WRITES: &[&str] = &[
     "define",

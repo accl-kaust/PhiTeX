@@ -49,6 +49,8 @@ pub struct Ctx<'a> {
     pub(crate) args: Arc<[ValueId]>,
     pub(crate) reads: Vec<Read>,
     pub(crate) defs: Vec<Def>,
+    /// Its definitions forwarding a loop-back field (`define_forward`).
+    pub(crate) forwards: Vec<(Field, Locality, Field)>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) pubs: Vec<(Field, ValueId)>,
     pub(crate) kids: Vec<Spec>,
@@ -141,6 +143,7 @@ impl<'a> Ctx<'a> {
             args: n.text.args.clone(),
             reads: Vec::with_capacity(hint),
             defs: Vec::new(),
+            forwards: Vec::new(),
             contribs: Vec::new(),
             pubs: Vec::new(),
             kids: Vec::new(),
@@ -704,6 +707,9 @@ impl<'a> Ctx<'a> {
     #[inline]
     fn define_with_inner(&mut self, f: Field, x: ValueId, loc: Locality) {
         let k = loc.entry_key();
+        if !self.forwards.is_empty() {
+            self.forwards.retain(|x| !(x.0 == f && x.1.entry_key() == k));
+        }
         if let Some(&i) = self.ix.get(&(0, f, k)) {
             let d = &mut self.defs[i];
             d.loc = loc;
@@ -712,6 +718,40 @@ impl<'a> Ctx<'a> {
             self.ix.insert((0, f, k), self.defs.len());
             self.defs.push(Def { f, loc, val: x });
         }
+    }
+
+    /// Defines `f` (at `loc`) as loop-back field `from`'s round value,
+    /// forwarded: the run does not read `from`, and when its round value
+    /// changes the definition follows without the node running again (only
+    /// `f`'s readers are asked again). While `from` is not a loop-back
+    /// field, `f` is defined as `from` read here (`use_field`), and
+    /// nothing while it reads none.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] as `use_field` of `from`, when it is not a loop-back field.
+    pub fn define_forward(&mut self, f: Field, from: Field, loc: Locality) -> Result<(), Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &from, &loc, )) } else { serde_json::Value::Null };
+        let r = self.define_forward_inner(f, from, loc);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "define_forward", a, crate::record::stop_or(&r));
+        r
+    }
+
+    #[inline]
+    fn define_forward_inner(&mut self, f: Field, from: Field, loc: Locality) -> Result<(), Stop> {
+        if let Some(&lv) = self.w.loops.get(&from) {
+            // (Its value is not a read: it follows.)
+            self.reads.push(Read::IsLoop { f: from, val: true });
+            self.define_with_inner(f, lv, loc);
+            self.forwards.push((f, loc, from));
+            return Ok(());
+        }
+        if let Some((v, _)) = self.read_at(from, self.me, false, false, 0)? {
+            self.define_with_inner(f, v, loc);
+        }
+        Ok(())
     }
 
     /// Defines `f` as a local of the scope this node opens after itself.
@@ -735,7 +775,7 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn declare_loopback_inner(&mut self, f: Field, init: ValueId) {
-        self.core.declare_loop_later(f, init);
+        self.core.declare_loop_later(f, init, self.me);
     }
 
     /// Publishes a loop-back field's next round value.
@@ -1670,6 +1710,7 @@ impl<'a> Ctx<'a> {
         self.reads.clear();
         self.read_ix.clear();
         self.defs.clear();
+        self.forwards.clear();
         self.contribs.clear();
         self.pubs.clear();
         self.kids.clear();

@@ -202,6 +202,7 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "use_env" => return res(cx.use_env(de(&g(0)))),
         "define" => json!(cx.define(de(&g(0)), de(&g(1)))),
         "define_with" => json!(cx.define_with(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
+        "define_forward" => return res(cx.define_forward(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
         "publish" => json!(cx.publish(de(&g(0)), de(&g(1)))),
         "declare_loopback" => json!(cx.declare_loopback(de(&g(0)), de(&g(1)))),
         "child" => json!(cx.child(de(&g(0)), de(&g(1)))),

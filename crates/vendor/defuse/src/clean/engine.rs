@@ -1161,6 +1161,10 @@ impl Engine {
         if ids(&self.w.publishers) != ids(&want.publishers) {
             out.push(format!("publishers {:?}, the nodes file {:?}", ids(&self.w.publishers), ids(&want.publishers)));
         }
+        let fw = |w: &World| -> Vec<(u64, Id)> { w.fwds.iter().map(|(&k, _)| k).collect() };
+        if fw(&self.w) != fw(&want) {
+            out.push(format!("fwds {:?}, the nodes file {:?}", fw(&self.w), fw(&want)));
+        }
         out
     }
 

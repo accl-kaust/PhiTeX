@@ -638,6 +638,46 @@ impl<'a> Builder<'a> {
         Some((e.val?, e.loc))
     }
 
+    /// The definitions forwarding loop-back fields `moved` (`Ctx::
+    /// define_forward`) follow their new round values: each done
+    /// forwarder's result takes the value and the entry is filed again (its
+    /// readers re-asked), the node not run again.
+    pub(crate) fn refile_forwards(&mut self, moved: &[Field]) {
+        for &m in moved {
+            let Some(&v) = self.w.loops.get(&m) else { continue };
+            let raw = m.0.raw();
+            let ids: Vec<Id> = self
+                .w
+                .fwds
+                .range(std::ops::Bound::Included(&(raw, 0)), std::ops::Bound::Included(&(raw, Id::MAX)))
+                .map(|(&(_, id), _)| id)
+                .collect();
+            for id in ids {
+                let Some(n) = self.w.node(id).filter(|n| n.st == St::Done).cloned() else { continue };
+                let Some(r) = &n.res else { continue };
+                let mut res = (**r).clone();
+                let mut ch = Vec::new();
+                for &(f, loc, _) in r.forwards_from(m) {
+                    if let Some(d) = res.defs.iter_mut().find(|d| d.f == f && d.loc.entry_key() == loc.entry_key())
+                        && d.val != v
+                    {
+                        d.val = v;
+                        ch.push((f, d.loc));
+                    }
+                }
+                if ch.is_empty() {
+                    continue;
+                }
+                let mut n2 = n;
+                n2.res = Some(Arc::new(res));
+                self.w.put(id, n2.clone());
+                for (f, loc) in ch {
+                    self.file_if(id, &n2, f, loc, Some(v), true);
+                }
+            }
+        }
+    }
+
     /// Removes one definition entry of node `n`.
     fn unfile(&mut self, id: Id, n: &Node, f: Field, loc: Locality) {
         let fr = self.def_frame(id, n, loc);
