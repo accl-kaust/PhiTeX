@@ -829,14 +829,23 @@ impl Operation for Pages {
             .map(|b| *b);
         // (resumed at a mark of its last run, [`Run::page_mark`]: the loop
         // as it was there, every page before placed again)
-        let at_mark = if parked.is_none()
-            && page_marks()
+        let at_mark = if page_marks()
             && !(cfg!(feature = "profile") && crate::exec::env_str!("PHITEX_PAGE_MARKS") == Some("noresume"))
         {
             cx.resumed()
         } else {
             None
         };
+        // (`PHITEX_PAGES_STOPS`, profile: how the run starts)
+        if crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {
+            eprintln!(
+                "pages-start: parked {} at mark {:?}",
+                parked.is_some(),
+                at_mark.as_ref().map(|m| m.1)
+            );
+        }
+        // (resumed at a mark: the loop from the mark, not the park)
+        let parked = if at_mark.is_some() { None } else { parked };
         // (a run, for its reads where a piece is; no text runs in it)
         let mut r = Run::new(cx, o);
         r.page_marks_on = page_marks();
