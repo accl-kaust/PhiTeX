@@ -5426,6 +5426,9 @@ impl Run<'_, '_> {
         let old = self.old_marks.clone()?;
         let (op, oh) = old.snaps.get(k)?;
         let (np, nh) = self.mark_snaps.get(k)?.clone();
+        if crate::exec::obs_flag!("PHITEX_MARK_WHY") {
+            mark_why(self.cx.node().raw(), k, op, &np);
+        }
         if *oh == nh || parked_rest(op) != parked_rest(&np) {
             return None;
         }
@@ -5644,6 +5647,52 @@ impl Run<'_, '_> {
             fin: self.fin.clone(),
         }
     }
+}
+
+/// (observe, `PHITEX_MARK_WHY=1`) Which parts of a resumed run's state
+/// at mark `k` differ from its last run's there.
+#[cold]
+fn mark_why(node: u64, k: usize, old: &Parked, new: &Parked) {
+    use std::hash::{Hash, Hasher};
+    let h = |f: &dyn Fn(&mut phitex_defuse::FxHasher)| {
+        let mut x = phitex_defuse::FxHasher::default();
+        f(&mut x);
+        x.finish()
+    };
+    let segs = |p: &Parked| h(&|x| format!("{:?}", p.segs).hash(x));
+    let segs_no_origin = |p: &Parked| {
+        h(&|x| {
+            for s in &p.segs {
+                match s {
+                    Seg::Line(l) => (&l.buf, l.loc, l.state, l.endch, l.starts, l.ends, l.lineno).hash(x),
+                    Seg::Toks(t) => t.iter().map(|t| t.raw()).collect::<Vec<_>>().hash(x),
+                    Seg::File(f) => (f.id.raw(), f.off, f.line).hash(x),
+                }
+            }
+        })
+    };
+    let nest = |p: &Parked| h(&|x| p.nest.iter().map(|l| (l.mode, l.group, l.lid, l.list.len())).collect::<Vec<_>>().hash(x));
+    let diff = new.st.value_diff(&old.st).map(|d| d.len());
+    let mut parts = Vec::new();
+    if segs(old) != segs(new) {
+        parts.push(if segs_no_origin(old) == segs_no_origin(new) { "input (origins only)" } else { "input" });
+    }
+    if nest(old) != nest(new) {
+        parts.push("nest");
+    }
+    if old.st.rest_hash() != new.st.rest_hash() {
+        parts.push("table rest");
+    }
+    if old.st.slot_sum() != new.st.slot_sum() {
+        parts.push("table slots");
+    }
+    if parked_rest(old) != parked_rest(new) {
+        parts.push("state but the table's slots");
+    }
+    eprintln!(
+        "mark-why: node {node} mark {k}: differs in {parts:?}; slot value diff {diff:?}; lines {}/{} read {}/{} muts {}/{}",
+        old.lines_entered, new.lines_entered, old.lines_read, new.lines_read, old.muts, new.muts
+    );
 }
 
 /// A digest of a run's state at a mark ([`Run::take_mark`]): equal for
