@@ -2190,7 +2190,13 @@ fn compose_now(core: &Core, w: &World, me: Id, res: &Res, k: usize, on: Option<&
                     xs.push(val);
                     continue;
                 }
-                let raw = root_now(core, w, me, rd)?;
+                // (Its definer in work: the old value stands, the definer's
+                // commit refiling it. The others are taken now: a later
+                // refile asks only of its own fields.)
+                let Some(raw) = root_now(core, w, me, rd) else {
+                    xs.push(val);
+                    continue;
+                };
                 let x = core.eval_path(path, raw)?;
                 if x != val {
                     ups.push((k, j, x, read, raw));
