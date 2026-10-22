@@ -669,8 +669,12 @@ pub(crate) struct Run<'c, 'a> {
     /// parked run's, and its digest; the ones before the mark a resumed
     /// run began at are its last run's ([`phitex_defuse::Ctx::resumed`]).
     pub mark_snaps: Vec<(std::sync::Arc<Parked>, u64)>,
-    /// The commands run when the last mark was taken.
-    pub mark_cmds: u64,
+    /// The command count, from the run's start over its parks and
+    /// resumes ([`Run::cmds_before`]), at which its next mark is due: a
+    /// multiple of [`MARK_EVERY`], so that every run of the node, whatever
+    /// attempt or mark it began at, takes its marks at the same places in
+    /// its text (0: the first, not set yet).
+    pub next_mark: u64,
     /// The marks of the run this one resumed from ([`Run::take_mark`]'s
     /// patched cutoff compares its marks with theirs).
     pub old_marks: Option<std::sync::Arc<KeptMarks>>,
@@ -948,7 +952,7 @@ impl<'c, 'a> Run<'c, 'a> {
             rt_rels: 0,
             resumed: false,
             mark_snaps: Vec::new(),
-            mark_cmds: 0,
+            next_mark: 0,
             old_marks: None,
             marks_on: false,
             cut_off: false,
@@ -5405,7 +5409,7 @@ pub(crate) struct KeptMarks {
 
 /// The commands between two marks of a run ([`Run::take_mark`]):
 /// `PHITEX_MARK_EVERY` (observe), else this.
-pub(crate) const MARK_EVERY: u64 = 500;
+pub(crate) const MARK_EVERY: u64 = 2000;
 
 fn mark_every() -> u64 {
     crate::exec::obs_str!("PHITEX_MARK_EVERY")
@@ -5414,13 +5418,32 @@ fn mark_every() -> u64 {
 }
 
 impl Run<'_, '_> {
-    /// Takes a mark between commands, every [`MARK_EVERY`] commands: the
+    /// Takes a mark between commands, at the first one from each
+    /// multiple of [`MARK_EVERY`] commands since the run's start
+    /// ([`Run::next_mark`]; 2000 by the cold and edit measures: at 500 the
+    /// snapshots cost 5-7% of a cold build and the edits gained nothing): the
     /// run's state as a parked run's ([`Run::snapshot`]) and its digest,
     /// given to the engine ([`phitex_defuse::Ctx::checkpoint`]). `Err`
     /// when the engine cuts the run off there: its last run's result
     /// stands.
     pub(crate) fn take_mark(&mut self) -> R<()> {
-        if !self.marks_on || self.cmds < self.mark_cmds + mark_every() || self.mark.active {
+        // (observe: the resume check, where the last run took the mark the
+        // engine resumed at, by the commands begun since the run's start)
+        if let Some((k, op, oh, args)) = &self.verify_at
+            && self.cmds_before + self.cmds == op.at_cmds
+        {
+            let (k, op, oh, args) = (*k, op.clone(), *oh, args.clone());
+            self.verify_at = None;
+            let np = self.snapshot();
+            let h = parked_digest(&np);
+            self.resume_verify(k, &op, oh, &np, h, &args);
+        }
+        let every = mark_every();
+        let at = self.cmds_before + self.cmds;
+        if self.next_mark == 0 {
+            self.next_mark = (at / every + 1) * every;
+        }
+        if !self.marks_on || at < self.next_mark || self.mark.active {
             return Ok(());
         }
         // (not where siblings were pulled: their places are the text's
@@ -5444,7 +5467,7 @@ impl Run<'_, '_> {
         {
             return Ok(());
         }
-        self.mark_cmds = self.cmds;
+        self.next_mark = (at / every + 1) * every;
         let tp = crate::prof::start();
         let p = self.snapshot();
         let td = crate::prof::start();
@@ -5454,11 +5477,7 @@ impl Run<'_, '_> {
         let tp = crate::prof::start();
         let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
         self.mark_snaps.push((std::sync::Arc::new(p), h));
-        if let Some((vk, op, oh, args)) = self.verify_at.clone()
-            && vk == k
-        {
-            self.resume_verify(k, &op, oh, h, &args);
-        }
+
         // (the accesses from here on stamped with this mark, numbered
         // from 1)
         self.st.cur_mark = k + 1;
@@ -5495,7 +5514,7 @@ impl Run<'_, '_> {
     /// (observe, `PHITEX_RESUME_VERIFY=1`) Whether this full run's state
     /// at mark `k` is the last run's there, which a run resumed at `k`
     /// starts from ([`Run::verify_at`]); where not, how they differ.
-    fn resume_verify(&mut self, k: u32, op: &Parked, oh: u64, h: u64, old_args: &[ValueId]) {
+    fn resume_verify(&mut self, k: u32, op: &Parked, oh: u64, np: &Parked, h: u64, old_args: &[ValueId]) {
         let node = self.cx.node().raw();
         let fin = self.cx.op() == self.ops.finish;
         let args = self.cx.args();
@@ -5508,12 +5527,11 @@ impl Run<'_, '_> {
             eprintln!("resume-verify: node {node} (finisher {fin}) mark {k} holds");
             return;
         }
-        let Some((np, _)) = self.mark_snaps.get(k as usize).cloned() else { return };
         eprintln!(
-            "resume-verify: node {node} mark {k}: the last run took it after {} commands, this one after {}",
+            "resume-verify: node {node} mark {k}: the last run took it after {} commands, this run compared after {}",
             op.at_cmds, np.at_cmds
         );
-        mark_why(node, k as usize, op, &np);
+        mark_why(node, k as usize, op, np);
         let v = self.v;
         let mut shown = Vec::new();
         for d in np.st.slot_diffs(&op.st).into_iter().take(12) {
