@@ -1352,6 +1352,18 @@ impl Run<'_, '_> {
         // guess; its page parameter markers resolved where the page
         // fired)
         let rtn = self.cx.placed_output_or(at, rtn_guess);
+        // (`PHITEX_RTN_TRACE=1`, profile: each page's routine material
+        // as read, against the guess it was placed with)
+        if crate::exec::prof_flag!("PHITEX_RTN_TRACE") {
+            eprintln!(
+                "rtn-trace: page {} node {} {} guess {} read {}",
+                j + 1,
+                self.cx.node().raw(),
+                if rtn == rtn_guess { "same" } else { "DIFF" },
+                v.render(rtn_guess).chars().take(400).collect::<String>(),
+                v.render(rtn).chars().take(400).collect::<String>()
+            );
+        }
         let rs = list_of(v, rtn);
         lp.prev_rtn = Some((key, rtn));
         if !in_material {
