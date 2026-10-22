@@ -4444,7 +4444,7 @@ impl Build {
         }
         crate::timeline::lap("engine: the environment pushed");
         // (the values the job made of the format's nodes: each once)
-        let made = env.made();
+        let made = Arc::new(env.made());
         job_env(&mut g, unit, &env, &made, &opts);
         // (the page builder, one node where the job begins: it folds the
         // pieces' profiles to the unit's end and places every page's
@@ -6334,19 +6334,16 @@ fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
 
 /// The job's environment: the format's parameters, the job name, the
 /// PDF options and the date (§241), set on `unit` before the first line.
-fn job_env(g: &mut Graph, unit: UnitId, env: &Env, made: &crate::fmtenv::Made, opts: &Options) {
+fn job_env(g: &mut Graph, unit: UnitId, env: &Env, made: &Arc<crate::fmtenv::Made>, opts: &Options) {
+    // (the format's bindings the environment's base: each made when a
+    // run first reads it, a value two bindings share made once; one no
+    // run reads is never made, nor its name)
+    {
+        let (fmt, made) = (Arc::clone(env), Arc::clone(made));
+        g.eng
+            .set_environment_base(Arc::new(move |v, f| fmt.get_field(v, f, &made)));
+    }
     let v = g.eng.values();
-    // (the format's bindings made values on the pool, by field as the
-    // format keeps them: each value two bindings share made once)
-    let mut ex = crate::exec::Coarse(crate::exec::Threads::new(g.threads));
-    let chunk = env.len().div_ceil(g.threads.max(1) * 4).max(1);
-    let format: Vec<(Field, ValueId)> =
-        crate::exec::map_on(&mut ex, env.len().div_ceil(chunk), &|c| {
-            env.bindings(v, made, c * chunk..((c + 1) * chunk).min(env.len()))
-        })
-        .into_iter()
-        .flatten()
-        .collect();
     let mut sets = Vec::new();
     sets.push((v.field("jobname"), v.str(&opts.jobname)));
     sets.push((v.field("dvicomment"), v.str(&opts.comment)));
@@ -6362,14 +6359,16 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, made: &crate::fmtenv::Made, o
         }
     }
     if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
-        g.start_env.extend(format.iter().chain(&sets).copied());
+        // (the check reads the format's bindings too: all of them made)
+        g.start_env
+            .extend(env.bindings(v, made, 0..env.len()).iter().chain(&sets).copied());
     }
     // (spec-final §4.5: the job's bindings go with the environment, one
     // push for all of them, made again only where an entry changed; the
     // graph has one unit, so the unit's start and the environment are
     // one place to read them)
     let _ = unit;
-    g.job = merge_by_field(&format, &by_field(sets));
+    g.job = by_field(sets);
     let env = g.environment(opts.fixpoint);
     g.push_env(env);
 }

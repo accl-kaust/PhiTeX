@@ -83,6 +83,13 @@ impl FormatEnv {
         Some(self.value(v, self.binds[i].2, made))
     }
 
+    /// The value bound to field `f`, made in `v` (none: the format binds
+    /// no such field).
+    pub(crate) fn get_field(&self, v: &Values, f: Field, made: &Made) -> Option<ValueId> {
+        let i = self.binds.binary_search_by_key(&f.0.raw(), |b| b.0).ok()?;
+        Some(self.value(v, self.binds[i].2, made))
+    }
+
     /// The names bound, in the bindings' order.
     pub(crate) fn names(&self) -> impl Iterator<Item = &str> + '_ {
         self.binds.iter().filter_map(|&(_, n, _)| self.str_at(n))
