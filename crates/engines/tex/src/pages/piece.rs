@@ -777,7 +777,9 @@ impl Run<'_, '_> {
         // so a value holding them in that order differs between two
         // builds of one text; stable, as the value list's)
         rs.sort_by_key(|x| x.0.0.raw());
-        let rs: Vec<ValueId> = rs.into_iter().map(|(f, x)| v.list(vec![f.0, x])).collect();
+        // (one list of the pairs in a row, `[f, x, f, x, ...]`: no list made
+        // per read)
+        let rs: Vec<ValueId> = rs.into_iter().flat_map(|(f, x)| [f.0, x]).collect();
         let gids = self.st.gid_mark();
         let mut locals: Vec<(Loc, Field)> = self
             .st
@@ -891,11 +893,13 @@ impl Run<'_, '_> {
         // (by field, then by the stretch's first candidate: one list
         // whatever order the run met them in)
         stretches.sort_unstable_by_key(|x| (x.0.raw(), x.3));
+        // (one list of the stretches in a row, five values each: no list
+        // made per stretch)
         let stretches = stretches
             .into_iter()
-            .map(|(f, g, kv, lo, hi)| {
+            .flat_map(|(f, g, kv, lo, hi)| {
                 let n = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
-                v.list(vec![f, v.int(i64::from(g)), kv, n(lo), n(hi)])
+                [f, v.int(i64::from(g)), kv, n(lo), n(hi)]
             })
             .collect();
         (v.list(rs), v.list(vec![v.list(stretches), v.list(cuts)]))
@@ -1045,8 +1049,7 @@ impl Run<'_, '_> {
         // close the piece made after the candidate came after them)
         read.extend(self.streams_since(0).into_iter().map(|f| f.0));
         let mut why = None;
-        for e in list_of(v, reads) {
-            let xs = list_of(v, e);
+        for xs in list_of(v, reads).chunks_exact(2) {
             if let [f, x] = xs[..]
                 && let Some(&(_, y)) = gdefs.iter().find(|(g, _)| *g == f)
                 && y != x
@@ -1760,11 +1763,9 @@ pub(crate) fn names_at(v: &Values, data: ValueId, k: u32) -> (ValueId, bool) {
         return (ValueId::UNIT, false);
     };
     let names = list_of(v, stretches)
-        .into_iter()
-        .filter_map(|s| {
-            let s = list_of(v, s);
-            (int_of(v, s[3]) <= k && k < int_of(v, s[4])).then(|| v.list(s[..3].to_vec()))
-        })
+        .chunks_exact(5)
+        .filter(|s| int_of(v, s[3]) <= k && k < int_of(v, s[4]))
+        .map(|s| v.list(s[..3].to_vec()))
         .collect();
     (v.list(names), int_of(v, cut) != 0)
 }
