@@ -166,6 +166,17 @@ pub struct Options {
     /// round ran with, and a warning names the fields still moving
     /// ([`Build::diagnostics`]).
     pub max_rounds: u64,
+    /// The relaxed mode's rounds: the loop-backs of the files the job
+    /// reads back (its `.aux`, `.toc`, `.out`, `.idx` and their kin)
+    /// move as soon as a run changes what they publish, and their
+    /// readers run again within the round, instead of waiting for the
+    /// round to end as latexmk's runs do. Fewer rounds; the result is
+    /// usually the same, but a document whose read-backs change more
+    /// than once or reach the round cap may differ from the exact
+    /// rounds' (a warning says so, [`Build::diagnostics`]), and even
+    /// one that settles cleanly is not proved to match. `false` (the
+    /// default): the exact rounds, byte for byte latexmk's.
+    pub early_loopbacks: bool,
     /// Where a tool's support files come from (bibliography styles and
     /// databases, index styles: [`ToolSearch`]); `None` asks
     /// [`Options::finder`] by name.
@@ -601,6 +612,7 @@ impl Default for Options {
             speculation: Speculation::Predicted,
             speculation_budget: 256,
             max_rounds: 5,
+            early_loopbacks: false,
             tool_finder: None,
             bibtex: phitex_bibtex::Options::default(),
             out_name_ok: None,
@@ -2103,6 +2115,7 @@ impl Graph {
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            early_loops: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pdf_cmds: Arc::default(),
             class_proj,
             outer_proj,
@@ -2535,6 +2548,18 @@ impl Graph {
         names
     }
 
+    /// Declares the read-back loop-backs `decl`, early in the relaxed
+    /// mode ([`Options::early_loopbacks`]).
+    fn decl_loops(&mut self, decl: &[(Field, ValueId)]) {
+        if self.ops.early_loops.load(std::sync::atomic::Ordering::Relaxed) {
+            for &(f, x) in decl {
+                self.eng.declare_loopback_early(f, x);
+            }
+        } else {
+            self.eng.declare_loopbacks(decl);
+        }
+    }
+
     /// Round one's guesses for the loop-backs: the last build's values
     /// (`opts`); none without one.
     fn guesses(&mut self, opts: &Options) {
@@ -2548,7 +2573,7 @@ impl Graph {
             let names = v.list(self.seeds.iter().map(|(n, _)| v.str(n)).collect());
             let f = v.field(crate::ops::WSEEN);
             decl_trace(&self.eng, f, names);
-            self.eng.declare_loopback(f, names);
+            self.decl_loops(&[(f, names)]);
         }
         // (a file read back from its text needs no guess of its keys)
         self.wkeys_guess = opts
@@ -2619,7 +2644,7 @@ impl Graph {
             for (f, x) in [(wf, none), (w, guess)] {
                 decl_trace(&self.eng, f, x);
             }
-            self.eng.declare_loopbacks(&[(wf, none), (w, guess)]);
+            self.decl_loops(&[(wf, none), (w, guess)]);
             // the guessed keys' `wdef:<field>` loop-backs declared with
             // it: a read-back of a guessed key never waits for them
             let keys: Vec<String> = self
@@ -2645,7 +2670,7 @@ impl Graph {
                     self.wdefs.push(k);
                 }
             }
-            self.eng.declare_loopbacks(&decl);
+            self.decl_loops(&decl);
         }
         self.written.push(name.to_owned());
     }
@@ -2792,6 +2817,23 @@ impl Graph {
                     names.join(", ")
                 ));
             }
+            // (the relaxed rounds, [`Options::early_loopbacks`]: a field
+            // read back that changed more than once, or reached the round
+            // limit, may have left another output than the exact rounds')
+            if r.early_may_differ() {
+                let v = self.eng.values();
+                let mut names: Vec<String> = r
+                    .early_loops
+                    .iter()
+                    .filter(|e| e.capped || e.oscillated())
+                    .map(|e| field_name(v, e.field))
+                    .collect();
+                names.sort();
+                self.eval_warnings.push(format!(
+                    "relaxed rounds: the files read back changed more than once or reached the round limit ({}); the output may differ from an exact build's, which --exact-pdf makes",
+                    names.join(", ")
+                ));
+            }
             for (k, d, n) in ex.by_kind() {
                 if n > 0 {
                     crate::timeline::note(&format!("runs: {k} ×{n} (summed over threads)"), d);
@@ -2875,6 +2917,16 @@ impl Graph {
                     r.cutoffs
                 );
                 eprintln!("acct-edit: quick path held {}", r.quick_held);
+                if !r.early_loops.is_empty() {
+                    eprintln!(
+                        "acct-edit: early loops: {} fields, {} changes, {} oscillated, {} capped, may differ {}",
+                        r.early_loops.len(),
+                        r.early_loops.iter().map(|e| u64::from(e.changes)).sum::<u64>(),
+                        r.early_loops.iter().filter(|e| e.oscillated()).count(),
+                        r.early_loops.iter().filter(|e| e.capped).count(),
+                        r.early_may_differ()
+                    );
+                }
                 // (the guesses this edit paid for: refuted runs, the
                 // fields they were refuted on, and the parked runs that
                 // started over and why)
@@ -3074,7 +3126,7 @@ impl Graph {
                     // evaluation more)
                     self.wdefs.push(f);
                 }
-                self.eng.declare_loopbacks(&decl);
+                self.decl_loops(&decl);
             }
             let asked_names: Vec<String> = {
                 let v = self.eng.values();
@@ -4395,6 +4447,9 @@ impl Build {
             opts.finisher_predictions,
             std::sync::atomic::Ordering::Relaxed,
         );
+        g.ops
+            .early_loops
+            .store(opts.early_loopbacks, std::sync::atomic::Ordering::Relaxed);
         // (observe: `PHITEX_MAX_ROUNDS`, a lower cap, so the warning names
         // the fields still moving after that round)
         let cap = crate::exec::obs_str!("PHITEX_MAX_ROUNDS")

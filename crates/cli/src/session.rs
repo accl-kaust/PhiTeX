@@ -134,9 +134,12 @@ pub struct Job {
     pub out_dir: PathBuf,
     /// The engine's threads (none: `PHITEX_THREADS`, else all the cores).
     pub threads: Option<usize>,
-    /// `--exact-pdf`: the PDF's objects numbered as pdfTeX numbers them
-    /// (false: the relaxed mode, the default).
-    pub exact_pdf: bool,
+    /// The exact rounds: the files read back move between rounds as
+    /// between latexmk's runs, so the output is pdfTeX's under latexmk,
+    /// byte for byte (`--exact`, `--exact-pdf`; the compatible mode
+    /// always). False: the relaxed rounds (`--relaxed`, the default),
+    /// [`phitex_tex::Options::early_loopbacks`].
+    pub exact: bool,
     /// `--spec`: when the engine runs steps ahead of their inputs (none:
     /// its default).
     pub spec: Option<String>,
@@ -684,6 +687,7 @@ impl Session {
                         Some("predicted") => phitex_tex::Speculation::Predicted,
                         _ => Options::default().speculation,
                     },
+                    early_loopbacks: !self.job.exact,
                     wkeys: self.load_wkeys(),
                     written_init: self.written_init(),
                     // (the package loads' records: machine-wide, beside the

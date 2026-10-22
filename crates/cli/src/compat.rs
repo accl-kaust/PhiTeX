@@ -232,7 +232,8 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         // (TeX's own default; with no terminal input an error stops the
         // job, as TeX's does when its standard input is at its end)
         threads,
-        exact_pdf: false,
+        // (pdflatex's runs: the exact rounds)
+        exact: true,
         spec: None,
         synctex,
         recorder,

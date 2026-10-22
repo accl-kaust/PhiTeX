@@ -209,6 +209,9 @@ pub(crate) struct Ops {
     pub fin_defs_start: std::sync::Arc<std::sync::Mutex<std::sync::Arc<FinTable>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// [`crate::Options::early_loopbacks`]: the read-back loop-backs
+    /// declared early (`crate::ops`).
+    pub early_loops: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The class projection of meanings ([`crate::val::class_projection`],
     /// registered with the engine): a lookup that only stores its token
     /// reads the name's class, not its meaning ([`Run::class_lookup`]).
@@ -3285,7 +3288,11 @@ impl<'c, 'a> Run<'c, 'a> {
         // its lines are, which its file node finds, `crate::ops`)
         for fam in [crate::fields::Fam::Wkeys, crate::fields::Fam::Wfile] {
             let f = self.keyed(fam, name);
-            self.cx.declare_loopback(f, v.list(Vec::new()));
+            if self.ops.early_loops.load(std::sync::atomic::Ordering::Relaxed) {
+                self.cx.declare_loopback_early(f, v.list(Vec::new()));
+            } else {
+                self.cx.declare_loopback(f, v.list(Vec::new()));
+            }
         }
         Ok(())
     }
