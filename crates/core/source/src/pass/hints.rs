@@ -1546,6 +1546,14 @@ impl<'a> Closure<'a> {
     /// Whether the document defines any of `names` (a set the prelude's
     /// cache holds is then not this document's).
     fn document_defines(&self, names: &[String]) -> bool {
+        // (a text that defines nothing: each name read, none defined,
+        // with no lookup)
+        if self.document.holds_no_name() {
+            for n in names {
+                crate::pass::defs::note_read(n);
+            }
+            return false;
+        }
         names
             .iter()
             .any(|n| self.document.effects(n).is_some() || self.document.shapes(n).is_some())

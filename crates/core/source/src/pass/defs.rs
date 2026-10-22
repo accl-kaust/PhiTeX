@@ -234,6 +234,12 @@ type ReadSet = HashSet<String, std::hash::BuildHasherDefault<crate::pass::hints:
 
 /// A lookup of `name` in any definitions, noted while [`with_reads`]
 /// runs on this thread.
+/// A lookup of `name` noted ([`with_reads`]) where the caller knows its
+/// answer without looking ([`Definitions::holds_no_name`]).
+pub(crate) fn note_read(name: &str) {
+    read(name);
+}
+
 fn read(name: &str) {
     READS.with(|r| {
         if let Some(set) = r.borrow_mut().as_mut()
@@ -444,6 +450,13 @@ impl Definitions {
     pub fn register(&self, name: &str) -> Option<u32> {
         read(name);
         self.registers.get(name).copied()
+    }
+
+    /// Whether no name has a definition or a body here (nothing read: a
+    /// question the caller answers for each name it reads, as
+    /// [`Definitions::shapes`] and [`Definitions::effects`] would).
+    pub(crate) fn holds_no_name(&self) -> bool {
+        self.macros.is_empty() && self.bodies.is_empty()
     }
 
     pub(crate) fn shapes(&self, name: &str) -> Option<Vec<&Shape>> {
