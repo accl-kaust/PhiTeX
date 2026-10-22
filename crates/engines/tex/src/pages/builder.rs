@@ -893,6 +893,13 @@ impl Operation for Pages {
                 if lp.torn || r.cut_off {
                     return Err(s);
                 }
+                // (its marks kept with what it committed at the stop too: a
+                // run after a broken read resumes at the mark before it)
+                if !r.page_marks.is_empty() {
+                    r.cx.keep_after(std::sync::Arc::new(KeptLoop {
+                        snaps: r.page_marks.clone(),
+                    }));
+                }
                 let tok = Box::new(ParkedLoop {
                     lp,
                     marks: std::mem::take(&mut r.page_marks),
