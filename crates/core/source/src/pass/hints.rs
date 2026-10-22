@@ -1460,12 +1460,6 @@ impl Acc {
     /// [`DefSet::add`] of `o`; `outer: false`: of `o` run inside a group
     /// (no outer calls, its global definitions alone).
     fn add(&mut self, o: &DefSet, outer: bool) {
-        let [relied, calls, outer_calls, unbounded] = &mut self.seen;
-        Acc::extend(&mut self.s.relied, relied, &o.relied);
-        Acc::extend(&mut self.s.calls, calls, &o.calls);
-        if outer {
-            Acc::extend(&mut self.s.outer_calls, outer_calls, &o.outer_calls);
-        }
         // (a name the set has already: its flag updated in place, the
         // name not copied to look it up)
         fn put(m: &mut BTreeMap<String, bool>, k: &str, v: bool) {
@@ -1475,6 +1469,12 @@ impl Acc {
                     m.insert(k.to_owned(), v);
                 }
             }
+        }
+        let [relied, calls, outer_calls, unbounded] = &mut self.seen;
+        Acc::extend(&mut self.s.relied, relied, &o.relied);
+        Acc::extend(&mut self.s.calls, calls, &o.calls);
+        if outer {
+            Acc::extend(&mut self.s.outer_calls, outer_calls, &o.outer_calls);
         }
         for (k, v) in &o.names {
             if outer || *v {
@@ -1560,6 +1560,10 @@ impl DefSet {
     }
 }
 
+/// A call's set in [`Closure`]'s memo: the set, the names looked up for
+/// it, whether a recursion cut it short.
+type Memo = (std::sync::Arc<DefSet>, std::sync::Arc<Vec<String>>, bool);
+
 /// Where the closure looks names up: the document's definitions, then
 /// the kernel's.
 pub(crate) struct Closure<'a> {
@@ -1568,7 +1572,7 @@ pub(crate) struct Closure<'a> {
     /// By name: the set, the names looked up for it, and whether a
     /// recursion cut it short (then it depends on the order of calls).
     /// (shared, not copied, by each call that takes it)
-    memo: HashMap<String, (std::sync::Arc<DefSet>, std::sync::Arc<Vec<String>>, bool)>,
+    memo: HashMap<String, Memo>,
     /// By name, a call's whole set at the top ([`Closure::call_top`]):
     /// the same for every call of the name in this closure's life (its
     /// definitions do not change).
