@@ -198,6 +198,50 @@ impl Cats {
 /// (`pg:`) and `aftertoken` come from the context, not from the command ([`Analysis::cs_hint`]).
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn class_state(name: &str) -> Option<&'static [&'static str]> {
+    // (one table lookup per name seen on the thread: the rows are a
+    // long match of strings, asked for every call of every body)
+    thread_local! {
+        static C: std::cell::RefCell<FxHashMap<Box<str>, Option<&'static [&'static str]>>> =
+            std::cell::RefCell::default();
+    }
+    if let Some(r) = C.with(|c| c.borrow().get(name).copied()) {
+        return r;
+    }
+    let r = class_state_of(name);
+    C.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 1 << 16 {
+            c.clear();
+        }
+        c.insert(Box::from(name), r);
+    });
+    r
+}
+
+/// The meaning field of the control sequence the pass names `name`
+/// (`cs:` and its name, a `^^` form read), made once per name on the
+/// thread: a body's relied names are asked for at every call.
+fn cs_field(name: &str) -> Option<String> {
+    thread_local! {
+        static C: std::cell::RefCell<FxHashMap<Box<str>, Option<String>>> =
+            std::cell::RefCell::default();
+    }
+    if let Some(r) = C.with(|c| c.borrow().get(name).cloned()) {
+        return r;
+    }
+    let r = Tok::cs(&caret_name(name)).field_name();
+    C.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 1 << 16 {
+            c.clear();
+        }
+        c.insert(Box::from(name), r.clone());
+    });
+    r
+}
+
+/// [`class_state`], looked up in its table.
+fn class_state_of(name: &str) -> Option<&'static [&'static str]> {
     let n = name
         .strip_prefix("tex_")
         .and_then(|x| x.strip_suffix(":D"))
@@ -937,7 +981,7 @@ impl TextHints {
     /// line of a file read by `\input`, a region).
     pub(crate) fn at_until(&self, off: usize, end: usize) -> Hint {
         let k = self.starts.partition_point(|&s| (s as usize) < off);
-        let mut acc: Option<Bound> = None;
+        let mut acc: Option<Union> = None;
         let mut first: Option<usize> = None;
         // (the first unbounded command, and whether every unbounded one
         // has a guess: the span's guess is then the union)
@@ -974,10 +1018,11 @@ impl TextHints {
                 continue;
             }
             match &mut acc {
-                Some(acc) => union(acc, part),
-                None => acc = Some(part.clone()),
+                Some(acc) => acc.add(part),
+                None => acc = Some(Union::new(part.clone())),
             }
         }
+        let acc = acc.map(|u| u.b);
         if let Some(mut h) = any {
             h.guess = if guessed { acc } else { None };
             return h;
@@ -1659,6 +1704,64 @@ fn line_span_end(text: &str, off: usize) -> usize {
 
 /// The union of bounds: what a slice of several commands may define.
 /// `None` state in either is `None` (every head).
+/// A union of bounds made one by one ([`union`]'s result), with sets of
+/// what it holds kept as it grows: no set of it made again per bound
+/// added (a span's bound is the union of its many commands').
+struct Union {
+    b: Bound,
+    prefixes: phitex_defuse::FxHashSet<String>,
+    means: phitex_defuse::FxHashSet<String>,
+    names: phitex_defuse::FxHashSet<String>,
+}
+
+impl Union {
+    fn new(b: Bound) -> Union {
+        Union {
+            prefixes: b.prefixes.iter().cloned().collect(),
+            means: b.means.iter().map(|m| m.0.clone()).collect(),
+            names: b.names.iter().cloned().collect(),
+            b,
+        }
+    }
+
+    /// [`union`] of the bound so far and `o`.
+    fn add(&mut self, o: &Bound) {
+        for p in &o.prefixes {
+            if self.prefixes.insert(p.clone()) {
+                self.b.prefixes.push(p.clone());
+            }
+        }
+        for &c in o.cats.iter() {
+            self.b.cats.add(c);
+        }
+        // (a meaning an earlier command of the span defines is the run's
+        // own, not assumed of the state before it)
+        for m in &o.means {
+            if !self.names.contains(&m.0) && self.means.insert(m.0.clone()) {
+                self.b.means.push(m.clone());
+            }
+        }
+        for n in &o.names {
+            if self.names.insert(n.clone()) {
+                self.b.names.push(n.clone());
+            }
+        }
+        match (&mut self.b.state, &o.state) {
+            (Some(sa), Some(sb)) => {
+                for h in sb {
+                    if !sa.contains(h) {
+                        sa.push(*h);
+                    }
+                }
+            }
+            (st, None) => *st = None,
+            (None, Some(_)) => {}
+        }
+        self.b.no_scope = self.b.no_scope && o.no_scope;
+        self.b.claim = None;
+    }
+}
+
 fn union(a: &mut Bound, b: &Bound) {
     use phitex_defuse::FxHashSet;
     // (each list kept in its order, each entry once: what `a` holds is
@@ -2748,7 +2851,7 @@ impl Analysis<'_> {
         let mut means: phitex_defuse::FxHashSet<String> =
             b.means.iter().map(|m| m.0.clone()).collect();
         for r in &set.relied {
-            if let Some(f) = Tok::cs(&caret_name(r)).field_name()
+            if let Some(f) = cs_field(r)
                 && !means.contains(&f)
             {
                 means.insert(f.clone());
@@ -2866,7 +2969,7 @@ impl Analysis<'_> {
             }
         }
         for r in &it.hints.relied {
-            if let Some(f) = Tok::cs(&caret_name(r)).field_name()
+            if let Some(f) = cs_field(r)
                 && !b.means.iter().any(|m| m.0 == f)
             {
                 b.means.push((f, 1));
