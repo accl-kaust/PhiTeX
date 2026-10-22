@@ -5772,7 +5772,7 @@ impl Run<'_, '_> {
             let folded = mark_table(&self.mark_snaps, k as usize);
             let whole = self.st.park(v);
             let (a, b) = (folded.table(), &whole);
-            let ok_sum = a.slot_sum() == b.slot_sum();
+            let ok_sum = a.def_sum() == b.def_sum();
             let ok_touched = a.touched_len() == b.touched_len();
             let ok_rest = a.rest_hash() == b.rest_hash();
             let ok_inc = self.mark_snaps[k as usize].0.mark_sum == Some(b.slot_sum());

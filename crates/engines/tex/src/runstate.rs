@@ -1373,8 +1373,19 @@ impl State {
                     .map_or(0, |m| m.ldef_stamp);
                 self.note_cand(s.loc, ldef, cur);
             }
+            // (while the run keeps marks: the engine's value put back, with
+            // no definition of the run's in force, is not kept but read
+            // again where it is used, as it was first: the value the run
+            // read is then none of its state, and a mark after the group
+            // compares equal whatever the engine gave it, its uses after
+            // the mark reads the engine sees, [`State::mark_delta`])
+            let unload = self.track
+                && s.ldef == (0, false, None)
+                && s.prev.flags & LOADED != 0
+                && s.prev.flags & PRELOADED == 0
+                && s.prev.flags & HAS_ID != 0;
             let slot = self.slot(s.loc);
-            slot.e = s.prev;
+            slot.e = if unload { UNLOADED } else { s.prev };
             slot.save_gid = s.gid;
             slot.save_stamp = s.stamp;
             let meta = slot.meta;
@@ -1384,6 +1395,9 @@ impl State {
             {
                 let m = self.meta_mut(m - 1);
                 (m.ldef_stamp, m.ldef_local, m.ldef_gid) = s.ldef;
+                if unload {
+                    m.eng = None;
+                }
             }
         }
         self.defined.truncate(def_base.min(self.defined.len()));
@@ -1969,10 +1983,24 @@ impl State {
 
     /// One slot as [`State::park`] parks it (`None`: left out, no
     /// definition, save or load of it), its entry encoded once.
+    /// One slot for a mark: its entry in the mark's table (`None`: none,
+    /// a read's cache among them, [`PSlot::is_read_cache`], which a run
+    /// resumed there reads again) and its digest (a cache's too: a run cut
+    /// off at a mark goes on with the values it holds).
+    fn slot_mark(&mut self, v: &Values, l: Loc) -> (Option<PSlot>, u64) {
+        match self.park_slot(v, l) {
+            Some(p) if p.is_read_cache() => (None, PState::slot_hash(&p)),
+            Some(p) => {
+                let h = PState::slot_hash(&p);
+                (Some(p), h)
+            }
+            None => (None, 0),
+        }
+    }
+
     fn park_slot(&mut self, v: &Values, l: Loc) -> Option<PSlot> {
         let s = self.slot_ref(l)?;
-        // (a read's cache is none of a mark's: [`PSlot::is_read_cache`])
-        if s.meta == 0 && s.save_gid == 0 && s.ginert == 0 && s.e.flags & PRELOADED == 0 {
+        if s.meta == 0 && s.save_gid == 0 && s.ginert == 0 && s.e.flags & LOADED == 0 {
             return None;
         }
         let e = s.e;
@@ -2064,23 +2092,19 @@ impl State {
         let mut slots = Vec::new();
         let mut gone = Vec::new();
         for l in changed {
-            let ps = self.park_slot(v, l);
-            let h = ps
-                .as_ref()
-                .filter(|p| !p.is_read_cache())
-                .map_or(0, PState::slot_hash);
-            let old = match ps {
+            let (ps, h) = self.slot_mark(v, l);
+            match ps {
                 Some(p) => {
                     slots.push(p);
-                    img.hashes.insert(l, h)
+                    img.tabled.insert(l);
                 }
                 None => {
-                    if img.hashes.contains_key(&l) {
+                    if img.tabled.remove(&l) {
                         gone.push(self.ploc(l));
                     }
-                    img.hashes.remove(&l)
                 }
-            };
+            }
+            let old = if h == 0 { img.hashes.remove(&l) } else { img.hashes.insert(l, h) };
             img.sum = img.sum.wrapping_sub(old.unwrap_or(0)).wrapping_add(h);
         }
         let touched: Vec<PLoc> = self.touched[img.touched..].iter().map(|&l| self.ploc(l)).collect();
@@ -2167,8 +2191,11 @@ impl State {
         img.begun = true;
         for i in 0..self.touched.len() {
             let l = self.touched[i];
-            if let Some(p) = self.park_slot(v, l) {
-                let h = if p.is_read_cache() { 0 } else { PState::slot_hash(&p) };
+            let (ps, h) = self.slot_mark(v, l);
+            if ps.is_some() {
+                img.tabled.insert(l);
+            }
+            if h != 0 {
                 img.hashes.insert(l, h);
                 img.sum = img.sum.wrapping_add(h);
             }
@@ -2321,9 +2348,10 @@ impl PSlot {
     /// engine's value, which every run reaching here with the same reads
     /// has, loaded or not as its path went (a lookahead that fetched the
     /// next command's name before a mark, a memo kept over a park that
-    /// spared a lookup). Not part of the state a mark compares, nor of
-    /// a mark's table: a run resumed there reads it again. A value the
-    /// run preloaded (from its text: a candidate's bindings) is no read's.
+    /// spared a lookup). Not part of a mark's table: a run resumed there
+    /// reads it again. Part of the state a mark compares: a run cut off
+    /// there goes on with the values its tables hold. A value the run
+    /// preloaded (from its text: a candidate's bindings) is no read's.
     fn is_read_cache(&self) -> bool {
         self.meta.is_none() && self.save_gid == 0 && self.ginert == 0 && self.e.flags & PRELOADED == 0
     }
@@ -2347,6 +2375,8 @@ struct PSaved {
 pub(crate) struct MarkImage {
     begun: bool,
     hashes: FxHashMap<Loc, u64>,
+    /// The slots the marks' tables hold (a read's cache is in none).
+    tabled: phitex_defuse::FxHashSet<Loc>,
     sum: u64,
     touched: usize,
     metas: usize,
@@ -2532,9 +2562,14 @@ impl PState {
         out
     }
 
-    /// The slots' digests summed: their order, the run's, left out, and
-    /// the slots that only cache a read ([`PSlot::is_read_cache`]).
+    /// The slots' digests summed, their order, the run's, left out.
     pub(crate) fn slot_sum(&self) -> u64 {
+        self.slots.iter().fold(0u64, |a, s| a.wrapping_add(Self::slot_hash(s)))
+    }
+
+    /// [`PState::slot_sum`] but for the slots that only cache a read (what
+    /// a mark's table holds, [`State::mark_delta`]).
+    pub(crate) fn def_sum(&self) -> u64 {
         self.slots
             .iter()
             .filter(|s| !s.is_read_cache())
