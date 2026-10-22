@@ -641,7 +641,7 @@ pub(crate) fn scan_numexpr_num(run: &mut Run<'_, '_>) -> R<crate::scan::Num> {
         let f = run.scan_int_num()?;
         // §1666: the next operator
         run.skip_blanks_x()?;
-        let op = [b'+', b'-', b'*', b'/'].iter().any(|&c| run.is_other(c));
+        let op = b"+-*/".iter().any(|&c| run.is_other(c));
         if !op && matches!(f, Num::Macro(..)) {
             // (the expression ends: at the top, `\relax` is taken)
             if run.cur.cmd != cmd::RELAX {
