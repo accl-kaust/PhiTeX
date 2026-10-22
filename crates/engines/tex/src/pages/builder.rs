@@ -139,6 +139,8 @@ pub(crate) const fn end_sub_of(item: u32) -> Option<(u32, u32)> {
 pub(crate) struct UnitRec {
     pub pid: i64,
     pub items: std::sync::Arc<Vec<crate::vprof::PItem>>,
+    /// The profile unit it was decoded from (its version, [`loop_state`]).
+    pub src: ValueId,
 }
 
 /// The page builder's node's loop, kept over a park.
@@ -312,7 +314,7 @@ pub(crate) fn loop_state(lp: &PageLoop) -> u64 {
         lp.marks,
         lp.pend,
         lp.page_src,
-        lp.units,
+        lp.units.iter().map(|u| (u.pid, u.src.raw(), lp.marks.len())).collect::<Vec<_>>(),
         lp.frontier,
         lp.last_fire.map(|(n, a, b)| (n.raw(), a, b)),
         lp.page_ins,
@@ -915,6 +917,17 @@ impl Operation for Pages {
     }
 }
 
+/// The pages between two marks of the page builder's loop (profile:
+/// `PHITEX_PAGE_MARK_EVERY`).
+fn page_mark_every() -> usize {
+    if cfg!(feature = "profile") {
+        if let Some(n) = crate::exec::env_str!("PHITEX_PAGE_MARK_EVERY").and_then(|s| s.parse().ok()) {
+            return n;
+        }
+    }
+    1
+}
+
 /// Whether the page builder takes marks ([`Run::page_mark`]; profile:
 /// `PHITEX_PAGE_MARKS=0` none, to measure them).
 fn page_marks() -> bool {
@@ -1212,7 +1225,7 @@ impl Run<'_, '_> {
                 Self::drop_units(lp);
                 pp::add(pp::DROP, t);
                 let t = pp::start();
-                let r = self.fold_unit(lp, node, pid, items, &classes);
+                let r = self.fold_unit(lp, node, pid, items, &classes, x);
                 pp::add(pp::FOLD, t);
                 // (a read of a page that fired in it stopped (where the
                 // page's piece is, a node before it still in work): the
@@ -1228,7 +1241,7 @@ impl Run<'_, '_> {
             // run of the loop resumes, or is cut off where it comes to the
             // same state, [`Run::page_mark`])
             if self.page_marks_on
-                && self.page_marks.last().map_or(0, |m| m.0.pages.len()) < lp.pages.len()
+                && self.page_marks.last().map_or(0, |m| m.0.pages.len()) + page_mark_every() <= lp.pages.len()
             {
                 self.page_mark(lp)?;
             }
@@ -1290,6 +1303,7 @@ impl Run<'_, '_> {
         pid: i64,
         items: Vec<crate::vprof::PItem>,
         classes: &[(u16, InsertClass)],
+        src: ValueId,
     ) -> R<()> {
         use crate::vprof::PItem;
         let seq = u64::try_from(lp.order.len()).unwrap_or(u64::MAX);
@@ -1297,6 +1311,7 @@ impl Run<'_, '_> {
         lp.prev.entry(pid).or_insert(lp.cur);
         lp.units.push(UnitRec {
             pid,
+            src,
             items: std::sync::Arc::new(items),
         });
         let ui = lp.units.len() - 1;
