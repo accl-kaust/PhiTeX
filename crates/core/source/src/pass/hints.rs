@@ -9,7 +9,12 @@
 //! is a value is named by its prefix (`count:`). A register allocated by
 //! `\newcount\x` is `count:` (its number is a value, catalogue F10).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+
+/// Maps and sets of names, hashed with [`Fx`]: memos and membership
+/// tests, never iterated in an order that matters.
+type HashMap<K, V, S = std::hash::BuildHasherDefault<Fx>> = std::collections::HashMap<K, V, S>;
+type HashSet<K, S = std::hash::BuildHasherDefault<Fx>> = std::collections::HashSet<K, S>;
 use std::fmt::Write as _;
 
 use super::atoms::{Atom, AtomKind};
@@ -1531,9 +1536,9 @@ impl<'a> Closure<'a> {
         Closure {
             document,
             prelude,
-            memo: HashMap::new(),
-            tops: HashMap::new(),
-            busy: HashSet::new(),
+            memo: HashMap::default(),
+            tops: HashMap::default(),
+            busy: HashSet::default(),
             frame: (Vec::new(), false),
         }
     }
