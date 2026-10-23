@@ -896,8 +896,11 @@ impl Operation for Dvi {
     fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         Some(crate::pages::no_units(v))
     }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(Vec::new())
+    /// The file ([`crate::assemble::END_FILE`]), its only effect: no
+    /// output (an output changed at every edit re-asked each reader of
+    /// a window that ends at this node, the page builder's).
+    fn defs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(vec![(v.field(crate::assemble::END_FILE), Locality::Global)])
     }
     /// Where the pages end and the accumulators the file is made of:
     /// the node waits while a page node or writer step before it is in
@@ -919,7 +922,10 @@ impl Operation for Dvi {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
-        crate::assemble::output(cx, o)
+        let file = crate::assemble::output(cx, o)?;
+        let v = cx.values();
+        cx.define_with(v.field(crate::assemble::END_FILE), file, Locality::Global);
+        Ok(ValueId::UNIT)
     }
 }
 

@@ -1576,6 +1576,22 @@ fn print_audit(eng: &Engine, a: &phitex_defuse::RunAudit) {
         ms(a.wasted_time),
         top.join("; ")
     );
+    // (the reads the commits re-asked, by field, and the readers re-asked
+    // on all their reads, by why)
+    let asked: u64 = a.rechecked.iter().map(|e| e.1).sum();
+    let broke: u64 = a.rechecked.iter().map(|e| e.2).sum();
+    let fields: Vec<String> = a
+        .rechecked
+        .iter()
+        .take(24)
+        .map(|&(f, n, b)| format!("{} {n}/{b}", f.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f))))
+        .collect();
+    let all: Vec<String> = a.rechecked_all.iter().map(|&(w, n, k)| format!("{w}: {n} readers {k} reads")).collect();
+    eprintln!(
+        "acct-edit: rechecked {asked} reads ({broke} broke) by field [{}]; all-reads readers by why [{}]",
+        fields.join("; "),
+        all.join("; ")
+    );
 }
 
 /// The cold accounting of an evaluation (spec-final §1), with
@@ -5915,9 +5931,7 @@ impl Build {
     #[must_use]
     pub fn is_pdf(&self) -> bool {
         let v = self.g.eng.values();
-        self.g
-            .eng
-            .output(self.dvi)
+        self.end_file()
             .is_some_and(|x| crate::assemble::file_bytes_shared(v, x).starts_with(b"%PDF"))
     }
 
@@ -5938,6 +5952,13 @@ impl Build {
             })
     }
 
+    /// The output file's value as the end node defined it
+    /// ([`crate::assemble::END_FILE`]).
+    fn end_file(&self) -> Option<ValueId> {
+        let v = self.g.eng.values();
+        self.g.eng.def_value(self.dvi, v.field(crate::assemble::END_FILE))
+    }
+
     /// The output file (DVI or PDF) and the log.
     #[must_use]
     pub fn output(&self) -> (Vec<u8>, String) {
@@ -5951,7 +5972,7 @@ impl Build {
     pub fn output_shared(&self) -> (Arc<Vec<u8>>, String) {
         let v = self.g.eng.values();
         let key = (
-            self.g.eng.output(self.dvi),
+            self.end_file(),
             self.g.eng.acc_value(self.unit, v.field("log")),
             self.g.eng.acc_value(self.unit, v.field("pagehash")),
             self.g.eval_errors.len(),
@@ -5969,9 +5990,7 @@ impl Build {
     fn output_made(&self) -> (Arc<Vec<u8>>, String) {
         let v = self.g.eng.values();
         let mut dvi: Arc<Vec<u8>> = self
-            .g
-            .eng
-            .output(self.dvi)
+            .end_file()
             .map(|x| crate::assemble::file_bytes_shared(v, x))
             .unwrap_or_default();
         let t0 = std::time::Instant::now();

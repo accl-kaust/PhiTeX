@@ -64,6 +64,10 @@ pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, 
 /// The exact PDF file the link made (`pdf:file`), read by the end node.
 pub(crate) const LINKED: &str = "pdf:file";
 
+/// The output file the end node made ([`output`]), which the build reads
+/// (`Build::output`); no node reads it.
+pub(crate) const END_FILE: &str = "end:file";
+
 /// The bytes of the files the link made, by their values table and hash:
 /// the file's value is `["bytes", hash, length]`, not the file as a string
 /// (copied, interned and hashed as characters, then copied back to bytes:
