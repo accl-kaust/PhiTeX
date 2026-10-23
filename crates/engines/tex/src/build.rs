@@ -2501,6 +2501,7 @@ impl Run<'_, '_> {
     /// [`Self::char_run`]): an `sf_code` above 1000 needs the old factor
     /// only through "below 1000?", so with the old factor unknown it is
     /// kept as the update itself (`-s`), never read.
+    #[inline]
     fn adjust_sf(&mut self, _md: &Mode, ch: u32, sf: &mut i32) -> R<()> {
         let s = self.code(2, ch)?;
         if s == 1000 {
@@ -2554,8 +2555,16 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let tfm = &loaded.tfm;
+        let chars = &loaded.at.chars;
+        // (whether the list ends with the hyphen character: a
+        // discretionary is §1035's to insert)
+        let mut after_hyphen =
+            matches!(out.last(), Some(Node::Char { ch, .. }) if i32::from(*ch) == hyphen_char);
         loop {
             let Some(cl) = *cur_l else { return Ok(()) };
+            if after_hyphen {
+                return Ok(());
+            }
             let line = &self.input.lines[li];
             if line.endch == -2 {
                 return Ok(());
@@ -2570,10 +2579,7 @@ impl Run<'_, '_> {
             if cat != cmd::LETTER && cat != cmd::OTHER_CHAR {
                 return Ok(());
             }
-            if false_bchar == Some(c)
-                || matches!(out.last(), Some(Node::Char { ch, .. }) if i32::from(*ch) == hyphen_char)
-                || !view.exists(f, c)
-            {
+            if false_bchar == Some(c) || chars.get(c as usize).is_none_or(Option::is_none) {
                 return Ok(());
             }
             let (Ok(l8), Ok(r8)) = (u8::try_from(cl), u8::try_from(c)) else {
@@ -2588,10 +2594,9 @@ impl Run<'_, '_> {
             self.adjust_sf(md, c, sf)?;
             *cur_q = out.len();
             *cur_l = Some(c);
-            out.push(Node::Char {
-                font: f,
-                ch: u16::try_from(c).unwrap_or(0),
-            });
+            let ch = u16::try_from(c).unwrap_or(0);
+            after_hyphen = i32::from(ch) == hyphen_char;
+            out.push(Node::Char { font: f, ch });
         }
     }
 
