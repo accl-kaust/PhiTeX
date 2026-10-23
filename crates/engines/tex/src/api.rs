@@ -1295,6 +1295,10 @@ pub struct Stats {
     /// Attempts that resumed a stopped run at its blocked read, and that
     /// started over though one was kept (a read changed).
     pub resumed: u64,
+    /// Runs resumed at a mark of their last run, and runs cut off at one
+    /// (`phitex_defuse::Report::resumed_at_mark`, `cut_in_run`).
+    pub resumed_at_mark: u64,
+    pub cut_in_run: u64,
     pub restarted: u64,
     /// Stopped runs restarted instead of resumed, by the first read that
     /// refused the resume.
@@ -2011,6 +2015,8 @@ impl Stats {
         self.pending_sets += r.pending_sets;
         self.stops += r.stops;
         self.resumed += r.resumed;
+        self.resumed_at_mark += r.resumed_at_mark;
+        self.cut_in_run += r.cut_in_run;
         self.restarted += r.restarted;
         for &(k, n) in &r.restarted_by {
             match self.restarted_by.iter_mut().find(|x| x.0 == k) {

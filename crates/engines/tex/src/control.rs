@@ -2059,6 +2059,9 @@ impl Run<'_, '_> {
             Some(crate::run::FileLine::Piece(name)) => {
                 let v = self.v;
                 let lines = v.field("lines");
+                // (a mark before the read: an edit that moves the lines
+                // runs the command again from here, [`Run::mark_before_read`])
+                self.mark_before_read()?;
                 // (observe, `PHITEX_READS=lines`: each reader, where)
                 if crate::exec::obs_flag!("PHITEX_READS") {
                     self.trace_read(lines, false);

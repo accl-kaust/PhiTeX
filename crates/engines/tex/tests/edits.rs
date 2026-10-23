@@ -165,6 +165,35 @@ fn tiny_edit() {
     );
 }
 
+/// A mark's digest counts the slots that only cache a read: past a
+/// mark a run may use a value it read before it with no read of its own.
+/// Here one paragraph (one node) looks at `\foo` between its first two
+/// marks and typesets it after the second: the edit's run resumes at the
+/// first (its reads before it hold) and reads the new `\foo`, and at the
+/// second its state differs from its last run's only in that cache. A
+/// cutoff there would keep the old `\foo` typeset (no read after the
+/// mark says it changed). (`\foo` by `\csname`: a name in the text is
+/// looked up as the run begins.)
+#[test]
+fn cutoff_at_a_mark_counts_read_caches() {
+    let fx = common::fixtures().join("dvi");
+    let src = "\\def\\foo{abc}\n\n\\count1=0 \\def\\body{\\advance\\count1 by 1 \\ifnum\\count1<1500 \\expandafter\\body\\fi}\n\n\\noindent\\body\\expandafter\\ifx\\csname foo\\endcsname\\relax\\fi\\count1=0 \\body\\csname foo\\endcsname\\par\n\n\\end\n".to_owned();
+    let prelude = common::plain();
+    let opts = || common::options("./t.tex", "t", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replacen("{abc}", "{xyz}", 1);
+    b.edit(&text);
+    let cold = common::build(opts(), Some(&prelude), &text);
+    eprintln!(
+        "read caches: {} nodes run, resumed at a mark {}, cut off at a mark {}",
+        b.stats.nodes_run, b.stats.resumed_at_mark, b.stats.cut_in_run
+    );
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "the edit's output differs from a cold build's: {}", d.unwrap_or_default());
+    // (the paragraph's run resumed at its first mark: the case is met)
+    assert!(b.stats.resumed_at_mark > 0, "no run resumed at a mark");
+}
+
 /// An edit inside a mark the output routine reads.
 #[test]
 fn tiny_mark_edit() {

@@ -328,6 +328,18 @@ impl FileRest {
         f
     }
 
+    /// Whether two are the same file at the same place
+    /// ([`crate::input::Seg::same`]).
+    pub(crate) fn same(&self, o: &FileRest) -> bool {
+        (self.id, self.off, self.name, self.pos, self.line, self.sliceable)
+            == (o.id, o.off, o.name, o.pos, o.line, o.sliceable)
+            && match (&self.units, &o.units) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a[..] == b[..],
+                _ => false,
+            }
+    }
+
     /// Whether its text is still to be read from its units.
     pub(crate) fn lazy(&self) -> bool {
         self.units.as_ref().is_some_and(|u| !u.is_empty()) && self.str().is_empty()
@@ -685,12 +697,27 @@ pub(crate) struct Run<'c, 'a> {
     /// parked run's, and its digest; the ones before the mark a resumed
     /// run began at are its last run's ([`phitex_defuse::Ctx::resumed`]).
     pub mark_snaps: Vec<(std::sync::Arc<Parked>, u64)>,
+    /// The marks of `mark_snaps` before this one hold another text's rest
+    /// (a retexted run resumed at this one, [`retext_mark`]): their tables
+    /// fold into the later marks', no run resumes at them
+    /// ([`KeptMarks::stale_below`]).
+    pub mark_stale: usize,
     /// The command count, from the run's start over its parks and
     /// resumes ([`Run::cmds_before`]), at which its next mark is due: a
     /// multiple of [`MARK_EVERY`], so that every run of the node, whatever
     /// attempt or mark it began at, takes its marks at the same places in
     /// its text (0: the first, not set yet).
     pub next_mark: u64,
+    /// The slots' digests as the run's last mark saw them
+    /// ([`crate::runstate::MarkImage`]).
+    pub(crate) mark_img: crate::runstate::MarkImage,
+    /// The groups open when the run took a mark before an `\inputlineno`
+    /// read ([`Run::mark_before_read`]): a mark is due at the first
+    /// boundary with fewer open.
+    pub(crate) watch_exit: Option<usize>,
+    /// The commands begun when a run resumed at such a mark begins that
+    /// command again: no mark taken before the read again there.
+    pub(crate) anchor_skip_at: Option<u64>,
     /// The marks of the run this one resumed from ([`Run::take_mark`]'s
     /// patched cutoff compares its marks with theirs).
     pub old_marks: Option<std::sync::Arc<KeptMarks>>,
@@ -988,7 +1015,11 @@ impl<'c, 'a> Run<'c, 'a> {
             rt_rels: 0,
             resumed: false,
             mark_snaps: Vec::new(),
+            mark_stale: 0,
             next_mark: 0,
+            mark_img: crate::runstate::MarkImage::default(),
+            watch_exit: None,
+            anchor_skip_at: None,
             old_marks: None,
             marks_on: false,
             page_marks: Vec::new(),
@@ -2062,6 +2093,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Character `c`'s entry in code table `table` (0 `lc`, 1 `uc`, 2
     /// `sf`, 3 `mc`, 4 `dc`).
+    #[inline]
     pub(crate) fn code(&mut self, table: usize, c: impl TryInto<u32>) -> R<i32> {
         let c = c.try_into().unwrap_or(u32::MAX);
         if c < 256 && table < 5 && self.interp.is_none() {
@@ -5393,6 +5425,17 @@ pub(crate) struct Parked {
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
+    /// A mark's ([`Run::take_mark`]): `st` holds the slots changed since
+    /// the mark before only, these the slots gone since, and this the
+    /// slots' digest ([`crate::runstate::State::mark_delta`]); `None`: `st`
+    /// is the whole table.
+    mark_gone: Vec<crate::runstate::PLoc>,
+    mark_sum: Option<u64>,
+    /// Whether its table is whole ([`crate::runstate::MarkDelta::whole`]).
+    mark_whole: bool,
+    /// A mark before an `\inputlineno` read ([`Run::mark_before_read`]):
+    /// the groups open there.
+    watch: Option<usize>,
     contribs: Vec<(Field, ValueId)>,
     kids: Vec<(OpId, Vec<ValueId>)>,
     effect: Effect,
@@ -5430,6 +5473,11 @@ pub(crate) struct Parked {
 }
 
 impl Parked {
+    /// Its table.
+    pub(crate) fn table(&self) -> &crate::runstate::PState {
+        &self.st
+    }
+
     /// The commands its run began before it.
     pub(crate) fn at_cmds(&self) -> u64 {
         self.at_cmds
@@ -5576,6 +5624,10 @@ impl Run<'_, '_> {
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
+            mark_gone: Vec::new(),
+            mark_sum: None,
+            mark_whole: true,
+            watch: None,
             contribs: std::mem::take(&mut self.contribs),
             kids: std::mem::take(&mut self.kids),
             effect: self.effect,
@@ -5629,6 +5681,10 @@ impl Parked {
     }
 }
 
+/// A run's marks: each one's state as a parked run's and its digest
+/// ([`Run::mark_snaps`]).
+pub(crate) type MarkSnaps = Vec<(std::sync::Arc<Parked>, u64)>;
+
 pub(crate) struct KeptMarks {
     pub snaps: Vec<(std::sync::Arc<Parked>, u64)>,
     /// (observe, `PHITEX_MARK_CHECK`) Its contributions and children, to
@@ -5639,11 +5695,84 @@ pub(crate) struct KeptMarks {
     pub args: Vec<ValueId>,
     /// (observe) The commands the run began in all.
     pub total_cmds: u64,
+    /// [`Run::mark_stale`]: the marks before it hold another text's
+    /// rest; a run resumes only at this one or a later.
+    pub stale_below: usize,
+}
+
+/// A retexted node's resume ([`phitex_defuse::Ctx::resumed_retext`]):
+/// the last of its last run's marks, at most `kmax`, whose state the
+/// text the two runs share alone made, and the marks up to it with that
+/// one's text rest the new text's.
+///
+/// The mark's text rest ([`Parked::segs`] past its levels) must be the
+/// last text's rest unchanged (from its segment `m`), not a text the run
+/// edited or one with siblings' text after it; the segments before `m`
+/// (those it had begun, its levels' rests among them) and `m` itself
+/// (the next, whose start a line's continuation looks at,
+/// `Run::join_continuation`) must be the new text's. The node's other
+/// arguments must be the same (where it is, its kind, its hint), and no
+/// part of either text a unit (`w`, read when the run begins,
+/// [`Run::resolve_units`]).
+pub(crate) fn retext_mark(
+    v: &Values,
+    km: &KeptMarks,
+    kmax: u32,
+    old_args: &[ValueId],
+    args: &[ValueId],
+) -> Result<(u32, MarkSnaps), &'static str> {
+    if old_args.len() != args.len() || old_args.get(1..) != args.get(1..) {
+        return Err("other arguments");
+    }
+    let is_w = |l: ValueId| {
+        v.with_list(l, |fs| {
+            fs.iter().any(|&f| {
+                v.with_list(f, |xs| xs.first().and_then(|&t| v.with_str(t, |s| s == "w")) == Some(true))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+    };
+    if old_args.first().is_some_and(|&l| is_w(l)) || args.first().is_some_and(|&l| is_w(l)) {
+        return Err("units");
+    }
+    let old = crate::input::joined(decode_segs(v, old_args));
+    let new = crate::input::joined(decode_segs(v, args));
+    let shared = old.iter().zip(&new).take_while(|(a, b)| a.same(b)).count();
+    let top = (kmax as usize).min(km.snaps.len().saturating_sub(1));
+    let mut why = "no mark";
+    for k in (0..=top).rev() {
+        let p = &km.snaps[k].0;
+        if p.pulled > 0 || p.watch.is_some() || p.has_sealed() || p.nlev > p.segs.len() {
+            why = "siblings, a watch, sealed lines";
+            continue;
+        }
+        let Some(m) = old.len().checked_sub(p.segs.len() - p.nlev) else {
+            why = "text grown";
+            continue;
+        };
+        if m == 0 || m >= shared {
+            why = "past the shared text";
+            continue;
+        }
+        if !p.segs[p.nlev..].iter().zip(&old[m..]).all(|(a, b)| a.same(b)) {
+            why = "text rest edited";
+            continue;
+        }
+        let mut q = (**p).clone();
+        q.segs.truncate(q.nlev);
+        q.segs.extend(new[m..].iter().cloned());
+        let h = parked_digest(&q);
+        let mut snaps = km.snaps[..k].to_vec();
+        snaps.push((std::sync::Arc::new(q), h));
+        return Ok((u32::try_from(k).unwrap_or(u32::MAX), snaps));
+    }
+    Err(why)
 }
 
 /// The commands between two marks of a run ([`Run::take_mark`]):
 /// `PHITEX_MARK_EVERY` (observe), else this.
-pub(crate) const MARK_EVERY: u64 = 2000;
+pub(crate) const MARK_EVERY: u64 = 4000;
 
 fn mark_every() -> u64 {
     crate::exec::obs_str!("PHITEX_MARK_EVERY")
@@ -5654,8 +5783,9 @@ fn mark_every() -> u64 {
 impl Run<'_, '_> {
     /// Takes a mark between commands, at the first one from each
     /// multiple of [`MARK_EVERY`] commands since the run's start
-    /// ([`Run::next_mark`]; 2000 by the cold and edit measures: at 500 the
-    /// snapshots cost 5-7% of a cold build and the edits gained nothing): the
+    /// ([`Run::next_mark`]; 4000 by the cold measure: a run's first mark
+    /// parks its whole table, the later ones its changes, 0.7% of a cold
+    /// amsldoc build at 4000, 1.3% at 2000): the
     /// run's state as a parked run's ([`Run::snapshot`]) and its digest,
     /// given to the engine ([`phitex_defuse::Ctx::checkpoint`]). `Err`
     /// when the engine cuts the run off there: its last run's result
@@ -5682,7 +5812,11 @@ impl Run<'_, '_> {
         if self.next_mark == 0 {
             self.next_mark = (at / every + 1) * every;
         }
-        if at < self.next_mark || self.mark.active {
+        // (the first boundary after the group a mark before an
+        // `\inputlineno` read was in closed, [`Run::mark_before_read`]: a
+        // mark there, where the line's number is gone with the group)
+        let forced = self.watch_exit.is_some_and(|w| self.group_count() < w);
+        if (at < self.next_mark && !forced) || self.mark.active {
             return Ok(());
         }
         // (not where siblings were pulled: their places are the text's
@@ -5692,6 +5826,17 @@ impl Run<'_, '_> {
         // character run not on the list yet and its ligature stack, §1034;
         // a read-back line being interpreted; the locations a read-back
         // point noted)
+        if forced && crate::exec::obs_flag!("PHITEX_ANCHOR_TRACE") {
+            eprintln!(
+                "anchor: node {} exit due at {at}: chars {} lig {} interp {} pre {} pull {}",
+                self.cx.node().raw(),
+                self.chars_live.is_some(),
+                !self.lig_buf.is_empty(),
+                self.interp.is_some(),
+                !self.pre_noted.is_empty(),
+                !self.pull_at.is_empty()
+            );
+        }
         if self.chars_live.is_some()
             || !self.lig_buf.is_empty()
             || self.interp.is_some()
@@ -5706,16 +5851,118 @@ impl Run<'_, '_> {
         {
             return Ok(());
         }
-        self.next_mark = (at / every + 1) * every;
+        if at >= self.next_mark {
+            self.next_mark = (at / every + 1) * every;
+        }
         let tp = crate::prof::start();
-        let p = self.snapshot();
+        // (the table as changed since the last mark: none where it went
+        // back since, the marks stop)
+        let tm = crate::prof::start();
+        let v = self.v;
+        // (observe, `PHITEX_MARK_FULL=1`: each mark's table whole, parked
+        // as a park's, for the measures against the changes)
+        let delta = (!crate::exec::obs_flag!("PHITEX_MARK_FULL")).then(|| self.st.mark_delta(v, &mut self.mark_img));
+        crate::prof::add(crate::prof::MARK_STATE, tm);
+        let p = self.snapshot_of(delta);
+        if forced {
+            self.watch_exit = None;
+        }
+        self.commit_mark(p, tp)
+    }
+
+    /// A mark's snapshot `p` kept, its digest given to the engine
+    /// ([`phitex_defuse::Ctx::checkpoint`]); `Err` where the engine cuts
+    /// the run off there. `tp`: the mark's profile probe.
+    fn commit_mark(&mut self, p: Parked, tp: Option<std::time::Instant>) -> R<()> {
+        let v = self.v;
         let td = crate::prof::start();
         let h = parked_digest(&p);
         crate::prof::add(crate::prof::MARK_DIGEST, td);
         crate::prof::add(crate::prof::MARK, tp);
         let tp = crate::prof::start();
         let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
+        // (observe, `PHITEX_MARK_LOG=1|slots`: each mark's digest and its
+        // parts; with `slots`, its table's slots)
+        if let Some(how) = crate::exec::obs_str!("PHITEX_MARK_LOG") {
+            let node = self.cx.node().raw();
+            eprintln!(
+                "mark-log: node {node} mark {k} at {} digest {h:x} rest {:x} slots {:x} ({} in the table)",
+                p.at_cmds,
+                parked_rest(&p),
+                p.mark_sum.unwrap_or_else(|| p.st.slot_sum()),
+                p.st.slot_list().len()
+            );
+            if how == "slots" {
+                for (key, x, fl, cache, sh) in p.st.slot_list() {
+                    let f = match key {
+                        crate::runstate::PLocKey::Fixed(l) => self.loc_field(l),
+                        crate::runstate::PLocKey::Spill(f) => f,
+                    };
+                    let x = x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(50).collect());
+                    eprintln!("mark-log: node {node} mark {k} slot {} = {x} flags {fl} cache {cache} hash {sh:x}", crate::val::field_name(v, f));
+                }
+            }
+        }
+        if crate::exec::obs_flag!("PHITEX_ANCHOR_TRACE") {
+            let old = self.old_marks.as_ref().and_then(|km| {
+                km.snaps.iter().enumerate().find(|(_, (q, _))| q.at_cmds == p.at_cmds && q.watch.is_some() == p.watch.is_some())
+            });
+            eprintln!(
+                "anchor: node {} mark {k} at {} {} groups {:?}; last run's there: {:?}",
+                self.cx.node().raw(),
+                p.at_cmds,
+                if p.watch.is_some() { "before a read" } else { "boundary" },
+                p.watch,
+                old.map(|(j, (_, oh))| (j, *oh == h))
+            );
+        }
+        let why_old = if crate::exec::obs_flag!("PHITEX_ANCHOR_TRACE") {
+            self.old_marks.as_ref().and_then(|km| {
+                let j = km.snaps.iter().position(|(q, oh)| q.at_cmds == p.at_cmds && *oh != h)?;
+                Some((j, mark_table(&km.snaps, j)))
+            })
+        } else {
+            None
+        };
         self.mark_snaps.push((std::sync::Arc::new(p), h));
+        if let Some((j, op)) = why_old {
+            let np = mark_table(&self.mark_snaps, k as usize);
+            mark_why(self.cx.node().raw(), j, &op, &np);
+            let v = self.v;
+            let mut shown = Vec::new();
+            for d in np.st.slot_diffs(&op.st).into_iter().take(8) {
+                let f = match d.0 {
+                    crate::runstate::PLocKey::Fixed(l) => self.loc_field(l),
+                    crate::runstate::PLocKey::Spill(f) => f,
+                };
+                let r = |x: Option<(Option<ValueId>, u8)>| {
+                    x.map_or_else(|| "no slot".to_owned(), |(x, fl)| format!("{}/{fl}", x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(50).collect())))
+                };
+                shown.push(format!("{} last {} this {}", crate::val::field_name(v, f), r(d.1), r(d.2)));
+            }
+            eprintln!("anchor: slots differing {shown:?}");
+        }
+        // (observe, `PHITEX_MARK_TABLE_CHECK=1`: the marks' tables folded
+        // against the table parked whole, and the digest kept up to date
+        // against the one made again)
+        if crate::exec::obs_flag!("PHITEX_MARK_TABLE_CHECK") {
+            let folded = mark_table(&self.mark_snaps, k as usize);
+            let whole = self.st.park(v);
+            let (a, b) = (folded.table(), &whole);
+            let ok_sum = a.slot_sum() == b.slot_sum();
+            let ok_touched = a.touched_len() == b.touched_len();
+            let ok_rest = a.rest_hash() == b.rest_hash();
+            let ok_inc = self.mark_snaps[k as usize].0.mark_sum == Some(b.slot_sum());
+            eprintln!(
+                "mark-table-check: node {} mark {k}: folded slots {ok_sum}, touched {ok_touched} ({} / {}), rest {ok_rest}, digest kept {ok_inc}",
+                self.cx.node().raw(),
+                a.touched_len(),
+                b.touched_len()
+            );
+            if !ok_touched {
+                eprintln!("mark-table-check: missing {:?}; extra {:?}", a.touched_missing(b), b.touched_missing(a));
+            }
+        }
         let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
         let r = self.cx.checkpoint(k, state);
         crate::prof::add(crate::prof::MARK_CK, tp);
@@ -5728,6 +5975,74 @@ impl Run<'_, '_> {
             return Err(Halt::Stop(s));
         }
         Ok(())
+    }
+
+    /// The groups of the run open now ([`Level::group`]).
+    fn group_count(&self) -> usize {
+        self.nest.iter().filter(|l| l.group != 0).count()
+    }
+
+    /// A mark at the start of the command in progress, before it reads
+    /// the lines before this node (`\inputlineno`, the `lines`
+    /// accumulator): where an edit moved the lines (a line inserted or
+    /// deleted before), the run resumes here, and with a mark at the
+    /// first boundary after the group open now closes ([`Run::take_mark`]),
+    /// where the number read is gone with it (`\@currenvline`), it is cut
+    /// off there; only the group's commands run again. Taken where the
+    /// command has changed nothing yet (its input as it found it, read
+    /// without putting it back, [`crate::input::Input::segs_at_command_start`]).
+    pub(crate) fn mark_before_read(&mut self) -> R<()> {
+        // (observe, `PHITEX_ANCHOR_MARKS=1`: measured on amsldoc's preamble
+        // edit, the runs resume at these marks but are not cut off after
+        // the group: a later `\inputlineno` read in the run reads another
+        // number too, and the page builder's candidate notes
+        // (`crate::runstate::State::mark_candidate`) keep the moved value for
+        // a second pass, so the states never meet again; off)
+        if !crate::exec::obs_flag!("PHITEX_ANCHOR_MARKS") {
+            return Ok(());
+        }
+        if !self.marks_on || self.cut_off || self.watch_exit.is_some() || !self.mark.active {
+            return Ok(());
+        }
+        let at = self.cmds_before + self.cmds;
+        if self.anchor_skip_at == Some(at)
+            || self.mutations() != self.mark.sig
+            || Some(self.effect) != self.mark.effect
+            || self.chars_live.is_some()
+            || !self.lig_buf.is_empty()
+            || self.interp.is_some()
+            || !self.pre_noted.is_empty()
+            || !self.pull_at.is_empty()
+        {
+            return Ok(());
+        }
+        let Some((segs, tys, text_at)) = self.input.segs_at_command_start(&self.mark.snap) else {
+            return Ok(());
+        };
+        let groups = self.group_count();
+        let tp = crate::prof::start();
+        let v = self.v;
+        let delta = self.st.mark_delta(v, &mut self.mark_img);
+        let mut p = self.snapshot_of(Some(delta));
+        let text_at = text_at.min(self.input.text.len());
+        p.nlev = segs.len() + self.parked_levels.saturating_sub(text_at);
+        let mut segs = segs;
+        segs.extend(self.input.text[text_at..].iter().cloned());
+        p.segs = segs;
+        p.level_tys = tys;
+        p.text_at = text_at;
+        // (the command it is at begins again where it resumes)
+        p.at_cmds = at.saturating_sub(1);
+        p.astate = self.mark.astate;
+        p.aopen = self.mark.aopen;
+        p.radix = self.mark.radix;
+        if let Some(o) = self.mark.cur_order {
+            p.cur_order = o;
+        }
+        p.no_pull = self.mark.no_pull;
+        p.watch = Some(groups);
+        self.watch_exit = Some(groups);
+        self.commit_mark(p, tp)
     }
 
     /// (observe, `PHITEX_RESUME_VERIFY=1`) Whether this full run's state
@@ -5773,6 +6088,13 @@ impl Run<'_, '_> {
     /// copied: the run goes on.
     #[allow(clippy::too_many_lines, reason = "one state field a line")]
     pub(crate) fn snapshot(&mut self) -> Parked {
+        self.snapshot_of(None)
+    }
+
+    /// [`Run::snapshot`] with the table as `delta` holds it (a mark's,
+    /// [`crate::runstate::State::mark_delta`]), else parked whole.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn snapshot_of(&mut self, delta: Option<crate::runstate::MarkDelta>) -> Parked {
         let v = self.v;
         let ti = crate::prof::start();
         let mut segs = Vec::new();
@@ -5863,7 +6185,10 @@ impl Run<'_, '_> {
             .collect();
         let level_tys = self.input.levels.iter().rev().map(|l| l.ty).collect();
         let ts = crate::prof::start();
-        let st = self.st.park(v);
+        let (st, mark_gone, mark_sum, mark_whole) = match delta {
+            Some(d) => (d.st, d.gone, Some(d.sum), d.whole),
+            None => (self.st.park(v), Vec::new(), None, true),
+        };
         crate::prof::add(crate::prof::MARK_STATE, ts);
         Parked {
             epoch: self.cx.values_epoch(),
@@ -5899,6 +6224,10 @@ impl Run<'_, '_> {
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st,
+            mark_gone,
+            mark_sum,
+            mark_whole,
+            watch: None,
             contribs: self.contribs.clone(),
             kids: self.kids.clone(),
             effect: self.effect,
@@ -5988,7 +6317,7 @@ fn mark_why(node: u64, k: usize, old: &Parked, new: &Parked) {
 /// contributions and children so far: kept in the run until then, the
 /// engine's own comparison does not see them).
 fn parked_digest(p: &Parked) -> u64 {
-    parked_digest_with(parked_rest(p), p.st.slot_sum())
+    parked_digest_with(parked_rest(p), p.mark_sum.unwrap_or_else(|| p.st.slot_sum()))
 }
 
 /// [`parked_digest`] from its two parts: the state but the table's slots
@@ -6002,6 +6331,23 @@ fn sorted_lazy(m: &phitex_defuse::FxHashMap<Field, ValueId>) -> Vec<(Field, Valu
     let mut xs: Vec<(Field, ValueId)> = m.iter().map(|(&f, &x)| (f, x)).collect();
     xs.sort_by_key(|x| x.0.0.raw());
     xs
+}
+
+/// The whole table at `snaps[k]`, a run's marks from its first: a mark
+/// holds its changes since the one before only
+/// ([`crate::runstate::MarkDelta`]); `snaps[k]` itself where it is whole.
+pub(crate) fn mark_table(snaps: &[(std::sync::Arc<Parked>, u64)], k: usize) -> Parked {
+    let mut p = (*snaps[k].0).clone();
+    if p.mark_sum.is_some() {
+        // (from the last whole one)
+        let from = (0..=k).rev().find(|&i| snaps[i].0.mark_whole).unwrap_or(0);
+        let parts: Vec<(&crate::runstate::PState, &[crate::runstate::PLoc])> =
+            snaps[from..=k].iter().map(|(x, _)| (&x.st, x.mark_gone.as_slice())).collect();
+        p.st = crate::runstate::MarkDelta::fold(&parts);
+        p.mark_gone = Vec::new();
+        p.mark_sum = None;
+    }
+    p
 }
 
 /// A run's memo by field, in the fields' order: the same for equal memos
@@ -6309,6 +6655,8 @@ impl<'c, 'a> Run<'c, 'a> {
         r.cand_marks = p.cand_marks;
         r.ins_pending = p.ins_pending;
         r.fin = p.fin;
+        r.watch_exit = p.watch;
+        r.anchor_skip_at = p.watch.map(|_| p.at_cmds + 1);
         r.sealed = p.sealed;
         r.cmds_before = p.at_cmds;
         r.resumed = true;

@@ -148,17 +148,42 @@ pub(crate) fn run_node_parking(
     let marks_ok = parks
         && !cx.is_speculative()
         && match which {
-            Some("exec") => cx.op() == o.exec,
             Some("finish") => cx.op() == o.finish,
             Some("all") => cx.op() == o.exec || cx.op() == o.finish,
-            // (`off`, or none given: measured on amsldoc, marks every 2000
-            // commands cost 3-6% of a cold build (their snapshots and the
-            // memory they keep) while no edit kind was cut off at one and
-            // the few resumed gained nothing at -j 8; `PHITEX_MARKS` (observe)
-            // takes them for exec runs, finishers or both)
-            _ => false,
+            Some("off") => false,
+            // (exec runs' by default: a mark holds the table's changes
+            // since the one before, its digest kept up to date by them,
+            // `crate::runstate::State::mark_delta`)
+            _ => cx.op() == o.exec,
         };
     let resumed_at = if marks_ok { cx.resumed() } else { None };
+    // (a retexted node: resumed at its last run's last mark that the two
+    // texts' shared part alone made, `crate::run::retext_mark`)
+    let retext = if marks_ok && resumed_at.is_none() {
+        cx.resumed_retext()
+    } else {
+        None
+    };
+    let retext = retext.and_then(|(tok, kmax, old)| {
+        let km = tok.downcast::<crate::run::KeptMarks>().ok()?;
+        let args = cx.args();
+        let v = cx.values();
+        // (the hint its run's start verified, `crate::hints::verify`:
+        // the same for both texts)
+        let hint = |a: &[ValueId]| format!("{:?}", crate::hints::hint_of_args(&o.hints, v, a));
+        let r = if hint(&old) == hint(&args) {
+            crate::run::retext_mark(v, &km, kmax, &old, &args)
+        } else {
+            Err("hint")
+        };
+        if crate::exec::obs_flag!("PHITEX_RETEXT_TRACE") {
+            match &r {
+                Ok((k, _)) => eprintln!("retext: node {} resumes at mark {k} (offered {kmax})", cx.node().raw()),
+                Err(why) => eprintln!("retext: node {} from the start (offered {kmax}): {why}", cx.node().raw()),
+            }
+        }
+        r.ok().map(|(k, snaps)| (k, snaps, args))
+    });
     // (observe, `PHITEX_RETEXT_POTENTIAL=1`: a node run again with another
     // text, where its last run's marks and how much of that run a resume
     // at the last mark before the first changed segment would skip)
@@ -167,8 +192,13 @@ pub(crate) fn run_node_parking(
     }
     let mut r = if let Some((tok, k)) = resumed_at {
         match tok.downcast::<crate::run::KeptMarks>() {
-            Ok(km) if (k as usize) < km.snaps.len() && crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") => {
-                let (p, h) = km.snaps[k as usize].clone();
+            Ok(km)
+                if (k as usize) < km.snaps.len()
+                    && k as usize >= km.stale_below
+                    && crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") =>
+            {
+                let h = km.snaps[k as usize].1;
+                let p = std::sync::Arc::new(crate::run::mark_table(&km.snaps, k as usize));
                 cx.restart();
                 let mut r = Run::new(cx, o);
                 r.verify_at = Some((k, p, h, km.args.clone()));
@@ -176,14 +206,25 @@ pub(crate) fn run_node_parking(
             }
             // (a mark whose run held sealed lines: their views were that
             // run's, `crate::pages::seal`; the run starts over)
-            Ok(km) if (k as usize) < km.snaps.len() && !km.snaps[k as usize].0.has_sealed() => {
-                let (p, h) = km.snaps[k as usize].clone();
+            Ok(km)
+                if (k as usize) < km.snaps.len()
+                    && k as usize >= km.stale_below
+                    && !km.snaps[k as usize].0.has_sealed() =>
+            {
+                let h = km.snaps[k as usize].1;
                 let tr = crate::prof::start();
-                let from = Run::from_parked(cx, o, (*p).clone());
+                // (the mark's table whole: its marks hold their changes)
+                let p = crate::run::mark_table(&km.snaps, k as usize);
+                let base = p.table().touched_len();
+                let from = Run::from_parked(cx, o, p);
                 crate::prof::add(crate::prof::RESUME, tr);
                 match from {
                     Ok(mut r) => {
+                        // (the marks after it note changes from its table)
+                        let v = r.v;
+                        r.st.begin_marks_from(v, &mut r.mark_img, base);
                         r.mark_snaps = km.snaps[..=k as usize].to_vec();
+                        r.mark_stale = km.stale_below;
                         r.old_marks = Some(km.clone());
                         // (the mark again: the engine keeps the marks
                         // before it; the run is never cut off at its own)
@@ -201,6 +242,39 @@ pub(crate) fn run_node_parking(
                 cx.restart();
                 Run::new(cx, o)
             }
+        }
+    } else if let Some((k, snaps, args)) = retext {
+        let h = snaps[k as usize].1;
+        if crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") {
+            // (observe: the run from the start, its state at the mark
+            // checked against the one it would have resumed from)
+            let p = std::sync::Arc::new(crate::run::mark_table(&snaps, k as usize));
+            let mut r = Run::new(cx, o);
+            r.verify_at = Some((k, p, h, args));
+            r
+        } else if cx.resume_at(k) {
+            let tr = crate::prof::start();
+            let p = crate::run::mark_table(&snaps, k as usize);
+            let base = p.table().touched_len();
+            let from = Run::from_parked(cx, o, p);
+            crate::prof::add(crate::prof::RESUME, tr);
+            match from {
+                Ok(mut r) => {
+                    let v = r.v;
+                    r.st.begin_marks_from(v, &mut r.mark_img, base);
+                    r.mark_snaps = snaps;
+                    r.mark_stale = k as usize;
+                    let state = r.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
+                    let _ = r.cx.checkpoint(k, state);
+                    r
+                }
+                Err(cx) => {
+                    cx.restart();
+                    Run::new(cx, o)
+                }
+            }
+        } else {
+            Run::new(cx, o)
         }
     } else {
         let parked = if parks { cx.parked() } else { None };
@@ -367,6 +441,7 @@ pub(crate) fn run_node_parking(
                     outs,
                     args,
                     total_cmds,
+                    stale_below: r.mark_stale,
                 });
                 if crate::exec::obs_flag!("PHITEX_RETEXT_POTENTIAL") {
                     retext_kept().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(r.cx.node().raw(), km.clone());

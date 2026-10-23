@@ -376,6 +376,33 @@ pub(crate) enum Seg {
     File(crate::run::FileRest),
 }
 
+impl Seg {
+    /// Whether two segments are the same text, read alike: a mark's text
+    /// not reached against a node's text ([`crate::run::retext_mark`]).
+    pub(crate) fn same(&self, o: &Seg) -> bool {
+        match (self, o) {
+            (Seg::Line(a), Seg::Line(b)) => {
+                a.buf == b.buf
+                    && (a.loc, a.state, a.endch, a.starts, a.ends, a.lineno, a.rescanned)
+                        == (b.loc, b.state, b.endch, b.starts, b.ends, b.lineno, b.rescanned)
+                    && a.origin == b.origin
+            }
+            (Seg::Toks(a), Seg::Toks(b)) => a == b,
+            (Seg::File(a), Seg::File(b)) => a.same(b),
+            _ => false,
+        }
+    }
+}
+
+/// A node's segments as a run's text holds them ([`Input::append_text`]
+/// on an empty text): a line segment continuing the one before joined to
+/// it.
+pub(crate) fn joined(segs: Vec<Seg>) -> Vec<Seg> {
+    let mut i = Input::new();
+    i.append_text(segs);
+    i.text
+}
+
 /// The input stack.
 #[derive(Default)]
 pub(crate) struct Input {
@@ -423,7 +450,10 @@ struct Snap {
 /// A level saved for a rewind ([`Snap`]): the level, its line's
 /// `(loc, state, endch, len)` or its file's `(off, _, _, pos)`, and the
 /// push that filled its slot.
-type Saved = (Level, (usize, u8, i64, usize), u64);
+type Saved = (Level, SavedPos, u64);
+
+/// A saved line's `(loc, state, endch, len)` or file's `(off, _, _, pos)`.
+type SavedPos = (usize, u8, i64, usize);
 
 /// The least arena size, in tokens, at which a run compacts it.
 pub(crate) const ARENA_COMPACT: usize = 1 << 22;
@@ -728,6 +758,59 @@ impl Input {
         });
         into.text_at = self.text_at;
         into.arena = self.arena.mark();
+    }
+
+    /// The input as the command in progress found it ([`Input::snapshot`]),
+    /// read without putting it back: top first, each level's segment
+    /// (a token list's rest, a line from its place then, a file from its
+    /// place then) with the level's token type; and the text's place then.
+    /// `None` where it cannot be read so (no rewind point, a line or file
+    /// slot refilled since, a line reduced in place).
+    pub(crate) fn segs_at_command_start(&self, s: &Snapshot) -> Option<(Vec<Seg>, Vec<u8>, usize)> {
+        let sn = self.snap.as_ref()?;
+        let mut levels: Vec<(Level, Option<SavedPos>)> =
+            self.levels[..sn.from.min(self.levels.len())].iter().map(|&l| (l, None)).collect();
+        for (l, pos, push) in sn.saved.iter().rev() {
+            let now = match l.kind {
+                kind::LINE => self.line_push.get(l.a as usize),
+                kind::FILE => self.file_push.get(l.a as usize),
+                _ => None,
+            };
+            if l.kind != kind::TOKS && now.copied() != Some(*push) {
+                return None;
+            }
+            levels.push((*l, Some(*pos)));
+        }
+        let mut segs = Vec::with_capacity(levels.len());
+        let mut tys = Vec::with_capacity(levels.len());
+        for (l, pos) in levels.iter().rev() {
+            match l.kind {
+                kind::TOKS => segs.push(Seg::Toks(self.arena.get(l.rest()).to_vec())),
+                kind::LINE => {
+                    let mut x = self.line(*l).clone();
+                    if let Some((loc, state, endch, len)) = *pos {
+                        if x.buf.len() < len {
+                            return None;
+                        }
+                        x.buf.truncate(len);
+                        x.loc = loc;
+                        x.state = state;
+                        x.endch = endch;
+                    }
+                    segs.push(Seg::Line(x));
+                }
+                _ => {
+                    let mut f = self.file(*l).clone();
+                    if let Some((off, _, _, len)) = *pos {
+                        f.off = off;
+                        f.set_pos_chars(len);
+                    }
+                    segs.push(Seg::File(f));
+                }
+            }
+            tys.push(l.ty);
+        }
+        Some((segs, tys, s.text_at))
     }
 
     /// Copies what the token-list levels still hold (each from its
