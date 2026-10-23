@@ -2333,7 +2333,7 @@ impl Engine {
                     if let (Some(b), Some(km)) = (r.base, km) {
                         let (k0, c0) = (u32::try_from(b.0).unwrap_or(u32::MAX), u32::try_from(b.1).unwrap_or(u32::MAX));
                         let mut marks = km.marks;
-                        marks.extend(r.res.marks.iter().map(|m| super::world::Mark { kids: m.kids + k0, conts: m.conts + c0, ..*m }));
+                        cont_marks(&mut marks, &r.res.marks, k0, c0);
                         r.res.marks = marks.into();
                         if r.res.after.is_none() {
                             r.res.after = km.after;
@@ -2466,7 +2466,7 @@ impl Engine {
                             && let Some(mut km) = km.filter(|km| km.kids.len() == b.0 && km.conts.len() == b.1)
                         {
                             let (k0, c0) = (u32::try_from(b.0).unwrap_or(u32::MAX), u32::try_from(b.1).unwrap_or(u32::MAX));
-                            km.marks.extend(r.res.marks.iter().map(|m| super::world::Mark { kids: m.kids + k0, conts: m.conts + c0, ..*m }));
+                            cont_marks(&mut km.marks, &r.res.marks, k0, c0);
                             km.kids.extend(r.kids.iter().cloned());
                             km.conts.extend(r.conts.iter().cloned());
                             if let Some(a) = r.res.after.clone() {
@@ -4285,6 +4285,19 @@ fn fold_guess(core: &super::core::Core, s: &mut Sched, id: Id, f: Field, ran: bo
     let c = s.fold_refutes.entry(id).or_default();
     *c += u32::from(count);
     *c <= 2
+}
+
+/// Appends attempt marks `new` of a run parked continuing to its earlier
+/// attempts' `marks`, their placements counted from its start (`k0`,
+/// `c0` before the attempt). A mark the earlier attempts made already
+/// (an attempt resumed from a token marking it again, past what it had
+/// done there) is not one: only the first of each, in order.
+fn cont_marks(marks: &mut Vec<super::world::Mark>, new: &[super::world::Mark], k0: u32, c0: u32) {
+    for m in new {
+        if marks.last().is_none_or(|l| m.mark > l.mark) {
+            marks.push(super::world::Mark { kids: m.kids + k0, conts: m.conts + c0, ..*m });
+        }
+    }
 }
 
 /// The marks of a run parked continuing, over its attempts
