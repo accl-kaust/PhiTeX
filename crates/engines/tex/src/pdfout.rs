@@ -1413,41 +1413,73 @@ fn fresh(v: &Values, date: String, jobname: &str, g2u: Option<ValueId>) -> PdfSt
     // or a link starts from it without copying or hashing it again.
     let mut st = match g2u {
         None => PdfState::new(PdfParams::default()),
-        Some(t) => {
-            let key = (v.instance(), t.raw());
-            let mut m = g2u_states().locked();
-            if let Some(k) = m.iter().position(|e| e.0 == key) {
-                m[k].1.clone()
-            } else {
-                let mut st = PdfState::new(PdfParams::default());
-                for e in list_of(v, t) {
-                    let ab = list_of(v, e);
-                    if let [a, b] = ab[..] {
-                        st.glyph_to_unicode(&bytes_of(&str_of(v, a)), &bytes_of(&str_of(v, b)));
-                    }
-                }
-                // (its sums taken here, once: a clone's are up to date)
-                let _ = st.digest();
-                if m.len() >= 4 {
-                    m.remove(0);
-                }
-                m.push((key, st.clone()));
-                st
-            }
-        }
+        Some(t) => g2u_cell((v.instance(), t.raw()))
+            .get_or_init(|| g2u_state(&g2u_pairs(v, t)))
+            .clone(),
     };
     *st.params_mut() = p;
     st
 }
 
 /// The fresh writers of [`fresh`] by their glyph table (values instance,
-/// value), the latest few.
-type G2uStates = Mutex<Vec<((u64, u64), PdfState)>>;
+/// value), the latest few, each made once: a writer that asks while it is
+/// being made waits for it, the table's lock held only to find its cell.
+type G2uStates = Mutex<Vec<((u64, u64), Arc<OnceLock<PdfState>>)>>;
 
 /// [`G2uStates`], the process's.
 fn g2u_states() -> &'static G2uStates {
     static M: OnceLock<G2uStates> = OnceLock::new();
     M.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// The cell of the fresh writer for glyph table `key` ([`G2uStates`]).
+fn g2u_cell(key: (u64, u64)) -> Arc<OnceLock<PdfState>> {
+    let mut m = g2u_states().locked();
+    if let Some(k) = m.iter().position(|e| e.0 == key) {
+        return m[k].1.clone();
+    }
+    if m.len() >= 4 {
+        m.remove(0);
+    }
+    let c = Arc::new(OnceLock::new());
+    m.push((key, c.clone()));
+    c
+}
+
+/// The glyph table `t`'s entries as bytes.
+fn g2u_pairs(v: &Values, t: ValueId) -> Vec<(Vec<u8>, Vec<u8>)> {
+    list_of(v, t)
+        .into_iter()
+        .filter_map(|e| match list_of(v, e)[..] {
+            [a, b] => Some((bytes_of(&str_of(v, a)), bytes_of(&str_of(v, b)))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A fresh writer with the glyph table `pairs`, its sums taken (a clone's
+/// are then up to date).
+fn g2u_state(pairs: &[(Vec<u8>, Vec<u8>)]) -> PdfState {
+    let mut st = PdfState::new(PdfParams::default());
+    for (a, b) in pairs {
+        st.glyph_to_unicode(a, b);
+    }
+    let _ = st.digest();
+    st
+}
+
+/// The fresh writer for the format's glyph table `t`, made now on a thread
+/// of its own: the job's first writers find it made, not one of them
+/// making it on the critical path while the others wait for it.
+pub(crate) fn warm_g2u(v: &Values, t: ValueId) {
+    let cell = g2u_cell((v.instance(), t.raw()));
+    if cell.get().is_some() {
+        return;
+    }
+    let pairs = g2u_pairs(v, t);
+    std::thread::spawn(move || {
+        cell.get_or_init(|| g2u_state(&pairs));
+    });
 }
 
 /// A read-time command on the writer in PDF mode, with the fonts it
