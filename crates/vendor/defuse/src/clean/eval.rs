@@ -955,6 +955,7 @@ impl Engine {
         let mut idle: u32 = 0;
         let predict = sched.speculation_budget() > 0;
         s.predict = predict;
+        self.core.predicting.store(predict, std::sync::atomic::Ordering::Relaxed);
         loop {
             if s.queue.is_empty() {
                 if self.requeue_hint_parked(s) {
@@ -1137,6 +1138,7 @@ impl Engine {
         let window = (par * 8).max(64);
         let predict = sched.speculation_budget() > 0;
         s.predict = predict;
+        self.core.predicting.store(predict, std::sync::atomic::Ordering::Relaxed);
         let fuel = sched.fuel();
         let mut idle: u32 = 0;
         loop {
@@ -1309,6 +1311,7 @@ impl Engine {
         let window = (par * 8).max(64);
         let predict = sched.speculation_budget() > 0;
         s.predict = predict;
+        self.core.predicting.store(predict, std::sync::atomic::Ordering::Relaxed);
         let fuel = sched.fuel();
         let mut idle: u32 = 0;
         loop {

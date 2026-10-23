@@ -1416,7 +1416,10 @@ impl<'a> Builder<'a> {
         // (A stop continuing its last: what it committed, as its memo
         // has it; else walked.)
         let res_ptr = n.res.as_ref().map_or(0, |r| Arc::as_ptr(r) as usize);
-        let memo = if cont && prefix { self.cont_memo.take().filter(|m| m.res == res_ptr && m.bk == bk && m.bc == bc) } else { None };
+        // (Taken whatever this commit is: one not continuing its last stop,
+        // a run resumed at a mark, say, places otherwise than the memo
+        // counted, and it goes.)
+        let memo = self.cont_memo.take().filter(|m| cont && prefix && m.res == res_ptr && m.bk == bk && m.bc == bc);
         // (Continuing: the ordinals go on from the placements committed.)
         let seed = |ids: &[Id]| -> FxHashMap<PlaceKey, u32> {
             let mut ord = FxHashMap::default();

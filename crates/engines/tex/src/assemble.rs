@@ -406,7 +406,7 @@ fn dvi_parts(
     {
         counts[k] = i32::try_from(int_of(v, *c)).unwrap_or(0);
     }
-    Some((bx, counts, side.whats))
+    Some((*bx, counts, side.whats))
 }
 
 /// Font `f`'s definition as the DVI file needs it.

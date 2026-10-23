@@ -874,11 +874,25 @@ pub fn line_break(
         let mut auto_breaking = true;
         let mut cur = 0;
         let mut prev_p = 0;
+        // (the font of the run of characters being measured, and its
+        // table, [`Fonts::whd_table`])
+        let mut run: Option<(u32, Option<&[crate::fonts::Whd]>)> = None;
         while cur < list.len() && !b.active.is_empty() {
             // §866
             match &list[cur] {
                 Node::Char { font, ch } => {
-                    b.add_width(fonts.char_width(*font, *ch));
+                    let table = match run {
+                        Some((f, t)) if f == *font => t,
+                        _ => {
+                            let t = fonts.whd_table(*font);
+                            run = Some((*font, t));
+                            t
+                        }
+                    };
+                    b.add_width(match table {
+                        Some(t) => t.get(usize::from(*ch)).map_or(0, |x| x.0),
+                        None => fonts.char_width(*font, *ch),
+                    });
                 }
                 Node::Box(_) | Node::Rule(_) => {
                     b.add_width(list[cur].box_dims().map_or(0, |d| d.0));
@@ -1057,14 +1071,15 @@ fn post_line_break(
     right_skip: Glue,
 ) -> Vec<Line> {
     // (the nodes not yet placed: `front`, a discretionary's post-break
-    // material still to come, last first, then the list from `it`; a
-    // node from the list carries its index, the others none)
-    let mut it = list.into_iter().enumerate().peekable();
+    // material still to come, last first, then the list from `it`, whose
+    // next node is the list's `pos`; a line's run of the list's nodes
+    // is moved in one go)
+    let mut it = list.into_iter();
+    let mut pos = 0usize;
     let mut front: Vec<Node> = Vec::new();
     let mut lines = Vec::with_capacity(breaks.len());
-    let mut cur_line = params.prev_graf + 1;
     let mut last_at = 0usize;
-    for (k, &brk) in breaks.iter().enumerate() {
+    for (cur_line, (k, &brk)) in (params.prev_graf + 1..).zip(breaks.iter().enumerate()) {
         // §881
         let mut line = spare.pop().unwrap_or_default();
         line.reserve(match brk {
@@ -1076,28 +1091,26 @@ fn post_line_break(
         match brk {
             None => {
                 line.extend(front.drain(..).rev());
-                line.extend(it.by_ref().map(|x| x.1));
+                line.extend(it.by_ref());
                 line.push(Node::param_glue(param::RIGHT_SKIP, right_skip));
             }
             Some(at) => {
                 last_at = at;
-                loop {
-                    let (idx, n) = if let Some(n) = front.pop() {
-                        (None, n)
-                    } else if let Some((i, n)) = it.next() {
-                        (Some(i), n)
-                    } else {
-                        break;
-                    };
-                    if idx != Some(at) {
-                        line.push(n);
-                        continue;
-                    }
+                line.extend(front.drain(..).rev());
+                let n = at.saturating_sub(pos);
+                let before = it.len();
+                line.extend(it.by_ref().take(n));
+                pos += before - it.len();
+                // (the break node, where the list reaches it)
+                if pos == at
+                    && let Some(n) = it.next()
+                {
+                    pos += 1;
                     match n {
                         Node::Glue(_) => line.push(Node::param_glue(param::RIGHT_SKIP, right_skip)),
                         Node::Disc(d) => {
                             // §882–§885
-                            line.push(Node::Disc(crate::node::Disc::default()));
+                            line.push(Node::Disc(Box::default()));
                             if !d.post.is_empty() {
                                 post_disc_break = true;
                                 front.extend(d.post.into_iter().rev());
@@ -1119,7 +1132,9 @@ fn post_line_break(
                             line.push(Node::param_glue(param::RIGHT_SKIP, right_skip));
                         }
                     }
-                    break;
+                } else {
+                    pos += it.len();
+                    line.extend(it.by_ref());
                 }
             }
         }
@@ -1170,7 +1185,6 @@ fn post_line_break(
             }
         }
         lines.push(Line { packed, penalty });
-        cur_line += 1;
         // §879
         if let Some(&next) = breaks.get(k + 1)
             && !post_disc_break
@@ -1178,8 +1192,8 @@ fn post_line_break(
             loop {
                 let (idx, n) = if let Some(n) = front.last() {
                     (None, n)
-                } else if let Some((i, n)) = it.peek() {
-                    (Some(*i), n)
+                } else if let Some(n) = it.as_slice().first() {
+                    (Some(pos), n)
                 } else {
                     break;
                 };
@@ -1195,6 +1209,7 @@ fn post_line_break(
                 }
                 if front.pop().is_none() {
                     it.next();
+                    pos += 1;
                 }
             }
         }

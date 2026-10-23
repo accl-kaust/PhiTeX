@@ -227,10 +227,10 @@ fn golden_two() {
         depth: 0,
     };
     let list = vec![
-        Node::Box(hi(&src)),
+        Node::Box(Box::new(hi(&src))),
         Node::Kern(3 * PT, KernKind::Explicit),
         Node::Rule(rule),
-        Node::Box(src.hbox(src.word(1, b"there"), NATURAL)),
+        Node::Box(Box::new(src.hbox(src.word(1, b"there"), NATURAL))),
     ];
     let page1 = vpackage(list, NATURAL, 0, &PackParams::default()).node;
     let page2 = src.hbox(src.word(2, b"Bold"), NATURAL);
@@ -258,7 +258,7 @@ fn golden_par() {
             list.push(Node::glue(Glue::ZERO));
         }
         list.push(Node::glue(Glue::ZERO));
-        Node::Box(src.hbox(list, Spec::Exactly(100 * PT)))
+        Node::Box(Box::new(src.hbox(list, Spec::Exactly(100 * PT))))
     };
     let list = vec![
         line(&[b"The", b"quick", b"brown", b"fox"], false),

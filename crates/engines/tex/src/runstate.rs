@@ -1504,20 +1504,21 @@ impl State {
     /// [`State::read_locs`] with the values read (`None`: undefined in
     /// the engine), in the same order.
     pub(crate) fn read_values(&self) -> Vec<(Loc, Option<ValueId>)> {
-        let mut out: Vec<(Loc, Option<ValueId>)> = self
-            .metas
-            .iter()
-            .filter_map(|m| m.eng.map(|e| (m.loc, e)))
-            .collect();
-        let has_meta: phitex_defuse::FxHashSet<Loc> = self.metas.iter().map(|m| m.loc).collect();
+        let mut out: Vec<(Loc, Option<ValueId>)> = Vec::with_capacity(self.metas.len() + self.touched.len());
+        out.extend(self.metas.iter().filter_map(|m| m.eng.map(|e| (m.loc, e))));
         for &l in &self.touched {
-            if has_meta.contains(&l) {
+            let Some(s) = self.slot_ref(l) else { continue };
+            // (a location with a definition record: its read is the
+            // record's, above; the slot names its record)
+            if s.meta != 0
+                && self
+                    .metas
+                    .get(s.meta as usize - 1)
+                    .is_some_and(|m| m.loc == l)
+            {
                 continue;
             }
-            if let Some(s) = self.slot_ref(l)
-                && s.e.flags & LOADED != 0
-                && s.e.flags & PRELOADED == 0
-            {
+            if s.e.flags & LOADED != 0 && s.e.flags & PRELOADED == 0 {
                 out.push((l, s.e.id));
             }
         }

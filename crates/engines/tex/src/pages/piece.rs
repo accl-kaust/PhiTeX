@@ -779,8 +779,10 @@ impl Run<'_, '_> {
         // (by field, never by location: a location's number is the order
         // the job's runs first met its field in, which the threads decide,
         // so a value holding them in that order differs between two
-        // builds of one text; stable, as the value list's)
-        rs.sort_by_key(|x| x.0.0.raw());
+        // builds of one text)
+        // (a field read for its value and by its class: the value's
+        // first, as the reads come)
+        rs.sort_unstable_by_key(|x| (x.0.0.raw(), x.1 == class));
         // (one list of the pairs in a row, `[f, x, f, x, ...]`: no list made
         // per read)
         let rs: Vec<ValueId> = rs.into_iter().flat_map(|(f, x)| [f.0, x]).collect();
@@ -793,7 +795,7 @@ impl Run<'_, '_> {
             .collect();
         // (by field once for every candidate: a candidate's names are
         // these merged with its own, the first of a field kept)
-        locals.sort_by_key(|x| x.1.0.raw());
+        locals.sort_unstable_by_key(|x| (x.1.0.raw(), x.0));
         // (every definition of the run, by field once, a standing one
         // first: a candidate's are those made after it, filtered in
         // order, [`State::defined_since_in_order`])

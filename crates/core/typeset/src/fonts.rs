@@ -86,6 +86,9 @@ pub enum Left {
     Boundary,
 }
 
+/// A character's width, height and depth ([`Fonts::whd_table`]).
+pub type Whd = (Scaled, Scaled, Scaled);
+
 /// The caller's fonts.
 pub trait Fonts {
     /// The metrics of `ch` in `font`, or `None` if it doesn't exist.
@@ -94,6 +97,15 @@ pub trait Fonts {
     /// line breaker's per-character question.
     fn char_width(&self, font: FontId, ch: u16) -> Scaled {
         self.char_info(font, ch).map_or(0, |i| i.width)
+    }
+    /// Each character's width, height and depth by code (0s where it
+    /// doesn't exist, or past the table's end), where the fonts keep such
+    /// a table: a run of characters in one font is measured by indexing
+    /// it, one question per run instead of per character. `None` where
+    /// they keep none ([`Fonts::char_whd`] is asked).
+    fn whd_table(&self, font: FontId) -> Option<&[Whd]> {
+        let _ = font;
+        None
     }
     /// Width, height and depth (0s when the character doesn't exist):
     /// the packager's per-character question.

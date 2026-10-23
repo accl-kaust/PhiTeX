@@ -100,6 +100,9 @@ pub(crate) struct Core {
     /// Fields whose readers wait on a pending definition set that may hold
     /// them even when predicting (`Engine::wait_on_pending`).
     pub wait_pending: FxHashSet<Field>,
+    /// Whether this evaluation's runs may guess (its scheduler speculates):
+    /// a careful run that lapses guesses again.
+    pub predicting: std::sync::atomic::AtomicBool,
     /// The siblings a pending claimer with no reach holds back
     /// (`Engine::set_claim_window`; `None`: all after it).
     pub claim_window: Option<usize>,
@@ -198,6 +201,7 @@ impl Core {
             claim_window: None,
             claim_chain: false,
             wait_pending: FxHashSet::default(),
+            predicting: std::sync::atomic::AtomicBool::new(false),
             eval_no: std::sync::atomic::AtomicU64::new(0),
 
             loops: FxHashMap::default(),
