@@ -1261,8 +1261,15 @@ fn default_map(r: &mut Run<'_, '_>) -> R<Option<Arc<Map>>> {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Fonts> {
     let v = r.v;
-    let map = default_map(r)?;
     let mut out = Fonts::default();
+    // (no font asked, a PDF command's (a link, a destination): nothing of
+    // the map, the loads' numbers or the fonts read, only the map lines'
+    // files)
+    if ids.is_empty() && !space {
+        map_line_files(r, &mut out)?;
+        return Ok(out);
+    }
+    let map = default_map(r)?;
     // the fonts' fields, defined once at their loads (`[id, name, size,
     // file, size asked]`), then the virtual fonts' local fonts
     // (`vf_def_font`): a local font of a name and size this step has is
@@ -1364,7 +1371,14 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
             },
         );
     }
-    // the files of `\pdfmapline`s and `\pdfmapfile`s
+    map_line_files(r, &mut out)?;
+    Ok(out)
+}
+
+/// The files of the `\pdfmapline`s and `\pdfmapfile`s read so far, into
+/// `out` ([`fonts_for`]).
+fn map_line_files(r: &mut Run<'_, '_>, out: &mut Fonts) -> R<()> {
+    let v = r.v;
     let maps_cell = r
         .get_loc(crate::fields::cell::PDF_MAPS)?
         .map(|x| list_of(v, x))
@@ -1372,8 +1386,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
     // (`PHITEX_FONTS_TRACE=1`, observe: what a page's font step reads)
     if crate::exec::obs_flag!("PHITEX_FONTS_TRACE") {
         eprintln!(
-            "fonts-for: ids {} fonts {} vfs {} map entries {:?}",
-            ids.len(),
+            "fonts-for: fonts {} vfs {} map entries {:?}",
             out.by_id.len(),
             out.vfs.len(),
             maps_cell
@@ -1407,7 +1420,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
             }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// A fresh writer state: nothing written yet.
