@@ -4965,13 +4965,19 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a finisher's output: what its routine gave back, which the
         // page builder reads where it placed it, `crate::pages::RTN`)
-        // (its register maps left out: the builder folds the rest,
-        // `crate::pages::rtn_strip`)
-        let out = self
-            .fin
-            .as_ref()
-            .and_then(|c| c.rtn)
-            .map_or(ValueId::UNIT, |x| crate::pages::rtn_strip(self.v, x));
+        // (its register maps left out where they are those its arguments
+        // guessed, the builder folding the rest, `crate::pages::rtn_strip`;
+        // kept where they differ: the builder learns them for the next
+        // pages' guesses, whose finishers contribute the register folds
+        // their arguments name, `Finish::static_contribs`)
+        let guessed = crate::pages::FinishIn::of(self.v, &self.cx.args()).map(|f| f.rtn_guess);
+        let out = self.fin.as_ref().and_then(|c| c.rtn).map_or(ValueId::UNIT, |x| {
+            let v = self.v;
+            match guessed {
+                Some(g) if crate::pages::rtn_maps(v, g) != crate::pages::rtn_maps(v, x) => x,
+                _ => crate::pages::rtn_strip(v, x),
+            }
+        });
         if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
             let v = self.v;
             let mut pubd: Vec<String> = published_trace
