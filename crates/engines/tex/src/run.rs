@@ -6465,6 +6465,9 @@ fn parked_rest(p: &Parked) -> u64 {
     }
     (p.cand, &p.ins_pending).hash(&mut h);
     format!("{:?}{:?}", p.cand_marks, p.fin).hash(&mut h);
+    // (a finisher's sealed units: the window they were read in and each
+    // one's place there, whose lines it reads at its end)
+    p.sealed.places().hash(&mut h);
     h.finish()
 }
 

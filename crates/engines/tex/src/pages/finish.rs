@@ -763,11 +763,15 @@ impl Run<'_, '_> {
                 }
             }
             self.resolve_params_of(p, &mut raw)?;
-            // (the own piece's last candidate; its other parts read later)
+            // (whether the page's candidate is the own piece's last, read
+            // as that alone (a piece growing after the page's cut leaves
+            // it standing): the candidate where so, else none (-2); its
+            // other parts read later)
             let shape = if p == pid {
                 own = Some((u, ui));
-                let last = self.cx.get(u, Step::Index(1)).unwrap_or(ValueId::UNIT);
-                v.list(vec![v.int(p), last])
+                let k = i64::from(fin.k);
+                let at_last = self.cx.at(u, Step::Index(1)).and_then(|w| self.cx.get(w, Step::Eq(v.int(k)))) == Some(v.bool(true));
+                v.list(vec![v.int(p), v.int(if at_last { k } else { -2 })])
             } else {
                 ValueId::UNIT
             };
