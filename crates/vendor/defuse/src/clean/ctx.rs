@@ -5,7 +5,20 @@ use std::any::Any;
 use std::sync::Arc;
 
 use super::core::Core;
-use super::world::{Def, FieldCell, FrameId, Id, LastReads, NONE, Place, Pos, Read, St, World};
+use super::world::{Def, FieldCell, FrameId, Id, LastReads, NONE, Place, Pos, Read, Seg, St, World};
+
+thread_local! {
+    /// Runs join no other (`Ctx::checkpoint_join`): a check's full run.
+    static NO_JOIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with no run joining another at a mark.
+pub(crate) fn no_joins<R>(f: impl FnOnce() -> R) -> R {
+    NO_JOIN.with(|c| c.set(true));
+    let r = f();
+    NO_JOIN.with(|c| c.set(false));
+    r
+}
 use crate::api::{Effect, FieldAt, Locality, NodeId, OpId, Stop};
 use crate::values::FxHashMap;
 use crate::values::{Field, ValueId, Values};
@@ -163,6 +176,23 @@ pub struct Ctx<'a> {
     pub(crate) after: Option<super::world::After>,
     pub(crate) from_mark: Option<MarkResume>,
     pub(crate) cutoff: Option<(usize, Option<Vec<(Field, Locality, Option<ValueId>)>>)>,
+    /// Joining runs at marks (`checkpoint_join`): the segments of outputs
+    /// closed so far (`None`: not joining), the one open and where its
+    /// keys are in it, and its logging held off (while a join makes
+    /// another run's outputs).
+    pub(crate) segs: Option<Vec<Seg>>,
+    pub(crate) seg: Seg,
+    seg_ix: FxHashMap<(u8, Field, u8), usize>,
+    seg_off: bool,
+    /// The last result's reads a join asked: that result (its address),
+    /// from which read, and the first after that does not hold.
+    join_scan: Option<(usize, u32, u32)>,
+    /// Cut off by a join: the output that stands, and the join (with the
+    /// last run's token) for the client (`Ctx::cut_join`).
+    pub(crate) join_out: Option<ValueId>,
+    join_cut: Option<crate::api::Hop>,
+    /// It joined a last run at a mark (hopped or cut off).
+    pub(crate) joined: bool,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) pubs: Vec<(Field, ValueId)>,
     pub(crate) kids: Vec<Spec>,
@@ -297,6 +327,14 @@ impl<'a> Ctx<'a> {
             out_from: None,
             marks: from_mark.as_ref().map_or_else(Vec::new, |m| m.old.marks[..m.j].to_vec()),
             after: None,
+            segs: from_mark.as_ref().and_then(|m| m.old.segs.as_ref().filter(|_| !m.no_cut).map(|g| g[..m.j].to_vec())),
+            seg: Seg { unknown: from_mark.is_some(), ..Seg::default() },
+            seg_ix: FxHashMap::default(),
+            seg_off: false,
+            join_scan: None,
+            join_out: None,
+            join_cut: None,
+            joined: false,
             from_mark,
             cutoff: None,
             contribs: Vec::new(),
@@ -1363,6 +1401,16 @@ impl<'a> Ctx<'a> {
             self.ix.insert((0, f, k), self.defs.len());
             self.defs.push(Def { f, loc, val: x });
         }
+        if self.segs.is_some() && !self.seg_off {
+            let d = Def { f, loc, val: x };
+            match self.seg_ix.get(&(0, f, k)) {
+                Some(&i) => self.seg.defs[i] = d,
+                None => {
+                    self.seg_ix.insert((0, f, k), self.seg.defs.len());
+                    self.seg.defs.push(d);
+                }
+            }
+        }
     }
 
     /// Defines `f` (at `loc`) as loop-back field `from`'s round value,
@@ -1463,6 +1511,15 @@ impl<'a> Ctx<'a> {
         } else {
             self.ix.insert((1, f, 0), self.pubs.len());
             self.pubs.push((f, x));
+        }
+        if self.segs.is_some() && !self.seg_off {
+            match self.seg_ix.get(&(1, f, 0)) {
+                Some(&i) => self.seg.pubs[i].1 = x,
+                None => {
+                    self.seg_ix.insert((1, f, 0), self.seg.pubs.len());
+                    self.seg.pubs.push((f, x));
+                }
+            }
         }
     }
 
@@ -1767,6 +1824,21 @@ impl<'a> Ctx<'a> {
             self.ix.insert((2, f, 0), self.contribs.len());
             self.contribs.push((f, x));
         }
+        if self.segs.is_some() && !self.seg_off {
+            match self.seg_ix.get(&(2, f, 0)) {
+                Some(&i) => {
+                    let c = &mut self.seg.contribs[i];
+                    c.1 = match self.core.acc(f) {
+                        Some(m) => m.combine(&self.core.values, c.1, x),
+                        None => x,
+                    };
+                }
+                None => {
+                    self.seg_ix.insert((2, f, 0), self.seg.contribs.len());
+                    self.seg.contribs.push((f, x));
+                }
+            }
+        }
     }
 
     /// The fold of `f`'s contributions after `from` and before this node.
@@ -2005,6 +2077,9 @@ impl<'a> Ctx<'a> {
     #[inline]
     fn set_kind_inner(&mut self, k: ValueId) {
         self.kinds = vec![k];
+        if self.segs.is_some() && !self.seg_off {
+            self.seg.kinds = Some(self.kinds.clone());
+        }
     }
 
     /// Sets the kinds of the frames this node opens, outermost first.
@@ -2019,6 +2094,9 @@ impl<'a> Ctx<'a> {
     #[inline]
     fn set_kinds_inner(&mut self, ks: &[ValueId]) {
         self.kinds = ks.to_vec();
+        if self.segs.is_some() && !self.seg_off {
+            self.seg.kinds = Some(self.kinds.clone());
+        }
     }
 
     /// Decides a pending effect.
@@ -2033,6 +2111,9 @@ impl<'a> Ctx<'a> {
     #[inline]
     fn set_effect_inner(&mut self, e: Effect) {
         self.effect = Some(e);
+        if self.segs.is_some() && !self.seg_off {
+            self.seg.effect = Some(Some(e));
+        }
     }
 
     /// Whether this node's effect is decided by its run.
@@ -2074,6 +2155,9 @@ impl<'a> Ctx<'a> {
     #[inline]
     fn claim_inner(&mut self, n: usize) {
         self.claim = Some(n);
+        if self.segs.is_some() && !self.seg_off {
+            self.seg.claim = Some(Some(n));
+        }
     }
 
     /// The claimed siblings' texts: a declared count claim's current
@@ -2419,12 +2503,222 @@ impl<'a> Ctx<'a> {
         r
     }
 
-    fn mark_at(&mut self, mark: u32, state: ValueId, as_old: ValueId, patch: Option<&[(Field, Locality, Option<ValueId>)]>) -> Result<(), Stop> {
+    /// Marks a point as [`Ctx::checkpoint`] does, and joins the node's
+    /// last run there: when that run marked a point with an equal `state`
+    /// (after the one this run resumed at or last joined it at), this run
+    /// goes on as that run did from there, as far as that run's reads
+    /// after it still hold. The engine takes that run's reads, placements,
+    /// marks and outputs from there on as this run's (after this run's own
+    /// so far): to its end, the run is cut off (`Err`; the run returns
+    /// it); else up to its last mark before its first read that no longer
+    /// holds, and the call returns that run's kept token and the marks
+    /// (the old run's names) joined from and hopped to: the client takes
+    /// its state to the mark hopped to from the token, and goes on from
+    /// there (making no outputs of the run hopped over again). Equal
+    /// states: the run goes on alike from there whatever came before,
+    /// arguments, placements and outputs so far included (they are not
+    /// compared). Both runs mark by this call; `None`: nothing joined.
+    ///
+    /// The token the run keeps ([`Ctx::keep_after`]) after a join is of
+    /// the marks joined too (the one kept before goes); cut off, the
+    /// client keeps it before it returns, from [`Ctx::cut_join`]. A run
+    /// keeping none after its last join keeps no token.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] when the run is cut off.
+    pub fn checkpoint_join(&mut self, mark: u32, state: ValueId) -> Result<Option<crate::api::Hop>, Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&mark, &state, )) } else { serde_json::Value::Null };
+        let r = self.checkpoint_join_inner(mark, state);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "checkpoint_join", a, crate::record::j(&match &r {
+            Ok(h) => Some(h.as_ref().map(|h| (h.from, h.to))),
+            Err(_) => None,
+        }));
+        r
+    }
+
+    /// Cut off by [`Ctx::checkpoint_join`]: the last run's kept token, the
+    /// mark joined at and its last mark (the old run's names).
+    pub fn cut_join(&self) -> Option<crate::api::Hop> {
+        self.join_cut.clone()
+    }
+
+    fn checkpoint_join_inner(&mut self, mark: u32, state: ValueId) -> Result<Option<crate::api::Hop>, Stop> {
+        if self.segs.is_none() {
+            // (Segments from here: what it made so far, the open one's;
+            // after marks made before, not known apart.)
+            let n = self.marks.len();
+            self.segs = Some(vec![Seg { unknown: true, ..Seg::default() }; n]);
+            self.seg = Seg {
+                defs: self.defs.clone(),
+                pubs: self.pubs.clone(),
+                contribs: self.contribs.clone(),
+                kinds: (!self.kinds.is_empty()).then(|| self.kinds.clone()),
+                diag: self.diag.clone(),
+                effect: self.effect.map(Some),
+                claim: self.claim.map(Some),
+                unknown: n > 0,
+            };
+            self.seg_ix.clear();
+            for (i, d) in self.defs.iter().enumerate() {
+                self.seg_ix.insert((0, d.f, d.loc.entry_key()), i);
+            }
+            for (i, p) in self.pubs.iter().enumerate() {
+                self.seg_ix.insert((1, p.0, 0), i);
+            }
+            for (i, c) in self.contribs.iter().enumerate() {
+                self.seg_ix.insert((2, c.0, 0), i);
+            }
+        }
+        self.push_mark(mark, state);
+        if NO_JOIN.with(std::cell::Cell::get) {
+            return Ok(None);
+        }
+        self.join(state)
+    }
+
+    /// The last run a join takes from: the one resumed at (or joined), else
+    /// the node's last result; with its segments, no passes or forwards.
+    fn join_base(&self) -> Option<(Arc<super::world::Res>, usize)> {
+        let (old, lo) = match &self.from_mark {
+            Some(fm) if fm.no_cut => return None,
+            Some(fm) => (fm.old.clone(), fm.j + 1),
+            None => (self.w.node(self.me)?.res.clone()?, 0),
+        };
+        let ok = old.segs.as_ref().is_some_and(|g| g.len() == old.marks.len() + 1) && old.passes.is_empty() && old.forwards.is_empty() && !old.cont_marks;
+        ok.then_some((old, lo))
+    }
+
+    /// Joins the last run at its first mark after the last joined with
+    /// state `state`, if this run's placements so far are that run's there
+    /// (by place and operation: their nodes are the same) and that run's
+    /// reads after it hold up to a mark of it.
+    fn join(&mut self, state: ValueId) -> Result<Option<crate::api::Hop>, Stop> {
+        // (A run setting its unit's environment, passing values on, with
+        // views or continuing goes on.)
+        if !self.env.is_empty() || !self.apps.is_empty() || !self.passes.is_empty() || !self.forwards.is_empty() || !self.views.is_empty() || self.base.is_some() {
+            return Ok(None);
+        }
+        let Some((old, lo)) = self.join_base() else { return Ok(None) };
+        let Some(jp) = (lo..old.marks.len()).find(|&j| old.marks[j].state == state) else { return Ok(None) };
+        let m0 = old.marks[jp];
+        if self.kids.len() != m0.kids as usize || self.conts.len() != m0.conts as usize {
+            return Ok(None);
+        }
+        let same = |mine: &[Spec], theirs: &[Id]| mine.iter().zip(theirs).all(|(s, &x)| self.w.node(x).is_some_and(|n| n.place == s.place && n.text.op == s.op));
+        if !same(&self.kids, &old.kids[..self.kids.len()]) || !same(&self.conts, &old.conts[..self.conts.len()]) {
+            return Ok(None);
+        }
+        // Its first read from the mark on that no longer holds (asked once
+        // per run as far as asked).
+        let a = m0.read_ix;
+        let ptr = Arc::as_ptr(&old) as usize;
+        let fail = match self.join_scan {
+            Some((p, f0, fl)) if p == ptr && f0 <= a && a <= fl => fl,
+            _ => {
+                let fl = old.reads[a as usize..].iter().position(|r| !super::build::holds(self.core, self.w, self.me, r)).map_or(old.reads.len(), |i| i + a as usize);
+                let fl = u32::try_from(fl).unwrap_or(u32::MAX);
+                self.join_scan = Some((ptr, a, fl));
+                fl
+            }
+        };
+        let segs = old.segs.clone().unwrap_or_default();
+        if fail as usize >= old.reads.len() {
+            if segs[jp + 1..].iter().any(|g| g.unknown) || !self.splice(&old, jp, None) {
+                return Ok(None);
+            }
+            self.join_out = Some(old.out);
+            self.join_cut = old.after.as_ref().map(|t| crate::api::Hop { token: t.0.clone(), from: m0.mark, to: old.marks[old.marks.len() - 1].mark });
+            self.joined = true;
+            // (The token kept so far is not of the marks joined.)
+            self.after = None;
+            return Err(Stop { _private: () });
+        }
+        let Some(h) = (jp + 1..old.marks.len()).rev().find(|&h| old.marks[h].read_ix <= fail) else { return Ok(None) };
+        let Some(after) = old.after.clone() else { return Ok(None) };
+        if segs[jp + 1..=h].iter().any(|g| g.unknown) || !self.splice(&old, jp, Some(h)) {
+            return Ok(None);
+        }
+        let hop = crate::api::Hop { token: after.0.clone(), from: m0.mark, to: old.marks[h].mark };
+        self.from_mark = Some(MarkResume { after: after.0, old, j: h, kids: Vec::new(), conts: Vec::new(), no_cut: false });
+        self.joined = true;
+        self.after = None;
+        Ok(Some(hop))
+    }
+
+    /// Takes run `old`'s reads, placements, marks and outputs after its
+    /// mark `jp` up to its mark `h` (`None`: to its end) as this run's,
+    /// after its own and its mark just made. False (nothing taken): a
+    /// placement of it is gone.
+    fn splice(&mut self, old: &super::world::Res, jp: usize, h: Option<usize>) -> bool {
+        let m0 = old.marks[jp];
+        let end = h.map(|h| old.marks[h]);
+        let spec = |x: &Id| self.w.node(*x).map(|n| Spec { op: n.text.op, args: n.text.args.clone(), place: n.place });
+        let kids: Option<Vec<Spec>> = old.kids[m0.kids as usize..end.map_or(old.kids.len(), |m| m.kids as usize)].iter().map(spec).collect();
+        let conts: Option<Vec<Spec>> = old.conts[m0.conts as usize..end.map_or(old.conts.len(), |m| m.conts as usize)].iter().map(spec).collect();
+        let (Some(kids), Some(conts)) = (kids, conts) else { return false };
+        let mk = *self.marks.last().expect("a mark just made");
+        let shift = |now: usize, then: u32, x: u32| u32::try_from(now as i64 + i64::from(x) - i64::from(then)).unwrap_or(u32::MAX);
+        let (rn, kn, cn) = (self.reads.len(), self.kids.len(), self.conts.len());
+        let last = h.unwrap_or(old.marks.len() - 1);
+        for m in &old.marks[jp + 1..=last] {
+            self.marks.push(super::world::Mark {
+                mark: m.mark.wrapping_add(mk.mark.wrapping_sub(m0.mark)),
+                read_ix: shift(rn, m0.read_ix, m.read_ix),
+                kids: shift(kn, m0.kids, m.kids),
+                conts: shift(cn, m0.conts, m.conts),
+                digest: 0,
+                odigest: 0,
+                ..*m
+            });
+        }
+        self.reads.extend_from_slice(&old.reads[m0.read_ix as usize..end.map_or(old.reads.len(), |m| m.read_ix as usize)]);
+        self.nkids += kids.iter().filter(|s| !matches!(s.place, Place::Marker(_))).count();
+        self.kids.extend(kids);
+        self.conts.extend(conts);
+        let segs = old.segs.as_deref().unwrap_or_default();
+        let taken = &segs[jp + 1..h.map_or(segs.len(), |h| h + 1)];
+        self.seg_off = true;
+        for g in taken {
+            for d in &g.defs {
+                self.define_with_inner(d.f, d.val, d.loc);
+            }
+            for &(f, x) in &g.pubs {
+                self.publish_inner(f, x);
+            }
+            for &(f, x) in &g.contribs {
+                self.contribute_inner(f, x);
+            }
+            if let Some(k) = &g.kinds {
+                self.kinds.clone_from(k);
+            }
+            self.diag.extend_from_slice(&g.diag);
+            if let Some(e) = g.effect {
+                self.effect = e;
+            }
+            if let Some(c) = g.claim {
+                self.claim = c;
+            }
+        }
+        self.seg_off = false;
+        if let Some(g) = &mut self.segs {
+            g.extend_from_slice(taken);
+        }
+        true
+    }
+
+    fn push_mark(&mut self, mark: u32, state: ValueId) -> u64 {
         self.flush_gets();
         let (digest, odigest) = self.out_digests();
         let read_ix = u32::try_from(self.reads.len()).unwrap_or(u32::MAX);
         let (kids, conts) = (u32::try_from(self.kids.len()).unwrap_or(u32::MAX), u32::try_from(self.conts.len()).unwrap_or(u32::MAX));
         self.marks.push(super::world::Mark { mark, read_ix, state, digest, odigest, kids, conts });
+        if let Some(g) = &mut self.segs {
+            g.push(std::mem::take(&mut self.seg));
+            self.seg_ix.clear();
+        }
         // (A careful run past its start, at a later mark, guesses again:
         // resumed at the mark before its first broken read, it is past that
         // read; parked, past where it stopped; run afresh, past its first
@@ -2438,6 +2732,12 @@ impl<'a> Ctx<'a> {
             self.lapsed = true;
             self.predict = self.core.predicting.load(std::sync::atomic::Ordering::Relaxed);
         }
+        odigest
+    }
+
+    fn mark_at(&mut self, mark: u32, state: ValueId, as_old: ValueId, patch: Option<&[(Field, Locality, Option<ValueId>)]>) -> Result<(), Stop> {
+        let odigest = self.push_mark(mark, state);
+        let digest = self.marks.last().map_or(0, |m| m.digest);
         let Some(fm) = &self.from_mark else { return Ok(()) };
         if fm.no_cut {
             return Ok(());
@@ -2630,6 +2930,13 @@ impl<'a> Ctx<'a> {
         self.env.clear();
         self.ix.clear();
         self.nkids = 0;
+        self.segs = None;
+        self.seg = Seg::default();
+        self.seg_ix.clear();
+        self.join_scan = None;
+        self.join_out = None;
+        self.join_cut = None;
+        self.joined = false;
     }
 
     pub fn diagnostic(&mut self, msg: ValueId) {
@@ -2643,6 +2950,9 @@ impl<'a> Ctx<'a> {
     #[inline]
     fn diagnostic_inner(&mut self, msg: ValueId) {
         self.diag.push(msg);
+        if self.segs.is_some() && !self.seg_off {
+            self.seg.diag.push(msg);
+        }
     }
 
     /// A pure text computation, memoized by the value store.

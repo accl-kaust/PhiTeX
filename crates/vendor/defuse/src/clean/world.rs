@@ -211,6 +211,27 @@ pub(crate) struct Mark {
     pub conts: u32,
 }
 
+/// The outputs a run made between two of its marks (or before its first,
+/// or after its last): its definitions and publications (the last of each
+/// key), its contributions (each field's combined), the kinds it set, its
+/// diagnostics, the effect and claim it set. A run joining another at a
+/// mark (`Ctx::checkpoint_join`) makes those of that run's segments after
+/// it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Seg {
+    pub defs: Vec<Def>,
+    pub pubs: Vec<(Field, ValueId)>,
+    pub contribs: Vec<(Field, ValueId)>,
+    pub kinds: Option<Vec<ValueId>>,
+    pub diag: Vec<ValueId>,
+    pub effect: Option<Option<Effect>>,
+    pub claim: Option<Option<usize>>,
+    /// Not known apart from what came before: the segment a run resumed at
+    /// a mark begins with (the client makes its outputs before the mark
+    /// again in it). A join over it is refused.
+    pub unknown: bool,
+}
+
 /// Where a run passed on a value it read through a view without
 /// inspecting it (`Ctx::define_from` and the others): a forward, the
 /// target refiled when the value read changes.
@@ -297,6 +318,10 @@ pub(crate) struct Res {
     /// resumed at one is not cut off at a later (their digests are of
     /// their attempts' outputs).
     pub cont_marks: bool,
+    /// What its run made between its marks, made by a client that joins
+    /// runs at marks (`Ctx::checkpoint_join`): the `i`-th, up to mark `i`;
+    /// the last, after the last mark.
+    pub segs: Option<Arc<[Seg]>>,
     /// The values it passed on without inspecting them.
     pub passes: Vec<Pass>,
     /// The compositions its passes name (`Ctx::compose`).
@@ -379,6 +404,7 @@ impl Default for Res {
             marks: Arc::from([]),
             after: None,
             cont_marks: false,
+            segs: None,
             passes: Vec::new(),
             composed: Vec::new(),
             last: None,

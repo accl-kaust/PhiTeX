@@ -414,6 +414,23 @@ pub enum Cause {
     Held { by: NodeId, why: Hold },
 }
 
+/// A run's join of the node's last run at a mark, up to a later mark of
+/// it (`Ctx::checkpoint_join`): that run's kept token, and its marks
+/// joined at and hopped to. The client takes its state to mark `to` from
+/// the token and goes on from there.
+#[derive(Clone)]
+pub struct Hop {
+    pub token: Arc<dyn std::any::Any + Send + Sync>,
+    pub from: u32,
+    pub to: u32,
+}
+
+impl std::fmt::Debug for Hop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hop").field("from", &self.from).field("to", &self.to).finish_non_exhaustive()
+    }
+}
+
 /// What held a node back before it ran ([`Cause::Held`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hold {

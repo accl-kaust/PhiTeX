@@ -4093,6 +4093,14 @@ fn run_job(
     }
     let run = |mut cx: Ctx<'_>, out: ValueId| Run {
         res: Res {
+            // (Joining: its segments, the last after its last mark, unless
+            // a join took that one.)
+            segs: cx.segs.take().map(|mut g| {
+                if g.len() == cx.marks.len() {
+                    g.push(std::mem::take(&mut cx.seg));
+                }
+                g.into()
+            }),
             last: cx.last_reads(),
             // (Its output as `output_from` set it, if it did.)
             out: cx.passes.iter().rev().find(|p| p.to == super::world::PassTo::Out).map(|p| p.val).or(cx.out_from).unwrap_or(out),
@@ -4182,6 +4190,8 @@ fn run_job(
         let conts: Option<Vec<_>> = old.conts.iter().map(spec).collect();
         if let (Some(kids), Some(conts)) = (kids, conts) {
             let mut res = (*old).clone();
+            // (Its marks are not that run's: no segments of them.)
+            res.segs = None;
             if patch.is_some() {
                 core.cut_patched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -4218,9 +4228,25 @@ fn run_job(
         }
         return run_job(core, w, id, None, predict, careful, fuel);
     }
+    // Cut off joining its last run (`Ctx::checkpoint_join`): its own
+    // and that run's, spliced, stand.
+    if let Some(out) = cx.join_out.take()
+        && matches!(r, Ok(Err(_)))
+    {
+        let r = run(cx, out);
+        core.cut_in_run.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if kept_check() {
+            check_cutoff(core, w, id, &r, predict, careful);
+        }
+        return Outcome::Done(r);
+    }
+    let joined = cx.joined;
     match r {
         Ok(Ok(out)) => {
             let mut r = run(cx, out);
+            if joined && kept_check() {
+                check_cutoff(core, w, id, &r, predict, careful);
+            }
             // Its reads filed here, off the merge (`CLEAN_FILE_AHEAD=0`:
             // all by the merge).
             if file_ahead() {
@@ -4249,7 +4275,7 @@ fn loop_trace() -> bool {
 /// `CLEAN_KEPT_CHECK`: a run cut off at a mark has the effects a run from
 /// the start makes.
 fn check_cutoff(core: &super::core::Core, w: &World, id: Id, cut: &Run, predict: bool, careful: bool) {
-    if let Outcome::Done(full) = run_job(core, w, id, None, predict, careful, None) {
+    if let Outcome::Done(full) = super::ctx::no_joins(|| run_job(core, w, id, None, predict, careful, None)) {
         let (a, b) = (&full.res, &cut.res);
         let differ: Vec<&str> = [
             ("out", a.out == b.out),

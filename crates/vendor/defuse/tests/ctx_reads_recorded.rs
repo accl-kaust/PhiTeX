@@ -77,6 +77,7 @@ const WRITES: &[&str] = &[
     "diagnostic",
     "checkpoint",
     "checkpoint_patched",
+    "checkpoint_join",
     "keep_after",
     "resume_at",
 ];
@@ -96,6 +97,7 @@ const LOCAL: &[&str] = &[
     "path",
     "resumed",
     "resumed_retext",
+    "cut_join",
 ];
 
 #[test]
