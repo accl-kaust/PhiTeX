@@ -874,16 +874,15 @@ impl<'a> Builder<'a> {
         self.claimer_gone(id, n.unit);
         self.w.unlink(n.unit, n.pos);
         self.w.drop_node(id);
-        // Its readers and those of its position.
-        if let Some(m) = self.w.rd.take_outs(id) {
-            for (&r, ()) in m.iter() {
-                self.recheck(r, 13);
-            }
+        // Its readers and those of its position. (They stay filed as its
+        // readers: one that runs again reading it, the node made again, has
+        // the same entries, and a diff of them files nothing; one that no
+        // longer reads it unfiles them.)
+        for r in self.w.out_readers_of(id) {
+            self.recheck(r, 13);
         }
-        if let Some(m) = self.w.rd.take_anchors(id) {
-            for (&r, ()) in m.iter() {
-                self.recheck(r, 13);
-            }
+        for r in self.w.anchor_readers_of(id) {
+            self.recheck(r, 13);
         }
         self.shape_at(n.unit, n.pos);
         self.w.touch_key(Key::Out(id));

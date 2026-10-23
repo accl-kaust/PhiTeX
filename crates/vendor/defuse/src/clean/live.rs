@@ -239,11 +239,6 @@ impl Readers {
         });
     }
 
-    /// Node `of`'s output readers, taken out (it is gone).
-    pub(crate) fn take_outs(&self, of: Id) -> Option<PMap<Id, ()>> {
-        lock(self.i().outs.shard(&of)).remove(&of)
-    }
-
     pub(crate) fn drop_out(&self, of: Id, id: Id) {
         self.i().outs.with_if(&of, |m| {
             m.remove(&id, &NoMeasure);
@@ -258,11 +253,6 @@ impl Readers {
         self.i().anchors.with(of, |m| {
             m.insert(id, (), &NoMeasure);
         });
-    }
-
-    /// Node `of`'s anchor readers, taken out (it is gone).
-    pub(crate) fn take_anchors(&self, of: Id) -> Option<PMap<Id, ()>> {
-        lock(self.i().anchors.shard(&of)).remove(&of)
     }
 
     pub(crate) fn drop_anchor(&self, of: Id, id: Id) {
