@@ -571,6 +571,36 @@ impl Core {
                 out[0] = v.list(has);
                 Some(v.list(out))
             }
+            Step::Rank(k) => {
+                let d = self.distinct(x)?;
+                #[allow(clippy::cast_possible_wrap)]
+                v.with(d, |val| match val {
+                    Value::List(l) => l.iter().position(|&e| e == k).map(|i| i as i64 + 1),
+                    _ => None,
+                })
+                .map(|n| v.int(n))
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            Step::Distinct => {
+                let d = self.distinct(x)?;
+                v.with(d, |val| match val {
+                    Value::List(l) => Some(v.int(l.len() as i64)),
+                    _ => None,
+                })
+            }
+            Step::Ranks(ks) => {
+                let d = self.distinct(x)?;
+                let ks: Vec<ValueId> = v.with(ks, |val| match val {
+                    Value::List(l) => l.to_vec(),
+                    _ => Vec::new(),
+                });
+                #[allow(clippy::cast_possible_wrap)]
+                let out = v.with(d, |val| match val {
+                    Value::List(l) => ks.iter().map(|k| v.int(l.iter().position(|e| e == k).map_or(0, |i| i as i64 + 1))).collect(),
+                    _ => Vec::new(),
+                });
+                Some(v.list(out))
+            }
             Step::Each(p) => v
                 .with(x, |val| match val {
                     Value::List(l) => Some(Err(l.to_vec())),
@@ -582,6 +612,66 @@ impl Core {
                     Ok(()) => self.each_seq(p.0, x),
                 }),
         }
+    }
+
+    /// The distinct elements of list or sequence `x` in the order they
+    /// first occur, as a list (`Step::Rank`); a sequence's kept per rope
+    /// node (made bottom up, without recursion): a node's are its left
+    /// part's, then its right part's not among them.
+    fn distinct(&self, x: ValueId) -> Option<ValueId> {
+        let v = &self.values;
+        let of = |l: &[ValueId]| {
+            let mut out: Vec<ValueId> = Vec::new();
+            for &e in l {
+                if !out.contains(&e) {
+                    out.push(e);
+                }
+            }
+            v.list(out)
+        };
+        match v.with(x, |val| match val {
+            Value::List(l) => Some(Ok(of(l))),
+            Value::Nil => Some(Ok(v.list(Vec::new()))),
+            Value::Seq(_) => Some(Err(())),
+            _ => None,
+        })? {
+            Ok(d) => return Some(d),
+            Err(()) => {}
+        }
+        let key = |x: ValueId| hash_words(0xd157, &[x.raw()]) | 1;
+        let got = |x: ValueId| if x == ValueId::NIL { Some(v.list(Vec::new())) } else { self.each_memo.get(key(x)).copied() };
+        let items = |d: ValueId| v.with(d, |val| match val {
+            Value::List(l) => l.to_vec(),
+            _ => Vec::new(),
+        });
+        let mut stack = vec![(x, false)];
+        while let Some((y, expanded)) = stack.pop() {
+            if got(y).is_some() {
+                continue;
+            }
+            match v.seq_split(y) {
+                Some(Ok(e)) => {
+                    self.each_memo.get_or_insert(key(y), || v.list(vec![e]));
+                }
+                Some(Err((l, r))) if expanded => {
+                    let (a, b) = (items(got(l).unwrap_or(ValueId::UNIT)), items(got(r).unwrap_or(ValueId::UNIT)));
+                    let mut out = a;
+                    for e in b {
+                        if !out.contains(&e) {
+                            out.push(e);
+                        }
+                    }
+                    self.each_memo.get_or_insert(key(y), || v.list(out));
+                }
+                Some(Err((l, r))) => {
+                    stack.push((y, true));
+                    stack.push((r, false));
+                    stack.push((l, false));
+                }
+                None => {}
+            }
+        }
+        got(x)
     }
 
     /// `Step::Each(p)` on sequence `s`, kept per rope node (made bottom up,
