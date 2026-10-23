@@ -86,6 +86,9 @@ pub enum Left {
     Boundary,
 }
 
+/// A character's width, height and depth ([`Fonts::whd_table`]).
+pub type Whd = (Scaled, Scaled, Scaled);
+
 /// The caller's fonts.
 pub trait Fonts {
     /// The metrics of `ch` in `font`, or `None` if it doesn't exist.
@@ -100,7 +103,7 @@ pub trait Fonts {
     /// a table: a run of characters in one font is measured by indexing
     /// it, one question per run instead of per character. `None` where
     /// they keep none ([`Fonts::char_whd`] is asked).
-    fn whd_table(&self, font: FontId) -> Option<&[(Scaled, Scaled, Scaled)]> {
+    fn whd_table(&self, font: FontId) -> Option<&[Whd]> {
         let _ = font;
         None
     }

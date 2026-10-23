@@ -80,7 +80,7 @@ fn scan_hlist(
     hdx: &mut (Scaled, Scaled, Scaled),
 ) {
     // (the font of the run of characters being measured, and its table)
-    let mut run: Option<(u32, Option<&[(Scaled, Scaled, Scaled)]>)> = None;
+    let mut run: Option<(u32, Option<&[crate::fonts::Whd]>)> = None;
     for p in list {
         match p {
             Node::Char { font, ch } => {

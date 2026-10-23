@@ -876,7 +876,7 @@ pub fn line_break(
         let mut prev_p = 0;
         // (the font of the run of characters being measured, and its
         // table, [`Fonts::whd_table`])
-        let mut run: Option<(u32, Option<&[(Scaled, Scaled, Scaled)]>)> = None;
+        let mut run: Option<(u32, Option<&[crate::fonts::Whd]>)> = None;
         while cur < list.len() && !b.active.is_empty() {
             // §866
             match &list[cur] {
