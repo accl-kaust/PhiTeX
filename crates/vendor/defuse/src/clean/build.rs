@@ -637,6 +637,7 @@ impl<'a> Builder<'a> {
             res: None,
             wide: false,
             narrowed: None,
+            was: None,
         };
         let statics = n.text.stat.contribs.clone();
         // (A placed id comes back: filed for anew. Positions workers took
@@ -1081,6 +1082,15 @@ impl<'a> Builder<'a> {
         m.text = text;
         m.wide = false;
         m.narrowed = None;
+        // (The text its last result is of, while that is not this one.)
+        let of = |t: &Arc<Text>| n.res.as_ref().is_some_and(|r| r.text == super::world::text_key(t));
+        m.was = if of(&m.text) {
+            None
+        } else if of(&n.text) {
+            Some(n.text.clone())
+        } else {
+            n.was.clone().filter(|w| of(w))
+        };
         // (Without a result, or claimed, it contributes what its text
         // declares: the new text's now.)
         let (before, after) = (contribs_of(&n), contribs_of(&m));
@@ -1828,6 +1838,7 @@ impl<'a> Builder<'a> {
         let mut n2 = n.clone();
         n2.wide |= widen;
         n2.narrowed = None;
+        n2.was = None;
         let new_defs = res.defs.clone();
         let claim = res.claim;
         let t_put = super::core::prof::start();

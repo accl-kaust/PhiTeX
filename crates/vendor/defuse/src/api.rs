@@ -1096,6 +1096,9 @@ pub struct Report {
     /// `stops`; `runs_by_op` counts every attempt).
     pub runs: u64,
     pub runs_by_op: Vec<(&'static str, u64)>,
+    /// Speculation by operation this evaluation: runs ahead of a node in
+    /// work, and of those the refuted.
+    pub speculation_by_op: Vec<(&'static str, u64, u64)>,
     /// Waits (a run or a validation parked on a subject in work).
     pub stops: u64,
     pub waits_by_op: Vec<(&'static str, u64)>,

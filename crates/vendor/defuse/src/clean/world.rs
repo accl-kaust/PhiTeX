@@ -402,6 +402,9 @@ pub(crate) struct Node {
     /// The bound a stopped run narrowed its pending set to (`Ctx::narrow`),
     /// until it runs again.
     pub narrowed: Option<Arc<May>>,
+    /// Given another text since its last result: the text that result is
+    /// of (`Ctx::resumed_retext`), until it commits again.
+    pub was: Option<Arc<Text>>,
 }
 
 impl Node {

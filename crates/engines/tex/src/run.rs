@@ -879,7 +879,7 @@ pub(crate) struct Run<'c, 'a> {
     /// The fonts of the lines this run made (by their box values), from
     /// their nodes; `None` for a line not sealed
     /// ([`crate::nodes::unit_shape`]).
-    pub(crate) line_fonts: crate::FxHashMap<ValueId, Option<ValueId>>,
+    pub(crate) line_fonts: crate::FxHashMap<ValueId, ValueId>,
     /// The font sets of those lines, each as one value.
     pub(crate) font_sets: crate::FxHashMap<u64, (Vec<u32>, ValueId)>,
     /// The main loop's `lig_stack`, kept between words (§1034).

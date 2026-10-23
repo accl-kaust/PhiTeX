@@ -604,6 +604,8 @@ impl Run {
                 Ok(J::Null)
             }
             "resumed" => Ok(json!(cx.resumed().map(|r| r.1))),
+            "resumed_retext" => Ok(json!(cx.resumed_retext().map(|r| (r.1, r.2.to_vec())))),
+            "resume_at" => Ok(json!(cx.resume_at(de(&c[1][0])))),
             m => call(cx, m, &c[1]),
         }
     }

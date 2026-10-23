@@ -1118,13 +1118,13 @@ impl Run<'_, '_> {
         let t_decode = t0.elapsed();
         phitex_pdf::phase::add(1, t0);
         let t_p2 = std::time::Instant::now();
-        // (the positions walk only for a whatsit that needs one: a
-        // `\write` expands without positions; a plain page skips the
-        // walk, the second copy of the box it makes and the font view)
+        // (the positions walk only for a whatsit that reads one: the
+        // others act on their data; a page without one skips the walk,
+        // the second copy of the box it makes and the font view)
         let needs_pos = side.whats.iter().any(|&w| {
             let xs = list_of(v, w);
             let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
-            !matches!(kind.as_str(), "write" | "open" | "close")
+            crate::pdfprim::reads_position_at_shipout(&kind)
         });
         let pos = if needs_pos {
             crate::pdfprim::positions(self, &bx)?
