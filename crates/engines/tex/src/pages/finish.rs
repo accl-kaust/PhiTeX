@@ -672,11 +672,44 @@ impl Run<'_, '_> {
             .unwrap_or_default();
         let mut want: phitex_defuse::FxHashSet<i64> = phitex_defuse::FxHashSet::default();
         want.insert(pid);
+        // (the items of each piece the page's spans name: a unit read at
+        // those alone, so a change to a piece's items after the page's
+        // cut (the next page's part of a piece that spans the break)
+        // leaves this finisher standing; the own piece whole where the
+        // page fired in the material before it, whose items after the
+        // candidate all go on to the next page)
+        let mut named: phitex_defuse::FxHashMap<i64, Vec<u32>> = phitex_defuse::FxHashMap::default();
         for s in &fin.spans {
             if let Src::Piece { piece, .. } | Src::Held { piece, .. } = s.src {
                 want.insert(piece);
             }
+            for src in crate::pages::span_srcs(s) {
+                let (piece, ix) = match src {
+                    Src::Piece { piece, item } => (piece, crate::pages::end_sub_of(item).map_or(item, |(e, _)| e)),
+                    Src::Held { piece, item, .. } => (piece, item),
+                    Src::Rtn { .. } => continue,
+                };
+                named.entry(piece).or_default().push(ix);
+            }
         }
+        for ixs in named.values_mut() {
+            ixs.sort_unstable();
+            ixs.dedup();
+        }
+        let whole = |p: i64| (p == pid && fin.in_material) || !named.contains_key(&p);
+        // (a unit's items, or their shapes, at the named indices: the
+        // others unit, never read)
+        let pick = |r: &mut Self, list: phitex_defuse::View, p: i64| -> Vec<ValueId> {
+            let ixs = &named[&p];
+            let n = ixs.last().map_or(0, |&i| i as usize + 1);
+            let mut out = vec![ValueId::UNIT; n];
+            for &i in ixs {
+                if let Some(x) = r.cx.get(list, Step::Index(i)) {
+                    out[i as usize] = x;
+                }
+            }
+            out
+        };
         let mut units: Vec<(i64, ValueId, Vec<ValueId>)> = Vec::new();
         let mut own = None;
         // (a PDF page's lines read by their shape: their dimensions and
@@ -694,21 +727,27 @@ impl Run<'_, '_> {
             // (a PDF page's unit read by its shape, its items' view kept
             // for its sealed lines, `crate::pages::seal`)
             let shape = if seal {
-                self.cx.get(u, Step::Index(7)).filter(|&x| x != ValueId::UNIT)
+                self.cx.at(u, Step::Index(7)).filter(|&w| self.cx.get(w, Step::Eq(ValueId::UNIT)) == Some(v.bool(false)))
             } else {
                 None
             };
             let mut raw = match self.cx.at(u, Step::Index(2)) {
-                Some(x) if shape.is_some() => {
+                Some(x) if let Some(sh) = shape => {
                     let raw_id = |n: phitex_defuse::NodeId| i64::from_ne_bytes(n.raw().to_ne_bytes());
                     let place = u32::try_from(i).unwrap_or(u32::MAX);
                     self.seal_unit(p, x, place, fin.after.map(raw_id), raw_id(fin.piece));
-                    list_of(v, shape.unwrap_or(ValueId::UNIT))
+                    if whole(p) {
+                        let sh = self.cx.whole(sh);
+                        list_of(v, sh)
+                    } else {
+                        pick(self, sh, p)
+                    }
                 }
-                Some(x) => {
+                Some(x) if whole(p) => {
                     let x = self.cx.whole(x);
                     list_of(v, x)
                 }
+                Some(x) => pick(self, x, p),
                 None => Vec::new(),
             };
             // (`PHITEX_FIN_ITEMS=1`, profile: each unit's items a
