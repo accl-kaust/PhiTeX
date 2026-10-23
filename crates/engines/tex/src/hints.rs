@@ -971,8 +971,8 @@ pub(crate) struct TextHints {
 
 /// A chunk's last analysis and the edit since (`(a, b, c)`: the old
 /// bytes `a..b` are now `a..c`), for [`text_hints_reads_reusing`]: the
-/// atoms outside the slices around the edit whose structure is the
-/// same keep their hints.
+/// atoms the edit does not reach whose structure is the same keep their
+/// hints ([`atom_hints`]).
 pub(crate) struct Reuse<'a> {
     pub th: &'a TextHints,
     pub edit: (usize, usize, usize),
@@ -3373,9 +3373,20 @@ fn atom_hints(
         // whose structure is the same: its hint as the last analysis
         // made it, [`Reuse`])
         if let Some((old, lo, hi, shift)) = reuse {
-            let j = if at.start < lo {
+            // (before the edit: the atom, its run of characters and its
+            // item's operands end before it; after the edit: the atom and
+            // the one before it, whose hint a non-command reads, begin
+            // after it)
+            let reach = an
+                .item_of
+                .get(&a)
+                .map(|&k| an.p.items[k].end.min(n))
+                .filter(|&e| e > 0)
+                .map_or(at.end, |e| an.p.atoms[e - 1].end.max(at.end));
+            let reach = an.run_key(a).map_or(reach, |r| reach.max(r.1));
+            let j = if reach <= lo {
                 Some(i)
-            } else if at.start >= hi {
+            } else if at.start >= hi && an.prev(a).is_none_or(|p| an.p.atoms[p].start >= hi) {
                 (i + old.sigs.len()).checked_sub(new_n)
             } else {
                 None
@@ -3460,8 +3471,9 @@ fn analyse_with(
 }
 
 /// [`analyse_with`] keeping the hints of the atoms an edit did not reach
-/// ([`Reuse`]): those before the slice before the edit's, and after the
-/// slice after it, whose structure is the same ([`atom_sig`]).
+/// ([`Reuse`]): those whose text, run and operands end before the edited
+/// bytes, and those after them (with the atom before them), whose
+/// structure is the same ([`atom_sig`]).
 #[allow(clippy::too_many_lines)]
 fn analyse_reusing(
     text: &str,
@@ -3496,14 +3508,10 @@ fn analyse_reusing(
     // (the bytes around the edit: from the start of the slice before
     // the one it begins in to the end of the slice after the one it ends
     // in)
+    // (the edited bytes: `a..c` of the new text)
     let window = reuse.map(|r| {
         let (a, b, c) = r.edit;
-        let k0 = slices.partition_point(|&(_, e)| e <= a).saturating_sub(1);
-        let k1 = (slices.partition_point(|&(_, e)| e < c) + 1).min(slices.len().saturating_sub(1));
-        let lo = slices.get(k0).map_or(0, |x| x.0);
-        let hi = slices.get(k1).map_or(text.len(), |x| x.1);
-        let shift = c.cast_signed() - b.cast_signed();
-        (r.th, lo, hi, shift)
+        (r.th, a, c, c.cast_signed() - b.cast_signed())
     });
     let (starts, hints, skip, sigs, kept) = atom_hints(&an, text, window);
     if tm && reuse.is_some() {
