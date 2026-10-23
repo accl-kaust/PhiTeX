@@ -172,11 +172,12 @@ fn tiny_edit() {
 /// first (its reads before it hold) and reads the new `\foo`, and at the
 /// second its state differs from its last run's only in that cache. A
 /// cutoff there would keep the old `\foo` typeset (no read after the
-/// mark says it changed).
+/// mark says it changed). (`\foo` by `\csname`: a name in the text is
+/// looked up as the run begins.)
 #[test]
 fn cutoff_at_a_mark_counts_read_caches() {
     let fx = common::fixtures().join("dvi");
-    let src = "\\def\\foo{abc}\n\n\\count1=0 \\def\\body{\\advance\\count1 by 1 \\ifnum\\count1<1500 \\expandafter\\body\\fi}\n\n\\noindent\\body\\ifx\\foo\\relax\\fi\\count1=0 \\body\\foo\\par\n\n\\end\n".to_owned();
+    let src = "\\def\\foo{abc}\n\n\\count1=0 \\def\\body{\\advance\\count1 by 1 \\ifnum\\count1<1500 \\expandafter\\body\\fi}\n\n\\noindent\\body\\expandafter\\ifx\\csname foo\\endcsname\\relax\\fi\\count1=0 \\body\\csname foo\\endcsname\\par\n\n\\end\n".to_owned();
     let prelude = common::plain();
     let opts = || common::options("./t.tex", "t", "", &fx);
     let mut b = common::build(opts(), Some(&prelude), &src);
