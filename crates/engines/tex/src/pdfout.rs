@@ -1365,11 +1365,24 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         );
     }
     // the files of `\pdfmapline`s and `\pdfmapfile`s
-    for e in r
+    let maps_cell = r
         .get_loc(crate::fields::cell::PDF_MAPS)?
         .map(|x| list_of(v, x))
-        .unwrap_or_default()
-    {
+        .unwrap_or_default();
+    // (`PHITEX_FONTS_TRACE=1`, observe: what a page's font step reads)
+    if crate::exec::obs_flag!("PHITEX_FONTS_TRACE") {
+        eprintln!(
+            "fonts-for: ids {} fonts {} vfs {} map entries {:?}",
+            ids.len(),
+            out.by_id.len(),
+            out.vfs.len(),
+            maps_cell
+                .iter()
+                .map(|&e| list_of(v, e).iter().map(|&y| v.render(y).chars().take(40).collect::<String>()).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+    }
+    for e in maps_cell {
         let ys = list_of(v, e);
         let file = ys.first().map(|&k| str_of(v, k)).as_deref() == Some("file");
         let text = ys.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
