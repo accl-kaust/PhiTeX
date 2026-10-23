@@ -724,9 +724,6 @@ impl State {
         if self.undo.is_some() {
             self.log_slot(loc);
         }
-        if self.track {
-            self.note_mark_change(loc);
-        }
         let s = if loc & SPILL == 0 {
             let i = loc as usize;
             if i >= self.eq.len() {
@@ -743,6 +740,11 @@ impl State {
         if !s.touched {
             s.touched = true;
             self.touched.push(loc);
+        }
+        // (noted as changed since the last mark, once: the slot at hand)
+        if self.track && !s.mdirty {
+            s.mdirty = true;
+            self.mdirty.push(loc);
         }
         s
     }
@@ -956,14 +958,15 @@ impl State {
         if self.undo.is_some() {
             self.log_slot(loc);
         }
-        if self.track {
-            self.note_mark_change(loc);
-        }
         let s = if loc & SPILL == 0 {
             &mut self.eq[loc as usize]
         } else {
             &mut self.spill[(loc & !SPILL) as usize]
         };
+        if self.track && !s.mdirty {
+            s.mdirty = true;
+            self.mdirty.push(loc);
+        }
         &mut s.e
     }
 
@@ -2469,6 +2472,19 @@ impl MarkDelta {
     }
 }
 
+#[cfg(test)]
+impl PState {
+    /// (test) A copy whose first defined slot read `x` from the engine
+    /// before its definition.
+    pub(crate) fn with_eng(&self, x: Option<ValueId>) -> PState {
+        let mut p = self.clone();
+        if let Some(m) = p.slots.iter_mut().find_map(|s| s.meta.as_mut()) {
+            m.eng = Some(x);
+        }
+        p
+    }
+}
+
 /// A run's table, parked ([`State::park`]).
 #[derive(Clone)]
 pub(crate) struct PState {
@@ -2534,10 +2550,12 @@ impl PState {
         let ent = |e: &PEntry| (e.id.map(ValueId::raw), e.flags);
         let mut h = phitex_defuse::FxHasher::default();
         (s.loc.word(), ent(&s.e), s.save_gid, s.save_stamp, s.ginert).hash(&mut h);
-        // (the engine's value the run read before its definition is a
-        // read's cache too, [`PSlot::is_read_cache`]: left out)
+        // (the engine's value the run read before its definition too: it
+        // says at the end whether the definition is an effect,
+        // `State::published`, and the run goes on from it)
         if let Some(m) = &s.meta {
             (
+                m.eng.map(|x| x.map(ValueId::raw)),
                 m.publ.map(|(x, l)| (x.map(ValueId::raw), l)),
                 m.ldef_stamp,
                 m.ldef_local,
@@ -2772,7 +2790,12 @@ impl State {
                 .and_then(|m| self.metas.get(m - 1));
             let group_local =
                 m.is_some_and(|m| m.ldef_local && m.ldef_gid.is_some_and(|g| open.contains(&g)));
-            if s.save_gid == 0 && s.ginert == 0 && !group_local {
+            // (a slot no open group saved and no local binding: what the
+            // run defined there globally is published, and the resume
+            // reads it from the engine as any piece does, depending on
+            // it only if it reads it; with no save open its last global
+            // definition's stamp makes no save inert)
+            if s.save_gid == 0 && !group_local {
                 continue;
             }
             let (cur, loaded) = ent(&s.e);
@@ -2935,5 +2958,35 @@ mod tests {
         back.fill(8, None);
         assert_eq!(back.read_values(), st.read_values());
         assert!(back.read_locs().contains(&900));
+    }
+
+    /// A cut inside a group: a global definition made there with no save
+    /// of its location open is not carried. The resume holds no mark of
+    /// it (`defined_after` is false: the cutting piece defined and
+    /// published it, the resume did not) and reads its value from the
+    /// engine, as the carried slot, unloaded, did; a local definition in
+    /// the open group then saves the unloaded slot, and the group's close
+    /// puts it back unloaded: the engine's value, the global one (§283).
+    /// A location the open group saved keeps its slot and its mark.
+    #[test]
+    fn a_continuation_carries_only_what_the_engine_does_not_hold() {
+        let v = Values::new();
+        let mut st = State::new();
+        let (g, sb, db, _) = st.open();
+        st.set(300, Entry::raw(Some(v.int(1))), true, Some(g));
+        st.set(301, Entry::raw(Some(v.int(2))), false, Some(g));
+        let c = st.cont(&v, &[g]);
+        let locs: Vec<Loc> = c.slots.iter().map(|s| s.loc).collect();
+        assert!(!locs.contains(&300));
+        assert!(locs.contains(&301));
+        let mut r = State::from_cont(c);
+        assert!(!r.defined_after(300, 0));
+        assert!(!r.is_loaded(300));
+        assert!(r.defined_after(301, 0));
+        r.set(300, Entry::raw(Some(v.int(5))), false, Some(g));
+        assert!(r.is_loaded(300));
+        r.close(sb, db);
+        assert!(!r.is_loaded(300));
+        assert!(!r.is_loaded(301));
     }
 }

@@ -1586,15 +1586,24 @@ impl Run<'_, '_> {
             );
         }
         let rs = list_of(v, rtn);
-        lp.prev_rtn = Some((key, rtn));
+        // (what the routine gave back with its register maps: the guess's
+        // where the read holds (the finisher's maps were those guessed),
+        // else the read's own, the finisher's output keeping its maps
+        // where they differ, `Run::finish`)
+        let rtn_known = if rtn == crate::pages::finish::rtn_strip(v, rtn_guess) {
+            rtn_guess
+        } else {
+            rtn
+        };
+        lp.prev_rtn = Some((key, rtn_known));
         if !in_material {
             // (`\deadcycles` kept but on a page `\end` fired: a dead cycle
             // guessed there would fire another, §1054, and grow a chain of
             // pages on guesses)
             let given = if f.output_penalty == END_PENALTY {
-                crate::pages::finish::rtn_as_guess(v, rtn)
+                crate::pages::finish::rtn_as_guess(v, rtn_known)
             } else {
-                rtn
+                rtn_known
             };
             match lp.last_rtn.iter_mut().find(|e| e.0 == key) {
                 Some(e) => e.1 = given,

@@ -1268,7 +1268,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
     // (`vf_def_font`): a local font of a name and size this step has is
     // that font, else a handle of its own ([`Fonts::locals`]); nothing of
     // the document's font table is read, the link numbers the local fonts
-    let nums = load_numbers(r)?;
+    let nums = load_numbers(r, ids)?;
     for &f in ids {
         if let Some(&n) = nums.get(&i64::from(f)) {
             out.nums.insert(f, FontId::try_from(n).unwrap_or(0));
@@ -2774,47 +2774,85 @@ pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, f: i64) -> R<i64> {
 /// runs' places) and this run's own. A provisional numbering (a page
 /// written apart names its fonts by it): the link numbers by the line's
 /// records in TeX's order ([`FontNums`]) and rewrites a name it moved.
-pub(crate) fn load_numbers(r: &mut Run<'_, '_>) -> R<FxHashMap<i64, i64>> {
-    static M: OnceLock<Once<Arc<FxHashMap<i64, i64>>>> = OnceLock::new();
+/// Only the fonts `ids` are numbered, each by its place among the
+/// distinct loads before the run (`Step::Ranks`, with the format's fonts
+/// there skipped; this run's new loads after `Step::Distinct` of them): a
+/// load elsewhere that leaves those places leaves the step standing.
+pub(crate) fn load_numbers(r: &mut Run<'_, '_>, ids: &[u32]) -> R<FxHashMap<i64, i64>> {
+    use phitex_defuse::Step;
     let v = r.v;
-    let put = |k: i64, out: &mut FxHashMap<i64, i64>| {
-        let n = i64::try_from(out.len()).unwrap_or(0) + 1;
-        out.entry(k).or_insert(n);
-    };
-    let order = r.get(crate::api::FONT_ORDER)?;
+    let format: Vec<i64> = r
+        .get(crate::api::FONT_ORDER)?
+        .map(|x| list_of(v, x).iter().map(|&k| int_of(v, k)).collect())
+        .unwrap_or_default();
+    let nf = i64::try_from(format.len()).unwrap_or(0);
     let f = v.field(FONT_LOADS);
-    let before = r.cx.acc_range(f, None)?;
-    // (the numbers of the format's fonts and of the loads before the run:
-    // a pure function's memo by those values, every page step asks)
-    let key = phitex_defuse::hash_words(
-        0x6c6f_6164_6e75_6d73,
-        &[order.map_or(0, ValueId::raw), before.raw()],
-    );
-    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-    {
-        let mut g = m.locked();
-        if g.len() > 1 << 10 {
-            g.clear();
+    let mut out: FxHashMap<i64, i64> = FxHashMap::default();
+    let mut want: Vec<i64> = Vec::new();
+    for &id in ids {
+        let k = i64::from(id);
+        if let Some(i) = format.iter().position(|&x| x == k) {
+            out.insert(k, i64::try_from(i).unwrap_or(0) + 1);
+        } else if !want.contains(&k) {
+            want.push(k);
         }
     }
-    let base = once(m, key, || {
-        let mut out: FxHashMap<i64, i64> = FxHashMap::default();
-        if let Some(x) = order {
-            for k in list_of(v, x) {
-                put(int_of(v, k), &mut out);
-            }
-        }
-        for k in v.seq_to_vec(before) {
-            put(int_of(v, k), &mut out);
-        }
-        Arc::new(out)
-    });
-    let mut out = (*base).clone();
+    if want.is_empty() {
+        return Ok(out);
+    }
+    // (this run's own loads, in order: numbered after those before it)
+    let mut own: Vec<i64> = Vec::new();
     for &(g, x) in &r.contribs {
         if g == f {
             for k in v.seq_to_vec(x) {
-                put(int_of(v, k), &mut out);
+                let k = int_of(v, k);
+                if !own.contains(&k) && !format.contains(&k) {
+                    own.push(k);
+                }
             }
+        }
+    }
+    // (one read of the loads before the run: the places of the fonts
+    // named, of this run's own and of the format's, which number first
+    // wherever they were loaded again)
+    let mut keys: Vec<i64> = want.clone();
+    for &o in &own {
+        if !keys.contains(&o) {
+            keys.push(o);
+        }
+    }
+    let nw = keys.len();
+    keys.extend(format.iter().copied());
+    let p = r.cx.path(&[Step::Ranks(v.list(keys.iter().map(|&k| v.int(k)).collect()))]);
+    let ranks: Vec<i64> = r
+        .cx
+        .acc_range_path(f, None, p)?
+        .map(|x| list_of(v, x).iter().map(|&n| int_of(v, n)).collect())
+        .unwrap_or_default();
+    let rank = |i: usize| ranks.get(i).copied().unwrap_or(0);
+    let fmt_ranks: Vec<i64> = (nw..keys.len()).map(rank).filter(|&n| n > 0).collect();
+    let number = |n: i64| nf + n - i64::try_from(fmt_ranks.iter().filter(|&&m| m < n).count()).unwrap_or(0);
+    // (this run's loads new to the line, in its order)
+    let fresh: Vec<i64> = own
+        .iter()
+        .copied()
+        .filter(|&o| keys[..nw].iter().position(|&x| x == o).is_some_and(|i| rank(i) == 0))
+        .collect();
+    let mut distinct: Option<i64> = None;
+    for (i, &k) in keys[..nw].iter().enumerate() {
+        if !want.contains(&k) {
+            continue;
+        }
+        let n = rank(i);
+        if n > 0 {
+            out.insert(k, number(n));
+        } else if let Some(j) = fresh.iter().position(|&x| x == k) {
+            if distinct.is_none() {
+                let p = r.cx.path(&[Step::Distinct]);
+                distinct = Some(r.cx.acc_range_path(f, None, p)?.map_or(0, |n| int_of(v, n)));
+            }
+            let before = distinct.unwrap_or(0) - i64::try_from(fmt_ranks.len()).unwrap_or(0);
+            out.insert(k, nf + before + i64::try_from(j).unwrap_or(0) + 1);
         }
     }
     Ok(out)

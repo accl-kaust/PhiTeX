@@ -23,7 +23,8 @@ pub(crate) const RESUME: usize = 13;
 pub(crate) const MARK_TEXT: usize = 14;
 pub(crate) const MARK_STATE: usize = 15;
 pub(crate) const MARK_DIGEST: usize = 16;
-const N: usize = 17;
+pub(crate) const RETEXT: usize = 17;
+const N: usize = 18;
 const NAMES: [&str; N] = [
     "exec run (body+fold+finish)",
     "char_run",
@@ -42,6 +43,7 @@ const NAMES: [&str; N] = [
     "  snapshot: input",
     "  snapshot: table",
     "  digest",
+    "marks: retext choice",
 ];
 
 static NS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];

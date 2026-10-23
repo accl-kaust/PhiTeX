@@ -693,6 +693,10 @@ pub(crate) struct Run<'c, 'a> {
     pub rt_rels: i64,
     /// Whether this run continues a parked attempt ([`Run::from_parked`]).
     pub resumed: bool,
+    /// A digest of the node's arguments but its text (where it is, its
+    /// kind, its hint): what the run reads of them after its start is
+    /// part of its state at a mark ([`parked_rest`]).
+    pub args_key: u64,
     /// The marks this run took ([`Run::take_mark`]): each one's state as a
     /// parked run's, and its digest; the ones before the mark a resumed
     /// run began at are its last run's ([`phitex_defuse::Ctx::resumed`]).
@@ -783,6 +787,11 @@ pub(crate) struct Run<'c, 'a> {
     /// ([`Run::pending_pre`]) become the read-back values. Else nothing
     /// of it is published.
     pub read_point_pending: Option<String>,
+    /// The files this run looked for in vain after it became a read-back
+    /// point ([`Run::read_point_here`]): one it opens for writing later is
+    /// read back here next round, where the lines written to it are read
+    /// ([`Run::note_absent_read_point`]), as when the file is there.
+    pub vain_after_point: Vec<String>,
     /// The values at a pending read-back point of the locations defined
     /// or restored after it ([`Run::note_pre`]).
     pub pending_pre: Vec<(Loc, ValueId)>,
@@ -1009,6 +1018,7 @@ impl<'c, 'a> Run<'c, 'a> {
             rt_cells: 0,
             rt_rels: 0,
             resumed: false,
+            args_key: 0,
             mark_snaps: Vec::new(),
             mark_stale: 0,
             next_mark: 0,
@@ -1033,6 +1043,7 @@ impl<'c, 'a> Run<'c, 'a> {
             seeded: Vec::new(),
             cont_lines: Vec::new(),
             read_point_pending: None,
+            vain_after_point: Vec::new(),
             pending_pre: Vec::new(),
             pending_locs: phitex_defuse::FxHashSet::default(),
             scanner: None,
@@ -2579,6 +2590,13 @@ impl<'c, 'a> Run<'c, 'a> {
             if per_field.is_some() {
                 self.note_read_point();
                 self.mark_read_point(key)?;
+            } else if self.read_point_here && self.read_point_pending.is_none() {
+                // (the run is a read-back point already: the values the
+                // lines written to this file read are kept from there)
+                if !self.vain_after_point.iter().any(|k| k == key) {
+                    self.muts += 1;
+                    self.vain_after_point.push(key.to_owned());
+                }
             } else if !self.read_back_done || self.read_point_pending.is_some() {
                 self.note_read_point();
                 if self.read_back_done {
@@ -2848,6 +2866,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// (a macro that looks for the file it then writes: the first round's
     /// lines are read back at that point next round).
     fn note_absent_read_point(&mut self, name: &str) -> R<()> {
+        if let Some(i) = self.vain_after_point.iter().position(|k| k == name) {
+            self.vain_after_point.swap_remove(i);
+            self.muts += 1;
+            return self.mark_read_point(name);
+        }
         if self.read_point_pending.as_deref() != Some(name) {
             return Ok(());
         }
@@ -4965,13 +4988,19 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a finisher's output: what its routine gave back, which the
         // page builder reads where it placed it, `crate::pages::RTN`)
-        // (its register maps left out: the builder folds the rest,
-        // `crate::pages::rtn_strip`)
-        let out = self
-            .fin
-            .as_ref()
-            .and_then(|c| c.rtn)
-            .map_or(ValueId::UNIT, |x| crate::pages::rtn_strip(self.v, x));
+        // (its register maps left out where they are those its arguments
+        // guessed, the builder folding the rest, `crate::pages::rtn_strip`;
+        // kept where they differ: the builder learns them for the next
+        // pages' guesses, whose finishers contribute the register folds
+        // their arguments name, `Finish::static_contribs`)
+        let guessed = crate::pages::FinishIn::of(self.v, &self.cx.args()).map(|f| f.rtn_guess);
+        let out = self.fin.as_ref().and_then(|c| c.rtn).map_or(ValueId::UNIT, |x| {
+            let v = self.v;
+            match guessed {
+                Some(g) if crate::pages::rtn_maps(v, g) != crate::pages::rtn_maps(v, x) => x,
+                _ => crate::pages::rtn_strip(v, x),
+            }
+        });
         if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
             let v = self.v;
             let mut pubd: Vec<String> = published_trace
@@ -5432,6 +5461,7 @@ pub(crate) struct Parked {
     doc_lines: Vec<(ValueId, i64)>,
     eof: bool,
     radix: i32,
+    args_key: u64,
     cur_order: phitex_typeset::glue::Order,
     pdf_occ: usize,
     rt_made: i64,
@@ -5445,6 +5475,7 @@ pub(crate) struct Parked {
     seeded: Vec<Seeded>,
     cont_lines: Vec<Option<FileLine>>,
     read_point_pending: Option<String>,
+    vain_after_point: Vec<String>,
     pending_pre: Vec<(Field, ValueId)>,
     cand: u32,
     cand_marks: Vec<crate::pages::CandMark>,
@@ -5623,6 +5654,7 @@ impl Run<'_, '_> {
             doc_lines: self.doc_lines.clone(),
             eof: self.eof,
             radix: self.radix,
+            args_key: self.args_key,
             cur_order: self.cur_order,
             pdf_occ: self.pdf_occ,
             rt_made: self.rt_made,
@@ -5636,6 +5668,7 @@ impl Run<'_, '_> {
             seeded: std::mem::take(&mut self.seeded),
             cont_lines: std::mem::take(&mut self.cont_lines),
             read_point_pending: self.read_point_pending.take(),
+            vain_after_point: std::mem::take(&mut self.vain_after_point),
             pending_pre: std::mem::take(&mut self.pending_pre)
                 .into_iter()
                 .map(|(l, x)| (self.loc_field(l), x))
@@ -5772,10 +5805,21 @@ impl Run<'_, '_> {
     /// stands.
     #[inline]
     pub(crate) fn take_mark(&mut self) -> R<()> {
-        // (one test a command where the run takes none)
-        if !self.marks_on {
+        // (one test a command where the run takes none, two where it
+        // takes marks: none due yet, no group exit or check watched)
+        if !self.marks_on
+            || (self.cmds_before + self.cmds < self.next_mark
+                && self.watch_exit.is_none()
+                && self.verify_at.is_none())
+        {
             return Ok(());
         }
+        self.take_mark_due()
+    }
+
+    /// [`Run::take_mark`] where a mark may be due.
+    #[inline(never)]
+    fn take_mark_due(&mut self) -> R<()> {
         // (observe: the resume check, where the last run took the mark the
         // engine resumed at, by the commands begun since the run's start)
         if let Some((k, op, oh, args)) = &self.verify_at
@@ -6222,6 +6266,7 @@ impl Run<'_, '_> {
             doc_lines: self.doc_lines.clone(),
             eof: self.eof,
             radix: self.radix,
+            args_key: self.args_key,
             cur_order: self.cur_order,
             pdf_occ: self.pdf_occ,
             rt_made: self.rt_made,
@@ -6235,6 +6280,7 @@ impl Run<'_, '_> {
             seeded: self.seeded.clone(),
             cont_lines: self.cont_lines.clone(),
             read_point_pending: self.read_point_pending.clone(),
+            vain_after_point: self.vain_after_point.clone(),
             pending_pre,
             cand: self.cand,
             cand_marks: self.cand_marks.clone(),
@@ -6295,6 +6341,40 @@ fn mark_why(node: u64, k: usize, old: &Parked, new: &Parked) {
 /// equal states, what the run will give the engine at its end too (its
 /// contributions and children so far: kept in the run until then, the
 /// engine's own comparison does not see them).
+/// (test) For each part of a run's state a mark's digest once left out,
+/// whether two marks that differ only there have other digests.
+#[cfg(test)]
+pub(crate) fn digest_gaps(p: &Parked, v: &Values) -> Vec<(&'static str, bool)> {
+    let d = |f: &dyn Fn(&mut Parked)| {
+        let mut q = p.clone();
+        f(&mut q);
+        parked_digest(&q)
+    };
+    let seeded = |t: &str| Seeded {
+        name: "x".into(),
+        keys: v.int(1),
+        defs: Vec::new(),
+        text: v.str(t),
+    };
+    let file = |u: &str| {
+        let order = v.list(vec![v.int(1), v.list(vec![v.list(vec![v.str(u), v.int(1)])])]);
+        Seg::File(FileRest::written(v, order, v.str("f.tex")))
+    };
+    vec![
+        ("seeded read-backs", d(&|q| q.seeded = vec![seeded("a")]) != d(&|q| q.seeded = vec![seeded("b")])),
+        (
+            "continuation lines",
+            d(&|q| q.cont_lines = vec![Some(FileLine::Known(1))]) != d(&|q| q.cont_lines = vec![Some(FileLine::Known(2))]),
+        ),
+        ("a file's units", d(&|q| q.segs.push(file("u1"))) != d(&|q| q.segs.push(file("u2")))),
+        ("the arguments but the text", d(&|q| q.args_key = 1) != d(&|q| q.args_key = 2)),
+        (
+            "the engine value read before a definition",
+            d(&|q| q.st = p.st.with_eng(Some(v.int(1)))) != d(&|q| q.st = p.st.with_eng(None)),
+        ),
+    ]
+}
+
 fn parked_digest(p: &Parked) -> u64 {
     parked_digest_with(parked_rest(p), p.mark_sum.unwrap_or_else(|| p.st.slot_sum()))
 }
@@ -6377,7 +6457,8 @@ fn parked_rest(p: &Parked) -> u64 {
             }
             Seg::File(f) => {
                 w(&mut h, 3);
-                (f.id.raw(), f.off, f.name.raw(), f.line).hash(&mut h);
+                (f.id.raw(), f.off, f.name.raw(), f.line, f.sliceable).hash(&mut h);
+                f.units.as_ref().map(|u| u.iter().map(|&(k, s)| (k.raw(), s)).collect::<Vec<_>>()).hash(&mut h);
             }
         }
     }
@@ -6436,7 +6517,7 @@ fn parked_rest(p: &Parked) -> u64 {
     for (f, x) in &p.fin_lazy {
         (f.0.raw(), x.raw()).hash(&mut h);
     }
-    (p.rec_load, p.no_pull).hash(&mut h);
+    (p.rec_load, p.no_pull, p.args_key).hash(&mut h);
     w(&mut h, p.st.rest_hash());
     w(&mut h, p.contribs.len() as u64);
     for (f, x) in &p.contribs {
@@ -6457,9 +6538,25 @@ fn parked_rest(p: &Parked) -> u64 {
         (x.raw(), n).hash(&mut h);
     }
     (p.read_back_done, p.read_point_here, &p.text_written, &p.read_point_pending).hash(&mut h);
+    p.vain_after_point.hash(&mut h);
     p.read_back_at.map(|l| (l.kind, l.ty, l.a, l.b, l.c)).hash(&mut h);
+    // (a run goes on from all of these: the read-backs it seeded and
+    // the lines of its continuations' files, whole)
     w(&mut h, p.seeded.len() as u64);
+    for s in &p.seeded {
+        (&s.name, s.keys.raw(), s.text.raw()).hash(&mut h);
+        for (k, x) in &s.defs {
+            (k, x.raw()).hash(&mut h);
+        }
+    }
     w(&mut h, p.cont_lines.len() as u64);
+    for l in &p.cont_lines {
+        match l {
+            None => w(&mut h, 0),
+            Some(FileLine::Known(n)) => (1u8, n).hash(&mut h),
+            Some(FileLine::Piece(x)) => (2u8, x.raw()).hash(&mut h),
+        }
+    }
     for (f, x) in &p.pending_pre {
         (f.0.raw(), x.raw()).hash(&mut h);
     }
@@ -6612,6 +6709,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.doc_lines.clone_from(&p.doc_lines);
         r.eof = p.eof;
         r.radix = p.radix;
+        r.args_key = p.args_key;
         r.cur_order = p.cur_order;
         r.pdf_occ = p.pdf_occ;
         r.rt_made = p.rt_made;
@@ -6625,6 +6723,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.seeded = p.seeded;
         r.cont_lines = p.cont_lines;
         r.read_point_pending = p.read_point_pending;
+        r.vain_after_point = p.vain_after_point;
         r.pending_pre = p
             .pending_pre
             .into_iter()
