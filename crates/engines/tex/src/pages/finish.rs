@@ -1900,7 +1900,7 @@ impl Operation for Finish {
             let args = r.fin.as_ref().map(|c| c.args.clone()).unwrap_or_default();
             r.split_piece(&args)?;
             let g = r.contribute_global_defs();
-            r.record_finisher_defs(&args, g);
+            r.record_finisher_defs(&args, g)?;
             r.define_page_start()?;
             Ok(())
         });
@@ -2036,15 +2036,24 @@ impl Run<'_, '_> {
 
     /// The definitions this finisher publishes, kept for the next one
     /// running the same routine ([`Finish::predicted_defs`]).
-    pub(crate) fn record_finisher_defs(&mut self, args: &[ValueId], gdefs: ValueId) {
+    pub(crate) fn record_finisher_defs(&mut self, args: &[ValueId], gdefs: ValueId) -> R<()> {
         let v = self.v;
-        let Some(&t) = args.get(9) else { return };
+        let Some(&t) = args.get(9) else { return Ok(()) };
         // (a speculative run's definitions may be refuted: they would
         // seed the predictions of the finishers after it)
         if t == ValueId::UNIT || self.cx.is_speculative() {
-            return;
+            return Ok(());
         }
         let mut out = Vec::new();
+        // (the records the run defines, as its readers read them whole:
+        // the page builder reads the page parameters' record after a
+        // finisher, and runs on its prediction, [`Run::ready_records`])
+        self.ready_records()?;
+        for &(f, x, l) in &self.rec_out {
+            if !matches!(l, Locality::ScopeAt(_)) {
+                out.push((f, x));
+            }
+        }
         for (loc, x, _) in self.st.published(v, self.rec_load) {
             let f = self.loc_field(loc);
             let name = crate::val::field_name(v, f);
@@ -2131,6 +2140,7 @@ impl Run<'_, '_> {
             e.prev = out;
             e.prev_j = j;
         }
+        Ok(())
     }
 }
 
