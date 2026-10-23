@@ -5772,10 +5772,21 @@ impl Run<'_, '_> {
     /// stands.
     #[inline]
     pub(crate) fn take_mark(&mut self) -> R<()> {
-        // (one test a command where the run takes none)
-        if !self.marks_on {
+        // (one test a command where the run takes none, two where it
+        // takes marks: none due yet, no group exit or check watched)
+        if !self.marks_on
+            || (self.cmds_before + self.cmds < self.next_mark
+                && self.watch_exit.is_none()
+                && self.verify_at.is_none())
+        {
             return Ok(());
         }
+        self.take_mark_due()
+    }
+
+    /// [`Run::take_mark`] where a mark may be due.
+    #[inline(never)]
+    fn take_mark_due(&mut self) -> R<()> {
         // (observe: the resume check, where the last run took the mark the
         // engine resumed at, by the commands begun since the run's start)
         if let Some((k, op, oh, args)) = &self.verify_at

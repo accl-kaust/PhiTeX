@@ -724,9 +724,6 @@ impl State {
         if self.undo.is_some() {
             self.log_slot(loc);
         }
-        if self.track {
-            self.note_mark_change(loc);
-        }
         let s = if loc & SPILL == 0 {
             let i = loc as usize;
             if i >= self.eq.len() {
@@ -743,6 +740,11 @@ impl State {
         if !s.touched {
             s.touched = true;
             self.touched.push(loc);
+        }
+        // (noted as changed since the last mark, once: the slot at hand)
+        if self.track && !s.mdirty {
+            s.mdirty = true;
+            self.mdirty.push(loc);
         }
         s
     }
@@ -956,14 +958,15 @@ impl State {
         if self.undo.is_some() {
             self.log_slot(loc);
         }
-        if self.track {
-            self.note_mark_change(loc);
-        }
         let s = if loc & SPILL == 0 {
             &mut self.eq[loc as usize]
         } else {
             &mut self.spill[(loc & !SPILL) as usize]
         };
+        if self.track && !s.mdirty {
+            s.mdirty = true;
+            self.mdirty.push(loc);
+        }
         &mut s.e
     }
 
