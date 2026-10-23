@@ -700,6 +700,10 @@ pub(crate) struct Run<'c, 'a> {
     /// The engine cut the run off at a mark: its last run's result stands
     /// ([`phitex_defuse::Ctx::checkpoint`]).
     pub cut_off: bool,
+    /// The page builder's loop marks taken so far, and whether it takes
+    /// them ([`crate::pages::KeptLoop`]).
+    pub page_marks: Vec<(std::sync::Arc<crate::pages::PageLoop>, u64)>,
+    pub page_marks_on: bool,
     /// (observe, `PHITEX_RESUME_VERIFY=1`) The mark the engine resumed
     /// this run at, with the last run's state there: the run goes from its
     /// start instead and compares its state at that mark.
@@ -982,6 +986,8 @@ impl<'c, 'a> Run<'c, 'a> {
             next_mark: 0,
             old_marks: None,
             marks_on: false,
+            page_marks: Vec::new(),
+            page_marks_on: false,
             cut_off: false,
             cut_check: None,
             verify_at: None,
@@ -4927,7 +4933,13 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a finisher's output: what its routine gave back, which the
         // page builder reads where it placed it, `crate::pages::RTN`)
-        let out = self.fin.as_ref().and_then(|c| c.rtn).unwrap_or(ValueId::UNIT);
+        // (its register maps left out: the builder folds the rest,
+        // `crate::pages::rtn_strip`)
+        let out = self
+            .fin
+            .as_ref()
+            .and_then(|c| c.rtn)
+            .map_or(ValueId::UNIT, |x| crate::pages::rtn_strip(self.v, x));
         if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
             let v = self.v;
             let mut pubd: Vec<String> = published_trace
