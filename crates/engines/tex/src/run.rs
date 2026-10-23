@@ -5826,9 +5826,11 @@ impl Run<'_, '_> {
         // back since, the marks stop)
         let tm = crate::prof::start();
         let v = self.v;
-        let delta = self.st.mark_delta(v, &mut self.mark_img);
+        // (observe, `PHITEX_MARK_FULL=1`: each mark's table whole, parked
+        // as a park's, for the measures against the changes)
+        let delta = (!crate::exec::obs_flag!("PHITEX_MARK_FULL")).then(|| self.st.mark_delta(v, &mut self.mark_img));
         crate::prof::add(crate::prof::MARK_STATE, tm);
-        let p = self.snapshot_of(Some(delta));
+        let p = self.snapshot_of(delta);
         if forced {
             self.watch_exit = None;
         }
