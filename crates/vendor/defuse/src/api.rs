@@ -1096,6 +1096,9 @@ pub struct Report {
     /// `stops`; `runs_by_op` counts every attempt).
     pub runs: u64,
     pub runs_by_op: Vec<(&'static str, u64)>,
+    /// Speculation by operation this evaluation: runs ahead of a node in
+    /// work, and of those the refuted.
+    pub speculation_by_op: Vec<(&'static str, u64, u64)>,
     /// Waits (a run or a validation parked on a subject in work).
     pub stops: u64,
     pub waits_by_op: Vec<(&'static str, u64)>,
@@ -1216,6 +1219,9 @@ pub struct Report {
     /// runs cut off at one (that run's result standing).
     pub resumed_at_mark: u64,
     pub cut_in_run: u64,
+    /// Careful nodes (refuted, running on committed values only) that ran
+    /// past a mark beyond the one they resumed at, and guess again.
+    pub careful_lapsed: u64,
     /// Of those cut off, those with a patch (`Ctx::checkpoint_patched`).
     pub cut_patched: u64,
     /// Done nodes whose values passed on through views (`Ctx::define_from`

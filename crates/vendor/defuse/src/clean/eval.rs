@@ -34,6 +34,9 @@ struct Run {
     from_last: u32,
     /// It read a prediction or a definer in work.
     guessed: bool,
+    /// Run carefully, it passed a mark past the one it resumed at: the
+    /// node runs carefully no longer (`Ctx::checkpoint`).
+    lapsed: bool,
     /// It folded contributors in work as they last contributed
     /// (`Monoid::guess_ran`).
     fold_ran: bool,
@@ -379,6 +382,10 @@ impl Engine {
         let mut ran: FxHashSet<Id> = FxHashSet::default();
         let mut cut: FxHashSet<Id> = FxHashSet::default();
         let deadline = self.limits.time.map(|d| t0 + d);
+        for v in self.spec.values_mut() {
+            *v = (v.0 * 0.5, v.1 * 0.5);
+        }
+        self.spec_eval.clear();
         let mut hs = Heights {
             on: self.heights,
             epoch: super::core::now(),
@@ -637,6 +644,9 @@ impl Engine {
             break;
         }
         self.early_live = false;
+        let mut by_op: Vec<(&'static str, u64, u64)> = self.spec_eval.iter().map(|(&op, &(a, r))| (self.core.op_name(op), a, r)).collect();
+        by_op.sort_unstable();
+        rep.speculation_by_op = by_op;
         if !self.early_changes.is_empty() || !self.early_frozen.is_empty() {
             let mut fs: Vec<Field> = self.early_changes.keys().chain(self.early_frozen.iter()).copied().collect();
             fs.sort_by_key(|f| f.0.raw());
@@ -1494,6 +1504,15 @@ impl Engine {
                 }
                 continue;
             }
+            // An operation whose runs ahead keep being refuted runs only so
+            // far ahead (`Engine::spec`).
+            if !first
+                && let Some(la) = self.spec_lookahead(k.2, window)
+                && ready.len() >= la
+                && self.w.work_of(k.0).and_then(|m| m.below(&k.1)).is_some()
+            {
+                continue;
+            }
             // A node refuted this evaluation runs in text order: when
             // nothing before it in its unit is in work (or it is first).
             if !first
@@ -1601,6 +1620,7 @@ impl Engine {
             predicted: 0,
             from_last: 0,
             guessed: false,
+            lapsed: false,
             fold_ran: false,
             fuel_out: false,
             range_wait: None,
@@ -1735,8 +1755,64 @@ impl Engine {
         let mut ix = KeptIx::new(&self.w, at);
         ix.add(&self.w, id, &reads);
         self.kept_ix.insert(id, ix);
-        self.kept.insert(id, (Box::new(super::ctx::MarkResume { after: after.0, old, j, kids, conts }), reads, None));
+        self.kept.insert(id, (Box::new(super::ctx::MarkResume { after: after.0, old, j, kids, conts, no_cut: false }), reads, None));
         rep.resumed_at_mark += 1;
+    }
+
+    /// A restart of node `id`, parked continuing (kept reads `reads`), at
+    /// the last of its attempts' marks before the first of those reads
+    /// that no longer holds strictly (none standing on a definer in work),
+    /// as a run resumed at a mark that is not cut off.
+    fn resume_kept_marks(&mut self, id: Id, reads: &[Read]) -> Option<super::ctx::KeptState> {
+        let km = self.kept_marks.remove(&id)?;
+        // (Its marks are of the text it ran.)
+        if let Some(t) = self.kept_text.get(&id)
+            && self.w.node(id).is_none_or(|n| !std::sync::Arc::ptr_eq(&n.text, t))
+        {
+            return None;
+        }
+        let after = km.after?;
+        let b = reads.iter().position(|r| !super::build::holds_with(&self.core, &self.w, id, r, true)).unwrap_or(reads.len());
+        let j = km.marks.iter().rposition(|m| m.read_ix as usize <= b)?;
+        let m = km.marks[j];
+        let (kids, conts) = (km.kids.get(..m.kids as usize)?.to_vec(), km.conts.get(..m.conts as usize)?.to_vec());
+        let old = std::sync::Arc::new(Res {
+            reads: reads.to_vec(),
+            marks: km.marks.into(),
+            ..Res::default()
+        });
+        let before = reads[..m.read_ix as usize].to_vec();
+        Some((Box::new(super::ctx::MarkResume { after: after.0, old, j, kids, conts, no_cut: true }), before, None))
+    }
+
+    /// Offers retexted node `id` its last run's marks (`Ctx::resumed_retext`):
+    /// up to the last before the first of that run's reads that no longer
+    /// holds strictly (none standing on a definer in work).
+    fn retext_offer(&mut self, id: Id) {
+        let Some(n) = self.w.node(id) else { return };
+        let (Some(was), Some(old)) = (n.was.clone(), n.res.clone()) else { return };
+        let Some(after) = old.after.clone() else { return };
+        if old.marks.is_empty() || old.text != super::world::text_key(&was) {
+            return;
+        }
+        let b = old.reads.iter().position(|r| !super::build::holds_with(&self.core, &self.w, id, r, true)).unwrap_or(old.reads.len());
+        let Some(jmax) = old.marks.iter().rposition(|m| m.read_ix as usize <= b) else { return };
+        let spec = |x: &Id| {
+            self.w.node(*x).map(|n| super::ctx::Spec {
+                op: n.text.op,
+                args: n.text.args.clone(),
+                place: n.place,
+            })
+        };
+        let (nk, nc) = (old.marks[jmax].kids as usize, old.marks[jmax].conts as usize);
+        let (Some(kids), Some(conts)) = (
+            old.kids.get(..nk).and_then(|k| k.iter().map(spec).collect::<Option<Vec<_>>>()),
+            old.conts.get(..nc).and_then(|c| c.iter().map(spec).collect::<Option<Vec<_>>>()),
+        ) else {
+            return;
+        };
+        let offer = super::ctx::RetextOffer { after: after.0, old, jmax, old_args: was.args.clone(), kids, conts };
+        self.kept.insert(id, (Box::new(offer), Vec::new(), None));
     }
 
     /// The first of node `id`'s kept reads that no longer holds: asked of
@@ -1841,7 +1917,15 @@ impl Engine {
             if super::core::debug() {
                 eprintln!("stale kept {placer}: its kept reads broke (seen running {id}); it starts over");
             }
-            self.kept.remove(&placer);
+            // (Parked continuing, with marks: at the last before its first
+            // broken read.)
+            if let Some((_, reads, _)) = self.kept.remove(&placer)
+                && let Some(k) = self.resume_kept_marks(placer, &reads)
+            {
+                self.kept_ix.remove(&placer);
+                self.kept.insert(placer, k);
+                rep.resumed_at_mark += 1;
+            }
             s.kept_ok.remove(&placer);
             s.parked.remove(&placer);
             s.range_wait.remove(&placer);
@@ -1874,12 +1958,19 @@ impl Engine {
         {
             self.mark_resume(rep, id, b, at);
         }
+        // Retexted: its last run's marks offered to the client.
+        if !self.kept.contains_key(&id) {
+            self.retext_offer(id);
+        }
         // A stopped run's kept state: resumed while its reads hold.
         let broken = if self.kept.contains_key(&id) { self.kept_first_broken(id) } else { None };
         Some(match self.kept.remove(&id) {
             Some((tok, reads, base)) => match broken.as_ref() {
                 None => {
-                    rep.resumed += 1;
+                    // (A retext's offer is not a resumed run.)
+                    if !tok.is::<super::ctx::RetextOffer>() {
+                        rep.resumed += 1;
+                    }
                     Some((tok, reads, base))
                 }
                 Some(r) => {
@@ -1888,6 +1979,16 @@ impl Engine {
                         Broken::Read(rd) => read_kind(rd),
                         Broken::Text => "text: changed",
                     });
+                    // (Parked continuing, with marks: at the last before
+                    // its first broken read.)
+                    if !matches!(r, Broken::Text)
+                        && let Some(k) = self.resume_kept_marks(id, &reads)
+                    {
+                        rep.resumed_at_mark += 1;
+                        let from = self.broken_from(id, r);
+                        self.stale_placer(id, from);
+                        return Some(Some(k));
+                    }
                     if super::core::debug() {
                         eprintln!("restart {id}: kept read broken {r:?}");
                     }
@@ -2133,6 +2234,12 @@ impl Engine {
         outcome: Outcome,
         fresh: bool,
     ) -> Result<(), EvalError> {
+            if let Outcome::Done(r) | Outcome::Stopped(r, _) = &outcome
+                && r.lapsed
+                && s.careful.remove(&id)
+            {
+                rep.careful_lapsed += 1;
+            }
             match outcome {
                 Outcome::Failed(mut e) => {
                     if let EvalError::NoProgress { rounds, .. } = &mut e {
@@ -2141,6 +2248,7 @@ impl Engine {
                     return Err(e);
                 }
                 Outcome::Done(r) => {
+                    self.kept_marks.remove(&id);
                     if let Some(e) = self.runaway(id, &r.kids, &r.conts) {
                         return Err(e);
                     }
@@ -2161,6 +2269,9 @@ impl Engine {
                             runs: *c,
                             causes: s.why.remove(&id).map(Vec::from).unwrap_or_default(),
                         });
+                    }
+                    if r.guessed {
+                        self.spec_note(id, SpecRun::Ahead);
                     }
                     let was_guess = if r.guessed { !s.guessed.insert(id) } else { s.guessed.remove(&id) };
                     let was_ran = if r.fold_ran { !s.fold_ran.insert(id) } else { s.fold_ran.remove(&id) };
@@ -2183,17 +2294,20 @@ impl Engine {
                                     })
                                 });
                                 s.refuted(id, site.is_some_and(|x| self.loop_news(x)));
+                                self.spec_note(id, SpecRun::Broke);
                                 bump_field(&mut rep.refuted_by_field, field);
                             }
                             Some(crate::api::Rerun::Rebind { field }) => {
                                 rep.mispredictions += 1;
                                 s.refuted(id, false);
+                                self.spec_note(id, SpecRun::Broke);
                                 bump_field(&mut rep.refuted_by_field, field);
                             }
                             Some(crate::api::Rerun::Loop { .. }) => {}
                             _ => {
                                 rep.mispredictions += 1;
                                 s.refuted(id, false);
+                                self.spec_note(id, SpecRun::Broke);
                             }
                         }
                     }
@@ -2251,6 +2365,7 @@ impl Engine {
                     let t = super::core::now();
                     for x in &freed {
                         self.kept.remove(x);
+                        self.kept_marks.remove(x);
                         s.parked.remove(x);
                         s.env.remove(x);
                         // (Its waiters: their subject is gone.)
@@ -2328,6 +2443,21 @@ impl Engine {
                         let base = r.park_cont.then_some((b.0 + r.kids.len(), b.1 + r.conts.len(), b.2 + nk));
                         // (Its reads indexed: those it held before as they
                         // were, its new ones now.)
+                        // (Continuing, its marks so far, counted from its
+                        // start.)
+                        if r.park_cont {
+                            let mut km = if r.resumed { self.kept_marks.remove(&id).unwrap_or_default() } else { KeptMarks::default() };
+                            let (k0, c0) = (u32::try_from(km.kids.len()).unwrap_or(u32::MAX), u32::try_from(km.conts.len()).unwrap_or(u32::MAX));
+                            km.marks.extend(r.res.marks.iter().map(|m| super::world::Mark { kids: m.kids + k0, conts: m.conts + c0, ..*m }));
+                            km.kids.extend(r.kids.iter().cloned());
+                            km.conts.extend(r.conts.iter().cloned());
+                            if let Some(a) = r.res.after.clone() {
+                                km.after = Some(a);
+                            }
+                            self.kept_marks.insert(id, km);
+                        } else {
+                            self.kept_marks.remove(&id);
+                        }
                         let reads = std::mem::take(&mut r.res.reads);
                         let ix = match self.kept_ix.remove(&id) {
                             Some(ix) if r.resumed => ix,
@@ -2404,6 +2534,7 @@ impl Engine {
                         self.freed += freed.len() as u64;
                         for x in &freed {
                             self.kept.remove(x);
+                            self.kept_marks.remove(x);
                             s.parked.remove(x);
                             s.env.remove(x);
                             self.wake(s, *x);
@@ -2850,6 +2981,7 @@ impl Engine {
         self.freed += freed.len() as u64;
         for x in &freed {
             self.kept.remove(x);
+            self.kept_marks.remove(x);
             s.parked.remove(x);
             s.env.remove(x);
             self.wake(s, *x);
@@ -3494,7 +3626,10 @@ impl Merge<'_> {
                         break;
                     }
                 }
-                if others.len() >= par {
+                // (Enough to feed the workers, off the chain or queued
+                // anyhow: the step ends, rather than the lane running the
+                // heads one by one while they idle.)
+                if others.len() >= par || self.eng.queued_ahead(self.s, par) >= par {
                     count(24);
                     break;
                 }
@@ -3546,6 +3681,13 @@ impl Merge<'_> {
             let chain = |x: Id| Some(x) == want || eng.w.node(x).is_some_and(|n| Some(n.text.op) == op);
             others.extend(cands.iter().copied().filter(|&x| !chain(x)));
             let best = cands.iter().filter(|&&x| chain(x)).filter_map(|&x| eng.w.node(x).map(|n| (n.unit, n.pos, x))).filter(|k| s.queue.contains(k)).min();
+            // (Or the head, of whatever operation: a queued node nothing
+            // before it in its unit is in work for, if it comes first.)
+            let head = s.queue.iter().take(8).find(|k| !busy.contains(&k.2) && eng.w.work_of(k.0).and_then(|m| m.below(&k.1)).is_none()).copied();
+            let best = match (best, head) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             let Some(k) = best else {
                 s.lane_new = Some(cands);
                 count(23);
@@ -3769,6 +3911,7 @@ impl Merge<'_> {
                     if !matches!(rd, Read::Range { f, .. } if fold_guess(&eng.core, s, id, *f, r.fold_ran, true)) {
                         let news = matches!(rd, Read::Use { site, .. } if eng.loop_news(*site));
                         s.refuted(id, news);
+                        eng.spec_note(id, SpecRun::Refuted);
                     }
                     rep.mispredictions += 1;
                     rep.predictions_refuted += u64::from(r.predicted > 0);
@@ -3911,6 +4054,7 @@ fn run_job(
     let op = core.ops[cx.op.0 as usize].clone();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.run(&mut cx)));
     cx.flush_gets();
+    super::ctx::recycle_read_ix(std::mem::take(&mut cx.read_ix));
     if cx.named_gone && r.as_ref().is_ok() {
         drop(cx);
         return run_job(core, w, id, None, predict, careful, fuel);
@@ -3968,6 +4112,7 @@ fn run_job(
         predicted: cx.predicted,
         from_last: cx.from_last,
         guessed: cx.guessed || cx.predicted > 0 || ahead,
+        lapsed: cx.lapsed,
         fold_ran: cx.fold_ran,
         fuel_out: cx.fuel_out,
         range_wait: cx.range_wait,
@@ -4125,10 +4270,94 @@ fn fold_guess(core: &super::core::Core, s: &mut Sched, id: Id, f: Field, ran: bo
     *c <= 2
 }
 
-/// Whether the steps run a lane (`CLEAN_LANE` set, not to `0`; read once).
+/// The marks of a run parked continuing, over its attempts
+/// (`Engine::kept_marks`).
+#[derive(Default)]
+pub(crate) struct KeptMarks {
+    marks: Vec<super::world::Mark>,
+    kids: Vec<Spec>,
+    conts: Vec<Spec>,
+    after: Option<super::world::After>,
+}
+
+/// What a speculative run of a node came to (`Engine::spec_note`).
+#[derive(Copy, Clone)]
+enum SpecRun {
+    /// Committed, run ahead of a node in work.
+    Ahead,
+    /// Run ahead and refuted at its merge.
+    Refuted,
+    /// Committed ahead, then broken.
+    Broke,
+}
+
+impl Engine {
+    /// Counts what a speculative run of node `id` came to, by its
+    /// operation.
+    fn spec_note(&mut self, id: Id, what: SpecRun) {
+        let Some(op) = self.w.node(id).map(|n| n.text.op) else { return };
+        let e = self.spec.entry(op).or_default();
+        let c = self.spec_eval.entry(op).or_default();
+        match what {
+            SpecRun::Ahead => {
+                e.0 += 1.0;
+                c.0 += 1;
+            }
+            SpecRun::Refuted => {
+                *e = (e.0 + 1.0, e.1 + 1.0);
+                *c = (c.0 + 1, c.1 + 1);
+            }
+            SpecRun::Broke => {
+                e.1 += 1.0;
+                c.1 += 1;
+            }
+        }
+    }
+
+    /// How far ahead (place in a step's batch) node `id` may run, by its
+    /// operation's refuted share of its runs ahead: from the whole window,
+    /// none refuted, down to the first only, a quarter or more refuted.
+    /// `None`: no limit (too few runs to tell, or not `CLEAN_ADAPT`).
+    fn spec_lookahead(&self, id: Id, window: usize) -> Option<usize> {
+        if !adapt() {
+            return None;
+        }
+        let op = self.w.node(id)?.text.op;
+        let &(ahead, refuted) = self.spec.get(&op)?;
+        // (A few refutations of an operation that seldom runs ahead tell
+        // little: its share is taken against at least 32 runs.)
+        if ahead < 16.0 {
+            return None;
+        }
+        let share = (refuted / ahead.max(32.0)).min(1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+        Some((((1.0 - 4.0 * share) * window as f32) as usize).max(1))
+    }
+}
+
+impl Engine {
+    /// How many of the first queued nodes may run in the next step's batch
+    /// (counted to `par`): those an adaptive limit holds to the head do not.
+    fn queued_ahead(&self, s: &Sched, par: usize) -> usize {
+        if !adapt() {
+            return s.queue.len();
+        }
+        s.queue.iter().take(par * 4).filter(|k| self.spec_lookahead(k.2, usize::MAX >> 8).is_none_or(|la| la > 1)).take(par).count()
+    }
+}
+
+/// Whether speculation adapts by operation (`CLEAN_ADAPT` set, not to
+/// `0`; read once). Off by default: it narrowed para4000 on a few
+/// refutations of one operation.
+fn adapt() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CLEAN_ADAPT").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// Whether the steps run a lane (`CLEAN_LANE` not `0`; read once).
 fn lane() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("CLEAN_LANE").is_some_and(|v| !v.is_empty() && v != "0"))
+    *ON.get_or_init(|| std::env::var_os("CLEAN_LANE").is_none_or(|v| v != "0"))
 }
 
 /// Counts a step that applied `n` runs in the width histogram (bucket `i`:
