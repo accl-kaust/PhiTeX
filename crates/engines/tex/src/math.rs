@@ -1174,9 +1174,24 @@ impl Run<'_, '_> {
                 let f = u32::try_from(self.fam_font(size, k32)?).unwrap_or(0);
                 if f != 0 {
                     *slot = Some(f);
-                    self.add_font(&mut view, f)?;
-                    skew.insert(f, self.font_int(f, crate::fields::FontCell::Sc)?);
                 }
+            }
+        }
+        // (the symbol and extension families' fonts with all their
+        // `\fontdimen`s, §700–§701; another family's with those math
+        // reads of any font, the space and the x-height, §738, §752)
+        let full: Vec<u32> = fam_fnt.iter().flat_map(|row| [row[2], row[3]]).flatten().collect();
+        for row in &fam_fnt {
+            for &f in row.iter().flatten() {
+                if view.fonts.contains_key(f) {
+                    continue;
+                }
+                if full.contains(&f) {
+                    self.add_font(&mut view, f)?;
+                } else {
+                    self.add_font_dimens(&mut view, f, &[2, 5])?;
+                }
+                skew.insert(f, self.font_int(f, crate::fields::FontCell::Sc)?);
             }
         }
         let sk = move |f: u32| skew.get(&f).copied().unwrap_or(-1);

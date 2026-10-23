@@ -1083,6 +1083,37 @@ impl Run<'_, '_> {
         Ok(())
     }
 
+    /// [`Self::add_font_metrics`] with `\\fontdimen`s `ks` read (the
+    /// others 0, their number the font's): a view whose reader asks
+    /// only those of the font.
+    pub(crate) fn add_font_dimens(&mut self, view: &mut crate::fonts::View, f: u32, ks: &[i32]) -> R<()> {
+        if view.fonts.contains_key(f) || f == 0 {
+            return Ok(());
+        }
+        let info = self.font_get(f, crate::fields::FontCell::Info)?;
+        let Some(i) = crate::fonts::info(self.v, info) else {
+            return Ok(());
+        };
+        let Some(l) = i
+            .file
+            .and_then(|file| crate::fonts::load(self.v, file, i.s))
+        else {
+            return Ok(());
+        };
+        let n = self.font_int(f, crate::fields::FontCell::Fdn)?;
+        let mut params = vec![0; usize::try_from(n).unwrap_or(0)];
+        for &k in ks {
+            if let Some(p) = usize::try_from(k - 1).ok().and_then(|j| params.get_mut(j)) {
+                *p = self.font_int(f, crate::fields::FontCell::Fd(k))?;
+            }
+        }
+        let hc = self.font_int(f, crate::fields::FontCell::Hc)?;
+        view.hyphen.insert(f, hc);
+        view.names.insert(f, (i.name, i.size));
+        view.fonts.insert(f, (l, params));
+        Ok(())
+    }
+
     pub(crate) fn add_font(&mut self, view: &mut crate::fonts::View, f: u32) -> R<()> {
         if view.fonts.contains_key(f) || f == 0 {
             return Ok(());
@@ -2490,6 +2521,80 @@ impl Run<'_, '_> {
         Ok(())
     }
 
+    /// [`Self::main_loop`]'s run of plain letters: while the next
+    /// character of the line on top is a letter or other character
+    /// (by the catcodes cached) with no ligature or kern after `cur_l`,
+    /// not after the hyphen character, not the false boundary character
+    /// and in the font, it is read, its space factor adjusted, and it
+    /// goes on `out` as the steps of §1036–§1039 put it; the first that
+    /// is not is left unread.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn plain_letters(
+        &mut self,
+        md: &Mode,
+        f: u32,
+        view: &crate::fonts::View,
+        (hyphen_char, false_bchar): (i32, Option<u32>),
+        sf: &mut i32,
+        out: &mut Vec<Node>,
+        (cur_l, cur_q): (&mut Option<u32>, &mut usize),
+    ) -> R<()> {
+        if self.cat_gen != self.st.cat_gen() {
+            return Ok(());
+        }
+        let Some(l) = self.input.levels.last() else {
+            return Ok(());
+        };
+        if l.kind != crate::input::kind::LINE {
+            return Ok(());
+        }
+        let li = l.a as usize;
+        let Some((loaded, _)) = view.fonts.get(f) else {
+            return Ok(());
+        };
+        let tfm = &loaded.tfm;
+        loop {
+            let Some(cl) = *cur_l else { return Ok(()) };
+            let line = &self.input.lines[li];
+            if line.endch == -2 {
+                return Ok(());
+            }
+            let Some(&c) = line.buf.get(line.loc) else {
+                return Ok(());
+            };
+            if c == 0 || c > 255 {
+                return Ok(());
+            }
+            let cat = self.cat_cache[c as usize];
+            if cat != cmd::LETTER && cat != cmd::OTHER_CHAR {
+                return Ok(());
+            }
+            if false_bchar == Some(c)
+                || matches!(out.last(), Some(Node::Char { ch, .. }) if i32::from(*ch) == hyphen_char)
+                || !view.exists(f, c)
+            {
+                return Ok(());
+            }
+            let (Ok(l8), Ok(r8)) = (u8::try_from(cl), u8::try_from(c)) else {
+                return Ok(());
+            };
+            if tfm.lookup(Some(l8), Some(r8)).is_some() {
+                return Ok(());
+            }
+            let line = &mut self.input.lines[li];
+            line.loc += 1;
+            line.state = crate::input::MID_LINE;
+            self.adjust_sf(md, c, sf)?;
+            *cur_q = out.len();
+            *cur_l = Some(c);
+            out.push(Node::Char {
+                font: f,
+                ch: u16::try_from(c).unwrap_or(0),
+            });
+        }
+    }
+
     /// `main_loop` (§1034–§1040) from character `ch`: true when the
     /// token after the characters is in `cur` (`goto reswitch`), false
     /// at `goto big_switch` (or at the end of the node's text).
@@ -2670,6 +2775,14 @@ impl Run<'_, '_> {
                     at = L::Lookahead;
                 }
                 L::Lookahead => {
+                    // (the word's plain letters straight from the line, as
+                    // the steps below take them one at a time: §1038's
+                    // lookahead, §1039's lookup finding nothing, nothing
+                    // to wrap up, §1036's move; the first that is not
+                    // plain is left to them)
+                    if lig_stack.is_empty() && !lig_present && !ins_disc {
+                        self.plain_letters(md, f, view, (hyphen_char, false_bchar), sf, out, (&mut cur_l, &mut cur_q))?;
+                    }
                     // §1038; at the end of the node's text the next token
                     // is not a character (characters are one node)
                     let mut got: Option<u32> = None;
