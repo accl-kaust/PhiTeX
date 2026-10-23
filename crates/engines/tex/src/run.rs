@@ -414,7 +414,7 @@ impl FileRest {
             endch: -2,
             starts: true,
             ends: true,
-            origin: Some((self.name, at)),
+            origin: Some((self.name, at, ValueId::UNIT)),
             lineno: self.line,
             rescanned: false,
         }
@@ -2349,11 +2349,12 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(Some(x))
     }
 
-    /// A unit's text and its offset in its file: a written file's
-    /// (`wunit:`, a loop-back `ops::Files` publishes, its text) or a
-    /// file's cut by the client (`unit:`, the environment's `[text,
-    /// offset]`, `api::file_units`).
-    pub(crate) fn unit_text(&mut self, key: ValueId) -> R<(String, usize)> {
+    /// A unit's text: a written file's (`wunit:`, a loop-back
+    /// `ops::Files` publishes, its text) or a file's cut by the client
+    /// (`unit:`, the environment's `[text]`, `api::file_units`). Never
+    /// its place in the file (`upos:`): a unit moved by an edit before it
+    /// is the same text, its piece not run again.
+    pub(crate) fn unit_text(&mut self, key: ValueId) -> R<String> {
         let v = self.v;
         let name = str_of(v, key);
         let f = v.field(&name);
@@ -2362,14 +2363,12 @@ impl<'c, 'a> Run<'c, 'a> {
                 eprintln!("TMPF unit {name} node {}", self.cx.node().raw());
             }
             let Some(x) = self.cx.use_env(f)? else {
-                return Ok((String::new(), 0));
+                return Ok(String::new());
             };
-            let xs = list_of(v, x);
-            let text = xs.first().map(|&t| str_of(v, t)).unwrap_or_default();
-            let at = xs
-                .get(1)
-                .map_or(0, |&o| usize::try_from(int_of(v, o)).unwrap_or(0));
-            return Ok((text, at));
+            return Ok(list_of(v, x)
+                .first()
+                .map(|&t| str_of(v, t))
+                .unwrap_or_default());
         }
         let x = self.cx.use_field(f)?;
         if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") {
@@ -2379,7 +2378,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cx.node().raw()
             );
         }
-        Ok((x.map(|x| str_of(v, x)).unwrap_or_default(), 0))
+        Ok(x.map(|x| str_of(v, x)).unwrap_or_default())
     }
 
     /// A written file's text from its order (`ops::Files`): its units
@@ -2395,7 +2394,7 @@ impl<'c, 'a> Run<'c, 'a> {
             let Some(&k) = list_of(v, e).first() else {
                 continue;
             };
-            text.push_str(&self.unit_text(k)?.0);
+            text.push_str(&self.unit_text(k)?);
         }
         Ok(v.str(&text))
     }
@@ -2409,7 +2408,7 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         let mut text = String::new();
         for &(k, _) in units.iter() {
-            text.push_str(&self.unit_text(k)?.0);
+            text.push_str(&self.unit_text(k)?);
         }
         let id = v.str(&text);
         self.input.file_mut(l).set_text(v, id);
@@ -2436,10 +2435,13 @@ impl<'c, 'a> Run<'c, 'a> {
                 continue;
             }
             let xs = list_of(v, f);
-            let (text, at) = self.unit_text(xs.get(1).copied().unwrap_or(ValueId::UNIT))?;
+            let key = xs.get(1).copied().unwrap_or(ValueId::UNIT);
+            let text = self.unit_text(key)?;
             let name = xs.get(2).copied().unwrap_or(ValueId::UNIT);
             let starts = xs.get(3).is_some_and(|&s| int_of(v, s) != 0);
-            let a = slice_args_in_file(v, &text, starts, name, at);
+            // (its lines' places from the unit's start: the file's offset
+            // is the unit's `upos:`, which a diagnostic adds, `Build::diagnostics`)
+            let a = slice_args_in_file(v, &text, starts, name, 0, key);
             frames.extend(a.first().map(|&x| list_of(v, x)).unwrap_or_default());
         }
         let mut out = args.to_vec();
@@ -3792,7 +3794,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     _ => None,
                 })
             });
-        let (file, at, seg, loc) = match &src {
+        let (file, at, unit, seg, loc) = match &src {
             Some(s) => {
                 let mut buf = s.buf.clone();
                 if s.endch >= 0 && buf.len() > s.loc && s.ends {
@@ -3805,11 +3807,11 @@ impl<'c, 'a> Run<'c, 'a> {
                     .collect();
                 let loc = s.loc.min(buf.len());
                 match s.origin {
-                    Some((n, a)) => (n, i64::try_from(a).unwrap_or(0), seg, loc),
-                    None => (ValueId::UNIT, -1, seg, loc),
+                    Some((n, a, u)) => (n, i64::try_from(a).unwrap_or(0), u, seg, loc),
+                    None => (ValueId::UNIT, -1, ValueId::UNIT, seg, loc),
                 }
             }
-            None => (ValueId::UNIT, -1, String::new(), 0),
+            None => (ValueId::UNIT, -1, ValueId::UNIT, String::new(), 0),
         };
         let node = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
         let e = v.list(vec![
@@ -3820,6 +3822,7 @@ impl<'c, 'a> Run<'c, 'a> {
             v.int(node),
             v.str(&seg),
             v.int(i64::try_from(loc).unwrap_or(0)),
+            unit,
         ]);
         let s = v.seq_unit(e);
         self.contribute("diags", s);
@@ -4248,7 +4251,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         let doc = self.input.top_line().is_some_and(|s| {
             s.origin
-                .is_some_and(|(n, _)| str_of(v, n) == crate::api::DOC_NAME)
+                .is_some_and(|(n, _, _)| str_of(v, n) == crate::api::DOC_NAME)
         });
         if !doc {
             return Ok(false);
@@ -4483,7 +4486,7 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             let a = s.max(f.off);
             let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
-            let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a);
+            let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a, ValueId::UNIT);
             let own = crate::hints::slice_hint_of(&t, s);
             let rec = loads
                 .as_deref()
@@ -5277,9 +5280,11 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
                     ends: xs.get(4).is_none_or(|&x| int_of(v, x) & 2 != 0),
                     rescanned: xs.get(4).is_some_and(|&x| int_of(v, x) & 4 != 0),
                     origin: match (xs.get(5), xs.get(6)) {
-                        (Some(&n), Some(&o)) => {
-                            Some((n, usize::try_from(int_of(v, o)).unwrap_or(0)))
-                        }
+                        (Some(&n), Some(&o)) => Some((
+                            n,
+                            usize::try_from(int_of(v, o)).unwrap_or(0),
+                            xs.get(8).copied().unwrap_or(ValueId::UNIT),
+                        )),
                         _ => None,
                     },
                     lineno: xs
@@ -5293,14 +5298,17 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
     out
 }
 /// [`slice_args`] for a piece of a file `\input` read, beginning at
-/// byte `at` of the file named `name`: every segment carries its origin
-/// `(name, offset)`; the kind is 2 (a document's piece, not the top).
+/// byte `at` of the file named `name` (of its unit `unit`, a `unit:`
+/// field's name, where it is one: `at` from the unit's start, the frame
+/// `[.., name, offset, 0, unit]`): every segment carries its origin
+/// `(name, offset, unit)`; the kind is 2 (a document's piece, not the top).
 pub(crate) fn slice_args_in_file(
     v: &Values,
     text: &str,
     starts_line: bool,
     name: ValueId,
     at: usize,
+    unit: ValueId,
 ) -> Vec<ValueId> {
     let mut frames = Vec::new();
     let mut starts = starts_line;
@@ -5319,7 +5327,7 @@ pub(crate) fn slice_args_in_file(
         };
         let state = if starts { NEW_LINE } else { MID_LINE };
         let flags = i64::from(starts) | (i64::from(ends) << 1);
-        frames.push(v.list(vec![
+        let mut xs = vec![
             v.str("s"),
             v.str(&seg),
             v.int(i64::from(state)),
@@ -5327,7 +5335,11 @@ pub(crate) fn slice_args_in_file(
             v.int(flags),
             name,
             v.int(i64::try_from(pos).unwrap_or(0)),
-        ]));
+        ];
+        if unit != ValueId::UNIT {
+            xs.extend([v.int(0), unit]);
+        }
+        frames.push(v.list(xs));
         starts = ends;
         rest = next;
         pos += used;
@@ -6477,7 +6489,7 @@ fn parked_rest(p: &Parked) -> u64 {
     let line = |h: &mut phitex_defuse::FxHasher, l: &crate::input::Line| {
         l.buf.hash(h);
         (l.loc, l.state, l.endch, l.starts, l.ends, l.lineno, l.rescanned).hash(h);
-        l.origin.map(|(x, o)| (x.raw(), o)).hash(h);
+        l.origin.map(|(x, o, u)| (x.raw(), o, u.raw())).hash(h);
     };
     w(&mut h, p.segs.len() as u64);
     for s in &p.segs {

@@ -2194,8 +2194,9 @@ type ProvidedUnit = (String, u64, Vec<(Field, ValueId)>);
 /// The files the provider cut into units, by name: each cut once.
 type UnitCuts = std::sync::Mutex<FxHashMap<String, Arc<OnceLock<FxHashMap<u64, ValueId>>>>>;
 
-/// The file a units field names: `units:<name>` (the order) or
-/// `unit:<name>:<i>` (one unit) or `fsize:<name>` (its size).
+/// The file a units field names: `units:<name>` (the order),
+/// `unit:<name>:<id>` (one unit), `upos:<name>:<id>` (its place) or
+/// `fsize:<name>` (its size).
 fn units_file(field: &str) -> Option<&str> {
     if let Some(n) = field
         .strip_prefix("units:")
@@ -2204,19 +2205,32 @@ fn units_file(field: &str) -> Option<&str> {
         return Some(n);
     }
     field
-        .strip_prefix("unit:")?
+        .strip_prefix("unit:")
+        .or_else(|| field.strip_prefix("upos:"))?
         .rsplit_once(':')
         .map(|(n, _)| n)
 }
 
+/// A unit's place field (`upos:<name>:<id>`) by its field's name
+/// (`unit:<name>:<id>`).
+fn upos_field(key: &str) -> Option<String> {
+    key.strip_prefix("unit:").map(|k| format!("upos:{k}"))
+}
+
 /// A file a document's `\input` reads, as units (spec-redesign §1
-/// `unit:<file>:<i>`): the file cut by the same analysis a document's
+/// `unit:<file>:<id>`): the file cut by the same analysis a document's
 /// text is cut by, each slice a field of the environment,
-/// `unit:<name>:<i>` = `[text, offset]`, and the order `units:<name>` =
+/// `unit:<name>:<id>` = `[text]`, `<id>` its text's hash and its
+/// occurrence among equal units (as a written file's, `ops::units_of`),
+/// so a unit an edit moves or leaves is the same field with the same
+/// value; its place, `upos:<name>:<id>` = the offset, a field of its own
+/// that no piece reads (a diagnostic's place adds it,
+/// `Build::diagnostics`); and the order `units:<name>` =
 /// `[path, UNIT, [sliceable, [[unit field, starts], ...]]]` (a written
-/// file's shape, `ops::Files`). The reader of the file reads the order
-/// only, so an edit inside a unit re-runs the unit's piece, not the
-/// node that read the file; each unit's hint is registered by its field
+/// file's shape, `ops::Files`), all that changes where units come or
+/// go. The reader of the file reads the order only, so an edit inside a
+/// unit re-runs the unit's piece and the order's reader, not the units
+/// after it; each unit's hint is registered by its field
 /// (`hints::register_unit`). A file that is not read as a document's
 /// text (`inputs::document_file`) is not cut: its order is empty and
 /// not sliceable, and the reader reads its text.
@@ -2244,12 +2258,17 @@ fn file_units(
     }
     let t = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
     crate::hints::register_text(reg, pv, &t);
-    let mut out = Vec::with_capacity(t.slices.len() + 1);
+    let mut out = Vec::with_capacity(2 * t.slices.len() + 2);
     let mut units = Vec::with_capacity(t.slices.len());
-    for (i, &(s, e)) in t.slices.iter().enumerate() {
+    let mut seen: FxHashMap<u64, u32> = FxHashMap::default();
+    for &(s, e) in &t.slices {
         let Some(u) = text.get(s..e) else { continue };
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-        let key = v.str(&format!("unit:{name}:{i}"));
+        let h = phitex_defuse::hash_bytes(0x756e_6974_0000_0001, u.as_bytes());
+        let n = seen.entry(h).or_insert(0);
+        let id = format!("{name}:{h:016x}.{n}");
+        *n += 1;
+        let key = v.str(&format!("unit:{id}"));
         // (a unit whose text cannot bound what it defines: its record's
         // hint when it has one, keyed by its text, `crate::pkgrec`)
         let own = crate::hints::slice_hint_of(&t, s);
@@ -2257,10 +2276,11 @@ fn file_units(
             .filter(|_| crate::pkgrec::unbounded(&own))
             .and_then(|l| l.hint_for(v, u))
             .map_or(own, Arc::from);
-        crate::hints::register_unit(reg, key, hint, crate::pkgrec::node_key(u));
+        crate::hints::register_unit(reg, key, hint, crate::pkgrec::node_key(u), s);
+        out.push((v.field(&format!("unit:{id}")), v.list(vec![v.str(u)])));
         out.push((
-            v.field(&format!("unit:{name}:{i}")),
-            v.list(vec![v.str(u), v.int(i64::try_from(s).unwrap_or(0))]),
+            v.field(&format!("upos:{id}")),
+            v.int(i64::try_from(s).unwrap_or(0)),
         ));
         units.push(v.list(vec![key, v.int(i64::from(starts))]));
     }
@@ -2723,16 +2743,22 @@ impl Graph {
         }
     }
 
-    /// A unit's text and offset in its file, as the environment holds it
-    /// (`unit:<file>:<i>`, [`file_units`]).
-    fn unit_value(&self, key: &str) -> Option<(String, usize)> {
+    /// A unit's text, as the environment holds it (`unit:<file>:<id>`,
+    /// [`file_units`]).
+    fn unit_value(&self, key: &str) -> Option<String> {
         let v = self.eng.values();
         let f = v.field(key);
         let &(_, x) = self.files.iter().find(|&&(g, _)| g == f)?;
-        let xs = list_of(v, x);
-        let text = str_of(v, *xs.first()?);
-        let at = usize::try_from(int_of(v, *xs.get(1)?)).ok()?;
-        Some((text, at))
+        Some(str_of(v, *list_of(v, x).first()?))
+    }
+
+    /// A unit's offset in its file (`upos:<file>:<id>` of the unit
+    /// `key`, [`file_units`]).
+    fn unit_pos(&self, key: &str) -> Option<usize> {
+        let v = self.eng.values();
+        let f = v.field(&upos_field(key)?);
+        let &(_, x) = self.files.iter().find(|&&(g, _)| g == f)?;
+        usize::try_from(int_of(v, x)).ok()
     }
 
     /// A file's whole text as the environment holds it: its `file:` value
@@ -2763,7 +2789,7 @@ impl Graph {
             let mut text = String::new();
             for u in units {
                 let key = list_of(v, u).first().map(|&k| str_of(v, k))?;
-                text.push_str(&self.unit_value(&key)?.0);
+                text.push_str(&self.unit_value(&key)?);
             }
             return Some(text.into());
         }
@@ -3756,7 +3782,7 @@ fn node_args(
     match (n, incr) {
         (&DocNode::Doc(s, e), Some(inc)) => {
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-            let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
+            let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s, ValueId::UNIT);
             // (a document node is a top-level node)
             a[1] = v.int(3);
             // (a package load: its record's hint, or the optimistic one;
@@ -4560,7 +4586,12 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
                 let bytes = finder(n.trim_start_matches("./"))
                     .map(|(_, b)| b)
                     .unwrap_or_default();
-                let at = usize::try_from(int(3)).unwrap_or(0) + loc;
+                // (a unit's line: its place the unit's `upos:` on)
+                let unit = xs
+                    .get(7)
+                    .filter(|&&u| u != ValueId::UNIT)
+                    .map_or(0, |&u| g.unit_pos(&str_of(v, u)).unwrap_or(0));
+                let at = usize::try_from(int(3)).unwrap_or(0) + unit + loc;
                 (n, bytes.iter().map(|&b| char::from(b)).collect(), at)
             }
             _ => {
@@ -4740,6 +4771,7 @@ pub struct Diagnostic {
 }
 
 /// A document built on the graph, kept for edits.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Build {
     g: Graph,
     unit: UnitId,
@@ -4779,6 +4811,10 @@ pub struct Build {
     /// the loads' records change (`crate::pkgrec`; a record is only a
     /// load's run's), so only then are they merged and stored.
     loads_ran: bool,
+    /// Files changed ([`Build::stage_file`]) not evaluated yet: the next
+    /// [`Build::absorb_pending`] evaluates them with the text sent, one
+    /// evaluation (its stats the nodes both ran).
+    staged: bool,
     /// The pieces' run times by text ([`crate::runtimes`]): those the
     /// build was given, updated by its evaluations.
     runtimes: phitex_defuse::FxHashMap<u64, u64>,
@@ -4993,6 +5029,7 @@ impl Build {
             memo: Mutex::default(),
             lines: Mutex::default(),
             loads_ran: false,
+            staged: false,
             runtimes: phitex_defuse::FxHashMap::default(),
             wait_fields: crate::waitfields::WaitFields::default(),
         };
@@ -5218,6 +5255,7 @@ impl Build {
     }
 
     fn settle(&mut self) {
+        self.staged = false;
         let t_all = std::time::Instant::now();
         self.progress_offsets();
         crate::timeline::lap("engine: the nodes' offsets (progress)");
@@ -5298,7 +5336,7 @@ impl Build {
     /// Builds the latest text sent, if one waits that no evaluation took:
     /// whether there was one.
     pub fn absorb_pending(&mut self) -> bool {
-        if !self.edits.pending() {
+        if !self.edits.pending() && !self.staged {
             return false;
         }
         self.settle();
@@ -5343,8 +5381,18 @@ impl Build {
     /// A file other than the document changed (`None`: as the finder
     /// gives it again): its `file:` field is replaced, and the nodes that
     /// read it run again.
-    #[allow(clippy::too_many_lines)]
     pub fn edit_file(&mut self, name: &str, text: Option<&[u8]>) {
+        self.stage_file(name, text);
+        if self.staged {
+            self.settle();
+        }
+    }
+
+    /// [`Build::edit_file`] without the evaluation: the next
+    /// [`Build::absorb_pending`] (or edit) evaluates it, with the text
+    /// sent, as one.
+    #[allow(clippy::too_many_lines)]
+    pub fn stage_file(&mut self, name: &str, text: Option<&[u8]>) {
         // (the units the provider cut so far: a file read only as units
         // is edited by its units)
         self.g.absorb_units();
@@ -5401,7 +5449,9 @@ impl Build {
             l.forget(name);
         }
         // (a file read as units: cut again, each unit's field its new
-        // slice; a unit whose text is the same keeps its value)
+        // slice; a unit whose text is the same keeps its field and its
+        // value wherever it moved, keyed by its text, only its `upos:`
+        // and the order changing, [`file_units`])
         if cut {
             self.g.drop_units(name);
             let v = self.g.eng.values();
@@ -5458,7 +5508,7 @@ impl Build {
         let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
         env_trace(&self.g.eng, &env);
         self.g.push_env(env);
-        self.settle();
+        self.staged = true;
     }
 
     /// The document's nodes' texts: each node's raw id, its text (`None`:
@@ -5498,12 +5548,21 @@ impl Build {
                         let s = usize::try_from(int_of(v, pos)).unwrap_or(0);
                         (str_of(v, name), s, s + str_of(v, seg).len() + 1)
                     }
+                    // (a unit's line: its place from the unit's, `upos:`)
+                    ("s", &[_, seg, _, _, _, name, pos, _, unit]) => {
+                        let Some(at) = self.g.unit_pos(&str_of(v, unit)) else {
+                            continue;
+                        };
+                        let s = at + usize::try_from(int_of(v, pos)).unwrap_or(0);
+                        (str_of(v, name), s, s + str_of(v, seg).len() + 1)
+                    }
                     ("w", &[_, key, _, _]) => {
                         let key = str_of(v, key);
                         let Some(file) = units_file(&key) else {
                             continue;
                         };
-                        let Some((u, at)) = self.g.unit_value(&key) else {
+                        let (Some(u), Some(at)) = (self.g.unit_value(&key), self.g.unit_pos(&key))
+                        else {
                             continue;
                         };
                         (file.to_owned(), at, at + u.len())
@@ -6319,7 +6378,13 @@ impl Build {
                             .into()
                     })
                     .clone();
-                let at = usize::try_from(int(3)).unwrap_or(0) + loc;
+                // (a unit's line: from the unit's start, its place in the
+                // file the unit's `upos:` now, [`file_units`])
+                let unit = xs
+                    .get(7)
+                    .filter(|&&u| u != ValueId::UNIT)
+                    .map_or(0, |&u| self.g.unit_pos(&str_of(v, u)).unwrap_or(0));
+                let at = usize::try_from(int(3)).unwrap_or(0) + unit + loc;
                 (name, &*file_text, at)
             } else {
                 let node = u64::from_ne_bytes(int(4).to_ne_bytes());

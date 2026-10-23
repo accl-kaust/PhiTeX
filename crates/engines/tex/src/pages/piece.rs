@@ -1179,12 +1179,16 @@ pub(crate) fn line_frame(v: &Values, s: &Line) -> Option<ValueId> {
         v.int(-2),
         v.int(i64::from(starts) | (i64::from(end_due) << 1) | (i64::from(s.rescanned) << 2)),
     ];
-    if let Some((name, at)) = s.origin {
+    if let Some((name, at, unit)) = s.origin {
         let at = at + s.loc.min(s.buf.len());
         xs.push(name);
         xs.push(v.int(i64::try_from(at).unwrap_or(0)));
-        if s.lineno > 0 {
+        if s.lineno > 0 || unit != ValueId::UNIT {
             xs.push(v.int(i64::from(s.lineno)));
+        }
+        // (a unit's line: its place from the unit's start, the unit named)
+        if unit != ValueId::UNIT {
+            xs.push(unit);
         }
     }
     Some(v.list(xs))

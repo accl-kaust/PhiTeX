@@ -3876,6 +3876,10 @@ pub(crate) struct Registry {
     /// The record key of each such unit's text (`crate::pkgrec::node_key`),
     /// by the same name.
     unit_keys: Mutex<FxHashMap<u64, String>>,
+    /// Each such unit's offset in its file as last cut, by the same
+    /// name: a unit's line carries its place from the unit's start
+    /// (`run::slice_args_in_file`), its file's analysis is at the file's.
+    unit_at: Mutex<FxHashMap<u64, usize>>,
     hints: Mutex<FxHashMap<u64, Arc<Hint>>>,
     /// The engine's answers ([`may_define`]) made ahead on the pool for
     /// nodes about to be pushed ([`prepare`]), by their arguments' key:
@@ -3920,12 +3924,19 @@ pub(crate) fn register_text(reg: &Registry, name: ValueId, t: &Arc<TextHints>) {
 }
 
 /// Registers the hint of a file's unit (`key`, its field name as a
-/// string value): a node whose text is that unit (a `["w", key, ...]`
-/// frame) gets it from here, as the unit's slice of the whole file's
-/// analysis.
-pub(crate) fn register_unit(reg: &Registry, key: ValueId, hint: Arc<str>, node_key: String) {
+/// string value) at byte `at` of its file: a node whose text is that
+/// unit (a `["w", key, ...]` frame) gets it from here, as the unit's
+/// slice of the whole file's analysis.
+pub(crate) fn register_unit(
+    reg: &Registry,
+    key: ValueId,
+    hint: Arc<str>,
+    node_key: String,
+    at: usize,
+) {
     reg.units.locked().insert(key.raw(), hint);
     reg.unit_keys.locked().insert(key.raw(), node_key);
+    reg.unit_at.locked().insert(key.raw(), at);
 }
 
 /// The record key of the unit `key`'s text, as registered.
@@ -4294,10 +4305,15 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
                 return Hint::any("text read under the catcodes in force", &text);
             }
             if let (Some(&name), Some(&o)) = (xs.get(5), xs.get(6)) {
-                let at = usize::try_from(int_of(v, o)).unwrap_or(0);
                 // (what the registry holds now: not cached by the
                 // arguments, `hint_of_args`)
                 *registry = true;
+                // (a unit's line: its place from the unit's start, the
+                // unit's in its file as last cut added)
+                let unit = xs
+                    .get(8)
+                    .map_or(0, |&u| reg.unit_at.locked().get(&u.raw()).copied().unwrap_or(0));
+                let at = usize::try_from(int_of(v, o)).unwrap_or(0) + unit;
                 let t = reg.by_name.locked().get(&name.raw()).cloned();
                 return match t {
                     Some(t) => t.at_until(at, at + text.len()),

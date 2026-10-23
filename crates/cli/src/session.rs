@@ -653,8 +653,10 @@ impl Session {
             if let Some(b) = &mut self.build {
                 self.status.set_live(Some(live(b.progress())));
                 self.status.set("engine");
+                // (evaluated with the text, one evaluation: its stats
+                // count the nodes the files' change ran)
                 for name in &reread {
-                    b.edit_file(name, None);
+                    b.stage_file(name, None);
                 }
                 // (sent as a version of its own: what another thread sends
                 // while it runs is taken between the engine's steps)
