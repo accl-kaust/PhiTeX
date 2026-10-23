@@ -346,6 +346,11 @@ for l in open(sys.argv[1]):
     fetched
     bin=$w/bin/cli/prof/phitex
     py=${GATE_EDITKINDS:-scripts/accl/gate-editkinds.py}
+    # (the format built first, by a one-line document: the first session's
+    # cold watch build then times the document, as the second's does, not
+    # the format's build)
+    mkdir -p "$w/ekwarm" && printf '%s\n' '\documentclass{article}' '\begin{document}' 'x' '\end{document}' > "$w/ekwarm/warm.tex"
+    (cd "$w/ekwarm" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_CACHE_DIR=$w/ekcache timeout 900 "$bin" build warm.tex > /dev/null 2>&1)
     for j in 8 1; do
       rm -rf "$w/ek" "$w/ek-cold" && cp -a bench/amsldoc "$w/ek"
       (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_CACHE_DIR=$w/ekcache \
