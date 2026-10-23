@@ -153,8 +153,10 @@ impl Slot {
 struct Inner {
     fields: Sharded<(u32, Field), FieldReaders>,
     units: Sharded<u32, UnitReaders>,
-    /// Readers of a node's output (or of its being there).
+    /// Readers of a node's output.
     outs: Sharded<Id, PMap<Id, ()>>,
+    /// Readers of where a node is (or of its being there).
+    anchors: Sharded<Id, PMap<Id, ()>>,
     /// The entries each node's reads are filed as.
     filed: Sharded<Id, Slot>,
     /// The last renumbering's epoch (`World::relabels`): a worker's keys
@@ -174,6 +176,7 @@ impl Inner {
             fields: Sharded::new(),
             units: Sharded::new(),
             outs: Sharded::new(),
+            anchors: Sharded::new(),
             filed: Sharded::new(),
             relabels: RwLock::new(0),
         }
@@ -194,6 +197,7 @@ impl Readers {
             fields: i.fields.snapshot(),
             units: i.units.snapshot(),
             outs: i.outs.snapshot(),
+            anchors: i.anchors.snapshot(),
             filed: i.filed.snapshot(),
             relabels: RwLock::new(r),
         };
@@ -242,6 +246,27 @@ impl Readers {
 
     pub(crate) fn drop_out(&self, of: Id, id: Id) {
         self.i().outs.with_if(&of, |m| {
+            m.remove(&id, &NoMeasure);
+        });
+    }
+
+    pub(crate) fn anchors(&self, of: Id) -> Option<PMap<Id, ()>> {
+        self.i().anchors.get(&of)
+    }
+
+    pub(crate) fn add_anchor(&self, of: Id, id: Id) {
+        self.i().anchors.with(of, |m| {
+            m.insert(id, (), &NoMeasure);
+        });
+    }
+
+    /// Node `of`'s anchor readers, taken out (it is gone).
+    pub(crate) fn take_anchors(&self, of: Id) -> Option<PMap<Id, ()>> {
+        lock(self.i().anchors.shard(&of)).remove(&of)
+    }
+
+    pub(crate) fn drop_anchor(&self, of: Id, id: Id) {
+        self.i().anchors.with_if(&of, |m| {
             m.remove(&id, &NoMeasure);
         });
     }

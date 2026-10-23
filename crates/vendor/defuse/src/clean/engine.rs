@@ -1152,7 +1152,8 @@ impl Engine {
                 .iter()
                 .filter(|(_, un)| un.app != super::world::NONE && self.w.node(un.app).is_some())
                 .filter(|&(&u, un)| {
-                    let readers = self.w.out_readers_of(un.app);
+                    let mut readers = self.w.out_readers_of(un.app);
+                    readers.extend(self.w.anchor_readers_of(un.app));
                     !readers.iter().any(|&r| roots.contains(&r) || self.w.node(r).is_some_and(|n| n.unit != u))
                 })
                 .map(|(&u, un)| (u, un.app))

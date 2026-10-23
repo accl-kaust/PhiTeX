@@ -187,8 +187,12 @@ pub(crate) fn text_key(t: &Arc<Text>) -> usize {
 pub(crate) enum ReadKey {
     /// A reader of field `f` of a unit at a position.
     Field(u32, Field, Pos),
-    /// A reader of a node's output (or of its being there).
+    /// A reader of a node's output.
     Out(Id),
+    /// A reader of where a node is (a window's anchor) or of its being
+    /// there: re-asked when it comes or goes, not when its output or text
+    /// changes.
+    Anchor(Id),
     /// A range reader of an accumulator over a window.
     Range(u32, Field, Pos, Pos),
 }
@@ -1301,6 +1305,19 @@ impl World {
     /// The readers of node `of`'s output.
     pub(crate) fn out_readers_of(&self, of: Id) -> Vec<Id> {
         self.rd.outs(of).map_or_else(Vec::new, |m| m.iter().map(|(&r, ())| r).collect())
+    }
+
+    pub(crate) fn add_anchor_reader(&self, of: Id, id: Id) {
+        self.rd.add_anchor(of, id);
+    }
+
+    pub(crate) fn drop_anchor_reader(&self, of: Id, id: Id) {
+        self.rd.drop_anchor(of, id);
+    }
+
+    /// The readers of where node `of` is (or of its being there).
+    pub(crate) fn anchor_readers_of(&self, of: Id) -> Vec<Id> {
+        self.rd.anchors(of).map_or_else(Vec::new, |m| m.iter().map(|(&r, ())| r).collect())
     }
 
     pub(crate) fn add_kind_reader(&self, u: u32, p: Pos, id: Id) {

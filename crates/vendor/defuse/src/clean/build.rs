@@ -79,6 +79,9 @@ pub(crate) struct Builder<'a> {
     /// Of those, the readers re-asked on their reads of structure too (the
     /// structure in a window they read changed).
     shaped: FxHashSet<Id>,
+    /// Of those, the readers re-asked on their reads of these nodes'
+    /// outputs.
+    out_on: FxHashMap<Id, Vec<Id>>,
     /// Auditing (`Core::rechecks` on): why each reader re-asked on all its
     /// reads was.
     all_why: Option<FxHashMap<Id, u8>>,
@@ -144,6 +147,7 @@ impl<'a> Builder<'a> {
             woken: Vec::new(),
             recheck: FxHashMap::default(),
             shaped: FxHashSet::default(),
+            out_on: FxHashMap::default(),
             all_why: core.auditing.load(std::sync::atomic::Ordering::Relaxed).then(FxHashMap::default),
             beyond: Vec::new(),
             rebinds: 0,
@@ -187,6 +191,17 @@ impl<'a> Builder<'a> {
         }
         self.recheck.entry(r).or_insert_with(|| Some(Vec::new()));
         self.shaped.insert(r);
+    }
+
+    /// Reader `r` re-asked on its reads of node `x`'s output (it changed,
+    /// or its text: why 18).
+    fn recheck_out(&mut self, r: Id, x: Id) {
+        super::core::prof::count(18);
+        if let Some(m) = &mut self.all_why {
+            m.insert(r, 18);
+        }
+        self.recheck.entry(r).or_insert_with(|| Some(Vec::new()));
+        self.out_on.entry(r).or_default().push(x);
     }
 
     /// Reader `r` re-asked on its reads of `f` (a definition or a
@@ -254,15 +269,17 @@ impl<'a> Builder<'a> {
     fn settle_round(&mut self) {
         let ids: Vec<(Id, Option<Vec<Field>>)> = std::mem::take(&mut self.recheck).into_iter().collect();
         let shaped = std::mem::take(&mut self.shaped);
+        let mut out_on = std::mem::take(&mut self.out_on);
         for (id, on) in ids {
             let shape = on.is_some() && shaped.contains(&id);
+            let outs: Vec<Id> = if on.is_some() { out_on.remove(&id).unwrap_or_default() } else { Vec::new() };
             let Some(n) = self.w.node(id) else { continue };
             if n.st != St::Done {
                 continue;
             }
             let Some(res) = n.res.clone() else { continue };
             let asked = |r: &Read| {
-                let a = on.as_ref().is_none_or(|fs| read_on(r, fs)) || (shape && structural(r));
+                let a = on.as_ref().is_none_or(|fs| read_on(r, fs)) || (shape && structural(r)) || (!outs.is_empty() && read_of(r, &outs));
                 if a {
                     super::core::prof::count(20);
                 }
@@ -286,7 +303,7 @@ impl<'a> Builder<'a> {
                 }
             });
             if audit.is_some()
-                && (on.is_none() || shape)
+                && (on.is_none() || shape || !outs.is_empty())
             {
                 let why = self.all_why.as_ref().and_then(|m| m.get(&id)).copied().unwrap_or(0);
                 let mut m = super::core::lock(&self.core.rechecks_all);
@@ -354,7 +371,7 @@ impl<'a> Builder<'a> {
         if out {
             self.w.touch_key(Key::Out(id));
             for r in self.w.out_readers_of(id) {
-                self.recheck_shape(r, 18);
+                self.recheck_out(r, id);
             }
         }
     }
@@ -863,6 +880,11 @@ impl<'a> Builder<'a> {
                 self.recheck(r, 13);
             }
         }
+        if let Some(m) = self.w.rd.take_anchors(id) {
+            for (&r, ()) in m.iter() {
+                self.recheck(r, 13);
+            }
+        }
         self.shape_at(n.unit, n.pos);
         self.w.touch_key(Key::Out(id));
         // (Scope markers are not nodes to the client.)
@@ -1001,7 +1023,7 @@ impl<'a> Builder<'a> {
             })
             .collect();
         for r in stale {
-            self.recheck_shape(r, 18);
+            self.recheck_out(r, id);
         }
     }
 
@@ -1058,10 +1080,14 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Node `x`'s output is gone or changed: its readers are re-asked.
+    /// Node `x`'s output is gone or changed, or it came: its readers and
+    /// those of where it is are re-asked.
     pub(crate) fn out_gone(&mut self, x: Id) {
         self.w.touch_key(Key::Out(x));
         for r in self.w.out_readers_of(x) {
+            self.recheck(r, 15);
+        }
+        for r in self.w.anchor_readers_of(x) {
             self.recheck(r, 15);
         }
     }
@@ -1140,7 +1166,7 @@ impl<'a> Builder<'a> {
         {
             self.w.touch_key(Key::Out(id));
             for x in self.w.out_readers_of(id) {
-                self.recheck_shape(x, 18);
+                self.recheck_out(x, id);
             }
         }
         self.file_declared(id);
@@ -1884,7 +1910,7 @@ impl<'a> Builder<'a> {
             if out_changed {
                 self.w.touch_key(Key::Out(id));
                 for r in self.w.out_readers_of(id) {
-                    self.recheck_shape(r, 18);
+                    self.recheck_out(r, id);
                 }
             } else {
                 // (The output its last result had: a reader that read
@@ -2480,6 +2506,15 @@ pub(crate) fn pending_breaks_none(core: &Core, f: Field) -> bool {
     core.acc(f).is_none() && !core.seqs.contains(&f)
 }
 
+/// Whether read `r` is of the output of one of nodes `xs`.
+fn read_of(r: &Read, xs: &[Id]) -> bool {
+    match r {
+        Read::Out { node, .. } | Read::Placed { node, .. } => xs.contains(node),
+        Read::Stream { outs, .. } => outs.iter().any(|(x, _)| xs.contains(x)),
+        _ => false,
+    }
+}
+
 fn read_on(r: &Read, fs: &[Field]) -> bool {
     match r {
         Read::Use { f, .. }
@@ -2562,9 +2597,14 @@ fn read_keys(w: &World, id: Id, n: &Node, reads: &[Read], which: Which) -> (Vec<
                 // (Its answer follows the frame chain it reads through.)
                 agg.kind |= moving;
             }
-            Read::Out { node, .. } | Read::Placed { node, .. } | Read::At { node, .. } => {
+            Read::Out { node, .. } | Read::Placed { node, .. } => {
                 if fixed {
                     keys.push(ReadKey::Out(*node));
+                }
+            }
+            Read::At { node, .. } => {
+                if fixed {
+                    keys.push(ReadKey::Anchor(*node));
                 }
             }
             Read::Kind { .. } => agg.kind |= moving,
@@ -2576,7 +2616,7 @@ fn read_keys(w: &World, id: Id, n: &Node, reads: &[Read], which: Which) -> (Vec<
                 if fixed {
                     for x in [*from, *to] {
                         if x != NONE {
-                            keys.push(ReadKey::Out(x));
+                            keys.push(ReadKey::Anchor(x));
                         }
                     }
                 }
@@ -2638,7 +2678,7 @@ fn index_key(w: &World, id: Id, k: ReadKey, on: bool) {
     super::core::prof::count(29);
     let _t = super::core::prof::Span::new(match k {
         ReadKey::Field(..) => 27,
-        ReadKey::Out(_) => 28,
+        ReadKey::Out(_) | ReadKey::Anchor(_) => 28,
         ReadKey::Range(..) => 29,
     });
     match (k, on) {
@@ -2646,6 +2686,8 @@ fn index_key(w: &World, id: Id, k: ReadKey, on: bool) {
         (ReadKey::Field(u, f, pos), false) => w.drop_reader(u, f, pos, id),
         (ReadKey::Out(x), true) => w.add_out_reader(x, id),
         (ReadKey::Out(x), false) => w.drop_out_reader(x, id),
+        (ReadKey::Anchor(x), true) => w.add_anchor_reader(x, id),
+        (ReadKey::Anchor(x), false) => w.drop_anchor_reader(x, id),
         (ReadKey::Range(ru, f, lo, hi), true) => w.add_range_reader(ru, f, lo, hi, id),
         (ReadKey::Range(ru, f, lo, hi), false) => w.drop_range_reader(ru, f, lo, hi, id),
     }
