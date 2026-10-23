@@ -68,9 +68,9 @@ pub(crate) struct MarkResume {
     /// first ones.
     pub kids: Vec<Spec>,
     pub conts: Vec<Spec>,
-    /// Of another text (`Ctx::resume_at`): no cut off at a later mark
-    /// (that run ran on its own text past this one).
-    pub retext: bool,
+    /// No cut off at a later mark: the run resumed is of another text
+    /// (`Ctx::resume_at`), or a stopped run's, without a result to stand.
+    pub no_cut: bool,
 }
 
 /// A retexted node's last run's marks offered (`Ctx::resumed_retext`):
@@ -2415,7 +2415,7 @@ impl<'a> Ctx<'a> {
             self.careful = false;
             self.lapsed = true;
         }
-        if fm.retext {
+        if fm.no_cut {
             return Ok(());
         }
         let old = fm.old.clone();
@@ -2545,7 +2545,7 @@ impl<'a> Ctx<'a> {
         self.kids.clone_from(&kids);
         self.conts.clone_from(&conts);
         self.nkids = kids.len();
-        self.from_mark = Some(MarkResume { after: o.after, old: o.old, j, kids, conts, retext: true });
+        self.from_mark = Some(MarkResume { after: o.after, old: o.old, j, kids, conts, no_cut: true });
         true
     }
 
