@@ -123,6 +123,7 @@ pub(crate) struct Gets {
     path: u32,
     ix: Vec<u32>,
     keys: Vec<ValueId>,
+    ranks: Vec<ValueId>,
 }
 
 /// A run's view of the store.
@@ -943,11 +944,11 @@ impl<'a> Ctx<'a> {
         let (root, path, x) = self.views[v.0 as usize];
         match s {
             // (Gathered: one read of the view, at the next mark.)
-            Step::Index(_) | Step::Key(_) if root & super::world::COMPOSED == 0 && matches!(self.reads.get(root as usize), Some(Read::Use { .. } | Read::Range { .. })) => {
+            Step::Index(_) | Step::Key(_) | Step::Rank(_) if root & super::world::COMPOSED == 0 && matches!(self.reads.get(root as usize), Some(Read::Use { .. } | Read::Range { .. })) => {
                 let g = match self.gets.iter().rposition(|g| g.root == root && g.path == path) {
                     Some(i) => &mut self.gets[i],
                     None => {
-                        self.gets.push(Gets { root, path, ix: Vec::new(), keys: Vec::new() });
+                        self.gets.push(Gets { root, path, ix: Vec::new(), keys: Vec::new(), ranks: Vec::new() });
                         self.gets.last_mut().expect("pushed")
                     }
                 };
@@ -957,6 +958,7 @@ impl<'a> Ctx<'a> {
                         return self.index_of(x, i);
                     }
                     Step::Key(k) => g.keys.push(k),
+                    Step::Rank(k) => g.ranks.push(k),
                     _ => {}
                 }
             }
@@ -991,8 +993,9 @@ impl<'a> Ctx<'a> {
 
     /// Reads what the run took by index and by key through each view since
     /// the last mark: one read of the view's root each, through a path
-    /// ending in the indices (`Step::Indices`) or the keys (`Step::Keys`)
-    /// taken; one taken alone, through its own step. The run depends on
+    /// ending in the indices (`Step::Indices`), the keys (`Step::Keys`) or
+    /// the ranks (`Step::Ranks`) taken; one taken alone, through its own
+    /// step. The run depends on
     /// exactly those elements.
     pub(crate) fn flush_gets(&mut self) {
         use crate::api::Step;
@@ -1017,6 +1020,16 @@ impl<'a> Ctx<'a> {
                 [] => None,
                 [k] => Some(Step::Key(k)),
                 _ => Some(Step::Keys(v.list(g.keys))),
+            };
+            if let Some(s) = s {
+                self.view_read(g.root, self.core.extend_path(g.path, s));
+            }
+            g.ranks.sort_unstable_by_key(|k| k.raw());
+            g.ranks.dedup();
+            let s = match g.ranks[..] {
+                [] => None,
+                [k] => Some(Step::Rank(k)),
+                _ => Some(Step::Ranks(v.list(g.ranks))),
             };
             if let Some(s) = s {
                 self.view_read(g.root, self.core.extend_path(g.path, s));

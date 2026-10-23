@@ -495,6 +495,17 @@ pub enum Step {
     /// each is there (a list of booleans), then those values. What a run
     /// took by key through one view, read as one.
     Keys(ValueId),
+    /// The place of `k` among the distinct elements of a list or a
+    /// sequence, in the order they first occur (1 for the first); none if
+    /// `k` is not there. On a sequence the distinct elements are kept per
+    /// rope node: a few distinct among many, it costs the rope's depth.
+    Rank(ValueId),
+    /// The places of elements `ks` (a list), as [`Step::Rank`] (0 where
+    /// absent): what a run took by rank through one view, read as one.
+    Ranks(ValueId),
+    /// How many distinct elements a list or a sequence has (kept as for
+    /// [`Step::Rank`]).
+    Distinct,
 }
 
 /// A read path: steps applied in turn to a value read. A run that reads
