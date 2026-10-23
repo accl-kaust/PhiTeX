@@ -980,6 +980,31 @@ pub(crate) struct Reuse<'a> {
 }
 
 impl TextHints {
+    /// The analyses of a text's chunks, each with its start, as one of
+    /// the whole text: their slices and atoms at the text's bytes.
+    pub(crate) fn joined(parts: &[(usize, &TextHints)]) -> TextHints {
+        let mut t = TextHints {
+            slices: Vec::new(),
+            starts: Vec::new(),
+            hints: Vec::new(),
+            skip: Vec::new(),
+            pars: Vec::new(),
+            slice_hints: Vec::new(),
+            sigs: Vec::new(),
+        };
+        for &(at, c) in parts {
+            let off = u32::try_from(at).unwrap_or(u32::MAX);
+            t.slices.extend(c.slices.iter().map(|&(s, e)| (s + at, e + at)));
+            t.starts.extend(c.starts.iter().map(|&s| s.saturating_add(off)));
+            t.hints.extend(c.hints.iter().cloned());
+            t.skip.extend_from_slice(&c.skip);
+            t.pars.extend_from_slice(&c.pars);
+            t.slice_hints.extend(c.slice_hints.iter().cloned());
+            t.sigs.extend_from_slice(&c.sigs);
+        }
+        t
+    }
+
     /// The hint of the command at or after byte `off`.
     fn at(&self, off: usize) -> Hint {
         // (to the end of the slice holding `off`: the node's own text)

@@ -259,6 +259,7 @@ impl Compare {
         self.session.set_text(crate::tex::chars(tex.as_bytes()));
         self.tex = tex;
         let r = self.session.build();
+        self.session.flush_records();
         let ok = r.out.errors.is_empty();
         if let Ok(w) = self.session.write(&r, ok) {
             self.wrote = w.files;

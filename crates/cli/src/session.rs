@@ -409,9 +409,15 @@ pub struct Session {
     /// The files other than the main one changed since the last build.
     changed: Vec<String>,
     /// Every name the builds since the last cold one asked the finder
-    /// for, in any evaluation, and whether it was found the last time
-    /// ([`Build::reads`] is the last evaluation's only).
-    inputs: Vec<(String, bool)>,
+    /// for, in any evaluation, whether it was found the last time
+    /// ([`Build::reads`] is the last evaluation's only), and the file
+    /// kpathsea found for it, looked up once, when the name came (or
+    /// when it was first found): an edit compares names, not lookups.
+    inputs: Vec<(String, bool, Option<PathBuf>)>,
+    /// Whether the package loads' and the document nodes' records
+    /// changed since last stored ([`Session::flush_records`]: when the
+    /// session is idle, not after every build).
+    records_dirty: bool,
     /// The formats' evaluated states (none: no cache).
     cache: Option<Cache>,
     /// The texts sent to the build while it runs, by version.
@@ -533,6 +539,7 @@ impl Session {
             buffers: Arc::default(),
             changed: Vec::new(),
             inputs: Vec::new(),
+            records_dirty: false,
             cache,
             absorb: Absorb::default(),
             absorbed_at: None,
@@ -559,7 +566,7 @@ impl Session {
     /// next build (`r` in watch: a change made outside, unseen).
     pub fn reread_all(&mut self) {
         self.changed
-            .extend(self.inputs.iter().map(|(n, _)| plain_name(n)));
+            .extend(self.inputs.iter().map(|(n, ..)| plain_name(n)));
     }
 
     /// A handle to send the main text to a build while it runs, from
@@ -782,9 +789,14 @@ impl Session {
                 self.inputs.clear();
             }
             for (n, found) in b.reads() {
-                match self.inputs.iter_mut().find(|(m, _)| *m == n) {
-                    Some(e) => e.1 = found,
-                    None => self.inputs.push((n, found)),
+                if let Some(e) = self.inputs.iter_mut().find(|(m, ..)| *m == n) {
+                    if found && e.2.is_none() {
+                        e.2 = self.tree.input(&n);
+                    }
+                    e.1 = found;
+                } else {
+                    let p = found.then(|| self.tree.input(&n)).flatten();
+                    self.inputs.push((n, found, p));
                 }
             }
         }
@@ -828,10 +840,10 @@ impl Session {
                 self.store_wnames(b);
             }
             lap(&mut phases, "written keys");
-            // (no load ran: its records are as last stored)
+            // (no load ran: its records are as last stored; else stored
+            // when the session is idle, [`Session::flush_records`])
             if b.pkgrec_changed() {
-                self.store_pkgrec(b);
-                self.store_noderec(b);
+                self.records_dirty = true;
             }
             // (written when it differs from the stored one)
             self.store_runtimes(b);
@@ -1306,6 +1318,21 @@ impl Session {
         }
     }
 
+    /// The package loads' and the document nodes' records stored, when
+    /// a build changed them since last stored: once the session is idle
+    /// (`phitex build` after its build, `watch` when no event came for a
+    /// while and when it quits), not after every build.
+    pub fn flush_records(&mut self) {
+        if !self.records_dirty {
+            return;
+        }
+        self.records_dirty = false;
+        if let Some(b) = &self.build {
+            self.store_pkgrec(b);
+            self.store_noderec(b);
+        }
+    }
+
     fn store_pkgrec(&self, b: &Build) {
         let (Some(c), Some(p)) = (&self.cache, self.pkgrec_path()) else {
             return;
@@ -1361,23 +1388,46 @@ impl Session {
     }
 
     /// The names the builds asked the finder for (`inputs`)
-    /// that stand for one of `changed` (as found, or as named).
+    /// that stand for one of `changed` (as found, or as named): by the
+    /// names and the files kept, no lookup; a changed name equal to
+    /// none is one of the files of its file name on disk.
     fn reads_of(&self, changed: &[String]) -> Vec<String> {
         if changed.is_empty() {
             return Vec::new();
         }
+        let found: Vec<Option<String>> = self
+            .inputs
+            .iter()
+            .map(|(_, _, p)| p.as_ref().map(|p| plain_name(&p.to_string_lossy())))
+            .collect();
+        let mut hit = vec![false; self.inputs.len()];
+        for c in changed {
+            let mut any = false;
+            for (i, (n, ..)) in self.inputs.iter().enumerate() {
+                let n = plain_name(n);
+                if *c == n || *c == format!("{n}.tex") || found[i].as_ref() == Some(c) {
+                    hit[i] = true;
+                    any = true;
+                }
+            }
+            if any {
+                continue;
+            }
+            let base = Path::new(c).file_name();
+            for (i, f) in found.iter().enumerate() {
+                if let Some(f) = f
+                    && Path::new(f).file_name() == base
+                    && same_file(f, c)
+                {
+                    hit[i] = true;
+                }
+            }
+        }
         self.inputs
             .iter()
-            .map(|(n, _)| n.clone())
-            .filter(|n| {
-                let found = self.tree.input(n).map(|p| plain_name(&p.to_string_lossy()));
-                changed.iter().any(|c| {
-                    *c == plain_name(n)
-                        || *c == format!("{}.tex", plain_name(n))
-                        || found.as_ref() == Some(c)
-                        || found.as_deref().is_some_and(|f| same_file(f, c))
-                })
-            })
+            .zip(hit)
+            .filter(|(_, h)| *h)
+            .map(|((n, ..), _)| n.clone())
             .collect()
     }
 
@@ -1557,8 +1607,8 @@ impl Session {
         s.push_str(&format!("PWD {}\n", cwd.display()));
         s.push_str(&format!("INPUT {}\n", self.job.path.display()));
         if self.build.is_some() {
-            for (n, found) in &self.inputs {
-                if let Some(p) = self.tree.input(n).filter(|_| *found) {
+            for (_, found, p) in &self.inputs {
+                if let Some(p) = p.as_ref().filter(|_| *found) {
                     s.push_str(&format!("INPUT {}\n", p.display()));
                 }
             }

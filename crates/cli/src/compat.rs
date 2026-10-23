@@ -274,6 +274,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         eprintln!("{progname}: {e}");
         std::process::exit(1);
     }
+    s.flush_records();
     // web2c's `do_final_end`: exit status 1 for errors or worse.
     std::process::exit(i32::from(!r.out.errors.is_empty()));
 }

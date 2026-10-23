@@ -669,6 +669,9 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     if let (Some(m), Some(d), true) = (&main, &t.copy_pdf, r.out.errors.is_empty()) {
         copy_pdf(m, d, ui);
     }
+    // (the records the build changed, stored once it is done)
+    s.flush_records();
+    phitex_tex::timeline::lap("cli: the records stored");
     cache_summary(t, ui);
     phitex_tex::timeline::lap("cli: the cache's summary");
     let code = i32::from(!r.out.errors.is_empty());

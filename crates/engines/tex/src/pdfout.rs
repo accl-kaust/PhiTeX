@@ -552,7 +552,7 @@ fn maps() -> &'static MapCache {
 /// What the fold carries beside the writer: the whatsits of the forms'
 /// boxes (`\pdfxform`), by the handles their boxes were given (from
 /// [`FORM_HANDLES`] up), and the fonts those boxes use.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub(crate) struct Forms {
     pub whats: BTreeMap<u32, Whatsit>,
     pub fonts: BTreeSet<u32>,
@@ -3149,10 +3149,22 @@ enum SameWriter {
     Other,
 }
 
+/// Whether forms `a` and the snapshot's `b` are the same forms, their
+/// whatsits' object numbers as `reloc` numbers them (a writer compared
+/// with the snapshot's has its relocation).
+fn same_forms(a: &Forms, b: &Forms, reloc: &Reloc) -> bool {
+    if a == b {
+        return true;
+    }
+    a.fonts == b.fonts
+        && a.whats.len() == b.whats.len()
+        && a.whats.iter().zip(&b.whats).all(|((ka, wa), (kb, wb))| {
+            ka == kb && (wa == wb || relocated(wa.clone(), reloc) == relocated(wb.clone(), reloc))
+        })
+}
+
 /// How the writer `st` with `nums`, `forms` and `reloc` compares with
-/// the one the last link had at snapshot `sn` ([`finish_exact`]). The
-/// forms compared only when there are none (a document with forms runs
-/// on).
+/// the one the last link had at snapshot `sn` ([`finish_exact`]).
 fn compare_writer(
     st: &mut PdfState,
     nums: &FontNums,
@@ -3160,11 +3172,7 @@ fn compare_writer(
     reloc: &Reloc,
     sn: &mut LinkSnap,
 ) -> SameWriter {
-    let none = forms.whats.is_empty()
-        && forms.fonts.is_empty()
-        && sn.forms.whats.is_empty()
-        && sn.forms.fonts.is_empty();
-    if !none || *nums != sn.nums || *reloc != sn.reloc {
+    if *nums != sn.nums || *reloc != sn.reloc || !same_forms(forms, &sn.forms, reloc) {
         return SameWriter::Other;
     }
     // (the snapshot's digests taken once: no copy of its writer)
@@ -3194,7 +3202,7 @@ fn compare_writer(
 /// (`PHITEX_LINK_WHY`, observe): the writer's fields that differ, with
 /// their first differing lines.
 #[cold]
-fn link_why(i: usize, st: &PdfState, nums: &FontNums, reloc: &Reloc, sn: &LinkSnap) {
+fn link_why(i: usize, st: &PdfState, nums: &FontNums, forms: &Forms, reloc: &Reloc, sn: &LinkSnap) {
     use std::fmt::Write as _;
     // (a field of the writer: a line indented by one level)
     fn fields(s: &str) -> Vec<(String, Vec<&str>)> {
@@ -3215,12 +3223,29 @@ fn link_why(i: usize, st: &PdfState, nums: &FontNums, reloc: &Reloc, sn: &LinkSn
     let b = format!("{:#?}", sn.st);
     let (fa, fb) = (fields(&a), fields(&b));
     let mut msg = format!(
-        "link why at record {i}: font numbers {}, reloc {}",
+        "link why at record {i}: font numbers {}, reloc {}, forms {}",
         if *nums == sn.nums { "equal" } else { "differ" },
         if *reloc == sn.reloc {
             "equal".to_owned()
         } else {
             format!("differs: {reloc:?} vs {:?}", sn.reloc)
+        },
+        if same_forms(forms, &sn.forms, reloc) {
+            "equal".to_owned()
+        } else {
+            let first = forms
+                .whats
+                .iter()
+                .zip(&sn.forms.whats)
+                .find(|(a, b)| a != b)
+                .map_or(String::new(), |(a, b)| format!(", first {a:?} vs {b:?}"));
+            format!(
+                "differ: {} whatsits and {} fonts vs {} and {}{first}",
+                forms.whats.len(),
+                forms.fonts.len(),
+                sn.forms.whats.len(),
+                sn.forms.fonts.len()
+            )
         }
     );
     for (n, la) in &fa {
@@ -3553,7 +3578,7 @@ fn link(
                 SameWriter::Other => {
                     tries += 1;
                     if crate::exec::obs_flag!("PHITEX_LINK_WHY") {
-                        link_why(i, &st, &nums, &reloc, sn);
+                        link_why(i, &st, &nums, &forms, &reloc, sn);
                     }
                 }
             }

@@ -637,7 +637,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         ui.keys(keys::BAR);
     }
     let last = RefCell::new(Last::default());
-    let quit = |ui: &Ui| -> ! {
+    let quit = |ui: &Ui, s: &mut Session| -> ! {
+        // (the records the builds changed, stored before the watch ends)
+        s.flush_records();
         ui.finish();
         keys::restore();
         if let Some(l) = farewell(st, &last.borrow()) {
@@ -1177,7 +1179,20 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (the diff against a past version, and what the viewer asked of it)
     let mut comparing: Option<crate::compare::Compare> = None;
     let mut diff_asks: Vec<Ask> = Vec::new();
-    while let Some(first) = held.pop_front().or_else(|| rx.recv().ok()) {
+    // (no event for 2 s: the session is idle, the records the builds
+    // changed are stored then, not after every build)
+    loop {
+        let first = match held.pop_front() {
+            Some(e) => e,
+            None => match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(e) => e,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    s.flush_records();
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+        };
         // (what came meanwhile, a build's time of keystrokes among it, is
         // one edit, timed from the last of them: the wait a writer feels)
         // (the events of one save come together, from one read of the
@@ -1203,7 +1218,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         for e in events {
             match e {
                 Event::Key(k) => match k {
-                    Key::Quit => quit(ui),
+                    Key::Quit => quit(ui, &mut s),
                     Key::Rebuild => {
                         // (every input read again from disk: a change made
                         // outside that no event told)
@@ -1579,7 +1594,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
         }
     }
-    quit(ui)
+    quit(ui, &mut s)
 }
 
 #[cfg(test)]

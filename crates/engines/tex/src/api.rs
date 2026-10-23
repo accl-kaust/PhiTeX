@@ -2175,6 +2175,9 @@ struct Graph {
     /// The fields of the files the provider cut into units
     /// ([`file_units`]), merged into `files` with `provided`.
     provided_units: Arc<std::sync::Mutex<Vec<ProvidedUnit>>>,
+    /// The files read as units, each one's units and analyses
+    /// ([`FileIncrs`]).
+    file_incr: FileIncrs,
     /// The package loads' records and hints (`crate::pkgrec`), once the
     /// build has set them.
     loads: Option<Arc<crate::pkgrec::LoadHints>>,
@@ -2190,6 +2193,12 @@ type Provided = (String, Field, Option<ValueId>, u64);
 /// finder's hash, and its fields with their values (none: the file is
 /// absent).
 type ProvidedUnit = (String, u64, Vec<(Field, ValueId)>);
+
+/// The files read as units, by name: each one's units and its chunks'
+/// analyses ([`Incr`]), made at the file's first cut ([`file_units`]);
+/// a later cut analyses again the chunks its change reached only, as
+/// the document's text is.
+type FileIncrs = Arc<std::sync::Mutex<FxHashMap<String, Arc<std::sync::Mutex<Incr>>>>>;
 
 /// The files the provider cut into units, by name: each cut once.
 type UnitCuts = std::sync::Mutex<FxHashMap<String, Arc<OnceLock<FxHashMap<u64, ValueId>>>>>;
@@ -2233,12 +2242,18 @@ fn upos_field(key: &str) -> Option<String> {
 /// after it; each unit's hint is registered by its field
 /// (`hints::register_unit`). A file that is not read as a document's
 /// text (`inputs::document_file`) is not cut: its order is empty and
-/// not sliceable, and the reader reads its text.
+/// not sliceable, and the reader reads its text. The file's analysis
+/// is its [`Incr`]'s (`incrs`): a text that changed in one range has the
+/// chunks that range reaches analysed again, the others kept.
+// (its callers pass the build's tables apart: the provider's are its
+// closure's)
+#[allow(clippy::too_many_arguments)]
 fn file_units(
     v: &Values,
     reg: &crate::hints::Registry,
     defs: &Defs,
     loads: Option<&crate::pkgrec::LoadHints>,
+    incrs: &FileIncrs,
     name: &str,
     path: &str,
     bytes: &[u8],
@@ -2254,9 +2269,32 @@ fn file_units(
     };
     let uf = v.field(&format!("units:{name}"));
     if !crate::inputs::document_file(path, &text) {
+        incrs.locked().remove(name);
         return vec![(uf, order(false, Vec::new()))];
     }
-    let t = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
+    let inc = incrs
+        .locked()
+        .entry(name.to_owned())
+        .or_insert_with(|| Arc::new(std::sync::Mutex::new(Incr::new(defs.clone()))))
+        .clone();
+    let t = {
+        let mut inc = inc.locked();
+        // (the range the text changed in since the file's last cut, from
+        // the ends the texts share: a first cut analyses it whole)
+        let (p, s) = byte_ends(inc.text().as_bytes(), text.as_bytes());
+        let old = inc.text().len();
+        inc.set_text_edit(&text, (p, old - s, text.len() - s));
+        // (its chunks' analyses as the whole file's: a node made from
+        // part of a unit's line is hinted from it, by the file's offsets)
+        match inc.chunks.as_slice() {
+            [c] if c.start == 0 => c.th.clone(),
+            cs => {
+                let parts: Vec<(usize, &crate::hints::TextHints)> =
+                    cs.iter().map(|c| (c.start, &*c.th)).collect();
+                Arc::new(crate::hints::TextHints::joined(&parts))
+            }
+        }
+    };
     crate::hints::register_text(reg, pv, &t);
     let mut out = Vec::with_capacity(2 * t.slices.len() + 2);
     let mut units = Vec::with_capacity(t.slices.len());
@@ -2424,6 +2462,7 @@ impl Graph {
             tool_finder: None,
             provided: Arc::default(),
             provided_units: Arc::default(),
+            file_incr: Arc::default(),
             loads: None,
         }
     }
@@ -2588,6 +2627,7 @@ impl Graph {
         let units_log = Arc::clone(&self.provided_units);
         let (reg, defs) = (Arc::clone(&self.ops.hints), Arc::clone(&self.ops.defs));
         let loads = Arc::clone(&self.ops.pkg_loads);
+        let incrs = Arc::clone(&self.file_incr);
         let finder_u = Arc::clone(&finder);
         let finder_t = Arc::clone(&finder);
         let tools = self.tool_finder.clone();
@@ -2609,7 +2649,7 @@ impl Graph {
                     let loads = loads.locked().clone();
                     let es = found
                         .map(|(path, bytes)| {
-                            file_units(v, &reg, &defs, loads.as_deref(), name, &path, &bytes)
+                            file_units(v, &reg, &defs, loads.as_deref(), &incrs, name, &path, &bytes)
                         })
                         .unwrap_or_default();
                     let m = es.iter().map(|&(g, x)| (g.0.raw(), x)).collect();
@@ -3460,6 +3500,7 @@ impl Graph {
                             &self.ops.hints,
                             &defs,
                             loads.as_deref(),
+                            &self.file_incr,
                             &name,
                             &path,
                             &bytes,
@@ -5451,7 +5492,8 @@ impl Build {
         // (a file read as units: cut again, each unit's field its new
         // slice; a unit whose text is the same keeps its field and its
         // value wherever it moved, keyed by its text, only its `upos:`
-        // and the order changing, [`file_units`])
+        // and the order changing, [`file_units`]; its analysis made
+        // again where the text changed only, by the file's `file_incr`)
         if cut {
             self.g.drop_units(name);
             let v = self.g.eng.values();
@@ -5463,6 +5505,7 @@ impl Build {
                         &self.g.ops.hints,
                         &defs,
                         self.g.loads.as_deref(),
+                        &self.g.file_incr,
                         name,
                         path,
                         bytes,
