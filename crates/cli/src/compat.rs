@@ -236,6 +236,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         exact: true,
         spec: None,
         wait_long: true,
+        node_records: false,
         synctex,
         recorder,
         shell_escape,

@@ -146,6 +146,11 @@ pub struct Job {
     /// Long pieces' readers wait for them on learned fields
     /// ([`phitex_tex::Options::wait_fields`]; on unless `--no-wait-long`).
     pub wait_long: bool,
+    /// The document nodes' records ([`phitex_tex::Options::noderec`])
+    /// read and stored (`--node-records`; off by default: amsldoc's cold
+    /// build was 20% slower at `-j 8` and `-j 24` with them, and they
+    /// gave the engine no prediction it reads).
+    pub node_records: bool,
     /// `-synctex`.
     pub synctex: bool,
     /// `-recorder`: `JOB.fls`.
@@ -1278,7 +1283,7 @@ impl Session {
     /// The cache's file of the document nodes' records
     /// ([`Build::export_noderec`]): the document's own.
     fn noderec_path(&self) -> Option<PathBuf> {
-        if self.job.ini {
+        if self.job.ini || !self.job.node_records {
             return None;
         }
         Some(self.cache.as_ref()?.doc_dir(&self.job.path).join("noderec"))

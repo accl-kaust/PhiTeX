@@ -179,6 +179,10 @@ struct Opts {
     /// beside the format). The output is the same either way.
     #[arg(long = "no-wait-long", global = true, hide = true)]
     no_wait_long: bool,
+    /// The document nodes' records read and stored (off by default; kept
+    /// per document in the cache). The output is the same either way.
+    #[arg(long = "node-records", global = true, hide = true)]
+    node_records: bool,
     /// Each run, each warning's first lines, an engine failure's whole
     /// message (-vv: more)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
@@ -247,6 +251,7 @@ pub struct Options {
     pub exact: bool,
     pub spec: Option<String>,
     pub wait_long: bool,
+    pub node_records: bool,
     pub verbose: u8,
     pub quiet: bool,
     pub json: bool,
@@ -284,6 +289,7 @@ impl Cli {
             exact: o.exact || o.exact_pdf || !o.relaxed,
             spec: o.spec,
             wait_long: !o.no_wait_long,
+            node_records: o.node_records,
             verbose: o.verbose,
             quiet: o.quiet,
             json: o.json,
@@ -470,6 +476,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         exact: o.exact,
         spec: o.spec.clone(),
         wait_long: o.wait_long,
+        node_records: o.node_records,
         synctex: t.synctex,
         recorder: false,
         shell_escape: t.shell_escape,
