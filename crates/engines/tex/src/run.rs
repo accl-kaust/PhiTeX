@@ -328,6 +328,18 @@ impl FileRest {
         f
     }
 
+    /// Whether two are the same file at the same place
+    /// ([`crate::input::Seg::same`]).
+    pub(crate) fn same(&self, o: &FileRest) -> bool {
+        (self.id, self.off, self.name, self.pos, self.line, self.sliceable)
+            == (o.id, o.off, o.name, o.pos, o.line, o.sliceable)
+            && match (&self.units, &o.units) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a[..] == b[..],
+                _ => false,
+            }
+    }
+
     /// Whether its text is still to be read from its units.
     pub(crate) fn lazy(&self) -> bool {
         self.units.as_ref().is_some_and(|u| !u.is_empty()) && self.str().is_empty()
@@ -685,6 +697,11 @@ pub(crate) struct Run<'c, 'a> {
     /// parked run's, and its digest; the ones before the mark a resumed
     /// run began at are its last run's ([`phitex_defuse::Ctx::resumed`]).
     pub mark_snaps: Vec<(std::sync::Arc<Parked>, u64)>,
+    /// The marks of `mark_snaps` before this one hold another text's rest
+    /// (a retexted run resumed at this one, [`retext_mark`]): their tables
+    /// fold into the later marks', no run resumes at them
+    /// ([`KeptMarks::stale_below`]).
+    pub mark_stale: usize,
     /// The command count, from the run's start over its parks and
     /// resumes ([`Run::cmds_before`]), at which its next mark is due: a
     /// multiple of [`MARK_EVERY`], so that every run of the node, whatever
@@ -989,6 +1006,7 @@ impl<'c, 'a> Run<'c, 'a> {
             rt_rels: 0,
             resumed: false,
             mark_snaps: Vec::new(),
+            mark_stale: 0,
             next_mark: 0,
             mark_img: crate::runstate::MarkImage::default(),
             watch_exit: None,
@@ -5637,6 +5655,79 @@ pub(crate) struct KeptMarks {
     pub args: Vec<ValueId>,
     /// (observe) The commands the run began in all.
     pub total_cmds: u64,
+    /// [`Run::mark_stale`]: the marks before it hold another text's
+    /// rest; a run resumes only at this one or a later.
+    pub stale_below: usize,
+}
+
+/// A retexted node's resume ([`phitex_defuse::Ctx::resumed_retext`]):
+/// the last of its last run's marks, at most `kmax`, whose state the
+/// text the two runs share alone made, and the marks up to it with that
+/// one's text rest the new text's.
+///
+/// The mark's text rest ([`Parked::segs`] past its levels) must be the
+/// last text's rest unchanged (from its segment `m`), not a text the run
+/// edited or one with siblings' text after it; the segments before `m`
+/// (those it had begun, its levels' rests among them) and `m` itself
+/// (the next, whose start a line's continuation looks at,
+/// `Run::join_continuation`) must be the new text's. The node's other
+/// arguments must be the same (where it is, its kind, its hint), and no
+/// part of either text a unit (`w`, read when the run begins,
+/// [`Run::resolve_units`]).
+pub(crate) fn retext_mark(
+    v: &Values,
+    km: &KeptMarks,
+    kmax: u32,
+    old_args: &[ValueId],
+    args: &[ValueId],
+) -> Result<(u32, Vec<(std::sync::Arc<Parked>, u64)>), &'static str> {
+    if old_args.len() != args.len() || old_args.get(1..) != args.get(1..) {
+        return Err("other arguments");
+    }
+    let is_w = |l: ValueId| {
+        v.with_list(l, |fs| {
+            fs.iter().any(|&f| {
+                v.with_list(f, |xs| xs.first().and_then(|&t| v.with_str(t, |s| s == "w")) == Some(true))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+    };
+    if old_args.first().is_some_and(|&l| is_w(l)) || args.first().is_some_and(|&l| is_w(l)) {
+        return Err("units");
+    }
+    let old = crate::input::joined(decode_segs(v, old_args));
+    let new = crate::input::joined(decode_segs(v, args));
+    let shared = old.iter().zip(&new).take_while(|(a, b)| a.same(b)).count();
+    let top = (kmax as usize).min(km.snaps.len().saturating_sub(1));
+    let mut why = "no mark";
+    for k in (0..=top).rev() {
+        let p = &km.snaps[k].0;
+        if p.pulled > 0 || p.watch.is_some() || p.has_sealed() || p.nlev > p.segs.len() {
+            why = "siblings, a watch, sealed lines";
+            continue;
+        }
+        let Some(m) = old.len().checked_sub(p.segs.len() - p.nlev) else {
+            why = "text grown";
+            continue;
+        };
+        if m == 0 || m >= shared {
+            why = "past the shared text";
+            continue;
+        }
+        if !p.segs[p.nlev..].iter().zip(&old[m..]).all(|(a, b)| a.same(b)) {
+            why = "text rest edited";
+            continue;
+        }
+        let mut q = (**p).clone();
+        q.segs.truncate(q.nlev);
+        q.segs.extend(new[m..].iter().cloned());
+        let h = parked_digest(&q);
+        let mut snaps = km.snaps[..k].to_vec();
+        snaps.push((std::sync::Arc::new(q), h));
+        return Ok((u32::try_from(k).unwrap_or(u32::MAX), snaps));
+    }
+    Err(why)
 }
 
 /// The commands between two marks of a run ([`Run::take_mark`]):
