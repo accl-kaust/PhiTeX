@@ -4851,6 +4851,11 @@ impl Build {
             let pages = g.ops.pages;
             g.eng.push(unit, pages, Vec::new());
         }
+        // (the writers' start, with the format's glyph table, made now
+        // beside the job: `crate::pdfout::warm_g2u`)
+        if let Some(t) = env.get(g.eng.values(), "pdf:glyphtounicode", &made) {
+            crate::pdfout::warm_g2u(g.eng.values(), t);
+        }
         // §1337: `\everyjob`, before the job's first line
         let every = env.get(g.eng.values(), "param:everyjob", &made);
         if let Some(t) = every {
