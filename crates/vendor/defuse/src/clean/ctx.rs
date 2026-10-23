@@ -209,9 +209,12 @@ pub struct Ctx<'a> {
     pub(crate) predict: bool,
     /// Committed values only: a read of a definer in work waits for it.
     pub(crate) careful: bool,
-    /// Running carefully, it passed a mark past the one it resumed at
-    /// (the broken read is behind it): it runs carefully no longer.
+    /// Running carefully, it passed a mark past its start (the one it
+    /// resumed at, else its first): it runs carefully no longer.
     pub(crate) lapsed: bool,
+    /// The first mark this attempt made (a run not resumed at a mark: its
+    /// start, for a careful run's lapse).
+    first_mark: Option<u32>,
     /// It read a definer in work (a guess the merge checks).
     pub(crate) guessed: bool,
     /// It folded contributors in work as they last contributed
@@ -321,6 +324,7 @@ impl<'a> Ctx<'a> {
             predict: false,
             careful: false,
             lapsed: false,
+            first_mark: None,
             guessed: false,
             fold_ran: false,
             predicted: 0,
@@ -2408,13 +2412,20 @@ impl<'a> Ctx<'a> {
         let read_ix = u32::try_from(self.reads.len()).unwrap_or(u32::MAX);
         let (kids, conts) = (u32::try_from(self.kids.len()).unwrap_or(u32::MAX), u32::try_from(self.conts.len()).unwrap_or(u32::MAX));
         self.marks.push(super::world::Mark { mark, read_ix, state, digest, odigest, kids, conts });
-        let Some(fm) = &self.from_mark else { return Ok(()) };
-        // (Resumed at the mark before its first broken read, a careful run
-        // is past that read at a later mark: it guesses again.)
-        if self.careful && mark > fm.old.marks[fm.j].mark {
+        // (A careful run past its start, at a later mark, guesses again:
+        // resumed at the mark before its first broken read, it is past that
+        // read; parked, past where it stopped; run afresh, past its first
+        // mark. Predicting as the evaluation does.)
+        let start = match &self.from_mark {
+            Some(fm) => fm.old.marks[fm.j].mark,
+            None => *self.first_mark.get_or_insert(mark),
+        };
+        if self.careful && mark > start {
             self.careful = false;
             self.lapsed = true;
+            self.predict = self.core.predicting.load(std::sync::atomic::Ordering::Relaxed);
         }
+        let Some(fm) = &self.from_mark else { return Ok(()) };
         if fm.no_cut {
             return Ok(());
         }
@@ -2577,6 +2588,7 @@ impl<'a> Ctx<'a> {
     #[inline]
     fn restart_inner(&mut self) {
         self.kept = None;
+        self.first_mark = None;
         self.base = None;
         self.restart = true;
         self.reads.clear();
