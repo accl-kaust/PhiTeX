@@ -324,8 +324,9 @@ impl Run<'_, '_> {
         let v = self.v;
         loop {
             self.set_astate(1_000_000);
+            // (e-TeX: a protected macro is not expanded here)
             loop {
-                self.get_x_token();
+                self.get_x_or_protected()?;
                 self.ck()?;
                 if self.cur.cmd != cmd::SPACER {
                     break;
@@ -516,8 +517,9 @@ impl Run<'_, '_> {
     /// §791: the next column's first token, then `init_col`.
     fn next_col(&mut self, asid: i64, col: usize) -> R<bool> {
         self.set_astate(1_000_000);
+        // (e-TeX: a protected macro is not expanded here)
         loop {
-            self.get_x_token();
+            self.get_x_or_protected()?;
             self.ck()?;
             if self.cur.cmd != cmd::SPACER {
                 break;

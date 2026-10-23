@@ -1092,9 +1092,18 @@ pub const PRELUDE_LAYOUT: u32 = 5;
 /// identity.
 const PRELUDE_MAGIC: &[u8; 8] = b"PHITEXPR";
 
+/// The engine's identity ([`engine_identity`]): a format exported by an
+/// engine of another identity is not read, one of the same is, whatever
+/// else the binary holding it changed (a cache names formats by it).
+#[must_use]
+pub fn engine_id() -> u64 {
+    engine_identity()
+}
+
 /// The vendored engine's identity: a hash of its sources and of this
-/// crate's (`build.rs`), so vendoring another engine or changing how
-/// this crate encodes its state invalidates every exported prelude.
+/// crate's and those it depends on by path (`build.rs`), so vendoring
+/// another engine or changing how this crate encodes its state
+/// invalidates every exported prelude.
 fn engine_identity() -> u64 {
     static ID: OnceLock<u64> = OnceLock::new();
     *ID.get_or_init(|| {

@@ -66,7 +66,7 @@ mod vprof;
 
 pub use api::{
     Build, Diagnostic, EditSender, Finder, Hint, Options, PageSettled, Rounds, Severity, Speculation,
-    Stats, ToolFinder, ToolSearch, byte_ends,
+    Stats, ToolFinder, ToolSearch, byte_ends, engine_id,
 };
 pub use exec::{Progress, SpawnWorker, set_spawn_worker};
 

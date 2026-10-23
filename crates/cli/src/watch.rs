@@ -1335,9 +1335,14 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                             buffers.remove(&rel);
                             set(&mut s, &buffers, &rel);
                         }
-                        // (the main file read once for all its events)
-                        if rel == main_rel && !buffers.contains_key(&rel) {
-                            main_changed = true;
+                        // (the main file read once for all its events;
+                        // another file the build reads again from disk)
+                        if !buffers.contains_key(&rel) {
+                            if rel == main_rel {
+                                main_changed = true;
+                            } else {
+                                set(&mut s, &buffers, &rel);
+                            }
                         }
                         why.push(rel);
                         again = true;

@@ -458,6 +458,41 @@ impl Run<'_, '_> {
         }
     }
 
+    /// e-TeX's `get_x_or_protected`: [`Run::get_x_token`], a `\protected`
+    /// macro left as it is, unexpanded (the first token of an alignment's
+    /// entry, §785 and §791: such a macro expands after the u template
+    /// is inserted, its braces counted in the entry's `align_state`).
+    pub(crate) fn get_x_or_protected(&mut self) -> R<()> {
+        loop {
+            self.next_or_end();
+            if self.cur.cmd <= cmd::MAX_COMMAND || self.halt.is_some() {
+                return Ok(());
+            }
+            if (cmd::CALL..cmd::END_TEMPLATE).contains(&self.cur.cmd) {
+                if matches!(&self.cur_mean()?, crate::val::Mean::Macro(x) if x.flags & crate::etex::PROTECTED != 0)
+                {
+                    return Ok(());
+                }
+                let nr = std::mem::replace(&mut self.num_reads, false);
+                self.macro_call();
+                self.num_reads = nr;
+                if self.halt.is_some() {
+                    return Ok(());
+                }
+                continue;
+            }
+            if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
+                return Ok(());
+            }
+            let nr = std::mem::replace(&mut self.num_reads, false);
+            self.expand();
+            self.num_reads = nr;
+            if self.halt.is_some() {
+                return Ok(());
+            }
+        }
+    }
+
     /// (observe) `PHITEX_TOK_TRACE=<a>[-<b>]`: in the node
     /// `PHITEX_CMD_TRACE` names, each token its commands `a` to `b` get, with its meaning's
     /// `cmd`/`chr` and the input levels.
