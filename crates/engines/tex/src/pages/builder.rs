@@ -1505,6 +1505,14 @@ impl Run<'_, '_> {
             .copied()
             .filter(|&b| Some(b) != f.brk && spans.iter().any(|sp| span_srcs(sp).any(|x| x == b)))
             .collect();
+        let mut spans_pieces: Vec<i64> = vec![i64::from_ne_bytes(node.raw().to_ne_bytes())];
+        for sp in &spans {
+            if let Src::Piece { piece, .. } | Src::Held { piece, .. } = sp.src
+                && !spans_pieces.contains(&piece)
+            {
+                spans_pieces.push(piece);
+            }
+        }
         let fin = FinishIn {
             j,
             normal: lp.st.normal,
@@ -1530,6 +1538,7 @@ impl Run<'_, '_> {
             post_k: lp.post_k,
             prev_fire: lp.prev_fire,
             inf,
+            vers: page_vers(lp, &spans_pieces),
         };
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
@@ -2455,4 +2464,16 @@ impl crate::vprof::Reaching for RunReaching<'_, '_, '_> {
             skip: Glue::ZERO,
         })
     }
+}
+
+/// The version of each piece `pieces` names as the loop folded it (its
+/// [`crate::vprof::VPROF`] unit, the latest the loop holds), sorted by
+/// piece ([`FinishIn::vers`]).
+fn page_vers(lp: &PageLoop, pieces: &[i64]) -> Vec<(i64, ValueId)> {
+    let mut out: Vec<(i64, ValueId)> = pieces
+        .iter()
+        .filter_map(|&p| lp.units.iter().rev().find(|u| u.pid == p).map(|u| (p, u.src)))
+        .collect();
+    out.sort_unstable_by_key(|e| e.0);
+    out
 }

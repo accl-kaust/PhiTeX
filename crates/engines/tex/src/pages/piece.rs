@@ -598,10 +598,11 @@ impl Run<'_, '_> {
         let (ints, marks) = crate::vprof::encode_marks(v, raw);
         crate::vprof::count_unit(&ints);
         let pid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
-        self.contribute(
-            crate::vprof::VPROF,
-            v.seq_unit(crate::vprof::unit(v, pid, &ints, marks)),
-        );
+        // (its vertical profile's unit, the version a page builder folds,
+        // in its items' unit too: a finisher placed on another version
+        // knows its placement stale, [`Run::finisher_args`])
+        let vunit = crate::vprof::unit(v, pid, &ints, marks);
+        self.contribute(crate::vprof::VPROF, v.seq_unit(vunit));
         let shape = crate::nodes::unit_shape(v, pid, raw, &self.line_fonts).unwrap_or(ValueId::UNIT);
         let it = v.list(vec![
             v.int(pid),
@@ -616,6 +617,7 @@ impl Run<'_, '_> {
             // (the items' shape, their lines sealed: what a PDF page's
             // finisher reads, `crate::pages::seal`; none: the items)
             shape,
+            vunit,
         ]);
         self.contribute(PITEMS, v.seq_unit(it));
     }

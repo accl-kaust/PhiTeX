@@ -200,6 +200,12 @@ pub(crate) struct FinishIn {
     /// The items of its spans that are the best break of a page before,
     /// a penalty: 10000 since that page fired (§1013).
     pub inf: Vec<Src>,
+    /// The version of each piece its spans name, as the page builder
+    /// folded it (the piece's [`crate::vprof::VPROF`] unit, which its
+    /// [`PITEMS`] unit holds too): a finisher reading a unit of another
+    /// version runs on a placement made before that piece ran again, and
+    /// makes no page ([`Run::finisher_args`]).
+    pub vers: Vec<(i64, ValueId)>,
 }
 
 impl FinishIn {
@@ -239,6 +245,7 @@ impl FinishIn {
                     .map(|&src| Span { src, len: 1 }.encode(v))
                     .collect(),
             ),
+            v.list(self.vers.iter().map(|&(p, x)| v.list(vec![v.int(p), x])).collect()),
         ]);
         let mut out = vec![v.int(self.j)];
         out.extend([ValueId::UNIT; 8]);
@@ -317,6 +324,16 @@ impl FinishIn {
                 .into_iter()
                 .filter_map(|x| Span::decode(v, x).map(|s| s.src))
                 .collect(),
+            vers: p
+                .get(22)
+                .map(|&x| list_of(v, x))
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|e| match list_of(v, e)[..] {
+                    [p, x] => Some((int_of(v, p), x)),
+                    _ => None,
+                })
+                .collect(),
         })
     }
 }
@@ -377,6 +394,16 @@ impl Run<'_, '_> {
             // the piece re-asked when the piece comes before this node.
             // No page made on it, and none waited for: the piece may read
             // what this node defines)
+            return Ok((Vec::new(), None));
+        }
+        if self.stale_placement(fin, &pids)? {
+            // (a piece the page names ran again since the page builder
+            // folded it: the placement is stale, the builder's fold of
+            // the new version places this finisher again; no page made
+            // on it, the mismatch no defect)
+            if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                eprintln!("finisher {} of page {}: stale placement", self.cx.node().raw(), fin.j);
+            }
             return Ok((Vec::new(), None));
         }
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
@@ -642,6 +669,30 @@ impl Run<'_, '_> {
         ]));
         let brk = Some((pid, i64::from(fire.k), !at_end && !own.is_empty()));
         Ok((args, brk))
+    }
+
+    /// Whether a piece finisher `fin`'s page names holds another version
+    /// in the window (`pids`, the window's pieces) than the page builder
+    /// folded ([`FinishIn::vers`]): read as that comparison alone.
+    fn stale_placement(&mut self, fin: &FinishIn, pids: &[i64]) -> R<bool> {
+        use phitex_defuse::Step;
+        let v = self.v;
+        if fin.vers.is_empty() {
+            return Ok(false);
+        }
+        let w = self.cx.acc_view(v.field(PITEMS), fin.after, Some(fin.piece))?;
+        for &(p, ver) in &fin.vers {
+            let Some(i) = pids.iter().position(|&q| q == p) else { continue };
+            let same = self
+                .cx
+                .at(w, Step::Index(u32::try_from(i).unwrap_or(u32::MAX)))
+                .and_then(|u| self.cx.at(u, Step::Index(8)))
+                .and_then(|x| self.cx.get(x, Step::Eq(ver)));
+            if same == Some(v.bool(false)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The [`PITEMS`] window of finisher `fin` (after `fin.after`, to its
