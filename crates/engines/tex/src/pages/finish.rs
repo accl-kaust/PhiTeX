@@ -678,38 +678,14 @@ impl Run<'_, '_> {
         // leaves this finisher standing; the own piece whole where the
         // page fired in the material before it, whose items after the
         // candidate all go on to the next page)
-        let mut named: phitex_defuse::FxHashMap<i64, Vec<u32>> = phitex_defuse::FxHashMap::default();
         for s in &fin.spans {
             if let Src::Piece { piece, .. } | Src::Held { piece, .. } = s.src {
                 want.insert(piece);
             }
-            for src in crate::pages::span_srcs(s) {
-                let (piece, ix) = match src {
-                    Src::Piece { piece, item } => (piece, crate::pages::end_sub_of(item).map_or(item, |(e, _)| e)),
-                    Src::Held { piece, item, .. } => (piece, item),
-                    Src::Rtn { .. } => continue,
-                };
-                named.entry(piece).or_default().push(ix);
-            }
         }
-        for ixs in named.values_mut() {
-            ixs.sort_unstable();
-            ixs.dedup();
-        }
+        let named = named_items(fin);
         let whole = |p: i64| (p == pid && fin.in_material) || !named.contains_key(&p);
-        // (a unit's items, or their shapes, at the named indices: the
-        // others unit, never read)
-        let pick = |r: &mut Self, list: phitex_defuse::View, p: i64| -> Vec<ValueId> {
-            let ixs = &named[&p];
-            let n = ixs.last().map_or(0, |&i| i as usize + 1);
-            let mut out = vec![ValueId::UNIT; n];
-            for &i in ixs {
-                if let Some(x) = r.cx.get(list, Step::Index(i)) {
-                    out[i as usize] = x;
-                }
-            }
-            out
-        };
+        let pick = |r: &mut Self, list: phitex_defuse::View, p: i64| r.items_at(list, &named[&p]);
         let mut units: Vec<(i64, ValueId, Vec<ValueId>)> = Vec::new();
         let mut own = None;
         // (a PDF page's lines read by their shape: their dimensions and
@@ -778,6 +754,23 @@ impl Run<'_, '_> {
             units.push((p, shape, raw));
         }
         Ok((pids, units, own))
+    }
+
+    /// A unit's items, or their shapes, at the indices `ixs` (sorted) of
+    /// `list`, read as those alone ([`Run::window_units`]): the others
+    /// unit, never read. A named index the list does not have ends the
+    /// items there, as the list whole would (a miss, never a stand-in).
+    fn items_at(&mut self, list: phitex_defuse::View, ixs: &[u32]) -> Vec<ValueId> {
+        let n = ixs.last().map_or(0, |&i| i as usize + 1);
+        let mut out = vec![ValueId::UNIT; n];
+        for &i in ixs {
+            let Some(x) = self.cx.get(list, phitex_defuse::Step::Index(i)) else {
+                out.truncate(i as usize);
+                break;
+            };
+            out[i as usize] = x;
+        }
+        out
     }
 
     /// Where the next page begins, for the text after this finisher
@@ -2311,4 +2304,26 @@ impl Run<'_, '_> {
                 .unwrap_or(ValueId::UNIT)
         })
     }
+}
+
+/// The items of each piece finisher `fin`'s page names (its spans'
+/// sources, sorted, once each): a unit of its window read at those alone
+/// ([`Run::window_units`]).
+fn named_items(fin: &FinishIn) -> phitex_defuse::FxHashMap<i64, Vec<u32>> {
+    let mut named: phitex_defuse::FxHashMap<i64, Vec<u32>> = phitex_defuse::FxHashMap::default();
+    for s in &fin.spans {
+        for src in crate::pages::span_srcs(s) {
+            let (piece, ix) = match src {
+                Src::Piece { piece, item } => (piece, crate::pages::end_sub_of(item).map_or(item, |(e, _)| e)),
+                Src::Held { piece, item, .. } => (piece, item),
+                Src::Rtn { .. } => continue,
+            };
+            named.entry(piece).or_default().push(ix);
+        }
+    }
+    for ixs in named.values_mut() {
+        ixs.sort_unstable();
+        ixs.dedup();
+    }
+    named
 }
