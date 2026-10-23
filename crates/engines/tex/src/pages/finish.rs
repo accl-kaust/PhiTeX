@@ -1648,6 +1648,16 @@ impl Finish {
                 }
             }
         }
+        // (`PHITEX_PRED_SHOW=1`, observe: whether a finisher's
+        // prediction has the page parameters)
+        if crate::exec::obs_flag!("PHITEX_PRED_SHOW") {
+            let pp = v.field("pagepar");
+            eprintln!(
+                "pred-show: {} defs, pagepar {}",
+                out.len(),
+                out.iter().any(|e| e.0 == pp)
+            );
+        }
         let rtn = v.field(RTN);
         if !out.iter().any(|e| e.0 == rtn) {
             let last = d.and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1));
