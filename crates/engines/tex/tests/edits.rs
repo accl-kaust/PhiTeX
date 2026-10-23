@@ -165,6 +165,28 @@ fn tiny_edit() {
     );
 }
 
+/// A mark's digest counts the slots that only cache a read: past a
+/// mark a run may use a value it read before it with no read of its own
+/// (`\foo`, looked at before the run's first mark, typeset after its
+/// last), so a run whose read differs there must not be cut off at a
+/// mark of its last run where the two states differ only in that cache.
+#[test]
+fn cutoff_at_a_mark_counts_read_caches() {
+    let fx = common::fixtures().join("dvi");
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2\n\\font\\tenrm=cmr10 \\tenrm \\hsize=100pt \\vsize=100pt\n\\def\\foo{abc}\n\\count1=0 \\def\\body{\\advance\\count1 by 1 \\ifnum\\count1<12000 \\expandafter\\body\\fi}\\ifx\\foo\\relax\\fi\\body\\hbox{\\foo}\n\\end\n".to_owned();
+    let opts = || common::options("./t.tex", "t", "", &fx);
+    let mut b = common::build(opts(), None, &src);
+    let text = src.replacen("{abc}", "{xyz}", 1);
+    b.edit(&text);
+    let cold = common::build(opts(), None, &text);
+    eprintln!(
+        "read caches: {} nodes run, resumed at a mark {}, cut off at a mark {}",
+        b.stats.nodes_run, b.stats.resumed_at_mark, b.stats.cut_in_run
+    );
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "the edit's output differs from a cold build's: {}", d.unwrap_or_default());
+}
+
 /// An edit inside a mark the output routine reads.
 #[test]
 fn tiny_mark_edit() {
