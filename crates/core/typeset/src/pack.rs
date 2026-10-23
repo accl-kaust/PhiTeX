@@ -79,9 +79,30 @@ fn scan_hlist(
     t: &mut Totals,
     hdx: &mut (Scaled, Scaled, Scaled),
 ) {
+    // (the font of the run of characters being measured, and its table)
+    let mut run: Option<(u32, Option<&[crate::fonts::Whd]>)> = None;
     for p in list {
         match p {
-            Node::Char { font, ch } => char_dims(fonts, *font, *ch, hdx),
+            Node::Char { font, ch } => {
+                let table = match run {
+                    Some((f, t)) if f == *font => t,
+                    _ => {
+                        let t = fonts.whd_table(*font);
+                        run = Some((*font, t));
+                        t
+                    }
+                };
+                match table {
+                    Some(t) => {
+                        // §654
+                        let (w, h, d) = t.get(usize::from(*ch)).copied().unwrap_or((0, 0, 0));
+                        hdx.2 += w;
+                        hdx.0 = hdx.0.max(h);
+                        hdx.1 = hdx.1.max(d);
+                    }
+                    None => char_dims(fonts, *font, *ch, hdx),
+                }
+            }
             // §652
             Node::Lig(l) => char_dims(fonts, l.font, l.ch, hdx),
             Node::Box(_) | Node::Rule(_) | Node::Unset(_) => {
@@ -469,7 +490,7 @@ mod tests {
             ..BoxNode::default()
         };
         let list = vec![
-            Node::Box(inner),
+            Node::Box(Box::new(inner)),
             Node::Mark(7),
             Node::Adjust(vec![Node::Penalty(5), Node::Penalty(6)]),
             Node::Kern(UNITY, crate::node::KernKind::Explicit),
@@ -490,13 +511,13 @@ mod tests {
     fn vpack_depth_limit_and_leaders() {
         let p = PackParams::default();
         let b = |h, d, w| {
-            Node::Box(BoxNode {
+            Node::Box(Box::new(BoxNode {
                 kind: BoxKind::H,
                 width: w,
                 height: h,
                 depth: d,
                 ..BoxNode::default()
-            })
+            }))
         };
         let leader = Node::Glue(GlueNode {
             spec: Glue::new(2 * UNITY, 0, 0),

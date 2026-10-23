@@ -106,7 +106,7 @@ fn decode_field(v: &Values, f: ValueId, side: &mut Side) -> Field {
             ch: u16::try_from(n(2)).unwrap_or(0),
         },
         3 => match xs.get(1).and_then(|&b| nodes::decode(v, b, side)) {
-            Some(Node::Box(b)) => Field::SubBox(b),
+            Some(Node::Box(b)) => Field::SubBox(*b),
             _ => Field::Empty,
         },
         4 => Field::SubMlist(decode_mlist(
@@ -1070,12 +1070,12 @@ impl Run<'_, '_> {
         // §1204
         if e != 0 {
             let r = Node::Kern(z - w - e - d, KernKind::Normal);
-            let ab = a.take().map(Node::Box);
+            let ab = a.take().map(|a| Node::Box(Box::new(a)));
             let list: Vec<Node> = if left {
                 d = 0;
-                ab.into_iter().chain([r, Node::Box(b)]).collect()
+                ab.into_iter().chain([r, Node::Box(Box::new(b))]).collect()
             } else {
-                std::iter::once(Node::Box(b)).chain([r]).chain(ab).collect()
+                std::iter::once(Node::Box(Box::new(b))).chain([r]).chain(ab).collect()
             };
             let view2 = self.font_view(&list)?;
             b = phitex_typeset::pack::hpack(list, Spec::Additional(0), &view2, &pp, false).node;
@@ -1174,9 +1174,24 @@ impl Run<'_, '_> {
                 let f = u32::try_from(self.fam_font(size, k32)?).unwrap_or(0);
                 if f != 0 {
                     *slot = Some(f);
-                    self.add_font(&mut view, f)?;
-                    skew.insert(f, self.font_int(f, crate::fields::FontCell::Sc)?);
                 }
+            }
+        }
+        // (the symbol and extension families' fonts with all their
+        // `\fontdimen`s, §700–§701; another family's with those math
+        // reads of any font, the space and the x-height, §738, §752)
+        let full: Vec<u32> = fam_fnt.iter().flat_map(|row| [row[2], row[3]]).flatten().collect();
+        for row in &fam_fnt {
+            for &f in row.iter().flatten() {
+                if view.fonts.contains_key(f) {
+                    continue;
+                }
+                if full.contains(&f) {
+                    self.add_font(&mut view, f)?;
+                } else {
+                    self.add_font_dimens(&mut view, f, &[2, 5])?;
+                }
+                skew.insert(f, self.font_int(f, crate::fields::FontCell::Sc)?);
             }
         }
         let sk = move |f: u32| skew.get(&f).copied().unwrap_or(-1);

@@ -255,7 +255,7 @@ pub fn set_alignment(
     let mut out = List::with_capacity(list.len());
     for q in list {
         match q {
-            Node::Unset(row) => out.push(Node::Box(set_row(*row, proto, halign, offset))),
+            Node::Unset(row) => out.push(Node::Box(Box::new(set_row(*row, proto, halign, offset)))),
             Node::Rule(mut r) => {
                 // §806
                 if r.width == RUNNING {
@@ -279,7 +279,7 @@ pub fn set_alignment(
                     )
                     .node;
                     b.shift = offset;
-                    out.push(Node::Box(b));
+                    out.push(Node::Box(Box::new(b)));
                 }
             }
             n => out.push(n),
@@ -340,7 +340,7 @@ fn set_row(row: Unset, p: &BoxNode, halign: bool, o: Scaled) -> BoxNode {
             }
             si += 1;
             let ws = width_of(&proto[si]);
-            extra.push(Node::Box(if halign {
+            extra.push(Node::Box(Box::new(if halign {
                 BoxNode {
                     width: ws,
                     ..BoxNode::default()
@@ -351,7 +351,7 @@ fn set_row(row: Unset, p: &BoxNode, halign: bool, o: Scaled) -> BoxNode {
                     height: ws,
                     ..BoxNode::default()
                 }
-            }));
+            })));
             t += ws;
         }
         // §810, §811
@@ -400,7 +400,7 @@ fn set_row(row: Unset, p: &BoxNode, halign: bool, o: Scaled) -> BoxNode {
                 list: r.list,
             }
         };
-        q.list.push(Node::Box(b));
+        q.list.push(Node::Box(Box::new(b)));
         q.list.extend(extra);
         // the tabskip glue after the entry (or spanned group)
         if let Some(g) = entries.next() {

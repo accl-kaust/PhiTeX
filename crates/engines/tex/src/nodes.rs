@@ -688,6 +688,13 @@ pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u
     // (a line's interword glue is one node many times: the last glue
     // encoded is kept, as [`encode_list`] does)
     let mut glue: Option<(&GlueNode, ValueId)> = None;
+    // (the line's characters' values, direct-mapped by character: a line
+    // repeats few, and the run's cache is a thread-local away)
+    let mut chars = [(u32::MAX, 0u16, ValueId::UNIT); 64];
+    // (its kerns' values, direct-mapped by width, and its last
+    // discretionary's: a line repeats those too)
+    let mut kerns = [(i32::MIN, KernKind::Normal, ValueId::UNIT); 16];
+    let mut disc: Option<(&Disc, ValueId)> = None;
     let mut xs = Vec::with_capacity(list.len());
     for n in list {
         let x = match n {
@@ -696,7 +703,14 @@ pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u
                     fonts.insert(*font);
                     font_was = *font;
                 }
-                char_value(v, *font, *ch)
+                let e = &mut chars[usize::from(*ch) & 63];
+                if e.0 == *font && e.1 == *ch {
+                    e.2
+                } else {
+                    let x = char_value(v, *font, *ch);
+                    *e = (*font, *ch, x);
+                    x
+                }
             }
             Node::Glue(g) if g.leader.is_none() => match glue {
                 Some((h, x)) if h == g => x,
@@ -706,9 +720,29 @@ pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u
                     x
                 }
             },
-            Node::Kern(..) | Node::Penalty(_) | Node::Rule(_) | Node::Math(..) | Node::Language { .. } => {
-                encode(v, n, side)
+            Node::Kern(w, k) => {
+                #[allow(clippy::cast_sign_loss)]
+                let e = &mut kerns[(*w as u32 as usize ^ (*w as u32 as usize >> 7)) & 15];
+                if e.0 == *w && e.1 == *k {
+                    e.2
+                } else {
+                    let x = encode(v, n, side);
+                    *e = (*w, *k, x);
+                    x
+                }
             }
+            Node::Disc(d) => {
+                plain = plain && native_walk(std::slice::from_ref(n), &mut fonts);
+                match disc {
+                    Some((e, x)) if **d == *e => x,
+                    _ => {
+                        let x = encode(v, n, side);
+                        disc = Some((d, x));
+                        x
+                    }
+                }
+            }
+            Node::Penalty(_) | Node::Rule(_) | Node::Math(..) | Node::Language { .. } => encode(v, n, side),
             _ => {
                 plain = plain && native_walk(std::slice::from_ref(n), &mut fonts);
                 encode(v, n, side)
@@ -807,7 +841,7 @@ pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<
         let mut b = decode_box_head(v, &xs);
         side.lazy_box.push((x, head_words(&b)));
         b.list = vec![Node::Whatsit(LAZY + k, None)];
-        return Some(Node::Box(b));
+        return Some(Node::Box(Box::new(b)));
     }
     decode(v, x, side)
 }
@@ -826,7 +860,7 @@ pub(crate) fn decode_box_top(v: &Values, x: ValueId, side: &mut Side) -> Option<
     }
     if is_sealed(v, xs[9]) {
         return match decode_shallow(v, x, side) {
-            Some(Node::Box(b)) => Some(b),
+            Some(Node::Box(b)) => Some(*b),
             _ => None,
         };
     }
@@ -885,7 +919,7 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
             font: u32::try_from(g(1)).unwrap_or(0),
             ch: u16::try_from(g(2)).unwrap_or(0),
         },
-        T_BOX => Node::Box(decode_box(v, xs, side)),
+        T_BOX => Node::Box(Box::new(decode_box(v, xs, side))),
         T_RULE => Node::Rule(Rule {
             width: g(1),
             height: g(2),
@@ -932,7 +966,7 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
             left_hit: g(4) != 0,
             right_hit: g(5) != 0,
         }),
-        T_DISC => Node::Disc(Disc {
+        T_DISC => Node::Disc(Box::new(Disc {
             pre: xs
                 .get(1)
                 .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
@@ -942,7 +976,7 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
             replace: xs
                 .get(3)
                 .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
-        }),
+        })),
         T_WHATSIT => {
             side.whats.push(xs.get(1).copied().unwrap_or(ValueId::UNIT));
             // a size: pdfTeX's `\pdfrefxform`, `\pdfrefximage`
@@ -998,6 +1032,16 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
 pub(crate) fn box_is_h(v: &Values, b: ValueId) -> bool {
     v.with_list(b, |xs| xs.get(1).is_some_and(|&k| int_of(v, k) == 0))
         .unwrap_or(false)
+}
+
+/// Whether box `b` is an hbox, and its height and depth, in one read
+/// ([`box_is_h`], [`box_dim`]).
+pub(crate) fn box_kind_ht_dp(v: &Values, b: ValueId) -> (bool, i32, i32) {
+    v.with_list(b, |xs| {
+        let at = |k: usize| xs.get(k).map_or(0, |&x| n32(v, x));
+        (xs.get(1).is_some_and(|&k| int_of(v, k) == 0), at(3), at(4))
+    })
+    .unwrap_or((false, 0, 0))
 }
 
 /// A box's width (`m=1`), depth (2) or height (3) (§420).

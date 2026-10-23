@@ -39,11 +39,11 @@ fn list(spec: &str) -> Vec<Node> {
                         .split(',')
                         .map(|x| if x == "0" { vec![] } else { vec![rule(x)] })
                         .collect();
-                    Node::Disc(Disc {
+                    Node::Disc(Box::new(Disc {
                         pre: p[0].clone(),
                         post: p[1].clone(),
                         replace: p[2].clone(),
-                    })
+                    }))
                 }
                 _ => panic!("{t}"),
             }
@@ -111,7 +111,7 @@ fn paragraphs_match_etex() {
                 v.push(g);
             }
             prev_depth = l.packed.node.depth;
-            v.push(Node::Box(l.packed.node));
+            v.push(Node::Box(Box::new(l.packed.node)));
             v.extend(l.packed.adjustments);
             if let Some(pen) = l.penalty {
                 v.push(Node::Penalty(pen));
@@ -120,7 +120,7 @@ fn paragraphs_match_etex() {
         let mut b = vpack(v, NATURAL, &PackParams::default()).node;
         b.kind = BoxKind::V;
         let mut got = String::new();
-        show_list(&[Node::Box(b)], "", &mut got);
+        show_list(&[Node::Box(Box::new(b))], "", &mut got);
         if got != expected {
             failures.push(format!("case {n}:\n--- expected\n{expected}--- got\n{got}"));
         }
