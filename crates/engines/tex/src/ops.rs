@@ -159,6 +159,7 @@ pub(crate) fn run_node_parking(
     let resumed_at = if marks_ok { cx.resumed() } else { None };
     // (a retexted node: resumed at its last run's last mark that the two
     // texts' shared part alone made, `crate::run::retext_mark`)
+    let tr = crate::prof::start();
     let retext = if marks_ok && resumed_at.is_none() {
         cx.resumed_retext()
     } else {
@@ -184,6 +185,7 @@ pub(crate) fn run_node_parking(
         }
         r.ok().map(|(k, snaps)| (k, snaps, args))
     });
+    crate::prof::add(crate::prof::RETEXT, tr);
     // (observe, `PHITEX_RETEXT_POTENTIAL=1`: a node run again with another
     // text, where its last run's marks and how much of that run a resume
     // at the last mark before the first changed segment would skip)

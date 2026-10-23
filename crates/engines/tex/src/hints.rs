@@ -3382,7 +3382,10 @@ fn atom_hints(
             };
             if let Some(j) = j
                 && old.sigs.get(j) == Some(&sig)
-                && old.starts.get(j).is_some_and(|&s| s as isize + if at.start < lo { 0 } else { shift } == at.start as isize)
+                && old
+                    .starts
+                    .get(j)
+                    .is_some_and(|&s| (s as usize).checked_add_signed(if at.start < lo { 0 } else { shift }) == Some(at.start))
                 && let Some(h) = old.hints[j].clone()
             {
                 hints.push(Some(h));
@@ -3499,8 +3502,7 @@ fn analyse_reusing(
         let k1 = (slices.partition_point(|&(_, e)| e < c) + 1).min(slices.len().saturating_sub(1));
         let lo = slices.get(k0).map_or(0, |x| x.0);
         let hi = slices.get(k1).map_or(text.len(), |x| x.1);
-        #[allow(clippy::cast_possible_wrap)]
-        let shift = c as isize - b as isize;
+        let shift = c.cast_signed() - b.cast_signed();
         (r.th, lo, hi, shift)
     });
     let (starts, hints, skip, sigs, kept) = atom_hints(&an, text, window);
