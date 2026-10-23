@@ -2772,7 +2772,12 @@ impl State {
                 .and_then(|m| self.metas.get(m - 1));
             let group_local =
                 m.is_some_and(|m| m.ldef_local && m.ldef_gid.is_some_and(|g| open.contains(&g)));
-            if s.save_gid == 0 && s.ginert == 0 && !group_local {
+            // (a slot no open group saved and no local binding: what the
+            // run defined there globally is published, and the resume
+            // reads it from the engine as any piece does, depending on
+            // it only if it reads it; with no save open its last global
+            // definition's stamp makes no save inert)
+            if s.save_gid == 0 && !group_local {
                 continue;
             }
             let (cur, loaded) = ent(&s.e);
