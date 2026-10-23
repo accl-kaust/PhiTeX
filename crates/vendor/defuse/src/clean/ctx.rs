@@ -68,6 +68,22 @@ pub(crate) struct MarkResume {
     /// first ones.
     pub kids: Vec<Spec>,
     pub conts: Vec<Spec>,
+    /// No cut off at a later mark: the run resumed is of another text
+    /// (`Ctx::resume_at`), or a stopped run's, without a result to stand.
+    pub no_cut: bool,
+}
+
+/// A retexted node's last run's marks offered (`Ctx::resumed_retext`):
+/// that run's kept token and result, the last mark before its first read
+/// that no longer holds (its index in the result's marks), the old text's
+/// arguments, and the placements that run made by each offered mark.
+pub(crate) struct RetextOffer {
+    pub after: Arc<dyn Any + Send + Sync>,
+    pub old: Arc<super::world::Res>,
+    pub jmax: usize,
+    pub old_args: Arc<[ValueId]>,
+    pub kids: Vec<Spec>,
+    pub conts: Vec<Spec>,
 }
 
 /// A parked token with the views its attempt made (they stand when the
@@ -76,6 +92,28 @@ pub(crate) struct KeptViews {
     pub token: Box<dyn Any + Send>,
     pub views: Vec<(u32, u32, ValueId)>,
     pub composed: Vec<Vec<super::world::CPart>>,
+}
+
+/// A run's read index (`Ctx::read_ix`), kept per thread between runs: a
+/// run that reads little clears a table, not allocates one its size.
+type ReadIx = FxHashMap<(Field, Id, bool, bool, u32), usize>;
+
+thread_local! {
+    static SPARE_READ_IX: std::cell::RefCell<Option<ReadIx>> = const { std::cell::RefCell::new(None) };
+}
+
+fn spare_read_ix() -> ReadIx {
+    SPARE_READ_IX.with(|c| c.borrow_mut().take()).unwrap_or_default()
+}
+
+/// Gives a run's read index back to its thread, cleared (a very large one
+/// goes).
+pub(crate) fn recycle_read_ix(mut m: ReadIx) {
+    if m.capacity() > 1 << 14 {
+        return;
+    }
+    m.clear();
+    SPARE_READ_IX.with(|c| *c.borrow_mut() = Some(m));
 }
 
 /// What a run took by index and by key through one view (root read,
@@ -107,6 +145,8 @@ pub struct Ctx<'a> {
     /// What it took by index and by key through each view since the last
     /// mark ([`Ctx::get`]), read as one at the next (`flush_gets`).
     pub(crate) gets: Vec<Gets>,
+    /// Retexted, its last run's marks offered (`Ctx::resumed_retext`).
+    pub(crate) retext_offer: Option<RetextOffer>,
     /// The lists it took elements of by index lately (a few, most recent
     /// last): a get looks its list up once.
     lists: Vec<(ValueId, Arc<crate::values::Value>)>,
@@ -157,7 +197,7 @@ pub struct Ctx<'a> {
     /// Each definition read made (field, at, after, projection): its
     /// entry in `reads`. The world a run sees does not change, so the same
     /// question asked again has the same answer and is not logged again.
-    read_ix: FxHashMap<(Field, Id, bool, bool, u32), usize>,
+    pub(crate) read_ix: ReadIx,
     /// The first path read of each field at each point: another path's
     /// read there takes its value without asking again (a whole read's is
     /// in `read_ix`).
@@ -169,6 +209,9 @@ pub struct Ctx<'a> {
     pub(crate) predict: bool,
     /// Committed values only: a read of a definer in work waits for it.
     pub(crate) careful: bool,
+    /// Running carefully, it passed a mark past the one it resumed at
+    /// (the broken read is behind it): it runs carefully no longer.
+    pub(crate) lapsed: bool,
     /// It read a definer in work (a guess the merge checks).
     pub(crate) guessed: bool,
     /// It folded contributors in work as they last contributed
@@ -219,6 +262,12 @@ impl<'a> Ctx<'a> {
             Some(Err(k)) => (Some(k), None),
             None => (None, None),
         };
+        // (Retexted, offered its last run's marks: no client token.)
+        let (kept, retext_offer) = match kept.map(|k| k.downcast::<RetextOffer>()) {
+            Some(Ok(o)) => (None, Some(*o)),
+            Some(Err(k)) => (Some(k), None),
+            None => (None, None),
+        };
         // (Resumed at a mark: the placements before it stand.)
         let (kids0, conts0) = from_mark.as_ref().map_or_else(Default::default, |m| (m.kids.clone(), m.conts.clone()));
         let nkids = kids0.len();
@@ -238,6 +287,7 @@ impl<'a> Ctx<'a> {
             composed,
             gets: Vec::new(),
             lists: Vec::new(),
+            retext_offer,
             // (Resumed at a mark: the marks before it stand.)
             passes: Vec::new(),
             out_from: None,
@@ -264,12 +314,13 @@ impl<'a> Ctx<'a> {
             apps: Vec::new(),
             env: Vec::new(),
             ix: FxHashMap::default(),
-            read_ix: FxHashMap::with_capacity_and_hasher(hint, Default::default()),
+            read_ix: spare_read_ix(),
             raw_ix: FxHashMap::default(),
             nkids,
             pset_wait: false,
             predict: false,
             careful: false,
+            lapsed: false,
             guessed: false,
             fold_ran: false,
             predicted: 0,
@@ -283,7 +334,7 @@ impl<'a> Ctx<'a> {
             calls: std::cell::RefCell::new(None),
             point: None,
             chain: None,
-            cells: FxHashMap::with_capacity_and_hasher(hint / 2, Default::default()),
+            cells: FxHashMap::default(),
             pset_near: None,
         }
     }
@@ -2358,6 +2409,15 @@ impl<'a> Ctx<'a> {
         let (kids, conts) = (u32::try_from(self.kids.len()).unwrap_or(u32::MAX), u32::try_from(self.conts.len()).unwrap_or(u32::MAX));
         self.marks.push(super::world::Mark { mark, read_ix, state, digest, odigest, kids, conts });
         let Some(fm) = &self.from_mark else { return Ok(()) };
+        // (Resumed at the mark before its first broken read, a careful run
+        // is past that read at a later mark: it guesses again.)
+        if self.careful && mark > fm.old.marks[fm.j].mark {
+            self.careful = false;
+            self.lapsed = true;
+        }
+        if fm.no_cut {
+            return Ok(());
+        }
         let old = fm.old.clone();
         let patched = patch.is_some_and(|p| !p.is_empty());
         let Some(j) = (fm.j + 1..old.marks.len()).find(|&j| {
@@ -2441,6 +2501,54 @@ impl<'a> Ctx<'a> {
         r
     }
 
+    /// Retexted since its last run, which marked points
+    /// ([`Ctx::checkpoint`]) and kept a token ([`Ctx::keep_after`]): that
+    /// token, the last mark `k_max` before the first of that run's reads
+    /// that no longer holds, and the old text's arguments. The client may
+    /// resume at a mark `k <= k_max` ([`Ctx::resume_at`]) when its state
+    /// there depends only on what the two texts share, or run from the
+    /// start. Asked first, before the run reads or makes anything.
+    pub fn resumed_retext(&mut self) -> Option<(Arc<dyn Any + Send + Sync>, u32, Arc<[ValueId]>)> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
+        let r = self.retext_offer.as_ref().map(|o| (o.after.clone(), o.old.marks[o.jmax].mark, o.old_args.clone()));
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "resumed_retext", a, crate::record::j(&r.as_ref().map(|r| (r.1, r.2.to_vec()))));
+        r
+    }
+
+    /// Resumes at mark `k` of the last run [`Ctx::resumed_retext`] offered
+    /// (`k <= k_max`): that run's reads before the mark are this run's
+    /// (they hold), its placements before it stand, and the run goes on
+    /// from the client's state there, under the new text. False (nothing
+    /// changed) if no such mark is offered or the run has begun.
+    pub fn resume_at(&mut self, k: u32) -> bool {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&k, )) } else { serde_json::Value::Null };
+        let r = self.resume_at_inner(k);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "resume_at", a, crate::record::j(&r));
+        r
+    }
+
+    fn resume_at_inner(&mut self, k: u32) -> bool {
+        let Some(o) = &self.retext_offer else { return false };
+        if !self.reads.is_empty() || !self.marks.is_empty() || !self.kids.is_empty() || !self.conts.is_empty() || !self.defs.is_empty() {
+            return false;
+        }
+        let Some(j) = o.old.marks[..=o.jmax].iter().rposition(|m| m.mark == k) else { return false };
+        let o = self.retext_offer.take().expect("checked");
+        let m = &o.old.marks[j];
+        self.reads = o.old.reads[..m.read_ix as usize].to_vec();
+        self.marks = o.old.marks[..j].to_vec();
+        let (kids, conts) = (o.kids[..m.kids as usize].to_vec(), o.conts[..m.conts as usize].to_vec());
+        self.kids.clone_from(&kids);
+        self.conts.clone_from(&conts);
+        self.nkids = kids.len();
+        self.from_mark = Some(MarkResume { after: o.after, old: o.old, j, kids, conts, no_cut: true });
+        true
+    }
+
     /// The token a stopped run of this node kept.
     pub fn parked(&mut self) -> Option<Box<dyn Any + Send>> {
         #[cfg(feature = "observe")]
@@ -2479,6 +2587,7 @@ impl<'a> Ctx<'a> {
         self.views.clear();
         self.composed.clear();
         self.gets.clear();
+        self.retext_offer = None;
         self.marks.clear();
         self.passes.clear();
         self.out_from = None;

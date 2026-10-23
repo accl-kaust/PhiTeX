@@ -451,7 +451,7 @@ fn is_marker(x: &PItem) -> bool {
 // --------------------------------------------------------------- scan
 
 /// The page builder's state over profiles.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ScanState {
     pub j: i64,
     /// The pages fired so far whose `\outputpenalty` is above -10001

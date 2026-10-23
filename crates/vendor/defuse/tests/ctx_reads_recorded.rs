@@ -78,6 +78,7 @@ const WRITES: &[&str] = &[
     "checkpoint",
     "checkpoint_patched",
     "keep_after",
+    "resume_at",
 ];
 /// The run's own inputs and state, pure memos, and hints that may not
 /// change a result.
@@ -94,6 +95,7 @@ const LOCAL: &[&str] = &[
     "tick",
     "path",
     "resumed",
+    "resumed_retext",
 ];
 
 #[test]

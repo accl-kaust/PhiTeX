@@ -143,6 +143,9 @@ pub struct Job {
     /// `--spec`: when the engine runs steps ahead of their inputs (none:
     /// its default).
     pub spec: Option<String>,
+    /// Long pieces' readers wait for them on learned fields
+    /// ([`phitex_tex::Options::wait_fields`]; on unless `--no-wait-long`).
+    pub wait_long: bool,
     /// `-synctex`.
     pub synctex: bool,
     /// `-recorder`: `JOB.fls`.
@@ -706,6 +709,12 @@ impl Session {
                         .runtimes_path()
                         .and_then(|p| self.cache.as_ref()?.get(&p))
                         .unwrap_or_default(),
+                    wait_fields: self.job.wait_long.then(|| {
+                        self.runtimes_path()
+                            .map(|p| p.with_extension("waitfields"))
+                            .and_then(|p| self.cache.as_ref()?.get(&p))
+                            .unwrap_or_default()
+                    }),
                     ..Options::default()
                 };
                 let opts = Options {
@@ -782,6 +791,9 @@ impl Session {
             }
             // (written when it differs from the stored one)
             self.store_runtimes(b);
+            if self.job.wait_long {
+                self.store_wait_fields(b);
+            }
             // (`PHITEX_CHAIN_DUMP=1`: the critical chain in full, and its
             // waits, for measurements)
             if phitex_tex::OBSERVE && std::env::var_os("PHITEX_CHAIN_DUMP").is_some() {
@@ -1215,6 +1227,19 @@ impl Session {
         let c = self.cache.as_ref()?;
         let text = format!("\\input {}\n", self.job.engine.ini);
         Some(c.format_file(&self.format_name(&text), "runtimes"))
+    }
+
+    /// The fields long pieces' readers wait on ([`Build::export_wait_fields`]),
+    /// in the file beside the run times'.
+    fn store_wait_fields(&self, b: &Build) {
+        let (Some(c), Some(p)) = (&self.cache, self.runtimes_path()) else {
+            return;
+        };
+        let p = p.with_extension("waitfields");
+        let out = b.export_wait_fields();
+        if c.get(&p).as_deref() != Some(out.as_slice()) {
+            let _ = c.put(&p, &out, &[]);
+        }
     }
 
     fn store_runtimes(&self, b: &Build) {

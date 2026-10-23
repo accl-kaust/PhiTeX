@@ -174,6 +174,11 @@ struct Opts {
     /// yet). The output is the same either way.
     #[arg(long = "spec", value_name = "WHEN", value_parser = ["off", "predicted", "all"], global = true)]
     spec: Option<String>,
+    /// A long piece's readers do not wait for it on the fields an earlier
+    /// build learned it defines last before them (they do by default: kept
+    /// beside the format). The output is the same either way.
+    #[arg(long = "no-wait-long", global = true, hide = true)]
+    no_wait_long: bool,
     /// Each run, each warning's first lines, an engine failure's whole
     /// message (-vv: more)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
@@ -241,6 +246,7 @@ pub struct Options {
     /// the relaxed ones (`--relaxed`).
     pub exact: bool,
     pub spec: Option<String>,
+    pub wait_long: bool,
     pub verbose: u8,
     pub quiet: bool,
     pub json: bool,
@@ -277,6 +283,7 @@ impl Cli {
             threads: o.jobs,
             exact: o.exact || o.exact_pdf || !o.relaxed,
             spec: o.spec,
+            wait_long: !o.no_wait_long,
             verbose: o.verbose,
             quiet: o.quiet,
             json: o.json,
@@ -462,6 +469,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         threads: o.threads,
         exact: o.exact,
         spec: o.spec.clone(),
+        wait_long: o.wait_long,
         synctex: t.synctex,
         recorder: false,
         shell_escape: t.shell_escape,

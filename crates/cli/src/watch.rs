@@ -448,7 +448,7 @@ fn faster(cold: Duration, wall: Duration) -> Option<String> {
 #[allow(clippy::too_many_lines)]
 pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     let st = ui.st;
-    let job = modern::job(t, o).unwrap_or_else(|e| {
+    let mut job = modern::job(t, o).unwrap_or_else(|e| {
         ui.error(&e);
         std::process::exit(crate::EXIT_FAILED);
     });
@@ -467,6 +467,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     for n in session::waiting_notes(&job) {
         ui.line(&format!("{}: {n}", st.yellow("note")));
     }
+    // (a watch's readers guess past a long piece rather than wait on its
+    // learned fields: an edit reruns it with the same values, and readers
+    // that waited would wait for nothing; `--wait-long` is the one-shot
+    // build's, learned there)
+    job.wait_long = false;
     let status = Arc::new(Status::default());
     let what = modern::what(t, &job);
     let spin = ui.spin(what.clone(), status.clone());

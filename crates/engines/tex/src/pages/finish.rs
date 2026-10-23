@@ -46,6 +46,27 @@ pub(crate) fn rtn_value(
     v.list(vec![markers, list, v.int(dead), v.list(ms)])
 }
 
+/// A give-back without its register maps: what the page builder folds
+/// (its markers, its list, `\deadcycles`), the finisher's output; the
+/// maps, which differ from page to page as the routine's own reads of a
+/// register make its write a map or a definition, stay in [`RTN`].
+pub(crate) fn rtn_strip(v: &Values, x: ValueId) -> ValueId {
+    let xs = list_of(v, x);
+    if xs.len() < 4 {
+        return x;
+    }
+    rtn_value(v, xs[0], xs[1], int_of(v, xs[2]), &[])
+}
+
+/// Give-back `x` with register maps `maps` ([`rtn_value`]).
+pub(crate) fn rtn_with_maps(v: &Values, x: ValueId, maps: &[(i32, crate::regfold::Affine)]) -> ValueId {
+    let xs = list_of(v, x);
+    if xs.len() < 2 {
+        return x;
+    }
+    rtn_value(v, xs[0], xs[1], xs.get(2).map_or(0, |&d| int_of(v, d)), maps)
+}
+
 /// The register maps of a give-back ([`rtn_value`]).
 pub(crate) fn rtn_maps(v: &Values, x: ValueId) -> Vec<(i32, crate::regfold::Affine)> {
     list_of(v, x)
@@ -816,7 +837,7 @@ impl Run<'_, '_> {
         // material as the finisher's output, [`Feedback::RoutineGivesBack`])
         let pos = self.cx.args();
         let guess = FinishIn::of(v, &pos).map(|f| f.rtn_guess);
-        if guess.is_some_and(|g| g != x) {
+        if guess.is_some_and(|g| rtn_strip(v, g) != rtn_strip(v, x)) {
             Feedback::RoutineGivesBack.missed();
             let j = pos.first().map_or(0, |&y| int_of(v, y));
             if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
@@ -1627,6 +1648,16 @@ impl Finish {
                 }
             }
         }
+        // (`PHITEX_PRED_SHOW=1`, observe: whether a finisher's
+        // prediction has the page parameters)
+        if crate::exec::obs_flag!("PHITEX_PRED_SHOW") {
+            let pp = v.field("pagepar");
+            eprintln!(
+                "pred-show: {} defs, pagepar {}",
+                out.len(),
+                out.iter().any(|e| e.0 == pp)
+            );
+        }
         let rtn = v.field(RTN);
         if !out.iter().any(|e| e.0 == rtn) {
             let last = d.and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1));
@@ -1869,7 +1900,7 @@ impl Operation for Finish {
             let args = r.fin.as_ref().map(|c| c.args.clone()).unwrap_or_default();
             r.split_piece(&args)?;
             let g = r.contribute_global_defs();
-            r.record_finisher_defs(&args, g);
+            r.record_finisher_defs(&args, g)?;
             r.define_page_start()?;
             Ok(())
         });
@@ -2005,15 +2036,24 @@ impl Run<'_, '_> {
 
     /// The definitions this finisher publishes, kept for the next one
     /// running the same routine ([`Finish::predicted_defs`]).
-    pub(crate) fn record_finisher_defs(&mut self, args: &[ValueId], gdefs: ValueId) {
+    pub(crate) fn record_finisher_defs(&mut self, args: &[ValueId], gdefs: ValueId) -> R<()> {
         let v = self.v;
-        let Some(&t) = args.get(9) else { return };
+        let Some(&t) = args.get(9) else { return Ok(()) };
         // (a speculative run's definitions may be refuted: they would
         // seed the predictions of the finishers after it)
         if t == ValueId::UNIT || self.cx.is_speculative() {
-            return;
+            return Ok(());
         }
         let mut out = Vec::new();
+        // (the records the run defines, as its readers read them whole:
+        // the page builder reads the page parameters' record after a
+        // finisher, and runs on its prediction, [`Run::ready_records`])
+        self.ready_records()?;
+        for &(f, x, l) in &self.rec_out {
+            if !matches!(l, Locality::ScopeAt(_)) {
+                out.push((f, x));
+            }
+        }
         for (loc, x, _) in self.st.published(v, self.rec_load) {
             let f = self.loc_field(loc);
             let name = crate::val::field_name(v, f);
@@ -2100,6 +2140,7 @@ impl Run<'_, '_> {
             e.prev = out;
             e.prev_j = j;
         }
+        Ok(())
     }
 }
 

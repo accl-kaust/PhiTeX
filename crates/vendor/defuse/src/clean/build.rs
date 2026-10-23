@@ -637,6 +637,7 @@ impl<'a> Builder<'a> {
             res: None,
             wide: false,
             narrowed: None,
+            was: None,
         };
         let statics = n.text.stat.contribs.clone();
         // (A placed id comes back: filed for anew. Positions workers took
@@ -985,6 +986,25 @@ impl<'a> Builder<'a> {
         self.def_changed(u, f, 0);
     }
 
+    /// Re-asks the readers of node `id`'s output whose read of it no longer
+    /// holds (an output committed equal to the last result's, read as
+    /// another while that result was not visible).
+    fn recheck_stale_out_readers(&mut self, id: Id) {
+        let stale: Vec<Id> = self
+            .w
+            .out_readers_of(id)
+            .into_iter()
+            .filter(|&r| {
+                self.w.node(r).and_then(|n| n.res.clone()).is_some_and(|res| {
+                    res.reads.iter().any(|rd| matches!(rd, Read::Placed { node, .. } | Read::Out { node, .. } if *node == id) && !holds(self.core, &self.w, r, rd))
+                })
+            })
+            .collect();
+        for r in stale {
+            self.recheck_shape(r, 18);
+        }
+    }
+
     /// Holds every final node that ran: its facts go (its readers wait for
     /// the final phase).
     pub(crate) fn hold_finals(&mut self) {
@@ -1062,6 +1082,15 @@ impl<'a> Builder<'a> {
         m.text = text;
         m.wide = false;
         m.narrowed = None;
+        // (The text its last result is of, while that is not this one.)
+        let of = |t: &Arc<Text>| n.res.as_ref().is_some_and(|r| r.text == super::world::text_key(t));
+        m.was = if of(&m.text) {
+            None
+        } else if of(&n.text) {
+            Some(n.text.clone())
+        } else {
+            n.was.clone().filter(|w| of(w))
+        };
         // (Without a result, or claimed, it contributes what its text
         // declares: the new text's now.)
         let (before, after) = (contribs_of(&n), contribs_of(&m));
@@ -1102,6 +1131,17 @@ impl<'a> Builder<'a> {
         self.core.cause(id, crate::api::Rerun::Text);
         if m.st == St::Dirty {
             self.dirty.push(id);
+        }
+        // (Its last result of its old text, or of its new one, as a text
+        // it had before: its placed output appears or goes for a reader.)
+        if let Some(r) = &n.res
+            && !Arc::ptr_eq(&n.text, &m.text)
+            && (r.text == super::world::text_key(&n.text) || r.text == super::world::text_key(&m.text))
+        {
+            self.w.touch_key(Key::Out(id));
+            for x in self.w.out_readers_of(id) {
+                self.recheck_shape(x, 18);
+            }
         }
         self.file_declared(id);
         if m.brackets() != old_b {
@@ -1798,6 +1838,7 @@ impl<'a> Builder<'a> {
         let mut n2 = n.clone();
         n2.wide |= widen;
         n2.narrowed = None;
+        n2.was = None;
         let new_defs = res.defs.clone();
         let claim = res.claim;
         let t_put = super::core::prof::start();
@@ -1842,6 +1883,11 @@ impl<'a> Builder<'a> {
                 for r in self.w.out_readers_of(id) {
                     self.recheck_shape(r, 18);
                 }
+            } else {
+                // (The output its last result had: a reader that read
+                // another while that result was not of its text, or not
+                // there, is re-asked.)
+                self.recheck_stale_out_readers(id);
             }
         });
         super::core::prof::time(14, || self.run_claimed(id, claim));
