@@ -3220,9 +3220,9 @@ pub(crate) fn fold_item(
 /// The `\\baselineskip` and `\\lineskip` of a line's item, decoded
 /// once for the lines that share them (a paragraph's: the same values).
 fn line_glues(v: &Values, bs: Option<ValueId>, ls: Option<ValueId>) -> (Glue, Glue) {
+    type Last = Option<(u64, Option<ValueId>, Option<ValueId>, Glue, Glue)>;
     thread_local! {
-        static LAST: std::cell::Cell<Option<(u64, Option<ValueId>, Option<ValueId>, Glue, Glue)>> =
-            const { std::cell::Cell::new(None) };
+        static LAST: std::cell::Cell<Last> = const { std::cell::Cell::new(None) };
     }
     if let Some((i, b, l, gb, gl)) = LAST.get()
         && i == v.instance()

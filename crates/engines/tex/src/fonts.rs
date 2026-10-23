@@ -19,6 +19,22 @@ pub(crate) struct Loaded {
     /// The digest of `at` a PDF writer's font state carries, made once
     /// ([`phitex_pdf::metrics_hash`]).
     pub at_hash: OnceLock<u64>,
+    /// Each character's width, height and depth by code, made once
+    /// (`phitex_typeset::fonts::Fonts::whd_table`).
+    pub whd: OnceLock<Vec<(i32, i32, i32)>>,
+}
+
+impl Loaded {
+    /// [`Loaded::whd`].
+    pub(crate) fn whd_table(&self) -> &[(i32, i32, i32)] {
+        self.whd.get_or_init(|| {
+            self.at
+                .chars
+                .iter()
+                .map(|d| d.map_or((0, 0, 0), |d| (d.width, d.height, d.depth)))
+                .collect()
+        })
+    }
 }
 
 type Cache = Mutex<FxHashMap<(u64, i32), Option<Arc<Loaded>>>>;
@@ -57,6 +73,7 @@ pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
             tfm,
             at,
             at_hash: OnceLock::new(),
+            whd: OnceLock::new(),
         }))
     });
     cache().locked().insert(key, loaded.clone());
@@ -186,11 +203,13 @@ impl View {
         self.fonts.get(f)
     }
 
+    #[inline]
     pub(crate) fn char_dims(&self, f: FontId, c: u32) -> Option<phitex_tfm::CharDims> {
         let (l, _) = self.get(f)?;
         l.at.chars.get(usize::try_from(c).ok()?).copied().flatten()
     }
 
+    #[inline]
     pub(crate) fn exists(&self, f: FontId, c: u32) -> bool {
         self.char_dims(f, c).is_some()
     }
@@ -210,6 +229,10 @@ fn lig_op(op: u8) -> LigOp {
 }
 
 impl Fonts for View {
+    fn whd_table(&self, font: FontId) -> Option<&[(i32, i32, i32)]> {
+        self.get(font).map(|(l, _)| l.whd_table())
+    }
+
     fn char_width(&self, font: FontId, ch: u16) -> i32 {
         self.get(font)
             .and_then(|(l, _)| l.at.chars.get(usize::from(ch)).copied().flatten())

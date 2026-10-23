@@ -2050,6 +2050,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Character `c`'s entry in code table `table` (0 `lc`, 1 `uc`, 2
     /// `sf`, 3 `mc`, 4 `dc`).
+    #[inline]
     pub(crate) fn code(&mut self, table: usize, c: impl TryInto<u32>) -> R<i32> {
         let c = c.try_into().unwrap_or(u32::MAX);
         if c < 256 && table < 5 && self.interp.is_none() {

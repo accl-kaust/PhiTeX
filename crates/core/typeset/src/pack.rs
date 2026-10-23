@@ -79,9 +79,30 @@ fn scan_hlist(
     t: &mut Totals,
     hdx: &mut (Scaled, Scaled, Scaled),
 ) {
+    // (the font of the run of characters being measured, and its table)
+    let mut run: Option<(u32, Option<&[(Scaled, Scaled, Scaled)]>)> = None;
     for p in list {
         match p {
-            Node::Char { font, ch } => char_dims(fonts, *font, *ch, hdx),
+            Node::Char { font, ch } => {
+                let table = match run {
+                    Some((f, t)) if f == *font => t,
+                    _ => {
+                        let t = fonts.whd_table(*font);
+                        run = Some((*font, t));
+                        t
+                    }
+                };
+                match table {
+                    Some(t) => {
+                        // §654
+                        let (w, h, d) = t.get(usize::from(*ch)).copied().unwrap_or((0, 0, 0));
+                        hdx.2 += w;
+                        hdx.0 = hdx.0.max(h);
+                        hdx.1 = hdx.1.max(d);
+                    }
+                    None => char_dims(fonts, *font, *ch, hdx),
+                }
+            }
             // §652
             Node::Lig(l) => char_dims(fonts, l.font, l.ch, hdx),
             Node::Box(_) | Node::Rule(_) | Node::Unset(_) => {

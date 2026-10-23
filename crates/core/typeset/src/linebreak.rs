@@ -874,11 +874,25 @@ pub fn line_break(
         let mut auto_breaking = true;
         let mut cur = 0;
         let mut prev_p = 0;
+        // (the font of the run of characters being measured, and its
+        // table, [`Fonts::whd_table`])
+        let mut run: Option<(u32, Option<&[(Scaled, Scaled, Scaled)]>)> = None;
         while cur < list.len() && !b.active.is_empty() {
             // §866
             match &list[cur] {
                 Node::Char { font, ch } => {
-                    b.add_width(fonts.char_width(*font, *ch));
+                    let table = match run {
+                        Some((f, t)) if f == *font => t,
+                        _ => {
+                            let t = fonts.whd_table(*font);
+                            run = Some((*font, t));
+                            t
+                        }
+                    };
+                    b.add_width(match table {
+                        Some(t) => t.get(usize::from(*ch)).map_or(0, |x| x.0),
+                        None => fonts.char_width(*font, *ch),
+                    });
                 }
                 Node::Box(_) | Node::Rule(_) => {
                     b.add_width(list[cur].box_dims().map_or(0, |d| d.0));
