@@ -3433,12 +3433,12 @@ fn atom_hints(
 fn atom_sig(an: &Analysis<'_>, a: usize, prim_op: bool) -> u64 {
     let at = &an.p.atoms[a];
     let mut h = phitex_defuse::FxHasher::default();
-    (at.kind as u8, at.end - at.start, an.claimed(a), prim_op, an.depth(a), an.in_align.has(a), an.after_global(a)).hash(&mut h);
+    (std::mem::discriminant(&at.kind), at.end - at.start, an.claimed(a), prim_op, an.depth(a), an.in_align.has(a), an.after_global(a)).hash(&mut h);
     (at.mate != usize::MAX).then(|| at.mate.wrapping_sub(a)).hash(&mut h);
     an.reg_hash.get(an.reg(a)).hash(&mut h);
     an.item_of.get(&a).map(|&i| an.p.items[i].end.wrapping_sub(a)).hash(&mut h);
     // (the atom before it: a command's hint reads its neighbour's)
-    an.prev(a).map(|p| (an.p.atoms[p].kind as u8, an.claimed(p))).hash(&mut h);
+    an.prev(a).map(|p| (std::mem::discriminant(&an.p.atoms[p].kind), an.claimed(p))).hash(&mut h);
     h.finish()
 }
 
