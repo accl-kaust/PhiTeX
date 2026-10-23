@@ -159,6 +159,7 @@ pub(crate) fn run_node_parking(
     let resumed_at = if marks_ok { cx.resumed() } else { None };
     // (a retexted node: resumed at its last run's last mark that the two
     // texts' shared part alone made, `crate::run::retext_mark`)
+    let tr = crate::prof::start();
     let retext = if marks_ok && resumed_at.is_none() {
         cx.resumed_retext()
     } else {
@@ -184,6 +185,7 @@ pub(crate) fn run_node_parking(
         }
         r.ok().map(|(k, snaps)| (k, snaps, args))
     });
+    crate::prof::add(crate::prof::RETEXT, tr);
     // (observe, `PHITEX_RETEXT_POTENTIAL=1`: a node run again with another
     // text, where its last run's marks and how much of that run a resume
     // at the last mark before the first changed segment would skip)
@@ -718,6 +720,16 @@ impl Operation for Exec {
                 // (`PHITEX_PKG_NONET=1`: no load recorded, for comparison)
                 r.rec_load = load && r.scope_kind()?.is_none();
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
+                // (what the run reads of its arguments but its text after
+                // its start, its hint's counts among them: in its state)
+                r.args_key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = phitex_defuse::FxHasher::default();
+                    for a in args.get(1..).unwrap_or_default() {
+                        a.raw().hash(&mut h);
+                    }
+                    h.finish()
+                };
                 let args = r.resolve_units(&args)?;
                 let fs = crate::run::decode_segs(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));

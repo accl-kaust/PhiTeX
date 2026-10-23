@@ -962,6 +962,20 @@ pub(crate) struct TextHints {
     pars: Vec<bool>,
     /// Per slice.
     slice_hints: Vec<Arc<str>>,
+    /// Per atom (parallel to `starts`): what its hint depends on in the
+    /// pass's structure ([`atom_sig`]), for an analysis of the edited
+    /// text that keeps the hints of the atoms the edit did not reach
+    /// ([`Reuse`]).
+    sigs: Vec<u64>,
+}
+
+/// A chunk's last analysis and the edit since (`(a, b, c)`: the old
+/// bytes `a..b` are now `a..c`), for [`text_hints_reads_reusing`]: the
+/// atoms the edit does not reach whose structure is the same keep their
+/// hints ([`atom_hints`]).
+pub(crate) struct Reuse<'a> {
+    pub th: &'a TextHints,
+    pub edit: (usize, usize, usize),
 }
 
 impl TextHints {
@@ -3324,10 +3338,17 @@ fn run_hint(an: &Analysis<'_>, a: usize, key: (u64, usize, u8), start: usize) ->
 /// starts, its hint, and whether a slice's union skips it.
 #[inline(never)]
 #[allow(clippy::type_complexity)]
-fn atom_hints(an: &Analysis<'_>, text: &str) -> (Vec<u32>, Vec<Option<Arc<Hint>>>, Vec<bool>) {
+fn atom_hints(
+    an: &Analysis<'_>,
+    text: &str,
+    reuse: Option<(&TextHints, usize, usize, isize)>,
+) -> (Vec<u32>, Vec<Option<Arc<Hint>>>, Vec<bool>, Vec<u64>, usize) {
     let mut starts = Vec::with_capacity(an.sig.len());
     let mut hints: Vec<Option<Arc<Hint>>> = Vec::with_capacity(an.sig.len());
     let mut skip = Vec::with_capacity(an.sig.len());
+    let mut sigs = Vec::with_capacity(an.sig.len());
+    let mut kept = 0usize;
+    let new_n = an.sig.len();
     // (the atoms a primitive reads: never run on their own; a command
     // a macro is only guessed to read runs in the slice, so it counts)
     let n = an.p.atoms.len();
@@ -3341,10 +3362,49 @@ fn atom_hints(an: &Analysis<'_>, text: &str) -> (Vec<u32>, Vec<Option<Arc<Hint>>
     let mut runs: FxHashMap<(u64, usize, u8), Arc<Hint>> = FxHashMap::default();
     // (an atom inside a run of characters, or a space, is never read:
     // no span reads it, so it has no entry)
-    for &a in &an.sig {
+    for (i, &a) in an.sig.iter().enumerate() {
         let a = a as usize;
         let at = &an.p.atoms[a];
         starts.push(u(at.start));
+        let prim_op = prim_operand.has(a);
+        let sig = atom_sig(an, a, prim_op);
+        sigs.push(sig);
+        // (an atom before the slices around the edit, or after them,
+        // whose structure is the same: its hint as the last analysis
+        // made it, [`Reuse`])
+        if let Some((old, lo, hi, shift)) = reuse {
+            // (before the edit: the atom, its run of characters and its
+            // item's operands end before it; after the edit: the atom and
+            // the one before it, whose hint a non-command reads, begin
+            // after it)
+            let reach = an
+                .item_of
+                .get(&a)
+                .map(|&k| an.p.items[k].end.min(n))
+                .filter(|&e| e > 0)
+                .map_or(at.end, |e| an.p.atoms[e - 1].end.max(at.end));
+            let reach = an.run_key(a).map_or(reach, |r| reach.max(r.1));
+            let j = if reach <= lo {
+                Some(i)
+            } else if at.start >= hi && an.prev(a).is_none_or(|p| an.p.atoms[p].start >= hi) {
+                (i + old.sigs.len()).checked_sub(new_n)
+            } else {
+                None
+            };
+            if let Some(j) = j
+                && old.sigs.get(j) == Some(&sig)
+                && old
+                    .starts
+                    .get(j)
+                    .is_some_and(|&s| (s as usize).checked_add_signed(if at.start < lo { 0 } else { shift }) == Some(at.start))
+                && let Some(h) = old.hints[j].clone()
+            {
+                hints.push(Some(h));
+                skip.push(old.skip[j]);
+                kept += 1;
+                continue;
+            }
+        }
         // (a run of characters whose hint depends on its text alone: one
         // hint per distinct run, shared)
         if let Some((s0, e0, reg, fl)) = an.run_key(a) {
@@ -3362,7 +3422,6 @@ fn atom_hints(an: &Analysis<'_>, text: &str) -> (Vec<u32>, Vec<Option<Arc<Hint>>
             continue;
         }
         let claimed = an.claimed(a);
-        let prim_op = prim_operand.has(a);
         let h = if claimed && at.kind == AtomKind::Cs && !prim_op {
             an.hint_run(a)
         } else {
@@ -3376,7 +3435,25 @@ fn atom_hints(an: &Analysis<'_>, text: &str) -> (Vec<u32>, Vec<Option<Arc<Hint>>
         // slice: its rows count in the union)
         skip.push(claimed && (at.kind != AtomKind::Cs || prim_op || unbounded_operand));
     }
-    (starts, hints, skip)
+    (starts, hints, skip, sigs, kept)
+}
+
+/// What the hint of atom `a` depends on in the pass's structure, apart
+/// from its own text and the definitions: its kind and length, whether
+/// an earlier command claims it or a primitive reads it, its brace depth
+/// and its mate's distance, whether it is in an alignment or follows
+/// `\global`, its regime, and its item's extent ([`atom_hints`]'s reuse:
+/// the same text with the same signature has the same hint).
+fn atom_sig(an: &Analysis<'_>, a: usize, prim_op: bool) -> u64 {
+    let at = &an.p.atoms[a];
+    let mut h = phitex_defuse::FxHasher::default();
+    (std::mem::discriminant(&at.kind), at.end - at.start, an.claimed(a), prim_op, an.depth(a), an.in_align.has(a), an.after_global(a)).hash(&mut h);
+    (at.mate != usize::MAX).then(|| at.mate.wrapping_sub(a)).hash(&mut h);
+    an.reg_hash.get(an.reg(a)).hash(&mut h);
+    an.item_of.get(&a).map(|&i| an.p.items[i].end.wrapping_sub(a)).hash(&mut h);
+    // (the atom before it: a command's hint reads its neighbour's)
+    an.prev(a).map(|p| (std::mem::discriminant(&an.p.atoms[p].kind), an.claimed(p))).hash(&mut h);
+    h.finish()
 }
 
 /// [`analyse`] given the text's own definitions ([`own_definitions`]).
@@ -3389,6 +3466,22 @@ fn analyse_with(
     defs: &Defs,
     own: Definitions,
     start: Option<&pass::Start>,
+) -> TextHints {
+    analyse_reusing(text, kind, defs, own, start, None)
+}
+
+/// [`analyse_with`] keeping the hints of the atoms an edit did not reach
+/// ([`Reuse`]): those whose text, run and operands end before the edited
+/// bytes, and those after them (with the atom before them), whose
+/// structure is the same ([`atom_sig`]).
+#[allow(clippy::too_many_lines)]
+fn analyse_reusing(
+    text: &str,
+    kind: FileKind,
+    defs: &Defs,
+    own: Definitions,
+    start: Option<&pass::Start>,
+    reuse: Option<&Reuse<'_>>,
 ) -> TextHints {
     // (`PHITEX_TEX_TIME`: the analysis's phases, on the timeline)
     let tm = crate::exec::prof_flag!("PHITEX_TEX_TIME");
@@ -3412,7 +3505,30 @@ fn analyse_with(
             .or_insert_with(|| Arc::from(s))
             .clone()
     };
-    let (starts, hints, skip) = atom_hints(&an, text);
+    // (the bytes around the edit: from the start of the slice before
+    // the one it begins in to the end of the slice after the one it ends
+    // in)
+    // (the edited bytes: `a..c` of the new text)
+    let window = reuse.map(|r| {
+        let (a, b, c) = r.edit;
+        (r.th, a, c, c.cast_signed() - b.cast_signed())
+    });
+    let (starts, hints, skip, sigs, kept) = atom_hints(&an, text, window);
+    if tm && reuse.is_some() {
+        eprintln!("hints reuse: {kept} of {} atoms' hints kept", sigs.len());
+    }
+    // (observe, `PHITEX_HINTS_REUSE_CHECK=1`: the kept hints against the
+    // ones made afresh)
+    if window.is_some() && crate::exec::obs_flag!("PHITEX_HINTS_REUSE_CHECK") {
+        let (_, fresh, fskip, _, _) = atom_hints(&an, text, None);
+        let bad = hints
+            .iter()
+            .zip(&fresh)
+            .zip(skip.iter().zip(&fskip))
+            .filter(|((x, y), (s, t))| x.as_ref().map(|h| h.encode()) != y.as_ref().map(|h| h.encode()) || s != t)
+            .count();
+        eprintln!("hints reuse check: {kept} of {} kept, {bad} differ", fresh.len());
+    }
     let mut t = TextHints {
         slices,
         starts,
@@ -3420,6 +3536,7 @@ fn analyse_with(
         skip,
         pars,
         slice_hints: Vec::new(),
+        sigs,
     };
     // each slice's hint: the union of its commands' bounds (a run
     // executes the whole slice); a paragraph's region also defines
@@ -3934,6 +4051,24 @@ pub(crate) fn text_hints_with(
     }
     c.insert(key, (Arc::downgrade(defs), t.clone()));
     t
+}
+
+/// [`text_hints_reads`] keeping the hints of the atoms the edit did not
+/// reach ([`Reuse`]). The names looked up are only those of the atoms
+/// analysed again: the caller adds the last analysis's.
+pub(crate) fn text_hints_reads_reusing(
+    text: &str,
+    kind: FileKind,
+    defs: &Defs,
+    own: Option<Definitions>,
+    start: Option<&pass::Start>,
+    reuse: &Reuse<'_>,
+) -> (Arc<TextHints>, Vec<String>) {
+    let named = kind;
+    let kind = kind_of(text, kind);
+    let own = own.unwrap_or_else(|| own_definitions_from(text, named, start).0);
+    let (t, looked) = pass::with_reads(|| analyse_reusing(text, kind, defs, own, start, Some(reuse)));
+    (Arc::new(t), looked)
 }
 
 /// [`text_hints_with`] made afresh (no cache), with the names the

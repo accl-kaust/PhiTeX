@@ -264,7 +264,16 @@ impl Incr {
         } else {
             self.cache[k - 1].out.1.clone()
         };
-        let (th, keys, reads) = analyse(t, &defs, Some(own), begins.as_ref());
+        // (the atoms the edit did not reach keep their hints,
+        // [`crate::hints::Reuse`]; the names the last analysis looked up
+        // stay in its read set with those looked up now)
+        let old_th = self.cache[k].th.clone();
+        let old_reads = self.cache[k].reads.clone();
+        let reuse = crate::hints::Reuse {
+            th: &old_th,
+            edit: (a - start, b - start, c - start),
+        };
+        let (th, keys, reads) = analyse_reusing(t, &defs, Some(own), begins.as_ref(), Some((&reuse, &old_reads)));
         let e = &mut self.cache[k];
         e.units = new_units;
         e.len = new_len;
@@ -676,7 +685,28 @@ fn analyse(
     own: Option<Definitions>,
     start: Option<&pass::Start>,
 ) -> (Arc<TextHints>, Arc<[u64]>, Reads) {
-    let (th, names) = crate::hints::text_hints_reads(t, FileKind::Document, defs, own, start);
+    analyse_reusing(t, defs, own, start, None)
+}
+
+/// [`analyse`] keeping what an edit did not reach of the chunk's last
+/// analysis ([`crate::hints::Reuse`]), whose read set (`Reads`) the new
+/// one keeps too.
+fn analyse_reusing(
+    t: &str,
+    defs: &Defs,
+    own: Option<Definitions>,
+    start: Option<&pass::Start>,
+    reuse: Option<(&crate::hints::Reuse<'_>, &Reads)>,
+) -> (Arc<TextHints>, Arc<[u64]>, Reads) {
+    let (th, mut names) = match reuse {
+        Some((r, _)) => crate::hints::text_hints_reads_reusing(t, FileKind::Document, defs, own, start, r),
+        None => crate::hints::text_hints_reads(t, FileKind::Document, defs, own, start),
+    };
+    if let Some((_, old)) = reuse {
+        let mut seen: phitex_defuse::FxHashSet<&str> = names.iter().map(String::as_str).collect();
+        let more: Vec<String> = old.iter().filter(|(n, _, _)| seen.insert(n.as_str())).map(|(n, _, _)| n.clone()).collect();
+        names.extend(more);
+    }
     let reads: Reads = names
         .into_iter()
         .map(|n| {

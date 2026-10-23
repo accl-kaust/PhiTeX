@@ -1294,6 +1294,64 @@ impl Run<'_, '_> {
                 Seg::File(f) => frames.extend(file_frames(v, f)),
             }
         }
+        // the state table's groups
+        let open: Vec<u32> = self
+            .nest
+            .iter()
+            .filter(|l| l.group != 0)
+            .map(|l| l.gid)
+            .collect();
+        if let Some(name) = crate::exec::obs_str!("PHITEX_CONT_SHOW") {
+            let l = self.loc_of(v.field(name));
+            eprintln!(
+                "cont {} at a cut: {name}: {} (open groups {open:?})",
+                self.cx.node().raw(),
+                self.st.debug_marks(l)
+            );
+        }
+        let c = self.st.cont(v, &open);
+        // (the stamps and the group numbers the continuation carries, by
+        // their order only: a resume compares them with each other and
+        // with its own, all later; what a run made before them, or how
+        // many groups it opened and closed, does not change it)
+        let mut stamps: Vec<u64> = vec![c.stamp];
+        let mut gids: Vec<u32> = vec![c.next_gid];
+        for l in &self.nest {
+            stamps.push(l.open_stamp);
+            gids.push(l.gid);
+        }
+        for x in &c.slots {
+            stamps.extend([x.save_stamp, x.ginert]);
+            gids.push(x.save_gid);
+            if let Some((st, _, g)) = x.ldef {
+                stamps.push(st);
+                gids.extend(g);
+            }
+        }
+        for x in &c.save {
+            stamps.extend([x.stamp, x.at, x.ldef.0]);
+            gids.push(x.gid);
+            gids.extend(x.ldef.2);
+        }
+        stamps.sort_unstable();
+        stamps.dedup();
+        gids.sort_unstable();
+        gids.dedup();
+        // (0 stays 0: no stamp, no group)
+        let st_of = |x: u64| -> u64 {
+            if x == 0 {
+                0
+            } else {
+                u64::try_from(stamps.partition_point(|&y| y < x)).unwrap_or(0) + u64::from(stamps[0] != 0)
+            }
+        };
+        let gid_of = |x: u32| -> u32 {
+            if x == 0 {
+                0
+            } else {
+                u32::try_from(gids.partition_point(|&y| y < x)).unwrap_or(0) + u32::from(gids[0] != 0)
+            }
+        };
         let nest: Vec<ValueId> = self
             .nest
             .iter()
@@ -1314,32 +1372,16 @@ impl Run<'_, '_> {
                     packed,
                     v.int(l.prev_graf),
                     v.list(l.extra.clone()),
-                    v.int(i64::from(l.gid)),
+                    v.int(i64::from(gid_of(l.gid))),
                     v.int(i64::try_from(l.save_base).unwrap_or(0)),
                     v.int(i64::try_from(l.def_base).unwrap_or(0)),
-                    v.int(i64::from_ne_bytes(l.open_stamp.to_ne_bytes())),
+                    v.int(i64::from_ne_bytes(st_of(l.open_stamp).to_ne_bytes())),
                     toks_value(v, &l.ag),
                 ])
             })
             .collect();
         let conds = v.list(self.conds.iter().map(|&c| v.int(i64::from(c))).collect());
         let codes = v.list(self.if_codes.iter().map(|&c| v.int(i64::from(c))).collect());
-        // the state table's groups
-        let open: Vec<u32> = self
-            .nest
-            .iter()
-            .filter(|l| l.group != 0)
-            .map(|l| l.gid)
-            .collect();
-        if let Some(name) = crate::exec::obs_str!("PHITEX_CONT_SHOW") {
-            let l = self.loc_of(v.field(name));
-            eprintln!(
-                "cont {} at a cut: {name}: {} (open groups {open:?})",
-                self.cx.node().raw(),
-                self.st.debug_marks(l)
-            );
-        }
-        let c = self.st.cont(v, &open);
         if let Some(name) = crate::exec::obs_str!("PHITEX_CONT_SHOW") {
             let l = self.loc_of(v.field(name));
             let hit = c.slots.iter().find(|s| s.loc == l);
@@ -1370,15 +1412,15 @@ impl Run<'_, '_> {
                 locals.push(v.list(vec![f.0, opt_val(s.cur), after]));
             }
             let (stamp, local, gid) = s.ldef.map_or((-1, 0, None), |(st, l, g)| {
-                (i64::from_ne_bytes(st.to_ne_bytes()), i64::from(l), g)
+                (i64::from_ne_bytes(st_of(st).to_ne_bytes()), i64::from(l), g.map(gid_of))
             });
             slots.push(v.list(vec![
                 f.0,
                 opt_val(s.cur),
                 v.int(i64::from(s.loaded)),
-                v.int(i64::from(s.save_gid)),
-                v.int(i64::from_ne_bytes(s.save_stamp.to_ne_bytes())),
-                v.int(i64::from_ne_bytes(s.ginert.to_ne_bytes())),
+                v.int(i64::from(gid_of(s.save_gid))),
+                v.int(i64::from_ne_bytes(st_of(s.save_stamp).to_ne_bytes())),
+                v.int(i64::from_ne_bytes(st_of(s.ginert).to_ne_bytes())),
                 v.int(stamp),
                 v.int(local),
                 gid_int(v, gid),
@@ -1391,12 +1433,12 @@ impl Run<'_, '_> {
                 f.0,
                 opt_val(s.prev),
                 v.int(i64::from(s.prev_loaded)),
-                v.int(i64::from(s.gid)),
-                v.int(i64::from_ne_bytes(s.stamp.to_ne_bytes())),
-                v.int(i64::from_ne_bytes(s.at.to_ne_bytes())),
-                v.int(i64::from_ne_bytes(s.ldef.0.to_ne_bytes())),
+                v.int(i64::from(gid_of(s.gid))),
+                v.int(i64::from_ne_bytes(st_of(s.stamp).to_ne_bytes())),
+                v.int(i64::from_ne_bytes(st_of(s.at).to_ne_bytes())),
+                v.int(i64::from_ne_bytes(st_of(s.ldef.0).to_ne_bytes())),
                 v.int(i64::from(s.ldef.1)),
-                gid_int(v, s.ldef.2),
+                gid_int(v, s.ldef.2.map(gid_of)),
             ]));
         }
         let mut defined = Vec::new();
@@ -1407,8 +1449,8 @@ impl Run<'_, '_> {
             v.list(slots),
             v.list(saves),
             v.list(defined),
-            v.int(i64::from_ne_bytes(c.stamp.to_ne_bytes())),
-            v.int(i64::from(c.next_gid)),
+            v.int(i64::from_ne_bytes(st_of(c.stamp).to_ne_bytes())),
+            v.int(i64::from(gid_of(c.next_gid))),
         ]);
         let misc = v.list(vec![
             v.int(self.next_lid),
@@ -1419,7 +1461,9 @@ impl Run<'_, '_> {
             v.int(i64::from(self.eof)),
             v.int(i64::from(self.radix)),
             v.int(self.cur_order as i64),
-            v.int(i64::try_from(self.pdf_occ).unwrap_or(0)),
+            // (the read-time commands' count: a resume keys its own by its
+            // node, from its start, as the read-time objects' counts)
+            v.int(0),
             // (the run's mutation count is compared only with itself
             // within one command, `Run::rewind`: not carried, an edit
             // before the cut would change the continuation for nothing)

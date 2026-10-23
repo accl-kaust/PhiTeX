@@ -7455,6 +7455,44 @@ mod park_tests {
         }
     }
 
+    /// The test's body: a run with a definition made, snapshotted, and its
+    /// state changed in each part a mark's digest once left out
+    /// ([`crate::run::digest_gaps`]).
+    struct DigestGaps(Ops);
+
+    impl Operation for DigestGaps {
+        fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+            Some(Vec::new())
+        }
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let o = &self.0;
+            let mut r = crate::run::Run::new(cx, o);
+            let v = r.v;
+            r.set("count:315", v.int(5), false);
+            r.begin_command();
+            let p = r.snapshot();
+            let gaps = crate::run::digest_gaps(&p, v);
+            let missed: Vec<&str> = gaps.iter().filter(|(_, differ)| !differ).map(|(n, _)| *n).collect();
+            assert!(missed.is_empty(), "a mark's digest leaves out: {missed:?}");
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// A mark's state covers everything a run goes on from: two marks
+    /// that differ only in a run's seeded read-backs, its continuations'
+    /// lines, a file's units, its arguments but its text, or the engine
+    /// value a definition's slot read before it have other digests (so
+    /// no cutoff or join takes one for the other).
+    #[test]
+    fn a_marks_digest_covers_what_its_run_goes_on_from() {
+        let mut g = Graph::new(None, Some(1));
+        let op = g.eng.register(Arc::new(DigestGaps(g.ops.clone())));
+        let u = g.eng.new_unit();
+        let n = g.eng.push(u, op, Vec::new());
+        g.eng.evaluate_sequential().expect("the run makes its marks");
+        assert_eq!(g.eng.output(n), Some(ValueId::UNIT));
+    }
+
     /// A run parked with a map of a counter past 255 (a location past the
     /// fixed ones, named by the field its table notes) resumes with it:
     /// the resumed run restores its table before it maps the parked maps
