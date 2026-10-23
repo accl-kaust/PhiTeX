@@ -235,6 +235,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         // (pdflatex's runs: the exact rounds)
         exact: true,
         spec: None,
+        wait_long: true,
         synctex,
         recorder,
         shell_escape,

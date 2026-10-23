@@ -293,6 +293,10 @@ pub(crate) struct Res {
     /// it kept for a later run to resume from one (`Ctx::keep_after`).
     pub marks: Arc<[Mark]>,
     pub after: Option<After>,
+    /// Its marks are of several attempts of a run parked continuing: a run
+    /// resumed at one is not cut off at a later (their digests are of
+    /// their attempts' outputs).
+    pub cont_marks: bool,
     /// The values it passed on without inspecting them.
     pub passes: Vec<Pass>,
     /// The compositions its passes name (`Ctx::compose`).
@@ -374,6 +378,7 @@ impl Default for Res {
             forwards: Vec::new(),
             marks: Arc::from([]),
             after: None,
+            cont_marks: false,
             passes: Vec::new(),
             composed: Vec::new(),
             last: None,
