@@ -1205,6 +1205,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 Event::Key(k) => match k {
                     Key::Quit => quit(ui),
                     Key::Rebuild => {
+                        // (every input read again from disk: a change made
+                        // outside that no event told)
+                        s.reread_all();
                         again = true;
                         why.push("asked".to_owned());
                     }

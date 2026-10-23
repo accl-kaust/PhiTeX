@@ -145,6 +145,11 @@ pub struct Options {
     /// uses what any earlier one learned (`crate::pkgrec`). Empty: none
     /// (every load unbounded, or optimistic under speculation).
     pub pkgrec: Vec<u8>,
+    /// The document nodes' records ([`Build::export_noderec`]): those
+    /// whose own text cannot bound what they define, keyed by their
+    /// text, kept per document (`crate::pkgrec`). Merged with
+    /// [`Self::pkgrec`]. Empty: none.
+    pub noderec: Vec<u8>,
     /// Whether the records carry the values each load published, and a
     /// load whose key matches is given them as the prediction of its
     /// outputs (also `PHITEX_PKG_PREDICT=1`).
@@ -633,6 +638,7 @@ impl Default for Options {
             wkeys: Vec::new(),
             written_init: Vec::new(),
             pkgrec: Vec::new(),
+            noderec: Vec::new(),
             pkg_predict: false,
             long_runs: Some(LONG_RUNS),
             runtimes: Vec::new(),
@@ -1465,6 +1471,9 @@ pub struct Stats {
     pub pkg_predicted: u64,
     pub pkg_predict_right: u64,
     pub pkg_predict_wrong: Vec<String>,
+    /// Document nodes given their record's hint (`crate::pkgrec`, since
+    /// the build began).
+    pub node_recorded: u64,
     /// Each node's run time in the evaluations (all its attempts), in
     /// microseconds, by node (`Report::run_times`, all of them).
     pub piece_times: Vec<(u64, u64)>,
@@ -2215,6 +2224,7 @@ fn file_units(
     v: &Values,
     reg: &crate::hints::Registry,
     defs: &Defs,
+    loads: Option<&crate::pkgrec::LoadHints>,
     name: &str,
     path: &str,
     bytes: &[u8],
@@ -2240,7 +2250,14 @@ fn file_units(
         let Some(u) = text.get(s..e) else { continue };
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
         let key = v.str(&format!("unit:{name}:{i}"));
-        crate::hints::register_unit(reg, key, crate::hints::slice_hint_of(&t, s));
+        // (a unit whose text cannot bound what it defines: its record's
+        // hint when it has one, keyed by its text, `crate::pkgrec`)
+        let own = crate::hints::slice_hint_of(&t, s);
+        let hint = loads
+            .filter(|_| crate::pkgrec::unbounded(&own))
+            .and_then(|l| l.hint_for(v, u))
+            .map_or(own, Arc::from);
+        crate::hints::register_unit(reg, key, hint, crate::pkgrec::node_key(u));
         out.push((
             v.field(&format!("unit:{name}:{i}")),
             v.list(vec![v.str(u), v.int(i64::try_from(s).unwrap_or(0))]),
@@ -2338,6 +2355,7 @@ impl Graph {
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             hints: Arc::default(),
             pkg_log: Arc::new(Mutex::new(Vec::new())),
+            rec_ran: Arc::default(),
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
@@ -2549,6 +2567,7 @@ impl Graph {
         let cut: UnitCuts = std::sync::Mutex::new(FxHashMap::default());
         let units_log = Arc::clone(&self.provided_units);
         let (reg, defs) = (Arc::clone(&self.ops.hints), Arc::clone(&self.ops.defs));
+        let loads = Arc::clone(&self.ops.pkg_loads);
         let finder_u = Arc::clone(&finder);
         let finder_t = Arc::clone(&finder);
         let tools = self.tool_finder.clone();
@@ -2567,8 +2586,11 @@ impl Graph {
                     let found = finder_u(name);
                     let hash = file_hash(found.as_ref());
                     let defs = defs.locked().clone();
+                    let loads = loads.locked().clone();
                     let es = found
-                        .map(|(path, bytes)| file_units(v, &reg, &defs, name, &path, &bytes))
+                        .map(|(path, bytes)| {
+                            file_units(v, &reg, &defs, loads.as_deref(), name, &path, &bytes)
+                        })
                         .unwrap_or_default();
                     let m = es.iter().map(|&(g, x)| (g.0.raw(), x)).collect();
                     if let Ok(mut l) = units_log.lock() {
@@ -3406,10 +3428,12 @@ impl Graph {
                 }
                 match found {
                     Some((path, bytes)) => {
+                        let loads = self.ops.pkg_loads.locked().clone();
                         let es = file_units(
                             self.eng.values(),
                             &self.ops.hints,
                             &defs,
+                            loads.as_deref(),
                             &name,
                             &path,
                             &bytes,
@@ -3735,14 +3759,16 @@ fn node_args(
             let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
             // (a document node is a top-level node)
             a[1] = v.int(3);
-            // (a package load: its record's hint, or the optimistic one,
-            // `crate::pkgrec`)
-            if let Some(h) = loads.and_then(|l| l.hint_for(v, &text[s..e])) {
-                a.push(v.str(&h));
-            } else {
-                let (c, at) = inc.chunk_at(s);
-                a.push(crate::hints::hint_arg(v, &c.th, at));
-            }
+            // (a package load: its record's hint, or the optimistic one;
+            // a node whose text cannot bound what it defines: its
+            // record's, `crate::pkgrec`)
+            let (c, at) = inc.chunk_at(s);
+            let own = crate::hints::slice_hint_of(&c.th, at);
+            let slice = &text[s..e];
+            let rec = loads
+                .filter(|_| crate::pkgrec::unbounded(&own) || crate::pkgrec::load_key(slice).is_some())
+                .and_then(|l| l.hint_for(v, slice));
+            a.push(v.str(rec.as_deref().unwrap_or(&*own)));
             a
         }
         (&DocNode::Doc(s, e), None) => {
@@ -4888,8 +4914,11 @@ impl Build {
         // runs optimistically under speculation
         let optimistic = opts.speculation != Speculation::Off;
         let predict = opts.pkg_predict;
+        // (the document nodes' records, the document's own, beside them)
+        let mut recs = crate::pkgrec::parse(&opts.pkgrec);
+        recs.extend(crate::pkgrec::parse(&opts.noderec));
         g.loads = Some(Arc::new(crate::pkgrec::LoadHints::new(
-            crate::pkgrec::parse(&opts.pkgrec),
+            recs,
             opts.finder.clone(),
             optimistic,
             predict,
@@ -5130,11 +5159,17 @@ impl Build {
     /// (`crate::pkgrec::entry`), so an evaluation in which no load ran
     /// leaves the merged records as they were.
     fn merge_load_records(&mut self) {
-        self.loads_ran = !self.g.ops.pkg_log.locked().is_empty();
+        // (the records of the nodes whose run was recorded in it: the
+        // others' are merged already)
+        let mut ran: phitex_defuse::FxHashSet<u64> = std::mem::take(&mut *self.g.ops.rec_ran.locked())
+            .into_iter()
+            .collect();
+        ran.extend(self.g.ops.pkg_log.locked().iter().map(|r| r.0));
+        self.loads_ran = !ran.is_empty();
         if self.loads_ran
             && let Some(l) = &self.g.loads
         {
-            l.merge(self.fresh_records());
+            l.merge(self.fresh_records(|n, _| ran.contains(&n)));
         }
     }
 
@@ -5189,6 +5224,7 @@ impl Build {
         let mut stats = Stats::default();
         self.g.queries.clear();
         self.g.ops.pkg_log.locked().clear();
+        self.g.ops.rec_ran.locked().clear();
         let loads = self.g.loads.clone();
         let mut absorb = Absorb {
             edits: &self.edits,
@@ -5360,6 +5396,10 @@ impl Build {
                 self.g.files[k].1 = val;
             }
         }
+        // (a record listing the file is matched against its new text)
+        if let Some(l) = &self.g.loads {
+            l.forget(name);
+        }
         // (a file read as units: cut again, each unit's field its new
         // slice; a unit whose text is the same keeps its value)
         if cut {
@@ -5368,7 +5408,15 @@ impl Build {
             let defs = self.g.ops.defs.locked().clone();
             match &found {
                 Some((path, bytes)) => {
-                    let es = file_units(v, &self.g.ops.hints, &defs, name, path, bytes);
+                    let es = file_units(
+                        v,
+                        &self.g.ops.hints,
+                        &defs,
+                        self.g.loads.as_deref(),
+                        name,
+                        path,
+                        bytes,
+                    );
                     self.g.files.extend(es);
                 }
                 None => self.g.absent.push(uf),
@@ -5543,9 +5591,32 @@ impl Build {
     #[must_use]
     pub fn export_pkgrec(&self) -> Vec<u8> {
         match &self.g.loads {
-            Some(l) => l.bytes(),
+            Some(l) => l.bytes_where(|k| !crate::pkgrec::is_node_key(k)),
             None => self.opts.pkgrec.clone(),
         }
+    }
+
+    /// The document nodes' records ([`Options::noderec`]): those of the
+    /// nodes live in this build (a record whose node is gone is not
+    /// kept), the runs of this build's replacing their own. Kept per
+    /// document.
+    #[must_use]
+    pub fn export_noderec(&self) -> Vec<u8> {
+        let Some(l) = &self.g.loads else {
+            return self.opts.noderec.clone();
+        };
+        let v = self.g.eng.values();
+        let live: phitex_defuse::FxHashSet<String> = self
+            .g
+            .eng
+            .acc_value(self.unit, v.field("pkgrecs"))
+            .map(|acc| v.seq_to_vec(acc))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| crate::pkgrec::entry_head(v, e).map(|(_, k)| k))
+            .filter(|k| crate::pkgrec::is_node_key(k))
+            .collect();
+        l.bytes_where(|k| live.contains(k))
     }
 
     /// The pieces' run times by text, for a later build's
@@ -5641,9 +5712,10 @@ impl Build {
         }
     }
 
-    /// Whether a package load ran in the last evaluation, so that the
-    /// records [`Self::export_pkgrec`] gives may differ from those it
-    /// gave before; `false`: they are the same.
+    /// Whether a package load or a recorded document node ran in the
+    /// last evaluation, so that the records [`Self::export_pkgrec`] and
+    /// [`Self::export_noderec`] give may differ from those they gave
+    /// before; `false`: they are the same.
     #[must_use]
     pub fn pkgrec_changed(&self) -> bool {
         self.loads_ran
@@ -5661,24 +5733,19 @@ impl Build {
         Some(p.into_iter().map(|(n, g, x)| (n, g, v.render(x))).collect())
     }
 
-    /// The records the loads' last runs left (`pkgrecs`), by load key.
-    fn fresh_records(&self) -> Vec<(String, crate::pkgrec::Rec)> {
+    /// The records the recorded nodes' last runs left (`pkgrecs`), by
+    /// key, of the nodes and keys `keep` keeps.
+    fn fresh_records(&self, keep: impl Fn(u64, &str) -> bool) -> Vec<(String, crate::pkgrec::Rec)> {
         let v = self.g.eng.values();
         let Some(acc) = self.g.eng.acc_value(self.unit, v.field("pkgrecs")) else {
             return Vec::new();
         };
-        let keys: FxHashMap<u64, String> = self
-            .nodes
-            .iter()
-            .filter_map(|(_, n, src)| {
-                Some((n.raw(), crate::pkgrec::load_key(src.text(&self.text))?))
-            })
-            .collect();
         v.seq_to_vec(acc)
             .into_iter()
+            .filter(|&e| crate::pkgrec::entry_head(v, e).is_some_and(|(n, k)| keep(n, &k)))
             .filter_map(|e| {
-                let (node, r) = crate::pkgrec::decode_entry(v, e)?;
-                Some((keys.get(&node)?.clone(), r))
+                let (_, k, r) = crate::pkgrec::decode_entry(v, e)?;
+                Some((k, r))
             })
             .collect()
     }
@@ -5706,7 +5773,7 @@ impl Build {
             })
             .count() as u64;
         if crate::exec::obs_flag!("PHITEX_PKG_TRACE") {
-            let fresh = self.fresh_records();
+            let fresh = self.fresh_records(|_, k| !crate::pkgrec::is_node_key(k));
             for (_, n, src) in &self.nodes {
                 let Some(k) = crate::pkgrec::load_key(src.text(&self.text)) else {
                     continue;
@@ -5779,11 +5846,14 @@ impl Build {
         if let Some(l) = &self.g.loads {
             stats.pkg_recorded = l.given[0].load(std::sync::atomic::Ordering::Relaxed);
             stats.pkg_optimistic = l.given[1].load(std::sync::atomic::Ordering::Relaxed);
+            stats.node_recorded = l.given[2].load(std::sync::atomic::Ordering::Relaxed);
             // each prediction against what the load's last run published
             let predicted = l.predicted.locked().clone();
             if !predicted.is_empty() {
-                let fresh: FxHashMap<String, crate::pkgrec::Rec> =
-                    self.fresh_records().into_iter().collect();
+                let fresh: FxHashMap<String, crate::pkgrec::Rec> = self
+                    .fresh_records(|_, k| predicted.contains_key(k))
+                    .into_iter()
+                    .collect();
                 stats.pkg_predicted = predicted.len() as u64;
                 stats.pkg_predict_wrong.clear();
                 let mut keys: Vec<&String> = predicted.keys().collect();

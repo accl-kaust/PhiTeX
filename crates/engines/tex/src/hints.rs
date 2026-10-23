@@ -25,8 +25,9 @@
 //! Where the text comes from: a document's or prelude's slices are
 //! analysed whole in [`text_hints`] (the regime tracked across the text:
 //! `\makeatletter`, `\ExplSyntaxOn`, literal `\catcode`s) and each slice's
-//! hint goes into its node's arguments ([`hint_arg`]); a document file
-//! read by `\input` is sliced and analysed the same way
+//! hint goes into its node's arguments ([`slice_hint_of`], or its
+//! record's, `crate::pkgrec`); a document file read by `\input` is
+//! sliced and analysed the same way
 //! (`Run::doc_file_regions`), its regions finding the analysis by name.
 //! A slice that opens and closes no scope (`no_scope`) declares no
 //! scope effect. Expansion tokens carry no text position and answer
@@ -3872,6 +3873,9 @@ pub(crate) struct Registry {
     /// (`api::file_units`), by the unit's field name (a string value):
     /// the analysis of the whole file at the unit's slice.
     units: Mutex<FxHashMap<u64, Arc<str>>>,
+    /// The record key of each such unit's text (`crate::pkgrec::node_key`),
+    /// by the same name.
+    unit_keys: Mutex<FxHashMap<u64, String>>,
     hints: Mutex<FxHashMap<u64, Arc<Hint>>>,
     /// The engine's answers ([`may_define`]) made ahead on the pool for
     /// nodes about to be pushed ([`prepare`]), by their arguments' key:
@@ -3919,8 +3923,14 @@ pub(crate) fn register_text(reg: &Registry, name: ValueId, t: &Arc<TextHints>) {
 /// string value): a node whose text is that unit (a `["w", key, ...]`
 /// frame) gets it from here, as the unit's slice of the whole file's
 /// analysis.
-pub(crate) fn register_unit(reg: &Registry, key: ValueId, hint: Arc<str>) {
+pub(crate) fn register_unit(reg: &Registry, key: ValueId, hint: Arc<str>, node_key: String) {
     reg.units.locked().insert(key.raw(), hint);
+    reg.unit_keys.locked().insert(key.raw(), node_key);
+}
+
+/// The record key of the unit `key`'s text, as registered.
+pub(crate) fn unit_node_key(reg: &Registry, key: ValueId) -> Option<String> {
+    reg.unit_keys.locked().get(&key.raw()).cloned()
 }
 
 /// Withdraws the analysis registered under `name` (a document whose
@@ -4095,11 +4105,6 @@ pub(crate) fn slice_hint_of(t: &TextHints, s: usize) -> Arc<str> {
         Some(h) => h.clone(),
         None => Hint::any("slice not found", "").encode().into(),
     }
-}
-
-/// [`slice_hint_of`] as the node's extra argument.
-pub(crate) fn hint_arg(v: &Values, t: &TextHints, s: usize) -> ValueId {
-    v.str(&slice_hint_of(t, s))
 }
 
 fn by_id() -> &'static Cache<u64> {
@@ -4578,11 +4583,19 @@ fn may_define_answer(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine 
         eprintln!("hint {:?}: {answer} ({})", h.excerpt, h.cause);
     }
     // (a package load's record: exactly the fields it defined, never a
-    // prefix of them, `crate::pkgrec`)
+    // prefix of them, `crate::pkgrec`; a document node's, and the page
+    // state any piece with items for the main list defines)
     if is_record(&h)
         && let Some(b) = &h.bound
     {
         let mut ns = b.names.clone();
+        if h.cause == NODE_RECORD_CAUSE {
+            for f in crate::pages::PAGE_FIELDS {
+                if !ns.iter().any(|n| n == f) {
+                    ns.push(f.to_owned());
+                }
+            }
+        }
         for r in crate::fields::RECORDS {
             if !ns.iter().any(|n| n == r)
                 && ns.iter().any(|n| {
@@ -4601,22 +4614,27 @@ fn may_define_answer(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine 
 /// ([`crate::pkgrec`]).
 pub(crate) const RECORD_CAUSE: &str = "package record";
 
+/// The cause of a document node's hint taken from its record.
+pub(crate) const NODE_RECORD_CAUSE: &str = "node record";
+
 /// The cause of a never-seen package load's optimistic hint.
 pub(crate) const OPTIMISTIC_CAUSE: &str = "package not recorded: optimistic";
 
-/// Whether the hint is a package load's record.
+/// Whether the hint is a package load's or a document node's record.
 pub(crate) fn is_record(h: &Hint) -> bool {
-    h.bound.is_some() && h.cause == RECORD_CAUSE
+    h.bound.is_some() && (h.cause == RECORD_CAUSE || h.cause == NODE_RECORD_CAUSE)
 }
 
-/// A package load's hint from its record: it defines exactly `writes`
-/// (no state head besides them), reads `reads`, and, when its last run
-/// said so, opens no scope and takes no sibling.
+/// A package load's hint from its record (a document node's, `node`):
+/// it defines exactly `writes` (no state head besides them), reads
+/// `reads`, and, when its last run said so, opens no scope and takes no
+/// sibling.
 pub(crate) fn record_hint(
     writes: &[String],
     reads: &[String],
     no_scope: bool,
     claim0: bool,
+    node: bool,
 ) -> String {
     Hint {
         bound: Some(Bound {
@@ -4627,7 +4645,7 @@ pub(crate) fn record_hint(
             reads: reads.to_vec(),
             ..Bound::default()
         }),
-        cause: RECORD_CAUSE.to_owned(),
+        cause: if node { NODE_RECORD_CAUSE } else { RECORD_CAUSE }.to_owned(),
         excerpt: String::new(),
         guess: None,
     }

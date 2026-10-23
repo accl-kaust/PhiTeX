@@ -385,10 +385,17 @@ pub struct Session {
     /// The hashes of the files the last write wrote (an unchanged file is
     /// not written again).
     written: Mutex<BTreeMap<PathBuf, u64>>,
-    /// The written keys, the package records and the written files'
-    /// names last stored in the cache ([`Session::store_wkeys`],
-    /// [`Session::store_pkgrec`], [`Session::store_wnames`]).
-    stored: Mutex<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>)>,
+    /// The written keys, the package records, the written files' names
+    /// and the document nodes' records last stored in the cache
+    /// ([`Session::store_wkeys`], [`Session::store_pkgrec`],
+    /// [`Session::store_wnames`], [`Session::store_noderec`]).
+    #[allow(clippy::type_complexity)]
+    stored: Mutex<(
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+    )>,
     /// What the written keys and names last stored were made from
     /// ([`Build::wkeys_source`]): the same, nothing to make or store.
     wkeys_from: Mutex<Option<u64>>,
@@ -401,6 +408,10 @@ pub struct Session {
     buffers: Arc<Mutex<Vec<(String, Option<String>)>>>,
     /// The files other than the main one changed since the last build.
     changed: Vec<String>,
+    /// Every name the builds since the last cold one asked the finder
+    /// for, in any evaluation, and whether it was found the last time
+    /// ([`Build::reads`] is the last evaluation's only).
+    inputs: Vec<(String, bool)>,
     /// The formats' evaluated states (none: no cache).
     cache: Option<Cache>,
     /// The texts sent to the build while it runs, by version.
@@ -516,11 +527,12 @@ impl Session {
             builds: 0,
             written: Mutex::new(BTreeMap::new()),
             last_main: Mutex::new(None),
-            stored: Mutex::new((None, None, None)),
+            stored: Mutex::new((None, None, None, None)),
             wkeys_from: Mutex::new(None),
             status,
             buffers: Arc::default(),
             changed: Vec::new(),
+            inputs: Vec::new(),
             cache,
             absorb: Absorb::default(),
             absorbed_at: None,
@@ -541,6 +553,13 @@ impl Session {
         bufs.push((name.clone(), text.map(str::to_owned)));
         drop(bufs);
         self.changed.push(name);
+    }
+
+    /// Every file the builds read is to be read again from disk at the
+    /// next build (`r` in watch: a change made outside, unseen).
+    pub fn reread_all(&mut self) {
+        self.changed
+            .extend(self.inputs.iter().map(|(n, _)| plain_name(n)));
     }
 
     /// A handle to send the main text to a build while it runs, from
@@ -612,11 +631,12 @@ impl Session {
         });
         phitex_tex::timeline::lap("session: the first changed line (texts compared)");
         let changed = std::mem::take(&mut self.changed);
-        let reread = self
-            .build
-            .as_ref()
-            .map(|b| self.reads_of(b, &changed))
-            .unwrap_or_default();
+        let reread = if self.build.is_some() {
+            self.reads_of(&changed)
+        } else {
+            Vec::new()
+        };
+        let cold = self.build.is_none();
         // (an evaluation error panics, naming the nodes: the build is
         // reported failed and dropped, the next one cold)
         // (the main file's line starts: a worker's place as file:line)
@@ -703,6 +723,14 @@ impl Session {
                         .pkgrec_path()
                         .and_then(|p| self.cache.as_ref()?.get(&p))
                         .unwrap_or_default(),
+                    // (the document nodes' records: the document's own)
+                    noderec: self
+                        .noderec_path()
+                        .and_then(|p| self.cache.as_ref()?.get(&p))
+                        .unwrap_or_default(),
+                    // (a recorded node's outputs predicted from its record,
+                    // so its readers run ahead on them)
+                    pkg_predict: true,
                     // (the pieces' run times an earlier build measured:
                     // beside the format, as the records are)
                     runtimes: self
@@ -743,6 +771,19 @@ impl Session {
                 self.build = None;
                 self.built_text = None;
                 return fail(engine_stop(&e), Some(e));
+            }
+        }
+        // (the names the build asked for, in every evaluation since the
+        // cold one: the files a later change of one is matched against)
+        if let Some(b) = &self.build {
+            if cold {
+                self.inputs.clear();
+            }
+            for (n, found) in b.reads() {
+                match self.inputs.iter_mut().find(|(m, _)| *m == n) {
+                    Some(e) => e.1 = found,
+                    None => self.inputs.push((n, found)),
+                }
             }
         }
         // (the result is for the latest text the build took)
@@ -788,6 +829,7 @@ impl Session {
             // (no load ran: its records are as last stored)
             if b.pkgrec_changed() {
                 self.store_pkgrec(b);
+                self.store_noderec(b);
             }
             // (written when it differs from the stored one)
             self.store_runtimes(b);
@@ -1219,6 +1261,15 @@ impl Session {
         Some(c.format_file(&self.format_name(&text), "pkgrec"))
     }
 
+    /// The cache's file of the document nodes' records
+    /// ([`Build::export_noderec`]): the document's own.
+    fn noderec_path(&self) -> Option<PathBuf> {
+        if self.job.ini {
+            return None;
+        }
+        Some(self.cache.as_ref()?.doc_dir(&self.job.path).join("noderec"))
+    }
+
     /// The cache's file of the pieces' run times ([`Build::export_runtimes`]):
     /// beside the format, as the package loads' records are.
     fn runtimes_path(&self) -> Option<PathBuf> {
@@ -1268,6 +1319,21 @@ impl Session {
         last.1 = Some(recs);
     }
 
+    fn store_noderec(&self, b: &Build) {
+        let (Some(c), Some(p)) = (&self.cache, self.noderec_path()) else {
+            return;
+        };
+        let recs = b.export_noderec();
+        let mut last = self.stored.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.3.as_deref() == Some(recs.as_slice()) {
+            return;
+        }
+        if !recs.is_empty() && c.get(&p).as_deref() != Some(recs.as_slice()) {
+            let _ = c.put(&p, &recs, &[]);
+        }
+        last.3 = Some(recs);
+    }
+
     fn store_prelude(&self, b: &Build, prelude: Option<&str>, had: Option<[u8; 32]>) {
         let (Some(c), Some(text)) = (&self.cache, prelude) else {
             return;
@@ -1292,15 +1358,15 @@ impl Session {
         }
     }
 
-    /// The names the build asked the finder for that stand for one of
-    /// `changed` (as found, or as named).
-    fn reads_of(&self, b: &Build, changed: &[String]) -> Vec<String> {
+    /// The names the builds asked the finder for (`inputs`)
+    /// that stand for one of `changed` (as found, or as named).
+    fn reads_of(&self, changed: &[String]) -> Vec<String> {
         if changed.is_empty() {
             return Vec::new();
         }
-        b.reads()
-            .into_iter()
-            .map(|(n, _)| n)
+        self.inputs
+            .iter()
+            .map(|(n, _)| n.clone())
             .filter(|n| {
                 let found = self.tree.input(n).map(|p| plain_name(&p.to_string_lossy()));
                 changed.iter().any(|c| {
@@ -1488,9 +1554,9 @@ impl Session {
         let cwd = std::env::current_dir().unwrap_or_default();
         s.push_str(&format!("PWD {}\n", cwd.display()));
         s.push_str(&format!("INPUT {}\n", self.job.path.display()));
-        if let Some(b) = &self.build {
-            for (n, found) in b.reads() {
-                if let Some(p) = self.tree.input(&n).filter(|_| found) {
+        if self.build.is_some() {
+            for (n, found) in &self.inputs {
+                if let Some(p) = self.tree.input(n).filter(|_| *found) {
                     s.push_str(&format!("INPUT {}\n", p.display()));
                 }
             }

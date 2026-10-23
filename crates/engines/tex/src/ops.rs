@@ -546,18 +546,18 @@ impl Operation for Exec {
         "exec"
     }
 
-    /// A package load whose record matches (and predictions on,
-    /// [`crate::Options::pkg_predict`]): the values its last run defined,
-    /// so later loads run on them, confirmed by value when it runs.
+    /// A recorded node (a package load, a document node whose text
+    /// cannot bound what it defines) whose record matches (and
+    /// predictions on, [`crate::Options::pkg_predict`]): the values its
+    /// last run defined, so later nodes run on them, confirmed by value
+    /// when it runs.
     fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        if !crate::pkgrec::is_load(v, args) {
+        let loads = ops(&self.0).pkg_loads.locked().clone()?;
+        if !loads.predict || !crate::pkgrec::is_recorded(reg(&self.0), v, args) {
             return None;
         }
-        let loads = ops(&self.0).pkg_loads.locked().clone()?;
-        let &fr = args.first()?;
-        let &f = list_of(v, fr).first()?;
-        let text = str_of(v, *list_of(v, f).get(1)?);
-        let p = loads.prediction(v, &text)?;
+        let key = crate::pkgrec::args_key(reg(&self.0), v, args)?;
+        let p = loads.prediction_of(v, &key)?;
         Some(p.into_iter().map(|(n, _, x)| (v.field(&n), x)).collect())
     }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
@@ -686,7 +686,9 @@ impl Operation for Exec {
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let args = cx.args();
-        // (a package load: its run recorded, `crate::pkgrec`)
+        // (a package load: its run recorded, publishing its net effect,
+        // `crate::pkgrec`; a document node's run is recorded at its end,
+        // `crate::pkgrec::is_recorded`)
         let load = crate::pkgrec::is_load(cx.values(), &args);
         let _nt = crate::exec::NodeTimer::new(if load { "load" } else { "exec" }, cx.node().raw());
         let hint = crate::hints::hint_of_args(reg(&self.0), cx.values(), &args);

@@ -13,6 +13,13 @@
 //! the node then may define anything, its readers re-run)
 //! and the run's own sets replace the record. A load never seen gets
 //! [`crate::hints::optimistic_hint`] under speculation.
+//!
+//! Every other document node whose text alone cannot bound what it
+//! defines (its static hint answers `Any`: a main-file slice, a region
+//! of a file `\input` reads) is recorded the same way, keyed by its
+//! text ([`node_key`], `n:` and its hash), kept per document: a later
+//! build gives it its record's hint and predicts its outputs from its
+//! record's values.
 
 use crate::exec::LockWait as _;
 use std::sync::Mutex;
@@ -49,7 +56,7 @@ pub(crate) struct Rec {
 /// and the value as bytes.
 pub(crate) type RecValues = Vec<(String, bool, Vec<u8>)>;
 
-/// Records by load key ([`load_key`]).
+/// Records by key ([`node_key`]).
 pub(crate) type Recs = FxHashMap<String, Rec>;
 
 /// The key of a slice that is a package load: its text up to the end
@@ -78,6 +85,102 @@ pub(crate) fn load_key(text: &str) -> Option<String> {
     let rest = body.strip_prefix('\\')?;
     let name_len = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
     LOADERS.contains(&&rest[..name_len]).then_some(body)
+}
+
+/// The key of a node's record: a package load's [`load_key`], else
+/// `n:` and the hash of the slice's text as its node runs it (each
+/// line's blanks at its end dropped, [`crate::run::slice_args`]).
+pub(crate) fn node_key(text: &str) -> String {
+    load_key(text).unwrap_or_else(|| {
+        let mut t = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(k) = rest.find('\n') {
+            t.push_str(rest[..k].trim_end_matches([' ', '\t', '\r']));
+            t.push('\n');
+            rest = &rest[k + 1..];
+        }
+        t.push_str(rest);
+        text_key(&t)
+    })
+}
+
+/// A document node's key from its text as run.
+fn text_key(t: &str) -> String {
+    format!("n:{:016x}", phitex_defuse::hash_bytes(0x6e6f_6465, t.as_bytes()))
+}
+
+/// Whether `key` is a document node's ([`node_key`]), not a load's.
+pub(crate) fn is_node_key(key: &str) -> bool {
+    key.starts_with("n:")
+}
+
+/// The text a node's arguments run when they are a document slice's
+/// lines (`s` frames only): each segment, a line's end after one that
+/// ends its line.
+fn args_text(v: &Values, args: &[ValueId]) -> Option<String> {
+    let mut out = String::new();
+    for f in list_of(v, *args.first()?) {
+        let xs = list_of(v, f);
+        if xs.first().map(|&t| str_of(v, t)).as_deref() != Some("s") {
+            return None;
+        }
+        out.push_str(&str_of(v, *xs.get(1)?));
+        if xs.get(4).is_some_and(|&x| int_of(v, x) & 2 != 0) {
+            out.push('\n');
+        }
+    }
+    Some(out)
+}
+
+/// The record key of a node from its arguments: a document slice's
+/// [`node_key`], a file's unit's as its analysis registered it
+/// ([`crate::hints::unit_node_key`]).
+pub(crate) fn args_key(reg: &crate::hints::Registry, v: &Values, args: &[ValueId]) -> Option<String> {
+    let &fr = args.first()?;
+    let fs = list_of(v, fr);
+    if let [f] = fs.as_slice() {
+        let xs = list_of(v, *f);
+        if xs.first().map(|&t| str_of(v, t)).as_deref() == Some("w") {
+            return crate::hints::unit_node_key(reg, *xs.get(1)?);
+        }
+    }
+    args_text(v, args).map(|t| node_key(&t))
+}
+
+/// Whether a node's run is recorded: a top-level package load
+/// ([`is_load`]), or a document node (a main-file slice, kind 3; a
+/// region of a file `\input` reads, kind 2) whose hint answers `Any`
+/// or is its record's.
+pub(crate) fn is_recorded(reg: &crate::hints::Registry, v: &Values, args: &[ValueId]) -> bool {
+    if is_load(v, args) {
+        return true;
+    }
+    if args
+        .get(1)
+        .is_none_or(|&t| !matches!(int_of(v, t), 2 | 3))
+    {
+        return false;
+    }
+    let Some(&fr) = args.first() else {
+        return false;
+    };
+    let fs = list_of(v, fr);
+    let frame = |f: ValueId| list_of(v, f).first().map(|&t| str_of(v, t));
+    let slice = match fs.as_slice() {
+        [] => false,
+        [f] => matches!(frame(*f).as_deref(), Some("s" | "w")),
+        _ => fs.iter().all(|&f| frame(f).as_deref() == Some("s")),
+    };
+    if !slice {
+        return false;
+    }
+    let h = crate::hints::hint_of_args(reg, v, args);
+    h.bound.is_none() || crate::hints::is_record(&h)
+}
+
+/// Whether a hint string (a node's hint argument) answers `Any`.
+pub(crate) fn unbounded(hint: &str) -> bool {
+    hint.starts_with("A\x1e")
 }
 
 /// [`load_key`]'s body: the text, blank and comment lines dropped before
@@ -130,31 +233,47 @@ fn encodable(n: &str) -> bool {
 }
 
 impl Rec {
-    /// The hint the record gives its load, when every name encodes.
-    pub(crate) fn hint(&self) -> Option<String> {
+    /// The hint the record gives its load (a document node's, `node`),
+    /// when every name encodes.
+    pub(crate) fn hint(&self, node: bool) -> Option<String> {
         (self.writes.iter().chain(&self.reads).all(|n| encodable(n))).then(|| {
             // (`PHITEX_PKG_NOREADS=1`: the definitions only, for comparison)
             let reads: &[String] = if false { &[] } else { &self.reads };
             // (`PHITEX_PKG_NOSCOPE=1`, `PHITEX_PKG_NOCLAIM=1`: the record's
             // effect, its claim left to the run, for comparison)
-            crate::hints::record_hint(&self.writes, reads, self.no_scope, self.claim0)
+            crate::hints::record_hint(&self.writes, reads, self.no_scope, self.claim0, node)
         })
     }
 
     /// Whether the files it read are as `now` says (a text's hash, 0
-    /// absent, `None` unknown: no match).
+    /// absent, `None` unknown: no match); a file read as units
+    /// ([`UNITS`]) matches while it is found.
     pub(crate) fn matches(&self, now: impl Fn(&str) -> Option<u64>) -> bool {
-        self.files.iter().all(|(n, h)| now(n) == Some(*h))
+        self.files.iter().all(|(n, h)| match *h {
+            UNITS => now(n).is_some_and(|x| x != 0),
+            h => now(n) == Some(h),
+        })
     }
 }
 
-/// The entry a load's run contributes to `pkgrecs`: `[node, files,
-/// writes, reads, flags, values]`, files `[name, hash]` (hash 0:
+/// A record's hash of a file its run read as units (a document file
+/// `\input` reads, `crate::run::Run::read_units`): what the run read is
+/// the units' order, not the text, so any text of it matches.
+pub(crate) const UNITS: u64 = u64::MAX;
+
+/// A value's bytes past which a document node's record keeps no value
+/// (the field stays in its writes: no prediction of it).
+const VALUE_MAX: usize = 64 << 10;
+
+/// The entry a recorded run contributes to `pkgrecs`: `[node, files,
+/// writes, reads, flags, values, key]`, files `[name, hash]` (hash 0:
 /// absent), flags 1 no scope, 2 no sibling taken, values `[name,
-/// global, value]`.
+/// global, value]`, key its [`node_key`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn entry(
     v: &Values,
     node: u64,
+    key: &str,
     files: &[(String, u64)],
     writes: &[String],
     reads: &[String],
@@ -178,14 +297,26 @@ pub(crate) fn entry(
                 .map(|(n, g, x)| v.list(vec![v.str(n), v.int(i64::from(*g)), *x]))
                 .collect(),
         ),
+        v.str(key),
     ])
 }
 
-/// An entry decoded: its node and record (its values always: predicting
-/// or not, a later build may predict from it).
-pub(crate) fn decode_entry(v: &Values, e: ValueId) -> Option<(u64, Rec)> {
+/// An entry's node and key, its record not decoded.
+pub(crate) fn entry_head(v: &Values, e: ValueId) -> Option<(u64, String)> {
     let xs = list_of(v, e);
-    let node = crate::val::int_at(v, e, 0).cast_unsigned();
+    Some((
+        crate::val::int_at(v, e, 0).cast_unsigned(),
+        str_of(v, *xs.get(6)?),
+    ))
+}
+
+/// An entry decoded: its node, key and record (its values always:
+/// predicting or not, a later build may predict from it; a document
+/// node's past [`VALUE_MAX`] bytes left out).
+pub(crate) fn decode_entry(v: &Values, e: ValueId) -> Option<(u64, String, Rec)> {
+    let xs = list_of(v, e);
+    let (node, key) = entry_head(v, e)?;
+    let node_rec = is_node_key(&key);
     let files = list_of(v, *xs.get(1)?)
         .into_iter()
         .map(|f| {
@@ -204,17 +335,18 @@ pub(crate) fn decode_entry(v: &Values, e: ValueId) -> Option<(u64, Rec)> {
                 .into_iter()
                 .filter_map(|e| {
                     let ys = list_of(v, e);
-                    Some((
-                        str_of(v, *ys.first()?),
-                        int_of(v, *ys.get(1)?) != 0,
-                        crate::api::tree_bytes(v, *ys.get(2)?),
-                    ))
+                    let b = crate::api::tree_bytes(v, *ys.get(2)?);
+                    if node_rec && b.len() > VALUE_MAX {
+                        return None;
+                    }
+                    Some((str_of(v, *ys.first()?), int_of(v, *ys.get(1)?) != 0, b))
                 })
                 .collect()
         })
         .unwrap_or_default();
     Some((
         node,
+        key,
         Rec {
             files,
             writes: strs(*xs.get(2)?),
@@ -226,8 +358,10 @@ pub(crate) fn decode_entry(v: &Values, e: ValueId) -> Option<(u64, Rec)> {
     ))
 }
 
-/// The records a build gives its loads, the files' hashes as the build
-/// finds them now, and whether never-seen loads get the optimistic hint.
+/// The records a build gives its loads and document nodes (the
+/// machine-wide loads' and the document's own, merged), the files'
+/// hashes as the build finds them now, and whether never-seen loads get
+/// the optimistic hint.
 pub(crate) struct LoadHints {
     pub recs: Mutex<Recs>,
     finder: crate::api::Finder,
@@ -238,10 +372,11 @@ pub(crate) struct LoadHints {
     /// predicts its outputs (`PHITEX_PKG_PREDICT=1`, or
     /// [`crate::Options::pkg_predict`]).
     pub predict: bool,
-    /// The predictions given this build, by load key.
+    /// The predictions given this build, by load key (loads' only).
     pub predicted: Mutex<FxHashMap<String, RecValues>>,
-    /// Loads given a record, given the optimistic hint (counts).
-    pub given: [std::sync::atomic::AtomicU64; 2],
+    /// Loads given a record, given the optimistic hint, document nodes
+    /// given a record (counts).
+    pub given: [std::sync::atomic::AtomicU64; 3],
 }
 
 impl LoadHints {
@@ -262,15 +397,13 @@ impl LoadHints {
         }
     }
 
-    /// The record of the load `text` when its key matches the files as
-    /// they are now.
-    fn matching(&self, v: &Values, text: &str) -> Option<(String, Rec)> {
-        let k = load_key(text)?;
-        let r = self.recs.locked().get(&k).cloned()?;
-        r.matches(|n| Some(self.hash_now(v, n))).then_some((k, r))
+    /// The record under `key` when it matches the files as they are now.
+    fn matching(&self, v: &Values, key: &str) -> Option<Rec> {
+        let r = self.recs.locked().get(key).cloned()?;
+        r.matches(|n| Some(self.hash_now(v, n))).then_some(r)
     }
 
-    /// The predicted publications of the load `text` (the hook's
+    /// The predicted publications of the node `text` (the hook's
     /// answer): the values its record says it defines, when predicting
     /// and its key matches; each field's name, whether global, and value.
     pub(crate) fn prediction(
@@ -278,10 +411,19 @@ impl LoadHints {
         v: &Values,
         text: &str,
     ) -> Option<Vec<(String, bool, ValueId)>> {
+        self.prediction_of(v, &node_key(text))
+    }
+
+    /// [`Self::prediction`] of the record under `key` ([`node_key`]).
+    pub(crate) fn prediction_of(
+        &self,
+        v: &Values,
+        key: &str,
+    ) -> Option<Vec<(String, bool, ValueId)>> {
         if !self.predict {
             return None;
         }
-        let (_, r) = self.matching(v, text)?;
+        let r = self.matching(v, key)?;
         r.values
             .iter()
             .map(|(n, g, b)| Some((n.clone(), *g, crate::api::tree_from_bytes(v, b)?)))
@@ -308,21 +450,22 @@ impl LoadHints {
         self.now.locked().remove(name);
     }
 
-    /// Whether the record of the load `text` lists file `name`.
+    /// Whether the record of the node `text` lists file `name`.
     pub(crate) fn reads_file(&self, text: &str, name: &str) -> bool {
-        load_key(text).is_some_and(|k| {
-            self.recs
-                .locked()
-                .get(&k)
-                .is_some_and(|r| r.files.iter().any(|(n, _)| n == name))
-        })
+        self.recs
+            .locked()
+            .get(&node_key(text))
+            .is_some_and(|r| r.files.iter().any(|(n, _)| n == name))
     }
 
-    /// The hint for the slice `text` when it is a package load: its
-    /// record's when the key matches, else the optimistic one (when on);
-    /// `None`: the text's own hint.
+    /// The hint for the slice `text` (a package load, or a document node
+    /// whose own hint answers `Any`: the caller asks for those only),
+    /// keyed by [`node_key`]: its record's when the key matches, else
+    /// for a load the optimistic one (when on); `None`: the text's own
+    /// hint.
     pub(crate) fn hint_for(&self, v: &Values, text: &str) -> Option<String> {
-        let k = load_key(text)?;
+        let k = node_key(text);
+        let node = is_node_key(&k);
         let rec = self.recs.locked().get(&k).cloned();
         if crate::exec::obs_flag!("PHITEX_PKG_TRACE") {
             match &rec {
@@ -347,15 +490,19 @@ impl LoadHints {
         }
         if let Some(r) = rec
             && r.matches(|n| Some(self.hash_now(v, n)))
-            && let Some(h) = r.hint()
+            && let Some(h) = r.hint(node)
         {
+            if node {
+                self.given[2].fetch_add(1, Ordering::Relaxed);
+                return Some(h);
+            }
             self.given[0].fetch_add(1, Ordering::Relaxed);
             if self.predict {
                 self.predicted.locked().insert(k, r.values);
             }
             return Some(h);
         }
-        if self.optimistic {
+        if self.optimistic && !node {
             self.given[1].fetch_add(1, Ordering::Relaxed);
             return Some(crate::hints::optimistic_hint());
         }
@@ -370,8 +517,15 @@ impl LoadHints {
         }
     }
 
-    pub(crate) fn bytes(&self) -> Vec<u8> {
-        serialise(&self.recs.locked())
+    /// The records whose key `keep` keeps, as bytes.
+    pub(crate) fn bytes_where(&self, keep: impl Fn(&str) -> bool) -> Vec<u8> {
+        let r = self.recs.locked();
+        let kept: Recs = r
+            .iter()
+            .filter(|(k, _)| keep(k))
+            .map(|(k, x)| (k.clone(), x.clone()))
+            .collect();
+        serialise(&kept)
     }
 }
 

@@ -190,6 +190,9 @@ pub(crate) struct Ops {
     /// The package loads' finished runs (`crate::pkgrec`): node, start,
     /// end, for [`crate::Stats`] (concurrency, preamble wall).
     pub pkg_log: std::sync::Arc<std::sync::Mutex<Vec<PkgRun>>>,
+    /// The nodes whose run was recorded in the evaluation (`crate::pkgrec`):
+    /// their records are merged at its end.
+    pub rec_ran: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
     /// The build's package records, for the engine's predicted
     /// definitions ([`crate::pkgrec::LoadHints::prediction`]).
     pub pkg_loads:
@@ -561,6 +564,9 @@ pub(crate) struct Run<'c, 'a> {
     /// The files this run looked for and did not find (a package load's
     /// record keys on them, `crate::pkgrec`).
     pub fmiss: Vec<String>,
+    /// The files of `fread` this run read as units ([`Run::read_units`]):
+    /// a record keys on their presence, not their text.
+    pub uread: Vec<String>,
     /// Inside `pass_text` (§494): a skipped text's tokens are read only
     /// to classify them (conditional, `\fi`/`\else`, or neither).
     pub in_skip: bool,
@@ -967,6 +973,7 @@ impl<'c, 'a> Run<'c, 'a> {
             doc: false,
             fread: Vec::new(),
             fmiss: Vec::new(),
+            uread: Vec::new(),
             in_skip: false,
             skip_from: (None, 0),
             skip_first: Vec::new(),
@@ -2338,6 +2345,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.muts += 1;
         self.fread.push((key.to_owned(), order.raw()));
+        self.uread.push(key.to_owned());
         Ok(Some(x))
     }
 
@@ -2617,7 +2625,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }) {
             self.muts += 1;
             self.fread.push((key.to_owned(), t.raw()));
-        } else if self.rec_load && !self.fmiss.iter().any(|n| n == key) {
+        } else if (self.rec_load || self.doc) && !self.fmiss.iter().any(|n| n == key) {
             self.fmiss.push(key.to_owned());
         }
         Ok(x)
@@ -4446,7 +4454,10 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         // (a file the job writes, not read here: one piece per unit, its
         // arguments the unit's field (its text's hash) alone, as a
-        // document slice's are its text; the piece reads its unit)
+        // document slice's are its text; the piece reads its unit; its
+        // hint, a record's when its text cannot bound it, keyed by the
+        // unit's text, is the one its file's cut registered,
+        // `api::file_units`, `crate::pkgrec::node_key`)
         if f.lazy()
             && let Some(units) = &f.units
         {
@@ -4462,6 +4473,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let defs = self.ops.defs.locked().clone();
         let t = crate::hints::text_hints(&text, phitex_source::pass::FileKind::Document, &defs);
         crate::hints::register_text(&self.ops.hints, f.name, &t);
+        // (a region whose text cannot bound what it defines: its
+        // record's hint, keyed by its text, `crate::pkgrec`)
+        let loads = self.ops.pkg_loads.locked().clone();
         let mut out = Vec::new();
         for &(s, e) in &t.slices {
             if e <= f.off {
@@ -4470,7 +4484,12 @@ impl<'c, 'a> Run<'c, 'a> {
             let a = s.max(f.off);
             let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
             let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a);
-            args.push(crate::hints::hint_arg(v, &t, s));
+            let own = crate::hints::slice_hint_of(&t, s);
+            let rec = loads
+                .as_deref()
+                .filter(|_| crate::pkgrec::unbounded(&own))
+                .and_then(|l| l.hint_for(v, &text[a..e]));
+            args.push(v.str(rec.as_deref().unwrap_or(&*own)));
             out.push(args);
         }
         out
@@ -4783,7 +4802,13 @@ impl<'c, 'a> Run<'c, 'a> {
                 published.len()
             );
         }
-        if self.rec_load && op == self.ops.exec && !self.claim_rest && self.pulled_only_blanks() {
+        // (a document node whose text cannot bound what it defines is
+        // recorded as a load is, `crate::pkgrec::is_recorded`)
+        let rec = self.rec_load
+            || (op == self.ops.exec
+                && !crate::pkgrec::is_load(self.v, &self.cx.args())
+                && crate::pkgrec::is_recorded(&self.ops.hints, self.v, &self.cx.args()));
+        if rec && op == self.ops.exec && !self.claim_rest && self.pulled_only_blanks() {
             self.record_load(&published);
         }
         let published_trace = if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
@@ -5051,17 +5076,26 @@ impl<'c, 'a> Run<'c, 'a> {
         })
     }
 
-    /// A package load's record (`crate::pkgrec`): the files it read (and
-    /// looked for in vain), the fields it defined (`published`) and read
-    /// from the engine, whether it opened no scope and took no sibling;
-    /// contributed to `pkgrecs`, and its run's times logged.
+    /// A package load's or a document node's record (`crate::pkgrec`):
+    /// the files it read (and looked for in vain), the fields it defined
+    /// (`published`) and read from the engine, whether it opened no
+    /// scope and took no sibling; contributed to `pkgrecs` under its key.
     fn record_load(&mut self, published: &[(Field, ValueId, Locality)]) {
         let v = self.v;
+        let Some(key) = crate::pkgrec::args_key(&self.ops.hints, v, &self.cx.args()) else {
+            return;
+        };
         // (the files the job writes and reads back are the document's,
-        // never part of a load's key)
+        // never part of a load's key; one read as units is read for its
+        // units' order, whatever its text)
         let mut files: Vec<(String, u64)> = Vec::new();
         for (n, h) in self.fread.clone() {
             if !self.written_known(&n) {
+                let h = if self.uread.contains(&n) {
+                    crate::pkgrec::UNITS
+                } else {
+                    h
+                };
                 files.push((n, h));
             }
         }
@@ -5108,8 +5142,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 .collect();
             eprintln!("pkgrec: skip reads of node {node}: {skips:?}");
         }
-        let e = crate::pkgrec::entry(v, node, &files, &writes, &reads, flags, &values);
+        let e = crate::pkgrec::entry(v, node, &key, &files, &writes, &reads, flags, &values);
         self.contribute("pkgrecs", v.seq_unit(e));
+        self.ops.rec_ran.locked().push(node);
     }
 
     /// Ends a run that cannot finish: nothing defined, and the need, for
@@ -5416,6 +5451,7 @@ pub(crate) struct Parked {
     doc: bool,
     fread: Vec<(String, u64)>,
     fmiss: Vec<String>,
+    uread: Vec<String>,
     skip_first: Vec<Field>,
     reg_pending: Vec<(Field, crate::regfold::Affine)>,
     /// The incompleat noads ([`Run::incs`]), the streams closed
@@ -5601,6 +5637,7 @@ impl Run<'_, '_> {
             doc: self.doc,
             fread: std::mem::take(&mut self.fread),
             fmiss: std::mem::take(&mut self.fmiss),
+            uread: std::mem::take(&mut self.uread),
             skip_first: std::mem::take(&mut self.skip_first)
                 .into_iter()
                 .map(|l| self.loc_field(l))
@@ -6234,6 +6271,7 @@ impl Run<'_, '_> {
             doc: self.doc,
             fread: self.fread.clone(),
             fmiss: self.fmiss.clone(),
+            uread: self.uread.clone(),
             skip_first,
             reg_pending,
             incs: self.incs.clone(),
@@ -6487,7 +6525,7 @@ fn parked_rest(p: &Parked) -> u64 {
             w(&mut h, u64::from(t.raw()));
         }
     }
-    (p.next_lid, p.last_par, p.doc, &p.fread, &p.fmiss, p.error_count).hash(&mut h);
+    (p.next_lid, p.last_par, p.doc, &p.fread, &p.fmiss, &p.uread, p.error_count).hash(&mut h);
     for f in &p.skip_first {
         w(&mut h, f.0.raw());
     }
@@ -6646,6 +6684,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.doc = p.doc;
         r.fread = p.fread;
         r.fmiss = p.fmiss;
+        r.uread = p.uread;
         // (the table first: the locations below are its, a location past
         // the fixed ones named by the field the table notes for it,
         // `Run::loc_of`; noted in a table the parked one then replaced,
