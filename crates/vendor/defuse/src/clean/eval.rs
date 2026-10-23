@@ -1755,7 +1755,7 @@ impl Engine {
         let mut ix = KeptIx::new(&self.w, at);
         ix.add(&self.w, id, &reads);
         self.kept_ix.insert(id, ix);
-        self.kept.insert(id, (Box::new(super::ctx::MarkResume { after: after.0, old, j, kids, conts, no_cut: false }), reads, None));
+        self.kept.insert(id, (Box::new(super::ctx::MarkResume { after: after.0, no_cut: old.cont_marks, old, j, kids, conts }), reads, None));
         rep.resumed_at_mark += 1;
     }
 
@@ -1779,6 +1779,7 @@ impl Engine {
         let old = std::sync::Arc::new(Res {
             reads: reads.to_vec(),
             marks: km.marks.into(),
+            cont_marks: true,
             ..Res::default()
         });
         let before = reads[..m.read_ix as usize].to_vec();
@@ -2247,8 +2248,8 @@ impl Engine {
                     }
                     return Err(e);
                 }
-                Outcome::Done(r) => {
-                    self.kept_marks.remove(&id);
+                Outcome::Done(mut r) => {
+                    let km = self.kept_marks.remove(&id);
                     if let Some(e) = self.runaway(id, &r.kids, &r.conts) {
                         return Err(e);
                     }
@@ -2327,6 +2328,18 @@ impl Engine {
                     let s0 = super::core::prof::snapshot();
                     // (The run audit: the result it replaces.)
                     let audit_old = if self.audit.is_some() { self.w.node(id).and_then(|n| n.res.clone()) } else { None };
+                    // (Continuing, its earlier attempts' marks with its
+                    // last's, counted from its start, as its placements.)
+                    if let (Some(b), Some(km)) = (r.base, km) {
+                        let (k0, c0) = (u32::try_from(b.0).unwrap_or(u32::MAX), u32::try_from(b.1).unwrap_or(u32::MAX));
+                        let mut marks = km.marks;
+                        marks.extend(r.res.marks.iter().map(|m| super::world::Mark { kids: m.kids + k0, conts: m.conts + c0, ..*m }));
+                        r.res.marks = marks.into();
+                        if r.res.after.is_none() {
+                            r.res.after = km.after;
+                        }
+                        r.res.cont_marks = true;
+                    }
                     let w = std::mem::take(&mut self.w);
                     let mut b = Builder::new(&self.core, w);
                     b.app_env(id, &r.env);
@@ -2445,9 +2458,14 @@ impl Engine {
                         // were, its new ones now.)
                         // (Continuing, its marks so far, counted from its
                         // start.)
-                        if r.park_cont {
-                            let mut km = if r.resumed { self.kept_marks.remove(&id).unwrap_or_default() } else { KeptMarks::default() };
-                            let (k0, c0) = (u32::try_from(km.kids.len()).unwrap_or(u32::MAX), u32::try_from(km.conts.len()).unwrap_or(u32::MAX));
+                        // (Its earlier attempts' kept as they placed: else
+                        // none.)
+                        let km = self.kept_marks.remove(&id);
+                        let km = if r.base.is_some() { km } else { Some(KeptMarks::default()) };
+                        if r.park_cont
+                            && let Some(mut km) = km.filter(|km| km.kids.len() == b.0 && km.conts.len() == b.1)
+                        {
+                            let (k0, c0) = (u32::try_from(b.0).unwrap_or(u32::MAX), u32::try_from(b.1).unwrap_or(u32::MAX));
                             km.marks.extend(r.res.marks.iter().map(|m| super::world::Mark { kids: m.kids + k0, conts: m.conts + c0, ..*m }));
                             km.kids.extend(r.kids.iter().cloned());
                             km.conts.extend(r.conts.iter().cloned());
@@ -2455,8 +2473,6 @@ impl Engine {
                                 km.after = Some(a);
                             }
                             self.kept_marks.insert(id, km);
-                        } else {
-                            self.kept_marks.remove(&id);
                         }
                         let reads = std::mem::take(&mut r.res.reads);
                         let ix = match self.kept_ix.remove(&id) {
@@ -4094,6 +4110,7 @@ fn run_job(
             eval: core.eval_no.load(std::sync::atomic::Ordering::Relaxed),
             marks: std::mem::take(&mut cx.marks).into(),
             after: cx.after.take(),
+            cont_marks: false,
             // (The compositions, when a pass names one.)
             composed: if cx.passes.iter().any(|p| p.read & super::world::COMPOSED != 0) { cx.composed.clone() } else { Vec::new() },
             passes: std::mem::take(&mut cx.passes),
