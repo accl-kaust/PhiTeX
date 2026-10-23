@@ -2537,6 +2537,13 @@ impl PState {
         h.finish()
     }
 
+    /// (observe, `PHITEX_MARK_LOG=slots`) Each slot: its location, value,
+    /// flags, whether it only caches a read, its digest.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn slot_list(&self) -> Vec<(PLocKey, Option<ValueId>, u8, bool, u64)> {
+        self.slots.iter().map(|s| (s.loc.key(), s.e.id, s.e.flags, s.is_read_cache(), Self::slot_hash(s))).collect()
+    }
+
     /// (observe) The slots whose digests differ from `old`'s ([`PState::slot_hash`]):
     /// each with its value in `old` and here (`None`: no such slot).
     #[allow(clippy::type_complexity)]

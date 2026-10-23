@@ -5847,6 +5847,28 @@ impl Run<'_, '_> {
         crate::prof::add(crate::prof::MARK, tp);
         let tp = crate::prof::start();
         let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
+        // (observe, `PHITEX_MARK_LOG=1|slots`: each mark's digest and its
+        // parts; with `slots`, its table's slots)
+        if let Some(how) = crate::exec::obs_str!("PHITEX_MARK_LOG") {
+            let node = self.cx.node().raw();
+            eprintln!(
+                "mark-log: node {node} mark {k} at {} digest {h:x} rest {:x} slots {:x} ({} in the table)",
+                p.at_cmds,
+                parked_rest(&p),
+                p.mark_sum.unwrap_or_else(|| p.st.slot_sum()),
+                p.st.slot_list().len()
+            );
+            if how == "slots" {
+                for (key, x, fl, cache, sh) in p.st.slot_list() {
+                    let f = match key {
+                        crate::runstate::PLocKey::Fixed(l) => self.loc_field(l),
+                        crate::runstate::PLocKey::Spill(f) => f,
+                    };
+                    let x = x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(50).collect());
+                    eprintln!("mark-log: node {node} mark {k} slot {} = {x} flags {fl} cache {cache} hash {sh:x}", crate::val::field_name(v, f));
+                }
+            }
+        }
         if crate::exec::obs_flag!("PHITEX_ANCHOR_TRACE") {
             let old = self.old_marks.as_ref().and_then(|km| {
                 km.snaps.iter().enumerate().find(|(_, (q, _))| q.at_cmds == p.at_cmds && q.watch.is_some() == p.watch.is_some())
