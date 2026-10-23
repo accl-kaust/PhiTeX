@@ -5645,6 +5645,10 @@ impl Parked {
     }
 }
 
+/// A run's marks: each one's state as a parked run's and its digest
+/// ([`Run::mark_snaps`]).
+pub(crate) type MarkSnaps = Vec<(std::sync::Arc<Parked>, u64)>;
+
 pub(crate) struct KeptMarks {
     pub snaps: Vec<(std::sync::Arc<Parked>, u64)>,
     /// (observe, `PHITEX_MARK_CHECK`) Its contributions and children, to
@@ -5680,7 +5684,7 @@ pub(crate) fn retext_mark(
     kmax: u32,
     old_args: &[ValueId],
     args: &[ValueId],
-) -> Result<(u32, Vec<(std::sync::Arc<Parked>, u64)>), &'static str> {
+) -> Result<(u32, MarkSnaps), &'static str> {
     if old_args.len() != args.len() || old_args.get(1..) != args.get(1..) {
         return Err("other arguments");
     }
