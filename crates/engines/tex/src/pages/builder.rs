@@ -927,10 +927,10 @@ impl Operation for Pages {
 /// The pages between two marks of the page builder's loop (profile:
 /// `PHITEX_PAGE_MARK_EVERY`).
 fn page_mark_every() -> usize {
-    if cfg!(feature = "profile") {
-        if let Some(n) = crate::exec::env_str!("PHITEX_PAGE_MARK_EVERY").and_then(|s| s.parse().ok()) {
-            return n;
-        }
+    if cfg!(feature = "profile")
+        && let Some(n) = crate::exec::env_str!("PHITEX_PAGE_MARK_EVERY").and_then(|s| s.parse().ok())
+    {
+        return n;
     }
     1
 }
@@ -1199,35 +1199,7 @@ impl Run<'_, '_> {
                     eprintln!("pages-stop: resolving the markers of piece {owner} ({} pages)", lp.pages.len());
                 }
                 r?;
-                let t = pp::start();
-                let at = node_of(pid);
-                // (the registers of the insertion classes this unit and
-                // the contributions pending put on the page, as they
-                // reach it, where no marker names them: §1008 reads them
-                // at the `build_page` call)
-                let mut ns: Vec<u16> = Vec::new();
-                for y in items.iter().chain(lp.pend.iter().map(|p| &p.0)) {
-                    if let crate::vprof::PItem::Node(Node::Ins(i)) = y
-                        && !ns.contains(&i.number)
-                    {
-                        ns.push(i.number);
-                    }
-                }
-                let mut classes = Vec::with_capacity(ns.len());
-                for n in ns {
-                    if let Some(&c) = lp.own.classes.iter().find(|c| c.0 == n) {
-                        classes.push(c);
-                        continue;
-                    }
-                    let c = self.insert_class_at(n, at);
-                    if c.is_err() {
-                        pp::add(pp::CLASSES, t);
-                    }
-                    let c = (n, c?);
-                    lp.own.classes.push(c);
-                    classes.push(c);
-                }
-                pp::add(pp::CLASSES, t);
+                let classes = self.unit_classes(lp, &items, node_of(pid))?;
                 // (units no page needs any more dropped)
                 let t = pp::start();
                 Self::drop_units(lp);
@@ -1255,6 +1227,39 @@ impl Run<'_, '_> {
             }
         }
         Ok(())
+    }
+
+    /// The registers of the insertion classes a unit's `items` and the
+    /// contributions pending put on the page, as they reach it at `at`,
+    /// where no marker names them (§1008 reads them at the `build_page`
+    /// call); memoised for the unit's owner in `lp.own`.
+    fn unit_classes(&mut self, lp: &mut PageLoop, items: &[crate::vprof::PItem], at: phitex_defuse::NodeId) -> R<Vec<(u16, InsertClass)>> {
+        use crate::prof::pages as pp;
+        let t = pp::start();
+        let mut ns: Vec<u16> = Vec::new();
+        for y in items.iter().chain(lp.pend.iter().map(|p| &p.0)) {
+            if let crate::vprof::PItem::Node(Node::Ins(i)) = y
+                && !ns.contains(&i.number)
+            {
+                ns.push(i.number);
+            }
+        }
+        let mut classes = Vec::with_capacity(ns.len());
+        for n in ns {
+            if let Some(&c) = lp.own.classes.iter().find(|c| c.0 == n) {
+                classes.push(c);
+                continue;
+            }
+            let c = self.insert_class_at(n, at);
+            if c.is_err() {
+                pp::add(pp::CLASSES, t);
+            }
+            let c = (n, c?);
+            lp.own.classes.push(c);
+            classes.push(c);
+        }
+        pp::add(pp::CLASSES, t);
+        Ok(classes)
     }
 
     /// A mark of the page builder's loop between contributors, after a
