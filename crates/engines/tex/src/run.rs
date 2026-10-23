@@ -5400,6 +5400,8 @@ pub(crate) struct Parked {
     /// is the whole table.
     mark_gone: Vec<crate::runstate::PLoc>,
     mark_sum: Option<u64>,
+    /// Whether its table is whole ([`crate::runstate::MarkDelta::whole`]).
+    mark_whole: bool,
     /// A mark before an `\inputlineno` read ([`Run::mark_before_read`]):
     /// the groups open there.
     watch: Option<usize>,
@@ -5592,6 +5594,7 @@ impl Run<'_, '_> {
             st: self.st.park(self.v),
             mark_gone: Vec::new(),
             mark_sum: None,
+            mark_whole: true,
             watch: None,
             contribs: std::mem::take(&mut self.contribs),
             kids: std::mem::take(&mut self.kids),
@@ -6154,9 +6157,9 @@ impl Run<'_, '_> {
             .collect();
         let level_tys = self.input.levels.iter().rev().map(|l| l.ty).collect();
         let ts = crate::prof::start();
-        let (st, mark_gone, mark_sum) = match delta {
-            Some(d) => (d.st, d.gone, Some(d.sum)),
-            None => (self.st.park(v), Vec::new(), None),
+        let (st, mark_gone, mark_sum, mark_whole) = match delta {
+            Some(d) => (d.st, d.gone, Some(d.sum), d.whole),
+            None => (self.st.park(v), Vec::new(), None, true),
         };
         crate::prof::add(crate::prof::MARK_STATE, ts);
         Parked {
@@ -6195,6 +6198,7 @@ impl Run<'_, '_> {
             st,
             mark_gone,
             mark_sum,
+            mark_whole,
             watch: None,
             contribs: self.contribs.clone(),
             kids: self.kids.clone(),
@@ -6306,8 +6310,10 @@ fn sorted_lazy(m: &phitex_defuse::FxHashMap<Field, ValueId>) -> Vec<(Field, Valu
 pub(crate) fn mark_table(snaps: &[(std::sync::Arc<Parked>, u64)], k: usize) -> Parked {
     let mut p = (*snaps[k].0).clone();
     if p.mark_sum.is_some() {
+        // (from the last whole one)
+        let from = (0..=k).rev().find(|&i| snaps[i].0.mark_whole).unwrap_or(0);
         let parts: Vec<(&crate::runstate::PState, &[crate::runstate::PLoc])> =
-            snaps[..=k].iter().map(|(x, _)| (&x.st, x.mark_gone.as_slice())).collect();
+            snaps[from..=k].iter().map(|(x, _)| (&x.st, x.mark_gone.as_slice())).collect();
         p.st = crate::runstate::MarkDelta::fold(&parts);
         p.mark_gone = Vec::new();
         p.mark_sum = None;

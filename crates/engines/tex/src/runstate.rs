@@ -266,7 +266,8 @@ pub(crate) struct State {
     /// group's end that puts back the engine's value unloads the slot.
     pub(crate) unload_restored: bool,
     /// A rollback since marks began: the marks' deltas no longer add up
-    /// to the table ([`State::rollback`]).
+    /// to the table ([`State::rollback`]); the next mark is whole
+    /// ([`State::mark_delta`]).
     mbroken: bool,
 }
 
@@ -375,7 +376,8 @@ impl Clone for State {
             cands: self.cands.clone(),
             undo: None,
             // (a copy put back is the table going back to it: a run's
-            // marks taken since no longer add up, [`State::mark_delta`])
+            // marks taken since no longer add up, its next is whole,
+            // [`State::mark_delta`])
             track: self.track,
             mdirty: Vec::new(),
             unload_restored: self.unload_restored,
@@ -2067,11 +2069,14 @@ impl State {
     /// of a run (an `img` not begun) parks every slot. `None` where the
     /// table went back since (a rollback): the deltas no longer add up.
     pub(crate) fn mark_delta(&mut self, v: &Values, img: &mut MarkImage) -> Option<MarkDelta> {
+        // (a table put back or rolled back since the last mark: the marks
+        // go on, this one whole again, its image made anew)
         if self.mbroken
             || self.touched.len() < img.touched
             || self.metas.len() < img.metas
         {
-            return None;
+            self.mbroken = false;
+            *img = MarkImage::default();
         }
         let first = !img.begun;
         let changed: Vec<Loc> = if first {
@@ -2124,6 +2129,7 @@ impl State {
             },
             gone,
             sum: img.sum,
+            whole: first,
         })
     }
 
@@ -2392,6 +2398,10 @@ pub(crate) struct MarkDelta {
     pub(crate) st: PState,
     pub(crate) gone: Vec<PLoc>,
     pub(crate) sum: u64,
+    /// Whether it holds the whole table (a run's first mark, or the first
+    /// after its table was put back): the marks before it are not folded
+    /// in ([`crate::run::mark_table`]).
+    pub(crate) whole: bool,
 }
 
 impl PState {
