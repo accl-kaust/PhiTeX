@@ -1801,7 +1801,7 @@ impl Run<'_, '_> {
                     });
                 }
             }
-            let x = nodes::encode(v, &Node::Disc(d), &Side::default());
+            let x = nodes::encode(v, &Node::Disc(Box::new(d)), &Side::default());
             self.append(md.lid, x);
         } else {
             self.scan_left_brace()?;
@@ -1870,7 +1870,7 @@ impl Run<'_, '_> {
                     );
                     let mut bx = pp.node;
                     bx.shift = x - h;
-                    p = Node::Box(bx);
+                    p = Node::Box(Box::new(bx));
                 }
                 let delta = (f64::from(w - a) / 2.0 + f64::from(h) * t - f64::from(x) * s).round();
                 #[allow(clippy::cast_possible_truncation)]
@@ -2178,11 +2178,11 @@ impl Run<'_, '_> {
             .extra
             .get(3)
             .map_or_else(Vec::new, |&l| nodes::decode_list(v, l, &mut s2));
-        let d = Node::Disc(Disc {
+        let d = Node::Disc(Box::new(Disc {
             pre,
             post,
             replace: list,
-        });
+        }));
         // the replacement list follows the disc node in tex.web's list;
         // here it is inside it
         let y = nodes::encode(v, &d, &merge_sides(s2, side));
@@ -2594,7 +2594,7 @@ impl Run<'_, '_> {
             if *ins_disc {
                 *ins_disc = false;
                 if para {
-                    out.push(Node::Disc(Disc::default()));
+                    out.push(Node::Disc(Box::new(Disc::default())));
                 }
             }
         };

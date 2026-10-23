@@ -3102,7 +3102,7 @@ fn xform_step(
             }
         }
         forms.fonts.extend(ids.iter().copied());
-        let n = st.xform(at_b.clone(), res_b.clone(), bx);
+        let n = st.xform(at_b.clone(), res_b.clone(), *bx);
         let mut err = None;
         if immediate {
             let whats = &forms.whats;

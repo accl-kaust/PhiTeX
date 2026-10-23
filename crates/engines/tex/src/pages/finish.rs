@@ -1179,7 +1179,7 @@ impl Run<'_, '_> {
         if pos.pdf
             && let Node::Box(bx) = page_box
         {
-            crate::pdfout::ship(self, page, bx, &side, &ids)?;
+            crate::pdfout::ship(self, page, *bx, &side, &ids)?;
         }
         let shown = Some(page.raw());
         phitex_pdf::phase::add(4, t_p4);

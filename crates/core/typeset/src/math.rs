@@ -509,7 +509,7 @@ impl Ctx<'_> {
                 let stack = |c: u16, b: &mut BoxNode| {
                     let p = self.char_box(f, c);
                     b.height = p.height;
-                    b.list.insert(0, Node::Box(p));
+                    b.list.insert(0, Node::Box(Box::new(p)));
                 };
                 if let Some(c) = bot {
                     stack(c, &mut b);
@@ -543,7 +543,7 @@ impl Ctx<'_> {
     fn rebox(&self, b: BoxNode, w: Scaled) -> BoxNode {
         if b.width != w && !b.list.is_empty() {
             let b = if b.kind == BoxKind::V {
-                self.hpack_nat(vec![Node::Box(b)])
+                self.hpack_nat(vec![Node::Box(Box::new(b))])
             } else {
                 b
             };
@@ -601,12 +601,12 @@ impl Ctx<'_> {
                 self.set_style(save_style);
                 h
             }
-            Field::SubBox(b) => vec![Node::Box(b.clone())],
-            Field::Empty => vec![Node::Box(BoxNode::default())],
+            Field::SubBox(b) => vec![Node::Box(Box::new(b.clone()))],
+            Field::Empty => vec![Node::Box(Box::new(BoxNode::default()))],
         };
         // found:
         let mut x = match q.as_slice() {
-            [Node::Box(b)] if b.shift == 0 => b.clone(),
+            [Node::Box(b)] if b.shift == 0 => (**b).clone(),
             _ => self.hpack_nat(q),
         };
         // §721
@@ -622,7 +622,7 @@ impl Ctx<'_> {
             new_kern(t),
             fraction_rule(t),
             new_kern(k),
-            Node::Box(b),
+            Node::Box(Box::new(b)),
         ])
     }
 
@@ -638,7 +638,7 @@ impl Ctx<'_> {
         let t = self.default_rule_thickness();
         let x = self.clean_box(&q.nucleus, self.cur_style);
         let xh = x.height;
-        let mut y = Self::vpack_nat(vec![Node::Box(x), new_kern(3 * t), fraction_rule(t)]);
+        let mut y = Self::vpack_nat(vec![Node::Box(Box::new(x)), new_kern(3 * t), fraction_rule(t)]);
         let delta = y.height + y.depth + t;
         y.height = xh;
         y.depth = delta - y.height;
@@ -674,7 +674,7 @@ impl Ctx<'_> {
         y.shift = -(x.height + clr);
         let yh = y.height;
         let over = Self::overbar(x, clr, yh);
-        q.nucleus = Field::SubBox(self.hpack_nat(vec![Node::Box(y), Node::Box(over)]));
+        q.nucleus = Field::SubBox(self.hpack_nat(vec![Node::Box(Box::new(y)), Node::Box(Box::new(over))]));
     }
 
     /// `make_math_accent` (§738).
@@ -729,7 +729,7 @@ impl Ctx<'_> {
         y.shift = s + half(w - y.width);
         y.width = 0;
         let xw = x.width;
-        let mut yv = Self::vpack_nat(vec![Node::Box(y), new_kern(-delta), Node::Box(x)]);
+        let mut yv = Self::vpack_nat(vec![Node::Box(Box::new(y)), new_kern(-delta), Node::Box(Box::new(x))]);
         yv.width = xw;
         if yv.height < h {
             // §739
@@ -815,7 +815,7 @@ impl Ctx<'_> {
             ..BoxNode::default()
         };
         let (xd, zh) = (x.depth, z.height);
-        v.list.push(Node::Box(x));
+        v.list.push(Node::Box(Box::new(x)));
         if thickness == 0 {
             v.list.push(new_kern((shift_up - xd) - (zh - shift_down)));
         } else {
@@ -823,7 +823,7 @@ impl Ctx<'_> {
             v.list.push(fraction_rule(thickness));
             v.list.push(new_kern((axis - delta) - (zh - shift_down)));
         }
-        v.list.push(Node::Box(z));
+        v.list.push(Node::Box(Box::new(z)));
         // §748
         let delta = if self.cur_style < Style::TEXT {
             self.mathsy(20, s)
@@ -832,11 +832,11 @@ impl Ctx<'_> {
         };
         let l = self.var_delimiter(q.left, s, delta);
         let r = self.var_delimiter(q.right, s, delta);
-        vec![Node::Box(self.hpack_nat(vec![
-            Node::Box(l),
-            Node::Box(v),
-            Node::Box(r),
-        ]))]
+        vec![Node::Box(Box::new(self.hpack_nat(vec![
+            Node::Box(Box::new(l)),
+            Node::Box(Box::new(v)),
+            Node::Box(Box::new(r)),
+        ])))]
     }
 
     /// `make_op` (§749); returns delta and, with limits, `new_hlist`.
@@ -890,25 +890,25 @@ impl Ctx<'_> {
         v.depth = y.depth;
         // §751
         if q.supscr == Field::Empty {
-            v.list.push(Node::Box(y));
+            v.list.push(Node::Box(Box::new(y)));
         } else {
             let shift_up = (self.mathex(11) - x.depth).max(self.mathex(9));
             let bos5 = self.mathex(13);
             v.height += bos5 + x.height + x.depth + shift_up;
             v.list.push(new_kern(bos5));
-            v.list.push(Node::Box(x));
+            v.list.push(Node::Box(Box::new(x)));
             v.list.push(new_kern(shift_up));
-            v.list.push(Node::Box(y));
+            v.list.push(Node::Box(Box::new(y)));
         }
         if q.subscr != Field::Empty {
             let shift_down = (self.mathex(12) - z.height).max(self.mathex(10));
             let bos5 = self.mathex(13);
             v.depth += bos5 + z.height + z.depth + shift_down;
             v.list.push(new_kern(shift_down));
-            v.list.push(Node::Box(z));
+            v.list.push(Node::Box(Box::new(z)));
             v.list.push(new_kern(bos5));
         }
-        (delta, Some(vec![Node::Box(v)]))
+        (delta, Some(vec![Node::Box(Box::new(v))]))
     }
 
     /// `make_ord` (§752, §753); `rest` is the mlist after `q`.
@@ -1055,12 +1055,12 @@ impl Ctx<'_> {
                 }
                 x.shift = delta;
                 let k = (shift_up - x.depth) - (y.height - shift_down);
-                let mut v = Self::vpack_nat(vec![Node::Box(x), new_kern(k), Node::Box(y)]);
+                let mut v = Self::vpack_nat(vec![Node::Box(Box::new(x)), new_kern(k), Node::Box(Box::new(y))]);
                 v.shift = shift_down;
                 v
             }
         };
-        hlist.push(Node::Box(x));
+        hlist.push(Node::Box(Box::new(x)));
     }
 
     /// `make_left_right` (§762, e-TeX's form).
@@ -1082,7 +1082,7 @@ impl Ctx<'_> {
         if delta < delta2 {
             delta = delta2;
         }
-        vec![Node::Box(self.var_delimiter(d, self.cur_size, delta))]
+        vec![Node::Box(Box::new(self.var_delimiter(d, self.cur_size, delta)))]
     }
 
     /// `mlist_to_hlist` (§726).
@@ -1269,12 +1269,12 @@ impl Ctx<'_> {
                         }
                     }
                     Field::Empty => Vec::new(),
-                    Field::SubBox(b) => vec![Node::Box(std::mem::take(b))],
+                    Field::SubBox(b) => vec![Node::Box(Box::new(std::mem::take(b)))],
                     Field::SubMlist(m) => {
                         let save_style = self.cur_style;
                         let h = self.mlist_to_hlist(std::mem::take(m), save_style, false);
                         self.set_style(save_style);
-                        vec![Node::Box(self.hpack_nat(h))]
+                        vec![Node::Box(Box::new(self.hpack_nat(h)))]
                     }
                 };
                 if noad.subscr != Field::Empty || noad.supscr != Field::Empty {
