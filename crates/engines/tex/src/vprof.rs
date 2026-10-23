@@ -78,9 +78,10 @@ pub(crate) fn encode(v: &Values, raw: &[ValueId]) -> Vec<i64> {
 pub(crate) fn encode_marks(v: &Values, raw: &[ValueId]) -> (Vec<i64>, Vec<ValueId>) {
     let mut out = Vec::with_capacity(raw.len() * 4);
     let mut ilp: Option<(Glue, Glue, i32)> = None;
+    let mut ilp_ids = [ValueId::UNIT; 3];
     let mut marks = Vec::new();
     for &x in raw {
-        push_item(v, x, &mut out, &mut ilp, &mut marks);
+        push_item(v, x, &mut out, (&mut ilp, &mut ilp_ids), &mut marks);
     }
     (out, marks)
 }
@@ -117,11 +118,14 @@ fn i32_at(v: &Values, x: ValueId, k: usize) -> i32 {
     i32::try_from(int_at(v, x, k)).unwrap_or(0)
 }
 
+/// One raw item's profile items onto `out`: `ilp` the interline
+/// parameters last put, with their values' ids (a line's are those of
+/// the line before: not decoded again).
 fn push_item(
     v: &Values,
     x: ValueId,
     out: &mut Vec<i64>,
-    ilp: &mut Option<(Glue, Glue, i32)>,
+    (ilp, ilp_ids): (&mut Option<(Glue, Glue, i32)>, &mut [ValueId; 3]),
     marks: &mut Vec<ValueId>,
 ) {
     match nodes::tag(v, x) {
@@ -130,26 +134,23 @@ fn push_item(
             marks.push(list_of(v, x).get(1).copied().unwrap_or(ValueId::UNIT));
         }
         nodes::T_VBOX => {
-            let ys = list_of(v, x);
-            let b = ys.get(1).copied().unwrap_or(ValueId::UNIT);
-            let p = (
-                glue_of(v, ys.get(2).copied()),
-                glue_of(v, ys.get(3).copied()),
-                i32_at(v, x, 4),
-            );
-            if *ilp != Some(p) {
-                out.push(P_ILP);
-                put_glue(out, &p.0);
-                put_glue(out, &p.1);
-                out.push(i64::from(p.2));
-                *ilp = Some(p);
+            let ys: [ValueId; 5] = v
+                .with_list(x, |xs| std::array::from_fn(|k| xs.get(k).copied().unwrap_or(ValueId::UNIT)))
+                .unwrap_or([ValueId::UNIT; 5]);
+            let b = ys[1];
+            if ilp.is_none() || *ilp_ids != [ys[2], ys[3], ys[4]] {
+                let p = (glue_of(v, Some(ys[2])), glue_of(v, Some(ys[3])), i32_at(v, x, 4));
+                *ilp_ids = [ys[2], ys[3], ys[4]];
+                if *ilp != Some(p) {
+                    out.push(P_ILP);
+                    put_glue(out, &p.0);
+                    put_glue(out, &p.1);
+                    out.push(i64::from(p.2));
+                    *ilp = Some(p);
+                }
             }
-            out.extend([
-                P_VBOX,
-                i64::from(!nodes::box_is_h(v, b)),
-                i64::from(nodes::box_dim(v, b, 3)),
-                i64::from(nodes::box_dim(v, b, 2)),
-            ]);
+            let (h, ht, dp) = nodes::box_kind_ht_dp(v, b);
+            out.extend([P_VBOX, i64::from(!h), i64::from(ht), i64::from(dp)]);
         }
         nodes::T_PD => out.extend([P_PD, int_at(v, x, 1)]),
         nodes::T_DELETE => out.push(P_DEL),
@@ -188,7 +189,7 @@ fn push_item(
                 i64::try_from(xs.len().saturating_sub(1)).unwrap_or(0),
             ]);
             for &y in xs.iter().skip(1) {
-                push_item(v, y, out, ilp, marks);
+                push_item(v, y, out, (&mut *ilp, &mut *ilp_ids), marks);
             }
         }
         nodes::T_ABORT => out.push(P_ABORT),

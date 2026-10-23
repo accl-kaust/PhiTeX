@@ -3183,16 +3183,15 @@ pub(crate) fn fold_item(
         T_PD => st.pd = i32::try_from(crate::val::int_at(v, n, 1)).unwrap_or(0),
         T_VBOX => {
             // (the fields borrowed: no list copied per line)
-            let ys: [Option<ValueId>; 4] = v
+            let ys: [Option<ValueId>; 5] = v
                 .with_list(n, |xs| std::array::from_fn(|k| xs.get(k).copied()))
                 .unwrap_or_else(|| {
                     let xs = list_of(v, n);
                     std::array::from_fn(|k| xs.get(k).copied())
                 });
             let b = ys[1].unwrap_or(ValueId::UNIT);
-            let bs = crate::val::glue_of(v, ys[2]);
-            let ls = crate::val::glue_of(v, ys[3]);
-            let lsl = i32::try_from(crate::val::int_at(v, n, 4)).unwrap_or(0);
+            let (bs, ls) = line_glues(v, ys[2], ys[3]);
+            let lsl = ys[4].map_or(0, |x| i32::try_from(int_of(v, x)).unwrap_or(0));
             let ht = nodes::box_dim(v, b, 3);
             if let Some(g) = phitex_typeset::linebreak::interline_glue(st.pd, ht, bs, ls, lsl) {
                 out.push_node(v, g);
@@ -3218,6 +3217,25 @@ pub(crate) fn fold_item(
     }
 }
 
+/// The `\\baselineskip` and `\\lineskip` of a line's item, decoded
+/// once for the lines that share them (a paragraph's: the same values).
+fn line_glues(v: &Values, bs: Option<ValueId>, ls: Option<ValueId>) -> (Glue, Glue) {
+    thread_local! {
+        static LAST: std::cell::Cell<Option<(u64, Option<ValueId>, Option<ValueId>, Glue, Glue)>> =
+            const { std::cell::Cell::new(None) };
+    }
+    if let Some((i, b, l, gb, gl)) = LAST.get()
+        && i == v.instance()
+        && b == bs
+        && l == ls
+    {
+        return (gb, gl);
+    }
+    let (gb, gl) = (crate::val::glue_of(v, bs), crate::val::glue_of(v, ls));
+    LAST.set(Some((v.instance(), bs, ls, gb, gl)));
+    (gb, gl)
+}
+
 /// What [`fold_item`] folds into: a list of values (an engine list's
 /// reader), or a list of this run's items ([`crate::nest::Item`]).
 pub(crate) trait FoldOut {
@@ -3234,18 +3252,21 @@ pub(crate) trait FoldOut {
 /// them, a node it made kept native until it is the last (only the last
 /// item and the count are read).
 #[derive(Default)]
-struct TailOut(Vec<Result<ValueId, Node>>);
+struct TailOut(Vec<Result<ValueId, phitex_typeset::node::GlueNode>>);
 
 impl FoldOut for TailOut {
     fn push_v(&mut self, x: ValueId) {
         self.0.push(Ok(x));
     }
-    fn push_node(&mut self, _v: &Values, n: Node) {
-        self.0.push(Err(n));
+    fn push_node(&mut self, v: &Values, n: Node) {
+        match n {
+            Node::Glue(g) => self.0.push(Err(g)),
+            n => self.0.push(Ok(nodes::encode(v, &n, &Side::default()))),
+        }
     }
     fn delete_last(&mut self, v: &Values) {
         if let Some(i) = self.0.iter().rposition(|x| x.as_ref().is_ok_and(|&x| !is_marker(v, x)) || x.is_err()) {
-            self.0.remove(i);
+            drop(self.0.remove(i));
         }
     }
 }
@@ -3463,7 +3484,8 @@ impl MainTail {
     /// The main list's end after `items` (a piece's own main-list items)
     /// folded onto this one.
     pub(crate) fn after(self, v: &Values, items: &[ValueId]) -> MainTail {
-        let mut out = TailOut(self.last.into_iter().map(Ok).collect());
+        let mut out = TailOut(Vec::with_capacity(2 * items.len() + 1));
+        out.0.extend(self.last.map(Ok));
         let mut st = FoldState {
             sf: self.sf,
             pd: self.pd,
@@ -3476,7 +3498,7 @@ impl MainTail {
             last: out.0.iter().rev().find_map(|x| match x {
                 Ok(x) if is_marker(v, *x) => None,
                 Ok(x) => Some(*x),
-                Err(n) => Some(nodes::encode(v, n, &Side::default())),
+                Err(g) => Some(nodes::encode(v, &Node::Glue(g.clone()), &Side::default())),
             }),
             since: st.since_bp,
             sf: st.sf,

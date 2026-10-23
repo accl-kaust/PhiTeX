@@ -1010,6 +1010,16 @@ pub(crate) fn box_is_h(v: &Values, b: ValueId) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether box `b` is an hbox, and its height and depth, in one read
+/// ([`box_is_h`], [`box_dim`]).
+pub(crate) fn box_kind_ht_dp(v: &Values, b: ValueId) -> (bool, i32, i32) {
+    v.with_list(b, |xs| {
+        let at = |k: usize| xs.get(k).map_or(0, |&x| n32(v, x));
+        (xs.get(1).is_some_and(|&k| int_of(v, k) == 0), at(3), at(4))
+    })
+    .unwrap_or((false, 0, 0))
+}
+
 /// A box's width (`m=1`), depth (2) or height (3) (§420).
 pub(crate) fn box_dim(v: &Values, b: ValueId, m: i32) -> i32 {
     let k = match m {
