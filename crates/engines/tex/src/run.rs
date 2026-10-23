@@ -5828,10 +5828,6 @@ impl Run<'_, '_> {
         let v = self.v;
         let delta = self.st.mark_delta(v, &mut self.mark_img);
         crate::prof::add(crate::prof::MARK_STATE, tm);
-        let Some(delta) = delta else {
-            self.marks_on = false;
-            return Ok(());
-        };
         let p = self.snapshot_of(Some(delta));
         if forced {
             self.watch_exit = None;
@@ -5991,10 +5987,7 @@ impl Run<'_, '_> {
         let groups = self.group_count();
         let tp = crate::prof::start();
         let v = self.v;
-        let Some(delta) = self.st.mark_delta(v, &mut self.mark_img) else {
-            self.marks_on = false;
-            return Ok(());
-        };
+        let delta = self.st.mark_delta(v, &mut self.mark_img);
         let mut p = self.snapshot_of(Some(delta));
         let text_at = text_at.min(self.input.text.len());
         p.nlev = segs.len() + self.parked_levels.saturating_sub(text_at);

@@ -2068,7 +2068,7 @@ impl State {
     /// changed since, parked again, the rest as before. The first mark
     /// of a run (an `img` not begun) parks every slot. `None` where the
     /// table went back since (a rollback): the deltas no longer add up.
-    pub(crate) fn mark_delta(&mut self, v: &Values, img: &mut MarkImage) -> Option<MarkDelta> {
+    pub(crate) fn mark_delta(&mut self, v: &Values, img: &mut MarkImage) -> MarkDelta {
         // (a table put back or rolled back since the last mark: the marks
         // go on, this one whole again, its image made anew)
         if self.mbroken
@@ -2120,7 +2120,7 @@ impl State {
         img.touched = self.touched.len();
         img.metas = self.metas.len();
         let rest = self.park_rest(v);
-        Some(MarkDelta {
+        MarkDelta {
             st: PState {
                 touched,
                 meta_order,
@@ -2130,7 +2130,7 @@ impl State {
             gone,
             sum: img.sum,
             whole: first,
-        })
+        }
     }
 
     /// A slot to change, as it is (no change noted).
