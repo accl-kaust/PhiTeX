@@ -5541,7 +5541,9 @@ impl Build {
             if long {
                 let k = crate::runtimes::key(src.text(&self.text));
                 let mine: phitex_defuse::FxHashSet<phitex_defuse::Field> = defs[i].iter().copied().collect();
-                let last = |f: &phitex_defuse::Field| mine.contains(f) && !later.contains(f);
+                // (a loop-back field's readers read the round's value, never
+                // a definer's: none to wait on)
+                let last = |f: &phitex_defuse::Field| mine.contains(f) && !later.contains(f) && eng.loop_value(*f).is_none();
                 let mut fs: Vec<String> = self
                     .wait_fields
                     .get(&k)
