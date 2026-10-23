@@ -4,8 +4,8 @@
 //! `x`, `t` defines `w`; `a` reads `x`, defines `z` and places `d(x)` after
 //! itself, which defines `y = x / 10`. `r` goes through items 0..4, before
 //! each marking (its sum so far, kept per mark) and parking continuing:
-//! item 0 reads `z`, item 1 `y`, item 2 `w`, item 3 places child `c(z)` and
-//! waits for its output. Cold, `r` stops on `y` and on `c`: three attempts.
+//! item 0 places child `c(0)` and reads `z`, item 1 reads `y`, item 2 `w`,
+//! item 3 places child `c(z)` and waits for its output. Cold, `r` stops on `y` and on `c`: three attempts.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -59,11 +59,11 @@ impl Operation for Ops {
             "c" => return Ok(a[1]),
             _ => {}
         }
-        // Parked: on from the token (at item 3, its child placed); resumed at a mark:
+        // Parked: on from the token (its item's child placed); resumed at a mark:
         // from that mark's sums.
         let parked = cx.parked().and_then(|t| t.downcast::<(usize, Vec<i64>)>().ok());
-        let (mut i, mut sums, placed) = match parked {
-            Some(t) => (t.0, t.1, t.0 == 3),
+        let (mut i, mut sums, mut placed) = match parked {
+            Some(t) => (t.0, t.1, true),
             None => {
                 let at = cx.resumed().map(|(tok, k)| (tok.downcast_ref::<Vec<i64>>().expect("sums")[..=k as usize].to_vec(), k));
                 self.runs.lock().unwrap().push((at.as_ref().map(|q| q.1), Vec::new()));
@@ -80,7 +80,12 @@ impl Operation for Ops {
             cx.park_continuing(Box::new((i, sums.clone())));
             self.runs.lock().unwrap().last_mut().expect("a run").1.push(i);
             let q = match i {
-                0 => cx.use_field(z)?,
+                0 => {
+                    if !placed {
+                        cx.child(op, vec![v.str("c"), v.int(0)]);
+                    }
+                    cx.use_field(z)?
+                }
                 1 => cx.use_field(y)?,
                 2 => cx.use_field(v.field("w"))?,
                 _ => {
@@ -88,11 +93,12 @@ impl Operation for Ops {
                         let zv = cx.use_field(z)?.unwrap_or(v.int(0));
                         cx.child(op, vec![v.str("c"), zv]);
                     }
-                    Some(cx.output_of(0)?)
+                    Some(cx.output_of(1)?)
                 }
             };
             sums.push(sum + q.and_then(|q| v.as_int(q)).unwrap_or(0));
             i += 1;
+            placed = false;
         }
         Ok(v.int(*sums.last().expect("a sum")))
     }
