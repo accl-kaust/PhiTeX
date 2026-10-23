@@ -200,17 +200,17 @@ pub(crate) struct PageLoop {
     pub marks: Vec<ValueId>,
     /// The pages fired so far: the piece each fired in, its finisher's
     /// input.
-    pub pages: Vec<(phitex_defuse::NodeId, FinishIn)>,
+    pub pages: Vec<std::sync::Arc<(phitex_defuse::NodeId, FinishIn)>>,
     /// Each page's finisher arguments as placed ([`FinishIn::args`]),
     /// made once: every attempt places the pages again.
-    pub page_args: Vec<Vec<ValueId>>,
+    pub page_args: Vec<std::sync::Arc<Vec<ValueId>>>,
     /// Whether this attempt continues from the loop's kept token (its
     /// placements so far committed: only new pages are placed) or starts
     /// over (every page placed again).
     pub resumed: bool,
     /// The finishers this run placed, page by page: their arguments and
     /// the placement's index ([`phitex_defuse::Ctx::placed_output`]).
-    pub placed: Vec<(Vec<ValueId>, usize)>,
+    pub placed: Vec<(std::sync::Arc<Vec<ValueId>>, usize)>,
     /// The contributions not yet looked at, with their sources.
     pub pend: Vec<(crate::vprof::PItem, SrcRef)>,
     /// The sources of the builder's page, item for item.
@@ -1148,9 +1148,10 @@ impl Run<'_, '_> {
         }
         if !lp.resumed {
             lp.placed.clear();
-            for ((at, fin), args) in lp.pages.iter().zip(&lp.page_args) {
-                let i = self.place_finisher(*at, fin, args.clone());
-                lp.placed.push((args.clone(), i));
+            for (p, args) in lp.pages.iter().zip(&lp.page_args) {
+                let (at, fin) = &**p;
+                let i = self.place_finisher(*at, fin, (**args).clone());
+                lp.placed.push((std::sync::Arc::clone(args), i));
             }
         }
         let vprof = v.field(crate::vprof::VPROF);
@@ -1540,7 +1541,7 @@ impl Run<'_, '_> {
         // (placed as it fires, its output read below; one placed by an
         // attempt before, which this one continues, is placed already,
         // with the same arguments)
-        let args = fin.args(v);
+        let args = std::sync::Arc::new(fin.args(v));
         let idx = lp.pages.len();
         let at = if let Some(p) = lp.placed.get(idx) {
             assert!(
@@ -1550,11 +1551,11 @@ impl Run<'_, '_> {
             );
             p.1
         } else {
-            let i = self.place_finisher(node, &fin, args.clone());
-            lp.placed.push((args.clone(), i));
+            let i = self.place_finisher(node, &fin, (*args).clone());
+            lp.placed.push((std::sync::Arc::clone(&args), i));
             i
         };
-        lp.pages.push((node, fin));
+        lp.pages.push(std::sync::Arc::new((node, fin)));
         lp.page_args.push(args);
         // (§1012: the marks in force where the next page begins, the
         // `\botmark` of every class after this page's marks)
