@@ -143,8 +143,8 @@ pub struct Job {
     /// `--spec`: when the engine runs steps ahead of their inputs (none:
     /// its default).
     pub spec: Option<String>,
-    /// `--wait-long`: long pieces' readers wait for them on learned
-    /// fields ([`phitex_tex::Options::wait_fields`]).
+    /// Long pieces' readers wait for them on learned fields
+    /// ([`phitex_tex::Options::wait_fields`]; on unless `--no-wait-long`).
     pub wait_long: bool,
     /// `-synctex`.
     pub synctex: bool,
