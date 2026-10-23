@@ -779,14 +779,13 @@ impl Run<'_, '_> {
         // (by field, never by location: a location's number is the order
         // the job's runs first met its field in, which the threads decide,
         // so a value holding them in that order differs between two
-        // builds of one text; stable, as the value list's)
-        // (unstable with the reads' order as the tie: the same order)
-        let mut rs: Vec<(u64, usize, Field, ValueId)> =
-            rs.into_iter().enumerate().map(|(i, (f, x))| (f.0.raw(), i, f, x)).collect();
-        rs.sort_unstable_by_key(|x| (x.0, x.1));
+        // builds of one text)
+        // (a field read for its value and by its class: the value's
+        // first, as the reads come)
+        rs.sort_unstable_by_key(|x| (x.0.0.raw(), x.1 == class));
         // (one list of the pairs in a row, `[f, x, f, x, ...]`: no list made
         // per read)
-        let rs: Vec<ValueId> = rs.into_iter().flat_map(|(_, _, f, x)| [f.0, x]).collect();
+        let rs: Vec<ValueId> = rs.into_iter().flat_map(|(f, x)| [f.0, x]).collect();
         let gids = self.st.gid_mark();
         let mut locals: Vec<(Loc, Field)> = self
             .st

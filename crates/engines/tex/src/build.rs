@@ -954,55 +954,8 @@ impl Run<'_, '_> {
         self.font_view_with(list, &[])
     }
 
-    /// [`Self::font_view`] of `list`, the characters it holds marked in
-    /// `seen` on the same walk (for the hyphenator's `\\lccode`s).
-    pub(crate) fn font_view_chars(&mut self, list: &[Node], seen: &mut [bool; 256]) -> R<crate::fonts::View> {
-        fn mark(seen: &mut [bool; 256], c: u16) {
-            if let Some(s) = seen.get_mut(usize::from(c)) {
-                *s = true;
-            }
-        }
-        fn walk(l: &[Node], ids: &mut std::collections::BTreeSet<u32>, seen: &mut [bool; 256]) {
-            let mut last = None;
-            for n in l {
-                match n {
-                    Node::Char { font, ch } => {
-                        mark(seen, *ch);
-                        if last != Some(*font) {
-                            ids.insert(*font);
-                            last = Some(*font);
-                        }
-                    }
-                    Node::Lig(g) => {
-                        mark(seen, g.ch);
-                        for &c in &g.original {
-                            mark(seen, c);
-                        }
-                        if last != Some(g.font) {
-                            ids.insert(g.font);
-                            last = Some(g.font);
-                        }
-                    }
-                    Node::Box(b) => walk(&b.list, ids, seen),
-                    Node::Unset(u) => walk(&u.list, ids, seen),
-                    Node::Disc(d) => {
-                        walk(&d.pre, ids, seen);
-                        walk(&d.post, ids, seen);
-                        walk(&d.replace, ids, seen);
-                    }
-                    Node::Ins(i) => walk(&i.list, ids, seen),
-                    Node::Adjust(a) => walk(a, ids, seen),
-                    Node::Glue(g) => {
-                        if let Some(l) = &g.leader {
-                            walk(std::slice::from_ref(l), ids, seen);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let mut ids = std::collections::BTreeSet::new();
-        walk(list, &mut ids, seen);
+    /// The view of fonts `ids` ([`Self::add_font_metrics`] each).
+    pub(crate) fn view_of(&mut self, ids: std::collections::BTreeSet<u32>) -> R<crate::fonts::View> {
         let mut view = crate::fonts::View::default();
         for f in ids {
             self.add_font_metrics(&mut view, f)?;
@@ -1214,21 +1167,39 @@ impl Run<'_, '_> {
         let v = self.v;
         let t0 = crate::prof::start();
         let mut side = Side::default();
-        // (collected in place: the items' buffer becomes the list's)
+        // (collected in place: the items' buffer becomes the list's; its
+        // fonts, and its characters for the hyphenator's `\lccode`s, found
+        // on the way)
+        let mut ids = std::collections::BTreeSet::new();
+        let mut seen = [false; 256];
+        let mut font_was = u32::MAX;
         let list: List = items
             .into_iter()
-            .filter_map(|x| match x {
-                crate::nest::Item::N(n) => Some(n),
-                crate::nest::Item::V(x) => nodes::decode(v, x, &mut side),
+            .filter_map(|x| {
+                let n = match x {
+                    crate::nest::Item::N(n) => n,
+                    crate::nest::Item::V(x) => nodes::decode(v, x, &mut side)?,
+                };
+                match &n {
+                    Node::Char { font, ch } => {
+                        if let Some(s) = seen.get_mut(usize::from(*ch)) {
+                            *s = true;
+                        }
+                        if *font != font_was {
+                            ids.insert(*font);
+                            font_was = *font;
+                        }
+                    }
+                    n => fonts_chars_of(std::slice::from_ref(n), &mut ids, &mut seen),
+                }
+                Some(n)
             })
             .collect();
         crate::prof::add(crate::prof::LB_DEC, t0);
         let t0 = crate::prof::start();
-        // \lccode of the characters the hyphenator can meet: those of the
-        // list (a character not in it is never asked for), found on the
-        // walk that finds its fonts ([`Self::font_view_chars`])
-        let mut seen = [false; 256];
-        let view = self.font_view_chars(&list, &mut seen)?;
+        // (\lccode of the characters the hyphenator can meet: those of
+        // the list, `seen`; a character not in it is never asked for)
+        let view = self.view_of(ids)?;
         let shape = self
             .get_loc(crate::fields::cell::PARSHAPE)?
             .map(|x| list_of(v, x))
@@ -2249,7 +2220,7 @@ impl Run<'_, '_> {
         // the factor, and at the end; the list's reader folds them
         let mut sf = SF_UNREAD;
         // (the buffer of the worker's last character run, reused)
-        let mut out: Vec<Node> = CHAR_BUF.with(std::cell::Cell::take);
+        let mut out: Vec<crate::nest::Item> = CHAR_BUF.with(std::cell::Cell::take);
         out.clear();
         // transitions and waiting spaces, each before `out[k]`
         let mut raws: Vec<(usize, ValueId)> = Vec::new();
@@ -2302,7 +2273,7 @@ impl Run<'_, '_> {
                         // the factor is known here (or not needed)
                         let normal = c == cmd::EX_SPACE || sf == 1000;
                         let g = self.space_glue_memo(f, sf, normal, &mut space)?;
-                        out.push(g);
+                        out.push(crate::nest::Item::N(g));
                     } else {
                         if sf != SF_UNREAD {
                             raws.push((out.len(), sf_value(v, sf)));
@@ -2367,32 +2338,37 @@ impl Run<'_, '_> {
 
     /// A character run's nodes and transitions (each transition before
     /// `out[k]`) put on list `lid`, `out` emptied.
-    fn flush_chars(&mut self, lid: i64, out: &mut Vec<Node>, raws: Vec<(usize, ValueId)>) {
+    fn flush_chars(&mut self, lid: i64, out: &mut Vec<crate::nest::Item>, raws: Vec<(usize, ValueId)>) {
         let v = self.v;
         let mut raws = raws.into_iter().peekable();
         if let Some(l) = self.level_of(lid) {
             // (the run's own list: the nodes go on it native, each stretch
             // between two transitions in one go)
             l.list.reserve(out.len() + raws.len());
-            let mut nodes = out.drain(..);
-            let mut k = 0;
-            for (at, r) in raws {
-                if at > k {
-                    l.list.extend(nodes.by_ref().take(at - k).map(crate::nest::Item::N));
-                    l.fold.since_bp += at - k;
-                    k = at;
-                }
-                fold_item(v, lid, r, &mut l.fold, &mut l.list);
+            // (the stretches cut off from the back, each moved once, then
+            // put on in order between the transitions)
+            let mut stretches: Vec<(Vec<crate::nest::Item>, Option<ValueId>)> = Vec::new();
+            for (at, r) in raws.rev() {
+                stretches.push((out.split_off(at.min(out.len())), Some(r)));
             }
-            let rest = nodes.len();
-            l.list.extend(nodes.map(crate::nest::Item::N));
-            l.fold.since_bp += rest;
+            l.fold.since_bp += out.len();
+            l.list.append(out);
+            for (mut s, r) in stretches.into_iter().rev() {
+                if let Some(r) = r {
+                    fold_item(v, lid, r, &mut l.fold, &mut l.list);
+                }
+                l.fold.since_bp += s.len();
+                l.list.append(&mut s);
+            }
         } else {
             for (k, n) in out.drain(..).enumerate() {
                 while let Some((_, r)) = raws.next_if(|&(at, _)| at == k) {
                     self.append(lid, r);
                 }
-                self.append_node(lid, n);
+                match n {
+                    crate::nest::Item::N(n) => self.append_node(lid, n),
+                    crate::nest::Item::V(x) => self.append(lid, x),
+                }
             }
             for (_, r) in raws {
                 self.append(lid, r);
@@ -2538,7 +2514,7 @@ impl Run<'_, '_> {
         view: &crate::fonts::View,
         (hyphen_char, false_bchar): (i32, Option<u32>),
         sf: &mut i32,
-        out: &mut Vec<Node>,
+        out: &mut Vec<crate::nest::Item>,
         (cur_l, cur_q): (&mut Option<u32>, &mut usize),
     ) -> R<()> {
         if self.cat_gen != self.st.cat_gen() {
@@ -2559,7 +2535,7 @@ impl Run<'_, '_> {
         // (whether the list ends with the hyphen character: a
         // discretionary is §1035's to insert)
         let mut after_hyphen =
-            matches!(out.last(), Some(Node::Char { ch, .. }) if i32::from(*ch) == hyphen_char);
+            matches!(out.last(), Some(crate::nest::Item::N(Node::Char { ch, .. })) if i32::from(*ch) == hyphen_char);
         loop {
             let Some(cl) = *cur_l else { return Ok(()) };
             if after_hyphen {
@@ -2596,7 +2572,7 @@ impl Run<'_, '_> {
             *cur_l = Some(c);
             let ch = u16::try_from(c).unwrap_or(0);
             after_hyphen = i32::from(ch) == hyphen_char;
-            out.push(Node::Char { font: f, ch });
+            out.push(crate::nest::Item::N(Node::Char { font: f, ch }));
         }
     }
 
@@ -2611,7 +2587,7 @@ impl Run<'_, '_> {
         view: &crate::fonts::View,
         ch: u32,
         sf: &mut i32,
-        out: &mut Vec<Node>,
+        out: &mut Vec<crate::nest::Item>,
         cancel_boundary: &mut bool,
     ) -> R<bool> {
         type Item = LigItem;
@@ -2661,7 +2637,7 @@ impl Run<'_, '_> {
         let wrapup = |z: bool,
                       cur_l: Option<u32>,
                       cur_q: usize,
-                      out: &mut Vec<Node>,
+                      out: &mut Vec<crate::nest::Item>,
                       lig_present: &mut bool,
                       lft_hit: &mut bool,
                       rt_hit: &mut bool,
@@ -2670,7 +2646,7 @@ impl Run<'_, '_> {
             // §1035
             let Some(cl) = cur_l else { return };
             if out.len() > cur_q
-                && matches!(out.last(), Some(Node::Char { ch, .. }) if i32::from(*ch) == hyphen_char)
+                && matches!(out.last(), Some(crate::nest::Item::N(Node::Char { ch, .. })) if i32::from(*ch) == hyphen_char)
             {
                 *ins_disc = true;
             }
@@ -2678,7 +2654,7 @@ impl Run<'_, '_> {
                 let original: Vec<u16> = out[cur_q..]
                     .iter()
                     .filter_map(|n| match n {
-                        Node::Char { ch, .. } => Some(*ch),
+                        crate::nest::Item::N(Node::Char { ch, .. }) => Some(*ch),
                         _ => None,
                     })
                     .collect();
@@ -2698,13 +2674,13 @@ impl Run<'_, '_> {
                     *rt_hit = false;
                 }
                 out.truncate(cur_q);
-                out.push(Node::Lig(lg));
+                out.push(crate::nest::Item::N(Node::Lig(lg)));
                 *lig_present = false;
             }
             if *ins_disc {
                 *ins_disc = false;
                 if para {
-                    out.push(Node::Disc(Box::default()));
+                    out.push(crate::nest::Item::N(Node::Disc(Box::default())));
                 }
             }
         };
@@ -2727,7 +2703,7 @@ impl Run<'_, '_> {
                         && (lig_present
                             || ins_disc
                             || (out.len() > cur_q
-                                && matches!(out.last(), Some(Node::Char { ch, .. }) if i32::from(*ch) == hyphen_char)));
+                                && matches!(out.last(), Some(crate::nest::Item::N(Node::Char { ch, .. })) if i32::from(*ch) == hyphen_char)));
                     if busy {
                         wrapup(
                             rt_hit,
@@ -2772,10 +2748,10 @@ impl Run<'_, '_> {
                         self.char_warning(f, input)?;
                         return Ok(false);
                     }
-                    out.push(Node::Char {
+                    out.push(crate::nest::Item::N(Node::Char {
                         font: f,
                         ch: u16::try_from(input).unwrap_or(0),
-                    });
+                    }));
                     lig_stack.pop();
                     at = L::Lookahead;
                 }
@@ -2859,10 +2835,10 @@ impl Run<'_, '_> {
                         ptr: None,
                     });
                     if let Some(c) = top.ptr {
-                        out.push(Node::Char {
+                        out.push(crate::nest::Item::N(Node::Char {
                             font: f,
                             ch: u16::try_from(c).unwrap_or(0),
-                        });
+                        }));
                     }
                     lig_present = true;
                     if let Some(t) = lig_stack.last() {
@@ -2887,17 +2863,17 @@ impl Run<'_, '_> {
                             && !lig_present
                             && !ins_disc
                             && !(out.len() > cur_q
-                                && matches!(out.last(), Some(Node::Char { ch, .. }) if i32::from(*ch) == hyphen_char))
+                                && matches!(out.last(), Some(crate::nest::Item::N(Node::Char { ch, .. })) if i32::from(*ch) == hyphen_char))
                             && view.exists(f, top.ch)
                         {
                             let c = top.ch;
                             lig_stack.clear();
                             cur_q = out.len();
                             cur_l = Some(c);
-                            out.push(Node::Char {
+                            out.push(crate::nest::Item::N(Node::Char {
                                 font: f,
                                 ch: u16::try_from(c).unwrap_or(0),
-                            });
+                            }));
                             at = L::Lookahead;
                             continue;
                         }
@@ -2916,7 +2892,7 @@ impl Run<'_, '_> {
                             &mut ins_disc,
                             lig_stack.is_empty(),
                         );
-                        out.push(Node::Kern(loaded.at.char_kern(step), KernKind::Normal));
+                        out.push(crate::nest::Item::N(Node::Kern(loaded.at.char_kern(step), KernKind::Normal)));
                         at = L::Move;
                         continue;
                     }
@@ -3187,6 +3163,54 @@ fn merge_sides(a: Side, b: Side) -> Side {
     s
 }
 
+/// The fonts of list `l`'s characters into `ids` and their codes marked
+/// in `seen` (for the hyphenator's `\lccode`s), nested lists included:
+/// what a paragraph's view and its hyphenation need of it.
+fn fonts_chars_of(l: &[Node], ids: &mut std::collections::BTreeSet<u32>, seen: &mut [bool; 256]) {
+    fn mark(seen: &mut [bool; 256], c: u16) {
+        if let Some(s) = seen.get_mut(usize::from(c)) {
+            *s = true;
+        }
+    }
+    let mut last = None;
+    for n in l {
+        match n {
+            Node::Char { font, ch } => {
+                mark(seen, *ch);
+                if last != Some(*font) {
+                    ids.insert(*font);
+                    last = Some(*font);
+                }
+            }
+            Node::Lig(g) => {
+                mark(seen, g.ch);
+                for &c in &g.original {
+                    mark(seen, c);
+                }
+                if last != Some(g.font) {
+                    ids.insert(g.font);
+                    last = Some(g.font);
+                }
+            }
+            Node::Box(b) => fonts_chars_of(&b.list, ids, seen),
+            Node::Unset(u) => fonts_chars_of(&u.list, ids, seen),
+            Node::Disc(d) => {
+                fonts_chars_of(&d.pre, ids, seen);
+                fonts_chars_of(&d.post, ids, seen);
+                fonts_chars_of(&d.replace, ids, seen);
+            }
+            Node::Ins(i) => fonts_chars_of(&i.list, ids, seen),
+            Node::Adjust(a) => fonts_chars_of(a, ids, seen),
+            Node::Glue(g) => {
+                if let Some(l) = &g.leader {
+                    fonts_chars_of(std::slice::from_ref(l), ids, seen);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn _unused(_: ValueId) -> Option<Glue> {
     let _ = glue_of;
     None
@@ -3195,7 +3219,7 @@ pub(crate) fn _unused(_: ValueId) -> Option<Glue> {
 thread_local! {
     /// A character run's node buffer, kept for the worker's next run
     /// ([`Run::char_run`]).
-    static CHAR_BUF: std::cell::Cell<Vec<Node>> = const { std::cell::Cell::new(Vec::new()) };
+    static CHAR_BUF: std::cell::Cell<Vec<crate::nest::Item>> = const { std::cell::Cell::new(Vec::new()) };
     /// Its font view, kept the same way.
     static CHAR_VIEW: std::cell::Cell<Option<crate::fonts::View>> = const { std::cell::Cell::new(None) };
 }

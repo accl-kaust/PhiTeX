@@ -691,6 +691,10 @@ pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u
     // (the line's characters' values, direct-mapped by character: a line
     // repeats few, and the run's cache is a thread-local away)
     let mut chars = [(u32::MAX, 0u16, ValueId::UNIT); 64];
+    // (its kerns' values, direct-mapped by width, and its last
+    // discretionary's: a line repeats those too)
+    let mut kerns = [(i32::MIN, KernKind::Normal, ValueId::UNIT); 16];
+    let mut disc: Option<(&Disc, ValueId)> = None;
     let mut xs = Vec::with_capacity(list.len());
     for n in list {
         let x = match n {
@@ -716,9 +720,29 @@ pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u
                     x
                 }
             },
-            Node::Kern(..) | Node::Penalty(_) | Node::Rule(_) | Node::Math(..) | Node::Language { .. } => {
-                encode(v, n, side)
+            Node::Kern(w, k) => {
+                #[allow(clippy::cast_sign_loss)]
+                let e = &mut kerns[(*w as u32 as usize ^ (*w as u32 as usize >> 7)) & 15];
+                if e.0 == *w && e.1 == *k {
+                    e.2
+                } else {
+                    let x = encode(v, n, side);
+                    *e = (*w, *k, x);
+                    x
+                }
             }
+            Node::Disc(d) => {
+                plain = plain && native_walk(std::slice::from_ref(n), &mut fonts);
+                match disc {
+                    Some((e, x)) if **d == *e => x,
+                    _ => {
+                        let x = encode(v, n, side);
+                        disc = Some((d, x));
+                        x
+                    }
+                }
+            }
+            Node::Penalty(_) | Node::Rule(_) | Node::Math(..) | Node::Language { .. } => encode(v, n, side),
             _ => {
                 plain = plain && native_walk(std::slice::from_ref(n), &mut fonts);
                 encode(v, n, side)
