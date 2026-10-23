@@ -2941,4 +2941,34 @@ mod tests {
         assert_eq!(back.read_values(), st.read_values());
         assert!(back.read_locs().contains(&900));
     }
+
+    /// A cut inside a group: a global definition made there with no save
+    /// of its location open is not carried. The resume holds no mark of
+    /// it (`defined_after` is false: the cutting piece defined and
+    /// published it, the resume did not) and reads its value from the
+    /// engine, as the carried slot, unloaded, did; a local definition in
+    /// the open group then saves the unloaded slot, and the group's close
+    /// puts it back unloaded: the engine's value, the global one (§283).
+    /// A location the open group saved keeps its slot and its mark.
+    #[test]
+    fn a_continuation_carries_only_what_the_engine_does_not_hold() {
+        let v = Values::new();
+        let mut st = State::new();
+        let (g, sb, db, _) = st.open();
+        st.set(300, Entry::raw(Some(v.int(1))), true, Some(g));
+        st.set(301, Entry::raw(Some(v.int(2))), false, Some(g));
+        let c = st.cont(&v, &[g]);
+        let locs: Vec<Loc> = c.slots.iter().map(|s| s.loc).collect();
+        assert!(!locs.contains(&300));
+        assert!(locs.contains(&301));
+        let mut r = State::from_cont(c);
+        assert!(!r.defined_after(300, 0));
+        assert!(!r.is_loaded(300));
+        assert!(r.defined_after(301, 0));
+        r.set(300, Entry::raw(Some(v.int(5))), false, Some(g));
+        assert!(r.is_loaded(300));
+        r.close(sb, db);
+        assert!(!r.is_loaded(300));
+        assert!(!r.is_loaded(301));
+    }
 }
