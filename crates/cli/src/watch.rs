@@ -11,7 +11,7 @@
 //! message the terminal shows is the viewer's too (its console).
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,35 +67,98 @@ fn source(root: &Path, p: &Path) -> bool {
 /// to one of them that leaves those bytes is the watch's own.
 type Ours = Arc<Mutex<HashMap<PathBuf, u64>>>;
 
+/// Whether the system says when a file's writer closes it (inotify's
+/// close-write): a change is then read once its save ends.
+const CLOSES: bool = cfg!(any(target_os = "linux", target_os = "android"));
+
+/// How long a file written and not closed waits before it is read
+/// anyway (a writer that keeps it open).
+const WRITE_WAIT: Duration = Duration::from_millis(500);
+
+/// `changed` without the watch's own writes (`ours`: a change that
+/// leaves the bytes it wrote).
+fn not_ours(ours: &Ours, changed: &mut Vec<PathBuf>) {
+    let ours = ours.lock().unwrap_or_else(PoisonError::into_inner);
+    changed.retain(|p| {
+        let mine = ours
+            .get(p)
+            .or_else(|| p.canonicalize().ok().and_then(|c| ours.get(&c)));
+        match mine {
+            Some(&h) => tex::fingerprint_file(p) != Some(h),
+            None => true,
+        }
+    });
+}
+
 /// The system's file events under `root`, as the project's changed
-/// sources (the watch's own writes left out).
+/// sources (the watch's own writes left out). Where the system says when
+/// a writer closes a file ([`CLOSES`]), a file created or written is a
+/// change once closed, not at each write of its save: an editor that
+/// saves in place truncates the file first, and a build of it read
+/// between would be one of a cut text.
 fn watcher(
     root: &Path,
     ours: Ours,
     tx: mpsc::Sender<(Instant, Event)>,
 ) -> notify::Result<notify::RecommendedWatcher> {
+    use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind};
     let r = root.to_path_buf();
+    // (the files written and not closed yet)
+    let writing: Arc<Mutex<HashSet<PathBuf>>> = Arc::default();
     let mut w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
         let Ok(ev) = ev else { return };
-        if !matches!(
-            ev.kind,
-            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-        ) {
+        let closed = CLOSES
+            && matches!(
+                ev.kind,
+                EventKind::Access(AccessKind::Close(AccessMode::Write))
+            );
+        if !closed
+            && !matches!(
+                ev.kind,
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+            )
+        {
             return;
         }
         let mut changed: Vec<PathBuf> = ev.paths.into_iter().filter(|p| source(&r, p)).collect();
-        {
-            let ours = ours.lock().unwrap_or_else(PoisonError::into_inner);
-            changed.retain(|p| {
-                let mine = ours
-                    .get(p)
-                    .or_else(|| p.canonicalize().ok().and_then(|c| ours.get(&c)));
-                match mine {
-                    Some(&h) => tex::fingerprint_file(p) != Some(h),
-                    None => true,
+        if CLOSES {
+            let written = matches!(
+                ev.kind,
+                EventKind::Create(CreateKind::File | CreateKind::Any)
+                    | EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Any)
+            );
+            let mut open = writing.lock().unwrap_or_else(PoisonError::into_inner);
+            if written {
+                // (read after WRITE_WAIT if its writer keeps it open)
+                for p in changed.drain(..) {
+                    if open.insert(p.clone()) {
+                        let (writing, ours, tx) = (writing.clone(), ours.clone(), tx.clone());
+                        std::thread::spawn(move || {
+                            std::thread::sleep(WRITE_WAIT);
+                            let late = writing
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .remove(&p);
+                            let mut changed = vec![p];
+                            if late {
+                                not_ours(&ours, &mut changed);
+                                if !changed.is_empty() {
+                                    let _ = tx.send((Instant::now(), Event::Files(changed)));
+                                }
+                            }
+                        });
+                    }
                 }
-            });
+            } else if closed {
+                // (a close of a file not written changes nothing)
+                changed.retain(|p| open.remove(p));
+            } else {
+                for p in &changed {
+                    open.remove(p);
+                }
+            }
         }
+        not_ours(&ours, &mut changed);
         if !changed.is_empty() {
             let _ = tx.send((Instant::now(), Event::Files(changed)));
         }

@@ -343,6 +343,11 @@ impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (raw, hint, version) = self.edits.take()?;
         crate::timeline::lap("engine: the edit taken");
+        // (the units hold the last text as a file, [`as_file`]: a range of
+        // the last text is one of theirs only where that text ended its
+        // lines already; a text cut off mid-line, as a file read while
+        // its editor writes it, has them a byte longer)
+        let whole = self.text.is_empty() || self.text.ends_with('\n');
         // (the sender's prefix and suffix, where its last text is the one
         // the canonical text is of: what changed is looked at alone)
         let ends = hint
@@ -436,7 +441,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             self.end,
             self.nodes,
             self.text,
-            range,
+            range.filter(|_| whole),
             self.incr.as_deref_mut(),
             self.loads,
         );
