@@ -783,6 +783,11 @@ pub(crate) struct Run<'c, 'a> {
     /// ([`Run::pending_pre`]) become the read-back values. Else nothing
     /// of it is published.
     pub read_point_pending: Option<String>,
+    /// The files this run looked for in vain after it became a read-back
+    /// point ([`Run::read_point_here`]): one it opens for writing later is
+    /// read back here next round, where the lines written to it are read
+    /// ([`Run::note_absent_read_point`]), as when the file is there.
+    pub vain_after_point: Vec<String>,
     /// The values at a pending read-back point of the locations defined
     /// or restored after it ([`Run::note_pre`]).
     pub pending_pre: Vec<(Loc, ValueId)>,
@@ -1033,6 +1038,7 @@ impl<'c, 'a> Run<'c, 'a> {
             seeded: Vec::new(),
             cont_lines: Vec::new(),
             read_point_pending: None,
+            vain_after_point: Vec::new(),
             pending_pre: Vec::new(),
             pending_locs: phitex_defuse::FxHashSet::default(),
             scanner: None,
@@ -2579,6 +2585,13 @@ impl<'c, 'a> Run<'c, 'a> {
             if per_field.is_some() {
                 self.note_read_point();
                 self.mark_read_point(key)?;
+            } else if self.read_point_here && self.read_point_pending.is_none() {
+                // (the run is a read-back point already: the values the
+                // lines written to this file read are kept from there)
+                if !self.vain_after_point.iter().any(|k| k == key) {
+                    self.muts += 1;
+                    self.vain_after_point.push(key.to_owned());
+                }
             } else if !self.read_back_done || self.read_point_pending.is_some() {
                 self.note_read_point();
                 if self.read_back_done {
@@ -2848,6 +2861,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// (a macro that looks for the file it then writes: the first round's
     /// lines are read back at that point next round).
     fn note_absent_read_point(&mut self, name: &str) -> R<()> {
+        if let Some(i) = self.vain_after_point.iter().position(|k| k == name) {
+            self.vain_after_point.swap_remove(i);
+            self.muts += 1;
+            return self.mark_read_point(name);
+        }
         if self.read_point_pending.as_deref() != Some(name) {
             return Ok(());
         }
@@ -5445,6 +5463,7 @@ pub(crate) struct Parked {
     seeded: Vec<Seeded>,
     cont_lines: Vec<Option<FileLine>>,
     read_point_pending: Option<String>,
+    vain_after_point: Vec<String>,
     pending_pre: Vec<(Field, ValueId)>,
     cand: u32,
     cand_marks: Vec<crate::pages::CandMark>,
@@ -5636,6 +5655,7 @@ impl Run<'_, '_> {
             seeded: std::mem::take(&mut self.seeded),
             cont_lines: std::mem::take(&mut self.cont_lines),
             read_point_pending: self.read_point_pending.take(),
+            vain_after_point: std::mem::take(&mut self.vain_after_point),
             pending_pre: std::mem::take(&mut self.pending_pre)
                 .into_iter()
                 .map(|(l, x)| (self.loc_field(l), x))
@@ -6235,6 +6255,7 @@ impl Run<'_, '_> {
             seeded: self.seeded.clone(),
             cont_lines: self.cont_lines.clone(),
             read_point_pending: self.read_point_pending.clone(),
+            vain_after_point: self.vain_after_point.clone(),
             pending_pre,
             cand: self.cand,
             cand_marks: self.cand_marks.clone(),
@@ -6457,6 +6478,7 @@ fn parked_rest(p: &Parked) -> u64 {
         (x.raw(), n).hash(&mut h);
     }
     (p.read_back_done, p.read_point_here, &p.text_written, &p.read_point_pending).hash(&mut h);
+    p.vain_after_point.hash(&mut h);
     p.read_back_at.map(|l| (l.kind, l.ty, l.a, l.b, l.c)).hash(&mut h);
     w(&mut h, p.seeded.len() as u64);
     w(&mut h, p.cont_lines.len() as u64);
@@ -6622,6 +6644,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.seeded = p.seeded;
         r.cont_lines = p.cont_lines;
         r.read_point_pending = p.read_point_pending;
+        r.vain_after_point = p.vain_after_point;
         r.pending_pre = p
             .pending_pre
             .into_iter()
