@@ -724,9 +724,6 @@ impl State {
         if self.undo.is_some() {
             self.log_slot(loc);
         }
-        if self.track {
-            self.note_mark_change(loc);
-        }
         let s = if loc & SPILL == 0 {
             let i = loc as usize;
             if i >= self.eq.len() {
@@ -743,6 +740,11 @@ impl State {
         if !s.touched {
             s.touched = true;
             self.touched.push(loc);
+        }
+        // (noted as changed since the last mark, once: the slot at hand)
+        if self.track && !s.mdirty {
+            s.mdirty = true;
+            self.mdirty.push(loc);
         }
         s
     }
@@ -956,14 +958,15 @@ impl State {
         if self.undo.is_some() {
             self.log_slot(loc);
         }
-        if self.track {
-            self.note_mark_change(loc);
-        }
         let s = if loc & SPILL == 0 {
             &mut self.eq[loc as usize]
         } else {
             &mut self.spill[(loc & !SPILL) as usize]
         };
+        if self.track && !s.mdirty {
+            s.mdirty = true;
+            self.mdirty.push(loc);
+        }
         &mut s.e
     }
 
@@ -2469,6 +2472,19 @@ impl MarkDelta {
     }
 }
 
+#[cfg(test)]
+impl PState {
+    /// (test) A copy whose first defined slot read `x` from the engine
+    /// before its definition.
+    pub(crate) fn with_eng(&self, x: Option<ValueId>) -> PState {
+        let mut p = self.clone();
+        if let Some(m) = p.slots.iter_mut().find_map(|s| s.meta.as_mut()) {
+            m.eng = Some(x);
+        }
+        p
+    }
+}
+
 /// A run's table, parked ([`State::park`]).
 #[derive(Clone)]
 pub(crate) struct PState {
@@ -2534,10 +2550,12 @@ impl PState {
         let ent = |e: &PEntry| (e.id.map(ValueId::raw), e.flags);
         let mut h = phitex_defuse::FxHasher::default();
         (s.loc.word(), ent(&s.e), s.save_gid, s.save_stamp, s.ginert).hash(&mut h);
-        // (the engine's value the run read before its definition is a
-        // read's cache too, [`PSlot::is_read_cache`]: left out)
+        // (the engine's value the run read before its definition too: it
+        // says at the end whether the definition is an effect,
+        // `State::published`, and the run goes on from it)
         if let Some(m) = &s.meta {
             (
+                m.eng.map(|x| x.map(ValueId::raw)),
                 m.publ.map(|(x, l)| (x.map(ValueId::raw), l)),
                 m.ldef_stamp,
                 m.ldef_local,
