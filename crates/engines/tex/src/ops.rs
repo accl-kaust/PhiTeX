@@ -720,6 +720,16 @@ impl Operation for Exec {
                 // (`PHITEX_PKG_NONET=1`: no load recorded, for comparison)
                 r.rec_load = load && r.scope_kind()?.is_none();
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
+                // (what the run reads of its arguments but its text after
+                // its start, its hint's counts among them: in its state)
+                r.args_key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = phitex_defuse::FxHasher::default();
+                    for a in args.get(1..).unwrap_or_default() {
+                        a.raw().hash(&mut h);
+                    }
+                    h.finish()
+                };
                 let args = r.resolve_units(&args)?;
                 let fs = crate::run::decode_segs(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
