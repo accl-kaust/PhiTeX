@@ -1190,6 +1190,15 @@ impl Run<'_, '_> {
                             font_was = *font;
                         }
                     }
+                    // (no character in it)
+                    Node::Glue(g) if g.leader.is_none() => {}
+                    Node::Kern(..)
+                    | Node::Penalty(_)
+                    | Node::Math(..)
+                    | Node::Rule(_)
+                    | Node::Whatsit(..)
+                    | Node::Mark(_)
+                    | Node::Language { .. } => {}
                     n => fonts_chars_of(std::slice::from_ref(n), &mut ids, &mut seen),
                 }
                 Some(n)
@@ -2345,21 +2354,19 @@ impl Run<'_, '_> {
             // (the run's own list: the nodes go on it native, each stretch
             // between two transitions in one go)
             l.list.reserve(out.len() + raws.len());
-            // (the stretches cut off from the back, each moved once, then
-            // put on in order between the transitions)
-            let mut stretches: Vec<(Vec<crate::nest::Item>, Option<ValueId>)> = Vec::new();
-            for (at, r) in raws.rev() {
-                stretches.push((out.split_off(at.min(out.len())), Some(r)));
-            }
-            l.fold.since_bp += out.len();
-            l.list.append(out);
-            for (mut s, r) in stretches.into_iter().rev() {
-                if let Some(r) = r {
-                    fold_item(v, lid, r, &mut l.fold, &mut l.list);
+            let mut nodes = out.drain(..);
+            let mut k = 0;
+            for (at, r) in raws {
+                if at > k {
+                    l.list.extend(nodes.by_ref().take(at - k));
+                    l.fold.since_bp += at - k;
+                    k = at;
                 }
-                l.fold.since_bp += s.len();
-                l.list.append(&mut s);
+                fold_item(v, lid, r, &mut l.fold, &mut l.list);
             }
+            let rest = nodes.len();
+            l.list.extend(nodes);
+            l.fold.since_bp += rest;
         } else {
             for (k, n) in out.drain(..).enumerate() {
                 while let Some((_, r)) = raws.next_if(|&(at, _)| at == k) {
