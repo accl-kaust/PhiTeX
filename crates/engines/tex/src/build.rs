@@ -2594,7 +2594,7 @@ impl Run<'_, '_> {
             if *ins_disc {
                 *ins_disc = false;
                 if para {
-                    out.push(Node::Disc(Box::new(Disc::default())));
+                    out.push(Node::Disc(Box::default()));
                 }
             }
         };

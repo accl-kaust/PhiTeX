@@ -602,7 +602,7 @@ impl Ctx<'_> {
                 h
             }
             Field::SubBox(b) => vec![Node::Box(Box::new(b.clone()))],
-            Field::Empty => vec![Node::Box(Box::new(BoxNode::default()))],
+            Field::Empty => vec![Node::Box(Box::default())],
         };
         // found:
         let mut x = match q.as_slice() {
