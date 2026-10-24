@@ -263,8 +263,7 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
             let name = crate::fields::font_cell_name(i64::from(id), crate::fields::FontCell::Info);
             let info = cx.use_field(v.field(&name))?;
             if let Some(i) = crate::fonts::info(v, info)
-                && let Some(file) = i.file
-                && let Some(l) = crate::fonts::load(v, file, i.s)
+                && let Some(l) = crate::fonts::load_info(v, &i)
             {
                 defs.insert(id, crate::fonts::font_def(&l, &i.name));
             }

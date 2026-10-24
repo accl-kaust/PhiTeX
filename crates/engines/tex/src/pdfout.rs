@@ -1333,13 +1333,13 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
             out.nums.insert(f, FontId::try_from(n).unwrap_or(0));
         }
     }
-    let mut known: Vec<(u32, String, i32, ValueId, i32)> = Vec::new();
+    let mut known: Vec<(u32, crate::fonts::Info)> = Vec::new();
     for &f in ids {
         if let Some(i) = crate::fonts::info(v, r.font_get(f, crate::fields::FontCell::Info)?)
-            && let Some(file) = i.file
+            && i.file.is_some()
             && !known.iter().any(|x| x.0 == f)
         {
-            known.push((f, i.name, i.size, file, i.s));
+            known.push((f, i));
         }
     }
     // (every step asks for its fonts' virtual files itself: no memo of
@@ -1347,8 +1347,43 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
     // asked)
     let mut k = 0;
     while k < known.len() {
-        let (f, name, size) = (known[k].0, known[k].1.clone(), known[k].2);
+        let (f, name, size, ls) = (
+            known[k].0,
+            known[k].1.name.clone(),
+            known[k].1.size,
+            known[k].1.ls,
+        );
         k += 1;
+        if let Some(ls) = ls {
+            // a letter-spaced font: its packets made here, its one local
+            // font the font it spaces (`letter_space_font`)
+            let Ok(g) = u32::try_from(ls.base) else {
+                continue;
+            };
+            if !known.iter().any(|x| x.0 == g) {
+                let Some(i) = crate::fonts::info(v, r.font_get(g, crate::fields::FontCell::Info)?)
+                    .filter(|i| i.file.is_some())
+                else {
+                    continue;
+                };
+                if let Some(&n) = nums.get(&ls.base) {
+                    out.nums.insert(g, FontId::try_from(n).unwrap_or(0));
+                }
+                known.push((g, i));
+            }
+            let Some(l) = crate::fonts::load_info(v, &known[k - 1].1) else {
+                continue;
+            };
+            let packets = Arc::new(ls.packets(&l.tfm));
+            out.vfs.insert(
+                f,
+                VirtualFont {
+                    fonts: vec![(0, g)],
+                    packets,
+                },
+            );
+            continue;
+        }
         let Some(b) = file_bytes(r, &format!("{name}.vf"))? else {
             continue;
         };
@@ -1359,12 +1394,22 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         for lf in &vf.fonts {
             let fs = store_scaled_f(lf.scaled, size);
             let lname = String::from_utf8_lossy(&lf.name).into_owned();
-            let g = if let Some(x) = known.iter().find(|x| x.1 == lname && x.2 == fs) {
+            let g = if let Some(x) = known.iter().find(|x| x.1.name == lname && x.1.size == fs) {
                 x.0
             } else if let Some(file) = r.file(&format!("{lname}.tfm"))? {
                 let g = LOCAL_FONTS + u32::try_from(out.locals.len()).unwrap_or(0);
                 out.locals.push((lname.clone(), fs));
-                known.push((g, lname, fs, file, fs));
+                known.push((
+                    g,
+                    crate::fonts::Info {
+                        name: lname,
+                        size: fs,
+                        dsize: 0,
+                        file: Some(file),
+                        s: fs,
+                        ls: None,
+                    },
+                ));
                 g
             } else {
                 // (`read_font_info` failing: the null font)
@@ -1380,10 +1425,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         );
         out.vfs.insert(f, VirtualFont { fonts, packets });
     }
-    let mut wanted: Vec<(u32, String, ValueId, i32)> = known
-        .into_iter()
-        .map(|(f, name, _, file, s)| (f, name, file, s))
-        .collect();
+    let mut wanted = known;
     if space && let Some(x) = r.file("pdftexspace.tfm")? {
         // pdfTeX loads the space font at the shipout that first needs
         // it, as the next internal font number (the engine numbers no
@@ -1392,16 +1434,30 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
             // fonts' range, numbered by the link where it is first
             // loaded ([`FontNums`])
             SPACE_FONT;
-        wanted.push((id, "pdftexspace".to_owned(), x, -1000));
+        wanted.push((
+            id,
+            crate::fonts::Info {
+                name: "pdftexspace".to_owned(),
+                size: 0,
+                dsize: 0,
+                file: Some(x),
+                s: -1000,
+                ls: None,
+            },
+        ));
         out.space = Some(id);
     }
-    for (id, name, file, s) in wanted {
-        let Some(l) = crate::fonts::load(v, file, s) else {
+    for (id, i) in wanted {
+        let name = i.name.clone();
+        let Some(l) = crate::fonts::load_info(v, &i) else {
             continue;
         };
         let entry = if Some(id) == out.space {
             // `mapfile.c`: the line pdfTeX adds for its space font
             parse_line(b"pdftexspace PdfTeX-Space <pdftexspace.pfb")
+        } else if i.ls.is_some() {
+            // (a letter-spaced font is virtual: no map line)
+            None
         } else {
             map.as_ref().and_then(|m| m.get(name.as_bytes()))
         };

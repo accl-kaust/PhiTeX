@@ -757,6 +757,19 @@ impl Tfm {
             .find(|j| j.next == cur_r && j.skip <= STOP_FLAG)
     }
 
+    /// The font without its characters' lig/kern programs
+    /// (`set_no_ligatures`, pdfTeX: a character's `lig_tag` taken off,
+    /// its kerns gone with its ligatures; the boundary's program kept).
+    #[must_use]
+    pub fn without_ligatures(mut self) -> Tfm {
+        for ci in &mut self.chars {
+            if ci.exists() && ci.tag == Tag::Lig {
+                ci.tag = Tag::None;
+            }
+        }
+        self.with_pairs()
+    }
+
     /// The font with its pair table ([`Tfm::lookup`]): each left
     /// character's program walked once, the first step for each right
     /// character kept.

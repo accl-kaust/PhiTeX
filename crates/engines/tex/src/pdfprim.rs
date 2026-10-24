@@ -1873,17 +1873,13 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
         r.define_cs(&u, &Mean::Font(0), global);
         r.scan_optional_equals()?;
         let f = r.scan_font_ident()?;
-        let mut suffix = String::new();
-        if chr == 11 {
-            let ls = r.scan_int()?.clamp(-1000, 1000);
+        let nf = if chr == 11 {
+            let e = r.scan_int()?.clamp(-1000, 1000);
             let nolig = r.scan_keyword("nolig")?;
-            suffix = format!("{}{ls}ls", if ls >= 0 { "+" } else { "" });
-            let _ = nolig;
-            // PDF-BACKEND-GAP: a letter-spaced font is a virtual font
-            // whose characters carry the spacing; the copy here has the
-            // original's metrics
-        }
-        let nf = copy_font(r, f, &suffix, &t)?;
+            letter_space_font(r, f, e, nolig, &t)?
+        } else {
+            copy_font(r, f, &t)?
+        };
         r.define_cs(&u, &Mean::Font(nf), global);
         let id = Tok::cs(&format!("\u{10FFFE}F{nf}\u{2}{t}"));
         r.define_cs(&id, &Mean::Font(nf), true);
@@ -1893,17 +1889,98 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
     Ok(false)
 }
 
-/// A new font with `f`'s metrics (and its name plus `suffix`), named
-/// `t`: its key that of the copy of `f` with `suffix` named `t`
-/// ([`crate::fonts::key_of`]; the same copy made again is that font).
-fn copy_font(r: &mut Run<'_, '_>, f: i64, suffix: &str, t: &str) -> R<i64> {
+/// `letter_space_font` (pdfTeX): font `f`'s TFM read again at its size
+/// as a new font named `t`, its name `f`'s with `+<e>ls`, every width
+/// `round_xn_over_d(quad, e, 1000)` wider (`quad` its own, `f`'s where
+/// its own is 0), no lig/kern programs if `nolig`; a virtual font whose
+/// character `c` is `f`'s `c` between two moves of
+/// `round_xn_over_d(quad(f), e, 2000)` ([`crate::fonts::Ls`]). Its key
+/// that of the same spacing of `f` named `t`.
+fn letter_space_font(r: &mut Run<'_, '_>, f: i64, e: i32, nolig: bool, t: &str) -> R<i64> {
+    use crate::fields::FontCell;
+    use phitex_pdf::num::round_xn_over_d;
+    let v = r.v;
+    let info = r.font_get(f, FontCell::Info)?;
+    let Some(i) = crate::fonts::info(v, info) else {
+        return Ok(0);
+    };
+    let Some(file) = i.file else {
+        return Ok(0);
+    };
+    let Some(l) = crate::fonts::load(v, file, i.size) else {
+        return Ok(0);
+    };
+    let name = format!("{}{}{e}ls", i.name, if e > 0 { "+" } else { "" });
+    let quad_f = r.font_int(f, FontCell::Fd(6))?;
+    let mut params = l.at.params.clone();
+    if let Some(q) = params.get_mut(5)
+        && *q == 0
+        && quad_f > 0
+    {
+        *q = quad_f;
+    }
+    let quad_k = params.get(5).copied().unwrap_or(0);
+    if quad_k == 0 {
+        r.log(
+            "wlog",
+            "pdfTeX warning (\\letterspacefont): font has zero em size (\\fontdimen6)",
+        )?;
+    }
+    let ls = crate::fonts::Ls {
+        base: f,
+        dw: round_xn_over_d(quad_k, e, 1000),
+        mv: crate::fonts::Ls::move_bytes(round_xn_over_d(quad_f, e, 2000), i.size),
+        nolig,
+    };
+    let sig = format!("{name}\u{1}{f}\u{1}{t}\u{1}{}", u8::from(nolig));
+    let mut held = false;
+    let k = crate::fonts::pick_key(&sig, i.size, &mut |k| {
+        let x = r.font_get(k, FontCell::Info)?;
+        let other = crate::fonts::info(v, x)
+            .map(|j| j.name != name || j.size != i.size || j.ls != Some(ls));
+        held = other == Some(false);
+        Ok::<_, crate::run::Halt>(other)
+    })?;
+    let nf = i64::from(k);
+    if held {
+        return Ok(nf);
+    }
+    r.set("fontlast", v.int(nf), true);
+    r.font_loaded(nf);
+    crate::pdfout::font_load(r, &name, i.size, nf);
+    let xs = vec![
+        v.str(&name),
+        v.int(i64::from(i.size)),
+        v.int(i64::from(l.at.design_size)),
+        file,
+        v.int(i64::from(i.size)),
+        ls.value(v),
+    ];
+    r.font_set(nf, FontCell::Info, v.list(xs), true);
+    for (k, p) in params.iter().enumerate() {
+        let k = i32::try_from(k + 1).unwrap_or(0);
+        r.font_set(nf, FontCell::Fd(k), v.int(i64::from(*p)), true);
+    }
+    let n = i64::try_from(params.len()).unwrap_or(0);
+    r.font_set(nf, FontCell::Fdn, v.int(n), true);
+    let hc = i64::from(r.ipar(crate::fields::Par::defaulthyphenchar)?);
+    let sc = i64::from(r.ipar(crate::fields::Par::defaultskewchar)?);
+    r.font_set(nf, FontCell::Hc, v.int(hc), true);
+    r.font_set(nf, FontCell::Sc, v.int(sc), true);
+    Ok(nf)
+}
+
+/// A new font with `f`'s metrics and name, named `t`: its key that of
+/// the copy of `f` named `t` ([`crate::fonts::key_of`]; the same copy
+/// made again is that font).
+fn copy_font(r: &mut Run<'_, '_>, f: i64, t: &str) -> R<i64> {
     let v = r.v;
     let info = r.font_get(f, crate::fields::FontCell::Info)?;
     let Some(i) = crate::fonts::info(v, info) else {
         return Ok(0);
     };
-    let sig = format!("{}{suffix}\u{1}{f}\u{1}{t}", i.name);
-    let copy_name = format!("{}{suffix}", i.name);
+    let sig = format!("{}\u{1}{f}\u{1}{t}", i.name);
+    let copy_name = i.name.clone();
     let mut held = false;
     let k = crate::fonts::pick_key(&sig, i.size, &mut |k| {
         let x = r.font_get(k, crate::fields::FontCell::Info)?;
@@ -1917,9 +1994,9 @@ fn copy_font(r: &mut Run<'_, '_>, f: i64, suffix: &str, t: &str) -> R<i64> {
     }
     r.set("fontlast", v.int(nf), true);
     r.font_loaded(nf);
-    crate::pdfout::font_load(r, &format!("{}{suffix}", i.name), i.size, nf);
+    crate::pdfout::font_load(r, &i.name, i.size, nf);
     let mut xs = vec![
-        v.str(&format!("{}{suffix}", i.name)),
+        v.str(&i.name),
         v.int(i64::from(i.size)),
         v.int(i64::from(i.dsize)),
     ];

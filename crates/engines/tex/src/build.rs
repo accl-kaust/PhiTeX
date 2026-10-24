@@ -1023,10 +1023,7 @@ impl Run<'_, '_> {
         let Some(i) = crate::fonts::info(self.v, info) else {
             return Ok(());
         };
-        let Some(l) = i
-            .file
-            .and_then(|file| crate::fonts::load(self.v, file, i.s))
-        else {
+        let Some(l) = crate::fonts::load_info(self.v, &i) else {
             return Ok(());
         };
         let hc = self.font_int(f, crate::fields::FontCell::Hc)?;
@@ -1047,10 +1044,7 @@ impl Run<'_, '_> {
         let Some(i) = crate::fonts::info(self.v, info) else {
             return Ok(());
         };
-        let Some(l) = i
-            .file
-            .and_then(|file| crate::fonts::load(self.v, file, i.s))
-        else {
+        let Some(l) = crate::fonts::load_info(self.v, &i) else {
             return Ok(());
         };
         let n = self.font_int(f, crate::fields::FontCell::Fdn)?;
@@ -1093,10 +1087,7 @@ impl Run<'_, '_> {
         }
         let info = self.font_get(f, crate::fields::FontCell::Info)?;
         let e = match crate::fonts::info(self.v, info) {
-            Some(i) => match i
-                .file
-                .and_then(|file| crate::fonts::load(self.v, file, i.s))
-            {
+            Some(i) => match crate::fonts::load_info(self.v, &i) {
                 Some(l) => {
                     let n = self.font_int(f, crate::fields::FontCell::Fdn)?;
                     let mut params = Vec::new();

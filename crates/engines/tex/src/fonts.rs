@@ -37,7 +37,7 @@ impl Loaded {
     }
 }
 
-type Cache = Mutex<FxHashMap<(u64, i32), Option<Arc<Loaded>>>>;
+type Cache = Mutex<FxHashMap<(u64, i32, i32, bool), Option<Arc<Loaded>>>>;
 
 /// The process's parsed fonts: a pure function's memo, by the file's
 /// value and the size.
@@ -59,16 +59,38 @@ pub(crate) fn bytes_of(text: &str) -> Vec<u8> {
 /// The TFM in file value `file` (a `[path, bytes]` list) at size `s`
 /// (§568: `s<0` is `scaled -s`).
 pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
-    let key = (file.raw(), s);
+    load_spaced(v, file, s, 0, false)
+}
+
+/// The font `i` names: its TFM, letter-spaced if it is a letter-spaced
+/// font ([`Ls`]).
+pub(crate) fn load_info(v: &Values, i: &Info) -> Option<Arc<Loaded>> {
+    let file = i.file?;
+    match i.ls {
+        Some(ls) => load_spaced(v, file, i.s, ls.dw, ls.nolig),
+        None => load(v, file, i.s),
+    }
+}
+
+/// [`load`] with every width `dw` wider and, if `nolig`, no lig/kern
+/// programs (`letter_space_font`, pdfTeX).
+fn load_spaced(v: &Values, file: ValueId, s: i32, dw: i32, nolig: bool) -> Option<Arc<Loaded>> {
+    let key = (file.raw(), s, dw, nolig);
     if let Some(x) = cache().locked().get(&key) {
         return x.clone();
     }
     let xs = list_of(v, file);
     let loaded = xs.get(1).and_then(|&b| {
         let bytes = bytes_of(&str_of(v, b));
-        let tfm = phitex_tfm::parse(&bytes).ok()?;
+        let mut tfm = phitex_tfm::parse(&bytes).ok()?;
+        if nolig {
+            tfm = tfm.without_ligatures();
+        }
         let z = tfm.size_for(s);
-        let at = tfm.at(z).ok()?;
+        let mut at = tfm.at(z).ok()?;
+        for d in at.chars.iter_mut().flatten() {
+            d.width += dw;
+        }
         Some(Arc::new(Loaded {
             tfm,
             at,
@@ -78,6 +100,98 @@ pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
     });
     cache().locked().insert(key, loaded.clone());
     loaded
+}
+
+/// A letter-spaced font's making (`letter_space_font`, pdfTeX): the
+/// font it spaces, how much wider each character is
+/// (`round_xn_over_d(quad(k), e, 1000)`), the move on either side of
+/// the character in its packet (`round_xn_over_d(quad(f), e, 2000)`, as
+/// the packet's four bytes), whether `nolig`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Ls {
+    pub base: i64,
+    pub dw: i32,
+    pub mv: [u8; 4],
+    pub nolig: bool,
+}
+
+impl Ls {
+    /// The `[base, dw, move, nolig]` value of a `fontinfo`.
+    pub(crate) fn value(&self, v: &Values) -> ValueId {
+        v.list(vec![
+            v.int(self.base),
+            v.int(i64::from(self.dw)),
+            v.int(i64::from(u32::from_be_bytes(self.mv))),
+            v.int(i64::from(self.nolig)),
+        ])
+    }
+
+    fn of(v: &Values, x: ValueId) -> Option<Ls> {
+        let xs = list_of(v, x);
+        let n = |k: usize| xs.get(k).map(|&y| int_of(v, y));
+        Some(Ls {
+            base: n(0)?,
+            dw: i32::try_from(n(1)?).ok()?,
+            mv: u32::try_from(n(2)?).ok()?.to_be_bytes(),
+            nolig: n(3)? != 0,
+        })
+    }
+
+    /// The move `w` (scaled points, of a font at `size`) as a packet's
+    /// four bytes (`letter_space_font`'s `vf_replace_z` and the bytes
+    /// after it).
+    pub(crate) fn move_bytes(w: i32, size: i32) -> [u8; 4] {
+        let mut z = size;
+        let mut alpha: i32 = 16;
+        while z >= 0o40000000 {
+            z /= 2;
+            alpha += alpha;
+        }
+        let beta = 256 / alpha;
+        let alpha = alpha * z;
+        let (b0, w) = if w >= 0 { (0u8, w) } else { (255u8, alpha + w) };
+        let mut r = w * beta;
+        let b1 = r / z;
+        r %= z;
+        let b2 = if r == 0 {
+            0
+        } else {
+            r *= 256;
+            let b = r / z;
+            r %= z;
+            b
+        };
+        let b3 = if r == 0 {
+            0
+        } else {
+            r *= 256;
+            r / z
+        };
+        let byte = |x: i32| u8::try_from(x & 0xff).unwrap_or(0);
+        [b0, byte(b1), byte(b2), byte(b3)]
+    }
+
+    /// The packets of the letter-spaced font of `tfm` (`right4`, the
+    /// character, `right4`), every code from `bc` to `ec`.
+    pub(crate) fn packets(&self, tfm: &Tfm) -> std::collections::BTreeMap<u8, Vec<u8>> {
+        const RIGHT4: u8 = 146;
+        const SET1: u8 = 128;
+        let mut out = std::collections::BTreeMap::new();
+        for c in tfm.bc..=tfm.ec.min(255) {
+            let Ok(c) = u8::try_from(c) else { continue };
+            let mut p = Vec::with_capacity(12);
+            p.push(RIGHT4);
+            p.extend(self.mv);
+            if c >= SET1 {
+                p.push(SET1);
+            }
+            p.push(c);
+            p.push(RIGHT4);
+            p.extend(self.mv);
+            out.insert(c, p);
+        }
+        out
+    }
 }
 
 /// A font as a run's state has it ([`crate::run::Run::font_entry`]).
@@ -97,13 +211,15 @@ pub(crate) struct View {
     pub names: FxHashMap<FontId, (String, i32)>,
 }
 
-/// A `fontinfo:<f>` value: name, size, design size, file value, `s`.
+/// A `fontinfo:<f>` value: name, size, design size, file value, `s`,
+/// and a letter-spaced font's making.
 pub(crate) struct Info {
     pub name: String,
     pub size: i32,
     pub dsize: i32,
     pub file: Option<ValueId>,
     pub s: i32,
+    pub ls: Option<Ls>,
 }
 
 pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
@@ -119,6 +235,7 @@ pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
         dsize: n(2),
         file: xs.get(3).copied(),
         s: n(4),
+        ls: xs.get(5).and_then(|&y| Ls::of(v, y)),
     })
 }
 
