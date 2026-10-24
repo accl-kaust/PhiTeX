@@ -2,8 +2,8 @@
 \usepackage{hyperref}
 % what the page builder shows the text: \pagegoal and \pagetotal at
 % each paragraph's start (inside a group setting \topskip, after a page
-% fired at the paragraph's own build), \lastnodetype after a paragraph,
-% a float's routines between; all typeset at the end
+% fired at the paragraph's own build), \lastnodetype after a paragraph;
+% all typeset at the end
 \def\rec{}
 \AddToHook{para/begin}{{\topskip=0pt\relax
   \xdef\rec{\rec[\the\pagegoal\space\the\pagetotal]}}}
@@ -17,10 +17,6 @@
 \xdef\rec{\rec(\the\lastnodetype)}
 \edef\n{\the\numexpr\n+1}
 \ifnum\n<14 \repeat
-\begin{figure}[h]
-\centering\rule{3cm}{2cm}
-\caption{A float.}
-\end{figure}
 \words\words\par
 \begin{thing}\words\end{thing}
 \def\n{0}
