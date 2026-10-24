@@ -1106,40 +1106,12 @@ pub fn engine_id() -> u64 {
     engine_identity()
 }
 
-/// The vendored engine's identity: a hash of its sources and of this
-/// crate's and those it depends on by path (`build.rs`), so vendoring
-/// another engine or changing how this crate encodes its state
-/// invalidates every exported prelude.
+/// The engine's identity: a hash of this crate's sources and of those it
+/// depends on by path, the engine's among them (`build.rs`), so changing
+/// the engine or how this crate encodes its state invalidates every
+/// exported prelude.
 fn engine_identity() -> u64 {
-    static ID: OnceLock<u64> = OnceLock::new();
-    *ID.get_or_init(|| {
-        let own = u64::from_str_radix(env!("PHITEX_TEX_SRC_HASH"), 16).unwrap_or(0);
-        let srcs: [&[u8]; 18] = [
-            include_bytes!("../../../vendor/defuse/Cargo.toml"),
-            include_bytes!("../../../vendor/defuse/src/lib.rs"),
-            include_bytes!("../../../vendor/defuse/src/api.rs"),
-            include_bytes!("../../../vendor/defuse/src/values.rs"),
-            include_bytes!("../../../vendor/defuse/src/sync.rs"),
-            include_bytes!("../../../vendor/defuse/src/obs.rs"),
-            include_bytes!("../../../vendor/defuse/src/record.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/mod.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/batch.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/build.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/claims.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/core.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/ctx.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/engine.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/eval.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/ptree.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/seq.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/world.rs"),
-        ];
-        let mut h = own;
-        for s in srcs {
-            h = phitex_defuse::hash_bytes(h ^ 0x9e37_79b9, s);
-        }
-        h
-    })
+    u64::from_str_radix(env!("PHITEX_TEX_SRC_HASH"), 16).unwrap_or(0)
 }
 
 /// The format's fonts by key in the order it loaded them (`fontorder`,

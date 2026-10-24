@@ -2,19 +2,24 @@
 name = "phitex-defuse"
 version = "0.0.0"
 edition.workspace = true
-license.workspace = true
 publish = false
-description = "PhiTeX's side of the engine: re-exports defuse (the TeX-free def-use graph evaluator, vendored under crates/vendor/defuse and never edited here) and holds what PhiTeX adds around it without knowing TeX"
+description = "The engine: an incremental, parallel, field-level def-use graph evaluator, written without knowledge of TeX"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-defuse = { path = "../../vendor/defuse" }
+# Only with the `observe` feature (the default build has no dependencies).
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [features]
-# the engine's probes (defuse::obs): spans and counters, profiling only
-profile = ["defuse/profile"]
-# the engine's scheduler dumps (DEFUSE_DUMP, DEFUSE_DUMP_EVERY, on SIGTERM and on NoProgress);
-# release builds carry none
-observe = ["defuse/observe"]
+# Diagnostics: the engine's phase timers and counters (CLEAN_PROF), traces
+# (CLEAN_DEBUG), scoped checks (CLEAN_SCOPED_CHECK) and the `obs` probes.
+# Off by default; release builds compile every probe out.
+profile = []
+# Recording for replay (DEFUSE_RECORD=path, replayed by examples/play.rs).
+# Off by default.
+observe = ["dep:serde", "dep:serde_json"]
 
-[lints]
-workspace = true
+[[example]]
+name = "play"
+required-features = ["observe"]

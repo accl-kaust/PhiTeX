@@ -20,7 +20,7 @@ never on the cluster):
     rustup target add wasm32-wasip1-threads --toolchain nightly-2026-08-08   # once, for the wasm program
 
 - [ ] `sb cargo fmt --all --check` prints nothing.
-- [ ] `sb cargo clippy --workspace --exclude defuse --no-deps --all-targets -- -D warnings`
+- [ ] `sb cargo clippy --workspace --exclude phitex-defuse --no-deps --all-targets -- -D warnings`
       is clean. The vendored engine keeps its own lints (`--no-deps`
       keeps it out as a path dependency too).
 - [ ] `sb cargo test --workspace --no-run` compiles every crate's tests.
@@ -150,7 +150,7 @@ with the pinned toolchain:
 | check | result | commit |
 |---|---|---|
 | `cargo fmt --all --check` | clean after 400c72ef (the vendored engine's own test file is left as it is) | 400c72ef |
-| `cargo clippy --workspace --exclude defuse --no-deps --all-targets -D warnings` | clean | 400c72ef |
+| `cargo clippy --workspace --exclude phitex-defuse --no-deps --all-targets -D warnings` | clean | 400c72ef |
 | `cargo test --workspace --no-run` | compiles | 400c72ef |
 | `cargo check --target wasm32-unknown-unknown` (the pure crates) | passes | 400c72ef |
 | `cargo clippy --target wasm32-wasip1-threads -p phitex-wasm --no-deps` | clean | 400c72ef |

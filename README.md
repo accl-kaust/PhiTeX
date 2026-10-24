@@ -49,7 +49,7 @@ The alpha runs plain TeX and LaTeX documents with pdfTeX's semantics.
 
 | Crate | What it is |
 |---|---|
-| `phitex-defuse` | the def-use graph evaluator (`defuse`, vendored under `crates/vendor/defuse`, never edited here) and what PhiTeX adds around it without knowing TeX |
+| `phitex-defuse` | the engine: the incremental, parallel def-use graph evaluator, which knows nothing of TeX |
 | `phitex-tex` | TeX's semantics on the graph: tokens, expansion, macros, registers, groups, modes, pages, pdfTeX's primitives, the cross-run fixpoint, the tools' runs |
 | `phitex-typeset` | Knuth's algorithms as pure functions: line breaking, hyphenation, math, alignments, the page builder |
 | `phitex-source` | source text as units with identities; the lexer, paragraphs, syntax tree and the syntactic pass |

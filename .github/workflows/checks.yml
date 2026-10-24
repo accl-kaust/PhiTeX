@@ -43,8 +43,8 @@ jobs:
       # (MuPDF's WebAssembly build, embedded in the CLI: fetched pinned, not committed)
       - run: scripts/fetch-mupdf.sh
       - run: cargo fmt --all --check
-      # (the vendored engine keeps its own lints)
-      - run: cargo clippy --workspace --exclude defuse --all-targets -- -D warnings
+      # (the engine, crates/core/defuse, keeps its own lints)
+      - run: cargo clippy --workspace --exclude phitex-defuse --all-targets -- -D warnings
       - run: >-
           cargo check --target wasm32-unknown-unknown -p phitex-codecs -p phitex-otf
           -p phitex-xdvipdfmx

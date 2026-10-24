@@ -300,7 +300,7 @@ section's finish line.
 
 1. Type every section, all of it, before running anything. Read code only
    to know where new code plugs in.
-2. `cargo check` clean, clippy `--workspace --exclude defuse --all-targets
+2. `cargo check` clean, clippy `--workspace --exclude phitex-defuse --all-targets
    -D warnings`, fmt with the pinned nightly, commit, push origin.
 3. One gate-fast round. The report is the §0 table with every number
    against its finish line, failures first, then the §1 accounting.
