@@ -985,7 +985,9 @@ impl Run<'_, '_> {
         let danger = self.insufficient_fonts()?;
         let p = self.formula_hlist(dmd, Style::DISPLAY, false, &mut side)?;
         let view = self.font_view(&p)?;
-        let pp = PackParams::default();
+        // (§1199, §1201: hpack, its overfull rule and reports by
+        // `\overfullrule`, `\hbadness`, `\hfuzz`)
+        let pp = self.pack_params(true)?;
         let natural = phitex_typeset::pack::hpack(p.clone(), Spec::Additional(0), &view, &pp, true);
         let t = natural.adjustments.clone();
         let mut b = natural.node;
