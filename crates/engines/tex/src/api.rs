@@ -2688,6 +2688,7 @@ impl Graph {
     /// environment does not hold gets it from the finder in place, as
     /// [`Graph::supply`] would have supplied it, instead of stopping;
     /// a file the job writes is not answered (it is read back).
+    #[allow(clippy::too_many_lines)]
     fn provide(&mut self, finder: &Finder) {
         let finder = Arc::clone(finder);
         let log = Arc::clone(&self.provided);
@@ -5540,21 +5541,20 @@ impl Build {
                     self.g.files.retain(|&(g, _)| g != d);
                     self.g.absent.retain(|&g| g != d);
                     self.g.ops.docs.locked().remove(name);
-                    match (&found, found_text) {
-                        (Some((path, bytes)), Some(_)) => {
-                            let defs = self.g.ops.defs.locked().clone();
-                            let x = cut_doc_file(
-                                self.g.eng.values(),
-                                &self.g.ops.hints,
-                                &defs,
-                                &self.g.ops.docs,
-                                name,
-                                path,
-                                bytes,
-                            );
-                            self.g.files.push((d, x));
-                        }
-                        _ => self.g.absent.push(d),
+                    if let (Some((path, bytes)), Some(_)) = (&found, found_text) {
+                        let defs = self.g.ops.defs.locked().clone();
+                        let x = cut_doc_file(
+                            self.g.eng.values(),
+                            &self.g.ops.hints,
+                            &defs,
+                            &self.g.ops.docs,
+                            name,
+                            path,
+                            bytes,
+                        );
+                        self.g.files.push((d, x));
+                    } else {
+                        self.g.absent.push(d);
                     }
                     self.staged_nodes += INLINE_NODES + 1;
                 }
@@ -6088,7 +6088,10 @@ impl Build {
             stats.pkg_optimistic = l.given[1].load(std::sync::atomic::Ordering::Relaxed);
             stats.node_recorded = l.given[2].load(std::sync::atomic::Ordering::Relaxed);
             // each prediction against what the load's last run published
-            let predicted = l.predicted.locked().clone();
+            // (where a load ran in this evaluation: an edit's that ran
+            // none compares nothing, every record not decoded again)
+            let ran = !self.g.ops.pkg_log.locked().is_empty();
+            let predicted = if ran { l.predicted.locked().clone() } else { FxHashMap::default() };
             if !predicted.is_empty() {
                 let fresh: FxHashMap<String, crate::pkgrec::Rec> = self
                     .fresh_records(|_, k| predicted.contains_key(k))
