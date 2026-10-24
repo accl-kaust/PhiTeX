@@ -477,23 +477,43 @@ fn dvi_page(
 /// Example: pieces `A B`, a page finishing at `A`'s end, `B` running
 /// `\immediate\pdfobj`: the line is `A, finish, B`; the file numbers
 /// page 1's objects, then `B`'s object.
+/// The line's and the pieces' items' last walks ([`pdf_exact`]).
+type LineMemos = (
+    crate::val::SeqMemo<ValueId>,
+    crate::val::SeqMemo<(i64, ValueId)>,
+);
+static LINE_MEMO: std::sync::OnceLock<std::sync::Mutex<LineMemos>> = std::sync::OnceLock::new();
+
 #[allow(clippy::too_many_lines)]
 fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let v = cx.values();
     let t0 = std::time::Instant::now();
     // (in pdfTeX's order: a page firing inside a piece before the
     // piece's records after it)
-    let line = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?);
+    // (both walked from the last link's: their ropes' nodes this edit
+    // left as they were are not decoded again)
+    let memo = LINE_MEMO.get_or_init(Default::default);
+    let line_seq = cx.acc_range(v.field(crate::pdfout::XPAGES), None)?;
+    let items_seq = cx.acc_range(v.field(crate::pages::PITEMS), None)?;
+    let (line, items) = {
+        let mut g = memo.locked();
+        (
+            g.0.walk(v, line_seq, Some),
+            g.1.walk(v, items_seq, |u| {
+                v.with_list(u, |xs| Some((v.as_int(*xs.first()?)?, *xs.get(2)?)))
+                    .flatten()
+            }),
+        )
+    };
 
     let t_acc = t0.elapsed();
     let xpages = crate::pdfout::order_line(v, &line);
     // (the pieces' items, by piece: the pages' sealed lines,
     // `crate::pages::seal`)
     let mut units = crate::FxHashMap::default();
-    for u in v.seq_to_vec(cx.acc_range(v.field(crate::pages::PITEMS), None)?) {
-        if let Some(Some((p, items))) = v.with_list(u, |xs| Some((v.as_int(*xs.first()?)?, *xs.get(2)?))) {
-            units.entry(p).or_insert(items);
-        }
+    units.reserve(items.len());
+    for (p, items) in items {
+        units.entry(p).or_insert(items);
     }
     if crate::exec::obs_flag!("PHITEX_LINE_TRACE") {
         for (tag, l) in [("in", &line), ("out", &xpages)] {
@@ -524,8 +544,8 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         seed.push((u32::try_from(k).unwrap_or(0), n, sz));
     }
     let mut fonts: Vec<u32> = seed.iter().map(|s| s.0).collect();
-    for &x in &xpages {
-        if let Some(k) = crate::pdfout::fontload_key(v, x)
+    for r in crate::pdfout::recs(v, &xpages) {
+        if let crate::pdfout::Rec::FontLoad(k) = r
             && let Ok(k) = u32::try_from(k)
             && !fonts.contains(&k)
         {

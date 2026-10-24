@@ -1081,10 +1081,10 @@ impl Run<'_, '_> {
     }
 
     /// Font `f` as the state has it now: its metrics, `\fontdimen`s,
-    /// `\hyphenchar` and name, decoded once while no slot of the run's
-    /// table changes ([`crate::runstate::State::any_gen`]).
+    /// `\hyphenchar` and name, decoded once while no font cell of the
+    /// run's table changes ([`crate::runstate::State::font_gen`]).
     pub(crate) fn font_entry(&mut self, f: u32) -> R<Option<std::rc::Rc<crate::fonts::Entry>>> {
-        let g = self.st.any_gen();
+        let g = self.st.font_gen();
         if let Some((eg, e)) = self.font_memo.get(&f)
             && *eg == g
             && self.interp.is_none()
@@ -1117,7 +1117,7 @@ impl Run<'_, '_> {
         };
         // (the reads above define nothing: the generation stands)
         if self.interp.is_none() {
-            let g = self.st.any_gen();
+            let g = self.st.font_gen();
             self.font_memo.insert(f, (g, e.clone()));
         }
         Ok(e)

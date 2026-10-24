@@ -494,7 +494,7 @@ impl Values {
 
     /// Sequence node `s` split: its element (a one-element node), or its
     /// two halves (`None`: not a non-empty sequence).
-    pub(crate) fn seq_split(&self, s: ValueId) -> Option<Result<ValueId, (ValueId, ValueId)>> {
+    pub fn seq_split(&self, s: ValueId) -> Option<Result<ValueId, (ValueId, ValueId)>> {
         if s.tag() != T_SEQ || s == ValueId::NIL {
             return None;
         }

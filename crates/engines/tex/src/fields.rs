@@ -604,7 +604,7 @@ pub(crate) const FONT_FD: usize = 24;
 /// name (`fontid:`), its number of parameters (`fdn:`), its
 /// `\hyphenchar` (`hc:`) and `\skewchar` (`sc:`), then its
 /// parameters (`fd:<f>:<k>`, [`FONT_FD`] of them).
-const FONT_W: usize = 5 + FONT_FD;
+pub(crate) const FONT_W: usize = 5 + FONT_FD;
 /// The fonts' cells, after the cells with fixed names: font `f`'s at
 /// `FONT0 + f * FONT_W` ([`font_loc`]). Their fields are named when a
 /// run first needs one ([`Fields::field_of`]), as the meanings' are.

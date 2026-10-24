@@ -244,6 +244,12 @@ pub(crate) struct State {
     /// a restore, a preload): the run's memos of decoded state
     /// (`Run::font_entry`) are valid while it stands.
     any_gen: u64,
+    /// Bumped whenever a font's cell may have changed ([`State::any_gen`]
+    /// for a font cell): the run's decoded fonts stand while it does.
+    font_gen: u64,
+    /// The font cells without a fixed location the run asked for
+    /// ([`State::note_font_loc`]).
+    font_slow: phitex_defuse::FxHashSet<Loc>,
     /// Bumped by every change of the table a command could not undo by
     /// rewinding its input (a definition, a save, a restore, a close):
     /// the table's part of the run's mutation counter
@@ -294,6 +300,7 @@ pub(crate) struct Undo {
     next_gid: u32,
     cat_gen: u64,
     any_gen: u64,
+    font_gen: u64,
     muts: u64,
 }
 
@@ -372,6 +379,8 @@ impl Clone for State {
             macros: self.macros.clone(),
             cat_gen: new_cat_gen(),
             any_gen: new_cat_gen(),
+            font_gen: new_cat_gen(),
+            font_slow: self.font_slow.clone(),
             muts: self.muts,
             cands: self.cands.clone(),
             undo: None,
@@ -481,6 +490,8 @@ impl State {
             macros: Vec::new(),
             cat_gen: new_cat_gen(),
             any_gen: new_cat_gen(),
+            font_gen: new_cat_gen(),
+            font_slow: phitex_defuse::FxHashSet::default(),
             muts: 0,
             cands: Vec::new(),
             undo: None,
@@ -525,6 +536,7 @@ impl State {
             next_gid: self.next_gid,
             cat_gen: self.cat_gen,
             any_gen: self.any_gen,
+            font_gen: self.font_gen,
             muts: self.muts,
         }));
         true
@@ -574,6 +586,7 @@ impl State {
         self.next_gid = u.next_gid;
         self.cat_gen = u.cat_gen;
         self.any_gen = u.any_gen;
+        self.font_gen = u.font_gen;
         self.muts = u.muts;
     }
 
@@ -708,6 +721,27 @@ impl State {
     /// The table's change generation ([`State`]'s `any_gen`).
     pub(crate) fn any_gen(&self) -> u64 {
         self.any_gen
+    }
+
+    /// The fonts' change generation ([`State`]'s `font_gen`).
+    pub(crate) fn font_gen(&self) -> u64 {
+        self.font_gen
+    }
+
+    /// Notes `loc` as a font's cell without a fixed location.
+    pub(crate) fn note_font_loc(&mut self, loc: Loc) {
+        self.font_slow.insert(loc);
+    }
+
+    /// A change of `loc` may come: the generations it bumps.
+    #[inline]
+    fn changing(&mut self, loc: Loc) {
+        self.any_gen = new_cat_gen();
+        if (loc as usize).wrapping_sub(crate::fields::FONT0) < crate::fields::FONTS * crate::fields::FONT_W
+            || (!self.font_slow.is_empty() && self.font_slow.contains(&loc))
+        {
+            self.font_gen = self.any_gen;
+        }
     }
 
     #[inline]
@@ -857,7 +891,7 @@ impl State {
     }
 
     pub(crate) fn preload(&mut self, loc: Loc, x: Option<ValueId>) {
-        self.any_gen = new_cat_gen();
+        self.changing(loc);
         self.muts += 1;
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
@@ -1225,7 +1259,7 @@ impl State {
     /// before it inert. A definition outside every group of the run, or
     /// a global one, is the run's for its base level.
     pub(crate) fn set(&mut self, loc: Loc, val: Entry, global: bool, grp: Option<u32>) {
-        self.any_gen = new_cat_gen();
+        self.changing(loc);
         self.muts += 1;
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
@@ -1301,7 +1335,7 @@ impl State {
     /// the run's definition there, `global` at level one), else a
     /// group's of the run.
     pub(crate) fn modify(&mut self, loc: Loc, val: Entry, base: bool, global: bool) {
-        self.any_gen = new_cat_gen();
+        self.changing(loc);
         self.muts += 1;
         let mi = self.meta(loc);
         if !self.cands.is_empty() {
@@ -1365,7 +1399,7 @@ impl State {
             if slot.ginert > s.at {
                 continue;
             }
-            self.any_gen = new_cat_gen();
+            self.changing(s.loc);
             if is_cat(s.loc) {
                 self.cat_gen = new_cat_gen();
             }
@@ -2316,6 +2350,7 @@ impl State {
         st.next_gid = p.next_gid;
         st.cat_gen = new_cat_gen();
         st.any_gen = new_cat_gen();
+        st.font_gen = new_cat_gen();
         st
     }
 }
@@ -2888,7 +2923,7 @@ impl State {
     /// finisher's) stands (§283): the binding is the engine's value now,
     /// and the open groups' saves of it are inert.
     pub(crate) fn override_global(&mut self, loc: Loc, x: Option<ValueId>) {
-        self.any_gen = new_cat_gen();
+        self.changing(loc);
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
         }

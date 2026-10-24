@@ -9,6 +9,8 @@
 //! a box, or `[4, items]` a formula. A sub- or superscript changes the
 //! list's last noad: the list gets a delete marker and the new noad.
 
+use std::rc::Rc;
+
 use phitex_defuse::{ValueId, Values};
 use phitex_typeset::arith::{MAX_DIMEN, half};
 use phitex_typeset::glue::Glue;
@@ -1165,8 +1167,6 @@ impl Run<'_, '_> {
         penalties: bool,
     ) -> R<Vec<Node>> {
         let mut fam_fnt = [[None; 16]; 3];
-        let mut view = crate::fonts::View::default();
-        let mut skew = crate::FxHashMap::default();
         for (s, row) in fam_fnt.iter_mut().enumerate() {
             for (k, slot) in row.iter_mut().enumerate() {
                 let size = i32::try_from(s * 16).unwrap_or(0);
@@ -1177,23 +1177,19 @@ impl Run<'_, '_> {
                 }
             }
         }
-        // (the symbol and extension families' fonts with all their
-        // `\fontdimen`s, §700–§701; another family's with those math
-        // reads of any font, the space and the x-height, §738, §752)
-        let full: Vec<u32> = fam_fnt.iter().flat_map(|row| [row[2], row[3]]).flatten().collect();
-        for row in &fam_fnt {
-            for &f in row.iter().flatten() {
-                if view.fonts.contains_key(f) {
-                    continue;
+        // (the last formula's fonts while no font cell changed since)
+        let g = self.st.font_gen();
+        let fonts = match &self.math_memo {
+            Some(m) if m.0 == g && m.1 == fam_fnt && self.interp.is_none() => m.2.clone(),
+            _ => {
+                let f = Rc::new(self.math_fonts(&fam_fnt)?);
+                if self.interp.is_none() {
+                    self.math_memo = Some((self.st.font_gen(), fam_fnt, f.clone()));
                 }
-                if full.contains(&f) {
-                    self.add_font(&mut view, f)?;
-                } else {
-                    self.add_font_dimens(&mut view, f, &[2, 5])?;
-                }
-                skew.insert(f, self.font_int(f, crate::fields::FontCell::Sc)?);
+                f
             }
-        }
+        };
+        let (view, skew) = (&fonts.0, &fonts.1);
         let sk = move |f: u32| skew.get(&f).copied().unwrap_or(-1);
         let params = MathParams {
             fam_fnt,
@@ -1209,7 +1205,36 @@ impl Run<'_, '_> {
             skew_char: &sk,
         };
         let (h, _diags) =
-            phitex_typeset::math::mlist_to_hlist(mlist, style, penalties, &params, &view);
+            phitex_typeset::math::mlist_to_hlist(mlist, style, penalties, &params, view);
         Ok(h)
     }
+
+    /// The families' fonts `fam_fnt` decoded for a formula, with their
+    /// `\skewchar`s.
+    fn math_fonts(&mut self, fam_fnt: &[[Option<u32>; 16]; 3]) -> R<(crate::fonts::View, crate::FxHashMap<u32, i32>)> {
+        let mut view = crate::fonts::View::default();
+        let mut skew = crate::FxHashMap::default();
+        // (the symbol and extension families' fonts with all their
+        // `\fontdimen`s, §700–§701; another family's with those math
+        // reads of any font, the space and the x-height, §738, §752)
+        let full: Vec<u32> = fam_fnt.iter().flat_map(|row| [row[2], row[3]]).flatten().collect();
+        for row in fam_fnt {
+            for &f in row.iter().flatten() {
+                if view.fonts.contains_key(f) {
+                    continue;
+                }
+                if full.contains(&f) {
+                    self.add_font(&mut view, f)?;
+                } else {
+                    self.add_font_dimens(&mut view, f, &[2, 5])?;
+                }
+                skew.insert(f, self.font_int(f, crate::fields::FontCell::Sc)?);
+            }
+        }
+        Ok((view, skew))
+    }
 }
+
+/// [`Run::math_memo`]: the fonts' generation, the families' fonts, and
+/// those fonts decoded with their `\skewchar`s.
+pub(crate) type MathMemo = (u64, [[Option<u32>; 16]; 3], Rc<(crate::fonts::View, crate::FxHashMap<u32, i32>)>);

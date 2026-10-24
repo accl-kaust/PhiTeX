@@ -626,6 +626,9 @@ pub(crate) struct Run<'c, 'a> {
     /// Fonts decoded in this run, with the table's change generation
     /// they were decoded at ([`Run::font_entry`]).
     pub font_memo: phitex_defuse::FxHashMap<u32, (u64, Option<std::rc::Rc<crate::fonts::Entry>>)>,
+    /// The last formula's families' fonts, decoded, with the fonts'
+    /// generation they were decoded at ([`Run::mlist_to_hlist`]).
+    pub(crate) math_memo: Option<crate::math::MathMemo>,
     /// Set while a token is fetched only to be stored (`\edef`'s and
     /// `\write`'s expansion, §478): an unexpandable meaning not read
     /// in full is read by its class ([`Run::class_lookup`]).
@@ -1009,6 +1012,7 @@ impl<'c, 'a> Run<'c, 'a> {
             code_cache: Box::new([[i32::MIN; 256]; 5]),
             code_gen: u64::MAX,
             font_memo: phitex_defuse::FxHashMap::default(),
+            math_memo: None,
             class_reads: false,
             class_memo: phitex_defuse::FxHashMap::default(),
             outer_reads: false,
@@ -3518,7 +3522,9 @@ impl<'c, 'a> Run<'c, 'a> {
             .ops
             .fields
             .font_field(self.v, self.cx.values_epoch(), f, c);
-        self.loc_of(fld)
+        let l = self.loc_of(fld);
+        self.st.note_font_loc(l);
+        l
     }
 
     /// Font `f`'s cell `c` ([`Run::font_loc`]).

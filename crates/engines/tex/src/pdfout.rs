@@ -85,12 +85,14 @@ pub(crate) fn line_push(r: &mut Run<'_, '_>, e: ValueId) {
 /// candidate 0), its page at candidate 0: the line `a, m0, b, page`
 /// becomes `a, page, m0, b`.
 pub(crate) fn order_line(v: &Values, xpages: &[ValueId]) -> Vec<ValueId> {
+    let rs = recs(v, xpages);
     let brks: Vec<(ValueId, i64, i64)> = {
         let m = pieces().locked();
         xpages
             .iter()
-            .filter_map(|&x| {
-                let k = v.as_int(x)?;
+            .zip(&rs)
+            .filter_map(|(&x, r)| {
+                let Rec::Page(k) = *r else { return None };
                 let (pid, c) = m.get(&u64::from_ne_bytes(k.to_ne_bytes()))?.brk?;
                 Some((x, pid, c))
             })
@@ -104,9 +106,10 @@ pub(crate) fn order_line(v: &Values, xpages: &[ValueId]) -> Vec<ValueId> {
     let mut pages_of: FxHashMap<i64, Vec<(usize, i64)>> = FxHashMap::default();
     let pos: FxHashMap<u64, usize> = xpages
         .iter()
+        .zip(&rs)
         .enumerate()
-        .filter(|(_, x)| v.as_int(**x).is_some())
-        .map(|(i, x)| (x.raw(), i))
+        .filter(|(_, (_, r))| matches!(r, Rec::Page(_)))
+        .map(|(i, (x, _))| (x.raw(), i))
         .collect();
     for &(page, pid, k) in &brks {
         if let Some(&p) = pos.get(&page.raw()) {
@@ -120,7 +123,7 @@ pub(crate) fn order_line(v: &Values, xpages: &[ValueId]) -> Vec<ValueId> {
     let mut anchor: Vec<Option<usize>> = vec![None; xpages.len()];
     let mut i = 0;
     while i < xpages.len() {
-        let Some((mp, c)) = line_marker(v, xpages[i]) else {
+        let Rec::Cand(mp, c) = rs[i] else {
             i += 1;
             continue;
         };
@@ -131,8 +134,8 @@ pub(crate) fn order_line(v: &Values, xpages: &[ValueId]) -> Vec<ValueId> {
                 .max()
         });
         anchor[i] = to;
-        if let Some(n) = xpages.get(i + 1)
-            && line_marker(v, *n).is_none()
+        if let Some(n) = rs.get(i + 1)
+            && !matches!(n, Rec::Cand(..))
             && to.is_some()
         {
             anchor[i + 1] = to;
@@ -175,7 +178,7 @@ pub(crate) fn line_show(v: &Values, x: ValueId) -> String {
             None => "page ?".to_owned(),
         };
     }
-    if let Some((p, c)) = line_marker(v, x) {
+    if let [Rec::Cand(p, c)] = recs(v, &[x])[..] {
         return format!("marker piece {} cand {c}", p.cast_unsigned());
     }
     let xs = list_of(v, x);
@@ -189,15 +192,49 @@ pub(crate) fn line_show(v: &Values, x: ValueId) -> String {
 }
 
 /// A line marker's piece and candidates passed ([`line_push`]).
-fn line_marker(v: &Values, x: ValueId) -> Option<(i64, i64)> {
-    // (the tag compared as a value: no list or string made per record)
-    let cand = v.str("cand");
+/// A line record as the link reads it: a page's key, a command's
+/// serial, a marker `["cand", piece, c]`, a font load's font.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Rec {
+    Page(i64),
+    Cmd(u64),
+    Cand(i64, i64),
+    FontLoad(i64),
+    Other,
+}
+
+fn rec_of(v: &Values, x: ValueId, tags: &[ValueId; 3]) -> Rec {
+    if let Some(k) = v.as_int(x) {
+        return Rec::Page(k);
+    }
     v.with_list(x, |xs| match *xs {
-        [k, p, c] if k == cand => Some((p, c)),
-        _ => None,
+        [k, _, s] if k == tags[0] => Rec::Cmd(u64::from_ne_bytes(int_of(v, s).to_ne_bytes())),
+        [k, p, c] if k == tags[1] => Rec::Cand(int_of(v, p), int_of(v, c)),
+        [k, _, _, f] if k == tags[2] => Rec::FontLoad(int_of(v, f)),
+        _ => Rec::Other,
     })
-    .flatten()
-    .map(|(p, c)| (int_of(v, p), int_of(v, c)))
+    .unwrap_or(Rec::Other)
+}
+
+/// The line's records read ([`Rec`]), each decoded once while the line
+/// holds it (records are values: the same id, the same record).
+pub(crate) fn recs(v: &Values, xs: &[ValueId]) -> Vec<Rec> {
+    type Memo = (u64, FxHashMap<ValueId, Rec>);
+    static M: OnceLock<Mutex<Memo>> = OnceLock::new();
+    let mut g = M.get_or_init(|| Mutex::new((0, FxHashMap::default()))).locked();
+    if g.0 != v.instance() {
+        g.1.clear();
+        g.0 = v.instance();
+    }
+    let tags = [v.str("cmd"), v.str("cand"), v.str("fontload")];
+    let out: Vec<Rec> = xs
+        .iter()
+        .map(|&x| *g.1.entry(x).or_insert_with(|| rec_of(v, x, &tags)))
+        .collect();
+    if g.1.len() > 2 * xs.len() + 1024 {
+        g.1 = xs.iter().copied().zip(out.iter().copied()).collect();
+    }
+    out
 }
 
 /// The writer's parameters a step reads as it writes (the compression,
@@ -3418,13 +3455,13 @@ fn link(
     let mut got: Vec<ValueId> = Vec::new();
     let mut errors: Vec<(String, i64)> = Vec::new();
     let (mut placed, mut shipped) = (0usize, 0usize);
+    let rs = recs(v, xpages);
     let pcs: Vec<Option<Arc<PagePiece>>> = {
         let m = pieces().locked();
-        xpages
-            .iter()
-            .map(|&x| {
-                v.as_int(x)
-                    .and_then(|k| m.get(&u64::from_ne_bytes(k.to_ne_bytes())).cloned())
+        rs.iter()
+            .map(|r| match *r {
+                Rec::Page(k) => m.get(&u64::from_ne_bytes(k.to_ne_bytes())).cloned(),
+                _ => None,
             })
             .collect()
     };
@@ -3433,18 +3470,11 @@ fn link(
     let hi = CMD_BORN.load(std::sync::atomic::Ordering::Relaxed);
     let serials: FxHashMap<u64, Arc<Cmd>> = {
         let mut m = cmds.locked();
-        // (the tag compared as a value: no string made per record)
-        let cmd_tag = v.str("cmd");
-        let serials: FxHashMap<u64, Arc<Cmd>> = xpages
+        let serials: FxHashMap<u64, Arc<Cmd>> = rs
             .iter()
-            .filter_map(|&x| {
-                let xs = list_of(v, x);
-                (xs.first() == Some(&cmd_tag))
-                    .then(|| {
-                        xs.get(2)
-                            .map(|&s| u64::from_ne_bytes(int_of(v, s).to_ne_bytes()))
-                    })
-                    .flatten()
+            .filter_map(|r| match *r {
+                Rec::Cmd(s) => Some(s),
+                _ => None,
             })
             .filter_map(|s| m.get(&s).map(|c| (s, c.clone())))
             .collect();
@@ -3476,10 +3506,10 @@ fn link(
             None => x.raw(),
         })
         .collect();
-    let shown: Vec<u64> = xpages
+    let shown: Vec<u64> = rs
         .iter()
         .zip(&ids)
-        .filter(|(x, _)| v.as_int(**x).is_some())
+        .filter(|(r, _)| matches!(r, Rec::Page(_)))
         .map(|(_, &id)| id)
         .collect();
     // (what the writer starts from: the same for the copy to stand)
@@ -3521,11 +3551,11 @@ fn link(
             start = sn.at;
             // (moved, not copied: the memo is this link's to replace)
             chunks_of.extend(m.chunks.drain(..start));
-            let (before, after): (Vec<LinkSnap>, Vec<LinkSnap>) = std::mem::take(&mut m.snaps)
-                .into_iter()
-                .partition(|x| x.at <= start);
-            snaps.extend(before);
-            m.snaps = after;
+            // (in order of their records: split where they pass `start`,
+            // the snapshots left in place, not moved one by one)
+            snaps = std::mem::take(&mut m.snaps);
+            let k = snaps.partition_point(|x| x.at <= start);
+            m.snaps = snaps.split_off(k);
             m.chunk_base = start;
         }
     }

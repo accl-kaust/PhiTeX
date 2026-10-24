@@ -578,7 +578,7 @@ impl Run<'_, '_> {
         // parameters as read then)
         if let (Ok(fu), Ok(ku)) = (u32::try_from(f), usize::try_from(k))
             && let Some((g, Some(e))) = self.font_memo.get(&fu)
-            && *g == self.st.any_gen()
+            && *g == self.st.font_gen()
             && self.interp.is_none()
             && let Some(&d) = ku.checked_sub(1).and_then(|i| e.params.get(i))
         {
