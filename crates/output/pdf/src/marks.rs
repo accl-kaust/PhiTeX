@@ -165,8 +165,8 @@ fn sort_dest_names(v: &mut [(Vec<u8>, usize)], l: isize, r: isize) {
     }
 }
 
-fn concat(to: &mut Option<Vec<u8>>, s: &[u8]) {
-    to.get_or_insert_with(Vec::new).extend_from_slice(s);
+fn concat(to: &mut Option<crate::digest::Toks>, s: &[u8]) {
+    to.get_or_insert_with(Default::default).0.extend_from_slice(s);
 }
 
 impl PdfState {

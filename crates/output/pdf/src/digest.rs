@@ -60,6 +60,29 @@ impl fmt::Debug for Bytes<'_> {
     }
 }
 
+/// Token text the state gathers (`\pdfcatalog`, `\pdfinfo` and the
+/// rest, concatenated): a digest formats it as its length and content
+/// hash ([`Bytes`]), not byte by byte.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(crate) struct Toks(pub Vec<u8>);
+
+impl std::ops::Deref for Toks {
+    type Target = Vec<u8>;
+    fn deref(&self) -> &Vec<u8> {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Toks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if FAST.with(std::cell::Cell::get) {
+            Bytes(&self.0).fmt(f)
+        } else {
+            self.0.fmt(f)
+        }
+    }
+}
+
 /// The hash of `x`'s `Debug` form.
 pub(crate) fn debug_hash(x: &dyn fmt::Debug) -> u64 {
     let mut w = Writer::default();

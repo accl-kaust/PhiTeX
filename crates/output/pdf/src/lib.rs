@@ -864,12 +864,12 @@ pub struct PdfState {
     subset_tags: BTreeSet<[u8; 6]>,
     last_arg_other_subr3: i32,
     // `\pdfinfo` and friends, concatenated
-    info_toks: Option<Vec<u8>>,
-    catalog_toks: Option<Vec<u8>>,
+    info_toks: Option<digest::Toks>,
+    catalog_toks: Option<digest::Toks>,
     catalog_openaction: usize,
-    names_toks: Option<Vec<u8>>,
-    trailer_toks: Option<Vec<u8>>,
-    trailer_id_toks: Option<Vec<u8>>,
+    names_toks: Option<digest::Toks>,
+    trailer_toks: Option<digest::Toks>,
+    trailer_id_toks: Option<digest::Toks>,
     /// `pdf_first_outline`, `pdf_last_outline`, `pdf_parent_outline`.
     first_outline: usize,
     last_outline: usize,

@@ -190,12 +190,14 @@ pub(crate) fn line_show(v: &Values, x: ValueId) -> String {
 
 /// A line marker's piece and candidates passed ([`line_push`]).
 fn line_marker(v: &Values, x: ValueId) -> Option<(i64, i64)> {
-    if v.as_int(x).is_some() {
-        return None;
-    }
-    let xs = list_of(v, x);
-    (xs.len() == 3 && xs.first().map(|&k| str_of(v, k)).as_deref() == Some("cand"))
-        .then(|| (int_of(v, xs[1]), int_of(v, xs[2])))
+    // (the tag compared as a value: no list or string made per record)
+    let cand = v.str("cand");
+    v.with_list(x, |xs| match *xs {
+        [k, p, c] if k == cand => Some((p, c)),
+        _ => None,
+    })
+    .flatten()
+    .map(|(p, c)| (int_of(v, p), int_of(v, c)))
 }
 
 /// The writer's parameters a step reads as it writes (the compression,
