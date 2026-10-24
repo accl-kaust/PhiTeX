@@ -121,7 +121,11 @@ def table(kind, d):
     if a8:
         idle = sum(x[4] for x in a8["rounds"])
         commit = sum(x[2] for x in a8["rounds"])
-        sp.append(f"cp {a8['cp_ms']:.1f} ms; j8 idle {idle:.1f} ms, commit {commit:.1f} ms, op bodies {a8['bodies_ms']:.1f} ms")
+        bodies = a8.get("bodies_ms")
+        body = f", op bodies {bodies:.1f} ms" if bodies is not None else ""
+        cp = a8.get("cp_ms")
+        cps = f"cp {cp:.1f} ms; " if cp is not None else ""
+        sp.append(f"{cps}j8 idle {idle:.1f} ms, commit {commit:.1f} ms{body}")
     rows.append(("parallel", par + "; " + "; ".join(sp), "j32 <= j16, then faster"))
     ew = []
     for j, e in sorted(edits.items()):
