@@ -35,7 +35,10 @@ impl Run<'_, '_> {
         // heartbeat's own work every `HB_BATCH` commands)
         self.cmds += 1;
         if self.cmds >= self.hb_at {
+            let done = self.hb_done;
             self.heartbeat_tick();
+            // (the engine bounds a run on a guess by its work)
+            self.cx.tick(self.cmds - done)?;
         }
         self.no_pull = true;
         let got = self.get_next();

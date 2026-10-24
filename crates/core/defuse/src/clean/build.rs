@@ -776,13 +776,25 @@ impl<'a> Builder<'a> {
                 let Some(r) = &n.res else { continue };
                 let mut res = (**r).clone();
                 let mut ch = Vec::new();
-                for &(f, loc, _) in r.forwards_from(m) {
+                let mut lost = false;
+                for fw in r.forwards_from(m) {
+                    let (f, loc) = (fw.f, fw.loc);
+                    // (A part the new value lacks, or the part kept
+                    // changed: the node runs again.)
+                    let Some(x) = self.core.eval_path(fw.path, v).filter(|_| fw.holds(self.core, &self.w)) else {
+                        lost = true;
+                        break;
+                    };
                     if let Some(d) = res.defs.iter_mut().find(|d| d.f == f && d.loc.entry_key() == loc.entry_key())
-                        && d.val != v
+                        && d.val != x
                     {
-                        d.val = v;
-                        ch.push((f, d.loc));
+                        d.val = x;
+                        ch.push((f, d.loc, x));
                     }
+                }
+                if lost {
+                    self.make_dirty_for(id, crate::api::Rerun::Loop { field: m });
+                    continue;
                 }
                 if ch.is_empty() {
                     continue;
@@ -790,8 +802,8 @@ impl<'a> Builder<'a> {
                 let mut n2 = n;
                 n2.res = Some(Arc::new(res));
                 self.w.put(id, n2.clone());
-                for (f, loc) in ch {
-                    self.file_if(id, &n2, f, loc, Some(v), true);
+                for (f, loc, x) in ch {
+                    self.file_if(id, &n2, f, loc, Some(x), true);
                 }
             }
         }

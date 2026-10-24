@@ -985,6 +985,10 @@ impl Run<'_, '_> {
                 }
                 self.x_token();
                 self.ck()?;
+                // (§120: the list fills TeX's main memory)
+                if body.len() >= crate::input::MAIN_MEMORY {
+                    return self.fatal(&format!("TeX capacity exceeded, sorry [main memory size={}]", crate::input::MAIN_MEMORY));
+                }
             } else {
                 // (§473: no meaning is needed here except a control
                 // sequence's in a `\def`, for §479's `#`; braces count

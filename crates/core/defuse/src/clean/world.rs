@@ -291,6 +291,28 @@ impl std::fmt::Debug for After {
     }
 }
 
+/// A definition forwarding a loop-back field (`Ctx::define_forward`,
+/// `Ctx::define_forward_at`): `f` at `loc` is the part at `path` of
+/// `from`'s round value, while the part at `keep` stays the value it was
+/// (else the node runs again).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Fwd {
+    pub f: Field,
+    pub loc: Locality,
+    pub from: Field,
+    pub path: u32,
+    pub keep: Option<(u32, ValueId)>,
+}
+
+impl Fwd {
+    /// Whether the loop-back value now has the part forwarded and the
+    /// part kept as it was.
+    pub(crate) fn holds(&self, core: &super::core::Core, w: &World) -> bool {
+        let Some(&v) = w.loops.get(&self.from) else { return false };
+        core.eval_path(self.path, v).is_some() && self.keep.is_none_or(|(k, kv)| core.eval_path(k, v) == Some(kv))
+    }
+}
+
 /// A committed run's result.
 #[derive(Clone, Debug)]
 pub(crate) struct Res {
@@ -318,9 +340,9 @@ pub(crate) struct Res {
     pub text: usize,
     /// The evaluation its run ran in (`Core::eval_no`; 0: none).
     pub eval: u64,
-    /// Its definitions that forward a loop-back field (target, locality,
-    /// the field): their values follow the field's round value.
-    pub forwards: Vec<(Field, Locality, Field)>,
+    /// Its definitions that forward a loop-back field: their values
+    /// follow the field's round value.
+    pub forwards: Vec<Fwd>,
     /// The marks its run made (`Ctx::checkpoint`), in order, and the token
     /// it kept for a later run to resume from one (`Ctx::keep_after`).
     pub marks: Arc<[Mark]>,
@@ -372,8 +394,8 @@ impl Res {
     }
 
     /// The loop-back fields its definitions forward (`Ctx::define_forward`).
-    pub(crate) fn forwards_from(&self, from: Field) -> impl Iterator<Item = &(Field, Locality, Field)> {
-        self.forwards.iter().filter(move |x| x.2 == from)
+    pub(crate) fn forwards_from(&self, from: Field) -> impl Iterator<Item = &Fwd> {
+        self.forwards.iter().filter(move |x| x.from == from)
     }
 
     /// The value it defines for `f` (defined at more than one locality,
@@ -618,7 +640,7 @@ fn published_any(n: &Node) -> &[(Field, ValueId)] {
 /// The loop-back fields a done node's definitions forward (`fwds` keys).
 fn forwarded(n: &Node) -> Vec<u64> {
     let mut v: Vec<u64> = match &n.res {
-        Some(r) if n.st == St::Done => r.forwards.iter().map(|x| x.2.0.raw()).collect(),
+        Some(r) if n.st == St::Done => r.forwards.iter().map(|x| x.from.0.raw()).collect(),
         _ => Vec::new(),
     };
     v.sort_unstable();

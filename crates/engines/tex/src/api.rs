@@ -496,7 +496,8 @@ fn edit_apply_note(t_all: std::time::Instant, t: [std::time::Duration; 3], n: [u
 /// The most nodes an edit's text and files may change for its
 /// evaluation to run on the calling thread, no pool woken (an edit's
 /// evaluation of a few nodes on the pool spent more waking and stealing
-/// than running).
+/// than running), and the most it runs and queues there: past them it
+/// goes on the pool, in steps, as a cold build (`Executor::widen`).
 const INLINE_NODES: usize = 16;
 
 /// The lengths of the key prefix and suffix `old` and `new` share
@@ -3184,9 +3185,12 @@ impl Graph {
                 self.eng.set_run_audit(true);
             }
             let t0 = std::time::Instant::now();
-            // (an edit's few nodes: on this thread, no pool woken)
+            // (an edit's few nodes: on this thread, no pool woken; one
+            // that comes to more on the pool, [`INLINE_NODES`])
             let n = if self.inline { 1 } else { self.threads };
-            let mut ex = crate::exec::Threads::new(n).watched(&self.watch);
+            let mut ex = crate::exec::Threads::new(n)
+                .widening(self.threads, INLINE_NODES)
+                .watched(&self.watch);
             let c0 = crate::exec::clock().now();
             let r = match self
                 .eng

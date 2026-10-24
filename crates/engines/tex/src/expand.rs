@@ -207,6 +207,27 @@ impl Run<'_, '_> {
         self.log("error", &s)
     }
 
+    /// `overflow` (§94): TeX's capacity `what` (`n`) exceeded; the job
+    /// ends there, the halt raised.
+    #[cold]
+    pub(crate) fn overflow_raise(&mut self, what: &str, n: usize) {
+        if crate::exec::obs_flag!("PHITEX_OVERFLOW_TRACE") {
+            let a: String = self.cx.args().first().map(|&x| self.v.render(x)).unwrap_or_default().chars().take(300).collect();
+            let lv: Vec<(u8, u32, u32, u32)> = self.input.levels.iter().rev().take(6).map(|l| (l.kind, l.c, l.a, l.b)).collect();
+            let mut top = Vec::new();
+            for (k, c, _, b) in lv {
+                let toks: Vec<Tok> = if k == crate::input::kind::TOKS && c < b { self.input.arena.get(crate::input::Range { start: c, end: b.min(c + 12) }).to_vec() } else { Vec::new() };
+                let mut t = String::new();
+                let _ = self.show_toks_into(&mut t, &toks);
+                top.push(t);
+            }
+            eprintln!("overflow: node {} {what}: levels {} arena {} text {a} top {top:?}", self.cx.node().raw(), self.input.levels.len(), self.input.arena.len());
+        }
+        if let Err(h) = self.fatal::<()>(&format!("TeX capacity exceeded, sorry [{what}={n}]")) {
+            self.raise(h);
+        }
+    }
+
     /// §372: the characters of a `\\csname` into `name`.
     fn cs_name_chars(&mut self, name: &mut String) -> R<()> {
         loop {
@@ -226,6 +247,24 @@ impl Run<'_, '_> {
     /// pushed as the macro's level. No list per argument, no buffer of
     /// the run's own. A halt is raised, never returned.
     pub(crate) fn macro_call(&mut self) {
+        // (the engine bounds a run on a guess by its work: an expansion
+        // that never ends, as `\edef` of a macro calling itself, makes
+        // no command)
+        self.exps += 1;
+        if self.exps.trailing_zeros() >= 12
+            && let Err(s) = self.cx.tick(0x1000)
+        {
+            self.raise(crate::run::Halt::Stop(s));
+            return;
+        }
+        // (§321 `push_input`'s and §120 `get_avail`'s overflows: a
+        // command whose expansion never ends fills them)
+        if self.input.levels.len() >= crate::input::STACK_SIZE {
+            return self.overflow_raise("input stack size", crate::input::STACK_SIZE);
+        }
+        if self.input.arena.len() >= crate::input::ARENA_MAX {
+            return self.overflow_raise("main memory size", crate::input::MAIN_MEMORY);
+        }
         let Some(m) = self.cur_macro() else {
             return;
         };

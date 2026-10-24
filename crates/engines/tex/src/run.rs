@@ -534,6 +534,9 @@ pub(crate) struct Run<'c, 'a> {
     /// heartbeat's next tick is at (`u64::MAX`: off) and the count its
     /// last tick took in.
     pub cmds: u64,
+    /// Macro expansions so far: told the engine every 4096 as its work
+    /// (`Ctx::tick`), as the commands are.
+    pub exps: u64,
     /// The commands the run's earlier attempts began before it was
     /// parked ([`Run::park`]): with [`Run::cmds`], where it is in its
     /// text (observe: the resume check says where marks were taken).
@@ -983,6 +986,7 @@ impl<'c, 'a> Run<'c, 'a> {
             doc_lines: Vec::new(),
             mode_zero: false,
             cmds: 0,
+            exps: 0,
             cmds_before: 0,
             hb_at: Run::heartbeat_start(),
             hb_done: 0,
@@ -1903,6 +1907,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let grp = self.innermost_group();
         self.st.note_kind(loc, self.in_advance);
+        self.st.rb_drop(loc);
         self.st.set(loc, val, global, grp);
         self.muts += 1;
     }
@@ -3026,6 +3031,22 @@ impl<'c, 'a> Run<'c, 'a> {
                     let _ = self.cx.use_field(wd)?;
                     continue;
                 }
+                // (a global definition, outside a line's interpretation:
+                // the field's value not read but passed on where the run
+                // publishes it, so a change of it runs no reader of the
+                // file again, only the meaning's, [`Run::finish`]; read
+                // where the run looks at the meaning, `State::rb_note`)
+                if self.interp.is_none()
+                    && !name.starts_with("rberr:")
+                    && let Some((val, true)) = self.rb_part(wd)
+                {
+                    self.read_back_pre(key, &name, val)?;
+                    self.set(&name, val, true);
+                    let f = self.ops.fields.get_at(v, self.cx.values_epoch(), &name);
+                    let l = self.loc_of(f);
+                    self.st.rb_note(l, wd);
+                    continue;
+                }
                 let Some(x) = self.cx.use_field(wd)? else {
                     continue;
                 };
@@ -3069,22 +3090,7 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             if let [val, g] = xs.as_slice() {
                 let global = int_of(v, *g) != 0;
-                // the value the read-back replaces, for the lines
-                // written this round ([`Run::revert_read_back`]): once
-                // per run (a file read back again later in the run keeps
-                // the first read-back point's)
-                let pre = format!("wpre:{name}");
-                if self.get(&pre)?.is_none() {
-                    let was = self.get(&name)?;
-                    if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
-                        eprintln!(
-                            "aux-trace: read-back {key} {name} = {} (was {:?})",
-                            crate::val::show_def(v, *val),
-                            was.map(|x| crate::val::show_def(v, x))
-                        );
-                    }
-                    self.set(&pre, was.unwrap_or(ValueId::UNIT), true);
-                }
+                self.read_back_pre(key, &name, *val)?;
                 self.set(&name, *val, global);
                 if self.interp.is_some() {
                     self.interp_nested.insert(name, id);
@@ -3115,6 +3121,38 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         Ok(true)
+    }
+
+    /// The value the read-back of `name` (`val`, from file `key`)
+    /// replaces, for the lines written this round
+    /// ([`Run::revert_read_back`]): kept once per run (a file read back
+    /// again later in the run keeps the first read-back point's).
+    fn read_back_pre(&mut self, key: &str, name: &str, val: ValueId) -> R<()> {
+        let v = self.v;
+        let pre = format!("wpre:{name}");
+        if self.get(&pre)?.is_none() {
+            let was = self.get(name)?;
+            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+                eprintln!(
+                    "aux-trace: read-back {key} {name} = {} (was {:?})",
+                    crate::val::show_def(v, val),
+                    was.map(|x| crate::val::show_def(v, x))
+                );
+            }
+            self.set(&pre, was.unwrap_or(ValueId::UNIT), true);
+        }
+        Ok(())
+    }
+
+    /// A read-back's loop-back field `wd`'s definition and whether it is
+    /// global, not read ([`phitex_defuse::Ctx::loop_part`]); `None` where
+    /// its value has no such parts.
+    pub(crate) fn rb_part(&mut self, wd: Field) -> Option<(ValueId, bool)> {
+        let v = self.v;
+        let (p0, p1) = rb_paths(self.cx);
+        let val = self.cx.loop_part(wd, p0)?;
+        let g = self.cx.loop_part(wd, p1)?;
+        Some((val, int_of(v, g) != 0))
     }
 
     /// File `key`, one the job writes and has not declared yet (round
@@ -4850,8 +4888,20 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         {
             let (n, t_list) = (published.len(), t_pub.elapsed());
+            // (a read-back's global definition standing as it read it:
+            // passed on from its loop-back field, which the run did not
+            // read, `Run::read_back`; one looked at, its field read)
+            self.rb_flush();
+            let rb: phitex_defuse::FxHashMap<Field, Field> = self.st.rb_entries().into_iter().map(|(l, w)| (self.loc_field(l), w)).collect();
+            let (p0, p1) = if rb.is_empty() { (phitex_defuse::PathId::WHOLE, phitex_defuse::PathId::WHOLE) } else { rb_paths(self.cx) };
             for (f, x, l) in published {
                 crate::exec::widths::def(f);
+                if let Some(&w) = rb.get(&f) {
+                    if l == Locality::Global && self.cx.loop_part(w, p0) == Some(x) && self.cx.define_forward_at(f, w, p0, Some(p1), l) {
+                        continue;
+                    }
+                    let _ = self.cx.use_field(w);
+                }
                 self.cx.define_with(f, x, l);
             }
             if n >= 10_000 && crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -5524,6 +5574,9 @@ pub(crate) struct Parked {
     /// [`Run::lt`]: its reads, and its tainted meanings by field and
     /// whether one was looked at ([`crate::runstate::State::taint`]).
     lt: (crate::control::LinesTaint, Vec<Field>, bool),
+    /// The read-backs' meanings not looked at, by field, with their
+    /// loop-back fields ([`crate::runstate::State::rb_note`]).
+    rb: Vec<(Field, Field)>,
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -5726,6 +5779,7 @@ impl Run<'_, '_> {
                 .collect(),
             fin_lazy: sorted_lazy(&std::mem::take(&mut self.fin_lazy)),
             lt: self.lt_parked(),
+            rb: self.rb_parked(),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
@@ -6340,6 +6394,7 @@ impl Run<'_, '_> {
             num_memo,
             fin_lazy,
             lt: self.lt_parked(),
+            rb: self.rb_parked(),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st,
@@ -6613,6 +6668,7 @@ fn parked_rest(p: &Parked) -> u64 {
         (f.0.raw(), x.raw()).hash(&mut h);
     }
     (&p.lt.0, p.lt.1.iter().map(|f| f.0.raw()).collect::<Vec<_>>(), p.lt.2).hash(&mut h);
+    p.rb.iter().map(|(f, w)| (f.0.raw(), w.0.raw())).collect::<Vec<_>>().hash(&mut h);
     (p.rec_load, p.no_pull, p.args_key).hash(&mut h);
     w(&mut h, p.st.rest_hash());
     w(&mut h, p.contribs.len() as u64);
@@ -6753,6 +6809,10 @@ impl<'c, 'a> Run<'c, 'a> {
             r.lt = lt;
             let locs = fs.into_iter().map(|f| r.loc_of(f)).collect();
             r.st.set_taint(locs, read);
+        }
+        {
+            let rb = p.rb.into_iter().map(|(f, w)| (r.loc_of(f), w)).collect();
+            r.st.set_rb(rb);
         }
         r.skip_first = p.skip_first.into_iter().map(|f| r.loc_of(f)).collect();
         if crate::exec::obs_flag!("PHITEX_REG_TRACE") {
@@ -7050,7 +7110,31 @@ pub(crate) fn text_lines(v: &Values, args: &[ValueId]) -> ValueId {
     lines_value(v, &lines)
 }
 
+/// The paths of a read-back field's definition and its globality in
+/// its value (`[definition, global]`).
+fn rb_paths(cx: &Ctx<'_>) -> (phitex_defuse::PathId, phitex_defuse::PathId) {
+    use phitex_defuse::Step;
+    (cx.path(&[Step::Index(0)]), cx.path(&[Step::Index(1)]))
+}
+
 impl Run<'_, '_> {
+    /// The read-backs as a park or a mark keeps them ([`Parked::rb`]),
+    /// the fields of those looked at read first ([`Run::rb_flush`]).
+    fn rb_parked(&mut self) -> Vec<(Field, Field)> {
+        self.rb_flush();
+        let mut v: Vec<(Field, Field)> = self.st.rb_entries().into_iter().map(|(l, w)| (self.loc_field(l), w)).collect();
+        v.sort_by_key(|e| e.0.0.raw());
+        v
+    }
+
+    /// The loop-back fields of the read-backs looked at since: read, as
+    /// the read-back would have read them (`Run::read_back`).
+    pub(crate) fn rb_flush(&mut self) {
+        for w in self.st.rb_take_looked() {
+            let _ = self.cx.use_field(w);
+        }
+    }
+
     /// [`Run::lt`] as a park or a mark keeps it ([`Parked::lt`]).
     fn lt_parked(&mut self) -> (crate::control::LinesTaint, Vec<Field>, bool) {
         let mut fs: Vec<Field> = self.st.tainted().to_vec().into_iter().map(|l| self.loc_field(l)).collect();

@@ -1518,6 +1518,15 @@ pub trait Executor {
         false
     }
 
+    /// An evaluation running free on one thread ([`Executor::steps`]
+    /// `false`, parallelism 1) has `work` nodes run and queued: an
+    /// executor that would rather run them in parallel takes on its
+    /// threads and says so, and the evaluation goes on in steps, as one
+    /// begun on them. `false` (the default): it goes on as it is.
+    fn widen(&mut self, _work: usize) -> bool {
+        false
+    }
+
     /// Runs `f(i)` for `i < n`, possibly in parallel.
     fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         let mut out = Vec::with_capacity(n);

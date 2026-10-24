@@ -1857,6 +1857,14 @@ impl Run<'_, '_> {
                 fin.k
             );
         }
+        // (`PHITEX_FIN_ARGS=1`: each page's arguments' parts, by id, to
+        // compare the pages two runs place)
+        if crate::exec::obs_flag!("PHITEX_FIN_ARGS") {
+            let v = self.v;
+            let parts: Vec<u64> = args.get(12).map(|&p| list_of(v, p).iter().map(|x| x.raw()).collect()).unwrap_or_default();
+            let top: Vec<u64> = args.iter().map(|x| x.raw()).collect();
+            eprintln!("fin-args: node {} page {} at {} parts {parts:?} top {top:?}", self.cx.node().raw(), fin.j, at.raw());
+        }
         self.cx.follow_after_any(at, self.ops.finish, args)
     }
 

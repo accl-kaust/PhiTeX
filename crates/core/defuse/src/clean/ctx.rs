@@ -139,6 +139,11 @@ pub(crate) struct Gets {
     ranks: Vec<ValueId>,
 }
 
+/// The work (`Ctx::tick` units) a run resting on a guess may do before it
+/// stops out of fuel: far past any run on its true inputs (a document's
+/// longest piece does about a million commands).
+pub(crate) const GUESS_WORK: u64 = 1 << 25;
+
 /// A run's view of the store.
 pub struct Ctx<'a> {
     pub(crate) core: &'a Core,
@@ -150,7 +155,7 @@ pub struct Ctx<'a> {
     pub(crate) reads: Vec<Read>,
     pub(crate) defs: Vec<Def>,
     /// Its definitions forwarding a loop-back field (`define_forward`).
-    pub(crate) forwards: Vec<(Field, Locality, Field)>,
+    pub(crate) forwards: Vec<super::world::Fwd>,
     /// The views this attempt made ([`View`]): each one's root read (its
     /// index in `reads`; `u32::MAX`: none, a constant), path and value.
     pub(crate) views: Vec<(u32, u32, ValueId)>,
@@ -262,6 +267,12 @@ pub struct Ctx<'a> {
     /// A speculative run's read budget; spent, the run stops (`fuel_out`).
     pub(crate) fuel: Option<u64>,
     pub(crate) fuel_out: bool,
+    /// The client's work so far (`Ctx::tick`), and whether it ran past
+    /// [`GUESS_WORK`] on a guess.
+    pub(crate) work: u64,
+    pub(crate) work_out: bool,
+    /// It read past a pending definition set, predicting.
+    pub(crate) past_pending: bool,
     /// The range a stopped run waits on (field, from, to).
     pub(crate) range_wait: Option<(Field, Id, Id, bool)>,
     /// The bound the run narrowed its pending set to.
@@ -371,6 +382,9 @@ impl<'a> Ctx<'a> {
             from_last: 0,
             fuel: None,
             fuel_out: false,
+            work: 0,
+            work_out: false,
+            past_pending: false,
             range_wait: None,
             narrowed: None,
             #[cfg(feature = "observe")]
@@ -543,8 +557,9 @@ impl<'a> Ctx<'a> {
         // (speculating, the read guesses past it; a definition it makes
         // re-asks the reader).
         let from = reach.map_or(0, |r| r.0);
+        let past = self.pset_after(u, pos, from);
         if (!self.predict || self.core.wait_pending.contains(&f))
-            && self.pset_after(u, pos, from)
+            && past
             && let Some(x) = super::core::prof::time(19, || self.w.pending_set_wait(self.core, u, f, from, pos, self.me))
         {
             if super::core::debug() && self.w.node(x).is_some_and(|n| !matches!(n.st, St::Dirty | St::Held)) {
@@ -553,6 +568,7 @@ impl<'a> Ctx<'a> {
             self.pset_wait = true;
             return Err(self.stop(Wait::Node(x, Some(f))));
         }
+        self.past_pending |= past && self.predict;
         match reach {
             Some((_, e)) => {
                 let site = e.node;
@@ -1163,7 +1179,7 @@ impl<'a> Ctx<'a> {
         match self.reads.get(root as usize) {
             _ if soft => {}
             _ if self.passable(root, path) => self.passes.push(super::world::Pass { to: super::world::PassTo::Def(f, loc), read: root, path, val: x, set: None }),
-            Some(&Read::Loop { f: from, .. }) if path == 0 => self.forwards.push((f, loc, from)),
+            Some(&Read::Loop { f: from, .. }) if path == 0 => self.forwards.push(super::world::Fwd { f, loc, from, path: 0, keep: None }),
             _ => self.view_read(root, path),
         }
         #[cfg(feature = "observe")]
@@ -1391,7 +1407,7 @@ impl<'a> Ctx<'a> {
     fn define_with_inner(&mut self, f: Field, x: ValueId, loc: Locality) {
         let k = loc.entry_key();
         if !self.forwards.is_empty() {
-            self.forwards.retain(|x| !(x.0 == f && x.1.entry_key() == k));
+            self.forwards.retain(|x| !(x.f == f && x.loc.entry_key() == k));
         }
         if !self.passes.is_empty() {
             self.passes.retain(|p| !matches!(p.to, super::world::PassTo::Def(g, l) if g == f && l.entry_key() == k));
@@ -1441,13 +1457,62 @@ impl<'a> Ctx<'a> {
             // (Its value is not a read: it follows.)
             self.reads.push(Read::IsLoop { f: from, val: true });
             self.define_with_inner(f, lv, loc);
-            self.forwards.push((f, loc, from));
+            self.forwards.push(super::world::Fwd { f, loc, from, path: 0, keep: None });
             return Ok(());
         }
         if let Some((v, _)) = self.read_at(from, self.me, false, false, 0)? {
             self.define_with_inner(f, v, loc);
         }
         Ok(())
+    }
+
+    /// The part at path `p` of loop-back field `from`'s round value, not
+    /// read: the run depends only on `from` being a loop-back field, and
+    /// on nothing at all where it passes the part on whole
+    /// ([`Ctx::define_forward_at`]); `None` where `from` is none or its
+    /// value has no such part.
+    pub fn loop_part(&mut self, from: Field, p: crate::api::PathId) -> Option<ValueId> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&from), self.core.rec_steps(p.0)]) } else { serde_json::Value::Null };
+        let r = self.w.loops.get(&from).and_then(|&lv| self.core.eval_path(p.0, lv));
+        if r.is_some() {
+            self.reads.push(Read::IsLoop { f: from, val: true });
+        }
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "loop_part", a, crate::record::j(&r));
+        r
+    }
+
+    /// Defines `f` (at `loc`) as the part at path `p` of loop-back field
+    /// `from`'s round value, forwarded as [`Ctx::define_forward`] forwards
+    /// it: when the round value changes the definition follows without
+    /// the node running again, while the part at path `keep` (if any)
+    /// stays the value it has now; a value without either part runs the
+    /// node again. False (nothing defined) where `from` is no loop-back
+    /// field or its value has no such parts: the client reads it instead.
+    pub fn define_forward_at(&mut self, f: Field, from: Field, p: crate::api::PathId, keep: Option<crate::api::PathId>, loc: Locality) -> bool {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&f), crate::record::j(&from), self.core.rec_steps(p.0), keep.map(|k| self.core.rec_steps(k.0)), crate::record::j(&loc)]) } else { serde_json::Value::Null };
+        let r = self.define_forward_at_inner(f, from, p.0, keep.map(|k| k.0), loc);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "define_forward_at", a, crate::record::j(&r));
+        r
+    }
+
+    fn define_forward_at_inner(&mut self, f: Field, from: Field, p: u32, keep: Option<u32>, loc: Locality) -> bool {
+        let Some(&lv) = self.w.loops.get(&from) else { return false };
+        let Some(x) = self.core.eval_path(p, lv) else { return false };
+        let keep = match keep {
+            Some(k) => match self.core.eval_path(k, lv) {
+                Some(kv) => Some((k, kv)),
+                None => return false,
+            },
+            None => None,
+        };
+        self.reads.push(Read::IsLoop { f: from, val: true });
+        self.define_with_inner(f, x, loc);
+        self.forwards.push(super::world::Fwd { f, loc, from, path: p, keep });
+        true
     }
 
     /// Defines `f` as a local of the scope this node opens after itself.
@@ -3028,12 +3093,27 @@ impl<'a> Ctx<'a> {
         crate::record::call(&self.calls, "unread", a, serde_json::Value::Null);
     }
 
-    /// Accounts `n` units of work.
+    /// Accounts `n` units of the client's work. A run resting on a guess
+    /// (a definer in work's result, a prediction, a pending definition
+    /// set read past) that works past [`GUESS_WORK`] units stops out of
+    /// fuel: its guess may have sent it where its true inputs never would
+    /// (a loop that does not end), and it runs again carefully, on
+    /// committed values only.
     ///
     /// # Errors
     ///
-    /// Never in this core.
-    pub fn tick(&mut self, _n: u64) -> Result<(), Stop> {
+    /// [`Stop`] when it stops so.
+    pub fn tick(&mut self, n: u64) -> Result<(), Stop> {
+        self.work = self.work.saturating_add(n);
+        if super::core::debug() && self.work > GUESS_WORK && self.work - n <= GUESS_WORK {
+            let text: String = self.w.node(self.me).map(|n| n.text.args.iter().take(2).map(|&a| self.core.values.render(a)).collect::<Vec<_>>().join(" | ")).unwrap_or_default().chars().take(300).collect();
+            eprintln!("tick {} past {GUESS_WORK}: guessed {} predicted {} past_pending {} predict {} careful {} text {text}", self.me, self.guessed, self.predicted, self.past_pending, self.predict, self.careful);
+        }
+        if self.work > GUESS_WORK && (self.guessed || self.predicted > 0 || self.past_pending) {
+            self.fuel_out = true;
+            self.work_out = true;
+            return Err(self.stop(Wait::Node(self.me, None)));
+        }
         Ok(())
     }
 }

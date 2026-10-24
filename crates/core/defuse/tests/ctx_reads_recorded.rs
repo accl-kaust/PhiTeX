@@ -31,6 +31,8 @@ const READS: &[&str] = &[
     "take_prev_contribution",
     "is_loopback",
     "define_forward",
+    "define_forward_at",
+    "loop_part",
     "use_field_path",
     "acc_fold_path",
     "acc_range_path",

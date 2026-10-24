@@ -345,6 +345,9 @@ pub(crate) struct Threads {
     pooled_jobs: AtomicU64,
     pooled_ns: AtomicU64,
     pooled_longest_ns: AtomicU64,
+    /// One thread taking on `.0` threads once the evaluation has more
+    /// than `.1` nodes run and queued ([`Executor::widen`]).
+    widen: Option<(usize, usize)>,
 }
 
 impl Threads {
@@ -360,7 +363,17 @@ impl Threads {
             pooled_jobs: AtomicU64::new(0),
             pooled_ns: AtomicU64::new(0),
             pooled_longest_ns: AtomicU64::new(0),
+            widen: None,
         }
+    }
+
+    /// One thread until the evaluation has more than `limit` nodes run
+    /// and queued, then `n` ([`Executor::widen`]).
+    pub(crate) fn widening(mut self, n: usize, limit: usize) -> Threads {
+        if self.n <= 1 && n > 1 {
+            self.widen = Some((n, limit));
+        }
+        self
     }
 
     /// The executor reporting to `w`; its counters begin again.
@@ -575,6 +588,17 @@ impl Executor for Threads {
 
     fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         self.parallel_each(n, &|i| self.job(|| f(i)));
+    }
+
+    fn widen(&mut self, work: usize) -> bool {
+        match self.widen {
+            Some((n, limit)) if work > limit && threads_possible() => {
+                self.n = n;
+                self.widen = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The workers the engine's own passes (its apply) may split over:

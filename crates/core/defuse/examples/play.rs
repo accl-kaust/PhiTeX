@@ -299,6 +299,15 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "define" => json!(cx.define(de(&g(0)), de(&g(1)))),
         "define_with" => json!(cx.define_with(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
         "define_forward" => return res(cx.define_forward(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
+        "define_forward_at" => {
+            let p = cx.path(&steps(cx, &g(2)));
+            let k = (!g(3).is_null()).then(|| cx.path(&steps(cx, &g(3))));
+            json!(cx.define_forward_at(de(&g(0)), de(&g(1)), p, k, de::<Locality>(&g(4))))
+        }
+        "loop_part" => {
+            let p = cx.path(&steps(cx, &g(1)));
+            json!(cx.loop_part(de(&g(0)), p))
+        }
         "publish" => json!(cx.publish(de(&g(0)), de(&g(1)))),
         "define_set" => {
             let p = cx.path(&steps(cx, &g(2)));

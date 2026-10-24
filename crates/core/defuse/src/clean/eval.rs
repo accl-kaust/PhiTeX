@@ -55,6 +55,9 @@ struct Run {
     /// (`Monoid::guess_ran`).
     fold_ran: bool,
     fuel_out: bool,
+    /// Out of fuel for its work on a guess (`Ctx::tick`): it runs
+    /// carefully next.
+    work_out: bool,
     range_wait: Option<(Field, Id, Id, bool)>,
     narrowed: Option<super::world::May>,
     /// Committed on a broken guessed fold, to run again: its folds waited
@@ -880,6 +883,11 @@ impl Engine {
         while let Some(k) = s.queue.first().copied() {
             rep.max_ready = rep.max_ready.max(s.queue.len());
             self.check_deadline(s, rep, deadline)?;
+            // (More work than one thread is for: in steps on the
+            // executor's threads, `Executor::widen`.)
+            if exec.widen(usize::try_from(rep.runs).unwrap_or(usize::MAX).saturating_add(s.queue.len())) {
+                return super::core::prof::time(24, || self.drain_steps(s, rep, ran, cut, deadline, hs, src, per_round, rounds, sched, exec));
+            }
             s.queue.pop_first();
             let id = k.2;
             let Some(resume) = super::core::prof::time(6, || self.prepare(s, rep, k)) else { continue };
@@ -1641,6 +1649,10 @@ impl Engine {
         if !res.reads.iter().all(|r| super::build::holds_with(&self.core, &self.w, id, r, true)) {
             return None;
         }
+        // (A forward whose parts moved off: `Ctx::define_forward_at`.)
+        if !res.forwards.iter().all(|fw| fw.holds(&self.core, &self.w)) {
+            return None;
+        }
         let spec = |x: Id| -> Option<Spec> {
             let n = prev.node(x)?;
             Some(Spec {
@@ -1669,6 +1681,7 @@ impl Engine {
             lapsed: false,
             fold_ran: false,
             fuel_out: false,
+            work_out: false,
             range_wait: None,
             narrowed: None,
             fold_redo: false,
@@ -3723,6 +3736,9 @@ impl Merge<'_> {
                 Outcome::Stopped(r, _) if r.fuel_out => {
                     rep.fuel_outs += 1;
                     s.no_fuel.insert(id);
+                    if r.work_out {
+                        s.careful.insert(id);
+                    }
                     // (Its placements are not made: a continuing token would
                     // stand on them, and goes.)
                     if let Some(k) = r.kept
@@ -4069,6 +4085,9 @@ impl Merge<'_> {
                 rep.merged += 1;
                 rep.fuel_outs += 1;
                 s.no_fuel.insert(id);
+                if r.work_out {
+                    s.careful.insert(id);
+                }
                 // (Its placements are not made: a continuing token would
                 // stand on them, and goes.)
                 if let Some(k) = r.kept
@@ -4321,6 +4340,7 @@ fn run_job(
         lapsed: cx.lapsed,
         fold_ran: cx.fold_ran,
         fuel_out: cx.fuel_out,
+        work_out: cx.work_out,
         range_wait: cx.range_wait,
         narrowed: cx.narrowed,
         fold_redo: false,

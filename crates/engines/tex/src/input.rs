@@ -457,6 +457,18 @@ type Saved = (Level, SavedPos, u64);
 /// A saved line's `(loc, state, endch, len)` or file's `(off, _, _, pos)`.
 type SavedPos = (usize, u8, i64, usize);
 
+/// TeX's input stack's size (§30 `stack_size`, TeX Live's 10000).
+pub(crate) const STACK_SIZE: usize = 10_000;
+
+/// TeX's main memory (TeX Live's `main_memory`), in words.
+pub(crate) const MAIN_MEMORY: usize = 5_000_000;
+
+/// The arena's size, in tokens, past which one command's expansions
+/// overflow the main memory: those it read are not freed before its
+/// end ([`Input::compact`] runs between commands), and no command of a
+/// document expands nearly so much.
+pub(crate) const ARENA_MAX: usize = 1 << 27;
+
 /// The least arena size, in tokens, at which a run compacts it.
 pub(crate) const ARENA_COMPACT: usize = 1 << 22;
 
