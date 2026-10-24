@@ -342,9 +342,12 @@ struct Absorb<'a> {
     loads: Option<&'a crate::pkgrec::LoadHints>,
     /// The build's hint registry (`crate::hints::Registry`).
     hints: Arc<crate::hints::Registry>,
+    /// The nodes the texts applied replaced, inserted or removed.
+    applied: usize,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
+    #[allow(clippy::too_many_lines)]
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (raw, hint, version) = self.edits.take()?;
         crate::timeline::lap("engine: the edit taken");
@@ -439,7 +442,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             *self.text = raw.to_string();
         }
         crate::timeline::lap("engine: the canonical text (comments marked)");
-        let changed = apply_text(
+        let n = apply_text(
             &self.hints,
             eng,
             self.exec,
@@ -450,7 +453,8 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             self.incr.as_deref_mut(),
             self.loads,
         );
-        if changed {
+        self.applied += n;
+        if n > 0 {
             self.unchanged = None;
             Some(version)
         } else {
@@ -483,6 +487,12 @@ fn edit_apply_note(t_all: std::time::Instant, t: [std::time::Duration; 3], n: [u
         n[6]
     );
 }
+
+/// The most nodes an edit's text and files may change for its
+/// evaluation to run on the calling thread, no pool woken (an edit's
+/// evaluation of a few nodes on the pool spent more waking and stealing
+/// than running).
+const INLINE_NODES: usize = 16;
 
 /// The lengths of the key prefix and suffix `old` and `new` share
 /// (not overlapping).
@@ -521,8 +531,8 @@ fn slice_keys(
 
 /// Edits the document's nodes `nodes` to the text `text`: the slices
 /// both texts share at the start and the end stay, those between are
-/// replaced, removed or inserted. Whether anything changed (a text
-/// whose slices are the nodes' already changes nothing).
+/// replaced, removed or inserted. The nodes replaced, inserted or
+/// removed (0: a text whose slices are the nodes' already).
 // one call site (Absorb::absorb), which passes its fields apart
 #[allow(clippy::too_many_arguments)]
 fn apply_text(
@@ -535,7 +545,7 @@ fn apply_text(
     range: Option<(usize, usize, usize)>,
     mut incr: Option<&mut Incr>,
     loads: Option<&crate::pkgrec::LoadHints>,
-) -> bool {
+) -> usize {
     let t_all = std::time::Instant::now();
     let text = as_file(text);
     crate::timeline::lap("engine: the text as a file");
@@ -556,7 +566,7 @@ fn apply_text(
     let t_hints = t_all.elapsed();
     let old = &*nodes_now;
     if old.len() == new.len() && old.iter().zip(&new).all(|(o, n)| o.0 == n.0) {
-        return false;
+        return 0;
     }
     let args_of = |eng: &Engine, k: usize| node_args(eng.values(), &text, incr, &new[k].1, loads);
     let (a, b) = common_ends(old, &new);
@@ -605,7 +615,7 @@ fn apply_text(
             text.len(),
         ],
     );
-    true
+    old_mid.max(new_mid)
 }
 
 /// How a build's loop-back rounds run (the files the job writes and
@@ -2149,6 +2159,9 @@ struct Graph {
     opened_last: Vec<String>,
     /// The executor's threads ([`Options::threads`]).
     threads: usize,
+    /// Whether the next evaluation runs on the calling thread alone: an
+    /// edit's few nodes, no pool woken ([`INLINE_NODES`]).
+    inline: bool,
     /// The comments of the document's canonical text
     /// ([`canonical_text`]): `doc:mark:<id>` in the environment, read by a
     /// run that reads a comment's mark as text (`Run::splice_mark`).
@@ -2449,6 +2462,7 @@ impl Graph {
             written: Vec::new(),
             seeds: Vec::new(),
             threads: crate::exec::threads(threads),
+            inline: false,
             marks: Marks::default(),
             wdefs: Vec::new(),
             wdefs_from: None,
@@ -3005,8 +3019,10 @@ impl Graph {
         let mut absent = self.absent.clone();
         absent.sort_unstable_by_key(|f| f.0.raw());
         absent.dedup();
+        crate::timeline::lap("env: merged with the job's");
         if env != self.env_pushed {
             self.eng.set_environment(env.iter().copied());
+            crate::timeline::lap("env: set in the engine");
             self.env_calls += 1;
             self.env_pushed = env;
         }
@@ -3097,7 +3113,9 @@ impl Graph {
                 self.eng.set_run_audit(true);
             }
             let t0 = std::time::Instant::now();
-            let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
+            // (an edit's few nodes: on this thread, no pool woken)
+            let n = if self.inline { 1 } else { self.threads };
+            let mut ex = crate::exec::Threads::new(n).watched(&self.watch);
             let c0 = crate::exec::clock().now();
             let r = match self
                 .eng
@@ -4856,6 +4874,10 @@ pub struct Build {
     /// [`Build::absorb_pending`] evaluates them with the text sent, one
     /// evaluation (its stats the nodes both ran).
     staged: bool,
+    /// The units the files staged since the last evaluation changed.
+    staged_units: usize,
+    /// Whether the build has evaluated (its cold build done).
+    evaluated: bool,
     /// The pieces' run times by text ([`crate::runtimes`]): those the
     /// build was given, updated by its evaluations.
     runtimes: phitex_defuse::FxHashMap<u64, u64>,
@@ -5071,6 +5093,8 @@ impl Build {
             lines: Mutex::default(),
             loads_ran: false,
             staged: false,
+            staged_units: 0,
+            evaluated: false,
             runtimes: phitex_defuse::FxHashMap::default(),
             wait_fields: crate::waitfields::WaitFields::default(),
         };
@@ -5319,6 +5343,7 @@ impl Build {
             canon: &mut self.canon,
             marks: self.g.marks.clone(),
             loads: loads.as_deref(),
+            applied: 0,
         };
         let t_before = t_all.elapsed();
         crate::timeline::lap("engine: the edit's inputs");
@@ -5327,6 +5352,13 @@ impl Build {
             self.g.eng.set_version(v);
         }
         let t_apply = t_all.elapsed();
+        // (an edit that starts with few nodes runs inline, [`INLINE_NODES`];
+        // the cold build and large edits on the pool)
+        self.g.inline = self.evaluated
+            && absorb.applied <= INLINE_NODES
+            && std::mem::take(&mut self.staged_units) <= INLINE_NODES
+            && !crate::exec::obs_flag!("PHITEX_NO_INLINE");
+        self.evaluated = true;
         self.g.settle(
             self.unit,
             &self.opts.finder,
@@ -5494,7 +5526,17 @@ impl Build {
         // value wherever it moved, keyed by its text, only its `upos:`
         // and the order changing, [`file_units`]; its analysis made
         // again where the text changed only, by the file's `file_incr`)
+        crate::timeline::lap("stage: the file's field");
         if cut {
+            let had: phitex_defuse::FxHashSet<(Field, ValueId)> = {
+                let v = self.g.eng.values();
+                self.g
+                    .files
+                    .iter()
+                    .filter(|&&(g, _)| units_file(&field_name(v, g)).is_some_and(|n| n == name))
+                    .copied()
+                    .collect()
+            };
             self.g.drop_units(name);
             let v = self.g.eng.values();
             let defs = self.g.ops.defs.locked().clone();
@@ -5510,10 +5552,14 @@ impl Build {
                         path,
                         bytes,
                     );
+                    self.staged_units += es.iter().filter(|e| !had.contains(e)).count();
                     self.g.files.extend(es);
                 }
                 None => self.g.absent.push(uf),
             }
+            crate::timeline::lap("stage: the file cut again");
+        } else {
+            self.staged_units += 1;
         }
         if let Some(r) = self.g.reads.iter_mut().find(|(n, _)| n == name) {
             r.1 = file_hash(found.as_ref());
@@ -5546,11 +5592,14 @@ impl Build {
                 self.g.eng.replace(n, self.g.ops.exec, args);
             }
         }
+        crate::timeline::lap("stage: the loads' records");
         self.g.absorb_provided();
         let env = self.g.environment(self.opts.fixpoint);
         let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
         env_trace(&self.g.eng, &env);
+        crate::timeline::lap("stage: the environment made");
         self.g.push_env(env);
+        crate::timeline::lap("stage: the environment set");
         self.staged = true;
     }
 
