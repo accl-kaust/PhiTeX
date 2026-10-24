@@ -1588,10 +1588,17 @@ impl Engine {
 
     /// Node `id`'s result in the round just finished, when every read it
     /// made still holds here (strictly): it is this round's too.
+    /// Else its own last result, made dirty by a read that broke and
+    /// holds again (a value that changed and came back while it waited):
+    /// committed as it was, not run.
     fn reuse(&self, id: Id) -> Option<Run> {
-        let prev = self.ev_prev.as_ref()?;
-        let pn = prev.node(id).filter(|n| n.st == St::Done)?;
         let cn = self.w.node(id)?;
+        let prev = match self.ev_prev.as_ref().filter(|p| p.node(id).is_some_and(|n| n.st == St::Done)) {
+            Some(p) => p,
+            None if cn.st == St::Dirty && cn.res.as_ref().is_some_and(|r| r.text == super::world::text_key(&cn.text)) => &self.w,
+            None => return None,
+        };
+        let pn = prev.node(id)?;
         if !std::sync::Arc::ptr_eq(&pn.text, &cn.text) || self.w.units.get(&cn.unit).is_some_and(|un| un.app == id) {
             return None;
         }
