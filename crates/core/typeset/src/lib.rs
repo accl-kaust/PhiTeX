@@ -26,6 +26,7 @@ pub mod glue;
 pub mod hyph;
 pub mod linebreak;
 pub mod math;
+pub mod microtype;
 pub mod node;
 pub mod pack;
 pub mod page;

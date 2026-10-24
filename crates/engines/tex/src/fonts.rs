@@ -63,13 +63,59 @@ pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
 }
 
 /// The font `i` names: its TFM, letter-spaced if it is a letter-spaced
-/// font ([`Ls`]).
+/// font ([`Ls`]), expanded if it is an expanded font ([`Info::ex`]).
 pub(crate) fn load_info(v: &Values, i: &Info) -> Option<Arc<Loaded>> {
     let file = i.file?;
-    match i.ls {
+    let l = match i.ls {
         Some(ls) => load_spaced(v, file, i.s, ls.dw, ls.nolig),
         None => load(v, file, i.s),
+    }?;
+    match i.ex {
+        Some((_, e, _)) => Some(expanded(&l, e)),
+        None => Some(l),
     }
+}
+
+/// `auto_expand_font(f, e)` (pdfTeX): font `l` expanded by `e`
+/// thousandths, its widths, italic corrections and kerns
+/// `round_xn_over_d(x, 1000+e, 1000)`; a memo by the font (the loads'
+/// cache keeps it) and `e`.
+pub(crate) fn expanded(l: &Arc<Loaded>, e: i32) -> Arc<Loaded> {
+    type Memo = Mutex<FxHashMap<(usize, i32), Arc<Loaded>>>;
+    static M: OnceLock<Memo> = OnceLock::new();
+    let key = (Arc::as_ptr(l) as usize, e);
+    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some(x) = m.locked().get(&key) {
+        return x.clone();
+    }
+    let r = |x: i32| phitex_typeset::arith::round_xn_over_d(x, 1000 + e, 1000);
+    let mut at = l.at.clone();
+    for d in at.chars.iter_mut().flatten() {
+        d.width = r(d.width);
+        d.italic = r(d.italic);
+    }
+    for k in &mut at.kerns {
+        *k = r(*k);
+    }
+    let x = Arc::new(Loaded {
+        tfm: l.tfm.clone(),
+        at,
+        at_hash: OnceLock::new(),
+        whd: OnceLock::new(),
+    });
+    m.locked().insert(key, x.clone());
+    x
+}
+
+/// An expanded font's name (`expand_font_name`): `name` with `+e`.
+pub(crate) fn expanded_name(name: &str, e: i32) -> String {
+    format!("{name}{e:+}")
+}
+
+/// The key of font `name` at `size` expanded by `e` (the key of a font of
+/// its name and size, as `tfm_lookup` finds it).
+pub(crate) fn expanded_key(name: &str, size: i32, e: i32) -> u32 {
+    key_of(&expanded_name(name, e), size, 0)
 }
 
 /// [`load`] with every width `dw` wider and, if `nolig`, no lig/kern
@@ -203,16 +249,45 @@ pub(crate) struct Entry {
 }
 
 /// The fonts a list uses, with their current `\fontdimen`s and
-/// `\hyphenchar`s.
+/// `\hyphenchar`s; for a paragraph's breaking with pdfTeX's protrusion or
+/// expansion, the fonts' codes and expansion ([`Px`]) and the fonts
+/// expanded as it asks ([`View::exp_log`]).
 #[derive(Default)]
 pub(crate) struct View {
     pub fonts: FontTable,
     pub hyphen: FxHashMap<FontId, i32>,
     pub names: FxHashMap<FontId, (String, i32)>,
+    pub px: FxHashMap<FontId, Box<Px>>,
+    /// An expanded font's base, for its codes.
+    pub ex_base: FxHashMap<FontId, FontId>,
+    /// The fonts expanded here: their base and the slot of their metrics.
+    exp_index: Mutex<FxHashMap<FontId, (FontId, usize)>>,
+    /// `get_expand_font`'s requests, in order (the first of each).
+    pub exp_log: Mutex<Vec<(FontId, i32)>>,
 }
 
+/// A font's pdfTeX data in a paragraph's view: its expansion (and
+/// whether automatic), `\lpcode`, `\rpcode`, `\efcode` of each
+/// character, `quad`, and the slots of its expanded fonts' metrics (by
+/// ratio, from `-shrink` in steps).
+pub(crate) struct Px {
+    pub expansion: Option<phitex_typeset::fonts::Expansion>,
+    pub auto: bool,
+    pub lp: Box<[i32; 256]>,
+    pub rp: Box<[i32; 256]>,
+    pub ef: Box<[i32; 256]>,
+    pub quad: i32,
+    pub slots: Box<[Slot]>,
+}
+
+/// An expanded font's metrics and `\fontdimen`s, once made ([`Px::slots`]).
+pub(crate) type Slot = OnceLock<(Arc<Loaded>, Vec<i32>)>;
+
 /// A `fontinfo:<f>` value: name, size, design size, file value, `s`,
-/// and a letter-spaced font's making.
+/// a letter-spaced font's making, an expanded font's base, ratio and
+/// whether it is auto-expanded (`pdf_font_blink`,
+/// `pdf_font_expand_ratio`, `pdf_font_auto_expand`).
+#[derive(Clone, Debug)]
 pub(crate) struct Info {
     pub name: String,
     pub size: i32,
@@ -220,6 +295,7 @@ pub(crate) struct Info {
     pub file: Option<ValueId>,
     pub s: i32,
     pub ls: Option<Ls>,
+    pub ex: Option<(i64, i32, bool)>,
 }
 
 pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
@@ -236,6 +312,11 @@ pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
         file: xs.get(3).copied(),
         s: n(4),
         ls: xs.get(5).and_then(|&y| Ls::of(v, y)),
+        ex: xs.get(6).and_then(|&y| {
+            let ys = list_of(v, y);
+            let g = |k: usize| ys.get(k).map(|&z| int_of(v, z));
+            Some((g(0)?, i32::try_from(g(1)?).ok()?, g(2)? != 0))
+        }),
     })
 }
 
@@ -317,7 +398,25 @@ impl View {
 
     #[inline]
     fn get(&self, f: FontId) -> Option<&(Arc<Loaded>, Vec<i32>)> {
-        self.fonts.get(f)
+        match self.fonts.get(f) {
+            Some(x) => Some(x),
+            None if self.px.is_empty() => None,
+            None => self.get_expanded(f),
+        }
+    }
+
+    /// A font expanded here ([`Fonts::expand_font`]).
+    fn get_expanded(&self, f: FontId) -> Option<&(Arc<Loaded>, Vec<i32>)> {
+        let (base, i) = self.exp_index.locked().get(&f).copied()?;
+        self.px.get(&base)?.slots.get(i)?.get()
+    }
+
+    /// The font whose codes and quad `f` has: an expanded font's base.
+    fn base_of(&self, f: FontId) -> FontId {
+        if let Some(&b) = self.ex_base.get(&f) {
+            return b;
+        }
+        self.exp_index.locked().get(&f).map_or(f, |x| x.0)
     }
 
     #[inline]
@@ -421,6 +520,75 @@ impl Fonts for View {
     fn param_count(&self, font: FontId) -> u16 {
         self.get(font)
             .map_or(0, |(_, p)| u16::try_from(p.len()).unwrap_or(0))
+    }
+
+    fn expansion(&self, font: FontId) -> Option<phitex_typeset::fonts::Expansion> {
+        self.px.get(&font).and_then(|p| p.expansion)
+    }
+
+    fn ef_code(&self, font: FontId, ch: u16) -> i32 {
+        self.px
+            .get(&self.base_of(font))
+            .map_or(1000, |p| p.ef.get(usize::from(ch)).copied().unwrap_or(1000))
+    }
+
+    fn lp_code(&self, font: FontId, ch: u16) -> i32 {
+        self.px
+            .get(&self.base_of(font))
+            .map_or(0, |p| p.lp.get(usize::from(ch)).copied().unwrap_or(0))
+    }
+
+    fn rp_code(&self, font: FontId, ch: u16) -> i32 {
+        self.px
+            .get(&self.base_of(font))
+            .map_or(0, |p| p.rp.get(usize::from(ch)).copied().unwrap_or(0))
+    }
+
+    fn quad(&self, font: FontId) -> i32 {
+        match self.px.get(&self.base_of(font)) {
+            Some(p) => p.quad,
+            None => self.param(font, 6),
+        }
+    }
+
+    fn expand_font(&self, font: FontId, e: i32) -> FontId {
+        self.expand(font, e, true)
+    }
+}
+
+impl View {
+    /// [`Fonts::expand_font`]; `log`: the request noted
+    /// ([`View::exp_log`]), else the font only made ready (the fonts at
+    /// the limits, made at `\pdffontexpand`).
+    pub(crate) fn expand(&self, font: FontId, e: i32, log: bool) -> FontId {
+        let Some(p) = self.px.get(&font) else {
+            return font;
+        };
+        let Some(x) = p.expansion else { return font };
+        // (pdfTeX loads a TFM of the expanded name where not automatic:
+        // none here)
+        if !p.auto || x.step <= 0 {
+            return font;
+        }
+        let low = x.shrink.map_or(0, |s| s.1);
+        let Some(i) = usize::try_from((e - low) / x.step)
+            .ok()
+            .filter(|&i| i < p.slots.len())
+        else {
+            return font;
+        };
+        let Some((name, size)) = self.names.get(&font) else {
+            return font;
+        };
+        let k = expanded_key(name, *size, e);
+        let Some((l, params)) = self.fonts.get(font) else {
+            return font;
+        };
+        p.slots[i].get_or_init(|| (expanded(l, e), params.clone()));
+        if self.exp_index.locked().insert(k, (font, i)).is_none() && log {
+            self.exp_log.locked().push((font, e));
+        }
+        k
     }
 }
 

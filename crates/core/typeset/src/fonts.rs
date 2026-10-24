@@ -86,6 +86,20 @@ pub enum Left {
     Boundary,
 }
 
+/// A font's expansion (pdfTeX's `\pdffontexpand`, `set_expand_params`):
+/// the fonts it is expanded to at its limits, and the step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Expansion {
+    /// `pdf_font_stretch`: the font expanded by the stretch limit, and
+    /// the limit (`pdf_font_expand_ratio` of it).
+    pub stretch: Option<(FontId, i32)>,
+    /// `pdf_font_shrink`: the font expanded by the shrink limit, and its
+    /// (negative) ratio.
+    pub shrink: Option<(FontId, i32)>,
+    /// `pdf_font_step`.
+    pub step: i32,
+}
+
 /// A character's width, height and depth ([`Fonts::whd_table`]).
 pub type Whd = (Scaled, Scaled, Scaled);
 
@@ -124,4 +138,35 @@ pub trait Fonts {
     fn param(&self, font: FontId, n: u16) -> Scaled;
     /// The number of parameters (`font_params`), for math's checks (§1195).
     fn param_count(&self, font: FontId) -> u16;
+    /// The font's expansion (pdfTeX), if it is expandable.
+    fn expansion(&self, font: FontId) -> Option<Expansion> {
+        let _ = font;
+        None
+    }
+    /// `get_ef_code` (pdfTeX's `\efcode`).
+    fn ef_code(&self, font: FontId, ch: u16) -> i32 {
+        let _ = (font, ch);
+        1000
+    }
+    /// `get_lp_code` (pdfTeX's `\lpcode`).
+    fn lp_code(&self, font: FontId, ch: u16) -> i32 {
+        let _ = (font, ch);
+        0
+    }
+    /// `get_rp_code` (pdfTeX's `\rpcode`).
+    fn rp_code(&self, font: FontId, ch: u16) -> i32 {
+        let _ = (font, ch);
+        0
+    }
+    /// `quad(f)`, `\fontdimen6`.
+    fn quad(&self, font: FontId) -> Scaled {
+        self.param(font, 6)
+    }
+    /// `get_expand_font(f, e)` (pdfTeX): font `font` expanded by `e`
+    /// thousandths (a nonzero multiple of its step), made where it is not
+    /// yet; `font` where the fonts make none.
+    fn expand_font(&self, font: FontId, e: i32) -> FontId {
+        let _ = e;
+        font
+    }
 }

@@ -9,7 +9,7 @@
 //! decision is the same.
 
 use crate::arith::{INF_BAD, MAX_DIMEN, Scaled, badness, fract};
-use crate::fonts::Fonts;
+use crate::fonts::{FontId, Fonts};
 use crate::glue::{Glue, Order};
 use crate::node::{List, Node, param};
 use crate::pack::{PackParams, Packed, Spec, hpack};
@@ -195,6 +195,12 @@ pub struct LineBreakParams {
     pub lang: LangState,
     /// `\hbadness`, `\hfuzz`, `\overfullrule` for the lines.
     pub pack: PackParams,
+    /// `\pdfadjustspacing` (pdfTeX): font expansion in the breaking (above
+    /// 1) and the lines' packing (above 0).
+    pub adjust_spacing: i32,
+    /// `\pdfprotrudechars` (pdfTeX): character protrusion in the breaking
+    /// (above 1) and the lines (above 0).
+    pub protrude_chars: i32,
 }
 
 impl Default for LineBreakParams {
@@ -239,6 +245,8 @@ impl Default for LineBreakParams {
                 rhm: 3,
             },
             pack: PackParams::default(),
+            adjust_spacing: 0,
+            protrude_chars: 0,
         }
     }
 }
@@ -267,7 +275,75 @@ pub struct Paragraph {
     pub pass: u8,
 }
 
-type Widths = [i64; 6];
+/// A line's edge character (pdfTeX's `last_leftmost_char`,
+/// `last_rightmost_char`).
+type Edge = Option<(FontId, u16)>;
+
+/// tex.web's six widths and pdfTeX's font stretch and shrink (7, 8).
+type Widths = [i64; 8];
+
+/// A node of the paragraph as pdfTeX's list reaches it: the list's
+/// `i`th, or the `j`th of the pre-break, post-break or replacement list
+/// of the discretionary there (`prev_char_p`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pos {
+    Main(usize),
+    Pre(usize, usize),
+    Post(usize, usize),
+    Rep(usize, usize),
+}
+
+fn pos_node(list: &[Node], p: Pos) -> Option<&Node> {
+    match p {
+        Pos::Main(i) => list.get(i),
+        Pos::Pre(i, j) | Pos::Post(i, j) | Pos::Rep(i, j) => {
+            let Node::Disc(d) = list.get(i)? else {
+                return None;
+            };
+            match p {
+                Pos::Pre(..) => d.pre.get(j),
+                Pos::Post(..) => d.post.get(j),
+                _ => d.replace.get(j),
+            }
+        }
+    }
+}
+
+/// `link(p)`: a discretionary's replacement follows it in pdfTeX's list.
+fn pos_next(list: &[Node], p: Pos) -> Option<Pos> {
+    let after = |i: usize| (i + 1 < list.len()).then_some(Pos::Main(i + 1));
+    match p {
+        Pos::Main(i) => match list.get(i)? {
+            Node::Disc(d) if !d.replace.is_empty() => Some(Pos::Rep(i, 0)),
+            _ => after(i),
+        },
+        Pos::Rep(i, j) => {
+            let Node::Disc(d) = list.get(i)? else {
+                return None;
+            };
+            if j + 1 < d.replace.len() {
+                Some(Pos::Rep(i, j + 1))
+            } else {
+                after(i)
+            }
+        }
+        Pos::Pre(i, j) | Pos::Post(i, j) => {
+            let Node::Disc(d) = list.get(i)? else {
+                return None;
+            };
+            let n = if matches!(p, Pos::Pre(..)) {
+                d.pre.len()
+            } else {
+                d.post.len()
+            };
+            (j + 1 < n).then_some(if matches!(p, Pos::Pre(..)) {
+                Pos::Pre(i, j + 1)
+            } else {
+                Pos::Post(i, j + 1)
+            })
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 struct Active {
@@ -382,9 +458,139 @@ struct Breaker<'a> {
     second_indent: Scaled,
     do_last_line_fit: bool,
     fill_width: [Scaled; 3],
+    /// pdfTeX's `disc_width[7]`, `disc_width[8]`.
+    disc_fw: [Scaled; 2],
+    /// pdfTeX's `prev_char_p`.
+    prev_char: Option<Pos>,
+    /// pdfTeX's `max_stretch_ratio`, `max_shrink_ratio` and
+    /// `cur_font_step` (-1 until a character sets them).
+    max_stretch_ratio: i32,
+    max_shrink_ratio: i32,
+    cur_font_step: i32,
 }
 
 impl Breaker<'_> {
+    /// `check_expand_pars(f)` (pdfTeX): whether `f` is expandable; the
+    /// paragraph's step and limits are the first such font's.
+    fn check_expand_pars(&mut self, f: FontId) -> bool {
+        let Some(x) = self.fonts.expansion(f) else {
+            return false;
+        };
+        if x.step == 0 || (x.stretch.is_none() && x.shrink.is_none()) {
+            return false;
+        }
+        if self.cur_font_step < 0 {
+            self.cur_font_step = x.step;
+        }
+        if let Some((_, r)) = x.stretch
+            && self.max_stretch_ratio < 0
+        {
+            self.max_stretch_ratio = r;
+        }
+        if let Some((_, r)) = x.shrink
+            && self.max_shrink_ratio < 0
+        {
+            self.max_shrink_ratio = -r;
+        }
+        true
+    }
+
+    /// A character's width with, where `\pdfadjustspacing>1` and its font
+    /// is expandable, its stretch and shrink (`add_char_stretch`, ...);
+    /// it becomes `prev_char_p`.
+    fn char_widths(&mut self, n: &Node, at: Pos) -> (Scaled, Scaled, Scaled) {
+        let Some((f, c)) = crate::microtype::char_of(n) else {
+            return (0, 0, 0);
+        };
+        let w = self.fonts.char_width(f, c);
+        if self.p.adjust_spacing > 1 && self.check_expand_pars(f) {
+            self.prev_char = Some(at);
+            return (
+                w,
+                crate::microtype::char_stretch(self.fonts, f, c),
+                crate::microtype::char_shrink(self.fonts, f, c),
+            );
+        }
+        (w, 0, 0)
+    }
+
+    /// A font kern's stretch and shrink (`kern_stretch`, `kern_shrink`)
+    /// where `\pdfadjustspacing>1`.
+    fn kern_widths(&self, list: &[Node], at: Pos, w: Scaled) -> (Scaled, Scaled) {
+        if self.p.adjust_spacing <= 1 {
+            return (0, 0);
+        }
+        let Some(pc) = self.prev_char else {
+            return (0, 0);
+        };
+        if pos_next(list, pc) != Some(at) {
+            return (0, 0);
+        }
+        let Some(nx) = pos_next(list, at) else {
+            return (0, 0);
+        };
+        let l = pos_node(list, pc).and_then(crate::microtype::char_of);
+        let r = pos_node(list, nx).and_then(crate::microtype::char_of);
+        (
+            crate::microtype::kern_fw(self.fonts, l, w, r, true),
+            crate::microtype::kern_fw(self.fonts, l, w, r, false),
+        )
+    }
+
+    /// The width of a node of a discretionary or its replacement, with
+    /// its stretch and shrink (§841, §842, §870, §871 and pdfTeX's).
+    fn disc_item_widths(&mut self, list: &[Node], n: &Node, at: Pos) -> (Scaled, Scaled, Scaled) {
+        match n {
+            Node::Char { .. } | Node::Lig(_) => self.char_widths(n, at),
+            Node::Kern(w, crate::node::KernKind::Normal) => {
+                let (st, sh) = self.kern_widths(list, at, *w);
+                (*w, st, sh)
+            }
+            n => (disc_item_width(n, self.fonts), 0, 0),
+        }
+    }
+
+    /// `total_pw(r, cur_p)` (pdfTeX): the protrusion of a line from the
+    /// break of active node `passive` to `cur_p`, and its left and right
+    /// characters (`last_leftmost_char`, `last_rightmost_char`).
+    fn total_pw(
+        &self,
+        list: &[Node],
+        passive: Option<usize>,
+        cur_p: Option<usize>,
+    ) -> (Scaled, Edge, Edge) {
+        use crate::microtype::{char_pw, find_protchar_left, find_protchar_right};
+        // (`l`: the break the line starts after; `first_p` at the start)
+        let l: Option<usize> = match passive {
+            None => (!list.is_empty()).then_some(0),
+            Some(k) => self.passive[k].cur_break,
+        };
+        let right = match cur_p.map(|c| &list[c]) {
+            Some(Node::Disc(d)) if !d.pre.is_empty() => d.pre.last(),
+            _ => {
+                let r = match cur_p {
+                    Some(c) => c.checked_sub(1),
+                    None => list.len().checked_sub(1),
+                };
+                match (l, r) {
+                    (Some(l), Some(r)) => find_protchar_right(list, l, r),
+                    _ => None,
+                }
+            }
+        };
+        let left = match l {
+            Some(li) => match &list[li] {
+                Node::Disc(d) if !d.post.is_empty() => d.post.first(),
+                Node::Disc(_) => find_protchar_left(list, li + 1, true),
+                _ => find_protchar_left(list, li, true),
+            },
+            None => None,
+        };
+        let (lw, lp) = char_pw(self.fonts, left, true);
+        let (rw, rp) = char_pw(self.fonts, right, false);
+        (lw + rw, lp, rp)
+    }
+
     /// §850 and §889: width and indent of line `l`.
     fn line_shape(&self, l: i32) -> (Scaled, Scaled) {
         if l > self.last_special_line {
@@ -398,19 +604,27 @@ impl Breaker<'_> {
     }
 
     /// §837–§842: `break_width` at `cur_p`.
-    fn break_width(&self, list: &List, cur_p: Option<usize>, hyphenated: bool) -> Widths {
+    fn break_width(&mut self, list: &List, cur_p: Option<usize>, hyphenated: bool) -> Widths {
         let mut bw = self.background;
         let Some(cp) = cur_p else { return bw };
         let mut s = Some(cp);
         if hyphenated && let Node::Disc(d) = &list[cp] {
             // §840
-            for v in &d.replace {
-                bw[0] -= i64::from(disc_item_width(v, self.fonts));
+            for (j, v) in d.replace.iter().enumerate() {
+                let (w, st, sh) = self.disc_item_widths(list, v, Pos::Rep(cp, j));
+                bw[0] -= i64::from(w);
+                bw[6] -= i64::from(st);
+                bw[7] -= i64::from(sh);
             }
-            for v in &d.post {
-                bw[0] += i64::from(disc_item_width(v, self.fonts));
+            for (j, v) in d.post.iter().enumerate() {
+                let (w, st, sh) = self.disc_item_widths(list, v, Pos::Post(cp, j));
+                bw[0] += i64::from(w);
+                bw[6] += i64::from(st);
+                bw[7] += i64::from(sh);
             }
             bw[0] += i64::from(self.disc_width);
+            bw[6] += i64::from(self.disc_fw[0]);
+            bw[7] += i64::from(self.disc_fw[1]);
             s = if d.post.is_empty() {
                 Some(cp + 1)
             } else {
@@ -468,7 +682,7 @@ impl Breaker<'_> {
                         self.minimum_demerits += adj;
                     }
                     let mut alpha = self.total;
-                    for k in 0..6 {
+                    for k in 0..8 {
                         alpha[k] -= break_width[k];
                     }
                     for fit in VERY_LOOSE_FIT..=TIGHT_FIT {
@@ -511,13 +725,52 @@ impl Breaker<'_> {
             }
             // §851
             let r = &self.active[i];
-            let mut caw = [0i64; 6];
+            let mut caw = [0i64; 8];
             for (k, c) in caw.iter_mut().enumerate() {
                 *c = self.total[k] - r.alpha[k];
             }
-            let caw: [Scaled; 6] = caw.map(to_scaled);
+            let caw: [Scaled; 8] = caw.map(to_scaled);
+            let r_passive = r.passive;
             let mut artificial_demerits = false;
             let mut shortfall = line_width - caw[0];
+            // pdfTeX: the line's protrusion and its fonts' expansion
+            let mut edges = (None, None);
+            if self.p.protrude_chars > 1 {
+                let (pw, lp, rp) = self.total_pw(list, r_passive, cur_p);
+                shortfall += pw;
+                edges = (lp, rp);
+            }
+            if self.p.adjust_spacing > 1 && shortfall != 0 {
+                let (mut mks, mut mksh) = (0, 0);
+                if self.p.protrude_chars > 1 {
+                    // "Calculate variations of marginal kerns"
+                    use crate::microtype::{pw_of, subst_font};
+                    for (f, c) in [edges.0, edges.1].into_iter().flatten() {
+                        let k = subst_font(self.fonts, f, c, 1000);
+                        if k != f {
+                            mks += pw_of(self.fonts, f, c, true) - pw_of(self.fonts, k, c, true);
+                        }
+                        let k = subst_font(self.fonts, f, c, -1000);
+                        if k != f {
+                            mksh += pw_of(self.fonts, k, c, true) - pw_of(self.fonts, f, c, true);
+                        }
+                    }
+                }
+                let (fs, fsh) = (caw[6] + mks, caw[7] + mksh);
+                if shortfall > 0 && fs > 0 {
+                    shortfall = if fs > shortfall {
+                        (fs / (self.max_stretch_ratio / self.cur_font_step).max(1)) / 2
+                    } else {
+                        shortfall - fs
+                    };
+                } else if shortfall < 0 && fsh > 0 {
+                    shortfall = if fsh > -shortfall {
+                        -((fsh / (self.max_shrink_ratio / self.cur_font_step).max(1)) / 2)
+                    } else {
+                        shortfall + fsh
+                    };
+                }
+            }
             let mut g: Scaled = 0;
             let mut b: i32;
             let mut fit_class: usize;
@@ -647,7 +900,7 @@ impl Breaker<'_> {
     fn last_line(
         &self,
         r: &Active,
-        caw: &[Scaled; 6],
+        caw: &[Scaled; 8],
         shortfall: Scaled,
     ) -> Option<(i32, usize, Scaled)> {
         if r.short == 0 || r.glue <= 0 {
@@ -754,7 +1007,7 @@ pub fn line_break(
     };
     let left_skip = finite(&params.left_skip, &mut infinite_shrink_error);
     let right_skip = finite(&params.right_skip, &mut infinite_shrink_error);
-    let mut background = [0i64; 6];
+    let mut background = [0i64; 8];
     add_glue(&mut background, &left_skip, 1);
     add_glue(&mut background, &right_skip, 1);
     let mut pool = POOL.take().unwrap_or_default();
@@ -762,7 +1015,7 @@ pub fn line_break(
         p: params,
         fonts,
         background,
-        total: [0; 6],
+        total: [0; 8],
         active: std::mem::take(&mut pool.active),
         passive: std::mem::take(&mut pool.passive),
         minimal_demerits: [AWFUL_BAD; 4],
@@ -783,6 +1036,11 @@ pub fn line_break(
         second_indent: 0,
         do_last_line_fit: false,
         fill_width: [0; 3],
+        disc_fw: [0; 2],
+        prev_char: None,
+        max_stretch_ratio: -1,
+        max_shrink_ratio: -1,
+        cur_font_step: -1,
     };
     // e-TeX: "Check for special treatment of last line of paragraph"
     if params.last_line_fit > 0 {
@@ -859,7 +1117,7 @@ pub fn line_break(
         // §864
         b.active.clear();
         b.passive.clear();
-        b.total = [0; 6];
+        b.total = [0; 8];
         let alpha = b.background.map(|x| -x);
         b.active.push(Active {
             passive: None,
@@ -880,7 +1138,7 @@ pub fn line_break(
         while cur < list.len() && !b.active.is_empty() {
             // §866
             match &list[cur] {
-                Node::Char { font, ch } => {
+                Node::Char { font, ch } if params.adjust_spacing <= 1 => {
                     let table = match run {
                         Some((f, t)) if f == *font => t,
                         _ => {
@@ -893,6 +1151,12 @@ pub fn line_break(
                         Some(t) => t.get(usize::from(*ch)).map_or(0, |x| x.0),
                         None => fonts.char_width(*font, *ch),
                     });
+                }
+                Node::Char { .. } | Node::Lig(_) => {
+                    let (w, st, sh) = b.char_widths(&list[cur], Pos::Main(cur));
+                    b.add_width(w);
+                    b.total[6] += i64::from(st);
+                    b.total[7] += i64::from(sh);
                 }
                 Node::Box(_) | Node::Rule(_) => {
                     b.add_width(list[cur].box_dims().map_or(0, |d| d.0));
@@ -931,22 +1195,43 @@ pub fn line_break(
                         b.kern_break(&list, cur, auto_breaking, w);
                     } else {
                         b.add_width(w);
+                        if *k == crate::node::KernKind::Normal {
+                            let (st, sh) = b.kern_widths(&list, Pos::Main(cur), w);
+                            b.total[6] += i64::from(st);
+                            b.total[7] += i64::from(sh);
+                        }
                     }
                 }
-                Node::Lig(l) => b.add_width(fonts.char_width(l.font, l.ch)),
                 Node::Disc(d) => {
                     // §869
-                    let pre: Scaled = d.pre.iter().map(|s| disc_item_width(s, fonts)).sum();
-                    let rep: Scaled = d.replace.iter().map(|s| disc_item_width(s, fonts)).sum();
-                    b.disc_width = pre;
+                    let mut dw = [0i64; 3];
+                    for (j, s) in d.pre.iter().enumerate() {
+                        let (w, st, sh) = b.disc_item_widths(&list, s, Pos::Pre(cur, j));
+                        dw[0] += i64::from(w);
+                        dw[1] += i64::from(st);
+                        dw[2] += i64::from(sh);
+                    }
+                    b.disc_width = to_scaled(dw[0]);
+                    b.disc_fw = [to_scaled(dw[1]), to_scaled(dw[2])];
                     if d.pre.is_empty() {
                         b.try_break(&list, Some(cur), params.ex_hyphen_penalty, true);
                     } else {
-                        b.add_width(pre);
+                        for (k, x) in [(0, dw[0]), (6, dw[1]), (7, dw[2])] {
+                            b.total[k] += x;
+                        }
                         b.try_break(&list, Some(cur), params.hyphen_penalty, true);
-                        b.add_width(-pre);
+                        for (k, x) in [(0, dw[0]), (6, dw[1]), (7, dw[2])] {
+                            b.total[k] -= x;
+                        }
                     }
-                    b.add_width(rep);
+                    if let Node::Disc(d) = &list[cur] {
+                        for (j, s) in d.replace.iter().enumerate() {
+                            let (w, st, sh) = b.disc_item_widths(&list, s, Pos::Rep(cur, j));
+                            b.add_width(w);
+                            b.total[6] += i64::from(st);
+                            b.total[7] += i64::from(sh);
+                        }
+                    }
                 }
                 Node::Math(kind, w) => {
                     let w = *w;
@@ -1088,10 +1373,14 @@ fn post_line_break(
         });
         let mut disc_break = false;
         let mut post_disc_break = false;
+        let protrude = params.protrude_chars > 0;
         match brk {
             None => {
                 line.extend(front.drain(..).rev());
                 line.extend(it.by_ref());
+                if protrude && let Some(q) = line.len().checked_sub(1) {
+                    right_margin(&mut line, q, false, b.fonts);
+                }
                 line.push(Node::param_glue(param::RIGHT_SKIP, right_skip));
             }
             Some(at) => {
@@ -1106,29 +1395,47 @@ fn post_line_break(
                     && let Some(n) = it.next()
                 {
                     pos += 1;
+                    // (pdfTeX: the right margin's kern after the node
+                    // before the break, `q`, or after the pre-break text)
                     match n {
-                        Node::Glue(_) => line.push(Node::param_glue(param::RIGHT_SKIP, right_skip)),
+                        Node::Glue(_) => {
+                            if protrude {
+                                let q = line.len();
+                                right_margin(&mut line, q, false, b.fonts);
+                            }
+                            line.push(Node::param_glue(param::RIGHT_SKIP, right_skip));
+                        }
                         Node::Disc(d) => {
                             // §882–§885
                             line.push(Node::Disc(Box::default()));
+                            let q = line.len() - 1;
                             if !d.post.is_empty() {
                                 post_disc_break = true;
                                 front.extend(d.post.into_iter().rev());
                             }
+                            let pre = !d.pre.is_empty();
                             line.extend(d.pre);
                             disc_break = true;
-                            line.push(Node::param_glue(param::RIGHT_SKIP, right_skip));
-                        }
-                        Node::Math(kind, _) => {
-                            line.push(Node::Math(kind, 0));
-                            line.push(Node::param_glue(param::RIGHT_SKIP, right_skip));
-                        }
-                        Node::Kern(_, kind) => {
-                            line.push(Node::Kern(0, kind));
+                            if protrude {
+                                if pre {
+                                    let q = line.len() - 1;
+                                    right_margin(&mut line, q, true, b.fonts);
+                                } else {
+                                    right_margin(&mut line, q, false, b.fonts);
+                                }
+                            }
                             line.push(Node::param_glue(param::RIGHT_SKIP, right_skip));
                         }
                         n => {
-                            line.push(n);
+                            line.push(match n {
+                                Node::Math(kind, _) => Node::Math(kind, 0),
+                                Node::Kern(_, kind) => Node::Kern(0, kind),
+                                n => n,
+                            });
+                            if protrude {
+                                let q = line.len() - 1;
+                                right_margin(&mut line, q, false, b.fonts);
+                            }
                             line.push(Node::param_glue(param::RIGHT_SKIP, right_skip));
                         }
                     }
@@ -1138,13 +1445,37 @@ fn post_line_break(
                 }
             }
         }
+        // pdfTeX: the left margin's kern
+        if protrude {
+            let p = crate::microtype::find_protchar_left(&line, 0, false);
+            let (w, ch) = crate::microtype::char_pw(b.fonts, p, true);
+            if w != 0
+                && let Some((font, ch)) = ch
+            {
+                line.insert(
+                    0,
+                    Node::Kern(
+                        -w,
+                        crate::node::KernKind::Margin {
+                            left: true,
+                            font,
+                            ch,
+                        },
+                    ),
+                );
+            }
+        }
         // §887: trap_zero_glue makes a zero \leftskip the zero_glue
         if left_skip.width != 0 || left_skip.stretch != 0 || left_skip.shrink != 0 {
             line.insert(0, Node::param_glue(param::LEFT_SKIP, left_skip));
         }
         // §889
         let (cur_width, cur_indent) = b.line_shape(cur_line);
-        let mut packed = hpack(line, Spec::Exactly(cur_width), b.fonts, &params.pack, true);
+        let mut packed = if params.adjust_spacing > 0 {
+            crate::microtype::hpack_expand(line, cur_width, b.fonts, &params.pack, true)
+        } else {
+            hpack(line, Spec::Exactly(cur_width), b.fonts, &params.pack, true)
+        };
         packed.node.shift = cur_indent;
         // §890
         let mut penalty = None;
@@ -1215,6 +1546,35 @@ fn post_line_break(
         }
     }
     lines
+}
+
+/// pdfTeX: the right margin's kern of a line, after the node before
+/// `line[q]` (the break, or the line's last node) or, `pre`, after
+/// `line[q]` itself (a discretionary's pre-break text's last node).
+fn right_margin(line: &mut List, q: usize, pre: bool, fonts: &dyn Fonts) {
+    let ptmp = if pre { Some(q) } else { q.checked_sub(1) };
+    let Some(pt) = ptmp else { return };
+    let p = if pre {
+        line.get(pt)
+    } else {
+        crate::microtype::find_protchar_right(line, 0, pt)
+    };
+    let (w, ch) = crate::microtype::char_pw(fonts, p, false);
+    if w != 0
+        && let Some((font, ch)) = ch
+    {
+        line.insert(
+            pt + 1,
+            Node::Kern(
+                -w,
+                crate::node::KernKind::Margin {
+                    left: false,
+                    font,
+                    ch,
+                },
+            ),
+        );
+    }
 }
 
 /// `append_to_vlist(b)` (§679): the interline glue to put before a box of

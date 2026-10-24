@@ -150,8 +150,31 @@ fn char_dims(fonts: &dyn Fonts, font: u32, ch: u16, hdx: &mut (Scaled, Scaled, S
     hdx.1 = hdx.1.max(d);
 }
 
+/// An hlist's natural width, height and depth, and the orders of its
+/// glue's stretch and shrink (§651–§656, §659, §665).
+pub(crate) struct Measure {
+    pub natural: Scaled,
+    pub height: Scaled,
+    pub depth: Scaled,
+    pub stretch_order: crate::glue::Order,
+    pub shrink_order: crate::glue::Order,
+}
+
+pub(crate) fn measure(list: &[Node], fonts: &dyn Fonts) -> Measure {
+    let mut t = Totals::default();
+    let mut hdx = (0, 0, 0);
+    scan_hlist(list, fonts, &mut t, &mut hdx);
+    Measure {
+        natural: hdx.2,
+        height: hdx.0,
+        depth: hdx.1,
+        stretch_order: t.stretch.highest(),
+        shrink_order: t.shrink.highest(),
+    }
+}
+
 /// Moves insertions, marks and adjust material out of `list` (§655).
-fn take_adjustments(list: &mut List) -> List {
+pub(crate) fn take_adjustments(list: &mut List) -> List {
     // (most lists have none: then nothing moves)
     if !list
         .iter()

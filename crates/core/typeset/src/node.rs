@@ -171,6 +171,16 @@ pub enum KernKind {
     AccKern,
     /// `\mkern`.
     Mu,
+    /// pdfTeX's `margin_kern_node`: a character's protrusion at a line's
+    /// edge, with the character (`margin_char`).
+    Margin {
+        /// `left_side` (else `right_side`).
+        left: bool,
+        /// The character's font.
+        font: FontId,
+        /// The character.
+        ch: u16,
+    },
 }
 
 /// An unset box of an alignment (§159).

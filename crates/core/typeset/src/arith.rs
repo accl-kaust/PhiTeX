@@ -177,6 +177,71 @@ pub fn fract(x: i32, n: i32, d: i32, max_answer: i32) -> Option<i32> {
     Some(if negative { -a } else { a })
 }
 
+/// `round_xn_over_d(x, n, d)` (pdfTeX): `x*n/d` rounded, halves up in
+/// magnitude; on overflow tex.web's unreduced value.
+#[must_use]
+pub fn round_xn_over_d(x: Scaled, n: i32, d: i32) -> Scaled {
+    let positive = x >= 0;
+    let x = i64::from(x).abs();
+    let (n, d) = (i64::from(n), i64::from(d));
+    let t = (x % 0o100000) * n;
+    let mut u = (x / 0o100000) * n + (t / 0o100000);
+    let mut v = (u % d) * 0o100000 + (t % 0o100000);
+    if u / d < 0o100000 {
+        u = 0o100000 * (u / d) + (v / d);
+    }
+    v %= d;
+    if 2 * v >= d {
+        u += 1;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let u = u as i32;
+    if positive { u } else { -u }
+}
+
+/// `ext_xn_over_d(x, n, d)` (pdfTeX's `extxnoverd`): `x*n/d` in double
+/// precision, rounded half away from zero.
+#[must_use]
+pub fn ext_xn_over_d(x: Scaled, n: i32, d: i32) -> Scaled {
+    let mut r = (f64::from(x) * f64::from(n)) / f64::from(d);
+    if r > f64::EPSILON {
+        r += 0.5;
+    } else {
+        r -= 0.5;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let r = r as i32;
+    r
+}
+
+/// `divide_scaled(s, m, dd)` (pdfTeX): `s/m` times `10^dd`, rounded.
+#[must_use]
+pub fn divide_scaled(s: Scaled, m: Scaled, dd: u32) -> Scaled {
+    let mut sign = 1;
+    let (mut s, mut m) = (s, m);
+    if s < 0 {
+        sign = -sign;
+        s = -s;
+    }
+    if m < 0 {
+        sign = -sign;
+        m = -m;
+    }
+    if m == 0 {
+        return 0;
+    }
+    let mut q = s / m;
+    let mut r = s % m;
+    for _ in 0..dd {
+        q = 10 * q + (10 * r) / m;
+        r = (10 * r) % m;
+    }
+    if 2 * r >= m {
+        q += 1;
+    }
+    sign * q
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

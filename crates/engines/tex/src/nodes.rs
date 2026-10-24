@@ -212,6 +212,12 @@ fn kern_kind(c: i64) -> KernKind {
         1 => KernKind::Explicit,
         2 => KernKind::AccKern,
         3 => KernKind::Mu,
+        // (a margin kern: its side and character, `4 + left + 2*(font<<16 | ch)`)
+        c if c >= 4 => KernKind::Margin {
+            left: (c - 4) & 1 == 1,
+            font: u32::try_from((c - 4) >> 17).unwrap_or(0),
+            ch: u16::try_from(((c - 4) >> 1) & 0xffff).unwrap_or(0),
+        },
         _ => KernKind::Normal,
     }
 }
@@ -222,7 +228,19 @@ fn kern_code(k: KernKind) -> i64 {
         KernKind::Explicit => 1,
         KernKind::AccKern => 2,
         KernKind::Mu => 3,
+        KernKind::Margin { left, font, ch } => {
+            4 + i64::from(left) + 2 * ((i64::from(font) << 16) | i64::from(ch))
+        }
     }
+}
+
+/// Whether node value `x` is a margin kern (pdfTeX's `margin_kern_node`).
+pub(crate) fn is_margin_kern(v: &Values, x: ValueId) -> bool {
+    v.with_list(x, |xs| {
+        xs.first().is_some_and(|&t| int_of(v, t) == T_KERN)
+            && xs.get(2).is_some_and(|&k| int_of(v, k) >= 4)
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn encode_list(v: &Values, list: &[Node], side: &Side) -> ValueId {
@@ -1009,7 +1027,7 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
                 .and_then(|&l| decode(v, l, side))
                 .map(Box::new),
         }),
-        T_KERN => Node::Kern(g(1), kern_kind(i64::from(g(2)))),
+        T_KERN => Node::Kern(g(1), kern_kind(xs.get(2).map_or(0, |&y| int_of(v, y)))),
         T_PENALTY => Node::Penalty(g(1)),
         T_UNSET => Node::Unset(Box::new(Unset {
             span_count: u16::try_from(g(1)).unwrap_or(0),

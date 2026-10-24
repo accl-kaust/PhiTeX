@@ -35,8 +35,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use phitex_defuse::{ValueId, Values};
 use phitex_pdf::map::{MapEntry, parse_line, parse_map, parse_map_ps};
 use phitex_pdf::{
-    Action, ColorStackCmd, DestKind, FontSource, Ident, LiteralMode, PdfBytes, PdfParams, PdfState,
-    VirtualFont, Whatsit,
+    Action, ColorStackCmd, DestKind, Expansion, FontSource, Ident, LiteralMode, PdfBytes,
+    PdfParams, PdfState, VirtualFont, Whatsit,
 };
 use phitex_tfm::ScaledFont;
 use phitex_typeset::fonts::FontId;
@@ -654,6 +654,8 @@ pub(crate) struct FontNums {
     map: BTreeMap<FontId, FontId>,
     /// The local fonts this fold gave ids ([`LINK_LOCALS`] on).
     locals: FontId,
+    /// The local fonts made anew ([`Fresh`]), by virtual font and index.
+    fresh: BTreeMap<(FontId, usize), FontId>,
 }
 
 impl FontNums {
@@ -694,6 +696,48 @@ impl FontNums {
                 }
             }
             None => self.put(id, name, size, false),
+        }
+    }
+
+    /// Virtual font `f`'s local fonts where it is read in (`do_vf`,
+    /// `vf_def_font`): each the font of its name and size, else a new
+    /// one, or one made anew ([`Fresh`]); an expandable virtual font's
+    /// expanded at its limits (`set_expand_params`), stretch's first.
+    fn vf_locals(&mut self, fonts: &Fonts, f: FontId, fwd: &mut FxHashMap<FontId, FontId>) {
+        let Some(x) = fonts.vfs.get(&f) else {
+            return;
+        };
+        let exp = fonts.vf_exp.get(&f).copied();
+        for &(_, g) in &x.fonts {
+            if let Some((n, sz, fresh)) = fonts.local(g)
+                && !fwd.contains_key(&g)
+            {
+                let d = match fresh {
+                    Some(key) => {
+                        if let Some(&d) = self.fresh.get(&key) {
+                            d
+                        } else {
+                            let id = LINK_LOCALS + self.locals;
+                            self.locals += 1;
+                            self.put(id, n, sz, true);
+                            self.fresh.insert(key, id);
+                            id
+                        }
+                    }
+                    None => self.local(n, sz),
+                };
+                fwd.insert(g, d);
+            }
+            if let Some((st, sh)) = exp
+                && let Some((n, sz)) = fonts.name_size(g)
+            {
+                if st > 0 {
+                    self.local(&crate::fonts::expanded_name(&n, st), sz);
+                }
+                if sh > 0 {
+                    self.local(&crate::fonts::expanded_name(&n, -sh), sz);
+                }
+            }
         }
     }
 
@@ -743,16 +787,12 @@ impl FontNums {
         });
         for (vf, f) in loads {
             if vf {
-                if let Some(x) = fonts.vfs.get(&f) {
-                    for &(_, g) in &x.fonts {
-                        if let Some((n, sz)) = fonts.local(g)
-                            && !fwd.contains_key(&g)
-                        {
-                            let d = self.local(n, sz);
-                            fwd.insert(g, d);
-                        }
-                    }
+                // (an expanded virtual font: its base read in first,
+                // `auto_expand_vf`)
+                if let Some(&b) = fonts.vf_base.get(&f) {
+                    self.vf_locals(fonts, b, &mut fwd);
                 }
+                self.vf_locals(fonts, f, &mut fwd);
             } else if f == SPACE_FONT {
                 self.put(SPACE_FONT, "pdftexspace", 0, false);
             }
@@ -832,6 +872,12 @@ impl FontSource for Mapped<'_> {
             for e in &mut x.fonts {
                 e.1 = self.doc(e.1);
             }
+            x
+        })
+    }
+    fn expansion(&self, f: FontId) -> Option<Expansion> {
+        self.fonts.expansion(self.step(f)).map(|mut x| {
+            x.base = self.doc(x.base);
             x
         })
     }
@@ -1070,7 +1116,15 @@ pub(crate) struct Fonts {
     /// (by name and size, never by number: [`LOCAL_FONTS`] + the index
     /// is the step's handle of one, which the link resolves against the
     /// fonts loaded before it, [`FontNums`]).
-    locals: Vec<(String, i32)>,
+    locals: Vec<(String, i32, Fresh)>,
+    /// The expanded fonts' expansions (`pdf_font_blink`,
+    /// `pdf_font_expand_ratio`, `pdf_font_auto_expand`).
+    exp: FxHashMap<FontId, Expansion>,
+    /// An expanded virtual font's base (`auto_expand_vf`).
+    vf_base: FxHashMap<FontId, FontId>,
+    /// An expandable virtual font's stretch and shrink limits: its local
+    /// fonts are expanded where it is read in (`vf_def_font`).
+    vf_exp: FxHashMap<FontId, (i32, i32)>,
     /// The fonts' numbers as the step sees them, by key (TeX's: their
     /// ranks in the order of the loads before it, [`FONT_LOADS`]): the
     /// names its content gives them, which the link rewrites only where
@@ -1089,13 +1143,32 @@ pub(crate) const FONT_LOADS: &str = "fontloads";
 /// ([`FontNums::local`]) begin at [`LINK_LOCALS`]. Both above any font
 /// the engine numbers and below [`SPACE_FONT`].
 const LOCAL_FONTS: FontId = 0x6000_0000;
+
+/// A local font made anew where its virtual font is read in, whatever
+/// fonts there are (`auto_expand_vf`: an expanded virtual font's local
+/// fonts, each its base's expanded): the virtual font and the local
+/// font's index.
+type Fresh = Option<(FontId, usize)>;
 const LINK_LOCALS: FontId = 0x7000_0000;
 
 impl Fonts {
-    /// Local font `g`'s name and size, if `g` is a handle of one.
-    fn local(&self, g: FontId) -> Option<(&str, i32)> {
+    /// Local font `g`'s name and size, and whether it is made anew
+    /// ([`Fresh`]), if `g` is a handle of one.
+    fn local(&self, g: FontId) -> Option<(&str, i32, Fresh)> {
         let i = usize::try_from(g.checked_sub(LOCAL_FONTS)?).ok()?;
-        self.locals.get(i).map(|(n, s)| (n.as_str(), *s))
+        self.locals.get(i).map(|(n, s, f)| (n.as_str(), *s, *f))
+    }
+
+    /// Font `g`'s name and size: a local font's, or one of the step's.
+    fn name_size(&self, g: FontId) -> Option<(String, i32)> {
+        if let Some((n, s, _)) = self.local(g) {
+            return Some((n.to_owned(), s));
+        }
+        let x = self.by_id.get(&g)?;
+        Some((
+            String::from_utf8_lossy(&x.name).into_owned(),
+            x.loaded.at.size,
+        ))
     }
 
     /// A digest of the fonts as the writer sees them (a memo key):
@@ -1247,6 +1320,9 @@ impl FontSource for Fonts {
     fn virtual_font(&self, f: FontId) -> Option<VirtualFont> {
         self.vfs.get(&f).cloned()
     }
+    fn expansion(&self, f: FontId) -> Option<Expansion> {
+        self.exp.get(&f).copied()
+    }
     fn tag(&self, f: FontId) -> Option<FontId> {
         self.nums.get(&f).copied()
     }
@@ -1353,7 +1429,35 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
             known[k].1.size,
             known[k].1.ls,
         );
+        let ex = known[k].1.ex;
         k += 1;
+        if let Some((b, e, auto)) = ex {
+            // an expanded font: its base with it (its virtual font, if
+            // the base has one, made below)
+            let Ok(g) = u32::try_from(b) else {
+                continue;
+            };
+            if !known.iter().any(|x| x.0 == g) {
+                let Some(i) = crate::fonts::info(v, r.font_get(g, crate::fields::FontCell::Info)?)
+                    .filter(|i| i.file.is_some())
+                else {
+                    continue;
+                };
+                if let Some(&n) = nums.get(&b) {
+                    out.nums.insert(g, FontId::try_from(n).unwrap_or(0));
+                }
+                known.push((g, i));
+            }
+            out.exp.insert(
+                f,
+                Expansion {
+                    base: g,
+                    ratio: e,
+                    auto,
+                },
+            );
+            continue;
+        }
         if let Some(ls) = ls {
             // a letter-spaced font: its packets made here, its one local
             // font the font it spaces (`letter_space_font`)
@@ -1390,6 +1494,9 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         let Ok(vf) = phitex_tfm::parse_vf(&b) else {
             continue;
         };
+        if let Some((st, sh, _, _)) = crate::pdfprim::expand_params(r, i64::from(f))? {
+            out.vf_exp.insert(f, (st, sh));
+        }
         let mut fonts = Vec::new();
         for lf in &vf.fonts {
             let fs = store_scaled_f(lf.scaled, size);
@@ -1398,7 +1505,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
                 x.0
             } else if let Some(file) = r.file(&format!("{lname}.tfm"))? {
                 let g = LOCAL_FONTS + u32::try_from(out.locals.len()).unwrap_or(0);
-                out.locals.push((lname.clone(), fs));
+                out.locals.push((lname.clone(), fs, None));
                 known.push((
                     g,
                     crate::fonts::Info {
@@ -1408,6 +1515,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
                         file: Some(file),
                         s: fs,
                         ls: None,
+                        ex: None,
                     },
                 ));
                 g
@@ -1424,6 +1532,50 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
                 .collect(),
         );
         out.vfs.insert(f, VirtualFont { fonts, packets });
+    }
+    // the expanded virtual fonts: the base's packets, each local font the
+    // base's expanded anew (`auto_expand_vf`)
+    for k in 0..known.len() {
+        let (f, ex) = (known[k].0, known[k].1.ex);
+        let Some((b, e, true)) = ex else { continue };
+        let Some(bvf) = u32::try_from(b).ok().and_then(|b| out.vfs.get(&b)).cloned() else {
+            continue;
+        };
+        let mut fonts = Vec::new();
+        for (idx, &(num, g)) in bvf.fonts.iter().enumerate() {
+            let Some(gi) = known.iter().find(|x| x.0 == g).map(|x| x.1.clone()) else {
+                fonts.push((num, 0));
+                continue;
+            };
+            let h = LOCAL_FONTS + u32::try_from(out.locals.len()).unwrap_or(0);
+            let name = crate::fonts::expanded_name(&gi.name, e);
+            out.locals.push((name.clone(), gi.size, Some((f, idx))));
+            out.exp.insert(
+                h,
+                Expansion {
+                    base: g,
+                    ratio: e,
+                    auto: true,
+                },
+            );
+            known.push((
+                h,
+                crate::fonts::Info {
+                    name,
+                    ex: Some((i64::from(g), e, true)),
+                    ..gi
+                },
+            ));
+            fonts.push((num, h));
+        }
+        out.vfs.insert(
+            f,
+            VirtualFont {
+                fonts,
+                packets: bvf.packets.clone(),
+            },
+        );
+        out.vf_base.insert(f, u32::try_from(b).unwrap_or(0));
     }
     let mut wanted = known;
     if space && let Some(x) = r.file("pdftexspace.tfm")? {
@@ -1443,6 +1595,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
                 file: Some(x),
                 s: -1000,
                 ls: None,
+                ex: None,
             },
         ));
         out.space = Some(id);
@@ -2263,6 +2416,37 @@ fn line_of(v: &Values, units: &FxHashMap<i64, ValueId>, s: &crate::nodes::Sealed
 /// it again.
 pub(crate) const ALLOCS: &str = "pdf:alloc";
 
+/// The fonts a shipout loads by name and size (a virtual font's local
+/// fonts, those made anew apart; an expandable virtual font's local
+/// fonts' expanded ones), for [`ALLOCS`].
+fn shipout_fonts(v: &Values, fonts: &Fonts) -> Vec<ValueId> {
+    let mut out: Vec<ValueId> = fonts
+        .locals
+        .iter()
+        .map(|(n, sz, fresh)| match fresh {
+            Some((k, i)) => v.str(&format!("{n}@{sz}#{k}.{i}")),
+            None => v.str(&format!("{n}@{sz}")),
+        })
+        .collect();
+    for (f, &(st, sh)) in &fonts.vf_exp {
+        for &(_, g) in fonts
+            .vfs
+            .get(f)
+            .map(|x| x.fonts.as_slice())
+            .unwrap_or_default()
+        {
+            if let Some((n, sz)) = fonts.name_size(g) {
+                for e in [st, -sh] {
+                    if e != 0 {
+                        out.push(v.str(&format!("{}@{sz}", crate::fonts::expanded_name(&n, e))));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The page's allocations ([`ALLOCS`]), from the write side: its box's
 /// fonts (`fonts`, the writer's view), its whatsits and the parameters
 /// in force.
@@ -2300,11 +2484,7 @@ pub(crate) fn page_allocs(
             _ => {}
         }
     }
-    let mut ship_fonts: Vec<ValueId> = fonts
-        .locals
-        .iter()
-        .map(|(n, sz)| v.str(&format!("{n}@{sz}")))
-        .collect();
+    let mut ship_fonts = shipout_fonts(v, fonts);
     if fonts.space.is_some() {
         ship_fonts.push(v.str("pdftexspace@0"));
     }

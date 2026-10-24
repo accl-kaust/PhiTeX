@@ -541,16 +541,43 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             }
         }
         cv::LEFT_MARGIN_KERN | cv::RIGHT_MARGIN_KERN => {
-            // margin kerns come from \pdfprotrudechars, which the line
-            // breaker does not make: none to find
+            // the margin kern at the box's left or right, past what
+            // protrusion skips and \leftskip or \rightskip
+            let left = c == cv::LEFT_MARGIN_KERN;
             let n = r.scan_register_num()?;
-            if r.box_reg(n)?.is_none_or(|b| !nodes::box_is_h(v, b)) {
+            let b = r.box_reg(n)?;
+            if b.is_none_or(|b| !nodes::box_is_h(v, b)) {
                 r.log(
                     "error",
                     "pdfTeX error (marginkern): a non-empty hbox expected",
                 )?;
             }
-            "0pt".to_owned()
+            let mut side = nodes::Side::default();
+            let list = match b.and_then(|b| nodes::decode(v, b, &mut side)) {
+                Some(Node::Box(bx)) => bx.list,
+                _ => Vec::new(),
+            };
+            let skip = |n: &&Node| {
+                phitex_typeset::microtype::cp_skipable(n)
+                    || matches!(n, Node::Glue(g) if g.kind == phitex_typeset::node::GlueKind::Param(
+                        if left { phitex_typeset::node::param::LEFT_SKIP } else { phitex_typeset::node::param::RIGHT_SKIP }))
+            };
+            let p = if left {
+                list.iter().find(|n| !skip(n))
+            } else {
+                list.iter().rev().find(|n| !skip(n))
+            };
+            let mut out = String::new();
+            match p {
+                Some(Node::Kern(w, phitex_typeset::node::KernKind::Margin { left: l, .. }))
+                    if *l == left =>
+                {
+                    crate::print::print_scaled(&mut out, *w);
+                }
+                _ => out.push('0'),
+            }
+            out.push_str("pt");
+            out
         }
         cv::XFORM_NAME => {
             let n = r.scan_int()?;
@@ -1794,6 +1821,37 @@ fn code_field(m: i32, f: i64, c: i32) -> String {
     format!("fcode:{name}:{f}:{c}")
 }
 
+/// The codes of `\lpcode`, `\rpcode` and `\efcode` of font `f`: a
+/// table per font (`[c, code, ...]`, by character), what a paragraph's
+/// breaking reads of them in one look.
+pub(crate) fn code_table_field(m: i32, f: i64) -> String {
+    format!(
+        "fcodes:{}:{f}",
+        FONT_CODES[usize::try_from(m).unwrap_or(0).min(11)]
+    )
+}
+
+/// Whether code `m` is kept in a table ([`code_table_field`]).
+fn tabled(m: i32) -> bool {
+    (2..=4).contains(&m)
+}
+
+/// Font `f`'s table of code `m`: the characters given one, and theirs.
+pub(crate) fn code_table(r: &mut Run<'_, '_>, m: i32, f: i64) -> R<Vec<(u16, i32)>> {
+    let v = r.v;
+    let x = r.get(&code_table_field(m, f))?;
+    let xs = x.map(|x| list_of(v, x)).unwrap_or_default();
+    Ok(xs
+        .chunks(2)
+        .filter_map(|p| {
+            Some((
+                u16::try_from(int_of(v, *p.first()?)).ok()?,
+                i32::try_from(int_of(v, *p.get(1)?)).ok()?,
+            ))
+        })
+        .collect())
+}
+
 /// `\lpcode` and the other font codes, read (pdfTeX §426).
 pub(crate) fn font_code(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
     let f = r.scan_font_ident()?;
@@ -1801,6 +1859,13 @@ pub(crate) fn font_code(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
         return Ok(IVal::Int(r.int32(&format!("fcode:nolig:{f}"))?));
     }
     let c = r.scan_char_num()?;
+    if tabled(m) {
+        let t = code_table(r, m, f)?;
+        let at = u16::try_from(c)
+            .ok()
+            .and_then(|c| t.iter().find(|x| x.0 == c));
+        return Ok(IVal::Int(at.map_or(if m == 4 { 1000 } else { 0 }, |x| x.1)));
+    }
     let x = r.get(&code_field(m, f, c))?;
     if let Some(x) = x {
         return Ok(IVal::Int(i32::try_from(int_of(r.v, x)).unwrap_or(0)));
@@ -1860,6 +1925,20 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
         } else {
             n.clamp(-1000, 1000)
         };
+        if tabled(chr) {
+            let mut t = code_table(r, chr, f)?;
+            let c = u16::try_from(ch).unwrap_or(0);
+            match t.binary_search_by_key(&c, |x| x.0) {
+                Ok(i) => t[i].1 = n,
+                Err(i) => t.insert(i, (c, n)),
+            }
+            let xs = t
+                .iter()
+                .flat_map(|&(c, n)| [v.int(i64::from(c)), v.int(i64::from(n))])
+                .collect();
+            r.set(&code_table_field(chr, f), v.list(xs), true);
+            return Ok(true);
+        }
         r.set(&code_field(chr, f, ch), v.int(i64::from(n)), true);
         return Ok(true);
     }
@@ -1968,6 +2047,160 @@ fn letter_space_font(r: &mut Run<'_, '_>, f: i64, e: i32, nolig: bool, t: &str) 
     r.font_set(nf, FontCell::Hc, v.int(hc), true);
     r.font_set(nf, FontCell::Sc, v.int(sc), true);
     Ok(nf)
+}
+
+/// `read_expand_font` (pdfTeX): `\pdffontexpand f stretch shrink step
+/// [autoexpand]`.
+fn read_expand_font(r: &mut Run<'_, '_>) -> R<()> {
+    use crate::fields::FontCell;
+    let v = r.v;
+    let f = r.scan_font_ident()?;
+    let info = crate::fonts::info(v, r.font_get(f, FontCell::Info)?);
+    if f == 0 {
+        r.log(
+            "error",
+            "pdfTeX error (font expansion): invalid font identifier",
+        )?;
+    }
+    if info.as_ref().is_some_and(|i| i.ex.is_some()) {
+        r.log(
+            "error",
+            "pdfTeX error (font expansion): \\pdffontexpand cannot be used this way (the base font has been expanded)",
+        )?;
+    }
+    r.scan_optional_equals()?;
+    let stretch = r.scan_int()?.clamp(0, 1000);
+    let shrink = r.scan_int()?.clamp(0, 500);
+    let step = r.scan_int()?.clamp(0, 100);
+    if step == 0 {
+        return r.fatal("pdfTeX error (font expansion): invalid step");
+    }
+    let stretch = (stretch - stretch % step).max(0);
+    let shrink = (shrink - shrink % step).max(0);
+    if stretch == 0 && shrink == 0 {
+        return r.fatal("pdfTeX error (font expansion): invalid limit(s)");
+    }
+    let auto = r.scan_keyword("autoexpand")?;
+    if auto {
+        // (an optional space)
+        r.get_x_token();
+        r.ck()?;
+        if r.cur.cmd != cmd::SPACER {
+            r.back_cur();
+        }
+    }
+    if f == 0 || info.as_ref().is_some_and(|i| i.ex.is_some()) {
+        return Ok(());
+    }
+    if let Some(x) = expand_params(r, f)? {
+        // (expanded before: the same parameters)
+        if x != (stretch, shrink, step, auto) {
+            r.log(
+                "error",
+                "pdfTeX error (font expansion): font has been expanded with different parameters",
+            )?;
+        }
+        return Ok(());
+    }
+    set_expand_params(r, f, auto, stretch, shrink, step)?;
+    // (a letter-spaced font is virtual: its local font expanded too,
+    // `vf_expand_local_fonts`)
+    if let Some(ls) = info.and_then(|i| i.ls)
+        && expand_params(r, ls.base)?.is_none()
+    {
+        set_expand_params(r, ls.base, auto, stretch, shrink, step)?;
+    }
+    Ok(())
+}
+
+/// Font `f`'s expansion parameters (`\pdffontexpand`'s), if it has any:
+/// stretch and shrink limits, step, whether automatic.
+pub(crate) fn expand_params(r: &mut Run<'_, '_>, f: i64) -> R<Option<(i32, i32, i32, bool)>> {
+    let v = r.v;
+    let Some(x) = r.get(&format!("pdf:fontexpand:{f}"))? else {
+        return Ok(None);
+    };
+    let xs = list_of(v, x);
+    let g = |k: usize| {
+        xs.get(k)
+            .map_or(0, |&y| i32::try_from(int_of(v, y)).unwrap_or(0))
+    };
+    Ok(Some((g(0), g(1), g(2), g(3) != 0)))
+}
+
+/// `set_expand_params` (pdfTeX): the font's parameters, and its fonts at
+/// the limits made (`get_expand_font`), stretch's first.
+fn set_expand_params(
+    r: &mut Run<'_, '_>,
+    f: i64,
+    auto: bool,
+    stretch: i32,
+    shrink: i32,
+    step: i32,
+) -> R<()> {
+    let v = r.v;
+    let e = v.list(vec![
+        v.int(i64::from(stretch)),
+        v.int(i64::from(shrink)),
+        v.int(i64::from(step)),
+        v.int(i64::from(auto)),
+    ]);
+    r.set(&format!("pdf:fontexpand:{f}"), e, true);
+    if stretch > 0 {
+        get_expand_font(r, f, stretch, auto)?;
+    }
+    if shrink > 0 {
+        get_expand_font(r, f, -shrink, auto)?;
+    }
+    Ok(())
+}
+
+/// `get_expand_font(f, e)` (pdfTeX): font `f` expanded by `e`
+/// thousandths, the font of its expanded name and size where there is
+/// one (`tfm_lookup`), else made: automatically, `f`'s metrics scaled
+/// (`auto_expand_font`, [`crate::fonts::expanded`]); else the TFM of the
+/// expanded name, a font of its own.
+pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -> R<i64> {
+    use crate::fields::FontCell;
+    let v = r.v;
+    let info = r.font_get(f, FontCell::Info)?;
+    let Some(i) = crate::fonts::info(v, info) else {
+        return Ok(0);
+    };
+    let name = crate::fonts::expanded_name(&i.name, e);
+    if !auto {
+        return r.read_font_info(&name, i.size);
+    }
+    let k = i64::from(crate::fonts::expanded_key(&i.name, i.size, e));
+    let held = crate::fonts::info(v, r.font_get(k, FontCell::Info)?)
+        .is_some_and(|j| j.name == name && j.size == i.size);
+    if held {
+        return Ok(k);
+    }
+    let Some(file) = i.file else { return Ok(0) };
+    r.font_loaded(k);
+    crate::pdfout::font_load(r, &name, i.size, k);
+    let xs = vec![
+        v.str(&name),
+        v.int(i64::from(i.size)),
+        v.int(i64::from(i.dsize)),
+        file,
+        v.int(i64::from(i.s)),
+        i.ls.map_or(ValueId::UNIT, |ls| ls.value(v)),
+        v.list(vec![v.int(f), v.int(i64::from(e)), v.int(i64::from(auto))]),
+    ];
+    r.font_set(k, FontCell::Info, v.list(xs), true);
+    let n = r.font_int(f, FontCell::Fdn)?;
+    for j in 1..=n {
+        let d = i64::from(r.font_int(f, FontCell::Fd(j))?);
+        r.font_set(k, FontCell::Fd(j), v.int(d), true);
+    }
+    r.font_set(k, FontCell::Fdn, v.int(i64::from(n)), true);
+    for c in [FontCell::Hc, FontCell::Sc] {
+        let x = i64::from(r.font_int(f, c)?);
+        r.font_set(k, c, v.int(x), true);
+    }
+    Ok(k)
 }
 
 /// A new font with `f`'s metrics and name, named `t`: its key that of
@@ -2776,21 +3009,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let st = Random::new(n);
             put_random(r, &st);
         }
-        ex::FONT_EXPAND => {
-            // pdfTeX §1365: \pdffontexpand f stretch shrink step [autoexpand]
-            let f = r.scan_font_ident()?;
-            let st = r.scan_int()?;
-            let sh = r.scan_int()?;
-            let step = r.scan_int()?;
-            let auto = r.scan_keyword("autoexpand")?;
-            let e = v.list(vec![
-                v.int(i64::from(st)),
-                v.int(i64::from(sh)),
-                v.int(i64::from(step)),
-                v.int(i64::from(auto)),
-            ]);
-            r.set(&format!("pdf:fontexpand:{f}"), e, true);
-        }
+        ex::FONT_EXPAND => read_expand_font(r)?,
         ex::GLYPH_TO_UNICODE => {
             let a = ext_value(r)?;
             let b = ext_value(r)?;

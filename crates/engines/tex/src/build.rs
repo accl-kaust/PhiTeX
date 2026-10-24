@@ -1026,10 +1026,69 @@ impl Run<'_, '_> {
         let Some(l) = crate::fonts::load_info(self.v, &i) else {
             return Ok(());
         };
+        if let Some((b, ..)) = i.ex {
+            view.ex_base.insert(f, u32::try_from(b).unwrap_or(0));
+        }
         let hc = self.font_int(f, crate::fields::FontCell::Hc)?;
         view.hyphen.insert(f, hc);
         view.names.insert(f, (i.name, i.size));
         view.fonts.insert(f, (l, Vec::new()));
+        Ok(())
+    }
+
+    /// pdfTeX's data of font `f` for a paragraph's breaking: its
+    /// `\lpcode`s, `\rpcode`s, `\efcode`s, quad and expansion
+    /// ([`crate::fonts::Px`]), its fonts at the expansion's limits made
+    /// ready.
+    pub(crate) fn add_px(&mut self, view: &mut crate::fonts::View, f: u32) -> R<()> {
+        let fi = i64::from(f);
+        let codes = |r: &mut Self, m: i32, d: i32| -> R<Box<[i32; 256]>> {
+            let mut a = Box::new([d; 256]);
+            for (c, n) in crate::pdfprim::code_table(r, m, fi)? {
+                if let Some(x) = a.get_mut(usize::from(c)) {
+                    *x = n;
+                }
+            }
+            Ok(a)
+        };
+        let lp = codes(self, 2, 0)?;
+        let rp = codes(self, 3, 0)?;
+        let ef = codes(self, 4, 1000)?;
+        let quad = self.font_int(fi, crate::fields::FontCell::Fd(6))?;
+        let mut expansion = None;
+        let mut auto = false;
+        let mut slots: Box<[std::sync::OnceLock<_>]> = Box::new([]);
+        if let Some((st, sh, step, a)) = crate::pdfprim::expand_params(self, fi)?
+            && step > 0
+            && let Some((name, size)) = view.names.get(&f).cloned()
+        {
+            let key = |e: i32| crate::fonts::expanded_key(&name, size, e);
+            expansion = Some(phitex_typeset::fonts::Expansion {
+                stretch: (st > 0).then(|| (key(st), st)),
+                shrink: (sh > 0).then(|| (key(-sh), -sh)),
+                step,
+            });
+            auto = a;
+            let n = usize::try_from((st + sh) / step + 1).unwrap_or(1);
+            slots = (0..n).map(|_| std::sync::OnceLock::new()).collect();
+        }
+        view.px.insert(
+            f,
+            Box::new(crate::fonts::Px {
+                expansion,
+                auto,
+                lp,
+                rp,
+                ef,
+                quad,
+                slots,
+            }),
+        );
+        if let Some(x) = expansion {
+            for (_, e) in [x.stretch, x.shrink].into_iter().flatten() {
+                view.expand(f, e, false);
+            }
+        }
         Ok(())
     }
 
@@ -1199,7 +1258,16 @@ impl Run<'_, '_> {
         let t0 = crate::prof::start();
         // (\lccode of the characters the hyphenator can meet: those of
         // the list, `seen`; a character not in it is never asked for)
-        let view = self.view_of(ids)?;
+        let mut view = self.view_of(ids)?;
+        // (pdfTeX's protrusion and expansion: the fonts' codes and
+        // expansion)
+        let adjust_spacing = self.param("pdfadjustspacing")?;
+        let protrude_chars = self.param("pdfprotrudechars")?;
+        if adjust_spacing > 0 || protrude_chars > 0 {
+            for f in view.fonts.ids() {
+                self.add_px(&mut view, f)?;
+            }
+        }
         let shape = self
             .get_loc(crate::fields::cell::PARSHAPE)?
             .map(|x| list_of(v, x))
@@ -1251,6 +1319,8 @@ impl Run<'_, '_> {
             prev_graf: self.prev_graf(md)?,
             lang,
             pack: self.pack_params(true)?,
+            adjust_spacing,
+            protrude_chars,
         };
         let patterns = self.patterns()?;
         let mut lc = [0u16; 256];
@@ -1273,6 +1343,12 @@ impl Run<'_, '_> {
         let t0 = crate::prof::start();
         let para = phitex_typeset::linebreak::line_break(list, display, &params, &view, &mut hy);
         crate::prof::add(crate::prof::LB_TS, t0);
+        // (the fonts its expansion made, in the order it asked for them:
+        // pdfTeX's internal fonts, numbered as they are made)
+        let made = std::mem::take(&mut *view.exp_log.locked());
+        for (f, e) in made {
+            crate::pdfprim::get_expand_font(self, i64::from(f), e, true)?;
+        }
         let t0 = crate::prof::start();
         // (the last line, for a display that interrupts the paragraph:
         // moved out once encoded)
@@ -1758,6 +1834,10 @@ impl Run<'_, '_> {
         };
         let xs = list_of(v, b);
         for x in xs.get(9).map(|&l| list_of(v, l)).unwrap_or_default() {
+            // (pdfTeX: a margin kern is not unboxed)
+            if nodes::is_margin_kern(v, x) {
+                continue;
+            }
             self.append(md.lid, x);
         }
         if c == 0 {
