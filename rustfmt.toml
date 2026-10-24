@@ -1,2 +1,2 @@
 unstable_features = true
-ignore = ["crates/vendor"]
+ignore = ["crates/core/defuse"]

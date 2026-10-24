@@ -158,7 +158,7 @@ run and must be native.
   (`-c 18 --mem=64G` for the heartbeat and callgrind). Tests use
   `--profile fastdev`; timing uses `--release`. fmt and clippy may run
   locally through `scripts/sandbox`. Do not run tests locally.
-- Never touch `crates/vendor/`. Never edit expected outputs. No `git stash`.
+- No TeX name in `crates/core/defuse`. Never edit expected outputs. No `git stash`.
   No `pkill`/`pgrep -f`; kill by PID. No session links in commits.
 - Gate before every push: plain, ini, etex, core, edits, page_steps, hints,
   diagnostics, pdftex (pdf_state_cutoff is a known red), latex_hello,

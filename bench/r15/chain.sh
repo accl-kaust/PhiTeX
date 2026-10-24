@@ -19,7 +19,7 @@ cp target/release/phitex "$w/bin/rel/"
 cargo build -q --release -p phitex-cli --features phitex-tex/profile,phitex-tex/observe > "$r/build-po.txt" 2>&1 || { grep -E "^error|-->" -A7 "$r/build-po.txt" | head -60 | tee -a "$r/summary.txt"; exit 1; }
 cp target/release/phitex "$w/bin/po/"
 cargo build -q --release -p phitex-cli --features phitex-tex/observe > "$r/build-o.txt" 2>&1 && mkdir -p "$w/bin/o" && cp target/release/phitex "$w/bin/o/"
-cargo build -q --release -p defuse --features observe --example play > "$r/build-play.txt" 2>&1 || grep -E "^error|-->" -A7 "$r/build-play.txt" | head -30 | tee -a "$r/summary.txt"
+cargo build -q --release -p phitex-defuse --features observe --example play > "$r/build-play.txt" 2>&1 || grep -E "^error|-->" -A7 "$r/build-play.txt" | head -30 | tee -a "$r/summary.txt"
 cargo clippy -q -p phitex-tex --no-deps --features profile,observe -- -D warnings > "$r/clippy.txt" 2>&1
 echo "clippy (profile,observe) exit $?" | tee -a "$r/summary.txt"; grep -E -- "^(error|warning)|-->" "$r/clippy.txt" | head -20 | tee -a "$r/summary.txt"
 run() { # bin j tag [env...]

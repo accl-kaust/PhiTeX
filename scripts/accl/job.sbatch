@@ -212,10 +212,10 @@ fi
 [ -d "$here/gate-control" ] && cp -a "$here/gate-control" "$w/gate-control"
 case $task in
   gate)
-    # (the vendored engine is an archive of another tree: not formatted or linted here)
+    # (the engine, crates/core/defuse, keeps its own format and lints)
     # (no fmt check here: the image's rustfmt differs from the pinned nightly and reflows
     # lines the local one keeps; formatting is checked locally, not by the merge gate)
-    box cargo clippy --workspace --exclude defuse --no-deps --all-targets -q -- -D warnings
+    box cargo clippy --workspace --exclude phitex-defuse --no-deps --all-targets -q -- -D warnings
     status=0
     box cargo xtask check > "$r/gate.log" 2>&1 || status=$?
     tail -25 "$r/gate.log"

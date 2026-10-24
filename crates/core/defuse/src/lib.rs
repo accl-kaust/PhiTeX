@@ -1,17 +1,28 @@
-//! This repository's side of the engine.
+//! The engine: an incremental, parallel, field-level def-use evaluator.
 //!
-//! The engine is `defuse`: an incremental, parallel, field-level def-use
-//! graph evaluator, written without knowledge of TeX and vendored under
-//! `crates/vendor/defuse` as a git subtree. Nothing under that path is
-//! edited in this repository; what we need from it is asked for as an
-//! addition and pulled in with `git subtree pull`.
-//!
-//! This crate re-exports `defuse` and is the home of what we add around it
-//! that still knows nothing of TeX: helpers for naming fields, the replay
-//! of recorded workloads (`crates/tools/trace`), and the workspace's lint
-//! and target conformance checks.
-//!
-//! Rule: this crate depends on nothing TeX. If it needs a TeX type, the
-//! design has leaked.
+//! Written from `docs/linear-core.md`, the toy language in `examples/common`
+//! and the test suites in `tests/`. It knows nothing of TeX: no TeX name,
+//! type or rule enters it, and no crate here depends on one.
 
-pub use defuse::*;
+// Engine code keeps short local names (s: slot, u: unit, f: field, r:
+// record) and long state machines in one function each.
+#![deny(unsafe_code)]
+#![allow(clippy::many_single_char_names, clippy::too_many_lines)]
+
+mod api;
+mod clean;
+pub mod obs;
+#[cfg(feature = "observe")]
+mod record;
+#[allow(unsafe_code)]
+mod sync;
+mod values;
+
+pub use api::{
+    Brackets, Candidate, CapPolicy, Cause, Claim, EarlyLoop, LoopOptions, PathId, RunAudit, Step, WastedRun, Edit, EditQueue, EditSource, Effect, EnvBase, EnvProvider, EvalError, Hold, Hop,
+    Executor, FieldAt, Greedy, Job, Lifted, Limits, Locality, LoopStart, MayDefine, Monoid, NoEdits, NodeId,
+    NodeInfo, NodeState, OpId, Operation, ProjId, Projection, RandomScheduler, Report, Rerun, RoundTimes, LinkTimes, MergeTimes, RunResult,
+    Scheduler, SeqMonoid, Sequential, Settled, Speculation, Stop, SumMonoid, UnitId, Until, WaitKind, WaitOn, Waiter,
+};
+pub use clean::{Ctx, Engine, Part, View};
+pub use values::{Field, FxHashMap, FxHashSet, FxHasher, Rng, SeqNode, Value, ValueId, Values, hash_bytes, hash_words};
