@@ -1643,6 +1643,15 @@ pub(crate) fn fin_may_box(v: &Values, args: &[ValueId], t: ValueId, f: Field) ->
     }
 }
 
+/// Whether field `f` is a command's transient state (§1266's
+/// `after_token`): what a routine leaves there depends on what reached it
+/// (it publishes only a change, `crate::runstate`), not on its page, so a
+/// finisher declares and predicts none of it; a run that defines it
+/// files it at its commit.
+pub(crate) fn transient(v: &Values, f: Field) -> bool {
+    f == v.field("aftertoken")
+}
+
 /// What a finisher defines besides its routine's definitions
 /// (`fire_page`, `output_end`, `ship_out`): field prefixes.
 /// The fields every finisher defines itself, whatever its routine.
@@ -1725,7 +1734,7 @@ impl Finish {
         let mut out = d
             .map(|d| if false { d.stable(v) } else { d.predict(v, j) })
             .unwrap_or_default();
-        out.retain(|e| fin_may_box(v, args, t, e.0));
+        out.retain(|e| fin_may_box(v, args, t, e.0) && !transient(v, e.0));
         if let Some(d) = d {
             for (f, x) in d.class_boxes(v, args.get(13).copied()) {
                 if let Some(x) = x
@@ -1803,7 +1812,7 @@ impl Operation for Finish {
                     .last
                     .iter()
                     .map(|e| e.0)
-                    .filter(|&f| fin_may_box(v, args, t, f))
+                    .filter(|&f| fin_may_box(v, args, t, f) && !transient(v, f))
                     .collect();
                 for (f, _) in d.class_boxes(v, args.get(13).copied()) {
                     if !ns.contains(&f) {

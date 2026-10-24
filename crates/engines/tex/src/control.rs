@@ -568,7 +568,9 @@ impl Run<'_, '_> {
             cmd::MESSAGE => {
                 // §1279
                 let ch = self.cur.chr;
+                let was = self.lines_sink_begin(Sink::Log);
                 let (_, body) = self.scan_toks(false, true);
+                self.lines_sink_end(was);
                 self.ck()?;
                 let mut s = String::new();
                 self.show_toks_into(&mut s, &body)?;
@@ -658,7 +660,9 @@ impl Run<'_, '_> {
                 }
                 let e = ch >= 2;
                 let p = self.get_r_token()?;
+                let was = e.then(|| self.lines_sink_begin(Sink::Def));
                 let (params, body) = self.scan_toks(true, e);
+                let hit = was.is_some_and(|w| self.lines_sink_end(w));
                 self.ck()?;
                 let m = Mean::Macro(Rc::new(Macro::new(
                     u8::try_from(a % 4).unwrap_or(0)
@@ -667,6 +671,14 @@ impl Run<'_, '_> {
                     body.into(),
                 )));
                 self.define_cs(&p, &m, global);
+                // (a body that read the lines: its meaning tainted, a
+                // global one seen after the run)
+                if hit {
+                    match self.mean_loc(p).filter(|_| !global) {
+                        Some(l) => self.st.taint(l),
+                        None => self.lt.strong = true,
+                    }
+                }
             }
             cmd::LET => {
                 // §1221
@@ -1655,7 +1667,9 @@ impl Run<'_, '_> {
         if crate::exec::obs_flag!("PHITEX_CMD_TRACE") && self.cmd_traced() {
             eprintln!("cmd-trace {} write_out {k}", self.cx.node().raw());
         }
+        let was = self.lines_sink_begin(Sink::Log);
         let s = self.expand_late(body);
+        let hit = self.lines_sink_end(was);
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && s.is_err() {
             eprintln!(
                 "aux-trace: write_out stream {k} node {} halted expanding its text",
@@ -1672,6 +1686,11 @@ impl Run<'_, '_> {
             && self
                 .get(&format!("write:{k}"))?
                 .is_some_and(|x| x != ValueId::UNIT);
+        // (the lines read into a file's text, or a shell command: seen
+        // after the run)
+        if hit && (open || k == 18) {
+            self.lt.strong = true;
+        }
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && s.is_empty() && self.interp.is_some() {
             let mut shown = String::new();
             self.show_toks_into(&mut shown, body)?;
@@ -2047,6 +2066,92 @@ impl Run<'_, '_> {
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
     }
 
+    /// A piece's read of the lines before it (`\inputlineno`), noted by
+    /// where the number goes ([`LinesTaint`]).
+    fn note_lines_read(&mut self) {
+        let piece = self.cx.op() == self.ops.exec || self.cx.op() == self.ops.resume;
+        match self.lt.sink {
+            Some(_) if piece => {
+                self.lt.hit = true;
+                self.lt.weak = true;
+            }
+            _ => {
+                if crate::exec::obs_flag!("PHITEX_LINES_TRACE") {
+                    let ctx: Vec<String> = self
+                        .input
+                        .levels
+                        .iter()
+                        .rev()
+                        .take(3)
+                        .filter(|l| l.kind == crate::input::kind::TOKS)
+                        .map(|l| {
+                            let toks: Vec<String> = self.input.arena.get(l.rest()).iter().take(6).map(|t| self.v.render(t.encode(self.v))).collect();
+                            toks.join(" ")
+                        })
+                        .collect();
+                    eprintln!("lines-strong: node {} sink {:?} | {}", self.cx.node().raw(), self.lt.sink, ctx.join(" | "));
+                }
+                self.lt.strong = true;
+            }
+        }
+    }
+
+    /// The expansion of a body for `sink` begins ([`LinesTaint`]): what
+    /// it was before, for [`Run::lines_sink_end`].
+    pub(crate) fn lines_sink_begin(&mut self, sink: Sink) -> (Option<Sink>, bool) {
+        let was = (self.lt.sink, self.lt.hit);
+        self.lt.sink = Some(sink);
+        self.lt.hit = false;
+        was
+    }
+
+    /// The body's expansion ended: whether it read the lines.
+    pub(crate) fn lines_sink_end(&mut self, was: (Option<Sink>, bool)) -> bool {
+        let hit = self.lt.hit;
+        (self.lt.sink, self.lt.hit) = was;
+        hit
+    }
+
+    /// The run's end: where it read the lines before it only into bodies
+    /// whose meanings nothing looked at and nothing after it sees (and
+    /// into the log), its result does not depend on them, and the reads
+    /// are taken back ([`phitex_defuse::Ctx::unread`]): an edit that moves
+    /// those lines leaves the piece standing. The log keeps the numbers
+    /// this run read.
+    pub(crate) fn settle_lines(&mut self) {
+        // (`PHITEX_LINES_TRACE=1`, observe: each piece that read them, and
+        // why its reads stand)
+        let trace = crate::exec::obs_flag!("PHITEX_LINES_TRACE") && (self.lt.weak || self.lt.strong);
+        if trace {
+            let v = self.v;
+            let pubd = self.st.published(v, self.rec_load);
+            let tainted: Vec<String> = self.st.tainted().to_vec().into_iter().map(|l| crate::val::field_name(v, self.loc_field(l))).collect();
+            eprintln!(
+                "lines-trace: node {} {:?} read {} tainted {tainted:?} published {}",
+                self.cx.node().raw(),
+                self.lt,
+                self.st.taint_read(),
+                pubd.iter().any(|d| self.st.tainted().contains(&d.0))
+            );
+        }
+        if !self.lt.weak || self.lt.strong || self.st.taint_read() {
+            return;
+        }
+        let v = self.v;
+        let tainted = self.st.tainted();
+        if !tainted.is_empty()
+            && self
+                .st
+                .published(v, self.rec_load)
+                .iter()
+                .any(|d| tainted.contains(&d.0))
+        {
+            return;
+        }
+        LINES_TAKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.cx.unread(v.field("lines"));
+    }
+
     /// The input left as one source line, for `\inputlineno`.
     ///
     /// TeX's `line` (§304): the line of the innermost file read. A line
@@ -2066,15 +2171,16 @@ impl Run<'_, '_> {
                 if crate::exec::obs_flag!("PHITEX_READS") {
                     self.trace_read(lines, false);
                 }
-                let x = self.cx.acc_range(lines, None);
+                // (its own file's count only: an edit of another file's
+                // lines leaves the read standing)
+                let p = self.cx.path(&[phitex_defuse::Step::Key(name)]);
+                let x = self.cx.acc_range_path(lines, None, p);
                 if x.is_err() {
                     self.trace_stop("range lines");
                 }
-                let before = list_of(v, x?)
-                    .iter()
-                    .map(|&e| list_of(v, e))
-                    .find(|e| e.first() == Some(&name))
-                    .map_or(0, |e| e.get(1).map_or(0, |&k| int_of(v, k)));
+                let x = x?;
+                self.note_lines_read();
+                let before = x.map_or(0, |k| int_of(v, k));
                 let mine = self
                     .doc_lines
                     .iter()
@@ -2204,4 +2310,32 @@ pub(crate) fn shell_words(cmd: &str) -> Option<Vec<String>> {
         words.push(cur);
     }
     Some(words)
+}
+
+/// The runs whose reads of the lines before them were taken back
+/// ([`Run::settle_lines`], reported with `PHITEX_TEX_TIME`).
+pub(crate) static LINES_TAKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Where a body expanded now goes (`\inputlineno`'s number read into
+/// it, [`LinesTaint`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Sink {
+    /// A meaning's body (`\edef`).
+    Def,
+    /// The log or the terminal (`\message`, a `\write` to no open file).
+    Log,
+}
+
+/// Where a piece's reads of the lines before it (`\inputlineno`) went:
+/// only into the log and into meanings nothing looks at after (a
+/// group's line number kept for an error message), the piece's result
+/// does not depend on them ([`Run::settle_lines`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct LinesTaint {
+    /// The body being expanded, and whether it read the lines.
+    pub sink: Option<Sink>,
+    pub hit: bool,
+    /// The lines read into a sink, and anywhere else.
+    pub weak: bool,
+    pub strong: bool,
 }

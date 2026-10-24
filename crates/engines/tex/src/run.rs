@@ -668,6 +668,8 @@ pub(crate) struct Run<'c, 'a> {
     /// field: the lazy tag of the value ([`Run::preload_candidate`],
     /// [`Run::fin_lazy_value`]).
     pub fin_lazy: phitex_defuse::FxHashMap<Field, ValueId>,
+    /// Where the lines before the run went ([`crate::control::LinesTaint`]).
+    pub lt: crate::control::LinesTaint,
     pub contribs: Vec<(Field, ValueId)>,
     /// Set while `\advance` defines its register ([`State::note_kind`]).
     pub in_advance: bool,
@@ -1023,6 +1025,7 @@ impl<'c, 'a> Run<'c, 'a> {
             num_reads: false,
             num_memo: phitex_defuse::FxHashMap::default(),
             fin_lazy: phitex_defuse::FxHashMap::default(),
+            lt: crate::control::LinesTaint::default(),
             contribs: Vec::new(),
             in_advance: false,
             kids: Vec::new(),
@@ -1642,7 +1645,19 @@ impl<'c, 'a> Run<'c, 'a> {
             if r.is_err() {
                 note_stop(self.op_name(), f);
             }
+            if crate::exec::obs_flag!("PHITEX_READS") {
+                self.trace_read(f, r.is_err());
+            }
             let (base, fold) = r?;
+            if crate::exec::obs_str!("PHITEX_READS").is_some_and(|w| w == crate::val::field_name(self.v, f)) {
+                eprintln!(
+                    "reads-value: node {} {} base {:?} fold {:?}",
+                    self.cx.node().raw(),
+                    crate::val::field_name(self.v, f),
+                    base.map(|b| self.v.render(b)),
+                    crate::regfold::Affine::decode(self.v, fold)
+                );
+            }
             let v = self.v;
             let x = crate::val::i32_of(v, base);
             let mut m = crate::regfold::Affine::decode(v, fold);
@@ -5528,6 +5543,9 @@ pub(crate) struct Parked {
     num_memo: Vec<(Field, bool)>,
     /// [`Run::fin_lazy`], by field in the fields' order.
     fin_lazy: Vec<(Field, ValueId)>,
+    /// [`Run::lt`]: its reads, and its tainted meanings by field and
+    /// whether one was looked at ([`crate::runstate::State::taint`]).
+    lt: (crate::control::LinesTaint, Vec<Field>, bool),
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -5729,6 +5747,7 @@ impl Run<'_, '_> {
                 .map(|(l, d)| (self.loc_field(l), d))
                 .collect(),
             fin_lazy: sorted_lazy(&std::mem::take(&mut self.fin_lazy)),
+            lt: self.lt_parked(),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
@@ -6342,6 +6361,7 @@ impl Run<'_, '_> {
             defined_memo,
             num_memo,
             fin_lazy,
+            lt: self.lt_parked(),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st,
@@ -6614,6 +6634,7 @@ fn parked_rest(p: &Parked) -> u64 {
     for (f, x) in &p.fin_lazy {
         (f.0.raw(), x.raw()).hash(&mut h);
     }
+    (&p.lt.0, p.lt.1.iter().map(|f| f.0.raw()).collect::<Vec<_>>(), p.lt.2).hash(&mut h);
     (p.rec_load, p.no_pull, p.args_key).hash(&mut h);
     w(&mut h, p.st.rest_hash());
     w(&mut h, p.contribs.len() as u64);
@@ -6749,6 +6770,12 @@ impl<'c, 'a> Run<'c, 'a> {
         // `Run::loc_of`; noted in a table the parked one then replaced,
         // a counter past 255 lost its name and its map, `Run::count_reg`)
         r.st = crate::runstate::State::unpark(p.st);
+        {
+            let (lt, fs, read) = p.lt;
+            r.lt = lt;
+            let locs = fs.into_iter().map(|f| r.loc_of(f)).collect();
+            r.st.set_taint(locs, read);
+        }
         r.skip_first = p.skip_first.into_iter().map(|f| r.loc_of(f)).collect();
         if crate::exec::obs_flag!("PHITEX_REG_TRACE") {
             eprintln!(
@@ -7043,4 +7070,13 @@ pub(crate) fn text_lines(v: &Values, args: &[ValueId]) -> ValueId {
         }
     }
     lines_value(v, &lines)
+}
+
+impl Run<'_, '_> {
+    /// [`Run::lt`] as a park or a mark keeps it ([`Parked::lt`]).
+    fn lt_parked(&mut self) -> (crate::control::LinesTaint, Vec<Field>, bool) {
+        let mut fs: Vec<Field> = self.st.tainted().to_vec().into_iter().map(|l| self.loc_field(l)).collect();
+        fs.sort_by_key(|f| f.0.raw());
+        (self.lt, fs, self.st.taint_read())
+    }
 }

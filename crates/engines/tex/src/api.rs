@@ -1959,6 +1959,10 @@ fn print_round(t: std::time::Duration, r: &Report) {
     );
     eprintln!("{}", crate::pages::Feedback::report());
     eprintln!(
+        "lines: {} runs' reads of the lines before them taken back",
+        crate::control::LINES_TAKEN.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    eprintln!(
         "rounds: {}, final nodes run {}, capped at the round limit: {}",
         r.rounds,
         r.final_nodes_run,

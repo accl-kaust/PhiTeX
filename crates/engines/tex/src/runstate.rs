@@ -275,6 +275,11 @@ pub(crate) struct State {
     /// to the table ([`State::rollback`]); the next mark is whole
     /// ([`State::mark_delta`]).
     mbroken: bool,
+    /// The meanings defined by a body whose expansion read the lines
+    /// before the run (`\inputlineno`, `Run::lines_taint`): a look at
+    /// one of them sets `taint_read`.
+    tainted: Vec<Loc>,
+    taint_read: std::cell::Cell<bool>,
 }
 
 /// What [`State::rollback`] puts back: each slot and metas entry as it
@@ -391,6 +396,8 @@ impl Clone for State {
             mdirty: Vec::new(),
             unload_restored: self.unload_restored,
             mbroken: self.track || self.mbroken,
+            tainted: self.tainted.clone(),
+            taint_read: self.taint_read.clone(),
         }
     }
 }
@@ -499,6 +506,8 @@ impl State {
             mdirty: Vec::new(),
             unload_restored: crate::exec::obs_flag!("PHITEX_ANCHOR_MARKS"),
             mbroken: false,
+            tainted: Vec::new(),
+            taint_read: std::cell::Cell::new(false),
         }
     }
 
@@ -731,6 +740,42 @@ impl State {
     /// Notes `loc` as a font's cell without a fixed location.
     pub(crate) fn note_font_loc(&mut self, loc: Loc) {
         self.font_slow.insert(loc);
+    }
+
+    /// A look at meaning `loc`'s value (a macro's body; its command code
+    /// and modifier, which a tainted definition does not change, are no
+    /// look): noted where it is tainted ([`State::taint`]).
+    #[inline]
+    fn look(&self, loc: Loc) {
+        if !self.tainted.is_empty() && self.tainted.contains(&loc) {
+            self.taint_read.set(true);
+        }
+    }
+
+    /// Meaning `loc` was just defined by a body whose expansion read the
+    /// lines before the run: a look at it from now on is noted
+    /// ([`State::taint_read`]), whatever it holds then (a command rolled
+    /// back may put the tainted value back).
+    pub(crate) fn taint(&mut self, loc: Loc) {
+        if !self.tainted.contains(&loc) {
+            self.tainted.push(loc);
+        }
+    }
+
+    /// The tainted meanings ([`State::taint`]).
+    pub(crate) fn tainted(&self) -> &[Loc] {
+        &self.tainted
+    }
+
+    /// Whether a tainted meaning was looked at since it was tainted.
+    pub(crate) fn taint_read(&self) -> bool {
+        self.taint_read.get()
+    }
+
+    /// A run resumed: its tainted meanings and whether one was looked at.
+    pub(crate) fn set_taint(&mut self, locs: Vec<Loc>, read: bool) {
+        self.tainted = locs;
+        self.taint_read.set(read);
     }
 
     /// A change of `loc` may come: the generations it bumps.
@@ -1127,6 +1172,7 @@ impl State {
     /// The macro in loaded `loc`, when it holds one already decoded.
     #[inline]
     pub(crate) fn macro_at(&self, loc: Loc) -> Option<Rc<crate::val::Macro>> {
+        self.look(loc);
         let s = self.slot_ref(loc)?;
         if s.e.flags & LOADED == 0 || s.e.kind != K_MACRO {
             return None;
@@ -1160,6 +1206,7 @@ impl State {
     /// Loaded `loc` as a meaning (decoded once).
     #[inline]
     pub(crate) fn mean_of(&mut self, loc: Loc, v: &Values) -> Mean {
+        self.look(loc);
         let e = *self.entry_mut(loc);
         match e.kind {
             K_ABSENT => Mean::Undefined,

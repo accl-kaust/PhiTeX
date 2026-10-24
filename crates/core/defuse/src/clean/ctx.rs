@@ -3006,6 +3006,25 @@ impl<'a> Ctx<'a> {
         val
     }
 
+    /// Takes back the run's reads of accumulator `f`'s folds (its range
+    /// reads of it, every attempt's): the client answers that its result
+    /// does not depend on what they got (a value that went only where
+    /// nothing reads it), so a change of the fold does not run it again.
+    /// Each stays in its place in the reads, as an answer that always
+    /// holds, so the marks' counts of reads stand.
+    pub fn unread(&mut self, f: Field) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, )) } else { serde_json::Value::Null };
+        let val = self.core.is_loop(f);
+        for r in &mut self.reads {
+            if matches!(r, Read::Range { f: g, .. } if *g == f) {
+                *r = Read::IsLoop { f, val };
+            }
+        }
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "unread", a, serde_json::Value::Null);
+    }
+
     /// Accounts `n` units of work.
     ///
     /// # Errors

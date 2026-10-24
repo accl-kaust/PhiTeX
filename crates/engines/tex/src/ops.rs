@@ -397,6 +397,7 @@ pub(crate) fn run_node_parking(
             {
                 return Err(s);
             }
+            r.settle_lines();
             // (the marks kept with the result: a later run resumes at one;
             // with the latest mark after which each field was accessed)
             if !r.mark_snaps.is_empty() && !crate::exec::obs_flag!("PHITEX_MARKS_NOKEEP") {
