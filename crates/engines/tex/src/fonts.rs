@@ -325,7 +325,7 @@ pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
 /// load, a compare and an index away, no hashing per character; a key
 /// is a hash, its low bits spread); a key whose slot another holds in a
 /// map beside it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct FontTable {
     direct: Vec<Option<(FontId, Metrics)>>,
     far: FxHashMap<FontId, Metrics>,
@@ -389,6 +389,18 @@ impl FontTable {
 }
 
 impl View {
+    /// A copy of the fonts, their `\fontdimen`s and `\hyphenchar`s (no
+    /// pdfTeX codes, nothing expanded).
+    pub(crate) fn fonts_copy(&self) -> View {
+        View {
+            fonts: self.fonts.clone(),
+            hyphen: self.hyphen.clone(),
+            names: self.names.clone(),
+            ex_base: self.ex_base.clone(),
+            ..View::default()
+        }
+    }
+
     /// Empties the view, its room kept.
     pub(crate) fn clear(&mut self) {
         self.fonts.clear();

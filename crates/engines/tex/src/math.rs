@@ -1189,6 +1189,22 @@ impl Run<'_, '_> {
                 f
             }
         };
+        // (§715 `rebox`: a box's characters packed again, their fonts'
+        // dimensions with the families')
+        let mut more = Vec::new();
+        box_fonts(&mlist, &mut more);
+        more.retain(|&f| !fonts.0.fonts.contains_key(f));
+        more.sort_unstable();
+        more.dedup();
+        let fonts = if more.is_empty() {
+            fonts
+        } else {
+            let mut f2 = (fonts.0.fonts_copy(), fonts.1.clone());
+            for f in more {
+                self.add_font(&mut f2.0, f)?;
+            }
+            Rc::new(f2)
+        };
         let (view, skew) = (&fonts.0, &fonts.1);
         let sk = move |f: u32| skew.get(&f).copied().unwrap_or(-1);
         let params = MathParams {
@@ -1232,6 +1248,42 @@ impl Run<'_, '_> {
             }
         }
         Ok((view, skew))
+    }
+}
+
+/// The fonts of the characters of the boxes in `ml`'s fields, their own
+/// lists only (a box inside them has its dimensions).
+fn box_fonts(ml: &[phitex_typeset::math::MItem], out: &mut Vec<u32>) {
+    use phitex_typeset::math::{Field, MItem};
+    fn field(x: &Field, out: &mut Vec<u32>) {
+        match x {
+            Field::SubBox(b) => {
+                for n in &b.list {
+                    match n {
+                        Node::Char { font, .. } => out.push(*font),
+                        Node::Lig(l) => out.push(l.font),
+                        _ => {}
+                    }
+                }
+            }
+            Field::SubMlist(m) => box_fonts(m, out),
+            _ => {}
+        }
+    }
+    for it in ml {
+        match it {
+            MItem::Noad(n) => {
+                field(&n.nucleus, out);
+                field(&n.supscr, out);
+                field(&n.subscr, out);
+            }
+            MItem::Fraction(f) => {
+                box_fonts(&f.numerator, out);
+                box_fonts(&f.denominator, out);
+            }
+            MItem::Choice(c) => c.iter().for_each(|m| box_fonts(m, out)),
+            _ => {}
+        }
     }
 }
 
