@@ -171,11 +171,12 @@ impl Src {
             let n = String::from_utf8(lf.name.clone()).unwrap();
             fonts.push((lf.number, self.font(&n, Some(fs))));
         }
-        let packets = vf
-            .chars
-            .iter()
-            .map(|c| (u8::try_from(c.code).unwrap(), c.dvi.to_vec()))
-            .collect();
+        let packets = std::sync::Arc::new(
+            vf.chars
+                .iter()
+                .map(|c| (u8::try_from(c.code).unwrap(), c.dvi.to_vec()))
+                .collect(),
+        );
         self.fonts[f as usize - 1].vf = Some(VirtualFont { fonts, packets });
     }
 

@@ -371,8 +371,9 @@ pub struct VirtualFont {
     /// The local fonts in the file's order: the font number `k` of the
     /// `fnt_def` and the TeX font it is.
     pub fonts: Vec<(u32, FontId)>,
-    /// Each character's DVI program, as in the `.vf` file.
-    pub packets: BTreeMap<u8, Vec<u8>>,
+    /// Each character's DVI program, as in the `.vf` file (shared: a
+    /// writer asks for the font at every page it walks).
+    pub packets: Arc<BTreeMap<u8, Vec<u8>>>,
 }
 
 /// The caller's fonts, by TeX's internal font number (`null_font` is 0).

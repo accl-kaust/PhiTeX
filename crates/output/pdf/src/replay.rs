@@ -141,10 +141,21 @@ impl PdfState {
     /// them (the text state is set at the page's start and by
     /// `pdf_begin_text`), formatted.
     fn pre_key(&self) -> String {
+        self.pre_key_with(false)
+    }
+
+    /// [`PdfState::pre_key`]; `bare`: the color stacks' page stacks and
+    /// the last form shipped left out (what a page that pops nothing
+    /// from below its start reads of them: nothing).
+    fn pre_key_with(&self, bare: bool) -> String {
         let mut thread = self.thread.clone();
         thread.last = None;
         // (`pdfshipoutbegin` and `colorstackused` as the page starts)
-        let mut stacks = self.stacks.clone();
+        let mut stacks = if bare {
+            self.stacks.without_page_stacks()
+        } else {
+            self.stacks.clone()
+        };
         stacks.ship_begin(true);
         stacks.used();
         format!(
@@ -165,7 +176,9 @@ impl PdfState {
                 &thread,
                 self.dummy_font,
                 &stacks,
-                (self.vf_cur_s, self.cur_s, self.cur_form),
+                // (the last form shipped: a page's walk reads it not,
+                // and leaves it, `ship`)
+                (self.vf_cur_s, self.cur_s, if bare { 0 } else { self.cur_form }),
             )
         )
     }
@@ -229,6 +242,13 @@ pub struct PageRecord {
     /// The variables before the walk (after `init_output`), formatted,
     /// the parameters apart; and the same after the page.
     pre: String,
+    /// [`PageRecord::pre`] without the color stacks' page stacks, their
+    /// depths, and whether the page popped from below them
+    /// ([`PdfState::replay_page`] places one that did not on deeper
+    /// stacks).
+    pre_bare: String,
+    depths: Vec<usize>,
+    below: bool,
     pre_p: Option<crate::PdfParams>,
     post_key: String,
     /// ... and after the page.
@@ -361,6 +381,8 @@ impl PdfState {
     ) -> (Result<(), PdfError>, PageRecord) {
         self.init_output();
         let pre = self.pre_key();
+        let pre_bare = self.pre_key_with(true);
+        let depths = self.stacks.page_depths();
         let shared = self.sys_obj_ptr();
         // (a link running across the page's start: its objects are the
         // page before's, numbered where that page was placed)
@@ -395,8 +417,12 @@ impl PdfState {
         }
         let rec = self.rec.take().unwrap_or_default();
         let pre_p = Some(self.p.clone());
+        let below = self.stacks.below;
         let mut pr = PageRecord {
             pre,
+            pre_bare,
+            depths,
+            below,
             pre_p,
             shared,
             pre_nums: rec.pre_nums,
@@ -520,7 +546,14 @@ impl PdfState {
             Some(k) => k.to_owned(),
             None => self.pre_key(),
         };
-        if pre != rec.pre {
+        // (a page that pops nothing from below its start placed on deeper
+        // color stacks, a color pushed on a page before and still open,
+        // or after another form: the same bytes, its own entries put on
+        // those, below, the form kept)
+        let mut under = None;
+        if pre != rec.pre && !rec.below && known.is_none() && self.pre_key_with(true) == rec.pre_bare {
+            under = Some((self.stacks.page_stacks(), self.cur_form));
+        } else if pre != rec.pre {
             let at = pre
                 .bytes()
                 .zip(rec.pre.bytes())
@@ -732,6 +765,10 @@ impl PdfState {
         let links = std::mem::take(&mut self.link_stack);
         self.set_scratch(post);
         self.link_stack = links;
+        if let Some((u, form)) = &under {
+            self.stacks.rebase_page(u, &rec.depths);
+            self.cur_form = *form;
+        }
         (self.pdf_f, self.last_f, self.dummy_font) =
             (fmap(self.pdf_f), fmap(self.last_f), fmap(self.dummy_font));
         Ok(report)

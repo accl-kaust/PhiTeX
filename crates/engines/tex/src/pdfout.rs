@@ -838,21 +838,26 @@ fn base_inputs(r: &mut Run<'_, '_>) -> R<BaseIn> {
         .map(|x| str_of(v, x))
         .unwrap_or_default();
     let g2u = r.get("pdf:glyphtounicode")?;
+    let stacks = r.get_loc(crate::fields::cell::PDF_COLORSTACKS)?;
     Ok(BaseIn {
         date,
         jobname,
         g2u,
+        stacks,
         first: r.page_index() == 0,
     })
 }
 
 /// What a page's own writer starts from ([`base_fold`]): the file's date
-/// and job name, the glyph-to-unicode table, whether it is the first page.
+/// and job name, the glyph-to-unicode table, the color stacks made
+/// before the page (`\pdfcolorstackinit`'s, `[page, mode, init]` each),
+/// whether it is the first page.
 #[derive(Clone)]
 pub(crate) struct BaseIn {
     date: String,
     jobname: String,
     g2u: Option<ValueId>,
+    stacks: Option<ValueId>,
     first: bool,
 }
 
@@ -862,6 +867,14 @@ pub(crate) struct BaseIn {
 /// written, the version fixed).
 fn base_fold(v: &Values, b: &BaseIn, params: &[ValueId], wparams: WParams) -> Fold {
     let mut st = fresh(v, b.date.clone(), &b.jobname, b.g2u);
+    // (the color stacks made before the page, as the link's writer has
+    // them there: their page start colors are the page's bytes)
+    for s in b.stacks.map(|x| list_of(v, x)).unwrap_or_default() {
+        let xs = list_of(v, s);
+        let int = |k: usize| xs.get(k).map_or(0, |&x| int_of(v, x));
+        let init = xs.get(2).map(|&t| bytes_of(&str_of(v, t))).unwrap_or_default();
+        let _ = st.colorstack_init(int(0) != 0, int(1) == 2, &init);
+    }
     if !b.first {
         set_writer_params(&mut st, wparams);
         page_params(v, st.params_mut(), params);
@@ -1320,11 +1333,12 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
             };
             fonts.push((lf.number, g));
         }
-        let packets = vf
-            .chars
-            .iter()
-            .filter_map(|c| Some((u8::try_from(c.code).ok()?, c.dvi.to_vec())))
-            .collect();
+        let packets = Arc::new(
+            vf.chars
+                .iter()
+                .filter_map(|c| Some((u8::try_from(c.code).ok()?, c.dvi.to_vec())))
+                .collect(),
+        );
         out.vfs.insert(f, VirtualFont { fonts, packets });
     }
     let mut wanted: Vec<(u32, String, ValueId, i32)> = known
@@ -1938,6 +1952,7 @@ fn ship_apart(
         phitex_defuse::hash_bytes(0, b.date.as_bytes()),
         phitex_defuse::hash_bytes(0, b.jobname.as_bytes()),
         b.g2u.map_or(0, ValueId::raw),
+        b.stacks.map_or(0, ValueId::raw),
         maps,
         pdfmap,
         u64::from(pc.fonts.space.is_some()),

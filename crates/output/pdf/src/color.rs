@@ -21,7 +21,7 @@ struct ColorStack {
 }
 
 /// The color stacks and the position and matrix stacks.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Stacks {
     /// Empty until first used (`colstacks_first_init`).
     list: Vec<ColorStack>,
@@ -33,6 +33,27 @@ pub(crate) struct Stacks {
     matrix: Vec<[f64; 6]>,
     /// The rectangle `matrixtransformrect` last saw (`last_llx`, ...).
     last_rect: [i32; 4],
+    /// Each color stack's page stack depth as the page began
+    /// ([`Stacks::ship_begin`]), and whether the page popped an entry
+    /// from below it: one that did not read nothing of the stacks below,
+    /// so a replay may place it on deeper ones
+    /// (`PdfState::replay_page`).
+    floor: Vec<usize>,
+    pub(crate) below: bool,
+}
+
+/// The stacks as the state's digest and keys see them: the page's own
+/// bookkeeping ([`Stacks::below`]) is read by nothing after the page.
+impl std::fmt::Debug for Stacks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stacks")
+            .field("list", &self.list)
+            .field("page_mode", &self.page_mode)
+            .field("pos", &self.pos)
+            .field("matrix", &self.matrix)
+            .field("last_rect", &self.last_rect)
+            .finish()
+    }
 }
 
 fn nonempty(s: &[u8]) -> Option<Vec<u8>> {
@@ -134,6 +155,9 @@ impl Stacks {
         } else {
             (&mut c.form_stack, &mut c.form_current)
         };
+        if page && stack.len() <= self.floor.get(n).copied().unwrap_or(0) {
+            self.below = true;
+        }
         match stack.pop() {
             None => (c.literal_mode, Vec::new()),
             Some(v) => {
@@ -161,6 +185,41 @@ impl Stacks {
     pub(crate) fn ship_begin(&mut self, shipping_page: bool) {
         self.pos.clear();
         self.page_mode = shipping_page;
+        if shipping_page {
+            self.floor = self.list.iter().map(|c| c.page_stack.len()).collect();
+            self.below = false;
+        }
+    }
+
+    /// The stacks with their page stacks emptied: what a page that pops
+    /// nothing from below its start reads of them ([`Stacks::below`]).
+    pub(crate) fn without_page_stacks(&self) -> Stacks {
+        let mut s = self.clone();
+        for c in &mut s.list {
+            c.page_stack.clear();
+        }
+        s
+    }
+
+    /// Each color stack's page stack.
+    pub(crate) fn page_stacks(&self) -> Vec<Vec<Option<Vec<u8>>>> {
+        self.list.iter().map(|c| c.page_stack.clone()).collect()
+    }
+
+    /// Each color stack's page stack depth.
+    pub(crate) fn page_depths(&self) -> Vec<usize> {
+        self.list.iter().map(|c| c.page_stack.len()).collect()
+    }
+
+    /// The page stacks a page left, its own entries (those above `from`,
+    /// its start's depths) put on `under` (the stacks it was placed on).
+    pub(crate) fn rebase_page(&mut self, under: &[Vec<Option<Vec<u8>>>], from: &[usize]) {
+        for (i, c) in self.list.iter_mut().enumerate() {
+            let k = from.get(i).copied().unwrap_or(0).min(c.page_stack.len());
+            let mut s = under.get(i).cloned().unwrap_or_default();
+            s.extend(c.page_stack.drain(k..));
+            c.page_stack = s;
+        }
     }
 
     /// `pdfshipoutend`: the number of unmatched `\pdfsave`s, an error.

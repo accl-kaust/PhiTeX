@@ -5517,12 +5517,11 @@ impl Build {
         // (its size, where a run asked for it, `fsize:`)
         let z = v.field(&format!("fsize:{name}"));
         if let Some(k) = self.g.files.iter().position(|(g, _)| *g == z) {
-            match &found {
-                Some((_, b)) => self.g.files[k].1 = v.int(i64::try_from(b.len()).unwrap_or(i64::MAX)),
-                None => {
-                    self.g.files.remove(k);
-                    self.g.absent.push(z);
-                }
+            if let Some((_, b)) = &found {
+                self.g.files[k].1 = v.int(i64::try_from(b.len()).unwrap_or(i64::MAX));
+            } else {
+                self.g.files.remove(k);
+                self.g.absent.push(z);
             }
         }
         crate::timeline::lap("stage: the file's field");
