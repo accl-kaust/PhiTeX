@@ -452,6 +452,41 @@ impl Engine {
         r
     }
 
+    /// A node placed beside `node` as its placer placed it: the same
+    /// placer, place and depth, right before `node` (`before`) or after
+    /// its extent, and listed among the placer's placements beside it.
+    /// A client that keeps a run's placements in step with texts of its
+    /// own edits them so ([`Engine::remove_placed`], [`Engine::replace`]);
+    /// a later run of the placer places what it places, as always. In a
+    /// kept world without `node`, nothing is placed.
+    ///
+    /// # Panics
+    ///
+    /// If `node` is not a live node.
+    pub fn insert_placed(&mut self, node: NodeId, before: bool, op: OpId, args: Vec<ValueId>) -> NodeId {
+        assert!(self.w.node(node.0).is_some(), "insert_placed: a live node");
+        #[cfg(feature = "observe")]
+        let a = crate::record::rec().map(|_| crate::record::j(&(&node, &before, &op, &args)));
+        let id = self.fresh();
+        let text = self.core.text(Some(id), op, Arc::from(args));
+        self.edit(|b| b.insert_placed(node.0, before, id, text.clone()));
+        self.rerun_text.push(id);
+        #[cfg(feature = "observe")]
+        self.rec_call("insert_placed", a, &NodeId(id));
+        NodeId(id)
+    }
+
+    /// Removes a node and its subtree, and from its placer's placements
+    /// ([`Engine::insert_placed`]).
+    pub fn remove_placed(&mut self, node: NodeId) {
+        if self.w.node(node.0).is_some() {
+            self.edit(|b| b.free_placement(node.0));
+            self.roots.retain(|&r| r != node);
+        }
+        #[cfg(feature = "observe")]
+        self.rec_call("remove_placed", crate::record::rec().map(|_| crate::record::j(&(&node,))), &());
+    }
+
     /// Replaces a node's text; the node keeps its id.
     pub fn replace(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) {
         #[cfg(feature = "observe")]
@@ -903,6 +938,35 @@ impl Engine {
             let fs: FxHashSet<Field> = e.known.keys().chain(new.keys()).copied().collect();
             let before: Vec<(Field, Option<Option<ValueId>>)> = fs.into_iter().map(|f| (f, self.core.env_answer(&e, f))).collect();
             e.known = new;
+            before.into_iter().filter(|(f, b)| self.core.env_answer(&e, *f) != *b).map(|(f, _)| f).collect::<Vec<_>>()
+        };
+        self.env_changed(&changed);
+    }
+
+    /// Changes the supplied environment fields `changes` names (`Some`:
+    /// supplied with that value, `None`: no longer supplied), the others
+    /// as they are: [`Engine::set_environment`] with the rest the same,
+    /// costing the fields changed, not the environment.
+    pub fn update_environment(&mut self, changes: &[(Field, Option<ValueId>)]) {
+        if changes.is_empty() {
+            return;
+        }
+        self.w.note(super::world::Change::All);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.core.values, "update_environment", crate::record::j(&changes), serde_json::Value::Null);
+        let changed = {
+            let mut e = self.core.env.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let before: Vec<(Field, Option<Option<ValueId>>)> = changes.iter().map(|&(f, _)| (f, self.core.env_answer(&e, f))).collect();
+            for &(f, x) in changes {
+                match x {
+                    Some(x) => {
+                        e.known.insert(f, x);
+                    }
+                    None => {
+                        e.known.remove(&f);
+                    }
+                }
+            }
             before.into_iter().filter(|(f, b)| self.core.env_answer(&e, *f) != *b).map(|(f, _)| f).collect::<Vec<_>>()
         };
         self.env_changed(&changed);

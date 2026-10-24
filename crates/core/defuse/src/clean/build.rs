@@ -1940,6 +1940,44 @@ impl<'a> Builder<'a> {
         self.w.put(id, n);
     }
 
+    /// Places node `id` (text `text`) beside placed node `at` as its
+    /// placer placed `at` (`Engine::insert_placed`).
+    pub(crate) fn insert_placed(&mut self, at: Id, before: bool, id: Id, text: Arc<Text>) {
+        let Some(an) = self.w.node(at).cloned() else { return };
+        let u = an.unit;
+        let p = if before {
+            self.w.unit(u).order.below(&an.pos).map_or(0, |(&p, _)| p)
+        } else {
+            let end = self.extent_end(at);
+            self.w.node(end).map_or(an.pos, |e| e.pos)
+        };
+        let pos = self.positions_after(u, p, 1)[0];
+        self.create(id, text, u, an.parent, an.place, an.depth, pos);
+        self.frames_from(u, pos);
+        self.file_declared(id);
+        if an.parent == NONE {
+            return;
+        }
+        let Some(mut pn) = self.w.node(an.parent).cloned() else { return };
+        let mut res = pn.res.as_deref().cloned().unwrap_or_default();
+        for l in [&mut res.kids, &mut res.conts] {
+            if let Some(i) = l.iter().position(|&k| k == at) {
+                l.insert(if before { i } else { i + 1 }, id);
+            }
+        }
+        pn.res = Some(Arc::new(res));
+        self.w.put(an.parent, pn);
+    }
+
+    /// Frees placed node `id` and drops it from its placer's placements
+    /// (`Engine::remove_placed`).
+    pub(crate) fn free_placement(&mut self, id: Id) {
+        match self.w.node(id).map(|n| n.parent) {
+            Some(p) if p != NONE && self.w.node(p).is_some() => self.free_placed(p, &[id]),
+            _ => self.free(id),
+        }
+    }
+
     pub(crate) fn commit_unfolding(&mut self, id: Id, kids: &[Spec], conts: &[Spec]) {
         let Some(n) = self.w.node(id).cloned() else { return };
         let (k, c) = self.place_some(id, kids, conts, true);

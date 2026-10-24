@@ -909,6 +909,12 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
             json!(eng.insert_before(de(&g(0)), de(&g(1)), de(&g(2)))),
         ),
         "replace" => eng.replace(de(&g(0)), de(&g(1)), de(&g(2))),
+        "insert_placed" => check(
+            "insert_placed",
+            json!(eng.insert_placed(de(&g(0)), de(&g(1)), de(&g(2)), de(&g(3)))),
+        ),
+        "remove_placed" => eng.remove_placed(de(&g(0))),
+        "update_environment" => eng.update_environment(&de::<Vec<(Field, Option<ValueId>)>>(a)),
         "remove" => eng.remove(de(&g(0))),
         "declare_sequence" => eng.declare_sequence(de(&g(0))),
         "declare_loopback" => eng.declare_loopback(de(&g(0)), de(&g(1))),
