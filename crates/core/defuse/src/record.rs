@@ -277,6 +277,11 @@ impl Operation for RecOp {
         self.st(values, "contribs_complete", args, J::Null, j(&r));
         r
     }
+    fn after_by_order(&self, args: &[ValueId], values: &Values) -> bool {
+        let r = self.inner.after_by_order(args, values);
+        self.st(values, "after_by_order", args, J::Null, j(&r));
+        r
+    }
     fn final_only(&self, args: &[ValueId], values: &Values) -> bool {
         let r = self.inner.final_only(args, values);
         self.st(values, "final_only", args, J::Null, j(&r));

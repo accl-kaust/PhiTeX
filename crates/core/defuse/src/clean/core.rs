@@ -346,6 +346,7 @@ impl Core {
             .map(Arc::from);
         let fin = self.hook(who, op, "final_only", || false, || o.final_only(args, v));
         let contribs_complete = contribs.is_some() && self.hook(who, op, "contribs_complete", || false, || o.contribs_complete(args, v));
+        let after_by_order = self.hook(who, op, "after_by_order", || false, || o.after_by_order(args, v));
         Static {
             defs: defs.map(Arc::from),
             may,
@@ -354,6 +355,7 @@ impl Core {
             contribs_complete,
             preds,
             fin,
+            after_by_order,
             reads: self.hook(who, op, "reads", || None, || o.reads(args, v)).map(Arc::from),
         }
     }

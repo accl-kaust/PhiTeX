@@ -44,6 +44,7 @@ const READS: &[&str] = &[
     "compose",
 ];
 const WRITES: &[&str] = &[
+    "unread",
     "define",
     "define_with",
     "define_in_scope",

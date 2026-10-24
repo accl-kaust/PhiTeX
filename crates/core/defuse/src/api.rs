@@ -204,6 +204,17 @@ pub trait Operation: Send + Sync {
         false
     }
 
+    /// Whether the node's continuations placed after other nodes
+    /// ([`crate::Ctx::follow_after_any`]) stand for its last result's by
+    /// their order: a stopped run's `n`-th of an operation replaces the
+    /// last result's `n`-th, which goes at that stop rather than standing
+    /// beside it until the run ends (as a page builder's finishers, the
+    /// `j`-th page's after whichever piece it fires in). Asked once per
+    /// text.
+    fn after_by_order(&self, _args: &[ValueId], _values: &Values) -> bool {
+        false
+    }
+
     /// Whether the node runs only in the evaluation's final phase: held,
     /// unrun, while loop-back fields still move, and run once the rounds
     /// have converged (`next_round` found nothing changed), after which the

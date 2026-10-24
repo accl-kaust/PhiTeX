@@ -822,6 +822,14 @@ impl Operation for Pages {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
+    /// Its finishers by their page: the `j`-th page's finisher placed
+    /// after another piece than in the last run replaces the last run's
+    /// at the stop that places it, not a second finisher beside it (whose
+    /// page counter step and definitions the text between would see
+    /// twice while this run goes on).
+    fn after_by_order(&self, _: &[ValueId], _: &Values) -> bool {
+        true
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);

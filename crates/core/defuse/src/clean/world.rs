@@ -67,6 +67,9 @@ pub(crate) struct Static {
     pub contribs_complete: bool,
     pub preds: Option<Arc<[(Field, ValueId)]>>,
     pub fin: bool,
+    /// Its continuations after other nodes replace its last result's by
+    /// order (`Operation::after_by_order`).
+    pub after_by_order: bool,
     /// The fields the run is declared to read (`reads`, a hint).
     pub reads: Option<Arc<[Field]>>,
 }

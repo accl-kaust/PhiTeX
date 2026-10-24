@@ -1429,6 +1429,7 @@ impl<'a> Builder<'a> {
         let cont = self.cont.is_some();
         let (bk, bc) = self.cont.unwrap_or((0, 0));
         let (bk, bc) = (bk.min(old.0.len()), bc.min(old.1.len()));
+        let by_order = n.text.stat.after_by_order;
         let key = |place: Place, op: crate::api::OpId| -> PlaceKey {
             match place {
                 Place::Child => (1, op, 0),
@@ -1591,6 +1592,35 @@ impl<'a> Builder<'a> {
             let end = self.put_placed(id, &n, c, spec, depth, base);
             last_cont.insert(anchor, end);
         }
+        // (By order, `Operation::after_by_order`: a stopped run's `n`-th
+        // continuation after a node of an operation stands for the earlier
+        // result's `n`-th, which goes, not left beside it.)
+        let rest_c: Vec<Id> = {
+            let rest = if cont { &old.1[bc..] } else { &old.1[..] };
+            if by_order && prefix {
+                let made: FxHashSet<Id> = cont_ids.iter().chain(&kid_ids).copied().collect();
+                let mut left: FxHashMap<crate::api::OpId, usize> = FxHashMap::default();
+                for s in conts.iter().filter(|s| matches!(s.place, Place::After(_))) {
+                    *left.entry(s.op).or_insert(0) += 1;
+                }
+                let mut out = Vec::with_capacity(rest.len());
+                for &x in rest {
+                    let gone = self.w.node(x).is_some_and(|xn| {
+                        matches!(xn.place, Place::After(_))
+                            && xn.parent == id
+                            && left.get_mut(&xn.text.op).is_some_and(|l| *l > 0 && { *l -= 1; true })
+                    });
+                    if !gone {
+                        out.push(x);
+                    } else if !made.contains(&x) {
+                        self.free(x);
+                    }
+                }
+                out
+            } else {
+                rest.to_vec()
+            }
+        };
         if cont {
             // Its earlier attempts', its own, then (stopped) the earlier
             // result's it has not made again.
@@ -1605,7 +1635,7 @@ impl<'a> Builder<'a> {
                 v
             };
             let (nk, nc) = (kid_ids.len(), cont_ids.len());
-            let out = (join(&old.0[..bk], kid_ids, &old.0[bk..]), join(&old.1[..bc], cont_ids, &old.1[bc..]));
+            let out = (join(&old.0[..bk], kid_ids, &old.0[bk..]), join(&old.1[..bc], cont_ids, &rest_c));
             // (Its memo for the next stop, all its attempts' live: its
             // result's address set when committed.)
             if prefix && (live || (out.0.len() >= bk + nk && out.1.len() >= bc + nc && out.0[..bk].len() == bk && old.0[..bk] == out.0[..bk] && old.1[..bc] == out.1[..bc])) {
@@ -1617,7 +1647,7 @@ impl<'a> Builder<'a> {
             let mut kid_ids = kid_ids;
             let mut cont_ids = cont_ids;
             kid_ids.extend(old.0.iter().copied().filter(|x| !keep.contains(x) && self.w.node(*x).is_some()));
-            cont_ids.extend(old.1.iter().copied().filter(|x| !keep.contains(x) && self.w.node(*x).is_some()));
+            cont_ids.extend(rest_c.iter().copied().filter(|x| !keep.contains(x) && self.w.node(*x).is_some()));
             return (kid_ids, cont_ids);
         }
         (kid_ids, cont_ids)

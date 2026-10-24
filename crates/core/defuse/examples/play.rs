@@ -396,6 +396,9 @@ impl Operation for PlayOp {
     fn contribs_complete(&self, args: &[ValueId], _: &Values) -> bool {
         self.st("contribs_complete", args, J::Null, false)
     }
+    fn after_by_order(&self, args: &[ValueId], _: &Values) -> bool {
+        self.st("after_by_order", args, J::Null, false)
+    }
     fn final_only(&self, args: &[ValueId], _: &Values) -> bool {
         self.st("final_only", args, J::Null, false)
     }
