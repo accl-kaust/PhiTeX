@@ -217,6 +217,26 @@ pub fn default_engine(text: &str) -> &'static str {
     }
 }
 
+/// The files `text` inputs by name in braces (`\input{name}`,
+/// `\include{name}`), in order.
+#[must_use]
+pub fn braced_inputs(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for cmd in ["\\input{", "\\include{"] {
+        let mut rest = text;
+        while let Some(i) = rest.find(cmd) {
+            rest = &rest[i + cmd.len()..];
+            if let Some(j) = rest.find('}') {
+                let name = rest[..j].trim();
+                if !name.is_empty() && !name.contains(['\\', '{', '\n']) {
+                    out.push(name);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +311,7 @@ mod tests {
         );
         assert_eq!(default_engine(text), "pdflatex");
         assert_eq!(default_engine("\\input plain"), "pdftex");
+        assert_eq!(braced_inputs("\\def\\x{}\n\\input{course}"), vec!["course"]);
         // the class in a shared preamble
         assert_eq!(
             default_engine("\\input{preamble}\n\\begin{document}\nx\n\\end{document}"),

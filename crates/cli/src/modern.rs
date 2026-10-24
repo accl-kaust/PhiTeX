@@ -413,9 +413,24 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         program = config::magic_comments(&text).0.or(program);
     }
     let named = o.engine.clone().or(cfg.engine).or(program);
-    let mut engine = match named {
-        Some(e) => tex::engine(&e)?,
-        None => tex::engine(config::default_engine(&read(&file, true)?))?,
+    let mut engine = if let Some(e) = named {
+        tex::engine(&e)?
+    } else {
+        let t = read(&file, true)?;
+        let mut e = config::default_engine(&t);
+        // (a file that inputs a LaTeX document is one: a second
+        // edition's main file setting a switch before its first's)
+        if e == "pdftex" {
+            let dir = Path::new(&file).parent().unwrap_or(Path::new(""));
+            for name in config::braced_inputs(&t) {
+                let f = dir.join(name).to_string_lossy().into_owned();
+                if read(&f, true).is_ok_and(|u| config::default_engine(&u) == "pdflatex") {
+                    e = "pdflatex";
+                    break;
+                }
+            }
+        }
+        tex::engine(e)?
     };
     if let Some(out) = o.output {
         engine = engine.with_output(out)?;
