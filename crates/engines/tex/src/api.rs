@@ -70,6 +70,7 @@ pub type OutNameOk = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// How a document is run.
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Options {
     /// The name `(…` prints for the document (`./story.tex`).
     pub name: String,
@@ -150,6 +151,10 @@ pub struct Options {
     /// text, kept per document (`crate::pkgrec`). Merged with
     /// [`Self::pkgrec`]. Empty: none.
     pub noderec: Vec<u8>,
+    /// Whether a document node whose text cannot bound what it defines
+    /// is recorded as a package load is (`crate::pkgrec::is_recorded`):
+    /// off, its runs record nothing and [`Self::noderec`] is not read.
+    pub node_records: bool,
     /// Whether the records carry the values each load published, and a
     /// load whose key matches is given them as the prediction of its
     /// outputs (also `PHITEX_PKG_PREDICT=1`).
@@ -536,18 +541,12 @@ fn slice_keys(
 }
 
 /// A document file's analysis registered under its name: its chunks'
-/// joined (a node made from part of a slice's line is hinted from it,
-/// by the file's offsets).
+/// (a node made from part of a slice's line is hinted from the chunk
+/// holding it, by the file's offsets).
 fn register_file(reg: &crate::hints::Registry, name: ValueId, inc: &Incr) {
-    let t = match inc.chunks.as_slice() {
-        [c] if c.start == 0 => c.th.clone(),
-        cs => {
-            let parts: Vec<(usize, &crate::hints::TextHints)> =
-                cs.iter().map(|c| (c.start, &*c.th)).collect();
-            Arc::new(crate::hints::TextHints::joined(&parts))
-        }
-    };
-    crate::hints::register_text(reg, name, &t);
+    let cs: Vec<(usize, Arc<crate::hints::TextHints>)> =
+        inc.chunks.iter().map(|c| (c.start, c.th.clone())).collect();
+    crate::hints::register_chunks(reg, name, Arc::from(cs));
 }
 
 /// A text cut again (the document's, or a document file's, `file`): its
@@ -590,7 +589,9 @@ enum Placing {
 /// inserted.
 #[derive(Clone, Copy, Default)]
 struct Applied {
-    kept: usize,
+    /// The nodes kept at the start and at the end.
+    prefix: usize,
+    suffix: usize,
     replaced: usize,
     removed: usize,
     inserted: usize,
@@ -620,7 +621,7 @@ fn apply_slices(
     let old = &*nodes_now;
     if old.len() == new.len() && old.iter().zip(new).all(|(o, n)| o.0 == n.0) {
         return Some(Applied {
-            kept: old.len(),
+            prefix: old.len(),
             ..Applied::default()
         });
     }
@@ -662,7 +663,8 @@ fn apply_slices(
     *nodes_now = nodes;
     crate::timeline::lap("engine: replace/insert/remove, the node list made");
     Some(Applied {
-        kept: a + b,
+        prefix: a,
+        suffix: b,
         replaced: common,
         removed: old_mid - common,
         inserted: new_mid - common,
@@ -710,7 +712,7 @@ fn apply_text(
         [
             old_len,
             new.len(),
-            d.kept,
+            d.prefix + d.suffix,
             d.replaced,
             d.removed,
             d.inserted,
@@ -751,6 +753,7 @@ impl Default for Options {
             written_init: Vec::new(),
             pkgrec: Vec::new(),
             noderec: Vec::new(),
+            node_records: true,
             pkg_predict: false,
             long_runs: Some(LONG_RUNS),
             runtimes: Vec::new(),
@@ -2291,6 +2294,8 @@ pub(crate) struct DocFile {
     /// made (a kept piece keeps its text and the places in it, as a
     /// document's node does, [`apply_slices`]).
     shifts: FxHashMap<u64, (ValueId, i64)>,
+    /// Each reader's pieces as the last edit left them, in order.
+    placed: FxHashMap<u64, Vec<NodeId>>,
 }
 
 /// The build's cut document files, by name ([`DocFile`]).
@@ -2328,6 +2333,7 @@ fn cut_doc_file(
         slices,
         readers: Vec::new(),
         shifts: FxHashMap::default(),
+        placed: FxHashMap::default(),
     };
     docs.locked()
         .insert(name.to_owned(), Arc::new(std::sync::Mutex::new(df)));
@@ -2380,14 +2386,13 @@ fn pieces_of(eng: &Engine, r: NodeId, name: ValueId) -> Vec<NodeId> {
         .collect()
 }
 
-/// The first place a node's frames carry (a slice's start where it was
-/// made).
-fn frames_start(v: &Values, fs: ValueId) -> Option<i64> {
-    let f = *list_of(v, fs).first()?;
-    let xs = list_of(v, f);
-    (xs.first().is_some_and(|&t| str_of(v, t) == "s"))
-        .then(|| xs.get(6).map(|&p| int_of(v, p)))
-        .flatten()
+/// Whether `kids` are still node `r`'s placements, in order and one
+/// after another ([`DocFile::placed`]).
+fn placed_still(eng: &Engine, r: NodeId, kids: &[NodeId]) -> bool {
+    let ch = eng.children(r);
+    ch.iter()
+        .position(|&k| k == kids[0])
+        .is_some_and(|p| ch.get(p..p + kids.len()) == Some(kids))
 }
 
 /// How far an edit of its file moved the text of node `n` or of the
@@ -2500,6 +2505,7 @@ impl Graph {
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            node_rec: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             early_loops: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pdf_cmds: Arc::default(),
             class_proj,
@@ -4925,6 +4931,9 @@ impl Build {
             std::sync::atomic::Ordering::Relaxed,
         );
         g.ops
+            .node_rec
+            .store(opts.node_records, std::sync::atomic::Ordering::Relaxed);
+        g.ops
             .early_loops
             .store(opts.rounds == Rounds::Relaxed, std::sync::atomic::Ordering::Relaxed);
         // (observe: `PHITEX_MAX_ROUNDS`, a lower cap, so the warning names
@@ -5633,11 +5642,18 @@ impl Build {
         let readers = std::mem::take(&mut df.readers);
         let mut kept = Vec::with_capacity(readers.len());
         let mut shifts = std::mem::take(&mut df.shifts);
+        let mut placed = std::mem::take(&mut df.placed);
+        let delta = i64::try_from(df.text.len()).unwrap_or(0) - i64::try_from(range.1 + s).unwrap_or(0);
         for r in readers {
             if !self.g.eng.is_live(r) {
                 continue;
             }
-            let kids = pieces_of(&self.g.eng, r, pv);
+            // (its pieces as the last edit left them, where they still are
+            // its placements in order; else found again)
+            let kids = match placed.remove(&r.raw()) {
+                Some(k) if !k.is_empty() && placed_still(&self.g.eng, r, &k) => k,
+                _ => pieces_of(&self.g.eng, r, pv),
+            };
             // (a node that no longer places the file's pieces: not its
             // reader now)
             if kids.is_empty() && !old.is_empty() {
@@ -5660,21 +5676,24 @@ impl Build {
                 Some(a) => {
                     n += a.changed();
                     // (each piece's move since it was made: a kept one's
-                    // text, and the places in it, as when it was made)
-                    let v = self.g.eng.values();
-                    for (_, id, src) in &nodes {
-                        let Src::Doc(s, _) = *src;
-                        let Some(fs) = self.g.eng.node_info(*id).and_then(|i| i.args.first().copied()) else {
-                            continue;
-                        };
-                        let made = frames_start(v, fs).unwrap_or(0);
-                        let d = i64::try_from(s).unwrap_or(0) - made;
-                        if d == 0 {
+                    // text, and the places in it, as when it was made; those
+                    // made now are where they are; those after the change
+                    // moved by as much as the text grew)
+                    let mid = a.prefix..nodes.len() - a.suffix;
+                    for (i, (_, id, _)) in nodes.iter().enumerate() {
+                        if mid.contains(&i) {
                             shifts.remove(&id.raw());
-                        } else {
-                            shifts.insert(id.raw(), (fs, d));
+                        } else if i >= mid.end && delta != 0 {
+                            let e = match shifts.get(&id.raw()) {
+                                Some(&(fs, d)) => Some((fs, d + delta)),
+                                None => self.g.eng.node_info(*id).and_then(|x| x.args.first().copied()).map(|fs| (fs, delta)),
+                            };
+                            if let Some(e) = e {
+                                shifts.insert(id.raw(), e);
+                            }
                         }
                     }
+                    placed.insert(r.raw(), nodes.iter().map(|x| x.1).collect());
                 }
                 None => redo.push(r),
             }
@@ -5691,6 +5710,7 @@ impl Build {
         shifts.retain(|&k, _| self.g.eng.is_live(NodeId::from_raw(k)));
         df.readers = kept;
         df.shifts = shifts;
+        df.placed = placed;
         df.slices = new;
         crate::timeline::lap("stage: the file's pieces edited");
         n

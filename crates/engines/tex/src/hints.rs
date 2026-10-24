@@ -980,31 +980,6 @@ pub(crate) struct Reuse<'a> {
 }
 
 impl TextHints {
-    /// The analyses of a text's chunks, each with its start, as one of
-    /// the whole text: their slices and atoms at the text's bytes.
-    pub(crate) fn joined(parts: &[(usize, &TextHints)]) -> TextHints {
-        let mut t = TextHints {
-            slices: Vec::new(),
-            starts: Vec::new(),
-            hints: Vec::new(),
-            skip: Vec::new(),
-            pars: Vec::new(),
-            slice_hints: Vec::new(),
-            sigs: Vec::new(),
-        };
-        for &(at, c) in parts {
-            let off = u32::try_from(at).unwrap_or(u32::MAX);
-            t.slices.extend(c.slices.iter().map(|&(s, e)| (s + at, e + at)));
-            t.starts.extend(c.starts.iter().map(|&s| s.saturating_add(off)));
-            t.hints.extend(c.hints.iter().cloned());
-            t.skip.extend_from_slice(&c.skip);
-            t.pars.extend_from_slice(&c.pars);
-            t.slice_hints.extend(c.slice_hints.iter().cloned());
-            t.sigs.extend_from_slice(&c.sigs);
-        }
-        t
-    }
-
     /// The hint of the command at or after byte `off`.
     fn at(&self, off: usize) -> Hint {
         // (to the end of the slice holding `off`: the node's own text)
@@ -3893,7 +3868,9 @@ fn texts() -> &'static TextsCache {
 /// analysis of another build's document at its offsets.
 #[derive(Default)]
 pub(crate) struct Registry {
-    by_name: Mutex<FxHashMap<u64, Arc<TextHints>>>,
+    /// Each text's analysis by its name, in chunks (their starts in the
+    /// text, [`register_chunks`]).
+    by_name: Mutex<FxHashMap<u64, Chunks>>,
     hints: Mutex<FxHashMap<u64, Arc<Hint>>>,
     /// The engine's answers ([`may_define`]) made ahead on the pool for
     /// nodes about to be pushed ([`prepare`]), by their arguments' key:
@@ -3932,9 +3909,22 @@ struct Prepared {
 /// definitions.
 pub(crate) fn register_text(reg: &Registry, name: ValueId, t: &Arc<TextHints>) {
     let mut bn = reg.by_name.locked();
-    if !bn.get(&name.raw()).is_some_and(|x| Arc::ptr_eq(x, t)) {
-        bn.insert(name.raw(), t.clone());
+    if !bn
+        .get(&name.raw())
+        .is_some_and(|x| matches!(&x[..], [(0, y)] if Arc::ptr_eq(y, t)))
+    {
+        bn.insert(name.raw(), Arc::from(vec![(0, t.clone())]));
     }
+}
+
+/// A text's analysis in chunks, each with its start in the text: a
+/// file cut as the document is ([`crate::incr::Incr`]), registered as
+/// its chunks are, not joined again at every edit.
+pub(crate) type Chunks = Arc<[(usize, Arc<TextHints>)]>;
+
+/// [`register_text`] of a text analysed in chunks (`chunks`, by start).
+pub(crate) fn register_chunks(reg: &Registry, name: ValueId, chunks: Chunks) {
+    reg.by_name.locked().insert(name.raw(), chunks);
 }
 
 /// Withdraws the analysis registered under `name` (a document whose
@@ -4303,8 +4293,12 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
                 *registry = true;
                 let at = usize::try_from(int_of(v, o)).unwrap_or(0);
                 let t = reg.by_name.locked().get(&name.raw()).cloned();
-                return match t {
-                    Some(t) => t.at_until(at, at + text.len()),
+                // (the chunk holding the line: its analysis, from its start)
+                let c = t.as_deref().and_then(|cs| {
+                    cs[..cs.partition_point(|c| c.0 <= at)].last().cloned()
+                });
+                return match c {
+                    Some((s, t)) => t.at_until(at - s, at - s + text.len()),
                     None => Hint::any("file not analysed yet", &text),
                 };
             }

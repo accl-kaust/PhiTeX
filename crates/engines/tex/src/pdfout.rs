@@ -871,9 +871,9 @@ fn base_fold(v: &Values, b: &BaseIn, params: &[ValueId], wparams: WParams) -> Fo
     // them there: their page start colors are the page's bytes)
     for s in b.stacks.map(|x| list_of(v, x)).unwrap_or_default() {
         let xs = list_of(v, s);
-        let int = |k: usize| xs.get(k).map_or(0, |&x| int_of(v, x));
-        let init = xs.get(2).map(|&t| bytes_of(&str_of(v, t))).unwrap_or_default();
-        let _ = st.colorstack_init(int(0) != 0, int(1) == 2, &init);
+        let num = |k: usize| xs.get(k).map_or(0, |&x| int_of(v, x));
+        let text = xs.get(2).map(|&t| bytes_of(&str_of(v, t))).unwrap_or_default();
+        let _ = st.colorstack_init(num(0) != 0, num(1) == 2, &text);
     }
     if !b.first {
         set_writer_params(&mut st, wparams);
@@ -3778,7 +3778,9 @@ fn link(
         })
         .collect();
     let done: Vec<phitex_pdf::Chunk> = {
-        let mut ex = crate::exec::Inner(crate::exec::threads(None));
+        // (an edit's page or two: here, no threads started for them)
+        let n = if jobs.len() > 2 { crate::exec::threads(None) } else { 1 };
+        let mut ex = crate::exec::Inner(n);
         crate::exec::map_on(&mut ex, jobs.len(), &|j| {
             let (i, k) = jobs[j];
             parts[i][k].clone().resolve()

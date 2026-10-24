@@ -52,7 +52,7 @@ impl std::fmt::Debug for Stacks {
             .field("pos", &self.pos)
             .field("matrix", &self.matrix)
             .field("last_rect", &self.last_rect)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

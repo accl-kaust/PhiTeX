@@ -215,6 +215,8 @@ pub(crate) struct Ops {
     pub fin_defs_start: std::sync::Arc<std::sync::Mutex<std::sync::Arc<FinTable>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// [`crate::Options::node_records`].
+    pub node_rec: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// [`crate::Rounds::Relaxed`]: the read-back loop-backs declared
     /// early (`crate::ops`).
     pub early_loops: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -4836,6 +4838,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // recorded as a load is, `crate::pkgrec::is_recorded`)
         let rec = self.rec_load
             || (op == self.ops.exec
+                && self.ops.node_rec.load(std::sync::atomic::Ordering::Relaxed)
                 && !crate::pkgrec::is_load(self.v, &self.cx.args())
                 && crate::pkgrec::is_recorded(&self.ops.hints, self.v, &self.cx.args()));
         if rec && op == self.ops.exec && !self.claim_rest && self.pulled_only_blanks() {

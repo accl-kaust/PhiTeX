@@ -742,6 +742,7 @@ impl Session {
                         .noderec_path()
                         .and_then(|p| self.cache.as_ref()?.get(&p))
                         .unwrap_or_default(),
+                    node_records: self.job.node_records,
                     // (a recorded node's outputs predicted from its record,
                     // so its readers run ahead on them)
                     pkg_predict: true,
