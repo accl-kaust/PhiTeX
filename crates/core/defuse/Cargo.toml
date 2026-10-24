@@ -13,7 +13,8 @@ serde_json = { version = "1", optional = true }
 
 [features]
 # Diagnostics: the engine's phase timers and counters (CLEAN_PROF), traces
-# (CLEAN_DEBUG), scoped checks (CLEAN_SCOPED_CHECK) and the `obs` probes.
+# (CLEAN_DEBUG), a line per run (CLEAN_RUNLOG), scoped checks
+# (CLEAN_SCOPED_CHECK) and the `obs` probes.
 # Off by default; release builds compile every probe out.
 profile = []
 # Recording for replay (DEFUSE_RECORD=path, replayed by examples/play.rs).

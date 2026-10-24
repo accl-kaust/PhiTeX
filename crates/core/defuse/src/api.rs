@@ -173,7 +173,9 @@ pub trait Operation: Send + Sync {
     /// likely does: its readers of a field waited on when predicting
     /// ([`crate::Engine::wait_on_pending`]) wait on it; past one that
     /// likely does not, they read on (a guess, as for any field, that its
-    /// definition re-asks). A speed hint, never a result.
+    /// definition re-asks). A node whose predicted definitions
+    /// ([`Operation::predicted_defs`]) leave `f` out is passed likewise. A
+    /// speed hint, never a result.
     fn likely_defines(&self, _args: &[ValueId], _values: &Values, _f: Field) -> bool {
         true
     }
@@ -234,9 +236,24 @@ pub trait Operation: Send + Sync {
     /// When the node runs, each predicted field is compared by value with
     /// what it defined: equal, the readers stand; different (or predicted
     /// and not defined), exactly the readers of that field run again.
-    /// Predictions change speed, never results. Asked once per text: a
-    /// new text asks again.
+    /// With a pending definition set (`defs` gives `None`), the predicted
+    /// fields are filed as global definitions to come: a reader after the
+    /// node takes the prediction instead of guessing past it, and the
+    /// run's definitions confirm or refute it as above (one made in a
+    /// scope included). A run resting on a guess that defines otherwise
+    /// than predicted is not committed while the node it guessed on is in
+    /// work: the prediction stays in force for the readers, and the node
+    /// runs again once that node commits. Predictions change speed, never
+    /// results. Asked once per text: a new text asks again.
     fn predicted_defs(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, ValueId)>> {
+        None
+    }
+
+    /// With a pending definition set, the localities of the predicted
+    /// definitions ([`Operation::predicted_defs`]), as they are filed
+    /// before the node runs; a field not listed is filed global. Asked
+    /// with the predictions.
+    fn predicted_localities(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, Locality)>> {
         None
     }
 
@@ -748,7 +765,8 @@ pub enum EvalError {
     },
     /// One of an operation's static hooks (`defs`, `may_define`,
     /// `may_define_field`, `effect`, `claim`, `claim_limit`, `reads`,
-    /// `static_contribs`, `predicted_defs`, `until`, `until_value`,
+    /// `static_contribs`, `predicted_defs`, `predicted_localities`,
+    /// `until`, `until_value`,
     /// `until_values`) panicked: the node
     /// when known (a text analysed before it is placed has none), the
     /// operation's name, the hook and the panic message. A panic outside
@@ -1219,8 +1237,8 @@ pub struct Report {
     /// ([`crate::Engine::guess_from_last`]), in every run merged (none in
     /// an evaluation where no node has a result from an earlier one).
     pub guessed_from_last: u64,
-    /// Nodes refuted this evaluation (a guess or prediction broke) that
-    /// ran conservatively afterwards, on committed values only (not those
+    /// Nodes refuted this evaluation (a guess or prediction broke, twice)
+    /// that ran conservatively afterwards, on committed values only (not those
     /// refuted only on a definition whose definer ran again for a
     /// loop-back value that moved). High counts mean a hint or prediction
     /// is costing parallelism.
@@ -1261,6 +1279,10 @@ pub struct Report {
     /// Careful nodes (refuted, running on committed values only) that ran
     /// past a mark beyond the one they resumed at, and guess again.
     pub careful_lapsed: u64,
+    /// Runs resting on a guess that defined otherwise than their text
+    /// predicts, not committed: their node waited for the node in work it
+    /// guessed on (the prediction stays in force for its readers).
+    pub unconfirmed_parked: u64,
     /// Of those cut off, those with a patch (`Ctx::checkpoint_patched`).
     pub cut_patched: u64,
     /// Done nodes whose values passed on through views (`Ctx::define_from`

@@ -272,6 +272,11 @@ impl Operation for RecOp {
         self.st(values, "predicted_defs", args, J::Null, j(&r));
         r
     }
+    fn predicted_localities(&self, args: &[ValueId], values: &Values) -> Option<Vec<(Field, Locality)>> {
+        let r = self.inner.predicted_localities(args, values);
+        self.st(values, "predicted_localities", args, J::Null, j(&r));
+        r
+    }
     fn contribs_complete(&self, args: &[ValueId], values: &Values) -> bool {
         let r = self.inner.contribs_complete(args, values);
         self.st(values, "contribs_complete", args, J::Null, j(&r));

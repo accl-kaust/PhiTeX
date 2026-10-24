@@ -404,13 +404,16 @@ impl<'a> Ctx<'a> {
                 _ => None,
             };
             eprintln!(
-                "stopped {} at ctx.rs:{} on {w:?}: {:?} (op {:?}, reads hinted {:?}, subject result {:?})",
+                "stopped {} at ctx.rs:{} on {w:?}: {:?} (op {:?}, reads hinted {:?}, subject result {:?}, predicting {}, careful {}, subject preds {:?})",
                 self.me,
                 std::panic::Location::caller().line(),
                 x.and_then(|x| self.w.node(x)).map(|n| (n.st, n.pos)),
                 self.w.node(self.me).map(|n| self.core.op_name(n.text.op)),
                 self.w.node(self.me).map(|n| n.text.stat.reads.is_some()),
                 x.and_then(|x| self.w.node(x)).map(|n| n.res.is_some()),
+                self.predict,
+                self.careful,
+                x.and_then(|x| self.w.node(x)).map(|n| (self.core.op_name(n.text.op), n.text.stat.preds.as_ref().map(|p| (p.len(), match w { Wait::Node(_, Some(f)) => p.iter().any(|q| q.0 == f), _ => false })))),
             );
         }
         self.wait = Some(w);

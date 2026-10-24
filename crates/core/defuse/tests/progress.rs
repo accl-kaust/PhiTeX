@@ -1,7 +1,7 @@
-//! Progress under bad predictions: a node whose run was refuted runs on
-//! committed values only for the rest of the evaluation, so each node is
-//! refuted at most once and the evaluation ends (in the worst case in text
-//! order). Finishers `F_i` each read the previous finisher's `d` and
+//! Progress under bad predictions: a node whose run was refuted twice runs
+//! on committed values only for the rest of the evaluation, so each node
+//! is refuted a few times at most and the evaluation ends (in the worst
+//! case in text order). Finishers `F_i` each read the previous finisher's `d` and
 //! predict `d = 100`, which never holds: every speculative read of `d` is
 //! refuted.
 
@@ -90,15 +90,15 @@ fn eval(eng: &mut Engine, i: usize) -> Report {
         .expect("evaluate ends")
 }
 
-/// Each node is refuted at most once an evaluation: it has one run on
-/// guesses at most, then runs on committed values (a rerun per change of
-/// what it read, stops that resume, and a run begun on guesses before it
-/// was refuted, which does not commit), so the runs stay linear in the
-/// nodes: under 5 per node in every schedule here, under load too.
+/// Each node is refuted at most three times an evaluation: it has two runs
+/// on guesses that are refuted at most, and a run begun on guesses before
+/// its second refutation, then runs on committed values (a rerun per
+/// change of what it read, stops that resume), so the runs stay linear in
+/// the nodes: under 5 per node in every schedule here, under load too.
 fn at_most_once(rep: &Report, what: &str) {
     assert!(rep.nodes_conservative <= N as u64, "{what}: {}", rep.nodes_conservative);
     assert!(
-        rep.refutations_max <= 1,
+        rep.refutations_max <= 3,
         "{what}: a node refuted {} times",
         rep.refutations_max
     );

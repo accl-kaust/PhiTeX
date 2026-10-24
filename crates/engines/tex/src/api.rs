@@ -2002,6 +2002,16 @@ fn print_round(t: std::time::Duration, r: &Report) {
         r.mispredictions,
         r.runs_by_op
     );
+    eprintln!(
+        "round predictions: {} confirmed, {} refuted, {} results parked unconfirmed; {} nodes careful, {} refuted (at most {} times), {} steps",
+        r.predictions_confirmed,
+        r.predictions_refuted,
+        r.unconfirmed_parked,
+        r.nodes_conservative,
+        r.refuted_nodes,
+        r.refutations_max,
+        r.steps
+    );
 }
 
 impl Stats {

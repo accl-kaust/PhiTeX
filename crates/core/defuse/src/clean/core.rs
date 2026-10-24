@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex, RwLock};
 
 use super::world::{Id, May, Static, Text, World};
-use crate::api::{EvalError, Monoid, OpId, Operation, Projection};
+use crate::api::{EvalError, Locality, Monoid, OpId, Operation, Projection};
 use crate::values::{Field, FxHashMap, FxHashSet, Value, ValueId, Values, hash_words};
 
 /// The environment the client supplies.
@@ -341,14 +341,30 @@ impl Core {
             }
             Arc::from(out)
         });
-        let preds = self
+        let preds: Option<Arc<[(Field, ValueId)]>> = self
             .hook(who, op, "predicted_defs", || None, || o.predicted_defs(args, v))
             .map(Arc::from);
         let fin = self.hook(who, op, "final_only", || false, || o.final_only(args, v));
         let contribs_complete = contribs.is_some() && self.hook(who, op, "contribs_complete", || false, || o.contribs_complete(args, v));
         let after_by_order = self.hook(who, op, "after_by_order", || false, || o.after_by_order(args, v));
+        // (A pending set's predictions filed as entries: a reader after
+        // the node takes its prediction instead of guessing past it.)
+        let defs: Option<Arc<[(Field, Locality)]>> = defs.map(Arc::from);
+        let filed = defs.clone().or_else(|| {
+            let ps = preds.as_ref()?;
+            let locs = self.hook(who, op, "predicted_localities", || None, || o.predicted_localities(args, v)).unwrap_or_default();
+            let mut fs: Vec<(Field, Locality)> = Vec::with_capacity(ps.len());
+            for &(f, _) in ps.iter() {
+                if !fs.iter().any(|e| e.0 == f) {
+                    let loc = locs.iter().find(|e| e.0 == f).map_or(Locality::Global, |e| e.1);
+                    fs.push((f, loc));
+                }
+            }
+            Some(Arc::from(fs))
+        });
         Static {
-            defs: defs.map(Arc::from),
+            defs,
+            filed,
             may,
             effect,
             contribs,
@@ -871,6 +887,37 @@ pub(crate) fn debug() -> bool {
     false
 }
 
+/// Whether `CLEAN_RUNLOG` is on (`profile` builds).
+pub(crate) fn debug_runlog() -> bool {
+    #[cfg(feature = "profile")]
+    {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("CLEAN_RUNLOG").is_some())
+    }
+    #[cfg(not(feature = "profile"))]
+    false
+}
+
+/// `CLEAN_RUNLOG` (`profile` builds): each run's node, operation, start
+/// and end (µs since the first run logged) and what came of it, a line
+/// each.
+pub(crate) fn runlog(id: Id, op: &str, span: Option<(std::time::Instant, std::time::Instant)>, what: &str) {
+    #[cfg(feature = "profile")]
+    {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var_os("CLEAN_RUNLOG").is_some()) {
+            return;
+        }
+        let t0 = *T0.get_or_init(std::time::Instant::now);
+        let us = |t: std::time::Instant| t.saturating_duration_since(t0).as_micros();
+        let (a, b) = span.map_or((0, 0), |(a, b)| (us(a), us(b)));
+        eprintln!("runlog {id} {op} {a} {b} {} {what}", us(std::time::Instant::now()));
+    }
+    #[cfg(not(feature = "profile"))]
+    let _ = (id, op, span, what);
+}
+
 /// The wall clock of the Report's merge and link times (none on wasm32).
 pub(crate) fn now() -> Option<std::time::Instant> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -1033,7 +1080,7 @@ pub(crate) mod prof {
         }
     }
     /// Event counters (shown with the timers).
-    pub(crate) const COUNTS: [&str; 44] = [
+    pub(crate) const COUNTS: [&str; 48] = [
         "results", "clean", "data_conflict", "shape_conflict", "placing", "effect_change", "deferred", "st_kids", "st_effect", "st_claim", "st_env", "st_stop", "flushes",
         // (Rechecks queued, by source; reads settle asked.)
         "rk_freed", "rk_shape", "rk_out", "rk_kind", "rk_moved", "rk_outchg", "rk_field", "rk_reads", "rk_acc",
@@ -1051,8 +1098,11 @@ pub(crate) mod prof {
         // follow nodes stepped over, continuations scanned.)
         "pl_specs", "pl_made", "pl_moved", "ext_follow", "ext_scan",
         "relabels",
+        // (The lane took a job of its step no worker had; read hints asked,
+        // found waiting, their fields asked.)
+        "lane_took", "hb_calls", "hb_blocked", "hb_fields",
     ];
-    pub(crate) static CN: [AtomicU64; 44] = [const { AtomicU64::new(0) }; 44];
+    pub(crate) static CN: [AtomicU64; 48] = [const { AtomicU64::new(0) }; 48];
     #[inline]
     pub(crate) fn count(i: usize) {
         if on() {

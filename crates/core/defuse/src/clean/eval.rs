@@ -13,6 +13,17 @@ use crate::api::{CapPolicy, EditSource, LoopStart, EvalError, Executor, NoEdits,
 use crate::values::{Field, FxHashMap, FxHashSet, ValueId};
 use crate::{Ctx, Greedy};
 
+/// The refutations on a guess after which a node runs carefully (on
+/// committed values only, after the nodes before it in its unit). A
+/// node's first rerun guesses again, on its definers' latest results: a
+/// document's nodes mostly define what they define whatever they read
+/// (a paragraph's flags and scratch macros), so a wave refuted once
+/// mostly stands on the next, and a node run carefully at its first
+/// refutation waits for every node before it, the second wave in text
+/// order, one at a time. A second refutation says its inputs are still
+/// moving under it: it waits for them.
+const CAREFUL_AFTER: u32 = 2;
+
 /// What a run gave.
 enum Outcome {
     Done(Run),
@@ -32,8 +43,11 @@ struct Run {
     predicted: u32,
     /// Reads it guessed from the last (`Engine::guess_from_last`).
     from_last: u32,
-    /// It read a prediction or a definer in work.
+    /// It read a prediction or a definer in work, or ran ahead of a node
+    /// in work before it.
     guessed: bool,
+    /// It read a prediction or a definer in work (a guess in its reads).
+    read_guess: bool,
     /// Run carefully, it passed a mark past the one it resumed at: the
     /// node runs carefully no longer (`Ctx::checkpoint`).
     lapsed: bool,
@@ -81,11 +95,14 @@ struct Sched {
     last_ran: FxHashMap<Id, std::time::Duration>,
     /// Nodes whose speculative run ran out of fuel: they run in full.
     no_fuel: FxHashSet<Id>,
-    /// How often each node's result was refuted.
+    /// How often each node's result was refuted, and of those how often
+    /// on a guess (not a loop-back value's move).
     refutes: FxHashMap<Id, u32>,
-    /// Nodes refuted on a guess that failed: they run carefully. (Not
-    /// for a definition whose definer ran again for a loop-back value that
-    /// moved: the round's own news, not a guess that keeps failing.)
+    guess_refutes: FxHashMap<Id, u32>,
+    /// Nodes refuted on a guess that failed [`CAREFUL_AFTER`] times: they
+    /// run carefully. (Not for a definition whose definer ran again for a
+    /// loop-back value that moved: the round's own news, not a guess that
+    /// keeps failing.)
     careful: FxHashSet<Id>,
     /// Nodes whose committed result rests on a guess.
     guessed: FxHashSet<Id>,
@@ -135,11 +152,18 @@ impl Sched {
     }
 
     /// A refutation of node `id`'s result; `news`: of a loop-back value's
-    /// move (it does not make the node careful).
+    /// move (it does not make the node careful). Refuted fewer than
+    /// [`CAREFUL_AFTER`] times, it runs again guessing, on its definers'
+    /// latest results.
     fn refuted(&mut self, id: Id, news: bool) {
-        *self.refutes.entry(id).or_default() += 1;
+        let c = self.refutes.entry(id).or_default();
+        *c += 1;
         if !news {
-            self.careful.insert(id);
+            let k = self.guess_refutes.entry(id).or_default();
+            *k += 1;
+            if *k >= CAREFUL_AFTER {
+                self.careful.insert(id);
+            }
         }
     }
 
@@ -150,6 +174,7 @@ impl Sched {
             why: std::mem::take(&mut self.why),
             time: std::mem::take(&mut self.time),
             refutes: std::mem::take(&mut self.refutes),
+            guess_refutes: std::mem::take(&mut self.guess_refutes),
             careful: std::mem::take(&mut self.careful),
             guessed: std::mem::take(&mut self.guessed),
             fold_ran: std::mem::take(&mut self.fold_ran),
@@ -965,6 +990,7 @@ impl Engine {
             }
             rep.max_ready = rep.max_ready.max(s.queue.len());
             self.check_deadline(s, rep, deadline)?;
+            let t_step = std::time::Instant::now();
             let Some((mut chosen, mut resumes, fueled)) = super::core::prof::time(22, || self.select_batch(s, rep, ran, cut, hs, window, predict, sched, &FxHashSet::default()))? else { continue };
             // Run against the snapshot; the results merge in text order
             // after the batch (merging in the workers as results came only
@@ -1003,14 +1029,20 @@ impl Engine {
                 let left = std::sync::atomic::AtomicUsize::new(jobs.len() - 1);
                 let busy_ids: FxHashSet<Id> = jobs.iter().skip(1).map(|j| j.0).collect();
                 let lane_busy = std::sync::atomic::AtomicU64::new(0);
+                // (Each job taken to run, by a worker or by the lane.)
+                let taken: Vec<std::sync::atomic::AtomicBool> = (0..jobs.len()).map(|_| std::sync::atomic::AtomicBool::new(false)).collect();
                 let lane_ran = std::sync::atomic::AtomicBool::new(false);
                 let lane_m = std::sync::Mutex::new(&mut m);
                 let run = |i: usize| {
                     if lane_on && i == 0 {
                         lane_ran.store(true, std::sync::atomic::Ordering::Relaxed);
                         let mut g = super::core::lock(&lane_m);
-                        let d = g.lane(&core, &snap, &jobs, &slots, &careful, &fueled, fuel, predict, &busy_ids, &left, par, deadline);
+                        let d = g.lane(&core, &snap, &jobs, &slots, &careful, &fueled, fuel, predict, &busy_ids, &left, &taken, par, deadline);
                         lane_busy.fetch_add(d, std::sync::atomic::Ordering::Relaxed);
+                        return crate::api::RunResult(());
+                    }
+                    // (Taken by the lane, run there.)
+                    if lane_on && taken[i].swap(true, std::sync::atomic::Ordering::AcqRel) {
                         return crate::api::RunResult(());
                     }
                     let (id, resume) = &jobs[i];
@@ -1056,6 +1088,7 @@ impl Engine {
             m.eng.defer = None;
             m.eng.t_commit += u64::try_from(tc.elapsed().as_nanos()).unwrap_or(u64::MAX);
             let (applied, parked, err) = (m.applied, m.parked, m.err.take());
+            super::core::runlog(0, "step", Some((t_step, std::time::Instant::now())), &format!("jobs {} applied {applied} parked {parked} queue {} merge_us {}", jobs.len(), m.s.queue.len(), tc.elapsed().as_micros()));
             drop(m);
             if let Some(e) = err {
                 return Err(e);
@@ -1486,6 +1519,25 @@ impl Engine {
             // (The first always goes, unless nodes are running: they
             // finish and let it go.)
             let first = ready.is_empty() && skip.is_empty();
+            // A node refuted this evaluation (twice) runs in text order:
+            // when nothing before it in its unit is in work (or it is
+            // first); a long one (`set_long_runs`) does not run ahead
+            // either. Behind a node waiting to run, it is parked on it
+            // (its commit queues it again), not scanned again each step.
+            if !first
+                && (s.careful(k.2) || s.long(&self.run_time, self.long_runs, k.2))
+                && let Some((_, &x)) = self.w.work_of(k.0).and_then(|m| m.below(&k.1))
+            {
+                s.held.insert(k.2, (x, if s.careful(k.2) { crate::api::Hold::Careful } else { crate::api::Hold::Long }));
+                if x != k.2 && self.w.node(x).is_some_and(|n| n.st == St::Dirty) {
+                    s.queue.remove(&k);
+                    s.queued.remove(&k.2);
+                    s.parked.insert(k.2, Wait::Node(x, None));
+                    s.waiters.entry(x).or_default().push(k.2);
+                    s.hint_parked.insert(k.2, x);
+                }
+                continue;
+            }
             if !first && let Err(x) = self.w.hint_blocker(&self.core, k.2, predict) {
                 // (Parked on a dirty blocker: its commit queues it again;
                 // a scan per step (or pick) for each cost a window's worth
@@ -1514,23 +1566,6 @@ impl Engine {
                 && ready.len() >= la
                 && self.w.work_of(k.0).and_then(|m| m.below(&k.1)).is_some()
             {
-                continue;
-            }
-            // A node refuted this evaluation runs in text order: when
-            // nothing before it in its unit is in work (or it is first).
-            if !first
-                && s.careful(k.2)
-                && let Some((_, &x)) = self.w.work_of(k.0).and_then(|m| m.below(&k.1))
-            {
-                s.held.insert(k.2, (x, crate::api::Hold::Careful));
-                continue;
-            }
-            // A long one (`set_long_runs`) does not run ahead either.
-            if !first
-                && s.long(&self.run_time, self.long_runs, k.2)
-                && let Some((_, &x)) = self.w.work_of(k.0).and_then(|m| m.below(&k.1))
-            {
-                s.held.insert(k.2, (x, crate::api::Hold::Long));
                 continue;
             }
             s.queue.remove(&k);
@@ -1630,6 +1665,7 @@ impl Engine {
             predicted: 0,
             from_last: 0,
             guessed: false,
+            read_guess: false,
             lapsed: false,
             fold_ran: false,
             fuel_out: false,
@@ -2251,6 +2287,30 @@ impl Engine {
             {
                 rep.careful_lapsed += 1;
             }
+            // A result resting on a guess that defines otherwise than its
+            // text predicts is not committed while the node it guessed on
+            // is in work: its readers keep the prediction (likely right:
+            // the guess under it likely is not), and it runs again once
+            // that node commits.
+            let outcome = match outcome {
+                Outcome::Done(r) => match self.unconfirmed(s, id, &r) {
+                    Some((x, f)) => {
+                        if let Some(n) = self.w.node(id) {
+                            let miss: Vec<String> = n.text.stat.preds.iter().flat_map(|ps| ps.iter()).filter(|&&(g, p)| r.res.def_value(g) != Some(p)).take(4).map(|&(g, _)| self.core.values.render(g.0)).collect();
+                            super::core::runlog(id, self.core.op_name(n.text.op), r.span, &format!("parked-unconfirmed on {x} {} {miss:?}", self.core.values.render(f.0)));
+                        }
+                        rep.unconfirmed_parked += 1;
+                        s.last_ran.remove(&id);
+                        s.held.remove(&id);
+                        hs.woke.insert(id, (x, Some(f)));
+                        s.parked.insert(id, Wait::Node(x, Some(f)));
+                        s.waiters.entry(x).or_default().push(id);
+                        return Ok(());
+                    }
+                    None => Outcome::Done(r),
+                },
+                o => o,
+            };
             match outcome {
                 Outcome::Failed(mut e) => {
                     if let EvalError::NoProgress { rounds, .. } = &mut e {
@@ -2259,6 +2319,17 @@ impl Engine {
                     return Err(e);
                 }
                 Outcome::Done(mut r) => {
+                    if super::core::debug_runlog() {
+                        let why = super::core::lock(&self.core.causes).get(&id).copied();
+                        let why = match why {
+                            Some(crate::api::Rerun::Changed { field, .. }) => format!("changed {}", self.core.values.render(field.0)),
+                            Some(crate::api::Rerun::Rebind { field }) => format!("rebind {}", self.core.values.render(field.0)),
+                            Some(crate::api::Rerun::Range { field: Some(f) }) => format!("range {}", self.core.values.render(f.0)),
+                            Some(w) => format!("{w:?}").chars().take(40).collect(),
+                            None => String::new(),
+                        };
+                        super::core::runlog(id, self.w.node(id).map_or("", |n| self.core.op_name(n.text.op)), r.span, &format!("{} {why}", if r.guessed { "commit-guessed" } else { "commit" }));
+                    }
                     let km = self.kept_marks.remove(&id);
                     if let Some(e) = self.runaway(id, &r.kids, &r.conts) {
                         return Err(e);
@@ -2406,6 +2477,7 @@ impl Engine {
                     }
                 }
                 Outcome::Stopped(mut r, wait) => {
+                    super::core::runlog(id, self.w.node(id).map_or("", |n| self.core.op_name(n.text.op)), r.span, "stop");
                     let _t = super::core::prof::Span::new(42);
                     rep.stops += 1;
                     // (An attempt whose placements are committed below: its
@@ -2629,6 +2701,45 @@ impl Engine {
                 }
             }
         Ok(())
+    }
+
+    /// Whether result `r` of node `id` waits for a node it guessed on:
+    /// it rests on a guess, and defines otherwise than its text predicts
+    /// (`Operation::predicted_defs`); the node in work before it in its
+    /// unit, queued or running (not parked: it may wait on this one), whose
+    /// definition or pending set it read on, the last in text order, and
+    /// the field.
+    fn unconfirmed(&self, s: &Sched, id: Id, r: &Run) -> Option<(Id, Field)> {
+        if !r.read_guess || r.fold_redo || r.base.is_some() || r.resumed {
+            return None;
+        }
+        let n = self.w.node(id)?;
+        let ps = n.text.stat.preds.as_ref()?;
+        if ps.iter().all(|&(f, p)| r.res.def_value(f) == Some(p)) {
+            return None;
+        }
+        let open = |x: Id| x != id && !s.parked.contains_key(&x) && self.w.node(x).is_some_and(|d| d.st == St::Dirty && d.unit == n.unit && d.pos < n.pos);
+        let mut best: Option<(Pos, Id, Field)> = None;
+        for rd in &r.res.reads {
+            let Read::Use { f, at, after, own, .. } = rd else { continue };
+            if self.w.loops.get(f).is_some() {
+                continue;
+            }
+            let Some((u, pos, fr, skip)) = self.w.read_point(*at, *after, *own) else { continue };
+            let reach = self.w.reaching(u, *f, pos, fr, skip);
+            let x = self
+                .w
+                .pending_set_between(&self.core, u, *f, reach.map_or(0, |r| r.0), pos, id)
+                .filter(|&x| open(x))
+                .or_else(|| reach.map(|r| r.1.node).filter(|&x| open(x)));
+            if let Some(x) = x
+                && let Some(p) = self.w.node(x).map(|d| d.pos)
+                && best.is_none_or(|b| p > b.0)
+            {
+                best = Some((p, x, *f));
+            }
+        }
+        best.map(|b| (b.1, b.2))
     }
 
     /// The unfolding limits: a run of `id` placing `kids` and `conts`.
@@ -3558,13 +3669,14 @@ impl Merge<'_> {
 
     /// The step's lane: runs `first` on the world as it is and commits it,
     /// then, while the step's other jobs (`busy`) run (`left` of them), or
-    /// its commits queued fewer than `par` nodes off the chain, the
-    /// chain on from it: the first ready node its commits queued that runs
-    /// the first node's operation (a scan's next scan, not the pieces it
-    /// unfolded), or the node the last run stopped on; once the other jobs
-    /// are done, their results merge first (`snap`, `jobs`, `slots`: the
-    /// step's);
-    /// the time it ran ops (ns).
+    /// its commits queued fewer than `par` nodes, the chain on from it:
+    /// the first ready node, in text order, that the commits queued, of
+    /// whatever operation (an expansion's piece, its page step, the page's
+    /// finisher), or the node the last run stopped on. The other jobs'
+    /// results merge as they come, in order (`snap`, `jobs`, `slots`: the
+    /// step's), between the lane's runs and while it has none to run: a
+    /// link the step ran goes on in the lane, not after the step's slowest
+    /// job. The time it ran ops (ns).
     #[allow(clippy::too_many_arguments)]
     fn lane(
         &mut self,
@@ -3578,6 +3690,7 @@ impl Merge<'_> {
         predict: bool,
         busy: &FxHashSet<Id>,
         left: &std::sync::atomic::AtomicUsize,
+        taken: &[std::sync::atomic::AtomicBool],
         par: usize,
         deadline: Option<std::time::Instant>,
     ) -> u64 {
@@ -3586,9 +3699,8 @@ impl Merge<'_> {
         let first = &jobs[0];
         let mut job = Some((first.0, super::core::lock(&first.1).take(), careful.contains(&first.0), fueled.contains(&first.0)));
         self.s.lane_new = Some(Vec::new());
-        // (The chain's operation: its first node's. `others`: the nodes its
-        // commits queued off the chain, for the next step's workers.)
-        let op = self.eng.w.node(first.0).map(|n| n.text.op);
+        // (`others`: the nodes the commits queued that the lane left, for
+        // the next step's workers.)
         let mut others: FxHashSet<Id> = FxHashSet::default();
         while let Some((id, resume, careful, fueled)) = job.take() {
             #[cfg(not(target_arch = "wasm32"))]
@@ -3639,6 +3751,12 @@ impl Merge<'_> {
                     self.parked += 1;
                 }
             }
+            // (The step's other results come in order as they are ready:
+            // what their commits queue is the lane's to go on with.)
+            self.drain_ready(snap, jobs, slots);
+            if self.err.is_some() {
+                break;
+            }
             // (The step's other jobs done and enough queued to feed the
             // workers: the step ends; while too little is, the chain
             // goes on here rather than a step per link.)
@@ -3664,31 +3782,66 @@ impl Merge<'_> {
                 self.err = Some(e);
                 break;
             }
-            match self.lane_next(busy, predict, op, want, &mut others) {
-                Ok(Some((x, r))) => {
-                    count(22);
-                    job = Some((x, r, self.s.careful(x), false));
+            let mut want = want;
+            loop {
+                match self.lane_next(busy, predict, want.take(), &mut others) {
+                    Ok(Some((x, r))) => {
+                        count(22);
+                        job = Some((x, r, self.s.careful(x), false));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        self.err = Some(e);
+                    }
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    self.err = Some(e);
+                // (Nothing to run while the step's jobs run: the next of
+                // their results in order, merged when it comes, may queue
+                // the chain's next link.)
+                if job.is_some() || self.err.is_some() || self.next >= jobs.len() {
                     break;
                 }
+                // (One no worker took yet the lane runs itself, on the
+                // world as it is, committed at once.)
+                let i = self.next;
+                if !taken[i].swap(true, std::sync::atomic::Ordering::AcqRel) {
+                    let (x, resume) = &jobs[i];
+                    job = Some((*x, super::core::lock(resume).take(), self.s.careful(*x), false));
+                    self.next += 1;
+                    left.fetch_sub(1, std::sync::atomic::Ordering::Release);
+                    count(44);
+                    break;
+                }
+                while super::core::lock(&slots[i]).is_none() {
+                    std::thread::yield_now();
+                }
+                self.drain_ready(snap, jobs, slots);
             }
         }
         self.s.lane_new = None;
         t_ops
     }
 
-    /// The lane's next node: the node `want` the last run stopped on, if
-    /// queued, else the first, in text order, of those its commits queued
-    /// that runs operation `op`, when ready to run now (prepared), if any.
+    /// Merges the step's results ready in order, up to the first still
+    /// running.
+    fn drain_ready(&mut self, snap: &World, jobs: &[(Id, Resume)], slots: &[std::sync::Mutex<Option<(Outcome, std::time::Duration)>>]) {
+        let mut end = self.next;
+        while end < jobs.len() && super::core::lock(&slots[end]).is_some() {
+            end += 1;
+        }
+        if end > self.next {
+            self.drain(snap, &jobs[..end], slots, &mut Sequential);
+        }
+    }
+
+    /// The lane's next node: of the node `want` the last run stopped on,
+    /// if queued, those the commits queued and the queue's head (nothing
+    /// before it in its unit in work), the first in text order ready to run
+    /// now (prepared), if any.
     #[allow(clippy::type_complexity)]
     fn lane_next(
         &mut self,
         busy: &FxHashSet<Id>,
         predict: bool,
-        op: Option<crate::api::OpId>,
         want: Option<Id>,
         others: &mut FxHashSet<Id>,
     ) -> Result<Option<(Id, Kept)>, EvalError> {
@@ -3701,15 +3854,16 @@ impl Merge<'_> {
         {
             v.push(x);
         }
+        // (Those found held this call: they wait for the step.)
+        let mut skipped: FxHashSet<Id> = FxHashSet::default();
         loop {
             let mut cands = s.lane_new.take().unwrap_or_default();
             cands.retain(|x| s.queued.contains(x) && !busy.contains(x));
-            let chain = |x: Id| Some(x) == want || eng.w.node(x).is_some_and(|n| Some(n.text.op) == op);
-            others.extend(cands.iter().copied().filter(|&x| !chain(x)));
-            let best = cands.iter().filter(|&&x| chain(x)).filter_map(|&x| eng.w.node(x).map(|n| (n.unit, n.pos, x))).filter(|k| s.queue.contains(k)).min();
-            // (Or the head, of whatever operation: a queued node nothing
-            // before it in its unit is in work for, if it comes first.)
-            let head = s.queue.iter().take(8).find(|k| !busy.contains(&k.2) && eng.w.work_of(k.0).and_then(|m| m.below(&k.1)).is_none()).copied();
+            others.extend(cands.iter().copied());
+            let best = cands.iter().filter(|x| !skipped.contains(x)).filter_map(|&x| eng.w.node(x).map(|n| (n.unit, n.pos, x))).filter(|k| s.queue.contains(k)).min();
+            // (Or the head: a queued node nothing before it in its unit is
+            // in work for, if it comes first.)
+            let head = s.queue.iter().take(8).find(|k| !busy.contains(&k.2) && !skipped.contains(&k.2) && eng.w.work_of(k.0).and_then(|m| m.below(&k.1)).is_none()).copied();
             let best = match (best, head) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
@@ -3719,10 +3873,9 @@ impl Merge<'_> {
                 count(23);
                 return Ok(None);
             };
-            cands.retain(|&x| x != k.2);
             s.lane_new = Some(cands);
             // (Held by its hints, or refuted and behind a node in work: it
-            // waits for the step.)
+            // waits for the step; the next one may go.)
             let long = s.long(&eng.run_time, eng.long_runs, k.2);
             let behind = (s.careful(k.2) || long) && eng.w.work_of(k.0).and_then(|m| m.below(&k.1)).is_some_and(|(_, &x)| {
                 s.held.insert(k.2, (x, if s.careful(k.2) { crate::api::Hold::Careful } else { crate::api::Hold::Long }));
@@ -3730,7 +3883,12 @@ impl Merge<'_> {
             });
             if behind || eng.w.hint_blocker(&eng.core, k.2, predict).is_err() {
                 count(25);
-                return Ok(None);
+                skipped.insert(k.2);
+                continue;
+            }
+            others.remove(&k.2);
+            if let Some(v) = s.lane_new.as_mut() {
+                v.retain(|&x| x != k.2);
             }
             s.queue.remove(&k);
             let Some(r) = eng.prepare(s, rep, k) else { continue };
@@ -3934,6 +4092,18 @@ impl Merge<'_> {
                     let tr = super::core::now();
                     // A read an earlier commit of this step broke.
                     eng.core.cause(id, super::build::why_broken(&eng.core, &eng.w, id, rd));
+                    super::core::runlog(id, eng.w.node(id).map_or("", |n| eng.core.op_name(n.text.op)), r.span, &format!("refuted {}", match rd {
+                        Read::Use { f, site, .. } => format!("{} site {site}", eng.core.values.render(f.0)),
+                        Read::Range { f, .. } => format!("range {}", eng.core.values.render(f.0)),
+                        _ => read_kind(rd).to_owned(),
+                    }));
+                    if super::core::debug()
+                        && let Read::Use { f, at, after, own, site, .. } = rd
+                    {
+                        let now = eng.w.read_point(*at, *after, *own).and_then(|(u, pos, fr, skip)| eng.w.reaching(u, *f, pos, fr, skip)).map(|r| r.1.node);
+                        let op = |x: Option<Id>| x.and_then(|x| eng.w.node(x)).map(|n| eng.core.op_name(n.text.op));
+                        eprintln!("refute {id} {:?} on {}: site {site} {:?} now {now:?} {:?}", op(Some(id)), eng.core.values.render(f.0), op(Some(*site)), op(now));
+                    }
                     if !matches!(rd, Read::Range { f, .. } if fold_guess(&eng.core, s, id, *f, r.fold_ran, true)) {
                         let news = matches!(rd, Read::Use { site, .. } if eng.loop_news(*site));
                         s.refuted(id, news);
@@ -4147,6 +4317,7 @@ fn run_job(
         predicted: cx.predicted,
         from_last: cx.from_last,
         guessed: cx.guessed || cx.predicted > 0 || ahead,
+        read_guess: cx.guessed || cx.predicted > 0,
         lapsed: cx.lapsed,
         fold_ran: cx.fold_ran,
         fuel_out: cx.fuel_out,

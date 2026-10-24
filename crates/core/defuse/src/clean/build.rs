@@ -334,6 +334,13 @@ impl<'a> Builder<'a> {
                 *e = (e.0.min(b), e.1.min(at));
             }
             if let Some(r) = broken {
+                if super::core::debug()
+                    && let Read::Use { f, at, after, own, site, .. } = r
+                {
+                    let now = self.w.read_point(*at, *after, *own).and_then(|(u, pos, fr, skip)| self.w.reaching(u, *f, pos, fr, skip)).map(|r| r.1.node);
+                    let op = |x: Option<Id>| x.and_then(|x| self.w.node(x)).map(|n| self.core.op_name(n.text.op));
+                    eprintln!("recheck-broken {id} {:?} on {}: site {site} {:?} now {now:?} {:?}", op(Some(id)), self.core.values.render(f.0), op(Some(*site)), op(now));
+                }
                 let why = if rebound(self.core, &self.w, r) {
                     self.rebinds += 1;
                     match r {
@@ -702,7 +709,7 @@ impl<'a> Builder<'a> {
     fn file_declared(&mut self, id: Id) {
         let _t = super::core::prof::Span::new(32);
         let Some(n) = self.w.node(id).cloned() else { return };
-        let Some(decl) = n.text.stat.defs.clone() else { return };
+        let Some(decl) = n.text.stat.filed.clone() else { return };
         for &(f, loc) in decl.iter() {
             self.file(id, &n, f, loc, None);
         }
@@ -727,7 +734,9 @@ impl<'a> Builder<'a> {
             return;
         }
         self.w.file_def(n.unit, f, pos, fr, e);
-        if val.is_none() && pending_breaks_none(self.core, f) {
+        // (A definition to come breaks no read, but for its prediction:
+        // the readers after it are asked against that.)
+        if val.is_none() && pending_breaks_none(self.core, f) && predicted(&self.w, id, f).is_none() {
             self.w.touch_key(Key::Defs(n.unit, f));
         } else {
             self.def_changed_in(n.unit, f, n.pos, Some(fr), loc == Locality::Global);
@@ -1067,7 +1076,7 @@ impl<'a> Builder<'a> {
                 self.unfile(id, n, d.f, d.loc);
             }
         }
-        if let Some(decl) = n.text.stat.defs.clone() {
+        if let Some(decl) = n.text.stat.filed.clone() {
             for &(f, loc) in decl.iter() {
                 if !n.res.as_ref().is_some_and(|r| r.defs.iter().any(|d| d.f == f && d.loc == loc)) {
                     self.unfile(id, n, f, loc);
@@ -1096,7 +1105,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn retext(&mut self, id: Id, text: Arc<Text>) {
         let Some(n) = self.w.node(id).cloned() else { return };
         let old_b = n.brackets();
-        if let Some(decl) = n.text.stat.defs.clone() {
+        if let Some(decl) = n.text.stat.filed.clone() {
             for &(f, loc) in decl.iter() {
                 if !n.res.as_ref().is_some_and(|r| r.defs.iter().any(|d| d.f == f && d.loc == loc)) {
                     self.unfile(id, &n, f, loc);
@@ -1335,7 +1344,7 @@ impl<'a> Builder<'a> {
         if let Some(r) = &n.res {
             keys.extend(r.defs.iter().map(|d| (d.f, d.loc)));
         }
-        if let Some(decl) = &n.text.stat.defs {
+        if let Some(decl) = &n.text.stat.filed {
             for &(f, loc) in decl.iter() {
                 if !keys.iter().any(|e| e.0 == f && e.1 == loc) {
                     keys.push((f, loc));
@@ -1874,6 +1883,7 @@ impl<'a> Builder<'a> {
         // Definitions: removed, added, changed.
         let old_defs: Vec<Def> = old.as_ref().map_or_else(Vec::new, |o| o.defs.clone());
         let decl = n.text.stat.defs.clone();
+        let filed = n.text.stat.filed.clone();
         let declared = |f: Field, k: u8| decl.as_ref().is_some_and(|d| d.iter().any(|e| e.0 == f && e.1.entry_key() == k));
         for d in &old_defs {
             if !res.defs.iter().any(|e| e.f == d.f && e.loc.entry_key() == d.loc.entry_key()) {
@@ -1884,14 +1894,16 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // Declared entries this run did not make go. (One the last run
-        // made went above, as made. A global entry and a local one share a
-        // key, not an entry: matched exactly.)
-        if let Some(dl) = decl.as_ref() {
+        // Declared entries this run did not make go, and predicted ones:
+        // their readers are asked again. (One the last run made went
+        // above, as made. A global entry and a local one share a key, not
+        // an entry: matched exactly.)
+        if let Some(dl) = filed.as_ref() {
+            // (Each list's entries as a set, the lists long: a package
+            // load's run makes hundreds.)
+            let made: FxHashSet<(Field, Locality)> = res.defs.iter().chain(old_defs.iter()).map(|e| (e.f, e.loc)).collect();
             for &(f, loc) in dl.iter() {
-                let made = res.defs.iter().any(|e| e.f == f && e.loc == loc);
-                let had = old_defs.iter().any(|e| e.f == f && e.loc == loc);
-                if !made && !had {
+                if !made.contains(&(f, loc)) {
                     self.unfile(id, &n, f, loc);
                 }
             }
@@ -1956,7 +1968,7 @@ impl<'a> Builder<'a> {
         // Scope entries filed where the old effect put them move with it.
         if effect_changed {
             let mut keys: Vec<(Field, Locality)> = old_defs.iter().map(|d| (d.f, d.loc)).collect();
-            keys.extend(decl.iter().flat_map(|d| d.iter().copied()));
+            keys.extend(filed.iter().flat_map(|d| d.iter().copied()));
             keys.sort_by_key(|&(f, l)| (f.0.raw(), l.entry_key()));
             keys.dedup();
             for (f, loc) in keys {
@@ -2262,16 +2274,17 @@ pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &m
         }
     };
     let v2 = match reach {
-        Some((_, e)) => match e.val {
-            Some(v) => Some(v),
-            // (A definer in work: the answer stands as a guess.)
-            None => {
+        Some((_, e)) => {
+            // (A definer in work: the answer stands as a guess; one that
+            // predicts it, its prediction is the answer.)
+            let Some(v) = e.val.or_else(|| predicted(w, e.node, *f)) else {
                 if *path >= super::core::PATH0 {
                     a.last = Some((*f, Err(())));
                 }
                 return true;
-            }
-        },
+            };
+            Some(v)
+        }
         None => w.env_of(core, u, *f),
     };
     if *path >= super::core::PATH0 {
@@ -2430,6 +2443,11 @@ fn use_now(core: &Core, w: &World, r: &Read) -> Option<ValueId> {
     }
 }
 
+/// The value node `x` predicts for `f` (`Operation::predicted_defs`).
+fn predicted(w: &World, x: Id, f: Field) -> Option<ValueId> {
+    w.node(x)?.text.stat.preds.as_ref()?.iter().find(|p| p.0 == f).map(|p| p.1)
+}
+
 /// Whether read `r` of node `me` still holds; `strict`: a definition still
 /// to be made between its site and the reader breaks it (else the read
 /// stands as a guess until that definer commits).
@@ -2459,8 +2477,12 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
                 Some((_, e)) => match e.val {
                     Some(v) => (e.node, Some(v)),
                     // A definer in work: the answer stands as a guess until
-                    // it commits (its commit re-asks the readers).
-                    None => return !strict,
+                    // it commits (its commit re-asks the readers), but for
+                    // its prediction, the answer a read gets now.
+                    None => match predicted(w, e.node, *f) {
+                        Some(p) if !strict => (e.node, Some(p)),
+                        _ => return !strict,
+                    },
                 },
                 None => (NONE, w.env_of(core, u, *f)),
             };

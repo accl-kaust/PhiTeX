@@ -66,6 +66,10 @@ pub(crate) struct Static {
     /// The listed contributions are all of them (none to other fields).
     pub contribs_complete: bool,
     pub preds: Option<Arc<[(Field, ValueId)]>>,
+    /// The entries filed pending before its run: its definitions, or
+    /// with a pending set, its predicted fields as global (a guess its
+    /// run confirms or refutes; the set bounds the rest).
+    pub filed: Option<Arc<[(Field, Locality)]>>,
     pub fin: bool,
     /// Its continuations after other nodes replace its last result's by
     /// order (`Operation::after_by_order`).
@@ -1823,11 +1827,13 @@ impl World {
     pub(crate) fn hint_blocker(&self, core: &super::core::Core, id: Id, predict: bool) -> Result<(), Option<Id>> {
         let Some(n) = self.node(id) else { return Ok(()) };
         let Some(fs) = n.text.stat.reads.as_ref() else { return Ok(()) };
+        super::core::prof::count(45);
         let Some((u, pos, fr)) = self.frame_at(id, false) else { return Ok(()) };
         let working = |x: Id| self.node(x).is_some_and(|d| in_work(d.st)).then_some(x);
         // (The frame chain walked once, for every hinted field.)
         let mut chain: Option<Vec<(FrameId, Pos)>> = None;
         for &f in fs.iter() {
+            super::core::prof::count(47);
             if self.loops.get(&f).is_some() {
                 continue;
             }
@@ -1844,6 +1850,7 @@ impl World {
                     self.range_blocker_last(id, f, u, 0, pos)
                 };
                 if let Some(x) = x {
+                    super::core::prof::count(46);
                     return Err(Some(x));
                 }
                 continue;
@@ -1860,12 +1867,20 @@ impl World {
                         .is_some_and(|ps| ps.iter().any(|p| p.0 == f))
                         || (e.val.is_none() && self.read_last(core, id, f)));
                 if busy && !predicted {
+                    super::core::prof::count(46);
+                    if super::core::debug() {
+                        eprintln!("hint-block {id} on {} by {} {:?} val {}", core.values.render(f.0), e.node, self.node(e.node).map(|d| core.op_name(d.text.op)), e.val.is_some());
+                    }
                     return Err(working(e.node));
                 }
             }
             if (!predict || core.wait_pending.contains(&f))
                 && let Some(x) = self.pending_set_wait(core, u, f, reach.map_or(0, |r| r.0), pos, id)
             {
+                super::core::prof::count(46);
+                if super::core::debug() {
+                    eprintln!("hint-block {id} on {} by pending {x} {:?}", core.values.render(f.0), self.node(x).map(|d| core.op_name(d.text.op)));
+                }
                 return Err(working(x));
             }
         }
@@ -1937,8 +1952,9 @@ impl World {
     /// The pending definition set a reader of `f` waits on: the first in
     /// the window, but for a field waited on when predicting
     /// (`Engine::wait_on_pending`), the last before `hi` that likely
-    /// defines it (`Operation::likely_defines`), woken by last when commits
-    /// come in text order (not by each before it in turn).
+    /// defines it (`Operation::likely_defines`, and its predicted
+    /// definitions, if any, name it), woken by last when commits come in
+    /// text order (not by each before it in turn).
     pub(crate) fn pending_set_wait(&self, core: &super::core::Core, u: u32, f: Field, lo: Pos, hi: Pos, me: Id) -> Option<Id> {
         self.pending_set_in(core, u, f, lo, hi, me, core.wait_pending.contains(&f))
     }
@@ -1952,7 +1968,7 @@ impl World {
             self.node(x).is_some_and(|n| {
                 n.text.stat.defs.is_none()
                     && (n.wide || core.may_cover(n.may(), n.text.op, &n.text.args, f))
-                    && (!last || core.likely_defines(n.text.op, &n.text.args, f))
+                    && (!last || (core.likely_defines(n.text.op, &n.text.args, f) && n.text.stat.preds.as_ref().is_none_or(|ps| ps.iter().any(|p| p.0 == f))))
             })
         };
         let un = self.unit_opt(u)?;
