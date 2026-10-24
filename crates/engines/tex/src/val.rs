@@ -1634,12 +1634,13 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
 }
 
 /// A sequence's elements mapped by a function, kept per rope node of
-/// [`SeqMemo::MIN`] elements or more ([`SeqMemo::walk`]): a sequence that
-/// shares most of its rope with the one walked last decodes the nodes it
-/// does not share, and copies the others' elements.
+/// [`SeqMemo::MIN`] elements or more and per element ([`SeqMemo::walk`]):
+/// a sequence that shares most of its rope, or its elements, with the
+/// one walked last maps only what it does not share.
 pub(crate) struct SeqMemo<T> {
     inst: u64,
     nodes: FxHashMap<ValueId, std::sync::Arc<[T]>>,
+    elems: FxHashMap<ValueId, Option<T>>,
 }
 
 impl<T> Default for SeqMemo<T> {
@@ -1647,6 +1648,7 @@ impl<T> Default for SeqMemo<T> {
         SeqMemo {
             inst: 0,
             nodes: FxHashMap::default(),
+            elems: FxHashMap::default(),
         }
     }
 }
@@ -1656,29 +1658,43 @@ impl<T: Clone> SeqMemo<T> {
 
     /// The elements of sequence `s` mapped by `f` (`None`: left out),
     /// in order; `f` must be a function of the element alone.
-    pub(crate) fn walk(&mut self, v: &Values, s: ValueId, f: impl Fn(ValueId) -> Option<T>) -> Vec<T> {
+    pub(crate) fn walk(
+        &mut self,
+        v: &Values,
+        s: ValueId,
+        f: impl Fn(ValueId) -> Option<T>,
+    ) -> Vec<T> {
         if self.inst != v.instance() {
             self.nodes.clear();
+            self.elems.clear();
             self.inst = v.instance();
         }
         let mut out = Vec::with_capacity(usize::try_from(v.seq_len(s)).unwrap_or(0));
-        let mut next = FxHashMap::default();
+        let mut nodes = FxHashMap::default();
+        let mut elems = FxHashMap::default();
         // (a node to walk, or one walked whose elements start at `Some`)
         let mut stack = vec![(s, None)];
         while let Some((x, start)) = stack.pop() {
             if let Some(st) = start {
                 if out.len() - st >= Self::MIN {
-                    next.insert(x, std::sync::Arc::from(&out[st..]));
+                    nodes.insert(x, std::sync::Arc::from(&out[st..]));
                 }
                 continue;
             }
             if let Some(e) = self.nodes.get(&x) {
                 out.extend_from_slice(e);
-                next.insert(x, e.clone());
+                nodes.insert(x, e.clone());
                 continue;
             }
             match v.seq_split(x) {
-                Some(Ok(e)) => out.extend(f(e)),
+                Some(Ok(e)) => {
+                    let t = match self.elems.remove(&e) {
+                        Some(t) => t,
+                        None => f(e),
+                    };
+                    out.extend(t.clone());
+                    elems.insert(e, t);
+                }
                 Some(Err((l, r))) => {
                     stack.push((x, Some(out.len())));
                     stack.push((r, None));
@@ -1687,7 +1703,14 @@ impl<T: Clone> SeqMemo<T> {
                 None => {}
             }
         }
-        self.nodes = next;
+        // (an element under a node kept is not looked at: kept too)
+        if self.elems.len() < 4 * elems.len() + 256 {
+            for (e, t) in self.elems.drain() {
+                elems.entry(e).or_insert(t);
+            }
+        }
+        self.nodes = nodes;
+        self.elems = elems;
         out
     }
 }
