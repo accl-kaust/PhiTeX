@@ -3821,9 +3821,24 @@ impl Merge<'_> {
                 let i = self.next;
                 if !taken[i].swap(true, std::sync::atomic::Ordering::AcqRel) {
                     let (x, resume) = &jobs[i];
-                    job = Some((*x, super::core::lock(resume).take(), self.s.careful(*x), false));
+                    let resume = super::core::lock(resume).take();
                     self.next += 1;
                     left.fetch_sub(1, std::sync::atomic::Ordering::Release);
+                    // (As a worker's result merges, `one_inner`: a node the
+                    // lane's commits ran or left clean is not run; one they
+                    // re-texted runs again on its new text, not resumed on
+                    // the old.)
+                    let (eng, s, rep) = (&mut *self.eng, &mut *self.s, &mut *self.rep);
+                    if !eng.w.node(*x).is_some_and(|n| n.st == St::Dirty) {
+                        rep.merged += 1;
+                        continue;
+                    }
+                    if !matches!((snap.node(*x), eng.w.node(*x)), (Some(a), Some(b)) if std::sync::Arc::ptr_eq(&a.text, &b.text)) {
+                        rep.merged += 1;
+                        eng.enqueue(s, *x);
+                        continue;
+                    }
+                    job = Some((*x, resume, s.careful(*x), false));
                     count(44);
                     break;
                 }
