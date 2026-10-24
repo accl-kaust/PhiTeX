@@ -137,11 +137,6 @@ impl Incr {
             .collect()
     }
 
-    /// The text as last set.
-    pub(crate) fn text(&self) -> &str {
-        &self.text
-    }
-
     /// The chunk holding byte `s` of the text, and `s` in it.
     pub(crate) fn chunk_at(&self, s: usize) -> (&Chunk, usize) {
         let k = self.chunks.partition_point(|c| c.start <= s).max(1) - 1;

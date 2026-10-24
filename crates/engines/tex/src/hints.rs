@@ -3894,17 +3894,6 @@ fn texts() -> &'static TextsCache {
 #[derive(Default)]
 pub(crate) struct Registry {
     by_name: Mutex<FxHashMap<u64, Arc<TextHints>>>,
-    /// The hint of each unit of a file `\\input` reads as units
-    /// (`api::file_units`), by the unit's field name (a string value):
-    /// the analysis of the whole file at the unit's slice.
-    units: Mutex<FxHashMap<u64, Arc<str>>>,
-    /// The record key of each such unit's text (`crate::pkgrec::node_key`),
-    /// by the same name.
-    unit_keys: Mutex<FxHashMap<u64, String>>,
-    /// Each such unit's offset in its file as last cut, by the same
-    /// name: a unit's line carries its place from the unit's start
-    /// (`run::slice_args_in_file`), its file's analysis is at the file's.
-    unit_at: Mutex<FxHashMap<u64, usize>>,
     hints: Mutex<FxHashMap<u64, Arc<Hint>>>,
     /// The engine's answers ([`may_define`]) made ahead on the pool for
     /// nodes about to be pushed ([`prepare`]), by their arguments' key:
@@ -3946,27 +3935,6 @@ pub(crate) fn register_text(reg: &Registry, name: ValueId, t: &Arc<TextHints>) {
     if !bn.get(&name.raw()).is_some_and(|x| Arc::ptr_eq(x, t)) {
         bn.insert(name.raw(), t.clone());
     }
-}
-
-/// Registers the hint of a file's unit (`key`, its field name as a
-/// string value) at byte `at` of its file: a node whose text is that
-/// unit (a `["w", key, ...]` frame) gets it from here, as the unit's
-/// slice of the whole file's analysis.
-pub(crate) fn register_unit(
-    reg: &Registry,
-    key: ValueId,
-    hint: Arc<str>,
-    node_key: String,
-    at: usize,
-) {
-    reg.units.locked().insert(key.raw(), hint);
-    reg.unit_keys.locked().insert(key.raw(), node_key);
-    reg.unit_at.locked().insert(key.raw(), at);
-}
-
-/// The record key of the unit `key`'s text, as registered.
-pub(crate) fn unit_node_key(reg: &Registry, key: ValueId) -> Option<String> {
-    reg.unit_keys.locked().get(&key.raw()).cloned()
 }
 
 /// Withdraws the analysis registered under `name` (a document whose
@@ -4333,12 +4301,7 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
                 // (what the registry holds now: not cached by the
                 // arguments, `hint_of_args`)
                 *registry = true;
-                // (a unit's line: its place from the unit's start, the
-                // unit's in its file as last cut added)
-                let unit = xs
-                    .get(8)
-                    .map_or(0, |&u| reg.unit_at.locked().get(&u.raw()).copied().unwrap_or(0));
-                let at = usize::try_from(int_of(v, o)).unwrap_or(0) + unit;
+                let at = usize::try_from(int_of(v, o)).unwrap_or(0);
                 let t = reg.by_name.locked().get(&name.raw()).cloned();
                 return match t {
                     Some(t) => t.at_until(at, at + text.len()),
@@ -4443,19 +4406,8 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
                 None => Hint::any("expansion tokens with unusual catcodes", &text),
             }
         }
-        "w" => {
-            // (a file's unit: its slice's hint in the whole file's
-            // analysis, registered when the file was cut into units;
-            // what the registry holds now, not cached by the arguments)
-            *registry = true;
-            let h = xs
-                .get(1)
-                .and_then(|&k| reg.units.locked().get(&k.raw()).cloned());
-            match h {
-                Some(h) if frames.len() == 1 => Hint::decode(&h),
-                _ => Hint::any("unit not analysed", ""),
-            }
-        }
+        // (a written file's unit, its text a loop-back's)
+        "w" => Hint::any("unit not analysed", ""),
         _ => Hint::any("unknown frame", ""),
     }
 }

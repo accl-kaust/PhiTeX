@@ -967,17 +967,18 @@ impl Run<'_, '_> {
         // back yet: read back from that text here, its read-back point,
         // `Run::seed_written`)
         self.seed_written(&key)?;
-        // (a document's `\input`: the file as units when it is cut,
-        // `Run::read_units`; else its text)
-        let x = if self.doc {
-            self.read_units(&key)?
-        } else {
-            None
-        };
-        let x = match x {
-            Some(x) => Some(x),
-            None => self.read_file_lazy(&key)?,
-        };
+        // (a document's `\input`: a file the client cut, its text not
+        // read, `Run::read_cut`; else its text)
+        let cut = if self.doc { self.read_cut(&key)? } else { None };
+        if let Some(x) = cut {
+            let path = crate::val::list_of(self.v, x)[0];
+            self.log("open", &str_of(self.v, path))?;
+            self.push_toks([Tok::cs("\u{10FFFE}eof")]);
+            let f = crate::run::FileRest::cut(self.v, self.v.str(&key), path);
+            self.input.push_file(f);
+            return Ok(());
+        }
+        let x = self.read_file_lazy(&key)?;
         let x = match x {
             Some(x) => Some(x),
             None => {

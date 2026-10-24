@@ -314,9 +314,9 @@ pub(crate) struct Line {
     pub starts: bool,
     pub ends: bool,
     /// Where `buf[0]` is in a file: the file's name (a string value),
-    /// byte position, and the unit it is in (`unit:` field's name, its
-    /// position then from the unit's start: the unit's place in the file,
-    /// `upos:`, is not the piece's to read), else `UNIT`; for diagnostics.
+    /// byte position, and the written file's unit it is in (`wunit:`
+    /// field's name, its position then from the unit's start), else
+    /// `UNIT`; for diagnostics.
     pub origin: Option<(phitex_defuse::ValueId, usize, phitex_defuse::ValueId)>,
     /// Its line number in its file (`line`, §304), where the node knows
     /// it: a line of a file read here (its text at hand) or a pseudo

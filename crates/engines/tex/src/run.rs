@@ -197,6 +197,9 @@ pub(crate) struct Ops {
     /// definitions ([`crate::pkgrec::LoadHints::prediction`]).
     pub pkg_loads:
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::pkgrec::LoadHints>>>>,
+    /// The document files the client cut (`api::DocFile`): a run reaching
+    /// one places its slices as its pieces ([`Run::doc_file_regions`]).
+    pub docs: crate::api::DocFiles,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
     /// What the last two finishers running each output routine defined,
@@ -275,6 +278,12 @@ pub(crate) struct FileRest {
     /// reads its lines itself ([`Run::load_written`]).
     pub units: Option<std::sync::Arc<[(ValueId, bool)]>>,
     pub sliceable: bool,
+    /// A document file the client cut as it cuts the document's text
+    /// (`api::DocFile`): its name as `\input` asked for it (a string
+    /// value); its pieces are the cut's slices ([`Run::doc_file_regions`]),
+    /// its text read only when a run reads its lines itself
+    /// ([`Run::load_written`]).
+    pub cut: Option<ValueId>,
 }
 
 impl FileRest {
@@ -298,7 +307,17 @@ impl FileRest {
             line,
             units: None,
             sliceable: false,
+            cut: None,
         }
+    }
+
+    /// A document file the client cut (`api::DocFile`), `\input` as
+    /// `key` (a string value), its text not read.
+    pub(crate) fn cut(v: &Values, key: ValueId, name: ValueId) -> FileRest {
+        let mut f = FileRest::new(v, v.str(""), 0, name);
+        f.sliceable = true;
+        f.cut = Some(key);
+        f
     }
 
     /// A file the job writes, from its order value (`ops::Files`:
@@ -334,8 +353,8 @@ impl FileRest {
     /// Whether two are the same file at the same place
     /// ([`crate::input::Seg::same`]).
     pub(crate) fn same(&self, o: &FileRest) -> bool {
-        (self.id, self.off, self.name, self.pos, self.line, self.sliceable)
-            == (o.id, o.off, o.name, o.pos, o.line, o.sliceable)
+        (self.id, self.off, self.name, self.pos, self.line, self.sliceable, self.cut)
+            == (o.id, o.off, o.name, o.pos, o.line, o.sliceable, o.cut)
             && match (&self.units, &o.units) {
                 (None, None) => true,
                 (Some(a), Some(b)) => a[..] == b[..],
@@ -343,9 +362,11 @@ impl FileRest {
             }
     }
 
-    /// Whether its text is still to be read from its units.
+    /// Whether its text is still to be read: from its units, or a cut
+    /// file's from the file.
     pub(crate) fn lazy(&self) -> bool {
-        self.units.as_ref().is_some_and(|u| !u.is_empty()) && self.str().is_empty()
+        (self.cut.is_some() || self.units.as_ref().is_some_and(|u| !u.is_empty()))
+            && self.str().is_empty()
     }
 
     /// Its text, read from its units ([`Run::load_written`]).
@@ -564,8 +585,8 @@ pub(crate) struct Run<'c, 'a> {
     /// The files this run looked for and did not find (a package load's
     /// record keys on them, `crate::pkgrec`).
     pub fmiss: Vec<String>,
-    /// The files of `fread` this run read as units ([`Run::read_units`]):
-    /// a record keys on their presence, not their text.
+    /// The files of `fread` this run read cut ([`Run::read_cut`]): a
+    /// record keys on their presence, not their text.
     pub uread: Vec<String>,
     /// Inside `pass_text` (§494): a skipped text's tokens are read only
     /// to classify them (conditional, `\fi`/`\else`, or neither).
@@ -2303,12 +2324,12 @@ impl<'c, 'a> Run<'c, 'a> {
         r
     }
 
-    /// File `key` as a document's `\input` reads it: its units' order
-    /// (`units:<key>`, `api::file_units`, `[path, UNIT, order]` as a
-    /// written file's) when the file is cut into units, so this run reads
-    /// no unit's text; `None` (the reader reads the text) for a file the
+    /// File `key` as a document's `\input` reads it: `[path, 1]` when
+    /// the client cut it as it cuts the document's text (`dfile:<key>`,
+    /// `api::DocFile`), so this run reads not its text, its pieces the
+    /// cut's slices; `None` (the reader reads the text) for a file the
     /// job writes or one not cut.
-    pub(crate) fn read_units(&mut self, key: &str) -> R<Option<ValueId>> {
+    pub(crate) fn read_cut(&mut self, key: &str) -> R<Option<ValueId>> {
         let v = self.v;
         if self.get(&format!("wopen:{key}"))?.is_some() {
             return Ok(None);
@@ -2334,42 +2355,24 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::obs_flag!("PHITEX_TMP_FTRACE") {
             eprintln!("TMPF units {key} node {}", self.cx.node().raw());
         }
-        let Some(x) = self.cx.use_env(v.field(&format!("units:{key}")))? else {
+        let Some(x) = self.cx.use_env(v.field(&format!("dfile:{key}")))? else {
             return Ok(None);
         };
-        let Some(&order) = list_of(v, x).get(2) else {
-            return Ok(None);
-        };
-        if list_of(v, order).first().is_none_or(|&s| int_of(v, s) == 0) {
+        if list_of(v, x).get(1).is_none_or(|&s| int_of(v, s) == 0) {
             return Ok(None);
         }
         self.muts += 1;
-        self.fread.push((key.to_owned(), order.raw()));
+        self.fread.push((key.to_owned(), x.raw()));
         self.uread.push(key.to_owned());
         Ok(Some(x))
     }
 
-    /// A unit's text: a written file's (`wunit:`, a loop-back
-    /// `ops::Files` publishes, its text) or a file's cut by the client
-    /// (`unit:`, the environment's `[text]`, `api::file_units`). Never
-    /// its place in the file (`upos:`): a unit moved by an edit before it
-    /// is the same text, its piece not run again.
+    /// A written file's unit's text (`wunit:`, a loop-back `ops::Files`
+    /// publishes).
     pub(crate) fn unit_text(&mut self, key: ValueId) -> R<String> {
         let v = self.v;
         let name = str_of(v, key);
         let f = v.field(&name);
-        if name.starts_with("unit:") {
-            if crate::exec::obs_flag!("PHITEX_TMP_FTRACE") {
-                eprintln!("TMPF unit {name} node {}", self.cx.node().raw());
-            }
-            let Some(x) = self.cx.use_env(f)? else {
-                return Ok(String::new());
-            };
-            return Ok(list_of(v, x)
-                .first()
-                .map(|&t| str_of(v, t))
-                .unwrap_or_default());
-        }
         let x = self.cx.use_field(f)?;
         if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") {
             eprintln!(
@@ -2403,6 +2406,15 @@ impl<'c, 'a> Run<'c, 'a> {
     /// its text from its units ([`FileRest::written`]).
     pub(crate) fn load_written(&mut self, l: crate::input::Level) -> R<()> {
         let v = self.v;
+        // (a cut file read here: its text, as a file not cut is read)
+        if let Some(key) = self.input.file(l).cut {
+            let text = match self.read_file(&str_of(v, key))? {
+                Some(x) => list_of(v, x).get(1).copied().unwrap_or_else(|| v.str("")),
+                None => v.str(""),
+            };
+            self.input.file_mut(l).set_text(v, text);
+            return Ok(());
+        }
         let Some(units) = self.input.file(l).units.clone() else {
             return Ok(());
         };
@@ -2439,8 +2451,7 @@ impl<'c, 'a> Run<'c, 'a> {
             let text = self.unit_text(key)?;
             let name = xs.get(2).copied().unwrap_or(ValueId::UNIT);
             let starts = xs.get(3).is_some_and(|&s| int_of(v, s) != 0);
-            // (its lines' places from the unit's start: the file's offset
-            // is the unit's `upos:`, which a diagnostic adds, `Build::diagnostics`)
+            // (its lines' places from the unit's start)
             let a = slice_args_in_file(v, &text, starts, name, 0, key);
             frames.extend(a.first().map(|&x| list_of(v, x)).unwrap_or_default());
         }
@@ -4461,6 +4472,22 @@ impl<'c, 'a> Run<'c, 'a> {
         // hint, a record's when its text cannot bound it, keyed by the
         // unit's text, is the one its file's cut registered,
         // `api::file_units`, `crate::pkgrec::node_key`)
+        // (a document file the client cut: its slices as the client cut
+        // them, the document's text's way, `api::doc_file_pieces`; the
+        // client edits these pieces where the file changes, this node
+        // one it edits them under)
+        if f.lazy()
+            && let Some(key) = f.cut
+        {
+            let loads = self.ops.pkg_loads.locked().clone();
+            return crate::api::doc_file_pieces(
+                v,
+                &self.ops.docs,
+                &str_of(v, key),
+                self.cx.node(),
+                loads.as_deref(),
+            );
+        }
         if f.lazy()
             && let Some(units) = &f.units
         {
@@ -5089,8 +5116,8 @@ impl<'c, 'a> Run<'c, 'a> {
             return;
         };
         // (the files the job writes and reads back are the document's,
-        // never part of a load's key; one read as units is read for its
-        // units' order, whatever its text)
+        // never part of a load's key; one read cut is read for that it
+        // is, whatever its text)
         let mut files: Vec<(String, u64)> = Vec::new();
         for (n, h) in self.fread.clone() {
             if !self.written_known(&n) {
@@ -5186,6 +5213,10 @@ pub(crate) fn units_frame(v: &Values, f: &FileRest) -> Option<ValueId> {
     if !f.lazy() {
         return None;
     }
+    // (a cut file: `["d", name, key]`, [`FileRest::cut`])
+    if let Some(key) = f.cut {
+        return Some(v.list(vec![v.str("d"), f.name, key]));
+    }
     let units = f.units.as_ref()?;
     let es = units
         .iter()
@@ -5262,6 +5293,12 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
                     out = Some(Seg::File(FileRest::written(v, order, name)));
                 }
             }
+            Some("d") => {
+                // (a cut file, not read yet, [`units_frame`])
+                if let (Some(&name), Some(&key)) = (xs.get(1), xs.get(2)) {
+                    out = Some(Seg::File(FileRest::cut(v, key, name)));
+                }
+            }
             Some("f") => {
                 if let (Some(&id), Some(&o)) = (xs.get(1), xs.get(2)) {
                     let off = usize::try_from(int_of(v, o)).unwrap_or(0);
@@ -5298,8 +5335,9 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
     out
 }
 /// [`slice_args`] for a piece of a file `\input` read, beginning at
-/// byte `at` of the file named `name` (of its unit `unit`, a `unit:`
-/// field's name, where it is one: `at` from the unit's start, the frame
+/// byte `at` of the file named `name` (of its unit `unit`, a written
+/// file's `wunit:` field's name, where it is one: `at` from the unit's
+/// start, the frame
 /// `[.., name, offset, 0, unit]`): every segment carries its origin
 /// `(name, offset, unit)`; the kind is 2 (a document's piece, not the top).
 pub(crate) fn slice_args_in_file(
@@ -6507,7 +6545,7 @@ fn parked_rest(p: &Parked) -> u64 {
             }
             Seg::File(f) => {
                 w(&mut h, 3);
-                (f.id.raw(), f.off, f.name.raw(), f.line, f.sliceable).hash(&mut h);
+                (f.id.raw(), f.off, f.name.raw(), f.line, f.sliceable, f.cut.map(ValueId::raw)).hash(&mut h);
                 f.units.as_ref().map(|u| u.iter().map(|&(k, s)| (k.raw(), s)).collect::<Vec<_>>()).hash(&mut h);
             }
         }

@@ -512,16 +512,22 @@ fn common_ends(old: &[(u64, NodeId, Src)], new: &[(u64, DocNode)]) -> (usize, us
 }
 
 /// The text's nodes and their keys: a document's (`incr`) per chunk of
-/// its units ([`doc_nodes`]), a format's the whole text as one.
+/// its units ([`doc_nodes`]), its analysis registered under its name
+/// (`file`: a document file's, else the document's), a format's the
+/// whole text as one.
 fn slice_keys(
     reg: &crate::hints::Registry,
     v: &Values,
     text: &str,
     incr: Option<&Incr>,
+    file: Option<ValueId>,
 ) -> Vec<(u64, DocNode)> {
     match incr {
         Some(inc) => {
-            register_doc(reg, v, inc);
+            match file {
+                Some(name) => register_file(reg, name, inc),
+                None => register_doc(reg, v, inc),
+            }
             doc_nodes(text, inc)
         }
         None if text.is_empty() => Vec::new(),
@@ -529,10 +535,143 @@ fn slice_keys(
     }
 }
 
-/// Edits the document's nodes `nodes` to the text `text`: the slices
-/// both texts share at the start and the end stay, those between are
-/// replaced, removed or inserted. The nodes replaced, inserted or
-/// removed (0: a text whose slices are the nodes' already).
+/// A document file's analysis registered under its name: its chunks'
+/// joined (a node made from part of a slice's line is hinted from it,
+/// by the file's offsets).
+fn register_file(reg: &crate::hints::Registry, name: ValueId, inc: &Incr) {
+    let t = match inc.chunks.as_slice() {
+        [c] if c.start == 0 => c.th.clone(),
+        cs => {
+            let parts: Vec<(usize, &crate::hints::TextHints)> =
+                cs.iter().map(|c| (c.start, &*c.th)).collect();
+            Arc::new(crate::hints::TextHints::joined(&parts))
+        }
+    };
+    crate::hints::register_text(reg, name, &t);
+}
+
+/// A text cut again (the document's, or a document file's, `file`): its
+/// units spliced where it changed (`range`, as [`Incr::set_text_edit`]
+/// takes it; none: anywhere), the chunks that reaches analysed again;
+/// its slices and their keys ([`slice_keys`]).
+fn cut_text(
+    reg: &crate::hints::Registry,
+    v: &Values,
+    text: &str,
+    range: Option<(usize, usize, usize)>,
+    incr: Option<&mut Incr>,
+    file: Option<ValueId>,
+) -> Vec<(u64, DocNode)> {
+    match incr {
+        Some(inc) => {
+            match range {
+                Some(r) => inc.set_text_edit(text, r),
+                None => inc.set_text(text),
+            }
+            crate::timeline::lap("engine: the units spliced and walked");
+            slice_keys(reg, v, text, Some(inc), file)
+        }
+        None => slice_keys(reg, v, text, None, file),
+    }
+}
+
+/// Where an edit puts the nodes it inserts ([`apply_slices`]).
+#[derive(Clone, Copy)]
+enum Placing {
+    /// The document's: top-level nodes, before the one given (the
+    /// writer, [`Build::end`]) where none precedes.
+    Top(NodeId),
+    /// A document file's pieces: placed beside the others, as the run
+    /// that placed those placed them (`Engine::insert_placed`).
+    Placed,
+}
+
+/// What [`apply_slices`] did: the nodes kept, replaced, removed and
+/// inserted.
+#[derive(Clone, Copy, Default)]
+struct Applied {
+    kept: usize,
+    replaced: usize,
+    removed: usize,
+    inserted: usize,
+}
+
+impl Applied {
+    /// The nodes it changed.
+    fn changed(self) -> usize {
+        self.replaced + self.removed + self.inserted
+    }
+}
+
+/// Edits the nodes `nodes_now` (each with its key) to the slices `new`:
+/// the slices both share at the start and the end stay, those between
+/// are replaced, removed or inserted (their arguments `args_of`'s).
+/// The document's text and a document file's are edited so alike, the
+/// file's pieces under each node that placed them ([`Build::stage_file`]).
+/// `None`: a file's pieces with none to place new ones beside.
+fn apply_slices(
+    eng: &mut Engine,
+    exec: OpId,
+    at: Placing,
+    nodes_now: &mut Vec<(u64, NodeId, Src)>,
+    new: &[(u64, DocNode)],
+    args_of: &dyn Fn(&Engine, usize) -> Vec<ValueId>,
+) -> Option<Applied> {
+    let old = &*nodes_now;
+    if old.len() == new.len() && old.iter().zip(new).all(|(o, n)| o.0 == n.0) {
+        return Some(Applied {
+            kept: old.len(),
+            ..Applied::default()
+        });
+    }
+    if old.is_empty() && matches!(at, Placing::Placed) {
+        return None;
+    }
+    let (a, b) = common_ends(old, new);
+    let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
+    let common = old_mid.min(new_mid);
+    crate::timeline::lap("engine: the slice-key diff");
+    for k in common..old_mid {
+        match at {
+            Placing::Top(_) => eng.remove(old[a + k].1),
+            Placing::Placed => eng.remove_placed(old[a + k].1),
+        }
+    }
+    let mut nodes: Vec<(u64, NodeId, Src)> = Vec::with_capacity(new.len());
+    for i in 0..new.len() {
+        let n = if i < a || i >= a + new_mid {
+            let oi = if i < a { i } else { i - new_mid + old_mid };
+            old[oi].1
+        } else if i - a < common {
+            let n = old[i].1;
+            let args = args_of(eng, i);
+            eng.replace(n, exec, args);
+            n
+        } else {
+            let args = args_of(eng, i);
+            let next = old.get(a + old_mid).map(|x| x.1);
+            match (at, nodes.last()) {
+                (Placing::Top(_), Some(&(_, p, _))) => eng.insert_after(p, exec, args),
+                (Placing::Top(end), None) => eng.insert_before(next.unwrap_or(end), exec, args),
+                (Placing::Placed, Some(&(_, p, _))) => eng.insert_placed(p, false, exec, args),
+                (Placing::Placed, None) => eng.insert_placed(next?, true, exec, args),
+            }
+        };
+        nodes.push((new[i].0, n, Src::of(&new[i].1)));
+    }
+    *nodes_now = nodes;
+    crate::timeline::lap("engine: replace/insert/remove, the node list made");
+    Some(Applied {
+        kept: a + b,
+        replaced: common,
+        removed: old_mid - common,
+        inserted: new_mid - common,
+    })
+}
+
+/// Edits the document's nodes `nodes` to the text `text` ([`cut_text`],
+/// [`apply_slices`]). The nodes replaced, inserted or removed (0: a text
+/// whose slices are the nodes' already).
 // one call site (Absorb::absorb), which passes its fields apart
 #[allow(clippy::too_many_arguments)]
 fn apply_text(
@@ -549,73 +688,36 @@ fn apply_text(
     let t_all = std::time::Instant::now();
     let text = as_file(text);
     crate::timeline::lap("engine: the text as a file");
-    // (the units spliced, the chunks whose text or incoming definitions
-    // changed analysed again; the range that changed where it is known
-    // and the text is the file as it is)
-    if let Some(inc) = incr.as_deref_mut() {
-        match range.filter(|_| matches!(text, std::borrow::Cow::Borrowed(_))) {
-            Some(r) => inc.set_text_edit(&text, r),
-            None => inc.set_text(&text),
-        }
-    }
-    let incr = incr.as_deref();
-    let t_slices = t_all.elapsed();
-    crate::timeline::lap("engine: the units spliced and walked");
-    let new = slice_keys(reg, eng.values(), &text, incr);
+    // (the range that changed where it is known and the text is the file
+    // as it is)
+    let range = range.filter(|_| matches!(text, std::borrow::Cow::Borrowed(_)));
+    let new = cut_text(reg, eng.values(), &text, range, incr.as_deref_mut(), None);
     crate::timeline::lap("engine: the slices and their keys");
     let t_hints = t_all.elapsed();
-    let old = &*nodes_now;
-    if old.len() == new.len() && old.iter().zip(&new).all(|(o, n)| o.0 == n.0) {
+    let incr = incr.as_deref();
+    let old_len = nodes_now.len();
+    let args_of = |eng: &Engine, k: usize| node_args(eng.values(), &text, incr, &new[k].1, loads, None);
+    let t_diff = t_all.elapsed();
+    let Some(d) = apply_slices(eng, exec, Placing::Top(end), nodes_now, &new, &args_of) else {
+        return 0;
+    };
+    if d.changed() == 0 {
         return 0;
     }
-    let args_of = |eng: &Engine, k: usize| node_args(eng.values(), &text, incr, &new[k].1, loads);
-    let (a, b) = common_ends(old, &new);
-    let old_len = old.len();
-    let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
-    let common = old_mid.min(new_mid);
-    crate::timeline::lap("engine: the slice-key diff");
-    let t_diff = t_all.elapsed();
-    for k in common..old_mid {
-        eng.remove(old[a + k].1);
-    }
-    let mut nodes: Vec<(u64, NodeId, Src)> = Vec::with_capacity(new.len());
-    for i in 0..new.len() {
-        let n = if i < a || i >= a + new_mid {
-            let oi = if i < a { i } else { i - new_mid + old_mid };
-            old[oi].1
-        } else if i - a < common {
-            let n = old[i].1;
-            let args = args_of(eng, i);
-            eng.replace(n, exec, args);
-            n
-        } else {
-            let args = args_of(eng, i);
-
-            if let Some(&(_, p, _)) = nodes.last() {
-                eng.insert_after(p, exec, args)
-            } else {
-                let first = old.get(a + old_mid).map_or(end, |x| x.1);
-                eng.insert_before(first, exec, args)
-            }
-        };
-        nodes.push((new[i].0, n, Src::of(&new[i].1)));
-    }
-    *nodes_now = nodes;
-    crate::timeline::lap("engine: replace/insert/remove, the node list made");
     edit_apply_note(
         t_all,
-        [t_slices, t_hints, t_diff],
+        [t_hints, t_hints, t_diff],
         [
             old_len,
             new.len(),
-            a + b,
-            common,
-            old_mid - common,
-            new_mid - common,
+            d.kept,
+            d.replaced,
+            d.removed,
+            d.inserted,
             text.len(),
         ],
     );
-    old_mid.max(new_mid)
+    d.changed()
 }
 
 /// How a build's loop-back rounds run (the files the job writes and
@@ -2157,12 +2259,6 @@ struct Graph {
     /// (name, field, value, hash), merged into `files`/`absent`/`reads`
     /// before the environment is set again (`Graph::provide`).
     provided: Arc<std::sync::Mutex<Vec<Provided>>>,
-    /// The fields of the files the provider cut into units
-    /// ([`file_units`]), merged into `files` with `provided`.
-    provided_units: Arc<std::sync::Mutex<Vec<ProvidedUnit>>>,
-    /// The files read as units, each one's units and analyses
-    /// ([`FileIncrs`]).
-    file_incr: FileIncrs,
     /// The package loads' records and hints (`crate::pkgrec`), once the
     /// build has set them.
     loads: Option<Arc<crate::pkgrec::LoadHints>>,
@@ -2174,146 +2270,145 @@ impl Graph {}
 /// (`None`: absent), and the finder's hash.
 type Provided = (String, Field, Option<ValueId>, u64);
 
-/// A file the provider cut into units ([`file_units`]): its name, the
-/// finder's hash, and its fields with their values (none: the file is
-/// absent).
-type ProvidedUnit = (String, u64, Vec<(Field, ValueId)>);
-
-/// The files read as units, by name: each one's units and its chunks'
-/// analyses ([`Incr`]), made at the file's first cut ([`file_units`]);
-/// a later cut analyses again the chunks its change reached only, as
-/// the document's text is.
-type FileIncrs = Arc<std::sync::Mutex<FxHashMap<String, Arc<std::sync::Mutex<Incr>>>>>;
-
-/// The files the provider cut into units, by name: each cut once.
-type UnitCuts = std::sync::Mutex<FxHashMap<String, Arc<OnceLock<FxHashMap<u64, ValueId>>>>>;
-
-/// The file a units field names: `units:<name>` (the order),
-/// `unit:<name>:<id>` (one unit), `upos:<name>:<id>` (its place) or
-/// `fsize:<name>` (its size).
-fn units_file(field: &str) -> Option<&str> {
-    if let Some(n) = field
-        .strip_prefix("units:")
-        .or_else(|| field.strip_prefix("fsize:"))
-    {
-        return Some(n);
-    }
-    field
-        .strip_prefix("unit:")
-        .or_else(|| field.strip_prefix("upos:"))?
-        .rsplit_once(':')
-        .map(|(n, _)| n)
+/// A document file a document's `\input` reads, cut as the document's
+/// text is: its slices, by the same analysis and keys ([`cut_text`]),
+/// are the pieces each run reaching the file places, their texts their
+/// arguments ([`doc_file_pieces`], [`node_args`]); an edit of the file
+/// edits those pieces as an edit of the document edits its nodes
+/// ([`apply_slices`], [`Build::stage_file`]). The runs read
+/// `dfile:<name>` = `[path, 1]` ([`cut_doc_file`]), never its text, so
+/// an edit inside it runs its pieces it changed, not their reader.
+pub(crate) struct DocFile {
+    path: String,
+    text: String,
+    incr: Incr,
+    /// Its slices and their keys.
+    slices: Vec<(u64, DocNode)>,
+    /// The nodes whose runs placed its pieces ([`doc_file_pieces`]).
+    readers: Vec<NodeId>,
+    /// The pieces an edit kept where its text moved, by node: their
+    /// arguments' frames and how far the text moved since they were
+    /// made (a kept piece keeps its text and the places in it, as a
+    /// document's node does, [`apply_slices`]).
+    shifts: FxHashMap<u64, (ValueId, i64)>,
 }
 
-/// A unit's place field (`upos:<name>:<id>`) by its field's name
-/// (`unit:<name>:<id>`).
-fn upos_field(key: &str) -> Option<String> {
-    key.strip_prefix("unit:").map(|k| format!("upos:{k}"))
-}
+/// The build's cut document files, by name ([`DocFile`]).
+pub(crate) type DocFiles = Arc<std::sync::Mutex<FxHashMap<String, Arc<std::sync::Mutex<DocFile>>>>>;
 
-/// A file a document's `\input` reads, as units (spec-redesign §1
-/// `unit:<file>:<id>`): the file cut by the same analysis a document's
-/// text is cut by, each slice a field of the environment,
-/// `unit:<name>:<id>` = `[text]`, `<id>` its text's hash and its
-/// occurrence among equal units (as a written file's, `ops::units_of`),
-/// so a unit an edit moves or leaves is the same field with the same
-/// value; its place, `upos:<name>:<id>` = the offset, a field of its own
-/// that no piece reads (a diagnostic's place adds it,
-/// `Build::diagnostics`); and the order `units:<name>` =
-/// `[path, UNIT, [sliceable, [[unit field, starts], ...]]]` (a written
-/// file's shape, `ops::Files`), all that changes where units come or
-/// go. The reader of the file reads the order only, so an edit inside a
-/// unit re-runs the unit's piece and the order's reader, not the units
-/// after it; each unit's hint is registered by its field
-/// (`hints::register_unit`). A file that is not read as a document's
-/// text (`inputs::document_file`) is not cut: its order is empty and
-/// not sliceable, and the reader reads its text. The file's analysis
-/// is its [`Incr`]'s (`incrs`): a text that changed in one range has the
-/// chunks that range reaches analysed again, the others kept.
-// (its callers pass the build's tables apart: the provider's are its
-// closure's)
-#[allow(clippy::too_many_arguments)]
-fn file_units(
+/// The provider's answers for cut files in an evaluation, by name: each
+/// file cut once.
+type DocCuts = std::sync::Mutex<FxHashMap<String, Arc<OnceLock<Option<ValueId>>>>>;
+
+/// Document file `name` (at `path`, its `bytes`) cut ([`DocFile`]):
+/// `dfile:<name>`'s value, `[path, 1]`; a file that is not a document's
+/// text (`inputs::document_file`) is not cut, `[path, 0]`, its readers
+/// read its text.
+fn cut_doc_file(
     v: &Values,
     reg: &crate::hints::Registry,
     defs: &Defs,
-    loads: Option<&crate::pkgrec::LoadHints>,
-    incrs: &FileIncrs,
+    docs: &DocFiles,
     name: &str,
     path: &str,
     bytes: &[u8],
-) -> Vec<(Field, ValueId)> {
+) -> ValueId {
     let text = latin1(bytes);
     let pv = v.str(path);
-    let order = |sliceable: bool, units: Vec<ValueId>| {
-        v.list(vec![
-            pv,
-            ValueId::UNIT,
-            v.list(vec![v.int(i64::from(sliceable)), v.list(units)]),
-        ])
-    };
-    let uf = v.field(&format!("units:{name}"));
     if !crate::inputs::document_file(path, &text) {
-        incrs.locked().remove(name);
-        return vec![(uf, order(false, Vec::new()))];
+        docs.locked().remove(name);
+        return v.list(vec![pv, v.int(0)]);
     }
-    let inc = incrs
-        .locked()
-        .entry(name.to_owned())
-        .or_insert_with(|| Arc::new(std::sync::Mutex::new(Incr::new(defs.clone()))))
-        .clone();
-    let t = {
-        let mut inc = inc.locked();
-        // (the range the text changed in since the file's last cut, from
-        // the ends the texts share: a first cut analyses it whole)
-        let (p, s) = byte_ends(inc.text().as_bytes(), text.as_bytes());
-        let old = inc.text().len();
-        inc.set_text_edit(&text, (p, old - s, text.len() - s));
-        // (its chunks' analyses as the whole file's: a node made from
-        // part of a unit's line is hinted from it, by the file's offsets)
-        match inc.chunks.as_slice() {
-            [c] if c.start == 0 => c.th.clone(),
-            cs => {
-                let parts: Vec<(usize, &crate::hints::TextHints)> =
-                    cs.iter().map(|c| (c.start, &*c.th)).collect();
-                Arc::new(crate::hints::TextHints::joined(&parts))
-            }
-        }
+    let mut incr = Incr::new(defs.clone());
+    let slices = cut_text(reg, v, &text, None, Some(&mut incr), Some(pv));
+    let df = DocFile {
+        path: path.to_owned(),
+        text,
+        incr,
+        slices,
+        readers: Vec::new(),
+        shifts: FxHashMap::default(),
     };
-    crate::hints::register_text(reg, pv, &t);
-    let mut out = Vec::with_capacity(2 * t.slices.len() + 2);
-    let mut units = Vec::with_capacity(t.slices.len());
-    let mut seen: FxHashMap<u64, u32> = FxHashMap::default();
-    for &(s, e) in &t.slices {
-        let Some(u) = text.get(s..e) else { continue };
-        let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-        let h = phitex_defuse::hash_bytes(0x756e_6974_0000_0001, u.as_bytes());
-        let n = seen.entry(h).or_insert(0);
-        let id = format!("{name}:{h:016x}.{n}");
-        *n += 1;
-        let key = v.str(&format!("unit:{id}"));
-        // (a unit whose text cannot bound what it defines: its record's
-        // hint when it has one, keyed by its text, `crate::pkgrec`)
-        let own = crate::hints::slice_hint_of(&t, s);
-        let hint = loads
-            .filter(|_| crate::pkgrec::unbounded(&own))
-            .and_then(|l| l.hint_for(v, u))
-            .map_or(own, Arc::from);
-        crate::hints::register_unit(reg, key, hint, crate::pkgrec::node_key(u), s);
-        out.push((v.field(&format!("unit:{id}")), v.list(vec![v.str(u)])));
-        out.push((
-            v.field(&format!("upos:{id}")),
-            v.int(i64::try_from(s).unwrap_or(0)),
-        ));
-        units.push(v.list(vec![key, v.int(i64::from(starts))]));
+    docs.locked()
+        .insert(name.to_owned(), Arc::new(std::sync::Mutex::new(df)));
+    v.list(vec![pv, v.int(1)])
+}
+
+/// The pieces of cut document file `key` a run reaching it places
+/// (`Run::doc_file_regions`): its slices with the arguments the
+/// document's nodes get ([`node_args`]); the run's node `node` is kept
+/// among the file's readers, whose pieces an edit of the file edits
+/// ([`Build::stage_file`]).
+pub(crate) fn doc_file_pieces(
+    v: &Values,
+    docs: &DocFiles,
+    key: &str,
+    node: NodeId,
+    loads: Option<&crate::pkgrec::LoadHints>,
+) -> Vec<Vec<ValueId>> {
+    let Some(df) = docs.locked().get(key).cloned() else {
+        return Vec::new();
+    };
+    let mut df = df.locked();
+    if !df.readers.contains(&node) {
+        df.readers.push(node);
     }
-    out.insert(0, (uf, order(true, units)));
-    // (its size, `\pdffilesize`'s answer, read without its text)
-    out.push((
-        v.field(&format!("fsize:{name}")),
-        v.int(i64::try_from(bytes.len()).unwrap_or(i64::MAX)),
-    ));
-    out
+    let name = v.str(&df.path);
+    df.slices
+        .iter()
+        .map(|(_, n)| node_args(v, &df.text, Some(&df.incr), n, loads, Some(name)))
+        .collect()
+}
+
+/// The pieces of the cut file named `name` (its path, a string value)
+/// that node `r` placed, in order ([`doc_file_pieces`]).
+fn pieces_of(eng: &Engine, r: NodeId, name: ValueId) -> Vec<NodeId> {
+    let v = eng.values();
+    eng.children(r)
+        .into_iter()
+        .filter(|&k| {
+            eng.node_info(k).is_some_and(|i| {
+                i.args.len() == 3
+                    && i.args.first().is_some_and(|&fs| {
+                        list_of(v, fs).first().is_some_and(|&f| {
+                            let xs = list_of(v, f);
+                            xs.first().is_some_and(|&t| str_of(v, t) == "s") && xs.get(5) == Some(&name)
+                        })
+                    })
+            })
+        })
+        .collect()
+}
+
+/// The first place a node's frames carry (a slice's start where it was
+/// made).
+fn frames_start(v: &Values, fs: ValueId) -> Option<i64> {
+    let f = *list_of(v, fs).first()?;
+    let xs = list_of(v, f);
+    (xs.first().is_some_and(|&t| str_of(v, t) == "s"))
+        .then(|| xs.get(6).map(|&p| int_of(v, p)))
+        .flatten()
+}
+
+/// How far an edit of its file moved the text of node `n` or of the
+/// piece it is under ([`DocFile::shifts`]): 0 where none did.
+fn piece_shift(eng: &Engine, shifts: &FxHashMap<u64, (ValueId, i64)>, n: NodeId) -> i64 {
+    if shifts.is_empty() {
+        return 0;
+    }
+    let mut n = n;
+    loop {
+        let Some(i) = eng.node_info(n) else { return 0 };
+        if let Some(&(fs, d)) = shifts.get(&n.raw())
+            && i.args.first() == Some(&fs)
+        {
+            return d;
+        }
+        match i.parent {
+            Some(p) => n = p,
+            None => return 0,
+        }
+    }
 }
 
 /// How many siblings after a pending claimer with no reach of its own
@@ -2400,6 +2495,7 @@ impl Graph {
             pkg_log: Arc::new(Mutex::new(Vec::new())),
             rec_ran: Arc::default(),
             pkg_loads: Arc::new(Mutex::new(None)),
+            docs: Arc::default(),
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),
@@ -2447,8 +2543,6 @@ impl Graph {
             eval_warnings: Vec::new(),
             tool_finder: None,
             provided: Arc::default(),
-            provided_units: Arc::default(),
-            file_incr: Arc::default(),
             loads: None,
         }
     }
@@ -2607,19 +2701,32 @@ impl Graph {
         let answered: std::sync::Mutex<
             FxHashMap<String, Arc<std::sync::OnceLock<Option<ValueId>>>>,
         > = std::sync::Mutex::new(FxHashMap::default());
-        // (a file read as units, [`file_units`]: cut once, each of its
-        // fields answered from the cut)
-        let cut: UnitCuts = std::sync::Mutex::new(FxHashMap::default());
-        let units_log = Arc::clone(&self.provided_units);
+        // (a document file cut, [`DocFile`]: cut once, `dfile:` answered
+        // from the cut)
+        let cut: DocCuts = std::sync::Mutex::new(FxHashMap::default());
+        let cut_log = Arc::clone(&self.provided);
         let (reg, defs) = (Arc::clone(&self.ops.hints), Arc::clone(&self.ops.defs));
-        let loads = Arc::clone(&self.ops.pkg_loads);
-        let incrs = Arc::clone(&self.file_incr);
+        let docs = Arc::clone(&self.ops.docs);
         let finder_u = Arc::clone(&finder);
         let finder_t = Arc::clone(&finder);
         let tools = self.tool_finder.clone();
         self.eng.set_env_provider(Box::new(move |v, f| {
             let field = v.as_str(f.0)?;
-            if let Some(name) = units_file(&field) {
+            // (a cut file's size, `\pdffilesize`'s answer without its
+            // text)
+            if let Some(name) = field.strip_prefix("fsize:") {
+                if written.iter().any(|w| w == name) {
+                    return None;
+                }
+                let found = finder_u(name);
+                let hash = file_hash(found.as_ref());
+                let val = found.map(|(_, b)| v.int(i64::try_from(b.len()).unwrap_or(i64::MAX)));
+                if let Ok(mut l) = cut_log.lock() {
+                    l.push((name.to_owned(), f, val, hash));
+                }
+                return Some(val);
+            }
+            if let Some(name) = field.strip_prefix("dfile:") {
                 if written.iter().any(|w| w == name) {
                     return None;
                 }
@@ -2628,23 +2735,18 @@ impl Graph {
                     .entry(name.to_owned())
                     .or_default()
                     .clone();
-                let m = cell.get_or_init(|| {
+                return Some(*cell.get_or_init(|| {
                     let found = finder_u(name);
                     let hash = file_hash(found.as_ref());
                     let defs = defs.locked().clone();
-                    let loads = loads.locked().clone();
-                    let es = found
-                        .map(|(path, bytes)| {
-                            file_units(v, &reg, &defs, loads.as_deref(), &incrs, name, &path, &bytes)
-                        })
-                        .unwrap_or_default();
-                    let m = es.iter().map(|&(g, x)| (g.0.raw(), x)).collect();
-                    if let Ok(mut l) = units_log.lock() {
-                        l.push((name.to_owned(), hash, es));
+                    let val = found.map(|(path, bytes)| {
+                        cut_doc_file(v, &reg, &defs, &docs, name, &path, &bytes)
+                    });
+                    if let Ok(mut l) = cut_log.lock() {
+                        l.push((name.to_owned(), f, val, hash));
                     }
-                    m
-                });
-                return Some(m.get(&f.0.raw()).copied());
+                    val
+                }));
             }
             // (a tool's support file, `tfile:<search>:<name>`: the
             // client's lookup for tools, else its finder by name)
@@ -2705,7 +2807,6 @@ impl Graph {
     /// Merges what the provider answered into the supplied files, so the
     /// next environment set is the whole environment.
     fn absorb_provided(&mut self) {
-        self.absorb_units();
         let got = self
             .provided
             .lock()
@@ -2719,8 +2820,9 @@ impl Graph {
                 continue;
             }
             // (a tool's support file: in the environment, not among the
-            // names the finder is asked for again)
-            if !name.starts_with("tfile:") {
+            // names the finder is asked for again; a file read both cut
+            // and whole, [`DocFile`], listed once)
+            if !name.starts_with("tfile:") && !self.reads.iter().any(|(n, _)| *n == name) {
                 self.queries.push((name.clone(), val.is_some()));
                 self.reads.push((name, hash));
             }
@@ -2731,64 +2833,8 @@ impl Graph {
         }
     }
 
-    /// Merges the units the provider cut ([`file_units`]) into the
-    /// supplied files (a file's, absent: into `absent`).
-    fn absorb_units(&mut self) {
-        let got = self
-            .provided_units
-            .lock()
-            .map(|mut l| std::mem::take(&mut *l))
-            .unwrap_or_default();
-        if got.is_empty() {
-            return;
-        }
-        let have: phitex_defuse::FxHashSet<Field> = self
-            .files
-            .iter()
-            .map(|&(g, _)| g)
-            .chain(self.absent.iter().copied())
-            .collect();
-        for (name, hash, es) in got {
-            // (a file read as units is a file the build read: listed, its
-            // hash kept, as [`Graph::supply`] keeps a file's)
-            if !self.reads.iter().any(|(n, _)| *n == name) {
-                self.queries.push((name.clone(), !es.is_empty()));
-                self.reads.push((name.clone(), hash));
-            }
-            if es.is_empty() {
-                let uf = self.eng.values().field(&format!("units:{name}"));
-                if !have.contains(&uf) {
-                    self.absent.push(uf);
-                }
-            }
-            for (f, x) in es {
-                if !have.contains(&f) {
-                    self.files.push((f, x));
-                }
-            }
-        }
-    }
-
-    /// A unit's text, as the environment holds it (`unit:<file>:<id>`,
-    /// [`file_units`]).
-    fn unit_value(&self, key: &str) -> Option<String> {
-        let v = self.eng.values();
-        let f = v.field(key);
-        let &(_, x) = self.files.iter().find(|&&(g, _)| g == f)?;
-        Some(str_of(v, *list_of(v, x).first()?))
-    }
-
-    /// A unit's offset in its file (`upos:<file>:<id>` of the unit
-    /// `key`, [`file_units`]).
-    fn unit_pos(&self, key: &str) -> Option<usize> {
-        let v = self.eng.values();
-        let f = v.field(&upos_field(key)?);
-        let &(_, x) = self.files.iter().find(|&&(g, _)| g == f)?;
-        usize::try_from(int_of(v, x)).ok()
-    }
-
-    /// A file's whole text as the environment holds it: its `file:` value
-    /// (by its name or its path), else its units joined in order.
+    /// A file's whole text as the build holds it: its `file:` value (by
+    /// its name or its path), else a cut file's ([`DocFile`]).
     fn file_text(&self, name: &str) -> Option<Arc<str>> {
         let v = self.eng.values();
         for &(g, x) in &self.files {
@@ -2801,34 +2847,19 @@ impl Graph {
                 return Some(str_of(v, t).into());
             }
         }
-        for &(g, x) in &self.files {
-            let fname = field_name(v, g);
-            let xs = list_of(v, x);
-            let Some(n) = fname.strip_prefix("units:") else {
-                continue;
-            };
-            if n != name && xs.first().is_none_or(|&p| str_of(v, p) != name) {
-                continue;
-            }
-            let order = xs.get(2).map(|&o| list_of(v, o)).unwrap_or_default();
-            let units = order.get(1).map(|&l| list_of(v, l)).unwrap_or_default();
-            let mut text = String::new();
-            for u in units {
-                let key = list_of(v, u).first().map(|&k| str_of(v, k))?;
-                text.push_str(&self.unit_value(&key)?);
-            }
-            return Some(text.into());
-        }
-        None
+        let docs = self.ops.docs.locked();
+        docs.iter()
+            .find(|(n, d)| *n == name || d.locked().path == name)
+            .map(|(_, d)| d.locked().text.as_str().into())
     }
 
-    /// A file's units ([`file_units`]) dropped from the environment:
-    /// the file the job writes, or one cut again.
-    fn drop_units(&mut self, name: &str) {
-        let v = self.eng.values();
-        let own = |f: Field| units_file(&field_name(v, f)).is_some_and(|n| n == name);
-        self.files.retain(|&(g, _)| !own(g));
-        self.absent.retain(|&g| !own(g));
+    /// A cut file ([`DocFile`]) dropped: the file the job writes, read
+    /// back.
+    fn drop_cut(&mut self, name: &str) {
+        let d = self.eng.values().field(&format!("dfile:{name}"));
+        self.files.retain(|&(g, _)| g != d);
+        self.absent.retain(|&g| g != d);
+        self.ops.docs.locked().remove(name);
     }
 
     /// The names of the files the job opened for writing.
@@ -2904,7 +2935,7 @@ impl Graph {
         self.files.retain(|(g, _)| *g != f);
         self.absent.retain(|g| *g != f);
         self.reads.retain(|(n, _)| n != name);
-        self.drop_units(name);
+        self.drop_cut(name);
         // (with `fixpoint`, `file:<name>` given a value of its own, the
         // empty list, which a run reads as no file: a run that read it
         // absent before the `\openout` declared the loop-back, LaTeX's
@@ -2993,7 +3024,12 @@ impl Graph {
         absent.dedup();
         crate::timeline::lap("env: merged with the job's");
         if env != self.env_pushed {
-            self.eng.set_environment(env.iter().copied());
+            // (a few fields changed, an edit's file: those alone, not
+            // the whole environment again)
+            match env_changes(&self.env_pushed, &env) {
+                Some(cs) if !self.env_pushed.is_empty() => self.eng.update_environment(&cs),
+                _ => self.eng.set_environment(env.iter().copied()),
+            }
             crate::timeline::lap("env: set in the engine");
             self.env_calls += 1;
             self.env_pushed = env;
@@ -3455,23 +3491,23 @@ impl Graph {
                     .filter_map(|&(_, f)| field_name(v, f).strip_prefix("file:").map(str::to_owned))
                     .collect()
             };
-            // (a file asked for as units, [`file_units`], with no
+            // (a document file asked for cut, [`DocFile`], with no
             // provider: cut here)
-            let asked_units: Vec<String> = {
+            let asked_cut: Vec<String> = {
                 let v = self.eng.values();
                 let mut ns: Vec<String> = r
                     .env_waits
                     .iter()
-                    .filter_map(|&(_, f)| units_file(&field_name(v, f)).map(str::to_owned))
+                    .filter_map(|&(_, f)| field_name(v, f).strip_prefix("dfile:").map(str::to_owned))
                     .collect();
                 ns.sort_unstable();
                 ns.dedup();
                 ns
             };
-            for name in asked_units {
-                let uf = self.eng.values().field(&format!("units:{name}"));
-                if self.files.iter().any(|&(g, _)| g == uf)
-                    || self.absent.contains(&uf)
+            for name in asked_cut {
+                let d = self.eng.values().field(&format!("dfile:{name}"));
+                if self.files.iter().any(|&(g, _)| g == d)
+                    || self.absent.contains(&d)
                     || self.written.contains(&name)
                 {
                     continue;
@@ -3484,23 +3520,21 @@ impl Graph {
                 }
                 match found {
                     Some((path, bytes)) => {
-                        let loads = self.ops.pkg_loads.locked().clone();
-                        let es = file_units(
+                        let x = cut_doc_file(
                             self.eng.values(),
                             &self.ops.hints,
                             &defs,
-                            loads.as_deref(),
-                            &self.file_incr,
+                            &self.ops.docs,
                             &name,
                             &path,
                             &bytes,
                         );
-                        self.files.extend(es);
+                        self.files.push((d, x));
                     }
-                    None => self.absent.push(uf),
+                    None => self.absent.push(d),
                 }
                 asked = true;
-                ask_why(&format!("units supplied: {name}"));
+                ask_why(&format!("cut file supplied: {name}"));
             }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 eprintln!("  waits: {} {:?}", r.env_stalled, asked_names);
@@ -3598,22 +3632,11 @@ impl Graph {
         mut incr: Option<&mut Incr>,
     ) -> Vec<(u64, NodeId, Src)> {
         let t0 = std::time::Instant::now();
-        if let Some(inc) = incr.as_deref_mut() {
-            inc.set_text(text);
-        }
-        crate::timeline::lap("hints: the units and the hint pass");
-        let incr = incr.as_deref();
         // a format's text is one node: a sequential run over the whole
         // file, its `\input`s inline; what it may define is unknowable
         // from its parts, so anything (it runs once, serially, cached)
-        let nodes: Vec<(u64, DocNode)> = match incr {
-            Some(inc) => {
-                register_doc(&self.ops.hints, self.eng.values(), inc);
-                doc_nodes(text, inc)
-            }
-            None if text.is_empty() => Vec::new(),
-            None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
-        };
+        let nodes = cut_text(&self.ops.hints, self.eng.values(), text, None, incr.as_deref_mut(), None);
+        let incr = incr.as_deref();
         let t1 = t0.elapsed();
         crate::timeline::lap("push: the nodes' slices and keys");
         // (the nodes' arguments made on the pool: values are named by
@@ -3624,7 +3647,7 @@ impl Graph {
             let reg = &*self.ops.hints;
             let mut ex = crate::exec::Threads::new(self.threads);
             crate::exec::map_on(&mut ex, nodes.len(), &|k| {
-                let a = node_args(v, text, incr, &nodes[k].1, loads);
+                let a = node_args(v, text, incr, &nodes[k].1, loads, None);
                 crate::hints::prepare(reg, v, &a);
                 a
             })
@@ -3802,20 +3825,25 @@ fn doc_nodes(text: &str, inc: &Incr) -> Vec<(u64, DocNode)> {
 }
 
 /// A document node's arguments: its text with its origin, and its hint;
-/// a format's (`incr` `None`): its text, and the format's hint.
+/// a document file's piece (`file`, its name) alike, a region a run
+/// placed; a format's (`incr` `None`): its text, and the format's hint.
 fn node_args(
     v: &Values,
     text: &str,
     incr: Option<&Incr>,
     n: &DocNode,
     loads: Option<&crate::pkgrec::LoadHints>,
+    file: Option<ValueId>,
 ) -> Vec<ValueId> {
     match (n, incr) {
         (&DocNode::Doc(s, e), Some(inc)) => {
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-            let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s, ValueId::UNIT);
+            let name = file.unwrap_or_else(|| v.str(DOC_NAME));
+            let mut a = slice_args_in_file(v, &text[s..e], starts, name, s, ValueId::UNIT);
             // (a document node is a top-level node)
-            a[1] = v.int(3);
+            if file.is_none() {
+                a[1] = v.int(3);
+            }
             // (a package load: its record's hint, or the optimistic one;
             // a node whose text cannot bound what it defines: its
             // record's, `crate::pkgrec`)
@@ -4617,12 +4645,7 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
                 let bytes = finder(n.trim_start_matches("./"))
                     .map(|(_, b)| b)
                     .unwrap_or_default();
-                // (a unit's line: its place the unit's `upos:` on)
-                let unit = xs
-                    .get(7)
-                    .filter(|&&u| u != ValueId::UNIT)
-                    .map_or(0, |&u| g.unit_pos(&str_of(v, u)).unwrap_or(0));
-                let at = usize::try_from(int(3)).unwrap_or(0) + unit + loc;
+                let at = usize::try_from(int(3)).unwrap_or(0) + loc;
                 (n, bytes.iter().map(|&b| char::from(b)).collect(), at)
             }
             _ => {
@@ -4846,8 +4869,8 @@ pub struct Build {
     /// [`Build::absorb_pending`] evaluates them with the text sent, one
     /// evaluation (its stats the nodes both ran).
     staged: bool,
-    /// The units the files staged since the last evaluation changed.
-    staged_units: usize,
+    /// The nodes the files staged since the last evaluation changed.
+    staged_nodes: usize,
     /// Whether the build has evaluated (its cold build done).
     evaluated: bool,
     /// The pieces' run times by text ([`crate::runtimes`]): those the
@@ -5065,7 +5088,7 @@ impl Build {
             lines: Mutex::default(),
             loads_ran: false,
             staged: false,
-            staged_units: 0,
+            staged_nodes: 0,
             evaluated: false,
             runtimes: phitex_defuse::FxHashMap::default(),
             wait_fields: crate::waitfields::WaitFields::default(),
@@ -5328,7 +5351,7 @@ impl Build {
         // the cold build and large edits on the pool)
         self.g.inline = self.evaluated
             && absorb.applied <= INLINE_NODES
-            && std::mem::take(&mut self.staged_units) <= INLINE_NODES
+            && std::mem::take(&mut self.staged_nodes) <= INLINE_NODES
             && !crate::exec::obs_flag!("PHITEX_NO_INLINE");
         self.evaluated = true;
         self.g.settle(
@@ -5438,19 +5461,16 @@ impl Build {
     /// sent, as one.
     #[allow(clippy::too_many_lines)]
     pub fn stage_file(&mut self, name: &str, text: Option<&[u8]>) {
-        // (the units the provider cut so far: a file read only as units
-        // is edited by its units)
-        self.g.absorb_units();
         let v = self.g.eng.values();
         let f = v.field(&format!("file:{name}"));
-        let uf = v.field(&format!("units:{name}"));
-        let unit_path = self
+        let d = v.field(&format!("dfile:{name}"));
+        let cut_path = self
             .g
             .files
             .iter()
-            .find(|&&(g, _)| g == uf)
+            .find(|&&(g, _)| g == d)
             .and_then(|&(_, x)| list_of(v, x).first().map(|&p| str_of(v, p)));
-        let cut = unit_path.is_some() || self.g.absent.contains(&uf);
+        let cut = cut_path.is_some() || self.g.absent.contains(&d);
         let k = if let Some(k) = self.g.files.iter().position(|(g, _)| *g == f) {
             Some(k)
         } else if self.g.absent.contains(&f) {
@@ -5468,7 +5488,7 @@ impl Build {
             Some(t) => Some((
                 old.first()
                     .map(|&p| str_of(v, p))
-                    .or(unit_path)
+                    .or(cut_path)
                     .unwrap_or_else(|| format!("./{name}")),
                 t.to_vec(),
             )),
@@ -5493,45 +5513,55 @@ impl Build {
         if let Some(l) = &self.g.loads {
             l.forget(name);
         }
-        // (a file read as units: cut again, each unit's field its new
-        // slice; a unit whose text is the same keeps its field and its
-        // value wherever it moved, keyed by its text, only its `upos:`
-        // and the order changing, [`file_units`]; its analysis made
-        // again where the text changed only, by the file's `file_incr`)
-        crate::timeline::lap("stage: the file's field");
-        if cut {
-            let had: phitex_defuse::FxHashSet<(Field, ValueId)> = {
-                let v = self.g.eng.values();
-                self.g
-                    .files
-                    .iter()
-                    .filter(|&&(g, _)| units_file(&field_name(v, g)).is_some_and(|n| n == name))
-                    .copied()
-                    .collect()
-            };
-            self.g.drop_units(name);
-            let v = self.g.eng.values();
-            let defs = self.g.ops.defs.locked().clone();
+        // (its size, where a run asked for it, `fsize:`)
+        let z = v.field(&format!("fsize:{name}"));
+        if let Some(k) = self.g.files.iter().position(|(g, _)| *g == z) {
             match &found {
-                Some((path, bytes)) => {
-                    let es = file_units(
-                        v,
-                        &self.g.ops.hints,
-                        &defs,
-                        self.g.loads.as_deref(),
-                        &self.g.file_incr,
-                        name,
-                        path,
-                        bytes,
-                    );
-                    self.staged_units += es.iter().filter(|e| !had.contains(e)).count();
-                    self.g.files.extend(es);
+                Some((_, b)) => self.g.files[k].1 = v.int(i64::try_from(b.len()).unwrap_or(i64::MAX)),
+                None => {
+                    self.g.files.remove(k);
+                    self.g.absent.push(z);
                 }
-                None => self.g.absent.push(uf),
             }
-            crate::timeline::lap("stage: the file cut again");
+        }
+        crate::timeline::lap("stage: the file's field");
+        // (a document file cut, [`DocFile`]: cut again where it changed,
+        // its pieces edited as the document's nodes are; one that comes,
+        // goes, or stops or starts being a document's text: cut afresh,
+        // `dfile:` changed, its readers run again)
+        if cut {
+            let doc = self.g.ops.docs.locked().get(name).cloned();
+            let text = found.as_ref().map(|(p, b)| (p, latin1(b)));
+            match (doc, text) {
+                (Some(df), Some((path, t))) if crate::inputs::document_file(path, &t) => {
+                    self.staged_nodes += self.stage_doc_file(&df, t);
+                }
+                (_, found_text) => {
+                    self.g.files.retain(|&(g, _)| g != d);
+                    self.g.absent.retain(|&g| g != d);
+                    self.g.ops.docs.locked().remove(name);
+                    match (&found, found_text) {
+                        (Some((path, bytes)), Some(_)) => {
+                            let defs = self.g.ops.defs.locked().clone();
+                            let x = cut_doc_file(
+                                self.g.eng.values(),
+                                &self.g.ops.hints,
+                                &defs,
+                                &self.g.ops.docs,
+                                name,
+                                path,
+                                bytes,
+                            );
+                            self.g.files.push((d, x));
+                        }
+                        _ => self.g.absent.push(d),
+                    }
+                    self.staged_nodes += INLINE_NODES + 1;
+                }
+            }
+            crate::timeline::lap("stage: the file cut again, its pieces edited");
         } else {
-            self.staged_units += 1;
+            self.staged_nodes += 1;
         }
         if let Some(r) = self.g.reads.iter_mut().find(|(n, _)| n == name) {
             r.1 = file_hash(found.as_ref());
@@ -5555,6 +5585,7 @@ impl Build {
                             incr,
                             &DocNode::Doc(s, e),
                             Some(&l),
+                            None,
                         ),
                     )),
                     Src::Doc(..) => None,
@@ -5575,6 +5606,97 @@ impl Build {
         self.staged = true;
     }
 
+    /// Cut document file `df` ([`DocFile`]) whose text is now `text`:
+    /// cut again where it changed (the range from the ends the two texts
+    /// share), and the pieces each node that placed them holds edited to
+    /// the new slices as the document's nodes are ([`apply_slices`]); a
+    /// node whose pieces are not the last cut's runs again. The pieces
+    /// replaced, inserted or removed.
+    fn stage_doc_file(&mut self, df: &Arc<std::sync::Mutex<DocFile>>, text: String) -> usize {
+        let mut df = df.locked();
+        if df.text == text {
+            return 0;
+        }
+        let (p, s) = byte_ends(df.text.as_bytes(), text.as_bytes());
+        let range = (p, df.text.len() - s, text.len() - s);
+        let old = std::mem::take(&mut df.slices);
+        df.text = text;
+        let pv = self.g.eng.values().str(&df.path);
+        let new = {
+            let DocFile { text, incr, .. } = &mut *df;
+            cut_text(&self.g.ops.hints, self.g.eng.values(), text, Some(range), Some(incr), Some(pv))
+        };
+        crate::timeline::lap("stage: the file cut again");
+        let loads = self.g.loads.clone();
+        let exec = self.g.ops.exec;
+        let mut n = 0;
+        let mut redo = Vec::new();
+        let readers = std::mem::take(&mut df.readers);
+        let mut kept = Vec::with_capacity(readers.len());
+        let mut shifts = std::mem::take(&mut df.shifts);
+        for r in readers {
+            if !self.g.eng.is_live(r) {
+                continue;
+            }
+            let kids = pieces_of(&self.g.eng, r, pv);
+            // (a node that no longer places the file's pieces: not its
+            // reader now)
+            if kids.is_empty() && !old.is_empty() {
+                continue;
+            }
+            kept.push(r);
+            if kids.len() != old.len() {
+                redo.push(r);
+                continue;
+            }
+            let mut nodes: Vec<(u64, NodeId, Src)> = old
+                .iter()
+                .zip(&kids)
+                .map(|((k, d), &id)| (*k, id, Src::of(d)))
+                .collect();
+            let args_of = |eng: &Engine, k: usize| {
+                node_args(eng.values(), &df.text, Some(&df.incr), &new[k].1, loads.as_deref(), Some(pv))
+            };
+            match apply_slices(&mut self.g.eng, exec, Placing::Placed, &mut nodes, &new, &args_of) {
+                Some(a) => {
+                    n += a.changed();
+                    // (each piece's move since it was made: a kept one's
+                    // text, and the places in it, as when it was made)
+                    let v = self.g.eng.values();
+                    for (_, id, src) in &nodes {
+                        let Src::Doc(s, _) = *src;
+                        let Some(fs) = self.g.eng.node_info(*id).and_then(|i| i.args.first().copied()) else {
+                            continue;
+                        };
+                        let made = frames_start(v, fs).unwrap_or(0);
+                        let d = i64::try_from(s).unwrap_or(0) - made;
+                        if d == 0 {
+                            shifts.remove(&id.raw());
+                        } else {
+                            shifts.insert(id.raw(), (fs, d));
+                        }
+                    }
+                }
+                None => redo.push(r),
+            }
+        }
+        // (a node whose pieces are not the cut's, or with none to edit:
+        // runs again, placing the new cut's)
+        for r in redo {
+            if let Some(i) = self.g.eng.node_info(r) {
+                let args = i.args;
+                self.g.eng.refresh_where(&|_, a, _| *a == args[..]);
+                n += INLINE_NODES + 1;
+            }
+        }
+        shifts.retain(|&k, _| self.g.eng.is_live(NodeId::from_raw(k)));
+        df.readers = kept;
+        df.shifts = shifts;
+        df.slices = new;
+        crate::timeline::lap("stage: the file's pieces edited");
+        n
+    }
+
     /// The document's nodes' texts: each node's raw id, its text (`None`:
     /// the document's, as given to [`Self::edit`]; else the file's text
     /// it is a slice of) and its byte range in it.
@@ -5587,21 +5709,35 @@ impl Build {
                 &Src::Doc(s, e) => (n.raw(), None, s, e),
             })
             .collect();
-        // (the nodes a run made of a file's slices or units, under the
-        // document's nodes: each in its file's text, at the slice's
-        // place, [`Run::doc_file_regions`])
+        // (the nodes a run made of a file's slices, under the document's
+        // nodes: each in its file's text, at the slice's place, moved as
+        // far as an edit of its file moved the piece it is under,
+        // [`Run::doc_file_regions`], [`DocFile::shifts`])
         let v = self.g.eng.values();
+        let shifts: FxHashMap<u64, (ValueId, i64)> = self
+            .g
+            .ops
+            .docs
+            .locked()
+            .values()
+            .flat_map(|d| d.locked().shifts.iter().map(|(&k, &x)| (k, x)).collect::<Vec<_>>())
+            .collect();
         let mut texts: FxHashMap<String, Option<Arc<str>>> = FxHashMap::default();
         let mut seen: phitex_defuse::FxHashSet<u64> = phitex_defuse::FxHashSet::default();
-        let mut stack: Vec<NodeId> = self.nodes.iter().map(|(_, n, _)| *n).collect();
-        while let Some(x) = stack.pop() {
+        let mut stack: Vec<(NodeId, i64)> = self.nodes.iter().map(|(_, n, _)| (*n, 0)).collect();
+        while let Some((x, sh)) = stack.pop() {
             if !seen.insert(x.raw()) {
                 continue;
             }
-            stack.extend(self.g.eng.children(x));
             let Some(i) = self.g.eng.node_info(x) else {
+                stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh)));
                 continue;
             };
+            let sh = match (shifts.get(&x.raw()), i.args.first()) {
+                (Some(&(fs, d)), Some(&a)) if fs == a => d,
+                _ => sh,
+            };
+            stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh)));
             let Some(&fs) = i.args.first() else { continue };
             let mut span: Option<(String, usize, usize)> = None;
             for f in list_of(v, fs) {
@@ -5609,27 +5745,8 @@ impl Build {
                 let Some(&t) = xs.first() else { continue };
                 let (name, s, e) = match (str_of(v, t).as_str(), &xs[..]) {
                     ("s", &[_, seg, _, _, _, name, pos]) => {
-                        let s = usize::try_from(int_of(v, pos)).unwrap_or(0);
+                        let s = usize::try_from(int_of(v, pos) + sh).unwrap_or(0);
                         (str_of(v, name), s, s + str_of(v, seg).len() + 1)
-                    }
-                    // (a unit's line: its place from the unit's, `upos:`)
-                    ("s", &[_, seg, _, _, _, name, pos, _, unit]) => {
-                        let Some(at) = self.g.unit_pos(&str_of(v, unit)) else {
-                            continue;
-                        };
-                        let s = at + usize::try_from(int_of(v, pos)).unwrap_or(0);
-                        (str_of(v, name), s, s + str_of(v, seg).len() + 1)
-                    }
-                    ("w", &[_, key, _, _]) => {
-                        let key = str_of(v, key);
-                        let Some(file) = units_file(&key) else {
-                            continue;
-                        };
-                        let (Some(u), Some(at)) = (self.g.unit_value(&key), self.g.unit_pos(&key))
-                        else {
-                            continue;
-                        };
-                        (file.to_owned(), at, at + u.len())
                     }
                     _ => continue,
                 };
@@ -6387,6 +6504,15 @@ impl Build {
             phitex_defuse::FxHashMap::default();
         // (each text node's move since it was sliced, by its index)
         let mut shifts: phitex_defuse::FxHashMap<usize, i64> = phitex_defuse::FxHashMap::default();
+        // (and each cut file's pieces', [`DocFile::shifts`])
+        let doc_shifts: FxHashMap<u64, (ValueId, i64)> = self
+            .g
+            .ops
+            .docs
+            .locked()
+            .values()
+            .flat_map(|d| d.locked().shifts.iter().map(|(&k, &x)| (k, x)).collect::<Vec<_>>())
+            .collect();
         for e in entries {
             let xs = list_of(v, e);
             let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
@@ -6442,13 +6568,12 @@ impl Build {
                             .into()
                     })
                     .clone();
-                // (a unit's line: from the unit's start, its place in the
-                // file the unit's `upos:` now, [`file_units`])
-                let unit = xs
-                    .get(7)
-                    .filter(|&&u| u != ValueId::UNIT)
-                    .map_or(0, |&u| self.g.unit_pos(&str_of(v, u)).unwrap_or(0));
-                let at = usize::try_from(int(3)).unwrap_or(0) + unit + loc;
+                // (a cut file's line: the place its piece was made at,
+                // moved as far as an edit of the file moved the piece,
+                // [`DocFile::shifts`])
+                let node = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int(4).to_ne_bytes()));
+                let shift = piece_shift(&self.g.eng, &doc_shifts, node);
+                let at = usize::try_from(int(3) + shift).unwrap_or(0) + loc;
                 (name, &*file_text, at)
             } else {
                 let node = u64::from_ne_bytes(int(4).to_ne_bytes());
@@ -7208,6 +7333,48 @@ fn by_field(mut xs: Vec<(Field, ValueId)>) -> Vec<(Field, ValueId)> {
     xs.dedup_by_key(|e| e.0);
     xs
 }
+
+/// The fields that differ between environments `old` and `new` (both
+/// by field, [`merge_by_field`]), each with its new value (`None`: no
+/// longer given); `None` where more than [`ENV_CHANGES`] do.
+fn env_changes(
+    old: &[(Field, ValueId)],
+    new: &[(Field, ValueId)],
+) -> Option<Vec<(Field, Option<ValueId>)>> {
+    let mut out = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    loop {
+        match (old.get(i), new.get(j)) {
+            (Some(a), Some(b)) if a.0 == b.0 => {
+                if a.1 != b.1 {
+                    out.push((b.0, Some(b.1)));
+                }
+                (i, j) = (i + 1, j + 1);
+            }
+            (Some(a), Some(b)) if a.0.0.raw() > b.0.0.raw() => {
+                out.push((b.0, Some(b.1)));
+                j += 1;
+            }
+            (Some(a), _) => {
+                out.push((a.0, None));
+                i += 1;
+            }
+            (None, Some(b)) => {
+                out.push((b.0, Some(b.1)));
+                j += 1;
+            }
+            (None, None) => break,
+        }
+        if out.len() > ENV_CHANGES {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// The most fields [`env_changes`] lists: past them the environment is
+/// set whole.
+const ENV_CHANGES: usize = 64;
 
 /// The graph's accumulators and loop-backs (their round-one values).
 fn declare_fields(eng: &mut Engine) {

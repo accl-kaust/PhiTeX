@@ -133,17 +133,8 @@ fn args_text(v: &Values, args: &[ValueId]) -> Option<String> {
 }
 
 /// The record key of a node from its arguments: a document slice's
-/// [`node_key`], a file's unit's as its analysis registered it
-/// ([`crate::hints::unit_node_key`]).
-pub(crate) fn args_key(reg: &crate::hints::Registry, v: &Values, args: &[ValueId]) -> Option<String> {
-    let &fr = args.first()?;
-    let fs = list_of(v, fr);
-    if let [f] = fs.as_slice() {
-        let xs = list_of(v, *f);
-        if xs.first().map(|&t| str_of(v, t)).as_deref() == Some("w") {
-            return crate::hints::unit_node_key(reg, *xs.get(1)?);
-        }
-    }
+/// [`node_key`].
+pub(crate) fn args_key(_reg: &crate::hints::Registry, v: &Values, args: &[ValueId]) -> Option<String> {
     args_text(v, args).map(|t| node_key(&t))
 }
 
@@ -256,9 +247,9 @@ impl Rec {
     }
 }
 
-/// A record's hash of a file its run read as units (a document file
-/// `\input` reads, `crate::run::Run::read_units`): what the run read is
-/// the units' order, not the text, so any text of it matches.
+/// A record's hash of a file its run read cut (a document file `\input`
+/// reads, `crate::run::Run::read_cut`): what the run read is that it is
+/// cut, not the text, so any text of it matches.
 pub(crate) const UNITS: u64 = u64::MAX;
 
 /// A value's bytes past which a document node's record keeps no value
@@ -450,12 +441,13 @@ impl LoadHints {
         self.now.locked().remove(name);
     }
 
-    /// Whether the record of the node `text` lists file `name`.
+    /// Whether the record of the node `text` lists file `name` by its
+    /// text (one it read cut, [`UNITS`], matches any text of it).
     pub(crate) fn reads_file(&self, text: &str, name: &str) -> bool {
         self.recs
             .locked()
             .get(&node_key(text))
-            .is_some_and(|r| r.files.iter().any(|(n, _)| n == name))
+            .is_some_and(|r| r.files.iter().any(|(n, h)| n == name && *h != UNITS))
     }
 
     /// The hint for the slice `text` (a package load, or a document node

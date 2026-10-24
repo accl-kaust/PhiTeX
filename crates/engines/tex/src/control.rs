@@ -1369,12 +1369,12 @@ impl Run<'_, '_> {
             } else {
                 format!("{name}.tex")
             };
-            // (a document's file cut into units: open, its text read by
+            // (a document's file the client cut: open, its text read by
             // the first line read from it, `Run::next_read_line`; a run
             // that only tests the stream, `\ifeof` after it opens, reads
-            // its units' order, not its text, so an edit inside the file
+            // whether it is cut, not its text, so an edit inside the file
             // reaches only the runs that read its lines)
-            if self.doc && self.read_units(&key)?.is_some() {
+            if self.read_cut(&key)?.is_some() {
                 self.set(&field, v.list(vec![v.int(LAZY_OPEN), v.str(&key)]), true);
                 return Ok(());
             }

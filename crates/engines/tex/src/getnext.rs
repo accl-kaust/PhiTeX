@@ -1139,6 +1139,10 @@ impl Run<'_, '_> {
     /// Whether a file `\input` opened is a document's (its rest becomes
     /// paragraph regions), not a format's (run line by line).
     pub(crate) fn doc_file(&self, f: &crate::run::FileRest) -> bool {
+        // (a file the client cut: a document's, `api::DocFile`)
+        if f.cut.is_some() {
+            return true;
+        }
         // (a file the job writes: as its writer found it, `ops::Files`)
         if f.units.is_some() {
             return f.sliceable;

@@ -440,24 +440,21 @@ fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
     Ok(xs.get(1).map(|&t| bytes(&str_of(r.v, t))))
 }
 
-/// A file's size in bytes, as [`file_bytes`] finds it. A document's
-/// file cut into units (`Run::read_units`): the size the environment
-/// holds beside its units' order (`fsize:<name>`, `api::file_units`),
-/// so the run reads neither its text: an edit inside the file that
-/// keeps its length reaches only the pieces of its units.
+/// A file's size in bytes, as [`file_bytes`] finds it. A document file
+/// the client cut (`Run::read_cut`): the size the environment holds
+/// beside it (`fsize:<name>`), so the run reads not its text: an edit
+/// inside the file that keeps its length reaches only its pieces.
 fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
     let base = name.rsplit('/').next().unwrap_or(name);
-    if r.doc {
-        let key = if base.contains('.') {
-            name.to_owned()
-        } else {
-            format!("{name}.tex")
-        };
-        if r.read_units(&key)?.is_some() {
-            let v = r.v;
-            if let Some(n) = r.cx.use_env(v.field(&format!("fsize:{key}")))? {
-                return Ok(Some(usize::try_from(int_of(v, n)).unwrap_or(0)));
-            }
+    let key = if base.contains('.') {
+        name.to_owned()
+    } else {
+        format!("{name}.tex")
+    };
+    if r.read_cut(&key)?.is_some() {
+        let v = r.v;
+        if let Some(n) = r.cx.use_env(v.field(&format!("fsize:{key}")))? {
+            return Ok(Some(usize::try_from(int_of(v, n)).unwrap_or(0)));
         }
     }
     // (a file the job writes and reads back: its size, not its text,
