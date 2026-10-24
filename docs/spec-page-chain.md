@@ -134,6 +134,19 @@ fire made wrong.
   runs in the first wave. When a finish node is inserted before a piece,
   only the fields it defines are rechecked against what the piece read (§2.3).
 
+- **Built as (2026-10-24).** `split_piece`, `check_cut` and the
+  `pages:resume` field are deleted; a resume's continuation is its
+  arguments. A piece still ends at an outer candidate (a `resume`, as
+  before: exact, and the piece's rest a node only when it holds input:
+  `Run::rest_blank`); it does not end at a candidate inside its own
+  groups (cutting at every one made about 2100 more resumes on amsldoc,
+  a chain of 377 in one piece). A page firing inside a piece runs its
+  routine on the piece's state at the candidate (`preload_candidate`),
+  and the piece's later definitions stand over the routine's
+  (`give_way`). A piece's `\inputlineno` reads are taken back where the
+  number reached only the log and meanings nothing looks at
+  (`settle_lines`; the log keeps the old numbers after an edit).
+
 ### 4.2 Finish nodes (one per fire)
 
 - **Identity:** the fire's index, plus the position of its decision piece.
@@ -156,6 +169,13 @@ fire made wrong.
   - non-immediate `\write`s expanded with the state at its position.
 - **Forced fires:** a penalty ≤ −10001 is a finish node like any other
   (`fire_special` today). It may ship nothing and give back material.
+
+- **Built as (2026-10-24).** One finisher per fire, placed after the
+  piece the page fired in (`follow_after_any`), its defs predicted from
+  the routine's last runs. The page builder's `j`-th finisher replaces
+  the last run's `j`-th at the stop that places it
+  (`Operation::after_by_order`), so the text never sees both. Finishers
+  do not wait for the finisher before them to start.
 
 ### 4.3 Scan steps (one per fire)
 
@@ -197,6 +217,10 @@ fire made wrong.
 - **Guesses:** on edits, scan p+1 may start on `RTN`'s predicted value
   (`rtn_guess`, as today). Cold, the lane makes the wait cheap.
 
+- **Built as (2026-10-24).** The scan steps are one `Pages` node
+  (docs/spec-layers.md), parking at each piece in work and placing each
+  finisher as its page fires; no step nodes.
+
 ### 4.4 The chain and the lane
 
 - **The chain:** scan p → finish p (it reads the break) and scan p+1 (it
@@ -209,6 +233,11 @@ fire made wrong.
   either order. When finish p gives nothing back, scan p+1 does not wait
   for it.
 
+- **Built as (2026-10-24).** Unchanged: the chain runs through `Pages`'s
+  parks. amsldoc j8 realised chain (gate): finish 87, pages 78, resume
+  177 for 44 fires; most resume links are the text's own chain
+  (`vlist`, `toks`, `cs`), not pages.
+
 ### 4.5 Edits
 
 1. The edited piece reruns.
@@ -219,6 +248,16 @@ fire made wrong.
 4. Finishers of moved pages rerun, and the link re-emits their records.
 5. Pieces after a moved fire are rechecked only for the fields the old and
    new finish nodes define.
+
+- **Built as (2026-10-24).** 1–2 as written. 3: `Pages` reruns from
+  its mark before the edited piece to the end (no value cutoff at a
+  page yet: its marks hold every best break). 4: the retexted
+  finishers rerun; the link copies the records before the change. 5:
+  readers re-ask by value at each commit, and a reader whose read broke
+  and holds again by the time it is picked commits its last result
+  (defuse `reuse`). Course paragraph insert in ch01: 87 nodes, about
+  1.6 s, of which the aux/toc loop round (`\begin{document}` reading
+  one changed label) is about 0.4 s.
 
 ## 5. State between pieces (P3: scope set by P0)
 
