@@ -1457,17 +1457,6 @@ impl<'a> Builder<'a> {
             }
             ord
         };
-        let assign = |specs: &[Spec], mut ord: FxHashMap<PlaceKey, u32>| -> (Vec<Id>, FxHashMap<PlaceKey, u32>) {
-            let v = specs
-                .iter()
-                .map(|s| {
-                    let k = ord.entry(key(s.place, s.op)).or_insert(0);
-                    *k += 1;
-                    Self::placed_id(id, s.place, s.op, *k)
-                })
-                .collect();
-            (v, ord)
-        };
         let (seed_k, seed_c) = match &memo {
             Some(m) => {
                 if memo_check() {
@@ -1478,8 +1467,66 @@ impl<'a> Builder<'a> {
             }
             None => (seed(&old.0[..bk]), seed(&old.1[..bc])),
         };
-        let (kid_ids, ord_k) = assign(kids, seed_k);
-        let (cont_ids, ord_c) = assign(conts, seed_c);
+        // (Kept by their text: a placement whose text is an earlier
+        // result's placement's in the ends the two share keeps that node,
+        // so one inserted or removed among them (by an edit,
+        // `Engine::insert_placed`) moves none of the others onto its
+        // neighbour's text. A stopped run's so far: the start only.)
+        let kept_ids = |specs: &[Spec], olds: &[Id]| -> Vec<Option<Id>> {
+            let same = |s: &Spec, x: Id| {
+                self.w.node(x).is_some_and(|xn| xn.place == s.place && xn.text.op == s.op && *xn.text.args == *s.args)
+            };
+            let mut out = vec![None; specs.len()];
+            if memo.is_some() {
+                return out;
+            }
+            let mut a = 0;
+            while a < specs.len() && a < olds.len() && same(&specs[a], olds[a]) {
+                out[a] = Some(olds[a]);
+                a += 1;
+            }
+            if !prefix {
+                let mut b = 0;
+                while b < specs.len() - a
+                    && b < olds.len() - a
+                    && same(&specs[specs.len() - 1 - b], olds[olds.len() - 1 - b])
+                {
+                    out[specs.len() - 1 - b] = Some(olds[olds.len() - 1 - b]);
+                    b += 1;
+                }
+            }
+            out
+        };
+        let kept_k = kept_ids(kids, &old.0[bk..]);
+        let kept_c = kept_ids(conts, &old.1[bc..]);
+        let mut taken: FxHashSet<Id> = kept_k.iter().chain(&kept_c).flatten().copied().collect();
+        taken.extend(old.0[..bk].iter().chain(&old.1[..bc]).copied());
+        let assign = |specs: &[Spec], kept: &[Option<Id>], mut ord: FxHashMap<PlaceKey, u32>, taken: &mut FxHashSet<Id>| {
+            let v = specs
+                .iter()
+                .zip(kept)
+                .map(|(s, &k)| {
+                    let o = ord.entry(key(s.place, s.op)).or_insert(0);
+                    *o += 1;
+                    if let Some(x) = k {
+                        return x;
+                    }
+                    // (An ordinal's id a kept node holds: another, the same
+                    // in every run that keeps those nodes.)
+                    let mut x = Self::placed_id(id, s.place, s.op, *o);
+                    let mut salt = 0u64;
+                    while taken.contains(&x) {
+                        salt += 1;
+                        x = hash_words(0x91ad, &[x, salt]) | 1 << 63;
+                    }
+                    taken.insert(x);
+                    x
+                })
+                .collect::<Vec<Id>>();
+            (v, ord)
+        };
+        let (kid_ids, ord_k) = assign(kids, &kept_k, seed_k, &mut taken);
+        let (cont_ids, ord_c) = assign(conts, &kept_c, seed_c, &mut taken);
         // (Its earlier attempts': asked only where a continuation of its
         // goes after them.)
         let mut own: Option<FxHashSet<Id>> = None;

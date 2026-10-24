@@ -2296,6 +2296,11 @@ pub(crate) struct DocFile {
     shifts: FxHashMap<u64, (ValueId, i64)>,
     /// Each reader's pieces as the last edit left them, in order.
     placed: FxHashMap<u64, Vec<NodeId>>,
+    /// Each slice's arguments as its pieces hold them: a slice an edit
+    /// kept where its text moved keeps the arguments it was made with
+    /// ([`DocFile::shifts`]), so a reader running again places the piece
+    /// it placed, not one moved; none: made from the text.
+    args: Vec<Option<Vec<ValueId>>>,
 }
 
 /// The build's cut document files, by name ([`DocFile`]).
@@ -2334,6 +2339,7 @@ fn cut_doc_file(
         readers: Vec::new(),
         shifts: FxHashMap::default(),
         placed: FxHashMap::default(),
+        args: Vec::new(),
     };
     docs.locked()
         .insert(name.to_owned(), Arc::new(std::sync::Mutex::new(df)));
@@ -2360,9 +2366,45 @@ pub(crate) fn doc_file_pieces(
         df.readers.push(node);
     }
     let name = v.str(&df.path);
+    let df = &mut *df;
+    df.args.resize(df.slices.len(), None);
     df.slices
         .iter()
-        .map(|(_, n)| node_args(v, &df.text, Some(&df.incr), n, loads, Some(name)))
+        .zip(df.args.iter_mut())
+        .map(|((_, n), a)| {
+            a.get_or_insert_with(|| node_args(v, &df.text, Some(&df.incr), n, loads, Some(name)))
+                .clone()
+        })
+        .collect()
+}
+
+/// The arguments of slices `new` an edit made of `old` (`args` theirs,
+/// [`DocFile::args`]): those of the ends the two share kept, the others
+/// none (made from the text).
+fn kept_args(
+    old: &[(u64, DocNode)],
+    new: &[(u64, DocNode)],
+    args: &[Option<Vec<ValueId>>],
+) -> Vec<Option<Vec<ValueId>>> {
+    let mut a = 0;
+    while a < old.len() && a < new.len() && old[a].0 == new[a].0 {
+        a += 1;
+    }
+    let mut b = 0;
+    while b < old.len() - a && b < new.len() - a && old[old.len() - 1 - b].0 == new[new.len() - 1 - b].0 {
+        b += 1;
+    }
+    (0..new.len())
+        .map(|i| {
+            let oi = if i < a {
+                Some(i)
+            } else if i >= new.len() - b {
+                Some(i + old.len() - new.len())
+            } else {
+                None
+            };
+            oi.and_then(|oi| args.get(oi).cloned().flatten())
+        })
         .collect()
 }
 
@@ -5708,6 +5750,9 @@ impl Build {
             }
         }
         shifts.retain(|&k, _| self.g.eng.is_live(NodeId::from_raw(k)));
+        // (each slice's arguments: a kept one's as its pieces hold them,
+        // a new one's made from the text, [`DocFile::args`])
+        df.args = kept_args(&old, &new, &df.args);
         df.readers = kept;
         df.shifts = shifts;
         df.placed = placed;
