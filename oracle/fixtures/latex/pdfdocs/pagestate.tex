@@ -1,0 +1,34 @@
+\documentclass{article}
+\usepackage{hyperref}
+% what the page builder shows the text: \pagegoal and \pagetotal at
+% each paragraph's start (inside a group setting \topskip, after a page
+% fired at the paragraph's own build), \lastnodetype after a paragraph,
+% a float's routines between; all typeset at the end
+\def\rec{}
+\AddToHook{para/begin}{{\topskip=0pt\relax
+  \xdef\rec{\rec[\the\pagegoal\space\the\pagetotal]}}}
+\newcounter{thing}
+\newenvironment{thing}{\par\refstepcounter{thing}\noindent\textbf{Thing \thething.}}{\par}
+\def\words{Some words to fill a line or two of text so that the pages fill up and break between and inside the paragraphs here and there. }
+\begin{document}
+\def\n{0}
+\loop
+\words\words\words\par
+\xdef\rec{\rec(\the\lastnodetype)}
+\edef\n{\the\numexpr\n+1}
+\ifnum\n<14 \repeat
+\begin{figure}[h]
+\centering\rule{3cm}{2cm}
+\caption{A float.}
+\end{figure}
+\words\words\par
+\begin{thing}\words\end{thing}
+\def\n{0}
+\loop
+\words\words\words\words\par
+\begin{thing}\words\end{thing}
+\edef\n{\the\numexpr\n+1}
+\ifnum\n<8 \repeat
+\clearpage
+\small\noindent\rec
+\end{document}

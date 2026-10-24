@@ -2353,6 +2353,38 @@ impl Run<'_, '_> {
         ]))
     }
 
+    /// The page parameters reaching this node, as a `T_PAGE_PARAMS`
+    /// marker: what a `[tag]` marker of its own items stands for, the
+    /// builds before its later settings (a setting at a candidate
+    /// puts a marker of its values there).
+    pub(crate) fn page_params_reaching(&mut self) -> R<ValueId> {
+        let v = self.v;
+        let b = crate::fields::B_PAGE;
+        let n = crate::fields::record_len(b);
+        let cells = self.record(b)?;
+        let absent = crate::fields::record_absent(v);
+        let mut xs = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = if let Some(c) = &cells {
+                (c[i] != absent).then_some(c[i])
+            } else {
+                let loc =
+                    crate::runstate::Loc::try_from(crate::fields::record_cell(b, i)).unwrap_or(0);
+                let f = self.loc_field(loc);
+                self.cx.use_field(f)?
+            };
+            xs.push(x);
+        }
+        let int = |x: Option<ValueId>| v.int(i64::from(crate::val::i32_of(v, x)));
+        Ok(v.list(vec![
+            v.int(nodes::T_PAGE_PARAMS),
+            int(xs[0]),
+            int(xs[1]),
+            glue_value(v, &glue_of(v, xs[2])),
+            int(xs[3]),
+        ]))
+    }
+
     /// `raw`'s `[tag]` page parameter markers, of piece `pid`, given the
     /// parameters reaching it ([`Run::page_params_at`]), and its `[tag,
     /// n]` insertion class markers the class's registers reaching it

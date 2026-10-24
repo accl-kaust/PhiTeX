@@ -119,6 +119,11 @@ pub(crate) struct PageStart {
     pub params: Option<ValueId>,
     /// What the page begins with, as a profile.
     pub prof: Vec<i64>,
+    /// Where the page before fired at a candidate inside the anchor, the
+    /// piece going on: the window its finisher read (after this node, to
+    /// the anchor) and the candidate. The anchor's items after it begin
+    /// the page after `prof`, read by the text after it, not the finisher.
+    pub tail: Option<(Option<phitex_defuse::NodeId>, u32)>,
 }
 
 impl PageStart {
@@ -133,6 +138,7 @@ impl PageStart {
                 fold: crate::build::IGNORE_DEPTH_STATE,
                 params: None,
                 prof: Vec::new(),
+                tail: None,
             };
         }
         let n = |i: usize| int_of(v, xs[i]);
@@ -152,6 +158,10 @@ impl PageStart {
                 .into_iter()
                 .map(|y| int_of(v, y))
                 .collect(),
+            tail: (xs.len() > 9 && n(8) >= 0).then(|| {
+                let after = (n(9) != -1).then(|| crate::pages::node_of(n(9)));
+                (after, u32::try_from(n(8)).unwrap_or(0))
+            }),
         }
     }
 
@@ -169,6 +179,12 @@ impl PageStart {
             v.int(i64::try_from(self.fold.since_bp).unwrap_or(0)),
             self.params.unwrap_or(ValueId::UNIT),
             crate::vprof::value(v, &self.prof),
+            v.int(self.tail.map_or(-1, |t| i64::from(t.1))),
+            v.int(
+                self.tail
+                    .and_then(|t| t.0)
+                    .map_or(-1, |a| i64::from_ne_bytes(a.raw().to_ne_bytes())),
+            ),
         ])
     }
 
@@ -222,12 +238,46 @@ impl Run<'_, '_> {
             .rposition(|&x| nodes::tag(v, x) == nodes::T_BUILD_PAGE)
             .map_or(0, |i| i + 1);
         let mut head = raw[..last].to_vec();
+        // (its `[tag]` markers the parameters reaching it: a setting since
+        // its last candidate is not the builds')
+        let mut reach = None;
+        for x in &mut head {
+            if nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {
+                *x = match reach {
+                    Some(m) => m,
+                    None => *reach.insert(self.page_params_reaching()?),
+                };
+            }
+        }
         self.resolve_page_params(&mut head)?;
         let s = PageStart::decode(v, self.eng_read(v.field(PAGE_START))?);
         let units = v.seq_to_vec(self.cx.acc_range(v.field(crate::vprof::VPROF), s.anchor)?);
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
         let mut st = s.state(v);
         let mut items = vec![crate::vprof::decode(&s.prof)];
+        if let (Some((after, k)), Some(a)) = (s.tail, s.anchor)
+            && a != self.cx.node()
+        {
+            // (the anchor's items after the candidate the page fired at,
+            // its unit's alone read)
+            let w = self
+                .cx
+                .acc_view(v.field(crate::vprof::VPROF), after, Some(a))?;
+            if let Some(u) = self.cx.get(w, phitex_defuse::Step::Last) {
+                let (pid, ints) = crate::vprof::unit_parts(v, u);
+                if pid == i64::from_ne_bytes(a.raw().to_ne_bytes()) {
+                    let mut x = crate::vprof::decode(&ints);
+                    if let Some(p) = x
+                        .iter()
+                        .position(|y| matches!(y, crate::vprof::PItem::Build(c) if *c == k))
+                    {
+                        x.drain(..=p);
+                        self.resolve_prof_of(pid, &mut x)?;
+                        items.push(x);
+                    }
+                }
+            }
+        }
         for &u in &units {
             let (pid, ints) = crate::vprof::unit_parts(v, u);
             let mut x = crate::vprof::decode(&ints);
@@ -238,10 +288,20 @@ impl Run<'_, '_> {
         let own = items.len() - 1;
         let mut rd = RunReaching(self, None);
         let mut fired = None;
-        for (i, x) in items.iter().enumerate() {
-            if st.fold_items(x, dead, &mut rd) {
+        'items: for (i, x) in items.iter().enumerate() {
+            let mut rest: &[crate::vprof::PItem] = x;
+            let mut n_fires = 0;
+            while st.fold_items(rest, dead, &mut rd) {
+                n_fires += 1;
                 fired = Some(i == own);
-                break;
+                if i != own || n_fires > 1000 {
+                    break 'items;
+                }
+                // (a page fired in its own items: its routine run, the
+                // build after it (§1026) takes what is left, the routine
+                // giving back nothing; the page the text goes on with)
+                rest = &rest[st.fired_at..];
+                st.resume();
             }
         }
         Ok((st, fired))

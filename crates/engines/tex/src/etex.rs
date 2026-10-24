@@ -543,11 +543,11 @@ fn last_node_type(r: &mut Run<'_, '_>) -> R<i32> {
     if r.chars_live.is_some_and(|(l, _)| l == md.lid) {
         return Ok(0);
     }
-    let (last, since_bp) = r.list_last_kind(md.lid)?;
+    // (the main list's contributions moved to the page: `last_node_type`,
+    // the type of the last item the page builder moved, §996)
+    let (last, _) = r.list_last_kind(md.lid)?;
     let v = r.v;
-    let main = md.lid == 0 && md.km == 1;
-    let tail = if main && since_bp == 0 { None } else { last };
-    let Some(t) = tail else { return Ok(-1) };
+    let Some(t) = last else { return Ok(-1) };
     Ok(match nodes::tag(v, t) {
         nodes::T_CHAR => 0,
         nodes::T_BOX => {

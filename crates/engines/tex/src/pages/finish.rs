@@ -602,6 +602,10 @@ impl Run<'_, '_> {
         } else {
             std::mem::take(&mut fire.rest)
         };
+        // (a page fired at a candidate inside its piece, the piece going
+        // on: the piece's items after it are on the next page, read
+        // there, [`PageStart::tail`], not here)
+        let tail = !fin.in_material && !at_end && !own.is_empty();
         // (the own unit's other parts read as they are used: its locals
         // always, its check only where the candidate is inside it; of a
         // local or a name standing at the candidate, which it is, and its
@@ -664,9 +668,11 @@ impl Run<'_, '_> {
             v.int(i64::from(ps.fold.pd)),
             v.int(i64::try_from(ps.fold.since_bp).unwrap_or(0)),
             ps.params.unwrap_or(ValueId::UNIT),
-            v.list(rest),
+            v.list(if tail { Vec::new() } else { rest }),
             // (`\deadcycles` where the page fires, §1012)
             v.int(ps.dead),
+            v.int(if tail { i64::from(fire.k) } else { -1 }),
+            v.int(fin.after.map_or(-1, |n| i64::from_ne_bytes(n.raw().to_ne_bytes()))),
         ]));
         let brk = Some((pid, i64::from(fire.k), !at_end && !own.is_empty()));
         Ok((args, brk))
@@ -847,13 +853,24 @@ impl Run<'_, '_> {
             pd: i32::try_from(n(1)).unwrap_or(IGNORE_DEPTH),
             since_bp: usize::try_from(n(2)).unwrap_or(0),
         };
-        let params = xs.get(3).copied().and_then(some);
+        // (§1026: the page parameters as the routine left them, the build
+        // after it freezing the next page's specs on them)
+        let set = self
+            .own_outer_items()
+            .into_iter()
+            .rev()
+            .find(|&x| nodes::tag(v, x) == nodes::T_PAGE_PARAMS && list_of(v, x).len() > 1);
+        let params = set.or_else(|| xs.get(3).copied().and_then(some));
         let mut mat: Vec<ValueId> = c.pending.clone();
         mat.extend(c.args.get(2).map(|&x| list_of(v, x)).unwrap_or_default());
         mat.push(v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(0)]));
         mat.extend(xs.get(4).map(|&x| list_of(v, x)).unwrap_or_default());
         self.resolve_page_params(&mut mat)?;
         let anchor = c.brk.map(|b| crate::pages::node_of(b.0));
+        let tail = u32::try_from(n(6)).ok().map(|k| {
+            let after = (xs.len() > 7 && n(7) != -1).then(|| crate::pages::node_of(n(7)));
+            (after, k)
+        });
         let normal = c.args.get(arg::NORMAL).map_or(0, |&x| int_of(v, x));
         let s = PageStart {
             anchor,
@@ -862,6 +879,7 @@ impl Run<'_, '_> {
             fold,
             params,
             prof: crate::vprof::encode(v, &mat),
+            tail,
         };
         self.cx
             .define_with(v.field(PAGE_START), s.encode(v), Locality::Global);

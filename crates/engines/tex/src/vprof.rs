@@ -461,6 +461,13 @@ pub(crate) struct ScanState {
     pub fold: FoldState,
     pub params: Option<PageParams>,
     pub pending: Vec<PItem>,
+    /// Where the last page fired, the contributions after it (§1017: the
+    /// held-over insertions, the page's material past its break, the
+    /// rest of the contribution list), and the index of the build in the
+    /// items that fired it: what the build after the output routine
+    /// (§1026) takes ([`ScanState::resume`]).
+    pub carry: Vec<PItem>,
+    pub fired_at: usize,
 }
 
 /// What the scan reads where it runs: the page parameters and an
@@ -488,6 +495,8 @@ impl ScanState {
             fold,
             params,
             pending: Vec::new(),
+            carry: Vec::new(),
+            fired_at: 0,
         }
     }
 
@@ -495,11 +504,12 @@ impl ScanState {
     /// a page fired (the fold stops there).
     pub(crate) fn fold_items(&mut self, items: &[PItem], dead: i64, rd: &mut dyn Reaching) -> bool {
         let mut buf = std::mem::take(&mut self.pending);
-        for x in items {
+        for (k, x) in items.iter().enumerate() {
             match x {
                 PItem::Build(_) => {
                     self.fold.since_bp = 0;
                     if self.build(&mut buf, dead, rd) {
+                        self.fired_at = k;
                         return true;
                     }
                 }
@@ -511,6 +521,13 @@ impl ScanState {
         }
         self.pending = buf;
         false
+    }
+
+    /// After a page fired and its output routine gave nothing back
+    /// (§1026), the build that takes what is left: the contributions
+    /// carried pending, the build that fired run again.
+    pub(crate) fn resume(&mut self) {
+        self.pending = std::mem::take(&mut self.carry);
     }
 
     /// [`crate::build::fold_item`] on the main list.
@@ -641,6 +658,14 @@ impl ScanState {
                         self.normal += 1;
                     }
                     self.fold.since_bp = 0;
+                    let f = *f;
+                    self.carry = f
+                        .held_inserts
+                        .into_iter()
+                        .chain(f.contributions)
+                        .map(PItem::Node)
+                        .chain(queue.into_iter().rev())
+                        .collect();
                     buf.clear();
                     return true;
                 }
