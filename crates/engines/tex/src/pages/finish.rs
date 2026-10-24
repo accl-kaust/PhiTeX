@@ -853,7 +853,14 @@ impl Run<'_, '_> {
             pd: i32::try_from(n(1)).unwrap_or(IGNORE_DEPTH),
             since_bp: usize::try_from(n(2)).unwrap_or(0),
         };
-        let params = xs.get(3).copied().and_then(some);
+        // (§1026: the page parameters as the routine left them, the build
+        // after it freezing the next page's specs on them)
+        let set = self
+            .own_outer_items()
+            .into_iter()
+            .rev()
+            .find(|&x| nodes::tag(v, x) == nodes::T_PAGE_PARAMS && list_of(v, x).len() > 1);
+        let params = set.or_else(|| xs.get(3).copied().and_then(some));
         let mut mat: Vec<ValueId> = c.pending.clone();
         mat.extend(c.args.get(2).map(|&x| list_of(v, x)).unwrap_or_default());
         mat.push(v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(0)]));
