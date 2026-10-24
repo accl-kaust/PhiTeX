@@ -20,8 +20,9 @@
 //!   and where the next page begins for the text's `\pagetotal`
 //!   ([`PAGE_START`], [`Run::define_page_start`]).
 //! - A page firing at a candidate inside a piece that could not end
-//!   there has its finisher check the piece's commands after it
-//!   ([`Run::check_cut`]).
+//!   there has its finisher run on the piece's state at the candidate
+//!   ([`Run::preload_candidate`]), the piece's later definitions standing
+//!   over its routine's ([`Run::give_way`]).
 
 use super::*;
 
@@ -356,8 +357,8 @@ impl Run<'_, '_> {
     ///    pieces' items to the fire: the page's data, `\box255` native
     ///    ([`Run::fin_box`]), the material carried;
     /// 3. where the candidate is inside the piece with commands after it
-    ///    (not its last, [`PITEMS`]' `last`), the piece's check data at
-    ///    that candidate ([`Run::check_cut`]) and its locals.
+    ///    (not its last, [`PITEMS`]' `last`), the piece's names at that
+    ///    candidate ([`Run::check_data`]) and its locals.
     ///
     /// A fire the real nodes do not make where the profiles made it is a
     /// defect: a panic in debug and observe builds, an engine diagnostic
@@ -625,7 +626,7 @@ impl Run<'_, '_> {
             // there)
             let defs_k;
             (defs_k, cuttable) = self.lazy_names_at(own_view, fire.k);
-            let reads = part(self, 3);
+            let reads = ValueId::UNIT;
             if crate::exec::prof_flag!("PHITEX_FIN_ITEMS") {
                 let d4 = part(self, 4);
                 eprintln!(
@@ -1994,7 +1995,7 @@ impl Operation for Finish {
             r.run_all()?;
             give_no_units(r);
             let args = r.fin.as_ref().map(|c| c.args.clone()).unwrap_or_default();
-            r.split_piece(&args)?;
+            r.give_way(&args)?;
             let g = r.contribute_global_defs();
             r.record_finisher_defs(&args, g)?;
             r.define_page_start()?;
@@ -2020,8 +2021,7 @@ impl Run<'_, '_> {
     /// (its fourth argument), and what the piece defined after the
     /// candidate as it was there, where the piece had it (its ninth): the
     /// routine runs at the candidate, before those definitions. One the
-    /// piece had not read stays as it reaches here; the routine reading
-    /// it cuts the piece ([`Run::check_cut`]).
+    /// piece had not read stays as it reaches here.
     pub(crate) fn preload_candidate(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
         let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);

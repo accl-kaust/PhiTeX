@@ -1092,6 +1092,90 @@ impl Run<'_, '_> {
         false
     }
 
+    /// Whether the input left is blank: no token list with tokens and no
+    /// file with lines, the lines left only spacers (or what a comment
+    /// character ends) and their ends a space or nothing, an empty line's
+    /// `\par` only where `\par` is the primitive (§1070: in vertical mode
+    /// a space does nothing, and `\par` adds nothing to the list).
+    pub(crate) fn rest_blank(&mut self) -> R<bool> {
+        self.input.pop_spent();
+        let mut lines: Vec<(Vec<u32>, u8, Option<i64>)> = Vec::new();
+        for l in self.input.levels.iter().rev() {
+            match l.kind {
+                kind::TOKS => {
+                    if l.a < l.b {
+                        return Ok(false);
+                    }
+                }
+                kind::LINE => {
+                    let ln = self.input.line(*l);
+                    let end = (ln.ends && ln.endch < -1).then_some(ln.endch);
+                    lines.push((ln.buf[ln.loc.min(ln.buf.len())..].to_vec(), ln.state, end));
+                }
+                _ => {
+                    if self.input.file(*l).has_lines() {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        for sg in self.input.text_rest() {
+            match sg {
+                Seg::Toks(t) => {
+                    if !t.is_empty() {
+                        return Ok(false);
+                    }
+                }
+                Seg::Line(ln) => {
+                    let end = (ln.ends && ln.endch < -1).then_some(ln.endch);
+                    lines.push((ln.buf[ln.loc.min(ln.buf.len())..].to_vec(), ln.state, end));
+                }
+                Seg::File(f) => {
+                    if f.has_lines() {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        for (chars, state, end) in lines {
+            let mut state = state;
+            let mut cut = false;
+            for c in chars {
+                match self.cat(c)? {
+                    9 => {}
+                    10 => {
+                        if state == MID_LINE {
+                            state = SKIP_BLANKS;
+                        }
+                    }
+                    14 => {
+                        cut = true;
+                        break;
+                    }
+                    _ => return Ok(false),
+                }
+            }
+            let Some(_) = end.filter(|_| !cut) else { continue };
+            let e = self.endlinechar()?;
+            let Ok(e) = u32::try_from(e) else { continue };
+            if e > 255 {
+                continue;
+            }
+            match self.cat(e)? {
+                9 | 10 => {}
+                5 if state != NEW_LINE => {}
+                5 => {
+                    let m = self.mean_of(crate::expand::par_tok())?;
+                    if m.cmd_chr().0 != cmd::PAR_END {
+                        return Ok(false);
+                    }
+                }
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
     /// Whether a document file reached here stops the run (its lines
     /// the region children, [`Run::leftover`]): a document's run with no
     /// level of its own open. Open conditionals do not keep it reading:

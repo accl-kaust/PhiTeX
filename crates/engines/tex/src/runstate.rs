@@ -1585,30 +1585,6 @@ impl State {
         out
     }
 
-    /// [`State::read_locs`] with the values read (`None`: undefined in
-    /// the engine), in the same order.
-    pub(crate) fn read_values(&self) -> Vec<(Loc, Option<ValueId>)> {
-        let mut out: Vec<(Loc, Option<ValueId>)> = Vec::with_capacity(self.metas.len() + self.touched.len());
-        out.extend(self.metas.iter().filter_map(|m| m.eng.map(|e| (m.loc, e))));
-        for &l in &self.touched {
-            let Some(s) = self.slot_ref(l) else { continue };
-            // (a location with a definition record: its read is the
-            // record's, above; the slot names its record)
-            if s.meta != 0
-                && self
-                    .metas
-                    .get(s.meta as usize - 1)
-                    .is_some_and(|m| m.loc == l)
-            {
-                continue;
-            }
-            if s.e.flags & LOADED != 0 && s.e.flags & PRELOADED == 0 {
-                out.push((l, s.e.id));
-            }
-        }
-        out
-    }
-
     /// The locations the run defined at its base level back to the
     /// engine's value it read first (restored: no net effect).
     pub(crate) fn restored_locs(&self, v: &Values) -> phitex_defuse::FxHashSet<Loc> {
@@ -3010,8 +2986,6 @@ mod tests {
         st.set(300, Entry::raw(None), false, None);
         st.fill(40, None);
         assert_eq!(st.read_locs(), vec![300, 900, 7, 40]);
-        let order: Vec<Loc> = st.read_values().into_iter().map(|(l, _)| l).collect();
-        assert_eq!(order, st.read_locs());
     }
 
     /// A run resumed from a park reports the reads a run that never
@@ -3030,15 +3004,18 @@ mod tests {
         st.set(300, Entry::raw(Some(v.int(4))), false, None);
         st.fill(40, Some(v.int(5)));
         st.set(41, Entry::raw(Some(v.int(6))), false, None);
-        let want = st.read_values();
+        let vals = |st: &State| -> Vec<(Loc, Option<Option<ValueId>>)> {
+            st.read_locs().into_iter().map(|l| (l, st.engine_value(l))).collect()
+        };
+        let want = vals(&st);
         let mut back = State::unpark(st.park(&v));
-        assert_eq!(back.read_values(), want);
+        assert_eq!(vals(&back), want);
         // (defined after the resume: read before it, so still a read)
         st.set(900, Entry::raw(Some(v.int(7))), false, None);
         back.set(900, Entry::raw(Some(v.int(7))), false, None);
         st.fill(8, None);
         back.fill(8, None);
-        assert_eq!(back.read_values(), st.read_values());
+        assert_eq!(vals(&back), vals(&st));
         assert!(back.read_locs().contains(&900));
     }
 

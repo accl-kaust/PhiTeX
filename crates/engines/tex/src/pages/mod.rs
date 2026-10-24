@@ -70,22 +70,15 @@ pub(crate) use seal::*;
 
 /// The pieces' main-list items, one unit per piece (and per paragraph's
 /// lines, `crate::parbreak`) beside its profile: `[piece, last, items,
-/// reads, defs, locals, cut, shape]` (its raw node id, its last candidate
-/// when nothing came after it, its items with their markers resolved,
-/// what a finisher's check needs, [`Run::check_cut`], for a piece cut at
-/// its last candidate the bindings local to the groups open there, which
-/// the routine sees, and its items' shape, [`crate::nodes::unit_shape`],
-/// unit where no line is sealed). Read by range by a finisher: its page's real items.
+/// unit, defs, locals, 0, shape, profile]` (its raw node id, its last
+/// candidate when nothing came after it, its items with their markers
+/// resolved, its state at each candidate for a finisher of a page firing
+/// at one inside it, [`Run::check_data`], for a piece cut at its last
+/// candidate the bindings local to the groups open there, which the
+/// routine sees, its items' shape, [`crate::nodes::unit_shape`], unit
+/// where no line is sealed, and its profile's unit). Read by range by a
+/// finisher: its page's real items.
 pub(crate) const PITEMS: &str = "pitems";
-
-/// A cut's continuation, `[cont, cutting node, text kind, claim guess,
-/// candidate]`
-/// ([`Run::cont_encode`]): defined by the piece that cuts, read by the
-/// resume the piece places after itself ([`Run::fold_here`]). A field,
-/// not the resume's arguments: the input left changes with any edit
-/// before the document's end, and a resume made anew re-makes everything
-/// after it (spec-predicted-breaks §7).
-pub(crate) const RESUME: &str = "pages:resume";
 
 /// The fields a finisher defined globally, one unit per finisher: read
 /// by range by the resume after a cut (a global definition replaces
@@ -279,13 +272,11 @@ pub(crate) fn is_page_field(name: &str) -> bool {
 /// The fields a piece with items on the main list may define for the
 /// pages (its hint names them, `crate::hints`): what it leaves the next
 /// piece of the main list (the previous depth, the space factor, the
-/// last item), its continuation where its run ends at a candidate, the
-/// conditionals it leaves open.
-pub(crate) const PAGE_FIELDS: [&str; 6] = [
+/// last item), the conditionals it leaves open.
+pub(crate) const PAGE_FIELDS: [&str; 5] = [
     crate::build::MAIN_PD,
     crate::build::MAIN_SF,
     crate::build::MAIN_LAST,
     crate::build::MAIN_SINCE,
-    RESUME,
     crate::run::COND_STACK,
 ];

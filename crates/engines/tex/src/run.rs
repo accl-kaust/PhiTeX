@@ -2695,7 +2695,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// A piece of the main list ends here, its rest a resume placed after
     /// the node, and the node after the pages firing in the piece before
     /// it, whose `\write`s come before the command (`crate::pages`, the
-    /// request in [`crate::pages::RESUME`]); a later read of the output
+    /// resume's arguments); a later read of the output
     /// in the rest reads the node's. Any other run (or a piece with
     /// nothing for the main list, or nothing left to read) places the
     /// node as its child, for the reads after the run.
@@ -4318,28 +4318,6 @@ impl<'c, 'a> Run<'c, 'a> {
         s.buf.splice(i..i + 17, text.chars().map(u32::from));
         s.loc = i;
         Ok(true)
-    }
-
-    /// The fields this run read by class only ([`Run::class_lookup`]):
-    /// for the cut checks, which take them as read (a routine's global
-    /// definition of one is taken to change what the run saw).
-    pub(crate) fn class_read_fields(&mut self) -> Vec<Field> {
-        // (by field, never by location: a meaning's location is its
-        // name's number in the process's interner, which the threads'
-        // schedule orders; every one, whether or not the table still
-        // holds its field, as after a park)
-        let ls: Vec<Loc> = self
-            .class_memo
-            .keys()
-            .chain(self.outer_memo.keys())
-            .chain(self.step_memo.keys())
-            .chain(self.defined_memo.keys())
-            .chain(self.num_memo.keys())
-            .copied()
-            .collect();
-        let mut fs: Vec<Field> = ls.into_iter().map(|l| self.loc_field(l)).collect();
-        fs.sort_unstable_by_key(|f| f.0.raw());
-        fs
     }
 
     #[inline(never)]
