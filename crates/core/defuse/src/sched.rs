@@ -13,7 +13,7 @@
 //! no barrier. Nothing waits for a node.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,7 @@ pub(crate) struct Shared {
     injector: Injector<NodeId>,
     stealers: Vec<Stealer<NodeId>>,
     later_stealers: Vec<Stealer<NodeId>>,
-    block_stealers: Vec<Stealer<NodeId>>,
+    block_stealers: Vec<Stealer<(NodeId, u32)>>,
     /// One thief at a time per block: a steal takes an even run of nodes
     /// from its far end, whole.
     block_busy: Vec<AtomicBool>,
@@ -99,8 +99,11 @@ pub(crate) struct Worker {
     /// ones, so a reader of many (a fold over the whole unit) runs behind
     /// the definers queued before it, not once per definer.
     later: Deque<NodeId>,
-    /// Its block of the nodes dirty before the evaluation, in order.
-    block: Deque<NodeId>,
+    /// Its block of the nodes dirty before the evaluation, in order, each
+    /// with the run it was put in by (a seed, a steal).
+    block: Deque<(NodeId, u32)>,
+    /// The runs it has put in its block.
+    block_runs: AtomicU32,
     shared: Arc<Shared>,
     pub(crate) runs: AtomicU64,
     pub(crate) nodes_run: AtomicU64,
@@ -148,8 +151,9 @@ impl Worker {
 
     /// Seeds the block with nodes to run in this order.
     pub(crate) fn seed(&self, nodes: &[NodeId]) {
+        let run = self.block_runs.fetch_add(1, Ordering::Relaxed);
         for &n in nodes.iter().rev() {
-            self.block.push(n);
+            self.block.push((n, run));
         }
         self.shared.outstanding.fetch_add(nodes.len(), Ordering::SeqCst);
     }
@@ -197,7 +201,7 @@ impl Pool {
     pub(crate) fn new(n: usize, epoch: u64, limits: Limits, stable: Arc<FxHashSet<Field>>) -> (Pool, Vec<Worker>) {
         let n = n.max(1);
         let deques: Vec<Deque<NodeId>> = (0..n).map(|_| Deque::new_lifo()).collect();
-        let blocks: Vec<Deque<NodeId>> = (0..n).map(|_| Deque::new_lifo()).collect();
+        let blocks: Vec<Deque<(NodeId, u32)>> = (0..n).map(|_| Deque::new_lifo()).collect();
         let laters: Vec<Deque<NodeId>> = (0..n).map(|_| Deque::new_fifo()).collect();
         let stealers = deques.iter().map(Deque::stealer).collect();
         let later_stealers = laters.iter().map(Deque::stealer).collect();
@@ -226,6 +230,7 @@ impl Pool {
                 local,
                 later,
                 block,
+                block_runs: AtomicU32::new(0),
                 shared: shared.clone(),
                 runs: AtomicU64::new(0),
                 nodes_run: AtomicU64::new(0),
@@ -276,7 +281,7 @@ impl Pool {
         // a claimer at the head of a unit takes its siblings before anyone
         // runs them
         if self.n > 1
-            && let Some(n) = workers[0].block.pop()
+            && let Some((n, _)) = workers[0].block.pop()
             && let Err(e) = work(eng, self, &workers[0], n)
         {
             self.fail(e);
@@ -339,7 +344,7 @@ impl Pool {
         if let Some(n) = w.later.pop() {
             return Some(n);
         }
-        if let Some(n) = w.block.pop() {
+        if let Some((n, _)) = w.block.pop() {
             return Some(n);
         }
         loop {
@@ -388,10 +393,32 @@ impl Pool {
             }
             // half of what is left: thieves of one block work far apart
             let want = ((st.len() / 2) & !1).max(BLOCK_STEAL);
-            let mut taken: Vec<NodeId> = Vec::with_capacity(want);
-            while taken.len() < want {
+            let mut taken: Vec<(NodeId, u32)> = Vec::with_capacity(want);
+            // (where the owner emptied the block and put a run of its own
+            // in meanwhile, the steal goes on into that run: from its far
+            // end, by an even run again)
+            let mut second: Option<usize> = None;
+            let mut stray: Option<NodeId> = None;
+            loop {
+                match second {
+                    Some(s) if (taken.len() - s).is_multiple_of(2) => break,
+                    None if taken.len() >= want => break,
+                    _ => {}
+                }
                 match st.steal() {
-                    Steal::Success(x) => taken.push(x),
+                    Steal::Success(x) => {
+                        if let Some(s) = second
+                            && taken[s].1 != x.1
+                        {
+                            // (a third run's far end: it runs last)
+                            stray = Some(x.0);
+                            break;
+                        }
+                        if second.is_none() && taken.first().is_some_and(|f| f.1 != x.1) {
+                            second = Some(taken.len());
+                        }
+                        taken.push(x);
+                    }
                     Steal::Empty => break,
                     Steal::Retry => {}
                 }
@@ -401,10 +428,27 @@ impl Pool {
                 continue;
             }
             Worker::add(&w.steals, 1);
-            // the far end first into the deque, so the run comes out in order
-            let last = taken.pop().expect("one taken");
+            if let Some(x) = stray {
+                let run = w.block_runs.fetch_add(1, Ordering::Relaxed);
+                w.block.push((x, run));
+            }
+            // the far end first into the deque, so a run comes out in
+            // order; the owner's second run after the first
+            if let Some(s) = second {
+                let run = w.block_runs.fetch_add(1, Ordering::Relaxed);
+                for x in taken.split_off(s) {
+                    w.block.push((x.0, run));
+                }
+            } else if taken.len() % 2 == 1 && taken.len() > 1 {
+                // (a run the owner's end cut short of even may start at a
+                // reader whose definer the owner took: that one runs last)
+                let run = w.block_runs.fetch_add(1, Ordering::Relaxed);
+                w.block.push((taken.pop().expect("one taken").0, run));
+            }
+            let run = w.block_runs.fetch_add(1, Ordering::Relaxed);
+            let last = taken.pop().expect("one taken").0;
             for x in taken {
-                w.block.push(x);
+                w.block.push((x.0, run));
             }
             return Some(last);
         }
