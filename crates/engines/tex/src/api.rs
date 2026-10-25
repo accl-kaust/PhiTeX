@@ -4488,14 +4488,17 @@ impl Build {
         // the pieces' profiles to its page's fire and places the page's
         // finisher and the next step, `crate::pages::Pages`; new text
         // pieces go before the mark it follows. With more than one thread
-        // it is placed by a node where the text begins, which runs first:
-        // the steps run beside the text, not after the last block of it)
+        // it is placed by a node where the text begins, right after the
+        // text's first piece, which the caller's thread runs before the
+        // others start (the state it sets, read by every piece after it,
+        // in before any of them runs): the steps run beside the text,
+        // not after the last block of it)
         let steps = g.eng.push(unit, g.mark, Vec::new());
         match nodes.first() {
             Some(&(_, first, _)) if g.threads > 1 => {
                 let v = g.eng.values();
                 let args = crate::pages::kick_args(v, steps);
-                g.eng.insert_before(first, g.ops.pages, args);
+                g.eng.insert_after(first, g.ops.pages, args);
             }
             _ => {
                 g.eng.push(unit, g.ops.pages, Vec::new());
