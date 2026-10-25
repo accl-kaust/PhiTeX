@@ -8,7 +8,7 @@ use crate::exec::LockWait as _;
 use std::sync::{Arc, OnceLock};
 
 use phitex_defuse::{
-    Claim, Ctx, Effect, Field, FxHashMap, Locality, MayDefine, OpId, Operation, Stop, ValueId,
+    Ctx, Effect, Field, FxHashMap, Locality, MayDefine, OpId, Operation, Stop, ValueId,
     Values,
 };
 
@@ -57,69 +57,14 @@ pub(crate) static COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 pub(crate) static COMMANDS_BY: [std::sync::atomic::AtomicU64; 4] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
-/// (observe) The last kept marks of each node, by node
-/// ([`retext_potential`]).
-fn retext_kept() -> &'static std::sync::Mutex<FxHashMap<u64, std::sync::Arc<crate::run::KeptMarks>>> {
-    static M: std::sync::OnceLock<std::sync::Mutex<FxHashMap<u64, std::sync::Arc<crate::run::KeptMarks>>>> =
-        std::sync::OnceLock::new();
-    M.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()))
-}
-
-/// (observe, `PHITEX_RETEXT_POTENTIAL`) For a node whose text changed
-/// since its last run kept marks: the first segment that differs, and
-/// the last mark that had begun no later segment (a run resumed there
-/// reads the same text up to it), with the commands it would skip.
-fn retext_potential(cx: &mut Ctx<'_>) {
-    let node = cx.node().raw();
-    let Some(km) = retext_kept().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&node).cloned() else {
-        return;
-    };
-    let args = cx.args();
-    if args == km.args {
-        return;
-    }
-    let v = cx.values();
-    let frames = |a: &[ValueId]| a.first().map(|&x| list_of(v, x)).unwrap_or_default();
-    let (old, new) = (frames(&km.args), frames(&args));
-    let d = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-    let best = km
-        .snaps
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, (p, _))| p.text_at <= d && p.text_at > 0);
-    match best {
-        Some((k, (p, _))) => eprintln!(
-            "retext-potential: node {node}: {} segments then {}, first differing {d}; {} marks; resume at mark {k} (segment {}, after {} of {} commands: {}% skipped)",
-            old.len(),
-            new.len(),
-            km.snaps.len(),
-            p.text_at,
-            p.at_cmds(),
-            km.total_cmds,
-            p.at_cmds() * 100 / km.total_cmds.max(1)
-        ),
-        None => eprintln!(
-            "retext-potential: node {node}: {} segments then {}, first differing {d}; {} marks, none before it ({} commands)",
-            old.len(),
-            new.len(),
-            km.snaps.len(),
-            km.total_cmds
-        ),
-    }
-}
-
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
-/// records its need for the client instead. With `parks`, a run that stops inside a command parks
-/// its state there ([`Run::park`], [`Ctx::park`]) and the next attempt,
-/// if the engine resumes it, continues at that command (`Run::resumed`:
-/// the body skips what it did before its commands).
+/// records its need for the client instead. A run that stops starts
+/// again from its beginning when the engine runs it again.
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
-pub(crate) fn run_node_parking(
+pub(crate) fn run_node(
     cx: &mut Ctx<'_>,
     o: &Ops,
-    parks: bool,
     mut body: impl FnMut(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
     let trace = crate::exec::obs_flag!("PHITEX_TEX_TRACE");
@@ -140,169 +85,13 @@ pub(crate) fn run_node_parking(
     } else {
         None
     };
-    // (marks, `Run::take_mark`: an exec or a finisher run that parks and
-    // is not speculative; one resumed at a mark of its last run starts
-    // from that mark's state)
-    // (observe: `PHITEX_MARKS=off|exec|finish|all` for the measures)
-    let which = crate::exec::obs_str!("PHITEX_MARKS");
-    let marks_ok = parks
-        && !cx.is_speculative()
-        && match which {
-            Some("finish") => cx.op() == o.finish,
-            Some("all") => cx.op() == o.exec || cx.op() == o.finish,
-            Some("off") => false,
-            // (exec runs' by default: a mark holds the table's changes
-            // since the one before, its digest kept up to date by them,
-            // `crate::runstate::State::mark_delta`)
-            _ => cx.op() == o.exec,
-        };
-    let resumed_at = if marks_ok { cx.resumed() } else { None };
-    // (a retexted node: resumed at its last run's last mark that the two
-    // texts' shared part alone made, `crate::run::retext_mark`)
-    let tr = crate::prof::start();
-    let retext = if marks_ok && resumed_at.is_none() {
-        cx.resumed_retext()
-    } else {
-        None
-    };
-    let retext = retext.and_then(|(tok, kmax, old)| {
-        let km = tok.downcast::<crate::run::KeptMarks>().ok()?;
-        let args = cx.args();
-        let v = cx.values();
-        // (the hint its run's start verified, `crate::hints::verify`:
-        // the same for both texts)
-        let hint = |a: &[ValueId]| format!("{:?}", crate::hints::hint_of_args(&o.hints, v, a));
-        let r = if hint(&old) == hint(&args) {
-            crate::run::retext_mark(v, &km, kmax, &old, &args)
-        } else {
-            Err("hint")
-        };
-        if crate::exec::obs_flag!("PHITEX_RETEXT_TRACE") {
-            match &r {
-                Ok((k, _)) => eprintln!("retext: node {} resumes at mark {k} (offered {kmax})", cx.node().raw()),
-                Err(why) => eprintln!("retext: node {} from the start (offered {kmax}): {why}", cx.node().raw()),
-            }
-        }
-        r.ok().map(|(k, snaps)| (k, snaps, args))
-    });
-    crate::prof::add(crate::prof::RETEXT, tr);
-    // (observe, `PHITEX_RETEXT_POTENTIAL=1`: a node run again with another
-    // text, where its last run's marks and how much of that run a resume
-    // at the last mark before the first changed segment would skip)
-    if marks_ok && resumed_at.is_none() && crate::exec::obs_flag!("PHITEX_RETEXT_POTENTIAL") {
-        retext_potential(cx);
-    }
-    let mut r = if let Some((tok, k)) = resumed_at {
-        match tok.downcast::<crate::run::KeptMarks>() {
-            Ok(km)
-                if (k as usize) < km.snaps.len()
-                    && k as usize >= km.stale_below
-                    && crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") =>
-            {
-                let h = km.snaps[k as usize].1;
-                let p = std::sync::Arc::new(crate::run::mark_table(&km.snaps, k as usize));
-                cx.restart();
-                let mut r = Run::new(cx, o);
-                r.verify_at = Some((k, p, h, km.args.clone()));
-                r
-            }
-            // (a mark whose run held sealed lines: their views were that
-            // run's, `crate::pages::seal`; the run starts over)
-            Ok(km)
-                if (k as usize) < km.snaps.len()
-                    && k as usize >= km.stale_below
-                    && !km.snaps[k as usize].0.has_sealed() =>
-            {
-                let h = km.snaps[k as usize].1;
-                let tr = crate::prof::start();
-                // (the mark's table whole: its marks hold their changes)
-                let p = crate::run::mark_table(&km.snaps, k as usize);
-                let base = p.table().touched_len();
-                let from = Run::from_parked(cx, o, p);
-                crate::prof::add(crate::prof::RESUME, tr);
-                match from {
-                    Ok(mut r) => {
-                        // (the marks after it note changes from its table)
-                        let v = r.v;
-                        r.st.begin_marks_from(v, &mut r.mark_img, base);
-                        r.mark_snaps = km.snaps[..=k as usize].to_vec();
-                        r.mark_stale = km.stale_below;
-                        r.old_marks = Some(km.clone());
-                        // (the mark again: the engine keeps the marks
-                        // before it; the run is never cut off at its own)
-                        let state = r.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
-                        let _ = r.cx.checkpoint(k, state);
-                        r
-                    }
-                    Err(cx) => {
-                        cx.restart();
-                        Run::new(cx, o)
-                    }
-                }
-            }
-            _ => {
-                cx.restart();
-                Run::new(cx, o)
-            }
-        }
-    } else if let Some((k, snaps, args)) = retext {
-        let h = snaps[k as usize].1;
-        if crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") {
-            // (observe: the run from the start, its state at the mark
-            // checked against the one it would have resumed from)
-            let p = std::sync::Arc::new(crate::run::mark_table(&snaps, k as usize));
-            let mut r = Run::new(cx, o);
-            r.verify_at = Some((k, p, h, args));
-            r
-        } else if cx.resume_at(k) {
-            let tr = crate::prof::start();
-            let p = crate::run::mark_table(&snaps, k as usize);
-            let base = p.table().touched_len();
-            let from = Run::from_parked(cx, o, p);
-            crate::prof::add(crate::prof::RESUME, tr);
-            match from {
-                Ok(mut r) => {
-                    let v = r.v;
-                    r.st.begin_marks_from(v, &mut r.mark_img, base);
-                    r.mark_snaps = snaps;
-                    r.mark_stale = k as usize;
-                    let state = r.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
-                    let _ = r.cx.checkpoint(k, state);
-                    r
-                }
-                Err(cx) => {
-                    cx.restart();
-                    Run::new(cx, o)
-                }
-            }
-        } else {
-            Run::new(cx, o)
-        }
-    } else {
-        let parked = if parks { cx.parked() } else { None };
-        match parked.map(<Box<dyn std::any::Any + Send>>::downcast::<crate::run::Parked>) {
-            Some(Ok(p)) => match Run::from_parked(cx, o, *p) {
-                Ok(r) => r,
-                Err(cx) => {
-                    cx.restart();
-                    Run::new(cx, o)
-                }
-            },
-            Some(Err(_)) => {
-                cx.restart();
-                Run::new(cx, o)
-            }
-            None => Run::new(cx, o),
-        }
-    };
-    r.marks_on = marks_ok;
+    let mut r = Run::new(cx, o);
     let t_body = std::time::Instant::now();
     let mut res = body(&mut r);
     // (a second pass from the start, ending at the candidate the first
     // asked for: deterministic, one at most, `Halt::Recut`)
     if let Err(Halt::Recut(k)) = res {
         let cx = r.cx;
-        cx.restart();
         r = Run::new(cx, o);
         r.stop_at = Some(k);
         // (a second pass to a candidate takes no marks)
@@ -398,60 +187,6 @@ pub(crate) fn run_node_parking(
                 return Err(s);
             }
             r.settle_lines();
-            // (the marks kept with the result: a later run resumes at one;
-            // with the latest mark after which each field was accessed)
-            if !r.mark_snaps.is_empty() && !crate::exec::obs_flag!("PHITEX_MARKS_NOKEEP") {
-                let tk = crate::prof::start();
-                let snaps = std::mem::take(&mut r.mark_snaps);
-                let outs = if crate::exec::obs_flag!("PHITEX_MARK_CHECK") {
-                    let v = r.v;
-                    let pubd = r.st.published(v, r.rec_load);
-                    let mut o: Vec<String> = pubd
-                        .into_iter()
-                        .map(|(l, x, loc)| format!("def {} {loc:?} {}", crate::val::field_name(v, r.loc_field(l)), x.raw()))
-                        .collect();
-                    o.extend(r.contribs.iter().map(|(f, x)| format!("contrib {} {}", crate::val::field_name(v, *f), x.raw())));
-                    o.extend(r.kids.iter().map(|(op, a)| format!("kid {op:?} {:?}", a.iter().map(|x| x.raw()).collect::<Vec<_>>())));
-                    o.push(format!("effect {:?}", r.effect));
-                    o
-                } else {
-                    Vec::new()
-                };
-                if let Some(k) = r.cut_check
-                    && let Some(old) = &r.old_marks
-                {
-                    let mine: std::collections::BTreeSet<&String> = outs.iter().collect();
-                    let theirs: std::collections::BTreeSet<&String> = old.outs.iter().collect();
-                    let only_mine: Vec<&&String> = mine.difference(&theirs).take(6).collect();
-                    let only_theirs: Vec<&&String> = theirs.difference(&mine).take(6).collect();
-                    if !only_mine.is_empty() || !only_theirs.is_empty() {
-                        eprintln!(
-                            "mark-check: node {} cut at mark {k} would differ: this run {only_mine:?}; the last run {only_theirs:?}",
-                            r.cx.node().raw()
-                        );
-                    } else {
-                        eprintln!("mark-check: node {} cut at mark {k} holds", r.cx.node().raw());
-                    }
-                }
-                let args = if crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") || crate::exec::obs_flag!("PHITEX_RETEXT_POTENTIAL") {
-                    r.cx.args()
-                } else {
-                    Vec::new()
-                };
-                let total_cmds = r.cmds_before + r.cmds;
-                let km = std::sync::Arc::new(crate::run::KeptMarks {
-                    snaps,
-                    outs,
-                    args,
-                    total_cmds,
-                    stale_below: r.mark_stale,
-                });
-                if crate::exec::obs_flag!("PHITEX_RETEXT_POTENTIAL") {
-                    retext_kept().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(r.cx.node().raw(), km.clone());
-                }
-                r.cx.keep_after(km);
-                crate::prof::add(crate::prof::KEEP, tk);
-            }
             // (observe, `PHITEX_MARK_TRACE=1`: a finisher's or exec run's
             // outputs, to compare a run resumed at a mark with a full one)
             if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
@@ -492,17 +227,7 @@ pub(crate) fn run_node_parking(
             }
             Ok(x)
         }
-        // (cut off at a mark: the last run's result stands, nothing kept)
-        Err(Halt::Stop(s)) if r.cut_off => Err(s),
-        Err(Halt::Stop(s)) => {
-            if parks
-                && !r.cx.is_speculative()
-                && let Some(p) = r.park()
-            {
-                r.cx.park(Box::new(p));
-            }
-            Err(s)
-        }
+        Err(Halt::Stop(s)) => Err(s),
         // (a second pass ends at its candidate, before the read that
         // asked for it)
         Err(Halt::Recut(k)) => unreachable!("a second pass passed its candidate {k}"),
@@ -561,49 +286,11 @@ impl Operation for Exec {
         let p = loads.prediction_of(v, &key)?;
         Some(p.into_iter().map(|(n, _, x)| (v.field(&n), x)).collect())
     }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        None
-    }
     /// What the text says it may define ([`crate::hints`]): the state's
     /// field heads and the control sequences its command can define, or
     /// anything where the pass cannot bound it.
     fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
         crate::hints::may_define(reg(&self.0), v, args)
-    }
-    /// For an unbounded region: the fields its hint's guess names (its
-    /// commands' rows, its calls' bodies); a wrong `false` is refuted
-    /// by the engine, never wrong output.
-    fn may_define_field(&self, args: &[ValueId], v: &Values, f: Field) -> bool {
-        if !client_only(v, f) {
-            return false;
-        }
-        // (the page state a piece with items on the main list defines,
-        // and a `\shipout`'s mark: `crate::pages`; the name borrowed,
-        // the hook asked once per definition)
-        if v.with_str(f.0, crate::pages::is_page_field) == Some(true) {
-            return true;
-        }
-        let h = crate::hints::hint_of_args(reg(&self.0), v, args);
-        v.with_str(f.0, |name| h.may_define_field(name))
-            .unwrap_or(true)
-    }
-    /// The meanings and catcodes the text's hint rests on
-    /// ([`crate::hints::reads`]): the node waits for them instead of
-    /// starting and stopping.
-    fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        crate::hints::reads(reg(&self.0), v, args)
-    }
-    /// The lines of its own text the node begins (`lines`, by file:
-    /// [`crate::run::Run::doc_lines`]): readers of `\inputlineno` fold
-    /// them without waiting for its run. A declaration names only the
-    /// fields it lists: the piece's profile and items, its page records
-    /// and its log stay unknown until it runs. (A node that claims a
-    /// sibling begins the sibling's lines too: its run refutes this, and
-    /// the readers after it run again.)
-    fn static_contribs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        let lines = crate::hints::prepared_lines(reg(&self.0), args)
-            .unwrap_or_else(|| crate::run::text_lines(v, args));
-        Some(vec![(v.field("lines"), lines)])
     }
     /// No scope effect where the text says the command opens and closes
     /// nothing ([`crate::hints`]); otherwise known when it runs (the
@@ -615,78 +302,8 @@ impl Operation for Exec {
             Effect::Pending
         }
     }
-    /// The siblings the slice takes when its text says so exactly
-    /// (a balanced region whose items all end inside it: none).
-    fn claim(
-        &self,
-        args: &[ValueId],
-        v: &Values,
-        following: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
-    ) -> Claim {
-        if false {
-            return Claim::Pending;
-        }
-        let c = match crate::hints::hint_of_args(reg(&self.0), v, args)
-            .bound
-            .as_ref()
-            .and_then(|b| b.claim)
-        {
-            Some(0) => Claim::None,
-            Some(n) => Claim::Count(n),
-            None => Claim::Pending,
-        };
-        let k = match c {
-            Claim::None => 0,
-            Claim::Count(_) => 1,
-            Claim::Pending => 2,
-        };
-        // (`PHITEX_CLAIM_TRACE`: a pending claim's text and its next
-        // sibling's, as the args render)
-        // (with why: no bound (the hint's cause), a scope its run may
-        // open or close, or an item reaching past it)
-        if k == 2 && crate::exec::obs_flag!("PHITEX_CLAIM_TRACE") {
-            let h = crate::hints::hint_of_args(reg(&self.0), v, args);
-            let why = match &h.bound {
-                None => format!("unbounded\t{}", h.cause),
-                Some(b) if !b.no_scope => "scope\t".to_owned(),
-                Some(_) => "reaches past\t".to_owned(),
-            };
-            let next = following
-                .next()
-                .map(|(_, a)| a.first().map(|&x| v.render(x)).unwrap_or_default());
-            eprintln!(
-                "claim-trace: pending\t{why}\t{:?} next {:?}",
-                args.first()
-                    .map(|&x| v.render(x))
-                    .unwrap_or_default()
-                    .chars()
-                    .take(160)
-                    .collect::<String>(),
-                next.unwrap_or_default()
-                    .chars()
-                    .take(80)
-                    .collect::<String>()
-            );
-        }
-        EXEC_CLAIMS[k].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        c
-    }
-    fn claim_limit(
-        &self,
-        args: &[ValueId],
-        v: &Values,
-        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
-    ) -> Option<usize> {
-        if false {
-            return None;
-        }
-        crate::hints::hint_of_args(reg(&self.0), v, args)
-            .bound
-            .as_ref()
-            .and_then(|b| b.claim)
-    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        let args = cx.args();
+        let args = cx.args().to_vec();
         // (a package load: its run recorded, publishing its net effect,
         // `crate::pkgrec`; a document node's run is recorded at its end,
         // `crate::pkgrec::is_recorded`)
@@ -714,7 +331,7 @@ impl Operation for Exec {
                 );
             });
         }
-        let res = run_node_parking(cx, o, true, |r| {
+        let res = run_node(cx, o, |r| {
             // (a resumed run has done this, and continues its commands)
             if !r.resumed {
                 // (a load at the unit's top level only: there a global
@@ -813,27 +430,9 @@ impl Operation for Put {
     fn name(&self) -> &'static str {
         "put"
     }
-    fn defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        let mut out: Vec<(Field, Locality)> = Vec::new();
-        if let Some(&d) = args.first() {
-            for e in list_of(v, d) {
-                let xs = list_of(v, e);
-                let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
-                let g = xs.get(2).is_some_and(|&g| int_of(v, g) != 0);
-                out.push((
-                    v.field(&name),
-                    if g { Locality::Global } else { Locality::Local },
-                ));
-            }
-        }
-        if args.get(1).is_some_and(|&c| !list_of(v, c).is_empty()) {
-            out.push((v.field("lvlfix"), Locality::Local));
-        }
-        Some(out)
-    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
-        let args = cx.args();
+        let args = cx.args().to_vec();
         let o = ops(&self.0);
         let v = cx.values();
         // REDUCE-GAP: a static definition set must be defined exactly;
@@ -905,35 +504,6 @@ impl Operation for Dvi {
     fn name(&self) -> &'static str {
         "dvi"
     }
-    /// No page profiles or items (the pieces' units, `crate::pages`):
-    /// the page builder, which reads them to the unit's end, does not
-    /// wait for it.
-    fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        Some(crate::pages::no_units(v))
-    }
-    /// The file ([`crate::assemble::END_FILE`]), its only effect: no
-    /// output (an output changed at every edit re-asked each reader of
-    /// a window that ends at this node, the page builder's).
-    fn defs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(vec![(v.field(crate::assemble::END_FILE), Locality::Global)])
-    }
-    /// Where the pages end and the accumulators the file is made of:
-    /// the node waits while a page node or writer step before it is in
-    /// work instead of starting, stopping at a range and running again
-    /// (an edit's end node ran twice: once stopped at `pages` while the
-    /// edited page's finisher ran).
-    fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        Some(
-            [crate::pages::PAGES_END, "pages", crate::assemble::LINKED]
-                .iter()
-                .map(|&f| v.field(f))
-                .collect(),
-        )
-    }
-    /// The output file is made once, after the loop-backs settle.
-    fn final_only(&self, _: &[ValueId], _: &Values) -> bool {
-        true
-    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
@@ -952,30 +522,6 @@ impl Operation for Link {
     fn name(&self) -> &'static str {
         "link"
     }
-    /// No page profiles or items (the pieces' units, `crate::pages`):
-    /// the page builder, which reads them to the unit's end, does not
-    /// wait for it.
-    fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        Some(crate::pages::no_units(v))
-    }
-    fn defs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(vec![(v.field(crate::assemble::LINKED), Locality::Global)])
-    }
-    /// What the file is made of: held until the pages and the line's
-    /// records before it are done (and the pieces' items: the pages'
-    /// sealed lines, `crate::pages::seal`).
-    fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        Some(
-            [crate::pages::PAGES_END, "pages", crate::pdfout::XPAGES, crate::pages::PITEMS]
-                .iter()
-                .map(|&f| v.field(f))
-                .collect(),
-        )
-    }
-    /// The PDF side: linked once, after the loop-backs settle.
-    fn final_only(&self, _: &[ValueId], _: &Values) -> bool {
-        true
-    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
@@ -989,9 +535,6 @@ pub(crate) struct Mark;
 impl Operation for Mark {
     fn name(&self) -> &'static str {
         "mark"
-    }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(Vec::new())
     }
     fn run(&self, _: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         Ok(ValueId::UNIT)
@@ -1027,38 +570,11 @@ impl Operation for Files {
     fn name(&self) -> &'static str {
         "files"
     }
-    /// No page profiles or items (the pieces' units, `crate::pages`):
-    /// the page builder, which reads them to the unit's end, does not
-    /// wait for it.
-    fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        Some(crate::pages::no_units(v))
-    }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(Vec::new())
-    }
-    /// The accumulators the node reads whole: the root the streams
-    /// opened, a file's node its stream's bucket.
-    /// Held until every contributor before it is done, instead of
-    /// starting and parking at the range again for each one still in
-    /// work (the root parked 349 times on para4000).
-    /// And where the pages end ([`crate::pages::PAGES_END`]): every
-    /// page's finisher, which writes and opens streams, is in the range.
-    fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        let mut out = vec![v.field("loopfiles"), v.field(crate::pages::PAGES_END)];
-        match args.first() {
-            None => out.push(v.field(crate::run::WNAMES)),
-            Some(&n) => {
-                out.push(crate::run::stream_bucket(v, &str_of(v, n)));
-                out.push(v.field(crate::run::SEEDED));
-            }
-        }
-        Some(out)
-    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();
         let Some(listed) = cx
-            .use_field(v.field("loopfiles"))?
+            .read(v.field("loopfiles"))?
             .filter(|&x| x != ValueId::UNIT)
         else {
             return Ok(ValueId::UNIT);
@@ -1066,7 +582,7 @@ impl Operation for Files {
         let listed: Vec<String> = list_of(v, listed).iter().map(|&n| str_of(v, n)).collect();
         // (the written text is complete once every page's finisher is
         // placed: where the pages end, defined by the page builder)
-        cx.use_field(v.field(crate::pages::PAGES_END))?;
+        cx.read(v.field(crate::pages::PAGES_END))?;
         match cx.args().first() {
             None => files_root(cx, listed, early_loops(&self.0)),
             Some(&n) => {
@@ -1108,15 +624,27 @@ fn files_root(cx: &mut Ctx<'_>, listed: Vec<String>, early: bool) -> Result<Valu
     let v = cx.values();
     let mut names = listed;
     let seen = v.field(WSEEN);
+    let opened: Vec<String> = v
+        .seq_to_vec(cx.fold(v.field(crate::run::WNAMES), None, None)?)
+        .into_iter()
+        .map(|n| str_of(v, n))
+        .collect();
+    // (a job that writes no file, now or in a round before: no files'
+    // nodes and no loop-back)
+    if names.is_empty() && opened.is_empty() && !cx.is_loopback(seen) {
+        return Ok(ValueId::UNIT);
+    }
     if !cx.is_loopback(seen) {
-        declare_loop(cx, early, seen, v.list(Vec::new()));
+        // (its first value the files the client gave the texts of, the
+        // files written before this build)
+        let seeds = cx.read(v.field(crate::run::SEEDS))?.unwrap_or_else(|| v.list(Vec::new()));
+        declare_loop(cx, early, seen, seeds);
     }
     let mut written: Vec<String> = cx
-        .use_field(seen)?
+        .read(seen)?
         .map(|x| list_of(v, x).iter().map(|&n| str_of(v, n)).collect())
         .unwrap_or_default();
-    let opened = cx.acc_range(v.field(crate::run::WNAMES), None)?;
-    for n in v.seq_to_vec(opened).into_iter().map(|n| str_of(v, n)) {
+    for n in opened {
         if !written.contains(&n) {
             written.push(n);
         }
@@ -1147,7 +675,7 @@ fn stream_of(
     name: &str,
 ) -> Result<(Option<String>, Option<WrittenDefs>, bool), Stop> {
     let v = cx.values();
-    let acc = cx.acc_range(crate::run::stream_bucket(v, name), None)?;
+    let acc = cx.fold(crate::run::stream_bucket(v, name), None, None)?;
     if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
         for e in v.seq_to_vec(acc) {
             eprintln!(
@@ -1204,8 +732,8 @@ fn file_node(
         && let Some(seed) = seed_text(cx, name)?
     {
         seed_decls(cx, name, seed, text.is_some() && as_text, defs_lock, early)?;
-        let _ = cx.use_field(k)?;
-        let _ = cx.use_field(wt)?;
+        let _ = cx.read(k)?;
+        let _ = cx.read(wt)?;
         return Ok(ValueId::UNIT);
     }
     // (a file not opened for writing this round stays as the round
@@ -1315,12 +843,12 @@ fn file_node(
 fn seed_text(cx: &mut Ctx<'_>, name: &str) -> Result<Option<ValueId>, Stop> {
     let v = cx.values();
     let listed = cx
-        .use_field(v.field(crate::run::SEEDS))?
+        .read(v.field(crate::run::SEEDS))?
         .is_some_and(|ns| list_of(v, ns).iter().any(|&n| str_of(v, n) == name));
     if !listed {
         return Ok(None);
     }
-    cx.use_field(v.field(&format!("{}:{name}", crate::run::SEEDS)))
+    cx.read(v.field(&format!("{}:{name}", crate::run::SEEDS)))
 }
 
 /// The round-one values of file `name`'s loop-backs from the client's
@@ -1342,7 +870,7 @@ fn seed_decls(
     early: bool,
 ) -> Result<(), Stop> {
     let v = cx.values();
-    let reads = cx.acc_range(v.field(crate::run::SEEDED), None)?;
+    let reads = cx.fold(v.field(crate::run::SEEDED), None, None)?;
     let read = v
         .seq_to_vec(reads)
         .into_iter()
@@ -1422,7 +950,7 @@ fn keep_file(cx: &mut Ctx<'_>, name: &str) -> Result<ValueId, Stop> {
         crate::tools::size_field(v, name),
     ];
     if cx.is_loopback(k)
-        && let Some(keys) = cx.use_field(k)?
+        && let Some(keys) = cx.read(k)?
         && keys != crate::api::text_mark(v)
     {
         for key in list_of(v, keys) {
@@ -1437,7 +965,7 @@ fn keep_file(cx: &mut Ctx<'_>, name: &str) -> Result<ValueId, Stop> {
     // (and its units', `wunit:`, as its order names them)
     let wf = fields[2];
     if cx.is_loopback(wf)
-        && let Some(order) = cx.use_field(wf)?
+        && let Some(order) = cx.read(wf)?
         && let Some(&es) = list_of(v, order).get(1)
     {
         for e in list_of(v, es) {
@@ -1448,7 +976,7 @@ fn keep_file(cx: &mut Ctx<'_>, name: &str) -> Result<ValueId, Stop> {
     }
     for f in fields {
         if cx.is_loopback(f)
-            && let Some(x) = cx.use_field(f)?
+            && let Some(x) = cx.read(f)?
         {
             publish_traced(cx, f, x);
         }

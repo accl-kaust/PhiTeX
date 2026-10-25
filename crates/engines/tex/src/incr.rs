@@ -509,7 +509,7 @@ impl Incr {
             .filter(|&k| parts[k].cached.is_none())
             .collect();
         // (on the executor, spec-final §5.1: no threads outside it)
-        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(threads));
+        let mut ex = crate::exec::Coarse(threads);
         let made_owns: Vec<(Mutex<Option<Definitions>>, Option<pass::Start>)> =
             crate::exec::map_on(&mut ex, fresh.len(), &|x| {
                 let (d, e) = crate::hints::own_definitions_from(

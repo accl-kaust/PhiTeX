@@ -27,83 +27,22 @@
 use super::*;
 
 /// A routine's give-back as [`RTN`] holds it: `[markers, list]`, and
-/// `[markers, list, dead, maps]` where `\deadcycles` is not 0 or the
-/// routine wrote integer registers globally (`maps`: `[[n, keep, add]…]`,
-/// [`crate::regfold::Affine`]).
-pub(crate) fn rtn_value(
-    v: &Values,
-    markers: ValueId,
-    list: ValueId,
-    dead: i64,
-    maps: &[(i32, crate::regfold::Affine)],
-) -> ValueId {
-    if dead == 0 && maps.is_empty() {
+/// `[markers, list, dead]` where `\deadcycles` is not 0.
+pub(crate) fn rtn_value(v: &Values, markers: ValueId, list: ValueId, dead: i64) -> ValueId {
+    if dead == 0 {
         return v.list(vec![markers, list]);
     }
-    v.list(vec![markers, list, v.int(dead), maps_value(v, maps)])
-}
-
-/// A give-back without its register maps: what the page builder folds
-/// (its markers, its list, `\deadcycles`), the finisher's output; the
-/// maps, which differ from page to page as the routine's own reads of a
-/// register make its write a map or a definition, stay in [`RTN`].
-pub(crate) fn rtn_strip(v: &Values, x: ValueId) -> ValueId {
-    let xs = list_of(v, x);
-    if xs.len() < 4 {
-        return x;
-    }
-    rtn_value(v, xs[0], xs[1], int_of(v, xs[2]), &[])
-}
-
-/// Give-back `x` with register maps `maps` ([`rtn_value`]).
-pub(crate) fn rtn_with_maps(v: &Values, x: ValueId, maps: &[(i32, crate::regfold::Affine)]) -> ValueId {
-    let xs = list_of(v, x);
-    if xs.len() < 2 {
-        return x;
-    }
-    rtn_value(v, xs[0], xs[1], xs.get(2).map_or(0, |&d| int_of(v, d)), maps)
-}
-
-/// The register maps of a give-back ([`rtn_value`]).
-pub(crate) fn rtn_maps(v: &Values, x: ValueId) -> Vec<(i32, crate::regfold::Affine)> {
-    list_of(v, x).get(3).map_or_else(Vec::new, |&ms| maps_of(v, ms))
-}
-
-/// The register maps `[[n, keep, add]…]` as a value ([`rtn_value`]'s
-/// fourth element; [`FinishIn::maps`]).
-pub(crate) fn maps_value(v: &Values, maps: &[(i32, crate::regfold::Affine)]) -> ValueId {
-    v.list(
-        maps.iter()
-            .map(|&(n, m)| v.list(vec![v.int(i64::from(n)), v.int(i64::from(m.keep)), v.int(i64::from(m.add))]))
-            .collect(),
-    )
-}
-
-/// [`maps_value`]'s maps.
-pub(crate) fn maps_of(v: &Values, ms: ValueId) -> Vec<(i32, crate::regfold::Affine)> {
-    list_of(v, ms)
-        .into_iter()
-        .filter_map(|e| match list_of(v, e)[..] {
-            [n, k, a] => Some((
-                i32::try_from(int_of(v, n)).ok()?,
-                crate::regfold::Affine {
-                    keep: int_of(v, k) != 0,
-                    add: i32::try_from(int_of(v, a)).unwrap_or(0),
-                },
-            )),
-            _ => None,
-        })
-        .collect()
+    v.list(vec![markers, list, v.int(dead)])
 }
 
 /// A give-back as a guess: `\deadcycles` 0 (a page shipped: a dead cycle
-/// guessed would grow a chain of pages on guesses), its maps kept.
+/// guessed would grow a chain of pages on guesses).
 pub(crate) fn rtn_as_guess(v: &Values, x: ValueId) -> ValueId {
     let xs = list_of(v, x);
     if xs.len() < 3 {
         return x;
     }
-    rtn_value(v, xs[0], xs[1], 0, &rtn_maps(v, x))
+    rtn_value(v, xs[0], xs[1], 0)
 }
 
 /// What a finisher's output routine gives back to the main list
@@ -111,11 +50,9 @@ pub(crate) fn rtn_as_guess(v: &Values, x: ValueId) -> ValueId {
 /// parameter markers) and the routine's list, without the held-over
 /// insertions (the page builder has them); then, where not nothing,
 /// `\deadcycles` as the routine left it (a page not shipped: §1054's
-/// `\end` after it reads it) and the maps of its global integer register
-/// writes ([`rtn_value`]). The page builder folds the
+/// `\end` after it reads it) ([`rtn_value`]). The page builder folds the
 /// next page on its guess of it ([`Run::rtn_guess`]) until the
-/// finisher's output, this value, says otherwise
-/// ([`phitex_defuse::Ctx::placed_output`]).
+/// finisher's output, this value ([`PAGE_OUT`]), says otherwise.
 pub(crate) const RTN: &str = "rtn";
 
 /// A finisher's arguments (a node's arguments are what the engine knows
@@ -195,13 +132,6 @@ pub(crate) struct FinishIn {
     /// The marks in force where the page began (`\topmark` and its
     /// classes, §1012): `[[class, mark]…]`.
     pub top_marks: ValueId,
-    /// The register maps of what the page builder guessed this page's
-    /// routine gives back, and folded the next page on
-    /// ([`Feedback::RoutineGivesBack`], [`Run::rtn_guess`]; `[[n, keep,
-    /// add]…]`, [`maps_value`]): the page counters' folds past this
-    /// finisher while it runs ([`Finish::static_contribs`]). Not the
-    /// guess: another page's give-back, its content.
-    pub maps: ValueId,
     /// How many of the spans the post-output build of the page before
     /// takes (§1026: the routine's material and the held-over insertions
     /// as they are, a piece's items carried folded again with their
@@ -252,7 +182,7 @@ impl FinishIn {
             v.int(i64::from(self.holding)),
             v.int(i64::from(self.held)),
             self.top_marks,
-            self.maps,
+            ValueId::UNIT,
             v.int(i64::from(self.post)),
             v.list(self.post_markers.clone()),
             v.int(i64::from(self.post_k)),
@@ -329,7 +259,6 @@ impl FinishIn {
             holding: n(12) != 0,
             held: u32::try_from(n(13)).unwrap_or(0),
             top_marks: p[14],
-            maps: p[15],
             post: p.get(16).map_or(0, |&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
             post_markers: p.get(17).map(|&x| list_of(v, x)).unwrap_or_default(),
             post_k: p.get(18).map_or(0, |&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
@@ -718,7 +647,7 @@ impl Run<'_, '_> {
         if fin.vers.is_empty() {
             return Ok(false);
         }
-        let w = self.cx.acc_view(v.field(PITEMS), fin.after, Some(fin.piece))?;
+        let w = self.view_through(PITEMS, fin.after, fin.piece)?;
         for &(p, ver) in &fin.vers {
             let Some(i) = pids.iter().position(|&q| q == p) else { continue };
             let same = self
@@ -752,13 +681,19 @@ impl Run<'_, '_> {
             let k = PageNode::of(self.ops, v, self.cx.op(), &self.cx.args());
             assert!(k.is_some_and(|k| k.folds().contains(&PITEMS)), "a window of {PITEMS} outside a finisher");
         }
-        let w = self.cx.acc_view(v.field(PITEMS), fin.after, Some(fin.piece))?;
-        let first = self.cx.path(&[Step::Index(0)]);
-        let pids: Vec<i64> = self
-            .cx
-            .get(w, Step::Each(first))
-            .map(|x| v.seq_to_vec(x).into_iter().map(|p| int_of(v, p)).collect())
-            .unwrap_or_default();
+        let w = self.view_through(PITEMS, fin.after, fin.piece)?;
+        // (each unit's piece, read as that alone)
+        let n = self.cx.len(w).unwrap_or(0);
+        let mut pids: Vec<i64> = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
+        for i in 0..n {
+            let i = u32::try_from(i).unwrap_or(u32::MAX);
+            let p = self
+                .cx
+                .at(w, Step::Index(i))
+                .and_then(|u| self.cx.get(u, Step::Index(0)))
+                .map_or(i64::MIN, |p| int_of(v, p));
+            pids.push(p);
+        }
         let mut want: phitex_defuse::FxHashSet<i64> = phitex_defuse::FxHashSet::default();
         want.insert(pid);
         // (the items of each piece the page's spans name: a unit read at
@@ -956,17 +891,9 @@ impl Run<'_, '_> {
         let c = self.fin.clone().unwrap_or_default();
         let list = c.pending.get(c.held_n..).unwrap_or_default().to_vec();
         // (and `\deadcycles` as it leaves it where not 0, a page not
-        // shipped: what `\end` reads after it, §1054; and the maps its
-        // global writes of integer registers are, `crate::regfold`)
+        // shipped: what `\end` reads after it, §1054)
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
-        let mut maps: Vec<(i32, crate::regfold::Affine)> = Vec::new();
-        for (&l, &m) in &self.reg_pending {
-            if let Some(n) = self.count_reg(l) {
-                maps.push((n, m));
-            }
-        }
-        maps.sort_by_key(|e| e.0);
-        let x = rtn_value(v, v.list(raw), v.list(list), dead, &maps);
+        let x = rtn_value(v, v.list(raw), v.list(list), dead);
         // (what it gives back leaves the run: its sealed lines' lists)
         let x = self.unseal(x);
         self.cx.define_with(v.field(RTN), x, Locality::Global);
@@ -1842,50 +1769,6 @@ impl Operation for Finish {
     fn name(&self) -> &'static str {
         "finish"
     }
-    /// What the last run of the same routine defined, and the fields a
-    /// finisher sets itself (spec-final §9b): a definition list, each
-    /// with its prediction ([`Finish::predicted_defs`]), so that a reader
-    /// after the finisher (the next finisher, the continuation reading
-    /// [`RTN`]) finds its site and runs on the prediction instead of
-    /// waiting; a run defining outside it widens it at its commit and
-    /// its readers run again (a field the routine defines on some pages
-    /// only is not claimed for every page). None before any run of the
-    /// routine.
-    fn defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        let t = *args.get(9)?;
-        if t == ValueId::UNIT {
-            return None;
-        }
-        let mut names: Vec<Field> = ops(&self.0)
-            .fin_defs
-            .locked()
-            .get(&fin_key(v, t, args))
-            .map(|d| {
-                // (the history this finisher predicts from, [`FinDefs::at`])
-                let d = d.at(fin_page_key(v, args));
-                let mut ns: Vec<Field> = d
-                    .last
-                    .iter()
-                    .map(|e| e.0)
-                    .filter(|&f| fin_may_box(v, args, t, f) && !transient(v, f))
-                    .collect();
-                for (f, _) in d.class_boxes(v, args.get(13).copied()) {
-                    if !ns.contains(&f) {
-                        ns.push(f);
-                    }
-                }
-                ns
-            })?;
-        // (and what it gives back to the main list, always predicted)
-        let rtn = v.field(RTN);
-        if !names.contains(&rtn) {
-            names.push(rtn);
-        }
-        // (the keys of the pages it ships, its PDF sides' read)
-        names.push(v.field(crate::pdfout::PAGE_KEYS));
-        ops(&self.0).fields.add_record_fields(&mut names);
-        Some(names.into_iter().map(|f| (f, Locality::Global)).collect())
-    }
     /// The output routine's hint (encoded, the tenth argument:
     /// [`crate::hints::routine_hint`]) and the fields a finisher defines
     /// itself; anything where the routine's text cannot be bounded, or
@@ -1926,23 +1809,6 @@ impl Operation for Finish {
         crate::fields::add_record_prefixes(&mut ps);
         MayDefine::Prefixes(ps)
     }
-    /// No pieces' units ([`no_units`]), its global definitions as the
-    /// last run of the routine gave them ([`Finish::gdefs_guess`]), and
-    /// its register maps as the page builder guessed them.
-    fn static_contribs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        let mut out = no_units(v);
-        out.push((v.field(GDEFS), self.gdefs_guess(args, v)));
-        // (the maps of its routine's global integer register writes, as
-        // the page builder guessed them, [`FinishIn::maps`]: the
-        // page counter's readers fold past it while it runs,
-        // `crate::regfold`)
-        if let Some(fin) = FinishIn::of(v, args) {
-            for (n, m) in maps_of(v, fin.maps) {
-                out.push((crate::regfold::acc_field(v, n), m.encode(v)));
-            }
-        }
-        Some(out)
-    }
     /// What the last finisher running the same routine defined, with
     /// its values: the text after this one runs on them, and runs again
     /// only where a value differs (the page number's readers). The page
@@ -1960,20 +1826,13 @@ impl Operation for Finish {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
-    /// What it folds ([`PageNode::folds`]) only: its break is its
-    /// argument, and the material its page begins with ([`SCAN_MAT`]) it
-    /// reads in its run, where the continuation before it is predicted
-    /// ([`Scan::predicted_defs`]): the engine's gate takes no prediction.
-    fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        Some(PageNode::Finish.reads(v, &[]))
-    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let t_fin = std::time::Instant::now();
         let _ = phitex_pdf::phase::take();
-        let pos = cx.args();
+        let pos = cx.args().to_vec();
         let o = ops(&self.0);
-        let out = run_node_parking(cx, o, true, |r| {
+        let out = run_node(cx, o, |r| {
             if crate::exec::obs_flag!("PHITEX_FIN_TRACE") {
                 let j = pos.first().map_or(0, |&x| int_of(r.v, x));
                 eprintln!(
@@ -2335,10 +2194,17 @@ impl Run<'_, '_> {
         let Some(l) = self.cx.at(u, Step::Index(5)) else {
             return Vec::new();
         };
-        let p0 = self.cx.path(&[Step::Index(0)]);
-        let p2 = self.cx.path(&[Step::Index(2)]);
-        let fs = self.cx.get(l, Step::Each(p0)).map(|x| list_of(v, x)).unwrap_or_default();
-        let afters = self.cx.get(l, Step::Each(p2)).map(|x| list_of(v, x)).unwrap_or_default();
+        // (each local's field and where it was made, read as those alone)
+        let n = self.cx.len(l).unwrap_or(0);
+        let mut fs = Vec::new();
+        let mut afters = Vec::new();
+        for i in 0..n {
+            let Some(e) = self.cx.at(l, Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) else {
+                continue;
+            };
+            fs.push(self.cx.get(e, Step::Index(0)).unwrap_or(ValueId::UNIT));
+            afters.push(self.cx.get(e, Step::Index(2)).unwrap_or_else(|| v.int(-1)));
+        }
         let tag = v.str(LAZY);
         fs
             .iter()
@@ -2419,7 +2285,7 @@ impl Run<'_, '_> {
         let Some(fin) = FinishIn::of(v, &pos) else {
             return Ok(ValueId::UNIT);
         };
-        let w = self.cx.acc_view(v.field(PITEMS), fin.after, Some(fin.piece))?;
+        let w = self.view_through(PITEMS, fin.after, fin.piece)?;
         let Some(u) = self.cx.at(w, Step::Index(n(1))) else {
             return Ok(ValueId::UNIT);
         };

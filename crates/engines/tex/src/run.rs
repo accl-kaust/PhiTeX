@@ -103,7 +103,7 @@ pub(crate) fn record_check(
     // job's environment sets at the document's start, else the supplied
     // environment's; `Err` where the node reaching it defined it only
     // inside the scope it opened, an entry the engine does not show)
-    let env: phitex_defuse::FxHashMap<Field, ValueId> = eng.environment().collect();
+    let env: phitex_defuse::FxHashMap<Field, ValueId> = eng.environment().into_iter().collect();
     let reaching = |n: phitex_defuse::NodeId, f: Field| match eng.reaching_def(n, f) {
         Some(d) => eng.def_value(d, f).map(Some).ok_or(()),
         None => Ok(start.get(&f).or_else(|| env.get(&f)).copied()),
@@ -768,10 +768,6 @@ pub(crate) struct Run<'c, 'a> {
     /// The engine cut the run off at a mark: its last run's result stands
     /// ([`phitex_defuse::Ctx::checkpoint`]).
     pub cut_off: bool,
-    /// The page builder's loop marks taken so far, and whether it takes
-    /// them ([`crate::pages::KeptLoop`]).
-    pub page_marks: Vec<(std::sync::Arc<crate::pages::PageLoop>, u64)>,
-    pub page_marks_on: bool,
     /// (observe, `PHITEX_RESUME_VERIFY=1`) The mark the engine resumed
     /// this run at, with the last run's state there: the run goes from its
     /// start instead and compares its state at that mark.
@@ -1068,8 +1064,6 @@ impl<'c, 'a> Run<'c, 'a> {
             anchor_skip_at: None,
             old_marks: None,
             marks_on: false,
-            page_marks: Vec::new(),
-            page_marks_on: false,
             cut_off: false,
             cut_check: None,
             verify_at: None,
@@ -1262,41 +1256,13 @@ impl<'c, 'a> Run<'c, 'a> {
             .fields
             .get_at(self.v, self.cx.values_epoch(), &format!("wpre:{name}"));
         for g in [pf, f] {
-            let r = self.cx.use_field_at(g, Some(at));
+            let r = self.cx.read_at(g, phitex_defuse::At::AfterOwn(at));
             if r.is_err() {
                 note_stop(self.op_name(), g);
             }
             match r? {
-                phitex_defuse::FieldAt::Def(x, by) if g == f || by == Some(at) => {
-                    // (an integer register: with the maps contributed
-                    // after its definition up to the point applied,
-                    // `crate::regfold`)
-                    if g == f
-                        && let Some(n) = self.count_reg(loc)
-                    {
-                        let acc = crate::regfold::acc_field(self.v, n);
-                        let m = crate::regfold::Affine::decode(
-                            self.v,
-                            self.cx.acc_range_to(acc, by, Some(at))?,
-                        );
-                        let y = m.apply(crate::val::i32_of(self.v, Some(x)));
-                        return Ok(Some(self.v.int(i64::from(y))));
-                    }
-                    return Ok(Some(x));
-                }
-                phitex_defuse::FieldAt::Unset if g == f => {
-                    if let Some(n) = self.count_reg(loc) {
-                        let acc = crate::regfold::acc_field(self.v, n);
-                        let m = crate::regfold::Affine::decode(
-                            self.v,
-                            self.cx.acc_range_to(acc, None, Some(at))?,
-                        );
-                        if m != crate::regfold::Affine::ID {
-                            return Ok(Some(self.v.int(i64::from(m.apply(0)))));
-                        }
-                    }
-                    return Ok(Some(ValueId::UNIT));
-                }
+                phitex_defuse::FieldAt::Def(x, by) if g == f || by == Some(at) => return Ok(Some(x)),
+                phitex_defuse::FieldAt::Unset if g == f => return Ok(Some(ValueId::UNIT)),
                 phitex_defuse::FieldAt::Gone => return Ok(None),
                 _ => {}
             }
@@ -1318,7 +1284,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 return Ok((x != self.absent()).then_some(x));
             }
         }
-        let r = self.cx.use_field(f);
+        let r = self.cx.read(f);
         if r.is_err() {
             note_stop(self.op_name(), f);
         }
@@ -1364,7 +1330,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(c.clone());
         }
         let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
-        let x = self.cx.use_field(f)?;
+        let x = self.cx.read(f)?;
         crate::exec::widths::read(f);
         let v = self.v;
         let cells: Option<Rc<[ValueId]>> = x
@@ -1391,7 +1357,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(x);
         }
         let f = self.loc_field(loc);
-        let x = self.cx.use_field(f)?;
+        let x = self.cx.read(f)?;
         self.cell_eng.insert(loc, x);
         Ok(x)
     }
@@ -1640,43 +1606,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         }
         let f = self.loc_field(loc);
-        // (an integer register: its definition reaching here with the
-        // maps contributed after it applied, and this run's own,
-        // `crate::regfold`)
-        if let Some(n) = self.count_reg(loc) {
-            let acc = crate::regfold::acc_field(self.v, n);
-            let r = self.cx.acc_range_after_def(acc, f);
-            if r.is_err() {
-                note_stop(self.op_name(), f);
-            }
-            if crate::exec::obs_flag!("PHITEX_READS") {
-                self.trace_read(f, r.is_err());
-            }
-            let (base, fold) = r?;
-            if crate::exec::obs_str!("PHITEX_READS").is_some_and(|w| w == crate::val::field_name(self.v, f)) {
-                eprintln!(
-                    "reads-value: node {} {} base {:?} fold {:?}",
-                    self.cx.node().raw(),
-                    crate::val::field_name(self.v, f),
-                    base.map(|b| self.v.render(b)),
-                    crate::regfold::Affine::decode(self.v, fold)
-                );
-            }
-            let v = self.v;
-            let x = crate::val::i32_of(v, base);
-            let mut m = crate::regfold::Affine::decode(v, fold);
-            if let Some(&own) = self.reg_pending.get(&loc) {
-                m = m.then(own);
-            }
-            let y = if base.is_none() && m == crate::regfold::Affine::ID {
-                None
-            } else {
-                Some(v.int(i64::from(m.apply(x))))
-            };
-            self.st.fill(loc, y);
-            return Ok(());
-        }
-        let r = self.cx.use_field(f);
+        let r = self.cx.read(f);
         if r.is_err() {
             note_stop(self.op_name(), f);
         }
@@ -1702,7 +1632,14 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cmds
             );
         }
-        self.st.fill(loc, r?);
+        let mut x = r?;
+        // (an integer register: this run's own map writes before the read
+        // applied, [`Run::reg_apply_map`])
+        if let Some(&own) = self.reg_pending.get(&loc) {
+            let v = self.v;
+            x = Some(v.int(i64::from(own.apply(crate::val::i32_of(v, x)))));
+        }
+        self.st.fill(loc, x);
         Ok(())
     }
 
@@ -1813,28 +1750,11 @@ impl<'c, 'a> Run<'c, 'a> {
         before: bool,
     ) -> Result<phitex_defuse::FieldAt, phitex_defuse::Stop> {
         let r = if before {
-            self.cx.use_field_before(f, at)?
+            self.cx.read_at(f, phitex_defuse::At::Before(at))?
         } else {
-            self.cx.use_field_after_own(f, at)?
+            self.cx.read_at(f, phitex_defuse::At::AfterOwn(at))?
         };
-        let Some(n) = crate::val::field_name(self.v, f)
-            .strip_prefix("count:")
-            .and_then(|n| n.parse::<i32>().ok())
-        else {
-            return Ok(r);
-        };
-        let (x, site) = match r {
-            phitex_defuse::FieldAt::Def(x, site) => (Some(x), site),
-            phitex_defuse::FieldAt::Unset => (None, None),
-            phitex_defuse::FieldAt::Gone => return Ok(r),
-        };
-        let acc = crate::regfold::acc_field(self.v, n);
-        let m = crate::regfold::Affine::decode(self.v, self.cx.acc_range_to(acc, site, Some(at))?);
-        if m == crate::regfold::Affine::ID {
-            return Ok(r);
-        }
-        let y = self.v.int(i64::from(m.apply(crate::val::i32_of(self.v, x))));
-        Ok(phitex_defuse::FieldAt::Def(y, site))
+        Ok(r)
     }
 
     /// The engine value of location `loc` in the run's view.
@@ -2367,8 +2287,8 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (bound as [`Run::file`] binds them: a run that writes the file
         // later declares its loop-back and this runs again)
-        let _ = self.cx.use_field(k)?;
-        let _ = self.cx.use_field(w)?;
+        let _ = self.cx.read(k)?;
+        let _ = self.cx.read(w)?;
         // (a file the job writes whose text the client gave: read back,
         // or read whole, not as a document's units, [`Run::seed_written`])
         if self.seeded(key).is_some() || self.seed_text(key)?.is_some() {
@@ -2381,7 +2301,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::obs_flag!("PHITEX_TMP_FTRACE") {
             eprintln!("TMPF units {key} node {}", self.cx.node().raw());
         }
-        let Some(x) = self.cx.use_env(v.field(&format!("dfile:{key}")))? else {
+        let Some(x) = self.cx.env(v.field(&format!("dfile:{key}")))? else {
             return Ok(None);
         };
         if list_of(v, x).get(1).is_none_or(|&s| int_of(v, s) == 0) {
@@ -2399,7 +2319,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         let name = str_of(v, key);
         let f = v.field(&name);
-        let x = self.cx.use_field(f)?;
+        let x = self.cx.read(f)?;
         if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") {
             eprintln!(
                 "round-read: {name} {:016x} node {}",
@@ -2511,7 +2431,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::obs_flag!("PHITEX_READS") {
             self.trace_read(f, false);
         }
-        Ok(self.cx.use_field(f)?)
+        Ok(self.cx.read(f)?)
     }
 
     /// File `key`, one the job writes whose text the client gave, looked
@@ -2558,8 +2478,8 @@ impl<'c, 'a> Run<'c, 'a> {
         // file later in the evaluation, declaring its loop-back,
         // `Run::written_decl`, runs this again on it)
         if !self.cx.is_loopback(k) && !self.cx.is_loopback(w) {
-            let _ = self.cx.use_field(k)?;
-            let _ = self.cx.use_field(w)?;
+            let _ = self.cx.read(k)?;
+            let _ = self.cx.read(w)?;
             // (a file the job writes whose text the client gave: read
             // back from it here, as from its loop-backs once they are in
             // effect, [`Run::seed_written`])
@@ -2581,7 +2501,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.per_field(k)?
         };
         if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") && self.cx.is_loopback(k) {
-            let (kx, wx) = (self.cx.use_field(k)?, self.cx.use_field(w)?);
+            let (kx, wx) = (self.cx.read(k)?, self.cx.read(w)?);
             eprintln!(
                 "round-read: wkeys:{key} {:016x} wfile:{key} {:016x} tool {} node {}",
                 kx.map_or(0, ValueId::raw),
@@ -2602,7 +2522,7 @@ impl<'c, 'a> Run<'c, 'a> {
             }
         } else if self.cx.is_loopback(w) {
             // (its units' order, `ops::Files`; none: absent)
-            let x = self.cx.use_field(w)?;
+            let x = self.cx.read(w)?;
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                 eprintln!(
                     "aux-trace: read wfile {key}: {:?} units",
@@ -2625,7 +2545,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // tool's output, `crate::tools`; else the file system's)
             match self.tool_output(key)? {
                 Some(x) => Some(x),
-                None => self.cx.use_env(f)?,
+                None => self.cx.env(f)?,
             }
         };
         let x = x.filter(|&x| !crate::val::list_of(v, x).is_empty());
@@ -2898,7 +2818,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if !self.cx.is_loopback(k) {
             return Ok(None);
         }
-        let x = self.cx.use_field(k)?;
+        let x = self.cx.read(k)?;
         Ok((x != Some(crate::api::text_mark(self.v))).then_some(x))
     }
 
@@ -3041,7 +2961,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 // (a key whose loop-back the files node has not declared
                 // yet: the field bound, so this runs again when it does)
                 if !self.cx.is_loopback(wd) {
-                    let _ = self.cx.use_field(wd)?;
+                    let _ = self.cx.read(wd)?;
                     continue;
                 }
                 // (a global definition, outside a line's interpretation:
@@ -3060,7 +2980,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     self.st.rb_note(l, wd);
                     continue;
                 }
-                let Some(x) = self.cx.use_field(wd)? else {
+                let Some(x) = self.cx.read(wd)? else {
                     continue;
                 };
                 // (`PHITEX_KEYS_SHOW=part`, profile: the value a read-back
@@ -3195,8 +3115,8 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(false);
         };
         // (bound: this runs again once they are in effect)
-        let _ = self.cx.use_field(k)?;
-        let _ = self.cx.use_field(w)?;
+        let _ = self.cx.read(k)?;
+        let _ = self.cx.read(w)?;
         let text = str_of(v, t);
         // (each line as the stream's: a text an earlier line left open
         // goes on with the next; the first line that does more than
@@ -3295,7 +3215,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(None);
         }
         let v = self.v;
-        let Some(names) = self.cx.use_field(v.field(SEEDS))? else {
+        let Some(names) = self.cx.read(v.field(SEEDS))? else {
             return Ok(None);
         };
         if !list_of(v, names).iter().any(|&n| str_of(v, n) == key) {
@@ -3303,12 +3223,12 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if self
             .cx
-            .use_field(v.field("loopfiles"))?
+            .read(v.field("loopfiles"))?
             .is_none_or(|x| x == ValueId::UNIT)
         {
             return Ok(None);
         }
-        Ok(self.cx.use_field(v.field(&format!("{SEEDS}:{key}")))?)
+        Ok(self.cx.read(v.field(&format!("{SEEDS}:{key}")))?)
     }
 
     /// The definitions an interpreted text made since stamp `base`,
@@ -3543,7 +3463,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // none, a prelude's)
         if self
             .cx
-            .use_field(v.field("loopfiles"))?
+            .read(v.field("loopfiles"))?
             .is_none_or(|x| x == ValueId::UNIT)
         {
             return Ok(());
@@ -3729,7 +3649,10 @@ impl<'c, 'a> Run<'c, 'a> {
                 .copied()
                 .filter(|l| matches!(l, Locality::ScopeAt(_)))
                 .collect();
-            frames.sort_unstable();
+            frames.sort_unstable_by_key(|l| match l {
+                Locality::ScopeAt(k) => *k,
+                _ => 0,
+            });
             frames.dedup();
             for l in frames {
                 out.push((f, v.list(Vec::new()), l));
@@ -4174,7 +4097,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(Some(c));
         }
         let f = self.loc_field(l);
-        let Some(x) = self.cx.use_field_proj(f, self.ops.class_proj)? else {
+        let Some(x) = self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.class_proj))? else {
             return Ok(None);
         };
         let Ok(c) = u8::try_from(int_of(self.v, x)) else {
@@ -4202,7 +4125,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(Some(k));
         }
         let f = self.loc_field(l);
-        let Some(x) = self.cx.use_field_proj(f, self.ops.step_proj)? else {
+        let Some(x) = self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.step_proj))? else {
             return Ok(None);
         };
         let k = int_of(self.v, x);
@@ -4241,7 +4164,7 @@ impl<'c, 'a> Run<'c, 'a> {
             phitex_defuse::Step::Proj(self.ops.num_proj),
             phitex_defuse::Step::Cmp(v.int(-1)),
         ]);
-        let b = self.cx.use_field_path(f, p)?.is_some_and(|x| int_of(v, x) > 0);
+        let b = self.cx.read_path(f, p)?.is_some_and(|x| int_of(v, x) > 0);
         self.num_memo.insert(l, b);
         Ok(b)
     }
@@ -4259,7 +4182,7 @@ impl<'c, 'a> Run<'c, 'a> {
             phitex_defuse::Step::Proj(self.ops.num_proj),
             phitex_defuse::Step::Cmp(v.int(k)),
         ]);
-        Ok(self.cx.use_field_path(f, p)?.map_or(0, |x| int_of(v, x)))
+        Ok(self.cx.read_path(f, p)?.map_or(0, |x| int_of(v, x)))
     }
 
     /// The number of `tok`'s meaning (a macro [`Run::num_lookup`] found
@@ -4272,7 +4195,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let f = self.loc_field(l);
         Ok(self
             .cx
-            .use_field_proj(f, self.ops.num_proj)?
+            .read_path(f, phitex_defuse::PathId::of_proj(self.ops.num_proj))?
             .map_or(0, |x| i32::try_from(int_of(v, x)).unwrap_or(0)))
     }
 
@@ -4292,7 +4215,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(Some(d));
         }
         let f = self.loc_field(l);
-        let d = match self.cx.use_field_proj(f, self.ops.defined_proj)? {
+        let d = match self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.defined_proj))? {
             Some(x) => int_of(self.v, x) != 0,
             None => return Ok(None),
         };
@@ -4317,7 +4240,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(Some(o));
         }
         let f = self.loc_field(l);
-        let Some(x) = self.cx.use_field_proj(f, self.ops.outer_proj)? else {
+        let Some(x) = self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.outer_proj))? else {
             return Ok(None);
         };
         let o = int_of(self.v, x) != 0;
@@ -4359,7 +4282,7 @@ impl<'c, 'a> Run<'c, 'a> {
             eprintln!("splice: node {} mark {id}", self.cx.node().raw());
         }
         let field = v.field(&format!("{}{id}", crate::api::DOC_MARKS));
-        let Some(text) = self.cx.use_field(field)?.map(|t| str_of(v, t)) else {
+        let Some(text) = self.cx.read(field)?.map(|t| str_of(v, t)) else {
             return Ok(false);
         };
         let Some(s) = self.input.top_line_mut() else {
@@ -4721,7 +4644,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         }
         let v = self.v;
-        let x = self.cx.use_field(v.field(COND_STACK))?;
+        let x = self.cx.read(v.field(COND_STACK))?;
         // (`PHITEX_COND_TRACE=1`, observe: the conditionals a run takes
         // from the node before it, and those it leaves)
         if crate::exec::obs_flag!("PHITEX_COND_TRACE") {
@@ -4932,7 +4855,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     if l == Locality::Global && self.cx.loop_part(w, p0) == Some(x) && self.cx.define_forward_at(f, w, p0, Some(p1), l) {
                         continue;
                     }
-                    let _ = self.cx.use_field(w);
+                    let _ = self.cx.read(w);
                 }
                 self.cx.define_with(f, x, l);
             }
@@ -5001,18 +4924,19 @@ impl<'c, 'a> Run<'c, 'a> {
         if cfg!(feature = "observe") {
             self.check_contribs_complete();
         }
-        if crate::exec::obs_flag!("PHITEX_REG_TRACE") {
-            eprintln!(
-                "reg-end: node {} resumed {} maps {:?}",
-                self.cx.node().raw(),
-                self.resumed,
-                self.reg_pending.iter().map(|(&l, m)| (self.count_reg(l), *m)).collect::<Vec<_>>()
-            );
-        }
+        // (an integer register's map writes: `add c` a relation on the
+        // value reaching the run, `set c` a definition; a location the run
+        // defines outright has them in its value)
         for (l, m) in std::mem::take(&mut self.reg_pending) {
-            if let Some(n) = self.count_reg(l) {
+            if self.count_reg(l).is_none() || self.st.defined_after(l, 0) {
+                continue;
+            }
+            let f = self.loc_field(l);
+            if m.keep {
+                self.cx.define_rel(f, i64::from(m.add));
+            } else {
                 let v = self.v;
-                self.contribs.push((crate::regfold::acc_field(v, n), m.encode(v)));
+                self.cx.define_with(f, v.int(i64::from(m.add)), Locality::Global);
             }
         }
         let contribs_trace: Vec<String> = if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
@@ -5126,20 +5050,16 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cx.set_effect(self.effect);
         }
         // (a finisher's output: what its routine gave back, which the
-        // page builder reads where it placed it, `crate::pages::RTN`)
-        // (its register maps left out where they are those its arguments
-        // guessed, the builder folding the rest, `crate::pages::rtn_strip`;
-        // kept where they differ: the builder learns them for the next
-        // pages' guesses, whose finishers contribute the register folds
-        // their arguments name, `Finish::static_contribs`)
-        let guessed = crate::pages::FinishIn::of(self.v, &self.cx.args()).map(|f| f.maps);
-        let out = self.fin.as_ref().and_then(|c| c.rtn).map_or(ValueId::UNIT, |x| {
+        // next page step reads, `crate::pages::PAGE_OUT`)
+        let out = self.fin.as_ref().and_then(|c| c.rtn).unwrap_or(ValueId::UNIT);
+        if op == self.ops.finish
+            && let Some(fin) = crate::pages::FinishIn::of(self.v, self.cx.args())
+        {
             let v = self.v;
-            match guessed {
-                Some(g) if crate::pages::maps_of(v, g) != crate::pages::rtn_maps(v, x) => x,
-                _ => crate::pages::rtn_strip(v, x),
-            }
-        });
+            let x = crate::pages::page_out_value(v, fin.piece, fin.nth, out);
+            self.cx.define_with(v.field(crate::pages::PAGE_OUT), x, Locality::Global);
+            self.cx.contribute(v.field(crate::pages::FIN_DONE), v.seq_unit(ValueId::UNIT));
+        }
         if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
             let v = self.v;
             let mut pubd: Vec<String> = published_trace
@@ -7163,7 +7083,7 @@ impl Run<'_, '_> {
     /// the read-back would have read them (`Run::read_back`).
     pub(crate) fn rb_flush(&mut self) {
         for w in self.st.rb_take_looked() {
-            let _ = self.cx.use_field(w);
+            let _ = self.cx.read(w);
         }
     }
 

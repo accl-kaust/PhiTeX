@@ -62,13 +62,7 @@ fn profile_doc() {
     let src = common::read(&path);
     let prelude = common::plain();
     let t0 = std::time::Instant::now();
-    let mut opts = common::options(&format!("./{stem}.tex"), &stem, "", &dir);
-    if let Some(n) = std::env::var("PHITEX_SPEC_BUDGET")
-        .ok()
-        .and_then(|x| x.parse().ok())
-    {
-        opts.speculation_budget = n;
-    }
+    let opts = common::options(&format!("./{stem}.tex"), &stem, "", &dir);
     let built = common::build(opts, Some(&prelude), &src);
     eprintln!("{stem}: {:?}\n{:#?}", t0.elapsed(), built.stats);
     let mut bd = built;

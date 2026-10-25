@@ -2302,25 +2302,6 @@ impl phitex_defuse::Operation for PdfPage {
     fn name(&self) -> &'static str {
         "pdfpage"
     }
-    fn defs(
-        &self,
-        _: &[ValueId],
-        _: &Values,
-    ) -> Option<Vec<(phitex_defuse::Field, phitex_defuse::Locality)>> {
-        Some(Vec::new())
-    }
-    /// Nothing: a range read before the loop-backs settle never waits
-    /// for it.
-    fn static_contribs(
-        &self,
-        _: &[ValueId],
-        _: &Values,
-    ) -> Option<Vec<(phitex_defuse::Field, ValueId)>> {
-        Some(Vec::new())
-    }
-    fn final_only(&self, _: &[ValueId], _: &Values) -> bool {
-        true
-    }
     fn run(&self, cx: &mut phitex_defuse::Ctx<'_>) -> Result<ValueId, phitex_defuse::Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();
@@ -2336,7 +2317,7 @@ impl phitex_defuse::Operation for PdfPage {
         // list changing leaves it standing)
         let p = cx.path(&[phitex_defuse::Step::Index(u32::try_from(i).unwrap_or(u32::MAX))]);
         let Some(k) = cx
-            .use_field_path(v.field(PAGE_KEYS), p)?
+            .read_path(v.field(PAGE_KEYS), p)?
             .and_then(|x| v.as_int(x))
         else {
             return Ok(ValueId::UNIT);
@@ -2378,7 +2359,9 @@ fn sealed_units(
         return Ok(out);
     }
     let node = crate::pages::node_of;
-    let w = cx.acc_view(v.field(crate::pages::PITEMS), after.map(node), Some(node(*to)))?;
+    let f = v.field(crate::pages::PITEMS);
+    let end = crate::pages::through(cx, f, node(*to))?;
+    let w = cx.view(f, after.map(node), end)?;
     for &(p, i) in at.iter().filter(|x| want.binary_search(&x.0).is_ok()) {
         let Some(u) = cx.at(w, Step::Index(i)) else { continue };
         if cx.get(u, Step::Index(0)).and_then(|x| v.as_int(x)) != Some(p) {
@@ -2716,7 +2699,7 @@ fn allocs_range(r: &mut Run<'_, '_>, why: &str) -> R<ValueId> {
         eprintln!("allocs-read: node {} {why}", r.cx.node().raw());
     }
     let v = r.v;
-    Ok(r.cx.acc_range(v.field(ALLOCS), None)?)
+    Ok(r.cx.fold(v.field(ALLOCS), None, None)?)
 }
 
 /// The fonts read-time writes used ([`fonts_first_used`]).
@@ -3080,9 +3063,9 @@ pub(crate) fn page_offset_at(r: &mut Run<'_, '_>, at: u64, c: i64) -> R<i64> {
     }
     let v = r.v;
     let to = phitex_defuse::NodeId::from_raw(at);
-    let mut range = r.cx.acc_range_to(v.field(ALLOCS), None, Some(to))?;
+    let mut range = crate::pages::fold_through(r.cx, v.field(ALLOCS), None, to)?;
     let me = i64::from_ne_bytes(at.to_ne_bytes());
-    let after = r.cx.acc_range(v.field(ALLOCS), Some(to))?;
+    let after = r.cx.fold(v.field(ALLOCS), Some(to), None)?;
     for u in v.seq_to_vec(after) {
         let brk = list_of(v, u).get(12).map(|&b| list_of(v, b)).unwrap_or_default();
         if let [pid, k] = brk[..]
@@ -3094,7 +3077,7 @@ pub(crate) fn page_offset_at(r: &mut Run<'_, '_>, at: u64, c: i64) -> R<i64> {
     }
     let f = fold_allocs(v, range);
     let mut there = |name: &str| -> R<Option<ValueId>> {
-        Ok(match r.cx.use_field_at(v.field(name), Some(to))? {
+        Ok(match r.cx.read_at(v.field(name), phitex_defuse::At::AfterOwn(to))? {
             phitex_defuse::FieldAt::Def(x, _) => Some(x),
             _ => None,
         })
@@ -3129,7 +3112,7 @@ pub(crate) fn load_numbers(r: &mut Run<'_, '_>) -> R<FxHashMap<i64, i64>> {
     };
     let order = r.get(crate::api::FONT_ORDER)?;
     let f = v.field(FONT_LOADS);
-    let before = r.cx.acc_range(f, None)?;
+    let before = r.cx.fold(f, None, None)?;
     // (the numbers of the format's fonts and of the loads before the run:
     // a pure function's memo by those values, every page step asks)
     let key = phitex_defuse::hash_words(
@@ -3188,7 +3171,7 @@ pub(crate) fn font_number(r: &mut Run<'_, '_>, f: i64) -> R<i64> {
     if let Some(&n) = seen.get(&f) {
         return Ok(n);
     }
-    let line = v.seq_to_vec(r.cx.acc_range(v.field(XPAGES), None)?);
+    let line = v.seq_to_vec(r.cx.fold(v.field(XPAGES), None, None)?);
     let own: Vec<ValueId> = r
         .contribs
         .iter()

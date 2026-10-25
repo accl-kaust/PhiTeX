@@ -746,18 +746,6 @@ impl Session {
                     // (a recorded node's outputs predicted from its record,
                     // so its readers run ahead on them)
                     pkg_predict: true,
-                    // (the pieces' run times an earlier build measured:
-                    // beside the format, as the records are)
-                    runtimes: self
-                        .runtimes_path()
-                        .and_then(|p| self.cache.as_ref()?.get(&p))
-                        .unwrap_or_default(),
-                    wait_fields: self.job.wait_long.then(|| {
-                        self.runtimes_path()
-                            .map(|p| p.with_extension("waitfields"))
-                            .and_then(|p| self.cache.as_ref()?.get(&p))
-                            .unwrap_or_default()
-                    }),
                     ..Options::default()
                 };
                 let opts = Options {
@@ -851,11 +839,6 @@ impl Session {
             if b.pkgrec_changed() {
                 self.records_dirty = true;
             }
-            // (written when it differs from the stored one)
-            self.store_runtimes(b);
-            if self.job.wait_long {
-                self.store_wait_fields(b);
-            }
             // (`PHITEX_CHAIN_DUMP=1`: the critical chain in full, and its
             // waits, for measurements)
             if phitex_tex::OBSERVE && std::env::var_os("PHITEX_CHAIN_DUMP").is_some() {
@@ -896,15 +879,7 @@ impl Session {
             }
         }
         lap(&mut phases, "records");
-        // (a long session: what the old texts' runs memoized and nothing
-        // reaches any more goes, so the tables stay bounded)
-        let mut gc = (Duration::ZERO, 0);
-        if let Some(b) = &mut self.build {
-            let t = Instant::now();
-            gc.1 = b.collect_garbage();
-            gc.0 = t.elapsed();
-        }
-        lap(&mut phases, "gc");
+        let gc = (Duration::ZERO, 0);
         self.status.set("output");
         let b = self.build.as_ref().expect("built above");
         let (bytes, log) = b.output_shared();
@@ -1288,40 +1263,6 @@ impl Session {
             return None;
         }
         Some(self.cache.as_ref()?.doc_dir(&self.job.path).join("noderec"))
-    }
-
-    /// The cache's file of the pieces' run times ([`Build::export_runtimes`]):
-    /// beside the format, as the package loads' records are.
-    fn runtimes_path(&self) -> Option<PathBuf> {
-        if self.job.ini {
-            return None;
-        }
-        let c = self.cache.as_ref()?;
-        let text = format!("\\input {}\n", self.job.engine.ini);
-        Some(c.format_file(&self.format_name(&text), "runtimes"))
-    }
-
-    /// The fields long pieces' readers wait on ([`Build::export_wait_fields`]),
-    /// in the file beside the run times'.
-    fn store_wait_fields(&self, b: &Build) {
-        let (Some(c), Some(p)) = (&self.cache, self.runtimes_path()) else {
-            return;
-        };
-        let p = p.with_extension("waitfields");
-        let out = b.export_wait_fields();
-        if c.get(&p).as_deref() != Some(out.as_slice()) {
-            let _ = c.put(&p, &out, &[]);
-        }
-    }
-
-    fn store_runtimes(&self, b: &Build) {
-        let (Some(c), Some(p)) = (&self.cache, self.runtimes_path()) else {
-            return;
-        };
-        let out = b.export_runtimes();
-        if c.get(&p).as_deref() != Some(out.as_slice()) {
-            let _ = c.put(&p, &out, &[]);
-        }
     }
 
     /// The package loads' and the document nodes' records stored, when

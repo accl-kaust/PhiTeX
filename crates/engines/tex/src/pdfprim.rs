@@ -453,7 +453,7 @@ fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
     };
     if r.read_cut(&key)?.is_some() {
         let v = r.v;
-        if let Some(n) = r.cx.use_env(v.field(&format!("fsize:{key}")))? {
+        if let Some(n) = r.cx.env(v.field(&format!("fsize:{key}")))? {
             return Ok(Some(usize::try_from(int_of(v, n)).unwrap_or(0)));
         }
     }
@@ -913,9 +913,9 @@ fn rels_before(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
     let f = v.field(RT_RELS);
     let own = at == r.cx.node().raw();
     let range = if own {
-        r.cx.acc_range(f, None)?
+        r.cx.fold(f, None, None)?
     } else {
-        r.cx.acc_range_to(f, None, Some(phitex_defuse::NodeId::from_raw(at)))?
+        crate::pages::fold_through(r.cx, f, None, phitex_defuse::NodeId::from_raw(at))?
     };
     let me = i64::from_ne_bytes(at.to_ne_bytes());
     let brk = if own {
@@ -951,7 +951,7 @@ pub(crate) fn rt_before(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
         let field = r.loc_field(crate::fields::cell::PDF_OBJNUM);
         match r
             .cx
-            .use_field_before(field, phitex_defuse::NodeId::from_raw(at))?
+            .read_at(field, phitex_defuse::At::Before(phitex_defuse::NodeId::from_raw(at)))?
         {
             phitex_defuse::FieldAt::Def(x, _) => v.as_int(x).unwrap_or(0),
             _ => 0,

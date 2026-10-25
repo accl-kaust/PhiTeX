@@ -115,14 +115,6 @@ impl Operation for Break {
     fn name(&self) -> &'static str {
         "break"
     }
-    fn defs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(
-            break_defs(v)
-                .into_iter()
-                .map(|f| (f, Locality::Global))
-                .collect(),
-        )
-    }
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
         MayDefine::Names(break_defs(v))
     }

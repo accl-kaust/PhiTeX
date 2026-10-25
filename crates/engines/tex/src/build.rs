@@ -594,14 +594,14 @@ impl Run<'_, '_> {
             // (a count that is a lower bound, `MainTail::since_at_least`:
             // the deletion may reach past the last item)
             let last = if kind_only && !deletes {
-                self.cx.use_field_proj(v.field(MAIN_LAST), self.ops.tail_proj)?
+                self.cx.read_path(v.field(MAIN_LAST), phitex_defuse::PathId::of_proj(self.ops.tail_proj))?
             } else {
                 self.eng_read(v.field(MAIN_LAST))?
             };
             let since = self.eng_read(v.field(MAIN_SINCE))?;
             let (last, since, at_least) = MainTail::of_last(v, last, since);
             if deletes && (since > 1 || at_least) {
-                let all = self.cx.acc_range(f, None)?;
+                let all = self.cx.fold(f, None, None)?;
                 fold_entries(v, 0, &v.seq_to_vec(all), &mut st, &mut out);
                 // (this run's own items are in `all` only once it ends:
                 // they follow)
@@ -619,7 +619,7 @@ impl Run<'_, '_> {
         } else {
             // a list is this run's or the engine's (lid 0): no list is
             // opened by one node and read by another
-            let all = self.cx.acc_range(f, None)?;
+            let all = self.cx.fold(f, None, None)?;
             fold_entries(v, lid, &v.seq_to_vec(all), &mut st, &mut out);
         }
         let mut push = |x: ValueId, out: &mut Vec<ValueId>| {
@@ -670,7 +670,7 @@ impl Run<'_, '_> {
     /// only ([`MainTail::since_at_least`]) and a deletion reaches back.
     pub(crate) fn main_tail_full(&mut self, raw: &[ValueId]) -> R<MainTail> {
         let v = self.v;
-        let all = self.cx.acc_range(v.field("items"), None)?;
+        let all = self.cx.fold(v.field("items"), None, None)?;
         let mut out: Vec<ValueId> = Vec::new();
         let mut st = FoldState {
             sf: 1000,

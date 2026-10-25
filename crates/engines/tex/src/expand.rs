@@ -140,7 +140,7 @@ impl Run<'_, '_> {
                                 let f = self.v.field(&format!("cs:{n}"));
                                 {
                                     let l = self.loc_of(f);
-                                    let here = self.cx.use_field(f);
+                                    let here = self.cx.read(f);
                                     format!("here {here:?}, local {}", self.st.debug_slot(l))
                                 }
                             })

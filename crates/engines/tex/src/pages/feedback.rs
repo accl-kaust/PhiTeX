@@ -253,7 +253,7 @@ impl Run<'_, '_> {
         }
         self.resolve_page_params(&mut head)?;
         let s = PageStart::decode(v, self.eng_read(v.field(PAGE_START))?);
-        let units = v.seq_to_vec(self.cx.acc_range(v.field(crate::vprof::VPROF), s.anchor)?);
+        let units = v.seq_to_vec(self.cx.fold(v.field(crate::vprof::VPROF), s.anchor, None)?);
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
         let mut st = s.state(v);
         let mut items = vec![crate::vprof::decode(&s.prof)];
@@ -262,9 +262,7 @@ impl Run<'_, '_> {
         {
             // (the anchor's items after the candidate the page fired at,
             // its unit's alone read)
-            let w = self
-                .cx
-                .acc_view(v.field(crate::vprof::VPROF), after, Some(a))?;
+            let w = self.view_through(crate::vprof::VPROF, after, a)?;
             if let Some(u) = self.cx.get(w, phitex_defuse::Step::Last) {
                 let (pid, ints) = crate::vprof::unit_parts(v, u);
                 if pid == i64::from_ne_bytes(a.raw().to_ne_bytes()) {

@@ -32,11 +32,12 @@ use crate::val::{int_of, list_of, str_of};
 pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let t0 = std::time::Instant::now();
     let v = cx.values();
-    // where the pages end first: the page builder defines it once every
-    // page's finisher is placed; read first, the pages are all there (a
-    // node started before would assemble the pages so far and run again
-    // at each page added)
-    cx.use_field(v.field(crate::pages::PAGES_END))?;
+    // where the pages end and their finishers have run first: read first,
+    // the pages are all there (a node run before gives nothing, and runs
+    // again as they come in)
+    if !crate::pages::all_finished(cx)? {
+        return Ok(ValueId::UNIT);
+    }
     // (a PDF's file is the link's: the pages read for their mode only,
     // the first page's, [`pdf_mode`]; a DVI file is made of them all)
     let pdf = pdf_mode(cx)?;
@@ -46,7 +47,7 @@ pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, 
             .filter(|&x| x != ValueId::UNIT)
             .unwrap_or_else(|| v.str("")))
     } else {
-        let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
+        let pages = v.seq_to_vec(cx.fold(v.field("pages"), None, None)?);
         n = pages.len();
         dvi_file(cx, &pages)
     };
@@ -154,7 +155,7 @@ fn pdf_mode(cx: &mut Ctx<'_>) -> Result<bool, Stop> {
     // would wait on the end node, which waits on this one)
     let me = cx.node();
     Ok(cx
-        .acc_fold_path(v.field("pages"), None, Some(me), p)?
+        .fold_path(v.field("pages"), None, Some(me), p)?
         .is_some_and(|x| v.as_int(x).is_some_and(|n| n != 0)))
 }
 
@@ -165,7 +166,11 @@ fn pdf_mode(cx: &mut Ctx<'_>) -> Result<bool, Stop> {
 pub(crate) fn link(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let t0 = std::time::Instant::now();
     let v = cx.values();
-    cx.use_field(v.field(crate::pages::PAGES_END))?;
+    // (before the pages end and their finishers have run: nothing, run
+    // again as they come in)
+    if !crate::pages::all_finished(cx)? {
+        return Ok(ValueId::UNIT);
+    }
     if !pdf_mode(cx)? {
         // (its declared definition made in every mode: none here)
         cx.define_with(
@@ -186,7 +191,7 @@ pub(crate) fn link(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Sto
 /// A field reaching the end node.
 fn field(cx: &mut Ctx<'_>, name: &str) -> Result<Option<ValueId>, Stop> {
     let f = cx.values().field(name);
-    cx.use_field(f)
+    cx.read(f)
 }
 
 fn int_field(cx: &mut Ctx<'_>, name: &str) -> Result<i64, Stop> {
@@ -261,7 +266,7 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
                 continue;
             }
             let name = crate::fields::font_cell_name(i64::from(id), crate::fields::FontCell::Info);
-            let info = cx.use_field(v.field(&name))?;
+            let info = cx.read(v.field(&name))?;
             if let Some(i) = crate::fonts::info(v, info)
                 && let Some(l) = crate::fonts::load_info(v, &i)
             {
@@ -363,7 +368,7 @@ fn font_numbers(
     let mut order: Vec<i64> = field(cx, crate::api::FONT_ORDER)?
         .map(|x| list_of(v, x).iter().map(|&k| int_of(v, k)).collect())
         .unwrap_or_default();
-    let line = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?);
+    let line = v.seq_to_vec(cx.fold(v.field(crate::pdfout::XPAGES), None, None)?);
     for x in crate::pdfout::order_line(v, &line) {
         if let Some(k) = crate::pdfout::fontload_key(v, x)
             && !order.contains(&k)
@@ -492,8 +497,8 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     // (both walked from the last link's: their ropes' nodes this edit
     // left as they were are not decoded again)
     let memo = LINE_MEMO.get_or_init(Default::default);
-    let line_seq = cx.acc_range(v.field(crate::pdfout::XPAGES), None)?;
-    let items_seq = cx.acc_range(v.field(crate::pages::PITEMS), None)?;
+    let line_seq = cx.fold(v.field(crate::pdfout::XPAGES), None, None)?;
+    let items_seq = cx.fold(v.field(crate::pages::PITEMS), None, None)?;
     let (line, items) = {
         let mut g = memo.locked();
         (
@@ -536,7 +541,7 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let mut seed = Vec::new();
     for &k in &order {
         let name = crate::fields::font_cell_name(k, crate::fields::FontCell::Info);
-        let info = cx.use_field(v.field(&name))?;
+        let info = cx.read(v.field(&name))?;
         let (n, sz) = crate::fonts::info(v, info)
             .map(|i| (i.name, i.size))
             .unwrap_or_default();

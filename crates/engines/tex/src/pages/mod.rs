@@ -38,7 +38,7 @@
 
 use crate::exec::LockWait as _;
 use phitex_defuse::{
-    Claim, Ctx, Effect, Field, Locality, MayDefine, OpId, Operation, Stop, ValueId, Values,
+    Ctx, Effect, Field, Locality, MayDefine, OpId, Operation, Stop, ValueId, Values,
 };
 use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{List, Node};
@@ -49,7 +49,7 @@ use crate::build::{FoldState, IGNORE_DEPTH, Mode, fold_item};
 use crate::fields::Par;
 use crate::input::{Line, Seg};
 use crate::nodes::{self, Side};
-use crate::ops::{Shared, ops, run_node_parking};
+use crate::ops::{Shared, ops, run_node};
 use crate::run::{Halt, R, Run};
 use crate::runstate::{ContSaved, ContSlot, ContState, Loc, State};
 use crate::val::{
@@ -125,9 +125,6 @@ impl phitex_defuse::Monoid for MissMonoid {
     }
     fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
         v.seq_concat(a, b)
-    }
-    fn speculate(&self) -> bool {
-        true
     }
 }
 
@@ -211,15 +208,6 @@ impl PageNode {
         !self.runs_text()
     }
 
-    /// The read hint: the fields `gate` the node cannot run without, and
-    /// [`PageNode::folds`].
-    pub(crate) fn reads(self, v: &Values, gate: &[&str]) -> Vec<Field> {
-        gate.iter()
-            .copied()
-            .chain(self.folds().iter().copied())
-            .map(|f| v.field(f))
-            .collect()
-    }
 }
 
 impl Run<'_, '_> {
@@ -248,9 +236,87 @@ impl Run<'_, '_> {
         }
         let f = self.v.field(name);
         Ok(match to {
-            None => self.cx.acc_range(f, from)?,
-            Some(_) => self.cx.acc_range_to(f, from, to)?,
+            None => self.cx.fold(f, from, None)?,
+            Some(to) => fold_through(self.cx, f, from, to)?,
         })
+    }
+
+    /// A view on `name`'s contributions after `from` up to and with
+    /// `to`'s ([`through`]).
+    pub(crate) fn view_through(
+        &mut self,
+        name: &str,
+        from: Option<phitex_defuse::NodeId>,
+        to: phitex_defuse::NodeId,
+    ) -> R<phitex_defuse::View> {
+        let f = self.v.field(name);
+        let end = through(self.cx, f, to)?;
+        Ok(self.cx.view(f, from, end)?)
+    }
+}
+
+/// Where a window of `f`'s contributions that ends with `to`'s own ends:
+/// the next contributor after `to` (the window stops before it), none
+/// where there is none or it has not committed (the reader's position:
+/// a contribution coming in there re-asks it).
+pub(crate) fn through(
+    cx: &mut phitex_defuse::Ctx<'_>,
+    f: Field,
+    to: phitex_defuse::NodeId,
+) -> Result<Option<phitex_defuse::NodeId>, phitex_defuse::Stop> {
+    Ok(cx.next_contribution(f, Some(to))?.map(|n| n.0))
+}
+
+/// The fold of `f`'s contributions after `from` up to and with `to`'s.
+pub(crate) fn fold_through(
+    cx: &mut phitex_defuse::Ctx<'_>,
+    f: Field,
+    from: Option<phitex_defuse::NodeId>,
+    to: phitex_defuse::NodeId,
+) -> Result<ValueId, phitex_defuse::Stop> {
+    let end = through(cx, f, to)?;
+    cx.fold(f, from, end)
+}
+
+/// The field every finisher defines at its position: what its routine
+/// gave back ([`RTN`]'s value) as `[piece, nth, output]`, the piece its
+/// page fired in and the pages fired in it before. The step after a
+/// finisher reads it there; one naming another page (its finisher not
+/// yet in) is no answer: the step runs on its guess and is re-asked when
+/// its finisher's comes in.
+pub(crate) const PAGE_OUT: &str = "pages:out";
+
+/// One unit from every finisher's run, at its position: the finishers
+/// that have run, which the writers count against [`PAGES_END`]'s pages
+/// ([`all_finished`]).
+pub(crate) const FIN_DONE: &str = "pages:fin";
+
+/// Whether the pages have ended and every page's finisher has run: read
+/// as the pages fired and the count of finishers run against them, so a
+/// writer before that gives nothing and runs again once the count is in.
+pub(crate) fn all_finished(cx: &mut phitex_defuse::Ctx<'_>) -> Result<bool, phitex_defuse::Stop> {
+    let v = cx.values();
+    let Some(n) = cx.read(v.field(PAGES_END))? else {
+        return Ok(false);
+    };
+    // (read as the count against the pages: an answer that stays the
+    // same while the count grows short of them)
+    let p = cx.path(&[phitex_defuse::Step::Len, phitex_defuse::Step::Cmp(n)]);
+    let c = cx.fold_path(v.field(FIN_DONE), None, None, p)?;
+    Ok(c.and_then(|c| v.as_int(c)).is_some_and(|c| c >= 0))
+}
+
+/// [`PAGE_OUT`]'s value.
+pub(crate) fn page_out_value(v: &Values, piece: phitex_defuse::NodeId, nth: u32, out: ValueId) -> ValueId {
+    v.list(vec![v.int(i64::from_ne_bytes(piece.raw().to_ne_bytes())), v.int(i64::from(nth)), out])
+}
+
+/// The output in a [`PAGE_OUT`] value, where it names page `(piece,
+/// nth)`.
+pub(crate) fn page_out_of(v: &Values, x: ValueId, piece: phitex_defuse::NodeId, nth: u32) -> Option<ValueId> {
+    match list_of(v, x)[..] {
+        [p, n, out] if int_of(v, p) == i64::from_ne_bytes(piece.raw().to_ne_bytes()) && int_of(v, n) == i64::from(nth) => Some(out),
+        _ => None,
     }
 }
 

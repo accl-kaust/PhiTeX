@@ -24,9 +24,15 @@ pub(crate) struct FormatEnv {
     /// The nodes, serialised in order: node `k` at `offs[k]`.
     nodes: Vec<u8>,
     offs: Vec<u32>,
-    /// By field (its id, a hash of its name), each field once: the
-    /// field's id, its name's node, its value's node.
+    /// By field (a hash of its name, [`name_key`]: a field's id is its
+    /// value store's), each field once: the key, its name's node, its
+    /// value's node.
     binds: Vec<(u64, u32, u32)>,
+}
+
+/// A field's key in [`FormatEnv`]: its name's hash.
+fn name_key(name: &str) -> u64 {
+    phitex_defuse::hash_bytes(0, name.as_bytes())
 }
 
 /// The values a job made of a format's nodes, by node (each once).
@@ -45,7 +51,7 @@ impl FormatEnv {
                 let f = v.field(name);
                 let n = w.node(v, f.0);
                 let k = w.node(v, *x);
-                (f.0.raw(), n, k)
+                (name_key(name), n, k)
             })
             .collect();
         // (the last given of a field first among its own, which the
@@ -78,7 +84,7 @@ impl FormatEnv {
 
     /// The value bound to `name`, made in `v`.
     pub(crate) fn get(&self, v: &Values, name: &str, made: &Made) -> Option<ValueId> {
-        let f = v.field(name).0.raw();
+        let f = name_key(name);
         let i = self.binds.binary_search_by_key(&f, |b| b.0).ok()?;
         Some(self.value(v, self.binds[i].2, made))
     }
@@ -86,7 +92,8 @@ impl FormatEnv {
     /// The value bound to field `f`, made in `v` (none: the format binds
     /// no such field).
     pub(crate) fn get_field(&self, v: &Values, f: Field, made: &Made) -> Option<ValueId> {
-        let i = self.binds.binary_search_by_key(&f.0.raw(), |b| b.0).ok()?;
+        let k = v.with_str(f.0, name_key)?;
+        let i = self.binds.binary_search_by_key(&k, |b| b.0).ok()?;
         Some(self.value(v, self.binds[i].2, made))
     }
 

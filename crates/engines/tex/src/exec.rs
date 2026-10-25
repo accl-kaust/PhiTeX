@@ -1,36 +1,21 @@
-//! The engine's executor: a batch of runs, and the engine's parallel
-//! passes, on up to `threads` threads. The schedule changes how fast,
-//! never what: every result lands in its index's slot and is read back
-//! in index order, so any thread count, 1 included, gives the same
-//! output.
+//! The client's parallel passes (a hint pass's chunks, a PDF's page
+//! contents, the DVI file's pages) on up to `threads` threads, the
+//! operations' counters, and the debug switches. The engine runs nodes on
+//! its own workers (`phitex_defuse::Engine::evaluate`); nothing here
+//! schedules a node. A pass's results land in their index's slot and are
+//! read back in index order, so any thread count gives the same output.
 //!
-//! One impl of `Executor`, pluggable by target:
-//! - native, feature `rayon` (default): a persistent rayon pool per
-//!   thread count;
-//! - native without it: workers scoped to each batch (`std::thread::scope`);
-//! - wasm32 with `atomics` (shared memory): the same rayon pool, its
-//!   workers spawned by the host through the callback given to
-//!   [`set_spawn_worker`] (a web worker each, as wasm-bindgen-rayon
-//!   does); the host adapts its own bindings, phitex-tex has none;
-//! - wasm32 without `atomics`, or one thread, or no host callback on
-//!   wasm32: in order on the calling thread.
-//!
-//! Which thread: the evaluation (`Build::with`, `Build::edit`) blocks in
-//! `for_each` until a batch has run, so on wasm32 it must run in a
-//! worker, never on the browser's main thread (which may not block).
-//! Natively any thread may run it. The thread count is
-//! `Options::threads`, else `PHITEX_THREADS`, else the available
-//! parallelism; on wasm32 the host registers its worker callback before
-//! the first build (without it the build runs in order). Workspace
-//! rule: no `unsafe`; borrowed closures reach the workers through
-//! rayon's scoped API or `std::thread::scope`.
+//! Natively, feature `rayon` (default): a persistent rayon pool per
+//! thread count; without it workers scoped to each pass. On wasm32 with
+//! `atomics` the same pool, its workers spawned by the host through the
+//! callback given to [`set_spawn_worker`]; else in order on the calling
+//! thread.
 
 use phitex_defuse::FxHashMap;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use phitex_defuse::{Executor, RunResult};
 
 /// Whether the environment variable `$name` is set, read once per
 /// process (a `getenv` takes the environment's lock and scans it; the
@@ -116,17 +101,6 @@ pub(crate) use prof_flag;
 /// Below this many items an engine pass runs on the calling thread
 /// (its items cost microseconds).
 const GRAIN: usize = 64;
-
-/// Below this many jobs a batch of runs goes inline. A run is a
-/// paragraph region, a page step or a format (hundreds of microseconds
-/// to seconds), so any batch of two or more is worth a hand-off to the
-/// pool.
-/// (`profile`, `PHITEX_POOL_SINGLE`: a batch of one job goes to the pool
-/// too, to study a run's cost on another thread than the one before
-/// without company.)
-fn job_grain() -> usize {
-    if prof_flag!("PHITEX_POOL_SINGLE") { 1 } else { 2 }
-}
 
 /// How the host starts a worker thread: it runs the closure on a new
 /// worker (on wasm32: a web worker sharing the module's memory).
@@ -328,165 +302,45 @@ pub(crate) const KINDS: [&str; 10] = [
     "exec", "load", "pages", "break", "finish", "resume", "files", "link", "dvi", "put",
 ];
 
-/// The executor of an evaluation, with its counters: the time its
-/// operations ran (summed over runs), and the most runs at once.
-pub(crate) struct Threads {
-    pub n: usize,
-    watch: Option<Watch>,
-    ops: std::sync::Arc<OpCounters>,
-    batches: AtomicU64,
-    batches_inline: AtomicU64,
-    jobs_max_batch: AtomicUsize,
-    /// (`profile`) the batches handed to the pool: their jobs, the
-    /// nanoseconds from the hand-over to the last result, and the
-    /// longest job's of each: the difference is the dispatch's (the
-    /// workers' wake, the caller's wait for the last of them)
-    pooled: AtomicU64,
-    pooled_jobs: AtomicU64,
-    pooled_ns: AtomicU64,
-    pooled_longest_ns: AtomicU64,
-    /// One thread taking on `.0` threads once the evaluation has more
-    /// than `.1` nodes run and queued ([`Executor::widen`]).
-    widen: Option<(usize, usize)>,
+/// The operations' counters ([`NodeTimer`], `profile`), summed over the
+/// process, read after each evaluation ([`take_counters`]).
+fn counters() -> &'static OpCounters {
+    static C: OnceLock<OpCounters> = OnceLock::new();
+    C.get_or_init(OpCounters::default)
 }
 
-impl Threads {
-    pub(crate) fn new(n: usize) -> Threads {
-        Threads {
-            n,
-            watch: None,
-            ops: std::sync::Arc::default(),
-            batches: AtomicU64::new(0),
-            batches_inline: AtomicU64::new(0),
-            jobs_max_batch: AtomicUsize::new(0),
-            pooled: AtomicU64::new(0),
-            pooled_jobs: AtomicU64::new(0),
-            pooled_ns: AtomicU64::new(0),
-            pooled_longest_ns: AtomicU64::new(0),
-            widen: None,
-        }
-    }
-
-    /// One thread until the evaluation has more than `limit` nodes run
-    /// and queued, then `n` ([`Executor::widen`]).
-    pub(crate) fn widening(mut self, n: usize, limit: usize) -> Threads {
-        if self.n <= 1 && n > 1 {
-            self.widen = Some((n, limit));
-        }
-        self
-    }
-
-    /// The executor reporting to `w`; its counters begin again.
-    pub(crate) fn watched(mut self, w: &Watch) -> Threads {
-        w.progress.done.store(0, Ordering::Relaxed);
-        w.progress.total.store(0, Ordering::Relaxed);
-        self.watch = Some(w.clone());
-        self
-    }
-
-    /// One node's run, its slot set around it.
-    fn node_job<R>(&self, f: impl FnOnce() -> R) -> R {
-        let Some(w) = &self.watch else {
-            return self.job(f);
-        };
-        let i = slot(w.progress.slots.len());
-        let prev = CURRENT.with(|c| c.borrow_mut().replace((w.clone(), i)));
-        let r = self.job(f);
-        CURRENT.with(|c| *c.borrow_mut() = prev);
-        // the slot is clear before the job counts as done
-        w.progress.slots[i].store(0, Ordering::Relaxed);
-        w.progress.done.fetch_add(1, Ordering::Relaxed);
-        r
-    }
-
-    /// The operations' run time and runs by node kind ([`KINDS`]).
-    pub(crate) fn by_kind(&self) -> Vec<(&'static str, std::time::Duration, u64)> {
-        KINDS
-            .iter()
-            .enumerate()
-            .map(|(i, &k)| {
-                (
-                    k,
-                    std::time::Duration::from_nanos(self.ops.kind_ns[i].load(Ordering::Relaxed)),
-                    self.ops.kind_runs[i].load(Ordering::Relaxed),
-                )
-            })
-            .collect()
-    }
-
-    /// (`PHITEX_CLOCK_PROBE`) By kind: the runs probed and the mean
-    /// clock (GHz, at 4 cycles an iteration) at their starts and ends.
-    pub(crate) fn clock_by_kind(&self) -> Vec<(&'static str, u64, f64, f64)> {
-        #[allow(clippy::cast_precision_loss)]
-        let ghz = |ns: u64, n: u64| {
-            if ns == 0 { 0.0 } else { (PROBE_ITERS * 4 * n) as f64 / ns as f64 }
-        };
-        KINDS
-            .iter()
-            .enumerate()
-            .map(|(i, &k)| {
-                let p = &self.ops.probe[i];
-                let n = p[2].load(Ordering::Relaxed);
-                (k, n, ghz(p[0].load(Ordering::Relaxed), n), ghz(p[1].load(Ordering::Relaxed), n))
-            })
-            .filter(|x| x.1 > 0)
-            .collect()
-    }
-
-    /// The operations' summed run time (zero without a clock).
-    pub(crate) fn busy(&self) -> std::time::Duration {
-        std::time::Duration::from_nanos(self.ops.busy.load(Ordering::Relaxed))
-    }
-
-    /// (`profile`) The batches handed to the pool: `(batches, jobs, from
-    /// hand-over to last result, the longest jobs' sum)`.
-    pub(crate) fn pooled(&self) -> (u64, u64, std::time::Duration, std::time::Duration) {
-        (
-            self.pooled.load(Ordering::Relaxed),
-            self.pooled_jobs.load(Ordering::Relaxed),
-            std::time::Duration::from_nanos(self.pooled_ns.load(Ordering::Relaxed)),
-            std::time::Duration::from_nanos(self.pooled_longest_ns.load(Ordering::Relaxed)),
-        )
-    }
-
-    /// The batches of runs, those run inline, and the largest batch.
-    pub(crate) fn batches(&self) -> (u64, u64, usize) {
-        (
-            self.batches.load(Ordering::Relaxed),
-            self.batches_inline.load(Ordering::Relaxed),
-            self.jobs_max_batch.load(Ordering::Relaxed),
-        )
-    }
-
-    /// The most operations that ran at once.
-    pub(crate) fn peak(&self) -> usize {
-        self.ops.peak.load(Ordering::Relaxed)
-    }
-
-    /// Runs one job (a worker's loop over runs): the operations it runs
-    /// count on this executor's counters.
-    fn job<R>(&self, f: impl FnOnce() -> R) -> R {
-        let _run = widths::Run::begin();
-        let prev = JOB_THREADS.with(|c| c.replace(self.n));
-        if !cfg!(feature = "profile") {
-            let r = f();
-            JOB_THREADS.with(|c| c.set(prev));
-            return r;
-        }
-        let prev_ops = JOB_OPS.with(|c| c.replace(Some(self.ops.clone())));
-        let r = f();
-        JOB_OPS.with(|c| *c.borrow_mut() = prev_ops);
-        JOB_THREADS.with(|c| c.set(prev));
-        r
-    }
+/// The counters since the last take, reset: the operations' run time and
+/// runs by node kind ([`KINDS`]), their summed run time, and the most
+/// that ran at once.
+pub(crate) fn take_counters() -> (Vec<(&'static str, std::time::Duration, u64)>, std::time::Duration, usize) {
+    let c = counters();
+    let by = KINDS
+        .iter()
+        .enumerate()
+        .map(|(i, &k)| {
+            (
+                k,
+                std::time::Duration::from_nanos(c.kind_ns[i].swap(0, Ordering::Relaxed)),
+                c.kind_runs[i].swap(0, Ordering::Relaxed),
+            )
+        })
+        .collect();
+    let busy = std::time::Duration::from_nanos(c.busy.swap(0, Ordering::Relaxed));
+    let peak = c.peak.swap(0, Ordering::Relaxed);
+    (by, busy, peak)
 }
 
-thread_local! {
-    /// The thread count of the executor whose job runs on this thread
-    /// (1 outside a job).
-    static JOB_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
-    /// The counters of the executor whose job runs on this thread.
-    static JOB_OPS: RefCell<Option<std::sync::Arc<OpCounters>>> = const { RefCell::new(None) };
+/// After an evaluation, with `PHITEX_OBS` set and the `profile` feature
+/// on: the client's and the engine's probes printed, then reset.
+pub(crate) fn after_evaluation() {
+    widths::print();
+    crate::prof::print();
+    crate::prof::caches::print();
+    crate::prof::pages::print();
+    if phitex_defuse::obs::enabled() && prof_flag!("PHITEX_OBS") {
+        eprint!("probes (evaluation):\n{:?}", phitex_defuse::obs::snapshot());
+        phitex_defuse::obs::reset();
+    }
 }
 
 /// The thread count: `given`, else `PHITEX_THREADS`, else the available
@@ -517,159 +371,37 @@ fn threads_possible() -> bool {
     }
 }
 
-/// After an evaluation, with `PHITEX_OBS` set and the `profile` feature
-/// on: the engine's probes (spans and counters) printed, then reset.
-impl Drop for Threads {
-    fn drop(&mut self) {
-        widths::print();
-        crate::prof::print();
-        crate::prof::caches::print();
-        crate::prof::pages::print();
-        if phitex_defuse::obs::enabled() && prof_flag!("PHITEX_OBS") {
-            eprint!("probes (evaluation):\n{}", phitex_defuse::obs::snapshot());
-            phitex_defuse::obs::reset();
-        }
-    }
+/// A client pass's fan-out ([`map_on`]).
+pub(crate) trait Fan {
+    /// `f(i)` for every `i < n`.
+    fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync));
 }
 
-impl Executor for Threads {
-    fn execute(
-        &mut self,
-        n: usize,
-        run: &(dyn Fn(usize) -> RunResult + Sync),
-        out: &mut Vec<RunResult>,
-    ) {
-        let _st = StepTrace::enter(n);
-        if let Some(w) = &self.watch {
-            w.progress
-                .total
-                .fetch_add(u64::try_from(n).unwrap_or(0), Ordering::Relaxed);
-        }
-        let _step = widths::Step::begin(n);
-        self.batches.fetch_add(1, Ordering::Relaxed);
-        self.jobs_max_batch.fetch_max(n, Ordering::Relaxed);
-        if self.n <= 1 || n < job_grain() || !threads_possible() {
-            self.batches_inline.fetch_add(1, Ordering::Relaxed);
-            out.extend((0..n).map(|i| self.node_job(|| run(i))));
-            phitex_defuse::obs::flush();
-            return;
-        }
-        let slots: Vec<OnceLock<RunResult>> = (0..n).map(|_| OnceLock::new()).collect();
-        trace(n, self.n);
-        let prof = cfg!(feature = "profile");
-        let now = || if prof { clock().now() } else { None };
-        let longest = AtomicU64::new(0);
-        // one job a task: each costs a run
-        let t0 = now();
-        on_pool_here(self.n, n, &|i| {
-            let t = now();
-            let _ = slots[i].set(self.node_job(|| run(i)));
-            if let (Some(a), Some(b)) = (t, now()) {
-                longest.fetch_max(b.saturating_sub(a), Ordering::Relaxed);
-            }
-        });
-        let t1 = now();
-        flush_workers(here_pool(self.n));
-        if let (Some(a), Some(b)) = (t0, t1) {
-            self.pooled.fetch_add(1, Ordering::Relaxed);
-            self.pooled_jobs
-                .fetch_add(u64::try_from(n).unwrap_or(0), Ordering::Relaxed);
-            self.pooled_ns
-                .fetch_add(b.saturating_sub(a), Ordering::Relaxed);
-            self.pooled_longest_ns
-                .fetch_add(longest.load(Ordering::Relaxed), Ordering::Relaxed);
-        }
-        out.extend(
-            slots
-                .into_iter()
-                .map(|s| s.into_inner().expect("every job ran")),
-        );
-    }
+/// A client pass whose items each cost a run's worth (the hint pass's
+/// chunks, spec-final §5.1): any batch of two or more split over the
+/// pool of `self.0` workers, one item a task.
+pub(crate) struct Coarse(pub usize);
 
+impl Fan for Coarse {
     fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
-        self.parallel_each(n, &|i| self.job(|| f(i)));
-    }
-
-    fn widen(&mut self, work: usize) -> bool {
-        match self.widen {
-            Some((n, limit)) if work > limit && threads_possible() => {
-                self.n = n;
-                self.widen = None;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// The workers the engine's own passes (its apply) may split over:
-    /// the pool's size where threads exist, else 1.
-    fn parallelism(&self) -> usize {
-        if threads_possible() { self.n.max(1) } else { 1 }
-    }
-}
-
-impl Threads {
-    /// `f(i)` for every `i < n`, on the pool when the batch is large
-    /// enough.
-    fn parallel_each(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
-        if self.n <= 1 || n < GRAIN || !threads_possible() {
-            (0..n).for_each(f);
-            phitex_defuse::obs::flush();
-            return;
-        }
-        let grain = (n / (self.n * 8)).clamp(4, GRAIN);
-        trace(n, self.n);
-        parallel(self.n, n, grain, f);
-    }
-}
-
-/// The executor of a client pass whose items each cost a run's worth
-/// (the hint pass's chunks, spec-final §5.1): `Executor::for_each`
-/// splits any batch of two or more over the pool, one item a task.
-pub(crate) struct Coarse(pub Threads);
-
-impl Executor for Coarse {
-    fn execute(
-        &mut self,
-        n: usize,
-        run: &(dyn Fn(usize) -> RunResult + Sync),
-        out: &mut Vec<RunResult>,
-    ) {
-        self.0.execute(n, run, out);
-    }
-
-    fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
-        if self.0.n <= 1 || n < 2 || !threads_possible() {
+        if self.0 <= 1 || n < 2 || !threads_possible() {
             (0..n).for_each(f);
             return;
         }
-        trace(n, self.0.n);
-        parallel(self.0.n, n, 1, &|i| self.0.job(|| f(i)));
-    }
-
-    fn parallelism(&self) -> usize {
-        self.0.parallelism()
+        trace(n, self.0);
+        parallel(self.0, n, 1, f);
     }
 }
 
-/// The executor of a fan-out inside an operation's run (the exact
-/// PDF's page contents, the DVI file's pages): `for_each` splits a batch
-/// over `self.0` threads of its own, never a pool's.
+/// A fan-out inside an operation's run (the exact PDF's page contents,
+/// the DVI file's pages): a batch split over `self.0` threads of its own,
+/// never a pool's.
 pub(crate) struct Inner(pub usize);
 
-impl Executor for Inner {
-    fn execute(
-        &mut self,
-        n: usize,
-        run: &(dyn Fn(usize) -> RunResult + Sync),
-        out: &mut Vec<RunResult>,
-    ) {
-        out.extend((0..n).map(run));
-    }
-
+impl Fan for Inner {
     fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
-        // (wasm32: `std::thread::spawn` is not there, whatever the host
-        // gives the executor's pool; the fan-out runs in order)
+        // (wasm32: `std::thread::spawn` is not there; the fan-out runs in
+        // order)
         if self.0 <= 1 || n < 2 || !threads_possible() || cfg!(target_arch = "wasm32") {
             (0..n).for_each(f);
             return;
@@ -677,20 +409,15 @@ impl Executor for Inner {
         trace(n, self.0);
         // (threads of its own, not a pool's: a pool's `install` called
         // from an engine worker's thread runs that pool's other jobs
-        // while it waits, an engine worker's loop among them, which
-        // waits for this run: the stack itself deadlocked)
+        // while it waits)
         scoped(self.0, n, 1, f);
-    }
-
-    fn parallelism(&self) -> usize {
-        if threads_possible() { self.0.max(1) } else { 1 }
     }
 }
 
-/// `f(i)` for every `i < n` on executor `ex` (its `for_each`), the
-/// results in order.
+/// `f(i)` for every `i < n` on `ex` (its `for_each`), the results in
+/// order.
 pub(crate) fn map_on<T: Send + Sync>(
-    ex: &mut dyn Executor,
+    ex: &mut dyn Fan,
     n: usize,
     f: &(dyn Fn(usize) -> T + Sync),
 ) -> Vec<T> {
@@ -724,37 +451,6 @@ fn on_pool(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
     });
 }
 
-/// `f(i)` for every `i < n`, one job a task: the first on this thread,
-/// the others on the pool of the other `threads - 1` workers
-/// ([`here_pool`]). The engine's thread runs a job of its batch itself,
-/// warm, instead of waiting while a woken worker runs it cold (a batch of
-/// two, a page's finisher and its neighbour, ran both on the pool at
-/// twice its time on this thread); with this thread one of the
-/// `threads`, at most `threads` jobs run at once (on the pool of
-/// `threads` workers, this thread made `threads + 1`).
-#[cfg(feature = "rayon")]
-fn on_pool_here(threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
-    pool(here_pool(threads)).in_place_scope(|s| {
-        for i in 1..n {
-            s.spawn(move |_| f(i));
-        }
-        if n > 0 {
-            f(0);
-        }
-    });
-}
-
-#[cfg(not(feature = "rayon"))]
-fn on_pool_here(threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
-    on_pool(threads, n, 1, f);
-}
-
-/// The workers [`on_pool_here`] spawns on beside the calling thread: one
-/// fewer than the threads asked for (at least one).
-fn here_pool(threads: usize) -> usize {
-    threads.saturating_sub(1).max(1)
-}
-
 /// Every worker of the pool of `threads` adds its probe counts and spans
 /// to the totals (a no-op without the `profile` feature, so the broadcast
 /// is skipped).
@@ -770,8 +466,8 @@ fn flush_workers(threads: usize) {
     }
 }
 
-/// The persistent pool of `threads` workers, the engine's workers' (an
-/// operation's fan-out runs on threads of its own, [`Inner`]).
+/// The persistent pool of `threads` workers (an operation's fan-out runs
+/// on threads of its own, [`Inner`]).
 #[cfg(feature = "rayon")]
 fn pool(threads: usize) -> std::sync::Arc<rayon::ThreadPool> {
     use std::sync::{Arc, Mutex, PoisonError};
@@ -1047,48 +743,12 @@ pub(crate) mod widths {
     }
 }
 
-/// (measurement) `PHITEX_STEP_TRACE`: per batch, its width, its run time,
-/// and the time since the previous batch ended (the engine's apply of it).
-struct StepTrace(Option<(std::time::Instant, usize)>);
-
-static STEP_LAST: std::sync::Mutex<Option<(std::time::Instant, usize)>> =
-    std::sync::Mutex::new(None);
-
-impl StepTrace {
-    fn enter(n: usize) -> StepTrace {
-        if !obs_flag!("PHITEX_STEP_TRACE") {
-            return StepTrace(None);
-        }
-        let now = std::time::Instant::now();
-        if let Some((t, pn)) = *STEP_LAST.lock().unwrap() {
-            eprintln!(
-                "stepgap: prev_n {pn} gap_us {}",
-                now.duration_since(t).as_micros()
-            );
-        }
-        StepTrace(Some((now, n)))
-    }
-}
-
-impl Drop for StepTrace {
-    fn drop(&mut self) {
-        if let Some((t, n)) = self.0 {
-            let now = std::time::Instant::now();
-            eprintln!(
-                "steprun: n {n} run_us {}",
-                now.duration_since(t).as_micros()
-            );
-            *STEP_LAST.lock().unwrap() = Some((now, n));
-        }
-    }
-}
-
-/// One operation's run, counted on the running executor's
+/// One operation's run, counted on the process's
 /// [`OpCounters`] (busy time, runs at once); with `PHITEX_TEX_TIME`
 /// also its operation, node and wall time, printed when the run ends.
 pub(crate) struct NodeTimer {
     trace: Option<(std::time::Instant, &'static str, u64)>,
-    ops: Option<(std::sync::Arc<OpCounters>, Option<u64>, usize)>,
+    ops: Option<(Option<u64>, usize)>,
 }
 
 impl NodeTimer {
@@ -1102,14 +762,13 @@ impl NodeTimer {
             };
         }
         let kind = KINDS.iter().position(|&k| k == op).unwrap_or(0);
-        let ops = JOB_OPS.with(|c| c.borrow().clone()).map(|o| {
-            let c = o.running.fetch_add(1, Ordering::Relaxed) + 1;
-            o.peak.fetch_max(c, Ordering::Relaxed);
-            if prof_flag!("PHITEX_CLOCK_PROBE") {
-                o.probe[kind][0].fetch_add(clock_probe(), Ordering::Relaxed);
-            }
-            (o, clock().now(), kind)
-        });
+        let o = counters();
+        let c = o.running.fetch_add(1, Ordering::Relaxed) + 1;
+        o.peak.fetch_max(c, Ordering::Relaxed);
+        if prof_flag!("PHITEX_CLOCK_PROBE") {
+            o.probe[kind][0].fetch_add(clock_probe(), Ordering::Relaxed);
+        }
+        let ops = Some((clock().now(), kind));
         let trace = (prof_flag!("PHITEX_TEX_TIME") || prof_flag!("PHITEX_RUN_TIMES"))
             .then(|| (std::time::Instant::now(), op, node));
         NodeTimer { trace, ops }
@@ -1118,7 +777,8 @@ impl NodeTimer {
 
 impl Drop for NodeTimer {
     fn drop(&mut self) {
-        if let Some((o, t0, kind)) = self.ops.take() {
+        if let Some((t0, kind)) = self.ops.take() {
+            let o = counters();
             if let (Some(a), Some(b)) = (t0, clock().now()) {
                 o.busy.fetch_add(b.saturating_sub(a), Ordering::Relaxed);
                 o.kind_ns[kind].fetch_add(b.saturating_sub(a), Ordering::Relaxed);

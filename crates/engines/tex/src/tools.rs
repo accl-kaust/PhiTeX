@@ -269,14 +269,14 @@ fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop
             // loop-back, never the file system's copy the job is writing;
             // one it does not write: the job's lookup)
             let w = text_field(v, name);
-            if let Some(x) = cx.use_field(w)? {
+            if let Some(x) = cx.read(w)? {
                 return Ok(
                     (x != ValueId::UNIT).then(|| (format!("./{name}"), bytes(&str_of(v, x))))
                 );
             }
-            Ok(file(cx.use_env(v.field(&format!("file:{name}")))?))
+            Ok(file(cx.env(v.field(&format!("file:{name}")))?))
         }
-        Need::Support(s, name) => Ok(file(cx.use_env(support_field(v, *s, name))?)),
+        Need::Support(s, name) => Ok(file(cx.env(support_field(v, *s, name))?)),
     }
 }
 
@@ -293,13 +293,10 @@ impl Operation for ToolRun {
     fn name(&self) -> &'static str {
         "tool"
     }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(Vec::new())
-    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();
-        let args = cx.args();
+        let args = cx.args().to_vec();
         let s = |i: usize| args.get(i).map(|&x| str_of(v, x)).unwrap_or_default();
         let Some(tool) = Tool::of_name(&s(0)) else {
             return Ok(ValueId::UNIT);
@@ -449,7 +446,7 @@ pub(crate) fn run_args(cx: &mut Ctx<'_>, output: &str) -> Result<Option<Vec<Valu
         // (a job that writes the input declares its loop-back; bound
         // otherwise, so the read runs again once it does)
         if !cx.is_loopback(w) {
-            let _ = cx.use_field(w)?;
+            let _ = cx.read(w)?;
             continue;
         }
         return Ok(Some(command_args(
@@ -492,19 +489,15 @@ impl Operation for ToolNode {
     fn name(&self) -> &'static str {
         "toolnode"
     }
-    fn defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        let out = args.get(1).map(|&x| str_of(v, x))?;
-        Some(vec![(out_field(v, &out), Locality::Global)])
-    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();
-        let args = cx.args();
+        let args = cx.args().to_vec();
         let (Some(&out), Some(&input)) = (args.get(1), args.get(2)) else {
             return Ok(ValueId::UNIT);
         };
         let (out, input) = (str_of(v, out), str_of(v, input));
-        let acc = cx.acc_range(crate::run::stream_bucket(v, &input), None)?;
+        let acc = cx.fold(crate::run::stream_bucket(v, &input), None, None)?;
         let text = crate::api::written_texts(v, Some(acc))
             .into_iter()
             .find(|(n, _)| *n == input)

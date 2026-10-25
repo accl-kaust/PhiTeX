@@ -1646,41 +1646,18 @@ impl Operation for Resume {
     fn name(&self) -> &'static str {
         "resume"
     }
-    /// What it folds ([`PageNode::folds`]): its continuation is its
-    /// arguments.
-    fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        Some(PageNode::Resume.reads(v, &[]))
-    }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        None
-    }
     fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
         MayDefine::Any
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::Pending
     }
-    /// The siblings the rest of the cut piece takes, as the piece guessed
-    /// them (the fourth argument, [`Run::claim_guess`]): a guess, which
-    /// its run's claim replaces.
-    fn claim(
-        &self,
-        args: &[ValueId],
-        v: &Values,
-        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
-    ) -> Claim {
-        match args.get(3).and_then(|&x| v.as_int(x)) {
-            Some(0) => Claim::None,
-            Some(n) if n > 0 => Claim::Count(usize::try_from(n).unwrap_or(0)),
-            _ => Claim::Pending,
-        }
-    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
-        let args = cx.args();
+        let args = cx.args().to_vec();
         let o = ops(&self.0);
         let t0 = std::time::Instant::now();
-        let out = run_node_parking(cx, o, true, |r| {
+        let out = run_node(cx, o, |r| {
             if !r.resumed {
                 let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
                 r.cont_load(a(0), a(2))?;

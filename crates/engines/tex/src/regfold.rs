@@ -1,29 +1,19 @@
-//! Integer registers as folds of the writes that outlive their runs
-//! (docs/note-register-folds.md, spec-page-chain §5.1).
+//! Integer registers' writes that outlive their runs as maps of the
+//! register's value.
 //!
 //! A write of an integer register that outlives its run, made where no
 //! group of the document or of the run holds a binding of the register,
 //! is a map of the register's value: `set c` (an assignment) or `add c`
-//! (`\advance` by a constant). It is contributed to the register's
-//! accumulator ([`acc_field`]) instead of defining the register, and it
-//! reads nothing: the map does not depend on the value it applies to.
-//! A reader's value is the definition reaching it (a write made inside a
-//! group, or the start value) with the maps after that definition applied
-//! in order. A run that read a guessed fold contributes the same maps, so
-//! a cold build's readers converge in a second wave instead of waiting in
-//! a chain through every writer.
+//! (`\advance` by a constant). The run composes its maps and defines the
+//! register at its end: `add c` as a relation on the value reaching it
+//! (`Ctx::define_rel`, which the engine recomputes without the run, and
+//! gives the operation's pending nodes ahead of their runs), `set c` as
+//! a value. Neither reads the register: a run that never looks at the
+//! value does not depend on it.
 
-use phitex_defuse::{Monoid, ValueId, Values};
+use phitex_defuse::{ValueId, Values};
 
 use crate::val::int_of;
-
-/// The prefix of the registers' accumulators: `acc:count:<n>`.
-pub(crate) const ACC_PREFIX: &str = "acc:count:";
-
-/// The accumulator of integer register `n`.
-pub(crate) fn acc_field(v: &Values, n: i32) -> phitex_defuse::Field {
-    v.field(&format!("{ACC_PREFIX}{n}"))
-}
 
 /// A map of a register's value: `x ↦ a·x + b` with `a` 0 (`set b`) or 1
 /// (`add b`), the sum wrapping at 32 bits as `\advance` does.
@@ -78,25 +68,5 @@ impl Affine {
             },
             _ => Affine::ID,
         }
-    }
-}
-
-/// The registers' accumulators: maps composed in position order. A
-/// reader may read past contributors still in work (as they last
-/// contributed, or as nothing): a map never depends on the value read, so
-/// a wrong guess costs the reader one more run and nothing else.
-pub(crate) struct AffineMonoid;
-
-impl Monoid for AffineMonoid {
-    fn empty(&self, v: &Values) -> ValueId {
-        Affine::ID.encode(v)
-    }
-
-    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
-        Affine::decode(v, a).then(Affine::decode(v, b)).encode(v)
-    }
-
-    fn speculate(&self) -> bool {
-        true
     }
 }

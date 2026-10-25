@@ -2015,7 +2015,7 @@ impl Run<'_, '_> {
     fn read_own_written(&mut self, key: &str) -> R<Option<ValueId>> {
         let v = self.v;
         let f = v.field("streams");
-        let before = self.cx.acc_range(f, None);
+        let before = self.cx.fold(f, None, None);
         if before.is_err() {
             self.trace_stop("range streams");
         }
@@ -2177,7 +2177,7 @@ impl Run<'_, '_> {
                 // (its own file's count only: an edit of another file's
                 // lines leaves the read standing)
                 let p = self.cx.path(&[phitex_defuse::Step::Key(name)]);
-                let x = self.cx.acc_range_path(lines, None, p);
+                let x = self.cx.fold_path(lines, None, None, p);
                 if x.is_err() {
                     self.trace_stop("range lines");
                 }
