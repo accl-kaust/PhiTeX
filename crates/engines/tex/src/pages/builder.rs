@@ -373,9 +373,39 @@ pub(crate) fn loop_state(lp: &PageLoop) -> u64 {
         lp.last_fire.map(|(n, a, b)| (n.raw(), a, b)),
         lp.page_ins,
         lp.held_nodes,
-        (places, lp.rtns.last().map(|r| (r.0, r.1)), rtns),
+        (&places, lp.rtns.last().map(|r| (r.0, r.1)), &rtns),
         lp.pages.len()
     );
+    if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
+        let parts = [
+            format!("{:?}", lp.st),
+            format!("{:?}", (lp.cur.map(phitex_defuse::NodeId::raw), lp.cur_units.map(phitex_defuse::NodeId::raw))),
+            format!("{:?}", lp.srcs),
+            format!("{:?}{:?}{:?}{:?}", lp.post, lp.post_markers, lp.post_k, lp.began),
+            format!("{:?}", lp.top_marks),
+            format!("{:?}{:?}{:?}", lp.rtn_dead, lp.dead, lp.inf),
+            format!("{:?}", lp.last_rtn),
+            format!("{:?}", lp.prev_rtn),
+            format!("{:?}{:?}", lp.last_markers, lp.prev_fire),
+            format!("{:?}", lp.marks),
+            format!("{:?}{:?}", lp.pend, lp.page_src),
+            format!("{:?}", lp.units.iter().map(|u| (u.pid, u.src.raw())).collect::<Vec<_>>()),
+            format!("{:?}{:?}", lp.frontier, lp.last_fire.map(|(n, a, b)| (n.raw(), a, b))),
+            format!("{:?}{:?}", lp.page_ins, lp.held_nodes),
+            format!("{places:?}"),
+            format!("{:?}", lp.rtns.last().map(|r| (r.0, r.1))),
+            format!("{rtns:?}"),
+        ];
+        let hs: Vec<String> = parts
+            .iter()
+            .map(|x| {
+                let mut g = phitex_defuse::FxHasher::default();
+                g.write(x.as_bytes());
+                format!("{:04x}", g.finish() & 0xffff)
+            })
+            .collect();
+        eprintln!("mark-trace: mark {} parts {}", lp.pages.len(), hs.join(" "));
+    }
     h.finish()
 }
 
@@ -1374,7 +1404,20 @@ impl Run<'_, '_> {
         let h = loop_state(lp);
         self.page_marks.push((std::sync::Arc::new(lp.clone()), h));
         let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
-        match self.cx.checkpoint_join(k, state) {
+        let r = self.cx.checkpoint_join(k, state);
+        if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
+            eprintln!(
+                "mark-join: node {} mark {k} state {:016x}: {}",
+                self.cx.node().raw(),
+                h,
+                match &r {
+                    Ok(None) => "none".to_owned(),
+                    Ok(Some(hop)) => format!("joined, from {} to {}", hop.from, hop.to),
+                    Err(_) => "cut".to_owned(),
+                }
+            );
+        }
+        match r {
             Ok(None) => Ok(()),
             Ok(Some(hop)) => {
                 if crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {

@@ -2618,7 +2618,9 @@ impl<'a> Ctx<'a> {
             // (Segments from here: what it made so far, the open one's;
             // after marks made before, not known apart.)
             let n = self.marks.len();
-            self.segs = Some(vec![Seg { unknown: true, ..Seg::default() }; n]);
+            // (Known where it made nothing so far: every segment empty.)
+            let none = self.defs.is_empty() && self.pubs.is_empty() && self.contribs.is_empty() && self.kinds.is_empty() && self.diag.is_empty() && self.effect.is_none() && self.claim.is_none();
+            self.segs = Some(vec![Seg { unknown: !none, ..Seg::default() }; n]);
             self.seg = Seg {
                 defs: self.defs.clone(),
                 pubs: self.pubs.clone(),
@@ -2627,7 +2629,7 @@ impl<'a> Ctx<'a> {
                 diag: self.diag.clone(),
                 effect: self.effect.map(Some),
                 claim: self.claim.map(Some),
-                unknown: n > 0,
+                unknown: n > 0 && !none,
             };
             self.seg_ix.clear();
             for (i, d) in self.defs.iter().enumerate() {
@@ -2669,7 +2671,19 @@ impl<'a> Ctx<'a> {
         if !self.env.is_empty() || !self.apps.is_empty() || !self.passes.is_empty() || !self.forwards.is_empty() || !self.views.is_empty() || self.base.is_some() {
             return Ok(None);
         }
-        let Some((old, lo)) = self.join_base() else { return Ok(None) };
+        let Some((old, lo)) = self.join_base() else {
+            #[cfg(feature = "profile")]
+            if std::env::var_os("CLEAN_JOIN_TRACE").is_some() {
+                eprintln!("join-trace: {:?} no base (from mark {})", self.me, self.from_mark.is_some());
+            }
+            return Ok(None);
+        };
+        #[cfg(feature = "profile")]
+        if std::env::var_os("CLEAN_JOIN_TRACE").is_some() {
+            let at = (lo..old.marks.len()).find(|&j| old.marks[j].state == state);
+            let unknown: Vec<usize> = old.segs.as_ref().map(|g| g.iter().enumerate().filter(|x| x.1.unknown).map(|x| x.0).collect()).unwrap_or_default();
+            eprintln!("join-trace: {:?} lo {lo} of {} marks: at {at:?}, kids {} conts {}, unknown segs {unknown:?}", self.me, old.marks.len(), self.kids.len(), self.conts.len());
+        }
         let Some(jp) = (lo..old.marks.len()).find(|&j| old.marks[j].state == state) else { return Ok(None) };
         let m0 = old.marks[jp];
         if self.kids.len() != m0.kids as usize || self.conts.len() != m0.conts as usize {
@@ -2784,6 +2798,13 @@ impl<'a> Ctx<'a> {
         let (kids, conts) = (u32::try_from(self.kids.len()).unwrap_or(u32::MAX), u32::try_from(self.conts.len()).unwrap_or(u32::MAX));
         self.marks.push(super::world::Mark { mark, read_ix, state, digest, odigest, kids, conts });
         if let Some(g) = &mut self.segs {
+            // (The segment a run resumed at a mark begins with is known
+            // where the client made nothing in it: no outputs before the
+            // mark made again, none of its own.)
+            let s = &self.seg;
+            if s.unknown && s.defs.is_empty() && s.pubs.is_empty() && s.contribs.is_empty() && s.kinds.is_none() && s.diag.is_empty() && s.effect.is_none() && s.claim.is_none() {
+                self.seg.unknown = false;
+            }
             g.push(std::mem::take(&mut self.seg));
             self.seg_ix.clear();
         }
