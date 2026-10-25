@@ -31,7 +31,7 @@ pub(crate) type Base = (usize, usize, usize);
 /// A stopped run's kept state: its token (`Ctx::park`), the reads its
 /// attempts made (it resumes while they hold), its placements so far.
 /// (The placements only when it parked continuing: `Ctx::park_continuing`.)
-pub(crate) type KeptState = (Box<dyn Any + Send>, Vec<Read>, Option<Base>);
+pub(crate) type KeptState = (Box<dyn Any + Send>, super::world::Reads, Option<Base>);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Spec {
@@ -152,7 +152,7 @@ pub struct Ctx<'a> {
     pub(crate) unit: u32,
     pub(crate) op: OpId,
     pub(crate) args: Arc<[ValueId]>,
-    pub(crate) reads: Vec<Read>,
+    pub(crate) reads: super::world::Reads,
     pub(crate) defs: Vec<Def>,
     /// Its definitions forwarding a loop-back field (`define_forward`).
     pub(crate) forwards: Vec<super::world::Fwd>,
@@ -207,6 +207,12 @@ pub struct Ctx<'a> {
     /// page builder marked after every page hashed every finisher it had
     /// placed). Reset where the lists are made anew.
     place_dig: std::cell::Cell<[(usize, u64); 2]>,
+    /// The placements' ordinals by kind ([`Ctx::placed_output`]): this
+    /// run's first so many counted, and the earlier attempts' (of the
+    /// committed result at an address, so many): a page builder asking
+    /// after every page counted every finisher it had placed. Reset with
+    /// `place_dig`.
+    place_ord: PlaceOrd,
     pub(crate) effect: Option<Effect>,
     pub(crate) kinds: Vec<ValueId>,
     pub(crate) diag: Vec<ValueId>,
@@ -330,7 +336,7 @@ impl<'a> Ctx<'a> {
             unit: n.unit,
             op: n.text.op,
             args: n.text.args.clone(),
-            reads: Vec::with_capacity(hint),
+            reads: super::world::Reads::with_capacity(hint),
             defs: Vec::new(),
             forwards: Vec::new(),
             views,
@@ -358,6 +364,7 @@ impl<'a> Ctx<'a> {
             kids: kids0,
             conts: conts0,
             place_dig: std::cell::Cell::new([(0, 0); 2]),
+            place_ord: PlaceOrd::default(),
             effect: None,
             kinds: Vec::new(),
             diag: Vec::new(),
@@ -1815,11 +1822,27 @@ impl<'a> Ctx<'a> {
                 p => (u64::from(!matches!(p, Place::Cont)), op, 0),
             };
             let want = key(s.place, s.op);
-            let earlier = committed[..bc.min(committed.len())]
-                .iter()
-                .filter(|&&x| self.w.node(x).is_some_and(|n| key(n.place, n.text.op) == want))
-                .count();
-            let mine = self.conts[..k].iter().filter(|c| key(c.place, c.op) == want).count();
+            let po = &mut self.place_ord;
+            let at = (bc, committed.as_ptr() as usize);
+            if po.earlier_at != Some(at) {
+                po.earlier.clear();
+                for &x in &committed[..bc.min(committed.len())] {
+                    if let Some(n) = self.w.node(x) {
+                        *po.earlier.entry(key(n.place, n.text.op)).or_default() += 1;
+                    }
+                }
+                po.earlier_at = Some(at);
+            }
+            if po.mine_n > k {
+                po.mine.clear();
+                po.mine_n = 0;
+            }
+            for c in &self.conts[po.mine_n..k] {
+                *po.mine.entry(key(c.place, c.op)).or_default() += 1;
+            }
+            po.mine_n = k;
+            let earlier = po.earlier.get(&want).copied().unwrap_or(0);
+            let mine = po.mine.get(&want).copied().unwrap_or(0);
             let ord = u32::try_from(earlier + mine + 1).unwrap_or(u32::MAX);
             (super::build::Builder::placed_id(self.me, s.place, s.op, ord), s.op, s.args.clone())
         };
@@ -2706,7 +2729,7 @@ impl<'a> Ctx<'a> {
         let fail = match self.join_scan {
             Some((p, f0, fl)) if p == ptr && f0 <= a && a <= fl => fl,
             _ => {
-                let fl = old.reads[a as usize..].iter().position(|r| !super::build::holds(self.core, self.w, self.me, r)).map_or(old.reads.len(), |i| i + a as usize);
+                let fl = old.reads.iter_from(a as usize).position(|r| !super::build::holds(self.core, self.w, self.me, r)).map_or(old.reads.len(), |i| i + a as usize);
                 let fl = u32::try_from(fl).unwrap_or(u32::MAX);
                 self.join_scan = Some((ptr, a, fl));
                 fl
@@ -2762,7 +2785,8 @@ impl<'a> Ctx<'a> {
                 ..*m
             });
         }
-        self.reads.extend_from_slice(&old.reads[m0.read_ix as usize..end.map_or(old.reads.len(), |m| m.read_ix as usize)]);
+        let (a, b) = (m0.read_ix as usize, end.map_or(old.reads.len(), |m| m.read_ix as usize));
+        self.reads.extend(old.reads.iter_from(a).take(b.saturating_sub(a)));
         self.nkids += kids.iter().filter(|s| !matches!(s.place, Place::Marker(_))).count();
         self.kids.extend(kids);
         self.conts.extend(conts);
@@ -2851,7 +2875,7 @@ impl<'a> Ctx<'a> {
             return Ok(());
         }
         let from = old.marks[j].read_ix as usize;
-        if !old.reads[from..].iter().all(|r| super::build::holds(self.core, self.w, self.me, r)) {
+        if !old.reads.iter_from(from).all(|r| super::build::holds(self.core, self.w, self.me, r)) {
             return Ok(());
         }
         self.cutoff = Some((j, patch.filter(|p| !p.is_empty()).map(<[_]>::to_vec)));
@@ -2971,12 +2995,13 @@ impl<'a> Ctx<'a> {
         let Some(j) = o.old.marks[..=o.jmax].iter().rposition(|m| m.mark == k) else { return false };
         let o = self.retext_offer.take().expect("checked");
         let m = &o.old.marks[j];
-        self.reads = o.old.reads[..m.read_ix as usize].to_vec();
+        self.reads = o.old.reads.prefix(m.read_ix as usize);
         self.marks = o.old.marks[..j].to_vec();
         let (kids, conts) = (o.kids[..m.kids as usize].to_vec(), o.conts[..m.conts as usize].to_vec());
         self.kids.clone_from(&kids);
         self.conts.clone_from(&conts);
         self.place_dig.set([(0, 0); 2]);
+        self.place_ord = PlaceOrd::default();
         self.nkids = kids.len();
         self.from_mark = Some(MarkResume { after: o.after, old: o.old, j, kids, conts, no_cut: true });
         true
@@ -3033,6 +3058,7 @@ impl<'a> Ctx<'a> {
         self.kids.clear();
         self.conts.clear();
         self.place_dig.set([(0, 0); 2]);
+        self.place_ord = PlaceOrd::default();
         self.effect = None;
         self.kinds.clear();
         self.diag.clear();
@@ -3126,7 +3152,7 @@ impl<'a> Ctx<'a> {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, )) } else { serde_json::Value::Null };
         let val = self.core.is_loop(f);
-        for r in &mut self.reads {
+        for r in self.reads.iter_mut() {
             if matches!(r, Read::Range { f: g, .. } if *g == f) {
                 *r = Read::IsLoop { f, val };
             }
@@ -3166,4 +3192,14 @@ pub(crate) fn app_id(op: OpId, args: &[ValueId]) -> Id {
     w.push(u64::from(op.0));
     // (Never a placed id: those have bit 63; never a pushed one: small.)
     crate::values::hash_words(0xa99, &w) & !(1 << 63) | 1 << 62
+}
+
+/// [`Ctx::place_ord`]: placements counted by kind (`(place class, op,
+/// anchor)`).
+#[derive(Default)]
+struct PlaceOrd {
+    earlier_at: Option<(usize, usize)>,
+    earlier: FxHashMap<(u64, OpId, u64), usize>,
+    mine_n: usize,
+    mine: FxHashMap<(u64, OpId, u64), usize>,
 }

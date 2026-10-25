@@ -313,6 +313,211 @@ impl Fwd {
     }
 }
 
+/// A run's reads, in order: sealed segments shared by the results and
+/// kept states that hold them (a clone copies at most [`Reads::TAIL`]
+/// reads), and the tail it appends to. A parked page builder resumed
+/// after every piece holds hundreds of thousands: its result and kept
+/// state each copied them whole per attempt.
+#[derive(Clone, Default)]
+pub(crate) struct Reads {
+    segs: Vec<Arc<Vec<Read>>>,
+    /// Each segment's end (exclusive), counted from the first read.
+    ends: Vec<usize>,
+    tail: Vec<Read>,
+}
+
+impl Reads {
+    /// The most reads the tail holds before it is sealed.
+    const TAIL: usize = 32;
+
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn with_capacity(n: usize) -> Self {
+        Reads { tail: Vec::with_capacity(n.min(Self::TAIL)), ..Self::default() }
+    }
+
+    fn sealed(&self) -> usize {
+        self.ends.last().copied().unwrap_or(0)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.sealed() + self.tail.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The tail made a segment; segments merged as a binary counter's
+    /// carries (each read copied O(log n) times in all).
+    fn seal(&mut self) {
+        if self.tail.is_empty() {
+            return;
+        }
+        let mut seg = std::mem::take(&mut self.tail);
+        while let Some(last) = self.segs.last()
+            && last.len() <= seg.len()
+        {
+            let last = self.segs.pop().expect("a segment");
+            self.ends.pop();
+            let mut m = Vec::with_capacity(last.len() + seg.len());
+            m.extend_from_slice(&last);
+            m.append(&mut seg);
+            seg = m;
+        }
+        let end = self.sealed() + seg.len();
+        self.segs.push(Arc::new(seg));
+        self.ends.push(end);
+    }
+
+    pub(crate) fn push(&mut self, r: Read) {
+        if self.tail.len() >= Self::TAIL {
+            self.seal();
+        }
+        self.tail.push(r);
+    }
+
+    pub(crate) fn extend<'a>(&mut self, rs: impl IntoIterator<Item = &'a Read>) {
+        for r in rs {
+            self.push(r.clone());
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.segs.clear();
+        self.ends.clear();
+        self.tail.clear();
+    }
+
+    fn seg_of(&self, i: usize) -> usize {
+        self.ends.partition_point(|&e| e <= i)
+    }
+
+    pub(crate) fn get(&self, i: usize) -> Option<&Read> {
+        let s = self.sealed();
+        if i >= s {
+            return self.tail.get(i - s);
+        }
+        let k = self.seg_of(i);
+        let start = if k == 0 { 0 } else { self.ends[k - 1] };
+        self.segs[k].get(i - start)
+    }
+
+    pub(crate) fn get_mut(&mut self, i: usize) -> Option<&mut Read> {
+        let s = self.sealed();
+        if i >= s {
+            return self.tail.get_mut(i - s);
+        }
+        let k = self.seg_of(i);
+        let start = if k == 0 { 0 } else { self.ends[k - 1] };
+        Arc::make_mut(&mut self.segs[k]).get_mut(i - start)
+    }
+
+    pub(crate) fn last(&self) -> Option<&Read> {
+        self.tail.last().or_else(|| self.segs.last().and_then(|s| s.last()))
+    }
+
+    pub(crate) fn last_mut(&mut self) -> Option<&mut Read> {
+        let n = self.len();
+        n.checked_sub(1).and_then(|i| self.get_mut(i))
+    }
+
+    pub(crate) fn iter(&self) -> ReadsIter<'_> {
+        ReadsIter { segs: self.segs.iter(), cur: [].iter(), tail: &self.tail, done: false }
+    }
+
+    /// The reads from the `i`-th on.
+    pub(crate) fn iter_from(&self, i: usize) -> ReadsIter<'_> {
+        let s = self.sealed();
+        if i >= s {
+            return ReadsIter { segs: [].iter(), cur: self.tail.get(i - s..).unwrap_or(&[]).iter(), tail: &[], done: true };
+        }
+        let k = self.seg_of(i);
+        let start = if k == 0 { 0 } else { self.ends[k - 1] };
+        ReadsIter { segs: self.segs[k + 1..].iter(), cur: self.segs[k][i - start..].iter(), tail: &self.tail, done: false }
+    }
+
+    /// The first `n` reads: the segments wholly before the `n`-th shared.
+    pub(crate) fn prefix(&self, n: usize) -> Reads {
+        if n >= self.len() {
+            return self.clone();
+        }
+        let k = self.seg_of(n);
+        let mut r = Reads { segs: self.segs[..k].to_vec(), ends: self.ends[..k].to_vec(), tail: Vec::new() };
+        let start = r.sealed();
+        r.extend(self.iter_from(start).take(n - start));
+        r
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Read> {
+        self.segs.iter_mut().flat_map(|s| Arc::make_mut(s).iter_mut()).chain(self.tail.iter_mut())
+    }
+
+    pub(crate) fn contains(&self, r: &Read) -> bool {
+        self.iter().any(|x| x == r)
+    }
+}
+
+impl std::ops::Index<usize> for Reads {
+    type Output = Read;
+    fn index(&self, i: usize) -> &Read {
+        self.get(i).expect("a read in range")
+    }
+}
+
+/// The reads of a [`Reads`] in order.
+#[derive(Clone)]
+pub(crate) struct ReadsIter<'a> {
+    segs: std::slice::Iter<'a, Arc<Vec<Read>>>,
+    cur: std::slice::Iter<'a, Read>,
+    tail: &'a [Read],
+    done: bool,
+}
+
+impl<'a> Iterator for ReadsIter<'a> {
+    type Item = &'a Read;
+    #[inline]
+    fn next(&mut self) -> Option<&'a Read> {
+        loop {
+            if let Some(r) = self.cur.next() {
+                return Some(r);
+            }
+            match self.segs.next() {
+                Some(s) => self.cur = s.iter(),
+                None if !self.done => {
+                    self.done = true;
+                    self.cur = self.tail.iter();
+                }
+                None => return None,
+            }
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Reads {
+    type Item = &'a Read;
+    type IntoIter = ReadsIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl PartialEq for Reads {
+    fn eq(&self, o: &Self) -> bool {
+        self.len() == o.len() && self.iter().eq(o.iter())
+    }
+}
+
+impl Eq for Reads {}
+
+impl std::fmt::Debug for Reads {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
 /// A committed run's result.
 #[derive(Clone, Debug)]
 pub(crate) struct Res {
@@ -325,7 +530,7 @@ pub(crate) struct Res {
     pub kinds: Vec<ValueId>,
     pub kids: Vec<Id>,
     pub conts: Vec<Id>,
-    pub reads: Vec<Read>,
+    pub reads: Reads,
     pub diag: Vec<ValueId>,
     /// The claim the run made (`Ctx::claim`), overriding the declared one.
     pub claim: Option<usize>,
@@ -426,7 +631,7 @@ impl Default for Res {
             kinds: Vec::new(),
             kids: Vec::new(),
             conts: Vec::new(),
-            reads: Vec::new(),
+            reads: Reads::new(),
             diag: Vec::new(),
             claim: None,
             filed: None,

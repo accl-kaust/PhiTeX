@@ -2737,7 +2737,7 @@ enum Which {
 
 /// The reader entries (`which` of them) of read log `reads` of node `id`
 /// in world `w`, sorted and distinct, and its scope and sibling windows.
-fn read_keys(w: &World, id: Id, n: &Node, reads: &[Read], which: Which) -> (Vec<ReadKey>, ReadAgg) {
+fn read_keys(w: &World, id: Id, n: &Node, reads: &super::world::Reads, which: Which) -> (Vec<ReadKey>, ReadAgg) {
     // (Most reads are at the reader itself: its position asked once.)
     let mut last_at: Option<(Id, Pos)> = None;
     let mut read_pos = |at: Id, n: &Node| match last_at {
@@ -2895,7 +2895,7 @@ fn diff(old: &[ReadKey], new: &[ReadKey], mut step: impl FnMut(ReadKey, bool)) {
 /// committed; never fewer), unless a renumbering came since `w` was
 /// taken. The entries made, with the renumbering they were made at, for
 /// the merge to file the committed run by.
-pub(crate) fn file_ahead(w: &World, id: Id, reads: &[Read]) -> Option<(u64, Arc<[ReadKey]>)> {
+pub(crate) fn file_ahead(w: &World, id: Id, reads: &super::world::Reads) -> Option<(u64, Arc<[ReadKey]>)> {
     let n = w.node(id)?;
     let epoch = w.rd.relabels();
     if *epoch != w.relabels {

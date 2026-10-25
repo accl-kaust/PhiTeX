@@ -1880,7 +1880,7 @@ impl Engine {
         ) else {
             return;
         };
-        let reads = old.reads[..old.marks[j].read_ix as usize].to_vec();
+        let reads = old.reads.prefix(old.marks[j].read_ix as usize);
         self.kept_text.insert(id, n.text.clone());
         let mut ix = KeptIx::new(&self.w, at);
         ix.add(&self.w, id, &reads);
@@ -1889,11 +1889,43 @@ impl Engine {
         rep.resumed_at_mark += 1;
     }
 
+    /// Node `id`'s run `r`, refuted at its merge, kept to resume at the
+    /// last of its marks (its earlier attempts' with its own) before the
+    /// first of its reads that no longer holds: a page builder whose last
+    /// attempt read a finisher's output that changed meanwhile goes on
+    /// from the page before, not from its start.
+    fn refuted_at_mark(&mut self, id: Id, r: &Run) -> bool {
+        let (k0, c0) = r.base.map_or((0, 0), |b| (b.0, b.1));
+        let mut km = match self.kept_marks.remove(&id) {
+            Some(km) if r.base.is_some() && km.kids.len() == k0 && km.conts.len() == c0 => km,
+            _ if r.base.is_none() => KeptMarks::default(),
+            _ => return false,
+        };
+        cont_marks(&mut km.marks, &r.res.marks, u32::try_from(k0).unwrap_or(u32::MAX), u32::try_from(c0).unwrap_or(u32::MAX));
+        if km.marks.is_empty() {
+            return false;
+        }
+        km.kids.extend(r.kids.iter().cloned());
+        km.conts.extend(r.conts.iter().cloned());
+        if r.res.after.is_some() {
+            km.after = r.res.after.clone();
+        }
+        self.kept_marks.insert(id, km);
+        let Some(t) = r.text.clone() else { return false };
+        self.kept_text.insert(id, t);
+        let Some(k) = self.resume_kept_marks(id, &r.res.reads) else { return false };
+        let mut ix = KeptIx::new(&self.w, r.log_at);
+        ix.add(&self.w, id, &k.1);
+        self.kept_ix.insert(id, ix);
+        self.kept.insert(id, k);
+        true
+    }
+
     /// A restart of node `id`, parked continuing (kept reads `reads`), at
     /// the last of its attempts' marks before the first of those reads
     /// that no longer holds strictly (none standing on a definer in work),
     /// as a run resumed at a mark that is not cut off.
-    fn resume_kept_marks(&mut self, id: Id, reads: &[Read]) -> Option<super::ctx::KeptState> {
+    fn resume_kept_marks(&mut self, id: Id, reads: &super::world::Reads) -> Option<super::ctx::KeptState> {
         let km = self.kept_marks.remove(&id)?;
         // (Its marks are of the text it ran.)
         if let Some(t) = self.kept_text.get(&id)
@@ -1907,12 +1939,12 @@ impl Engine {
         let m = km.marks[j];
         let (kids, conts) = (km.kids.get(..m.kids as usize)?.to_vec(), km.conts.get(..m.conts as usize)?.to_vec());
         let old = std::sync::Arc::new(Res {
-            reads: reads.to_vec(),
+            reads: reads.clone(),
             marks: km.marks.into(),
             cont_marks: true,
             ..Res::default()
         });
-        let before = reads[..m.read_ix as usize].to_vec();
+        let before = reads.prefix(m.read_ix as usize);
         Some((Box::new(super::ctx::MarkResume { after: after.0, old, j, kids, conts, no_cut: true }), before, None))
     }
 
@@ -1943,7 +1975,7 @@ impl Engine {
             return;
         };
         let offer = super::ctx::RetextOffer { after: after.0, old, jmax, old_args: was.args.clone(), kids, conts };
-        self.kept.insert(id, (Box::new(offer), Vec::new(), None));
+        self.kept.insert(id, (Box::new(offer), super::world::Reads::new(), None));
     }
 
     /// The first of node `id`'s kept reads that no longer holds: asked of
@@ -2911,14 +2943,19 @@ impl Engine {
         // result's; one that stood waited for nothing.)
         let cause = super::core::lock(&self.core.causes).get(&id).copied();
         let old = self.w.node(id).and_then(|n| n.res.clone());
-        let moved = |f: Field, from: Id, to: Id, val: ValueId| {
+        // (A resumed run's offered reads are its last run's: only the
+        // last run's reads past them can differ.)
+        fn tail(o: &Res, from: usize) -> super::world::ReadsIter<'_> {
+            o.reads.iter_from(from.min(o.reads.len()))
+        }
+        let moved = |f: Field, lo: Id, to: Id, val: ValueId| {
             !self.core.acc(f).is_some_and(|m| m.speculate() || m.guess_ran())
                 || matches!(cause, Some(crate::api::Rerun::Range { field: Some(g) }) if g == f)
                 || old.as_ref().is_some_and(|o| {
-                    o.reads.iter().any(|r| matches!(r, Read::Range { f: g, from: a, to: b, val: v, .. } if *g == f && *a == from && *b == to && *v != val))
+                    tail(o, from).any(|r| matches!(r, Read::Range { f: g, from: a, to: b, val: v, .. } if *g == f && *a == lo && *b == to && *v != val))
                 })
         };
-        for r in &res.reads[from..] {
+        for r in res.reads.iter_from(from) {
             match r {
                 Read::Use { f, site, .. } if *site != super::world::NONE => {
                     offer(hs, *site, Cause::Changed {
@@ -2942,7 +2979,7 @@ impl Engine {
                 Read::Placed { node, val, or, .. } => {
                     let made = or.is_none()
                         || matches!(cause, Some(crate::api::Rerun::Output { of }) if of == NodeId(*node))
-                        || old.as_ref().is_some_and(|o| o.reads.iter().any(|r| matches!(r, Read::Placed { node: x, val: v, .. } if x == node && v != val)));
+                        || old.as_ref().is_some_and(|o| tail(o, from).any(|r| matches!(r, Read::Placed { node: x, val: v, .. } if x == node && v != val)));
                     if made {
                         offer(hs, *node, Cause::Output { of: NodeId(*node) });
                     }
@@ -4266,6 +4303,9 @@ impl Merge<'_> {
                     if let Read::Use { f, .. } | Read::Range { f, .. } | Read::Seq { f, .. } = rd {
                         bump_field(&mut rep.refuted_by_field, *f);
                     }
+                    if eng.refuted_at_mark(id, &r) {
+                        rep.resumed_at_mark += 1;
+                    }
                     eng.enqueue(s, id);
                     rep.merge.refute += super::core::ns_since(tr);
                     rep.merge.total += super::core::ns_since(tv);
@@ -4377,7 +4417,7 @@ fn run_job(
     let text = w.node(id).map(|n| n.text.clone());
     let (kept, reads, base) = match resume {
         Some((t, r, b)) => (Some(t), r, Some(b)),
-        None => (None, Vec::new(), None),
+        None => (None, super::world::Reads::new(), None),
     };
     // Run ahead of a node before it still in work: what it reads may
     // change yet (a guess).
@@ -4387,8 +4427,6 @@ fn run_job(
     if !reads.is_empty() {
         // (Its earlier attempts' reads, with room for as many as its
         // operation's runs read.)
-        let mut reads = reads;
-        reads.reserve(cx.reads.capacity().saturating_sub(reads.len()));
         cx.reads = reads;
     }
     // (Continuing: the placements its earlier attempts made stand.)
@@ -4501,7 +4539,7 @@ fn run_job(
         let from = old.marks[j].read_ix as usize;
         let mut reads = std::mem::take(&mut cx.reads);
         let shift = reads.len() as i64 - from as i64;
-        reads.extend_from_slice(&old.reads[from..]);
+        reads.extend(old.reads.iter_from(from));
         // (The marks the kept token takes the client back to: those up to
         // the one resumed at, where both runs are one; and, unpatched,
         // those from the one cut off at, where they are one again.)
@@ -4811,8 +4849,9 @@ impl KeptIx {
     }
 
     /// Indexes node `me`'s kept reads past those indexed, by `w`'s positions.
-    fn add(&mut self, w: &World, me: Id, reads: &[Read]) {
-        for (i, r) in reads.iter().enumerate().skip(self.n) {
+    fn add(&mut self, w: &World, me: Id, reads: &super::world::Reads) {
+        let n0 = self.n;
+        for (i, r) in reads.iter_from(n0).enumerate().map(|(i, r)| (i + n0, r)) {
             let node = |x: Id, ix: &mut Self| {
                 if x != super::world::NONE && x != me {
                     ix.nodes.entry(x).or_default().push(i);
