@@ -1521,7 +1521,8 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
 }
 
 /// Takes a node's definitions and contributions out of its segment (under
-/// its write lock) and re-asks their readers; its placements are unfiled.
+/// its write lock) and re-asks their readers, and, when it is removed, the
+/// reads made at its label; its placements are unfiled.
 fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: bool) {
     let rec = node.record();
     let Some((seg, mut inner)) = own_write(eng, node) else {
@@ -1530,7 +1531,16 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     let pos = node.pos_hint();
     let seg_id = seg.id;
     let was_hole = node.is_hole();
+    // (others' reads at its label, `At`: gone with it)
+    let mut anchored: Vec<(Field, Reader)> = Vec::new();
     if remove {
+        for (f, rs) in &inner.readers {
+            for r in rs {
+                if r.anchor == node.id && r.node != node.id {
+                    anchored.push((*f, r.clone()));
+                }
+            }
+        }
         node.set_state(State::Gone);
         inner.nodes.remove(&pos);
         if was_hole {
@@ -1580,6 +1590,9 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     }
     for f in changed_contribs {
         reask_ranges(eng, w, f, pos, node.id, &mut st);
+    }
+    for (f, r) in &anchored {
+        reask_reader(eng, w, *f, r, Some(node.id), &mut st);
     }
     reask_holes(eng, w, node, &mut st);
     if was_hole && remove {

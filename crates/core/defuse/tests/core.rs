@@ -879,3 +879,23 @@ fn a_next_stopped_at_a_claimed_sibling_is_asked_again() {
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
 
+
+#[test]
+fn a_reader_at_a_removed_node_is_asked_again() {
+    // A read at another node's position whose node is removed: the read
+    // now finds it gone, and its reader runs again.
+    let (e, o) = engine();
+    let v = e.values();
+    let x = f(v, "x");
+    let u = e.new_unit();
+    e.push(u, o.def, vec![x, v.int(1)]);
+    let mid = e.push(u, o.work, vec![v.int(0)]);
+    let late = e.push(u, o.get_before, vec![x, v.int(mid.raw() as i64)]);
+    e.evaluate(2).unwrap();
+    assert_eq!(int(&e, late), 1);
+    e.remove(mid);
+    let r = e.evaluate(2).unwrap();
+    assert_eq!(e.output(late), Some(ValueId::UNIT), "the reader of a gone node's position ran again: {r:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
