@@ -10,7 +10,7 @@ use crate::api::{
     OpId, Operation, PathId, ProjId, Projection, Report, SeqMonoid, Settled, Step, UnitId,
 };
 use crate::commit::{self, CommitStats, Predicted, own_write, place_after, settle_predictions, unfile};
-use crate::index::FieldIndex;
+use crate::index::{FieldIndex, RangeIndex};
 use crate::lock::{Lock, Mx, ns};
 use crate::node::{Node, State, Wake};
 use crate::order::{GAP, Order, Pos, SegId, UNIT_SPAN};
@@ -94,6 +94,8 @@ pub struct Engine {
     pub(crate) defs: FieldIndex,
     pub(crate) contribs: FieldIndex,
     pub(crate) readers: FieldIndex,
+    /// The range readers of each field, by interval.
+    pub(crate) ranges: RangeIndex,
     pub(crate) monoids: Lock<Monoids>,
     pub(crate) env: Env,
     pub(crate) paths: Paths,
@@ -165,6 +167,7 @@ impl Engine {
             defs: FieldIndex::new(),
             contribs: FieldIndex::new(),
             readers: FieldIndex::new(),
+            ranges: RangeIndex::new(),
             monoids: Lock::new(Monoids {
                 by_field: FxHashMap::default(),
                 by_prefix: Vec::new(),

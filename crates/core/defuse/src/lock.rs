@@ -2,9 +2,10 @@
 //!
 //! | lock | taken by | held for |
 //! |---|---|---|
-//! | a segment's `inner` (`segment::Segment`) | a read; a commit; a placement; a split | one map operation, or one commit's diff of one node; never two segments at once, never across a run |
+//! | a segment's `inner` (`segment::Segment`) | a read; a commit; a placement; a split; a `next` filed at its stop | one map operation, or one commit's diff of one node; never two segments at once, never across a run |
 //! | the order's list (`order::Order::segs`) | a position lookup; a split or a new unit | a binary search; one insert |
 //! | a field-index shard (`index::FieldIndex`: definitions, contributions, readers) | a read's or a commit's skip | one set lookup or insert |
+//! | a range-index shard (`index::RangeIndex`: the range readers by interval) | a commit filing its ranges; a changed contribution asking which hold its label | one commit's ranges of one field; a few map ranges |
 //! | a value shard (`values::Values`) | an intern; a sequence node lookup | one insert or one lookup; plain reads take none |
 //! | paths, monoids, environment, shapes, memo, marks, pending (`engine::Engine`) | setup; rare inserts; a push or an edit outside an evaluation | one map operation |
 //! | a node's `last`, `woke`, `text` and `stopped` (`node::Node`) | its commit; its re-ask; an edit; a read of its arguments; a walk stopping at it | a swap; a clone; a push |
@@ -111,8 +112,9 @@ impl<T> Mx<T> {
 }
 
 /// Tries before a refused guard blocks: every hold in the table is short,
-/// and a blocked thread's wake costs tens of microseconds.
-const SPIN_TRIES: u32 = 256;
+/// and a spin longer than a few dozen is a wait by another name (counted as
+/// one all the same).
+const SPIN_TRIES: u32 = 32;
 
 fn spin() {
     for _ in 0..16 {

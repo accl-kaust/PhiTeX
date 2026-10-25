@@ -494,22 +494,30 @@ pub(crate) fn reader_answer(eng: &Engine, f: Field, r: &Reader) -> Option<ValueI
     through(eng, rc, r.path)
 }
 
-/// A range reader record's current answer, its folds from `memo`.
-pub(crate) fn range_answer_in(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) -> Option<ValueId> {
+/// Whether a range reader record's every path still gives what it saw, its
+/// folds from `memo`.
+pub(crate) fn range_stands(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) -> bool {
+    let v = range_value_in(eng, f, r, memo);
+    r.seen.iter().all(|&(p, s)| v.and_then(|v| apply_path(eng, v, p)) == s)
+}
+
+/// A range reader's value before its paths (None where an end is gone:
+/// every path gives none).
+fn range_value_in(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) -> Option<Option<ValueId>> {
     let me = eng.node(r.node);
     let from = match r.from {
-        Some(n) => Some(pos_of(eng, n)?),
-        None => Some(unit_start(eng, me)),
+        Some(n) => pos_of(eng, n)?,
+        None => unit_start(eng, me),
     };
     if r.next {
-        let n = next_contribution(eng, f, from);
-        return apply_path(eng, next_value(eng, &n), r.path);
+        let n = next_contribution(eng, f, Some(from));
+        return Some(next_value(eng, &n));
     }
     let to = match r.to {
         Some(n) => pos_of(eng, n)?,
         None => pos_of(eng, me.id)?,
     };
-    apply_path(eng, Some(fold_in(eng, f, from?, end_of(to, r.incl), memo)), r.path)
+    Some(Some(fold_in(eng, f, from, end_of(to, r.incl), memo)))
 }
 
 /// A fold's exclusive end at `to`, or just past it where `to`'s own is in

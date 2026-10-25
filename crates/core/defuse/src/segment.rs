@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering;
 
 use crate::api::{NodeId, OpId, PathId, UnitId};
 use crate::engine::Engine;
+use crate::index::RangeKey;
 use crate::lock::Lock;
 use crate::node::State;
 use crate::order::{Pos, SEG_CAP, SegId};
@@ -38,8 +39,10 @@ pub(crate) struct Inner {
     /// Contributions by field, in position order, and their fold.
     pub(crate) contribs: FxHashMap<Field, PosMap<ValueId>>,
     pub(crate) sums: FxHashMap<Field, ValueId>,
-    /// Readers of folds whose range covers this segment.
-    pub(crate) range_readers: FxHashMap<Field, Vec<RangeReader>>,
+    /// `next` readers whose search stopped at one of its nodes, not yet
+    /// committed (`commit::reask_holes`); their ranges are in
+    /// `Engine::ranges`.
+    pub(crate) stops: Vec<(Field, RangeKey, RangeReader)>,
     /// Its nodes by operation, for `commit::learn_shape`.
     pub(crate) by_op: FxHashMap<OpId, Vec<NodeId>>,
     /// Its nodes that have not committed (about: a walk skips the search
@@ -493,8 +496,10 @@ pub(crate) struct RangeReader {
     pub(crate) next: bool,
     /// A fold up to and with `to`'s own.
     pub(crate) incl: bool,
-    pub(crate) path: PathId,
-    pub(crate) seen: Option<ValueId>,
+    /// A `next` stopped at a node not yet committed (`to`).
+    pub(crate) hole: bool,
+    /// Each path read through the range and what it gave.
+    pub(crate) seen: Arc<[(PathId, Option<ValueId>)]>,
 }
 
 /// Whether a reader record still stands for its node.
@@ -566,7 +571,7 @@ impl Segment {
                 readers: FxHashMap::default(),
                 contribs: FxHashMap::default(),
                 sums: FxHashMap::default(),
-                range_readers: FxHashMap::default(),
+                stops: Vec::new(),
                 by_op: FxHashMap::default(),
                 holes: 0,
             }),
@@ -728,7 +733,10 @@ impl Segment {
             }
         }
         inner.readers.retain(|_, v| !v.is_empty());
-        let range_readers = inner.range_readers.clone();
+        let (stops, down): (Vec<_>, Vec<_>) = std::mem::take(&mut inner.stops)
+            .into_iter()
+            .partition(|s: &(Field, RangeKey, RangeReader)| s.2.to.is_some_and(|n| eng.node(n).pos_hint() >= at));
+        inner.stops = down;
         let mut by_op: FxHashMap<OpId, Vec<NodeId>> = FxHashMap::default();
         for (op, v) in &mut inner.by_op {
             let (up, down): (Vec<NodeId>, Vec<NodeId>) = v.drain(..).partition(|n| eng.node(*n).pos_hint() >= at);
@@ -751,7 +759,7 @@ impl Segment {
                 readers,
                 contribs,
                 sums: FxHashMap::default(),
-                range_readers,
+                stops,
                 by_op,
                 holes: up_holes,
             }),

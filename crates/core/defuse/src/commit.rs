@@ -34,15 +34,19 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use crate::api::{Cause, Locality, NodeId, OpId, UnitId};
+use crate::api::{Cause, Locality, NodeId, OpId, PathId, UnitId};
 use crate::engine::Engine;
 use crate::lock::ns;
 use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, RunRecord, State, Wake};
 use crate::order::{Pos, SegId};
 use crate::read::{self, Reaching, next_contribution, reaching_at, reader_answer, through};
 use crate::sched::{Worker, enqueue, mark_dirty, mark_stale};
+use crate::index::RangeKey;
 use crate::segment::{Def, Inner, Made, RangeReader, Reader, Segment, live, push_pruned};
 use crate::values::{Field, FxHashMap, FxHashSet, ValueId};
+
+/// A range read's field, ends, and whether a `next` or with `to`'s own.
+type RangeOf = (Field, Option<NodeId>, Option<NodeId>, bool, bool);
 
 /// Counts for the report.
 #[derive(Default, Clone, Copy)]
@@ -189,36 +193,87 @@ impl IndexOps {
     }
 }
 
-/// Files a range reader in every segment its range covers.
-fn file_range_reader(eng: &Engine, me: &Node, f: Field, r: RangeReader) {
-    let from = match r.from {
-        Some(n) => eng.node(n).pos_hint(),
-        None => read::unit_start(eng, me),
-    };
-    file_range_reader_from(eng, f, r, from);
+/// The labels a node's label stays within for its life: its segment's
+/// range now (a relabel stays in it, a split narrows it); None when gone.
+fn node_span(eng: &Engine, n: NodeId) -> Option<(Pos, Pos)> {
+    let node = eng.node(n);
+    loop {
+        if node.state() == State::Gone {
+            return None;
+        }
+        let seg = eng.seg(node.seg_hint());
+        let inner = seg.inner.read();
+        if inner.nodes.get(&node.pos_hint()) == Some(&n) {
+            return Some((seg.lo, inner.hi));
+        }
+        if node.state() == State::Gone {
+            return None;
+        }
+    }
 }
 
-/// `file_range_reader` in the segments from `from`'s on.
-fn file_range_reader_from(eng: &Engine, f: Field, r: RangeReader, from: Pos) {
+/// The labels a range reader's range stays within (`index::RangeIndex`).
+fn range_span(eng: &Engine, r: &RangeReader) -> (Pos, Pos) {
     let me = eng.node(r.node);
-    let to = match r.to {
-        Some(n) => Some(eng.node(n).pos_hint()),
-        None if r.next => None,
-        None => Some(me.pos_hint()),
+    let lo = match r.from {
+        Some(n) => node_span(eng, n).map_or(Pos(0), |s| s.0),
+        None => read::unit_start(eng, me),
     };
-    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
-    while let Some(sid) = cur {
-        let seg = eng.seg(sid);
-        if to.is_some_and(|t| seg.lo > t) {
-            break;
+    let hi = match r.to {
+        Some(n) => node_span(eng, n).map_or(Pos(u64::MAX), |s| s.1),
+        None if r.next => Pos(u64::MAX),
+        None => node_span(eng, r.node).map_or(Pos(u64::MAX), |s| s.1),
+    };
+    (lo, hi)
+}
+
+/// Files range readers in their fields' interval lists (one lock a field),
+/// and each `next` stopped at a node not yet committed at that node; one
+/// whose stop has committed meanwhile is re-asked at once.
+fn file_ranges(eng: &Engine, w: Option<&Worker>, mut rs: Vec<(Field, RangeReader)>, by: NodeId, st: &mut CommitStats) {
+    rs.sort_by_key(|x| x.0);
+    let mut again: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
+    let mut i = 0;
+    while i < rs.len() {
+        let f = rs[i].0;
+        let j = i + rs[i..].iter().take_while(|x| x.0 == f).count();
+        let items: Vec<(Pos, Pos, RangeReader)> = rs[i..j]
+            .iter()
+            .map(|(_, r)| {
+                let (lo, hi) = range_span(eng, r);
+                (lo, hi, r.clone())
+            })
+            .collect();
+        let keys = eng.ranges.insert(f, items, |r| live(eng, r.node, r.serial));
+        for (k, (_, r)) in keys.into_iter().zip(&rs[i..j]) {
+            if !file_stop(eng, f, k, r) {
+                again.push((f, k, r.clone()));
+            }
         }
-        {
-            let mut inner = seg.inner.write();
-            let v = inner.range_readers.entry(f).or_default();
-            push_pruned(v, r.clone(), |x| live(eng, x.node, x.serial));
-        }
-        cur = eng.order.next(sid, seg.lo);
+        i = j;
     }
+    let mut memo = read::FoldMemo::new();
+    for (f, k, r) in again {
+        reask_range(eng, w, f, k, &r, by, st, &mut memo);
+    }
+}
+
+/// Files a `next` reader whose search stopped at a node not yet committed
+/// at that node (`reask_holes`); false when the node has committed or gone
+/// since: the stop is stale.
+fn file_stop(eng: &Engine, f: Field, k: RangeKey, r: &RangeReader) -> bool {
+    let (true, Some(stop)) = (r.hole, r.to) else {
+        return true;
+    };
+    let n = eng.node(stop);
+    let Some((_, mut inner)) = own_write(eng, n) else {
+        return false;
+    };
+    if !n.is_hole() {
+        return false;
+    }
+    push_pruned(&mut inner.stops, (f, k, r.clone()), |x| live(eng, x.2.node, x.2.serial));
+    true
 }
 
 /// Whether a range reader's range covers `at`.
@@ -309,13 +364,14 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut here_reads: Vec<(Field, Reader)> = Vec::with_capacity(rec.reads.len());
     let mut other_reads: Vec<(Field, Reader, Anchor)> = Vec::new();
     let mut range_reads: Vec<(Field, RangeReader)> = Vec::new();
+    let mut range_seen: Vec<Vec<(PathId, Option<ValueId>)>> = Vec::new();
+    let mut range_at: FxHashMap<RangeOf, usize> = FxHashMap::default();
     let mut env_reads: Vec<(Field, crate::engine::EnvReader)> = Vec::new();
     // what the lock decides of the walks and of the run's own reads
     let mut walks: Vec<(Field, Here)> = Vec::with_capacity(nd);
     let mut wake: Vec<(NodeId, NodeId, Field)> = Vec::with_capacity(8);
     let mut later: Vec<(Field, Reader, NodeId)> = Vec::new();
-    let mut ranges: Vec<(Field, RangeReader)> = Vec::new();
-    let mut holes: Vec<(Field, RangeReader)> = Vec::new();
+    let mut holes: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
     let mut unchecked: Vec<usize> = Vec::with_capacity(rec.reads.len());
     let mut refuted: Option<usize> = None;
     let mut ix = IndexOps::with_capacity(nd, nc, rec.reads.len());
@@ -352,41 +408,56 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     seen: r.seen,
                 },
             )),
-            ReadKind::Fold { f, from, to, incl } => range_reads.push((
-                *f,
-                RangeReader {
-                    node: node.id,
-                    serial,
-                    from: *from,
-                    to: *to,
-                    next: false,
-                    incl: *incl,
-                    path: r.path,
-                    seen: r.seen,
-                },
-            )),
+            ReadKind::Fold { f, from, to, incl } => {
+                let i = *range_at.entry((*f, *from, *to, false, *incl)).or_insert_with(|| {
+                    range_reads.push((
+                        *f,
+                        RangeReader {
+                            node: node.id,
+                            serial,
+                            from: *from,
+                            to: *to,
+                            next: false,
+                            incl: *incl,
+                            hole: false,
+                            seen: Arc::from([]),
+                        },
+                    ));
+                    range_seen.push(Vec::new());
+                    range_reads.len() - 1
+                });
+                range_seen[i].push((r.path, r.seen));
+            }
             ReadKind::Next { f, after } => {
                 let from = match after {
                     Some(n) => Some(eng.node(*n).pos_hint()),
                     None => Some(read::unit_start(eng, node)),
                 };
-                let stop = next_contribution(eng, *f, from).stop;
-                range_reads.push((
-                    *f,
-                    RangeReader {
-                        node: node.id,
-                        serial,
-                        from: *after,
-                        to: stop,
-                        next: true,
-                        incl: false,
-                        path: r.path,
-                        seen: r.seen,
-                    },
-                ));
+                let i = *range_at.entry((*f, *after, None, true, false)).or_insert_with(|| {
+                    let n = next_contribution(eng, *f, from);
+                    range_reads.push((
+                        *f,
+                        RangeReader {
+                            node: node.id,
+                            serial,
+                            from: *after,
+                            to: n.stop,
+                            next: true,
+                            incl: false,
+                            hole: n.item.is_none() && n.stop.is_some(),
+                            seen: Arc::from([]),
+                        },
+                    ));
+                    range_seen.push(Vec::new());
+                    range_reads.len() - 1
+                });
+                range_seen[i].push((r.path, r.seen));
             }
             ReadKind::Placed { .. } | ReadKind::Following { .. } => {}
         }
+    }
+    for ((_, r), seen) in range_reads.iter_mut().zip(range_seen) {
+        r.seen = Arc::from(seen);
     }
     let mut read_fields: Vec<(Field, usize)> = here_reads.iter().map(|(f, _)| (*f, 1)).collect();
     read_fields.sort_unstable_by_key(|x| x.0);
@@ -397,7 +468,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         same
     });
-    let (seg_id, seg_lo, old_output, rec) = loop {
+    let (seg_id, seg_lo, old_output, rec, seg_pos) = loop {
         let Some((seg, mut inner)) = own_write(eng, node) else {
             return st;
         };
@@ -608,19 +679,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 walk_here(eng, &mut inner, f, pos, node.id, &mut wake, &mut later, &mut st),
             ));
         }
-        for &f in &changed_contribs {
-            if let Some(rs) = inner.range_readers.get(&f) {
-                ranges.extend(rs.iter().filter(|r| covers(eng, r, pos)).map(|r| (f, r.clone())));
-            }
-        }
-        if serial == 1 {
-            for (f, rs) in &inner.range_readers {
-                holes.extend(
-                    rs.iter()
-                        .filter(|r| r.next && r.to == Some(node.id))
-                        .map(|r| (*f, r.clone())),
-                );
-            }
+        if serial == 1 && !inner.stops.is_empty() {
+            let (mine, rest) = std::mem::take(&mut inner.stops).into_iter().partition(|s| s.2.to == Some(node.id));
+            inner.stops = rest;
+            holes = mine;
         }
         // the run's own reads at its position, answered again
         for (i, r) in rec.reads.iter().enumerate() {
@@ -648,7 +710,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         for id in removed {
             unfile(eng, ww, eng.node(id));
         }
-        break (seg.id, seg.lo, old_output, rec);
+        break (seg.id, seg.lo, old_output, rec, pos);
     };
     // 2. reads anchored elsewhere
     for (f, mut r, at) in other_reads {
@@ -669,9 +731,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             }
         }
     }
-    for (f, r) in range_reads {
-        file_range_reader(eng, node, f, r);
-    }
+    file_ranges(eng, ww, range_reads, node.id, &mut st);
     if !env_reads.is_empty() {
         let mut er = eng.env.readers.write();
         for (f, r) in env_reads {
@@ -719,12 +779,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let defined: Vec<Field> = rec.defs.iter().map(|d| d.f).collect();
         walk_stopped(eng, ww, node, node.pos_hint(), seg_id, &defined, &mut st);
     }
-    let mut memo = read::FoldMemo::new();
-    for (f, r) in ranges {
-        reask_range(eng, ww, f, &r, node.id, &mut st, &mut memo);
+    for &f in &changed_contribs {
+        reask_ranges(eng, ww, f, seg_pos, node.id, &mut st);
     }
-    for (f, r) in holes {
-        reask_range(eng, ww, f, &r, node.id, &mut st, &mut memo);
+    let mut memo = read::FoldMemo::new();
+    for (f, k, r) in holes {
+        reask_range(eng, ww, f, k, &r, node.id, &mut st, &mut memo);
     }
     // (the last first: a worker's deque gives the newest first, so its
     // placements run in their order, a child before the node after it)
@@ -1161,28 +1221,31 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
     }
 }
 
-/// Re-asks the readers of folds over `f` whose range covers `at`.
+/// Re-asks the readers of folds over `f` whose range covers `at`, `by`'s
+/// label (its last where it is gone).
 pub(crate) fn reask_ranges(eng: &Engine, w: Option<&Worker>, f: Field, at: Pos, by: NodeId, st: &mut CommitStats) {
-    let Some(seg) = eng.seg_for_pos(at) else {
-        return;
-    };
-    let readers: Vec<RangeReader> = {
-        let inner = seg.inner.read();
-        let byn = eng.node(by);
-        let at = if inner.nodes.get(&byn.pos_hint()) == Some(&by) { byn.pos_hint() } else { at };
-        match inner.range_readers.get(&f) {
-            Some(rs) => rs.iter().filter(|r| covers(eng, r, at)).cloned().collect(),
-            None => Vec::new(),
-        }
-    };
+    let at = read::pos_of(eng, by).unwrap_or(at);
+    let readers = eng.ranges.holding(f, at);
     let mut memo = read::FoldMemo::new();
-    for r in readers {
-        reask_range(eng, w, f, &r, by, st, &mut memo);
+    for (k, r) in readers {
+        if covers(eng, &r, at) {
+            reask_range(eng, w, f, k, &r, by, st, &mut memo);
+        }
     }
 }
 
 /// Re-asks one range reader after `by`'s change.
-fn reask_range(eng: &Engine, w: Option<&Worker>, f: Field, r: &RangeReader, by: NodeId, st: &mut CommitStats, memo: &mut read::FoldMemo) {
+#[allow(clippy::too_many_arguments)]
+fn reask_range(
+    eng: &Engine,
+    w: Option<&Worker>,
+    f: Field,
+    k: RangeKey,
+    r: &RangeReader,
+    by: NodeId,
+    st: &mut CommitStats,
+    memo: &mut read::FoldMemo,
+) {
     if !live(eng, r.node, r.serial) {
         return;
     }
@@ -1190,6 +1253,10 @@ fn reask_range(eng: &Engine, w: Option<&Worker>, f: Field, r: &RangeReader, by: 
     // (the node it stopped at committed with nothing for it): filed again
     // up to its new stop, which re-asks it in turn
     if r.next {
+        if !eng.ranges.has(f, k) {
+            // (filed again since: that record answers)
+            return;
+        }
         let me = eng.node(r.node);
         let from = match r.from {
             Some(n) => read::pos_of(eng, n),
@@ -1197,18 +1264,19 @@ fn reask_range(eng: &Engine, w: Option<&Worker>, f: Field, r: &RangeReader, by: 
         };
         if let Some(from) = from {
             let n = read::next_contribution(eng, f, Some(from));
-            if read::apply_path(eng, read::next_value(eng, &n), r.path) == r.seen {
-                if n.stop != r.to {
-                    let start = r.to.and_then(|t| read::pos_of(eng, t)).unwrap_or(from);
+            let v = read::next_value(eng, &n);
+            if r.seen.iter().all(|&(p, s)| read::apply_path(eng, v, p) == s) {
+                if n.stop != r.to && eng.ranges.remove(f, k) {
                     let mut again = r.clone();
                     again.to = n.stop;
-                    file_range_reader_from(eng, f, again, start);
+                    again.hole = n.item.is_none() && n.stop.is_some();
+                    file_ranges(eng, w, vec![(f, again)], by, st);
                 }
                 return;
             }
         }
     }
-    if read::range_answer_in(eng, f, r, memo) != r.seen
+    if !read::range_stands(eng, f, r, memo)
         && mark_stale(
             eng,
             w,
@@ -1229,17 +1297,18 @@ fn reask_range(eng: &Engine, w: Option<&Worker>, f: Field, r: &RangeReader, by: 
 /// start may now be known.
 pub(crate) fn reask_holes(eng: &Engine, w: Option<&Worker>, node: &Node, st: &mut CommitStats) {
     let seg = eng.seg(node.seg_hint());
-    let readers: Vec<(Field, RangeReader)> = {
-        let inner = seg.inner.read();
-        inner
-            .range_readers
-            .iter()
-            .flat_map(|(f, rs)| rs.iter().filter(|r| r.next && r.to == Some(node.id)).map(move |r| (*f, r.clone())))
-            .collect()
+    let readers: Vec<(Field, RangeKey, RangeReader)> = {
+        let mut inner = seg.inner.write();
+        if inner.stops.is_empty() {
+            return;
+        }
+        let (mine, rest) = std::mem::take(&mut inner.stops).into_iter().partition(|s| s.2.to == Some(node.id));
+        inner.stops = rest;
+        mine
     };
     let mut memo = read::FoldMemo::new();
-    for (f, r) in readers {
-        reask_range(eng, w, f, &r, node.id, st, &mut memo);
+    for (f, k, r) in readers {
+        reask_range(eng, w, f, k, &r, node.id, st, &mut memo);
     }
 }
 
