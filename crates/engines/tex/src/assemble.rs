@@ -536,6 +536,19 @@ type LineMemos = (
 );
 static LINE_MEMO: std::sync::OnceLock<std::sync::Mutex<LineMemos>> = std::sync::OnceLock::new();
 
+/// The last link's line, in pdfTeX's order, and its pieces' items, by
+/// piece ([`pdf_exact`]).
+#[derive(Default)]
+struct LinkInputs {
+    inst: u64,
+    line: Vec<ValueId>,
+    ordered: std::sync::Arc<Vec<ValueId>>,
+    items: Vec<(i64, ValueId)>,
+    units: std::sync::Arc<crate::FxHashMap<i64, ValueId>>,
+}
+
+static LINK_INPUTS: std::sync::OnceLock<std::sync::Mutex<LinkInputs>> = std::sync::OnceLock::new();
+
 #[allow(clippy::too_many_lines)]
 fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let v = cx.values();
@@ -560,14 +573,50 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     };
 
     let t_acc = t0.elapsed();
-    let xpages = crate::pdfout::order_line(v, &line);
-    // (the pieces' items, by piece: the pages' sealed lines,
-    // `crate::pages::seal`)
-    let mut units = crate::FxHashMap::default();
-    units.reserve(items.len());
-    for (p, items) in items {
-        units.entry(p).or_insert(items);
-    }
+    // (the line in pdfTeX's order, and the pieces' items by piece (the
+    // pages' sealed lines, `crate::pages::seal`): the last link's where
+    // the same, the items of the pieces that changed put in, the link
+    // told which those are)
+    let (xpages, units, changed) = {
+        let mut g = LINK_INPUTS.get_or_init(Default::default).locked();
+        if g.inst != v.instance() {
+            *g = LinkInputs {
+                inst: v.instance(),
+                ..LinkInputs::default()
+            };
+        }
+        if g.line != line {
+            g.ordered = std::sync::Arc::new(crate::pdfout::order_line(v, &line));
+            g.line.clone_from(&line);
+        }
+        let changed = if g.items.len() == items.len() && !g.units.is_empty() {
+            let ps: phitex_defuse::FxHashSet<i64> = g
+                .items
+                .iter()
+                .zip(&items)
+                .filter(|(a, b)| a != b)
+                .flat_map(|(a, b)| [a.0, b.0])
+                .collect();
+            let units = std::sync::Arc::make_mut(&mut g.units);
+            for &p in &ps {
+                match items.iter().find(|x| x.0 == p) {
+                    Some(&(_, u)) => units.insert(p, u),
+                    None => units.remove(&p),
+                };
+            }
+            Some(ps)
+        } else {
+            let mut units = crate::FxHashMap::default();
+            units.reserve(items.len());
+            for &(p, u) in &items {
+                units.entry(p).or_insert(u);
+            }
+            g.units = std::sync::Arc::new(units);
+            None
+        };
+        g.items = items;
+        (g.ordered.clone(), g.units.clone(), changed)
+    };
     if crate::exec::obs_flag!("PHITEX_LINE_TRACE") {
         for (tag, l) in [("in", &line), ("out", &xpages)] {
             for &x in l {
@@ -615,7 +664,7 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
     };
     let t_seed = t0.elapsed();
-    let l = crate::pdfout::finish_exact(v, &f, &xpages, &units, &o.pdf_cmds);
+    let l = crate::pdfout::finish_exact(v, &f, &xpages, &units, changed.as_ref(), &o.pdf_cmds);
     let t_fin = t0.elapsed();
     // a page the link shipped and the writer could not write is the
     // job's error, in the log and loudly, naming the node that shipped

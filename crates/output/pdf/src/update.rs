@@ -30,7 +30,7 @@ use crate::{Chunk, PdfBytes, PdfError, Tail};
 /// state flushed and the tail's.
 #[derive(Clone, Debug)]
 pub struct Layout {
-    bytes: PdfBytes,
+    bytes: Arc<PdfBytes>,
     tail: Arc<Tail>,
     exact: Arc<OnceLock<Result<Arc<Vec<u8>>, PdfError>>>,
 }
@@ -51,7 +51,7 @@ impl Layout {
     #[must_use]
     pub fn new(tail: Arc<Tail>, bytes: PdfBytes) -> Layout {
         Layout {
-            bytes,
+            bytes: Arc::new(bytes),
             tail,
             exact: Arc::default(),
         }
@@ -188,25 +188,27 @@ impl Layout {
     }
 }
 
-/// The chunks' hash, each chunk's kept by its bytes' address while a
-/// layout holds it.
+/// The chunks' hash from each chunk's, the last call's kept: a chunk
+/// at the same place from the start or from the end as one of its
+/// chunks, the same allocation, is not hashed again.
 fn chunks_hash<'a>(chunks: impl Iterator<Item = &'a Chunk>) -> u64 {
-    type Memo = Mutex<std::collections::HashMap<usize, (Arc<[u8]>, u64)>>;
+    type Memo = Mutex<Vec<(Arc<[u8]>, u64)>>;
     static MEMO: OnceLock<Memo> = OnceLock::new();
     let mut m = MEMO
         .get_or_init(Mutex::default)
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let mut kept = std::collections::HashMap::with_capacity(m.len());
-    let mut words = Vec::new();
-    for c in chunks {
-        let k = c.bytes.as_ptr() as usize;
-        let h = match m.remove(&k) {
-            Some((a, h)) if Arc::ptr_eq(&a, &c.bytes) => h,
-            _ => crate::finish::hash64(&c.bytes),
-        };
+    let chunks: Vec<&Chunk> = chunks.collect();
+    let (n, k) = (chunks.len(), m.len());
+    let mut kept = Vec::with_capacity(n);
+    let mut words = Vec::with_capacity(8 * n);
+    for (i, c) in chunks.iter().enumerate() {
+        let same = |j: usize| m.get(j).filter(|e| Arc::ptr_eq(&e.0, &c.bytes)).map(|e| e.1);
+        let h = same(i)
+            .or_else(|| (k + i).checked_sub(n).and_then(same))
+            .unwrap_or_else(|| crate::finish::hash64(&c.bytes));
         words.extend_from_slice(&h.to_le_bytes());
-        kept.insert(k, (c.bytes.clone(), h));
+        kept.push((c.bytes.clone(), h));
     }
     *m = kept;
     crate::finish::hash64(&words)
@@ -474,7 +476,11 @@ fn restream(
         .iter()
         .copied()
         .filter(|n| news.get(n).is_some_and(|b| is_stream(b)))
-        .chain(olds.iter().filter(|(_, b)| is_stream(b)).map(|(&n, _)| n))
+        .chain(
+            olds.iter()
+                .filter(|&(n, b)| is_stream(b) && news.get(n) != Some(b))
+                .map(|(&n, _)| n),
+        )
         .collect();
     if touched.is_empty() {
         return;

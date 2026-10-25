@@ -104,6 +104,14 @@ pub(crate) struct Incr {
     pub chunks: Vec<Chunk>,
     /// How many chunks the last text analysed again.
     pub analysed: usize,
+    /// The texts set so far, and what the last one changed where known:
+    /// one chunk analysed again (its index), the chunks after it moved
+    /// by the length's change (`usize::MAX`: nothing changed).
+    pub edits: u64,
+    pub one: Option<(usize, isize)>,
+    /// The slices and their keys as `api::doc_nodes` made them last,
+    /// for the texts set so far then.
+    pub slices: std::sync::Mutex<Option<crate::api::SliceMemo>>,
     /// File ids for the definitions of the document's chunks.
     next_file: u32,
     /// The workers its chunks are analysed on (`crate::exec::Coarse`).
@@ -119,6 +127,9 @@ impl Incr {
             cache: Vec::new(),
             chunks: Vec::new(),
             analysed: 0,
+            edits: 0,
+            one: None,
+            slices: std::sync::Mutex::new(None),
             next_file: 2_000_000_000,
             threads: 1,
         }
@@ -148,11 +159,14 @@ impl Incr {
     /// analysed again where their text or incoming definitions changed.
     pub(crate) fn set_text(&mut self, text: &str) {
         let t0 = std::time::Instant::now();
+        self.edits += 1;
+        self.one = None;
         if text != self.text {
             self.splice(text);
             text.clone_into(&mut self.text);
         } else if !self.chunks.is_empty() || text.is_empty() {
             self.analysed = 0;
+            self.one = Some((usize::MAX, 0));
             return;
         }
         let t1 = t0.elapsed();
@@ -171,9 +185,12 @@ impl Incr {
     /// the old text not compared, edited in place.
     pub(crate) fn set_text_edit(&mut self, text: &str, (a, b, c): (usize, usize, usize)) {
         let t0 = std::time::Instant::now();
+        self.edits += 1;
+        self.one = None;
         if a == b && a == c && text.len() == self.text.len() {
             if !self.chunks.is_empty() || text.is_empty() {
                 self.analysed = 0;
+                self.one = Some((usize::MAX, 0));
                 return;
             }
         } else if self.text.is_empty() || self.src.start().is_none() || b > self.text.len() {
@@ -288,6 +305,7 @@ impl Incr {
             }
         }
         self.analysed = 1;
+        self.one = Some((k, c.cast_signed() - b.cast_signed()));
         true
     }
 

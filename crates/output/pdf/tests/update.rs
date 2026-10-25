@@ -509,7 +509,7 @@ impl<'a> Reader<'a> {
                 let d = match known {
                     Some(Some(d)) => d,
                     // (a cycle: the object being digested)
-                    Some(None) => 0x6379_636c_65,
+                    Some(None) => 0x0063_7963_6c65,
                     None => {
                         self.digests.borrow_mut().insert(*n, None);
                         let d = self.digest(&self.object(*n));

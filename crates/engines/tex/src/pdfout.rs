@@ -29,7 +29,7 @@
 use crate::exec::LockWait as _;
 use std::collections::{BTreeMap, BTreeSet};
 
-use phitex_defuse::FxHashMap;
+use phitex_defuse::{FxHashMap, FxHashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use phitex_defuse::{ValueId, Values};
@@ -3382,6 +3382,81 @@ fn apart_names(whats: &BTreeMap<u32, Whatsit>, floor: usize) -> (usize, Vec<(usi
     (named, aliases)
 }
 
+/// The line as the last link read it: its records ([`recs`]), its
+/// pages' pieces, the pages each piece's sealed lines are on, and each
+/// page's lines' hash ([`lines_hash`]).
+struct LineCache {
+    inst: u64,
+    xpages: Vec<ValueId>,
+    rs: Vec<Rec>,
+    pcs: Vec<Option<Arc<PagePiece>>>,
+    on: FxHashMap<i64, Vec<usize>>,
+    hashes: Vec<Option<u64>>,
+}
+
+static LINE_CACHE: Mutex<Option<LineCache>> = Mutex::new(None);
+
+/// [`LineCache`] of line `xpages` with the pieces' items `units`: the
+/// last link's for the same line, its pages on the pieces `changed`
+/// hashed again (none: all of them).
+fn line_cache(
+    v: &Values,
+    xpages: &[ValueId],
+    units: &FxHashMap<i64, ValueId>,
+    changed: Option<&FxHashSet<i64>>,
+) -> LineCache {
+    let last = changed.and_then(|_| {
+        LINE_CACHE
+            .locked()
+            .take()
+            .filter(|c| c.inst == v.instance() && c.xpages == xpages)
+    });
+    if let (Some(mut c), Some(changed)) = (last, changed) {
+        for p in changed {
+            for &i in c.on.get(p).into_iter().flatten() {
+                c.hashes[i] = c.pcs[i].as_ref().and_then(|pc| lines_hash(pc, units));
+            }
+        }
+        if crate::exec::obs_flag!("PHITEX_LINK_CHECK") {
+            let all: Vec<Option<u64>> = c
+                .pcs
+                .iter()
+                .map(|pc| pc.as_ref().and_then(|pc| lines_hash(pc, units)))
+                .collect();
+            assert!(all == c.hashes, "link check: the pages' lines hashed again are not all of them hashed");
+        }
+        return c;
+    }
+    let rs = recs(v, xpages);
+    let pcs: Vec<Option<Arc<PagePiece>>> = {
+        let m = pieces().locked();
+        rs.iter()
+            .map(|r| match *r {
+                Rec::Page(k) => m.get(&u64::from_ne_bytes(k.to_ne_bytes())).cloned(),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut on: FxHashMap<i64, Vec<usize>> = FxHashMap::default();
+    for (i, pc) in pcs.iter().enumerate() {
+        for &p in pc.iter().flat_map(|pc| &pc.pieces) {
+            on.entry(p).or_default().push(i);
+        }
+    }
+    let hashes = pcs
+        .iter()
+        .map(|pc| pc.as_ref().and_then(|pc| lines_hash(pc, units)))
+        .collect();
+    LineCache {
+        inst: v.instance(),
+        xpages: xpages.to_vec(),
+        rs,
+        pcs,
+        on,
+        hashes,
+    }
+}
+
 /// The last link of the process: its records (by value), each record's
 /// chunks, the writer every [`LINK_SNAP`] records, and what it gave the
 /// commands; an edit's link copies the records it shares from the start
@@ -3628,13 +3703,14 @@ pub(crate) fn finish_exact(
     f: &EndFields,
     xpages: &[ValueId],
     units: &FxHashMap<i64, ValueId>,
+    changed: Option<&FxHashSet<i64>>,
     cmds: &CmdMemo,
 ) -> Linked {
-    let out = link(v, f, xpages, units, cmds, true);
+    let out = link(v, f, xpages, units, changed, cmds, true);
     if crate::exec::obs_flag!("PHITEX_LINK_CHECK") {
         // (the file linked from the last link's records, and from the
         // start: the same bytes)
-        let full = link(v, f, xpages, units, cmds, false);
+        let full = link(v, f, xpages, units, None, cmds, false);
         let bytes = |l: &Linked| {
             l.layout
                 .as_ref()
@@ -3667,6 +3743,7 @@ fn link(
     f: &EndFields,
     xpages: &[ValueId],
     units: &FxHashMap<i64, ValueId>,
+    changed: Option<&FxHashSet<i64>>,
     cmds: &CmdMemo,
     memo: bool,
 ) -> Linked {
@@ -3691,16 +3768,16 @@ fn link(
     let mut got: Vec<ValueId> = Vec::new();
     let mut errors: Vec<(String, i64)> = Vec::new();
     let (mut placed, mut shipped) = (0usize, 0usize);
-    let rs = recs(v, xpages);
-    let pcs: Vec<Option<Arc<PagePiece>>> = {
-        let m = pieces().locked();
-        rs.iter()
-            .map(|r| match *r {
-                Rec::Page(k) => m.get(&u64::from_ne_bytes(k.to_ne_bytes())).cloned(),
-                _ => None,
-            })
-            .collect()
-    };
+    // (the line's records, their pages and their lines' hashes: the
+    // last link's where the line is the same, the hashes of the pages
+    // whose pieces' items changed made again, [`LineCache`])
+    let LineCache {
+        rs,
+        pcs,
+        on,
+        hashes,
+        ..
+    } = line_cache(v, xpages, units, changed.filter(|_| memo));
     // (the commands made so far: one made after this point is not one
     // this link can have dropped)
     let hi = CMD_BORN.load(std::sync::atomic::Ordering::Relaxed);
@@ -3729,11 +3806,6 @@ fn link(
     // (a page by its key and its sealed lines: a word edited in one of
     // its lines changes those, not the key)
     let mut line = |s: &crate::nodes::Sealed| line_of(v, units, s);
-    let hashes: Vec<Option<u64>> = xpages
-        .iter()
-        .zip(&pcs)
-        .map(|(_, pc)| pc.as_ref().and_then(|pc| lines_hash(pc, units)))
-        .collect();
     let ids: Vec<u64> = xpages
         .iter()
         .zip(&hashes)
@@ -4208,6 +4280,16 @@ fn link(
             layout.as_ref().map_or(0, phitex_pdf::Layout::len),
             t0.elapsed()
         );
+    }
+    if memo {
+        *LINE_CACHE.locked() = Some(LineCache {
+            inst: v.instance(),
+            xpages: xpages.to_vec(),
+            rs,
+            pcs,
+            on,
+            hashes,
+        });
     }
     Linked {
         layout,

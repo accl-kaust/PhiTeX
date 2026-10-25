@@ -3278,29 +3278,89 @@ enum DocNode {
     Doc(usize, usize),
 }
 
+/// The document's slices and their keys as [`doc_nodes`] made them
+/// last (`Incr::slices`): each `(key, start, end)`, where each chunk's
+/// begin, and the texts set when made (`Incr::edits`).
+pub(crate) struct SliceMemo {
+    edits: u64,
+    out: Vec<(u64, usize, usize)>,
+    first: Vec<usize>,
+}
+
+/// Chunk `c`'s slices keyed: the keys made when it was analysed, a slice
+/// at its start not beginning a line keyed again.
+fn chunk_slices(text: &str, c: &crate::incr::Chunk, out: &mut Vec<(u64, usize, usize)>) {
+    out.extend(c.th.slices.iter().zip(c.keys.iter()).map(|(&(s, e), &k)| {
+        let (s, e) = (c.start + s, c.start + e);
+        let k = if s == c.start && s > 0 && text.as_bytes()[s - 1] != b'\n' {
+            key(&text[s..e], false)
+        } else {
+            k
+        };
+        (k, s, e)
+    }));
+}
+
 /// The document's nodes, keyed: per chunk of its units, its slices. (An
 /// `\\input` file's regions are made where a run reaches the file,
-/// whatever route reaches it: `Run::leftover`.)
+/// whatever route reaches it: `Run::leftover`.) Made from the last ones
+/// where the text set since changed one chunk only (`Incr::one`): its
+/// slices and the next chunk's (whose first slice's key reads the
+/// byte before it) made again, those after moved.
 fn doc_nodes(text: &str, inc: &Incr) -> Vec<(u64, DocNode)> {
-    let mut out = Vec::new();
-    for c in &inc.chunks {
-        let slices =
-            c.th.slices
-                .iter()
-                .zip(c.keys.iter())
-                .map(|(&(s, e), &k)| (c.start + s, c.start + e, k));
-        // (the chunk's keys, made when it was analysed; a slice at its
-        // start not beginning a line keyed again)
-        out.extend(slices.map(|(s, e, k)| {
-            let k = if s == c.start && s > 0 && text.as_bytes()[s - 1] != b'\n' {
-                key(&text[s..e], false)
-            } else {
-                k
-            };
-            (k, DocNode::Doc(s, e))
-        }));
+    let mut g = inc.slices.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let n = inc.chunks.len();
+    let patched = match (g.as_mut(), inc.one) {
+        (Some(m), Some(_)) if m.edits == inc.edits => true,
+        (Some(m), Some((usize::MAX, 0))) if m.edits + 1 == inc.edits && m.first.len() == n => true,
+        (Some(m), Some((k, d))) if m.edits + 1 == inc.edits && m.first.len() == n && k < n => {
+            let to = (k + 2).min(n);
+            let (a, b) = (m.first[k], m.first.get(to).copied().unwrap_or(m.out.len()));
+            let mut mid = Vec::new();
+            for c in &inc.chunks[k..to] {
+                chunk_slices(text, c, &mut mid);
+            }
+            let grown = mid.len().cast_signed() - (b - a).cast_signed();
+            for e in &mut m.out[b..] {
+                e.1 = e.1.saturating_add_signed(d);
+                e.2 = e.2.saturating_add_signed(d);
+            }
+            m.out.splice(a..b, mid);
+            let mut at = a;
+            for (j, c) in inc.chunks[k..to].iter().enumerate() {
+                m.first[k + j] = at;
+                at += c.th.slices.len();
+            }
+            for f in &mut m.first[to..] {
+                *f = f.saturating_add_signed(grown);
+            }
+            true
+        }
+        _ => false,
+    };
+    if !patched {
+        let mut out = Vec::new();
+        let mut first = Vec::with_capacity(n);
+        for c in &inc.chunks {
+            first.push(out.len());
+            chunk_slices(text, c, &mut out);
+        }
+        *g = Some(SliceMemo {
+            edits: inc.edits,
+            out,
+            first,
+        });
     }
-    out
+    let m = g.as_mut().expect("made above");
+    m.edits = inc.edits;
+    if crate::exec::obs_flag!("PHITEX_SLICE_CHECK") {
+        let mut all = Vec::new();
+        for c in &inc.chunks {
+            chunk_slices(text, c, &mut all);
+        }
+        assert!(all == m.out, "slice check: the slices made from the last ones are not those made anew");
+    }
+    m.out.iter().map(|&(k, s, e)| (k, DocNode::Doc(s, e))).collect()
 }
 
 /// A document node's arguments: its text with its origin, and its hint;
@@ -5388,23 +5448,21 @@ impl Build {
     /// The package loads' counters ([`Stats::pkg_loads`] and the rest).
     #[allow(clippy::too_many_lines)]
     fn pkg_stats(&self, stats: &mut Stats) {
-        let loads: Vec<u64> = self
+        // (the loads found once: a pass over every node's text)
+        let loads: Vec<NodeId> = self
             .nodes
             .iter()
             .filter(|(_, _, src)| crate::pkgrec::load_key(src.text(&self.text)).is_some())
-            .map(|(_, n, _)| n.raw())
+            .map(|(_, n, _)| *n)
             .collect();
         stats.pkg_loads = loads.len() as u64;
-        stats.pkg_claimed = self
-            .nodes
+        stats.pkg_claimed = loads
             .iter()
-            .filter(|(_, n, src)| {
-                crate::pkgrec::load_key(src.text(&self.text)).is_some()
-                    && self
-                        .g
-                        .eng
-                        .node_info(*n)
-                        .is_some_and(|i| i.state == phitex_defuse::NodeState::Inert)
+            .filter(|&&n| {
+                self.g
+                    .eng
+                    .node_info(n)
+                    .is_some_and(|i| i.state == phitex_defuse::NodeState::Inert)
             })
             .count() as u64;
         if crate::exec::obs_flag!("PHITEX_PKG_TRACE") {
@@ -5560,7 +5618,7 @@ impl Build {
             .iter()
             .map(|(n, _)| n.raw())
             .collect();
-        stats.pkg_on_critical = loads.iter().filter(|n| on.contains(n)).count() as u64;
+        stats.pkg_on_critical = loads.iter().filter(|n| on.contains(&n.raw())).count() as u64;
     }
 
     /// The files the document's runs opened for reading, with a hash of
