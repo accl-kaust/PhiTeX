@@ -381,6 +381,30 @@ print(r["verdict"] + (": " + ", ".join(bad) if bad else ""))' "$r/editkinds-j$j.
         || red "cold control -j $j: exit $?"
     done
     ;;
+  exp)
+    # exp: para4000 runs to tell the machine from the engine: one -j 1
+    # alone, eight -j 1 processes at once (one core each), -j 8 on eight
+    # cores and -j 32 on all, each with every run's time
+    # (PHITEX_RUN_TIMES); the average run by operation of each
+    fetched
+    bin=$w/bin/cli/prof/phitex
+    mkdir -p "$w/exp" && cp bench/para4000.tex "$w/exp/"
+    (cd "$w/exp" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 1 --output-dir=warm --program pdftex para4000.tex > /dev/null 2>&1)
+    cores=$(one_per_core); all=$(awk '/Cpus_allowed_list/{print $2}' /proc/self/status)
+    IFS=, read -r -a cs <<< "$cores"
+    avg() { awk '/^runtime/{d=($5-$4)*1000; s[$2]+=d; c[$2]++} END{for(k in c) printf " %s %d runs %.1f us", k, c[k], s[k]/c[k]}' "$1"; }
+    run1() { (cd "$w/exp" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_RUN_TIMES=1 PHITEX_TEX_TIME=1 NO_COLOR=1 \
+      timeout 900 taskset -c "$2" "$bin" build -j "$3" --output-dir="o-$1" --program pdftex para4000.tex > "$r/exp-$1.log" 2>&1); }
+    run1 alone "${cs[0]}" 1
+    echo "exp alone -j 1:$(avg "$r/exp-alone.log")" >> "$r/exp.txt"
+    for i in 0 1 2 3 4 5 6 7; do run1 "c$i" "${cs[$i]}" 1 & done; wait
+    for i in 0 1 2 3 4 5 6 7; do echo "exp concurrent $i -j 1:$(avg "$r/exp-c$i.log")" >> "$r/exp.txt"; done
+    run1 j8 "$(IFS=,; echo "${cs[*]:0:8}")" 8
+    echo "exp -j 8:$(avg "$r/exp-j8.log")" >> "$r/exp.txt"
+    run1 j32 "$all" 32
+    echo "exp -j 32:$(avg "$r/exp-j32.log")" >> "$r/exp.txt"
+    grep -h '^acct: wall\|^acct: op time\|^acct: .*refuted by field' "$r/exp-j8.log" "$r/exp-j32.log" >> "$r/exp.txt"
+    ;;
   big)
     # big: bench/para40000.tex cold at -j 1, 8 and 16 (wall, the round's
     # op, commit, check and idle, the link's phases), then three

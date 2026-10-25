@@ -189,6 +189,9 @@ submit() {
   if on para; then ids+=("$(sub "--hint=multithread -c 32 --mem=16G -t 00:30:00 -J gf-para $(on_bins "$C")" para "${GATE_PARA_MD5:-4146793290dc0ea887d79a1d2d1b4c89}")"); fi
   # (para40000: the scale run, only when named: GATE_ONLY="... big")
   if [[ " ${GATE_ONLY:-} " == *" big "* ]]; then ids+=("$(sub "--hint=multithread -c 32 --mem=48G -t 00:40:00 -J gf-big $(on_bins "$C")" big)"); fi
+  # (para4000's runs by operation: alone, eight at once, -j 8, -j 32;
+  # only when named: GATE_ONLY="... exp")
+  if [[ " ${GATE_ONLY:-} " == *" exp "* ]]; then ids+=("$(sub "--hint=multithread -c 32 --mem=32G -t 00:30:00 -J gf-exp $(on_bins "$C")" exp)"); fi
   # (para4000 at one thread under callgrind: startup, node bodies' Ir
   # per command, the top 15)
   if on cg; then ids+=("$(sub "-c 2 --mem=8G -t 00:40:00 -J gf-cg $(on_bins "$C")" cg)"); fi
