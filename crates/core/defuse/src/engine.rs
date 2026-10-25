@@ -773,7 +773,10 @@ impl Engine {
     pub fn claimed(&self, n: NodeId) -> Vec<NodeId> {
         let node = self.node(n);
         let k = node.run_record().map_or(0, |r| r.claim);
-        (0..k).filter_map(|i| read::following(self, node, i).map(|s| s.id)).collect()
+        let mut at = None;
+        (0..k)
+            .filter_map(|i| read::following_on(self, node, i, &mut at).map(|s| s.id))
+            .collect()
     }
 
     /// The node whose definition of `f` reaches `n` (None: the environment).

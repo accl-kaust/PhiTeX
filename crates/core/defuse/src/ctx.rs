@@ -42,6 +42,8 @@ pub struct Ctx<'a> {
     pub(crate) stable: Option<&'a FxHashSet<Field>>,
     /// The change count the read in hand loaded ([`ReadRec::epoch`]).
     pub(crate) ep: u64,
+    /// The last sibling `following` found, to go on from.
+    pub(crate) follow_at: Option<(usize, NodeId)>,
 }
 
 fn stop() -> Stop {
@@ -66,6 +68,7 @@ impl<'a> Ctx<'a> {
             },
             views: Vec::new(),
             ep: u64::MAX,
+            follow_at: None,
             last: me.run_record(),
             stable: worker.map(|w| &*w.stable),
         }
@@ -423,7 +426,7 @@ impl<'a> Ctx<'a> {
 
     /// The `i`-th claimed sibling's (op, args).
     pub fn following(&mut self, i: usize) -> Option<(OpId, Vec<ValueId>)> {
-        let n = read::following(self.eng, self.me, i);
+        let n = read::following_on(self.eng, self.me, i, &mut self.follow_at);
         let seen = n.as_ref().map(|n| read::text_value(self.eng, n));
         self.record(ReadKind::Following { i }, PathId::WHOLE, seen);
         n.map(|n| (n.op(), n.args().to_vec()))

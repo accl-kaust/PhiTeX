@@ -1093,3 +1093,23 @@ fn an_evaluation_that_fails_loses_no_node() {
     }
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+#[test]
+fn a_claim_reads_its_siblings_in_one_pass() {
+    // A claimer that reads the siblings it takes one after another, as a
+    // run pulling lines does: each read goes on from the one before, not
+    // from the claimer, and its commit checks them the same way.
+    let (e, o) = engine();
+    let v = e.values();
+    let u = e.new_unit();
+    let n = 4000;
+    let cl = e.push(u, o.claimer, vec![v.int(n)]);
+    for i in 0..n {
+        e.push(u, o.get, vec![v.int(i)]);
+    }
+    let t = Instant::now();
+    e.evaluate(1).unwrap();
+    let wall = t.elapsed();
+    assert_eq!(e.claimed(cl).len(), n as usize);
+    assert!(wall < Duration::from_millis(80), "a claim of {n} read in {wall:?}: one pass is about 15 ms, one per sibling about 250");
+}

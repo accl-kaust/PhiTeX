@@ -849,10 +849,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (one whose field no change has counted since it read stands)
     let refuted = refuted.or_else(|| {
         let mut memo = read::FoldMemo::new();
+        // (siblings read in turn, checked in one pass)
+        let mut follow_at = None;
         unchecked.into_iter().find(|&i| {
             let r = &rec.reads[i];
             if r.kind.field().is_some_and(|f| eng.field_epoch(f) == r.epoch) {
                 return false;
+            }
+            if let ReadKind::Following { i } = r.kind {
+                let n = read::following_on(eng, node, i, &mut follow_at);
+                return read::apply_path(eng, n.map(|n| read::text_value(eng, &n)), r.path) != r.seen;
             }
             read::answer_in(eng, node, &r.kind, r.path, &mut memo) != r.seen
         })

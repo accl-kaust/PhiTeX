@@ -401,10 +401,33 @@ pub(crate) fn unit_start(eng: &Engine, me: &Node) -> Pos {
 /// The `i`-th pushed sibling after `me` (placements skipped), as a value
 /// naming its text: `[op, node, args]`; None past the unit's end.
 pub(crate) fn following(eng: &Engine, me: &Node, i: usize) -> Option<Arc<Node>> {
-    let mut cur = Some(me.seg_hint());
-    let mut lower = Some(me.pos_hint());
-    let mut k = 0;
-    while let Some(sid) = cur {
+    following_on(eng, me, i, &mut None)
+}
+
+/// `following`, going on from `at`, the `j`-th sibling an earlier call
+/// found, where `j < i` (siblings read one after another cost one pass,
+/// not one from `me` each); `at` becomes this answer.
+pub(crate) fn following_on(eng: &Engine, me: &Node, i: usize, at: &mut Option<(usize, NodeId)>) -> Option<Arc<Node>> {
+    let (mut k, from): (usize, &Node) = match *at {
+        Some((j, n)) if j < i => (j + 1, eng.node(n)),
+        _ => (0, me),
+    };
+    let mut cur = Some(from.seg_hint());
+    let mut lower = Some(from.pos_hint());
+    let hit = following_from(eng, me, i, &mut k, &mut cur, &mut lower);
+    *at = hit.as_ref().map(|n| (i, n.id));
+    hit
+}
+
+fn following_from(
+    eng: &Engine,
+    me: &Node,
+    i: usize,
+    k: &mut usize,
+    cur: &mut Option<SegId>,
+    lower: &mut Option<Pos>,
+) -> Option<Arc<Node>> {
+    while let Some(sid) = *cur {
         let seg = eng.seg(sid);
         if seg.unit != me.unit {
             return None;
@@ -418,19 +441,19 @@ pub(crate) fn following(eng: &Engine, me: &Node, i: usize) -> Option<Arc<Node>> 
                 if n.parent.is_some() || n.state() == State::Gone {
                     continue;
                 }
-                if k == i {
+                if *k == i {
                     hit = Some(n.clone());
                     break;
                 }
-                k += 1;
+                *k += 1;
             }
             hit
         };
         if hit.is_some() {
             return hit;
         }
-        lower = None;
-        cur = eng.order.next(sid, seg.lo);
+        *lower = None;
+        *cur = eng.order.next(sid, seg.lo);
     }
     None
 }
