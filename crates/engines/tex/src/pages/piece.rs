@@ -955,9 +955,13 @@ impl Run<'_, '_> {
         if crate::exec::obs_flag!("PHITEX_TEX_TRACE") {
             eprintln!("  cut {}: at candidate {k}", self.cx.node().raw());
         }
+        // (what a page firing at an earlier candidate reads there: the
+        // names the run defined after it, its locals at the cut being
+        // later than it, `Run::preload_candidate`)
+        let (reads, defs) = self.check_data(Some(k));
         self.pin_reaching_page_params(&mut raw)?;
         let (cont, locals) = self.cont_encode()?;
-        self.contribute_units(&raw, Some(k), ValueId::UNIT, ValueId::UNIT, locals);
+        self.contribute_units(&raw, Some(k), reads, defs, locals);
         let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         // (the siblings the rest of the piece will take where the piece's

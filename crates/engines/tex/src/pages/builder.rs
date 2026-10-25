@@ -614,6 +614,13 @@ fn build_t(
     if page_params.is_some() {
         lp.st.params = page_params;
     }
+    if crate::exec::obs_str!("PHITEX_PAGE_DUMP").is_some_and(|d| d == lp.st.j.to_string()) {
+        eprintln!(
+            "dump loop page {}: build {k} topskip {:?}",
+            lp.st.j,
+            lp.st.params.map(|p| p.top_skip.width)
+        );
+    }
     let params = lp.st.params.unwrap_or(PageParams {
         vsize: 0,
         max_depth: 0,
@@ -2228,6 +2235,13 @@ impl PageState {
             classes.push((n, live(n)?));
         }
         if page_params.is_some() {
+            if crate::exec::obs_str!("PHITEX_PAGE_DUMP").is_some_and(|d| d == self.j.to_string()) {
+                eprintln!(
+                    "dump fin page {}: params {} at build {k}",
+                    self.j,
+                    page_params.map_or_else(String::new, |m| v.render(m))
+                );
+            }
             self.params = page_params;
             self.params_pre = None;
         }

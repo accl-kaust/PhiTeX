@@ -527,6 +527,17 @@ impl Run<'_, '_> {
         ps.normal = fin.normal - i64::from(!fin.special);
         ps.fold = fin.fold;
         ps.params = fin.params;
+        if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
+            eprintln!(
+                "page-trace: finisher {} (piece {}, nth {}) begins with params {} and {} post spans of {}",
+                self.cx.node().raw(),
+                fin.piece.raw(),
+                fin.nth,
+                fin.params.map_or_else(|| "none".to_owned(), |m| v.render(m)),
+                fin.post,
+                fin.spans.len()
+            );
+        }
         // (`\deadcycles` as the routine before left it, §1012: the page
         // builder's, never the finisher before's; the text's settings
         // after it come in order with the items, `DEAD_SLOT` markers)
@@ -2069,6 +2080,22 @@ impl Run<'_, '_> {
         let v = self.v;
         let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
         let locals = list_of(v, a(3));
+        if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
+            let names = |x: ValueId| {
+                list_of(v, x)
+                    .iter()
+                    .filter_map(|&e| list_of(v, e).first().map(|&f| crate::val::field_name(v, Field(f))))
+                    .filter(|n| n.starts_with("param:"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            eprintln!(
+                "page-trace: finisher {} preloads locals [{}] names [{}]",
+                self.cx.node().raw(),
+                names(a(3)),
+                if args.len() >= 9 { names(a(8)) } else { String::new() }
+            );
+        }
         // (the routines of the pages firing in the piece before this one,
         // placed after it before this finisher: a binding they defined
         // globally is gone at every level where it was made before

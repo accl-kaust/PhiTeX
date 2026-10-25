@@ -2805,6 +2805,14 @@ impl<'c, 'a> Run<'c, 'a> {
         let maxdepth = self.ipar(Par::maxdepth)?;
         let topskip = self.gpar(Par::topskip)?;
         let holding = self.ipar(Par::holdinginserts)?;
+        if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
+            eprintln!(
+                "page-trace: node {} op {:?} params marker vsize {vsize} topskip {}",
+                self.cx.node().raw(),
+                self.cx.op(),
+                topskip.width
+            );
+        }
         Ok(v.list(vec![
             v.int(crate::nodes::T_PAGE_PARAMS),
             v.int(i64::from(vsize)),

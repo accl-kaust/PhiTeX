@@ -1,0 +1,25 @@
+\documentclass{article}
+\usepackage[most]{tcolorbox}
+% a heading then a breakable box near a page's foot: the box's
+% \nobreak handling fills the page out and ends a paragraph, which fires
+% the page with the heading carried; the box's drawing then sets
+% \topskip=0pt in a group the page break is outside of, and breaks
+% itself across the next page: that page's \topskip glue is the
+% document's (§987, §1026)
+\tcbset{exstyle/.style={enhanced,breakable,colback=white,colframe=black,
+  boxrule=0pt,leftrule=2.5pt,arc=0pt,outer arc=0pt,left=7pt,right=6pt,top=4pt,bottom=4pt,
+  before skip=10pt,after skip=6pt}}
+\newenvironment{exercise}{\begin{tcolorbox}[exstyle]}{\end{tcolorbox}}
+\def\words{Some words to fill a line or two of text so that the pages fill up and break between and inside the boxes here and there. }
+\def\many{\words\words\words\words\words\words\words\words\words\words}
+\begin{document}
+\def\n{0}
+\loop
+\subsection{Heading \n}
+\words\words\words\par
+\ifodd\n \words\words\par\fi
+\subsection{Another heading}
+\begin{exercise}\many\many\many\par\many\many\many\many\end{exercise}
+\edef\n{\the\numexpr\n+1}
+\ifnum\n<16 \repeat
+\end{document}
