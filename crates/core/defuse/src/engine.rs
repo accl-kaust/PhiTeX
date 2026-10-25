@@ -901,11 +901,15 @@ impl Engine {
         let mut st = CommitStats::default();
         for (f, _) in changes {
             let readers = self.env.readers.write().remove(f).unwrap_or_default();
+            // (one whose answer stands is kept for the next change)
+            let mut stands = Vec::new();
             for r in readers {
                 if !crate::segment::live(self, r.node, r.serial) {
                     continue;
                 }
-                if apply_path(self, read::env_value(self, *f), r.path) != r.seen {
+                if apply_path(self, read::env_value(self, *f), r.path) == r.seen {
+                    stands.push(r);
+                } else {
                     mark_dirty(
                         self,
                         None,
@@ -917,6 +921,9 @@ impl Engine {
                         },
                     );
                 }
+            }
+            if !stands.is_empty() {
+                self.env.readers.write().entry(*f).or_default().append(&mut stands);
             }
             if let Some(first) = self.order.first() {
                 commit::reask_from(self, None, *f, Pos(0), first, None, None, &mut st);

@@ -1217,3 +1217,38 @@ fn a_placement_after_its_own_placer_is_placed() {
     assert_eq!(e.order(u), vec![p, kids[0]]);
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[f]`: outputs the environment's f, whatever is defined before it
+/// (UNIT if none).
+struct EnvGet;
+
+impl Operation for EnvGet {
+    fn name(&self) -> &'static str {
+        "env_get"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        Ok(cx.env(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
+    }
+}
+
+#[test]
+fn an_environment_reader_outlives_a_change_that_leaves_it() {
+    // The environment changed in a field to what a reader of it saw: the
+    // reader stands, and is still asked at the next change that is not.
+    let (e, _) = engine();
+    let get = e.register(Arc::new(EnvGet));
+    let v = e.values();
+    let x = v.field("file:a");
+    let u = e.new_unit();
+    let r = e.push(u, get, vec![x.0]);
+    e.evaluate(2).unwrap();
+    assert_eq!(e.output(r), Some(ValueId::UNIT));
+    e.update_environment(&[(x, None)]);
+    let rep = e.evaluate(2).unwrap();
+    assert_eq!(rep.nodes_run, 0, "{rep:?}");
+    e.update_environment(&[(x, Some(v.int(5)))]);
+    e.evaluate(2).unwrap();
+    assert_eq!(e.output(r), Some(v.int(5)), "the reader of the environment ran again");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
