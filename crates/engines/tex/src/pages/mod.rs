@@ -237,12 +237,12 @@ impl Run<'_, '_> {
         let f = self.v.field(name);
         Ok(match to {
             None => self.cx.fold(f, from, None)?,
-            Some(to) => fold_through(self.cx, f, from, to)?,
+            Some(to) => self.cx.fold_through(f, from, to)?,
         })
     }
 
     /// A view on `name`'s contributions after `from` up to and with
-    /// `to`'s ([`through`]).
+    /// `to`'s own.
     pub(crate) fn view_through(
         &mut self,
         name: &str,
@@ -250,32 +250,8 @@ impl Run<'_, '_> {
         to: phitex_defuse::NodeId,
     ) -> R<phitex_defuse::View> {
         let f = self.v.field(name);
-        let end = through(self.cx, f, to)?;
-        Ok(self.cx.view(f, from, end)?)
+        Ok(self.cx.view_through(f, from, to)?)
     }
-}
-
-/// Where a window of `f`'s contributions that ends with `to`'s own ends:
-/// the next contributor after `to` (the window stops before it), none
-/// where there is none or it has not committed (the reader's position:
-/// a contribution coming in there re-asks it).
-pub(crate) fn through(
-    cx: &mut phitex_defuse::Ctx<'_>,
-    f: Field,
-    to: phitex_defuse::NodeId,
-) -> Result<Option<phitex_defuse::NodeId>, phitex_defuse::Stop> {
-    Ok(cx.next_contribution(f, Some(to))?.map(|n| n.0))
-}
-
-/// The fold of `f`'s contributions after `from` up to and with `to`'s.
-pub(crate) fn fold_through(
-    cx: &mut phitex_defuse::Ctx<'_>,
-    f: Field,
-    from: Option<phitex_defuse::NodeId>,
-    to: phitex_defuse::NodeId,
-) -> Result<ValueId, phitex_defuse::Stop> {
-    let end = through(cx, f, to)?;
-    cx.fold(f, from, end)
 }
 
 /// The field every finisher defines at its position: what its routine

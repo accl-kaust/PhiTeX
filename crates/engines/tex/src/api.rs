@@ -4487,8 +4487,20 @@ impl Build {
         // (the pages: the first page step, where the text ends: it folds
         // the pieces' profiles to its page's fire and places the page's
         // finisher and the next step, `crate::pages::Pages`; new text
-        // pieces go before it)
-        let steps = g.eng.push(unit, g.ops.pages, Vec::new());
+        // pieces go before the mark it follows. With more than one thread
+        // it is placed by a node where the text begins, which runs first:
+        // the steps run beside the text, not after the last block of it)
+        let steps = g.eng.push(unit, g.mark, Vec::new());
+        match nodes.first() {
+            Some(&(_, first, _)) if g.threads > 1 => {
+                let v = g.eng.values();
+                let args = crate::pages::kick_args(v, steps);
+                g.eng.insert_before(first, g.ops.pages, args);
+            }
+            _ => {
+                g.eng.push(unit, g.ops.pages, Vec::new());
+            }
+        }
         // (the files' node, then the link and the end node: new text
         // pieces go before all three; the files' node, whose run gives the
         // loop-backs, before the link and the end node, which run once

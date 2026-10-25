@@ -915,7 +915,7 @@ fn rels_before(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
     let range = if own {
         r.cx.fold(f, None, None)?
     } else {
-        crate::pages::fold_through(r.cx, f, None, phitex_defuse::NodeId::from_raw(at))?
+        r.cx.fold_through(f, None, phitex_defuse::NodeId::from_raw(at))?
     };
     let me = i64::from_ne_bytes(at.to_ne_bytes());
     let brk = if own {

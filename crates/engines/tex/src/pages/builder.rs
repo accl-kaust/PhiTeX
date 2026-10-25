@@ -939,6 +939,25 @@ pub(crate) fn params_marker(v: &Values, p: &PageParams) -> ValueId {
     ])
 }
 
+/// The tag of a kick's arguments ([`kick_args`]).
+const KICK: &str = "\u{1}kick";
+
+/// The arguments of the node that places the first page step after
+/// `mark` (where the text ends): `[tag, mark]`. Pushed where the text
+/// begins, it runs with the first block, so the steps start beside the
+/// text instead of after it.
+pub(crate) fn kick_args(v: &Values, mark: phitex_defuse::NodeId) -> Vec<ValueId> {
+    vec![v.str(KICK), raw_value(v, Some(mark))]
+}
+
+/// The mark a kick's arguments name.
+fn kick_of(v: &Values, args: &[ValueId]) -> Option<phitex_defuse::NodeId> {
+    match args {
+        [t, m] if v.with_str(*t, |s| s == KICK).unwrap_or(false) => raw_node(v, *m),
+        _ => None,
+    }
+}
+
 /// A page step ([`PageLoop`]; the module's doc): `[]` for the first,
 /// else `[node, state]`, the contributor the page before fired in and
 /// the loop there ([`encode_state`]).
@@ -958,6 +977,12 @@ impl Operation for Pages {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
         let args = cx.args().to_vec();
+        // (the kick: the first step placed after the mark where the text
+        // ends, [`kick_args`])
+        if let Some(at) = kick_of(cx.values(), &args) {
+            cx.follow_after(at, o.pages, Vec::new());
+            return Ok(ValueId::UNIT);
+        }
         // (a run, for its reads where a piece is; no text runs in it)
         let mut r = Run::new(cx, o);
         crate::prof::pages::attempt();

@@ -2359,9 +2359,7 @@ fn sealed_units(
         return Ok(out);
     }
     let node = crate::pages::node_of;
-    let f = v.field(crate::pages::PITEMS);
-    let end = crate::pages::through(cx, f, node(*to))?;
-    let w = cx.view(f, after.map(node), end)?;
+    let w = cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(*to))?;
     for &(p, i) in at.iter().filter(|x| want.binary_search(&x.0).is_ok()) {
         let Some(u) = cx.at(w, Step::Index(i)) else { continue };
         if cx.get(u, Step::Index(0)).and_then(|x| v.as_int(x)) != Some(p) {
@@ -3063,7 +3061,7 @@ pub(crate) fn page_offset_at(r: &mut Run<'_, '_>, at: u64, c: i64) -> R<i64> {
     }
     let v = r.v;
     let to = phitex_defuse::NodeId::from_raw(at);
-    let mut range = crate::pages::fold_through(r.cx, v.field(ALLOCS), None, to)?;
+    let mut range = r.cx.fold_through(v.field(ALLOCS), None, to)?;
     let me = i64::from_ne_bytes(at.to_ne_bytes());
     let after = r.cx.fold(v.field(ALLOCS), Some(to), None)?;
     for u in v.seq_to_vec(after) {
