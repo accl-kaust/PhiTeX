@@ -1047,15 +1047,14 @@ impl Operation for Pages {
 }
 
 /// The pages between two marks of the page builder's loop (profile:
-/// `PHITEX_PAGE_MARK_EVERY`): a mark's state is hashed and its loop
-/// copied, so not every page; a resume refolds the pages since one.
+/// `PHITEX_PAGE_MARK_EVERY`).
 fn page_mark_every() -> usize {
     if cfg!(feature = "profile")
         && let Some(n) = crate::exec::env_str!("PHITEX_PAGE_MARK_EVERY").and_then(|s| s.parse().ok())
     {
         return n;
     }
-    4
+    1
 }
 
 /// Whether the page builder takes marks ([`Run::page_mark`]; profile:
