@@ -315,7 +315,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     let defs = dedup_defs(std::mem::take(&mut p.defs));
     let contribs = combine_dups(eng, std::mem::take(&mut p.contribs));
-    let last = node.record();
+    let mut last = node.record();
     let serial = node.serial.load(Ordering::Acquire) + 1;
     let old_placed: Vec<NodeId> = last.as_ref().map(|r| r.placed.clone()).unwrap_or_default();
     let kept = match_placements(eng, &old_placed, &p.placements);
@@ -351,8 +351,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         provisional: false,
     });
     let mut spare_readers: Vec<Reader> = Vec::with_capacity(4);
-    let old_fields: Vec<Field> = last.as_ref().map(|r| r.defs.iter().map(|d| d.f).collect()).unwrap_or_default();
-    let old_contribs: Vec<Field> = last.as_ref().map(|r| r.contribs.iter().map(|c| c.0).collect()).unwrap_or_default();
+    let fields_of = |r: &Option<Arc<RunRecord>>| -> (Vec<Field>, Vec<Field>) {
+        r.as_ref().map_or_else(Default::default, |r| {
+            (r.defs.iter().map(|d| d.f).collect(), r.contribs.iter().map(|c| c.0).collect())
+        })
+    };
+    let (mut old_fields, mut old_contribs) = fields_of(&last);
     let nd = rec.defs.len() + old_fields.len();
     let nc = rec.contribs.len() + old_contribs.len();
     let mut changed_defs: Vec<Field> = Vec::with_capacity(nd);
@@ -474,6 +478,24 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         };
         if node.taken() {
             return st;
+        }
+        // (a node that has not committed may be given a relation ahead of
+        // its run meanwhile, `learn_shape`: what this run does not define of
+        // it is withdrawn, so the diff is against that record)
+        {
+            let now = node.last.lock();
+            let same = match (&*now, &last) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            };
+            if !same {
+                last = now.clone();
+                drop(now);
+                drop(inner);
+                (old_fields, old_contribs) = fields_of(&last);
+                continue;
+            }
         }
         if Segment::needs_split(&inner) {
             let id = SegId(u32::try_from(eng.segs.reserve()).expect("segment ids"));

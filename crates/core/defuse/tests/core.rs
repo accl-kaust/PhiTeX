@@ -1001,3 +1001,69 @@ fn an_inline_run_reads_at_its_callers_position() {
     assert_eq!((int(&e, a), int(&e, b)), (1, 3));
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[ms]`: its predictions take `ms` milliseconds to make, and are none;
+/// runs to nothing.
+struct SlowPred;
+
+impl Operation for SlowPred {
+    fn name(&self) -> &'static str {
+        "slow_pred"
+    }
+
+    fn run(&self, _: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        Ok(ValueId::UNIT)
+    }
+
+    fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        spin(Duration::from_millis(v.as_int(args[0]).unwrap() as u64));
+        None
+    }
+}
+
+/// `[f, step, ms, child]`: spins `ms` milliseconds; f := f + 1 as a
+/// relation if `step` is 1; places a `SlowPred [child]` if `child` is not 0.
+struct MaybeAdv(OpId);
+
+impl Operation for MaybeAdv {
+    fn name(&self) -> &'static str {
+        "maybe_adv"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let (f, step) = (Field(cx.args()[0]), v.as_int(cx.args()[1]).unwrap());
+        spin(Duration::from_millis(v.as_int(cx.args()[2]).unwrap() as u64));
+        if step == 1 {
+            cx.define_rel(f, 1);
+        }
+        if v.as_int(cx.args()[3]).unwrap() != 0 {
+            cx.child(self.0, vec![cx.args()[3]]);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn a_shape_learned_while_a_node_commits_leaves_it_nothing() {
+    // A node of an operation that steps a counter, whose run did not, is
+    // committing (its placement's predictions take a while) when another
+    // node of that operation steps it first: the relation given to the
+    // committing node ahead of its run is withdrawn by its commit, not
+    // left at its label to add one more.
+    let (e, o) = engine();
+    let slow = e.register(Arc::new(SlowPred));
+    let op = e.register(Arc::new(MaybeAdv(slow)));
+    let v = e.values();
+    let c = f(v, "c");
+    let (zero, one) = (v.int(0), v.int(1));
+    let u = e.new_unit();
+    e.push(u, o.def, vec![c, zero]);
+    let n = e.push(u, op, vec![c, zero, zero, v.int(60)]);
+    e.push(u, op, vec![c, one, v.int(15), zero]);
+    let g = e.push(u, o.get, vec![c]);
+    e.evaluate(4).unwrap();
+    assert_eq!(e.defs_of(n), vec![]);
+    assert_eq!(int(&e, g), 1, "one step of the counter before the reader");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
