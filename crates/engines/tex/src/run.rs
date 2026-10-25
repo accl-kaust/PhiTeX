@@ -4714,6 +4714,16 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let v = self.v;
         let x = self.cx.use_field(v.field(COND_STACK))?;
+        // (`PHITEX_COND_TRACE=1`, observe: the conditionals a run takes
+        // from the node before it, and those it leaves)
+        if crate::exec::obs_flag!("PHITEX_COND_TRACE") {
+            eprintln!(
+                "cond-trace: node {} loads {} (speculative {})",
+                self.cx.node().raw(),
+                x.map_or_else(|| "none".to_owned(), |x| v.render(x)),
+                self.cx.is_speculative()
+            );
+        }
         self.cond_loaded = true;
         self.muts += 1;
         for e in x.map(|x| list_of(v, x)).unwrap_or_default() {
@@ -4745,6 +4755,15 @@ impl<'c, 'a> Run<'c, 'a> {
                     .collect(),
             )
         };
+        if crate::exec::obs_flag!("PHITEX_COND_TRACE") {
+            eprintln!(
+                "cond-trace: node {} leaves {} (stopped {}, loaded {})",
+                self.cx.node().raw(),
+                v.render(x),
+                self.cond_stop,
+                self.cond_loaded
+            );
+        }
         self.cx
             .define_with(v.field(COND_STACK), x, phitex_defuse::Locality::Global);
     }

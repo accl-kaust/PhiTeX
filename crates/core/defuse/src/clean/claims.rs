@@ -107,10 +107,19 @@ impl World {
     }
 
     /// Whether `x` is taken from `me`: inert, held by a claimer other than
-    /// `me` and its continuations.
+    /// `me` and its continuations that comes before `me` (the earlier
+    /// claimer wins, as the claims resolve: a node a later claimer holds
+    /// is `me`'s to take, a claimer `me` itself takes holding it).
     pub(crate) fn taken_from(&self, me: Id, x: &Node) -> bool {
         match x.st {
-            St::Inert(by) => by != me && !self.own_cont(me, by),
+            St::Inert(by) => {
+                by != me
+                    && !self.own_cont(me, by)
+                    && match (self.node(by), self.node(me)) {
+                        (Some(b), Some(m)) => b.pos < m.pos,
+                        _ => true,
+                    }
+            }
             _ => false,
         }
     }

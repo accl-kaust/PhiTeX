@@ -684,12 +684,32 @@ impl Run<'_, '_> {
                         self.pulled
                     );
                 }
+                if crate::exec::obs_flag!("PHITEX_COND_TRACE") && !self.conds.is_empty() {
+                    eprintln!(
+                        "cond-trace: node {} pulls sibling {} with conditionals {:?} (skipping {}): {}",
+                        self.cx.node().raw(),
+                        self.pulled,
+                        self.conds,
+                        self.in_skip,
+                        args.first().map(|&x| self.v.render(x)).unwrap_or_default().chars().take(80).collect::<String>()
+                    );
+                }
                 self.muts += 1;
                 self.pulled += 1;
                 self.input.append_text(segs);
                 Ok(true)
             }
             other => {
+                if crate::exec::obs_flag!("PHITEX_COND_TRACE") && !self.conds.is_empty() {
+                    eprintln!(
+                        "cond-trace: node {} cannot pull sibling {} ({:?}, top {}) with {} conditionals open",
+                        self.cx.node().raw(),
+                        self.pulled,
+                        other.as_ref().map(|(op, _)| *op),
+                        self.top,
+                        self.conds.len()
+                    );
+                }
                 if crate::exec::obs_flag!("PHITEX_TEX_TRACE") {
                     eprintln!(
                         "  pull {} stops: sibling {} is {:?}",
