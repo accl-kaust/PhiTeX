@@ -366,8 +366,10 @@ impl Report {
 /// Bounds on an evaluation.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    /// Runs of one node in one evaluation (default 64): more is a bug in
-    /// the client's purity or in the engine, `EvalError::RunawayNode`.
+    /// Runs of one node in one evaluation (default 1 << 20, a sanity
+    /// bound: a node is re-asked by whatever lands; one that runs again
+    /// on unchanged reads is what `Engine::check_invariants` finds),
+    /// `EvalError::RunawayNode`.
     pub runs_per_node: u32,
     /// Runs in the whole evaluation (default none).
     pub total_runs: Option<u64>,
@@ -378,7 +380,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            runs_per_node: 64,
+            runs_per_node: 1 << 20,
             total_runs: None,
             time: None,
         }
