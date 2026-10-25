@@ -39,6 +39,9 @@ pub(crate) struct Inner {
     /// Contributions by field, in position order, and their fold.
     pub(crate) contribs: FxHashMap<Field, PosMap<ValueId>>,
     pub(crate) sums: FxHashMap<Field, ValueId>,
+    /// Counts the sums dropped (`resum`): a sum computed outside the lock
+    /// is kept only if none was dropped meanwhile (`read::segment_part`).
+    pub(crate) sums_gen: u64,
     /// `next` readers whose search stopped at one of its nodes, not yet
     /// committed (`commit::reask_holes`); their ranges are in
     /// `Engine::ranges`.
@@ -537,24 +540,13 @@ pub(crate) fn reduce(eng: &Engine, mono: &dyn crate::api::Monoid, xs: Vec<ValueI
 
 impl Inner {
     /// Its sum of `f` is stale: dropped, computed again at the next fold
-    /// (`sum`); an empty field is dropped.
+    /// (`read::segment_part`); an empty field is dropped.
     pub(crate) fn resum(&mut self, _eng: &Engine, f: Field) {
         self.sums.remove(&f);
+        self.sums_gen += 1;
         if self.contribs.get(&f).is_some_and(PosMap::is_empty) {
             self.contribs.remove(&f);
         }
-    }
-
-    /// The sum of its contributions to `f`, cached.
-    pub(crate) fn sum(&mut self, eng: &Engine, f: Field) -> ValueId {
-        if let Some(&x) = self.sums.get(&f) {
-            return x;
-        }
-        let mono = eng.monoid(f);
-        let xs: Vec<ValueId> = self.contribs.get(&f).map(|m| m.values().copied().collect()).unwrap_or_default();
-        let x = reduce(eng, &*mono, xs);
-        self.sums.insert(f, x);
-        x
     }
 }
 
@@ -571,6 +563,7 @@ impl Segment {
                 readers: FxHashMap::default(),
                 contribs: FxHashMap::default(),
                 sums: FxHashMap::default(),
+                sums_gen: 0,
                 stops: Vec::new(),
                 by_op: FxHashMap::default(),
                 holes: 0,
@@ -759,6 +752,7 @@ impl Segment {
                 readers,
                 contribs,
                 sums: FxHashMap::default(),
+                sums_gen: 0,
                 stops,
                 by_op,
                 holes: up_holes,

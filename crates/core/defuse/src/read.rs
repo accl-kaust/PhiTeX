@@ -135,30 +135,37 @@ pub(crate) fn reaching_at(eng: &Engine, f: Field, anchor: NodeId, inclusive: boo
 }
 
 /// The contributions of a segment in `(from, to)`, reduced; the cached
-/// sum when the range covers the whole segment.
+/// sum when the range covers the whole segment. The monoid runs under no
+/// lock: the contributions are copied out under the read lock, and a whole
+/// segment's sum is kept after (a short write lock) unless one of its sums
+/// was dropped meanwhile.
 fn segment_part(eng: &Engine, mono: &dyn crate::api::Monoid, seg: &Segment, f: Field, from: Option<Pos>, to: Option<Pos>) -> ValueId {
-    let whole = {
+    let (xs, whole) = {
         let inner = seg.inner.read();
         let covers = from.is_none_or(|p| p < seg.lo) && to.is_none_or(|p| p >= inner.hi);
-        if covers {
-            match inner.sums.get(&f) {
-                Some(&x) => return x,
-                None => true,
-            }
-        } else {
-            match inner.contribs.get(&f) {
-                Some(m) => {
-                    let lo = from.map_or(Unbounded, Excluded);
-                    let hi = to.map_or(Unbounded, Excluded);
-                    let xs: Vec<ValueId> = m.range((lo, hi)).map(|(_, &x)| x).collect();
-                    return reduce(eng, mono, xs);
-                }
-                None => return mono.empty(eng.values()),
-            }
+        if covers && let Some(&x) = inner.sums.get(&f) {
+            return x;
         }
+        let Some(m) = inner.contribs.get(&f) else {
+            return mono.empty(eng.values());
+        };
+        let xs: Vec<ValueId> = if covers {
+            m.values().copied().collect()
+        } else {
+            let lo = from.map_or(Unbounded, Excluded);
+            let hi = to.map_or(Unbounded, Excluded);
+            m.range((lo, hi)).map(|(_, &x)| x).collect()
+        };
+        (xs, covers.then_some(inner.sums_gen))
     };
-    debug_assert!(whole);
-    seg.inner.write().sum(eng, f)
+    let x = reduce(eng, mono, xs);
+    if let Some(seen) = whole {
+        let mut inner = seg.inner.write();
+        if inner.sums_gen == seen {
+            inner.sums.insert(f, x);
+        }
+    }
+    x
 }
 
 /// The declared monoid's fold over the contributions to `f` after `from`

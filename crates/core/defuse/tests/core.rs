@@ -1113,3 +1113,37 @@ fn a_claim_reads_its_siblings_in_one_pass() {
     assert_eq!(e.claimed(cl).len(), n as usize);
     assert!(wall < Duration::from_millis(80), "a claim of {n} read in {wall:?}: one pass is about 15 ms, one per sibling about 250");
 }
+
+/// Integer sum whose every combine takes 300 microseconds.
+struct SlowSum;
+
+impl phitex_defuse::Monoid for SlowSum {
+    fn empty(&self, v: &Values) -> ValueId {
+        v.int(0)
+    }
+
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        spin(Duration::from_micros(300));
+        v.int(v.as_int(a).unwrap_or(0) + v.as_int(b).unwrap_or(0))
+    }
+}
+
+#[test]
+fn a_fold_sums_a_segment_outside_its_lock() {
+    // Folds over a segment whose sum is not cached compute it under no
+    // lock: the readers and the commits of that segment do not wait for
+    // the monoid.
+    let (e, o) = engine();
+    let v = e.values();
+    let s = f(v, "s");
+    e.declare_accumulator(Field(s), Arc::new(SlowSum));
+    let u = e.new_unit();
+    for i in 0..60 {
+        e.push(u, o.contrib, vec![s, v.int(i)]);
+        if i % 6 == 5 {
+            e.push(u, o.fold, vec![s]);
+        }
+    }
+    let r = e.evaluate(8).unwrap();
+    assert!(r.times.lock_wait_max_ns < 3_000_000, "a lock waited for a fold's sum: {:?}", r.times);
+}
