@@ -44,10 +44,45 @@ const END_BLOCK: usize = 256;
 const REP_3_6: usize = 16;
 const REPZ_3_10: usize = 17;
 const REPZ_11_138: usize = 18;
-const BUF_SIZE: u32 = 16;
 const STORED_BLOCK: u32 = 0;
 const STATIC_TREES: u32 = 1;
 const DYN_TREES: u32 = 2;
+/// The window's allocation: a power of two above `WINDOW_SIZE` +
+/// `MAX_MATCH`, so an index masked by `WIN_AMASK` (the same index: every
+/// window position is below it) needs no bounds check, and eight bytes
+/// more for a word read at any such index.
+const WIN_ALLOC: usize = 1 << 17;
+const WIN_AMASK: usize = WIN_ALLOC - 1;
+const WIN_LEN: usize = WIN_ALLOC + 8;
+/// The symbol buffer's allocation (`lit_bufsize` * 4, a power of two,
+/// three bytes more for a symbol at any masked index).
+const SYM_ALLOC: usize = LIT_BUFSIZE * 4;
+const SYM_LEN: usize = SYM_ALLOC + 3;
+
+type Window = Box<[u8; WIN_LEN]>;
+
+/// A zeroed array on the heap.
+fn zbox<T: Copy + Default, const N: usize>() -> Box<[T; N]> {
+    alloc::vec![T::default(); N]
+        .into_boxed_slice()
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("a vector of N elements"))
+}
+
+/// The window's byte at `i` (a window position).
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn wb(w: &[u8; WIN_LEN], i: usize) -> u8 {
+    w[i & WIN_AMASK]
+}
+
+/// The window's two bytes at `i`, as a number.
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn w16(w: &[u8; WIN_LEN], i: usize) -> u16 {
+    let i = i & WIN_AMASK;
+    u16::from_le_bytes([w[i], w[i + 1]])
+}
 
 const EXTRA_LBITS: [u32; LENGTH_CODES] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
@@ -204,7 +239,8 @@ impl Static {
         if dist < 256 {
             usize::from(self.dist_code[dist])
         } else {
-            usize::from(self.dist_code[256 + (dist >> 7)])
+            // (`dist` < 32K: `dist >> 7` < 256)
+            usize::from(self.dist_code[256 + ((dist >> 7) & 0xff)])
         }
     }
 }
@@ -335,9 +371,9 @@ struct State<'a> {
     next_in: usize,
     adler: u32,
     out: Vec<u8>,
-    window: Vec<u8>,
-    prev: Vec<u16>,
-    head: Vec<u16>,
+    window: Window,
+    prev: Box<[u16; W_SIZE]>,
+    head: Box<[u16; HASH_SIZE]>,
     ins_h: u32,
     /// `block_start` (C's `long`): negative once the window slid past
     /// the block's start.
@@ -364,13 +400,15 @@ struct State<'a> {
     heap_len: usize,
     heap_max: usize,
     depth: [u8; 2 * L_CODES + 1],
-    sym_buf: Vec<u8>,
+    sym_buf: Box<[u8; SYM_LEN]>,
     sym_next: usize,
     sym_end: usize,
     opt_len: u64,
     static_len: u64,
     insert: usize,
-    bi_buf: u16,
+    /// The bits not yet written (zlib's `bi_buf`, wider: written four
+    /// bytes at a time, the stream the same) and their count (< 32).
+    bi_buf: u64,
     bi_valid: u32,
     /// The input read at most this many bytes at a time, the state kept
     /// before each read past `snap_step` bytes after the last one kept
@@ -380,6 +418,8 @@ struct State<'a> {
     snaps: Vec<(usize, State<'static>)>,
     /// The search by longer prefixes ([`Fast`]), where it is kept.
     fast: Option<Box<Fast>>,
+    /// [`FAST_CHECK`], read once per compression.
+    check: bool,
 }
 
 enum Block {
@@ -399,25 +439,20 @@ fn isize_of(s: usize) -> isize {
     isize::try_from(s).expect("a position in the window")
 }
 
-/// The index of the first byte in 3..`MAX_MATCH` where `a` and `b`
-/// differ, or `MAX_MATCH` (`a`, `b`: `MAX_MATCH + 1` bytes).
-fn common_len(a: &[u8], b: &[u8]) -> usize {
-    let (a, b) = (&a[3..=MAX_MATCH], &b[3..=MAX_MATCH]);
-    let mut i = 0;
-    for (x, y) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
-        let x = u64::from_le_bytes(*x);
-        let y = u64::from_le_bytes(*y);
-        let d = x ^ y;
+/// The index of the first byte in 3..`MAX_MATCH` where the window's
+/// bytes at `a` and at `b` differ, or `MAX_MATCH` (eight bytes at a
+/// time: the lowest set byte of their XOR). (Not inlined: the chain's
+/// walk calls it for a few of its candidates.)
+#[inline(never)]
+fn common_len(w: &[u8; WIN_LEN], a: usize, b: usize) -> usize {
+    let (x, y) = (&w[a + 3..=a + MAX_MATCH], &w[b + 3..=b + MAX_MATCH]);
+    let mut i = 3;
+    for (x, y) in x.as_chunks::<8>().0.iter().zip(y.as_chunks::<8>().0) {
+        let d = u64::from_le_bytes(*x) ^ u64::from_le_bytes(*y);
         if d != 0 {
-            return 3 + i + (d.trailing_zeros() / 8) as usize;
+            return i + (d.trailing_zeros() / 8) as usize;
         }
         i += 8;
-    }
-    while i < a.len() {
-        if a[i] != b[i] {
-            return 3 + i;
-        }
-        i += 1;
     }
     MAX_MATCH
 }
@@ -425,53 +460,38 @@ fn common_len(a: &[u8], b: &[u8]) -> usize {
 impl State<'_> {
     // ---- trees.c ----
 
-    fn put_byte(&mut self, c: u8) {
-        self.out.push(c);
-    }
-
     fn put_short(&mut self, w: u16) {
         self.out.extend_from_slice(&w.to_le_bytes());
     }
 
     /// `send_bits`: `value` (below `1 << length`, `length` ≤ 16, as
     /// zlib's Assert in `send_bits` has it) appended to the bit buffer,
-    /// its low 16 bits written once they are full. With `bi_valid` ≤ 16
-    /// the buffer and the new bits fit a `u32`: its low half is what C's
-    /// `bi_buf |= (ush)value << bi_valid` keeps, its high half the
-    /// `(ush)value >> (Buf_size - bi_valid)` carried over.
+    /// its low 32 bits written once they are full.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn send_bits(&mut self, value: u32, length: u32) {
-        let acc = u32::from(self.bi_buf) | value << self.bi_valid;
-        let [b0, b1, b2, b3] = acc.to_le_bytes();
-        let total = self.bi_valid + length;
-        if total > BUF_SIZE {
-            self.out.extend_from_slice(&[b0, b1]);
-            self.bi_buf = u16::from_le_bytes([b2, b3]);
-            self.bi_valid = total - BUF_SIZE;
-        } else {
-            self.bi_buf = u16::from_le_bytes([b0, b1]);
-            self.bi_valid = total;
+        self.bi_buf |= u64::from(value) << self.bi_valid;
+        self.bi_valid += length;
+        if self.bi_valid >= 32 {
+            #[allow(clippy::cast_possible_truncation)]
+            let low = self.bi_buf as u32;
+            self.out.extend_from_slice(&low.to_le_bytes());
+            self.bi_buf >>= 32;
+            self.bi_valid -= 32;
         }
     }
 
-    fn send_code(&mut self, c: usize, tree: Tree) {
-        let ct = match tree {
-            Tree::StaticL => self.st.ltree[c],
-            Tree::StaticD => self.st.dtree[c],
-            Tree::DynL => self.dyn_ltree[c],
-            Tree::DynD => self.dyn_dtree[c],
-            Tree::Bl => self.bl_tree[c],
-        };
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn send_ct(&mut self, ct: Ct) {
         self.send_bits(u32::from(ct.fc), u32::from(ct.dl));
     }
 
+    /// `bi_windup`: the bits left written, to the byte boundary.
     fn bi_windup(&mut self) {
-        if self.bi_valid > 8 {
-            let b = self.bi_buf;
-            self.put_short(b);
-        } else if self.bi_valid > 0 {
-            let [b, _] = self.bi_buf.to_le_bytes();
-            self.put_byte(b);
-        }
+        let n = self.bi_valid.div_ceil(8) as usize;
+        let b = self.bi_buf.to_le_bytes();
+        self.out.extend_from_slice(&b[..n]);
         self.bi_buf = 0;
         self.bi_valid = 0;
     }
@@ -750,7 +770,7 @@ impl State<'_> {
             }
             if count < min_count {
                 loop {
-                    self.send_code(curlen, Tree::Bl);
+                    self.send_ct(self.bl_tree[curlen]);
                     count -= 1;
                     if count == 0 {
                         break;
@@ -758,16 +778,16 @@ impl State<'_> {
                 }
             } else if curlen != 0 {
                 if Some(curlen) != prevlen {
-                    self.send_code(curlen, Tree::Bl);
+                    self.send_ct(self.bl_tree[curlen]);
                     count -= 1;
                 }
-                self.send_code(REP_3_6, Tree::Bl);
+                self.send_ct(self.bl_tree[REP_3_6]);
                 self.send_bits(bits(count - 3), 2);
             } else if count <= 10 {
-                self.send_code(REPZ_3_10, Tree::Bl);
+                self.send_ct(self.bl_tree[REPZ_3_10]);
                 self.send_bits(bits(count - 3), 3);
             } else {
-                self.send_code(REPZ_11_138, Tree::Bl);
+                self.send_ct(self.bl_tree[REPZ_11_138]);
                 self.send_bits(bits(count - 11), 7);
             }
             count = 0;
@@ -828,39 +848,66 @@ impl State<'_> {
         }
     }
 
-    fn compress_block(&mut self, ltree: Tree, dtree: Tree) {
-        let mut sx = 0;
-        if self.sym_next != 0 {
-            loop {
-                let mut dist = usize::from(self.sym_buf[sx]);
-                dist += usize::from(self.sym_buf[sx + 1]) << 8;
-                let mut lc = usize::from(self.sym_buf[sx + 2]);
-                sx += 3;
-                if dist == 0 {
-                    self.send_code(lc, ltree);
-                } else {
-                    let code = usize::from(self.st.length_code[lc]);
-                    self.send_code(code + LITERALS + 1, ltree);
-                    let extra = EXTRA_LBITS[code];
-                    if extra != 0 {
-                        lc -= self.st.base_length[code];
-                        self.send_bits(bits(lc), extra);
-                    }
-                    dist -= 1;
-                    let code = self.st.d_code(dist);
-                    self.send_code(code, dtree);
-                    let extra = EXTRA_DBITS[code];
-                    if extra != 0 {
-                        dist -= self.st.base_dist[code];
-                        self.send_bits(bits(dist), extra);
-                    }
+    /// `compress_block`: the block's symbols in the trees `ltree` and
+    /// `dtree` (the static ones or the block's own).
+    fn compress_block(&mut self, dynamic: bool) {
+        let (ltree, dtree): (&[Ct; L_CODES + 2], &[Ct; D_CODES]) = if dynamic {
+            (
+                self.dyn_ltree[..L_CODES + 2]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!()),
+                self.dyn_dtree[..D_CODES]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!()),
+            )
+        } else {
+            (&self.st.ltree, &self.st.dtree)
+        };
+        let st = &self.st;
+        let (mut buf, mut valid) = (self.bi_buf, self.bi_valid);
+        let out = &mut self.out;
+        // (`send_bits` on the locals)
+        let mut send = |v: u32, n: u32| {
+            buf |= u64::from(v) << valid;
+            valid += n;
+            if valid >= 32 {
+                #[allow(clippy::cast_possible_truncation)]
+                let low = buf as u32;
+                out.extend_from_slice(&low.to_le_bytes());
+                buf >>= 32;
+                valid -= 32;
+            }
+        };
+        for sym in self.sym_buf[..self.sym_next].as_chunks::<3>().0 {
+            let mut dist = usize::from(sym[0]) | usize::from(sym[1]) << 8;
+            let mut lc = usize::from(sym[2]);
+            if dist == 0 {
+                let ct = ltree[lc];
+                send(u32::from(ct.fc), u32::from(ct.dl));
+            } else {
+                let code = usize::from(st.length_code[lc]);
+                let ct = ltree[code + LITERALS + 1];
+                send(u32::from(ct.fc), u32::from(ct.dl));
+                let extra = EXTRA_LBITS[code];
+                if extra != 0 {
+                    lc -= st.base_length[code];
+                    send(bits(lc), extra);
                 }
-                if sx >= self.sym_next {
-                    break;
+                dist -= 1;
+                let code = st.d_code(dist);
+                let ct = dtree[code];
+                send(u32::from(ct.fc), u32::from(ct.dl));
+                let extra = EXTRA_DBITS[code];
+                if extra != 0 {
+                    dist -= st.base_dist[code];
+                    send(bits(dist), extra);
                 }
             }
         }
-        self.send_code(END_BLOCK, ltree);
+        let ct = ltree[END_BLOCK];
+        send(u32::from(ct.fc), u32::from(ct.dl));
+        self.bi_buf = buf;
+        self.bi_valid = valid;
     }
 
     fn flush_block(&mut self, buf: Option<usize>, stored_len: usize, last: bool) {
@@ -876,12 +923,12 @@ impl State<'_> {
             self.stored_block(buf, stored_len, last);
         } else if static_lenb == opt_lenb {
             self.send_bits((STATIC_TREES << 1) + u32::from(last), 3);
-            self.compress_block(Tree::StaticL, Tree::StaticD);
+            self.compress_block(false);
         } else {
             self.send_bits((DYN_TREES << 1) + u32::from(last), 3);
             let (l, d) = (self.l_max_code + 1, self.d_max_code + 1);
             self.send_all_trees(l, d, max_blindex + 1);
-            self.compress_block(Tree::DynL, Tree::DynD);
+            self.compress_block(true);
         }
         self.init_block();
         if last {
@@ -889,10 +936,11 @@ impl State<'_> {
         }
     }
 
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn tally_lit(&mut self, c: u8) -> bool {
-        self.sym_buf[self.sym_next] = 0;
-        self.sym_buf[self.sym_next + 1] = 0;
-        self.sym_buf[self.sym_next + 2] = c;
+        let i = self.sym_next & (SYM_ALLOC - 1);
+        self.sym_buf[i..i + 3].copy_from_slice(&[0, 0, c]);
         self.sym_next += 3;
         self.dyn_ltree[usize::from(c)].fc = self.dyn_ltree[usize::from(c)].fc.wrapping_add(1);
         self.sym_next == self.sym_end
@@ -903,11 +951,11 @@ impl State<'_> {
         let [d0, d1] = u16::try_from(dist)
             .expect("dist below the window")
             .to_le_bytes();
-        self.sym_buf[self.sym_next] = d0;
-        self.sym_buf[self.sym_next + 1] = d1;
-        self.sym_buf[self.sym_next + 2] = u8::try_from(len).expect("len below 256");
+        let i = self.sym_next & (SYM_ALLOC - 1);
+        #[allow(clippy::cast_possible_truncation)]
+        self.sym_buf[i..i + 3].copy_from_slice(&[d0, d1, len as u8]);
         self.sym_next += 3;
-        let lc = usize::from(self.st.length_code[len]) + LITERALS + 1;
+        let lc = usize::from(self.st.length_code[len & 0xff]) + LITERALS + 1;
         self.dyn_ltree[lc].fc = self.dyn_ltree[lc].fc.wrapping_add(1);
         let dc = self.st.d_code(dist - 1);
         self.dyn_dtree[dc].fc = self.dyn_dtree[dc].fc.wrapping_add(1);
@@ -921,14 +969,19 @@ impl State<'_> {
     }
 
     /// `INSERT_STRING`: returns the chain's previous head.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn insert_string(&mut self, s: usize) -> usize {
-        let c = self.window[s + MIN_MATCH - 1];
-        self.update_hash(c);
-        let h = self.head[self.ins_h as usize];
+        let c = wb(&self.window, s + MIN_MATCH - 1);
+        let ih = ((self.ins_h << HASH_SHIFT) ^ u32::from(c)) & HASH_MASK;
+        self.ins_h = ih;
+        let h = self.head[ih as usize];
         self.prev[s & W_MASK] = h;
-        self.head[self.ins_h as usize] = pos_u16(s);
+        #[allow(clippy::cast_possible_truncation)]
+        let p = s as u16;
+        self.head[ih as usize] = p;
         if let Some(f) = self.fast.as_mut() {
-            f.insert(&self.window, s, self.ins_h as usize);
+            f.insert(&*self.window, s, ih as usize);
         }
         usize::from(h)
     }
@@ -990,10 +1043,11 @@ impl State<'_> {
                 while self.insert != 0 {
                     let c = self.window[str + MIN_MATCH - 1];
                     self.update_hash(c);
-                    self.prev[str & W_MASK] = self.head[self.ins_h as usize];
-                    self.head[self.ins_h as usize] = pos_u16(str);
+                    let ih = (self.ins_h & HASH_MASK) as usize;
+                    self.prev[str & W_MASK] = self.head[ih];
+                    self.head[ih] = pos_u16(str);
                     if let Some(f) = self.fast.as_mut() {
-                        f.insert(&self.window, str, self.ins_h as usize);
+                        f.insert(&*self.window, str, ih);
                     }
                     str += 1;
                     self.insert -= 1;
@@ -1072,6 +1126,7 @@ impl State<'_> {
             snap_step: self.snap_step,
             snaps: Vec::new(),
             fast: self.fast.clone(),
+            check: self.check,
         }
     }
 
@@ -1093,7 +1148,7 @@ impl State<'_> {
             return None;
         }
         let s = self.strstart;
-        let w = &self.window;
+        let w: &[u8; WIN_LEN] = &self.window;
         let mut chain = self.max_chain_length;
         if self.prev_length >= self.good_match {
             chain >>= 2;
@@ -1162,7 +1217,7 @@ impl State<'_> {
                     if !candidate(p) {
                         break;
                     }
-                    let l = common_len(&w[s..=s + MAX_MATCH], &w[p..=p + MAX_MATCH]);
+                    let l = common_len(w, s, p);
                     if l > best.0 {
                         best = (l, p);
                         if l >= self.nice_match {
@@ -1177,15 +1232,26 @@ impl State<'_> {
         Some(best.0.min(self.lookahead))
     }
 
-    fn longest_match(&mut self, mut cur_match: usize) -> usize {
+    /// `longest_match`: by the longer prefixes' chains where they are
+    /// kept ([`State::fast_match`]), else zlib's walk.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn longest_match(&mut self, cur_match: usize) -> usize {
+        if self.fast.is_some() {
+            self.fast_or_walk(cur_match)
+        } else {
+            self.chain_match(cur_match)
+        }
+    }
+
+    #[inline(never)]
+    fn fast_or_walk(&mut self, cur_match: usize) -> usize {
         let ms0 = self.match_start;
         if let Some(n) = self.fast_match(cur_match) {
-            if cfg!(debug_assertions) || FAST_CHECK.load(core::sync::atomic::Ordering::Relaxed) {
+            if cfg!(debug_assertions) || self.check {
                 let ms = self.match_start;
                 self.match_start = ms0;
-                let fast = self.fast.take();
-                let n2 = self.longest_match(cur_match);
-                self.fast = fast;
+                let n2 = self.chain_match(cur_match);
                 assert_eq!(
                     (n, ms),
                     (n2, self.match_start),
@@ -1195,6 +1261,13 @@ impl State<'_> {
             }
             return n;
         }
+        self.chain_match(cur_match)
+    }
+
+    /// zlib's walk of the three-byte chain from `cur_match`.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn chain_match(&mut self, mut cur_match: usize) -> usize {
         let mut chain_length = self.max_chain_length;
         let scan0 = self.strstart;
         let mut best_len = self.prev_length;
@@ -1204,10 +1277,12 @@ impl State<'_> {
         } else {
             NIL
         };
-        let strend = self.strstart + MAX_MATCH;
-        let w = &self.window;
-        let mut scan_end1 = w[scan0 + best_len - 1];
-        let mut scan_end = w[scan0 + best_len];
+        let w: &[u8; WIN_LEN] = &self.window;
+        let prev: &[u16; W_SIZE] = &self.prev;
+        // (zlib's four compares, `match[best_len]`, `match[best_len-1]`,
+        // `match[0]` and `match[1]` against `scan`'s, as two of two bytes)
+        let scan_start = w16(w, scan0);
+        let mut scan_end = w16(w, scan0 + best_len - 1);
         if self.prev_length >= self.good_match {
             chain_length >>= 2;
         }
@@ -1217,30 +1292,23 @@ impl State<'_> {
         let mut match_start = self.match_start;
         loop {
             let m = cur_match;
-            let skip = w[m + best_len] != scan_end
-                || w[m + best_len - 1] != scan_end1
-                || w[m] != w[scan0]
-                || w[m + 1] != w[scan0 + 1];
-            if !skip {
+            if w16(w, m + best_len - 1) == scan_end && w16(w, m) == scan_start {
                 // (the bytes from 3 on, as zlib's loop compares them: it
                 // steps eight at a time from `scan + 2` and stops at the
                 // first byte that differs or at `strend` (256 bytes on,
                 // a multiple of eight), so the length is the index of the
-                // first differing byte in 3..258, or 258; found here
-                // eight bytes at a time by the lowest set byte of their
-                // XOR)
-                let len = common_len(&w[scan0..=strend], &w[m..=m + MAX_MATCH]);
+                // first differing byte in 3..258, or 258)
+                let len = common_len(w, scan0, m);
                 if len > best_len {
                     match_start = cur_match;
                     best_len = len;
                     if len >= nice_match {
                         break;
                     }
-                    scan_end1 = w[scan0 + best_len - 1];
-                    scan_end = w[scan0 + best_len];
+                    scan_end = w16(w, scan0 + best_len - 1);
                 }
             }
-            cur_match = usize::from(self.prev[cur_match & W_MASK]);
+            cur_match = usize::from(prev[cur_match & W_MASK]);
             if cur_match <= limit {
                 break;
             }
@@ -1310,12 +1378,12 @@ impl State<'_> {
                 } else {
                     self.strstart += self.match_length;
                     self.match_length = 0;
-                    self.ins_h = u32::from(self.window[self.strstart]);
-                    let c = self.window[self.strstart + 1];
+                    self.ins_h = u32::from(wb(&self.window, self.strstart));
+                    let c = wb(&self.window, self.strstart + 1);
                     self.update_hash(c);
                 }
             } else {
-                let c = self.window[self.strstart];
+                let c = wb(&self.window, self.strstart);
                 bflush = self.tally_lit(c);
                 self.lookahead -= 1;
                 self.strstart += 1;
@@ -1395,7 +1463,7 @@ impl State<'_> {
                     self.flush_block_only(false);
                 }
             } else if self.match_available {
-                let c = self.window[self.strstart - 1];
+                let c = wb(&self.window, self.strstart - 1);
                 if self.tally_lit(c) {
                     self.flush_block_only(false);
                 }
@@ -1426,16 +1494,6 @@ impl State<'_> {
         }
         Block::Done
     }
-}
-
-/// Which tree `send_code` reads.
-#[derive(Clone, Copy)]
-enum Tree {
-    StaticL,
-    StaticD,
-    DynL,
-    DynD,
-    Bl,
 }
 
 /// Adler-32 (RFC 1950), continued from `a`.
@@ -1474,10 +1532,10 @@ pub fn compress(data: &[u8], level: i32) -> Vec<u8> {
 #[derive(Default)]
 pub struct Scratch {
     st: Option<Box<Static>>,
-    window: Vec<u8>,
-    prev: Vec<u16>,
-    head: Vec<u16>,
-    sym_buf: Vec<u8>,
+    window: Option<Window>,
+    prev: Option<Box<[u16; W_SIZE]>>,
+    head: Option<Box<[u16; HASH_SIZE]>>,
+    sym_buf: Option<Box<[u8; SYM_LEN]>>,
     /// ([`Resumable`]'s: the states to keep and those kept, and whether
     /// the search keeps its longer chains, [`Fast`].)
     snap_step: usize,
@@ -1575,19 +1633,24 @@ impl Resumable {
     }
 }
 
-/// A buffer of `n` zeros, reusing `v`'s allocation.
-fn zeroed<T: Copy + Default>(mut v: Vec<T>, n: usize) -> Vec<T> {
-    v.clear();
-    v.resize(n, T::default());
-    v
+/// `b` (a fresh zeroed array if `None`) with its first `k` elements
+/// zeroed (above them, what the last use left or zero).
+fn zeroed_to<T: Copy + Default, const N: usize>(b: Option<Box<[T; N]>>, k: usize) -> Box<[T; N]> {
+    zeroed_from(b, 0..k)
 }
 
-/// A buffer of `n` elements, reusing `v`'s allocation, zero below `k`
-/// (above it, what the last use left or zero).
-fn zeroed_to<T: Copy + Default>(mut v: Vec<T>, n: usize, k: usize) -> Vec<T> {
-    v.resize(n, T::default());
-    v[..k.min(n)].fill(T::default());
-    v
+/// `b` (a fresh zeroed array if `None`) with the elements `r` zeroed.
+fn zeroed_from<T: Copy + Default, const N: usize>(
+    b: Option<Box<[T; N]>>,
+    r: core::ops::Range<usize>,
+) -> Box<[T; N]> {
+    match b {
+        Some(mut b) => {
+            b[r.start.min(N)..r.end.min(N)].fill(T::default());
+            b
+        }
+        None => zbox(),
+    }
 }
 
 /// [`compress`] with the buffers of `sc` (the same bytes).
@@ -1599,9 +1662,11 @@ fn zeroed_to<T: Copy + Default>(mut v: Vec<T>, n: usize, k: usize) -> Vec<T> {
 pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
     let level = level.clamp(1, 9).unsigned_abs() as usize;
     let (good, lazy, nice, chain) = CONFIG[level];
-    // (data the window holds whole, never slid: no read of the window
-    // or of `prev` goes past its length and a match's reach, so only
-    // that much is zeroed; `head` is zeroed whole)
+    // (data the window holds whole, never slid: every byte of the
+    // window read is the data's or, past its end, within a match's
+    // reach, which is zeroed (zlib's `high_water`); `prev` is written
+    // before it is read (a chain holds only positions inserted); `head`
+    // is zeroed whole)
     let reach = (data.len() + MIN_LOOKAHEAD <= W_SIZE).then_some(data.len());
     let mut s = State {
         st: sc.st.take().unwrap_or_else(Static::new),
@@ -1610,17 +1675,14 @@ pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
         next_in: 0,
         adler: 1,
         out: Vec::with_capacity(data.len() / 2 + 64),
-        window: zeroed_to(
-            core::mem::take(&mut sc.window),
-            WINDOW_SIZE + MAX_MATCH,
-            reach.map_or(WINDOW_SIZE + MAX_MATCH, |n| n + MAX_MATCH + MIN_MATCH),
+        window: zeroed_from(
+            sc.window.take(),
+            reach.map_or(0..WINDOW_SIZE + MAX_MATCH + 8, |n| {
+                n..n + MAX_MATCH + MIN_MATCH + 8
+            }),
         ),
-        prev: zeroed_to(
-            core::mem::take(&mut sc.prev),
-            W_SIZE,
-            reach.map_or(W_SIZE, |n| n + 1),
-        ),
-        head: zeroed(core::mem::take(&mut sc.head), HASH_SIZE),
+        prev: sc.prev.take().unwrap_or_else(zbox),
+        head: zeroed_to(sc.head.take(), HASH_SIZE),
         ins_h: 0,
         block_start: 0,
         match_length: MIN_MATCH - 1,
@@ -1645,11 +1707,7 @@ pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
         heap_len: 0,
         heap_max: 0,
         depth: [0; 2 * L_CODES + 1],
-        sym_buf: {
-            let mut b = core::mem::take(&mut sc.sym_buf);
-            b.resize(LIT_BUFSIZE * 4, 0);
-            b
-        },
+        sym_buf: sc.sym_buf.take().unwrap_or_else(zbox),
         sym_next: 0,
         sym_end: (LIT_BUFSIZE - 1) * 3,
         opt_len: 0,
@@ -1666,6 +1724,7 @@ pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
             }
             None => Fast::new(),
         }),
+        check: FAST_CHECK.load(core::sync::atomic::Ordering::Relaxed),
     };
     s.init_block();
     // (the zlib header: deflate, a 32K window, the level's flags)
@@ -1686,10 +1745,10 @@ pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
     s.run();
     sc.snaps = core::mem::take(&mut s.snaps);
     sc.st = Some(s.st);
-    sc.window = s.window;
-    sc.prev = s.prev;
-    sc.head = s.head;
-    sc.sym_buf = s.sym_buf;
+    sc.window = Some(s.window);
+    sc.prev = Some(s.prev);
+    sc.head = Some(s.head);
+    sc.sym_buf = Some(s.sym_buf);
     sc.fast_tables = s.fast.take();
     s.out
 }
