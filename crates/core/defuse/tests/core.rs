@@ -363,7 +363,11 @@ fn scales_with_threads() {
         t.elapsed()
     };
     let (t1, t8) = (wall(1), wall(8));
-    assert!(t8 * 2 < t1, "8 threads at least twice as fast as 1: {t1:?} vs {t8:?}");
+    assert!(t8 * 5 < t1, "8 threads at least five times as fast as 1 on independent work: {t1:?} vs {t8:?}");
+    if threads() >= 32 {
+        let t32 = wall(32);
+        assert!(t32 < t8, "32 threads faster than 8: {t8:?} vs {t32:?}");
+    }
 }
 
 #[test]
