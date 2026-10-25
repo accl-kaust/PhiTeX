@@ -673,6 +673,7 @@ impl Run<'_, '_> {
             vunit,
         ]);
         self.contribute(PITEMS, v.seq_unit(it));
+        self.contribute(crate::pages::LINK_ITEMS, it);
     }
 
     /// What the piece leaves the next one of the main list

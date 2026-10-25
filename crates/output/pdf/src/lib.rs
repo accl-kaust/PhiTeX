@@ -87,6 +87,8 @@ mod digest;
 pub mod enc;
 mod finish;
 pub use finish::{Chunk, PdfBytes, Tail, finish};
+mod update;
+pub use update::{Layout, Section, Updater};
 mod encodings;
 mod epdffont;
 mod font;

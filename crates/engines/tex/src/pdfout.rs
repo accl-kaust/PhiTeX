@@ -69,9 +69,9 @@ pub(crate) fn line_push(r: &mut Run<'_, '_>, e: ValueId) {
     if (op == r.ops.exec || op == r.ops.resume) && r.cand > 0 {
         let pid = i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes());
         let m = v.list(vec![v.str("cand"), v.int(pid), v.int(i64::from(r.cand))]);
-        r.contribute(XPAGES, v.seq_unit(m));
+        r.contribute(XPAGES, m);
     }
-    r.contribute(XPAGES, v.seq_unit(e));
+    r.contribute(XPAGES, e);
 }
 
 /// The line in pdfTeX's order: a page whose break is at candidate `k`
@@ -3171,12 +3171,12 @@ pub(crate) fn font_number(r: &mut Run<'_, '_>, f: i64) -> R<i64> {
     if let Some(&n) = seen.get(&f) {
         return Ok(n);
     }
-    let line = v.seq_to_vec(r.cx.fold(v.field(XPAGES), None, None)?);
+    let line = crate::val::cat_to_vec(v, r.cx.fold(v.field(XPAGES), None, None)?);
     let own: Vec<ValueId> = r
         .contribs
         .iter()
         .filter(|(g, _)| *g == v.field(XPAGES))
-        .flat_map(|&(_, x)| v.seq_to_vec(x))
+        .map(|&(_, x)| x)
         .collect();
     let mut n = i64::try_from(seen.len()).unwrap_or(0);
     for x in order_line(v, &line).into_iter().chain(own) {
@@ -3584,11 +3584,11 @@ fn link_memo() -> &'static Mutex<Option<LinkMemo>> {
     M.get_or_init(|| Mutex::new(None))
 }
 
-/// What the link made: the file (empty: none).
+/// What the link made: the file's layout (none: no file), the exact
+/// file made from it when asked ([`phitex_pdf::Layout::exact`]).
 pub(crate) struct Linked {
-    pub file: Vec<u8>,
-    /// The file's hash, from its chunks' ([`phitex_pdf::Tail::link_hashed`];
-    /// none: to be hashed whole).
+    pub layout: Option<phitex_pdf::Layout>,
+    /// The file's hash, from its chunks' ([`phitex_pdf::Layout::hash`]).
     pub hash: Option<u64>,
     /// The writer's errors where the link shipped a page again (pdfTeX's,
     /// `PDF-BACKEND-GAP`: a fatal error there, here logged, the job going
@@ -3635,22 +3635,24 @@ pub(crate) fn finish_exact(
         // (the file linked from the last link's records, and from the
         // start: the same bytes)
         let full = link(v, f, xpages, units, cmds, false);
-        let at = out
-            .file
-            .iter()
-            .zip(&full.file)
-            .take_while(|(a, b)| a == b)
-            .count();
+        let bytes = |l: &Linked| {
+            l.layout
+                .as_ref()
+                .and_then(|l| l.exact().ok())
+                .unwrap_or_default()
+        };
+        let (a, b) = (bytes(&out), bytes(&full));
+        let at = a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
         assert!(
-            out.file == full.file && out.errors == full.errors,
+            a == b && out.errors == full.errors,
             "link check: the file linked from the last link's records ({} bytes) is not the \
              file linked from the start ({} bytes): they differ from byte {at}",
-            out.file.len(),
-            full.file.len()
+            a.len(),
+            b.len()
         );
         eprintln!(
             "link check: {} bytes, the same linked from the start",
-            out.file.len()
+            a.len()
         );
     }
     out
@@ -3669,7 +3671,7 @@ fn link(
     memo: bool,
 ) -> Linked {
     let none = Linked {
-        file: Vec::new(),
+        layout: None,
         hash: None,
         errors: Vec::new(),
         placed: 0,
@@ -4184,32 +4186,31 @@ fn link(
         }),
     };
     let t2 = std::time::Instant::now();
-    let (out, hash) = tail
-        .and_then(|t| {
-            t.map_or(Ok((Vec::new(), None)), |t| {
-                t.link_hashed(&bytes).map(|(b, h)| (b, Some(h)))
-            })
-        })
+    // (the file's layout: the exact file, its cross-reference section
+    // by the chunks' places, made when asked, `phitex_pdf::Layout::exact`)
+    let layout = tail
         .unwrap_or_else(|e| {
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 eprintln!("pdf: {e}");
             }
-            (Vec::new(), None)
-        });
+            None
+        })
+        .map(|t| phitex_pdf::Layout::new(t, bytes));
+    let hash = layout.as_ref().map(phitex_pdf::Layout::hash);
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "pdf link: {} records, {placed} pages placed, {shipped} shipped again, {} commands; \
-             line {:?}, tail {:?}, file {} bytes in {:?}",
+             line {:?}, tail {:?}, {} bytes before the cross-reference section in {:?}",
             xpages.len(),
             got.len(),
             t1 - t0,
             t2 - t1,
-            out.len(),
+            layout.as_ref().map_or(0, phitex_pdf::Layout::len),
             t0.elapsed()
         );
     }
     Linked {
-        file: out,
+        layout,
         hash,
         errors,
         placed: u64::try_from(placed).unwrap_or(0),

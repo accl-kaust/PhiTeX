@@ -259,8 +259,13 @@ impl Run<'_, '_> {
 /// (`Operation::contributes`), so a step's search for the next piece passes
 /// over them while they run.
 pub(crate) fn from_pieces(v: &Values, f: Field) -> bool {
-    f == v.field(crate::vprof::VPROF) || f == v.field(PITEMS)
+    f == v.field(crate::vprof::VPROF) || f == v.field(PITEMS) || f == v.field(LINK_ITEMS)
 }
+
+/// The pieces' items again ([`PITEMS`]'s units, each its own
+/// contribution), as the link reads them whole: a `crate::val::CatMonoid`
+/// fold, not a sequence's.
+pub(crate) const LINK_ITEMS: &str = "pdf:items";
 
 /// The field every finisher defines at its position: what its routine
 /// gave back ([`RTN`]'s value) as `[piece, nth, output]`, the piece its
@@ -270,7 +275,7 @@ pub(crate) fn from_pieces(v: &Values, f: Field) -> bool {
 /// its finisher's comes in.
 pub(crate) const PAGE_OUT: &str = "pages:out";
 
-/// One unit from every finisher's run, at its position: the finishers
+/// One from every finisher's run, at its position, summed: the finishers
 /// that have run, which the writers count against [`PAGES_END`]'s pages
 /// ([`all_finished`]).
 pub(crate) const FIN_DONE: &str = "pages:fin";
@@ -283,10 +288,12 @@ pub(crate) fn all_finished(cx: &mut phitex_defuse::Ctx<'_>) -> Result<bool, phit
     let Some(n) = cx.read(v.field(PAGES_END))? else {
         return Ok(false);
     };
-    // (read as the count against the pages: an answer that stays the
-    // same while the count grows short of them)
-    let p = cx.path(&[phitex_defuse::Step::Len, phitex_defuse::Step::Cmp(n)]);
+    // (read as the count against the pages, a sum: an answer that stays
+    // the same while the count grows short of them)
+    let p = cx.path(&[phitex_defuse::Step::Cmp(n)]);
+    let t0 = std::time::Instant::now();
     let c = cx.fold_path(v.field(FIN_DONE), None, None, p)?;
+    crate::timeline::note("pages: all finished (the fold)", t0.elapsed());
     Ok(c.and_then(|c| v.as_int(c)).is_some_and(|c| c >= 0))
 }
 

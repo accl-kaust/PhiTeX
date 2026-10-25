@@ -1216,7 +1216,10 @@ pub(crate) const FONT_ORDER: &str = "fontorder";
 pub(crate) fn font_order(v: &Values, line: Option<ValueId>) -> Vec<i64> {
     let mut seen = phitex_defuse::FxHashSet::default();
     let mut out = Vec::new();
-    for x in line.map(|l| v.seq_to_vec(l)).unwrap_or_default() {
+    for x in line
+        .map(|l| crate::val::cat_to_vec(v, l))
+        .unwrap_or_default()
+    {
         if let Some(k) = crate::pdfout::fontload_key(v, x)
             && seen.insert(k)
         {
@@ -5655,8 +5658,64 @@ impl Build {
     #[must_use]
     pub fn is_pdf(&self) -> bool {
         let v = self.g.eng.values();
+        self.pdf_layout().is_some()
+            || self
+                .end_file()
+                .is_some_and(|x| crate::assemble::file_bytes_shared(v, x).starts_with(b"%PDF"))
+    }
+
+    /// The PDF file's layout, the link's (none: a DVI file, or no file):
+    /// its exact bytes made when asked ([`phitex_pdf::Layout::exact`]),
+    /// or an update section of a file holding an earlier one
+    /// ([`phitex_pdf::Updater`]).
+    #[must_use]
+    pub fn pdf_layout(&self) -> Option<phitex_pdf::Layout> {
+        let v = self.g.eng.values();
         self.end_file()
-            .is_some_and(|x| crate::assemble::file_bytes_shared(v, x).starts_with(b"%PDF"))
+            .and_then(|x| crate::assemble::file_layout(v, x))
+    }
+
+    /// The output file's bytes (the exact PDF file, made from its layout
+    /// if not yet; a DVI file), without the log.
+    #[must_use]
+    pub fn output_bytes(&self) -> Arc<Vec<u8>> {
+        let v = self.g.eng.values();
+        self.end_file()
+            .map(|x| crate::assemble::file_bytes_shared(v, x))
+            .unwrap_or_default()
+    }
+
+    /// The log's error lines (`! ...`), read without laying the log out:
+    /// none unless the errors' count says there are some.
+    #[must_use]
+    pub fn error_lines(&self) -> Vec<String> {
+        let v = self.g.eng.values();
+        let n = self
+            .g
+            .eng
+            .acc_value(self.unit, v.field(crate::run::LOG_ERRORS))
+            .map_or(0, |x| int_of(v, x));
+        if n == 0 {
+            return Vec::new();
+        }
+        let (error, errmsg) = (v.str("error"), v.str("errmsg"));
+        self.g
+            .eng
+            .acc_value(self.unit, v.field("log"))
+            .map(|e| v.seq_to_vec(e))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|x| {
+                let xs = list_of(v, x);
+                let k = *xs.first()?;
+                (k == error || k == errmsg).then(|| {
+                    format!(
+                        "! {}.",
+                        xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default()
+                    )
+                })
+            })
+            .collect()
     }
 
     /// Whether the job ended on a fatal error (§93, `history =
@@ -5695,12 +5754,14 @@ impl Build {
     #[must_use]
     pub fn output_shared(&self) -> (Arc<Vec<u8>>, String) {
         let v = self.g.eng.values();
+        let t0 = std::time::Instant::now();
         let key = (
             self.end_file(),
             self.g.eng.acc_value(self.unit, v.field("log")),
             self.g.eng.acc_value(self.unit, v.field("pagehash")),
             self.g.eval_errors.len(),
         );
+        crate::timeline::note("output: the key (log, pagehash folds)", t0.elapsed());
         if let Some((k, x)) = &self.memo.locked().output
             && *k == key
         {
@@ -6345,19 +6406,42 @@ impl Build {
     #[must_use]
     pub fn pages(&self) -> Vec<u64> {
         let v = self.g.eng.values();
-        let f = v.field("pagehash");
-        let acc = self.g.eng.acc_value(self.unit, f).map(|x| {
-            // (and the pages as the link has them: a PDF page's entry is
-            // its shape, `crate::pdfout::SHOWN`)
-            let r = self.g.eng.acc_value(self.unit, v.field(crate::pdfout::SHOWN));
-            v.list(vec![x, r.unwrap_or(ValueId::UNIT)])
+        let t0 = std::time::Instant::now();
+        // (a PDF file's pages are the link's, each its identity there
+        // (`crate::pdfout::SHOWN`, one contribution): not the fold of
+        // every page's hash, which an edit would join again)
+        let shown = self.pdf_layout().and_then(|_| {
+            self.g
+                .eng
+                .acc_value(self.unit, v.field(crate::pdfout::SHOWN))
         });
+        let acc = match shown {
+            Some(s) => Some(v.list(vec![ValueId::UNIT, s])),
+            None => {
+                let f = v.field("pagehash");
+                self.g.eng.acc_value(self.unit, f).map(|x| {
+                    let r = self.g.eng.acc_value(self.unit, v.field(crate::pdfout::SHOWN));
+                    v.list(vec![x, r.unwrap_or(ValueId::UNIT)])
+                })
+            }
+        };
+        crate::timeline::note("pages: the key", t0.elapsed());
         if let Some((k, x)) = &self.memo.locked().pages
             && *k == acc
         {
             return x.clone();
         }
-        let x = self.pages_made();
+        let x = match shown {
+            Some(s) => v
+                .seq_to_vec(s)
+                .first()
+                .map(|&l| list_of(v, l))
+                .unwrap_or_default()
+                .iter()
+                .map(|x| phitex_defuse::hash_words(0x7061_6765, &[x.raw()]))
+                .collect(),
+            None => self.pages_made(),
+        };
         self.memo.locked().pages = Some((acc, x.clone()));
         x
     }
@@ -6721,7 +6805,6 @@ fn declare_fields(eng: &Engine) {
         "fread",
         "pkgrecs",
         "gdefs",
-        crate::pdfout::XPAGES,
         crate::vprof::VPROF,
         crate::pages::PITEMS,
         crate::run::SEEDED,
@@ -6752,7 +6835,16 @@ fn declare_fields(eng: &Engine) {
     eng.declare_accumulator(rels, Arc::new(SeqMonoid));
     let linked = eng.values().field(crate::pdfout::LINKED);
     eng.declare_accumulator(linked, Arc::new(SeqMonoid));
-    for f in crate::hints::COUNTERS {
+    // (the link's line and the pieces' items as the link reads them,
+    // whole: pairs, not joined sequences, `crate::val::CatMonoid`)
+    for f in [crate::pdfout::XPAGES, crate::pages::LINK_ITEMS] {
+        let fld = eng.values().field(f);
+        eng.declare_accumulator(fld, Arc::new(crate::val::CatMonoid));
+    }
+    for f in crate::hints::COUNTERS
+        .iter()
+        .chain(&[crate::run::LOG_ERRORS, crate::pages::FIN_DONE])
+    {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SumMonoid));
     }

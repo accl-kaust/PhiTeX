@@ -85,18 +85,25 @@ fn linked_files() -> &'static LinkedFiles {
 /// [`linked_files`]: per values table (its instance), its files.
 type LinkedFiles = std::sync::Mutex<Vec<(u64, Linked)>>;
 
-/// A table's linked files: (hash, bytes), the latest last.
-type Linked = std::collections::VecDeque<(u64, std::sync::Arc<Vec<u8>>)>;
+/// A table's linked files: (hash, file), the latest last.
+type Linked = std::collections::VecDeque<(u64, File)>;
+
+/// A linked file: its bytes, or its layout (a PDF file, the exact bytes
+/// made from it when asked).
+#[derive(Clone)]
+enum File {
+    #[cfg_attr(not(test), allow(dead_code))]
+    Bytes(std::sync::Arc<Vec<u8>>),
+    Layout(phitex_pdf::Layout),
+}
 
 /// The files linked in values table `instance` dropped: its build goes.
 pub(crate) fn forget_linked(instance: u64) {
     linked_files().locked().retain(|(i, _)| *i != instance);
 }
 
-/// The value standing for file bytes `b` ([`linked_files`]).
-fn bytes_value(v: &phitex_defuse::Values, b: Vec<u8>, hash: Option<u64>) -> ValueId {
-    let h = hash.unwrap_or_else(|| phitex_defuse::hash_bytes(0x6c69_6e6b_6564, &b));
-    let n = b.len();
+/// The value standing for file `f` ([`linked_files`]).
+fn file_value(v: &phitex_defuse::Values, f: File, h: u64, n: usize) -> ValueId {
     let mut all = linked_files().locked();
     let k = if let Some(k) = all.iter().position(|(i, _)| *i == v.instance()) {
         k
@@ -106,7 +113,7 @@ fn bytes_value(v: &phitex_defuse::Values, b: Vec<u8>, hash: Option<u64>) -> Valu
     };
     let m = &mut all[k].1;
     if !m.iter().any(|e| e.0 == h) {
-        m.push_back((h, std::sync::Arc::new(b)));
+        m.push_back((h, f));
         while m.len() > 4 {
             m.pop_front();
         }
@@ -118,9 +125,26 @@ fn bytes_value(v: &phitex_defuse::Values, b: Vec<u8>, hash: Option<u64>) -> Valu
     ])
 }
 
-/// The bytes of an output value: a file's string, or the bytes a
-/// [`bytes_value`] stands for (shared, not copied).
-pub(crate) fn file_bytes_shared(v: &phitex_defuse::Values, x: ValueId) -> std::sync::Arc<Vec<u8>> {
+/// The value standing for file bytes `b` ([`linked_files`]).
+#[cfg(test)]
+fn bytes_value(v: &phitex_defuse::Values, b: Vec<u8>, hash: Option<u64>) -> ValueId {
+    let h = hash.unwrap_or_else(|| phitex_defuse::hash_bytes(0x6c69_6e6b_6564, &b));
+    let n = b.len();
+    file_value(v, File::Bytes(std::sync::Arc::new(b)), h, n)
+}
+
+/// What an output value stands for ([`file_of`]).
+enum Found {
+    /// A file a [`file_value`] made.
+    File(File),
+    /// One no longer kept.
+    Gone,
+    /// None: the value is the file, as a string.
+    Str,
+}
+
+/// The file an output value stands for.
+fn file_of(v: &phitex_defuse::Values, x: ValueId) -> Found {
     if let phitex_defuse::Value::List(xs) = &*v.get(x)
         && xs.len() == 3
         && str_of(v, xs[0]) == "bytes"
@@ -131,14 +155,34 @@ pub(crate) fn file_bytes_shared(v: &phitex_defuse::Values, x: ValueId) -> std::s
             .iter()
             .find(|(i, _)| *i == v.instance())
             .and_then(|(_, m)| m.iter().find(|e| e.0 == h).map(|e| e.1.clone()))
-            .unwrap_or_default();
+            .map_or(Found::Gone, Found::File);
     }
-    std::sync::Arc::new(
-        str_of(v, x)
-            .chars()
-            .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
-            .collect(),
-    )
+    Found::Str
+}
+
+/// The bytes of an output value: a file's string, or the bytes a
+/// [`file_value`] stands for (shared, not copied; a layout's exact file).
+pub(crate) fn file_bytes_shared(v: &phitex_defuse::Values, x: ValueId) -> std::sync::Arc<Vec<u8>> {
+    match file_of(v, x) {
+        Found::File(File::Bytes(b)) => b,
+        Found::File(File::Layout(l)) => l.exact().unwrap_or_default(),
+        Found::Gone => std::sync::Arc::default(),
+        Found::Str => std::sync::Arc::new(
+            str_of(v, x)
+                .chars()
+                .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
+                .collect(),
+        ),
+    }
+}
+
+/// The PDF file's layout an output value stands for (none: a DVI file,
+/// or no file).
+pub(crate) fn file_layout(v: &phitex_defuse::Values, x: ValueId) -> Option<phitex_pdf::Layout> {
+    match file_of(v, x) {
+        Found::File(File::Layout(l)) => Some(l),
+        _ => None,
+    }
 }
 
 /// The format pdfTeX fixed at the first `\shipout` (`fix_pdfoutput`):
@@ -148,15 +192,19 @@ pub(crate) fn file_bytes_shared(v: &phitex_defuse::Values, x: ValueId) -> std::s
 /// (`pages[0][3][0]`), read through a path, so the reader depends on it
 /// alone (no page: not).
 fn pdf_mode(cx: &mut Ctx<'_>) -> Result<bool, Stop> {
-    use phitex_defuse::Step;
     let v = cx.values();
-    let p = cx.path(&[Step::Index(0), Step::Index(3), Step::Index(0)]);
-    // (up to this node, as `acc_range` reads: a fold to the unit's end
-    // would wait on the end node, which waits on this one)
-    let me = cx.node();
-    Ok(cx
-        .fold_path(v.field("pages"), None, Some(me), p)?
-        .is_some_and(|x| v.as_int(x).is_some_and(|n| n != 0)))
+    // (the first page's entry: the first contribution, not the fold of
+    // them all, which an edit would join again)
+    let t0 = std::time::Instant::now();
+    let first = cx.next_contribution(v.field("pages"), None)?;
+    let r = first
+        .and_then(|(_, x)| v.seq_nth(x, 0))
+        .map(|e| list_of(v, e))
+        .and_then(|xs| xs.get(3).map(|&p| list_of(v, p)))
+        .and_then(|ps| ps.first().copied())
+        .is_some_and(|x| v.as_int(x).is_some_and(|n| n != 0));
+    crate::timeline::note("pdf mode (the first page)", t0.elapsed());
+    Ok(r)
 }
 
 /// The link's run (spec-redesign §1, `link`): in exact PDF mode the file
@@ -368,7 +416,7 @@ fn font_numbers(
     let mut order: Vec<i64> = field(cx, crate::api::FONT_ORDER)?
         .map(|x| list_of(v, x).iter().map(|&k| int_of(v, k)).collect())
         .unwrap_or_default();
-    let line = v.seq_to_vec(cx.fold(v.field(crate::pdfout::XPAGES), None, None)?);
+    let line = crate::val::cat_to_vec(v, cx.fold(v.field(crate::pdfout::XPAGES), None, None)?);
     for x in crate::pdfout::order_line(v, &line) {
         if let Some(k) = crate::pdfout::fontload_key(v, x)
             && !order.contains(&k)
@@ -483,8 +531,8 @@ fn dvi_page(
 /// page 1's objects, then `B`'s object.
 /// The line's and the pieces' items' last walks ([`pdf_exact`]).
 type LineMemos = (
-    crate::val::SeqMemo<ValueId>,
-    crate::val::SeqMemo<(i64, ValueId)>,
+    crate::val::CatMemo<ValueId>,
+    crate::val::CatMemo<(i64, ValueId)>,
 );
 static LINE_MEMO: std::sync::OnceLock<std::sync::Mutex<LineMemos>> = std::sync::OnceLock::new();
 
@@ -498,7 +546,7 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     // left as they were are not decoded again)
     let memo = LINE_MEMO.get_or_init(Default::default);
     let line_seq = cx.fold(v.field(crate::pdfout::XPAGES), None, None)?;
-    let items_seq = cx.fold(v.field(crate::pages::PITEMS), None, None)?;
+    let items_seq = cx.fold(v.field(crate::pages::LINK_ITEMS), None, None)?;
     crate::timeline::note("link: the line read: the folds", t0.elapsed());
     let (line, items) = {
         let mut g = memo.locked();
@@ -575,6 +623,7 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     for (msg, node) in &l.errors {
         let e = v.list(vec![v.str("error"), v.str(msg), v.int(-1)]);
         cx.contribute(v.field("log"), v.seq_unit(e));
+        cx.contribute(v.field(crate::run::LOG_ERRORS), v.int(1));
         let d = v.list(vec![
             v.int(1),
             v.str(&format!(
@@ -600,7 +649,13 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     // (one list, made once: not a sequence grown page by page)
     let shown = v.list(l.shown.iter().map(|&h| v.int(i64::from_ne_bytes(h.to_ne_bytes()))).collect());
     cx.contribute(v.field(crate::pdfout::SHOWN), v.seq_unit(shown));
-    let x = bytes_value(v, l.file, l.hash);
+    let x = match l.layout {
+        Some(lay) => {
+            let n = lay.len();
+            file_value(v, File::Layout(lay), l.hash.unwrap_or(0), n)
+        }
+        None => v.str(""),
+    };
     {
         use crate::timeline::note;
         note("link: the line read", t_acc);

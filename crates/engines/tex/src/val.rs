@@ -1633,101 +1633,161 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
     out
 }
 
-/// A sequence's elements mapped by a function, kept per rope node of
-/// [`SeqMemo::MIN`] elements or more and per element ([`SeqMemo::walk`]):
-/// a sequence that shares most of its rope, or its elements, with those
-/// walked before maps only what it does not share. The nodes and elements
-/// stay kept across walks (an edit's path down a node kept whole before
-/// finds its children kept too), pruned to the last walk's once they
-/// outgrow it.
-pub(crate) struct SeqMemo<T> {
+/// The tag of [`CatMonoid`]'s pairs.
+const CAT: &str = "\u{1}cat";
+
+/// A fold whose combination is a pair (`[CAT, a, b]`), not a sequence's
+/// join: an accumulator the link alone reads whole, which an edit folds
+/// again over every segment (a rope's join each, ~3 µs: a whole line's
+/// fold of some thousand segments, ms; a pair, a value made). Its
+/// contributions are the elements themselves (no sequence of one), read
+/// with [`cat_to_vec`] or walked with a [`CatMemo`].
+pub(crate) struct CatMonoid;
+
+impl phitex_defuse::Monoid for CatMonoid {
+    fn empty(&self, _: &Values) -> ValueId {
+        ValueId::NIL
+    }
+
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        if a == ValueId::NIL {
+            b
+        } else if b == ValueId::NIL {
+            a
+        } else {
+            v.list(vec![v.str(CAT), a, b])
+        }
+    }
+}
+
+/// A [`CatMonoid`] pair's two sides (`tag`: `v.str(CAT)`).
+fn cat_pair(v: &Values, tag: ValueId, x: ValueId) -> Option<(ValueId, ValueId)> {
+    v.with_list(x, |xs| match xs {
+        [t, a, b] if *t == tag => Some((*a, *b)),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// A [`CatMonoid`] fold's elements in order.
+pub(crate) fn cat_to_vec(v: &Values, x: ValueId) -> Vec<ValueId> {
+    let tag = v.str(CAT);
+    let mut out = Vec::new();
+    let mut stack = vec![x];
+    while let Some(x) = stack.pop() {
+        if x == ValueId::NIL {
+            continue;
+        }
+        match cat_pair(v, tag, x) {
+            Some((a, b)) => {
+                stack.push(b);
+                stack.push(a);
+            }
+            None => out.push(x),
+        }
+    }
+    out
+}
+
+/// A [`CatMonoid`] fold's elements mapped by a function, from the last
+/// walk's: a fold is the pairs of its segments' sums, each pair on the
+/// last one (`[[[s1, s2], s3], s4]`), so an edit's fold shares the pairs
+/// below the first segment it changed. The walk goes down from the top
+/// to a pair the last walk met (its elements before it are the last
+/// walk's first ones), mapping the sums above it, each kept by its value.
+pub(crate) struct CatMemo<T> {
     inst: u64,
-    nodes: FxHashMap<ValueId, std::sync::Arc<[T]>>,
+    /// The pairs down the left side of the last walk's fold, each with
+    /// the count of elements under it.
+    spine: FxHashMap<ValueId, usize>,
+    /// The last walk's elements.
+    out: Vec<T>,
+    /// A segment's sum mapped, by value.
+    sums: FxHashMap<ValueId, std::sync::Arc<[T]>>,
     elems: FxHashMap<ValueId, Option<T>>,
 }
 
-impl<T> Default for SeqMemo<T> {
+impl<T> Default for CatMemo<T> {
     fn default() -> Self {
-        SeqMemo {
+        CatMemo {
             inst: 0,
-            nodes: FxHashMap::default(),
+            spine: FxHashMap::default(),
+            out: Vec::new(),
+            sums: FxHashMap::default(),
             elems: FxHashMap::default(),
         }
     }
 }
 
-impl<T: Clone> SeqMemo<T> {
-    const MIN: usize = 64;
-
-    /// The elements of sequence `s` mapped by `f` (`None`: left out),
-    /// in order; `f` must be a function of the element alone.
+impl<T: Clone> CatMemo<T> {
+    /// The elements of fold `x` mapped by `f` (`None`: left out), in
+    /// order; `f` must be a function of the element alone.
     pub(crate) fn walk(
         &mut self,
         v: &Values,
-        s: ValueId,
+        x: ValueId,
         f: impl Fn(ValueId) -> Option<T>,
     ) -> Vec<T> {
         if self.inst != v.instance() {
-            self.nodes.clear();
-            self.elems.clear();
-            self.inst = v.instance();
+            *self = CatMemo {
+                inst: v.instance(),
+                ..CatMemo::default()
+            };
         }
-        let n = usize::try_from(v.seq_len(s)).unwrap_or(0);
-        let mut out = Vec::with_capacity(n);
-        // (the nodes and elements this walk met: what a prune keeps)
-        let mut met_nodes: Vec<ValueId> = Vec::new();
-        let mut met_elems = 0usize;
-        // (a node to walk, or one walked whose elements start at `Some`)
-        let mut stack = vec![(s, None)];
-        while let Some((x, start)) = stack.pop() {
-            if let Some(st) = start {
-                if out.len() - st >= Self::MIN {
-                    self.nodes.insert(x, std::sync::Arc::from(&out[st..]));
-                    met_nodes.push(x);
-                }
-                continue;
+        let tag = v.str(CAT);
+        // (down the left side to a pair the last walk met, or the end)
+        let mut above: Vec<(ValueId, ValueId)> = Vec::new();
+        let mut cur = x;
+        let base = loop {
+            if cur == ValueId::NIL {
+                break 0;
             }
-            if let Some(e) = self.nodes.get(&x) {
-                out.extend_from_slice(e);
-                met_nodes.push(x);
-                continue;
+            if let Some(&n) = self.spine.get(&cur) {
+                break n;
             }
-            match v.seq_split(x) {
-                Some(Ok(e)) => {
-                    met_elems += 1;
-                    let t = match self.elems.get(&e) {
-                        Some(t) => t.clone(),
-                        None => {
-                            let t = f(e);
-                            self.elems.insert(e, t.clone());
-                            t
-                        }
+            if let Some((a, b)) = cat_pair(v, tag, cur) {
+                above.push((cur, b));
+                cur = a;
+            } else {
+                above.push((cur, cur));
+                break 0;
+            }
+        };
+        self.out.truncate(base);
+        self.spine.retain(|_, n| *n <= base);
+        let mut met = 0usize;
+        for &(node, sum) in above.iter().rev() {
+            let m = if let Some(m) = self.sums.get(&sum) {
+                m.clone()
+            } else {
+                let mut m = Vec::new();
+                for e in cat_to_vec(v, sum) {
+                    met += 1;
+                    let t = if let Some(t) = self.elems.get(&e) {
+                        t.clone()
+                    } else {
+                        let t = f(e);
+                        self.elems.insert(e, t.clone());
+                        t
                     };
-                    out.extend(t);
+                    m.extend(t);
                 }
-                Some(Err((l, r))) => {
-                    stack.push((x, Some(out.len())));
-                    stack.push((r, None));
-                    stack.push((l, None));
-                }
-                None => {}
-            }
+                let m: std::sync::Arc<[T]> = m.into();
+                self.sums.insert(sum, m.clone());
+                m
+            };
+            self.out.extend_from_slice(&m);
+            self.spine.insert(node, self.out.len());
         }
-        // (pruned to this walk's own once grown past four times them;
-        // an element under a node kept is not looked at, so the elements
-        // go whole)
-        if self.nodes.len() > 4 * met_nodes.len() + 1024 {
-            let mut kept = FxHashMap::default();
-            for x in met_nodes {
-                if let Some(e) = self.nodes.remove(&x) {
-                    kept.insert(x, e);
-                }
-            }
-            self.nodes = kept;
+        // (the kept sums and elements dropped once grown past four times
+        // the fold's: mapped again where met)
+        if self.sums.len() > 4 * self.spine.len() + 1024 {
+            self.sums.clear();
         }
-        if self.elems.len() > 4 * (met_elems + n) + 1024 {
+        if self.elems.len() > 4 * (met + self.out.len()) + 1024 {
             self.elems.clear();
         }
-        out
+        self.out.clone()
     }
 }
+

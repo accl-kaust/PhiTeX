@@ -39,7 +39,7 @@ pub struct Chunk {
 /// [`finish`] places the chunks by the prefix sums of their lengths.
 #[derive(Clone, Debug, Default)]
 pub struct PdfBytes {
-    chunks: Vec<Chunk>,
+    pub(crate) chunks: Vec<Chunk>,
     len: usize,
 }
 
@@ -113,8 +113,17 @@ pub fn finish(state: PdfState, bytes: &PdfBytes) -> Result<Vec<u8>, PdfError> {
 /// cross-reference section and the trailer.
 #[derive(Clone, Debug)]
 pub struct Tail {
-    st: PdfState,
-    root: usize,
+    pub(crate) st: PdfState,
+    pub(crate) root: usize,
+    /// Its objects' bytes, a chunk like a step's (shared: a tail kept
+    /// for an equal state is the same chunk).
+    pub(crate) chunk: Chunk,
+    /// What an update section's trailer says as the exact file's does
+    /// ([`crate::Updater`]): `/Info`'s number, `\pdftrailer`'s entries
+    /// and `/ID`.
+    pub(crate) info: Option<usize>,
+    pub(crate) extra: Arc<[u8]>,
+    pub(crate) id: Arc<[u8]>,
 }
 
 impl Tail {
@@ -126,31 +135,15 @@ impl Tail {
     /// # Errors
     /// `bytes` not the ones the state flushed.
     pub fn link(&self, bytes: &PdfBytes) -> Result<Vec<u8>, PdfError> {
-        self.link_hashed(bytes).map(|x| x.0)
-    }
-
-    /// [`Tail::link`] with a hash of the file's bytes, made from its
-    /// chunks' hashes (each chunk's hashed once, while a link keeps it:
-    /// an edit hashes its new chunks only).
-    ///
-    /// # Errors
-    /// As [`Tail::link`].
-    pub fn link_hashed(&self, bytes: &PdfBytes) -> Result<(Vec<u8>, u64), PdfError> {
-        let out = self.link_bytes(bytes)?;
-        let t0 = std::time::Instant::now();
-        let h = chunk_hashes(&bytes.chunks, &out[bytes.len..]);
-        if crate::phase::on() {
-            eprintln!("pdf tail link: hashed {:?}", t0.elapsed());
-        }
-        Ok((out, h))
+        self.link_bytes(bytes)
     }
 
     fn link_bytes(&self, bytes: &PdfBytes) -> Result<Vec<u8>, PdfError> {
         let t0 = std::time::Instant::now();
         let mut st = self.st.clone();
         let t_clone = t0.elapsed();
-        let tail = std::mem::take(&mut st.out);
-        let tail_objs = std::mem::take(&mut st.chunk_objs);
+        let tail = &self.chunk.bytes;
+        let tail_objs = &self.chunk.objs;
         if bytes.chunks.len() != st.flushes || st.base != 0 {
             return Err(PdfError::Unsupported(
                 "finish: the bytes are not the ones the state flushed".into(),
@@ -184,7 +177,7 @@ impl Tail {
         for c in &bytes.chunks {
             out.extend_from_slice(&c.bytes);
         }
-        out.extend_from_slice(&tail);
+        out.extend_from_slice(tail);
         out.extend_from_slice(&end);
         if crate::phase::on() {
             eprintln!(
@@ -201,7 +194,7 @@ impl Tail {
 }
 
 /// A hash of bytes, a word at a time.
-fn hash64(b: &[u8]) -> u64 {
+pub(crate) fn hash64(b: &[u8]) -> u64 {
     let mut h = 0x243f_6a88_85a3_08d3u64 ^ b.len() as u64;
     let (words, rest) = b.as_chunks::<8>();
     for w in words {
@@ -213,34 +206,6 @@ fn hash64(b: &[u8]) -> u64 {
         h = (h ^ u64::from(c)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     }
     h
-}
-
-/// The file's hash from its chunks' and the rest's (`tail`): each chunk's
-/// hash kept by its bytes' address while a link has it.
-fn chunk_hashes(chunks: &[Chunk], tail: &[u8]) -> u64 {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock, PoisonError};
-    type Memo = Mutex<HashMap<usize, (Arc<[u8]>, u64)>>;
-    static MEMO: OnceLock<Memo> = OnceLock::new();
-    let mut m = MEMO
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    let mut kept = HashMap::with_capacity(chunks.len());
-    let mut hs = Vec::with_capacity(chunks.len() + 1);
-    for c in chunks {
-        let k = c.bytes.as_ptr() as usize;
-        let h = match m.remove(&k) {
-            Some((a, h)) if Arc::ptr_eq(&a, &c.bytes) => h,
-            _ => hash64(&c.bytes),
-        };
-        hs.push(h);
-        kept.insert(k, (c.bytes.clone(), h));
-    }
-    *m = kept;
-    hs.push(hash64(tail));
-    let words: Vec<u8> = hs.iter().flat_map(|h| h.to_le_bytes()).collect();
-    hash64(&words)
 }
 
 impl PdfState {
@@ -349,14 +314,34 @@ impl PdfState {
         if self.total_pages == 0 || self.fixed_draftmode != 0 {
             return Ok(None);
         }
-        let (root, _) = self.tail_objects()?;
+        let (root, info) = self.tail_objects()?;
         if self.os.enable {
             self.os_flush();
         }
         if let Some(e) = self.error.take() {
             return Err(e);
         }
-        Ok(Some(Tail { st: self, root }))
+        let chunk = Chunk {
+            bytes: std::mem::take(&mut self.out).into(),
+            objs: std::mem::take(&mut self.chunk_objs),
+        };
+        // (the trailer's entries as `xref` prints them: `/Info` the last
+        // object before the cross-reference section's)
+        let info = info.map(|_| self.sys_obj_ptr());
+        // (`print_toks_ln`'s bytes, the state left as it is)
+        let extra = match &self.trailer_toks {
+            Some(t) if !t.is_empty() => [&t[..], b"\n"].concat().into(),
+            _ => Arc::from(&b""[..]),
+        };
+        let id = self.id_bytes().into();
+        Ok(Some(Tail {
+            st: self,
+            root,
+            chunk,
+            info,
+            extra,
+            id,
+        }))
     }
 
     /// The cross-reference table or stream, the trailer and `startxref`,
@@ -465,17 +450,25 @@ impl PdfState {
 
     /// `print_ID` or `print_ID_alt`.
     fn print_id(&mut self) {
-        if let Some(t) = self.trailer_id_toks.take() {
+        let id = self.id_bytes();
+        self.print(&id);
+    }
+
+    /// What [`PdfState::print_id`] prints.
+    fn id_bytes(&self) -> Vec<u8> {
+        if let Some(t) = &self.trailer_id_toks {
             let s = t.split(|&c| c == 0).next().unwrap_or_default();
-            if !s.is_empty() {
+            if s.is_empty() {
+                Vec::new()
+            } else {
                 let id = md5_hex(s);
-                self.print(format!("/ID [<{id}> <{id}>]").as_bytes());
+                format!("/ID [<{id}> <{id}>]").into_bytes()
             }
         } else {
             let mut m = self.p.date.clone().into_bytes();
             m.extend_from_slice(self.p.output_file_name.as_bytes());
             let id = md5_hex(&m);
-            self.print(format!("/ID [<{id}> <{id}>]").as_bytes());
+            format!("/ID [<{id}> <{id}>]").into_bytes()
         }
     }
 

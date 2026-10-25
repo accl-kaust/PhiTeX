@@ -55,6 +55,11 @@ pub(crate) type R<T> = Result<T, Halt>;
 /// conditionals is sliced like the document): `[[if_limit, cur_if],
 /// ...]`, bottom first, read on first touch by the run that ends one
 /// ([`Run::load_cond_stack`]).
+/// The errors the log has (`! ...` lines: an error, an `\errmessage`),
+/// counted: a sum the build reads without the log
+/// (`crate::Build::error_lines`).
+pub(crate) const LOG_ERRORS: &str = "log:errors";
+
 pub(crate) const COND_STACK: &str = "cond:stack";
 
 /// The names of the files the job's streams write, one entry per stream
@@ -3433,9 +3438,10 @@ impl<'c, 'a> Run<'c, 'a> {
     /// defines ([`Run::interpret_line`]).
     fn contributed_since(&self, n: usize) -> bool {
         let log = self.v.field("log");
+        let errors = self.v.field(LOG_ERRORS);
         self.contribs
             .get(n..)
-            .is_some_and(|c| c.iter().any(|&(f, _)| f != log))
+            .is_some_and(|c| c.iter().any(|&(f, _)| f != log && f != errors))
     }
 
     /// File `name` is opened for writing: where the build keeps the
@@ -3742,6 +3748,10 @@ impl<'c, 'a> Run<'c, 'a> {
             .list(vec![self.v.str(kind), self.v.str(text), self.v.int(nl)]);
         let s = self.v.seq_unit(e);
         self.contribute("log", s);
+        if kind == "error" || kind == "errmsg" {
+            let one = self.v.int(1);
+            self.contribute(LOG_ERRORS, one);
+        }
         if stop {
             // §82: history is fatal_error_stop and the job ends
             let e = self.v.list(vec![
@@ -5054,7 +5064,7 @@ impl<'c, 'a> Run<'c, 'a> {
             let v = self.v;
             let x = crate::pages::page_out_value(v, fin.piece, fin.nth, out);
             self.cx.define_with(v.field(crate::pages::PAGE_OUT), x, Locality::Global);
-            self.cx.contribute(v.field(crate::pages::FIN_DONE), v.seq_unit(ValueId::UNIT));
+            self.cx.contribute(v.field(crate::pages::FIN_DONE), v.int(1));
         }
         if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
             let v = self.v;
