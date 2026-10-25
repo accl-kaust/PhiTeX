@@ -1090,8 +1090,26 @@ impl Engine {
             for rd in &r.reads {
                 let now = answer(self, node, &rd.kind, rd.path);
                 if now != rd.seen {
+                    let site = match &rd.kind {
+                        crate::node::ReadKind::Field { f, at: crate::node::Anchor::Me } => read::reaching_at(self, *f, n, false)
+                            .and_then(|r| r.by)
+                            .map_or(String::new(), |b| {
+                                let bn = self.node(b);
+                                format!(
+                                    " (by {} at {} seg {} serial {}; reader at {} seg {} serial {})",
+                                    b.raw(),
+                                    bn.pos_hint().0,
+                                    bn.seg_hint().0,
+                                    bn.serial.load(std::sync::atomic::Ordering::Relaxed),
+                                    node.pos_hint().0,
+                                    node.seg_hint().0,
+                                    node.serial.load(std::sync::atomic::Ordering::Relaxed)
+                                )
+                            }),
+                        _ => String::new(),
+                    };
                     out.push(format!(
-                        "node {} ({}) read {:?} path {} saw {} but now {}",
+                        "node {} ({}) read {:?} path {} saw {} but now {}{site}",
                         n.raw(),
                         self.op(node.op()).name(),
                         rd.kind,

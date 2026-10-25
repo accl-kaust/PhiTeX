@@ -144,7 +144,8 @@ fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, spare: &mut
 
 /// Index changes made under a segment's lock, applied after it: a reader
 /// that misses the entry meanwhile is put right by the walk that follows,
-/// or by its own commit's check of its reads.
+/// or by its own commit's check of its reads: each entry's field is
+/// counted again once the entry is in.
 #[derive(Default)]
 struct IndexOps {
     defs_add: Vec<Field>,
@@ -168,18 +169,22 @@ impl IndexOps {
     fn apply(self, eng: &Engine, seg: &Segment) {
         for f in self.defs_add {
             eng.defs.add(f, seg.lo, seg.id);
+            eng.bump(f);
         }
         for f in self.contribs_add {
             eng.contribs.add(f, seg.lo, seg.id);
+            eng.bump(f);
         }
         for f in self.readers_add {
             eng.readers.add(f, seg.lo, seg.id);
         }
         for f in self.defs_remove {
             eng.defs.remove(f, seg.lo, seg.id);
+            eng.bump(f);
         }
         for f in self.contribs_remove {
             eng.contribs.remove(f, seg.lo, seg.id);
+            eng.bump(f);
         }
     }
 }
@@ -565,6 +570,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         let mut removed: Vec<NodeId> = old_placed.iter().copied().filter(|n| !placed.contains(n)).collect();
         removed.extend(removed_kept);
+        // (a placement that relabelled the segment moved this node's label)
+        let pos = pos_in(&inner, node);
         // reads anchored here
         node.committing.store(true, Ordering::Release);
         for (f, r) in here_reads.drain(..) {

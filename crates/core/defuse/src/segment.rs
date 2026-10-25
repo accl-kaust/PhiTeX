@@ -756,7 +756,7 @@ impl Segment {
                 holes: up_holes,
             }),
         });
-        {
+        let moved: Vec<Field> = {
             let mut ni = new.inner.write();
             for f in &resum {
                 ni.resum(eng, *f);
@@ -774,7 +774,8 @@ impl Segment {
             for f in ni.readers.keys() {
                 eng.readers.add(*f, at, new_id);
             }
-        }
+            ni.defs.keys().chain(ni.contribs.keys()).copied().collect()
+        };
         for f in gone_defs {
             eng.defs.remove(f, self.lo, self.id);
         }
@@ -785,6 +786,11 @@ impl Segment {
             eng.readers.remove(f, self.lo, self.id);
         }
         eng.order.insert(at, new_id);
+        // (counted again once indexed and ordered: a read that took this
+        // segment for them before the split checks again)
+        for f in moved {
+            eng.bump(f);
+        }
         new
     }
 }
