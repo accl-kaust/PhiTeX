@@ -654,7 +654,9 @@ impl<'a> Builder<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create(&mut self, id: Id, text: Arc<Text>, u: u32, parent: Id, place: Place, depth: u32, pos: Pos) {
         let _t = super::core::prof::Span::new(31);
-        let st = if text.stat.fin { St::Held } else { St::Dirty };
+        // (A final node, as one made dirty: held past the evaluation's
+        // first round only, else it runs as it comes.)
+        let st = if text.stat.fin && self.core.hold_fin.load(std::sync::atomic::Ordering::Relaxed) { St::Held } else { St::Dirty };
         if self.core.marked_ops.read().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&text.op) {
             self.w.op_marked.insert(id, (), &NoMeasure);
         }
