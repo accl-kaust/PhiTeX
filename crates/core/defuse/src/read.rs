@@ -494,12 +494,7 @@ pub(crate) fn reader_answer(eng: &Engine, f: Field, r: &Reader) -> Option<ValueI
     through(eng, rc, r.path)
 }
 
-/// A range reader record's current answer.
-pub(crate) fn range_answer(eng: &Engine, f: Field, r: &RangeReader) -> Option<ValueId> {
-    range_answer_in(eng, f, r, &mut FoldMemo::new())
-}
-
-/// [`range_answer`], its folds from `memo`.
+/// A range reader record's current answer, its folds from `memo`.
 pub(crate) fn range_answer_in(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) -> Option<ValueId> {
     let me = eng.node(r.node);
     let from = match r.from {

@@ -586,12 +586,16 @@ impl Segment {
     /// A label strictly after `after` and before the next node (or `hi`);
     /// None when that gap is closed and the segment must relabel or split.
     pub(crate) fn gap_after(inner: &Inner, after: Pos) -> Option<Pos> {
-        let next = inner
-            .nodes
-            .range((Excluded(after), Unbounded))
-            .next()
-            .map_or(inner.hi, |(p, _)| *p);
-        (next.0 - after.0 >= 2).then(|| Pos(after.0 + (next.0 - after.0) / 2))
+        let next = inner.nodes.range((Excluded(after), Unbounded)).next().map(|(p, _)| *p);
+        // (after the last node a push's step, not half the rest: nodes
+        // placed at a segment's end one after another, as a chain of
+        // steps is, would halve its labels at each, and each split of it
+        // halve them again)
+        let (next, step) = match next {
+            Some(q) => (q, (q.0 - after.0) / 2),
+            None => (inner.hi, ((inner.hi.0 - after.0) / 2).min(crate::order::GAP)),
+        };
+        (next.0 - after.0 >= 2 && step >= 1).then(|| Pos(after.0 + step))
     }
 
     /// A label strictly before `before` and after the previous node (or
@@ -636,9 +640,43 @@ impl Segment {
     /// definitions, readers, contributions, sums, range readers and by-op
     /// entries; `hi` shrinks to the median. The new segment is registered
     /// in the order and the field indexes before this returns.
+    ///
+    /// The lower half is relabelled first a push's step apart from `lo`
+    /// (or closer, to fit before the median) and the new segment starts
+    /// right after it: nodes placed at one spot, a chain of steps before
+    /// the unit's last nodes, fill the upper half, which keeps the rest
+    /// of the labels instead of half of them at every split.
     pub(crate) fn split(&self, inner: &mut Inner, eng: &Engine, new_id: SegId) -> Arc<Segment> {
-        let mid = *inner.nodes.keys().nth(inner.nodes.len() / 2).expect("a segment to split has nodes");
-        self.split_at(inner, eng, mid, new_id)
+        let k = inner.nodes.len() / 2;
+        let mid = *inner.nodes.keys().nth(k).expect("a segment to split has nodes");
+        let step = ((mid.0 - self.lo.0) / (k as u64 + 1)).min(crate::order::GAP);
+        if step < 2 {
+            return self.split_at(inner, eng, mid, new_id);
+        }
+        let lower: Vec<(Pos, NodeId)> = inner.nodes.range(..mid).map(|(p, n)| (*p, *n)).collect();
+        let mut map: FxHashMap<Pos, Pos> = FxHashMap::default();
+        for (i, (p, id)) in lower.iter().enumerate() {
+            let np = Pos(self.lo.0 + (i as u64 + 1) * step);
+            if np != *p {
+                map.insert(*p, np);
+                inner.nodes.remove(p);
+                eng.node(*id).pos.store(np.0, Ordering::Release);
+            }
+        }
+        for (p, id) in &lower {
+            if let Some(&np) = map.get(p) {
+                inner.nodes.insert(np, *id);
+            }
+        }
+        if !map.is_empty() {
+            for m in inner.defs.values_mut() {
+                m.rekey(&map);
+            }
+            for m in inner.contribs.values_mut() {
+                m.rekey(&map);
+            }
+        }
+        self.split_at(inner, eng, Pos(self.lo.0 + (k as u64 + 1) * step), new_id)
     }
 
     /// `split`, at label `at`: the new segment is `[at, hi)`.
