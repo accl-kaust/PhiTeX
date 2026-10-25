@@ -509,17 +509,24 @@ impl Session {
         status: Arc<Status>,
         note: &mut dyn FnMut(&str),
     ) -> Result<Session, String> {
-        let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
-        phitex_tex::timeline::lap("session: the main file read");
-        let text = Arc::from(tex::chars_owned(text));
-        phitex_tex::timeline::lap("session: its characters");
         // (the `ls-R` databases kept in the cache: read, not parsed, by
         // the next process while they are unchanged)
         phitex_kpse::set_db_cache(Some(tex::cache_dir().join("kpse")));
-        let tree = Arc::new(tex::Tree::open(&job.engine));
-        phitex_tex::timeline::lap("session: kpathsea opened (texmf.cnf, ls-R)");
-        let format_tree = Arc::new(tex::Tree::open_format(&job.engine));
-        phitex_tex::timeline::lap("session: kpathsea opened for the format (texmf.cnf)");
+        // (kpathsea opened for the job and for the format on threads of
+        // their own while the main file is read)
+        let (text, tree, format_tree) = std::thread::scope(|s| {
+            let tree = s.spawn(|| Arc::new(tex::Tree::open(&job.engine)));
+            let format_tree = s.spawn(|| Arc::new(tex::Tree::open_format(&job.engine)));
+            let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()));
+            phitex_tex::timeline::lap("session: the main file read");
+            let text = text.map(|t| Arc::<str>::from(tex::chars_owned(t)));
+            phitex_tex::timeline::lap("session: its characters");
+            let tree = tree.join().expect("kpathsea opened");
+            let format_tree = format_tree.join().expect("kpathsea opened for the format");
+            phitex_tex::timeline::lap("session: kpathsea opened (texmf.cnf, ls-R; the format's)");
+            (text, tree, format_tree)
+        });
+        let text = text?;
         let cache = Cache::open(job.cache_limit).ok();
         phitex_tex::timeline::lap("session: the cache opened");
         if let Some(c) = &cache
