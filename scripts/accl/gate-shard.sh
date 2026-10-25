@@ -94,7 +94,7 @@ update() {
   (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 \
     timeout 3000 python3 -I scripts/accl/gate-update.py "$bin" "$w/$dir" "$main" "$j" "$n" "$j" "$r/$label.json" "$w/$dir-pairs" "$@" --program pdftex) >> "$out" 2>&1
   grep -q '"verdict": "same"' "$r/$label.json" 2>/dev/null || red "$label: $(python3 -c "import json;print(json.load(open('$r/$label.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
-  if (cd crates/output/pdf && PHITEX_UPDATE_PAIRS="$w/$dir-pairs" timeout 1800 "$w/bin/tests/update" --exact harness_pairs --nocapture > "$r/$label-read.txt" 2>&1); then
+  if (cd crates/output/pdf && PHITEX_UPDATE_PAIRS="$w/$dir-pairs" timeout 1800 "$w/bin/update" --exact harness_pairs --nocapture > "$r/$label-read.txt" 2>&1); then
     grep '^harness_pairs' "$r/$label-read.txt" | sed "s/^/  $label: /" >> "$out"
   else
     red "$label: the update files read back ($(grep -m1 -E 'panicked|differs|error' "$r/$label-read.txt" | cut -c1-160))"
@@ -227,7 +227,7 @@ case $shard in
     for s in latex $SUITES; do a+=(--test "$s"); done
     # (and the PDF writer's update test, which reads back a watch's
     # update files: the para and big shards run it on theirs)
-    ( { $T "${a[@]}" --no-run --message-format=json-render-diagnostics && cargo test --profile fastdev -p phitex-pdf --test update --no-run --message-format=json-render-diagnostics; } > "$r/build-tests.json" 2> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
+    ( { $T "${a[@]}" --no-run --message-format=json-render-diagnostics && { [ ! -f crates/output/pdf/tests/update.rs ] || cargo test --profile fastdev -p phitex-pdf --test update --no-run --message-format=json-render-diagnostics; }; } > "$r/build-tests.json" 2> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
     # (three CLIs: the checks' (profile and observe: CHECK_READS, the
     # recordings, amsldoc), the timings' (profile: the acct lines without
     # the engine's recorder) and the users' (no feature))

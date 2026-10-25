@@ -116,9 +116,14 @@ def main():
         open(tmp, "w", encoding="latin-1").write(t)
         os.replace(tmp, path)
 
+    # (the words an edit may replace, found once: a word replaced by one
+    # of its length leaves them where they are; an insert finds them anew)
+    cands = []
+
     def edit(k, ins):
         nonlocal text
         if ins:
+            cands.clear()
             # (a paragraph of words inserted after a blank line: the
             # pages after it move)
             spots = [m.end() for m in re.finditer(r"\n\n", text)]
@@ -128,8 +133,13 @@ def main():
                              for _ in range(rng.randint(40, 120)))
             text = text[:at] + words + ".\n\n" + text[at:]
         else:
-            at, w = rng.choice(candidates(text))
-            text = text[:at] + other(w, rng) + text[at + len(w):]
+            if not cands:
+                cands.extend(candidates(text))
+            i = rng.randrange(len(cands))
+            at, w = cands[i]
+            x = other(w, rng)
+            cands[i] = (at, x)
+            text = text[:at] + x + text[at + len(w):]
         save(text)
 
     for k in range(1, n + 1):
@@ -165,6 +175,12 @@ def main():
                 break
             res["burst_walls_ms"].append(round(ev.get("wall_ms", 0), 3))
             res["burst_section_bytes"].append(os.path.getsize(pdf) - before)
+            if os.path.getsize(pdf) < before:
+                # (an idle write came within the burst: the file is no
+                # longer the one before it with sections appended)
+                res["burst_idle_write"] = True
+        if res.get("burst_idle_write"):
+            os.remove(os.path.join(pairs, f"{k}.before.pdf"))
         if ev is not None:
             shutil.copyfile(pdf, os.path.join(pairs, f"{k}.update.pdf"))
             open(os.path.join(pairs, f"{k}.tex"), "w", encoding="latin-1").write(text)

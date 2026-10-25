@@ -441,6 +441,39 @@ pub struct Session {
     /// The PDF file written as update sections (a watch's, but with
     /// `--exact`): what it holds ([`UpdateFile`]).
     pub updates: Option<Arc<Mutex<UpdateFile>>>,
+    /// The main text's lines counted by block ([`LineMarks`]).
+    lines: LineMarks,
+}
+
+/// The lines before each block of [`LineMarks::BLOCK`] bytes of the
+/// last text counted, those of the blocks an edit left as they were
+/// kept: an edit's first changed line counted from its block's start,
+/// not from the text's.
+#[derive(Default)]
+struct LineMarks {
+    /// The lines before block `k`'s start, for the first blocks.
+    marks: Vec<usize>,
+}
+
+impl LineMarks {
+    const BLOCK: usize = 1 << 20;
+
+    /// The lines before byte `n` of `t`, whose bytes before `n` are the
+    /// last text's (an edit's first change at `n`); the blocks from `n`
+    /// on forgotten.
+    fn before(&mut self, t: &str, n: usize) -> usize {
+        let k = n / Self::BLOCK;
+        while self.marks.len() <= k {
+            let j = self.marks.len();
+            let m = match j.checked_sub(1) {
+                Some(i) => self.marks[i] + newlines(&t.as_bytes()[i * Self::BLOCK..j * Self::BLOCK]),
+                None => 0,
+            };
+            self.marks.push(m);
+        }
+        self.marks.truncate(k + 1);
+        self.marks[k] + newlines(&t.as_bytes()[k * Self::BLOCK..n])
+    }
 }
 
 /// The PDF file a watch writes: the exact file, then an update section
@@ -617,6 +650,7 @@ impl Session {
             absorbed_at: None,
             watching: false,
             updates: None,
+            lines: LineMarks::default(),
         })
     }
 
@@ -708,7 +742,7 @@ impl Session {
             )
         });
         let mut edit_line = ends.as_ref().and_then(|(old, (p, _))| {
-            (old.len() != text.len() || *p < old.len()).then(|| lines_before(&text, *p) + 1)
+            (old.len() != text.len() || *p < old.len()).then(|| self.lines.before(&text, *p) + 1)
         });
         phitex_tex::timeline::lap("session: the first changed line (texts compared)");
         let changed = std::mem::take(&mut self.changed);
@@ -873,6 +907,7 @@ impl Session {
                 .as_deref()
                 .and_then(|old| first_difference_line(old, &t));
             text = t;
+            self.lines = LineMarks::default();
             self.absorbed_at = Some(came);
             self.text.clone_from(&text);
         }
@@ -1818,9 +1853,9 @@ fn same_text(a: &Arc<str>, b: &Arc<str>) -> bool {
     Arc::ptr_eq(a, b) || a == b
 }
 
-/// The line ends in the first `n` bytes of `t`, eight bytes at a time.
-fn lines_before(t: &str, n: usize) -> usize {
-    let (words, rest) = t.as_bytes()[..n].as_chunks::<8>();
+/// The line ends in `b`, eight bytes at a time.
+fn newlines(b: &[u8]) -> usize {
+    let (words, rest) = b.as_chunks::<8>();
     let mut c = 0usize;
     for w in words {
         let v = u64::from_ne_bytes(*w) ^ 0x0a0a_0a0a_0a0a_0a0a;
