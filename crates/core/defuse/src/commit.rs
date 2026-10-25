@@ -472,7 +472,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let Some((seg, mut inner)) = own_write(eng, node) else {
             return st;
         };
-        if node.state() == State::Inert {
+        if node.taken() {
             return st;
         }
         if Segment::needs_split(&inner) {
@@ -1638,16 +1638,15 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
                     continue;
                 }
                 if k < want {
-                    if s.state() != State::Inert {
-                        let hole = s.is_hole();
-                        s.set_state(State::Inert);
+                    let hole = s.is_hole();
+                    if s.take() {
                         if s.committed() {
                             retracts.push(s.clone());
                         } else if hole {
                             taken_holes.push(s.clone());
                         }
                     }
-                } else if s.state() == State::Inert {
+                } else if s.taken() {
                     releases.push(s.clone());
                 } else {
                     inner.holes = inner.holes.saturating_sub(taken_holes.len() - before);
@@ -1669,7 +1668,7 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
     }
     eng.note_stats(w, &st);
     for s in releases {
-        if s.cas_state(State::Inert, State::Dirty) {
+        if s.release() {
             enqueue(
                 eng,
                 w,

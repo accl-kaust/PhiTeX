@@ -25,6 +25,11 @@ pub(crate) enum State {
     Inert = 4,
     /// Removed: unfiled, never run again.
     Gone = 5,
+    /// Taken by a claim while a run of it is in progress: its reads return
+    /// `Stop`, its commit files nothing, and its worker makes it `Inert`;
+    /// given back meanwhile, it is `RunningDirty`, run again by that worker,
+    /// never by a second one beside it.
+    RunningInert = 6,
 }
 
 pub(crate) struct Node {
@@ -118,6 +123,7 @@ impl Node {
             2 => State::Running,
             3 => State::RunningDirty,
             4 => State::Inert,
+            6 => State::RunningInert,
             _ => State::Gone,
         }
     }
@@ -130,6 +136,49 @@ impl Node {
 
     pub(crate) fn set_state(&self, s: State) {
         self.state.store(s as u8, Ordering::Release);
+    }
+
+    /// Taken by a claim (`Inert`, or `RunningInert` while a run is in
+    /// progress).
+    pub(crate) fn taken(&self) -> bool {
+        matches!(self.state(), State::Inert | State::RunningInert)
+    }
+
+    /// Takes it for a claim: `Inert`, or `RunningInert` while a run of it is
+    /// in progress (that run's worker holds its count of the outstanding
+    /// nodes). False if it was taken or gone already.
+    pub(crate) fn take(&self) -> bool {
+        loop {
+            let (from, to) = match self.state() {
+                s @ (State::Clean | State::Dirty) => (s, State::Inert),
+                s @ (State::Running | State::RunningDirty) => (s, State::RunningInert),
+                State::Inert | State::RunningInert | State::Gone => return false,
+            };
+            if self.cas_state(from, to) {
+                return true;
+            }
+        }
+    }
+
+    /// Gives it back from a claim: true when it is `Dirty` now and the
+    /// caller queues it; a run still in progress is made `RunningDirty`
+    /// instead, for its worker to queue once it ends.
+    pub(crate) fn release(&self) -> bool {
+        loop {
+            match self.state() {
+                State::Inert => {
+                    if self.cas_state(State::Inert, State::Dirty) {
+                        return true;
+                    }
+                }
+                State::RunningInert => {
+                    if self.cas_state(State::RunningInert, State::RunningDirty) {
+                        return false;
+                    }
+                }
+                State::Clean | State::Dirty | State::Running | State::RunningDirty | State::Gone => return false,
+            }
+        }
     }
 
     pub(crate) fn seg_hint(&self) -> SegId {

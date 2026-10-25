@@ -96,7 +96,7 @@ impl<'a> Ctx<'a> {
     /// `Err(Stop)` once a commit has refuted a read of this run.
     fn check(&self) -> Result<(), Stop> {
         match self.me.state() {
-            State::RunningDirty | State::Inert | State::Gone => Err(stop()),
+            State::RunningDirty | State::Inert | State::RunningInert | State::Gone => Err(stop()),
             State::Clean | State::Dirty | State::Running => Ok(()),
         }
     }

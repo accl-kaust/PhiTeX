@@ -638,7 +638,7 @@ pub(crate) fn mark_dirty(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
                     return true;
                 }
             }
-            State::Dirty | State::RunningDirty | State::Inert | State::Gone => return false,
+            State::Dirty | State::RunningDirty | State::Inert | State::RunningInert | State::Gone => return false,
         }
     }
 }
@@ -730,23 +730,7 @@ pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(
         }
         Ok(Err(_stop)) => {
             drop(cx);
-            loop {
-                match node.state() {
-                    State::Running | State::RunningDirty => {
-                        let from = node.state();
-                        if node.cas_state(from, State::Dirty) {
-                            w.local.push(n);
-                            w.shared.wake_one();
-                            break;
-                        }
-                    }
-                    State::Inert | State::Gone => {
-                        pool.shared.done_one();
-                        break;
-                    }
-                    State::Clean | State::Dirty => break,
-                }
-            }
+            end_run(pool, w, node, State::Dirty);
             Ok(())
         }
         Ok(Ok(out)) => {
@@ -763,33 +747,44 @@ pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(
             node.done_ns.store(done, Ordering::Relaxed);
             w.last_commit.store(n.raw(), Ordering::Relaxed);
             w.last_done.store(done, Ordering::Relaxed);
-            loop {
-                match node.state() {
-                    State::Running => {
-                        if node.cas_state(State::Running, State::Clean) {
-                            node.committing.store(false, Ordering::Release);
-                            eng.note_settled(node, out);
-                            pool.shared.done_one();
-                            break;
-                        }
-                    }
-                    State::RunningDirty => {
-                        if node.cas_state(State::RunningDirty, State::Dirty) {
-                            node.committing.store(false, Ordering::Release);
-                            w.local.push(n);
-                            w.shared.wake_one();
-                            break;
-                        }
-                    }
-                    State::Inert | State::Gone => {
-                        node.committing.store(false, Ordering::Release);
-                        pool.shared.done_one();
-                        break;
-                    }
-                    State::Clean | State::Dirty => break,
-                }
+            if end_run(pool, w, node, State::Clean) {
+                eng.note_settled(node, out);
             }
             Ok(())
         }
+    }
+}
+
+/// The end of a run on `w`: `Running` becomes `done` (`Clean` after a
+/// commit, `Dirty` and queued again after a `Stop`), `RunningDirty` is
+/// queued again, `RunningInert` (taken meanwhile) becomes `Inert`. The run
+/// held one count of the outstanding nodes: it goes with the node queued
+/// again, or is given up here, whatever state the node is found in.
+/// Whether the node ended `Clean`. Its commit's `committing` is cleared
+/// after the state is: a walk meanwhile marks it as `mark_dirty` does.
+fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
+    loop {
+        let (from, to) = match node.state() {
+            State::Running => (State::Running, done),
+            State::RunningDirty => (State::RunningDirty, State::Dirty),
+            State::RunningInert => (State::RunningInert, State::Inert),
+            // (removed meanwhile; nothing else leaves a run's states)
+            State::Gone | State::Inert | State::Clean | State::Dirty => {
+                node.committing.store(false, Ordering::Release);
+                pool.shared.done_one();
+                return false;
+            }
+        };
+        if !node.cas_state(from, to) {
+            continue;
+        }
+        node.committing.store(false, Ordering::Release);
+        if to == State::Dirty {
+            w.local.push(node.id);
+            w.shared.wake_one();
+        } else {
+            pool.shared.done_one();
+        }
+        return to == State::Clean;
     }
 }

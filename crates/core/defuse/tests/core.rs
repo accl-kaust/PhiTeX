@@ -709,3 +709,73 @@ fn many_pushed_at_once_are_as_pushed_one_by_one() {
     assert_eq!(e.output(last), Some(v.int(-1)));
     assert!(e.check_invariants().is_empty());
 }
+
+/// `[k, ms]`: reads k (an integer; none: 0), spins `ms` milliseconds, then
+/// claims that many siblings; outputs k.
+struct ClaimK;
+
+impl Operation for ClaimK {
+    fn name(&self) -> &'static str {
+        "claim_k"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let k = Field(cx.args()[0]);
+        let n = cx.read(k)?.and_then(|x| cx.values().as_int(x)).unwrap_or(0);
+        spin(Duration::from_millis(cx.values().as_int(cx.args()[1]).unwrap() as u64));
+        cx.claim(n as usize);
+        Ok(cx.values().int(n))
+    }
+}
+
+/// `[f, v, ms]`: spins `ms` milliseconds, then defines f = v; outputs v.
+struct SlowDef;
+
+impl Operation for SlowDef {
+    fn name(&self) -> &'static str {
+        "slow_def"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let (f, x) = (Field(cx.args()[0]), cx.args()[1]);
+        spin(Duration::from_millis(cx.values().as_int(cx.args()[2]).unwrap() as u64));
+        cx.define(f, x);
+        Ok(x)
+    }
+}
+
+/// Runs `e.evaluate(n)` on a thread of its own: None when it has not
+/// returned in `limit` (the thread is left behind).
+fn evaluate_within(e: &Arc<Engine>, n: usize, limit: Duration) -> Option<Report> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = e.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(e.evaluate(n).unwrap());
+    });
+    rx.recv_timeout(limit).ok()
+}
+
+#[test]
+fn a_sibling_released_while_it_runs_ends_the_evaluation() {
+    // A claimer takes the sibling after it while that one runs, then, run
+    // again on a definition that lands later, gives it back while its
+    // first run is still going: the sibling runs once more, and the
+    // evaluation ends.
+    let (e, o) = engine();
+    let e = Arc::new(e);
+    let claim_k = e.register(Arc::new(ClaimK));
+    let slow_def = e.register(Arc::new(SlowDef));
+    let v = e.values();
+    let k = f(v, "k");
+    e.set_environment([(Field(k), v.int(1))]);
+    let u = e.new_unit();
+    e.push(u, o.work, vec![v.int(0)]);
+    e.push(u, slow_def, vec![k, v.int(0), v.int(40)]);
+    let c = e.push(u, claim_k, vec![k, v.int(10)]);
+    let s = e.push(u, o.work, vec![v.int(150_000)]);
+    let r = evaluate_within(&e, 4, Duration::from_secs(10));
+    assert!(r.is_some(), "the evaluation ends");
+    assert_eq!(int(&e, c), 0);
+    assert_eq!(e.node_info(s).unwrap().state, NodeState::Done);
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

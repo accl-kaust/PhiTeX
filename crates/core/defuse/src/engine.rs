@@ -592,7 +592,7 @@ impl Engine {
                 let mut found = None;
                 for (_, id) in inner.nodes.range((std::ops::Bound::Unbounded, hi)).rev() {
                     let s = self.node(*id);
-                    if s.parent.is_some() || s.state() == State::Gone || s.state() == State::Inert {
+                    if s.parent.is_some() || s.state() == State::Gone || s.taken() {
                         continue;
                     }
                     found = Some(s.clone());
@@ -637,7 +637,7 @@ impl Engine {
         settle_predictions(self, None, node, &mut st);
         self.note_stats(None, &st);
         self.wake_claimer(near);
-        if near.state() == State::Inert {
+        if near.taken() {
             self.wake_claimer(node);
         }
         node.id
@@ -703,7 +703,7 @@ impl Engine {
         }
         *n.text.write() = args.into();
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
-        if n.state() == State::Inert {
+        if n.taken() {
             self.wake_claimer(n);
             return;
         }
@@ -722,7 +722,7 @@ impl Engine {
     /// Removes a node and its placements (`commit::unfile`).
     pub fn remove(&self, node: NodeId) {
         let n = self.node(node);
-        let was_inert = n.state() == State::Inert;
+        let was_inert = n.taken();
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
         unfile(self, None, n);
         if was_inert {
@@ -736,7 +736,7 @@ impl Engine {
             let Some(n) = self.nodes.get(i) else {
                 continue;
             };
-            if matches!(n.state(), State::Gone | State::Inert) {
+            if matches!(n.state(), State::Gone | State::Inert | State::RunningInert) {
                 continue;
             }
             if pred(n.op(), &n.args(), &self.values) {
@@ -756,7 +756,7 @@ impl Engine {
 
     pub fn output(&self, n: NodeId) -> Option<ValueId> {
         let node = self.nodes.get(usize::try_from(n.raw()).ok()?)?;
-        if matches!(node.state(), State::Gone | State::Inert) {
+        if matches!(node.state(), State::Gone | State::Inert | State::RunningInert) {
             return None;
         }
         node.run_record().map(|r| r.output)
@@ -1047,7 +1047,7 @@ impl Engine {
         let node = self.nodes.get(usize::try_from(n.raw()).ok()?)?;
         let state = match node.state() {
             State::Gone => return None,
-            State::Inert => NodeState::Inert,
+            State::Inert | State::RunningInert => NodeState::Inert,
             State::Clean => NodeState::Done,
             State::Dirty | State::Running | State::RunningDirty => NodeState::Dirty,
         };
@@ -1159,7 +1159,7 @@ impl Engine {
             let n = node.id;
             match node.state() {
                 State::Gone | State::Inert => continue,
-                State::Dirty | State::Running | State::RunningDirty => {
+                State::Dirty | State::Running | State::RunningDirty | State::RunningInert => {
                     out.push(format!("node {} is {:?} after the evaluation", n.raw(), node.state()));
                     continue;
                 }
