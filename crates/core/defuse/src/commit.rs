@@ -1603,8 +1603,8 @@ pub(crate) fn unfile(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
     retract_products(eng, w, node, true);
 }
 
-/// A sibling taken by a claim after it ran: its products are withdrawn,
-/// the node stays, inert.
+/// A sibling taken by a claim after it ran, or before with predictions
+/// filed: its products are withdrawn, the node stays, inert.
 fn retract(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
     retract_products(eng, w, node, false);
 }
@@ -1640,9 +1640,12 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
                 if k < want {
                     let hole = s.is_hole();
                     if s.take() {
-                        if s.committed() {
+                        // (one that has not run yet: what it was predicted
+                        // to define is withdrawn as a run's would be)
+                        if s.committed() || s.record().is_some() {
                             retracts.push(s.clone());
-                        } else if hole {
+                        }
+                        if !s.committed() && hole {
                             taken_holes.push(s.clone());
                         }
                     }

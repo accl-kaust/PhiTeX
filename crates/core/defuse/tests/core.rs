@@ -779,3 +779,41 @@ fn a_sibling_released_while_it_runs_ends_the_evaluation() {
     assert_eq!(e.node_info(s).unwrap().state, NodeState::Done);
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[f, v]`: defines f = v, and says so before it runs.
+struct PredDef;
+
+impl Operation for PredDef {
+    fn name(&self) -> &'static str {
+        "pred_def"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let (f, v) = (Field(cx.args()[0]), cx.args()[1]);
+        cx.define(f, v);
+        Ok(v)
+    }
+
+    fn predicted_defs(&self, args: &[ValueId], _: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(vec![(Field(args[0]), args[1])])
+    }
+}
+
+#[test]
+fn a_claimed_sibling_leaves_no_prediction() {
+    // A sibling taken before it ran never runs: what it was predicted to
+    // define reaches nobody, as in the sequential evaluation.
+    let (e, o) = engine();
+    let pred = e.register(Arc::new(PredDef));
+    let v = e.values();
+    let x = f(v, "x");
+    let u = e.new_unit();
+    let cl = e.push(u, o.claimer, vec![v.int(1)]);
+    let p = e.push(u, pred, vec![x, v.int(7)]);
+    let g = e.push(u, o.get, vec![x]);
+    e.evaluate(1).unwrap();
+    assert_eq!(e.claimed(cl), vec![p]);
+    assert_eq!(e.output(g), Some(ValueId::UNIT), "the taken sibling's predicted x reaches the reader");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
