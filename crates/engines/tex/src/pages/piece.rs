@@ -25,6 +25,7 @@ use super::*;
 /// finishing at an earlier one takes what the run defined after it
 /// (`stamp`, `gids`: [`State::defined_since_in_order`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools, reason = "a candidate's four independent facts")]
 pub(crate) struct CandMark {
     pub k: u32,
     pub stamp: u64,
