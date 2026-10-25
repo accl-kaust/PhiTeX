@@ -31,6 +31,7 @@ use crate::values::{Field, FxHashMap, FxHashSet};
 pub(crate) struct Shared {
     injector: Injector<NodeId>,
     stealers: Vec<Stealer<NodeId>>,
+    later_stealers: Vec<Stealer<NodeId>>,
     block_stealers: Vec<Stealer<NodeId>>,
     /// One thief at a time per block: a steal takes an even run of nodes
     /// from its far end, whole.
@@ -92,8 +93,12 @@ pub(crate) struct WorkerLog {
 /// One worker's deques and counters (nanoseconds).
 pub(crate) struct Worker {
     pub(crate) ix: usize,
-    /// Nodes woken or placed by its commits: run next.
+    /// Nodes placed by its commits, and its runs to run again: next.
     local: Deque<NodeId>,
+    /// Nodes its commits re-asked, in the order asked: after its placed
+    /// ones, so a reader of many (a fold over the whole unit) runs behind
+    /// the definers queued before it, not once per definer.
+    later: Deque<NodeId>,
     /// Its block of the nodes dirty before the evaluation, in order.
     block: Deque<NodeId>,
     shared: Arc<Shared>,
@@ -193,11 +198,14 @@ impl Pool {
         let n = n.max(1);
         let deques: Vec<Deque<NodeId>> = (0..n).map(|_| Deque::new_lifo()).collect();
         let blocks: Vec<Deque<NodeId>> = (0..n).map(|_| Deque::new_lifo()).collect();
+        let laters: Vec<Deque<NodeId>> = (0..n).map(|_| Deque::new_fifo()).collect();
         let stealers = deques.iter().map(Deque::stealer).collect();
+        let later_stealers = laters.iter().map(Deque::stealer).collect();
         let block_stealers = blocks.iter().map(Deque::stealer).collect();
         let shared = Arc::new(Shared {
             injector: Injector::new(),
             stealers,
+            later_stealers,
             block_stealers,
             block_busy: (0..n).map(|_| AtomicBool::new(false)).collect(),
             outstanding: AtomicUsize::new(0),
@@ -211,10 +219,12 @@ impl Pool {
         let workers = deques
             .into_iter()
             .zip(blocks)
+            .zip(laters)
             .enumerate()
-            .map(|(ix, (local, block))| Worker {
+            .map(|(ix, ((local, block), later))| Worker {
                 ix,
                 local,
+                later,
                 block,
                 shared: shared.clone(),
                 runs: AtomicU64::new(0),
@@ -326,6 +336,9 @@ impl Pool {
         if let Some(n) = w.local.pop() {
             return Some(n);
         }
+        if let Some(n) = w.later.pop() {
+            return Some(n);
+        }
         if let Some(n) = w.block.pop() {
             return Some(n);
         }
@@ -341,6 +354,19 @@ impl Pool {
             let v = (w.ix + k) % n;
             loop {
                 match self.shared.stealers[v].steal() {
+                    Steal::Success(x) => {
+                        Worker::add(&w.steals, 1);
+                        return Some(x);
+                    }
+                    Steal::Empty => break,
+                    Steal::Retry => {}
+                }
+            }
+        }
+        for k in 1..n {
+            let v = (w.ix + k) % n;
+            loop {
+                match self.shared.later_stealers[v].steal() {
                     Steal::Success(x) => {
                         Worker::add(&w.steals, 1);
                         return Some(x);
@@ -509,11 +535,16 @@ fn run_worker(
 /// Queues a node made dirty (a new node, a released sibling): on `w`'s
 /// deque, or the engine's pending list when no evaluation runs.
 pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) {
+    let created = matches!(wake.cause, Cause::Created { .. });
     *n.woke.lock() = Some(wake);
     match w {
         Some(w) => {
             w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
-            w.local.push(n.id);
+            if created {
+                w.local.push(n.id);
+            } else {
+                w.later.push(n.id);
+            }
             let sh = &w.shared;
             if sh.spawned.load(Ordering::Relaxed) < sh.n && w.local.len() >= 2 {
                 sh.want_spawn.store(true, Ordering::SeqCst);
