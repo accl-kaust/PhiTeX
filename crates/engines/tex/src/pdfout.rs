@@ -3823,6 +3823,9 @@ fn link(
     // being filled: compared again once that stream is written)
     let mut os_wait: Option<usize> = None;
     let (mut t_try, mut t_snap) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    // (the object streams the records fill compressed after the loop,
+    // side by side with the pages' contents, not one after another in it)
+    st.defer_streams(true);
     for (i, (&x, pc)) in xpages.iter().zip(&pcs).enumerate().skip(start) {
         let tt = std::time::Instant::now();
         if os_wait.is_some_and(|c| st.os_stream() != c) {
@@ -4016,11 +4019,10 @@ fn link(
                 }
             }
         }
-        if let Some(c) = st.flush_chunk() {
-            ps.push(phitex_pdf::Part::Bytes(c));
-        }
+        st.take_parts(&mut ps);
         parts.push(ps);
     }
+    st.defer_streams(false);
     let t_loop = t0.elapsed();
     crate::timeline::note(
         &format!(

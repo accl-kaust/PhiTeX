@@ -206,6 +206,10 @@ struct Opts {
     /// watch: no live viewer
     #[arg(long, global = true)]
     no_view: bool,
+    /// watch: the diagnostics at their places after every edit too (the
+    /// viewer asks for them; else an edit reports the engine's own only)
+    #[arg(long, global = true)]
+    diagnostics: bool,
     /// watch: the viewer's port (default: a free one)
     #[arg(long, value_name = "N", global = true)]
     port: Option<u16>,
@@ -258,6 +262,7 @@ pub struct Options {
     pub shell_escape: bool,
     pub open: bool,
     pub view: bool,
+    pub diagnostics: bool,
     pub port: Option<u16>,
     pub editor: Option<String>,
     pub copy_pdf: Option<config::CopyPdf>,
@@ -296,6 +301,7 @@ impl Cli {
             shell_escape: o.shell_escape,
             open: o.open,
             view: !o.no_view,
+            diagnostics: o.diagnostics,
             port: o.port,
             editor: o.editor,
             copy_pdf: if o.no_copy_pdf {
@@ -499,6 +505,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         // (the files the job reads back, .aux and .toc, to their fixpoint)
         fixpoint: true,
         cache_limit: t.cache_limit,
+        edit_diagnostics: o.diagnostics || o.view,
     })
 }
 

@@ -721,9 +721,7 @@ impl PdfState {
         if subs.is_empty() {
             self.print(&rec.blob);
         } else {
-            if let Some(c) = self.flush_chunk() {
-                parts.push(Part::Bytes(c));
-            }
+            self.take_parts(parts);
             self.flushes += 1;
             parts.push(Part::Content {
                 data: rec.shown.0.clone(),

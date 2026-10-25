@@ -280,6 +280,24 @@ impl PdfState {
         })
     }
 
+    /// Object streams left to the caller to compress, on or off: each
+    /// one's bytes up to its `/Length` a chunk, the stream a
+    /// [`Part::Content`] ([`PdfState::take_parts`]), compressed where the
+    /// caller has threads (a link's records: the streams of many pages
+    /// compressed side by side, not one after another).
+    pub fn defer_streams(&mut self, on: bool) {
+        self.defer = on;
+    }
+
+    /// The parts written since the last take: the object streams left to
+    /// compress and the bytes around them, in order.
+    pub fn take_parts(&mut self, parts: &mut Vec<crate::Part>) {
+        parts.append(&mut self.pending);
+        if let Some(c) = self.flush_chunk() {
+            parts.push(crate::Part::Bytes(c));
+        }
+    }
+
     /// The number of chunks flushed.
     #[must_use]
     pub fn flushed(&self) -> usize {

@@ -280,11 +280,36 @@ impl PdfState {
         self.print_int_ln(int(list.len()));
         self.print(b"/First ");
         self.print_int_ln(int(q - p));
-        self.begin_stream();
         let data = std::mem::take(&mut self.os.buf);
-        self.print(&data[p..q]);
-        self.print(&data[..p]);
-        self.end_stream();
+        if self.defer {
+            // (the bytes so far a chunk of their own, the state's other
+            // positions as they are; the stream's `/Length` on, its
+            // `endstream` and `endobj` the part's, as `begin_stream` and
+            // `end_stream` would write them)
+            if !self.out.is_empty() {
+                let b = std::mem::take(&mut self.out);
+                self.flushes += 1;
+                self.pending.push(crate::Part::Bytes(crate::Chunk {
+                    bytes: b.into(),
+                    objs: std::mem::take(&mut self.chunk_objs),
+                }));
+            }
+            let mut d = Vec::with_capacity(q);
+            d.extend_from_slice(&data[p..q]);
+            d.extend_from_slice(&data[..p]);
+            self.flushes += 1;
+            self.pending.push(crate::Part::Content {
+                data: d.into(),
+                subs: Vec::new(),
+                level: self.p.compress_level,
+            });
+            self.last_byte = 0;
+        } else {
+            self.begin_stream();
+            self.print(&data[p..q]);
+            self.print(&data[..p]);
+            self.end_stream();
+        }
         self.os.cur = 0;
     }
 

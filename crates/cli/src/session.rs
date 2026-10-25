@@ -164,6 +164,9 @@ pub struct Job {
     pub fixpoint: bool,
     /// The cache's size limit (`cache-limit`).
     pub cache_limit: Option<u64>,
+    /// An edit's diagnostics at their places (a viewer's, `--diagnostics`);
+    /// else an edit reports the engine's own, at no place, only.
+    pub edit_diagnostics: bool,
 }
 
 /// One run of a build.
@@ -893,7 +896,11 @@ impl Session {
         lap(&mut phases, "output");
         let pdf = b.is_pdf();
         let s = &b.stats;
-        let diagnostics = b.diagnostics();
+        let diagnostics = if why == "edit" && !self.job.edit_diagnostics {
+            b.unplaced_diagnostics()
+        } else {
+            b.diagnostics()
+        };
         // (the engine's warnings at no place: the read-back files still
         // changing at the round limit; the front ends print them)
         let warnings: Vec<String> = diagnostics

@@ -896,6 +896,10 @@ pub struct PdfState {
     last_byte: u8,
     /// A page's walk being recorded ([`PdfState::ship_recorded`]).
     rec: Option<Box<replay::Recording>>,
+    /// Object streams left to the caller to compress
+    /// ([`PdfState::defer_streams`]), and the parts so far.
+    defer: bool,
+    pending: Vec<Part>,
 }
 
 impl PdfState {
@@ -1008,6 +1012,8 @@ impl PdfState {
             vf_cur_s: 0,
             last_byte: 0,
             rec: None,
+            defer: false,
+            pending: Vec::new(),
         }
     }
 

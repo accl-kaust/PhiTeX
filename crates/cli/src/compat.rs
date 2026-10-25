@@ -244,6 +244,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         // (one run, as the program's)
         fixpoint: false,
         cache_limit: None,
+        edit_diagnostics: true,
     };
     for n in session::waiting_notes(&job) {
         eprintln!("{progname}: {n}");

@@ -6080,6 +6080,27 @@ impl Build {
         out
     }
 
+    /// The diagnostics at no place alone (the engine's own warnings and
+    /// errors, the format's): what [`Build::diagnostics`] gives but the
+    /// document's, without placing those.
+    #[must_use]
+    pub fn unplaced_diagnostics(&self) -> Vec<Diagnostic> {
+        let docname = self.opts.name.clone();
+        let at = |severity: Severity, m: &String| Diagnostic {
+            file: docname.clone(),
+            range: (0, 0),
+            line: 1,
+            severity,
+            message: m.clone(),
+            context: String::new(),
+            help: None,
+        };
+        let mut out: Vec<Diagnostic> = self.prelude.diags.clone();
+        out.extend(self.g.eval_warnings.iter().map(|m| at(Severity::Warning, m)));
+        out.extend(self.prelude.errors.iter().chain(&self.g.eval_errors).map(|m| at(Severity::Error, m)));
+        out
+    }
+
     /// The critical chain in full, one line per link, last node first,
     /// with each node's height:
     /// the link's cause with what it names (the site that defined the
