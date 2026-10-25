@@ -254,6 +254,14 @@ impl Run<'_, '_> {
     }
 }
 
+/// Whether `f` is what the pieces give the page builder (their profiles and
+/// items): the page steps, finishers and page writers never contribute it
+/// (`Operation::contributes`), so a step's search for the next piece passes
+/// over them while they run.
+pub(crate) fn from_pieces(v: &Values, f: Field) -> bool {
+    f == v.field(crate::vprof::VPROF) || f == v.field(PITEMS)
+}
+
 /// The field every finisher defines at its position: what its routine
 /// gave back ([`RTN`]'s value) as `[piece, nth, output]`, the piece its
 /// page fired in and the pages fired in it before. The step after a

@@ -202,6 +202,13 @@ pub trait Operation: Send + Sync {
     fn effect(&self, _args: &[ValueId], _values: &Values) -> Effect {
         Effect::None
     }
+
+    /// Whether a run may contribute to `f` (default: yes). A node that has
+    /// not committed and never contributes `f` is passed over by
+    /// `Ctx::next_contribution`, not a stop.
+    fn contributes(&self, _args: &[ValueId], _values: &Values, _f: Field) -> bool {
+        true
+    }
 }
 
 use crate::ctx::Ctx;

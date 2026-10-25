@@ -632,3 +632,57 @@ fn a_continuation_chain_joins_on_an_unchanged_step() {
     assert_eq!(e.order(u), chain);
     assert!(e.check_invariants().is_empty());
 }
+
+/// `[ms]`: spins `ms` milliseconds and contributes nothing, and says so.
+struct Quiet;
+
+impl Operation for Quiet {
+    fn name(&self) -> &'static str {
+        "quiet"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let ms = cx.values().as_int(cx.args()[0]).unwrap() as u64;
+        spin(Duration::from_millis(ms));
+        Ok(ValueId::UNIT)
+    }
+
+    fn contributes(&self, _: &[ValueId], _: &Values, _: Field) -> bool {
+        false
+    }
+}
+
+/// `[s, n, ms]`: spins `ms` milliseconds, then outputs the first
+/// contribution to s after node n.
+struct NextAfter;
+
+impl Operation for NextAfter {
+    fn name(&self) -> &'static str {
+        "next_after"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let s = Field(cx.args()[0]);
+        let n = NodeId::from_raw(v.as_int(cx.args()[1]).unwrap() as u64);
+        spin(Duration::from_millis(v.as_int(cx.args()[2]).unwrap() as u64));
+        Ok(cx.next_contribution(s, Some(n))?.map_or(ValueId::UNIT, |x| x.1))
+    }
+}
+
+#[test]
+fn a_node_that_never_contributes_is_no_stop() {
+    let (e, o) = engine();
+    let quiet = e.register(Arc::new(Quiet));
+    let next = e.register(Arc::new(NextAfter));
+    let v = e.values();
+    let u = e.new_unit();
+    let s = f(v, "stream");
+    let first = e.push(u, o.contrib, vec![s, v.int(1)]);
+    e.push(u, quiet, vec![v.int(200)]);
+    e.push(u, o.contrib, vec![s, v.int(2)]);
+    let n = e.push(u, next, vec![s, v.int(first.raw() as i64), v.int(20)]);
+    let r = e.evaluate(4).unwrap();
+    assert_eq!(e.output(n), Some(v.int(2)));
+    assert_eq!(Report::by_op(&r.runs_by_op, "next_after"), 1, "the reader ran once, past the quiet node still running: {r:?}");
+}

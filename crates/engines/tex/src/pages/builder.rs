@@ -1026,6 +1026,9 @@ impl Operation for Pages {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
+    fn contributes(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
+        !crate::pages::from_pieces(v, f)
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
@@ -2102,8 +2105,12 @@ impl Run<'_, '_> {
     }
 
 
-    /// A page's finisher placed as the step's child, its arguments
-    /// `fin`'s ([`FinishIn::args`]).
+    /// A page's finisher placed after the piece the page fired in, where
+    /// its routine runs in the text's order (its definitions reach the
+    /// pieces after it), its arguments `fin`'s ([`FinishIn::args`]); the
+    /// next step follows it ([`Run::cut`]). A page firing in the piece the
+    /// step began in: the step already stands after that piece and the
+    /// finisher before it, and the finisher is the step's child.
     pub(crate) fn place_finisher(&mut self, fin: &FinishIn, args: Vec<ValueId>) -> usize {
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
@@ -2121,7 +2128,15 @@ impl Run<'_, '_> {
             let top: Vec<u64> = args.iter().map(|x| x.raw()).collect();
             eprintln!("fin-args: node {} page {} at {} parts {parts:?} top {top:?}", self.cx.node().raw(), fin.j, fin.piece.raw());
         }
-        self.cx.child(self.ops.finish, args)
+        let began = match self.cx.args() {
+            [x, _] => raw_node(self.v, *x),
+            _ => None,
+        };
+        if began == Some(fin.piece) {
+            self.cx.child(self.ops.finish, args)
+        } else {
+            self.cx.follow_after(fin.piece, self.ops.finish, args)
+        }
     }
 }
 

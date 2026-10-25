@@ -2302,6 +2302,9 @@ impl phitex_defuse::Operation for PdfPage {
     fn name(&self) -> &'static str {
         "pdfpage"
     }
+    fn contributes(&self, _: &[ValueId], v: &phitex_defuse::Values, f: phitex_defuse::Field) -> bool {
+        !crate::pages::from_pieces(v, f)
+    }
     fn run(&self, cx: &mut phitex_defuse::Ctx<'_>) -> Result<ValueId, phitex_defuse::Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();

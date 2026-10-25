@@ -1771,6 +1771,9 @@ impl Operation for Finish {
     fn name(&self) -> &'static str {
         "finish"
     }
+    fn contributes(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
+        !crate::pages::from_pieces(v, f)
+    }
     /// The output routine's hint (encoded, the tenth argument:
     /// [`crate::hints::routine_hint`]) and the fields a finisher defines
     /// itself; anything where the routine's text cannot be bounded, or

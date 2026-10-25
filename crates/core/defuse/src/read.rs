@@ -196,8 +196,9 @@ pub(crate) fn fold(eng: &Engine, f: Field, from: Option<Pos>, to: Option<Pos>) -
 }
 
 /// The first contribution to `f` after `after` (None: the start), or the
-/// first node after it that has not committed yet: a contribution that may
-/// still come is not the first.
+/// first node after it that has not committed yet and whose operation may
+/// contribute `f` (`Operation::contributes`): a contribution that may still
+/// come is not the first.
 pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>) -> Next {
     let mut cur: Option<SegId> = match after {
         Some(p) => eng.seg_for_pos(p).map(|s| s.id).or_else(|| eng.order.first()),
@@ -212,27 +213,52 @@ pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>) -> N
             let mut hit = None;
             for (p, id) in inner.nodes.range((lo, Unbounded)) {
                 if let Some(&x) = inner.contribs.get(&f).and_then(|m| m.get(p)) {
-                    hit = Some(Next {
-                        item: Some((*id, x)),
-                        stop: Some(*id),
-                    });
+                    hit = Some((
+                        Next {
+                            item: Some((*id, x)),
+                            stop: Some(*id),
+                        },
+                        false,
+                    ));
                     break;
                 }
                 if eng.node(*id).is_hole() {
-                    hit = Some(Next {
-                        item: None,
-                        stop: Some(*id),
-                    });
+                    hit = Some((
+                        Next {
+                            item: None,
+                            stop: Some(*id),
+                        },
+                        true,
+                    ));
                     break;
                 }
             }
             hit
         };
-        if let Some(n) = found {
-            return n;
+        match found {
+            Some((n, false)) => return n,
+            Some((n, true)) => {
+                // (asked outside the segment's lock: the node's text has
+                // its own)
+                let id = n.stop.expect("a hole");
+                let h = eng.node(id);
+                if eng.op(h.op()).contributes(&h.args(), eng.values(), f) {
+                    return n;
+                }
+                let Some(p) = pos_of(eng, id) else {
+                    // (gone meanwhile: searched again from where it was)
+                    lower = Some(h.pos_hint());
+                    cur = eng.seg_for_pos(h.pos_hint()).map(|s| s.id);
+                    continue;
+                };
+                lower = Some(p);
+                cur = eng.seg_for_pos(p).map(|s| s.id);
+            }
+            None => {
+                lower = None;
+                cur = eng.order.next(sid, seg.lo);
+            }
         }
-        lower = None;
-        cur = eng.order.next(sid, seg.lo);
     }
     Next { item: None, stop: None }
 }
