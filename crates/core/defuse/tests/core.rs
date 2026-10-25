@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use phitex_defuse::{
-    At, Ctx, Engine, Field, FieldAt, NodeId, NodeState, OpId, Operation, Report, Step, Stop, ValueId, Values,
+    At, Ctx, Engine, Field, FieldAt, Limits, NodeId, NodeState, OpId, Operation, Report, Step, Stop, ValueId, Values,
 };
 
 /// `[f, v]`: defines f = v; outputs v.
@@ -1065,5 +1065,31 @@ fn a_shape_learned_while_a_node_commits_leaves_it_nothing() {
     e.evaluate(4).unwrap();
     assert_eq!(e.defs_of(n), vec![]);
     assert_eq!(int(&e, g), 1, "one step of the counter before the reader");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
+#[test]
+fn an_evaluation_that_fails_loses_no_node() {
+    // An evaluation stopped by a limit leaves its queued nodes, and the one
+    // it stopped at, to the next: that one runs them all.
+    let (e, o) = engine();
+    let v = e.values();
+    let u = e.new_unit();
+    let mut gets = Vec::new();
+    for i in 0..200 {
+        let x = f(v, &format!("x{i}"));
+        e.push(u, o.def, vec![x, v.int(i)]);
+        gets.push(e.push(u, o.get, vec![x]));
+    }
+    e.set_limits(Limits {
+        total_runs: Some(50),
+        ..Limits::default()
+    });
+    assert!(e.evaluate(2).is_err());
+    e.set_limits(Limits::default());
+    e.evaluate(2).unwrap();
+    for (i, g) in gets.iter().enumerate() {
+        assert_eq!(e.output(*g), Some(v.int(i as i64)), "get {i}");
+    }
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }

@@ -312,8 +312,40 @@ impl Pool {
         let mut workers = vec![first];
         workers.extend(rest);
         match self.failed.lock().take() {
-            Some(e) => Err(e),
+            Some(e) => {
+                self.leave_queued(eng, &workers);
+                Err(e)
+            }
             None => Ok(workers),
+        }
+    }
+
+    /// The nodes still queued when a failure stopped the evaluation, to the
+    /// engine's pending list: the next evaluation runs them.
+    fn leave_queued(&self, eng: &Engine, workers: &[Worker]) {
+        let mut left = Vec::new();
+        for w in workers {
+            while let Some(n) = w.local.pop() {
+                left.push(n);
+            }
+            while let Some(n) = w.later.pop() {
+                left.push(n);
+            }
+            while let Some((n, _)) = w.block.pop() {
+                left.push(n);
+            }
+        }
+        loop {
+            match self.shared.injector.steal() {
+                Steal::Success(n) => left.push(n),
+                Steal::Empty => break,
+                Steal::Retry => {}
+            }
+        }
+        for n in left {
+            if eng.node(n).state() == State::Dirty {
+                eng.pend(n);
+            }
         }
     }
 
@@ -686,6 +718,7 @@ pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(
     }
     let op = eng.op(node.op()).clone();
     if runs > pool.limits.runs_per_node {
+        give_back(eng, node);
         return Err(EvalError::RunawayNode {
             node: n,
             op: op.name(),
@@ -695,10 +728,12 @@ pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(
     if let Some(t) = pool.limits.total_runs {
         let total = pool.total_runs.fetch_add(1, Ordering::Relaxed) + 1;
         if total > t {
+            give_back(eng, node);
             return Err(EvalError::TotalRuns { runs: total });
         }
     }
     if pool.limits.time.is_some_and(|t| pool.t0.elapsed() > t) {
+        give_back(eng, node);
         return Err(EvalError::Deadline);
     }
     let t = Instant::now();
@@ -717,6 +752,7 @@ pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(
     }
     match r {
         Err(payload) => {
+            give_back(eng, node);
             let message = payload
                 .downcast_ref::<&str>()
                 .map(|s| (*s).to_owned())
@@ -751,6 +787,25 @@ pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(
                 eng.note_settled(node, out);
             }
             Ok(())
+        }
+    }
+}
+
+/// A node whose run a failure stopped (a limit, a panic), `Dirty` again on
+/// the engine's pending list for the next evaluation.
+fn give_back(eng: &Engine, node: &Node) {
+    loop {
+        let (from, to) = match node.state() {
+            s @ (State::Running | State::RunningDirty) => (s, State::Dirty),
+            State::RunningInert => (State::RunningInert, State::Inert),
+            State::Clean | State::Dirty | State::Inert | State::Gone => return,
+        };
+        if node.cas_state(from, to) {
+            node.committing.store(false, Ordering::Release);
+            if to == State::Dirty {
+                eng.pend(node.id);
+            }
+            return;
         }
     }
 }
