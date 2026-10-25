@@ -3,24 +3,17 @@ name = "phitex-defuse"
 version = "0.0.0"
 edition.workspace = true
 publish = false
-description = "The engine: an incremental, parallel, field-level def-use graph evaluator, written without knowledge of TeX"
-license = "MIT OR Apache-2.0"
+description = "The engine: a mergeless, parallel, incremental def-use evaluator over one line of positions, written without knowledge of TeX"
+license.workspace = true
 
 [dependencies]
-# Only with the `observe` feature (the default build has no dependencies).
+crossbeam-deque = "0.8"
+# Only with the `observe` feature.
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
 [features]
-# Diagnostics: the engine's phase timers and counters (CLEAN_PROF), traces
-# (CLEAN_DEBUG), a line per run (CLEAN_RUNLOG), scoped checks
-# (CLEAN_SCOPED_CHECK) and the `obs` probes.
-# Off by default; release builds compile every probe out.
+# Diagnostics compiled in: lock-wait and phase timers, the realised chain's
+# per-node times. Off by default; release builds compile every probe out.
 profile = []
-# Recording for replay (DEFUSE_RECORD=path, replayed by examples/play.rs).
-# Off by default.
 observe = ["dep:serde", "dep:serde_json"]
-
-[[example]]
-name = "play"
-required-features = ["observe"]
