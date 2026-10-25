@@ -3860,6 +3860,30 @@ fn texts() -> &'static TextsCache {
     C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
+/// A map by a hashed key, cut into shards of their own locks: the pool's
+/// workers preparing nodes meet only where their keys share a shard.
+pub(crate) struct Shards<V>(Box<[Mutex<FxHashMap<u64, V>>]>);
+
+impl<V> Default for Shards<V> {
+    fn default() -> Self {
+        Shards((0..SHARDS).map(|_| Mutex::new(FxHashMap::default())).collect())
+    }
+}
+
+const SHARDS: usize = 64;
+
+impl<V> Shards<V> {
+    fn of(&self, k: u64) -> std::sync::MutexGuard<'_, FxHashMap<u64, V>> {
+        let i = usize::try_from(k.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58).unwrap_or(0);
+        self.0[i % SHARDS].locked()
+    }
+
+    /// Everything in it, taken out.
+    fn take_all(&self) -> Vec<FxHashMap<u64, V>> {
+        self.0.iter().map(|s| std::mem::take(&mut *s.locked())).collect()
+    }
+}
+
 /// A build's hint state (`run::Ops::hints`): the analyses of texts
 /// registered by name, and the nodes' hints by their arguments. Owned
 /// by the build, not the process: every document is registered under
@@ -3871,17 +3895,17 @@ pub(crate) struct Registry {
     /// Each text's analysis by its name, in chunks (their starts in the
     /// text, [`register_chunks`]).
     by_name: Mutex<FxHashMap<u64, Chunks>>,
-    hints: Mutex<FxHashMap<u64, Arc<Hint>>>,
+    hints: Shards<Arc<Hint>>,
     /// The engine's answers ([`may_define`]) made ahead on the pool for
     /// nodes about to be pushed ([`prepare`]), by their arguments' key:
     /// each taken by the push's one question, the rest dropped after it
     /// ([`prepared_done`]).
-    prepared: Mutex<FxHashMap<u64, Prepared>>,
+    prepared: Shards<Prepared>,
     /// The hints decoded, by their string's value (the nodes of a
     /// document share a few hint strings among thousands of slices).
-    decoded: Mutex<FxHashMap<u64, Arc<Hint>>>,
+    decoded: Shards<Arc<Hint>>,
     /// [`may_define`]'s answer by the hint string's value.
-    answers: Mutex<FxHashMap<u64, MayDefine>>,
+    answers: Shards<MayDefine>,
 }
 
 /// An answer kept for its one question, or taken.
@@ -3898,7 +3922,6 @@ enum Kept<T> {
 struct Prepared {
     may: Option<MayDefine>,
     reads: Kept<Option<Vec<Field>>>,
-    lines: Option<ValueId>,
 }
 
 /// Registers a text's analysis under `name` (a string value) in the
@@ -4161,9 +4184,9 @@ pub(crate) fn prepare(reg: &Registry, v: &Values, args: &[ValueId]) {
         // (`PHITEX_HINTS` prints each answer where the engine asks)
         may: (!crate::exec::obs_flag!("PHITEX_HINTS")).then(|| may_define_now(reg, v, args)),
         reads: Kept::Ready(reads_now(reg, v, args)),
-        lines: Some(crate::run::text_lines(v, args)),
     };
-    reg.prepared.locked().insert(args_key(args), p);
+    let k = args_key(args);
+    reg.prepared.of(k).insert(k, p);
 }
 
 /// The answer `f` takes from a node's prepared ones, if it was prepared.
@@ -4172,23 +4195,21 @@ fn take_prepared<T>(
     args: &[ValueId],
     f: impl FnOnce(&mut Prepared) -> Option<T>,
 ) -> Option<T> {
-    let mut p = reg.prepared.locked();
+    let k = args_key(args);
+    let mut p = reg.prepared.of(k);
     if p.is_empty() {
         return None;
     }
-    p.get_mut(&args_key(args)).and_then(f)
-}
-
-/// The lines a node's text begins (`crate::run::text_lines`), as
-/// prepared before its push.
-pub(crate) fn prepared_lines(reg: &Registry, args: &[ValueId]) -> Option<ValueId> {
-    take_prepared(reg, args, |p| p.lines.take())
+    p.get_mut(&k).and_then(f)
 }
 
 /// The push the answers were [`prepare`]d for is done: those it did not
 /// take are dropped (a later node with the same arguments asks again).
 pub(crate) fn prepared_done(reg: &Registry) {
-    reg.prepared.locked().clear();
+    // (dropped on a thread of their own: a document's thousands of
+    // answers are freed beside its evaluation)
+    let left = reg.prepared.take_all();
+    std::thread::spawn(move || drop(left));
 }
 
 /// The hint of a node from its arguments: the extra argument when the
@@ -4203,18 +4224,18 @@ pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<
             .clone();
     }
     let key = args_key(args);
-    if let Some(h) = reg.hints.locked().get(&key) {
+    if let Some(h) = reg.hints.of(key).get(&key) {
         return h.clone();
     }
     let mut registry = false;
     let h = match hint_value(v, args) {
         // (the hint argument's string decoded once per build)
         Some(hv) => {
-            let known = reg.decoded.locked().get(&hv.raw()).cloned();
+            let known = reg.decoded.of(hv.raw()).get(&hv.raw()).cloned();
             known.unwrap_or_else(|| {
                 let h = Arc::new(compute_hint(reg, v, args, &mut registry));
-                let mut d = reg.decoded.locked();
-                if d.len() > 1 << 16 {
+                let mut d = reg.decoded.of(hv.raw());
+                if d.len() > (1 << 16) / SHARDS {
                     d.clear();
                 }
                 d.insert(hv.raw(), h.clone());
@@ -4228,8 +4249,8 @@ pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<
         // edit registers again: the arguments alone do not name it)
         return h;
     }
-    let mut c = reg.hints.locked();
-    if c.len() > 1 << 20 {
+    let mut c = reg.hints.of(key);
+    if c.len() > (1 << 20) / SHARDS {
         c.clear();
     }
     c.insert(key, h.clone());
@@ -4534,14 +4555,14 @@ fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     // (an answer is the hint's alone: made once per hint string)
     let hv = hint_value(v, args).filter(|_| !crate::exec::obs_flag!("PHITEX_HINTS"));
     if let Some(hv) = hv
-        && let Some(m) = reg.answers.locked().get(&hv.raw())
+        && let Some(m) = reg.answers.of(hv.raw()).get(&hv.raw())
     {
         return m.clone();
     }
     let m = may_define_answer(reg, v, args);
     if let Some(hv) = hv {
-        let mut a = reg.answers.locked();
-        if a.len() > 1 << 16 {
+        let mut a = reg.answers.of(hv.raw());
+        if a.len() > (1 << 16) / SHARDS {
             a.clear();
         }
         a.insert(hv.raw(), m.clone());

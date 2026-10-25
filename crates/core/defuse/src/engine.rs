@@ -52,6 +52,8 @@ pub(crate) struct Paths {
 
 /// Path ids below this are projections' (`PathId::of_proj`).
 const PROJ_PATHS: usize = 1024;
+/// Nodes `push_many` files in each segment it makes: room for as many again.
+const PUSH_RUN: usize = crate::order::SEG_CAP / 2;
 
 /// `Ctx::apply`'s memo: (op, args) -> output.
 pub(crate) type Memo = FxHashMap<(OpId, Box<[ValueId]>), ValueId>;
@@ -493,8 +495,85 @@ impl Engine {
         }
     }
 
-    pub fn push_many(&self, unit: UnitId, op: OpId, args: Vec<Vec<ValueId>>) -> Vec<NodeId> {
-        args.into_iter().map(|a| self.push(unit, op, a)).collect()
+    /// Nodes at the end of `unit`, in order, dirty, as `push` makes them:
+    /// built (their predictions asked) and filed in segments of their own,
+    /// half a segment's room each, on `threads` threads; the order's list
+    /// takes those segments in one insert.
+    pub fn push_many(&self, unit: UnitId, op: OpId, args: Vec<Vec<ValueId>>, threads: usize) -> Vec<NodeId> {
+        let n = args.len();
+        let u = self.unit(unit);
+        // the unit's last segment gives up its labels after its last node
+        let (old, p0) = loop {
+            let seg = self.seg(self.order.seg_at(Pos(u.end.0 - 1)));
+            let inner = seg.inner.read();
+            if seg.unit != unit || Pos(u.end.0 - 1) >= inner.hi {
+                continue;
+            }
+            let last = inner.nodes.keys().next_back().copied().unwrap_or(seg.lo.max(u.start));
+            break (seg.clone(), Pos(last.0 + GAP));
+        };
+        if n < PUSH_RUN || p0.0.saturating_add((n as u64 + 1) * GAP) >= u.end.0 {
+            return args.into_iter().map(|a| self.push(unit, op, a)).collect();
+        }
+        let label = |k: usize| Pos(p0.0 + k as u64 * GAP);
+        let runs = n.div_ceil(PUSH_RUN);
+        let first_id = self.nodes.reserve_n(n);
+        let sids: Vec<SegId> = (0..runs)
+            .map(|_| SegId(u32::try_from(self.segs.reserve()).expect("segment ids")))
+            .collect();
+        // (each thread its runs, every `t`-th, their arguments its own)
+        let t = threads.clamp(1, runs);
+        let mut shares: Vec<Vec<(usize, Vec<Vec<ValueId>>)>> = (0..t).map(|_| Vec::new()).collect();
+        let mut args = args.into_iter();
+        for r in 0..runs {
+            shares[r % t].push((r, args.by_ref().take(PUSH_RUN).collect()));
+        }
+        let made = |r: usize, xs: Vec<Vec<ValueId>>| {
+            let (a, b) = (r * PUSH_RUN, ((r + 1) * PUSH_RUN).min(n));
+            let hi = if r + 1 == runs { u.end } else { label(b) };
+            let seg = Arc::new(Segment::new(sids[r], unit, label(a), hi));
+            {
+                let mut inner = seg.inner.write();
+                for (k, x) in (a..b).zip(xs) {
+                    let id = NodeId::from_raw((first_id + k) as u64);
+                    let (node, pred) = commit::built(self, unit, None, op, x, id);
+                    let p = label(k);
+                    node.seg.store(seg.id.0, Ordering::Release);
+                    node.pos.store(p.0, Ordering::Release);
+                    *node.woke.lock() = Some(Wake {
+                        by: None,
+                        cause: Cause::Created { by: None },
+                        at_ns: self.now_ns(),
+                    });
+                    self.nodes.set(first_id + k, node.clone());
+                    inner.nodes.insert(p, id);
+                    inner.holes += 1;
+                    inner.by_op.entry(op).or_default().push(id);
+                    commit::file_predicted(self, &seg, &mut inner, &node, pred);
+                }
+            }
+            self.segs.set(sids[r].0 as usize, seg);
+        };
+        std::thread::scope(|s| {
+            let mut shares = shares.into_iter();
+            let mine = shares.next().expect("a share");
+            for share in shares {
+                s.spawn(|| share.into_iter().for_each(|(r, xs)| made(r, xs)));
+            }
+            mine.into_iter().for_each(|(r, xs)| made(r, xs));
+        });
+        self.order.insert_many((0..runs).map(|r| (label(r * PUSH_RUN), sids[r])).collect());
+        old.inner.write().hi = p0;
+        u.last.store(label(n - 1).0, Ordering::Release);
+        self.stats.nodes_made.fetch_add(n as u64, Ordering::Relaxed);
+        let ids: Vec<NodeId> = (0..n).map(|k| NodeId::from_raw((first_id + k) as u64)).collect();
+        self.pending.lock().nodes.extend_from_slice(&ids);
+        let mut st = CommitStats::default();
+        for id in &ids {
+            settle_predictions(self, None, self.node(*id), &mut st);
+        }
+        self.note_stats(None, &st);
+        ids
     }
 
     /// The nearest pushed sibling before `n` that is not inert, re-asked

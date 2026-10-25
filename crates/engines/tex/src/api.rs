@@ -2206,7 +2206,7 @@ impl Graph {
             hints: Arc::default(),
             pkg_log: Arc::new(Mutex::new(Vec::new())),
             rec_ran: Arc::default(),
-            pkg_loads: Arc::new(Mutex::new(None)),
+            pkg_loads: Arc::new(std::sync::RwLock::new(None)),
             docs: Arc::default(),
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
@@ -3139,7 +3139,7 @@ impl Graph {
             }
         }
         // (one append of every node, in order)
-        let ids = self.eng.push_many(unit, self.ops.exec, args);
+        let ids = self.eng.push_many(unit, self.ops.exec, args, self.threads);
         crate::hints::prepared_done(&self.ops.hints);
         crate::timeline::lap("push: the engine's push");
         let out: Vec<(u64, NodeId, Src)> = nodes
@@ -3904,6 +3904,16 @@ impl Options {
     }
 }
 
+/// The check of a format read from the cache ([`cached_prelude`]),
+/// running.
+static FORMAT_CHECK: Mutex<Option<std::thread::JoinHandle<bool>>> = Mutex::new(None);
+
+/// Whether the format read from the cache, if one was, still has every
+/// file it read as the finder gives it now.
+fn format_holds() -> bool {
+    FORMAT_CHECK.locked().take().is_none_or(|h| h.join().unwrap_or(false))
+}
+
 fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> {
     let finder = opts.prelude_finder();
     let candidates: Vec<Arc<Cached>> = env_cache().locked().get(&key).cloned().unwrap_or_default();
@@ -3926,8 +3936,29 @@ fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> 
             }
         );
     }
+    // (a format read from the cache is taken at once, its files found and
+    // hashed on a thread of their own beside the job's start; the build
+    // takes the answer before its first evaluation, `format_holds`)
+    if let Some(c) = given {
+        let (finder, cc) = (finder.clone(), c.clone());
+        let h = std::thread::spawn(move || {
+            let t1 = std::time::Instant::now();
+            let fresh = cc.reads.iter().all(|(n, h)| file_hash(finder(n).as_ref()) == *h);
+            if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                eprintln!(
+                    "format check: {} files found and hashed in {:?} ({}, beside the start)",
+                    cc.reads.len(),
+                    t1.elapsed(),
+                    if fresh { "fresh" } else { "stale" }
+                );
+            }
+            fresh
+        });
+        *FORMAT_CHECK.locked() = Some(h);
+        return Ok(c);
+    }
     let mut known: Vec<String> = Vec::new();
-    for c in given.into_iter().chain(candidates) {
+    for c in candidates {
         let t1 = std::time::Instant::now();
         // (the files found, read and hashed on the pool)
         let mut ex = crate::exec::Coarse(crate::exec::threads(
@@ -4481,7 +4512,7 @@ impl Build {
             predict,
         )));
         // (the loads' predictions, asked by the engine per load node)
-        g.ops.pkg_loads.locked().clone_from(&g.loads);
+        g.ops.pkg_loads.write().unwrap_or_else(std::sync::PoisonError::into_inner).clone_from(&g.loads);
         crate::timeline::lap("engine: the job's environment, the loads' records");
         let (nodes, incr) = g.push_document(unit, &text, defs, doc);
         // (the pages: the first page step, where the text ends: it folds
@@ -4546,6 +4577,12 @@ impl Build {
                 g.eng.set_stable(f);
             }
         }
+        // (a format whose files changed since it was cached: built again)
+        if !format_holds() {
+            crate::timeline::lap("engine: the cached format stale");
+            return Build::with(Options { prelude_bytes: None, ..opts }, prelude, document);
+        }
+        crate::timeline::lap("engine: the format's check taken");
         let edits = opts.edits.clone().unwrap_or_default();
         let mut b = Build {
             g,

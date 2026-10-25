@@ -64,6 +64,13 @@ impl Order {
         segs.insert(i, (lo, s));
     }
 
+    /// Registers segments in one insert (`Engine::push_many`'s).
+    pub(crate) fn insert_many(&self, new: Vec<(Pos, SegId)>) {
+        let mut segs = self.segs.write();
+        segs.extend(new);
+        segs.sort_unstable();
+    }
+
     /// The first segment at or after `p`'s, for walks forward.
     pub(crate) fn at_or_after(&self, p: Pos) -> Option<SegId> {
         let segs = self.segs.read();

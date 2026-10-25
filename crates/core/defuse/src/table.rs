@@ -35,6 +35,13 @@ impl<T> Table<T> {
         i
     }
 
+    /// `n` next indices in a row, the first returned.
+    pub(crate) fn reserve_n(&self, n: usize) -> usize {
+        let i = self.next.fetch_add(n, Ordering::AcqRel);
+        assert!(i + n <= CHUNK * CHUNKS, "table full");
+        i
+    }
+
     pub(crate) fn set(&self, i: usize, x: T) {
         let chunk = self.chunks[i >> CHUNK_BITS].get_or_init(|| (0..CHUNK).map(|_| OnceLock::new()).collect());
         assert!(chunk[i & (CHUNK - 1)].set(x).is_ok(), "table slot {i} set twice");

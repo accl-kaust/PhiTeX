@@ -278,8 +278,12 @@ impl Operation for Exec {
     /// last run defined, so later nodes run on them, confirmed by value
     /// when it runs.
     fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        let loads = ops(&self.0).pkg_loads.locked().clone()?;
-        if !loads.predict || !crate::pkgrec::is_recorded(reg(&self.0), v, args) {
+        // (the text first: most nodes are no recorded node, and ask no lock)
+        if !crate::pkgrec::is_recorded(reg(&self.0), v, args) {
+            return None;
+        }
+        let loads = ops(&self.0).pkg_loads.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()?;
+        if !loads.predict {
             return None;
         }
         let key = crate::pkgrec::args_key(reg(&self.0), v, args)?;

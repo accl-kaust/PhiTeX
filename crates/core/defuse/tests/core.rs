@@ -686,3 +686,25 @@ fn a_node_that_never_contributes_is_no_stop() {
     assert_eq!(e.output(n), Some(v.int(2)));
     assert_eq!(Report::by_op(&r.runs_by_op, "next_after"), 1, "the reader ran once, past the quiet node still running: {r:?}");
 }
+
+#[test]
+fn many_pushed_at_once_are_as_pushed_one_by_one() {
+    let (e, o) = engine();
+    let v = e.values();
+    let u = e.new_unit();
+    let n = 300;
+    let x = f(v, "x");
+    e.push(u, o.def, vec![x, v.int(-1)]);
+    let defs: Vec<Vec<ValueId>> = (0..n).map(|i| vec![f(v, &format!("y{i}")), v.int(i)]).collect();
+    e.push_many(u, o.def, defs, 4);
+    let gets: Vec<Vec<ValueId>> = (0..n).map(|i| vec![f(v, &format!("y{i}"))]).collect();
+    let ids = e.push_many(u, o.get, gets, 4);
+    let last = e.push(u, o.get, vec![x]);
+    let r = e.evaluate(4).unwrap();
+    assert_eq!(r.runs, 2 * n as u64 + 2);
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(e.output(*id), Some(v.int(i as i64)), "get {i}");
+    }
+    assert_eq!(e.output(last), Some(v.int(-1)));
+    assert!(e.check_invariants().is_empty());
+}

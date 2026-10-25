@@ -196,7 +196,7 @@ pub(crate) struct Ops {
     /// The build's package records, for the engine's predicted
     /// definitions ([`crate::pkgrec::LoadHints::prediction`]).
     pub pkg_loads:
-        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::pkgrec::LoadHints>>>>,
+        std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<crate::pkgrec::LoadHints>>>>,
     /// The document files the client cut (`api::DocFile`): a run reaching
     /// one places its slices as its pieces ([`Run::doc_file_regions`]).
     pub docs: crate::api::DocFiles,
@@ -4450,7 +4450,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if f.lazy()
             && let Some(key) = f.cut
         {
-            let loads = self.ops.pkg_loads.locked().clone();
+            let loads = self.ops.pkg_loads.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             return crate::api::doc_file_pieces(
                 v,
                 &self.ops.docs,
@@ -4476,7 +4476,7 @@ impl<'c, 'a> Run<'c, 'a> {
         crate::hints::register_text(&self.ops.hints, f.name, &t);
         // (a region whose text cannot bound what it defines: its
         // record's hint, keyed by its text, `crate::pkgrec`)
-        let loads = self.ops.pkg_loads.locked().clone();
+        let loads = self.ops.pkg_loads.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let mut out = Vec::new();
         for &(s, e) in &t.slices {
             if e <= f.off {
@@ -6844,31 +6844,6 @@ pub(crate) fn lines_value(v: &Values, lines: &[(ValueId, i64)]) -> ValueId {
             .map(|(_, n, k)| v.list(vec![n, v.int(k)]))
             .collect(),
     )
-}
-
-/// The lines a node's own text begins, by file, as its run counts them
-/// ([`Run::doc_line_begun`]): its segments not reached yet that begin a
-/// line, are no `\read` line and carry no number of their own.
-pub(crate) fn text_lines(v: &Values, args: &[ValueId]) -> ValueId {
-    let mut lines: Vec<(ValueId, i64)> = Vec::new();
-    for f in args.first().map(|&a| list_of(v, a)).unwrap_or_default() {
-        let xs = list_of(v, f);
-        if xs.first().map(|&t| str_of(v, t)).as_deref() != Some("s") {
-            continue;
-        }
-        let flags = xs.get(4).map_or(3, |&x| int_of(v, x));
-        let unread = xs.get(3).map_or(-2, |&x| int_of(v, x)) == -2;
-        let lineno = xs.get(7).map_or(0, |&x| int_of(v, x));
-        if !unread || flags & 1 == 0 || flags & 4 != 0 || lineno != 0 {
-            continue;
-        }
-        let name = if xs.len() >= 7 { xs[5] } else { ValueId::UNIT };
-        match lines.iter_mut().find(|(n, _)| *n == name) {
-            Some((_, k)) => *k += 1,
-            None => lines.push((name, 1)),
-        }
-    }
-    lines_value(v, &lines)
 }
 
 /// The paths of a read-back field's definition and its globality in
