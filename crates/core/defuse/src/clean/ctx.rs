@@ -202,6 +202,11 @@ pub struct Ctx<'a> {
     pub(crate) pubs: Vec<(Field, ValueId)>,
     pub(crate) kids: Vec<Spec>,
     pub(crate) conts: Vec<Spec>,
+    /// The digests of the first placements of `kids` and `conts`, by how
+    /// many: a mark's digest adds those after ([`Ctx::out_digests`]; a
+    /// page builder marked after every page hashed every finisher it had
+    /// placed). Reset where the lists are made anew.
+    place_dig: std::cell::Cell<[(usize, u64); 2]>,
     pub(crate) effect: Option<Effect>,
     pub(crate) kinds: Vec<ValueId>,
     pub(crate) diag: Vec<ValueId>,
@@ -352,6 +357,7 @@ impl<'a> Ctx<'a> {
             pubs: Vec::new(),
             kids: kids0,
             conts: conts0,
+            place_dig: std::cell::Cell::new([(0, 0); 2]),
             effect: None,
             kinds: Vec::new(),
             diag: Vec::new(),
@@ -2874,13 +2880,26 @@ impl<'a> Ctx<'a> {
                 h = h.wrapping_add(hash_words(k, &[f.0.raw(), x.raw()]));
             }
         }
-        for (k, l) in [(5, &self.kids), (6, &self.conts)] {
-            for (i, s) in l.iter().enumerate() {
-                let mut w: Vec<u64> = vec![i as u64, u64::from(s.op.0)];
-                w.extend(s.args.iter().map(|a| a.raw()));
-                h = h.wrapping_add(hash_words(k, &w));
+        // (The placements are only appended to, or made anew, which
+        // resets the digests kept: the ones hashed before are summed.)
+        let mut dig = self.place_dig.get();
+        for (j, (k, l)) in [(5, &self.kids), (6, &self.conts)].into_iter().enumerate() {
+            let (mut n, mut sum) = dig[j];
+            if n > l.len() {
+                (n, sum) = (0, 0);
             }
+            let mut w: Vec<u64> = Vec::new();
+            for (i, s) in l.iter().enumerate().skip(n) {
+                w.clear();
+                w.push(i as u64);
+                w.push(u64::from(s.op.0));
+                w.extend(s.args.iter().map(|a| a.raw()));
+                sum = sum.wrapping_add(hash_words(k, &w));
+            }
+            dig[j] = (l.len(), sum);
+            h = h.wrapping_add(sum);
         }
+        self.place_dig.set(dig);
         for (k, l) in [(7, &self.kinds), (8, &self.diag)] {
             for (i, x) in l.iter().enumerate() {
                 h = h.wrapping_add(hash_words(k, &[i as u64, x.raw()]));
@@ -2957,6 +2976,7 @@ impl<'a> Ctx<'a> {
         let (kids, conts) = (o.kids[..m.kids as usize].to_vec(), o.conts[..m.conts as usize].to_vec());
         self.kids.clone_from(&kids);
         self.conts.clone_from(&conts);
+        self.place_dig.set([(0, 0); 2]);
         self.nkids = kids.len();
         self.from_mark = Some(MarkResume { after: o.after, old: o.old, j, kids, conts, no_cut: true });
         true
@@ -3012,6 +3032,7 @@ impl<'a> Ctx<'a> {
         self.pubs.clear();
         self.kids.clear();
         self.conts.clear();
+        self.place_dig.set([(0, 0); 2]);
         self.effect = None;
         self.kinds.clear();
         self.diag.clear();

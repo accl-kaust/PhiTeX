@@ -144,6 +144,80 @@ pub(crate) struct UnitRec {
     pub src: ValueId,
 }
 
+/// An append-only list whose copy is cheap: full chunks shared behind
+/// `Arc`s, the last part its own. The page builder's loop is copied at
+/// every mark ([`Run::page_mark`]); its lists of the pages fired so far
+/// copied whole made the marks quadratic in the pages.
+pub(crate) struct Chunked<T> {
+    chunks: Vec<std::sync::Arc<[T]>>,
+    tail: Vec<T>,
+}
+
+/// The entries of a full chunk of [`Chunked`].
+const CHUNK: usize = 64;
+
+impl<T: Clone> Clone for Chunked<T> {
+    fn clone(&self) -> Self {
+        Chunked {
+            chunks: self.chunks.clone(),
+            tail: self.tail.clone(),
+        }
+    }
+}
+
+impl<T> Default for Chunked<T> {
+    fn default() -> Self {
+        Chunked {
+            chunks: Vec::new(),
+            tail: Vec::new(),
+        }
+    }
+}
+
+impl<T> Chunked<T> {
+    pub(crate) fn len(&self) -> usize {
+        self.chunks.len() * CHUNK + self.tail.len()
+    }
+
+    pub(crate) fn push(&mut self, x: T) {
+        self.tail.push(x);
+        if self.tail.len() == CHUNK {
+            let full: Vec<T> = std::mem::replace(&mut self.tail, Vec::with_capacity(CHUNK));
+            self.chunks.push(std::sync::Arc::from(full));
+        }
+    }
+
+    pub(crate) fn get(&self, i: usize) -> Option<&T> {
+        match self.chunks.get(i / CHUNK) {
+            Some(c) => c.get(i % CHUNK),
+            None => self.tail.get(i - self.chunks.len() * CHUNK),
+        }
+    }
+
+    pub(crate) fn last(&self) -> Option<&T> {
+        self.tail.last().or_else(|| self.chunks.last().and_then(|c| c.last()))
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.chunks.clear();
+        self.tail.clear();
+    }
+
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
+        self.chunks.iter().flat_map(|c| c.iter()).chain(self.tail.iter())
+    }
+}
+
+impl<T> FromIterator<T> for Chunked<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(it: I) -> Self {
+        let mut c = Chunked::default();
+        for x in it {
+            c.push(x);
+        }
+        c
+    }
+}
+
 /// The page builder's node's loop, kept over a park.
 #[derive(Clone)]
 pub(crate) struct PageLoop {
@@ -201,13 +275,13 @@ pub(crate) struct PageLoop {
     pub marks: Vec<ValueId>,
     /// The pages fired so far: the piece each fired in, its finisher's
     /// input.
-    pub pages: Vec<std::sync::Arc<(phitex_defuse::NodeId, FinishIn)>>,
+    pub pages: Chunked<std::sync::Arc<(phitex_defuse::NodeId, FinishIn)>>,
     /// Each page's finisher arguments as placed ([`FinishIn::args`]),
     /// made once: every attempt places the pages again.
-    pub page_args: Vec<std::sync::Arc<Vec<ValueId>>>,
+    pub page_args: Chunked<std::sync::Arc<Vec<ValueId>>>,
     /// What each page's routine gave back as the loop folded it, by the
     /// page ([`PageId`]), in the order the pages fired.
-    pub outs: Vec<(PageId, ValueId)>,
+    pub outs: Chunked<(PageId, ValueId)>,
     /// The last run's [`PageLoop::outs`], fixed where this run began: a
     /// page's routine's guess while its finisher, placed anew, has no
     /// output (its page as the last run had it, not another page's,
@@ -219,7 +293,7 @@ pub(crate) struct PageLoop {
     pub resumed: bool,
     /// The finishers this run placed, page by page: their arguments and
     /// the placement's index ([`phitex_defuse::Ctx::placed_output`]).
-    pub placed: Vec<(std::sync::Arc<Vec<ValueId>>, usize)>,
+    pub placed: Chunked<(std::sync::Arc<Vec<ValueId>>, usize)>,
     /// The contributions not yet looked at, with their sources.
     pub pend: Vec<(crate::vprof::PItem, SrcRef)>,
     /// The sources of the builder's page, item for item.
@@ -236,7 +310,7 @@ pub(crate) struct PageLoop {
     pub cur_units: Option<phitex_defuse::NodeId>,
     /// The routines' material the loop folded, by page: `(page, value,
     /// its markers then its list as profile items)`.
-    pub rtns: Vec<(i64, ValueId, std::sync::Arc<Vec<crate::vprof::PItem>>)>,
+    pub rtns: Chunked<(i64, ValueId, std::sync::Arc<Vec<crate::vprof::PItem>>)>,
     /// Where the pieces' items are folded to: `(unit index in `units`,
     /// the next item)`.
     pub frontier: (usize, u32),
@@ -251,6 +325,9 @@ pub(crate) struct PageLoop {
     /// Each piece's place among those folded (the earliest a page names
     /// starts its finisher's window).
     pub order: phitex_defuse::FxHashMap<i64, u64>,
+    /// The next piece's place in [`PageLoop::order`] (the pieces no page
+    /// names any more leave it, [`Run::drop_units`]).
+    pub seq: u64,
     /// What the loop read where the owner of the units it folds last is
     /// ([`OwnerReads`]): a piece's unit and its paragraphs' lines' units
     /// share it.
@@ -456,23 +533,24 @@ impl PageLoop {
             last_markers: Vec::new(),
             prev_fire: (-1, 0),
             marks: Vec::new(),
-            pages: Vec::new(),
-            page_args: Vec::new(),
-            outs: Vec::new(),
+            pages: Chunked::default(),
+            page_args: Chunked::default(),
+            outs: Chunked::default(),
             prior: std::sync::Arc::default(),
             resumed: false,
-            placed: Vec::new(),
+            placed: Chunked::default(),
             pend: Vec::new(),
             page_src: Vec::new(),
             units: Vec::new(),
             prev: phitex_defuse::FxHashMap::default(),
             cur_units: None,
-            rtns: Vec::new(),
+            rtns: Chunked::default(),
             frontier: (0, 0),
             last_fire: None,
             page_ins: Vec::new(),
             held_nodes: Vec::new(),
             order: phitex_defuse::FxHashMap::default(),
+            seq: 0,
             own: OwnerReads::default(),
             torn: false,
         }
@@ -1270,7 +1348,8 @@ impl Run<'_, '_> {
         }
         if !lp.resumed {
             lp.placed.clear();
-            for (p, args) in lp.pages.iter().zip(&lp.page_args) {
+            let all: Vec<(std::sync::Arc<(phitex_defuse::NodeId, FinishIn)>, std::sync::Arc<Vec<ValueId>>)> = lp.pages.iter().cloned().zip(lp.page_args.iter().cloned()).collect();
+            for (p, args) in &all {
                 let (at, fin) = &**p;
                 let i = self.place_finisher(*at, fin, (**args).clone());
                 lp.placed.push((std::sync::Arc::clone(args), i));
@@ -1502,8 +1581,10 @@ impl Run<'_, '_> {
         src: ValueId,
     ) -> R<()> {
         use crate::vprof::PItem;
-        let seq = u64::try_from(lp.order.len()).unwrap_or(u64::MAX);
-        lp.order.entry(pid).or_insert(seq);
+        if let std::collections::hash_map::Entry::Vacant(e) = lp.order.entry(pid) {
+            e.insert(lp.seq);
+            lp.seq += 1;
+        }
         lp.prev.entry(pid).or_insert(lp.cur_units);
         lp.units.push(UnitRec {
             pid,
@@ -1698,7 +1779,9 @@ impl Run<'_, '_> {
         }
         // (the pages fired in this piece before this one: its place among
         // the finishers placed after the piece)
-        let nth = lp.pages.iter().filter(|p| p.0 == node).count();
+        // (the pages of this piece are the last ones: no earlier page
+        // fired in a later piece)
+        let nth = lp.pages.iter().rev().take_while(|p| p.0 == node).count();
         // (a routine's material by the pages before this one counted back
         // from it, not by their index among all the pages)
         let rel = |src: Src| match src {
@@ -2038,6 +2121,22 @@ impl Run<'_, '_> {
         if keep > 0 {
             lp.units.drain(..keep);
             lp.frontier.0 -= keep;
+        }
+        // (the places of the pieces the page's input and the units carried
+        // name: the others' go, the loop is copied at every mark)
+        let named = lp.units.len() + lp.srcs.len() + lp.pend.len() + lp.held_nodes.len();
+        if lp.order.len() > 2 * named + 64 {
+            let mut keep: phitex_defuse::FxHashSet<i64> = lp.units.iter().map(|u| u.pid).collect();
+            let piece = |s: &Src| match *s {
+                Src::Piece { piece, .. } | Src::Held { piece, .. } => Some(piece),
+                Src::Rtn { .. } => None,
+            };
+            keep.extend(lp.srcs.iter().filter_map(piece));
+            keep.extend(lp.pend.iter().filter_map(|p| p.1.src.as_ref().and_then(piece)));
+            keep.extend(lp.page_src.iter().filter_map(|p| p.src.as_ref().and_then(piece)));
+            keep.extend(lp.held_nodes.iter().filter_map(|h| piece(&h.0)));
+            lp.order.retain(|p, _| keep.contains(p));
+            lp.prev.retain(|p, _| keep.contains(p));
         }
     }
 
