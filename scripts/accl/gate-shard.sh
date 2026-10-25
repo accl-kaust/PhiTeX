@@ -700,7 +700,7 @@ rows = [
     ("  of which nodes::encode_line", num(r"phitex_tex::nodes::encode_line"), pars, "paragraph"),
     ("  of which handle_right_brace (box_end_in in it)", num(r"<phitex_tex::run::Run>::handle_right_brace"), pars, "paragraph"),
     ("a page's PDF output (pdfout::PdfPage::run)", op("pdfout::PdfPage"), pages, "page"),
-    ("  of which PdfState::char_out", num(r"<phitex_pdf::PdfState>::char_out"), letters, "letter"),
+    ("  of which PdfState::char_out and char_run", num(r"<phitex_pdf::PdfState>::char_out") + num(r"<phitex_pdf::PdfState>::char_run"), letters, "letter"),
     ("  of which begin_string_tail", num(r"<phitex_pdf::PdfState>::begin_string_tail"), letters, "letter"),
     ("  of which deflate::compress_with (%d bytes in)" % flate, num(r"phitex_codecs::deflate::compress_with"), flate, "byte in"),
     ("a finisher (pages::finish::Finish::run)", op("pages::finish::Finish"), pages, "page"),
