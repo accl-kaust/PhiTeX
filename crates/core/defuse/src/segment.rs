@@ -491,6 +491,8 @@ pub(crate) struct RangeReader {
     pub(crate) to: Option<NodeId>,
     /// `Ctx::next_contribution` rather than a fold.
     pub(crate) next: bool,
+    /// A fold up to and with `to`'s own.
+    pub(crate) incl: bool,
     pub(crate) path: PathId,
     pub(crate) seen: Option<ValueId>,
 }

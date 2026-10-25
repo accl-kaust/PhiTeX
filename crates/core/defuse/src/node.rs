@@ -223,11 +223,13 @@ pub(crate) enum ReadKind {
         f: Field,
     },
     /// The fold over contributions to `f` after `from` (None: the unit's
-    /// start) and before `to` (None: the reader).
+    /// start) and before `to` (None: the reader), or up to and with `to`'s
+    /// own (`incl`).
     Fold {
         f: Field,
         from: Option<NodeId>,
         to: Option<NodeId>,
+        incl: bool,
     },
     /// The first contribution to `f` after `after` (None: the unit's start).
     Next {
@@ -250,6 +252,19 @@ pub(crate) struct ReadRec {
     pub(crate) kind: ReadKind,
     pub(crate) path: PathId,
     pub(crate) seen: Option<ValueId>,
+    /// Its field's change count before it read ([`crate::Engine`]'s
+    /// `field_epoch`; `u64::MAX` for a read of none).
+    pub(crate) epoch: u64,
+}
+
+impl ReadKind {
+    /// The field it reads, if one.
+    pub(crate) fn field(&self) -> Option<Field> {
+        match self {
+            ReadKind::Field { f, .. } | ReadKind::Env { f } | ReadKind::Fold { f, .. } | ReadKind::Next { f, .. } => Some(*f),
+            ReadKind::Placed { .. } | ReadKind::Following { .. } => None,
+        }
+    }
 }
 
 pub(crate) struct Wake {

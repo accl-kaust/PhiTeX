@@ -190,6 +190,12 @@ fn file_range_reader(eng: &Engine, me: &Node, f: Field, r: RangeReader) {
         Some(n) => eng.node(n).pos_hint(),
         None => read::unit_start(eng, me),
     };
+    file_range_reader_from(eng, f, r, from);
+}
+
+/// `file_range_reader` in the segments from `from`'s on.
+fn file_range_reader_from(eng: &Engine, f: Field, r: RangeReader, from: Pos) {
+    let me = eng.node(r.node);
     let to = match r.to {
         Some(n) => Some(eng.node(n).pos_hint()),
         None if r.next => None,
@@ -223,7 +229,7 @@ fn covers(eng: &Engine, r: &RangeReader, at: Pos) -> bool {
     match r.to {
         Some(n) => {
             let t = eng.node(n).pos_hint();
-            if r.next { at <= t } else { at < t }
+            if r.next || r.incl { at <= t } else { at < t }
         }
         None => r.next || at < me.pos_hint(),
     }
@@ -336,7 +342,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     seen: r.seen,
                 },
             )),
-            ReadKind::Fold { f, from, to } => range_reads.push((
+            ReadKind::Fold { f, from, to, incl } => range_reads.push((
                 *f,
                 RangeReader {
                     node: node.id,
@@ -344,6 +350,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     from: *from,
                     to: *to,
                     next: false,
+                    incl: *incl,
                     path: r.path,
                     seen: r.seen,
                 },
@@ -362,6 +369,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                         from: *after,
                         to: stop,
                         next: true,
+                        incl: false,
                         path: r.path,
                         seen: r.seen,
                     },
@@ -501,12 +509,22 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         changed_contribs.dedup();
         for &f in &changed_contribs {
             inner.resum(eng, f);
+            eng.bump(f);
+        }
+        for &f in &changed_defs {
+            eng.bump(f);
         }
         // placements
         let mut after = node.id;
         let mut in_seg = true;
         let mut removed_kept: Vec<NodeId> = Vec::new();
+        // (a kept placement's subtree end found only where a placement
+        // follows it: the last one's subtree may be a whole chain)
+        let mut kept_end: Option<NodeId> = None;
         for (i, what) in p.placements.iter().enumerate() {
+            if let Some(k) = kept_end.take() {
+                after = subtree_end(eng, k);
+            }
             let after_pos = eng.node(after).pos_hint();
             if let Some(k) = kept[i]
                 && !matches!(what, Placement::FollowAfter(..))
@@ -514,7 +532,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 let kn = eng.node(k);
                 if kn.state() != State::Gone && kn.pos_hint() > after_pos {
                     placed.push(k);
-                    after = subtree_end(eng, k);
+                    kept_end = Some(k);
                     continue;
                 }
                 removed_kept.push(k);
@@ -687,7 +705,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     for (f, r) in holes {
         reask_range(eng, ww, f, &r, node.id, &mut st, &mut memo);
     }
-    for n in &made {
+    // (the last first: a worker's deque gives the newest first, so its
+    // placements run in their order, a child before the node after it)
+    for n in made.iter().rev() {
         enqueue(
             eng,
             ww,
@@ -718,10 +738,14 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         learn_shape(eng, ww, node.op(), f, c, &mut st);
     }
     // 6. the node's own reads the lock could not answer
+    // (one whose field no change has counted since it read stands)
     let refuted = refuted.or_else(|| {
         let mut memo = read::FoldMemo::new();
         unchecked.into_iter().find(|&i| {
             let r = &rec.reads[i];
+            if r.kind.field().is_some_and(|f| eng.field_epoch(f) == r.epoch) {
+                return false;
+            }
             read::answer_in(eng, node, &r.kind, r.path, &mut memo) != r.seen
         })
     });
@@ -827,6 +851,7 @@ fn walk_here(
         if let Some(e) = inner.defs.get_mut(&f).and_then(|m| m.get_mut(&p)) {
             e.value = nv;
         }
+        eng.bump(f);
         st.relative_resolved += 1;
         by = d.by;
         from = p;
@@ -869,6 +894,7 @@ pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: i64) -> bool {
                 if e.value != nv {
                     e.value = nv;
                     changed = true;
+                    eng.bump(f);
                 }
             }
             _ => return changed,
@@ -1139,6 +1165,28 @@ fn reask_range(eng: &Engine, w: Option<&Worker>, f: Field, r: &RangeReader, by: 
     if !live(eng, r.node, r.serial) {
         return;
     }
+    // a `next` whose answer stands but whose search now stops further on
+    // (the node it stopped at committed with nothing for it): filed again
+    // up to its new stop, which re-asks it in turn
+    if r.next {
+        let me = eng.node(r.node);
+        let from = match r.from {
+            Some(n) => read::pos_of(eng, n),
+            None => Some(read::unit_start(eng, me)),
+        };
+        if let Some(from) = from {
+            let n = read::next_contribution(eng, f, Some(from));
+            if read::apply_path(eng, read::next_value(eng, &n), r.path) == r.seen {
+                if n.stop != r.to {
+                    let start = r.to.and_then(|t| read::pos_of(eng, t)).unwrap_or(from);
+                    let mut again = r.clone();
+                    again.to = n.stop;
+                    file_range_reader_from(eng, f, again, start);
+                }
+                return;
+            }
+        }
+    }
     if read::range_answer_in(eng, f, r, memo) != r.seen
         && mark_stale(
             eng,
@@ -1245,6 +1293,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
                 );
                 filed.push((n, nv));
                 carried = Some(nv);
+                eng.bump(f);
                 i += 1;
             } else {
                 let (dp, d) = existing[j];
@@ -1257,6 +1306,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
                         if let Some(e) = m.get_mut(&dp) {
                             e.value = nv;
                         }
+                        eng.bump(f);
                         st.relative_resolved += 1;
                         to_walk.push((sid, d.by));
                     }
@@ -1375,6 +1425,7 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
         if first {
             eng.defs.add(d.f, seg.lo, seg.id);
         }
+        eng.bump(d.f);
     }
     *node.last.lock() = Some(Arc::new(RunRecord::provisional(defs)));
 }
@@ -1428,6 +1479,9 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
         }
     }
     *node.last.lock() = None;
+    for &f in changed_defs.iter().chain(&changed_contribs) {
+        eng.bump(f);
+    }
     drop(inner);
     ix.apply(eng, seg);
     let mut st = CommitStats::default();

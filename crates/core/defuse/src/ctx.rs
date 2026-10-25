@@ -25,6 +25,8 @@ pub(crate) struct ViewRec {
     pub(crate) path: PathId,
     /// The value under the path when the view was made.
     pub(crate) value: Option<ValueId>,
+    /// Its field's change count before the view was made.
+    pub(crate) epoch: u64,
 }
 
 pub struct Ctx<'a> {
@@ -38,6 +40,8 @@ pub struct Ctx<'a> {
     pub(crate) last: Option<Arc<RunRecord>>,
     /// Fields whose reads go unrecorded (`Engine::set_stable`).
     pub(crate) stable: Option<&'a FxHashSet<Field>>,
+    /// The change count the read in hand loaded ([`ReadRec::epoch`]).
+    pub(crate) ep: u64,
 }
 
 fn stop() -> Stop {
@@ -61,6 +65,7 @@ impl<'a> Ctx<'a> {
                 effect: Effect::None,
             },
             views: Vec::new(),
+            ep: u64::MAX,
             last: me.run_record(),
             stable: worker.map(|w| &*w.stable),
         }
@@ -97,7 +102,13 @@ impl<'a> Ctx<'a> {
     }
 
     fn record(&mut self, kind: ReadKind, path: PathId, seen: Option<ValueId>) {
-        self.product.reads.push(ReadRec { kind, path, seen });
+        let epoch = if kind.field().is_some() { self.ep } else { u64::MAX };
+        self.product.reads.push(ReadRec { kind, path, seen, epoch });
+    }
+
+    /// Loads `f`'s change count before a read of it ([`ReadRec::epoch`]).
+    fn before_read(&mut self, f: Field) {
+        self.ep = self.eng.field_epoch(f);
     }
 
     fn recorded(&self, f: Field) -> bool {
@@ -107,6 +118,7 @@ impl<'a> Ctx<'a> {
     /// The definition of `f` reaching me, or the environment's value.
     pub fn read(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
         self.check()?;
+        self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
         if self.recorded(f) {
             self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
@@ -117,6 +129,7 @@ impl<'a> Ctx<'a> {
     /// The definition of `f` reaching another position.
     pub fn read_at(&mut self, f: Field, at: At) -> Result<FieldAt, Stop> {
         self.check()?;
+        self.before_read(f);
         let (anchor, r) = match at {
             At::Before(n) => (Anchor::Before(n), reaching_at(self.eng, f, n, false)),
             At::AfterOwn(n) => (Anchor::AfterOwn(n), reaching_at(self.eng, f, n, true)),
@@ -140,6 +153,7 @@ impl<'a> Ctx<'a> {
     /// `read` through a path: the run depends only on the path's answer.
     pub fn read_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
         self.check()?;
+        self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
         let x = through(self.eng, r, p);
         if self.recorded(f) {
@@ -151,6 +165,7 @@ impl<'a> Ctx<'a> {
     /// The node whose definition of `f` reaches me (None: the environment).
     pub fn def_site(&mut self, f: Field) -> Result<Option<NodeId>, Stop> {
         self.check()?;
+        self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
         if self.recorded(f) {
             let seen = through(self.eng, r, SITE);
@@ -162,6 +177,7 @@ impl<'a> Ctx<'a> {
     /// The environment's value of `f`, whatever is defined before me.
     pub fn env(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
         self.check()?;
+        self.before_read(f);
         let x = read::env_value(self.eng, f);
         if self.recorded(f) {
             self.record(ReadKind::Env { f }, PathId::WHOLE, x);
@@ -213,29 +229,38 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn fold_value(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<ValueId, Stop> {
+    fn fold_value(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, incl: bool) -> Result<ValueId, Stop> {
         self.check()?;
+        self.before_read(f);
         let fp = self.bound(from)?;
         let tp = match to {
             Some(n) => pos_of(self.eng, n).ok_or_else(stop)?,
             None => pos_of(self.eng, self.me.id).ok_or_else(stop)?,
         };
-        Ok(read::fold(self.eng, f, Some(fp), Some(tp)))
+        Ok(read::fold(self.eng, f, Some(fp), Some(read::end_of(tp, incl))))
     }
 
     /// The declared monoid's fold over the contributions to `f` after
     /// `from` (None: the unit's start) and before `to` (None: me).
     pub fn fold(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<ValueId, Stop> {
-        let x = self.fold_value(f, from, to)?;
-        self.record(ReadKind::Fold { f, from, to }, PathId::WHOLE, Some(x));
+        let x = self.fold_value(f, from, to, false)?;
+        self.record(ReadKind::Fold { f, from, to, incl: false }, PathId::WHOLE, Some(x));
+        Ok(x)
+    }
+
+    /// The fold over the contributions to `f` after `from` (None: the
+    /// unit's start) up to and with `to`'s own.
+    pub fn fold_through(&mut self, f: Field, from: Option<NodeId>, to: NodeId) -> Result<ValueId, Stop> {
+        let x = self.fold_value(f, from, Some(to), true)?;
+        self.record(ReadKind::Fold { f, from, to: Some(to), incl: true }, PathId::WHOLE, Some(x));
         Ok(x)
     }
 
     /// `fold` through a path.
     pub fn fold_path(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, p: PathId) -> Result<Option<ValueId>, Stop> {
-        let x = self.fold_value(f, from, to)?;
+        let x = self.fold_value(f, from, to, false)?;
         let y = read::apply_path(self.eng, Some(x), p);
-        self.record(ReadKind::Fold { f, from, to }, p, y);
+        self.record(ReadKind::Fold { f, from, to, incl: false }, p, y);
         Ok(y)
     }
 
@@ -243,6 +268,7 @@ impl<'a> Ctx<'a> {
     /// or None while the next node after it has not committed.
     pub fn next_contribution(&mut self, f: Field, after: Option<NodeId>) -> Result<Option<(NodeId, ValueId)>, Stop> {
         self.check()?;
+        self.before_read(f);
         let ap = self.bound(after)?;
         let n = read::next_contribution(self.eng, f, Some(ap));
         self.record(ReadKind::Next { f, after }, PathId::WHOLE, next_value(self.eng, &n));
@@ -251,11 +277,24 @@ impl<'a> Ctx<'a> {
 
     /// A view on `fold(f, from, to)`, read step by step.
     pub fn view(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<View, Stop> {
-        let x = self.fold_value(f, from, to)?;
+        let x = self.fold_value(f, from, to, false)?;
         self.views.push(ViewRec {
-            kind: ReadKind::Fold { f, from, to },
+            kind: ReadKind::Fold { f, from, to, incl: false },
             path: PathId::WHOLE,
             value: Some(x),
+            epoch: self.ep,
+        });
+        Ok(View(u32::try_from(self.views.len() - 1).unwrap_or(u32::MAX)))
+    }
+
+    /// A view on `fold_through(f, from, to)`.
+    pub fn view_through(&mut self, f: Field, from: Option<NodeId>, to: NodeId) -> Result<View, Stop> {
+        let x = self.fold_value(f, from, Some(to), true)?;
+        self.views.push(ViewRec {
+            kind: ReadKind::Fold { f, from, to: Some(to), incl: true },
+            path: PathId::WHOLE,
+            value: Some(x),
+            epoch: self.ep,
         });
         Ok(View(u32::try_from(self.views.len() - 1).unwrap_or(u32::MAX)))
     }
@@ -263,11 +302,13 @@ impl<'a> Ctx<'a> {
     /// A view on `read(f)`.
     pub fn view_field(&mut self, f: Field) -> Result<View, Stop> {
         self.check()?;
+        self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
         self.views.push(ViewRec {
             kind: ReadKind::Field { f, at: Anchor::Me },
             path: PathId::WHOLE,
             value: r.value,
+            epoch: self.ep,
         });
         Ok(View(u32::try_from(self.views.len() - 1).unwrap_or(u32::MAX)))
     }
@@ -279,23 +320,25 @@ impl<'a> Ctx<'a> {
     /// The view one step further; None where the step does not apply.
     pub fn at(&mut self, v: View, s: Step) -> Option<View> {
         let rec = self.view_rec(v)?;
-        let (kind, value) = (rec.kind.clone(), rec.value);
+        let (kind, value, epoch) = (rec.kind.clone(), rec.value, rec.epoch);
         let path = self.eng.path_extend(rec.path, s);
         let x = read::step(self.eng, value, s);
         let present = self.eng.path_extend(path, Step::Present);
         let seen = Some(self.eng.values().bool(x.is_some()));
+        self.ep = epoch;
         self.record(kind.clone(), present, seen);
         x?;
-        self.views.push(ViewRec { kind, path, value: x });
+        self.views.push(ViewRec { kind, path, value: x, epoch });
         Some(View(u32::try_from(self.views.len() - 1).unwrap_or(u32::MAX)))
     }
 
     /// The value at one step further, recorded as a read of that path.
     pub fn get(&mut self, v: View, s: Step) -> Option<ValueId> {
         let rec = self.view_rec(v)?;
-        let (kind, value) = (rec.kind.clone(), rec.value);
+        let (kind, value, epoch) = (rec.kind.clone(), rec.value, rec.epoch);
         let path = self.eng.path_extend(rec.path, s);
         let x = read::step(self.eng, value, s);
+        self.ep = epoch;
         self.record(kind, path, x);
         x
     }
@@ -315,6 +358,7 @@ impl<'a> Ctx<'a> {
             return ValueId::UNIT;
         };
         let (kind, path, value) = (rec.kind.clone(), rec.path, rec.value);
+        self.ep = rec.epoch;
         self.record(kind, path, value);
         value.unwrap_or(ValueId::UNIT)
     }

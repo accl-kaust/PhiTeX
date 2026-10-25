@@ -453,7 +453,7 @@ pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, 
             through(eng, r, path)
         }
         ReadKind::Env { f } => apply_path(eng, env_value(eng, *f), path),
-        ReadKind::Fold { f, from, to } => {
+        ReadKind::Fold { f, from, to, incl } => {
             let from = match from {
                 Some(n) => Some(pos_of(eng, *n)?),
                 None => Some(unit_start(eng, me)),
@@ -462,7 +462,7 @@ pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, 
                 Some(n) => pos_of(eng, *n)?,
                 None => pos_of(eng, me.id)?,
             };
-            apply_path(eng, Some(fold_in(eng, *f, from?, to, memo)), path)
+            apply_path(eng, Some(fold_in(eng, *f, from?, end_of(to, *incl), memo)), path)
         }
         ReadKind::Next { f, after } => {
             let after = match after {
@@ -509,7 +509,13 @@ pub(crate) fn range_answer_in(eng: &Engine, f: Field, r: &RangeReader, memo: &mu
         Some(n) => pos_of(eng, n)?,
         None => pos_of(eng, me.id)?,
     };
-    apply_path(eng, Some(fold_in(eng, f, from?, to, memo)), r.path)
+    apply_path(eng, Some(fold_in(eng, f, from?, end_of(to, r.incl), memo)), r.path)
+}
+
+/// A fold's exclusive end at `to`, or just past it where `to`'s own is in
+/// (labels are integers: nothing lies between `to` and the next).
+pub(crate) fn end_of(to: Pos, incl: bool) -> Pos {
+    if incl { Pos(to.0 + 1) } else { to }
 }
 
 /// The built-in projections.

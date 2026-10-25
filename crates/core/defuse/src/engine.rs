@@ -120,7 +120,13 @@ pub struct Engine {
     pub(crate) last_commit: AtomicU64,
     /// The last evaluation's report, for the chain queries.
     pub(crate) last_report: Mx<Option<Report>>,
+    /// A change count per field bucket ([`Engine::field_epoch`]): a run's
+    /// read whose bucket did not move by its commit needs no second look.
+    pub(crate) field_epochs: Box<[AtomicU64]>,
 }
+
+/// The buckets of [`Engine::field_epochs`].
+const EPOCH_BUCKETS: usize = 4096;
 
 impl Default for Engine {
     fn default() -> Self {
@@ -149,6 +155,7 @@ impl Engine {
         projections.push(Arc::new(|x: ValueId, _: &Values| x) as Projection);
         projections.push(read::builtin_projection(ProjId::IS_EMPTY).expect("the built-in projection"));
         Engine {
+            field_epochs: (0..EPOCH_BUCKETS).map(|_| AtomicU64::new(0)).collect(),
             values: Values::new(),
             ops: Table::new(),
             units: Table::new(),
@@ -729,6 +736,22 @@ impl Engine {
         Some(read::fold(self, f, Some(Pos(u.start.0 - 1)), Some(u.end)))
     }
 
+    fn epoch_bucket(f: Field) -> usize {
+        usize::try_from(crate::values::hash_words(0, &[f.0.raw()]) % EPOCH_BUCKETS as u64).unwrap_or(0)
+    }
+
+    /// `f`'s bucket's change count: loaded before a read, compared at the
+    /// reader's commit.
+    pub(crate) fn field_epoch(&self, f: Field) -> u64 {
+        self.field_epochs[Self::epoch_bucket(f)].load(Ordering::SeqCst)
+    }
+
+    /// Counts a change of `f`'s definitions, contributions or environment
+    /// value, made before this call.
+    pub(crate) fn bump(&self, f: Field) {
+        self.field_epochs[Self::epoch_bucket(f)].fetch_add(1, Ordering::SeqCst);
+    }
+
     /// The fold of contributions to `f` (default: `SeqMonoid`).
     pub fn declare_accumulator(&self, f: Field, m: Arc<dyn Monoid>) {
         self.monoids.write().by_field.insert(f, m);
@@ -763,6 +786,7 @@ impl Engine {
         let mut vals = self.env.values.write();
         for (f, x) in env {
             vals.insert(f, Some(x));
+            self.bump(f);
         }
     }
 
@@ -773,6 +797,7 @@ impl Engine {
             let mut vals = self.env.values.write();
             for (f, x) in changes {
                 vals.insert(*f, *x);
+                self.bump(*f);
             }
         }
         let mut st = CommitStats::default();
@@ -840,7 +865,10 @@ impl Engine {
         let n = threads.max(1);
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         let (pool, workers) = Pool::new(n, epoch, self.limits(), self.stable.read().clone());
-        let seed = self.take_pending(&workers[0]);
+        let mut seed = self.take_pending(&workers[0]);
+        // (in position order, as the blocks run: a node inserted before
+        // others runs with them, not after every node pushed)
+        seed.sort_by_key(|&n| self.node(n).pos_hint());
         if !seed.is_empty() {
             let per = seed.len().div_ceil(n);
             for (i, chunk) in seed.chunks(per).enumerate() {
