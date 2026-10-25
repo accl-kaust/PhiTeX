@@ -1791,3 +1791,52 @@ impl<T: Clone> CatMemo<T> {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phitex_defuse::Monoid as _;
+
+    /// A fold as the engine makes it: each segment's sum, then the sums
+    /// left to right.
+    fn fold(v: &Values, segs: &[Vec<i64>]) -> ValueId {
+        let m = CatMonoid;
+        let mut acc = m.empty(v);
+        for s in segs {
+            let mut sum = m.empty(v);
+            for &x in s {
+                sum = m.combine(v, sum, v.int(x));
+            }
+            acc = m.combine(v, acc, sum);
+        }
+        acc
+    }
+
+    /// A walk from the last walk's spine gives the fold's elements,
+    /// however the segments changed (one edited, added, removed, emptied)
+    /// and whichever the last walk was.
+    #[test]
+    fn cat_walks_are_the_folds_elements() {
+        let v = Values::new();
+        let mut segs: Vec<Vec<i64>> = (0..200).map(|k| (0..(k % 5)).map(|j| k * 10 + j).collect()).collect();
+        let mut memo: CatMemo<i64> = CatMemo::default();
+        let mut step = |segs: &Vec<Vec<i64>>, memo: &mut CatMemo<i64>| {
+            let x = fold(&v, segs);
+            let want: Vec<i64> = segs.iter().flatten().copied().collect();
+            let got = memo.walk(&v, x, |e| v.as_int(e));
+            assert_eq!(got, want);
+            assert_eq!(cat_to_vec(&v, x).len(), want.len());
+        };
+        step(&segs, &mut memo);
+        for k in [150usize, 3, 199, 0, 77] {
+            segs[k].push(-1);
+            step(&segs, &mut memo);
+            segs.insert(k, vec![-2, -3]);
+            step(&segs, &mut memo);
+            segs.remove(k / 2);
+            step(&segs, &mut memo);
+            segs[k / 3].clear();
+            step(&segs, &mut memo);
+        }
+    }
+}
