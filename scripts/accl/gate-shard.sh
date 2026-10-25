@@ -83,6 +83,51 @@ cache_off() {
   "$RUSTC_WRAPPER" --stop-server > /dev/null 2>&1
   echo "sccache: $(grep -E '^(Compile requests|Cache hits|Cache misses|Non-cacheable calls) ' "$r/sccache.txt" | sed -E 's/  +/ /g' | tr '\n' ',' | sed 's/,$//')"
 }
+# update FILE_TXT LABEL DIR MAIN J N ARGS...: a watch writing update
+# sections (gate-update.py: N edits, each file kept, the idle write's
+# md5 against a cold build of each text), its files read back by the PDF
+# writer's update test (harness_pairs); red if either fails
+update() {
+  local out=$1 label=$2 dir=$3 main=$4 j=$5 n=$6
+  shift 6
+  rm -rf "$w/$dir" "$w/$dir-cold" "$w/$dir-pairs" && mkdir -p "$w/$dir" && cp "bench/$main" "$w/$dir/"
+  (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 \
+    timeout 3000 python3 -I scripts/accl/gate-update.py "$bin" "$w/$dir" "$main" "$j" "$n" "$j" "$r/$label.json" "$w/$dir-pairs" "$@" --program pdftex) >> "$out" 2>&1
+  grep -q '"verdict": "same"' "$r/$label.json" 2>/dev/null || red "$label: $(python3 -c "import json;print(json.load(open('$r/$label.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
+  if (cd crates/output/pdf && PHITEX_UPDATE_PAIRS="$w/$dir-pairs" timeout 1800 "$w/bin/tests/update" --exact harness_pairs --nocapture > "$r/$label-read.txt" 2>&1); then
+    grep '^harness_pairs' "$r/$label-read.txt" | sed "s/^/  $label: /" >> "$out"
+  else
+    red "$label: the update files read back ($(grep -m1 -E 'panicked|differs|error' "$r/$label-read.txt" | cut -c1-160))"
+  fi
+  rm -rf "$w/$dir-pairs"
+}
+# phases LOG LABEL: the median edit's timeline of a watch's stderr
+# (PHITEX_TEX_TIME), quoted
+phases() {
+  python3 -I - "$1" "$2" <<'PY'
+import re, sys
+blocks, cur = [], None
+for line in open(sys.argv[1], errors="replace"):
+    if line.startswith("timeline ("):
+        cur = [line.rstrip()]
+        blocks.append(cur)
+    elif cur is not None and line.startswith("  "):
+        cur.append(line.rstrip())
+        if line.startswith("  clock:"):
+            cur = None
+    else:
+        cur = None
+edits = [b for b in blocks[1:] if b]
+if not edits:
+    print(sys.argv[2] + ": no timeline")
+else:
+    total = lambda b: float(re.search(r"([0-9.]+) ms from", b[0]).group(1))
+    edits.sort(key=total)
+    b = edits[len(edits) // 2]
+    print("%s (median of %d edits; totals %s ms):" % (sys.argv[2], len(edits), " ".join("%.1f" % total(x) for x in edits)))
+    print("\n".join(b[:48]))
+PY
+}
 # the build's compile time, as the shard's build_s
 fetched() { echo "build_s $(cat "$w/bin/build_s" "$w/bin/tests/build_s" "$w/bin/cli/build_s" 2>/dev/null | head -1 | grep . || echo 0)" >> "$r/times.txt"; }
 # runtests BIN PREFIX LIST DIR: each test of LIST (names, one a line) its
@@ -180,7 +225,9 @@ case $shard in
     cache_on
     a=()
     for s in latex $SUITES; do a+=(--test "$s"); done
-    ( $T "${a[@]}" --no-run --message-format=json-render-diagnostics > "$r/build-tests.json" 2> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
+    # (and the PDF writer's update test, which reads back a watch's
+    # update files: the para and big shards run it on theirs)
+    ( { $T "${a[@]}" --no-run --message-format=json-render-diagnostics && cargo test --profile fastdev -p phitex-pdf --test update --no-run --message-format=json-render-diagnostics; } > "$r/build-tests.json" 2> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
     # (three CLIs: the checks' (profile and observe: CHECK_READS, the
     # recordings, amsldoc), the timings' (profile: the acct lines without
     # the engine's recorder) and the users' (no feature))
@@ -430,8 +477,23 @@ print(r["verdict"] + (": " + ", ".join(bad) if bad else ""))' "$r/editkinds-j$j.
       [ "$e" = 0 ] || red "para40000 -j $j: exit $e"
     done
     rm -rf "$w/bige" && mkdir -p "$w/bige" && cp bench/para40000.tex "$w/bige/"
-    (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 timeout 1800 python3 -I scripts/accl/edit-one.py "$bin" "$w/bige" para40000.tex 8 3 "$r/big-watch.err" --program pdftex) >> "$r/big.txt" 2>&1
+    # (the exact file after every edit, --exact, as before; then the
+    # watch's default, update sections)
+    echo "para40000 watch --exact:" >> "$r/big.txt"
+    (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 timeout 1800 python3 -I scripts/accl/edit-one.py "$bin" "$w/bige" para40000.tex 8 3 "$r/big-watch-exact.err" --program pdftex --exact) >> "$r/big.txt" 2>&1
+    grep -E '^(edit phases|session phases|pdf exact|link:)' "$r/big-watch-exact.err" | tail -8 | sed 's/^/  /' >> "$r/big.txt"
+    phases "$r/big-watch-exact.err" "para40000 --exact edit phases -j 8" >> "$r/big.txt"
+    rm -rf "$w/bige" && mkdir -p "$w/bige" && cp bench/para40000.tex "$w/bige/"
+    echo "para40000 watch (update sections):" >> "$r/big.txt"
+    (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 timeout 1800 python3 -I scripts/accl/edit-one.py "$bin" "$w/bige" para40000.tex 8 5 "$r/big-watch.err" --program pdftex) >> "$r/big.txt" 2>&1
     grep -E '^(edit phases|session phases|pdf exact|link:)' "$r/big-watch.err" | tail -8 | sed 's/^/  /' >> "$r/big.txt"
+    phases "$r/big-watch.err" "para40000 edit phases -j 8" >> "$r/big.txt"
+    # the update file: word edits each followed by the idle write (the
+    # file kept, read back, the idle write's md5 against a cold build),
+    # then a burst of edits without the idle wait, at -j 8 and 16
+    for j in 8 16; do
+      update "$r/big.txt" "big-update-j$j" bigu para40000.tex $j 3 --burst 6
+    done
     ;;
   para)
     # para BAR_MD5: the head's release CLI; the format made once untimed,
@@ -513,7 +575,7 @@ print(r["verdict"] + (": " + ", ".join(bad) if bad else ""))' "$r/editkinds-j$j.
     for j in 8 16; do
       rm -rf "$w/parh" "$w/parh-cold" && mkdir -p "$w/parh" && cp bench/para4000.tex "$w/parh/"
       (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 \
-        timeout 2400 python3 -I scripts/accl/gate-edits.py "$bin" "$w/parh" para4000.tex $j 50 $j "$r/edits-j$j.json" --program pdftex) >> "$r/para.txt" 2>&1
+        timeout 2400 python3 -I scripts/accl/gate-edits.py "$bin" "$w/parh" para4000.tex $j 50 $j "$r/edits-j$j.json" --program pdftex --exact) >> "$r/para.txt" 2>&1
       grep -q '"verdict": "same"' "$r/edits-j$j.json" 2>/dev/null || red "para4000 edit history -j $j: $(python3 -c "import json;print(json.load(open('$r/edits-j$j.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
     done
     # one edit's phases at -j 8: 10 edits with the watch's timelines
@@ -526,7 +588,7 @@ print(r["verdict"] + (": " + ", ".join(bad) if bad else ""))' "$r/editkinds-j$j.
     rm -rf "$w/parp" "$w/parp-cold" && mkdir -p "$w/parp" && cp bench/para4000.tex "$w/parp/"
     (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_TEX_TIME=1 GATE_EDIT_STDERR="$r/edit-phases-j8-$hv.log" \
       PHITEX_NO_HEIGHTS=$([ $hv = off ] && echo 1) \
-      timeout 900 python3 -I scripts/accl/gate-edits.py "$bin" "$w/parp" para4000.tex 8 10 7 "$r/edits-phases-j8-$hv.json" --program pdftex) > /dev/null 2>&1
+      timeout 900 python3 -I scripts/accl/gate-edits.py "$bin" "$w/parp" para4000.tex 8 10 7 "$r/edits-phases-j8-$hv.json" --program pdftex --exact) > /dev/null 2>&1
     echo "(heights $hv)" >> "$r/para.txt"
     python3 -I - "$r/edit-phases-j8-$hv.log" >> "$r/para.txt" <<'PY'
 import re, sys
@@ -552,6 +614,17 @@ else:
     print("\n".join(b[:40]))
 PY
     done
+    # the update file (watch's default): word edits each followed by
+    # the idle write, then a burst without the idle wait, at -j 8 and 16
+    # (the walls without the timelines); an insert every other edit at
+    # -j 8; the update run's phases at -j 8 (PHITEX_TEX_TIME)
+    bin=$w/bin/cli/prof/phitex
+    for j in 8 16; do
+      update "$r/para.txt" "para-update-j$j" paru para4000.tex $j 10 --burst 10
+    done
+    update "$r/para.txt" "para-update-insert-j8" paru para4000.tex 8 6 --insert
+    GATE_EDIT_STDERR="$r/update-phases-j8.log" PHITEX_TEX_TIME=1 update "$r/para.txt" "para-update-phases-j8" paru para4000.tex 8 6 --burst 6
+    phases "$r/update-phases-j8.log" "para4000 update edit phases -j 8" >> "$r/para.txt"
     python3 -I scripts/accl/gate-acct.py table para "$r" > "$r/table.txt" 2>&1
     ;;
   cg)

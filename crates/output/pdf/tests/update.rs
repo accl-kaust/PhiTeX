@@ -28,7 +28,10 @@
     clippy::assigning_clones
 )]
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use phitex_pdf::map::{MapEntry, parse_map};
@@ -319,6 +322,11 @@ struct Reader<'a> {
     trailer: Obj,
     /// The cross-reference sections met, newest first.
     sections: usize,
+    /// The objects' digests ([`Reader::digest`]; `None`: being made).
+    digests: RefCell<HashMap<usize, Option<u64>>>,
+    /// The object streams decoded: their data, `/First` and the
+    /// objects' numbers and offsets.
+    streams: RefCell<HashMap<usize, Rc<(Vec<u8>, usize, Vec<(usize, usize)>)>>>,
 }
 
 fn decoded(d: &BTreeMap<Vec<u8>, Obj>, data: &[u8]) -> Vec<u8> {
@@ -432,6 +440,8 @@ impl<'a> Reader<'a> {
             xref,
             trailer: trailer.unwrap(),
             sections,
+            digests: RefCell::default(),
+            streams: RefCell::default(),
         }
     }
 
@@ -447,26 +457,12 @@ impl<'a> Reader<'a> {
                 lx.value()
             }
             Entry::In(s, idx) => {
-                let Obj::Stream(d, data) = self.object(s) else {
-                    panic!("object stream {s} of object {n}")
-                };
-                let data = decoded(&d, &data);
-                let count = d.get(&b"N"[..]).and_then(Obj::int).unwrap() as usize;
-                let first = d.get(&b"First"[..]).and_then(Obj::int).unwrap() as usize;
-                assert!(
-                    idx < count,
-                    "object {n}: index {idx} of {count} in stream {s}"
-                );
-                let mut lx = Lexer { b: &data, i: 0 };
-                let mut pairs = Vec::new();
-                for _ in 0..count {
-                    let a: usize = std::str::from_utf8(lx.word()).unwrap().parse().unwrap();
-                    let o: usize = std::str::from_utf8(lx.word()).unwrap().parse().unwrap();
-                    pairs.push((a, o));
-                }
+                let st = self.stream(s);
+                let (data, first, pairs) = &*st;
+                assert!(idx < pairs.len(), "object {n}: index {idx} of {} in stream {s}", pairs.len());
                 assert_eq!(pairs[idx].0, n, "stream {s}'s object {idx} is not {n}");
                 let mut lx = Lexer {
-                    b: &data,
+                    b: data,
                     i: first + pairs[idx].1,
                 };
                 lx.value()
@@ -474,33 +470,90 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// `x` with every reference followed (but `/Parent`'s), streams
-    /// decoded: what a page shows, whatever the objects' numbers.
-    fn resolved(&self, x: &Obj, depth: usize) -> Obj {
-        assert!(depth < 64, "references too deep");
+    /// Object stream `s` decoded, its header read.
+    fn stream(&self, s: usize) -> Rc<(Vec<u8>, usize, Vec<(usize, usize)>)> {
+        if let Some(x) = self.streams.borrow().get(&s) {
+            return x.clone();
+        }
+        let Obj::Stream(d, data) = self.object(s) else {
+            panic!("object stream {s}")
+        };
+        let data = decoded(&d, &data);
+        let count = d.get(&b"N"[..]).and_then(Obj::int).unwrap() as usize;
+        let first = d.get(&b"First"[..]).and_then(Obj::int).unwrap() as usize;
+        let mut lx = Lexer { b: &data, i: 0 };
+        let mut pairs = Vec::new();
+        for _ in 0..count {
+            let a: usize = std::str::from_utf8(lx.word()).unwrap().parse().unwrap();
+            let o: usize = std::str::from_utf8(lx.word()).unwrap().parse().unwrap();
+            pairs.push((a, o));
+        }
+        let x = Rc::new((data, first, pairs));
+        self.streams.borrow_mut().insert(s, x.clone());
+        x
+    }
+
+    /// A digest of `x` with every reference followed (but `/Parent`'s
+    /// and a page's own, `/P`), streams decoded: what a page shows,
+    /// whatever the objects' numbers; each object's made once.
+    fn digest(&self, x: &Obj) -> u64 {
+        let mut h = std::hash::DefaultHasher::new();
+        self.feed(x, &mut h);
+        h.finish()
+    }
+
+    fn feed(&self, x: &Obj, h: &mut std::hash::DefaultHasher) {
         match x {
-            Obj::Ref(n) => self.resolved(&self.object(*n), depth + 1),
-            Obj::Array(a) => Obj::Array(a.iter().map(|y| self.resolved(y, depth + 1)).collect()),
-            Obj::Dict(d) => Obj::Dict(self.resolved_dict(d, depth)),
-            Obj::Stream(d, data) => {
-                let mut r = self.resolved_dict(d, depth);
-                for k in ["Length", "Filter", "DecodeParms"] {
-                    r.remove(k.as_bytes());
-                }
-                Obj::Stream(r, decoded(d, data))
+            Obj::Ref(n) => {
+                let known = self.digests.borrow().get(n).copied();
+                let d = match known {
+                    Some(Some(d)) => d,
+                    // (a cycle: the object being digested)
+                    Some(None) => 0x6379_636c_65,
+                    None => {
+                        self.digests.borrow_mut().insert(*n, None);
+                        let d = self.digest(&self.object(*n));
+                        self.digests.borrow_mut().insert(*n, Some(d));
+                        d
+                    }
+                };
+                0u8.hash(h);
+                d.hash(h);
             }
-            _ => x.clone(),
+            Obj::Array(a) => {
+                1u8.hash(h);
+                a.len().hash(h);
+                for y in a {
+                    self.feed(y, h);
+                }
+            }
+            Obj::Dict(d) => {
+                2u8.hash(h);
+                self.feed_dict(d, h);
+            }
+            Obj::Stream(d, data) => {
+                3u8.hash(h);
+                self.feed_dict(d, h);
+                decoded(d, data).hash(h);
+            }
+            other => {
+                4u8.hash(h);
+                format!("{other:?}").hash(h);
+            }
         }
     }
 
-    fn resolved_dict(&self, d: &BTreeMap<Vec<u8>, Obj>, depth: usize) -> BTreeMap<Vec<u8>, Obj> {
-        d.iter()
-            .filter(|(k, _)| k.as_slice() != b"Parent")
-            .map(|(k, v)| (k.clone(), self.resolved(v, depth + 1)))
-            .collect()
+    fn feed_dict(&self, d: &BTreeMap<Vec<u8>, Obj>, h: &mut std::hash::DefaultHasher) {
+        for (k, v) in d {
+            if matches!(&k[..], b"Parent" | b"P" | b"Length" | b"Filter" | b"DecodeParms") {
+                continue;
+            }
+            k.hash(h);
+            self.feed(v, h);
+        }
     }
 
-    /// The pages in order, each resolved.
+    /// The pages in order.
     fn pages(&self) -> Vec<Obj> {
         let root = self.object(match self.trailer.get("Root") {
             Some(Obj::Ref(n)) => *n,
@@ -522,29 +575,28 @@ impl<'a> Reader<'a> {
                         stack.push(k.clone());
                     }
                 }
-                Some(Obj::Name(t)) if t == b"Page" => out.push(self.resolved(&node, 0)),
+                Some(Obj::Name(t)) if t == b"Page" => out.push(node),
                 t => panic!("a page tree node of type {t:?}"),
             }
         }
         out
     }
 
-    /// The pages' content streams' bytes, decoded.
-    fn contents(pages: &[Obj]) -> Vec<Vec<u8>> {
-        pages
-            .iter()
-            .map(|p| match p.get("Contents") {
-                Some(Obj::Stream(_, d)) => d.clone(),
-                Some(Obj::Array(a)) => a
-                    .iter()
-                    .flat_map(|s| match s {
-                        Obj::Stream(_, d) => d.clone(),
-                        _ => Vec::new(),
-                    })
-                    .collect(),
-                c => panic!("/Contents {c:?}"),
-            })
-            .collect()
+    /// A page's content stream's bytes, decoded (its streams', in turn).
+    fn contents(&self, page: &Obj) -> Vec<u8> {
+        let get = |x: &Obj| match x {
+            Obj::Ref(n) => self.object(*n),
+            o => o.clone(),
+        };
+        let one = |x: Obj| match x {
+            Obj::Stream(d, data) => decoded(&d, &data),
+            c => panic!("/Contents {c:?}"),
+        };
+        match page.get("Contents").map(get) {
+            Some(Obj::Array(a)) => a.iter().flat_map(|s| one(get(s))).collect(),
+            Some(x) => one(x),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -559,16 +611,17 @@ fn same_document(upd: &[u8], exact: &[u8], what: &str) {
     );
     let (up, ep) = (u.pages(), e.pages());
     assert_eq!(up.len(), ep.len(), "{what}: the pages");
-    let (uc, ec) = (Reader::contents(&up), Reader::contents(&ep));
-    for (k, (a, b)) in uc.iter().zip(&ec).enumerate() {
-        assert!(a == b, "{what}: page {}'s content stream differs", k + 1);
-    }
     for (k, (a, b)) in up.iter().zip(&ep).enumerate() {
-        assert!(a == b, "{what}: page {} differs:\n{a:?}\n{b:?}", k + 1);
+        assert!(
+            u.contents(a) == e.contents(b),
+            "{what}: page {}'s content stream differs",
+            k + 1
+        );
+        assert!(u.digest(a) == e.digest(b), "{what}: page {} differs", k + 1);
     }
     for key in ["Root", "Info"] {
-        let a = u.trailer.get(key).map(|x| u.resolved(x, 0));
-        let b = e.trailer.get(key).map(|x| e.resolved(x, 0));
+        let a = u.trailer.get(key).map(|x| u.digest(x));
+        let b = e.trailer.get(key).map(|x| e.digest(x));
         assert_eq!(a, b, "{what}: the trailer's /{key}");
     }
     assert_eq!(u.trailer.get("ID"), e.trailer.get("ID"), "{what}: /ID");
@@ -901,6 +954,24 @@ fn harness_pairs() {
             assert!(
                 upd.len() >= b.len() && upd[..b.len()] == b[..],
                 "edit {k}: the file is not {before} with bytes appended"
+            );
+            // (the sections' bytes, and of them the pages' content
+            // streams': what an edit must write)
+            let r = Reader::new(&upd);
+            let mut contents = 0;
+            for p in r.pages() {
+                if let Some(Obj::Ref(n)) = p.get("Contents")
+                    && let Some(&Entry::At(off)) = r.xref.get(n)
+                    && off >= b.len()
+                {
+                    let end = upd[off..].windows(6).position(|w| w == b"endobj").map_or(0, |e| e + 7);
+                    contents += end;
+                }
+            }
+            eprintln!(
+                "harness_pairs: edit {k}: {} bytes appended, {contents} of them pages' content streams, {} sections",
+                upd.len() - b.len(),
+                r.sections
             );
         }
         same_document(&upd, &exact, &format!("edit {k}"));
