@@ -39,6 +39,7 @@ impl<T> Lock<T> {
     }
 
     /// A shared guard: `try_read` first, and only a refused try is timed.
+    #[cfg_attr(feature = "profile", track_caller)]
     pub(crate) fn read(&self) -> RwLockReadGuard<'_, T> {
         match self.0.try_read() {
             Ok(g) => return g,
@@ -59,6 +60,7 @@ impl<T> Lock<T> {
     }
 
     /// An exclusive guard, timed as `read`.
+    #[cfg_attr(feature = "profile", track_caller)]
     pub(crate) fn write(&self) -> RwLockWriteGuard<'_, T> {
         match self.0.try_write() {
             Ok(g) => return g,
@@ -87,6 +89,7 @@ impl<T> Mx<T> {
     }
 
     /// A guard, timed as `Lock::read`.
+    #[cfg_attr(feature = "profile", track_caller)]
     pub(crate) fn lock(&self) -> MutexGuard<'_, T> {
         match self.0.try_lock() {
             Ok(g) => return g,
@@ -117,8 +120,17 @@ fn spin() {
     }
 }
 
+#[cfg_attr(feature = "profile", track_caller)]
 fn timed<G>(g: G, t: Instant) -> G {
-    waited(ns(t));
+    let w = ns(t);
+    waited(w);
+    // (`profile`: by the file that took the lock, a probe each at the
+    // thread's next take)
+    if cfg!(feature = "profile") {
+        let f = std::panic::Location::caller().file();
+        let i = SITE_FILES.iter().position(|s| f.ends_with(s)).unwrap_or(SITE_FILES.len());
+        SITE_WAITS[i].fetch_add(w, std::sync::atomic::Ordering::Relaxed);
+    }
     g
 }
 
@@ -139,3 +151,12 @@ pub(crate) fn take_wait() -> (u64, u64) {
     let max = WAIT_MAX_NS.with(|c| c.replace(0));
     (sum, max)
 }
+
+/// (`profile`) The files whose lock waits are summed apart, by the file
+/// that took the lock; the rest in one more.
+pub(crate) const SITE_FILES: [&str; 10] = [
+    "segment.rs", "read.rs", "commit.rs", "index.rs", "values.rs", "engine.rs", "sched.rs", "node.rs", "ctx.rs", "table.rs",
+];
+
+/// (`profile`) The lock waits by [`SITE_FILES`], nanoseconds.
+pub(crate) static SITE_WAITS: [std::sync::atomic::AtomicU64; 11] = [const { std::sync::atomic::AtomicU64::new(0) }; 11];

@@ -1607,6 +1607,15 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         ms(t.lock_wait_ns),
         ms(t.lock_wait_max_ns)
     );
+    if phitex_defuse::obs::enabled() {
+        let sites: Vec<String> = phitex_defuse::obs::snapshot()
+            .lock_sites
+            .iter()
+            .filter(|s| s.1 > 0)
+            .map(|(f, w)| format!("{f} {:.3}", ms(*w)))
+            .collect();
+        eprintln!("acct: lock wait by the file taking it (ms, the process so far): {}", sites.join(", "));
+    }
     let live = eng.live_nodes().max(1);
     #[allow(clippy::cast_precision_loss)]
     let rpn = r.runs as f64 / live as f64;

@@ -20,7 +20,7 @@
 # again); lint (clippy -D warnings; fmt is local only, the image's rustfmt
 # is another version; it builds its own, no wait); and, after the build
 # (Slurm dependency, cancelled if it fails), on its binaries: suites
-# (phitex-tex's pdftex edits pages plain etex hints inputs defuse_gaps);
+# (phitex-tex's pdftex edits pages plain etex hints inputs);
 # latex 0..N-1 (the latex target's non-ignored tests dealt out,
 # GATE_LATEX_SHARDS, default 3); ams (amsldoc --exact-pdf at -j 1, 8, 16,
 # md5 against the epoch oracle on acclhead1, the round counters with

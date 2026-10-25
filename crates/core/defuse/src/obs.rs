@@ -15,6 +15,8 @@ pub struct Snapshot {
     /// (name, nanoseconds, count).
     pub spans: Vec<(&'static str, u64, u64)>,
     pub lock_wait_ns: u64,
+    /// The lock waits by the engine's file that took the lock, ns.
+    pub lock_sites: Vec<(&'static str, u64)>,
 }
 
 struct Probe {
@@ -55,6 +57,16 @@ pub fn snapshot() -> Snapshot {
         counters: ps.iter().filter(|p| !p.span).map(|p| (p.name, p.count)).collect(),
         spans: ps.iter().filter(|p| p.span).map(|p| (p.name, p.ns, p.count)).collect(),
         lock_wait_ns: ps.iter().filter(|p| p.name == "lock_wait").map(|p| p.ns).sum(),
+        lock_sites: crate::lock::SITE_WAITS
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                (
+                    crate::lock::SITE_FILES.get(i).copied().unwrap_or("other"),
+                    w.load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })
+            .collect(),
     }
 }
 
@@ -70,11 +82,17 @@ pub fn flush() {
     for (name, ns, n) in &s.spans {
         eprintln!("defuse-prof: {name} {:.3} ms over {n}", *ns as f64 / 1e6);
     }
+    for (f, w) in &s.lock_sites {
+        eprintln!("defuse-prof: lock wait taken in {f} {:.3} ms", *w as f64 / 1e6);
+    }
 }
 
 pub fn reset() {
     if enabled() {
         PROBES.lock().clear();
+        for w in &crate::lock::SITE_WAITS {
+            w.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
