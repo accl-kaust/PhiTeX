@@ -284,7 +284,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         output: p.output,
         defs,
         contribs,
-        reads: std::mem::take(&mut p.reads),
+        // (kept for as long as the node stands: no growth's slack)
+        reads: {
+            let mut r = std::mem::take(&mut p.reads);
+            r.shrink_to_fit();
+            r
+        },
         placed: Vec::with_capacity(p.placements.len()),
         claim: p.claim,
         effect: p.effect,
