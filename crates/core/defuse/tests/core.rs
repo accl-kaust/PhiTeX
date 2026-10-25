@@ -817,3 +817,65 @@ fn a_claimed_sibling_leaves_no_prediction() {
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
 
+
+/// `[s, n]`: outputs the first contribution to s after node n; never
+/// contributes, and says so.
+struct NextQuiet;
+
+impl Operation for NextQuiet {
+    fn name(&self) -> &'static str {
+        "next_quiet"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let s = Field(cx.args()[0]);
+        let n = NodeId::from_raw(cx.values().as_int(cx.args()[1]).unwrap() as u64);
+        Ok(cx.next_contribution(s, Some(n))?.map_or(ValueId::UNIT, |x| x.1))
+    }
+
+    fn contributes(&self, _: &[ValueId], _: &Values, _: Field) -> bool {
+        false
+    }
+}
+
+/// `[n]`: claims the next n siblings; never contributes, and says so.
+struct QuietClaimer;
+
+impl Operation for QuietClaimer {
+    fn name(&self) -> &'static str {
+        "quiet_claimer"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let n = cx.values().as_int(cx.args()[0]).unwrap() as usize;
+        cx.claim(n);
+        Ok(ValueId::UNIT)
+    }
+
+    fn contributes(&self, _: &[ValueId], _: &Values, _: Field) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_next_stopped_at_a_claimed_sibling_is_asked_again() {
+    // The first contribution after `first` is searched while the sibling
+    // that may make it has not run, and stops there; that sibling is then
+    // taken by a claim and never contributes: the reader is asked again
+    // and finds the one after it.
+    let (e, o) = engine();
+    let next = e.register(Arc::new(NextQuiet));
+    let quiet = e.register(Arc::new(QuietClaimer));
+    let v = e.values();
+    let s = f(v, "stream");
+    let u = e.new_unit();
+    let first = e.push(u, o.contrib, vec![s, v.int(1)]);
+    let r = e.push(u, next, vec![s, v.int(first.raw() as i64)]);
+    e.push(u, quiet, vec![v.int(1)]);
+    e.push(u, o.contrib, vec![s, v.int(5)]);
+    e.push(u, o.contrib, vec![s, v.int(2)]);
+    e.evaluate(1).unwrap();
+    assert_eq!(e.output(r), Some(v.int(2)));
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+

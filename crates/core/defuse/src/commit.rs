@@ -1666,8 +1666,11 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
         retract(eng, w, &s);
     }
     let mut st = CommitStats::default();
+    // (a taken node never contributes: the `next`s that stopped at it
+    // search on past it)
     for s in taken_holes {
         walk_stopped(eng, w, &s, s.pos_hint(), s.seg_hint(), &[], &mut st);
+        reask_holes(eng, w, &s, &mut st);
     }
     eng.note_stats(w, &st);
     for s in releases {
