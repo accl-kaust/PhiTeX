@@ -114,6 +114,52 @@ pub(crate) fn unit_parts(v: &Values, x: ValueId) -> (i64, Vec<i64>) {
     (piece, ints)
 }
 
+/// A unit decoded ([`decoded`]): its piece, its items, whether any is a
+/// mark (ids the loop's table gives, `remap_marks`) or a marker read
+/// where the piece is (`resolve_prof_of_with`).
+pub(crate) struct Decoded {
+    pub pid: i64,
+    pub items: std::sync::Arc<Vec<PItem>>,
+    pub marks: bool,
+    pub unresolved: bool,
+}
+
+const DECODED_SHARDS: usize = 64;
+
+type DecodedShard = std::sync::Mutex<phitex_defuse::FxHashMap<(u64, u64), std::sync::Arc<Decoded>>>;
+
+fn decoded_shards() -> &'static [DecodedShard] {
+    static S: std::sync::OnceLock<Vec<DecodedShard>> = std::sync::OnceLock::new();
+    S.get_or_init(|| (0..DECODED_SHARDS).map(|_| std::sync::Mutex::default()).collect())
+}
+
+/// Unit `x` decoded once per value, shared by every step that folds it.
+pub(crate) fn decoded(v: &Values, x: ValueId) -> std::sync::Arc<Decoded> {
+    use crate::exec::LockWait as _;
+    let key = (v.instance(), x.raw());
+    let sh = &decoded_shards()[usize::try_from(phitex_defuse::hash_words(key.0, &[key.1]) >> 58).unwrap_or(0) % DECODED_SHARDS];
+    if let Some(d) = sh.locked().get(&key) {
+        return d.clone();
+    }
+    let (pid, ints) = unit_parts(v, x);
+    let items = decode(&ints);
+    fn any(xs: &[PItem], f: &dyn Fn(&PItem) -> bool) -> bool {
+        xs.iter().any(|x| f(x) || matches!(x, PItem::End(ys) if any(ys, f)))
+    }
+    let d = std::sync::Arc::new(Decoded {
+        pid,
+        marks: any(&items, &|x| matches!(x, PItem::Node(Node::Mark(_)))),
+        unresolved: any(&items, &|x| matches!(x, PItem::Params(None) | PItem::InsParams(_, None))),
+        items: std::sync::Arc::new(items),
+    });
+    let mut g = sh.locked();
+    if g.len() >= 1 << 14 {
+        g.clear();
+    }
+    g.insert(key, d.clone());
+    d
+}
+
 fn i32_at(v: &Values, x: ValueId, k: usize) -> i32 {
     i32::try_from(int_at(v, x, k)).unwrap_or(0)
 }

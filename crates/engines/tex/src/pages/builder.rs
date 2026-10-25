@@ -68,42 +68,6 @@ pub(crate) struct Span {
     pub len: u32,
 }
 
-impl Span {
-    /// As a value: `[tag, a, b, c, len]` (tags 0 piece, 1 routine, 2
-    /// held).
-    pub(crate) fn encode(&self, v: &Values) -> ValueId {
-        let (t, a, b, c) = match self.src {
-            Src::Piece { piece, item } => (0, piece, i64::from(item), 0),
-            Src::Rtn { page, item } => (1, page, i64::from(item), 0),
-            Src::Held { piece, item, from } => (2, piece, i64::from(item), i64::from(from)),
-        };
-        v.list(vec![v.int(t), v.int(a), v.int(b), v.int(c), v.int(i64::from(self.len))])
-    }
-
-    pub(crate) fn decode(v: &Values, x: ValueId) -> Option<Span> {
-        let xs = list_of(v, x);
-        let n = |i: usize| xs.get(i).map_or(0, |&y| int_of(v, y));
-        let u = |i: usize| u32::try_from(n(i)).unwrap_or(0);
-        let src = match n(0) {
-            0 => Src::Piece {
-                piece: n(1),
-                item: u(2),
-            },
-            1 => Src::Rtn {
-                page: n(1),
-                item: u(2),
-            },
-            2 => Src::Held {
-                piece: n(1),
-                item: u(2),
-                from: u(3),
-            },
-            _ => return None,
-        };
-        Some(Span { src, len: u(4) })
-    }
-}
-
 /// Where an item the loop took came from, and the main list's fold just
 /// before it: a piece's raw item folds again from there where it goes
 /// back to the contributions (§1017).
@@ -133,9 +97,37 @@ pub(crate) const fn end_sub_of(item: u32) -> Option<(u32, u32)> {
 #[derive(Clone, Debug)]
 pub(crate) struct UnitRec {
     pub pid: i64,
+    /// As decoded, shared ([`crate::vprof::decoded`]): its markers read
+    /// where the piece is are `res`'s.
     pub items: std::sync::Arc<Vec<crate::vprof::PItem>>,
+    pub res: Resolved,
     /// The profile unit it was decoded from (its version, [`loop_state`]).
     pub src: ValueId,
+}
+
+/// A unit's markers as read where its piece is ([`Run::unit_items`]):
+/// the page parameters and the insertion classes' registers, given to
+/// its items unread in their place ([`Resolved::of`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Resolved {
+    pub params: Option<PageParams>,
+    pub classes: Vec<(u16, InsertClass)>,
+}
+
+impl Resolved {
+    /// Item `x` with what it names read, where it names any.
+    pub(crate) fn of(&self, x: &crate::vprof::PItem) -> Option<crate::vprof::PItem> {
+        use crate::vprof::PItem;
+        match x {
+            PItem::Params(None) => self.params.map(|p| PItem::Params(Some(p))),
+            PItem::InsParams(n, None) => self
+                .classes
+                .iter()
+                .find(|c| c.0 == *n)
+                .map(|c| PItem::InsParams(*n, Some(c.1))),
+            _ => None,
+        }
+    }
 }
 
 /// The page builder's loop as a step has it.
@@ -318,69 +310,6 @@ fn raw_node(v: &Values, x: ValueId) -> Option<phitex_defuse::NodeId> {
     (i != -1).then(|| node_of(i))
 }
 
-fn src_value(v: &Values, s: Src) -> ValueId {
-    Span { src: s, len: 1 }.encode(v)
-}
-
-fn src_of(v: &Values, x: ValueId) -> Option<Src> {
-    Span::decode(v, x).map(|s| s.src)
-}
-
-fn fold_value(v: &Values, f: FoldState) -> [ValueId; 3] {
-    [v.int(i64::from(f.sf)), v.int(i64::from(f.pd)), v.int(i64::try_from(f.since_bp).unwrap_or(0))]
-}
-
-fn fold_of(v: &Values, xs: &[ValueId]) -> FoldState {
-    let n = |i: usize| xs.get(i).map_or(0, |&y| int_of(v, y));
-    FoldState {
-        sf: i32::try_from(n(0)).unwrap_or(1000),
-        pd: i32::try_from(n(1)).unwrap_or(IGNORE_DEPTH),
-        since_bp: usize::try_from(n(2)).unwrap_or(0),
-    }
-}
-
-fn key_value(v: &Values, k: RtnKey) -> [ValueId; 3] {
-    [k.0, v.int(i64::from(k.1)), v.bool(k.2)]
-}
-
-fn key_of(v: &Values, xs: &[ValueId]) -> RtnKey {
-    (
-        xs.first().copied().unwrap_or(ValueId::UNIT),
-        xs.get(1).map_or(0, |&y| i32::try_from(int_of(v, y)).unwrap_or(0)),
-        xs.get(2).and_then(|&y| v.as_bool(y)).unwrap_or(false),
-    )
-}
-
-/// A measured node of the loop (a held-over insertion) as a value: its
-/// profile ([`crate::vprof::push_node`]).
-fn node_value(v: &Values, n: &Node) -> ValueId {
-    let mut out = Vec::new();
-    crate::vprof::push_node(n, &mut out);
-    crate::vprof::value(v, &out)
-}
-
-fn node_of_value(v: &Values, x: ValueId) -> Option<Node> {
-    let ints: Vec<i64> = list_of(v, x).into_iter().map(|y| int_of(v, y)).collect();
-    match crate::vprof::decode(&ints).into_iter().next()? {
-        crate::vprof::PItem::Node(n) => Some(n),
-        _ => None,
-    }
-}
-
-/// The insertion class registers `(n, class)` as a marker
-/// ([`class_of`]'s inverse).
-fn class_value(v: &Values, n: u16, c: &InsertClass) -> ValueId {
-    v.list(vec![
-        v.int(nodes::T_INS_PARAMS),
-        v.int(i64::from(n)),
-        v.int(c.box_height_plus_depth.map_or(-1, i64::from)),
-        v.int(i64::from(c.box_is_hbox)),
-        v.int(i64::from(c.count)),
-        v.int(i64::from(c.dimen)),
-        glue_value(v, &c.skip),
-    ])
-}
-
 /// The loop at a page's fire and the fire, as the next step's state: what
 /// the fold on from there reads, nothing else (the units no source after
 /// the fire names, the routines' material none names, the places of the
@@ -406,112 +335,237 @@ fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
     let mut pieces: Vec<i64> = units.iter().map(|u| u.pid).chain(named.iter().copied()).collect();
     pieces.sort_unstable();
     pieces.dedup();
-    let pages: Vec<i64> = {
-        let mut ps: Vec<i64> = p
-            .carried
-            .iter()
-            .filter_map(|c| match c.src {
-                Some(Src::Rtn { page, .. }) => Some(page),
-                _ => None,
-            })
-            .chain(lp.inf.iter().filter_map(|s| match *s {
-                Src::Rtn { page, .. } => Some(page),
-                _ => None,
-            }))
-            .collect();
-        ps.sort_unstable();
-        ps.dedup();
-        ps
-    };
-    let inf: Vec<ValueId> = lp
+    let mut pages: Vec<i64> = p
+        .carried
+        .iter()
+        .filter_map(|c| match c.src {
+            Some(Src::Rtn { page, .. }) => Some(page),
+            _ => None,
+        })
+        .chain(lp.inf.iter().filter_map(|s| match *s {
+            Src::Rtn { page, .. } => Some(page),
+            _ => None,
+        }))
+        .collect();
+    pages.sort_unstable();
+    pages.dedup();
+    let mut e = Enc { v, xs: Vec::with_capacity(64 + 4 * lp.inf.len() + 2 * units.len()) };
+    let st = &lp.st;
+    e.i(st.j);
+    e.i(st.normal);
+    e.fold(st.fold);
+    match st.params {
+        Some(q) => {
+            e.i(1);
+            e.i(i64::from(q.vsize));
+            e.i(i64::from(q.max_depth));
+            e.glue(&q.top_skip);
+            e.i(i64::from(q.holding_inserts));
+        }
+        None => e.i(0),
+    }
+    e.node(lp.cur);
+    e.node(lp.cur_units);
+    e.x(lp.top_marks);
+    let inf: Vec<Src> = lp
         .inf
         .iter()
-        .filter(|s| match **s {
-            Src::Rtn { page, .. } => pages.contains(&page),
-            Src::Piece { piece, .. } | Src::Held { piece, .. } => pieces.contains(&piece),
+        .copied()
+        .filter(|s| match *s {
+            Src::Rtn { page, .. } => pages.binary_search(&page).is_ok(),
+            Src::Piece { piece, .. } | Src::Held { piece, .. } => pieces.binary_search(&piece).is_ok(),
         })
-        .map(|&s| src_value(v, s))
         .collect();
-    let n = |i: i64| v.int(i);
-    let st = &lp.st;
-    let mut stv = vec![n(st.j), n(st.normal)];
-    stv.extend(fold_value(v, st.fold));
-    stv.push(st.params.map_or(ValueId::UNIT, |q| params_marker(v, &q)));
-    let pend = {
-        let mut xs = vec![
-            n(p.j),
-            raw_value(v, Some(p.node)),
-            n(i64::try_from(p.xs_i).unwrap_or(0)),
-            n(p.pid),
-            v.bool(p.in_material),
-            p.hint,
-        ];
-        xs.extend(key_value(v, p.key));
-        xs.extend([
-            p.rtn_guess,
-            n(i64::from(p.k)),
-            n(i64::from(p.output_penalty)),
-            v.list(p.held.iter().map(|(s, h)| v.list(vec![src_value(v, *s), node_value(v, h)])).collect()),
-            v.list(
-                p.carried
-                    .iter()
-                    .map(|c| {
-                        let mut e = vec![c.src.map_or(ValueId::UNIT, |s| src_value(v, s))];
-                        e.extend(fold_value(v, c.fold));
-                        v.list(e)
-                    })
-                    .collect(),
-            ),
-            n(i64::from(p.nth)),
-            v.list(p.classes.iter().map(|(k, c)| class_value(v, *k, c)).collect()),
-        ]);
-        v.list(xs)
-    };
-    v.list(vec![
-        v.list(stv),
-        raw_value(v, lp.cur),
-        raw_value(v, lp.cur_units),
-        lp.top_marks,
-        v.list(inf),
-        v.list(
-            lp.last_rtn
-                .iter()
-                .map(|(k, x)| {
-                    let mut e = key_value(v, *k).to_vec();
-                    e.push(*x);
-                    v.list(e)
-                })
-                .collect(),
-        ),
-        v.list(lp.last_markers.iter().map(|&(h, m)| v.list(vec![h, m])).collect()),
-        v.list(units.iter().map(|u| v.list(vec![n(u.pid), u.src])).collect()),
-        v.list(vec![
-            n(i64::try_from(lp.frontier.0.saturating_sub(keep)).unwrap_or(0)),
-            n(i64::from(lp.frontier.1)),
-        ]),
-        v.list(
-            pieces
-                .iter()
-                .map(|p| {
-                    v.list(vec![
-                        n(*p),
-                        raw_value(v, lp.prev.get(p).copied().flatten()),
-                        lp.order.get(p).map_or(ValueId::UNIT, |&o| n(i64::try_from(o).unwrap_or(0))),
-                    ])
-                })
-                .collect(),
-        ),
-        n(i64::try_from(lp.seq).unwrap_or(0)),
-        v.list(
-            lp.rtns
-                .iter()
-                .filter(|r| pages.contains(&r.0))
-                .map(|r| v.list(vec![n(r.0), r.1]))
-                .collect(),
-        ),
-        v.list(vec![raw_value(v, lp.nth.0), n(i64::from(lp.nth.1))]),
-        pend,
-    ])
+    e.len(inf.len());
+    for s in inf {
+        e.src(s);
+    }
+    e.len(lp.last_rtn.len());
+    for (k, x) in &lp.last_rtn {
+        e.key(*k);
+        e.x(*x);
+    }
+    e.len(lp.last_markers.len());
+    for &(h, m) in &lp.last_markers {
+        e.x(h);
+        e.x(m);
+    }
+    e.len(units.len());
+    for u in units {
+        e.x(u.src);
+    }
+    e.len(lp.frontier.0.saturating_sub(keep));
+    e.i(i64::from(lp.frontier.1));
+    e.len(pieces.len());
+    for q in &pieces {
+        e.i(*q);
+        e.node(lp.prev.get(q).copied().flatten());
+        e.i(lp.order.get(q).map_or(-1, |&o| i64::try_from(o).unwrap_or(0)));
+    }
+    e.i(i64::try_from(lp.seq).unwrap_or(0));
+    let rtns: Vec<&(i64, ValueId, std::sync::Arc<Vec<crate::vprof::PItem>>)> =
+        lp.rtns.iter().filter(|r| pages.binary_search(&r.0).is_ok()).collect();
+    e.len(rtns.len());
+    for r in rtns {
+        e.i(r.0);
+        e.x(r.1);
+    }
+    e.node(lp.nth.0);
+    e.i(i64::from(lp.nth.1));
+    // the fire
+    e.i(p.j);
+    e.node(Some(p.node));
+    e.len(p.xs_i);
+    e.i(p.pid);
+    e.i(i64::from(p.in_material));
+    e.x(p.hint);
+    e.key(p.key);
+    e.x(p.rtn_guess);
+    e.i(i64::from(p.k));
+    e.i(i64::from(p.output_penalty));
+    e.len(p.held.len());
+    for (s, h) in &p.held {
+        e.src(*s);
+        let mut out = Vec::new();
+        crate::vprof::push_node(h, &mut out);
+        e.len(out.len());
+        for x in out {
+            e.i(x);
+        }
+    }
+    e.len(p.carried.len());
+    for c in &p.carried {
+        match c.src {
+            Some(s) => e.src(s),
+            None => e.i(-1),
+        }
+        e.fold(c.fold);
+    }
+    e.i(i64::from(p.nth));
+    e.len(p.classes.len());
+    for (k, c) in &p.classes {
+        e.i(i64::from(*k));
+        e.i(c.box_height_plus_depth.map_or(-1, i64::from));
+        e.i(i64::from(c.box_is_hbox));
+        e.i(i64::from(c.count));
+        e.i(i64::from(c.dimen));
+        e.glue(&c.skip);
+    }
+    v.list(e.xs)
+}
+
+/// The step's state as one flat list ([`encode_state`]): integers inline,
+/// values by their ids, a list as its length then its elements.
+struct Enc<'v> {
+    v: &'v Values,
+    xs: Vec<ValueId>,
+}
+
+impl Enc<'_> {
+    fn i(&mut self, x: i64) {
+        self.xs.push(self.v.int(x));
+    }
+    fn len(&mut self, n: usize) {
+        self.i(i64::try_from(n).unwrap_or(0));
+    }
+    fn x(&mut self, x: ValueId) {
+        self.xs.push(x);
+    }
+    fn node(&mut self, n: Option<phitex_defuse::NodeId>) {
+        self.i(n.map_or(-1, |n| i64::from_ne_bytes(n.raw().to_ne_bytes())));
+    }
+    fn src(&mut self, s: Src) {
+        let (t, a, b, c) = match s {
+            Src::Piece { piece, item } => (0, piece, i64::from(item), 0),
+            Src::Rtn { page, item } => (1, page, i64::from(item), 0),
+            Src::Held { piece, item, from } => (2, piece, i64::from(item), i64::from(from)),
+        };
+        self.i(t);
+        self.i(a);
+        self.i(b);
+        self.i(c);
+    }
+    fn fold(&mut self, f: FoldState) {
+        self.i(i64::from(f.sf));
+        self.i(i64::from(f.pd));
+        self.len(f.since_bp);
+    }
+    fn key(&mut self, k: RtnKey) {
+        self.x(k.0);
+        self.i(i64::from(k.1));
+        self.i(i64::from(k.2));
+    }
+    fn glue(&mut self, g: &Glue) {
+        self.i(i64::from(g.width));
+        self.i(i64::from(g.stretch));
+        self.i(i64::from(g.shrink));
+        self.i((g.stretch_order as i64) * 4 + g.shrink_order as i64);
+    }
+}
+
+/// [`Enc`]'s reader.
+struct Dec<'v> {
+    v: &'v Values,
+    xs: Vec<ValueId>,
+    at: usize,
+}
+
+impl Dec<'_> {
+    fn x(&mut self) -> ValueId {
+        let x = self.xs.get(self.at).copied().unwrap_or(ValueId::UNIT);
+        self.at += 1;
+        x
+    }
+    fn i(&mut self) -> i64 {
+        let x = self.x();
+        int_of(self.v, x)
+    }
+    fn i32(&mut self) -> i32 {
+        i32::try_from(self.i()).unwrap_or(0)
+    }
+    fn u32(&mut self) -> u32 {
+        u32::try_from(self.i()).unwrap_or(0)
+    }
+    fn len(&mut self) -> usize {
+        usize::try_from(self.i()).unwrap_or(0)
+    }
+    fn node(&mut self) -> Option<phitex_defuse::NodeId> {
+        let i = self.i();
+        (i != -1).then(|| node_of(i))
+    }
+    fn src_tagged(&mut self, t: i64) -> Option<Src> {
+        let (a, b, c) = (self.i(), self.u32(), self.u32());
+        match t {
+            0 => Some(Src::Piece { piece: a, item: b }),
+            1 => Some(Src::Rtn { page: a, item: b }),
+            2 => Some(Src::Held { piece: a, item: b, from: c }),
+            _ => None,
+        }
+    }
+    fn src(&mut self) -> Option<Src> {
+        let t = self.i();
+        self.src_tagged(t)
+    }
+    fn fold(&mut self) -> FoldState {
+        FoldState {
+            sf: self.i32(),
+            pd: self.i32(),
+            since_bp: self.len(),
+        }
+    }
+    fn key(&mut self) -> RtnKey {
+        (self.x(), self.i32(), self.i() != 0)
+    }
+    fn glue(&mut self) -> Glue {
+        let (w, st, sh, o) = (self.i32(), self.i32(), self.i32(), self.i());
+        Glue {
+            width: w,
+            stretch: st,
+            stretch_order: crate::val::order(o / 4),
+            shrink: sh,
+            shrink_order: crate::val::order(o % 4),
+        }
+    }
 }
 
 /// A page the loop's builder fired, with the sources of what it took.
@@ -560,7 +614,7 @@ fn loop_item_raw(lp: &PageLoop, src: Src) -> Option<crate::vprof::PItem> {
         Src::Piece { piece, item } => {
             let u = lp.units.iter().rev().find(|u| u.pid == piece)?;
             match end_sub_of(item) {
-                None => u.items.get(item as usize).cloned(),
+                None => u.items.get(item as usize).map(|x| u.res.of(x).unwrap_or_else(|| x.clone())),
                 Some((e, s)) => match u.items.get(e as usize)? {
                     PItem::End(ys) => ys.get(s as usize).cloned(),
                     _ => None,
@@ -693,12 +747,12 @@ fn build_t(
         holding_inserts: 0,
         saving_vdiscards: false,
     });
-    let mut queue = buf;
-    queue.reverse();
+    // (the contributions in order, the next at the front)
+    let mut queue: std::collections::VecDeque<(PItem, SrcRef)> = buf.into();
     let mut end_seen: Option<(PItem, SrcRef)> = None;
-    while let Some((x, s)) = queue.pop() {
+    while let Some((x, s)) = queue.pop_front() {
         let p = match x {
-            PItem::End(ref ys) => {
+            PItem::End(ys) => {
                 if lp.st.pb.page.is_empty() && queue.is_empty() && dead == 0 {
                     lp.ended = true;
                     continue;
@@ -712,20 +766,20 @@ fn build_t(
                         piece,
                         item: end_sub(item, u32::try_from(i).unwrap_or(0)),
                     });
-                    queue.push((y.clone(), SrcRef { src, fold: s.fold }));
+                    queue.push_front((y.clone(), SrcRef { src, fold: s.fold }));
                 }
-                end_seen = Some((x.clone(), s));
+                end_seen = Some((PItem::End(ys), s));
                 continue;
             }
             PItem::Abort => {
                 lp.ended = true;
                 return None;
             }
-            PItem::Node(ref n) => n.clone(),
+            PItem::Node(n) => n,
             _ => continue,
         };
         let next = if matches!(p, Node::Kern(..)) {
-            match queue.last() {
+            match queue.front() {
                 Some((PItem::Node(n), _)) => Some(n.clone()),
                 _ => None,
             }
@@ -759,8 +813,8 @@ fn build_t(
                     lp.page_ins.push(ins_n);
                 }
             }
-            Outcome::Wait(_) => {
-                queue.push((x, s));
+            Outcome::Wait(n) => {
+                queue.push_front((PItem::Node(n), s));
                 break;
             }
             Outcome::Fire(f) => {
@@ -787,7 +841,7 @@ fn build_t(
                     carried.push(SrcRef { src: None, fold: s.fold });
                 }
                 carried.push(s);
-                carried.extend(queue.drain(..).rev().map(|(_, s)| s));
+                carried.extend(queue.drain(..).map(|(_, s)| s));
                 if let Some((_, s)) = end_seen {
                     carried.push(s);
                 }
@@ -818,8 +872,7 @@ fn build_t(
             }
         }
     }
-    queue.reverse();
-    lp.pend = queue;
+    lp.pend = queue.into();
     None
 }
 
@@ -1160,103 +1213,111 @@ impl Run<'_, '_> {
     /// where their pieces are.
     pub(crate) fn decode_state(&mut self, x: ValueId) -> R<(PageLoop, Pending)> {
         let v = self.v;
-        let xs = list_of(v, x);
-        let at = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
-        let n = |y: ValueId| int_of(v, y);
+        let mut d = Dec { v, xs: list_of(v, x), at: 0 };
         let mut lp = PageLoop::new();
-        let st = list_of(v, at(0));
-        let params = st.get(5).copied().filter(|&p| p != ValueId::UNIT).map(|p| params_of(v, p));
-        lp.st = crate::vprof::ScanState::fresh(
-            st.first().map_or(0, |&y| n(y)),
-            st.get(1).map_or(0, |&y| n(y)),
-            fold_of(v, st.get(2..5).unwrap_or_default()),
-            params,
-        );
-        lp.cur = raw_node(v, at(1));
-        lp.cur_units = raw_node(v, at(2));
-        lp.top_marks = at(3);
-        lp.inf = list_of(v, at(4)).into_iter().filter_map(|y| src_of(v, y)).collect();
-        lp.last_rtn = list_of(v, at(5))
-            .into_iter()
-            .map(|e| {
-                let es = list_of(v, e);
-                (key_of(v, &es), es.get(3).copied().unwrap_or(ValueId::UNIT))
-            })
-            .collect();
-        lp.last_markers = list_of(v, at(6))
-            .into_iter()
-            .filter_map(|e| match list_of(v, e)[..] {
-                [h, m] => Some((h, m)),
-                _ => None,
-            })
-            .collect();
-        for e in list_of(v, at(9)) {
-            let es = list_of(v, e);
-            let Some(&p) = es.first() else { continue };
-            let p = n(p);
-            lp.prev.insert(p, es.get(1).and_then(|&y| raw_node(v, y)));
-            if let Some(&o) = es.get(2).filter(|&&o| o != ValueId::UNIT) {
-                lp.order.insert(p, u64::try_from(n(o)).unwrap_or(0));
+        let (j, normal, fold) = (d.i(), d.i(), d.fold());
+        let params = (d.i() != 0).then(|| PageParams {
+            vsize: d.i32(),
+            max_depth: d.i32(),
+            top_skip: d.glue(),
+            holding_inserts: d.i32(),
+            saving_vdiscards: false,
+        });
+        lp.st = crate::vprof::ScanState::fresh(j, normal, fold, params);
+        lp.cur = d.node();
+        lp.cur_units = d.node();
+        lp.top_marks = d.x();
+        let n = d.len();
+        lp.inf = (0..n).filter_map(|_| d.src()).collect();
+        let n = d.len();
+        lp.last_rtn = (0..n).map(|_| (d.key(), d.x())).collect();
+        let n = d.len();
+        lp.last_markers = (0..n).map(|_| (d.x(), d.x())).collect();
+        let n = d.len();
+        for _ in 0..n {
+            let src = d.x();
+            let (pid, items, res) = self.unit_items(&mut lp, src)?;
+            lp.units.push(UnitRec { pid, items, res, src });
+        }
+        lp.frontier = (d.len(), d.u32());
+        let n = d.len();
+        for _ in 0..n {
+            let p = d.i();
+            lp.prev.insert(p, d.node());
+            let o = d.i();
+            if o >= 0 {
+                lp.order.insert(p, u64::try_from(o).unwrap_or(0));
             }
         }
-        lp.seq = u64::try_from(n(at(10))).unwrap_or(0);
-        for e in list_of(v, at(7)) {
-            let Some(&src) = list_of(v, e).get(1) else { continue };
-            let (pid, items) = self.unit_items(&mut lp, src)?;
-            lp.units.push(UnitRec {
-                pid,
-                items: std::sync::Arc::new(items),
-                src,
-            });
-        }
-        let fr = list_of(v, at(8));
-        lp.frontier = (
-            fr.first().map_or(0, |&y| usize::try_from(n(y)).unwrap_or(0)),
-            fr.get(1).map_or(0, |&y| u32::try_from(n(y)).unwrap_or(0)),
-        );
-        for e in list_of(v, at(11)) {
-            let es = list_of(v, e);
-            let (Some(&page), Some(&val)) = (es.first(), es.get(1)) else { continue };
+        lp.seq = u64::try_from(d.i()).unwrap_or(0);
+        let n = d.len();
+        for _ in 0..n {
+            let (page, val) = (d.i(), d.x());
             let items = self.rtn_items(&mut lp, val);
-            lp.rtns.push((n(page), val, std::sync::Arc::new(items)));
+            lp.rtns.push((page, val, std::sync::Arc::new(items)));
         }
-        let nth = list_of(v, at(12));
-        lp.nth = (
-            nth.first().and_then(|&y| raw_node(v, y)),
-            nth.get(1).map_or(0, |&y| u32::try_from(n(y)).unwrap_or(0)),
-        );
-        let ps = list_of(v, at(13));
-        let p = |i: usize| ps.get(i).copied().unwrap_or(ValueId::UNIT);
+        lp.nth = (d.node(), d.u32());
+        let j = d.i();
+        let node = d.node().unwrap_or_else(|| node_of(0));
+        let xs_i = d.len();
+        let pid = d.i();
+        let in_material = d.i() != 0;
+        let hint = d.x();
+        let key = d.key();
+        let rtn_guess = d.x();
+        let k = d.u32();
+        let output_penalty = d.i32();
+        let n = d.len();
+        let mut held = Vec::with_capacity(n);
+        for _ in 0..n {
+            let s = d.src();
+            let m = d.len();
+            let ints: Vec<i64> = (0..m).map(|_| d.i()).collect();
+            if let (Some(s), Some(crate::vprof::PItem::Node(h))) = (s, crate::vprof::decode(&ints).into_iter().next()) {
+                held.push((s, h));
+            }
+        }
+        let n = d.len();
+        let carried = (0..n)
+            .map(|_| {
+                let t = d.i();
+                let src = if t == -1 { None } else { d.src_tagged(t) };
+                SrcRef { src, fold: d.fold() }
+            })
+            .collect();
+        let nth = d.u32();
+        let n = d.len();
+        let classes = (0..n)
+            .map(|_| {
+                let k = u16::try_from(d.i()).unwrap_or(0);
+                let h = d.i();
+                (
+                    k,
+                    InsertClass {
+                        box_height_plus_depth: (h >= 0).then(|| i32::try_from(h).unwrap_or(0)),
+                        box_is_hbox: d.i() != 0,
+                        count: d.i32(),
+                        dimen: d.i32(),
+                        skip: d.glue(),
+                    },
+                )
+            })
+            .collect();
         let pending = Pending {
-            j: n(p(0)),
-            node: raw_node(v, p(1)).unwrap_or_else(|| node_of(0)),
-            xs_i: usize::try_from(n(p(2))).unwrap_or(0),
-            pid: n(p(3)),
-            in_material: v.as_bool(p(4)).unwrap_or(false),
-            hint: p(5),
-            key: key_of(v, ps.get(6..9).unwrap_or_default()),
-            rtn_guess: p(9),
-            k: u32::try_from(n(p(10))).unwrap_or(0),
-            output_penalty: i32::try_from(n(p(11))).unwrap_or(0),
-            held: list_of(v, p(12))
-                .into_iter()
-                .filter_map(|e| match list_of(v, e)[..] {
-                    [s, h] => Some((src_of(v, s)?, node_of_value(v, h)?)),
-                    _ => None,
-                })
-                .collect(),
-            carried: list_of(v, p(13))
-                .into_iter()
-                .map(|e| {
-                    let es = list_of(v, e);
-                    SrcRef {
-                        src: es.first().and_then(|&s| src_of(v, s)),
-                        fold: fold_of(v, es.get(1..).unwrap_or_default()),
-                    }
-                })
-                .collect(),
-            nth: u32::try_from(n(p(14))).unwrap_or(0),
-            classes: list_of(v, p(15)).into_iter().map(|c| class_of(v, c)).collect(),
+            j,
+            node,
+            xs_i,
+            pid,
+            in_material,
+            hint,
+            key,
+            rtn_guess,
+            k,
+            output_penalty,
+            held,
+            carried,
+            nth,
+            classes,
         };
         Ok((lp, pending))
     }
@@ -1264,15 +1325,18 @@ impl Run<'_, '_> {
     /// A [`crate::vprof::VPROF`] unit's piece and items: decoded, its
     /// marks given ids in the loop's table, its markers resolved where
     /// its piece is.
-    fn unit_items(&mut self, lp: &mut PageLoop, x: ValueId) -> R<(i64, Vec<crate::vprof::PItem>)> {
+    fn unit_items(
+        &mut self,
+        lp: &mut PageLoop,
+        x: ValueId,
+    ) -> R<(i64, std::sync::Arc<Vec<crate::vprof::PItem>>, Resolved)> {
         use crate::prof::pages as pp;
+        use crate::vprof::PItem;
         let v = self.v;
         let t = pp::start();
-        let (pid, ints) = crate::vprof::unit_parts(v, x);
-        let mut items = crate::vprof::decode(&ints);
-        remap_marks(&mut items, &crate::vprof::unit_marks(v, x), &mut lp.marks);
+        let d = crate::vprof::decoded(v, x);
+        let pid = d.pid;
         pp::add(pp::DECODE, t);
-        let t = pp::start();
         // (the piece whose run made its items: the contributor)
         if lp.own.owner != Some(pid) {
             lp.own = OwnerReads {
@@ -1280,12 +1344,36 @@ impl Run<'_, '_> {
                 ..OwnerReads::default()
             };
         }
-        let mut own = std::mem::take(&mut lp.own);
-        let r = self.resolve_prof_of_with(pid, &mut items, &mut own);
-        lp.own = own;
-        pp::add(pp::RESOLVE, t);
-        r?;
-        Ok((pid, items))
+        // (its markers read where the piece is, kept beside the items)
+        let mut res = Resolved::default();
+        if d.unresolved {
+            let t = pp::start();
+            let mut own = std::mem::take(&mut lp.own);
+            let mut probe: Vec<PItem> = d
+                .items
+                .iter()
+                .filter(|y| matches!(y, PItem::Params(None) | PItem::InsParams(_, None)))
+                .cloned()
+                .collect();
+            let r = self.resolve_prof_of_with(pid, &mut probe, &mut own);
+            lp.own = own;
+            pp::add(pp::RESOLVE, t);
+            r?;
+            for y in probe {
+                match y {
+                    PItem::Params(p) => res.params = p,
+                    PItem::InsParams(n, Some(c)) => res.classes.push((n, c)),
+                    _ => {}
+                }
+            }
+        }
+        // (a mark's id is the loop's own: those items copied)
+        if !d.marks {
+            return Ok((pid, std::sync::Arc::clone(&d.items), res));
+        }
+        let mut items = (*d.items).clone();
+        remap_marks(&mut items, &crate::vprof::unit_marks(v, x), &mut lp.marks);
+        Ok((pid, std::sync::Arc::new(items), res))
     }
 
     /// A routine's material as profile items (§1026: its markers, then
@@ -1390,7 +1478,7 @@ impl Run<'_, '_> {
     ) -> R<Option<(Pending, Vec<(u16, InsertClass)>)>> {
         use crate::prof::pages as pp;
         pp::unit();
-        let (pid, items) = self.unit_items(lp, x)?;
+        let (pid, items, res) = self.unit_items(lp, x)?;
         let classes = self.unit_classes(lp, &items, node_of(pid))?;
         // (units no page needs any more dropped)
         let t = pp::start();
@@ -1401,11 +1489,7 @@ impl Run<'_, '_> {
             lp.seq += 1;
         }
         lp.prev.entry(pid).or_insert(lp.cur_units);
-        lp.units.push(UnitRec {
-            pid,
-            src: x,
-            items: std::sync::Arc::new(items),
-        });
+        lp.units.push(UnitRec { pid, src: x, items, res });
         let ui = lp.units.len() - 1;
         let t = pp::start();
         let r = self.fold_items(lp, node, pid, ui, 0, &classes);
@@ -1424,10 +1508,18 @@ impl Run<'_, '_> {
         classes: &[(u16, InsertClass)],
     ) -> R<Option<Pending>> {
         use crate::vprof::PItem;
-        let Some(items) = lp.units.get(ui).map(|u| std::sync::Arc::clone(&u.items)) else {
+        let Some((items, res)) = lp.units.get(ui).map(|u| (std::sync::Arc::clone(&u.items), u.res.clone())) else {
             return Ok(None);
         };
         for (i, x) in items.iter().enumerate().skip(from) {
+            let r;
+            let x = match res.of(x) {
+                Some(y) => {
+                    r = y;
+                    &r
+                }
+                None => x,
+            };
             let item = u32::try_from(i).unwrap_or(u32::MAX);
             let src = Src::Piece { piece: pid, item };
             let s = SrcRef {
@@ -2476,6 +2568,40 @@ impl Run<'_, '_> {
     /// where it is not defined there, as [`Run::eng_read`] reads them).
     pub(crate) fn page_params_at(&mut self, at: i64) -> R<ValueId> {
         let v = self.v;
+        let Some(xs) = self.page_cells_at(at)? else {
+            return self.page_params_marker();
+        };
+        let int = |x: Option<ValueId>| v.int(i64::from(crate::val::i32_of(v, x)));
+        Ok(v.list(vec![
+            v.int(nodes::T_PAGE_PARAMS),
+            int(xs[0]),
+            int(xs[1]),
+            glue_value(v, &glue_of(v, xs[2])),
+            int(xs[3]),
+        ]))
+    }
+
+    /// [`Run::page_params_at`]'s parameters, not made a marker.
+    pub(crate) fn page_params_struct_at(&mut self, at: i64) -> R<PageParams> {
+        let v = self.v;
+        let Some(xs) = self.page_cells_at(at)? else {
+            let m = self.page_params_marker()?;
+            return Ok(params_of(v, m));
+        };
+        let int = |x: Option<ValueId>| crate::val::i32_of(v, x);
+        Ok(PageParams {
+            vsize: int(xs[0]),
+            max_depth: int(xs[1]),
+            top_skip: glue_of(v, xs[2]),
+            holding_inserts: int(xs[3]),
+            saving_vdiscards: false,
+        })
+    }
+
+    /// The page parameters' cells after piece `at` (None: the piece is
+    /// gone, the marker where the run is stands for them).
+    fn page_cells_at(&mut self, at: i64) -> R<Option<Vec<Option<ValueId>>>> {
+        let v = self.v;
         let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(at.to_ne_bytes()));
         let b = crate::fields::B_PAGE;
         let rf = self.ops.fields.slot_field(crate::fields::record_loc(b));
@@ -2486,7 +2612,7 @@ impl Run<'_, '_> {
         }
         let cells = match cells? {
             phitex_defuse::FieldAt::Def(x, _) => Some(list_of(v, x)).filter(|xs| xs.len() == n),
-            phitex_defuse::FieldAt::Gone => return self.page_params_marker(),
+            phitex_defuse::FieldAt::Gone => return Ok(None),
             phitex_defuse::FieldAt::Unset => None,
         };
         let absent = crate::fields::record_absent(v);
@@ -2505,14 +2631,7 @@ impl Run<'_, '_> {
             };
             xs.push(x);
         }
-        let int = |x: Option<ValueId>| v.int(i64::from(crate::val::i32_of(v, x)));
-        Ok(v.list(vec![
-            v.int(nodes::T_PAGE_PARAMS),
-            int(xs[0]),
-            int(xs[1]),
-            glue_value(v, &glue_of(v, xs[2])),
-            int(xs[3]),
-        ]))
+        Ok(Some(xs))
     }
 
     /// The page parameters reaching this node, as a `T_PAGE_PARAMS`
@@ -2620,8 +2739,7 @@ impl Run<'_, '_> {
                 let pp = if let Some(pp) = own.params {
                     pp
                 } else {
-                    let mm = self.page_params_at(pid)?;
-                    let pp = params_of(self.v, mm);
+                    let pp = self.page_params_struct_at(pid)?;
                     own.params = Some(pp);
                     pp
                 };

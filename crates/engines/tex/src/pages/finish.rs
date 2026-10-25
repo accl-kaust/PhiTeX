@@ -166,13 +166,8 @@ impl FinishIn {
             v.int(i64::from(self.k)),
             v.int(i64::from(self.in_material)),
             self.after.map_or_else(|| v.int(-1), raw),
-            v.list(self.spans.iter().map(|s| s.encode(v)).collect()),
-            v.list(
-                self.rtns
-                    .iter()
-                    .map(|&(j, x)| v.list(vec![v.int(j), x]))
-                    .collect(),
-            ),
+            v.list(self.spans.iter().flat_map(|s| span_ints(v, s.src, s.len)).collect()),
+            v.list(self.rtns.iter().flat_map(|&(j, x)| [v.int(j), x]).collect()),
             v.int(i64::from(self.fold.sf)),
             v.int(i64::from(self.fold.pd)),
             v.int(i64::try_from(self.fold.since_bp).unwrap_or(0)),
@@ -188,13 +183,8 @@ impl FinishIn {
             v.int(i64::from(self.post_k)),
             v.int(self.prev_fire.0),
             v.int(self.prev_fire.1),
-            v.list(
-                self.inf
-                    .iter()
-                    .map(|&src| Span { src, len: 1 }.encode(v))
-                    .collect(),
-            ),
-            v.list(self.vers.iter().map(|&(p, x)| v.list(vec![v.int(p), x])).collect()),
+            v.list(self.inf.iter().flat_map(|&src| span_ints(v, src, 1)).collect()),
+            v.list(self.vers.iter().flat_map(|&(p, x)| [v.int(p), x]).collect()),
         ]);
         let mut out = vec![v.int(i64::from(self.nth))];
         out.extend([ValueId::UNIT; 8]);
@@ -237,17 +227,8 @@ impl FinishIn {
             k: u32::try_from(n(1)).unwrap_or(0),
             in_material: n(2) != 0,
             after: (n(3) != -1).then(|| node(n(3))),
-            spans: list_of(v, p[4])
-                .into_iter()
-                .filter_map(|x| Span::decode(v, x))
-                .collect(),
-            rtns: list_of(v, p[5])
-                .into_iter()
-                .filter_map(|e| match list_of(v, e)[..] {
-                    [j, x] => Some((int_of(v, j), x)),
-                    _ => None,
-                })
-                .collect(),
+            spans: list_of(v, p[4]).chunks_exact(5).filter_map(|c| span_of_ints(v, c)).collect(),
+            rtns: list_of(v, p[5]).chunks_exact(2).map(|c| (int_of(v, c[0]), c[1])).collect(),
             fold: FoldState {
                 sf: i32::try_from(n(6)).unwrap_or(1000),
                 pd: i32::try_from(n(7)).unwrap_or(IGNORE_DEPTH),
@@ -270,21 +251,42 @@ impl FinishIn {
                 .get(21)
                 .map(|&x| list_of(v, x))
                 .unwrap_or_default()
-                .into_iter()
-                .filter_map(|x| Span::decode(v, x).map(|s| s.src))
+                .chunks_exact(5)
+                .filter_map(|c| span_of_ints(v, c).map(|s| s.src))
                 .collect(),
             vers: p
                 .get(22)
                 .map(|&x| list_of(v, x))
                 .unwrap_or_default()
-                .into_iter()
-                .filter_map(|e| match list_of(v, e)[..] {
-                    [p, x] => Some((int_of(v, p), x)),
-                    _ => None,
-                })
+                .chunks_exact(2)
+                .map(|c| (int_of(v, c[0]), c[1]))
                 .collect(),
         })
     }
+}
+
+/// A span in a finisher's page argument, inline: `tag, a, b, c, len`
+/// (tags 0 piece, 1 routine, 2 held), flat in the list.
+fn span_ints(v: &Values, src: Src, len: u32) -> [ValueId; 5] {
+    let (t, a, b, c) = match src {
+        Src::Piece { piece, item } => (0, piece, i64::from(item), 0),
+        Src::Rtn { page, item } => (1, page, i64::from(item), 0),
+        Src::Held { piece, item, from } => (2, piece, i64::from(item), i64::from(from)),
+    };
+    [v.int(t), v.int(a), v.int(b), v.int(c), v.int(i64::from(len))]
+}
+
+/// [`span_ints`]' span.
+fn span_of_ints(v: &Values, c: &[ValueId]) -> Option<Span> {
+    let n = |i: usize| c.get(i).map_or(0, |&y| int_of(v, y));
+    let u = |i: usize| u32::try_from(n(i)).unwrap_or(0);
+    let src = match n(0) {
+        0 => Src::Piece { piece: n(1), item: u(2) },
+        1 => Src::Rtn { page: n(1), item: u(2) },
+        2 => Src::Held { piece: n(1), item: u(2), from: u(3) },
+        _ => return None,
+    };
+    Some(Span { src, len: u(4) })
 }
 
 impl Run<'_, '_> {

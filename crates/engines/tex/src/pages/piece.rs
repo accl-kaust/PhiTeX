@@ -654,6 +654,8 @@ impl Run<'_, '_> {
         // in its items' unit too: a finisher placed on another version
         // knows its placement stale, [`Run::finisher_args`])
         let vunit = crate::vprof::unit(v, pid, &ints, marks);
+        // (decoded here, beside the other pieces, not on the steps' chain)
+        let _ = crate::vprof::decoded(v, vunit);
         self.contribute(crate::vprof::VPROF, v.seq_unit(vunit));
         let shape = crate::nodes::unit_shape(v, pid, raw, &self.line_fonts).unwrap_or(ValueId::UNIT);
         let it = v.list(vec![
