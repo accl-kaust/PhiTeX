@@ -6473,15 +6473,14 @@ impl Build {
                 .eng
                 .acc_value(self.unit, v.field(crate::pdfout::SHOWN))
         });
-        let acc = match shown {
-            Some(s) => Some(v.list(vec![ValueId::UNIT, s])),
-            None => {
-                let f = v.field("pagehash");
-                self.g.eng.acc_value(self.unit, f).map(|x| {
-                    let r = self.g.eng.acc_value(self.unit, v.field(crate::pdfout::SHOWN));
-                    v.list(vec![x, r.unwrap_or(ValueId::UNIT)])
-                })
-            }
+        let acc = if let Some(s) = shown {
+            Some(v.list(vec![ValueId::UNIT, s]))
+        } else {
+            let f = v.field("pagehash");
+            self.g.eng.acc_value(self.unit, f).map(|x| {
+                let r = self.g.eng.acc_value(self.unit, v.field(crate::pdfout::SHOWN));
+                v.list(vec![x, r.unwrap_or(ValueId::UNIT)])
+            })
         };
         crate::timeline::note("pages: the key", t0.elapsed());
         if let Some((k, x)) = &self.memo.locked().pages
