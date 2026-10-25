@@ -4,44 +4,55 @@
 //! up without touching any lock.
 
 use std::sync::OnceLock;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const CHUNK_BITS: u32 = 16;
 const CHUNK: usize = 1 << CHUNK_BITS;
 const CHUNKS: usize = 1 << 14;
 
+/// A chunk: `CHUNK` slots, each set once.
+type Chunk<T> = Box<[OnceLock<T>]>;
+
 pub(crate) struct Table<T> {
     /// A chunk is made on first use; a slot is set once.
-    chunks: Box<[OnceLock<Box<[OnceLock<T>]>>]>,
+    chunks: Box<[OnceLock<Chunk<T>>]>,
     next: AtomicUsize,
 }
 
 impl<T> Table<T> {
     pub(crate) fn new() -> Table<T> {
-        todo!()
+        Table {
+            chunks: (0..CHUNKS).map(|_| OnceLock::new()).collect(),
+            next: AtomicUsize::new(0),
+        }
     }
 
     /// The next index, its slot still empty: an id can be made before its
     /// entry is built. `set` fills it, exactly once.
     pub(crate) fn reserve(&self) -> usize {
-        todo!()
+        let i = self.next.fetch_add(1, Ordering::AcqRel);
+        assert!(i < CHUNK * CHUNKS, "table full");
+        i
     }
 
     pub(crate) fn set(&self, i: usize, x: T) {
-        todo!()
+        let chunk = self.chunks[i >> CHUNK_BITS].get_or_init(|| (0..CHUNK).map(|_| OnceLock::new()).collect());
+        assert!(chunk[i & (CHUNK - 1)].set(x).is_ok(), "table slot {i} set twice");
     }
 
     pub(crate) fn push(&self, x: T) -> usize {
-        todo!()
+        let i = self.reserve();
+        self.set(i, x);
+        i
     }
 
     /// None for an index not reserved or not yet set.
     pub(crate) fn get(&self, i: usize) -> Option<&T> {
-        todo!()
+        self.chunks.get(i >> CHUNK_BITS)?.get()?[i & (CHUNK - 1)].get()
     }
 
     /// Indices handed out so far (set or not).
     pub(crate) fn len(&self) -> usize {
-        todo!()
+        self.next.load(Ordering::Acquire)
     }
 }

@@ -8,10 +8,11 @@ use std::sync::Arc;
 
 use crate::api::{At, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Step, Stop};
 use crate::engine::Engine;
-use crate::node::{Node, Product, ReadKind, RunRecord};
-use crate::order::{Pos, SegId};
+use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, ReadRec, RunRecord, State};
+use crate::order::Pos;
+use crate::read::{self, SITE, next_value, pos_of, reaching, reaching_at, through};
 use crate::sched::Worker;
-use crate::values::{Field, ValueId, Values};
+use crate::values::{Field, FxHashSet, ValueId, Values};
 
 /// A handle on a value read through a path, extended step by step
 /// (`Ctx::at`) and read at a step (`Ctx::get`): the run depends only on
@@ -22,24 +23,53 @@ pub struct View(u32);
 pub(crate) struct ViewRec {
     pub(crate) kind: ReadKind,
     pub(crate) path: PathId,
+    /// The value under the path when the view was made.
+    pub(crate) value: Option<ValueId>,
 }
 
 pub struct Ctx<'a> {
     pub(crate) eng: &'a Engine,
     pub(crate) worker: Option<&'a Worker>,
     pub(crate) me: &'a Arc<Node>,
-    /// Its segment and label at the run's start.
-    pub(crate) seg: SegId,
-    pub(crate) pos: Pos,
+    pub(crate) args: Arc<[ValueId]>,
     pub(crate) product: Product,
     pub(crate) views: Vec<ViewRec>,
     /// Its last record, for `placed_output`.
     pub(crate) last: Option<Arc<RunRecord>>,
+    /// Fields whose reads go unrecorded (`Engine::set_stable`).
+    pub(crate) stable: Arc<FxHashSet<Field>>,
+}
+
+fn stop() -> Stop {
+    Stop { _private: () }
 }
 
 impl<'a> Ctx<'a> {
     pub(crate) fn new(eng: &'a Engine, worker: Option<&'a Worker>, me: &'a Arc<Node>) -> Ctx<'a> {
-        todo!()
+        Ctx {
+            eng,
+            worker,
+            me,
+            args: me.args(),
+            product: Product {
+                output: ValueId::UNIT,
+                defs: Vec::new(),
+                contribs: Vec::new(),
+                reads: Vec::new(),
+                placements: Vec::new(),
+                claim: 0,
+                effect: Effect::None,
+            },
+            views: Vec::new(),
+            last: me.run_record(),
+            stable: eng.stable.read().clone(),
+        }
+    }
+
+    /// The product, with the output.
+    pub(crate) fn into_product(mut self, output: ValueId) -> Product {
+        self.product.output = output;
+        self.product
     }
 
     pub fn values(&self) -> &'a Values {
@@ -51,41 +81,92 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn op(&self) -> OpId {
-        self.me.op
+        self.me.op()
     }
 
     pub fn args(&self) -> &[ValueId] {
-        &self.me.args
+        &self.args
     }
 
     /// `Err(Stop)` once a commit has refuted a read of this run.
     fn check(&self) -> Result<(), Stop> {
-        todo!()
+        match self.me.state() {
+            State::RunningDirty | State::Inert | State::Gone => Err(stop()),
+            State::Clean | State::Dirty | State::Running => Ok(()),
+        }
+    }
+
+    fn record(&mut self, kind: ReadKind, path: PathId, seen: Option<ValueId>) {
+        self.product.reads.push(ReadRec { kind, path, seen });
+    }
+
+    fn recorded(&self, f: Field) -> bool {
+        !self.stable.contains(&f)
     }
 
     /// The definition of `f` reaching me, or the environment's value.
     pub fn read(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
-        todo!()
+        self.check()?;
+        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        if self.recorded(f) {
+            self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
+        }
+        Ok(r.value)
     }
 
     /// The definition of `f` reaching another position.
     pub fn read_at(&mut self, f: Field, at: At) -> Result<FieldAt, Stop> {
-        todo!()
+        self.check()?;
+        let (anchor, r) = match at {
+            At::Before(n) => (Anchor::Before(n), reaching_at(self.eng, f, n, false)),
+            At::AfterOwn(n) => (Anchor::AfterOwn(n), reaching_at(self.eng, f, n, true)),
+            At::End(u) => (
+                Anchor::End(u),
+                Some(reaching(self.eng, f, Pos(self.eng.unit(u).end.0 - 1), true)),
+            ),
+        };
+        if self.recorded(f) {
+            self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.and_then(|x| x.value));
+        }
+        Ok(match r {
+            None => FieldAt::Gone,
+            Some(x) => match x.value {
+                Some(v) => FieldAt::Def(v, x.by),
+                None => FieldAt::Unset,
+            },
+        })
     }
 
     /// `read` through a path: the run depends only on the path's answer.
     pub fn read_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
-        todo!()
+        self.check()?;
+        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let x = through(self.eng, r, p);
+        if self.recorded(f) {
+            self.record(ReadKind::Field { f, at: Anchor::Me }, p, x);
+        }
+        Ok(x)
     }
 
     /// The node whose definition of `f` reaches me (None: the environment).
     pub fn def_site(&mut self, f: Field) -> Result<Option<NodeId>, Stop> {
-        todo!()
+        self.check()?;
+        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        if self.recorded(f) {
+            let seen = through(self.eng, r, SITE);
+            self.record(ReadKind::Field { f, at: Anchor::Me }, SITE, seen);
+        }
+        Ok(r.by)
     }
 
     /// The environment's value of `f`, whatever is defined before me.
     pub fn env(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
-        todo!()
+        self.check()?;
+        let x = read::env_value(self.eng, f);
+        if self.recorded(f) {
+            self.record(ReadKind::Env { f }, PathId::WHOLE, x);
+        }
+        Ok(x)
     }
 
     pub fn define(&mut self, f: Field, x: ValueId) {
@@ -94,7 +175,16 @@ impl<'a> Ctx<'a> {
 
     /// `Locality::Scope` and `ScopeAt` are `unimplemented!("scopes: next run")`.
     pub fn define_with(&mut self, f: Field, x: ValueId, loc: Locality) {
-        todo!()
+        match loc {
+            Locality::Local | Locality::Global => {}
+            Locality::Scope | Locality::ScopeAt(_) => unimplemented!("scopes: next run"),
+        }
+        self.product.defs.push(DefRec {
+            f,
+            loc,
+            value: x,
+            rel: None,
+        });
     }
 
     /// `f` := the integer definition of `f` reaching me, plus `c`. Kept as
@@ -103,108 +193,204 @@ impl<'a> Ctx<'a> {
     /// are given it ahead of their runs. This is how a counter chain is not
     /// a chain of runs. The run need not read `f` first.
     pub fn define_rel(&mut self, f: Field, c: i64) {
-        todo!()
+        self.product.defs.push(DefRec {
+            f,
+            loc: Locality::Local,
+            value: ValueId::UNIT,
+            rel: Some(c),
+        });
     }
 
     /// Adds `x` to `f`'s contributions at my position.
     pub fn contribute(&mut self, f: Field, x: ValueId) {
-        todo!()
+        self.product.contribs.push((f, x));
+    }
+
+    fn bound(&self, n: Option<NodeId>) -> Result<Pos, Stop> {
+        match n {
+            Some(n) => pos_of(self.eng, n).ok_or_else(stop),
+            None => Ok(read::unit_start(self.eng, self.me)),
+        }
+    }
+
+    fn fold_value(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<ValueId, Stop> {
+        self.check()?;
+        let fp = self.bound(from)?;
+        let tp = match to {
+            Some(n) => pos_of(self.eng, n).ok_or_else(stop)?,
+            None => pos_of(self.eng, self.me.id).ok_or_else(stop)?,
+        };
+        Ok(read::fold(self.eng, f, Some(fp), Some(tp)))
     }
 
     /// The declared monoid's fold over the contributions to `f` after
     /// `from` (None: the unit's start) and before `to` (None: me).
     pub fn fold(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<ValueId, Stop> {
-        todo!()
+        let x = self.fold_value(f, from, to)?;
+        self.record(ReadKind::Fold { f, from, to }, PathId::WHOLE, Some(x));
+        Ok(x)
     }
 
     /// `fold` through a path.
     pub fn fold_path(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, p: PathId) -> Result<Option<ValueId>, Stop> {
-        todo!()
+        let x = self.fold_value(f, from, to)?;
+        let y = read::apply_path(self.eng, Some(x), p);
+        self.record(ReadKind::Fold { f, from, to }, p, y);
+        Ok(y)
     }
 
-    /// The first contribution to `f` after `after` (None: the unit's start).
+    /// The first contribution to `f` after `after` (None: the unit's start),
+    /// or None while the next node after it has not committed.
     pub fn next_contribution(&mut self, f: Field, after: Option<NodeId>) -> Result<Option<(NodeId, ValueId)>, Stop> {
-        todo!()
+        self.check()?;
+        let ap = self.bound(after)?;
+        let n = read::next_contribution(self.eng, f, Some(ap));
+        self.record(ReadKind::Next { f, after }, PathId::WHOLE, next_value(self.eng, &n));
+        Ok(n.item)
     }
 
     /// A view on `fold(f, from, to)`, read step by step.
     pub fn view(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<View, Stop> {
-        todo!()
+        let x = self.fold_value(f, from, to)?;
+        self.views.push(ViewRec {
+            kind: ReadKind::Fold { f, from, to },
+            path: PathId::WHOLE,
+            value: Some(x),
+        });
+        Ok(View(u32::try_from(self.views.len() - 1).unwrap_or(u32::MAX)))
     }
 
     /// A view on `read(f)`.
     pub fn view_field(&mut self, f: Field) -> Result<View, Stop> {
-        todo!()
+        self.check()?;
+        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.views.push(ViewRec {
+            kind: ReadKind::Field { f, at: Anchor::Me },
+            path: PathId::WHOLE,
+            value: r.value,
+        });
+        Ok(View(u32::try_from(self.views.len() - 1).unwrap_or(u32::MAX)))
+    }
+
+    fn view_rec(&self, v: View) -> Option<&ViewRec> {
+        self.views.get(v.0 as usize)
     }
 
     /// The view one step further; None where the step does not apply.
     pub fn at(&mut self, v: View, s: Step) -> Option<View> {
-        todo!()
+        let rec = self.view_rec(v)?;
+        let (kind, value) = (rec.kind.clone(), rec.value);
+        let path = self.eng.path_extend(rec.path, s);
+        let x = read::step(self.eng, value, s);
+        let present = self.eng.path_extend(path, Step::Present);
+        let seen = Some(self.eng.values().bool(x.is_some()));
+        self.record(kind.clone(), present, seen);
+        x?;
+        self.views.push(ViewRec { kind, path, value: x });
+        Some(View(u32::try_from(self.views.len() - 1).unwrap_or(u32::MAX)))
     }
 
     /// The value at one step further, recorded as a read of that path.
     pub fn get(&mut self, v: View, s: Step) -> Option<ValueId> {
-        todo!()
+        let rec = self.view_rec(v)?;
+        let (kind, value) = (rec.kind.clone(), rec.value);
+        let path = self.eng.path_extend(rec.path, s);
+        let x = read::step(self.eng, value, s);
+        self.record(kind, path, x);
+        x
     }
 
     pub fn len(&mut self, v: View) -> Option<u64> {
-        todo!()
+        let x = self.get(v, Step::Len)?;
+        self.eng.values().as_int(x).and_then(|i| u64::try_from(i).ok())
     }
 
     pub fn has(&mut self, v: View, k: ValueId) -> bool {
-        todo!()
+        self.get(v, Step::Has(k)).and_then(|x| self.eng.values().as_bool(x)).unwrap_or(false)
     }
 
     /// The whole value under the view, recorded as a read of all of it.
     pub fn whole(&mut self, v: View) -> ValueId {
-        todo!()
+        let Some(rec) = self.view_rec(v) else {
+            return ValueId::UNIT;
+        };
+        let (kind, path, value) = (rec.kind.clone(), rec.path, rec.value);
+        self.record(kind, path, value);
+        value.unwrap_or(ValueId::UNIT)
     }
 
     /// Places a node after me, before my continuation and next sibling;
     /// its index among my placements.
     pub fn child(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
-        todo!()
+        self.product.placements.push(Placement::Child(op, args));
+        self.product.placements.len() - 1
     }
 
     /// Places a node after me and my children.
     pub fn follow(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
-        todo!()
+        self.product.placements.push(Placement::Follow(op, args));
+        self.product.placements.len() - 1
     }
 
     /// Places a node after `at` and its placements.
     pub fn follow_after(&mut self, at: NodeId, op: OpId, args: Vec<ValueId>) -> usize {
-        todo!()
+        self.product.placements.push(Placement::FollowAfter(at, op, args));
+        self.product.placements.len() - 1
     }
 
     /// The output my `i`-th placement had at my last commit, if it has run.
     pub fn placed_output(&mut self, i: usize) -> Option<ValueId> {
-        todo!()
+        let c = self.last.as_ref().and_then(|r| r.placed.get(i).copied());
+        let out = c.and_then(|c| {
+            let n = self.eng.node(c);
+            (n.state() != State::Gone).then(|| n.run_record().map(|r| r.output)).flatten()
+        });
+        self.record(ReadKind::Placed { i }, PathId::WHOLE, out);
+        out
     }
 
     /// `op` on `args` inline, memoised by (op, args): the output. It reads
     /// at my position and its reads are mine.
     pub fn apply(&mut self, op: OpId, args: Vec<ValueId>) -> Result<ValueId, Stop> {
-        todo!()
+        self.check()?;
+        let key = (op, args.clone().into_boxed_slice());
+        if let Some(&x) = self.eng.memo.read().get(&key) {
+            return Ok(x);
+        }
+        let o = self.eng.op(op).clone();
+        let mut sub = Ctx::new(self.eng, self.worker, self.me);
+        sub.args = args.into();
+        let out = o.run(&mut sub)?;
+        self.product.reads.append(&mut sub.product.reads);
+        self.eng.memo.write().insert(key, out);
+        Ok(out)
     }
 
     /// Takes my next `n` siblings: they become inert and `following` gives
     /// their (op, args). Pushed siblings only, not placements.
     pub fn claim(&mut self, n: usize) {
-        todo!()
+        self.product.claim = n;
+        crate::commit::apply_claim(self.eng, self.worker, self.me, n);
     }
 
     /// The `i`-th claimed sibling's (op, args).
     pub fn following(&mut self, i: usize) -> Option<(OpId, Vec<ValueId>)> {
-        todo!()
+        let n = read::following(self.eng, self.me, i);
+        let seen = n.as_ref().map(|n| read::text_value(self.eng, n));
+        self.record(ReadKind::Following { i }, PathId::WHOLE, seen);
+        n.map(|n| (n.op(), n.args().to_vec()))
     }
 
     /// Narrows what I may define, for prediction. Accepted, not used by
     /// this core.
-    pub fn narrow(&mut self, m: MayDefine) {}
+    pub fn narrow(&mut self, _m: MayDefine) {}
 
     /// `Effect::None` is accepted; any other is `unimplemented!("scopes: next run")`.
     pub fn set_effect(&mut self, e: Effect) {
-        todo!()
+        match e {
+            Effect::None => self.product.effect = e,
+            Effect::Open | Effect::Close | Effect::Scope(_) | Effect::Pending => unimplemented!("scopes: next run"),
+        }
     }
 
     /// Always true: a run never knows it is final. Side effects belong
@@ -219,7 +405,10 @@ impl<'a> Ctx<'a> {
 
     /// Forgets my reads of `f` in this run: the commit records none.
     pub fn unread(&mut self, f: Field) {
-        todo!()
+        self.product.reads.retain(|r| match &r.kind {
+            ReadKind::Field { f: g, .. } | ReadKind::Env { f: g } => *g != f,
+            ReadKind::Fold { .. } | ReadKind::Next { .. } | ReadKind::Placed { .. } | ReadKind::Following { .. } => true,
+        });
     }
 
     /// A path interned for `read_path` and friends.

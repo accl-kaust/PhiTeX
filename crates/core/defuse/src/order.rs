@@ -17,15 +17,15 @@ use crate::lock::Lock;
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) struct Pos(pub u64);
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) struct SegId(pub u32);
 
 /// Nodes a segment holds before it splits.
 pub(crate) const SEG_CAP: usize = 256;
 /// Labels between nodes pushed in a row.
-pub(crate) const GAP: u64 = 1 << 24;
+pub(crate) const GAP: u64 = 1 << 20;
 /// Labels a unit is given at its making; a unit's segments split within it.
-pub(crate) const UNIT_SPAN: u64 = 1 << 40;
+pub(crate) const UNIT_SPAN: u64 = 1 << 44;
 
 /// The segments in order of their first label.
 pub(crate) struct Order {
@@ -41,29 +41,46 @@ impl Order {
 
     /// The segment whose range holds `p`.
     pub(crate) fn seg_at(&self, p: Pos) -> SegId {
-        todo!()
+        self.at_or_after(p).expect("a position before the first segment")
     }
 
-    pub(crate) fn next(&self, s: SegId, lo: Pos) -> Option<SegId> {
-        todo!()
+    pub(crate) fn next(&self, _s: SegId, lo: Pos) -> Option<SegId> {
+        let segs = self.segs.read();
+        let i = segs.partition_point(|(l, _)| *l <= lo);
+        segs.get(i).map(|x| x.1)
     }
 
-    pub(crate) fn prev(&self, s: SegId, lo: Pos) -> Option<SegId> {
-        todo!()
+    pub(crate) fn prev(&self, _s: SegId, lo: Pos) -> Option<SegId> {
+        let segs = self.segs.read();
+        let i = segs.partition_point(|(l, _)| *l < lo);
+        i.checked_sub(1).map(|j| segs[j].1)
     }
 
     /// Registers a segment starting at `lo` (a split's upper half, a unit's
     /// first segment).
     pub(crate) fn insert(&self, lo: Pos, s: SegId) {
-        todo!()
+        let mut segs = self.segs.write();
+        let i = segs.partition_point(|(l, _)| *l < lo);
+        segs.insert(i, (lo, s));
     }
 
     /// The first segment at or after `p`'s, for walks forward.
     pub(crate) fn at_or_after(&self, p: Pos) -> Option<SegId> {
-        todo!()
+        let segs = self.segs.read();
+        let i = segs.partition_point(|(l, _)| *l <= p);
+        i.checked_sub(1).map(|j| segs[j].1)
+    }
+
+    /// The segments in order, a snapshot.
+    pub(crate) fn all(&self) -> Vec<SegId> {
+        self.segs.read().iter().map(|x| x.1).collect()
+    }
+
+    pub(crate) fn first(&self) -> Option<SegId> {
+        self.segs.read().first().map(|x| x.1)
     }
 
     pub(crate) fn count(&self) -> u32 {
-        todo!()
+        u32::try_from(self.segs.read().len()).unwrap_or(u32::MAX)
     }
 }

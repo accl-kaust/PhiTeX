@@ -303,6 +303,9 @@ pub struct Times {
     pub wall_ns: u64,
     /// In operations' runs, the reads inside included.
     pub op_ns: u64,
+    /// Of `op_ns`, in runs that were not their node's last in this
+    /// evaluation: thrown away.
+    pub wasted_ns: u64,
     /// In commits: the diff into the node's own segment.
     pub commit_ns: u64,
     pub commit_max_ns: u64,
@@ -325,6 +328,8 @@ pub struct Report {
     pub runs_by_op: Vec<(&'static str, u64)>,
     /// Nodes that ran once and were never refuted.
     pub first_runs: u64,
+    /// The summed run time of every run that was not its node's last.
+    pub wasted_ns: u64,
     pub refuted_nodes: u64,
     pub refuted_by_field: Vec<(Field, u64)>,
     pub rerun_causes: Vec<(NodeId, Cause)>,

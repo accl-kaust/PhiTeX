@@ -1,10 +1,10 @@
 //! A node and what its last run left.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::api::{Cause, Effect, Locality, NodeId, OpId, PathId, UnitId};
-use crate::lock::Mx;
+use crate::lock::{Lock, Mx};
 use crate::order::{Pos, SegId};
 use crate::values::{Field, ValueId};
 
@@ -30,8 +30,10 @@ pub(crate) enum State {
 pub(crate) struct Node {
     pub(crate) id: NodeId,
     pub(crate) unit: UnitId,
-    pub(crate) op: OpId,
-    pub(crate) args: Box<[ValueId]>,
+    /// Its operation and arguments: its text, swapped by an edit
+    /// (`Engine::replace`), cloned by a read.
+    pub(crate) op: AtomicU32,
+    pub(crate) text: Lock<Arc<[ValueId]>>,
     pub(crate) parent: Option<NodeId>,
     /// Its segment and label, written under the owning segment's write
     /// lock (a relabel, a split), read under its read lock. A lock-free read
@@ -39,28 +41,81 @@ pub(crate) struct Node {
     pub(crate) seg: AtomicU32,
     pub(crate) pos: AtomicU64,
     pub(crate) state: AtomicU8,
-    /// Runs in this evaluation (`Limits::runs_per_node`).
+    /// Runs in this evaluation (`Limits::runs_per_node`), the evaluation
+    /// they count in.
     pub(crate) runs: AtomicU32,
+    pub(crate) run_epoch: AtomicU64,
     /// Bumped at each commit; a reader record carrying an older serial is
     /// stale and dropped when met, so a commit never visits other segments
-    /// to retract its node's old reads.
+    /// to retract its node's old reads. Zero: never committed.
     pub(crate) serial: AtomicU32,
-    /// What the last commit left, diffed against by the next.
+    /// What the last commit left, diffed against by the next; a record
+    /// filed before any run (`provisional`) holds predictions only.
     pub(crate) last: Mx<Option<Arc<RunRecord>>>,
     /// Who woke it last and why: the realised chain.
     pub(crate) woke: Mx<Option<Wake>>,
-    /// With `profile`: nanoseconds of its last run and when it committed.
+    /// Nanoseconds of its last run, its commit and its walk forward, and
+    /// when it committed (from the evaluation's start).
     pub(crate) run_ns: AtomicU64,
+    pub(crate) commit_ns: AtomicU64,
+    pub(crate) reask_ns: AtomicU64,
     pub(crate) done_ns: AtomicU64,
 }
 
 impl Node {
+    pub(crate) fn new(
+        id: NodeId,
+        unit: UnitId,
+        op: OpId,
+        args: Vec<ValueId>,
+        parent: Option<NodeId>,
+        seg: SegId,
+        pos: Pos,
+    ) -> Node {
+        Node {
+            id,
+            unit,
+            op: AtomicU32::new(op.0),
+            text: Lock::new(args.into()),
+            parent,
+            seg: AtomicU32::new(seg.0),
+            pos: AtomicU64::new(pos.0),
+            state: AtomicU8::new(State::Dirty as u8),
+            runs: AtomicU32::new(0),
+            run_epoch: AtomicU64::new(0),
+            serial: AtomicU32::new(0),
+            last: Mx::new(None),
+            woke: Mx::new(None),
+            run_ns: AtomicU64::new(0),
+            commit_ns: AtomicU64::new(0),
+            reask_ns: AtomicU64::new(0),
+            done_ns: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn op(&self) -> OpId {
+        OpId(self.op.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn args(&self) -> Arc<[ValueId]> {
+        self.text.read().clone()
+    }
+
     pub(crate) fn state(&self) -> State {
-        todo!()
+        match self.state.load(Ordering::Acquire) {
+            0 => State::Clean,
+            1 => State::Dirty,
+            2 => State::Running,
+            3 => State::RunningDirty,
+            4 => State::Inert,
+            _ => State::Gone,
+        }
     }
 
     pub(crate) fn cas_state(&self, from: State, to: State) -> bool {
-        todo!()
+        self.state
+            .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     pub(crate) fn set_state(&self, s: State) {
@@ -73,6 +128,26 @@ impl Node {
 
     pub(crate) fn pos_hint(&self) -> Pos {
         Pos(self.pos.load(Ordering::Acquire))
+    }
+
+    /// Whether a run of it has committed.
+    pub(crate) fn committed(&self) -> bool {
+        self.serial.load(Ordering::Acquire) > 0
+    }
+
+    /// Never committed and not taken or removed: its contributions are
+    /// still to come.
+    pub(crate) fn is_hole(&self) -> bool {
+        !self.committed() && matches!(self.state(), State::Dirty | State::Running | State::RunningDirty)
+    }
+
+    pub(crate) fn record(&self) -> Option<Arc<RunRecord>> {
+        self.last.lock().clone()
+    }
+
+    /// Its last run's record, not a prediction.
+    pub(crate) fn run_record(&self) -> Option<Arc<RunRecord>> {
+        self.record().filter(|r| !r.provisional)
     }
 }
 
@@ -88,8 +163,27 @@ pub(crate) struct RunRecord {
     pub(crate) placed: Vec<NodeId>,
     pub(crate) claim: usize,
     pub(crate) effect: Effect,
+    /// Filed before any run: predictions, replaced by the first commit.
+    pub(crate) provisional: bool,
 }
 
+impl RunRecord {
+    pub(crate) fn provisional(defs: Vec<DefRec>) -> RunRecord {
+        RunRecord {
+            serial: 0,
+            output: ValueId::UNIT,
+            defs,
+            contribs: Vec::new(),
+            reads: Vec::new(),
+            placed: Vec::new(),
+            claim: 0,
+            effect: Effect::None,
+            provisional: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct DefRec {
     pub(crate) f: Field,
     pub(crate) loc: Locality,
@@ -162,6 +256,14 @@ pub(crate) enum Placement {
     Follow(OpId, Vec<ValueId>),
     /// After node `at` (and its placements).
     FollowAfter(NodeId, OpId, Vec<ValueId>),
+}
+
+impl Placement {
+    pub(crate) fn key(&self) -> (OpId, &[ValueId]) {
+        match self {
+            Placement::Child(op, a) | Placement::Follow(op, a) | Placement::FollowAfter(_, op, a) => (*op, a),
+        }
+    }
 }
 
 /// A run's product, handed to the commit.

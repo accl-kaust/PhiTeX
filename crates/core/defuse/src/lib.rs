@@ -42,9 +42,7 @@
 //! at the top of [`lock`]; a new one needs a row there.
 
 #![deny(unsafe_code)]
-#![allow(clippy::many_single_char_names, clippy::too_many_lines)]
-// The skeleton: bodies are `todo!()`. Remove these two allows when it is filled.
-#![allow(dead_code, unused_variables)]
+#![allow(clippy::many_single_char_names, clippy::too_many_lines, clippy::too_many_arguments)]
 
 mod api;
 mod commit;
