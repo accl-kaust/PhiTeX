@@ -1,0 +1,38 @@
+\hsize=6in \vsize=8.5in \parindent=0pt
+% the token path: 200000 iterations of a \loop (ten blocks of 20000:
+% one run of them all overflows the engine's labels after a run's
+% 170th page), each doing \edef, \csname...\endcsname, \number,
+% \ifnum, \expandafter and a call of a macro with two arguments,
+% typesetting one word
+\newcount\n \newcount\m \newcount\p
+\expandafter\def\csname w0\endcsname{zero}
+\expandafter\def\csname w1\endcsname{one}
+\expandafter\def\csname w2\endcsname{two}
+\expandafter\def\csname w3\endcsname{three}
+\expandafter\def\csname w4\endcsname{four}
+\expandafter\def\csname w5\endcsname{five}
+\expandafter\def\csname w6\endcsname{six}
+\expandafter\def\csname w7\endcsname{seven}
+\expandafter\def\csname w8\endcsname{eight}
+\expandafter\def\csname w9\endcsname{nine}
+\def\pair#1#2{\ifnum#1>4 #2\else #2s\fi\space}
+\def\step{%
+  \advance\n by 1
+  \ifnum\m>8 \m=0 \else \advance\m by 1 \fi
+  \edef\x{\number\m}%
+  \edef\y{\expandafter\noexpand\csname w\x\endcsname}%
+  \expandafter\pair\expandafter{\x}\y
+  \advance\p by 1
+  \ifnum\p>999 \p=0 \par\fi}
+\def\block{\n=0 \loop \step \ifnum\n<20000 \repeat\par}
+\block
+\block
+\block
+\block
+\block
+\block
+\block
+\block
+\block
+\block
+\bye

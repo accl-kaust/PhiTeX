@@ -99,7 +99,7 @@ sub() {
   tag="gf-$c-$1-$$-$RANDOM"
   for try in 1 2 3; do
     out=$(ACCL_COMMIT=$c ACCL_OPTS="$(with_scripts "$opts") --comment=$tag" "$here/accl" submit cmd \
-      env GATE_TEST_TIMEOUT="${GATE_TEST_TIMEOUT:-120}" GATE_TEST_PAR="${GATE_TEST_PAR:-5}" GATE_AMS_EDITS="${GATE_AMS_EDITS:-10}" \
+      env GATE_TEST_TIMEOUT="${GATE_TEST_TIMEOUT:-120}" GATE_TEST_PAR="${GATE_TEST_PAR:-5}" GATE_AMS_EDITS="${GATE_AMS_EDITS:-10}" GATE_CG_DOC="${GATE_CG_DOC:-para4000 macros}" \
       bash -c "$boot" gate-shard "$@" 2> "$err") || true
     id=$(tail -1 <<< "$out")
     [[ "$id" =~ ^[0-9]+$ ]] && break

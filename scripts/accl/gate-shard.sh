@@ -30,9 +30,10 @@
 #   gate-shard.sh control CTL           control CTL's CLI built, its cold
 #                                       watch timings at -j 1/8/16 (recorded
 #                                       by `gate-fast control`)
-#   gate-shard.sh cg                    para4000 at one thread under callgrind:
-#                                       startup Ir, node bodies' Ir per
-#                                       command, top 15 functions
+#   gate-shard.sh cg                    GATE_CG_DOC (para4000 and macros) at
+#                                       one thread under callgrind: startup
+#                                       Ir, Ir per command, the phases'
+#                                       table, top 15 functions
 #   gate-shard.sh para BAR_MD5          bench/para4000.tex (plain pdfTeX) cold
 #                                       at -j 1/8/16, three runs each (the
 #                                       node is shared: the min quoted, the
@@ -628,39 +629,99 @@ PY
     python3 -I scripts/accl/gate-acct.py table para "$r" > "$r/table.txt" 2>&1
     ;;
   cg)
-    # cg: para4000 at one thread under callgrind (the build shard's
-    # release CLI: the profiling build's code, its symbols and line tables;
-    # callgrind attributes by symbol, not by inlined frame), the format
-    # made once unprofiled. Prints the
-    # Ir in all, the startup's (all but the evaluation, `Graph::settle`),
-    # the node bodies' (the operations' runs, inclusive) over the
-    # commands they did (`acct: commands`), and the top 15 functions by
-    # exclusive Ir
+    # cg: each document of GATE_CG_DOC (default para4000 and macros) at
+    # one thread under callgrind (the build shard's release CLI: the
+    # profiling build's code, its symbols and line tables; callgrind
+    # attributes by symbol, not by inlined frame), the format made once
+    # unprofiled. Prints the Ir in all, the startup's (all but the
+    # evaluation, `Graph::settle`), the node bodies' (the operations'
+    # runs, inclusive) over the commands they did (`acct: commands`),
+    # the phases' table (cgtable) and the top 15 functions by exclusive
+    # Ir; para4000's files are cg.*, another document's cg-DOC.*
     fetched
     bin=$w/bin/cli/prof/phitex
-    doc=${GATE_CG_DOC:-para4000}
-    mkdir -p "$w/cg" && cp "bench/$doc.tex" "$w/cg/"
-    (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 1 --output-dir=warm --program pdftex "$doc.tex" > "$r/cg-warm.log" 2>&1)
-    (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_THREADS=1 \
-      timeout 3000 valgrind --tool=callgrind --callgrind-out-file="$r/cg.out" "$bin" build -j 1 --output-dir=o1 --program pdftex "$doc.tex" > "$r/cg-run.log" 2>&1) \
-      || red "cg: callgrind run exit $?"
-    callgrind_annotate --threshold=100 "$r/cg.out" > "$r/cg.excl.txt" 2>&1
-    callgrind_annotate --inclusive=yes --threshold=100 "$r/cg.out" > "$r/cg.incl.txt" 2>&1
-    num() { grep -m1 -F "$1" "$r/cg.incl.txt" | awk '{print $1}' | tr -d ,; }
-    total=$(grep -m1 'PROGRAM TOTALS' "$r/cg.excl.txt" | awk '{print $1}' | tr -d ,)
-    settle=$(num 'phitex_tex::api::Graph>::settle')
-    bodies=0
-    for op in 'ops::Exec as defuse::api::Operation>::run' 'pages::Resume as defuse::api::Operation>::run' \
-      'pages::Scan as defuse::api::Operation>::run' 'pages::Finish as defuse::api::Operation>::run' \
-      'ops::Link as defuse::api::Operation>::run' 'ops::Dvi as defuse::api::Operation>::run'; do
-      x=$(num "$op"); bodies=$((bodies + ${x:-0}))
+    : > "$r/cg.txt"
+    for doc in ${GATE_CG_DOC:-para4000 macros}; do
+      p=$r/cg; [ "$doc" = para4000 ] || p=$r/cg-$doc
+      mkdir -p "$w/cg" && cp "bench/$doc.tex" "$w/cg/"
+      (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 1 --output-dir=warm --program pdftex "$doc.tex" > "$p-warm.log" 2>&1)
+      (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_THREADS=1 \
+        timeout 3000 valgrind --tool=callgrind --callgrind-out-file="$p.out" "$bin" build -j 1 --output-dir=o1 --program pdftex "$doc.tex" > "$p-run.log" 2>&1) \
+        || red "cg: callgrind run of $doc exit $?"
+      callgrind_annotate --threshold=100 "$p.out" > "$p.excl.txt" 2>&1
+      callgrind_annotate --inclusive=yes --threshold=100 "$p.out" > "$p.incl.txt" 2>&1
+      python3 -I - "$doc" "$p.incl.txt" "$p.excl.txt" "$p-run.log" "$w/cg/$doc.tex" "$w/cg/o1/$doc.pdf" >> "$r/cg.txt" <<'PY'
+import re, sys, zlib
+doc, incl, excl, log, tex, pdf = sys.argv[1:]
+ir = {}
+for line in open(incl, errors="replace"):
+    m = re.match(r" *([0-9,]+) +\([ 0-9.]+%\) +(.*)$", line)
+    if m:
+        ir.setdefault(m.group(2), []).append(int(m.group(1).replace(",", "")))
+def num(pat):
+    rx = re.compile(pat)
+    return max((max(v) for k, v in ir.items() if rx.search(k)), default=0)
+total = next((int(l.split()[0].replace(",", "")) for l in open(excl) if "PROGRAM TOTALS" in l), 0)
+settle = num(r"phitex_tex::api::Graph>::settle")
+op = lambda n: num(re.escape("<phitex_tex::" + n + " as phitex_defuse::api::Operation>::run"))
+ops = ["ops::Exec", "pdfout::PdfPage", "pages::finish::Finish", "pages::builder::Pages", "pages::piece::Resume", "ops::Link", "ops::Dvi", "ops::Files", "ops::Mark"]
+bodies = sum(op(n) for n in ops)
+L = open(log, errors="replace").read()
+g = lambda pat: (lambda m: int(m[-1]) if m else 0)(re.findall(pat, L))
+cmds, chunks, pages = g(r"acct: commands ([0-9]+)"), g(r"incr walk: ([0-9]+) chunks"), g(r"([0-9]+) pages?, ")
+src = open(tex, encoding="latin-1").read()
+letters = sum(c.isalpha() for c in src)
+pars = sum(1 for l in src.splitlines() if l and not l.startswith("\\"))
+# the bytes deflated: every FlateDecode stream of the PDF inflated
+flate = 0
+try:
+    data = open(pdf, "rb").read()
+    for m in re.finditer(rb"/FlateDecode[^>]*>>\s*stream\r?\n", data):
+        try:
+            flate += len(zlib.decompressobj().decompress(data[m.end():]))
+        except zlib.error:
+            pass
+except OSError:
+    pass
+print("%s -j 1 under callgrind: Ir %d; startup (all but the evaluation) %d; evaluation %d, of which node bodies %d; commands %d; evaluation per command %s Ir, node bodies per command %s Ir (pdfTeX about 63 Ir per token)" % (
+    doc, total, total - settle, settle, bodies, cmds,
+    "%.0f" % (settle / cmds) if cmds else "?", "%.0f" % (bodies / cmds) if cmds else "?"))
+G = lambda x: "%.2f" % (x / 1e9)
+per = lambda x, n, u: "%.0f per %s" % (x / n, u) if n else ""
+lb = num(r"phitex_typeset::linebreak::line_break( |$)")
+rows = [
+    ("hint analysis before the build (hints::analyse_reusing)", num(r"phitex_tex::hints::analyse_reusing"), chunks, "chunk"),
+    ("a piece's run (ops::Exec::run)", op("ops::Exec"), pars, "paragraph"),
+    ("  of which Run::char_run", num(r"<phitex_tex::run::Run>::char_run"), letters, "letter"),
+    ("  of which Run::line_break_ outside typeset::line_break", max(0, num(r"<phitex_tex::run::Run>::line_break_( |$)") - lb), pars, "paragraph"),
+    ("  of which typeset::line_break", lb, pars, "paragraph"),
+    ("  of which Run::load_slow", num(r"<phitex_tex::run::Run>::load_slow"), pars, "paragraph"),
+    ("  of which Run::finisher_args", num(r"<phitex_tex::run::Run>::finisher_args"), pars, "paragraph"),
+    ("  of which nodes::encode_line", num(r"phitex_tex::nodes::encode_line"), pars, "paragraph"),
+    ("  of which handle_right_brace (box_end_in in it)", num(r"<phitex_tex::run::Run>::handle_right_brace"), pars, "paragraph"),
+    ("a page's PDF output (pdfout::PdfPage::run)", op("pdfout::PdfPage"), pages, "page"),
+    ("  of which PdfState::char_out", num(r"<phitex_pdf::PdfState>::char_out"), letters, "letter"),
+    ("  of which begin_string_tail", num(r"<phitex_pdf::PdfState>::begin_string_tail"), letters, "letter"),
+    ("  of which deflate::compress_with (%d bytes in)" % flate, num(r"phitex_codecs::deflate::compress_with"), flate, "byte in"),
+    ("a finisher (pages::finish::Finish::run)", op("pages::finish::Finish"), pages, "page"),
+    ("page steps (pages::builder::Pages::run)", op("pages::builder::Pages"), pages, "page"),
+]
+top = [r[1] for r in rows if not r[0].startswith(" ")]
+rows.append(("the engine and everything else", total - sum(top), 0, ""))
+rows.append(("total", total, 0, ""))
+print("%s phases (G Ir, inclusive; %d chunks, %d paragraphs, %d letters, %d pages):" % (doc, chunks, pars, letters, pages))
+for name, x, n, u in rows:
+    print("  %-62s %6s  %s" % (name, G(x), per(x, n, u)))
+print("%s top 15 by exclusive Ir:" % doc)
+k = 0
+for line in open(excl, errors="replace"):
+    if re.match(r" *[0-9,]+ +\(", line) and "PROGRAM TOTALS" not in line:
+        print(line.rstrip()[:200])
+        k += 1
+        if k == 15:
+            break
+PY
     done
-    cmds=$(grep -oE 'acct: commands [0-9]+' "$r/cg-run.log" | tail -1 | awk '{print $3}')
-    {
-      echo "$doc -j 1 under callgrind: Ir ${total:-?}; startup (all but the evaluation) $(( ${total:-0} - ${settle:-0} )); evaluation ${settle:-?}, of which node bodies $bodies; commands ${cmds:-?}; node bodies per command $(awk -v a="$bodies" -v b="${cmds:-0}" 'BEGIN { if (b > 0) printf "%.0f", a / b; else print "?" }') Ir (pdfTeX about 2,900)"
-      echo "top 15 by exclusive Ir:"
-      grep -E '^ *[0-9,]+ +\(' "$r/cg.excl.txt" | grep -v 'PROGRAM TOTALS' | head -15 | cut -c1-200
-    } > "$r/cg.txt"
     ;;
   *) red "unknown shard $shard" ;;
 esac
