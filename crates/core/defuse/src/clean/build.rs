@@ -278,8 +278,17 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let Some(res) = n.res.clone() else { continue };
+            if super::core::settle_stats() {
+                super::core::settle_note(self.core.op_name(n.text.op), res.reads.len(), on.as_ref().map_or(0, Vec::len));
+            }
+            // (Many fields asked on, a finisher's: looked up in a set, not
+            // each read against the whole list.)
+            let on_set: Option<FxHashSet<Field>> = on.as_ref().filter(|fs| fs.len() > 8).map(|fs| fs.iter().copied().collect());
             let asked = |r: &Read| {
-                let a = on.as_ref().is_none_or(|fs| read_on(r, fs)) || (shape && structural(r)) || (!outs.is_empty() && read_of(r, &outs));
+                let a = on.as_ref().is_none_or(|fs| match &on_set {
+                    Some(set) => read_on_set(r, set),
+                    None => read_on(r, fs),
+                }) || (shape && structural(r)) || (!outs.is_empty() && read_of(r, &outs));
                 if a {
                     super::core::prof::count(20);
                 }
@@ -2659,6 +2668,20 @@ fn read_of(r: &Read, xs: &[Id]) -> bool {
     match r {
         Read::Out { node, .. } | Read::Placed { node, .. } => xs.contains(node),
         Read::Stream { outs, .. } => outs.iter().any(|(x, _)| xs.contains(x)),
+        _ => false,
+    }
+}
+
+/// [`read_on`] on a set of fields.
+fn read_on_set(r: &Read, fs: &FxHashSet<Field>) -> bool {
+    match r {
+        Read::Use { f, .. }
+        | Read::Loop { f, .. }
+        | Read::Env { f, .. }
+        | Read::IsLoop { f, .. }
+        | Read::Range { f, .. }
+        | Read::Seq { f, .. } => fs.contains(f),
+        Read::Stream { fields, .. } => fields.iter().any(|(f, _)| fs.contains(f)),
         _ => false,
     }
 }

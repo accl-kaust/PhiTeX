@@ -75,6 +75,9 @@ struct Run {
     log_at: u64,
     /// The text the run ran under (a token it parked is of that text).
     text: Option<std::sync::Arc<super::world::Text>>,
+    /// The texts of its placements, made where it ran (their hooks
+    /// asked there, not in the commit): held until it commits.
+    _pre: Vec<std::sync::Arc<super::world::Text>>,
 }
 
 /// The evaluation's scheduling state.
@@ -139,6 +142,10 @@ struct Sched {
     /// Placers whose kept state's reads were found to hold, with the world
     /// version they held at.
     kept_ok: FxHashMap<Id, u64>,
+    /// Parked nodes woken since they last ran: on one thread a waiter
+    /// woken by the first of what it waits on goes after the queued work
+    /// ([`Engine::drain`]), and takes the rest in the same attempt.
+    woken: FxHashSet<Id>,
 }
 
 impl Sched {
@@ -243,6 +250,21 @@ struct Heights {
     runs: Vec<Link>,
     cur: FxHashMap<Id, usize>,
     cur_c: FxHashMap<Id, usize>,
+    /// Each node's reads offered at its last run, kept by how many and
+    /// the last of them, with what they offered: a resumed run's reads
+    /// begin with those, and only its new ones are offered (a page
+    /// builder parked after every piece holds thousands).
+    seen: FxHashMap<Id, Seen>,
+}
+
+/// What a run's first `n` reads offered ([`Heights::seen`]).
+#[derive(Clone)]
+struct Seen {
+    n: usize,
+    last: Read,
+    best: Option<(u32, Id, crate::api::Cause, Option<usize>)>,
+    best_t: u64,
+    lastk: Option<(u64, usize, crate::api::Cause)>,
 }
 
 /// A run's entry in the chain: its node, height, link and why, and when
@@ -837,6 +859,7 @@ impl Engine {
         }
         s.queued.insert(id);
         s.queue.insert((n.unit, n.pos, id));
+        super::core::runlog(id, self.core.op_name(n.text.op), None, "enqueue");
         if let Some(t) = super::core::now() {
             s.ready_at.insert(id, t);
         }
@@ -866,8 +889,8 @@ impl Engine {
         // steps ~350-430 ms. CLEAN_FLOW=2: the combining merge.)
         static FLOW: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
         let flow = *FLOW.get_or_init(|| match std::env::var("CLEAN_FLOW").as_deref() {
-            Ok("2") => 2,
-            Ok("0") | Err(_) => 0,
+            Ok("2") | Err(_) => 2,
+            Ok("0") => 0,
             Ok(_) => 1,
         });
         if exec.parallelism() > 1 && flow == 2 {
@@ -880,7 +903,26 @@ impl Engine {
             return super::core::prof::time(24, || self.drain_steps(s, rep, ran, cut, deadline, hs, src, per_round, rounds, sched, exec));
         }
         let mut idle: u32 = 0;
-        while let Some(k) = s.queue.first().copied() {
+        // (Waiters woken while other work is queued: they go after it, an
+        // accumulator's reader then taking every contribution made
+        // meanwhile in one attempt, not one attempt a contribution.)
+        let mut later: Vec<(u32, Pos, Id)> = Vec::new();
+        loop {
+            let Some(k) = s.queue.first().copied() else {
+                if later.is_empty() {
+                    break;
+                }
+                for k in later.drain(..) {
+                    s.woken.remove(&k.2);
+                    s.queue.insert(k);
+                }
+                continue;
+            };
+            if s.queue.len() > 1 && s.woken.remove(&k.2) && later.len() < 1024 {
+                s.queue.remove(&k);
+                later.push(k);
+                continue;
+            }
             rep.max_ready = rep.max_ready.max(s.queue.len());
             self.check_deadline(s, rep, deadline)?;
             // (More work than one thread is for: in steps on the
@@ -1208,6 +1250,10 @@ impl Engine {
                 done: Vec::new(),
                 merged: 0,
                 stop: false,
+                combines: 0,
+                pick_none: 0,
+                t_by_op: Vec::new(),
+                t_pick: 0,
             });
             let cv = std::sync::Condvar::new();
             let budget = 256usize;
@@ -1389,14 +1435,19 @@ impl Engine {
                 done: Vec::new(),
                 merged: 0,
                 stop: false,
+                combines: 0,
+                pick_none: 0,
+                t_by_op: Vec::new(),
+                t_pick: 0,
             });
             let cv = std::sync::Condvar::new();
             // A result was handed in (or the first pick is due): whoever
             // finds the merge free takes it.
             let want = AtomicBool::new(true);
-            let budget = 256usize;
+            let budget = usize::MAX;
             // (Round times: ops' and the merge's ns, summed over workers.)
             let (op_ns, merge_ns) = (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0));
+            let (wait_ns, waits) = (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0));
             let run = |_: usize| {
                 loop {
                     // (The holder looks again after letting go: a result
@@ -1441,13 +1492,32 @@ impl Engine {
                     if want.load(SeqCst) && flow.try_lock().is_ok() {
                         continue;
                     }
+                    let tw = super::core::now();
                     drop(cv.wait(qg).unwrap_or_else(std::sync::PoisonError::into_inner));
+                    wait_ns.fetch_add(super::core::ns_since(tw), SeqCst);
+                    waits.fetch_add(1, SeqCst);
                 }
                 crate::api::RunResult(())
             };
             let mut out = Vec::with_capacity(par);
             exec.execute(par, &run, &mut out);
             let mut f = flow.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+            super::core::settle_print();
+            if std::env::var_os("CLEAN_PIPE_STATS").is_some() {
+                eprintln!(
+                    "pipe: ops {} ms, merge {} ms in {} merges of {} results, waits {} ({} ms), picks none {} with queue {}",
+                    op_ns.load(SeqCst) / 1_000_000,
+                    merge_ns.load(SeqCst) / 1_000_000,
+                    f.combines,
+                    f.merged,
+                    waits.load(SeqCst),
+                    wait_ns.load(SeqCst) / 1_000_000,
+                    f.pick_none,
+                    f.m.s.queue.len()
+                );
+                let by: Vec<String> = f.t_by_op.iter().enumerate().filter(|x| x.1.1 > 0).map(|(i, &(ns, n))| format!("{} {} us/{n}", f.m.eng.core.op_name(crate::api::OpId(i as u32)), ns / 1000 / n)).collect();
+                eprintln!("pipe: merge by op {by:?}, picks {} ms", f.t_pick / 1_000_000);
+            }
             f.m.eng.t_op += op_ns.into_inner();
             f.m.eng.t_commit += merge_ns.into_inner();
             let qd = q.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1691,6 +1761,7 @@ impl Engine {
             resumed: false,
             log_at: 0,
             text: None,
+            _pre: Vec::new(),
         })
     }
 
@@ -2309,7 +2380,7 @@ impl Engine {
                 Outcome::Done(r) => match self.unconfirmed(s, id, &r) {
                     Some((x, f)) => {
                         if let Some(n) = self.w.node(id) {
-                            let miss: Vec<String> = n.text.stat.preds.iter().flat_map(|ps| ps.iter()).filter(|&&(g, p)| r.res.def_value(g) != Some(p)).take(4).map(|&(g, _)| self.core.values.render(g.0)).collect();
+                            let miss: Vec<String> = n.text.stat.preds.iter().flat_map(|ps| ps.iter()).filter(|&&(g, p)| r.res.def_value(g) != Some(p)).take(4).map(|&(g, p)| format!("{} predicted {} made {}", self.core.values.render(g.0), self.core.values.render(p), r.res.def_value(g).map(|x| self.core.values.render(x)).unwrap_or_default())).collect();
                             super::core::runlog(id, self.core.op_name(n.text.op), r.span, &format!("parked-unconfirmed on {x} {} {miss:?}", self.core.values.render(f.0)));
                         }
                         rep.unconfirmed_parked += 1;
@@ -2802,7 +2873,20 @@ impl Engine {
         let mut best: Option<(u32, Id, Cause, Option<usize>)> = None;
         let mut best_t = 0u64;
         let mut last: Option<(u64, usize, Cause)> = None;
-        let mut offer = |hs: &Heights, x: Id, c: Cause| {
+        // (The reads its last run offered, when this one's begin with
+        // them: only the new ones are offered.)
+        let from = match hs.seen.get(&id) {
+            Some(sn) if sn.n > 0 && res.reads.len() >= sn.n && res.reads[sn.n - 1] == sn.last => {
+                best.clone_from(&sn.best);
+                best_t = sn.best_t;
+                last.clone_from(&sn.lastk);
+                sn.n
+            }
+            _ => 0,
+        };
+        type Best = Option<(u32, Id, Cause, Option<usize>)>;
+        type Last = Option<(u64, usize, Cause)>;
+        let offer_to = |best: &mut Best, best_t: &mut u64, last: &mut Last, hs: &Heights, x: Id, c: Cause| {
             // (A range's contributor: as it last contributed.)
             let (at, k) = match c {
                 Cause::Range { .. } => (hs.hc.get(&x).map(|e| (e.0.0, e.1)), hs.cur_c.get(&x)),
@@ -2812,15 +2896,16 @@ impl Engine {
             if let Some(k) = k
                 && last.as_ref().is_none_or(|l| hs.runs[k].at[3] > l.0)
             {
-                last = Some((hs.runs[k].at[3], k, c.clone()));
+                *last = Some((hs.runs[k].at[3], k, c.clone()));
             }
             if let Some((h, t)) = at.or_else(|| hs.h.get(&x).map(|e| (e.0, hs.t.get(&x).copied().unwrap_or(0)))) {
-                best_t = best_t.max(t);
+                *best_t = (*best_t).max(t);
                 if best.as_ref().is_none_or(|b| h > b.0) {
-                    best = Some((h, x, c, k));
+                    *best = Some((h, x, c, k));
                 }
             }
         };
+        let mut offer = |hs: &Heights, x: Id, c: Cause| offer_to(&mut best, &mut best_t, &mut last, hs, x, c);
         // (A guessed fold, `Monoid::speculate`, is a link only when it made
         // this run: its change the cause, or its value not the last
         // result's; one that stood waited for nothing.)
@@ -2833,7 +2918,7 @@ impl Engine {
                     o.reads.iter().any(|r| matches!(r, Read::Range { f: g, from: a, to: b, val: v, .. } if *g == f && *a == from && *b == to && *v != val))
                 })
         };
-        for r in &res.reads {
+        for r in &res.reads[from..] {
             match r {
                 Read::Use { f, site, .. } if *site != super::world::NONE => {
                     offer(hs, *site, Cause::Changed {
@@ -2881,6 +2966,17 @@ impl Engine {
                 _ => {}
             }
         }
+        drop(offer);
+        if let Some(r) = res.reads.last() {
+            hs.seen.insert(id, Seen {
+                n: res.reads.len(),
+                last: r.clone(),
+                best: best.clone(),
+                best_t,
+                lastk: last.clone(),
+            });
+        }
+        let mut offer = |hs: &Heights, x: Id, c: Cause| offer_to(&mut best, &mut best_t, &mut last, hs, x, c);
         if let Some(&(x, f)) = hs.woke.get(&id) {
             // (Waiting on a pending set declared by prefixes: the one the
             // field matched.)
@@ -3081,6 +3177,7 @@ impl Engine {
         if let Some(v) = s.waiters.remove(&x) {
             for id in v {
                 s.parked.remove(&id);
+                s.woken.insert(id);
                 self.enqueue(s, id);
             }
         }
@@ -3482,6 +3579,10 @@ struct Flow<'a> {
     done: Vec<(Id, World, Outcome, std::time::Duration)>,
     merged: usize,
     stop: bool,
+    combines: usize,
+    pick_none: usize,
+    t_by_op: Vec<(u64, u64)>,
+    t_pick: u64,
 }
 
 /// A job ready to start: its node, kept state, whether careful, whether
@@ -3552,18 +3653,19 @@ impl Flow<'_> {
     fn combine(&mut self, q: &std::sync::Mutex<FlowQ>, cv: &std::sync::Condvar, par: usize, window: usize, predict: bool, budget: usize, deadline: Option<std::time::Instant>) {
         let key = |w: &World, x: Id| w.node(x).map_or((u32::MAX, Pos::MAX), |n| (n.unit, n.pos));
         let mut merged_any = false;
+        self.combines += 1;
         loop {
-            let mut now = Vec::new();
+            let mut now;
             {
+                // (Every result handed in, in text order: each is checked
+                // against the world as it is, so one need not wait for the
+                // runs before it; a read an earlier commit breaks is
+                // refuted and runs again.)
                 let mut qg = super::core::lock(q);
                 let w = &self.m.eng.w;
-                let first_running = qg.running.iter().map(|&x| key(w, x)).min();
-                let mut done = std::mem::take(&mut qg.done);
-                done.sort_by_key(|r| std::cmp::Reverse(key(w, r.0)));
-                while done.last().is_some_and(|r| first_running.is_none_or(|fr| key(w, r.0) < fr)) {
-                    now.push(done.pop().expect("checked"));
-                }
-                qg.done = done;
+                now = std::mem::take(&mut qg.done);
+                drop(qg);
+                now.sort_by_key(|r| key(w, r.0));
             }
             if now.is_empty() {
                 break;
@@ -3592,12 +3694,21 @@ impl Flow<'_> {
                 *self.m.s.time.entry(id).or_default() += d;
                 self.m.s.last_ran.insert(id, d);
                 let ahead = self.m.eng.w.node(id).is_some_and(|n| self.m.eng.w.work_of(n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
+                let t1 = super::core::now();
+                let op = self.m.eng.w.node(id).map_or(0, |n| n.text.op.0 as usize);
                 if let Err(e) = self.m.one(&snap, usize::from(ahead), id, o, &mut Sequential) {
                     self.m.err = Some(e);
                 }
+                let d = super::core::ns_since(t1);
+                if self.t_by_op.len() <= op {
+                    self.t_by_op.resize(op + 1, (0, 0));
+                }
+                self.t_by_op[op].0 += d;
+                self.t_by_op[op].1 += 1;
                 self.merged += 1;
             }
         }
+        let t_pick = super::core::now();
         if self.m.err.is_none()
             && let Err(e) = self.m.eng.check_deadline(self.m.s, self.m.rep, deadline)
         {
@@ -3611,14 +3722,18 @@ impl Flow<'_> {
         };
         let mut jobs = Vec::new();
         if !self.stop && self.merged < budget {
-            while ready + running + jobs.len() < par + 1 {
-                let Some((id, resume)) = self.pick(window, predict) else { break };
+            while ready + running + jobs.len() < 2 * par + 2 {
+                let Some((id, resume)) = self.pick(window, predict) else {
+                    self.pick_none += 1;
+                    break;
+                };
                 let careful = self.m.s.careful(id);
                 let fueled = self.fueled.remove(&id);
                 self.inflight.insert(id);
                 jobs.push((key(&self.m.eng.w, id), (id, resume, careful, fueled)));
             }
         }
+        self.t_pick += super::core::ns_since(t_pick);
         let mut qg = super::core::lock(q);
         if merged_any || !jobs.is_empty() {
             qg.latest = std::sync::Arc::new(self.m.eng.w.clone());
@@ -4072,7 +4187,10 @@ impl Merge<'_> {
         // environment's, which is not the world's.)
         let same = snap.same_as(&eng.w);
         rep.merge.unchanged += u64::from(same);
-        let asked = |rd: &Read| !same || matches!(rd, Read::Env { .. });
+        // (Only the reads a change since the snapshot names: the others
+        // hold as they held when it ran.)
+        let changes = if same { None } else { super::world::ChangeFilter::since(snap, &eng.w) };
+        let asked = |rd: &Read| matches!(rd, Read::Env { .. }) || (!same && changes.as_ref().is_none_or(|c| c.may_break(rd)));
         let redo = match &o {
             Outcome::Done(r) if r.kids.is_empty() && r.conts.is_empty() => {
                 let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate() || (m.guess_ran() && r.fold_ran)));
@@ -4292,6 +4410,8 @@ fn run_job(
     if let Some(e) = cx.error.take() {
         return Outcome::Failed(e);
     }
+    // (Its placements' texts, analysed here: the commit finds them made.)
+    let pre: Vec<std::sync::Arc<super::world::Text>> = cx.kids.iter().chain(cx.conts.iter()).map(|k| core.text(None, k.op, k.args.clone())).collect();
     // (Its operation's next run starts its read list at the most its runs
     // read lately: this one's, or the last most less an eighth.)
     if let Some(a) = core.op_reads.get(cx.op.0 as usize) {
@@ -4365,6 +4485,7 @@ fn run_job(
         resumed,
         text: text.clone(),
         log_at,
+        _pre: pre,
     };
     // Cut off at a mark of its last run: that run's result stands, with
     // this run's reads up to the mark and that run's after it.

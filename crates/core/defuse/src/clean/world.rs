@@ -837,6 +837,60 @@ impl Log {
         }
     }
 }
+/// The changes a world made since a snapshot of it, by what they name:
+/// a result run on the snapshot needs only its reads these could break
+/// asked again on the world (the rest hold as they held), not every
+/// read it made.
+pub(crate) struct ChangeFilter {
+    fields: crate::values::FxHashSet<Field>,
+    nodes: crate::values::FxHashSet<Id>,
+    order: bool,
+}
+
+impl ChangeFilter {
+    /// The changes of `w` since `snap` (of its branch), or `None` when
+    /// they are not all known as named ones (another branch, a
+    /// renumbering, a scope change, changes forgotten, too many).
+    pub(crate) fn since(snap: &World, w: &World) -> Option<ChangeFilter> {
+        if !snap.log.same(&w.log) || snap.relabels != w.relabels || w.log_len < snap.log_len || w.log_len - snap.log_len > 4096 {
+            return None;
+        }
+        let ch = w.log.since(snap.log_len, w.log_len)?;
+        let mut cf = ChangeFilter {
+            fields: crate::values::FxHashSet::default(),
+            nodes: crate::values::FxHashSet::default(),
+            order: false,
+        };
+        for c in ch {
+            match c {
+                Change::All | Change::Frames(_) => return None,
+                Change::Field(_, f, _) | Change::Loop(f) => {
+                    cf.fields.insert(f);
+                }
+                Change::Node(x) => {
+                    cf.nodes.insert(x);
+                }
+                Change::Order(_) => cf.order = true,
+            }
+        }
+        Some(cf)
+    }
+
+    /// Whether read `r` may answer otherwise now (a change names what
+    /// it stands on); `false`: it holds as it held.
+    pub(crate) fn may_break(&self, r: &Read) -> bool {
+        let n = |x: &Id| *x != NONE && self.nodes.contains(x);
+        match r {
+            Read::Use { f, at, site, after, .. } => self.fields.contains(f) || n(at) || n(site) || (*after && self.order),
+            Read::Loop { f, .. } | Read::IsLoop { f, .. } => self.fields.contains(f),
+            Read::Out { node, .. } | Read::Placed { node, .. } => n(node),
+            Read::Range { f, from, to, .. } => self.fields.contains(f) || self.order || n(from) || n(to),
+            Read::Seq { f, .. } => self.fields.contains(f) || self.order,
+            _ => true,
+        }
+    }
+}
+
 impl World {
     /// Whether `other` is this world unchanged, as a read sees it (every
     /// map a read's answer stands on shares its root): a run on one

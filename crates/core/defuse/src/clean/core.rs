@@ -901,6 +901,33 @@ pub(crate) fn debug_runlog() -> bool {
 /// `CLEAN_RUNLOG` (`profile` builds): each run's node, operation, start
 /// and end (µs since the first run logged) and what came of it, a line
 /// each.
+/// (`CLEAN_SETTLE_STATS`) The readers settle re-asked, by operation:
+/// how many, the reads they held, the fields asked on.
+pub(crate) fn settle_stats() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CLEAN_SETTLE_STATS").is_some())
+}
+
+static SETTLE: std::sync::Mutex<Vec<(&'static str, u64, u64, u64)>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn settle_note(op: &'static str, reads: usize, on: usize) {
+    let mut g = lock(&SETTLE);
+    match g.iter_mut().find(|e| e.0 == op) {
+        Some(e) => {
+            e.1 += 1;
+            e.2 += reads as u64;
+            e.3 += on as u64;
+        }
+        None => g.push((op, 1, reads as u64, on as u64)),
+    }
+}
+
+pub(crate) fn settle_print() {
+    if settle_stats() {
+        eprintln!("settle: {:?}", std::mem::take(&mut *lock(&SETTLE)));
+    }
+}
+
 pub(crate) fn runlog(id: Id, op: &str, span: Option<(std::time::Instant, std::time::Instant)>, what: &str) {
     #[cfg(feature = "profile")]
     {
