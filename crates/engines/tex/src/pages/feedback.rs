@@ -201,7 +201,12 @@ impl Run<'_, '_> {
     /// candidate folded in (the contributions after it are not on the
     /// page), read, not defined.
     pub(crate) fn page_dimen(&mut self, m: i32) -> R<i32> {
-        let (st, _) = self.page_so_far()?;
+        let (st, fired, own_k) = self.page_so_far()?;
+        if fired == Some(true)
+            && let Some(k) = own_k
+        {
+            self.order_after_own_page(k)?;
+        }
         if st.pb.contents == Contents::Empty {
             return Ok(if m == 0 { MAX_DIMEN } else { 0 });
         }
@@ -218,15 +223,16 @@ impl Run<'_, '_> {
     /// page fired after that start): the run goes again when it is, and
     /// decides then.
     pub(crate) fn page_fires_in_own(&mut self) -> R<bool> {
-        let (_, fired) = self.page_so_far()?;
+        let (_, fired, _) = self.page_so_far()?;
         Ok(fired == Some(true))
     }
 
     /// The page builder over the profiles where this piece's page began
     /// ([`PAGE_START`]) to its own last candidate: its state, stopped at
     /// the first page firing, and where that page fired (`Some(true)` in
-    /// this piece's own items, `Some(false)` before them).
-    fn page_so_far(&mut self) -> R<(crate::vprof::ScanState, Option<bool>)> {
+    /// this piece's own items, `Some(false)` before them), and the own
+    /// candidate it fired at.
+    fn page_so_far(&mut self) -> R<(crate::vprof::ScanState, Option<bool>, Option<u32>)> {
         let v = self.v;
         let raw = self.own_outer_items();
         let last = raw
@@ -284,11 +290,20 @@ impl Run<'_, '_> {
         let own = items.len() - 1;
         let mut rd = RunReaching(self, None);
         let mut fired = None;
+        let mut own_k = None;
         'items: for (i, x) in items.iter().enumerate() {
             let mut rest: &[crate::vprof::PItem] = x;
             let mut n_fires = 0;
             while st.fold_items(rest, dead, &mut rd) {
                 n_fires += 1;
+                // (the candidate the first page fired at in its own items:
+                // its build)
+                if fired.is_none() && i == own {
+                    own_k = match rest.get(st.fired_at) {
+                        Some(crate::vprof::PItem::Build(c)) => Some(*c),
+                        _ => None,
+                    };
+                }
                 fired = Some(i == own);
                 if i != own || n_fires > 1000 {
                     break 'items;
@@ -300,6 +315,6 @@ impl Run<'_, '_> {
                 st.resume();
             }
         }
-        Ok((st, fired))
+        Ok((st, fired, own_k))
     }
 }

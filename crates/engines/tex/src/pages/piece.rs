@@ -51,6 +51,11 @@ pub(crate) struct CandMark {
     /// run's that own no list; the continuation carrying the levels, the
     /// paragraph's list and the input `\everypar` left, §1091).
     pub restartable: bool,
+    /// Whether a second pass can end the run here though a group or a
+    /// conditional of its own is open (owning no list): the candidate a
+    /// page fires at that the run read the page after
+    /// ([`Run::order_after_own_page`]).
+    pub open_cut: bool,
 }
 
 impl Run<'_, '_> {
@@ -121,7 +126,9 @@ impl Run<'_, '_> {
                 }));
         // (a rest of blank input makes no node: the piece runs it, spaces
         // and an empty line's `\par` in vertical mode, §1070)
-        let cuttable = fresh && ((can && !self.rest_blank()?) || (restartable && self.stop_at == Some(k)));
+        let open_cut = self.open_span() && self.cuttable_open();
+        let cuttable = fresh
+            && ((can && !self.rest_blank()?) || ((restartable || open_cut) && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,
             stamp: self.st.stamp(),
@@ -134,6 +141,7 @@ impl Run<'_, '_> {
             cuttable,
             fresh,
             restartable,
+            open_cut,
         });
         self.st.mark_candidate();
         if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
@@ -225,6 +233,45 @@ impl Run<'_, '_> {
             && (self.top || self.doc)
             && open_ok
             && self.has_input()
+    }
+
+    /// Whether the run could end at the candidate it is at inside groups
+    /// or conditionals of its own, whatever forced the builder: the
+    /// groups own no list, the continuation carries them.
+    pub(crate) fn cuttable_open(&mut self) -> bool {
+        let op = self.cx.op();
+        (op == self.ops.exec || op == self.ops.resume)
+            && (self.top || self.doc)
+            && self.nest.iter().all(|l| !l.owns && l.group != 0)
+            && self.has_input()
+    }
+
+    /// A read of the page (`\pagegoal`, `\pagetotal`, ...) after a
+    /// candidate of the run's own a page fires at (`k`): TeX ran that
+    /// page's routine there, and what the run reads after it (the page,
+    /// what the routine set: LaTeX's `\vsize` for a float it placed) is
+    /// the routine's. The run goes again from its start and ends at that
+    /// candidate ([`Halt::Recut`]), its rest a resume placed after the
+    /// page's finisher.
+    pub(crate) fn order_after_own_page(&mut self, k: u32) -> R<()> {
+        let op = self.cx.op();
+        let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
+        if !piece || self.cut.is_some() || self.stop_at.is_some() {
+            return Ok(());
+        }
+        let Some(m) = self.cand_marks.iter().find(|m| m.k == k) else {
+            return Ok(());
+        };
+        if !m.fresh || !(m.restartable || m.open_cut) {
+            return Ok(());
+        }
+        if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
+            eprintln!(
+                "page-trace: node {} ends at candidate {k}: a read of the page after a page fired there",
+                self.cx.node().raw()
+            );
+        }
+        Err(Halt::Recut(k))
     }
 
     /// A read of the objects the pages shipped before this run
