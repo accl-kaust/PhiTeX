@@ -276,8 +276,8 @@ pub struct Paragraph {
 }
 
 /// A line's edge character (pdfTeX's `last_leftmost_char`,
-/// `last_rightmost_char`).
-type Edge = Option<(FontId, u16)>;
+/// `last_rightmost_char`) and whether a ligature's.
+type Edge = Option<(FontId, u16, bool)>;
 
 /// tex.web's six widths and pdfTeX's font stretch and shrink (7, 8).
 type Widths = [i64; 8];
@@ -586,9 +586,14 @@ impl Breaker<'_> {
             },
             None => None,
         };
+        let lig = |n: Option<&Node>| matches!(n, Some(Node::Lig(_)));
         let (lw, lp) = char_pw(self.fonts, left, true);
         let (rw, rp) = char_pw(self.fonts, right, false);
-        (lw + rw, lp, rp)
+        (
+            lw + rw,
+            lp.map(|(f, c)| (f, c, lig(left))),
+            rp.map(|(f, c)| (f, c, lig(right))),
+        )
     }
 
     /// §850 and §889: width and indent of line `l`.
@@ -743,16 +748,19 @@ impl Breaker<'_> {
             if self.p.adjust_spacing > 1 && shortfall != 0 {
                 let (mut mks, mut mksh) = (0, 0);
                 if self.p.protrude_chars > 1 {
-                    // "Calculate variations of marginal kerns"
+                    // "Calculate variations of marginal kerns": `left_pw`
+                    // of both edges, and of a ligature's edge 0 (pdfTeX
+                    // asks `char_pw` of its `lig_char`, no char node)
                     use crate::microtype::{pw_of, subst_font};
-                    for (f, c) in [edges.0, edges.1].into_iter().flatten() {
+                    for (f, c, lig) in [edges.0, edges.1].into_iter().flatten() {
+                        let own = if lig { 0 } else { pw_of(self.fonts, f, c, true) };
                         let k = subst_font(self.fonts, f, c, 1000);
                         if k != f {
-                            mks += pw_of(self.fonts, f, c, true) - pw_of(self.fonts, k, c, true);
+                            mks += own - pw_of(self.fonts, k, c, true);
                         }
                         let k = subst_font(self.fonts, f, c, -1000);
                         if k != f {
-                            mksh += pw_of(self.fonts, k, c, true) - pw_of(self.fonts, f, c, true);
+                            mksh += pw_of(self.fonts, k, c, true) - own;
                         }
                     }
                 }
