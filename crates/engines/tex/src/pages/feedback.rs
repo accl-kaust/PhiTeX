@@ -35,7 +35,7 @@ pub(crate) enum Feedback {
     /// page parameters it set) and `\deadcycles` as it leaves it where not
     /// 0 (a page not shipped, which §1054's `\end` after it reads): the
     /// page builder folds the next page on a guess
-    /// ([`FinishIn::rtn_guess`]: what the same routine gave back on the
+    /// ([`Run::rtn_guess`]: what the same routine gave back on the
     /// last page fired on the text before it at the same
     /// `\outputpenalty`, `\deadcycles` always guessed 0, nothing for a
     /// page fired in a routine's material); a
@@ -112,8 +112,6 @@ pub(crate) struct PageStart {
     /// The piece the page before fired in: the text after it folds the
     /// profiles after it. `None`: the job's start.
     pub anchor: Option<phitex_defuse::NodeId>,
-    pub j: i64,
-    pub normal: i64,
     pub fold: FoldState,
     /// The page parameters in force (a `T_PAGE_PARAMS` marker).
     pub params: Option<ValueId>,
@@ -133,8 +131,6 @@ impl PageStart {
         if xs.len() < 8 {
             return PageStart {
                 anchor: None,
-                j: 0,
-                normal: 0,
                 fold: crate::build::IGNORE_DEPTH_STATE,
                 params: None,
                 prof: Vec::new(),
@@ -146,8 +142,6 @@ impl PageStart {
             anchor: Some(phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(
                 n(0).to_ne_bytes(),
             ))),
-            j: n(1),
-            normal: n(2),
             fold: FoldState {
                 sf: i32::try_from(n(3)).unwrap_or(1000),
                 pd: i32::try_from(n(4)).unwrap_or(IGNORE_DEPTH),
@@ -172,8 +166,10 @@ impl PageStart {
             .map_or(-1, |a| i64::from_ne_bytes(a.raw().to_ne_bytes()));
         v.list(vec![
             v.int(anchor),
-            v.int(self.j),
-            v.int(self.normal),
+            // (no page's index: the text reads where its page began, not
+            // how many pages fired before it)
+            v.int(0),
+            v.int(0),
             v.int(i64::from(self.fold.sf)),
             v.int(i64::from(self.fold.pd)),
             v.int(i64::try_from(self.fold.since_bp).unwrap_or(0)),
@@ -191,8 +187,8 @@ impl PageStart {
     /// The builder over profiles where the page began.
     pub(crate) fn state(&self, v: &Values) -> crate::vprof::ScanState {
         crate::vprof::ScanState::fresh(
-            self.j,
-            self.normal,
+            0,
+            0,
             self.fold,
             self.params.map(|m| params_of(v, m)),
         )

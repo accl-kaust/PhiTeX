@@ -28,12 +28,13 @@
 //! The next page begins with what the routine gives back (§1026): the
 //! finisher's output ([`RTN`], [`phitex_defuse::Ctx::placed_output`]),
 //! read where the loop placed it ([`phitex_defuse::Ctx::placed_output_or`]),
-//! and while the finisher has none, a guess ([`FinishIn::rtn_guess`], [`Feedback::RoutineGivesBack`]): the
+//! and while the finisher has none, a guess ([`Run::rtn_guess`], [`Feedback::RoutineGivesBack`]): the
 //! routine's last value on another page, or nothing. A finisher's
 //! output coming in other than the guess runs the node again, which folds that
-//! page's next page on it. The guess in a finisher's arguments stays the
-//! guess, never the real value, so the output read back does not change
-//! the finisher it came from.
+//! page's next page on it. The guess is no finisher's argument (only its
+//! register maps are, [`FinishIn::maps`]): another page's give-back, its
+//! content, would make a later page's finisher another node whenever
+//! that page changed.
 //!
 //! What the loop reads where a piece is (the page parameters, an
 //! insertion class's registers) it reads at that piece, a read past its
@@ -182,7 +183,7 @@ pub(crate) struct PageLoop {
     /// on the text at each `\outputpenalty` (every ordinary one alike,
     /// `i32::MAX`), after a page that left dead cycles or not
     /// ([`RtnKey`]), `\deadcycles` left out only on a page `\end` fired:
-    /// the guess of a later page fired there ([`FinishIn::rtn_guess`]).
+    /// the guess of a later page fired there ([`Run::rtn_guess`]).
     pub last_rtn: Vec<(RtnKey, ValueId)>,
     /// The page fired last: its key and what its routine gave back as
     /// the loop folded it (read or guessed), `\deadcycles` included: a
@@ -204,6 +205,14 @@ pub(crate) struct PageLoop {
     /// Each page's finisher arguments as placed ([`FinishIn::args`]),
     /// made once: every attempt places the pages again.
     pub page_args: Vec<std::sync::Arc<Vec<ValueId>>>,
+    /// What each page's routine gave back as the loop folded it, by the
+    /// page ([`PageId`]), in the order the pages fired.
+    pub outs: Vec<(PageId, ValueId)>,
+    /// The last run's [`PageLoop::outs`], fixed where this run began: a
+    /// page's routine's guess while its finisher, placed anew, has no
+    /// output (its page as the last run had it, not another page's,
+    /// [`Run::rtn_guess`]).
+    pub prior: std::sync::Arc<phitex_defuse::FxHashMap<PageId, ValueId>>,
     /// Whether this attempt continues from the loop's kept token (its
     /// placements so far committed: only new pages are placed) or starts
     /// over (every page placed again).
@@ -218,9 +227,13 @@ pub(crate) struct PageLoop {
     /// The units folded whose items a page's carried contributions may
     /// fold again (the oldest dropped once no page needs them).
     pub units: Vec<UnitRec>,
-    /// The contributor before each piece folded: a finisher's window of
-    /// [`PITEMS`] starts after it.
+    /// The contributor with units before each piece folded: a
+    /// finisher's window of [`PITEMS`] starts after it. Not a page node
+    /// (a finisher, whose placement a page before moves: the window would
+    /// move with it, and the finisher after with it).
     pub prev: phitex_defuse::FxHashMap<i64, Option<phitex_defuse::NodeId>>,
+    /// The last contributor folded that gave units ([`PageLoop::prev`]).
+    pub cur_units: Option<phitex_defuse::NodeId>,
     /// The routines' material the loop folded, by page: `(page, value,
     /// its markers then its list as profile items)`.
     pub rtns: Vec<(i64, ValueId, std::sync::Arc<Vec<crate::vprof::PItem>>)>,
@@ -251,11 +264,42 @@ pub(crate) struct PageLoop {
     pub torn: bool,
 }
 
+/// A page as the loop knows it across runs: the piece it fired in (raw
+/// id) and the pages fired in that piece before it ([`FinishIn::nth`]).
+pub(crate) type PageId = (i64, u32);
+
 /// The page builder's loop marks kept with its result
 /// ([`Run::page_mark`], [`phitex_defuse::Ctx::keep_after`]): the loop at
-/// each mark and its state's version.
+/// each mark and its state's version. A mark is named by the pages fired
+/// before it ([`mark_name`]).
 pub(crate) struct KeptLoop {
     pub snaps: Vec<(std::sync::Arc<PageLoop>, u64)>,
+}
+
+/// A mark's name: the pages fired before it. Two runs' marks with equal
+/// states have fired as many pages (the engine joins them only where
+/// their placements so far are as many), so a run joining another's
+/// marks names them as it would.
+pub(crate) fn mark_name(lp: &PageLoop) -> u32 {
+    u32::try_from(lp.pages.len()).unwrap_or(u32::MAX)
+}
+
+impl KeptLoop {
+    /// The mark named `k`, its index.
+    pub(crate) fn at(&self, k: u32) -> Option<usize> {
+        self.snaps.iter().position(|s| mark_name(&s.0) == k)
+    }
+
+    /// What the run that kept these marks read of each page's routine,
+    /// to its last mark ([`PageLoop::prior`]).
+    pub(crate) fn outs(&self) -> std::sync::Arc<phitex_defuse::FxHashMap<PageId, ValueId>> {
+        let Some((last, _)) = self.snaps.last() else {
+            return std::sync::Arc::default();
+        };
+        let mut m = (*last.prior).clone();
+        m.extend(last.outs.iter().copied());
+        std::sync::Arc::new(m)
+    }
 }
 
 /// A parked page builder's loop and its marks so far.
@@ -293,11 +337,21 @@ pub(crate) fn loop_state(lp: &PageLoop) -> u64 {
         })
         .collect();
     places.sort_unstable();
+    // (the routines' material the page's input names, by value: its
+    // items fold again from here)
+    let mut rtns: Vec<(i64, u64)> = Vec::new();
+    for s in &lp.srcs {
+        if let Src::Rtn { page, .. } = *s
+            && !rtns.iter().any(|r| r.0 == page)
+        {
+            rtns.push((page, lp.rtns.iter().rev().find(|r| r.0 == page).map_or(0, |r| r.1.raw())));
+        }
+    }
     let _ = write!(
         W(&mut h),
         "{:?}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
         lp.st,
-        lp.cur.map(phitex_defuse::NodeId::raw),
+        (lp.cur.map(phitex_defuse::NodeId::raw), lp.cur_units.map(phitex_defuse::NodeId::raw)),
         lp.srcs,
         lp.post,
         lp.post_markers,
@@ -319,10 +373,27 @@ pub(crate) fn loop_state(lp: &PageLoop) -> u64 {
         lp.last_fire.map(|(n, a, b)| (n.raw(), a, b)),
         lp.page_ins,
         lp.held_nodes,
-        (places, lp.rtns.last().map(|r| (r.0, r.1))),
+        (places, lp.rtns.last().map(|r| (r.0, r.1)), rtns),
         lp.pages.len()
     );
     h.finish()
+}
+
+/// The loop `snap` (another run's, at a mark after `lp`'s, the same
+/// state where `lp` is) with `lp`'s pages before that state: their
+/// finishers' inputs, arguments and placements, and what their routines
+/// gave back, as this run fired them.
+fn splice_pages(lp: &PageLoop, snap: &PageLoop) -> PageLoop {
+    let n = lp.pages.len();
+    let mut out = snap.clone();
+    out.pages = lp.pages.iter().cloned().chain(snap.pages.iter().skip(n).cloned()).collect();
+    out.page_args = lp.page_args.iter().cloned().chain(snap.page_args.iter().skip(n).cloned()).collect();
+    out.placed = lp.placed.iter().cloned().chain(snap.placed.iter().skip(n).cloned()).collect();
+    out.outs = lp.outs.iter().copied().chain(snap.outs.iter().skip(n).copied()).collect();
+    out.prior = std::sync::Arc::clone(&lp.prior);
+    out.resumed = lp.resumed;
+    out.torn = false;
+    out
 }
 
 /// The reads at one owner piece ([`crate::vprof::unit_owner`]): its page
@@ -357,12 +428,15 @@ impl PageLoop {
             marks: Vec::new(),
             pages: Vec::new(),
             page_args: Vec::new(),
+            outs: Vec::new(),
+            prior: std::sync::Arc::default(),
             resumed: false,
             placed: Vec::new(),
             pend: Vec::new(),
             page_src: Vec::new(),
             units: Vec::new(),
             prev: phitex_defuse::FxHashMap::default(),
+            cur_units: None,
             rtns: Vec::new(),
             frontier: (0, 0),
             last_fire: None,
@@ -868,14 +942,17 @@ impl Operation for Pages {
                 p.lp
             }
             None => match at_mark.map(|(t, k)| (t.downcast::<KeptLoop>(), k)) {
-                Some((Ok(kl), k)) if (k as usize) < kl.snaps.len() => {
-                    let (snap, h) = kl.snaps[k as usize].clone();
-                    r.page_marks = kl.snaps[..=k as usize].to_vec();
+                Some((Ok(kl), k)) if let Some(i) = kl.at(k) => {
+                    let (snap, h) = kl.snaps[i].clone();
+                    r.page_marks = kl.snaps[..=i].to_vec();
                     // (the mark again: the engine keeps the marks before it;
                     // the run is never cut off at its own)
                     let state = r.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
-                    let _ = r.cx.checkpoint(k, state);
+                    let _ = r.cx.checkpoint_join(k, state);
                     let mut lp = (*snap).clone();
+                    // (the last run's give-backs, the guesses of the pages
+                    // whose finishers this run places anew)
+                    lp.prior = kl.outs();
                     // (the placements before the mark stand, as a run
                     // continuing from a park keeps those before its stop;
                     // profile `PHITEX_PAGE_MARK_REPLACE=1`: placed again)
@@ -955,7 +1032,7 @@ impl Run<'_, '_> {
     /// ([`crate::pages::finish::pen_class`]; `crate::run::Ops::fin_defs` then, so every
     /// attempt of the loop guesses the same), `\deadcycles` left out,
     /// else nothing given back. The guess of page `j`
-    /// ([`FinishIn::rtn_guess`], made in [`Run::page_loop`]) is what the
+    /// ([`Run::rtn_guess`], made in [`Run::page_loop`]) is what the
     /// same routine gave back on the last page the loop fired on the text
     /// before `j` at the same `\outputpenalty`, every one above -10001
     /// alike (the output it read, or that page's own guess where it read
@@ -1176,7 +1253,9 @@ impl Run<'_, '_> {
                 );
             }
             let Some((node, u)) = next? else { break };
-            for x in v.seq_to_vec(u) {
+            let xs = v.seq_to_vec(u);
+            let gave = !xs.is_empty();
+            for x in xs {
                 pp::unit();
                 let t = pp::start();
                 let (pid, ints) = crate::vprof::unit_parts(v, x);
@@ -1225,6 +1304,9 @@ impl Run<'_, '_> {
                 }
             }
             lp.cur = Some(node);
+            if gave {
+                lp.cur_units = Some(node);
+            }
             // (a page fired in this contributor: a mark, where a later
             // run of the loop resumes, or is cut off where it comes to the
             // same state, [`Run::page_mark`])
@@ -1271,25 +1353,68 @@ impl Run<'_, '_> {
     }
 
     /// A mark of the page builder's loop between contributors, after a
-    /// page fired ([`phitex_defuse::Ctx::checkpoint`]): the loop as it
+    /// page fired ([`phitex_defuse::Ctx::checkpoint_join`]): the loop as it
     /// stands, and a version of what its fold from here depends on
     /// ([`loop_state`]). A run that comes to a mark of its last run with
-    /// the same state, the pages before it the same and its reads after
-    /// it holding is cut off there; one whose read after a mark broke
-    /// resumes at that mark instead of folding the document again.
-    fn page_mark(&mut self, lp: &PageLoop) -> R<()> {
-        let k = u32::try_from(self.page_marks.len()).unwrap_or(u32::MAX);
+    /// the same state joins it there, whatever pages it fired before
+    /// (an edit that moved a page before, a finisher placed anew): cut
+    /// off where that run's reads after it all hold, else on from that
+    /// run's last mark before its first read that broke. One whose read
+    /// after a mark broke resumes at that mark instead of folding the
+    /// document again.
+    fn page_mark(&mut self, lp: &mut PageLoop) -> R<()> {
+        let k = mark_name(lp);
         let h = loop_state(lp);
         self.page_marks.push((std::sync::Arc::new(lp.clone()), h));
         let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
-        if let Err(s) = self.cx.checkpoint(k, state) {
-            if crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {
-                eprintln!("pages-cut: at mark {k} ({} pages)", lp.pages.len());
+        match self.cx.checkpoint_join(k, state) {
+            Ok(None) => Ok(()),
+            Ok(Some(hop)) => {
+                if crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {
+                    eprintln!("pages-join: at mark {k}, on from mark {}", hop.to);
+                }
+                if let Some(next) = self.join_marks(lp, &hop) {
+                    *lp = next;
+                }
+                Ok(())
             }
-            self.cut_off = true;
-            return Err(Halt::Stop(s));
+            Err(s) => {
+                if crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {
+                    eprintln!("pages-cut: at mark {k} ({} pages)", lp.pages.len());
+                }
+                // (joined to its end: its marks after the join this run's,
+                // kept with the result that stands)
+                if let Some(hop) = self.cx.cut_join() {
+                    let _ = self.join_marks(lp, &hop);
+                    let snaps = std::mem::take(&mut self.page_marks);
+                    self.cx.keep_after(std::sync::Arc::new(KeptLoop { snaps }));
+                }
+                self.cut_off = true;
+                Err(Halt::Stop(s))
+            }
         }
-        Ok(())
+    }
+
+    /// The marks of the run joined (`hop`, from its token, a
+    /// [`KeptLoop`]) after the mark joined at up to the one hopped to,
+    /// this run's: each its loop with this run's pages before the join
+    /// ([`splice_pages`]). The loop at the mark hopped to, where this run
+    /// goes on.
+    fn join_marks(&mut self, lp: &PageLoop, hop: &phitex_defuse::Hop) -> Option<PageLoop> {
+        let old = hop.token.downcast_ref::<KeptLoop>()?;
+        let mut at = None;
+        for (snap, h) in &old.snaps {
+            let k = mark_name(snap);
+            if k <= hop.from || k > hop.to {
+                continue;
+            }
+            let next = splice_pages(lp, snap);
+            if k == hop.to {
+                at = Some(next.clone());
+            }
+            self.page_marks.push((std::sync::Arc::new(next), *h));
+        }
+        at
     }
 
     /// The output routine's hint (as [`Run::output_hint`]) where piece
@@ -1329,7 +1454,7 @@ impl Run<'_, '_> {
         use crate::vprof::PItem;
         let seq = u64::try_from(lp.order.len()).unwrap_or(u64::MAX);
         lp.order.entry(pid).or_insert(seq);
-        lp.prev.entry(pid).or_insert(lp.cur);
+        lp.prev.entry(pid).or_insert(lp.cur_units);
         lp.units.push(UnitRec {
             pid,
             src,
@@ -1521,8 +1646,18 @@ impl Run<'_, '_> {
                 spans_pieces.push(piece);
             }
         }
+        // (the pages fired in this piece before this one: its place among
+        // the finishers placed after the piece)
+        let nth = lp.pages.iter().filter(|p| p.0 == node).count();
+        // (a routine's material by the pages before this one counted back
+        // from it, not by their index among all the pages)
+        let rel = |src: Src| match src {
+            Src::Rtn { page, item } => Src::Rtn { page: j - page, item },
+            s => s,
+        };
         let fin = FinishIn {
             j,
+            nth: u32::try_from(nth).unwrap_or(u32::MAX),
             normal: lp.st.normal,
             special: f.output_penalty <= -10001,
             hint,
@@ -1531,8 +1666,8 @@ impl Run<'_, '_> {
             k: f.k,
             in_material,
             after,
-            spans,
-            rtns,
+            spans: spans.iter().map(|s| Span { src: rel(s.src), len: s.len }).collect(),
+            rtns: rtns.iter().map(|&(p, x)| (j - p, x)).collect(),
             fold: lp.began.0,
             params: lp.began.1,
             best: u32::try_from(f.best).unwrap_or(u32::MAX),
@@ -1540,12 +1675,12 @@ impl Run<'_, '_> {
             holding: f.holding,
             held: u32::try_from(held.len()).unwrap_or(0),
             top_marks: lp.top_marks,
-            rtn_guess,
+            maps: crate::pages::finish::maps_value(v, &crate::pages::finish::rtn_maps(v, rtn_guess)),
             post: u32::try_from(post).unwrap_or(0),
             post_markers: lp.post_markers.clone(),
             post_k: lp.post_k,
             prev_fire: lp.prev_fire,
-            inf,
+            inf: inf.into_iter().map(rel).collect(),
             vers: page_vers(lp, &spans_pieces),
         };
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
@@ -1587,9 +1722,21 @@ impl Run<'_, '_> {
         // guess while it has none, the read holding while it gives the
         // guess; its page parameter markers resolved where the page
         // fired)
-        let rtn = self
-            .cx
-            .placed_output_or(at, crate::pages::finish::rtn_strip(v, rtn_guess));
+        // (while the finisher has no output, the page's own as the last
+        // run read it where it fired then, else the guess; a finisher that
+        // made no page, its placement stale, outputs none: that stands
+        // until it runs on this placement)
+        let guess = crate::pages::finish::rtn_strip(v, rtn_guess);
+        let id = (i64::from_ne_bytes(node.raw().to_ne_bytes()), u32::try_from(nth).unwrap_or(u32::MAX));
+        let used = lp.prior.get(&id).copied().unwrap_or(guess);
+        let rtn = match self.cx.placed_output_or(at, used) {
+            ValueId::UNIT => used,
+            x => x,
+        };
+        if rtn != used {
+            Feedback::RoutineGivesBack.missed();
+        }
+        lp.outs.push((id, rtn));
         // (`PHITEX_RTN_TRACE=1`, profile: each page's routine material
         // as read, against the guess it was placed with)
         if crate::exec::prof_flag!("PHITEX_RTN_TRACE") {

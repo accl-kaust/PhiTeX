@@ -507,6 +507,17 @@ pub(crate) fn doc_op(r: &mut Run<'_, '_>, kind: &str, args: &[ValueId]) -> R<boo
     let v = r.v;
     let mut xs = vec![v.str(kind)];
     xs.extend_from_slice(args);
+    // (`PHITEX_DOCOP_TRACE=1`, observe: each document-level command, the
+    // node that ran it and its text)
+    if crate::exec::obs_flag!("PHITEX_DOCOP_TRACE") {
+        eprintln!(
+            "docop-trace: {kind} in node {} (op {:?}, speculative {}): {}",
+            r.cx.node().raw(),
+            r.cx.op(),
+            r.cx.is_speculative(),
+            args.iter().map(|&a| v.render(a).chars().take(300).collect::<String>()).collect::<Vec<_>>().join(" | ")
+        );
+    }
     // (the writer's parameters where it runs: one that writes now, an
     // open action's object, fixes the file's version and compression
     // with them, §792, as a command's step does)
@@ -929,7 +940,7 @@ fn base_inputs(r: &mut Run<'_, '_>) -> R<BaseIn> {
         jobname,
         g2u,
         stacks,
-        first: r.page_index() == 0,
+        first: r.first_page(),
     })
 }
 
@@ -2177,7 +2188,7 @@ fn ship_apart(
             ps
         },
         places: r.sealed.places(),
-        pj: i64::try_from(r.page_index()).unwrap_or(i64::MAX),
+        pj: r.page_nth(),
         node: i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()),
         brk: r
             .fin

@@ -932,20 +932,33 @@ pub(crate) fn is_cand_marker(v: &Values, e: ValueId) -> bool {
     tag.is_some_and(|t| v.with_str(t, |s| s == CAND).unwrap_or(false))
 }
 
-/// A `streams` entry without its page tag (`[j, entry]` or
-/// `[j, entry, piece, candidate]` from page step `j`,
-/// [`crate::run::Run::contribute_stream`]).
+/// A `streams` entry without its page tag (`[page, entry]` or
+/// `[page, entry, piece, candidate]` from a page's finisher, `page` its
+/// `[piece, nth]`, [`crate::run::Run::contribute_stream`]).
 pub(crate) fn stream_entry(v: &Values, e: ValueId) -> ValueId {
     let xs = list_of(v, e);
     match xs.as_slice() {
-        [j, x] | [j, x, _, _] if v.as_int(*j).is_some() => *x,
+        [p, x] | [p, x, _, _] if page_of(v, *p).is_some() => *x,
         _ => e,
     }
 }
 
+/// A page tag's page: the piece it fired in and the pages fired in that
+/// piece before it.
+type PageOf = (i64, i64);
+
+/// The [`PageOf`] a page tag names.
+fn page_of(v: &Values, p: ValueId) -> Option<PageOf> {
+    v.with_list(p, |xs| match xs {
+        [a, n] => Some((v.as_int(*a)?, v.as_int(*n)?)),
+        _ => None,
+    })
+    .flatten()
+}
+
 /// A page-tagged entry's page and, for a page whose break is inside a
 /// piece, that piece and candidate.
-fn page_tag(v: &Values, e: ValueId) -> Option<(i64, Option<(i64, i64)>)> {
+fn page_tag(v: &Values, e: ValueId) -> Option<(PageOf, Option<(i64, i64)>)> {
     // (the entry's ids looked at in place: no copy of the list)
     let ids = |xs: &[ValueId]| match xs {
         [j, _] => Some((*j, None)),
@@ -956,7 +969,7 @@ fn page_tag(v: &Values, e: ValueId) -> Option<(i64, Option<(i64, i64)>)> {
         .with_list(e, ids)
         .unwrap_or_else(|| ids(&list_of(v, e)))?;
     Some((
-        v.as_int(j)?,
+        page_of(v, j)?,
         match pk {
             None => None,
             Some((p, k)) => Some((v.as_int(p)?, v.as_int(k)?)),
@@ -980,7 +993,8 @@ fn page_tag(v: &Values, e: ValueId) -> Option<(i64, Option<(i64, i64)>)> {
 /// entries `a, m1, close, [3, b, P, 0]` are written `a, b, close`.
 pub(crate) fn doc_order(v: &Values, entries: &[ValueId]) -> Vec<ValueId> {
     // (runs of consecutive page entries: the finishers placed after one
-    // piece, sorted by page, stable within one page)
+    // piece in the order they fired there, stable within one page; the
+    // pieces in the run's order)
     let mut es: Vec<ValueId> = Vec::with_capacity(entries.len());
     let mut i = 0;
     while i < entries.len() {
@@ -994,7 +1008,17 @@ pub(crate) fn doc_order(v: &Values, entries: &[ValueId]) -> Vec<ValueId> {
             i += 1;
         }
         let mut run: Vec<ValueId> = entries[a..i].to_vec();
-        run.sort_by_key(|&e| page_tag(v, e).map_or(0, |t| t.0));
+        let mut pieces: Vec<i64> = Vec::new();
+        for &e in &run {
+            if let Some(((p, _), _)) = page_tag(v, e)
+                && !pieces.contains(&p)
+            {
+                pieces.push(p);
+            }
+        }
+        run.sort_by_key(|&e| {
+            page_tag(v, e).map_or((0, 0), |((p, n), _)| (pieces.iter().position(|&q| q == p).unwrap_or(0), n))
+        });
         es.extend(run);
     }
     // (each page's last entry, by the piece its break is inside of)
@@ -1004,7 +1028,7 @@ pub(crate) fn doc_order(v: &Values, entries: &[ValueId]) -> Vec<ValueId> {
             let last = es
                 .get(p + 1)
                 .and_then(|&n| page_tag(v, n))
-                .is_none_or(|t| t.0 != page_tag(v, e).map_or(-1, |u| u.0));
+                .is_none_or(|t| Some(t.0) != page_tag(v, e).map(|u| u.0));
             if last {
                 pages_of.entry(pid).or_default().push((p, k));
             }
@@ -3178,6 +3202,11 @@ impl Graph {
                 let o = &self.ops;
                 let fd = o.fin_defs.locked().clone();
                 *o.fin_defs_start.locked() = Arc::new(fd);
+                // (a finisher placed again with the arguments of one no
+                // node holds now predicts from the table as it is, its
+                // page's last run in it, `crate::pages::Finish::predicted_defs`)
+                let fin = o.finish;
+                self.eng.forget_texts_where(&|op, _, _| op == fin);
             }
             // (the engine's run audit, `PHITEX_RUN_AUDIT=1`: the reruns
             // whose effects all came out as before, printed below)

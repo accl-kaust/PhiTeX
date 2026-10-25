@@ -40,11 +40,7 @@ pub(crate) fn rtn_value(
     if dead == 0 && maps.is_empty() {
         return v.list(vec![markers, list]);
     }
-    let ms = maps
-        .iter()
-        .map(|&(n, m)| v.list(vec![v.int(i64::from(n)), v.int(i64::from(m.keep)), v.int(i64::from(m.add))]))
-        .collect();
-    v.list(vec![markers, list, v.int(dead), v.list(ms)])
+    v.list(vec![markers, list, v.int(dead), maps_value(v, maps)])
 }
 
 /// A give-back without its register maps: what the page builder folds
@@ -70,10 +66,22 @@ pub(crate) fn rtn_with_maps(v: &Values, x: ValueId, maps: &[(i32, crate::regfold
 
 /// The register maps of a give-back ([`rtn_value`]).
 pub(crate) fn rtn_maps(v: &Values, x: ValueId) -> Vec<(i32, crate::regfold::Affine)> {
-    list_of(v, x)
-        .get(3)
-        .map(|&ms| list_of(v, ms))
-        .unwrap_or_default()
+    list_of(v, x).get(3).map_or_else(Vec::new, |&ms| maps_of(v, ms))
+}
+
+/// The register maps `[[n, keep, add]…]` as a value ([`rtn_value`]'s
+/// fourth element; [`FinishIn::maps`]).
+pub(crate) fn maps_value(v: &Values, maps: &[(i32, crate::regfold::Affine)]) -> ValueId {
+    v.list(
+        maps.iter()
+            .map(|&(n, m)| v.list(vec![v.int(i64::from(n)), v.int(i64::from(m.keep)), v.int(i64::from(m.add))]))
+            .collect(),
+    )
+}
+
+/// [`maps_value`]'s maps.
+pub(crate) fn maps_of(v: &Values, ms: ValueId) -> Vec<(i32, crate::regfold::Affine)> {
+    list_of(v, ms)
         .into_iter()
         .filter_map(|e| match list_of(v, e)[..] {
             [n, k, a] => Some((
@@ -105,21 +113,23 @@ pub(crate) fn rtn_as_guess(v: &Values, x: ValueId) -> ValueId {
 /// `\deadcycles` as the routine left it (a page not shipped: §1054's
 /// `\end` after it reads it) and the maps of its global integer register
 /// writes ([`rtn_value`]). The page builder folds the
-/// next page on its guess of it ([`FinishIn::rtn_guess`]) until the
+/// next page on its guess of it ([`Run::rtn_guess`]) until the
 /// finisher's output, this value, says otherwise
 /// ([`phitex_defuse::Ctx::placed_output`]).
 pub(crate) const RTN: &str = "rtn";
 
 /// A finisher's arguments (a node's arguments are what the engine knows
-/// of it before it runs: [`Finish::defs`] and its kin read them): `[j,
+/// of it before it runs: [`Finish::defs`] and its kin read them): `[nth,
 /// (8 unused), hint, normal, special, page, classes]`. Its run builds its
-/// arguments in full from them ([`Run::finisher_args`]: `[j, data,
+/// arguments in full from them ([`Run::finisher_args`]: `[nth, data,
 /// carried, locals, rest, piece, k, reads, defs, hint, normal, special,
 /// cuttable]`), which [`FinCtx::args`] holds; the positions both share
-/// are these.
+/// are these. No argument is the page's index among all the pages, nor
+/// another page's content: a page moved by pages fired before it, or by
+/// another page's routine giving back otherwise, is the same finisher.
 pub(crate) mod arg {
-    /// The page's index (0 for the first page).
-    pub(crate) const J: usize = 0;
+    /// The pages fired in the page's piece before it ([`super::FinishIn::nth`]).
+    pub(crate) const NTH: usize = 0;
     /// The output routine's hint where the page fired
     /// ([`crate::hints::routine_hint`]), encoded; unit for the default
     /// routine.
@@ -140,7 +150,12 @@ pub(crate) mod arg {
 /// ([`FinishIn::args`], [`arg`]).
 #[derive(Clone, Debug)]
 pub(crate) struct FinishIn {
+    /// The page's index in the page builder's loop: the loop's own, never
+    /// an argument (decoded: -1).
     pub j: i64,
+    /// The pages fired in `piece` before this one: the page's place among
+    /// the finishers placed after that piece ([`arg::NTH`]).
+    pub nth: u32,
     pub normal: i64,
     pub special: bool,
     /// The output routine's hint where the page fired ([`arg::HINT`]).
@@ -162,7 +177,9 @@ pub(crate) struct FinishIn {
     /// the routine's material of the page before first, the material
     /// carried, then the pieces' items.
     pub spans: Vec<Span>,
-    /// The routines' material the spans name ([`Src::Rtn`]), by page.
+    /// The routines' material the spans name ([`Src::Rtn`]), by page:
+    /// the pages before this one counted back from it (1 the page just
+    /// before), as the spans name them.
     pub rtns: Vec<(i64, ValueId)>,
     /// The builder's state where the page began: the main list's fold
     /// and the page parameters in force (a `T_PAGE_PARAMS` marker).
@@ -178,12 +195,13 @@ pub(crate) struct FinishIn {
     /// The marks in force where the page began (`\topmark` and its
     /// classes, §1012): `[[class, mark]…]`.
     pub top_marks: ValueId,
-    /// What the page builder guessed this page's routine gives back,
-    /// and folded the next page on ([`Feedback::RoutineGivesBack`],
-    /// [`Run::rtn_guess`]): from the pages before this one only, never
-    /// this page's real value read back, so its own miss does not change
-    /// this node.
-    pub rtn_guess: ValueId,
+    /// The register maps of what the page builder guessed this page's
+    /// routine gives back, and folded the next page on
+    /// ([`Feedback::RoutineGivesBack`], [`Run::rtn_guess`]; `[[n, keep,
+    /// add]…]`, [`maps_value`]): the page counters' folds past this
+    /// finisher while it runs ([`Finish::static_contribs`]). Not the
+    /// guess: another page's give-back, its content.
+    pub maps: ValueId,
     /// How many of the spans the post-output build of the page before
     /// takes (§1026: the routine's material and the held-over insertions
     /// as they are, a piece's items carried folded again with their
@@ -234,7 +252,7 @@ impl FinishIn {
             v.int(i64::from(self.holding)),
             v.int(i64::from(self.held)),
             self.top_marks,
-            self.rtn_guess,
+            self.maps,
             v.int(i64::from(self.post)),
             v.list(self.post_markers.clone()),
             v.int(i64::from(self.post_k)),
@@ -248,7 +266,7 @@ impl FinishIn {
             ),
             v.list(self.vers.iter().map(|&(p, x)| v.list(vec![v.int(p), x])).collect()),
         ]);
-        let mut out = vec![v.int(self.j)];
+        let mut out = vec![v.int(i64::from(self.nth))];
         out.extend([ValueId::UNIT; 8]);
         out.extend([
             self.hint,
@@ -271,7 +289,8 @@ impl FinishIn {
         let node = |x: i64| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(x.to_ne_bytes()));
         let at = |i: usize| pos.get(i).map_or(0, |&x| int_of(v, x));
         Some(FinishIn {
-            j: at(arg::J),
+            j: -1,
+            nth: u32::try_from(at(arg::NTH)).unwrap_or(0),
             normal: at(arg::NORMAL),
             special: at(arg::SPECIAL) != 0,
             hint: pos.get(arg::HINT).copied().unwrap_or(ValueId::UNIT),
@@ -310,7 +329,7 @@ impl FinishIn {
             holding: n(12) != 0,
             held: u32::try_from(n(13)).unwrap_or(0),
             top_marks: p[14],
-            rtn_guess: p[15],
+            maps: p[15],
             post: p.get(16).map_or(0, |&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
             post_markers: p.get(17).map(|&x| list_of(v, x)).unwrap_or_default(),
             post_k: p.get(18).map_or(0, |&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
@@ -403,15 +422,15 @@ impl Run<'_, '_> {
             // the new version places this finisher again; no page made
             // on it, the mismatch no defect)
             if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-                eprintln!("finisher {} of page {}: stale placement", self.cx.node().raw(), fin.j);
+                eprintln!("finisher {} (page {} of its piece): stale placement", self.cx.node().raw(), fin.nth);
             }
             return Ok((Vec::new(), None));
         }
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
-                "finisher {} of page {} runs (piece {} candidate {}, after {:?}, {} spans, window {:?})",
+                "finisher {} (page {} of its piece) runs (piece {} candidate {}, after {:?}, {} spans, window {:?})",
                 self.cx.node().raw(),
-                fin.j,
+                fin.nth,
                 fin.piece.raw(),
                 fin.k,
                 fin.after.map(phitex_defuse::NodeId::raw),
@@ -425,8 +444,9 @@ impl Run<'_, '_> {
         }
         let defect = |r: &mut Self, what: String| {
             let msg = format!(
-                "page {} (finisher {}): {what}: the page builder over the profiles and the finisher's page part",
-                fin.j,
+                "page {} of piece {} (finisher {}): {what}: the page builder over the profiles and the finisher's page part",
+                fin.nth,
+                fin.piece.raw(),
                 r.cx.node().raw()
             );
             assert!(!cfg!(any(debug_assertions, feature = "observe")), "{msg}");
@@ -871,11 +891,8 @@ impl Run<'_, '_> {
             let after = (xs.len() > 7 && n(7) != -1).then(|| crate::pages::node_of(n(7)));
             (after, k)
         });
-        let normal = c.args.get(arg::NORMAL).map_or(0, |&x| int_of(v, x));
         let s = PageStart {
             anchor,
-            j: c.j + 1,
-            normal,
             fold,
             params,
             prof: crate::vprof::encode(v, &mat),
@@ -894,7 +911,11 @@ impl Run<'_, '_> {
 /// rest of the piece, [`Run::define_page_start`]).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FinCtx {
-    pub j: i64,
+    /// The pages fired in its page's piece before it ([`arg::NTH`]).
+    pub nth: i64,
+    /// Whether its page is the first the page builder fired (no page
+    /// fired before it: [`FinishIn::prev_fire`]).
+    pub first: bool,
     pub pending: Vec<ValueId>,
     /// How many of `pending` are the held-over insertions (§1022).
     pub held_n: usize,
@@ -938,37 +959,23 @@ impl Run<'_, '_> {
         // (what it gives back leaves the run: its sealed lines' lists)
         let x = self.unseal(x);
         self.cx.define_with(v.field(RTN), x, Locality::Global);
-        // (a routine that gave back other than the page builder folded
-        // the next page on: counted; the builder's node reads the real
-        // material as the finisher's output, [`Feedback::RoutineGivesBack`])
-        let pos = self.cx.args();
-        let guess = FinishIn::of(v, &pos).map(|f| f.rtn_guess);
-        if guess.is_some_and(|g| rtn_strip(v, g) != rtn_strip(v, x)) {
-            Feedback::RoutineGivesBack.missed();
-            let j = pos.first().map_or(0, |&y| int_of(v, y));
-            if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-                let r = |y: ValueId| v.render(y).chars().take(300).collect::<String>();
-                eprintln!(
-                    "miss: page {j} (finisher {}): guess {} real {}",
-                    self.cx.node().raw(),
-                    guess.map_or_else(String::new, r),
-                    r(x)
-                );
-            }
-        }
+        // (what the page builder folded the next page on, and a miss, it
+        // counts where it reads this output, [`Feedback::RoutineGivesBack`])
         if let Some(c) = self.fin.as_mut() {
             c.rtn = Some(x);
         }
         Ok(())
     }
 
-    /// The page a finisher finishes (its first argument); `usize::MAX`
-    /// in any other run.
-    pub(crate) fn page_index(&self) -> usize {
-        self.fin
-            .as_ref()
-            .and_then(|c| usize::try_from(c.j).ok())
-            .unwrap_or(usize::MAX)
+    /// The pages fired in a finisher's page's piece before it (its first
+    /// argument); -1 in any other run.
+    pub(crate) fn page_nth(&self) -> i64 {
+        self.fin.as_ref().map_or(-1, |c| c.nth)
+    }
+
+    /// Whether this run is the finisher of the first page fired.
+    pub(crate) fn first_page(&self) -> bool {
+        self.fin.as_ref().is_some_and(|c| c.first)
     }
 
     /// `fire_up` (§1012–§1025) for a finisher's page: the marks and the
@@ -1021,7 +1028,7 @@ impl Run<'_, '_> {
             eprintln!(
                 "fire-text: node {} page {} penalty {output_penalty} held {} spec {}: {t:?}",
                 self.cx.node().raw(),
-                self.fin.as_ref().map_or(-1, |c| c.j),
+                self.fin.as_ref().map_or(-1, |c| c.nth),
                 held.len(),
                 self.cx.is_speculative()
             );
@@ -1470,10 +1477,9 @@ pub(crate) struct FinDefs {
     /// globally, [`Run::contribute_global_defs`]): the next finisher's
     /// declared contribution, a guess ([`Finish::static_contribs`]).
     pub gdefs: Option<ValueId>,
-    /// Each page's last run (by the page's index, the finisher's first
-    /// argument): its ordinary pages fired and its definitions
-    /// ([`FinDefs::at`]).
-    pub pages: std::collections::BTreeMap<i64, (i64, Vec<(Field, ValueId)>)>,
+    /// Each page's last run (by [`fin_page_key`]): its ordinary pages
+    /// fired and its definitions ([`FinDefs::at`]).
+    pub pages: std::collections::BTreeMap<PageKey, (i64, Vec<(Field, ValueId)>)>,
 }
 
 impl FinDefs {
@@ -1484,7 +1490,7 @@ impl FinDefs {
     /// pages after it: what a routine leaves on a later page (a column
     /// kept, a float pending, a page counter) is not what it leaves on
     /// this one.
-    pub(crate) fn at(&self, idx: i64) -> FinDefs {
+    pub(crate) fn at(&self, idx: PageKey) -> FinDefs {
         let mut d = FinDefs {
             recent: self.recent.clone(),
             ..FinDefs::default()
@@ -1608,6 +1614,22 @@ impl FinDefs {
             })
             .collect()
     }
+}
+
+/// A page's place among the pages a routine ran on ([`FinDefs::pages`]),
+/// from its finisher's arguments: the ordinary pages fired up to it, its
+/// piece and the pages fired in that piece before it. No page's index
+/// among all the pages: none is an argument.
+pub(crate) type PageKey = (i64, i64, i64);
+
+/// [`PageKey`] of a finisher with arguments `args`.
+pub(crate) fn fin_page_key(v: &Values, args: &[ValueId]) -> PageKey {
+    let at = |i: usize| args.get(i).map_or(0, |&x| int_of(v, x));
+    let piece = args
+        .get(arg::PAGE)
+        .and_then(|&p| list_of(v, p).first().map(|&x| int_of(v, x)))
+        .unwrap_or(0);
+    (at(arg::NORMAL), piece, at(arg::NTH))
 }
 
 /// Whether a finisher's definition `x` of field `name`, which the run
@@ -1744,7 +1766,7 @@ impl Finish {
         let j = args.get(10).map_or(0, |&x| int_of(v, x));
         let o = ops(&self.0);
         let m = o.fin_defs.locked();
-        let idx = args.first().map_or(0, |&x| int_of(v, x));
+        let idx = fin_page_key(v, args);
         let d = (t != ValueId::UNIT)
             .then(|| m.get(&fin_key(v, t, args)))
             .flatten()
@@ -1826,7 +1848,7 @@ impl Operation for Finish {
             .get(&fin_key(v, t, args))
             .map(|d| {
                 // (the history this finisher predicts from, [`FinDefs::at`])
-                let d = d.at(args.first().map_or(0, |&x| int_of(v, x)));
+                let d = d.at(fin_page_key(v, args));
                 let mut ns: Vec<Field> = d
                     .last
                     .iter()
@@ -1897,11 +1919,11 @@ impl Operation for Finish {
         let mut out = no_units(v);
         out.push((v.field(GDEFS), self.gdefs_guess(args, v)));
         // (the maps of its routine's global integer register writes, as
-        // the page builder guessed them, [`FinishIn::rtn_guess`]: the
+        // the page builder guessed them, [`FinishIn::maps`]: the
         // page counter's readers fold past it while it runs,
         // `crate::regfold`)
         if let Some(fin) = FinishIn::of(v, args) {
-            for (n, m) in rtn_maps(v, fin.rtn_guess) {
+            for (n, m) in maps_of(v, fin.maps) {
                 out.push((crate::regfold::acc_field(v, n), m.encode(v)));
             }
         }
@@ -1941,7 +1963,7 @@ impl Operation for Finish {
             if crate::exec::obs_flag!("PHITEX_FIN_TRACE") {
                 let j = pos.first().map_or(0, |&x| int_of(r.v, x));
                 eprintln!(
-                    "fin-trace: node {} page {j} spec {} resumed {}",
+                    "fin-trace: node {} page {j} of its piece spec {} resumed {}",
                     r.cx.node().raw(),
                     r.cx.is_speculative(),
                     r.resumed
@@ -1957,14 +1979,16 @@ impl Operation for Finish {
                 };
                 // (a view in which the page's piece is not before this
                 // node: no page, [`Run::finisher_args`])
-                // (its output the guess the page builder folded on, which
-                // leaves the builder as it is)
+                // (its output none, unit: the page builder goes on with
+                // the guess it folded on)
+                let first = FinishIn::of(v, &pos).is_some_and(|f| f.prev_fire.0 == -1);
                 if args.is_empty() {
                     r.fin = Some(FinCtx {
-                        j: pos.first().map_or(0, |&x| int_of(v, x)),
+                        nth: pos.first().map_or(0, |&x| int_of(v, x)),
+                        first,
                         pending: Vec::new(),
                         held_n: 0,
-                        rtn: FinishIn::of(v, &pos).map(|f| f.rtn_guess),
+                        rtn: None,
                         args: Vec::new(),
                         brk: None,
                     });
@@ -1973,7 +1997,8 @@ impl Operation for Finish {
                 }
                 let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
                 r.fin = Some(FinCtx {
-                    j: int_of(v, a(0)),
+                    nth: int_of(v, a(0)),
+                    first,
                     pending: Vec::new(),
                     held_n: 0,
                     rtn: None,
@@ -2198,7 +2223,7 @@ impl Run<'_, '_> {
         }
         let mut m = self.ops.fin_defs.locked();
         let pos = self.cx.args();
-        let idx = pos.first().map_or(0, |&x| int_of(v, x));
+        let idx = fin_page_key(v, &pos);
         let e = m.entry(fin_key(v, t, &pos)).or_default();
         e.gdefs = Some(gdefs);
         for &(f, x) in &out {
@@ -2216,7 +2241,7 @@ impl Run<'_, '_> {
             // routine's material, the dead cycles before it)
             let fin = FinishIn::of(v, &self.cx.args());
             let class = fin.as_ref().map_or_else(String::new, |f| {
-                format!("pen {} mat {} prev_dead {} classes {:?} j {}", f.output_penalty, f.in_material, f.prev_fire.1, f.classes, f.j)
+                format!("pen {} mat {} prev_dead {} classes {:?} nth {}", f.output_penalty, f.in_material, f.prev_fire.1, f.classes, f.nth)
             });
             let r = |x: ValueId| v.render(x).chars().take(120).collect::<String>();
             let e = e.at(idx);

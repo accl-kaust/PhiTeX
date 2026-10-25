@@ -1293,6 +1293,19 @@ impl Engine {
         std::mem::take(&mut self.settled_out)
     }
 
+    /// Drops the cached analyses of the texts passing `pred` that no node
+    /// holds: such a text made again is analysed afresh, its hooks asked
+    /// in the context as it is then (a prediction from a history that
+    /// grew since), not as when it was first made. The nodes are not
+    /// touched.
+    pub fn forget_texts_where(&mut self, pred: &dyn Fn(OpId, &[ValueId], &Values) -> bool) {
+        let mut t = lock(&self.core.texts);
+        t.retain(|_, v| {
+            v.retain(|x| std::sync::Arc::strong_count(x) > 1 || !pred(x.op, &x.args, &self.core.values));
+            !v.is_empty()
+        });
+    }
+
     /// Re-runs the nodes whose text passes `pred`, their texts analysed
     /// again (their hooks' answers may depend on context that changed).
     pub fn refresh_where(&mut self, pred: &dyn Fn(OpId, &[ValueId], &Values) -> bool) {

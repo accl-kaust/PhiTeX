@@ -2724,9 +2724,10 @@ impl<'c, 'a> Run<'c, 'a> {
     /// A `streams` entry (`[name]` opens the file empty, `[name, text]`
     /// adds to it, `[name, "", "close"]` closes it) where TeX makes it
     /// ([`crate::api::doc_order`]): from a page step, tagged with its
-    /// page and, for a page whose break is inside a piece, that break
-    /// (`[j, entry]`, `[j, entry, piece, candidate]`); from a piece after
-    /// one of its page-builder candidates, after a marker
+    /// page (`[piece, nth]`, the piece it fired in and the pages fired in
+    /// it before it) and, for a page whose break is inside a piece, that
+    /// break (`[page, entry]`, `[page, entry, piece, candidate]`); from a
+    /// piece after one of its page-builder candidates, after a marker
     /// `["cand", piece, candidates passed]`, so that a page firing at an
     /// earlier candidate of the piece writes before it (§1370, §1374).
     /// From a document node, also a `T_WRITE_AT` marker on the main list.
@@ -2737,8 +2738,12 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         let op = self.cx.op();
         let (marker, tagged) = if op == self.ops.finish {
-            let j = i64::try_from(self.page_index()).unwrap_or(i64::MAX);
-            let mut t = vec![v.int(j), e];
+            // (the page: its piece and the pages fired in it before it,
+            // `crate::api::doc_order`)
+            let anchor = crate::pages::FinishIn::of(v, &self.cx.args())
+                .map_or(-1, |f| i64::from_ne_bytes(f.piece.raw().to_ne_bytes()));
+            let page = v.list(vec![v.int(anchor), v.int(self.page_nth())]);
+            let mut t = vec![page, e];
             // (the piece its break is inside of and the candidate: what
             // the piece wrote after that candidate comes after the page's
             // writes)
@@ -5100,11 +5105,11 @@ impl<'c, 'a> Run<'c, 'a> {
         // kept where they differ: the builder learns them for the next
         // pages' guesses, whose finishers contribute the register folds
         // their arguments name, `Finish::static_contribs`)
-        let guessed = crate::pages::FinishIn::of(self.v, &self.cx.args()).map(|f| f.rtn_guess);
+        let guessed = crate::pages::FinishIn::of(self.v, &self.cx.args()).map(|f| f.maps);
         let out = self.fin.as_ref().and_then(|c| c.rtn).map_or(ValueId::UNIT, |x| {
             let v = self.v;
             match guessed {
-                Some(g) if crate::pages::rtn_maps(v, g) != crate::pages::rtn_maps(v, x) => x,
+                Some(g) if crate::pages::maps_of(v, g) != crate::pages::rtn_maps(v, x) => x,
                 _ => crate::pages::rtn_strip(v, x),
             }
         });

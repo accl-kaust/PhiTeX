@@ -149,7 +149,7 @@ impl Run<'_, '_> {
                             "undefined {t} in node {} (op {:?}, page {}): engine {at}",
                             self.cx.node().raw(),
                             self.cx.op(),
-                            self.page_index()
+                            self.page_nth()
                         );
                     }
                     self.log("error", "Undefined control sequence")?;
