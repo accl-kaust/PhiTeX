@@ -423,6 +423,25 @@ pub(crate) fn text_value(eng: &Engine, n: &Node) -> ValueId {
 /// re-ask compares with `seen`. A re-ask that finds the same answer leaves
 /// the reader standing; that is the whole of validation.
 pub(crate) fn answer(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId) -> Option<ValueId> {
+    answer_in(eng, me, kind, path, &mut FoldMemo::new())
+}
+
+/// The folds one pass of answers computed, by range: a node's reads
+/// through many paths of one range fold it once.
+pub(crate) type FoldMemo = Vec<((Field, Pos, Pos), ValueId)>;
+
+/// `fold`, from `memo` where this pass computed it.
+pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut FoldMemo) -> ValueId {
+    if let Some(e) = memo.iter().find(|e| e.0 == (f, from, to)) {
+        return e.1;
+    }
+    let x = fold(eng, f, Some(from), Some(to));
+    memo.push(((f, from, to), x));
+    x
+}
+
+/// [`answer`], its folds from `memo`.
+pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, memo: &mut FoldMemo) -> Option<ValueId> {
     match kind {
         ReadKind::Field { f, at } => {
             let r = match *at {
@@ -440,10 +459,10 @@ pub(crate) fn answer(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId) -> 
                 None => Some(unit_start(eng, me)),
             };
             let to = match to {
-                Some(n) => Some(pos_of(eng, *n)?),
-                None => Some(pos_of(eng, me.id)?),
+                Some(n) => pos_of(eng, *n)?,
+                None => pos_of(eng, me.id)?,
             };
-            apply_path(eng, Some(fold(eng, *f, from, to)), path)
+            apply_path(eng, Some(fold_in(eng, *f, from?, to, memo)), path)
         }
         ReadKind::Next { f, after } => {
             let after = match after {
@@ -477,6 +496,11 @@ pub(crate) fn reader_answer(eng: &Engine, f: Field, r: &Reader) -> Option<ValueI
 
 /// A range reader record's current answer.
 pub(crate) fn range_answer(eng: &Engine, f: Field, r: &RangeReader) -> Option<ValueId> {
+    range_answer_in(eng, f, r, &mut FoldMemo::new())
+}
+
+/// [`range_answer`], its folds from `memo`.
+pub(crate) fn range_answer_in(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) -> Option<ValueId> {
     let me = eng.node(r.node);
     let from = match r.from {
         Some(n) => Some(pos_of(eng, n)?),
@@ -487,10 +511,10 @@ pub(crate) fn range_answer(eng: &Engine, f: Field, r: &RangeReader) -> Option<Va
         return apply_path(eng, next_value(eng, &n), r.path);
     }
     let to = match r.to {
-        Some(n) => Some(pos_of(eng, n)?),
-        None => Some(pos_of(eng, me.id)?),
+        Some(n) => pos_of(eng, n)?,
+        None => pos_of(eng, me.id)?,
     };
-    apply_path(eng, Some(fold(eng, f, from, to)), r.path)
+    apply_path(eng, Some(fold_in(eng, f, from?, to, memo)), r.path)
 }
 
 /// The built-in projections.

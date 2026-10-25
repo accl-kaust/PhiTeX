@@ -31,7 +31,6 @@
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::Arc;
-use std::sync::RwLockWriteGuard;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -71,7 +70,7 @@ impl CommitStats {
 
 /// The node's segment, write-locked, with the node still in it; None when
 /// the node is gone.
-pub(crate) fn own_write<'a>(eng: &'a Engine, node: &Node) -> Option<(&'a Arc<Segment>, RwLockWriteGuard<'a, Inner>)> {
+pub(crate) fn own_write<'a>(eng: &'a Engine, node: &Node) -> Option<(&'a Arc<Segment>, crate::lock::WriteGuard<'a, Inner>)> {
     loop {
         if node.state() == State::Gone {
             return None;
@@ -681,11 +680,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let defined: Vec<Field> = rec.defs.iter().map(|d| d.f).collect();
         walk_stopped(eng, ww, node, node.pos_hint(), seg_id, &defined, &mut st);
     }
+    let mut memo = read::FoldMemo::new();
     for (f, r) in ranges {
-        reask_range(eng, ww, f, &r, node.id, &mut st);
+        reask_range(eng, ww, f, &r, node.id, &mut st, &mut memo);
     }
     for (f, r) in holes {
-        reask_range(eng, ww, f, &r, node.id, &mut st);
+        reask_range(eng, ww, f, &r, node.id, &mut st, &mut memo);
     }
     for n in &made {
         enqueue(
@@ -719,9 +719,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     // 6. the node's own reads the lock could not answer
     let refuted = refuted.or_else(|| {
+        let mut memo = read::FoldMemo::new();
         unchecked.into_iter().find(|&i| {
             let r = &rec.reads[i];
-            answer(eng, node, &r.kind, r.path) != r.seen
+            read::answer_in(eng, node, &r.kind, r.path, &mut memo) != r.seen
         })
     });
     if let Some(i) = refuted {
@@ -1127,17 +1128,18 @@ pub(crate) fn reask_ranges(eng: &Engine, w: Option<&Worker>, f: Field, at: Pos, 
             None => Vec::new(),
         }
     };
+    let mut memo = read::FoldMemo::new();
     for r in readers {
-        reask_range(eng, w, f, &r, by, st);
+        reask_range(eng, w, f, &r, by, st, &mut memo);
     }
 }
 
 /// Re-asks one range reader after `by`'s change.
-fn reask_range(eng: &Engine, w: Option<&Worker>, f: Field, r: &RangeReader, by: NodeId, st: &mut CommitStats) {
+fn reask_range(eng: &Engine, w: Option<&Worker>, f: Field, r: &RangeReader, by: NodeId, st: &mut CommitStats, memo: &mut read::FoldMemo) {
     if !live(eng, r.node, r.serial) {
         return;
     }
-    if range_answer(eng, f, r) != r.seen
+    if read::range_answer_in(eng, f, r, memo) != r.seen
         && mark_stale(
             eng,
             w,
@@ -1166,8 +1168,9 @@ pub(crate) fn reask_holes(eng: &Engine, w: Option<&Worker>, node: &Node, st: &mu
             .flat_map(|(f, rs)| rs.iter().filter(|r| r.next && r.to == Some(node.id)).map(move |r| (*f, r.clone())))
             .collect()
     };
+    let mut memo = read::FoldMemo::new();
     for (f, r) in readers {
-        reask_range(eng, w, f, &r, node.id, st);
+        reask_range(eng, w, f, &r, node.id, st, &mut memo);
     }
 }
 

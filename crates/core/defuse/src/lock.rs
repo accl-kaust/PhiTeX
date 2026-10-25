@@ -23,6 +23,9 @@ use std::cell::Cell;
 use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 use std::time::Instant;
 
+/// A held write guard of a [`Lock`].
+pub(crate) type WriteGuard<'a, T> = RwLockWriteGuard<'a, T>;
+
 thread_local! {
     static WAIT_NS: Cell<u64> = const { Cell::new(0) };
     static WAIT_MAX_NS: Cell<u64> = const { Cell::new(0) };
