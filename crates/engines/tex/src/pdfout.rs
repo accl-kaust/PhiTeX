@@ -3211,7 +3211,11 @@ pub(crate) struct EndFields {
     pub suppress_ptex_info: i32,
 }
 
-/// The records between two of the link's kept states ([`LinkMemo`]).
+/// The records between two of the link's kept states ([`LinkMemo`]), at
+/// least: a line of `n` records keeps one every `sqrt(n)` (a state's copy
+/// grows with the objects before it: one every 8 copied a line of 7000
+/// pages' 22000 objects 860 times, 188 ms; an edit replays at most that
+/// many records more before a state it can resync on).
 const LINK_SNAP: usize = 8;
 
 /// The writer as the link left it after a record (every [`LINK_SNAP`]).
@@ -3788,6 +3792,7 @@ fn link(
         }
     }
     let copied = start;
+    let snap_every = LINK_SNAP.max(xpages.len().isqrt());
     let t_pre = t0.elapsed();
     // (each record's bytes from `start` on, a page's content still to
     // be rewritten and compressed among them)
@@ -3860,7 +3865,7 @@ fn link(
         }
         t_try += tt.elapsed();
         let tt = std::time::Instant::now();
-        if i > start && (i - start).is_multiple_of(LINK_SNAP) {
+        if i > start && (i - start).is_multiple_of(snap_every) {
             // (the writer's digests' sums brought up to date first: a
             // later link comparing a writer with this snapshot, or going
             // on from it, hashes only what changed after it, not every
