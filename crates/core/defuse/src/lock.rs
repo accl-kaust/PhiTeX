@@ -7,7 +7,7 @@
 //! | a field-index shard (`index::FieldIndex`: definitions, contributions, readers) | a read's or a commit's skip | one set lookup or insert |
 //! | a value shard (`values::Values`) | an intern; a sequence node lookup | one insert or one lookup; plain reads take none |
 //! | paths, monoids, environment, shapes, memo, marks, pending (`engine::Engine`) | setup; rare inserts; a push or an edit outside an evaluation | one map operation |
-//! | a node's `last`, `woke` and `text` (`node::Node`) | its commit; its re-ask; an edit; a read of its arguments | a swap; a clone |
+//! | a node's `last`, `woke`, `text` and `stopped` (`node::Node`) | its commit; its re-ask; an edit; a read of its arguments; a walk stopping at it | a swap; a clone; a push |
 //! | the pool's parking (`sched::Pool`) | an idle worker; a push that finds one idle | the rest itself; one notify |
 //! | a block's steal flag (`sched::Shared::block_busy`, an atomic) | a thief | one steal of an even run of nodes |
 //! | the spare workers and their handles (`sched::Pool::run`) | the caller's thread, starting the workers an evaluation turns out to need | one spawn |
@@ -16,8 +16,8 @@
 //! No lock is held while an operation runs. No thread holds two locks of the
 //! same row at once. A lock not in this table is a bug: add the row first.
 //!
-//! A guard taken at once costs a `try_*`; one waited for adds its wait to the
-//! thread's count, which the pool sums into [`crate::Times::lock_wait_ns`].
+//! A guard taken at once costs a `try_*`; a refused one tries again a few
+//! hundred times before it blocks, and adds its wait to the thread's count, which the pool sums into [`crate::Times::lock_wait_ns`].
 
 use std::cell::Cell;
 use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
@@ -43,9 +43,16 @@ impl<T> Lock<T> {
             Err(TryLockError::WouldBlock) => {}
         }
         let t = Instant::now();
+        for _ in 0..SPIN_TRIES {
+            spin();
+            match self.0.try_read() {
+                Ok(g) => return timed(g, t),
+                Err(TryLockError::Poisoned(p)) => return timed(p.into_inner(), t),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        }
         let g = self.0.read().unwrap_or_else(PoisonError::into_inner);
-        waited(ns(t));
-        g
+        timed(g, t)
     }
 
     /// An exclusive guard, timed as `read`.
@@ -56,9 +63,16 @@ impl<T> Lock<T> {
             Err(TryLockError::WouldBlock) => {}
         }
         let t = Instant::now();
+        for _ in 0..SPIN_TRIES {
+            spin();
+            match self.0.try_write() {
+                Ok(g) => return timed(g, t),
+                Err(TryLockError::Poisoned(p)) => return timed(p.into_inner(), t),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        }
         let g = self.0.write().unwrap_or_else(PoisonError::into_inner);
-        waited(ns(t));
-        g
+        timed(g, t)
     }
 }
 
@@ -77,10 +91,32 @@ impl<T> Mx<T> {
             Err(TryLockError::WouldBlock) => {}
         }
         let t = Instant::now();
+        for _ in 0..SPIN_TRIES {
+            spin();
+            match self.0.try_lock() {
+                Ok(g) => return timed(g, t),
+                Err(TryLockError::Poisoned(p)) => return timed(p.into_inner(), t),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        }
         let g = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        waited(ns(t));
-        g
+        timed(g, t)
     }
+}
+
+/// Tries before a refused guard blocks: every hold in the table is short,
+/// and a blocked thread's wake costs tens of microseconds.
+const SPIN_TRIES: u32 = 256;
+
+fn spin() {
+    for _ in 0..16 {
+        std::hint::spin_loop();
+    }
+}
+
+fn timed<G>(g: G, t: Instant) -> G {
+    waited(ns(t));
+    g
 }
 
 /// Nanoseconds since `t`.

@@ -11,7 +11,12 @@ use crate::lock::Lock;
 use crate::order::{Pos, SegId};
 use crate::values::{Field, FxHashMap, hash_words};
 
-const SHARDS: usize = 512;
+/// Many and a cache line each: a commit's index work meets another's only
+/// when their fields share a shard.
+const SHARDS: usize = 4096;
+
+#[repr(align(64))]
+struct Shard(Lock<FxHashMap<Field, Segs>>);
 
 /// The segments of one field: most fields live in one segment, and that
 /// one costs no allocation under the shard's lock.
@@ -70,22 +75,22 @@ impl Segs {
 }
 
 pub(crate) struct FieldIndex {
-    shards: Box<[Lock<FxHashMap<Field, Segs>>]>,
+    shards: Box<[Shard]>,
 }
 
 fn shard(f: Field) -> usize {
-    usize::try_from(hash_words(7, &[f.0.raw()]) >> 55).unwrap_or(0) & (SHARDS - 1)
+    usize::try_from(hash_words(7, &[f.0.raw()]) >> 52).unwrap_or(0) & (SHARDS - 1)
 }
 
 impl FieldIndex {
     pub(crate) fn new() -> FieldIndex {
         FieldIndex {
-            shards: (0..SHARDS).map(|_| Lock::new(FxHashMap::default())).collect(),
+            shards: (0..SHARDS).map(|_| Shard(Lock::new(FxHashMap::default()))).collect(),
         }
     }
 
     pub(crate) fn add(&self, f: Field, lo: Pos, s: SegId) {
-        let mut w = self.shards[shard(f)].write();
+        let mut w = self.shards[shard(f)].0.write();
         match w.get_mut(&f) {
             Some(segs) => segs.insert(lo, s),
             None => {
@@ -95,7 +100,7 @@ impl FieldIndex {
     }
 
     pub(crate) fn remove(&self, f: Field, lo: Pos, s: SegId) {
-        let mut w = self.shards[shard(f)].write();
+        let mut w = self.shards[shard(f)].0.write();
         if let Some(segs) = w.get_mut(&f)
             && segs.remove(lo, s)
         {
@@ -105,21 +110,21 @@ impl FieldIndex {
 
     /// The last segment strictly before the one starting at `lo` with `f`.
     pub(crate) fn last_before(&self, f: Field, lo: Pos) -> Option<SegId> {
-        self.shards[shard(f)].read().get(&f)?.last_before(lo)
+        self.shards[shard(f)].0.read().get(&f)?.last_before(lo)
     }
 
     /// The first segment at or after the one starting at `lo` with `f`, and
     /// its start.
     pub(crate) fn first_at_or_after(&self, f: Field, lo: Pos) -> Option<(Pos, SegId)> {
-        self.shards[shard(f)].read().get(&f)?.first_at_or_after(lo)
+        self.shards[shard(f)].0.read().get(&f)?.first_at_or_after(lo)
     }
 
     /// The segments with `f` whose start is in `[from, to)`, in order.
     pub(crate) fn between(&self, f: Field, from: Pos, to: Pos) -> Vec<SegId> {
-        self.shards[shard(f)].read().get(&f).map(|s| s.between(from, to)).unwrap_or_default()
+        self.shards[shard(f)].0.read().get(&f).map(|s| s.between(from, to)).unwrap_or_default()
     }
 
     pub(crate) fn has(&self, f: Field) -> bool {
-        self.shards[shard(f)].read().contains_key(&f)
+        self.shards[shard(f)].0.read().contains_key(&f)
     }
 }

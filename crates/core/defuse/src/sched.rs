@@ -25,7 +25,7 @@ use crate::ctx::Ctx;
 use crate::engine::Engine;
 use crate::lock::{Mx, ns, take_wait};
 use crate::node::{Node, State, Wake};
-use crate::values::{Field, FxHashMap};
+use crate::values::{Field, FxHashMap, FxHashSet};
 
 /// What every worker and the pool share.
 pub(crate) struct Shared {
@@ -78,8 +78,6 @@ pub(crate) struct Pool {
     pub(crate) epoch: u64,
     pub(crate) limits: Limits,
     pub(crate) t0: Instant,
-    /// The last node to commit (`Engine::critical_chain`).
-    pub(crate) last_commit: AtomicU64,
 }
 
 /// What a worker logs beyond its counters.
@@ -117,6 +115,11 @@ pub(crate) struct Worker {
     pub(crate) predictions_refuted: AtomicU64,
     pub(crate) shaped: AtomicU64,
     pub(crate) commits: AtomicU64,
+    /// Its last commit and when (`Engine::critical_chain`).
+    pub(crate) last_commit: AtomicU64,
+    pub(crate) last_done: AtomicU64,
+    /// The engine's stable fields, taken once for the evaluation.
+    pub(crate) stable: Arc<FxHashSet<Field>>,
     pub(crate) log: Mx<WorkerLog>,
 }
 
@@ -149,9 +152,12 @@ impl Worker {
 
 /// Spins before parking.
 const SPINS: u32 = 64;
-/// A block is stolen from only with this much left, `BLOCK_STEAL` nodes at
-/// a time (an even run from its far end, run in order), so the tail is its
-/// owner's and no steal cuts a definer from the reader right after it.
+/// A block is stolen from only with this much left, half of it at a time
+/// and at least `BLOCK_STEAL` nodes (an even run from its far end, run in
+/// order): the tail is its owner's, no steal cuts a definer from the reader
+/// right after it, and two thieves of a block seldom share a segment. A
+/// reader at the head of a stolen run is re-asked once its owner's chain
+/// reaches it (`commit::first_hole`), not once per definer before it.
 const BLOCK_MIN: usize = 96;
 const BLOCK_STEAL: usize = 32;
 /// Edits are asked for this often from the caller's thread.
@@ -159,7 +165,7 @@ const ABSORB_EVERY: Duration = Duration::from_millis(2);
 
 impl Pool {
     /// A pool of `n` workers and their deques.
-    pub(crate) fn new(n: usize, epoch: u64, limits: Limits) -> (Pool, Vec<Worker>) {
+    pub(crate) fn new(n: usize, epoch: u64, limits: Limits, stable: Arc<FxHashSet<Field>>) -> (Pool, Vec<Worker>) {
         let n = n.max(1);
         let deques: Vec<Deque<NodeId>> = (0..n).map(|_| Deque::new_lifo()).collect();
         let blocks: Vec<Deque<NodeId>> = (0..n).map(|_| Deque::new_lifo()).collect();
@@ -205,6 +211,9 @@ impl Pool {
                 predictions_refuted: AtomicU64::new(0),
                 shaped: AtomicU64::new(0),
                 commits: AtomicU64::new(0),
+                last_commit: AtomicU64::new(u64::MAX),
+                last_done: AtomicU64::new(0),
+                stable: stable.clone(),
                 log: Mx::new(WorkerLog::default()),
             })
             .collect();
@@ -216,7 +225,6 @@ impl Pool {
             epoch,
             limits,
             t0: Instant::now(),
-            last_commit: AtomicU64::new(u64::MAX),
         };
         (pool, workers)
     }
@@ -335,8 +343,10 @@ impl Pool {
             if busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
                 continue;
             }
-            let mut taken: Vec<NodeId> = Vec::with_capacity(BLOCK_STEAL);
-            while taken.len() < BLOCK_STEAL {
+            // half of what is left: thieves of one block work far apart
+            let want = ((st.len() / 2) & !1).max(BLOCK_STEAL);
+            let mut taken: Vec<NodeId> = Vec::with_capacity(want);
+            while taken.len() < want {
                 match st.steal() {
                     Steal::Success(x) => taken.push(x),
                     Steal::Empty => break,
@@ -498,10 +508,15 @@ pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wak
 }
 
 /// A walk's re-ask: marks a clean node dirty and queues it. A running node
-/// is left alone: what it reads is checked again at its own commit, after
-/// the definition the walk is for was filed, so it needs no mark; one here
-/// would run it again on a read it may well have made right.
+/// is left alone until its commit: what it reads is checked again there,
+/// after the definition the walk is for was filed, so it needs no mark; one
+/// here would run it again on a read it may well have made right. Once its
+/// commit has checked (`Node::committing`), it is marked as `mark_dirty`
+/// marks it.
 pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    if n.committing.load(Ordering::Acquire) {
+        return mark_dirty(eng, w, n, wake);
+    }
     if n.state() == State::Clean && n.cas_state(State::Clean, State::Dirty) {
         log_wake(eng, w, n, &wake);
         enqueue(eng, w, n, wake);
@@ -585,9 +600,11 @@ pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(
             runs,
         });
     }
-    let total = pool.total_runs.fetch_add(1, Ordering::Relaxed) + 1;
-    if pool.limits.total_runs.is_some_and(|t| total > t) {
-        return Err(EvalError::TotalRuns { runs: total });
+    if let Some(t) = pool.limits.total_runs {
+        let total = pool.total_runs.fetch_add(1, Ordering::Relaxed) + 1;
+        if total > t {
+            return Err(EvalError::TotalRuns { runs: total });
+        }
     }
     if pool.limits.time.is_some_and(|t| pool.t0.elapsed() > t) {
         return Err(EvalError::Deadline);
@@ -650,12 +667,15 @@ pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(
             w.note(&st);
             node.commit_ns.store(st.commit_ns, Ordering::Relaxed);
             node.reask_ns.store(st.reask_ns, Ordering::Relaxed);
-            node.done_ns.store(ns(pool.t0), Ordering::Relaxed);
-            pool.last_commit.store(n.raw(), Ordering::Relaxed);
+            let done = ns(pool.t0);
+            node.done_ns.store(done, Ordering::Relaxed);
+            w.last_commit.store(n.raw(), Ordering::Relaxed);
+            w.last_done.store(done, Ordering::Relaxed);
             loop {
                 match node.state() {
                     State::Running => {
                         if node.cas_state(State::Running, State::Clean) {
+                            node.committing.store(false, Ordering::Release);
                             eng.note_settled(node, out);
                             pool.shared.done_one();
                             break;
@@ -663,12 +683,14 @@ pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(
                     }
                     State::RunningDirty => {
                         if node.cas_state(State::RunningDirty, State::Dirty) {
+                            node.committing.store(false, Ordering::Release);
                             w.local.push(n);
                             w.shared.wake_one();
                             break;
                         }
                     }
                     State::Inert | State::Gone => {
+                        node.committing.store(false, Ordering::Release);
                         pool.shared.done_one();
                         break;
                     }

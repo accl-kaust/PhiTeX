@@ -1,7 +1,7 @@
 //! A node and what its last run left.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::api::{Cause, Effect, Locality, NodeId, OpId, PathId, UnitId};
 use crate::lock::{Lock, Mx};
@@ -41,6 +41,10 @@ pub(crate) struct Node {
     pub(crate) seg: AtomicU32,
     pub(crate) pos: AtomicU64,
     pub(crate) state: AtomicU8,
+    /// Its commit has filed its reads and answered them under its lock and
+    /// it is still `Running`: a walk that finds one of them changed marks it
+    /// as `sched::mark_dirty` does.
+    pub(crate) committing: AtomicBool,
     /// Runs in this evaluation (`Limits::runs_per_node`), the evaluation
     /// they count in.
     pub(crate) runs: AtomicU32,
@@ -54,6 +58,10 @@ pub(crate) struct Node {
     pub(crate) last: Mx<Option<Arc<RunRecord>>>,
     /// Who woke it last and why: the realised chain.
     pub(crate) woke: Mx<Option<Wake>>,
+    /// Fields whose walks stopped at it while it had not committed
+    /// (`commit::first_hole`): walked on from it when it commits, is taken
+    /// or is removed.
+    pub(crate) stopped: Mx<Vec<Field>>,
     /// Nanoseconds of its last run, its commit and its walk forward, and
     /// when it committed (from the evaluation's start).
     pub(crate) run_ns: AtomicU64,
@@ -81,11 +89,13 @@ impl Node {
             seg: AtomicU32::new(seg.0),
             pos: AtomicU64::new(pos.0),
             state: AtomicU8::new(State::Dirty as u8),
+            committing: AtomicBool::new(false),
             runs: AtomicU32::new(0),
             run_epoch: AtomicU64::new(0),
             serial: AtomicU32::new(0),
             last: Mx::new(None),
             woke: Mx::new(None),
+            stopped: Mx::new(Vec::new()),
             run_ns: AtomicU64::new(0),
             commit_ns: AtomicU64::new(0),
             reask_ns: AtomicU64::new(0),

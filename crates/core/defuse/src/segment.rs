@@ -6,7 +6,7 @@
 //! node's segment for one diff. Nothing ever holds two segments.
 
 use std::collections::BTreeMap;
-use std::ops::Bound::{Excluded, Unbounded};
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -31,17 +31,430 @@ pub(crate) struct Inner {
     pub(crate) nodes: BTreeMap<Pos, NodeId>,
     /// Definitions by field, in position order. A relation's value is kept
     /// materialised and recomputed in place when its input changes.
-    pub(crate) defs: FxHashMap<Field, BTreeMap<Pos, Def>>,
+    pub(crate) defs: FxHashMap<Field, PosMap<Def>>,
     /// Readers of each field anchored in this segment. Stale records (an
     /// older serial than the reader's) are dropped when met.
     pub(crate) readers: FxHashMap<Field, Vec<Reader>>,
     /// Contributions by field, in position order, and their fold.
-    pub(crate) contribs: FxHashMap<Field, BTreeMap<Pos, ValueId>>,
+    pub(crate) contribs: FxHashMap<Field, PosMap<ValueId>>,
     pub(crate) sums: FxHashMap<Field, ValueId>,
     /// Readers of folds whose range covers this segment.
     pub(crate) range_readers: FxHashMap<Field, Vec<RangeReader>>,
     /// Its nodes by operation, for `commit::learn_shape`.
     pub(crate) by_op: FxHashMap<OpId, Vec<NodeId>>,
+    /// Its nodes that have not committed (about: a walk skips the search
+    /// for one when there are none, `commit::first_hole`).
+    pub(crate) holes: usize,
+}
+
+/// A field's definitions or contributions in one segment, by label. Most
+/// fields have one per segment, kept without an allocation; more are a
+/// sorted run whose room a commit makes before its lock (`Grow`).
+#[derive(Clone, Debug, Default)]
+pub(crate) enum PosMap<V> {
+    #[default]
+    Zero,
+    One(Pos, V),
+    Many(Vec<(Pos, V)>),
+}
+
+pub(crate) enum PosIter<'a, V> {
+    One(Option<(&'a Pos, &'a V)>),
+    Run(std::slice::Iter<'a, (Pos, V)>),
+}
+
+impl<'a, V> Iterator for PosIter<'a, V> {
+    type Item = (&'a Pos, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PosIter::One(x) => x.take(),
+            PosIter::Run(i) => i.next().map(|(p, v)| (p, v)),
+        }
+    }
+}
+
+impl<V> DoubleEndedIterator for PosIter<'_, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            PosIter::One(x) => x.take(),
+            PosIter::Run(i) => i.next_back().map(|(p, v)| (p, v)),
+        }
+    }
+}
+
+impl<V> PosMap<V> {
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            PosMap::Zero => true,
+            PosMap::One(..) => false,
+            PosMap::Many(m) => m.is_empty(),
+        }
+    }
+
+    fn find(m: &[(Pos, V)], p: Pos) -> Result<usize, usize> {
+        m.binary_search_by(|x| x.0.cmp(&p))
+    }
+
+    pub(crate) fn get(&self, p: &Pos) -> Option<&V> {
+        match self {
+            PosMap::Zero => None,
+            PosMap::One(q, v) => (q == p).then_some(v),
+            PosMap::Many(m) => Self::find(m, *p).ok().map(|i| &m[i].1),
+        }
+    }
+
+    pub(crate) fn get_mut(&mut self, p: &Pos) -> Option<&mut V> {
+        match self {
+            PosMap::Zero => None,
+            PosMap::One(q, v) => (q == p).then_some(v),
+            PosMap::Many(m) => Self::find(m, *p).ok().map(|i| &mut m[i].1),
+        }
+    }
+
+    /// Whether inserting at `p` allocates.
+    pub(crate) fn full_for(&self, p: Pos) -> bool {
+        match self {
+            PosMap::Zero => false,
+            PosMap::One(q, _) => *q != p,
+            PosMap::Many(m) => m.len() == m.capacity() && Self::find(m, p).is_err(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            PosMap::Zero => 0,
+            PosMap::One(..) => 1,
+            PosMap::Many(m) => m.len(),
+        }
+    }
+
+    pub(crate) fn insert(&mut self, p: Pos, v: V) -> Option<V> {
+        match self {
+            PosMap::Zero => {
+                *self = PosMap::One(p, v);
+                None
+            }
+            PosMap::One(q, w) if *q == p => Some(std::mem::replace(w, v)),
+            PosMap::One(..) => {
+                let PosMap::One(q, w) = std::mem::take(self) else {
+                    unreachable!()
+                };
+                let mut m = Vec::with_capacity(4);
+                m.push((q, w));
+                *self = PosMap::Many(m);
+                self.insert(p, v)
+            }
+            PosMap::Many(m) => match Self::find(m, p) {
+                Ok(i) => Some(std::mem::replace(&mut m[i].1, v)),
+                Err(i) => {
+                    m.insert(i, (p, v));
+                    None
+                }
+            },
+        }
+    }
+
+    pub(crate) fn remove(&mut self, p: &Pos) -> Option<V> {
+        match self {
+            PosMap::Zero => None,
+            PosMap::One(q, _) if q != p => None,
+            PosMap::One(..) => match std::mem::take(self) {
+                PosMap::One(_, v) => Some(v),
+                _ => unreachable!(),
+            },
+            PosMap::Many(m) => Self::find(m, *p).ok().map(|i| m.remove(i).1),
+        }
+    }
+
+    pub(crate) fn iter(&self) -> PosIter<'_, V> {
+        match self {
+            PosMap::Zero => PosIter::One(None),
+            PosMap::One(q, v) => PosIter::One(Some((q, v))),
+            PosMap::Many(m) => PosIter::Run(m.iter()),
+        }
+    }
+
+    pub(crate) fn range<R: std::ops::RangeBounds<Pos>>(&self, r: R) -> PosIter<'_, V> {
+        match self {
+            PosMap::Zero => PosIter::One(None),
+            PosMap::One(q, v) => PosIter::One(r.contains(q).then_some((q, v))),
+            PosMap::Many(m) => {
+                let lo = match r.start_bound() {
+                    Included(p) => m.partition_point(|x| x.0 < *p),
+                    Excluded(p) => m.partition_point(|x| x.0 <= *p),
+                    Unbounded => 0,
+                };
+                let hi = match r.end_bound() {
+                    Included(p) => m.partition_point(|x| x.0 <= *p),
+                    Excluded(p) => m.partition_point(|x| x.0 < *p),
+                    Unbounded => m.len(),
+                };
+                PosIter::Run(m[lo..hi.max(lo)].iter())
+            }
+        }
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
+        self.iter().map(|(_, v)| v)
+    }
+
+    /// The entries at and after `at`, taken out.
+    pub(crate) fn split_off(&mut self, at: &Pos) -> PosMap<V> {
+        match self {
+            PosMap::Zero => PosMap::Zero,
+            PosMap::One(q, _) if *q < *at => PosMap::Zero,
+            PosMap::One(..) => std::mem::take(self),
+            PosMap::Many(m) => {
+                let i = m.partition_point(|x| x.0 < *at);
+                PosMap::Many(m.split_off(i))
+            }
+        }
+    }
+
+    /// Labels moved in order (a relabel).
+    fn rekey(&mut self, map: &FxHashMap<Pos, Pos>) {
+        match self {
+            PosMap::Zero => {}
+            PosMap::One(q, _) => *q = map.get(q).copied().unwrap_or(*q),
+            PosMap::Many(m) => {
+                for x in m.iter_mut() {
+                    x.0 = map.get(&x.0).copied().unwrap_or(x.0);
+                }
+            }
+        }
+    }
+
+    /// Moves its entries into `run`, which has room, and becomes it; the
+    /// old run is given back to be freed after the lock.
+    fn regrow(&mut self, mut run: Vec<(Pos, V)>) -> Vec<(Pos, V)> {
+        match std::mem::take(self) {
+            PosMap::Zero => {
+                *self = PosMap::Zero;
+                run
+            }
+            PosMap::One(q, v) => {
+                run.push((q, v));
+                *self = PosMap::Many(run);
+                Vec::new()
+            }
+            PosMap::Many(mut old) => {
+                run.append(&mut old);
+                *self = PosMap::Many(run);
+                old
+            }
+        }
+    }
+}
+
+/// A vector of `n` slots' room, written once so that its pages are
+/// touched: filling it under a lock faults nothing in.
+pub(crate) fn touched<T: Clone>(n: usize, x: T) -> Vec<T> {
+    let mut v = vec![x; n];
+    v.clear();
+    v
+}
+
+/// A map with room for `n` entries, its slots touched as `touched`'s.
+fn touched_map<V: Default>(n: usize) -> FxHashMap<Field, V> {
+    let mut m = FxHashMap::default();
+    m.reserve(n);
+    for i in 0..n as u64 {
+        m.insert(Field(ValueId::from_raw(i)), V::default());
+    }
+    m.clear();
+    m
+}
+
+/// What a commit would grow under its segment's lock, found under it and
+/// made outside it (`Grow::make`); `Made::install` then only moves.
+#[derive(Default)]
+pub(crate) struct Grow {
+    defs: usize,
+    contribs: usize,
+    readers: usize,
+    def_runs: Vec<(Field, usize)>,
+    contrib_runs: Vec<(Field, usize)>,
+    reader_lists: Vec<(Field, usize)>,
+}
+
+#[derive(Default)]
+pub(crate) struct Made {
+    defs: Option<FxHashMap<Field, PosMap<Def>>>,
+    contribs: Option<FxHashMap<Field, PosMap<ValueId>>>,
+    readers: Option<FxHashMap<Field, Vec<Reader>>>,
+    def_runs: Vec<(Field, Vec<(Pos, Def)>)>,
+    contrib_runs: Vec<(Field, Vec<(Pos, ValueId)>)>,
+    reader_lists: Vec<(Field, Vec<Reader>)>,
+}
+
+/// Room a map needs for `k` new keys, as its new size; 0 when it has it.
+fn map_room<V>(m: &FxHashMap<Field, V>, k: usize) -> usize {
+    if k == 0 || m.capacity() - m.len() >= k {
+        0
+    } else {
+        ((m.len() + k) * 2).max(16)
+    }
+}
+
+const DUMMY_DEF: Def = Def {
+    value: ValueId::UNIT,
+    by: NodeId(0),
+    rel: None,
+    provisional: false,
+};
+
+const DUMMY_READER: Reader = Reader {
+    node: NodeId(0),
+    serial: 0,
+    anchor: NodeId(0),
+    inclusive: false,
+    path: PathId::WHOLE,
+    seen: None,
+};
+
+impl Grow {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.defs == 0
+            && self.contribs == 0
+            && self.readers == 0
+            && self.def_runs.is_empty()
+            && self.contrib_runs.is_empty()
+            && self.reader_lists.is_empty()
+    }
+
+    /// Makes what it names, outside any lock.
+    pub(crate) fn make(&self) -> Made {
+        Made {
+            defs: (self.defs > 0).then(|| touched_map(self.defs)),
+            contribs: (self.contribs > 0).then(|| touched_map(self.contribs)),
+            readers: (self.readers > 0).then(|| touched_map(self.readers)),
+            def_runs: self
+                .def_runs
+                .iter()
+                .map(|&(f, n)| (f, touched(n, (Pos(0), DUMMY_DEF))))
+                .collect(),
+            contrib_runs: self
+                .contrib_runs
+                .iter()
+                .map(|&(f, n)| (f, touched(n, (Pos(0), ValueId::UNIT))))
+                .collect(),
+            reader_lists: self
+                .reader_lists
+                .iter()
+                .map(|&(f, n)| (f, touched(n, DUMMY_READER)))
+                .collect(),
+        }
+    }
+}
+
+impl Made {
+    /// Moves the segment's containers into the bigger ones made; what they
+    /// replaced is kept here, to be freed after the lock.
+    pub(crate) fn install(&mut self, inner: &mut Inner) {
+        if let Some(mut m) = self.defs.take()
+            && m.capacity() > inner.defs.capacity()
+        {
+            m.extend(inner.defs.drain());
+            std::mem::swap(&mut inner.defs, &mut m);
+            self.defs = Some(m);
+        }
+        if let Some(mut m) = self.contribs.take()
+            && m.capacity() > inner.contribs.capacity()
+        {
+            m.extend(inner.contribs.drain());
+            std::mem::swap(&mut inner.contribs, &mut m);
+            self.contribs = Some(m);
+        }
+        if let Some(mut m) = self.readers.take()
+            && m.capacity() > inner.readers.capacity()
+        {
+            m.extend(inner.readers.drain());
+            std::mem::swap(&mut inner.readers, &mut m);
+            self.readers = Some(m);
+        }
+        for (f, run) in &mut self.def_runs {
+            if let Some(pm) = inner.defs.get_mut(f)
+                && run.capacity() > pm.len()
+            {
+                *run = pm.regrow(std::mem::take(run));
+            }
+        }
+        for (f, run) in &mut self.contrib_runs {
+            if let Some(pm) = inner.contribs.get_mut(f)
+                && run.capacity() > pm.len()
+            {
+                *run = pm.regrow(std::mem::take(run));
+            }
+        }
+        for (f, list) in &mut self.reader_lists {
+            match inner.readers.get_mut(f) {
+                Some(v) => {
+                    if list.capacity() > v.len() {
+                        list.append(v);
+                        std::mem::swap(v, list);
+                    }
+                }
+                None => {
+                    inner.readers.insert(*f, std::mem::take(list));
+                }
+            }
+        }
+    }
+}
+
+impl Inner {
+    /// What filing these definitions and contributions at `pos`, and
+    /// readers of these fields (each so many times), would grow.
+    pub(crate) fn grow_for(
+        &self,
+        pos: Pos,
+        defs: impl Iterator<Item = Field>,
+        contribs: impl Iterator<Item = Field>,
+        reads: &[(Field, usize)],
+    ) -> Grow {
+        let mut g = Grow::default();
+        let mut new = 0;
+        for f in defs {
+            match self.defs.get(&f) {
+                None => new += 1,
+                Some(pm) => {
+                    if pm.full_for(pos) {
+                        g.def_runs.push((f, (pm.len() * 2).max(4)));
+                    }
+                }
+            }
+        }
+        g.defs = map_room(&self.defs, new);
+        let mut new = 0;
+        for f in contribs {
+            match self.contribs.get(&f) {
+                None => new += 1,
+                Some(pm) => {
+                    if pm.full_for(pos) {
+                        g.contrib_runs.push((f, (pm.len() * 2).max(4)));
+                    }
+                }
+            }
+        }
+        g.contribs = map_room(&self.contribs, new);
+        let mut new = 0;
+        for &(f, k) in reads {
+            match self.readers.get(&f) {
+                None => {
+                    new += 1;
+                    g.reader_lists.push((f, k.max(4)));
+                }
+                Some(v) => {
+                    if v.capacity() - v.len() < k {
+                        g.reader_lists.push((f, (v.len() * 2).max(v.len() + k)));
+                    }
+                }
+            }
+        }
+        g.readers = map_room(&self.readers, new);
+        g
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -120,7 +533,7 @@ impl Inner {
     /// (`sum`); an empty field is dropped.
     pub(crate) fn resum(&mut self, _eng: &Engine, f: Field) {
         self.sums.remove(&f);
-        if self.contribs.get(&f).is_some_and(BTreeMap::is_empty) {
+        if self.contribs.get(&f).is_some_and(PosMap::is_empty) {
             self.contribs.remove(&f);
         }
     }
@@ -153,6 +566,7 @@ impl Segment {
                 sums: FxHashMap::default(),
                 range_readers: FxHashMap::default(),
                 by_op: FxHashMap::default(),
+                holes: 0,
             }),
         }
     }
@@ -206,10 +620,10 @@ impl Segment {
         }
         inner.nodes = nodes;
         for m in inner.defs.values_mut() {
-            rekey(m, &map);
+            m.rekey(&map);
         }
         for m in inner.contribs.values_mut() {
-            rekey(m, &map);
+            m.rekey(&map);
         }
     }
 
@@ -284,6 +698,8 @@ impl Segment {
             }
         }
         inner.by_op.retain(|_, v| !v.is_empty());
+        let up_holes = nodes.values().filter(|n| eng.node(**n).is_hole()).count();
+        inner.holes = inner.nodes.values().filter(|n| eng.node(**n).is_hole()).count();
         let new = Arc::new(Segment {
             id: new_id,
             unit: self.unit,
@@ -297,6 +713,7 @@ impl Segment {
                 sums: FxHashMap::default(),
                 range_readers,
                 by_op,
+                holes: up_holes,
             }),
         });
         {
@@ -329,12 +746,5 @@ impl Segment {
         }
         eng.order.insert(at, new_id);
         new
-    }
-}
-
-fn rekey<V>(m: &mut BTreeMap<Pos, V>, map: &FxHashMap<Pos, Pos>) {
-    let old = std::mem::take(m);
-    for (p, v) in old {
-        m.insert(map.get(&p).copied().unwrap_or(p), v);
     }
 }

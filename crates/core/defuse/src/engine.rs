@@ -9,7 +9,7 @@ use crate::api::{
     CapPolicy, Cause, EditSource, EnvProvider, EvalError, Limits, LoopStart, Monoid, NodeId, NodeInfo, NodeState,
     OpId, Operation, PathId, ProjId, Projection, Report, SeqMonoid, Settled, Step, UnitId,
 };
-use crate::commit::{self, CommitStats, own_write, place_after, settle_predictions, unfile};
+use crate::commit::{self, CommitStats, Predicted, own_write, place_after, settle_predictions, unfile};
 use crate::index::FieldIndex;
 use crate::lock::{Lock, Mx, ns};
 use crate::node::{Node, State, Wake};
@@ -100,6 +100,7 @@ pub struct Engine {
     pub(crate) projections: Table<Projection>,
     /// Relations each operation has made: (op, field) -> c (`commit::learn_shape`).
     pub(crate) shapes: Lock<FxHashMap<(OpId, Field), i64>>,
+    pub(crate) shapes_n: AtomicUsize,
     /// `Ctx::apply`'s memo.
     pub(crate) memo: Lock<Memo>,
     /// Fields the client says never change after setup: reads of them are
@@ -170,6 +171,7 @@ impl Engine {
             paths,
             projections,
             shapes: Lock::new(FxHashMap::default()),
+            shapes_n: AtomicUsize::new(0),
             memo: Lock::new(FxHashMap::default()),
             stable: Lock::new(Arc::new(FxHashSet::default())),
             marked: Lock::new(FxHashSet::default()),
@@ -416,7 +418,8 @@ impl Engine {
     /// A node at the end of `unit`, dirty.
     pub fn push(&self, unit: UnitId, op: OpId, args: Vec<ValueId>) -> NodeId {
         let id = NodeId::from_raw(self.nodes.reserve() as u64);
-        let node = self.push_node(unit, None, op, args, id);
+        let (node, pred) = commit::built(self, unit, None, op, args, id);
+        let node = self.push_node(node, pred);
         self.stats.nodes_made.fetch_add(1, Ordering::Relaxed);
         enqueue(
             self,
@@ -434,8 +437,9 @@ impl Engine {
         id
     }
 
-    /// A node with a reserved id at the end of `unit`, in its last segment.
-    pub(crate) fn push_node(&self, unit: UnitId, parent: Option<NodeId>, op: OpId, args: Vec<ValueId>, id: NodeId) -> Arc<Node> {
+    /// A built node at the end of its unit, in its last segment.
+    pub(crate) fn push_node(&self, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
+        let unit = node.unit;
         let u = self.unit(unit);
         loop {
             let seg = self.seg(self.order.seg_at(Pos(u.end.0 - 1)));
@@ -459,11 +463,14 @@ impl Engine {
                     }
                 }
             };
-            let node = Arc::new(Node::new(id, unit, op, args, parent, seg.id, p));
-            self.nodes.set(usize::try_from(id.raw()).unwrap_or(usize::MAX), node.clone());
-            inner.nodes.insert(p, id);
-            inner.by_op.entry(op).or_default().push(id);
-            commit::file_predicted(self, seg, &mut inner, &node);
+            node.seg.store(seg.id.0, Ordering::Release);
+            node.pos.store(p.0, Ordering::Release);
+            self.nodes
+                .set(usize::try_from(node.id.raw()).unwrap_or(usize::MAX), node.clone());
+            inner.nodes.insert(p, node.id);
+            inner.holes += 1;
+            inner.by_op.entry(node.op()).or_default().push(node.id);
+            commit::file_predicted(self, seg, &mut inner, &node, pred);
             u.last.store(p.0, Ordering::Release);
             return node;
         }
@@ -544,16 +551,20 @@ impl Engine {
     pub fn insert_after(&self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
         let near = self.node(node);
         let id = NodeId::from_raw(self.nodes.reserve() as u64);
-        let n = place_after(self, near.unit, None, node, op, args, id);
+        let (n, pred) = commit::built(self, near.unit, None, op, args, id);
+        let n = place_after(self, node, n, pred);
         self.inserted(&n, near)
     }
 
     /// A node before `node`, dirty.
     pub fn insert_before(&self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
         let near = self.node(node);
+        let id = NodeId::from_raw(self.nodes.reserve() as u64);
+        let (n, pred) = commit::built(self, near.unit, None, op, args, id);
         loop {
             let Some((seg, mut inner)) = own_write(self, near) else {
-                return self.push(near.unit, op, args);
+                let n = self.push_node(n, pred);
+                return self.inserted(&n, near);
             };
             if Segment::needs_split(&inner) {
                 let sid = SegId(u32::try_from(self.segs.reserve()).expect("segment ids"));
@@ -567,13 +578,14 @@ impl Engine {
                     seg.gap_before(&inner, near.pos_hint()).expect("a gap after a relabel")
                 }
             };
-            let i = self.nodes.reserve();
-            let id = NodeId::from_raw(i as u64);
-            let n = Arc::new(Node::new(id, near.unit, op, args, None, seg.id, p));
-            self.nodes.set(i, n.clone());
+            n.seg.store(seg.id.0, Ordering::Release);
+            n.pos.store(p.0, Ordering::Release);
+            self.nodes
+                .set(usize::try_from(id.raw()).unwrap_or(usize::MAX), n.clone());
             inner.nodes.insert(p, id);
+            inner.holes += 1;
             inner.by_op.entry(op).or_default().push(id);
-            commit::file_predicted(self, seg, &mut inner, &n);
+            commit::file_predicted(self, seg, &mut inner, &n, pred);
             drop(inner);
             return self.inserted(&n, near);
         }
@@ -777,7 +789,7 @@ impl Engine {
                 }
             }
             if let Some(first) = self.order.first() {
-                commit::reask_from(self, None, *f, Pos(0), first, None, &mut st);
+                commit::reask_from(self, None, *f, Pos(0), first, None, None, &mut st);
             }
         }
         self.note_stats(None, &st);
@@ -820,7 +832,7 @@ impl Engine {
         let t0 = Instant::now();
         let n = threads.max(1);
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
-        let (pool, workers) = Pool::new(n, epoch, self.limits());
+        let (pool, workers) = Pool::new(n, epoch, self.limits(), self.stable.read().clone());
         let seed = self.take_pending(&workers[0]);
         if !seed.is_empty() {
             let per = seed.len().div_ceil(n);
@@ -870,11 +882,19 @@ impl Engine {
         rep.segments = self.order.count();
         rep.version = self.version.load(Ordering::Acquire);
         rep.edits = self.stats.edits.swap(0, Ordering::AcqRel);
-        self.last_commit.store(pool.last_commit.load(Ordering::Relaxed), Ordering::Release);
+        let last = workers
+            .iter()
+            .filter(|w| load(&w.last_commit) != u64::MAX)
+            .max_by_key(|w| load(&w.last_done))
+            .map_or(u64::MAX, |w| load(&w.last_commit));
+        self.last_commit.store(last, Ordering::Release);
         let chain = self.critical_chain();
         rep.realised_critical_path = u32::try_from(chain.len()).unwrap_or(u32::MAX);
         rep.realised_critical_time = Duration::from_nanos(
-            chain.iter().map(|(n, _)| self.node(*n).run_ns.load(Ordering::Relaxed)).sum(),
+            chain
+                .iter()
+                .map(|(n, _)| self.node(*n).run_ns.load(Ordering::Relaxed))
+                .sum(),
         );
         rep.times.wall_ns = ns(t0);
         *self.last_report.lock() = Some(rep.clone());

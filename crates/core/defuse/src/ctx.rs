@@ -37,7 +37,7 @@ pub struct Ctx<'a> {
     /// Its last record, for `placed_output`.
     pub(crate) last: Option<Arc<RunRecord>>,
     /// Fields whose reads go unrecorded (`Engine::set_stable`).
-    pub(crate) stable: Arc<FxHashSet<Field>>,
+    pub(crate) stable: Option<&'a FxHashSet<Field>>,
 }
 
 fn stop() -> Stop {
@@ -62,7 +62,7 @@ impl<'a> Ctx<'a> {
             },
             views: Vec::new(),
             last: me.run_record(),
-            stable: eng.stable.read().clone(),
+            stable: worker.map(|w| &*w.stable),
         }
     }
 
@@ -101,7 +101,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn recorded(&self, f: Field) -> bool {
-        !self.stable.contains(&f)
+        self.stable.is_none_or(|s| !s.contains(&f))
     }
 
     /// The definition of `f` reaching me, or the environment's value.

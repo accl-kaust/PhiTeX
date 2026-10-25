@@ -24,6 +24,16 @@ pub(crate) struct Reaching {
     pub(crate) provisional: bool,
 }
 
+impl Reaching {
+    pub(crate) fn of(d: &crate::segment::Def) -> Reaching {
+        Reaching {
+            value: Some(d.value),
+            by: Some(d.by),
+            provisional: d.provisional,
+        }
+    }
+}
+
 /// The first contribution after a position, or where the search stopped.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Next {

@@ -1,18 +1,28 @@
 //! A run's commit: into the node's own segment, then the walk forward.
 //!
+//! 0. Before the lock: the record, the placements' nodes and predictions,
+//!    the scratch lists. Under it, room the filing would grow (a map, a run
+//!    of definitions, a list of readers) is found; it is made outside and
+//!    the lock taken again (`segment::Grow`): nothing is allocated under it.
 //! 1. Under the node's segment's write lock: diff the product's definitions
 //!    and contributions against the node's last record, file the changes,
 //!    match placements by (op, args) to keep unchanged children, place new
 //!    ones in the gap (relabel or split if closed), record the reads
-//!    anchored here, bump the serial, swap the record. Release.
+//!    anchored here, walk forward as far as the segment goes (`walk_here`),
+//!    answer the run's own reads that the segment answers, bump the serial,
+//!    swap the record. Release.
 //! 2. Reads anchored in other segments: each under that segment's lock, one
 //!    at a time, never nested.
-//! 3. For each changed (field, position): the walk forward (`reask`). For
-//!    each changed contribution: its range readers.
+//! 3. The readers step 1 found changed are marked; each walk goes on past
+//!    the segment (`reask`). For each changed contribution: its range
+//!    readers. A first commit walks on the walks that stopped at it
+//!    (`first_hole`).
 //! 4. Removed placements: `unfile`, recursively, each under its own segment.
-//! 5. A relation defined for the first time by this operation: `learn_shape`.
-//! 6. The node's own reads, answered again: a walk that passed before they
-//!    were filed is caught here, and the node runs again.
+//! 5. Its relations from their input again (`settle_rel`); a relation
+//!    defined for the first time by this operation: `learn_shape`.
+//! 6. The node's own reads step 1 could not answer, answered: a walk that
+//!    passed before they were filed is caught here, and the node runs again;
+//!    one that passes after finds the node `committing` and marks it.
 //!
 //! No other segment is written in step 1. No lock is held in step 3 except
 //! one segment's read lock at a time, and a short write lock to recompute a
@@ -30,9 +40,9 @@ use crate::engine::Engine;
 use crate::lock::ns;
 use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, RunRecord, State, Wake};
 use crate::order::{Pos, SegId};
-use crate::read::{self, answer, next_contribution, range_answer, reader_answer, reaching_at};
+use crate::read::{self, Reaching, answer, next_contribution, range_answer, reaching_at, reader_answer, through};
 use crate::sched::{Worker, enqueue, mark_dirty, mark_stale};
-use crate::segment::{Def, Inner, RangeReader, Reader, Segment, live, push_pruned};
+use crate::segment::{Def, Inner, Made, RangeReader, Reader, Segment, live, push_pruned};
 use crate::values::{Field, FxHashMap, FxHashSet, ValueId};
 
 /// Counts for the report.
@@ -146,6 +156,16 @@ struct IndexOps {
 }
 
 impl IndexOps {
+    fn with_capacity(defs: usize, contribs: usize, reads: usize) -> IndexOps {
+        IndexOps {
+            defs_add: Vec::with_capacity(defs),
+            defs_remove: Vec::with_capacity(defs),
+            contribs_add: Vec::with_capacity(contribs),
+            contribs_remove: Vec::with_capacity(contribs),
+            readers_add: Vec::with_capacity(reads),
+        }
+    }
+
     fn apply(self, eng: &Engine, seg: &Segment) {
         for f in self.defs_add {
             eng.defs.add(f, seg.lo, seg.id);
@@ -234,6 +254,20 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let serial = node.serial.load(Ordering::Acquire) + 1;
     let old_placed: Vec<NodeId> = last.as_ref().map(|r| r.placed.clone()).unwrap_or_default();
     let kept = match_placements(eng, &old_placed, &p.placements);
+    // everything a placement needs but its label, made before the lock
+    let mut fresh: Vec<Option<(Arc<Node>, Predicted)>> = p
+        .placements
+        .iter()
+        .zip(&kept)
+        .map(|(what, k)| {
+            if k.is_some() && !matches!(what, Placement::FollowAfter(..)) {
+                return None;
+            }
+            let (op, args) = what.key();
+            let id = NodeId::from_raw(eng.nodes.reserve() as u64);
+            Some(built(eng, node.unit, Some(node.id), op, args.to_vec(), id))
+        })
+        .collect();
     // the record, made before the lock: no allocation under it
     let mut rec = Arc::new(RunRecord {
         serial,
@@ -249,16 +283,28 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut spare_readers: Vec<Reader> = Vec::with_capacity(4);
     let old_fields: Vec<Field> = last.as_ref().map(|r| r.defs.iter().map(|d| d.f).collect()).unwrap_or_default();
     let old_contribs: Vec<Field> = last.as_ref().map(|r| r.contribs.iter().map(|c| c.0).collect()).unwrap_or_default();
-    let mut changed_defs: Vec<Field> = Vec::new();
-    let mut changed_contribs: Vec<Field> = Vec::new();
-    let mut rels: Vec<(Field, i64)> = Vec::new();
+    let nd = rec.defs.len() + old_fields.len();
+    let nc = rec.contribs.len() + old_contribs.len();
+    let mut changed_defs: Vec<Field> = Vec::with_capacity(nd);
+    let mut changed_contribs: Vec<Field> = Vec::with_capacity(nc);
+    let mut rels: Vec<(Field, i64)> = Vec::with_capacity(rec.defs.len());
     let mut placed: Vec<NodeId> = Vec::with_capacity(p.placements.len());
-    let mut made: Vec<Arc<Node>> = Vec::new();
-    let mut deferred: Vec<(usize, NodeId, OpId, Vec<ValueId>)> = Vec::new();
-    let mut here_reads: Vec<(Field, Reader)> = Vec::new();
+    let mut made: Vec<Arc<Node>> = Vec::with_capacity(p.placements.len());
+    let mut deferred: Vec<(usize, NodeId, Arc<Node>, Predicted)> = Vec::new();
+    let mut here_reads: Vec<(Field, Reader)> = Vec::with_capacity(rec.reads.len());
     let mut other_reads: Vec<(Field, Reader, Anchor)> = Vec::new();
     let mut range_reads: Vec<(Field, RangeReader)> = Vec::new();
     let mut env_reads: Vec<(Field, crate::engine::EnvReader)> = Vec::new();
+    // what the lock decides of the walks and of the run's own reads
+    let mut walks: Vec<(Field, Here)> = Vec::with_capacity(nd);
+    let mut wake: Vec<(NodeId, NodeId, Field)> = Vec::with_capacity(8);
+    let mut later: Vec<(Field, Reader, NodeId)> = Vec::new();
+    let mut ranges: Vec<(Field, RangeReader)> = Vec::new();
+    let mut holes: Vec<(Field, RangeReader)> = Vec::new();
+    let mut unchecked: Vec<usize> = Vec::with_capacity(rec.reads.len());
+    let mut refuted: Option<usize> = None;
+    let mut ix = IndexOps::with_capacity(nd, nc, rec.reads.len());
+    let mut room: Option<Made> = None;
     for r in &rec.reads {
         match &r.kind {
             ReadKind::Field { f, at } => {
@@ -325,7 +371,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             ReadKind::Placed { .. } | ReadKind::Following { .. } => {}
         }
     }
-    let (seg_id, pos, old_output, rec) = loop {
+    let mut read_fields: Vec<(Field, usize)> = here_reads.iter().map(|(f, _)| (*f, 1)).collect();
+    read_fields.sort_unstable_by_key(|x| x.0);
+    read_fields.dedup_by(|a, b| {
+        let same = a.0 == b.0;
+        if same {
+            b.1 += a.1;
+        }
+        same
+    });
+    let (seg_id, seg_lo, old_output, rec) = loop {
         let Some((seg, mut inner)) = own_write(eng, node) else {
             return st;
         };
@@ -339,7 +394,21 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         let t_lock = Instant::now();
         let pos = pos_in(&inner, node);
-        let mut ix = IndexOps::default();
+        // room for what is filed, made outside the lock
+        if let Some(m) = room.as_mut() {
+            m.install(&mut inner);
+        }
+        let g = inner.grow_for(
+            pos,
+            rec.defs.iter().map(|d| d.f),
+            rec.contribs.iter().map(|c| c.0),
+            &read_fields,
+        );
+        if !g.is_empty() {
+            drop(inner);
+            room = Some(g.make());
+            continue;
+        }
         // definitions
         let defs = &rec.defs;
         let contribs = &rec.contribs;
@@ -451,8 +520,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 }
                 removed_kept.push(k);
             }
-            let (op, args) = what.key();
-            let id = NodeId::from_raw(eng.nodes.reserve() as u64);
+            let (n, pred) = match fresh[i].take() {
+                Some(x) => x,
+                None => {
+                    let (op, args) = what.key();
+                    let id = NodeId::from_raw(eng.nodes.reserve() as u64);
+                    built(eng, node.unit, Some(node.id), op, args.to_vec(), id)
+                }
+            };
+            let id = n.id;
             placed.push(id);
             let at = match what {
                 Placement::FollowAfter(at, _, _) => Some(*at),
@@ -463,18 +539,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 && eng.node(after).seg_hint() == seg.id
                 && inner.nodes.get(&eng.node(after).pos_hint()) == Some(&after);
             if in_here {
-                let n = place(eng, seg, &mut inner, node.unit, Some(node.id), after, op, args.to_vec(), id);
-                made.push(n);
+                made.push(place(eng, seg, &mut inner, after, n, pred));
             } else {
                 in_seg = false;
-                deferred.push((i, at.unwrap_or(after), op, args.to_vec()));
+                deferred.push((i, at.unwrap_or(after), n, pred));
             }
             after = id;
         }
         let mut removed: Vec<NodeId> = old_placed.iter().copied().filter(|n| !placed.contains(n)).collect();
         removed.extend(removed_kept);
         // reads anchored here
-        let mut later: Vec<(Field, Reader, Anchor)> = Vec::new();
+        node.committing.store(true, Ordering::Release);
         for (f, r) in here_reads.drain(..) {
             let a = eng.node(r.anchor);
             if r.anchor == node.id || (a.seg_hint() == seg.id && inner.nodes.get(&a.pos_hint()) == Some(&r.anchor)) {
@@ -483,21 +558,59 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 }
             } else {
                 let at = Anchor::Before(r.anchor);
-                later.push((f, r, at));
+                other_reads.push((f, r, at));
             }
         }
-        other_reads.extend(later);
-        Arc::get_mut(&mut rec).expect("the record is not shared yet").placed = placed;
-        *node.last.lock() = Some(rec.clone());
+        // the walks, as far as this segment goes
+        changed_defs.sort_unstable();
+        changed_defs.dedup();
+        for &f in &changed_defs {
+            walks.push((
+                f,
+                walk_here(eng, &mut inner, f, pos, node.id, &mut wake, &mut later, &mut st),
+            ));
+        }
+        for &f in &changed_contribs {
+            if let Some(rs) = inner.range_readers.get(&f) {
+                ranges.extend(rs.iter().filter(|r| covers(eng, r, pos)).map(|r| (f, r.clone())));
+            }
+        }
+        if serial == 1 {
+            for (f, rs) in &inner.range_readers {
+                holes.extend(
+                    rs.iter()
+                        .filter(|r| r.next && r.to == Some(node.id))
+                        .map(|r| (*f, r.clone())),
+                );
+            }
+        }
+        // the run's own reads at its position, answered again
+        for (i, r) in rec.reads.iter().enumerate() {
+            if let ReadKind::Field { f, at: Anchor::Me } = r.kind
+                && let Some((_, d)) = Segment::reaching(&inner, f, pos, false)
+            {
+                if refuted.is_none() && through(eng, Reaching::of(d), r.path) != r.seen {
+                    refuted = Some(i);
+                }
+            } else {
+                unchecked.push(i);
+            }
+        }
+        if serial == 1 {
+            inner.holes = inner.holes.saturating_sub(1);
+        }
+        Arc::get_mut(&mut rec).expect("the record is not shared yet").placed = std::mem::take(&mut placed);
+        let old = node.last.lock().replace(rec.clone());
         node.serial.store(serial, Ordering::Release);
         let old_output = last.as_ref().filter(|r| !r.provisional).map(|r| r.output);
         st.commit_ns = ns(t_lock);
         drop(inner);
-        ix.apply(eng, seg);
+        drop(old);
+        std::mem::take(&mut ix).apply(eng, seg);
         for id in removed {
             unfile(eng, ww, eng.node(id));
         }
-        break (seg.id, pos, old_output, rec);
+        break (seg.id, seg.lo, old_output, rec);
     };
     // 2. reads anchored elsewhere
     for (f, mut r, at) in other_reads {
@@ -528,23 +641,51 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
     }
     // deferred placements: after a node elsewhere
-    let mut by_index: Vec<(usize, Arc<Node>)> = Vec::new();
-    for (i, at, op, args) in deferred {
-        let n = place_after(eng, node.unit, Some(node.id), at, op, args, rec.placed[i]);
-        by_index.push((i, n));
+    for (_, at, n, pred) in deferred {
+        made.push(place_after(eng, at, n, pred));
     }
-    made.extend(by_index.into_iter().map(|x| x.1));
     if p.claim > 0 || last.as_ref().is_some_and(|r| r.claim > 0) {
         apply_claim(eng, ww, node, p.claim);
     }
-    // 3. the walks
-    changed_defs.sort_unstable();
-    changed_defs.dedup();
-    for &f in &changed_defs {
-        reask(eng, ww, f, pos, seg_id, node.id, &mut st);
+    // 3. the walks: readers the lock found changed, then on past the segment
+    for (n, by, f) in wake {
+        let rn = eng.node(n);
+        if mark_stale(
+            eng,
+            ww,
+            rn,
+            Wake {
+                by: Some(by),
+                cause: Cause::Changed {
+                    field: f,
+                    site: Some(by),
+                },
+                at_ns: eng.now_ns(),
+            },
+        ) {
+            st.woken += 1;
+        }
     }
-    for &f in &changed_contribs {
-        reask_ranges(eng, ww, f, pos, node.id, &mut st);
+    for (f, r, by) in later {
+        reask_reader(eng, ww, f, &r, Some(by), &mut st);
+    }
+    for (f, h) in walks {
+        match h {
+            Here::Done => {}
+            Here::On(by) => reask_later(eng, ww, f, seg_lo, by, &mut st),
+            Here::From(by) => reask(eng, ww, f, eng.node(by).pos_hint(), seg_id, by, &mut st),
+            Here::Stopped(h) => stop_at(eng, ww, h, f, &mut st),
+        }
+    }
+    if serial == 1 {
+        let defined: Vec<Field> = rec.defs.iter().map(|d| d.f).collect();
+        walk_stopped(eng, ww, node, node.pos_hint(), seg_id, &defined, &mut st);
+    }
+    for (f, r) in ranges {
+        reask_range(eng, ww, f, &r, node.id, &mut st);
+    }
+    for (f, r) in holes {
+        reask_range(eng, ww, f, &r, node.id, &mut st);
     }
     for n in &made {
         enqueue(
@@ -559,43 +700,136 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         );
         settle_predictions(eng, ww, n, &mut st);
     }
-    if serial == 1 {
-        reask_holes(eng, ww, node, &mut st);
-    }
     if old_output != Some(p.output)
         && let Some(parent) = node.parent
     {
         reask_parent(eng, ww, eng.node(parent), node.id, &mut st);
     }
+    // its relations from their input now: one that changed before they were
+    // filed was computed from the older
+    for &(f, c) in &rels {
+        if settle_rel(eng, f, node.id, c) {
+            st.relative_resolved += 1;
+            reask(eng, ww, f, node.pos_hint(), node.seg_hint(), node.id, &mut st);
+        }
+    }
     // 5. a first relation by this operation
     for (f, c) in rels {
         learn_shape(eng, ww, node.op(), f, c, &mut st);
     }
-    // 6. the node's own reads, answered again
-    for r in &rec.reads {
-        if answer(eng, node, &r.kind, r.path) != r.seen {
-            let cause = match &r.kind {
-                ReadKind::Field { f, .. } => Cause::Changed { field: *f, site: None },
-                ReadKind::Env { f } => Cause::Environment { field: *f },
-                ReadKind::Fold { f, .. } | ReadKind::Next { f, .. } => Cause::Range { field: *f, by: node.id },
-                ReadKind::Placed { .. } => Cause::Output { of: node.id },
-                ReadKind::Following { .. } => Cause::Structure,
-            };
-            mark_dirty(
-                eng,
-                ww,
-                node,
-                Wake {
-                    by: None,
-                    cause,
-                    at_ns: eng.now_ns(),
-                },
-            );
-            break;
-        }
+    // 6. the node's own reads the lock could not answer
+    let refuted = refuted.or_else(|| {
+        unchecked.into_iter().find(|&i| {
+            let r = &rec.reads[i];
+            answer(eng, node, &r.kind, r.path) != r.seen
+        })
+    });
+    if let Some(i) = refuted {
+        let cause = match &rec.reads[i].kind {
+            ReadKind::Field { f, .. } => Cause::Changed { field: *f, site: None },
+            ReadKind::Env { f } => Cause::Environment { field: *f },
+            ReadKind::Fold { f, .. } | ReadKind::Next { f, .. } => Cause::Range { field: *f, by: node.id },
+            ReadKind::Placed { .. } => Cause::Output { of: node.id },
+            ReadKind::Following { .. } => Cause::Structure,
+        };
+        mark_dirty(
+            eng,
+            ww,
+            node,
+            Wake {
+                by: None,
+                cause,
+                at_ns: eng.now_ns(),
+            },
+        );
     }
     st.reask_ns = ns(t0).saturating_sub(st.commit_ns);
     st
+}
+
+/// What the lock decided of a walk from a changed definition.
+enum Here {
+    /// It stopped in the segment.
+    Done,
+    /// The segment has no definition of the field after `by`'s: on in later
+    /// segments.
+    On(NodeId),
+    /// The next relation's input is in an earlier segment: the walk goes on
+    /// from `by`'s definition after the lock.
+    From(NodeId),
+    /// It stopped at a node that has not committed (`first_hole`).
+    Stopped(NodeId),
+}
+
+/// The walk forward (`reask_from`) within the committing node's segment,
+/// under its write lock: readers whose answer changed go to `wake` (as
+/// (reader, definer, field)), those whose answer is in an earlier segment
+/// to `later`, and a relation met is recomputed in place.
+#[allow(clippy::too_many_arguments)]
+fn walk_here(
+    eng: &Engine,
+    inner: &mut Inner,
+    f: Field,
+    from: Pos,
+    by: NodeId,
+    wake: &mut Vec<(NodeId, NodeId, Field)>,
+    later: &mut Vec<(Field, Reader, NodeId)>,
+    st: &mut CommitStats,
+) -> Here {
+    let v = eng.values();
+    let op = eng.node(by).op();
+    let (mut from, mut by) = (from, by);
+    loop {
+        let mut next = Segment::next_def(inner, f, from).map(|(p, d)| (p, *d));
+        let hole = first_hole(eng, inner, op, from, next.map(|x| x.0));
+        if hole.is_some() {
+            next = None;
+        }
+        let stop = hole.map(|h| h.0).or(next.map(|x| x.0));
+        if let Some(rs) = inner.readers.get(&f) {
+            for r in rs {
+                let ap = eng.node(r.anchor).pos_hint();
+                let inside = (ap > from || (ap == from && r.inclusive))
+                    && stop.is_none_or(|s| ap < s || (ap == s && !r.inclusive));
+                if !inside || !live(eng, r.node, r.serial) {
+                    continue;
+                }
+                let here = (inner.nodes.get(&ap) == Some(&r.anchor))
+                    .then(|| Segment::reaching(inner, f, ap, r.inclusive))
+                    .flatten();
+                match here {
+                    Some((_, d)) => {
+                        if through(eng, Reaching::of(d), r.path) != r.seen {
+                            wake.push((r.node, by, f));
+                        }
+                    }
+                    None => later.push((f, r.clone(), by)),
+                }
+            }
+        }
+        if let Some((_, h)) = hole {
+            return Here::Stopped(h);
+        }
+        let Some((p, d)) = next else {
+            return Here::On(by);
+        };
+        let Some(c) = d.rel else {
+            return Here::Done;
+        };
+        let Some((_, i)) = Segment::reaching(inner, f, p, false) else {
+            return Here::From(by);
+        };
+        let nv = v.int(v.as_int(i.value).unwrap_or(0).wrapping_add(c));
+        if nv == d.value {
+            return Here::Done;
+        }
+        if let Some(e) = inner.defs.get_mut(&f).and_then(|m| m.get_mut(&p)) {
+            e.value = nv;
+        }
+        st.relative_resolved += 1;
+        by = d.by;
+        from = p;
+    }
 }
 
 /// A new node's provisional relations put right from their true input
@@ -610,20 +844,38 @@ pub(crate) fn settle_predictions(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>
     }
     for d in &rec.defs {
         if let Some(c) = d.rel {
-            let nv = rel_value_at(eng, d.f, n.id, c);
-            if nv != d.value
-                && let Some((_, mut inner)) = own_write(eng, n)
-            {
-                let p = n.pos_hint();
-                if let Some(e) = inner.defs.get_mut(&d.f).and_then(|m| m.get_mut(&p))
-                    && e.provisional
-                    && e.by == n.id
-                {
-                    e.value = nv;
-                }
-            }
+            settle_rel(eng, d.f, n.id, c);
         }
         reask(eng, w, d.f, n.pos_hint(), n.seg_hint(), n.id, st);
+    }
+}
+
+/// Recomputes `by`'s relation `f := input + c` until a read of the input
+/// after the write still gives the value written: a walk that read an
+/// older input and wrote after one that read a newer is put right by its
+/// own read after. Whether the filed value changed.
+pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: i64) -> bool {
+    let n = eng.node(by);
+    let mut changed = false;
+    loop {
+        let nv = rel_value_at(eng, f, by, c);
+        let Some((_, mut inner)) = own_write(eng, n) else {
+            return changed;
+        };
+        let p = n.pos_hint();
+        match inner.defs.get_mut(&f).and_then(|m| m.get_mut(&p)) {
+            Some(e) if e.by == by && e.rel == Some(c) => {
+                if e.value != nv {
+                    e.value = nv;
+                    changed = true;
+                }
+            }
+            _ => return changed,
+        }
+        drop(inner);
+        if rel_value_at(eng, f, by, c) == nv {
+            return changed;
+        }
     }
 }
 
@@ -665,12 +917,22 @@ fn reask_parent(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: Nod
 /// saw is marked dirty (`sched::mark_dirty`). A relation met as the next
 /// definition is recomputed in place (one short write lock) and, if its
 /// value changed, the walk goes on past it: the cascade of a counter chain.
-pub(crate) fn reask(eng: &Engine, w: Option<&Worker>, f: Field, from: Pos, seg: SegId, by: NodeId, st: &mut CommitStats) {
-    reask_from(eng, w, f, from, seg, Some(by), st);
+pub(crate) fn reask(
+    eng: &Engine,
+    w: Option<&Worker>,
+    f: Field,
+    from: Pos,
+    seg: SegId,
+    by: NodeId,
+    st: &mut CommitStats,
+) {
+    reask_from(eng, w, f, from, seg, Some(by), Some(eng.node(by).op()), st);
 }
 
 /// `reask` from a label with no defining node (the environment: `by`
-/// None), or from a node's definition.
+/// None), or from a node's definition. With `stop_op`, the walk also stops
+/// at a node of that operation that has not committed (`first_hole`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn reask_from(
     eng: &Engine,
     w: Option<&Worker>,
@@ -678,13 +940,13 @@ pub(crate) fn reask_from(
     from: Pos,
     seg: SegId,
     by: Option<NodeId>,
+    stop_op: Option<OpId>,
     st: &mut CommitStats,
 ) {
-    let v = eng.values();
     let (mut cur, mut from, mut by) = (seg, from, by);
     loop {
         let s = eng.seg(cur);
-        let (readers, next) = {
+        let (readers, next, hole) = {
             let inner = s.inner.read();
             if let Some(b) = by {
                 let byn = eng.node(b);
@@ -693,7 +955,8 @@ pub(crate) fn reask_from(
                 }
             }
             let next = Segment::next_def(&inner, f, from).map(|(p, d)| (p, *d));
-            let stop = next.map(|x| x.0);
+            let hole = stop_op.and_then(|op| first_hole(eng, &inner, op, from, next.map(|x| x.0)));
+            let stop = hole.map(|h| h.0).or(next.map(|x| x.0));
             let readers: Vec<Reader> = match inner.readers.get(&f) {
                 Some(rs) => rs
                     .iter()
@@ -706,51 +969,122 @@ pub(crate) fn reask_from(
                     .collect(),
                 None => Vec::new(),
             };
-            (readers, next)
+            (readers, next, hole)
         };
         for r in &readers {
             reask_reader(eng, w, f, r, by, st);
+        }
+        if let Some((_, h)) = hole {
+            stop_at(eng, w, h, f, st);
+            return;
         }
         match next {
             Some((_, d)) => {
                 let Some(c) = d.rel else {
                     return;
                 };
-                let input = reaching_at(eng, f, d.by, false).and_then(|r| r.value);
-                let nv = v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c));
-                if nv == d.value {
+                if !settle_rel(eng, f, d.by, c) {
                     return;
-                }
-                {
-                    let mut inner = s.inner.write();
-                    let p = eng.node(d.by).pos_hint();
-                    if let Some(e) = inner.defs.get_mut(&f).and_then(|m| m.get_mut(&p))
-                        && e.by == d.by
-                    {
-                        e.value = nv;
-                    }
                 }
                 st.relative_resolved += 1;
                 by = Some(d.by);
             }
             None => {
-                let after = Pos(s.lo.0 + 1);
-                let nd = eng.defs.first_at_or_after(f, after);
-                let nr = eng.readers.first_at_or_after(f, after);
-                cur = match (nd, nr) {
-                    (None, None) => return,
-                    (Some(a), None) => a.1,
-                    (None, Some(b)) => b.1,
-                    (Some(a), Some(b)) => {
-                        if a.0 <= b.0 {
-                            a.1
-                        } else {
-                            b.1
-                        }
-                    }
+                let Some(next) = next_with(eng, f, s.lo) else {
+                    return;
                 };
+                cur = next;
                 from = Pos(eng.seg(cur).lo.0.saturating_sub(1));
             }
+        }
+    }
+}
+
+/// The first segment after the one starting at `lo` with a definition or
+/// a reader of `f`.
+fn next_with(eng: &Engine, f: Field, lo: Pos) -> Option<SegId> {
+    let after = Pos(lo.0 + 1);
+    let nd = eng.defs.first_at_or_after(f, after);
+    let nr = eng.readers.first_at_or_after(f, after);
+    match (nd, nr) {
+        (None, None) => None,
+        (Some(a), None) => Some(a.1),
+        (None, Some(b)) => Some(b.1),
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a.1 } else { b.1 }),
+    }
+}
+
+/// The walk forward of a definition of `f` by `by`, the last of its
+/// segment (starting at `lo`), on from the next segment.
+fn reask_later(eng: &Engine, w: Option<&Worker>, f: Field, lo: Pos, by: NodeId, st: &mut CommitStats) {
+    if let Some(cur) = next_with(eng, f, lo) {
+        let op = eng.node(by).op();
+        reask_from(
+            eng,
+            w,
+            f,
+            Pos(eng.seg(cur).lo.0.saturating_sub(1)),
+            cur,
+            Some(by),
+            Some(op),
+            st,
+        );
+    }
+}
+
+/// The first node in `(from, to)` of operation `op` that has not
+/// committed: a walk of `f` from a definition by `op` stops there, as at a
+/// definition, and `stop_at` files `f` with it to be walked on when it
+/// commits, is taken or is removed. A node of the same operation likely
+/// defines the same fields, and its readers would be re-asked once more by
+/// its own commit: a reader far ahead of a chain of definers is re-asked
+/// once, not once per definer. Under the segment's lock.
+fn first_hole(eng: &Engine, inner: &Inner, op: OpId, from: Pos, to: Option<Pos>) -> Option<(Pos, NodeId)> {
+    if inner.holes == 0 {
+        return None;
+    }
+    let hi = to.map_or(Unbounded, Excluded);
+    inner
+        .nodes
+        .range((Excluded(from), hi))
+        .find(|(_, id)| {
+            let n = eng.node(**id);
+            n.op() == op && n.is_hole()
+        })
+        .map(|(p, id)| (*p, *id))
+}
+
+/// Files `f` with the node a walk stopped at, after the walk's lock. A
+/// node that has committed (or gone) meanwhile has taken its list already:
+/// the walk goes on from it here.
+fn stop_at(eng: &Engine, w: Option<&Worker>, h: NodeId, f: Field, st: &mut CommitStats) {
+    let n = eng.node(h);
+    {
+        let mut s = n.stopped.lock();
+        if !s.contains(&f) {
+            s.push(f);
+        }
+    }
+    if !n.is_hole() {
+        walk_stopped(eng, w, n, n.pos_hint(), n.seg_hint(), &[], st);
+    }
+}
+
+/// The walks that stopped at `node` (`first_hole`), on from it, but for
+/// the fields it defines (its own walks).
+fn walk_stopped(
+    eng: &Engine,
+    w: Option<&Worker>,
+    node: &Node,
+    pos: Pos,
+    seg: SegId,
+    defined: &[Field],
+    st: &mut CommitStats,
+) {
+    let fs = std::mem::take(&mut *node.stopped.lock());
+    for f in fs {
+        if !defined.contains(&f) {
+            reask_from(eng, w, f, pos, seg, Some(node.id), None, st);
         }
     }
 }
@@ -794,23 +1128,28 @@ pub(crate) fn reask_ranges(eng: &Engine, w: Option<&Worker>, f: Field, at: Pos, 
         }
     };
     for r in readers {
-        if !live(eng, r.node, r.serial) {
-            continue;
-        }
-        if range_answer(eng, f, &r) != r.seen
-            && mark_stale(
-                eng,
-                w,
-                eng.node(r.node),
-                Wake {
-                    by: Some(by),
-                    cause: Cause::Range { field: f, by },
-                    at_ns: eng.now_ns(),
-                },
-            )
-        {
-            st.woken += 1;
-        }
+        reask_range(eng, w, f, &r, by, st);
+    }
+}
+
+/// Re-asks one range reader after `by`'s change.
+fn reask_range(eng: &Engine, w: Option<&Worker>, f: Field, r: &RangeReader, by: NodeId, st: &mut CommitStats) {
+    if !live(eng, r.node, r.serial) {
+        return;
+    }
+    if range_answer(eng, f, r) != r.seen
+        && mark_stale(
+            eng,
+            w,
+            eng.node(r.node),
+            Wake {
+                by: Some(by),
+                cause: Cause::Range { field: f, by },
+                at_ns: eng.now_ns(),
+            },
+        )
+    {
+        st.woken += 1;
     }
 }
 
@@ -828,23 +1167,7 @@ pub(crate) fn reask_holes(eng: &Engine, w: Option<&Worker>, node: &Node, st: &mu
             .collect()
     };
     for (f, r) in readers {
-        if !live(eng, r.node, r.serial) {
-            continue;
-        }
-        if range_answer(eng, f, &r) != r.seen
-            && mark_stale(
-                eng,
-                w,
-                eng.node(r.node),
-                Wake {
-                    by: Some(node.id),
-                    cause: Cause::Range { field: f, by: node.id },
-                    at_ns: eng.now_ns(),
-                },
-            )
-        {
-            st.woken += 1;
-        }
+        reask_range(eng, w, f, &r, node.id, st);
     }
 }
 
@@ -861,6 +1184,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
             return;
         }
         sh.insert((op, f), c);
+        eng.shapes_n.fetch_add(1, Ordering::Release);
     }
     let v = eng.values();
     let plus = |carried: Option<ValueId>, c: i64| v.int(carried.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c));
@@ -964,17 +1288,17 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
     }
 }
 
-/// Files a new node's provisional definitions: its operation's
-/// `predicted_defs`, and the relations its operation is known to make
-/// (from the input in this segment or the environment; the commit that
-/// places it puts the value right from the true input, `settle_predictions`).
-pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, node: &Arc<Node>) {
-    let v = eng.values();
-    let op = eng.op(node.op());
-    let args = node.args();
-    let pos = node.pos_hint();
+/// A new node's predictions, made before its segment's lock: its
+/// operation's `predicted_defs`, and the relations its operation is known
+/// to make (valued under the lock, `file_predicted`).
+pub(crate) struct Predicted {
+    defs: Vec<DefRec>,
+    shapes: Vec<(Field, i64)>,
+}
+
+pub(crate) fn predict(eng: &Engine, op: OpId, args: &[ValueId]) -> Predicted {
     let mut defs: Vec<DefRec> = Vec::new();
-    if let Some(pd) = op.predicted_defs(&args, v) {
+    if let Some(pd) = eng.op(op).predicted_defs(args, eng.values()) {
         for (f, x) in pd {
             defs.push(DefRec {
                 f,
@@ -984,17 +1308,41 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
             });
         }
     }
-    let shapes: Vec<(Field, i64)> = eng
-        .shapes
-        .read()
-        .iter()
-        .filter(|((o, _), _)| *o == node.op())
-        .map(|((_, f), c)| (*f, *c))
-        .collect();
+    let shapes = if eng.shapes_n.load(Ordering::Acquire) == 0 {
+        Vec::new()
+    } else {
+        eng.shapes
+            .read()
+            .iter()
+            .filter(|((o, f), _)| *o == op && !defs.iter().any(|d| d.f == *f))
+            .map(|((_, f), c)| (*f, *c))
+            .collect()
+    };
+    Predicted { defs, shapes }
+}
+
+/// A node not yet on the line, and its predictions: all a placement needs
+/// but a label.
+pub(crate) fn built(
+    eng: &Engine,
+    unit: UnitId,
+    parent: Option<NodeId>,
+    op: OpId,
+    args: Vec<ValueId>,
+    id: NodeId,
+) -> (Arc<Node>, Predicted) {
+    let pred = predict(eng, op, &args);
+    (Arc::new(Node::new(id, unit, op, args, parent, SegId(0), Pos(0))), pred)
+}
+
+/// Files a new node's predictions at its label: the relations from the
+/// input in this segment or the environment (the commit that places it
+/// puts the value right from the true input, `settle_predictions`).
+pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, node: &Arc<Node>, pred: Predicted) {
+    let v = eng.values();
+    let pos = node.pos_hint();
+    let Predicted { mut defs, shapes } = pred;
     for (f, c) in shapes {
-        if defs.iter().any(|d| d.f == f) {
-            continue;
-        }
         let input = Segment::reaching(inner, f, pos, false)
             .map(|(_, d)| d.value)
             .or_else(|| read::env_value(eng, f));
@@ -1037,9 +1385,13 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     };
     let pos = node.pos_hint();
     let seg_id = seg.id;
+    let was_hole = node.is_hole();
     if remove {
         node.set_state(State::Gone);
         inner.nodes.remove(&pos);
+        if was_hole {
+            inner.holes = inner.holes.saturating_sub(1);
+        }
         if let Some(v) = inner.by_op.get_mut(&node.op()) {
             v.retain(|&n| n != node.id);
         }
@@ -1083,6 +1435,9 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
         reask_ranges(eng, w, f, pos, node.id, &mut st);
     }
     reask_holes(eng, w, node, &mut st);
+    if was_hole && remove {
+        walk_stopped(eng, w, node, pos, seg_id, &[], &mut st);
+    }
     if let Some(r) = &rec {
         for &c in &r.placed {
             unfile(eng, w, eng.node(c));
@@ -1120,13 +1475,15 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
     let mut k = 0usize;
     let mut retracts: Vec<Arc<Node>> = Vec::new();
     let mut releases: Vec<Arc<Node>> = Vec::new();
+    let mut taken_holes: Vec<Arc<Node>> = Vec::new();
     'segs: while let Some(sid) = cur {
         let seg = eng.seg(sid);
         if seg.unit != me.unit {
             break;
         }
         {
-            let inner = seg.inner.write();
+            let mut inner = seg.inner.write();
+            let before = taken_holes.len();
             let lo = lower.map_or(Unbounded, Excluded);
             for (_, id) in inner.nodes.range((lo, Unbounded)) {
                 let s = eng.node(*id);
@@ -1135,18 +1492,23 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
                 }
                 if k < want {
                     if s.state() != State::Inert {
+                        let hole = s.is_hole();
                         s.set_state(State::Inert);
                         if s.committed() {
                             retracts.push(s.clone());
+                        } else if hole {
+                            taken_holes.push(s.clone());
                         }
                     }
                 } else if s.state() == State::Inert {
                     releases.push(s.clone());
                 } else {
+                    inner.holes = inner.holes.saturating_sub(taken_holes.len() - before);
                     break 'segs;
                 }
                 k += 1;
             }
+            inner.holes = inner.holes.saturating_sub(taken_holes.len() - before);
         }
         lower = None;
         cur = eng.order.next(sid, seg.lo);
@@ -1154,6 +1516,11 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
     for s in retracts {
         retract(eng, w, &s);
     }
+    let mut st = CommitStats::default();
+    for s in taken_holes {
+        walk_stopped(eng, w, &s, s.pos_hint(), s.seg_hint(), &[], &mut st);
+    }
+    eng.note_stats(w, &st);
     for s in releases {
         if s.cas_state(State::Inert, State::Dirty) {
             enqueue(
@@ -1170,20 +1537,17 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
     }
 }
 
-/// Makes a node for a placement after `after` (a label in the gap, the
-/// segment relabelled if the gap is closed), registers it in the
-/// segment and files its predictions. Under the segment's write lock,
-/// which the caller holds; `after` is in the segment.
+/// Puts a built node on the line after `after` (a label in the gap, the
+/// segment relabelled if the gap is closed), registers it in the segment
+/// and files its predictions. Under the segment's write lock, which the
+/// caller holds; `after` is in the segment.
 pub(crate) fn place(
     eng: &Engine,
     seg: &Segment,
     inner: &mut Inner,
-    unit: UnitId,
-    parent: Option<NodeId>,
     after: NodeId,
-    op: OpId,
-    args: Vec<ValueId>,
-    id: NodeId,
+    node: Arc<Node>,
+    pred: Predicted,
 ) -> Arc<Node> {
     let p = match Segment::gap_after(inner, eng.node(after).pos_hint()) {
         Some(p) => p,
@@ -1192,24 +1556,19 @@ pub(crate) fn place(
             Segment::gap_after(inner, eng.node(after).pos_hint()).expect("a gap after a relabel")
         }
     };
-    let node = Arc::new(Node::new(id, unit, op, args, parent, seg.id, p));
-    eng.nodes.set(usize::try_from(id.raw()).unwrap_or(usize::MAX), node.clone());
-    inner.nodes.insert(p, id);
-    inner.by_op.entry(op).or_default().push(id);
-    file_predicted(eng, seg, inner, &node);
+    node.seg.store(seg.id.0, Ordering::Release);
+    node.pos.store(p.0, Ordering::Release);
+    eng.nodes
+        .set(usize::try_from(node.id.raw()).unwrap_or(usize::MAX), node.clone());
+    inner.nodes.insert(p, node.id);
+    inner.holes += 1;
+    inner.by_op.entry(node.op()).or_default().push(node.id);
+    file_predicted(eng, seg, inner, &node, pred);
     node
 }
 
 /// `place` after node `at` and its placements, under their segment's lock.
-pub(crate) fn place_after(
-    eng: &Engine,
-    unit: UnitId,
-    parent: Option<NodeId>,
-    at: NodeId,
-    op: OpId,
-    args: Vec<ValueId>,
-    id: NodeId,
-) -> Arc<Node> {
+pub(crate) fn place_after(eng: &Engine, at: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
     let end = subtree_end(eng, at);
     let endn = eng.node(end);
     loop {
@@ -1219,12 +1578,12 @@ pub(crate) fn place_after(
                 seg.split(&mut inner, eng, sid);
                 continue;
             }
-            return place(eng, seg, &mut inner, unit, parent, end, op, args, id);
+            return place(eng, seg, &mut inner, end, node, pred);
         }
         // the node is gone: after its parent, or at the unit's end
-        return match endn.parent.or(parent) {
-            Some(p) if p != at => place_after(eng, unit, parent, p, op, args, id),
-            _ => eng.push_node(unit, parent, op, args, id),
+        return match endn.parent.or(node.parent) {
+            Some(p) if p != at => place_after(eng, p, node, pred),
+            _ => eng.push_node(node, pred),
         };
     }
 }
