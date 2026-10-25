@@ -205,13 +205,20 @@ impl Engine {
         }
     }
 
-    /// The segment whose range holds `p` now; None before the first.
+    /// The segment whose range holds `p` now, or the last before `p`
+    /// where `p` is in no segment's (a gap, past the last unit's end);
+    /// None before the first.
     pub(crate) fn seg_for_pos(&self, p: Pos) -> Option<&Arc<Segment>> {
         loop {
-            let s = self.seg(self.order.at_or_after(p)?);
-            let hi = s.inner.read().hi;
-            if p < hi {
-                return Some(s);
+            let sid = self.order.at_or_after(p)?;
+            let s = self.seg(sid);
+            {
+                // (a split moves the order under the segment's lock: the
+                // same segment again is no split under way)
+                let inner = s.inner.read();
+                if p < inner.hi || self.order.at_or_after(p) == Some(sid) {
+                    return Some(s);
+                }
             }
             std::hint::spin_loop();
         }
