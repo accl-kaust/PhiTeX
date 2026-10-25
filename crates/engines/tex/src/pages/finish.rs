@@ -1520,7 +1520,7 @@ impl FinDefs {
                 // (one run of the routine so far, spec-final §9b: its
                 // values carried on, a page counter stepping by the pages
                 // between; a wrong guess runs its readers again, a piece
-                // never parks on a finisher)
+                // never waits for a finisher)
                 let Some(&(_, y)) = self.prev.iter().find(|d| d.0 == f) else {
                     if !name.starts_with("count:") {
                         return Some((f, x));
@@ -1855,13 +1855,12 @@ impl Operation for Finish {
             if crate::exec::obs_flag!("PHITEX_FIN_TRACE") {
                 let j = pos.first().map_or(0, |&x| int_of(r.v, x));
                 eprintln!(
-                    "fin-trace: node {} page {j} of its piece spec {} resumed {}",
+                    "fin-trace: node {} page {j} of its piece spec {}",
                     r.cx.node().raw(),
-                    r.cx.is_speculative(),
-                    r.resumed
+                    r.cx.is_speculative()
                 );
             }
-            if !r.resumed {
+            {
                 let v = r.v;
                 // (its page assembled from its input alone, the page
                 // builder's decisions: [`Run::finisher_args`])
@@ -2088,8 +2087,8 @@ impl Run<'_, '_> {
         let Some(&t) = args.get(9) else { return Ok(()) };
         // (a speculative run's too: a cold build's finishers all run on
         // predictions, and one seeding none leaves every later finisher
-        // predicting nothing given back, its result parked unconfirmed
-        // until the page builder ends; a wrong seed is a misprediction,
+        // predicting nothing given back, its result unconfirmed until
+        // the page builder ends; a wrong seed is a misprediction,
         // its readers run again)
         if t == ValueId::UNIT {
             return Ok(());

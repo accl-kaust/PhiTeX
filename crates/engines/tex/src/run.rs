@@ -728,8 +728,6 @@ pub(crate) struct Run<'c, 'a> {
     pub rt_made: i64,
     pub rt_cells: i64,
     pub rt_rels: i64,
-    /// Whether this run continues a parked attempt ([`Run::from_parked`]).
-    pub resumed: bool,
     /// A digest of the node's arguments but its text (where it is, its
     /// kind, its hint): what the run reads of them after its start is
     /// part of its state at a mark ([`parked_rest`]).
@@ -1054,7 +1052,6 @@ impl<'c, 'a> Run<'c, 'a> {
             rt_made: 0,
             rt_cells: 0,
             rt_rels: 0,
-            resumed: false,
             args_key: 0,
             mark_snaps: Vec::new(),
             mark_stale: 0,
@@ -1682,9 +1679,8 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::obs_flag!("PHITEX_REG_TRACE") && self.count_reg(loc).is_some() {
             let sk = self.scope_kind()?.is_some();
             eprintln!(
-                "reg-ok: node {} resumed {} register {:?} global {global} op-ok {} doc {} rec_load {} interp {} read_back {} point {} cands {} group {} defined_after {} scope {sk}",
+                "reg-ok: node {} register {:?} global {global} op-ok {} doc {} rec_load {} interp {} read_back {} point {} cands {} group {} defined_after {} scope {sk}",
                 self.cx.node().raw(),
-                self.resumed,
                 self.count_reg(loc),
                 op == self.ops.exec || op == self.ops.resume || routine,
                 self.doc,
@@ -5068,9 +5064,8 @@ impl<'c, 'a> Run<'c, 'a> {
                 .collect();
             pubd.sort();
             eprintln!(
-                "mark-trace-end: node {} resumed {} out {} claim {n} effect {:?} defs {pubd:?} contribs {contribs_trace:?}",
+                "mark-trace-end: node {} out {} claim {n} effect {:?} defs {pubd:?} contribs {contribs_trace:?}",
                 self.cx.node().raw(),
-                self.resumed,
                 out.raw(),
                 self.effect
             );
@@ -6670,192 +6665,6 @@ fn parked_rest(p: &Parked) -> u64 {
     // one's place there, whose lines it reads at its end)
     p.sealed.places().hash(&mut h);
     h.finish()
-}
-
-impl<'c, 'a> Run<'c, 'a> {
-    /// A run continuing a parked attempt at the command it stopped in;
-    /// `Err(cx)` if the token is of another values epoch (its ids may be
-    /// swept): the run then starts from the top.
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn from_parked(
-        cx: &'c mut Ctx<'a>,
-        ops: &'c Ops,
-        p: Parked,
-    ) -> Result<Self, &'c mut Ctx<'a>> {
-        if p.epoch != cx.values_epoch() {
-            return Err(cx);
-        }
-        let mut r = Run::new(cx, ops);
-        r.input.text = p.segs;
-        r.input.text_at = 0;
-        r.parked_levels = p.nlev;
-        // (a mark's levels put back as levels, each with its token type:
-        // the bottom first)
-        if !p.level_tys.is_empty() {
-            let n = p.level_tys.len();
-            let rest = r.input.text.split_off(n);
-            let lev = std::mem::replace(&mut r.input.text, rest);
-            r.parked_levels = p.nlev.saturating_sub(n);
-            for (seg, ty) in lev.into_iter().zip(p.level_tys).rev() {
-                match seg {
-                    Seg::Toks(t) => {
-                        let g = r.input.arena.alloc(&t);
-                        r.input.levels.push(crate::input::Level::toks(g, ty));
-                    }
-                    Seg::Line(l) => {
-                        r.input.push_line(l);
-                    }
-                    Seg::File(f) => {
-                        r.input.push_file(f);
-                    }
-                }
-                if let Some(l) = r.input.levels.last_mut() {
-                    l.ty = ty;
-                }
-            }
-        }
-        if crate::exec::obs_flag!("PHITEX_PARK_TRACE") {
-            eprintln!(
-                "park-trace: resume {}: {}",
-                r.cx.node().raw(),
-                r.input_where()
-            );
-        }
-        r.nest = p
-            .nest
-            .into_iter()
-            .map(|l| {
-                let mut x = crate::nest::Level::new(l.mode, l.group, l.lid, l.owns, l.extra);
-                x.list = l.list;
-                x.fold = l.fold;
-                x.par = l.par;
-                x.prev_graf = l.prev_graf;
-                x.gid = l.gid;
-                x.save_base = l.save_base;
-                x.def_base = l.def_base;
-                x.open_stamp = l.open_stamp;
-                x.ag = l.ag;
-                x
-            })
-            .collect();
-        r.pulled = p.pulled;
-        r.pull_at = p.pull_at;
-        r.pull_orig = p.pull_orig;
-        r.pull_box = p.pull_box;
-        r.top = p.top;
-        r.claim_rest = p.claim_rest;
-        r.hint_void = p.hint_void;
-        r.next_lid = p.next_lid;
-        r.last_par = p.last_par;
-        r.doc = p.doc;
-        r.fread = p.fread;
-        r.fmiss = p.fmiss;
-        r.uread = p.uread;
-        // (the table first: the locations below are its, a location past
-        // the fixed ones named by the field the table notes for it,
-        // `Run::loc_of`; noted in a table the parked one then replaced,
-        // a counter past 255 lost its name and its map, `Run::count_reg`)
-        r.st = crate::runstate::State::unpark(p.st);
-        {
-            let (lt, fs, read) = p.lt;
-            r.lt = lt;
-            let locs = fs.into_iter().map(|f| r.loc_of(f)).collect();
-            r.st.set_taint(locs, read);
-        }
-        {
-            let rb = p.rb.into_iter().map(|(f, w)| (r.loc_of(f), w)).collect();
-            r.st.set_rb(rb);
-        }
-        r.skip_first = p.skip_first.into_iter().map(|f| r.loc_of(f)).collect();
-        if crate::exec::obs_flag!("PHITEX_REG_TRACE") {
-            eprintln!(
-                "reg-resume: node {} parked maps {:?}",
-                r.cx.node().raw(),
-                p.reg_pending.iter().map(|(f, m)| (crate::val::field_name(r.v, *f), *m)).collect::<Vec<_>>()
-            );
-        }
-        r.reg_pending = p
-            .reg_pending
-            .into_iter()
-            .map(|(f, m)| (r.loc_of(f), m))
-            .collect();
-        r.incs = p.incs;
-        r.closed = p.closed;
-        r.error_count = p.error_count;
-        r.class_memo = p
-            .class_memo
-            .into_iter()
-            .map(|(f, c)| (r.loc_of(f), c))
-            .collect();
-        r.outer_memo = p
-            .outer_memo
-            .into_iter()
-            .map(|(f, o)| (r.loc_of(f), o))
-            .collect();
-        r.step_memo = p
-            .step_memo
-            .into_iter()
-            .map(|(f, k)| (r.loc_of(f), k))
-            .collect();
-        r.defined_memo = p
-            .defined_memo
-            .into_iter()
-            .map(|(f, d)| (r.loc_of(f), d))
-            .collect();
-        r.num_memo = p
-            .num_memo
-            .into_iter()
-            .map(|(f, d)| (r.loc_of(f), d))
-            .collect();
-        r.fin_lazy = p.fin_lazy.into_iter().collect();
-        r.rec_load = p.rec_load;
-        r.no_pull = p.no_pull;
-        r.contribs = p.contribs;
-        r.kids = p.kids;
-        r.effect = p.effect;
-        r.conds = p.conds;
-        r.if_codes = p.if_codes;
-        r.cond_loaded = p.cond_loaded;
-        r.cond_stop = p.cond_stop;
-        r.astate = p.astate;
-        r.aopen = p.aopen;
-        r.lines_entered = p.lines_entered;
-        r.lines_read = p.lines_read;
-        r.doc_lines.clone_from(&p.doc_lines);
-        r.eof = p.eof;
-        r.radix = p.radix;
-        r.args_key = p.args_key;
-        r.cur_order = p.cur_order;
-        r.pdf_occ = p.pdf_occ;
-        r.rt_made = p.rt_made;
-        r.rt_cells = p.rt_cells;
-        r.rt_rels = p.rt_rels;
-        r.muts = p.muts;
-        r.read_back_done = p.read_back_done;
-        r.read_back_at = p.read_back_at;
-        r.read_point_here = p.read_point_here;
-        r.text_written = p.text_written;
-        r.seeded = p.seeded;
-        r.cont_lines = p.cont_lines;
-        r.read_point_pending = p.read_point_pending;
-        r.vain_after_point = p.vain_after_point;
-        r.pending_pre = p
-            .pending_pre
-            .into_iter()
-            .map(|(f, x)| (r.loc_of(f), x))
-            .collect();
-        r.pending_locs = r.pending_pre.iter().map(|&(l, _)| l).collect();
-        r.cand = p.cand;
-        r.cand_marks = p.cand_marks;
-        r.ins_pending = p.ins_pending;
-        r.fin = p.fin;
-        r.watch_exit = p.watch;
-        r.anchor_skip_at = p.watch.map(|_| p.at_cmds + 1);
-        r.sealed = p.sealed;
-        r.cmds_before = p.at_cmds;
-        r.resumed = true;
-        Ok(r)
-    }
 }
 
 /// `scanner_status` (§305) values kept in [`Run::scanner`].

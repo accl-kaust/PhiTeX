@@ -2533,9 +2533,8 @@ pub(crate) fn page_allocs(
     if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
         eprintln!("alloc: page (node {}): {}", r.cx.node().raw(), v.render(e));
         eprintln!(
-            "alloc-src: node {} resumed {} dests loaded before {dests_loaded} mark {}",
+            "alloc-src: node {} dests loaded before {dests_loaded} mark {}",
             r.cx.node().raw(),
-            r.resumed,
             r.mark_snaps.len()
         );
     }

@@ -35,7 +35,8 @@ thread_local! {
 }
 
 /// (measure, `PHITEX_RUN_LOG`) every run attempt of the process: the
-/// node's raw id, whether it resumed a parked run, whether it ran
+/// node's raw id, whether it continued an earlier attempt (none does:
+/// false), whether it ran
 /// speculatively, and how it ended (`o` finished, `s` stopped, `x`
 /// other); drained into [`crate::Stats::run_log`] per evaluation.
 pub(crate) static RUN_LOG: std::sync::Mutex<Vec<(u64, bool, bool, u8)>> =
@@ -137,13 +138,13 @@ pub(crate) fn run_node(
         };
         RUN_LOG
             .locked()
-            .push((r.cx.node().raw(), r.resumed, r.cx.is_speculative(), how));
+            .push((r.cx.node().raw(), false, r.cx.is_speculative(), how));
     }
     // (a long run, the format's: its commands' time, then its finish)
     let timed = t_body.as_secs() >= 1 && crate::exec::prof_flag!("PHITEX_TEX_TIME");
     if timed {
         eprintln!(
-            "run: commands {t_body:?} ({}, speculative {}, resumed {}), memory MB resident/peak {:?}",
+            "run: commands {t_body:?} ({}, speculative {}), memory MB resident/peak {:?}",
             match &res {
                 Ok(()) => "ok",
                 Err(Halt::Stop(_)) => "stop",
@@ -153,7 +154,6 @@ pub(crate) fn run_node(
                 Err(Halt::Recut(_)) => "recut",
             },
             r.cx.is_speculative(),
-            r.resumed,
             crate::api::mem_mb()
         );
     }
@@ -206,8 +206,8 @@ pub(crate) fn run_node(
                     .collect();
                 let kids: Vec<String> = r.kids.iter().map(|(o, a)| format!("{o:?}{:?}", a.iter().map(|x| x.raw()).collect::<Vec<_>>())).collect();
                 eprintln!(
-                    "mark-trace: node {node} resumed {} effect {:?} pub {pubd:?} contribs {contribs:?} kids {kids:?}",
-                    r.resumed, r.effect
+                    "mark-trace: node {node} effect {:?} pub {pubd:?} contribs {contribs:?} kids {kids:?}",
+                    r.effect
                 );
             }
             let t = std::time::Instant::now();
@@ -332,8 +332,7 @@ impl Operation for Exec {
             });
         }
         let res = run_node(cx, o, |r| {
-            // (a resumed run has done this, and continues its commands)
-            if !r.resumed {
+            {
                 // (a load at the unit's top level only: there a global
                 // definition back to the value in force is no effect, and
                 // the run publishes its net effect, `State::published`)

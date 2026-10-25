@@ -979,7 +979,7 @@ impl Run<'_, '_> {
     /// the page builder's to find, as for any piece) and places the
     /// resume piece after it, which runs the rest from the continuation,
     /// its arguments ([`Run::cont_encode`]). Nothing here reads the page:
-    /// where the cut is is the piece's text's alone. A stop here parks
+    /// where the cut is is the piece's text's alone. A stop here stops
     /// the run: the end is a command of its own ([`Run::begin_command`]).
     pub(crate) fn fold_here(&mut self, raw: Vec<ValueId>) -> R<()> {
         let t0 = std::time::Instant::now();
@@ -1660,10 +1660,8 @@ impl Operation for Resume {
         let o = ops(&self.0);
         let t0 = std::time::Instant::now();
         let out = run_node(cx, o, |r| {
-            if !r.resumed {
-                let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
-                r.cont_load(a(0), a(2))?;
-            }
+            let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
+            r.cont_load(a(0), a(2))?;
             r.run_all()
         });
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
