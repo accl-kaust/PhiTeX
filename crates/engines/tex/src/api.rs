@@ -1905,6 +1905,11 @@ struct Graph {
     dvi: OpId,
     /// The link (`crate::ops::Link`), pushed before the end node.
     link: OpId,
+    /// The writers (the link and the end node) as last pushed, with their
+    /// unit: taken out before an evaluation and pushed again after it, so
+    /// they run once on its pages, not at every page that comes in
+    /// ([`Graph::settle`]).
+    writers: Option<(UnitId, NodeId, NodeId)>,
     /// The environment and the absent fields as last pushed to the
     /// engine (sorted), and the engine calls the pushes made
     /// ([`Graph::push_env`], spec-final §4.5).
@@ -2231,6 +2236,7 @@ impl Graph {
             mark,
             dvi,
             link,
+            writers: None,
             env_pushed: Vec::new(),
             absent_pushed: Vec::new(),
             env_calls: 0,
@@ -2732,6 +2738,19 @@ impl Graph {
     /// Evaluates; when the graph asks for files, supplies them and
     /// evaluates again.
     #[allow(clippy::too_many_lines)]
+    /// Pushes the link and the end node at the end of `unit`.
+    fn push_writers(&mut self, unit: UnitId) -> NodeId {
+        let l = self.eng.push(unit, self.link, Vec::new());
+        let d = self.eng.push(unit, self.dvi, Vec::new());
+        self.writers = Some((unit, l, d));
+        d
+    }
+
+    /// The end node as last pushed.
+    fn end_node(&self) -> Option<NodeId> {
+        self.writers.map(|w| w.2)
+    }
+
     fn settle(
         &mut self,
         unit: UnitId,
@@ -2772,7 +2791,21 @@ impl Graph {
             // (an edit's few nodes: on this thread, no worker started,
             // [`INLINE_NODES`])
             let n = if self.inline { 1 } else { self.threads };
-            let res = self.eng.evaluate_absorbing(n, edits);
+            // (the writers out while the pages settle, in again after)
+            let writers = self.writers.take();
+            if let Some((_, l, d)) = writers {
+                self.eng.remove(l);
+                self.eng.remove(d);
+            }
+            let mut res = self.eng.evaluate_absorbing(n, edits);
+            if let Some((u, _, _)) = writers {
+                self.push_writers(u);
+                if res.is_ok()
+                    && let Err(e) = self.eng.evaluate(n)
+                {
+                    res = Err(e);
+                }
+            }
             let (by_kind, busy, peak) = crate::exec::take_counters();
             crate::exec::after_evaluation();
             let r = match res {
@@ -4508,8 +4541,7 @@ impl Build {
         // them)
         let files_op = g.files_op;
         let files = g.eng.push(unit, files_op, Vec::new());
-        g.eng.push(unit, g.link, Vec::new());
-        let dvi = g.eng.push(unit, g.dvi, Vec::new());
+        let dvi = g.push_writers(unit);
         let _ = files;
         let end = steps;
         crate::timeline::lap("engine: the link, end and files nodes");
@@ -5640,7 +5672,7 @@ impl Build {
     /// ([`crate::assemble::END_FILE`]).
     fn end_file(&self) -> Option<ValueId> {
         let v = self.g.eng.values();
-        self.g.eng.def_value(self.dvi, v.field(crate::assemble::END_FILE))
+        self.g.eng.def_value(self.g.end_node()?, v.field(crate::assemble::END_FILE))
     }
 
     /// The output file (DVI or PDF) and the log.
