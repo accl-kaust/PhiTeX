@@ -6324,7 +6324,7 @@ impl Build {
             .g
             .eng
             .acc_value(self.unit, v.field(crate::pdfout::SHOWN))
-            .map(|x| v.seq_to_vec(x))
+            .and_then(|x| v.seq_to_vec(x).first().map(|&l| list_of(v, l)))
             .unwrap_or_default();
         if shown.len() == out.len() {
             for (h, s) in out.iter_mut().zip(shown) {

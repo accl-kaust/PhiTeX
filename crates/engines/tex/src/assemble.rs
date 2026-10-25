@@ -499,6 +499,7 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let memo = LINE_MEMO.get_or_init(Default::default);
     let line_seq = cx.fold(v.field(crate::pdfout::XPAGES), None, None)?;
     let items_seq = cx.fold(v.field(crate::pages::PITEMS), None, None)?;
+    crate::timeline::note("link: the line read: the folds", t0.elapsed());
     let (line, items) = {
         let mut g = memo.locked();
         (
@@ -596,11 +597,9 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         ])),
     );
     // (each page's identity, for a viewer: `crate::api::Build::pages`)
-    let shown = l
-        .shown
-        .iter()
-        .fold(ValueId::NIL, |a, &h| v.seq_concat(a, v.seq_unit(v.int(i64::from_ne_bytes(h.to_ne_bytes())))));
-    cx.contribute(v.field(crate::pdfout::SHOWN), shown);
+    // (one list, made once: not a sequence grown page by page)
+    let shown = v.list(l.shown.iter().map(|&h| v.int(i64::from_ne_bytes(h.to_ne_bytes()))).collect());
+    cx.contribute(v.field(crate::pdfout::SHOWN), v.seq_unit(shown));
     let x = bytes_value(v, l.file, l.hash);
     {
         use crate::timeline::note;

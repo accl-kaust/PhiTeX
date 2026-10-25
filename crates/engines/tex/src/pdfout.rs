@@ -54,8 +54,8 @@ use crate::val::{int_of, list_of, str_of};
 /// this order ([`finish_exact`]).
 pub(crate) const XPAGES: &str = "pdf:xpages";
 
-/// The pages' identities in the file's order, contributed by the link
-/// ([`Linked::shown`]).
+/// The pages' identities in the file's order, contributed by the link as
+/// one list ([`Linked::shown`]).
 pub(crate) const SHOWN: &str = "pdf:shown";
 
 /// Record `e` put in the line ([`XPAGES`]) where this run is; a piece's

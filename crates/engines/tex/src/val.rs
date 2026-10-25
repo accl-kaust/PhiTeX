@@ -1635,8 +1635,11 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
 
 /// A sequence's elements mapped by a function, kept per rope node of
 /// [`SeqMemo::MIN`] elements or more and per element ([`SeqMemo::walk`]):
-/// a sequence that shares most of its rope, or its elements, with the
-/// one walked last maps only what it does not share.
+/// a sequence that shares most of its rope, or its elements, with those
+/// walked before maps only what it does not share. The nodes and elements
+/// stay kept across walks (an edit's path down a node kept whole before
+/// finds its children kept too), pruned to the last walk's once they
+/// outgrow it.
 pub(crate) struct SeqMemo<T> {
     inst: u64,
     nodes: FxHashMap<ValueId, std::sync::Arc<[T]>>,
@@ -1669,31 +1672,38 @@ impl<T: Clone> SeqMemo<T> {
             self.elems.clear();
             self.inst = v.instance();
         }
-        let mut out = Vec::with_capacity(usize::try_from(v.seq_len(s)).unwrap_or(0));
-        let mut nodes = FxHashMap::default();
-        let mut elems = FxHashMap::default();
+        let n = usize::try_from(v.seq_len(s)).unwrap_or(0);
+        let mut out = Vec::with_capacity(n);
+        // (the nodes and elements this walk met: what a prune keeps)
+        let mut met_nodes: Vec<ValueId> = Vec::new();
+        let mut met_elems = 0usize;
         // (a node to walk, or one walked whose elements start at `Some`)
         let mut stack = vec![(s, None)];
         while let Some((x, start)) = stack.pop() {
             if let Some(st) = start {
                 if out.len() - st >= Self::MIN {
-                    nodes.insert(x, std::sync::Arc::from(&out[st..]));
+                    self.nodes.insert(x, std::sync::Arc::from(&out[st..]));
+                    met_nodes.push(x);
                 }
                 continue;
             }
             if let Some(e) = self.nodes.get(&x) {
                 out.extend_from_slice(e);
-                nodes.insert(x, e.clone());
+                met_nodes.push(x);
                 continue;
             }
             match v.seq_split(x) {
                 Some(Ok(e)) => {
-                    let t = match self.elems.remove(&e) {
-                        Some(t) => t,
-                        None => f(e),
+                    met_elems += 1;
+                    let t = match self.elems.get(&e) {
+                        Some(t) => t.clone(),
+                        None => {
+                            let t = f(e);
+                            self.elems.insert(e, t.clone());
+                            t
+                        }
                     };
-                    out.extend(t.clone());
-                    elems.insert(e, t);
+                    out.extend(t);
                 }
                 Some(Err((l, r))) => {
                     stack.push((x, Some(out.len())));
@@ -1703,14 +1713,21 @@ impl<T: Clone> SeqMemo<T> {
                 None => {}
             }
         }
-        // (an element under a node kept is not looked at: kept too)
-        if self.elems.len() < 4 * elems.len() + 256 {
-            for (e, t) in self.elems.drain() {
-                elems.entry(e).or_insert(t);
+        // (pruned to this walk's own once grown past four times them;
+        // an element under a node kept is not looked at, so the elements
+        // go whole)
+        if self.nodes.len() > 4 * met_nodes.len() + 1024 {
+            let mut kept = FxHashMap::default();
+            for x in met_nodes {
+                if let Some(e) = self.nodes.remove(&x) {
+                    kept.insert(x, e);
+                }
             }
+            self.nodes = kept;
         }
-        self.nodes = nodes;
-        self.elems = elems;
+        if self.elems.len() > 4 * (met_elems + n) + 1024 {
+            self.elems.clear();
+        }
         out
     }
 }
