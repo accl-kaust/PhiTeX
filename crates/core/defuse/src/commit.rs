@@ -530,12 +530,21 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             if let Some(k) = kept_end.take() {
                 after = subtree_end(eng, k);
             }
-            let after_pos = eng.node(after).pos_hint();
-            if let Some(k) = kept[i]
-                && !matches!(what, Placement::FollowAfter(..))
-            {
+            // (after one made in this commit and not placed yet: no kept
+            // node stands after it)
+            let after_pos = eng
+                .nodes
+                .get(usize::try_from(after.raw()).unwrap_or(usize::MAX))
+                .map_or(Pos(u64::MAX), |n| n.pos_hint());
+            if let Some(k) = kept[i] {
                 let kn = eng.node(k);
-                if kn.state() != State::Gone && kn.pos_hint() > after_pos {
+                // (one placed after another node stands while it is still
+                // after that node)
+                let floor = match what {
+                    Placement::FollowAfter(at, ..) => after_pos.max(eng.node(*at).pos_hint()),
+                    Placement::Child(..) | Placement::Follow(..) => after_pos,
+                };
+                if kn.state() != State::Gone && kn.pos_hint() > floor {
                     placed.push(k);
                     kept_end = Some(k);
                     continue;

@@ -114,7 +114,21 @@ struct Rope {
     unit: bool,
 }
 
-const SHARDS: usize = 64;
+/// A shard's lock on a cache line of its own.
+#[repr(align(64))]
+struct Padded<T>(T);
+
+type Shard<V> = Padded<Lock<FxHashMap<u64, V>>>;
+
+/// Many, each a cache line apart: an intern meets another's lock only when
+/// their hashes share a shard ([`shard_of`]).
+const SHARDS: usize = 1024;
+
+/// A hash's shard: its bits mixed first (a list's hash is weak in its top
+/// bits).
+fn shard_of(h: u64) -> usize {
+    usize::try_from(h.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 54).unwrap_or(0) & (SHARDS - 1)
+}
 
 static INSTANCES: AtomicU64 = AtomicU64::new(1);
 
@@ -124,11 +138,11 @@ pub struct Values {
     plain: Table<Arc<Value>>,
     /// Content hash of a plain value -> its id; a shard's lock is held for
     /// one insert.
-    plain_ix: Box<[Lock<FxHashMap<u64, ValueId>>]>,
+    plain_ix: Box<[Shard<ValueId>]>,
     /// Sequence nodes by their id's payload, sharded by it; a lookup holds a
     /// shard's read lock for one map get. Balanced on concat so a sequence
     /// of n elements is O(log n) deep.
-    seqs: Box<[Lock<FxHashMap<u64, Rope>>]>,
+    seqs: Box<[Shard<Rope>]>,
     /// Distinct per store, for caches keyed by ids (`instance`).
     instance: u64,
 }
@@ -178,8 +192,8 @@ impl Values {
     pub fn new() -> Values {
         Values {
             plain: Table::new(),
-            plain_ix: (0..SHARDS).map(|_| Lock::new(FxHashMap::default())).collect(),
-            seqs: (0..SHARDS).map(|_| Lock::new(FxHashMap::default())).collect(),
+            plain_ix: (0..SHARDS).map(|_| Padded(Lock::new(FxHashMap::default()))).collect(),
+            seqs: (0..SHARDS).map(|_| Padded(Lock::new(FxHashMap::default()))).collect(),
             instance: INSTANCES.fetch_add(1, Ordering::Relaxed),
         }
     }
@@ -209,7 +223,7 @@ impl Values {
     fn intern_plain(&self, v: Value, tag: u64) -> ValueId {
         let mut h = plain_hash(&v);
         loop {
-            let shard = &self.plain_ix[usize::try_from(h >> 58).unwrap_or(0)];
+            let shard = &self.plain_ix[shard_of(h)].0;
             let hit = shard.read().get(&h).copied();
             if let Some(id) = hit {
                 if self.plain_is(id, &v) {
@@ -373,11 +387,11 @@ impl Values {
             return None;
         }
         let p = id.payload();
-        self.seqs[usize::try_from(p >> 55).unwrap_or(0) & (SHARDS - 1)].read().get(&p).copied()
+        self.seqs[shard_of(p)].0.read().get(&p).copied()
     }
 
     fn insert_rope(&self, payload: u64, r: Rope) {
-        self.seqs[usize::try_from(payload >> 55).unwrap_or(0) & (SHARDS - 1)]
+        self.seqs[shard_of(payload)].0
             .write()
             .entry(payload)
             .or_insert(r);

@@ -21,7 +21,7 @@ pub(crate) struct Pos(pub u64);
 pub(crate) struct SegId(pub u32);
 
 /// Nodes a segment holds before it splits.
-pub(crate) const SEG_CAP: usize = 256;
+pub(crate) const SEG_CAP: usize = 64;
 /// Labels between nodes pushed in a row.
 pub(crate) const GAP: u64 = 1 << 20;
 /// Labels a unit is given at its making; a unit's segments split within it.

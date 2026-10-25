@@ -150,6 +150,30 @@ impl Worker {
     }
 }
 
+/// Starts `ws` on threads of scope `s`: the first's thread starts two
+/// halves of the rest before it works; each gives its worker to `back`
+/// when it is done.
+fn spawn_tree<'s, 'e: 's>(
+    s: &'s std::thread::Scope<'s, 'e>,
+    eng: &'e Engine,
+    pool: &'e Pool,
+    back: &'e Mutex<Vec<Worker>>,
+    mut ws: Vec<Worker>,
+) {
+    if ws.is_empty() {
+        return;
+    }
+    let w = ws.remove(0);
+    pool.shared.spawned.fetch_add(1, Ordering::SeqCst);
+    s.spawn(move || {
+        let right = ws.split_off(ws.len() / 2);
+        spawn_tree(s, eng, pool, back, ws);
+        spawn_tree(s, eng, pool, back, right);
+        run_worker(eng, pool, &w, None, None);
+        back.lock().unwrap_or_else(PoisonError::into_inner).push(w);
+    });
+}
+
 /// Spins before parking.
 const SPINS: u32 = 64;
 /// A block is stolen from only with this much left, half of it at a time
@@ -253,30 +277,23 @@ impl Pool {
         // workers with a block start now; the rest when asked for
         let active = rest.iter().filter(|w| !w.block.is_empty()).count();
         let later: Vec<Worker> = rest.drain(active..).collect();
-        let (first, rest) = std::thread::scope(|s| {
-            let spawn = |w: Worker| {
-                self.shared.spawned.fetch_add(1, Ordering::SeqCst);
-                s.spawn(move || {
-                    run_worker(eng, self, &w, None, None);
-                    w
-                })
-            };
-            let handles = Mutex::new(rest.drain(..).map(spawn).collect::<Vec<_>>());
-            let spare = Mutex::new(later);
+        let back: Mutex<Vec<Worker>> = Mutex::new(Vec::with_capacity(self.n));
+        let spare = Mutex::new(later);
+        std::thread::scope(|s| {
+            // (spawned as a tree, each thread starting two before it
+            // works: no thread waits for the others' starts, the caller's
+            // least of all)
+            spawn_tree(s, eng, self, &back, std::mem::take(&mut rest));
             let spawn_more = || {
                 self.shared.want_spawn.store(false, Ordering::SeqCst);
                 let more: Vec<Worker> = spare.lock().unwrap_or_else(PoisonError::into_inner).drain(..).collect();
-                let mut hs = handles.lock().unwrap_or_else(PoisonError::into_inner);
-                for w in more {
-                    hs.push(spawn(w));
-                }
+                spawn_tree(s, eng, self, &back, more);
             };
             run_worker(eng, self, &first, src, Some(&spawn_more));
-            let hs: Vec<_> = handles.into_inner().unwrap_or_else(PoisonError::into_inner);
-            let mut back: Vec<Worker> = hs.into_iter().map(|h| h.join().expect("a worker thread")).collect();
-            back.extend(spare.into_inner().unwrap_or_else(PoisonError::into_inner));
-            (first, back)
         });
+        let mut rest = back.into_inner().unwrap_or_else(PoisonError::into_inner);
+        rest.extend(spare.into_inner().unwrap_or_else(PoisonError::into_inner));
+        rest.sort_by_key(|w| w.ix);
         let mut workers = vec![first];
         workers.extend(rest);
         match self.failed.lock().take() {
