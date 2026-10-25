@@ -260,6 +260,9 @@ pub struct Output {
     pub log: String,
     /// The files TeX wrote.
     pub writes: Vec<(String, String)>,
+    /// The PDF file's layout, where the session writes update sections
+    /// ([`Session::updates`]; `pdf` is then empty).
+    pub layout: Option<phitex_pdf::Layout>,
 }
 
 /// What a build made.
@@ -432,6 +435,60 @@ pub struct Session {
     absorb: Absorb,
     /// When the change came that the last build took last while it ran.
     absorbed_at: Option<Instant>,
+    /// A watch's session: no log laid out after a build (`--log`: with
+    /// the exact file when idle, [`Session::write_log`]).
+    pub watching: bool,
+    /// The PDF file written as update sections (a watch's, but with
+    /// `--exact`): what it holds ([`UpdateFile`]).
+    pub updates: Option<Arc<Mutex<UpdateFile>>>,
+}
+
+/// The PDF file a watch writes: the exact file, then an update section
+/// after each edit ([`phitex_pdf::Updater`]), the exact file again once
+/// the editor is idle ([`compact`]).
+#[derive(Default)]
+pub struct UpdateFile {
+    /// Where, and what it holds (none: nothing written yet).
+    pub at: Option<(PathBuf, phitex_pdf::Updater)>,
+    /// Whether it is the exact file of what it holds.
+    pub exact: bool,
+    /// Its writes so far (a compaction of an older state is dropped).
+    pub writes: u64,
+}
+
+/// The exact file of what `f` holds written over it, through a
+/// temporary file renamed (atomic), unless it is written already or
+/// another write came meanwhile: whether it was written. The exact
+/// bytes are made and written without the lock: a section an edit
+/// appends meanwhile wins, and the next idle writes the exact file.
+///
+/// # Errors
+/// The file system's.
+pub fn compact(f: &Mutex<UpdateFile>) -> Result<bool, String> {
+    let (p, layout, writes) = {
+        let g = f.lock().unwrap_or_else(PoisonError::into_inner);
+        match &g.at {
+            Some((p, u)) if !g.exact => (p.clone(), u.held().clone(), g.writes),
+            _ => return Ok(false),
+        }
+    };
+    let exact = layout.exact().map_err(|e| format!("{e}"))?;
+    let name = p
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let tmp = p.with_file_name(format!(".{name}.phitex-exact"));
+    let err = |e: std::io::Error| format!("can't write {}: {e}", p.display());
+    std::fs::write(&tmp, exact.as_slice()).map_err(err)?;
+    let mut g = f.lock().unwrap_or_else(PoisonError::into_inner);
+    if g.writes != writes {
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(false);
+    }
+    std::fs::rename(&tmp, &p).map_err(err)?;
+    g.at = Some((p, phitex_pdf::Updater::after_exact(layout, &exact)));
+    g.exact = true;
+    g.writes += 1;
+    Ok(true)
 }
 
 /// The main text sent to a running build from another thread: the build
@@ -558,6 +615,8 @@ impl Session {
             cache,
             absorb: Absorb::default(),
             absorbed_at: None,
+            watching: false,
+            updates: None,
         })
     }
 
@@ -892,9 +951,18 @@ impl Session {
         let gc = (Duration::ZERO, 0);
         self.status.set("output");
         let b = self.build.as_ref().expect("built above");
-        let (bytes, log) = b.output_shared();
+        // (a watch lays no log out; a file written as update sections
+        // takes the link's layout, not the exact bytes)
+        let layout = self.updates.as_ref().and_then(|_| b.pdf_layout());
+        let (bytes, log) = if layout.is_some() {
+            (Arc::default(), String::new())
+        } else if self.watching {
+            (b.output_bytes(), String::new())
+        } else {
+            b.output_shared()
+        };
         lap(&mut phases, "output");
-        let pdf = b.is_pdf();
+        let pdf = layout.is_some() || b.is_pdf();
         let s = &b.stats;
         let diagnostics = if why == "edit" && !self.job.edit_diagnostics {
             b.unplaced_diagnostics()
@@ -951,11 +1019,14 @@ impl Session {
                     .iter()
                     .map(|d| format!("! {} ({}:{})", d.message, d.file, d.line)),
             )
-            .chain(
+            .chain(if self.watching {
+                b.error_lines()
+            } else {
                 log.lines()
                     .filter(|l| l.starts_with("! "))
-                    .map(str::to_owned),
-            )
+                    .map(str::to_owned)
+                    .collect()
+            })
             .collect();
         // (a PDF file's pages: not known until the engine reports them;
         // the viewer counts the PDF's itself and draws each page again)
@@ -995,6 +1066,7 @@ impl Session {
                 page_hashes: hashes,
                 errors,
                 log,
+                layout,
             },
             edit_line,
             runs: vec![RunInfo {
@@ -1459,6 +1531,13 @@ impl Session {
             .main_output()
             .map_or(self.job.engine.output.ext(), |(e, _)| e);
         let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
+        if let (Some(l), Some(u), true) = (&r.out.layout, &self.updates, main_too) {
+            let p = dir.join(format!("{}.pdf", self.job.jobname));
+            self.write_update(&p, l, u)?;
+            phitex_tex::timeline::lap("write: the main output (an update section)");
+            files.push((p.clone(), tex::ANY_BYTES));
+            main = Some(p);
+        }
         if let Some((e, _)) = r.main_output().filter(|_| main_too) {
             let shared = if r.out.pdf.is_empty() {
                 &r.out.dvi
@@ -1496,16 +1575,78 @@ impl Session {
             }
             put(n, &tex::bytes(t))?;
         }
-        put(
-            &format!("{}.log", self.job.jobname),
-            &tex::bytes(&r.out.log),
-        )?;
+        if !self.watching {
+            put(
+                &format!("{}.log", self.job.jobname),
+                &tex::bytes(&r.out.log),
+            )?;
+        }
         if self.job.recorder {
             let fls = self.recorder(r, &format!("{}.{ext}", self.job.jobname));
             put(&format!("{}.fls", self.job.jobname), fls.as_bytes())?;
         }
         phitex_tex::timeline::lap("write: the log, the files TeX wrote");
         Ok(Written { main, files })
+    }
+
+    /// The PDF file at `p` brought to layout `l`: an update section
+    /// appended where the file holds an earlier layout (as `u` says, and
+    /// as long as its length on disk), else the exact file written whole.
+    fn write_update(
+        &self,
+        p: &Path,
+        l: &phitex_pdf::Layout,
+        u: &Mutex<UpdateFile>,
+    ) -> Result<(), String> {
+        use std::io::Write;
+        let err = |e: std::io::Error| format!("can't write {}: {e}", p.display());
+        let mut g = u.lock().unwrap_or_else(PoisonError::into_inner);
+        let on_disk = std::fs::metadata(p).map(|m| m.len()).ok();
+        if let Some((q, up)) = g.at.as_mut()
+            && q == p
+            && on_disk == Some(up.len())
+        {
+            if let phitex_pdf::Section::Append(b) = up.section(l) {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(p)
+                    .and_then(|mut f| f.write_all(&b))
+                    .map_err(err)?;
+                g.exact = false;
+                g.writes += 1;
+            }
+            return Ok(());
+        }
+        let exact = l.exact().map_err(|e| format!("{e}"))?;
+        let name = p
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let tmp = p.with_file_name(format!(".{name}.phitex-tmp"));
+        std::fs::write(&tmp, exact.as_slice())
+            .and_then(|()| std::fs::rename(&tmp, p))
+            .map_err(err)?;
+        g.at = Some((
+            p.to_path_buf(),
+            phitex_pdf::Updater::after_exact(l.clone(), &exact),
+        ));
+        g.exact = true;
+        g.writes += 1;
+        Ok(())
+    }
+
+    /// `JOB.log` written from the build as it is now (a watch's `--log`,
+    /// when idle).
+    ///
+    /// # Errors
+    /// The file system's.
+    pub fn write_log(&self) -> Result<(), String> {
+        let Some(b) = &self.build else {
+            return Ok(());
+        };
+        let (_, log) = b.output_shared();
+        let p = self.job.out_dir.join(format!("{}.log", self.job.jobname));
+        std::fs::write(&p, tex::bytes(&log))
+            .map_err(|e| format!("can't write {}: {e}", p.display()))
     }
 
     /// The main output written at `p`: where the file is the last one

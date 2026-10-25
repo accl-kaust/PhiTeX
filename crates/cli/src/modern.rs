@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Args, ColorChoice, Parser, Subcommand};
@@ -157,7 +158,9 @@ struct Opts {
     /// Exact rounds (the default): the files the document reads back
     /// (.aux, .toc, .out, .idx, …) change only between rounds, as
     /// between latexmk's runs, so the PDF is byte for byte what pdflatex
-    /// under latexmk makes
+    /// under latexmk makes. watch: every edit writes that exact PDF file
+    /// too (else an edit appends an update section to it, and the exact
+    /// file is written once the editor is idle)
     #[arg(long, global = true, conflicts_with = "relaxed")]
     exact: bool,
     /// Relaxed rounds (experimental): a file read back changes as soon
@@ -210,6 +213,14 @@ struct Opts {
     /// viewer asks for them; else an edit reports the engine's own only)
     #[arg(long, global = true)]
     diagnostics: bool,
+    /// watch: the time without an edit after which the exact PDF file is
+    /// written over the updated one (default 300)
+    #[arg(long, value_name = "MS", global = true)]
+    idle: Option<u64>,
+    /// watch: the log written too, with the exact PDF file when idle
+    /// (else a watch writes no log)
+    #[arg(long, global = true)]
+    log: bool,
     /// watch: the viewer's port (default: a free one)
     #[arg(long, value_name = "N", global = true)]
     port: Option<u16>,
@@ -263,6 +274,12 @@ pub struct Options {
     pub open: bool,
     pub view: bool,
     pub diagnostics: bool,
+    /// watch: every edit writes the exact PDF file (`--exact`).
+    pub exact_file: bool,
+    /// watch: the idle time before the exact file is written.
+    pub idle: Duration,
+    /// watch: the log written with the exact file (`--log`).
+    pub log: bool,
     pub port: Option<u16>,
     pub editor: Option<String>,
     pub copy_pdf: Option<config::CopyPdf>,
@@ -302,6 +319,9 @@ impl Cli {
             open: o.open,
             view: !o.no_view,
             diagnostics: o.diagnostics,
+            exact_file: o.exact || o.exact_pdf,
+            idle: Duration::from_millis(o.idle.unwrap_or(300)),
+            log: o.log,
             port: o.port,
             editor: o.editor,
             copy_pdf: if o.no_copy_pdf {

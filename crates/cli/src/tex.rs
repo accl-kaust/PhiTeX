@@ -182,6 +182,10 @@ fn samples(len: usize) -> Vec<(usize, usize)> {
     v
 }
 
+/// A written file's hash standing for any bytes: a file the watch
+/// appends to (its PDF's update sections), whose changes are all its own.
+pub const ANY_BYTES: u64 = u64::MAX;
+
 /// The watch's mark of a file it wrote, to know the file as its own when
 /// the system says it changed: the bytes' hash below 1 MB; past it the
 /// length and samples (its head, its tail, 256 bytes a megabyte), so

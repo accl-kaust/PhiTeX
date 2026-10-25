@@ -24,6 +24,7 @@ phitex-biber = { path = "../tools/biber" }
 phitex-kpse = { path = "../tools/kpse" }
 phitex-makeindex = { path = "../tools/makeindex" }
 phitex-tex = { path = "../engines/tex" }
+phitex-pdf = { path = "../output/pdf" }
 phitex-xdvipdfmx = { path = "../output/xdvipdfmx" }
 phitex-codecs = { path = "../codecs" }
 phitex-diff = { path = "../editor/diff" }

@@ -1573,6 +1573,7 @@ dependencies = [
  "phitex-git",
  "phitex-kpse",
  "phitex-makeindex",
+ "phitex-pdf",
  "phitex-tex",
  "phitex-xdvipdfmx",
  "rustix",

@@ -44,6 +44,9 @@ enum Event {
     /// The build running on its own thread ended: the watch joins it at
     /// once (no poll).
     Built,
+    /// The exact PDF file written over the updated one (when idle),
+    /// that of build `.0`: whether it was, or why not.
+    Compacted(usize, Result<bool, String>),
 }
 
 /// The extensions of the files a change of rebuilds.
@@ -84,6 +87,7 @@ fn not_ours(ours: &Ours, changed: &mut Vec<PathBuf>) {
             .get(p)
             .or_else(|| p.canonicalize().ok().and_then(|c| ours.get(&c)));
         match mine {
+            Some(&tex::ANY_BYTES) => false,
             Some(&h) => tex::fingerprint_file(p) != Some(h),
             None => true,
         }
@@ -543,6 +547,16 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         std::process::exit(crate::EXIT_FAILED);
     });
     spin.done();
+    // (no log laid out after a build; the PDF file appended an update
+    // section after each edit, the exact file written when idle, but
+    // with `--exact`)
+    s.watching = true;
+    if !o.exact_file {
+        s.updates = Some(Arc::default());
+    }
+    // (since when the PDF file is not the exact one: written when the
+    // editor has been idle for `o.idle`)
+    let idle_since: std::cell::Cell<Option<Instant>> = std::cell::Cell::new(None);
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let main_file = root.join(&s.job.path);
     let main_rel = s
@@ -632,14 +646,28 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     }
     // (the build's thread's end, sent to the loop that waits on it)
     let built = Mutex::new(tx.clone());
+    // (the exact file's write when idle, on a thread of its own, says
+    // when it is done)
+    let compacted = tx.clone();
     drop(tx);
     if raw {
         ui.keys(keys::BAR);
     }
     let last = RefCell::new(Last::default());
     let quit = |ui: &Ui, s: &mut Session| -> ! {
-        // (the records the builds changed, stored before the watch ends)
+        // (the records the builds changed, stored before the watch ends;
+        // the exact PDF file and, with `--log`, the log)
         s.flush_records();
+        if let Some(u) = &s.updates
+            && let Err(e) = session::compact(u)
+        {
+            ui.error(&e);
+        }
+        if o.log
+            && let Err(e) = s.write_log()
+        {
+            ui.error(&e);
+        }
         ui.finish();
         keys::restore();
         if let Some(l) = farewell(st, &last.borrow()) {
@@ -779,6 +807,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
         };
         drop(mine);
+        if let Some(u) = &s.updates {
+            let exact = u.lock().unwrap_or_else(PoisonError::into_inner).exact;
+            idle_since.set((!exact || o.log).then(Instant::now));
+        } else if o.log {
+            idle_since.set(Some(Instant::now()));
+        }
         phitex_tex::timeline::lap("watch: files written (the PDF, the log, the aux files)");
         if phitex_tex::tex_time() {
             eprintln!(
@@ -794,6 +828,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         if let Some(v) = &view {
             {
                 last_pdf = match r.main_output() {
+                    // (a file written as update sections: as it is)
+                    None if r.out.layout.is_some() => written
+                        .as_ref()
+                        .and_then(|p| std::fs::read(p).ok())
+                        .map(|b| session::shared(&b)),
                     Some(("pdf", b)) => Some(session::shared(b)),
                     Some((_, dvi)) => match crate::dvipdf::dvi_to_pdf(
                         dvi,
@@ -1182,10 +1221,35 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (no event for 2 s: the session is idle, the records the builds
     // changed are stored then, not after every build)
     loop {
+        let wait = idle_since.get().map_or(Duration::from_secs(2), |t| {
+            o.idle.saturating_sub(t.elapsed())
+        });
         let first = match held.pop_front() {
             Some(e) => e,
-            None => match rx.recv_timeout(Duration::from_secs(2)) {
+            None => match rx.recv_timeout(wait) {
                 Ok(e) => e,
+                Err(mpsc::RecvTimeoutError::Timeout) if idle_since.take().is_some() => {
+                    // (idle: the exact PDF file written on a thread of
+                    // its own, over the updated one; with `--log`, the
+                    // log beside it)
+                    if o.log
+                        && let Err(e) = s.write_log()
+                    {
+                        ui.error(&e);
+                    }
+                    if let Some(u) = s.updates.clone() {
+                        let tx = compacted.clone();
+                        let b = last.borrow().builds;
+                        std::thread::Builder::new()
+                            .name("phitex-watch-exact".into())
+                            .spawn(move || {
+                                let r = session::compact(&u);
+                                let _ = tx.send((Instant::now(), Event::Compacted(b, r)));
+                            })
+                            .expect("a thread");
+                    }
+                    continue;
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     s.flush_records();
                     continue;
@@ -1368,6 +1432,22 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 }
                 // (a build's end is taken by the loop that waits on it)
                 Event::Built => {}
+                Event::Compacted(_, Ok(false)) => {}
+                Event::Compacted(b, Ok(true)) => {
+                    let out = last.borrow().good.clone();
+                    ui.event(&json!({
+                        "event": "written",
+                        "exact": true,
+                        "build": b,
+                        "output": out.as_ref().map(|p| p.display().to_string()),
+                    }));
+                    if let (Some(v), Some(p)) = (&view, &out)
+                        && let Ok(b) = std::fs::read(p)
+                    {
+                        v.pdf_replaced(Some(session::shared(&b)));
+                    }
+                }
+                Event::Compacted(_, Err(e)) => ui.error(&e),
                 Event::Edited(file) => {
                     set(&mut s, &buffers, &file);
                     why.push(format!("{file} (editor)"));

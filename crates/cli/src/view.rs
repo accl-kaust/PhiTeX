@@ -372,6 +372,16 @@ impl View {
     /// A build is in: its PDF and pages' hashes kept, the browsers told
     /// (they draw the pages that changed). The pages (from 1) whose hashes
     /// changed, and how many there are.
+    /// The PDF served replaced by the same pages' exact file (written
+    /// when idle over the updated one), the browsers told.
+    pub fn pdf_replaced(&self, pdf: Option<Arc<[u8]>>) {
+        lock(&self.shared.pages).pdf = pdf;
+        broadcast(
+            &self.shared,
+            &json!({"event": "written", "exact": true}).to_string(),
+        );
+    }
+
     pub fn built(&self, b: &Built) -> (Vec<usize>, usize) {
         let mut pages = lock(&self.shared.pages);
         let changed: Vec<usize> = b
