@@ -1814,9 +1814,10 @@ impl Operation for Finish {
     /// only where a value differs (the page number's readers). The page
     /// state and the shipped mark are left out: the chain reads them.
     ///
-    /// And its page's output as no output yet ([`PAGE_OUT`]): the step
-    /// after it reads it as its own finisher's, on its guess, not an
-    /// earlier finisher's that a later commit would take back.
+    /// And its page's output ([`PAGE_OUT`]) as the routine's last
+    /// give-back, else nothing given back (the step's guess without one,
+    /// `Run::rtn_guess`): the step after it runs on that and stands when
+    /// the run gives the same.
     fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         let r = self.predicted_defs_(args, v);
         let c = if r.is_some() {
@@ -1830,8 +1831,13 @@ impl Operation for Finish {
         };
         let mut out = r.unwrap_or_default();
         let f = v.field(PAGE_OUT);
+        let rtn = v.field(RTN);
+        let given = out
+            .iter()
+            .find(|e| e.0 == rtn)
+            .map_or_else(|| v.list(vec![v.list(Vec::new()), v.list(Vec::new())]), |e| e.1);
         out.retain(|e| e.0 != f);
-        out.push((f, page_out_value(v, fin.piece, fin.nth, ValueId::UNIT)));
+        out.push((f, page_out_value(v, fin.piece, fin.nth, given)));
         Some(out)
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {

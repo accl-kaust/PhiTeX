@@ -287,15 +287,6 @@ pub(crate) fn page_out_value(v: &Values, piece: phitex_defuse::NodeId, nth: u32,
     v.list(vec![v.int(i64::from_ne_bytes(piece.raw().to_ne_bytes())), v.int(i64::from(nth)), out])
 }
 
-/// The output in a [`PAGE_OUT`] value, where it names page `(piece,
-/// nth)`.
-pub(crate) fn page_out_of(v: &Values, x: ValueId, piece: phitex_defuse::NodeId, nth: u32) -> Option<ValueId> {
-    match list_of(v, x)[..] {
-        [p, n, out] if int_of(v, p) == i64::from_ne_bytes(piece.raw().to_ne_bytes()) && int_of(v, n) == i64::from(nth) => Some(out),
-        _ => None,
-    }
-}
-
 /// A location's value at a candidate in a piece's check data
 /// ([`Run::check_data`]) that the piece had neither read nor defined
 /// before: what reached the piece, which its page's finisher reads before

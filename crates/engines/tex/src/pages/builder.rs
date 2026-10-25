@@ -1500,17 +1500,31 @@ impl Run<'_, '_> {
             phitex_defuse::FieldAt::Unset => None,
             phitex_defuse::FieldAt::Gone => self.par(Par::output)?,
         };
-        let toks = toks_of(v, out);
-        if toks.is_empty() {
-            return Ok(ValueId::UNIT);
+        // (the last routine's hint, by its value and the definitions: a
+        // page's routine is mostly the page before's)
+        type Last = Option<(u64, Option<ValueId>, usize, ValueId)>;
+        thread_local! {
+            static LAST: std::cell::Cell<Last> = const { std::cell::Cell::new(None) };
         }
-        let mut text = String::new();
-        self.show_toks_into(&mut text, &toks)?;
-        let h = {
-            let defs = self.ops.defs.locked();
-            crate::hints::routine_hint(&text, &defs)
+        let defs = self.ops.defs.locked().clone();
+        let d = std::sync::Arc::as_ptr(&defs) as usize;
+        if let Some((i, o, dp, h)) = LAST.get()
+            && i == v.instance()
+            && o == out
+            && dp == d
+        {
+            return Ok(h);
+        }
+        let toks = toks_of(v, out);
+        let h = if toks.is_empty() {
+            ValueId::UNIT
+        } else {
+            let mut text = String::new();
+            self.show_toks_into(&mut text, &toks)?;
+            v.str(&crate::hints::routine_hint(&text, &defs).encode())
         };
-        Ok(v.str(&h.encode()))
+        LAST.set(Some((v.instance(), out, d, h)));
+        Ok(h)
     }
 
 
@@ -1728,9 +1742,11 @@ impl Run<'_, '_> {
         let j = p.j;
         let node = p.node;
         let guess = p.rtn_guess;
-        // (its finisher's output where the definition reaching here is
-        // its finisher's, else the guess)
-        let rtn = match self.cx.read(v.field(PAGE_OUT))?.and_then(|x| page_out_of(v, x, node, p.nth)) {
+        // (its finisher's output, the definition reaching here: the
+        // finisher is placed with it predicted, so read past the page's
+        // name; none yet, the guess)
+        let at = self.cx.path(&[phitex_defuse::Step::Index(2)]);
+        let rtn = match self.cx.read_path(v.field(PAGE_OUT), at)? {
             None | Some(ValueId::UNIT) => guess,
             Some(x) => x,
         };

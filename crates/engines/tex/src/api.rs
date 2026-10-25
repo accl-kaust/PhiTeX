@@ -2798,6 +2798,9 @@ impl Graph {
                 self.eng.remove(d);
             }
             let mut res = self.eng.evaluate_absorbing(n, edits);
+            if let (Ok(r), Some(path)) = (&res, crate::exec::env_str!("PHITEX_CHAIN_TSV")) {
+                dump_chain(&self.eng, r, path);
+            }
             if let Some((u, _, _)) = writers {
                 self.push_writers(u);
                 if res.is_ok()
@@ -2917,9 +2920,6 @@ impl Graph {
                     by.truncate(12);
                     eprintln!("  reruns by field {by:?}");
                 }
-            }
-            if let Some(path) = crate::exec::env_str!("PHITEX_CHAIN_TSV") {
-                dump_chain(&self.eng, &r, path);
             }
             crate::timeline::lap("engine: the accounting printed (PHITEX_TEX_TIME only)");
             stats.add(&r);
