@@ -1563,11 +1563,11 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
 
 /// Takes a node's definitions and contributions out of its segment (under
 /// its write lock) and re-asks their readers, and, when it is removed, the
-/// reads made at its label; its placements are unfiled.
-fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: bool) {
+/// reads made at its label. Its placements, for the caller to unfile.
+fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: bool) -> Vec<NodeId> {
     let rec = node.record();
     let Some((seg, mut inner)) = own_write(eng, node) else {
-        return;
+        return Vec::new();
     };
     let pos = node.pos_hint();
     let seg_id = seg.id;
@@ -1639,28 +1639,36 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     if was_hole && remove {
         walk_stopped(eng, w, node, pos, seg_id, &[], &mut st);
     }
-    if let Some(r) = &rec {
-        for &c in &r.placed {
-            unfile(eng, w, eng.node(c));
-        }
-        if r.claim > 0 {
-            release_claimed(eng, w, node);
-        }
+    if let Some(r) = &rec
+        && r.claim > 0
+    {
+        release_claimed(eng, w, node);
     }
     eng.note_stats(w, &st);
+    rec.map(|r| r.placed.clone()).unwrap_or_default()
 }
 
-/// Removes a node: its definitions, contributions, reads, by-op entry and,
-/// recursively, its placements; readers of what it defined are re-asked.
-/// Its state becomes `Gone`.
+/// Removes a node: its definitions, contributions, reads, by-op entry and
+/// its placements', all the way down; readers of what they defined are
+/// re-asked. Their state becomes `Gone`. A list of the placements still to
+/// remove, not a frame each: a continuation chain is as deep as it is long.
 pub(crate) fn unfile(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
-    retract_products(eng, w, node, true);
+    let mut todo = retract_products(eng, w, node, true);
+    todo.reverse();
+    while let Some(c) = todo.pop() {
+        let mut more = retract_products(eng, w, eng.node(c), true);
+        more.reverse();
+        todo.append(&mut more);
+    }
 }
 
 /// A sibling taken by a claim after it ran, or before with predictions
-/// filed: its products are withdrawn, the node stays, inert.
+/// filed: its products are withdrawn, its placements removed, the node
+/// stays, inert.
 fn retract(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
-    retract_products(eng, w, node, false);
+    for c in retract_products(eng, w, node, false) {
+        unfile(eng, w, eng.node(c));
+    }
 }
 
 /// The claimer's inert siblings made dirty again (its claim is gone).

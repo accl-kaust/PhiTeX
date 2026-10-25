@@ -1164,3 +1164,23 @@ fn a_node_after_a_long_chain_is_placed() {
     let x = e.insert_after(first, op, vec![v.int(n), v.int(n), v.int(0)]);
     assert_eq!(*e.order(u).last().unwrap(), x);
 }
+
+#[test]
+fn a_long_chain_cut_at_its_head_is_removed() {
+    // The head of a continuation chain run again with nothing to follow:
+    // its commit removes the whole chain after it, without a frame per
+    // step, on a worker's thread.
+    let e = Engine::new();
+    let st = Arc::new(Stepper(std::sync::OnceLock::new()));
+    let op = e.register(st.clone());
+    st.0.set(op).unwrap();
+    let v = e.values();
+    let u = e.new_unit();
+    let n = 100_000;
+    let first = e.push(u, op, vec![v.int(0), v.int(n), v.int(0)]);
+    e.evaluate(4).unwrap();
+    e.replace(first, op, vec![v.int(0), v.int(0), v.int(0)]);
+    e.evaluate(4).unwrap();
+    assert_eq!(e.order(u), vec![first]);
+    assert_eq!(e.live_nodes(), 1);
+}
