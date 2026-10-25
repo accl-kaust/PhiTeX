@@ -1147,3 +1147,20 @@ fn a_fold_sums_a_segment_outside_its_lock() {
     let r = e.evaluate(8).unwrap();
     assert!(r.times.lock_wait_max_ns < 3_000_000, "a lock waited for a fold's sum: {:?}", r.times);
 }
+
+#[test]
+fn a_node_after_a_long_chain_is_placed() {
+    // A node inserted after the head of a continuation chain goes after
+    // the chain's end, found without a frame per step.
+    let e = Engine::new();
+    let st = Arc::new(Stepper(std::sync::OnceLock::new()));
+    let op = e.register(st.clone());
+    st.0.set(op).unwrap();
+    let v = e.values();
+    let u = e.new_unit();
+    let n = 100_000;
+    let first = e.push(u, op, vec![v.int(0), v.int(n), v.int(0)]);
+    e.evaluate(4).unwrap();
+    let x = e.insert_after(first, op, vec![v.int(n), v.int(n), v.int(0)]);
+    assert_eq!(*e.order(u).last().unwrap(), x);
+}

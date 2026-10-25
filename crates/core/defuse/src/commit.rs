@@ -91,17 +91,24 @@ pub(crate) fn own_write<'a>(eng: &'a Engine, node: &Node) -> Option<(&'a Arc<Seg
 }
 
 /// The last node of `n`'s subtree: `n`, or the furthest of its placements'.
+/// A list of the nodes still to visit, not a frame each: a continuation
+/// chain is a subtree as deep as it is long.
 pub(crate) fn subtree_end(eng: &Engine, n: NodeId) -> NodeId {
-    let mut best = n;
-    if let Some(r) = eng.node(n).run_record() {
+    let (mut best, mut best_pos) = (n, eng.node(n).pos_hint());
+    let mut todo = vec![n];
+    while let Some(x) = todo.pop() {
+        let Some(r) = eng.node(x).run_record() else {
+            continue;
+        };
         for &c in &r.placed {
-            if eng.node(c).state() == State::Gone {
+            let cn = eng.node(c);
+            if cn.state() == State::Gone {
                 continue;
             }
-            let e = subtree_end(eng, c);
-            if eng.node(e).pos_hint() > eng.node(best).pos_hint() {
-                best = e;
+            if cn.pos_hint() > best_pos {
+                (best, best_pos) = (c, cn.pos_hint());
             }
+            todo.push(c);
         }
     }
     best
