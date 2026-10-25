@@ -899,3 +899,70 @@ fn a_reader_at_a_removed_node_is_asked_again() {
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
 
+
+/// `[k, ms, work]`: reads k (an integer; none: 0), spins `ms`
+/// milliseconds, then places k children `Work [0]`; outputs k.
+struct SpawnK(OpId);
+
+impl Operation for SpawnK {
+    fn name(&self) -> &'static str {
+        "spawn_k"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let k = Field(cx.args()[0]);
+        let n = cx.read(k)?.and_then(|x| cx.values().as_int(x)).unwrap_or(0);
+        spin(Duration::from_millis(cx.values().as_int(cx.args()[1]).unwrap() as u64));
+        for _ in 0..n {
+            let zero = cx.values().int(0);
+            cx.child(self.0, vec![zero]);
+        }
+        Ok(cx.values().int(n))
+    }
+}
+
+/// `[f, n, ms]`: reads the definition of f reaching node n, spins `ms`
+/// milliseconds; outputs what it read (UNIT if none or gone).
+struct SlowGetBefore;
+
+impl Operation for SlowGetBefore {
+    fn name(&self) -> &'static str {
+        "slow_get_before"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let f = Field(cx.args()[0]);
+        let n = NodeId::from_raw(cx.values().as_int(cx.args()[1]).unwrap() as u64);
+        let x = match cx.read_at(f, At::Before(n))? {
+            FieldAt::Def(v, _) => v,
+            FieldAt::Unset | FieldAt::Gone => ValueId::UNIT,
+        };
+        spin(Duration::from_millis(cx.values().as_int(cx.args()[2]).unwrap() as u64));
+        Ok(x)
+    }
+}
+
+#[test]
+fn a_reader_whose_anchor_goes_before_its_commit_runs_again() {
+    // The node a read is at is removed while its reader still runs: the
+    // reader's commit finds it gone, so its read no longer stands.
+    let (e, o) = engine();
+    let spawn = e.register(Arc::new(SpawnK(o.work)));
+    let get = e.register(Arc::new(SlowGetBefore));
+    let v = e.values();
+    let (x, k) = (f(v, "x"), f(v, "k"));
+    let u = e.new_unit();
+    e.push(u, o.def, vec![x, v.int(1)]);
+    let kd = e.push(u, o.def, vec![k, v.int(1)]);
+    let p = e.push(u, spawn, vec![k, v.int(30)]);
+    e.evaluate(2).unwrap();
+    let n = e.children(p)[0];
+    // (the caller's thread runs the edit first and then the parent, which
+    // removes `n` at 30 ms; the reader reads at once and commits at 100 ms)
+    e.replace(kd, o.def, vec![k, v.int(0)]);
+    let r = e.push(u, get, vec![x, v.int(n.raw() as i64), v.int(100)]);
+    e.evaluate(4).unwrap();
+    assert!(!e.is_live(n));
+    assert_eq!(e.output(r), Some(ValueId::UNIT), "the reader of a node gone before its commit ran again");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

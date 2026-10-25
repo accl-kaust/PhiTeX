@@ -713,6 +713,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         break (seg.id, seg.lo, old_output, rec, pos);
     };
     // 2. reads anchored elsewhere
+    // (a node read at that is gone by now: a read that found a value there
+    // finds none, and no removal will ask it again)
+    let mut anchor_gone = false;
     for (f, mut r, at) in other_reads {
         if let Anchor::End(u) = at {
             let Some(last_node) = eng.unit_last_node(u) else {
@@ -729,6 +732,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             if first {
                 eng.readers.add(f, seg.lo, seg.id);
             }
+        } else if r.seen.is_some() {
+            anchor_gone = true;
         }
     }
     file_ranges(eng, ww, range_reads, node.id, &mut st);
@@ -830,14 +835,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             read::answer_in(eng, node, &r.kind, r.path, &mut memo) != r.seen
         })
     });
-    if let Some(i) = refuted {
-        let cause = match &rec.reads[i].kind {
-            ReadKind::Field { f, .. } => Cause::Changed { field: *f, site: None },
-            ReadKind::Env { f } => Cause::Environment { field: *f },
-            ReadKind::Fold { f, .. } | ReadKind::Next { f, .. } => Cause::Range { field: *f, by: node.id },
-            ReadKind::Placed { .. } => Cause::Output { of: node.id },
-            ReadKind::Following { .. } => Cause::Structure,
-        };
+    let cause = match refuted.map(|i| &rec.reads[i].kind) {
+        Some(ReadKind::Field { f, .. }) => Some(Cause::Changed { field: *f, site: None }),
+        Some(ReadKind::Env { f }) => Some(Cause::Environment { field: *f }),
+        Some(ReadKind::Fold { f, .. } | ReadKind::Next { f, .. }) => Some(Cause::Range { field: *f, by: node.id }),
+        Some(ReadKind::Placed { .. }) => Some(Cause::Output { of: node.id }),
+        Some(ReadKind::Following { .. }) => Some(Cause::Structure),
+        None => anchor_gone.then_some(Cause::Structure),
+    };
+    if let Some(cause) = cause {
         mark_dirty(
             eng,
             ww,
