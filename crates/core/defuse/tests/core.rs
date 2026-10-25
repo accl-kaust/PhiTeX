@@ -701,7 +701,8 @@ fn many_pushed_at_once_are_as_pushed_one_by_one() {
     let ids = e.push_many(u, o.get, gets, 4);
     let last = e.push(u, o.get, vec![x]);
     let r = e.evaluate(4).unwrap();
-    assert_eq!(r.runs, 2 * n as u64 + 2);
+    // (a get may run before its definer, in another block, and once more)
+    assert_eq!(r.nodes_run, 2 * n as u64 + 2);
     for (i, id) in ids.iter().enumerate() {
         assert_eq!(e.output(*id), Some(v.int(i as i64)), "get {i}");
     }
