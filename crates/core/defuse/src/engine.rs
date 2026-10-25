@@ -208,6 +208,13 @@ impl Engine {
         self.nodes.get(usize::try_from(id.raw()).unwrap_or(usize::MAX)).expect("a node of this engine")
     }
 
+    /// A node, None while it is not on the line yet: a commit's record
+    /// names the placements it puts after other nodes (`place_after`)
+    /// before they are placed.
+    pub(crate) fn placed_node(&self, id: NodeId) -> Option<&Arc<Node>> {
+        self.nodes.get(usize::try_from(id.raw()).unwrap_or(usize::MAX))
+    }
+
     pub(crate) fn seg(&self, id: SegId) -> &Arc<Segment> {
         loop {
             if let Some(s) = self.segs.get(id.0 as usize) {
@@ -766,7 +773,13 @@ impl Engine {
     pub fn children(&self, n: NodeId) -> Vec<NodeId> {
         self.node(n)
             .run_record()
-            .map(|r| r.placed.iter().copied().filter(|&c| self.node(c).state() != State::Gone).collect())
+            .map(|r| {
+                r.placed
+                    .iter()
+                    .copied()
+                    .filter(|&c| self.placed_node(c).is_some_and(|n| n.state() != State::Gone))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

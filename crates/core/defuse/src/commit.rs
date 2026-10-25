@@ -101,7 +101,10 @@ pub(crate) fn subtree_end(eng: &Engine, n: NodeId) -> NodeId {
             continue;
         };
         for &c in &r.placed {
-            let cn = eng.node(c);
+            // (one not on the line yet goes after this end)
+            let Some(cn) = eng.placed_node(c) else {
+                continue;
+            };
             if cn.state() == State::Gone {
                 continue;
             }
@@ -772,9 +775,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             er.entry(f).or_default().push(r);
         }
     }
-    // deferred placements: after a node elsewhere
+    // deferred placements: after a node elsewhere (one placed after this
+    // node was removed or taken, which withdrew this record, goes with it)
     for (_, at, n, pred) in deferred {
-        made.push(place_after(eng, at, n, pred));
+        let n = place_after(eng, at, n, pred);
+        if node.state() == State::Gone || !node.record().is_some_and(|r| Arc::ptr_eq(&r, &rec)) {
+            unfile(eng, ww, &n);
+            continue;
+        }
+        made.push(n);
     }
     if p.claim > 0 || last.as_ref().is_some_and(|r| r.claim > 0) {
         apply_claim(eng, ww, node, p.claim);
@@ -1656,7 +1665,12 @@ pub(crate) fn unfile(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
     let mut todo = retract_products(eng, w, node, true);
     todo.reverse();
     while let Some(c) = todo.pop() {
-        let mut more = retract_products(eng, w, eng.node(c), true);
+        // (one not on the line yet: its placer's commit removes it once
+        // placed, finding its placer's record gone)
+        let Some(cn) = eng.placed_node(c) else {
+            continue;
+        };
+        let mut more = retract_products(eng, w, cn, true);
         more.reverse();
         todo.append(&mut more);
     }
@@ -1667,7 +1681,9 @@ pub(crate) fn unfile(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
 /// stays, inert.
 fn retract(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
     for c in retract_products(eng, w, node, false) {
-        unfile(eng, w, eng.node(c));
+        if let Some(cn) = eng.placed_node(c) {
+            unfile(eng, w, cn);
+        }
     }
 }
 

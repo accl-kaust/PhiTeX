@@ -1184,3 +1184,36 @@ fn a_long_chain_cut_at_its_head_is_removed() {
     assert_eq!(e.order(u), vec![first]);
     assert_eq!(e.live_nodes(), 1);
 }
+
+/// `[]`: places a `Work [0]` after itself and its placements
+/// (`Ctx::follow_after` of itself).
+struct FollowSelf(OpId);
+
+impl Operation for FollowSelf {
+    fn name(&self) -> &'static str {
+        "follow_self"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let me = cx.node();
+        let zero = cx.values().int(0);
+        cx.follow_after(me, self.0, vec![zero]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn a_placement_after_its_own_placer_is_placed() {
+    // A node placed after a subtree that holds its own placer: the placer's
+    // record names it before it is on the line, and finding the subtree's
+    // end passes over it.
+    let (e, o) = engine();
+    let op = e.register(Arc::new(FollowSelf(o.work)));
+    let u = e.new_unit();
+    let p = e.push(u, op, vec![]);
+    e.evaluate(1).unwrap();
+    let kids = e.children(p);
+    assert_eq!(kids.len(), 1);
+    assert_eq!(e.order(u), vec![p, kids[0]]);
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
