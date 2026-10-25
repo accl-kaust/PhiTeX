@@ -1807,12 +1807,15 @@ impl Finish {
             );
         }
         let rtn = v.field(RTN);
-        if !out.iter().any(|e| e.0 == rtn) {
-            let last = d.and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1));
-            out.push((
-                rtn,
-                last.unwrap_or_else(|| v.list(vec![v.list(Vec::new()), v.list(Vec::new())])),
-            ));
+        // (the last run's give-back; none where the routine never ran:
+        // a guess of nothing given back is wrong for every routine that
+        // writes a register, and a finisher whose run defines otherwise
+        // than its text predicts waits for what it guessed on, in a cold
+        // build the page builder, to the end)
+        if !out.iter().any(|e| e.0 == rtn)
+            && let Some(last) = d.and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1))
+        {
+            out.push((rtn, last));
         }
         Some(out)
     }
@@ -2205,9 +2208,12 @@ impl Run<'_, '_> {
     pub(crate) fn record_finisher_defs(&mut self, args: &[ValueId], gdefs: ValueId) -> R<()> {
         let v = self.v;
         let Some(&t) = args.get(9) else { return Ok(()) };
-        // (a speculative run's definitions may be refuted: they would
-        // seed the predictions of the finishers after it)
-        if t == ValueId::UNIT || self.cx.is_speculative() {
+        // (a speculative run's too: a cold build's finishers all run on
+        // predictions, and one seeding none leaves every later finisher
+        // predicting nothing given back, its result parked unconfirmed
+        // until the page builder ends; a wrong seed is a misprediction,
+        // its readers run again)
+        if t == ValueId::UNIT {
             return Ok(());
         }
         let mut out = Vec::new();
