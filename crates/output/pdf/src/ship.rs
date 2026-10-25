@@ -813,6 +813,155 @@ impl PdfState {
         self.cur_h += self.font(f).width(c);
     }
 
+    /// The nodes of an hlist from `list[i]` on that go on the `TJ` string
+    /// of font `f` a character of it began: its characters, and the
+    /// glue, kerns, penalties and empty discretionaries between them
+    /// (pdfTeX §731–§737, as [`PdfState::hlist_nodes`] does them), until
+    /// a node of another kind or font; the index after them. A
+    /// character whose position needs more than a kern in the string
+    /// (§692: a vertical move, a gap too wide) is [`PdfState::char_out`]'s.
+    /// The font is looked up and its fields read once, the output buffer
+    /// taken once, the characters first used marked at the end.
+    #[allow(clippy::too_many_lines)]
+    fn char_run(
+        &mut self,
+        f: FontId,
+        list: &[Node],
+        mut i: usize,
+        fr: &mut Frame,
+        src: &dyn FontSource,
+    ) -> usize {
+        let steady = |me: &PdfState| {
+            me.doing_text && me.doing_string && !me.faked_space && me.pdf_f == f && me.tm_a == 0
+        };
+        if !steady(self) || !matches!(list.get(i), Some(Node::Char { .. } | Node::Lig(_))) {
+            return i;
+        }
+        let Some(st) = self.fonts.get(&f).cloned() else {
+            return i;
+        };
+        if st.kind != FontType::Real || st.auto_expand_ratio() != 0 {
+            return i;
+        }
+        let size = st.size;
+        let mut fresh = [false; 256];
+        let mut any_fresh = false;
+        let mut out = std::mem::take(self.buf());
+        // (the fields the string's characters move, as locals: `cur_v`
+        // and `pdf_v` stay while they do)
+        let (mut cur_h, mut delta_h, mut tj) = (self.cur_h, self.delta_h, self.tj_start_h);
+        let mut v_moved = (self.cur_v - self.pdf_v).abs() >= self.min_bp_val;
+        while let Some(p) = list.get(i) {
+            let c = match p {
+                Node::Char { font, ch } if *font == f => *ch,
+                Node::Lig(l) if l.font == f => l.ch,
+                Node::Glue(g)
+                    if !matches!(
+                        g.kind,
+                        GlueKind::ALeaders | GlueKind::CLeaders | GlueKind::XLeaders
+                    ) =>
+                {
+                    cur_h += fr.glue(g);
+                    i += 1;
+                    continue;
+                }
+                Node::Kern(w, _) | Node::Math(_, w) => {
+                    cur_h += w;
+                    i += 1;
+                    continue;
+                }
+                Node::Penalty(_) => {
+                    i += 1;
+                    continue;
+                }
+                Node::Disc(d) if d.replace.is_empty() => {
+                    i += 1;
+                    continue;
+                }
+                _ => break,
+            };
+            i += 1;
+            let Some(w) = u8::try_from(c)
+                .ok()
+                .and_then(|c8| st.metrics.char(c8))
+                .map(|d| d.width)
+            else {
+                // (not in the font: `char_width` 0, nothing written)
+                continue;
+            };
+            let c8 = u8::try_from(c).unwrap_or(0);
+            // (`pdf_begin_string` with the string going on in `f`: §692)
+            let gap = cur_h - (tj + delta_h);
+            // (`divide_scaled(gap, size, 3)`: (0, 0) while `2000|gap|` <
+            // `size`, the quotient rounding to 0 and its rest all of `gap`)
+            let (s, s_out) = if i64::from(gap).abs() * 2000 < i64::from(size) {
+                (0, 0)
+            } else {
+                divide_scaled(gap, size, 3)
+            };
+            if v_moved || s.abs() >= 0o100000 {
+                (self.cur_h, self.delta_h) = (cur_h, delta_h);
+                *self.buf() = out;
+                self.char_out(f, c, src);
+                if !steady(self) {
+                    return self.mark_fresh(f, &fresh, any_fresh, i);
+                }
+                out = std::mem::take(self.buf());
+                (cur_h, delta_h, tj) = (self.cur_h, self.delta_h, self.tj_start_h);
+                v_moved = (self.cur_v - self.pdf_v).abs() >= self.min_bp_val;
+                continue;
+            }
+            if s != 0 {
+                out.push(b')');
+                crate::num::int(&mut out, -i64::from(s));
+                out.push(b'(');
+                delta_h += s_out;
+            }
+            if !st.chars[usize::from(c8)] && !fresh[usize::from(c8)] {
+                fresh[usize::from(c8)] = true;
+                any_fresh = true;
+            }
+            if c8 <= 32 || c8 == 92 || c8 == 40 || c8 == 41 || c8 > 127 {
+                out.extend_from_slice(&[
+                    b'\\',
+                    b'0' + (c8 >> 6),
+                    b'0' + ((c8 >> 3) & 7),
+                    b'0' + (c8 & 7),
+                ]);
+            } else {
+                out.push(c8);
+            }
+            // (`adv_char_width` with `tm_a` 0: [`PdfState::adv_width`])
+            #[allow(clippy::cast_sign_loss)]
+            let k = ((w as u32) ^ (size as u32).rotate_left(7)) as usize & 63;
+            let e = self.adv_memo[k];
+            delta_h += if e.0 == w && e.1 == size && size != 0 {
+                e.3
+            } else {
+                let r = divide_scaled(w, size, 4);
+                self.adv_memo[k] = (w, size, r.0, r.1);
+                r.1
+            };
+            cur_h += w;
+        }
+        (self.cur_h, self.delta_h) = (cur_h, delta_h);
+        *self.buf() = out;
+        drop(st);
+        self.mark_fresh(f, &fresh, any_fresh, i)
+    }
+
+    /// [`PdfState::char_run`]'s characters first used marked (`pdf_print_char`'s
+    /// `pdf_char_used`); `i` passed on.
+    fn mark_fresh(&mut self, f: FontId, fresh: &[bool; 256], any: bool, i: usize) -> usize {
+        if any {
+            let st = self.font_mut(f);
+            for (a, &b) in st.chars.iter_mut().zip(fresh) {
+                *a |= b;
+            }
+        }
+        i
+    }
+
     /// `pdf_hlist_out` (pdfTeX §729).
     fn hlist_out(&mut self, b: &BoxNode, src: &dyn FontSource, wh: &mut WhatsitSource<'_>) {
         self.cur_s += 1;
@@ -836,14 +985,18 @@ impl PdfState {
         src: &dyn FontSource,
         wh: &mut WhatsitSource<'_>,
     ) {
-        for p in list {
+        let mut i = 0;
+        while let Some(p) = list.get(i) {
+            i += 1;
             let rule = match p {
                 Node::Char { font, ch } => {
                     self.char_out(*font, *ch, src);
+                    i = self.char_run(*font, list, i, fr, src);
                     None
                 }
                 Node::Lig(l) => {
                     self.char_out(l.font, l.ch, src);
+                    i = self.char_run(l.font, list, i, fr, src);
                     None
                 }
                 Node::Box(bx) => {

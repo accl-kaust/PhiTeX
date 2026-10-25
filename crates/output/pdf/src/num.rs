@@ -105,6 +105,24 @@ fn narrow(x: i64) -> i32 {
 
 /// `pdf_print_int` (pdfTeX §686) as bytes.
 pub fn int(out: &mut Vec<u8>, n: i64) {
+    // (below 1000, the common case (a kern in a `TJ` string), the digits
+    // pushed as they are)
+    let m = n.unsigned_abs();
+    if m < 1000 {
+        let m = u16::try_from(m).unwrap_or(0);
+        if n < 0 {
+            out.push(b'-');
+        }
+        let d = |x: u16| b'0' + u8::try_from(x % 10).unwrap_or(0);
+        if m >= 100 {
+            out.extend_from_slice(&[d(m / 100), d(m / 10), d(m)]);
+        } else if m >= 10 {
+            out.extend_from_slice(&[d(m / 10), d(m)]);
+        } else {
+            out.push(d(m));
+        }
+        return;
+    }
     // (the digits on the stack, last first: no string per number)
     let mut buf = [0u8; 20];
     let mut k = buf.len();
