@@ -966,3 +966,38 @@ fn a_reader_whose_anchor_goes_before_its_commit_runs_again() {
     assert_eq!(e.output(r), Some(ValueId::UNIT), "the reader of a node gone before its commit ran again");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[f]`: `Get` on `[f]` inline (`Ctx::apply`); outputs what it gave.
+struct ApplyGet(OpId);
+
+impl Operation for ApplyGet {
+    fn name(&self) -> &'static str {
+        "apply_get"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.apply(self.0, vec![cx.args()[0]])
+    }
+}
+
+#[test]
+fn an_inline_run_reads_at_its_callers_position() {
+    // `Ctx::apply` runs an operation at the caller's position and its reads
+    // are the caller's: two callers on either side of a definition get what
+    // reaches each, and an edit of that definition re-asks the one after.
+    let (e, o) = engine();
+    let ag = e.register(Arc::new(ApplyGet(o.get)));
+    let v = e.values();
+    let x = f(v, "x");
+    let u = e.new_unit();
+    e.push(u, o.def, vec![x, v.int(1)]);
+    let a = e.push(u, ag, vec![x]);
+    let d = e.push(u, o.def, vec![x, v.int(2)]);
+    let b = e.push(u, ag, vec![x]);
+    e.evaluate(1).unwrap();
+    assert_eq!((int(&e, a), int(&e, b)), (1, 2));
+    e.replace(d, o.def, vec![x, v.int(3)]);
+    e.evaluate(1).unwrap();
+    assert_eq!((int(&e, a), int(&e, b)), (1, 3));
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

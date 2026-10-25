@@ -393,8 +393,9 @@ impl<'a> Ctx<'a> {
         out
     }
 
-    /// `op` on `args` inline, memoised by (op, args): the output. It reads
-    /// at my position and its reads are mine.
+    /// `op` on `args` inline: the output. It reads at my position and its
+    /// reads are mine. A run that read nothing is memoised by (op, args);
+    /// one that read depends on where it ran, and runs at each caller.
     pub fn apply(&mut self, op: OpId, args: Vec<ValueId>) -> Result<ValueId, Stop> {
         self.check()?;
         let key = (op, args.clone().into_boxed_slice());
@@ -405,8 +406,11 @@ impl<'a> Ctx<'a> {
         let mut sub = Ctx::new(self.eng, self.worker, self.me);
         sub.args = args.into();
         let out = o.run(&mut sub)?;
-        self.product.reads.append(&mut sub.product.reads);
-        self.eng.memo.write().insert(key, out);
+        if sub.product.reads.is_empty() {
+            self.eng.memo.write().insert(key, out);
+        } else {
+            self.product.reads.append(&mut sub.product.reads);
+        }
         Ok(out)
     }
 
