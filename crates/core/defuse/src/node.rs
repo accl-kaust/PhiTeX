@@ -99,6 +99,10 @@ pub(crate) struct Node {
     /// `Engine::clock` when its last run began, and at its last commit.
     pub(crate) run_start: AtomicU64,
     pub(crate) committed_at: AtomicU64,
+    /// Placed as its placer's continuation (`Ctx::follow`,
+    /// `Ctx::follow_after`), not as its child: a node placed after the
+    /// placer and its children goes before it.
+    pub(crate) follows: AtomicBool,
     /// Its operation's static effect (`Operation::effect`), packed
     /// (`pack_effect`): asked once when the node is made or its text
     /// replaced.
@@ -137,6 +141,7 @@ impl Node {
             claim_end: AtomicU64::new(0),
             run_start: AtomicU64::new(0),
             committed_at: AtomicU64::new(0),
+            follows: AtomicBool::new(false),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             id,

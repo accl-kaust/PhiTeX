@@ -117,6 +117,36 @@ pub(crate) fn subtree_end(eng: &Engine, n: NodeId) -> NodeId {
     best
 }
 
+/// Where a node placed after `n` and its children goes (`follow_after`):
+/// after the last node of its children's subtrees (or `n`), and before
+/// its first continuation (`Node::follows`), if it has one: the
+/// position it must stand before.
+pub(crate) fn children_end(eng: &Engine, n: NodeId) -> (NodeId, Option<Pos>) {
+    let (mut best, mut best_pos) = (n, eng.node(n).pos_hint());
+    let mut first_follow: Option<Pos> = None;
+    let Some(r) = eng.node(n).run_record() else {
+        return (best, None);
+    };
+    for &c in &r.placed {
+        let Some(cn) = eng.placed_node(c) else {
+            continue;
+        };
+        if cn.state() == State::Gone {
+            continue;
+        }
+        if cn.follows.load(Ordering::Acquire) {
+            first_follow = Some(first_follow.map_or(cn.pos_hint(), |p| p.min(cn.pos_hint())));
+            continue;
+        }
+        let e = subtree_end(eng, c);
+        let ep = eng.node(e).pos_hint();
+        if ep > best_pos {
+            (best, best_pos) = (e, ep);
+        }
+    }
+    (best, first_follow)
+}
+
 /// One contribution per field: several to the same field combined.
 fn combine_dups(eng: &Engine, xs: Vec<(Field, ValueId)>) -> Vec<(Field, ValueId)> {
     let mut out: Vec<(Field, ValueId)> = Vec::with_capacity(xs.len());
@@ -748,11 +778,14 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 let kn = eng.node(k);
                 // (one placed after another node stands while it is still
                 // after that node)
-                let floor = match what {
-                    Placement::FollowAfter(at, ..) => after_pos.max(eng.node(*at).pos_hint()),
-                    Placement::Child(..) | Placement::Follow(..) => after_pos,
+                let (floor, ceiling) = match what {
+                    Placement::FollowAfter(at, ..) => {
+                        let (e, before) = children_end(eng, *at);
+                        (after_pos.max(eng.node(e).pos_hint()), before)
+                    }
+                    Placement::Child(..) | Placement::Follow(..) => (after_pos, None),
                 };
-                if kn.state() != State::Gone && kn.pos_hint() > floor {
+                if kn.state() != State::Gone && kn.pos_hint() > floor && ceiling.is_none_or(|c| kn.pos_hint() < c) {
                     placed.push(k);
                     kept_end = Some(k);
                     continue;
@@ -768,6 +801,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 }
             };
             let id = n.id;
+            n.follows.store(!matches!(what, Placement::Child(..)), Ordering::Release);
             placed.push(id);
             let at = match what {
                 Placement::FollowAfter(at, _, _) => Some(*at),
@@ -884,8 +918,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     // deferred placements: after a node elsewhere (one placed after this
     // node was removed or taken, which withdrew this record, goes with it)
-    for (_, at, n, pred) in deferred {
-        let n = place_after(eng, at, n, pred);
+    for (i, at, n, pred) in deferred {
+        let n = if matches!(p.placements[i], Placement::FollowAfter(..)) {
+            place_after_children(eng, at, n, pred)
+        } else {
+            place_after(eng, at, n, pred)
+        };
         if node.state() == State::Gone || !node.record().is_some_and(|r| Arc::ptr_eq(&r, &rec)) {
             unfile(eng, ww, &n);
             continue;
@@ -1008,9 +1046,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (a loop-back read refuted counts as its re-ask would)
     let final_ok = match refuted.map(|i| &rec.reads[i].kind) {
         Some(ReadKind::Field { f, at: Anchor::Final }) => {
-            node.final_wake.store(true, Ordering::Release);
             let by = read::last_definition(eng, *f).by;
-            allow_final_rerun(eng, ww, node, by, prev_commit)
+            let own = by == Some(node.id);
+            node.final_wake.store(!own, Ordering::Release);
+            own || allow_final_rerun(eng, ww, node, by, prev_commit)
         }
         _ => true,
     };
@@ -1435,10 +1474,13 @@ pub(crate) fn reask_final(eng: &Engine, w: Option<&Worker>, f: Field, by: Option
         if !(n.state() == State::Clean || n.committing.load(Ordering::Acquire)) {
             continue;
         }
-        if !allow_final_rerun(eng, w, n, by, n.committed_at.load(Ordering::Acquire)) {
+        // (its own definition read back: a step of its run, no pass of
+        // the loop; it runs again at once)
+        let own = by == Some(r.node);
+        if !own && !allow_final_rerun(eng, w, n, by, n.committed_at.load(Ordering::Acquire)) {
             continue;
         }
-        n.final_wake.store(true, Ordering::Release);
+        n.final_wake.store(!own, Ordering::Release);
         if mark_stale(
             eng,
             w,
@@ -2198,7 +2240,15 @@ pub(crate) fn place(
 
 /// `place` after node `at` and its placements, under their segment's lock.
 pub(crate) fn place_after(eng: &Engine, at: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
-    let end = subtree_end(eng, at);
+    place_at_end(eng, at, subtree_end(eng, at), node, pred)
+}
+
+/// `place` after node `at` and its children, before its continuation.
+fn place_after_children(eng: &Engine, at: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
+    place_at_end(eng, at, children_end(eng, at).0, node, pred)
+}
+
+fn place_at_end(eng: &Engine, at: NodeId, end: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
     let endn = eng.node(end);
     let mut roomy = false;
     loop {

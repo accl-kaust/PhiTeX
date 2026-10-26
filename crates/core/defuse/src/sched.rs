@@ -39,6 +39,13 @@ pub(crate) struct Shared {
     finals_n: AtomicUsize,
     /// Runs taken from `finals` still going: they are no other work.
     finals_running: AtomicUsize,
+    /// The readers queued in `finals` when the line went quiet are taken
+    /// as one pass, all of them (`pass_left` still to take) whatever
+    /// their runs make meanwhile; one queued since waits for the next
+    /// quiet. `passes` counts the passes: the loop-back's beyond the
+    /// first, `Report::final_reruns`.
+    pass_left: AtomicUsize,
+    passes: AtomicU64,
     stealers: Vec<Stealer<NodeId>>,
     later_stealers: Vec<Stealer<NodeId>>,
     block_stealers: Vec<Stealer<(NodeId, u32)>>,
@@ -232,6 +239,8 @@ impl Pool {
             finals: Injector::new(),
             finals_n: AtomicUsize::new(0),
             finals_running: AtomicUsize::new(0),
+            pass_left: AtomicUsize::new(0),
+            passes: AtomicU64::new(0),
             stealers,
             later_stealers,
             block_stealers,
@@ -513,8 +522,19 @@ impl Pool {
             return Some(last);
         }
         let sh = &self.shared;
-        if sh.outstanding.load(Ordering::SeqCst) > sh.finals_n.load(Ordering::SeqCst) + sh.finals_running.load(Ordering::SeqCst) {
-            return None;
+        // (a place in the pass open, or the line quiet: a new pass of all
+        // that is queued)
+        let in_pass = sh.pass_left.try_update(Ordering::SeqCst, Ordering::SeqCst, |k| k.checked_sub(1)).is_ok();
+        if !in_pass {
+            let fin = sh.finals_n.load(Ordering::SeqCst);
+            if fin == 0 || sh.outstanding.load(Ordering::SeqCst) > fin + sh.finals_running.load(Ordering::SeqCst) {
+                return None;
+            }
+            if sh.pass_left.compare_exchange(0, fin - 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                return None;
+            }
+            let k = sh.passes.fetch_add(1, Ordering::SeqCst) + 1;
+            Worker::max(&w.final_max, k);
         }
         loop {
             match sh.finals.steal() {
@@ -524,7 +544,10 @@ impl Pool {
                     w.took_final.store(true, Ordering::Relaxed);
                     return Some(n);
                 }
-                Steal::Empty => return None,
+                Steal::Empty => {
+                    sh.pass_left.store(0, Ordering::SeqCst);
+                    return None;
+                }
                 Steal::Retry => {}
             }
         }
@@ -935,7 +958,6 @@ pub(crate) fn allow_final_rerun(eng: &Engine, w: Option<&Worker>, node: &Node, b
     }
     let k = node.final_reruns.fetch_add(1, Ordering::AcqRel);
     if k < w.shared.final_limit {
-        Worker::max(&w.final_max, u64::from(k) + 1);
         return true;
     }
     w.log.lock().capped.push(node.id);

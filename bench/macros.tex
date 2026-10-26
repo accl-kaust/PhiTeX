@@ -1,9 +1,7 @@
 \hsize=6in \vsize=8.5in \parindent=0pt
-% the token path: 200000 iterations of a \loop (ten blocks of 20000:
-% one run of them all overflows the engine's labels after a run's
-% 170th page), each doing \edef, \csname...\endcsname, \number,
-% \ifnum, \expandafter and a call of a macro with two arguments,
-% typesetting one word
+% the token path: 200000 iterations of one \loop, each doing \edef,
+% \csname...\endcsname, \number, \ifnum, \expandafter and a call of a
+% macro with two arguments, typesetting one word
 \newcount\n \newcount\m \newcount\p
 \expandafter\def\csname w0\endcsname{zero}
 \expandafter\def\csname w1\endcsname{one}
@@ -24,15 +22,5 @@
   \expandafter\pair\expandafter{\x}\y
   \advance\p by 1
   \ifnum\p>999 \p=0 \par\fi}
-\def\block{\n=0 \loop \step \ifnum\n<20000 \repeat\par}
-\block
-\block
-\block
-\block
-\block
-\block
-\block
-\block
-\block
-\block
+\n=0 \loop \step \ifnum\n<200000 \repeat\par
 \bye
