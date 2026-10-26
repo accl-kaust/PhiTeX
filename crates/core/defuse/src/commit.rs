@@ -43,7 +43,7 @@ use crate::read::{self, Reaching, next_contribution, reaching_at, reader_answer,
 use crate::sched::{Worker, allow_final_rerun, enqueue, mark_dirty, mark_stale};
 use crate::index::RangeKey;
 use crate::segment::{Def, GLOBAL, Inner, Made, RangeReader, Reader, Segment, live, push_pruned};
-use crate::values::{Field, FxHashMap, FxHashSet, ValueId};
+use crate::values::{Field, FxHashMap, FxHashSet, ValueId, Values};
 
 /// A range read's field, ends, and whether a `next` or with `to`'s own.
 type RangeOf = (Field, Option<NodeId>, Option<NodeId>, bool, bool);
@@ -132,17 +132,66 @@ fn combine_dups(eng: &Engine, xs: Vec<(Field, ValueId)>) -> Vec<(Field, ValueId)
     out
 }
 
-/// The last definition of each field wins.
+/// The last definition of each field at each locality wins.
 fn dedup_defs(defs: Vec<DefRec>) -> Vec<DefRec> {
     let mut seen = FxHashSet::default();
     let mut out: Vec<DefRec> = Vec::with_capacity(defs.len());
     for d in defs.into_iter().rev() {
-        if seen.insert(d.f) {
+        if seen.insert((d.f, d.loc)) {
             out.push(d);
         }
     }
     out.reverse();
     out
+}
+
+/// A run's definition as filed: its depth (`def_depth`), and for a field
+/// it defines at several depths, the one multi definition (`Def::multi`).
+struct Filed {
+    f: Field,
+    depth: u16,
+    value: ValueId,
+    rel: Option<i64>,
+    multi: bool,
+}
+
+/// `defs` (deduplicated) at their depths under `b`, one per field: the
+/// last at each depth, outermost first in a multi value (a global one
+/// outermost of all); a relation is never one of several.
+fn filed_defs(v: &Values, defs: &[DefRec], b: &Brackets) -> Vec<Filed> {
+    let mut at: FxHashMap<Field, usize> = FxHashMap::default();
+    type Parts = (Field, Option<i64>, Vec<(u16, ValueId)>);
+    let mut ps: Vec<Parts> = Vec::with_capacity(defs.len());
+    for d in defs {
+        let depth = def_depth(d.loc, b);
+        let i = *at.entry(d.f).or_insert_with(|| {
+            ps.push((d.f, None, Vec::new()));
+            ps.len() - 1
+        });
+        let e = &mut ps[i];
+        if e.1.is_some() || d.rel.is_some() {
+            e.2.clear();
+        }
+        e.1 = d.rel;
+        e.2.retain(|x| x.0 != depth);
+        e.2.push((depth, d.value));
+    }
+    let outer = |d: u16| if d == GLOBAL { 0 } else { u32::from(d) + 1 };
+    ps.into_iter()
+        .map(|(f, rel, mut xs)| {
+            if let [(depth, value)] = xs[..] {
+                return Filed { f, depth, value, rel, multi: false };
+            }
+            xs.sort_by_key(|x| outer(x.0));
+            Filed {
+                f,
+                depth: xs[0].0,
+                value: v.list(xs.iter().flat_map(|&(d, x)| [v.int(i64::from(d)), x]).collect()),
+                rel,
+                multi: true,
+            }
+        })
+        .collect()
 }
 
 /// Files a reader record in a segment it is anchored in; true for the
@@ -353,6 +402,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     let defs = dedup_defs(std::mem::take(&mut p.defs));
     let brackets = effective_brackets(node, p.effect);
+    let filed = filed_defs(&eng.values, &defs, &brackets);
     let bracket_change: Option<Brackets>;
     let contribs = combine_dups(eng, std::mem::take(&mut p.contribs));
     let mut last = node.record();
@@ -575,8 +625,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         bracket_change = file_brackets(eng, &mut inner, node, pos, brackets);
         let defs = &rec.defs;
         let contribs = &rec.contribs;
-        for d in defs {
-            let depth = def_depth(d.loc, &brackets);
+        for d in &filed {
+            let depth = d.depth;
             let m = inner.defs.entry(d.f).or_default();
             let first = m.is_empty();
             match m.get_mut(&pos) {
@@ -587,6 +637,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     e.provisional = false;
                     e.rel = d.rel;
                     e.by = node.id;
+                    e.multi = d.multi;
                 }
                 Some(e) => {
                     if e.provisional {
@@ -598,6 +649,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                         by: node.id,
                         rel: d.rel,
                         provisional: false,
+                        multi: d.multi,
                     };
                     changed_defs.push(d.f);
                 }
@@ -610,6 +662,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                             by: node.id,
                             rel: d.rel,
                             provisional: false,
+                            multi: d.multi,
                         },
                     );
                     changed_defs.push(d.f);
@@ -770,7 +823,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 && plain
                 && let Some((_, d)) = Segment::reaching(&inner, f, pos, false)
             {
-                if refuted.is_none() && through(eng, Reaching::of(d), r.path) != r.seen {
+                if refuted.is_none() && through(eng, Reaching::of(&d.plain(&eng.values)), r.path) != r.seen {
                     refuted = Some(i);
                 }
             } else {
@@ -1030,7 +1083,7 @@ fn walk_here(
                     .flatten();
                 match here {
                     Some((_, d)) => {
-                        if through(eng, Reaching::of(d), r.path) != r.seen {
+                        if through(eng, Reaching::of(&d.plain(&eng.values)), r.path) != r.seen {
                             wake.push((r.node, by, f));
                         }
                     }
@@ -1188,10 +1241,13 @@ pub(crate) fn def_level(eng: &Engine, f: Field, by: NodeId) -> u16 {
         if inner.nodes.get(&p) != Some(&by) {
             continue;
         }
-        return read::levels(&inner, f, &start, Some(p), true)
-            .last()
+        // (a multi definition's widest part: the walk goes as far as it)
+        return read::levels(&eng.values, &inner, f, &start, Some(p), true)
+            .iter()
             .filter(|x| x.0 == p && x.1.by == by)
-            .map_or(0, |x| u16::try_from(x.2.0).unwrap_or(u16::MAX));
+            .map(|x| u16::try_from(x.2.0).unwrap_or(u16::MAX))
+            .min()
+            .unwrap_or(0);
     }
 }
 
@@ -1201,9 +1257,9 @@ pub(crate) fn def_level(eng: &Engine, f: Field, by: NodeId) -> u16 {
 /// the deeper ones before it, which the walk passes: a reader past their
 /// scope's close sees the walked one again.
 #[allow(clippy::type_complexity)]
-fn next_hiding(inner: &Inner, f: Field, start: &[u64], from: Pos, level: u16) -> (Option<(Pos, Def, u16)>, Vec<(Pos, Def)>) {
+fn next_hiding(v: &Values, inner: &Inner, f: Field, start: &[u64], from: Pos, level: u16) -> (Option<(Pos, Def, u16)>, Vec<(Pos, Def)>) {
     let mut deeper = Vec::new();
-    for (q, d, lv) in read::levels(inner, f, start, None, false) {
+    for (q, d, lv) in read::levels(v, inner, f, start, None, false) {
         if q <= from {
             continue;
         }
@@ -1250,7 +1306,7 @@ pub(crate) fn reask_from(
             }
             let (next, mut deeper) = match &start {
                 None => (Segment::next_def(&inner, f, from).map(|(p, d)| (p, *d, 0)), Vec::new()),
-                Some(c) => next_hiding(&inner, f, c, from, level),
+                Some(c) => next_hiding(&eng.values, &inner, f, c, from, level),
             };
             let hole = stop_op.and_then(|op| first_hole(eng, &inner, op, from, next.map(|x| x.0)));
             let stop = hole.map(|h| h.0).or(next.map(|x| x.0));
@@ -1641,6 +1697,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
                         by: n,
                         rel: Some(c),
                         provisional: true,
+                        multi: false,
                     },
                 );
                 filed.push((n, nv));
@@ -1783,6 +1840,7 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
                 by: node.id,
                 rel: d.rel,
                 provisional: true,
+                multi: false,
             },
         );
         if first {

@@ -131,6 +131,8 @@ pub(crate) struct Worker {
     pub(crate) predictions_refuted: AtomicU64,
     pub(crate) shaped: AtomicU64,
     pub(crate) commits: AtomicU64,
+    /// The most `At::Final` reruns of one node it allowed.
+    pub(crate) final_max: AtomicU64,
     /// Its last commit and when (`Engine::critical_chain`).
     pub(crate) last_commit: AtomicU64,
     pub(crate) last_done: AtomicU64,
@@ -260,6 +262,7 @@ impl Pool {
                 predictions_refuted: AtomicU64::new(0),
                 shaped: AtomicU64::new(0),
                 commits: AtomicU64::new(0),
+                final_max: AtomicU64::new(0),
                 last_commit: AtomicU64::new(u64::MAX),
                 last_done: AtomicU64::new(0),
                 stable: stable.clone(),
@@ -874,7 +877,9 @@ pub(crate) fn allow_final_rerun(eng: &Engine, w: Option<&Worker>, node: &Node) -
     if node.final_epoch.swap(ep, Ordering::AcqRel) != ep {
         node.final_reruns.store(0, Ordering::Release);
     }
-    if node.final_reruns.fetch_add(1, Ordering::AcqRel) < w.shared.final_limit {
+    let k = node.final_reruns.fetch_add(1, Ordering::AcqRel);
+    if k < w.shared.final_limit {
+        Worker::max(&w.final_max, u64::from(k) + 1);
         return true;
     }
     w.log.lock().capped.push(node.id);

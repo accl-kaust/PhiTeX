@@ -9,7 +9,7 @@ use crate::engine::Engine;
 use crate::node::{Anchor, Node, ReadKind, State};
 use crate::order::{Pos, SegId};
 use crate::segment::{Def, GLOBAL, Inner, RangeReader, Reader, Segment, reduce};
-use crate::values::{Field, Value, ValueId};
+use crate::values::{Field, Value, ValueId, Values};
 
 /// A path that is no path: the defining node's id as an integer
 /// (`Ctx::def_site`).
@@ -72,6 +72,7 @@ fn before_segment(eng: &Engine, f: Field, lo: Pos) -> Reaching {
         {
             let inner = seg.inner.read();
             if let Some((_, d)) = inner.defs.get(&f).and_then(|m| m.iter().next_back()) {
+                let d = d.plain(&eng.values);
                 return Reaching {
                     value: Some(d.value),
                     by: Some(d.by),
@@ -94,6 +95,7 @@ pub(crate) fn reaching(eng: &Engine, f: Field, at: Pos, inclusive: bool) -> Reac
     {
         let inner = seg.inner.read();
         if let Some((_, d)) = Segment::reaching(&inner, f, at, inclusive) {
+            let d = d.plain(&eng.values);
             return Reaching {
                 value: Some(d.value),
                 by: Some(d.by),
@@ -609,7 +611,7 @@ pub(crate) fn last_definition(eng: &Engine, f: Field) -> Reaching {
     while let Some(s) = eng.defs.last_before(f, lo) {
         let seg = eng.seg(s);
         if let Some((_, d)) = seg.inner.read().defs.get(&f).and_then(|m| m.iter().next_back()) {
-            return Reaching::of(d);
+            return Reaching::of(&d.plain(&eng.values));
         }
         lo = seg.lo;
     }
@@ -751,7 +753,8 @@ pub(crate) fn visible(target: &[u64], lv: (usize, u64)) -> bool {
 /// Each definition of `f` in the segment before `limit` (at it too when
 /// `incl`; None: all of them), in order, with its scope; `start`: the
 /// scopes open at the segment's start.
-pub(crate) fn levels(inner: &Inner, f: Field, start: &[u64], limit: Option<Pos>, incl: bool) -> Vec<(Pos, Def, (usize, u64))> {
+/// A multi definition gives each of its parts, outermost first.
+pub(crate) fn levels(v: &Values, inner: &Inner, f: Field, start: &[u64], limit: Option<Pos>, incl: bool) -> Vec<(Pos, Def, (usize, u64))> {
     let Some(m) = inner.defs.get(&f) else {
         return Vec::new();
     };
@@ -773,15 +776,22 @@ pub(crate) fn levels(inner: &Inner, f: Field, start: &[u64], limit: Option<Pos>,
             brs.next();
         }
         let own = brs.peek().filter(|(bp, _)| **bp == *q).map(|(_, x)| *x);
-        let lv = match own {
+        let closed = match own {
             Some(x) if x.1.closes > 0 => {
                 let mut c = chain.clone();
                 close(&mut c, &x.1);
-                level(d, &c, Some(x))
+                Some(c)
             }
-            _ => level(d, &chain, own),
+            _ => None,
         };
-        out.push((*q, *d, lv));
+        let c = closed.as_deref().unwrap_or(&chain);
+        if d.multi {
+            for p in d.parts(v) {
+                out.push((*q, p, level(&p, c, own)));
+            }
+        } else {
+            out.push((*q, *d, level(d, c, own)));
+        }
     }
     out
 }
@@ -800,7 +810,7 @@ fn visible_before(eng: &Engine, f: Field, target: &[u64], lo: Pos) -> Reaching {
         let start = chain_start(eng, seg);
         {
             let inner = seg.inner.read();
-            if let Some(d) = last_visible(&levels(&inner, f, &start, None, false), target) {
+            if let Some(d) = last_visible(&levels(&eng.values, &inner, f, &start, None, false), target) {
                 return Reaching::of(&d);
             }
         }
@@ -867,7 +877,7 @@ pub(crate) fn reaching_visible(eng: &Engine, f: Field, at: Pos, inclusive: bool)
                 continue;
             }
             let target = reader_chain(&inner, &start, at, inclusive);
-            if let Some(d) = last_visible(&levels(&inner, f, &start, Some(at), inclusive), &target) {
+            if let Some(d) = last_visible(&levels(&eng.values, &inner, f, &start, Some(at), inclusive), &target) {
                 return Reaching::of(&d);
             }
             target
@@ -892,7 +902,7 @@ fn reaching_at_visible(eng: &Engine, f: Field, anchor: NodeId, inclusive: bool) 
                 continue;
             }
             let target = reader_chain(&inner, &start, p, inclusive);
-            if let Some(d) = last_visible(&levels(&inner, f, &start, Some(p), inclusive), &target) {
+            if let Some(d) = last_visible(&levels(&eng.values, &inner, f, &start, Some(p), inclusive), &target) {
                 return Some(Reaching::of(&d));
             }
             target

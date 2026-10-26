@@ -68,7 +68,8 @@ pub enum MayDefine {
 /// definitions (a node whose text begins by closing a group); without,
 /// after its definitions. The opens always come after its definitions.
 /// `kind` and `kind_pending` are kept for the client; the engine does not
-/// read them.
+/// read them (what a scope is to the client is best a definition inside
+/// it, `Locality::Scope`, read by depth like any other).
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 #[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct Brackets {
@@ -409,6 +410,9 @@ pub struct Report {
     /// left with their last answer (the client's "labels may have
     /// changed").
     pub capped: Vec<NodeId>,
+    /// The most reruns one node took from `At::Final` re-asks: the
+    /// passes a loop-back took to settle beyond the first.
+    pub final_reruns: u32,
 }
 
 impl Report {

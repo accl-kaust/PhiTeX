@@ -348,6 +348,7 @@ const DUMMY_DEF: Def = Def {
     by: NodeId(0),
     rel: None,
     provisional: false,
+    multi: false,
 };
 
 const DUMMY_READER: Reader = Reader {
@@ -520,6 +521,39 @@ pub(crate) struct Def {
     /// it reaches a later position while the scope it is in is still
     /// open there (`read::visible`).
     pub(crate) depth: u16,
+    /// A node that defines the field at several depths (a run leaving
+    /// scopes open with a value in each): `value` lists `[depth, value]`
+    /// pairs outermost first (`Def::parts`), `depth` the outermost's, so
+    /// a walk passes it as its widest scope; a read sees the innermost
+    /// part still open.
+    pub(crate) multi: bool,
+}
+
+impl Def {
+    /// A multi definition's parts, outermost first; a plain one alone.
+    pub(crate) fn parts(&self, v: &crate::values::Values) -> Vec<Def> {
+        if !self.multi {
+            return vec![*self];
+        }
+        v.with_list(self.value, |xs| {
+            xs.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| Def {
+                    depth: u16::try_from(v.as_int(c[0]).unwrap_or(0)).unwrap_or(GLOBAL),
+                    value: c[1],
+                    multi: false,
+                    ..*self
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| vec![*self])
+    }
+
+    /// The definition as one value: a multi one's innermost part.
+    pub(crate) fn plain(&self, v: &crate::values::Values) -> Def {
+        if self.multi { self.parts(v).pop().unwrap_or(*self) } else { *self }
+    }
 }
 
 /// `Def::depth` of a global definition: it reaches every later position.

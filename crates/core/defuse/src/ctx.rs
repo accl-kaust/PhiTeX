@@ -508,16 +508,4 @@ impl<'a> Ctx<'a> {
         self.check()
     }
 
-    /// No scopes span nodes in this core.
-    pub fn scope_kind(&mut self) -> Result<Option<ValueId>, Stop> {
-        Ok(None)
-    }
-
-    pub fn set_kinds(&mut self, _ks: &[ValueId]) {}
-
-    /// No field is a loop-back in this core: a loop-back read is a read
-    /// through `At::Final`.
-    pub fn is_loopback(&mut self, _f: Field) -> bool {
-        false
-    }
 }

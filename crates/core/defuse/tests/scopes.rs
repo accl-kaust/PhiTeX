@@ -163,6 +163,33 @@ impl Operation for Pending {
     }
 }
 
+/// `[f, a, b, c]`: opens two scopes after itself and defines f = a
+/// outside them, b in the first, c in the second: a run that leaves two
+/// groups open with a value in each.
+struct DefFrames;
+
+impl Operation for DefFrames {
+    fn name(&self) -> &'static str {
+        "def_frames"
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::Scope(Brackets {
+            opens: 2,
+            ..Brackets::default()
+        })
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let f = Field(cx.args()[0]);
+        let (a, b, c) = (cx.args()[1], cx.args()[2], cx.args()[3]);
+        cx.define_with(f, a, Locality::Local);
+        cx.define_with(f, b, Locality::ScopeAt(0));
+        cx.define_with(f, c, Locality::ScopeAt(1));
+        Ok(ValueId::UNIT)
+    }
+}
+
 /// `[]`: outputs the depth it starts at.
 struct Depth;
 
@@ -188,6 +215,7 @@ struct Ops {
     close_then_get: OpId,
     pending: OpId,
     depth: OpId,
+    def_frames: OpId,
 }
 
 fn engine() -> (Engine, Ops) {
@@ -203,6 +231,7 @@ fn engine() -> (Engine, Ops) {
         close_then_get: e.register(Arc::new(CloseThenGet)),
         pending: e.register(Arc::new(Pending)),
         depth: e.register(Arc::new(Depth)),
+        def_frames: e.register(Arc::new(DefFrames)),
     };
     (e, ops)
 }
@@ -297,6 +326,28 @@ fn a_definition_inside_the_scope_a_node_opens() {
     let after = e.push(u, o.get, vec![x]);
     e.evaluate(2).unwrap();
     assert_eq!((int(&e, inside), int(&e, dep), int(&e, after)), (5, 1, 1));
+}
+
+#[test]
+fn a_node_defining_a_field_in_each_scope_it_opens() {
+    let (e, o) = engine();
+    let v = e.values();
+    let x = v.field("x").0;
+    let u = e.new_unit();
+    e.push(u, o.def, vec![x, v.int(1)]);
+    let fr = e.push(u, o.def_frames, vec![x, v.int(2), v.int(3), v.int(4)]);
+    let d2 = e.push(u, o.get, vec![x]);
+    e.push(u, o.close, vec![]);
+    let d1 = e.push(u, o.get, vec![x]);
+    e.push(u, o.close, vec![]);
+    let d0 = e.push(u, o.get, vec![x]);
+    e.evaluate(2).unwrap();
+    assert_eq!((int(&e, d2), int(&e, d1), int(&e, d0)), (4, 3, 2));
+    e.replace(fr, o.def_frames, vec![x, v.int(2), v.int(6), v.int(4)]);
+    e.evaluate(2).unwrap();
+    assert_eq!((int(&e, d2), int(&e, d1), int(&e, d0)), (4, 6, 2), "a change of one part re-asks the readers that see it");
+    let bad = e.check_invariants();
+    assert!(bad.is_empty(), "{bad:?}");
 }
 
 #[test]

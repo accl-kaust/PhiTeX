@@ -860,7 +860,24 @@ impl Engine {
             if inner.nodes.get(&p) != Some(&n) {
                 continue;
             }
-            return inner.defs.get(&f).and_then(|m| m.get(&p)).filter(|d| d.by == n).map(|d| d.value);
+            return inner.defs.get(&f).and_then(|m| m.get(&p)).filter(|d| d.by == n).map(|d| d.plain(&self.values).value);
+        }
+    }
+
+    /// `n`'s own definitions of `f`, one per depth.
+    fn def_parts(&self, n: NodeId, f: Field) -> Vec<ValueId> {
+        let node = self.node(n);
+        loop {
+            if node.state() == State::Gone {
+                return Vec::new();
+            }
+            let seg = self.seg(node.seg_hint());
+            let inner = seg.inner.read();
+            let p = node.pos_hint();
+            if inner.nodes.get(&p) != Some(&n) {
+                continue;
+            }
+            return inner.defs.get(&f).and_then(|m| m.get(&p)).filter(|d| d.by == n).map(|d| d.parts(&self.values).iter().map(|x| x.value).collect()).unwrap_or_default();
         }
     }
 
@@ -871,7 +888,7 @@ impl Engine {
         };
         r.defs
             .iter()
-            .map(|d| (d.f, self.def_value(n, d.f).unwrap_or(d.value)))
+            .map(|d| (d.f, if d.rel.is_some() { self.def_value(n, d.f).unwrap_or(d.value) } else { d.value }))
             .collect()
     }
 
@@ -1045,6 +1062,7 @@ impl Engine {
             rep.relative_resolved += load(&w.relative_resolved);
             rep.shaped += load(&w.shaped);
             rep.commits += load(&w.commits);
+            rep.final_reruns = rep.final_reruns.max(u32::try_from(load(&w.final_max)).unwrap_or(u32::MAX));
             rep.steals += load(&w.steals);
             rep.times.op_ns += load(&w.op_ns);
             rep.times.wasted_ns += load(&w.wasted_ns);
@@ -1290,7 +1308,7 @@ impl Engine {
                             v.render(want)
                         ));
                     }
-                } else if self.def_value(n, d.f) != Some(d.value) {
+                } else if !self.def_parts(n, d.f).contains(&d.value) {
                     out.push(format!(
                         "node {} definition {} is not filed as {}",
                         n.raw(),
