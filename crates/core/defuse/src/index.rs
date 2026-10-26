@@ -187,6 +187,9 @@ struct Ranges {
     published: Option<Reaching>,
     /// Its last definition may have moved since it was published.
     dirty: bool,
+    /// Published anew, its readers of another's definition not re-asked
+    /// yet (`commit::publish_finals`).
+    pending: bool,
     /// Readers of the environment's value.
     envs: Vec<EnvReader>,
 }
@@ -244,7 +247,7 @@ impl Ranges {
     }
 
     fn is_empty(&self) -> bool {
-        self.len == 0 && self.finals.is_empty() && self.envs.is_empty() && self.published.is_none() && !self.dirty
+        self.len == 0 && self.finals.is_empty() && self.envs.is_empty() && self.published.is_none() && !self.dirty && !self.pending
     }
 
     /// Drops the dead once as many have been filed as the list held.
@@ -447,13 +450,32 @@ impl RangeIndex {
         out
     }
 
-    /// Publishes `r` for `f`: whether that changed what is published.
-    pub(crate) fn republish(&self, f: Field, r: Reaching) -> bool {
+    /// Publishes `r` for `f`, marked pending if that changed what is
+    /// published.
+    pub(crate) fn republish(&self, f: Field, r: Reaching) {
         let mut w = self.shards[range_shard(f)].0.write();
         let m = w.entry(f).or_default();
-        let moved = m.published.is_none_or(|x| (x.value, x.by) != (r.value, r.by));
+        if m.published.is_none_or(|x| (x.value, x.by) != (r.value, r.by)) {
+            m.pending = true;
+        }
         m.published = Some(r);
-        moved
+    }
+
+    /// The fields marked pending, unmarked when `clear`.
+    pub(crate) fn pending(&self, clear: bool) -> Vec<Field> {
+        let mut out = Vec::new();
+        for sh in &*self.shards {
+            if !sh.0.read().values().any(|m| m.pending) {
+                continue;
+            }
+            for (f, m) in sh.0.write().iter_mut() {
+                if m.pending {
+                    m.pending = !clear;
+                    out.push(*f);
+                }
+            }
+        }
+        out
     }
 
     /// The `At::Final` readers of `f` that still stand.

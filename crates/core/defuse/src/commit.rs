@@ -1484,25 +1484,33 @@ pub(crate) fn reask_final(eng: &Engine, f: Field) {
 /// At a quiet point (nothing queued or running), on one thread: each
 /// loop-back value marked since the last (`reask_final`) published again
 /// as the field's last definition now, then the readers whose answer
-/// moved re-asked (`sched::allow_final_rerun`: past the limit one is
-/// left as it is): the next pass of the loop. The readers re-asked.
-pub(crate) fn publish_finals(eng: &Engine, w: &Worker) -> usize {
+/// moved re-asked (`sched::allow_final_rerun`: past the limit one is left
+/// as it is). The readers of their own definition first, alone: a file's
+/// node keeping what it wrote and running the tools on it, as latexmk runs
+/// makeindex between two runs, its new definitions published at the next
+/// quiet point; then, with none of those left, the readers of others'
+/// definitions, the next pass of the loop. The readers re-asked, and
+/// whether they were a pass.
+pub(crate) fn publish_finals(eng: &Engine, w: &Worker) -> (usize, bool) {
     if !eng.has_finals.load(Ordering::Acquire) {
-        return 0;
+        return (0, false);
     }
-    let moved: Vec<(Field, read::Reaching)> = eng
-        .ranges
-        .take_dirty()
-        .into_iter()
-        .filter_map(|f| {
-            let r = read::last_definition(eng, f);
-            eng.ranges.republish(f, r).then_some((f, r))
-        })
-        .collect();
-    let mut k = 0;
-    for (f, last) in moved {
+    for f in eng.ranges.take_dirty() {
+        eng.ranges.republish(f, read::last_definition(eng, f));
+    }
+    let mut asks: Vec<(Field, read::Reaching, Reader)> = Vec::new();
+    for f in eng.ranges.pending(false) {
+        let last = read::final_reaching(eng, f);
         for r in eng.ranges.finals(f, |r| live(eng, r.node, r.serial)) {
-            if through(eng, last, r.path) == r.seen {
+            if through(eng, last, r.path) != r.seen && eng.node(r.node).state() == State::Clean {
+                asks.push((f, last, r));
+            }
+        }
+    }
+    let ask = |own: bool| {
+        let mut k = 0;
+        for (f, last, r) in &asks {
+            if (last.by == Some(r.node)) != own {
                 continue;
             }
             let n = eng.node(r.node);
@@ -1511,15 +1519,22 @@ pub(crate) fn publish_finals(eng: &Engine, w: &Worker) -> usize {
             }
             let wake = Wake {
                 by: last.by,
-                cause: Cause::Changed { field: f, site: last.by },
+                cause: Cause::Changed { field: *f, site: last.by },
                 at_ns: eng.now_ns(),
             };
             if mark_stale(eng, Some(w), n, wake) {
                 k += 1;
             }
         }
+        k
+    };
+    let k = ask(true);
+    if k > 0 {
+        return (k, false);
     }
-    k
+    eng.ranges.pending(true);
+    let k = ask(false);
+    (k, k > 0)
 }
 
 /// The first node in `(from, to)` of operation `op` that has not
@@ -1933,6 +1948,11 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     let Some((seg, mut inner)) = own_write(eng, node) else {
         return Vec::new();
     };
+    // (a sibling a claim took and gave back before its products were
+    // withdrawn may have run and committed since: its products stand)
+    if !remove && !node.taken() {
+        return Vec::new();
+    }
     // (under the lock its commit installs a record under: a record read
     // before it misses the placements a commit made meanwhile, left on
     // the line with no placer)

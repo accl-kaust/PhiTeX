@@ -608,9 +608,12 @@ fn run_worker(
         // quiescent: the loop-back values published, their readers whose
         // answer moved run again (a pass)
         if w.ix == 0 {
-            if crate::commit::publish_finals(eng, w) > 0 {
+            let (k, pass) = crate::commit::publish_finals(eng, w);
+            if pass {
                 let k = pool.shared.passes.fetch_add(1, Ordering::SeqCst) + 1;
                 Worker::max(&w.final_max, k);
+            }
+            if k > 0 {
                 continue;
             }
             if let Some(s) = src.as_deref_mut() {
