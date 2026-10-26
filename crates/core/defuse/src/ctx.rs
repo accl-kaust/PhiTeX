@@ -45,6 +45,8 @@ pub struct Ctx<'a> {
     /// What `read` answered in this run, by field: a field read again is
     /// answered from here, with no second lookup and no second record.
     pub(crate) seen: FxHashMap<Field, Option<ValueId>>,
+    /// Where the last `next_contribution` that found none stopped.
+    pub(crate) stop_at: Option<NodeId>,
 }
 
 fn stop() -> Stop {
@@ -67,11 +69,13 @@ impl<'a> Ctx<'a> {
                 claim: 0,
                 effect: None,
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
+                unchanged: false,
             },
             views: Vec::new(),
             ep: u64::MAX,
             follow_at: None,
             seen: FxHashMap::default(),
+            stop_at: None,
             last: me.run_record(),
         }
     }
@@ -281,7 +285,15 @@ impl<'a> Ctx<'a> {
         };
         let n = read::next_contribution(self.eng, f, Some(ap));
         self.record(ReadKind::Next { f, after }, PathId::WHOLE, next_value(self.eng, &n));
+        self.stop_at = if n.item.is_none() { n.stop } else { None };
         Ok(n.item)
+    }
+
+    /// The node the last `next_contribution` that answered none stopped
+    /// at, one that has not committed yet; None where it met the line's
+    /// end (or a gone bound).
+    pub fn stopped_at(&self) -> Option<NodeId> {
+        self.stop_at
     }
 
     /// A view on `fold(f, from, to)`, read step by step.
@@ -470,6 +482,19 @@ impl<'a> Ctx<'a> {
 
     pub fn values_epoch(&self) -> u64 {
         self.eng.values.instance()
+    }
+
+    /// This run publishes nothing new: what my last run defined,
+    /// contributed, placed and output stands as it is, and only this
+    /// run's reads are filed, so a change to one (a node it stopped at
+    /// committing) runs me again. For a run that met what is not there
+    /// yet (a stop at a hole) before it could say anything: what it
+    /// said before is the best guess until then, and taking it back
+    /// would re-ask every reader of it, and remove every placement and
+    /// theirs, to put them back once the hole fills. On a first run there
+    /// is nothing to keep (a prediction stands as made).
+    pub fn unchanged(&mut self) {
+        self.product.unchanged = true;
     }
 
     /// Forgets my reads of `f` in this run: the commit records none.

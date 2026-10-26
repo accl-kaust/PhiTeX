@@ -435,6 +435,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut st = CommitStats::default();
     let t0 = Instant::now();
     let ww = Some(w);
+    // (a run that published nothing new: the last record's products, its
+    // placements kept as they are)
+    let keep_placed = p.unchanged && node.record().is_some();
+    if let Some(r) = node.record().filter(|_| p.unchanged) {
+        p.defs.clone_from(&r.defs);
+        p.contribs.clone_from(&r.contribs);
+        p.output = r.output;
+        p.effect = Some(r.effect);
+        p.claim = r.claim;
+        p.placements.clear();
+    }
     for d in &mut p.defs {
         if let Some(c) = d.rel {
             d.value = rel_value_at(eng, d.f, node.id, c);
@@ -621,7 +632,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         same
     });
     let mut tries = 0;
-    let (seg_id, seg_lo, old_output, rec, seg_pos) = loop {
+    let (seg_id, seg_lo, old_output, rec, seg_pos, removed) = loop {
         let Some((seg, mut inner)) = own_write(eng, node) else {
             return st;
         };
@@ -807,6 +818,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // placement kept, `waiting`, so that one still stands after it)
         let mut labelled = node.id;
         let mut waiting: Vec<usize> = Vec::new();
+        // (whether the last placement went after another node than this
+        // one: one following it goes after it there, not before a
+        // continuation of this node's that it replaces)
+        let mut elsewhere = false;
         for (i, what) in p.placements.iter().enumerate() {
             if let Some(k) = kept_end.take() {
                 after = subtree_end(eng, k);
@@ -816,17 +831,19 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             if let Some(k) = kept[i] {
                 let kn = eng.node(k);
                 // (one placed after another node stands while it is still
-                // after that node)
+                // after that node and its children, wherever the placer is:
+                // a node may place after a node before itself)
                 let (floor, ceiling) = match what {
                     Placement::FollowAfter(at, ..) => {
                         let (e, before) = children_end(eng, *at);
-                        (after_pos.max(eng.node(e).pos_hint()), before)
+                        (eng.node(e).pos_hint(), before)
                     }
                     Placement::Child(..) | Placement::Follow(..) => (after_pos, None),
                 };
                 if kn.state() != State::Gone && kn.pos_hint() > floor && ceiling.is_none_or(|c| kn.pos_hint() < c) {
                     placed.push(k);
                     kept_end = Some(k);
+                    elsewhere = matches!(what, Placement::FollowAfter(..));
                     for d in waiting.drain(..) {
                         if deferred[d].2.is_none() {
                             deferred[d].2 = Some(k);
@@ -851,7 +868,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 Placement::FollowAfter(at, _, _) => Some(*at),
                 Placement::Child(..) | Placement::Follow(..) => None,
             };
-            let before = if matches!(what, Placement::Follow(..)) {
+            let before = if matches!(what, Placement::Follow(..)) && !elsewhere {
                 while old_follows.front().is_some_and(|&b| eng.node(b).pos_hint() <= after_pos) {
                     old_follows.pop_front();
                 }
@@ -879,7 +896,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 }
                 deferred.push((i, at.unwrap_or(after), before, n, pred));
             }
+            // (one after another node goes after its children there: what
+            // follows it is checked against that)
+            if let Some(a) = at {
+                labelled = children_end(eng, a).0;
+            }
+            elsewhere = at.is_some();
             after = id;
+        }
+        if keep_placed {
+            placed.clone_from(&old_placed);
         }
         let mut removed: Vec<NodeId> = old_placed.iter().copied().filter(|n| !placed.contains(n)).collect();
         removed.extend(removed_kept);
@@ -938,10 +964,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         st.commit_ns = ns(t_lock);
         drop(inner);
         drop(old);
-        for id in removed {
-            unfile(eng, ww, eng.node(id));
-        }
-        break (seg.id, seg.lo, old_output, rec, pos);
+        break (seg.id, seg.lo, old_output, rec, pos, removed);
     };
     // 2. reads anchored elsewhere
     // (a node read at that is gone by now: a read that found a value there
@@ -998,6 +1021,13 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             continue;
         }
         made.push(n);
+    }
+    // what this run no longer places goes once what replaces it stands: a
+    // node made anew in place of a removed one has filed its definitions
+    // as predicted, and the readers after it whose answer stays are not
+    // asked again
+    for id in removed {
+        unfile(eng, ww, eng.node(id));
     }
     if p.claim > 0 || last.as_ref().is_some_and(|r| r.claim > 0) {
         apply_claim(eng, ww, node, p.claim);

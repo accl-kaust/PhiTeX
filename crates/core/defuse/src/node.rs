@@ -420,4 +420,8 @@ pub(crate) struct Product {
     /// The scope epoch when the run began (`Engine::scope_gen`): a
     /// bracket changed since may have moved any of its reads.
     pub(crate) scope_gen: u64,
+    /// The run published nothing new (`Ctx::unchanged`): the last
+    /// record's definitions, contributions, placements and output stand,
+    /// with this run's reads.
+    pub(crate) unchanged: bool,
 }

@@ -1011,9 +1011,13 @@ fn kick_of(v: &Values, args: &[ValueId]) -> Option<phitex_defuse::NodeId> {
     }
 }
 
+/// Where the loop stands at a page's fire ([`encode_state`]), defined by
+/// the step that fired it for the step after it.
+pub(crate) const PAGE_LOOP: &str = "pages:loop";
+
 /// A page step ([`PageLoop`]; the module's doc): `[]` for the first,
-/// else `[node, state]`, the contributor the page before fired in and
-/// the loop there ([`encode_state`]).
+/// else `[node, step]`, the contributor the page before fired in and
+/// the step that fired it, whose [`PAGE_LOOP`] it reads.
 pub(crate) struct Pages(pub Shared);
 
 impl Operation for Pages {
@@ -1021,7 +1025,7 @@ impl Operation for Pages {
         "pages"
     }
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
-        MayDefine::Names(vec![v.field(PAGES_END)])
+        MayDefine::Names(vec![v.field(PAGES_END), v.field(PAGE_LOOP)])
     }
     /// (set right after the text's first piece where there are threads
     /// to run it beside the text: no piece's claim takes it)
@@ -1048,9 +1052,29 @@ impl Operation for Pages {
         let mut r = Run::new(cx, o);
         crate::prof::pages::attempt();
         let t = crate::prof::pages::start();
-        let res = match args.get(1) {
-            Some(&x) => r.decode_state(x).and_then(|(lp, p)| r.page_step(lp, Some(p))),
-            None => r.page_step(PageLoop::new(), None),
+        let res = if args.is_empty() {
+            r.page_step(PageLoop::new(), None)
+        } else {
+            // (the step before's own definition: a step is placed after
+            // its page's finisher, in the text, not after the step)
+            let before = args.get(1).and_then(|&x| raw_node(r.v, x));
+            let read = match before {
+                Some(b) => r.cx.read_at(r.v.field(PAGE_LOOP), phitex_defuse::At::AfterOwn(b)),
+                None => Ok(phitex_defuse::FieldAt::Unset),
+            };
+            match read {
+                Ok(phitex_defuse::FieldAt::Def(x, _)) => r.decode_state(x).and_then(|(lp, p)| r.page_step(lp, Some(p))),
+                // (the step before has not said where its page left the
+                // loop: this one stands as it was)
+                Ok(_) => {
+                    if crate::exec::prof_flag!("PHITEX_STEP_LOG") {
+                        eprintln!("steplog: {} noloop", r.cx.node().raw());
+                    }
+                    r.cx.unchanged();
+                    Ok(())
+                }
+                Err(s) => Err(Halt::Stop(s)),
+            }
         };
         crate::prof::pages::add(crate::prof::pages::ATTEMPT, t);
         match res {
@@ -1419,7 +1443,10 @@ impl Run<'_, '_> {
             let next = self.cx.next_contribution(vprof, lp.cur)?;
             crate::prof::pages::add(crate::prof::pages::NEXT, t);
             let Some((node, u)) = next.filter(|n| n.0 == p.node) else {
-                // (another before it now: the step before runs again)
+                // (another before it now: the step before runs again, and
+                // this one's page stands until then)
+                self.step_log(&lp, "moved");
+                self.cx.unchanged();
                 return Ok(());
             };
             let xs = v.seq_to_vec(u);
@@ -1446,7 +1473,18 @@ impl Run<'_, '_> {
             let t = crate::prof::pages::start();
             let next = self.cx.next_contribution(vprof, lp.cur)?;
             crate::prof::pages::add(crate::prof::pages::NEXT, t);
-            let Some((node, u)) = next else { break };
+            let Some((node, u)) = next else {
+                // (a contributor not in yet before the page fires: the
+                // step's page and the steps after stand as they were
+                // until it comes in, and the step runs again then)
+                if self.cx.stopped_at().is_some() {
+                    self.step_log(&lp, "hole");
+                    self.cx.unchanged();
+                    return Ok(());
+                }
+                self.step_log(&lp, "end");
+                break;
+            };
             let xs = v.seq_to_vec(u);
             for (i, &x) in xs.iter().enumerate() {
                 if let Some((q, classes)) = self.fold_unit(&mut lp, node, x)? {
@@ -1459,9 +1497,25 @@ impl Run<'_, '_> {
             }
         }
         if lp.ended {
+            self.step_log(&lp, "ended");
             self.cx.define_with(v.field(PAGES_END), v.int(lp.st.j), Locality::Global);
         }
         Ok(())
+    }
+
+    /// (`PHITEX_STEP_LOG`, profile) A step's run: its node, the pages
+    /// fired, the last contributor folded and how it ended.
+    fn step_log(&self, lp: &PageLoop, how: &str) {
+        if crate::exec::prof_flag!("PHITEX_STEP_LOG") {
+            let a = self.cx.args().first().map_or(-2, |&x| int_of(self.v, x));
+            eprintln!(
+                "steplog: {} j {} from {a} cur {} stop {:?} {how}",
+                self.cx.node().raw(),
+                lp.st.j,
+                lp.cur.map_or(-1, |n| i64::try_from(n.raw()).unwrap_or(-1)),
+                self.cx.stopped_at().map(phitex_defuse::NodeId::raw)
+            );
+        }
     }
 
     /// The step's end at a page's fire: the next step placed after the
@@ -1471,7 +1525,14 @@ impl Run<'_, '_> {
         q.classes = classes;
         q.xs_i = xs_i;
         let state = encode_state(v, lp, &q);
-        self.cx.follow(self.ops.pages, vec![raw_value(v, Some(q.node)), state]);
+        self.step_log(lp, "fire");
+        // (the next step is named by the piece the page fired in alone,
+        // and reads the loop as a definition: a loop that comes out
+        // otherwise runs it again, where an argument would make it and
+        // every step and finisher after it anew)
+        self.cx.define_with(v.field(PAGE_LOOP), state, Locality::Global);
+        let me = self.cx.node();
+        self.cx.follow(self.ops.pages, vec![raw_value(v, Some(q.node)), raw_value(v, Some(me))]);
         Ok(())
     }
 
