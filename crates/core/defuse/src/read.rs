@@ -505,6 +505,7 @@ pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, 
                 Anchor::Before(n) => reaching_at(eng, *f, n, false)?,
                 Anchor::AfterOwn(n) => reaching_at(eng, *f, n, true)?,
                 Anchor::End(u) => reaching(eng, *f, Pos(eng.unit(u).end.0 - 1), true),
+                Anchor::Final => last_definition(eng, *f),
             };
             through(eng, r, path)
         }
@@ -585,4 +586,35 @@ pub(crate) fn end_of(to: Pos, incl: bool) -> Pos {
 /// The built-in projections.
 pub(crate) fn builtin_projection(p: ProjId) -> Option<crate::api::Projection> {
     (p == ProjId::IS_EMPTY).then(|| Arc::new(is_empty_proj) as crate::api::Projection)
+}
+
+/// The last definition of `f` on the whole line (`At::Final`), else the
+/// environment: the field index's last segment, its last entry. Globals
+/// and locals alike: whatever is last, since a loop-back reader asks what
+/// the back of the document left.
+pub(crate) fn last_definition(eng: &Engine, f: Field) -> Reaching {
+    todo!()
+}
+
+/// The scope depth at `p`: scopes open just before the node there, its
+/// own closes not applied. The segments before `p`'s are summed by their
+/// `depth_net`; `p`'s segment is walked to `p`. Never below 0.
+pub(crate) fn depth_at(eng: &Engine, p: Pos) -> u32 {
+    todo!()
+}
+
+/// Whether a definition at `def` with scope depth `depth` is still open
+/// at `at` (`at` exclusive): no position in `(def, at)` brings the depth
+/// below `depth`, the closes that come before the node at `at` included
+/// when `before_closes` says so. Whole segments between are skipped by
+/// their `depth_min`.
+pub(crate) fn visible(eng: &Engine, def: Pos, depth: u16, at: Pos, before_closes: bool) -> bool {
+    todo!()
+}
+
+/// [`reaching`] under scopes: the last definition of `f` before `at` that
+/// is visible there (`visible`); an invisible one is passed over and the
+/// walk goes on to the one before it, across segments by the field index.
+pub(crate) fn reaching_visible(eng: &Engine, f: Field, at: Pos, inclusive: bool) -> Reaching {
+    todo!()
 }

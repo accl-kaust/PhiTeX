@@ -136,6 +136,7 @@ impl<'a> Ctx<'a> {
         let (anchor, r) = match at {
             At::Before(n) => (Anchor::Before(n), reaching_at(self.eng, f, n, false)),
             At::AfterOwn(n) => (Anchor::AfterOwn(n), reaching_at(self.eng, f, n, true)),
+            At::Final => (Anchor::Final, Some(crate::read::last_definition(self.eng, f))),
             At::End(u) => (
                 Anchor::End(u),
                 Some(reaching(self.eng, f, Pos(self.eng.unit(u).end.0 - 1), true)),
@@ -192,12 +193,10 @@ impl<'a> Ctx<'a> {
         self.define_with(f, x, Locality::Local);
     }
 
-    /// `Locality::Scope` and `ScopeAt` are `unimplemented!("scopes: next run")`.
+    /// A definition at the locality's depth (`Locality`): the commit
+    /// files it with its depth, from my brackets (`set_effect`, or my
+    /// operation's `effect`) and the depth reaching me.
     pub fn define_with(&mut self, f: Field, x: ValueId, loc: Locality) {
-        match loc {
-            Locality::Local | Locality::Global => {}
-            Locality::Scope | Locality::ScopeAt(_) => unimplemented!("scopes: next run"),
-        }
         self.product.defs.push(DefRec {
             f,
             loc,
@@ -436,12 +435,17 @@ impl<'a> Ctx<'a> {
     /// this core.
     pub fn narrow(&mut self, _m: MayDefine) {}
 
-    /// `Effect::None` is accepted; any other is `unimplemented!("scopes: next run")`.
+    /// My scope brackets, when they are known only by running
+    /// (`Operation::effect` gave `Pending`). The commit files them; the
+    /// readers after me whose answer moved are re-asked.
     pub fn set_effect(&mut self, e: Effect) {
-        match e {
-            Effect::None => self.product.effect = e,
-            Effect::Open | Effect::Close | Effect::Scope(_) | Effect::Pending => unimplemented!("scopes: next run"),
-        }
+        self.product.effect = e;
+    }
+
+    /// The scope depth I start at: scopes open just before me, my own
+    /// closes not applied.
+    pub fn depth(&mut self) -> Result<u32, Stop> {
+        todo!()
     }
 
     /// Always true: a run never knows it is final. Side effects belong
@@ -479,35 +483,9 @@ impl<'a> Ctx<'a> {
 
     pub fn set_kinds(&mut self, _ks: &[ValueId]) {}
 
+    /// No field is a loop-back in this core: a loop-back read is a read
+    /// through `At::Final`.
     pub fn is_loopback(&mut self, _f: Field) -> bool {
         false
-    }
-
-    pub fn declare_loopback(&mut self, _f: Field, _init: ValueId) {
-        unimplemented!("loop-back: next run")
-    }
-
-    pub fn declare_loopback_early(&mut self, _f: Field, _init: ValueId) {
-        unimplemented!("loop-back: next run")
-    }
-
-    pub fn loop_part(&mut self, _from: Field, _p: PathId) -> Option<ValueId> {
-        unimplemented!("loop-back: next run")
-    }
-
-    pub fn define_forward_at(&mut self, _f: Field, _from: Field, _p: PathId, _keep: Option<PathId>, _loc: Locality) -> bool {
-        unimplemented!("loop-back: next run")
-    }
-
-    pub fn publish(&mut self, _f: Field, _x: ValueId) {
-        unimplemented!("loop-back: next run")
-    }
-
-    pub fn checkpoint(&mut self, _mark: u32, _state: ValueId) -> Result<(), Stop> {
-        unimplemented!("loop-back: next run")
-    }
-
-    pub fn restart(&mut self) {
-        unimplemented!("loop-back: next run")
     }
 }

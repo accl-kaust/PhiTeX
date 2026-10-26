@@ -398,8 +398,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     Anchor::Before(n) => (n, false),
                     Anchor::AfterOwn(n) => (n, true),
                     Anchor::End(_) => (node.id, true),
+                    // (a loop-back read: filed under the field, re-asked when
+                    // the last definition of it lands or moves)
+                    Anchor::Final => (node.id, true),
                 };
                 let rec = Reader {
+                    depth: 0, // (scopes: `commit::def_depth`, the reader's depth)
                     node: node.id,
                     serial,
                     anchor,
@@ -407,7 +411,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     path: r.path,
                     seen: r.seen,
                 };
-                if matches!(at, Anchor::End(_)) {
+                if matches!(at, Anchor::End(_) | Anchor::Final) {
                     other_reads.push((*f, rec, *at));
                 } else {
                     here_reads.push((*f, rec));
@@ -549,6 +553,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                         st.predictions_refuted += 1;
                     }
                     *e = Def {
+                        depth: 0, // (scopes: `commit::def_depth`, the reader's depth)
                         value: d.value,
                         by: node.id,
                         rel: d.rel,
@@ -560,6 +565,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     m.insert(
                         pos,
                         Def {
+                        depth: 0, // (scopes: `commit::def_depth`, the reader's depth)
                             value: d.value,
                             by: node.id,
                             rel: d.rel,
@@ -1425,6 +1431,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
                 m.insert(
                     pp,
                     Def {
+                        depth: 0, // (scopes: `commit::def_depth`, the reader's depth)
                         value: nv,
                         by: n,
                         rel: Some(c),
@@ -1556,6 +1563,7 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
         m.insert(
             pos,
             Def {
+            depth: 0, // (scopes: `commit::def_depth`, the reader's depth)
                 value: d.value,
                 by: node.id,
                 rel: d.rel,
@@ -1845,4 +1853,27 @@ pub(crate) fn rel_value_at(eng: &Engine, f: Field, at: NodeId, c: i64) -> ValueI
     let v = eng.values();
     let input = reaching_at(eng, f, at, false).and_then(|r| r.value);
     v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c))
+}
+
+/// Files a node's brackets at its position (from its operation's `effect`
+/// when it is made, from `Ctx::set_effect` at its commit) and, when they
+/// changed, re-asks every reader anchored after `at` whose answer moved:
+/// a bracket decides which definitions reach everything after it. Rare
+/// outside edits, since an operation's `effect` is known before its run
+/// for all but `Effect::Pending`.
+pub(crate) fn file_effect(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, at: Pos, e: crate::api::Effect, st: &mut CommitStats) {
+    todo!()
+}
+
+/// Re-asks the readers anchored after `from` (all fields) whose answer
+/// moved, after a change of brackets at `from`.
+pub(crate) fn reask_after_effect(eng: &Engine, w: Option<&Worker>, from: Pos, by: NodeId, st: &mut CommitStats) {
+    todo!()
+}
+
+/// The scope depth a definition is filed at: the depth reaching the node
+/// (`read::depth_at`), its closes applied, then by locality: `Local` as
+/// is, `Scope` plus its opens, `ScopeAt(k)` plus `k + 1`, `Global` 0.
+pub(crate) fn def_depth(eng: &Engine, node: &Node, at: Pos, loc: crate::api::Locality) -> u16 {
+    todo!()
 }

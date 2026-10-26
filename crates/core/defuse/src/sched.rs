@@ -843,3 +843,10 @@ fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
         return to == State::Clean;
     }
 }
+
+/// A node re-asked through an `At::Final` read: counts the rerun; past
+/// `Limits::final_reruns` the node is left with its last answer, listed in
+/// `Report::capped`, and not queued. True when it may run.
+pub(crate) fn allow_final_rerun(eng: &Engine, pool: &Pool, node: &Arc<Node>) -> bool {
+    todo!()
+}

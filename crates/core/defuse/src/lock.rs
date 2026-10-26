@@ -11,6 +11,7 @@
 //! | a node's `last`, `woke`, `text` and `stopped` (`node::Node`) | its commit; its re-ask; an edit; a read of its arguments; a walk stopping at it | a swap; a clone; a push |
 //! | the pool's parking (`sched::Pool`) | an idle worker; a push that finds one idle | the rest itself; one notify |
 //! | a block's steal flag (`sched::Shared::block_busy`, an atomic) | a thief | one steal of an even run of nodes |
+//! | the order's list, then a segment and its right neighbour in ascending order (`order::Order::rebalance`) | a placement that finds a segment's labels used up | one rebalance: the one time two segments are held, under the order's write lock, never while any other lock is held |
 //! | the spare workers and their handles (`sched::Pool::run`) | the caller's thread, starting the workers an evaluation turns out to need | one spawn |
 //! | the probes (`obs`) | a probe, with `profile` | one counter |
 //!

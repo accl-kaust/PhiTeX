@@ -73,6 +73,9 @@ pub(crate) struct Node {
     pub(crate) commit_ns: AtomicU64,
     pub(crate) reask_ns: AtomicU64,
     pub(crate) done_ns: AtomicU64,
+    /// Reruns caused by `At::Final` re-asks in this evaluation
+    /// (`Limits::final_reruns`); past the limit the node is capped.
+    pub(crate) final_reruns: AtomicU32,
 }
 
 impl Node {
@@ -86,6 +89,7 @@ impl Node {
         pos: Pos,
     ) -> Node {
         Node {
+            final_reruns: AtomicU32::new(0),
             id,
             unit,
             op: AtomicU32::new(op.0),
@@ -259,6 +263,8 @@ pub(crate) enum Anchor {
     Before(NodeId),
     AfterOwn(NodeId),
     End(UnitId),
+    /// The last definition on the line (`At::Final`).
+    Final,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

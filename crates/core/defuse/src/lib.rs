@@ -60,7 +60,7 @@ mod table;
 mod values;
 
 pub use api::{
-    At, Brackets, CapPolicy, Cause, EditSource, Effect, EnvProvider, EvalError, FieldAt, Limits, Locality, LoopStart,
+    At, Brackets, Cause, EditSource, Effect, EnvProvider, EvalError, FieldAt, Limits, Locality,
     MayDefine, Monoid, NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, PathId, ProjId, Projection, Report,
     SeqMonoid, Settled, Step, Stop, SumMonoid, Times, UnitId,
 };

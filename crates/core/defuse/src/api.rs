@@ -34,9 +34,16 @@ impl NodeId {
 #[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct UnitId(pub(crate) u32);
 
-/// Where a definition is seen. `Local` and `Global` both reach every later
-/// position in this core (a node's end state is outside its own groups).
-/// `Scope` and `ScopeAt` are refused (`unimplemented!("scopes: next run")`).
+/// Where a definition is seen: its scope depth. Scopes are brackets on
+/// the line (`Effect`): a node closes some before itself and opens some
+/// after itself, and the depth at a position is the count of scopes open
+/// there. A definition at depth `k` reaches a later position only while
+/// no close has brought the depth below `k` in between; a `Global` one
+/// (depth 0) reaches every later position until the next definition.
+/// `Local`: the depth at the node after its closes and before its opens
+/// (its end state, outside the scopes it leaves open). `Scope`: inside
+/// the scopes it opens (that depth plus its opens). `ScopeAt(k)`: inside
+/// the `k`-th scope it opens (0: the outermost).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub enum Locality {
@@ -56,8 +63,12 @@ pub enum MayDefine {
     Prefixes(Vec<String>),
 }
 
-/// Scope brackets. Kept for the client's types; only `Effect::None` is
-/// accepted by this core (`Ctx::set_effect`).
+/// A node's scope brackets: it closes `closes` scopes and opens `opens`.
+/// With `before`, the closes come before the node's reads and
+/// definitions (a node whose text begins by closing a group); without,
+/// after its definitions. The opens always come after its definitions.
+/// `kind` and `kind_pending` are kept for the client; the engine does not
+/// read them.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 #[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct Brackets {
@@ -68,7 +79,12 @@ pub struct Brackets {
     pub kind_pending: bool,
 }
 
-/// A node's scope effect.
+/// A node's scope effect: `Open` opens one scope after itself, `Close`
+/// closes one before itself, `Scope` as its brackets say, `Pending`
+/// means the run will say (`Ctx::set_effect`). An operation's `effect`
+/// is filed when the node is made, so readers after it see the right
+/// depth before it runs; a run that sets another re-asks the readers
+/// after it whose answer moved.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub enum Effect {
@@ -77,6 +93,26 @@ pub enum Effect {
     Close,
     Scope(Brackets),
     Pending,
+}
+
+impl Effect {
+    /// As brackets (`Pending` as none).
+    #[must_use]
+    pub fn brackets(self) -> Brackets {
+        match self {
+            Effect::None | Effect::Pending => Brackets::default(),
+            Effect::Open => Brackets {
+                opens: 1,
+                ..Brackets::default()
+            },
+            Effect::Close => Brackets {
+                closes: 1,
+                before: true,
+                ..Brackets::default()
+            },
+            Effect::Scope(b) => b,
+        }
+    }
 }
 
 /// Returned (via `?`) by a read when the run is already refuted: a commit
@@ -96,6 +132,14 @@ pub enum At {
     AfterOwn(NodeId),
     /// The definition reaching the end of the unit: the last one in it.
     End(UnitId),
+    /// The last definition on the whole line, whatever comes after the
+    /// reader: a loop-back read (a label read at the front of a document,
+    /// defined at its back). The reader runs on what is there now and is
+    /// re-asked when the last definition lands or moves; a reader re-asked
+    /// this way more than `Limits::final_reruns` times in one evaluation
+    /// is left as it is and listed in `Report::capped` (a document that
+    /// does not converge).
+    Final,
 }
 
 /// A read at another node's position (`Ctx::read_at`).
@@ -361,6 +405,10 @@ pub struct Report {
     pub steals: u64,
     pub version: u64,
     pub edits: u64,
+    /// Readers through `At::Final` re-asked past `Limits::final_reruns`:
+    /// left with their last answer (the client's "labels may have
+    /// changed").
+    pub capped: Vec<NodeId>,
 }
 
 impl Report {
@@ -378,6 +426,10 @@ pub struct Limits {
     /// on unchanged reads is what `Engine::check_invariants` finds),
     /// `EvalError::RunawayNode`.
     pub runs_per_node: u32,
+    /// Reruns of one node caused by `At::Final` re-asks in one evaluation
+    /// (default 10, about what a LaTeX user tolerates in passes): past
+    /// it the node is capped (`Report::capped`), never an error.
+    pub final_reruns: u32,
     /// Runs in the whole evaluation (default none).
     pub total_runs: Option<u64>,
     /// Wall time (default none).
@@ -388,6 +440,7 @@ impl Default for Limits {
     fn default() -> Self {
         Limits {
             runs_per_node: 1 << 20,
+            final_reruns: 10,
             total_runs: None,
             time: None,
         }
@@ -436,18 +489,3 @@ impl EditSource for NoEdits {
     }
 }
 
-/// Kept for the client's options; loop-back is `unimplemented!("loop-back:
-/// next run")` in this core.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum LoopStart {
-    Initial,
-    Previous,
-    PerRound,
-}
-
-/// As `LoopStart`.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum CapPolicy {
-    Stop,
-    Final,
-}

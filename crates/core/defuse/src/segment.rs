@@ -48,6 +48,14 @@ pub(crate) struct Inner {
     pub(crate) stops: Vec<(Field, RangeKey, RangeReader)>,
     /// Its nodes by operation, for `commit::learn_shape`.
     pub(crate) by_op: FxHashMap<OpId, Vec<NodeId>>,
+    /// Each node's scope brackets, by position; absent means none.
+    pub(crate) brackets: PosMap<crate::api::Brackets>,
+    /// The segment's scope summary: the net change of depth over it, and
+    /// the lowest depth reached inside it relative to its start (≤ 0),
+    /// kept current with `brackets` (`Inner::sum_depth`). A visibility
+    /// walk skips a whole segment by these.
+    pub(crate) depth_net: i32,
+    pub(crate) depth_min: i32,
     /// Its nodes that have not committed (about: a walk skips the search
     /// for one when there are none, `commit::first_hole`).
     pub(crate) holes: usize,
@@ -304,6 +312,8 @@ fn map_room<V>(m: &FxHashMap<Field, V>, k: usize) -> usize {
 }
 
 const DUMMY_DEF: Def = Def {
+
+    depth: 0, // (scopes: `commit::def_depth`, the reader's depth)
     value: ValueId::UNIT,
     by: NodeId(0),
     rel: None,
@@ -311,6 +321,8 @@ const DUMMY_DEF: Def = Def {
 };
 
 const DUMMY_READER: Reader = Reader {
+
+    depth: 0, // (scopes: `commit::def_depth`, the reader's depth)
     node: NodeId(0),
     serial: 0,
     anchor: NodeId(0),
@@ -472,6 +484,10 @@ pub(crate) struct Def {
     /// Filed before its node ran (a prediction, a learned shape): the run
     /// replaces it.
     pub(crate) provisional: bool,
+    /// Its scope depth (`Locality`); 0 for a global. It reaches a later
+    /// position only while the depth between stays at or above it
+    /// (`read::visible`).
+    pub(crate) depth: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -483,6 +499,10 @@ pub(crate) struct Reader {
     pub(crate) anchor: NodeId,
     /// `At::AfterOwn`: the anchor's own definition counts.
     pub(crate) inclusive: bool,
+    /// The depth the read was answered at: the anchor's, after the
+    /// closes that come before it. A change of brackets between a
+    /// definition and this reader re-asks it (`commit::reask_after_effect`).
+    pub(crate) depth: u16,
     pub(crate) path: PathId,
     pub(crate) seen: Option<ValueId>,
 }
@@ -557,6 +577,9 @@ impl Segment {
             unit,
             lo,
             inner: Lock::new(Inner {
+                brackets: PosMap::Zero,
+                depth_net: 0,
+                depth_min: 0,
                 hi,
                 nodes: BTreeMap::new(),
                 defs: FxHashMap::default(),
@@ -746,6 +769,9 @@ impl Segment {
             unit: self.unit,
             lo: at,
             inner: Lock::new(Inner {
+                brackets: PosMap::Zero,
+                depth_net: 0,
+                depth_min: 0,
                 hi,
                 nodes,
                 defs,
@@ -794,5 +820,14 @@ impl Segment {
             eng.bump(f);
         }
         new
+    }
+}
+
+impl Inner {
+    /// Recomputes `depth_net` and `depth_min` from `brackets`, in position
+    /// order: for each node, its closes (before or after its definitions
+    /// alike for the summary) then its opens.
+    pub(crate) fn sum_depth(&mut self) {
+        todo!()
     }
 }

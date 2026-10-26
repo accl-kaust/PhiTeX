@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::api::{
-    CapPolicy, Cause, EditSource, EnvProvider, EvalError, Limits, LoopStart, Monoid, NodeId, NodeInfo, NodeState,
+    Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState,
     OpId, Operation, PathId, ProjId, Projection, Report, SeqMonoid, Settled, Step, UnitId,
 };
 use crate::commit::{self, CommitStats, Predicted, own_write, place_after, settle_predictions, unfile};
@@ -1322,25 +1322,9 @@ impl Engine {
     /// Accepted, unused: no run audit in this core.
     pub fn set_run_audit(&self, _on: bool) {}
 
-    pub fn set_loop_start(&self, _s: LoopStart) {}
-
-    pub fn set_max_rounds(&self, _n: u64) {}
-
-    pub fn set_round_cap_policy(&self, _p: CapPolicy) {}
-
-    pub fn declare_loopback(&self, _f: Field, _init: ValueId) {
-        unimplemented!("loop-back: next run")
-    }
-
-    pub fn declare_loopback_early(&self, _f: Field, _init: ValueId) {
-        unimplemented!("loop-back: next run")
-    }
-
-    pub fn declare_loopbacks(&self, _fields: &[(Field, ValueId)]) {
-        unimplemented!("loop-back: next run")
-    }
-
-    pub fn loop_value(&self, _f: Field) -> Option<ValueId> {
-        unimplemented!("loop-back: next run")
+    /// The scope depth at a node: scopes open just before it (its closes
+    /// not yet applied). For the client's diagnostics.
+    pub fn depth_at(&self, n: NodeId) -> Option<u32> {
+        todo!()
     }
 }

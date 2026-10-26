@@ -91,3 +91,18 @@ impl Order {
         u32::try_from(self.segs.read().len()).unwrap_or(u32::MAX)
     }
 }
+
+impl Order {
+    /// Gives a segment whose labels are used up (a gap of nothing left
+    /// after a relabel: one node placing thousands of placements after
+    /// itself) a wider range: under the order's write lock, the segment
+    /// and its right neighbour are locked in ascending order, the
+    /// boundary between them moved so that each holds labels in
+    /// proportion to its nodes (a neighbour too full is split first),
+    /// both relabelled, and every field-index entry keyed by the
+    /// neighbour's old start moved to its new one. The one place two
+    /// segments are held at once (`lock.rs`'s table). Never a panic.
+    pub(crate) fn rebalance(&self, eng: &crate::engine::Engine, seg: SegId) {
+        todo!()
+    }
+}
