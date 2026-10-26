@@ -676,14 +676,10 @@ impl Segment {
     /// None when that gap is closed and the segment must relabel or split.
     pub(crate) fn gap_after(inner: &Inner, after: Pos) -> Option<Pos> {
         let next = inner.nodes.range((Excluded(after), Unbounded)).next().map(|(p, _)| *p);
-        // (after the last node a push's step, not half the rest: nodes
-        // placed at a segment's end one after another, as a chain of
-        // steps is, would halve its labels at each, and each split of it
-        // halve them again)
-        let (next, step) = match next {
-            Some(q) => (q, (q.0 - after.0) / 2),
-            None => (inner.hi, ((inner.hi.0 - after.0) / 2).min(crate::order::GAP)),
-        };
+        // (a push's step, not half the rest: nodes placed one after
+        // another, as a chain of steps is, would halve the gap at each)
+        let next = next.unwrap_or(inner.hi);
+        let step = ((next.0 - after.0) / 2).min(crate::order::GAP);
         (next.0 - after.0 >= 2 && step >= 1).then(|| Pos(after.0 + step))
     }
 
@@ -736,12 +732,10 @@ impl Segment {
     /// Moves its nodes at and after `cut` (`right`: into `to`, the next
     /// segment) or before it (into `to`, the previous one), with their
     /// definitions, contributions, readers, stops, by-op entries and
-    /// brackets, then relabels both evenly: the moved nodes leave its range
-    /// for `to`'s, the only move of a node across a segment's boundary
-    /// (`order::Order::rebalance`). Under both segments' write locks. The
-    /// fields `to` holds now and those this one no longer holds, for the
-    /// field indexes; whether brackets moved.
-    #[allow(clippy::type_complexity)]
+    /// brackets, their labels as they were (the caller relabels both, and
+    /// tells the field indexes): the only move of a node across a
+    /// segment's boundary (`order::Order::rebalance`). Under both
+    /// segments' write locks. Whether brackets moved.
     pub(crate) fn give(
         &self,
         inner: &mut Inner,
@@ -750,7 +744,7 @@ impl Segment {
         ti: &mut Inner,
         cut: Pos,
         right: bool,
-    ) -> (Vec<(Field, u8)>, Vec<(Field, u8)>, bool) {
+    ) -> bool {
         let moved = |p: Pos| if right { p >= cut } else { p < cut };
         let nodes: Vec<(Pos, NodeId)> = inner.nodes.iter().filter(|(p, _)| moved(**p)).map(|(p, n)| (*p, *n)).collect();
         for (p, _) in &nodes {
@@ -760,8 +754,6 @@ impl Segment {
             ti.nodes.insert(*p, *n);
             eng.node(*n).seg.store(to.id.0, Ordering::Release);
         }
-        let mut added: Vec<(Field, u8)> = Vec::new();
-        let mut gone: Vec<(Field, u8)> = Vec::new();
         // definitions (0), contributions (1), readers (2)
         let keys: Vec<Field> = inner.defs.keys().copied().collect();
         for f in keys {
@@ -772,12 +764,8 @@ impl Segment {
             }
             if m.is_empty() {
                 inner.defs.remove(&f);
-                gone.push((f, 0));
             }
             let old = ti.defs.remove(&f).unwrap_or_default();
-            if old.is_empty() {
-                added.push((f, 0));
-            }
             ti.defs.insert(f, if right { PosMap::concat(part, old) } else { PosMap::concat(old, part) });
         }
         let keys: Vec<Field> = inner.contribs.keys().copied().collect();
@@ -787,14 +775,8 @@ impl Segment {
             if part.is_empty() {
                 continue;
             }
-            if m.is_empty() {
-                gone.push((f, 1));
-            }
             inner.resum(eng, f);
             let old = ti.contribs.remove(&f).unwrap_or_default();
-            if old.is_empty() {
-                added.push((f, 1));
-            }
             ti.contribs.insert(f, if right { PosMap::concat(part, old) } else { PosMap::concat(old, part) });
             ti.resum(eng, f);
         }
@@ -806,16 +788,10 @@ impl Segment {
             *v = keep;
             if v.is_empty() {
                 inner.readers.remove(&f);
-                gone.push((f, 2));
             }
-            if out.is_empty() {
-                continue;
+            if !out.is_empty() {
+                ti.readers.entry(f).or_default().extend(out);
             }
-            let t = ti.readers.entry(f).or_default();
-            if t.is_empty() {
-                added.push((f, 2));
-            }
-            t.extend(out);
         }
         let (out, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut inner.stops)
             .into_iter()
@@ -838,9 +814,7 @@ impl Segment {
         ti.sum_depth();
         inner.holes = inner.nodes.values().filter(|n| eng.node(**n).is_hole()).count();
         ti.holes = ti.nodes.values().filter(|n| eng.node(**n).is_hole()).count();
-        to.relabel(ti, eng);
-        self.relabel(inner, eng);
-        (added, gone, brackets_moved)
+        brackets_moved
     }
 
     /// Moves the nodes at and after the median label into a new segment

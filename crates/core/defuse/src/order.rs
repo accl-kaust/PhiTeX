@@ -92,102 +92,192 @@ impl Order {
     }
 }
 
+/// Labels a node a rebalanced window keeps at the least.
+const DENSITY: u64 = 16;
+
 impl Order {
     /// Gives a segment whose labels are used up (a gap of nothing left
     /// after a relabel: one node placing thousands of placements after
-    /// itself) room, from a neighbour of its unit: the segment and its
-    /// right neighbour are locked in ascending order, nodes at the end of
-    /// the fuller one move into the other so that each holds nodes in
-    /// proportion to its labels (`Segment::give`), both relabelled; a
-    /// neighbour itself too full is given room from its own neighbour
-    /// first. No segment's range changes: the order's list does not, and
-    /// a moved node's new segment and field-index entries are filed as a
-    /// split files them; the range readers whose interval ended (or began)
-    /// at the boundary are widened over the neighbour (`RangeIndex::widen`).
-    /// The left neighbour where there is no right one. The one place two
-    /// segments are held at once (`lock.rs`'s table). False when the
-    /// whole unit is full.
+    /// itself) room: the window of its unit's segments around it, doubled
+    /// until it holds `DENSITY` labels a node (the whole unit at the
+    /// most, two labels a node then), is relabelled evenly. No segment's
+    /// range changes, so neither do the order's list and the field
+    /// indexes' keys: each segment is given nodes in proportion to its
+    /// labels, a node moving across a boundary to the segment its new
+    /// label is in (`Segment::give`, between neighbours, in order), and
+    /// filed as a split files it; the range readers whose interval began
+    /// or ended inside the window are widened over it (`RangeIndex::
+    /// widen_over`). The window's segments are taken in ascending order,
+    /// no other lock held (`lock.rs`'s table). False when the whole unit
+    /// holds fewer than two labels a node.
     pub(crate) fn rebalance(&self, eng: &crate::engine::Engine, seg: SegId) -> bool {
-        self.rebalance_toward(eng, seg, true) || self.rebalance_toward(eng, seg, false)
-    }
-
-    /// `rebalance` with the neighbour on one side only (and its own
-    /// neighbours further that way).
-    fn rebalance_toward(&self, eng: &crate::engine::Engine, seg: SegId, right: bool) -> bool {
         let s = eng.seg(seg);
-        for _ in 0..64 {
-            let nb = if right { self.next(seg, s.lo) } else { self.prev(seg, s.lo) };
-            let Some(o) = nb.map(|x| eng.seg(x)).filter(|o| o.unit == s.unit) else {
-                return false;
+        let (mut left, mut right) = (0usize, 0usize);
+        loop {
+            // the window's segments, in order, from the list now
+            let (ids, at_lo, at_hi) = {
+                let segs = self.segs.read();
+                let Ok(i) = segs.binary_search(&(s.lo, s.id)) else {
+                    return false;
+                };
+                let mut a = i;
+                while a > 0 && i - a < left && eng.seg(segs[a - 1].1).unit == s.unit {
+                    a -= 1;
+                }
+                let mut b = i;
+                while b + 1 < segs.len() && b - i < right && eng.seg(segs[b + 1].1).unit == s.unit {
+                    b += 1;
+                }
+                let at_lo = a == 0 || eng.seg(segs[a - 1].1).unit != s.unit;
+                let at_hi = b + 1 == segs.len() || eng.seg(segs[b + 1].1).unit != s.unit;
+                (segs[a..=b].iter().map(|x| x.1).collect::<Vec<SegId>>(), at_lo, at_hi)
             };
-            // (ascending: the left one first)
-            let (a, b) = if right { (s, o) } else { (o, s) };
-            let mut ai = a.inner.write();
-            let mut bi = b.inner.write();
-            if ai.hi != b.lo {
-                // (a split between them meanwhile)
+            let win: Vec<std::sync::Arc<crate::segment::Segment>> = ids.iter().map(|&x| eng.seg(x).clone()).collect();
+            let mut gs: Vec<crate::lock::WriteGuard<'_, crate::segment::Inner>> = win.iter().map(|x| x.inner.write()).collect();
+            // (a split among them meanwhile: the list again)
+            if (1..win.len()).any(|k| gs[k - 1].hi != win[k].lo) {
                 continue;
             }
-            let (si, oi) = if right { (&*ai, &*bi) } else { (&*bi, &*ai) };
-            let (ws, wo) = (si.hi.0 - s.lo.0, oi.hi.0 - o.lo.0);
-            let (ns, no) = (si.nodes.len() as u64, oi.nodes.len() as u64);
-            let total = ns + no + 4;
-            if ws.saturating_add(wo) < total.saturating_mul(16) {
-                // (the neighbour too full to share: room from its far side
-                // first)
-                drop(bi);
-                drop(ai);
-                if !self.rebalance_toward(eng, o.id, right) {
+            let lo = win[0].lo;
+            let width = gs[gs.len() - 1].hi.0 - lo.0;
+            let n: u64 = gs.iter().map(|g| g.nodes.len() as u64).sum();
+            let whole = at_lo && at_hi;
+            if width < DENSITY.saturating_mul(n + 1) && !(whole && width >= 2 * (n + 1)) {
+                drop(gs);
+                if whole {
                     return false;
                 }
+                // twice as many segments, each side as far as the unit goes
+                let k = left + right + 1;
+                let (mut l, mut r) = (k / 2 + 1, k - k / 2);
+                if at_lo {
+                    r += l;
+                    l = 0;
+                }
+                if at_hi {
+                    l += r;
+                    r = 0;
+                }
+                left += l;
+                right += r;
                 continue;
             }
-            // nodes kept in proportion to labels: s keeps `keep`
-            let keep =
-                usize::try_from((u128::from(total) * u128::from(ws) / u128::from(ws + wo)) as u64).unwrap_or(0).saturating_sub(2).min(si.nodes.len());
-            let give = si.nodes.len() - keep;
-            if give == 0 {
-                return true;
-            }
-            let cut = if right {
-                *si.nodes.keys().nth(keep).expect("a node to give")
-            } else {
-                // (the first `give` go left: the cut is the first kept)
-                si.nodes.keys().nth(give).copied().unwrap_or(si.hi)
-            };
-            eng.layout_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            let ((added, gone, brackets), boundary) =
-                if right { (s.give(&mut ai, eng, o, &mut bi, cut, true), o.lo) } else { (s.give(&mut bi, eng, o, &mut ai, cut, false), s.lo) };
-            let (olo, oid) = (o.lo, o.id);
-            for &(f, k) in &added {
-                match k {
-                    0 => eng.defs.add(f, olo, oid),
-                    1 => eng.contribs.add(f, olo, oid),
-                    _ => eng.readers.add(f, olo, oid),
-                }
-            }
-            drop(bi);
-            drop(ai);
-            for &(f, k) in &gone {
-                match k {
-                    0 => eng.defs.remove(f, s.lo, s.id),
-                    1 => eng.contribs.remove(f, s.lo, s.id),
-                    _ => eng.readers.remove(f, s.lo, s.id),
-                }
-            }
-            for &(f, _) in added.iter().chain(&gone) {
-                eng.bump(f);
-            }
-            if brackets {
-                eng.scope_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                eng.bump(eng.depth_field);
-            }
-            // (a range read through a moved node now reaches into the
-            // neighbour)
-            let far = if right { o.inner.read().hi } else { o.lo };
-            eng.ranges.widen(boundary, far);
+            self.spread(eng, &win, &mut gs, n);
+            let hi = gs[gs.len() - 1].hi;
+            drop(gs);
+            // (a range read through a moved node now reaches anywhere in
+            // the window)
+            eng.ranges.widen_over(lo, hi);
             return true;
         }
-        false
+    }
+
+    /// `rebalance`'s move, under the window's locks: each segment's count
+    /// in proportion to its labels (the remainder to the widest, which
+    /// have room), the nodes moved across each boundary in turn (rightward
+    /// then leftward, every move between neighbours), each segment
+    /// relabelled evenly, the field indexes told what each segment holds
+    /// now.
+    fn spread(
+        &self,
+        eng: &crate::engine::Engine,
+        win: &[std::sync::Arc<crate::segment::Segment>],
+        gs: &mut [crate::lock::WriteGuard<'_, crate::segment::Inner>],
+        n: u64,
+    ) {
+        use crate::values::{Field, FxHashMap};
+        let k = win.len();
+        let widths: Vec<u64> = (0..k).map(|i| gs[i].hi.0 - win[i].lo.0).collect();
+        let total: u64 = widths.iter().sum();
+        let share = |i: usize| u128::from(n) * u128::from(widths[i]);
+        let mut want: Vec<u64> = (0..k).map(|i| (share(i) / u128::from(total)) as u64).collect();
+        let mut left = n - want.iter().sum::<u64>();
+        let mut by_rest: Vec<usize> = (0..k).collect();
+        by_rest.sort_by_key(|&i| std::cmp::Reverse(share(i) % u128::from(total)));
+        while left > 0 {
+            let before = left;
+            for &i in &by_rest {
+                if left > 0 && widths[i] >= 4 * (want[i] + 2) {
+                    want[i] += 1;
+                    left -= 1;
+                }
+            }
+            if left == before {
+                let i = (0..k).max_by_key(|&i| widths[i]).expect("a window");
+                want[i] += left;
+                left = 0;
+            }
+        }
+        let held = |g: &crate::segment::Inner| -> FxHashMap<(Field, u8), ()> {
+            let mut m = FxHashMap::default();
+            m.extend(g.defs.keys().map(|f| ((*f, 0u8), ())));
+            m.extend(g.contribs.keys().map(|f| ((*f, 1u8), ())));
+            m.extend(g.readers.keys().map(|f| ((*f, 2u8), ())));
+            m
+        };
+        let before: Vec<_> = gs.iter().map(|g| held(g)).collect();
+        eng.layout_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let mut brackets = false;
+        let counts = |gs: &[crate::lock::WriteGuard<'_, crate::segment::Inner>]| -> Vec<u64> { gs.iter().map(|g| g.nodes.len() as u64).collect() };
+        // rightward: every prefix down to its share or below
+        let (mut have, mut aim) = (0u64, 0u64);
+        for i in 0..k.saturating_sub(1) {
+            let c = counts(gs);
+            have += c[i];
+            aim += want[i];
+            if have > aim {
+                let give = (have - aim) as usize;
+                let cut = *gs[i].nodes.keys().nth(c[i] as usize - give).expect("a node to give");
+                let (a, b) = gs.split_at_mut(i + 1);
+                brackets |= win[i].give(&mut a[i], eng, &win[i + 1], &mut b[0], cut, true);
+                have = aim;
+            }
+        }
+        // leftward: every prefix up to its share
+        for i in (1..k).rev() {
+            let c = counts(gs);
+            let have: u64 = c[..i].iter().sum();
+            let aim: u64 = want[..i].iter().sum();
+            if have < aim {
+                let take = (aim - have) as usize;
+                let cut = gs[i].nodes.keys().nth(take).copied().unwrap_or(crate::order::Pos(u64::MAX));
+                let (a, b) = gs.split_at_mut(i);
+                brackets |= win[i].give(&mut b[0], eng, &win[i - 1], &mut a[i - 1], cut, false);
+            }
+        }
+        for i in 0..k {
+            win[i].relabel(&mut gs[i], eng);
+        }
+        let mut bump: FxHashMap<Field, ()> = FxHashMap::default();
+        for i in 0..k {
+            let now = held(&gs[i]);
+            for &(f, kind) in now.keys() {
+                bump.insert(f, ());
+                if !before[i].contains_key(&(f, kind)) {
+                    match kind {
+                        0 => eng.defs.add(f, win[i].lo, win[i].id),
+                        1 => eng.contribs.add(f, win[i].lo, win[i].id),
+                        _ => eng.readers.add(f, win[i].lo, win[i].id),
+                    }
+                }
+            }
+            for &(f, kind) in before[i].keys() {
+                if !now.contains_key(&(f, kind)) {
+                    bump.insert(f, ());
+                    match kind {
+                        0 => eng.defs.remove(f, win[i].lo, win[i].id),
+                        1 => eng.contribs.remove(f, win[i].lo, win[i].id),
+                        _ => eng.readers.remove(f, win[i].lo, win[i].id),
+                    }
+                }
+            }
+        }
+        for (f, ()) in bump {
+            eng.bump(f);
+        }
+        if brackets {
+            eng.scope_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            eng.bump(eng.depth_field);
+        }
     }
 }

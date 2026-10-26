@@ -196,3 +196,63 @@ fn a_long_chain_in_a_pushed_run_takes_labels_from_its_neighbours() {
     assert_eq!(int(&e, total), n + 1);
     assert!(e.check_invariants().is_empty());
 }
+
+/// `[n]`: like `Chain`, and places a child `Def(s_n, n)` before its next
+/// step (a piece whose pages fire in it, then the piece's next part).
+struct ChainKids(std::sync::OnceLock<OpId>, OpId, Field);
+
+impl Operation for ChainKids {
+    fn name(&self) -> &'static str {
+        "chain_kids"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let n = v.as_int(cx.args()[0]).unwrap();
+        cx.child(self.1, vec![v.field("k").0, v.int(n)]);
+        if n > 0 {
+            cx.follow(*self.0.get().unwrap(), vec![v.int(n - 1)]);
+        }
+        cx.contribute(self.2, v.int(1));
+        Ok(cx.args()[0])
+    }
+}
+
+#[test]
+fn long_chains_among_many_pushed_pieces_fit() {
+    // A book's shape: thousands of pieces pushed at once, and a few of
+    // them read on in a long chain of continuations, each placing a page
+    // after itself first; the chains use up their pushed neighbours'
+    // labels many times over, and the line makes room over a window of
+    // segments as wide as it needs, never out of labels.
+    for threads in [1, threads().min(8)] {
+        let e = Engine::new();
+        let v = e.values();
+        let s = v.field("s");
+        e.declare_accumulator(s, Arc::new(phitex_defuse::SumMonoid));
+        let def = e.register(Arc::new(Def));
+        let ch = Arc::new(ChainKids(std::sync::OnceLock::new(), def, s));
+        let chain = e.register(ch.clone());
+        ch.0.set(chain).unwrap();
+        let fold = e.register(Arc::new(FoldAll));
+        let u = e.new_unit();
+        let x = v.field("x");
+        let ids = e.push_many(u, def, (0..4000).map(|i| vec![x.0, v.int(i)]).collect(), 4);
+        let n = 10_000;
+        let heads: Vec<NodeId> = [100, 101, 1999, 3998].iter().map(|&i| e.insert_after(ids[i], chain, vec![v.int(n)])).collect();
+        let total = e.push(u, fold, vec![s.0]);
+        let t = Instant::now();
+        e.evaluate(threads).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(30), "{:?} at {threads} threads", t.elapsed());
+        let order = e.order(u);
+        for (&h, &i) in heads.iter().zip(&[100usize, 101, 1999, 3998]) {
+            let at = order.iter().position(|&x| x == h).unwrap();
+            for k in 0..=n as usize {
+                assert_eq!(int(&e, order[at + 2 * k]), n - k as i64);
+            }
+            assert_eq!(order[at + 2 * n as usize + 2], ids[i + 1]);
+        }
+        assert_eq!(int(&e, total), 4 * (n + 1));
+        assert!(e.check_invariants().is_empty());
+    }
+}

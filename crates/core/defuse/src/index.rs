@@ -319,23 +319,19 @@ impl RangeIndex {
         self.shards[range_shard(f)].0.read().get(&f).is_some_and(|m| m.at.contains_key(&k.seq))
     }
 
-    /// Every interval ending at `old` ends at `new` instead (`old <
-    /// new`), or every one starting at `old` starts at `new` (`new <
-    /// old`): a rebalance moved nodes across a segment's boundary at
-    /// `old` into a segment reaching `new` (`order::Order::rebalance`).
-    pub(crate) fn widen(&self, old: Pos, new: Pos) {
+    /// Every interval starting inside `(lo, hi)` starts at `lo` instead,
+    /// and every one ending inside it ends at `hi`: a rebalance moved
+    /// nodes among the segments of `[lo, hi)` (`order::Order::rebalance`).
+    pub(crate) fn widen_over(&self, lo: Pos, hi: Pos) {
+        let inside = |p: Pos| p > lo && p < hi;
         for sh in &*self.shards {
             let mut w = sh.0.write();
             for m in w.values_mut() {
                 let hit: Vec<(u64, Pos, Pos)> =
-                    m.at.iter().filter(|(_, (lo, hi))| if new > old { *hi == old } else { *lo == old }).map(|(s, (lo, hi))| (*s, *lo, *hi)).collect();
-                for (seq, lo, hi) in hit {
+                    m.at.iter().filter(|(_, (a, b))| inside(*a) || inside(*b)).map(|(s, (a, b))| (*s, *a, *b)).collect();
+                for (seq, a, b) in hit {
                     let r = m.take(seq).expect("a filing it holds");
-                    if new > old {
-                        m.insert(seq, lo, new, r);
-                    } else {
-                        m.insert(seq, new, hi, r);
-                    }
+                    m.insert(seq, if inside(a) { lo } else { a }, if inside(b) { hi } else { b }, r);
                 }
             }
         }
