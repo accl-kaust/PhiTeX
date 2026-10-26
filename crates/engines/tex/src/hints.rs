@@ -4100,8 +4100,31 @@ pub(crate) fn text_hints_reads_reusing(
 
 /// [`text_hints_with`] made afresh (no cache), with the names the
 /// analysis looked up in the definitions ([`pass::with_reads`]): a
-/// document chunk's analysis and its read set (`crate::incr`).
+/// document chunk's analysis and its read set (`crate::incr`). A chunk
+/// of plain text ([`plain_hints`]) is answered by one scan of its bytes.
 pub(crate) fn text_hints_reads(
+    text: &str,
+    kind: FileKind,
+    defs: &Defs,
+    own: Option<Definitions>,
+    start: Option<&pass::Start>,
+) -> (Arc<TextHints>, Vec<String>) {
+    if kind == FileKind::Document
+        && start.is_none()
+        && let Some(r) = plain_hints(text, defs)
+    {
+        // (`PHITEX_HINTS_PLAIN_CHECK=1`: the pass's own answer beside it)
+        if crate::exec::obs_flag!("PHITEX_HINTS_PLAIN_CHECK") {
+            let slow = text_hints_reads_(text, kind, defs, own, start);
+            plain_check(text, &r, &slow);
+            return slow;
+        }
+        return r;
+    }
+    text_hints_reads_(text, kind, defs, own, start)
+}
+
+fn text_hints_reads_(
     text: &str,
     kind: FileKind,
     defs: &Defs,
@@ -4113,6 +4136,273 @@ pub(crate) fn text_hints_reads(
     let own = own.unwrap_or_else(|| own_definitions_from(text, named, start).0);
     let (t, looked) = pass::with_reads(|| analyse_with(text, kind, defs, own, start));
     (Arc::new(t), looked)
+}
+
+/// What the pass answers for a document chunk of plain text under a
+/// format's definitions, read off its answer for a small text of the
+/// same shape (`a b`, a line break, `c`, a blank line: [`PLAIN_SHAPE`]),
+/// made once per definitions ([`plain_hints`]).
+struct PlainShape {
+    /// A character run's hint (its catcodes replaced by each run's).
+    word: Hint,
+    /// The blank line's.
+    par: Arc<Hint>,
+    /// The signatures of a run first in the text, after a space, after
+    /// a line break, and the blank line's ([`atom_sig`]).
+    sigs: [u64; 4],
+    /// The slice's hint encoded, before and after its catcodes.
+    slice: (String, String),
+    /// The names the pass looked up.
+    looked: Vec<String>,
+}
+
+/// The text [`PlainShape`] is read from.
+const PLAIN_SHAPE: &str = "a b\nc\n\n";
+
+/// The shape of a format's definitions, made once per definitions (`None`
+/// when the pass's answer for [`PLAIN_SHAPE`] is not of the shape read).
+fn plain_shape(defs: &Defs) -> Option<Arc<PlainShape>> {
+    type Shapes =
+        Mutex<FxHashMap<usize, (std::sync::Weak<pass::Definitions>, Option<Arc<PlainShape>>)>>;
+    static C: OnceLock<Shapes> = OnceLock::new();
+    let c = C.get_or_init(|| Mutex::new(FxHashMap::default()));
+    let key = Arc::as_ptr(defs) as usize;
+    if let Some((w, sh)) = c.locked().get(&key)
+        && w.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
+    {
+        return sh.clone();
+    }
+    let (t, looked) = text_hints_reads_(PLAIN_SHAPE, FileKind::Document, defs, None, None);
+    let sh = (|| {
+        let word = |k: usize, b: u8| {
+            t.hints
+                .get(k)?
+                .as_deref()
+                .filter(|h| h.bound.as_ref().is_some_and(|x| *x.cats == [(b, 11)]))
+                .cloned()
+        };
+        if t.starts != [0, 2, 4, 6]
+            || t.skip != [false; 4]
+            || t.slices != [(0, 7)]
+            || t.pars != [true]
+        {
+            return None;
+        }
+        let w = word(1, b'b')?;
+        // (the runs' hints the same but for their catcodes)
+        let same = |h: Hint| {
+            let mut h = h;
+            if let Some(b) = &mut h.bound {
+                b.cats = w.bound.as_ref().map(|x| x.cats.clone()).unwrap_or_default();
+            }
+            h.encode() == w.encode()
+        };
+        if !same(word(0, b'a')?) || !same(word(2, b'c')?) {
+            return None;
+        }
+        let enc = t.slice_hints.first()?;
+        let cats = "97\x1d11\x1f98\x1d11\x1f99\x1d11";
+        let (pre, post) = enc.split_once(cats)?;
+        Some(Arc::new(PlainShape {
+            word: w,
+            par: t.hints[3].clone()?,
+            sigs: [t.sigs[0], t.sigs[1], t.sigs[2], t.sigs[3]],
+            slice: (pre.to_owned(), post.to_owned()),
+            looked,
+        }))
+    })();
+    let mut c = c.locked();
+    if c.len() > 64 {
+        c.clear();
+    }
+    c.insert(key, (Arc::downgrade(defs), sh.clone()));
+    sh
+}
+
+/// A document chunk read in the document's regime that is plain text:
+/// runs of letters and other characters (digits and `.,;:!?"()[]-+=/*<>|@`:
+/// not `'`, whose math code is plain's prime, §1151, nor the backquote,
+/// which the pass reads with the character after it) between single
+/// spaces and line breaks, ended by one blank line. Its analysis is the
+/// pass's for [`PLAIN_SHAPE`] laid over its runs: each run's hint that
+/// of `b` with the run's catcodes, the blank line's, the signatures by
+/// what a run follows, the slice's hint with the union of the catcodes.
+/// `None`: not such a chunk (the pass reads it).
+fn plain_hints(text: &str, defs: &Defs) -> Option<(Arc<TextHints>, Vec<String>)> {
+    /// A byte's class: 0 no plain byte, 1 a space, 2 a line break, 3 a
+    /// letter (catcode 11), 4 another character (12).
+    const CLASS: [u8; 256] = {
+        let mut t = [0u8; 256];
+        let mut b: u8 = 0;
+        while b < 128 {
+            let c = b as usize;
+            t[c] = if b == b' ' {
+                1
+            } else if b == b'\n' {
+                2
+            } else if b.is_ascii_alphabetic() {
+                3
+            } else if b.is_ascii_digit() {
+                4
+            } else {
+                let mut k = 0;
+                let o = b".,;:!?\"()[]-+=/*<>|@";
+                let mut j = 0;
+                while j < o.len() {
+                    if o[j] == b {
+                        k = 4;
+                    }
+                    j += 1;
+                }
+                k
+            };
+            b += 1;
+        }
+        t
+    };
+    /// The runs' hints a thread made, by the hash of their bytes
+    /// (direct-mapped).
+    const SLOTS: usize = 1 << 12;
+    type Slot = Option<(u64, Box<[u8]>, Arc<Hint>)>;
+    thread_local! {
+        static RUNS: std::cell::RefCell<(Option<Arc<PlainShape>>, Vec<Slot>)> =
+            const { std::cell::RefCell::new((None, Vec::new())) };
+    }
+    let b = text.as_bytes();
+    let n = b.len();
+    if n < 3 || b[n - 1] != b'\n' || b[n - 2] != b'\n' || CLASS[usize::from(b[0])] < 3 {
+        return None;
+    }
+    let body = &b[..n - 2];
+    let sh = plain_shape(defs)?;
+    let mut starts = Vec::with_capacity(n / 5 + 2);
+    let mut hints = Vec::with_capacity(n / 5 + 2);
+    let mut sigs = Vec::with_capacity(n / 5 + 2);
+    let mut union = Cats::default();
+    let ok = RUNS.with(|r| {
+        let (owner, runs) = &mut *r.borrow_mut();
+        if !owner.as_ref().is_some_and(|o| Arc::ptr_eq(o, &sh)) {
+            *owner = Some(sh.clone());
+            runs.clear();
+            runs.resize(SLOTS, None);
+        }
+        let mut i = 0;
+        let mut after = 0;
+        loop {
+            // (a run: plain characters up to a blank)
+            let s = i;
+            let mut h: u64 = 0x7275_6e73;
+            while let Some(&c) = body.get(i) {
+                let k = CLASS[usize::from(c)];
+                if k < 3 {
+                    break;
+                }
+                union.add((c, if k == 3 { 11 } else { 12 }));
+                h = (h.rotate_left(5) ^ u64::from(c)).wrapping_mul(0x517c_c1b7_2722_0a95);
+                i += 1;
+            }
+            let run = &body[s..i];
+            if run.is_empty() {
+                return false;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let slot = &mut runs[(h >> 52) as usize % SLOTS];
+            let hint = match slot {
+                Some((sh_, bytes, hint)) if *sh_ == h && **bytes == *run => hint.clone(),
+                _ => {
+                    let mut w = sh.word.clone();
+                    if let Some(bd) = &mut w.bound {
+                        bd.cats = run
+                            .iter()
+                            .map(|&c| (c, if CLASS[usize::from(c)] == 3 { 11 } else { 12 }))
+                            .collect();
+                    }
+                    let w = Arc::new(w);
+                    *slot = Some((h, run.into(), w.clone()));
+                    w
+                }
+            };
+            starts.push(u32::try_from(s).unwrap_or(u32::MAX));
+            hints.push(Some(hint));
+            sigs.push(sh.sigs[after]);
+            match body.get(i).map(|&c| CLASS[usize::from(c)]) {
+                None => return true,
+                Some(1) => after = 1,
+                Some(2) => after = 2,
+                _ => return false,
+            }
+            i += 1;
+            if i == body.len() {
+                // (a blank before the blank line)
+                return false;
+            }
+        }
+    });
+    if !ok {
+        return None;
+    }
+    starts.push(u32::try_from(n - 1).unwrap_or(u32::MAX));
+    hints.push(Some(sh.par.clone()));
+    sigs.push(sh.sigs[3]);
+    let mut enc = String::with_capacity(sh.slice.0.len() + sh.slice.1.len() + 8 * union.len());
+    enc.push_str(&sh.slice.0);
+    for (k, &(c, cat)) in union.iter().enumerate() {
+        if k > 0 {
+            enc.push('\x1f');
+        }
+        push_u8(&mut enc, c);
+        enc.push('\x1d');
+        push_u8(&mut enc, cat);
+    }
+    enc.push_str(&sh.slice.1);
+    let skip = vec![false; starts.len()];
+    Some((
+        Arc::new(TextHints {
+            slices: vec![(0, n)],
+            starts,
+            hints,
+            skip,
+            pars: vec![true],
+            slice_hints: vec![Arc::from(enc)],
+            sigs,
+        }),
+        sh.looked.clone(),
+    ))
+}
+
+/// (observe) [`plain_hints`]'s answer against the pass's: a line for
+/// each difference.
+fn plain_check(
+    text: &str,
+    fast: &(Arc<TextHints>, Vec<String>),
+    slow: &(Arc<TextHints>, Vec<String>),
+) {
+    let (f, s) = (&fast.0, &slow.0);
+    let enc = |t: &TextHints| -> Vec<Option<String>> {
+        t.hints
+            .iter()
+            .map(|h| h.as_ref().map(|h| h.encode()))
+            .collect()
+    };
+    let diffs = [
+        ("slices", f.slices != s.slices),
+        ("starts", f.starts != s.starts),
+        ("hints", enc(f) != enc(s)),
+        ("skip", f.skip != s.skip),
+        ("pars", f.pars != s.pars),
+        ("slice hints", f.slice_hints != s.slice_hints),
+        ("sigs", f.sigs != s.sigs),
+        ("looked", fast.1 != slow.1),
+    ];
+    let bad: Vec<&str> = diffs.iter().filter(|d| d.1).map(|d| d.0).collect();
+    if bad.is_empty() {
+        eprintln!("hints plain check: same");
+    } else {
+        eprintln!(
+            "hints plain check: DIFFERS in {bad:?} for {:?}",
+            &text[..text.len().min(60)]
+        );
+    }
 }
 
 /// The hint of the document slice beginning at byte `s` of the text `t`

@@ -690,7 +690,7 @@ G = lambda x: "%.2f" % (x / 1e9)
 per = lambda x, n, u: "%.0f per %s" % (x / n, u) if n else ""
 lb = num(r"phitex_typeset::linebreak::line_break( |$)")
 rows = [
-    ("hint analysis before the build (hints::analyse_reusing)", num(r"phitex_tex::hints::analyse_reusing"), chunks, "chunk"),
+    ("hint analysis before the build (incr::analyse_reusing)", num(r"phitex_tex::incr::analyse_reusing"), chunks, "chunk"),
     ("a piece's run (ops::Exec::run)", op("ops::Exec"), pars, "paragraph"),
     ("  of which Run::char_run", num(r"<phitex_tex::run::Run>::char_run"), letters, "letter"),
     ("  of which Run::line_break_ outside typeset::line_break", max(0, num(r"<phitex_tex::run::Run>::line_break_( |$)") - lb), pars, "paragraph"),
