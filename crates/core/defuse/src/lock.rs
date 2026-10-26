@@ -134,8 +134,55 @@ fn timed<G>(g: G, t: Instant) -> G {
         let f = std::panic::Location::caller().file();
         let i = SITE_FILES.iter().position(|s| f.ends_with(s)).unwrap_or(SITE_FILES.len());
         SITE_WAITS[i].fetch_add(w, std::sync::atomic::Ordering::Relaxed);
+        let line = std::panic::Location::caller().line();
+        site_line_add((i as u64) << 32 | u64::from(line), w);
     }
     g
+}
+
+/// (`profile`) The lock waits by the file and line that took the lock:
+/// open addressing over atomics, the key `file index << 32 | line`.
+static SITE_LINES: [(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64); 512] =
+    [const { (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)) }; 512];
+
+fn site_line_add(key: u64, w: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let k = key + 1;
+    let mut i = (k.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 55) as usize;
+    for _ in 0..512 {
+        let (kk, ww) = &SITE_LINES[i % 512];
+        match kk.compare_exchange(0, k, Relaxed, Relaxed) {
+            Ok(_) => {
+                ww.fetch_add(w, Relaxed);
+                return;
+            }
+            Err(x) if x == k => {
+                ww.fetch_add(w, Relaxed);
+                return;
+            }
+            Err(_) => i += 1,
+        }
+    }
+}
+
+/// (`profile`) The lock waits by file and line, the longest first:
+/// `("read.rs:123", ns)`.
+#[must_use]
+pub fn site_lines() -> Vec<(String, u64)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut out: Vec<(String, u64)> = SITE_LINES
+        .iter()
+        .filter_map(|(k, w)| {
+            let k = k.load(Relaxed);
+            (k != 0).then(|| {
+                let k = k - 1;
+                let f = SITE_FILES.get((k >> 32) as usize).copied().unwrap_or("other");
+                (format!("{f}:{}", k & 0xffff_ffff), w.load(Relaxed))
+            })
+        })
+        .collect();
+    out.sort_by_key(|x| std::cmp::Reverse(x.1));
+    out
 }
 
 /// Nanoseconds since `t`.

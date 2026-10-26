@@ -1592,6 +1592,25 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
             .map(|(f, w)| format!("{f} {:.3}", ms(*w)))
             .collect();
         eprintln!("acct: lock wait by the file taking it (ms, the process so far): {}", sites.join(", "));
+        let lines: Vec<String> = phitex_defuse::obs::lock_lines().iter().take(12).map(|(l, w)| format!("{l} {:.3}", ms(*w))).collect();
+        eprintln!("acct: lock wait by line (ms, the process so far): {}", lines.join(", "));
+    }
+    if let Some(n) = r.commit_max_node {
+        let i = eng.node_info(n);
+        let head: String = i
+            .as_ref()
+            .and_then(|i| i.args.first().map(|&a| eng.values().render(a)))
+            .unwrap_or_default()
+            .chars()
+            .take(60)
+            .collect();
+        eprintln!(
+            "acct: longest commit {:.3} ms: node {} {} [defs, contribs, reads, placed] {:?} {head}",
+            ms(t.commit_max_ns),
+            n.raw(),
+            i.map_or("gone", |i| i.op),
+            eng.record_sizes(n)
+        );
     }
     let live = eng.live_nodes().max(1);
     #[allow(clippy::cast_precision_loss)]
@@ -1614,6 +1633,9 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
     by_field.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     by_field.truncate(20);
     eprintln!("acct: {} nodes refuted; refuted by field {by_field:?}", r.refuted_nodes);
+    if crate::exec::prof_flag!("PHITEX_RUN_AUDIT") {
+        print_rerun_classes(eng, r);
+    }
     // (the kinds on the engine's critical chain, and why each link waited)
     let mut on_chain: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
     let chain = eng.critical_chain();

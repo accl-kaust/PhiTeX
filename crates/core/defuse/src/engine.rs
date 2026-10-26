@@ -1114,7 +1114,10 @@ impl Engine {
             rep.times.op_ns += load(&w.op_ns);
             rep.times.wasted_ns += load(&w.wasted_ns);
             rep.times.commit_ns += load(&w.commit_ns);
-            rep.times.commit_max_ns = rep.times.commit_max_ns.max(load(&w.commit_max_ns));
+            if load(&w.commit_max_ns) > rep.times.commit_max_ns {
+                rep.times.commit_max_ns = load(&w.commit_max_ns);
+                rep.commit_max_node = Some(NodeId(load(&w.commit_max_node)));
+            }
             rep.times.reask_ns += load(&w.reask_ns);
             rep.times.idle_ns += load(&w.idle_ns);
             rep.times.lock_wait_ns += load(&w.lock_wait_ns);
@@ -1503,6 +1506,13 @@ impl Engine {
         }
         chain.reverse();
         chain
+    }
+
+    /// What a node's last record holds: its definitions, contributions,
+    /// reads and placements, counted.
+    pub fn record_sizes(&self, n: NodeId) -> Option<[usize; 4]> {
+        let r = self.node(n).record()?;
+        Some([r.defs.len(), r.contribs.len(), r.reads.len(), r.placed.len()])
     }
 
     /// The chain with each node's [run, commit, re-ask, gap-before] in ns.

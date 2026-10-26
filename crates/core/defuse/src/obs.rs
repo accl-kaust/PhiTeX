@@ -108,3 +108,10 @@ pub fn span(name: &'static str, ns: u64) {
         p.count += 1;
     });
 }
+
+/// (`profile`) The lock waits by the file and line that took the lock,
+/// the longest first.
+#[must_use]
+pub fn lock_lines() -> Vec<(String, u64)> {
+    crate::lock::site_lines()
+}

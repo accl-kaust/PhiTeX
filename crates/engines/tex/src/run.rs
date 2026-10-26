@@ -4465,6 +4465,9 @@ impl<'c, 'a> Run<'c, 'a> {
             self.trace_stop("scope kind");
         }
         let k = r?;
+        if crate::exec::prof_flag!("PHITEX_SKIND_LOG") {
+            eprintln!("skindlog: {} {}", self.cx.node().raw(), k.map_or_else(|| "none".to_owned(), |x| self.v.render(x)));
+        }
         self.scope_kind_memo = Some(k);
         Ok(k)
     }

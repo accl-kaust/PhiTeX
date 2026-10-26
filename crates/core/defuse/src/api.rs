@@ -436,6 +436,9 @@ pub struct Report {
     /// shape (`commit::learn_shape`).
     pub shaped: u64,
     pub commits: u64,
+    /// The node whose commit held its segment longest
+    /// (`Times::commit_max_ns`).
+    pub commit_max_node: Option<NodeId>,
     pub times: Times,
     pub segments: u32,
     pub steals: u64,
