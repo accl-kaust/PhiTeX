@@ -222,9 +222,6 @@ pub(crate) struct Ops {
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// [`crate::Options::node_records`].
     pub node_rec: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// [`crate::Rounds::Relaxed`]: the read-back loop-backs declared
-    /// early (`crate::ops`).
-    pub early_loops: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The class projection of meanings ([`crate::val::class_projection`],
     /// registered with the engine): a lookup that only stores its token
     /// reads the name's class, not its meaning ([`Run::class_lookup`]).
@@ -768,17 +765,10 @@ pub(crate) struct Run<'c, 'a> {
     /// Whether this run takes marks (an exec or a finisher run that is
     /// not speculative).
     pub marks_on: bool,
-    /// The engine cut the run off at a mark: its last run's result stands
-    /// ([`phitex_defuse::Ctx::checkpoint`]).
-    pub cut_off: bool,
     /// (observe, `PHITEX_RESUME_VERIFY=1`) The mark the engine resumed
     /// this run at, with the last run's state there: the run goes from its
     /// start instead and compares its state at that mark.
     pub verify_at: Option<(u32, std::sync::Arc<Parked>, u64, Vec<ValueId>)>,
-    /// (observe, `PHITEX_MARK_CHECK=1`) The mark the engine would have cut
-    /// the run off at: it runs on, and compares its result with the last
-    /// run's at its end.
-    pub cut_check: Option<u32>,
     /// Changes to the run's state a stopped command cannot undo (own
     /// definitions, a buffer reduced in place): a stop after one does
     /// not park ([`Run::rewind`]).
@@ -819,7 +809,7 @@ pub(crate) struct Run<'c, 'a> {
     /// A read-back point not known to be one yet: the file this run
     /// looked for in vain from the macro running ([`Run::read_back_at`]).
     /// When the run opens that file for writing, the point was its
-    /// read-back point ([`Run::written_decl`]): the values kept meanwhile
+    /// read-back point ([`Run::opened_for_writing`]): the values kept meanwhile
     /// ([`Run::pending_pre`]) become the read-back values. Else nothing
     /// of it is published.
     pub read_point_pending: Option<String>,
@@ -1066,8 +1056,6 @@ impl<'c, 'a> Run<'c, 'a> {
             anchor_skip_at: None,
             old_marks: None,
             marks_on: false,
-            cut_off: false,
-            cut_check: None,
             verify_at: None,
             muts: 0,
             interp: None,
@@ -1828,7 +1816,6 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let grp = self.innermost_group();
         self.st.note_kind(loc, self.in_advance);
-        self.st.rb_drop(loc);
         self.st.set(loc, val, global, grp);
         self.muts += 1;
     }
@@ -2198,10 +2185,28 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// Loop-back field `f` ([`crate::ops::lb_read`]): its last
+    /// definition on the line, wherever this run is.
+    pub(crate) fn lb(&mut self, f: Field) -> R<Option<ValueId>> {
+        Ok(crate::ops::lb_read(self.cx, f)?)
+    }
+
+    /// Whether file `key`'s read-back field `f` has a value
+    /// ([`Run::lb`]): none until the file's node defines it, nor while a
+    /// file whose text the client gave is written as given
+    /// ([`crate::ops::WSAME`]): that text is read back where it is read
+    /// ([`Run::seed_written`]), as a run reads it before any value.
+    pub(crate) fn lb_known(&mut self, key: &str, f: Field) -> R<bool> {
+        let v = self.v;
+        if self.lb(v.field(&format!("{}:{key}", crate::ops::WSAME)))?.and_then(|x| v.as_bool(x)) == Some(true) {
+            return Ok(false);
+        }
+        Ok(self.lb(f)?.is_some())
+    }
+
     /// The file `key` from the client (`file:<key>`): `None` if it is
-    /// absent; until the client supplies it or says it is absent, the
-    /// node waits ([`phitex_defuse::Ctx::use_env`]). A file the job
-    /// writes and reads back is a loop-back field: the previous round's.
+    /// absent. A file the job writes and reads back is read from its
+    /// loop-back fields ([`Run::lb`]).
     pub(crate) fn file(&mut self, key: &str) -> R<Option<ValueId>> {
         // (a file the job writes, read whole, `\\openin`'s lines, a size:
         // its text, `wtext:`, whatever its read-back is, per field or as
@@ -2209,10 +2214,11 @@ impl<'c, 'a> Run<'c, 'a> {
         // vain reads it, below)
         let v = self.v;
         let wt = crate::tools::text_field(v, key);
-        if self.cx.is_loopback(wt) {
+        let ws = crate::tools::size_field(v, key);
+        if self.lb_known(key, ws)? {
             let k = self.keyed(crate::fields::Fam::Wkeys, key);
             let w = self.keyed(crate::fields::Fam::Wfile, key);
-            if (self.cx.is_loopback(k) || self.cx.is_loopback(w))
+            if (self.lb_known(key, k)? || self.lb_known(key, w)?)
                 && !self.tool_makes(key)?
                 && let Some(t) = self
                     .read_written_text(key, wt)?
@@ -2232,7 +2238,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if whole && let [path, _] = xs[..] {
             let seed = self.seeded(key).map(|sd| sd.text);
             let t = match seed {
-                Some(t) if !self.cx.is_loopback(wt) => Some(t),
+                Some(t) if !self.lb_known(key, ws)? => Some(t),
                 _ => self.read_written_text(key, wt)?,
             };
             let t = t
@@ -2254,11 +2260,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// field (its text not read by the read-back) and no tool makes.
     pub(crate) fn written_per_field(&mut self, key: &str) -> R<bool> {
         let k = self.keyed(crate::fields::Fam::Wkeys, key);
-        if !self.cx.is_loopback(k) {
+        if !self.lb_known(key, k)? {
             let mark = crate::api::text_mark(self.v);
             return Ok(self.seeded(key).is_some_and(|s| s.keys != mark) && !self.tool_makes(key)?);
         }
-        Ok(self.per_field(k)?.is_some() && !self.tool_makes(key)?)
+        Ok(self.per_field(key, k)?.is_some() && !self.tool_makes(key)?)
     }
 
     /// [`Run::file`], a file the job writes as `[path, UNIT, order]`
@@ -2283,13 +2289,11 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let w = self.keyed(crate::fields::Fam::Wfile, key);
         let k = self.keyed(crate::fields::Fam::Wkeys, key);
-        if self.cx.is_loopback(k) || self.cx.is_loopback(w) {
+        // (read as [`Run::file`] reads them: once the file's node defines
+        // them this runs again)
+        if self.lb_known(key, k)? || self.lb_known(key, w)? {
             return Ok(None);
         }
-        // (bound as [`Run::file`] binds them: a run that writes the file
-        // later declares its loop-back and this runs again)
-        let _ = self.cx.read(k)?;
-        let _ = self.cx.read(w)?;
         // (a file the job writes whose text the client gave: read back,
         // or read whole, not as a document's units, [`Run::seed_written`])
         if self.seeded(key).is_some() || self.seed_text(key)?.is_some() {
@@ -2315,12 +2319,12 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// A written file's unit's text (`wunit:`, a loop-back `ops::Files`
-    /// publishes).
+    /// defines).
     pub(crate) fn unit_text(&mut self, key: ValueId) -> R<String> {
         let v = self.v;
         let name = str_of(v, key);
         let f = v.field(&name);
-        let x = self.cx.read(f)?;
+        let x = self.lb(f)?;
         if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") {
             eprintln!(
                 "round-read: {name} {:016x} node {}",
@@ -2418,7 +2422,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-    /// The round before's text of file `key`, one the job writes
+    /// The text of file `key`, one the job writes
     /// (`wt`, [`crate::tools::text_field`]); where only its size is read
     /// ([`Run::size_read`]), its size instead
     /// ([`crate::tools::size_field`], an integer), so that a lookup's
@@ -2432,7 +2436,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::obs_flag!("PHITEX_READS") {
             self.trace_read(f, false);
         }
-        Ok(self.cx.read(f)?)
+        self.lb(f)
     }
 
     /// File `key`, one the job writes whose text the client gave, looked
@@ -2456,7 +2460,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(None);
         };
         let wt = crate::tools::text_field(v, key);
-        let loopback = self.cx.is_loopback(wt);
+        let loopback = self.lb_known(key, crate::tools::size_field(v, key))?;
         let x = self.read_written_text(key, wt)?;
         let t = if loopback {
             x.unwrap_or(ValueId::UNIT)
@@ -2475,12 +2479,10 @@ impl<'c, 'a> Run<'c, 'a> {
         let w = self.keyed(crate::fields::Fam::Wfile, key);
         let f = self.keyed(crate::fields::Fam::File, key);
         let k = self.keyed(crate::fields::Fam::Wkeys, key);
-        // (neither declared yet: both bound, so a run that writes the
-        // file later in the evaluation, declaring its loop-back,
-        // `Run::written_decl`, runs this again on it)
-        if !self.cx.is_loopback(k) && !self.cx.is_loopback(w) {
-            let _ = self.cx.read(k)?;
-            let _ = self.cx.read(w)?;
+        // (neither defined yet: both read, so the file's node defining
+        // them runs this again on them)
+        let (known_k, known_w) = (self.lb_known(key, k)?, self.lb_known(key, w)?);
+        if !known_k && !known_w {
             // (a file the job writes whose text the client gave: read
             // back from it here, as from its loop-backs once they are in
             // effect, [`Run::seed_written`])
@@ -2491,7 +2493,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // (a name the job writes that a tool also makes from a file the
         // job writes: the tool's output, as latexmk's tool run after the
         // TeX run that wrote both replaces what the job wrote there)
-        let made = if self.cx.is_loopback(k) || self.cx.is_loopback(w) {
+        let made = if known_k || known_w {
             self.tool_output(key)?
         } else {
             None
@@ -2499,10 +2501,10 @@ impl<'c, 'a> Run<'c, 'a> {
         let per_field = if made.is_some() {
             None
         } else {
-            self.per_field(k)?
+            self.per_field(key, k)?
         };
-        if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") && self.cx.is_loopback(k) {
-            let (kx, wx) = (self.cx.read(k)?, self.cx.read(w)?);
+        if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") && known_k {
+            let (kx, wx) = (self.lb(k)?, self.lb(w)?);
             eprintln!(
                 "round-read: wkeys:{key} {:016x} wfile:{key} {:016x} tool {} node {}",
                 kx.map_or(0, ValueId::raw),
@@ -2521,9 +2523,9 @@ impl<'c, 'a> Run<'c, 'a> {
             } else {
                 None
             }
-        } else if self.cx.is_loopback(w) {
+        } else if known_w {
             // (its units' order, `ops::Files`; none: absent)
-            let x = self.cx.read(w)?;
+            let x = self.lb(w)?;
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                 eprintln!(
                     "aux-trace: read wfile {key}: {:?} units",
@@ -2532,8 +2534,6 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             x.filter(|&x| !list_of(v, x).is_empty())
                 .map(|o| v.list(vec![v.str(&format!("./{key}")), ValueId::UNIT, o]))
-        } else if self.cx.is_loopback(f) {
-            self.get_f(f)?
         } else {
             if crate::exec::obs_flag!("PHITEX_TMP_FTRACE") {
                 eprintln!(
@@ -2553,7 +2553,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // (a file looked for in vain: where it would be read back, its
         // next round's lines are read, [`Run::note_read_point`]; one this
         // job writes and reads back per field is known here, another may
-        // be opened for writing by this run later, [`Run::written_decl`])
+        // be opened for writing by this run later, [`Run::opened_for_writing`])
         if x.is_none() && self.interp.is_none() && !self.writer_lookup {
             if per_field.is_some() {
                 self.note_read_point();
@@ -2593,18 +2593,16 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// File `key` as a tool makes it, where one does ([`crate::tools`]):
     /// the output a `\write18`'s tool node before here made of it
-    /// ([`crate::tools::out_field`]), else the output of the memoised run
-    /// of a tool whose default output it is from a file the job writes
-    /// (`[path, text]`). `None`: no tool makes it, or the run made none.
+    /// ([`crate::tools::out_field`]), else what a tool makes of it by
+    /// default from a file the job writes, defined by that file's node
+    /// ([`crate::tools::made_field`], `[path, text]`). `None`: no tool
+    /// makes it, or the run made none.
     fn tool_output(&mut self, key: &str) -> R<Option<ValueId>> {
         if let Some(x) = self.eng_read(crate::tools::out_field(self.v, key))? {
             return Ok((x != ValueId::UNIT).then_some(x));
         }
-        let Some(args) = crate::tools::run_args(self.cx, key)? else {
-            return Ok(None);
-        };
-        let x = self.cx.apply(self.ops.tool, args)?;
-        Ok((x != ValueId::UNIT).then_some(x))
+        let x = self.lb(crate::tools::made_field(self.v, key))?;
+        Ok(x.filter(|&x| x != ValueId::UNIT))
     }
 
     /// Whether a tool makes file `key` ([`Run::tool_output`]): its text is
@@ -2613,7 +2611,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if let Some(x) = self.eng_read(crate::tools::out_field(self.v, key))? {
             return Ok(x != ValueId::UNIT);
         }
-        Ok(crate::tools::run_args(self.cx, key)?.is_some())
+        Ok(self.lb(crate::tools::made_field(self.v, key))?.is_some())
     }
 
     /// A `\write18` naming a tool (`[tool, output, input, [args...]]`,
@@ -2791,12 +2789,12 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(())
     }
 
-    /// Whether file `name` is one the job writes and reads back, with its
-    /// loop-backs declared.
-    pub(crate) fn written_known(&mut self, name: &str) -> bool {
+    /// Whether file `name` is one the job writes and reads back, its
+    /// fields defined or its text the client's.
+    pub(crate) fn written_known(&mut self, name: &str) -> R<bool> {
         let w = self.keyed(crate::fields::Fam::Wfile, name);
         let k = self.keyed(crate::fields::Fam::Wkeys, name);
-        self.cx.is_loopback(w) || self.cx.is_loopback(k) || self.seeded(name).is_some()
+        Ok(self.lb_known(name, w)? || self.lb_known(name, k)? || self.seeded(name).is_some())
     }
 
     /// Whether the lines this run writes to `name` are interpreted as
@@ -2815,11 +2813,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// loop-back declared and not marked as read back as text
     /// ([`crate::api::text_mark`]). The key set read, its value bound.
     #[allow(clippy::option_option)]
-    fn per_field(&mut self, k: Field) -> R<Option<Option<ValueId>>> {
-        if !self.cx.is_loopback(k) {
+    fn per_field(&mut self, key: &str, k: Field) -> R<Option<Option<ValueId>>> {
+        if !self.lb_known(key, k)? {
             return Ok(None);
         }
-        let x = self.cx.read(k)?;
+        let x = self.lb(k)?;
         Ok((x != Some(crate::api::text_mark(self.v))).then_some(x))
     }
 
@@ -2928,9 +2926,9 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn read_back(&mut self, key: &str) -> R<bool> {
         let v = self.v;
         let wk = self.keyed(crate::fields::Fam::Wkeys, key);
-        // (read back from the client's text in this run, its loop-backs
-        // not in effect yet: the values they are declared with)
-        let seed = if self.cx.is_loopback(wk) {
+        // (read back from the client's text in this run, its fields not
+        // defined yet or the file written as given)
+        let seed = if self.lb_known(key, wk)? {
             None
         } else {
             self.seeded(key).cloned()
@@ -2939,7 +2937,7 @@ impl<'c, 'a> Run<'c, 'a> {
             Some(sd) if sd.keys == crate::api::text_mark(v) => return Ok(false),
             Some(sd) => list_of(v, sd.keys),
             None => {
-                let Some(keys) = self.per_field(wk)? else {
+                let Some(keys) = self.per_field(key, wk)? else {
                     return Ok(false);
                 };
                 keys.map(|x| list_of(v, x)).unwrap_or_default()
@@ -2959,29 +2957,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
             } else {
                 let wd = self.keyed(crate::fields::Fam::Wdef, &id);
-                // (a key whose loop-back the files node has not declared
-                // yet: the field bound, so this runs again when it does)
-                if !self.cx.is_loopback(wd) {
-                    let _ = self.cx.read(wd)?;
-                    continue;
-                }
-                // (a global definition, outside a line's interpretation:
-                // the field's value not read but passed on where the run
-                // publishes it, so a change of it runs no reader of the
-                // file again, only the meaning's, [`Run::finish`]; read
-                // where the run looks at the meaning, `State::rb_note`)
-                if self.interp.is_none()
-                    && !name.starts_with("rberr:")
-                    && let Some((val, true)) = self.rb_part(wd)
-                {
-                    self.read_back_pre(key, &name, val)?;
-                    self.set(&name, val, true);
-                    let f = self.ops.fields.get_at(v, self.cx.values_epoch(), &name);
-                    let l = self.loc_of(f);
-                    self.st.rb_note(l, wd);
-                    continue;
-                }
-                let Some(x) = self.cx.read(wd)? else {
+                // (a key the file's node has not defined yet: read, so
+                // this runs again when it does)
+                let Some(x) = self.lb(wd)? else {
                     continue;
                 };
                 // (`PHITEX_KEYS_SHOW=part`, profile: the value a read-back
@@ -3078,17 +3056,6 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(())
     }
 
-    /// A read-back's loop-back field `wd`'s definition and whether it is
-    /// global, not read ([`phitex_defuse::Ctx::loop_part`]); `None` where
-    /// its value has no such parts.
-    pub(crate) fn rb_part(&mut self, wd: Field) -> Option<(ValueId, bool)> {
-        let v = self.v;
-        let (p0, p1) = rb_paths(self.cx);
-        let val = self.cx.loop_part(wd, p0)?;
-        let g = self.cx.loop_part(wd, p1)?;
-        Some((val, int_of(v, g) != 0))
-    }
-
     /// File `key`, one the job writes and has not declared yet (round
     /// one), read back from the text the client gave for it as the build
     /// began (`wseeds`, [`crate::Options::written_init`]: the file an
@@ -3109,15 +3076,14 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         let k = self.keyed(crate::fields::Fam::Wkeys, key);
         let w = self.keyed(crate::fields::Fam::Wfile, key);
-        if self.cx.is_loopback(k) || self.cx.is_loopback(w) {
+        // (read: this runs again once the file's node finds the file
+        // written otherwise)
+        if self.lb_known(key, k)? || self.lb_known(key, w)? {
             return Ok(false);
         }
         let Some(t) = self.seed_text(key)? else {
             return Ok(false);
         };
-        // (bound: this runs again once they are in effect)
-        let _ = self.cx.read(k)?;
-        let _ = self.cx.read(w)?;
         let text = str_of(v, t);
         // (each line as the stream's: a text an earlier line left open
         // goes on with the next; the first line that does more than
@@ -3170,13 +3136,6 @@ impl<'c, 'a> Run<'c, 'a> {
         } else {
             crate::api::key_set(v, key, &ds)
         };
-        let defs: Vec<ValueId> = ds
-            .iter()
-            .filter(|(_, x)| *x != ValueId::UNIT)
-            .map(|(f, x)| v.list(vec![v.str(&crate::api::wdef_id(key, f)), *x]))
-            .collect();
-        let e = v.list(vec![v.str(key), keys, v.list(defs)]);
-        self.contribute(SEEDED, v.seq_unit(e));
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: {key} read back from the client's text in node {}: {} bytes, {}",
@@ -3444,41 +3403,13 @@ impl<'c, 'a> Run<'c, 'a> {
             .is_some_and(|c| c.iter().any(|&(f, _)| f != log && f != errors))
     }
 
-    /// File `name` is opened for writing: where the build keeps the
-    /// files the job writes in memory (`loopfiles`, a watch's fixpoint),
-    /// its loop-backs are declared here, from the run (spec-redesign §1
-    /// `files(round)`): `wkeys:<name>` for a read-back that only defines
-    /// and `wfile:<name>` for its text, which of the two its file node
-    /// finds from its lines, none until it publishes one. A
-    /// reader that read the file before binds the field
-    /// ([`Run::file`]) and runs again within the evaluation; no
-    /// evaluation waits on the client for it.
-    pub(crate) fn written_decl(&mut self, name: &str) -> R<()> {
+    /// File `name` is opened for writing: a lookup of it in vain from
+    /// the macro still running was its read-back point
+    /// ([`Run::note_absent_read_point`]). Its readers read what its file
+    /// node defines ([`crate::ops::Files`]).
+    pub(crate) fn opened_for_writing(&mut self, name: &str) -> R<()> {
         if self.interp.is_none() {
             self.note_absent_read_point(name)?;
-        }
-        if self.written_known(name) {
-            return Ok(());
-        }
-        let v = self.v;
-        // (read as the files node reads it: no wait where a build has
-        // none, a prelude's)
-        if self
-            .cx
-            .read(v.field("loopfiles"))?
-            .is_none_or(|x| x == ValueId::UNIT)
-        {
-            return Ok(());
-        }
-        // (both: whether its read-back is per field or its text is what
-        // its lines are, which its file node finds, `crate::ops`)
-        for fam in [crate::fields::Fam::Wkeys, crate::fields::Fam::Wfile] {
-            let f = self.keyed(fam, name);
-            if self.ops.early_loops.load(std::sync::atomic::Ordering::Relaxed) {
-                self.cx.declare_loopback_early(f, v.list(Vec::new()));
-            } else {
-                self.cx.declare_loopback(f, v.list(Vec::new()));
-            }
         }
         Ok(())
     }
@@ -4506,13 +4437,14 @@ impl<'c, 'a> Run<'c, 'a> {
         out
     }
 
-    /// The scope kind the node runs in: the engine's, read once a run
-    /// (a stop reads it again).
+    /// The scope kind the node runs in: the definition of [`SCOPE_KIND`]
+    /// reaching it, made inside each scope by the node that opened it
+    /// ([`Run::leave_scope`]), read once a run (a stop reads it again).
     pub(crate) fn scope_kind(&mut self) -> R<Option<ValueId>> {
         if let Some(k) = self.scope_kind_memo {
             return Ok(k);
         }
-        let r = self.cx.scope_kind();
+        let r = self.cx.read(self.v.field(SCOPE_KIND));
         if r.is_err() {
             self.trace_stop("scope kind");
         }
@@ -4618,7 +4550,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// open, no scope effect yet, and a text that does not say it opens
     /// none. Each group is a frame; a field the run defines at its level
     /// and a group inside it has an entry for each
-    /// (`Ctx::define_in_scope`, `Ctx::define_in_scope_at`).
+    /// (`Locality::Scope`, `Locality::ScopeAt`).
     pub(crate) fn can_leave_scope(&self) -> bool {
         let op = self.cx.op();
         (op == self.ops.exec || op == self.ops.resume)
@@ -4632,13 +4564,13 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Whether the run closed the engine scope it ran in, with nothing
     /// of its own open but conditionals: it ends after that command
-    /// (`Effect::Close`, its reads and definitions inside the scope), and
+    /// ([`CLOSE`], its reads and definitions inside the scope), and
     /// what it has left of its input runs outside it as the following
     /// nodes, the conditionals carried ([`Run::leftover`]). (Any run: a
     /// run going on past the close would read on with its own bindings
     /// of the closed scope, §282 not done.)
     fn closed_scope(&self) -> bool {
-        self.effect == Effect::Close && self.nest.is_empty()
+        self.effect == CLOSE && self.nest.is_empty()
     }
 
     /// The conditionals a node before this one left open
@@ -4849,20 +4781,8 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         {
             let (n, t_list) = (published.len(), t_pub.elapsed());
-            // (a read-back's global definition standing as it read it:
-            // passed on from its loop-back field, which the run did not
-            // read, `Run::read_back`; one looked at, its field read)
-            self.rb_flush();
-            let rb: phitex_defuse::FxHashMap<Field, Field> = self.st.rb_entries().into_iter().map(|(l, w)| (self.loc_field(l), w)).collect();
-            let (p0, p1) = if rb.is_empty() { (phitex_defuse::PathId::WHOLE, phitex_defuse::PathId::WHOLE) } else { rb_paths(self.cx) };
             for (f, x, l) in published {
                 crate::exec::widths::def(f);
-                if let Some(&w) = rb.get(&f) {
-                    if l == Locality::Global && self.cx.loop_part(w, p0) == Some(x) && self.cx.define_forward_at(f, w, p0, Some(p1), l) {
-                        continue;
-                    }
-                    let _ = self.cx.read(w);
-                }
                 self.cx.define_with(f, x, l);
             }
             if n >= 10_000 && crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -5128,8 +5048,9 @@ impl<'c, 'a> Run<'c, 'a> {
         // never part of a load's key; one read cut is read for that it
         // is, whatever its text)
         let mut files: Vec<(String, u64)> = Vec::new();
+        // (a read refuted here refutes the run, whose record is dropped)
         for (n, h) in self.fread.clone() {
-            if !self.written_known(&n) {
+            if !self.written_known(&n).unwrap_or(true) {
                 let h = if self.uread.contains(&n) {
                     crate::pkgrec::UNITS
                 } else {
@@ -5139,7 +5060,7 @@ impl<'c, 'a> Run<'c, 'a> {
             }
         }
         for n in self.fmiss.clone() {
-            if !self.written_known(&n) {
+            if !self.written_known(&n).unwrap_or(true) {
                 files.push((n, 0));
             }
         }
@@ -5452,10 +5373,6 @@ struct PLevel {
 /// `wseeds:<name>` is each one's text.
 pub(crate) const SEEDS: &str = "wseeds";
 
-/// The accumulator of the read-backs runs made of those files
-/// ([`Run::seed_written`]): `[name, keys, [[wdef id, value], ...]]` each.
-pub(crate) const SEEDED: &str = "wseeded";
-
 /// A round-one read-back of a file the job writes, from the client's
 /// text ([`Run::seed_written`]).
 #[derive(Clone)]
@@ -5531,9 +5448,6 @@ pub(crate) struct Parked {
     /// [`Run::lt`]: its reads, and its tainted meanings by field and
     /// whether one was looked at ([`crate::runstate::State::taint`]).
     lt: (crate::control::LinesTaint, Vec<Field>, bool),
-    /// The read-backs' meanings not looked at, by field, with their
-    /// loop-back fields ([`crate::runstate::State::rb_note`]).
-    rb: Vec<(Field, Field)>,
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -5736,7 +5650,6 @@ impl Run<'_, '_> {
                 .collect(),
             fin_lazy: sorted_lazy(&std::mem::take(&mut self.fin_lazy)),
             lt: self.lt_parked(),
-            rb: self.rb_parked(),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
@@ -5904,9 +5817,7 @@ impl Run<'_, '_> {
     /// parks its whole table, the later ones its changes, 0.7% of a cold
     /// amsldoc build at 4000, 1.3% at 2000): the
     /// run's state as a parked run's ([`Run::snapshot`]) and its digest,
-    /// given to the engine ([`phitex_defuse::Ctx::checkpoint`]). `Err`
-    /// when the engine cuts the run off there: its last run's result
-    /// stands.
+    /// kept for the observers that compare runs.
     #[inline]
     pub(crate) fn take_mark(&mut self) -> R<()> {
         // (one test a command where the run takes none, two where it
@@ -5998,9 +5909,8 @@ impl Run<'_, '_> {
         self.commit_mark(p, tp)
     }
 
-    /// A mark's snapshot `p` kept, its digest given to the engine
-    /// ([`phitex_defuse::Ctx::checkpoint`]); `Err` where the engine cuts
-    /// the run off there. `tp`: the mark's profile probe.
+    /// A mark's snapshot `p` kept with its digest. `tp`: the mark's
+    /// profile probe.
     fn commit_mark(&mut self, p: Parked, tp: Option<std::time::Instant>) -> R<()> {
         let v = self.v;
         let td = crate::prof::start();
@@ -6091,17 +6001,7 @@ impl Run<'_, '_> {
                 eprintln!("mark-table-check: missing {:?}; extra {:?}", a.touched_missing(b), b.touched_missing(a));
             }
         }
-        let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
-        let r = self.cx.checkpoint(k, state);
         crate::prof::add(crate::prof::MARK_CK, tp);
-        if let Err(s) = r {
-            if crate::exec::obs_flag!("PHITEX_MARK_CHECK") {
-                self.cut_check.get_or_insert(k);
-                return Ok(());
-            }
-            self.cut_off = true;
-            return Err(Halt::Stop(s));
-        }
         Ok(())
     }
 
@@ -6129,7 +6029,7 @@ impl Run<'_, '_> {
         if !crate::exec::obs_flag!("PHITEX_ANCHOR_MARKS") {
             return Ok(());
         }
-        if !self.marks_on || self.cut_off || self.watch_exit.is_some() || !self.mark.active {
+        if !self.marks_on || self.watch_exit.is_some() || !self.mark.active {
             return Ok(());
         }
         let at = self.cmds_before + self.cmds;
@@ -6351,7 +6251,6 @@ impl Run<'_, '_> {
             num_memo,
             fin_lazy,
             lt: self.lt_parked(),
-            rb: self.rb_parked(),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st,
@@ -6625,7 +6524,6 @@ fn parked_rest(p: &Parked) -> u64 {
         (f.0.raw(), x.raw()).hash(&mut h);
     }
     (&p.lt.0, p.lt.1.iter().map(|f| f.0.raw()).collect::<Vec<_>>(), p.lt.2).hash(&mut h);
-    p.rb.iter().map(|(f, w)| (f.0.raw(), w.0.raw())).collect::<Vec<_>>().hash(&mut h);
     (p.rec_load, p.no_pull, p.args_key).hash(&mut h);
     w(&mut h, p.st.rest_hash());
     w(&mut h, p.contribs.len() as u64);
@@ -6856,31 +6754,21 @@ pub(crate) fn lines_value(v: &Values, lines: &[(ValueId, i64)]) -> ValueId {
     )
 }
 
-/// The paths of a read-back field's definition and its globality in
-/// its value (`[definition, global]`).
-fn rb_paths(cx: &Ctx<'_>) -> (phitex_defuse::PathId, phitex_defuse::PathId) {
-    use phitex_defuse::Step;
-    (cx.path(&[Step::Index(0)]), cx.path(&[Step::Index(1)]))
-}
+/// The field holding the kind of the scope open at a node
+/// ([`Run::scope_kind`]): `[group, sid, list, mode, depth, parent kind,
+/// extra…]`, defined inside the scope by the node that leaves its group
+/// open, so a close ends it as it ends the group's other locals.
+pub(crate) const SCOPE_KIND: &str = "skind";
+
+/// A node that closes the scope it runs in, after its reads and
+/// definitions: the run ends there ([`Run::closed_scope`]).
+pub(crate) const CLOSE: Effect = Effect::Scope(phitex_defuse::Brackets {
+    closes: 1,
+    opens: 0,
+    before: false,
+});
 
 impl Run<'_, '_> {
-    /// The read-backs as a park or a mark keeps them ([`Parked::rb`]),
-    /// the fields of those looked at read first ([`Run::rb_flush`]).
-    fn rb_parked(&mut self) -> Vec<(Field, Field)> {
-        self.rb_flush();
-        let mut v: Vec<(Field, Field)> = self.st.rb_entries().into_iter().map(|(l, w)| (self.loc_field(l), w)).collect();
-        v.sort_by_key(|e| e.0.0.raw());
-        v
-    }
-
-    /// The loop-back fields of the read-backs looked at since: read, as
-    /// the read-back would have read them (`Run::read_back`).
-    pub(crate) fn rb_flush(&mut self) {
-        for w in self.st.rb_take_looked() {
-            let _ = self.cx.read(w);
-        }
-    }
-
     /// [`Run::lt`] as a park or a mark keeps it ([`Parked::lt`]).
     fn lt_parked(&mut self) -> (crate::control::LinesTaint, Vec<Field>, bool) {
         let mut fs: Vec<Field> = self.st.tainted().to_vec().into_iter().map(|l| self.loc_field(l)).collect();

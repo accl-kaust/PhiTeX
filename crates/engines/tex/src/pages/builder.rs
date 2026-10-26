@@ -1023,6 +1023,11 @@ impl Operation for Pages {
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
         MayDefine::Names(vec![v.field(PAGES_END)])
     }
+    /// (set right after the text's first piece where there are threads
+    /// to run it beside the text: no piece's claim takes it)
+    fn sibling(&self) -> bool {
+        false
+    }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }

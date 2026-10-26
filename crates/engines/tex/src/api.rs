@@ -167,15 +167,6 @@ pub struct Options {
     /// process (`phitex-makeindex`); the others are refused with a
     /// diagnostic.
     pub shell_escape: i32,
-    /// The loop-back rounds an evaluation may take, as latexmk's
-    /// `max_repeat` bounds pdflatex's runs (5): a document whose files
-    /// read back still change then is finished on the values its last
-    /// round ran with, and a warning names the fields still moving
-    /// ([`Build::diagnostics`]).
-    pub max_rounds: u64,
-    /// How the loop-back rounds run ([`Rounds`]): exact (the default) or
-    /// relaxed.
-    pub rounds: Rounds,
     /// Where a tool's support files come from (bibliography styles and
     /// databases, index styles: [`ToolSearch`]); `None` asks
     /// [`Options::finder`] by name.
@@ -679,23 +670,6 @@ fn apply_text(
     d.changed()
 }
 
-/// How a build's loop-back rounds run (the files the job writes and
-/// reads back: its `.aux`, `.toc`, `.out`, `.idx` and their kin).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Rounds {
-    /// As latexmk's runs: a file read back moves only between rounds,
-    /// so the output is byte for byte pdfTeX's under latexmk.
-    #[default]
-    Exact,
-    /// A file read back moves as soon as a run changes what it holds,
-    /// and its readers run again within the round: fewer rounds. The
-    /// result is usually the same, but a document whose read-backs
-    /// change more than once or reach the round cap may differ from the
-    /// exact rounds' (a warning says so, [`Build::diagnostics`]), and
-    /// one that settles cleanly is not proved to match either.
-    Relaxed,
-}
-
 impl Default for Options {
     fn default() -> Self {
         Options {
@@ -725,8 +699,6 @@ impl Default for Options {
             // for cold builds) mispredicts most of its runs while the
             // commands answer `Any`
             speculation: Speculation::Predicted,
-            max_rounds: 5,
-            rounds: Rounds::Exact,
             tool_finder: None,
             bibtex: phitex_bibtex::Options::default(),
             out_name_ok: None,
@@ -1371,8 +1343,8 @@ pub struct Stats {
     /// the piece its page finished inside of changed what the piece's
     /// commands after the candidate saw): each costs a round.
     pub cuts: u64,
-    /// Loop-back rounds the engine ran (the files read back, to their
-    /// fixpoint).
+    /// The passes the files read back took to their fixpoint: one, and
+    /// each rerun one reader of them took (`Report::final_reruns`).
     pub loop_rounds: u64,
     /// Nodes that waited on a value not known yet, and stops.
     pub pending_waits: u64,
@@ -1868,6 +1840,9 @@ impl Stats {
         self.nodes_run += r.nodes_run;
         self.runs += r.runs;
         self.rounds += 1;
+        // (the passes the files read back took: one, and each rerun a
+        // node took on them)
+        self.loop_rounds = self.loop_rounds.max(1 + u64::from(r.final_reruns));
         self.version = r.version;
         self.predictions_confirmed += r.predictions_confirmed;
         self.predictions_refuted += r.predictions_refuted;
@@ -1945,16 +1920,11 @@ struct Graph {
     /// ([`canonical_text`]): `doc:mark:<id>` in the environment, read by a
     /// run that reads a comment's mark as text (`Run::splice_mark`).
     marks: Marks,
-    /// The `wdef:<field>` loop-backs declared: the fields the read-back
-    /// of a job-written file defines.
-    wdefs: Vec<String>,
-    /// The written files' accumulator (`streams`) `wdefs` were last
-    /// declared from: the same value, the same fields, none new.
-    wdefs_from: Option<ValueId>,
     /// The names of the files opened for writing ([`Graph::opened`]), by
     /// the `streams` value they were read from.
     opened_memo: std::sync::Mutex<Option<(Option<ValueId>, Vec<String>)>>,
-    /// The round-one guesses of the `wkeys:<name>` loop-backs.
+    /// The guessed key sets of the read-back files that only define, the
+    /// environment's `wkeys:<name>` until their files' nodes define them.
     wkeys_guess: Vec<(String, Vec<String>)>,
     /// What the executor runs now, for readers on other threads.
     watch: crate::exec::Watch,
@@ -2216,7 +2186,6 @@ impl Graph {
             fin_defs_start: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             node_rec: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            early_loops: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pdf_cmds: Arc::default(),
             class_proj,
             outer_proj,
@@ -2248,8 +2217,6 @@ impl Graph {
             threads: crate::exec::threads(threads),
             inline: false,
             marks: Marks::default(),
-            wdefs: Vec::new(),
-            wdefs_from: None,
             opened_memo: std::sync::Mutex::new(None),
             wkeys_guess: Vec::new(),
             opened_last: Vec::new(),
@@ -2540,30 +2507,12 @@ impl Graph {
         names
     }
 
-    /// Declares the read-back loop-backs `decl`, early in the relaxed
-    /// rounds ([`Rounds::Relaxed`]).
-    fn decl_loops(&mut self, decl: &[(Field, ValueId)]) {
-        // (none to declare: the engine is not asked)
-        if decl.is_empty() {
-            return;
-        }
-        if self.ops.early_loops.load(std::sync::atomic::Ordering::Relaxed) {
-            for &(f, x) in decl {
-                self.eng.declare_loopback_early(f, x);
-            }
-        } else {
-            self.eng.declare_loopbacks(decl);
-        }
-    }
-
     /// Round one's guesses for the loop-backs: the last build's values
     /// (`opts`); none without one.
     fn guesses(&mut self, opts: &Options) {
         if opts.fixpoint {
             self.seeds.clone_from(&opts.written_init);
         }
-        // (the files the job wrote in an earlier round: the files node
-        // declares them, `crate::ops::WSEEN`, once a file is written)
         // (a file read back from its text needs no guess of its keys)
         self.wkeys_guess = opts
             .wkeys
@@ -2573,15 +2522,10 @@ impl Graph {
             .collect();
     }
 
-    /// A file the job writes is read back: from the previous round
-    /// (`fixpoint`: a loop-back field, absent in round one, as LaTeX's
-    /// `\@input` finds no `.aux` on a first run), or absent.
-    ///
-    /// With `fixpoint` the file is an in-memory value, `wfile:<name>`: a
-    /// loop-back the writer (`Files`) publishes, its first value the
-    /// file on disk if there is one (the last build's fixpoint), else
-    /// absent; `file:<name>` is absent, so a run that read it from the
-    /// finder before this runs again and reads the loop-back.
+    /// A file the job writes is read back as the job writes it
+    /// (`fixpoint`: its fields, `crate::ops::Files`, read at their last
+    /// definition), or absent; `file:<name>` is absent, so a run that
+    /// read it from the finder before this runs again and reads them.
     fn written_file(&mut self, name: &str, fixpoint: bool, _finder: &Finder) {
         if self.written.iter().any(|w| w == name) {
             return;
@@ -2605,61 +2549,6 @@ impl Graph {
             self.files.push((f, none));
         } else {
             self.absent.push(f);
-        }
-        // (a file whose text the client gave: its loop-backs are the
-        // reading run's, declared with what it read back from that text,
-        // [`Options::written_init`]; declared again here, their round-one
-        // values would be lost)
-        if fixpoint && !self.seeds.iter().any(|(n, _)| n == name) {
-            // nothing else reads the bytes on disk: a read-back that only
-            // defines is its key set `wkeys:<name>` and one
-            // `wdef:<field>` per field; another file is its text in
-            // memory, `wfile:<name>`; both start empty (absent)
-            let v = self.eng.values();
-            let none = v.list(Vec::new());
-            // (both: whether it is read back per field or as its text is
-            // what its lines are, which its file node finds, `crate::ops`)
-            let wf = v.field(&format!("wfile:{name}"));
-            let w = v.field(&format!("wkeys:{name}"));
-            // a key set guessed (the last session's, or from the text):
-            // the read-back runs once when the guess is right
-            let guess = self
-                .wkeys_guess
-                .iter()
-                .find(|(n, _)| n == name)
-                .map_or(none, |(_, ks)| {
-                    v.list(ks.iter().map(|k| v.str(k)).collect())
-                });
-            for (f, x) in [(wf, none), (w, guess)] {
-                decl_trace(&self.eng, f, x);
-            }
-            self.decl_loops(&[(wf, none), (w, guess)]);
-            // the guessed keys' `wdef:<field>` loop-backs declared with
-            // it: a read-back of a guessed key never waits for them
-            let keys: Vec<String> = self
-                .wkeys_guess
-                .iter()
-                .filter(|(n, _)| n == name)
-                .flat_map(|(_, ks)| {
-                    ks.iter()
-                        .filter(|k| *k != WRITTEN_KEY)
-                        .map(|k| wdef_id(name, k))
-                })
-                .collect();
-            // (declared in one pass: each declaration looks at every
-            // run's reads)
-            let mut decl = Vec::new();
-            for k in keys {
-                if !self.wdefs.contains(&k) {
-                    let v = self.eng.values();
-                    let none = v.list(Vec::new());
-                    let wd = v.field(&format!("wdef:{k}"));
-                    decl_trace(&self.eng, wd, none);
-                    decl.push((wd, none));
-                    self.wdefs.push(k);
-                }
-            }
-            self.decl_loops(&decl);
         }
         self.written.push(name.to_owned());
     }
@@ -2723,7 +2612,22 @@ impl Graph {
                 v.list(self.seeds.iter().map(|(n, _)| v.str(n)).collect()),
             ));
             for (n, t) in &self.seeds {
-                env.push((v.field(&format!("{}:{n}", crate::run::SEEDS)), v.str(t)));
+                let t = v.str(t);
+                env.push((v.field(&format!("{}:{n}", crate::run::SEEDS)), t));
+                // (its text and size as the client gave it, for its tools
+                // and lookups, and written as given until its node finds
+                // otherwise: its readers read the text,
+                // `crate::ops::WSAME`)
+                env.push((crate::tools::text_field(v, n), t));
+                env.push((crate::tools::size_field(v, n), crate::tools::size_value(v, t)));
+                env.push((v.field(&format!("{}:{n}", crate::ops::WSAME)), v.bool(true)));
+            }
+            // (a key set guessed for a file written before, until its node
+            // defines the file's)
+            for (n, ks) in &self.wkeys_guess {
+                if self.written.contains(n) {
+                    env.push((v.field(&format!("wkeys:{n}")), v.list(ks.iter().map(|k| v.str(k)).collect())));
+                }
             }
         } else {
             env.push((v.field("loopfiles"), ValueId::UNIT));
@@ -2800,6 +2704,26 @@ impl Graph {
             };
             t_eval += t0.elapsed();
             self.eval_warnings.clear();
+            // (a reader of a file read back still moving at the cap: the
+            // output is its last run's, as latexmk's is after its last
+            // run, and LaTeX's warning says so)
+            if !r.capped.is_empty() {
+                let v = self.eng.values();
+                let mut moving: Vec<String> = r
+                    .rerun_causes
+                    .iter()
+                    .filter(|(n, _)| r.capped.binary_search(n).is_ok())
+                    .filter_map(|(_, c)| cause_parts(c).1)
+                    .map(|f| crate::val::field_name(v, f))
+                    .collect();
+                moving.sort_unstable();
+                moving.dedup();
+                self.eval_warnings.push(format!(
+                    "Label(s) may have changed: the files read back still changed after {} rounds; still changing: {}",
+                    self.eng.limits().final_reruns + 1,
+                    moving.join(", ")
+                ));
+            }
             for (k, d, n) in &by_kind {
                 if *n > 0 {
                     crate::timeline::note(&format!("runs: {k} ×{n} (summed over threads)"), *d);
@@ -2943,42 +2867,6 @@ impl Graph {
                     asked = true;
                     ask_why(&format!("supplied file written: {name}"));
                 }
-            }
-            // the fields a job-written file's read-back defines: their
-            // `wdef:<field>` loop-backs declared
-            let streams = self.eng.acc_value(unit, self.eng.values().field("streams"));
-            if fixpoint && (streams.is_none() || streams != self.wdefs_from) {
-                self.wdefs_from = streams;
-                let v = self.eng.values();
-                let defs = written_defs(v, streams);
-                let mut new = Vec::new();
-                for (name, ds) in defs {
-                    // (a file read back from the client's text: the
-                    // reading run declared its keys, `written_file`)
-                    if self.seeds.iter().any(|(n, _)| *n == name) {
-                        continue;
-                    }
-                    for (f, _) in ds {
-                        let f = wdef_id(&name, &f);
-                        if !self.wdefs.contains(&f) && !new.contains(&f) {
-                            new.push(f);
-                        }
-                    }
-                }
-                // (declared in one pass: each declaration looks at every
-                // run's reads)
-                let mut decl = Vec::with_capacity(new.len());
-                for f in new {
-                    let none = self.eng.values().list(Vec::new());
-                    let w = self.eng.values().field(&format!("wdef:{f}"));
-                    decl_trace(&self.eng, w, none);
-                    decl.push((w, none));
-                    // (declared by the files node within the
-                    // evaluation, its readers run again there: no
-                    // evaluation more)
-                    self.wdefs.push(f);
-                }
-                self.decl_loops(&decl);
             }
             // (the provider answers every file read in place: none asked
             // after the evaluation)
@@ -4088,7 +3976,6 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         opts.finisher_predictions,
         std::sync::atomic::Ordering::Relaxed,
     );
-    g.eng.set_max_rounds(opts.max_rounds);
     let unit = g.eng.new_unit();
     // the files a previous build of this prelude read, supplied before
     // the first evaluation: no run stops on them, no round per file
@@ -4488,19 +4375,6 @@ impl Build {
         g.ops
             .node_rec
             .store(opts.node_records, std::sync::atomic::Ordering::Relaxed);
-        g.ops
-            .early_loops
-            .store(opts.rounds == Rounds::Relaxed, std::sync::atomic::Ordering::Relaxed);
-        // (observe: `PHITEX_MAX_ROUNDS`, a lower cap, so the warning names
-        // the fields still moving after that round)
-        let cap = crate::exec::obs_str!("PHITEX_MAX_ROUNDS")
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(opts.max_rounds);
-        g.eng.set_max_rounds(cap);
-        // (latexmk's `max_repeat`: the document finished on its last
-        // round's values, the fields still moving a warning)
-        g.eng
-            .set_round_cap_policy(phitex_defuse::CapPolicy::Final);
         (*g.ops.out_ok.locked()).clone_from(&opts.out_name_ok);
         g.ops.tool_opts.locked().bibtex.clone_from(&opts.bibtex);
         g.tool_finder.clone_from(&opts.tool_finder);
@@ -6431,7 +6305,6 @@ impl Build {
     /// the cause's kind, and its field if any ([`Engine::critical_chain`]).
     #[must_use]
     pub fn critical_chain(&self) -> Vec<(String, String, String)> {
-        use phitex_defuse::Cause;
         let v = self.g.eng.values();
         self.g
             .eng
@@ -6864,7 +6737,6 @@ fn declare_fields(eng: &Engine) {
         "gdefs",
         crate::vprof::VPROF,
         crate::pages::PITEMS,
-        crate::run::SEEDED,
     ] {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));
@@ -6974,26 +6846,6 @@ impl phitex_defuse::Monoid for LinesMonoid {
         }
         v.list(out)
     }
-}
-
-/// `PHITEX_DECL_TRACE`: a loop-back declaration, its family and whether
-/// its initial value is the one declared before.
-fn decl_trace(eng: &Engine, f: Field, init: ValueId) {
-    static LAST: std::sync::Mutex<Option<FxHashMap<Field, ValueId>>> = std::sync::Mutex::new(None);
-
-    if !crate::exec::obs_flag!("PHITEX_DECL_TRACE") {
-        return;
-    }
-    let mut l = LAST.locked();
-    let prev = l.get_or_insert_with(FxHashMap::default).insert(f, init);
-    let name = field_name(eng.values(), f);
-    let fam = name.split(':').next().unwrap_or("").to_owned();
-    let how = match prev {
-        None => "new",
-        Some(p) if p == init => "same init",
-        Some(_) => "other init",
-    };
-    eprintln!("decl-trace: declare_loopback {fam}: {how}");
 }
 
 /// `PHITEX_DECL_TRACE`: a full environment map, by family: fields new,

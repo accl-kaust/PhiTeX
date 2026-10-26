@@ -2,18 +2,18 @@
 //! pdflatex's runs: BibTeX, biber and makeindex, in process
 //! (`phitex-bibtex`, `phitex-biber`, `phitex-makeindex`).
 //!
-//! A tool is driven by a read, never by a write. When TeX opens a name
-//! the job does not write itself ([`crate::run::Run::file`]), each tool's
-//! crate is asked whether that name is its default output for an input
-//! the job writes (makeindex: `X.ind` from `X.idx`). The read is then the
-//! output of a memoised application of [`ToolRun`] (`Ctx::apply`): it
-//! reads the input as the job wrote it the round before (`wtext:<name>`,
-//! a loop-back the files' node publishes, `ops::Files`) and its support
-//! files through the client's lookups for the tool
-//! ([`crate::api::ToolSearch`]). So a tool runs only where its output is
-//! read, and again only when what it read changed: the engine's
-//! memoisation, no step between rounds. A name no tool claims, or one
-//! whose input the job does not write, is read from the file system.
+//! A file the job writes is its tools' input: its node
+//! (`crate::ops::Files`) asks each tool's crate whether a name is its
+//! default output from that file (makeindex: `X.ind` from `X.idx`), runs
+//! [`ToolRun`] on the text as the job writes it (`wtext:<name>`) and its
+//! support files through the client's lookups for the tool
+//! ([`crate::api::ToolSearch`]), and defines what it made
+//! ([`made_field`]). Where TeX opens that name
+//! ([`crate::run::Run::file`]) it reads that definition at its last
+//! (`At::Final`): the reader depends on what the tool makes, not on its
+//! input, and the tool runs again only when what it read changed. A name
+//! no tool claims, or one whose input the job does not write, is read
+//! from the file system.
 //!
 //! A `\write18` naming a tool is a node of its own ([`ToolNode`]),
 //! placed where the command is in this round (the run making it ends
@@ -36,9 +36,38 @@ pub(crate) fn out_field(v: &Values, name: &str) -> Field {
     v.field(&format!("toolout:{name}"))
 }
 
-/// The loop-back of a file the job writes, its whole text as the round
-/// before wrote it (`UNIT`: not written), published by the files' node
-/// for the tools that read it.
+/// What a tool makes of a name by default from a file the job writes
+/// ([`made_from`]): its [`ToolRun`] value, defined by that file's node
+/// (`crate::ops::Files`) and read at its last definition where the name
+/// is opened.
+pub(crate) fn made_field(v: &Values, name: &str) -> Field {
+    v.field(&format!("toolmade:{name}"))
+}
+
+/// The names a tool makes by default from `input`, a file the job
+/// writes, each with its run's arguments: an output whose first claiming
+/// tool with a written input reads `input` (BibTeX's `.bbl` from the
+/// `.aux`, biber's from the `.bcf`, makeindex's `.ind` from the `.idx`).
+pub(crate) fn made_from(cx: &mut Ctx<'_>, input: &str) -> Result<Vec<(String, Vec<ValueId>)>, Stop> {
+    let v = cx.values();
+    let base = input.rsplit_once('.').map_or(input, |(b, _)| b);
+    let mut out = Vec::new();
+    for o in [format!("{base}.bbl"), format!("{base}.ind")] {
+        if !claims(&o).iter().any(|(_, i)| i == input) {
+            continue;
+        }
+        if let Some(args) = run_args(cx, &o)?
+            && args.get(2).is_some_and(|&i| str_of(v, i) == input)
+        {
+            out.push((o, args));
+        }
+    }
+    Ok(out)
+}
+
+/// The loop-back of a file the job writes, its whole text as the job
+/// writes it (`UNIT`: not written), defined by the files' node for the
+/// tools that read it.
 pub(crate) fn text_field(v: &Values, name: &str) -> Field {
     v.field(&format!("wtext:{name}"))
 }
@@ -265,11 +294,11 @@ fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop
     };
     match n {
         Need::File(name) => {
-            // (a file the job writes: its text the round before, from its
-            // loop-back, never the file system's copy the job is writing;
-            // one it does not write: the job's lookup)
+            // (a file the job writes: its text as the job writes it, from
+            // its loop-back field, never the file system's copy the job
+            // is writing; one it does not write: the job's lookup)
             let w = text_field(v, name);
-            if let Some(x) = cx.read(w)? {
+            if let Some(x) = crate::ops::lb_read(cx, w)? {
                 return Ok(
                     (x != ValueId::UNIT).then(|| (format!("./{name}"), bytes(&str_of(v, x))))
                 );
@@ -431,22 +460,13 @@ fn makeindex_said(ilg: &[u8]) -> Vec<(bool, String)> {
 
 /// The arguments of the tool run that makes `output` by default, if one
 /// does: the first tool claiming it by name whose input the job writes
-/// (its loop-back declared). The run reads the input's text as the round
-/// before wrote it itself ([`ToolRun`], `look_up`), not the reader: a
-/// reader of the output depends on what the run makes, not on its input
-/// (a lookup of an output name read the whole input, and every line the
-/// job wrote to it ran the reader again, the output the same or none).
-/// The run makes nothing where the job wrote none of the input the round
-/// before, and the name is then read from the file system. `None`: no
-/// tool makes it.
+/// (its size defined, `crate::ops::Files`). `None`: no tool makes it.
 pub(crate) fn run_args(cx: &mut Ctx<'_>, output: &str) -> Result<Option<Vec<ValueId>>, Stop> {
     let v = cx.values();
     for (t, input) in claims(output) {
-        let w = text_field(v, &input);
-        // (a job that writes the input declares its loop-back; bound
-        // otherwise, so the read runs again once it does)
-        if !cx.is_loopback(w) {
-            let _ = cx.read(w)?;
+        // (a job that writes the input defines its size, the files'
+        // node; read either way, so this runs again once it does)
+        if crate::ops::lb_read(cx, size_field(v, &input))?.is_none() {
             continue;
         }
         return Ok(Some(command_args(

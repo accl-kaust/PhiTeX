@@ -155,22 +155,13 @@ struct Opts {
         global = true
     )]
     jobs: Option<usize>,
-    /// Exact rounds (the default): the files the document reads back
-    /// (.aux, .toc, .out, .idx, …) change only between rounds, as
-    /// between latexmk's runs, so the PDF is byte for byte what pdflatex
-    /// under latexmk makes. watch: every edit writes that exact PDF file
-    /// too (else an edit appends an update section to it, and the exact
-    /// file is written once the editor is idle)
-    #[arg(long, global = true, conflicts_with = "relaxed")]
-    exact: bool,
-    /// Relaxed rounds (experimental): a file read back changes as soon
-    /// as the run writing it does, and its readers run again within the
-    /// round. Usually the same PDF, but not guaranteed: a warning says
-    /// when the read-backs did not settle cleanly; not faster yet
+    /// watch: every edit writes the exact PDF file too (else an edit
+    /// appends an update section to it, and the exact file is written
+    /// once the editor is idle)
     #[arg(long, global = true)]
-    relaxed: bool,
+    exact: bool,
     /// (the same as --exact)
-    #[arg(long = "exact-pdf", global = true, hide = true, conflicts_with = "relaxed")]
+    #[arg(long = "exact-pdf", global = true, hide = true)]
     exact_pdf: bool,
     /// Whether the engine runs steps ahead of their inputs: on those an
     /// earlier run predicts (the default), never, or on any (not usable
@@ -261,9 +252,6 @@ pub struct Options {
     pub etex: bool,
     pub output_dir: Option<String>,
     pub threads: Option<usize>,
-    /// The exact rounds (the default; `--exact`, `--exact-pdf`); false:
-    /// the relaxed ones (`--relaxed`).
-    pub exact: bool,
     pub spec: Option<String>,
     pub wait_long: bool,
     pub node_records: bool,
@@ -308,7 +296,6 @@ impl Cli {
             etex: o.etex,
             output_dir: o.output_dir,
             threads: o.jobs,
-            exact: o.exact || o.exact_pdf || !o.relaxed,
             spec: o.spec,
             wait_long: !o.no_wait_long,
             node_records: o.node_records,
@@ -514,7 +501,6 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
             .map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (batch mode, as the oracles run: the CLI shows the errors itself)
         threads: o.threads,
-        exact: o.exact,
         spec: o.spec.clone(),
         wait_long: o.wait_long,
         node_records: o.node_records,

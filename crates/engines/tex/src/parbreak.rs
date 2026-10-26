@@ -30,7 +30,7 @@
 //! - a paragraph ended where the piece cannot end (inside a group or a
 //!   conditional of its own).
 
-use phitex_defuse::{Ctx, Effect, Field, Locality, MayDefine, Operation, Stop, ValueId, Values};
+use phitex_defuse::{Ctx, Effect, Field, MayDefine, Operation, Stop, ValueId, Values};
 
 use crate::build::{MAIN_LAST, MAIN_PD, MAIN_SINCE, Mode};
 use crate::ops::{Shared, ops};

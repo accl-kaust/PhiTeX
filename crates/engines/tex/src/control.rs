@@ -1973,7 +1973,7 @@ impl Run<'_, '_> {
             self.log("error", &format!("I can't write on file `{name}'"))?;
             return self.fatal("*** (job aborted, file error in nonstop mode)");
         }
-        self.written_decl(&name)?;
+        self.opened_for_writing(&name)?;
         // (§1374: the stream is open from here, whatever this run closed
         // of it before)
         if let Ok(k) = i32::try_from(n)

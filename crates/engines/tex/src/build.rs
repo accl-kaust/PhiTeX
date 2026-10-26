@@ -190,7 +190,7 @@ impl Run<'_, '_> {
             }
             return self.mode();
         }
-        self.effect = Effect::Close;
+        self.effect = crate::run::CLOSE;
         self.unsave_extras(md)?;
         self.kind_outer(md)
     }
@@ -237,7 +237,7 @@ impl Run<'_, '_> {
     /// following siblings' level 0 ([`Run::base_mode`]). It opens after
     /// the run's entry: the run's definitions at its base level lie
     /// outside it, the group's local ones are the scope's
-    /// (`Ctx::define_in_scope`); its `\aftergroup` tokens the scope's
+    /// (`Locality::Scope`), and its kind ([`crate::run::SCOPE_KIND`]); its `\aftergroup` tokens the scope's
     /// `ag` list.
     pub(crate) fn leave_scope(&mut self) -> R<()> {
         let v = self.v;
@@ -304,13 +304,13 @@ impl Run<'_, '_> {
             eprintln!("leave_scope: node {} defs {ds:#?}", self.cx.node().raw());
         }
         // the scope opens after the run's entry: its base-level
-        // definitions outside it, the group's inside
+        // definitions outside it, the group's and its kind inside
+        self.cx
+            .define_with(v.field(crate::run::SCOPE_KIND), kind, phitex_defuse::Locality::Scope);
         self.effect = Effect::Scope(phitex_defuse::Brackets {
             closes: 0,
             opens: 1,
             before: false,
-            kind: Some(kind),
-            kind_pending: false,
         });
         Ok(())
     }
@@ -321,7 +321,7 @@ impl Run<'_, '_> {
     /// `k`'s kind is group `k`'s, `[group, sid, list, mode, depth, parent
     /// kind, extra…]`, its parent kind frame `k - 1`'s (the scope the run
     /// runs in for frame 0), its sid its own; group `k`'s local
-    /// definitions are frame `k`'s (`Ctx::define_in_scope_at`), its
+    /// definitions and its kind are frame `k`'s (`Locality::ScopeAt(k)`), its
     /// `\aftergroup` tokens frame `k`'s `ag` list. The run's definitions
     /// at its base level lie outside them all.
     fn leave_frames(&mut self, base: &crate::build::Mode, parent: ValueId) {
@@ -365,13 +365,15 @@ impl Run<'_, '_> {
                 u8::try_from(k).unwrap_or(u8::MAX - 2),
             );
         }
-        self.cx.set_kinds(&kinds);
+        let sk = v.field(crate::run::SCOPE_KIND);
+        for (k, &kind) in kinds.iter().enumerate() {
+            let at = phitex_defuse::Locality::ScopeAt(u8::try_from(k).unwrap_or(u8::MAX - 2));
+            self.cx.define_with(sk, kind, at);
+        }
         self.effect = Effect::Scope(phitex_defuse::Brackets {
             closes: 0,
             opens: u8::try_from(n).unwrap_or(u8::MAX),
             before: false,
-            kind: None,
-            kind_pending: true,
         });
     }
 
@@ -2101,7 +2103,7 @@ impl Run<'_, '_> {
                 let outer = self.close_group(md)?;
                 if (BOX_FLAG..SHIP_OUT_FLAG).contains(&ctx)
                     && ctx < BOX_FLAG + 256
-                    && self.effect == Effect::Close
+                    && self.effect == crate::run::CLOSE
                 {
                     // a local \setbox of an engine scope lands outside it
                     let lvl = v.int(outer.depth);
@@ -2124,7 +2126,7 @@ impl Run<'_, '_> {
                     }
                 }
                 // §1076: `if mode>0 then build_page`, after the adjustments
-                if ctx < BOX_FLAG && outer.m > 0 && self.effect != Effect::Close {
+                if ctx < BOX_FLAG && outer.m > 0 && self.effect != crate::run::CLOSE {
                     self.finish_candidate()?;
                 }
                 Ok(())

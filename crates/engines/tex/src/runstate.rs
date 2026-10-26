@@ -280,12 +280,6 @@ pub(crate) struct State {
     /// one of them sets `taint_read`.
     tainted: Vec<Loc>,
     taint_read: std::cell::Cell<bool>,
-    /// The meanings a read-back defined globally from its file's
-    /// loop-back field (`Run::read_back`), not looked at since: each with
-    /// that field. A look moves the field to `rb_looked`, to be read.
-    rb: std::cell::RefCell<phitex_defuse::FxHashMap<Loc, phitex_defuse::Field>>,
-    rb_looked: std::cell::RefCell<Vec<phitex_defuse::Field>>,
-    rb_on: std::cell::Cell<bool>,
 }
 
 /// What [`State::rollback`] puts back: each slot and metas entry as it
@@ -404,9 +398,6 @@ impl Clone for State {
             mbroken: self.track || self.mbroken,
             tainted: self.tainted.clone(),
             taint_read: self.taint_read.clone(),
-            rb: self.rb.clone(),
-            rb_looked: self.rb_looked.clone(),
-            rb_on: self.rb_on.clone(),
         }
     }
 }
@@ -517,9 +508,6 @@ impl State {
             mbroken: false,
             tainted: Vec::new(),
             taint_read: std::cell::Cell::new(false),
-            rb: std::cell::RefCell::default(),
-            rb_looked: std::cell::RefCell::default(),
-            rb_on: std::cell::Cell::new(false),
         }
     }
 
@@ -762,9 +750,6 @@ impl State {
         if !self.tainted.is_empty() && self.tainted.contains(&loc) {
             self.taint_read.set(true);
         }
-        if self.rb_on.get() {
-            self.rb_look(loc);
-        }
     }
 
     /// Meaning `loc` was just defined by a body whose expansion read the
@@ -775,48 +760,6 @@ impl State {
         if !self.tainted.contains(&loc) {
             self.tainted.push(loc);
         }
-    }
-
-    /// A look at `loc` where a read-back defined it: its field is read.
-    #[cold]
-    fn rb_look(&self, loc: Loc) {
-        if let Some(f) = self.rb.borrow_mut().remove(&loc) {
-            self.rb_looked.borrow_mut().push(f);
-        }
-    }
-
-    /// Meaning `loc` just defined by a read-back from loop-back field `f`
-    /// ([`State::rb`]).
-    pub(crate) fn rb_note(&mut self, loc: Loc, f: phitex_defuse::Field) {
-        self.rb.get_mut().insert(loc, f);
-        self.rb_on.set(true);
-    }
-
-    /// Meaning `loc` defined again: no read-back's any longer.
-    #[inline]
-    pub(crate) fn rb_drop(&mut self, loc: Loc) {
-        if self.rb_on.get() {
-            self.rb.get_mut().remove(&loc);
-        }
-    }
-
-    /// The read-backs' fields looked at since the last call: to be read.
-    pub(crate) fn rb_take_looked(&mut self) -> Vec<phitex_defuse::Field> {
-        std::mem::take(self.rb_looked.get_mut())
-    }
-
-    /// The read-backs not looked at, by location.
-    pub(crate) fn rb_entries(&self) -> Vec<(Loc, phitex_defuse::Field)> {
-        let mut v: Vec<(Loc, phitex_defuse::Field)> = self.rb.borrow().iter().map(|(&l, &f)| (l, f)).collect();
-        v.sort_unstable_by_key(|e| e.0);
-        v
-    }
-
-    /// A run resumed: its read-backs not looked at.
-    pub(crate) fn set_rb(&mut self, es: Vec<(Loc, phitex_defuse::Field)>) {
-        self.rb_on.set(!es.is_empty());
-        *self.rb.get_mut() = es.into_iter().collect();
-        self.rb_looked.get_mut().clear();
     }
 
     /// The tainted meanings ([`State::taint`]).
@@ -1848,7 +1791,7 @@ impl State {
     /// Leaves the group whose saves and definitions began at `save_base`
     /// and `def_base` (opened at `open_stamp`) to the engine as the scope
     /// the run opens after itself: its local definitions are published
-    /// as the scope's (`Locality::Scope`, `Ctx::define_in_scope`), the
+    /// as the scope's (`Locality::Scope`), the
     /// base level's stay the run's; a group's local of the value the base
     /// level publishes is that definition seen inside; of another value,
     /// a second entry of the field, the scope's ([`State::scope_extra`]).
