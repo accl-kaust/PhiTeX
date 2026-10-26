@@ -484,7 +484,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut rels: Vec<(Field, i64)> = Vec::with_capacity(rec.defs.len());
     let mut placed: Vec<NodeId> = Vec::with_capacity(p.placements.len());
     let mut made: Vec<Arc<Node>> = Vec::with_capacity(p.placements.len());
-    let mut deferred: Vec<(usize, NodeId, Arc<Node>, Predicted)> = Vec::new();
+    let mut deferred: Vec<Deferred> = Vec::new();
     let mut here_reads: Vec<(Field, Reader)> = Vec::with_capacity(rec.reads.len());
     let mut other_reads: Vec<(Field, Reader, Anchor)> = Vec::new();
     let mut final_reads: Vec<(Field, Reader)> = Vec::new();
@@ -760,6 +760,20 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let mut after = node.id;
         let mut in_seg = true;
         let mut removed_kept: Vec<NodeId> = Vec::new();
+        // (a continuation made anew takes the place of the one it
+        // replaces: what others placed after this node's children since,
+        // before that one, stays before it, as a page fired in this node
+        // does)
+        let mut old_follows: std::collections::VecDeque<NodeId> = {
+            let mut v: Vec<NodeId> = old_placed
+                .iter()
+                .copied()
+                .filter(|n| !kept.contains(&Some(*n)))
+                .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() != State::Gone && x.follows.load(Ordering::Acquire)))
+                .collect();
+            v.sort_by_key(|&n| eng.node(n).pos_hint());
+            v.into()
+        };
         // (a kept placement's subtree end found only where a placement
         // follows it: the last one's subtree may be a whole chain)
         let mut kept_end: Option<NodeId> = None;
@@ -806,15 +820,27 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 Placement::FollowAfter(at, _, _) => Some(*at),
                 Placement::Child(..) | Placement::Follow(..) => None,
             };
+            let before = if matches!(what, Placement::Follow(..)) {
+                while old_follows.front().is_some_and(|&b| eng.node(b).pos_hint() <= after_pos) {
+                    old_follows.pop_front();
+                }
+                old_follows.pop_front()
+            } else {
+                None
+            };
             let in_here = at.is_none()
                 && in_seg
                 && eng.node(after).seg_hint() == seg.id
-                && inner.nodes.get(&eng.node(after).pos_hint()) == Some(&after);
+                && inner.nodes.get(&eng.node(after).pos_hint()) == Some(&after)
+                && before.is_none_or(|b| eng.node(b).seg_hint() == seg.id && inner.nodes.get(&eng.node(b).pos_hint()) == Some(&b));
             if in_here {
-                made.push(place(eng, seg, &mut inner, after, n, pred));
+                made.push(match before {
+                    Some(b) => place_before(eng, seg, &mut inner, b, n, pred),
+                    None => place(eng, seg, &mut inner, after, n, pred),
+                });
             } else {
                 in_seg = false;
-                deferred.push((i, at.unwrap_or(after), n, pred));
+                deferred.push((i, at.unwrap_or(after), before, n, pred));
             }
             after = id;
         }
@@ -922,9 +948,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     // deferred placements: after a node elsewhere (one placed after this
     // node was removed or taken, which withdrew this record, goes with it)
-    for (i, at, n, pred) in deferred {
+    for (i, at, before, n, pred) in deferred {
         let n = if matches!(p.placements[i], Placement::FollowAfter(..)) {
             place_after_children(eng, at, n, pred)
+        } else if let Some(b) = before {
+            place_before_node(eng, b, at, n, pred)
         } else {
             place_after(eng, at, n, pred)
         };

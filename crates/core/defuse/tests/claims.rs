@@ -427,3 +427,62 @@ fn a_node_removed_as_it_commits_takes_its_placements_with_it() {
         assert_eq!(e.order(u).len(), 2 + 1 + 3, "round {i}");
     }
 }
+
+/// `[f]`: places `Text [0]` as its child and `Text [f's value]` as its
+/// continuation.
+struct ReadOn(OpId);
+
+impl Operation for ReadOn {
+    fn name(&self) -> &'static str {
+        "read_on"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let x = cx.read(Field(cx.args()[0]))?.unwrap_or(v.int(0));
+        cx.child(self.0, vec![v.int(0)]);
+        cx.follow(self.0, vec![x]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[n]`: places `Text ["a"]` after node n and its children.
+struct After(OpId);
+
+impl Operation for After {
+    fn name(&self) -> &'static str {
+        "after"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let n = NodeId::from_raw(v.as_int(cx.args()[0]).unwrap() as u64);
+        cx.follow_after(n, self.0, vec![v.str("a")]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn a_continuation_made_anew_stays_after_what_was_placed_after_its_node() {
+    // X places its child and its continuation C; Y places A after X and
+    // its children, before C (a page fired in X). X run again makes C
+    // anew: the new one takes C's place, after A, not before it.
+    let (e, o) = engine();
+    let read_on = e.register(Arc::new(ReadOn(o.text)));
+    let after = e.register(Arc::new(After(o.text)));
+    let v = e.values();
+    let f = v.field("f").0;
+    let u = e.new_unit();
+    let s = e.push(u, o.def, vec![v.field("g").0, v.int(1)]);
+    let x = e.push(u, read_on, vec![f]);
+    e.push(u, after, vec![v.int(x.raw() as i64)]);
+    e.evaluate(1).unwrap();
+    let texts = |e: &Engine| -> Vec<ValueId> {
+        e.order(u).into_iter().filter(|&n| e.node_info(n).is_some_and(|i| i.op == "text")).map(|n| e.node_info(n).unwrap().args[0]).collect()
+    };
+    assert_eq!(texts(&e), vec![v.int(0), v.str("a"), v.int(0)]);
+    e.replace(s, o.def, vec![f, v.int(2)]);
+    e.evaluate(1).unwrap();
+    assert_eq!(texts(&e), vec![v.int(0), v.str("a"), v.int(2)]);
+    assert!(e.check_invariants().is_empty());
+}
