@@ -2445,9 +2445,11 @@ impl<'c, 'a> Run<'c, 'a> {
     #[allow(clippy::option_option)]
     fn seeded_lookup(&mut self, key: &str) -> R<Option<Option<ValueId>>> {
         let v = self.v;
-        if let Some(sd) = self.seeded(key) {
+        if self.seeded(key).is_some() {
+            let reread = self.seed_reread(key)?;
+            let sd = self.seeded(key).expect("seeded");
             let path = v.str(&format!("./{key}"));
-            return Ok(Some(Some(if sd.keys == crate::api::text_mark(v) {
+            return Ok(Some(Some(if sd.keys == crate::api::text_mark(v) || reread {
                 v.list(vec![path, sd.text])
             } else {
                 v.list(vec![path, v.str("")])
@@ -2934,6 +2936,10 @@ impl<'c, 'a> Run<'c, 'a> {
         } else {
             self.seeded(key).cloned()
         };
+        if seed.is_some() && self.seed_reread(key)? {
+            self.note_read_back(key)?;
+            return Ok(false);
+        }
         let keys = match &seed {
             Some(sd) if sd.keys == crate::api::text_mark(v) => return Ok(false),
             Some(sd) => list_of(v, sd.keys),
@@ -3092,26 +3098,17 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(false);
         };
         let text = str_of(v, t);
-        // (each line as the stream's: a text an earlier line left open
-        // goes on with the next; the first line that does more than
-        // define makes the file one read back as its text)
+        // (the whole text at once, as a run reads it: a line reads what
+        // the lines before it defined, hyperref's `\calc@bm@number`
+        // counting a bookmark's children line by line; one that does more
+        // than define makes the file one read back as its text)
         let mut ds: Vec<(String, ValueId)> = Vec::new();
         let mut as_text = false;
         let mut open = String::new();
-        for line in text.split_inclusive('\n') {
-            open.push_str(line);
-            let made = self.interpret_line(&open)?;
-            match made {
-                None => {}
-                Some(m) if self.interp_plain => {
-                    crate::api::merge_defs(v, &mut ds, m);
-                    open.clear();
-                }
-                Some(_) => {
-                    as_text = true;
-                    break;
-                }
-            }
+        match self.interpret_line(&text)? {
+            None => open = text.clone(),
+            Some(m) if self.interp_plain => crate::api::merge_defs(v, &mut ds, m),
+            Some(_) => as_text = true,
         }
         // (a text left open at the file's end: read to its end as the
         // stream's close reads it, its errors given at each read-back)
@@ -3166,6 +3163,18 @@ impl<'c, 'a> Run<'c, 'a> {
             text: t,
         });
         Ok(true)
+    }
+
+    /// Whether file `key`, read back from the client's text per field
+    /// before here, is read again before it is opened for writing: then
+    /// its lines are read again under the meanings here, as its text
+    /// (hyperref's `\ReadBookmarks`, the `.out` read twice, its outlines
+    /// made the second time), as [`Run::note_read_back`] makes a file
+    /// read back from what the job wrote.
+    fn seed_reread(&mut self, key: &str) -> R<bool> {
+        Ok(self.seeded(key).is_some_and(|s| s.keys != crate::api::text_mark(self.v))
+            && self.get(&format!("wread:{key}"))?.is_some()
+            && self.get(&format!("wopen:{key}"))?.is_none())
     }
 
     /// The read-back this run made of file `key` from the client's text
