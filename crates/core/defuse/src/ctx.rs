@@ -10,9 +10,9 @@ use crate::api::{At, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId,
 use crate::engine::Engine;
 use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, ReadRec, RunRecord, State};
 use crate::order::Pos;
-use crate::read::{self, SITE, next_value, pos_of, reaching, reaching_at, through};
+use crate::read::{self, SITE, next_value, pos_of, reaching_at, through};
 use crate::sched::Worker;
-use crate::values::{Field, FxHashSet, ValueId, Values};
+use crate::values::{Field, FxHashMap, FxHashSet, ValueId, Values};
 
 /// A handle on a value read through a path, extended step by step
 /// (`Ctx::at`) and read at a step (`Ctx::get`): the run depends only on
@@ -44,6 +44,9 @@ pub struct Ctx<'a> {
     pub(crate) ep: u64,
     /// The last sibling `following` found, to go on from.
     pub(crate) follow_at: Option<(usize, NodeId)>,
+    /// What `read` answered in this run, by field: a field read again is
+    /// answered from here, with no second lookup and no second record.
+    pub(crate) seen: FxHashMap<Field, Option<ValueId>>,
 }
 
 fn stop() -> Stop {
@@ -64,11 +67,13 @@ impl<'a> Ctx<'a> {
                 reads: Vec::new(),
                 placements: Vec::new(),
                 claim: 0,
-                effect: Effect::None,
+                effect: None,
+                scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
             },
             views: Vec::new(),
             ep: u64::MAX,
             follow_at: None,
+            seen: FxHashMap::default(),
             last: me.run_record(),
             stable: worker.map(|w| &*w.stable),
         }
@@ -121,11 +126,15 @@ impl<'a> Ctx<'a> {
     /// The definition of `f` reaching me, or the environment's value.
     pub fn read(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
         self.check()?;
+        if let Some(&x) = self.seen.get(&f) {
+            return Ok(x);
+        }
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
         if self.recorded(f) {
             self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
         }
+        self.seen.insert(f, r.value);
         Ok(r.value)
     }
 
@@ -139,7 +148,7 @@ impl<'a> Ctx<'a> {
             At::Final => (Anchor::Final, Some(crate::read::last_definition(self.eng, f))),
             At::End(u) => (
                 Anchor::End(u),
-                Some(reaching(self.eng, f, Pos(self.eng.unit(u).end.0 - 1), true)),
+                Some(read::reaching_visible(self.eng, f, Pos(self.eng.unit(u).end.0 - 1), true)),
             ),
         };
         if self.recorded(f) {
@@ -224,54 +233,69 @@ impl<'a> Ctx<'a> {
         self.product.contribs.push((f, x));
     }
 
-    fn bound(&self, n: Option<NodeId>) -> Result<Pos, Stop> {
+    /// A bound's label: None when the node named is gone (the read
+    /// answers none, as a read at a gone node does, `FieldAt::Gone`).
+    fn bound(&self, n: Option<NodeId>) -> Option<Pos> {
         match n {
-            Some(n) => pos_of(self.eng, n).ok_or_else(stop),
-            None => Ok(read::unit_start(self.eng, self.me)),
+            Some(n) => pos_of(self.eng, n),
+            None => Some(read::unit_start(self.eng, self.me)),
         }
     }
 
-    fn fold_value(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, incl: bool) -> Result<ValueId, Stop> {
+    /// The fold's value; None where a bound is gone.
+    fn fold_value(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, incl: bool) -> Result<Option<ValueId>, Stop> {
         self.check()?;
         self.before_read(f);
-        let fp = self.bound(from)?;
-        let tp = match to {
-            Some(n) => pos_of(self.eng, n).ok_or_else(stop)?,
-            None => pos_of(self.eng, self.me.id).ok_or_else(stop)?,
+        let Some(fp) = self.bound(from) else {
+            return Ok(None);
         };
-        Ok(read::fold(self.eng, f, Some(fp), Some(read::end_of(tp, incl))))
+        let tp = match to {
+            Some(n) => pos_of(self.eng, n),
+            None => Some(pos_of(self.eng, self.me.id).ok_or_else(stop)?),
+        };
+        Ok(tp.map(|tp| read::fold(self.eng, f, Some(fp), Some(read::end_of(tp, incl)))))
+    }
+
+    /// The monoid's empty value: a fold whose bound is gone.
+    fn empty(&self, f: Field) -> ValueId {
+        self.eng.monoid(f).empty(self.values())
     }
 
     /// The declared monoid's fold over the contributions to `f` after
-    /// `from` (None: the unit's start) and before `to` (None: me).
+    /// `from` (None: the unit's start) and before `to` (None: me); empty
+    /// where `from` or `to` is gone.
     pub fn fold(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<ValueId, Stop> {
         let x = self.fold_value(f, from, to, false)?;
-        self.record(ReadKind::Fold { f, from, to, incl: false }, PathId::WHOLE, Some(x));
-        Ok(x)
+        self.record(ReadKind::Fold { f, from, to, incl: false }, PathId::WHOLE, x);
+        Ok(x.unwrap_or_else(|| self.empty(f)))
     }
 
     /// The fold over the contributions to `f` after `from` (None: the
     /// unit's start) up to and with `to`'s own.
     pub fn fold_through(&mut self, f: Field, from: Option<NodeId>, to: NodeId) -> Result<ValueId, Stop> {
         let x = self.fold_value(f, from, Some(to), true)?;
-        self.record(ReadKind::Fold { f, from, to: Some(to), incl: true }, PathId::WHOLE, Some(x));
-        Ok(x)
+        self.record(ReadKind::Fold { f, from, to: Some(to), incl: true }, PathId::WHOLE, x);
+        Ok(x.unwrap_or_else(|| self.empty(f)))
     }
 
     /// `fold` through a path.
     pub fn fold_path(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, p: PathId) -> Result<Option<ValueId>, Stop> {
         let x = self.fold_value(f, from, to, false)?;
-        let y = read::apply_path(self.eng, Some(x), p);
+        let y = x.and_then(|x| read::apply_path(self.eng, Some(x), p));
         self.record(ReadKind::Fold { f, from, to, incl: false }, p, y);
         Ok(y)
     }
 
     /// The first contribution to `f` after `after` (None: the unit's start),
-    /// or None while the next node after it has not committed.
+    /// or None while the next node after it has not committed, or where
+    /// `after` is gone.
     pub fn next_contribution(&mut self, f: Field, after: Option<NodeId>) -> Result<Option<(NodeId, ValueId)>, Stop> {
         self.check()?;
         self.before_read(f);
-        let ap = self.bound(after)?;
+        let Some(ap) = self.bound(after) else {
+            self.record(ReadKind::Next { f, after }, PathId::WHOLE, None);
+            return Ok(None);
+        };
         let n = read::next_contribution(self.eng, f, Some(ap));
         self.record(ReadKind::Next { f, after }, PathId::WHOLE, next_value(self.eng, &n));
         Ok(n.item)
@@ -283,7 +307,7 @@ impl<'a> Ctx<'a> {
         self.views.push(ViewRec {
             kind: ReadKind::Fold { f, from, to, incl: false },
             path: PathId::WHOLE,
-            value: Some(x),
+            value: x,
             epoch: self.ep,
         });
         Ok(View(u32::try_from(self.views.len() - 1).unwrap_or(u32::MAX)))
@@ -295,7 +319,7 @@ impl<'a> Ctx<'a> {
         self.views.push(ViewRec {
             kind: ReadKind::Fold { f, from, to: Some(to), incl: true },
             path: PathId::WHOLE,
-            value: Some(x),
+            value: x,
             epoch: self.ep,
         });
         Ok(View(u32::try_from(self.views.len() - 1).unwrap_or(u32::MAX)))
@@ -439,13 +463,20 @@ impl<'a> Ctx<'a> {
     /// (`Operation::effect` gave `Pending`). The commit files them; the
     /// readers after me whose answer moved are re-asked.
     pub fn set_effect(&mut self, e: Effect) {
-        self.product.effect = e;
+        self.product.effect = Some(e);
     }
 
     /// The scope depth I start at: scopes open just before me, my own
-    /// closes not applied.
+    /// closes not applied. Recorded: a bracket before me that changes it
+    /// runs me again.
     pub fn depth(&mut self) -> Result<u32, Stop> {
-        todo!()
+        self.check()?;
+        let f = self.eng.depth_field;
+        self.before_read(f);
+        let d = read::depth_of(self.eng, self.me.id).ok_or_else(stop)?;
+        let x = self.eng.values().int(i64::from(d));
+        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, Some(x));
+        Ok(d)
     }
 
     /// Always true: a run never knows it is final. Side effects belong
@@ -460,6 +491,7 @@ impl<'a> Ctx<'a> {
 
     /// Forgets my reads of `f` in this run: the commit records none.
     pub fn unread(&mut self, f: Field) {
+        self.seen.remove(&f);
         self.product.reads.retain(|r| match &r.kind {
             ReadKind::Field { f: g, .. } | ReadKind::Env { f: g } => *g != f,
             ReadKind::Fold { .. } | ReadKind::Next { .. } | ReadKind::Placed { .. } | ReadKind::Following { .. } => true,

@@ -39,6 +39,9 @@ pub(crate) struct Shared {
     /// Queue entries plus running nodes; zero ends the evaluation.
     outstanding: AtomicUsize,
     idle: AtomicUsize,
+    /// Counts the wakes: a worker that looked for work outside the park's
+    /// lock rests only if none came since it looked.
+    wakes: AtomicU64,
     park: (Mutex<()>, Condvar),
     stop: AtomicBool,
     /// Workers running so far; the rest start when a deque holds more than
@@ -47,11 +50,13 @@ pub(crate) struct Shared {
     spawned: AtomicUsize,
     want_spawn: AtomicBool,
     n: usize,
+    /// `Limits::final_reruns`.
+    final_limit: u32,
 }
 
 impl Shared {
     fn wake_one(&self) {
-        fence(Ordering::SeqCst);
+        self.wakes.fetch_add(1, Ordering::SeqCst);
         if self.idle.load(Ordering::SeqCst) > 0 {
             let _g = self.park.0.lock().unwrap_or_else(PoisonError::into_inner);
             self.park.1.notify_one();
@@ -59,6 +64,7 @@ impl Shared {
     }
 
     fn wake_all(&self) {
+        self.wakes.fetch_add(1, Ordering::SeqCst);
         let _g = self.park.0.lock().unwrap_or_else(PoisonError::into_inner);
         self.park.1.notify_all();
     }
@@ -88,6 +94,8 @@ pub(crate) struct WorkerLog {
     pub(crate) causes: Vec<(NodeId, Cause)>,
     pub(crate) refuted_by_field: FxHashMap<Field, u64>,
     pub(crate) run_times: Vec<(NodeId, Duration)>,
+    /// Loop-back readers past `Limits::final_reruns` (`allow_final_rerun`).
+    pub(crate) capped: Vec<NodeId>,
 }
 
 /// One worker's deques and counters (nanoseconds).
@@ -214,11 +222,13 @@ impl Pool {
             block_busy: (0..n).map(|_| AtomicBool::new(false)).collect(),
             outstanding: AtomicUsize::new(0),
             idle: AtomicUsize::new(0),
+            wakes: AtomicU64::new(0),
             park: (Mutex::new(()), Condvar::new()),
             stop: AtomicBool::new(false),
             spawned: AtomicUsize::new(1),
             want_spawn: AtomicBool::new(false),
             n,
+            final_limit: limits.final_reruns,
         });
         let workers = deques
             .into_iter()
@@ -491,13 +501,15 @@ impl Pool {
     /// outstanding (then the caller's thread decides).
     fn idle_wait(&self, w: &Worker) -> Option<NodeId> {
         let (m, cv) = &self.shared.park;
-        let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
         self.shared.idle.fetch_add(1, Ordering::SeqCst);
         fence(Ordering::SeqCst);
         let r = loop {
             if self.shared.stop.load(Ordering::SeqCst) {
                 break None;
             }
+            // (looked for outside the park's lock: a steal is no reason to
+            // keep another idle worker or a waker out)
+            let seen = self.shared.wakes.load(Ordering::SeqCst);
             if let Some(n) = self.find_work(w) {
                 break Some(n);
             }
@@ -507,13 +519,19 @@ impl Pool {
             if w.ix == 0 && self.shared.want_spawn.load(Ordering::SeqCst) {
                 break None;
             }
+            let g = m.lock().unwrap_or_else(PoisonError::into_inner);
+            if self.shared.stop.load(Ordering::SeqCst) || self.shared.outstanding.load(Ordering::SeqCst) == 0 {
+                break None;
+            }
+            // (a push between the search and the lock notified no one
+            // yet waiting: its work is looked for again before resting)
+            if self.shared.wakes.load(Ordering::SeqCst) != seen {
+                continue;
+            }
             // (the timeout only guards a lost wakeup; a short one would
             // have idle workers preempting the busy ones every few
             // microseconds)
-            let (gg, _) = cv
-                .wait_timeout(g, Duration::from_millis(2))
-                .unwrap_or_else(PoisonError::into_inner);
-            g = gg;
+            drop(cv.wait_timeout(g, Duration::from_millis(2)).unwrap_or_else(PoisonError::into_inner));
         };
         self.shared.idle.fetch_sub(1, Ordering::SeqCst);
         r
@@ -847,6 +865,18 @@ fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
 /// A node re-asked through an `At::Final` read: counts the rerun; past
 /// `Limits::final_reruns` the node is left with its last answer, listed in
 /// `Report::capped`, and not queued. True when it may run.
-pub(crate) fn allow_final_rerun(eng: &Engine, pool: &Pool, node: &Arc<Node>) -> bool {
-    todo!()
+pub(crate) fn allow_final_rerun(eng: &Engine, w: Option<&Worker>, node: &Node) -> bool {
+    // (outside an evaluation, an edit's re-ask: not counted)
+    let Some(w) = w else {
+        return true;
+    };
+    let ep = eng.epoch.load(Ordering::Acquire);
+    if node.final_epoch.swap(ep, Ordering::AcqRel) != ep {
+        node.final_reruns.store(0, Ordering::Release);
+    }
+    if node.final_reruns.fetch_add(1, Ordering::AcqRel) < w.shared.final_limit {
+        return true;
+    }
+    w.log.lock().capped.push(node.id);
+    false
 }

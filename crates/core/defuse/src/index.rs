@@ -8,9 +8,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::engine::EnvReader;
 use crate::lock::Lock;
 use crate::order::{Pos, SegId};
-use crate::segment::RangeReader;
+use crate::segment::{RangeReader, Reader, push_pruned};
 use crate::values::{Field, FxHashMap, hash_words};
 
 /// Many and a cache line each: a commit's index work meets another's only
@@ -141,13 +142,16 @@ impl FieldIndex {
     }
 }
 
-/// Per field, its range readers (folds and `next`s), each filed once as an
-/// interval of labels that holds its range for the reader's life: from the
-/// start of the segment its first node was in to the end of the one its
-/// last was in (a relabel stays within a segment's range, a split only
+/// Per field, its readers that are not anchored in a segment: range
+/// readers (folds and `next`s), `At::Final` readers and environment
+/// readers, in one shard by field. A range reader is filed once as an
+/// interval of labels that holds its range for the reader's life: from
+/// the start of the segment its first node was in to the end of the one
+/// its last was in (a relabel stays within a segment's range, a split only
 /// narrows it). Intervals are kept by their span's power of two, each
-/// class in order of its start, so the readers whose interval holds a label
-/// are a few short ranges of a few maps.
+/// class in order of its start and again in order of its end, so the
+/// readers whose interval holds a label are a few short ranges of a few
+/// maps, whichever of the two orders gives the shorter.
 pub(crate) struct RangeIndex {
     shards: Box<[RangeShard]>,
     seq: AtomicU64,
@@ -156,23 +160,33 @@ pub(crate) struct RangeIndex {
 #[repr(align(64))]
 struct RangeShard(Lock<FxHashMap<Field, Ranges>>);
 
-/// One span class: by (start, filing), the end and the reader.
+/// One span class: by (start, filing), the end and the reader; or by
+/// (end, filing), the start and the reader.
 type Class = BTreeMap<(Pos, u64), (Pos, RangeReader)>;
+/// Classes by their span's power of two, in order.
+type Classes = Vec<(u32, Class)>;
 
 #[derive(Default)]
 struct Ranges {
     /// By span class (`span <= 1 << k`), by (start, filing).
-    classes: Vec<(u32, Class)>,
+    classes: Classes,
+    /// By span class, by (end, filing).
+    ends: Classes,
+    /// Each filing's interval now: a rebalance widens one in place
+    /// (`RangeIndex::widen`), its key the same.
+    at: FxHashMap<u64, (Pos, Pos)>,
     len: usize,
     /// Filed since the dead were last dropped.
     filed: usize,
+    /// `At::Final` readers.
+    finals: Vec<Reader>,
+    /// Readers of the environment's value.
+    envs: Vec<EnvReader>,
 }
 
-/// Where a range reader is filed, to take it out again.
+/// Where a range reader is filed, to take it out again: its filing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RangeKey {
-    class: u32,
-    lo: Pos,
     seq: u64,
 }
 
@@ -180,33 +194,50 @@ fn class_of(lo: Pos, hi: Pos) -> u32 {
     let span = hi.0.saturating_sub(lo.0).max(1);
     64 - (span - 1).leading_zeros()
 }
+fn class_mut(cs: &mut Classes, class: u32) -> &mut Class {
+    let i = match cs.binary_search_by_key(&class, |c| c.0) {
+        Ok(i) => i,
+        Err(i) => {
+            cs.insert(i, (class, BTreeMap::new()));
+            i
+        }
+    };
+    &mut cs[i].1
+}
+
+fn class_take(cs: &mut Classes, class: u32, key: (Pos, u64)) -> Option<RangeReader> {
+    let Ok(i) = cs.binary_search_by_key(&class, |c| c.0) else {
+        return None;
+    };
+    let hit = cs[i].1.remove(&key).map(|x| x.1);
+    if cs[i].1.is_empty() {
+        cs.remove(i);
+    }
+    hit
+}
 
 impl Ranges {
-    fn insert(&mut self, k: RangeKey, hi: Pos, r: RangeReader) {
-        let i = match self.classes.binary_search_by_key(&k.class, |c| c.0) {
-            Ok(i) => i,
-            Err(i) => {
-                self.classes.insert(i, (k.class, BTreeMap::new()));
-                i
-            }
-        };
-        self.classes[i].1.insert((k.lo, k.seq), (hi, r));
+    fn insert(&mut self, seq: u64, lo: Pos, hi: Pos, r: RangeReader) {
+        let class = class_of(lo, hi);
+        class_mut(&mut self.ends, class).insert((hi, seq), (lo, r.clone()));
+        class_mut(&mut self.classes, class).insert((lo, seq), (hi, r));
+        self.at.insert(seq, (lo, hi));
         self.len += 1;
         self.filed += 1;
     }
 
-    fn remove(&mut self, k: RangeKey) -> bool {
-        let Ok(i) = self.classes.binary_search_by_key(&k.class, |c| c.0) else {
-            return false;
-        };
-        let hit = self.classes[i].1.remove(&(k.lo, k.seq)).is_some();
-        if hit {
-            self.len -= 1;
-            if self.classes[i].1.is_empty() {
-                self.classes.remove(i);
-            }
-        }
-        hit
+    /// Takes filing `seq` out: its reader, if it was there.
+    fn take(&mut self, seq: u64) -> Option<RangeReader> {
+        let (lo, hi) = self.at.remove(&seq)?;
+        let class = class_of(lo, hi);
+        let r = class_take(&mut self.classes, class, (lo, seq));
+        class_take(&mut self.ends, class, (hi, seq));
+        self.len -= 1;
+        r
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0 && self.finals.is_empty() && self.envs.is_empty()
     }
 
     /// Drops the dead once as many have been filed as the list held.
@@ -215,45 +246,40 @@ impl Ranges {
             return;
         }
         self.filed = 0;
+        let at = &mut self.at;
         for (_, m) in &mut self.classes {
+            m.retain(|k, (_, r)| {
+                let keep = live(r);
+                if !keep {
+                    at.remove(&k.1);
+                }
+                keep
+            });
+        }
+        for (_, m) in &mut self.ends {
             m.retain(|_, (_, r)| live(r));
         }
         self.classes.retain(|c| !c.1.is_empty());
+        self.ends.retain(|c| !c.1.is_empty());
         self.len = self.classes.iter().map(|c| c.1.len()).sum();
     }
 }
 
 impl RangeIndex {
     pub(crate) fn new() -> RangeIndex {
-        RangeIndex {
-            shards: (0..RANGE_SHARDS).map(|_| RangeShard(Lock::new(FxHashMap::default()))).collect(),
-            seq: AtomicU64::new(0),
-        }
+        RangeIndex { shards: (0..RANGE_SHARDS).map(|_| RangeShard(Lock::new(FxHashMap::default()))).collect(), seq: AtomicU64::new(0) }
     }
 
     /// Files readers of `f` over the intervals `[lo, hi)`, one lock for
     /// all; the dead are dropped on the way now and then.
-    pub(crate) fn insert(
-        &self,
-        f: Field,
-        rs: Vec<(Pos, Pos, RangeReader)>,
-        live: impl Fn(&RangeReader) -> bool,
-    ) -> Vec<RangeKey> {
+    pub(crate) fn insert(&self, f: Field, rs: Vec<(Pos, Pos, RangeReader)>, live: impl Fn(&RangeReader) -> bool) -> Vec<RangeKey> {
         let seq = self.seq.fetch_add(rs.len() as u64, Ordering::Relaxed);
-        let keys: Vec<RangeKey> = rs
-            .iter()
-            .enumerate()
-            .map(|(i, (lo, hi, _))| RangeKey {
-                class: class_of(*lo, *hi),
-                lo: *lo,
-                seq: seq + i as u64,
-            })
-            .collect();
+        let keys: Vec<RangeKey> = (0..rs.len()).map(|i| RangeKey { seq: seq + i as u64 }).collect();
         let mut w = self.shards[range_shard(f)].0.write();
         let m = w.entry(f).or_default();
         m.sweep(live);
-        for (k, (_, hi, r)) in keys.iter().zip(rs) {
-            m.insert(*k, hi, r);
+        for (k, (lo, hi, r)) in keys.iter().zip(rs) {
+            m.insert(k.seq, lo, hi, r);
         }
         keys
     }
@@ -264,43 +290,125 @@ impl RangeIndex {
         let Some(m) = w.get_mut(&f) else {
             return false;
         };
-        let hit = m.remove(k);
-        if m.len == 0 {
+        let hit = m.take(k.seq).is_some();
+        if m.is_empty() {
             w.remove(&f);
         }
         hit
     }
 
+    /// Files a reader again over `[lo, hi)`, its key the same (a span
+    /// found stale after a rebalance); false if it is not there.
+    pub(crate) fn refile(&self, f: Field, k: RangeKey, lo: Pos, hi: Pos) -> bool {
+        let mut w = self.shards[range_shard(f)].0.write();
+        let Some(m) = w.get_mut(&f) else {
+            return false;
+        };
+        match m.at.get(&k.seq) {
+            Some(&x) if x == (lo, hi) => true,
+            Some(_) => {
+                let r = m.take(k.seq).expect("a filing it holds");
+                m.insert(k.seq, lo, hi, r);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub(crate) fn has(&self, f: Field, k: RangeKey) -> bool {
-        self.shards[range_shard(f)].0.read().get(&f).is_some_and(|m| {
-            m.classes
-                .binary_search_by_key(&k.class, |c| c.0)
-                .is_ok_and(|i| m.classes[i].1.contains_key(&(k.lo, k.seq)))
-        })
+        self.shards[range_shard(f)].0.read().get(&f).is_some_and(|m| m.at.contains_key(&k.seq))
+    }
+
+    /// Every interval ending at `old` ends at `new` instead (`old <
+    /// new`), or every one starting at `old` starts at `new` (`new <
+    /// old`): a rebalance moved nodes across a segment's boundary at
+    /// `old` into a segment reaching `new` (`order::Order::rebalance`).
+    pub(crate) fn widen(&self, old: Pos, new: Pos) {
+        for sh in &*self.shards {
+            let mut w = sh.0.write();
+            for m in w.values_mut() {
+                let hit: Vec<(u64, Pos, Pos)> =
+                    m.at.iter().filter(|(_, (lo, hi))| if new > old { *hi == old } else { *lo == old }).map(|(s, (lo, hi))| (*s, *lo, *hi)).collect();
+                for (seq, lo, hi) in hit {
+                    let r = m.take(seq).expect("a filing it holds");
+                    if new > old {
+                        m.insert(seq, lo, new, r);
+                    } else {
+                        m.insert(seq, new, hi, r);
+                    }
+                }
+            }
+        }
     }
 
     /// The readers of `f` whose interval holds `at` (a superset of those
-    /// whose range covers it).
+    /// whose range covers it). Each class is searched by start and by end
+    /// side by side, and the search that ends first answers: a class of
+    /// folds from a unit's start costs the folds that end after `at`, not
+    /// every fold that starts before it.
     pub(crate) fn holding(&self, f: Field, at: Pos) -> Vec<(RangeKey, RangeReader)> {
         let r = self.shards[range_shard(f)].0.read();
         let Some(m) = r.get(&f) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for (class, map) in &m.classes {
+        for ((class, by_lo), (_, by_hi)) in m.classes.iter().zip(&m.ends) {
             let floor = if *class >= 64 { 0 } else { at.0.saturating_sub(1 << class) };
-            for ((lo, seq), (hi, rr)) in map.range((Pos(floor), 0)..(at, 0)) {
+            let ceil = if *class >= 64 { u64::MAX } else { at.0.saturating_add(1 << class) };
+            let mut a = by_lo.range((Pos(floor), 0)..(at, 0));
+            let mut b = by_hi.range((Pos(at.0.saturating_add(1)), 0)..=(Pos(ceil), u64::MAX));
+            let (mut ra, mut rb) = (Vec::new(), Vec::new());
+            loop {
+                let Some(((_, seq), (hi, rr))) = a.next() else {
+                    out.append(&mut ra);
+                    break;
+                };
                 if *hi > at {
-                    out.push((
-                        RangeKey {
-                            class: *class,
-                            lo: *lo,
-                            seq: *seq,
-                        },
-                        rr.clone(),
-                    ));
+                    ra.push((RangeKey { seq: *seq }, rr.clone()));
+                }
+                let Some(((_, seq), (lo, rr))) = b.next() else {
+                    out.append(&mut rb);
+                    break;
+                };
+                if *lo < at {
+                    rb.push((RangeKey { seq: *seq }, rr.clone()));
                 }
             }
+        }
+        out
+    }
+
+    /// Files an `At::Final` reader of `f`, the dead dropped when the list
+    /// is about to grow.
+    pub(crate) fn add_final(&self, f: Field, r: Reader, live: impl Fn(&Reader) -> bool) {
+        let mut w = self.shards[range_shard(f)].0.write();
+        push_pruned(&mut w.entry(f).or_default().finals, r, live);
+    }
+
+    /// The `At::Final` readers of `f` that still stand.
+    pub(crate) fn finals(&self, f: Field, live: impl Fn(&Reader) -> bool) -> Vec<Reader> {
+        self.shards[range_shard(f)].0.read().get(&f).map(|m| m.finals.iter().filter(|r| live(r)).cloned().collect()).unwrap_or_default()
+    }
+
+    /// Files environment readers of `f`, the dead dropped as the list
+    /// grows.
+    pub(crate) fn add_envs(&self, f: Field, rs: Vec<EnvReader>, live: impl Fn(&EnvReader) -> bool) {
+        let mut w = self.shards[range_shard(f)].0.write();
+        let v = &mut w.entry(f).or_default().envs;
+        for r in rs {
+            push_pruned(v, r, &live);
+        }
+    }
+
+    /// The environment readers of `f`, taken out.
+    pub(crate) fn take_envs(&self, f: Field) -> Vec<EnvReader> {
+        let mut w = self.shards[range_shard(f)].0.write();
+        let Some(m) = w.get_mut(&f) else {
+            return Vec::new();
+        };
+        let out = std::mem::take(&mut m.envs);
+        if m.is_empty() {
+            w.remove(&f);
         }
         out
     }

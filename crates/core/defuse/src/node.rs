@@ -3,9 +3,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
-use crate::api::{Cause, Effect, Locality, NodeId, OpId, PathId, UnitId};
+use crate::api::{Brackets, Cause, Effect, Locality, NodeId, OpId, PathId, UnitId};
+use crate::index::RangeKey;
 use crate::lock::{Lock, Mx};
 use crate::order::{Pos, SegId};
+use crate::segment::RangeReader;
 use crate::values::{Field, ValueId};
 
 /// A node's state: one byte, changed by compare-and-swap, so a re-ask never
@@ -64,9 +66,13 @@ pub(crate) struct Node {
     /// Who woke it last and why: the realised chain.
     pub(crate) woke: Mx<Option<Wake>>,
     /// Fields whose walks stopped at it while it had not committed
-    /// (`commit::first_hole`): walked on from it when it commits, is taken
-    /// or is removed.
-    pub(crate) stopped: Mx<Vec<Field>>,
+    /// (`commit::first_hole`), each with the scope depth of the definition
+    /// walked from: walked on from it when it commits, is taken or is
+    /// removed.
+    pub(crate) stopped: Mx<Vec<(Field, u16)>>,
+    /// Range readers whose range starts or ends at it: asked again when
+    /// it is removed (their bound gone, they answer none).
+    pub(crate) bounded: Mx<Vec<(Field, RangeKey, RangeReader)>>,
     /// Nanoseconds of its last run, its commit and its walk forward, and
     /// when it committed (from the evaluation's start).
     pub(crate) run_ns: AtomicU64,
@@ -74,8 +80,28 @@ pub(crate) struct Node {
     pub(crate) reask_ns: AtomicU64,
     pub(crate) done_ns: AtomicU64,
     /// Reruns caused by `At::Final` re-asks in this evaluation
-    /// (`Limits::final_reruns`); past the limit the node is capped.
+    /// (`Limits::final_reruns`), and the evaluation they count in; past
+    /// the limit the node is capped.
     pub(crate) final_reruns: AtomicU32,
+    pub(crate) final_epoch: AtomicU64,
+    /// Its operation's static effect (`Operation::effect`), packed
+    /// (`pack_effect`): asked once when the node is made or its text
+    /// replaced.
+    pub(crate) effect: AtomicU32,
+    /// It has brackets filed in its segment.
+    pub(crate) has_brackets: AtomicBool,
+}
+
+/// An effect as 32 bits: closes, opens, `before`, and whether pending.
+pub(crate) fn pack_effect(e: Effect) -> u32 {
+    let b = e.brackets();
+    u32::from(b.closes) | (u32::from(b.opens) << 8) | (u32::from(b.before) << 16) | (u32::from(e == Effect::Pending) << 17)
+}
+
+/// The brackets of a packed effect, and whether it is pending.
+pub(crate) fn unpack_effect(x: u32) -> (Brackets, bool) {
+    let b = Brackets { closes: (x & 0xff) as u8, opens: ((x >> 8) & 0xff) as u8, before: x & (1 << 16) != 0, ..Brackets::default() };
+    (b, x & (1 << 17) != 0)
 }
 
 impl Node {
@@ -90,6 +116,9 @@ impl Node {
     ) -> Node {
         Node {
             final_reruns: AtomicU32::new(0),
+            final_epoch: AtomicU64::new(0),
+            effect: AtomicU32::new(0),
+            has_brackets: AtomicBool::new(false),
             id,
             unit,
             op: AtomicU32::new(op.0),
@@ -105,6 +134,7 @@ impl Node {
             last: Mx::new(None),
             woke: Mx::new(None),
             stopped: Mx::new(Vec::new()),
+            bounded: Mx::new(Vec::new()),
             run_ns: AtomicU64::new(0),
             commit_ns: AtomicU64::new(0),
             reask_ns: AtomicU64::new(0),
@@ -354,5 +384,9 @@ pub(crate) struct Product {
     pub(crate) reads: Vec<ReadRec>,
     pub(crate) placements: Vec<Placement>,
     pub(crate) claim: usize,
-    pub(crate) effect: Effect,
+    /// What the run set (`Ctx::set_effect`); None: its operation's.
+    pub(crate) effect: Option<Effect>,
+    /// The scope epoch when the run began (`Engine::scope_gen`): a
+    /// bracket changed since may have moved any of its reads.
+    pub(crate) scope_gen: u64,
 }

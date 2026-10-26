@@ -2,12 +2,13 @@
 
 use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use crate::api::{NodeId, PathId, ProjId, Step};
+use crate::api::{Brackets, NodeId, PathId, ProjId, Step};
 use crate::engine::Engine;
 use crate::node::{Anchor, Node, ReadKind, State};
 use crate::order::{Pos, SegId};
-use crate::segment::{RangeReader, Reader, Segment, reduce};
+use crate::segment::{Def, GLOBAL, Inner, RangeReader, Reader, Segment, reduce};
 use crate::values::{Field, Value, ValueId};
 
 /// A path that is no path: the defining node's id as an integer
@@ -103,9 +104,12 @@ pub(crate) fn reaching(eng: &Engine, f: Field, at: Pos, inclusive: bool) -> Reac
     before_segment(eng, f, seg.lo)
 }
 
-/// `reaching` at a node's label, read under its segment's lock; None when
-/// the node is gone.
+/// `reaching` at a node's label, read under its segment's lock, under
+/// scopes ([`reaching_visible`]); None when the node is gone.
 pub(crate) fn reaching_at(eng: &Engine, f: Field, anchor: NodeId, inclusive: bool) -> Option<Reaching> {
+    if scoped(eng) {
+        return reaching_at_visible(eng, f, anchor, inclusive);
+    }
     let n = eng.node(anchor);
     loop {
         if n.state() == State::Gone {
@@ -500,11 +504,15 @@ pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut Fol
 pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, memo: &mut FoldMemo) -> Option<ValueId> {
     match kind {
         ReadKind::Field { f, at } => {
+            if *f == eng.depth_field {
+                let d = depth_of(eng, me.id)?;
+                return apply_path(eng, Some(eng.values().int(i64::from(d))), path);
+            }
             let r = match *at {
                 Anchor::Me => reaching_at(eng, *f, me.id, false)?,
                 Anchor::Before(n) => reaching_at(eng, *f, n, false)?,
                 Anchor::AfterOwn(n) => reaching_at(eng, *f, n, true)?,
-                Anchor::End(u) => reaching(eng, *f, Pos(eng.unit(u).end.0 - 1), true),
+                Anchor::End(u) => reaching_visible(eng, *f, Pos(eng.unit(u).end.0 - 1), true),
                 Anchor::Final => last_definition(eng, *f),
             };
             through(eng, r, path)
@@ -547,6 +555,10 @@ pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, 
 
 /// A segment-side reader record's current answer.
 pub(crate) fn reader_answer(eng: &Engine, f: Field, r: &Reader) -> Option<ValueId> {
+    if f == eng.depth_field {
+        let d = depth_of(eng, r.anchor)?;
+        return apply_path(eng, Some(eng.values().int(i64::from(d))), r.path);
+    }
     let rc = reaching_at(eng, f, r.anchor, r.inclusive)?;
     through(eng, rc, r.path)
 }
@@ -593,28 +605,298 @@ pub(crate) fn builtin_projection(p: ProjId) -> Option<crate::api::Projection> {
 /// and locals alike: whatever is last, since a loop-back reader asks what
 /// the back of the document left.
 pub(crate) fn last_definition(eng: &Engine, f: Field) -> Reaching {
-    todo!()
+    let mut lo = Pos(u64::MAX);
+    while let Some(s) = eng.defs.last_before(f, lo) {
+        let seg = eng.seg(s);
+        if let Some((_, d)) = seg.inner.read().defs.get(&f).and_then(|m| m.iter().next_back()) {
+            return Reaching::of(d);
+        }
+        lo = seg.lo;
+    }
+    env_reaching(eng, f)
+}
+
+/// A scope's identity: the node that opened it and which of its opens.
+pub(crate) fn opener(n: NodeId, j: u8) -> u64 {
+    (n.raw() << 8) | u64::from(j)
+}
+
+/// A node's closes applied to the scopes open: one at the root does
+/// nothing (TeX's extra `}`, an error it ignores).
+pub(crate) fn close(chain: &mut Vec<u64>, b: &Brackets) {
+    chain.truncate(chain.len().saturating_sub(usize::from(b.closes)));
+}
+
+pub(crate) fn open(chain: &mut Vec<u64>, n: NodeId, b: &Brackets) {
+    chain.extend((0..b.opens).map(|j| opener(n, j)));
+}
+
+/// Whether any node on the line has brackets: without, every definition
+/// reaches every later position and no scope is walked.
+pub(crate) fn scoped(eng: &Engine) -> bool {
+    eng.bracket_nodes.load(Ordering::Acquire) > 0
+}
+
+/// The scopes open at the start of `s`, outermost first: its cached
+/// chain if no bracket changed since, else the last segment before it
+/// whose chain is known, and on from there through each segment's
+/// brackets, each chain found kept. One segment's lock at a time.
+pub(crate) fn chain_start(eng: &Engine, s: &Arc<Segment>) -> Arc<[u64]> {
+    let g = eng.scope_gen.load(Ordering::Acquire);
+    let cached = |t: &Segment| t.inner.read().chain.as_ref().filter(|c| c.0 == g).map(|c| c.1.clone());
+    if let Some(c) = cached(s) {
+        return c;
+    }
+    let mut todo: Vec<&Arc<Segment>> = vec![s];
+    let mut known: Option<(&Arc<Segment>, Arc<[u64]>)> = None;
+    loop {
+        let t = *todo.last().expect("a segment");
+        let Some(p) = eng.order.prev(t.id, t.lo) else {
+            break;
+        };
+        let ps = eng.seg(p);
+        if let Some(c) = cached(ps) {
+            known = Some((ps, c));
+            break;
+        }
+        todo.push(ps);
+    }
+    let store = |t: &Segment, c: &Arc<[u64]>| {
+        if eng.scope_gen.load(Ordering::Acquire) == g {
+            t.inner.write().chain = Some((g, c.clone()));
+        }
+    };
+    let (mut prev, mut c) = match known {
+        Some(k) => k,
+        None => {
+            let first = todo.pop().expect("a segment");
+            let c: Arc<[u64]> = Arc::from(Vec::new());
+            store(first, &c);
+            (first, c)
+        }
+    };
+    while let Some(t) = todo.pop() {
+        c = chain_end(prev, &c);
+        store(t, &c);
+        prev = t;
+    }
+    c
+}
+
+/// The scopes open at the end of `s`, from those at its start.
+fn chain_end(s: &Segment, start: &Arc<[u64]>) -> Arc<[u64]> {
+    let inner = s.inner.read();
+    if inner.brackets.is_empty() {
+        return start.clone();
+    }
+    let mut c = start.to_vec();
+    for (_, (n, b)) in inner.brackets.iter() {
+        close(&mut c, b);
+        open(&mut c, *n, b);
+    }
+    Arc::from(c)
+}
+
+/// The scopes open at `at` in a segment whose start's are `start`: those
+/// before it, with its closes where `closes` says, and its opens too
+/// where `opens` does.
+pub(crate) fn chain_at(inner: &Inner, start: &[u64], at: Pos, closes: bool, opens: bool) -> Vec<u64> {
+    let mut c = start.to_vec();
+    for (_, (n, b)) in inner.brackets.range(..at) {
+        close(&mut c, b);
+        open(&mut c, *n, b);
+    }
+    if let Some((n, b)) = inner.brackets.get(&at) {
+        if closes || opens {
+            close(&mut c, b);
+        }
+        if opens {
+            open(&mut c, *n, b);
+        }
+    }
+    c
+}
+
+/// Where a reader at `at` looks from: after the closes its node makes
+/// before its reads, or, `inclusive`, after the node altogether.
+pub(crate) fn reader_chain(inner: &Inner, start: &[u64], at: Pos, inclusive: bool) -> Vec<u64> {
+    let before = inner.brackets.get(&at).is_some_and(|(_, b)| b.before);
+    chain_at(inner, start, at, inclusive || before, inclusive)
+}
+
+/// A definition's scope: its depth (0: it reaches every later position)
+/// and the scope it lives in. `closed`: the scopes open at its node after
+/// the node's closes; `own`: the node's brackets.
+pub(crate) fn level(d: &Def, closed: &[u64], own: Option<&(NodeId, Brackets)>) -> (usize, u64) {
+    if d.depth == GLOBAL {
+        return (0, 0);
+    }
+    let k = closed.len();
+    if d.depth > 0
+        && let Some((n, b)) = own
+        && b.opens > 0
+    {
+        let j = u8::try_from(d.depth - 1).unwrap_or(u8::MAX).min(b.opens - 1);
+        return (k + usize::from(j) + 1, opener(*n, j));
+    }
+    (k, if k == 0 { 0 } else { closed[k - 1] })
+}
+
+/// Whether a definition in scope `lv` reaches a reader whose open scopes
+/// are `target`: its scope is still open there.
+pub(crate) fn visible(target: &[u64], lv: (usize, u64)) -> bool {
+    lv.0 == 0 || (target.len() >= lv.0 && target[lv.0 - 1] == lv.1)
+}
+
+/// Each definition of `f` in the segment before `limit` (at it too when
+/// `incl`; None: all of them), in order, with its scope; `start`: the
+/// scopes open at the segment's start.
+pub(crate) fn levels(inner: &Inner, f: Field, start: &[u64], limit: Option<Pos>, incl: bool) -> Vec<(Pos, Def, (usize, u64))> {
+    let Some(m) = inner.defs.get(&f) else {
+        return Vec::new();
+    };
+    let defs = match limit {
+        None => m.iter(),
+        Some(p) if incl => m.range(..=p),
+        Some(p) => m.range(..p),
+    };
+    let mut chain = start.to_vec();
+    let mut brs = inner.brackets.iter().peekable();
+    let mut out = Vec::new();
+    for (q, d) in defs {
+        while let Some((bp, (n, b))) = brs.peek() {
+            if **bp >= *q {
+                break;
+            }
+            close(&mut chain, b);
+            open(&mut chain, *n, b);
+            brs.next();
+        }
+        let own = brs.peek().filter(|(bp, _)| **bp == *q).map(|(_, x)| *x);
+        let lv = match own {
+            Some(x) if x.1.closes > 0 => {
+                let mut c = chain.clone();
+                close(&mut c, &x.1);
+                level(d, &c, Some(x))
+            }
+            _ => level(d, &chain, own),
+        };
+        out.push((*q, *d, lv));
+    }
+    out
+}
+
+/// The last definition in `levels` a reader with open scopes `target` sees.
+fn last_visible(ls: &[(Pos, Def, (usize, u64))], target: &[u64]) -> Option<Def> {
+    ls.iter().rev().find(|x| visible(target, x.2)).map(|x| x.1)
+}
+
+/// The definitions of `f` before the segment starting at `lo`, by the
+/// field index, the last one visible to `target`; else the environment.
+fn visible_before(eng: &Engine, f: Field, target: &[u64], lo: Pos) -> Reaching {
+    let mut lo = lo;
+    while let Some(s) = eng.defs.last_before(f, lo) {
+        let seg = eng.seg(s);
+        let start = chain_start(eng, seg);
+        {
+            let inner = seg.inner.read();
+            if let Some(d) = last_visible(&levels(&inner, f, &start, None, false), target) {
+                return Reaching::of(&d);
+            }
+        }
+        lo = seg.lo;
+    }
+    env_reaching(eng, f)
 }
 
 /// The scope depth at `p`: scopes open just before the node there, its
-/// own closes not applied. The segments before `p`'s are summed by their
-/// `depth_net`; `p`'s segment is walked to `p`. Never below 0.
+/// own closes not applied.
 pub(crate) fn depth_at(eng: &Engine, p: Pos) -> u32 {
-    todo!()
+    if !scoped(eng) {
+        return 0;
+    }
+    loop {
+        let Some(seg) = eng.seg_for_pos(p) else {
+            return 0;
+        };
+        let start = chain_start(eng, seg);
+        let inner = seg.inner.read();
+        if p < seg.lo || (p >= inner.hi && eng.order.at_or_after(p) != Some(seg.id)) {
+            continue;
+        }
+        return u32::try_from(chain_at(&inner, &start, p, false, false).len()).unwrap_or(u32::MAX);
+    }
 }
 
-/// Whether a definition at `def` with scope depth `depth` is still open
-/// at `at` (`at` exclusive): no position in `(def, at)` brings the depth
-/// below `depth`, the closes that come before the node at `at` included
-/// when `before_closes` says so. Whole segments between are skipped by
-/// their `depth_min`.
-pub(crate) fn visible(eng: &Engine, def: Pos, depth: u16, at: Pos, before_closes: bool) -> bool {
-    todo!()
+/// The scope depth at a node (its closes not applied); None when gone.
+pub(crate) fn depth_of(eng: &Engine, n: NodeId) -> Option<u32> {
+    let node = eng.node(n);
+    if !scoped(eng) {
+        return (node.state() != State::Gone).then_some(0);
+    }
+    loop {
+        if node.state() == State::Gone {
+            return None;
+        }
+        let seg = eng.seg(node.seg_hint());
+        let start = chain_start(eng, seg);
+        let inner = seg.inner.read();
+        let p = node.pos_hint();
+        if inner.nodes.get(&p) != Some(&n) {
+            continue;
+        }
+        return Some(u32::try_from(chain_at(&inner, &start, p, false, false).len()).unwrap_or(u32::MAX));
+    }
 }
 
 /// [`reaching`] under scopes: the last definition of `f` before `at` that
 /// is visible there (`visible`); an invisible one is passed over and the
 /// walk goes on to the one before it, across segments by the field index.
 pub(crate) fn reaching_visible(eng: &Engine, f: Field, at: Pos, inclusive: bool) -> Reaching {
-    todo!()
+    if !scoped(eng) {
+        return reaching(eng, f, at, inclusive);
+    }
+    loop {
+        let Some(seg) = eng.seg_for_pos(at) else {
+            return env_reaching(eng, f);
+        };
+        let start = chain_start(eng, seg);
+        let target = {
+            let inner = seg.inner.read();
+            if at < seg.lo || (at >= inner.hi && eng.order.at_or_after(at) != Some(seg.id)) {
+                continue;
+            }
+            let target = reader_chain(&inner, &start, at, inclusive);
+            if let Some(d) = last_visible(&levels(&inner, f, &start, Some(at), inclusive), &target) {
+                return Reaching::of(&d);
+            }
+            target
+        };
+        return visible_before(eng, f, &target, seg.lo);
+    }
+}
+
+/// [`reaching_at`] under scopes.
+fn reaching_at_visible(eng: &Engine, f: Field, anchor: NodeId, inclusive: bool) -> Option<Reaching> {
+    let n = eng.node(anchor);
+    loop {
+        if n.state() == State::Gone {
+            return None;
+        }
+        let seg = eng.seg(n.seg_hint());
+        let start = chain_start(eng, seg);
+        let target = {
+            let inner = seg.inner.read();
+            let p = n.pos_hint();
+            if inner.nodes.get(&p) != Some(&anchor) {
+                continue;
+            }
+            let target = reader_chain(&inner, &start, p, inclusive);
+            if let Some(d) = last_visible(&levels(&inner, f, &start, Some(p), inclusive), &target) {
+                return Some(Reaching::of(&d));
+            }
+            target
+        };
+        return Some(visible_before(eng, f, &target, seg.lo));
+    }
 }

@@ -10,7 +10,7 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::api::{NodeId, OpId, PathId, UnitId};
+use crate::api::{Brackets, NodeId, OpId, PathId, UnitId};
 use crate::engine::Engine;
 use crate::index::RangeKey;
 use crate::lock::Lock;
@@ -48,14 +48,19 @@ pub(crate) struct Inner {
     pub(crate) stops: Vec<(Field, RangeKey, RangeReader)>,
     /// Its nodes by operation, for `commit::learn_shape`.
     pub(crate) by_op: FxHashMap<OpId, Vec<NodeId>>,
-    /// Each node's scope brackets, by position; absent means none.
-    pub(crate) brackets: PosMap<crate::api::Brackets>,
+    /// Each node's scope brackets, by position, with the node; absent
+    /// means none.
+    pub(crate) brackets: PosMap<(NodeId, Brackets)>,
     /// The segment's scope summary: the net change of depth over it, and
     /// the lowest depth reached inside it relative to its start (≤ 0),
-    /// kept current with `brackets` (`Inner::sum_depth`). A visibility
-    /// walk skips a whole segment by these.
+    /// kept current with `brackets` (`Inner::sum_depth`). A walk after a
+    /// changed bracket skips a whole segment by these
+    /// (`commit::reask_after_effect`).
     pub(crate) depth_net: i32,
     pub(crate) depth_min: i32,
+    /// The scopes open at its start, outermost first (`read::chain_start`),
+    /// and the scope epoch they were found at (`Engine::scope_gen`).
+    pub(crate) chain: Option<(u64, Arc<[u64]>)>,
     /// Its nodes that have not committed (about: a walk skips the search
     /// for one when there are none, `commit::first_hole`).
     pub(crate) holes: usize,
@@ -226,6 +231,32 @@ impl<V> PosMap<V> {
         }
     }
 
+    /// The entries before `at`, taken out.
+    pub(crate) fn split_lower(&mut self, at: &Pos) -> PosMap<V> {
+        let upper = self.split_off(at);
+        std::mem::replace(self, upper)
+    }
+
+    /// `a`'s entries then `b`'s (all of `a`'s labels before `b`'s).
+    pub(crate) fn concat(a: PosMap<V>, b: PosMap<V>) -> PosMap<V> {
+        if a.is_empty() {
+            return b;
+        }
+        if b.is_empty() {
+            return a;
+        }
+        let into = |m: PosMap<V>| -> Vec<(Pos, V)> {
+            match m {
+                PosMap::Zero => Vec::new(),
+                PosMap::One(p, v) => vec![(p, v)],
+                PosMap::Many(v) => v,
+            }
+        };
+        let mut v = into(a);
+        v.append(&mut into(b));
+        PosMap::Many(v)
+    }
+
     /// Labels moved in order (a relabel).
     fn rekey(&mut self, map: &FxHashMap<Pos, Pos>) {
         match self {
@@ -312,8 +343,7 @@ fn map_room<V>(m: &FxHashMap<Field, V>, k: usize) -> usize {
 }
 
 const DUMMY_DEF: Def = Def {
-
-    depth: 0, // (scopes: `commit::def_depth`, the reader's depth)
+    depth: 0,
     value: ValueId::UNIT,
     by: NodeId(0),
     rel: None,
@@ -321,8 +351,6 @@ const DUMMY_DEF: Def = Def {
 };
 
 const DUMMY_READER: Reader = Reader {
-
-    depth: 0, // (scopes: `commit::def_depth`, the reader's depth)
     node: NodeId(0),
     serial: 0,
     anchor: NodeId(0),
@@ -484,11 +512,18 @@ pub(crate) struct Def {
     /// Filed before its node ran (a prediction, a learned shape): the run
     /// replaces it.
     pub(crate) provisional: bool,
-    /// Its scope depth (`Locality`); 0 for a global. It reaches a later
-    /// position only while the depth between stays at or above it
-    /// (`read::visible`).
+    /// Its scope (`commit::def_depth`): `GLOBAL`, or how many scopes
+    /// above the depth at its node after the node's closes (0: `Local`,
+    /// `j + 1`: inside the node's `j`-th open). The depth it stands for is
+    /// found when it is read, from the brackets before it as they are
+    /// then, so a bracket filed or moved before it never leaves it stale;
+    /// it reaches a later position while the scope it is in is still
+    /// open there (`read::visible`).
     pub(crate) depth: u16,
 }
+
+/// `Def::depth` of a global definition: it reaches every later position.
+pub(crate) const GLOBAL: u16 = u16::MAX;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Reader {
@@ -499,10 +534,6 @@ pub(crate) struct Reader {
     pub(crate) anchor: NodeId,
     /// `At::AfterOwn`: the anchor's own definition counts.
     pub(crate) inclusive: bool,
-    /// The depth the read was answered at: the anchor's, after the
-    /// closes that come before it. A change of brackets between a
-    /// definition and this reader re-asks it (`commit::reask_after_effect`).
-    pub(crate) depth: u16,
     pub(crate) path: PathId,
     pub(crate) seen: Option<ValueId>,
 }
@@ -580,6 +611,7 @@ impl Segment {
                 brackets: PosMap::Zero,
                 depth_net: 0,
                 depth_min: 0,
+                chain: None,
                 hi,
                 nodes: BTreeMap::new(),
                 defs: FxHashMap::default(),
@@ -652,10 +684,129 @@ impl Segment {
         for m in inner.contribs.values_mut() {
             m.rekey(&map);
         }
+        inner.brackets.rekey(&map);
     }
 
     pub(crate) fn needs_split(inner: &Inner) -> bool {
         inner.nodes.len() > SEG_CAP
+    }
+
+    /// Whether a relabel leaves a gap between its nodes for `more` nodes
+    /// placed after any one of them, a few times over; else
+    /// `order::Order::rebalance` makes room first.
+    pub(crate) fn has_room(&self, inner: &Inner, more: usize) -> bool {
+        let n = (inner.nodes.len() + more + 2) as u64;
+        inner.hi.0 - self.lo.0 >= n.saturating_mul(4)
+    }
+
+    /// Moves its nodes at and after `cut` (`right`: into `to`, the next
+    /// segment) or before it (into `to`, the previous one), with their
+    /// definitions, contributions, readers, stops, by-op entries and
+    /// brackets, then relabels both evenly: the moved nodes leave its range
+    /// for `to`'s, the only move of a node across a segment's boundary
+    /// (`order::Order::rebalance`). Under both segments' write locks. The
+    /// fields `to` holds now and those this one no longer holds, for the
+    /// field indexes; whether brackets moved.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn give(
+        &self,
+        inner: &mut Inner,
+        eng: &Engine,
+        to: &Segment,
+        ti: &mut Inner,
+        cut: Pos,
+        right: bool,
+    ) -> (Vec<(Field, u8)>, Vec<(Field, u8)>, bool) {
+        let moved = |p: Pos| if right { p >= cut } else { p < cut };
+        let nodes: Vec<(Pos, NodeId)> = inner.nodes.iter().filter(|(p, _)| moved(**p)).map(|(p, n)| (*p, *n)).collect();
+        for (p, _) in &nodes {
+            inner.nodes.remove(p);
+        }
+        for (p, n) in &nodes {
+            ti.nodes.insert(*p, *n);
+            eng.node(*n).seg.store(to.id.0, Ordering::Release);
+        }
+        let mut added: Vec<(Field, u8)> = Vec::new();
+        let mut gone: Vec<(Field, u8)> = Vec::new();
+        // definitions (0), contributions (1), readers (2)
+        let keys: Vec<Field> = inner.defs.keys().copied().collect();
+        for f in keys {
+            let m = inner.defs.get_mut(&f).expect("a key");
+            let part = if right { m.split_off(&cut) } else { m.split_lower(&cut) };
+            if part.is_empty() {
+                continue;
+            }
+            if m.is_empty() {
+                inner.defs.remove(&f);
+                gone.push((f, 0));
+            }
+            let old = ti.defs.remove(&f).unwrap_or_default();
+            if old.is_empty() {
+                added.push((f, 0));
+            }
+            ti.defs.insert(f, if right { PosMap::concat(part, old) } else { PosMap::concat(old, part) });
+        }
+        let keys: Vec<Field> = inner.contribs.keys().copied().collect();
+        for f in keys {
+            let m = inner.contribs.get_mut(&f).expect("a key");
+            let part = if right { m.split_off(&cut) } else { m.split_lower(&cut) };
+            if part.is_empty() {
+                continue;
+            }
+            if m.is_empty() {
+                gone.push((f, 1));
+            }
+            inner.resum(eng, f);
+            let old = ti.contribs.remove(&f).unwrap_or_default();
+            if old.is_empty() {
+                added.push((f, 1));
+            }
+            ti.contribs.insert(f, if right { PosMap::concat(part, old) } else { PosMap::concat(old, part) });
+            ti.resum(eng, f);
+        }
+        let mine: FxHashMap<NodeId, ()> = nodes.iter().map(|(_, n)| (*n, ())).collect();
+        let keys: Vec<Field> = inner.readers.keys().copied().collect();
+        for f in keys {
+            let v = inner.readers.get_mut(&f).expect("a key");
+            let (out, keep): (Vec<Reader>, Vec<Reader>) = v.drain(..).partition(|r| mine.contains_key(&r.anchor));
+            *v = keep;
+            if v.is_empty() {
+                inner.readers.remove(&f);
+                gone.push((f, 2));
+            }
+            if out.is_empty() {
+                continue;
+            }
+            let t = ti.readers.entry(f).or_default();
+            if t.is_empty() {
+                added.push((f, 2));
+            }
+            t.extend(out);
+        }
+        let (out, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut inner.stops)
+            .into_iter()
+            .partition(|s: &(Field, RangeKey, RangeReader)| s.2.to.is_some_and(|n| mine.contains_key(&n)));
+        inner.stops = keep;
+        ti.stops.extend(out);
+        for v in inner.by_op.values_mut() {
+            let (out, keep): (Vec<NodeId>, Vec<NodeId>) = v.drain(..).partition(|n| mine.contains_key(n));
+            *v = keep;
+            for n in out {
+                ti.by_op.entry(eng.node(n).op()).or_default().push(n);
+            }
+        }
+        inner.by_op.retain(|_, v| !v.is_empty());
+        let br = if right { inner.brackets.split_off(&cut) } else { inner.brackets.split_lower(&cut) };
+        let brackets_moved = !br.is_empty();
+        let old = std::mem::take(&mut ti.brackets);
+        ti.brackets = if right { PosMap::concat(br, old) } else { PosMap::concat(old, br) };
+        inner.sum_depth();
+        ti.sum_depth();
+        inner.holes = inner.nodes.values().filter(|n| eng.node(**n).is_hole()).count();
+        ti.holes = ti.nodes.values().filter(|n| eng.node(**n).is_hole()).count();
+        to.relabel(ti, eng);
+        self.relabel(inner, eng);
+        (added, gone, brackets_moved)
     }
 
     /// Moves the nodes at and after the median label into a new segment
@@ -698,6 +849,7 @@ impl Segment {
             for m in inner.contribs.values_mut() {
                 m.rekey(&map);
             }
+            inner.brackets.rekey(&map);
         }
         self.split_at(inner, eng, Pos(self.lo.0 + (k as u64 + 1) * step), new_id)
     }
@@ -764,14 +916,19 @@ impl Segment {
         inner.by_op.retain(|_, v| !v.is_empty());
         let up_holes = nodes.values().filter(|n| eng.node(**n).is_hole()).count();
         inner.holes = inner.nodes.values().filter(|n| eng.node(**n).is_hole()).count();
+        // (the scopes open at the old start are as they were; the new
+        // segment's are found when asked)
+        let brackets = inner.brackets.split_off(&at);
+        inner.sum_depth();
         let new = Arc::new(Segment {
             id: new_id,
             unit: self.unit,
             lo: at,
             inner: Lock::new(Inner {
-                brackets: PosMap::Zero,
+                brackets,
                 depth_net: 0,
                 depth_min: 0,
+                chain: None,
                 hi,
                 nodes,
                 defs,
@@ -786,6 +943,7 @@ impl Segment {
         });
         let moved: Vec<Field> = {
             let mut ni = new.inner.write();
+            ni.sum_depth();
             for f in &resum {
                 ni.resum(eng, *f);
             }
@@ -828,6 +986,13 @@ impl Inner {
     /// order: for each node, its closes (before or after its definitions
     /// alike for the summary) then its opens.
     pub(crate) fn sum_depth(&mut self) {
-        todo!()
+        let (mut d, mut lo) = (0i32, 0i32);
+        for (_, (_, b)) in self.brackets.iter() {
+            d -= i32::from(b.closes);
+            lo = lo.min(d);
+            d += i32::from(b.opens);
+        }
+        self.depth_net = d;
+        self.depth_min = lo;
     }
 }

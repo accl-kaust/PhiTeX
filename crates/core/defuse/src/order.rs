@@ -95,14 +95,99 @@ impl Order {
 impl Order {
     /// Gives a segment whose labels are used up (a gap of nothing left
     /// after a relabel: one node placing thousands of placements after
-    /// itself) a wider range: under the order's write lock, the segment
-    /// and its right neighbour are locked in ascending order, the
-    /// boundary between them moved so that each holds labels in
-    /// proportion to its nodes (a neighbour too full is split first),
-    /// both relabelled, and every field-index entry keyed by the
-    /// neighbour's old start moved to its new one. The one place two
-    /// segments are held at once (`lock.rs`'s table). Never a panic.
-    pub(crate) fn rebalance(&self, eng: &crate::engine::Engine, seg: SegId) {
-        todo!()
+    /// itself) room, from a neighbour of its unit: the segment and its
+    /// right neighbour are locked in ascending order, nodes at the end of
+    /// the fuller one move into the other so that each holds nodes in
+    /// proportion to its labels (`Segment::give`), both relabelled; a
+    /// neighbour itself too full is given room from its own neighbour
+    /// first. No segment's range changes: the order's list does not, and
+    /// a moved node's new segment and field-index entries are filed as a
+    /// split files them; the range readers whose interval ended (or began)
+    /// at the boundary are widened over the neighbour (`RangeIndex::widen`).
+    /// The left neighbour where there is no right one. The one place two
+    /// segments are held at once (`lock.rs`'s table). False when the
+    /// whole unit is full.
+    pub(crate) fn rebalance(&self, eng: &crate::engine::Engine, seg: SegId) -> bool {
+        self.rebalance_toward(eng, seg, true) || self.rebalance_toward(eng, seg, false)
+    }
+
+    /// `rebalance` with the neighbour on one side only (and its own
+    /// neighbours further that way).
+    fn rebalance_toward(&self, eng: &crate::engine::Engine, seg: SegId, right: bool) -> bool {
+        let s = eng.seg(seg);
+        for _ in 0..64 {
+            let nb = if right { self.next(seg, s.lo) } else { self.prev(seg, s.lo) };
+            let Some(o) = nb.map(|x| eng.seg(x)).filter(|o| o.unit == s.unit) else {
+                return false;
+            };
+            // (ascending: the left one first)
+            let (a, b) = if right { (s, o) } else { (o, s) };
+            let mut ai = a.inner.write();
+            let mut bi = b.inner.write();
+            if ai.hi != b.lo {
+                // (a split between them meanwhile)
+                continue;
+            }
+            let (si, oi) = if right { (&*ai, &*bi) } else { (&*bi, &*ai) };
+            let (ws, wo) = (si.hi.0 - s.lo.0, oi.hi.0 - o.lo.0);
+            let (ns, no) = (si.nodes.len() as u64, oi.nodes.len() as u64);
+            let total = ns + no + 4;
+            if ws.saturating_add(wo) < total.saturating_mul(16) {
+                // (the neighbour too full to share: room from its far side
+                // first)
+                drop(bi);
+                drop(ai);
+                if !self.rebalance_toward(eng, o.id, right) {
+                    return false;
+                }
+                continue;
+            }
+            // nodes kept in proportion to labels: s keeps `keep`
+            let keep =
+                usize::try_from((u128::from(total) * u128::from(ws) / u128::from(ws + wo)) as u64).unwrap_or(0).saturating_sub(2).min(si.nodes.len());
+            let give = si.nodes.len() - keep;
+            if give == 0 {
+                return true;
+            }
+            let cut = if right {
+                *si.nodes.keys().nth(keep).expect("a node to give")
+            } else {
+                // (the first `give` go left: the cut is the first kept)
+                si.nodes.keys().nth(give).copied().unwrap_or(si.hi)
+            };
+            eng.layout_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let ((added, gone, brackets), boundary) =
+                if right { (s.give(&mut ai, eng, o, &mut bi, cut, true), o.lo) } else { (s.give(&mut bi, eng, o, &mut ai, cut, false), s.lo) };
+            let (olo, oid) = (o.lo, o.id);
+            for &(f, k) in &added {
+                match k {
+                    0 => eng.defs.add(f, olo, oid),
+                    1 => eng.contribs.add(f, olo, oid),
+                    _ => eng.readers.add(f, olo, oid),
+                }
+            }
+            drop(bi);
+            drop(ai);
+            for &(f, k) in &gone {
+                match k {
+                    0 => eng.defs.remove(f, s.lo, s.id),
+                    1 => eng.contribs.remove(f, s.lo, s.id),
+                    _ => eng.readers.remove(f, s.lo, s.id),
+                }
+            }
+            for &(f, _) in added.iter().chain(&gone) {
+                eng.bump(f);
+            }
+            if brackets {
+                eng.scope_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                eng.bump(eng.depth_field);
+            }
+            // (a range read through a moved node now reaches into the
+            // neighbour)
+            let far = if right { o.inner.read().hi } else { o.lo };
+            eng.ranges.widen(boundary, far);
+            return true;
+        }
+        false
     }
 }

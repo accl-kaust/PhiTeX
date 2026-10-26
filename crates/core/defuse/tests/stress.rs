@@ -127,3 +127,72 @@ fn a_read_of_an_unchanged_field_is_cheap() {
     assert_eq!(int(&e, r), 1);
     assert!(per < Duration::from_nanos(150), "a read of an unchanged field costs {per:?}; a hundred nanoseconds is the bar");
 }
+
+/// `[n]`: places the chain's next step `[n - 1]` after itself while `n >
+/// 0` (a loop's iterations, each a continuation of the last), and
+/// contributes 1 to `s`.
+struct Chain(std::sync::OnceLock<OpId>, Field);
+
+impl Operation for Chain {
+    fn name(&self) -> &'static str {
+        "chain"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let n = v.as_int(cx.args()[0]).unwrap();
+        if n > 0 {
+            cx.follow(*self.0.get().unwrap(), vec![v.int(n - 1)]);
+        }
+        cx.contribute(self.1, v.int(1));
+        Ok(cx.args()[0])
+    }
+}
+
+/// `[f]`: the fold of f from the unit's start to it.
+struct FoldAll;
+
+impl Operation for FoldAll {
+    fn name(&self) -> &'static str {
+        "fold_all"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.fold(Field(cx.args()[0]), None, None)
+    }
+}
+
+#[test]
+fn a_long_chain_in_a_pushed_run_takes_labels_from_its_neighbours() {
+    // Nodes pushed many at once share a segment's labels a push's step
+    // apart; a chain of twenty thousand steps placed one after another in
+    // the middle of them uses those labels up many times over, and its
+    // segment takes room from the segments after it (`Order::rebalance`),
+    // its order, its contributions and the fold after it all kept.
+    let e = Engine::new();
+    let v = e.values();
+    let s = v.field("s");
+    e.declare_accumulator(s, Arc::new(phitex_defuse::SumMonoid));
+    let def = e.register(Arc::new(Def));
+    let ch = Arc::new(Chain(std::sync::OnceLock::new(), s));
+    let chain = e.register(ch.clone());
+    ch.0.set(chain).unwrap();
+    let fold = e.register(Arc::new(FoldAll));
+    let u = e.new_unit();
+    let x = v.field("x");
+    let ids = e.push_many(u, def, (0..100).map(|i| vec![x.0, v.int(i)]).collect(), 4);
+    let n = 20_000;
+    let head = e.insert_after(ids[50], chain, vec![v.int(n)]);
+    let total = e.insert_after(ids[70], fold, vec![s.0]);
+    let t = Instant::now();
+    e.evaluate(threads().min(8)).unwrap();
+    assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+    let order = e.order(u);
+    let at = order.iter().position(|&x| x == head).unwrap();
+    for k in 0..=n as usize {
+        assert_eq!(int(&e, order[at + k]), n - k as i64);
+    }
+    assert_eq!(order[at + n as usize + 1], ids[51]);
+    assert_eq!(int(&e, total), n + 1);
+    assert!(e.check_invariants().is_empty());
+}

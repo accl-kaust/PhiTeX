@@ -2,16 +2,16 @@
 //!
 //! | lock | taken by | held for |
 //! |---|---|---|
-//! | a segment's `inner` (`segment::Segment`) | a read; a commit; a placement; a split; a `next` filed at its stop | one map operation, or one commit's diff of one node; never two segments at once, never across a run |
+//! | a segment's `inner` (`segment::Segment`) | a read; a commit; a placement; a split; a `next` filed at its stop; a scope chain found or kept; brackets filed | one map operation, or one commit's diff of one node; never two segments at once (but `rebalance`'s), never across a run |
 //! | the order's list (`order::Order::segs`) | a position lookup; a split or a new unit | a binary search; one insert |
 //! | a field-index shard (`index::FieldIndex`: definitions, contributions, readers) | a read's or a commit's skip | one set lookup or insert |
-//! | a range-index shard (`index::RangeIndex`: the range readers by interval) | a commit filing its ranges; a changed contribution asking which hold its label | one commit's ranges of one field; a few map ranges |
+//! | a range-index shard (`index::RangeIndex`: by field, the range readers by interval, the `At::Final` readers, the environment's readers) | a commit filing its ranges, loop-back and environment reads; a changed contribution asking which hold its label; a last definition landing; an environment change; a rebalance widening intervals | one commit's ranges of one field; a few map ranges; one list; one shard's intervals |
 //! | a value shard (`values::Values`) | an intern; a sequence node lookup | one insert or one lookup; plain reads take none |
-//! | paths, monoids, environment, shapes, memo, marks, pending (`engine::Engine`) | setup; rare inserts; a push or an edit outside an evaluation | one map operation |
-//! | a node's `last`, `woke`, `text` and `stopped` (`node::Node`) | its commit; its re-ask; an edit; a read of its arguments; a walk stopping at it | a swap; a clone; a push |
-//! | the pool's parking (`sched::Pool`) | an idle worker; a push that finds one idle | the rest itself; one notify |
+//! | paths and their extensions, monoids, environment values, shapes, memo, marks, pending (`engine::Engine`) | setup; rare inserts; a view's step; a push or an edit outside an evaluation | one map operation |
+//! | a node's `last`, `woke`, `text`, `stopped` and `bounded` (`node::Node`) | its commit; its re-ask; an edit; a read of its arguments; a walk stopping at it; a range reader bounded by it filed or taken | a swap; a clone; a push |
+//! | the pool's parking (`sched::Pool`) | an idle worker that found no work (looked for outside it); a push that finds one idle | the rest itself; one notify |
 //! | a block's steal flag (`sched::Shared::block_busy`, an atomic) | a thief | one steal of an even run of nodes |
-//! | the order's list, then a segment and its right neighbour in ascending order (`order::Order::rebalance`) | a placement that finds a segment's labels used up | one rebalance: the one time two segments are held, under the order's write lock, never while any other lock is held |
+//! | a segment and its neighbour in ascending order (`order::Order::rebalance`) | a placement that finds a segment's labels used up | one move of nodes into the neighbour: the one time two segments are held, taken while no other lock is held (a field-index or range-index shard after them, as a split takes them) |
 //! | the spare workers and their handles (`sched::Pool::run`) | the caller's thread, starting the workers an evaluation turns out to need | one spawn |
 //! | the probes (`obs`) | a probe, with `profile` | one counter |
 //!

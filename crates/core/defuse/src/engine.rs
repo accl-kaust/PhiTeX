@@ -39,15 +39,19 @@ pub(crate) struct EnvReader {
 
 /// The environment: the values reaching the start of the line, from the
 /// client's settings and, on a miss, its provider.
+/// Its readers are filed by field with the range readers
+/// (`index::RangeIndex`).
 pub(crate) struct Env {
     pub(crate) values: Lock<FxHashMap<Field, Option<ValueId>>>,
     pub(crate) provider: Lock<Option<Box<EnvProvider>>>,
-    pub(crate) readers: Lock<FxHashMap<Field, Vec<EnvReader>>>,
 }
 
 pub(crate) struct Paths {
     pub(crate) by_steps: Lock<FxHashMap<Box<[Step]>, PathId>>,
     pub(crate) steps: Table<Box<[Step]>>,
+    /// A path one step further, by (path, step): `Ctx::at` and `get`
+    /// extend a view's path without a list of its steps.
+    pub(crate) ext: Lock<FxHashMap<(PathId, Step), PathId>>,
 }
 
 /// Path ids below this are projections' (`PathId::of_proj`).
@@ -127,6 +131,21 @@ pub struct Engine {
     /// A change count per field bucket ([`Engine::field_epoch`]): a run's
     /// read whose bucket did not move by its commit needs no second look.
     pub(crate) field_epochs: Box<[AtomicU64]>,
+    /// Counts the changes of any node's brackets: a chain of open scopes
+    /// cached at an older count is stale (`read::chain_start`), and a run
+    /// that began before one checks every read at its commit.
+    pub(crate) scope_gen: AtomicU64,
+    /// Nodes with brackets filed: none, and no scope is walked.
+    pub(crate) bracket_nodes: AtomicUsize,
+    /// The field a read of the scope depth is recorded under
+    /// (`Ctx::depth`): its readers are re-asked with the rest after a
+    /// changed bracket.
+    pub(crate) depth_field: Field,
+    /// Some `At::Final` reader was ever filed.
+    pub(crate) has_finals: std::sync::atomic::AtomicBool,
+    /// Counts the rebalances (`order::Order::rebalance`): a range reader
+    /// whose span was found before one is filed again with its span now.
+    pub(crate) layout_gen: AtomicU64,
 }
 
 /// The buckets of [`Engine::field_epochs`].
@@ -143,6 +162,7 @@ impl Engine {
         let paths = Paths {
             by_steps: Lock::new(FxHashMap::default()),
             steps: Table::new(),
+            ext: Lock::new(FxHashMap::default()),
         };
         {
             let mut by = paths.by_steps.write();
@@ -158,9 +178,16 @@ impl Engine {
         let projections = Table::new();
         projections.push(Arc::new(|x: ValueId, _: &Values| x) as Projection);
         projections.push(read::builtin_projection(ProjId::IS_EMPTY).expect("the built-in projection"));
+        let values = Values::new();
+        let depth_field = values.field("\u{0}depth");
         Engine {
             field_epochs: (0..EPOCH_BUCKETS).map(|_| AtomicU64::new(0)).collect(),
-            values: Values::new(),
+            scope_gen: AtomicU64::new(1),
+            bracket_nodes: AtomicUsize::new(0),
+            depth_field,
+            has_finals: std::sync::atomic::AtomicBool::new(false),
+            layout_gen: AtomicU64::new(0),
+            values,
             ops: Table::new(),
             units: Table::new(),
             nodes: Table::new(),
@@ -178,7 +205,6 @@ impl Engine {
             env: Env {
                 values: Lock::new(FxHashMap::default()),
                 provider: Lock::new(None),
-                readers: Lock::new(FxHashMap::default()),
             },
             paths,
             projections,
@@ -276,9 +302,14 @@ impl Engine {
     }
 
     pub(crate) fn path_extend(&self, p: PathId, s: Step) -> PathId {
+        if let Some(&q) = self.paths.ext.read().get(&(p, s)) {
+            return q;
+        }
         let mut steps: Vec<Step> = self.path_steps(p).map(|x| x.to_vec()).unwrap_or_default();
         steps.push(s);
-        self.path(&steps)
+        let q = self.path(&steps);
+        self.paths.ext.write().insert((p, s), q);
+        q
     }
 
     pub(crate) fn projection(&self, p: ProjId) -> Option<&Projection> {
@@ -415,6 +446,11 @@ impl Engine {
                 .next()
                 .map_or(inner.hi, |(q, _)| *q);
             if next.0 - p.0 < 8 {
+                if !seg.has_room(&inner, 4) {
+                    drop(inner);
+                    self.order.rebalance(self, seg.id);
+                    continue;
+                }
                 seg.relabel(&mut inner, self);
                 continue;
             }
@@ -664,6 +700,7 @@ impl Engine {
         let near = self.node(node);
         let id = NodeId::from_raw(self.nodes.reserve() as u64);
         let (n, pred) = commit::built(self, near.unit, None, op, args, id);
+        let mut roomy = false;
         loop {
             let Some((seg, mut inner)) = own_write(self, near) else {
                 let n = self.push_node(n, pred);
@@ -672,6 +709,12 @@ impl Engine {
             if Segment::needs_split(&inner) {
                 let sid = SegId(u32::try_from(self.segs.reserve()).expect("segment ids"));
                 seg.split(&mut inner, self, sid);
+                continue;
+            }
+            if !roomy && !seg.has_room(&inner, 1) {
+                drop(inner);
+                roomy = true;
+                self.order.rebalance(self, seg.id);
                 continue;
             }
             let p = match seg.gap_before(&inner, near.pos_hint()) {
@@ -708,12 +751,19 @@ impl Engine {
             inner.by_op.entry(op).or_default().push(node);
             n.op.store(op.0, Ordering::Release);
         }
+        let effect = self.op(op).effect(&args, &self.values);
         *n.text.write() = args.into();
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
+        n.effect.store(crate::node::pack_effect(effect), Ordering::Release);
         if n.taken() {
             self.wake_claimer(n);
             return;
         }
+        // (its operation's brackets now: readers after it see them before
+        // it runs)
+        let mut st = CommitStats::default();
+        commit::file_effect(self, None, n, None, &mut st);
+        self.note_stats(None, &st);
         mark_dirty(
             self,
             None,
@@ -900,7 +950,7 @@ impl Engine {
         }
         let mut st = CommitStats::default();
         for (f, _) in changes {
-            let readers = self.env.readers.write().remove(f).unwrap_or_default();
+            let readers = self.ranges.take_envs(*f);
             // (one whose answer stands is kept for the next change)
             let mut stands = Vec::new();
             for r in readers {
@@ -923,10 +973,10 @@ impl Engine {
                 }
             }
             if !stands.is_empty() {
-                self.env.readers.write().entry(*f).or_default().append(&mut stands);
+                self.ranges.add_envs(*f, std::mem::take(&mut stands), |r| crate::segment::live(self, r.node, r.serial));
             }
             if let Some(first) = self.order.first() {
-                commit::reask_from(self, None, *f, Pos(0), first, None, None, &mut st);
+                commit::reask_from(self, None, *f, Pos(0), first, None, None, 0, &mut st);
             }
         }
         self.note_stats(None, &st);
@@ -1009,11 +1059,14 @@ impl Engine {
                 *by_op.entry(op).or_default() += k;
             }
             rep.rerun_causes.append(&mut log.causes);
+            rep.capped.append(&mut log.capped);
             for (f, k) in log.refuted_by_field.drain() {
                 *rbf.entry(f).or_default() += k;
             }
             rep.run_times.append(&mut log.run_times);
         }
+        rep.capped.sort_unstable();
+        rep.capped.dedup();
         rep.first_runs = rep.nodes_run.saturating_sub(rep.refuted_nodes);
         rep.runs_by_op = by_op.into_iter().map(|(op, k)| (self.op(op).name(), k)).collect();
         rep.runs_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
@@ -1325,6 +1378,6 @@ impl Engine {
     /// The scope depth at a node: scopes open just before it (its closes
     /// not yet applied). For the client's diagnostics.
     pub fn depth_at(&self, n: NodeId) -> Option<u32> {
-        todo!()
+        read::depth_of(self, n)
     }
 }

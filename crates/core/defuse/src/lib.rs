@@ -36,6 +36,19 @@
 //! contributions ([`Ctx::fold`]) is a monoid over per-segment sums, so a step
 //! of a page-like fold is logarithmic in the document.
 //!
+//! # Scopes and loop-back, with the same rules
+//! A node may close scopes before itself and open scopes after itself
+//! (`Effect`: from its operation when it is made, or from its run). A
+//! definition is filed with its scope (`Locality`) and reaches a later
+//! position only while that scope is still open there: a read passes over
+//! a definition whose scope has closed, to the one before (`read`, with
+//! the scopes open at each segment's start cached). A bracket that changes
+//! re-asks the readers after it whose answer moved, as a definition does.
+//! A loop-back read (`At::Final`) asks for the last definition on the
+//! line and is re-asked when that lands, changes or goes; one that never
+//! settles is capped (`Limits::final_reruns`, `Report::capped`): no
+//! rounds, no declarations.
+//!
 //! # Rules
 //! No TeX name, type or rule enters this crate. No lock is held across a run
 //! of an operation or across two segments. Every lock in the crate is listed
