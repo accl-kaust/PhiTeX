@@ -1267,6 +1267,13 @@ impl Engine {
                 continue;
             };
             let n = node.id;
+            // (a placed node stands only while its placer holds it)
+            if node.state() != State::Gone
+                && let Some(p) = node.parent
+                && !self.node(p).record().is_some_and(|r| r.placed.contains(&n))
+            {
+                out.push(format!("node {} is on the line, its placer {} holding it no more", n.raw(), p.raw()));
+            }
             match node.state() {
                 State::Gone | State::Inert => continue,
                 State::Dirty | State::Running | State::RunningDirty | State::RunningInert => {

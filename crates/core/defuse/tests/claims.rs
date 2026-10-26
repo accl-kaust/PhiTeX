@@ -347,3 +347,83 @@ fn a_loopback_reader_never_sees_a_part_of_the_pass_being_written() {
         assert!(e.check_invariants().is_empty());
     }
 }
+
+/// `[f, us]`: spins `us` microseconds, then defines f = 1.
+struct SlowOne;
+
+impl Operation for SlowOne {
+    fn name(&self) -> &'static str {
+        "slow_one"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let us = cx.values().as_int(cx.args()[1]).unwrap() as u64;
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_micros(us) {
+            std::hint::spin_loop();
+        }
+        cx.define(Field(cx.args()[0]), cx.values().int(1));
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[f, us]`: places `Grow [f's value, us]`.
+struct Parent(OpId);
+
+impl Operation for Parent {
+    fn name(&self) -> &'static str {
+        "parent"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let x = cx.read(Field(cx.args()[0]))?.unwrap_or(v.int(0));
+        cx.child(self.0, vec![x, cx.args()[1]]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[x, us]`: spins `us` microseconds, then places three texts.
+struct Grow(OpId);
+
+impl Operation for Grow {
+    fn name(&self) -> &'static str {
+        "grow"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let us = cx.values().as_int(cx.args()[1]).unwrap() as u64;
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_micros(us) {
+            std::hint::spin_loop();
+        }
+        for k in 0..3 {
+            cx.child(self.0, vec![cx.values().int(k)]);
+        }
+        Ok(cx.args()[0])
+    }
+}
+
+#[test]
+fn a_node_removed_as_it_commits_takes_its_placements_with_it() {
+    // P places G on what it read of f; S defines f after a while, P runs
+    // again and G gives way to another while G's own run, as long, places
+    // its children: whichever comes first, no node is left on the line
+    // that its placer no longer holds.
+    let threads = std::thread::available_parallelism().map_or(1, usize::from).clamp(2, 8);
+    for i in 0..400 {
+        let (e, o) = engine();
+        let grow = e.register(Arc::new(Grow(o.text)));
+        let parent = e.register(Arc::new(Parent(grow)));
+        let slow = e.register(Arc::new(SlowOne));
+        let v = e.values();
+        let f = v.field("f").0;
+        let u = e.new_unit();
+        e.push(u, slow, vec![f, v.int(200)]);
+        e.push(u, parent, vec![f, v.int(150 + (i % 100))]);
+        e.evaluate(threads).unwrap();
+        let bad = e.check_invariants();
+        assert!(bad.is_empty(), "round {i}: {bad:?}");
+        assert_eq!(e.order(u).len(), 2 + 1 + 3, "round {i}");
+    }
+}

@@ -1902,10 +1902,13 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
 /// its write lock) and re-asks their readers, and, when it is removed, the
 /// reads made at its label. Its placements, for the caller to unfile.
 fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: bool) -> Vec<NodeId> {
-    let rec = node.record();
     let Some((seg, mut inner)) = own_write(eng, node) else {
         return Vec::new();
     };
+    // (under the lock its commit installs a record under: a record read
+    // before it misses the placements a commit made meanwhile, left on
+    // the line with no placer)
+    let rec = node.record();
     let pos = node.pos_hint();
     let seg_id = seg.id;
     let was_hole = node.is_hole();
