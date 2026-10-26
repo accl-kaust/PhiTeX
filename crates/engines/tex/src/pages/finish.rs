@@ -482,8 +482,15 @@ impl Run<'_, '_> {
             for s in &fin.spans[..post] {
                 for src in crate::pages::span_srcs(s) {
                     let Some(x) = item(src) else {
-                        defect(self, format!("no item for {src:?}"));
-                        continue;
+                        // (a span naming an item its piece no longer has:
+                        // the piece ran again since the page builder folded
+                        // it, past what the version check sees; the
+                        // placement is stale, the builder places this
+                        // finisher again on the new version)
+                        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                            eprintln!("finisher {} (page {} of its piece): no item for {src:?}: stale placement", self.cx.node().raw(), fin.nth);
+                        }
+                        return Ok((Vec::new(), None));
                     };
                     let carried_raw = matches!(src, Src::Piece { item, .. } if crate::pages::end_sub_of(item).is_none())
                         && nodes::tag(v, x) != nodes::T_END;
@@ -514,7 +521,12 @@ impl Run<'_, '_> {
             for src in crate::pages::span_srcs(&s) {
                 match item(src) {
                     Some(x) => raw.push(x),
-                    None => defect(self, format!("no item for {src:?}")),
+                    None => {
+                        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                            eprintln!("finisher {} (page {} of its piece): no item for {src:?}: stale placement", self.cx.node().raw(), fin.nth);
+                        }
+                        return Ok((Vec::new(), None));
+                    }
                 }
             }
             let p_at = match s.src {

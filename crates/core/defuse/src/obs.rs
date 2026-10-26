@@ -168,3 +168,68 @@ pub(crate) fn long_hold(what: &str, n: usize, t: std::time::Instant) {
         }
     }
 }
+
+
+/// (`PHITEX_LINE_DUMP=<n>`, profile, with `PHITEX_WAKE_LOG`) Every `n`
+/// wakes, the line: each live node in position order with its position,
+/// id, operation, state, arguments, and its definitions of the fields
+/// named in `PHITEX_LINE_FIELDS` (comma-separated).
+pub(crate) fn maybe_dump_line(eng: &crate::engine::Engine) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let every = *EVERY.get_or_init(|| {
+        std::env::var("PHITEX_LINE_DUMP").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+    });
+    if every == 0 {
+        return;
+    }
+    let c = COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if !c.is_multiple_of(every) {
+        return;
+    }
+    let fields: Vec<String> = std::env::var("PHITEX_LINE_FIELDS")
+        .map(|v| v.split(',').map(str::to_owned).collect())
+        .unwrap_or_default();
+    let v = eng.values();
+    let fs: Vec<crate::values::Field> = fields.iter().map(|f| v.field(f)).collect();
+    let mut out = format!("line-dump #{c}:\n");
+    for sid in eng.order.all() {
+        let seg = eng.seg(sid);
+        let inner = seg.inner.read();
+        for (pos, nid) in &inner.nodes {
+            let n = eng.node(*nid);
+            let op = eng.ops.get(n.op().0 as usize).map_or("?", |o| o.name());
+            let args: Vec<String> = n.args().iter().map(|&a| v.render(a)).collect();
+            let mut args = args.join(" ");
+            if args.len() > 90 {
+                args.truncate(90);
+                args.push('…');
+            }
+            let mut defs = String::new();
+            for (name, f) in fields.iter().zip(&fs) {
+                if let Some(m) = inner.defs.get(f)
+                    && let Some(d) = m.get(pos)
+                {
+                    let mut val = v.render(d.value);
+                    if val.len() > 60 {
+                        val.truncate(60);
+                        val.push('…');
+                    }
+                    defs.push_str(&format!(" {name}={val}{}", if d.provisional { "(prov)" } else { "" }));
+                }
+            }
+            out.push_str(&format!(
+                "  {:?} seg {:?} node {} {op} {:?} parent {:?} anchor {:?} slot {} [{args}]{defs}\n",
+                pos.0,
+                sid,
+                nid.raw(),
+                n.state(),
+                n.parent.map(crate::api::NodeId::raw),
+                n.anchor().map(crate::api::NodeId::raw),
+                n.slot()
+            ));
+        }
+    }
+    eprint!("{out}");
+}

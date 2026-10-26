@@ -725,6 +725,13 @@ pub(crate) fn mark_dirty(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
     }
 }
 
+/// (`PHITEX_WAKE_LOG`, profile) Whether every wake of a committed node is
+/// printed: the node, the field and the cause, as the re-ask happens.
+fn wake_log() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("PHITEX_WAKE_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
 fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
     if !n.committed() {
         return;
@@ -733,6 +740,23 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
         Cause::Rebind { field, .. } | Cause::Changed { field, .. } | Cause::Range { field, .. } | Cause::Environment { field } => Some(*field),
         Cause::Output { .. } | Cause::Structure | Cause::Created { .. } | Cause::Edited => None,
     };
+    if crate::obs::enabled() && wake_log() {
+        let name = field.and_then(|f| eng.values().as_str(f.0)).unwrap_or_default();
+        let site = match &wake.cause {
+            Cause::Changed { site: Some(s), .. } | Cause::Range { by: s, .. } | Cause::Output { of: s } => Some(*s),
+            Cause::Rebind { to, .. } => *to,
+            _ => None,
+        };
+        let site_pos = site.map_or(String::new(), |s| format!(" site-pos {:?}", eng.node(s).pos_hint()));
+        crate::obs::maybe_dump_line(eng);
+        eprintln!(
+            "wake: node {} op {:?} pos {:?} field {name} {:?}{site_pos}",
+            n.id.raw(),
+            n.op(),
+            n.pos_hint(),
+            wake.cause
+        );
+    }
     match w {
         Some(w) => {
             let mut log = w.log.lock();
