@@ -2290,10 +2290,19 @@ impl Run<'_, '_> {
     fn char_run_(&mut self, md: &Mode, cancel: bool) -> R<()> {
         let v = self.v;
         let f = u32::try_from(self.cint(crate::fields::cell::FONT)?).unwrap_or(0);
-        // (the view of the worker's last character run, emptied)
-        let mut view = CHAR_VIEW.with(std::cell::Cell::take).unwrap_or_default();
-        view.clear();
-        self.add_font_metrics(&mut view, f)?;
+        // (the view of the worker's last character run, kept while it is
+        // this table's of the same font and no font's cell changed since,
+        // [`State::font_gen`] (the run read its cells making it); else
+        // emptied and made again, the font's space dimensions with it)
+        let (mut view, kept, dims) = CHAR_VIEW.with(std::cell::Cell::take).unwrap_or_default();
+        let key = (self.st.font_gen(), f);
+        let mut space = SpaceMemo::default();
+        if kept == Some(key) {
+            space.d = dims;
+        } else {
+            view.clear();
+            self.add_font_metrics(&mut view, f)?;
+        }
         // the space factor is never read: the run's effect on it so far
         // (`sf`: SF_UNREAD none, n >= 0 set to n, -s §1034's update by s)
         // goes on the list as a transition before each space that needs
@@ -2307,7 +2316,6 @@ impl Run<'_, '_> {
         let mut cancel_boundary = cancel;
         // (the space parameters, read once: no command of this loop
         // changes them)
-        let mut space = SpaceMemo::default();
         loop {
             // reswitch
             let c = self.cur.cmd;
@@ -2411,7 +2419,10 @@ impl Run<'_, '_> {
         let te = crate::prof::start();
         self.flush_chars(md.lid, &mut out, raws);
         CHAR_BUF.with(|c| c.set(out));
-        CHAR_VIEW.with(|c| c.set(Some(view)));
+        // (the font's dimensions read by a run whose font cells are as
+        // they were: kept with the view)
+        let kept = (self.st.font_gen() == key.0).then_some(key);
+        CHAR_VIEW.with(|c| c.set(Some((view, kept, space.d))));
         crate::prof::add(crate::prof::CHAR_ENC, te);
         Ok(())
     }
@@ -3298,8 +3309,10 @@ thread_local! {
     /// A character run's node buffer, kept for the worker's next run
     /// ([`Run::char_run`]).
     static CHAR_BUF: std::cell::Cell<Vec<crate::nest::Item>> = const { std::cell::Cell::new(Vec::new()) };
-    /// Its font view, kept the same way.
-    static CHAR_VIEW: std::cell::Cell<Option<crate::fonts::View>> = const { std::cell::Cell::new(None) };
+    /// Its font view, kept the same way, with the table generation and
+    /// font it was made for and the font's space dimensions read.
+    static CHAR_VIEW: std::cell::Cell<Option<(crate::fonts::View, Option<(u64, u32)>, [Option<i32>; 4])>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// The space factor not read yet in a run of characters.

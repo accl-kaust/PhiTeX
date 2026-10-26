@@ -328,6 +328,8 @@ pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
 #[derive(Clone, Default)]
 pub(crate) struct FontTable {
     direct: Vec<Option<(FontId, Metrics)>>,
+    /// The slots of `direct` taken (emptied by [`FontTable::clear`]).
+    taken: Vec<u8>,
     far: FxHashMap<FontId, Metrics>,
 }
 
@@ -355,9 +357,12 @@ impl FontTable {
         self.get(f).is_some()
     }
 
-    /// Empties the table, its room kept.
+    /// Empties the table, its room kept (the slots taken, not all).
     pub(crate) fn clear(&mut self) {
-        self.direct.clear();
+        for &i in &self.taken {
+            self.direct[usize::from(i)] = None;
+        }
+        self.taken.clear();
         self.far.clear();
     }
 
@@ -367,7 +372,10 @@ impl FontTable {
         }
         let i = Self::slot(f);
         match &mut self.direct[i] {
-            e @ None => *e = Some((f, x)),
+            e @ None => {
+                *e = Some((f, x));
+                self.taken.push(u8::try_from(i).unwrap_or(0));
+            }
             Some((k, y)) if *k == f => *y = x,
             Some(_) => {
                 self.far.insert(f, x);
