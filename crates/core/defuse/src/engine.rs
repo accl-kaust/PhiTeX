@@ -155,6 +155,11 @@ impl Default for Engine {
 }
 
 impl Engine {
+    /// A bracket changed: a new scope count.
+    pub(crate) fn scope_changed(&self) {
+        self.scope_gen.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub fn new() -> Engine {
         let paths = Paths {
             by_steps: Lock::new(FxHashMap::default()),

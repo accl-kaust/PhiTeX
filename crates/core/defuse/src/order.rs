@@ -331,7 +331,7 @@ impl Order {
             eng.bump(f);
         }
         if brackets {
-            eng.scope_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            eng.scope_changed();
             eng.bump(eng.depth_field);
         }
     }

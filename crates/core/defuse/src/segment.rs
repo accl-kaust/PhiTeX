@@ -24,6 +24,10 @@ pub(crate) struct Segment {
     /// Its first label, fixed for its life (a split keeps the lower half here).
     pub(crate) lo: Pos,
     pub(crate) inner: Lock<Inner>,
+    /// The scopes open at its start, outermost first (`read::chain_start`),
+    /// and the scope count they were found at (`Engine::scope_gen`): apart
+    /// from `inner`, so a read of them never waits for a commit.
+    pub(crate) chain: crate::lock::Mx<Option<(u64, Arc<[u64]>)>>,
 }
 
 pub(crate) struct Inner {
@@ -58,9 +62,6 @@ pub(crate) struct Inner {
     /// (`commit::reask_after_effect`).
     pub(crate) depth_net: i32,
     pub(crate) depth_min: i32,
-    /// The scopes open at its start, outermost first (`read::chain_start`),
-    /// and the scope epoch they were found at (`Engine::scope_gen`).
-    pub(crate) chain: Option<(u64, Arc<[u64]>)>,
     /// Its nodes that have not committed (about: a walk skips the search
     /// for one when there are none, `commit::first_hole`).
     pub(crate) holes: usize,
@@ -641,11 +642,11 @@ impl Segment {
             id,
             unit,
             lo,
+            chain: crate::lock::Mx::new(None),
             inner: Lock::new(Inner {
                 brackets: PosMap::Zero,
                 depth_net: 0,
                 depth_min: 0,
-                chain: None,
                 hi,
                 nodes: BTreeMap::new(),
                 defs: FxHashMap::default(),
@@ -939,11 +940,11 @@ impl Segment {
             id: new_id,
             unit: self.unit,
             lo: at,
+            chain: crate::lock::Mx::new(None),
             inner: Lock::new(Inner {
                 brackets,
                 depth_net: 0,
                 depth_min: 0,
-                chain: None,
                 hi,
                 nodes,
                 defs,

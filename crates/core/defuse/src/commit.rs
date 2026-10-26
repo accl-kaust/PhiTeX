@@ -2211,6 +2211,7 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
     }
     let mut ps = read::SiblingParents::of(me);
     let mut new_end: Option<NodeId> = None;
+    let mut first = true;
     'segs: while let Some(sid) = cur {
         let seg = eng.seg(sid);
         if seg.unit != me.unit {
@@ -2218,6 +2219,22 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
         }
         {
             let mut inner = seg.inner.write();
+            // (where the claimer is, read under its segment's lock: a
+            // label read before a relabel would start the walk before
+            // it, and take siblings it does not follow)
+            if first {
+                first = false;
+                let p = me.pos_hint();
+                if me.state() != State::Gone && (me.seg_hint() != sid || inner.nodes.get(&p) != Some(&me.id)) {
+                    drop(inner);
+                    first = true;
+                    cur = Some(me.seg_hint());
+                    lower = Some(me.pos_hint());
+                    continue 'segs;
+                }
+                lower = Some(p);
+                ps = read::SiblingParents::of(me);
+            }
             let before = taken_holes.len();
             let lo = lower.map_or(Unbounded, Excluded);
             let mut done = k >= want && old_end.is_none();
@@ -2289,6 +2306,10 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
     // (a taken node never contributes: the `next`s that stopped at it
     // search on past it)
     for s in &taken_holes {
+        // (one taken while its first run goes on may have claimed already,
+        // in that run: a node taken claims nothing, and no commit of its
+        // will give back what it took)
+        release_claimed(eng, w, s);
         walk_stopped(eng, w, s, s.pos_hint(), s.seg_hint(), &[], &mut st);
         // (one that never ran keeps its operation's brackets: taken, it
         // has none)
@@ -2555,7 +2576,7 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
         node.has_brackets.store(false, Ordering::Release);
     }
     inner.sum_depth();
-    eng.scope_gen.fetch_add(1, Ordering::AcqRel);
+    eng.scope_changed();
     eng.bump(eng.depth_field);
     Some(old.unwrap_or_default())
 }

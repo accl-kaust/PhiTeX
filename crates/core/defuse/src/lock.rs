@@ -2,7 +2,8 @@
 //!
 //! | lock | taken by | held for |
 //! |---|---|---|
-//! | a segment's `inner` (`segment::Segment`) | a read; a commit; a placement; a split; a `next` filed at its stop; a scope chain found or kept; brackets filed | one map operation, or one commit's diff of one node; never two segments at once (but a rebalance's window), never across a run |
+//! | a segment's `inner` (`segment::Segment`) | a read; a commit; a placement; a split; a `next` filed at its stop; brackets filed | one map operation, or one commit's diff of one node; never two segments at once (but a rebalance's window), never across a run |
+//! | a segment's `chain` (`segment::Segment`) | a scope chain found or kept (`read::chain_start`) | an `Arc` clone or swap |
 //! | the order's list (`order::Order::segs`) | a position lookup; a split or a new unit | a binary search; one insert |
 //! | a field-index shard (`index::FieldIndex`: definitions, contributions, readers) | a read's or a commit's skip | one set lookup or insert |
 //! | a range-index shard (`index::RangeIndex`: by field, the range readers by interval, the `At::Final` readers, the environment's readers) | a commit filing its ranges, loop-back and environment reads; a changed contribution asking which hold its label; a loop-back value read, marked, or published at a quiet point; an environment change; a rebalance widening intervals | one commit's ranges of one field; a few map ranges; one list; one value; one shard's intervals |

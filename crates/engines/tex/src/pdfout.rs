@@ -316,9 +316,6 @@ pub(crate) struct Cmd {
     wparams: WParams,
     /// The node that ran it (for the link's trace).
     node: u64,
-    /// When it was made ([`CMD_BORN`]): the link drops only the
-    /// commands made before it looked.
-    born: u64,
     /// The object number TeX gave the object the command makes, at read
     /// time ([`note_read_time`]; 0: none): the link maps it to the
     /// number its writer gives where it stands in the line.
@@ -1826,7 +1823,6 @@ pub(crate) fn command_forms(
     let mut words = vec![key, input.raw(), fs.digest()];
     words.extend(wparams.iter().map(|&p| u64::from(p.cast_unsigned())));
     let serial = phitex_defuse::hash_words(0x6364_6d73_6572_0001, &words);
-    let born = CMD_BORN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     r.ops.pdf_cmds.locked().insert(
         serial,
         Arc::new(Cmd {
@@ -1834,7 +1830,6 @@ pub(crate) fn command_forms(
             fonts: fs,
             wparams,
             node: r.cx.node().raw(),
-            born,
             rt: std::sync::atomic::AtomicU64::new(0),
         }),
     );
@@ -1848,9 +1843,27 @@ pub(crate) fn command_forms(
     Ok(None)
 }
 
-/// The commands made so far ([`command`]), for [`Cmd::born`] only: a
-/// count the schedule orders, never put in a value.
-static CMD_BORN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The commands no record on the line names dropped ([`CmdMemo`]):
+/// run between evaluations, when no run is in work. (During one, a run
+/// that made a command may commit after a link read the line: the link
+/// it re-asks would find the command gone, and write no file.)
+pub(crate) fn prune_cmds(v: &Values, line: &[ValueId], cmds: &CmdMemo) {
+    let mut m = cmds.locked();
+    if m.len() <= 64 {
+        return;
+    }
+    let keep: FxHashSet<u64> = recs(v, line)
+        .into_iter()
+        .filter_map(|r| match r {
+            Rec::Cmd(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    if m.len() > 2 * keep.len() + 64 {
+        m.retain(|s, _| keep.contains(s));
+    }
+}
+
 
 fn param(v: &Values, xs: &[ValueId], k: usize) -> i32 {
     xs.get(k)
@@ -3778,26 +3791,15 @@ fn link(
         hashes,
         ..
     } = line_cache(v, xpages, units, changed.filter(|_| memo));
-    // (the commands made so far: one made after this point is not one
-    // this link can have dropped)
-    let hi = CMD_BORN.load(std::sync::atomic::Ordering::Relaxed);
     let serials: FxHashMap<u64, Arc<Cmd>> = {
-        let mut m = cmds.locked();
-        let serials: FxHashMap<u64, Arc<Cmd>> = rs
-            .iter()
+        let m = cmds.locked();
+        rs.iter()
             .filter_map(|r| match *r {
                 Rec::Cmd(s) => Some(s),
                 _ => None,
             })
             .filter_map(|s| m.get(&s).map(|c| (s, c.clone())))
-            .collect();
-        // (the runs whose records the line no longer holds, a re-run's
-        // old one, a discarded speculation's: the link waits for every
-        // contributor, so none of them is still to come)
-        if m.len() > 2 * serials.len() + 64 {
-            m.retain(|s, c| c.born > hi || serials.contains_key(s));
-        }
-        serials
+            .collect()
     };
     // (spec-final §6.2: the records the last link of this build placed,
     // the same from the file's start, are not placed again: their chunks

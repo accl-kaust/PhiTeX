@@ -427,7 +427,7 @@ pub(crate) fn following_on(eng: &Engine, me: &Node, i: usize, at: &mut Option<(u
     };
     let mut cur = Some(from.seg_hint());
     let mut lower = Some(from.pos_hint());
-    let hit = following_from(eng, me, i, &mut k, &mut cur, &mut lower);
+    let hit = following_from(eng, me, from, i, &mut k, &mut cur, &mut lower);
     *at = hit.as_ref().map(|n| (i, n.id));
     hit
 }
@@ -435,12 +435,14 @@ pub(crate) fn following_on(eng: &Engine, me: &Node, i: usize, at: &mut Option<(u
 fn following_from(
     eng: &Engine,
     me: &Node,
+    from: &Node,
     i: usize,
     k: &mut usize,
     cur: &mut Option<SegId>,
     lower: &mut Option<Pos>,
 ) -> Option<Arc<Node>> {
     let mut ps = SiblingParents::of(me);
+    let mut first = true;
     while let Some(sid) = *cur {
         let seg = eng.seg(sid);
         if seg.unit != me.unit {
@@ -448,6 +450,20 @@ fn following_from(
         }
         let hit = {
             let inner = seg.inner.read();
+            // (where the walk starts, read under the lock: a label read
+            // before a relabel would start it before `from`)
+            if first {
+                let p = from.pos_hint();
+                if from.state() != State::Gone && (from.seg_hint() != sid || inner.nodes.get(&p) != Some(&from.id)) {
+                    drop(inner);
+                    *cur = Some(from.seg_hint());
+                    *lower = Some(from.pos_hint());
+                    continue;
+                }
+                first = false;
+                *lower = Some(p);
+                ps = SiblingParents::of(me);
+            }
             let lo = lower.map_or(Unbounded, Excluded);
             let mut hit = None;
             for (_, id) in inner.nodes.range((lo, Unbounded)) {
@@ -714,10 +730,21 @@ pub(crate) fn scoped(eng: &Engine) -> bool {
 /// whose chain is known, and on from there through each segment's
 /// brackets, each chain found kept. One segment's lock at a time.
 pub(crate) fn chain_start(eng: &Engine, s: &Arc<Segment>) -> Arc<[u64]> {
+    loop {
+        if let Some(c) = try_chain_start(eng, s) {
+            return c;
+        }
+    }
+}
+
+/// [`chain_start`], None where a segment walked through was split or
+/// absorbed meanwhile (its end is no longer the next one's start: its
+/// brackets read now are not all those before the next).
+fn try_chain_start(eng: &Engine, s: &Arc<Segment>) -> Option<Arc<[u64]>> {
     let g = eng.scope_gen.load(Ordering::Acquire);
-    let cached = |t: &Segment| t.inner.read().chain.as_ref().filter(|c| c.0 == g).map(|c| c.1.clone());
+    let cached = |t: &Segment| t.chain.lock().as_ref().filter(|c| c.0 == g).map(|c| c.1.clone());
     if let Some(c) = cached(s) {
-        return c;
+        return Some(c);
     }
     let mut todo: Vec<&Arc<Segment>> = vec![s];
     let mut known: Option<(&Arc<Segment>, Arc<[u64]>)> = None;
@@ -735,7 +762,7 @@ pub(crate) fn chain_start(eng: &Engine, s: &Arc<Segment>) -> Arc<[u64]> {
     }
     let store = |t: &Segment, c: &Arc<[u64]>| {
         if eng.scope_gen.load(Ordering::Acquire) == g {
-            t.inner.write().chain = Some((g, c.clone()));
+            *t.chain.lock() = Some((g, c.clone()));
         }
     };
     let (mut prev, mut c) = match known {
@@ -748,25 +775,31 @@ pub(crate) fn chain_start(eng: &Engine, s: &Arc<Segment>) -> Arc<[u64]> {
         }
     };
     while let Some(t) = todo.pop() {
-        c = chain_end(prev, &c);
+        c = chain_end(eng, prev, &c, t.id)?;
         store(t, &c);
         prev = t;
     }
-    c
+    Some(c)
 }
 
-/// The scopes open at the end of `s`, from those at its start.
-fn chain_end(s: &Segment, start: &Arc<[u64]>) -> Arc<[u64]> {
+/// The scopes open at the end of `s`, from those at its start; None
+/// where `next` no longer follows `s` on the line (one of them split, or
+/// absorbed, since it was found before it): read under `s`'s lock,
+/// which a split or a rebalance of `s` takes.
+fn chain_end(eng: &Engine, s: &Segment, start: &Arc<[u64]>, next: SegId) -> Option<Arc<[u64]>> {
     let inner = s.inner.read();
+    if eng.order.next(s.id, s.lo) != Some(next) {
+        return None;
+    }
     if inner.brackets.is_empty() {
-        return start.clone();
+        return Some(start.clone());
     }
     let mut c = start.to_vec();
     for (_, (n, b)) in inner.brackets.iter() {
         close(&mut c, b);
         open(&mut c, *n, b);
     }
-    Arc::from(c)
+    Some(Arc::from(c))
 }
 
 /// The scopes open at `at` in a segment whose start's are `start`: those

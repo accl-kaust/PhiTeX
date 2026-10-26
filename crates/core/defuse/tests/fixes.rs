@@ -113,3 +113,104 @@ fn an_operation_whose_nodes_differ_shapes_none() {
     }
     assert!(e.check_invariants().is_empty());
 }
+
+/// The interleaving of `SlowClaim`'s two runs: the later node claimed,
+/// then the earlier one took it.
+static CLAIMED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static TAKEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn wait_for(flag: &std::sync::atomic::AtomicU32, ms: u64) -> bool {
+    let t = std::time::Instant::now();
+    while flag.load(Ordering::SeqCst) == 0 {
+        if t.elapsed() > std::time::Duration::from_millis(ms) {
+            return false;
+        }
+        std::thread::yield_now();
+    }
+    true
+}
+
+/// `[n, role]`: claims its next n siblings; role 1 (the earlier node)
+/// waits for role 2's claim first, role 2 then waits to be taken.
+struct SlowClaim;
+
+impl Operation for SlowClaim {
+    fn name(&self) -> &'static str {
+        "slow_claim"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let n = usize::try_from(v.as_int(cx.args()[0]).unwrap_or(0)).unwrap_or(0);
+        let role = v.as_int(cx.args()[1]).unwrap_or(0);
+        if role == 1 {
+            wait_for(&CLAIMED, 500);
+            cx.claim(n);
+            TAKEN.store(1, Ordering::SeqCst);
+        } else {
+            cx.claim(n);
+            CLAIMED.store(1, Ordering::SeqCst);
+            wait_for(&TAKEN, 500);
+        }
+        Ok(cx.args()[0])
+    }
+}
+
+/// `[us]`: spins.
+struct Spin;
+
+impl Operation for Spin {
+    fn name(&self) -> &'static str {
+        "spin"
+    }
+
+    fn sibling(&self) -> bool {
+        false
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let t = std::time::Instant::now();
+        let us = cx.values().as_int(cx.args()[0]).unwrap_or(0).unsigned_abs();
+        while t.elapsed() < std::time::Duration::from_micros(us) {
+            std::hint::spin_loop();
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn a_node_taken_while_its_run_claims_gives_back_what_it_took() {
+    let mut interleaved = 0;
+    for _ in 0..20 {
+        CLAIMED.store(0, Ordering::SeqCst);
+        TAKEN.store(0, Ordering::SeqCst);
+        let e = Engine::new();
+        let v = e.values();
+        let claim = e.register(Arc::new(SlowClaim));
+        let get = e.register(Arc::new(Get));
+        let spin = e.register(Arc::new(Spin));
+        let f = v.field("x");
+        let u = e.new_unit();
+        // (work around them, so the workers start, and the two in two
+        // workers' first shares: they run side by side)
+        for _ in 0..8 {
+            e.push(u, spin, vec![v.int(500)]);
+        }
+        e.push(u, claim, vec![v.int(1), v.int(1)]);
+        let a = e.push(u, claim, vec![v.int(3), v.int(2)]);
+        let sibs: Vec<_> = (0..3).map(|_| e.push(u, get, vec![f.0])).collect();
+        for _ in 0..59 {
+            e.push(u, spin, vec![v.int(500)]);
+        }
+        e.evaluate(8).unwrap();
+        if CLAIMED.load(Ordering::SeqCst) == 1 && TAKEN.load(Ordering::SeqCst) == 1 {
+            interleaved += 1;
+        }
+        assert_eq!(e.node_info(a).map(|i| i.state), Some(phitex_defuse::NodeState::Inert));
+        for s in sibs {
+            assert_eq!(e.node_info(s).map(|i| i.state), Some(phitex_defuse::NodeState::Done), "{s:?} is held by a node taken");
+        }
+        assert!(e.check_invariants().is_empty());
+    }
+    assert!(interleaved > 0, "the two claims never ran side by side");
+}
