@@ -28,12 +28,6 @@ fn reg(s: &Shared) -> &crate::hints::Registry {
     &s.get().expect("operations registered").hints
 }
 
-thread_local! {
-    /// (measure) the text of the exec node this thread runs, for the
-    /// `longrun:` line.
-    static LONG_TEXT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-}
-
 /// (measure, `PHITEX_RUN_LOG`) every run attempt of the process: the
 /// node's raw id, whether it continued an earlier attempt (none does:
 /// false), whether it ran
@@ -321,20 +315,6 @@ impl Operation for Exec {
         );
         let o = ops(&self.0);
         let log = o.pkg_log.clone();
-        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
-            let v = cx.values();
-            let fs = crate::run::decode_segs(v, &args);
-            LONG_TEXT.with(|c| {
-                *c.borrow_mut() = format!(
-                    "{} segs, load {load}: {}",
-                    fs.len(),
-                    v.render(args.first().copied().unwrap_or(ValueId::UNIT))
-                        .chars()
-                        .take(300)
-                        .collect::<String>()
-                );
-            });
-        }
         let res = run_node(cx, o, |r| {
             {
                 // (a load at the unit's top level only: there a global
@@ -413,7 +393,16 @@ impl Operation for Exec {
                 .push((node, t0, std::time::Instant::now(), spec));
         }
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
-            let text = LONG_TEXT.with(|c| c.borrow().clone());
+            // (the node's text, rendered only for a long run)
+            let v = cx.values();
+            let text = format!(
+                "{} segs, load {load}: {}",
+                crate::run::decode_segs(v, &args).len(),
+                v.render(args.first().copied().unwrap_or(ValueId::UNIT))
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
+            );
             crate::exec::later(format!(
                 "longrun: exec {node} {:.0} ms (ok {}): {text}",
                 t0.elapsed().as_secs_f64() * 1e3,
