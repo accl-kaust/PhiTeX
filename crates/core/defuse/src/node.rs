@@ -89,16 +89,10 @@ pub(crate) struct Node {
     /// claim passes over a sibling another claimer holds, and gives back
     /// only its own.
     pub(crate) claimer: AtomicU64,
-    /// Its next queueing is for a loop-back re-ask: on the pool's last
-    /// queue (`sched::enqueue`).
-    pub(crate) final_wake: AtomicBool,
     /// The furthest sibling its claim holds (raw id + 1; 0: none): a
     /// claim made smaller gives back what it holds up to there, past
     /// siblings it never held.
     pub(crate) claim_end: AtomicU64,
-    /// `Engine::clock` when its last run began, and at its last commit.
-    pub(crate) run_start: AtomicU64,
-    pub(crate) committed_at: AtomicU64,
     /// Placed as its placer's continuation (`Ctx::follow`,
     /// `Ctx::follow_after`), not as its child: a node placed after the
     /// placer and its children goes before it.
@@ -137,10 +131,7 @@ impl Node {
             final_reruns: AtomicU32::new(0),
             final_epoch: AtomicU64::new(0),
             claimer: AtomicU64::new(0),
-            final_wake: AtomicBool::new(false),
             claim_end: AtomicU64::new(0),
-            run_start: AtomicU64::new(0),
-            committed_at: AtomicU64::new(0),
             follows: AtomicBool::new(false),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),

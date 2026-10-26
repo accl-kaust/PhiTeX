@@ -12,7 +12,7 @@ use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, ReadRec, R
 use crate::order::Pos;
 use crate::read::{self, SITE, next_value, pos_of, reaching_at, through};
 use crate::sched::Worker;
-use crate::values::{Field, FxHashMap, FxHashSet, ValueId, Values};
+use crate::values::{Field, FxHashMap, ValueId, Values};
 
 /// A handle on a value read through a path, extended step by step
 /// (`Ctx::at`) and read at a step (`Ctx::get`): the run depends only on
@@ -38,8 +38,6 @@ pub struct Ctx<'a> {
     pub(crate) views: Vec<ViewRec>,
     /// Its last record, for `placed_output`.
     pub(crate) last: Option<Arc<RunRecord>>,
-    /// Fields whose reads go unrecorded (`Engine::set_stable`).
-    pub(crate) stable: Option<&'a FxHashSet<Field>>,
     /// The change count the read in hand loaded ([`ReadRec::epoch`]).
     pub(crate) ep: u64,
     /// The last sibling `following` found, to go on from.
@@ -75,7 +73,6 @@ impl<'a> Ctx<'a> {
             follow_at: None,
             seen: FxHashMap::default(),
             last: me.run_record(),
-            stable: worker.map(|w| &*w.stable),
         }
     }
 
@@ -119,10 +116,6 @@ impl<'a> Ctx<'a> {
         self.ep = self.eng.field_epoch(f);
     }
 
-    fn recorded(&self, f: Field) -> bool {
-        self.stable.is_none_or(|s| !s.contains(&f))
-    }
-
     /// The definition of `f` reaching me, or the environment's value.
     pub fn read(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
         self.check()?;
@@ -131,9 +124,7 @@ impl<'a> Ctx<'a> {
         }
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
-        if self.recorded(f) {
-            self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
-        }
+        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
         self.seen.insert(f, r.value);
         Ok(r.value)
     }
@@ -145,15 +136,13 @@ impl<'a> Ctx<'a> {
         let (anchor, r) = match at {
             At::Before(n) => (Anchor::Before(n), reaching_at(self.eng, f, n, false)),
             At::AfterOwn(n) => (Anchor::AfterOwn(n), reaching_at(self.eng, f, n, true)),
-            At::Final => (Anchor::Final, Some(crate::read::last_definition(self.eng, f))),
+            At::Final => (Anchor::Final, Some(crate::read::final_read(self.eng, f))),
             At::End(u) => (
                 Anchor::End(u),
                 Some(read::reaching_visible(self.eng, f, Pos(self.eng.unit(u).end.0 - 1), true)),
             ),
         };
-        if self.recorded(f) {
-            self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.and_then(|x| x.value));
-        }
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.and_then(|x| x.value));
         Ok(match r {
             None => FieldAt::Gone,
             Some(x) => match x.value {
@@ -169,9 +158,7 @@ impl<'a> Ctx<'a> {
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
         let x = through(self.eng, r, p);
-        if self.recorded(f) {
-            self.record(ReadKind::Field { f, at: Anchor::Me }, p, x);
-        }
+        self.record(ReadKind::Field { f, at: Anchor::Me }, p, x);
         Ok(x)
     }
 
@@ -180,10 +167,8 @@ impl<'a> Ctx<'a> {
         self.check()?;
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
-        if self.recorded(f) {
-            let seen = through(self.eng, r, SITE);
-            self.record(ReadKind::Field { f, at: Anchor::Me }, SITE, seen);
-        }
+        let seen = through(self.eng, r, SITE);
+        self.record(ReadKind::Field { f, at: Anchor::Me }, SITE, seen);
         Ok(r.by)
     }
 
@@ -192,9 +177,7 @@ impl<'a> Ctx<'a> {
         self.check()?;
         self.before_read(f);
         let x = read::env_value(self.eng, f);
-        if self.recorded(f) {
-            self.record(ReadKind::Env { f }, PathId::WHOLE, x);
-        }
+        self.record(ReadKind::Env { f }, PathId::WHOLE, x);
         Ok(x)
     }
 

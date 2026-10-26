@@ -561,7 +561,7 @@ pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, 
                 Anchor::Before(n) => reaching_at(eng, *f, n, false)?,
                 Anchor::AfterOwn(n) => reaching_at(eng, *f, n, true)?,
                 Anchor::End(u) => reaching_visible(eng, *f, Pos(eng.unit(u).end.0 - 1), true),
-                Anchor::Final => last_definition(eng, *f),
+                Anchor::Final => final_reaching(eng, *f),
             };
             through(eng, r, path)
         }
@@ -648,7 +648,31 @@ pub(crate) fn builtin_projection(p: ProjId) -> Option<crate::api::Projection> {
     (p == ProjId::IS_EMPTY).then(|| Arc::new(is_empty_proj) as crate::api::Projection)
 }
 
-/// The last definition of `f` on the whole line (`At::Final`), else the
+/// What an `At::Final` reader of `f` is answered: the value published
+/// when the line was last quiet (`commit::publish_finals`), the same for
+/// every reader between two quiet points, whatever lands meanwhile, so a
+/// pass of the loop reads what the pass before it wrote, never a part of
+/// what this one is writing; else the environment.
+pub(crate) fn final_reaching(eng: &Engine, f: Field) -> Reaching {
+    eng.ranges.published(f).unwrap_or_else(|| env_reaching(eng, f))
+}
+
+/// `final_reaching` for a run: a field none published yet is published
+/// now, as its last definition if that is a prediction (a value from
+/// before the evaluation, `Operation::predicted_defs`), else as the
+/// environment, and checked at the next quiet point.
+pub(crate) fn final_read(eng: &Engine, f: Field) -> Reaching {
+    if let Some(r) = eng.ranges.published(f) {
+        return r;
+    }
+    if !eng.has_finals.load(Ordering::Acquire) {
+        eng.has_finals.store(true, Ordering::Release);
+    }
+    let live = last_definition(eng, f);
+    eng.ranges.publish_first(f, if live.provisional { live } else { env_reaching(eng, f) })
+}
+
+/// The last definition of `f` on the whole line, else the
 /// environment: the field index's last segment, its last entry. Globals
 /// and locals alike: whatever is last, since a loop-back reader asks what
 /// the back of the document left.

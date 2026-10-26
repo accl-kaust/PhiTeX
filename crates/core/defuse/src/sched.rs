@@ -25,26 +25,14 @@ use crate::ctx::Ctx;
 use crate::engine::Engine;
 use crate::lock::{Mx, ns, take_wait};
 use crate::node::{Node, State, Wake};
-use crate::values::{Field, FxHashMap, FxHashSet};
+use crate::values::{Field, FxHashMap};
 
 /// What every worker and the pool share.
 pub(crate) struct Shared {
     injector: Injector<NodeId>,
-    /// Loop-back readers re-asked (`Node::final_wake`): taken only when
-    /// nothing else is queued or running (`finals_n` is all that is
-    /// outstanding), so a reader runs again on definitions that have
-    /// settled rather than on each one as it lands, a half-made state
-    /// another run is about to change.
-    finals: Injector<NodeId>,
-    finals_n: AtomicUsize,
-    /// Runs taken from `finals` still going: they are no other work.
-    finals_running: AtomicUsize,
-    /// The readers queued in `finals` when the line went quiet are taken
-    /// as one pass, all of them (`pass_left` still to take) whatever
-    /// their runs make meanwhile; one queued since waits for the next
-    /// quiet. `passes` counts the passes: the loop-back's beyond the
-    /// first, `Report::final_reruns`.
-    pass_left: AtomicUsize,
+    /// The quiet points at which a published loop-back value moved and
+    /// its readers ran again (`commit::publish_finals`): the loop-back's
+    /// passes beyond the first, `Report::final_reruns`.
     passes: AtomicU64,
     stealers: Vec<Stealer<NodeId>>,
     later_stealers: Vec<Stealer<NodeId>>,
@@ -112,13 +100,15 @@ pub(crate) struct WorkerLog {
     pub(crate) run_times: Vec<(NodeId, Duration)>,
     /// Loop-back readers past `Limits::final_reruns` (`allow_final_rerun`).
     pub(crate) capped: Vec<NodeId>,
+    /// Runs that panicked on inputs that held when they did: the node,
+    /// what it read, the panic; failures only if those reads still hold
+    /// once the line is quiet (`Engine::evaluate`).
+    pub(crate) panicked: Vec<(NodeId, Vec<crate::node::ReadRec>, &'static str, String)>,
 }
 
 /// One worker's deques and counters (nanoseconds).
 pub(crate) struct Worker {
     pub(crate) ix: usize,
-    /// Its next run was taken from the loop-back readers' queue.
-    took_final: AtomicBool,
     /// Nodes placed by its commits, and its runs to run again: next.
     local: Deque<NodeId>,
     /// Nodes its commits re-asked, in the order asked: after its placed
@@ -134,6 +124,8 @@ pub(crate) struct Worker {
     pub(crate) runs: AtomicU64,
     pub(crate) nodes_run: AtomicU64,
     pub(crate) refuted_nodes: AtomicU64,
+    /// Runs that panicked on inputs that moved during the run.
+    pub(crate) stale_panics: AtomicU64,
     pub(crate) op_ns: AtomicU64,
     pub(crate) wasted_ns: AtomicU64,
     pub(crate) commit_ns: AtomicU64,
@@ -154,8 +146,6 @@ pub(crate) struct Worker {
     /// Its last commit and when (`Engine::critical_chain`).
     pub(crate) last_commit: AtomicU64,
     pub(crate) last_done: AtomicU64,
-    /// The engine's stable fields, taken once for the evaluation.
-    pub(crate) stable: Arc<FxHashSet<Field>>,
     pub(crate) log: Mx<WorkerLog>,
 }
 
@@ -226,7 +216,7 @@ const ABSORB_EVERY: Duration = Duration::from_millis(2);
 
 impl Pool {
     /// A pool of `n` workers and their deques.
-    pub(crate) fn new(n: usize, epoch: u64, limits: Limits, stable: Arc<FxHashSet<Field>>) -> (Pool, Vec<Worker>) {
+    pub(crate) fn new(n: usize, epoch: u64, limits: Limits) -> (Pool, Vec<Worker>) {
         let n = n.max(1);
         let deques: Vec<Deque<NodeId>> = (0..n).map(|_| Deque::new_lifo()).collect();
         let blocks: Vec<Deque<(NodeId, u32)>> = (0..n).map(|_| Deque::new_lifo()).collect();
@@ -236,10 +226,6 @@ impl Pool {
         let block_stealers = blocks.iter().map(Deque::stealer).collect();
         let shared = Arc::new(Shared {
             injector: Injector::new(),
-            finals: Injector::new(),
-            finals_n: AtomicUsize::new(0),
-            finals_running: AtomicUsize::new(0),
-            pass_left: AtomicUsize::new(0),
             passes: AtomicU64::new(0),
             stealers,
             later_stealers,
@@ -266,11 +252,11 @@ impl Pool {
                 later,
                 block,
                 block_runs: AtomicU32::new(0),
-                took_final: AtomicBool::new(false),
                 shared: shared.clone(),
                 runs: AtomicU64::new(0),
                 nodes_run: AtomicU64::new(0),
                 refuted_nodes: AtomicU64::new(0),
+                stale_panics: AtomicU64::new(0),
                 op_ns: AtomicU64::new(0),
                 wasted_ns: AtomicU64::new(0),
                 commit_ns: AtomicU64::new(0),
@@ -289,7 +275,6 @@ impl Pool {
                 final_max: AtomicU64::new(0),
                 last_commit: AtomicU64::new(u64::MAX),
                 last_done: AtomicU64::new(0),
-                stable: stable.clone(),
                 log: Mx::new(WorkerLog::default()),
             })
             .collect();
@@ -521,36 +506,7 @@ impl Pool {
             }
             return Some(last);
         }
-        let sh = &self.shared;
-        // (a place in the pass open, or the line quiet: a new pass of all
-        // that is queued)
-        let in_pass = sh.pass_left.try_update(Ordering::SeqCst, Ordering::SeqCst, |k| k.checked_sub(1)).is_ok();
-        if !in_pass {
-            let fin = sh.finals_n.load(Ordering::SeqCst);
-            if fin == 0 || sh.outstanding.load(Ordering::SeqCst) > fin + sh.finals_running.load(Ordering::SeqCst) {
-                return None;
-            }
-            if sh.pass_left.compare_exchange(0, fin - 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-                return None;
-            }
-            let k = sh.passes.fetch_add(1, Ordering::SeqCst) + 1;
-            Worker::max(&w.final_max, k);
-        }
-        loop {
-            match sh.finals.steal() {
-                Steal::Success(n) => {
-                    sh.finals_running.fetch_add(1, Ordering::SeqCst);
-                    sh.finals_n.fetch_sub(1, Ordering::SeqCst);
-                    w.took_final.store(true, Ordering::Relaxed);
-                    return Some(n);
-                }
-                Steal::Empty => {
-                    sh.pass_left.store(0, Ordering::SeqCst);
-                    return None;
-                }
-                Steal::Retry => {}
-            }
-        }
+        None
     }
 
     /// Rests until there is work, the evaluation stops, or nothing is
@@ -649,8 +605,14 @@ fn run_worker(
         if pool.outstanding() > 0 {
             continue;
         }
-        // quiescent
+        // quiescent: the loop-back values published, their readers whose
+        // answer moved run again (a pass)
         if w.ix == 0 {
+            if crate::commit::publish_finals(eng, w) > 0 {
+                let k = pool.shared.passes.fetch_add(1, Ordering::SeqCst) + 1;
+                Worker::max(&w.final_max, k);
+                continue;
+            }
             if let Some(s) = src.as_deref_mut() {
                 let items: Vec<Settled> = eng.take_settled();
                 if !items.is_empty() && s.settled(eng, &items) {
@@ -686,15 +648,11 @@ fn run_worker(
 /// deque, or the engine's pending list when no evaluation runs.
 pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) {
     let created = matches!(wake.cause, Cause::Created { .. });
-    let fin = n.final_wake.swap(false, Ordering::AcqRel);
     *n.woke.lock() = Some(wake);
     match w {
         Some(w) => {
             w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
-            if fin {
-                w.shared.finals_n.fetch_add(1, Ordering::SeqCst);
-                w.shared.finals.push(n.id);
-            } else if created {
+            if created {
                 w.local.push(n.id);
             } else {
                 w.later.push(n.id);
@@ -778,21 +736,11 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
 /// then `Clean` or, if re-asked meanwhile, `Dirty` and queued again. A
 /// `Stop` from the run is a refuted run: queued again without a commit.
 pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
-    let fin = w.took_final.swap(false, Ordering::Relaxed);
-    let r = work_one(eng, pool, w, n);
-    if fin {
-        pool.shared.finals_running.fetch_sub(1, Ordering::SeqCst);
-    }
-    r
-}
-
-fn work_one(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
     let node = eng.node(n);
     if !node.cas_state(State::Dirty, State::Running) {
         pool.shared.done_one();
         return Ok(());
     }
-    node.run_start.store(eng.clock.fetch_add(1, Ordering::AcqRel), Ordering::Release);
     let first = node.run_epoch.swap(pool.epoch, Ordering::AcqRel) != pool.epoch;
     if first {
         node.runs.store(0, Ordering::Relaxed);
@@ -839,18 +787,31 @@ fn work_one(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), Eval
         }
     }
     match r {
+        // (a run that read what has moved since, or one re-asked or taken
+        // meanwhile, panicked on inputs no longer current: run again)
+        Err(_)
+            if node.state() != State::Running
+                || cx.product.reads.iter().any(|rd| crate::read::answer(eng, node, &rd.kind, rd.path) != rd.seen) =>
+        {
+            drop(cx);
+            Worker::add(&w.stale_panics, 1);
+            end_run(pool, w, node, State::Dirty);
+            Ok(())
+        }
         Err(payload) => {
-            give_back(eng, node);
+            // (held, not failed: a run still going may change what it
+            // read; `Engine::evaluate` decides once the line is quiet)
             let message = payload
                 .downcast_ref::<&str>()
                 .map(|s| (*s).to_owned())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "panic".to_owned());
-            Err(EvalError::OpPanicked {
-                node: n,
-                op: op.name(),
-                message,
-            })
+            let reads = std::mem::take(&mut cx.product.reads);
+            drop(cx);
+            give_back(eng, node);
+            w.log.lock().panicked.push((n, reads, op.name(), message));
+            pool.shared.done_one();
+            Ok(())
         }
         Ok(Err(_stop)) => {
             drop(cx);
@@ -923,12 +884,7 @@ fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
         }
         node.committing.store(false, Ordering::Release);
         if to == State::Dirty {
-            if node.final_wake.swap(false, Ordering::AcqRel) {
-                w.shared.finals_n.fetch_add(1, Ordering::SeqCst);
-                w.shared.finals.push(node.id);
-            } else {
-                w.local.push(node.id);
-            }
+            w.local.push(node.id);
             w.shared.wake_one();
         } else {
             pool.shared.done_one();
@@ -937,21 +893,11 @@ fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
     }
 }
 
-/// A node re-asked through an `At::Final` read of `by`'s definition:
-/// counts the rerun where `by`'s run began after the node's commit at
-/// `since` (it could have seen the node's last result: a pass of the
-/// loop, as a LaTeX run reads what the one before wrote; a definition
-/// from a run older than that is one more step of the same pass); past
-/// `Limits::final_reruns` the node is left with its last answer, listed
-/// in `Report::capped`, and not queued. True when it may run.
-pub(crate) fn allow_final_rerun(eng: &Engine, w: Option<&Worker>, node: &Node, by: Option<NodeId>, since: u64) -> bool {
-    // (outside an evaluation, an edit's re-ask: not counted)
-    let Some(w) = w else {
-        return true;
-    };
-    if by.is_some_and(|b| eng.node(b).run_start.load(Ordering::Acquire) < since) {
-        return true;
-    }
+/// A loop-back reader re-asked at a quiet point (`commit::publish_finals`):
+/// counts the rerun; past `Limits::final_reruns` in one evaluation the
+/// node is left with its last answer, listed in `Report::capped`, and not
+/// queued. True when it may run.
+pub(crate) fn allow_final_rerun(eng: &Engine, w: &Worker, node: &Node) -> bool {
     let ep = eng.epoch.load(Ordering::Acquire);
     if node.final_epoch.swap(ep, Ordering::AcqRel) != ep {
         node.final_reruns.store(0, Ordering::Release);

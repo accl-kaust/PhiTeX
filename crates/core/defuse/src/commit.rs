@@ -423,7 +423,6 @@ fn pos_in(inner: &Inner, node: &Node) -> Pos {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product) -> CommitStats {
     let mut st = CommitStats::default();
-    let prev_commit = node.committed_at.load(Ordering::Acquire);
     let t0 = Instant::now();
     let ww = Some(w);
     for d in &mut p.defs {
@@ -871,7 +870,6 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         Arc::get_mut(&mut rec).expect("the record is not shared yet").placed = std::mem::take(&mut placed);
         let old = node.last.lock().replace(rec.clone());
         node.serial.store(serial, Ordering::Release);
-        node.committed_at.store(eng.clock.fetch_add(1, Ordering::AcqRel), Ordering::Release);
         let old_output = last.as_ref().filter(|r| !r.provisional).map(|r| r.output);
         st.commit_ns = ns(t_lock);
         drop(inner);
@@ -907,6 +905,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
     }
     file_ranges(eng, ww, range_reads, node.id, &mut st);
+    if eng.op(node.op()).read_back() && !changed_defs.is_empty() {
+        eng.has_finals.store(true, Ordering::Release);
+        for &f in &changed_defs {
+            eng.ranges.mark_read_back(f);
+        }
+    }
     for (f, r) in final_reads {
         if !eng.has_finals.load(Ordering::Acquire) {
             eng.has_finals.store(true, Ordering::Release);
@@ -1043,19 +1047,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         Some(ReadKind::Following { .. }) => Some(Cause::Structure),
         None => anchor_gone.then_some(Cause::Structure),
     };
-    // (a loop-back read refuted counts as its re-ask would)
-    let final_ok = match refuted.map(|i| &rec.reads[i].kind) {
-        Some(ReadKind::Field { f, at: Anchor::Final }) => {
-            let by = read::last_definition(eng, *f).by;
-            let own = by == Some(node.id);
-            node.final_wake.store(!own, Ordering::Release);
-            own || allow_final_rerun(eng, ww, node, by, prev_commit)
-        }
-        _ => true,
-    };
-    if let Some(cause) = cause
-        && final_ok
-    {
+    if let Some(cause) = cause {
         mark_dirty(
             eng,
             ww,
@@ -1406,7 +1398,7 @@ pub(crate) fn reask_from(
             None => {
                 let Some(next) = next_with(eng, f, s.lo) else {
                     if !passed {
-                        reask_final(eng, w, f, by, st);
+                        reask_final(eng, f);
                     }
                     return;
                 };
@@ -1449,51 +1441,57 @@ fn reask_later(eng: &Engine, w: Option<&Worker>, f: Field, lo: Pos, by: NodeId, 
             st,
         );
     } else {
-        reask_final(eng, w, f, Some(by), st);
+        reask_final(eng, f);
     }
 }
 
-/// The loop-back readers of `f` (`At::Final`) whose answer moved: the
-/// last definition of `f` landed, changed or went. Each is counted
-/// (`sched::allow_final_rerun`): past the limit it is left as it is.
-pub(crate) fn reask_final(eng: &Engine, w: Option<&Worker>, f: Field, by: Option<NodeId>, st: &mut CommitStats) {
+/// The last definition of `f` landed, changed or went: its published
+/// value is checked at the next quiet point (`publish_finals`).
+pub(crate) fn reask_final(eng: &Engine, f: Field) {
+    if eng.has_finals.load(Ordering::Acquire) {
+        eng.ranges.mark_dirty(f);
+    }
+}
+
+/// At a quiet point (nothing queued or running), on one thread: each
+/// loop-back value marked since the last (`reask_final`) published again
+/// as the field's last definition now, then the readers whose answer
+/// moved re-asked (`sched::allow_final_rerun`: past the limit one is
+/// left as it is): the next pass of the loop. The readers re-asked.
+pub(crate) fn publish_finals(eng: &Engine, w: &Worker) -> usize {
     if !eng.has_finals.load(Ordering::Acquire) {
-        return;
+        return 0;
     }
-    let rs = eng.ranges.finals(f, |r| live(eng, r.node, r.serial));
-    if rs.is_empty() {
-        return;
-    }
-    let last = read::last_definition(eng, f);
-    for r in &rs {
-        if through(eng, last, r.path) == r.seen {
-            continue;
-        }
-        let n = eng.node(r.node);
-        // (one running is checked at its commit; one queued runs anyway)
-        if !(n.state() == State::Clean || n.committing.load(Ordering::Acquire)) {
-            continue;
-        }
-        // (its own definition read back: a step of its run, no pass of
-        // the loop; it runs again at once)
-        let own = by == Some(r.node);
-        if !own && !allow_final_rerun(eng, w, n, by, n.committed_at.load(Ordering::Acquire)) {
-            continue;
-        }
-        n.final_wake.store(!own, Ordering::Release);
-        if mark_stale(
-            eng,
-            w,
-            n,
-            Wake {
-                by,
-                cause: Cause::Changed { field: f, site: by },
+    let moved: Vec<(Field, read::Reaching)> = eng
+        .ranges
+        .take_dirty()
+        .into_iter()
+        .filter_map(|f| {
+            let r = read::last_definition(eng, f);
+            eng.ranges.republish(f, r).then_some((f, r))
+        })
+        .collect();
+    let mut k = 0;
+    for (f, last) in moved {
+        for r in eng.ranges.finals(f, |r| live(eng, r.node, r.serial)) {
+            if through(eng, last, r.path) == r.seen {
+                continue;
+            }
+            let n = eng.node(r.node);
+            if n.state() != State::Clean || !allow_final_rerun(eng, w, n) {
+                continue;
+            }
+            let wake = Wake {
+                by: last.by,
+                cause: Cause::Changed { field: f, site: last.by },
                 at_ns: eng.now_ns(),
-            },
-        ) {
-            st.woken += 1;
+            };
+            if mark_stale(eng, Some(w), n, wake) {
+                k += 1;
+            }
         }
     }
+    k
 }
 
 /// The first node in `(from, to)` of operation `op` that has not
@@ -1975,6 +1973,11 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     }
     drop(inner);
     ix.apply(eng, seg);
+    if eng.op(node.op()).read_back() {
+        for &f in &changed_defs {
+            eng.ranges.mark_read_back(f);
+        }
+    }
     let mut st = CommitStats::default();
     if let Some(old) = bracket_gone {
         reask_after_effect(eng, w, node, pos, old, Brackets::default(), &mut st);

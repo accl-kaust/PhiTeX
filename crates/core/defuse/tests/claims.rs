@@ -260,3 +260,90 @@ fn a_loopback_reader_runs_again_once_the_line_is_quiet() {
     assert!(rep.capped.is_empty());
     assert!(e.check_invariants().is_empty());
 }
+
+/// `[f]`: outputs f's definition reaching it; panics unless it is 2.
+struct PanicUnless2;
+
+impl Operation for PanicUnless2 {
+    fn name(&self) -> &'static str {
+        "panic_unless_2"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let x = cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT);
+        assert!(cx.values().as_int(x) == Some(2), "not 2");
+        Ok(x)
+    }
+}
+
+#[test]
+fn a_panic_on_a_value_about_to_move_is_run_again_and_one_on_settled_values_fails() {
+    // R panics unless f is 2; W1 defines it 1 at once, W2 2 after a long
+    // run. R run before W2 lands panics on a value about to move, and runs
+    // again; R after a definition of 1 that stays fails.
+    let threads = std::thread::available_parallelism().map_or(1, usize::from).clamp(2, 8);
+    for j in [1, threads] {
+        let (e, o) = engine();
+        let pu = e.register(Arc::new(PanicUnless2));
+        let v = e.values();
+        let fv = v.field("f").0;
+        let u = e.new_unit();
+        e.push(u, o.def, vec![fv, v.int(1)]);
+        e.push(u, o.slow_def, vec![fv, v.int(2), v.int(40)]);
+        let r = e.push(u, pu, vec![fv]);
+        e.evaluate(j).unwrap();
+        assert_eq!(e.output(r), Some(v.int(2)), "-j{j}");
+        assert!(e.check_invariants().is_empty());
+        let w = e.push(u, o.def, vec![fv, v.int(1)]);
+        let r2 = e.push(u, pu, vec![fv]);
+        let err = e.evaluate(j).unwrap_err();
+        assert!(matches!(err, phitex_defuse::EvalError::OpPanicked { node, .. } if node == r2), "-j{j}: {err:?}");
+        e.remove(w);
+        e.evaluate(j).unwrap();
+        assert_eq!(e.output(r2), Some(v.int(2)), "-j{j}");
+    }
+}
+
+/// `[f]`: outputs f's published last definition, keeping every value it
+/// was answered.
+struct SeenFinal(Arc<std::sync::Mutex<Vec<ValueId>>>);
+
+impl Operation for SeenFinal {
+    fn name(&self) -> &'static str {
+        "seen_final"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let x = match cx.read_at(Field(cx.args()[0]), At::Final)? {
+            FieldAt::Def(x, _) => x,
+            _ => ValueId::UNIT,
+        };
+        self.0.lock().unwrap().push(x);
+        Ok(x)
+    }
+}
+
+#[test]
+fn a_loopback_reader_never_sees_a_part_of_the_pass_being_written() {
+    // W1 defines f at once, W2 again after a long run; R between them
+    // reads f's last definition. Whatever runs when, R is answered what
+    // the line held when it was last quiet: nothing, then W2's value,
+    // never W1's, which is no whole state of the line.
+    let threads = std::thread::available_parallelism().map_or(1, usize::from).clamp(2, 8);
+    for j in [1, threads] {
+        let (e, o) = engine();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sf = e.register(Arc::new(SeenFinal(seen.clone())));
+        let v = e.values();
+        let fv = v.field("f").0;
+        let u = e.new_unit();
+        e.push(u, o.def, vec![fv, v.int(1)]);
+        let r = e.push(u, sf, vec![fv]);
+        e.push(u, o.slow_def, vec![fv, v.int(2), v.int(40)]);
+        let rep = e.evaluate(j).unwrap();
+        assert_eq!(e.output(r), Some(v.int(2)), "-j{j}");
+        assert_eq!(*seen.lock().unwrap(), vec![ValueId::UNIT, v.int(2)], "-j{j}");
+        assert_eq!(rep.final_reruns, 1, "-j{j}: {rep:?}");
+        assert!(e.check_invariants().is_empty());
+    }
+}

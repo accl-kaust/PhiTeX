@@ -3146,21 +3146,6 @@ fn register_doc(reg: &crate::hints::Registry, v: &Values, inc: &Incr) {
 }
 
 
-/// The fields the engine is told are stable (`Engine::set_stable`):
-/// read by more than half of para4000's nodes and defined only by the
-/// format or the job's environment (`PHITEX_READERS=1` counted them:
-/// 4,000 to 5,204 readers of 6,677 nodes, every read from the
-/// environment). A wrong one costs speed, never bytes.
-const STABLE_FIELDS: &[&str] = &[
-    "cattab",
-    "sftab",
-    "lctab",
-    "patterns",
-    "font",
-    "cs:par",
-    "param:everypar",
-];
-
 /// A document node's text: a slice of the document (its bytes).
 enum DocNode {
     Doc(usize, usize),
@@ -4484,36 +4469,6 @@ impl Build {
         let _ = files;
         let end = steps;
         crate::timeline::lap("engine: the link, end and files nodes");
-        // (the fields nearly every node reads and only the format or the
-        // job's start defines: their reads kept per unit, not filed by
-        // scope, [`STABLE_FIELDS`])
-        for f in STABLE_FIELDS {
-            let f = g.eng.values().field(f);
-            g.eng.set_stable(f);
-        }
-        // (and the format's first font's cells, by its key: its
-        // metrics, hyphen character and the parameters spacing reads)
-        let first_font = {
-            let v = g.eng.values();
-            cached
-                .env
-                .get(v, FONT_ORDER, &made)
-                .and_then(|x| list_of(v, x).first().map(|&k| int_of(v, k)))
-        };
-        if let Some(k) = first_font {
-            use crate::fields::{FontCell, font_cell_name};
-            for c in [
-                FontCell::Info,
-                FontCell::Hc,
-                FontCell::Fd(2),
-                FontCell::Fd(3),
-                FontCell::Fd(4),
-                FontCell::Fd(7),
-            ] {
-                let f = g.eng.values().field(&font_cell_name(k, c));
-                g.eng.set_stable(f);
-            }
-        }
         // (a format whose files changed since it was cached: built again)
         if !format_holds() {
             crate::timeline::lap("engine: the cached format stale");
@@ -4556,8 +4511,7 @@ impl Build {
 
     /// `PHITEX_READERS=1`: after a settle, the fields most nodes read,
     /// each with its readers, the nodes in all, and where the reads found
-    /// it (the environment, or the nodes defining it): the data the
-    /// stable fields ([`STABLE_FIELDS`]) are chosen from.
+    /// it (the environment, or the nodes defining it).
     fn dump_readers(&self) {
         if !crate::exec::obs_flag!("PHITEX_READERS") {
             return;
@@ -6987,6 +6941,15 @@ fn debug_nodes(eng: &Engine, when: &str) {
                 let _ = write!(out, " | {r}");
             }
             out.push('\n');
+            // (`PHITEX_NODE_DUMP_DEFS=1`: each node's definitions, a digest
+            // of each value)
+            if crate::exec::obs_flag!("PHITEX_NODE_DUMP_DEFS") {
+                let mut ds: Vec<(String, u64)> = eng.defs_of(n).into_iter().map(|(f, x)| (v.render(f.0), dig(x))).collect();
+                ds.sort();
+                for (f, d) in ds {
+                    let _ = writeln!(out, "  def {f} {d:016x}");
+                }
+            }
             if crate::exec::obs_str!("PHITEX_NODE_DUMP_READS")
                 .is_some_and(|l| l.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(n.raw())))
             {

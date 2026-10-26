@@ -569,6 +569,11 @@ impl Operation for Files {
     fn name(&self) -> &'static str {
         "files"
     }
+    /// The written files are read back: a pass reads them whole as the
+    /// pass before left them.
+    fn read_back(&self) -> bool {
+        true
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();

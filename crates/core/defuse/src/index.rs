@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::engine::EnvReader;
 use crate::lock::Lock;
+use crate::read::Reaching;
 use crate::order::{Pos, SegId};
 use crate::segment::{RangeReader, Reader, push_pruned};
 use crate::values::{Field, FxHashMap, hash_words};
@@ -180,6 +181,12 @@ struct Ranges {
     filed: usize,
     /// `At::Final` readers.
     finals: Vec<Reader>,
+    /// What its `At::Final` readers are answered: its last definition
+    /// when the line was last quiet (`commit::publish_finals`), or what
+    /// the first reader found (`read::final_read`).
+    published: Option<Reaching>,
+    /// Its last definition may have moved since it was published.
+    dirty: bool,
     /// Readers of the environment's value.
     envs: Vec<EnvReader>,
 }
@@ -237,7 +244,7 @@ impl Ranges {
     }
 
     fn is_empty(&self) -> bool {
-        self.len == 0 && self.finals.is_empty() && self.envs.is_empty()
+        self.len == 0 && self.finals.is_empty() && self.envs.is_empty() && self.published.is_none() && !self.dirty
     }
 
     /// Drops the dead once as many have been filed as the list held.
@@ -379,6 +386,74 @@ impl RangeIndex {
     pub(crate) fn add_final(&self, f: Field, r: Reader, live: impl Fn(&Reader) -> bool) {
         let mut w = self.shards[range_shard(f)].0.write();
         push_pruned(&mut w.entry(f).or_default().finals, r, live);
+    }
+
+    /// The value published for `f`'s `At::Final` readers, if any.
+    pub(crate) fn published(&self, f: Field) -> Option<Reaching> {
+        self.shards[range_shard(f)].0.read().get(&f).and_then(|m| m.published)
+    }
+
+    /// Publishes `r` for `f` unless a value is published already (a
+    /// first reader), marked to be checked at the next quiet point: the
+    /// value published.
+    pub(crate) fn publish_first(&self, f: Field, r: Reaching) -> Reaching {
+        let mut w = self.shards[range_shard(f)].0.write();
+        let m = w.entry(f).or_default();
+        if let Some(x) = m.published {
+            return x;
+        }
+        m.published = Some(r);
+        m.dirty = true;
+        r
+    }
+
+    /// Marks `f`'s published value to be checked at the next quiet point
+    /// (its last definition landed, changed or went); nothing where none
+    /// is published.
+    pub(crate) fn mark_dirty(&self, f: Field) {
+        let sh = &self.shards[range_shard(f)].0;
+        if !sh.read().get(&f).is_some_and(|m| m.published.is_some() && !m.dirty) {
+            return;
+        }
+        if let Some(m) = sh.write().get_mut(&f) {
+            m.dirty = true;
+        }
+    }
+
+    /// Marks `f` to be published at the next quiet point, published
+    /// before or not: a read-back node defined it (`Operation::read_back`).
+    pub(crate) fn mark_read_back(&self, f: Field) {
+        let sh = &self.shards[range_shard(f)].0;
+        if sh.read().get(&f).is_some_and(|m| m.dirty) {
+            return;
+        }
+        sh.write().entry(f).or_default().dirty = true;
+    }
+
+    /// The fields marked since the last take, each unmarked.
+    pub(crate) fn take_dirty(&self) -> Vec<Field> {
+        let mut out = Vec::new();
+        for sh in &*self.shards {
+            if !sh.0.read().values().any(|m| m.dirty) {
+                continue;
+            }
+            for (f, m) in sh.0.write().iter_mut() {
+                if m.dirty {
+                    m.dirty = false;
+                    out.push(*f);
+                }
+            }
+        }
+        out
+    }
+
+    /// Publishes `r` for `f`: whether that changed what is published.
+    pub(crate) fn republish(&self, f: Field, r: Reaching) -> bool {
+        let mut w = self.shards[range_shard(f)].0.write();
+        let m = w.entry(f).or_default();
+        let moved = m.published.is_none_or(|x| (x.value, x.by) != (r.value, r.by));
+        m.published = Some(r);
+        moved
     }
 
     /// The `At::Final` readers of `f` that still stand.

@@ -111,9 +111,6 @@ pub struct Engine {
     pub(crate) shapes_n: AtomicUsize,
     /// `Ctx::apply`'s memo.
     pub(crate) memo: Lock<Memo>,
-    /// Fields the client says never change after setup: reads of them are
-    /// not recorded.
-    pub(crate) stable: Lock<Arc<FxHashSet<Field>>>,
     pub(crate) marked: Lock<FxHashSet<NodeId>>,
     pub(crate) marked_n: AtomicUsize,
     pub(crate) settled: Mx<Vec<Settled>>,
@@ -123,9 +120,6 @@ pub struct Engine {
     pub(crate) pending: Mx<Pending>,
     /// Evaluations so far: the epoch a node's run count belongs to.
     pub(crate) epoch: AtomicU64,
-    /// Ticks at each run's start and each commit (`Node::run_start`,
-    /// `Node::committed_at`): which run could have seen which commit.
-    pub(crate) clock: AtomicU64,
     pub(crate) t0: Instant,
     /// The last node to commit in the last evaluation.
     pub(crate) last_commit: AtomicU64,
@@ -214,7 +208,6 @@ impl Engine {
             shapes: Lock::new(FxHashMap::default()),
             shapes_n: AtomicUsize::new(0),
             memo: Lock::new(FxHashMap::default()),
-            stable: Lock::new(Arc::new(FxHashSet::default())),
             marked: Lock::new(FxHashSet::default()),
             marked_n: AtomicUsize::new(0),
             settled: Mx::new(Vec::new()),
@@ -223,7 +216,6 @@ impl Engine {
             stats: Stats::default(),
             pending: Mx::new(Pending::default()),
             epoch: AtomicU64::new(0),
-            clock: AtomicU64::new(1),
             t0: Instant::now(),
             last_commit: AtomicU64::new(u64::MAX),
             last_report: Mx::new(None),
@@ -930,14 +922,6 @@ impl Engine {
         self.monoids.write().by_prefix.push((prefix.to_owned(), m));
     }
 
-    /// A field that never changes after setup: reads of it go unrecorded.
-    pub fn set_stable(&self, f: Field) {
-        let mut s = self.stable.write();
-        let mut set = (**s).clone();
-        set.insert(f);
-        *s = Arc::new(set);
-    }
-
     pub fn set_limits(&self, l: Limits) {
         *self.limits.write() = l;
     }
@@ -971,6 +955,8 @@ impl Engine {
         }
         let mut st = CommitStats::default();
         for (f, _) in changes {
+            // (a loop-back value published from the environment)
+            self.ranges.mark_dirty(*f);
             let readers = self.ranges.take_envs(*f);
             // (one whose answer stands is kept for the next change)
             let mut stands = Vec::new();
@@ -1036,22 +1022,46 @@ impl Engine {
         self.evaluate_with(threads, Some(src))
     }
 
-    fn evaluate_with(&self, threads: usize, src: Option<&mut dyn EditSource>) -> Result<Report, EvalError> {
+    fn evaluate_with(&self, threads: usize, mut src: Option<&mut dyn EditSource>) -> Result<Report, EvalError> {
         let t0 = Instant::now();
         let n = threads.max(1);
-        let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
-        let (pool, workers) = Pool::new(n, epoch, self.limits(), self.stable.read().clone());
-        let mut seed = self.take_pending(&workers[0]);
-        // (in position order, as the blocks run: a node inserted before
-        // others runs with them, not after every node pushed)
-        seed.sort_by_key(|&n| self.node(n).pos_hint());
-        if !seed.is_empty() {
-            let per = seed.len().div_ceil(n);
-            for (i, chunk) in seed.chunks(per).enumerate() {
-                workers[i].seed(chunk);
+        let mut all: Vec<crate::sched::Worker> = Vec::new();
+        loop {
+            let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            let (pool, workers) = Pool::new(n, epoch, self.limits());
+            let mut seed = self.take_pending(&workers[0]);
+            // (in position order, as the blocks run: a node inserted before
+            // others runs with them, not after every node pushed)
+            seed.sort_by_key(|&n| self.node(n).pos_hint());
+            if !seed.is_empty() {
+                let per = seed.len().div_ceil(n);
+                for (i, chunk) in seed.chunks(per).enumerate() {
+                    workers[i].seed(chunk);
+                }
+            }
+            // (the trait object's lifetime shortened for the reborrow, which
+            // `as_deref_mut` cannot)
+            #[allow(clippy::option_as_ref_deref)]
+            let workers = pool.run(self, workers, src.as_mut().map(|s| -> &mut dyn EditSource { &mut **s }))?;
+            // a run that panicked: a failure if what it read still holds
+            // now the line is quiet, else run again with the rest pending
+            let panicked: Vec<_> = workers.iter().flat_map(|w| std::mem::take(&mut w.log.lock().panicked)).collect();
+            all.extend(workers);
+            if panicked.is_empty() {
+                break;
+            }
+            if let Some((node, _, op, message)) = panicked
+                .iter()
+                .find(|(x, reads, _, _)| reads.iter().all(|rd| read::answer(self, self.node(*x), &rd.kind, rd.path) == rd.seen))
+            {
+                return Err(EvalError::OpPanicked {
+                    node: *node,
+                    op,
+                    message: message.clone(),
+                });
             }
         }
-        let workers = pool.run(self, workers, src)?;
+        let workers = all;
         let mut rep = Report::default();
         let mut by_op: FxHashMap<OpId, u64> = FxHashMap::default();
         let mut rbf: FxHashMap<Field, u64> = FxHashMap::default();
@@ -1060,6 +1070,7 @@ impl Engine {
             rep.nodes_run += load(&w.nodes_run);
             rep.runs += load(&w.runs);
             rep.refuted_nodes += load(&w.refuted_nodes);
+            rep.stale_panics += load(&w.stale_panics);
             rep.wasted_ns += load(&w.wasted_ns);
             rep.predictions_confirmed += load(&w.predictions_confirmed);
             rep.predictions_refuted += load(&w.predictions_refuted);

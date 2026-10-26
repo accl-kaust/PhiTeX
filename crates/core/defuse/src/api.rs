@@ -132,11 +132,13 @@ pub enum At {
     End(UnitId),
     /// The last definition on the whole line, whatever comes after the
     /// reader: a loop-back read (a label read at the front of a document,
-    /// defined at its back). The reader runs on what is there now and is
-    /// re-asked when the last definition lands or moves; a reader re-asked
-    /// this way more than `Limits::final_reruns` times in one evaluation
-    /// is left as it is and listed in `Report::capped` (a document that
-    /// does not converge).
+    /// defined at its back). The reader runs on the value published when
+    /// the line was last quiet (a field none published yet: its
+    /// prediction, else the environment's) and is re-asked at the next
+    /// quiet point if the last definition moved; a reader re-asked this way
+    /// more than `Limits::final_reruns` times in one evaluation is left as
+    /// it is and listed in `Report::capped` (a document that does not
+    /// converge).
     Final,
 }
 
@@ -238,6 +240,16 @@ pub trait Operation: Send + Sync {
     /// a run that makes the same ones re-asks nobody.
     fn predicted_defs(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, ValueId)>> {
         None
+    }
+
+    /// Whether what its runs define is read back (`At::Final`: a file the
+    /// job writes and reads): all of it published together at each quiet
+    /// point (`commit::publish_finals`), so a pass reads one whole state
+    /// of what the pass before wrote, a field and the fields it names
+    /// alike (default no: a field of another node is published where it
+    /// is first read back).
+    fn read_back(&self) -> bool {
+        false
     }
 
     /// Whether its nodes are siblings to a claim (`Ctx::claim`,
@@ -389,6 +401,9 @@ pub struct Report {
     /// The summed run time of every run that was not its node's last.
     pub wasted_ns: u64,
     pub refuted_nodes: u64,
+    /// Runs that panicked on inputs that moved while they ran, run again
+    /// (a panic on inputs that still hold is `EvalError::OpPanicked`).
+    pub stale_panics: u64,
     pub refuted_by_field: Vec<(Field, u64)>,
     pub rerun_causes: Vec<(NodeId, Cause)>,
     /// With `profile`: every run's time by node.
@@ -416,8 +431,8 @@ pub struct Report {
     /// left with their last answer (the client's "labels may have
     /// changed").
     pub capped: Vec<NodeId>,
-    /// The most reruns one node took from `At::Final` re-asks: the
-    /// passes a loop-back took to settle beyond the first.
+    /// The quiet points at which a loop-back value moved and its readers
+    /// ran again: the passes a loop-back took to settle beyond the first.
     pub final_reruns: u32,
 }
 

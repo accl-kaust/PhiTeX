@@ -45,9 +45,12 @@
 //! the scopes open at each segment's start cached). A bracket that changes
 //! re-asks the readers after it whose answer moved, as a definition does.
 //! A loop-back read (`At::Final`) asks for the last definition on the
-//! line and is re-asked when that lands, changes or goes; one that never
-//! settles is capped (`Limits::final_reruns`, `Report::capped`): no
-//! rounds, no declarations.
+//! line as it stood when the line was last quiet (nothing queued or
+//! running): every such value is published again at each quiet point,
+//! and the readers whose answer moved run again, a pass of the loop that
+//! reads one whole state of what the pass before wrote, never a part of
+//! what the pass is writing. One that never settles is capped
+//! (`Limits::final_reruns`, `Report::capped`): no rounds, no declarations.
 //!
 //! # Rules
 //! No TeX name, type or rule enters this crate. No lock is held across a run
