@@ -214,3 +214,44 @@ fn a_node_taken_while_its_run_claims_gives_back_what_it_took() {
     }
     assert!(interleaved > 0, "the two claims never ran side by side");
 }
+
+/// `[s, to]`: a view on the fold of s up to node `to`, read one step in;
+/// counts its runs.
+struct ViewTo(std::sync::atomic::AtomicU64);
+
+impl Operation for ViewTo {
+    fn name(&self) -> &'static str {
+        "view_to"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let v = cx.values();
+        let to = phitex_defuse::NodeId::from_raw(v.as_int(cx.args()[1]).unwrap_or(0).unsigned_abs());
+        let w = cx.view_through(Field(cx.args()[0]), None, to)?;
+        Ok(cx.at(w, phitex_defuse::Step::Index(0)).map_or(ValueId::UNIT, |x| cx.whole(x)))
+    }
+}
+
+#[test]
+fn a_view_whose_bound_is_removed_runs_once_more_and_settles() {
+    let e = Engine::new();
+    let v = e.values();
+    let contrib = e.register(Arc::new(Contrib));
+    let view = Arc::new(ViewTo(AtomicU64::new(0)));
+    let vo = e.register(view.clone());
+    let s = v.field("s");
+    let u = e.new_unit();
+    let c = e.push(u, contrib, vec![s.0, v.seq_unit(v.int(1))]);
+    e.push(u, vo, vec![s.0, v.int(i64::try_from(c.raw()).unwrap())]);
+    e.evaluate(2).unwrap();
+    assert_eq!(view.0.load(Ordering::Relaxed), 1);
+    e.remove(c);
+    let mut lim = phitex_defuse::Limits::default();
+    lim.runs_per_node = 50;
+    e.set_limits(lim);
+    let r = e.evaluate(2);
+    assert!(r.is_ok(), "the reader ran on for ever: {r:?}");
+    assert_eq!(view.0.load(Ordering::Relaxed), 2, "once more, on the bound gone");
+    assert!(e.check_invariants().is_empty());
+}

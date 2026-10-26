@@ -370,11 +370,11 @@ pub(crate) fn apply_path(eng: &Engine, v: Option<ValueId>, p: PathId) -> Option<
     }
     let steps = eng.path_steps(p)?;
     let mut cur = v;
+    // (a step that does not apply gives none, and the steps after it
+    // apply to none: `Present` and `Eq` answer false there, as a view's
+    // step that found nothing recorded it, `Ctx::at`)
     for s in steps {
         cur = step(eng, cur, *s);
-        if cur.is_none() && !matches!(s, Step::Present | Step::Eq(_)) {
-            return None;
-        }
     }
     cur
 }
@@ -583,15 +583,20 @@ pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, 
         }
         ReadKind::Env { f } => apply_path(eng, env_value(eng, *f), path),
         ReadKind::Fold { f, from, to, incl } => {
+            // (a bound gone: no value, through the path as the run took
+            // it, `Ctx::fold_value`; a view's step on none answers too)
             let from = match from {
-                Some(n) => Some(pos_of(eng, *n)?),
+                Some(n) => pos_of(eng, *n),
                 None => Some(unit_start(eng, me)),
             };
             let to = match to {
-                Some(n) => pos_of(eng, *n)?,
-                None => pos_of(eng, me.id)?,
+                Some(n) => pos_of(eng, *n),
+                None => pos_of(eng, me.id),
             };
-            apply_path(eng, Some(fold_in(eng, *f, from?, end_of(to, *incl), memo)), path)
+            let (Some(from), Some(to)) = (from, to) else {
+                return apply_path(eng, None, path);
+            };
+            apply_path(eng, Some(fold_in(eng, *f, from, end_of(to, *incl), memo)), path)
         }
         ReadKind::Next { f, after } => {
             let after = match after {
@@ -638,8 +643,14 @@ pub(crate) fn range_stands(eng: &Engine, f: Field, r: &RangeReader, memo: &mut F
 /// every path gives none).
 fn range_value_in(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) -> Option<Option<ValueId>> {
     let me = eng.node(r.node);
+    // (a bound gone: no value, as the run had it (`Ctx::fold_value`,
+    // `Ctx::next_contribution`): a reader filed over a removed bound
+    // stands on that, not asked again for ever)
     let from = match r.from {
-        Some(n) => pos_of(eng, n)?,
+        Some(n) => match pos_of(eng, n) {
+            Some(p) => p,
+            None => return Some(None),
+        },
         None => unit_start(eng, me),
     };
     if r.next {
@@ -647,7 +658,10 @@ fn range_value_in(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) 
         return Some(next_value(eng, &n));
     }
     let to = match r.to {
-        Some(n) => pos_of(eng, n)?,
+        Some(n) => match pos_of(eng, n) {
+            Some(p) => p,
+            None => return Some(None),
+        },
         None => pos_of(eng, me.id)?,
     };
     Some(Some(fold_in(eng, f, from, end_of(to, r.incl), memo)))
@@ -733,6 +747,12 @@ pub(crate) fn chain_start(eng: &Engine, s: &Arc<Segment>) -> Arc<[u64]> {
     loop {
         if let Some(c) = try_chain_start(eng, s) {
             return c;
+        }
+        // (a segment absorbed by its neighbour since the caller found it
+        // is no longer on the line: none, and the caller, which checks its
+        // node is there under the lock, looks again)
+        if eng.order.at_or_after(s.lo) != Some(s.id) {
+            return Arc::from(Vec::new());
         }
     }
 }

@@ -349,8 +349,10 @@ fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
         .collect();
     pages.sort_unstable();
     pages.dedup();
+    let mut cuts: Vec<(&str, usize)> = Vec::new();
     let mut e = Enc { v, xs: Vec::with_capacity(64 + 4 * lp.inf.len() + 2 * units.len()) };
     let st = &lp.st;
+    cuts.push(("st", e.xs.len()));
     e.i(st.j);
     e.i(st.normal);
     e.fold(st.fold);
@@ -364,9 +366,12 @@ fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
         }
         None => e.i(0),
     }
+    cuts.push(("cur", e.xs.len()));
     e.node(lp.cur);
     e.node(lp.cur_units);
+    cuts.push(("marks", e.xs.len()));
     e.x(lp.top_marks);
+    cuts.push(("inf", e.xs.len()));
     let inf: Vec<Src> = lp
         .inf
         .iter()
@@ -380,29 +385,32 @@ fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
     for s in inf {
         e.src(s);
     }
-    e.len(lp.last_rtn.len());
-    for (k, x) in &lp.last_rtn {
-        e.key(*k);
-        e.x(*x);
-    }
-    e.len(lp.last_markers.len());
-    for &(h, m) in &lp.last_markers {
-        e.x(h);
-        e.x(m);
-    }
+    cuts.push(("last_rtn", e.xs.len()));
+    // (the give-backs of the pages before, the guesses of later ones, are
+    // not carried: a step fires one page, and guesses it from the page
+    // just before it, read, or from the evaluation's start; carried, any
+    // page's give-back that changed ran every step after it again)
+    e.len(0);
+    cuts.push(("last_markers", e.xs.len()));
+    e.len(0);
+    cuts.push(("units", e.xs.len()));
     e.len(units.len());
     for u in units {
         e.x(u.src);
     }
+    cuts.push(("frontier", e.xs.len()));
     e.len(lp.frontier.0.saturating_sub(keep));
     e.i(i64::from(lp.frontier.1));
+    cuts.push(("pieces", e.xs.len()));
     e.len(pieces.len());
     for q in &pieces {
         e.i(*q);
         e.node(lp.prev.get(q).copied().flatten());
         e.i(lp.order.get(q).map_or(-1, |&o| i64::try_from(o).unwrap_or(0)));
     }
+    cuts.push(("seq", e.xs.len()));
     e.i(i64::try_from(lp.seq).unwrap_or(0));
+    cuts.push(("rtns", e.xs.len()));
     let rtns: Vec<&(i64, ValueId, std::sync::Arc<Vec<crate::vprof::PItem>>)> =
         lp.rtns.iter().filter(|r| pages.binary_search(&r.0).is_ok()).collect();
     e.len(rtns.len());
@@ -410,19 +418,25 @@ fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
         e.i(r.0);
         e.x(r.1);
     }
+    cuts.push(("nth", e.xs.len()));
     e.node(lp.nth.0);
     e.i(i64::from(lp.nth.1));
+    cuts.push(("fire", e.xs.len()));
     // the fire
     e.i(p.j);
     e.node(Some(p.node));
     e.len(p.xs_i);
     e.i(p.pid);
     e.i(i64::from(p.in_material));
+    cuts.push(("hint", e.xs.len()));
     e.x(p.hint);
     e.key(p.key);
+    cuts.push(("guess", e.xs.len()));
     e.x(p.rtn_guess);
+    cuts.push(("fire2", e.xs.len()));
     e.i(i64::from(p.k));
     e.i(i64::from(p.output_penalty));
+    cuts.push(("held", e.xs.len()));
     e.len(p.held.len());
     for (s, h) in &p.held {
         e.src(*s);
@@ -433,6 +447,7 @@ fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
             e.i(x);
         }
     }
+    cuts.push(("carried", e.xs.len()));
     e.len(p.carried.len());
     for c in &p.carried {
         match c.src {
@@ -441,6 +456,7 @@ fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
         }
         e.fold(c.fold);
     }
+    cuts.push(("pnth", e.xs.len()));
     e.i(i64::from(p.nth));
     e.len(p.classes.len());
     for (k, c) in &p.classes {
@@ -450,6 +466,19 @@ fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
         e.i(i64::from(c.count));
         e.i(i64::from(c.dimen));
         e.glue(&c.skip);
+    }
+    if crate::exec::prof_flag!("PHITEX_STEP_LOG") {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut parts = Vec::new();
+        for (k, &(name, at)) in cuts.iter().enumerate() {
+            let end = cuts.get(k + 1).map_or(e.xs.len(), |c| c.1);
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for x in &e.xs[at..end] {
+                x.raw().hash(&mut h);
+            }
+            parts.push(format!("{name}={:04x}", h.finish() & 0xffff));
+        }
+        eprintln!("stepstate: {}", parts.join(" "));
     }
     v.list(e.xs)
 }

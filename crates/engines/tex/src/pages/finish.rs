@@ -1878,6 +1878,10 @@ impl Operation for Finish {
                 // the guess it folded on)
                 let first = FinishIn::of(v, &pos).is_some_and(|f| f.prev_fire.0 == -1);
                 if args.is_empty() {
+                    // (a stale placement publishes nothing new: the page it
+                    // made last stands, read by the text after it, until
+                    // the page builder places it again)
+                    r.cx.unchanged();
                     r.fin = Some(FinCtx {
                         nth: pos.first().map_or(0, |&x| int_of(v, x)),
                         first,
