@@ -156,7 +156,6 @@ impl Operation for Pending {
             closes,
             opens,
             before: true,
-            ..Brackets::default()
         }));
         cx.define(f, x);
         Ok(x)

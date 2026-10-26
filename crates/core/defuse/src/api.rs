@@ -67,17 +67,14 @@ pub enum MayDefine {
 /// With `before`, the closes come before the node's reads and
 /// definitions (a node whose text begins by closing a group); without,
 /// after its definitions. The opens always come after its definitions.
-/// `kind` and `kind_pending` are kept for the client; the engine does not
-/// read them (what a scope is to the client is best a definition inside
-/// it, `Locality::Scope`, read by depth like any other).
+/// What a scope is to the client is a definition inside it
+/// (`Locality::Scope`), read by depth like any other.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 #[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct Brackets {
     pub closes: u8,
     pub opens: u8,
     pub before: bool,
-    pub kind: Option<ValueId>,
-    pub kind_pending: bool,
 }
 
 /// A node's scope effect: `Open` opens one scope after itself, `Close`
@@ -241,6 +238,13 @@ pub trait Operation: Send + Sync {
     /// a run that makes the same ones re-asks nobody.
     fn predicted_defs(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, ValueId)>> {
         None
+    }
+
+    /// Whether its nodes are siblings to a claim (`Ctx::claim`,
+    /// `Ctx::following`; default yes): a node set among the text's pieces
+    /// to start work beside them says no, and a claim passes over it.
+    fn sibling(&self) -> bool {
+        true
     }
 
     /// Its scope effect, if known before it runs.

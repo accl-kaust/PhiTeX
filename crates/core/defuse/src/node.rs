@@ -84,6 +84,11 @@ pub(crate) struct Node {
     /// the limit the node is capped.
     pub(crate) final_reruns: AtomicU32,
     pub(crate) final_epoch: AtomicU64,
+    /// The node whose claim took it (raw id + 1; 0: none), set and
+    /// cleared under its segment's write lock (`commit::apply_claim`): a
+    /// claim passes over a sibling another claimer holds, and gives back
+    /// only its own.
+    pub(crate) claimer: AtomicU64,
     /// Its operation's static effect (`Operation::effect`), packed
     /// (`pack_effect`): asked once when the node is made or its text
     /// replaced.
@@ -100,7 +105,7 @@ pub(crate) fn pack_effect(e: Effect) -> u32 {
 
 /// The brackets of a packed effect, and whether it is pending.
 pub(crate) fn unpack_effect(x: u32) -> (Brackets, bool) {
-    let b = Brackets { closes: (x & 0xff) as u8, opens: ((x >> 8) & 0xff) as u8, before: x & (1 << 16) != 0, ..Brackets::default() };
+    let b = Brackets { closes: (x & 0xff) as u8, opens: ((x >> 8) & 0xff) as u8, before: x & (1 << 16) != 0 };
     (b, x & (1 << 17) != 0)
 }
 
@@ -117,6 +122,7 @@ impl Node {
         Node {
             final_reruns: AtomicU32::new(0),
             final_epoch: AtomicU64::new(0),
+            claimer: AtomicU64::new(0),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             id,
@@ -170,6 +176,16 @@ impl Node {
 
     pub(crate) fn set_state(&self, s: State) {
         self.state.store(s as u8, Ordering::Release);
+    }
+
+    /// The node whose claim holds it.
+    pub(crate) fn claimer(&self) -> Option<NodeId> {
+        self.claimer.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw)
+    }
+
+    /// Whether another node's claim than `me`'s holds it.
+    pub(crate) fn held_by_other(&self, me: NodeId) -> bool {
+        self.claimer().is_some_and(|c| c != me)
     }
 
     /// Taken by a claim (`Inert`, or `RunningInert` while a run is in

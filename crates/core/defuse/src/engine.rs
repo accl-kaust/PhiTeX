@@ -635,7 +635,7 @@ impl Engine {
                 let mut found = None;
                 for (_, id) in inner.nodes.range((std::ops::Bound::Unbounded, hi)).rev() {
                     let s = self.node(*id);
-                    if s.parent.is_some() || s.state() == State::Gone || s.taken() {
+                    if s.parent.is_some() || s.state() == State::Gone || s.taken() || !self.op(s.op()).sibling() {
                         continue;
                     }
                     found = Some(s.clone());

@@ -2009,12 +2009,13 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
             let mut done = false;
             for (_, id) in inner.nodes.range((lo, Unbounded)) {
                 let s = eng.node(*id);
-                if s.parent.is_some() || s.state() == State::Gone {
+                if s.parent.is_some() || s.state() == State::Gone || !eng.op(s.op()).sibling() || s.held_by_other(me.id) {
                     continue;
                 }
                 if k < want {
                     let hole = s.is_hole();
                     if s.take() {
+                        s.claimer.store(me.id.raw() + 1, Ordering::Release);
                         // (one that has not run yet: what it was predicted
                         // to define is withdrawn as a run's would be)
                         if s.committed() || s.record().is_some() {
@@ -2025,6 +2026,7 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
                         }
                     }
                 } else if s.taken() {
+                    s.claimer.store(0, Ordering::Release);
                     releases.push(s.clone());
                 } else {
                     done = true;

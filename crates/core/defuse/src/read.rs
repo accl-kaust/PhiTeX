@@ -451,7 +451,7 @@ fn following_from(
             let mut hit = None;
             for (_, id) in inner.nodes.range((lo, Unbounded)) {
                 let n = eng.node(*id);
-                if n.parent.is_some() || n.state() == State::Gone {
+                if n.parent.is_some() || n.state() == State::Gone || !eng.op(n.op()).sibling() || n.held_by_other(me.id) {
                     continue;
                 }
                 if *k == i {
