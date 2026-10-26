@@ -693,7 +693,7 @@ rows = [
     ("hint analysis before the build (incr::analyse_reusing)", num(r"phitex_tex::incr::analyse_reusing"), chunks, "chunk"),
     ("a piece's run (ops::Exec::run)", op("ops::Exec"), pars, "paragraph"),
     ("  of which Run::char_run", num(r"<phitex_tex::run::Run>::char_run"), letters, "letter"),
-    ("  of which Run::line_break_ outside typeset::line_break", max(0, num(r"<phitex_tex::run::Run>::line_break_( |$)") - lb), pars, "paragraph"),
+    ("  of which Run::line_break_ outside typeset::line_break", max(0, max(num(r"<phitex_tex::run::Run>::line_break_( |$)"), num(r"<phitex_tex::run::Run>::line_break( |$)")) - lb), pars, "paragraph"),
     ("  of which typeset::line_break", lb, pars, "paragraph"),
     ("  of which Run::load_slow", num(r"<phitex_tex::run::Run>::load_slow"), pars, "paragraph"),
     ("  of which Run::finisher_args", num(r"<phitex_tex::run::Run>::finisher_args"), pars, "paragraph"),
