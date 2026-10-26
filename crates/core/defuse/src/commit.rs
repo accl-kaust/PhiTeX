@@ -393,6 +393,7 @@ fn pos_in(inner: &Inner, node: &Node) -> Pos {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product) -> CommitStats {
     let mut st = CommitStats::default();
+    let prev_commit = node.committed_at.load(Ordering::Acquire);
     let t0 = Instant::now();
     let ww = Some(w);
     for d in &mut p.defs {
@@ -836,6 +837,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         Arc::get_mut(&mut rec).expect("the record is not shared yet").placed = std::mem::take(&mut placed);
         let old = node.last.lock().replace(rec.clone());
         node.serial.store(serial, Ordering::Release);
+        node.committed_at.store(eng.clock.fetch_add(1, Ordering::AcqRel), Ordering::Release);
         let old_output = last.as_ref().filter(|r| !r.provisional).map(|r| r.output);
         st.commit_ns = ns(t_lock);
         drop(inner);
@@ -1005,7 +1007,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     };
     // (a loop-back read refuted counts as its re-ask would)
     let final_ok = match refuted.map(|i| &rec.reads[i].kind) {
-        Some(ReadKind::Field { at: Anchor::Final, .. }) => allow_final_rerun(eng, ww, node),
+        Some(ReadKind::Field { f, at: Anchor::Final }) => {
+            node.final_wake.store(true, Ordering::Release);
+            let by = read::last_definition(eng, *f).by;
+            allow_final_rerun(eng, ww, node, by, prev_commit)
+        }
         _ => true,
     };
     if let Some(cause) = cause
@@ -1429,9 +1435,10 @@ pub(crate) fn reask_final(eng: &Engine, w: Option<&Worker>, f: Field, by: Option
         if !(n.state() == State::Clean || n.committing.load(Ordering::Acquire)) {
             continue;
         }
-        if !allow_final_rerun(eng, w, n) {
+        if !allow_final_rerun(eng, w, n, by, n.committed_at.load(Ordering::Acquire)) {
             continue;
         }
+        n.final_wake.store(true, Ordering::Release);
         if mark_stale(
             eng,
             w,
@@ -1943,11 +1950,9 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     if was_hole && remove {
         walk_stopped(eng, w, node, pos, seg_id, &[], &mut st);
     }
-    if let Some(r) = &rec
-        && r.claim > 0
-    {
-        release_claimed(eng, w, node);
-    }
+    // (whatever it holds, committed or claimed by a run that never
+    // committed: a node removed or taken claims nothing)
+    release_claimed(eng, w, node);
     eng.note_stats(w, &st);
     rec.map(|r| r.placed.clone()).unwrap_or_default()
 }
@@ -1997,6 +2002,13 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
     let mut releases: Vec<Arc<Node>> = Vec::new();
     let mut taken_holes: Vec<Arc<Node>> = Vec::new();
     let mut stops: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
+    // (what it held before, up to there; what it holds now, to here)
+    let old_end = me.claim_end.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw);
+    if want == 0 && old_end.is_none() {
+        return;
+    }
+    let mut ps = read::SiblingParents::of(me);
+    let mut new_end: Option<NodeId> = None;
     'segs: while let Some(sid) = cur {
         let seg = eng.seg(sid);
         if seg.unit != me.unit {
@@ -2006,15 +2018,26 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
             let mut inner = seg.inner.write();
             let before = taken_holes.len();
             let lo = lower.map_or(Unbounded, Excluded);
-            let mut done = false;
+            let mut done = k >= want && old_end.is_none();
             for (_, id) in inner.nodes.range((lo, Unbounded)) {
+                if done {
+                    break;
+                }
                 let s = eng.node(*id);
-                if s.parent.is_some() || s.state() == State::Gone || !eng.op(s.op()).sibling() || s.held_by_other(me.id) {
+                if !ps.takes(eng, s) {
                     continue;
                 }
                 if k < want {
                     let hole = s.is_hole();
-                    if s.take() {
+                    new_end = Some(s.id);
+                    if Some(s.id) == old_end && k + 1 >= want {
+                        done = true;
+                    }
+                    // (one a later sibling's claim holds is taken with
+                    // that sibling: its holder is me now)
+                    if s.claimer().is_some_and(|c| c != me.id) && s.taken() {
+                        s.claimer.store(me.id.raw() + 1, Ordering::Release);
+                    } else if s.take() {
                         s.claimer.store(me.id.raw() + 1, Ordering::Release);
                         // (one that has not run yet: what it was predicted
                         // to define is withdrawn as a run's would be)
@@ -2025,14 +2048,19 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
                             taken_holes.push(s.clone());
                         }
                     }
-                } else if s.taken() {
-                    s.claimer.store(0, Ordering::Release);
-                    releases.push(s.clone());
                 } else {
-                    done = true;
-                    break;
+                    if s.claimer() == Some(me.id) {
+                        s.claimer.store(0, Ordering::Release);
+                        releases.push(s.clone());
+                    }
+                    if Some(s.id) == old_end || old_end.is_none() {
+                        done = true;
+                    }
                 }
                 k += 1;
+                if k >= want && old_end.is_none() {
+                    done = true;
+                }
             }
             inner.holes = inner.holes.saturating_sub(taken_holes.len() - before);
             for h in &taken_holes[before..] {
@@ -2045,8 +2073,15 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
         lower = None;
         cur = eng.order.next(sid, seg.lo);
     }
+    me.claim_end.store(new_end.map_or(0, |n| n.raw() + 1), Ordering::Release);
     for s in retracts {
         retract(eng, w, &s);
+    }
+    // (a claimer removed or taken while its run went on claims nothing:
+    // what it took after its removal gave back what it held goes back
+    // here; either way the siblings end released)
+    if want > 0 && matches!(me.state(), State::Gone | State::Inert | State::RunningInert) {
+        apply_claim(eng, w, me, 0);
     }
     let mut st = CommitStats::default();
     // (a taken node never contributes: the `next`s that stopped at it
@@ -2062,6 +2097,9 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
         file_effect(eng, w, s, None, &mut st);
     }
     eng.note_stats(w, &st);
+    for s in &releases {
+        wake_puller(eng, w, s, me.id);
+    }
     for s in releases {
         if s.release() {
             enqueue(
@@ -2075,6 +2113,56 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
                 },
             );
         }
+    }
+}
+
+/// The nearest node before `s` that would take it as a sibling, not
+/// inert and not `except`, re-asked where its last run read its
+/// siblings (`Ctx::following`): `s` held by another's claim was passed
+/// over when it read them, and now it is free that answer moved; its
+/// commit checked the answer while `s` was still held.
+fn wake_puller(eng: &Engine, w: Option<&Worker>, s: &Node, except: NodeId) {
+    let mut cur = Some(s.seg_hint());
+    let mut upper = Some(s.pos_hint());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.unit != s.unit {
+            return;
+        }
+        let found = {
+            let inner = seg.inner.read();
+            let hi = upper.map_or(Unbounded, Excluded);
+            let mut found = None;
+            for (_, id) in inner.nodes.range((Unbounded, hi)).rev() {
+                let x = eng.node(*id);
+                if x.id == except || x.state() == State::Gone || x.taken() {
+                    continue;
+                }
+                if read::SiblingParents::of(x).takes(eng, s) || s.parent == Some(x.id) {
+                    found = Some(x.clone());
+                    break;
+                }
+            }
+            found
+        };
+        if let Some(x) = found {
+            let pulled = x.record().is_some_and(|r| r.reads.iter().any(|rd| matches!(rd.kind, ReadKind::Following { .. })));
+            if pulled {
+                mark_stale(
+                    eng,
+                    w,
+                    &x,
+                    Wake {
+                        by: Some(s.id),
+                        cause: Cause::Structure,
+                        at_ns: eng.now_ns(),
+                    },
+                );
+            }
+            return;
+        }
+        upper = None;
+        cur = eng.order.prev(sid, seg.lo);
     }
 }
 

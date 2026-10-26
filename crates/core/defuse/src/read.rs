@@ -9,7 +9,7 @@ use crate::engine::Engine;
 use crate::node::{Anchor, Node, ReadKind, State};
 use crate::order::{Pos, SegId};
 use crate::segment::{Def, GLOBAL, Inner, RangeReader, Reader, Segment, reduce};
-use crate::values::{Field, Value, ValueId, Values};
+use crate::values::{Field, FxHashSet, Value, ValueId, Values};
 
 /// A path that is no path: the defining node's id as an integer
 /// (`Ctx::def_site`).
@@ -440,6 +440,7 @@ fn following_from(
     cur: &mut Option<SegId>,
     lower: &mut Option<Pos>,
 ) -> Option<Arc<Node>> {
+    let mut ps = SiblingParents::of(me);
     while let Some(sid) = *cur {
         let seg = eng.seg(sid);
         if seg.unit != me.unit {
@@ -451,7 +452,7 @@ fn following_from(
             let mut hit = None;
             for (_, id) in inner.nodes.range((lo, Unbounded)) {
                 let n = eng.node(*id);
-                if n.parent.is_some() || n.state() == State::Gone || !eng.op(n.op()).sibling() || n.held_by_other(me.id) {
+                if !ps.takes(eng, n) {
                     continue;
                 }
                 if *k == i {
@@ -469,6 +470,51 @@ fn following_from(
         *cur = eng.order.next(sid, seg.lo);
     }
     None
+}
+
+/// The parents a sibling of `me` may have: `me`'s, then its parent's,
+/// up to the line's top (a placed node's siblings are the later
+/// placements of its parent and, past them, its parent's siblings); the
+/// chain above `me`'s parent found once, when a candidate needs it.
+pub(crate) struct SiblingParents {
+    me: NodeId,
+    at: Pos,
+    parent: Option<NodeId>,
+    above: Option<FxHashSet<NodeId>>,
+}
+
+impl SiblingParents {
+    pub(crate) fn of(me: &Node) -> SiblingParents {
+        SiblingParents { me: me.id, at: me.pos_hint(), parent: me.parent, above: None }
+    }
+
+    fn has(&mut self, eng: &Engine, p: Option<NodeId>) -> bool {
+        let Some(q) = p else {
+            return true;
+        };
+        if p == self.parent {
+            return true;
+        }
+        let parent = self.parent;
+        self.above
+            .get_or_insert_with(|| {
+                let mut s = FxHashSet::default();
+                let mut p = parent;
+                while let Some(x) = p {
+                    p = eng.node(x).parent;
+                    if let Some(y) = p {
+                        s.insert(y);
+                    }
+                }
+                s
+            })
+            .contains(&q)
+    }
+
+    /// Whether `n` is a sibling a claim of `me` may take.
+    pub(crate) fn takes(&mut self, eng: &Engine, n: &Node) -> bool {
+        n.state() != State::Gone && eng.op(n.op()).sibling() && !n.held_before(eng, self.me, self.at) && self.has(eng, n.parent)
+    }
 }
 
 pub(crate) fn text_value(eng: &Engine, n: &Node) -> ValueId {

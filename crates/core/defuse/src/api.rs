@@ -338,6 +338,8 @@ pub struct NodeInfo {
     /// The node whose run placed it, if any.
     pub parent: Option<NodeId>,
     pub state: NodeState,
+    /// The node whose claim holds it, if one does.
+    pub claimer: Option<NodeId>,
 }
 
 /// A node's state, coarsely.

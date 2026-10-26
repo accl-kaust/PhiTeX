@@ -123,6 +123,9 @@ pub struct Engine {
     pub(crate) pending: Mx<Pending>,
     /// Evaluations so far: the epoch a node's run count belongs to.
     pub(crate) epoch: AtomicU64,
+    /// Ticks at each run's start and each commit (`Node::run_start`,
+    /// `Node::committed_at`): which run could have seen which commit.
+    pub(crate) clock: AtomicU64,
     pub(crate) t0: Instant,
     /// The last node to commit in the last evaluation.
     pub(crate) last_commit: AtomicU64,
@@ -220,6 +223,7 @@ impl Engine {
             stats: Stats::default(),
             pending: Mx::new(Pending::default()),
             epoch: AtomicU64::new(0),
+            clock: AtomicU64::new(1),
             t0: Instant::now(),
             last_commit: AtomicU64::new(u64::MAX),
             last_report: Mx::new(None),
@@ -1151,6 +1155,7 @@ impl Engine {
             unit: node.unit,
             parent: node.parent,
             state,
+            claimer: node.claimer(),
         })
     }
 

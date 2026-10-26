@@ -30,6 +30,15 @@ use crate::values::{Field, FxHashMap, FxHashSet};
 /// What every worker and the pool share.
 pub(crate) struct Shared {
     injector: Injector<NodeId>,
+    /// Loop-back readers re-asked (`Node::final_wake`): taken only when
+    /// nothing else is queued or running (`finals_n` is all that is
+    /// outstanding), so a reader runs again on definitions that have
+    /// settled rather than on each one as it lands, a half-made state
+    /// another run is about to change.
+    finals: Injector<NodeId>,
+    finals_n: AtomicUsize,
+    /// Runs taken from `finals` still going: they are no other work.
+    finals_running: AtomicUsize,
     stealers: Vec<Stealer<NodeId>>,
     later_stealers: Vec<Stealer<NodeId>>,
     block_stealers: Vec<Stealer<(NodeId, u32)>>,
@@ -101,6 +110,8 @@ pub(crate) struct WorkerLog {
 /// One worker's deques and counters (nanoseconds).
 pub(crate) struct Worker {
     pub(crate) ix: usize,
+    /// Its next run was taken from the loop-back readers' queue.
+    took_final: AtomicBool,
     /// Nodes placed by its commits, and its runs to run again: next.
     local: Deque<NodeId>,
     /// Nodes its commits re-asked, in the order asked: after its placed
@@ -218,6 +229,9 @@ impl Pool {
         let block_stealers = blocks.iter().map(Deque::stealer).collect();
         let shared = Arc::new(Shared {
             injector: Injector::new(),
+            finals: Injector::new(),
+            finals_n: AtomicUsize::new(0),
+            finals_running: AtomicUsize::new(0),
             stealers,
             later_stealers,
             block_stealers,
@@ -243,6 +257,7 @@ impl Pool {
                 later,
                 block,
                 block_runs: AtomicU32::new(0),
+                took_final: AtomicBool::new(false),
                 shared: shared.clone(),
                 runs: AtomicU64::new(0),
                 nodes_run: AtomicU64::new(0),
@@ -497,7 +512,22 @@ impl Pool {
             }
             return Some(last);
         }
-        None
+        let sh = &self.shared;
+        if sh.outstanding.load(Ordering::SeqCst) > sh.finals_n.load(Ordering::SeqCst) + sh.finals_running.load(Ordering::SeqCst) {
+            return None;
+        }
+        loop {
+            match sh.finals.steal() {
+                Steal::Success(n) => {
+                    sh.finals_running.fetch_add(1, Ordering::SeqCst);
+                    sh.finals_n.fetch_sub(1, Ordering::SeqCst);
+                    w.took_final.store(true, Ordering::Relaxed);
+                    return Some(n);
+                }
+                Steal::Empty => return None,
+                Steal::Retry => {}
+            }
+        }
     }
 
     /// Rests until there is work, the evaluation stops, or nothing is
@@ -633,11 +663,15 @@ fn run_worker(
 /// deque, or the engine's pending list when no evaluation runs.
 pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) {
     let created = matches!(wake.cause, Cause::Created { .. });
+    let fin = n.final_wake.swap(false, Ordering::AcqRel);
     *n.woke.lock() = Some(wake);
     match w {
         Some(w) => {
             w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
-            if created {
+            if fin {
+                w.shared.finals_n.fetch_add(1, Ordering::SeqCst);
+                w.shared.finals.push(n.id);
+            } else if created {
                 w.local.push(n.id);
             } else {
                 w.later.push(n.id);
@@ -721,11 +755,21 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
 /// then `Clean` or, if re-asked meanwhile, `Dirty` and queued again. A
 /// `Stop` from the run is a refuted run: queued again without a commit.
 pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
+    let fin = w.took_final.swap(false, Ordering::Relaxed);
+    let r = work_one(eng, pool, w, n);
+    if fin {
+        pool.shared.finals_running.fetch_sub(1, Ordering::SeqCst);
+    }
+    r
+}
+
+fn work_one(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
     let node = eng.node(n);
     if !node.cas_state(State::Dirty, State::Running) {
         pool.shared.done_one();
         return Ok(());
     }
+    node.run_start.store(eng.clock.fetch_add(1, Ordering::AcqRel), Ordering::Release);
     let first = node.run_epoch.swap(pool.epoch, Ordering::AcqRel) != pool.epoch;
     if first {
         node.runs.store(0, Ordering::Relaxed);
@@ -856,7 +900,12 @@ fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
         }
         node.committing.store(false, Ordering::Release);
         if to == State::Dirty {
-            w.local.push(node.id);
+            if node.final_wake.swap(false, Ordering::AcqRel) {
+                w.shared.finals_n.fetch_add(1, Ordering::SeqCst);
+                w.shared.finals.push(node.id);
+            } else {
+                w.local.push(node.id);
+            }
             w.shared.wake_one();
         } else {
             pool.shared.done_one();
@@ -865,14 +914,21 @@ fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
     }
 }
 
-/// A node re-asked through an `At::Final` read: counts the rerun; past
-/// `Limits::final_reruns` the node is left with its last answer, listed in
-/// `Report::capped`, and not queued. True when it may run.
-pub(crate) fn allow_final_rerun(eng: &Engine, w: Option<&Worker>, node: &Node) -> bool {
+/// A node re-asked through an `At::Final` read of `by`'s definition:
+/// counts the rerun where `by`'s run began after the node's commit at
+/// `since` (it could have seen the node's last result: a pass of the
+/// loop, as a LaTeX run reads what the one before wrote; a definition
+/// from a run older than that is one more step of the same pass); past
+/// `Limits::final_reruns` the node is left with its last answer, listed
+/// in `Report::capped`, and not queued. True when it may run.
+pub(crate) fn allow_final_rerun(eng: &Engine, w: Option<&Worker>, node: &Node, by: Option<NodeId>, since: u64) -> bool {
     // (outside an evaluation, an edit's re-ask: not counted)
     let Some(w) = w else {
         return true;
     };
+    if by.is_some_and(|b| eng.node(b).run_start.load(Ordering::Acquire) < since) {
+        return true;
+    }
     let ep = eng.epoch.load(Ordering::Acquire);
     if node.final_epoch.swap(ep, Ordering::AcqRel) != ep {
         node.final_reruns.store(0, Ordering::Release);

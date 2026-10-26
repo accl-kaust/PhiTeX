@@ -89,6 +89,16 @@ pub(crate) struct Node {
     /// claim passes over a sibling another claimer holds, and gives back
     /// only its own.
     pub(crate) claimer: AtomicU64,
+    /// Its next queueing is for a loop-back re-ask: on the pool's last
+    /// queue (`sched::enqueue`).
+    pub(crate) final_wake: AtomicBool,
+    /// The furthest sibling its claim holds (raw id + 1; 0: none): a
+    /// claim made smaller gives back what it holds up to there, past
+    /// siblings it never held.
+    pub(crate) claim_end: AtomicU64,
+    /// `Engine::clock` when its last run began, and at its last commit.
+    pub(crate) run_start: AtomicU64,
+    pub(crate) committed_at: AtomicU64,
     /// Its operation's static effect (`Operation::effect`), packed
     /// (`pack_effect`): asked once when the node is made or its text
     /// replaced.
@@ -123,6 +133,10 @@ impl Node {
             final_reruns: AtomicU32::new(0),
             final_epoch: AtomicU64::new(0),
             claimer: AtomicU64::new(0),
+            final_wake: AtomicBool::new(false),
+            claim_end: AtomicU64::new(0),
+            run_start: AtomicU64::new(0),
+            committed_at: AtomicU64::new(0),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             id,
@@ -183,9 +197,14 @@ impl Node {
         self.claimer.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw)
     }
 
-    /// Whether another node's claim than `me`'s holds it.
-    pub(crate) fn held_by_other(&self, me: NodeId) -> bool {
-        self.claimer().is_some_and(|c| c != me)
+    /// Whether a claim of a node before `me` (at `at`) holds it: one
+    /// `me` cannot take. A claimer after `me` holds it inside its own
+    /// span, which `me` takes with the claimer.
+    pub(crate) fn held_before(&self, eng: &crate::engine::Engine, me: NodeId, at: crate::order::Pos) -> bool {
+        self.claimer().is_some_and(|c| {
+            let cn = eng.node(c);
+            c != me && cn.state() != State::Gone && cn.pos_hint() < at
+        })
     }
 
     /// Taken by a claim (`Inert`, or `RunningInert` while a run is in
