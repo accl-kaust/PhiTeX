@@ -145,7 +145,15 @@ pub struct Values {
     seqs: Box<[Shard<Rope>]>,
     /// Distinct per store, for caches keyed by ids (`instance`).
     instance: u64,
+    /// Its plain values' first payload (`PLAIN_SPAN` times its instance):
+    /// the stores of one process give their plain values distinct ids, so
+    /// a cache of the process keyed by ids (a font's file, a map's text)
+    /// never takes one store's value for another's.
+    base: u64,
 }
+
+/// The payloads of one store's plain values.
+const PLAIN_SPAN: u64 = 1 << 40;
 
 impl Default for Values {
     fn default() -> Self {
@@ -190,12 +198,19 @@ fn plain_hash(v: &Value) -> u64 {
 
 impl Values {
     pub fn new() -> Values {
+        let instance = INSTANCES.fetch_add(1, Ordering::Relaxed);
         Values {
             plain: Table::new(),
             plain_ix: (0..SHARDS).map(|_| Padded(Lock::new(FxHashMap::default()))).collect(),
             seqs: (0..SHARDS).map(|_| Padded(Lock::new(FxHashMap::default()))).collect(),
-            instance: INSTANCES.fetch_add(1, Ordering::Relaxed),
+            instance,
+            base: (instance % (PAYLOAD / PLAIN_SPAN)) * PLAIN_SPAN,
         }
+    }
+
+    /// The index in `plain` of plain value `id`'s payload.
+    fn plain_index(&self, id: ValueId) -> usize {
+        id.payload().checked_sub(self.base).filter(|&i| i < PLAIN_SPAN).and_then(|i| usize::try_from(i).ok()).unwrap_or(usize::MAX)
     }
 
     /// The id of `v`, made if new.
@@ -215,7 +230,7 @@ impl Values {
     }
 
     fn plain_is(&self, id: ValueId, v: &Value) -> bool {
-        self.plain.get(usize::try_from(id.payload()).unwrap_or(usize::MAX)).is_some_and(|a| **a == *v)
+        self.plain.get(self.plain_index(id)).is_some_and(|a| **a == *v)
     }
 
     /// A string, list or big integer by content hash; a hash held by
@@ -242,7 +257,7 @@ impl Values {
                 continue;
             }
             let i = self.plain.push(Arc::new(v));
-            let id = ValueId::make(tag, i as u64);
+            let id = ValueId::make(tag, self.base + i as u64);
             w.insert(h, id);
             return id;
         }
@@ -255,6 +270,29 @@ impl Values {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// A hash of `id`'s content, the same in every store (an id is its
+    /// store's own: two builds' equal values have other ids): the
+    /// identity of a value compared across builds, a page's.
+    pub fn digest(&self, id: ValueId) -> u64 {
+        match id.tag() {
+            T_UNIT | T_BOOL | T_INT => hash_words(0x6469_6765_7374, &[id.0]),
+            T_SEQ => {
+                let xs = self.seq_to_vec(id);
+                let ds: Vec<u64> = xs.iter().map(|&x| self.digest(x)).collect();
+                hash_words(T_SEQ, &ds)
+            }
+            _ => match self.plain_value(id).map(|a| &**a) {
+                Some(Value::Str(s)) => hash_bytes(T_STR, s.as_bytes()),
+                Some(Value::List(xs)) => {
+                    let ds: Vec<u64> = xs.iter().map(|&x| self.digest(x)).collect();
+                    hash_words(T_LIST, &ds)
+                }
+                Some(Value::Int(i)) => hash_words(T_BIG, &[i.cast_unsigned()]),
+                _ => 0,
+            },
+        }
     }
 
     /// A number distinct per store, for caches keyed by ids.
@@ -295,7 +333,7 @@ impl Values {
     }
 
     fn plain_value(&self, id: ValueId) -> Option<&Arc<Value>> {
-        self.plain.get(usize::try_from(id.payload()).ok()?)
+        self.plain.get(self.plain_index(id))
     }
 
     /// The value; a sequence node is built on demand.

@@ -227,8 +227,8 @@ impl FinishIn {
             k: u32::try_from(n(1)).unwrap_or(0),
             in_material: n(2) != 0,
             after: (n(3) != -1).then(|| node(n(3))),
-            spans: list_of(v, p[4]).chunks_exact(5).filter_map(|c| span_of_ints(v, c)).collect(),
-            rtns: list_of(v, p[5]).chunks_exact(2).map(|c| (int_of(v, c[0]), c[1])).collect(),
+            spans: list_of(v, p[4]).as_chunks::<5>().0.iter().filter_map(|c| span_of_ints(v, c)).collect(),
+            rtns: list_of(v, p[5]).as_chunks::<2>().0.iter().map(|c| (int_of(v, c[0]), c[1])).collect(),
             fold: FoldState {
                 sf: i32::try_from(n(6)).unwrap_or(1000),
                 pd: i32::try_from(n(7)).unwrap_or(IGNORE_DEPTH),
@@ -251,14 +251,14 @@ impl FinishIn {
                 .get(21)
                 .map(|&x| list_of(v, x))
                 .unwrap_or_default()
-                .chunks_exact(5)
+                .as_chunks::<5>().0.iter()
                 .filter_map(|c| span_of_ints(v, c).map(|s| s.src))
                 .collect(),
             vers: p
                 .get(22)
                 .map(|&x| list_of(v, x))
                 .unwrap_or_default()
-                .chunks_exact(2)
+                .as_chunks::<2>().0.iter()
                 .map(|c| (int_of(v, c[0]), c[1]))
                 .collect(),
         })
@@ -680,7 +680,7 @@ impl Run<'_, '_> {
         use phitex_defuse::Step;
         let v = self.v;
         if cfg!(feature = "observe") {
-            let k = PageNode::of(self.ops, v, self.cx.op(), &self.cx.args());
+            let k = PageNode::of(self.ops, v, self.cx.op(), self.cx.args());
             assert!(k.is_some_and(|k| k.folds().contains(&PITEMS)), "a window of {PITEMS} outside a finisher");
         }
         let w = self.view_through(PITEMS, fin.after, fin.piece)?;
@@ -979,7 +979,7 @@ impl Run<'_, '_> {
         // §1012: the marks; those in force where the page began (every
         // class's `\botmark` before it) the page builder's, from its
         // arguments ([`FinishIn::top_marks`]), not the finisher before's
-        let before: Vec<(i64, ValueId)> = FinishIn::of(v, &self.cx.args())
+        let before: Vec<(i64, ValueId)> = FinishIn::of(v, self.cx.args())
             .map(|f| f.top_marks)
             .filter(|&m| m != ValueId::UNIT)
             .map(|m| {
@@ -1255,7 +1255,8 @@ impl Run<'_, '_> {
         {
             crate::pdfout::ship(self, page, *bx, &side, &ids)?;
         }
-        let shown = Some(page.raw());
+        // (its content's hash: a page's identity across builds)
+        let shown = Some(v.digest(page));
         phitex_pdf::phase::add(4, t_p4);
         if timed {
             crate::exec::later(format!(
@@ -2078,7 +2079,7 @@ impl Run<'_, '_> {
                 all.join(" ")
             );
         }
-        let at = fin_at(v, &self.cx.args());
+        let at = fin_at(v, self.cx.args());
         self.contribute(GDEFS, gdefs_unit(v, x, at));
         x
     }
@@ -2136,8 +2137,8 @@ impl Run<'_, '_> {
         }
         let mut m = self.ops.fin_defs.locked();
         let pos = self.cx.args();
-        let idx = fin_page_key(v, &pos);
-        let e = m.entry(fin_key(v, t, &pos)).or_default();
+        let idx = fin_page_key(v, pos);
+        let e = m.entry(fin_key(v, t, pos)).or_default();
         e.gdefs = Some(gdefs);
         for &(f, x) in &out {
             if !e.seen.contains(&f) {
@@ -2152,7 +2153,7 @@ impl Run<'_, '_> {
         if crate::exec::obs_flag!("PHITEX_PRED_SHOW") {
             // (the page's class: the penalty it fired at, whether in a
             // routine's material, the dead cycles before it)
-            let fin = FinishIn::of(v, &self.cx.args());
+            let fin = FinishIn::of(v, self.cx.args());
             let class = fin.as_ref().map_or_else(String::new, |f| {
                 format!("pen {} mat {} prev_dead {} classes {:?} nth {}", f.output_penalty, f.in_material, f.prev_fire.1, f.classes, f.nth)
             });
@@ -2303,7 +2304,7 @@ impl Run<'_, '_> {
         let xs = list_of(v, x);
         let n = |i: usize| u32::try_from(xs.get(i).map_or(0, |&y| int_of(v, y))).unwrap_or(u32::MAX);
         let pos = self.cx.args();
-        let Some(fin) = FinishIn::of(v, &pos) else {
+        let Some(fin) = FinishIn::of(v, pos) else {
             return Ok(ValueId::UNIT);
         };
         let w = self.view_through(PITEMS, fin.after, fin.piece)?;

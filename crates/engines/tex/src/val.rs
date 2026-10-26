@@ -1820,7 +1820,7 @@ mod tests {
         let v = Values::new();
         let mut segs: Vec<Vec<i64>> = (0..200).map(|k| (0..(k % 5)).map(|j| k * 10 + j).collect()).collect();
         let mut memo: CatMemo<i64> = CatMemo::default();
-        let mut step = |segs: &Vec<Vec<i64>>, memo: &mut CatMemo<i64>| {
+        let step = |segs: &Vec<Vec<i64>>, memo: &mut CatMemo<i64>| {
             let x = fold(&v, segs);
             let want: Vec<i64> = segs.iter().flatten().copied().collect();
             let got = memo.walk(&v, x, |e| v.as_int(e));

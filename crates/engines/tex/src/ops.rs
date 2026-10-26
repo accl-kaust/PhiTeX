@@ -247,6 +247,12 @@ pub(crate) fn run_node(
             let pdf = r.param("pdfoutput").is_ok_and(|p| p > 0);
             let _ = r.log("fatal", if pdf { "pdf" } else { "" });
             r.end_fatal();
+            // (the main list's end, an abort, given to the page builder as
+            // a piece's items are: it ends the pages there, and the output
+            // is assembled from the pages shipped before)
+            if let Err(Halt::Stop(s)) = r.page_fold() {
+                return Err(s);
+            }
             if let Err(Halt::Stop(s)) = r.ready_records() {
                 return Err(s);
             }

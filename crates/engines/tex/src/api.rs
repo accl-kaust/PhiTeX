@@ -4732,7 +4732,7 @@ impl Build {
         let t_before = t_all.elapsed();
         crate::timeline::lap("engine: the edit's inputs");
         // a text sent before the evaluation starts is the one it is for
-        if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
+        if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &self.g.eng) {
             self.g.eng.set_version(v);
         }
         let t_apply = t_all.elapsed();
@@ -5039,7 +5039,7 @@ impl Build {
             let args_of = |eng: &Engine, k: usize| {
                 node_args(eng.values(), &df.text, Some(&df.incr), &new[k].1, loads.as_deref(), Some(pv))
             };
-            match apply_slices(&mut self.g.eng, exec, Placing::Placed, &mut nodes, &new, &args_of) {
+            match apply_slices(&self.g.eng, exec, Placing::Placed, &mut nodes, &new, &args_of) {
                 Some(a) => {
                     n += a.changed();
                     // (each piece's move since it was made: a kept one's
@@ -6335,7 +6335,7 @@ impl Build {
                 .map(|&l| list_of(v, l))
                 .unwrap_or_default()
                 .iter()
-                .map(|x| phitex_defuse::hash_words(0x7061_6765, &[x.raw()]))
+                .map(|&x| phitex_defuse::hash_words(0x7061_6765, &[v.digest(x)]))
                 .collect(),
             None => self.pages_made(),
         };
@@ -6367,7 +6367,7 @@ impl Build {
             .unwrap_or_default();
         if shown.len() == out.len() {
             for (h, s) in out.iter_mut().zip(shown) {
-                *h = phitex_defuse::hash_words(*h, &[s.raw()]);
+                *h = phitex_defuse::hash_words(*h, &[v.digest(s)]);
             }
         }
         out

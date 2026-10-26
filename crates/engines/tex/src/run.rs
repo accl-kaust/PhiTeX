@@ -2661,7 +2661,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let (marker, tagged) = if op == self.ops.finish {
             // (the page: its piece and the pages fired in it before it,
             // `crate::api::doc_order`)
-            let anchor = crate::pages::FinishIn::of(v, &self.cx.args())
+            let anchor = crate::pages::FinishIn::of(v, self.cx.args())
                 .map_or(-1, |f| i64::from_ne_bytes(f.piece.raw().to_ne_bytes()));
             let page = v.list(vec![v.int(anchor), v.int(self.page_nth())]);
             let mut t = vec![page, e];
@@ -3649,7 +3649,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Where it does: the engine passed it by in that field's windows.
     fn check_contribs_complete(&self) {
         let args = self.cx.args();
-        let Some(k) = crate::pages::PageNode::of(self.ops, self.v, self.cx.op(), &args) else {
+        let Some(k) = crate::pages::PageNode::of(self.ops, self.v, self.cx.op(), args) else {
             return;
         };
         if !k.contribs_complete() {
@@ -4575,7 +4575,7 @@ impl<'c, 'a> Run<'c, 'a> {
             && self.conds.is_empty()
             && self.effect == Effect::None
             && self.nest.iter().all(|l| !l.owns && l.group != 0)
-            && !crate::hints::effect_none(&self.ops.hints, self.v, &self.cx.args())
+            && !crate::hints::effect_none(&self.ops.hints, self.v, self.cx.args())
     }
 
     /// Whether the run closed the engine scope it ran in, with nothing
@@ -4785,8 +4785,8 @@ impl<'c, 'a> Run<'c, 'a> {
         let rec = self.rec_load
             || (op == self.ops.exec
                 && self.ops.node_rec.load(std::sync::atomic::Ordering::Relaxed)
-                && !crate::pkgrec::is_load(self.v, &self.cx.args())
-                && crate::pkgrec::is_recorded(&self.ops.hints, self.v, &self.cx.args()));
+                && !crate::pkgrec::is_load(self.v, self.cx.args())
+                && crate::pkgrec::is_recorded(&self.ops.hints, self.v, self.cx.args()));
         if rec && op == self.ops.exec && !self.claim_rest && self.pulled_only_blanks() {
             self.record_load(&published);
         }
@@ -4959,7 +4959,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // cause and its text)
         if n > 0 && crate::exec::obs_flag!("PHITEX_CLAIM_TRACE") {
             let args = self.cx.args();
-            let h = crate::hints::hint_of_args(&self.ops.hints, self.v, &args);
+            let h = crate::hints::hint_of_args(&self.ops.hints, self.v, args);
             eprintln!(
                 "claim-made: {n}\t{}\t{:?}",
                 if h.bound.is_some() {
@@ -4980,7 +4980,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.cx.claim(n);
         if crate::exec::obs_flag!("PHITEX_TEX_TRACE")
             && self.effect != Effect::None
-            && crate::hints::effect_none(&self.ops.hints, self.v, &self.cx.args())
+            && crate::hints::effect_none(&self.ops.hints, self.v, self.cx.args())
         {
             eprintln!(
                 "  effect {:?} of {} against its hint's none (refuted)",
@@ -5057,7 +5057,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// scope and took no sibling; contributed to `pkgrecs` under its key.
     fn record_load(&mut self, published: &[(Field, ValueId, Locality)]) {
         let v = self.v;
-        let Some(key) = crate::pkgrec::args_key(&self.ops.hints, v, &self.cx.args()) else {
+        let Some(key) = crate::pkgrec::args_key(&self.ops.hints, v, self.cx.args()) else {
             return;
         };
         // (the files the job writes and reads back are the document's,
@@ -6099,7 +6099,7 @@ impl Run<'_, '_> {
         if args != old_args {
             let v = self.v;
             let r = |a: &[ValueId]| a.iter().map(|&x| v.render(x).chars().take(200).collect::<String>()).collect::<Vec<_>>();
-            eprintln!("resume-verify: node {node} (finisher {fin}) RETEXTED: last {:?} this {:?}", r(old_args), r(&args));
+            eprintln!("resume-verify: node {node} (finisher {fin}) RETEXTED: last {:?} this {:?}", r(old_args), r(args));
         }
         if oh == h {
             eprintln!("resume-verify: node {node} (finisher {fin}) mark {k} holds");

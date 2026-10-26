@@ -227,7 +227,7 @@ impl Run<'_, '_> {
         to: Option<phitex_defuse::NodeId>,
     ) -> R<ValueId> {
         if cfg!(feature = "observe") {
-            let k = PageNode::of(self.ops, self.v, self.cx.op(), &self.cx.args());
+            let k = PageNode::of(self.ops, self.v, self.cx.op(), self.cx.args());
             assert!(
                 k.is_some_and(|k| k.folds().contains(&name)),
                 "node {} ({k:?}) folds {name}, which its read hint leaves out (PageNode::folds)",

@@ -17,7 +17,7 @@
 //!   piece's later definitions stand over the routine's
 //!   ([`Run::give_way`]).
 
-use super::*;
+use super::{Run, R, group, Halt, Par, nodes, list_of, int_of, ValueId, Field, str_of, InsertClass, glue_value, glue_of, PITEMS, Locality, Loc, BEFORE_PIECE, PAGE_FIELDS, MayDefine, Values, Line, Operation, toks_value, Seg, ContSlot, some, ContSaved, State, ContState, GDef, replaced, FoldState, IGNORE_DEPTH, toks_of, Shared, Effect, Ctx, Stop, ops, run_node};
 
 /// What a run had done when it passed a candidate: at its end, a page
 /// finishing at its last candidate finishes at the end of the piece iff
@@ -438,7 +438,7 @@ impl Run<'_, '_> {
         if op != self.ops.exec {
             return None;
         }
-        crate::hints::hint_of_args(&self.ops.hints, v, &args)
+        crate::hints::hint_of_args(&self.ops.hints, v, args)
             .bound
             .as_ref()
             .and_then(|b| b.claim)

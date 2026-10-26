@@ -615,9 +615,30 @@ impl Engine {
         ids
     }
 
-    /// The nearest pushed sibling before `n` that is not inert, re-asked
+    /// The node that took `n`, if it is taken, else the nearest pushed
+    /// sibling before `n` that is not inert, re-asked
     /// when its claim may have changed shape (`Cause::Structure`).
     fn wake_claimer(&self, n: &Node) {
+        // (a node taken: the node that took it, a continuation placed
+        // after a sibling as much as a sibling)
+        if n.taken()
+            && let Some(c) = n.claimer()
+        {
+            let c = self.node(c);
+            if c.state() != State::Gone {
+                mark_dirty(
+                    self,
+                    None,
+                    c,
+                    Wake {
+                        by: Some(n.id),
+                        cause: Cause::Structure,
+                        at_ns: self.now_ns(),
+                    },
+                );
+                return;
+            }
+        }
         let mut cur = Some(n.seg_hint());
         let mut upper = Some(n.pos_hint());
         while let Some(sid) = cur {

@@ -1547,7 +1547,14 @@ impl Run<'_, '_> {
                         return Ok(Some(q?));
                     }
                 }
-                PItem::SetPage(..) | PItem::InsParams(..) | PItem::End(_) | PItem::Abort => {
+                // (§1335: the main list ends there, no build after it; the
+                // page is not shipped)
+                PItem::Abort => {
+                    lp.pend.clear();
+                    lp.ended = true;
+                    return Ok(None);
+                }
+                PItem::SetPage(..) | PItem::InsParams(..) | PItem::End(_) => {
                     lp.pend.push((x.clone(), s));
                 }
                 _ => fold_item_t(lp, x, s),
