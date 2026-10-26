@@ -698,20 +698,36 @@ pub(crate) fn keep_made(
 /// holds only characters, boxes of them, discretionaries, glue without
 /// leaders, rules, kerns and the like ([`native_walk`]), noted on the
 /// way: the walk that encodes it.
-pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u8, Option<FontIds>) {
+/// What [`encode_line`] keeps from one line of a paragraph to the next:
+/// the last interword glue's value, the characters' (direct-mapped by
+/// character) and the kerns' (by width); the lines repeat them.
+pub(crate) struct LineMemo {
+    glue: Option<(GlueNode, ValueId)>,
+    chars: [(u32, u16, ValueId); 128],
+    kerns: [(i32, KernKind, ValueId); 16],
+}
+
+impl Default for LineMemo {
+    fn default() -> Self {
+        Self {
+            glue: None,
+            chars: [(u32::MAX, 0, ValueId::UNIT); 128],
+            kerns: [(i32::MIN, KernKind::Normal, ValueId::UNIT); 16],
+        }
+    }
+}
+
+pub(crate) fn encode_line(
+    v: &Values,
+    list: &[Node],
+    side: &Side,
+    memo: &mut LineMemo,
+) -> (ValueId, u8, Option<FontIds>) {
     let was = SIDE_SEEN.with(|c| c.replace(0));
     let mut fonts = FontIds::default();
     let mut plain = true;
     let mut font_was = u32::MAX;
-    // (a line's interword glue is one node many times: the last glue
-    // encoded is kept, as [`encode_list`] does)
-    let mut glue: Option<(&GlueNode, ValueId)> = None;
-    // (the line's characters' values, direct-mapped by character: a line
-    // repeats few, and the run's cache is a thread-local away)
-    let mut chars = [(u32::MAX, 0u16, ValueId::UNIT); 64];
-    // (its kerns' values, direct-mapped by width, and its last
-    // discretionary's: a line repeats those too)
-    let mut kerns = [(i32::MIN, KernKind::Normal, ValueId::UNIT); 16];
+    let LineMemo { glue, chars, kerns } = memo;
     let mut disc: Option<(&Disc, ValueId)> = None;
     let mut xs = Vec::with_capacity(list.len());
     for n in list {
@@ -721,7 +737,7 @@ pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u
                     fonts.insert(*font);
                     font_was = *font;
                 }
-                let e = &mut chars[usize::from(*ch) & 63];
+                let e = &mut chars[usize::from(*ch) & 127];
                 if e.0 == *font && e.1 == *ch {
                     e.2
                 } else {
@@ -731,10 +747,10 @@ pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u
                 }
             }
             Node::Glue(g) if g.leader.is_none() => match glue {
-                Some((h, x)) if h == g => x,
+                Some((h, x)) if h == g => *x,
                 _ => {
                     let x = encode(v, n, side);
-                    glue = Some((g, x));
+                    *glue = Some((g.clone(), x));
                     x
                 }
             },

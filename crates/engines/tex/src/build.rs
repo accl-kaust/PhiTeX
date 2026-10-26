@@ -1361,9 +1361,11 @@ impl Run<'_, '_> {
         let lsl = v.int(i64::from(self.ipar(Par::lineskiplimit)?));
         let tv = v.int(nodes::T_VBOX);
         let mut out = Vec::with_capacity(para.lines.len() * 2);
+        let mut memo = nodes::LineMemo::default();
         for (k, mut line) in para.lines.into_iter().enumerate() {
             self.box_report(true, line.packed.report, true);
-            let (list, seen, line_fonts) = nodes::encode_line(v, &line.packed.node.list, &side);
+            let (list, seen, line_fonts) =
+                nodes::encode_line(v, &line.packed.node.list, &side, &mut memo);
             let b = nodes::encode_box_with(v, &line.packed.node, list);
             // (its fonts from its nodes, for its unit's shape: not walked
             // again through its value, `crate::nodes::unit_shape`)
