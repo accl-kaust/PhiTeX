@@ -3074,6 +3074,12 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.seeded.iter().any(|s| s.name == key) {
             return Ok(true);
         }
+        // (a file this run opened for writing before here is read as it
+        // wrote it so far, `Run::read_file`: LaTeX's `\enddocument` reading
+        // the `.aux` back to compare its labels)
+        if self.get(&format!("wopen:{key}"))?.is_some() {
+            return Ok(false);
+        }
         let v = self.v;
         let k = self.keyed(crate::fields::Fam::Wkeys, key);
         let w = self.keyed(crate::fields::Fam::Wfile, key);
