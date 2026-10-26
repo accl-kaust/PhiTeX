@@ -13,7 +13,7 @@ use crate::commit::{self, CommitStats, Predicted, own_write, place_after, settle
 use crate::index::{FieldIndex, RangeIndex};
 use crate::lock::{Lock, Mx, ns};
 use crate::node::{Node, State, Wake};
-use crate::order::{GAP, Order, Pos, SegId, UNIT_SPAN};
+use crate::order::{GAP, Order, Pos, ROOM_TRIES, SegId, UNIT_SPAN};
 use crate::read::{self, answer, apply_path, reaching_at};
 use crate::sched::{Pool, Worker, enqueue, mark_dirty};
 use crate::segment::Segment;
@@ -696,7 +696,7 @@ impl Engine {
         let near = self.node(node);
         let id = NodeId::from_raw(self.nodes.reserve() as u64);
         let (n, pred) = commit::built(self, near.unit, None, op, args, id);
-        let mut roomy = false;
+        let mut tries = 0;
         loop {
             let Some((seg, mut inner)) = own_write(self, near) else {
                 let n = self.push_node(n, pred);
@@ -707,9 +707,10 @@ impl Engine {
                 seg.split(&mut inner, self, sid);
                 continue;
             }
-            if !roomy && !seg.has_room(&inner, 1) {
+            if !seg.has_room(&inner, 1) && (tries < ROOM_TRIES || !seg.can_place(&inner)) {
                 drop(inner);
-                roomy = true;
+                tries += 1;
+                assert!(tries <= 2 * ROOM_TRIES, "no room after rebalances");
                 self.order.rebalance(self, seg.id);
                 continue;
             }
@@ -886,6 +887,11 @@ impl Engine {
             .iter()
             .map(|d| (d.f, if d.rel.is_some() { self.def_value(n, d.f).unwrap_or(d.value) } else { d.value }))
             .collect()
+    }
+
+    /// What `n`'s last run contributed, by field.
+    pub fn contribs_of(&self, n: NodeId) -> Vec<(Field, ValueId)> {
+        self.node(n).run_record().map(|r| r.contribs.clone()).unwrap_or_default()
     }
 
     /// The fold over all of `unit`'s contributions to `f`.
@@ -1199,8 +1205,17 @@ impl Engine {
         for rd in &r.reads {
             let now = answer(self, node, &rd.kind, rd.path);
             let show = |x: Option<ValueId>| x.map_or("none".to_owned(), |x| v.render(x));
+            // (a field read: its name and the node whose definition reaches)
+            let site = match &rd.kind {
+                crate::node::ReadKind::Field { f, at: crate::node::Anchor::Me } => format!(
+                    " [{} by {:?}]",
+                    v.render(f.0),
+                    read::reaching_at(self, *f, n, false).and_then(|r| r.by).map(NodeId::raw)
+                ),
+                _ => String::new(),
+            };
             out.push_str(&format!(
-                "{:?} path {} seen {} now {}{}\n",
+                "{:?} path {} seen {} now {}{}{site}\n",
                 rd.kind,
                 rd.path.0,
                 show(rd.seen),
@@ -1257,12 +1272,92 @@ impl Engine {
         out
     }
 
+    /// Debug: every committed node run again, in line order, on the line
+    /// as it stands, its product compared with its record (output,
+    /// definitions, contributions, placements, claim); nothing is
+    /// committed. A line per node whose run now differs: what a run made
+    /// that its recorded reads do not account for.
+    pub fn rerun_check(&self) -> Vec<String> {
+        let v = self.values();
+        let mut out = Vec::new();
+        for i in 0..self.nodes.len() {
+            let Some(node) = self.nodes.get(i) else {
+                continue;
+            };
+            if node.state() != State::Clean {
+                continue;
+            }
+            let Some(rec) = node.run_record() else {
+                continue;
+            };
+            let op = self.op(node.op()).clone();
+            let mut cx = crate::ctx::Ctx::new(self, None, node);
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.run(&mut cx)));
+            let name = op.name();
+            let Ok(Ok(x)) = r else {
+                out.push(format!("node {} ({name}) stops or panics when run again", node.id.raw()));
+                continue;
+            };
+            let p = cx.into_product(x);
+            let mut why = Vec::new();
+            if p.output != rec.output {
+                why.push(format!("output {} was {}", v.render(p.output).chars().take(200).collect::<String>(), v.render(rec.output).chars().take(200).collect::<String>()));
+            }
+            let defs = commit::dedup_defs(p.defs);
+            for d in &defs {
+                if d.rel.is_none() && !rec.defs.iter().any(|e| e.f == d.f && e.loc == d.loc && e.value == d.value) {
+                    why.push(format!("defines {} = {}", v.render(d.f.0), v.render(d.value).chars().take(200).collect::<String>()));
+                }
+            }
+            for e in &rec.defs {
+                if !defs.iter().any(|d| d.f == e.f && d.loc == e.loc) {
+                    why.push(format!("no longer defines {}", v.render(e.f.0)));
+                }
+            }
+            let cs = commit::combine_dups(self, p.contribs);
+            for (f, x) in &cs {
+                if !rec.contribs.iter().any(|(g, y)| g == f && y == x) {
+                    let was = rec.contribs.iter().find(|(g, _)| g == f).map_or("none".to_owned(), |(_, y)| v.render(*y).chars().take(300).collect());
+                    why.push(format!("contributes {} {} was {was}", v.render(f.0), v.render(*x).chars().take(300).collect::<String>()));
+                }
+            }
+            let placed: Vec<(OpId, Vec<ValueId>)> = rec.placed.iter().filter_map(|&c| self.placed_node(c)).map(|c| (c.op(), c.args().to_vec())).collect();
+            let now: Vec<(OpId, Vec<ValueId>)> = p.placements.iter().map(|x| { let (o, a) = x.key(); (o, a.to_vec()) }).collect();
+            if placed != now {
+                why.push(format!("places {} nodes, recorded {}", now.len(), placed.len()));
+            }
+            if p.claim != rec.claim {
+                why.push(format!("claims {} was {}", p.claim, rec.claim));
+            }
+            if !why.is_empty() {
+                out.push(format!("node {} ({name}): {}", node.id.raw(), why.join("; ")));
+            }
+        }
+        out
+    }
+
     /// Checks every recorded read against its current answer and every
     /// relation against its input: a line per violation. Empty after any
     /// evaluation, or the engine is wrong.
     pub fn check_invariants(&self) -> Vec<String> {
         let mut out = Vec::new();
         let v = self.values();
+        // (each segment filed under every field it holds a definition or a
+        // contribution of: a read passes over a segment the index lacks)
+        for sid in self.order.all() {
+            let s = self.seg(sid);
+            let inner = s.inner.read();
+            for (f, m) in &inner.defs {
+                if !m.is_empty() && !self.defs.holds(*f, s.lo, s.id) {
+                    out.push(format!("segment {} holds definitions of {} the index lacks", sid.0, v.render(f.0)));
+                }
+            }
+            for (f, m) in &inner.contribs {
+                if !m.is_empty() && !self.contribs.holds(*f, s.lo, s.id) {
+                    out.push(format!("segment {} holds contributions to {} the index lacks", sid.0, v.render(f.0)));
+                }
+            }
+        }
         for i in 0..self.nodes.len() {
             let Some(node) = self.nodes.get(i) else {
                 continue;

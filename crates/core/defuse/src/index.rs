@@ -141,6 +141,14 @@ impl FieldIndex {
     pub(crate) fn has(&self, f: Field) -> bool {
         self.shards[shard(f)].0.read().contains_key(&f)
     }
+
+    /// Whether segment `s`, starting at `lo`, is filed under `f`.
+    pub(crate) fn holds(&self, f: Field, lo: Pos, s: SegId) -> bool {
+        self.shards[shard(f)].0.read().get(&f).is_some_and(|x| match x {
+            Segs::One(p, q) => (*p, *q) == (lo, s),
+            Segs::Many(set) => set.contains(&(lo, s)),
+        })
+    }
 }
 
 /// Per field, its readers that are not anchored in a segment: range

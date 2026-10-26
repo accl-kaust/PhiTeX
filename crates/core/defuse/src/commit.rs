@@ -42,7 +42,7 @@ use crate::order::{Pos, SegId};
 use crate::read::{self, Reaching, next_contribution, reaching_at, reader_answer, through};
 use crate::sched::{Worker, allow_final_rerun, enqueue, mark_dirty, mark_stale};
 use crate::index::RangeKey;
-use crate::segment::{Def, GLOBAL, Inner, Made, RangeReader, Reader, Segment, live, push_pruned};
+use crate::segment::{Def, GLOBAL, Inner, Made, PosMap, RangeReader, Reader, Segment, live, push_pruned};
 use crate::values::{Field, FxHashMap, FxHashSet, ValueId, Values};
 
 /// A range read's field, ends, and whether a `next` or with `to`'s own.
@@ -148,7 +148,7 @@ pub(crate) fn children_end(eng: &Engine, n: NodeId) -> (NodeId, Option<Pos>) {
 }
 
 /// One contribution per field: several to the same field combined.
-fn combine_dups(eng: &Engine, xs: Vec<(Field, ValueId)>) -> Vec<(Field, ValueId)> {
+pub(crate) fn combine_dups(eng: &Engine, xs: Vec<(Field, ValueId)>) -> Vec<(Field, ValueId)> {
     let mut out: Vec<(Field, ValueId)> = Vec::with_capacity(xs.len());
     for (f, x) in xs {
         match out.iter_mut().find(|(g, _)| *g == f) {
@@ -163,7 +163,7 @@ fn combine_dups(eng: &Engine, xs: Vec<(Field, ValueId)>) -> Vec<(Field, ValueId)
 }
 
 /// The last definition of each field at each locality wins.
-fn dedup_defs(defs: Vec<DefRec>) -> Vec<DefRec> {
+pub(crate) fn dedup_defs(defs: Vec<DefRec>) -> Vec<DefRec> {
     let mut seen = FxHashSet::default();
     let mut out: Vec<DefRec> = Vec::with_capacity(defs.len());
     for d in defs.into_iter().rev() {
@@ -235,10 +235,12 @@ fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, spare: &mut
     first
 }
 
-/// Index changes made under a segment's lock, applied after it: a reader
-/// that misses the entry meanwhile is put right by the walk that follows,
-/// or by its own commit's check of its reads: each entry's field is
-/// counted again once the entry is in.
+/// Index changes made under a segment's lock, applied before it is let go
+/// (a field-index shard under it, as a split takes one): applied after
+/// it, one commit's removal of a segment's last definition of a field
+/// could land after another's addition of a first one, and the index lose
+/// a segment that holds the field, every read passing over it for good
+/// (amsldoc at -j8: a section's counter read past the section before it).
 #[derive(Default)]
 struct IndexOps {
     defs_add: Vec<Field>,
@@ -259,7 +261,11 @@ impl IndexOps {
         }
     }
 
-    fn apply(self, eng: &Engine, seg: &Segment) {
+    /// Applied under the segment's lock, its removals checked against
+    /// what the segment holds now (a placement this commit made may have
+    /// filed a prediction of a field the commit's own run stopped
+    /// defining).
+    fn apply(self, eng: &Engine, seg: &Segment, inner: &Inner) {
         for f in self.defs_add {
             eng.defs.add(f, seg.lo, seg.id);
             eng.bump(f);
@@ -272,11 +278,15 @@ impl IndexOps {
             eng.readers.add(f, seg.lo, seg.id);
         }
         for f in self.defs_remove {
-            eng.defs.remove(f, seg.lo, seg.id);
+            if inner.defs.get(&f).is_none_or(PosMap::is_empty) {
+                eng.defs.remove(f, seg.lo, seg.id);
+            }
             eng.bump(f);
         }
         for f in self.contribs_remove {
-            eng.contribs.remove(f, seg.lo, seg.id);
+            if inner.contribs.get(&f).is_none_or(PosMap::is_empty) {
+                eng.contribs.remove(f, seg.lo, seg.id);
+            }
             eng.bump(f);
         }
     }
@@ -595,7 +605,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         same
     });
-    let mut roomy = false;
+    let mut tries = 0;
     let (seg_id, seg_lo, old_output, rec, seg_pos) = loop {
         let Some((seg, mut inner)) = own_write(eng, node) else {
             return st;
@@ -628,9 +638,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         // (labels for its new placements: a segment used up takes room
         // from a neighbour first, once)
-        if !roomy && !seg.has_room(&inner, fresh.iter().filter(|x| x.is_some()).count()) {
+        if tries < crate::order::ROOM_TRIES && !seg.has_room(&inner, fresh.iter().filter(|x| x.is_some()).count()) {
             drop(inner);
-            roomy = true;
+            tries += 1;
             eng.order.rebalance(eng, seg.id);
             continue;
         }
@@ -830,6 +840,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             };
             let in_here = at.is_none()
                 && in_seg
+                && seg.can_place(&inner)
                 && eng.node(after).seg_hint() == seg.id
                 && inner.nodes.get(&eng.node(after).pos_hint()) == Some(&after)
                 && before.is_none_or(|b| eng.node(b).seg_hint() == seg.id && inner.nodes.get(&eng.node(b).pos_hint()) == Some(&b));
@@ -897,10 +908,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let old = node.last.lock().replace(rec.clone());
         node.serial.store(serial, Ordering::Release);
         let old_output = last.as_ref().filter(|r| !r.provisional).map(|r| r.output);
+        std::mem::take(&mut ix).apply(eng, seg, &inner);
         st.commit_ns = ns(t_lock);
         drop(inner);
         drop(old);
-        std::mem::take(&mut ix).apply(eng, seg);
         for id in removed {
             unfile(eng, ww, eng.node(id));
         }
@@ -2022,8 +2033,8 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     for &f in changed_defs.iter().chain(&changed_contribs) {
         eng.bump(f);
     }
+    ix.apply(eng, seg, &inner);
     drop(inner);
-    ix.apply(eng, seg);
     if eng.op(node.op()).read_back() {
         for &f in &changed_defs {
             eng.ranges.mark_read_back(f);
@@ -2321,7 +2332,7 @@ fn place_before(eng: &Engine, seg: &Segment, inner: &mut Inner, before: NodeId, 
 /// placements where `before` is gone.
 fn place_before_node(eng: &Engine, before: NodeId, at: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
     let bn = eng.node(before);
-    let mut roomy = false;
+    let mut tries = 0;
     loop {
         let Some((seg, mut inner)) = own_write(eng, bn) else {
             return place_after(eng, at, node, pred);
@@ -2331,9 +2342,10 @@ fn place_before_node(eng: &Engine, before: NodeId, at: NodeId, node: Arc<Node>, 
             seg.split(&mut inner, eng, sid);
             continue;
         }
-        if !roomy && !seg.has_room(&inner, 1) {
+        if !seg.has_room(&inner, 1) && (tries < crate::order::ROOM_TRIES || !seg.can_place(&inner)) {
             drop(inner);
-            roomy = true;
+            tries += 1;
+            assert!(tries <= 2 * crate::order::ROOM_TRIES, "no room after rebalances");
             eng.order.rebalance(eng, seg.id);
             continue;
         }
@@ -2353,7 +2365,7 @@ fn place_after_children(eng: &Engine, at: NodeId, node: Arc<Node>, pred: Predict
 
 fn place_at_end(eng: &Engine, at: NodeId, end: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
     let endn = eng.node(end);
-    let mut roomy = false;
+    let mut tries = 0;
     loop {
         if let Some((seg, mut inner)) = own_write(eng, endn) {
             if Segment::needs_split(&inner) {
@@ -2361,9 +2373,10 @@ fn place_at_end(eng: &Engine, at: NodeId, end: NodeId, node: Arc<Node>, pred: Pr
                 seg.split(&mut inner, eng, sid);
                 continue;
             }
-            if !roomy && !seg.has_room(&inner, 1) {
+            if !seg.has_room(&inner, 1) && (tries < crate::order::ROOM_TRIES || !seg.can_place(&inner)) {
                 drop(inner);
-                roomy = true;
+                tries += 1;
+                assert!(tries <= 2 * crate::order::ROOM_TRIES, "no room after rebalances");
                 eng.order.rebalance(eng, seg.id);
                 continue;
             }

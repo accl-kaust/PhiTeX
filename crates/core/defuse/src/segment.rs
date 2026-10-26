@@ -721,6 +721,13 @@ impl Segment {
         inner.nodes.len() > SEG_CAP
     }
 
+    /// Whether a node can be placed in it now: a relabel leaves a gap of
+    /// two labels or more after each node (a placement past that is put
+    /// off to a rebalance first).
+    pub(crate) fn can_place(&self, inner: &Inner) -> bool {
+        inner.hi.0 - self.lo.0 >= 2 * (inner.nodes.len() as u64 + 2)
+    }
+
     /// Whether a relabel leaves a gap between its nodes for `more` nodes
     /// placed after any one of them, a few times over; else
     /// `order::Order::rebalance` makes room first.

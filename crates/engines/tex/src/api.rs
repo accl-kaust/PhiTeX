@@ -2738,6 +2738,16 @@ impl Graph {
             crate::timeline::lap("engine: evaluate (the runs, their commits)");
             t_mark = std::time::Instant::now();
             crate::timeline::lap("engine: the evaluation's report");
+            // (debug, `PHITEX_RERUN_CHECK=1`: every committed node run
+            // again on the line as it stands; a product that differs from
+            // its record is a dependency its reads did not record)
+            if crate::exec::obs_flag!("PHITEX_RERUN_CHECK") {
+                let lines = self.eng.rerun_check();
+                for l in &lines {
+                    eprintln!("rerun_check: {l}");
+                }
+                eprintln!("rerun_check: {} differ", lines.len());
+            }
             if crate::exec::obs_flag!("PHITEX_CHECK_READS") || crate::exec::obs_flag!("PHITEX_CHECK_INVARIANTS") {
                 // (debug: every committed node's reads and relations checked
                 // again after this evaluation; `PHITEX_CHECK_READS=fail`: a
@@ -6949,9 +6959,25 @@ fn debug_nodes(eng: &Engine, when: &str) {
                 for (f, d) in ds {
                     let _ = writeln!(out, "  def {f} {d:016x}");
                 }
+                let mut cs: Vec<(String, u64, String)> = eng
+                    .contribs_of(n)
+                    .into_iter()
+                    .map(|(f, x)| (v.render(f.0), dig(x), v.render(x).chars().take(200).collect()))
+                    .collect();
+                cs.sort();
+                for (f, d, t) in cs {
+                    let _ = writeln!(out, "  contrib {f} {d:016x} {t}");
+                }
             }
+            let argd = format!("{:016x}", {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                for &a in &i.args {
+                    dig(a).hash(&mut h);
+                }
+                h.finish()
+            });
             if crate::exec::obs_str!("PHITEX_NODE_DUMP_READS")
-                .is_some_and(|l| l.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(n.raw())))
+                .is_some_and(|l| l == "all" || l.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(n.raw()) || x.trim() == argd))
             {
                 let _ = writeln!(out, "    node {}", eng.debug_node(n));
                 for l in eng.debug_reads(n).lines() {

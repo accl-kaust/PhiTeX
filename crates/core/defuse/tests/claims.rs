@@ -486,3 +486,79 @@ fn a_continuation_made_anew_stays_after_what_was_placed_after_its_node() {
     assert_eq!(texts(&e), vec![v.int(0), v.str("a"), v.int(2)]);
     assert!(e.check_invariants().is_empty());
 }
+
+/// `[f, v]`: predicts f = v (its last build's record) and defines it.
+struct PredictedDef;
+
+impl Operation for PredictedDef {
+    fn name(&self) -> &'static str {
+        "predicted_def"
+    }
+
+    fn predicted_defs(&self, args: &[ValueId], _: &phitex_defuse::Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(vec![(Field(args[0]), args[1])])
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.define(Field(cx.args()[0]), cx.args()[1]);
+        Ok(cx.args()[1])
+    }
+}
+
+/// `[f, k]`: k = 0 defines f = 1; k = 1 defines nothing and places
+/// `PredictedDef [f, 5]` as its child.
+struct DefOrPlace(OpId);
+
+impl Operation for DefOrPlace {
+    fn name(&self) -> &'static str {
+        "def_or_place"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let f = Field(cx.args()[0]);
+        if v.as_int(cx.args()[1]) == Some(0) {
+            cx.define(f, v.int(1));
+        } else {
+            cx.child(self.0, vec![f.0, v.int(5)]);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[f]`: outputs the definition of f reaching it.
+struct GetF;
+
+impl Operation for GetF {
+    fn name(&self) -> &'static str {
+        "get_f"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        Ok(cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
+    }
+}
+
+#[test]
+fn a_commit_that_stops_defining_a_field_its_placement_predicts_keeps_its_segment_indexed() {
+    // P defines f, then runs again defining nothing and placing C, whose
+    // prediction defines f in the same segment: the commit's removal of
+    // the segment's last definition of f and the placement's filing of
+    // the first again leave the segment in f's index, and R after them
+    // reads C's value.
+    let (e, _) = engine();
+    let pd = e.register(Arc::new(PredictedDef));
+    let p_op = e.register(Arc::new(DefOrPlace(pd)));
+    let get = e.register(Arc::new(GetF));
+    let v = e.values();
+    let f = v.field("f").0;
+    let u = e.new_unit();
+    let p = e.push(u, p_op, vec![f, v.int(0)]);
+    let r = e.push(u, get, vec![f]);
+    e.evaluate(1).unwrap();
+    assert_eq!(e.output(r), Some(v.int(1)));
+    e.replace(p, p_op, vec![f, v.int(1)]);
+    e.evaluate(1).unwrap();
+    assert_eq!(e.output(r), Some(v.int(5)));
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

@@ -256,3 +256,36 @@ fn long_chains_among_many_pushed_pieces_fit() {
         assert!(e.check_invariants().is_empty());
     }
 }
+
+#[test]
+fn floods_among_long_chains_fit() {
+    // Pieces placing thousands of children in one commit next to chains
+    // that used up their labels: a commit's placements past its
+    // segment's room go after a rebalance, one by one, never out of
+    // labels.
+    for threads in [1, threads().min(8)] {
+        let e = Engine::new();
+        let v = e.values();
+        let s = v.field("s");
+        e.declare_accumulator(s, Arc::new(phitex_defuse::SumMonoid));
+        let def = e.register(Arc::new(Def));
+        let ch = Arc::new(ChainKids(std::sync::OnceLock::new(), def, s));
+        let chain = e.register(ch.clone());
+        ch.0.set(chain).unwrap();
+        let flood = e.register(Arc::new(Flood(def)));
+        let u = e.new_unit();
+        let x = v.field("x");
+        let ids = e.push_many(u, def, (0..2000).map(|i| vec![x.0, v.int(i)]).collect(), 4);
+        let mut floods = Vec::new();
+        for &i in &[10usize, 11, 500, 1000, 1999] {
+            e.insert_after(ids[i], chain, vec![v.int(3000)]);
+            floods.push(e.insert_after(ids[i], flood, vec![v.int(3000)]));
+        }
+        e.evaluate(threads).unwrap();
+        for f in floods {
+            assert_eq!(e.children(f).len(), 3000);
+        }
+        assert_eq!(e.order(u).len(), 2000 + 5 * (1 + 3000) + 5 * 2 * 3001);
+        assert!(e.check_invariants().is_empty());
+    }
+}

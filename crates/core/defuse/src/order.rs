@@ -94,6 +94,8 @@ impl Order {
 
 /// Labels a node a rebalanced window keeps at the least.
 const DENSITY: u64 = 16;
+/// Rebalances a placement asks for before it places where it can.
+pub(crate) const ROOM_TRIES: u32 = 2;
 
 impl Order {
     /// Gives a segment whose labels are used up (a gap of nothing left
@@ -210,8 +212,9 @@ impl Order {
         }
         let held = |g: &crate::segment::Inner| -> FxHashMap<(Field, u8), ()> {
             let mut m = FxHashMap::default();
-            m.extend(g.defs.keys().map(|f| ((*f, 0u8), ())));
-            m.extend(g.contribs.keys().map(|f| ((*f, 1u8), ())));
+            // (an entry made ready for a commit and not filled holds nothing)
+            m.extend(g.defs.iter().filter(|x| !x.1.is_empty()).map(|(f, _)| ((*f, 0u8), ())));
+            m.extend(g.contribs.iter().filter(|x| !x.1.is_empty()).map(|(f, _)| ((*f, 1u8), ())));
             m.extend(g.readers.keys().map(|f| ((*f, 2u8), ())));
             m
         };
