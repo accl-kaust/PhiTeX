@@ -103,6 +103,10 @@ pub(crate) struct Node {
     pub(crate) effect: AtomicU32,
     /// It has brackets filed in its segment.
     pub(crate) has_brackets: AtomicBool,
+    /// The fields other nodes' reads anchored at it read (`At::Before`,
+    /// `At::AfterOwn`): its removal looks for those readers in its
+    /// segment, under those fields alone.
+    pub(crate) anchored: Mx<Vec<Field>>,
 }
 
 /// An effect as 32 bits: closes, opens, `before`, and whether pending.
@@ -135,6 +139,7 @@ impl Node {
             follows: AtomicBool::new(false),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
+            anchored: Mx::new(Vec::new()),
             id,
             unit,
             op: AtomicU32::new(op.0),

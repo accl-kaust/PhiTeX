@@ -115,3 +115,56 @@ pub fn span(name: &'static str, ns: u64) {
 pub fn lock_lines() -> Vec<(String, u64)> {
     crate::lock::site_lines()
 }
+
+/// (`profile`) A commit's time under its segment's lock by part, reported
+/// for one that held it past a millisecond.
+pub(crate) struct Laps {
+    #[cfg(feature = "profile")]
+    t: std::time::Instant,
+    #[cfg(feature = "profile")]
+    parts: Vec<(&'static str, u64)>,
+}
+
+impl Laps {
+    #[allow(unused_variables)]
+    pub(crate) fn new(t: std::time::Instant) -> Laps {
+        Laps {
+            #[cfg(feature = "profile")]
+            t,
+            #[cfg(feature = "profile")]
+            parts: Vec::new(),
+        }
+    }
+
+    #[allow(unused_variables, clippy::unused_self)]
+    pub(crate) fn lap(&mut self, name: &'static str) {
+        #[cfg(feature = "profile")]
+        {
+            let now = std::time::Instant::now();
+            self.parts.push((name, u64::try_from(now.duration_since(self.t).as_nanos()).unwrap_or(u64::MAX)));
+            self.t = now;
+        }
+    }
+
+    #[allow(unused_variables, clippy::unused_self)]
+    pub(crate) fn report(&self, node: u64, ns: u64, defs: usize, reads: usize) {
+        #[cfg(feature = "profile")]
+        if ns > 1_000_000 {
+            let parts: Vec<String> = self.parts.iter().map(|(n, t)| format!("{n} {:.3}", *t as f64 / 1e6)).collect();
+            eprintln!("commit-laps: node {node} {:.3} ms ({defs} defs, {reads} reads): {}", ns as f64 / 1e6, parts.join(", "));
+        }
+    }
+}
+
+/// (`profile`) A hold of segment locks past a millisecond, reported:
+/// what held them and for how long.
+#[allow(unused_variables)]
+pub(crate) fn long_hold(what: &str, n: usize, t: std::time::Instant) {
+    #[cfg(feature = "profile")]
+    {
+        let ns = t.elapsed().as_nanos();
+        if ns > 1_000_000 {
+            eprintln!("long-hold: {what} ({n}) {:.3} ms", ns as f64 / 1e6);
+        }
+    }
+}

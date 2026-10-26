@@ -229,6 +229,12 @@ fn filed_defs(v: &Values, defs: &[DefRec], b: &Brackets) -> Vec<Filed> {
 /// lock is released). `spare` is a list made before the lock, used for a
 /// field's first.
 fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, spare: &mut Vec<Reader>) -> bool {
+    if r.anchor != r.node {
+        let mut a = eng.node(r.anchor).anchored.lock();
+        if !a.contains(&f) {
+            a.push(f);
+        }
+    }
     let v = inner.readers.entry(f).or_insert_with(|| std::mem::take(spare));
     let first = v.is_empty();
     push_pruned(v, r, |x| live(eng, x.node, x.serial));
@@ -631,6 +637,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         same
     });
+    // (what the run defines and contributes, by field: the last run's
+    // others are taken back under the lock, each looked up here, not
+    // searched for)
+    let new_fields: FxHashSet<Field> = rec.defs.iter().map(|d| d.f).collect();
+    let new_contribs: FxHashSet<Field> = rec.contribs.iter().map(|c| c.0).collect();
     let mut tries = 0;
     let (seg_id, seg_lo, old_output, rec, seg_pos, removed) = loop {
         let Some((seg, mut inner)) = own_write(eng, node) else {
@@ -687,9 +698,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             room = Some(g.make());
             continue;
         }
+        let mut lap = crate::obs::Laps::new(t_lock);
         // brackets, then definitions at their depths
         bracket_change = file_brackets(eng, &mut inner, node, pos, brackets);
-        let defs = &rec.defs;
         let contribs = &rec.contribs;
         for d in &filed {
             let depth = d.depth;
@@ -742,7 +753,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             }
         }
         for &f in &old_fields {
-            if defs.iter().any(|d| d.f == f) {
+            if new_fields.contains(&f) {
                 continue;
             }
             if let Some(m) = inner.defs.get_mut(&f)
@@ -756,6 +767,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 }
             }
         }
+        lap.lap("defs");
         // contributions
         for &(f, x) in contribs {
             let m = inner.contribs.entry(f).or_default();
@@ -771,7 +783,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             }
         }
         for &f in &old_contribs {
-            if contribs.iter().any(|c| c.0 == f) {
+            if new_contribs.contains(&f) {
                 continue;
             }
             if let Some(m) = inner.contribs.get_mut(&f)
@@ -792,6 +804,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         for &f in &changed_defs {
             eng.bump(f);
         }
+        lap.lap("contribs");
         // placements
         let mut after = node.id;
         let mut in_seg = true;
@@ -911,6 +924,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         removed.extend(removed_kept);
         // (a placement that relabelled the segment moved this node's label)
         let pos = pos_in(&inner, node);
+        lap.lap("placements");
         // reads anchored here
         node.committing.store(true, Ordering::Release);
         for (f, r) in here_reads.drain(..) {
@@ -924,6 +938,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 other_reads.push((f, r, at));
             }
         }
+        lap.lap("readers");
         // the walks, as far as this segment goes
         changed_defs.sort_unstable();
         changed_defs.dedup();
@@ -938,6 +953,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             inner.stops = rest;
             holes = mine;
         }
+        lap.lap("walks");
         // the run's own reads at its position, answered again (under
         // scopes after the lock: an answer may lie past a close)
         let plain = !read::scoped(eng);
@@ -960,8 +976,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let old = node.last.lock().replace(rec.clone());
         node.serial.store(serial, Ordering::Release);
         let old_output = last.as_ref().filter(|r| !r.provisional).map(|r| r.output);
+        lap.lap("checks");
         std::mem::take(&mut ix).apply(eng, seg, &inner);
+        lap.lap("index");
         st.commit_ns = ns(t_lock);
+        lap.report(node.id.0, st.commit_ns, rec.defs.len(), rec.reads.len());
         drop(inner);
         drop(old);
         break (seg.id, seg.lo, old_output, rec, pos, removed);
@@ -2066,13 +2085,18 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     let pos = node.pos_hint();
     let seg_id = seg.id;
     let was_hole = node.is_hole();
+    let t_held = std::time::Instant::now();
+    let mut lap = crate::obs::Laps::new(t_held);
     // (others' reads at its label, `At`: gone with it)
     let mut anchored: Vec<(Field, Reader)> = Vec::new();
     if remove {
-        for (f, rs) in &inner.readers {
-            for r in rs {
+        // (under the fields others read at it, not every field the
+        // segment's readers read)
+        let fs = std::mem::take(&mut *node.anchored.lock());
+        for f in fs {
+            for r in inner.readers.get(&f).into_iter().flatten() {
                 if r.anchor == node.id && r.node != node.id {
-                    anchored.push((*f, r.clone()));
+                    anchored.push((f, r.clone()));
                 }
             }
         }
@@ -2085,6 +2109,7 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
             v.retain(|&n| n != node.id);
         }
     }
+    lap.lap("scan");
     // (its brackets go with its products; the `next`s stopped at it are
     // taken here, where it is known to be in this segment)
     let bracket_gone = if node.has_brackets.load(Ordering::Acquire) {
@@ -2092,7 +2117,9 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     } else {
         None
     };
+    lap.lap("brackets");
     let mut stops = take_stops(&mut inner, node.id);
+    lap.lap("stops");
     if remove {
         stops.append(&mut std::mem::take(&mut *node.bounded.lock()));
     }
@@ -2124,12 +2151,15 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
             }
         }
     }
+    lap.lap("defs");
+    lap.report(node.id.0, u64::try_from(t_held.elapsed().as_nanos()).unwrap_or(0), inner.stops.len(), inner.readers.len());
     *node.last.lock() = None;
     for &f in changed_defs.iter().chain(&changed_contribs) {
         eng.bump(f);
     }
     ix.apply(eng, seg, &inner);
     drop(inner);
+    crate::obs::long_hold("retract", changed_defs.len(), t_held);
     if eng.op(node.op()).read_back() {
         for &f in &changed_defs {
             eng.ranges.mark_read_back(f);

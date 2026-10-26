@@ -147,6 +147,7 @@ impl Order {
             };
             let win: Vec<std::sync::Arc<crate::segment::Segment>> = ids.iter().map(|&x| eng.seg(x).clone()).collect();
             let mut gs: Vec<crate::lock::WriteGuard<'_, crate::segment::Inner>> = win.iter().map(|x| x.inner.write()).collect();
+            let t_held = std::time::Instant::now();
             // (a split or an absorption among them meanwhile: the list again)
             if (1..win.len()).any(|k| gs[k - 1].hi != win[k].lo) {
                 continue;
@@ -180,6 +181,7 @@ impl Order {
             self.spread(eng, &win, &mut gs, n, asking, more);
             let hi = gs[gs.len() - 1].hi;
             drop(gs);
+            crate::obs::long_hold("rebalance", win.len(), t_held);
             // (a range read through a moved node now reaches anywhere in
             // the window)
             eng.ranges.widen_over(lo, hi);

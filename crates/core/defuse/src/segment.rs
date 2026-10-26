@@ -695,6 +695,7 @@ impl Segment {
     /// `pos` and re-keying `nodes`, `defs` and `contribs`. Under the write
     /// lock; nothing outside holds a label.
     pub(crate) fn relabel(&self, inner: &mut Inner, eng: &Engine) {
+        let t_held = std::time::Instant::now();
         let n = inner.nodes.len() as u64;
         let width = inner.hi.0 - self.lo.0;
         assert!(width > n + 1, "segment {:?} out of labels: {n} nodes in {width}", self.id);
@@ -716,6 +717,7 @@ impl Segment {
             m.rekey(&map);
         }
         inner.brackets.rekey(&map);
+        crate::obs::long_hold("relabel", inner.nodes.len(), t_held);
     }
 
     pub(crate) fn needs_split(inner: &Inner) -> bool {
