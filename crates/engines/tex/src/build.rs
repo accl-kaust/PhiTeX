@@ -2321,22 +2321,33 @@ impl Run<'_, '_> {
             let c = self.cur.cmd;
             match c {
                 cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN | cmd::CHAR_NUM => {
-                    let ch = if c == cmd::CHAR_NUM {
-                        self.scan_char_num()?
+                    // (words of plain characters, each with the space
+                    // after it, straight from the line: then at
+                    // big_switch, the space in `cur`)
+                    let plain = c != cmd::CHAR_GIVEN
+                        && c != cmd::CHAR_NUM
+                        && self
+                            .plain_words(md, f, &view, &mut sf, &mut out, &mut raws, &mut space)?;
+                    if plain {
+                        cancel_boundary = false;
                     } else {
-                        self.cur.chr
-                    };
-                    let next = self.main_loop(
-                        md,
-                        f,
-                        &view,
-                        u32::try_from(ch).unwrap_or(0),
-                        &mut sf,
-                        &mut out,
-                        &mut cancel_boundary,
-                    )?;
-                    if next {
-                        continue;
+                        let ch = if c == cmd::CHAR_NUM {
+                            self.scan_char_num()?
+                        } else {
+                            self.cur.chr
+                        };
+                        let next = self.main_loop(
+                            md,
+                            f,
+                            &view,
+                            u32::try_from(ch).unwrap_or(0),
+                            &mut sf,
+                            &mut out,
+                            &mut cancel_boundary,
+                        )?;
+                        if next {
+                            continue;
+                        }
                     }
                 }
                 cmd::NO_BOUNDARY => {
@@ -2357,26 +2368,14 @@ impl Run<'_, '_> {
                     continue;
                 }
                 cmd::SPACER | cmd::EX_SPACE => {
-                    if c == cmd::EX_SPACE || sf >= 0 {
-                        // the factor is known here (or not needed)
-                        let normal = c == cmd::EX_SPACE || sf == 1000;
-                        let g = self.space_glue_memo(f, sf, normal, &mut space)?;
-                        out.push(crate::nest::Item::N(g));
-                    } else {
-                        if sf != SF_UNREAD {
-                            raws.push((out.len(), sf_value(v, sf)));
-                            self.chars_eff = sf_compose(self.chars_eff, sf);
-                            sf = SF_UNREAD;
-                        }
-                        let p = if let Some(p) = space.waiting {
-                            p
-                        } else {
-                            let p = self.waiting_space(f)?;
-                            space.waiting = Some(p);
-                            p
-                        };
-                        raws.push((out.len(), p));
-                    }
+                    self.char_space(
+                        f,
+                        c == cmd::EX_SPACE,
+                        &mut sf,
+                        &mut out,
+                        &mut raws,
+                        &mut space,
+                    )?;
                 }
                 _ => {
                     self.back_cur();
@@ -2425,6 +2424,176 @@ impl Run<'_, '_> {
         CHAR_VIEW.with(|c| c.set(Some((view, kept, space.d))));
         crate::prof::add(crate::prof::CHAR_ENC, te);
         Ok(())
+    }
+
+    /// A space in a run of characters (§1041–§1044): its glue where the
+    /// space factor is known (or not needed, `\\ `), else a waiting space
+    /// after the factor's transition.
+    fn char_space(
+        &mut self,
+        f: u32,
+        ex: bool,
+        sf: &mut i32,
+        out: &mut Vec<crate::nest::Item>,
+        raws: &mut Vec<(usize, ValueId)>,
+        space: &mut SpaceMemo,
+    ) -> R<()> {
+        if ex || *sf >= 0 {
+            // the factor is known here (or not needed)
+            let normal = ex || *sf == 1000;
+            let g = self.space_glue_memo(f, *sf, normal, space)?;
+            out.push(crate::nest::Item::N(g));
+        } else {
+            if *sf != SF_UNREAD {
+                raws.push((out.len(), sf_value(self.v, *sf)));
+                self.chars_eff = sf_compose(self.chars_eff, *sf);
+                *sf = SF_UNREAD;
+            }
+            let p = if let Some(p) = space.waiting {
+                p
+            } else {
+                let p = self.waiting_space(f)?;
+                space.waiting = Some(p);
+                p
+            };
+            raws.push((out.len(), p));
+        }
+        Ok(())
+    }
+
+    /// The words of plain characters from `cur` on, each followed by a
+    /// space on the line on top, as [`Run::main_loop`] and the run's
+    /// space take them (§1034–§1044), with no state machine: a word is
+    /// letters and other characters of the font, none its hyphen
+    /// character, no ligature between two (a kern goes between them),
+    /// in a font with no boundary character; its characters adjust the
+    /// space factor and go on `out`, the space after it is read as
+    /// `get_next` reads it (the blanks after it skipped, §347) and goes
+    /// on as [`Run::char_space`] puts it. The first word that is not so
+    /// is left unread; false when `cur`'s is not (nothing read).
+    #[allow(clippy::too_many_arguments)]
+    fn plain_words(
+        &mut self,
+        md: &Mode,
+        f: u32,
+        view: &crate::fonts::View,
+        sf: &mut i32,
+        out: &mut Vec<crate::nest::Item>,
+        raws: &mut Vec<(usize, ValueId)>,
+        space: &mut SpaceMemo,
+    ) -> R<bool> {
+        /// The longest word taken (a longer one is the main loop's).
+        const LONG: usize = 48;
+        if self.cat_gen != self.st.cat_gen() {
+            return Ok(false);
+        }
+        let Some(&l) = self.input.levels.last() else {
+            return Ok(false);
+        };
+        if l.kind != crate::input::kind::LINE {
+            return Ok(false);
+        }
+        let li = l.a as usize;
+        let Some((loaded, _)) = view.fonts.get(f) else {
+            return Ok(false);
+        };
+        let tfm = &loaded.tfm;
+        if tfm.bchar_label().is_some() || tfm.bchar().is_some() {
+            return Ok(false);
+        }
+        let chars = &loaded.at.chars;
+        let hyphen = view.hyphen.get(&f).copied().unwrap_or(-1);
+        let Ok(c0) = u8::try_from(self.cur.chr) else {
+            return Ok(false);
+        };
+        let mut first = Some(c0);
+        let mut done = false;
+        let mut w = [0u8; LONG];
+        // (the kern before each character, 0: none)
+        let mut k = [0i32; LONG];
+        loop {
+            // the word (with `cur`'s character first) and the line's
+            // place after it
+            let line = &self.input.lines[li];
+            if line.endch == -2 {
+                return Ok(done);
+            }
+            let mut n = 0;
+            if let Some(c) = first {
+                w[0] = c;
+                n = 1;
+            }
+            let mut i = line.loc;
+            let cat = |c: u32| {
+                if c > 0 && c < 256 {
+                    self.cat_cache[c as usize]
+                } else {
+                    cmd::INVALID_CHAR
+                }
+            };
+            while let Some(&c) = line.buf.get(i) {
+                let t = cat(c);
+                if t != cmd::LETTER && t != cmd::OTHER_CHAR {
+                    break;
+                }
+                if n == LONG {
+                    return Ok(done);
+                }
+                w[n] = u8::try_from(c).unwrap_or(0);
+                n += 1;
+                i += 1;
+            }
+            if n == 0 || line.buf.get(i).is_none_or(|&c| cat(c) != cmd::SPACER) {
+                return Ok(done);
+            }
+            for j in 0..n {
+                let c = w[j];
+                if i32::from(c) == hyphen || chars.get(usize::from(c)).is_none_or(Option::is_none) {
+                    return Ok(done);
+                }
+                k[j] = 0;
+                if j > 0
+                    && let Some(step) = tfm.lookup(Some(w[j - 1]), Some(c))
+                {
+                    if !step.is_kern() {
+                        return Ok(done);
+                    }
+                    k[j] = loaded.at.char_kern(step);
+                    if k[j] == 0 {
+                        // (a kern of 0 still a node)
+                        return Ok(done);
+                    }
+                }
+            }
+            // the word read: its characters, then the space after it and
+            // the blanks after that
+            let mut e = i + 1;
+            while line.buf.get(e).is_some_and(|&c| cat(c) == cmd::SPACER) {
+                e += 1;
+            }
+            let line = &mut self.input.lines[li];
+            line.loc = e;
+            line.state = crate::input::SKIP_BLANKS;
+            for j in 0..n {
+                if k[j] != 0 {
+                    out.push(crate::nest::Item::N(Node::Kern(k[j], KernKind::Normal)));
+                }
+                let c = w[j];
+                self.adjust_sf(md, u32::from(c), sf)?;
+                out.push(crate::nest::Item::N(Node::Char {
+                    font: f,
+                    ch: u16::from(c),
+                }));
+            }
+            self.cur = crate::run::Cur {
+                tok: Tok::ch(cmd::SPACER, 32),
+                cmd: cmd::SPACER,
+                chr: 32,
+            };
+            self.char_space(f, false, sf, out, raws, space)?;
+            done = true;
+            first = None;
+        }
     }
 
     /// A character run's nodes and transitions (each transition before
@@ -2486,6 +2655,19 @@ impl Run<'_, '_> {
     /// [`Self::space_glue`] with the parameters read once a character
     /// run (`m`).
     fn space_glue_memo(&mut self, f: u32, sf: i32, normal: bool, m: &mut SpaceMemo) -> R<Node> {
+        if let Some((s, n, g)) = &m.last
+            && *s == sf
+            && *n == normal
+        {
+            return Ok(g.clone());
+        }
+        let g = self.space_glue_made(f, sf, normal, m)?;
+        m.last = Some((sf, normal, g.clone()));
+        Ok(g)
+    }
+
+    /// [`Run::space_glue_memo`]'s glue made.
+    fn space_glue_made(&mut self, f: u32, sf: i32, normal: bool, m: &mut SpaceMemo) -> R<Node> {
         let ss = if let Some(g) = m.ss {
             g
         } else {
@@ -3352,6 +3534,8 @@ pub(crate) fn sf_apply(base: i32, e: i32) -> i32 {
 /// and a waiting space's value.
 #[derive(Default)]
 struct SpaceMemo {
+    /// The last glue made, for its space factor and normality.
+    last: Option<(i32, bool, Node)>,
     ss: Option<Glue>,
     xs: Option<Glue>,
     d: [Option<i32>; 4],

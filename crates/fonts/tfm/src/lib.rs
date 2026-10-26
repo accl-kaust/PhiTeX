@@ -742,6 +742,7 @@ impl Tfm {
     /// walking is a halt, never a match (§545). The caller maps a right
     /// character equal to [`Tfm::false_bchar`] to no match, as §1038 does.
     #[must_use]
+    #[inline]
     pub fn lookup(&self, left: Option<u8>, right: Option<u8>) -> Option<LigKernStep> {
         let cur_r = right.or(self.bchar)?;
         if let Some(c) = left {
