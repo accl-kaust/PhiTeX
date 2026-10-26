@@ -493,6 +493,7 @@ impl Input {
 
     /// Level `t` with its line's or file's position and the push that
     /// filled its slot, for [`Snap`].
+    #[inline]
     fn saved(&self, t: usize) -> Saved {
         let l = self.levels[t];
         match l.kind {
@@ -760,16 +761,17 @@ impl Input {
     /// top only once they are on top, so no copy of the whole stack.
     pub(crate) fn snapshot(&mut self, into: &mut Snapshot) {
         let len = self.levels.len();
-        let mut saved = self.snap.take().map(|s| s.saved).unwrap_or_default();
-        saved.clear();
-        if len > 0 {
-            saved.push(self.saved(len - 1));
-        }
-        self.snap = Some(Snap {
-            len,
-            from: len.saturating_sub(1),
-            saved,
+        let top = len.checked_sub(1).map(|t| self.saved(t));
+        // (the last snapshot's vector reused, in place)
+        let sn = self.snap.get_or_insert_with(|| Snap {
+            len: 0,
+            from: 0,
+            saved: Vec::new(),
         });
+        sn.len = len;
+        sn.from = len.saturating_sub(1);
+        sn.saved.clear();
+        sn.saved.extend(top);
         into.text_at = self.text_at;
         into.arena = self.arena.mark();
     }
