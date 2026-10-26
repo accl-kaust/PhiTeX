@@ -2884,10 +2884,11 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(())
     }
 
-    /// File `key`'s lines read back by this run (per field or as its
-    /// text, not a lookup): a second such read by the same run, before it
-    /// opens the file for writing, reads the round before's lines again,
-    /// under the meanings there ([`REREAD`]).
+    /// File `key`'s lines read back here (per field or as its text, not
+    /// a lookup): a second such read before the file is opened for
+    /// writing (by this run, or by a piece of the file's text read as
+    /// its text the read before placed) reads the lines again, under the
+    /// meanings there, so the file is read back as its text ([`REREAD`]).
     pub(crate) fn note_read_back(&mut self, key: &str) -> R<()> {
         if self.interp.is_some() {
             return Ok(());
@@ -2896,12 +2897,12 @@ impl<'c, 'a> Run<'c, 'a> {
             .v
             .int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         let f = format!("wread:{key}");
-        if self.get(&f)? == Some(me)
+        if self.get(&f)?.is_some()
             && self.get(&format!("wopen:{key}"))?.is_none()
             && self.get(&format!("{REREAD}{key}"))?.is_none()
         {
             self.set(&format!("{REREAD}{key}"), self.v.int(1), true);
-        } else if self.get(&f)? != Some(me) {
+        } else if self.get(&f)?.is_none() {
             self.set(&f, me, true);
         }
         Ok(())

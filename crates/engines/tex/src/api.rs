@@ -6972,11 +6972,12 @@ fn debug_nodes(eng: &Engine, when: &str) {
             let head: String = i.args.first().map(|&a| v.render(a)).unwrap_or_default().chars().take(60).collect();
             let _ = write!(
                 out,
-                "{} {} {:?} parent {:?} args {:016x} out {o:016x} {head}",
+                "{} {} {:?} parent {:?} claimer {:?} args {:016x} out {o:016x} {head}",
                 n.raw(),
                 i.op,
                 i.state,
                 i.parent.map(phitex_defuse::NodeId::raw),
+                i.claimer.map(phitex_defuse::NodeId::raw),
                 h.finish()
             );
             // (a page's finisher: what it gave back; `PHITEX_NODE_DUMP_READS`
