@@ -2272,6 +2272,55 @@ pub(crate) fn place(
     node
 }
 
+/// A placement made outside its placer's segment, after the lock: its
+/// index, the node it goes after, the node it goes before if any (a
+/// continuation replacing another), the node.
+type Deferred = (usize, NodeId, Option<NodeId>, Arc<Node>, Predicted);
+
+/// `place`, before `before` (a node of the segment) instead of after one.
+fn place_before(eng: &Engine, seg: &Segment, inner: &mut Inner, before: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
+    let p = match seg.gap_before(inner, eng.node(before).pos_hint()) {
+        Some(p) => p,
+        None => {
+            seg.relabel(inner, eng);
+            seg.gap_before(inner, eng.node(before).pos_hint()).expect("a gap after a relabel")
+        }
+    };
+    node.seg.store(seg.id.0, Ordering::Release);
+    node.pos.store(p.0, Ordering::Release);
+    eng.nodes
+        .set(usize::try_from(node.id.raw()).unwrap_or(usize::MAX), node.clone());
+    inner.nodes.insert(p, node.id);
+    inner.holes += 1;
+    inner.by_op.entry(node.op()).or_default().push(node.id);
+    file_predicted(eng, seg, inner, &node, pred);
+    node
+}
+
+/// `place_before` under `before`'s segment's lock; after `at` and its
+/// placements where `before` is gone.
+fn place_before_node(eng: &Engine, before: NodeId, at: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
+    let bn = eng.node(before);
+    let mut roomy = false;
+    loop {
+        let Some((seg, mut inner)) = own_write(eng, bn) else {
+            return place_after(eng, at, node, pred);
+        };
+        if Segment::needs_split(&inner) {
+            let sid = SegId(u32::try_from(eng.segs.reserve()).expect("segment ids"));
+            seg.split(&mut inner, eng, sid);
+            continue;
+        }
+        if !roomy && !seg.has_room(&inner, 1) {
+            drop(inner);
+            roomy = true;
+            eng.order.rebalance(eng, seg.id);
+            continue;
+        }
+        return place_before(eng, seg, &mut inner, before, node, pred);
+    }
+}
+
 /// `place` after node `at` and its placements, under their segment's lock.
 pub(crate) fn place_after(eng: &Engine, at: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
     place_at_end(eng, at, subtree_end(eng, at), node, pred)

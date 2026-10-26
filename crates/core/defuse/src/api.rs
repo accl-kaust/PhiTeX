@@ -132,13 +132,18 @@ pub enum At {
     End(UnitId),
     /// The last definition on the whole line, whatever comes after the
     /// reader: a loop-back read (a label read at the front of a document,
-    /// defined at its back). The reader runs on the value published when
-    /// the line was last quiet (a field none published yet: its
-    /// prediction, else the environment's) and is re-asked at the next
-    /// quiet point if the last definition moved; a reader re-asked this way
-    /// more than `Limits::final_reruns` times in one evaluation is left as
-    /// it is and listed in `Report::capped` (a document that does not
-    /// converge).
+    /// defined at its back). It is answered the loop-back value as of the
+    /// last quiet point: the previous complete pass, as TeX's own passes
+    /// read the aux file the last run left, never a part of what this pass
+    /// is writing (a field none published yet: its prediction, else the
+    /// environment's). A quiet point is an event, the count of queued and
+    /// running nodes reaching zero, never something a worker waits for:
+    /// there every loop-back definition is published again
+    /// (`Operation::read_back`'s together) and only the readers whose
+    /// answer moved run again, the next pass. `Limits::final_reruns`
+    /// counts passes: a reader re-asked in more of them in one evaluation
+    /// is left as it is and listed in `Report::capped` (a document that
+    /// does not converge).
     Final,
 }
 
@@ -434,6 +439,10 @@ pub struct Report {
     /// The quiet points at which a loop-back value moved and its readers
     /// ran again: the passes a loop-back took to settle beyond the first.
     pub final_reruns: u32,
+    /// The passes the evaluation made: one, and one more for each quiet
+    /// point whose published values re-asked a reader (a LaTeX build's
+    /// runs).
+    pub passes: u32,
 }
 
 impl Report {
@@ -451,9 +460,10 @@ pub struct Limits {
     /// on unchanged reads is what `Engine::check_invariants` finds),
     /// `EvalError::RunawayNode`.
     pub runs_per_node: u32,
-    /// Reruns of one node caused by `At::Final` re-asks in one evaluation
-    /// (default 10, about what a LaTeX user tolerates in passes): past
-    /// it the node is capped (`Report::capped`), never an error.
+    /// The passes of one evaluation a node is re-asked in through
+    /// `At::Final` (default 10, about what a LaTeX user tolerates in
+    /// passes): past it the node is capped (`Report::capped`), never an
+    /// error.
     pub final_reruns: u32,
     /// Runs in the whole evaluation (default none).
     pub total_runs: Option<u64>,

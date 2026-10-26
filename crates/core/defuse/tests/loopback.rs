@@ -283,3 +283,71 @@ fn a_thousand_references_cost_a_thousand_re_asks_not_a_square() {
     assert!(rep.runs <= 4000, "{rep:?}");
     assert!(e.check_invariants().is_empty());
 }
+
+/// `[f]`: reads f's last definition; where it is 1 (a file half
+/// written: an open brace) it takes its next sibling, as a reader of an
+/// unbalanced table of contents reads on into the text after it.
+struct OpenReader;
+
+impl Operation for OpenReader {
+    fn name(&self) -> &'static str {
+        "open_reader"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let x = match cx.read_at(Field(cx.args()[0]), At::Final)? {
+            FieldAt::Def(x, _) => x,
+            _ => ValueId::UNIT,
+        };
+        if cx.values().as_int(x) == Some(1) {
+            let _ = cx.following(0);
+            cx.claim(1);
+        }
+        Ok(x)
+    }
+}
+
+/// `[f, v, ms]`: spins `ms` milliseconds, then defines f = v.
+struct SlowLabel;
+
+impl Operation for SlowLabel {
+    fn name(&self) -> &'static str {
+        "slow_label"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let ms = cx.values().as_int(cx.args()[2]).unwrap() as u64;
+        let t = std::time::Instant::now();
+        while t.elapsed() < std::time::Duration::from_millis(ms) {
+            std::hint::spin_loop();
+        }
+        cx.define(Field(cx.args()[0]), cx.args()[1]);
+        Ok(cx.args()[1])
+    }
+}
+
+#[test]
+fn a_half_written_file_never_leads_to_another_fixed_point() {
+    // A writes the file's first half (f = 1) at once, B the whole (f = 2)
+    // after a long run; R between them reads the file and, on the half,
+    // takes B, which then never writes: a fixed point of its own (R reads
+    // 1, B taken, the last definition 1). TeX's passes read whole files
+    // only (nothing, then 2): R ends on 2 and B stands, at any threads.
+    let threads = std::thread::available_parallelism().map_or(1, usize::from).clamp(2, 8);
+    for j in [1, threads] {
+        let (e, o) = engine();
+        let open = e.register(Arc::new(OpenReader));
+        let slow = e.register(Arc::new(SlowLabel));
+        let v = e.values();
+        let x = v.field("x").0;
+        let u = e.new_unit();
+        e.push(u, o.label, vec![x, v.int(1)]);
+        let r = e.push(u, open, vec![x]);
+        let b = e.push(u, slow, vec![x, v.int(2), v.int(40)]);
+        let rep = e.evaluate(j).unwrap();
+        assert_eq!(int(&e, r), 2, "-j{j}: {rep:?}");
+        assert_eq!(e.node_info(b).unwrap().state, phitex_defuse::NodeState::Done, "-j{j}");
+        assert_eq!(rep.passes, 2, "-j{j}: {rep:?}");
+        assert!(e.check_invariants().is_empty());
+    }
+}

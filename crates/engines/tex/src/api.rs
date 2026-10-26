@@ -1343,8 +1343,8 @@ pub struct Stats {
     /// the piece its page finished inside of changed what the piece's
     /// commands after the candidate saw): each costs a round.
     pub cuts: u64,
-    /// The passes the files read back took to their fixpoint: one, and
-    /// each rerun one reader of them took (`Report::final_reruns`).
+    /// The passes the files read back took to their fixpoint
+    /// (`Report::passes`).
     pub loop_rounds: u64,
     /// Nodes that waited on a value not known yet, and stops.
     pub pending_waits: u64,
@@ -1842,7 +1842,7 @@ impl Stats {
         self.rounds += 1;
         // (the passes the files read back took: one, and each rerun a
         // node took on them)
-        self.loop_rounds = self.loop_rounds.max(1 + u64::from(r.final_reruns));
+        self.loop_rounds = self.loop_rounds.max(u64::from(r.passes));
         self.version = r.version;
         self.predictions_confirmed += r.predictions_confirmed;
         self.predictions_refuted += r.predictions_refuted;

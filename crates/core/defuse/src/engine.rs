@@ -1098,6 +1098,7 @@ impl Engine {
             }
             rep.run_times.append(&mut log.run_times);
         }
+        rep.passes = rep.final_reruns + 1;
         rep.capped.sort_unstable();
         rep.capped.dedup();
         rep.first_runs = rep.nodes_run.saturating_sub(rep.refuted_nodes);
