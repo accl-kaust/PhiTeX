@@ -1649,6 +1649,10 @@ impl Operation for Resume {
     fn name(&self) -> &'static str {
         "resume"
     }
+    /// Each runs its own text: a counter one steps is not another's.
+    fn alike(&self) -> bool {
+        false
+    }
     fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
         MayDefine::Any
     }

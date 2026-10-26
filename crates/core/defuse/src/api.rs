@@ -257,6 +257,15 @@ pub trait Operation: Send + Sync {
         false
     }
 
+    /// Whether its nodes define alike (default yes): a relation one of
+    /// them makes (`Ctx::define_rel`) is then predicted for the others
+    /// that have not run (`commit::learn_shape`). An operation whose nodes
+    /// each run their own text says no: one node's counter step predicts
+    /// nothing of another's.
+    fn alike(&self) -> bool {
+        true
+    }
+
     /// Whether its nodes are siblings to a claim (`Ctx::claim`,
     /// `Ctx::following`; default yes): a node set among the text's pieces
     /// to start work beside them says no, and a claim passes over it.

@@ -271,6 +271,10 @@ impl Operation for Exec {
     fn name(&self) -> &'static str {
         "exec"
     }
+    /// Each runs its own text: a counter one steps is not another's.
+    fn alike(&self) -> bool {
+        false
+    }
 
     /// A recorded node (a package load, a document node whose text
     /// cannot bound what it defines) whose record matches (and

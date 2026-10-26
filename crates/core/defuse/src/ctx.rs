@@ -476,8 +476,8 @@ impl<'a> Ctx<'a> {
     pub fn unread(&mut self, f: Field) {
         self.seen.remove(&f);
         self.product.reads.retain(|r| match &r.kind {
-            ReadKind::Field { f: g, .. } | ReadKind::Env { f: g } => *g != f,
-            ReadKind::Fold { .. } | ReadKind::Next { .. } | ReadKind::Placed { .. } | ReadKind::Following { .. } => true,
+            ReadKind::Field { f: g, .. } | ReadKind::Env { f: g } | ReadKind::Fold { f: g, .. } | ReadKind::Next { f: g, .. } => *g != f,
+            ReadKind::Placed { .. } | ReadKind::Following { .. } => true,
         });
     }
 

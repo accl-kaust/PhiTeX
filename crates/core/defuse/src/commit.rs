@@ -1076,7 +1076,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
     }
     // 5. a first relation by this operation
-    for (f, c) in rels {
+    for (f, c) in rels.into_iter().filter(|_| eng.op(node.op()).alike()) {
         learn_shape(eng, ww, node.op(), f, c, &mut st);
     }
     // 6. the node's own reads the lock could not answer
