@@ -34,6 +34,9 @@ pub(crate) struct Shared {
     /// its readers ran again (`commit::publish_finals`): the loop-back's
     /// passes beyond the first, `Report::final_reruns`.
     passes: AtomicU64,
+    /// Nodes run so far in the evaluation, and at each pass's start
+    /// (`Report::pass_runs`).
+    runs_now: AtomicU64,
     stealers: Vec<Stealer<NodeId>>,
     later_stealers: Vec<Stealer<NodeId>>,
     block_stealers: Vec<Stealer<(NodeId, u32)>>,
@@ -104,6 +107,9 @@ pub(crate) struct WorkerLog {
     /// what it read, the panic; failures only if those reads still hold
     /// once the line is quiet (`Engine::evaluate`).
     pub(crate) panicked: Vec<(NodeId, Vec<crate::node::ReadRec>, &'static str, String)>,
+    /// The runs made before each pass after the first began (the caller's
+    /// worker only).
+    pub(crate) pass_starts: Vec<u64>,
 }
 
 /// One worker's deques and counters (nanoseconds).
@@ -227,6 +233,7 @@ impl Pool {
         let shared = Arc::new(Shared {
             injector: Injector::new(),
             passes: AtomicU64::new(0),
+            runs_now: AtomicU64::new(0),
             stealers,
             later_stealers,
             block_stealers,
@@ -612,6 +619,7 @@ fn run_worker(
             if pass {
                 let k = pool.shared.passes.fetch_add(1, Ordering::SeqCst) + 1;
                 Worker::max(&w.final_max, k);
+                w.log.lock().pass_starts.push(pool.shared.runs_now.load(Ordering::SeqCst));
             }
             if k > 0 {
                 continue;
@@ -782,6 +790,7 @@ pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(
     node.run_ns.store(run_ns, Ordering::Relaxed);
     Worker::add(&w.op_ns, run_ns);
     Worker::add(&w.runs, 1);
+    w.shared.runs_now.fetch_add(1, Ordering::Relaxed);
     {
         let mut log = w.log.lock();
         *log.runs_by_op.entry(node.op()).or_default() += 1;

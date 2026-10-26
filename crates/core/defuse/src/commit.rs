@@ -641,7 +641,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         if tries < crate::order::ROOM_TRIES && !seg.has_room(&inner, fresh.iter().filter(|x| x.is_some()).count()) {
             drop(inner);
             tries += 1;
-            eng.order.rebalance(eng, seg.id);
+            eng.order.rebalance(eng, seg.id, fresh.iter().filter(|x| x.is_some()).count());
             continue;
         }
         let t_lock = Instant::now();
@@ -841,6 +841,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             let in_here = at.is_none()
                 && in_seg
                 && seg.can_place(&inner)
+                && !Segment::needs_split(&inner)
                 && eng.node(after).seg_hint() == seg.id
                 && inner.nodes.get(&eng.node(after).pos_hint()) == Some(&after)
                 && before.is_none_or(|b| eng.node(b).seg_hint() == seg.id && inner.nodes.get(&eng.node(b).pos_hint()) == Some(&b));
@@ -1250,14 +1251,13 @@ fn reask_parent(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: Nod
     let Some(r) = parent.run_record() else {
         return;
     };
-    let Some(i) = r.placed.iter().position(|&c| c == child) else {
-        return;
-    };
-    let out = eng.node(child).run_record().map(|x| x.output);
+    // (its reads of placements, not its placements: a placer of thousands
+    // reads few of them)
+    let mut out = None;
     for rd in &r.reads {
         if let ReadKind::Placed { i: j } = rd.kind
-            && j == i
-            && read::apply_path(eng, out, rd.path) != rd.seen
+            && r.placed.get(j) == Some(&child)
+            && read::apply_path(eng, *out.get_or_insert_with(|| eng.node(child).run_record().map(|x| x.output)), rd.path) != rd.seen
         {
             if mark_stale(
                 eng,
@@ -2346,7 +2346,7 @@ fn place_before_node(eng: &Engine, before: NodeId, at: NodeId, node: Arc<Node>, 
             drop(inner);
             tries += 1;
             assert!(tries <= 2 * crate::order::ROOM_TRIES, "no room after rebalances");
-            eng.order.rebalance(eng, seg.id);
+            eng.order.rebalance(eng, seg.id, 1);
             continue;
         }
         return place_before(eng, seg, &mut inner, before, node, pred);
@@ -2377,7 +2377,7 @@ fn place_at_end(eng: &Engine, at: NodeId, end: NodeId, node: Arc<Node>, pred: Pr
                 drop(inner);
                 tries += 1;
                 assert!(tries <= 2 * crate::order::ROOM_TRIES, "no room after rebalances");
-                eng.order.rebalance(eng, seg.id);
+                eng.order.rebalance(eng, seg.id, 1);
                 continue;
             }
             return place(eng, seg, &mut inner, end, node, pred);

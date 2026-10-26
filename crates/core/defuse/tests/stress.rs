@@ -289,3 +289,51 @@ fn floods_among_long_chains_fit() {
         assert!(e.check_invariants().is_empty());
     }
 }
+
+/// `[n, k]`: places its chain's next step `[n - 1, k]` after itself while
+/// `n > 0`; the last step places k children `Def` in its one commit.
+struct ChainThenFlood(std::sync::OnceLock<OpId>, OpId);
+
+impl Operation for ChainThenFlood {
+    fn name(&self) -> &'static str {
+        "chain_then_flood"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let (n, k) = (v.as_int(cx.args()[0]).unwrap(), v.as_int(cx.args()[1]).unwrap());
+        if n > 0 {
+            cx.follow(*self.0.get().unwrap(), vec![v.int(n - 1), v.int(k)]);
+        } else {
+            let f = v.field("z");
+            for i in 0..k {
+                cx.child(self.1, vec![f.0, v.int(i)]);
+            }
+        }
+        Ok(cx.args()[0])
+    }
+}
+
+#[test]
+fn a_flood_at_the_end_of_a_long_chain_fits() {
+    // A chain of steps placed one after another narrows its segments as
+    // they split (the book: a chapter read on in parts); its last step
+    // places thousands of children in one commit, more than its narrow
+    // segment can label: the placements its segment has no room for go
+    // after a rebalance, never a relabel without a gap.
+    for threads in [1, threads().min(8)] {
+        let e = Engine::new();
+        let v = e.values();
+        let def = e.register(Arc::new(Def));
+        let ch = Arc::new(ChainThenFlood(std::sync::OnceLock::new(), def));
+        let chain = e.register(ch.clone());
+        ch.0.set(chain).unwrap();
+        let u = e.new_unit();
+        let x = v.field("x");
+        let ids = e.push_many(u, def, (0..200).map(|i| vec![x.0, v.int(i)]).collect(), 4);
+        e.insert_after(ids[100], chain, vec![v.int(5000), v.int(60000)]);
+        e.evaluate(threads).unwrap();
+        assert_eq!(e.order(u).len(), 200 + 5001 + 60000);
+        assert!(e.check_invariants().is_empty());
+    }
+}

@@ -444,7 +444,7 @@ impl Engine {
             if next.0 - p.0 < 8 {
                 if !seg.has_room(&inner, 4) {
                     drop(inner);
-                    self.order.rebalance(self, seg.id);
+                    self.order.rebalance(self, seg.id, 4);
                     continue;
                 }
                 seg.relabel(&mut inner, self);
@@ -711,7 +711,7 @@ impl Engine {
                 drop(inner);
                 tries += 1;
                 assert!(tries <= 2 * ROOM_TRIES, "no room after rebalances");
-                self.order.rebalance(self, seg.id);
+                self.order.rebalance(self, seg.id, 1);
                 continue;
             }
             let p = match seg.gap_before(&inner, near.pos_hint()) {
@@ -1105,6 +1105,12 @@ impl Engine {
             rep.run_times.append(&mut log.run_times);
         }
         rep.passes = rep.final_reruns + 1;
+        let starts: Vec<u64> = workers.iter().flat_map(|w| std::mem::take(&mut w.log.lock().pass_starts)).collect();
+        let mut at = 0;
+        for s in starts.into_iter().chain([rep.runs]) {
+            rep.pass_runs.push(s.saturating_sub(at));
+            at = s;
+        }
         rep.capped.sort_unstable();
         rep.capped.dedup();
         rep.first_runs = rep.nodes_run.saturating_sub(rep.refuted_nodes);
@@ -1358,6 +1364,8 @@ impl Engine {
                 }
             }
         }
+        // (each placer's placements as a set, made once)
+        let mut held: FxHashMap<NodeId, FxHashSet<NodeId>> = FxHashMap::default();
         for i in 0..self.nodes.len() {
             let Some(node) = self.nodes.get(i) else {
                 continue;
@@ -1366,7 +1374,10 @@ impl Engine {
             // (a placed node stands only while its placer holds it)
             if node.state() != State::Gone
                 && let Some(p) = node.parent
-                && !self.node(p).record().is_some_and(|r| r.placed.contains(&n))
+                && !held
+                    .entry(p)
+                    .or_insert_with(|| self.node(p).record().map(|r| r.placed.iter().copied().collect()).unwrap_or_default())
+                    .contains(&n)
             {
                 out.push(format!("node {} is on the line, its placer {} holding it no more", n.raw(), p.raw()));
             }

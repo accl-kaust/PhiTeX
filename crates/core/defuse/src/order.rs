@@ -92,28 +92,39 @@ impl Order {
     }
 }
 
-/// Labels a node a rebalanced window keeps at the least.
+/// Labels a node the widest windows keep after a rebalance.
 const DENSITY: u64 = 16;
 /// Rebalances a placement asks for before it places where it can.
 pub(crate) const ROOM_TRIES: u32 = 2;
+/// A segment narrower than this is absorbed into its left neighbour when
+/// a window is spread: its range ends where its nodes began, and fixed
+/// narrow ranges in a dense run would give the run room a few nodes at a
+/// time, a rebalance each.
+const MIN_WIDTH: u64 = DENSITY * SEG_CAP as u64 / 2;
+
+/// Labels a node a window of about `2^level` segments must hold to be
+/// spread: looser near the segment that asked, stricter far from it, so
+/// a spread of a wide window leaves each narrower one room in proportion
+/// to its size (the order-maintenance thresholds).
+fn need(level: u32) -> u64 {
+    (4 + 2 * u64::from(level)).min(DENSITY)
+}
 
 impl Order {
-    /// Gives a segment whose labels are used up (a gap of nothing left
-    /// after a relabel: one node placing thousands of placements after
-    /// itself) room: the window of its unit's segments around it, doubled
-    /// until it holds `DENSITY` labels a node (the whole unit at the
-    /// most, two labels a node then), is relabelled evenly. No segment's
-    /// range changes, so neither do the order's list and the field
-    /// indexes' keys: each segment is given nodes in proportion to its
-    /// labels, a node moving across a boundary to the segment its new
-    /// label is in (`Segment::give`, between neighbours, in order), and
-    /// filed as a split files it; the range readers whose interval began
-    /// or ended inside the window are widened over it (`RangeIndex::
-    /// widen_over`). The window's segments are taken in ascending order,
-    /// no other lock held (`lock.rs`'s table). False when the whole unit
-    /// holds fewer than two labels a node.
-    pub(crate) fn rebalance(&self, eng: &crate::engine::Engine, seg: SegId) -> bool {
+    /// Gives segment `seg`, which has no room for `more` placements, room:
+    /// the window of its unit's segments around it, doubled until it holds
+    /// `need(level)` labels a node with them (the whole unit at the most,
+    /// two labels a node then), is spread: narrow segments absorbed into
+    /// their left neighbours, each segment given nodes in proportion to its
+    /// labels (the asking one less, by what it is to place), relabelled
+    /// evenly (`spread`); the range readers whose interval began or ended
+    /// inside the window are widened over it (`RangeIndex::widen_over`).
+    /// The window's segments are taken in ascending order, no other lock
+    /// held (`lock.rs`'s table). False when the whole unit holds fewer
+    /// than two labels a node.
+    pub(crate) fn rebalance(&self, eng: &crate::engine::Engine, seg: SegId, more: usize) -> bool {
         let s = eng.seg(seg);
+        let more = more as u64;
         let (mut left, mut right) = (0usize, 0usize);
         loop {
             // the window's segments, in order, from the list now
@@ -136,7 +147,7 @@ impl Order {
             };
             let win: Vec<std::sync::Arc<crate::segment::Segment>> = ids.iter().map(|&x| eng.seg(x).clone()).collect();
             let mut gs: Vec<crate::lock::WriteGuard<'_, crate::segment::Inner>> = win.iter().map(|x| x.inner.write()).collect();
-            // (a split among them meanwhile: the list again)
+            // (a split or an absorption among them meanwhile: the list again)
             if (1..win.len()).any(|k| gs[k - 1].hi != win[k].lo) {
                 continue;
             }
@@ -144,7 +155,8 @@ impl Order {
             let width = gs[gs.len() - 1].hi.0 - lo.0;
             let n: u64 = gs.iter().map(|g| g.nodes.len() as u64).sum();
             let whole = at_lo && at_hi;
-            if width < DENSITY.saturating_mul(n + 1) && !(whole && width >= 2 * (n + 1)) {
+            let level = usize::BITS - win.len().leading_zeros();
+            if width < need(level).saturating_mul(n + more + 1) && !(whole && width >= 2 * (n + more + 1)) {
                 drop(gs);
                 if whole {
                     return false;
@@ -164,7 +176,8 @@ impl Order {
                 right += r;
                 continue;
             }
-            self.spread(eng, &win, &mut gs, n);
+            let asking = ids.iter().position(|&x| x == seg).expect("the asking segment");
+            self.spread(eng, &win, &mut gs, n, asking, more);
             let hi = gs[gs.len() - 1].hi;
             drop(gs);
             // (a range read through a moved node now reaches anywhere in
@@ -174,42 +187,36 @@ impl Order {
         }
     }
 
-    /// `rebalance`'s move, under the window's locks: each segment's count
-    /// in proportion to its labels (the remainder to the widest, which
-    /// have room), the nodes moved across each boundary in turn (rightward
-    /// then leftward, every move between neighbours), each segment
-    /// relabelled evenly, the field indexes told what each segment holds
-    /// now.
+    /// Takes segment `id` starting at `lo` out of the list (absorbed into
+    /// its left neighbour by `spread`).
+    fn remove(&self, lo: Pos, id: SegId) {
+        let mut segs = self.segs.write();
+        if let Ok(i) = segs.binary_search(&(lo, id)) {
+            segs.remove(i);
+        }
+    }
+
+    /// `rebalance`'s move, under the window's locks. Each segment narrower
+    /// than `MIN_WIDTH`, or right of one, is absorbed into its left
+    /// neighbour (its nodes moved over, `Segment::give`; the neighbour's
+    /// range extended over its own, which ends where it begins; out of the
+    /// list). Then each segment's count is set in proportion to its labels
+    /// (`asking`'s less by `more` placements' room; the remainder to the
+    /// widest, which have room), the nodes moved across each boundary in
+    /// turn (rightward then leftward, between neighbours), each segment
+    /// relabelled evenly, and the field indexes told what each holds now.
+    #[allow(clippy::too_many_lines)]
     fn spread(
         &self,
         eng: &crate::engine::Engine,
         win: &[std::sync::Arc<crate::segment::Segment>],
         gs: &mut [crate::lock::WriteGuard<'_, crate::segment::Inner>],
         n: u64,
+        asking: usize,
+        more: u64,
     ) {
         use crate::values::{Field, FxHashMap};
         let k = win.len();
-        let widths: Vec<u64> = (0..k).map(|i| gs[i].hi.0 - win[i].lo.0).collect();
-        let total: u64 = widths.iter().sum();
-        let share = |i: usize| u128::from(n) * u128::from(widths[i]);
-        let mut want: Vec<u64> = (0..k).map(|i| (share(i) / u128::from(total)) as u64).collect();
-        let mut left = n - want.iter().sum::<u64>();
-        let mut by_rest: Vec<usize> = (0..k).collect();
-        by_rest.sort_by_key(|&i| std::cmp::Reverse(share(i) % u128::from(total)));
-        while left > 0 {
-            let before = left;
-            for &i in &by_rest {
-                if left > 0 && widths[i] >= 4 * (want[i] + 2) {
-                    want[i] += 1;
-                    left -= 1;
-                }
-            }
-            if left == before {
-                let i = (0..k).max_by_key(|&i| widths[i]).expect("a window");
-                want[i] += left;
-                left = 0;
-            }
-        }
         let held = |g: &crate::segment::Inner| -> FxHashMap<(Field, u8), ()> {
             let mut m = FxHashMap::default();
             // (an entry made ready for a commit and not filled holds nothing)
@@ -221,6 +228,49 @@ impl Order {
         let before: Vec<_> = gs.iter().map(|g| held(g)).collect();
         eng.layout_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let mut brackets = false;
+        // narrow segments absorbed: `live[i]` false for one taken in
+        let mut live = vec![true; k];
+        let mut a = 0;
+        for b in 1..k {
+            let wa = gs[a].hi.0 - win[a].lo.0;
+            let wb = gs[b].hi.0 - win[b].lo.0;
+            if wa >= MIN_WIDTH && wb >= MIN_WIDTH {
+                a = b;
+                continue;
+            }
+            let (x, y) = gs.split_at_mut(b);
+            brackets |= win[b].give(&mut y[0], eng, &win[a], &mut x[a], Pos(u64::MAX), false);
+            x[a].hi = y[0].hi;
+            y[0].hi = win[b].lo;
+            live[b] = false;
+            self.remove(win[b].lo, win[b].id);
+        }
+        let widths: Vec<u64> = (0..k)
+            .map(|i| {
+                let w = gs[i].hi.0 - win[i].lo.0;
+                if i == asking { w.saturating_sub(need(0).saturating_mul(more)) } else { w }
+            })
+            .collect();
+        let total: u64 = widths.iter().sum::<u64>().max(1);
+        let share = |i: usize| u128::from(n) * u128::from(widths[i]);
+        let mut want: Vec<u64> = (0..k).map(|i| (share(i) / u128::from(total)) as u64).collect();
+        let mut left = n - want.iter().sum::<u64>();
+        let mut by_rest: Vec<usize> = (0..k).filter(|&i| live[i]).collect();
+        by_rest.sort_by_key(|&i| std::cmp::Reverse(share(i) % u128::from(total)));
+        while left > 0 {
+            let before = left;
+            for &i in &by_rest {
+                if left > 0 && widths[i] >= 4 * (want[i] + 2) {
+                    want[i] += 1;
+                    left -= 1;
+                }
+            }
+            if left == before {
+                let i = (0..k).filter(|&i| live[i]).max_by_key(|&i| gs[i].hi.0 - win[i].lo.0).expect("a window");
+                want[i] += left;
+                left = 0;
+            }
+        }
         let counts = |gs: &[crate::lock::WriteGuard<'_, crate::segment::Inner>]| -> Vec<u64> { gs.iter().map(|g| g.nodes.len() as u64).collect() };
         // rightward: every prefix down to its share or below
         let (mut have, mut aim) = (0u64, 0u64);
@@ -243,13 +293,15 @@ impl Order {
             let aim: u64 = want[..i].iter().sum();
             if have < aim {
                 let take = (aim - have) as usize;
-                let cut = gs[i].nodes.keys().nth(take).copied().unwrap_or(crate::order::Pos(u64::MAX));
+                let cut = gs[i].nodes.keys().nth(take).copied().unwrap_or(Pos(u64::MAX));
                 let (a, b) = gs.split_at_mut(i);
                 brackets |= win[i].give(&mut b[0], eng, &win[i - 1], &mut a[i - 1], cut, false);
             }
         }
         for i in 0..k {
-            win[i].relabel(&mut gs[i], eng);
+            if live[i] {
+                win[i].relabel(&mut gs[i], eng);
+            }
         }
         let mut bump: FxHashMap<Field, ()> = FxHashMap::default();
         for i in 0..k {

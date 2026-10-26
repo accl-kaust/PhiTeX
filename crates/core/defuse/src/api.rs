@@ -443,6 +443,8 @@ pub struct Report {
     /// point whose published values re-asked a reader (a LaTeX build's
     /// runs).
     pub passes: u32,
+    /// The runs each pass made, in order (their sum is `runs`).
+    pub pass_runs: Vec<u64>,
 }
 
 impl Report {
