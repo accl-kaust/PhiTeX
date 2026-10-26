@@ -454,13 +454,28 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         .placements
         .iter()
         .zip(&kept)
-        .map(|(what, k)| {
+        .enumerate()
+        .map(|(i, (what, k))| {
             if k.is_some() && !matches!(what, Placement::FollowAfter(..)) {
                 return None;
             }
             let (op, args) = what.key();
             let id = NodeId::from_raw(eng.nodes.reserve() as u64);
-            Some(built(eng, node.unit, Some(node.id), op, args.to_vec(), id))
+            let (n, mut pred) = built(eng, node.unit, Some(node.id), op, args.to_vec(), id);
+            // (made anew in place of the one at its index, of its
+            // operation, which goes: that one's definitions are its
+            // prediction, so that a reader after it whose answer stays
+            // the same is not run again)
+            if k.is_none()
+                && let Some(&o) = old_placed.get(i)
+                && !kept.contains(&Some(o))
+                && let Some(on) = eng.placed_node(o)
+                && on.op() == op
+                && let Some(r) = on.record()
+            {
+                pred.inherit(&r.defs);
+            }
+            Some((n, pred))
         })
         .collect();
     // the record, made before the lock: no allocation under it
@@ -787,16 +802,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // (a kept placement's subtree end found only where a placement
         // follows it: the last one's subtree may be a whole chain)
         let mut kept_end: Option<NodeId> = None;
+        // (the last placement with a label: one made in this commit and put
+        // off to after the lock has none yet, and goes before the next
+        // placement kept, `waiting`, so that one still stands after it)
+        let mut labelled = node.id;
+        let mut waiting: Vec<usize> = Vec::new();
         for (i, what) in p.placements.iter().enumerate() {
             if let Some(k) = kept_end.take() {
                 after = subtree_end(eng, k);
+                labelled = after;
             }
-            // (after one made in this commit and not placed yet: no kept
-            // node stands after it)
-            let after_pos = eng
-                .nodes
-                .get(usize::try_from(after.raw()).unwrap_or(usize::MAX))
-                .map_or(Pos(u64::MAX), |n| n.pos_hint());
+            let after_pos = eng.node(labelled).pos_hint();
             if let Some(k) = kept[i] {
                 let kn = eng.node(k);
                 // (one placed after another node stands while it is still
@@ -811,6 +827,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 if kn.state() != State::Gone && kn.pos_hint() > floor && ceiling.is_none_or(|c| kn.pos_hint() < c) {
                     placed.push(k);
                     kept_end = Some(k);
+                    for d in waiting.drain(..) {
+                        if deferred[d].2.is_none() {
+                            deferred[d].2 = Some(k);
+                        }
+                    }
                     continue;
                 }
                 removed_kept.push(k);
@@ -850,8 +871,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     Some(b) => place_before(eng, seg, &mut inner, b, n, pred),
                     None => place(eng, seg, &mut inner, after, n, pred),
                 });
+                labelled = id;
             } else {
                 in_seg = false;
+                if at.is_none() {
+                    waiting.push(deferred.len());
+                }
                 deferred.push((i, at.unwrap_or(after), before, n, pred));
             }
             after = id;
@@ -1680,8 +1705,15 @@ fn reask_range(
             .then(|| read::pos_of(eng, by).map_or(eng.node(by).pos_hint(), |p| Pos(p.0 - 1)))
             .filter(|p| from.is_some_and(|f| *p > f));
         if let Some(from) = from {
-            let n = read::next_contribution(eng, f, Some(resume.unwrap_or(from)));
-            let v = read::next_value(eng, &n);
+            let mut n = read::next_contribution(eng, f, Some(resume.unwrap_or(from)));
+            let mut v = read::next_value(eng, &n);
+            // (a node placed since before the one it stopped at, a
+            // continuation made anew in place of a removed one, is found
+            // only from the start: the answer asked again in full)
+            if resume.is_some() && !r.seen.iter().all(|&(p, s)| read::apply_path(eng, v, p) == s) {
+                n = read::next_contribution(eng, f, Some(from));
+                v = read::next_value(eng, &n);
+            }
             if r.seen.iter().all(|&(p, s)| read::apply_path(eng, v, p) == s) {
                 if n.stop != r.to && eng.ranges.remove(f, k) {
                     let mut again = r.clone();
@@ -1691,6 +1723,22 @@ fn reask_range(
                 }
                 return;
             }
+            // (the answer this search gave, not another search's: one made
+            // after a node placed meanwhile may find the old answer again
+            // with a stop the record does not hold)
+            if mark_stale(
+                eng,
+                w,
+                eng.node(r.node),
+                Wake {
+                    by: Some(by),
+                    cause: Cause::Range { field: f, by },
+                    at_ns: eng.now_ns(),
+                },
+            ) {
+                st.woken += 1;
+            }
+            return;
         }
     }
     if !read::range_stands(eng, f, r, memo)
@@ -1859,6 +1907,23 @@ pub(crate) struct Predicted {
     shapes: Vec<(Field, i64)>,
     /// Its operation's static effect, filed with the node.
     effect: Effect,
+}
+
+impl Predicted {
+    /// `defs`, those of a node this one replaces, for the fields its
+    /// operation predicts no value for: a relation with the value it gave
+    /// there (a shape's value is computed from the input in the node's
+    /// segment only, and the commit that places it settles it from the
+    /// true input, `settle_predictions`).
+    fn inherit(&mut self, defs: &[DefRec]) {
+        for d in defs {
+            if self.defs.iter().any(|x| x.f == d.f) {
+                continue;
+            }
+            self.shapes.retain(|x| x.0 != d.f);
+            self.defs.push(*d);
+        }
+    }
 }
 
 pub(crate) fn predict(eng: &Engine, op: OpId, args: &[ValueId]) -> Predicted {

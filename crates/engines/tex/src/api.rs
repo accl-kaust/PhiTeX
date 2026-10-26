@@ -1384,8 +1384,8 @@ pub struct Stats {
     pub batches: u64,
     pub batches_inline: u64,
     pub jobs_max_batch: usize,
-    /// The longest chain of dependent waits among the live nodes after
-    /// the last evaluation (the engine's `critical_path`), in nodes.
+    /// The longest chain of runs that waited on each other over this
+    /// build's evaluations (`realised_critical_path`), in nodes.
     pub critical_path: Option<usize>,
     /// The engine's realised critical path (`Report::realised_critical_path`:
     /// the longest chain of runs that waited for each other, counted from
@@ -1851,6 +1851,8 @@ impl Stats {
         self.predictions_refuted += r.predictions_refuted;
         self.round_times.push(r.times);
         self.realised_critical_path = self.realised_critical_path.max(r.realised_critical_path);
+        // (the chain of runs that waited on each other, in nodes)
+        self.critical_path = Some(self.realised_critical_path as usize);
         if r.realised_critical_time >= self.realised_critical_time {
             self.realised_critical_time = r.realised_critical_time;
             let mut ts = r.run_times.clone();
