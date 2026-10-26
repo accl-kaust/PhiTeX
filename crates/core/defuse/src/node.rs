@@ -97,6 +97,17 @@ pub(crate) struct Node {
     /// `Ctx::follow_after`), not as its child: a node placed after the
     /// placer and its children goes before it.
     pub(crate) follows: AtomicBool,
+    /// The node it was placed right after (raw id + 1; 0: pushed by the
+    /// client, after none): the `at` of a `Ctx::follow_after`, else the
+    /// placer or the placement before it. A placement kept where it stood
+    /// is checked against it (`commit::stranded`).
+    pub(crate) anchor: AtomicU64,
+    /// Where it stands among the nodes placed at its anchor: 0 a child
+    /// of it, 1 after it and its children (another's `Ctx::follow_after`,
+    /// or the placement after it in its placer's run), 2 its own
+    /// continuation (`Ctx::follow`). Those of a lower slot stand before
+    /// those of a higher one.
+    pub(crate) slot: AtomicU8,
     /// Its operation's static effect (`Operation::effect`), packed
     /// (`pack_effect`): asked once when the node is made or its text
     /// replaced.
@@ -137,6 +148,8 @@ impl Node {
             claimer: AtomicU64::new(0),
             claim_end: AtomicU64::new(0),
             follows: AtomicBool::new(false),
+            anchor: AtomicU64::new(0),
+            slot: AtomicU8::new(0),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             anchored: Mx::new(Vec::new()),
@@ -253,6 +266,18 @@ impl Node {
 
     pub(crate) fn seg_hint(&self) -> SegId {
         SegId(self.seg.load(Ordering::Acquire))
+    }
+
+    /// The node it was placed right after (none: pushed by the client).
+    pub(crate) fn anchor(&self) -> Option<NodeId> {
+        match self.anchor.load(Ordering::Acquire) {
+            0 => None,
+            a => Some(NodeId::from_raw(a - 1)),
+        }
+    }
+
+    pub(crate) fn slot(&self) -> u8 {
+        self.slot.load(Ordering::Acquire)
     }
 
     pub(crate) fn pos_hint(&self) -> Pos {

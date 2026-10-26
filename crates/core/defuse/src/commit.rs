@@ -121,6 +121,100 @@ pub(crate) fn subtree_end(eng: &Engine, n: NodeId) -> NodeId {
 /// after the last node of its children's subtrees (or `n`), and before
 /// its first continuation (`Node::follows`), if it has one: the
 /// position it must stand before.
+/// The slot `y` stands in under `a`: the slot of the node of `y`'s
+/// anchor chain whose anchor is `a` (`y` itself, or what it was placed
+/// after, and so on); none where the chain ends before `a` (a pushed
+/// node, or one anchored elsewhere).
+fn slot_under(eng: &Engine, y: NodeId, a: NodeId) -> Option<u8> {
+    let mut z = y;
+    for _ in 0..100_000 {
+        let zn = eng.placed_node(z)?;
+        let an = zn.anchor()?;
+        if an == a {
+            return Some(zn.slot());
+        }
+        z = an;
+    }
+    None
+}
+
+/// Whether a placement of `by`'s kept at `upto` (`None`: in another
+/// segment) in slot `s` of anchor `a` is stranded: a node of a later slot under `a`,
+/// or of none (pushed, or anchored elsewhere), stands in this segment
+/// between `floor` (the slot's start) and it. A kept placement stands
+/// where its slot is; when its anchor's earlier slots moved back and
+/// nodes of later slots came between, it is made anew where it belongs.
+/// (Nodes in other segments between are not seen.)
+fn stranded(eng: &Engine, inner: &Inner, by: NodeId, a: NodeId, s: u8, floor: Pos, upto: Option<Pos>) -> bool {
+    let r = match upto {
+        Some(u) => inner.nodes.range((Excluded(floor), Excluded(u))),
+        None => inner.nodes.range((Excluded(floor), Unbounded)),
+    };
+    for (_, &x) in r {
+        // (one not in the table yet: made by this commit, its own)
+        let Some(xn) = eng.placed_node(x) else {
+            continue;
+        };
+        if xn.state() == State::Gone || x == a {
+            continue;
+        }
+        // (a placement of `by`'s own, kept or replaced: where the
+        // replaced one stands, the one made anew goes)
+        let mut q = Some(x);
+        let mut own = false;
+        while let Some(y) = q {
+            if y == by {
+                own = true;
+                break;
+            }
+            q = eng.placed_node(y).and_then(|n| n.parent);
+        }
+        if own {
+            continue;
+        }
+        match slot_under(eng, x, a) {
+            Some(t) if t <= s => {}
+            t => {
+                if crate::obs::enabled() && std::env::var_os("PHITEX_WAKE_LOG").is_some() {
+                    eprintln!(
+                        "stranded: anchor {} slot {s} floor {:?} upto {:?}: node {} (op {:?}, anchor {:?} slot {}, under {t:?}) between",
+                        a.raw(),
+                        floor.0,
+                        upto.map(|u| u.0),
+                        x.raw(),
+                        xn.op(),
+                        xn.anchor().map(NodeId::raw),
+                        xn.slot()
+                    );
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The last node in this segment after `from` that stands under `a`
+/// (its anchor chain reaches `a`): a continuation of `a`'s goes after
+/// them all, as what others placed after `a` and its children, and what
+/// follows those, comes before it. `from` where none does.
+fn attached_end(eng: &Engine, inner: &Inner, a: NodeId, from: NodeId) -> NodeId {
+    let mut last = from;
+    for (_, &x) in inner.nodes.range((Excluded(eng.node(from).pos_hint()), Unbounded)) {
+        let Some(xn) = eng.placed_node(x) else {
+            continue;
+        };
+        if xn.state() == State::Gone {
+            continue;
+        }
+        if slot_under(eng, x, a).is_none() {
+            break;
+        }
+        last = x;
+    }
+    last
+}
+
 pub(crate) fn children_end(eng: &Engine, n: NodeId) -> (NodeId, Option<Pos>) {
     let (mut best, mut best_pos) = (n, eng.node(n).pos_hint());
     let mut first_follow: Option<Pos> = None;
@@ -818,7 +912,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 .iter()
                 .copied()
                 .filter(|n| !kept.contains(&Some(*n)))
-                .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() != State::Gone && x.follows.load(Ordering::Acquire)))
+                .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() != State::Gone && x.slot() == 2))
                 .collect();
             v.sort_by_key(|&n| eng.node(n).pos_hint());
             v.into()
@@ -835,6 +929,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // one: one following it goes after it there, not before a
         // continuation of this node's that it replaces)
         let mut elsewhere = false;
+        // (the placement before, where it stands: a kept one follows it)
+        let mut prev: Option<NodeId> = None;
         for (i, what) in p.placements.iter().enumerate() {
             if let Some(k) = kept_end.take() {
                 after = subtree_end(eng, k);
@@ -853,9 +949,34 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     }
                     Placement::Child(..) | Placement::Follow(..) => (after_pos, None),
                 };
-                if kn.state() != State::Gone && kn.pos_hint() > floor && ceiling.is_none_or(|c| kn.pos_hint() < c) {
+                // (and nothing of a later slot under its anchor stands
+                // between: one left where it was when the slots before
+                // it moved back is made anew where it belongs)
+                let (anchor, slot, sfloor) = match what {
+                    Placement::FollowAfter(at, ..) => (*at, 1, floor),
+                    Placement::Child(..) => (node.id, 0, floor),
+                    Placement::Follow(..) if elsewhere => {
+                        // (the placement before not in the table yet, made
+                        // by this commit and put off: the floor stands)
+                        let q = prev.expect("a placement before, placed elsewhere");
+                        let f = eng
+                            .placed_node(q)
+                            .filter(|qn| qn.state() != State::Gone && qn.pos_hint() != Pos(0))
+                            .map_or(floor, |qn| eng.node(subtree_end(eng, qn.id)).pos_hint());
+                        (q, 1, f)
+                    }
+                    Placement::Follow(..) => (node.id, 2, floor),
+                };
+                let kpos = kn.pos_hint();
+                let here = kn.seg_hint() == seg.id && inner.nodes.get(&kpos) == Some(&k);
+                if kn.state() != State::Gone
+                    && kpos > floor
+                    && ceiling.is_none_or(|c| kpos < c)
+                    && !stranded(eng, &inner, node.id, anchor, slot, sfloor, here.then_some(kpos))
+                {
                     placed.push(k);
                     kept_end = Some(k);
+                    prev = Some(k);
                     elsewhere = matches!(what, Placement::FollowAfter(..));
                     for d in waiting.drain(..) {
                         if deferred[d].2.is_none() {
@@ -881,6 +1002,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 Placement::FollowAfter(at, _, _) => Some(*at),
                 Placement::Child(..) | Placement::Follow(..) => None,
             };
+            let (anchor, slot) = match what {
+                Placement::FollowAfter(at, ..) => (*at, 1),
+                Placement::Child(..) => (node.id, 0),
+                Placement::Follow(..) if elsewhere => (prev.expect("a placement before, placed elsewhere"), 1),
+                Placement::Follow(..) => (node.id, 2),
+            };
+            n.anchor.store(anchor.raw() + 1, Ordering::Release);
+            n.slot.store(slot, Ordering::Release);
+            prev = Some(id);
             let before = if matches!(what, Placement::Follow(..)) && !elsewhere {
                 while old_follows.front().is_some_and(|&b| eng.node(b).pos_hint() <= after_pos) {
                     old_follows.pop_front();
@@ -889,6 +1019,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             } else {
                 None
             };
+            // (one replacing a continuation left behind, with nodes of a
+            // later slot between, or standing in another segment: not
+            // there, where the continuation belongs)
+            let before = before.filter(|&b| {
+                let bn = eng.node(b);
+                let bp = bn.pos_hint();
+                bn.seg_hint() == seg.id
+                    && inner.nodes.get(&bp) == Some(&b)
+                    && !stranded(eng, &inner, node.id, node.id, 2, after_pos, Some(bp))
+            });
             let in_here = at.is_none()
                 && in_seg
                 && seg.can_place(&inner)
@@ -897,6 +1037,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 && inner.nodes.get(&eng.node(after).pos_hint()) == Some(&after)
                 && before.is_none_or(|b| eng.node(b).seg_hint() == seg.id && inner.nodes.get(&eng.node(b).pos_hint()) == Some(&b));
             if in_here {
+                // (a continuation goes after what others placed after this
+                // node and its children, and what follows those)
+                let after = if slot == 2 && before.is_none() { attached_end(eng, &inner, node.id, after) } else { after };
                 made.push(match before {
                     Some(b) => place_before(eng, seg, &mut inner, b, n, pred),
                     None => place(eng, seg, &mut inner, after, n, pred),
@@ -2446,7 +2589,26 @@ pub(crate) fn place(
     inner.holes += 1;
     inner.by_op.entry(node.op()).or_default().push(node.id);
     file_predicted(eng, seg, inner, &node, pred);
+    log_placed(eng, &node, "after", after);
     node
+}
+
+/// (`PHITEX_WAKE_LOG`, profile) A placement: the node, its placer, anchor
+/// and slot, its label, and the node it went after or before.
+fn log_placed(eng: &Engine, node: &Node, how: &str, rel: NodeId) {
+    if crate::obs::enabled() && std::env::var_os("PHITEX_WAKE_LOG").is_some() {
+        eprintln!(
+            "placed: node {} op {:?} parent {:?} anchor {:?} slot {} at {:?} {how} {} (at {:?})",
+            node.id.raw(),
+            node.op(),
+            node.parent.map(NodeId::raw),
+            node.anchor().map(NodeId::raw),
+            node.slot(),
+            node.pos_hint().0,
+            rel.raw(),
+            eng.placed_node(rel).map(|r| r.pos_hint().0)
+        );
+    }
 }
 
 /// A placement made outside its placer's segment, after the lock: its
@@ -2471,6 +2633,7 @@ fn place_before(eng: &Engine, seg: &Segment, inner: &mut Inner, before: NodeId, 
     inner.holes += 1;
     inner.by_op.entry(node.op()).or_default().push(node.id);
     file_predicted(eng, seg, inner, &node, pred);
+    log_placed(eng, &node, "before", before);
     node
 }
 
@@ -2526,6 +2689,10 @@ fn place_at_end(eng: &Engine, at: NodeId, end: NodeId, node: Arc<Node>, pred: Pr
                 eng.order.rebalance(eng, seg.id, 1);
                 continue;
             }
+            let end = match node.parent {
+                Some(p) if node.slot() == 2 => attached_end(eng, &inner, p, end),
+                _ => end,
+            };
             return place(eng, seg, &mut inner, end, node, pred);
         }
         // the node is gone: after its parent, or at the unit's end
