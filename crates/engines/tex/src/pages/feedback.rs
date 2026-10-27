@@ -252,6 +252,9 @@ impl Run<'_, '_> {
             }
         }
         self.resolve_page_params(&mut head)?;
+        if crate::exec::obs_flag!("PHITEX_READS") {
+            self.trace_read(v.field(PAGE_START), false);
+        }
         let s = PageStart::decode(v, self.eng_read(v.field(PAGE_START))?);
         let units = v.seq_to_vec(self.cx.fold(v.field(crate::vprof::VPROF), s.anchor, None)?);
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;

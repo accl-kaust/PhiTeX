@@ -49,7 +49,9 @@ use crate::val::{int_of, list_of, str_of};
 
 /// The line's records for the exact writer, in document order: a page,
 /// the key of its [`PagePiece`] ([`pieces`]); a read-time command,
-/// `["cmd", key, serial]` ([`command`]); a document-level command,
+/// `["cmd", key, serial]`, with the read-time number of the object it
+/// makes after them where TeX read one ([`command`], [`note_read_time`]);
+/// a document-level command,
 /// `[kind, args...]` ([`doc_op`]). The link puts them on one state in
 /// this order ([`finish_exact`]).
 pub(crate) const XPAGES: &str = "pdf:xpages";
@@ -208,7 +210,7 @@ fn rec_of(v: &Values, x: ValueId, tags: &[ValueId; 3]) -> Rec {
         return Rec::Page(k);
     }
     v.with_list(x, |xs| match *xs {
-        [k, _, s] if k == tags[0] => Rec::Cmd(u64::from_ne_bytes(int_of(v, s).to_ne_bytes())),
+        [k, _, s] | [k, _, s, _] if k == tags[0] => Rec::Cmd(u64::from_ne_bytes(int_of(v, s).to_ne_bytes())),
         [k, p, c] if k == tags[1] => Rec::Cand(int_of(v, p), int_of(v, c)),
         [k, _, _, f] if k == tags[2] => Rec::FontLoad(int_of(v, f)),
         _ => Rec::Other,
@@ -316,27 +318,39 @@ pub(crate) struct Cmd {
     wparams: WParams,
     /// The node that ran it (for the link's trace).
     node: u64,
-    /// The object number TeX gave the object the command makes, at read
-    /// time ([`note_read_time`]; 0: none): the link maps it to the
-    /// number its writer gives where it stands in the line.
-    rt: std::sync::atomic::AtomicU64,
 }
 
 /// A read-time allocation `n` of the command in progress: the number
 /// TeX read back for the object its writer command makes (the first
-/// allocation after the command was recorded, [`Run::pdf_cmd`]).
+/// allocation after the command was recorded, [`Run::pdf_cmd`]), put in
+/// the command's record on the line, `["cmd", key, serial, n]`: the link
+/// reads it there, through the engine, and a run made again that
+/// numbers it otherwise re-asks the link.
 pub(crate) fn note_read_time(r: &mut Run<'_, '_>, n: i64) {
     let serial = std::mem::take(&mut r.pdf_cmd);
     if serial == 0 {
         return;
     }
-    if let Some(c) = r.ops.pdf_cmds.locked().get(&serial) {
-        c.rt.store(n.cast_unsigned(), std::sync::atomic::Ordering::Relaxed);
+    let v = r.v;
+    let (f, cmd) = (v.field(XPAGES), v.str("cmd"));
+    let s = v.int(i64::from_ne_bytes(serial.to_ne_bytes()));
+    let at = r.contribs.iter().rposition(|&(g, x)| {
+        g == f && v.with_list(x, |xs| matches!(*xs, [k, _, t] if k == cmd && t == s)).unwrap_or(false)
+    });
+    if let Some(i) = at {
+        let key = v.with_list(r.contribs[i].1, |xs| xs[1]).unwrap_or(ValueId::UNIT);
+        r.contribs[i].1 = v.list(vec![cmd, key, s, v.int(n)]);
     }
 }
 
 /// The build's read-time commands by serial ([`crate::run::Ops::pdf_cmds`]).
 pub(crate) type CmdMemo = Mutex<FxHashMap<u64, Arc<Cmd>>>;
+
+/// Command `c` under `serial` (a run made again makes the same handle:
+/// the same command).
+fn remember_cmd(cmds: &CmdMemo, serial: u64, c: Cmd) {
+    cmds.locked().insert(serial, Arc::new(c));
+}
 
 /// One page as the exact writer ships it, made by the page's own step
 /// with nothing read from another page's: the box, the parameters
@@ -1823,15 +1837,15 @@ pub(crate) fn command_forms(
     let mut words = vec![key, input.raw(), fs.digest()];
     words.extend(wparams.iter().map(|&p| u64::from(p.cast_unsigned())));
     let serial = phitex_defuse::hash_words(0x6364_6d73_6572_0001, &words);
-    r.ops.pdf_cmds.locked().insert(
+    remember_cmd(
+        &r.ops.pdf_cmds,
         serial,
-        Arc::new(Cmd {
+        Cmd {
             f: Mutex::new(Box::new(f)),
             fonts: fs,
             wparams,
             node: r.cx.node().raw(),
-            rt: std::sync::atomic::AtomicU64::new(0),
-        }),
+        },
     );
     r.pdf_cmd = serial;
     let e = v.list(vec![
@@ -4060,7 +4074,7 @@ fn link(
                         let mut g = c.f.locked();
                         (*g)(&mut st, &mut forms, &src)
                     };
-                    let rt = c.rt.load(std::sync::atomic::Ordering::Relaxed);
+                    let rt = xs.get(3).map_or(0, |&n| int_of(v, n));
                     if let (Ok(rt @ 1..), Some(&m)) = (usize::try_from(rt), out.nums.first())
                         && let Ok(m) = usize::try_from(m)
                         && m != rt
@@ -4300,5 +4314,22 @@ fn link(
         placed: u64::try_from(placed).unwrap_or(0),
         shipped: u64::try_from(shipped).unwrap_or(0),
         shown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_record_carries_its_read_time_number() {
+        // (the link reads the number from the record, `["cmd", key,
+        // serial, n]`; a record without one is a command all the same)
+        let v = Values::new();
+        let tags = [v.str("cmd"), v.str("cand"), v.str("fontload")];
+        let with = v.list(vec![v.str("cmd"), v.int(3), v.int(7), v.int(42)]);
+        let without = v.list(vec![v.str("cmd"), v.int(3), v.int(7)]);
+        assert_eq!(rec_of(&v, with, &tags), Rec::Cmd(7));
+        assert_eq!(rec_of(&v, without, &tags), Rec::Cmd(7));
     }
 }
