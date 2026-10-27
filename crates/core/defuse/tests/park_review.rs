@@ -34,6 +34,9 @@ struct Gates {
     /// for it, where `contrib_waits_placer` is up.
     placer_done: AtomicBool,
     contrib_waits_placer: AtomicBool,
+    /// The walk's runs offered a state, woken by a range that moved,
+    /// with the site the cause named (raw ids).
+    offered: std::sync::Mutex<Vec<u64>>,
 }
 
 /// `[s, x, gated]`: contributes x to s; gated (1), it waits as `Gates` say
@@ -147,6 +150,9 @@ impl Operation for Walk {
             let c = v.as_int(parts[0]).unwrap_or(-1);
             (if c < 0 { None } else { Some(NodeId::from_raw(c.unsigned_abs())) }, v.as_int(parts[1]).unwrap_or(0))
         };
+        if let (Some(_), Some(Cause::Range { by, .. })) = (cx.resumed(), cx.woken_by()) {
+            self.0.offered.lock().unwrap().push(by.raw());
+        }
         let state = match (cx.resumed(), cx.woken_by()) {
             (Some(st), Some(Cause::Range { by, .. })) => match decode(st).0 {
                 Some(c) if cx.before(c, by) => Some(st),
@@ -284,4 +290,132 @@ fn a_resumed_run_still_reads_what_its_state_was_made_of() {
     assert_eq!(out(&d), Some(112), "{r:?}");
     assert!(d.e.check_invariants().is_empty());
     let _ = (d.c2, d.contrib_place);
+}
+
+/// `[s]`: reads "t"; contributes 1 to s, and where t is not 0 places a
+/// contributor of 5 after itself, waiting first (where `contrib_waits`)
+/// for the walk to have read, and raising `contrib_done` at its end.
+struct PlaceOnT(OpId, Arc<Gates>);
+
+impl Operation for PlaceOnT {
+    fn name(&self) -> &'static str {
+        "place_on_t"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let t = cx.read(v.field("t"))?;
+        let s = cx.args()[0];
+        if t.and_then(|x| v.as_int(x)).unwrap_or(0) != 0 {
+            if self.1.contrib_waits.load(Ordering::Acquire) {
+                spin_until(&self.1.loop_read, 30);
+            }
+            cx.child(self.0, vec![s, v.int(5), v.int(0)]);
+        }
+        cx.contribute(Field(s), v.int(1));
+        self.1.contrib_done.store(true, Ordering::Release);
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn a_kept_range_read_refuted_at_the_commit_keeps_the_state_and_names_its_start() {
+    // The walk resumes from its state (a contribution added ahead of its
+    // cursor) and reads from its cursor on; the reads its state rests on
+    // are kept, the next contribution after the placer among them.
+    // While it runs, the placer runs again and places a contributor
+    // after itself: the walk's commit finds that kept read moved. The
+    // next run is offered the state and told the change lies after the
+    // placer (the read's start), and goes back before it. (A loop with a
+    // checkpoint per page goes back to the one before the site; an
+    // emptied state made it start over.)
+    let e = Engine::new();
+    let g = Arc::new(Gates::default());
+    let v = e.values();
+    let s = v.field("s");
+    let walk = e.register(Arc::new(Walk(g.clone())));
+    let contrib = e.register(Arc::new(Contrib(g.clone())));
+    let place = e.register(Arc::new(PlaceOnT(contrib, g.clone())));
+    let def_t = e.register(Arc::new(DefT));
+    let u = e.new_unit();
+    let t = e.push(u, def_t, vec![v.int(0)]);
+    let p = e.push(u, place, vec![s.0]);
+    e.push(u, contrib, vec![s.0, v.int(3), v.int(0)]);
+    let l = e.push(u, walk, vec![s.0, v.int(1)]);
+    e.evaluate(2).unwrap();
+    assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(4));
+    g.loop_waits.store(true, Ordering::Release);
+    g.contrib_waits.store(true, Ordering::Release);
+    g.contrib_done.store(false, Ordering::Release);
+    e.replace(t, def_t, vec![v.int(1)]);
+    e.insert_before(l, contrib, vec![s.0, v.int(100), v.int(0)]);
+    let r = e.evaluate(2).unwrap();
+    assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(109), "{r:?}");
+    let offered = g.offered.lock().unwrap().clone();
+    assert!(offered.contains(&p.raw()), "a run offered the state with the placer as the site: {offered:?} (placer {}) {r:?}", p.raw());
+    assert!(e.check_invariants().is_empty());
+}
+
+/// `[s, t0]`: contributes 1 to s, and where "t" equals t0 places a
+/// contributor of 5 after itself; where it does not, waits first (where
+/// `contrib_waits`) for the walk to have read. Raises `contrib_done`.
+struct PlaceWhileT(OpId, Arc<Gates>);
+
+impl Operation for PlaceWhileT {
+    fn name(&self) -> &'static str {
+        "place_while_t"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let t = cx.read(v.field("t"))?;
+        let s = cx.args()[0];
+        if t == Some(cx.args()[1]) {
+            cx.child(self.0, vec![s, v.int(5), v.int(0)]);
+        } else if self.1.contrib_waits.load(Ordering::Acquire) {
+            spin_until(&self.1.loop_read, 30);
+        }
+        cx.contribute(Field(s), v.int(1));
+        self.1.contrib_done.store(true, Ordering::Release);
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn a_kept_read_from_a_node_gone_is_not_kept() {
+    // The placer's contributor of 5 stands after it, and the walk read
+    // the next contribution after that contributor. The placer runs again
+    // and places nothing: the contributor is gone. The walk, woken (by
+    // "t", then by the read from the placer), runs again; a read from the
+    // node gone is not kept with its record: no run reads from it again,
+    // and kept it moved at the next commit and ran the walk again (twice
+    // more here) (a loop that goes back to a
+    // checkpoint and stops early where a page fires as it was ran again
+    // at each, without end).
+    let e = Engine::new();
+    let g = Arc::new(Gates::default());
+    let v = e.values();
+    let s = v.field("s");
+    let walk = e.register(Arc::new(Walk(g.clone())));
+    let contrib = e.register(Arc::new(Contrib(g.clone())));
+    let place = e.register(Arc::new(PlaceWhileT(contrib, g.clone())));
+    let def_t = e.register(Arc::new(DefT));
+    let u = e.new_unit();
+    let t = e.push(u, def_t, vec![v.int(0)]);
+    let p = e.push(u, place, vec![s.0, v.int(0)]);
+    e.push(u, contrib, vec![s.0, v.int(3), v.int(0)]);
+    let l = e.push(u, walk, vec![s.0, v.int(1)]);
+    e.evaluate(2).unwrap();
+    assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(9));
+    let c = e.children(p);
+    assert_eq!(c.len(), 1, "the placer's contributor");
+    let from_c = format!("after: Some({:?})", c[0]);
+    assert!(e.debug_reads(l).contains(&from_c), "the walk read from it: {}", e.debug_reads(l));
+    e.replace(t, def_t, vec![v.int(1)]);
+    let r = e.evaluate(2).unwrap();
+    assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(4), "{r:?}");
+    let walks = r.runs_by_op.iter().find(|x| x.0 == "walk").map_or(0, |x| x.1);
+    assert!(walks <= 2, "the walk runs for the edit and for the read from the placer, not again for the read from the node gone: {r:?}");
+    assert!(!e.debug_reads(l).contains(&from_c), "no read from the node gone: {}", e.debug_reads(l));
+    assert!(e.check_invariants().is_empty());
 }

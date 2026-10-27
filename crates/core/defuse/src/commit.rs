@@ -592,7 +592,14 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         && let Some(r) = node.run_record()
     {
         let again: FxHashSet<(ReadKind, PathId)> = p.reads.iter().map(|x| (x.kind.clone(), x.path)).collect();
-        p.reads.extend(r.reads.iter().filter(|x| !again.contains(&(x.kind.clone(), x.path))).cloned());
+        // (not the next contribution after a node gone: no run reads from
+        // it again, and its going moved the read from the node before it,
+        // which carries the change; kept, it would move at every commit)
+        let gone = |x: &crate::node::ReadRec| match x.kind {
+            ReadKind::Next { after: Some(n), .. } => eng.placed_node(n).is_none_or(|n| n.state() == State::Gone),
+            _ => false,
+        };
+        p.reads.extend(r.reads.iter().filter(|x| !again.contains(&(x.kind.clone(), x.path)) && !gone(x)).cloned());
     }
     for d in &mut p.defs {
         if let Some(c) = d.rel {
@@ -1405,24 +1412,72 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             !read::holds(eng, node, r, &mut memo)
         })
     });
-    // (a read kept from the run its state came from no longer holds: the
-    // state is stale, and the next run starts from nothing; one that
-    // took none clears that)
-    node.state_stale.store(refuted.is_some_and(|i| i >= own_reads), Ordering::Release);
-    let cause = match refuted.map(|i| &rec.reads[i].kind) {
-        Some(ReadKind::Field { f, .. }) => Some(Cause::Changed { field: *f, site: None }),
-        Some(ReadKind::Env { f }) => Some(Cause::Environment { field: *f }),
-        // (where the change lies the check does not know: at the range's
-        // start, so a loop resuming from its state goes back before it)
-        Some(ReadKind::Fold { f, from: start, .. } | ReadKind::Next { f, after: start }) => Some(Cause::Range {
+    // (where a read that moved sends the next run: a field's change, the
+    // environment's, a range's at the range's start (where the change
+    // lies the check does not know: a loop resuming from its state goes
+    // back before it), a placement's output)
+    let cause_of = |kind: &ReadKind| match kind {
+        ReadKind::Field { f, .. } => Cause::Changed { field: *f, site: None },
+        ReadKind::Env { f } => Cause::Environment { field: *f },
+        ReadKind::Fold { f, from: start, .. } | ReadKind::Next { f, after: start } => Cause::Range {
             field: *f,
             by: start.or_else(|| first_of_unit(eng, node)).unwrap_or(node.id),
-        }),
-        Some(ReadKind::Placed { .. }) => Some(Cause::Output { of: node.id }),
-        Some(ReadKind::Following { .. }) => Some(Cause::Structure),
-        None => anchor_gone.then_some(Cause::Structure),
+        },
+        ReadKind::Placed { .. } => Cause::Output { of: node.id },
+        ReadKind::Following { .. } => Cause::Structure,
     };
-    if let Some(cause) = cause {
+    // (a read kept from the run its state came from no longer holds: the
+    // run that resumed from that state rests on it. A range read names
+    // where the change may lie, and the next run, offered the state, goes
+    // back before it as for any range that moved; any other kept read
+    // that moved makes the state stale, and the next run starts from
+    // nothing. So every kept read is checked once a kept one moved: a
+    // kept field read behind a range read's start would otherwise stand
+    // unseen. One that took none clears that.)
+    let mut causes: Vec<Cause> = Vec::new();
+    let mut stale = false;
+    if let Some(i) = refuted {
+        // (a range from a node: the change lies after it; one from the
+        // unit's start names no node a run could go back before, nor one
+        // from the site the run was told to go back before, which it did
+        // not read again)
+        let range = |k: &ReadKind| match k {
+            ReadKind::Fold { from: Some(n), .. } | ReadKind::Next { after: Some(n), .. } => p.woken_at != Some(*n),
+            _ => false,
+        };
+        causes.push(cause_of(&rec.reads[i].kind));
+        if i >= own_reads {
+            stale = !range(&rec.reads[i].kind);
+            let mut memo = read::FoldMemo::new();
+            for (j, r) in rec.reads.iter().enumerate().skip(own_reads) {
+                if j == i || stale {
+                    continue;
+                }
+                // (as the check above: a field no change has counted
+                // since it was read stands; a sibling's read, answered
+                // only in turn with the ones before it, is taken as
+                // moved)
+                let moved = match r.kind {
+                    ReadKind::Following { .. } => true,
+                    _ if !scope_moved && !matches!(r.kind, ReadKind::Next { .. }) && r.kind.field().is_some_and(|f| eng.field_epoch(f) == r.epoch) => false,
+                    _ => !read::holds(eng, node, r, &mut memo),
+                };
+                if !moved {
+                    continue;
+                }
+                if range(&r.kind) {
+                    causes.push(cause_of(&r.kind));
+                } else {
+                    stale = true;
+                }
+            }
+        }
+    }
+    node.state_stale.store(stale, Ordering::Release);
+    if causes.is_empty() && anchor_gone {
+        causes.push(Cause::Structure);
+    }
+    for cause in causes {
         mark_dirty(
             eng,
             ww,

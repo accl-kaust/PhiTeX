@@ -78,6 +78,7 @@ impl<'a> Ctx<'a> {
                 unchanged: false,
                 state: None,
                 resumed: std::cell::Cell::new(false),
+                woken_at: None,
             },
             views: Vec::new(),
             ep: u64::MAX,
@@ -93,6 +94,10 @@ impl<'a> Ctx<'a> {
     /// The product, with the output.
     pub(crate) fn into_product(mut self, output: ValueId) -> Product {
         self.product.output = output;
+        self.product.woken_at = match self.woke {
+            Some(Cause::Range { by, .. }) => Some(by),
+            _ => None,
+        };
         self.product
     }
 
