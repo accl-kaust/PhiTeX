@@ -290,6 +290,13 @@ pub trait Operation: Send + Sync {
         Effect::None
     }
 
+    /// The values the client holds for this operation outside the engine
+    /// (a cache it decodes again, a run state kept for a resume), each
+    /// given to `keep`, at a collection ([`crate::Engine::collect`]):
+    /// what it does not give may be freed. A cache keyed by values may be
+    /// emptied here instead. With nothing running.
+    fn roots(&self, _eng: &crate::Engine, _keep: &mut dyn FnMut(ValueId)) {}
+
     /// Whether a run may contribute to `f` (default: yes). A node that has
     /// not committed and never contributes `f` is passed over by
     /// `Ctx::next_contribution`, not a stop.
@@ -475,6 +482,9 @@ pub struct Report {
     /// The reader records of earlier runs dropped at the evaluation's
     /// quiet points.
     pub readers_swept: u64,
+    /// The collections the evaluation made (`Limits::collect_at_bytes`):
+    /// what each freed, and the nanoseconds each held the workers.
+    pub collections: Vec<(crate::Collected, u64)>,
 }
 
 impl Report {
@@ -501,6 +511,11 @@ pub struct Limits {
     pub total_runs: Option<u64>,
     /// Wall time (default none).
     pub time: Option<Duration>,
+    /// The value store's payload at which the evaluation stops every
+    /// worker at the end of its run and collects (`Engine::collect`;
+    /// default none): then at twice what the last collection left, if
+    /// more.
+    pub collect_at_bytes: Option<u64>,
 }
 
 impl Default for Limits {
@@ -510,6 +525,7 @@ impl Default for Limits {
             final_reruns: 10,
             total_runs: None,
             time: None,
+            collect_at_bytes: None,
         }
     }
 }
@@ -546,6 +562,12 @@ pub trait EditSource {
     fn settled(&mut self, _eng: &crate::Engine, _items: &[Settled]) -> bool {
         false
     }
+
+    /// The values it holds for edits not yet taken (a text interned
+    /// before it is applied), each given to `keep`, at a collection
+    /// during the evaluation (`Limits::collect_at_bytes`): what it does
+    /// not give may be freed.
+    fn roots(&self, _keep: &mut dyn FnMut(ValueId)) {}
 }
 
 pub struct NoEdits;

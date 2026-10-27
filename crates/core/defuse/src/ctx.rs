@@ -496,8 +496,12 @@ impl<'a> Ctx<'a> {
         true
     }
 
+    /// The value store's epoch: its instance and the collections it has
+    /// made ([`crate::Values::collect`]). An id a client cached at one
+    /// epoch is valid while the epoch lasts: one a collection freed is
+    /// never handed out again.
     pub fn values_epoch(&self) -> u64 {
-        self.eng.values.instance()
+        self.eng.values.epoch()
     }
 
     /// This run publishes nothing new: what my last run defined,

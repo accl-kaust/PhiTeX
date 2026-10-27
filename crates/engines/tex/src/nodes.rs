@@ -647,6 +647,14 @@ static MADE: [std::sync::Mutex<Option<Made>>; MADE_SHARDS] =
 /// The shards of [`MADE`].
 const MADE_SHARDS: usize = 64;
 
+/// At a collection ([`crate::collect`]): the made lines dropped (their
+/// marks' and whatsits' values with them).
+pub(crate) fn clear_made() {
+    for sh in &MADE {
+        *sh.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
 /// The nodes a shard of [`MADE`] holds at most.
 const MADE_NODES: usize = (1 << 22) / MADE_SHARDS;
 

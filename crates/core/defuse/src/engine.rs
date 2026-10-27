@@ -18,7 +18,7 @@ use crate::read::{self, answer, apply_path, reaching_at};
 use crate::sched::{Pool, Worker, enqueue, mark_dirty};
 use crate::segment::Segment;
 use crate::table::Table;
-use crate::values::{Field, FxHashMap, FxHashSet, ValueId, Values};
+use crate::values::{Collected, Field, FxHashMap, FxHashSet, ValueId, Values};
 
 /// A unit's range of the line.
 pub(crate) struct Unit {
@@ -152,6 +152,10 @@ pub struct Engine {
     /// (`sched::work_caught`): the next evaluation checks the line first
     /// (`Engine::repair_line`).
     pub(crate) repair: std::sync::atomic::AtomicBool,
+    /// The evaluations running, with [`COLLECTING`] while a collection
+    /// runs: neither begins during the other (a task reads a list without
+    /// a pin, `values::TaskGuard`).
+    pub(crate) busy: AtomicU64,
     /// Counts the builds the loop-back passes are counted in
     /// (`sched::allow_final_rerun`): each evaluation, and each edit taken
     /// during one (`sched::absorb`), a document of its own.
@@ -164,6 +168,22 @@ const EPOCH_BUCKETS: usize = 4096;
 impl Default for Engine {
     fn default() -> Self {
         Engine::new()
+    }
+}
+
+/// [`Engine::busy`]'s bit for a collection running.
+pub(crate) const COLLECTING: u64 = 1 << 63;
+
+/// Takes `.1` back from [`Engine::busy`] as it drops (an unwind as well).
+struct Unbusy<'a>(&'a AtomicU64, u64);
+
+impl Drop for Unbusy<'_> {
+    fn drop(&mut self) {
+        if self.1 == COLLECTING {
+            self.0.fetch_and(!COLLECTING, Ordering::SeqCst);
+        } else {
+            self.0.fetch_sub(self.1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -205,6 +225,7 @@ impl Engine {
             has_finals: std::sync::atomic::AtomicBool::new(false),
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
+            busy: AtomicU64::new(0),
             final_gen: AtomicU64::new(0),
             values,
             ops: Table::new(),
@@ -988,6 +1009,7 @@ impl Engine {
     }
 
     pub fn set_limits(&self, l: Limits) {
+        self.values.count_payload(l.collect_at_bytes.is_some());
         *self.limits.write() = l;
     }
 
@@ -1089,6 +1111,11 @@ impl Engine {
 
     fn evaluate_with(&self, threads: usize, mut src: Option<&mut dyn EditSource>) -> Result<Report, EvalError> {
         let t0 = Instant::now();
+        if self.busy.fetch_add(1, Ordering::SeqCst) & COLLECTING != 0 {
+            self.busy.fetch_sub(1, Ordering::SeqCst);
+            panic!("an evaluation begun while Engine::collect runs");
+        }
+        let _busy = Unbusy(&self.busy, 1);
         let n = threads.max(1);
         let mut all: Vec<crate::sched::Worker> = Vec::new();
         if self.repair.swap(false, Ordering::AcqRel) {
@@ -1142,6 +1169,7 @@ impl Engine {
         let swept = self.sweep_readers() as u64 + workers.iter().map(|w| std::mem::take(&mut w.log.lock().swept)).sum::<u64>();
         let mut rep = Report {
             readers_swept: swept,
+            collections: workers.iter().flat_map(|w| std::mem::take(&mut w.log.lock().collections)).collect(),
             ..Report::default()
         };
         let mut by_op: FxHashMap<OpId, u64> = FxHashMap::default();
@@ -1310,6 +1338,134 @@ impl Engine {
 
     /// (measure) The reader records filed in segments, those still
     /// standing for their node, and the segments' fields read.
+    /// Every value the engine holds: the nodes' arguments and their last
+    /// records (output, definitions, contributions, what each read saw),
+    /// the segments' definitions, readers, contributions and sums, the
+    /// range, final and environment readers, the environment, the paths'
+    /// steps, the memo of applications, and the fields named anywhere.
+    pub(crate) fn roots(&self, keep: &mut dyn FnMut(ValueId)) {
+        let step = |s: &Step, keep: &mut dyn FnMut(ValueId)| match *s {
+            Step::Key(x) | Step::Has(x) | Step::Eq(x) | Step::Cmp(x) | Step::Indices(x) | Step::Keys(x) | Step::Rank(x) | Step::Ranks(x) => keep(x),
+            _ => {}
+        };
+        for i in 0..self.nodes.len() {
+            let Some(n) = self.nodes.get(i) else { continue };
+            n.text.read().iter().for_each(|&x| keep(x));
+            if let Some(r) = n.last.lock().as_ref() {
+                keep(r.output);
+                // (the state a resumed run goes on from, `Ctx::park`)
+                r.state.into_iter().for_each(&mut *keep);
+                for d in &r.defs {
+                    keep(d.f.0);
+                    keep(d.value);
+                }
+                for &(f, x) in &r.contribs {
+                    keep(f.0);
+                    keep(x);
+                }
+                for rd in &r.reads {
+                    if let Some(f) = rd.kind.field() {
+                        keep(f.0);
+                    }
+                    rd.seen.into_iter().for_each(&mut *keep);
+                }
+            }
+            for (f, _, r) in n.bounded.lock().iter() {
+                keep(f.0);
+                if crate::segment::live(self, r.node, r.serial) {
+                    r.seen.iter().for_each(|&(_, x)| x.into_iter().for_each(&mut *keep));
+                }
+            }
+            n.stopped.lock().iter().for_each(|&(f, _)| keep(f.0));
+            n.anchored.lock().iter().for_each(|f| keep(f.0));
+        }
+        for sid in self.order.all() {
+            let inner = self.seg(sid).inner.read();
+            for (f, m) in &inner.defs {
+                keep(f.0);
+                m.values().for_each(|d| keep(d.value));
+            }
+            for (f, rs) in &inner.readers {
+                keep(f.0);
+                rs.iter().for_each(|r| r.seen.into_iter().for_each(&mut *keep));
+            }
+            for (f, m) in &inner.contribs {
+                keep(f.0);
+                m.values().for_each(|&x| keep(x));
+            }
+            for (f, &x) in &inner.sums {
+                keep(f.0);
+                keep(x);
+            }
+            for (f, _, r) in &inner.stops {
+                keep(f.0);
+                r.seen.iter().for_each(|&(_, x)| x.into_iter().for_each(&mut *keep));
+            }
+        }
+        self.ranges.roots(self, keep);
+        for (f, x) in self.env.values.read().iter() {
+            keep(f.0);
+            if let Some(x) = *x {
+                keep(x);
+            }
+        }
+        for i in 0..self.paths.steps.len() {
+            if let Some(ss) = self.paths.steps.get(i) {
+                ss.iter().for_each(|s| step(s, keep));
+            }
+        }
+        for ((_, a), &x) in self.memo.read().iter() {
+            a.iter().for_each(|&y| keep(y));
+            keep(x);
+        }
+        self.monoids.read().by_field.keys().for_each(|f| keep(f.0));
+        self.shapes.read().keys().for_each(|(_, f)| keep(f.0));
+        keep(self.depth_field.0);
+        // (what marked nodes settled with, not taken yet: an output since
+        // superseded on its node is in the client's next take)
+        self.settled.lock().iter().for_each(|s| keep(s.output));
+    }
+
+    /// Frees the values nothing holds ([`Values::collect`]): the engine's
+    /// own ([`Engine::roots`]) and what each operation says its client
+    /// holds ([`Operation::roots`]). Only where nothing runs: between
+    /// evaluations, or with every worker at the collection's barrier.
+    /// Panics during an evaluation, which collects at its barrier
+    /// (`Limits::collect_at_bytes`): its tasks read lists unpinned.
+    pub fn collect(&self) -> Collected {
+        assert!(
+            self.busy.compare_exchange(0, COLLECTING, Ordering::SeqCst, Ordering::SeqCst).is_ok(),
+            "Engine::collect during an evaluation: a collection runs between evaluations or at an evaluation's barrier (Limits::collect_at_bytes)"
+        );
+        let _busy = Unbusy(&self.busy, COLLECTING);
+        self.collect_with(Vec::new())
+    }
+
+    /// The barrier's collection ([`Engine::collect_with`]), when this
+    /// evaluation is the only one running (None: another began meanwhile,
+    /// whose tasks the barrier does not stop).
+    pub(crate) fn collect_at_barrier(&self, extra: Vec<ValueId>) -> Option<Collected> {
+        self.busy.compare_exchange(1, 1 | COLLECTING, Ordering::SeqCst, Ordering::SeqCst).ok()?;
+        let _busy = Unbusy(&self.busy, COLLECTING);
+        Some(self.collect_with(extra))
+    }
+
+    /// [`Engine::collect`], with `extra` roots the caller holds (an edit
+    /// source's, `EditSource::roots`).
+    pub(crate) fn collect_with(&self, extra: Vec<ValueId>) -> Collected {
+        // (a stale reader's `seen` holds what an earlier run read: swept
+        // first, it holds nothing)
+        self.sweep_readers_now();
+        let mut roots: Vec<ValueId> = extra;
+        self.roots(&mut |x| roots.push(x));
+        for i in 0..self.ops.len() {
+            if let Some(op) = self.ops.get(i) {
+                op.roots(self, &mut |x| roots.push(x));
+            }
+        }
+        self.values.collect(roots)
+    }
+
     /// The reader records of runs no longer their node's last dropped from
     /// every segment, and the lists they leave shrunk: at a quiet point
     /// (the end of an evaluation, a pass's quiescence), where nothing
@@ -1326,6 +1482,11 @@ impl Engine {
         if stale < (1 << 16).max(self.swept_left.load(Ordering::Relaxed)) {
             return 0;
         }
+        self.sweep_readers_now()
+    }
+
+    /// [`Engine::sweep_readers`] whatever the count.
+    fn sweep_readers_now(&self) -> usize {
         self.stale_reads.store(0, Ordering::Relaxed);
         let mut dropped = 0;
         let mut left = 0;
@@ -1362,6 +1523,19 @@ impl Engine {
             }
         }
         (filed, standing, fields)
+    }
+
+    /// What each live node's last run defined `f` to, in no order.
+    pub fn defined_by_live(&self, f: Field) -> Vec<(NodeId, ValueId)> {
+        (0..self.nodes.len())
+            .filter_map(|i| self.nodes.get(i))
+            .filter(|n| n.state() != State::Gone)
+            .filter_map(|n| {
+                let r = n.run_record()?;
+                let x = r.defs.iter().rev().find(|d| d.f == f)?.value;
+                Some((n.id, x))
+            })
+            .collect()
     }
 
     pub fn live_nodes(&self) -> usize {

@@ -310,6 +310,11 @@ impl Operation for Exec {
     fn name(&self) -> &'static str {
         "exec"
     }
+    /// The client's roots of a collection, for every operation of the
+    /// build ([`crate::collect`]).
+    fn roots(&self, eng: &phitex_defuse::Engine, keep: &mut dyn FnMut(ValueId)) {
+        crate::collect::roots(ops(&self.0), eng, keep);
+    }
     /// Each runs its own text: a counter one steps is not another's.
     fn alike(&self) -> bool {
         false

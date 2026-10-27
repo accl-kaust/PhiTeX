@@ -10,6 +10,9 @@
 //! | a value shard (`values::Values`) | an intern; a sequence node lookup | one insert or one lookup; plain reads take none |
 //! | paths and their extensions, monoids, environment values, shapes, memo, marks, pending (`engine::Engine`) | setup; rare inserts; a view's step; a push or an edit outside an evaluation | one map operation |
 //! | a node's `last`, `woke`, `text`, `stopped`, `bounded` and `anchored` (`node::Node`) | its commit; its re-ask; an edit; a read of its arguments; a walk stopping at it; a range reader bounded by it filed or taken; a reader anchored at it filed (under that reader's segment's lock) or its removal | a swap; a clone; a push |
+//! | an edit source's roots (`sched::Shared::extra_roots`) | the caller's worker coming to a collection's barrier; the collector | one extend; one take |
+//! | the lists a collection took while a reader was pinned (`values::Values::graveyard`) | a collection | one take or one extend |
+//! | the panicked runs' reads (`sched::Shared::panicked_roots`) | a run that panicked on inputs that held; the collector | one extend; one copy |
 //! | the pool's parking (`sched::Pool`) | an idle worker that found no work (looked for outside it); a push that finds one idle | the rest itself; one notify |
 //! | a block's steal flag (`sched::Shared::block_busy`, an atomic) | a thief | one steal of an even run of nodes |
 //! | the segments of a window of the line in ascending order (`order::Order::rebalance`) | a placement that finds a segment's labels used up | one even relabel of the window, its nodes moved between neighbours: the one time several segments are held, taken while no other lock is held (a field-index shard under them, as a split takes it; the range-index shards after them) |

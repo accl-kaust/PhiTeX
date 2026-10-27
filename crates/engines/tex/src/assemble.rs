@@ -549,6 +549,17 @@ struct LinkInputs {
 
 static LINK_INPUTS: std::sync::OnceLock<std::sync::Mutex<LinkInputs>> = std::sync::OnceLock::new();
 
+/// At a collection ([`crate::collect`]): the link's walks of the line and
+/// the items, and its inputs, dropped; the next link reads them anew.
+pub(crate) fn clear_line_memos() {
+    if let Some(m) = LINE_MEMO.get() {
+        *m.locked() = LineMemos::default();
+    }
+    if let Some(m) = LINK_INPUTS.get() {
+        *m.locked() = LinkInputs::default();
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let v = cx.values();
@@ -579,9 +590,9 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     // told which those are)
     let (xpages, units, changed) = {
         let mut g = LINK_INPUTS.get_or_init(Default::default).locked();
-        if g.inst != v.instance() {
+        if g.inst != v.epoch() {
             *g = LinkInputs {
-                inst: v.instance(),
+                inst: v.epoch(),
                 ..LinkInputs::default()
             };
         }

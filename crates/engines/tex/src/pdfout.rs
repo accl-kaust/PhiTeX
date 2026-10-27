@@ -224,9 +224,9 @@ pub(crate) fn recs(v: &Values, xs: &[ValueId]) -> Vec<Rec> {
     type Memo = (u64, FxHashMap<ValueId, Rec>);
     static M: OnceLock<Mutex<Memo>> = OnceLock::new();
     let mut g = M.get_or_init(|| Mutex::new((0, FxHashMap::default()))).locked();
-    if g.0 != v.instance() {
+    if g.0 != v.epoch() {
         g.1.clear();
-        g.0 = v.instance();
+        g.0 = v.epoch();
     }
     let tags = [v.str("cmd"), v.str("cand"), v.str("fontload")];
     let out: Vec<Rec> = xs
@@ -1859,6 +1859,32 @@ pub(crate) fn command_forms(
     Ok(None)
 }
 
+/// At a collection ([`crate::collect`]): this build's pages no live run
+/// names (`live`, its [`PAGE_KEYS`]) dropped with their written records,
+/// the values the rest hold given to `keep`. With nothing running, every
+/// page the line holds is one the last run that shipped it names; the
+/// rest are the
+/// pages of runs thrown away (the book's course edition at -j8: some
+/// 5 GB of pages, their fonts and their boxes at 3100 s).
+pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn FnMut(ValueId)) {
+    let inst = v.instance();
+    let mut m = pieces().locked();
+    m.retain(|k, pc| pc.inst != inst || live.contains(k));
+    for pc in m.values().filter(|pc| pc.inst == inst) {
+        pc.params.iter().chain(&pc.lazy).for_each(|&x| keep(x));
+        pc.base_in.g2u.into_iter().chain(pc.base_in.stacks).for_each(&mut *keep);
+    }
+    let mut rs = records().locked();
+    rs.retain(|(k, _), _| m.contains_key(k));
+}
+
+/// At a collection: the link's memos of the last link dropped (the line,
+/// the pieces, the writer's snapshots): the next link reads anew.
+pub(crate) fn clear_link_memos() {
+    *link_memo().locked() = None;
+    *LINE_CACHE.locked() = None;
+}
+
 /// The pages of this build no record on the line names dropped, with
 /// their written records ([`pieces`], [`records`]): run between
 /// evaluations, as [`prune_cmds`]. A finisher run again ships its page
@@ -2981,7 +3007,7 @@ type AllocMemo = Mutex<FxHashMap<(u64, u64), AllocFold>>;
 fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     static M: OnceLock<AllocMemo> = OnceLock::new();
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-    let k = (v.instance(), range.raw());
+    let k = (v.epoch(), range.raw());
     if let Some(x) = m.locked().get(&k) {
         return x.clone();
     }
@@ -3461,7 +3487,7 @@ fn line_cache(
         LINE_CACHE
             .locked()
             .take()
-            .filter(|c| c.inst == v.instance() && c.xpages == xpages)
+            .filter(|c| c.inst == v.epoch() && c.xpages == xpages)
     });
     if let (Some(mut c), Some(changed)) = (last, changed) {
         for p in changed {
@@ -3500,7 +3526,7 @@ fn line_cache(
         .map(|pc| pc.as_ref().and_then(|pc| lines_hash(pc, units)))
         .collect();
     LineCache {
-        inst: v.instance(),
+        inst: v.epoch(),
         xpages: xpages.to_vec(),
         rs,
         pcs,
@@ -3864,7 +3890,7 @@ fn link(
     // (what the writer starts from: the same for the copy to stand)
     let mut head = phitex_defuse::hash_bytes(
         phitex_defuse::hash_words(
-            v.instance(),
+            v.epoch(),
             &[f.g2u.map_or(0, ValueId::raw), f.date.len() as u64],
         ),
         [f.date.as_bytes(), f.jobname.as_bytes()]
@@ -4324,7 +4350,7 @@ fn link(
     }
     if memo {
         *LINE_CACHE.locked() = Some(LineCache {
-            inst: v.instance(),
+            inst: v.epoch(),
             xpages: xpages.to_vec(),
             rs,
             pcs,

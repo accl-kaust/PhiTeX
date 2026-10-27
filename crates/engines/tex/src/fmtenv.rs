@@ -38,6 +38,14 @@ fn name_key(name: &str) -> u64 {
 /// The values a job made of a format's nodes, by node (each once).
 pub(crate) struct Made(Vec<OnceLock<ValueId>>);
 
+impl Made {
+    /// The values made so far, for a collection ([`crate::collect`]):
+    /// each is handed out again by its node.
+    pub(crate) fn roots(&self, keep: &mut dyn FnMut(ValueId)) {
+        self.0.iter().filter_map(OnceLock::get).for_each(|&x| keep(x));
+    }
+}
+
 impl FormatEnv {
     /// The bindings `env` (name, value in `v`), the last of a name kept.
     pub(crate) fn of(v: &Values, env: &[(String, ValueId)]) -> FormatEnv {

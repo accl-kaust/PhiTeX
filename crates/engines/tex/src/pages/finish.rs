@@ -1439,6 +1439,20 @@ pub(crate) struct FinDefs {
 }
 
 impl FinDefs {
+    /// Every value it holds, for a collection ([`crate::collect`]).
+    pub(crate) fn roots(&self, keep: &mut dyn FnMut(ValueId)) {
+        let defs = self.prev.iter().chain(&self.last).chain(self.pages.values().flat_map(|p| &p.1));
+        for &(f, x) in defs {
+            keep(f.0);
+            keep(x);
+        }
+        for &(f, x, _, _) in &self.recent {
+            keep(f.0);
+            keep(x);
+        }
+        self.gdefs.into_iter().for_each(&mut *keep);
+    }
+
     /// The history a finisher of page `idx` predicts from: the page's
     /// own last run where it ran before (a finisher placed again with
     /// other arguments, a round after the first), both runs that one;

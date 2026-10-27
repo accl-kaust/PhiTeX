@@ -299,6 +299,12 @@ struct Absorb<'a> {
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
+    /// Nothing: an edit waiting is text (`EditSender`), and an edit taken
+    /// is the nodes it pushed, whose arguments the engine holds; the
+    /// document's analyses (`Incr`), sources and comment marks are
+    /// offsets and strings, no values.
+    fn roots(&self, _keep: &mut dyn FnMut(ValueId)) {}
+
     #[allow(clippy::too_many_lines)]
     fn absorb(&mut self, eng: &Engine) -> Option<u64> {
         let (raw, hint, version) = self.edits.take()?;
@@ -1621,6 +1627,23 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         .map(|(k, d, n)| format!("{k} {:.3} ms/{n}", d.as_secs_f64() * 1e3))
         .collect();
     eprintln!("acct: op time by kind: {}", kinds.join(", "));
+    if !r.collections.is_empty() {
+        let cs: Vec<String> = r
+            .collections
+            .iter()
+            .map(|(c, held)| {
+                format!(
+                    "{} -> {} MB ({} lists, {} sequence nodes; held {} ms)",
+                    c.bytes_before >> 20,
+                    c.bytes_after >> 20,
+                    c.lists,
+                    c.ropes,
+                    held / 1_000_000
+                )
+            })
+            .collect();
+        eprintln!("acct: collections {}: {}; reader records swept {}", cs.len(), cs.join(", "), r.readers_swept);
+    }
     let mut by_field: Vec<(String, u64)> = r
         .refuted_by_field
         .iter()
@@ -2001,6 +2024,14 @@ pub(crate) struct DocFile {
     args: Vec<Option<Vec<ValueId>>>,
 }
 
+impl DocFile {
+    /// Every value it holds, for a collection ([`crate::collect`]).
+    pub(crate) fn roots(&self, keep: &mut dyn FnMut(ValueId)) {
+        self.shifts.values().for_each(|&(x, _)| keep(x));
+        self.args.iter().flatten().flatten().for_each(|&x| keep(x));
+    }
+}
+
 /// The build's cut document files, by name ([`DocFile`]).
 pub(crate) type DocFiles = Arc<std::sync::Mutex<FxHashMap<String, Arc<std::sync::Mutex<DocFile>>>>>;
 
@@ -2162,8 +2193,14 @@ impl Graph {
     #[allow(clippy::too_many_lines)]
     fn new(time: Option<std::time::Duration>, threads: Option<usize>) -> Graph {
         let eng = Engine::new();
+        // (`PHITEX_COLLECT_MB`: the value store collected when its payload
+        // passes it, `phitex_defuse::Limits::collect_at_bytes`)
+        let collect_at_bytes = crate::exec::env_str!("PHITEX_COLLECT_MB")
+            .and_then(|x| x.parse::<u64>().ok())
+            .map(|mb| mb << 20);
         eng.set_limits(phitex_defuse::Limits {
             time,
+            collect_at_bytes,
             ..phitex_defuse::Limits::default()
         });
         let shared: Shared = Arc::new(OnceLock::new());
@@ -2213,6 +2250,8 @@ impl Graph {
             counters: Arc::default(),
             scope_learned: Arc::default(),
             watch: Arc::default(),
+            fmt_made: Arc::default(),
+            held: Arc::default(),
             node_rec: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pdf_cmds: Arc::default(),
             class_proj,
@@ -2703,6 +2742,16 @@ impl Graph {
                 let o = &self.ops;
                 let fd = o.fin_defs.locked().clone();
                 *o.fin_defs_start.locked() = Arc::new(fd);
+                // (what the build holds outside the engine: roots of a
+                // collection in the evaluation, `crate::collect`)
+                let mut held: Vec<ValueId> = Vec::new();
+                for (f, x) in self.start_env.iter().chain(self.env_pushed.iter().map(|(f, x)| (f, x))).chain(self.job.iter().map(|(f, x)| (f, x))).chain(self.files.iter().map(|(f, x)| (f, x))) {
+                    held.extend([f.0, *x]);
+                }
+                if let Some((x, _)) = &*self.opened_memo.locked() {
+                    held.extend(*x);
+                }
+                *o.held.write().unwrap_or_else(std::sync::PoisonError::into_inner) = held;
             }
             let t0 = std::time::Instant::now();
             // (an edit's few nodes: on this thread, no worker started,
@@ -4490,6 +4539,7 @@ impl Build {
         crate::timeline::lap("engine: the environment pushed");
         // (the values the job made of the format's nodes: each once)
         let made = Arc::new(env.made());
+        *g.ops.fmt_made.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(made.clone());
         job_env(&mut g, unit, &env, &made, &opts);
         // (the writers' start, with the format's glyph table, made now
         // beside the job: `crate::pdfout::warm_g2u`)

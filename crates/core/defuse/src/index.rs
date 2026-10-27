@@ -13,7 +13,7 @@ use crate::lock::Lock;
 use crate::read::Reaching;
 use crate::order::{Pos, SegId};
 use crate::segment::{RangeReader, Reader, push_pruned};
-use crate::values::{Field, FxHashMap, hash_words};
+use crate::values::{Field, FxHashMap, ValueId, hash_words};
 
 /// Many and a cache line each: a commit's index work meets another's only
 /// when their fields share a shard (a holder the OS stops then stops the
@@ -395,6 +395,31 @@ impl RangeIndex {
 
     /// Files an `At::Final` reader of `f`, the dead dropped when the list
     /// is about to grow.
+    /// Every value its readers hold ([`crate::Engine::collect`]).
+    pub(crate) fn roots(&self, eng: &crate::Engine, keep: &mut dyn FnMut(ValueId)) {
+        let live = |n, s| crate::segment::live(eng, n, s);
+        for sh in &*self.shards {
+            let m = sh.0.read();
+            for (f, rs) in m.iter() {
+                keep(f.0);
+                for (_, c) in rs.classes.iter().chain(rs.ends.iter()) {
+                    for (_, r) in c.values().filter(|(_, r)| live(r.node, r.serial)) {
+                        r.seen.iter().for_each(|&(_, x)| x.into_iter().for_each(&mut *keep));
+                    }
+                }
+                for r in rs.finals.iter().filter(|r| live(r.node, r.serial)) {
+                    r.seen.into_iter().for_each(&mut *keep);
+                }
+                if let Some(x) = rs.published.and_then(|r| r.value) {
+                    keep(x);
+                }
+                for r in rs.envs.iter().filter(|r| live(r.node, r.serial)) {
+                    r.seen.into_iter().for_each(&mut *keep);
+                }
+            }
+        }
+    }
+
     pub(crate) fn add_final(&self, f: Field, r: Reader, live: impl Fn(&Reader) -> bool) {
         let mut w = self.shards[range_shard(f)].0.write();
         push_pruned(&mut w.entry(f).or_default().finals, r, live);

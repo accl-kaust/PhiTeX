@@ -59,6 +59,26 @@ pub(crate) struct Shared {
     n: usize,
     /// `Limits::final_reruns`.
     final_limit: u32,
+    /// A collection is wanted (`Limits::collect_at_bytes`): every worker
+    /// ending a run, or idle, comes to the barrier (`Pool::barrier`); the
+    /// last to come collects, with no run in flight. `active` counts the
+    /// workers in the evaluation (counted when spawned, so one starting
+    /// late comes too), `arrived` those at the barrier, `collect_gen` the
+    /// collections made; the payload of the next is `collect_next`.
+    collect_wanted: AtomicBool,
+    /// The roots the caller's edit source holds (`EditSource::roots`),
+    /// given by the caller's worker as it comes to the barrier.
+    extra_roots: Mx<Vec<crate::values::ValueId>>,
+    /// What the runs that panicked on inputs that held saw, judged at the
+    /// evaluation's end (`Engine::evaluate`): roots of every collection
+    /// before it, so a freed answer does not pass a genuine failure for a
+    /// moved input.
+    panicked_roots: Mx<Vec<crate::values::ValueId>>,
+    collecting: AtomicBool,
+    active: AtomicUsize,
+    arrived: AtomicUsize,
+    collect_gen: AtomicU64,
+    collect_next: AtomicU64,
 }
 
 impl Shared {
@@ -115,7 +135,9 @@ pub(crate) struct WorkerLog {
     pub(crate) absorbed: Vec<(u64, u64)>,
     /// The reader records of earlier runs dropped at the passes' quiet
     /// points (`Engine::sweep_readers`; the caller's worker only).
-    pub(crate) swept: u64,
+    pub(crate) swept: u64,    /// The collections this worker made, with the time each held the
+    /// workers (ns).
+    pub(crate) collections: Vec<(crate::Collected, u64)>,
 }
 
 /// One worker's deques and counters (nanoseconds).
@@ -206,6 +228,7 @@ fn spawn_tree<'s, 'e: 's>(
     }
     let w = ws.remove(0);
     pool.shared.spawned.fetch_add(1, Ordering::SeqCst);
+    pool.shared.active.fetch_add(1, Ordering::SeqCst);
     s.spawn(move || {
         let right = ws.split_off(ws.len() / 2);
         spawn_tree(s, eng, pool, back, ws);
@@ -255,6 +278,14 @@ impl Pool {
             want_spawn: AtomicBool::new(false),
             n,
             final_limit: limits.final_reruns,
+            collect_wanted: AtomicBool::new(false),
+            extra_roots: Mx::new(Vec::new()),
+            panicked_roots: Mx::new(Vec::new()),
+            collecting: AtomicBool::new(false),
+            active: AtomicUsize::new(1),
+            arrived: AtomicUsize::new(0),
+            collect_gen: AtomicU64::new(0),
+            collect_next: AtomicU64::new(limits.collect_at_bytes.unwrap_or(u64::MAX)),
         });
         let workers = deques
             .into_iter()
@@ -527,6 +558,51 @@ impl Pool {
 
     /// Rests until there is work, the evaluation stops, or nothing is
     /// outstanding (then the caller's thread decides).
+    /// The collection's barrier (`Limits::collect_at_bytes`): `w`, with
+    /// no run in flight, waits for every other worker of the evaluation
+    /// to end its run or leave its idle wait; the last to come collects
+    /// (`Engine::collect`) and lets them go. A worker leaving the
+    /// evaluation meanwhile is one fewer to wait for. Nothing runs while
+    /// it collects: no run's stack holds a value.
+    fn barrier(&self, eng: &Engine, w: &Worker) {
+        let sh = &self.shared;
+        let seen = sh.collect_gen.load(Ordering::SeqCst);
+        sh.arrived.fetch_add(1, Ordering::SeqCst);
+        let (m, cv) = &sh.park;
+        let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if sh.collect_gen.load(Ordering::SeqCst) != seen || sh.stop.load(Ordering::SeqCst) {
+                break;
+            }
+            if sh.arrived.load(Ordering::SeqCst) >= sh.active.load(Ordering::SeqCst) && !sh.collecting.swap(true, Ordering::SeqCst) {
+                drop(g);
+                let t = Instant::now();
+                let mut extra = std::mem::take(&mut *sh.extra_roots.lock());
+                extra.extend(sh.panicked_roots.lock().iter().copied());
+                let floor = self.limits.collect_at_bytes.unwrap_or(u64::MAX);
+                if let Some(c) = eng.collect_at_barrier(extra) {
+                    let held = ns(t);
+                    sh.collect_next.store(floor.max(c.bytes_after.saturating_mul(2)), Ordering::SeqCst);
+                    w.log.lock().collections.push((c, held));
+                } else {
+                    sh.collect_next.store(floor.max(eng.values().payload_bytes().saturating_mul(2)), Ordering::SeqCst);
+                }
+                sh.arrived.store(0, Ordering::SeqCst);
+                sh.collect_wanted.store(false, Ordering::SeqCst);
+                sh.collecting.store(false, Ordering::SeqCst);
+                sh.collect_gen.fetch_add(1, Ordering::SeqCst);
+                sh.wake_all();
+                return;
+            }
+            g = cv.wait_timeout(g, Duration::from_millis(2)).unwrap_or_else(PoisonError::into_inner).0;
+        }
+        drop(g);
+        // (stopped before the collection: no longer waited for)
+        if sh.collect_gen.load(Ordering::SeqCst) == seen {
+            sh.arrived.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
     fn idle_wait(&self, eng: &Engine, w: &Worker) -> Option<NodeId> {
         let (m, cv) = &self.shared.park;
         self.shared.idle.fetch_add(1, Ordering::SeqCst);
@@ -534,7 +610,7 @@ impl Pool {
         let t_idle = Instant::now();
         let r = loop {
             stall_dump(eng, &self.shared, t_idle);
-            if self.shared.stop.load(Ordering::SeqCst) {
+            if self.shared.stop.load(Ordering::SeqCst) || self.shared.collect_wanted.load(Ordering::SeqCst) {
                 break None;
             }
             // (looked for outside the park's lock: a steal is no reason to
@@ -550,7 +626,10 @@ impl Pool {
                 break None;
             }
             let g = m.lock().unwrap_or_else(PoisonError::into_inner);
-            if self.shared.stop.load(Ordering::SeqCst) || self.shared.outstanding.load(Ordering::SeqCst) == 0 {
+            if self.shared.stop.load(Ordering::SeqCst)
+                || self.shared.outstanding.load(Ordering::SeqCst) == 0
+                || self.shared.collect_wanted.load(Ordering::SeqCst)
+            {
                 break None;
             }
             // (a push between the search and the lock notified no one
@@ -579,6 +658,16 @@ fn run_worker(
     loop {
         if pool.shared.stop.load(Ordering::SeqCst) {
             break;
+        }
+        if pool.shared.collect_wanted.load(Ordering::SeqCst) {
+            // (what the edit source holds for edits not taken yet, given
+            // before this worker comes: the last to come collects)
+            if let Some(s) = src.as_deref() {
+                let mut x = pool.shared.extra_roots.lock();
+                s.roots(&mut |v| x.push(v));
+            }
+            pool.barrier(eng, w);
+            continue;
         }
         if let Some(sp) = spawn_more
             && pool.shared.want_spawn.load(Ordering::SeqCst)
@@ -670,6 +759,9 @@ fn run_worker(
             break;
         }
     }
+    // (one fewer for a collection's barrier to wait for)
+    pool.shared.active.fetch_sub(1, Ordering::SeqCst);
+    pool.shared.wake_all();
     let (sum, max) = take_wait();
     Worker::add(&w.lock_wait_ns, sum);
     Worker::max(&w.lock_wait_max_ns, max);
@@ -885,6 +977,8 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
 /// with `n` counted outstanding, and the others would wait for it for ever;
 /// `n` is pending again, for the next evaluation.
 fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
+    // (the whole task, run, commit and re-asks: no collection meanwhile)
+    let _task = eng.values().task();
     catch_unwind(AssertUnwindSafe(|| work(eng, pool, w, n))).unwrap_or_else(|p| {
         let message = p
             .downcast_ref::<&str>()
@@ -978,6 +1072,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             let reads = std::mem::take(&mut cx.product.reads);
             drop(cx);
             give_back(eng, node);
+            pool.shared.panicked_roots.lock().extend(reads.iter().filter_map(|r| r.seen));
             w.log.lock().panicked.push((n, reads, op.name(), message));
             pool.shared.done_one();
             Ok(())
@@ -990,6 +1085,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         Ok(Ok(out)) => {
             let product = cx.into_product(out);
             let st = commit(eng, w, node, product);
+            // (the store past the collection's mark: the workers called to
+            // its barrier as their runs end)
+            let sh = &pool.shared;
+            let next = sh.collect_next.load(Ordering::Relaxed);
+            if next != u64::MAX && eng.values().payload_bytes() > next && !sh.collect_wanted.swap(true, Ordering::SeqCst) {
+                sh.wake_all();
+            }
             Worker::add(&w.commits, 1);
             Worker::add(&w.commit_ns, st.commit_ns);
             if st.commit_ns > w.commit_max_ns.load(Ordering::Relaxed) {

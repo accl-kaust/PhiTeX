@@ -3755,6 +3755,12 @@ struct BlockMemo {
 
 type BlockCache = std::sync::Mutex<phitex_defuse::FxHashMap<u64, std::sync::Arc<BlockMemo>>>;
 
+/// At a collection ([`crate::collect`]): the folded blocks dropped (their
+/// entries are values).
+pub(crate) fn clear_blocks() {
+    block_cache().locked().clear();
+}
+
 fn block_cache() -> &'static BlockCache {
     static C: std::sync::OnceLock<BlockCache> = std::sync::OnceLock::new();
     C.get_or_init(BlockCache::default)

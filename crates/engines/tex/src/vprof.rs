@@ -128,6 +128,13 @@ const DECODED_SHARDS: usize = 64;
 
 type DecodedShard = std::sync::Mutex<phitex_defuse::FxHashMap<(u64, u64), std::sync::Arc<Decoded>>>;
 
+/// At a collection ([`crate::collect`]): the decoded profiles dropped.
+pub(crate) fn clear_decoded() {
+    for sh in decoded_shards() {
+        sh.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    }
+}
+
 fn decoded_shards() -> &'static [DecodedShard] {
     static S: std::sync::OnceLock<Vec<DecodedShard>> = std::sync::OnceLock::new();
     S.get_or_init(|| (0..DECODED_SHARDS).map(|_| std::sync::Mutex::default()).collect())
@@ -139,7 +146,7 @@ pub(crate) fn decoded(v: &Values, x: ValueId) -> std::sync::Arc<Decoded> {
         xs.iter().any(|x| f(x) || matches!(x, PItem::End(ys) if any(ys, f)))
     }
     use crate::exec::LockWait as _;
-    let key = (v.instance(), x.raw());
+    let key = (v.epoch(), x.raw());
     let sh = &decoded_shards()[usize::try_from(phitex_defuse::hash_words(key.0, &[key.1]) >> 58).unwrap_or(0) % DECODED_SHARDS];
     if let Some(d) = sh.locked().get(&key) {
         return d.clone();

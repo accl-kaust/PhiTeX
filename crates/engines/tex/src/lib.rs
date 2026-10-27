@@ -28,6 +28,7 @@ mod align;
 mod api;
 mod assemble;
 mod build;
+mod collect;
 mod control;
 mod etex;
 mod exec;

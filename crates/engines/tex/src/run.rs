@@ -236,6 +236,13 @@ pub(crate) struct Ops {
     /// before each evaluation: each run holds a slot while it runs
     /// ([`crate::exec::Busy`]).
     pub watch: std::sync::Arc<std::sync::RwLock<Option<crate::exec::Watch>>>,
+    /// The format's values made for this build (`crate::fmtenv::Made`):
+    /// each handed out again by its node, a root of a collection.
+    pub fmt_made: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<crate::fmtenv::Made>>>>,
+    /// The values the build holds outside the engine as an evaluation
+    /// begins (its environment's, the job's, the files'), roots of a
+    /// collection in it ([`crate::collect`]).
+    pub held: std::sync::Arc<std::sync::RwLock<Vec<ValueId>>>,
     /// [`crate::Options::node_records`].
     pub node_rec: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The class projection of meanings ([`crate::val::class_projection`],
@@ -5965,6 +5972,7 @@ impl Run<'_, '_> {
     /// [`crate::runstate::State::mark_delta`]), else parked whole.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn snapshot_of(&mut self, delta: Option<crate::runstate::MarkDelta>) -> Parked {
+        use crate::runstate::{M_CLASS, M_DEFINED, M_NUM, M_OUTER, M_STEP};
         let v = self.v;
         let ti = crate::prof::start();
         let mut segs = Vec::new();
@@ -6036,7 +6044,6 @@ impl Run<'_, '_> {
         // (the memos by field: their order the same for equal memos)
         let m = self.reg_pending.iter().map(|(&l, &m)| (l, m)).collect();
         let reg_pending = by_field(self, m);
-        use crate::runstate::{M_CLASS, M_DEFINED, M_NUM, M_OUTER, M_STEP};
         let m = self.memos.with(M_CLASS).into_iter().map(|(l, x)| (l, x.class)).collect();
         let class_memo = by_field(self, m);
         let m = self.memos.with(M_OUTER).into_iter().map(|(l, x)| (l, x.val & M_OUTER != 0)).collect();

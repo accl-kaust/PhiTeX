@@ -82,4 +82,4 @@ pub use api::{
 };
 pub use ctx::{Ctx, View};
 pub use engine::Engine;
-pub use values::{Field, FxHashMap, FxHashSet, FxHasher, SeqNode, Value, ValueId, Values, hash_bytes, hash_words};
+pub use values::{Collected, Field, FxHashMap, FxHashSet, FxHasher, SeqNode, Value, ValueId, Values, hash_bytes, hash_words};

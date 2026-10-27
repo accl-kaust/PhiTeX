@@ -622,10 +622,10 @@ pub(crate) fn char_node_id(
     let slot = (usize::from(ch) ^ (font as usize).wrapping_mul(0x9E37)) & (CHAR_NODES - 1);
     let hit = ENCODED.with(|c| {
         let mut c = c.borrow_mut();
-        if c.instance != v.instance() || c.epoch != epoch {
+        if c.instance != v.epoch() || c.epoch != epoch {
             crate::prof::caches::hit(crate::prof::caches::ENC_RESET);
             *c = Encoded {
-                instance: v.instance(),
+                instance: v.epoch(),
                 epoch,
                 ..Encoded::default()
             };
@@ -715,10 +715,10 @@ fn encoded<K: std::hash::Hash + Eq>(
     };
     let hit = ENCODED.with(|c| {
         let mut c = c.borrow_mut();
-        if c.instance != v.instance() || c.epoch != epoch {
+        if c.instance != v.epoch() || c.epoch != epoch {
             crate::prof::caches::hit(crate::prof::caches::ENC_RESET);
             *c = Encoded {
-                instance: v.instance(),
+                instance: v.epoch(),
                 epoch,
                 ..Encoded::default()
             };
@@ -757,7 +757,7 @@ pub(crate) fn str_id(v: &Values, s: &str) -> ValueId {
     if let Some(e) = scope_epoch(v) {
         let hit = ENCODED.with(|c| {
             let c = c.borrow();
-            (c.instance == v.instance() && c.epoch == e)
+            (c.instance == v.epoch() && c.epoch == e)
                 .then(|| c.strs.get(s).copied())
                 .flatten()
         });
@@ -780,10 +780,10 @@ pub(crate) fn node_id(v: &Values, key: NodeKey, make: impl FnOnce() -> ValueId) 
 pub(crate) fn tok_id(v: &Values, epoch: u64, t: Tok) -> ValueId {
     let hit = ENCODED.with(|c| {
         let mut c = c.borrow_mut();
-        if c.instance != v.instance() || c.epoch != epoch {
+        if c.instance != v.epoch() || c.epoch != epoch {
             crate::prof::caches::hit(crate::prof::caches::ENC_RESET);
             *c = Encoded {
-                instance: v.instance(),
+                instance: v.epoch(),
                 epoch,
                 ..Encoded::default()
             };
@@ -833,7 +833,7 @@ pub(crate) fn leaf_of(v: &Values, id: ValueId) -> Option<phitex_typeset::node::N
 fn leaf_of_cached(v: &Values, id: ValueId) -> Option<phitex_typeset::node::Node> {
     DECODED.with(|c| {
         let c = c.borrow();
-        (c.instance == v.instance())
+        (c.instance == v.epoch())
             .then(|| c.leaves.get(&id).cloned())
             .flatten()
     })
@@ -852,9 +852,9 @@ pub(crate) fn keep_leaf(v: &Values, id: ValueId, n: &phitex_typeset::node::Node)
     }
     DECODED.with(|c| {
         let mut c = c.borrow_mut();
-        if c.instance != v.instance() {
+        if c.instance != v.epoch() {
             *c = Decoded {
-                instance: v.instance(),
+                instance: v.epoch(),
                 ..Decoded::default()
             };
         }
@@ -892,7 +892,7 @@ fn char_node_of_cached(v: &Values, id: ValueId) -> Option<(u32, u16)> {
     let raw = id.raw();
     CHAR_NODES_DEC.with(|c| {
         let c = c.borrow();
-        if c.0 != v.instance() {
+        if c.0 != v.epoch() {
             return None;
         }
         #[allow(clippy::cast_possible_truncation)]
@@ -907,8 +907,8 @@ pub(crate) fn keep_char_node(v: &Values, id: ValueId, font: u32, ch: u16) {
     let raw = id.raw();
     CHAR_NODES_DEC.with(|c| {
         let mut c = c.borrow_mut();
-        if c.0 != v.instance() || c.1.is_empty() {
-            *c = (v.instance(), vec![(u64::MAX, 0, 0); CHAR_NODES_DEC_SIZE]);
+        if c.0 != v.epoch() || c.1.is_empty() {
+            *c = (v.epoch(), vec![(u64::MAX, 0, 0); CHAR_NODES_DEC_SIZE]);
         }
         #[allow(clippy::cast_possible_truncation)]
         let k = (raw ^ (raw >> 17)) as usize & (CHAR_NODES_DEC_SIZE - 1);
@@ -925,9 +925,9 @@ fn decoded<T: Clone>(
 ) -> T {
     let hit = DECODED.with(|c| {
         let mut c = c.borrow_mut();
-        if c.instance != v.instance() {
+        if c.instance != v.epoch() {
             *c = Decoded {
-                instance: v.instance(),
+                instance: v.epoch(),
                 ..Decoded::default()
             };
         }
@@ -1016,9 +1016,9 @@ pub(crate) fn clist_projection(x: ValueId, v: &Values) -> ValueId {
     // answers through it, a whole list decoded each time otherwise)
     static MEMO: OnceLock<crate::hints::Shards<(u64, ValueId, ValueId)>> = OnceLock::new();
     let memo = MEMO.get_or_init(Default::default);
-    let k = x.raw() ^ v.instance().rotate_left(32);
+    let k = x.raw() ^ v.epoch().rotate_left(32);
     if let Some(&(i, y, r)) = memo.of(k).get(&k)
-        && i == v.instance()
+        && i == v.epoch()
         && y == x
     {
         return r;
@@ -1028,7 +1028,7 @@ pub(crate) fn clist_projection(x: ValueId, v: &Values) -> ValueId {
     if m.len() > 1 << 12 {
         m.clear();
     }
-    m.insert(k, (v.instance(), x, r));
+    m.insert(k, (v.epoch(), x, r));
     r
 }
 
@@ -1509,10 +1509,10 @@ fn macro_id(v: &Values, m: &Rc<Macro>) -> ValueId {
     let key = Rc::as_ptr(m) as usize;
     let hit = ENCODED.with(|c| {
         let mut c = c.borrow_mut();
-        if c.instance != v.instance() || c.epoch != epoch {
+        if c.instance != v.epoch() || c.epoch != epoch {
             crate::prof::caches::hit(crate::prof::caches::ENC_RESET);
             *c = Encoded {
-                instance: v.instance(),
+                instance: v.epoch(),
                 epoch,
                 ..Encoded::default()
             };
@@ -1529,9 +1529,9 @@ fn macro_id(v: &Values, m: &Rc<Macro>) -> ValueId {
     remember_macro(v, m, x);
     DECODED.with(|c| {
         let mut c = c.borrow_mut();
-        if c.instance != v.instance() {
+        if c.instance != v.epoch() {
             *c = Decoded {
-                instance: v.instance(),
+                instance: v.epoch(),
                 ..Decoded::default()
             };
         }
@@ -1548,10 +1548,10 @@ fn remember_macro(v: &Values, m: &Rc<Macro>, id: ValueId) {
     let Some(epoch) = scope_epoch(v) else { return };
     ENCODED.with(|c| {
         let mut c = c.borrow_mut();
-        if c.instance != v.instance() || c.epoch != epoch {
+        if c.instance != v.epoch() || c.epoch != epoch {
             crate::prof::caches::hit(crate::prof::caches::ENC_RESET);
             *c = Encoded {
-                instance: v.instance(),
+                instance: v.epoch(),
                 epoch,
                 ..Encoded::default()
             };
@@ -1823,9 +1823,9 @@ impl<T: Clone> CatMemo<T> {
         x: ValueId,
         f: impl Fn(ValueId) -> Option<T>,
     ) -> Vec<T> {
-        if self.inst != v.instance() {
+        if self.inst != v.epoch() {
             *self = CatMemo {
-                inst: v.instance(),
+                inst: v.epoch(),
                 ..CatMemo::default()
             };
         }
