@@ -2288,6 +2288,7 @@ impl Graph {
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
         let pages = eng.register(Arc::new(crate::pages::Pages(shared.clone())));
+        let kick = eng.register(Arc::new(crate::pages::Kick(shared.clone())));
         let finish = eng.register(Arc::new(crate::pages::Finish(shared.clone())));
         let resume = eng.register(Arc::new(crate::pages::Resume(shared.clone())));
         let brk = eng.register(Arc::new(crate::parbreak::Break(shared.clone())));
@@ -2310,6 +2311,7 @@ impl Graph {
             exec,
             put,
             pages,
+            kick,
             finish,
             resume,
             brk,
@@ -2327,6 +2329,7 @@ impl Graph {
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),
+            fin_class: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
@@ -4679,7 +4682,7 @@ impl Build {
             Some(&(_, first, _)) if g.threads > 1 => {
                 let v = g.eng.values();
                 let args = crate::pages::kick_args(v, steps);
-                g.eng.insert_after(first, g.ops.pages, args);
+                g.eng.insert_after(first, g.ops.kick, args);
             }
             _ => {
                 g.eng.push(unit, g.ops.pages, Vec::new());

@@ -91,7 +91,7 @@ fn a_word_edit_reruns_the_piece_its_finisher_and_the_writers() {
     let r = common::rebuild(&mut b, &edited);
     assert_eq!(runs_of_report(&r, "exec") + runs_of_report(&r, "resume"), 1, "one piece: {r:?}");
     assert_eq!(runs_of_report(&r, "finish"), 1, "one finisher, the edited piece's page: {r:?}");
-    assert_eq!(runs_of_report(&r, "pages"), 1, "the loop once, from its checkpoint: {r:?}");
+    assert!(runs_of_report(&r, "pages") <= 1, "the loop at most once, from its checkpoint (none where the edited paragraph's profile is unchanged: exact reads wake nobody): {r:?}");
     assert_eq!(r.placements_made("finish"), 0, "no finisher made anew: {r:?}");
     assert!(r.runs <= 5, "piece, finisher, loop, link, end: {r:?}");
     let after = b.pages();
@@ -133,7 +133,7 @@ fn page_dimensions_read_in_text_are_exact_and_fine() {
         let src = common::read(&dir.join(format!("{name}.tex")));
         let want = std::fs::read(dir.join(format!("{name}.dvi"))).expect("the oracle");
         let opts = common::options(&format!("./{name}.tex"), name, &common::dvi_comment(&want), &dir);
-        let b = common::build(opts, Some(&common::plain()), &src);
+        let b = common::build(opts, None, &src);
         let (dvi, log) = b.output();
         assert_eq!(dvi, want, "{name}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
         assert!(b.stats.refuted_by("pages:start") <= b.pages().len(), "{name}: a reader of the page is re-asked at most once per page: {:?}", b.stats.refuted_by_field);
@@ -154,7 +154,7 @@ fn page_fixtures_are_byte_identical() {
         let src = common::read(&tex);
         let want = std::fs::read(dir.join(format!("{name}.dvi"))).expect("the oracle");
         let opts = common::options(&format!("./{name}.tex"), name, &common::dvi_comment(&want), &dir);
-        let b = common::build(opts, Some(&common::plain()), &src);
+        let b = common::build(opts, None, &src);
         let (dvi, log) = b.output();
         assert_eq!(dvi, want, "{name}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
     }

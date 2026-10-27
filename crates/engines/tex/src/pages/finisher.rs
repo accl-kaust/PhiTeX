@@ -39,43 +39,42 @@ use super::*;
 /// text's tools and traces.
 pub(crate) const PAGE_OUT: &str = "pages:out";
 
-/// The finisher's arguments: `[piece, nth, hint, class, special]`, the
-/// page's key and what [`Finish::predicted_defs`] and
-/// [`Finish::predicted_rels`] key the prediction history by (`SPEC.md`
-/// §3.3: by routine and page class, never by page content).
+/// The finisher's arguments: `[piece, nth]`, the page's key and its
+/// placement's identity, nothing else: an argument that changed between
+/// the loop's runs would make the finisher anew. The routine's hint and
+/// the page's class it predicts by (`SPEC.md` §3.3: by routine and page
+/// class, never by page content) are the page's, which the run reads
+/// ([`Page::hint`], [`Page::output_penalty`]) and the loop leaves for
+/// the predictions in `Ops::fin_class` ([`fin_class_of`]).
 pub(crate) struct FinishArgs {
     pub key: PageKey,
-    /// The output routine's hint where the page fired.
-    pub hint: ValueId,
-    /// `\outputpenalty`'s class: every ordinary page (`> -10001`) one
-    /// class, each special penalty its own.
-    pub class: i64,
-    pub special: bool,
 }
 
 impl FinishArgs {
     pub(crate) fn encode(&self, v: &Values) -> Vec<ValueId> {
-        vec![
-            raw_value(v, Some(self.key.piece)),
-            v.int(i64::from(self.key.nth)),
-            self.hint,
-            v.int(self.class),
-            v.int(i64::from(self.special)),
-        ]
+        vec![raw_value(v, Some(self.key.piece)), v.int(i64::from(self.key.nth))]
     }
 
     pub(crate) fn decode(v: &Values, args: &[ValueId]) -> Option<FinishArgs> {
-        let [p, n, h, c, s] = args else { return None };
+        let [p, n] = args else { return None };
         Some(FinishArgs {
             key: PageKey {
                 piece: raw_node(v, *p)?,
                 nth: u32::try_from(v.as_int(*n)?).ok()?,
             },
-            hint: *h,
-            class: v.as_int(*c)?,
-            special: v.as_int(*s)? != 0,
         })
     }
+}
+
+/// The routine's hint and the page's class of the finisher with
+/// arguments `args`, as the loop last fired its page (`Ops::fin_class`);
+/// `(UNIT, ordinary)` where it has not.
+pub(crate) fn fin_class_of(o: &crate::run::Ops, v: &Values, args: &[ValueId]) -> (ValueId, i32) {
+    o.fin_class
+        .locked()
+        .get(&fin_page_key(v, args))
+        .copied()
+        .unwrap_or((ValueId::UNIT, i32::MAX))
 }
 
 pub(crate) struct Finish(pub Shared);
@@ -98,7 +97,7 @@ impl Operation for Finish {
         let Some(a) = FinishArgs::decode(v, args) else {
             return MayDefine::Any;
         };
-        let t = a.hint;
+        let (t, pen) = fin_class_of(ops(&self.0), v, args);
         if t == ValueId::UNIT {
             return MayDefine::Any;
         }
@@ -109,7 +108,7 @@ impl Operation for Finish {
         let known = ops(&self.0)
             .fin_defs
             .locked()
-            .get(&fin_key(v, t, args))
+            .get(&fin_key_class(t, pen))
             .map(FinDefs::names);
         if let Some(mut names) = known {
             for n in FIN_OWN {
@@ -169,9 +168,12 @@ impl Operation for Finish {
         if !o.fin_predict.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
-        let t = FinishArgs::decode(v, args).map(|a| a.hint).filter(|&t| t != ValueId::UNIT)?;
+        let (t, pen) = fin_class_of(o, v, args);
+        if t == ValueId::UNIT {
+            return None;
+        }
         let m = o.fin_defs.locked();
-        let mut out = m.get(&fin_key(v, t, args))?.rels.clone()?;
+        let mut out = m.get(&fin_key_class(t, pen))?.rels.clone()?;
         for e in m.values() {
             for &(f, _) in e.rels.iter().flatten() {
                 if !out.iter().any(|x| x.0 == f) {
@@ -520,14 +522,6 @@ pub(crate) const FINISHER_FIELDS: &[&str] = &[
     "pdf:",
 ];
 
-/// A finisher's entry in `Ops::fin_defs`: its routine (the hint `t`)
-/// and its page's class ([`pen_class`]), from its arguments `args`
-/// ([`FinishArgs`]; an ordinary page where they hold none).
-pub(crate) fn fin_key(v: &Values, t: ValueId, args: &[ValueId]) -> u64 {
-    let pen = FinishArgs::decode(v, args).map_or(i32::MAX, |a| i32::try_from(a.class).unwrap_or(i32::MAX));
-    fin_key_class(t, pen)
-}
-
 /// The class of a page fired at `\outputpenalty` `p`: every ordinary
 /// one (above -10001, §1013) alike, `i32::MAX`; a special one its own,
 /// which its routine branches on (a float page, a cleared page): the
@@ -556,7 +550,7 @@ impl Finish {
         {
             return None;
         }
-        let t = FinishArgs::decode(v, args).map_or(ValueId::UNIT, |a| a.hint);
+        let (t, pen) = fin_class_of(ops(&self.0), v, args);
         // (the ordinary pages fired up to it are its page's, which its
         // arguments do not carry: page counters are relations,
         // [`Finish::predicted_rels`])
@@ -565,7 +559,7 @@ impl Finish {
         let m = o.fin_defs.locked();
         let idx = fin_page_key(v, args);
         let d = (t != ValueId::UNIT)
-            .then(|| m.get(&fin_key(v, t, args)))
+            .then(|| m.get(&fin_key_class(t, pen)))
             .flatten()
             .map(|d| d.at(idx));
         let d = d.as_ref();

@@ -170,6 +170,9 @@ pub(crate) struct Ops {
     /// The page builder (one node), a page's finisher and the rest of a
     /// cut piece (`crate::pages`).
     pub pages: OpId,
+    /// The node that places the page builder's where the text begins
+    /// ([`crate::pages::Kick`]).
+    pub kick: OpId,
     pub finish: OpId,
     pub resume: OpId,
     /// A paragraph's line breaking (`crate::parbreak::Break`).
@@ -218,6 +221,13 @@ pub(crate) struct Ops {
     /// counts follow the schedule, and hide that dependency from the
     /// engine).
     pub fin_defs_start: std::sync::Arc<std::sync::Mutex<std::sync::Arc<FinTable>>>,
+    /// Each page's routine hint and class ([`crate::pages::pen_class`]) as
+    /// the page loop last fired it, by the page's key
+    /// ([`crate::pages::FinPageKey`]): what its finisher, whose arguments
+    /// are the key alone, predicts and declares by
+    /// ([`crate::pages::Finish::predicted_defs`]); the loop that places
+    /// the finisher writes it before its commit.
+    pub fin_class: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, (phitex_defuse::ValueId, i32)>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The profile units the page loop folded over all its runs

@@ -200,9 +200,43 @@ pub(crate) fn kick_of(v: &Values, args: &[ValueId]) -> Option<NodeId> {
     }
 }
 
+/// The node that places the page builder ([`Pages`]) after the text's
+/// end mark, from where the text begins (arguments [`kick_args`]), and
+/// ends: its own operation, so the builder is the only `pages` node.
+pub(crate) struct Kick(pub Shared);
+
+impl Operation for Kick {
+    fn name(&self) -> &'static str {
+        "kick"
+    }
+
+    fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
+        MayDefine::Nothing
+    }
+
+    /// Set among the text's pieces, not one of them: a claim passes over it.
+    fn sibling(&self) -> bool {
+        false
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::None
+    }
+
+    fn contributes(&self, _: &[ValueId], _: &Values, _: Field) -> bool {
+        false
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        if let Some(at) = kick_of(cx.values(), cx.args()) {
+            cx.follow_after(at, ops(&self.0).pages, Vec::new());
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
 /// The one page-builder node. Arguments: none. Pushed after the text's
-/// end mark by the kick ([`kick_args`]: `[KICK, mark]` places it with
-/// `follow_after(mark)` and ends).
+/// end mark, by the [`Kick`] where there is more than one thread.
 pub(crate) struct Pages(pub Shared);
 
 impl Operation for Pages {
@@ -232,12 +266,7 @@ impl Operation for Pages {
     /// ([`Run::page_loop`]).
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
-        let o = ops(&self.0);
-        if let Some(at) = kick_of(cx.values(), cx.args()) {
-            cx.follow_after(at, o.pages, Vec::new());
-            return Ok(ValueId::UNIT);
-        }
-        let mut r = Run::new(cx, o);
+        let mut r = Run::new(cx, ops(&self.0));
         r.page_loop()
     }
 }
@@ -263,7 +292,7 @@ enum Start {
 enum Bound {
     /// Nowhere: what moved is not known.
     Never,
-    /// At a page fired in or after this contributor.
+    /// At a page fired after this contributor.
     Site(NodeId),
     /// At a page after this one (its give-back moved).
     Page(usize),
@@ -387,6 +416,16 @@ impl Run<'_, '_> {
             }
         };
         let hole = if lc.ended { false } else { self.fold_on(&mut st, &mut lc, &mut pending, &mut ls, &old, bound)? };
+        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+            eprintln!(
+                "pages {}: run ends {} ({} checkpoints, cursor {:?}, stopped at {:?})",
+                me.raw(),
+                if hole { "at a hole" } else if lc.ended { "with the job" } else { "neither ended nor at a hole" },
+                ls.checkpoints.len(),
+                lc.cur.map(NodeId::raw),
+                self.cx.stopped_at().map(NodeId::raw)
+            );
+        }
         // 4. a hole: the tail
         if hole {
             ls.tail = Some(encode_tail(v, &st, &lc));
@@ -584,7 +623,11 @@ impl Run<'_, '_> {
     fn agrees(&self, c: &Checkpoint, old: &LoopState, bound: Bound) -> bool {
         let past = match bound {
             Bound::Never => false,
-            Bound::Site(s) => c.cursor == s || !self.cx.before(c.cursor, s),
+            // (strictly after the site: a page fired in the site's own
+            // contributor rests on what moved there, or after it where
+            // the next contribution after it moved, which the run reads
+            // again only past that page)
+            Bound::Site(s) => c.cursor != s && !self.cx.before(c.cursor, s),
             Bound::Page(j) => c.placement > j,
         };
         past && old.checkpoints.get(c.placement).is_some_and(|o| {
@@ -600,14 +643,12 @@ impl Run<'_, '_> {
         let x = page.encode(v);
         let i = ls.checkpoints.len();
         let prev = ls.checkpoints.last().map(|p| p.key);
-        let args = v.list(
-            FinishArgs {
-                key: page.key,
-                hint: page.hint,
-                class: i64::from(pen_class(page.output_penalty)),
-                special: page.special,
-            }
-            .encode(v),
+        let args = v.list(FinishArgs { key: page.key }.encode(v));
+        // (what its finisher predicts by: the routine and the page's
+        // class, the page's, not its placement's)
+        self.ops.fin_class.locked().insert(
+            (i64::from_ne_bytes(page.key.piece.raw().to_ne_bytes()), i64::from(page.key.nth)),
+            (page.hint, pen_class(page.output_penalty)),
         );
         self.emit_page(i, page.key, x, args, prev);
         let gave = self.give_back(i, q.rtn_guess);
