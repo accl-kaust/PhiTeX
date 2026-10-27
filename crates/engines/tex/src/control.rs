@@ -1175,7 +1175,7 @@ impl Run<'_, '_> {
         let mut pre = None;
         if p == 0 && q == cmd::ADVANCE && self.map_ok(l, global) {
             let x = self.scan_int()?;
-            if self.st.add(l, x, global) {
+            if self.st.add(self.v, l, x, global) {
                 self.muts += 1;
                 return Ok(());
             }

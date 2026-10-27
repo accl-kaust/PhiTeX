@@ -146,7 +146,10 @@ pub(crate) struct Ops {
     /// are the key alone, predicts and declares by
     /// ([`crate::pages::Finish::predicted_defs`]); the loop that places
     /// the finisher writes it before its commit.
-    pub fin_class: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, (phitex_defuse::ValueId, i32)>>>,
+    /// With them, the page's index among the pages the loop fired (its
+    /// checkpoint's): the page number a finisher's prediction carries
+    /// its templates to ([`crate::pages::FinDefs::predict`]).
+    pub fin_class: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, (phitex_defuse::ValueId, i32, i64)>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The profile units the page loop folded over all its runs

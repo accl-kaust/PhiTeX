@@ -60,7 +60,7 @@ pub(crate) fn roots(o: &Ops, eng: &Engine, keep: &mut dyn FnMut(ValueId)) {
     for d in o.fin_defs_start.locked().values() {
         d.roots(keep);
     }
-    for &(hint, _) in o.fin_class.locked().values() {
+    for &(hint, _, _) in o.fin_class.locked().values() {
         keep(hint);
     }
     for f in o.docs.locked().values() {

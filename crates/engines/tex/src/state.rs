@@ -262,6 +262,9 @@ struct Slot {
     /// [`MAP_GLOBAL`]); none once the register is read or set.
     map: Map,
     mapped: u8,
+    /// The value the run read of a register it steps ([`State::add`]):
+    /// what reached it, the steps applied to it in [`Slot::e`].
+    base: Option<ValueId>,
     /// A value given for the slot where the run first uses it, read then
     /// (a finisher's state at its candidate, `Run::fin_lazy_value`).
     lazy: Option<ValueId>,
@@ -281,6 +284,7 @@ impl Default for Slot {
             field: None,
             map: Map::ID,
             mapped: MAP_NONE,
+            base: None,
             lazy: None,
             sym: false,
         }
@@ -988,7 +992,6 @@ impl State {
         Ok(())
     }
 
-    /// `loc` read from the engine as `x` ([`State::get`]).
     pub(crate) fn load_read(&mut self, v: &Values, loc: Loc, x: Option<ValueId>) {
         let s = self.slot(loc);
         let mut e = Entry::raw(x);
@@ -997,21 +1000,13 @@ impl State {
         if s.mapped == MAP_NONE {
             return;
         }
-        let (map, global) = (s.map, s.mapped == MAP_GLOBAL);
-        s.map = Map::ID;
-        s.mapped = MAP_NONE;
-        // (the steps over the value read: one write, at the base level,
-        // local or global as the steps were)
-        let y = map.apply(crate::val::i32_of(v, x));
-        let mi = self.meta(loc);
-        self.stamp += 1;
-        let st = self.stamp;
-        self.slot(loc).e = stored(Entry::int(y));
-        let m = self.meta_mut(mi);
-        m.ldef_stamp = st;
-        m.ldef_local = !global;
-        m.ldef_gid = None;
-        m.publ = Some((Entry::int(y), if global { Locality::Global } else { Locality::Local }));
+        // (the steps over the value read: the run holds their result and
+        // publishes them as before, a relation)
+        s.base = x;
+        let y = s.map.apply(crate::val::i32_of(v, x));
+        let mut e = Entry::int(y);
+        e.flags = LOADED;
+        s.e = e;
     }
 
 
@@ -1187,6 +1182,9 @@ impl State {
         let s = self.slot_ref(loc)?;
         if s.meta != 0 {
             return self.metas.get(s.meta as usize - 1).and_then(|m| m.eng);
+        }
+        if s.mapped != MAP_NONE {
+            return (s.e.flags & LOADED != 0).then_some(s.base);
         }
         (s.e.flags & (LOADED | HAS_ID | PRELOADED) == LOADED | HAS_ID).then_some(s.e.id)
     }
@@ -1401,9 +1399,7 @@ impl State {
         if m != 0 {
             return m as usize - 1;
         }
-        let s = self.slot(loc);
-        let e = &s.e;
-        let eng = (e.flags & LOADED != 0 && e.flags & PRELOADED == 0).then_some(e.id);
+        let eng = self.engine_value(loc);
         let i = self.metas.len();
         self.slot(loc).meta = u32::try_from(i + 1).unwrap_or(0);
         self.metas.push(Meta {
@@ -1428,6 +1424,7 @@ impl State {
     pub(crate) fn set(&mut self, loc: Loc, val: Entry, global: bool, grp: Option<u32>) {
         self.changing(loc);
         self.muts += 1;
+        let mi = self.meta(loc);
         // (a register only stepped so far: its steps are no binding once
         // it is set, the value replaces them)
         if let Some(s) = self.slot_ref(loc)
@@ -1436,8 +1433,8 @@ impl State {
             let s = self.slot(loc);
             s.map = Map::ID;
             s.mapped = MAP_NONE;
+            s.base = None;
         }
-        let mi = self.meta(loc);
         self.stamp += 1;
         let st = self.stamp;
         let ldef = {
@@ -1488,27 +1485,28 @@ impl State {
         }
     }
 
-    /// `+c` on integer register `loc` (spec §2.3 rule 3): where the run
-    /// has neither read, set nor been given the register, the step is
-    /// composed onto the run's map of it and nothing is read; the run
-    /// publishes the map as a relation on the value reaching it. False
-    /// where it does not apply (the caller reads and writes the value):
-    /// the register held by the run, or a local step after a global one
-    /// (one relation cannot say both). The caller decides the rest of
-    /// the rule (a piece's write outside every group of the run, before
-    /// its first candidate, no job-written file read back).
-    pub(crate) fn add(&mut self, loc: Loc, c: i32, global: bool) -> bool {
+    pub(crate) fn add(&mut self, v: &Values, loc: Loc, c: i32, global: bool) -> bool {
         let g = if global { MAP_GLOBAL } else { MAP_LOCAL };
         if self.slot_ref(loc).is_some_and(|s| {
-            s.e.flags & LOADED != 0 || s.meta != 0 || s.lazy.is_some() || (s.mapped != MAP_NONE && s.mapped != g)
+            s.e.flags & PRELOADED != 0 || s.meta != 0 || s.lazy.is_some() || (s.mapped != MAP_NONE && s.mapped != g)
         }) {
             return false;
         }
         self.changing(loc);
         self.muts += 1;
+        let loaded = self.is_loaded(loc);
+        let cur = if loaded { Some(self.int_of(loc, v)) } else { None };
         let s = self.slot(loc);
+        if loaded && s.mapped == MAP_NONE {
+            s.base = s.e.id;
+        }
         s.map = s.map.then(Map::add(c));
         s.mapped = g;
+        if let Some(x) = cur {
+            let mut e = Entry::int(x.wrapping_add(c));
+            e.flags = LOADED;
+            s.e = e;
+        }
         true
     }
 
@@ -1518,9 +1516,16 @@ impl State {
     /// run read and holds unwritten holds the value it read already.
     pub(crate) fn restore(&mut self, loc: Loc) {
         if self.slot_ref(loc).is_some_and(|s| s.mapped != MAP_NONE) {
+            self.changing(loc);
             let s = self.slot(loc);
             s.map = Map::ID;
             s.mapped = MAP_NONE;
+            if s.e.flags & LOADED != 0 {
+                let mut e = Entry::raw(s.base);
+                e.flags = LOADED | HAS_ID;
+                s.e = e;
+            }
+            s.base = None;
         }
         self.muts += 1;
     }
@@ -2385,16 +2390,19 @@ mod tests {
         st.set(11, Entry::int(7), false, Some(g));
         st.close(sb, db);
         assert!(st.publication(&v, true).0.iter().all(|p| p.loc != 11));
-        assert!(st.add(12, 1, true));
-        assert!(st.add(12, 2, true));
-        assert!(!st.add(12, 1, false), "a local step after a global one");
+        assert!(st.add(&v, 12, 1, true));
+        assert!(st.add(&v, 12, 2, true));
+        assert!(!st.add(&v, 12, 1, false), "a local step after a global one");
         let p = st.publication(&v, true).0;
         assert!(p.iter().any(|p| p.loc == 12 && p.what == Pub::Rel(3) && p.at == Locality::Global));
         st.load_read(&v, 12, Some(v.int(5)));
         assert_eq!(st.int_of(12, &v), 8);
+        assert_eq!(st.engine_value(12), Some(Some(v.int(5))));
         let p = st.publication(&v, true).0;
-        assert!(p.iter().any(|p| p.loc == 12 && p.what == Pub::Value(v.int(8))));
-        assert!(st.add(13, 2, false));
+        assert!(p.iter().any(|p| p.loc == 12 && p.what == Pub::Rel(3)));
+        st.set(12, Entry::int(5), true, None);
+        assert!(st.publication(&v, true).0.iter().all(|p| p.loc != 12), "set back to what it read");
+        assert!(st.add(&v, 13, 2, false));
         st.restore(13);
         let (p, _) = st.publication(&v, true);
         assert!(p.iter().all(|p| p.loc != 13));

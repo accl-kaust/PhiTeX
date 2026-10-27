@@ -73,8 +73,13 @@ pub(crate) fn fin_class_of(o: &crate::run::Ops, v: &Values, args: &[ValueId]) ->
     o.fin_class
         .locked()
         .get(&fin_page_key(v, args))
-        .copied()
-        .unwrap_or((ValueId::UNIT, i32::MAX))
+        .map_or((ValueId::UNIT, i32::MAX), |x| (x.0, x.1))
+}
+
+/// The page's index among the pages the loop fired, as it last fired the
+/// page of a finisher with arguments `args` (`Ops::fin_class`).
+pub(crate) fn fin_index_of(o: &crate::run::Ops, v: &Values, args: &[ValueId]) -> Option<i64> {
+    o.fin_class.locked().get(&fin_page_key(v, args)).map(|x| x.2)
 }
 
 pub(crate) struct Finish(pub Shared);
@@ -329,7 +334,12 @@ pub(crate) struct FinDefs {
     pub gdefs: Option<ValueId>,
     /// Each page's last run (by [`fin_page_key`]): its ordinary pages
     /// fired and its definitions ([`FinDefs::at`]).
-    pub pages: std::collections::BTreeMap<FinPageKey, (i64, Vec<(Field, ValueId)>)>,
+    pub pages: std::collections::BTreeMap<FinPageKey, (i64, Vec<(Field, ValueId)>, Option<i64>)>,
+    /// The page number (`\count0` as it reached the routine) of the runs
+    /// `prev` and `last` were, where they read it: the hole of a
+    /// page-dependent macro's template ([`FinDefs::predict`]).
+    pub prev_pno: Option<i64>,
+    pub last_pno: Option<i64>,
     /// The relations the last run defined (an integer register's global
     /// `\\advance`, `crate::regfold`: `\\c@page` stepped as the page
     /// ships): the next finisher's predicted relations
@@ -345,6 +355,7 @@ impl FinDefs {
             keep(f.0);
             keep(x);
         }
+
         for &(f, x, _, _) in &self.recent {
             keep(f.0);
             keep(x);
@@ -361,17 +372,20 @@ impl FinDefs {
     pub(crate) fn at(&self, idx: FinPageKey) -> FinDefs {
         let mut d = FinDefs {
             recent: self.recent.clone(),
+            rels: self.rels.clone(),
             ..FinDefs::default()
         };
-        if let Some((j, defs)) = self.pages.get(&idx) {
+        if let Some((j, defs, pno)) = self.pages.get(&idx) {
             d.last.clone_from(defs);
             d.prev.clone_from(defs);
             (d.last_j, d.prev_j) = (*j, *j);
+            (d.last_pno, d.prev_pno) = (*pno, *pno);
             return d;
         }
         d.last.clone_from(&self.last);
         d.prev.clone_from(&self.prev);
         (d.last_j, d.prev_j) = (self.last_j, self.prev_j);
+        (d.last_pno, d.prev_pno) = (self.last_pno, self.prev_pno);
         d
     }
 
@@ -400,7 +414,34 @@ impl FinDefs {
     /// counter) carried on to page `j` (spec-predicted-breaks §3).
     /// (`j`: the ordinary pages fired up to the page, where known; a page
     /// counter is carried on to it only then.)
-    pub(crate) fn predict(&self, v: &Values, j: Option<i64>) -> Vec<(Field, ValueId)> {
+    pub(crate) fn predict(&self, v: &Values, j: Option<i64>, page: Option<i64>) -> Vec<(Field, ValueId)> {
+        // (the page number of page `j`: the last run's, stepped as its
+        // relation on `\count0` steps it per page; a macro holding the
+        // last run's page number is predicted with this one in its place,
+        // spec-state-model §2.4)
+        let c0 = v.field("count:0");
+        let step = self.rels.as_ref().and_then(|rs| rs.iter().find(|r| r.0 == c0).map(|r| r.1));
+        // (only where the last two runs agree on it, their page numbers
+        // one step a page apart: a run on an early guess read another)
+        let agree = match (self.prev_pno, self.last_pno, step) {
+            (Some(a), Some(b), Some(c)) => c.checked_mul(self.last_j - self.prev_j).is_some_and(|d| a.checked_add(d) == Some(b)),
+            _ => false,
+        };
+        let pno = match (self.last_pno, page, step) {
+            (Some(p), Some(j), Some(c)) if agree => c.checked_mul(j - self.last_j).and_then(|d| p.checked_add(d)),
+            _ => None,
+        };
+        let template = |f: Field, x: ValueId| -> ValueId {
+            match (self.last_pno, pno) {
+                (Some(p), Some(q)) if p != q && v.with_str(f.0, |s| s.starts_with("cs:")).unwrap_or(false) => substitute_page(v, x, p, q).unwrap_or(x),
+                _ => x,
+            }
+        };
+        self.predict_values(v, j).into_iter().map(|(f, x)| (f, template(f, x))).collect()
+    }
+
+    /// [`FinDefs::predict`] before its templates.
+    fn predict_values(&self, v: &Values, j: Option<i64>) -> Vec<(Field, ValueId)> {
         let dj = self.last_j - self.prev_j;
         self.last
             .iter()
@@ -453,6 +494,38 @@ impl FinDefs {
             })
             .collect()
     }
+}
+
+/// `x`, a macro's meaning, with each number in its body that is page
+/// number `from` as `\number` prints it (digits of category 12, no
+/// digit next to them) made `to`; `None` where it holds none, or is no
+/// macro ([`FinDefs::predict`]'s templates).
+pub(crate) fn substitute_page(v: &Values, x: ValueId, from: i64, to: i64) -> Option<ValueId> {
+    use crate::val::{Macro, Mean, Tok};
+    let Mean::Macro(m) = Mean::decode(v, Some(x)) else {
+        return None;
+    };
+    let digits = |n: i64| -> Vec<Tok> { n.to_string().chars().map(|c| Tok::ch(12, u32::from(c))).collect() };
+    let (fd, td) = (digits(from), digits(to));
+    let is_digit = |t: &Tok| !t.is_cs_or_active() && t.cat() == Some(12) && (48..=57).contains(&t.chr());
+    let b = &m.body;
+    let mut out: Vec<Tok> = Vec::with_capacity(b.len() + 2);
+    let mut hit = false;
+    let mut i = 0;
+    while i < b.len() {
+        let here = b[i..].starts_with(&fd)
+            && (i == 0 || !is_digit(&b[i - 1]))
+            && b.get(i + fd.len()).is_none_or(|t| !is_digit(t));
+        if here {
+            out.extend(td.iter().copied());
+            i += fd.len();
+            hit = true;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    hit.then(|| Mean::Macro(std::rc::Rc::new(Macro::new(m.flags, m.params.clone(), std::rc::Rc::from(out)))).encode(v))
 }
 
 /// A page's place among the pages a routine ran on ([`FinDefs::pages`]):
@@ -572,6 +645,7 @@ impl Finish {
         // [`Finish::predicted_rels`])
         let j = None;
         let o = ops(&self.0);
+        let page = fin_index_of(o, v, args);
         let m = o.fin_defs.locked();
         let idx = fin_page_key(v, args);
         let d = (t != ValueId::UNIT)
@@ -580,7 +654,7 @@ impl Finish {
             .map(|d| d.at(idx));
         let d = d.as_ref();
         let mut out = d
-            .map(|d| if false { d.stable(v) } else { d.predict(v, j) })
+            .map(|d| if false { d.stable(v) } else { d.predict(v, j, page) })
             .unwrap_or_default();
         out.retain(|e| !transient(v, e.0));
         // (`PHITEX_PRED_SHOW=1`, observe: whether a finisher's
@@ -1196,9 +1270,13 @@ impl Run<'_, '_> {
         if let Some(x) = self.fin.as_ref().and_then(|c| c.rtn) {
             out.push((v.field(RTN), x));
         }
-        // (the ordinary pages fired up to this one: page counters step
-        // by them)
-        let j = args.get(10).map_or(0, |&x| int_of(v, x));
+        // (the page's index among the pages the loop fired, and its page
+        // number as it reached the routine where the routine read it: the
+        // templates' hole, [`FinDefs::predict`])
+        let own = self.cx.args().to_vec();
+        let j = fin_index_of(self.ops, v, &own).unwrap_or(0);
+        let c0 = self.reg_loc(0, 0);
+        let pno = self.st.engine_value(c0).map(|x| i64::from(crate::val::i32_of(v, x)));
         // (`PHITEX_FIN_FIELD=name`: what each finisher's run left of that
         // field, for the predictions)
         if let Some(name) = crate::exec::obs_str!("PHITEX_FIN_FIELD") {
@@ -1239,7 +1317,7 @@ impl Run<'_, '_> {
             );
             let r = |x: ValueId| v.render(x).chars().take(120).collect::<String>();
             let e = e.at(idx);
-            for (f, x) in e.predict(v, Some(j)) {
+            for (f, x) in e.predict(v, None, Some(j)) {
                 let got = out.iter().find(|d| d.0 == f).map(|d| d.1);
                 if got != Some(x) {
                     let name = crate::val::field_name(v, f);
@@ -1255,23 +1333,28 @@ impl Run<'_, '_> {
                 }
             }
         }
-        e.pages.insert(idx, (j, out.clone()));
+        e.pages.insert(idx, (j, out.clone(), pno));
         // (the two latest pages: finishers commit in any order; a page's
         // run again replaces its own entry, never makes the other: two
         // runs of one page agree on what changes from page to page, a
         // column kept, a mark, and would predict it for the next page)
         if j == e.last_j && !e.last.is_empty() {
             e.last = out;
+            e.last_pno = pno;
         } else if j == e.prev_j && !e.prev.is_empty() {
             e.prev = out;
+            e.prev_pno = pno;
         } else if j > e.last_j || e.last.is_empty() {
             e.prev = std::mem::take(&mut e.last);
             e.prev_j = e.last_j;
+            e.prev_pno = e.last_pno;
             e.last = out;
             e.last_j = j;
+            e.last_pno = pno;
         } else if j > e.prev_j || e.prev.is_empty() {
             e.prev = out;
             e.prev_j = j;
+            e.prev_pno = pno;
         }
         Ok(())
     }}

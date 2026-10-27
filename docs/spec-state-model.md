@@ -118,6 +118,10 @@ In order of preference, the first that applies:
    register (`\advance`, `\stepcounter` where the counter is not read).
    The run composes its maps; the engine recomputes relations without a
    run and gives predicted ones to nodes ahead of their run.
+   Steps of a register the run read (and never set) are a relation
+   too, its read recorded beside it (2026-10-28: a finisher's
+   `\advancepageno` reads `\count0` then steps it, and the finishers'
+   predicted relations on it need the relation).
 4. **A value**, otherwise: filed at the run's position, Global if the
    assignment was `\global` or at the document's outer level, Local with
    the depth of the group it was made in (the engine's scope depth), as

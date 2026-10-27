@@ -623,6 +623,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let defs = dedup_defs(std::mem::take(&mut p.defs));
     let brackets = effective_brackets(node, p.effect);
     let filed = filed_defs(&eng.values, &defs, &brackets);
+    // (a global definition by a node standing outside every scope is seen
+    // as a local one at its depth is: one confirms a prediction, filed
+    // at depth 0, of its value)
+    let at_top = filed.iter().any(|d| d.depth == GLOBAL) && read::depth_of(eng, node.id) == Some(0);
     let bracket_change: Option<Brackets>;
     let contribs = combine_dups(eng, std::mem::take(&mut p.contribs));
     let mut last = node.record();
@@ -891,10 +895,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             let m = inner.defs.entry(d.f).or_default();
             let first = m.is_empty();
             match m.get_mut(&pos) {
-                Some(e) if e.value == d.value && e.depth == depth => {
+                Some(e)
+                    if e.value == d.value
+                        && (e.depth == depth
+                            || (e.provisional && at_top && e.depth == 0 && depth == GLOBAL)) =>
+                {
                     if e.provisional {
                         st.predictions_confirmed += 1;
                     }
+                    e.depth = depth;
                     e.provisional = false;
                     e.rel = d.rel;
                     e.by = node.id;

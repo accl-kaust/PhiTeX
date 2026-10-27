@@ -60,7 +60,7 @@ fn a_deferred_write_of_the_page_number_is_resolved_at_shipout_without_a_read_in_
         let (want_dvi, want_out) = cold("write", &src, 1);
         assert_eq!(b.output().0, want_dvi, "-j{threads}: cold at one thread");
         assert!(want_out.contains("page=") && !want_out.contains("page=1."), "-j{threads}: the write names its page: {want_out:?}");
-        assert_eq!(b.stats.refuted_by("count:0"), 0, "-j{threads}: no paragraph read the page number: {:?}", b.stats.refuted_by_field);
+        assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "-j{threads}: no paragraph read the page number: {:?}", b.stats.refuted_by_field);
         // a paragraph inserted at the front: every page break moves
         let edited = doc(121, 60, mid).replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines, so the marked paragraph moves.\n\nParagraph 0 of", 1);
         common::rebuild(&mut b, &edited);
@@ -68,7 +68,7 @@ fn a_deferred_write_of_the_page_number_is_resolved_at_shipout_without_a_read_in_
         assert_eq!(b.output().0, want_dvi, "-j{threads}: the edited document equals its cold build");
         let got_out = b.writes().into_iter().filter(|(k, _)| *k == 1).map(|(_, t)| t).collect::<Vec<_>>().join("");
         assert_eq!(got_out, want_out, "-j{threads}: the written page number followed the page");
-        assert_eq!(b.stats.refuted_by("count:0"), 0, "-j{threads}: still no read of the page number by a paragraph");
+        assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "-j{threads}: still no read of the page number by a paragraph");
     }
 }
 
@@ -84,11 +84,11 @@ fn a_page_number_in_a_macro_never_expanded_is_no_read() {
     };
     let mut b = common::build(opts, Some(&common::plain()), &src);
     assert_eq!(b.output().0, cold("macro", &src, 1).0);
-    assert_eq!(b.stats.refuted_by("count:0"), 0, "{:?}", b.stats.refuted_by_field);
+    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "{:?}", b.stats.refuted_by_field);
     let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 0 of", 1);
     let r = common::rebuild(&mut b, &edited);
     assert_eq!(b.output().0, cold("macro-edited", &edited, 1).0);
-    assert_eq!(b.stats.refuted_by("count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
+    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
 }
 
 /// A conditional on the page number needs the digits: the paragraph
@@ -125,12 +125,12 @@ fn a_save_and_restore_of_the_page_number_is_neither_a_read_nor_a_definition() {
     };
     let mut b = common::build(opts, Some(&common::plain()), &src);
     assert_eq!(b.output().0, cold("restore", &src, 1).0, "page numbers after the probe are TeX's");
-    assert_eq!(b.stats.refuted_by("count:0"), 0, "{:?}", b.stats.refuted_by_field);
+    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "{:?}", b.stats.refuted_by_field);
     assert_eq!(b.definitions_by_op("exec", "count:0") + b.definitions_by_op("resume", "count:0"), 0, "no paragraph defined the page number");
     let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 0 of", 1);
     let r = common::rebuild(&mut b, &edited);
     assert_eq!(b.output().0, cold("restore-edited", &edited, 1).0);
-    assert_eq!(b.stats.refuted_by("count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
+    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
 }
 
 /// A `\mark` holding the page number is resolved by the finisher that
@@ -146,11 +146,11 @@ fn a_mark_with_the_page_number_is_resolved_by_the_finisher() {
     };
     let mut b = common::build(opts, Some(&common::plain()), &src);
     assert_eq!(b.output().0, cold("mark", &src, 1).0);
-    assert_eq!(b.stats.refuted_by("count:0"), 0, "{:?}", b.stats.refuted_by_field);
+    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "{:?}", b.stats.refuted_by_field);
     let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 0 of", 1);
     let r = common::rebuild(&mut b, &edited);
     assert_eq!(b.output().0, cold("mark-edited", &edited, 1).0, "the headline follows the page");
-    assert_eq!(b.stats.refuted_by("count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
+    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
 }
 
 /// The fixture `oracle/fixtures/dvi/defer.tex` (every shape above in one

@@ -1467,6 +1467,9 @@ pub struct Stats {
     /// The relations the live nodes' last runs filed, by operation and
     /// field, counted ([`crate::run::NodeAudit`]).
     pub relations: Vec<(&'static str, String, u64)>,
+    /// The readers re-asked by field, by the reader's operation: `(op,
+    /// field, count)` over the build ([`Stats::refuted_by_op`]).
+    pub refuted_by_op_field: Vec<(&'static str, String, u64)>,
     /// Nodes the placements made, by operation, over the build's
     /// evaluations (a placement kept makes none).
     pub placed_by_op: Vec<(&'static str, u64)>,
@@ -1860,15 +1863,27 @@ impl Stats {
         self.units_now.iter().find(|x| x.0 == field).map_or(0, |x| x.1)
     }
 
-    /// The readers re-asked through field `name`, or a field of its
-    /// family (`name:…`, a field in parts), over the build.
+    /// The relations (`Ctx::define_rel`) on `field` the live nodes of
+    /// operation `op` filed at their last runs (tests/state.rs).
     #[must_use]
-    /// The relations (`Ctx::define_rel`) on `field` filed by nodes of
-    /// operation `op` (tests/state.rs). Filled by the state-model rewrite.
     pub fn relations_by_op(&self, op: &str, field: &str) -> u64 {
         self.relations.iter().filter(|r| r.0 == op && r.1 == field).map(|r| r.2).sum()
     }
 
+    /// The readers of operation `op` re-asked through field `name`, or a
+    /// field of its family (`name:…`), over the build.
+    #[must_use]
+    pub fn refuted_by_op(&self, op: &str, name: &str) -> usize {
+        self.refuted_by_op_field
+            .iter()
+            .filter(|e| e.0 == op && (e.1 == name || e.1.strip_prefix(name).is_some_and(|r| r.starts_with(':'))))
+            .map(|e| usize::try_from(e.2).unwrap_or(usize::MAX))
+            .sum()
+    }
+
+    /// The readers re-asked through field `name`, or a field of its
+    /// family (`name:…`, a field in parts), over the build.
+    #[must_use]
     pub fn refuted_by(&self, name: &str) -> usize {
         self.refuted_by_field
             .iter()
@@ -1938,6 +1953,15 @@ impl Stats {
 
     fn add_refuted(&mut self, eng: &Engine, r: &Report) {
         let v = eng.values();
+        for (n, c) in &r.rerun_causes {
+            let Some(f) = cause_parts(c).1 else { continue };
+            let Some(op) = eng.node_info(*n).map(|i| i.op) else { continue };
+            let name = field_name(v, f);
+            match self.refuted_by_op_field.iter_mut().find(|e| e.0 == op && e.1 == name) {
+                Some(e) => e.2 += 1,
+                None => self.refuted_by_op_field.push((op, name, 1)),
+            }
+        }
         for &(f, n) in &r.refuted_by_field {
             let name = field_name(v, f);
             match self.refuted_by_field.iter_mut().find(|e| e.0 == name) {

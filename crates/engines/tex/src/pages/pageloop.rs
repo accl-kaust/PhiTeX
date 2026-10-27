@@ -700,7 +700,7 @@ impl Run<'_, '_> {
         // class, the page's, not its placement's)
         self.ops.fin_class.locked().insert(
             (i64::from_ne_bytes(page.key.piece.raw().to_ne_bytes()), i64::from(page.key.nth)),
-            (page.hint, pen_class(page.output_penalty)),
+            (page.hint, pen_class(page.output_penalty), i64::try_from(i).unwrap_or(i64::MAX)),
         );
         self.emit_page(i, page.key, page.at, x, args, prev);
         let gave = self.give_back(i, q.rtn_guess);

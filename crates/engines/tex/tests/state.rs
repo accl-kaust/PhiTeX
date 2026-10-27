@@ -145,18 +145,31 @@ fn a_run_records_a_read_only_of_the_items_it_used() {
     assert_eq!(b.reads_by_op("exec", "cattab"), 0);
 }
 
-/// Every DVI fixture is byte-identical on the new model.
+/// Every DVI fixture is byte-identical on the new model: the set and
+/// the preludes plain.rs's `dvi_fixtures` runs (no prelude), and the
+/// deferred reads' fixture with plain.
 #[test]
 fn the_state_fixtures_are_byte_identical() {
     let dir = common::fixtures().join("dvi");
-    let mut names: Vec<_> = std::fs::read_dir(&dir).expect("fixtures").filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "tex")).collect();
-    names.sort();
-    for tex in names {
-        let name = tex.file_stem().unwrap().to_string_lossy().to_string();
-        let Ok(want) = std::fs::read(dir.join(format!("{name}.dvi"))) else { continue };
-        let src = common::read(&tex);
-        let opts = common::options(&format!("./{name}.tex"), &name, &common::dvi_comment(&want), &dir);
-        let b = common::build(opts, None, &src);
+    let set = [
+        ("hbox", false),
+        ("endgroup", false),
+        ("input", false),
+        ("fonts", false),
+        ("disc", false),
+        ("accent", false),
+        ("pargroup", false),
+        ("mathpar", false),
+        ("errors100", false),
+        ("catline", false),
+        ("defer", true),
+    ];
+    for (name, plain) in set {
+        let want = std::fs::read(dir.join(format!("{name}.dvi"))).expect("the oracle");
+        let src = common::read(&dir.join(format!("{name}.tex")));
+        let opts = common::options(&format!("./{name}.tex"), name, &common::dvi_comment(&want), &dir);
+        let prelude = plain.then(common::plain);
+        let b = common::build(opts, prelude.as_deref(), &src);
         let (dvi, log) = b.output();
         assert_eq!(dvi, want, "{name}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
     }
