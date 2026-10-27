@@ -52,8 +52,11 @@ pub struct Ctx<'a> {
     pub(crate) woke: Option<Cause>,
     /// My last run's placements by operation and arguments, made on the
     /// first `placed_output_or`.
-    placed_keys: Option<FxHashMap<(OpId, Arc<[ValueId]>), NodeId>>,
+    placed_keys: Option<PlacedKeys>,
 }
+
+/// A run's placements by operation and arguments.
+type PlacedKeys = FxHashMap<(OpId, Arc<[ValueId]>), NodeId>;
 
 fn stop() -> Stop {
     Stop { _private: () }

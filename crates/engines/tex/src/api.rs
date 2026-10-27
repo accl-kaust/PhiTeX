@@ -6661,6 +6661,15 @@ impl Build {
 
     /// The `\write` streams' lines: `(stream, text)`.
     #[must_use]
+    /// The definitions of field `field` filed by nodes of operation `op`
+    /// over the build (tests/defer.rs: a piece that restores a register
+    /// defines nothing). Filled by the deferred-reads implementation
+    /// (docs/spec-deferred-reads.md).
+    pub fn definitions_by_op(&self, op: &str, field: &str) -> u64 {
+        let _ = (op, field);
+        todo!("Build::definitions_by_op: the definitions of a field by an operation's nodes (docs/spec-deferred-reads.md)")
+    }
+
     pub fn writes(&self) -> Vec<(i64, String)> {
         let v = self.g.eng.values();
         let f = v.field("writes");
