@@ -440,12 +440,18 @@ pub(crate) enum Placement {
     Follow(OpId, Vec<ValueId>),
     /// After node `at` (and its placements).
     FollowAfter(NodeId, OpId, Vec<ValueId>),
+    /// After the node the placer's `j`-th placement of this run stands
+    /// for (and its placements), `j` before this one.
+    FollowAfterPlaced(usize, OpId, Vec<ValueId>),
 }
 
 impl Placement {
     pub(crate) fn key(&self) -> (OpId, &[ValueId]) {
         match self {
-            Placement::Child(op, a) | Placement::Follow(op, a) | Placement::FollowAfter(_, op, a) => (*op, a),
+            Placement::Child(op, a)
+            | Placement::Follow(op, a)
+            | Placement::FollowAfter(_, op, a)
+            | Placement::FollowAfterPlaced(_, op, a) => (*op, a),
         }
     }
 }

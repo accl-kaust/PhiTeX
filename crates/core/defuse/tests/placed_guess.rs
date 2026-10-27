@@ -91,3 +91,55 @@ fn every_guess_right_runs_the_placer_once() {
     assert_eq!(p.runs.load(Ordering::Relaxed), 1);
     assert!(e.check_invariants().is_empty());
 }
+
+/// `[anchor, n, salt]`: places `n` leaves after node `anchor`, each after
+/// the one before (`Ctx::follow_after_placed`), the first after the
+/// anchor's own children.
+struct Chain {
+    leaf: std::sync::OnceLock<phitex_defuse::OpId>,
+}
+
+impl Operation for Chain {
+    fn name(&self) -> &'static str {
+        "chain"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let at = phitex_defuse::NodeId::from_raw(v.as_int(cx.args()[0]).unwrap_or(0).unsigned_abs());
+        let n = v.as_int(cx.args()[1]).unwrap_or(0);
+        let salt = v.as_int(cx.args()[2]).unwrap_or(0);
+        let leaf = *self.leaf.get().unwrap();
+        let mut last = cx.follow_after(at, leaf, vec![v.int(salt * 100)]);
+        for k in 1..n {
+            last = cx.follow_after_placed(last, leaf, vec![v.int(salt * 100 + k)]);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// Several nodes placed after one node elsewhere stand in the placer's
+/// order (each after the one before), on the first run and after a run
+/// that keeps some and makes others anew.
+#[test]
+fn placements_after_a_placement_stand_in_order() {
+    let e = Engine::new();
+    let v = e.values();
+    let leaf = e.register(Arc::new(Leaf));
+    let c = Arc::new(Chain { leaf: std::sync::OnceLock::new() });
+    c.leaf.set(leaf).unwrap();
+    let op = e.register(c);
+    let u = e.new_unit();
+    let a = e.push(u, leaf, vec![v.int(-1)]);
+    let b = e.push(u, leaf, vec![v.int(-2)]);
+    let ch = e.push(u, op, vec![v.int(i64::try_from(a.raw()).unwrap()), v.int(3), v.int(1)]);
+    e.evaluate(2).unwrap();
+    let outs = |e: &Engine| -> Vec<i64> { e.order(u).into_iter().filter_map(|n| e.output(n).and_then(|x| v.as_int(x))).collect() };
+    assert_eq!(outs(&e), vec![-1, 100, 101, 102, -2], "after the anchor, in the placer's order");
+    // (the middle one made anew: the others kept, the order the same)
+    e.replace(ch, op, vec![v.int(i64::try_from(a.raw()).unwrap()), v.int(4), v.int(1)]);
+    e.evaluate(2).unwrap();
+    assert_eq!(outs(&e), vec![-1, 100, 101, 102, 103, -2]);
+    let _ = b;
+    assert!(e.check_invariants().is_empty());
+}

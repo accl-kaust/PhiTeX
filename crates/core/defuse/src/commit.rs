@@ -634,7 +634,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         .zip(&kept)
         .enumerate()
         .map(|(i, (what, k))| {
-            if k.is_some() && !matches!(what, Placement::FollowAfter(..)) {
+            if k.is_some() && !matches!(what, Placement::FollowAfter(..) | Placement::FollowAfterPlaced(..)) {
                 return None;
             }
             let (op, args) = what.key();
@@ -1000,13 +1000,33 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let mut elsewhere = false;
         // (the placement before, where it stands: a kept one follows it)
         let mut prev: Option<NodeId> = None;
+        // (whether each placement is a node made by this commit)
+        let mut made_now: Vec<bool> = Vec::with_capacity(p.placements.len());
         for (i, what) in p.placements.iter().enumerate() {
             if let Some(k) = kept_end.take() {
                 after = subtree_end(eng, k);
                 labelled = after;
             }
             let after_pos = eng.node(labelled).pos_hint();
-            if let Some(k) = kept[i] {
+            // (after a placement of this run: after the node it stands
+            // for; one made by this commit is placed after it, not kept
+            // where it stood before that node was)
+            let resolved;
+            let mut kept_i = kept[i];
+            let what = match what {
+                Placement::FollowAfterPlaced(j, op, a) => {
+                    if made_now[*j]
+                        && let Some(k) = kept_i.take()
+                    {
+                        removed_kept.push(k);
+                    }
+                    resolved = Placement::FollowAfter(placed[*j], *op, a.clone());
+                    &resolved
+                }
+                w => w,
+            };
+            made_now.push(true);
+            if let Some(k) = kept_i {
                 let kn = eng.node(k);
                 // (one placed after another node stands while it is still
                 // after that node and its children, wherever the placer is:
@@ -1017,6 +1037,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                         (eng.node(e).pos_hint(), before)
                     }
                     Placement::Child(..) | Placement::Follow(..) => (after_pos, None),
+                    Placement::FollowAfterPlaced(..) => unreachable!("resolved above"),
                 };
                 // (and nothing of a later slot under its anchor stands
                 // between: one left where it was when the slots before
@@ -1035,6 +1056,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                         (q, 1, f)
                     }
                     Placement::Follow(..) => (node.id, 2, floor),
+                    Placement::FollowAfterPlaced(..) => unreachable!("resolved above"),
                 };
                 let kpos = kn.pos_hint();
                 if kn.state() != State::Gone
@@ -1051,6 +1073,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                             deferred[d].2 = Some(k);
                         }
                     }
+                    made_now[i] = false;
                     continue;
                 }
                 removed_kept.push(k);
@@ -1069,12 +1092,14 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             let at = match what {
                 Placement::FollowAfter(at, _, _) => Some(*at),
                 Placement::Child(..) | Placement::Follow(..) => None,
+                Placement::FollowAfterPlaced(..) => unreachable!("resolved above"),
             };
             let (anchor, slot) = match what {
                 Placement::FollowAfter(at, ..) => (*at, 1),
                 Placement::Child(..) => (node.id, 0),
                 Placement::Follow(..) if elsewhere => (prev.expect("a placement before, placed elsewhere"), 1),
                 Placement::Follow(..) => (node.id, 2),
+                Placement::FollowAfterPlaced(..) => unreachable!("resolved above"),
             };
             n.anchor.store(anchor.raw() + 1, Ordering::Release);
             n.slot.store(slot, Ordering::Release);
@@ -1122,7 +1147,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             }
             // (one after another node goes after its children there: what
             // follows it is checked against that)
-            if let Some(a) = at {
+            // (a node this commit made after another not on the line yet
+            // goes after it later, in order: nothing is placed after it here)
+            if let Some(a) = at
+                && eng.placed_node(a).is_some()
+            {
                 labelled = children_end(eng, a).0;
             }
             elsewhere = at.is_some();
@@ -1242,7 +1271,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // deferred placements: after a node elsewhere (one placed after this
     // node was removed or taken, which withdrew this record, goes with it)
     for (i, at, before, n, pred) in deferred {
-        let n = if matches!(p.placements[i], Placement::FollowAfter(..)) {
+        let n = if matches!(p.placements[i], Placement::FollowAfter(..) | Placement::FollowAfterPlaced(..)) {
             place_after_children(eng, at, n, pred)
         } else if let Some(b) = before {
             place_before_node(eng, b, at, n, pred)

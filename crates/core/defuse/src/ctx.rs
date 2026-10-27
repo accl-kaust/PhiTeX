@@ -423,6 +423,20 @@ impl<'a> Ctx<'a> {
         self.product.placements.len() - 1
     }
 
+    /// Places a node after the node my `j`-th placement of this run
+    /// stands for, and its placements: a run placing several nodes after
+    /// one node elsewhere puts each after the one before, in its order
+    /// (`follow_after` puts each right after that node's own children).
+    ///
+    /// # Panics
+    ///
+    /// Where `j` is not a placement this run made before.
+    pub fn follow_after_placed(&mut self, j: usize, op: OpId, args: Vec<ValueId>) -> usize {
+        assert!(j < self.product.placements.len(), "follow_after_placed({j}): no such placement before");
+        self.product.placements.push(Placement::FollowAfterPlaced(j, op, args));
+        self.product.placements.len() - 1
+    }
+
     /// The output my `i`-th placement had at my last commit, if it has run.
     pub fn placed_output(&mut self, i: usize) -> Option<ValueId> {
         let c = self.last.as_ref().and_then(|r| r.placed.get(i).copied());
