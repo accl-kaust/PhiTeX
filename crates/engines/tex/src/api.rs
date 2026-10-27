@@ -1475,6 +1475,9 @@ pub struct Stats {
     /// Nodes the placements made, by operation, over the build's
     /// evaluations (a placement kept makes none).
     pub placed_by_op: Vec<(&'static str, u64)>,
+    /// Placements relocated instead of remade over the build's
+    /// evaluations (`phitex_defuse::Report::placements_moved`).
+    pub placements_moved: u64,
     /// The profile units the page loop folded over all its runs.
     pub units_folded: u64,
     /// The units of each accumulator the last evaluation ended with
@@ -1691,7 +1694,7 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         .take(8)
         .map(|(o, t, k)| format!("{o} {:.3} ms/{k} reads", std::time::Duration::from_nanos(*t).as_secs_f64() * 1e3))
         .collect();
-    eprintln!("acct: commits by op (whole time, reads filed): {}; placed by op {:?}", commits.join(", "), r.placed_by_op);
+    eprintln!("acct: commits by op (whole time, reads filed): {}; placed by op {:?}; moved {}", commits.join(", "), r.placed_by_op, r.placements_moved);
     let mut by_field: Vec<(String, u64)> = r
         .refuted_by_field
         .iter()
@@ -1836,8 +1839,8 @@ pub struct RunReport {
     pub runs_by_op: Vec<(&'static str, u64)>,
     pub placed_by_op: Vec<(&'static str, u64)>,
     /// Placements relocated instead of remade over the evaluations
-    /// (`phitex_defuse::Report::placements_moved`; filled by the
-    /// continuations rewrite, docs/spec-continuations.md).
+    /// (`phitex_defuse::Report::placements_moved`,
+    /// docs/spec-continuations.md §2.3).
     pub placements_moved: u64,
 }
 
@@ -2044,6 +2047,8 @@ impl Stats {
             self.run_times = ts.iter().take(10).map(|&(n, t)| (n.raw(), t)).collect();
         }
         self.page_steps += Report::by_op(&r.runs_by_op, "finish");
+        self.placements_moved += r.placements_moved;
+        self.last.placements_moved += r.placements_moved;
         for &(k, n) in &r.placed_by_op {
             match self.placed_by_op.iter_mut().find(|x| x.0 == k) {
                 Some(x) => x.1 += n,

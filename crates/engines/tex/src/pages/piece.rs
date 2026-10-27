@@ -5,7 +5,8 @@
 //! - A piece ends at every candidate it can end at with more than blank
 //!   input left (a cut, [`Run::fold_here`]): its rest is a [`Resume`]
 //!   placed after it, after the finishers of the pages firing there,
-//!   its continuation its arguments ([`Run::cont_encode`],
+//!   keyed by the piece and the candidate, its continuation a field the
+//!   piece defines ([`cont_field`], [`Run::cont_encode`],
 //!   [`Run::cont_load`]). A cut is how the text is divided into nodes;
 //!   no page decides it.
 //! - At its end a piece gives its profile and its items as units
@@ -423,17 +424,14 @@ impl Run<'_, '_> {
     }
 
     /// The siblings this run's text says it takes: an exec node's hint
-    /// (`None` where the text does not say), a resume's guess (its
-    /// fourth argument).
+    /// (`None` where the text does not say), a resume's guess (read with
+    /// its continuation, [`Run::cont_guess`]).
     pub(crate) fn claim_guess(&self) -> Option<usize> {
         let v = self.v;
         let args = self.cx.args();
         let op = self.cx.op();
         if op == self.ops.resume {
-            return args
-                .get(3)
-                .and_then(|&x| v.as_int(x))
-                .and_then(|n| usize::try_from(n).ok());
+            return self.cont_guess;
         }
         if op != self.ops.exec {
             return None;
@@ -979,7 +977,7 @@ impl Run<'_, '_> {
     /// it gives its items up to the candidate as its units (the page is
     /// the page builder's to find, as for any piece) and places the
     /// resume piece after it, which runs the rest from the continuation,
-    /// its arguments ([`Run::cont_encode`]). Nothing here reads the page:
+    /// a field the piece defines ([`Run::cont_encode`], [`cont_field`]). Nothing here reads the page:
     /// where the cut is is the piece's text's alone. A stop here stops
     /// the run: the end is a command of its own ([`Run::begin_command`]).
     pub(crate) fn fold_here(&mut self, raw: Vec<ValueId>) -> R<()> {
@@ -1029,13 +1027,16 @@ impl Run<'_, '_> {
         // piece, so before the rest, which reads what their routines
         // leave; a `\write18`'s tool node the run ended at right before
         // it, `Run::tool_command`)
+        // (the continuation and the guess are a field the piece defines,
+        // `cont:<piece>:<k>`, read by the rest at its start: the rest is
+        // the piece's and the candidate's, a change of the piece's state
+        // at the cut a definition that changed, which reruns the rest in
+        // place, docs/spec-continuations.md §2.2)
+        self.cx.define_with(cont_field(v, pid, k), v.list(vec![cont, v.int(rest)]), Locality::Global);
         if let Some(t) = self.tool_cut {
             self.cx.follow(self.ops.toolnode, list_of(v, t));
         }
-        self.cx.follow(
-            self.ops.resume,
-            vec![cont, v.int(flags), pid, v.int(rest), v.int(i64::from(k))],
-        );
+        self.cx.follow(self.ops.resume, vec![v.int(flags), pid, v.int(i64::from(k))]);
         Ok(())
     }
 
@@ -1636,12 +1637,22 @@ impl Run<'_, '_> {
     }
 }
 
-/// The rest of a piece after a cut: arguments `[cont, flags, piece,
-/// claim guess, candidate]`, the continuation ([`Run::cont_encode`]),
-/// the piece's text kind, the cutting piece's node, the siblings it
-/// takes and the candidate cut at. It runs the input left in the groups
-/// left open, as the piece would have gone on, reading what the
-/// finishers before it defined.
+/// The field a piece cut at candidate `k` defines for its rest
+/// (`cont:<piece>:<k>`, Global): `[cont, claim guess]`, the continuation
+/// ([`Run::cont_encode`]) and the siblings the rest takes where the
+/// piece's text says so (-1: decided by the rest's run).
+pub(crate) fn cont_field(v: &Values, pid: ValueId, k: u32) -> Field {
+    v.field(&format!("cont:{}:{k}", int_of(v, pid)))
+}
+
+/// The rest of a piece after a cut: arguments `[flags, piece,
+/// candidate]`, the piece's text kind, the cutting piece's node and the
+/// candidate cut at: nothing of the piece's state, so a changed state at
+/// the cut reruns the same node (docs/spec-continuations.md §2.1). Its
+/// continuation and claim guess it reads from the piece's field
+/// ([`cont_field`]). It runs the input left in the groups left open, as
+/// the piece would have gone on, reading what the finishers before it
+/// defined.
 pub(crate) struct Resume(pub Shared);
 
 impl Operation for Resume {
@@ -1655,10 +1666,10 @@ impl Operation for Resume {
     fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
         MayDefine::Any
     }
-    /// The brackets its rest's text shows inside the groups it carries
-    /// ([`crate::ops::predicted_effect`]).
-    fn effect(&self, args: &[ValueId], v: &Values) -> Effect {
-        crate::ops::predicted_effect(ops(&self.0), v, args, true)
+    /// Its brackets are its run's: the text they would be predicted
+    /// from is its continuation, a field, not its arguments.
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::Pending
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
@@ -1666,14 +1677,27 @@ impl Operation for Resume {
         let args = cx.args().to_vec();
         let o = ops(&self.0);
         let t0 = std::time::Instant::now();
+        let mut text = ValueId::UNIT;
         let out = run_node(cx, o, |r| {
+            let v = r.v;
             let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
-            r.cont_load(a(0), a(2))?;
+            let k = u32::try_from(int_of(v, a(2))).unwrap_or(0);
+            // (its continuation, the piece's field; none yet: the piece's
+            // definition re-asks it when filed)
+            let Some(c) = r.eng_read(cont_field(v, a(1), k))? else {
+                return Ok(());
+            };
+            let xs = list_of(v, c);
+            let cont = xs.first().copied().unwrap_or(ValueId::UNIT);
+            r.cont_val = Some(cont);
+            r.cont_guess = xs.get(1).and_then(|&g| v.as_int(g)).and_then(|n| usize::try_from(n).ok());
+            text = cont;
+            r.cont_load(cont, a(1))?;
             r.run_all()
         });
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
             let v = cx.values();
-            let text = v.render(args.first().copied().unwrap_or(ValueId::UNIT));
+            let text = v.render(text);
             let cut: String = text.chars().take(600).collect();
             crate::exec::later(format!(
                 "longrun: resume {} {:.0} ms: {cut}",

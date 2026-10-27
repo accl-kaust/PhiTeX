@@ -1221,6 +1221,7 @@ impl Engine {
             for (op, k) in log.placed_by_op.drain() {
                 *placed.entry(op).or_default() += k;
             }
+            rep.placements_moved += std::mem::take(&mut log.placements_moved);
             for (op, (t, k)) in log.commit_by_op.drain() {
                 let e = commit_by.entry(op).or_default();
                 e.0 += t;

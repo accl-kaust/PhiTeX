@@ -122,6 +122,10 @@ pub(crate) struct Node {
     /// `At::AfterOwn`): its removal looks for those readers in its
     /// segment, under those fields alone.
     pub(crate) anchored: Mx<Vec<Field>>,
+    /// Relocated since its last commit (`commit::relocate`): its next
+    /// commit checks its placements where it stands now, though its run
+    /// published nothing new (`Ctx::unchanged`).
+    pub(crate) moved: AtomicBool,
 }
 
 /// An effect as 32 bits: closes, opens, `before`, and whether pending.
@@ -158,6 +162,7 @@ impl Node {
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             anchored: Mx::new(Vec::new()),
+            moved: AtomicBool::new(false),
             id,
             unit,
             op: AtomicU32::new(op.0),

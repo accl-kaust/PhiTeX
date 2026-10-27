@@ -746,6 +746,12 @@ pub(crate) struct Run<'c, 'a> {
     /// ([`Run::cont_load`], by its index in the text): a token level's
     /// file line, for `\inputlineno` ([`Run::file_line_here`]).
     pub cont_lines: Vec<Option<FileLine>>,
+    /// A resume's continuation and claim guess, read from the field its
+    /// piece defined at the cut (`cont:<piece>:<k>`, [`Run::fold_here`]):
+    /// its text as an exec node's first argument is (scope shape, file
+    /// lines), and the siblings it takes where the piece's text says so.
+    pub cont_val: Option<ValueId>,
+    pub cont_guess: Option<usize>,
     /// A read-back point not known to be one yet: the file this run
     /// looked for in vain from the macro running ([`Run::read_back_at`]).
     /// When the run opens that file for writing, the point was its
@@ -979,6 +985,8 @@ impl<'c, 'a> Run<'c, 'a> {
             text_written: Vec::new(),
             seeded: Vec::new(),
             cont_lines: Vec::new(),
+            cont_val: None,
+            cont_guess: None,
             read_point_pending: None,
             vain_after_point: Vec::new(),
             pending_pre: Vec::new(),
@@ -4203,8 +4211,10 @@ impl<'c, 'a> Run<'c, 'a> {
     /// correct, and serial for exactly that span.
     pub(crate) fn run_all(&mut self) -> R<()> {
         let args = self.cx.args();
-        // the node's text kind (`args[1]`: 1 the job's text, 2 a document's)
-        let k = args.get(1).map_or(0, |&t| int_of(self.v, t));
+        // the node's text kind (`args[1]`: 1 the job's text, 2 a
+        // document's; a resume's flags, its first)
+        let at = usize::from(self.cx.op() != self.ops.resume);
+        let k = args.get(at).map_or(0, |&t| int_of(self.v, t));
         self.top = k & 1 != 0;
         self.doc = k & 2 != 0;
         loop {
@@ -4711,13 +4721,13 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cx.set_effect(self.effect);
         }
         if crate::exec::prof_flag!("PHITEX_SKIND_LOG") && self.cut.is_some() && (op == self.ops.exec || op == self.ops.resume) {
-            let shape = crate::ops::scope_shape_of(self.v, self.cx.args(), op == self.ops.resume);
+            let shape = crate::ops::scope_shape_of(self.v, &self.text_arg().into_iter().collect::<Vec<_>>(), op == self.ops.resume);
             eprintln!("skindcut: {} op {} effect {:?} shape {shape:?}", self.cx.node().raw(), self.op_name(), self.effect);
         }
         // (a run cut at a candidate, or one that ended the job, ran not
         // to its text's end: its brackets say nothing of its shape's)
         if (op == self.ops.exec || op == self.ops.resume) && self.cut.is_none() && !self.claim_rest {
-            let shape = crate::ops::scope_shape_of(self.v, self.cx.args(), op == self.ops.resume);
+            let shape = crate::ops::scope_shape_of(self.v, &self.text_arg().into_iter().collect::<Vec<_>>(), op == self.ops.resume);
             let opened = match self.effect {
                 Effect::Scope(b) if b.closes == 0 => usize::from(b.opens),
                 _ => 0,
@@ -4737,7 +4747,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 let was: Vec<(String, Option<bool>)> = learn.iter().map(|(k, _)| (k.clone(), m.get(k).copied())).collect();
                 let v = self.v;
                 let carried: Vec<i64> = if op == self.ops.resume {
-                    let c = list_of(v, self.cx.args().first().copied().unwrap_or(ValueId::UNIT));
+                    let c = list_of(v, self.text_arg().unwrap_or(ValueId::UNIT));
                     c.get(1).map(|&l| list_of(v, l).iter().map(|&e| list_of(v, e).get(1).map_or(-1, |&g| int_of(v, g))).collect()).unwrap_or_default()
                 } else {
                     Vec::new()
@@ -5224,8 +5234,17 @@ impl Run<'_, '_> {
             return Some(c);
         }
         let v = self.v;
-        let frames = self.cx.args().first().map(|&f| list_of(v, f))?;
+        let frames = self.text_arg().map(|f| list_of(v, f))?;
         frames.iter().find_map(|&f| frame_line(v, f))
+    }
+
+    /// The node's text: an exec node's first argument, a resume's
+    /// continuation ([`Run::cont_val`]).
+    pub(crate) fn text_arg(&self) -> Option<ValueId> {
+        if self.cx.op() == self.ops.resume {
+            return self.cont_val;
+        }
+        self.cx.args().first().copied()
     }
 
     /// A line of a document's piece in file `name` begun (§362).

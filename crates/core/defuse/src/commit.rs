@@ -94,6 +94,12 @@ pub(crate) fn own_write<'a>(eng: &'a Engine, node: &Node) -> Option<(&'a Arc<Seg
 /// A list of the nodes still to visit, not a frame each: a continuation
 /// chain is a subtree as deep as it is long.
 pub(crate) fn subtree_end(eng: &Engine, n: NodeId) -> NodeId {
+    subtree_end_skip(eng, n, None)
+}
+
+/// `subtree_end` passing over the nodes of `skip` and theirs: a node
+/// being relocated and its subtree (`relocate`).
+fn subtree_end_skip(eng: &Engine, n: NodeId, skip: Option<&FxHashSet<NodeId>>) -> NodeId {
     let (mut best, mut best_pos) = (n, eng.node(n).pos_hint());
     let mut todo = vec![n];
     while let Some(x) = todo.pop() {
@@ -105,7 +111,7 @@ pub(crate) fn subtree_end(eng: &Engine, n: NodeId) -> NodeId {
             let Some(cn) = eng.placed_node(c) else {
                 continue;
             };
-            if cn.state() == State::Gone {
+            if cn.state() == State::Gone || skip.is_some_and(|k| k.contains(&c)) {
                 continue;
             }
             if cn.pos_hint() > best_pos {
@@ -235,12 +241,17 @@ fn stranded(eng: &Engine, inner: &Inner, others: &[NodeId], by: NodeId, a: NodeI
 /// them all, as what others placed after `a` and its children, and what
 /// follows those, comes before it. `from` where none does.
 fn attached_end(eng: &Engine, inner: &Inner, a: NodeId, from: NodeId) -> NodeId {
+    attached_end_skip(eng, inner, a, from, None)
+}
+
+/// `attached_end` passing over the nodes of `skip` (`relocate`).
+fn attached_end_skip(eng: &Engine, inner: &Inner, a: NodeId, from: NodeId, skip: Option<&FxHashSet<NodeId>>) -> NodeId {
     let mut last = from;
     for (_, &x) in inner.nodes.range((Excluded(eng.node(from).pos_hint()), Unbounded)) {
         let Some(xn) = eng.placed_node(x) else {
             continue;
         };
-        if xn.state() == State::Gone {
+        if xn.state() == State::Gone || skip.is_some_and(|k| k.contains(&x)) {
             continue;
         }
         if slot_under(eng, x, a).is_none() {
@@ -252,6 +263,11 @@ fn attached_end(eng: &Engine, inner: &Inner, a: NodeId, from: NodeId) -> NodeId 
 }
 
 pub(crate) fn children_end(eng: &Engine, n: NodeId) -> (NodeId, Option<Pos>) {
+    children_end_skip(eng, n, None)
+}
+
+/// `children_end` passing over the nodes of `skip` (`relocate`).
+fn children_end_skip(eng: &Engine, n: NodeId, skip: Option<&FxHashSet<NodeId>>) -> (NodeId, Option<Pos>) {
     let (mut best, mut best_pos) = (n, eng.node(n).pos_hint());
     let mut first_follow: Option<Pos> = None;
     let Some(r) = eng.node(n).run_record() else {
@@ -261,14 +277,14 @@ pub(crate) fn children_end(eng: &Engine, n: NodeId) -> (NodeId, Option<Pos>) {
         let Some(cn) = eng.placed_node(c) else {
             continue;
         };
-        if cn.state() == State::Gone {
+        if cn.state() == State::Gone || skip.is_some_and(|k| k.contains(&c)) {
             continue;
         }
         if cn.follows.load(Ordering::Acquire) {
             first_follow = Some(first_follow.map_or(cn.pos_hint(), |p| p.min(cn.pos_hint())));
             continue;
         }
-        let e = subtree_end(eng, c);
+        let e = subtree_end_skip(eng, c, skip);
         let ep = eng.node(e).pos_hint();
         if ep > best_pos {
             (best, best_pos) = (e, ep);
@@ -573,7 +589,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let ww = Some(w);
     // (a run that published nothing new: the last record's products, its
     // placements kept as they are)
-    let keep_placed = p.unchanged && node.record().is_some();
+    // (one relocated since its last commit checks its placements where
+    // it stands now: they are the last run's again, matched and kept or
+    // moved as a run's are, `relocate`)
+    let moved = node.moved.swap(false, Ordering::AcqRel);
+    let keep_placed = p.unchanged && node.record().is_some() && !moved;
     if let Some(r) = node.record().filter(|_| p.unchanged) {
         p.defs.clone_from(&r.defs);
         p.contribs.clone_from(&r.contribs);
@@ -581,6 +601,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         p.effect = Some(r.effect);
         p.claim = r.claim;
         p.placements.clear();
+        if moved {
+            p.placements = replay_placements(eng, node.id, &r.placed);
+        }
         if p.state.is_none() {
             p.state = r.state;
         }
@@ -1034,23 +1057,30 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let mut prev: Option<NodeId> = None;
         // (whether each placement is a node made by this commit)
         let mut made_now: Vec<bool> = Vec::with_capacity(p.placements.len());
+        // (the placements relocated by this commit: put off to after the
+        // lock as one made anew is, they stand nowhere yet for the checks
+        // of those after them)
+        let mut moving: Vec<NodeId> = Vec::new();
         for (i, what) in p.placements.iter().enumerate() {
             if let Some(k) = kept_end.take() {
                 after = subtree_end(eng, k);
                 labelled = after;
             }
-            let after_pos = eng.node(labelled).pos_hint();
+            let after_pos = if moving.contains(&labelled) { Pos(0) } else { eng.node(labelled).pos_hint() };
             // (after a placement of this run: after the node it stands
             // for; one made by this commit is placed after it, not kept
             // where it stood before that node was)
             let resolved;
             let mut kept_i = kept[i];
+            // (a matched placement not standing where it is placed now:
+            // relocated, `relocate`)
+            let mut move_k: Option<NodeId> = None;
             let what = match what {
                 Placement::FollowAfterPlaced(j, op, a) => {
                     if made_now[*j]
                         && let Some(k) = kept_i.take()
                     {
-                        removed_kept.push(k);
+                        move_k = Some(k);
                     }
                     resolved = Placement::FollowAfter(placed[*j], *op, a.clone());
                     &resolved
@@ -1083,7 +1113,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                         let q = prev.expect("a placement before, placed elsewhere");
                         let f = eng
                             .placed_node(q)
-                            .filter(|qn| qn.state() != State::Gone && qn.pos_hint() != Pos(0))
+                            .filter(|qn| qn.state() != State::Gone && qn.pos_hint() != Pos(0) && !moving.contains(&qn.id))
                             .map_or(floor, |qn| eng.node(subtree_end(eng, qn.id)).pos_hint());
                         (q, 1, f)
                     }
@@ -1108,14 +1138,41 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     made_now[i] = false;
                     continue;
                 }
+                move_k = Some(k);
+            }
+            // (a relocation keeps the node, its record and its own
+            // placements (docs/spec-continuations.md §2.3); one across
+            // units, or of a node a claim holds or takes, is a remake: its
+            // place is its claimer's, among the claimer's siblings, and a
+            // node's unit is fixed at its making)
+            let movable = move_k.filter(|&k| {
+                let kn = eng.node(k);
+                let unit = match what {
+                    // (one made by this commit, not on the line yet: of the placer's unit)
+                    Placement::FollowAfter(at, ..) => Some(eng.placed_node(*at).map_or(node.unit, |a| a.unit)),
+                    _ => Some(node.unit),
+                };
+                !matches!(kn.state(), State::Gone | State::Inert | State::RunningInert)
+                    && kn.claimer().is_none()
+                    && unit == Some(kn.unit)
+                    && kn.pos_hint() != Pos(0)
+            });
+            if let Some(k) = move_k
+                && movable.is_none()
+            {
                 removed_kept.push(k);
             }
-            let (n, pred) = match fresh[i].take() {
-                Some(x) => x,
-                None => {
+            let (n, pred) = match (movable, fresh[i].take()) {
+                (Some(k), _) => {
+                    moving.push(k);
+                    (eng.node(k).clone(), None)
+                }
+                (None, Some((n, pred))) => (n, Some(pred)),
+                (None, None) => {
                     let (op, args) = what.key();
                     let id = NodeId::from_raw(eng.nodes.reserve() as u64);
-                    built(eng, node.unit, Some(node.id), op, args.to_vec(), id)
+                    let (n, pred) = built(eng, node.unit, Some(node.id), op, args.to_vec(), id);
+                    (n, Some(pred))
                 }
             };
             let id = n.id;
@@ -1155,6 +1212,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     && !stranded(eng, &inner, &others, node.id, node.id, 2, after_pos, bp)
             });
             let in_here = at.is_none()
+                && pred.is_some()
                 && in_seg
                 && seg.can_place(&inner)
                 && !Segment::needs_split(&inner)
@@ -1165,6 +1223,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 // (a continuation goes after what others placed after this
                 // node and its children, and what follows those)
                 let after = if slot == 2 && before.is_none() { attached_end(eng, &inner, node.id, after) } else { after };
+                let pred = pred.expect("a node made anew");
                 made.push(match before {
                     Some(b) => place_before(eng, seg, &mut inner, b, n, pred),
                     None => place(eng, seg, &mut inner, after, n, pred),
@@ -1302,7 +1361,26 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     // deferred placements: after a node elsewhere (one placed after this
     // node was removed or taken, which withdrew this record, goes with it)
+    let mut moves = 0u64;
     for (i, at, before, n, pred) in deferred {
+        // (a relocation: after what it is placed after now, if this run
+        // still stands)
+        let Some(pred) = pred else {
+            if node.state() == State::Gone || !node.record().is_some_and(|r| Arc::ptr_eq(&r, &rec)) {
+                continue;
+            }
+            let to = if matches!(p.placements[i], Placement::FollowAfter(..) | Placement::FollowAfterPlaced(..)) {
+                Target::AfterChildren(at)
+            } else if let Some(b) = before {
+                Target::Before(b, at)
+            } else {
+                Target::After(at)
+            };
+            if relocate(eng, ww, node.id, &n, to, &mut st) {
+                moves += 1;
+            }
+            continue;
+        };
         let n = if matches!(p.placements[i], Placement::FollowAfter(..) | Placement::FollowAfterPlaced(..)) {
             place_after_children(eng, at, n, pred)
         } else if let Some(b) = before {
@@ -1315,6 +1393,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             continue;
         }
         made.push(n);
+    }
+    if moves > 0 {
+        w.log.lock().placements_moved += moves;
     }
     // what this run no longer places goes once what replaces it stands: a
     // node made anew in place of a removed one has filed its definitions
@@ -2087,6 +2168,12 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
 /// label (its last where it is gone).
 pub(crate) fn reask_ranges(eng: &Engine, w: Option<&Worker>, f: Field, at: Pos, by: NodeId, st: &mut CommitStats) {
     let at = read::pos_of(eng, by).unwrap_or(at);
+    reask_ranges_at(eng, w, f, at, by, st);
+}
+
+/// `reask_ranges` at label `at` whatever `by`'s label is now (its old
+/// one, `relocate`).
+fn reask_ranges_at(eng: &Engine, w: Option<&Worker>, f: Field, at: Pos, by: NodeId, st: &mut CommitStats) {
     let readers = eng.ranges.holding(f, at);
     let mut memo = read::FoldMemo::new();
     for (k, r) in readers {
@@ -2854,7 +2941,8 @@ fn log_placed(eng: &Engine, node: &Node, how: &str, rel: NodeId) {
 /// A placement made outside its placer's segment, after the lock: its
 /// index, the node it goes after, the node it goes before if any (a
 /// continuation replacing another), the node.
-type Deferred = (usize, NodeId, Option<NodeId>, Arc<Node>, Predicted);
+/// (No prediction: a relocation of a node kept, `relocate`.)
+type Deferred = (usize, NodeId, Option<NodeId>, Arc<Node>, Option<Predicted>);
 
 /// `place`, before `before` (a node of the segment) instead of after one.
 fn place_before(eng: &Engine, seg: &Segment, inner: &mut Inner, before: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
@@ -2940,6 +3028,451 @@ fn place_at_end(eng: &Engine, at: NodeId, end: NodeId, node: Arc<Node>, pred: Pr
             Some(p) if p != at => place_after(eng, p, node, pred),
             _ => eng.push_node(node, pred),
         };
+    }
+}
+
+/// A run's placements as its last run made them (`placed`, by `me`):
+/// what a run of a relocated node that published nothing new
+/// (`Ctx::unchanged`) places, so its commit checks them where it stands
+/// now. Those gone or never placed are left out, as they were.
+fn replay_placements(eng: &Engine, me: NodeId, placed: &[NodeId]) -> Vec<Placement> {
+    let mut out: Vec<Placement> = Vec::with_capacity(placed.len());
+    let mut at: Vec<(NodeId, usize)> = Vec::with_capacity(placed.len());
+    for &c in placed {
+        let Some(cn) = eng.placed_node(c) else {
+            continue;
+        };
+        if cn.state() == State::Gone {
+            continue;
+        }
+        let (op, args) = (cn.op(), cn.args().to_vec());
+        let x = match (cn.slot(), cn.anchor()) {
+            (0, _) => Placement::Child(op, args),
+            (2, _) => Placement::Follow(op, args),
+            (_, Some(a)) => match at.iter().find(|x| x.0 == a) {
+                Some(&(_, j)) => Placement::FollowAfterPlaced(j, op, args),
+                None => Placement::FollowAfter(a, op, args),
+            },
+            (_, None) => Placement::FollowAfter(me, op, args),
+        };
+        at.push((c, out.len()));
+        out.push(x);
+    }
+    out
+}
+
+/// Where a relocated node goes (`relocate`), as a node made anew there
+/// would: after a node and its children (`Ctx::follow_after`), after a
+/// node and its placements, or before a node (a continuation's place it
+/// takes; after the second where that one is gone).
+pub(crate) enum Target {
+    AfterChildren(NodeId),
+    After(NodeId),
+    Before(NodeId, NodeId),
+}
+
+/// What a relocated node left at its old label (`lift`): the label and
+/// segment, the fields it defined and contributed to there, its brackets,
+/// others' reads anchored at it (filed again where it lands), the `next`
+/// and range readers bounded by it, and whether it had not committed.
+struct Left {
+    pos: Pos,
+    seg: SegId,
+    defs: Vec<Field>,
+    contribs: Vec<Field>,
+    brackets: Option<Brackets>,
+    readers: Vec<(Field, Reader)>,
+    stops: Vec<(Field, RangeKey, RangeReader)>,
+    hole: bool,
+}
+
+/// Relocates `k`, a placement of `placer`'s kept by its (op, args) whose
+/// place moved (docs/spec-continuations.md §2.3): its id, record and own
+/// placements are kept. The nodes that go: `k`, and those of its subtree
+/// that would stand before its new place (placed by it, or by its
+/// placements), after it in their order. Each is lifted from its old
+/// label (`lift`: its definitions, contributions, brackets taken out
+/// there), put at the new one with its record's definitions filed as
+/// predictions and its brackets (`land`), then the readers at the new
+/// place whose answer moved are re-asked, then those at the old place
+/// (whose walk stops at the new definitions where it reaches them: a
+/// reader past the new place sees the same), and it is marked to run
+/// again, its reads checked where it stands. A node whose claim holds a
+/// sibling that would stand before it gives its claim back first: its run
+/// takes it again from the new place. False when it stayed (its place
+/// gone with its placer, or the place inside its own subtree).
+pub(crate) fn relocate(eng: &Engine, w: Option<&Worker>, placer: NodeId, k: &Arc<Node>, to: Target, st: &mut CommitStats) -> bool {
+    // its subtree, as it stands
+    let mut sub: Vec<NodeId> = Vec::new();
+    let mut skip: FxHashSet<NodeId> = FxHashSet::default();
+    skip.insert(k.id);
+    let mut todo = vec![k.id];
+    while let Some(x) = todo.pop() {
+        let Some(r) = eng.node(x).run_record() else {
+            continue;
+        };
+        for &c in &r.placed {
+            let Some(cn) = eng.placed_node(c) else {
+                continue;
+            };
+            if cn.state() == State::Gone || cn.pos_hint() == Pos(0) || !skip.insert(c) {
+                continue;
+            }
+            sub.push(c);
+            todo.push(c);
+        }
+    }
+    // where it goes: after `end`, or before `before`
+    let (end, before) = match to {
+        Target::AfterChildren(at) => (children_end_skip(eng, at, Some(&skip)).0, None),
+        Target::After(at) => (subtree_end_skip(eng, at, Some(&skip)), None),
+        Target::Before(b, at) => match eng.placed_node(b) {
+            Some(bn) if bn.state() != State::Gone && bn.pos_hint() != Pos(0) && !skip.contains(&b) => (at, Some(b)),
+            _ => (subtree_end_skip(eng, at, Some(&skip)), None),
+        },
+    };
+    if skip.contains(&end) || eng.placed_node(end).is_none() {
+        return false;
+    }
+    let lim = before.map_or_else(|| eng.node(end).pos_hint(), |b| eng.node(b).pos_hint());
+    let mut movers: Vec<Arc<Node>> = vec![k.clone()];
+    let mut rest: Vec<Arc<Node>> = sub.iter().map(|&c| eng.node(c).clone()).filter(|c| c.pos_hint() < lim).collect();
+    rest.sort_by_key(|c| c.pos_hint());
+    movers.extend(rest);
+    // (a claim holding a sibling it would stand after: given back)
+    for m in &movers {
+        let held_end = m.claim_end.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw);
+        if m.run_record().is_some_and(|r| r.claim > 0)
+            && held_end.is_some_and(|h| eng.placed_node(h).is_some_and(|hn| hn.pos_hint() < lim))
+        {
+            apply_claim(eng, w, m, 0);
+        }
+    }
+    let (lo, mut hi) = (k.pos_hint().min(lim), k.pos_hint().max(lim));
+    let mut prev = end;
+    let mut first = true;
+    let mut landed: Vec<Arc<Node>> = Vec::with_capacity(movers.len());
+    for m in movers {
+        let Some(left) = lift(eng, &m) else {
+            continue;
+        };
+        hi = hi.max(left.pos);
+        let parent = if first && m.slot() == 2 && before.is_none() { m.parent } else { None };
+        let place = land(eng, &m, prev, if first { before } else { None }, parent, &skip, left.hole);
+        let Some((npos, nseg, defs, b)) = place else {
+            // (its place gone with its placer: it goes with it, its old
+            // place's readers asked again)
+            m.set_state(State::Gone);
+            *m.last.lock() = None;
+            lifted_walks(eng, w, &m, left, st);
+            unfile_placements(eng, w, &m);
+            continue;
+        };
+        first = false;
+        prev = m.id;
+        // the readers anchored at it, filed where it stands now
+        let mut first_of: Vec<Field> = Vec::new();
+        {
+            let mut spare: Vec<Reader> = Vec::new();
+            if let Some((seg, mut inner)) = own_write(eng, &m) {
+                for (f, r) in &left.readers {
+                    if file_reader(eng, &mut inner, *f, r.clone(), &mut spare) {
+                        first_of.push(*f);
+                    }
+                }
+                drop(inner);
+                for f in first_of {
+                    eng.readers.add(f, seg.lo, seg.id);
+                }
+            }
+        }
+        // the new place first: a walk from the old label stops at it
+        for d in &defs {
+            if let Some(c) = d.rel {
+                settle_rel(eng, d.f, m.id, c);
+            }
+        }
+        for d in &defs {
+            reask(eng, w, d.f, npos, nseg, m.id, st);
+        }
+        if b.closes > 0 || b.opens > 0 {
+            reask_after_effect(eng, w, &m, npos, Brackets::default(), b, st);
+        }
+        // then the old place
+        lifted_walks(eng, w, &m, left, st);
+        hi = hi.max(npos);
+        landed.push(m);
+    }
+    if landed.is_empty() {
+        return false;
+    }
+    // (range readers bounded by a node that moved now reach anywhere
+    // between its two labels)
+    eng.ranges.widen_over(Pos(lo.0.saturating_sub(1)), Pos(hi.0.saturating_add(1)));
+    // each runs again where it stands (the last first: a worker's deque
+    // gives the newest first)
+    for m in landed.iter().rev() {
+        m.moved.store(true, Ordering::Release);
+        // (a parked state rests on reads at the old place)
+        if m.record().is_some_and(|r| r.state.is_some()) {
+            m.state_stale.store(true, Ordering::Release);
+        }
+        let wake = Wake {
+            by: Some(placer),
+            cause: Cause::Created { by: Some(placer) },
+            at_ns: eng.now_ns(),
+        };
+        if m.state() == State::Clean && m.cas_state(State::Clean, State::Dirty) {
+            enqueue(eng, w, m, wake);
+        } else {
+            mark_dirty(eng, w, m, wake);
+        }
+    }
+    if crate::obs::enabled() && std::env::var_os("PHITEX_WAKE_LOG").is_some() {
+        eprintln!(
+            "relocated: node {} op {:?} by {} with {} of its subtree, after {} (at {:?})",
+            k.id.raw(),
+            k.op(),
+            placer.raw(),
+            landed.len() - 1,
+            end.raw(),
+            k.pos_hint().0
+        );
+    }
+    true
+}
+
+/// The walks from a relocated node's old label (`relocate`): the readers
+/// anchored at it there (filed again where it landed), those after its
+/// brackets, definitions and contributions there, the `next`s and ranges
+/// it bounded, the walks that stopped at it while it had not committed.
+fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, left: Left, st: &mut CommitStats) {
+    for (f, r) in &left.readers {
+        reask_reader(eng, w, *f, r, Some(m.id), st);
+    }
+    if let Some(old) = left.brackets {
+        reask_after_effect_at(eng, w, m, left.pos, old, Brackets::default(), st);
+    }
+    for &f in &left.defs {
+        reask_from(eng, w, f, left.pos, left.seg, None, Some(m.op()), 0, st);
+    }
+    for &f in &left.contribs {
+        reask_ranges_at(eng, w, f, left.pos, m.id, st);
+    }
+    reask_stops(eng, w, left.stops, m.id, st);
+    if left.hole {
+        let fs = std::mem::take(&mut *m.stopped.lock());
+        for (f, level) in fs {
+            reask_from(eng, w, f, left.pos, left.seg, None, Some(m.op()), level, st);
+        }
+    }
+}
+
+/// Takes a node off its label for `relocate`, under its segment's lock:
+/// out of the segment's nodes and its operation's list, its definitions,
+/// contributions and brackets taken out, others' readers anchored at it
+/// taken (its own go: it runs again), the `next` readers stopped at it
+/// and the range readers bounded by it taken. Its label is 0 until it
+/// lands (`land`): no other placement goes after it meanwhile. Its record
+/// stays.
+fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
+    let (seg, mut inner) = own_write(eng, m)?;
+    let pos = m.pos_hint();
+    let hole = m.is_hole();
+    let rec = m.record();
+    let mut fs: Vec<Field> = m.anchored.lock().clone();
+    if let Some(r) = &rec {
+        fs.extend(r.reads.iter().filter_map(|x| match x.kind {
+            ReadKind::Field { f, at: Anchor::Me } => Some(f),
+            _ => None,
+        }));
+    }
+    fs.sort_unstable();
+    fs.dedup();
+    let mut readers: Vec<(Field, Reader)> = Vec::new();
+    for f in fs {
+        if let Some(rs) = inner.readers.get_mut(&f) {
+            rs.retain(|r| {
+                if r.anchor != m.id {
+                    return true;
+                }
+                if r.node != m.id && live(eng, r.node, r.serial) {
+                    readers.push((f, r.clone()));
+                }
+                false
+            });
+        }
+    }
+    inner.nodes.remove(&pos);
+    if hole {
+        inner.holes = inner.holes.saturating_sub(1);
+    }
+    if let Some(v) = inner.by_op.get_mut(&m.op()) {
+        v.retain(|&n| n != m.id);
+    }
+    let brackets = if m.has_brackets.load(Ordering::Acquire) {
+        file_brackets(eng, &mut inner, m, pos, Brackets::default())
+    } else {
+        None
+    };
+    let mut stops = take_stops(&mut inner, m.id);
+    stops.append(&mut std::mem::take(&mut *m.bounded.lock()));
+    let mut defs = Vec::new();
+    let mut contribs = Vec::new();
+    let mut ix = IndexOps::default();
+    if let Some(r) = &rec {
+        for d in &r.defs {
+            if let Some(mp) = inner.defs.get_mut(&d.f)
+                && mp.get(&pos).is_some_and(|e| e.by == m.id)
+            {
+                mp.remove(&pos);
+                defs.push(d.f);
+                if mp.is_empty() {
+                    inner.defs.remove(&d.f);
+                    ix.defs_remove.push(d.f);
+                }
+            }
+        }
+        for (f, _) in &r.contribs {
+            if let Some(mp) = inner.contribs.get_mut(f)
+                && mp.remove(&pos).is_some()
+            {
+                contribs.push(*f);
+                if mp.is_empty() {
+                    ix.contribs_remove.push(*f);
+                }
+                inner.resum(eng, *f);
+            }
+        }
+    }
+    m.pos.store(0, Ordering::Release);
+    for &f in defs.iter().chain(&contribs) {
+        eng.bump(f);
+    }
+    ix.apply(eng, seg, &inner);
+    let seg_id = seg.id;
+    drop(inner);
+    if eng.op(m.op()).read_back() {
+        for &f in &defs {
+            eng.ranges.mark_read_back(f);
+        }
+    }
+    Some(Left {
+        pos,
+        seg: seg_id,
+        defs,
+        contribs,
+        brackets,
+        readers,
+        stops,
+        hole,
+    })
+}
+
+/// Puts a lifted node back on the line for `relocate`: before `before`,
+/// or after `after` (a continuation of `attach`'s after what stands under
+/// it there, `attached_end`, passing over `skip`), under that node's
+/// segment's lock; its record's definitions filed as predictions there
+/// (its record stays: its run diffs against it) and its brackets, its
+/// last run's. Its label and segment, the definitions filed, the
+/// brackets; None when the node it goes by is gone.
+#[allow(clippy::too_many_arguments)]
+fn land(
+    eng: &Engine,
+    m: &Arc<Node>,
+    after: NodeId,
+    before: Option<NodeId>,
+    attach: Option<NodeId>,
+    skip: &FxHashSet<NodeId>,
+    hole: bool,
+) -> Option<(Pos, SegId, Vec<DefRec>, Brackets)> {
+    let by = eng.node(before.unwrap_or(after));
+    let rec = m.record();
+    let defs: Vec<DefRec> = rec.as_ref().map(|r| r.defs.clone()).unwrap_or_default();
+    let b = match rec.as_ref().filter(|r| !r.provisional) {
+        Some(r) => r.effect.brackets(),
+        None => {
+            let (b, pending) = unpack_effect(m.effect.load(Ordering::Acquire));
+            if pending { Brackets::default() } else { b }
+        }
+    };
+    let mut tries = 0;
+    loop {
+        let (seg, mut inner) = own_write(eng, by)?;
+        if Segment::needs_split(&inner) {
+            let sid = SegId(u32::try_from(eng.segs.reserve()).expect("segment ids"));
+            seg.split(&mut inner, eng, sid);
+            continue;
+        }
+        if !seg.has_room(&inner, 1) && (tries < crate::order::ROOM_TRIES || !seg.can_place(&inner)) {
+            drop(inner);
+            tries += 1;
+            assert!(tries <= 2 * crate::order::ROOM_TRIES, "no room after rebalances");
+            eng.order.rebalance(eng, seg.id, 1);
+            continue;
+        }
+        let p = match before {
+            Some(bf) => match seg.gap_before(&inner, eng.node(bf).pos_hint()) {
+                Some(p) => p,
+                None => {
+                    seg.relabel(&mut inner, eng);
+                    seg.gap_before(&inner, eng.node(bf).pos_hint()).expect("a gap after a relabel")
+                }
+            },
+            None => {
+                let end = attach.map_or(after, |a| attached_end_skip(eng, &inner, a, after, Some(skip)));
+                match Segment::gap_after(&inner, eng.node(end).pos_hint()) {
+                    Some(p) => p,
+                    None => {
+                        seg.relabel(&mut inner, eng);
+                        Segment::gap_after(&inner, eng.node(end).pos_hint()).expect("a gap after a relabel")
+                    }
+                }
+            }
+        };
+        m.seg.store(seg.id.0, Ordering::Release);
+        m.pos.store(p.0, Ordering::Release);
+        inner.nodes.insert(p, m.id);
+        if hole {
+            inner.holes += 1;
+        }
+        inner.by_op.entry(m.op()).or_default().push(m.id);
+        if b.closes > 0 || b.opens > 0 {
+            file_brackets(eng, &mut inner, m, p, b);
+        }
+        for d in &defs {
+            let mp = inner.defs.entry(d.f).or_default();
+            let first = mp.is_empty();
+            mp.insert(
+                p,
+                Def {
+                    depth: 0,
+                    value: d.value,
+                    by: m.id,
+                    rel: d.rel,
+                    provisional: true,
+                    multi: false,
+                },
+            );
+            if first {
+                eng.defs.add(d.f, seg.lo, seg.id);
+            }
+            eng.bump(d.f);
+        }
+        log_placed(eng, m, "moved after", after);
+        return Some((p, seg.id, defs, b));
+    }
+}
+
+/// The placements of a node that goes (`relocate` with nowhere to go),
+/// removed.
+fn unfile_placements(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>) {
+    if let Some(r) = m.record() {
+        for &c in &r.placed {
+            if let Some(cn) = eng.placed_node(c) {
+                unfile(eng, w, cn);
+            }
+        }
     }
 }
 
@@ -3073,6 +3606,20 @@ pub(crate) fn reask_after_effect(
     st: &mut CommitStats,
 ) {
     let at = read::pos_of(eng, by.id).unwrap_or(at);
+    reask_after_effect_at(eng, w, by, at, old, new, st);
+}
+
+/// `reask_after_effect` from label `at` whatever `by`'s label is now
+/// (its old one, `relocate`).
+fn reask_after_effect_at(
+    eng: &Engine,
+    w: Option<&Worker>,
+    by: &Node,
+    at: Pos,
+    old: Brackets,
+    new: Brackets,
+    st: &mut CommitStats,
+) {
     let d0 = i64::from(read::depth_at(eng, at));
     let (co, cn) = ((d0 - i64::from(old.closes)).max(0), (d0 - i64::from(new.closes)).max(0));
     let (mut a, mut b) = (co + i64::from(old.opens), cn + i64::from(new.opens));
