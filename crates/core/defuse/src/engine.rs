@@ -148,6 +148,10 @@ pub struct Engine {
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
     pub(crate) layout_gen: AtomicU64,
+    /// A panic outside a run cut a commit or a walk short
+    /// (`sched::work_caught`): the next evaluation checks the line first
+    /// (`Engine::repair_line`).
+    pub(crate) repair: std::sync::atomic::AtomicBool,
 }
 
 /// The buckets of [`Engine::field_epochs`].
@@ -196,6 +200,7 @@ impl Engine {
             depth_field,
             has_finals: std::sync::atomic::AtomicBool::new(false),
             layout_gen: AtomicU64::new(0),
+            repair: std::sync::atomic::AtomicBool::new(false),
             values,
             ops: Table::new(),
             units: Table::new(),
@@ -1065,6 +1070,9 @@ impl Engine {
         let t0 = Instant::now();
         let n = threads.max(1);
         let mut all: Vec<crate::sched::Worker> = Vec::new();
+        if self.repair.swap(false, Ordering::AcqRel) {
+            self.repair_line();
+        }
         loop {
             let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
             let (pool, workers) = Pool::new(n, epoch, self.limits());
@@ -1091,7 +1099,15 @@ impl Engine {
             }
             if let Some((node, _, op, message)) = panicked
                 .iter()
-                .find(|(x, reads, _, _)| reads.iter().all(|rd| read::answer(self, self.node(*x), &rd.kind, rd.path) == rd.seen))
+                .find(|(x, reads, _, _)| {
+                    // (a read that panics when answered again, a client's
+                    // fold broken since: not one that holds, so the node runs
+                    // again and its run says)
+                    reads.iter().all(|rd| {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read::answer(self, self.node(*x), &rd.kind, rd.path) == rd.seen))
+                            .unwrap_or(false)
+                    })
+                })
             {
                 return Err(EvalError::OpPanicked {
                     node: *node,
@@ -1179,6 +1195,66 @@ impl Engine {
         rep.times.wall_ns = ns(t0);
         *self.last_report.lock() = Some(rep.clone());
         Ok(rep)
+    }
+
+    /// After a panic outside a run (a client's monoid, projection or
+    /// hook at a commit or a walk): what the commit cut short left is put
+    /// right before the next evaluation runs anything. Its products stand
+    /// filed, but the walks that re-ask their readers, the queueing of
+    /// its placements and the removal of those it no longer places may
+    /// not have happened. Every node not run since it was made dirty is
+    /// pending again, every reader whose answer moved is marked, every
+    /// relation is computed from its input again, and every node whose
+    /// placer no longer holds it is removed. A look at every node and
+    /// read, once per panic; a check that panics again marks its reader.
+    fn repair_line(&self) {
+        let wake = || Wake {
+            by: None,
+            cause: Cause::Structure,
+            at_ns: self.now_ns(),
+        };
+        let mut stray = Vec::new();
+        for i in 0..self.nodes.len() {
+            let Some(node) = self.nodes.get(i) else {
+                continue;
+            };
+            match node.state() {
+                State::Gone | State::Inert | State::RunningInert => continue,
+                State::Dirty | State::Running | State::RunningDirty => {
+                    node.set_state(State::Dirty);
+                    self.pend(node.id);
+                }
+                State::Clean => {
+                    let Some(r) = node.run_record() else {
+                        continue;
+                    };
+                    let moved = r.reads.iter().any(|rd| {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| answer(self, node, &rd.kind, rd.path) != rd.seen))
+                            .unwrap_or(true)
+                    });
+                    if moved {
+                        mark_dirty(self, None, node, wake());
+                    }
+                    for d in &r.defs {
+                        if let Some(c) = d.rel
+                            && commit::settle_rel(self, d.f, node.id, c)
+                        {
+                            let mut st = CommitStats::default();
+                            commit::reask(self, None, d.f, node.pos_hint(), node.seg_hint(), node.id, &mut st);
+                            self.note_stats(None, &st);
+                        }
+                    }
+                }
+            }
+            if let Some(p) = node.parent
+                && !self.node(p).record().is_some_and(|r| r.placed.contains(&node.id))
+            {
+                stray.push(node.clone());
+            }
+        }
+        for n in stray {
+            unfile(self, None, &n);
+        }
     }
 
     pub fn is_live(&self, node: NodeId) -> bool {

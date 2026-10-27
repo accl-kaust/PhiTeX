@@ -848,6 +848,8 @@ fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), E
             .map(|s| (*s).to_owned())
             .or_else(|| p.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "panic".to_owned());
+        // (a commit cut short: the next evaluation checks the line first)
+        eng.repair.store(true, Ordering::Release);
         give_back(eng, eng.node(n));
         Err(EvalError::OpPanicked {
             node: n,

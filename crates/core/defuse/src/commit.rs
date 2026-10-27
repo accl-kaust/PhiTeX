@@ -1247,7 +1247,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // as predicted, and the readers after it whose answer stays are not
     // asked again
     for id in removed {
-        unfile(eng, ww, eng.node(id));
+        // (one a commit cut short never placed is not on the line)
+        if let Some(n) = eng.placed_node(id) {
+            unfile(eng, ww, n);
+        }
     }
     if p.claim > 0 || last.as_ref().is_some_and(|r| r.claim > 0) {
         apply_claim(eng, ww, node, p.claim);
@@ -2775,7 +2778,10 @@ pub(crate) fn match_placements(eng: &Engine, last: &[NodeId], new: &[Placement])
     }
     let mut pool: FxHashMap<(OpId, Vec<ValueId>), VecDeque<NodeId>> = FxHashMap::default();
     for &n in last {
-        let nd = eng.node(n);
+        // (one a commit cut short never placed: not there to keep)
+        let Some(nd) = eng.placed_node(n) else {
+            continue;
+        };
         if nd.state() == State::Gone {
             continue;
         }

@@ -182,3 +182,150 @@ fn a_continuation_stands_where_it_would_in_one_segment() {
     let many = continuation_after_lines(300);
     assert_eq!(one, many, "the same order in one segment ({one}) and across many ({many})");
 }
+
+/// Sums, and panics while its flag is up: a client's fold that breaks
+/// for a while (a bug fixed by the next edit).
+struct Flaky(Arc<std::sync::atomic::AtomicBool>);
+
+impl phitex_defuse::Monoid for Flaky {
+    fn empty(&self, v: &phitex_defuse::Values) -> ValueId {
+        v.int(0)
+    }
+
+    fn combine(&self, v: &phitex_defuse::Values, a: ValueId, b: ValueId) -> ValueId {
+        assert!(!self.0.load(std::sync::atomic::Ordering::Relaxed), "the fold is broken");
+        v.int(v.as_int(a).unwrap_or(0) + v.as_int(b).unwrap_or(0))
+    }
+}
+
+/// `[s, x]`: contributes x to s.
+struct Contrib;
+
+impl Operation for Contrib {
+    fn name(&self) -> &'static str {
+        "contrib"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.contribute(phitex_defuse::Field(cx.args()[0]), cx.args()[1]);
+        Ok(cx.args()[1])
+    }
+}
+
+/// `[s]`: the fold of s from the unit's start to it.
+struct FoldAll;
+
+impl Operation for FoldAll {
+    fn name(&self) -> &'static str {
+        "fold_all"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.fold(phitex_defuse::Field(cx.args()[0]), None, None)
+    }
+}
+
+/// `[s]`: reads "t"; contributes it to s and places a `Def` of it.
+struct PlaceT(OpId);
+
+impl Operation for PlaceT {
+    fn name(&self) -> &'static str {
+        "place_t"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let t = cx.read(v.field("t"))?.unwrap_or(v.int(0));
+        cx.contribute(phitex_defuse::Field(cx.args()[0]), t);
+        cx.child(self.0, vec![t]);
+        Ok(t)
+    }
+}
+
+#[test]
+fn a_commit_a_panic_cut_short_is_finished_by_the_next_evaluation() {
+    // A client's fold panics where a commit re-asks the readers of the
+    // contribution it changed, after the commit has filed its products
+    // and placed a child: the evaluation ends with the error. Once the
+    // fold works again, the next evaluation ran the node again, found its
+    // products as filed and asked nobody: the child it placed never ran
+    // and the fold after it kept the old sum.
+    let e = Engine::new();
+    let v = e.values();
+    let broken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let s = v.field("s");
+    e.declare_accumulator(s, Arc::new(Flaky(broken.clone())));
+    let def = e.register(Arc::new(Def));
+    let def_t = e.register(Arc::new(DefT));
+    let contrib = e.register(Arc::new(Contrib));
+    let fold = e.register(Arc::new(FoldAll));
+    let place = e.register(Arc::new(PlaceT(def)));
+    let u = e.new_unit();
+    let t = e.push(u, def_t, vec![v.int(0)]);
+    e.push(u, contrib, vec![s.0, v.int(1)]);
+    let a = e.push(u, place, vec![s.0]);
+    let f = e.push(u, fold, vec![s.0]);
+    e.evaluate(1).unwrap();
+    assert_eq!(e.output(f).and_then(|x| v.as_int(x)), Some(1));
+    broken.store(true, std::sync::atomic::Ordering::Relaxed);
+    e.replace(t, def_t, vec![v.int(5)]);
+    assert!(e.evaluate(1).is_err(), "the fold panics");
+    broken.store(false, std::sync::atomic::Ordering::Relaxed);
+    let r = e.evaluate(1).unwrap();
+    assert!(e.check_invariants().is_empty(), "{:?} {r:?}", e.check_invariants());
+    assert_eq!(e.output(f).and_then(|x| v.as_int(x)), Some(6), "the fold has the new contribution");
+    let k = e.children(a);
+    assert_eq!(k.len(), 1);
+    assert_eq!(e.output(k[0]).and_then(|x| v.as_int(x)), Some(5), "the child placed ran");
+}
+
+/// `[s]`: folds s, then panics: an operation broken on its input.
+struct FoldThenPanic;
+
+impl Operation for FoldThenPanic {
+    fn name(&self) -> &'static str {
+        "fold_then_panic"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.fold(phitex_defuse::Field(cx.args()[0]), None, None)?;
+        panic!("broken on its input");
+    }
+}
+
+/// `[]`: breaks the fold (a client's state a run changes).
+struct Breaks(Arc<std::sync::atomic::AtomicBool>);
+
+impl Operation for Breaks {
+    fn name(&self) -> &'static str {
+        "breaks"
+    }
+
+    fn run(&self, _cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn a_fold_that_panics_when_a_failed_run_is_judged_is_an_error_not_a_panic() {
+    // A run panicked on its input; at the end of the evaluation its reads
+    // are answered again to tell a failure from a stale input, on the
+    // caller's thread: a fold among them that panics now went up through
+    // `evaluate` as a panic, where the caller is promised an `EvalError`.
+    let e = Engine::new();
+    let v = e.values();
+    let broken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let s = v.field("s");
+    e.declare_accumulator(s, Arc::new(Flaky(broken.clone())));
+    let contrib = e.register(Arc::new(Contrib));
+    let fp = e.register(Arc::new(FoldThenPanic));
+    let br = e.register(Arc::new(Breaks(broken.clone())));
+    let u = e.new_unit();
+    e.push(u, contrib, vec![s.0, v.int(1)]);
+    e.push(u, contrib, vec![s.0, v.int(2)]);
+    e.push(u, fp, vec![s.0]);
+    e.push(u, br, vec![]);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| e.evaluate(1).is_err()));
+    assert_eq!(r.ok(), Some(true), "the evaluation returns an error");
+}
