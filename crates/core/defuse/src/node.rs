@@ -319,6 +319,10 @@ pub(crate) struct RunRecord {
     pub(crate) effect: Effect,
     /// Filed before any run: predictions, replaced by the first commit.
     pub(crate) provisional: bool,
+    /// What the run stored for its next run (`Ctx::park`): a long loop's
+    /// state at the point it stopped, read back by `Ctx::resumed`. Not a
+    /// read: no record, no re-ask. A root at a collection.
+    pub(crate) state: Option<ValueId>,
 }
 
 impl RunRecord {
@@ -331,6 +335,7 @@ impl RunRecord {
             reads: Vec::new(),
             placed: Vec::new(),
             claim: 0,
+            state: None,
             effect: Effect::None,
             provisional: true,
         }
@@ -454,4 +459,6 @@ pub(crate) struct Product {
     /// record's definitions, contributions, placements and output stand,
     /// with this run's reads.
     pub(crate) unchanged: bool,
+    /// `Ctx::park`: the state the next run resumes from.
+    pub(crate) state: Option<ValueId>,
 }

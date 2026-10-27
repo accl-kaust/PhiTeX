@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{At, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Step, Stop};
+use crate::api::{Cause, At, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Step, Stop};
 use crate::engine::Engine;
 use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, ReadRec, RunRecord, State};
 use crate::order::Pos;
@@ -70,6 +70,7 @@ impl<'a> Ctx<'a> {
                 effect: None,
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
                 unchanged: false,
+                state: None,
             },
             views: Vec::new(),
             ep: u64::MAX,
@@ -505,6 +506,40 @@ impl<'a> Ctx<'a> {
     /// is nothing to keep (a prediction stands as made).
     pub fn unchanged(&mut self) {
         self.product.unchanged = true;
+    }
+
+    /// Stores `state` with this run's record for my next run (`resumed`):
+    /// a long loop (the page builder over the whole text) that meets a
+    /// hole commits what it has so far, definitions and placements, and
+    /// goes on from here when the hole fills, instead of from its start.
+    /// The state is a value of mine, no read: nothing re-asks me for it.
+    pub fn park(&mut self, state: ValueId) {
+        self.product.state = Some(state);
+    }
+
+    /// What my last run stored with `park`, if it did; `None` on a first
+    /// run, after a run that stored nothing, and after an edit of my text.
+    pub fn resumed(&self) -> Option<ValueId> {
+        if matches!(self.woken_by(), Some(Cause::Edited)) {
+            return None;
+        }
+        self.last.as_ref().and_then(|r| r.state)
+    }
+
+    /// Whether node `a` stands before node `b` on the line (both alive). A
+    /// loop resumed after a contribution moved asks whether the mover lies
+    /// behind its cursor (then it goes back to the checkpoint before it)
+    /// or ahead (then it goes on). Not a read.
+    pub fn before(&self, a: NodeId, b: NodeId) -> bool {
+        self.eng.node(a).pos_hint() < self.eng.node(b).pos_hint()
+    }
+
+    /// Why this run was asked for: the cause that marked me dirty (a
+    /// definition or contribution I read that moved, with its site; my
+    /// creation; an edit). A loop resumes from the checkpoint before the
+    /// site. `None` where the engine recorded none.
+    pub fn woken_by(&self) -> Option<Cause> {
+        self.me.woke.lock().as_ref().map(|w| w.cause.clone())
     }
 
     /// Forgets my reads of `f` in this run: the commit records none.

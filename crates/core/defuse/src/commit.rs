@@ -581,6 +581,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         p.effect = Some(r.effect);
         p.claim = r.claim;
         p.placements.clear();
+        if p.state.is_none() {
+            p.state = r.state;
+        }
     }
     for d in &mut p.defs {
         if let Some(c) = d.rel {
@@ -660,6 +663,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         claim: p.claim,
         effect: if brackets == Brackets::default() { Effect::None } else { Effect::Scope(brackets) },
         provisional: false,
+        state: p.state,
     });
     let mut spare_readers: Vec<Reader> = Vec::with_capacity(4);
     let fields_of = |r: &Option<Arc<RunRecord>>| -> (Vec<Field>, Vec<Field>) {
