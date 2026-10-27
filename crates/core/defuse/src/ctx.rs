@@ -607,6 +607,12 @@ impl<'a> Ctx<'a> {
         self.eng.node(a).pos_hint() < self.eng.node(b).pos_hint()
     }
 
+    /// Whether node `n` still stands (placed, not removed): a run about
+    /// to place a node after `n` (`follow_after`) asks first. Not a read.
+    pub fn alive(&self, n: NodeId) -> bool {
+        self.eng.placed_node(n).is_some_and(|x| x.state() != State::Gone)
+    }
+
     /// Why this run was asked for: the cause that marked me dirty (a
     /// definition or contribution I read that moved, with its site; my
     /// creation; an edit). A loop resumes from the checkpoint before the

@@ -588,6 +588,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (a run that went on from its last run's state rests on that run's
     // reads: kept, but those it read again)
     let own_reads = p.reads.len();
+    let mut gone_kept: Vec<(Field, NodeId)> = Vec::new();
     if p.resumed.get()
         && let Some(r) = node.run_record()
     {
@@ -595,10 +596,23 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // (not the next contribution after a node gone: no run reads from
         // it again, and its going moved the read from the node before it,
         // which carries the change; kept, it would move at every commit)
+        // (nor a read at a node gone: it asks the run again where that
+        // node stood, once, below, and is not kept)
+        let is_gone = |n: NodeId| eng.placed_node(n).is_none_or(|n| n.state() == State::Gone);
         let gone = |x: &crate::node::ReadRec| match x.kind {
-            ReadKind::Next { after: Some(n), .. } => eng.placed_node(n).is_none_or(|n| n.state() == State::Gone),
+            ReadKind::Next { after: Some(n), .. } => is_gone(n),
+            ReadKind::Field { at: Anchor::Before(n) | Anchor::AfterOwn(n), .. } => is_gone(n),
             _ => false,
         };
+        for x in &r.reads {
+            if let ReadKind::Field { f, at: Anchor::Before(n) | Anchor::AfterOwn(n) } = x.kind
+                && x.seen.is_some()
+                && is_gone(n)
+                && !again.contains(&(x.kind.clone(), x.path))
+            {
+                gone_kept.push((f, n));
+            }
+        }
         p.reads.extend(r.reads.iter().filter(|x| !again.contains(&(x.kind.clone(), x.path)) && !gone(x)).cloned());
     }
     for d in &mut p.defs {
@@ -1238,7 +1252,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // 2. reads anchored elsewhere
     // (a node read at that is gone by now: a read that found a value there
     // finds none, and no removal will ask it again)
-    let mut anchor_gone = false;
+    let mut anchor_gone: Vec<(Field, NodeId)> = gone_kept;
     for (f, mut r, at) in other_reads {
         if let Anchor::End(u) = at {
             let Some(last_node) = eng.unit_last_node(u) else {
@@ -1256,7 +1270,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 eng.readers.add(f, seg.lo, seg.id);
             }
         } else if r.seen.is_some() {
-            anchor_gone = true;
+            anchor_gone.push((f, r.anchor));
         }
     }
     file_ranges(eng, ww, range_reads, node.id, &mut st);
@@ -1474,7 +1488,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
     }
     node.state_stale.store(stale, Ordering::Release);
-    if causes.is_empty() && anchor_gone {
+    // (a read at a node gone: for a run that parks a state, the change
+    // lies where that node stood, so the next run, resuming from it, goes
+    // back before it; the read, which nothing asks again, is not kept by
+    // a run after. For any other, the structure moved)
+    if p.state.is_some() {
+        for (f, n) in anchor_gone {
+            causes.push(Cause::Changed { field: f, site: Some(n) });
+        }
+    } else if causes.is_empty() && !anchor_gone.is_empty() {
         causes.push(Cause::Structure);
     }
     for cause in causes {

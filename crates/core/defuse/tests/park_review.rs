@@ -419,3 +419,83 @@ fn a_kept_read_from_a_node_gone_is_not_kept() {
     assert!(!e.debug_reads(l).contains(&from_c), "no read from the node gone: {}", e.debug_reads(l));
     assert!(e.check_invariants().is_empty());
 }
+
+/// `[s, a]`: folds the contributions to s, parked as `[cursor, sum]`;
+/// woken by a range it resumes from its state, else starts over, then
+/// reading "t" where node `a` stands (`At::Before`) while `a` stands.
+/// Keeps every cause it was woken by.
+struct AnchorWalk(std::sync::Mutex<Vec<Option<Cause>>>);
+
+impl Operation for AnchorWalk {
+    fn name(&self) -> &'static str {
+        "anchor_walk"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let s = Field(cx.args()[0]);
+        let a = NodeId::from_raw(v.as_int(cx.args()[1]).unwrap_or(0).unsigned_abs());
+        self.0.lock().unwrap().push(cx.woken_by());
+        let state = match (cx.resumed(), cx.woken_by()) {
+            (Some(st), Some(Cause::Range { .. })) => Some(st),
+            _ => None,
+        };
+        let (mut cur, mut sum) = state.map_or((None, 0), |st| {
+            let parts = v.with_list(st, <[ValueId]>::to_vec).unwrap_or_default();
+            let c = v.as_int(parts[0]).unwrap_or(-1);
+            (if c < 0 { None } else { Some(NodeId::from_raw(c.unsigned_abs())) }, v.as_int(parts[1]).unwrap_or(0))
+        });
+        if state.is_none() && cx.alive(a) {
+            let _ = cx.read_at(v.field("t"), phitex_defuse::At::Before(a))?;
+        }
+        while let Some((n, x)) = cx.next_contribution(s, cur)? {
+            sum += v.as_int(x).unwrap_or(0);
+            cur = Some(n);
+        }
+        cx.park(v.list(vec![v.int(cur.map_or(-1, |n| i64::try_from(n.raw()).unwrap())), v.int(sum)]));
+        Ok(v.int(sum))
+    }
+
+    fn contributes(&self, _: &[ValueId], _: &phitex_defuse::Values, _: Field) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_kept_read_at_a_node_gone_wakes_a_parking_run_once_with_its_site() {
+    // The walk read "t" where a quiet node stands. The node is removed and
+    // a contribution added ahead of the walk's cursor: the walk resumes,
+    // keeping its read at the node gone. That read is not kept: it asks
+    // the walk again once, the change where the node stood (a loop with a
+    // checkpoint per page goes back before it); a moved structure, with no
+    // site, sent the page loop back to its start at every commit.
+    let e = Engine::new();
+    let g = Arc::new(Gates::default());
+    let v = e.values();
+    let s = v.field("s");
+    let walk = Arc::new(AnchorWalk(std::sync::Mutex::new(Vec::new())));
+    let walk_op = e.register(walk.clone());
+    let contrib = e.register(Arc::new(Contrib(g.clone())));
+    let quiet = e.register(Arc::new(Quiet));
+    let def_t = e.register(Arc::new(DefT));
+    let u = e.new_unit();
+    e.push(u, def_t, vec![v.int(0)]);
+    e.push(u, contrib, vec![s.0, v.int(1), v.int(0)]);
+    let a = e.push(u, quiet, vec![]);
+    e.push(u, contrib, vec![s.0, v.int(2), v.int(0)]);
+    let l = e.push(u, walk_op, vec![s.0, v.int(i64::try_from(a.raw()).unwrap())]);
+    e.evaluate(2).unwrap();
+    assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(3));
+    walk.0.lock().unwrap().clear();
+    e.remove(a);
+    e.insert_before(l, contrib, vec![s.0, v.int(100), v.int(0)]);
+    let r = e.evaluate(2).unwrap();
+    assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(103), "{r:?}");
+    let causes = walk.0.lock().unwrap().clone();
+    assert!(
+        causes.iter().any(|c| matches!(c, Some(Cause::Changed { site: Some(n), .. }) if *n == a)),
+        "woken where the node stood: {causes:?}"
+    );
+    assert!(causes.len() <= 3, "{causes:?}");
+    assert!(e.check_invariants().is_empty());
+}

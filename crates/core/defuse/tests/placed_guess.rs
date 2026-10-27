@@ -146,3 +146,36 @@ fn placements_after_a_placement_stand_in_order() {
     let _ = b;
     assert!(e.check_invariants().is_empty());
 }
+
+/// `[target]`: 1 where the node `target` (raw id) still stands, else 0.
+struct Alive;
+
+impl Operation for Alive {
+    fn name(&self) -> &'static str {
+        "alive"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let t = phitex_defuse::NodeId::from_raw(v.as_int(cx.args()[0]).unwrap_or(0).unsigned_abs());
+        Ok(v.int(i64::from(cx.alive(t))))
+    }
+}
+
+/// A run asks whether a node still stands before it places after it
+/// (`Ctx::alive`): a node removed by an edit does not.
+#[test]
+fn a_run_knows_whether_a_node_still_stands() {
+    let e = Engine::new();
+    let v = e.values();
+    let alive = e.register(Arc::new(Alive));
+    let u = e.new_unit();
+    let a = e.push(u, alive, vec![v.int(0)]);
+    let p = e.push(u, alive, vec![v.int(i64::try_from(a.raw()).unwrap())]);
+    e.evaluate(2).unwrap();
+    assert_eq!(e.output(p).and_then(|x| v.as_int(x)), Some(1));
+    e.remove(a);
+    e.replace(p, alive, vec![v.int(i64::try_from(a.raw()).unwrap())]);
+    e.evaluate(2).unwrap();
+    assert_eq!(e.output(p).and_then(|x| v.as_int(x)), Some(0));
+}
