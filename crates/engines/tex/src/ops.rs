@@ -322,8 +322,10 @@ impl Operation for Exec {
     /// when it runs.
     fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         // (the text first: most nodes are no recorded node, and ask no lock)
+        // (a document piece's constant assignments at its base level,
+        // `crate::hints::const_defs`)
         if !crate::pkgrec::is_recorded(reg(&self.0), v, args) {
-            return None;
+            return crate::hints::const_defs(v, args);
         }
         let loads = ops(&self.0).pkg_loads.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()?;
         if !loads.predict {

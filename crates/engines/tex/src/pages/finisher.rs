@@ -300,7 +300,7 @@ impl Run<'_, '_> {
         let args = self.fin.as_ref().map(|c| c.args.clone()).unwrap_or_default();
         self.give_way(&args)?;
         let g = self.contribute_global_defs();
-        self.record_finisher_defs(&args, g)?;
+        self.record_finisher_defs(&args, g);
         self.define_page_start()
     }
 }
@@ -310,6 +310,10 @@ impl Run<'_, '_> {
 pub(crate) static FIN_PREDICTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) static FIN_UNPREDICTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A page's last finisher run in [`FinDefs::pages`]: its checkpoint
+/// index, its definitions, the page number it read.
+pub(crate) type FinPage = (i64, Vec<(Field, ValueId)>, Option<i64>);
 
 /// What the last two finishers running one routine defined
 /// (`Ops::fin_defs`): the earlier run's definitions, then the last's.
@@ -334,7 +338,7 @@ pub(crate) struct FinDefs {
     pub gdefs: Option<ValueId>,
     /// Each page's last run (by [`fin_page_key`]): its ordinary pages
     /// fired and its definitions ([`FinDefs::at`]).
-    pub pages: std::collections::BTreeMap<FinPageKey, (i64, Vec<(Field, ValueId)>, Option<i64>)>,
+    pub pages: std::collections::BTreeMap<FinPageKey, FinPage>,
     /// The page number (`\count0` as it reached the routine) of the runs
     /// `prev` and `last` were, where they read it: the hole of a
     /// page-dependent macro's template ([`FinDefs::predict`]).
@@ -1241,16 +1245,16 @@ impl Run<'_, '_> {
     }
     /// The definitions this finisher publishes, kept for the next one
     /// running the same routine ([`Finish::predicted_defs`]).
-    pub(crate) fn record_finisher_defs(&mut self, args: &[ValueId], gdefs: ValueId) -> R<()> {
+    pub(crate) fn record_finisher_defs(&mut self, args: &[ValueId], gdefs: ValueId) {
         let v = self.v;
-        let Some(&t) = args.get(9) else { return Ok(()) };
+        let Some(&t) = args.get(9) else { return };
         // (a speculative run's too: a cold build's finishers all run on
         // predictions, and one seeding none leaves every later finisher
         // predicting nothing given back, its result unconfirmed until
         // the page builder ends; a wrong seed is a misprediction,
         // its readers run again)
         if t == ValueId::UNIT {
-            return Ok(());
+            return;
         }
         let mut out = Vec::new();
         let mut rels: Vec<(Field, i64)> = Vec::new();
@@ -1290,7 +1294,7 @@ impl Run<'_, '_> {
                 )
             );
         }
-        let Some(page) = self.fin_page().cloned() else { return Ok(()) };
+        let Some(page) = self.fin_page().cloned() else { return };
         self.trace_fin_rel(&page, &rels);
         let mut m = self.ops.fin_defs.locked();
         let idx = (i64::from_ne_bytes(page.key.piece.raw().to_ne_bytes()), i64::from(page.key.nth));
@@ -1356,8 +1360,8 @@ impl Run<'_, '_> {
             e.prev_j = j;
             e.prev_pno = pno;
         }
-        Ok(())
-    }}
+    }
+}
 
 /// The items of each piece finisher `fin`'s page names (its spans'
 /// sources, sorted, once each): a unit of its window read at those alone

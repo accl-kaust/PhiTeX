@@ -1464,6 +1464,8 @@ pub struct Stats {
     /// The fields whose speculative reads were refuted, with counts,
     /// most first.
     pub refuted_by_field: Vec<(String, u64)>,
+    /// The refuted predictions by field, with counts, most first.
+    pub predictions_refuted_by_field: Vec<(String, u64)>,
     /// The relations the live nodes' last runs filed, by operation and
     /// field, counted ([`crate::run::NodeAudit`]).
     pub relations: Vec<(&'static str, String, u64)>,
@@ -1881,6 +1883,13 @@ impl Stats {
             .sum()
     }
 
+    /// The predictions of field `name` refuted at their node's commit,
+    /// over the build.
+    #[must_use]
+    pub fn predictions_refuted_by(&self, name: &str) -> u64 {
+        self.predictions_refuted_by_field.iter().filter(|e| e.0 == name).map(|e| e.1).sum()
+    }
+
     /// The readers re-asked through field `name`, or a field of its
     /// family (`name:…`, a field in parts), over the build.
     #[must_use]
@@ -1970,6 +1979,15 @@ impl Stats {
             }
         }
         self.refuted_by_field
+            .sort_by_key(|e| std::cmp::Reverse(e.1));
+        for &(f, n) in &r.predictions_refuted_by_field {
+            let name = field_name(v, f);
+            match self.predictions_refuted_by_field.iter_mut().find(|e| e.0 == name) {
+                Some(e) => e.1 += n,
+                None => self.predictions_refuted_by_field.push((name, n)),
+            }
+        }
+        self.predictions_refuted_by_field
             .sort_by_key(|e| std::cmp::Reverse(e.1));
     }
 
@@ -3075,6 +3093,8 @@ impl Graph {
             }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
+                // (`PHITEX_PRED_MISSES`: the refuted predictions by field)
+                phitex_defuse::obs::flush_pred_misses(self.eng.values());
                 crate::exec::flush_later();
                 print_accounting(&self.eng, &r, n, &by_kind, self.env_calls);
                 {

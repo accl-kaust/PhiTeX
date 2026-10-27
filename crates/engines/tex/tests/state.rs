@@ -80,7 +80,7 @@ fn a_global_restore_of_a_read_value_publishes_nothing() {
     let b = build8("restore", &src);
     assert_eq!(b.output().0, cold("restore", &src));
     assert_eq!(b.definitions_by_op("exec", "count:0") + b.definitions_by_op("resume", "count:0"), 0);
-    assert_eq!(b.stats.refuted_by("count:0"), 0, "{:?}", b.stats.refuted_by_field);
+    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "{:?}", b.stats.refuted_by_field);
 }
 
 /// A local write inside a group the run closes publishes nothing; a
@@ -130,7 +130,7 @@ fn a_page_dependent_macro_is_predicted_from_the_page_number() {
     let src = format!("\\output={{\\xdef\\lastfolio{{page \\number\\count0}}\\global\\setbox255=\\box255 \\shipout\\box255 \\advancepageno}}\n{}", doc(160, 80, "The last folio was \\lastfolio. A paragraph in the middle."));
     let b = build8("template", &src);
     assert_eq!(b.output().0, cold("template", &src));
-    assert!(b.stats.predictions_refuted <= b.pages().len() as u64, "a miss at most once per page, not once per macro: {}", b.stats.predictions_refuted);
+    assert!(b.stats.predictions_refuted_by("cs:lastfolio") <= b.pages().len() as u64, "a miss at most once per page, not once per macro: {:?}", b.stats.predictions_refuted_by_field);
 }
 
 /// A paragraph that uses three catcodes and two parameters records

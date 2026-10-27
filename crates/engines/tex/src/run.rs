@@ -79,7 +79,9 @@ pub(crate) fn stream_bucket(v: &Values, name: &str) -> Field {
     v.field(&format!("wstreams:{k}"))
 }
 
-
+/// A page's finisher class ([`Ops::fin_class`]): its hint, its penalty
+/// class, its checkpoint index.
+pub(crate) type FinClass = (phitex_defuse::ValueId, i32, i64);
 
 /// The operations, as registered.
 #[derive(Clone)]
@@ -149,7 +151,7 @@ pub(crate) struct Ops {
     /// With them, the page's index among the pages the loop fired (its
     /// checkpoint's): the page number a finisher's prediction carries
     /// its templates to ([`crate::pages::FinDefs::predict`]).
-    pub fin_class: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, (phitex_defuse::ValueId, i32, i64)>>>,
+    pub fin_class: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, FinClass>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The profile units the page loop folded over all its runs
@@ -367,6 +369,12 @@ impl FileRest {
 
     pub(crate) fn pos_chars(&self) -> usize {
         self.pos
+    }
+
+    /// Sets the position in characters (a rollback in the input's tests).
+    #[cfg(test)]
+    pub(crate) fn set_pos_chars(&mut self, p: usize) {
+        self.pos = p;
     }
 
 
@@ -1048,10 +1056,32 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.interp.is_some() {
             self.revert_read_back(loc)?;
         }
-        if self.st.is_loaded(loc) {
-            return Ok(());
+        match self.st.load_state(loc) {
+            1 => Ok(()),
+            2 => self.unalias(loc),
+            _ => self.load_slow(loc),
         }
-        self.load_slow(loc)
+    }
+
+    /// Integer register `loc` holds an alias definition's value (a
+    /// symbol written to it, `crate::defer::try_symbolic`, or such a
+    /// binding a finisher or a resume was given) and the run uses it:
+    /// the symbol's digits, forced in a piece, resolved anywhere else
+    /// (`crate::defer::force`, `crate::defer::resolve`). The binding the
+    /// run publishes stays the alias.
+    #[cold]
+    #[inline(never)]
+    fn unalias(&mut self, loc: Loc) -> R<()> {
+        let Some((g, node)) = self.st.alias_at(loc, self.v) else {
+            return Ok(());
+        };
+        let s = crate::defer::Sym { loc: self.loc_of(g), node };
+        let x = match self.op_name() {
+            "exec" | "resume" => crate::defer::force(self, s)?,
+            _ => crate::defer::resolve(self, s)?,
+        };
+        self.st.resolve_alias(loc, x);
+        Ok(())
     }
 
     /// A job-written line is read as the next round's read-back reads
@@ -1113,7 +1143,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // (read in place of the value, not a definition of the line:
             // only what the line defines on it is published)
             self.st
-                .preload(loc, if p == ValueId::UNIT { None } else { Some(p) });
+                .preload(self.v, loc, if p == ValueId::UNIT { None } else { Some(p) });
         }
         Ok(())
     }
@@ -1262,7 +1292,10 @@ impl<'c, 'a> Run<'c, 'a> {
         // value at the candidate, read now, [`Run::fin_lazy_value`])
         if let Some(x) = self.st.lazy(loc) {
             let y = self.fin_lazy_preload(x)?;
-            self.st.preload(loc, y);
+            self.st.preload(self.v, loc, y);
+            if self.st.load_state(loc) == 2 {
+                return self.unalias(loc);
+            }
             return Ok(());
         }
         let f = self.loc_field(loc);
@@ -1353,7 +1386,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// A restore of integer register `loc` to this piece's own symbol of
-    /// it (docs/spec-deferred-reads.md §2, [`crate::defer::try_restore`]):
+    /// it (docs/spec-deferred-reads.md §2, [`crate::defer::try_symbolic`]):
     /// the run's map of it the identity, neither a read nor a
     /// definition; where the run loaded it, its value back to the one
     /// first loaded, or, never read (a value its own `set` gave), unread.
@@ -4493,7 +4526,12 @@ impl<'c, 'a> Run<'c, 'a> {
             let (n, t_list) = (publication.len(), t_pub.elapsed());
             for &(f, w, l) in &publication {
                 match w {
-                    crate::state::Pub::Value(x) => self.cx.define_with(f, x, l),
+                    // (a symbol written to the item: the alias it is,
+                    // `crate::defer::try_symbolic`)
+                    crate::state::Pub::Value(x) => match phitex_defuse::alias_of(self.v, x) {
+                        Some((g, at)) => self.cx.define_alias(f, g, at, l),
+                        None => self.cx.define_with(f, x, l),
+                    },
                     crate::state::Pub::Rel(c) => self.cx.define_rel_with(f, c, l),
                 }
             }
@@ -4758,18 +4796,15 @@ impl<'c, 'a> Run<'c, 'a> {
             ..NodeAudit::default()
         };
         for l in self.st.used_locs() {
-            match crate::state::Family::of(l) {
-                Some(fam) => {
-                    let p = fam.prefix();
-                    match a.reads.iter_mut().find(|r| r.0 == p) {
-                        Some(r) => r.1 += 1,
-                        None => a.reads.push((p, 1)),
-                    }
+            if let Some(fam) = crate::state::Family::of(l) {
+                let p = fam.prefix();
+                match a.reads.iter_mut().find(|r| r.0 == p) {
+                    Some(r) => r.1 += 1,
+                    None => a.reads.push((p, 1)),
                 }
-                None => {
-                    let f = self.loc_field(l);
-                    a.other_reads.push(f);
-                }
+            } else {
+                let f = self.loc_field(l);
+                a.other_reads.push(f);
             }
         }
         self.ops.audit.locked().insert(self.cx.node().raw(), a);
@@ -4843,7 +4878,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .collect();
         // (a field the load put back as it found it is no read of its
         // predecessor's either: only the net effect is recorded)
-        let restored: Vec<Loc> = self.pubs.as_ref().map(|p| p.2.clone()).unwrap_or_else(|| self.st.publication(v, true).1);
+        let restored: Vec<Loc> = self.pubs.as_ref().map_or_else(|| self.st.publication(v, true).1, |p| p.2.clone());
         let reads: Vec<String> = self
             .st
             .used_locs()

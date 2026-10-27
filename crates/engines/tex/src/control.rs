@@ -1044,13 +1044,13 @@ impl Run<'_, '_> {
         let l = self.quantity_loc(cmd::ASSIGN_INT, self.cur.chr);
         self.scan_optional_equals()?;
         // (`\c@page=` its own symbol: a restore, docs/spec-deferred-reads.md §2)
-        if crate::defer::try_restore(self, l, global)? {
+        if crate::defer::try_symbolic(self, l, global)? {
             return Ok(());
         }
         let n = self.scan_int()?;
         // (set back to the value reaching the run, which it read: a
         // restore, `crate::defer::restores`)
-        if crate::defer::restores(self, l, n, global)? {
+        if crate::defer::restores(self, l, n, global) {
             return Ok(());
         }
         self.note_reg_def(l);
@@ -1163,7 +1163,7 @@ impl Run<'_, '_> {
             self.scan_optional_equals()?;
             // (the register set to its own symbol: a restore, neither a
             // read nor a definition, docs/spec-deferred-reads.md §2)
-            if p == 0 && crate::defer::try_restore(self, l, global)? {
+            if p == 0 && crate::defer::try_symbolic(self, l, global)? {
                 return Ok(());
             }
         } else {
@@ -1226,7 +1226,7 @@ impl Run<'_, '_> {
                 // "Arithmetic overflow"
                 return Ok(());
             };
-            if p == 0 && q == cmd::REGISTER && crate::defer::restores(self, l, r, global)? {
+            if p == 0 && q == cmd::REGISTER && crate::defer::restores(self, l, r, global) {
                 return Ok(());
             }
             if p == 0 {

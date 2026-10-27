@@ -1515,7 +1515,7 @@ impl Run<'_, '_> {
         }
         // (the locations above were computed in the run's first state:
         // a field past the static cells has its location there, kept)
-        let mut ns = State::from_cont(ContState {
+        let mut ns = State::from_cont(v, ContState {
             slots,
             save,
             defined,

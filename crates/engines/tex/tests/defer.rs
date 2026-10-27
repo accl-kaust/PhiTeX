@@ -133,6 +133,34 @@ fn a_save_and_restore_of_the_page_number_is_neither_a_read_nor_a_definition() {
     assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
 }
 
+/// The page number copied into another register (`\global\count9=\the
+/// \count0`) is an alias definition (docs/spec-state-model.md §2.2): the
+/// paragraph makes no read of it, and a `\write` of the copy expanded at
+/// shipout reads the page number as of the paragraph through it.
+#[test]
+fn a_page_number_copied_into_another_register_is_an_alias() {
+    let mid = "\\global\\count9=\\the\\count0\\relax\\write1{copy=\\the\\count9.}Paragraph that copies its page number into another register and writes the copy at shipout.";
+    let src = doc(120, 60, mid);
+    let dir = common::scratch("defer-alias");
+    let opts = Options {
+        threads: Some(8),
+        ..common::options("./d.tex", "d", "", &dir)
+    };
+    let mut b = common::build(opts, Some(&common::plain()), &src);
+    let (want_dvi, want_out) = cold("alias", &src, 1);
+    assert_eq!(b.output().0, want_dvi);
+    let got = |b: &phitex_tex::Build| b.writes().into_iter().filter(|(k, _)| *k == 1).map(|(_, t)| t).collect::<String>();
+    assert!(want_out.contains("copy=") && !want_out.contains("copy=1."), "{want_out:?}");
+    assert_eq!(got(&b), want_out);
+    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "{:?}", b.stats.refuted_by_field);
+    let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 0 of", 1);
+    let r = common::rebuild(&mut b, &edited);
+    let (want_dvi, want_out) = cold("alias-edited", &edited, 1);
+    assert_eq!(b.output().0, want_dvi);
+    assert_eq!(got(&b), want_out, "the copy followed the page");
+    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
+}
+
 /// A `\mark` holding the page number is resolved by the finisher that
 /// shows it in the headline: the paragraph makes no read.
 #[test]

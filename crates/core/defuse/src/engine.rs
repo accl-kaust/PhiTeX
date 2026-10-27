@@ -1178,6 +1178,7 @@ impl Engine {
         let mut placed: FxHashMap<OpId, u64> = FxHashMap::default();
         let mut commit_by: FxHashMap<OpId, (u64, u64)> = FxHashMap::default();
         let mut rbf: FxHashMap<Field, u64> = FxHashMap::default();
+        let mut pbf: FxHashMap<Field, u64> = FxHashMap::default();
         let load = |c: &AtomicU64| c.load(Ordering::Relaxed);
         for w in &workers {
             rep.nodes_run += load(&w.nodes_run);
@@ -1220,6 +1221,9 @@ impl Engine {
             for (f, k) in log.refuted_by_field.drain() {
                 *rbf.entry(f).or_default() += k;
             }
+            for (f, k) in log.pred_refuted_by_field.drain() {
+                *pbf.entry(f).or_default() += k;
+            }
             rep.run_times.append(&mut log.run_times);
         }
         rep.passes = rep.final_reruns + 1;
@@ -1240,6 +1244,8 @@ impl Engine {
         rep.commit_by_op = commit_by.into_iter().map(|(op, (t, k))| (self.op(op).name(), t, k)).collect();
         rep.commit_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         rep.refuted_by_field = rbf.into_iter().collect();
+        rep.predictions_refuted_by_field = pbf.into_iter().collect();
+        rep.predictions_refuted_by_field.sort_by_key(|x| std::cmp::Reverse(x.1));
         rep.refuted_by_field.sort_by_key(|x| std::cmp::Reverse(x.1));
         rep.segments = self.order.count();
         rep.version = self.version.load(Ordering::Acquire);

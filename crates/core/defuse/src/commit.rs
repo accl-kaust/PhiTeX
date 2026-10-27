@@ -912,6 +912,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 Some(e) => {
                     if e.provisional {
                         st.predictions_refuted += 1;
+                        *w.log.lock().pred_refuted_by_field.entry(d.f).or_default() += 1;
+                        crate::obs::pred_miss(d.f, e.value == d.value);
                     }
                     *e = Def {
                         depth,
@@ -1625,6 +1627,8 @@ fn walk_here(
         let Some((_, i)) = Segment::reaching(inner, f, p, false) else {
             return Here::From(by);
         };
+        // (an alias's input, `read::through_aliases`, is not followed under
+        // the lock: the relation's own settle puts it right, `settle_rel`)
         let nv = v.int(v.as_int(i.value).unwrap_or(0).wrapping_add(c));
         if nv == d.value {
             return Here::Done;
@@ -2967,7 +2971,7 @@ pub(crate) fn match_placements(eng: &Engine, last: &[NodeId], new: &[Placement])
 /// `rel_value` at a node's label, read under its segment's lock.
 pub(crate) fn rel_value_at(eng: &Engine, f: Field, at: NodeId, c: i64) -> ValueId {
     let v = eng.values();
-    let input = reaching_at(eng, f, at, false).and_then(|r| r.value);
+    let input = read::through_aliases(eng, reaching_at(eng, f, at, false).and_then(|r| r.value));
     v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c))
 }
 

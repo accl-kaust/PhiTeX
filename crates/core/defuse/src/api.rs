@@ -465,6 +465,8 @@ pub struct Report {
     /// or replaced.
     pub predictions_confirmed: u64,
     pub predictions_refuted: u64,
+    /// [`Report::predictions_refuted`] by field, most first.
+    pub predictions_refuted_by_field: Vec<(Field, u64)>,
     /// Relative definitions recomputed from their input without a run.
     pub relative_resolved: u64,
     /// Nodes given a relation ahead of their run from their operation's

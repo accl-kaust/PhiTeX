@@ -87,6 +87,44 @@ pub fn flush() {
     }
 }
 
+/// The refuted predictions by field and by why (`profile`, with
+/// `PHITEX_PRED_MISSES` set): another value, or the same value at another
+/// depth. Printed by [`flush`], the most first.
+static PRED_MISSES: Mx<Vec<(crate::Field, bool, u64)>> = Mx::new(Vec::new());
+
+fn pred_misses_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    enabled() && *ON.get_or_init(|| std::env::var_os("PHITEX_PRED_MISSES").is_some())
+}
+
+/// A prediction of field `f` refuted at commit: by an equal value at
+/// another depth (`same_value`), else by another value.
+pub(crate) fn pred_miss(f: crate::Field, same_value: bool) {
+    if !pred_misses_on() {
+        return;
+    }
+    let mut m = PRED_MISSES.lock();
+    match m.iter_mut().find(|e| e.0 == f && e.1 == same_value) {
+        Some(e) => e.2 += 1,
+        None => m.push((f, same_value, 1)),
+    }
+}
+
+/// Prints the refuted predictions by field ([`pred_miss`]) with the
+/// fields' names from `v`, the most first, and clears them.
+pub fn flush_pred_misses(v: &crate::Values) {
+    if !pred_misses_on() {
+        return;
+    }
+    let mut m = std::mem::take(&mut *PRED_MISSES.lock());
+    m.sort_by_key(|e| std::cmp::Reverse(e.2));
+    let total: u64 = m.iter().map(|e| e.2).sum();
+    eprintln!("pred-misses: {total} refuted predictions by field");
+    for (f, same, n) in m.iter().take(40) {
+        eprintln!("pred-miss: {n} {} {}", v.render(f.0), if *same { "depth" } else { "value" });
+    }
+}
+
 pub fn reset() {
     if enabled() {
         PROBES.lock().clear();

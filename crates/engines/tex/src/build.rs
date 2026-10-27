@@ -271,7 +271,10 @@ impl Run<'_, '_> {
         // level's stay the run's: `Locality::Scope`)
         self.st
             .abandon_to_scope(v, l.save_base, l.def_base, l.open_stamp, self.rec_load);
-        let sid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        // (the scope's tag, its `ag` and `lvlfix` lists' too: its depth,
+        // which no other scope open at a reader has; never the opener's
+        // node, which a re-cut changes, its readers asked again for it)
+        let sid = base.depth + 1;
         let mut xs = vec![
             v.int(l.group),
             v.int(sid),
@@ -335,8 +338,8 @@ impl Run<'_, '_> {
         self.muts += 1;
         let levels = std::mem::take(&mut self.nest);
         let n = levels.len();
-        let sid0 = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
-        let sid = |k: usize| sid0.wrapping_add(i64::try_from(k).unwrap_or(0));
+        // (each frame's tag its depth, as [`Run::leave_scope`]'s)
+        let sid = |k: usize| base.depth + 1 + i64::try_from(k).unwrap_or(0);
         let mut kinds = Vec::with_capacity(n);
         let mut outer = parent;
         for (k, l) in levels.iter().enumerate() {

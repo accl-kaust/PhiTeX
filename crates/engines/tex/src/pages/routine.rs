@@ -641,7 +641,7 @@ impl Run<'_, '_> {
                     self.st.set_lazy(loc, Some(x));
                     continue;
                 }
-                self.st.preload(loc, some(x));
+                self.st.preload(v, loc, some(x));
             }
         }
         if args.len() < 9 {
@@ -670,7 +670,7 @@ impl Run<'_, '_> {
                 list_of(v, kv).first().copied()
             };
             let loc = self.loc_of(Field(f));
-            self.st.preload(loc, x);
+            self.st.preload(v, loc, x);
         }
         Ok(())
     }

@@ -186,6 +186,11 @@ const PRELOADED: u8 = 4;
 /// `cmd` and `chr` hold the meaning's command code and modifier
 /// (`eq_type`, `equiv`, §221).
 const CC: u8 = 8;
+/// The entry's engine value (`id`) is an alias definition's
+/// (`phitex_defuse::alias_value`): another register's value as of a
+/// piece, a symbol written to this item ([`Entry::alias`]); a use
+/// resolves it first (`Run::load`, [`State::resolve_alias`]).
+const ALIAS: u8 = 16;
 
 /// One slot's value (spec-final §2.1): a meaning's record, `cmd`, `chr`
 /// and a `payload` (a macro's handle in the table's macro store, a
@@ -222,6 +227,30 @@ impl Entry {
             payload: 0,
             id: x,
         }
+    }
+
+    /// Field `g`'s value as of piece `at`, unseen: a symbol written to
+    /// an integer register (spec §2.2, `crate::defer::try_symbolic`),
+    /// published as the alias definition it is (`Ctx::define_alias`).
+    pub(crate) fn alias(v: &Values, g: Field, at: phitex_defuse::NodeId) -> Entry {
+        Entry {
+            kind: K_RAW,
+            flags: HAS_ID | ALIAS,
+            cmd: 0,
+            chr: 0,
+            payload: 0,
+            id: Some(phitex_defuse::alias_value(v, g, at)),
+        }
+    }
+
+    /// An entry holding engine value `x` as it is, an alias definition's
+    /// value known as one ([`ALIAS`]).
+    fn raw_seen(v: &Values, x: Option<ValueId>) -> Entry {
+        let mut e = Entry::raw(x);
+        if x.is_some_and(|y| phitex_defuse::alias_of(v, y).is_some()) {
+            e.flags |= ALIAS;
+        }
+        e
     }
 
     /// An integer (a count, a dimension, a code).
@@ -960,6 +989,40 @@ impl State {
         self.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0)
     }
 
+    /// Whether `loc` is loaded (1), loaded holding an alias definition's
+    /// value its use resolves first (2, [`State::resolve_alias`]), or
+    /// not loaded (0).
+    #[inline]
+    pub(crate) fn load_state(&self, loc: Loc) -> u8 {
+        match self.slot_ref(loc).map_or(0, |s| s.e.flags & (LOADED | ALIAS)) {
+            0 | ALIAS => 0,
+            LOADED => 1,
+            _ => 2,
+        }
+    }
+
+    /// The field and piece of the alias definition `loc` holds, if it
+    /// holds one unresolved ([`Entry::alias`]).
+    pub(crate) fn alias_at(&self, loc: Loc, v: &Values) -> Option<(Field, phitex_defuse::NodeId)> {
+        let s = self.slot_ref(loc)?;
+        if s.e.flags & ALIAS == 0 {
+            return None;
+        }
+        phitex_defuse::alias_of(v, s.e.id?)
+    }
+
+    /// `loc`'s alias definition resolved to `x` where the run uses it
+    /// (`Run::load`): the slot holds the integer, the binding it
+    /// publishes stays the alias.
+    pub(crate) fn resolve_alias(&mut self, loc: Loc, x: i32) {
+        self.muts += 1;
+        let e = &mut self.slot(loc).e;
+        e.kind = K_INT;
+        e.chr = x;
+        e.id = None;
+        e.flags &= !(HAS_ID | ALIAS);
+    }
+
     /// What the run holds for `loc` (spec §2.6).
     pub(crate) fn held(&self, loc: Loc) -> Held {
         let Some(s) = self.slot_ref(loc) else {
@@ -1047,11 +1110,11 @@ impl State {
     /// A value read in place of the engine's (a finisher's state at its
     /// candidate, a job-written line's at its read-back point): loaded,
     /// no read recorded, never compared with the engine's at the end.
-    pub(crate) fn preload(&mut self, loc: Loc, x: Option<ValueId>) {
+    pub(crate) fn preload(&mut self, v: &Values, loc: Loc, x: Option<ValueId>) {
         self.changing(loc);
         self.muts += 1;
-        let mut e = Entry::raw(x);
-        e.flags = LOADED | HAS_ID | PRELOADED;
+        let mut e = Entry::raw_seen(v, x);
+        e.flags |= LOADED | PRELOADED;
         let s = self.slot(loc);
         s.e = e;
         s.lazy = None;
@@ -1511,7 +1574,7 @@ impl State {
     }
 
     /// A restore of `loc` to its own symbol (spec §2.3 rule 1,
-    /// `crate::defer::try_restore`): the run's steps of the register made
+    /// `crate::defer::try_symbolic`): the run's steps of the register made
     /// the identity, nothing read and nothing published. A register the
     /// run read and holds unwritten holds the value it read already.
     pub(crate) fn restore(&mut self, loc: Loc) {
@@ -2119,7 +2182,7 @@ impl Memos {
 /// meaning record kept where known.
 fn stored(val: Entry) -> Entry {
     let mut e = val;
-    e.flags = LOADED | (val.flags & (HAS_ID | CC));
+    e.flags = LOADED | (val.flags & (HAS_ID | CC | ALIAS));
     e
 }
 
@@ -2261,11 +2324,13 @@ impl State {
     }
 
     /// The table of a resume piece ([`State::cont`]).
-    pub(crate) fn from_cont(c: ContState) -> State {
+    pub(crate) fn from_cont(v: &Values, c: ContState) -> State {
         let mut st = State::new();
+        // (a binding that is an alias definition's value stays one,
+        // resolved where the resume uses it)
         let ent = |x: Option<ValueId>, loaded: bool| {
-            let mut e = Entry::raw(x);
-            e.flags = if loaded { LOADED | HAS_ID } else { 0 };
+            let mut e = Entry::raw_seen(v, x);
+            e.flags = if loaded { LOADED | HAS_ID | (e.flags & ALIAS) } else { 0 };
             e
         };
         for s in c.slots {
@@ -2362,7 +2427,7 @@ mod tests {
         let locs: Vec<Loc> = c.slots.iter().map(|s| s.loc).collect();
         assert!(!locs.contains(&300));
         assert!(locs.contains(&301));
-        let mut r = State::from_cont(c);
+        let mut r = State::from_cont(&v, c);
         assert!(!r.defined_after(300, 0));
         assert!(!r.is_loaded(300));
         assert!(r.defined_after(301, 0));

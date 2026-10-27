@@ -181,14 +181,18 @@ pub(crate) fn leaked(r: &Run<'_, '_>, s: Sym) -> ! {
 }
 
 /// `\count<n>=` (or `\c@page=` through `\setcounter`) whose operand's
-/// first expanded token is this piece's own symbol of the same register,
-/// followed by nothing but an optional space: a restore. Called from
-/// `control::do_register_command` after the optional `=`, before
-/// `scan_int`; true when it consumed the operand. The run's map of the
-/// register becomes the identity ([`Run::reg_restore`]) and, where the
-/// register was loaded, its run-local value goes back to what was loaded
-/// before any map of this run (`Run::reg_loaded_base`).
-pub(crate) fn try_restore(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate::run::R<bool> {
+/// first expanded token is a symbol, followed by nothing but an optional
+/// space, or an integer register holding one unresolved (`\global\c@page
+/// \calc@Acount` after `\global\calc@Acount\calc@Bcount`): neither read
+/// nor value (docs/spec-state-model.md §2.2). This piece's own symbol of
+/// the same register is a restore ([`restore_reaching`]): the run's map
+/// of it the identity and, where the register was loaded, its run-local
+/// value back to what was loaded before any map of this run
+/// (`Run::reg_loaded_base`). Any other symbol is an alias ([`alias`]).
+/// Called from `control::assign_int` and `control::do_register_command`
+/// after the optional `=`, before `scan_int`; true when it consumed the
+/// operand.
+pub(crate) fn try_symbolic(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate::run::R<bool> {
     use crate::val::cmd;
     if r.count_reg(loc).is_none() || !r.defer_allowed() {
         return Ok(false);
@@ -199,11 +203,24 @@ pub(crate) fn try_restore(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate:
         r.get_token();
         r.ck()?;
         let c = r.cur.cmd;
-        if c == cmd::SYM || c == cmd::SPACER {
-            if c == cmd::SYM {
-                break;
-            }
+        if c == cmd::SYM {
+            break;
+        }
+        if c == cmd::SPACER {
             continue;
+        }
+        // (a `\countdef` register holding an alias unresolved: copied
+        // as it is, §413's internal integer, nothing scanned after it)
+        if c == cmd::ASSIGN_INT {
+            let l = r.quantity_loc(cmd::ASSIGN_INT, r.cur.chr);
+            if let Some((g, node)) = r.st.alias_at(l, r.v) {
+                let s = Sym { loc: r.loc_of(g), node };
+                if symbolic(r, loc, s, global) {
+                    return Ok(true);
+                }
+            }
+            r.back_cur();
+            return Ok(false);
         }
         if c <= cmd::MAX_COMMAND || (c >= cmd::END_TEMPLATE && c != cmd::DONT_EXPAND) {
             r.back_cur();
@@ -213,10 +230,10 @@ pub(crate) fn try_restore(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate:
         r.ck()?;
     }
     let t = r.cur.tok;
-    if sym_of(t) != Some(Sym { loc, node: r.cx.node() }) {
+    let Some(s) = sym_of(t) else {
         r.back_input(t);
         return Ok(false);
-    }
+    };
     // (§443-§444: the number ends at a token not a digit, one space
     // taken; a digit goes on with it, so the digits are needed)
     r.get_x_token();
@@ -228,8 +245,7 @@ pub(crate) fn try_restore(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate:
         r.back_input(t);
         return Ok(false);
     }
-    let done = restore_reaching(r, loc, global)?;
-    if !done {
+    if !symbolic(r, loc, s, global) {
         r.back_input(u);
         r.back_input(t);
         return Ok(false);
@@ -240,29 +256,57 @@ pub(crate) fn try_restore(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate:
     Ok(true)
 }
 
+/// Register `loc` set to symbol `s`: a restore where `s` is this
+/// piece's own symbol of `loc`, else an alias.
+fn symbolic(r: &mut Run<'_, '_>, loc: Loc, s: Sym, global: bool) -> bool {
+    if s == (Sym { loc, node: r.cx.node() }) {
+        return restore_reaching(r, loc, global);
+    }
+    alias(r, loc, s, global)
+}
+
+/// Integer register `loc` set to symbol `s` of another register (or of
+/// another piece), globally or at the run's base level, where it could
+/// hold steps ([`Run::map_ok`]: a document piece, before its first
+/// candidate): the run defines it as `s`'s register's value as of `s`'s
+/// piece, `Ctx::define_alias` ([`crate::state::Entry::alias`]), so a
+/// reader of `loc` reads that register there itself, and a change of it
+/// asks that reader again, never this run. A use in the run resolves it
+/// (`Run::load`). False elsewhere (the caller assigns as TeX does).
+fn alias(r: &mut Run<'_, '_>, loc: Loc, s: Sym, global: bool) -> bool {
+    if !r.map_ok(loc, global) {
+        return false;
+    }
+    let g = r.loc_field(s.loc);
+    r.note_reg_def(loc);
+    let e = crate::state::Entry::alias(r.v, g, s.node);
+    r.set_loc(loc, e, global);
+    true
+}
+
 /// Integer register `loc` put back to the value reaching the run
 /// (docs/spec-deferred-reads.md §2), where that is neither a read nor a
 /// definition: the run's writes of it maps, back to the identity; none,
 /// it holds that value already; its own definitions, made at its base
 /// level after its last candidate, taken back. False where none is so
 /// (the caller assigns as TeX does).
-pub(crate) fn restore_reaching(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate::run::R<bool> {
+pub(crate) fn restore_reaching(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> bool {
     if r.map_ok(loc, global) && !r.st.defined_after(loc, 0) {
         r.reg_restore(loc, global);
-        return Ok(true);
+        return true;
     }
     let own = !r.st.has_map(loc);
     if !own || !(global || r.innermost_group().is_none()) {
-        return Ok(false);
+        return false;
     }
     if !r.st.defined_after(loc, 0) {
-        return Ok(true);
+        return true;
     }
     if r.reg_first_def.get(&loc) == Some(&r.cand) && r.st.undefine_fresh(loc) {
         r.reg_first_def.remove(&loc);
-        return Ok(true);
+        return true;
     }
-    Ok(false)
+    false
 }
 
 /// An assignment of `x` to integer register `loc` where `x` is the value
@@ -271,9 +315,9 @@ pub(crate) fn restore_reaching(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> c
 /// other registers (calc's `\setcounter`: `\calc@Acount`, then
 /// `\c@page`) defines nothing; the read stands, so the run is asked
 /// again where that value moves.
-pub(crate) fn restores(r: &mut Run<'_, '_>, loc: Loc, x: i32, global: bool) -> crate::run::R<bool> {
+pub(crate) fn restores(r: &mut Run<'_, '_>, loc: Loc, x: i32, global: bool) -> bool {
     if r.reg_loaded_base.get(&loc) != Some(&x) || !r.defer_allowed() || r.count_reg(loc).is_none() {
-        return Ok(false);
+        return false;
     }
     restore_reaching(r, loc, global)
 }

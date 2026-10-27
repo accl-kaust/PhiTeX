@@ -4712,23 +4712,7 @@ pub(crate) fn counter_rels(
     v: &Values,
     args: &[ValueId],
 ) -> Option<Vec<(Field, i64)>> {
-    let fr = *args.first()?;
-    let f = *list_of(v, fr).first()?;
-    let xs = list_of(v, f);
-    let tag = str_of(v, *xs.first()?);
-    let text = match tag.as_str() {
-        "s" => str_of(v, *xs.get(1)?),
-        "f" => {
-            let t = str_of(v, *xs.get(1)?);
-            let off = usize::try_from(int_of(v, *xs.get(2)?)).ok()?.min(t.len());
-            if !t.is_char_boundary(off) {
-                return None;
-            }
-            let end = line_span_end(&t, off);
-            t[off..end].to_owned()
-        }
-        _ => return None,
-    };
+    let text = node_text(v, args)?;
     if !text.contains("counter{") {
         return None;
     }
@@ -4748,6 +4732,215 @@ pub(crate) fn counter_rels(
         }
     }
     (!out.is_empty()).then_some(out)
+}
+
+/// A node's own text, where it is source: its string, or its span of
+/// a file (one statement, [`line_span_end`]); `None` for expansion
+/// tokens and continuations.
+fn node_text(v: &Values, args: &[ValueId]) -> Option<String> {
+    let fr = *args.first()?;
+    let f = *list_of(v, fr).first()?;
+    let xs = list_of(v, f);
+    let tag = str_of(v, *xs.first()?);
+    Some(match tag.as_str() {
+        "s" => str_of(v, *xs.get(1)?),
+        "f" => {
+            let t = str_of(v, *xs.get(1)?);
+            let off = usize::try_from(int_of(v, *xs.get(2)?)).ok()?.min(t.len());
+            if !t.is_char_boundary(off) {
+                return None;
+            }
+            let end = line_span_end(&t, off);
+            t[off..end].to_owned()
+        }
+        _ => return None,
+    })
+}
+
+/// The constant assignments a node's text makes at its base level, as
+/// its run will define them (`Operation::predicted_defs`): an integer
+/// parameter set to a literal integer (`\\finalhyphendemerits=0`,
+/// `\\global\\clubpenalty 10000`) or a code (``\\catcode`\\@=11``,
+/// `\\sfcode 46=3000`), each at the start of a line outside every brace,
+/// the line before it ending complete (no control word left waiting for
+/// arguments), in a text with no conditional, no definition and no group
+/// command (any of which could make the assignment not happen, happen
+/// elsewhere or with another value). A catcode change ends the scan:
+/// the text after it is read under other catcodes. The value as the
+/// state table encodes an integer ([`crate::val::int_id`]); the field
+/// as the run names it (`param:<name>`, `cat:<c>`).
+pub(crate) fn const_defs(v: &Values, args: &[ValueId]) -> Option<Vec<(Field, ValueId)>> {
+    let text = node_text(v, args)?;
+    if !text.contains('=') && !text.contains("code") {
+        return None;
+    }
+    let found = const_assignments(&text);
+    (!found.is_empty()).then(|| found.into_iter().map(|(n, x)| (v.field(&n), crate::val::int_id(v, x))).collect())
+}
+
+/// Whether `name` is an integer parameter (`assign_int`, cmd 73).
+fn int_param(name: &str) -> bool {
+    static S: OnceLock<phitex_defuse::FxHashSet<&'static str>> = OnceLock::new();
+    S.get_or_init(|| crate::prims::PRIMS.iter().filter(|p| p.1 == 73).map(|p| p.0).collect())
+        .contains(name)
+}
+
+/// [`const_defs`]'s scan: `(field name, value)`, the last of each field.
+fn const_assignments(text: &str) -> Vec<(String, i64)> {
+    const BANNED: [&str; 25] = [
+        "else", "fi", "or", "unless", "def", "edef", "gdef", "xdef", "let", "futurelet", "newcommand",
+        "renewcommand", "providecommand", "csname", "expandafter", "afterassignment", "loop", "begingroup",
+        "endgroup", "bgroup", "egroup", "aftergroup", "NewDocumentCommand", "begin", "end",
+    ];
+    let mut out: Vec<(String, i64)> = Vec::new();
+    // (the text's control words: a conditional (`\\if…`) or one of these
+    // anywhere, nothing predicted)
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' {
+            let e = b[i + 1..].iter().position(|c| !c.is_ascii_alphabetic()).map_or(b.len(), |k| i + 1 + k);
+            let w = &text[i + 1..e];
+            if w.starts_with("if") || BANNED.contains(&w) {
+                return out;
+            }
+            i = e.max(i + 2);
+        } else {
+            i += 1;
+        }
+    }
+    let mut depth = 0i64;
+    // (the line before ended complete: at depth 0, no control word last)
+    let mut prev_ok = true;
+    for raw in text.lines() {
+        let line = strip_comment(raw);
+        let t = line.trim_start();
+        let t = t.strip_prefix("\\global").map_or(t, str::trim_start);
+        if depth == 0 && prev_ok && let Some((name, x, stop)) = const_assignment(t) {
+            match out.iter_mut().find(|e| e.0 == name) {
+                Some(e) => e.1 = x,
+                None => out.push((name, x)),
+            }
+            if stop {
+                return out;
+            }
+        }
+        if line.contains("\\catcode") || line.contains("\\makeat") || line.contains("Syntax") {
+            return out;
+        }
+        let b = line.as_bytes();
+        let mut i = 0;
+        let mut last_cs_word = false;
+        while i < b.len() {
+            match b[i] {
+                b'\\' => {
+                    let s = i + 1;
+                    let mut e = s;
+                    while e < b.len() && b[e].is_ascii_alphabetic() {
+                        e += 1;
+                    }
+                    last_cs_word = e > s;
+                    i = if e > s { e } else { s + 1 };
+                    continue;
+                }
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                c if !c.is_ascii_whitespace() => last_cs_word = false,
+                _ => {}
+            }
+            i += 1;
+        }
+        if depth < 0 {
+            return out;
+        }
+        prev_ok = depth == 0 && !last_cs_word;
+    }
+    out
+}
+
+/// `line` up to an unescaped `%`.
+fn strip_comment(line: &str) -> &str {
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'%' => return &line[..i],
+            _ => i += 1,
+        }
+    }
+    line
+}
+
+/// One constant assignment at the start of `t` that is the whole line:
+/// its field, value, and whether it changes a catcode.
+fn const_assignment(t: &str) -> Option<(String, i64, bool)> {
+    let t = t.strip_prefix('\\')?;
+    let e = t.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(t.len());
+    let (name, rest) = t.split_at(e);
+    let (field, rest, stop) = match name {
+        "catcode" | "lccode" | "uccode" | "sfcode" | "mathcode" | "delcode" => {
+            let (c, r) = tex_number(rest)?;
+            let c = u32::try_from(c).ok().filter(|&c| c < 256)?;
+            let head = match name {
+                "catcode" => "cat",
+                "lccode" => "lc",
+                "uccode" => "uc",
+                "sfcode" => "sf",
+                "mathcode" => "mc",
+                _ => "dc",
+            };
+            (cat(&[head, ":", &c.to_string()]), r, name == "catcode")
+        }
+        n if int_param(n) && !n.is_empty() => (cat(&["param:", n]), rest, false),
+        _ => return None,
+    };
+    let r = rest.trim_start_matches([' ', '\t']);
+    let r = r.strip_prefix('=').unwrap_or(r);
+    let (x, r) = tex_number(r)?;
+    // (the line ends there, or a `\\relax` does)
+    let r = r.trim();
+    if !(r.is_empty() || r == "\\relax") {
+        return None;
+    }
+    Some((field, x, stop))
+}
+
+/// A literal integer after optional blanks and signs: decimal digits, or
+/// a backquoted character (`` `a ``, `` `\\@ ``); then one optional
+/// blank. `None` for anything else (a register, a macro, a hex or octal
+/// constant, a dimension).
+fn tex_number(s: &str) -> Option<(i64, &str)> {
+    let mut r = s.trim_start_matches([' ', '\t']);
+    let mut neg = false;
+    while let Some(c) = r.chars().next().filter(|c| matches!(c, '+' | '-' | ' ')) {
+        if c == '-' {
+            neg = !neg;
+        }
+        r = &r[1..];
+    }
+    let (x, rest) = if let Some(q) = r.strip_prefix('`') {
+        let esc = q.starts_with('\\');
+        let q = q.strip_prefix('\\').unwrap_or(q);
+        let c = q.chars().next()?;
+        // (a control word after the backquote is no character)
+        if esc && c.is_ascii_alphabetic() && q[1..].starts_with(|d: char| d.is_ascii_alphabetic()) {
+            return None;
+        }
+        (i64::from(u32::from(c)), &q[c.len_utf8()..])
+    } else {
+        let e = r.find(|c: char| !c.is_ascii_digit()).unwrap_or(r.len());
+        if e == 0 {
+            return None;
+        }
+        // (a dimension's or a real's continuation: no integer)
+        if r[e..].starts_with(['.', ',']) || r[e..].chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            return None;
+        }
+        (r[..e].parse::<i64>().ok()?, &r[e..])
+    };
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    Some((if neg { -x } else { x }, rest))
 }
 
 /// `\\stepcounter{X}`, `\\refstepcounter{X}` (+1) and
@@ -5633,6 +5826,21 @@ mod tests {
             counter_steps(t),
             vec![("exercise".to_owned(), 1), ("page".to_owned(), 1), ("x@y".to_owned(), -3), ("d".to_owned(), 1)]
         );
+    }
+
+    #[test]
+    fn constant_assignments_at_the_base_level() {
+        let t = "\\finalhyphendemerits=0\n\\global\\clubpenalty 10000 % c\n\\usepackage{x}\n\\sfcode`\\.=1000\\relax\n\\tolerance=\\@M\n\\hbadness=10pt\n{\\widowpenalty=5}\n\\foo\n\\pretolerance=7\n\\catcode`\\@=11\n\\looseness=1";
+        assert_eq!(
+            const_assignments(t),
+            vec![
+                ("param:finalhyphendemerits".to_owned(), 0),
+                ("param:clubpenalty".to_owned(), 10000),
+                ("sf:46".to_owned(), 1000),
+                ("cat:64".to_owned(), 11),
+            ]
+        );
+        assert_eq!(const_assignments("\\ifx\\a\\b\n\\tolerance=1\n\\fi"), Vec::new());
     }
 
     #[test]

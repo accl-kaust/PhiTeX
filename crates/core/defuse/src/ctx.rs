@@ -200,7 +200,8 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
-    /// The definition of `f` reaching me, or the environment's value.
+    /// The definition of `f` reaching me, or the environment's value; an
+    /// alias definition followed ([`Ctx::define_alias`]).
     pub fn read(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
         self.check()?;
         if let Some(&x) = self.seen.get(&f) {
@@ -209,12 +210,56 @@ impl<'a> Ctx<'a> {
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
         self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
-        self.seen.insert(f, r.value);
-        Ok(r.value)
+        let x = self.follow_aliases(r.value)?;
+        self.seen.insert(f, x);
+        Ok(x)
     }
 
-    /// The definition of `f` reaching another position.
+    /// `x` with each alias definition it is followed: a read of the
+    /// aliased field before the alias's node, recorded as mine
+    /// ([`Ctx::define_alias`]).
+    fn follow_aliases(&mut self, mut x: Option<ValueId>) -> Result<Option<ValueId>, Stop> {
+        for _ in 0..32 {
+            let Some((g, at)) = x.and_then(|y| read::alias_of(self.values(), y)) else {
+                return Ok(x);
+            };
+            x = match self.read_at_raw(g, At::Before(at))? {
+                FieldAt::Def(y, _) => Some(y),
+                FieldAt::Unset | FieldAt::Gone => None,
+            };
+        }
+        Ok(x)
+    }
+
+    /// `f` := the value of `g` reaching node `at` (`At::Before(at)`), an
+    /// alias: a reader of `f` that this definition reaches is answered
+    /// with that value and reads `g` there itself, so a change of `g`'s
+    /// definition reaching `at` asks that reader again and never me; an
+    /// alias of an alias is followed. For a value a run passes on without
+    /// looking at it (a page-layer register's symbol copied into another
+    /// register, docs/spec-state-model.md §2.2).
+    pub fn define_alias(&mut self, f: Field, g: Field, at: NodeId, loc: Locality) {
+        let x = read::alias_value(self.values(), g, at);
+        self.product.defs.push(DefRec { f, loc, value: x, rel: None });
+    }
+
+    /// The definition of `f` reaching another position; an alias
+    /// definition followed ([`Ctx::define_alias`]).
     pub fn read_at(&mut self, f: Field, at: At) -> Result<FieldAt, Stop> {
+        let r = self.read_at_raw(f, at)?;
+        if let FieldAt::Def(x, by) = r
+            && read::alias_of(self.values(), x).is_some()
+        {
+            return Ok(match self.follow_aliases(Some(x))? {
+                Some(y) => FieldAt::Def(y, by),
+                None => FieldAt::Unset,
+            });
+        }
+        Ok(r)
+    }
+
+    /// [`Ctx::read_at`] with an alias definition as it is.
+    fn read_at_raw(&mut self, f: Field, at: At) -> Result<FieldAt, Stop> {
         self.check()?;
         self.before_read(f);
         let (anchor, r) = match at {
@@ -236,11 +281,19 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    /// `read` through a path: the run depends only on the path's answer.
+    /// `read` through a path: the run depends only on the path's answer
+    /// (an alias definition: on all of it, followed).
     pub fn read_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
         self.check()?;
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        if let Some(x) = r.value
+            && read::alias_of(self.values(), x).is_some()
+        {
+            self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
+            let y = self.follow_aliases(r.value)?;
+            return Ok(read::apply_path(self.eng, y, p));
+        }
         let x = through(self.eng, r, p);
         self.record(ReadKind::Field { f, at: Anchor::Me }, p, x);
         Ok(x)

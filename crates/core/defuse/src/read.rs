@@ -1080,3 +1080,43 @@ fn reaching_at_visible(eng: &Engine, f: Field, anchor: NodeId, inclusive: bool) 
         return Some(visible_before(eng, f, &target, seg.lo));
     }
 }
+
+/// The tag of an alias definition's value (`Ctx::define_alias`): `[ALIAS,
+/// g, at]`, "the value of `g` reaching node `at`".
+pub(crate) const ALIAS: &str = "\u{10FFFF}alias";
+
+/// The field and node an alias definition's value names, if `x` is one.
+#[must_use]
+pub fn alias_of(v: &Values, x: ValueId) -> Option<(Field, NodeId)> {
+    v.with_list(x, |xs| {
+        if xs.len() != 3 || !v.with_str(xs[0], |s| s == ALIAS).unwrap_or(false) {
+            return None;
+        }
+        let n = v.as_int(xs[2])?;
+        Some((Field(xs[1]), NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes()))))
+    })
+    .flatten()
+}
+
+/// The value an alias definition files (`Ctx::define_alias`): `f`'s
+/// definition is "the value of `g` reaching `at`". A client that keeps
+/// such a definition in its own state publishes this value with
+/// `Ctx::define_with` to the same effect, and knows it again by
+/// [`alias_of`].
+#[must_use]
+pub fn alias_value(v: &Values, g: Field, at: NodeId) -> ValueId {
+    v.list(vec![v.str(ALIAS), g.0, v.int(i64::from_ne_bytes(at.raw().to_ne_bytes()))])
+}
+
+/// `x` with its alias definitions followed (`Ctx::define_alias`), as a
+/// read before each alias's node gives them, unrecorded: what a relation
+/// on an aliased field adds to.
+pub(crate) fn through_aliases(eng: &Engine, mut x: Option<ValueId>) -> Option<ValueId> {
+    for _ in 0..32 {
+        let Some((g, at)) = x.and_then(|y| alias_of(&eng.values, y)) else {
+            return x;
+        };
+        x = reaching_at(eng, g, at, false).and_then(|r| r.value);
+    }
+    x
+}

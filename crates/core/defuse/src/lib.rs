@@ -81,5 +81,6 @@ pub use api::{
     SeqMonoid, Settled, Step, Stop, SumMonoid, Times, UnitId,
 };
 pub use ctx::{Ctx, View};
+pub use read::{alias_of, alias_value};
 pub use engine::Engine;
 pub use values::{Collected, Field, FxHashMap, FxHashSet, FxHasher, SeqNode, Value, ValueId, Values, hash_bytes, hash_words};

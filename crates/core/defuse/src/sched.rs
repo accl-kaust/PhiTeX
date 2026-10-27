@@ -128,6 +128,8 @@ pub(crate) struct WorkerLog {
     pub(crate) commit_by_op: FxHashMap<OpId, (u64, u64)>,
     pub(crate) causes: Vec<(NodeId, Cause)>,
     pub(crate) refuted_by_field: FxHashMap<Field, u64>,
+    /// The commits' refuted predictions by field ([`crate::Report::predictions_refuted_by_field`]).
+    pub(crate) pred_refuted_by_field: FxHashMap<Field, u64>,
     pub(crate) run_times: Vec<(NodeId, Duration)>,
     /// Loop-back readers past `Limits::final_reruns` (`allow_final_rerun`).
     pub(crate) capped: Vec<NodeId>,
