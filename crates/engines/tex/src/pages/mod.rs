@@ -96,26 +96,183 @@ impl PageKey {
 /// A fired page as the loop defines it and the finisher reads it
 /// (`SPEC.md` §2.3 "its page"): the old `FinishIn` without `j` (no page
 /// index: a page's content is its own) and without any other page's
-/// content. Fields: `nth`, `normal`, `special`, `hint`, `classes`,
-/// `piece`, `k`, `in_material`, `after`, `spans`, `rtns`, `fold`,
-/// `params`, `best`, `output_penalty`, `holding`, `held`, `top_marks`,
-/// `post`, `post_markers`, `post_k`, `prev_fire`, `inf`, `vers`, with
-/// the old docs. Encoded as one value by `Page::encode`/`decode` (the old
-/// `FinishIn::args`/`of`, moved).
-#[derive(Clone)]
+/// content. Encoded as one value by [`Page::encode`]/[`Page::decode`]
+/// (the old `FinishIn::args`/`of`, moved).
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Page {
+    /// The piece the page fired in (the finisher is placed right after
+    /// it) and the pages fired in it before this one: the page's place
+    /// among the finishers placed after that piece.
     pub key: PageKey,
-    // (the rest: the old FinishIn's fields, see the doc)
+    /// The ordinary pages fired up to this one, with it where it is one.
+    pub normal: i64,
+    /// Whether `\outputpenalty` is -10001 or less (§1013).
+    pub special: bool,
+    /// The output routine's hint where the page fired
+    /// ([`crate::hints::routine_hint`]), encoded; unit for the default
+    /// routine.
+    pub hint: ValueId,
+    /// The insertion classes on the page (§1018: the boxes its fire
+    /// fills).
+    pub classes: Vec<u16>,
+    /// The candidate it fired at (§994's `build_page` call).
+    pub k: u32,
+    /// Whether it fired in the material the page before left (the
+    /// routine's, the material carried), before any item of its piece
+    /// after that page's candidate.
+    pub in_material: bool,
+    /// The window of [`PITEMS`] its spans read: from after this node (none:
+    /// the unit's start) to its piece.
+    pub after: Option<phitex_defuse::NodeId>,
+    /// Where each item the builder took for the page came from, in order,
+    /// from where the page began to its fire: the held-over insertions and
+    /// the routine's material of the page before first, the material
+    /// carried, then the pieces' items.
+    pub spans: Vec<Span>,
+    /// The routines' material the spans name ([`Src::Rtn`]), by page:
+    /// the pages before this one counted back from it (1 the page just
+    /// before), as the spans name them.
+    pub rtns: Vec<(i64, ValueId)>,
+    /// The builder's state where the page began: the main list's fold
+    /// and the page parameters in force (a `T_PAGE_PARAMS` marker).
+    pub fold: FoldState,
+    pub params: Option<ValueId>,
+    /// The builder's decisions where it fired (§1005–§1017): the best
+    /// break's index on the page, `\outputpenalty` there, whether
+    /// `\holdinginserts` was positive, the insertions held over.
+    pub best: u32,
+    pub output_penalty: i32,
+    pub holding: bool,
+    pub held: u32,
+    /// The marks in force where the page began (`\topmark` and its
+    /// classes, §1012): `[[class, mark]…]`.
+    pub top_marks: ValueId,
+    /// How many of the spans the post-output build of the page before
+    /// takes (§1026: the routine's material and the held-over insertions
+    /// as they are, a piece's items carried folded again with their
+    /// builds and markers spent), and what that build reads besides: the
+    /// insertion classes' registers on its material (`T_INS_PARAMS`
+    /// markers) and its candidate. None for the first page.
+    pub post: u32,
+    pub post_markers: Vec<ValueId>,
+    pub post_k: u32,
+    /// The piece the page before fired in (its raw id, -1 none) and
+    /// `\deadcycles` as its routine left it ([`RTN`]'s third element):
+    /// what §1054's `\end` reads in the post-output build and in the
+    /// rest of that piece.
+    pub prev_fire: (i64, i64),
+    /// The items of its spans that are the best break of a page before,
+    /// a penalty: 10000 since that page fired (§1013).
+    pub inf: Vec<Src>,
+    /// The version of each piece its spans name, as the page builder
+    /// folded it (the piece's [`crate::vprof::VPROF`] unit, which its
+    /// [`PITEMS`] unit holds too): a finisher reading a unit of another
+    /// version runs on a page fired before that piece ran again, and
+    /// makes no page ([`Run::assemble_page`]).
+    pub vers: Vec<(i64, ValueId)>,
 }
 
 impl Page {
+    /// The page as one value (the old `FinishIn::args`' page and its
+    /// node's place, moved).
     pub(crate) fn encode(&self, v: &Values) -> ValueId {
-        todo!("Page::encode: the old FinishIn::args, moved")
+        let raw = |n: phitex_defuse::NodeId| v.int(i64::from_ne_bytes(n.raw().to_ne_bytes()));
+        v.list(vec![
+            raw(self.key.piece),
+            v.int(i64::from(self.k)),
+            v.int(i64::from(self.in_material)),
+            self.after.map_or_else(|| v.int(-1), raw),
+            v.list(self.spans.iter().flat_map(|s| span_ints(v, s.src, s.len)).collect()),
+            v.list(self.rtns.iter().flat_map(|&(j, x)| [v.int(j), x]).collect()),
+            v.int(i64::from(self.fold.sf)),
+            v.int(i64::from(self.fold.pd)),
+            v.int(i64::try_from(self.fold.since_bp).unwrap_or(0)),
+            self.params.unwrap_or(ValueId::UNIT),
+            v.int(i64::from(self.best)),
+            v.int(i64::from(self.output_penalty)),
+            v.int(i64::from(self.holding)),
+            v.int(i64::from(self.held)),
+            self.top_marks,
+            v.int(i64::from(self.key.nth)),
+            v.int(i64::from(self.post)),
+            v.list(self.post_markers.clone()),
+            v.int(i64::from(self.post_k)),
+            v.int(self.prev_fire.0),
+            v.int(self.prev_fire.1),
+            v.list(self.inf.iter().flat_map(|&src| span_ints(v, src, 1)).collect()),
+            v.list(self.vers.iter().flat_map(|&(p, x)| [v.int(p), x]).collect()),
+            self.hint,
+            v.int(self.normal),
+            v.int(i64::from(self.special)),
+            v.list(self.classes.iter().map(|&n| v.int(i64::from(n))).collect()),
+        ])
     }
 
+    /// [`Page::encode`]'s page; `None` on any other value.
     pub(crate) fn decode(v: &Values, x: ValueId) -> Option<Page> {
-        todo!("Page::decode: the old FinishIn::of, moved")
+        let p = list_of(v, x);
+        if p.len() != 27 {
+            return None;
+        }
+        let n = |i: usize| int_of(v, p[i]);
+        let ints = |i: usize| list_of(v, p[i]);
+        Some(Page {
+            key: PageKey {
+                piece: node_of(n(0)),
+                nth: u32::try_from(n(15)).unwrap_or(0),
+            },
+            normal: n(24),
+            special: n(25) != 0,
+            hint: p[23],
+            classes: ints(26).into_iter().filter_map(|x| u16::try_from(int_of(v, x)).ok()).collect(),
+            k: u32::try_from(n(1)).unwrap_or(0),
+            in_material: n(2) != 0,
+            after: (n(3) != -1).then(|| node_of(n(3))),
+            spans: ints(4).as_chunks::<5>().0.iter().filter_map(|c| span_of_ints(v, c)).collect(),
+            rtns: ints(5).as_chunks::<2>().0.iter().map(|c| (int_of(v, c[0]), c[1])).collect(),
+            fold: FoldState {
+                sf: i32::try_from(n(6)).unwrap_or(1000),
+                pd: i32::try_from(n(7)).unwrap_or(IGNORE_DEPTH),
+                since_bp: usize::try_from(n(8)).unwrap_or(0),
+            },
+            params: some(p[9]),
+            best: u32::try_from(n(10)).unwrap_or(0),
+            output_penalty: i32::try_from(n(11)).unwrap_or(0),
+            holding: n(12) != 0,
+            held: u32::try_from(n(13)).unwrap_or(0),
+            top_marks: p[14],
+            post: u32::try_from(n(16)).unwrap_or(0),
+            post_markers: ints(17),
+            post_k: u32::try_from(n(18)).unwrap_or(0),
+            prev_fire: (n(19), n(20)),
+            inf: ints(21).as_chunks::<5>().0.iter().filter_map(|c| span_of_ints(v, c).map(|s| s.src)).collect(),
+            vers: ints(22).as_chunks::<2>().0.iter().map(|c| (int_of(v, c[0]), c[1])).collect(),
+        })
     }
+}
+
+/// A span in a page's value, inline: `tag, a, b, c, len` (tags 0 piece,
+/// 1 routine, 2 held), flat in the list.
+fn span_ints(v: &Values, src: Src, len: u32) -> [ValueId; 5] {
+    let (t, a, b, c) = match src {
+        Src::Piece { piece, item } => (0, piece, i64::from(item), 0),
+        Src::Rtn { page, item } => (1, page, i64::from(item), 0),
+        Src::Held { piece, item, from } => (2, piece, i64::from(item), i64::from(from)),
+    };
+    [v.int(t), v.int(a), v.int(b), v.int(c), v.int(i64::from(len))]
+}
+
+/// [`span_ints`]' span.
+fn span_of_ints(v: &Values, c: &[ValueId]) -> Option<Span> {
+    let n = |i: usize| c.get(i).map_or(0, |&y| int_of(v, y));
+    let u = |i: usize| u32::try_from(n(i)).unwrap_or(0);
+    let src = match n(0) {
+        0 => Src::Piece { piece: n(1), item: u(2) },
+        1 => Src::Rtn { page: n(1), item: u(2) },
+        2 => Src::Held { piece: n(1), item: u(2), from: u(3) },
+        _ => return None,
+    };
+    Some(Span { src, len: u(4) })
 }
 
 /// The pieces' main-list items, one unit per piece (and per paragraph's
@@ -143,18 +300,6 @@ pub(crate) const GDEFS: &str = "gdefs";
 /// must not move after its readers ran again on it, and the output's
 /// writers (`crate::assemble`).
 pub(crate) const PAGES_END: &str = "pages:end";
-
-/// Where the page after a finisher's begins, defined by that finisher for
-/// the text after it: `[anchor, j, normal, sf, pd, since_bp, params,
-/// profile]`, the piece the page fired in (the text after it folds the
-/// profiles after that piece), the pages fired, the ordinary ones, the
-/// main list's fold, the page parameters in force, and what the next
-/// page begins with as a profile (the held-over insertions, the routine's
-/// list, the material carried, the rest of the piece). Read only by
-/// `\pagegoal`, `\pagetotal` and their kin in the text
-/// ([`Feedback::PageSoFar`], [`Run::page_dimen`]): nothing else reads a
-/// finisher's view of the next page.
-pub(crate) const PAGE_START: &str = "pages:start";
 
 /// A `T_SET_PAGE` marker's slot for `\deadcycles` set by the text
 /// (§1246): after the eight of `\pagegoal` and its kin (§1245).
@@ -316,14 +461,6 @@ pub(crate) fn from_pieces(v: &Values, f: Field) -> bool {
 /// contribution), as the link reads them whole: a `crate::val::CatMonoid`
 /// fold, not a sequence's.
 pub(crate) const LINK_ITEMS: &str = "pdf:items";
-
-/// The field every finisher defines at its position: what its routine
-/// gave back ([`RTN`]'s value) as `[piece, nth, output]`, the piece its
-/// page fired in and the pages fired in it before. The step after a
-/// finisher reads it there; one naming another page (its finisher not
-/// yet in) is no answer: the step runs on its guess and is re-asked when
-/// its finisher's comes in.
-pub(crate) const PAGE_OUT: &str = "pages:out";
 
 /// One from every finisher's run, at its position, summed: the finishers
 /// that have run, which the writers count against [`PAGES_END`]'s pages

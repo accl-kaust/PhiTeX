@@ -220,6 +220,9 @@ pub(crate) struct Ops {
     pub fin_defs_start: std::sync::Arc<std::sync::Mutex<std::sync::Arc<FinTable>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The profile units the page loop folded over all its runs
+    /// (`crate::pages::Run::fold_unit`; `Stats::units_folded`).
+    pub units_folded: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The integer registers named by `\countdef` so far, by name (a
     /// LaTeX counter X's register is `\c@X`'s): what a node's text steps
     /// is predicted on them ([`crate::hints::counter_rels`]); a name
@@ -2659,8 +2662,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let (marker, tagged) = if op == self.ops.finish {
             // (the page: its piece and the pages fired in it before it,
             // `crate::api::doc_order`)
-            let anchor = crate::pages::FinishIn::of(v, self.cx.args())
-                .map_or(-1, |f| i64::from_ne_bytes(f.piece.raw().to_ne_bytes()));
+            let anchor = self
+                .fin_page()
+                .map_or(-1, |f| i64::from_ne_bytes(f.key.piece.raw().to_ne_bytes()));
             let page = v.list(vec![v.int(anchor), v.int(self.page_nth())]);
             let mut t = vec![page, e];
             // (the piece its break is inside of and the candidate: what
@@ -5110,11 +5114,12 @@ impl<'c, 'a> Run<'c, 'a> {
         // next page step reads, `crate::pages::PAGE_OUT`)
         let out = self.fin.as_ref().and_then(|c| c.rtn).unwrap_or(ValueId::UNIT);
         if op == self.ops.finish
-            && let Some(fin) = crate::pages::FinishIn::of(self.v, self.cx.args())
+            && let Some(key) = self.fin_page().map(|f| f.key)
+            && self.fin.as_ref().is_some_and(|c| c.rtn.is_some())
         {
             let v = self.v;
-            let x = crate::pages::page_out_value(v, fin.piece, fin.nth, out);
-            self.cx.define_with(v.field(crate::pages::PAGE_OUT), x, Locality::Global);
+            let x = crate::pages::page_out_value(v, key.piece, key.nth, out);
+            self.cx.define_with(key.field(v, crate::pages::PAGE_OUT), x, Locality::Global);
             self.cx.contribute(v.field(crate::pages::FIN_DONE), v.int(1));
         }
         if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {

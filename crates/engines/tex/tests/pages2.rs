@@ -11,7 +11,7 @@ use phitex_tex::Options;
 
 /// The runs of an operation in a build.
 fn runs_of(b: &phitex_tex::Build, op: &str) -> u64 {
-    b.stats.runs_by_op.iter().find(|(o, _)| o == op).map_or(0, |(_, n)| *n)
+    b.stats.runs_by_op.iter().find(|(o, _)| *o == op).map_or(0, |(_, n)| *n)
 }
 
 /// The live nodes of an operation.
@@ -161,7 +161,7 @@ fn page_fixtures_are_byte_identical() {
 }
 
 fn runs_of_report(r: &phitex_tex::Report, op: &str) -> u64 {
-    r.runs_by_op.iter().find(|(o, _)| o == op).map_or(0, |(_, n)| *n)
+    r.runs_by_op.iter().find(|(o, _)| *o == op).map_or(0, |(_, n)| *n)
 }
 
 fn page_of_paragraph(b: &phitex_tex::Build, i: usize) -> usize {

@@ -444,3 +444,21 @@ pub fn plain_paragraphs(pars: usize, pdf: bool) -> (String, String) {
     let new = format!("{}wurds{}", &src[..at], &src[at + 5..]);
     (src, new)
 }
+
+/// A scratch directory of its own under the tests' temporary directory,
+/// made empty.
+#[allow(dead_code)]
+pub fn scratch(name: &str) -> PathBuf {
+    let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).expect("a scratch directory");
+    d
+}
+
+/// The document edited to `src` whole, through the build's edit path:
+/// what that edit ran.
+#[allow(dead_code)]
+pub fn rebuild(b: &mut Build, src: &str) -> phitex_tex::Report {
+    b.edit(src);
+    b.stats.last.clone()
+}

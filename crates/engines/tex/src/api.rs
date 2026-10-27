@@ -1464,6 +1464,16 @@ pub struct Stats {
     /// The fields whose speculative reads were refuted, with counts,
     /// most first.
     pub refuted_by_field: Vec<(String, u64)>,
+    /// Nodes the placements made, by operation, over the build's
+    /// evaluations (a placement kept makes none).
+    pub placed_by_op: Vec<(&'static str, u64)>,
+    /// The profile units the page loop folded over all its runs.
+    pub units_folded: u64,
+    /// The units of each accumulator the last evaluation ended with
+    /// (`vprof`: the profiles the pieces contributed).
+    pub units_now: Vec<(&'static str, u64)>,
+    /// What the last build or edit's evaluations ran ([`RunReport`]).
+    pub last: RunReport,
     /// The engine's speculative runs: kept with outstanding
     /// assumptions, confirmed, and whose assumptions failed.
     pub speculations: u64,
@@ -1780,7 +1790,49 @@ fn print_round(t: std::time::Duration, r: &Report) {
     );
 }
 
+/// What one build or edit ran, over its evaluations: its runs, by
+/// operation, and the nodes its placements made.
+#[derive(Clone, Debug, Default)]
+pub struct RunReport {
+    pub runs: u64,
+    pub runs_by_op: Vec<(&'static str, u64)>,
+    pub placed_by_op: Vec<(&'static str, u64)>,
+}
+
+impl RunReport {
+    /// The nodes of operation `op` its placements made.
+    #[must_use]
+    pub fn placements_made(&self, op: &str) -> usize {
+        self.placed_by_op.iter().find(|x| x.0 == op).map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
+    }
+}
+
 impl Stats {
+    /// The nodes of operation `op` the placements made over the build.
+    #[must_use]
+    pub fn placements_of(&self, op: &str) -> usize {
+        self.placed_by_op.iter().find(|x| x.0 == op).map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
+    }
+
+    /// The profile units the page loop (`op`, "pages") folded over all
+    /// its runs.
+    #[must_use]
+    pub fn units_folded(&self, op: &str) -> u64 {
+        if op == "pages" { self.units_folded } else { 0 }
+    }
+
+    /// The units accumulator `field` holds at the build's end.
+    #[must_use]
+    pub fn units_contributed(&self, field: &str) -> u64 {
+        self.units_now.iter().find(|x| x.0 == field).map_or(0, |x| x.1)
+    }
+
+    /// The readers re-asked through field `name` over the build.
+    #[must_use]
+    pub fn refuted_by(&self, name: &str) -> usize {
+        self.refuted_by_field.iter().filter(|e| e.0 == name).map(|e| usize::try_from(e.1).unwrap_or(usize::MAX)).sum()
+    }
+
     /// One evaluation's wall time on `threads` threads, and the
     /// operations' counters since the last ([`crate::exec::take_counters`]).
     fn add_exec(&mut self, threads: usize, wall: std::time::Duration, by_kind: &[(&'static str, std::time::Duration, u64)], busy: std::time::Duration, peak: usize) {
@@ -1902,6 +1954,23 @@ impl Stats {
             self.run_times = ts.iter().take(10).map(|&(n, t)| (n.raw(), t)).collect();
         }
         self.page_steps += Report::by_op(&r.runs_by_op, "finish");
+        for &(k, n) in &r.placed_by_op {
+            match self.placed_by_op.iter_mut().find(|x| x.0 == k) {
+                Some(x) => x.1 += n,
+                None => self.placed_by_op.push((k, n)),
+            }
+            match self.last.placed_by_op.iter_mut().find(|x| x.0 == k) {
+                Some(x) => x.1 += n,
+                None => self.last.placed_by_op.push((k, n)),
+            }
+        }
+        self.last.runs += r.runs;
+        for &(k, n) in &r.runs_by_op {
+            match self.last.runs_by_op.iter_mut().find(|x| x.0 == k) {
+                Some(x) => x.1 += n,
+                None => self.last.runs_by_op.push((k, n)),
+            }
+        }
         for &(k, n) in &r.runs_by_op {
             match self.runs_by_op.iter_mut().find(|x| x.0 == k) {
                 Some(x) => x.1 += n,
@@ -2247,6 +2316,7 @@ impl Graph {
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
             scope_learned: Arc::default(),
             watch: Arc::default(),
@@ -2956,6 +3026,12 @@ impl Graph {
             }
             crate::timeline::lap("engine: the accounting printed (PHITEX_TEX_TIME only)");
             stats.add(&r);
+            stats.units_folded = self.ops.units_folded.load(std::sync::atomic::Ordering::Relaxed);
+            {
+                let v = self.eng.values();
+                let n = self.eng.acc_value(unit, v.field(crate::vprof::VPROF)).map_or(0, |x| v.seq_to_vec(x).len());
+                stats.units_now = vec![(crate::vprof::VPROF, u64::try_from(n).unwrap_or(0))];
+            }
             stats.env_calls = self.env_calls;
             stats.add_reruns(&self.eng, &r);
             stats.add_refuted(&self.eng, &r);
@@ -4945,6 +5021,7 @@ impl Build {
     /// replaced, inserted or removed, and the graph re-evaluated.
     pub fn edit(&mut self, text: &str) {
         let t0 = std::time::Instant::now();
+        self.stats.last = RunReport::default();
         let _ = self.edits.send(text);
         self.settle();
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -6423,6 +6500,48 @@ impl Build {
                 (what, kind.to_owned(), field)
             })
             .collect()
+    }
+
+    /// The live nodes of operation `op`.
+    #[must_use]
+    pub fn nodes_by_op(&self, op: &str) -> usize {
+        let e = &self.g.eng;
+        e.order(self.unit).into_iter().filter(|&n| e.node_info(n).is_some_and(|i| i.op == op)).count()
+    }
+
+    /// The index of the first page shipped whose text (its characters, a
+    /// space for each glue and each box's end) holds `s`; `usize::MAX`
+    /// where none does.
+    #[must_use]
+    pub fn page_of_text(&self, s: &str) -> usize {
+        fn text(list: &[phitex_typeset::node::Node], out: &mut String) {
+            use phitex_typeset::node::Node;
+            for n in list {
+                match n {
+                    Node::Char { ch, .. } => out.push(char::from_u32(u32::from(*ch)).unwrap_or('?')),
+                    Node::Lig(l) => out.extend(l.original.iter().map(|&c| char::from_u32(u32::from(c)).unwrap_or('?'))),
+                    Node::Box(b) => {
+                        text(&b.list, out);
+                        out.push(' ');
+                    }
+                    Node::Glue(_) => out.push(' '),
+                    _ => {}
+                }
+            }
+        }
+        let v = self.g.eng.values();
+        let pages = self.g.eng.acc_value(self.unit, v.field("pages")).map(|x| v.seq_to_vec(x)).unwrap_or_default();
+        pages
+            .iter()
+            .position(|&p| {
+                let b = list_of(v, p).first().copied().unwrap_or(ValueId::UNIT);
+                let mut t = String::new();
+                if let Some(phitex_typeset::node::Node::Box(bx)) = crate::nodes::decode(v, b, &mut crate::nodes::Side::default()) {
+                    text(&bx.list, &mut t);
+                }
+                t.contains(s)
+            })
+            .unwrap_or(usize::MAX)
     }
 
     /// The pages shipped, first first: a hash of what each shows (a PDF
