@@ -585,6 +585,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             p.state = r.state;
         }
     }
+    // (a run that went on from its last run's state rests on that run's
+    // reads: kept, but those it read again)
+    let own_reads = p.reads.len();
+    if p.resumed.get()
+        && let Some(r) = node.run_record()
+    {
+        let again: FxHashSet<(ReadKind, PathId)> = p.reads.iter().map(|x| (x.kind.clone(), x.path)).collect();
+        p.reads.extend(r.reads.iter().filter(|x| !again.contains(&(x.kind.clone(), x.path))).cloned());
+    }
     for d in &mut p.defs {
         if let Some(c) = d.rel {
             d.value = rel_value_at(eng, d.f, node.id, c);
@@ -1361,10 +1370,19 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             read::answer_in(eng, node, &r.kind, r.path, &mut memo) != r.seen
         })
     });
+    // (a read kept from the run its state came from no longer holds: the
+    // state is stale, and the next run starts from nothing; one that
+    // took none clears that)
+    node.state_stale.store(refuted.is_some_and(|i| i >= own_reads), Ordering::Release);
     let cause = match refuted.map(|i| &rec.reads[i].kind) {
         Some(ReadKind::Field { f, .. }) => Some(Cause::Changed { field: *f, site: None }),
         Some(ReadKind::Env { f }) => Some(Cause::Environment { field: *f }),
-        Some(ReadKind::Fold { f, .. } | ReadKind::Next { f, .. }) => Some(Cause::Range { field: *f, by: node.id }),
+        // (where the change lies the check does not know: at the range's
+        // start, so a loop resuming from its state goes back before it)
+        Some(ReadKind::Fold { f, from: start, .. } | ReadKind::Next { f, after: start }) => Some(Cause::Range {
+            field: *f,
+            by: start.or_else(|| first_of_unit(eng, node)).unwrap_or(node.id),
+        }),
         Some(ReadKind::Placed { .. }) => Some(Cause::Output { of: node.id }),
         Some(ReadKind::Following { .. }) => Some(Cause::Structure),
         None => anchor_gone.then_some(Cause::Structure),
@@ -1383,6 +1401,24 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     st.reask_ns = ns(t0).saturating_sub(st.commit_ns);
     st
+}
+
+/// The first node of `n`'s unit.
+fn first_of_unit(eng: &Engine, n: &Node) -> Option<NodeId> {
+    let mut cur = eng.seg_for_pos(read::unit_start(eng, n)).map(|s| s.id);
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.unit != n.unit && seg.lo > read::unit_start(eng, n) {
+            return None;
+        }
+        if seg.unit == n.unit
+            && let Some((_, &x)) = seg.inner.read().nodes.iter().next()
+        {
+            return Some(x);
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    None
 }
 
 /// What the lock decided of a walk from a changed definition.

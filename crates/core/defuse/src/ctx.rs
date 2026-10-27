@@ -47,6 +47,9 @@ pub struct Ctx<'a> {
     pub(crate) seen: FxHashMap<Field, Option<ValueId>>,
     /// Where the last `next_contribution` that found none stopped.
     pub(crate) stop_at: Option<NodeId>,
+    /// Why this run was asked for, as it began (`woken_by`): a cause a
+    /// re-ask stores while it runs is the next run's.
+    pub(crate) woke: Option<Cause>,
 }
 
 fn stop() -> Stop {
@@ -71,12 +74,14 @@ impl<'a> Ctx<'a> {
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
                 unchanged: false,
                 state: None,
+                resumed: std::cell::Cell::new(false),
             },
             views: Vec::new(),
             ep: u64::MAX,
             follow_at: None,
             seen: FxHashMap::default(),
             stop_at: None,
+            woke: me.woke.lock().as_ref().map(|w| w.cause.clone()),
             last: me.run_record(),
         }
     }
@@ -519,11 +524,18 @@ impl<'a> Ctx<'a> {
 
     /// What my last run stored with `park`, if it did; `None` on a first
     /// run, after a run that stored nothing, and after an edit of my text.
+    /// A run that takes it goes on from what the last run read: those
+    /// reads are kept with this run's (the ones it reads again replaced),
+    /// so a change behind where it resumes still asks it again.
     pub fn resumed(&self) -> Option<ValueId> {
-        if matches!(self.woken_by(), Some(Cause::Edited)) {
+        if matches!(self.woken_by(), Some(Cause::Edited)) || self.me.state_stale.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
-        self.last.as_ref().and_then(|r| r.state)
+        let st = self.last.as_ref().and_then(|r| r.state);
+        if st.is_some() {
+            self.product.resumed.set(true);
+        }
+        st
     }
 
     /// Whether node `a` stands before node `b` on the line (both alive). A
@@ -539,7 +551,7 @@ impl<'a> Ctx<'a> {
     /// creation; an edit). A loop resumes from the checkpoint before the
     /// site. `None` where the engine recorded none.
     pub fn woken_by(&self) -> Option<Cause> {
-        self.me.woke.lock().as_ref().map(|w| w.cause.clone())
+        self.woke.clone()
     }
 
     /// Forgets my reads of `f` in this run: the commit records none.

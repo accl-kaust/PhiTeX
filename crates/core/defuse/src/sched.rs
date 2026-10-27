@@ -723,6 +723,9 @@ pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
         enqueue(eng, w, n, wake);
         return true;
     }
+    if n.state() == State::Dirty {
+        merge_woke(eng, n, wake);
+    }
     false
 }
 
@@ -747,8 +750,42 @@ pub(crate) fn mark_dirty(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
                     return true;
                 }
             }
-            State::Dirty | State::RunningDirty | State::Inert | State::RunningInert | State::Gone => return false,
+            State::Dirty | State::RunningDirty => {
+                merge_woke(eng, n, wake);
+                return false;
+            }
+            State::Inert | State::RunningInert | State::Gone => return false,
         }
+    }
+}
+
+/// A node asked again before the run its last cause asks for: the cause
+/// the run is told (`Ctx::woken_by`) is the one that asks most of it, an
+/// edit of its text first, then the change nearest its start (no site:
+/// the start itself), never one dropped for the cause already there: a
+/// loop resuming from its state past a change behind it would keep a sum
+/// that change made stale.
+fn merge_woke(eng: &Engine, n: &Node, wake: Wake) {
+    fn site(c: &Cause) -> Option<NodeId> {
+        match c {
+            Cause::Changed { site, .. } => *site,
+            Cause::Range { by, .. } => Some(*by),
+            Cause::Output { of } => Some(*of),
+            Cause::Rebind { from, to, .. } => from.or(*to),
+            Cause::Environment { .. } | Cause::Structure | Cause::Created { .. } | Cause::Edited => None,
+        }
+    }
+    let mut w = n.woke.lock();
+    let keep = match (&*w, &wake.cause) {
+        (_, Cause::Edited) | (None, _) => false,
+        (Some(o), _) if matches!(o.cause, Cause::Edited | Cause::Created { .. }) => true,
+        (Some(o), c) => {
+            let at = |s: Option<NodeId>| s.and_then(|s| eng.placed_node(s)).map_or(crate::order::Pos(0), |x| x.pos_hint());
+            at(site(&o.cause)) <= at(site(c))
+        }
+    };
+    if !keep {
+        *w = Some(wake);
     }
 }
 

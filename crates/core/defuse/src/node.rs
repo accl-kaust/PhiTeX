@@ -102,6 +102,10 @@ pub(crate) struct Node {
     /// placer or the placement before it. A placement kept where it stood
     /// is checked against it (`commit::stranded`).
     pub(crate) anchor: AtomicU64,
+    /// Its parked state (`Ctx::park`) rests on a read that moved: a run
+    /// that went on from it read one kept from the run before that no
+    /// longer holds. The next run is offered none (`Ctx::resumed`).
+    pub(crate) state_stale: AtomicBool,
     /// Where it stands among the nodes placed at its anchor: 0 a child
     /// of it, 1 after it and its children (another's `Ctx::follow_after`,
     /// or the placement after it in its placer's run), 2 its own
@@ -149,6 +153,7 @@ impl Node {
             claim_end: AtomicU64::new(0),
             follows: AtomicBool::new(false),
             anchor: AtomicU64::new(0),
+            state_stale: AtomicBool::new(false),
             slot: AtomicU8::new(0),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
@@ -353,7 +358,7 @@ pub(crate) struct DefRec {
 }
 
 /// Where a read looks, relative to the reader.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Anchor {
     Me,
     Before(NodeId),
@@ -363,7 +368,7 @@ pub(crate) enum Anchor {
     Final,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum ReadKind {
     Field {
         f: Field,
@@ -461,4 +466,7 @@ pub(crate) struct Product {
     pub(crate) unchanged: bool,
     /// `Ctx::park`: the state the next run resumes from.
     pub(crate) state: Option<ValueId>,
+    /// The run took its last run's state (`Ctx::resumed`): that run's
+    /// reads stand with this one's.
+    pub(crate) resumed: std::cell::Cell<bool>,
 }
