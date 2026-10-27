@@ -1367,7 +1367,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 let n = read::following_on(eng, node, i, &mut follow_at);
                 return read::apply_path(eng, n.map(|n| read::text_value(eng, &n)), r.path) != r.seen;
             }
-            read::answer_in(eng, node, &r.kind, r.path, &mut memo) != r.seen
+            !read::holds(eng, node, r, &mut memo)
         })
     });
     // (a read kept from the run its state came from no longer holds: the
@@ -1573,9 +1573,11 @@ fn reask_parent(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: Nod
     // reads few of them)
     let mut out = None;
     for rd in &r.reads {
-        if let ReadKind::Placed { i: j } = rd.kind
+        if let ReadKind::Placed { i: j, guess } = rd.kind
             && r.placed.get(j) == Some(&child)
-            && read::apply_path(eng, *out.get_or_insert_with(|| eng.node(child).run_record().map(|x| x.output)), rd.path) != rd.seen
+            && let o = *out.get_or_insert_with(|| eng.node(child).run_record().map(|x| x.output))
+            && !(guess && o.is_none())
+            && read::apply_path(eng, o, rd.path) != rd.seen
         {
             if mark_stale(
                 eng,

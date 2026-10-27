@@ -392,9 +392,12 @@ pub(crate) enum ReadKind {
         f: Field,
         after: Option<NodeId>,
     },
-    /// The output of the reader's `i`-th placement.
+    /// The output of the reader's `i`-th placement; with `guess`, one
+    /// that has not run yet answers what the reader saw (its guess,
+    /// `Ctx::placed_output_or`).
     Placed {
         i: usize,
+        guess: bool,
     },
     /// The `i`-th claimed sibling's (op, args).
     Following {

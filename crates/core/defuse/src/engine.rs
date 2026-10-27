@@ -1153,7 +1153,7 @@ impl Engine {
                     // fold broken since: not one that holds, so the node runs
                     // again and its run says)
                     reads.iter().all(|rd| {
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read::answer(self, self.node(*x), &rd.kind, rd.path) == rd.seen))
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read::holds(self, self.node(*x), rd, &mut read::FoldMemo::new())))
                             .unwrap_or(false)
                     })
                 })

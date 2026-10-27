@@ -593,6 +593,21 @@ pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut Fol
     x
 }
 
+/// Whether recorded read `rd` of `me` still holds: its answer is what it
+/// saw, or it read a guess of a placement's output that has not run yet
+/// (`Ctx::placed_output_or`).
+pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &mut FoldMemo) -> bool {
+    if let ReadKind::Placed { i, guess: true } = rd.kind
+        && let Some(r) = me.run_record()
+        && let Some(&c) = r.placed.get(i)
+        && eng.node(c).state() != State::Gone
+        && eng.node(c).run_record().is_none()
+    {
+        return true;
+    }
+    answer_in(eng, me, &rd.kind, rd.path, memo) == rd.seen
+}
+
 /// [`answer`], its folds from `memo`.
 pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, memo: &mut FoldMemo) -> Option<ValueId> {
     match kind {
@@ -637,7 +652,7 @@ pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, 
             let n = next_contribution(eng, *f, after);
             apply_path(eng, next_value(eng, &n), path)
         }
-        ReadKind::Placed { i } => {
+        ReadKind::Placed { i, .. } => {
             let r = me.run_record()?;
             let c = *r.placed.get(*i)?;
             let child = eng.node(c);

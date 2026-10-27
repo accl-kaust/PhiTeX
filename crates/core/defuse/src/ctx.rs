@@ -50,6 +50,9 @@ pub struct Ctx<'a> {
     /// Why this run was asked for, as it began (`woken_by`): a cause a
     /// re-ask stores while it runs is the next run's.
     pub(crate) woke: Option<Cause>,
+    /// My last run's placements by operation and arguments, made on the
+    /// first `placed_output_or`.
+    placed_keys: Option<FxHashMap<(OpId, Arc<[ValueId]>), NodeId>>,
 }
 
 fn stop() -> Stop {
@@ -82,6 +85,7 @@ impl<'a> Ctx<'a> {
             seen: FxHashMap::default(),
             stop_at: None,
             woke: me.woke.lock().as_ref().map(|w| w.cause.clone()),
+            placed_keys: None,
             last: me.run_record(),
         }
     }
@@ -426,8 +430,34 @@ impl<'a> Ctx<'a> {
             let n = self.eng.node(c);
             (n.state() != State::Gone).then(|| n.run_record().map(|r| r.output)).flatten()
         });
-        self.record(ReadKind::Placed { i }, PathId::WHOLE, out);
+        self.record(ReadKind::Placed { i, guess: false }, PathId::WHOLE, out);
         out
+    }
+
+    /// The output of the node my `i`-th placement of this run stands for
+    /// (my last run's of the same operation and arguments) if it has run,
+    /// else `guess`: recorded as seen, so a placement whose first output
+    /// is the guess re-asks me for nothing, and one that differs re-asks
+    /// me (a loop folding a child's result goes on on its guess).
+    pub fn placed_output_or(&mut self, i: usize, guess: ValueId) -> ValueId {
+        if self.placed_keys.is_none() {
+            let mut m: FxHashMap<(OpId, Arc<[ValueId]>), NodeId> = FxHashMap::default();
+            for &c in self.last.as_ref().map_or(&[][..], |r| &r.placed[..]) {
+                if let Some(n) = self.eng.placed_node(c).filter(|n| n.state() != State::Gone) {
+                    m.entry((n.op(), n.args())).or_insert(c);
+                }
+            }
+            self.placed_keys = Some(m);
+        }
+        let out = self.product.placements.get(i).and_then(|p| {
+            let (op, args) = p.key();
+            let c = *self.placed_keys.as_ref()?.get(&(op, Arc::from(args)))?;
+            let n = self.eng.node(c);
+            (n.state() != State::Gone).then(|| n.run_record().map(|r| r.output)).flatten()
+        });
+        let x = out.unwrap_or(guess);
+        self.record(ReadKind::Placed { i, guess: true }, PathId::WHOLE, Some(x));
+        x
     }
 
     /// `op` on `args` inline: the output. It reads at my position and its

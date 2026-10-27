@@ -1054,7 +1054,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         // meanwhile, panicked on inputs no longer current: run again)
         Err(_)
             if node.state() != State::Running
-                || cx.product.reads.iter().any(|rd| crate::read::answer(eng, node, &rd.kind, rd.path) != rd.seen) =>
+                || cx.product.reads.iter().any(|rd| !crate::read::holds(eng, node, rd, &mut crate::read::FoldMemo::new())) =>
         {
             drop(cx);
             Worker::add(&w.stale_panics, 1);
