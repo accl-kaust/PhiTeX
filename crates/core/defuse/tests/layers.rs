@@ -1,9 +1,8 @@
-//! Layers (`Operation::layer`): one layer is active at a time, the lowest
-//! with nodes dirty or running, and only its nodes run. A loop over the
-//! lower layers' contributions then runs once, over all of them, with no
-//! hole; a lower node a higher layer's commits re-ask runs once after
-//! that whole layer, before the layers above go on, so what they read of
-//! it is its final state.
+//! Layers (`Operation::layer`): a dirty node runs only while no node of a
+//! lower layer is dirty or running. A loop over the lower layers'
+//! contributions then runs once, over all of them, with no hole; and a
+//! lower node a higher layer's commit re-asks runs before the higher
+//! layers go on, so what they read of it is its final state.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -230,11 +229,11 @@ impl Operation for End {
 
 /// The stepper (layer 5) stands first on the line, the reader (layer 2)
 /// after it, the end (layer 6) last. The reader runs first, with no
-/// `page` yet; the stepper, active once the reader is done, defines it
-/// and re-asks the reader; layer 2 is active again once the stepper is
-/// done, the reader runs with its final answer, and the end, held
-/// throughout, runs last and sees 7 once. Nothing waits for ever: every
-/// active layer drains.
+/// `page` yet; the stepper, let go once the reader is done, defines it
+/// and re-asks the reader; the end, held while the reader is dirty
+/// again, runs once the reader has its final answer, and sees 7 once.
+/// Nothing waits for ever: the stepper's re-ask makes layer 2 busy again
+/// and the higher layers wait for it a second time.
 #[test]
 fn a_lower_node_re_asked_by_a_higher_layer_runs_before_the_higher_layers_go_on() {
     for threads in [1, 8] {
@@ -287,66 +286,4 @@ fn a_lower_layer_never_waits_for_a_higher_one() {
     assert_eq!(en.runs.load(Ordering::SeqCst), 1, "{r:?}");
     assert!(e.output(x).is_some(), "{r:?}");
     assert!(e.check_invariants().is_empty());
-}
-
-/// `[x, ms]`, layer 5: works `ms` milliseconds, then defines `page` := x,
-/// as one of several finishers each stepping a counter.
-struct Finisher {
-    runs: AtomicU64,
-}
-
-impl Operation for Finisher {
-    fn name(&self) -> &'static str {
-        "finisher"
-    }
-
-    fn layer(&self) -> u8 {
-        5
-    }
-
-    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        self.runs.fetch_add(1, Ordering::SeqCst);
-        let v = cx.values();
-        spin(v.as_int(cx.args()[1]).unwrap_or(0).unsigned_abs());
-        cx.define(v.field("page"), cx.args()[0]);
-        Ok(cx.args()[0])
-    }
-}
-
-/// Three finishers (layer 5) stand before a reader of `page` (layer 2)
-/// and the end (layer 6). The reader runs first, with no `page`. Each
-/// finisher's commit moves the definition reaching the reader and
-/// re-asks it; with one layer active at a time the reader is held while
-/// the finishers run, and runs once more after all three, seeing the
-/// last one's value, where "a lower layer never waits" ran it once per
-/// finisher. The end runs once, after that.
-#[test]
-fn a_node_re_asked_by_a_higher_layer_runs_once_after_that_layer_not_once_per_commit() {
-    for threads in [1, 8] {
-        let e = Engine::new();
-        let v = e.values();
-        let fi = Arc::new(Finisher { runs: AtomicU64::new(0) });
-        let fop = e.register(fi.clone());
-        let rd = Arc::new(Reader { runs: AtomicU64::new(0) });
-        let rop = e.register(rd.clone());
-        let en = Arc::new(End {
-            runs: AtomicU64::new(0),
-            seen: Mutex::new(Vec::new()),
-        });
-        let eop = e.register(en.clone());
-        let u = e.new_unit();
-        for (x, ms) in [(7, 0), (8, 20), (9, 40)] {
-            e.push(u, fop, vec![v.int(x), v.int(ms)]);
-        }
-        let r_ = e.push(u, rop, vec![]);
-        let x = e.push(u, eop, vec![]);
-        let r = e.evaluate(threads).unwrap();
-        assert_eq!(e.output(r_).and_then(|y| v.as_int(y)), Some(9), "-j{threads}: {r:?}");
-        assert_eq!(e.output(x).and_then(|y| v.as_int(y)), Some(9), "-j{threads}: {r:?}");
-        assert_eq!(fi.runs.load(Ordering::SeqCst), 3, "-j{threads}: {r:?}");
-        assert_eq!(rd.runs.load(Ordering::SeqCst), 2, "-j{threads}: the reader ran before the finishers and once after all of them: {r:?}");
-        assert_eq!(en.runs.load(Ordering::SeqCst), 1, "-j{threads}: {r:?}");
-        assert_eq!(*en.seen.lock().unwrap(), vec![9], "-j{threads}: {r:?}");
-        assert!(e.check_invariants().is_empty(), "-j{threads}: {:?}", e.check_invariants());
-    }
 }

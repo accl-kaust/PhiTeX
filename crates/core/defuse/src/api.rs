@@ -304,18 +304,17 @@ pub trait Operation: Send + Sync {
         true
     }
 
-    /// The layer its nodes run in (default 0; at most 15). One layer is
-    /// active at a time, the lowest with nodes dirty or running, and only
-    /// its nodes run; a dirty node of another layer waits until its layer
-    /// is the active one. So a loop over the lower layers' contributions
-    /// starts when they are quiet, meets no hole and runs once over all
-    /// of them; a node that predicts what they define guesses from their
-    /// final state; and a lower node a higher layer's commits re-ask (a
-    /// paragraph that read a counter the pages' finishers step) runs
-    /// again once, after that whole layer, not once per commit. The nodes
-    /// of one layer run beside each other as before, and the order of
-    /// definitions is the line's whatever the layers, so the result does
-    /// not depend on it.
+    /// The layer its nodes run in (default 0; at most 15). A dirty node
+    /// runs only while no node of a lower layer is dirty or running: the
+    /// layers below it are quiet when it starts, so a loop over their
+    /// contributions meets no hole and runs once over all of them, and a
+    /// node that predicts what they define guesses from their final
+    /// state. A node of a lower layer never waits for a higher one: a
+    /// higher node's commit may re-ask a lower node (a page's finisher
+    /// moving a counter a paragraph read), and then the higher layers
+    /// wait for it again before they go on. The nodes of one layer run
+    /// beside each other as before, and the order of definitions is the
+    /// line's whatever the layers, so the result does not depend on it.
     fn layer(&self) -> u8 {
         0
     }
@@ -504,7 +503,7 @@ pub struct Report {
     /// The reader records of earlier runs dropped at the evaluation's
     /// quiet points.
     pub readers_swept: u64,
-    /// Runs put off at their start because another layer was active
+    /// Runs put off at their start because a lower layer was not quiet
     /// (`Operation::layer`): each wait of a node counts once.
     pub layer_holds: u64,
     /// The collections the evaluation made (`Limits::collect_at_bytes`):
