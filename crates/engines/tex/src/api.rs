@@ -1865,6 +1865,7 @@ impl Stats {
         self.loop_rounds = self.loop_rounds.max(u64::from(r.passes));
         self.pass_runs.clone_from(&r.pass_runs);
         self.version = r.version;
+        self.absorbed.extend_from_slice(&r.absorbed);
         self.predictions_confirmed += r.predictions_confirmed;
         self.predictions_refuted += r.predictions_refuted;
         self.round_times.push(r.times);
@@ -2211,6 +2212,7 @@ impl Graph {
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             counters: Arc::default(),
             scope_learned: Arc::default(),
+            watch: Arc::default(),
             node_rec: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pdf_cmds: Arc::default(),
             class_proj,
@@ -4771,6 +4773,8 @@ impl Build {
         self.staged = false;
         let t_all = std::time::Instant::now();
         self.progress_offsets();
+        self.g.watch.progress.begin();
+        *self.g.ops.watch.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(self.g.watch.clone());
         crate::timeline::lap("engine: the nodes' offsets (progress)");
         let mut stats = Stats::default();
         self.g.queries.clear();

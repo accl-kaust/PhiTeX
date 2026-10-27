@@ -362,6 +362,7 @@ impl Operation for Exec {
         // `crate::pkgrec::is_recorded`)
         let load = crate::pkgrec::is_load(cx.values(), &args);
         let _nt = crate::exec::NodeTimer::new(if load { "load" } else { "exec" }, cx.node().raw());
+        let _busy = crate::exec::Busy::new(&ops(&self.0).watch, 1, cx.node().raw());
         let hint = crate::hints::hint_of_args(reg(&self.0), cx.values(), &args);
         let (node, t0, spec) = (
             cx.node().raw(),
@@ -479,6 +480,7 @@ impl Operation for Put {
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let _busy = crate::exec::Busy::new(&ops(&self.0).watch, 2, cx.node().raw());
         let args = cx.args().to_vec();
         let o = ops(&self.0);
         let v = cx.values();

@@ -1874,6 +1874,7 @@ impl Operation for Finish {
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let _busy = crate::exec::Busy::new(&ops(&self.0).watch, 3, cx.node().raw());
         let t_fin = std::time::Instant::now();
         let _ = phitex_pdf::phase::take();
         let pos = cx.args().to_vec();

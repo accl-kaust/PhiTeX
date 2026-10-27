@@ -12,7 +12,6 @@
 //! thread.
 
 use phitex_defuse::FxHashMap;
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -141,8 +140,9 @@ pub(crate) fn clock() -> &'static dyn Clock {
 /// (`Build::progress`): one slot per worker holding the job it runs
 /// ([`Progress::pack`]: the operation and the node's byte offset in the
 /// document; 0 when idle), the jobs finished in this evaluation and
-/// the jobs known so far (growing as nodes unfold). Workers only store
-/// into atomics (relaxed), once at a job's start and once at its end.
+/// the jobs begun so far (a run is a job: a node run again counts
+/// again). Workers only store into atomics (relaxed), once at a job's
+/// start and once at its end.
 #[derive(Debug)]
 pub struct Progress {
     slots: Box<[AtomicU64]>,
@@ -189,6 +189,12 @@ impl Progress {
             .collect()
     }
 
+    /// An evaluation begins: no jobs known or done.
+    pub(crate) fn begin(&self) {
+        self.done.store(0, Ordering::Relaxed);
+        self.total.store(0, Ordering::Relaxed);
+    }
+
     /// The jobs finished in this evaluation.
     #[must_use]
     pub fn done(&self) -> u64 {
@@ -219,8 +225,6 @@ impl Watch {
 }
 
 thread_local! {
-    /// The slot of the job this thread runs, while it runs one.
-    static CURRENT: RefCell<Option<(Watch, usize)>> = const { RefCell::new(None) };
     /// This thread's worker number, for its slot.
     static WORKER: usize = {
         static NEXT: AtomicUsize = AtomicUsize::new(1);
@@ -228,14 +232,35 @@ thread_local! {
     };
 }
 
-/// A run begins: `op` on `node` (the job's slot says so).
-pub(crate) fn note(op: u16, node: u64) {
-    CURRENT.with(|c| {
-        if let Some((w, i)) = &*c.borrow() {
-            let off = w.offsets.get(&node).copied().unwrap_or(Progress::INSIDE);
-            w.progress.slots[*i].store(Progress::pack(op, off), Ordering::Relaxed);
+/// A run in a progress slot (`Build::progress`): one more job known
+/// when it begins, its operation and its node's offset in the slot while
+/// it runs, idle and one more job done when it ends.
+pub(crate) struct Busy(Option<(Arc<Progress>, usize)>);
+
+impl Busy {
+    /// `op` (as [`Progress::pack`]) begins on `node` on this thread, in
+    /// the progress the build watches now (`Ops::watch`, set before each
+    /// evaluation with the text nodes' offsets).
+    pub(crate) fn new(watch: &std::sync::RwLock<Option<Watch>>, op: u16, node: u64) -> Busy {
+        let g = watch.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(w) = g.as_ref() else {
+            return Busy(None);
+        };
+        let i = WORKER.with(|x| *x) % w.progress.slots.len();
+        let off = w.offsets.get(&node).copied().unwrap_or(Progress::INSIDE);
+        w.progress.total.fetch_add(1, Ordering::Relaxed);
+        w.progress.slots[i].store(Progress::pack(op, off), Ordering::Relaxed);
+        Busy(Some((w.progress.clone(), i)))
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        if let Some((p, i)) = self.0.take() {
+            p.slots[i].store(0, Ordering::Relaxed);
+            p.done.fetch_add(1, Ordering::Relaxed);
         }
-    });
+    }
 }
 
 /// What the operations of an evaluation did, counted where they run

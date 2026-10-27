@@ -1134,6 +1134,7 @@ impl Engine {
             rep.run_times.append(&mut log.run_times);
         }
         rep.passes = rep.final_reruns + 1;
+        rep.absorbed = workers.iter().flat_map(|w| std::mem::take(&mut w.log.lock().absorbed)).collect();
         let starts: Vec<u64> = workers.iter().flat_map(|w| std::mem::take(&mut w.log.lock().pass_starts)).collect();
         let mut at = 0;
         for s in starts.into_iter().chain([rep.runs]) {

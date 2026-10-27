@@ -110,6 +110,9 @@ pub(crate) struct WorkerLog {
     /// The runs made before each pass after the first began (the caller's
     /// worker only).
     pub(crate) pass_starts: Vec<u64>,
+    /// The edits taken during the evaluation: their version and the runs
+    /// made before (the caller's worker only).
+    pub(crate) absorbed: Vec<(u64, u64)>,
 }
 
 /// One worker's deques and counters (nanoseconds).
@@ -588,7 +591,7 @@ fn run_worker(
                 && last_absorb.elapsed() >= ABSORB_EVERY
             {
                 last_absorb = Instant::now();
-                if s.absorb(eng).is_some() {
+                if absorb(eng, pool, w, s) {
                     pool.drain_pending(eng, w);
                 }
             }
@@ -637,7 +640,7 @@ fn run_worker(
                     break;
                 }
                 last_absorb = Instant::now();
-                if s.absorb(eng).is_some() && pool.drain_pending(eng, w) > 0 {
+                if absorb(eng, pool, w, s) && pool.drain_pending(eng, w) > 0 {
                     continue;
                 }
             }
@@ -658,6 +661,18 @@ fn run_worker(
     let (sum, max) = take_wait();
     Worker::add(&w.lock_wait_ns, sum);
     Worker::max(&w.lock_wait_max_ns, max);
+}
+
+/// Edits taken from `s` during the evaluation: the engine's version is
+/// theirs (`Report::version`, `Settled::version`), and the log has them
+/// with the runs made before (`Report::absorbed`); whether there were any.
+fn absorb(eng: &Engine, pool: &Pool, w: &Worker, s: &mut dyn EditSource) -> bool {
+    let Some(v) = s.absorb(eng) else {
+        return false;
+    };
+    eng.set_version(v);
+    w.log.lock().absorbed.push((v, pool.shared.runs_now.load(Ordering::SeqCst)));
+    true
 }
 
 /// Queues a node made dirty (a new node, a released sibling): on `w`'s

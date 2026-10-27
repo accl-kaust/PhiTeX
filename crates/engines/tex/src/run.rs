@@ -232,6 +232,10 @@ pub(crate) struct Ops {
     /// closer closed the scope its node ran in. The brackets of a node
     /// not yet run are predicted on them ([`crate::hints::predicted_brackets`]).
     pub scope_learned: std::sync::Arc<std::sync::RwLock<crate::FxHashMap<String, bool>>>,
+    /// The progress the build watches and its text nodes' offsets, set
+    /// before each evaluation: each run holds a slot while it runs
+    /// ([`crate::exec::Busy`]).
+    pub watch: std::sync::Arc<std::sync::RwLock<Option<crate::exec::Watch>>>,
     /// [`crate::Options::node_records`].
     pub node_rec: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The class projection of meanings ([`crate::val::class_projection`],
@@ -955,14 +959,6 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::obs_flag!("PHITEX_LOOP_TRACE") {
             eprintln!("lb-run node {:x} op {op:?}", cx.node().raw());
         }
-        let code = if op == ops.exec {
-            1
-        } else if op == ops.put {
-            2
-        } else {
-            0
-        };
-        crate::exec::note(code, cx.node().raw());
         Run {
             _scope: crate::val::EpochScope::enter(v, cx.values_epoch()),
             cx,

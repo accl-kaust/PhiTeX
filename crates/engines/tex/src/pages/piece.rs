@@ -1663,6 +1663,7 @@ impl Operation for Resume {
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let _busy = crate::exec::Busy::new(&ops(&self.0).watch, 1, cx.node().raw());
         let args = cx.args().to_vec();
         let o = ops(&self.0);
         let t0 = std::time::Instant::now();

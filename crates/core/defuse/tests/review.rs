@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use phitex_defuse::{Ctx, Engine, Field, Limits, Monoid, NodeId, OpId, Operation, Stop, SumMonoid, ValueId, Values};
+use phitex_defuse::{Ctx, EditSource, Engine, Field, Limits, Monoid, NodeId, OpId, Operation, Stop, SumMonoid, UnitId, ValueId, Values};
 
 /// `[f, x]`: contributes x to f.
 struct Contrib;
@@ -270,6 +270,45 @@ fn a_panic_outside_a_run_ends_the_evaluation() {
     });
     let r = rx.recv_timeout(Duration::from_secs(30)).expect("the evaluation ends");
     assert_eq!(r.ok(), Some(true), "it ends with an error");
+}
+
+/// Sends one edit, version 5, the first time it is asked: a node more.
+struct OneEdit(UnitId, OpId, Field, bool);
+
+impl EditSource for OneEdit {
+    fn absorb(&mut self, eng: &Engine) -> Option<u64> {
+        if std::mem::replace(&mut self.3, true) {
+            return None;
+        }
+        let v = eng.values();
+        eng.push(self.0, self.1, vec![self.2.0, v.int(5)]);
+        Some(5)
+    }
+}
+
+#[test]
+fn an_edit_taken_during_an_evaluation_is_its_version() {
+    // The edit taken while the evaluation runs (not before it) sets the
+    // version the report gives, and the report lists it with the runs
+    // made before it: the version was left as it was.
+    let e = Engine::new();
+    let c = e.register(Arc::new(Contrib));
+    let fa = e.register(Arc::new(FoldAll));
+    let v = e.values();
+    let s = v.field("s");
+    e.declare_accumulator(s, Arc::new(SumMonoid));
+    let u = e.new_unit();
+    for _ in 0..50 {
+        e.push(u, c, vec![s.0, v.int(1)]);
+    }
+    let r = e.push(u, fa, vec![s.0]);
+    let mut src = OneEdit(u, c, s, false);
+    let rep = e.evaluate_absorbing(1, &mut src).unwrap();
+    assert_eq!(rep.version, 5);
+    assert_eq!(rep.absorbed.len(), 1, "{:?}", rep.absorbed);
+    assert_eq!(rep.absorbed[0].0, 5);
+    assert!(rep.absorbed[0].1 > 0, "taken after runs: {:?}", rep.absorbed);
+    assert_eq!(int(&e, r), 50);
 }
 
 /// `[n]`: places `n` children `Quiet` after itself and contributes 1 to

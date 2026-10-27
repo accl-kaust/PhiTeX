@@ -469,6 +469,9 @@ pub struct Report {
     pub passes: u32,
     /// The runs each pass made, in order (their sum is `runs`).
     pub pass_runs: Vec<u64>,
+    /// The edits taken during the evaluation (`EditSource::absorb`): each
+    /// one's version and the runs made before it.
+    pub absorbed: Vec<(u64, u64)>,
 }
 
 impl Report {
