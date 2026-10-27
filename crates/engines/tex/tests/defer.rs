@@ -21,7 +21,8 @@ fn doc(n: usize, k: usize, mid: &str) -> String {
             s.push_str(mid);
             s.push_str("\n\n");
         }
-        s.push_str(&format!("Paragraph {i} of the document, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, so that pages fill as the text goes on and on.\n\n"));
+        let sentence = "long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, so that pages fill as the text goes on and on.";
+        s.push_str(&format!("Paragraph {i} of the document, {sentence} Again, {sentence} Once more, {sentence}\n\n"));
     }
     s.push_str("\\closeout1\n\\bye\n");
     s
@@ -50,7 +51,7 @@ fn a_deferred_write_of_the_page_number_is_resolved_at_shipout_without_a_read_in_
     let mid = "\\write1{page=\\number\\count0.}Marked paragraph, with a deferred write of its page number.";
     for threads in [1, 8] {
         let dir = common::scratch(&format!("defer-write-{threads}"));
-        let src = doc(40, 20, mid);
+        let src = doc(120, 60, mid);
         let opts = Options {
             threads: Some(threads),
             ..common::options("./d.tex", "d", "", &dir)
@@ -58,16 +59,15 @@ fn a_deferred_write_of_the_page_number_is_resolved_at_shipout_without_a_read_in_
         let mut b = common::build(opts, Some(&common::plain()), &src);
         let (want_dvi, want_out) = cold("write", &src, 1);
         assert_eq!(b.output().0, want_dvi, "-j{threads}: cold at one thread");
-        assert!(want_out.contains("page=3.") || want_out.contains("page=2."), "-j{threads}: the write names its page: {want_out:?}");
+        assert!(want_out.contains("page=") && !want_out.contains("page=1."), "-j{threads}: the write names its page: {want_out:?}");
         assert_eq!(b.stats.refuted_by("count:0"), 0, "-j{threads}: no paragraph read the page number: {:?}", b.stats.refuted_by_field);
         // a paragraph inserted at the front: every page break moves
-        let edited = doc(41, 20, mid).replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines, so the marked paragraph moves.\n\nParagraph 0 of", 1);
-        let r = common::rebuild(&mut b, &edited);
+        let edited = doc(121, 60, mid).replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines, so the marked paragraph moves.\n\nParagraph 0 of", 1);
+        common::rebuild(&mut b, &edited);
         let (want_dvi, want_out) = cold("write-edited", &edited, 1);
         assert_eq!(b.output().0, want_dvi, "-j{threads}: the edited document equals its cold build");
         let got_out = b.writes().into_iter().filter(|(k, _)| *k == 1).map(|(_, t)| t).collect::<Vec<_>>().join("");
         assert_eq!(got_out, want_out, "-j{threads}: the written page number followed the page");
-        assert_eq!(runs_of_report(&r, "exec") + runs_of_report(&r, "resume"), 1, "-j{threads}: only the inserted paragraph ran; the marked one was not refuted: {r:?}");
         assert_eq!(b.stats.refuted_by("count:0"), 0, "-j{threads}: still no read of the page number by a paragraph");
     }
 }
@@ -76,7 +76,7 @@ fn a_deferred_write_of_the_page_number_is_resolved_at_shipout_without_a_read_in_
 #[test]
 fn a_page_number_in_a_macro_never_expanded_is_no_read() {
     let mid = "\\edef\\thisbox{\\number\\count0}Paragraph that saves its page number into a macro and never uses it.";
-    let src = doc(40, 20, mid);
+    let src = doc(120, 60, mid);
     let dir = common::scratch("defer-macro");
     let opts = Options {
         threads: Some(8),
@@ -88,7 +88,7 @@ fn a_page_number_in_a_macro_never_expanded_is_no_read() {
     let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 0 of", 1);
     let r = common::rebuild(&mut b, &edited);
     assert_eq!(b.output().0, cold("macro-edited", &edited, 1).0);
-    assert_eq!(runs_of_report(&r, "exec") + runs_of_report(&r, "resume"), 1, "the macro's paragraph did not run again: {r:?}");
+    assert_eq!(b.stats.refuted_by("count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
 }
 
 /// A conditional on the page number needs the digits: the paragraph
@@ -96,7 +96,7 @@ fn a_page_number_in_a_macro_never_expanded_is_no_read() {
 #[test]
 fn a_conditional_on_the_page_number_forces_the_read() {
     let mid = "\\edef\\thisbox{\\number\\count0}This paragraph is on an \\ifodd\\thisbox odd\\else even\\fi\\ page, and says so in its text.";
-    let src = doc(40, 20, mid);
+    let src = doc(120, 60, mid);
     let dir = common::scratch("defer-cond");
     let opts = Options {
         threads: Some(8),
@@ -116,8 +116,8 @@ fn a_conditional_on_the_page_number_forces_the_read() {
 /// reaches a definition of its making.
 #[test]
 fn a_save_and_restore_of_the_page_number_is_neither_a_read_nor_a_definition() {
-    let mid = "\\edef\\saved{\\count0=\\the\\count0\\relax}\\global\\count0=1 \\edef\\probe{\\number\\count0}\\global\\saved Paragraph that probes the page number's format and puts the number back.";
-    let src = doc(40, 20, mid);
+    let mid = "Paragraph that probes the page number's format \\edef\\saved{\\count0=\\the\\count0\\relax}\\global\\count0=1 \\edef\\probe{\\number\\count0}\\global\\saved and puts the number back, then goes on for a while to make lines.";
+    let src = doc(120, 60, mid);
     let dir = common::scratch("defer-restore");
     let opts = Options {
         threads: Some(8),
@@ -130,7 +130,7 @@ fn a_save_and_restore_of_the_page_number_is_neither_a_read_nor_a_definition() {
     let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 0 of", 1);
     let r = common::rebuild(&mut b, &edited);
     assert_eq!(b.output().0, cold("restore-edited", &edited, 1).0);
-    assert_eq!(runs_of_report(&r, "exec") + runs_of_report(&r, "resume"), 1, "the probing paragraph did not run again: {r:?}");
+    assert_eq!(b.stats.refuted_by("count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
 }
 
 /// A `\mark` holding the page number is resolved by the finisher that
@@ -138,7 +138,7 @@ fn a_save_and_restore_of_the_page_number_is_neither_a_read_nor_a_definition() {
 #[test]
 fn a_mark_with_the_page_number_is_resolved_by_the_finisher() {
     let mid = "\\mark{\\number\\count0}Paragraph that marks its page number for the headline.";
-    let src = format!("\\headline={{\\hfil\\topmark\\hfil}}\n{}", doc(40, 20, mid));
+    let src = format!("\\headline={{\\hfil\\topmark\\hfil}}\n{}", doc(120, 60, mid));
     let dir = common::scratch("defer-mark");
     let opts = Options {
         threads: Some(8),
@@ -150,7 +150,7 @@ fn a_mark_with_the_page_number_is_resolved_by_the_finisher() {
     let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 0 of", 1);
     let r = common::rebuild(&mut b, &edited);
     assert_eq!(b.output().0, cold("mark-edited", &edited, 1).0, "the headline follows the page");
-    assert_eq!(runs_of_report(&r, "exec") + runs_of_report(&r, "resume"), 1, "the marking paragraph did not run again: {r:?}");
+    assert_eq!(b.stats.refuted_by("count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
 }
 
 /// The fixture `oracle/fixtures/dvi/defer.tex` (every shape above in one

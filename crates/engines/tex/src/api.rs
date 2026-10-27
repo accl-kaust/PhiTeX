@@ -6668,10 +6668,6 @@ impl Build {
 
     /// The `\write` streams' lines: `(stream, text)`.
     #[must_use]
-    /// The definitions of field `field` filed by nodes of operation `op`
-    /// over the build (tests/defer.rs: a piece that restores a register
-    /// defines nothing). Filled by the deferred-reads implementation
-    /// (docs/spec-deferred-reads.md).
     /// The reads of fields whose name starts with `prefix` recorded by
     /// nodes of operation `op` over the build (tests/state.rs: per item
     /// used, never a table). Filled by the state-model rewrite.
@@ -6680,9 +6676,19 @@ impl Build {
         todo!("Build::reads_by_op (docs/spec-state-model.md §8)")
     }
 
+    /// The definitions of field `field` filed by the live nodes of
+    /// operation `op`, as their last runs left them (tests/defer.rs: a
+    /// piece that restores a register defines nothing,
+    /// docs/spec-deferred-reads.md).
     pub fn definitions_by_op(&self, op: &str, field: &str) -> u64 {
-        let _ = (op, field);
-        todo!("Build::definitions_by_op: the definitions of a field by an operation's nodes (docs/spec-deferred-reads.md)")
+        let eng = &self.g.eng;
+        let f = eng.values().field(field);
+        let n = eng
+            .defined_by_live(f)
+            .into_iter()
+            .filter(|(n, _)| eng.node_info(*n).is_some_and(|i| i.op == op))
+            .count();
+        u64::try_from(n).unwrap_or(u64::MAX)
     }
 
     pub fn writes(&self) -> Vec<(i64, String)> {

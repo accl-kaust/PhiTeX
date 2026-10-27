@@ -119,6 +119,13 @@ impl Run<'_, '_> {
                 }
                 cmd::CS_NAME => self.cs_name()?,
                 cmd::CONVERT => self.conv_toks()?,
+                cmd::SYM => {
+                    // (a deferred read's symbol where its digits are
+                    // needed: docs/spec-deferred-reads.md §2)
+                    if let Some(s) = crate::defer::sym_of(self.cur.tok) {
+                        crate::defer::expand_sym(self, s)?;
+                    }
+                }
                 cmd::THE => {
                     let toks = self.the_toks();
                     self.ck()?;
@@ -425,6 +432,19 @@ impl Run<'_, '_> {
                 if self.halt.is_some() {
                     return false;
                 }
+                // (a deferred read's symbol outside braces: TeX matched
+                // its digits one by one, docs/spec-deferred-reads.md §2)
+                if crate::defer::is_sym(tok)
+                    && let Some(sy) = crate::defer::sym_of(tok)
+                {
+                    match self.lift(|r| crate::defer::value(r, sy)) {
+                        Some(x) => {
+                            self.push_number(x);
+                            continue 'cont;
+                        }
+                        None => return false,
+                    }
+                }
                 if r < len && !is_match(&p[r]) && tok == p[r] {
                     // §394
                     r += 1;
@@ -631,10 +651,13 @@ impl Run<'_, '_> {
         if !self.next_ck()? {
             return Ok(false);
         }
+        // (a deferred read's symbol: TeX compared its first digit)
+        self.unsym_cur()?;
         let (p, h1, m1) = self.ifx_side()?;
         if !self.next_ck()? {
             return Ok(false);
         }
+        self.unsym_cur()?;
         let (c2, h2, m2) = self.ifx_side()?;
         if c2 != p {
             return Ok(false);
@@ -642,20 +665,37 @@ impl Run<'_, '_> {
         if c2 < cmd::CALL {
             return Ok(h2 == h1);
         }
-        if let (IfxMacro::At(a), IfxMacro::At(b)) = (&m1, &m2)
-            && let Some(same) = self.st.same_macro(*a, *b)
-        {
-            return Ok(same);
+        let fast = if let (IfxMacro::At(a), IfxMacro::At(b)) = (&m1, &m2) {
+            self.st.same_macro(*a, *b)
+        } else {
+            None
+        };
+        if fast == Some(true) {
+            return Ok(true);
         }
         let get = |r: &Self, m: IfxMacro| match m {
             IfxMacro::No => None,
             IfxMacro::At(l) => r.st.macro_at(l),
             IfxMacro::Rc(x) => Some(x),
         };
-        Ok(match (get(self, m1), get(self, m2)) {
-            (Some(a), Some(b)) => Rc::ptr_eq(&a, &b) || (a.params == b.params && a.body == b.body),
-            _ => false,
-        })
+        let (Some(a), Some(b)) = (get(self, m1), get(self, m2)) else {
+            return Ok(false);
+        };
+        if fast.is_none() && (Rc::ptr_eq(&a, &b) || (a.params == b.params && a.body == b.body)) {
+            return Ok(true);
+        }
+        // (bodies holding deferred reads' symbols: equal where TeX's
+        // digits are, docs/spec-deferred-reads.md §2)
+        let syms = |m: &Macro| m.params.iter().chain(m.body.iter()).any(|&t| crate::defer::is_sym(t));
+        if !syms(&a) && !syms(&b) {
+            return Ok(false);
+        }
+        let d = |r: &mut Self, xs: &[Tok]| -> R<Vec<Tok>> {
+            Ok(crate::defer::digits_of(r, xs)?.unwrap_or_else(|| xs.to_vec()))
+        };
+        let (pa, pb) = (d(self, &a.params)?, d(self, &b.params)?);
+        let (ba, bb) = (d(self, &a.body)?, d(self, &b.body)?);
+        Ok(pa == pb && ba == bb)
     }
 
     /// One side of `\ifx` (§507): the current token's command code, its
@@ -929,7 +969,15 @@ impl Run<'_, '_> {
         }
         self.get_x_token();
         self.ck()?;
-        let val = self.scan_something_internal(5, false)?;
+        // (a page-layer register alone, unread, in a piece: its symbol,
+        // docs/spec-deferred-reads.md §2)
+        self.defer_ok = self.defer_allowed();
+        let val = self.scan_something_internal(5, false);
+        self.defer_ok = false;
+        let val = val?;
+        if let Some(loc) = self.defer_hit.take() {
+            return Ok(vec![crate::defer::symbol_for(self, loc)]);
+        }
         Ok(match val {
             crate::scan::IVal::Toks(t) => t,
             crate::scan::IVal::Ident(f) => vec![self.font_id_tok(f)?],
@@ -952,24 +1000,16 @@ impl Run<'_, '_> {
     fn conv_toks(&mut self) -> R<()> {
         let c = self.cur.chr;
         if c == 0 {
-            // (`\number`: its digits onto the input, §465, no string made)
-            let n = self.scan_int()?;
-            let mut buf = [Tok::c(0); 11];
-            let mut k = buf.len();
-            let mut x = n.unsigned_abs();
-            loop {
-                k -= 1;
-                buf[k] = Tok::ch(12, u32::from(b'0') + x % 10);
-                x /= 10;
-                if x == 0 {
-                    break;
-                }
+            // (`\number`: its digits onto the input, §465, no string made;
+            // a page-layer register alone, unread, in a piece: its symbol,
+            // docs/spec-deferred-reads.md §2)
+            let n = self.scan_int_deferring()?;
+            if let Some(loc) = self.defer_hit.take() {
+                let t = crate::defer::symbol_for(self, loc);
+                self.push_toks([t]);
+                return Ok(());
             }
-            if n < 0 {
-                k -= 1;
-                buf[k] = Tok::ch(12, u32::from(b'-'));
-            }
-            self.push_toks(&buf[k..]);
+            self.push_number(n);
             return Ok(());
         }
         let mut s = String::new();
@@ -981,6 +1021,7 @@ impl Run<'_, '_> {
             2 => {
                 self.get_token();
                 self.ck()?;
+                self.unsym_cur()?;
                 let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
                 if self.cur.is_cs() {
                     print::sprint_cs(&mut s, self.cur.tok, esc);
@@ -991,6 +1032,7 @@ impl Run<'_, '_> {
             3 => {
                 self.get_token();
                 self.ck()?;
+                self.unsym_cur()?;
                 let (t, m) = (self.cur.tok, self.cur_mean()?);
                 let (c, h) = (self.cur.cmd, self.cur.chr);
                 let _ = t;
@@ -1006,6 +1048,43 @@ impl Run<'_, '_> {
             }
         }
         self.push_toks(str_toks(&s));
+        Ok(())
+    }
+
+    /// `n`'s digits onto the input, as `\number` gives them (§465).
+    pub(crate) fn push_number(&mut self, n: i32) {
+        let mut buf = [Tok::c(0); 11];
+        let mut k = buf.len();
+        let mut x = n.unsigned_abs();
+        loop {
+            k -= 1;
+            buf[k] = Tok::ch(12, u32::from(b'0') + x % 10);
+            x /= 10;
+            if x == 0 {
+                break;
+            }
+        }
+        if n < 0 {
+            k -= 1;
+            buf[k] = Tok::ch(12, u32::from(b'-'));
+        }
+        self.push_toks(&buf[k..]);
+    }
+
+    /// A deferred read's symbol as the current token where a command
+    /// takes the token unexpanded (`\string`, `\meaning`, `\ifx`): TeX
+    /// had its digits there, so they are put on the input and the first
+    /// taken instead.
+    pub(crate) fn unsym_cur(&mut self) -> R<()> {
+        while self.cur.cmd == cmd::SYM {
+            let Some(s) = crate::defer::sym_of(self.cur.tok) else {
+                break;
+            };
+            let x = crate::defer::value(self, s)?;
+            self.push_number(x);
+            self.get_token();
+            self.ck()?;
+        }
         Ok(())
     }
 
@@ -1111,6 +1190,10 @@ impl Run<'_, '_> {
 
     /// `show_token_list` with the current `\escapechar` and category codes.
     pub(crate) fn show_toks_into(&mut self, s: &mut String, toks: &[Tok]) -> R<()> {
+        // (a deferred read's symbol prints its digits: forced in a piece,
+        // resolved in a finisher, docs/spec-deferred-reads.md §2)
+        let digits = crate::defer::digits_of(self, toks)?;
+        let toks = digits.as_deref().unwrap_or(toks);
         let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
         // single-character names: their current category code (§262)
         let mut cats: crate::FxHashMap<u32, i64> = crate::FxHashMap::default();

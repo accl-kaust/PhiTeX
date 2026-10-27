@@ -222,9 +222,12 @@ pub(crate) fn take_protected(a: &mut i32) -> bool {
 /// pdfTeX §478 (e-TeX): a protected macro is not expanded while a token
 /// list is built with expansion; true if `cur` was one (it is now
 /// `\relax`-like, `no_expand_flag`).
+/// A deferred read's symbol is kept so too (docs/spec-deferred-reads.md
+/// §3): `\edef`, `\mark`, a `\write` expanded keep it as one token.
 pub(crate) fn protect(r: &mut Run<'_, '_>) -> R<bool> {
-    if (cmd::CALL..cmd::END_TEMPLATE).contains(&r.cur.cmd)
-        && matches!(&r.cur_mean()?, Mean::Macro(x) if x.flags & PROTECTED != 0)
+    if r.cur.cmd == cmd::SYM
+        || ((cmd::CALL..cmd::END_TEMPLATE).contains(&r.cur.cmd)
+            && matches!(&r.cur_mean()?, Mean::Macro(x) if x.flags & PROTECTED != 0))
     {
         r.cur.cmd = cmd::RELAX;
         r.cur.chr = crate::val::NO_EXPAND_FLAG;

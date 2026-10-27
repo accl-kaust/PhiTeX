@@ -929,6 +929,52 @@ impl State {
         }
     }
 
+    /// Location `loc` back to unread: an integer register a restore to
+    /// its own symbol gave back the value reaching the run, which the
+    /// run never read (`Run::reg_restore`).
+    pub(crate) fn unload(&mut self, loc: Loc) {
+        self.changing(loc);
+        self.muts += 1;
+        let e = &mut self.slot(loc).e;
+        e.flags = 0;
+        e.id = None;
+    }
+
+    /// The run's definitions of `loc` taken back: made at the base level
+    /// (no group of the run saved or bound it; the caller knows no
+    /// candidate passed since the first, `Run::reg_first_def`). The
+    /// location is then unread (a read of it reads the engine's value
+    /// again) and the run publishes nothing of it: a register put back
+    /// to the value reaching the run (`crate::defer::restore_reaching`).
+    /// False, nothing changed, otherwise.
+    pub(crate) fn undefine_fresh(&mut self, loc: Loc) -> bool {
+        let Some(mi) = self
+            .slot_ref(loc)
+            .filter(|s| s.save_gid == 0)
+            .and_then(|s| usize::try_from(s.meta).ok())
+            .filter(|&m| m > 0)
+            .map(|m| m - 1)
+        else {
+            return false;
+        };
+        let m = &self.metas[mi];
+        if m.publ.is_none() || m.ldef_gid.is_some() {
+            return false;
+        }
+        self.changing(loc);
+        self.muts += 1;
+        let e = &mut self.slot(loc).e;
+        e.flags = 0;
+        e.id = None;
+        let m = self.meta_mut(mi);
+        m.publ = None;
+        m.ldef_stamp = 0;
+        m.ldef_local = false;
+        m.ldef_gid = None;
+        self.base_defs.retain(|&l| l != loc);
+        true
+    }
+
     pub(crate) fn preload(&mut self, loc: Loc, x: Option<ValueId>) {
         self.changing(loc);
         self.muts += 1;

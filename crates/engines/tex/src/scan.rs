@@ -194,6 +194,20 @@ impl Run<'_, '_> {
         self.scan_int_from(negative)
     }
 
+    /// `scan_int` (§440) for `\number` (docs/spec-deferred-reads.md §2):
+    /// with no sign, the operand's one internal quantity may be deferred
+    /// ([`Run::defer_ok`], taken by the outermost
+    /// `scan_something_internal`; the signs' expansion before it reads
+    /// as any scan does). [`Run::defer_hit`] says whether it was.
+    pub(crate) fn scan_int_deferring(&mut self) -> R<i32> {
+        self.radix = 0;
+        let negative = self.skip_signs()?;
+        self.defer_ok = !negative && self.defer_allowed();
+        let r = self.scan_int_from(negative);
+        self.defer_ok = false;
+        r
+    }
+
     /// `scan_int` (§440) for an `\ifnum` operand ([`Num`]): a number
     /// that is a macro's whole body, the macro not this run's own, is kept
     /// as that macro (its meaning not read), directly or as all of an
@@ -258,6 +272,9 @@ impl Run<'_, '_> {
     fn scan_int_from(&mut self, negative: bool) -> R<i32> {
         let mut ok_so_far = true;
         let mut val: i32;
+        // (a deferring scan, [`Run::scan_int_deferring`]: an internal
+        // quantity only, never digits or a constant)
+        let defer = std::mem::take(&mut self.defer_ok);
         if self.is_other(b'`') {
             // §442
             self.get_token();
@@ -299,6 +316,7 @@ impl Run<'_, '_> {
                 }
             }
         } else if self.cur.cmd >= cmd::CHAR_GIVEN && self.cur.cmd <= cmd::MAX_INTERNAL {
+            self.defer_ok = defer;
             val = self.scan_something_internal(0, false)?.int();
         } else {
             // §444
@@ -700,6 +718,9 @@ impl Run<'_, '_> {
     pub(crate) fn scan_something_internal(&mut self, level: u8, negative: bool) -> R<IVal> {
         let m = self.cur.chr;
         let c = self.cur.cmd;
+        // (a deferring scan's quantity, [`Run::defer_ok`]: only this one,
+        // not a register read while it is scanned)
+        let defer = std::mem::take(&mut self.defer_ok);
         let mut val = match c {
             cmd::DEF_CODE => {
                 // §414
@@ -740,7 +761,14 @@ impl Run<'_, '_> {
                     IVal::Ident(self.scan_font_ident()?)
                 }
             }
-            cmd::ASSIGN_INT => IVal::Int(crate::val::i32_of(self.v, self.qget(c, m)?)),
+            cmd::ASSIGN_INT => {
+                let l = self.quantity_loc(c, m);
+                if defer && self.defer_at(l) {
+                    IVal::Int(0)
+                } else {
+                    IVal::Int(crate::val::i32_of(self.v, self.get_loc(l)?))
+                }
+            }
             cmd::ASSIGN_DIMEN => IVal::Dimen(crate::val::i32_of(self.v, self.qget(c, m)?)),
             cmd::ASSIGN_GLUE => {
                 let x = self.qget(c, m)?;
@@ -827,7 +855,14 @@ impl Run<'_, '_> {
                 // §427
                 let n = self.scan_eight_bit_int()?;
                 match m {
-                    0 => IVal::Int(crate::val::i32_of(self.v, self.reg(0, n)?)),
+                    0 => {
+                        let l = self.reg_loc(0, n);
+                        if defer && self.defer_at(l) {
+                            IVal::Int(0)
+                        } else {
+                            IVal::Int(crate::val::i32_of(self.v, self.get_loc(l)?))
+                        }
+                    }
                     1 => IVal::Dimen(crate::val::i32_of(self.v, self.reg(1, n)?)),
                     2 => {
                         let x = self.reg(2, n)?;
@@ -984,7 +1019,9 @@ impl Run<'_, '_> {
                         let q = self.the_toks();
                         self.ck()?;
                         body.extend(q);
-                    } else if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND
+                    } else if self.cur.cmd >= cmd::END_TEMPLATE
+                        && self.cur.cmd != cmd::DONT_EXPAND
+                        && self.cur.cmd != cmd::SYM
                     {
                         break;
                     } else {

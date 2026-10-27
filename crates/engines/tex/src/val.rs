@@ -137,6 +137,11 @@ pub(crate) mod cmd {
     pub const LONG_OUTER_CALL: u8 = 114;
     pub const END_TEMPLATE: u8 = 115;
     pub const DONT_EXPAND: u8 = 116;
+    /// A deferred read's symbol (`crate::defer`): expandable, forced or
+    /// resolved by `expand`, kept as a protected macro is in a list built
+    /// with expansion; past [`END_TEMPLATE`], so every test of that range
+    /// names it.
+    pub const SYM: u8 = 117;
     /// The command of the halt sentinel ([`crate::run::Run::raise`]): no
     /// handler matches it; a stored one is a bug.
     pub const HALT: u8 = 255;

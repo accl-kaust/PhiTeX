@@ -56,7 +56,7 @@ impl Run<'_, '_> {
                 self.cmd_trace();
             }
             if self.cur.cmd > cmd::MAX_COMMAND {
-                if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
+                if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND && self.cur.cmd != cmd::SYM {
                     return Ok(());
                 }
                 self.expand();
@@ -356,7 +356,7 @@ impl Run<'_, '_> {
                             self.ck()?;
                             continue;
                         }
-                        if c >= cmd::END_TEMPLATE && c != cmd::DONT_EXPAND {
+                        if c >= cmd::END_TEMPLATE && c != cmd::DONT_EXPAND && c != cmd::SYM {
                             break;
                         }
                         self.expand();
@@ -1047,11 +1047,21 @@ impl Run<'_, '_> {
     fn assign_int(&mut self, global: bool) -> R<()> {
         let l = self.quantity_loc(cmd::ASSIGN_INT, self.cur.chr);
         self.scan_optional_equals()?;
+        // (`\c@page=` its own symbol: a restore, docs/spec-deferred-reads.md §2)
+        if crate::defer::try_restore(self, l, global)? {
+            return Ok(());
+        }
         let n = self.scan_int()?;
+        // (set back to the value reaching the run, which it read: a
+        // restore, `crate::defer::restores`)
+        if crate::defer::restores(self, l, n, global)? {
+            return Ok(());
+        }
         // (an integer register's: a map, `crate::regfold`)
         if self.reg_map_ok(l, global)? {
             self.reg_apply_map(l, crate::regfold::Affine::set(n));
         } else {
+            self.note_reg_def(l);
             self.set_loc(l, Entry::int(n), global);
         }
         Ok(())
@@ -1160,6 +1170,11 @@ impl Run<'_, '_> {
         };
         if q == cmd::REGISTER {
             self.scan_optional_equals()?;
+            // (the register set to its own symbol: a restore, neither a
+            // read nor a definition, docs/spec-deferred-reads.md §2)
+            if p == 0 && crate::defer::try_restore(self, l, global)? {
+                return Ok(());
+            }
         } else {
             let _ = self.scan_keyword("by")?;
         }
@@ -1168,6 +1183,9 @@ impl Run<'_, '_> {
         // the run contributes, `crate::regfold`)
         if p == 0 && (q == cmd::REGISTER || q == cmd::ADVANCE) && self.reg_map_ok(l, global)? {
             let x = self.scan_int()?;
+            if q == cmd::REGISTER && crate::defer::restores(self, l, x, global)? {
+                return Ok(());
+            }
             let map = if q == cmd::ADVANCE {
                 crate::regfold::Affine::add(x)
             } else {
@@ -1219,6 +1237,12 @@ impl Run<'_, '_> {
                 // "Arithmetic overflow"
                 return Ok(());
             };
+            if p == 0 && q == cmd::REGISTER && crate::defer::restores(self, l, r, global)? {
+                return Ok(());
+            }
+            if p == 0 {
+                self.note_reg_def(l);
+            }
             self.in_advance = q == cmd::ADVANCE;
             self.set_loc(l, Entry::int(r), global);
             self.in_advance = false;

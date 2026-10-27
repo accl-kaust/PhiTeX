@@ -457,7 +457,7 @@ impl Run<'_, '_> {
                 }
                 continue;
             }
-            if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
+            if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND && self.cur.cmd != cmd::SYM {
                 return;
             }
             let nr = std::mem::replace(&mut self.num_reads, false);
@@ -492,7 +492,7 @@ impl Run<'_, '_> {
                 }
                 continue;
             }
-            if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
+            if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND && self.cur.cmd != cmd::SYM {
                 return Ok(());
             }
             let nr = std::mem::replace(&mut self.num_reads, false);

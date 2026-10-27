@@ -636,6 +636,26 @@ pub(crate) struct Run<'c, 'a> {
     /// value, composed in order, contributed at its end instead of
     /// definitions ([`crate::regfold`], [`Run::reg_write_map`]).
     pub reg_pending: crate::regfold::Maps,
+    /// Set by `\the` and `\number` in a piece around the scan of their
+    /// one internal quantity (docs/spec-deferred-reads.md §2): the
+    /// outermost `scan_something_internal` takes it, so a register read
+    /// inside that scan (a register's number, a conditional) is a read.
+    pub defer_ok: bool,
+    /// The register a scan under [`Run::defer_ok`] met unread: the
+    /// caller makes its symbol ([`crate::defer::symbol_for`]).
+    pub defer_hit: Option<Loc>,
+    /// Per integer register, its value as first read from the engine,
+    /// before any map of this run: what a restore to the register's own
+    /// symbol puts back ([`Run::reg_restore`]).
+    pub reg_loaded_base: phitex_defuse::FxHashMap<Loc, i32>,
+    /// The registers this run defers besides `count:0`
+    /// ([`crate::defer::deferrable`]), made once a run.
+    pub defer_regs: Option<Vec<Loc>>,
+    /// Per integer register the run defined at its base level, the
+    /// candidates it had passed at its first definition: a restore takes
+    /// the definitions back only where none passed since
+    /// ([`crate::defer::restore_reaching`]).
+    pub reg_first_def: phitex_defuse::FxHashMap<Loc, u32>,
     /// Whether the node is a package load at the unit's top level, whose
     /// run is recorded (`crate::pkgrec`) and publishes its net effect.
     pub rec_load: bool,
@@ -1013,6 +1033,11 @@ impl<'c, 'a> Run<'c, 'a> {
             skip_from: (None, 0),
             skip_first: Vec::new(),
             reg_pending: crate::regfold::Maps::default(),
+            defer_ok: false,
+            defer_hit: None,
+            reg_loaded_base: phitex_defuse::FxHashMap::default(),
+            defer_regs: None,
+            reg_first_def: phitex_defuse::FxHashMap::default(),
             rec_load: false,
             no_pull: false,
             st: crate::runstate::State::new(),
@@ -1604,6 +1629,15 @@ impl<'c, 'a> Run<'c, 'a> {
             self.st.fill(loc, x);
             return Ok(());
         }
+        // (an integer register this run set, `set c`: its value is the
+        // map's whatever reaches the run, so no read; not a read either,
+        // [`Run::reg_restore`] unloads it)
+        if let Some(own) = self.reg_pending.get(loc)
+            && !own.keep
+        {
+            self.st.preload(loc, Some(self.v.int(i64::from(own.add))));
+            return Ok(());
+        }
         let f = self.loc_field(loc);
         let r = self.cx.read(f);
         if r.is_err() {
@@ -1631,6 +1665,7 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         let mut x = r?;
+        self.note_loaded_base(loc, x);
         // (an integer register: this run's own map writes before the read
         // applied, [`Run::reg_apply_map`])
         if let Some(own) = self.reg_pending.get(loc) {
@@ -1724,13 +1759,106 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.count_reg(loc)
             );
         }
-        let own = self.reg_pending.get(loc).unwrap_or(crate::regfold::Affine::ID);
+        let own = self.reg_pending.get(loc);
+        if own.is_none() && self.st.is_loaded(loc) && !self.reg_loaded_base.contains_key(&loc) {
+            let x = self.st.int_of(loc, self.v);
+            self.reg_loaded_base.insert(loc, x);
+        }
+        let own = own.unwrap_or(crate::regfold::Affine::ID);
         self.reg_pending.insert(loc, own.then(map));
         if self.st.is_loaded(loc) {
             let x = map.apply(self.st.int_of(loc, self.v));
             self.st.fill(loc, Some(self.v.int(i64::from(x))));
         }
         self.muts += 1;
+    }
+
+    /// An integer register's engine value as first loaded
+    /// ([`Run::reg_loaded_base`]).
+    /// Kept for the registers a restore can name: `\count0`–`\count255`
+    /// and the deferred ones ([`Run::defer_regs`]).
+    fn note_loaded_base(&mut self, loc: Loc, x: Option<ValueId>) {
+        if (loc as usize).wrapping_sub(crate::fields::REG0) < 256
+            || self.defer_regs.as_ref().is_some_and(|r| r.contains(&loc))
+        {
+            let v = self.v;
+            self.reg_loaded_base.entry(loc).or_insert_with(|| crate::val::i32_of(v, x));
+        }
+    }
+
+    /// A restore of integer register `loc` to this piece's own symbol of
+    /// it (docs/spec-deferred-reads.md §2, [`crate::defer::try_restore`]):
+    /// the run's map of it the identity, neither a read nor a
+    /// definition; where the run loaded it, its value back to the one
+    /// first loaded, or, never read (a value its own `set` gave), unread.
+    pub(crate) fn reg_restore(&mut self, loc: Loc, global: bool) {
+        if crate::exec::obs_flag!("PHITEX_REG_TRACE") {
+            eprintln!(
+                "reg-restore: node {} register {:?} global {global}",
+                self.cx.node().raw(),
+                self.count_reg(loc)
+            );
+        }
+        self.reg_pending.insert(loc, crate::regfold::Affine::ID);
+        if self.st.is_loaded(loc) {
+            match self.reg_loaded_base.get(&loc) {
+                Some(&b) => {
+                    let x = self.v.int(i64::from(b));
+                    self.st.fill(loc, Some(x));
+                }
+                None => self.st.unload(loc),
+            }
+        }
+        self.muts += 1;
+    }
+
+    /// Whether `\the`/`\number` in this run may defer a page-layer
+    /// register (docs/spec-deferred-reads.md §2): a document piece's run
+    /// (`exec`, `resume`), not a recorded load, a line read back, or a
+    /// read-back point. Its candidates do not matter: the symbol resolves
+    /// to the definition reaching the piece, which is what its own read
+    /// gets wherever in the run it is made (`Ctx::read` is a read at the
+    /// node's position). `PHITEX_NO_DEFER=1` turns it off (observe builds).
+    pub(crate) fn defer_allowed(&self) -> bool {
+        let op = self.cx.op();
+        (op == self.ops.exec || op == self.ops.resume)
+            && self.doc
+            && !self.rec_load
+            && self.interp.is_none()
+            && !self.read_back_done
+            && !self.read_point_here
+            && !crate::exec::obs_flag!("PHITEX_NO_DEFER")
+    }
+
+    /// A definition of integer register `loc` about to be made: the
+    /// first one notes the candidates passed ([`Run::reg_first_def`]).
+    pub(crate) fn note_reg_def(&mut self, loc: Loc) {
+        if !self.st.defined_after(loc, 0) && self.count_reg(loc).is_some() {
+            self.reg_first_def.insert(loc, self.cand);
+        }
+    }
+
+    /// The outermost quantity of a deferring scan is integer register
+    /// `loc` ([`Run::defer_ok`] was set): true, and [`Run::defer_hit`]
+    /// set, where it is a page-layer register the run has not loaded and
+    /// holds no map of (its own write makes it concrete): no read.
+    pub(crate) fn defer_at(&mut self, loc: Loc) -> bool {
+        if self.st.is_loaded(loc)
+            || self
+                .reg_pending
+                .get(loc)
+                .is_some_and(|m| m != crate::regfold::Affine::ID)
+        {
+            return false;
+        }
+        if loc as usize >= crate::fields::NSLOT {
+            self.loc_field(loc);
+        }
+        if self.count_reg(loc).is_none() || !crate::defer::deferrable(self, loc) {
+            return false;
+        }
+        self.defer_hit = Some(loc);
+        true
     }
 
     /// Field `f` as it reaches node `at` (right after its own run, or
@@ -3972,6 +4100,16 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
+        // (a deferred read's symbol: its meaning is its name's,
+        // `crate::defer`, nothing read)
+        if crate::defer::is_sym(tok) {
+            self.cur = Cur {
+                tok,
+                cmd: cmd::SYM,
+                chr: 0,
+            };
+            return Ok(());
+        }
         // (the common case: a control sequence whose meaning this run
         // has read and decoded: one slot access)
         if let Some(i) = tok.cs_index()
@@ -4948,7 +5086,8 @@ impl<'c, 'a> Run<'c, 'a> {
         // it stands past the scope)
         let loc = if matches!(self.scope_kind_memo, Some(Some(_))) { Locality::Global } else { Locality::Local };
         for (l, m) in self.reg_pending.take() {
-            if self.count_reg(l).is_none() || self.st.defined_after(l, 0) {
+            // (the identity, a restore's: nothing defined)
+            if m == crate::regfold::Affine::ID || self.count_reg(l).is_none() || self.st.defined_after(l, 0) {
                 continue;
             }
             let f = self.loc_field(l);
