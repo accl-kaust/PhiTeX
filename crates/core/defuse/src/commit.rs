@@ -1430,7 +1430,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // environment's, a range's at the range's start (where the change
     // lies the check does not know: a loop resuming from its state goes
     // back before it), a placement's output)
+    // (a read at a node, by a run that parks a state: the change reaches
+    // that node, which the next run goes back before; else no site)
+    let parks = p.state.is_some();
     let cause_of = |kind: &ReadKind| match kind {
+        ReadKind::Field { f, at: Anchor::Before(n) | Anchor::AfterOwn(n) } if parks => Cause::Changed { field: *f, site: Some(*n) },
         ReadKind::Field { f, .. } => Cause::Changed { field: *f, site: None },
         ReadKind::Env { f } => Cause::Environment { field: *f },
         ReadKind::Fold { f, from: start, .. } | ReadKind::Next { f, after: start } => Cause::Range {
@@ -1451,12 +1455,14 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut causes: Vec<Cause> = Vec::new();
     let mut stale = false;
     if let Some(i) = refuted {
-        // (a range from a node: the change lies after it; one from the
-        // unit's start names no node a run could go back before, nor one
-        // from the site the run was told to go back before, which it did
-        // not read again)
+        // (a range from a node, or a read at a node: the change lies
+        // there; one from the unit's start names no node a run could go
+        // back before, nor one from the site the run was told to go back
+        // before, which it did not read again)
         let range = |k: &ReadKind| match k {
-            ReadKind::Fold { from: Some(n), .. } | ReadKind::Next { after: Some(n), .. } => p.woken_at != Some(*n),
+            ReadKind::Fold { from: Some(n), .. }
+            | ReadKind::Next { after: Some(n), .. }
+            | ReadKind::Field { at: Anchor::Before(n) | Anchor::AfterOwn(n), .. } => p.woken_at != Some(*n),
             _ => false,
         };
         causes.push(cause_of(&rec.reads[i].kind));

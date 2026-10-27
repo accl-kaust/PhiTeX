@@ -478,9 +478,9 @@ pub(crate) struct Product {
     /// The run took its last run's state (`Ctx::resumed`): that run's
     /// reads stand with this one's.
     pub(crate) resumed: std::cell::Cell<bool>,
-    /// The site of the range the run was woken by (`Ctx::woken_by`,
-    /// `Cause::Range`): a kept read from it that still moved at the
-    /// commit is one the run did not read again where it was told to go
-    /// back before it.
+    /// The site the run was woken by (`Ctx::woken_by`: a range's start,
+    /// a changed definition's node): a kept read from it that still moved
+    /// at the commit is one the run did not read again where it was told
+    /// to go back before it.
     pub(crate) woken_at: Option<NodeId>,
 }

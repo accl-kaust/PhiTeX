@@ -423,8 +423,9 @@ fn a_kept_read_from_a_node_gone_is_not_kept() {
 /// `[s, a]`: folds the contributions to s, parked as `[cursor, sum]`;
 /// woken by a range it resumes from its state, else starts over, then
 /// reading "t" where node `a` stands (`At::Before`) while `a` stands.
-/// Keeps every cause it was woken by.
-struct AnchorWalk(std::sync::Mutex<Vec<Option<Cause>>>);
+/// Keeps every cause it was woken by. With gates: raises `loop_read`
+/// after reading, and waits for `contrib_done` where `loop_waits`.
+struct AnchorWalk(std::sync::Mutex<Vec<Option<Cause>>>, Option<Arc<Gates>>);
 
 impl Operation for AnchorWalk {
     fn name(&self) -> &'static str {
@@ -447,6 +448,12 @@ impl Operation for AnchorWalk {
         });
         if state.is_none() && cx.alive(a) {
             let _ = cx.read_at(v.field("t"), phitex_defuse::At::Before(a))?;
+        }
+        if let Some(g) = &self.1 {
+            g.loop_read.store(true, Ordering::Release);
+            if g.loop_waits.load(Ordering::Acquire) {
+                spin_until(&g.contrib_done, 30);
+            }
         }
         while let Some((n, x)) = cx.next_contribution(s, cur)? {
             sum += v.as_int(x).unwrap_or(0);
@@ -473,7 +480,7 @@ fn a_kept_read_at_a_node_gone_wakes_a_parking_run_once_with_its_site() {
     let g = Arc::new(Gates::default());
     let v = e.values();
     let s = v.field("s");
-    let walk = Arc::new(AnchorWalk(std::sync::Mutex::new(Vec::new())));
+    let walk = Arc::new(AnchorWalk(std::sync::Mutex::new(Vec::new()), None));
     let walk_op = e.register(walk.clone());
     let contrib = e.register(Arc::new(Contrib(g.clone())));
     let quiet = e.register(Arc::new(Quiet));
@@ -497,5 +504,86 @@ fn a_kept_read_at_a_node_gone_wakes_a_parking_run_once_with_its_site() {
         "woken where the node stood: {causes:?}"
     );
     assert!(causes.len() <= 3, "{causes:?}");
+    assert!(e.check_invariants().is_empty());
+}
+
+/// `[x]`: defines "t" = x + "k"; where `contrib_waits`, waits first for
+/// the walk to have read; raises `contrib_done`.
+struct GatedDefT(Arc<Gates>);
+
+impl Operation for GatedDefT {
+    fn name(&self) -> &'static str {
+        "gated_def_t"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        if self.0.contrib_waits.load(Ordering::Acquire) {
+            spin_until(&self.0.loop_read, 30);
+        }
+        let v = cx.values();
+        let k = cx.read(v.field("k"))?.and_then(|k| v.as_int(k)).unwrap_or(0);
+        let x = v.int(v.as_int(cx.args()[0]).unwrap_or(0) + k);
+        cx.define(v.field("t"), x);
+        self.0.contrib_done.store(true, Ordering::Release);
+        Ok(x)
+    }
+}
+
+/// `[x]`: defines "k" = x.
+struct DefK;
+
+impl Operation for DefK {
+    fn name(&self) -> &'static str {
+        "def_k"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let x = cx.args()[0];
+        cx.define(cx.values().field("k"), x);
+        Ok(x)
+    }
+}
+
+#[test]
+fn a_read_at_a_node_refuted_at_the_commit_names_the_node_to_a_parking_run() {
+    // The walk reads "t" where a quiet node stands; while it runs, "t"
+    // is defined anew before that node, and the walk's commit finds its
+    // read moved. A run that parks a state is told where: at the node it
+    // read at, or the definer (the earlier), never no site (which sent
+    // the page loop back to its start where a checkpoint before the
+    // piece it read at would do).
+    let e = Engine::new();
+    let g = Arc::new(Gates::default());
+    let v = e.values();
+    let s = v.field("s");
+    let walk = Arc::new(AnchorWalk(std::sync::Mutex::new(Vec::new()), Some(g.clone())));
+    let walk_op = e.register(walk.clone());
+    let contrib = e.register(Arc::new(Contrib(g.clone())));
+    let quiet = e.register(Arc::new(Quiet));
+    let def_t = e.register(Arc::new(GatedDefT(g.clone())));
+    let def_k = e.register(Arc::new(DefK));
+    let u = e.new_unit();
+    let k = e.push(u, def_k, vec![v.int(0)]);
+    e.push(u, def_t, vec![v.int(0)]);
+    e.push(u, contrib, vec![s.0, v.int(1), v.int(0)]);
+    let a = e.push(u, quiet, vec![]);
+    e.push(u, contrib, vec![s.0, v.int(2), v.int(0)]);
+    let l = e.push(u, walk_op, vec![s.0, v.int(i64::try_from(a.raw()).unwrap())]);
+    e.evaluate(2).unwrap();
+    assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(3));
+    walk.0.lock().unwrap().clear();
+    g.loop_waits.store(true, Ordering::Release);
+    g.contrib_waits.store(true, Ordering::Release);
+    g.contrib_done.store(false, Ordering::Release);
+    g.loop_read.store(false, Ordering::Release);
+    e.replace(k, def_k, vec![v.int(1)]);
+    e.replace(l, walk_op, vec![s.0, v.int(i64::try_from(a.raw()).unwrap())]);
+    let r = e.evaluate(2).unwrap();
+    assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(3), "{r:?}");
+    let causes = walk.0.lock().unwrap().clone();
+    assert!(
+        !causes.iter().any(|c| matches!(c, Some(Cause::Changed { site: None, .. }))),
+        "a site for every changed read: {causes:?}"
+    );
     assert!(e.check_invariants().is_empty());
 }

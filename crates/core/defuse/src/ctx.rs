@@ -98,7 +98,7 @@ impl<'a> Ctx<'a> {
     pub(crate) fn into_product(mut self, output: ValueId) -> Product {
         self.product.output = output;
         self.product.woken_at = match self.woke {
-            Some(Cause::Range { by, .. }) => Some(by),
+            Some(Cause::Range { by, .. } | Cause::Changed { site: Some(by), .. }) => Some(by),
             _ => None,
         };
         self.product
