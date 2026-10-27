@@ -209,6 +209,13 @@ impl Arena {
         }
     }
 
+    /// Argument `i` (0-based) of the call begun at `b`, as matched.
+    pub(crate) fn scratch_arg(&self, b: Scratch, i: usize) -> Option<&[Tok]> {
+        let &(lo, hi) = self.sbounds.get(b.bounds as usize + i)?;
+        let t0 = b.toks as usize;
+        self.scratch.get(t0 + lo as usize..t0 + hi as usize)
+    }
+
     /// The call begun at `b` is done: its scratch goes.
     #[inline]
     pub(crate) fn scratch_end(&mut self, b: Scratch) {

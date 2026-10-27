@@ -255,3 +255,16 @@ fn a_view_whose_bound_is_removed_runs_once_more_and_settles() {
     assert_eq!(view.0.load(Ordering::Relaxed), 2, "once more, on the bound gone");
     assert!(e.check_invariants().is_empty());
 }
+
+/// The store's footprint counts what it interned, once per distinct value.
+#[test]
+fn the_value_store_footprint_counts_its_values() {
+    let v = phitex_defuse::Values::new();
+    let (n0, b0, _) = v.footprint();
+    let a = v.str("abcdef");
+    let l = v.list(vec![a, a, a]);
+    assert_eq!(v.list(vec![a, a, a]), l);
+    let (n1, b1, _) = v.footprint();
+    assert_eq!(n1, n0 + 2, "a string and a list");
+    assert_eq!(b1, b0 + (32 + 6) + (32 + 24));
+}

@@ -259,6 +259,10 @@ pub(crate) struct Ops {
     /// `\ifnum` comparing a macro's number reads the comparison's outcome
     /// ([`Run::num_order`]).
     pub num_proj: phitex_defuse::ProjId,
+    /// The comma-list projection of meanings ([`crate::val::clist_projection`]):
+    /// a membership test of a list macro reads whether the item is in it
+    /// ([`Run::clist_has`]).
+    pub clist_proj: phitex_defuse::ProjId,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -4162,6 +4166,33 @@ impl<'c, 'a> Run<'c, 'a> {
             .cx
             .read_path(f, phitex_defuse::PathId::of_proj(self.ops.num_proj))?
             .map_or(0, |x| i32::try_from(int_of(v, x)).unwrap_or(0)))
+    }
+
+    /// Whether `item` is an item of the comma list `tok`'s meaning holds
+    /// (a parameterless macro, [`crate::val::clist_projection`]), read
+    /// through that projection and the item's membership: a list grown by
+    /// other items leaves this run standing. `None` where the meaning is
+    /// no such list, or the run has it in full or bound it itself (as
+    /// [`Run::defined_lookup`]).
+    pub(crate) fn clist_has(&mut self, tok: Tok, item: &[Tok]) -> R<Option<bool>> {
+        let v = self.v;
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(None);
+        };
+        if self.st.is_loaded(l) || self.lazy_pre(l) || self.interp.is_some() || self.rec_load {
+            return Ok(None);
+        }
+        let f = self.loc_field(l);
+        let not = self.cx.path(&[
+            phitex_defuse::Step::Proj(self.ops.clist_proj),
+            phitex_defuse::Step::Has(v.str(crate::val::CLIST_NOT)),
+        ]);
+        if self.cx.read_path(f, not)?.is_none_or(|x| x != v.bool(false)) {
+            return Ok(None);
+        }
+        let key = crate::val::toks_value(v, item);
+        let has = self.cx.path(&[phitex_defuse::Step::Proj(self.ops.clist_proj), phitex_defuse::Step::Has(key)]);
+        Ok(self.cx.read_path(f, has)?.map(|x| x == v.bool(true)))
     }
 
     /// Whether `tok`'s meaning is defined, read through the engine's

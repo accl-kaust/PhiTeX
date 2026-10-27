@@ -3873,7 +3873,7 @@ impl<V> Default for Shards<V> {
 const SHARDS: usize = 64;
 
 impl<V> Shards<V> {
-    fn of(&self, k: u64) -> std::sync::MutexGuard<'_, FxHashMap<u64, V>> {
+    pub(crate) fn of(&self, k: u64) -> std::sync::MutexGuard<'_, FxHashMap<u64, V>> {
         let i = usize::try_from(k.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58).unwrap_or(0);
         self.0[i % SHARDS].locked()
     }

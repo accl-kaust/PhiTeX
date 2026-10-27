@@ -263,6 +263,25 @@ impl Values {
         }
     }
 
+    /// (measure) The plain values' count and payload bytes (a list's ids,
+    /// a string's bytes, an allocation's header each), and the sequence
+    /// nodes' count: what the store holds, nothing of it ever freed.
+    pub fn footprint(&self) -> (usize, usize, usize) {
+        let n = self.plain.len();
+        let mut bytes = 0usize;
+        for i in 0..n {
+            if let Some(x) = self.plain.get(i) {
+                bytes += 32 + match &**x {
+                    Value::Str(s) => s.len(),
+                    Value::List(xs) => xs.len() * 8,
+                    _ => 8,
+                };
+            }
+        }
+        let seqs = self.seqs.iter().map(|s| s.0.read().len()).sum();
+        (n, bytes, seqs)
+    }
+
     /// Plain values interned so far.
     pub fn len(&self) -> usize {
         self.plain.len()

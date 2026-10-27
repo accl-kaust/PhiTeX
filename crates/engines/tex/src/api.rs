@@ -2190,6 +2190,7 @@ impl Graph {
         let defined_proj = eng.register_projection(Arc::new(crate::val::defined_projection));
         let tail_proj = eng.register_projection(Arc::new(crate::val::tail_projection));
         let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
+        let clist_proj = eng.register_projection(Arc::new(crate::val::clist_projection));
         let ops = Ops {
             exec,
             put,
@@ -2222,6 +2223,7 @@ impl Graph {
             defined_proj,
             tail_proj,
             num_proj,
+            clist_proj,
         };
         let _ = shared.set(ops.clone());
         declare_fields(&eng);
@@ -2708,7 +2710,38 @@ impl Graph {
             // (an edit's few nodes: on this thread, no worker started,
             // [`INLINE_NODES`])
             let n = if self.inline { 1 } else { self.threads };
-            let res = self.eng.evaluate_absorbing(n, edits);
+            // (`PHITEX_MEM_LOG=secs`, profile: every `secs` seconds of the
+            // evaluation, the resident memory, the value store and the live
+            // nodes)
+            let mem_log = crate::exec::env_str!("PHITEX_MEM_LOG").and_then(|x| x.parse::<f64>().ok()).filter(|_| cfg!(feature = "profile"));
+            let done = std::sync::atomic::AtomicBool::new(false);
+            let res = std::thread::scope(|sc| {
+                if let Some(secs) = mem_log {
+                    let (eng, done) = (&self.eng, &done);
+                    sc.spawn(move || {
+                        let t = std::time::Instant::now();
+                        let mut next = secs;
+                        while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            if t.elapsed().as_secs_f64() < next {
+                                continue;
+                            }
+                            next += secs;
+                            let (n, b, sq) = eng.values().footprint();
+                            eprintln!(
+                                "mem-log: {:.0} s: resident {} MB; values {n} ({} MB payload), seq nodes {sq}; live nodes {}",
+                                t.elapsed().as_secs_f64(),
+                                mem_mb().0,
+                                b >> 20,
+                                eng.live_nodes()
+                            );
+                        }
+                    });
+                }
+                let r = self.eng.evaluate_absorbing(n, edits);
+                done.store(true, std::sync::atomic::Ordering::Relaxed);
+                r
+            });
             {
                 // (the PDF commands no record names any more: dropped now,
                 // with no run in work)

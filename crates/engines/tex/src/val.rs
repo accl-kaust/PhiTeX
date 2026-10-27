@@ -966,6 +966,67 @@ pub(crate) fn show_def(v: &Values, x: ValueId) -> String {
     s
 }
 
+/// The key [`clist_projection`] answers for a meaning that is no plain
+/// comma list.
+pub(crate) const CLIST_NOT: &str = "\u{1}not a list";
+
+/// A parameterless macro's body as the items of a comma list, for a
+/// membership test (`[[item]…]`, each item its tokens between commas at
+/// brace depth 0, `[[CLIST_NOT]]` for any other meaning, or a body
+/// holding a brace, `\\@empty` or `\\@nnil`, where a delimited match is
+/// more than membership): what microtype's `\\MT@in@clist{x}\\list` reads
+/// of `\\list` (`Run::clist_has`). A pure projection for the engine: a
+/// list grown by an item a reader does not test for leaves it standing.
+pub(crate) fn clist_projection(x: ValueId, v: &Values) -> ValueId {
+    // (kept per value: every reader of a list the engine asks again
+    // answers through it, a whole list decoded each time otherwise)
+    static MEMO: OnceLock<crate::hints::Shards<(u64, ValueId, ValueId)>> = OnceLock::new();
+    let memo = MEMO.get_or_init(Default::default);
+    let k = x.raw() ^ v.instance().rotate_left(32);
+    if let Some(&(i, y, r)) = memo.of(k).get(&k)
+        && i == v.instance()
+        && y == x
+    {
+        return r;
+    }
+    let r = clist_items(x, v);
+    let mut m = memo.of(k);
+    if m.len() > 1 << 12 {
+        m.clear();
+    }
+    m.insert(k, (v.instance(), x, r));
+    r
+}
+
+/// [`clist_projection`]'s answer, made.
+fn clist_items(x: ValueId, v: &Values) -> ValueId {
+    let not = || v.list(vec![v.list(vec![v.str(CLIST_NOT)])]);
+    let Mean::Macro(m) = Mean::decode(v, Some(x)) else {
+        return not();
+    };
+    if !m.params.is_empty() {
+        return not();
+    }
+    let mut items = Vec::new();
+    let mut cur: Vec<Tok> = Vec::new();
+    for &t in m.body.iter() {
+        if let Some(c) = t.as_cs() {
+            if matches!(c.name(), "@empty" | "@nnil") {
+                return not();
+            }
+        } else if matches!(t.cat(), Some(1 | 2)) {
+            return not();
+        } else if t.cat() == Some(12) && t.chr() == u32::from(b',') {
+            items.push(v.list(vec![toks_value(v, &cur)]));
+            cur.clear();
+            continue;
+        }
+        cur.push(t);
+    }
+    items.push(v.list(vec![toks_value(v, &cur)]));
+    v.list(items)
+}
+
 /// The class of a meaning as a lookup that only stores its token needs
 /// it (spec-redesign §8, class reads; `\edef`'s expansion, §478): the
 /// command code of an unexpandable meaning, `\relax`'s for a

@@ -265,6 +265,7 @@ impl Run<'_, '_> {
         if self.input.arena.len() >= crate::input::ARENA_MAX {
             return self.overflow_raise("main memory size", crate::input::MAIN_MEMORY);
         }
+        let name = self.cur.tok;
         let Some(m) = self.cur_macro() else {
             return;
         };
@@ -282,6 +283,10 @@ impl Run<'_, '_> {
         let base = self.input.arena.scratch_begin();
         let ok = self.macro_args(&m, base);
         self.scanner = was;
+        if ok && self.halt.is_none() && m.params.len() == 2 && self.clist_call(name, &m, base) {
+            self.input.arena.scratch_end(base);
+            return;
+        }
         if ok && self.halt.is_none() {
             // §400: the body with its arguments substituted, written
             // straight into the arena as the macro's level
@@ -290,6 +295,96 @@ impl Run<'_, '_> {
             self.push_range(range, crate::input::ty::MACRO);
         }
         self.input.arena.scratch_end(base);
+    }
+
+    /// microtype's `\\MT@in@clist{x}\\list` (whether `x` is an item of the
+    /// comma list `\\list` holds: `\\ifMT@inlist@`), its arguments
+    /// matched since `base`: the list read as the item's membership
+    /// ([`Run::clist_has`]), so a list grown by other items (a font
+    /// another piece used first) leaves the run standing. Its body runs
+    /// as written up to its `\\def\\MT@res@a…{…}`, then the switch its
+    /// match would set (`\\MT@inlist@true` or `false`): the same
+    /// definitions, the list's expansion and the match left out. False
+    /// (the call runs whole) for any other macro, an item holding a comma,
+    /// a brace or `\\@empty`/`\\@nnil`, a list that is not one
+    /// ([`crate::val::clist_projection`]). (No macro is traced here:
+    /// `\\tracingmacros` writes nothing in this engine.)
+    fn clist_call(&mut self, name: Tok, m: &Macro, base: crate::input::Scratch) -> bool {
+        const BODY: [&str; 14] = [
+            "def",
+            "MT@res@a",
+            "@nnil",
+            "ifx",
+            "@empty",
+            "MT@inlist@false",
+            "else",
+            "MT@inlist@true",
+            "fi",
+            "expandafter",
+            "MT@res@a",
+            "expandafter",
+            "@empty",
+            "@nnil",
+        ];
+        if name.as_cs().is_none_or(|c| c.name() != "MT@in@clist")
+            || !m.body.iter().filter_map(|t| t.as_cs().map(|c| c.name())).eq(BODY)
+        {
+            return false;
+        }
+        let (Some(item), Some(list)) = (self.input.arena.scratch_arg(base, 0), self.input.arena.scratch_arg(base, 1)) else {
+            return false;
+        };
+        let (item, list) = (item.to_vec(), list.to_vec());
+        let plain = |t: &Tok| match t.as_cs() {
+            Some(c) => !matches!(c.name(), "@empty" | "@nnil"),
+            None => !matches!(t.cat(), Some(1 | 2)) && !(t.cat() == Some(12) && t.chr() == u32::from(b',')),
+        };
+        if item.is_empty() || !item.iter().all(plain) || list.len() != 1 || !list[0].is_cs() {
+            return false;
+        }
+        let has = match self.lift(|r| r.clist_has(list[0], &item)) {
+            None => return true,
+            Some(None) => return false,
+            Some(Some(h)) => h,
+        };
+        // the body with its arguments, to the end of its `\def`
+        let mut toks: Vec<Tok> = Vec::with_capacity(m.body.len() + item.len());
+        for sg in m.segs.iter() {
+            toks.extend_from_slice(&m.body[sg.lo as usize..sg.hi as usize]);
+            match sg.param {
+                0 => {}
+                1 => toks.extend_from_slice(&item),
+                _ => toks.extend_from_slice(&list),
+            }
+        }
+        let Some(open) = toks.iter().position(|t| t.cat() == Some(1)) else {
+            return false;
+        };
+        let mut depth = 0i32;
+        let mut close = None;
+        for (i, t) in toks.iter().enumerate().skip(open) {
+            match t.cat() {
+                Some(1) => depth += 1,
+                Some(2) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let want = if has { "MT@inlist@true" } else { "MT@inlist@false" };
+        let (Some(close), Some(&sw)) = (close, toks.iter().find(|t| t.as_cs().is_some_and(|c| c.name() == want))) else {
+            return false;
+        };
+        toks.truncate(close + 1);
+        toks.push(sw);
+        self.input.pop_spent();
+        let r = self.input.arena.alloc(&toks);
+        self.push_range(r, crate::input::ty::MACRO);
+        true
     }
 
     /// §391–§400: the arguments of `m` into the arena's scratch region
