@@ -200,6 +200,7 @@ impl Operation for Finish {
         let t_fin = std::time::Instant::now();
         let _ = phitex_pdf::phase::take();
         let o = ops(&self.0);
+        #[allow(clippy::redundant_closure_for_method_calls, reason = "the method is not general enough over the run's lifetimes")]
         let out = run_node(cx, o, |r| r.finish_page());
         if phitex_pdf::phase::on() {
             phitex_pdf::phase::add(0, t_fin);

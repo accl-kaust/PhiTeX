@@ -14,7 +14,10 @@
 
 use std::fmt::Write as _;
 
-use super::*;
+use super::{
+    Contents, FoldState, IGNORE_DEPTH, Locality, MAX_DIMEN, R, Run, RunReaching, ValueId, Values, glue_of,
+    glue_value, int_of, list_of, node_of, nodes, params_of, some,
+};
 
 /// The named cases of a lower layer reading a higher one's result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,7 +219,7 @@ impl Run<'_, '_> {
         mat.push(v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(0)]));
         mat.extend(xs.get(4).map(|&x| list_of(v, x)).unwrap_or_default());
         self.resolve_page_params(&mut mat)?;
-        let anchor = c.brk.map(|b| b.0).unwrap_or(-1);
+        let anchor = c.brk.map_or(-1, |b| b.0);
         let (k, after) = if xs.len() > 7 && n(6) >= 0 { (n(6), n(7)) } else { (-1, -1) };
         let defs = [
             (PAGE_START_ANCHOR, v.list(vec![v.int(anchor), v.int(k), v.int(after)])),

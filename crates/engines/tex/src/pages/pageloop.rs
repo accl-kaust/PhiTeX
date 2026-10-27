@@ -242,6 +242,9 @@ impl Operation for Pages {
     }
 }
 
+/// A fire a unit made: the fire, its page, the unit's insertion classes.
+type UnitFire = (FireNote, Page, Vec<(u16, InsertClass)>);
+
 /// Where a run's fold starts.
 enum Start {
     /// The job's start: no page fired.
@@ -319,7 +322,7 @@ impl Run<'_, '_> {
         let (limit, mut bound) = match site {
             None => (0, Bound::Never),
             Some(s) if s == me => (n_old, Bound::Never),
-            Some(s) => (old.before(&self.cx, s).map_or(0, |i| i + 1), Bound::Site(s)),
+            Some(s) => (old.before(self.cx, s).map_or(0, |i| i + 1), Bound::Site(s)),
         };
         // (the tail stands where every checkpoint does and the site is
         // past the contributor it folded last)
@@ -486,24 +489,19 @@ impl Run<'_, '_> {
                     eprintln!("pages {}: page {} fired again as it was; on from {moved:?}", self.cx.node().raw(), *i + 1);
                 }
                 cur_xs = None;
-                match moved {
-                    Some(j) => {
-                        let (s, c, p) = self.decode_state(ls.checkpoints[j].state);
-                        (*st, *lc) = (s, c);
-                        *pending = Some((j, p));
-                        bound = Bound::Page(j);
-                    }
-                    None => {
-                        *pending = None;
-                        bound = Bound::Never;
-                        match old.tail {
-                            Some(t) => (*st, *lc) = self.decode_tail(t),
-                            None => {
-                                lc.ended = old.ended;
-                                return Ok(false);
-                            }
-                        }
-                    }
+                if let Some(j) = moved {
+                    let (s, c, p) = self.decode_state(ls.checkpoints[j].state);
+                    (*st, *lc) = (s, c);
+                    *pending = Some((j, p));
+                    bound = Bound::Page(j);
+                } else {
+                    *pending = None;
+                    bound = Bound::Never;
+                    let Some(t) = old.tail else {
+                        lc.ended = old.ended;
+                        return Ok(false);
+                    };
+                    (*st, *lc) = self.decode_tail(t);
                 }
             }
             if let Some((i, p)) = pending.take() {
@@ -513,37 +511,36 @@ impl Run<'_, '_> {
                     let (mut q, page) = self.fire_at(st, lc, p.node, p.pid, &f, true)?;
                     q.xs_i = p.xs_i;
                     q.classes.clone_from(&p.classes);
-                    *pending = Some(self.checkpoint(st, lc, q, page, ls));
+                    *pending = Some(self.checkpoint(st, lc, q, &page, ls));
                     continue;
                 }
                 // (the rest of the contributor the page fired in)
-                let xs = match cur_xs.take().filter(|c| c.0 == p.node) {
-                    Some(c) => c.1,
-                    None => {
-                        let t = crate::prof::pages::start();
-                        let next = self.cx.next_contribution(vprof, lc.cur)?;
-                        crate::prof::pages::add(crate::prof::pages::NEXT, t);
-                        match next.filter(|n| n.0 == p.node) {
-                            Some((_, u)) => v.seq_to_vec(u),
-                            // (not where it was: the change that moved it
-                            // runs this node again, from before it)
-                            None => return Ok(true),
-                        }
-                    }
+                let xs = if let Some(c) = cur_xs.take().filter(|c| c.0 == p.node) {
+                    c.1
+                } else {
+                    let t = crate::prof::pages::start();
+                    let next = self.cx.next_contribution(vprof, lc.cur)?;
+                    crate::prof::pages::add(crate::prof::pages::NEXT, t);
+                    // (not where it was: the change that moved it runs
+                    // this node again, from before it)
+                    let Some((_, u)) = next.filter(|n| n.0 == p.node) else {
+                        return Ok(true);
+                    };
+                    v.seq_to_vec(u)
                 };
                 cur_xs = Some((p.node, xs.clone()));
                 let (ui, from) = lc.frontier;
                 if let Some((mut q, page)) = self.fold_items(st, lc, p.node, p.pid, ui, from as usize, &p.classes)? {
                     q.classes.clone_from(&p.classes);
                     q.xs_i = p.xs_i;
-                    *pending = Some(self.checkpoint(st, lc, q, page, ls));
+                    *pending = Some(self.checkpoint(st, lc, q, &page, ls));
                     continue;
                 }
                 for (i, &x) in xs.iter().enumerate().skip(p.xs_i + 1) {
                     if let Some((mut q, page, classes)) = self.fold_unit(st, lc, p.node, x)? {
                         q.classes = classes;
                         q.xs_i = i;
-                        *pending = Some(self.checkpoint(st, lc, q, page, ls));
+                        *pending = Some(self.checkpoint(st, lc, q, &page, ls));
                         continue 'fold;
                     }
                 }
@@ -570,7 +567,7 @@ impl Run<'_, '_> {
                 if let Some((mut q, page, classes)) = self.fold_unit(st, lc, node, x)? {
                     q.classes = classes;
                     q.xs_i = i;
-                    *pending = Some(self.checkpoint(st, lc, q, page, ls));
+                    *pending = Some(self.checkpoint(st, lc, q, &page, ls));
                     continue 'fold;
                 }
             }
@@ -598,7 +595,7 @@ impl Run<'_, '_> {
     /// A page fired (`q`, its [`Page`] `page`): defined, its finisher
     /// placed, its checkpoint pushed and its give-back read; the fire to
     /// fold on from.
-    fn checkpoint(&mut self, st: &ScanState, lc: &LoopCarry, q: FireNote, page: Page, ls: &mut LoopState) -> (usize, FireNote) {
+    fn checkpoint(&mut self, st: &ScanState, lc: &LoopCarry, q: FireNote, page: &Page, ls: &mut LoopState) -> (usize, FireNote) {
         let v = self.v;
         let x = page.encode(v);
         let i = ls.checkpoints.len();
@@ -643,7 +640,7 @@ impl Run<'_, '_> {
         lc: &mut LoopCarry,
         node: phitex_defuse::NodeId,
         x: ValueId,
-    ) -> R<Option<(FireNote, Page, Vec<(u16, InsertClass)>)>> {
+    ) -> R<Option<UnitFire>> {
         use crate::prof::pages as pp;
         pp::unit();
         self.ops.units_folded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -967,7 +964,6 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines, reason = "one fire's whole give-back")]
     pub(crate) fn after_fire(&mut self, st: &mut ScanState, lc: &mut LoopCarry, p: &FireNote, gave: ValueId) -> R<Option<LoopFire>> {
         let classes = &p.classes[..];
-        use crate::vprof::PItem;
         let v = self.v;
         let j = p.j;
         let node = p.node;
@@ -1373,15 +1369,12 @@ impl Enc<'_> {
             }
             PItem::InsParams(n, c) => {
                 self.i(7);
-                match c {
-                    Some(c) => {
-                        self.i(1);
-                        self.class(*n, c);
-                    }
-                    None => {
-                        self.i(0);
-                        self.i(i64::from(*n));
-                    }
+                if let Some(c) = c {
+                    self.i(1);
+                    self.class(*n, c);
+                } else {
+                    self.i(0);
+                    self.i(i64::from(*n));
                 }
             }
             PItem::End(ys) => {

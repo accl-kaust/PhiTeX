@@ -12,7 +12,10 @@
 //! window reads, stale checks or predictions lives here: those are the
 //! finisher's (`finisher.rs`).
 
-use super::*;
+use super::{
+    BEFORE_PIECE, Field, GDEFS, List, Locality, Mode, Node, PITEMS, PackParams, Page, Par, R, Run, Side, Spec, ValueId,
+    Values, group, int_of, list_of, nodes, some, str_of, toks_of,
+};
 
 /// A routine's give-back as [`RTN`] holds it: `[markers, list]`, and
 /// `[markers, list, dead]` where `\deadcycles` is not 0.
