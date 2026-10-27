@@ -455,7 +455,8 @@ impl Inner {
     /// What filing these definitions and contributions at `pos`, and
     /// readers of these fields (each so many times), would grow.
     pub(crate) fn grow_for(
-        &self,
+        &mut self,
+        eng: &Engine,
         pos: Pos,
         defs: impl Iterator<Item = Field>,
         contribs: impl Iterator<Item = Field>,
@@ -488,15 +489,20 @@ impl Inner {
         g.contribs = map_room(&self.contribs, new);
         let mut new = 0;
         for &(f, k) in reads {
-            match self.readers.get(&f) {
-                None => {
-                    new += 1;
-                    g.reader_lists.push((f, k.max(4)));
-                }
-                Some(v) => {
-                    if v.capacity() - v.len() < k {
-                        g.reader_lists.push((f, (v.len() * 2).max(v.len() + k)));
-                    }
+            // (a list out of room first drops its records that no longer
+            // stand, a node's earlier runs': kept, they grew with every
+            // run for good, the course's lists ten times their readers.
+            // It grows only where what stands fills half of it, so a
+            // list drops its dead once per doubling, not per filing)
+            let Some(v) = self.readers.get_mut(&f) else {
+                new += 1;
+                g.reader_lists.push((f, k.max(4)));
+                continue;
+            };
+            if v.capacity() - v.len() < k {
+                v.retain(|r| live(eng, r.node, r.serial));
+                if v.len() + k > v.capacity() / 2 {
+                    g.reader_lists.push((f, (v.len() * 2).max(v.len() + k)));
                 }
             }
         }

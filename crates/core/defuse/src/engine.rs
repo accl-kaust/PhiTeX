@@ -1175,6 +1175,45 @@ impl Engine {
             .is_some_and(|n| n.state() != State::Gone)
     }
 
+    /// (measure) What the line holds besides values: reader records filed
+    /// in segments (all, and those still standing for their node), and the
+    /// run records' reads, definitions and contributions of the nodes alive
+    /// and of those gone.
+    pub fn footprint(&self) -> String {
+        let (filed, standing, fields) = self.reader_records();
+        let (mut live, mut gone) = ([0usize; 4], [0usize; 4]);
+        for i in 0..self.nodes.len() {
+            let Some(n) = self.nodes.get(i) else { continue };
+            let t = if n.state() == State::Gone { &mut gone } else { &mut live };
+            t[0] += 1;
+            if let Some(r) = n.record() {
+                t[1] += r.reads.len();
+                t[2] += r.defs.len();
+                t[3] += r.contribs.len();
+            }
+        }
+        format!(
+            "readers filed {filed} ({standing} standing) over {fields} segment fields; nodes alive {} (reads {}, defs {}, contribs {}), gone {} (reads {}, defs {}, contribs {})",
+            live[0], live[1], live[2], live[3], gone[0], gone[1], gone[2], gone[3]
+        )
+    }
+
+    /// (measure) The reader records filed in segments, those still
+    /// standing for their node, and the segments' fields read.
+    pub fn reader_records(&self) -> (usize, usize, usize) {
+        let (mut filed, mut standing, mut fields) = (0usize, 0usize, 0usize);
+        for sid in self.order.all() {
+            let s = self.seg(sid);
+            let inner = s.inner.read();
+            fields += inner.readers.len();
+            for rs in inner.readers.values() {
+                filed += rs.len();
+                standing += rs.iter().filter(|r| crate::segment::live(self, r.node, r.serial)).count();
+            }
+        }
+        (filed, standing, fields)
+    }
+
     pub fn live_nodes(&self) -> usize {
         (0..self.nodes.len())
             .filter(|&i| self.nodes.get(i).is_some_and(|n| n.state() != State::Gone))

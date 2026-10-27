@@ -2729,11 +2729,11 @@ impl Graph {
                             next += secs;
                             let (n, b, sq) = eng.values().footprint();
                             eprintln!(
-                                "mem-log: {:.0} s: resident {} MB; values {n} ({} MB payload), seq nodes {sq}; live nodes {}",
+                                "mem-log: {:.0} s: resident {} MB; values {n} ({} MB payload), seq nodes {sq}; {}",
                                 t.elapsed().as_secs_f64(),
                                 mem_mb().0,
                                 b >> 20,
-                                eng.live_nodes()
+                                eng.footprint()
                             );
                         }
                     });

@@ -782,6 +782,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             m.install(&mut inner);
         }
         let g = inner.grow_for(
+            eng,
             pos,
             rec.defs.iter().map(|d| d.f),
             rec.contribs.iter().map(|c| c.0),

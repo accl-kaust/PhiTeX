@@ -268,3 +268,61 @@ fn the_value_store_footprint_counts_its_values() {
     assert_eq!(n1, n0 + 2, "a string and a list");
     assert_eq!(b1, b0 + (32 + 6) + (32 + 24));
 }
+
+/// `[x, n]`: reads x and n fields y0.. (none defined).
+struct ReadMany;
+
+impl Operation for ReadMany {
+    fn name(&self) -> &'static str {
+        "read_many"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let n = v.as_int(cx.args()[1]).unwrap_or(0);
+        for j in 0..n {
+            cx.read(v.field(&format!("y{j}")))?;
+        }
+        Ok(cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// `[f, x]`: defines f := x.
+struct Def;
+
+impl Operation for Def {
+    fn name(&self) -> &'static str {
+        "def"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.define(Field(cx.args()[0]), cx.args()[1]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A node run again and again files its reads anew each time; the records
+/// of its earlier runs go as a list runs out of room, so what a segment
+/// holds stays a few times what stands (the course's segments held ten
+/// times their readers, growing with every run: 9 M records, 1 GB).
+#[test]
+fn reader_records_of_earlier_runs_do_not_pile_up() {
+    let e = Engine::new();
+    let v = e.values();
+    let def = e.register(Arc::new(Def));
+    let rd = e.register(Arc::new(ReadMany));
+    let x = v.field("x");
+    let u = e.new_unit();
+    let d = e.push(u, def, vec![x.0, v.int(0)]);
+    let r = e.push(u, rd, vec![x.0, v.int(100)]);
+    e.evaluate(2).unwrap();
+    for i in 1..200 {
+        e.replace(d, def, vec![x.0, v.int(i)]);
+        e.evaluate(2).unwrap();
+        assert_eq!(e.output(r), Some(v.int(i)));
+    }
+    let (filed, standing, _) = e.reader_records();
+    assert!(standing >= 101, "{standing}");
+    assert!(filed <= 8 * standing, "{filed} records filed for {standing} standing");
+    assert!(e.check_invariants().is_empty());
+}
