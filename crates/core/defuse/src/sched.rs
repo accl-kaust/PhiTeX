@@ -120,6 +120,9 @@ pub(crate) struct WorkerLog {
     pub(crate) runs_by_op: FxHashMap<OpId, u64>,
     /// Nodes the commits' placements made, by operation.
     pub(crate) placed_by_op: FxHashMap<OpId, u64>,
+    /// The commits' whole time (under the lock and the re-asks after)
+    /// and the reads their records file, by operation.
+    pub(crate) commit_by_op: FxHashMap<OpId, (u64, u64)>,
     pub(crate) causes: Vec<(NodeId, Cause)>,
     pub(crate) refuted_by_field: FxHashMap<Field, u64>,
     pub(crate) run_times: Vec<(NodeId, Duration)>,
@@ -1104,6 +1107,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             w.note(&st);
             node.commit_ns.store(st.commit_ns, Ordering::Relaxed);
             node.reask_ns.store(st.reask_ns, Ordering::Relaxed);
+            {
+                let reads = node.record().map_or(0, |r| r.reads.len() as u64);
+                let mut log = w.log.lock();
+                let e = log.commit_by_op.entry(node.op()).or_default();
+                e.0 += st.commit_ns + st.reask_ns;
+                e.1 += reads;
+            }
             let done = ns(pool.t0);
             node.done_ns.store(done, Ordering::Relaxed);
             w.last_commit.store(n.raw(), Ordering::Relaxed);

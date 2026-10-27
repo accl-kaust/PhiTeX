@@ -66,6 +66,7 @@ fn a_placement_whose_output_is_the_guess_reasks_nobody() {
         let r = e.evaluate(threads).unwrap();
         assert_eq!(e.output(n).and_then(|x| v.as_int(x)), Some(30), "-j{threads}: {r:?}");
         assert_eq!(p.runs.load(Ordering::Relaxed), 2, "-j{threads}: the first run on the guesses, one more woken by the leaf that gave 20: {r:?}");
+        assert!(r.commit_by_op.iter().any(|c| c.0 == "placer" && c.2 == 4), "two commits of two placed reads each: {:?}", r.commit_by_op);
         let cause = p.cause.lock().unwrap().clone();
         assert!(matches!(cause, Some(Cause::Output { .. })), "-j{threads}: woken by the second leaf's output: {cause:?}");
         assert!(e.check_invariants().is_empty());

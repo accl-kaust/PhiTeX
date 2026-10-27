@@ -432,6 +432,9 @@ pub struct Report {
     /// Nodes the runs' placements made (a placement kept makes none), by
     /// operation.
     pub placed_by_op: Vec<(&'static str, u64)>,
+    /// The commits by operation: their whole time in ns (under the lock
+    /// and the re-asks after) and the reads their records file.
+    pub commit_by_op: Vec<(&'static str, u64, u64)>,
     /// Nodes that ran once and were never refuted.
     pub first_runs: u64,
     /// The summed run time of every run that was not its node's last.
