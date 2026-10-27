@@ -503,12 +503,6 @@ pub struct Report {
     /// Placements relocated instead of remade (docs/spec-continuations.md
     /// §2.3): a kept node moved to the place its placer wants now.
     pub placements_moved: u64,
-    /// Runs held back: a node taken from a deque while the node whose
-    /// commit woke it was to run again, put aside until that run ended
-    /// (`sched::wait_for_writer`); and those of them released at a quiet
-    /// point instead, their waker never ending so.
-    pub runs_waited: u64,
-    pub waits_broken: u64,
     /// The collections the evaluation made (`Limits::collect_at_bytes`):
     /// what each freed, and the nanoseconds each held the workers.
     pub collections: Vec<(crate::Collected, u64)>,
