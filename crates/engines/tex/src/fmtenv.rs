@@ -299,11 +299,12 @@ mod tests {
         let mut c = Vec::new();
         g.write(&mut c);
         assert_eq!(c, b[..b.len() - 1]);
-        // (in another table: the same ids, content hashes)
+        // (in another table: the same values by content; each store gives
+        // its plain values ids of its own)
         let w = Values::new();
         let m = g.made();
         assert_eq!(g.get(&w, "cs:a", &m), Some(v.bool(true)));
-        assert_eq!(g.get(&w, "cs:b", &m), Some(s));
+        assert_eq!(g.get(&w, "cs:b", &m).map(|x| w.render(x)), Some(v.render(s)));
         assert_eq!(g.get(&w, "cs:c", &m), None);
         let mut names: Vec<&str> = g.names().collect();
         names.sort_unstable();
