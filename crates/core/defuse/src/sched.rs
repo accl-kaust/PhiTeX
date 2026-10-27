@@ -66,6 +66,9 @@ pub(crate) struct Shared {
     /// late comes too), `arrived` those at the barrier, `collect_gen` the
     /// collections made; the payload of the next is `collect_next`.
     collect_wanted: AtomicBool,
+    /// Dirty nodes of `Operation::final_only` operations, uncounted, run
+    /// when the line is next quiet.
+    deferred: Mx<Vec<NodeId>>,
     /// The roots the caller's edit source holds (`EditSource::roots`),
     /// given by the caller's worker as it comes to the barrier.
     extra_roots: Mx<Vec<crate::values::ValueId>>,
@@ -284,6 +287,7 @@ impl Pool {
             n,
             final_limit: limits.final_reruns,
             collect_wanted: AtomicBool::new(false),
+            deferred: Mx::new(Vec::new()),
             extra_roots: Mx::new(Vec::new()),
             panicked_roots: Mx::new(Vec::new()),
             collecting: AtomicBool::new(false),
@@ -437,8 +441,15 @@ impl Pool {
     }
 
     /// The caller's thread drains the engine's pending edits onto its deque.
+    /// Whether dirty node `n` waits for the quiet point
+    /// (`Operation::final_only`), kept for it.
+    pub(crate) fn defer(&self, eng: &Engine, n: NodeId) -> bool {
+        defer(eng, &self.shared, n)
+    }
+
     fn drain_pending(&self, eng: &Engine, w: &Worker) -> usize {
-        let nodes = eng.take_pending(w);
+        let mut nodes = eng.take_pending(w);
+        nodes.retain(|&n| !defer(eng, &self.shared, n));
         w.seed(&nodes);
         nodes.len()
     }
@@ -717,9 +728,19 @@ fn run_worker(
         if pool.outstanding() > 0 {
             continue;
         }
-        // quiescent: the loop-back values published, their readers whose
-        // answer moved run again (a pass)
+        // quiescent: the nodes that run only then (`Operation::final_only`)
+        // released, and once they are done, the loop-back values
+        // published, their readers whose answer moved run again (a pass)
         if w.ix == 0 {
+            let rel: Vec<NodeId> = std::mem::take(&mut *pool.shared.deferred.lock())
+                .into_iter()
+                .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty))
+                .collect();
+            if !rel.is_empty() {
+                w.seed(&rel);
+                pool.shared.wake_all();
+                continue;
+            }
             let (k, pass) = crate::commit::publish_finals(eng, w);
             if pass {
                 let k = pool.shared.passes.fetch_add(1, Ordering::SeqCst) + 1;
@@ -786,12 +807,24 @@ fn absorb(eng: &Engine, pool: &Pool, w: &Worker, s: &mut dyn EditSource) -> bool
     true
 }
 
+/// Whether dirty node `n` waits for the line's quiet point
+/// (`Operation::final_only`): then it is kept, uncounted, for it.
+fn defer(eng: &Engine, sh: &Shared, n: NodeId) -> bool {
+    let Some(node) = eng.placed_node(n) else { return false };
+    if !eng.op(node.op()).final_only() {
+        return false;
+    }
+    sh.deferred.lock().push(n);
+    true
+}
+
 /// Queues a node made dirty (a new node, a released sibling): on `w`'s
 /// deque, or the engine's pending list when no evaluation runs.
 pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) {
     let created = matches!(wake.cause, Cause::Created { .. });
     *n.woke.lock() = Some(wake);
     match w {
+        Some(w) if defer(eng, &w.shared, n.id) => {}
         Some(w) => {
             w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
             if created {
@@ -1080,7 +1113,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         {
             drop(cx);
             Worker::add(&w.stale_panics, 1);
-            end_run(pool, w, node, State::Dirty);
+            end_run(eng, pool, w, node, State::Dirty);
             Ok(())
         }
         Err(payload) => {
@@ -1101,7 +1134,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         }
         Ok(Err(_stop)) => {
             drop(cx);
-            end_run(pool, w, node, State::Dirty);
+            end_run(eng, pool, w, node, State::Dirty);
             Ok(())
         }
         Ok(Ok(out)) => {
@@ -1135,7 +1168,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             node.done_ns.store(done, Ordering::Relaxed);
             w.last_commit.store(n.raw(), Ordering::Relaxed);
             w.last_done.store(done, Ordering::Relaxed);
-            if end_run(pool, w, node, State::Clean) {
+            if end_run(eng, pool, w, node, State::Clean) {
                 eng.note_settled(node, out, version);
             }
             Ok(())
@@ -1169,7 +1202,7 @@ fn give_back(eng: &Engine, node: &Node) {
 /// again, or is given up here, whatever state the node is found in.
 /// Whether the node ended `Clean`. Its commit's `committing` is cleared
 /// after the state is: a walk meanwhile marks it as `mark_dirty` does.
-fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
+fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
     loop {
         let (from, to) = match node.state() {
             State::Running => (State::Running, done),
@@ -1186,7 +1219,7 @@ fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
             continue;
         }
         node.committing.store(false, Ordering::Release);
-        if to == State::Dirty {
+        if to == State::Dirty && !defer(eng, &pool.shared, node.id) {
             w.local.push(node.id);
             w.shared.wake_one();
         } else {

@@ -1126,6 +1126,8 @@ impl Engine {
             self.final_gen.fetch_add(1, Ordering::AcqRel);
             let (pool, workers) = Pool::new(n, epoch, self.limits());
             let mut seed = self.take_pending(&workers[0]);
+            // (a node that runs only when the line is quiet waits for it)
+            seed.retain(|&n| !pool.defer(self, n));
             // (in position order, as the blocks run: a node inserted before
             // others runs with them, not after every node pushed)
             seed.sort_by_key(|&n| self.node(n).pos_hint());

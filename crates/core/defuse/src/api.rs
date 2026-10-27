@@ -269,6 +269,16 @@ pub trait Operation: Send + Sync {
         false
     }
 
+    /// Whether its nodes run only once the line is quiet (default no):
+    /// one made dirty during an evaluation waits, uncounted, until no other
+    /// node is queued or running, and then runs before the loop-back values
+    /// are published (a pass's writers: a page's PDF side, the link, the
+    /// files): so they run once a pass, not once for every rerun of what
+    /// they read. Nothing an evaluation needs may wait on one.
+    fn final_only(&self) -> bool {
+        false
+    }
+
     /// Whether its nodes define alike (default yes): a relation one of
     /// them makes (`Ctx::define_rel`) is then predicted for the others
     /// that have not run (`commit::learn_shape`). An operation whose nodes
