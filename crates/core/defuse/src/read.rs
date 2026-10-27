@@ -177,9 +177,38 @@ fn segment_part(eng: &Engine, mono: &dyn crate::api::Monoid, seg: &Segment, f: F
 /// The declared monoid's fold over the contributions to `f` after `from`
 /// (None: the start) and before `to` (None: the end): partial sums at the
 /// two ends, the segment sums between, combined in order.
+/// (`PHITEX_FOLD_TRACE=1`) A fold read whose `from` stands at or after its
+/// end, the empty range: the reader, its bounds' nodes and labels.
+pub(crate) fn trace_inverted(eng: &Engine, at: &str, me: &Node, f: Field, from: (Option<NodeId>, Pos), to: (Option<NodeId>, Pos)) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if from.1 < to.1 || !*ON.get_or_init(|| std::env::var_os("PHITEX_FOLD_TRACE").is_some()) {
+        return;
+    }
+    let name = |n: Option<NodeId>| n.map(|n| (n.raw(), eng.op(eng.node(n).op()).name()));
+    eprintln!(
+        "fold-trace: {at}: reader {} {} reads {} from {:?} at {:?} to {:?} at {:?}",
+        me.id.raw(),
+        eng.op(me.op()).name(),
+        eng.values().render(f.0),
+        name(from.0),
+        from.1,
+        name(to.0),
+        to.1
+    );
+}
+
 pub(crate) fn fold(eng: &Engine, f: Field, from: Option<Pos>, to: Option<Pos>) -> ValueId {
     let mono = eng.monoid(f);
     let v = eng.values();
+    // (bounds the wrong way round, a reader's `from` placed after its `to`
+    // as the line stands: nothing between them; a search of the range
+    // from the one past the other panicked, the worker gone with its node
+    // still counted outstanding, and the evaluation never ended)
+    if let (Some(a), Some(b)) = (from, to)
+        && a >= b
+    {
+        return mono.empty(v);
+    }
     let fs = from.and_then(|p| eng.seg_for_pos(p));
     let ts = to.and_then(|p| eng.seg_for_pos(p));
     if let (Some(a), Some(b)) = (&fs, &ts)
@@ -583,6 +612,7 @@ pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, 
         }
         ReadKind::Env { f } => apply_path(eng, env_value(eng, *f), path),
         ReadKind::Fold { f, from, to, incl } => {
+            let (from_n, to_n) = (from, to);
             // (a bound gone: no value, through the path as the run took
             // it, `Ctx::fold_value`; a view's step on none answers too)
             let from = match from {
@@ -596,6 +626,7 @@ pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, 
             let (Some(from), Some(to)) = (from, to) else {
                 return apply_path(eng, None, path);
             };
+            trace_inverted(eng, "answer", me, *f, (*from_n, from), (*to_n, end_of(to, *incl)));
             apply_path(eng, Some(fold_in(eng, *f, from, end_of(to, *incl), memo)), path)
         }
         ReadKind::Next { f, after } => {
@@ -664,6 +695,7 @@ fn range_value_in(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) 
         },
         None => pos_of(eng, me.id)?,
     };
+    trace_inverted(eng, "re-ask", me, f, (r.from, from), (r.to, end_of(to, r.incl)));
     Some(Some(fold_in(eng, f, from, end_of(to, r.incl), memo)))
 }
 

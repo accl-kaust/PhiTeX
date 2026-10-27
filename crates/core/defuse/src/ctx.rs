@@ -247,6 +247,9 @@ impl<'a> Ctx<'a> {
             Some(n) => pos_of(self.eng, n),
             None => Some(pos_of(self.eng, self.me.id).ok_or_else(stop)?),
         };
+        if let Some(tp) = tp {
+            read::trace_inverted(self.eng, "run", self.me, f, (from, fp), (to, read::end_of(tp, incl)));
+        }
         Ok(tp.map(|tp| read::fold(self.eng, f, Some(fp), Some(read::end_of(tp, incl)))))
     }
 

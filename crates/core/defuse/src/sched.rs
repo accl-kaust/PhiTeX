@@ -314,7 +314,7 @@ impl Pool {
         // runs them
         if self.n > 1
             && let Some((n, _)) = workers[0].block.pop()
-            && let Err(e) = work(eng, self, &workers[0], n)
+            && let Err(e) = work_caught(eng, self, &workers[0], n)
         {
             self.fail(e);
         }
@@ -580,7 +580,7 @@ fn run_worker(
             sp();
         }
         if let Some(n) = pool.find_work(w) {
-            if let Err(e) = work(eng, pool, w, n) {
+            if let Err(e) = work_caught(eng, pool, w, n) {
                 pool.fail(e);
                 break;
             }
@@ -608,7 +608,7 @@ fn run_worker(
         }
         Worker::add(&w.idle_ns, ns(t));
         if let Some(n) = found {
-            if let Err(e) = work(eng, pool, w, n) {
+            if let Err(e) = work_caught(eng, pool, w, n) {
                 pool.fail(e);
                 break;
             }
@@ -649,7 +649,7 @@ fn run_worker(
         let r = pool.idle_wait(eng, w);
         Worker::add(&w.idle_ns, ns(t));
         if let Some(n) = r
-            && let Err(e) = work(eng, pool, w, n)
+            && let Err(e) = work_caught(eng, pool, w, n)
         {
             pool.fail(e);
             break;
@@ -814,7 +814,27 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
 /// the operation (panics caught into `EvalError::OpPanicked`), the commit,
 /// then `Clean` or, if re-asked meanwhile, `Dirty` and queued again. A
 /// `Stop` from the run is a refuted run: queued again without a commit.
-pub(crate) fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
+/// `work`, a panic outside the run (a monoid's or a hook's, at a commit or
+/// a re-ask) ending the evaluation with the error: the worker would die
+/// with `n` counted outstanding, and the others would wait for it for ever;
+/// `n` is pending again, for the next evaluation.
+fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
+    catch_unwind(AssertUnwindSafe(|| work(eng, pool, w, n))).unwrap_or_else(|p| {
+        let message = p
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| p.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panic".to_owned());
+        give_back(eng, eng.node(n));
+        Err(EvalError::OpPanicked {
+            node: n,
+            op: eng.op(eng.node(n).op()).name(),
+            message,
+        })
+    })
+}
+
+fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
     let node = eng.node(n);
     if !node.cas_state(State::Dirty, State::Running) {
         pool.shared.done_one();

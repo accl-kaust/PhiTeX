@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use phitex_defuse::{Ctx, Engine, Field, Limits, NodeId, OpId, Operation, Stop, SumMonoid, ValueId, Values};
+use phitex_defuse::{Ctx, Engine, Field, Limits, Monoid, NodeId, OpId, Operation, Stop, SumMonoid, ValueId, Values};
 
 /// `[f, x]`: contributes x to f.
 struct Contrib;
@@ -196,6 +196,80 @@ fn a_fold_from_a_removed_node_answers_and_stops() {
     e.evaluate(2).expect("the reader settles");
     assert_eq!(int(&e, r), 0);
     assert!(e.check_invariants().is_empty());
+}
+
+#[test]
+fn a_fold_from_a_node_after_its_reader_answers_empty() {
+    // The node a fold starts after stands after the reader, segments of
+    // contributions between them: nothing lies between the bounds, so the
+    // fold answers empty. It searched the segments from the later one to
+    // the earlier, which panicked; the worker died with the node counted
+    // outstanding and the other workers waited for ever.
+    let e = Engine::new();
+    let c = e.register(Arc::new(Contrib));
+    let q = e.register(Arc::new(Quiet));
+    let ff = e.register(Arc::new(FoldFrom));
+    let v = e.values();
+    let s = v.field("s");
+    e.declare_accumulator(s, Arc::new(SumMonoid));
+    let u = e.new_unit();
+    let r = e.push(u, q, vec![]);
+    let mut last = r;
+    for _ in 0..1000 {
+        last = e.push(u, c, vec![s.0, v.int(1)]);
+    }
+    e.evaluate(4).unwrap();
+    e.replace(r, ff, vec![s.0, v.int(last.raw() as i64)]);
+    e.evaluate(4).expect("the reader runs");
+    assert_eq!(int(&e, r), 0);
+    assert!(e.check_invariants().is_empty());
+}
+
+/// Sums, and panics on a -7: a fold that breaks wherever it is asked.
+struct SevenPanics;
+
+impl Monoid for SevenPanics {
+    fn empty(&self, v: &Values) -> ValueId {
+        v.int(0)
+    }
+
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        let (a, b) = (v.as_int(a).unwrap_or(0), v.as_int(b).unwrap_or(0));
+        assert!(a != -7 && b != -7, "a minus seven");
+        v.int(a + b)
+    }
+}
+
+#[test]
+fn a_panic_outside_a_run_ends_the_evaluation() {
+    // A contribution whose fold panics where a commit re-asks its readers,
+    // on the worker outside any run: the evaluation ends with the error.
+    // The worker died with the node it committed counted outstanding, and
+    // the others waited for it for ever.
+    let e = Arc::new(Engine::new());
+    let c = e.register(Arc::new(Contrib));
+    let fa = e.register(Arc::new(FoldAll));
+    let v = e.values();
+    let s = v.field("s");
+    e.declare_accumulator(s, Arc::new(SevenPanics));
+    let u = e.new_unit();
+    let a = e.push(u, c, vec![s.0, v.int(1)]);
+    for _ in 0..200 {
+        e.push(u, c, vec![s.0, v.int(1)]);
+    }
+    for _ in 0..50 {
+        e.push(u, fa, vec![s.0]);
+    }
+    e.evaluate(4).unwrap();
+    e.replace(a, c, vec![s.0, v.int(-7)]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e2 = e.clone();
+    std::thread::spawn(move || {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| e2.evaluate(4).is_err()));
+        let _ = tx.send(r);
+    });
+    let r = rx.recv_timeout(Duration::from_secs(30)).expect("the evaluation ends");
+    assert_eq!(r.ok(), Some(true), "it ends with an error");
 }
 
 /// `[n]`: places `n` children `Quiet` after itself and contributes 1 to

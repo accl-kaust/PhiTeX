@@ -76,6 +76,7 @@ impl Segs {
     fn between(&self, from: Pos, to: Pos) -> Vec<SegId> {
         match self {
             Segs::One(p, q) => (*p >= from && *p < to).then_some(*q).into_iter().collect(),
+            Segs::Many(_) if from >= to => Vec::new(),
             Segs::Many(set) => set.range((from, SegId(0))..(to, SegId(0))).map(|x| x.1).collect(),
         }
     }
