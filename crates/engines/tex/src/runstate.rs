@@ -1110,6 +1110,12 @@ impl State {
 
     /// The engine value of loaded `loc` (encoded once).
     pub(crate) fn id_of(&mut self, loc: Loc, v: &Values) -> Option<ValueId> {
+        // (known already: read, nothing changed)
+        if let Some(s) = self.slot_ref(loc)
+            && s.e.flags & HAS_ID != 0
+        {
+            return s.e.id;
+        }
         let e = *self.entry_mut(loc);
         if e.flags & HAS_ID != 0 {
             return e.id;
@@ -1124,6 +1130,11 @@ impl State {
     /// Loaded `loc` as an integer (decoded once).
     #[inline]
     pub(crate) fn int_of(&mut self, loc: Loc, v: &Values) -> i32 {
+        if let Some(s) = self.slot_ref(loc)
+            && s.e.kind == K_INT
+        {
+            return s.e.chr;
+        }
         let e = self.entry_mut(loc);
         match e.kind {
             K_INT => e.chr,
@@ -1215,6 +1226,18 @@ impl State {
                 Mean::decode(v, x)
             }
         }
+    }
+
+    /// Loaded meaning `loc`'s entry where it is decoded: what `\let`
+    /// copies (§1221), the macro's handle shared.
+    #[inline]
+    pub(crate) fn meaning_entry(&self, loc: Loc) -> Option<Entry> {
+        let s = self.eq.get(loc as usize)?;
+        if s.e.flags & LOADED == 0 || s.e.kind < K_MEAN0 {
+            return None;
+        }
+        self.look(loc);
+        Some(s.e)
     }
 
     /// The command code and modifier of loaded meaning `loc` (decoded
@@ -1317,25 +1340,27 @@ impl State {
             self.note_cand(loc, ldef.0, prev);
         }
         let s = self.slot(loc);
+        let mut saved = None;
         if global {
             s.ginert = st;
         } else if let Some(g) = grp
             && !(s.save_gid == g && s.ginert <= s.save_stamp)
         {
-            let saved = Saved {
+            saved = Some(Saved {
                 loc,
                 prev: s.e,
                 gid: s.save_gid,
                 stamp: s.save_stamp,
                 at: st,
                 ldef,
-            };
+            });
             s.save_gid = g;
             s.save_stamp = st;
-            self.save.push(saved);
         }
-        let s = self.slot(loc);
         s.e = stored(val);
+        if let Some(x) = saved {
+            self.save.push(x);
+        }
         if !global && grp.is_some() {
             self.defined.push(loc);
         }

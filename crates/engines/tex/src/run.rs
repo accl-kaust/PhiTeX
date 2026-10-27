@@ -650,6 +650,9 @@ pub(crate) struct Run<'c, 'a> {
     /// codes (the engine holds the projected reads; this run's own
     /// lookups and the cut checks need them).
     pub memos: crate::runstate::Memos,
+    /// A token list's vector a definition gave back after copying its
+    /// body out (`\def`), taken by the next scan ([`Run::scan_toks`]).
+    pub toks_buf: Vec<Tok>,
     /// Set while a token is fetched only to be stepped over
     /// (`\expandafter`'s first, §368): a meaning not this run's own is
     /// read only as whether it is `\outer` ([`Run::outer_lookup`]).
@@ -1001,6 +1004,7 @@ impl<'c, 'a> Run<'c, 'a> {
             math_memo: None,
             class_reads: false,
             memos: crate::runstate::Memos::default(),
+            toks_buf: Vec::new(),
             outer_reads: false,
             step_reads: false,
             num_reads: false,
@@ -4496,10 +4500,16 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The scope kind the node runs in: the definition of [`SCOPE_KIND`]
     /// reaching it, made inside each scope by the node that opened it
     /// ([`Run::leave_scope`]), read once a run (a stop reads it again).
+    #[inline]
     pub(crate) fn scope_kind(&mut self) -> R<Option<ValueId>> {
         if let Some(k) = self.scope_kind_memo {
             return Ok(k);
         }
+        self.scope_kind_read()
+    }
+
+    #[inline(never)]
+    fn scope_kind_read(&mut self) -> R<Option<ValueId>> {
         let r = self.cx.read(self.v.field(SCOPE_KIND));
         if r.is_err() {
             self.trace_stop("scope kind");
@@ -4630,7 +4640,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// nodes, the conditionals carried ([`Run::leftover`]). (Any run: a
     /// run going on past the close would read on with its own bindings
     /// of the closed scope, §282 not done.)
-    fn closed_scope(&self) -> bool {
+    pub(crate) fn closed_scope(&self) -> bool {
         self.effect == CLOSE && self.nest.is_empty()
     }
 

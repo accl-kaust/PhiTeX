@@ -94,6 +94,22 @@ impl Run<'_, '_> {
         })
     }
 
+    /// [`Run::mode`]'s mode alone (§211's `mode`): no list or group read.
+    pub(crate) fn mode_m(&mut self) -> R<i32> {
+        if let Some(t) = self.nest.last() {
+            return Ok(t.mode);
+        }
+        let Some(k) = self.scope_kind()? else {
+            return Ok(1);
+        };
+        if let Some((kk, p)) = &self.kind_memo
+            && *kk == k
+        {
+            return Ok(p.3);
+        }
+        Ok(self.base_mode_with(false)?.m)
+    }
+
     /// Level 0: the scope kind the node runs in, decoded once per value.
     pub(crate) fn base_mode(&mut self) -> R<Mode> {
         self.base_mode_with(true)

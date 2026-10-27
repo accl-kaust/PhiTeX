@@ -912,12 +912,29 @@ impl Run<'_, '_> {
     /// `conv_toks` (§470–§472).
     fn conv_toks(&mut self) -> R<()> {
         let c = self.cur.chr;
+        if c == 0 {
+            // (`\number`: its digits onto the input, §465, no string made)
+            let n = self.scan_int()?;
+            let mut buf = [Tok::c(0); 11];
+            let mut k = buf.len();
+            let mut x = n.unsigned_abs();
+            loop {
+                k -= 1;
+                buf[k] = Tok::ch(12, u32::from(b'0') + x % 10);
+                x /= 10;
+                if x == 0 {
+                    break;
+                }
+            }
+            if n < 0 {
+                k -= 1;
+                buf[k] = Tok::ch(12, u32::from(b'-'));
+            }
+            self.push_toks(&buf[k..]);
+            return Ok(());
+        }
         let mut s = String::new();
         match c {
-            0 => {
-                let n = self.scan_int()?;
-                print::print_int(&mut s, i64::from(n));
-            }
             1 => {
                 let n = self.scan_int()?;
                 print::print_roman_int(&mut s, i64::from(n));
@@ -949,8 +966,7 @@ impl Run<'_, '_> {
                 s.push_str(&j.map_or_else(|| "texput".to_owned(), |x| str_of(self.v, x)));
             }
         }
-        let toks: Rc<[Tok]> = s.chars().map(char_tok).collect();
-        self.push_toks(toks);
+        self.push_toks(str_toks(&s));
         Ok(())
     }
 

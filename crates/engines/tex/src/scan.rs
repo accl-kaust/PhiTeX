@@ -897,7 +897,13 @@ impl Run<'_, '_> {
 
     fn scan_toks_in(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
         let mut params: Vec<Tok> = Vec::new();
-        let mut body: Vec<Tok> = Vec::with_capacity(32);
+        // (the list the last definition left, emptied: a definition copies
+        // its body out and gives it back, [`Run::toks_buf`])
+        let mut body: Vec<Tok> = std::mem::take(&mut self.toks_buf);
+        body.clear();
+        if body.capacity() == 0 {
+            body.reserve(32);
+        }
         let mut hash_brace: Option<Tok> = None;
         let mut t: u32 = 0; // parameters so far
         if macro_def {

@@ -28,38 +28,73 @@ pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
 static HEARTBEAT_FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
 impl Run<'_, '_> {
-    /// The node's command: expand once, or do one command (§1030).
+    /// The node's command: expand once, or do one command (§1030). An
+    /// expansion is followed by the next command here, as §1030's
+    /// `get_x_token` does, where nothing [`Run::run_all`] does between
+    /// commands is due ([`Run::expansion_goes_on`]).
     pub(crate) fn command(&mut self) -> R<()> {
-        phitex_pdf::phase::bump(23);
-        // (spec-final §2.4: a run-local count and one branch; the
-        // heartbeat's own work every `HB_BATCH` commands)
-        self.cmds += 1;
-        if self.cmds >= self.hb_at {
-            let done = self.hb_done;
-            self.heartbeat_tick();
-            // (the engine bounds a run on a guess by its work)
-            self.cx.tick(self.cmds - done)?;
-        }
-        self.no_pull = true;
-        let got = self.get_next();
-        self.no_pull = false;
-        // (the command loop's one check of the token path's halt)
-        self.ck()?;
-        if !got {
-            return Ok(());
-        }
-        if crate::exec::obs_flag!("PHITEX_CMD_TRACE") {
-            self.cmd_trace();
-        }
-        if self.cur.cmd > cmd::MAX_COMMAND {
-            if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
+        loop {
+            phitex_pdf::phase::bump(23);
+            // (spec-final §2.4: a run-local count and one branch; the
+            // heartbeat's own work every `HB_BATCH` commands)
+            self.cmds += 1;
+            if self.cmds >= self.hb_at {
+                let done = self.hb_done;
+                self.heartbeat_tick();
+                // (the engine bounds a run on a guess by its work)
+                self.cx.tick(self.cmds - done)?;
+            }
+            self.no_pull = true;
+            let got = self.get_next();
+            self.no_pull = false;
+            // (the command loop's one check of the token path's halt)
+            self.ck()?;
+            if !got {
                 return Ok(());
             }
-            self.expand();
+            if crate::exec::obs_flag!("PHITEX_CMD_TRACE") {
+                self.cmd_trace();
+            }
+            if self.cur.cmd > cmd::MAX_COMMAND {
+                if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
+                    return Ok(());
+                }
+                self.expand();
+                self.ck()?;
+                if self.expansion_goes_on() {
+                    self.pdf_cmd = 0;
+                    continue;
+                }
+                return Ok(());
+            }
+            self.dispatch()?;
             return self.ck();
         }
-        self.dispatch()?;
-        self.ck()
+    }
+
+    /// Whether the command after an expansion begins at once: what
+    /// [`Run::run_all`] checks between commands holds no work (no claim
+    /// or scope end to stop at, no sibling pulled, no mark due, no
+    /// compaction, a token list with tokens on top: no file to stop at).
+    #[inline]
+    fn expansion_goes_on(&mut self) -> bool {
+        if crate::exec::obs_flag!("PHITEX_ANCHOR_MARKS")
+            || self.pulled != 0
+            || self.claim_rest
+            || self.closed_scope()
+            || (self.marks_on
+                && (self.cmds_before + self.cmds >= self.next_mark
+                    || self.watch_exit.is_some()
+                    || self.verify_at.is_some()))
+            || self.input.arena.len() > self.input.compact_at.max(crate::input::ARENA_COMPACT)
+        {
+            return false;
+        }
+        self.input.pop_spent();
+        self.input
+            .levels
+            .last()
+            .is_some_and(|l| l.kind == crate::input::kind::TOKS)
     }
 
     /// (observe) `PHITEX_CMD_TRACE=<node>` (`all`: every node): each
@@ -252,6 +287,10 @@ impl Run<'_, '_> {
             return self.prefixed_command();
         }
         if c == cmd::RELAX {
+            return Ok(());
+        }
+        // (a space outside horizontal mode does nothing, §1045)
+        if c == cmd::SPACER && self.mode_m()?.abs() != 102 {
             return Ok(());
         }
         let md = self.mode()?;
@@ -625,9 +664,27 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// `prefixed_command` (§1211–§1269).
-    #[allow(clippy::too_many_lines)]
+    /// `prefixed_command` (§1211–§1269): the common assignments here,
+    /// the rest in [`Run::prefixed_rest`].
     pub(crate) fn prefixed_command(&mut self) -> R<()> {
+        let c = self.cur.cmd;
+        if matches!(c, cmd::DEF | cmd::LET | cmd::REGISTER | cmd::ADVANCE) {
+            let gd = self.ipar(Par::globaldefs)?;
+            let global = gd > 0;
+            match c {
+                cmd::DEF => self.def_cmd(if global { 4 } else { 0 }, false, gd, global)?,
+                cmd::LET => self.let_cmd(global)?,
+                _ => self.do_register_command(global)?,
+            }
+            return self.after_assignment();
+        }
+        self.prefixed_rest()
+    }
+
+    /// [`Run::prefixed_command`] for prefixes and the other assignments.
+    #[allow(clippy::too_many_lines)]
+    #[inline(never)]
+    fn prefixed_rest(&mut self) -> R<()> {
         let mut a: i32 = 0;
         while self.cur.cmd == cmd::PREFIX {
             if (a / self.cur.chr) % 2 == 0 {
@@ -663,68 +720,8 @@ impl Run<'_, '_> {
                 let f = v.int(i64::from(self.cur.chr));
                 self.set_cell(crate::fields::cell::FONT, f, global);
             }
-            cmd::DEF => {
-                // §1218
-                let ch = self.cur.chr;
-                let mut global = global;
-                if ch % 2 == 1 && !global && gd >= 0 {
-                    global = true;
-                }
-                let e = ch >= 2;
-                let p = self.get_r_token()?;
-                let was = e.then(|| self.lines_sink_begin(Sink::Def));
-                let (params, body) = self.scan_toks(true, e);
-                let hit = was.is_some_and(|w| self.lines_sink_end(w));
-                self.ck()?;
-                let m = Mean::Macro(Rc::new(Macro::new(
-                    u8::try_from(a % 4).unwrap_or(0)
-                        | if protected { crate::etex::PROTECTED } else { 0 },
-                    params,
-                    body.into(),
-                )));
-                self.define_cs(&p, &m, global);
-                // (a body that read the lines: its meaning tainted, a
-                // global one seen after the run)
-                if hit {
-                    match self.mean_loc(p).filter(|_| !global) {
-                        Some(l) => self.st.taint(l),
-                        None => self.lt.strong = true,
-                    }
-                }
-            }
-            cmd::LET => {
-                // §1221
-                let n = self.cur.chr;
-                let p = self.get_r_token()?;
-                if n == 0 {
-                    loop {
-                        self.get_token();
-                        self.ck()?;
-                        if self.cur.cmd != cmd::SPACER {
-                            break;
-                        }
-                    }
-                    if self.is_other(b'=') {
-                        self.get_token();
-                        self.ck()?;
-                        if self.cur.cmd == cmd::SPACER {
-                            self.get_token();
-                            self.ck()?;
-                        }
-                    }
-                } else {
-                    self.get_token();
-                    self.ck()?;
-                    let q = self.cur.tok;
-                    self.get_token();
-                    self.ck()?;
-                    let t = self.cur.tok;
-                    self.back_input(t);
-                    self.back_input(q);
-                }
-                let m = self.cur_mean()?;
-                self.define_cs(&p, &m, global);
-            }
+            cmd::DEF => self.def_cmd(a, protected, gd, global)?,
+            cmd::LET => self.let_cmd(global)?,
             cmd::SHORTHAND_DEF => {
                 // §1224
                 let n = self.cur.chr;
@@ -1019,6 +1016,89 @@ impl Run<'_, '_> {
         Ok(())
     }
 
+    /// `\def` and its kin (§1218).
+    fn def_cmd(&mut self, a: i32, protected: bool, gd: i32, global: bool) -> R<()> {
+        // §1218
+        let ch = self.cur.chr;
+        let mut global = global;
+        if ch % 2 == 1 && !global && gd >= 0 {
+            global = true;
+        }
+        let e = ch >= 2;
+        let p = self.get_r_token()?;
+        let was = e.then(|| self.lines_sink_begin(Sink::Def));
+        let (params, body) = self.scan_toks(true, e);
+        let hit = was.is_some_and(|w| self.lines_sink_end(w));
+        // (the body's list kept for the next scan: the macro's
+        // own made from it at its size)
+        let rc: Rc<[Tok]> = Rc::from(&body[..]);
+        self.toks_buf = body;
+        self.ck()?;
+        let m = Mean::Macro(Rc::new(Macro::new(
+            u8::try_from(a % 4).unwrap_or(0)
+                | if protected { crate::etex::PROTECTED } else { 0 },
+            params,
+            rc,
+        )));
+        self.define_cs_owned(p, m, global);
+        // (a body that read the lines: its meaning tainted, a
+        // global one seen after the run)
+        if hit {
+            match self.mean_loc(p).filter(|_| !global) {
+                Some(l) => self.st.taint(l),
+                None => self.lt.strong = true,
+            }
+        }
+        Ok(())
+    }
+
+    /// `\let` and `\futurelet` (§1221).
+    fn let_cmd(&mut self, global: bool) -> R<()> {
+        // §1221
+        let n = self.cur.chr;
+        let p = self.get_r_token()?;
+        if n == 0 {
+            loop {
+                self.get_token();
+                self.ck()?;
+                if self.cur.cmd != cmd::SPACER {
+                    break;
+                }
+            }
+            if self.is_other(b'=') {
+                self.get_token();
+                self.ck()?;
+                if self.cur.cmd == cmd::SPACER {
+                    self.get_token();
+                    self.ck()?;
+                }
+            }
+        } else {
+            self.get_token();
+            self.ck()?;
+            let q = self.cur.tok;
+            self.get_token();
+            self.ck()?;
+            let t = self.cur.tok;
+            self.back_input(t);
+            self.back_input(q);
+        }
+        // (a control sequence's decoded meaning: its entry copied)
+        if self.interp.is_none()
+            && !(self.cur.cmd == cmd::RELAX && self.cur.chr == crate::val::NO_EXPAND_FLAG)
+            && let Some(i) = self.cur.tok.cs_index()
+            && !self.cur.tok.is_frozen_cs()
+            && let Some(e) = self.st.meaning_entry(crate::runstate::Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(u32::MAX))
+            && let Some(l) = self.mean_loc(p)
+        {
+            self.set_loc(l, e, global);
+            return Ok(());
+        }
+        let m = self.cur_mean()?;
+        self.define_cs_owned(p, m, global);
+        Ok(())
+    }
+
     /// `get_r_token` (§1215).
     fn get_r_token(&mut self) -> R<Tok> {
         loop {
@@ -1038,6 +1118,11 @@ impl Run<'_, '_> {
     #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn define_cs(&mut self, t: &Tok, m: &Mean, global: bool) {
         self.set_mean(*t, m.clone(), global);
+    }
+
+    /// [`Run::define_cs`] of a meaning made for it.
+    pub(crate) fn define_cs_owned(&mut self, t: Tok, m: Mean, global: bool) {
+        self.set_mean(t, m, global);
     }
 
     /// `do_register_command` (§1236–§1240).

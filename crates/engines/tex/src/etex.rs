@@ -262,7 +262,25 @@ impl Run<'_, '_> {
 
 /// The expandable e-TeX and pdfTeX commands `expand` (§366) does not
 /// know; true if `cur` was one (and was expanded).
+#[inline]
 pub(crate) fn expand(r: &mut Run<'_, '_>) -> R<bool> {
+    let (c, chr) = (r.cur.cmd, r.cur.chr);
+    let mine = match c {
+        cmd::EXPAND_AFTER | cmd::NO_EXPAND => chr == 1,
+        cmd::INPUT => chr == 2,
+        cmd::TOP_BOT_MARK => chr >= MARKS_CODE,
+        cmd::CONVERT => chr >= 100,
+        _ => false,
+    };
+    if !mine {
+        return Ok(false);
+    }
+    expand_mine(r)
+}
+
+/// [`expand`] of a command it names.
+#[inline(never)]
+fn expand_mine(r: &mut Run<'_, '_>) -> R<bool> {
     let (c, chr) = (r.cur.cmd, r.cur.chr);
     match c {
         cmd::EXPAND_AFTER if chr == 1 => unless(r)?,
@@ -1119,7 +1137,26 @@ pub(crate) fn normal_paragraph(r: &mut Run<'_, '_>) -> R<()> {
 
 /// The commands of `main_control` e-TeX and pdfTeX add (or change):
 /// true if `cur` was one.
+#[inline]
 pub(crate) fn command(r: &mut Run<'_, '_>, md: &Mode) -> R<bool> {
+    let (c, chr) = (r.cur.cmd, r.cur.chr);
+    let mine = match c {
+        cmd::MARK => chr == MARKS_CODE,
+        cmd::VALIGN => chr > 0,
+        cmd::UN_VBOX | cmd::START_PAR => chr >= 2,
+        cmd::LEFT_RIGHT => chr == MIDDLE_NOAD,
+        cmd::EXTENSION => chr >= 6,
+        _ => false,
+    };
+    if !mine {
+        return Ok(false);
+    }
+    command_mine(r, md)
+}
+
+/// [`command`] of a command it may name.
+#[inline(never)]
+fn command_mine(r: &mut Run<'_, '_>, md: &Mode) -> R<bool> {
     let (c, chr) = (r.cur.cmd, r.cur.chr);
     let am = md.m.abs();
     match c {
