@@ -641,14 +641,18 @@ fn run_worker(
                 continue;
             }
             if let Some(s) = src.as_deref_mut() {
-                let items: Vec<Settled> = eng.take_settled();
+                let items: Vec<Settled> = eng.take_settled_quiet();
                 if !items.is_empty() && s.settled(eng, &items) {
                     pool.shared.stop.store(true, Ordering::SeqCst);
                     pool.shared.wake_all();
                     break;
                 }
                 last_absorb = Instant::now();
-                if absorb(eng, pool, w, s) && pool.drain_pending(eng, w) > 0 {
+                // (an edit that queues nothing may still move a loop-back
+                // value, a label removed: the line is quiet again, and its
+                // values published, before the evaluation ends)
+                if absorb(eng, pool, w, s) {
+                    pool.drain_pending(eng, w);
                     continue;
                 }
             }
@@ -936,6 +940,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         return Err(EvalError::Deadline);
     }
     let t = Instant::now();
+    let version = eng.version.load(Ordering::Acquire);
     let mut cx = Ctx::new(eng, Some(w), node);
     let r = catch_unwind(AssertUnwindSafe(|| op.run(&mut cx)));
     let run_ns = ns(t);
@@ -1000,7 +1005,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             w.last_commit.store(n.raw(), Ordering::Relaxed);
             w.last_done.store(done, Ordering::Relaxed);
             if end_run(pool, w, node, State::Clean) {
-                eng.note_settled(node, out);
+                eng.note_settled(node, out, version);
             }
             Ok(())
         }

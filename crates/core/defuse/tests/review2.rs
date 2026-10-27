@@ -407,3 +407,179 @@ fn edits_taken_during_an_evaluation_each_get_their_own_loop_back_passes() {
     assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(15), "{rep:?}");
     assert!(e.check_invariants().is_empty());
 }
+
+/// Removes the label the first time it is asked (a user deleting the
+/// `\label` while the build runs).
+struct DeleteLabel(NodeId, bool);
+
+impl phitex_defuse::EditSource for DeleteLabel {
+    fn absorb(&mut self, eng: &Engine) -> Option<u64> {
+        if std::mem::replace(&mut self.1, true) {
+            return None;
+        }
+        eng.remove(self.0);
+        Some(1)
+    }
+}
+
+#[test]
+fn an_edit_taken_at_the_last_quiet_point_is_published_before_the_evaluation_ends() {
+    // The edit is taken at the quiet point that would end the evaluation:
+    // it removes the label a reference before it reads back, which queues
+    // no node but changes the last definition of the label. The evaluation
+    // ended there, with nothing queued, and the reference kept the removed
+    // label's value: the report's version was the edited document's, its
+    // output was not.
+    let e = Engine::new();
+    let v = e.values();
+    let label = e.register(Arc::new(Label));
+    let rf = e.register(Arc::new(Ref));
+    let f = v.field("lab");
+    let u = e.new_unit();
+    let r = e.push(u, rf, vec![f.0]);
+    let l = e.push(u, label, vec![f.0, v.int(7)]);
+    let mut src = DeleteLabel(l, false);
+    let rep = e.evaluate_absorbing(1, &mut src).unwrap();
+    assert_eq!(rep.version, 1);
+    assert_eq!(e.output(r), Some(ValueId::UNIT), "the reference reads no label: {rep:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
+/// Gates for a run that straddles an edit taken mid-evaluation.
+#[derive(Default)]
+struct EditGates {
+    absorbed: std::sync::atomic::AtomicBool,
+    marked_done: std::sync::atomic::AtomicBool,
+}
+
+fn wait_gate(flag: &std::sync::atomic::AtomicBool, then_ms: u64) {
+    let t = std::time::Instant::now();
+    while !flag.load(std::sync::atomic::Ordering::Acquire) && t.elapsed() < std::time::Duration::from_secs(5) {
+        std::hint::spin_loop();
+    }
+    let t = std::time::Instant::now();
+    while t.elapsed() < std::time::Duration::from_millis(then_ms) {
+        std::hint::spin_loop();
+    }
+}
+
+/// `[x, gated]`: defines "x" = x; gated, it waits for the marked node's
+/// run to end first.
+struct GatedDef(Arc<EditGates>);
+
+impl Operation for GatedDef {
+    fn name(&self) -> &'static str {
+        "gated_def"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        if cx.values().as_int(cx.args()[1]) == Some(1) {
+            wait_gate(&self.0.marked_done, 30);
+        }
+        let x = cx.args()[0];
+        cx.define(cx.values().field("x"), x);
+        Ok(x)
+    }
+}
+
+/// `[gated]`: reads "x"; gated, it waits for the edit before it reads and
+/// raises `marked_done` at its end.
+struct GatedRead(Arc<EditGates>);
+
+impl Operation for GatedRead {
+    fn name(&self) -> &'static str {
+        "gated_read"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let gated = cx.values().as_int(cx.args()[0]) == Some(1);
+        if gated {
+            wait_gate(&self.0.absorbed, 0);
+        }
+        let x = cx.read(cx.values().field("x"))?.unwrap_or(ValueId::UNIT);
+        if gated {
+            self.0.marked_done.store(true, std::sync::atomic::Ordering::Release);
+        }
+        Ok(x)
+    }
+}
+
+/// `[ms]`: works `ms` milliseconds.
+struct Busy;
+
+impl Operation for Busy {
+    fn name(&self) -> &'static str {
+        "busy"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let ms = cx.values().as_int(cx.args()[0]).unwrap_or(0).unsigned_abs();
+        let t = std::time::Instant::now();
+        while t.elapsed() < std::time::Duration::from_millis(ms) {
+            std::hint::spin_loop();
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// Edits the definer to 2 the first time it is asked; keeps what settles.
+struct EditDef {
+    def: NodeId,
+    op: OpId,
+    g: Arc<EditGates>,
+    done: bool,
+    seen: Vec<phitex_defuse::Settled>,
+}
+
+impl phitex_defuse::EditSource for EditDef {
+    fn absorb(&mut self, eng: &Engine) -> Option<u64> {
+        if std::mem::replace(&mut self.done, true) {
+            return None;
+        }
+        let v = eng.values();
+        eng.replace(self.def, self.op, vec![v.int(2), v.int(1)]);
+        self.g.absorbed.store(true, std::sync::atomic::Ordering::Release);
+        Some(1)
+    }
+
+    fn settled(&mut self, _eng: &Engine, items: &[phitex_defuse::Settled]) -> bool {
+        self.seen.extend_from_slice(items);
+        false
+    }
+}
+
+#[test]
+fn a_node_settled_at_a_version_has_that_version_s_output() {
+    // A marked node's run began before an edit taken mid-evaluation and
+    // read the old value; it committed after the edit was taken, before
+    // the edited definer committed. It was reported settled at the edit's
+    // version with the output of the document before it (and then again
+    // with the right one): a client taking the first report of a version
+    // shows a stale page as current.
+    let e = Engine::new();
+    let v = e.values();
+    let g = Arc::new(EditGates::default());
+    let def = e.register(Arc::new(GatedDef(g.clone())));
+    let rd = e.register(Arc::new(GatedRead(g.clone())));
+    let busy = e.register(Arc::new(Busy));
+    let u = e.new_unit();
+    let d = e.push(u, def, vec![v.int(1), v.int(0)]);
+    let fs: Vec<NodeId> = (0..4).map(|_| e.push(u, busy, vec![v.int(3)])).collect();
+    let m = e.push(u, rd, vec![v.int(0)]);
+    e.evaluate(2).unwrap();
+    e.mark(m);
+    let _ = e.take_settled();
+    for &f in &fs {
+        e.replace(f, busy, vec![v.int(3)]);
+    }
+    e.replace(m, rd, vec![v.int(1)]);
+    let mut src = EditDef { def: d, op: def, g, done: false, seen: Vec::new() };
+    let rep = e.evaluate_absorbing(2, &mut src).unwrap();
+    assert_eq!(e.output(m).and_then(|x| v.as_int(x)), Some(2), "{rep:?}");
+    assert!(!src.seen.is_empty());
+    for s in &src.seen {
+        if s.version == 1 {
+            assert_eq!(v.as_int(s.output), Some(2), "settled at version 1 with the old output: {:?} {rep:?}", src.seen);
+        }
+    }
+}

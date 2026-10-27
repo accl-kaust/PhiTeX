@@ -374,15 +374,31 @@ impl Engine {
         nodes
     }
 
-    pub(crate) fn note_settled(&self, node: &Node, output: ValueId) {
+    /// A marked node's run committed clean: its output, at the version
+    /// the run began at (an edit taken while it ran may move what it read).
+    pub(crate) fn note_settled(&self, node: &Node, output: ValueId, version: u64) {
         if self.marked_n.load(Ordering::Relaxed) == 0 || !self.marked.read().contains(&node.id) {
             return;
         }
-        self.settled.lock().push(Settled {
-            node: node.id,
-            version: self.version.load(Ordering::Acquire),
-            output,
-        });
+        self.settled.lock().push(Settled { node: node.id, version, output });
+    }
+
+    /// The marked nodes settled since the last take, at a quiet point:
+    /// each once, with its output now and the version now, which nothing
+    /// queued or running can move (a report made while it ran may name an
+    /// output an edit taken since made stale).
+    pub(crate) fn take_settled_quiet(&self) -> Vec<Settled> {
+        let items = self.take_settled();
+        let version = self.version.load(Ordering::Acquire);
+        let mut seen = FxHashSet::default();
+        let mut out: Vec<Settled> = items
+            .iter()
+            .rev()
+            .filter(|s| seen.insert(s.node))
+            .filter_map(|s| self.output(s.node).map(|output| Settled { node: s.node, version, output }))
+            .collect();
+        out.reverse();
+        out
     }
 
     /// The last node of a unit, if any.
