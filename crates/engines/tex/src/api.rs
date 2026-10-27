@@ -1835,6 +1835,10 @@ pub struct RunReport {
     pub runs: u64,
     pub runs_by_op: Vec<(&'static str, u64)>,
     pub placed_by_op: Vec<(&'static str, u64)>,
+    /// Placements relocated instead of remade over the evaluations
+    /// (`phitex_defuse::Report::placements_moved`; filled by the
+    /// continuations rewrite, docs/spec-continuations.md).
+    pub placements_moved: u64,
 }
 
 impl RunReport {

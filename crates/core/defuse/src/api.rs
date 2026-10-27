@@ -500,6 +500,9 @@ pub struct Report {
     /// The reader records of earlier runs dropped at the evaluation's
     /// quiet points.
     pub readers_swept: u64,
+    /// Placements relocated instead of remade (docs/spec-continuations.md
+    /// §2.3): a kept node moved to the place its placer wants now.
+    pub placements_moved: u64,
     /// The collections the evaluation made (`Limits::collect_at_bytes`):
     /// what each freed, and the nanoseconds each held the workers.
     pub collections: Vec<(crate::Collected, u64)>,

@@ -888,6 +888,16 @@ impl Engine {
         }
     }
 
+    /// The nodes `n`'s last run placed, in order (tests).
+    pub fn placed_by(&self, n: NodeId) -> Vec<NodeId> {
+        self.node(n).record().map(|r| r.placed.clone()).unwrap_or_default()
+    }
+
+    /// Whether `a` stands before `b` on the line.
+    pub fn before(&self, a: NodeId, b: NodeId) -> bool {
+        self.node(a).pos_hint() < self.node(b).pos_hint()
+    }
+
     pub fn output(&self, n: NodeId) -> Option<ValueId> {
         let node = self.nodes.get(usize::try_from(n.raw()).ok()?)?;
         if matches!(node.state(), State::Gone | State::Inert | State::RunningInert) {
