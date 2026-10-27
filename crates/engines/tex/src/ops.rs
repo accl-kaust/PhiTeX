@@ -557,6 +557,10 @@ impl Operation for Dvi {
     fn name(&self) -> &'static str {
         "dvi"
     }
+    /// A pass's writer: runs once the line is quiet, once a pass.
+    fn final_only(&self) -> bool {
+        true
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
@@ -574,6 +578,10 @@ pub(crate) struct Link(pub Shared);
 impl Operation for Link {
     fn name(&self) -> &'static str {
         "link"
+    }
+    /// A pass's writer: runs once the line is quiet, once a pass.
+    fn final_only(&self) -> bool {
+        true
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
@@ -623,6 +631,10 @@ pub(crate) struct Files(pub Shared);
 impl Operation for Files {
     fn name(&self) -> &'static str {
         "files"
+    }
+    /// A pass's writer: runs once the line is quiet, once a pass.
+    fn final_only(&self) -> bool {
+        true
     }
     /// The written files are read back: a pass reads them whole as the
     /// pass before left them.

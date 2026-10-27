@@ -284,6 +284,23 @@ impl Run<'_, '_> {
         Ok(st.pb.so_far[usize::try_from(m).unwrap_or(0).min(7)])
     }
 
+    /// `\insertpenalties` (§419) outside the output routine: the page
+    /// builder's sum of the split insertions' penalties on the page so far
+    /// (§1008), as [`Run::page_dimen`] reads the page; inside the routine,
+    /// the count of held-over insertions the routine's run keeps (§1018).
+    pub(crate) fn insert_penalties(&mut self) -> R<i32> {
+        if self.fin.is_some() {
+            return self.int_loc(crate::fields::cell::INSPEN);
+        }
+        let (st, fired, own_k) = self.page_so_far()?;
+        if fired == Some(true)
+            && let Some(k) = own_k
+        {
+            self.order_after_own_page(k)?;
+        }
+        Ok(st.pb.insert_penalties)
+    }
+
     /// Whether a page fires at one of this piece's candidates so far
     /// ([`Feedback::PageSoFar`]: the page where the piece's page began,
     /// the profiles from there, its own items up to its last candidate):
@@ -382,6 +399,18 @@ impl Run<'_, '_> {
                 // giving back nothing; the page the text goes on with)
                 rest = &rest[st.fired_at..];
                 st.resume();
+            }
+        }
+        // (§1245: a page dimension set since its last candidate, in this
+        // paragraph, stands for what it reads after it)
+        if fired != Some(true) {
+            for &x in &raw[last..] {
+                if nodes::tag(v, x) == nodes::T_SET_PAGE {
+                    let i = usize::try_from(crate::val::int_at(v, x, 1)).unwrap_or(8);
+                    if i < 8 {
+                        st.pb.so_far[i] = i32::try_from(crate::val::int_at(v, x, 2)).unwrap_or(0);
+                    }
+                }
             }
         }
         Ok((st, fired, own_k))

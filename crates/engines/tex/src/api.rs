@@ -1628,8 +1628,8 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
     #[allow(clippy::cast_precision_loss)]
     let rpn = r.runs as f64 / live as f64;
     eprintln!(
-        "acct: {} runs, {} nodes run, {} live nodes, {rpn:.2} runs/node, {} refuted, {} relations resolved, {} shaped, {} steals, {} segments",
-        r.runs, r.nodes_run, live, r.refuted_nodes, r.relative_resolved, r.shaped, r.steals, r.segments
+        "acct: {} runs, {} nodes run, {} live nodes, {rpn:.2} runs/node, {} refuted, {} relations resolved, {} shaped, {} steals, {} segments, {} passes",
+        r.runs, r.nodes_run, live, r.refuted_nodes, r.relative_resolved, r.shaped, r.steals, r.segments, r.passes
     );
     let kinds: Vec<String> = by_kind
         .iter()

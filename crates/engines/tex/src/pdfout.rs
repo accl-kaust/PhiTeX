@@ -2380,6 +2380,10 @@ impl phitex_defuse::Operation for PdfPage {
     fn name(&self) -> &'static str {
         "pdfpage"
     }
+    /// A pass's writer: runs once the line is quiet, once a pass.
+    fn final_only(&self) -> bool {
+        true
+    }
     fn contributes(&self, _: &[ValueId], v: &phitex_defuse::Values, f: phitex_defuse::Field) -> bool {
         !crate::pages::from_pieces(v, f)
     }

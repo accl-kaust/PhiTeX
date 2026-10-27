@@ -785,7 +785,7 @@ impl Run<'_, '_> {
                 IVal::Int(if m == 0 {
                     self.int_loc(crate::fields::cell::DEADCYCLES)?
                 } else {
-                    self.int_loc(crate::fields::cell::INSPEN)?
+                    self.insert_penalties()?
                 })
             }
             cmd::SET_PAGE_DIMEN => {
