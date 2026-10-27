@@ -62,11 +62,11 @@ guessed wrong run again. Each case is named; a new one is added here.
 ## 3b. The order of the layers in the engine (2026-10-27)
 
 The engine keeps the layers in order (`Operation::layer`, defuse
-`sched::Shared::admit`): a dirty node of layer k runs only while no node
-of a layer below k is dirty, held or running. A node that cannot start is
-held, still counted outstanding, and let go when the last lower node is
-done. Nodes of one layer run beside each other as before, and a lower
-layer never waits for a higher one.
+`sched::Shared::admit`): one layer is active at a time, the lowest with
+nodes dirty or running, and only its nodes run. A dirty node of another
+layer is held, still counted outstanding, and let go when its layer
+becomes active: when the active layer drains, the lowest layer with
+dirty nodes is next. Nodes of one layer run beside each other as before.
 
 What it buys. The page builder (4) runs once, when every piece and its
 lines (2, 3) have committed: no hole, no park at a hole, no resume at
@@ -78,16 +78,22 @@ difference was the builder resuming and re-predicting at every hole.
 
 What it does not do. A piece (2) that reads a page-layer value (a
 counter a finisher moves, `\pagegoal`) still speculates: layer 2 cannot
-wait for layer 5, which is placed from it. The finisher's commit re-asks
-the piece, and the layers above wait for the piece again before they go
-on; the stack settles as the passes of §3 do. The reads themselves are
-the §3 table's business: predicted, or deferred to the layer that knows
-them (the page number inside a deferred write is expanded by the
-finisher, never by the piece).
+wait for layer 5, which is placed from it. A finisher's commit re-asks
+the piece, which waits, held, until the whole finisher layer has run;
+then layer 2 is active again and the piece runs once, seeing every
+finisher's definition, where "a lower layer never waits" (the first form
+of the rule, measured on course1 at one thread: 6.9 runs a node, 1727
+page-counter reruns) ran it once per finisher commit. The finishers
+whose page content the rerun moved run again, and the stack settles as
+the passes of §3 do. The reads themselves are the §3 table's business:
+predicted, or deferred to the layer that knows them (the page number
+inside a deferred write is expanded by the finisher, never by the
+piece).
 
 What it costs. No pipelining between layers: a finisher of an early page
-does not start while late paragraphs run. The page side is about a fifth
-of a cold build's run time and runs in parallel after the settle.
+does not start while late paragraphs run, and a piece re-asked by a
+finisher waits for the finisher layer. The page side is about a fifth of
+a cold build's run time and runs in parallel after the settle.
 
 Layers in the client: Exec, Put, Resume, Break and a `\write18`'s tool
 node 2 (line breaking stays beside its piece: the next piece reads what
