@@ -1228,6 +1228,11 @@ impl State {
         }
     }
 
+    /// Whether the entry is a macro's.
+    pub(crate) fn entry_is_macro(e: &Entry) -> bool {
+        e.kind == K_MACRO
+    }
+
     /// Loaded meaning `loc`'s entry where it is decoded: what `\let`
     /// copies (§1221), the macro's handle shared.
     #[inline]
@@ -1238,6 +1243,22 @@ impl State {
         }
         self.look(loc);
         Some(s.e)
+    }
+
+    /// Whether loaded meanings `a` and `b`, both macros, are the same
+    /// macro for `\ifx` (§507: the same parameters and body), read in
+    /// place. `None` where either is no decoded macro.
+    pub(crate) fn same_macro(&self, a: Loc, b: Loc) -> Option<bool> {
+        let m = |l: Loc| {
+            let s = self.eq.get(l as usize)?;
+            (s.e.flags & LOADED != 0 && s.e.kind == K_MACRO).then_some(s.e.payload as usize)
+        };
+        let (pa, pb) = (m(a)?, m(b)?);
+        if pa == pb {
+            return Some(true);
+        }
+        let (x, y) = (self.macros.get(pa)?, self.macros.get(pb)?);
+        Some(Rc::ptr_eq(x, y) || (x.params == y.params && x.body == y.body))
     }
 
     /// The command code and modifier of loaded meaning `loc` (decoded

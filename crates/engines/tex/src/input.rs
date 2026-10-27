@@ -139,15 +139,13 @@ impl Arena {
     }
 }
 
-/// Appends `xs` to `to`: token by token when short (no `memcpy` call).
+/// Appends `xs` to `to`: a single token pushed, more copied.
 #[inline]
 fn push_short(to: &mut Vec<Tok>, xs: &[Tok]) {
-    if xs.len() <= 16 {
-        for &t in xs {
-            to.push(t);
-        }
-    } else {
-        to.extend_from_slice(xs);
+    match xs {
+        [] => {}
+        [t] => to.push(*t),
+        _ => to.extend_from_slice(xs),
     }
 }
 
@@ -205,8 +203,7 @@ impl Arena {
     ) -> Range {
         let start = self.mark();
         let (t0, b0) = (b.toks as usize, b.bounds as usize);
-        // (the pieces are short: copied token by token into room made
-        // once, not by a `memcpy` call each)
+        // (the room made once for all the pieces)
         let arg = |sb: &[(u32, u32)], p: u8| {
             if p == 0 {
                 return None;

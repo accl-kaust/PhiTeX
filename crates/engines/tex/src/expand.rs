@@ -16,6 +16,14 @@ pub(crate) const FI_CODE: i32 = 2;
 pub(crate) const ELSE_CODE: i32 = 3;
 pub(crate) const OR_CODE: i32 = 4;
 
+/// A side of `\ifx` that is a macro ([`Run::ifx_side`]): none, a
+/// decoded meaning of the run's table, or a meaning read whole.
+enum IfxMacro {
+    No,
+    At(crate::runstate::Loc),
+    Rc(Rc<Macro>),
+}
+
 /// A conditional begun before this run is in its taken branch (§510).
 const OUTSIDE_LIMIT: u8 = 4;
 
@@ -628,22 +636,32 @@ impl Run<'_, '_> {
             return Ok(false);
         }
         let (c2, h2, m2) = self.ifx_side()?;
-        Ok(if c2 != p {
-            false
-        } else if c2 < cmd::CALL {
-            h2 == h1
-        } else {
-            match (m1, m2) {
-                (Some(a), Some(b)) => Rc::ptr_eq(&a, &b) || (a.params == b.params && a.body == b.body),
-                _ => false,
-            }
+        if c2 != p {
+            return Ok(false);
+        }
+        if c2 < cmd::CALL {
+            return Ok(h2 == h1);
+        }
+        if let (IfxMacro::At(a), IfxMacro::At(b)) = (&m1, &m2)
+            && let Some(same) = self.st.same_macro(*a, *b)
+        {
+            return Ok(same);
+        }
+        let get = |r: &Self, m: IfxMacro| match m {
+            IfxMacro::No => None,
+            IfxMacro::At(l) => r.st.macro_at(l),
+            IfxMacro::Rc(x) => Some(x),
+        };
+        Ok(match (get(self, m1), get(self, m2)) {
+            (Some(a), Some(b)) => Rc::ptr_eq(&a, &b) || (a.params == b.params && a.body == b.body),
+            _ => false,
         })
     }
 
     /// One side of `\ifx` (§507): the current token's command code, its
-    /// modifier (0 for a macro), and its macro if it is one. A decoded
-    /// meaning of the run's table is read in place, no `Mean` made.
-    fn ifx_side(&mut self) -> R<(u8, i32, Option<Rc<Macro>>)> {
+    /// modifier (0 for a macro), and its macro if it is one: a decoded
+    /// meaning of the run's table by its location, read in place.
+    fn ifx_side(&mut self) -> R<(u8, i32, IfxMacro)> {
         let (c, h) = (self.cur.cmd, self.cur.chr);
         if self.interp.is_none()
             && !(c == cmd::RELAX && h == crate::val::NO_EXPAND_FLAG)
@@ -651,10 +669,11 @@ impl Run<'_, '_> {
             && let Some(i) = self.cur.tok.cs_index()
         {
             let l = crate::runstate::Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(u32::MAX);
-            if self.st.meaning_entry(l).is_some() {
-                return Ok(match self.st.macro_at(l) {
-                    Some(m) => (c, 0, Some(m)),
-                    None => (c, h, None),
+            if let Some(e) = self.st.meaning_entry(l) {
+                return Ok(if crate::runstate::State::entry_is_macro(&e) {
+                    (c, 0, IfxMacro::At(l))
+                } else {
+                    (c, h, IfxMacro::No)
                 });
             }
         }
@@ -662,8 +681,8 @@ impl Run<'_, '_> {
         let m = self.cur_mean()?;
         let (c, h) = self.cur_cmd_chr_for_ifx(t, &m);
         Ok(match m {
-            Mean::Macro(x) => (c, h, Some(x)),
-            _ => (c, h, None),
+            Mean::Macro(x) => (c, h, IfxMacro::Rc(x)),
+            _ => (c, h, IfxMacro::No),
         })
     }
 

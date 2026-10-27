@@ -1136,22 +1136,23 @@ impl Run<'_, '_> {
         let q = self.cur.cmd;
         let v = self.v;
         // §1237
-        let (field, p): (phitex_defuse::Field, u8) = if q == cmd::REGISTER {
+        // (the register by its location: no field looked up)
+        let (l, p): (Loc, u8) = if q == cmd::REGISTER {
             let p = u8::try_from(self.cur.chr).unwrap_or(0);
             let n = self.scan_eight_bit_int()?;
-            (self.reg_field(usize::from(p.min(3)), n), p)
+            (self.reg_loc(usize::from(p.min(3)), n), p)
         } else {
             self.get_x_token();
             self.ck()?;
             if self.cur.cmd >= cmd::ASSIGN_INT && self.cur.cmd <= cmd::ASSIGN_MU_GLUE {
                 (
-                    self.quantity(self.cur.cmd, self.cur.chr),
+                    self.quantity_loc(self.cur.cmd, self.cur.chr),
                     self.cur.cmd - cmd::ASSIGN_INT,
                 )
             } else if self.cur.cmd == cmd::REGISTER {
                 let p = u8::try_from(self.cur.chr).unwrap_or(0);
                 let n = self.scan_eight_bit_int()?;
-                (self.reg_field(usize::from(p.min(3)), n), p)
+                (self.reg_loc(usize::from(p.min(3)), n), p)
             } else {
                 // "You can't use x after \advance"
                 return Ok(());
@@ -1166,7 +1167,6 @@ impl Run<'_, '_> {
         // map alone decides it: the old value not read, the write a map
         // the run contributes, `crate::regfold`)
         if p == 0 && (q == cmd::REGISTER || q == cmd::ADVANCE) {
-            let l = self.loc_of(field);
             if self.reg_map_ok(l, global)? {
                 let x = self.scan_int()?;
                 let map = if q == cmd::ADVANCE {
@@ -1183,7 +1183,7 @@ impl Run<'_, '_> {
         let old = if q == cmd::REGISTER {
             None
         } else {
-            self.read_f(field)?
+            self.get_loc(l)?
         };
         if p < 2 {
             let cur = i64::from(crate::val::i32_of(v, old));
@@ -1221,7 +1221,6 @@ impl Run<'_, '_> {
                 // "Arithmetic overflow"
                 return Ok(());
             };
-            let l = self.loc_of(field);
             self.in_advance = q == cmd::ADVANCE;
             self.set_loc(l, Entry::int(r), global);
             self.in_advance = false;
@@ -1259,7 +1258,6 @@ impl Run<'_, '_> {
                 }
             };
             let Some(r) = r else { return Ok(()) };
-            let l = self.loc_of(field);
             let e = self.st.glue_entry(r);
             self.set_loc(l, e, global);
         }
