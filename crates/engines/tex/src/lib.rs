@@ -59,6 +59,7 @@ mod prof;
 mod run;
 mod runstate;
 mod scan;
+mod state;
 pub mod timeline;
 mod tools;
 mod val;

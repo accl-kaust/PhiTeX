@@ -1860,6 +1860,13 @@ impl Stats {
     /// The readers re-asked through field `name`, or a field of its
     /// family (`name:…`, a field in parts), over the build.
     #[must_use]
+    /// The relations (`Ctx::define_rel`) on `field` filed by nodes of
+    /// operation `op` (tests/state.rs). Filled by the state-model rewrite.
+    pub fn relations_by_op(&self, op: &str, field: &str) -> u64 {
+        let _ = (op, field);
+        todo!("Stats::relations_by_op (docs/spec-state-model.md §8)")
+    }
+
     pub fn refuted_by(&self, name: &str) -> usize {
         self.refuted_by_field
             .iter()
@@ -6665,6 +6672,14 @@ impl Build {
     /// over the build (tests/defer.rs: a piece that restores a register
     /// defines nothing). Filled by the deferred-reads implementation
     /// (docs/spec-deferred-reads.md).
+    /// The reads of fields whose name starts with `prefix` recorded by
+    /// nodes of operation `op` over the build (tests/state.rs: per item
+    /// used, never a table). Filled by the state-model rewrite.
+    pub fn reads_by_op(&self, op: &str, prefix: &str) -> u64 {
+        let _ = (op, prefix);
+        todo!("Build::reads_by_op (docs/spec-state-model.md §8)")
+    }
+
     pub fn definitions_by_op(&self, op: &str, field: &str) -> u64 {
         let _ = (op, field);
         todo!("Build::definitions_by_op: the definitions of a field by an operation's nodes (docs/spec-deferred-reads.md)")

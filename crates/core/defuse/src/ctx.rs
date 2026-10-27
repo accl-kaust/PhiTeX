@@ -143,6 +143,31 @@ impl<'a> Ctx<'a> {
         self.ep = self.eng.field_epoch(f);
     }
 
+    /// A family snapshot (docs/spec-state-model.md §2.1, §9): the value
+    /// folding the reaching definitions of every field whose name starts
+    /// with `family`'s name (`cat:`, `param:`, `count:` …) at my position,
+    /// as a list of `[field, value]` pairs in field order; unrecorded (no
+    /// read is filed), cached by content in the store. A client loads a
+    /// whole table from it and records only the items it uses
+    /// (`read_item`). The body is the rewrite's; the test is
+    /// tests/snapshot.rs.
+    pub fn snapshot(&mut self, family: Field) -> Result<ValueId, Stop> {
+        let _ = family;
+        // fill: fold the reaching definitions of every field with the family's prefix at my position (read::reaching_at over the family's fields, visibility as read), unrecorded; cache by content
+        todo!()
+    }
+
+    /// Records a read of `f` answered `seen`, as `read` would have
+    /// recorded it, without answering it again: a client that loaded
+    /// `f`'s value from a snapshot and used it files the read here, so a
+    /// definition of `f` reaching me that differs from `seen` re-asks me
+    /// (docs/spec-state-model.md §2.1).
+    pub fn read_item(&mut self, f: Field, seen: Option<ValueId>) -> Result<(), Stop> {
+        let _ = (f, seen);
+        // fill: self.check()?; self.before_read(f); self.record(ReadKind::Field at Me, PathId::WHOLE, seen)
+        todo!()
+    }
+
     /// The definition of `f` reaching me, or the environment's value.
     pub fn read(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
         self.check()?;
