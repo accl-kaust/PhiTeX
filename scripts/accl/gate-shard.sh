@@ -33,7 +33,8 @@
 #   gate-shard.sh cg                    GATE_CG_DOC (para4000 and macros) at
 #                                       one thread under callgrind: startup
 #                                       Ir, Ir per command, the phases'
-#                                       table, top 15 functions
+#                                       table, top 15 functions; each PDF's
+#                                       md5 against pdfTeX's (red if not)
 #   gate-shard.sh para BAR_MD5          bench/para4000.tex (plain pdfTeX) cold
 #                                       at -j 1/8/16, three runs each (the
 #                                       node is shared: the min quoted, the
@@ -648,6 +649,15 @@ PY
       (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_THREADS=1 \
         timeout 3000 valgrind --tool=callgrind --callgrind-out-file="$p.out" "$bin" build -j 1 --output-dir=o1 --program pdftex "$doc.tex" > "$p-run.log" 2>&1) \
         || red "cg: callgrind run of $doc exit $?"
+      # (the document's PDF against pdfTeX's: GATE_CG_MD5_<doc>)
+      want=$(eval echo "\${GATE_CG_MD5_$doc:-}")
+      [ -n "$want" ] || case $doc in
+        para4000) want=4146793290dc0ea887d79a1d2d1b4c89 ;;
+        macros) want=af7d38807b2fa1b32cd118c999a6c63b ;;
+      esac
+      got=$(md5sum < "$w/cg/o1/$doc.pdf" 2>/dev/null | cut -c1-32)
+      echo "$doc md5 $got (pdfTeX $want)" >> "$r/cg.txt"
+      [ -z "$want" ] || [ "$got" = "$want" ] || red "cg: $doc md5 $got, pdfTeX's $want"
       callgrind_annotate --threshold=100 "$p.out" > "$p.excl.txt" 2>&1
       callgrind_annotate --inclusive=yes --threshold=100 "$p.out" > "$p.incl.txt" 2>&1
       python3 -I - "$doc" "$p.incl.txt" "$p.excl.txt" "$p-run.log" "$w/cg/$doc.tex" "$w/cg/o1/$doc.pdf" >> "$r/cg.txt" <<'PY'
@@ -683,7 +693,10 @@ try:
             pass
 except OSError:
     pass
-print("%s -j 1 under callgrind: Ir %d; startup (all but the evaluation) %d; evaluation %d, of which node bodies %d; commands %d; evaluation per command %s Ir, node bodies per command %s Ir (pdfTeX about 63 Ir per token)" % (
+# (pdfTeX 1.40.29 under callgrind on bench/macros.tex: 942 Ir per command
+# of this count, the 180000 iterations between its 20000- and
+# 200000-iteration runs; 11.70 G Ir, 1.14 s in all)
+print("%s -j 1 under callgrind: Ir %d; startup (all but the evaluation) %d; evaluation %d, of which node bodies %d; commands %d; evaluation per command %s Ir, node bodies per command %s Ir (pdfTeX 942 Ir per command on macros)" % (
     doc, total, total - settle, settle, bodies, cmds,
     "%.0f" % (settle / cmds) if cmds else "?", "%.0f" % (bodies / cmds) if cmds else "?"))
 G = lambda x: "%.2f" % (x / 1e9)
