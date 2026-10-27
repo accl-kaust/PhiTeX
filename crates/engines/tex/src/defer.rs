@@ -9,7 +9,7 @@
 use phitex_defuse::{At, FieldAt, NodeId, ValueId};
 
 use crate::run::Run;
-use crate::runstate::Loc;
+use crate::state::Loc;
 use crate::val::Tok;
 
 /// The prefix of a symbol's internal name: `\u{10FFFE}sym\u{2}<loc>\u{2}<node raw>`.
@@ -80,7 +80,8 @@ pub(crate) fn deferrable(r: &mut Run<'_, '_>, loc: Loc) -> bool {
 /// operand was the register alone: `scan_int` clears `defer_ok` as soon
 /// as it consumes anything but that one internal quantity).
 pub(crate) fn symbol_for(r: &mut Run<'_, '_>, loc: Loc) -> Tok {
-    sym_tok(Sym { loc, node: r.cx.node() })
+    let node = r.cx.node();
+    sym_tok(r.st.symbol(loc, node).unwrap_or(Sym { loc, node }))
 }
 
 /// The expansion of a symbol token met by `expand` (its command code
@@ -145,8 +146,7 @@ pub(crate) fn force(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<i32> {
     r.defer_ok = false;
     // (the run has not written it since: the piece's own read, memoised;
     // else the value reaching the run, as first loaded or read now)
-    let pristine = r.reg_pending.get(s.loc).is_none_or(|m| m == crate::regfold::Affine::ID)
-        && !r.st.defined_after(s.loc, 0);
+    let pristine = !r.st.has_map(s.loc) && !r.st.defined_after(s.loc, 0);
     if pristine {
         return r.int_loc(s.loc);
     }
@@ -247,11 +247,11 @@ pub(crate) fn try_restore(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate:
 /// level after its last candidate, taken back. False where none is so
 /// (the caller assigns as TeX does).
 pub(crate) fn restore_reaching(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate::run::R<bool> {
-    if r.reg_map_ok(loc, global)? {
+    if r.map_ok(loc, global) && !r.st.defined_after(loc, 0) {
         r.reg_restore(loc, global);
         return Ok(true);
     }
-    let own = r.reg_pending.get(loc).is_none_or(|m| m == crate::regfold::Affine::ID);
+    let own = !r.st.has_map(loc);
     if !own || !(global || r.innermost_group().is_none()) {
         return Ok(false);
     }

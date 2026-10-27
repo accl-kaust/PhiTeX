@@ -1511,8 +1511,7 @@ impl Run<'_, '_> {
 
     /// The page parameters (§980) reaching the position just after node
     /// `at`, as a `T_PAGE_PARAMS` marker: what a piece's `[tag]` marker
-    /// means, read where the piece is (the record `pagepar`, or its cells
-    /// where it is not defined there, as [`Run::eng_read`] reads them).
+    /// means, read where the piece is, each its own item).
     pub(crate) fn page_params_at(&mut self, at: i64) -> R<ValueId> {
         let v = self.v;
         let Some(xs) = self.page_cells_at(at)? else {
@@ -1548,35 +1547,19 @@ impl Run<'_, '_> {
     /// The page parameters' cells after piece `at` (None: the piece is
     /// gone, the marker where the run is stands for them).
     pub(crate) fn page_cells_at(&mut self, at: i64) -> R<Option<Vec<Option<ValueId>>>> {
-        let v = self.v;
         let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(at.to_ne_bytes()));
-        let b = crate::fields::B_PAGE;
-        let rf = self.ops.fields.slot_field(crate::fields::record_loc(b));
-        let n = crate::fields::record_len(b);
-        let cells = self.cx.read_at(rf, phitex_defuse::At::AfterOwn(at));
-        if cells.is_err() && crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {
-            eprintln!("pages-stop: the page parameters after piece {}", at.raw());
-        }
-        let cells = match cells? {
-            phitex_defuse::FieldAt::Def(x, _) => Some(list_of(v, x)).filter(|xs| xs.len() == n),
-            phitex_defuse::FieldAt::Gone => return Ok(None),
-            phitex_defuse::FieldAt::Unset => None,
-        };
-        let absent = crate::fields::record_absent(v);
-        let mut xs = Vec::with_capacity(n);
-        for i in 0..n {
-            let x = if let Some(c) = &cells {
-                (c[i] != absent).then_some(c[i])
-            } else {
-                let loc =
-                    crate::runstate::Loc::try_from(crate::fields::record_cell(b, i)).unwrap_or(0);
-                let f = self.loc_field(loc);
-                match self.cx.read_at(f, phitex_defuse::At::AfterOwn(at))? {
-                    phitex_defuse::FieldAt::Def(x, _) => Some(x),
-                    _ => None,
-                }
-            };
-            xs.push(x);
+        let mut xs = Vec::with_capacity(4);
+        for p in crate::pages::PAGE_PARAMS {
+            let f = self.loc_field(p as crate::state::Loc);
+            let r = self.cx.read_at(f, phitex_defuse::At::AfterOwn(at));
+            if r.is_err() && crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {
+                eprintln!("pages-stop: the page parameters after piece {}", at.raw());
+            }
+            match r? {
+                phitex_defuse::FieldAt::Def(x, _) => xs.push(Some(x)),
+                phitex_defuse::FieldAt::Gone => return Ok(None),
+                phitex_defuse::FieldAt::Unset => xs.push(None),
+            }
         }
         Ok(Some(xs))
     }

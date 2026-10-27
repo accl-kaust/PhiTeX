@@ -1464,6 +1464,9 @@ pub struct Stats {
     /// The fields whose speculative reads were refuted, with counts,
     /// most first.
     pub refuted_by_field: Vec<(String, u64)>,
+    /// The relations the live nodes' last runs filed, by operation and
+    /// field, counted ([`crate::run::NodeAudit`]).
+    pub relations: Vec<(&'static str, String, u64)>,
     /// Nodes the placements made, by operation, over the build's
     /// evaluations (a placement kept makes none).
     pub placed_by_op: Vec<(&'static str, u64)>,
@@ -1863,8 +1866,7 @@ impl Stats {
     /// The relations (`Ctx::define_rel`) on `field` filed by nodes of
     /// operation `op` (tests/state.rs). Filled by the state-model rewrite.
     pub fn relations_by_op(&self, op: &str, field: &str) -> u64 {
-        let _ = (op, field);
-        todo!("Stats::relations_by_op (docs/spec-state-model.md §8)")
+        self.relations.iter().filter(|r| r.0 == op && r.1 == field).map(|r| r.2).sum()
     }
 
     pub fn refuted_by(&self, name: &str) -> usize {
@@ -2360,6 +2362,7 @@ impl Graph {
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),
             fin_class: Arc::default(),
+            audit: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
@@ -5007,13 +5010,11 @@ impl Build {
         }
         stats.live = self.g.eng.live_nodes();
         crate::timeline::lap("engine: live nodes counted");
-        if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
-            crate::run::record_check(&self.g.eng, &self.g.start_env);
-        }
         self.pkg_stats(&mut stats);
         crate::timeline::lap("engine: package load stats");
         self.merge_load_records();
         crate::timeline::lap("engine: package load records merged");
+        stats.relations = self.relations_now();
         self.stats = stats;
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             self.note_edit_phases(t_all, t_before, t_apply, t_settle);
@@ -6666,31 +6667,61 @@ impl Build {
         out
     }
 
+    /// The relations the live nodes' last runs filed, by operation and
+    /// field ([`Stats::relations_by_op`]).
+    fn relations_now(&self) -> Vec<(&'static str, String, u64)> {
+        let v = self.g.eng.values();
+        let mut a = self.g.ops.audit.locked();
+        // (the nodes gone since: their runs' records dropped)
+        a.retain(|&n, _| self.g.eng.is_live(NodeId::from_raw(n)));
+        let mut out: Vec<(&'static str, String, u64)> = Vec::new();
+        for x in a.values() {
+            for &(f, rel) in &x.defs {
+                if !rel {
+                    continue;
+                }
+                let name = field_name(v, f);
+                match out.iter_mut().find(|r| r.0 == x.op && r.1 == name) {
+                    Some(r) => r.2 += 1,
+                    None => out.push((x.op, name, 1)),
+                }
+            }
+        }
+        out
+    }
+
+    /// The reads of fields whose name starts with `prefix` the live
+    /// nodes of operation `op` recorded at their last runs
+    /// (tests/state.rs: per item used, never a table).
+    #[must_use]
+    pub fn reads_by_op(&self, op: &str, prefix: &str) -> u64 {
+        let v = self.g.eng.values();
+        let a = self.g.ops.audit.locked();
+        let mut n = 0u64;
+        for (&node, x) in a.iter() {
+            if x.op != op || !self.g.eng.is_live(NodeId::from_raw(node)) {
+                continue;
+            }
+            n += x.reads.iter().filter(|r| r.0.starts_with(prefix)).map(|r| u64::from(r.1)).sum::<u64>();
+            n += x.other_reads.iter().filter(|&&f| field_name(v, f).starts_with(prefix)).count() as u64;
+        }
+        n
+    }
+
+    /// The definitions (values, not relations) of field `field` the live
+    /// nodes of operation `op` filed at their last runs.
+    #[must_use]
+    pub fn definitions_by_op(&self, op: &str, field: &str) -> u64 {
+        let f = self.g.eng.values().field(field);
+        let a = self.g.ops.audit.locked();
+        a.iter()
+            .filter(|(node, x)| x.op == op && self.g.eng.is_live(NodeId::from_raw(**node)))
+            .map(|(_, x)| x.defs.iter().filter(|d| d.0 == f && !d.1).count() as u64)
+            .sum()
+    }
+
     /// The `\write` streams' lines: `(stream, text)`.
     #[must_use]
-    /// The reads of fields whose name starts with `prefix` recorded by
-    /// nodes of operation `op` over the build (tests/state.rs: per item
-    /// used, never a table). Filled by the state-model rewrite.
-    pub fn reads_by_op(&self, op: &str, prefix: &str) -> u64 {
-        let _ = (op, prefix);
-        todo!("Build::reads_by_op (docs/spec-state-model.md §8)")
-    }
-
-    /// The definitions of field `field` filed by the live nodes of
-    /// operation `op`, as their last runs left them (tests/defer.rs: a
-    /// piece that restores a register defines nothing,
-    /// docs/spec-deferred-reads.md).
-    pub fn definitions_by_op(&self, op: &str, field: &str) -> u64 {
-        let eng = &self.g.eng;
-        let f = eng.values().field(field);
-        let n = eng
-            .defined_by_live(f)
-            .into_iter()
-            .filter(|(n, _)| eng.node_info(*n).is_some_and(|i| i.op == op))
-            .count();
-        u64::try_from(n).unwrap_or(u64::MAX)
-    }
-
     pub fn writes(&self) -> Vec<(i64, String)> {
         let v = self.g.eng.values();
         let f = v.field("writes");

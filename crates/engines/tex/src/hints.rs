@@ -641,8 +641,6 @@ impl Hint {
                         ps.push(f.to_owned());
                     }
                 }
-                // (a cell's definer defines its record too)
-                crate::fields::add_record_prefixes(&mut ps);
                 MayDefine::Prefixes(ps)
             }
         }
@@ -5100,19 +5098,15 @@ fn reads_now(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<Field>>
     let h = hint_of_args(reg, v, args);
     let b = h.bound.as_ref()?;
     let mut out: Vec<Field> = b.means.iter().map(|(n, _)| v.field(n)).collect();
-    // (a record's cells are read from the record)
-    let mut recs = [false; crate::fields::NREC];
-    recs[crate::fields::B_CAT] = !b.cats.is_empty();
-    for n in &b.reads {
-        match crate::fields::record_of_name(n) {
-            Some(r) => recs[r] = true,
-            None => out.push(v.field(n)),
+    // (each catcode read its own item, spec-state-model §2)
+    for &(c, _) in b.cats.iter() {
+        let f = v.field(&format!("cat:{c}"));
+        if !out.contains(&f) {
+            out.push(f);
         }
     }
-    for (r, &on) in recs.iter().enumerate() {
-        if on {
-            out.push(v.field(crate::fields::RECORDS[r]));
-        }
+    for n in &b.reads {
+        out.push(v.field(n));
     }
     (!out.is_empty()).then_some(out)
 }
@@ -5178,15 +5172,6 @@ fn may_define_answer(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine 
                 if !ns.iter().any(|n| n == f) {
                     ns.push(f.to_owned());
                 }
-            }
-        }
-        for r in crate::fields::RECORDS {
-            if !ns.iter().any(|n| n == r)
-                && ns.iter().any(|n| {
-                    crate::fields::record_of_name(n).is_some_and(|x| crate::fields::RECORDS[x] == r)
-                })
-            {
-                ns.push(r.to_owned());
             }
         }
         return MayDefine::Names(ns.iter().map(|n| v.field(n)).collect());
@@ -5352,7 +5337,7 @@ pub(crate) fn debug_defs(r: &mut Run<'_, '_>, h: &Hint) {
     // (`PHITEX_HINTS=3`: each node's published fields, against its bound)
     if crate::exec::obs_str!("PHITEX_HINTS") == Some("3") {
         let fs: Vec<String> = r
-            .published_fields()
+            .def_fields()
             .into_iter()
             .map(|f| crate::val::field_name(r.v, f))
             .collect();
@@ -5402,21 +5387,6 @@ impl Hint {
     pub(crate) fn may_define_field(&self, f: &str) -> bool {
         if false {
             return true;
-        }
-        // (a record: where the node may define one of its cells; the
-        // cells' names written over one buffer per thread, no string
-        // made per call)
-        if let Some(b) = crate::fields::RECORDS.iter().position(|&r| r == f) {
-            thread_local! {
-                static CELL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-            }
-            return CELL.with(|c| {
-                let mut c = c.borrow_mut();
-                (0..crate::fields::record_len(b)).any(|i| {
-                    crate::fields::record_cell_name_into(b, i, &mut c);
-                    self.may_define_field(&c)
-                })
-            });
         }
         let Some(b) = self.bound.as_ref().or(self.guess.as_ref()) else {
             return true;

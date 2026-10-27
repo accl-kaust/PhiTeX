@@ -115,7 +115,6 @@ impl Operation for Finish {
                 names.push(v.field(n));
             }
             names.push(a.key.field(v, PAGE_OUT));
-            ops(&self.0).fields.add_record_fields(&mut names);
             return MayDefine::Names(names);
         }
         let h = crate::hints::Hint::decode(&str_of(v, t));
@@ -128,7 +127,6 @@ impl Operation for Finish {
         ps.extend(FINISHER_FIELDS.iter().map(|&s| s.to_owned()));
         ps.push(PAGE_OUT.to_owned());
         ps.push(RTN.to_owned());
-        crate::fields::add_record_prefixes(&mut ps);
         MayDefine::Prefixes(ps)
     }
 
@@ -588,9 +586,9 @@ impl Finish {
         // (`PHITEX_PRED_SHOW=1`, observe: whether a finisher's
         // prediction has the page parameters)
         if crate::exec::obs_flag!("PHITEX_PRED_SHOW") {
-            let pp = v.field("pagepar");
+            let pp = v.field("param:vsize");
             eprintln!(
-                "pred-show: {} defs, pagepar {}",
+                "pred-show: {} defs, vsize {}",
                 out.len(),
                 out.iter().any(|e| e.0 == pp)
             );
@@ -1181,23 +1179,19 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let mut out = Vec::new();
-        // (the records the run defines, as its readers read them whole:
-        // the page builder reads the page parameters' record after a
-        // finisher, and runs on its prediction, [`Run::ready_records`])
-        self.ready_records()?;
-        for &(f, x, l) in &self.rec_out {
-            if !matches!(l, Locality::ScopeAt(_)) {
-                out.push((f, x));
+        let mut rels: Vec<(Field, i64)> = Vec::new();
+        for (f, w, _) in self.publication() {
+            match w {
+                crate::state::Pub::Value(x) => {
+                    let name = crate::val::field_name(v, f);
+                    if is_page_field(&name) {
+                        continue;
+                    }
+                    let x = self.unseal(x);
+                    out.push((f, x));
+                }
+                crate::state::Pub::Rel(c) => rels.push((f, c)),
             }
-        }
-        for (loc, x, _) in self.st.published(v, self.rec_load) {
-            let f = self.loc_field(loc);
-            let name = crate::val::field_name(v, f);
-            if is_page_field(&name) {
-                continue;
-            }
-            let x = self.unseal(x);
-            out.push((f, x));
         }
         if let Some(x) = self.fin.as_ref().and_then(|c| c.rtn) {
             out.push((v.field(RTN), x));
@@ -1217,13 +1211,6 @@ impl Run<'_, '_> {
                     |d| v.render(d.1).chars().take(80).collect()
                 )
             );
-        }
-        let mut rels: Vec<(Field, i64)> = Vec::new();
-        let maps: Vec<(Loc, crate::regfold::Affine)> = self.reg_pending.iter().collect();
-        for (l, m) in maps {
-            if m.keep && self.count_reg(l).is_some() && !self.st.defined_after(l, 0) {
-                rels.push((self.loc_field(l), i64::from(m.add)));
-            }
         }
         let Some(page) = self.fin_page().cloned() else { return Ok(()) };
         self.trace_fin_rel(&page, &rels);

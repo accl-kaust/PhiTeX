@@ -152,9 +152,34 @@ impl<'a> Ctx<'a> {
     /// (`read_item`). The body is the rewrite's; the test is
     /// tests/snapshot.rs.
     pub fn snapshot(&mut self, family: Field) -> Result<ValueId, Stop> {
-        let _ = family;
-        // fill: fold the reaching definitions of every field with the family's prefix at my position (read::reaching_at over the family's fields, visibility as read), unrecorded; cache by content
-        todo!()
+        self.check()?;
+        let v = self.values();
+        let Some(prefix) = v.as_str(family.0) else {
+            return Ok(v.list(Vec::new()));
+        };
+        let has = |f: Field| v.with_str(f.0, |s| s.starts_with(prefix.as_str())).unwrap_or(false);
+        // (the family's fields: those with a definition filed in some
+        // segment, and those the environment holds now; one reaching me
+        // is defined in a segment before me or is the environment's)
+        let mut fields: Vec<Field> = Vec::new();
+        for sid in self.eng.order.all() {
+            let seg = self.eng.seg(sid);
+            let inner = seg.inner.read();
+            fields.extend(inner.defs.keys().copied().filter(|&f| has(f)));
+        }
+        fields.extend(self.eng.env.values.read().keys().copied().filter(|&f| has(f)));
+        fields.sort_unstable_by_key(|f| f.0.raw());
+        fields.dedup();
+        let mut pairs = Vec::with_capacity(fields.len());
+        for f in fields {
+            let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+            if let Some(x) = r.value {
+                pairs.push(v.list(vec![f.0, x]));
+            }
+        }
+        // (interned by content: the same definitions reaching give the
+        // same value wherever they reach)
+        Ok(v.list(pairs))
     }
 
     /// Records a read of `f` answered `seen`, as `read` would have
@@ -163,9 +188,16 @@ impl<'a> Ctx<'a> {
     /// definition of `f` reaching me that differs from `seen` re-asks me
     /// (docs/spec-state-model.md §2.1).
     pub fn read_item(&mut self, f: Field, seen: Option<ValueId>) -> Result<(), Stop> {
-        let _ = (f, seen);
-        // fill: self.check()?; self.before_read(f); self.record(ReadKind::Field at Me, PathId::WHOLE, seen)
-        todo!()
+        self.check()?;
+        if self.seen.contains_key(&f) {
+            return Ok(());
+        }
+        // (no change count: the value was loaded before now, so the
+        // commit checks the read whatever its field's count says)
+        self.ep = u64::MAX;
+        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, seen);
+        self.seen.insert(f, seen);
+        Ok(())
     }
 
     /// The definition of `f` reaching me, or the environment's value.

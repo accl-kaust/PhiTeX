@@ -1310,7 +1310,7 @@ const INTERNAL_PRIMS: [&str; 4] = [
 
 /// Every primitive's name by a dense handle, and the handle by name
 /// (a meaning slot keeps a primitive's name as its handle,
-/// `crate::runstate::Entry`).
+/// `crate::state::Entry`).
 fn prim_handles() -> &'static (
     Vec<&'static str>,
     phitex_defuse::FxHashMap<&'static str, u32>,
@@ -1693,9 +1693,6 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
         "fontinfo:0".to_owned(),
         v.list(vec![v.str("nullfont"), v.int(0), v.int(0)]),
     ));
-    // the records of the cells above ([`crate::fields::RECORDS`])
-    let recs = crate::fields::initial_records(v, &out);
-    out.extend(recs);
     out
 }
 

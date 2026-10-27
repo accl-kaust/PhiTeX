@@ -636,12 +636,11 @@ impl Run<'_, '_> {
                     continue;
                 }
                 // (a value read where the routine uses it, [`Run::fin_lazy_value`])
+                let loc = self.loc_of(Field(f));
                 if self.is_lazy(x) {
-                    self.fin_lazy.insert(Field(f), x);
+                    self.st.set_lazy(loc, Some(x));
                     continue;
                 }
-                self.fin_lazy.remove(&Field(f));
-                let loc = self.loc_of(Field(f));
                 self.st.preload(loc, some(x));
             }
         }
@@ -664,12 +663,12 @@ impl Run<'_, '_> {
                     phitex_defuse::FieldAt::Gone => continue,
                 }
             } else if self.is_lazy(kv) {
-                self.fin_lazy.insert(Field(f), kv);
+                let loc = self.loc_of(Field(f));
+                self.st.set_lazy(loc, Some(kv));
                 continue;
             } else {
                 list_of(v, kv).first().copied()
             };
-            self.fin_lazy.remove(&Field(f));
             let loc = self.loc_of(Field(f));
             self.st.preload(loc, x);
         }
@@ -682,11 +681,10 @@ impl Run<'_, '_> {
     pub(crate) fn contribute_global_defs(&mut self) -> ValueId {
         let v = self.v;
         let names: Vec<ValueId> = self
-            .st
-            .published(v, self.rec_load)
+            .publication()
             .into_iter()
             .filter(|d| d.2 == Locality::Global)
-            .map(|d| self.loc_field(d.0).0)
+            .map(|d| d.0.0)
             .collect();
         // (none given as nothing, as the declared guess says it,
         // [`Finish::static_contribs`])
@@ -697,17 +695,11 @@ impl Run<'_, '_> {
         };
         if crate::exec::obs_flag!("PHITEX_FIN_DEFS") {
             let all: Vec<String> = self
-                .st
-                .published(v, false)
+                .publication()
                 .into_iter()
-                .map(|d| crate::val::field_name(v, self.loc_field(d.0)))
+                .map(|d| crate::val::field_name(v, d.0))
                 .collect();
-            let same: Vec<String> = self
-                .st
-                .published_as_read(v)
-                .into_iter()
-                .map(|l| crate::val::field_name(v, self.loc_field(l)))
-                .collect();
+            let same: Vec<String> = Vec::new();
             eprintln!(
                 "fin-defs node {} spec {}: {} published, {} global as read: {}  ALL: {}",
                 self.cx.node().raw(),

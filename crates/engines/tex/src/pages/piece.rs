@@ -997,7 +997,7 @@ impl Run<'_, '_> {
         if n != 0 {
             self.cx.claim(n);
         }
-        let mut defs = self.published_fields();
+        let mut defs = self.def_fields();
         defs.extend(PAGE_FIELDS.map(|f| v.field(f)));
         self.cx.narrow(MayDefine::Names(defs));
         self.begin_command();
@@ -1059,11 +1059,10 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let gdefs: Vec<ValueId> = self
-            .st
-            .published(v, self.rec_load)
+            .publication()
             .into_iter()
             .filter(|d| d.2 == Locality::Global)
-            .map(|d| self.loc_field(d.0).0)
+            .map(|d| d.0.0)
             .collect();
         let mut restore = Vec::new();
         for e in list_of(v, a(8)) {
@@ -1077,7 +1076,7 @@ impl Run<'_, '_> {
         for f in restore {
             let x = self.eng_read(f)?;
             let loc = self.loc_of(f);
-            self.set_loc(loc, crate::runstate::Entry::raw(x), true);
+            self.set_loc(loc, crate::state::Entry::raw(x), true);
         }
         Ok(())
     }
@@ -1756,7 +1755,7 @@ struct NameSources<'a> {
     defs: &'a [RunDef],
     held: &'a [(Field, Loc, Option<ValueId>)],
     streams: &'a [Vec<Field>],
-    at: &'a crate::runstate::AtCandidates,
+    at: &'a crate::state::AtCandidates,
 }
 
 /// One source of a field's name ([`NameSources::by_field`]): its rank

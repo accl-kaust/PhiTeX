@@ -55,7 +55,7 @@ use crate::input::{Line, Seg};
 use crate::nodes::{self, Side};
 use crate::ops::{Shared, ops, run_node};
 use crate::run::{Halt, R, Run};
-use crate::runstate::{ContSaved, ContSlot, ContState, Loc, State};
+use crate::state::{ContSaved, ContSlot, ContState, Loc, State};
 use crate::val::{
     glue_of, glue_value, group, int_at, int_of, list_of, str_of, toks_of, toks_value,
 };
@@ -292,6 +292,15 @@ fn span_of_ints(v: &Values, c: &[ValueId]) -> Option<Span> {
 /// where no line is sealed, and its profile's unit). Read by range by a
 /// finisher: its page's real items.
 pub(crate) const PITEMS: &str = "pitems";
+
+/// The page builder's parameters (§980), each its own item: `\vsize`,
+/// `\maxdepth`, `\topskip`, `\holdinginserts`.
+pub(crate) const PAGE_PARAMS: [crate::fields::Par; 4] = [
+    crate::fields::Par::vsize,
+    crate::fields::Par::maxdepth,
+    crate::fields::Par::topskip,
+    crate::fields::Par::holdinginserts,
+];
 
 /// The fields a finisher defined globally, one unit per finisher: read
 /// by range by the resume after a cut (a global definition replaces

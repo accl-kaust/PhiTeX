@@ -10,7 +10,7 @@ use phitex_typeset::glue::Glue;
 
 use crate::fields::Par;
 use crate::run::{R, Run};
-use crate::runstate::{Entry, Loc};
+use crate::state::{Entry, Loc};
 use crate::val::{
     CAT_CODE_BASE, DEL_CODE_BASE, MATH_CODE_BASE, Macro, Mean, OUTPUT_ROUTINE_LOC, SF_CODE_BASE,
     TOKS_BASE, Tok, cmd, glue_of, int_of, list_of, str_of, toks_value,
@@ -82,10 +82,6 @@ impl Run<'_, '_> {
             || self.pulled != 0
             || self.claim_rest
             || self.closed_scope()
-            || (self.marks_on
-                && (self.cmds_before + self.cmds >= self.next_mark
-                    || self.watch_exit.is_some()
-                    || self.verify_at.is_some()))
             || self.input.arena.len() > self.input.compact_at.max(crate::input::ARENA_COMPACT)
         {
             return false;
@@ -582,7 +578,7 @@ impl Run<'_, '_> {
                 // §1268
                 // (the token pending before this one, read first: a run
                 // that ends with the state it found publishes nothing,
-                // `runstate::unchanged_transient`, so it must know what
+                // `state::unchanged_transient`, so it must know what
                 // it found; a pending token only a run before it set
                 // reaches it)
                 self.get_loc(crate::fields::cell::AFTERTOKEN)?;
@@ -1057,13 +1053,8 @@ impl Run<'_, '_> {
         if crate::defer::restores(self, l, n, global)? {
             return Ok(());
         }
-        // (an integer register's: a map, `crate::regfold`)
-        if self.reg_map_ok(l, global)? {
-            self.reg_apply_map(l, crate::regfold::Affine::set(n));
-        } else {
-            self.note_reg_def(l);
-            self.set_loc(l, Entry::int(n), global);
-        }
+        self.note_reg_def(l);
+        self.set_loc(l, Entry::int(n), global);
         Ok(())
     }
 
@@ -1103,7 +1094,7 @@ impl Run<'_, '_> {
             && !(self.cur.cmd == cmd::RELAX && self.cur.chr == crate::val::NO_EXPAND_FLAG)
             && let Some(i) = self.cur.tok.cs_index()
             && !self.cur.tok.is_frozen_cs()
-            && let Some(e) = self.st.meaning_entry(crate::runstate::Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(u32::MAX))
+            && let Some(e) = self.st.meaning_entry(crate::state::Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(u32::MAX))
             && let Some(l) = self.mean_loc(p)
         {
             self.set_loc(l, e, global);
@@ -1178,21 +1169,17 @@ impl Run<'_, '_> {
         } else {
             let _ = self.scan_keyword("by")?;
         }
-        // (an integer register set, or advanced by a constant, where the
-        // map alone decides it: the old value not read, the write a map
-        // the run contributes, `crate::regfold`)
-        if p == 0 && (q == cmd::REGISTER || q == cmd::ADVANCE) && self.reg_map_ok(l, global)? {
+        // (an integer register advanced by a constant it never read: a
+        // step of the run's map, nothing read, published as a relation,
+        // `State::add`)
+        let mut pre = None;
+        if p == 0 && q == cmd::ADVANCE && self.map_ok(l, global) {
             let x = self.scan_int()?;
-            if q == cmd::REGISTER && crate::defer::restores(self, l, x, global)? {
+            if self.st.add(l, x, global) {
+                self.muts += 1;
                 return Ok(());
             }
-            let map = if q == cmd::ADVANCE {
-                crate::regfold::Affine::add(x)
-            } else {
-                crate::regfold::Affine::set(x)
-            };
-            self.reg_apply_map(l, map);
-            return Ok(());
+            pre = Some(x);
         }
         // (§1238: the old value is read for `\advance`, `\multiply` and
         // `\divide` only; an assignment replaces it unseen)
@@ -1204,7 +1191,9 @@ impl Run<'_, '_> {
         if p < 2 {
             let cur = i64::from(crate::val::i32_of(v, old));
             let r: Option<i32> = if q < cmd::MULTIPLY {
-                let x = if p == 0 {
+                let x = if let Some(x) = pre {
+                    x
+                } else if p == 0 {
                     self.scan_int()?
                 } else {
                     self.scan_normal_dimen()?
@@ -1243,9 +1232,7 @@ impl Run<'_, '_> {
             if p == 0 {
                 self.note_reg_def(l);
             }
-            self.in_advance = q == cmd::ADVANCE;
             self.set_loc(l, Entry::int(r), global);
-            self.in_advance = false;
         } else {
             let s = glue_of(v, old);
             let r: Option<Glue> = if q < cmd::MULTIPLY {
@@ -2255,29 +2242,26 @@ impl Run<'_, '_> {
         let trace = crate::exec::obs_flag!("PHITEX_LINES_TRACE") && (self.lt.weak || self.lt.strong);
         if trace {
             let v = self.v;
-            let pubd = self.st.published(v, self.rec_load);
-            let tainted: Vec<String> = self.st.tainted().to_vec().into_iter().map(|l| crate::val::field_name(v, self.loc_field(l))).collect();
+            let tf: Vec<phitex_defuse::Field> = self.st.tainted().to_vec().into_iter().map(|l| self.loc_field(l)).collect();
+            let pubd = self.publication();
+            let tainted: Vec<String> = tf.iter().map(|&f| crate::val::field_name(v, f)).collect();
             eprintln!(
                 "lines-trace: node {} {:?} read {} tainted {tainted:?} published {}",
                 self.cx.node().raw(),
                 self.lt,
                 self.st.taint_read(),
-                pubd.iter().any(|d| self.st.tainted().contains(&d.0))
+                pubd.iter().any(|d| tf.contains(&d.0))
             );
         }
         if !self.lt.weak || self.lt.strong || self.st.taint_read() {
             return;
         }
         let v = self.v;
-        let tainted = self.st.tainted();
-        if !tainted.is_empty()
-            && self
-                .st
-                .published(v, self.rec_load)
-                .iter()
-                .any(|d| tainted.contains(&d.0))
-        {
-            return;
+        if !self.st.tainted().is_empty() {
+            let tf: Vec<phitex_defuse::Field> = self.st.tainted().to_vec().into_iter().map(|l| self.loc_field(l)).collect();
+            if self.publication().iter().any(|d| tf.contains(&d.0)) {
+                return;
+            }
         }
         LINES_TAKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.cx.unread(v.field("lines"));
@@ -2295,9 +2279,6 @@ impl Run<'_, '_> {
             Some(crate::run::FileLine::Piece(name)) => {
                 let v = self.v;
                 let lines = v.field("lines");
-                // (a mark before the read: an edit that moves the lines
-                // runs the command again from here, [`Run::mark_before_read`])
-                self.mark_before_read();
                 // (observe, `PHITEX_READS=lines`: each reader, where)
                 if crate::exec::obs_flag!("PHITEX_READS") {
                     self.trace_read(lines, false);

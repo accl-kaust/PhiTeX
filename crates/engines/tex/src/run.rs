@@ -16,7 +16,7 @@ use crate::input::{Line, MID_LINE, NEW_LINE, Seg};
 use phitex_defuse::{Ctx, Effect, Field, Locality, OpId, Stop, Value, ValueId, Values};
 
 use crate::fields::Par;
-use crate::runstate::{Entry, Loc};
+use crate::state::{Entry, Loc};
 use crate::val::{Mean, Tok, cmd, int_of, list_of, str_of};
 
 /// Why a run cannot finish its command now.
@@ -79,88 +79,7 @@ pub(crate) fn stream_bucket(v: &Values, name: &str) -> Field {
     v.field(&format!("wstreams:{k}"))
 }
 
-/// The runs that read a record whole (node, record), kept under
-/// `PHITEX_RECORD_CHECK=1` for [`record_check`].
-static RECORD_READERS: std::sync::Mutex<Vec<(phitex_defuse::NodeId, usize)>> =
-    std::sync::Mutex::new(Vec::new());
 
-/// Debug (`PHITEX_RECORD_CHECK=1`), after an evaluation: each live node
-/// that read a record, the record reaching it against the value of each
-/// of its cells reaching it; a difference is reported. Inside a run a
-/// read may answer with a definer's prediction, which that definer's
-/// commit rechecks (a refuted reader runs again), so the record and a
-/// cell read in the same run may disagree for a while: only the state
-/// the evaluation leaves is compared. A stale record (no cells, its
-/// readers read the cells) has nothing to compare, nor has a reader
-/// inside a scope whose opener defined the record or a cell only there
-/// (the engine shows a node's entry outside its scope only); such
-/// readers are counted.
-pub(crate) fn record_check(
-    eng: &phitex_defuse::Engine,
-    start: &phitex_defuse::FxHashMap<Field, ValueId>,
-) -> usize {
-    let mut readers = std::mem::take(&mut *RECORD_READERS.locked());
-    readers.sort_unstable();
-    readers.dedup();
-    let v = eng.values();
-    let absent = crate::fields::record_absent(v);
-    // (the value reaching `n`: a node's definition, else the value the
-    // job's environment sets at the document's start, else the supplied
-    // environment's; `Err` where the node reaching it defined it only
-    // inside the scope it opened, an entry the engine does not show)
-    let env: phitex_defuse::FxHashMap<Field, ValueId> = eng.environment().into_iter().collect();
-    let reaching = |n: phitex_defuse::NodeId, f: Field| match eng.reaching_def(n, f) {
-        Some(d) => eng.def_value(d, f).map(Some).ok_or(()),
-        None => Ok(start.get(&f).or_else(|| env.get(&f)).copied()),
-    };
-    let (mut bad, mut scoped, mut compared) = (0, 0, 0);
-    'readers: for (n, b) in readers {
-        if eng.node_info(n).is_none() {
-            continue;
-        }
-        let rf = v.field(crate::fields::RECORDS[b]);
-        let rec = match reaching(n, rf) {
-            Ok(Some(rec)) => rec,
-            Ok(None) => continue,
-            Err(()) => {
-                scoped += 1;
-                continue;
-            }
-        };
-        let rec = list_of(v, rec);
-        if rec.len() != crate::fields::record_len(b) {
-            continue;
-        }
-        let mut diffs = Vec::new();
-        compared += 1;
-        for (i, &x) in rec.iter().enumerate() {
-            let cf = v.field(&crate::fields::record_cell_name(b, i));
-            let Ok(y) = reaching(n, cf) else {
-                compared -= 1;
-                scoped += 1;
-                continue 'readers;
-            };
-            let x = (x != absent).then_some(x);
-            if x != y {
-                diffs.push((cf, x, y));
-            }
-        }
-        for (cf, x, y) in diffs {
-            bad += 1;
-            eprintln!(
-                "record-check: node {} {} record {:?} cell {:?}",
-                n.raw(),
-                crate::val::field_name(v, cf),
-                x.map(|x| v.render(x)),
-                y.map(|y| v.render(y))
-            );
-        }
-    }
-    eprintln!(
-        "record-check: {bad} differences in {compared} readers ({scoped} readers inside a scope its opener defined a cell in: not compared)"
-    );
-    bad
-}
 
 /// The operations, as registered.
 #[derive(Clone)]
@@ -290,6 +209,23 @@ pub(crate) struct Ops {
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
+    /// What each node's last run published and read of the state, by
+    /// node ([`NodeAudit`]): the state model's tests ask it
+    /// (`Build::definitions_by_op`, `Build::reads_by_op`,
+    /// `Stats::relations_by_op`).
+    pub audit: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<u64, NodeAudit>>>,
+}
+
+/// What a node's last run published and read of the state
+/// ([`Ops::audit`]): its operation, each item it published (and whether
+/// as a relation), and the items it read, counted by family
+/// ([`crate::state::Family::prefix`]), those of no family by field.
+#[derive(Clone, Default)]
+pub(crate) struct NodeAudit {
+    pub op: &'static str,
+    pub defs: Vec<(Field, bool)>,
+    pub reads: Vec<(&'static str, u32)>,
+    pub other_reads: Vec<Field>,
 }
 
 /// The finishers' table ([`Ops::fin_defs`]).
@@ -430,9 +366,6 @@ impl FileRest {
         self.pos
     }
 
-    pub(crate) fn set_pos_chars(&mut self, p: usize) {
-        self.pos = p;
-    }
 
     /// The next line as a segment not yet reached (what a top-level
     /// node's arguments for it decode to, without a value or a string per
@@ -567,10 +500,6 @@ pub(crate) struct Run<'c, 'a> {
     /// Macro expansions so far: told the engine every 4096 as its work
     /// (`Ctx::tick`), as the commands are.
     pub exps: u64,
-    /// The commands the run's earlier attempts began before it was
-    /// parked ([`Run::park`]): with [`Run::cmds`], where it is in its
-    /// text (observe: the resume check says where marks were taken).
-    pub cmds_before: u64,
     pub hb_at: u64,
     pub hb_done: u64,
     pub pulled: usize,
@@ -632,10 +561,6 @@ pub(crate) struct Run<'c, 'a> {
     /// The locations a load's run first read from the engine while
     /// skipping (`PHITEX_PKG_TRACE`: which chaining reads are skips).
     pub skip_first: Vec<Loc>,
-    /// The integer registers' writes this run made as maps of their
-    /// value, composed in order, contributed at its end instead of
-    /// definitions ([`crate::regfold`], [`Run::reg_write_map`]).
-    pub reg_pending: crate::regfold::Maps,
     /// Set by `\the` and `\number` in a piece around the scan of their
     /// one internal quantity (docs/spec-deferred-reads.md §2): the
     /// outermost `scan_something_internal` takes it, so a register read
@@ -662,9 +587,9 @@ pub(crate) struct Run<'c, 'a> {
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
-    /// The run's state table ([`crate::runstate`]): every field it read
+    /// The run's state table ([`crate::state`]): every field it read
     /// or defined, native.
-    pub st: crate::runstate::State,
+    pub st: crate::state::State,
     /// The category codes of characters 0–255 as last read (`u8::MAX`:
     /// not read), valid while the table's catcode generation is
     /// `cat_gen`.
@@ -689,7 +614,7 @@ pub(crate) struct Run<'c, 'a> {
     /// The meanings this run read by class only, with their command
     /// codes (the engine holds the projected reads; this run's own
     /// lookups and the cut checks need them).
-    pub memos: crate::runstate::Memos,
+    pub memos: crate::state::Memos,
     /// A token list's vector a definition gave back after copying its
     /// body out (`\def`), taken by the next scan ([`Run::scan_toks`]).
     pub toks_buf: Vec<Tok>,
@@ -714,17 +639,9 @@ pub(crate) struct Run<'c, 'a> {
     /// is not read, the scan keeps it as that macro's number
     /// ([`Run::num_lookup`], [`crate::scan::Num`]).
     pub num_reads: bool,
-    /// The meanings this run found to be numbers, read through the
-    /// number projection's test only ([`Run::num_lookup`]).
-    /// A finisher's fields preloaded where the routine reads them, by
-    /// field: the lazy tag of the value ([`Run::preload_candidate`],
-    /// [`Run::fin_lazy_value`]).
-    pub fin_lazy: phitex_defuse::FxHashMap<Field, ValueId>,
     /// Where the lines before the run went ([`crate::control::LinesTaint`]).
     pub lt: crate::control::LinesTaint,
     pub contribs: Vec<(Field, ValueId)>,
-    /// Set while `\advance` defines its register ([`State::note_kind`]).
-    pub in_advance: bool,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -781,36 +698,6 @@ pub(crate) struct Run<'c, 'a> {
     /// kind, its hint): what the run reads of them after its start is
     /// part of its state at a mark ([`parked_rest`]).
     pub args_key: u64,
-    /// The marks this run took ([`Run::take_mark`]): each one's state as a
-    /// parked run's, and its digest; the ones before the mark a resumed
-    /// run began at are its last run's ([`phitex_defuse::Ctx::resumed`]).
-    pub mark_snaps: Vec<(std::sync::Arc<Parked>, u64)>,
-    /// The command count, from the run's start over its parks and
-    /// resumes ([`Run::cmds_before`]), at which its next mark is due: a
-    /// multiple of [`MARK_EVERY`], so that every run of the node, whatever
-    /// attempt or mark it began at, takes its marks at the same places in
-    /// its text (0: the first, not set yet).
-    pub next_mark: u64,
-    /// The slots' digests as the run's last mark saw them
-    /// ([`crate::runstate::MarkImage`]).
-    pub(crate) mark_img: crate::runstate::MarkImage,
-    /// The groups open when the run took a mark before an `\inputlineno`
-    /// read ([`Run::mark_before_read`]): a mark is due at the first
-    /// boundary with fewer open.
-    pub(crate) watch_exit: Option<usize>,
-    /// The commands begun when a run resumed at such a mark begins that
-    /// command again: no mark taken before the read again there.
-    pub(crate) anchor_skip_at: Option<u64>,
-    /// The marks of the run this one resumed from ([`Run::take_mark`]'s
-    /// patched cutoff compares its marks with theirs).
-    pub old_marks: Option<std::sync::Arc<KeptMarks>>,
-    /// Whether this run takes marks (an exec or a finisher run that is
-    /// not speculative).
-    pub marks_on: bool,
-    /// (observe, `PHITEX_RESUME_VERIFY=1`) The mark the engine resumed
-    /// this run at, with the last run's state there: the run goes from its
-    /// start instead and compares its state at that mark.
-    pub verify_at: Option<(u32, std::sync::Arc<Parked>, u64, Vec<ValueId>)>,
     /// Changes to the run's state a stopped command cannot undo (own
     /// definitions, a buffer reduced in place): a stop after one does
     /// not park ([`Run::rewind`]).
@@ -938,6 +825,11 @@ pub(crate) struct Run<'c, 'a> {
     /// it does not change during the run.
     #[allow(clippy::option_option)]
     scope_kind_memo: Option<Option<ValueId>>,
+    /// What the run publishes, made before it finishes
+    /// ([`Run::prepare_publication`]), with the table's state then and
+    /// the locations it restored.
+    #[allow(clippy::type_complexity)]
+    pub(crate) pubs: Option<(((usize, usize, usize, u64), u64), Vec<(Field, crate::state::Pub, Locality)>, Vec<Loc>)>,
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
     pub cut: Option<u32>,
@@ -954,24 +846,10 @@ pub(crate) struct Run<'c, 'a> {
     /// A `\write18`'s tool node this run ends at ([`Run::tool_command`]):
     /// placed before its resume.
     pub tool_cut: Option<ValueId>,
-    /// The records read ([`crate::fields::RECORDS`]), by record: `None`
-    /// not read yet; `Some(None)` undefined or stale (its cells are read
-    /// one by one); `Some(Some(cells))` each cell's value.
-    #[allow(clippy::option_option)]
-    pub(crate) recs: [Option<Option<Rc<[ValueId]>>>; crate::fields::NREC],
     /// A read of a file's size (`\\pdffilesize`): a file the job writes
     /// and reads back is read as its size, not its text
     /// ([`Run::read_written_text`]).
     pub(crate) size_read: bool,
-    /// The records the run defines at its end ([`Run::ready_records`]).
-    pub(crate) rec_out: Vec<(Field, ValueId, Locality)>,
-    /// The engine values of record cells read for a stale record
-    /// ([`Run::engine_cell`]).
-    pub(crate) cell_eng: phitex_defuse::FxHashMap<Loc, Option<ValueId>>,
-    /// [`Run::rec_out`] is made, and the state table's signature then.
-    pub(crate) rec_ready: bool,
-    pub(crate) rec_absent: Option<ValueId>,
-    pub(crate) rec_sig: (usize, usize, usize, u64),
     /// The engine reads a scan step's builder made through its run
     /// (`pages::RunReaching`): a prefix folded with none is memoized.
     pub reach_reads: u64,
@@ -1010,7 +888,6 @@ impl<'c, 'a> Run<'c, 'a> {
             mode_zero: false,
             cmds: 0,
             exps: 0,
-            cmds_before: 0,
             hb_at: Run::heartbeat_start(),
             hb_done: 0,
             pulled: 0,
@@ -1032,7 +909,6 @@ impl<'c, 'a> Run<'c, 'a> {
             in_skip: false,
             skip_from: (None, 0),
             skip_first: Vec::new(),
-            reg_pending: crate::regfold::Maps::default(),
             defer_ok: false,
             defer_hit: None,
             reg_loaded_base: phitex_defuse::FxHashMap::default(),
@@ -1040,7 +916,7 @@ impl<'c, 'a> Run<'c, 'a> {
             reg_first_def: phitex_defuse::FxHashMap::default(),
             rec_load: false,
             no_pull: false,
-            st: crate::runstate::State::new(),
+            st: crate::state::State::new(),
             cat_cache: [u8::MAX; 256],
             cat_gen: u64::MAX,
             code_cache: Box::new([[i32::MIN; 256]; 5]),
@@ -1048,15 +924,13 @@ impl<'c, 'a> Run<'c, 'a> {
             font_memo: phitex_defuse::FxHashMap::default(),
             math_memo: None,
             class_reads: false,
-            memos: crate::runstate::Memos::default(),
+            memos: crate::state::Memos::default(),
             toks_buf: Vec::new(),
             outer_reads: false,
             step_reads: false,
             num_reads: false,
-            fin_lazy: phitex_defuse::FxHashMap::default(),
             lt: crate::control::LinesTaint::default(),
             contribs: Vec::new(),
-            in_advance: false,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
@@ -1084,14 +958,6 @@ impl<'c, 'a> Run<'c, 'a> {
             rt_cells: 0,
             rt_rels: 0,
             args_key: 0,
-            mark_snaps: Vec::new(),
-            next_mark: 0,
-            mark_img: crate::runstate::MarkImage::default(),
-            watch_exit: None,
-            anchor_skip_at: None,
-            old_marks: None,
-            marks_on: false,
-            verify_at: None,
             muts: 0,
             interp: None,
             interp_short: false,
@@ -1127,6 +993,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cand_marks: Vec::new(),
             pdf_cmd: 0,
             scope_kind_memo: None,
+            pubs: None,
             ins_pending: Vec::new(),
             fin: None,
             cut: None,
@@ -1134,13 +1001,7 @@ impl<'c, 'a> Run<'c, 'a> {
             chars_live: None,
             chars_eff: i32::MIN,
             tool_cut: None,
-            recs: std::array::from_fn(|_| None),
             size_read: false,
-            rec_out: Vec::new(),
-            rec_ready: false,
-            rec_absent: None,
-            cell_eng: phitex_defuse::FxHashMap::default(),
-            rec_sig: (0, 0, 0, 0),
             fin_box: None,
             sealed: crate::pages::Sealing::default(),
             line_fonts: crate::FxHashMap::default(),
@@ -1271,7 +1132,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(at) = self.interp_point.filter(|&n| n != self.cx.node()) else {
             return self.get(&format!("wpre:{name}"));
         };
-        if crate::fields::record_of(loc as usize).is_some() || !is_read_back_definition(&name) {
+        if !is_read_back_definition(&name) {
             return Ok(None);
         }
         // (at the point: the reading run's own `wpre:`, else the field as
@@ -1298,17 +1159,6 @@ impl<'c, 'a> Run<'c, 'a> {
     /// An engine read of field `f` outside the state table (by name): a
     /// record's cell from its record.
     pub(crate) fn eng_read(&mut self, f: Field) -> Result<Option<ValueId>, phitex_defuse::Stop> {
-        if let Some((b, i)) = self.ops.fields.record_of_field(f) {
-            let cells = match self.record(b) {
-                Ok(c) => c,
-                Err(Halt::Stop(s)) => return Err(s),
-                Err(_) => None,
-            };
-            if let Some(cells) = cells {
-                let x = cells[i];
-                return Ok((x != self.absent()).then_some(x));
-            }
-        }
         let r = self.cx.read(f);
         if r.is_err() {
             note_stop(self.op_name(), f);
@@ -1338,270 +1188,66 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-    /// The value of an absent cell in a record (made once a run).
-    fn absent(&mut self) -> ValueId {
-        if let Some(a) = self.rec_absent {
-            return a;
-        }
-        let a = crate::fields::record_absent(self.v);
-        self.rec_absent = Some(a);
-        a
-    }
 
-    /// Record `b`'s cells, read once a run (`None`: undefined or stale,
-    /// its cells read one by one).
-    pub(crate) fn record(&mut self, b: usize) -> R<Option<Rc<[ValueId]>>> {
-        if let Some(c) = &self.recs[b] {
-            return Ok(c.clone());
-        }
-        let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
-        let x = self.cx.read(f)?;
-        let v = self.v;
-        let cells: Option<Rc<[ValueId]>> = x
-            .map(|x| list_of(v, x))
-            .filter(|xs| xs.len() == crate::fields::record_len(b))
-            .map(Rc::from);
-        // (debug, `PHITEX_RECORD_CHECK=1`: the record's readers, whose
-        // record is compared with its cells after the evaluation,
-        // [`record_check`])
-        if cells.is_some() && crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
-            RECORD_READERS.locked().push((self.cx.node(), b));
-        }
-        self.recs[b] = Some(cells.clone());
-        Ok(cells)
-    }
 
-    /// The engine's value of cell `loc` reaching the run (what it read,
-    /// or a read of the cell's own field).
-    fn engine_cell(&mut self, loc: Loc) -> R<Option<ValueId>> {
-        if let Some(x) = self.st.engine_value(loc) {
-            return Ok(x);
-        }
-        if let Some(&x) = self.cell_eng.get(&loc) {
-            return Ok(x);
-        }
-        let f = self.loc_field(loc);
-        let x = self.cx.read(f)?;
-        self.cell_eng.insert(loc, x);
-        Ok(x)
-    }
 
-    /// Reads what [`Run::record_after`] of record `b` reads: the record,
-    /// or (undefined or stale) its cells' engine values.
-    pub(crate) fn prepare_record(&mut self, b: usize) -> R<()> {
-        if self.record(b)?.is_none() {
-            for i in 0..crate::fields::record_len(b) {
-                let loc = Loc::try_from(crate::fields::record_cell(b, i)).unwrap_or(0);
-                self.engine_cell(loc)?;
-            }
-        }
-        Ok(())
-    }
 
-    /// Record `b` as the run leaves it at its base level, given `defs`,
-    /// the definitions to publish: the record read, or (undefined or
-    /// stale) its cells' engine values, with the cells the run defines
-    /// replaced. `None` with the record unchanged.
-    fn record_after(
-        &mut self,
-        b: usize,
-        defs: &[(Loc, ValueId, Locality)],
-    ) -> R<Option<(ValueId, bool)>> {
-        let mine: Vec<(usize, ValueId, Locality)> = defs
-            .iter()
-            .filter_map(|&(l, x, lc)| {
-                crate::fields::record_of(l as usize)
-                    .filter(|r| r.0 == b)
-                    .map(|r| (r.1, x, lc))
-            })
-            .collect();
-        if mine.is_empty() {
-            return Ok(None);
-        }
-        let v = self.v;
-        let a = self.absent();
-        let rec = self.record(b)?;
-        let (base, fresh): (Vec<ValueId>, bool) = if let Some(c) = rec {
-            (c.to_vec(), true)
-        } else {
-            let mut xs = Vec::with_capacity(crate::fields::record_len(b));
-            for i in 0..crate::fields::record_len(b) {
-                let loc = Loc::try_from(crate::fields::record_cell(b, i)).unwrap_or(0);
-                xs.push(self.engine_cell(loc)?.unwrap_or(a));
-            }
-            (xs, false)
-        };
-        let mut cells = base.clone();
-        for &(i, x, _) in &mine {
-            cells[i] = x;
-        }
-        // (debug, `PHITEX_REC_TRACE=1`: each record a run defines, the
-        // cells it changes)
-        if crate::exec::obs_flag!("PHITEX_REC_TRACE") {
-            let ch: Vec<String> = (0..cells.len())
-                .filter(|&i| cells[i] != base[i])
-                .map(|i| {
-                    format!(
-                        "{} {} -> {}",
-                        crate::fields::record_cell_name(b, i),
-                        v.render(base[i]),
-                        v.render(cells[i])
-                    )
-                })
-                .collect();
-            eprintln!(
-                "rec-trace: node {} op {:?} {} (fresh {fresh}): {}",
-                self.cx.node().raw(),
-                self.cx.op(),
-                crate::fields::RECORDS[b],
-                ch.join(", ")
-            );
-        }
-        let global = mine.iter().any(|m| m.2 == Locality::Global);
-        if fresh && cells == base {
-            return Ok(None);
-        }
-        Ok(Some((v.list(cells), global)))
-    }
 
-    /// A continuation's open-group bindings the run republishes locally
-    /// at its base level are no definitions where they equal the value
-    /// reaching the run (read from the engine here: a record's cell
-    /// from its record): only a binding that differs is published, so a
-    /// resume re-made by an edit is no new definition of what it left
-    /// as it was (per cell, and so per record).
-    pub(crate) fn drop_unchanged_republished(&mut self) -> R<()> {
-        for (loc, x) in self.st.cont_republished(self.v) {
-            let f = self.loc_field(loc);
-            if self.eng_read(f)? == Some(x) {
-                self.st.drop_publ(loc);
-            }
-        }
-        Ok(())
-    }
 
-    /// The records the run defines at its end, made before it finishes
-    /// (they may read): each record a cell of which the run publishes,
-    /// as the run leaves it. A global definition of a cell where a scope
-    /// is open (the record holds the scope's local values of its other
-    /// cells, which a global record would keep past the scope's end)
-    /// makes the record stale (its readers read the cells one by one)
-    /// until a definition of a cell outside every scope makes it whole.
-    /// (This is the hole the engine's `define_in_scope` will close: a
-    /// global definition of the record's outermost value, the scopes'
-    /// local records kept.)
-    pub(crate) fn ready_records(&mut self) -> R<()> {
-        self.rec_out.clear();
-        self.rec_ready = false;
-        let defs = self.st.published(self.v, self.rec_load);
-        if !defs
-            .iter()
-            .any(|d| crate::fields::record_of(d.0 as usize).is_some())
-        {
-            self.rec_ready = true;
-            self.rec_sig = self.st.sig();
-            return Ok(());
-        }
-        let v = self.v;
-        // (cells the run defines in the frames it opens after itself,
-        // one per group it left open, `Locality::ScopeAt`: the record is
-        // stale in each such frame, its readers there read the cells;
-        // the rest below is made from the other definitions)
-        let defs = {
-            let mut defs = defs;
-            let mut stale: Vec<(usize, Locality)> = Vec::new();
-            for d in &defs {
-                if let (Locality::ScopeAt(_), Some(r)) =
-                    (d.2, crate::fields::record_of(d.0 as usize))
-                    && !stale.contains(&(r.0, d.2))
-                {
-                    stale.push((r.0, d.2));
-                }
-            }
-            for (b, l) in stale {
-                let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
-                self.rec_out.push((f, v.list(Vec::new()), l));
-            }
-            defs.retain(|d| !matches!(d.2, Locality::ScopeAt(_)));
-            defs
-        };
-        let mut inside = None;
-        for b in 0..crate::fields::RECORDS.len() {
-            let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
-            // (cells the run defines in the scope it opens after itself,
-            // `Locality::Scope`: the record outside is made from the
-            // other definitions, below, and the scope's is the record
-            // reaching the run with every definition, the scope's last)
-            let of_b = |d: &(Loc, ValueId, Locality)| {
-                crate::fields::record_of(d.0 as usize).is_some_and(|r| r.0 == b)
-            };
-            let scoped = defs.iter().any(|d| d.2 == Locality::Scope && of_b(d));
-            if scoped {
-                let outer: Vec<(Loc, ValueId, Locality)> = defs
-                    .iter()
-                    .copied()
-                    .filter(|d| d.2 != Locality::Scope)
-                    .collect();
-                let mut all = outer.clone();
-                all.extend(defs.iter().copied().filter(|d| d.2 == Locality::Scope));
-                let has_outer = outer.iter().any(of_b);
-                match self.record_after(b, &all)? {
-                    Some((x, _)) => self.rec_out.push((f, x, Locality::Scope)),
-                    // (the scope's cells as the record reaching the run,
-                    // the run's own record outside differing: stale in
-                    // the scope, its readers read the cells)
-                    None if has_outer => {
-                        self.rec_out.push((f, v.list(Vec::new()), Locality::Scope));
-                    }
-                    None => {}
-                }
-                if !has_outer {
-                    continue;
-                }
-            }
-            let defs_b: Vec<(Loc, ValueId, Locality)> = if scoped {
-                defs.iter()
-                    .copied()
-                    .filter(|d| d.2 != Locality::Scope)
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let defs = if scoped { &defs_b } else { &defs };
-            let global = defs.iter().any(|d| {
-                d.2 == Locality::Global
-                    && crate::fields::record_of(d.0 as usize).is_some_and(|r| r.0 == b)
-            });
-            if global {
-                let at = if let Some(i) = inside {
-                    i
-                } else {
-                    let opens_before = matches!(
-                        self.effect,
-                        Effect::Scope(k) if k.before && k.opens > 0
-                    );
-                    let i = opens_before || self.scope_kind()?.is_some();
-                    inside = Some(i);
-                    i
-                };
-                if at {
-                    self.rec_out.push((f, v.list(Vec::new()), Locality::Global));
-                    continue;
-                }
-            }
-            let Some((x, global)) = self.record_after(b, defs)? else {
+    /// What the run publishes ([`crate::state::State::publication`]),
+    /// made before it finishes with the reads the rule takes: whether the
+    /// run stands outside every scope of the document (the scope kind
+    /// reaching it, read only where a global write restores what it read,
+    /// spec §2.3 rule 1), and the value reaching it of each binding a
+    /// continuation carried that it publishes again (rule 2: one equal to
+    /// it is none). A stop here runs the node again from its start.
+    pub(crate) fn prepare_publication(&mut self) -> R<()> {
+        let top = self.rec_load || (self.st.has_global_restore(self.v) && self.scope_kind()?.is_none());
+        let (pubs, restored) = self.st.publication(self.v, top);
+        let mut out = Vec::with_capacity(pubs.len());
+        for p in pubs {
+            let f = self.loc_field(p.loc);
+            if p.carried
+                && let crate::state::Pub::Value(x) = p.what
+                && self.eng_read(f)? == Some(x)
+            {
                 continue;
-            };
-            let l = if global {
-                Locality::Global
-            } else {
-                Locality::Local
-            };
-            self.rec_out.push((f, x, l));
+            }
+            out.push((f, p.what, p.at));
         }
-        self.rec_ready = true;
-        self.rec_sig = self.st.sig();
+        self.pubs = Some((self.pub_key(), out, restored));
         Ok(())
+    }
+
+    /// The state the publication was made in ([`Run::prepare_publication`]).
+    fn pub_key(&self) -> ((usize, usize, usize, u64), u64) {
+        (self.st.sig(), self.st.muts())
+    }
+
+    /// What the run publishes: as [`Run::prepare_publication`] made it,
+    /// else (the table changed since, or it was not made) made now with
+    /// no read: a global restore published where the run's scope is not
+    /// known, a carried binding published as it is.
+    pub(crate) fn publication(&mut self) -> Vec<(Field, crate::state::Pub, Locality)> {
+        if let Some((k, out, _)) = &self.pubs
+            && *k == self.pub_key()
+        {
+            return out.clone();
+        }
+        let top = self.rec_load || matches!(self.scope_kind_memo, Some(None));
+        let (pubs, _) = self.st.publication(self.v, top);
+        pubs.into_iter().map(|p| (self.loc_field(p.loc), p.what, p.at)).collect()
+    }
+
+    /// The values the run publishes (its relations left out).
+    pub(crate) fn published_values(&mut self) -> Vec<(Field, ValueId, Locality)> {
+        self.publication()
+            .into_iter()
+            .filter_map(|(f, w, l)| match w {
+                crate::state::Pub::Value(x) => Some((f, x, l)),
+                crate::state::Pub::Rel(_) => None,
+            })
+            .collect()
     }
 
     #[inline(never)]
@@ -1609,37 +1255,15 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.in_skip && self.rec_load {
             self.skip_first.push(loc);
         }
-        // (a finisher's field preloaded where the routine reads it: its
+        // (a finisher's field given where the routine reads it: its
         // value at the candidate, read now, [`Run::fin_lazy_value`])
-        if !self.fin_lazy.is_empty() {
-            let f = self.loc_field(loc);
-            if let Some(&x) = self.fin_lazy.get(&f) {
-                let y = self.fin_lazy_preload(x)?;
-                self.fin_lazy.remove(&f);
-                self.st.preload(loc, y);
-                return Ok(());
-            }
-        }
-        // (a record's cell: read from the record, once a run)
-        if let Some((b, i)) = crate::fields::record_of(loc as usize)
-            && let Some(cells) = self.record(b)?
-        {
-            let x = cells[i];
-            let x = (x != self.absent()).then_some(x);
-            self.st.fill(loc, x);
-            return Ok(());
-        }
-        // (an integer register this run set, `set c`: its value is the
-        // map's whatever reaches the run, so no read; not a read either,
-        // [`Run::reg_restore`] unloads it)
-        if let Some(own) = self.reg_pending.get(loc)
-            && !own.keep
-        {
-            self.st.preload(loc, Some(self.v.int(i64::from(own.add))));
+        if let Some(x) = self.st.lazy(loc) {
+            let y = self.fin_lazy_preload(x)?;
+            self.st.preload(loc, y);
             return Ok(());
         }
         let f = self.loc_field(loc);
-        let r = self.cx.read(f);
+        let r = self.st.get(self.cx, self.v, loc, f);
         if r.is_err() {
             note_stop(self.op_name(), f);
         }
@@ -1653,10 +1277,10 @@ impl<'c, 'a> Run<'c, 'a> {
             eprintln!(
                 "def-trace read {} = {} by node {} op {:?} at {:?} (cmd #{})",
                 crate::val::field_name(self.v, f),
-                match &r {
-                    Ok(Some(x)) => format!("{x:?} {}", crate::val::show_def(self.v, *x)),
-                    Ok(None) => "none".to_owned(),
-                    Err(_) => "stop".to_owned(),
+                match self.st.engine_value(loc) {
+                    Some(Some(x)) => format!("{x:?} {}", crate::val::show_def(self.v, x)),
+                    Some(None) => "none".to_owned(),
+                    None => "stop".to_owned(),
                 },
                 self.cx.node().raw(),
                 self.cx.op(),
@@ -1664,15 +1288,10 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cmds
             );
         }
-        let mut x = r?;
-        self.note_loaded_base(loc, x);
-        // (an integer register: this run's own map writes before the read
-        // applied, [`Run::reg_apply_map`])
-        if let Some(own) = self.reg_pending.get(loc) {
-            let v = self.v;
-            x = Some(v.int(i64::from(own.apply(crate::val::i32_of(v, x)))));
+        r?;
+        if let Some(x) = self.st.engine_value(loc) {
+            self.note_loaded_base(loc, x);
         }
-        self.st.fill(loc, x);
         Ok(())
     }
 
@@ -1694,84 +1313,28 @@ impl<'c, 'a> Run<'c, 'a> {
             .flatten()
     }
 
-    /// A write of integer register `loc` as a map of its value
-    /// ([`crate::regfold`]), where the map alone decides it for every
-    /// reader after the run: a document piece's write, or a routine's
-    /// global one (not a format's or a recorded load's), before its first
-    /// candidate (a
-    /// page firing inside the piece runs its routine before the later
-    /// writes) and not where a job-written file is read back (the
-    /// read-back's run notes the values its writes replace, `note_pre`),
-    /// outside every group of the document and, unless global,
-    /// of the run, and with no definition of the register by the run
-    /// itself (a global `\advance` adds to the value in force, which a
-    /// binding of the run's or of an open group may hold, §279). Then
-    /// the write is [`Run::reg_apply_map`]'s.
-    pub(crate) fn reg_map_ok(&mut self, loc: Loc, global: bool) -> R<bool> {
+    /// Whether a step of integer register `loc` by a constant may be a
+    /// relation (spec §2.3 rule 3, [`crate::state::State::add`]): a
+    /// document piece's write, or a routine's global one (not a format's
+    /// or a recorded load's), outside every group of the run unless
+    /// global, before the run's first candidate (a page firing inside the
+    /// piece runs its routine at the candidate, on the value there), and
+    /// not where a job-written file is read back (the read-back keeps the
+    /// values its writes replace, [`Run::note_pre`]).
+    pub(crate) fn map_ok(&self, loc: Loc, global: bool) -> bool {
         let op = self.cx.op();
-        // (a routine's global write too: its run's own groups, the output
-        // routine's among them, hold no binding a global write passes)
         let routine = op == self.ops.finish && global;
-        if crate::exec::obs_flag!("PHITEX_REG_TRACE") && self.count_reg(loc).is_some() {
-            let sk = self.scope_kind()?.is_some();
-            eprintln!(
-                "reg-ok: node {} register {:?} global {global} op-ok {} doc {} rec_load {} interp {} read_back {} point {} cands {} group {} defined_after {} scope {sk}",
-                self.cx.node().raw(),
-                self.count_reg(loc),
-                op == self.ops.exec || op == self.ops.resume || routine,
-                self.doc,
-                self.rec_load,
-                self.interp.is_some(),
-                self.read_back_done,
-                self.read_point_here,
-                self.cand_marks.len(),
-                !global && self.innermost_group().is_some(),
-                self.st.defined_after(loc, 0),
-            );
-        }
-        if self.count_reg(loc).is_none()
-            || !(op == self.ops.exec || op == self.ops.resume || routine)
-            || (!self.doc && !routine)
-            || self.rec_load
-            || self.interp.is_some()
-            || self.read_back_done
-            || self.read_point_here
-            || !self.cand_marks.is_empty()
-            || (!global && self.innermost_group().is_some())
-            || self.st.defined_after(loc, 0)
-        {
-            return Ok(false);
-        }
-        // (inside a scope of the document a global write only: it adds to
-        // the binding in force there and stands past the scope's end,
-        // `Locality::Global`, [`Run::finish`]; a local one is the scope's)
-        let in_scope = self.scope_kind()?.is_some();
-        Ok(global || !in_scope)
+        self.count_reg(loc).is_some()
+            && (op == self.ops.exec || op == self.ops.resume || routine)
+            && (self.doc || routine)
+            && !self.rec_load
+            && self.interp.is_none()
+            && !self.read_back_done
+            && !self.read_point_here
+            && self.cand_marks.is_empty()
+            && (global || self.innermost_group().is_none())
     }
 
-    /// A write [`Run::reg_map_ok`] allowed: the map composed onto the
-    /// run's own and the value the run sees updated; nothing defined.
-    pub(crate) fn reg_apply_map(&mut self, loc: Loc, map: crate::regfold::Affine) {
-        if crate::exec::obs_flag!("PHITEX_REG_TRACE") {
-            eprintln!(
-                "reg-map: node {} register {:?} {map:?}",
-                self.cx.node().raw(),
-                self.count_reg(loc)
-            );
-        }
-        let own = self.reg_pending.get(loc);
-        if own.is_none() && self.st.is_loaded(loc) && !self.reg_loaded_base.contains_key(&loc) {
-            let x = self.st.int_of(loc, self.v);
-            self.reg_loaded_base.insert(loc, x);
-        }
-        let own = own.unwrap_or(crate::regfold::Affine::ID);
-        self.reg_pending.insert(loc, own.then(map));
-        if self.st.is_loaded(loc) {
-            let x = map.apply(self.st.int_of(loc, self.v));
-            self.st.fill(loc, Some(self.v.int(i64::from(x))));
-        }
-        self.muts += 1;
-    }
 
     /// An integer register's engine value as first loaded
     /// ([`Run::reg_loaded_base`]).
@@ -1799,16 +1362,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.count_reg(loc)
             );
         }
-        self.reg_pending.insert(loc, crate::regfold::Affine::ID);
-        if self.st.is_loaded(loc) {
-            match self.reg_loaded_base.get(&loc) {
-                Some(&b) => {
-                    let x = self.v.int(i64::from(b));
-                    self.st.fill(loc, Some(x));
-                }
-                None => self.st.unload(loc),
-            }
-        }
+        self.st.restore(loc);
         self.muts += 1;
     }
 
@@ -1843,12 +1397,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// set, where it is a page-layer register the run has not loaded and
     /// holds no map of (its own write makes it concrete): no read.
     pub(crate) fn defer_at(&mut self, loc: Loc) -> bool {
-        if self.st.is_loaded(loc)
-            || self
-                .reg_pending
-                .get(loc)
-                .is_some_and(|m| m != crate::regfold::Affine::ID)
-        {
+        if self.st.is_loaded(loc) || self.st.has_map(loc) || self.st.lazy(loc).is_some() {
             return false;
         }
         if loc as usize >= crate::fields::NSLOT {
@@ -1954,7 +1503,6 @@ impl<'c, 'a> Run<'c, 'a> {
             self.note_pre(loc);
         }
         let grp = self.innermost_group();
-        self.st.note_kind(loc, self.in_advance);
         self.st.set(loc, val, global, grp);
         self.muts += 1;
     }
@@ -3654,7 +3202,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// The category code of character `c` (§232), through the run's
     /// copy of the catcode table (refreshed when any category code
-    /// changes, [`crate::runstate::State::cat_gen`]).
+    /// changes, [`crate::state::State::cat_gen`]).
     #[inline]
     pub(crate) fn cat(&mut self, c: u32) -> R<u8> {
         if let Ok(i) = usize::try_from(c)
@@ -3699,86 +3247,16 @@ impl<'c, 'a> Run<'c, 'a> {
         self.set_loc(l, Entry::raw(Some(val)), global);
     }
 
-    /// The fields the run publishes: its definitions at the base level
-    /// but a local one equal to the value it read (the same binding),
-    /// and the records of the cells among them.
-    pub(crate) fn published_fields(&mut self) -> Vec<Field> {
-        let locs: Vec<Loc> = self
-            .st
-            .published(self.v, self.rec_load)
-            .into_iter()
-            .map(|x| x.0)
-            .collect();
-        let mut fs: Vec<Field> = locs.into_iter().map(|l| self.loc_field(l)).collect();
-        self.ops.fields.add_record_fields(&mut fs);
-        fs
-    }
 
-    /// The records the run defines ([`Run::ready_records`], made before
-    /// the run finishes). A run that publishes a cell and could not make
-    /// its record (no chance to read before finishing) makes it stale:
-    /// its readers read the cells one by one, as they are.
-    fn records_at_finish(&mut self) -> Vec<(Field, ValueId, Locality)> {
-        if self.rec_ready && self.rec_sig == self.st.sig() {
-            return std::mem::take(&mut self.rec_out);
-        }
-        let v = self.v;
-        let mut out = Vec::new();
-        let defs = self.st.published(v, self.rec_load);
-        for b in 0..crate::fields::RECORDS.len() {
-            let mut mine: Vec<Locality> = defs
-                .iter()
-                .filter(|d| crate::fields::record_of(d.0 as usize).is_some_and(|r| r.0 == b))
-                .map(|d| d.2)
-                .collect();
-            // (stale in each frame the run opens with cells of it)
-            let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
-            let mut frames: Vec<Locality> = mine
-                .iter()
-                .copied()
-                .filter(|l| matches!(l, Locality::ScopeAt(_)))
-                .collect();
-            frames.sort_unstable_by_key(|l| match l {
-                Locality::ScopeAt(k) => *k,
-                _ => 0,
-            });
-            frames.dedup();
-            for l in frames {
-                out.push((f, v.list(Vec::new()), l));
-            }
-            mine.retain(|l| !matches!(l, Locality::ScopeAt(_)));
-            if mine.is_empty() {
-                continue;
-            }
-            let l = if mine.contains(&Locality::Global) {
-                Locality::Global
-            } else if mine.iter().all(|&l| l == Locality::Scope) {
-                Locality::Scope
-            } else {
-                Locality::Local
-            };
-            out.push((f, v.list(Vec::new()), l));
-        }
-        out
-    }
 
     /// The fields the run defines: those whose value at its end differs
     /// from the one it loaded, or that it never loaded (a local
     /// assignment that ends where it began defines nothing, as LaTeX's
     /// paragraph hooks setting `\\everypar` and back).
     pub(crate) fn def_fields(&mut self) -> Vec<Field> {
-        let locs = self.defined_now();
-        locs.into_iter().map(|l| self.loc_field(l)).collect()
+        self.publication().into_iter().map(|d| d.0).collect()
     }
 
-    /// [`Run::def_fields`]' locations, as the state table publishes them.
-    fn defined_now(&self) -> Vec<Loc> {
-        self.st
-            .published(self.v, self.rec_load)
-            .into_iter()
-            .map(|(l, _, _)| l)
-            .collect()
-    }
 
     /// A page node whose declared contributions are all it contributes
     /// ([`crate::pages::PageNode::contribs_complete`]) contributes to no
@@ -4217,7 +3695,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(None);
         }
         let m = self.memos.get(l);
-        if m.has & crate::runstate::M_CLASS != 0 {
+        if m.has & crate::state::M_CLASS != 0 {
             return Ok(Some(m.class));
         }
         let f = self.loc_field(l);
@@ -4228,7 +3706,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(None);
         };
         let e = self.memos.entry(l);
-        e.has |= crate::runstate::M_CLASS;
+        e.has |= crate::state::M_CLASS;
         e.class = c;
         Ok(Some(c))
     }
@@ -4248,7 +3726,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(None);
         }
         let m = self.memos.get(l);
-        if m.has & crate::runstate::M_STEP != 0 {
+        if m.has & crate::state::M_STEP != 0 {
             return Ok(Some(m.step));
         }
         let f = self.loc_field(l);
@@ -4257,18 +3735,15 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         let k = int_of(self.v, x);
         let e = self.memos.entry(l);
-        e.has |= crate::runstate::M_STEP;
+        e.has |= crate::state::M_STEP;
         e.step = k;
         Ok(Some(k))
     }
 
-    /// Whether `l` is a finisher's field preloaded where the routine reads
-    /// it ([`Run::fin_lazy`]): the run's own, read in full.
-    fn lazy_pre(&mut self, l: Loc) -> bool {
-        !self.fin_lazy.is_empty() && {
-            let f = self.loc_field(l);
-            self.fin_lazy.contains_key(&f)
-        }
+    /// Whether `l` is a finisher's field given where the routine reads
+    /// it ([`crate::state::State::lazy`]): the run's own, read in full.
+    fn lazy_pre(&self, l: Loc) -> bool {
+        self.st.lazy(l).is_some()
     }
 
     /// Whether `tok`'s meaning is a macro whose body is a number
@@ -4284,7 +3759,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(false);
         }
-        if let Some(b) = self.memos.bool_of(l, crate::runstate::M_NUM) {
+        if let Some(b) = self.memos.bool_of(l, crate::state::M_NUM) {
             return Ok(b);
         }
         let f = self.loc_field(l);
@@ -4294,7 +3769,7 @@ impl<'c, 'a> Run<'c, 'a> {
             phitex_defuse::Step::Cmp(v.int(-1)),
         ]);
         let b = self.cx.read_path(f, p)?.is_some_and(|x| int_of(v, x) > 0);
-        self.memos.set_bool(l, crate::runstate::M_NUM, b);
+        self.memos.set_bool(l, crate::state::M_NUM, b);
         Ok(b)
     }
 
@@ -4367,7 +3842,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.st.is_loaded(l) || self.lazy_pre(l) || self.interp.is_some() || self.rec_load {
             return Ok(None);
         }
-        if let Some(d) = self.memos.bool_of(l, crate::runstate::M_DEFINED) {
+        if let Some(d) = self.memos.bool_of(l, crate::state::M_DEFINED) {
             return Ok(Some(d));
         }
         let f = self.loc_field(l);
@@ -4375,7 +3850,7 @@ impl<'c, 'a> Run<'c, 'a> {
             Some(x) => int_of(self.v, x) != 0,
             None => return Ok(None),
         };
-        self.memos.set_bool(l, crate::runstate::M_DEFINED, d);
+        self.memos.set_bool(l, crate::state::M_DEFINED, d);
         Ok(Some(d))
     }
 
@@ -4392,7 +3867,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
-        if let Some(o) = self.memos.bool_of(l, crate::runstate::M_OUTER) {
+        if let Some(o) = self.memos.bool_of(l, crate::state::M_OUTER) {
             return Ok(Some(o));
         }
         let f = self.loc_field(l);
@@ -4400,7 +3875,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(None);
         };
         let o = int_of(self.v, x) != 0;
-        self.memos.set_bool(l, crate::runstate::M_OUTER, o);
+        self.memos.set_bool(l, crate::state::M_OUTER, o);
         Ok(Some(o))
     }
 
@@ -4707,7 +4182,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 if self.input.arena.len() > self.input.compact_at.max(crate::input::ARENA_COMPACT) {
                     self.input.compact();
                 }
-                self.take_mark();
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
@@ -4738,7 +4212,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // into the next sibling, claimed
             if crate::exec::obs_flag!("PHITEX_GIVEBACK_TRACE") && self.doc && self.open_span() {
                 eprintln!(
-                    "readon: node {} pulled {}: nest {:?}, conds {}, effect {:?}, baselocal {}",
+                    "readon: node {} pulled {}: nest {:?}, conds {}, effect {:?}, metas {}",
                     self.cx.node().raw(),
                     self.pulled,
                     self.nest
@@ -4747,7 +4221,7 @@ impl<'c, 'a> Run<'c, 'a> {
                         .collect::<Vec<_>>(),
                     self.conds.len(),
                     self.effect,
-                    self.st.has_base_local_def(self.v)
+                    self.st.sig().0
                 );
             }
             if self.open_span() && !self.eof && self.pull()? {
@@ -4894,21 +4368,24 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let op = self.cx.op();
         let t_pub = std::time::Instant::now();
-        let mut published: Vec<(Field, ValueId, Locality)> = self
-            .st
-            .published(self.v, self.rec_load)
-            .into_iter()
-            .map(|(loc, x, l)| (self.loc_field(loc), x, l))
-            .collect();
-        let recs = self.records_at_finish();
-        published.extend(recs.iter().copied());
+        let mut publication = self.publication();
         // (a finisher's sealed lines in what leaves it: their own lists,
         // read now, `crate::pages::Run::unseal`)
         if !self.sealed.is_empty() {
-            for d in &mut published {
-                d.1 = self.unseal(d.1);
+            for d in &mut publication {
+                if let crate::state::Pub::Value(x) = d.1 {
+                    d.1 = crate::state::Pub::Value(self.unseal(x));
+                }
             }
         }
+        let published: Vec<(Field, ValueId, Locality)> = publication
+            .iter()
+            .filter_map(|&(f, w, l)| match w {
+                crate::state::Pub::Value(x) => Some((f, x, l)),
+                crate::state::Pub::Rel(_) => None,
+            })
+            .collect();
+        self.audit(&publication);
         // (debug, `PHITEX_PUB_TRACE=<a>|<b>…`: the definitions of a run whose
         // first text segment contains one of the texts)
         if let Some(pat) = crate::exec::obs_str!("PHITEX_PUB_TRACE") {
@@ -5010,9 +4487,12 @@ impl<'c, 'a> Run<'c, 'a> {
             Vec::new()
         };
         {
-            let (n, t_list) = (published.len(), t_pub.elapsed());
-            for (f, x, l) in published {
-                self.cx.define_with(f, x, l);
+            let (n, t_list) = (publication.len(), t_pub.elapsed());
+            for &(f, w, l) in &publication {
+                match w {
+                    crate::state::Pub::Value(x) => self.cx.define_with(f, x, l),
+                    crate::state::Pub::Rel(c) => self.cx.define_rel_with(f, c, l),
+                }
             }
             if n >= 10_000 && crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 eprintln!(
@@ -5021,10 +4501,8 @@ impl<'c, 'a> Run<'c, 'a> {
                 );
             }
         }
-        let locs: Vec<Loc> = self.defined_now();
-        if !locs.is_empty() {
-            let mut names: Vec<ValueId> = locs.into_iter().map(|l| self.loc_field(l).0).collect();
-            names.extend(recs.iter().map(|r| r.0.0));
+        if !publication.is_empty() {
+            let names: Vec<ValueId> = publication.iter().map(|d| d.0.0).collect();
             let l = self.v.list(names);
             let s = self.v.seq_unit(l);
             let defs = self
@@ -5078,25 +4556,6 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if cfg!(feature = "observe") {
             self.check_contribs_complete();
-        }
-        // (an integer register's map writes: `add c` a relation on the
-        // value reaching the run, `set c` a definition; a location the run
-        // defines outright has them in its value)
-        // (inside a scope every map is a global write's, `Run::reg_map_ok`:
-        // it stands past the scope)
-        let loc = if matches!(self.scope_kind_memo, Some(Some(_))) { Locality::Global } else { Locality::Local };
-        for (l, m) in self.reg_pending.take() {
-            // (the identity, a restore's: nothing defined)
-            if m == crate::regfold::Affine::ID || self.count_reg(l).is_none() || self.st.defined_after(l, 0) {
-                continue;
-            }
-            let f = self.loc_field(l);
-            if m.keep {
-                self.cx.define_rel_with(f, i64::from(m.add), loc);
-            } else {
-                let v = self.v;
-                self.cx.define_with(f, v.int(i64::from(m.add)), Locality::Global);
-            }
         }
         let contribs_trace: Vec<String> = if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
             let v = self.v;
@@ -5288,6 +4747,31 @@ impl<'c, 'a> Run<'c, 'a> {
         out
     }
 
+    /// Notes what the run publishes and read ([`Ops::audit`]).
+    fn audit(&mut self, publication: &[(Field, crate::state::Pub, Locality)]) {
+        let mut a = NodeAudit {
+            op: self.op_name(),
+            defs: publication.iter().map(|&(f, w, _)| (f, matches!(w, crate::state::Pub::Rel(_)))).collect(),
+            ..NodeAudit::default()
+        };
+        for l in self.st.used_locs() {
+            match crate::state::Family::of(l) {
+                Some(fam) => {
+                    let p = fam.prefix();
+                    match a.reads.iter_mut().find(|r| r.0 == p) {
+                        Some(r) => r.1 += 1,
+                        None => a.reads.push((p, 1)),
+                    }
+                }
+                None => {
+                    let f = self.loc_field(l);
+                    a.other_reads.push(f);
+                }
+            }
+        }
+        self.ops.audit.locked().insert(self.cx.node().raw(), a);
+    }
+
     /// The following siblings this run takes, once its input is read
     /// out: those it pulled, and with `\end` inside groups every text
     /// after them. Declared at the commit, and before the page fold's
@@ -5356,10 +4840,10 @@ impl<'c, 'a> Run<'c, 'a> {
             .collect();
         // (a field the load put back as it found it is no read of its
         // predecessor's either: only the net effect is recorded)
-        let restored = self.st.restored_locs(v);
+        let restored: Vec<Loc> = self.pubs.as_ref().map(|p| p.2.clone()).unwrap_or_else(|| self.st.publication(v, true).1);
         let reads: Vec<String> = self
             .st
-            .read_locs()
+            .used_locs()
             .into_iter()
             .filter(|l| !restored.contains(l))
             .map(|l| crate::val::field_name(v, self.loc_field(l)))
@@ -5632,27 +5116,6 @@ pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<Value
     vec![v.list(frames), v.int(1)]
 }
 
-// ------------------------------------------------------------- parking
-
-/// A [`crate::nest::Level`] without `Rc`.
-#[derive(Clone)]
-struct PLevel {
-    mode: i32,
-    group: i64,
-    lid: i64,
-    owns: bool,
-    list: Vec<crate::nest::Item>,
-    fold: crate::build::FoldState,
-    par: Option<(i64, i64)>,
-    prev_graf: i64,
-    extra: Vec<ValueId>,
-    gid: u32,
-    save_base: usize,
-    def_base: usize,
-    open_stamp: u64,
-    ag: Vec<Tok>,
-}
-
 /// The env field listing the files the job writes whose text the
 /// client gave as the build began ([`crate::Options::written_init`]);
 /// `wseeds:<name>` is each one's text.
@@ -5670,874 +5133,6 @@ pub(crate) struct Seeded {
     pub defs: Vec<(String, ValueId)>,
     /// Its text.
     pub text: ValueId,
-}
-
-/// A run stopped at a read, at the start of the command the read
-/// abandoned ([`Run::rewind`]): every owned field of [`Run`] but the
-/// caches, which the resumed run rebuilds ([`phitex_defuse::Ctx::park`]).
-#[allow(clippy::struct_excessive_bools)]
-#[derive(Clone)]
-pub(crate) struct Parked {
-    /// The commands the run began before this (all its attempts): not
-    /// part of its state ([`Run::cmds_before`]).
-    at_cmds: u64,
-    /// The text's segments the run had begun when parked or marked
-    /// ([`crate::input::Input::text_at`]): those before are read (the
-    /// one before it, maybe, in part), those after not yet.
-    pub(crate) text_at: usize,
-    /// The input left, top first: the levels' rests, then the text.
-    segs: Vec<Seg>,
-    /// How many of `segs` were levels ([`Run::parked_levels`]).
-    nlev: usize,
-    /// A mark's ([`Run::snapshot`]): the token types of the levels it
-    /// had, top first, its first segments; a run resumed there puts them
-    /// back as levels, not as text (a routine's list stays the routine's,
-    /// §1100). Empty for a park: its levels are read on as text.
-    level_tys: Vec<u8>,
-    pulled: usize,
-    /// Where each pulled sibling's text begins, as an index into `segs`'
-    /// text part: [`Run::pull_at`], kept so a resumed run can still give a
-    /// peeked sibling back.
-    pull_at: Vec<Option<usize>>,
-    pull_orig: Vec<Option<crate::input::Line>>,
-    pull_box: Vec<bool>,
-    top: bool,
-    claim_rest: bool,
-    hint_void: bool,
-    nest: Vec<PLevel>,
-    next_lid: i64,
-    last_par: (i64, i64),
-    doc: bool,
-    fread: Vec<(String, u64)>,
-    fmiss: Vec<String>,
-    uread: Vec<String>,
-    skip_first: Vec<Field>,
-    reg_pending: Vec<(Field, crate::regfold::Affine)>,
-    /// The incompleat noads ([`Run::incs`]), the streams closed
-    /// ([`Run::closed`]) and the errors counted ([`Run::error_count`]):
-    /// the run's state like the rest, kept over the park.
-    incs: Vec<(i64, ValueId)>,
-    closed: Vec<i32>,
-    error_count: u32,
-    /// The meanings read by class only ([`Run::class_memo`]): reads of
-    /// the run like its table's, kept over the park.
-    class_memo: Vec<(Field, u8)>,
-    outer_memo: Vec<(Field, bool)>,
-    step_memo: Vec<(Field, i64)>,
-    defined_memo: Vec<(Field, bool)>,
-    num_memo: Vec<(Field, bool)>,
-    /// [`Run::fin_lazy`], by field in the fields' order.
-    fin_lazy: Vec<(Field, ValueId)>,
-    /// [`Run::lt`]: its reads, and its tainted meanings by field and
-    /// whether one was looked at ([`crate::runstate::State::taint`]).
-    lt: (crate::control::LinesTaint, Vec<Field>, bool),
-    rec_load: bool,
-    no_pull: bool,
-    st: crate::runstate::PState,
-    /// A mark's ([`Run::take_mark`]): `st` holds the slots changed since
-    /// the mark before only, these the slots gone since, and this the
-    /// slots' digest ([`crate::runstate::State::mark_delta`]); `None`: `st`
-    /// is the whole table.
-    mark_gone: Vec<crate::runstate::PLoc>,
-    mark_sum: Option<u64>,
-    /// Whether its table is whole ([`crate::runstate::MarkDelta::whole`]).
-    mark_whole: bool,
-    /// A mark before an `\inputlineno` read ([`Run::mark_before_read`]):
-    /// the groups open there.
-    watch: Option<usize>,
-    contribs: Vec<(Field, ValueId)>,
-    kids: Vec<(OpId, Vec<ValueId>)>,
-    effect: Effect,
-    conds: Vec<u8>,
-    if_codes: Vec<i32>,
-    cond_loaded: bool,
-    cond_stop: bool,
-    astate: Option<i64>,
-    aopen: i64,
-    lines_entered: i64,
-    lines_read: u64,
-    doc_lines: Vec<(ValueId, i64)>,
-    eof: bool,
-    radix: i32,
-    args_key: u64,
-    cur_order: phitex_typeset::glue::Order,
-    pdf_occ: usize,
-    rt_made: i64,
-    rt_cells: i64,
-    rt_rels: i64,
-    muts: u64,
-    read_back_done: bool,
-    read_back_at: Option<crate::input::Level>,
-    read_point_here: bool,
-    text_written: Vec<String>,
-    seeded: Vec<Seeded>,
-    cont_lines: Vec<Option<FileLine>>,
-    read_point_pending: Option<String>,
-    vain_after_point: Vec<String>,
-    pending_pre: Vec<(Field, ValueId)>,
-    cand: u32,
-    cand_marks: Vec<crate::pages::CandMark>,
-    ins_pending: Vec<u16>,
-    fin: Option<crate::pages::FinCtx>,
-    sealed: crate::pages::Sealing,
-}
-
-impl Parked {
-    /// Its table.
-    pub(crate) fn table(&self) -> &crate::runstate::PState {
-        &self.st
-    }
-
-}
-
-impl Run<'_, '_> {
-}
-
-/// A run's marks, kept with its result ([`phitex_defuse::Ctx::keep_after`]):
-/// each mark's state as a parked run's, and its digest. A later run of
-/// the node resumed at mark `k` ([`phitex_defuse::Ctx::resumed`]) starts
-/// from `snaps[k]`.
-impl Parked {
-}
-
-pub(crate) struct KeptMarks {
-    pub snaps: Vec<(std::sync::Arc<Parked>, u64)>,
-}
-
-/// The commands between two marks of a run ([`Run::take_mark`]):
-/// `PHITEX_MARK_EVERY` (observe), else this.
-pub(crate) const MARK_EVERY: u64 = 4000;
-
-fn mark_every() -> u64 {
-    crate::exec::obs_str!("PHITEX_MARK_EVERY")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(MARK_EVERY)
-}
-
-impl Run<'_, '_> {
-    /// Takes a mark between commands, at the first one from each
-    /// multiple of [`MARK_EVERY`] commands since the run's start
-    /// ([`Run::next_mark`]; 4000 by the cold measure: a run's first mark
-    /// parks its whole table, the later ones its changes, 0.7% of a cold
-    /// amsldoc build at 4000, 1.3% at 2000): the
-    /// run's state as a parked run's ([`Run::snapshot`]) and its digest,
-    /// kept for the observers that compare runs.
-    #[inline]
-    pub(crate) fn take_mark(&mut self) {
-        // (one test a command where the run takes none, two where it
-        // takes marks: none due yet, no group exit or check watched)
-        if !self.marks_on
-            || (self.cmds_before + self.cmds < self.next_mark
-                && self.watch_exit.is_none()
-                && self.verify_at.is_none())
-        {
-            return;
-        }
-        self.take_mark_due();
-    }
-
-    /// [`Run::take_mark`] where a mark may be due.
-    #[inline(never)]
-    fn take_mark_due(&mut self) {
-        // (observe: the resume check, where the last run took the mark the
-        // engine resumed at, by the commands begun since the run's start)
-        if let Some((k, op, oh, args)) = &self.verify_at
-            && self.cmds_before + self.cmds == op.at_cmds
-        {
-            let (k, op, oh, args) = (*k, op.clone(), *oh, args.clone());
-            self.verify_at = None;
-            let np = self.snapshot();
-            let h = parked_digest(&np);
-            self.resume_verify(k, &op, oh, &np, h, &args);
-        }
-        let every = mark_every();
-        let at = self.cmds_before + self.cmds;
-        if self.next_mark == 0 {
-            self.next_mark = (at / every + 1) * every;
-        }
-        // (the first boundary after the group a mark before an
-        // `\inputlineno` read was in closed, [`Run::mark_before_read`]: a
-        // mark there, where the line's number is gone with the group)
-        let forced = self.watch_exit.is_some_and(|w| self.group_count() < w);
-        if (at < self.next_mark && !forced) || self.mark.active {
-            return;
-        }
-        // (not where siblings were pulled: their places are the text's
-        // and the levels'; `PHITEX_MARK_TEXT_ONLY=1` (observe): only where
-        // no token list is on the stack)
-        // (nor where the state holds what a snapshot does not: a
-        // character run not on the list yet and its ligature stack, §1034;
-        // a read-back line being interpreted; the locations a read-back
-        // point noted)
-        if forced && crate::exec::obs_flag!("PHITEX_ANCHOR_TRACE") {
-            eprintln!(
-                "anchor: node {} exit due at {at}: chars {} lig {} interp {} pre {} pull {}",
-                self.cx.node().raw(),
-                self.chars_live.is_some(),
-                !self.lig_buf.is_empty(),
-                self.interp.is_some(),
-                !self.pre_noted.is_empty(),
-                !self.pull_at.is_empty()
-            );
-        }
-        if self.chars_live.is_some()
-            || !self.lig_buf.is_empty()
-            || self.interp.is_some()
-            || !self.pre_noted.is_empty()
-            || !self.pull_at.is_empty()
-            || crate::exec::obs_flag!("PHITEX_MARK_TEXT_ONLY")
-                && self
-                    .input
-                    .levels
-                    .iter()
-                    .any(|l| l.kind == crate::input::kind::TOKS)
-        {
-            return;
-        }
-        if at >= self.next_mark {
-            self.next_mark = (at / every + 1) * every;
-        }
-        let tp = crate::prof::start();
-        // (the table as changed since the last mark: none where it went
-        // back since, the marks stop)
-        let tm = crate::prof::start();
-        let v = self.v;
-        // (observe, `PHITEX_MARK_FULL=1`: each mark's table whole, parked
-        // as a park's, for the measures against the changes)
-        let delta = (!crate::exec::obs_flag!("PHITEX_MARK_FULL")).then(|| self.st.mark_delta(v, &mut self.mark_img));
-        crate::prof::add(crate::prof::MARK_STATE, tm);
-        let p = self.snapshot_of(delta);
-        if forced {
-            self.watch_exit = None;
-        }
-        self.commit_mark(p, tp);
-    }
-
-    /// A mark's snapshot `p` kept with its digest. `tp`: the mark's
-    /// profile probe.
-    fn commit_mark(&mut self, p: Parked, tp: Option<std::time::Instant>) {
-        let v = self.v;
-        let td = crate::prof::start();
-        let h = parked_digest(&p);
-        crate::prof::add(crate::prof::MARK_DIGEST, td);
-        crate::prof::add(crate::prof::MARK, tp);
-        let tp = crate::prof::start();
-        let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
-        // (observe, `PHITEX_MARK_LOG=1|slots`: each mark's digest and its
-        // parts; with `slots`, its table's slots)
-        if let Some(how) = crate::exec::obs_str!("PHITEX_MARK_LOG") {
-            let node = self.cx.node().raw();
-            eprintln!(
-                "mark-log: node {node} mark {k} at {} digest {h:x} rest {:x} slots {:x} ({} in the table)",
-                p.at_cmds,
-                parked_rest(&p),
-                p.mark_sum.unwrap_or_else(|| p.st.slot_sum()),
-                p.st.slot_list().len()
-            );
-            if how == "slots" {
-                for (key, x, fl, cache, sh) in p.st.slot_list() {
-                    let f = match key {
-                        crate::runstate::PLocKey::Fixed(l) => self.loc_field(l),
-                        crate::runstate::PLocKey::Spill(f) => f,
-                    };
-                    let x = x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(50).collect());
-                    eprintln!("mark-log: node {node} mark {k} slot {} = {x} flags {fl} cache {cache} hash {sh:x}", crate::val::field_name(v, f));
-                }
-            }
-        }
-        if crate::exec::obs_flag!("PHITEX_ANCHOR_TRACE") {
-            let old = self.old_marks.as_ref().and_then(|km| {
-                km.snaps.iter().enumerate().find(|(_, (q, _))| q.at_cmds == p.at_cmds && q.watch.is_some() == p.watch.is_some())
-            });
-            eprintln!(
-                "anchor: node {} mark {k} at {} {} groups {:?}; last run's there: {:?}",
-                self.cx.node().raw(),
-                p.at_cmds,
-                if p.watch.is_some() { "before a read" } else { "boundary" },
-                p.watch,
-                old.map(|(j, (_, oh))| (j, *oh == h))
-            );
-        }
-        let why_old = if crate::exec::obs_flag!("PHITEX_ANCHOR_TRACE") {
-            self.old_marks.as_ref().and_then(|km| {
-                let j = km.snaps.iter().position(|(q, oh)| q.at_cmds == p.at_cmds && *oh != h)?;
-                Some((j, mark_table(&km.snaps, j)))
-            })
-        } else {
-            None
-        };
-        self.mark_snaps.push((std::sync::Arc::new(p), h));
-        if let Some((j, op)) = why_old {
-            let np = mark_table(&self.mark_snaps, k as usize);
-            mark_why(self.cx.node().raw(), j, &op, &np);
-            let v = self.v;
-            let mut shown = Vec::new();
-            for d in np.st.slot_diffs(&op.st).into_iter().take(8) {
-                let f = match d.0 {
-                    crate::runstate::PLocKey::Fixed(l) => self.loc_field(l),
-                    crate::runstate::PLocKey::Spill(f) => f,
-                };
-                let r = |x: Option<(Option<ValueId>, u8)>| {
-                    x.map_or_else(|| "no slot".to_owned(), |(x, fl)| format!("{}/{fl}", x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(50).collect())))
-                };
-                shown.push(format!("{} last {} this {}", crate::val::field_name(v, f), r(d.1), r(d.2)));
-            }
-            eprintln!("anchor: slots differing {shown:?}");
-        }
-        // (observe, `PHITEX_MARK_TABLE_CHECK=1`: the marks' tables folded
-        // against the table parked whole, and the digest kept up to date
-        // against the one made again)
-        if crate::exec::obs_flag!("PHITEX_MARK_TABLE_CHECK") {
-            let folded = mark_table(&self.mark_snaps, k as usize);
-            let whole = self.st.park(v);
-            let (a, b) = (folded.table(), &whole);
-            let ok_sum = a.slot_sum() == b.slot_sum();
-            let ok_touched = a.touched_len() == b.touched_len();
-            let ok_rest = a.rest_hash() == b.rest_hash();
-            let ok_inc = self.mark_snaps[k as usize].0.mark_sum == Some(b.slot_sum());
-            eprintln!(
-                "mark-table-check: node {} mark {k}: folded slots {ok_sum}, touched {ok_touched} ({} / {}), rest {ok_rest}, digest kept {ok_inc}",
-                self.cx.node().raw(),
-                a.touched_len(),
-                b.touched_len()
-            );
-            if !ok_touched {
-                eprintln!("mark-table-check: missing {:?}; extra {:?}", a.touched_missing(b), b.touched_missing(a));
-            }
-        }
-        crate::prof::add(crate::prof::MARK_CK, tp);
-    }
-
-    /// The groups of the run open now ([`Level::group`]).
-    fn group_count(&self) -> usize {
-        self.nest.iter().filter(|l| l.group != 0).count()
-    }
-
-    /// A mark at the start of the command in progress, before it reads
-    /// the lines before this node (`\inputlineno`, the `lines`
-    /// accumulator): where an edit moved the lines (a line inserted or
-    /// deleted before), the run resumes here, and with a mark at the
-    /// first boundary after the group open now closes ([`Run::take_mark`]),
-    /// where the number read is gone with it (`\@currenvline`), it is cut
-    /// off there; only the group's commands run again. Taken where the
-    /// command has changed nothing yet (its input as it found it, read
-    /// without putting it back, [`crate::input::Input::segs_at_command_start`]).
-    pub(crate) fn mark_before_read(&mut self) {
-        // (observe, `PHITEX_ANCHOR_MARKS=1`: measured on amsldoc's preamble
-        // edit, the runs resume at these marks but are not cut off after
-        // the group: a later `\inputlineno` read in the run reads another
-        // number too, and the page builder's candidate notes
-        // (`crate::runstate::State::mark_candidate`) keep the moved value for
-        // a second pass, so the states never meet again; off)
-        if !crate::exec::obs_flag!("PHITEX_ANCHOR_MARKS") {
-            return;
-        }
-        if !self.marks_on || self.watch_exit.is_some() || !self.mark.active {
-            return;
-        }
-        let at = self.cmds_before + self.cmds;
-        if self.anchor_skip_at == Some(at)
-            || self.mutations() != self.mark.sig
-            || Some(self.effect) != self.mark.effect
-            || self.chars_live.is_some()
-            || !self.lig_buf.is_empty()
-            || self.interp.is_some()
-            || !self.pre_noted.is_empty()
-            || !self.pull_at.is_empty()
-        {
-            return;
-        }
-        let Some((segs, tys, text_at)) = self.input.segs_at_command_start(&self.mark.snap) else {
-            return;
-        };
-        let groups = self.group_count();
-        let tp = crate::prof::start();
-        let v = self.v;
-        let delta = self.st.mark_delta(v, &mut self.mark_img);
-        let mut p = self.snapshot_of(Some(delta));
-        let text_at = text_at.min(self.input.text.len());
-        p.nlev = segs.len() + self.parked_levels.saturating_sub(text_at);
-        let mut segs = segs;
-        segs.extend(self.input.text[text_at..].iter().cloned());
-        p.segs = segs;
-        p.level_tys = tys;
-        p.text_at = text_at;
-        // (the command it is at begins again where it resumes)
-        p.at_cmds = at.saturating_sub(1);
-        p.astate = self.mark.astate;
-        p.aopen = self.mark.aopen;
-        p.radix = self.mark.radix;
-        if let Some(o) = self.mark.cur_order {
-            p.cur_order = o;
-        }
-        p.no_pull = self.mark.no_pull;
-        p.watch = Some(groups);
-        self.watch_exit = Some(groups);
-        self.commit_mark(p, tp);
-    }
-
-    /// (observe, `PHITEX_RESUME_VERIFY=1`) Whether this full run's state
-    /// at mark `k` is the last run's there, which a run resumed at `k`
-    /// starts from ([`Run::verify_at`]); where not, how they differ.
-    fn resume_verify(&mut self, k: u32, op: &Parked, oh: u64, np: &Parked, h: u64, old_args: &[ValueId]) {
-        let node = self.cx.node().raw();
-        let fin = self.cx.op() == self.ops.finish;
-        let args = self.cx.args();
-        if args != old_args {
-            let v = self.v;
-            let r = |a: &[ValueId]| a.iter().map(|&x| v.render(x).chars().take(200).collect::<String>()).collect::<Vec<_>>();
-            eprintln!("resume-verify: node {node} (finisher {fin}) RETEXTED: last {:?} this {:?}", r(old_args), r(args));
-        }
-        if oh == h {
-            eprintln!("resume-verify: node {node} (finisher {fin}) mark {k} holds");
-            return;
-        }
-        eprintln!(
-            "resume-verify: node {node} mark {k}: the last run took it after {} commands, this run compared after {}",
-            op.at_cmds, np.at_cmds
-        );
-        mark_why(node, k as usize, op, np);
-        let v = self.v;
-        let mut shown = Vec::new();
-        for d in np.st.slot_diffs(&op.st).into_iter().take(12) {
-            let f = match d.0 {
-                crate::runstate::PLocKey::Fixed(l) => self.loc_field(l),
-                crate::runstate::PLocKey::Spill(f) => f,
-            };
-            let r = |x: Option<(Option<ValueId>, u8)>| {
-                x.map_or_else(
-                    || "no slot".to_owned(),
-                    |(x, fl)| format!("{}/{fl}", x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(60).collect())),
-                )
-            };
-            shown.push(format!("{} last {} this {}", crate::val::field_name(v, f), r(d.1), r(d.2)));
-        }
-        eprintln!("resume-verify: node {node} (finisher {fin}) mark {k} DIFFERS: {shown:?}");
-    }
-
-    /// The run's state between two commands, as [`Run::park`] gives it but
-    /// copied: the run goes on.
-    #[allow(clippy::too_many_lines, reason = "one state field a line")]
-    pub(crate) fn snapshot(&mut self) -> Parked {
-        self.snapshot_of(None)
-    }
-
-    /// [`Run::snapshot`] with the table as `delta` holds it (a mark's,
-    /// [`crate::runstate::State::mark_delta`]), else parked whole.
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn snapshot_of(&mut self, delta: Option<crate::runstate::MarkDelta>) -> Parked {
-        use crate::runstate::{M_CLASS, M_DEFINED, M_NUM, M_OUTER, M_STEP};
-        let v = self.v;
-        let ti = crate::prof::start();
-        let mut segs = Vec::new();
-        let input = &self.input;
-        for l in input.levels.iter().rev() {
-            match l.kind {
-                crate::input::kind::TOKS => {
-                    segs.push(Seg::Toks(input.arena.get(l.rest()).to_vec()));
-                }
-                crate::input::kind::LINE => segs.push(Seg::Line(input.line(*l).clone())),
-                _ => segs.push(Seg::File(input.file(*l).clone())),
-            }
-        }
-        let nlev = input.levels.len();
-        let last = self.pull_at.len().wrapping_sub(1);
-        let mut pull_at = Vec::with_capacity(self.pull_at.len());
-        let mut pull_orig = Vec::with_capacity(self.pull_at.len());
-        for (i, p) in self.pull_at.iter().enumerate() {
-            let (at, orig) = match *p {
-                Some(at) if at >= input.text_at => (Some(nlev + at - input.text_at), None),
-                Some(at) if i == last && at + 1 == input.text_at => {
-                    match (self.pull_lev, &input.text[at]) {
-                        (Some(j), Seg::Line(orig))
-                            if j + 1 < nlev
-                                && input.levels[j].kind == crate::input::kind::LINE
-                                && input.levels[j + 1].kind == crate::input::kind::TOKS
-                                && input.levels[j + 1].ty == crate::input::ty::BACKED_UP
-                                && input.levels[j + 1].b - input.levels[j + 1].a == 1 =>
-                        {
-                            (Some(nlev - 2 - j), Some(orig.clone()))
-                        }
-                        _ => (None, None),
-                    }
-                }
-                _ => (None, None),
-            };
-            pull_at.push(at);
-            pull_orig.push(orig);
-        }
-        let nlev_all = nlev + self.parked_levels.saturating_sub(input.text_at);
-        segs.extend(input.text_rest().iter().cloned());
-        crate::prof::add(crate::prof::MARK_TEXT, ti);
-        let nest = self
-            .nest
-            .iter()
-            .map(|l| PLevel {
-                mode: l.mode,
-                group: l.group,
-                lid: l.lid,
-                owns: l.owns,
-                list: l.list.clone(),
-                fold: l.fold,
-                par: l.par,
-                prev_graf: l.prev_graf,
-                extra: l.extra.clone(),
-                gid: l.gid,
-                save_base: l.save_base,
-                def_base: l.def_base,
-                open_stamp: l.open_stamp,
-                ag: l.ag.clone(),
-            })
-            .collect();
-        let skip_first: Vec<Field> = self
-            .skip_first
-            .clone()
-            .into_iter()
-            .map(|l| self.loc_field(l))
-            .collect();
-        // (the memos by field: their order the same for equal memos)
-        let m = self.reg_pending.iter().collect();
-        let reg_pending = by_field(self, m);
-        let m = self.memos.with(M_CLASS).into_iter().map(|(l, x)| (l, x.class)).collect();
-        let class_memo = by_field(self, m);
-        let m = self.memos.with(M_OUTER).into_iter().map(|(l, x)| (l, x.val & M_OUTER != 0)).collect();
-        let outer_memo = by_field(self, m);
-        let m = self.memos.with(M_STEP).into_iter().map(|(l, x)| (l, x.step)).collect();
-        let step_memo = by_field(self, m);
-        let m = self.memos.with(M_DEFINED).into_iter().map(|(l, x)| (l, x.val & M_DEFINED != 0)).collect();
-        let defined_memo = by_field(self, m);
-        let m = self.memos.with(M_NUM).into_iter().map(|(l, x)| (l, x.val & M_NUM != 0)).collect();
-        let num_memo = by_field(self, m);
-        let fin_lazy = sorted_lazy(&self.fin_lazy);
-        let pending_pre = self
-            .pending_pre
-            .clone()
-            .into_iter()
-            .map(|(l, x)| (self.loc_field(l), x))
-            .collect();
-        let level_tys = self.input.levels.iter().rev().map(|l| l.ty).collect();
-        let ts = crate::prof::start();
-        let (st, mark_gone, mark_sum, mark_whole) = match delta {
-            Some(d) => (d.st, d.gone, Some(d.sum), d.whole),
-            None => (self.st.park(v), Vec::new(), None, true),
-        };
-        crate::prof::add(crate::prof::MARK_STATE, ts);
-        Parked {
-            at_cmds: self.cmds_before + self.cmds,
-            text_at: self.input.text_at,
-            segs,
-            nlev: nlev_all,
-            level_tys,
-            pulled: self.pulled,
-            pull_at,
-            pull_orig,
-            pull_box: self.pull_box.clone(),
-            top: self.top,
-            claim_rest: self.claim_rest,
-            hint_void: self.hint_void,
-            nest,
-            next_lid: self.next_lid,
-            last_par: self.last_par,
-            doc: self.doc,
-            fread: self.fread.clone(),
-            fmiss: self.fmiss.clone(),
-            uread: self.uread.clone(),
-            skip_first,
-            reg_pending,
-            incs: self.incs.clone(),
-            closed: self.closed.clone(),
-            error_count: self.error_count,
-            class_memo,
-            outer_memo,
-            step_memo,
-            defined_memo,
-            num_memo,
-            fin_lazy,
-            lt: self.lt_parked(),
-            rec_load: self.rec_load,
-            no_pull: self.no_pull,
-            st,
-            mark_gone,
-            mark_sum,
-            mark_whole,
-            watch: None,
-            contribs: self.contribs.clone(),
-            kids: self.kids.clone(),
-            effect: self.effect,
-            conds: self.conds.clone(),
-            if_codes: self.if_codes.clone(),
-            cond_loaded: self.cond_loaded,
-            cond_stop: self.cond_stop,
-            astate: self.astate,
-            aopen: self.aopen,
-            lines_entered: self.lines_entered,
-            lines_read: self.lines_read,
-            doc_lines: self.doc_lines.clone(),
-            eof: self.eof,
-            radix: self.radix,
-            args_key: self.args_key,
-            cur_order: self.cur_order,
-            pdf_occ: self.pdf_occ,
-            rt_made: self.rt_made,
-            rt_cells: self.rt_cells,
-            rt_rels: self.rt_rels,
-            muts: self.muts,
-            read_back_done: self.read_back_done,
-            read_back_at: self.read_back_at,
-            read_point_here: self.read_point_here,
-            text_written: self.text_written.clone(),
-            seeded: self.seeded.clone(),
-            cont_lines: self.cont_lines.clone(),
-            read_point_pending: self.read_point_pending.clone(),
-            vain_after_point: self.vain_after_point.clone(),
-            pending_pre,
-            cand: self.cand,
-            cand_marks: self.cand_marks.clone(),
-            ins_pending: self.ins_pending.clone(),
-            fin: self.fin.clone(),
-            sealed: self.sealed.clone(),
-        }
-    }
-}
-
-/// (observe, `PHITEX_MARK_WHY=1`) Which parts of a resumed run's state
-/// at mark `k` differ from its last run's there.
-#[cold]
-fn mark_why(node: u64, k: usize, old: &Parked, new: &Parked) {
-    use std::hash::{Hash, Hasher};
-    let h = |f: &dyn Fn(&mut phitex_defuse::FxHasher)| {
-        let mut x = phitex_defuse::FxHasher::default();
-        f(&mut x);
-        x.finish()
-    };
-    let segs = |p: &Parked| h(&|x| format!("{:?}", p.segs).hash(x));
-    let segs_no_origin = |p: &Parked| {
-        h(&|x| {
-            for s in &p.segs {
-                match s {
-                    Seg::Line(l) => (&l.buf, l.loc, l.state, l.endch, l.starts, l.ends, l.lineno).hash(x),
-                    Seg::Toks(t) => t.iter().map(|t| t.raw()).collect::<Vec<_>>().hash(x),
-                    Seg::File(f) => (f.id.raw(), f.off, f.line).hash(x),
-                }
-            }
-        })
-    };
-    let nest = |p: &Parked| h(&|x| p.nest.iter().map(|l| (l.mode, l.group, l.lid, l.list.len())).collect::<Vec<_>>().hash(x));
-    let diff = new.st.value_diff(&old.st).map(|d| d.len());
-    let mut parts = Vec::new();
-    if segs(old) != segs(new) {
-        parts.push(if segs_no_origin(old) == segs_no_origin(new) { "input (origins only)" } else { "input" });
-    }
-    if nest(old) != nest(new) {
-        parts.push("nest");
-    }
-    if old.st.rest_hash() != new.st.rest_hash() {
-        parts.push("table rest");
-    }
-    if old.st.slot_sum() != new.st.slot_sum() {
-        parts.push("table slots");
-    }
-    if parked_rest(old) != parked_rest(new) {
-        parts.push("state but the table's slots");
-    }
-    eprintln!(
-        "mark-why: node {node} mark {k}: differs in {parts:?}; slot value diff {diff:?}; lines {}/{} read {}/{} muts {}/{}",
-        old.lines_entered, new.lines_entered, old.lines_read, new.lines_read, old.muts, new.muts
-    );
-}
-
-fn parked_digest(p: &Parked) -> u64 {
-    parked_digest_with(parked_rest(p), p.mark_sum.unwrap_or_else(|| p.st.slot_sum()))
-}
-
-/// [`parked_digest`] from its two parts: the state but the table's slots
-/// ([`parked_rest`]) and the slots' sum ([`crate::runstate::PState::slot_sum`]).
-fn parked_digest_with(rest: u64, slots: u64) -> u64 {
-    phitex_defuse::hash_words(0x6d61_726b, &[rest, slots])
-}
-
-/// [`Run::fin_lazy`] in the fields' order ([`Parked::fin_lazy`]).
-fn sorted_lazy(m: &phitex_defuse::FxHashMap<Field, ValueId>) -> Vec<(Field, ValueId)> {
-    let mut xs: Vec<(Field, ValueId)> = m.iter().map(|(&f, &x)| (f, x)).collect();
-    xs.sort_by_key(|x| x.0.0.raw());
-    xs
-}
-
-/// The whole table at `snaps[k]`, a run's marks from its first: a mark
-/// holds its changes since the one before only
-/// ([`crate::runstate::MarkDelta`]); `snaps[k]` itself where it is whole.
-pub(crate) fn mark_table(snaps: &[(std::sync::Arc<Parked>, u64)], k: usize) -> Parked {
-    let mut p = (*snaps[k].0).clone();
-    if p.mark_sum.is_some() {
-        // (from the last whole one)
-        let from = (0..=k).rev().find(|&i| snaps[i].0.mark_whole).unwrap_or(0);
-        let parts: Vec<(&crate::runstate::PState, &[crate::runstate::PLoc])> =
-            snaps[from..=k].iter().map(|(x, _)| (&x.st, x.mark_gone.as_slice())).collect();
-        p.st = crate::runstate::MarkDelta::fold(&parts);
-        p.mark_gone = Vec::new();
-        p.mark_sum = None;
-    }
-    p
-}
-
-/// A run's memo by field, in the fields' order: the same for equal memos
-/// ([`Run::snapshot`]).
-fn by_field<T: Copy>(r: &mut Run<'_, '_>, m: Vec<(Loc, T)>) -> Vec<(Field, T)> {
-    let mut xs: Vec<(Field, T)> = m.into_iter().map(|(l, x)| (r.loc_field(l), x)).collect();
-    xs.sort_by_key(|x| x.0.0.raw());
-    xs
-}
-
-/// A value's `Debug` form fed to `h` as it is written (no string made):
-/// for the parts of a mark's state without a `Hash` ([`parked_rest`]).
-fn dbg_hash(h: &mut phitex_defuse::FxHasher, x: &dyn std::fmt::Debug) {
-    struct W<'a>(&'a mut phitex_defuse::FxHasher);
-    impl std::fmt::Write for W<'_> {
-        fn write_str(&mut self, s: &str) -> std::fmt::Result {
-            std::hash::Hasher::write(self.0, s.as_bytes());
-            Ok(())
-        }
-    }
-    let _ = std::fmt::write(&mut W(h), format_args!("{x:?}"));
-}
-
-/// [`parked_digest`]'s part but the table's slots.
-#[allow(clippy::too_many_lines)]
-fn parked_rest(p: &Parked) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = phitex_defuse::FxHasher::default();
-    let w = |h: &mut phitex_defuse::FxHasher, x: u64| x.hash(h);
-    let line = |h: &mut phitex_defuse::FxHasher, l: &crate::input::Line| {
-        l.buf.hash(h);
-        (l.loc, l.state, l.endch, l.starts, l.ends, l.lineno, l.rescanned).hash(h);
-        l.origin.map(|(x, o, u)| (x.raw(), o, u.raw())).hash(h);
-    };
-    w(&mut h, p.segs.len() as u64);
-    for s in &p.segs {
-        match s {
-            Seg::Line(l) => {
-                w(&mut h, 1);
-                line(&mut h, l);
-            }
-            Seg::Toks(t) => {
-                w(&mut h, 2);
-                w(&mut h, t.len() as u64);
-                for x in t {
-                    w(&mut h, u64::from(x.raw()));
-                }
-            }
-            Seg::File(f) => {
-                w(&mut h, 3);
-                (f.id.raw(), f.off, f.name.raw(), f.line, f.sliceable, f.cut.map(ValueId::raw)).hash(&mut h);
-                f.units.as_ref().map(|u| u.iter().map(|&(k, s)| (k.raw(), s)).collect::<Vec<_>>()).hash(&mut h);
-            }
-        }
-    }
-    (p.nlev, &p.level_tys, p.pulled, &p.pull_box, p.top, p.claim_rest, p.hint_void).hash(&mut h);
-    for (a, o) in p.pull_at.iter().zip(&p.pull_orig) {
-        a.hash(&mut h);
-        if let Some(l) = o {
-            line(&mut h, l);
-        }
-    }
-    w(&mut h, p.nest.len() as u64);
-    for l in &p.nest {
-        (l.mode, l.group, l.lid, l.owns, l.par, l.prev_graf, l.gid, l.save_base, l.def_base, l.open_stamp).hash(&mut h);
-        dbg_hash(&mut h, &l.fold);
-        w(&mut h, l.list.len() as u64);
-        for it in &l.list {
-            match it {
-                crate::nest::Item::V(x) => w(&mut h, x.raw()),
-                crate::nest::Item::N(n) => dbg_hash(&mut h, n),
-            }
-        }
-        for x in &l.extra {
-            w(&mut h, x.raw());
-        }
-        for t in &l.ag {
-            w(&mut h, u64::from(t.raw()));
-        }
-    }
-    (p.next_lid, p.last_par, p.doc, &p.fread, &p.fmiss, &p.uread, p.error_count).hash(&mut h);
-    for f in &p.skip_first {
-        w(&mut h, f.0.raw());
-    }
-    for (f, m) in &p.reg_pending {
-        w(&mut h, f.0.raw());
-        dbg_hash(&mut h, m);
-    }
-    for (k, x) in &p.incs {
-        (k, x.raw()).hash(&mut h);
-    }
-    p.closed.hash(&mut h);
-    for (f, c) in &p.class_memo {
-        (f.0.raw(), c).hash(&mut h);
-    }
-    for (f, c) in &p.outer_memo {
-        (f.0.raw(), c).hash(&mut h);
-    }
-    for (f, c) in &p.step_memo {
-        (f.0.raw(), c).hash(&mut h);
-    }
-    for (f, c) in &p.defined_memo {
-        (f.0.raw(), c).hash(&mut h);
-    }
-    for (f, c) in &p.num_memo {
-        (f.0.raw(), c).hash(&mut h);
-    }
-    for (f, x) in &p.fin_lazy {
-        (f.0.raw(), x.raw()).hash(&mut h);
-    }
-    (&p.lt.0, p.lt.1.iter().map(|f| f.0.raw()).collect::<Vec<_>>(), p.lt.2).hash(&mut h);
-    (p.rec_load, p.no_pull, p.args_key).hash(&mut h);
-    w(&mut h, p.st.rest_hash());
-    w(&mut h, p.contribs.len() as u64);
-    for (f, x) in &p.contribs {
-        (f.0.raw(), x.raw()).hash(&mut h);
-    }
-    w(&mut h, p.kids.len() as u64);
-    for (o, a) in &p.kids {
-        format!("{o:?}").hash(&mut h);
-        for x in a {
-            w(&mut h, x.raw());
-        }
-    }
-    format!("{:?}", p.effect).hash(&mut h);
-    (&p.conds, &p.if_codes, p.cond_loaded, p.cond_stop, p.astate, p.aopen).hash(&mut h);
-    (p.lines_entered, p.lines_read, p.eof, p.radix, p.pdf_occ, p.rt_made, p.rt_cells, p.rt_rels, p.muts).hash(&mut h);
-    format!("{:?}", p.cur_order).hash(&mut h);
-    for (x, n) in &p.doc_lines {
-        (x.raw(), n).hash(&mut h);
-    }
-    (p.read_back_done, p.read_point_here, &p.text_written, &p.read_point_pending).hash(&mut h);
-    p.vain_after_point.hash(&mut h);
-    p.read_back_at.map(|l| (l.kind, l.ty, l.a, l.b, l.c)).hash(&mut h);
-    // (a run goes on from all of these: the read-backs it seeded and
-    // the lines of its continuations' files, whole)
-    w(&mut h, p.seeded.len() as u64);
-    for s in &p.seeded {
-        (&s.name, s.keys.raw(), s.text.raw()).hash(&mut h);
-        for (k, x) in &s.defs {
-            (k, x.raw()).hash(&mut h);
-        }
-    }
-    w(&mut h, p.cont_lines.len() as u64);
-    for l in &p.cont_lines {
-        match l {
-            None => w(&mut h, 0),
-            Some(FileLine::Known(n)) => (1u8, n).hash(&mut h),
-            Some(FileLine::Piece(x)) => (2u8, x.raw()).hash(&mut h),
-        }
-    }
-    for (f, x) in &p.pending_pre {
-        (f.0.raw(), x.raw()).hash(&mut h);
-    }
-    (p.cand, &p.ins_pending).hash(&mut h);
-    format!("{:?}{:?}", p.cand_marks, p.fin).hash(&mut h);
-    // (a finisher's sealed units: the window they were read in and each
-    // one's place there, whose lines it reads at its end)
-    p.sealed.places().hash(&mut h);
-    h.finish()
 }
 
 /// `scanner_status` (§305) values kept in [`Run::scanner`].
@@ -6685,12 +5280,3 @@ pub(crate) const CLOSE: Effect = Effect::Scope(phitex_defuse::Brackets {
     opens: 0,
     before: false,
 });
-
-impl Run<'_, '_> {
-    /// [`Run::lt`] as a park or a mark keeps it ([`Parked::lt`]).
-    fn lt_parked(&mut self) -> (crate::control::LinesTaint, Vec<Field>, bool) {
-        let mut fs: Vec<Field> = self.st.tainted().to_vec().into_iter().map(|l| self.loc_field(l)).collect();
-        fs.sort_by_key(|f| f.0.raw());
-        (self.lt, fs, self.st.taint_read())
-    }
-}

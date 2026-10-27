@@ -55,7 +55,7 @@ pub(crate) struct Level {
     /// spec, an insert's number, …): as the scope kind's extra.
     pub extra: Vec<ValueId>,
     /// The group's number in the run's state table
-    /// ([`crate::runstate::State::open`]), where its saves and its local
+    /// ([`crate::state::State::open`]), where its saves and its local
     /// definitions begin there, and the table's clock when it opened.
     pub gid: u32,
     pub save_base: usize,
@@ -251,7 +251,7 @@ impl Run<'_, '_> {
     /// `base` is the depth of level 0.
     pub(crate) fn modify_at(
         &mut self,
-        loc: crate::runstate::Loc,
+        loc: crate::state::Loc,
         val: ValueId,
         lvl: i64,
         base: i64,
@@ -265,7 +265,7 @@ impl Run<'_, '_> {
         let at_base = lvl <= base;
         self.st.modify(
             loc,
-            crate::runstate::Entry::raw(Some(val)),
+            crate::state::Entry::raw(Some(val)),
             at_base,
             lvl == 0,
         );

@@ -90,7 +90,6 @@ pub(crate) fn run_node(
         r = Run::new(cx, o);
         r.stop_at = Some(k);
         // (a second pass to a candidate takes no marks)
-        r.marks_on = false;
         res = body(&mut r);
     }
     // the run's end on the page (`crate::pages`): its items folded into
@@ -174,10 +173,7 @@ pub(crate) fn run_node(
             // (what a continuation republishes and the records the run
             // defines, which may read: a stop here runs the node again
             // from its start)
-            if let Err(Halt::Stop(s)) = r
-                .drop_unchanged_republished()
-                .and_then(|()| r.ready_records())
-            {
+            if let Err(Halt::Stop(s)) = r.prepare_publication() {
                 return Err(s);
             }
             r.settle_lines();
@@ -187,10 +183,9 @@ pub(crate) fn run_node(
                 let v = r.v;
                 let node = r.cx.node().raw();
                 let mut pubd: Vec<String> = r
-                    .st
-                    .published(v, r.rec_load)
+                    .publication()
                     .into_iter()
-                    .map(|(l, x, loc)| format!("{}{loc:?}={}", crate::val::field_name(v, r.loc_field(l)), x.raw()))
+                    .map(|(f, x, loc)| format!("{}{loc:?}={x:?}", crate::val::field_name(v, f)))
                     .collect();
                 pubd.sort();
                 let contribs: Vec<String> = r
@@ -253,7 +248,7 @@ pub(crate) fn run_node(
             if let Err(Halt::Stop(s)) = r.page_fold() {
                 return Err(s);
             }
-            if let Err(Halt::Stop(s)) = r.ready_records() {
+            if let Err(Halt::Stop(s)) = r.prepare_publication() {
                 return Err(s);
             }
             Ok(r.finish())

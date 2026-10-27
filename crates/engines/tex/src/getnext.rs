@@ -526,7 +526,7 @@ impl Run<'_, '_> {
             .map(|l| (l.kind, l.ty, l.c, l.b))
             .collect();
         let slot = crate::fields::mean_loc(self.cur.tok)
-            .and_then(|l| crate::runstate::Loc::try_from(l).ok())
+            .and_then(|l| crate::state::Loc::try_from(l).ok())
             .map(|l| format!("{} {}", self.st.debug_slot(l), self.st.debug_marks(l)))
             .unwrap_or_default();
         eprintln!(

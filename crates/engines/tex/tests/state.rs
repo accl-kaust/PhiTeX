@@ -156,7 +156,7 @@ fn the_state_fixtures_are_byte_identical() {
         let Ok(want) = std::fs::read(dir.join(format!("{name}.dvi"))) else { continue };
         let src = common::read(&tex);
         let opts = common::options(&format!("./{name}.tex"), &name, &common::dvi_comment(&want), &dir);
-        let b = common::build(opts, Some(&common::plain()), &src);
+        let b = common::build(opts, None, &src);
         let (dvi, log) = b.output();
         assert_eq!(dvi, want, "{name}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
     }

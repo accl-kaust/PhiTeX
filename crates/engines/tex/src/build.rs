@@ -259,14 +259,6 @@ impl Run<'_, '_> {
         let v = self.v;
         let base = self.base_mode()?;
         let parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
-        // (what the records of the scope's definitions read, before the
-        // group is left: [`Run::ready_records`])
-        let defined = self.st.defined_records();
-        for (b, &d) in defined.iter().enumerate() {
-            if d {
-                self.prepare_record(b)?;
-            }
-        }
         if self.nest.len() > 1 {
             self.leave_frames(&base, parent);
             return Ok(());
@@ -299,7 +291,7 @@ impl Run<'_, '_> {
             // scope's, stays: the scope's is the field's second entry)
             if self.st.base_publishes(v, f, Some(loc), self.rec_load) {
                 self.st
-                    .define_scope_extra(loc, crate::runstate::Entry::raw(Some(v.list(xs))));
+                    .define_scope_extra(loc, crate::state::Entry::raw(Some(v.list(xs))));
             } else {
                 self.set("ag", v.list(xs), false);
                 self.st.publish_in_scope(loc);
@@ -307,11 +299,9 @@ impl Run<'_, '_> {
         }
         if crate::exec::obs_flag!("PHITEX_GIVEBACK_TRACE") {
             let ds: Vec<String> = self
-                .st
-                .published(v, self.rec_load)
+                .published_values()
                 .into_iter()
-                .map(|(loc, x, l)| {
-                    let f = self.loc_field(loc);
+                .map(|(f, x, l)| {
                     let mut r = v.render(x);
                     r.truncate(r.char_indices().nth(60).map_or(r.len(), |(i, _)| i));
                     format!("{} {l:?} {r}", crate::val::field_name(v, f))
@@ -377,7 +367,7 @@ impl Run<'_, '_> {
             xs.extend(l.ag.iter().map(|t| t.encode(v)));
             self.st.define_frame_extra(
                 loc,
-                crate::runstate::Entry::raw(Some(v.list(xs))),
+                crate::state::Entry::raw(Some(v.list(xs))),
                 u8::try_from(k).unwrap_or(u8::MAX - 2),
             );
         }
@@ -1153,7 +1143,7 @@ impl Run<'_, '_> {
 
     /// Font `f` as the state has it now: its metrics, `\fontdimen`s,
     /// `\hyphenchar` and name, decoded once while no font cell of the
-    /// run's table changes ([`crate::runstate::State::font_gen`]).
+    /// run's table changes ([`crate::state::State::font_gen`]).
     pub(crate) fn font_entry(&mut self, f: u32) -> R<Option<std::rc::Rc<crate::fonts::Entry>>> {
         let g = self.st.font_gen();
         if let Some((eg, e)) = self.font_memo.get(&f)
@@ -1528,9 +1518,9 @@ impl Run<'_, '_> {
 
     /// The location of box register `n` (spec-runstate §2: a fixed one
     /// for 0–255, the spill's by its field past them).
-    pub(crate) fn box_loc(&mut self, n: i64) -> crate::runstate::Loc {
+    pub(crate) fn box_loc(&mut self, n: i64) -> crate::state::Loc {
         if let Some(i) = usize::try_from(n).ok().filter(|&i| i < 256) {
-            crate::runstate::Loc::try_from(crate::fields::BOX0 + i).unwrap_or(0)
+            crate::state::Loc::try_from(crate::fields::BOX0 + i).unwrap_or(0)
         } else {
             let f = self.box_field(n);
             self.loc_of(f)
@@ -1556,7 +1546,7 @@ impl Run<'_, '_> {
         let lvl = if global { 0 } else { md.depth };
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
         let l = self.box_loc(n);
-        self.set_loc(l, crate::runstate::Entry::raw(Some(val)), global);
+        self.set_loc(l, crate::state::Entry::raw(Some(val)), global);
     }
 
     /// A box register changed "at the same level" (§1079 `box(n):=null`,

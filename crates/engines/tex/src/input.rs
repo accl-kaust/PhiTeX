@@ -804,58 +804,6 @@ impl Input {
         into.arena = self.arena.mark();
     }
 
-    /// The input as the command in progress found it ([`Input::snapshot`]),
-    /// read without putting it back: top first, each level's segment
-    /// (a token list's rest, a line from its place then, a file from its
-    /// place then) with the level's token type; and the text's place then.
-    /// `None` where it cannot be read so (no rewind point, a line or file
-    /// slot refilled since, a line reduced in place).
-    pub(crate) fn segs_at_command_start(&self, s: &Snapshot) -> Option<(Vec<Seg>, Vec<u8>, usize)> {
-        let sn = self.snap.as_ref()?;
-        let mut levels: Vec<(Level, Option<SavedPos>)> =
-            self.levels[..sn.from.min(self.levels.len())].iter().map(|&l| (l, None)).collect();
-        for (l, pos, push) in sn.saved.iter().rev() {
-            let now = match l.kind {
-                kind::LINE => self.line_push.get(l.a as usize),
-                kind::FILE => self.file_push.get(l.a as usize),
-                _ => None,
-            };
-            if l.kind != kind::TOKS && now.copied() != Some(*push) {
-                return None;
-            }
-            levels.push((*l, Some(*pos)));
-        }
-        let mut segs = Vec::with_capacity(levels.len());
-        let mut tys = Vec::with_capacity(levels.len());
-        for (l, pos) in levels.iter().rev() {
-            match l.kind {
-                kind::TOKS => segs.push(Seg::Toks(self.arena.get(l.rest()).to_vec())),
-                kind::LINE => {
-                    let mut x = self.line(*l).clone();
-                    if let Some((loc, state, endch, len)) = *pos {
-                        if x.buf.len() < len {
-                            return None;
-                        }
-                        x.buf.truncate(len);
-                        x.loc = loc;
-                        x.state = state;
-                        x.endch = endch;
-                    }
-                    segs.push(Seg::Line(x));
-                }
-                _ => {
-                    let mut f = self.file(*l).clone();
-                    if let Some((off, _, _, len)) = *pos {
-                        f.off = off;
-                        f.set_pos_chars(len);
-                    }
-                    segs.push(Seg::File(f));
-                }
-            }
-            tys.push(l.ty);
-        }
-        Some((segs, tys, s.text_at))
-    }
 
     /// Copies what the token-list levels still hold (each from its
     /// origin, for a step back, §325) into a fresh arena and drops the

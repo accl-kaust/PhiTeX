@@ -16,10 +16,15 @@ pub(crate) const LB_TS: usize = 6;
 pub(crate) const LB_COMMIT: usize = 7;
 pub(crate) const FOLD: usize = 8;
 pub(crate) const FINISH: usize = 9;
+#[allow(dead_code)]
 pub(crate) const MARK: usize = 10;
+#[allow(dead_code)]
 pub(crate) const MARK_CK: usize = 11;
+#[allow(dead_code)]
 pub(crate) const MARK_TEXT: usize = 14;
+#[allow(dead_code)]
 pub(crate) const MARK_STATE: usize = 15;
+#[allow(dead_code)]
 pub(crate) const MARK_DIGEST: usize = 16;
 const N: usize = 18;
 const NAMES: [&str; N] = [

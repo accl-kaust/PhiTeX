@@ -20,7 +20,7 @@ pub(crate) const OR_CODE: i32 = 4;
 /// decoded meaning of the run's table, or a meaning read whole.
 enum IfxMacro {
     No,
-    At(crate::runstate::Loc),
+    At(crate::state::Loc),
     Rc(Rc<Macro>),
 }
 
@@ -708,9 +708,9 @@ impl Run<'_, '_> {
             && !self.cur.tok.is_frozen_cs()
             && let Some(i) = self.cur.tok.cs_index()
         {
-            let l = crate::runstate::Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(u32::MAX);
+            let l = crate::state::Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(u32::MAX);
             if let Some(e) = self.st.meaning_entry(l) {
-                return Ok(if crate::runstate::State::entry_is_macro(&e) {
+                return Ok(if crate::state::State::entry_is_macro(&e) {
                     (c, 0, IfxMacro::At(l))
                 } else {
                     (c, h, IfxMacro::No)
