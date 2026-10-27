@@ -1,321 +1,84 @@
-//! Feedback up the layers (docs/spec-layers.md §3): every read by a
-//! lower layer of what a higher one decides, named. Each is read on a
-//! prediction or on the value reaching it, and validated where the
-//! higher layer settles: only the readers that read wrong run again. No
-//! case is a wait in a chain of nodes. A new case is added here, with
-//! its mechanism, before any code reads across the layers otherwise.
+//! Feedback up the layers (docs/spec-layers.md §3; `SPEC.md` §4): every
+//! read of a lower layer's result by the text is a named case, read as
+//! a value the lower layer defines, predicted where it is not there yet,
+//! and never a wait.
+//!
+//! Each case is one function here, and each is as fine as its reader:
+//! a piece that asks `\pagegoal` reads one dimension of the page it is
+//! on, not the whole page record and the whole profile fold. The
+//! course's three chapters refuted pieces 294 times through `pages:start`
+//! and 161 through `vprof` for those three dimensions (`SPEC.md` §4.1):
+//! the cost this module removes.
 
-use std::fmt::Write as _;
+use phitex_defuse::ValueId;
 
-use super::{
-    Contents, FoldState, IGNORE_DEPTH, MAX_DIMEN, PAGE_START, R, Run, RunReaching, ValueId,
-    Values, int_of, list_of, nodes, params_of, some,
-};
+use crate::run::{R, Run};
 
-/// The named cases of a lower layer reading a higher one's result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The named cases, counted in profile builds (`Feedback::count`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Feedback {
-    /// `\pagegoal`, `\pagetotal` and their kin read in the text (§421):
-    /// the page so far where the piece is. The piece reads where its page
-    /// began ([`PAGE_START`], defined by the finisher of the page before,
-    /// or nothing before the first page's) and folds the profiles from
-    /// there to itself ([`Run::page_dimen`]); a finisher placed or
-    /// changed before it runs it again.
+    /// `\pagegoal`, `\pagetotal`, …, §421: the page the piece is on, as
+    /// far as its own last candidate.
     PageSoFar,
-    /// What an output routine defines, read by the text after its page
-    /// (`\count0` and the page counters, a float list, a column's height,
-    /// a mark's class registers): fields, defined by the finisher placed
-    /// after the piece its page fired in, predicted from the routine's
-    /// last runs ([`FinDefs::predict`]). (Today's engine: the finishers
-    /// are placed when the page builder's node ends, so the text before
-    /// reads what reaches it without them and runs again where one
-    /// changes it.)
-    OutputState,
-    /// What the routine gives back to the main list (§1026: its list, the
-    /// page parameters it set) and `\deadcycles` as it leaves it where not
-    /// 0 (a page not shipped, which §1054's `\end` after it reads): the
-    /// page builder folds the next page on a guess
-    /// ([`Run::rtn_guess`]: what the same routine gave back on the
-    /// last page fired on the text before it at the same
-    /// `\outputpenalty`, `\deadcycles` always guessed 0, nothing for a
-    /// page fired in a routine's material); a
-    /// finisher's output is what its routine gave
-    /// ([`phitex_defuse::Ctx::placed_output`]), and the page builder's
-    /// node runs again where that is not the guess.
-    RoutineGivesBack,
-    /// The page parameters and an insertion class's registers (§980,
-    /// §1008), set by text or by a routine: read by the page builder
-    /// where each piece is ([`Run::page_params_at`],
-    /// [`Run::insert_class_at`]), a read past the builder's own node.
-    BuilderRegisters,
-    /// The objects the pages shipped, read back in the text
-    /// (`\pdflastobj`, `\pdflastlink`, `\pdfximage`'s number and their
-    /// kin): the piece ends before the read ([`Run::order_after_pages`]),
-    /// its rest a resume after the finishers of the pages firing in it.
+    /// A number of an object the pages shipped before this piece made
+    /// (`\pdfobj`, links, images): the piece ends before the command on a
+    /// second pass; the number is then the finishers' before it.
     ObjectNumbers,
-    /// What a paragraph's line breaking leaves the list it was on
-    /// (`\prevgraf`, the last line for `\lastbox`, `\lastpenalty`,
-    /// `\lastskip`, `\prevdepth`): the line-break node's definitions,
-    /// predicted (`crate::parbreak::Break::predicted_defs`).
-    LastLine,
-    /// The width of a display's last line (§1146's `pre_display_size`):
-    /// the display reads its paragraph's lines, so the lines before a
-    /// display are broken in the piece itself, not by a node of their
-    /// own (`crate::parbreak`).
-    PreDisplay,
-    /// A catcode change: the lines after it tokenized again under the
-    /// regime it makes (layer 1's key).
-    Catcodes,
-    /// Page references, contents, an index, citations: the files a build
-    /// writes and reads back (loop-back fields), the rounds.
-    Rounds,
+    /// What a routine defined, read by the text after its page: an
+    /// ordinary field read past the finisher, on its prediction.
+    OutputState,
+    /// The page parameters and insertion registers the builder reads at
+    /// a piece (`[tag]` markers): the records at the piece.
+    BuilderRegisters,
+    /// What a routine gives back, read by the loop before the finisher
+    /// ran: the guess.
+    RoutineGivesBack,
 }
 
 impl Feedback {
-    /// The cases, in the order of docs/spec-layers.md §3.
-    pub(crate) const ALL: [Feedback; 9] = [
-        Feedback::PageSoFar,
-        Feedback::OutputState,
-        Feedback::RoutineGivesBack,
-        Feedback::BuilderRegisters,
-        Feedback::ObjectNumbers,
-        Feedback::LastLine,
-        Feedback::PreDisplay,
-        Feedback::Catcodes,
-        Feedback::Rounds,
-    ];
-
-    /// Counts a reader that read wrong and runs again (`PHITEX_TEX_TIME`
-    /// reports them, [`Feedback::report`]).
-    pub(crate) fn missed(self) {
-        MISSES[self as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// `feedback: <case> <misses> …`, the cases with a miss.
-    pub(crate) fn report() -> String {
-        let mut out = String::from("feedback:");
-        for c in Feedback::ALL {
-            let n = MISSES[c as usize].load(std::sync::atomic::Ordering::Relaxed);
-            if n > 0 {
-                let _ = write!(out, " {c:?} {n}");
-            }
-        }
-        out
+    pub(crate) fn count(self) {
+        todo!("a profile counter per case (crate::prof), as the old feedback.rs")
     }
 }
 
-/// The misses per case ([`Feedback::missed`]).
-static MISSES: [std::sync::atomic::AtomicU64; 9] = [const { std::sync::atomic::AtomicU64::new(0) }; 9];
-
-/// Where a page begins, as [`PAGE_START`] holds it.
-pub(crate) struct PageStart {
-    /// The piece the page before fired in: the text after it folds the
-    /// profiles after it. `None`: the job's start.
-    pub anchor: Option<phitex_defuse::NodeId>,
-    pub fold: FoldState,
-    /// The page parameters in force (a `T_PAGE_PARAMS` marker).
-    pub params: Option<ValueId>,
-    /// What the page begins with, as a profile.
-    pub prof: Vec<i64>,
-    /// Where the page before fired at a candidate inside the anchor, the
-    /// piece going on: the window its finisher read (after this node, to
-    /// the anchor) and the candidate. The anchor's items after it begin
-    /// the page after `prof`, read by the text after it, not the finisher.
-    pub tail: Option<(Option<phitex_defuse::NodeId>, u32)>,
-}
-
-impl PageStart {
-    /// The value of [`PAGE_START`] (none: the job's start).
-    pub(crate) fn decode(v: &Values, x: Option<ValueId>) -> PageStart {
-        let xs = x.map(|x| list_of(v, x)).unwrap_or_default();
-        if xs.len() < 8 {
-            return PageStart {
-                anchor: None,
-                fold: crate::build::IGNORE_DEPTH_STATE,
-                params: None,
-                prof: Vec::new(),
-                tail: None,
-            };
-        }
-        let n = |i: usize| int_of(v, xs[i]);
-        PageStart {
-            anchor: Some(phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(
-                n(0).to_ne_bytes(),
-            ))),
-            fold: FoldState {
-                sf: i32::try_from(n(3)).unwrap_or(1000),
-                pd: i32::try_from(n(4)).unwrap_or(IGNORE_DEPTH),
-                since_bp: usize::try_from(n(5)).unwrap_or(0),
-            },
-            params: some(xs[6]),
-            prof: list_of(v, xs[7])
-                .into_iter()
-                .map(|y| int_of(v, y))
-                .collect(),
-            tail: (xs.len() > 9 && n(8) >= 0).then(|| {
-                let after = (n(9) != -1).then(|| crate::pages::node_of(n(9)));
-                (after, u32::try_from(n(8)).unwrap_or(0))
-            }),
-        }
-    }
-
-    /// The value of [`PAGE_START`].
-    pub(crate) fn encode(&self, v: &Values) -> ValueId {
-        let anchor = self
-            .anchor
-            .map_or(-1, |a| i64::from_ne_bytes(a.raw().to_ne_bytes()));
-        v.list(vec![
-            v.int(anchor),
-            // (no page's index: the text reads where its page began, not
-            // how many pages fired before it)
-            v.int(0),
-            v.int(0),
-            v.int(i64::from(self.fold.sf)),
-            v.int(i64::from(self.fold.pd)),
-            v.int(i64::try_from(self.fold.since_bp).unwrap_or(0)),
-            self.params.unwrap_or(ValueId::UNIT),
-            crate::vprof::value(v, &self.prof),
-            v.int(self.tail.map_or(-1, |t| i64::from(t.1))),
-            v.int(
-                self.tail
-                    .and_then(|t| t.0)
-                    .map_or(-1, |a| i64::from_ne_bytes(a.raw().to_ne_bytes())),
-            ),
-        ])
-    }
-
-    /// The builder over profiles where the page began.
-    pub(crate) fn state(&self, v: &Values) -> crate::vprof::ScanState {
-        crate::vprof::ScanState::fresh(
-            0,
-            0,
-            self.fold,
-            self.params.map(|m| params_of(v, m)),
-        )
-    }
-}
+/// The page a piece is on, where it begins: defined by the finisher of the
+/// page before as `pages:start` (`SPEC.md` §3.2 "where the next page
+/// begins"), read by the piece as the definition reaching it. Its parts
+/// are separate fields so a reader of one re-asks on that one alone:
+/// `pages:start:anchor` (the piece the page before fired in, and the
+/// candidate), `pages:start:fold` (the main list's fold after the fire),
+/// `pages:start:params` (the parameters as the routine left them),
+/// `pages:start:head` (what the page begins with as a profile: held
+/// insertions, the routine's list, the carried material).
+pub(crate) const PAGE_START: &str = "pages:start";
 
 impl Run<'_, '_> {
-    /// `\pagegoal`, `\pagetotal`, … (§421, [`Feedback::PageSoFar`]): the
-    /// page state reaching this piece with its own items up to its last
-    /// candidate folded in (the contributions after it are not on the
-    /// page), read, not defined.
+    /// `\pagegoal`, `\pagetotal`, `\pagestretch`, `\pagefilstretch`,
+    /// `\pagefillstretch`, `\pagefilllstretch`, `\pageshrink`,
+    /// `\pagedepth` (§421; `m` 0..7): the builder's `page_so_far[m]` on
+    /// the page this piece is on, with the piece's own items up to its
+    /// last candidate folded in (`SPEC.md` §4 first bullet). Reads:
+    /// `pages:start:*` reaching the piece, the `vprof` fold from the
+    /// page's anchor to this piece, the anchor's items after its
+    /// candidate (`pages:start:head`), and its own items; nothing of
+    /// the page record a dimension does not depend on. An empty page
+    /// answers `\pagegoal = \maxdimen`, 0 for the rest. A page firing at
+    /// a fresh candidate of the piece's own ends the piece there on a
+    /// second pass ([`Run::order_after_own_page`]).
     pub(crate) fn page_dimen(&mut self, m: i32) -> R<i32> {
-        let (st, fired, own_k) = self.page_so_far()?;
-        if fired == Some(true)
-            && let Some(k) = own_k
-        {
-            self.order_after_own_page(k)?;
-        }
-        if st.pb.contents == Contents::Empty {
-            return Ok(if m == 0 { MAX_DIMEN } else { 0 });
-        }
-        Ok(st.pb.so_far[usize::try_from(m).unwrap_or(0).min(7)])
+        todo!("page_dimen: the old feedback.rs page_so_far, on the split pages:start fields; the fold over vprof from the anchor stays a fold (the builder needs every profile), the record reads become per-part")
     }
 
-    /// Whether a page fires at one of this piece's candidates so far
-    /// ([`Feedback::PageSoFar`]: the page where the piece's page began,
-    /// the profiles from there, its own items up to its last candidate):
-    /// a page firing at none of them ships nothing before the commands
-    /// after them (§1005), so what they read of the pages' objects is
-    /// complete. A page firing before the piece's own items says the page
-    /// start read is not yet the finisher's placed before the piece (its
-    /// page fired after that start): the run goes again when it is, and
-    /// decides then.
+    /// Whether a page fires at one of this piece's own candidates so far
+    /// (the object-number path, `SPEC.md` §4 second bullet).
     pub(crate) fn page_fires_in_own(&mut self) -> R<bool> {
-        let (_, fired, _) = self.page_so_far()?;
-        Ok(fired == Some(true))
+        todo!("page_fires_in_own: as page_dimen's fold, answering the first fire's place")
     }
 
-    /// The page builder over the profiles where this piece's page began
-    /// ([`PAGE_START`]) to its own last candidate: its state, stopped at
-    /// the first page firing, and where that page fired (`Some(true)` in
-    /// this piece's own items, `Some(false)` before them), and the own
-    /// candidate it fired at.
-    fn page_so_far(&mut self) -> R<(crate::vprof::ScanState, Option<bool>, Option<u32>)> {
-        let v = self.v;
-        let raw = self.own_outer_items();
-        let last = raw
-            .iter()
-            .rposition(|&x| nodes::tag(v, x) == nodes::T_BUILD_PAGE)
-            .map_or(0, |i| i + 1);
-        let mut head = raw[..last].to_vec();
-        // (its `[tag]` markers the parameters reaching it: a setting since
-        // its last candidate is not the builds')
-        let mut reach = None;
-        for x in &mut head {
-            if nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {
-                *x = match reach {
-                    Some(m) => m,
-                    None => *reach.insert(self.page_params_reaching()?),
-                };
-            }
-        }
-        self.resolve_page_params(&mut head)?;
-        if crate::exec::obs_flag!("PHITEX_READS") {
-            self.trace_read(v.field(PAGE_START), false);
-        }
-        let s = PageStart::decode(v, self.eng_read(v.field(PAGE_START))?);
-        let units = v.seq_to_vec(self.cx.fold(v.field(crate::vprof::VPROF), s.anchor, None)?);
-        let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
-        let mut st = s.state(v);
-        let mut items = vec![crate::vprof::decode(&s.prof)];
-        if let (Some((after, k)), Some(a)) = (s.tail, s.anchor)
-            && a != self.cx.node()
-        {
-            // (the anchor's items after the candidate the page fired at,
-            // its unit's alone read)
-            let w = self.view_through(crate::vprof::VPROF, after, a)?;
-            if let Some(u) = self.cx.get(w, phitex_defuse::Step::Last) {
-                let (pid, ints) = crate::vprof::unit_parts(v, u);
-                if pid == i64::from_ne_bytes(a.raw().to_ne_bytes()) {
-                    let mut x = crate::vprof::decode(&ints);
-                    if let Some(p) = x
-                        .iter()
-                        .position(|y| matches!(y, crate::vprof::PItem::Build(c) if *c == k))
-                    {
-                        x.drain(..=p);
-                        self.resolve_prof_of(pid, &mut x)?;
-                        items.push(x);
-                    }
-                }
-            }
-        }
-        for &u in &units {
-            let (pid, ints) = crate::vprof::unit_parts(v, u);
-            let mut x = crate::vprof::decode(&ints);
-            self.resolve_prof_of(pid, &mut x)?;
-            items.push(x);
-        }
-        items.push(crate::vprof::decode(&crate::vprof::encode(v, &head)));
-        let own = items.len() - 1;
-        let mut rd = RunReaching(self, None);
-        let mut fired = None;
-        let mut own_k = None;
-        'items: for (i, x) in items.iter().enumerate() {
-            let mut rest: &[crate::vprof::PItem] = x;
-            let mut n_fires = 0;
-            while st.fold_items(rest, dead, &mut rd) {
-                n_fires += 1;
-                // (the candidate the first page fired at in its own items:
-                // its build)
-                if fired.is_none() && i == own {
-                    own_k = match rest.get(st.fired_at) {
-                        Some(crate::vprof::PItem::Build(c)) => Some(*c),
-                        _ => None,
-                    };
-                }
-                fired = Some(i == own);
-                if i != own || n_fires > 1000 {
-                    break 'items;
-                }
-                // (a page fired in its own items: its routine run, the
-                // build after it (§1026) takes what is left, the routine
-                // giving back nothing; the page the text goes on with)
-                rest = &rest[st.fired_at..];
-                st.resume();
-            }
-        }
-        Ok((st, fired, own_k))
+    /// The parameters reaching this piece as a `T_PAGE_PARAMS` marker
+    /// (what a bare `[tag]` marker of its own items stands for), read at
+    /// the piece.
+    pub(crate) fn page_params_reaching(&mut self) -> R<ValueId> {
+        todo!("page_params_reaching: builder.rs at bc394b811, moved")
     }
 }

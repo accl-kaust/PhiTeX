@@ -13,21 +13,25 @@
 //! - **Layer 3, the lines** (`crate::parbreak`). A paragraph's line
 //!   breaking is a node of its own, a child of the piece that ended the
 //!   paragraph; its lines are its own units of the same two accumulators.
-//! - **Layer 4, the page builder** ([`builder`]). **One** node,
-//!   [`Pages`], pushed where the job begins: TeX's page builder
-//!   (§980–§1010) as a loop over the profiles, piece by piece
-//!   ([`phitex_defuse::Ctx::acc_next`]), microseconds a paragraph. Where
-//!   a page fires it notes the page ([`FinishIn`]: where each item on it
-//!   came from, the builder's decisions); at its end it places every
-//!   page's finisher right after the piece the page fired in and defines
-//!   [`PAGES_END`]. No scan per page, no continuation, no chain of page
-//!   nodes.
-//! - **Layer 5, the finishers** ([`finish`]). One [`Finish`] a page: it
-//!   assembles its page from its [`FinishIn`] alone (the pieces' items by
-//!   range, the routine's material by value), runs the output routine
-//!   (§1012–§1026) as one run of its own, and ships the page. Finishers
-//!   run in parallel: what one reads of the one before is a field, read
-//!   on its prediction ([`FinDefs::predict`]).
+//! - **Layer 4, the page builder** ([`pageloop`]). **One** node,
+//!   [`Pages`], placed after the text's end: TeX's page builder
+//!   (§980–§1010) as a loop over the profiles, contributor by contributor
+//!   ([`phitex_defuse::Ctx::next_contribution`]), microseconds a
+//!   paragraph. Where a page fires it defines the page ([`Page`]: where
+//!   each item on it came from, the builder's decisions) as a field of
+//!   its own keyed by [`PageKey`], and places the finisher right after
+//!   the piece the page fired in; at the text's end it defines
+//!   [`PAGES_END`]. Its state after every fire is a checkpoint it parks
+//!   with its record ([`phitex_defuse::Ctx::park`]): a hole, a moved
+//!   contribution or a finisher's give-back re-run it from the checkpoint
+//!   before, never from the start, and never as a chain of nodes.
+//! - **Layer 5, the finishers** ([`finisher`]). One [`Finish`] a page,
+//!   named by its [`PageKey`]: it reads its [`Page`] from the loop's
+//!   definition, assembles it from the pieces' items by path and the
+//!   routines' material by value ([`replay`]), runs the output routine
+//!   (§1012–§1026, [`routine`]) as one run of its own, and ships the
+//!   page. Finishers run in parallel: what one reads of the one before
+//!   is a field, read on its prediction ([`Finish::predicted_defs`]).
 //! - **Feedback up the layers** ([`feedback`]): every read of a higher
 //!   layer's result by a lower one is a named case, predicted and
 //!   validated, never a wait in a chain.
@@ -56,17 +60,63 @@ use crate::val::{
     glue_of, glue_value, group, int_at, int_of, list_of, str_of, toks_of, toks_value,
 };
 
-mod builder;
 mod feedback;
-mod finish;
+mod finisher;
+mod pageloop;
 mod piece;
+mod replay;
+mod routine;
 mod seal;
 
-pub(crate) use builder::*;
 pub(crate) use feedback::*;
-pub(crate) use finish::*;
+pub(crate) use finisher::*;
+pub(crate) use pageloop::*;
 pub(crate) use piece::*;
+pub(crate) use replay::*;
+pub(crate) use routine::*;
 pub(crate) use seal::*;
+
+/// A page's key: the piece it fired in and its place among the pages
+/// fired in that piece. Identity of its finisher; the name of its field
+/// (`pages:page:<piece raw id>:<nth>`, `pages:out:<piece>:<nth>`). An
+/// earlier change of the text moves no later page's key unless the page
+/// moves to another piece.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct PageKey {
+    pub piece: phitex_defuse::NodeId,
+    pub nth: u32,
+}
+
+impl PageKey {
+    pub(crate) fn field(self, v: &Values, family: &str) -> Field {
+        v.field(&format!("{family}:{}:{}", self.piece.raw(), self.nth))
+    }
+}
+
+/// A fired page as the loop defines it and the finisher reads it
+/// (`SPEC.md` §2.3 "its page"): the old `FinishIn` without `j` (no page
+/// index: a page's content is its own) and without any other page's
+/// content. Fields: `nth`, `normal`, `special`, `hint`, `classes`,
+/// `piece`, `k`, `in_material`, `after`, `spans`, `rtns`, `fold`,
+/// `params`, `best`, `output_penalty`, `holding`, `held`, `top_marks`,
+/// `post`, `post_markers`, `post_k`, `prev_fire`, `inf`, `vers`, with
+/// the old docs. Encoded as one value by `Page::encode`/`decode` (the old
+/// `FinishIn::args`/`of`, moved).
+#[derive(Clone)]
+pub(crate) struct Page {
+    pub key: PageKey,
+    // (the rest: the old FinishIn's fields, see the doc)
+}
+
+impl Page {
+    pub(crate) fn encode(&self, v: &Values) -> ValueId {
+        todo!("Page::encode: the old FinishIn::args, moved")
+    }
+
+    pub(crate) fn decode(v: &Values, x: ValueId) -> Option<Page> {
+        todo!("Page::decode: the old FinishIn::of, moved")
+    }
+}
 
 /// The pieces' main-list items, one unit per piece (and per paragraph's
 /// lines, `crate::parbreak`) beside its profile: `[piece, last, items,
