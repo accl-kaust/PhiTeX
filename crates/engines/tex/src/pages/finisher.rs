@@ -1127,6 +1127,30 @@ impl Run<'_, '_> {
         Ok((pids, units, own))
     }
 
+    /// `PHITEX_FIN_FIELD=name` (observe): the run's relation on that
+    /// field beside its prediction, with the page's key, contributor,
+    /// penalty and the class the prediction used.
+    fn trace_fin_rel(&self, page: &Page, rels: &[(Field, i64)]) {
+        let v = self.v;
+        if let Some(name) = crate::exec::obs_str!("PHITEX_FIN_FIELD") {
+            let f = v.field(name);
+            let fa = self.cx.args().to_vec();
+            let (t0, pen0) = fin_class_of(self.ops, v, &fa);
+            eprintln!(
+                "fin-rel node {} key {}:{} at {} pen {} (class guess {:?} {}): {name} {:?}, predicted {:?}",
+                self.cx.node().raw(),
+                page.key.piece.raw(),
+                page.key.nth,
+                page.at.raw(),
+                page.output_penalty,
+                t0 == page.hint,
+                pen0,
+                rels.iter().find(|r| r.0 == f).map(|r| r.1),
+                Finish::predicted_rels_of(self.ops, &fa, v).and_then(|rs| rs.iter().find(|r| r.0 == f).map(|r| r.1))
+            );
+        }
+    }
+
     /// A unit's items, or their shapes, at the indices `ixs` (sorted) of
     /// `list`, read as those alone ([`Run::window_units`]): the others
     /// unit, never read. A named index the list does not have ends the
@@ -1202,23 +1226,7 @@ impl Run<'_, '_> {
             }
         }
         let Some(page) = self.fin_page().cloned() else { return Ok(()) };
-        if let Some(name) = crate::exec::obs_str!("PHITEX_FIN_FIELD") {
-            let f = v.field(name);
-            let fa = self.cx.args().to_vec();
-            let (t0, pen0) = fin_class_of(self.ops, v, &fa);
-            eprintln!(
-                "fin-rel node {} key {}:{} at {} pen {} (class guess {:?} {}): {name} {:?}, predicted {:?}",
-                self.cx.node().raw(),
-                page.key.piece.raw(),
-                page.key.nth,
-                page.at.raw(),
-                page.output_penalty,
-                t0 == page.hint,
-                pen0,
-                rels.iter().find(|r| r.0 == f).map(|r| r.1),
-                Finish::predicted_rels_of(self.ops, &fa, v).and_then(|rs| rs.iter().find(|r| r.0 == f).map(|r| r.1))
-            );
-        }
+        self.trace_fin_rel(&page, &rels);
         let mut m = self.ops.fin_defs.locked();
         let idx = (i64::from_ne_bytes(page.key.piece.raw().to_ne_bytes()), i64::from(page.key.nth));
         let e = m.entry(fin_key_class(t, pen_class(page.output_penalty))).or_default();

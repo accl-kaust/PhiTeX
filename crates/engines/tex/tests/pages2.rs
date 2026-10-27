@@ -7,6 +7,8 @@
 
 mod common;
 
+use std::fmt::Write as _;
+
 use phitex_tex::Options;
 
 /// The runs of an operation in a build.
@@ -24,7 +26,7 @@ fn nodes_of(b: &phitex_tex::Build, op: &str) -> usize {
 fn paragraphs(n: usize) -> String {
     let mut s = String::new();
     for i in 0..n {
-        s.push_str(&format!("Paragraph {i} of the document, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, so that pages fill.\n\n"));
+        let _ = write!(s, "Paragraph {i} of the document, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, so that pages fill.\n\n");
     }
     s.push_str("\\bye\n");
     s

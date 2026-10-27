@@ -11,7 +11,12 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let mut crates = Vec::new();
-    closure(&Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize().unwrap_or_default(), &mut crates);
+    closure(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .canonicalize()
+            .unwrap_or_default(),
+        &mut crates,
+    );
     let mut files = Vec::new();
     for c in &crates {
         files.push(c.join("Cargo.toml"));
@@ -56,7 +61,10 @@ fn closure(dir: &Path, out: &mut Vec<PathBuf>) {
         let Some(rest) = line.split("path").nth(1) else {
             continue;
         };
-        let Some(path) = rest.trim_start().strip_prefix('=').and_then(|r| r.split('"').nth(1))
+        let Some(path) = rest
+            .trim_start()
+            .strip_prefix('=')
+            .and_then(|r| r.split('"').nth(1))
         else {
             continue;
         };

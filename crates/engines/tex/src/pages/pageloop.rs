@@ -354,50 +354,9 @@ impl Run<'_, '_> {
         let old = self.cx.resumed().and_then(|x| LoopState::decode(v, x)).unwrap_or_default();
         // 2. where to start
         let me = self.cx.node();
-        let site = match self.cx.woken_by() {
-            Some(Cause::Range { by, .. } | Cause::Changed { site: Some(by), .. }) => Some(by),
-            Some(Cause::Rebind { from, to, .. }) => from.or(to),
-            // (a give-back: every one is read again below)
-            Some(Cause::Output { .. }) => Some(me),
-            _ => None,
-        };
         let n_old = old.checkpoints.len();
-        let (limit, mut bound) = match site {
-            None => (0, Bound::Never),
-            Some(s) if s == me => (n_old, Bound::Never),
-            Some(s) => (old.before(self.cx, s).map_or(0, |i| i + 1), Bound::Site(s)),
-        };
-        // (the tail stands where every checkpoint does and the site is
-        // past the contributor it folded last)
-        let tail_ok = match (site, old.tail) {
-            (Some(s), Some(t)) if limit == n_old => {
-                let c = tail_cursor(v, t);
-                (s == me || c.is_none_or(|c| c != s && self.cx.before(c, s))).then_some(t)
-            }
-            _ => None,
-        };
         let mut ls = LoopState::default();
-        let mut start = Start::Scratch;
-        // (the kept checkpoints emitted again, their give-backs read
-        // again: one that moved is where the fold goes on from)
-        for i in 0..limit {
-            let gave = self.emit_kept(&mut ls, &old.checkpoints[i]);
-            if gave != old.checkpoints[i].gave {
-                start = Start::At(i);
-                bound = Bound::Page(i);
-                break;
-            }
-        }
-        if matches!(start, Start::Scratch) {
-            start = match tail_ok {
-                Some(t) => Start::Tail(t),
-                // (every page kept, their give-backs as they were, the
-                // job ended: nothing to fold)
-                None if limit == n_old && limit > 0 && old.tail.is_none() && old.ended => Start::Done,
-                None if limit > 0 => Start::At(limit - 1),
-                None => Start::Scratch,
-            };
-        }
+        let (start, bound) = self.where_to_start(&old, &mut ls);
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             let how = match start {
                 Start::Scratch => "scratch".to_owned(),
@@ -466,6 +425,58 @@ impl Run<'_, '_> {
         // 6. parked
         self.cx.park(ls.encode(v));
         Ok(ValueId::UNIT)
+    }
+
+    /// [`Run::page_loop`]'s step 2: where the fold starts and how far it
+    /// may stop early, the kept checkpoints emitted again on `ls` (their
+    /// give-backs read again: one that moved is where it goes on from).
+    fn where_to_start(&mut self, old: &LoopState, ls: &mut LoopState) -> (Start, Bound) {
+        let v = self.v;
+        let me = self.cx.node();
+        let site = match self.cx.woken_by() {
+            Some(Cause::Range { by, .. } | Cause::Changed { site: Some(by), .. }) => Some(by),
+            Some(Cause::Rebind { from, to, .. }) => from.or(to),
+            // (a give-back: every one is read again below)
+            Some(Cause::Output { .. }) => Some(me),
+            _ => None,
+        };
+        let n_old = old.checkpoints.len();
+        let (limit, mut bound) = match site {
+            None => (0, Bound::Never),
+            Some(s) if s == me => (n_old, Bound::Never),
+            Some(s) => (old.before(self.cx, s).map_or(0, |i| i + 1), Bound::Site(s)),
+        };
+        // (the tail stands where every checkpoint does and the site is
+        // past the contributor it folded last)
+        let tail_ok = match (site, old.tail) {
+            (Some(s), Some(t)) if limit == n_old => {
+                let c = tail_cursor(v, t);
+                (s == me || c.is_none_or(|c| c != s && self.cx.before(c, s))).then_some(t)
+            }
+            _ => None,
+        };
+        let mut start = Start::Scratch;
+        // (the kept checkpoints emitted again, their give-backs read
+        // again: one that moved is where the fold goes on from)
+        for i in 0..limit {
+            let gave = self.emit_kept(ls, &old.checkpoints[i]);
+            if gave != old.checkpoints[i].gave {
+                start = Start::At(i);
+                bound = Bound::Page(i);
+                break;
+            }
+        }
+        if matches!(start, Start::Scratch) {
+            start = match tail_ok {
+                Some(t) => Start::Tail(t),
+                // (every page kept, their give-backs as they were, the
+                // job ended: nothing to fold)
+                None if limit == n_old && limit > 0 && old.tail.is_none() && old.ended => Start::Done,
+                None if limit > 0 => Start::At(limit - 1),
+                None => Start::Scratch,
+            };
+        }
+        (start, bound)
     }
 
     /// [`LoopState::beyond`]: the old pages past this run's last (the old
