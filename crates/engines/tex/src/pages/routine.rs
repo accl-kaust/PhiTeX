@@ -537,7 +537,7 @@ pub(crate) struct GDef {
 pub(crate) fn fin_at(page: Option<&Page>) -> (i64, i64) {
     page.map_or((-2, i64::MAX), |f| {
         (
-            i64::from_ne_bytes(f.key.piece.raw().to_ne_bytes()),
+            i64::from_ne_bytes(f.at.raw().to_ne_bytes()),
             if f.in_material { i64::MAX } else { i64::from(f.k) },
         )
     })
@@ -839,7 +839,7 @@ impl Run<'_, '_> {
         let v = self.v;
         let xs = list_of(v, x);
         let n = |i: usize| u32::try_from(xs.get(i).map_or(0, |&y| int_of(v, y))).unwrap_or(u32::MAX);
-        let Some((after, piece)) = self.fin_page().map(|f| (f.after, f.key.piece)) else {
+        let Some((after, piece)) = self.fin_page().map(|f| (f.after, f.at)) else {
             return Ok(ValueId::UNIT);
         };
         let w = self.view_through(PITEMS, after, piece)?;

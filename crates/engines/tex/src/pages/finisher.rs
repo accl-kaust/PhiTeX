@@ -259,7 +259,6 @@ impl Run<'_, '_> {
                 page,
                 brk: None,
             });
-            give_no_units(self);
             return Ok(());
         };
         // 3. the routine on its page
@@ -309,7 +308,9 @@ impl Run<'_, '_> {
     /// as [`PAGE_OUT`] and the run's output, and [`FIN_DONE`], are the
     /// run's end's, `Run::finish`.)
     pub(crate) fn publish_page(&mut self) -> R<()> {
-        give_no_units(self);
+        // (no `vprof` nor `pitems`, not even empty: the operation declares
+        // it contributes to neither, and a contribution the loop's next
+        // read met re-asked it at every finisher's first commit)
         let args = self.fin.as_ref().map(|c| c.args.clone()).unwrap_or_default();
         self.give_way(&args)?;
         let g = self.contribute_global_defs();
@@ -614,7 +615,7 @@ impl Run<'_, '_> {
     /// in its piece (`[piece, candidate, inside]`, [`FinCtx::brk`]):
     ///
     /// 1. the items its spans name: the [`PITEMS`] units of the window
-    ///    `(fin.after, fin.key.piece]` read by range, each piece's markers
+    ///    `(fin.after, fin.at]` read by range, each piece's markers
     ///    resolved where the piece is ([`Run::resolve_params_of`]), a
     ///    routine's material from `fin.rtns`, a held-over insertion's
     ///    list from its split (§1021);
@@ -640,7 +641,7 @@ impl Run<'_, '_> {
     )]
     pub(crate) fn assemble_page(&mut self, fin: &Page) -> R<Option<Assembled>> {
         let me = |n: phitex_defuse::NodeId| i64::from_ne_bytes(n.raw().to_ne_bytes());
-        let pid = me(fin.key.piece);
+        let pid = me(fin.at);
         // (the window's units, by piece: their items with the markers
         // resolved where each piece is)
         // (the window read through paths, [`Run::window_units`]: each
@@ -697,7 +698,7 @@ impl Run<'_, '_> {
     pub(crate) fn replay_page(&mut self, fin: &Page, asm: &Assembled) -> R<Option<Shipped>> {
         let v = self.v;
         let me = |n: phitex_defuse::NodeId| i64::from_ne_bytes(n.raw().to_ne_bytes());
-        let pid = me(fin.key.piece);
+        let pid = me(fin.at);
         let units = &asm.units;
         let own_view = asm.own;
         let mut unit_ix: phitex_defuse::FxHashMap<i64, usize> = phitex_defuse::FxHashMap::default();
@@ -804,7 +805,7 @@ impl Run<'_, '_> {
         // builder's, never the finisher before's; the text's settings
         // after it come in order with the items, `DEAD_SLOT` markers)
         ps.dead = fin.prev_fire.1;
-        let at = fin.key.piece;
+        let at = fin.at;
         let mut fire: Option<Fire> = None;
         let mut fired_at_end = false;
         // 1. the post-output build
@@ -990,7 +991,7 @@ impl Run<'_, '_> {
         if fin.vers.is_empty() {
             return Ok(false);
         }
-        let w = self.view_through(PITEMS, fin.after, fin.key.piece)?;
+        let w = self.view_through(PITEMS, fin.after, fin.at)?;
         for &(p, ver) in &fin.vers {
             let Some(i) = pids.iter().position(|&q| q == p) else { continue };
             let same = self
@@ -1024,7 +1025,7 @@ impl Run<'_, '_> {
             let k = PageNode::of(self.ops, v, self.cx.op(), self.cx.args());
             assert!(k.is_some_and(|k| k.folds().contains(&PITEMS)), "a window of {PITEMS} outside a finisher");
         }
-        let w = self.view_through(PITEMS, fin.after, fin.key.piece)?;
+        let w = self.view_through(PITEMS, fin.after, fin.at)?;
         // (each unit's piece, read as that alone)
         let n = self.cx.len(w).unwrap_or(0);
         let mut pids: Vec<i64> = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
@@ -1078,7 +1079,7 @@ impl Run<'_, '_> {
                 Some(x) if let Some(sh) = shape => {
                     let raw_id = |n: phitex_defuse::NodeId| i64::from_ne_bytes(n.raw().to_ne_bytes());
                     let place = u32::try_from(i).unwrap_or(u32::MAX);
-                    self.seal_unit(p, x, place, fin.after.map(raw_id), raw_id(fin.key.piece));
+                    self.seal_unit(p, x, place, fin.after.map(raw_id), raw_id(fin.at));
                     if whole(p) {
                         let sh = self.cx.whole(sh);
                         list_of(v, sh)

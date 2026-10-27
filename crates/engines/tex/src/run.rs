@@ -2674,7 +2674,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // `crate::api::doc_order`)
             let anchor = self
                 .fin_page()
-                .map_or(-1, |f| i64::from_ne_bytes(f.key.piece.raw().to_ne_bytes()));
+                .map_or(-1, |f| i64::from_ne_bytes(f.at.raw().to_ne_bytes()));
             let page = v.list(vec![v.int(anchor), v.int(self.page_nth())]);
             let mut t = vec![page, e];
             // (the piece its break is inside of and the candidate: what

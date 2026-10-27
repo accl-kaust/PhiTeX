@@ -76,11 +76,13 @@ pub(crate) use replay::*;
 pub(crate) use routine::*;
 pub(crate) use seal::*;
 
-/// A page's key: the piece it fired in and its place among the pages
-/// fired in that piece. Identity of its finisher; the name of its field
-/// (`pages:page:<piece raw id>:<nth>`, `pages:out:<piece>:<nth>`). An
-/// earlier change of the text moves no later page's key unless the page
-/// moves to another piece.
+/// A page's key: the piece its chain of fires began in and its place
+/// among the pages of that chain (a page fired in the rest of a piece cut
+/// at the page before, a resume node, counts on from that piece: re-cut,
+/// the rest is placed anew and the key stands). Identity of its
+/// finisher; the name of its field (`pages:page:<piece raw id>:<nth>`,
+/// `pages:out:<piece>:<nth>`). An earlier change of the text moves no
+/// later page's key unless the page moves to another piece.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct PageKey {
     pub piece: phitex_defuse::NodeId,
@@ -100,10 +102,12 @@ impl PageKey {
 /// (the old `FinishIn::args`/`of`, moved).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Page {
-    /// The piece the page fired in (the finisher is placed right after
-    /// it) and the pages fired in it before this one: the page's place
-    /// among the finishers placed after that piece.
+    /// The page's identity ([`PageKey`]).
     pub key: PageKey,
+    /// The contributor the page fired in: the finisher is placed right
+    /// after it, its window ends there, and the pages fired in it before
+    /// this one give its place among the finishers placed after it.
+    pub at: phitex_defuse::NodeId,
     /// The ordinary pages fired up to this one, with it where it is one.
     pub normal: i64,
     /// Whether `\outputpenalty` is -10001 or less (§1013).
@@ -205,13 +209,14 @@ impl Page {
             v.int(self.normal),
             v.int(i64::from(self.special)),
             v.list(self.classes.iter().map(|&n| v.int(i64::from(n))).collect()),
+            raw(self.at),
         ])
     }
 
     /// [`Page::encode`]'s page; `None` on any other value.
     pub(crate) fn decode(v: &Values, x: ValueId) -> Option<Page> {
         let p = list_of(v, x);
-        if p.len() != 27 {
+        if p.len() != 28 {
             return None;
         }
         let n = |i: usize| int_of(v, p[i]);
@@ -221,6 +226,7 @@ impl Page {
                 piece: node_of(n(0)),
                 nth: u32::try_from(n(15)).unwrap_or(0),
             },
+            at: node_of(n(27)),
             normal: n(24),
             special: n(25) != 0,
             hint: p[23],
@@ -331,15 +337,6 @@ pub(crate) fn no_units(v: &Values) -> Vec<(Field, ValueId)> {
         (v.field(crate::vprof::VPROF), ValueId::NIL),
         (v.field(PITEMS), ValueId::NIL),
     ]
-}
-
-/// [`no_units`] as a run gives them (a run contributing otherwise than
-/// its text declared runs the windows' readers again).
-pub(crate) fn give_no_units(r: &mut Run<'_, '_>) {
-    for (f, x) in no_units(r.v) {
-        r.muts += 1;
-        r.contribs.push((f, x));
-    }
 }
 
 /// The page nodes, by what their own code folds.

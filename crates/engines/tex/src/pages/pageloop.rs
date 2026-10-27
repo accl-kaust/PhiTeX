@@ -92,16 +92,22 @@ pub(crate) struct LoopState {
     pub tail: Option<ValueId>,
     /// `\end` ended the job (§1054): the pages are complete.
     pub ended: bool,
+    /// The pages a run before fired past the hole this run parked at,
+    /// placed again as they were (placement `checkpoints.len() + k`): not
+    /// the fold's, which goes on from the tail, but their finishers kept
+    /// standing until the fold reaches them again (a run that went back
+    /// and met a hole short of them dropped their finishers, and the next
+    /// one made them anew, most of the finishers made in a cold build).
+    pub beyond: Vec<Checkpoint>,
 }
 
 /// The tag of a parked [`LoopState`] of this version.
-const STATE_TAG: &str = "\u{1}pages-loop-1";
+const STATE_TAG: &str = "\u{1}pages-loop-3";
 
 impl LoopState {
     pub(crate) fn encode(&self, v: &Values) -> ValueId {
-        let cps = self
-            .checkpoints
-            .iter()
+        let cps = |cs: &[Checkpoint]| -> Vec<ValueId> {
+            cs.iter()
             .map(|c| {
                 v.list(vec![
                     raw_value(v, Some(c.key.piece)),
@@ -114,12 +120,14 @@ impl LoopState {
                     c.gave,
                 ])
             })
-            .collect();
+            .collect()
+        };
         v.list(vec![
             v.str(STATE_TAG),
-            v.list(cps),
+            v.list(cps(&self.checkpoints)),
             self.tail.unwrap_or(ValueId::UNIT),
             v.int(i64::from(self.ended)),
+            v.list(cps(&self.beyond)),
         ])
     }
 
@@ -127,11 +135,12 @@ impl LoopState {
     /// the run starts from nothing).
     pub(crate) fn decode(v: &Values, x: ValueId) -> Option<LoopState> {
         let xs = list_of(v, x);
-        if xs.len() != 4 || !v.with_str(xs[0], |s| s == STATE_TAG).unwrap_or(false) {
+        if xs.len() != 5 || !v.with_str(xs[0], |s| s == STATE_TAG).unwrap_or(false) {
             return None;
         }
+        let cps = |x: ValueId, at: usize| -> Option<Vec<Checkpoint>> {
         let mut checkpoints = Vec::new();
-        for (i, c) in list_of(v, xs[1]).into_iter().enumerate() {
+        for (i, c) in list_of(v, x).into_iter().enumerate() {
             let cs = list_of(v, c);
             if cs.len() != 8 {
                 return None;
@@ -143,17 +152,22 @@ impl LoopState {
                 },
                 page: cs[2],
                 args: cs[3],
-                placement: i,
+                placement: at + i,
                 cursor: raw_node(v, cs[4])?,
                 state: cs[5],
                 guess: cs[6],
                 gave: cs[7],
             });
         }
+        Some(checkpoints)
+        };
+        let checkpoints = cps(xs[1], 0)?;
+        let beyond = cps(xs[4], checkpoints.len())?;
         Some(LoopState {
             checkpoints,
             tail: some(xs[2]),
             ended: int_of(v, xs[3]) != 0,
+            beyond,
         })
     }
 
@@ -426,9 +440,11 @@ impl Run<'_, '_> {
                 self.cx.stopped_at().map(NodeId::raw)
             );
         }
-        // 4. a hole: the tail
+        // 4. a hole: the tail, and the pages a run before fired past it
+        // placed again as they were
         if hole {
             ls.tail = Some(encode_tail(v, &st, &lc));
+            self.emit_beyond(&mut ls, &old);
         }
         ls.ended = lc.ended;
         // 5. the pages' end
@@ -448,13 +464,34 @@ impl Run<'_, '_> {
         Ok(ValueId::UNIT)
     }
 
+    /// [`LoopState::beyond`]: the old pages past this run's last (the old
+    /// fold's after its index, then what it kept beyond), each defined
+    /// and its finisher placed again where its contributor still stands
+    /// and its key is not one of this run's; no give-back read (the fold
+    /// has not reached them).
+    fn emit_beyond(&mut self, ls: &mut LoopState, old: &LoopState) {
+        let n = ls.checkpoints.len();
+        let olds = old.checkpoints.iter().skip(n).chain(old.beyond.iter().skip(n.saturating_sub(old.checkpoints.len())));
+        let mut keys: phitex_defuse::FxHashSet<PageKey> = ls.checkpoints.iter().map(|c| c.key).collect();
+        let mut prev = ls.checkpoints.last().map(|c| c.cursor);
+        for c in olds {
+            if !self.cx.alive(c.cursor) || !keys.insert(c.key) {
+                continue;
+            }
+            let i = n + ls.beyond.len();
+            self.emit_page(i, c.key, c.cursor, c.page, c.args, prev);
+            prev = Some(c.cursor);
+            ls.beyond.push(Checkpoint { placement: i, ..c.clone() });
+        }
+    }
+
     /// A checkpoint kept: its page defined and its finisher placed again,
     /// its give-back read again ([`Run::give_back`]); pushed. The
     /// give-back read.
     fn emit_kept(&mut self, ls: &mut LoopState, c: &Checkpoint) -> ValueId {
         let i = ls.checkpoints.len();
-        let prev = ls.checkpoints.last().map(|p| p.key);
-        self.emit_page(i, c.key, c.page, c.args, prev);
+        let prev = ls.checkpoints.last().map(|p| p.cursor);
+        self.emit_page(i, c.key, c.cursor, c.page, c.args, prev);
         let gave = self.give_back(i, c.guess);
         ls.checkpoints.push(Checkpoint {
             placement: i,
@@ -469,13 +506,13 @@ impl Run<'_, '_> {
     /// or after the finisher of the page before where that one fired in
     /// the same piece (its routine runs before this one's, both before
     /// the piece's rest).
-    fn emit_page(&mut self, i: usize, key: PageKey, x: ValueId, args: ValueId, prev: Option<PageKey>) {
+    fn emit_page(&mut self, i: usize, key: PageKey, cursor: NodeId, x: ValueId, args: ValueId, prev: Option<NodeId>) {
         let v = self.v;
         self.cx.define_with(key.field(v, PAGE_OF), x, Locality::Global);
         let args = list_of(v, args);
         let at = match prev {
-            Some(p) if p.piece == key.piece && i > 0 => self.cx.follow_after_placed(i - 1, self.ops.finish, args),
-            _ => self.cx.follow_after(key.piece, self.ops.finish, args),
+            Some(p) if p == cursor && i > 0 => self.cx.follow_after_placed(i - 1, self.ops.finish, args),
+            _ => self.cx.follow_after(cursor, self.ops.finish, args),
         };
         debug_assert_eq!(at, i, "checkpoint i is placement i");
     }
@@ -642,7 +679,7 @@ impl Run<'_, '_> {
         let v = self.v;
         let x = page.encode(v);
         let i = ls.checkpoints.len();
-        let prev = ls.checkpoints.last().map(|p| p.key);
+        let prev = ls.checkpoints.last().map(|p| p.cursor);
         let args = v.list(FinishArgs { key: page.key }.encode(v));
         // (what its finisher predicts by: the routine and the page's
         // class, the page's, not its placement's)
@@ -650,7 +687,7 @@ impl Run<'_, '_> {
             (i64::from_ne_bytes(page.key.piece.raw().to_ne_bytes()), i64::from(page.key.nth)),
             (page.hint, pen_class(page.output_penalty)),
         );
-        self.emit_page(i, page.key, x, args, prev);
+        self.emit_page(i, page.key, page.at, x, args, prev);
         let gave = self.give_back(i, q.rtn_guess);
         ls.checkpoints.push(Checkpoint {
             key: page.key,
@@ -928,9 +965,16 @@ impl Run<'_, '_> {
                 spans_pieces.push(piece);
             }
         }
-        // (the pages fired in this contributor before this one)
-        let nth = if lc.nth.0 == Some(node) { lc.nth.1 } else { 0 };
-        lc.nth = (Some(node), nth + 1);
+        // (the page's key: a fire in the contributor the last page fired
+        // in, or in the one right after it (the rest of that piece where
+        // the fire cut it), counts on in that chain; any other begins one)
+        let chained = lc.chain_at.is_some() && (lc.chain_at == Some(node) || lc.chain_at == lc.cur);
+        let (root, nth) = match lc.nth.0 {
+            Some(r) if chained => (r, lc.nth.1),
+            _ => (node, 0),
+        };
+        lc.nth = (Some(root), nth + 1);
+        lc.chain_at = Some(node);
         // (a routine's material by the pages before this one counted back
         // from it, not by their index among all the pages)
         let rel = |src: Src| match src {
@@ -938,7 +982,8 @@ impl Run<'_, '_> {
             s => s,
         };
         let page = Page {
-            key: PageKey { piece: node, nth },
+            key: PageKey { piece: root, nth },
+            at: node,
             normal: st.normal,
             special: f.output_penalty <= -10001,
             hint,
@@ -964,10 +1009,12 @@ impl Run<'_, '_> {
         };
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
-                "pages {}: page {} fires in piece {} at candidate {} (in material {in_material}, {} spans, best {}, penalty {})",
+                "pages {}: page {} fires in piece {} (key {}:{}) at candidate {} (in material {in_material}, {} spans, best {}, penalty {})",
                 self.cx.node().raw(),
                 j + 1,
                 node.raw(),
+                root.raw(),
+                nth,
                 f.k,
                 page.spans.len(),
                 f.best,
@@ -1932,6 +1979,7 @@ pub(crate) fn encode_state(v: &Values, st: &ScanState, lc: &LoopCarry, p: &FireN
     }
     e.node(lc.nth.0);
     e.i(i64::from(lc.nth.1));
+    e.node(lc.chain_at);
     encode_fire(&mut e, p);
     v.list(e.xs)
 }
@@ -2036,6 +2084,7 @@ pub(crate) fn encode_tail(v: &Values, st: &ScanState, lc: &LoopCarry) -> ValueId
     e.i(i64::try_from(lc.seq).unwrap_or(0));
     e.node(lc.nth.0);
     e.i(i64::from(lc.nth.1));
+    e.node(lc.chain_at);
     e.i(i64::from(lc.ended));
     v.list(e.xs)
 }
@@ -2098,6 +2147,7 @@ impl Run<'_, '_> {
             lc.rtns.push((page, val, std::sync::Arc::new(items)));
         }
         lc.nth = (d.node(), d.u32());
+        lc.chain_at = d.node();
         let p = decode_fire(&mut d);
         (st, lc, p)
     }
@@ -2175,6 +2225,7 @@ impl Run<'_, '_> {
         }
         lc.seq = u64::try_from(d.i()).unwrap_or(0);
         lc.nth = (d.node(), d.u32());
+        lc.chain_at = d.node();
         lc.ended = d.i() != 0;
         (st, lc)
     }
