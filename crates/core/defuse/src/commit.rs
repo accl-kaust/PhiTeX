@@ -2944,6 +2944,62 @@ fn log_placed(eng: &Engine, node: &Node, how: &str, rel: NodeId) {
 /// (No prediction: a relocation of a node kept, `relocate`.)
 type Deferred = (usize, NodeId, Option<NodeId>, Arc<Node>, Option<Predicted>);
 
+/// `Engine::insert_placed`'s placement: right after node `beside`, its
+/// placements and what stands under it (`attached_end`: the nodes others
+/// placed after it), before the next of its placer's; or (`after`
+/// false) right before it. None when `beside` is gone.
+pub(crate) fn place_beside(eng: &Engine, beside: NodeId, after: bool, node: Arc<Node>, pred: Predicted) -> Option<Arc<Node>> {
+    let start = if after { subtree_end(eng, beside) } else { beside };
+    let sn = eng.node(start);
+    let mut tries = 0;
+    loop {
+        let (seg, mut inner) = own_write(eng, sn)?;
+        if Segment::needs_split(&inner) {
+            let sid = SegId(u32::try_from(eng.segs.reserve()).expect("segment ids"));
+            seg.split(&mut inner, eng, sid);
+            continue;
+        }
+        if !seg.has_room(&inner, 1) && (tries < crate::order::ROOM_TRIES || !seg.can_place(&inner)) {
+            drop(inner);
+            tries += 1;
+            assert!(tries <= 2 * crate::order::ROOM_TRIES, "no room after rebalances");
+            eng.order.rebalance(eng, seg.id, 1);
+            continue;
+        }
+        if after {
+            let end = attached_end(eng, &inner, beside, start);
+            return Some(place(eng, seg, &mut inner, end, node, pred));
+        }
+        return Some(place_before(eng, seg, &mut inner, beside, node, pred));
+    }
+}
+
+/// Edits the placements its placer's last run made (`Engine::insert_placed`,
+/// `remove_placed`): the record is the same run's with `f` applied to its
+/// list, so the placer's next run matches what a client placed beside its
+/// placements as its own (`match_placements`).
+pub(crate) fn edit_placed(eng: &Engine, placer: NodeId, f: impl FnOnce(&mut Vec<NodeId>)) {
+    let p = eng.node(placer);
+    let mut last = p.last.lock();
+    let Some(r) = last.as_ref() else {
+        return;
+    };
+    let mut placed = r.placed.clone();
+    f(&mut placed);
+    *last = Some(Arc::new(RunRecord {
+        serial: r.serial,
+        output: r.output,
+        defs: r.defs.clone(),
+        contribs: r.contribs.clone(),
+        reads: r.reads.clone(),
+        placed,
+        claim: r.claim,
+        effect: r.effect,
+        provisional: r.provisional,
+        state: r.state,
+    }));
+}
+
 /// `place`, before `before` (a node of the segment) instead of after one.
 fn place_before(eng: &Engine, seg: &Segment, inner: &mut Inner, before: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
     let p = match seg.gap_before(inner, eng.node(before).pos_hint()) {

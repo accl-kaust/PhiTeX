@@ -535,7 +535,9 @@ enum Placing {
     /// writer, [`Build::end`]) where none precedes.
     Top(NodeId),
     /// A document file's pieces: placed beside the others, as the run
-    /// that placed those placed them (`Engine::insert_placed`).
+    /// that placed those placed them, listed among its placements
+    /// (`Engine::insert_placed`, `Engine::remove_placed`), so its next run
+    /// keeps them and makes no second node of a slice.
     Placed,
 }
 
@@ -587,7 +589,10 @@ fn apply_slices(
     let common = old_mid.min(new_mid);
     crate::timeline::lap("engine: the slice-key diff");
     for k in common..old_mid {
-        eng.remove(old[a + k].1);
+        match at {
+            Placing::Top(_) => eng.remove(old[a + k].1),
+            Placing::Placed => eng.remove_placed(old[a + k].1),
+        }
     }
     let mut nodes: Vec<(u64, NodeId, Src)> = Vec::with_capacity(new.len());
     for i in 0..new.len() {
@@ -603,9 +608,10 @@ fn apply_slices(
             let args = args_of(eng, i);
             let next = old.get(a + old_mid).map(|x| x.1);
             match (at, nodes.last()) {
-                (_, Some(&(_, p, _))) => eng.insert_after(p, exec, args),
+                (Placing::Top(_), Some(&(_, p, _))) => eng.insert_after(p, exec, args),
                 (Placing::Top(end), None) => eng.insert_before(next.unwrap_or(end), exec, args),
-                (Placing::Placed, None) => eng.insert_before(next?, exec, args),
+                (Placing::Placed, Some(&(_, p, _))) => eng.insert_placed(p, true, exec, args),
+                (Placing::Placed, None) => eng.insert_placed(next?, false, exec, args),
             }
         };
         nodes.push((new[i].0, n, Src::of(&new[i].1)));

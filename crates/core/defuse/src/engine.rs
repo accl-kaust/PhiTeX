@@ -771,6 +771,43 @@ impl Engine {
         self.inserted(&n, near)
     }
 
+    /// A node placed beside node `beside` as its placer placed it: after
+    /// it (and its placements, and what others placed after it) or
+    /// before it, with its placer, anchor and slot, listed among the
+    /// placer's placements next to it, dirty. The placer's next run
+    /// placing the same (op, args) there keeps it (`match_placements`):
+    /// a client that edits a run's placements in step with texts of its
+    /// own makes no second node. Beside a node no run placed:
+    /// `insert_after`, `insert_before`.
+    pub fn insert_placed(&self, beside: NodeId, after: bool, op: OpId, args: Vec<ValueId>) -> NodeId {
+        let near = self.node(beside);
+        let Some(placer) = near.parent.filter(|&p| self.node(p).run_record().is_some_and(|r| r.placed.contains(&beside))) else {
+            return if after { self.insert_after(beside, op, args) } else { self.insert_before(beside, op, args) };
+        };
+        let id = NodeId::from_raw(self.nodes.reserve() as u64);
+        let (n, pred) = commit::built(self, near.unit, Some(placer), op, args.clone(), id);
+        n.follows.store(near.follows.load(Ordering::Acquire), Ordering::Release);
+        n.anchor.store(near.anchor.load(Ordering::Acquire), Ordering::Release);
+        n.slot.store(near.slot(), Ordering::Release);
+        let Some(n) = commit::place_beside(self, beside, after, n, pred) else {
+            return self.insert_after(placer, op, args);
+        };
+        commit::edit_placed(self, placer, |v| {
+            let i = v.iter().position(|&x| x == beside).map_or(v.len(), |i| i + usize::from(after));
+            v.insert(i, id);
+        });
+        self.inserted(&n, near)
+    }
+
+    /// Removes a placed node and its placements (`remove`), and takes it
+    /// out of its placer's placements: the inverse of `insert_placed`.
+    pub fn remove_placed(&self, node: NodeId) {
+        if let Some(p) = self.node(node).parent {
+            commit::edit_placed(self, p, |v| v.retain(|&x| x != node));
+        }
+        self.remove(node);
+    }
+
     /// A node before `node`, dirty.
     pub fn insert_before(&self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
         let near = self.node(node);
