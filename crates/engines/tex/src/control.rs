@@ -1166,17 +1166,15 @@ impl Run<'_, '_> {
         // (an integer register set, or advanced by a constant, where the
         // map alone decides it: the old value not read, the write a map
         // the run contributes, `crate::regfold`)
-        if p == 0 && (q == cmd::REGISTER || q == cmd::ADVANCE) {
-            if self.reg_map_ok(l, global)? {
-                let x = self.scan_int()?;
-                let map = if q == cmd::ADVANCE {
-                    crate::regfold::Affine::add(x)
-                } else {
-                    crate::regfold::Affine::set(x)
-                };
-                self.reg_apply_map(l, map);
-                return Ok(());
-            }
+        if p == 0 && (q == cmd::REGISTER || q == cmd::ADVANCE) && self.reg_map_ok(l, global)? {
+            let x = self.scan_int()?;
+            let map = if q == cmd::ADVANCE {
+                crate::regfold::Affine::add(x)
+            } else {
+                crate::regfold::Affine::set(x)
+            };
+            self.reg_apply_map(l, map);
+            return Ok(());
         }
         // (§1238: the old value is read for `\advance`, `\multiply` and
         // `\divide` only; an assignment replaces it unseen)
