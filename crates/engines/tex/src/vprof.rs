@@ -135,6 +135,9 @@ fn decoded_shards() -> &'static [DecodedShard] {
 
 /// Unit `x` decoded once per value, shared by every step that folds it.
 pub(crate) fn decoded(v: &Values, x: ValueId) -> std::sync::Arc<Decoded> {
+    fn any(xs: &[PItem], f: &dyn Fn(&PItem) -> bool) -> bool {
+        xs.iter().any(|x| f(x) || matches!(x, PItem::End(ys) if any(ys, f)))
+    }
     use crate::exec::LockWait as _;
     let key = (v.instance(), x.raw());
     let sh = &decoded_shards()[usize::try_from(phitex_defuse::hash_words(key.0, &[key.1]) >> 58).unwrap_or(0) % DECODED_SHARDS];
@@ -143,9 +146,6 @@ pub(crate) fn decoded(v: &Values, x: ValueId) -> std::sync::Arc<Decoded> {
     }
     let (pid, ints) = unit_parts(v, x);
     let items = decode(&ints);
-    fn any(xs: &[PItem], f: &dyn Fn(&PItem) -> bool) -> bool {
-        xs.iter().any(|x| f(x) || matches!(x, PItem::End(ys) if any(ys, f)))
-    }
     let d = std::sync::Arc::new(Decoded {
         pid,
         marks: any(&items, &|x| matches!(x, PItem::Node(Node::Mark(_)))),

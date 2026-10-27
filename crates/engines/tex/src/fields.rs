@@ -862,12 +862,6 @@ impl Fields {
         f
     }
 
-    /// Every handle held here: the engine must keep them alive across
-    /// its value sweeps (they are held outside the graph).
-    pub(crate) fn handles(&self) -> impl Iterator<Item = Field> + '_ {
-        self.slot_field.iter().copied()
-    }
-
     /// The field of slot `s`.
     pub(crate) fn slot_field(&self, s: usize) -> Field {
         self.slot_field[s]

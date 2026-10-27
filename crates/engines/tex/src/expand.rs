@@ -327,7 +327,7 @@ impl Run<'_, '_> {
             "@nnil",
         ];
         if name.as_cs().is_none_or(|c| c.name() != "MT@in@clist")
-            || !m.body.iter().filter_map(|t| t.as_cs().map(|c| c.name())).eq(BODY)
+            || !m.body.iter().filter_map(|t| t.as_cs().map(crate::val::CsId::name)).eq(BODY)
         {
             return false;
         }
@@ -337,7 +337,7 @@ impl Run<'_, '_> {
         let (item, list) = (item.to_vec(), list.to_vec());
         let plain = |t: &Tok| match t.as_cs() {
             Some(c) => !matches!(c.name(), "@empty" | "@nnil"),
-            None => !matches!(t.cat(), Some(1 | 2)) && !(t.cat() == Some(12) && t.chr() == u32::from(b',')),
+            None => !matches!(t.cat(), Some(1 | 2)) && (t.cat() != Some(12) || t.chr() != u32::from(b',')),
         };
         if item.is_empty() || !item.iter().all(plain) || list.len() != 1 || !list[0].is_cs() {
             return false;
@@ -349,7 +349,7 @@ impl Run<'_, '_> {
         };
         // the body with its arguments, to the end of its `\def`
         let mut toks: Vec<Tok> = Vec::with_capacity(m.body.len() + item.len());
-        for sg in m.segs.iter() {
+        for sg in &m.segs {
             toks.extend_from_slice(&m.body[sg.lo as usize..sg.hi as usize]);
             match sg.param {
                 0 => {}

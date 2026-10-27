@@ -701,42 +701,6 @@ impl Hint {
         }
     }
 
-    /// Whether the node may define `f`: its bound's answer, or for an
-    /// unbounded node its guess (what its commands' rows and the bodies
-    /// of its calls define); `true` without one.
-    pub(crate) fn may_define_field(&self, f: &str) -> bool {
-        if false {
-            return true;
-        }
-        // (a record: where the node may define one of its cells; the
-        // cells' names written over one buffer per thread, no string
-        // made per call)
-        if let Some(b) = crate::fields::RECORDS.iter().position(|&r| r == f) {
-            thread_local! {
-                static CELL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-            }
-            return CELL.with(|c| {
-                let mut c = c.borrow_mut();
-                (0..crate::fields::record_len(b)).any(|i| {
-                    crate::fields::record_cell_name_into(b, i, &mut c);
-                    self.may_define_field(&c)
-                })
-            });
-        }
-        let Some(b) = self.bound.as_ref().or(self.guess.as_ref()) else {
-            return true;
-        };
-        if b.names.iter().any(|n| n == f) || b.prefixes.iter().any(|p| f.starts_with(p.as_str())) {
-            return true;
-        }
-        if is_cs_field(f) {
-            return false;
-        }
-        match &b.state {
-            None => true,
-            Some(st) => st.iter().any(|h| f.starts_with(*h)),
-        }
-    }
 }
 
 /// `x` in decimal, as `{x}` formats it.
@@ -5411,6 +5375,46 @@ pub(crate) fn count(r: &mut Run<'_, '_>, k: usize) {
 }
 
 #[cfg(test)]
+impl Hint {
+    /// Whether the node may define `f`: its bound's answer, or for an
+    /// unbounded node its guess (what its commands' rows and the bodies
+    /// of its calls define); `true` without one.
+    pub(crate) fn may_define_field(&self, f: &str) -> bool {
+        if false {
+            return true;
+        }
+        // (a record: where the node may define one of its cells; the
+        // cells' names written over one buffer per thread, no string
+        // made per call)
+        if let Some(b) = crate::fields::RECORDS.iter().position(|&r| r == f) {
+            thread_local! {
+                static CELL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+            }
+            return CELL.with(|c| {
+                let mut c = c.borrow_mut();
+                (0..crate::fields::record_len(b)).any(|i| {
+                    crate::fields::record_cell_name_into(b, i, &mut c);
+                    self.may_define_field(&c)
+                })
+            });
+        }
+        let Some(b) = self.bound.as_ref().or(self.guess.as_ref()) else {
+            return true;
+        };
+        if b.names.iter().any(|n| n == f) || b.prefixes.iter().any(|p| f.starts_with(p.as_str())) {
+            return true;
+        }
+        if is_cs_field(f) {
+            return false;
+        }
+        match &b.state {
+            None => true,
+            Some(st) => st.iter().any(|h| f.starts_with(*h)),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -5649,13 +5653,11 @@ mod tests {
                 close: None,
             };
             st.text(t);
-            match st.close {
-                Some(c) => ScopeShape::Close(c),
-                None => {
-                    let o: Vec<String> = st.open.into_iter().skip(carried).collect();
-                    if o.is_empty() { ScopeShape::Balanced } else { ScopeShape::Open(o) }
-                }
+            if let Some(c) = st.close {
+                return ScopeShape::Close(c);
             }
+            let o: Vec<String> = st.open.into_iter().skip(carried).collect();
+            if o.is_empty() { ScopeShape::Balanced } else { ScopeShape::Open(o) }
         };
         assert_eq!(shape("\\begin{center}\n", 0), ScopeShape::Open(vec!["begin:center".into()]));
         assert_eq!(shape("x \\end{center} \\begin{itemize}", 0), ScopeShape::Close("end:center".into()));

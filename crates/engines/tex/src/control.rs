@@ -2079,8 +2079,11 @@ impl Run<'_, '_> {
     /// where the number goes ([`LinesTaint`]).
     fn note_lines_read(&mut self) {
         let piece = self.cx.op() == self.ops.exec || self.cx.op() == self.ops.resume;
+        // (a number read into the log stands: the log is the run's
+        // output, and a number taken back there is the one a run read
+        // before the lines ahead of it were in, `D=1` for line 6 at -j8)
         match self.lt.sink {
-            Some(_) if piece => {
+            Some(Sink::Def) if piece => {
                 self.lt.hit = true;
                 self.lt.weak = true;
             }
@@ -2122,11 +2125,11 @@ impl Run<'_, '_> {
     }
 
     /// The run's end: where it read the lines before it only into bodies
-    /// whose meanings nothing looked at and nothing after it sees (and
-    /// into the log), its result does not depend on them, and the reads
-    /// are taken back ([`phitex_defuse::Ctx::unread`]): an edit that moves
-    /// those lines leaves the piece standing. The log keeps the numbers
-    /// this run read.
+    /// whose meanings nothing looked at and nothing after it sees, its
+    /// result does not depend on them, and the reads are taken back
+    /// ([`phitex_defuse::Ctx::unread`]): an edit that moves those lines
+    /// leaves the piece standing. (A number read into the log is output:
+    /// its read stands, [`Run::note_lines_read`].)
     pub(crate) fn settle_lines(&mut self) {
         // (`PHITEX_LINES_TRACE=1`, observe: each piece that read them, and
         // why its reads stand)
@@ -2175,7 +2178,7 @@ impl Run<'_, '_> {
                 let lines = v.field("lines");
                 // (a mark before the read: an edit that moves the lines
                 // runs the command again from here, [`Run::mark_before_read`])
-                self.mark_before_read()?;
+                self.mark_before_read();
                 // (observe, `PHITEX_READS=lines`: each reader, where)
                 if crate::exec::obs_flag!("PHITEX_READS") {
                     self.trace_read(lines, false);
@@ -2336,9 +2339,9 @@ pub(crate) enum Sink {
 }
 
 /// Where a piece's reads of the lines before it (`\inputlineno`) went:
-/// only into the log and into meanings nothing looks at after (a
-/// group's line number kept for an error message), the piece's result
-/// does not depend on them ([`Run::settle_lines`]).
+/// only into meanings nothing looks at after (a group's line number kept
+/// for an error message), the piece's result does not depend on them
+/// ([`Run::settle_lines`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct LinesTaint {
     /// The body being expanded, and whether it read the lines.

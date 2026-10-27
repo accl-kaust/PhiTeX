@@ -1560,7 +1560,7 @@ impl Session {
         let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
         if let (Some(l), Some(u), true) = (&r.out.layout, &self.updates, main_too) {
             let p = dir.join(format!("{}.pdf", self.job.jobname));
-            self.write_update(&p, l, u)?;
+            Self::write_update(&p, l, u)?;
             phitex_tex::timeline::lap("write: the main output (an update section)");
             files.push((p.clone(), tex::ANY_BYTES));
             main = Some(p);
@@ -1620,7 +1620,6 @@ impl Session {
     /// appended where the file holds an earlier layout (as `u` says, and
     /// as long as its length on disk), else the exact file written whole.
     fn write_update(
-        &self,
         p: &Path,
         l: &phitex_pdf::Layout,
         u: &Mutex<UpdateFile>,

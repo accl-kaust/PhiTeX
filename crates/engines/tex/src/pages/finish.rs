@@ -519,15 +519,13 @@ impl Run<'_, '_> {
             i += 1;
             let mut raw: Vec<ValueId> = Vec::new();
             for src in crate::pages::span_srcs(&s) {
-                match item(src) {
-                    Some(x) => raw.push(x),
-                    None => {
-                        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-                            eprintln!("finisher {} (page {} of its piece): no item for {src:?}: stale placement", self.cx.node().raw(), fin.nth);
-                        }
-                        return Ok((Vec::new(), None));
+                let Some(x) = item(src) else {
+                    if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                        eprintln!("finisher {} (page {} of its piece): no item for {src:?}: stale placement", self.cx.node().raw(), fin.nth);
                     }
-                }
+                    return Ok((Vec::new(), None));
+                };
+                raw.push(x);
             }
             let p_at = match s.src {
                 Src::Piece { piece, .. } => crate::pages::node_of(piece),
@@ -1767,22 +1765,6 @@ impl Finish {
         Some(out)
     }
 
-    /// The finisher's declared contribution to `gdefs` (what it defines
-    /// globally, read by the resume after it as a guess, spec-redesign
-    /// §1 resume row): the last run's of the routine, else none; a run
-    /// giving another runs the resume again.
-    pub(crate) fn gdefs_guess(&self, args: &[ValueId], v: &Values) -> ValueId {
-        let t = args.get(9).copied().unwrap_or(ValueId::UNIT);
-        if t == ValueId::UNIT {
-            return ValueId::NIL;
-        }
-        ops(&self.0)
-            .fin_defs_start
-            .locked()
-            .get(&fin_key(v, t, args))
-            .and_then(|d| d.gdefs)
-            .map_or(ValueId::NIL, |x| gdefs_unit(v, x, fin_at(v, args)))
-    }
 }
 
 impl Operation for Finish {

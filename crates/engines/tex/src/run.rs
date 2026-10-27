@@ -370,18 +370,6 @@ impl FileRest {
         f
     }
 
-    /// Whether two are the same file at the same place
-    /// ([`crate::input::Seg::same`]).
-    pub(crate) fn same(&self, o: &FileRest) -> bool {
-        (self.id, self.off, self.name, self.pos, self.line, self.sliceable, self.cut)
-            == (o.id, o.off, o.name, o.pos, o.line, o.sliceable, o.cut)
-            && match (&self.units, &o.units) {
-                (None, None) => true,
-                (Some(a), Some(b)) => a[..] == b[..],
-                _ => false,
-            }
-    }
-
     /// Whether its text is still to be read: from its units, or a cut
     /// file's from the file.
     pub(crate) fn lazy(&self) -> bool {
@@ -754,11 +742,6 @@ pub(crate) struct Run<'c, 'a> {
     /// parked run's, and its digest; the ones before the mark a resumed
     /// run began at are its last run's ([`phitex_defuse::Ctx::resumed`]).
     pub mark_snaps: Vec<(std::sync::Arc<Parked>, u64)>,
-    /// The marks of `mark_snaps` before this one hold another text's rest
-    /// (a retexted run resumed at this one, [`retext_mark`]): their tables
-    /// fold into the later marks', no run resumes at them
-    /// ([`KeptMarks::stale_below`]).
-    pub mark_stale: usize,
     /// The command count, from the run's start over its parks and
     /// resumes ([`Run::cmds_before`]), at which its next mark is due: a
     /// multiple of [`MARK_EVERY`], so that every run of the node, whatever
@@ -1065,7 +1048,6 @@ impl<'c, 'a> Run<'c, 'a> {
             rt_rels: 0,
             args_key: 0,
             mark_snaps: Vec::new(),
-            mark_stale: 0,
             next_mark: 0,
             mark_img: crate::runstate::MarkImage::default(),
             watch_exit: None,
@@ -1337,7 +1319,6 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
         let x = self.cx.read(f)?;
-        crate::exec::widths::read(f);
         let v = self.v;
         let cells: Option<Rc<[ValueId]>> = x
             .map(|x| list_of(v, x))
@@ -1616,7 +1597,6 @@ impl<'c, 'a> Run<'c, 'a> {
         if r.is_err() {
             note_stop(self.op_name(), f);
         }
-        crate::exec::widths::read(f);
         if crate::exec::obs_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());
         }
@@ -3125,7 +3105,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let mut as_text = false;
         let mut open = String::new();
         match self.interpret_line(&text)? {
-            None => open = text.clone(),
+            None => open.clone_from(&text),
             Some(m) if self.interp_plain => crate::api::merge_defs(v, &mut ds, m),
             Some(_) => as_text = true,
         }
@@ -4544,7 +4524,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 if self.input.arena.len() > self.input.compact_at.max(crate::input::ARENA_COMPACT) {
                     self.input.compact();
                 }
-                self.take_mark()?;
+                self.take_mark();
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
@@ -4849,7 +4829,6 @@ impl<'c, 'a> Run<'c, 'a> {
         {
             let (n, t_list) = (published.len(), t_pub.elapsed());
             for (f, x, l) in published {
-                crate::exec::widths::def(f);
                 self.cx.define_with(f, x, l);
             }
             if n >= 10_000 && crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -5514,8 +5493,6 @@ pub(crate) struct Seeded {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone)]
 pub(crate) struct Parked {
-    /// The values' epoch the ids below belong to.
-    epoch: u64,
     /// The commands the run began before this (all its attempts): not
     /// part of its state ([`Run::cmds_before`]).
     at_cmds: u64,
@@ -5626,198 +5603,9 @@ impl Parked {
         &self.st
     }
 
-    /// The commands its run began before it.
-    pub(crate) fn at_cmds(&self) -> u64 {
-        self.at_cmds
-    }
 }
 
 impl Run<'_, '_> {
-    /// The run's state for [`phitex_defuse::Ctx::park`] after a stop:
-    /// `None` if the stopped command cannot be rewound.
-    #[allow(clippy::too_many_lines, reason = "one state field a line")]
-    pub(crate) fn park(&mut self) -> Option<Parked> {
-        if !self.rewind() {
-            return None;
-        }
-        if crate::exec::obs_flag!("PHITEX_PARK_TRACE") {
-            eprintln!(
-                "park-trace: park {}: {}",
-                self.cx.node().raw(),
-                self.input_where()
-            );
-        }
-        let mut segs = Vec::new();
-        let input = std::mem::replace(&mut self.input, crate::input::Input::new());
-        for l in input.levels.iter().rev() {
-            match l.kind {
-                crate::input::kind::TOKS => {
-                    segs.push(Seg::Toks(input.arena.get(l.rest()).to_vec()));
-                }
-                crate::input::kind::LINE => segs.push(Seg::Line(input.line(*l).clone())),
-                _ => segs.push(Seg::File(input.file(*l).clone())),
-            }
-        }
-        // where each pulled sibling's text begins in the resumed run's
-        // text: the levels' rests come first, then the text not reached
-        let nlev = input.levels.len();
-        let last = self.pull_at.len().wrapping_sub(1);
-        let mut pull_at = Vec::with_capacity(self.pull_at.len());
-        let mut pull_orig = Vec::with_capacity(self.pull_at.len());
-        for (i, p) in self.pull_at.iter().enumerate() {
-            let (at, orig) = match *p {
-                Some(at) if at >= input.text_at => (Some(nlev + at - input.text_at), None),
-                // the last sibling's first line reached, its first token
-                // read and put back on top of it: the token and the rest
-                // of the line become two segments
-                Some(at) if i == last && at + 1 == input.text_at => {
-                    match (self.pull_lev, &input.text[at]) {
-                        (Some(j), Seg::Line(orig))
-                            if j + 1 < nlev
-                                && input.levels[j].kind == crate::input::kind::LINE
-                                && input.levels[j + 1].kind == crate::input::kind::TOKS
-                                && input.levels[j + 1].ty == crate::input::ty::BACKED_UP
-                                && input.levels[j + 1].b - input.levels[j + 1].a == 1 =>
-                        {
-                            (Some(nlev - 2 - j), Some(orig.clone()))
-                        }
-                        _ => (None, None),
-                    }
-                }
-                _ => (None, None),
-            };
-            pull_at.push(at);
-            pull_orig.push(orig);
-        }
-        // (the levels a run resumed before had yet to reach are levels
-        // still: they come first in the text)
-        let nlev_all = nlev + self.parked_levels.saturating_sub(input.text_at);
-        segs.extend(input.text_rest().iter().cloned());
-        let nest = std::mem::take(&mut self.nest)
-            .into_iter()
-            .map(|l| PLevel {
-                mode: l.mode,
-                group: l.group,
-                lid: l.lid,
-                owns: l.owns,
-                list: l.list,
-                fold: l.fold,
-                par: l.par,
-                prev_graf: l.prev_graf,
-                extra: l.extra,
-                gid: l.gid,
-                save_base: l.save_base,
-                def_base: l.def_base,
-                open_stamp: l.open_stamp,
-                ag: l.ag,
-            })
-            .collect();
-        // (the pending values go with the parked run)
-        self.pending_locs.clear();
-        Some(Parked {
-            epoch: self.cx.values_epoch(),
-            // (the command it stopped in is begun again where it resumes:
-            // counted then, not now, so that its marks fall on the same
-            // commands as a run's that never parked, `Run::next_mark`)
-            at_cmds: (self.cmds_before + self.cmds).saturating_sub(1),
-            text_at: 0,
-            segs,
-            nlev: nlev_all,
-            level_tys: Vec::new(),
-            pulled: self.pulled,
-            pull_at,
-            pull_orig,
-            pull_box: self.pull_box.clone(),
-            top: self.top,
-            claim_rest: self.claim_rest,
-            hint_void: self.hint_void,
-            nest,
-            next_lid: self.next_lid,
-            last_par: self.last_par,
-            doc: self.doc,
-            fread: std::mem::take(&mut self.fread),
-            fmiss: std::mem::take(&mut self.fmiss),
-            uread: std::mem::take(&mut self.uread),
-            skip_first: std::mem::take(&mut self.skip_first)
-                .into_iter()
-                .map(|l| self.loc_field(l))
-                .collect(),
-            reg_pending: std::mem::take(&mut self.reg_pending)
-                .into_iter()
-                .map(|(l, m)| (self.loc_field(l), m))
-                .collect(),
-            incs: std::mem::take(&mut self.incs),
-            closed: std::mem::take(&mut self.closed),
-            error_count: self.error_count,
-            class_memo: std::mem::take(&mut self.class_memo)
-                .into_iter()
-                .map(|(l, c)| (self.loc_field(l), c))
-                .collect(),
-            outer_memo: std::mem::take(&mut self.outer_memo)
-                .into_iter()
-                .map(|(l, o)| (self.loc_field(l), o))
-                .collect(),
-            step_memo: std::mem::take(&mut self.step_memo)
-                .into_iter()
-                .map(|(l, k)| (self.loc_field(l), k))
-                .collect(),
-            defined_memo: std::mem::take(&mut self.defined_memo)
-                .into_iter()
-                .map(|(l, d)| (self.loc_field(l), d))
-                .collect(),
-            num_memo: std::mem::take(&mut self.num_memo)
-                .into_iter()
-                .map(|(l, d)| (self.loc_field(l), d))
-                .collect(),
-            fin_lazy: sorted_lazy(&std::mem::take(&mut self.fin_lazy)),
-            lt: self.lt_parked(),
-            rec_load: self.rec_load,
-            no_pull: self.no_pull,
-            st: self.st.park(self.v),
-            mark_gone: Vec::new(),
-            mark_sum: None,
-            mark_whole: true,
-            watch: None,
-            contribs: std::mem::take(&mut self.contribs),
-            kids: std::mem::take(&mut self.kids),
-            effect: self.effect,
-            conds: std::mem::take(&mut self.conds),
-            if_codes: std::mem::take(&mut self.if_codes),
-            cond_loaded: self.cond_loaded,
-            cond_stop: self.cond_stop,
-            astate: self.astate,
-            aopen: self.aopen,
-            lines_entered: self.lines_entered,
-            lines_read: self.lines_read,
-            doc_lines: self.doc_lines.clone(),
-            eof: self.eof,
-            radix: self.radix,
-            args_key: self.args_key,
-            cur_order: self.cur_order,
-            pdf_occ: self.pdf_occ,
-            rt_made: self.rt_made,
-            rt_cells: self.rt_cells,
-            rt_rels: self.rt_rels,
-            muts: self.muts,
-            read_back_done: self.read_back_done,
-            read_back_at: self.read_back_at,
-            read_point_here: self.read_point_here,
-            text_written: std::mem::take(&mut self.text_written),
-            seeded: std::mem::take(&mut self.seeded),
-            cont_lines: std::mem::take(&mut self.cont_lines),
-            read_point_pending: self.read_point_pending.take(),
-            vain_after_point: std::mem::take(&mut self.vain_after_point),
-            pending_pre: std::mem::take(&mut self.pending_pre)
-                .into_iter()
-                .map(|(l, x)| (self.loc_field(l), x))
-                .collect(),
-            cand: self.cand,
-            cand_marks: std::mem::take(&mut self.cand_marks),
-            ins_pending: std::mem::take(&mut self.ins_pending),
-            fin: self.fin.take(),
-            sealed: std::mem::take(&mut self.sealed),
-        })
-    }
 }
 
 /// A run's marks, kept with its result ([`phitex_defuse::Ctx::keep_after`]):
@@ -5825,100 +5613,10 @@ impl Run<'_, '_> {
 /// the node resumed at mark `k` ([`phitex_defuse::Ctx::resumed`]) starts
 /// from `snaps[k]`.
 impl Parked {
-    /// Whether the run held sealed lines (`crate::pages::seal`): their
-    /// views are its own run's, not a later run's that resumes here.
-    pub(crate) fn has_sealed(&self) -> bool {
-        !self.sealed.is_empty()
-    }
 }
-
-/// A run's marks: each one's state as a parked run's and its digest
-/// ([`Run::mark_snaps`]).
-pub(crate) type MarkSnaps = Vec<(std::sync::Arc<Parked>, u64)>;
 
 pub(crate) struct KeptMarks {
     pub snaps: Vec<(std::sync::Arc<Parked>, u64)>,
-    /// (observe, `PHITEX_MARK_CHECK`) Its contributions and children, to
-    /// compare a run the engine would cut off with.
-    pub outs: Vec<String>,
-    /// (observe, `PHITEX_RESUME_VERIFY`, `PHITEX_RETEXT_POTENTIAL`) Its
-    /// node's text.
-    pub args: Vec<ValueId>,
-    /// (observe) The commands the run began in all.
-    pub total_cmds: u64,
-    /// [`Run::mark_stale`]: the marks before it hold another text's
-    /// rest; a run resumes only at this one or a later.
-    pub stale_below: usize,
-}
-
-/// A retexted node's resume ([`phitex_defuse::Ctx::resumed_retext`]):
-/// the last of its last run's marks, at most `kmax`, whose state the
-/// text the two runs share alone made, and the marks up to it with that
-/// one's text rest the new text's.
-///
-/// The mark's text rest ([`Parked::segs`] past its levels) must be the
-/// last text's rest unchanged (from its segment `m`), not a text the run
-/// edited or one with siblings' text after it; the segments before `m`
-/// (those it had begun, its levels' rests among them) and `m` itself
-/// (the next, whose start a line's continuation looks at,
-/// `Run::join_continuation`) must be the new text's. The node's other
-/// arguments must be the same (where it is, its kind, its hint), and no
-/// part of either text a unit (`w`, read when the run begins,
-/// [`Run::resolve_units`]).
-pub(crate) fn retext_mark(
-    v: &Values,
-    km: &KeptMarks,
-    kmax: u32,
-    old_args: &[ValueId],
-    args: &[ValueId],
-) -> Result<(u32, MarkSnaps), &'static str> {
-    if old_args.len() != args.len() || old_args.get(1..) != args.get(1..) {
-        return Err("other arguments");
-    }
-    let is_w = |l: ValueId| {
-        v.with_list(l, |fs| {
-            fs.iter().any(|&f| {
-                v.with_list(f, |xs| xs.first().and_then(|&t| v.with_str(t, |s| s == "w")) == Some(true))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-    };
-    if old_args.first().is_some_and(|&l| is_w(l)) || args.first().is_some_and(|&l| is_w(l)) {
-        return Err("units");
-    }
-    let old = crate::input::joined(decode_segs(v, old_args));
-    let new = crate::input::joined(decode_segs(v, args));
-    let shared = old.iter().zip(&new).take_while(|(a, b)| a.same(b)).count();
-    let top = (kmax as usize).min(km.snaps.len().saturating_sub(1));
-    let mut why = "no mark";
-    for k in (0..=top).rev() {
-        let p = &km.snaps[k].0;
-        if p.pulled > 0 || p.watch.is_some() || p.has_sealed() || p.nlev > p.segs.len() {
-            why = "siblings, a watch, sealed lines";
-            continue;
-        }
-        let Some(m) = old.len().checked_sub(p.segs.len() - p.nlev) else {
-            why = "text grown";
-            continue;
-        };
-        if m == 0 || m >= shared {
-            why = "past the shared text";
-            continue;
-        }
-        if !p.segs[p.nlev..].iter().zip(&old[m..]).all(|(a, b)| a.same(b)) {
-            why = "text rest edited";
-            continue;
-        }
-        let mut q = (**p).clone();
-        q.segs.truncate(q.nlev);
-        q.segs.extend(new[m..].iter().cloned());
-        let h = parked_digest(&q);
-        let mut snaps = km.snaps[..k].to_vec();
-        snaps.push((std::sync::Arc::new(q), h));
-        return Ok((u32::try_from(k).unwrap_or(u32::MAX), snaps));
-    }
-    Err(why)
 }
 
 /// The commands between two marks of a run ([`Run::take_mark`]):
@@ -5940,7 +5638,7 @@ impl Run<'_, '_> {
     /// run's state as a parked run's ([`Run::snapshot`]) and its digest,
     /// kept for the observers that compare runs.
     #[inline]
-    pub(crate) fn take_mark(&mut self) -> R<()> {
+    pub(crate) fn take_mark(&mut self) {
         // (one test a command where the run takes none, two where it
         // takes marks: none due yet, no group exit or check watched)
         if !self.marks_on
@@ -5948,14 +5646,14 @@ impl Run<'_, '_> {
                 && self.watch_exit.is_none()
                 && self.verify_at.is_none())
         {
-            return Ok(());
+            return;
         }
-        self.take_mark_due()
+        self.take_mark_due();
     }
 
     /// [`Run::take_mark`] where a mark may be due.
     #[inline(never)]
-    fn take_mark_due(&mut self) -> R<()> {
+    fn take_mark_due(&mut self) {
         // (observe: the resume check, where the last run took the mark the
         // engine resumed at, by the commands begun since the run's start)
         if let Some((k, op, oh, args)) = &self.verify_at
@@ -5977,7 +5675,7 @@ impl Run<'_, '_> {
         // mark there, where the line's number is gone with the group)
         let forced = self.watch_exit.is_some_and(|w| self.group_count() < w);
         if (at < self.next_mark && !forced) || self.mark.active {
-            return Ok(());
+            return;
         }
         // (not where siblings were pulled: their places are the text's
         // and the levels'; `PHITEX_MARK_TEXT_ONLY=1` (observe): only where
@@ -6009,7 +5707,7 @@ impl Run<'_, '_> {
                     .iter()
                     .any(|l| l.kind == crate::input::kind::TOKS)
         {
-            return Ok(());
+            return;
         }
         if at >= self.next_mark {
             self.next_mark = (at / every + 1) * every;
@@ -6027,12 +5725,12 @@ impl Run<'_, '_> {
         if forced {
             self.watch_exit = None;
         }
-        self.commit_mark(p, tp)
+        self.commit_mark(p, tp);
     }
 
     /// A mark's snapshot `p` kept with its digest. `tp`: the mark's
     /// profile probe.
-    fn commit_mark(&mut self, p: Parked, tp: Option<std::time::Instant>) -> R<()> {
+    fn commit_mark(&mut self, p: Parked, tp: Option<std::time::Instant>) {
         let v = self.v;
         let td = crate::prof::start();
         let h = parked_digest(&p);
@@ -6123,7 +5821,6 @@ impl Run<'_, '_> {
             }
         }
         crate::prof::add(crate::prof::MARK_CK, tp);
-        Ok(())
     }
 
     /// The groups of the run open now ([`Level::group`]).
@@ -6140,7 +5837,7 @@ impl Run<'_, '_> {
     /// off there; only the group's commands run again. Taken where the
     /// command has changed nothing yet (its input as it found it, read
     /// without putting it back, [`crate::input::Input::segs_at_command_start`]).
-    pub(crate) fn mark_before_read(&mut self) -> R<()> {
+    pub(crate) fn mark_before_read(&mut self) {
         // (observe, `PHITEX_ANCHOR_MARKS=1`: measured on amsldoc's preamble
         // edit, the runs resume at these marks but are not cut off after
         // the group: a later `\inputlineno` read in the run reads another
@@ -6148,10 +5845,10 @@ impl Run<'_, '_> {
         // (`crate::runstate::State::mark_candidate`) keep the moved value for
         // a second pass, so the states never meet again; off)
         if !crate::exec::obs_flag!("PHITEX_ANCHOR_MARKS") {
-            return Ok(());
+            return;
         }
         if !self.marks_on || self.watch_exit.is_some() || !self.mark.active {
-            return Ok(());
+            return;
         }
         let at = self.cmds_before + self.cmds;
         if self.anchor_skip_at == Some(at)
@@ -6163,10 +5860,10 @@ impl Run<'_, '_> {
             || !self.pre_noted.is_empty()
             || !self.pull_at.is_empty()
         {
-            return Ok(());
+            return;
         }
         let Some((segs, tys, text_at)) = self.input.segs_at_command_start(&self.mark.snap) else {
-            return Ok(());
+            return;
         };
         let groups = self.group_count();
         let tp = crate::prof::start();
@@ -6191,7 +5888,7 @@ impl Run<'_, '_> {
         p.no_pull = self.mark.no_pull;
         p.watch = Some(groups);
         self.watch_exit = Some(groups);
-        self.commit_mark(p, tp)
+        self.commit_mark(p, tp);
     }
 
     /// (observe, `PHITEX_RESUME_VERIFY=1`) Whether this full run's state
@@ -6340,7 +6037,6 @@ impl Run<'_, '_> {
         };
         crate::prof::add(crate::prof::MARK_STATE, ts);
         Parked {
-            epoch: self.cx.values_epoch(),
             at_cmds: self.cmds_before + self.cmds,
             text_at: self.input.text_at,
             segs,
@@ -6462,44 +6158,6 @@ fn mark_why(node: u64, k: usize, old: &Parked, new: &Parked) {
         "mark-why: node {node} mark {k}: differs in {parts:?}; slot value diff {diff:?}; lines {}/{} read {}/{} muts {}/{}",
         old.lines_entered, new.lines_entered, old.lines_read, new.lines_read, old.muts, new.muts
     );
-}
-
-/// A digest of a run's state at a mark ([`Run::take_mark`]): equal for
-/// equal states, what the run will give the engine at its end too (its
-/// contributions and children so far: kept in the run until then, the
-/// engine's own comparison does not see them).
-/// (test) For each part of a run's state a mark's digest once left out,
-/// whether two marks that differ only there have other digests.
-#[cfg(test)]
-pub(crate) fn digest_gaps(p: &Parked, v: &Values) -> Vec<(&'static str, bool)> {
-    let d = |f: &dyn Fn(&mut Parked)| {
-        let mut q = p.clone();
-        f(&mut q);
-        parked_digest(&q)
-    };
-    let seeded = |t: &str| Seeded {
-        name: "x".into(),
-        keys: v.int(1),
-        defs: Vec::new(),
-        text: v.str(t),
-    };
-    let file = |u: &str| {
-        let order = v.list(vec![v.int(1), v.list(vec![v.list(vec![v.str(u), v.int(1)])])]);
-        Seg::File(FileRest::written(v, order, v.str("f.tex")))
-    };
-    vec![
-        ("seeded read-backs", d(&|q| q.seeded = vec![seeded("a")]) != d(&|q| q.seeded = vec![seeded("b")])),
-        (
-            "continuation lines",
-            d(&|q| q.cont_lines = vec![Some(FileLine::Known(1))]) != d(&|q| q.cont_lines = vec![Some(FileLine::Known(2))]),
-        ),
-        ("a file's units", d(&|q| q.segs.push(file("u1"))) != d(&|q| q.segs.push(file("u2")))),
-        ("the arguments but the text", d(&|q| q.args_key = 1) != d(&|q| q.args_key = 2)),
-        (
-            "the engine value read before a definition",
-            d(&|q| q.st = p.st.with_eng(Some(v.int(1)))) != d(&|q| q.st = p.st.with_eng(None)),
-        ),
-    ]
 }
 
 fn parked_digest(p: &Parked) -> u64 {
@@ -6701,53 +6359,6 @@ pub(crate) const SCAN_DEFINING: u8 = 2;
 pub(crate) const SCAN_MATCHING: u8 = 3;
 pub(crate) const SCAN_ABSORBING: u8 = 5;
 impl Run<'_, '_> {
-    /// The innermost file being read (§304): the top file level of the
-    /// input stack (a line of it, or the rest of a file read here), else
-    /// the file the node's token levels were left in (its `t` frame).
-    /// Debug (`PHITEX_PARK_TRACE`): the input levels top first (a line's
-    /// position, state, end character and the text around its position)
-    /// and the segments of the text not reached.
-    pub(crate) fn input_where(&self) -> String {
-        let line = |s: &crate::input::Line| {
-            let a = s.loc.saturating_sub(24);
-            let b = (s.loc + 24).min(s.buf.len());
-            let t: String = s.buf[a.min(b)..b]
-                .iter()
-                .map(|&c| char::from_u32(c).unwrap_or('?'))
-                .collect();
-            format!(
-                "line loc {} len {} state {} endch {} starts {} ends {} [{t:?}]",
-                s.loc,
-                s.buf.len(),
-                s.state,
-                s.endch,
-                s.starts,
-                s.ends
-            )
-        };
-        let mut out = Vec::new();
-        for l in self.input.levels.iter().rev() {
-            out.push(match l.kind {
-                crate::input::kind::TOKS => format!("toks {}", l.b.saturating_sub(l.a)),
-                crate::input::kind::LINE => line(self.input.line(*l)),
-                _ => "file".to_owned(),
-            });
-        }
-        for s in self.input.text_rest() {
-            out.push(match s {
-                Seg::Toks(t) => format!("text toks {}", t.len()),
-                Seg::Line(l) => format!("text {}", line(l)),
-                Seg::File(_) => "text file".to_owned(),
-            });
-        }
-        format!(
-            "{} | cur {:?} | text_at {} parked_levels {}",
-            out.join(" / "),
-            self.cur.tok,
-            self.input.text_at,
-            self.parked_levels
-        )
-    }
 
     pub(crate) fn file_line_here(&self) -> Option<FileLine> {
         for l in self.input.levels.iter().rev() {

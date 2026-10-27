@@ -772,12 +772,6 @@ impl State {
         self.taint_read.get()
     }
 
-    /// A run resumed: its tainted meanings and whether one was looked at.
-    pub(crate) fn set_taint(&mut self, locs: Vec<Loc>, read: bool) {
-        self.tainted = locs;
-        self.taint_read.set(read);
-    }
-
     /// A change of `loc` may come: the generations it bumps.
     #[inline]
     fn changing(&mut self, loc: Loc) {
@@ -2253,129 +2247,6 @@ impl State {
         }
     }
 
-    /// The table a run resumed at a mark goes on from, its marks' image
-    /// begun from it ([`MarkImage`]): each slot's digest, and changes noted
-    /// from here.
-    pub(crate) fn begin_marks_from(&mut self, v: &Values, img: &mut MarkImage, touched: usize) {
-        *img = MarkImage::default();
-        img.begun = true;
-        for i in 0..self.touched.len() {
-            let l = self.touched[i];
-            let (ps, h) = self.slot_mark(v, l);
-            if ps.is_some() {
-                img.tabled.insert(l);
-            }
-            if h != 0 {
-                img.hashes.insert(l, h);
-                img.sum = img.sum.wrapping_add(h);
-            }
-        }
-        // (the touched list as the marks' tables hold it: locations its
-        // resumption touched since come with the next mark's)
-        img.touched = touched.min(self.touched.len());
-        img.metas = self.metas.len();
-        self.track = true;
-        self.mdirty.clear();
-    }
-
-    /// The table of a parked run ([`State::park`]).
-    pub(crate) fn unpark(p: PState) -> State {
-        let mut st = State::new();
-        let loc = |st: &mut State, l: PLoc| -> Loc {
-            match l {
-                PLoc::Fixed(l) => l,
-                PLoc::Spill(f) => st.spill_loc(f),
-            }
-        };
-        let ent = |e: PEntry| {
-            let mut x = Entry::raw(e.id);
-            x.flags = e.flags;
-            x
-        };
-        // (the touched list in the run's order first: the reads it
-        // reports follow it, [`State::read_locs`])
-        for l in p.touched {
-            let l = loc(&mut st, l);
-            st.slot(l);
-        }
-        // (the metas in the run's order: its definitions' bookkeeping
-        // comes first in the reads it reports)
-        let order: Vec<Loc> = p.meta_order.into_iter().map(|l| loc(&mut st, l)).collect();
-        let at: FxHashMap<Loc, usize> = order.iter().enumerate().map(|(i, &l)| (l, i)).collect();
-        let mut metas: Vec<Option<Meta>> = (0..order.len()).map(|_| None).collect();
-        for s in p.slots {
-            let l = loc(&mut st, s.loc);
-            if let Some(m) = s.meta
-                && let Some(&i) = at.get(&l)
-            {
-                metas[i] = Some(Meta {
-                    loc: l,
-                    eng: m.eng,
-                    publ: m.publ.map(|(x, lc)| (Entry::raw(x), lc)),
-                    ldef_stamp: m.ldef_stamp,
-                    ldef_local: m.ldef_local,
-                    ldef_gid: m.ldef_gid,
-                });
-            }
-            let slot = st.slot(l);
-            slot.e = ent(s.e);
-            slot.save_gid = s.save_gid;
-            slot.save_stamp = s.save_stamp;
-            slot.ginert = s.ginert;
-        }
-        for m in metas.into_iter().flatten() {
-            st.metas.push(m);
-            let i = u32::try_from(st.metas.len()).unwrap_or(0);
-            let l = st.metas[st.metas.len() - 1].loc;
-            st.slot(l).meta = i;
-        }
-        for s in p.save {
-            let l = loc(&mut st, s.loc);
-            st.save.push(Saved {
-                loc: l,
-                prev: ent(s.prev),
-                gid: s.gid,
-                stamp: s.stamp,
-                at: s.at,
-                ldef: s.ldef,
-            });
-        }
-        for d in p.defined {
-            let l = loc(&mut st, d);
-            st.defined.push(l);
-        }
-        for d in p.base_defs {
-            let l = loc(&mut st, d);
-            st.base_defs.push(l);
-        }
-        for d in p.cont_locs {
-            let l = loc(&mut st, d);
-            st.cont_locs.push(l);
-        }
-        st.pp_dirty = p.pp_dirty;
-        if let Some(ks) = p.kinds {
-            let mut m = FxHashMap::default();
-            for (d, a) in ks {
-                let l = loc(&mut st, d);
-                m.insert(l, a);
-            }
-            st.kinds = Some(m);
-        }
-        for (stamp, xs) in p.cands {
-            let mut ys = Vec::with_capacity(xs.len());
-            for (l, e) in xs {
-                let l = loc(&mut st, l);
-                ys.push((l, ent(e)));
-            }
-            st.cands.push((stamp, ys));
-        }
-        st.stamp = p.stamp;
-        st.next_gid = p.next_gid;
-        st.cat_gen = new_cat_gen();
-        st.any_gen = new_cat_gen();
-        st.font_gen = new_cat_gen();
-        st
-    }
 }
 
 /// A location of a parked table: a fixed one or a meaning's (stable for
@@ -2527,19 +2398,6 @@ impl MarkDelta {
             slots,
             ..rest
         }
-    }
-}
-
-#[cfg(test)]
-impl PState {
-    /// (test) A copy whose first defined slot read `x` from the engine
-    /// before its definition.
-    pub(crate) fn with_eng(&self, x: Option<ValueId>) -> PState {
-        let mut p = self.clone();
-        if let Some(m) = p.slots.iter_mut().find_map(|s| s.meta.as_mut()) {
-            m.eng = Some(x);
-        }
-        p
     }
 }
 
@@ -2966,6 +2824,108 @@ impl State {
         m.ldef_stamp = st;
         m.ldef_local = false;
         m.ldef_gid = None;
+    }
+}
+
+#[cfg(test)]
+impl State {
+    /// The table of a parked run ([`State::park`]).
+    pub(crate) fn unpark(p: PState) -> State {
+        let mut st = State::new();
+        let loc = |st: &mut State, l: PLoc| -> Loc {
+            match l {
+                PLoc::Fixed(l) => l,
+                PLoc::Spill(f) => st.spill_loc(f),
+            }
+        };
+        let ent = |e: PEntry| {
+            let mut x = Entry::raw(e.id);
+            x.flags = e.flags;
+            x
+        };
+        // (the touched list in the run's order first: the reads it
+        // reports follow it, [`State::read_locs`])
+        for l in p.touched {
+            let l = loc(&mut st, l);
+            st.slot(l);
+        }
+        // (the metas in the run's order: its definitions' bookkeeping
+        // comes first in the reads it reports)
+        let order: Vec<Loc> = p.meta_order.into_iter().map(|l| loc(&mut st, l)).collect();
+        let at: FxHashMap<Loc, usize> = order.iter().enumerate().map(|(i, &l)| (l, i)).collect();
+        let mut metas: Vec<Option<Meta>> = (0..order.len()).map(|_| None).collect();
+        for s in p.slots {
+            let l = loc(&mut st, s.loc);
+            if let Some(m) = s.meta
+                && let Some(&i) = at.get(&l)
+            {
+                metas[i] = Some(Meta {
+                    loc: l,
+                    eng: m.eng,
+                    publ: m.publ.map(|(x, lc)| (Entry::raw(x), lc)),
+                    ldef_stamp: m.ldef_stamp,
+                    ldef_local: m.ldef_local,
+                    ldef_gid: m.ldef_gid,
+                });
+            }
+            let slot = st.slot(l);
+            slot.e = ent(s.e);
+            slot.save_gid = s.save_gid;
+            slot.save_stamp = s.save_stamp;
+            slot.ginert = s.ginert;
+        }
+        for m in metas.into_iter().flatten() {
+            st.metas.push(m);
+            let i = u32::try_from(st.metas.len()).unwrap_or(0);
+            let l = st.metas[st.metas.len() - 1].loc;
+            st.slot(l).meta = i;
+        }
+        for s in p.save {
+            let l = loc(&mut st, s.loc);
+            st.save.push(Saved {
+                loc: l,
+                prev: ent(s.prev),
+                gid: s.gid,
+                stamp: s.stamp,
+                at: s.at,
+                ldef: s.ldef,
+            });
+        }
+        for d in p.defined {
+            let l = loc(&mut st, d);
+            st.defined.push(l);
+        }
+        for d in p.base_defs {
+            let l = loc(&mut st, d);
+            st.base_defs.push(l);
+        }
+        for d in p.cont_locs {
+            let l = loc(&mut st, d);
+            st.cont_locs.push(l);
+        }
+        st.pp_dirty = p.pp_dirty;
+        if let Some(ks) = p.kinds {
+            let mut m = FxHashMap::default();
+            for (d, a) in ks {
+                let l = loc(&mut st, d);
+                m.insert(l, a);
+            }
+            st.kinds = Some(m);
+        }
+        for (stamp, xs) in p.cands {
+            let mut ys = Vec::with_capacity(xs.len());
+            for (l, e) in xs {
+                let l = loc(&mut st, l);
+                ys.push((l, ent(e)));
+            }
+            st.cands.push((stamp, ys));
+        }
+        st.stamp = p.stamp;
+        st.next_gid = p.next_gid;
+        st.cat_gen = new_cat_gen();
+        st.any_gen = new_cat_gen();
+        st.font_gen = new_cat_gen();
+        st
     }
 }
 

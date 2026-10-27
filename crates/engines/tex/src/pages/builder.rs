@@ -310,12 +310,125 @@ fn raw_node(v: &Values, x: ValueId) -> Option<phitex_defuse::NodeId> {
     (i != -1).then(|| node_of(i))
 }
 
-/// The loop at a page's fire and the fire, as the next step's state: what
-/// the fold on from there reads, nothing else (the units no source after
-/// the fire names, the routines' material none names, the places of the
-/// pieces neither names, left out), so a step whose page comes out as it
-/// was gives the step after it the same arguments.
-fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
+/// [`Run::decode_state`]'s part for the fire ([`encode_fire`]).
+fn decode_fire(d: &mut Dec<'_>) -> Pending {
+    let j = d.i();
+    let node = d.node().unwrap_or_else(|| node_of(0));
+    let xs_i = d.len();
+    let pid = d.i();
+    let in_material = d.i() != 0;
+    let hint = d.x();
+    let key = d.key();
+    let rtn_guess = d.x();
+    let k = d.u32();
+    let output_penalty = d.i32();
+    let n = d.len();
+    let mut held = Vec::with_capacity(n);
+    for _ in 0..n {
+        let s = d.src();
+        let m = d.len();
+        let ints: Vec<i64> = (0..m).map(|_| d.i()).collect();
+        if let (Some(s), Some(crate::vprof::PItem::Node(h))) = (s, crate::vprof::decode(&ints).into_iter().next()) {
+            held.push((s, h));
+        }
+    }
+    let n = d.len();
+    let carried = (0..n)
+        .map(|_| {
+            let t = d.i();
+            let src = if t == -1 { None } else { d.src_tagged(t) };
+            SrcRef { src, fold: d.fold() }
+        })
+        .collect();
+    let nth = d.u32();
+    let n = d.len();
+    let classes = (0..n)
+        .map(|_| {
+            let k = u16::try_from(d.i()).unwrap_or(0);
+            let h = d.i();
+            (
+                k,
+                InsertClass {
+                    box_height_plus_depth: (h >= 0).then(|| i32::try_from(h).unwrap_or(0)),
+                    box_is_hbox: d.i() != 0,
+                    count: d.i32(),
+                    dimen: d.i32(),
+                    skip: d.glue(),
+                },
+            )
+        })
+        .collect();
+    Pending {
+        j,
+        node,
+        xs_i,
+        pid,
+        in_material,
+        hint,
+        key,
+        rtn_guess,
+        k,
+        output_penalty,
+        held,
+        carried,
+        nth,
+        classes,
+    }
+}
+
+/// [`encode_state`]'s part for the fire `p`.
+fn encode_fire(e: &mut Enc<'_>, cuts: &mut Vec<(&'static str, usize)>, p: &Pending) {
+    cuts.push(("fire", e.xs.len()));
+    // the fire
+    e.i(p.j);
+    e.node(Some(p.node));
+    e.len(p.xs_i);
+    e.i(p.pid);
+    e.i(i64::from(p.in_material));
+    cuts.push(("hint", e.xs.len()));
+    e.x(p.hint);
+    e.key(p.key);
+    cuts.push(("guess", e.xs.len()));
+    e.x(p.rtn_guess);
+    cuts.push(("fire2", e.xs.len()));
+    e.i(i64::from(p.k));
+    e.i(i64::from(p.output_penalty));
+    cuts.push(("held", e.xs.len()));
+    e.len(p.held.len());
+    for (s, h) in &p.held {
+        e.src(*s);
+        let mut out = Vec::new();
+        crate::vprof::push_node(h, &mut out);
+        e.len(out.len());
+        for x in out {
+            e.i(x);
+        }
+    }
+    cuts.push(("carried", e.xs.len()));
+    e.len(p.carried.len());
+    for c in &p.carried {
+        match c.src {
+            Some(s) => e.src(s),
+            None => e.i(-1),
+        }
+        e.fold(c.fold);
+    }
+    cuts.push(("pnth", e.xs.len()));
+    e.i(i64::from(p.nth));
+    e.len(p.classes.len());
+    for (k, c) in &p.classes {
+        e.i(i64::from(*k));
+        e.i(c.box_height_plus_depth.map_or(-1, i64::from));
+        e.i(i64::from(c.box_is_hbox));
+        e.i(i64::from(c.count));
+        e.i(i64::from(c.dimen));
+        e.glue(&c.skip);
+    }
+}
+
+/// What [`encode_state`] keeps of the loop: the units from `keep` on, the
+/// pieces the units and the fire name, and the routines' pages it names.
+fn state_names(lp: &PageLoop, p: &Pending) -> (usize, Vec<i64>, Vec<i64>) {
     let piece = |s: &Src| match *s {
         Src::Piece { piece, .. } | Src::Held { piece, .. } => Some(piece),
         Src::Rtn { .. } => None,
@@ -349,7 +462,18 @@ fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
         .collect();
     pages.sort_unstable();
     pages.dedup();
-    let mut cuts: Vec<(&str, usize)> = Vec::new();
+    (keep, pieces, pages)
+}
+
+/// The loop at a page's fire and the fire, as the next step's state: what
+/// the fold on from there reads, nothing else (the units no source after
+/// the fire names, the routines' material none names, the places of the
+/// pieces neither names, left out), so a step whose page comes out as it
+/// was gives the step after it the same arguments.
+fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
+    let (keep, pieces, pages) = state_names(lp, p);
+    let units = &lp.units[keep.min(lp.units.len())..];
+    let mut cuts: Vec<(&'static str, usize)> = Vec::new();
     let mut e = Enc { v, xs: Vec::with_capacity(64 + 4 * lp.inf.len() + 2 * units.len()) };
     let st = &lp.st;
     cuts.push(("st", e.xs.len()));
@@ -421,66 +545,26 @@ fn encode_state(v: &Values, lp: &PageLoop, p: &Pending) -> ValueId {
     cuts.push(("nth", e.xs.len()));
     e.node(lp.nth.0);
     e.i(i64::from(lp.nth.1));
-    cuts.push(("fire", e.xs.len()));
-    // the fire
-    e.i(p.j);
-    e.node(Some(p.node));
-    e.len(p.xs_i);
-    e.i(p.pid);
-    e.i(i64::from(p.in_material));
-    cuts.push(("hint", e.xs.len()));
-    e.x(p.hint);
-    e.key(p.key);
-    cuts.push(("guess", e.xs.len()));
-    e.x(p.rtn_guess);
-    cuts.push(("fire2", e.xs.len()));
-    e.i(i64::from(p.k));
-    e.i(i64::from(p.output_penalty));
-    cuts.push(("held", e.xs.len()));
-    e.len(p.held.len());
-    for (s, h) in &p.held {
-        e.src(*s);
-        let mut out = Vec::new();
-        crate::vprof::push_node(h, &mut out);
-        e.len(out.len());
-        for x in out {
-            e.i(x);
-        }
-    }
-    cuts.push(("carried", e.xs.len()));
-    e.len(p.carried.len());
-    for c in &p.carried {
-        match c.src {
-            Some(s) => e.src(s),
-            None => e.i(-1),
-        }
-        e.fold(c.fold);
-    }
-    cuts.push(("pnth", e.xs.len()));
-    e.i(i64::from(p.nth));
-    e.len(p.classes.len());
-    for (k, c) in &p.classes {
-        e.i(i64::from(*k));
-        e.i(c.box_height_plus_depth.map_or(-1, i64::from));
-        e.i(i64::from(c.box_is_hbox));
-        e.i(i64::from(c.count));
-        e.i(i64::from(c.dimen));
-        e.glue(&c.skip);
-    }
+    encode_fire(&mut e, &mut cuts, p);
     if crate::exec::prof_flag!("PHITEX_STEP_LOG") {
-        use std::hash::{Hash as _, Hasher as _};
-        let mut parts = Vec::new();
-        for (k, &(name, at)) in cuts.iter().enumerate() {
-            let end = cuts.get(k + 1).map_or(e.xs.len(), |c| c.1);
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            for x in &e.xs[at..end] {
-                x.raw().hash(&mut h);
-            }
-            parts.push(format!("{name}={:04x}", h.finish() & 0xffff));
-        }
-        eprintln!("stepstate: {}", parts.join(" "));
+        step_state_log(&e.xs, &cuts);
     }
     v.list(e.xs)
+}
+
+/// (`PHITEX_STEP_LOG`) A digest of each part of an encoded step state.
+fn step_state_log(xs: &[ValueId], cuts: &[(&'static str, usize)]) {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut parts = Vec::new();
+    for (k, &(name, at)) in cuts.iter().enumerate() {
+        let end = cuts.get(k + 1).map_or(xs.len(), |c| c.1);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for x in &xs[at..end] {
+            x.raw().hash(&mut h);
+        }
+        parts.push(format!("{name}={:04x}", h.finish() & 0xffff));
+    }
+    eprintln!("stepstate: {}", parts.join(" "));
 }
 
 /// The step's state as one flat list ([`encode_state`]): integers inline,
@@ -1040,6 +1124,9 @@ fn kick_of(v: &Values, args: &[ValueId]) -> Option<phitex_defuse::NodeId> {
     }
 }
 
+/// The fire a unit made and its insertion classes ([`Run::fold_unit`]).
+type UnitFire = (Pending, Vec<(u16, InsertClass)>);
+
 /// Where the loop stands at a page's fire ([`encode_state`]), defined by
 /// the step that fired it for the step after it.
 pub(crate) const PAGE_LOOP: &str = "pages:loop";
@@ -1318,68 +1405,7 @@ impl Run<'_, '_> {
             lp.rtns.push((page, val, std::sync::Arc::new(items)));
         }
         lp.nth = (d.node(), d.u32());
-        let j = d.i();
-        let node = d.node().unwrap_or_else(|| node_of(0));
-        let xs_i = d.len();
-        let pid = d.i();
-        let in_material = d.i() != 0;
-        let hint = d.x();
-        let key = d.key();
-        let rtn_guess = d.x();
-        let k = d.u32();
-        let output_penalty = d.i32();
-        let n = d.len();
-        let mut held = Vec::with_capacity(n);
-        for _ in 0..n {
-            let s = d.src();
-            let m = d.len();
-            let ints: Vec<i64> = (0..m).map(|_| d.i()).collect();
-            if let (Some(s), Some(crate::vprof::PItem::Node(h))) = (s, crate::vprof::decode(&ints).into_iter().next()) {
-                held.push((s, h));
-            }
-        }
-        let n = d.len();
-        let carried = (0..n)
-            .map(|_| {
-                let t = d.i();
-                let src = if t == -1 { None } else { d.src_tagged(t) };
-                SrcRef { src, fold: d.fold() }
-            })
-            .collect();
-        let nth = d.u32();
-        let n = d.len();
-        let classes = (0..n)
-            .map(|_| {
-                let k = u16::try_from(d.i()).unwrap_or(0);
-                let h = d.i();
-                (
-                    k,
-                    InsertClass {
-                        box_height_plus_depth: (h >= 0).then(|| i32::try_from(h).unwrap_or(0)),
-                        box_is_hbox: d.i() != 0,
-                        count: d.i32(),
-                        dimen: d.i32(),
-                        skip: d.glue(),
-                    },
-                )
-            })
-            .collect();
-        let pending = Pending {
-            j,
-            node,
-            xs_i,
-            pid,
-            in_material,
-            hint,
-            key,
-            rtn_guess,
-            k,
-            output_penalty,
-            held,
-            carried,
-            nth,
-            classes,
-        };
+        let pending = decode_fire(&mut d);
         Ok((lp, pending))
     }
 
@@ -1482,15 +1508,18 @@ impl Run<'_, '_> {
             let classes = p.classes.clone();
             if let Some(f) = self.after_fire(&mut lp, &p, &classes)? {
                 let q = self.fire_at(&mut lp, node, p.pid, &f, true)?;
-                return self.cut(&lp, q, classes, p.xs_i);
+                self.cut(&lp, q, classes, p.xs_i);
+                return Ok(());
             }
             let (ui, from) = lp.frontier;
             if let Some(q) = self.fold_items(&mut lp, node, p.pid, ui, from as usize, &classes)? {
-                return self.cut(&lp, q, classes, p.xs_i);
+                self.cut(&lp, q, classes, p.xs_i);
+                return Ok(());
             }
             for (i, &x) in xs.iter().enumerate().skip(p.xs_i + 1) {
                 if let Some((q, classes)) = self.fold_unit(&mut lp, node, x)? {
-                    return self.cut(&lp, q, classes, i);
+                    self.cut(&lp, q, classes, i);
+                return Ok(());
                 }
             }
             lp.cur = Some(node);
@@ -1517,7 +1546,8 @@ impl Run<'_, '_> {
             let xs = v.seq_to_vec(u);
             for (i, &x) in xs.iter().enumerate() {
                 if let Some((q, classes)) = self.fold_unit(&mut lp, node, x)? {
-                    return self.cut(&lp, q, classes, i);
+                    self.cut(&lp, q, classes, i);
+                return Ok(());
                 }
             }
             lp.cur = Some(node);
@@ -1549,7 +1579,7 @@ impl Run<'_, '_> {
 
     /// The step's end at a page's fire: the next step placed after the
     /// page's finisher, on the loop as it stands.
-    fn cut(&mut self, lp: &PageLoop, mut q: Pending, classes: Vec<(u16, InsertClass)>, xs_i: usize) -> R<()> {
+    fn cut(&mut self, lp: &PageLoop, mut q: Pending, classes: Vec<(u16, InsertClass)>, xs_i: usize) {
         let v = self.v;
         q.classes = classes;
         q.xs_i = xs_i;
@@ -1562,7 +1592,6 @@ impl Run<'_, '_> {
         self.cx.define_with(v.field(PAGE_LOOP), state, Locality::Global);
         let me = self.cx.node();
         self.cx.follow(self.ops.pages, vec![raw_value(v, Some(q.node)), raw_value(v, Some(me))]);
-        Ok(())
     }
 
     /// A contributor's unit `x` decoded and folded from its first item
@@ -1573,7 +1602,7 @@ impl Run<'_, '_> {
         lp: &mut PageLoop,
         node: phitex_defuse::NodeId,
         x: ValueId,
-    ) -> R<Option<(Pending, Vec<(u16, InsertClass)>)>> {
+    ) -> R<Option<UnitFire>> {
         use crate::prof::pages as pp;
         pp::unit();
         let (pid, items, res) = self.unit_items(lp, x)?;
@@ -1690,6 +1719,12 @@ impl Run<'_, '_> {
     /// The output routine's hint (as [`Run::output_hint`]) where piece
     /// `at` ends: the routine of a page firing there.
     pub(crate) fn output_hint_at(&mut self, at: phitex_defuse::NodeId) -> R<ValueId> {
+        // (the last routine's hint, by its value and the definitions: a
+        // page's routine is mostly the page before's)
+        type Last = Option<(u64, Option<ValueId>, usize, ValueId)>;
+        thread_local! {
+            static LAST: std::cell::Cell<Last> = const { std::cell::Cell::new(None) };
+        }
         let v = self.v;
         let f = self.loc_field(Par::output as Loc);
         let out = match self.field_at(f, at, false)? {
@@ -1697,12 +1732,6 @@ impl Run<'_, '_> {
             phitex_defuse::FieldAt::Unset => None,
             phitex_defuse::FieldAt::Gone => self.par(Par::output)?,
         };
-        // (the last routine's hint, by its value and the definitions: a
-        // page's routine is mostly the page before's)
-        type Last = Option<(u64, Option<ValueId>, usize, ValueId)>;
-        thread_local! {
-            static LAST: std::cell::Cell<Last> = const { std::cell::Cell::new(None) };
-        }
         let defs = self.ops.defs.locked().clone();
         let d = std::sync::Arc::as_ptr(&defs) as usize;
         if let Some((i, o, dp, h)) = LAST.get()
@@ -1815,7 +1844,7 @@ impl Run<'_, '_> {
                 self.rtn_guess(hint, key.1),
             );
             guess_check(
-                u64::try_from(node.raw()).unwrap_or(0),
+                node.raw(),
                 j,
                 (eval, key, in_material, &lp.last_rtn, &lp.prev_rtn, &lp.last_markers),
                 rtn_guess,

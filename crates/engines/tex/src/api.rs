@@ -581,10 +581,7 @@ fn apply_slices(
     let common = old_mid.min(new_mid);
     crate::timeline::lap("engine: the slice-key diff");
     for k in common..old_mid {
-        match at {
-            Placing::Top(_) => eng.remove(old[a + k].1),
-            Placing::Placed => eng.remove(old[a + k].1),
-        }
+        eng.remove(old[a + k].1);
     }
     let mut nodes: Vec<(u64, NodeId, Src)> = Vec::with_capacity(new.len());
     for i in 0..new.len() {
@@ -600,9 +597,8 @@ fn apply_slices(
             let args = args_of(eng, i);
             let next = old.get(a + old_mid).map(|x| x.1);
             match (at, nodes.last()) {
-                (Placing::Top(_), Some(&(_, p, _))) => eng.insert_after(p, exec, args),
+                (_, Some(&(_, p, _))) => eng.insert_after(p, exec, args),
                 (Placing::Top(end), None) => eng.insert_before(next.unwrap_or(end), exec, args),
-                (Placing::Placed, Some(&(_, p, _))) => eng.insert_after(p, exec, args),
                 (Placing::Placed, None) => eng.insert_before(next?, exec, args),
             }
         };
@@ -6930,51 +6926,78 @@ fn env_trace(eng: &Engine, env: &[(Field, ValueId)]) {
     *l = Some((store, new));
 }
 
-/// (debug) The first leaf where two values differ: its path, and both
-/// leaves shown with their ids and kinds.
-fn structural_diff(
-    v: &Values,
-    a: ValueId,
-    b: ValueId,
-    path: String,
-) -> Option<(String, String, String)> {
-    use phitex_defuse::Value;
-    if a == b {
-        return None;
-    }
-    let (va, vb) = (v.get(a), v.get(b));
-    match (&*va, &*vb) {
-        (Value::List(xa), Value::List(xb)) => {
-            if xa.len() != xb.len() {
-                return Some((
-                    path,
-                    format!("list len {}", xa.len()),
-                    format!("list len {}", xb.len()),
-                ));
-            }
-            for (i, (&x, &y)) in xa.iter().zip(xb.iter()).enumerate() {
-                if let Some(d) = structural_diff(v, x, y, format!("{path}/{i}")) {
-                    return Some(d);
-                }
-            }
-            Some((
-                path,
-                format!("list {:?} (same elements)", a.raw()),
-                format!("list {:?}", b.raw()),
-            ))
+/// [`debug_nodes`]' `PHITEX_NODE_DUMP` file: the unit of `root`'s nodes in
+/// text order.
+fn node_dump(eng: &Engine, path: &str, root: &phitex_defuse::NodeInfo) {
+    use std::fmt::Write as _;
+    use std::hash::{Hash as _, Hasher as _};
+    let v = eng.values();
+    let dig = |x: ValueId| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        v.render(x).hash(&mut h);
+        h.finish()
+    };
+    let mut out = String::new();
+    for n in eng.order(root.unit) {
+        let Some(i) = eng.node_info(n) else { continue };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for &a in &i.args {
+            dig(a).hash(&mut h);
         }
-        _ => Some((
-            path,
-            format!("{:?} id {}", *va, a.raw())
-                .chars()
-                .take(120)
-                .collect(),
-            format!("{:?} id {}", *vb, b.raw())
-                .chars()
-                .take(120)
-                .collect(),
-        )),
+        let o = eng.output(n).map_or(0, dig);
+        let head: String = i.args.first().map(|&a| v.render(a)).unwrap_or_default().chars().take(60).collect();
+        let _ = write!(
+            out,
+            "{} {} {:?} parent {:?} claimer {:?} args {:016x} out {o:016x} {head}",
+            n.raw(),
+            i.op,
+            i.state,
+            i.parent.map(phitex_defuse::NodeId::raw),
+            i.claimer.map(phitex_defuse::NodeId::raw),
+            h.finish()
+        );
+        // (a page's finisher: what it gave back; `PHITEX_NODE_DUMP_READS`
+        // names nodes whose reads follow)
+        if i.op == "finish" {
+            let r: String = eng.output(n).map(|x| v.render(x)).unwrap_or_default().chars().take(300).collect();
+            let _ = write!(out, " | {r}");
+        }
+        out.push('\n');
+        // (`PHITEX_NODE_DUMP_DEFS=1`: each node's definitions, a digest
+        // of each value)
+        if crate::exec::obs_flag!("PHITEX_NODE_DUMP_DEFS") {
+            let mut ds: Vec<(String, u64)> = eng.defs_of(n).into_iter().map(|(f, x)| (v.render(f.0), dig(x))).collect();
+            ds.sort();
+            for (f, d) in ds {
+                let _ = writeln!(out, "  def {f} {d:016x}");
+            }
+            let mut cs: Vec<(String, u64, String)> = eng
+                .contribs_of(n)
+                .into_iter()
+                .map(|(f, x)| (v.render(f.0), dig(x), v.render(x).chars().take(200).collect()))
+                .collect();
+            cs.sort();
+            for (f, d, t) in cs {
+                let _ = writeln!(out, "  contrib {f} {d:016x} {t}");
+            }
+        }
+        let argd = format!("{:016x}", {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for &a in &i.args {
+                dig(a).hash(&mut h);
+            }
+            h.finish()
+        });
+        if crate::exec::obs_str!("PHITEX_NODE_DUMP_READS")
+            .is_some_and(|l| l == "all" || l.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(n.raw()) || x.trim() == argd))
+        {
+            let _ = writeln!(out, "    node {}", eng.debug_node(n));
+            for l in eng.debug_reads(n).lines() {
+                let _ = writeln!(out, "    read {}", l.replace("}, ", "},\n    read "));
+            }
+        }
     }
+    let _ = std::fs::write(path, out);
 }
 
 /// Debug: `PHITEX_DEBUG_NODES=id,id,...` prints the engine's view of
@@ -6988,75 +7011,7 @@ fn debug_nodes(eng: &Engine, when: &str) {
         && let Some(path) = crate::exec::obs_str!("PHITEX_NODE_DUMP")
         && let Some(root) = eng.node_info(phitex_defuse::NodeId::from_raw(1))
     {
-        use std::fmt::Write as _;
-        use std::hash::{Hash as _, Hasher as _};
-        let v = eng.values();
-        let dig = |x: ValueId| {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            v.render(x).hash(&mut h);
-            h.finish()
-        };
-        let mut out = String::new();
-        for n in eng.order(root.unit) {
-            let Some(i) = eng.node_info(n) else { continue };
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            for &a in &i.args {
-                dig(a).hash(&mut h);
-            }
-            let o = eng.output(n).map_or(0, dig);
-            let head: String = i.args.first().map(|&a| v.render(a)).unwrap_or_default().chars().take(60).collect();
-            let _ = write!(
-                out,
-                "{} {} {:?} parent {:?} claimer {:?} args {:016x} out {o:016x} {head}",
-                n.raw(),
-                i.op,
-                i.state,
-                i.parent.map(phitex_defuse::NodeId::raw),
-                i.claimer.map(phitex_defuse::NodeId::raw),
-                h.finish()
-            );
-            // (a page's finisher: what it gave back; `PHITEX_NODE_DUMP_READS`
-            // names nodes whose reads follow)
-            if i.op == "finish" {
-                let r: String = eng.output(n).map(|x| v.render(x)).unwrap_or_default().chars().take(300).collect();
-                let _ = write!(out, " | {r}");
-            }
-            out.push('\n');
-            // (`PHITEX_NODE_DUMP_DEFS=1`: each node's definitions, a digest
-            // of each value)
-            if crate::exec::obs_flag!("PHITEX_NODE_DUMP_DEFS") {
-                let mut ds: Vec<(String, u64)> = eng.defs_of(n).into_iter().map(|(f, x)| (v.render(f.0), dig(x))).collect();
-                ds.sort();
-                for (f, d) in ds {
-                    let _ = writeln!(out, "  def {f} {d:016x}");
-                }
-                let mut cs: Vec<(String, u64, String)> = eng
-                    .contribs_of(n)
-                    .into_iter()
-                    .map(|(f, x)| (v.render(f.0), dig(x), v.render(x).chars().take(200).collect()))
-                    .collect();
-                cs.sort();
-                for (f, d, t) in cs {
-                    let _ = writeln!(out, "  contrib {f} {d:016x} {t}");
-                }
-            }
-            let argd = format!("{:016x}", {
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                for &a in &i.args {
-                    dig(a).hash(&mut h);
-                }
-                h.finish()
-            });
-            if crate::exec::obs_str!("PHITEX_NODE_DUMP_READS")
-                .is_some_and(|l| l == "all" || l.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(n.raw()) || x.trim() == argd))
-            {
-                let _ = writeln!(out, "    node {}", eng.debug_node(n));
-                for l in eng.debug_reads(n).lines() {
-                    let _ = writeln!(out, "    read {}", l.replace("}, ", "},\n    read "));
-                }
-            }
-        }
-        let _ = std::fs::write(path, out);
+        node_dump(eng, path, &root);
     }
     // (`PHITEX_ORDER_AROUND=a,b`: the unit's nodes in text order from
     // node `a` to node `b`, each as the engine has it)

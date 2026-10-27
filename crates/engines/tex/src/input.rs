@@ -386,30 +386,6 @@ pub(crate) enum Seg {
 }
 
 impl Seg {
-    /// Whether two segments are the same text, read alike: a mark's text
-    /// not reached against a node's text ([`crate::run::retext_mark`]).
-    pub(crate) fn same(&self, o: &Seg) -> bool {
-        match (self, o) {
-            (Seg::Line(a), Seg::Line(b)) => {
-                a.buf == b.buf
-                    && (a.loc, a.state, a.endch, a.starts, a.ends, a.lineno, a.rescanned)
-                        == (b.loc, b.state, b.endch, b.starts, b.ends, b.lineno, b.rescanned)
-                    && a.origin == b.origin
-            }
-            (Seg::Toks(a), Seg::Toks(b)) => a == b,
-            (Seg::File(a), Seg::File(b)) => a.same(b),
-            _ => false,
-        }
-    }
-}
-
-/// A node's segments as a run's text holds them ([`Input::append_text`]
-/// on an empty text): a line segment continuing the one before joined to
-/// it.
-pub(crate) fn joined(segs: Vec<Seg>) -> Vec<Seg> {
-    let mut i = Input::new();
-    i.append_text(segs);
-    i.text
 }
 
 /// The input stack.
@@ -869,6 +845,17 @@ impl Input {
         self.arena = fresh;
     }
 
+}
+
+/// Where the input stood when a command began ([`Input::snapshot`]).
+#[derive(Default)]
+pub(crate) struct Snapshot {
+    pub text_at: usize,
+    pub arena: u32,
+}
+
+#[cfg(test)]
+impl Input {
     /// Puts the levels back as [`Input::snapshot`] found them. False if
     /// a line was reduced in place beyond what can be restored.
     pub(crate) fn restore(&mut self, s: &Snapshot) -> bool {
@@ -923,13 +910,6 @@ impl Input {
         // command are unreachable and the run ends soon after a park)
         true
     }
-}
-
-/// Where the input stood when a command began ([`Input::snapshot`]).
-#[derive(Default)]
-pub(crate) struct Snapshot {
-    pub text_at: usize,
-    pub arena: u32,
 }
 
 #[cfg(test)]

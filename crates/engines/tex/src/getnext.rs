@@ -1782,30 +1782,6 @@ impl Run<'_, '_> {
         self.mark = m;
     }
 
-    /// After a stop inside a command: puts the input back as the command
-    /// found it, so a resumed run executes the command from its start.
-    /// False (the run must not park) if the command changed anything
-    /// else, or the input in a way not recorded.
-    pub(crate) fn rewind(&mut self) -> bool {
-        if !self.mark.active
-            || self.mutations() != self.mark.sig
-            || Some(self.effect) != self.mark.effect
-        {
-            return false;
-        }
-        let m = std::mem::take(&mut self.mark);
-        if !self.input.restore(&m.snap) {
-            return false;
-        }
-        self.astate = m.astate;
-        self.aopen = m.aopen;
-        self.radix = m.radix;
-        self.no_pull = m.no_pull;
-        if let Some(o) = m.cur_order {
-            self.cur_order = o;
-        }
-        true
-    }
 }
 
 /// The command in progress (`Run::begin_command`): the input levels as

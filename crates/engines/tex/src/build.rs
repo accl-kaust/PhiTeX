@@ -2505,7 +2505,6 @@ impl Run<'_, '_> {
         if tfm.bchar_label().is_some() || tfm.bchar().is_some() {
             return Ok(false);
         }
-        let chars = &loaded.at.chars;
         let hyphen = view.hyphen.get(&f).copied().unwrap_or(-1);
         let Ok(c0) = u8::try_from(self.cur.chr) else {
             return Ok(false);
@@ -2550,24 +2549,8 @@ impl Run<'_, '_> {
             if n == 0 || line.buf.get(i).is_none_or(|&c| cat(c) != cmd::SPACER) {
                 return Ok(done);
             }
-            for j in 0..n {
-                let c = w[j];
-                if i32::from(c) == hyphen || chars.get(usize::from(c)).is_none_or(Option::is_none) {
-                    return Ok(done);
-                }
-                k[j] = 0;
-                if j > 0
-                    && let Some(step) = tfm.lookup(Some(w[j - 1]), Some(c))
-                {
-                    if !step.is_kern() {
-                        return Ok(done);
-                    }
-                    k[j] = loaded.at.char_kern(step);
-                    if k[j] == 0 {
-                        // (a kern of 0 still a node)
-                        return Ok(done);
-                    }
-                }
+            if !word_kerns(loaded, hyphen, &w[..n], &mut k) {
+                return Ok(done);
             }
             // the word read: its characters, then the space after it and
             // the blanks after that
@@ -3491,13 +3474,42 @@ pub(crate) fn _unused(_: ValueId) -> Option<Glue> {
     None
 }
 
+/// The kerns between the characters of word `w` in `loaded`
+/// ([`Run::plain_words`], 0 before the first and where none): false where
+/// a character is the hyphen character or missing, or a pair ligatures or
+/// kerns by 0 (a kern node all the same), which the main loop takes.
+fn word_kerns(loaded: &crate::fonts::Loaded, hyphen: i32, w: &[u8], k: &mut [i32]) -> bool {
+    for (j, &c) in w.iter().enumerate() {
+        if i32::from(c) == hyphen || loaded.at.chars.get(usize::from(c)).is_none_or(Option::is_none) {
+            return false;
+        }
+        k[j] = 0;
+        if j > 0
+            && let Some(step) = loaded.tfm.lookup(Some(w[j - 1]), Some(c))
+        {
+            if !step.is_kern() {
+                return false;
+            }
+            k[j] = loaded.at.char_kern(step);
+            if k[j] == 0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// A font view kept for character runs, with the table generation and
+/// font it was made for and the font's space dimensions read.
+type CharView = (crate::fonts::View, Option<(u64, u32)>, [Option<i32>; 4]);
+
 thread_local! {
     /// A character run's node buffer, kept for the worker's next run
     /// ([`Run::char_run`]).
     static CHAR_BUF: std::cell::Cell<Vec<crate::nest::Item>> = const { std::cell::Cell::new(Vec::new()) };
     /// Its font view, kept the same way, with the table generation and
     /// font it was made for and the font's space dimensions read.
-    static CHAR_VIEW: std::cell::Cell<Option<(crate::fonts::View, Option<(u64, u32)>, [Option<i32>; 4])>> =
+    static CHAR_VIEW: std::cell::Cell<Option<CharView>> =
         const { std::cell::Cell::new(None) };
 }
 

@@ -18,12 +18,9 @@ pub(crate) const FOLD: usize = 8;
 pub(crate) const FINISH: usize = 9;
 pub(crate) const MARK: usize = 10;
 pub(crate) const MARK_CK: usize = 11;
-pub(crate) const KEEP: usize = 12;
-pub(crate) const RESUME: usize = 13;
 pub(crate) const MARK_TEXT: usize = 14;
 pub(crate) const MARK_STATE: usize = 15;
 pub(crate) const MARK_DIGEST: usize = 16;
-pub(crate) const RETEXT: usize = 17;
 const N: usize = 18;
 const NAMES: [&str; N] = [
     "exec run (body+fold+finish)",
@@ -279,14 +276,6 @@ pub(crate) mod pages {
     pub(crate) fn unit() {
         if on() {
             UNITS.fetch_add(1, Relaxed);
-        }
-    }
-
-    /// A fold torn mid-unit (`crate::pages::PageLoop::torn`).
-    #[inline]
-    pub(crate) fn torn() {
-        if on() {
-            TORNS.fetch_add(1, Relaxed);
         }
     }
 

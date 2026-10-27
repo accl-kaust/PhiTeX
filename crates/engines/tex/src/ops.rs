@@ -529,7 +529,6 @@ impl Operation for Put {
             let val = xs.get(1).copied().unwrap_or(ValueId::UNIT);
             let f = v.field(&name);
             names.push(f.0);
-            crate::exec::widths::def(f);
             cx.define_with(f, val, if g { Locality::Global } else { Locality::Local });
         }
         // the fields defined, for the prelude's export (as `Run::finish`)
@@ -586,12 +585,6 @@ impl Operation for Mark {
     fn run(&self, _: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         Ok(ValueId::UNIT)
     }
-}
-
-/// Whether a node may define `f`: files (`file:`) come only from the
-/// client.
-pub(crate) fn client_only(v: &Values, f: Field) -> bool {
-    v.with_str(f.0, |s| !s.starts_with("file:")).unwrap_or(true)
 }
 
 /// The files the job writes, read back where the job reads them: one
