@@ -253,7 +253,8 @@ pub trait Operation: Send + Sync {
     /// as provisional relations when the node is made, as a learned shape
     /// is (`Ctx::define_rel` by the run replaces them; a run that defines
     /// the field otherwise, or not at all, refutes only the readers whose
-    /// answer moves). `None`: no prediction.
+    /// answer moves). `None`: no prediction. A field `predicted_defs`
+    /// gives a value for keeps that value.
     fn predicted_rels(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, i64)>> {
         None
     }

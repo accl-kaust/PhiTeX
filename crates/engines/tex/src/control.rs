@@ -728,7 +728,13 @@ impl Run<'_, '_> {
                     _ => {
                         let r = self.scan_eight_bit_int()?;
                         match n {
-                            2 => Mean::Reg(cmd::ASSIGN_INT, crate::val::COUNT_BASE + r),
+                            2 => {
+                                if let Some(c) = p.as_cs() {
+                                    let f = self.quantity(cmd::ASSIGN_INT, crate::val::COUNT_BASE + r);
+                                    self.ops.counters.write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(c.name(), f);
+                                }
+                                Mean::Reg(cmd::ASSIGN_INT, crate::val::COUNT_BASE + r)
+                            }
                             3 => Mean::Reg(cmd::ASSIGN_DIMEN, crate::val::SCALED_BASE + r),
                             4 => Mean::Reg(cmd::ASSIGN_GLUE, crate::val::SKIP_BASE + r),
                             5 => Mean::Reg(cmd::ASSIGN_MU_GLUE, crate::val::MU_SKIP_BASE + r),

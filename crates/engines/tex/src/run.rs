@@ -220,6 +220,12 @@ pub(crate) struct Ops {
     pub fin_defs_start: std::sync::Arc<std::sync::Mutex<std::sync::Arc<FinTable>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The integer registers named by `\countdef` so far, by name (a
+    /// LaTeX counter X's register is `\c@X`'s): what a node's text steps
+    /// is predicted on them ([`crate::hints::counter_rels`]); a name
+    /// defined again, or not yet, is a wrong or a missing guess, never
+    /// a wrong value.
+    pub counters: std::sync::Arc<std::sync::RwLock<crate::FxHashMap<&'static str, phitex_defuse::Field>>>,
     /// [`crate::Options::node_records`].
     pub node_rec: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The class projection of meanings ([`crate::val::class_projection`],
@@ -4993,6 +4999,12 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if self.effect != Effect::None {
             self.cx.set_effect(self.effect);
+        }
+        // (`PHITEX_SKIND_LOG`: the brackets a run sets, and its text)
+        if crate::exec::prof_flag!("PHITEX_SKIND_LOG") && self.effect != Effect::None {
+            let v = self.v;
+            let text = self.cx.args().first().map_or_else(String::new, |&a| v.render(a).chars().take(160).collect());
+            eprintln!("skindeff: {} op {} {:?} {text}", self.cx.node().raw(), self.op_name(), self.effect);
         }
         // (a finisher's output: what its routine gave back, which the
         // next page step reads, `crate::pages::PAGE_OUT`)

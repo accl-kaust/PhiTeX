@@ -294,6 +294,12 @@ impl Operation for Exec {
         let p = loads.prediction_of(v, &key)?;
         Some(p.into_iter().map(|(n, _, x)| (v.field(&n), x)).collect())
     }
+    /// The counters the text steps in plain sight, as relations on the
+    /// value reaching the node ([`crate::hints::counter_rels`]): the text
+    /// after it runs on the stepped value before this node has run.
+    fn predicted_rels(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, i64)>> {
+        crate::hints::counter_rels(&ops(&self.0).counters, v, args)
+    }
     /// What the text says it may define ([`crate::hints`]): the state's
     /// field heads and the control sequences its command can define, or
     /// anything where the pass cannot bound it.

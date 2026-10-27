@@ -1433,6 +1433,11 @@ pub(crate) struct FinDefs {
     /// Each page's last run (by [`fin_page_key`]): its ordinary pages
     /// fired and its definitions ([`FinDefs::at`]).
     pub pages: std::collections::BTreeMap<PageKey, (i64, Vec<(Field, ValueId)>)>,
+    /// The relations the last run defined (an integer register's global
+    /// `\\advance`, `crate::regfold`: `\\c@page` stepped as the page
+    /// ships): the next finisher's predicted relations
+    /// ([`Finish::predicted_rels`]).
+    pub rels: Option<Vec<(Field, i64)>>,
 }
 
 impl FinDefs {
@@ -1858,6 +1863,30 @@ impl Operation for Finish {
         out.push((f, page_out_value(v, fin.piece, fin.nth, given)));
         Some(out)
     }
+    /// The relations the last finisher of the same routine and page class
+    /// defined ([`FinDefs::rels`]: `\\c@page` and the shipout count +1
+    /// where its page ships), and none (+0) on every register another
+    /// class's run stepped: a page that ships nothing (a float page's
+    /// routine pass) steps no page counter, which the operation's one
+    /// learned relation would say it does. None before the class's first
+    /// run.
+    fn predicted_rels(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, i64)>> {
+        let o = ops(&self.0);
+        if !o.fin_predict.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        let t = args.get(9).copied().filter(|&t| t != ValueId::UNIT)?;
+        let m = o.fin_defs.locked();
+        let mut out = m.get(&fin_key(v, t, args))?.rels.clone()?;
+        for e in m.values() {
+            for &(f, _) in e.rels.iter().flatten() {
+                if !out.iter().any(|x| x.0 == f) {
+                    out.push((f, 0));
+                }
+            }
+        }
+        Some(out)
+    }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
@@ -2151,11 +2180,19 @@ impl Run<'_, '_> {
                 )
             );
         }
+        let mut rels: Vec<(Field, i64)> = Vec::new();
+        let maps: Vec<(Loc, crate::regfold::Affine)> = self.reg_pending.iter().map(|(&l, &m)| (l, m)).collect();
+        for (l, m) in maps {
+            if m.keep && self.count_reg(l).is_some() && !self.st.defined_after(l, 0) {
+                rels.push((self.loc_field(l), i64::from(m.add)));
+            }
+        }
         let mut m = self.ops.fin_defs.locked();
         let pos = self.cx.args();
         let idx = fin_page_key(v, pos);
         let e = m.entry(fin_key(v, t, pos)).or_default();
         e.gdefs = Some(gdefs);
+        e.rels = Some(rels);
         for &(f, x) in &out {
             if !e.seen.contains(&f) {
                 e.seen.push(f);

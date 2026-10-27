@@ -4717,6 +4717,116 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
     }
 }
 
+/// The counter steps a node's text makes in plain sight: `\\stepcounter{X}`
+/// and `\\refstepcounter{X}` +1, `\\addtocounter{X}{n}` its literal `n`,
+/// outside comments, on the register of `\\c@X` among `counters` (the
+/// registers `\\countdef` named so far, [`crate::run::Ops::counters`]): the
+/// relations its run defines where the step is unconditional
+/// (`Operation::predicted_rels`). A counter not named yet, an
+/// `\\addtocounter` by no literal, or text that is no source (expansion
+/// tokens): nothing predicted for it.
+pub(crate) fn counter_rels(
+    counters: &std::sync::RwLock<FxHashMap<&'static str, Field>>,
+    v: &Values,
+    args: &[ValueId],
+) -> Option<Vec<(Field, i64)>> {
+    let fr = *args.first()?;
+    let f = *list_of(v, fr).first()?;
+    let xs = list_of(v, f);
+    let tag = str_of(v, *xs.first()?);
+    let text = match tag.as_str() {
+        "s" => str_of(v, *xs.get(1)?),
+        "f" => {
+            let t = str_of(v, *xs.get(1)?);
+            let off = usize::try_from(int_of(v, *xs.get(2)?)).ok()?.min(t.len());
+            if !t.is_char_boundary(off) {
+                return None;
+            }
+            let end = line_span_end(&t, off);
+            t[off..end].to_owned()
+        }
+        _ => return None,
+    };
+    if !text.contains("counter{") {
+        return None;
+    }
+    let steps = counter_steps(&text);
+    if steps.is_empty() {
+        return None;
+    }
+    let reg = counters.read().unwrap_or_else(PoisonError::into_inner);
+    let mut out: Vec<(Field, i64)> = Vec::new();
+    for (name, d) in steps {
+        let Some(&fld) = reg.get(cat(&["c@", &name]).as_str()) else {
+            continue;
+        };
+        match out.iter_mut().find(|e| e.0 == fld) {
+            Some(e) => e.1 = e.1.wrapping_add(d),
+            None => out.push((fld, d)),
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// `\\stepcounter{X}`, `\\refstepcounter{X}` (+1) and
+/// `\\addtocounter{X}{n}` (a literal `n`) in `text`, outside comments: the
+/// counter's name and the step.
+fn counter_steps(text: &str) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        // (the line up to an unescaped `%`)
+        let b = line.as_bytes();
+        let mut end = b.len();
+        let mut i = 0;
+        while i < b.len() {
+            match b[i] {
+                b'\\' => i += 2,
+                b'%' => {
+                    end = i;
+                    break;
+                }
+                _ => i += 1,
+            }
+        }
+        let line = &line[..end.min(line.len())];
+        let mut at = 0;
+        while let Some(k) = line[at..].find('\\') {
+            let s = at + k + 1;
+            let name_end = line[s..]
+                .find(|c: char| !c.is_ascii_alphabetic())
+                .map_or(line.len(), |e| s + e);
+            let cmd = &line[s..name_end];
+            at = name_end.max(s);
+            let step = match cmd {
+                "stepcounter" | "refstepcounter" => Some(1),
+                "addtocounter" => None,
+                _ => continue,
+            };
+            let Some((x, after)) = braced(&line[name_end..]) else {
+                continue;
+            };
+            let d = match step {
+                Some(d) => Some(d),
+                None => braced(after).and_then(|(n, _)| n.trim().parse::<i64>().ok()),
+            };
+            if let Some(d) = d
+                && !x.is_empty()
+                && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '@' || c == '*')
+            {
+                out.push((x.to_owned(), d));
+            }
+        }
+    }
+    out
+}
+
+/// `{x}rest` (after spaces) as `(x, rest)`, `x` holding no brace.
+fn braced(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start_matches(' ').strip_prefix('{')?;
+    let e = s.find(['{', '}'])?;
+    (s.as_bytes()[e] == b'}').then(|| (&s[..e], &s[e + 1..]))
+}
+
 /// A fragment's context is not in its text: it may start a paragraph,
 /// follow an `\afterassignment`, and the state of what it calls is
 /// known only by name.
@@ -5328,5 +5438,14 @@ mod tests {
         for f in ["cs:foo", "act:126"] {
             assert!(!ps.iter().any(|p| f.starts_with(p.as_str())), "{f}");
         }
+    }
+
+    #[test]
+    fn counter_steps_in_plain_sight() {
+        let t = "\\refstepcounter{exercise}x \\stepcounter {page}\n\\addtocounter{x@y}{-3}\\addtocounter{z}{\\n}% \\stepcounter{c}\n\\%\\stepcounter{d}";
+        assert_eq!(
+            counter_steps(t),
+            vec![("exercise".to_owned(), 1), ("page".to_owned(), 1), ("x@y".to_owned(), -3), ("d".to_owned(), 1)]
+        );
     }
 }

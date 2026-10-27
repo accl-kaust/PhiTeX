@@ -2131,6 +2131,7 @@ pub(crate) fn predict(eng: &Engine, op: OpId, args: &[ValueId]) -> Predicted {
         }
     }
     let mut shapes: Vec<(Field, i64)> = eng.op(op).predicted_rels(args, eng.values()).unwrap_or_default();
+    shapes.retain(|s| !defs.iter().any(|d| d.f == s.0));
     let learned = if eng.shapes_n.load(Ordering::Acquire) == 0 {
         Vec::new()
     } else {
