@@ -80,7 +80,7 @@ pub(crate) struct Node {
     pub(crate) reask_ns: AtomicU64,
     pub(crate) done_ns: AtomicU64,
     /// Reruns caused by `At::Final` re-asks in this evaluation
-    /// (`Limits::final_reruns`), and the evaluation they count in; past
+    /// (`Limits::final_reruns`), and the build they count in (`Engine::final_gen`); past
     /// the limit the node is capped.
     pub(crate) final_reruns: AtomicU32,
     pub(crate) final_epoch: AtomicU64,

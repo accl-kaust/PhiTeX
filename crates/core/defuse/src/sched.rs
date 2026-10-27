@@ -679,6 +679,8 @@ fn absorb(eng: &Engine, pool: &Pool, w: &Worker, s: &mut dyn EditSource) -> bool
         return false;
     };
     eng.set_version(v);
+    // (a new document: its loop-back takes passes of its own)
+    eng.final_gen.fetch_add(1, Ordering::AcqRel);
     w.log.lock().absorbed.push((v, pool.shared.runs_now.load(Ordering::SeqCst)));
     true
 }
@@ -1026,7 +1028,7 @@ fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
 /// node is left with its last answer, listed in `Report::capped`, and not
 /// queued. True when it may run.
 pub(crate) fn allow_final_rerun(eng: &Engine, w: &Worker, node: &Node) -> bool {
-    let ep = eng.epoch.load(Ordering::Acquire);
+    let ep = eng.final_gen.load(Ordering::Acquire);
     if node.final_epoch.swap(ep, Ordering::AcqRel) != ep {
         node.final_reruns.store(0, Ordering::Release);
     }

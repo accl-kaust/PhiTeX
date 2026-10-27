@@ -329,3 +329,81 @@ fn a_fold_that_panics_when_a_failed_run_is_judged_is_an_error_not_a_panic() {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| e.evaluate(1).is_err()));
     assert_eq!(r.ok(), Some(true), "the evaluation returns an error");
 }
+
+/// `[f, v]`: defines f = v (a label).
+struct Label;
+
+impl Operation for Label {
+    fn name(&self) -> &'static str {
+        "label"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let (f, x) = (phitex_defuse::Field(cx.args()[0]), cx.args()[1]);
+        cx.define(f, x);
+        Ok(x)
+    }
+}
+
+/// `[f]`: the last definition of f on the line (a reference to a label
+/// after it).
+struct Ref;
+
+impl Operation for Ref {
+    fn name(&self) -> &'static str {
+        "ref"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        Ok(match cx.read_at(phitex_defuse::Field(cx.args()[0]), phitex_defuse::At::Final)? {
+            phitex_defuse::FieldAt::Def(x, _) => x,
+            phitex_defuse::FieldAt::Unset | phitex_defuse::FieldAt::Gone => ValueId::UNIT,
+        })
+    }
+}
+
+/// Edits the label's value to 1, 2, .. `n`, one each time it is asked
+/// (a user typing while the build runs).
+struct Typing {
+    label: NodeId,
+    op: OpId,
+    f: phitex_defuse::Field,
+    k: i64,
+    n: i64,
+}
+
+impl phitex_defuse::EditSource for Typing {
+    fn absorb(&mut self, eng: &Engine) -> Option<u64> {
+        if self.k == self.n {
+            return None;
+        }
+        self.k += 1;
+        let v = eng.values();
+        eng.replace(self.label, self.op, vec![self.f.0, v.int(self.k)]);
+        Some(self.k.unsigned_abs())
+    }
+}
+
+#[test]
+fn edits_taken_during_an_evaluation_each_get_their_own_loop_back_passes() {
+    // A reference to a label after it, the label edited fifteen times
+    // while one evaluation runs: each edit is a new document whose
+    // reference settles in one more pass. The passes were counted over
+    // the whole evaluation, so after the tenth edit the reference was
+    // capped and kept the tenth value, the document never converging as
+    // far as the report says.
+    let e = Engine::new();
+    let v = e.values();
+    let label = e.register(Arc::new(Label));
+    let rf = e.register(Arc::new(Ref));
+    let f = v.field("lab");
+    let u = e.new_unit();
+    let r = e.push(u, rf, vec![f.0]);
+    let l = e.push(u, label, vec![f.0, v.int(0)]);
+    let mut src = Typing { label: l, op: label, f, k: 0, n: 15 };
+    let rep = e.evaluate_absorbing(2, &mut src).unwrap();
+    assert_eq!(rep.version, 15);
+    assert!(rep.capped.is_empty(), "nothing is capped: {:?}", rep.capped);
+    assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(15), "{rep:?}");
+    assert!(e.check_invariants().is_empty());
+}

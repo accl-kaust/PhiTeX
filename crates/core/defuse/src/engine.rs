@@ -152,6 +152,10 @@ pub struct Engine {
     /// (`sched::work_caught`): the next evaluation checks the line first
     /// (`Engine::repair_line`).
     pub(crate) repair: std::sync::atomic::AtomicBool,
+    /// Counts the builds the loop-back passes are counted in
+    /// (`sched::allow_final_rerun`): each evaluation, and each edit taken
+    /// during one (`sched::absorb`), a document of its own.
+    pub(crate) final_gen: AtomicU64,
 }
 
 /// The buckets of [`Engine::field_epochs`].
@@ -201,6 +205,7 @@ impl Engine {
             has_finals: std::sync::atomic::AtomicBool::new(false),
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
+            final_gen: AtomicU64::new(0),
             values,
             ops: Table::new(),
             units: Table::new(),
@@ -1075,6 +1080,7 @@ impl Engine {
         }
         loop {
             let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            self.final_gen.fetch_add(1, Ordering::AcqRel);
             let (pool, workers) = Pool::new(n, epoch, self.limits());
             let mut seed = self.take_pending(&workers[0]);
             // (in position order, as the blocks run: a node inserted before
