@@ -207,9 +207,16 @@ impl<'a> Ctx<'a> {
     /// are given it ahead of their runs. This is how a counter chain is not
     /// a chain of runs. The run need not read `f` first.
     pub fn define_rel(&mut self, f: Field, c: i64) {
+        self.define_rel_with(f, c, Locality::Local);
+    }
+
+    /// [`Ctx::define_rel`] at a locality: `Global`, the value reaching me
+    /// (the innermost binding seen here) plus `c`, standing past the
+    /// scopes I am in (a global `\advance` inside an environment).
+    pub fn define_rel_with(&mut self, f: Field, c: i64, loc: Locality) {
         self.product.defs.push(DefRec {
             f,
-            loc: Locality::Local,
+            loc,
             value: ValueId::UNIT,
             rel: Some(c),
         });

@@ -1712,11 +1712,14 @@ impl<'c, 'a> Run<'c, 'a> {
             || !self.cand_marks.is_empty()
             || (!global && self.innermost_group().is_some())
             || self.st.defined_after(loc, 0)
-            || self.scope_kind()?.is_some()
         {
             return Ok(false);
         }
-        Ok(true)
+        // (inside a scope of the document a global write only: it adds to
+        // the binding in force there and stands past the scope's end,
+        // `Locality::Global`, [`Run::finish`]; a local one is the scope's)
+        let in_scope = self.scope_kind()?.is_some();
+        Ok(global || !in_scope)
     }
 
     /// A write [`Run::reg_map_ok`] allowed: the map composed onto the
@@ -4917,13 +4920,16 @@ impl<'c, 'a> Run<'c, 'a> {
         // (an integer register's map writes: `add c` a relation on the
         // value reaching the run, `set c` a definition; a location the run
         // defines outright has them in its value)
+        // (inside a scope every map is a global write's, `Run::reg_map_ok`:
+        // it stands past the scope)
+        let loc = if matches!(self.scope_kind_memo, Some(Some(_))) { Locality::Global } else { Locality::Local };
         for (l, m) in std::mem::take(&mut self.reg_pending) {
             if self.count_reg(l).is_none() || self.st.defined_after(l, 0) {
                 continue;
             }
             let f = self.loc_field(l);
             if m.keep {
-                self.cx.define_rel(f, i64::from(m.add));
+                self.cx.define_rel_with(f, i64::from(m.add), loc);
             } else {
                 let v = self.v;
                 self.cx.define_with(f, v.int(i64::from(m.add)), Locality::Global);

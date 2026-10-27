@@ -35,6 +35,21 @@ impl Operation for DefGlobal {
     }
 }
 
+/// `[f, c]`: f := the value reaching it + c, globally (a relation).
+struct RelGlobal;
+
+impl Operation for RelGlobal {
+    fn name(&self) -> &'static str {
+        "rel_global"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let c = cx.values().as_int(cx.args()[1]).unwrap_or(0);
+        cx.define_rel_with(Field(cx.args()[0]), c, Locality::Global);
+        Ok(ValueId::UNIT)
+    }
+}
+
 /// `[f]`: outputs the definition of f reaching it (UNIT if none).
 struct Get;
 
@@ -215,6 +230,7 @@ struct Ops {
     pending: OpId,
     depth: OpId,
     def_frames: OpId,
+    rel_global: OpId,
 }
 
 fn engine() -> (Engine, Ops) {
@@ -231,6 +247,7 @@ fn engine() -> (Engine, Ops) {
         pending: e.register(Arc::new(Pending)),
         depth: e.register(Arc::new(Depth)),
         def_frames: e.register(Arc::new(DefFrames)),
+        rel_global: e.register(Arc::new(RelGlobal)),
     };
     (e, ops)
 }
@@ -477,5 +494,49 @@ fn many_scopes_side_by_side() {
         assert_eq!(int(&e, inside), i);
         assert_eq!(int(&e, after), 0);
     }
+    assert!(e.check_invariants().is_empty());
+}
+
+/// A global relation inside a scope adds to the value reaching it, the
+/// innermost binding there, and stands past the close: the second step
+/// counts the first though both are in scopes closed before it reads.
+#[test]
+fn a_global_relation_inside_a_scope_survives_its_close() {
+    let (e, o) = engine();
+    let v = e.values();
+    let x = v.field("x").0;
+    let u = e.new_unit();
+    e.push(u, o.def, vec![x, v.int(10)]);
+    e.push(u, o.open, vec![]);
+    e.push(u, o.rel_global, vec![x, v.int(1)]);
+    let inside = e.push(u, o.get, vec![x]);
+    e.push(u, o.close, vec![]);
+    e.push(u, o.open, vec![]);
+    e.push(u, o.rel_global, vec![x, v.int(1)]);
+    e.push(u, o.close, vec![]);
+    let after = e.push(u, o.get, vec![x]);
+    e.evaluate(4).unwrap();
+    assert_eq!(int(&e, inside), 11);
+    assert_eq!(int(&e, after), 12, "both steps stand past their scopes");
+    assert!(e.check_invariants().is_empty());
+}
+
+/// A global relation adds to the innermost binding it sees (a global
+/// `\advance` of a register an open group bound locally, §279): 5 + 1
+/// stands after the close, not 10 + 1.
+#[test]
+fn a_global_relation_adds_to_the_local_binding_it_sees() {
+    let (e, o) = engine();
+    let v = e.values();
+    let x = v.field("x").0;
+    let u = e.new_unit();
+    e.push(u, o.def, vec![x, v.int(10)]);
+    e.push(u, o.open, vec![]);
+    e.push(u, o.def, vec![x, v.int(5)]);
+    e.push(u, o.rel_global, vec![x, v.int(1)]);
+    e.push(u, o.close, vec![]);
+    let after = e.push(u, o.get, vec![x]);
+    e.evaluate(4).unwrap();
+    assert_eq!(int(&e, after), 6);
     assert!(e.check_invariants().is_empty());
 }
