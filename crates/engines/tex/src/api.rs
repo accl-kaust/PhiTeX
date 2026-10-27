@@ -1654,6 +1654,13 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
             .collect();
         eprintln!("acct: collections {}: {}; reader records swept {}", cs.len(), cs.join(", "), r.readers_swept);
     }
+    let commits: Vec<String> = r
+        .commit_by_op
+        .iter()
+        .take(8)
+        .map(|(o, t, k)| format!("{o} {:.3} ms/{k} reads", std::time::Duration::from_nanos(*t).as_secs_f64() * 1e3))
+        .collect();
+    eprintln!("acct: commits by op (whole time, reads filed): {}; placed by op {:?}", commits.join(", "), r.placed_by_op);
     let mut by_field: Vec<(String, u64)> = r
         .refuted_by_field
         .iter()
@@ -1827,10 +1834,15 @@ impl Stats {
         self.units_now.iter().find(|x| x.0 == field).map_or(0, |x| x.1)
     }
 
-    /// The readers re-asked through field `name` over the build.
+    /// The readers re-asked through field `name`, or a field of its
+    /// family (`name:…`, a field in parts), over the build.
     #[must_use]
     pub fn refuted_by(&self, name: &str) -> usize {
-        self.refuted_by_field.iter().filter(|e| e.0 == name).map(|e| usize::try_from(e.1).unwrap_or(usize::MAX)).sum()
+        self.refuted_by_field
+            .iter()
+            .filter(|e| e.0 == name || e.0.strip_prefix(name).is_some_and(|r| r.starts_with(':')))
+            .map(|e| usize::try_from(e.1).unwrap_or(usize::MAX))
+            .sum()
     }
 
     /// One evaluation's wall time on `threads` threads, and the

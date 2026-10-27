@@ -61,6 +61,8 @@ pub(crate) struct Checkpoint {
     /// move).
     pub key: PageKey,
     pub page: ValueId,
+    /// Its finisher's arguments ([`FinishArgs`]), as one list.
+    pub args: ValueId,
     /// The placement index of the page's finisher in this run's order
     /// (the pages in fire order: checkpoint `i` is placement `i`).
     pub placement: usize,
@@ -105,6 +107,7 @@ impl LoopState {
                     raw_value(v, Some(c.key.piece)),
                     v.int(i64::from(c.key.nth)),
                     c.page,
+                    c.args,
                     raw_value(v, Some(c.cursor)),
                     c.state,
                     c.guess,
@@ -130,7 +133,7 @@ impl LoopState {
         let mut checkpoints = Vec::new();
         for (i, c) in list_of(v, xs[1]).into_iter().enumerate() {
             let cs = list_of(v, c);
-            if cs.len() != 7 {
+            if cs.len() != 8 {
                 return None;
             }
             checkpoints.push(Checkpoint {
@@ -139,11 +142,12 @@ impl LoopState {
                     nth: u32::try_from(int_of(v, cs[1])).ok()?,
                 },
                 page: cs[2],
+                args: cs[3],
                 placement: i,
-                cursor: raw_node(v, cs[3])?,
-                state: cs[4],
-                guess: cs[5],
-                gave: cs[6],
+                cursor: raw_node(v, cs[4])?,
+                state: cs[5],
+                guess: cs[6],
+                gave: cs[7],
             });
         }
         Some(LoopState {
@@ -408,8 +412,7 @@ impl Run<'_, '_> {
     fn emit_kept(&mut self, ls: &mut LoopState, c: &Checkpoint) -> ValueId {
         let i = ls.checkpoints.len();
         let prev = ls.checkpoints.last().map(|p| p.key);
-        let page = Page::decode(self.v, c.page);
-        self.emit_page(i, c.key, c.page, page.as_ref(), prev);
+        self.emit_page(i, c.key, c.page, c.args, prev);
         let gave = self.give_back(i, c.guess);
         ls.checkpoints.push(Checkpoint {
             placement: i,
@@ -424,19 +427,10 @@ impl Run<'_, '_> {
     /// or after the finisher of the page before where that one fired in
     /// the same piece (its routine runs before this one's, both before
     /// the piece's rest).
-    fn emit_page(&mut self, i: usize, key: PageKey, x: ValueId, page: Option<&Page>, prev: Option<PageKey>) {
+    fn emit_page(&mut self, i: usize, key: PageKey, x: ValueId, args: ValueId, prev: Option<PageKey>) {
         let v = self.v;
         self.cx.define_with(key.field(v, PAGE_OF), x, Locality::Global);
-        let (hint, pen, special) = page.map_or((ValueId::UNIT, i32::MAX, false), |p| {
-            (p.hint, pen_class(p.output_penalty), p.special)
-        });
-        let args = FinishArgs {
-            key,
-            hint,
-            class: i64::from(pen),
-            special,
-        }
-        .encode(v);
+        let args = list_of(v, args);
         let at = match prev {
             Some(p) if p.piece == key.piece && i > 0 => self.cx.follow_after_placed(i - 1, self.ops.finish, args),
             _ => self.cx.follow_after(key.piece, self.ops.finish, args),
@@ -609,11 +603,21 @@ impl Run<'_, '_> {
         let x = page.encode(v);
         let i = ls.checkpoints.len();
         let prev = ls.checkpoints.last().map(|p| p.key);
-        self.emit_page(i, page.key, x, Some(&page), prev);
+        let args = v.list(
+            FinishArgs {
+                key: page.key,
+                hint: page.hint,
+                class: i64::from(pen_class(page.output_penalty)),
+                special: page.special,
+            }
+            .encode(v),
+        );
+        self.emit_page(i, page.key, x, args, prev);
         let gave = self.give_back(i, q.rtn_guess);
         ls.checkpoints.push(Checkpoint {
             key: page.key,
             page: x,
+            args,
             placement: i,
             cursor: q.node,
             state: encode_state(v, st, lc, &q),
