@@ -245,6 +245,15 @@ impl Run<'_, '_> {
     /// `reswitch` (§1045): the case for `cur` in the current mode.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn dispatch(&mut self) -> R<()> {
+        // (§1210's prefixed commands are the same in every mode, and
+        // `\relax` does nothing: no mode read)
+        let c = self.cur.cmd;
+        if (cmd::TOKS_REGISTER..=cmd::SET_INTERACTION).contains(&c) {
+            return self.prefixed_command();
+        }
+        if c == cmd::RELAX {
+            return Ok(());
+        }
         let md = self.mode()?;
         if crate::etex::command(self, &md)? {
             return Ok(());

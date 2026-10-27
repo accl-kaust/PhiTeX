@@ -106,10 +106,11 @@ pub mod phase {
     /// The clocks.
     pub const N: usize = 24;
     thread_local! {
-        static T: Cell<[u64; N]> = const { Cell::new([0; N]) };
+        static T: [Cell<u64>; N] = const { [const { Cell::new(0) }; N] };
     }
     /// Whether the clocks run.
     #[must_use]
+    #[inline]
     pub fn on() -> bool {
         static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         cfg!(feature = "profile")
@@ -121,27 +122,20 @@ pub mod phase {
     pub fn add(i: usize, t0: std::time::Instant) {
         if on() {
             let d = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(0);
-            T.with(|t| {
-                let mut a = t.get();
-                a[i] += d;
-                t.set(a);
-            });
+            T.with(|t| t[i].set(t[i].get() + d));
         }
     }
     /// Clock `i` counts one (a count, not a time).
+    #[inline]
     pub fn bump(i: usize) {
         if on() {
-            T.with(|t| {
-                let mut a = t.get();
-                a[i] += 1000;
-                t.set(a);
-            });
+            T.with(|t| t[i].set(t[i].get() + 1000));
         }
     }
     /// The clocks, reset.
     #[must_use]
     pub fn take() -> [u64; N] {
-        T.with(|t| t.replace([0; N]))
+        T.with(|t| std::array::from_fn(|i| t[i].replace(0)))
     }
 }
 mod replay;

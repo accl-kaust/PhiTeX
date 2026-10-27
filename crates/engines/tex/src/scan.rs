@@ -138,8 +138,11 @@ impl Run<'_, '_> {
 
     /// `scan_keyword` (§407).
     pub(crate) fn scan_keyword(&mut self, s: &str) -> R<bool> {
-        let mut matched: Vec<Tok> = Vec::new();
+        // (the tokens matched so far, at most the keyword's length: no
+        // list made)
+        let mut matched = [Tok::c(0); 16];
         let bytes = s.as_bytes();
+        debug_assert!(bytes.len() <= matched.len());
         let mut k = 0;
         while k < bytes.len() {
             self.get_x_token();
@@ -149,12 +152,12 @@ impl Run<'_, '_> {
                 && (self.cur.chr == i32::from(c)
                     || self.cur.chr == i32::from(c) - i32::from(b'a') + i32::from(b'A'))
             {
-                matched.push(self.cur.tok);
+                matched[k] = self.cur.tok;
                 k += 1;
-            } else if self.cur.cmd != cmd::SPACER || !matched.is_empty() {
+            } else if self.cur.cmd != cmd::SPACER || k > 0 {
                 self.back_cur();
-                if !matched.is_empty() {
-                    self.push_toks(matched);
+                if k > 0 {
+                    self.push_toks(&matched[..k]);
                 }
                 return Ok(false);
             }

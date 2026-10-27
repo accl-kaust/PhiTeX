@@ -2611,6 +2611,121 @@ impl PState {
     }
 }
 
+/// What a run read of a meaning by a projection alone, by location
+/// ([`crate::run::Run::step_lookup`] and its kin): one dense entry per
+/// location below [`SPILL`], a map above it; the entries set are listed
+/// so the table goes back to its thread's pool cleared.
+pub(crate) struct Memos {
+    dense: Vec<Memo>,
+    set: Vec<Loc>,
+    spill: FxHashMap<Loc, Memo>,
+}
+
+/// One location's projected reads ([`Memos`]): the step class, the
+/// command class, and whether it is outer, defined, a number, each with
+/// its bit in `has`.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Memo {
+    pub step: i64,
+    pub class: u8,
+    pub has: u8,
+    pub val: u8,
+}
+
+/// [`Memo::has`]'s bits (and [`Memo::val`]'s for the booleans).
+pub(crate) const M_STEP: u8 = 1;
+pub(crate) const M_CLASS: u8 = 2;
+pub(crate) const M_OUTER: u8 = 4;
+pub(crate) const M_DEFINED: u8 = 8;
+pub(crate) const M_NUM: u8 = 16;
+
+thread_local! {
+    static MEMO_POOL: std::cell::RefCell<Vec<Vec<Memo>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl Default for Memos {
+    fn default() -> Memos {
+        Memos {
+            dense: MEMO_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default(),
+            set: Vec::new(),
+            spill: FxHashMap::default(),
+        }
+    }
+}
+
+impl Drop for Memos {
+    fn drop(&mut self) {
+        let mut d = std::mem::take(&mut self.dense);
+        for &l in &self.set {
+            if let Some(m) = d.get_mut(l as usize) {
+                *m = Memo::default();
+            }
+        }
+        MEMO_POOL.with(|p| {
+            let mut p = p.borrow_mut();
+            if p.len() < 4 {
+                p.push(d);
+            }
+        });
+    }
+}
+
+impl Memos {
+    /// `loc`'s entry (empty where nothing was read).
+    #[inline]
+    pub(crate) fn get(&self, loc: Loc) -> Memo {
+        if loc & SPILL == 0 {
+            self.dense.get(loc as usize).copied().unwrap_or_default()
+        } else {
+            self.spill.get(&loc).copied().unwrap_or_default()
+        }
+    }
+
+    /// `loc`'s entry, to set.
+    pub(crate) fn entry(&mut self, loc: Loc) -> &mut Memo {
+        if loc & SPILL != 0 {
+            return self.spill.entry(loc).or_default();
+        }
+        let i = loc as usize;
+        if i >= self.dense.len() {
+            self.dense.resize(i + 1 + 1024, Memo::default());
+        }
+        let m = &mut self.dense[i];
+        if m.has == 0 {
+            self.set.push(loc);
+        }
+        m
+    }
+
+    /// Sets bit `b` of `loc` to `x` (a boolean projection).
+    pub(crate) fn set_bool(&mut self, loc: Loc, b: u8, x: bool) {
+        let m = self.entry(loc);
+        m.has |= b;
+        if x {
+            m.val |= b;
+        } else {
+            m.val &= !b;
+        }
+    }
+
+    /// `loc`'s boolean projection `b`, where read.
+    #[inline]
+    pub(crate) fn bool_of(&self, loc: Loc, b: u8) -> Option<bool> {
+        let m = self.get(loc);
+        (m.has & b != 0).then_some(m.val & b != 0)
+    }
+
+    /// The locations with projection `b` read, and their entries.
+    pub(crate) fn with(&self, b: u8) -> Vec<(Loc, Memo)> {
+        self.set
+            .iter()
+            .filter_map(|&l| self.dense.get(l as usize).map(|m| (l, *m)))
+            .chain(self.spill.iter().map(|(&l, &m)| (l, m)))
+            .filter(|(_, m)| m.has & b != 0)
+            .collect()
+    }
+}
+
 /// An entry as a definition stores it: loaded, its engine value and
 /// meaning record kept where known.
 fn stored(val: Entry) -> Entry {

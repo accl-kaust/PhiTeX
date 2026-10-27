@@ -57,8 +57,14 @@ impl Run<'_, '_> {
     #[inline(always)]
     pub(crate) fn fetch(&mut self) -> bool {
         // (the common case: a token of the list on top that is not an
-        // internal marker, and no alignment entry to watch for)
-        if let Some(tok) = self.input.next_plain_of_top() {
+        // internal marker, and no alignment entry to watch for; a list
+        // read to its end is popped first, §324, and the one below tried)
+        let next = match self.input.next_plain_of_top() {
+            Some(t) => Some(t),
+            None if self.input.pop_spent_top() => self.input.next_plain_of_top(),
+            None => None,
+        };
+        if let Some(tok) = next {
             self.set_cur_flag(tok);
             if self.cur.cmd >= cmd::OUTER_CALL
                 && self.cur.cmd <= cmd::LONG_OUTER_CALL
@@ -407,11 +413,16 @@ impl Run<'_, '_> {
     pub(crate) fn get_token_tok(&mut self) -> Tok {
         // (an alignment of this run counts every brace, §342: the slow
         // path then)
-        if self.aopen == 0
-            && let Some(t) = self.input.next_plain_of_top()
-        {
-            self.cur.tok = t;
-            return t;
+        if self.aopen == 0 {
+            let next = match self.input.next_plain_of_top() {
+                Some(t) => Some(t),
+                None if self.input.pop_spent_top() => self.input.next_plain_of_top(),
+                None => None,
+            };
+            if let Some(t) = next {
+                self.cur.tok = t;
+                return t;
+            }
         }
         self.get_token_stored();
         self.cur.tok
@@ -737,8 +748,17 @@ impl Run<'_, '_> {
     /// it runs as its own node on the state this run leaves. True when
     /// the run is to end here. (A preamble's loads each end their run so,
     /// instead of every later load joining the first.)
-    #[allow(clippy::too_many_lines)]
+    #[inline]
     pub(crate) fn give_back_peeked(&mut self) -> R<bool> {
+        if self.pulled == 0 {
+            return Ok(false);
+        }
+        self.give_back_peeked_slow()
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[inline(never)]
+    fn give_back_peeked_slow(&mut self) -> R<bool> {
         // (`PHITEX_GIVEBACK_TRACE`: a load's run, why a sibling it pulled
         // was not given back)
         // (`=all`: every run's)
@@ -1064,9 +1084,21 @@ impl Run<'_, '_> {
     }
 
     /// Whether there is input left without claiming more siblings.
+    #[inline]
     pub(crate) fn has_input(&mut self) -> bool {
-        // (spent lists popped first, §325: the level on top answers)
+        // (spent lists popped first, §325: the level on top answers; the
+        // common case, a list with tokens left on top, at once)
         self.input.pop_spent();
+        if let Some(l) = self.input.levels.last()
+            && l.kind == kind::TOKS
+        {
+            return true;
+        }
+        self.has_input_slow()
+    }
+
+    #[inline(never)]
+    fn has_input_slow(&mut self) -> bool {
         // (the levels on top: a list with tokens left, a line with
         // characters left, a file with lines; a document file's lines
         // left for the region children stop the run, also inside groups
@@ -1768,6 +1800,12 @@ impl Run<'_, '_> {
     #[inline]
     pub(crate) fn begin_command(&mut self) {
         self.pdf_cmd = 0;
+        self.mark.active = true;
+        // (the input and state as the command found them: read only by
+        // `Run::mark_before_read`, observe's `PHITEX_ANCHOR_MARKS`)
+        if !crate::exec::obs_flag!("PHITEX_ANCHOR_MARKS") {
+            return;
+        }
         let sig = self.mutations();
         let mut m = std::mem::take(&mut self.mark);
         self.input.snapshot(&mut m.snap);

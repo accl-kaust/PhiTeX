@@ -649,7 +649,7 @@ pub(crate) struct Run<'c, 'a> {
     /// The meanings this run read by class only, with their command
     /// codes (the engine holds the projected reads; this run's own
     /// lookups and the cut checks need them).
-    pub class_memo: phitex_defuse::FxHashMap<Loc, u8>,
+    pub memos: crate::runstate::Memos,
     /// Set while a token is fetched only to be stepped over
     /// (`\expandafter`'s first, §368): a meaning not this run's own is
     /// read only as whether it is `\outer` ([`Run::outer_lookup`]).
@@ -661,14 +661,11 @@ pub(crate) struct Run<'c, 'a> {
     pub step_reads: bool,
     /// The meanings this run read as outer or not only (kept over a park
     /// like [`Run::class_memo`]).
-    pub outer_memo: phitex_defuse::FxHashMap<Loc, bool>,
     /// The meanings this run read through the step projection only, with
     /// the class ([`Run::step_lookup`]; kept over a park like
     /// [`Run::class_memo`]).
-    pub step_memo: phitex_defuse::FxHashMap<Loc, i64>,
     /// The meanings this run read as defined or not only
     /// ([`Run::defined_lookup`]; kept over a park like [`Run::class_memo`]).
-    pub defined_memo: phitex_defuse::FxHashMap<Loc, bool>,
     /// Set while a number scan of an `\ifnum` operand looks for its first
     /// token (§440): a macro not this run's own whose body is a number
     /// is not read, the scan keeps it as that macro's number
@@ -676,7 +673,6 @@ pub(crate) struct Run<'c, 'a> {
     pub num_reads: bool,
     /// The meanings this run found to be numbers, read through the
     /// number projection's test only ([`Run::num_lookup`]).
-    pub num_memo: phitex_defuse::FxHashMap<Loc, bool>,
     /// A finisher's fields preloaded where the routine reads them, by
     /// field: the lazy tag of the value ([`Run::preload_candidate`],
     /// [`Run::fin_lazy_value`]).
@@ -1004,14 +1000,10 @@ impl<'c, 'a> Run<'c, 'a> {
             font_memo: phitex_defuse::FxHashMap::default(),
             math_memo: None,
             class_reads: false,
-            class_memo: phitex_defuse::FxHashMap::default(),
+            memos: crate::runstate::Memos::default(),
             outer_reads: false,
             step_reads: false,
-            outer_memo: phitex_defuse::FxHashMap::default(),
-            step_memo: phitex_defuse::FxHashMap::default(),
-            defined_memo: phitex_defuse::FxHashMap::default(),
             num_reads: false,
-            num_memo: phitex_defuse::FxHashMap::default(),
             fin_lazy: phitex_defuse::FxHashMap::default(),
             lt: crate::control::LinesTaint::default(),
             contribs: Vec::new(),
@@ -3923,8 +3915,28 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// [`Self::set_cur`] for a control sequence or active character.
-    #[inline]
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn set_cur_cs(&mut self, tok: Tok) -> R<()> {
+        // (the common case: a control sequence whose meaning this run
+        // has read and decoded: one slot access)
+        if !self.bare
+            && let Some(i) = tok.cs_index()
+            && let Some((c, h)) = self.st.cmd_chr_fast(Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(Loc::MAX))
+        {
+            self.cur = Cur {
+                tok,
+                cmd: c,
+                chr: h,
+            };
+            return Ok(());
+        }
+        self.set_cur_cs_rest(tok)
+    }
+
+    /// [`Self::set_cur_cs`] past its common case.
+    #[inline(never)]
+    fn set_cur_cs_rest(&mut self, tok: Tok) -> R<()> {
         if self.bare {
             // (a name about to be defined: its present meaning is never
             // used, so it is not read)
@@ -4041,8 +4053,9 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
-        if let Some(&c) = self.class_memo.get(&l) {
-            return Ok(Some(c));
+        let m = self.memos.get(l);
+        if m.has & crate::runstate::M_CLASS != 0 {
+            return Ok(Some(m.class));
         }
         let f = self.loc_field(l);
         let Some(x) = self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.class_proj))? else {
@@ -4051,7 +4064,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let Ok(c) = u8::try_from(int_of(self.v, x)) else {
             return Ok(None);
         };
-        self.class_memo.insert(l, c);
+        let e = self.memos.entry(l);
+        e.has |= crate::runstate::M_CLASS;
+        e.class = c;
         Ok(Some(c))
     }
 
@@ -4069,15 +4084,18 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
-        if let Some(&k) = self.step_memo.get(&l) {
-            return Ok(Some(k));
+        let m = self.memos.get(l);
+        if m.has & crate::runstate::M_STEP != 0 {
+            return Ok(Some(m.step));
         }
         let f = self.loc_field(l);
         let Some(x) = self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.step_proj))? else {
             return Ok(None);
         };
         let k = int_of(self.v, x);
-        self.step_memo.insert(l, k);
+        let e = self.memos.entry(l);
+        e.has |= crate::runstate::M_STEP;
+        e.step = k;
         Ok(Some(k))
     }
 
@@ -4103,7 +4121,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(false);
         }
-        if let Some(&b) = self.num_memo.get(&l) {
+        if let Some(b) = self.memos.bool_of(l, crate::runstate::M_NUM) {
             return Ok(b);
         }
         let f = self.loc_field(l);
@@ -4113,7 +4131,7 @@ impl<'c, 'a> Run<'c, 'a> {
             phitex_defuse::Step::Cmp(v.int(-1)),
         ]);
         let b = self.cx.read_path(f, p)?.is_some_and(|x| int_of(v, x) > 0);
-        self.num_memo.insert(l, b);
+        self.memos.set_bool(l, crate::runstate::M_NUM, b);
         Ok(b)
     }
 
@@ -4186,7 +4204,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.st.is_loaded(l) || self.lazy_pre(l) || self.interp.is_some() || self.rec_load {
             return Ok(None);
         }
-        if let Some(&d) = self.defined_memo.get(&l) {
+        if let Some(d) = self.memos.bool_of(l, crate::runstate::M_DEFINED) {
             return Ok(Some(d));
         }
         let f = self.loc_field(l);
@@ -4194,7 +4212,7 @@ impl<'c, 'a> Run<'c, 'a> {
             Some(x) => int_of(self.v, x) != 0,
             None => return Ok(None),
         };
-        self.defined_memo.insert(l, d);
+        self.memos.set_bool(l, crate::runstate::M_DEFINED, d);
         Ok(Some(d))
     }
 
@@ -4211,7 +4229,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
-        if let Some(&o) = self.outer_memo.get(&l) {
+        if let Some(o) = self.memos.bool_of(l, crate::runstate::M_OUTER) {
             return Ok(Some(o));
         }
         let f = self.loc_field(l);
@@ -4219,7 +4237,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(None);
         };
         let o = int_of(self.v, x) != 0;
-        self.outer_memo.insert(l, o);
+        self.memos.set_bool(l, crate::runstate::M_OUTER, o);
         Ok(Some(o))
     }
 
@@ -6008,15 +6026,16 @@ impl Run<'_, '_> {
         // (the memos by field: their order the same for equal memos)
         let m = self.reg_pending.iter().map(|(&l, &m)| (l, m)).collect();
         let reg_pending = by_field(self, m);
-        let m = self.class_memo.iter().map(|(&l, &c)| (l, c)).collect();
+        use crate::runstate::{M_CLASS, M_DEFINED, M_NUM, M_OUTER, M_STEP};
+        let m = self.memos.with(M_CLASS).into_iter().map(|(l, x)| (l, x.class)).collect();
         let class_memo = by_field(self, m);
-        let m = self.outer_memo.iter().map(|(&l, &o)| (l, o)).collect();
+        let m = self.memos.with(M_OUTER).into_iter().map(|(l, x)| (l, x.val & M_OUTER != 0)).collect();
         let outer_memo = by_field(self, m);
-        let m = self.step_memo.iter().map(|(&l, &k)| (l, k)).collect();
+        let m = self.memos.with(M_STEP).into_iter().map(|(l, x)| (l, x.step)).collect();
         let step_memo = by_field(self, m);
-        let m = self.defined_memo.iter().map(|(&l, &d)| (l, d)).collect();
+        let m = self.memos.with(M_DEFINED).into_iter().map(|(l, x)| (l, x.val & M_DEFINED != 0)).collect();
         let defined_memo = by_field(self, m);
-        let m = self.num_memo.iter().map(|(&l, &d)| (l, d)).collect();
+        let m = self.memos.with(M_NUM).into_iter().map(|(l, x)| (l, x.val & M_NUM != 0)).collect();
         let num_memo = by_field(self, m);
         let fin_lazy = sorted_lazy(&self.fin_lazy);
         let pending_pre = self

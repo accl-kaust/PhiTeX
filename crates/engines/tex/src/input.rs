@@ -541,6 +541,16 @@ impl Input {
     /// Pops the token-list levels on top that are read to their end.
     #[inline]
     pub(crate) fn pop_spent(&mut self) {
+        if let Some(l) = self.levels.last()
+            && l.kind == kind::TOKS
+            && l.a >= l.b
+        {
+            self.pop_spent_slow();
+        }
+    }
+
+    #[inline(never)]
+    fn pop_spent_slow(&mut self) {
         while let Some(l) = self.levels.last() {
             if l.kind == kind::TOKS && l.a >= l.b {
                 self.levels.pop();
@@ -549,6 +559,23 @@ impl Input {
                 break;
             }
         }
+    }
+
+    /// Pops the level on top if it is a token list read to its end
+    /// (§324); whether it did.
+    #[inline]
+    pub(crate) fn pop_spent_top(&mut self) -> bool {
+        if let Some(l) = self.levels.last()
+            && l.kind == kind::TOKS
+            && l.a >= l.b
+        {
+            self.levels.pop();
+            if self.snap.is_some() {
+                self.uncovered();
+            }
+            return true;
+        }
+        false
     }
 
     /// Pushes a line on top.
