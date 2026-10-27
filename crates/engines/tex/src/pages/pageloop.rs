@@ -447,6 +447,10 @@ impl Run<'_, '_> {
             self.emit_beyond(&mut ls, &old);
         }
         ls.ended = lc.ended;
+        if crate::exec::obs_flag!("PHITEX_KEY_TRACE") {
+            let ks: Vec<String> = ls.checkpoints.iter().chain(&ls.beyond).map(|c| format!("{}:{}@{}", c.key.piece.raw(), c.key.nth, c.cursor.raw())).collect();
+            eprintln!("pages-keys {}: {}", me.raw(), ks.join(" "));
+        }
         // 5. the pages' end
         if ls.ended {
             let n = i64::try_from(ls.checkpoints.len()).unwrap_or(0);
