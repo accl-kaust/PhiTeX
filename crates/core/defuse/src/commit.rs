@@ -138,60 +138,96 @@ fn slot_under(eng: &Engine, y: NodeId, a: NodeId) -> Option<u8> {
     None
 }
 
-/// Whether a placement of `by`'s kept at `upto` (`None`: in another
-/// segment) in slot `s` of anchor `a` is stranded: a node of a later slot under `a`,
-/// or of none (pushed, or anchored elsewhere), stands in this segment
-/// between `floor` (the slot's start) and it. A kept placement stands
-/// where its slot is; when its anchor's earlier slots moved back and
-/// nodes of later slots came between, it is made anew where it belongs.
-/// (Nodes in other segments between are not seen.)
-fn stranded(eng: &Engine, inner: &Inner, by: NodeId, a: NodeId, s: u8, floor: Pos, upto: Option<Pos>) -> bool {
-    let r = match upto {
-        Some(u) => inner.nodes.range((Excluded(floor), Excluded(u))),
-        None => inner.nodes.range((Excluded(floor), Unbounded)),
-    };
-    for (_, &x) in r {
-        // (one not in the table yet: made by this commit, its own)
-        let Some(xn) = eng.placed_node(x) else {
-            continue;
-        };
-        if xn.state() == State::Gone || x == a {
-            continue;
+/// Whether `x` is a placement of `by`'s, or of one of its placements.
+fn own_of(eng: &Engine, x: NodeId, by: NodeId) -> bool {
+    let mut q = Some(x);
+    while let Some(y) = q {
+        if y == by {
+            return true;
         }
-        // (a placement of `by`'s own, kept or replaced: where the
-        // replaced one stands, the one made anew goes)
-        let mut q = Some(x);
-        let mut own = false;
-        while let Some(y) = q {
-            if y == by {
-                own = true;
-                break;
-            }
-            q = eng.placed_node(y).and_then(|n| n.parent);
-        }
-        if own {
-            continue;
-        }
-        match slot_under(eng, x, a) {
-            Some(t) if t <= s => {}
-            t => {
-                if crate::obs::enabled() && std::env::var_os("PHITEX_WAKE_LOG").is_some() {
-                    eprintln!(
-                        "stranded: anchor {} slot {s} floor {:?} upto {:?}: node {} (op {:?}, anchor {:?} slot {}, under {t:?}) between",
-                        a.raw(),
-                        floor.0,
-                        upto.map(|u| u.0),
-                        x.raw(),
-                        xn.op(),
-                        xn.anchor().map(NodeId::raw),
-                        xn.slot()
-                    );
-                }
-                return true;
-            }
-        }
+        q = eng.placed_node(y).and_then(|n| n.parent);
     }
     false
+}
+
+/// Whether `x` standing between a placement's floor and it strands it:
+/// a node of a later slot under `a` than `s`, or of none (pushed, or
+/// anchored elsewhere), not `by`'s own.
+fn strands(eng: &Engine, x: NodeId, by: NodeId, a: NodeId, s: u8) -> bool {
+    // (one not in the table yet: made by this commit, its own)
+    let Some(xn) = eng.placed_node(x) else {
+        return false;
+    };
+    if xn.state() == State::Gone || x == a {
+        return false;
+    }
+    // (a placement of `by`'s own, kept or replaced: where the replaced
+    // one stands, the one made anew goes)
+    if own_of(eng, x, by) {
+        return false;
+    }
+    let t = slot_under(eng, x, a);
+    let bad = !matches!(t, Some(t) if t <= s);
+    if bad && crate::obs::enabled() && std::env::var_os("PHITEX_WAKE_LOG").is_some() {
+        eprintln!(
+            "stranded: anchor {} slot {s}: node {} (op {:?}, anchor {:?} slot {}, under {t:?}) between",
+            a.raw(),
+            x.raw(),
+            xn.op(),
+            xn.anchor().map(NodeId::raw),
+            xn.slot()
+        );
+    }
+    bad
+}
+
+/// The nodes not `by`'s own standing between `lo` and `hi`, in every
+/// segment the range crosses, each read-locked in turn before the
+/// commit's lock: what the check of a kept placement (`stranded`) cannot
+/// see under its lock, where the placement or its floor stands in
+/// another segment than its placer.
+fn foreign_between(eng: &Engine, by: NodeId, lo: Pos, hi: Pos) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    let mut cur = eng.seg_for_pos(lo).map(|s| s.id);
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        let inner = seg.inner.read();
+        if seg.lo >= hi {
+            break;
+        }
+        for (_, &x) in inner.nodes.range((Excluded(lo), Excluded(hi))) {
+            if !own_of(eng, x, by) {
+                out.push(x);
+            }
+        }
+        let end = inner.hi;
+        drop(inner);
+        if end >= hi {
+            break;
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    out
+}
+
+/// Whether a placement of `by`'s kept at `kpos` in slot `s` of anchor
+/// `a` is stranded: a node of a later slot under `a`, or of none
+/// (pushed, or anchored elsewhere), stands between `floor` (the slot's
+/// start) and it: in this segment, under its lock, or among `others`
+/// (`foreign_between`, found before the lock), wherever they stand now.
+/// A kept placement stands where its slot is; when its anchor's earlier
+/// slots moved back and nodes of later slots came between, it is made
+/// anew where it belongs.
+#[allow(clippy::too_many_arguments)]
+fn stranded(eng: &Engine, inner: &Inner, others: &[NodeId], by: NodeId, a: NodeId, s: u8, floor: Pos, kpos: Pos) -> bool {
+    if kpos <= floor {
+        return false;
+    }
+    inner.nodes.range((Excluded(floor), Excluded(kpos))).any(|(_, &x)| strands(eng, x, by, a, s))
+        || others.iter().any(|&x| {
+            let p = eng.node(x).pos_hint();
+            p > floor && p < kpos && strands(eng, x, by, a, s)
+        })
 }
 
 /// The last node in this segment after `from` that stands under `a`
@@ -560,6 +596,25 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let serial = node.serial.load(Ordering::Acquire) + 1;
     let old_placed: Vec<NodeId> = last.as_ref().map(|r| r.placed.clone()).unwrap_or_default();
     let kept = match_placements(eng, &old_placed, &p.placements);
+    // (the nodes of other segments between a kept placement and the
+    // lowest floor its check can have, the placer or a node it places
+    // after: its check under the lock sees its own segment only)
+    let others: Vec<NodeId> = {
+        let mut lo = node.pos_hint();
+        let mut hi: Option<Pos> = None;
+        for (what, k) in p.placements.iter().zip(&kept) {
+            if let Placement::FollowAfter(at, ..) = what
+                && let Some(an) = eng.placed_node(*at)
+            {
+                lo = lo.min(an.pos_hint());
+            }
+            if let Some(k) = k {
+                let kp = eng.node(*k).pos_hint();
+                hi = Some(hi.map_or(kp, |h| h.max(kp)));
+            }
+        }
+        hi.filter(|h| *h > lo).map(|h| foreign_between(eng, node.id, lo, h)).unwrap_or_default()
+    };
     // everything a placement needs but its label, made before the lock
     let mut fresh: Vec<Option<(Arc<Node>, Predicted)>> = p
         .placements
@@ -969,11 +1024,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     Placement::Follow(..) => (node.id, 2, floor),
                 };
                 let kpos = kn.pos_hint();
-                let here = kn.seg_hint() == seg.id && inner.nodes.get(&kpos) == Some(&k);
                 if kn.state() != State::Gone
                     && kpos > floor
                     && ceiling.is_none_or(|c| kpos < c)
-                    && !stranded(eng, &inner, node.id, anchor, slot, sfloor, here.then_some(kpos))
+                    && !stranded(eng, &inner, &others, node.id, anchor, slot, sfloor, kpos)
                 {
                     placed.push(k);
                     kept_end = Some(k);
@@ -1028,7 +1082,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 let bp = bn.pos_hint();
                 bn.seg_hint() == seg.id
                     && inner.nodes.get(&bp) == Some(&b)
-                    && !stranded(eng, &inner, node.id, node.id, 2, after_pos, Some(bp))
+                    && !stranded(eng, &inner, &others, node.id, node.id, 2, after_pos, bp)
             });
             let in_here = at.is_none()
                 && in_seg
