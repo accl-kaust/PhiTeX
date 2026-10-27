@@ -952,13 +952,30 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
             _ => None,
         };
         let site_pos = site.map_or(String::new(), |s| format!(" site-pos {:?}", eng.node(s).pos_hint()));
+        let site_op = site.map_or("-", |s| eng.op(eng.node(s).op()).name());
+        let kind = match &wake.cause {
+            Cause::Rebind { .. } => "Rebind",
+            Cause::Changed { .. } => "Changed",
+            Cause::Range { .. } => "Range",
+            Cause::Output { .. } => "Output",
+            Cause::Environment { .. } => "Environment",
+            Cause::Structure => "Structure",
+            Cause::Created { .. } => "Created",
+            Cause::Edited => "Edited",
+        };
         crate::obs::maybe_dump_line(eng);
+        // (one line a wake, tab-separated for the attribution table: the
+        // woken run's op, the field, the cause's kind, the site's op, the
+        // time of the run it refutes)
         eprintln!(
-            "wake: node {} op {:?} pos {:?} field {name} {:?}{site_pos}",
+            "wake: node {} op {:?} pos {:?} field {name} {:?}{site_pos}\twake\t{}\t{}\t{name}\t{kind}\t{site_op}\t{}",
             n.id.raw(),
             n.op(),
             n.pos_hint(),
-            wake.cause
+            wake.cause,
+            eng.op(n.op()).name(),
+            n.id.raw(),
+            n.run_ns.load(Ordering::Relaxed)
         );
     }
     match w {
