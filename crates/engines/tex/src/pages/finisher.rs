@@ -80,10 +80,6 @@ pub(crate) fn fin_class_of(o: &crate::run::Ops, v: &Values, args: &[ValueId]) ->
 pub(crate) struct Finish(pub Shared);
 
 impl Operation for Finish {
-    /// Layer 5 (docs/spec-layers.md §2): a page's finisher, once the page builder is quiet: its page and its predictions are the builder's final ones.
-    fn layer(&self) -> u8 {
-        5
-    }
     fn name(&self) -> &'static str {
         "finish"
     }

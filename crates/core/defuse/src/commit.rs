@@ -2351,8 +2351,7 @@ pub(crate) fn built(
     id: NodeId,
 ) -> (Arc<Node>, Predicted) {
     let pred = predict(eng, op, &args);
-    let layer = eng.op(op).layer().min(crate::sched::LAST_LAYER);
-    let n = Node::new(id, unit, op, args, parent, SegId(0), Pos(0), layer);
+    let n = Node::new(id, unit, op, args, parent, SegId(0), Pos(0));
     n.effect.store(pack_effect(pred.effect), Ordering::Release);
     (Arc::new(n), pred)
 }

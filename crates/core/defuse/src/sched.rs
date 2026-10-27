@@ -10,14 +10,7 @@
 //! left (a block's tail is its owner's, so no steal cuts a definer from
 //! the reader right after it), then parks. The evaluation ends when
 //! `outstanding` (queued plus running nodes) is zero: no step, no round,
-//! no barrier. Nothing waits for a node, except across layers: a dirty
-//! node of a layer (`Operation::layer`) starts only while no node of a
-//! lower layer is dirty or running (`Shared::admit`); one that cannot is
-//! held, and let go when the last lower node is done (`Shared::done_one`,
-//! `Shared::release_held`). The outstanding count includes the held
-//! nodes, so the evaluation does not end around them, and a held node
-//! cannot wait for ever: the lowest layer with nodes outstanding always
-//! has runnable ones.
+//! no barrier. Nothing waits for a node.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
@@ -52,13 +45,6 @@ pub(crate) struct Shared {
     block_busy: Vec<AtomicBool>,
     /// Queue entries plus running nodes; zero ends the evaluation.
     outstanding: AtomicUsize,
-    /// The same by layer (`Operation::layer`, a node's `qlayer`), and the
-    /// nodes put off at their run's start because a lower layer was not
-    /// quiet, by layer: let go when the lower layers drain
-    /// (`release_held`). `holds` counts the waits (`Report::layer_holds`).
-    by_layer: [AtomicUsize; LAYERS],
-    held: Mx<Vec<Vec<NodeId>>>,
-    holds: AtomicU64,
     idle: AtomicUsize,
     /// Counts the wakes: a worker that looked for work outside the park's
     /// lock rests only if none came since it looked.
@@ -110,70 +96,9 @@ impl Shared {
         self.park.1.notify_all();
     }
 
-    /// One queue entry or running node more: `n`, dirty, counted in the
-    /// layer its operation has now, which it keeps until it is done.
-    fn queued(&self, n: &Node) {
-        let l = n.layer();
-        n.qlayer.store(l, Ordering::Release);
-        self.by_layer[usize::from(l)].fetch_add(1, Ordering::SeqCst);
-        self.outstanding.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// One queue entry or running node less, of layer `layer`; the last
-    /// one wakes everyone, and the last of a layer lets the held nodes of
-    /// the layers above it go.
-    fn done_one(&self, layer: u8) {
-        let left = self.by_layer[usize::from(layer)].fetch_sub(1, Ordering::SeqCst) - 1;
+    /// One queue entry or running node less; the last one wakes everyone.
+    fn done_one(&self) {
         if self.outstanding.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.wake_all();
-            return;
-        }
-        if left == 0 {
-            self.release_held();
-        }
-    }
-
-    /// Whether a node of `layer` may start: no node of a lower layer is
-    /// queued, held or running.
-    fn runnable(&self, layer: u8) -> bool {
-        (0..usize::from(layer)).all(|l| self.by_layer[l].load(Ordering::SeqCst) == 0)
-    }
-
-    /// Whether `n`, dirty and taken from a queue, may start now. Else it
-    /// is held, under the held list's lock and after a second look at the
-    /// counts under it, so a release between the look and the push cannot
-    /// miss it (a release decrements before it takes the lock); the node
-    /// stays outstanding, and the last lower node done lets it go.
-    fn admit(&self, n: &Node) -> bool {
-        let l = n.qlayer();
-        if self.runnable(l) {
-            return true;
-        }
-        let mut held = self.held.lock();
-        if self.runnable(l) {
-            return true;
-        }
-        held[usize::from(l)].push(n.id);
-        self.holds.fetch_add(1, Ordering::Relaxed);
-        false
-    }
-
-    /// The held nodes whose lower layers are all quiet now, to the
-    /// injector: every held layer up to the lowest one with nodes
-    /// outstanding (a held node is outstanding in its own layer, so that
-    /// layer is let go too). Each is admitted again at its run's start.
-    fn release_held(&self) {
-        let mut held = self.held.lock();
-        let lowest = (0..LAYERS).find(|&l| self.by_layer[l].load(Ordering::SeqCst) > 0).unwrap_or(LAYERS);
-        let mut any = false;
-        for l in 0..LAYERS.min(lowest + 1) {
-            for n in held[l].drain(..) {
-                self.injector.push(n);
-                any = true;
-            }
-        }
-        drop(held);
-        if any {
             self.wake_all();
         }
     }
@@ -284,14 +209,12 @@ impl Worker {
     }
 
     /// Seeds the block with nodes to run in this order.
-    pub(crate) fn seed(&self, eng: &Engine, nodes: &[NodeId]) {
+    pub(crate) fn seed(&self, nodes: &[NodeId]) {
         let run = self.block_runs.fetch_add(1, Ordering::Relaxed);
         for &n in nodes.iter().rev() {
             self.block.push((n, run));
         }
-        for &n in nodes {
-            self.shared.queued(eng.node(n));
-        }
+        self.shared.outstanding.fetch_add(nodes.len(), Ordering::SeqCst);
     }
 }
 
@@ -322,9 +245,6 @@ fn spawn_tree<'s, 'e: 's>(
 
 /// Spins before parking.
 const SPINS: u32 = 64;
-/// The layers (`Operation::layer`): 0 to `LAST_LAYER`.
-pub(crate) const LAST_LAYER: u8 = 15;
-const LAYERS: usize = LAST_LAYER as usize + 1;
 /// A block is stolen from only with this much left, half of it at a time
 /// and at least `BLOCK_STEAL` nodes (an even run from its far end, run in
 /// order): the tail is its owner's, no steal cuts a definer from the reader
@@ -355,9 +275,6 @@ impl Pool {
             block_stealers,
             block_busy: (0..n).map(|_| AtomicBool::new(false)).collect(),
             outstanding: AtomicUsize::new(0),
-            by_layer: std::array::from_fn(|_| AtomicUsize::new(0)),
-            held: Mx::new((0..LAYERS).map(|_| Vec::new()).collect()),
-            holds: AtomicU64::new(0),
             idle: AtomicUsize::new(0),
             wakes: AtomicU64::new(0),
             park: (Mutex::new(()), Condvar::new()),
@@ -499,19 +416,11 @@ impl Pool {
                 Steal::Retry => {}
             }
         }
-        for v in self.shared.held.lock().iter_mut() {
-            left.append(v);
-        }
         for n in left {
             if eng.node(n).state() == State::Dirty {
                 eng.pend(n);
             }
         }
-    }
-
-    /// The runs put off because a lower layer was not quiet.
-    pub(crate) fn layer_holds(&self) -> u64 {
-        self.shared.holds.load(Ordering::Relaxed)
     }
 
     fn fail(&self, e: EvalError) {
@@ -530,7 +439,7 @@ impl Pool {
     /// The caller's thread drains the engine's pending edits onto its deque.
     fn drain_pending(&self, eng: &Engine, w: &Worker) -> usize {
         let nodes = eng.take_pending(w);
-        w.seed(eng, &nodes);
+        w.seed(&nodes);
         nodes.len()
     }
 
@@ -884,7 +793,7 @@ pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wak
     *n.woke.lock() = Some(wake);
     match w {
         Some(w) => {
-            w.shared.queued(n);
+            w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
             if created {
                 w.local.push(n.id);
             } else {
@@ -1000,10 +909,8 @@ fn stall_dump(eng: &Engine, shared: &Shared, t_idle: Instant) {
     if DONE.swap(true, Ordering::Relaxed) {
         return;
     }
-    let by_layer: Vec<usize> = shared.by_layer.iter().map(|c| c.load(Ordering::SeqCst)).collect();
-    let held: Vec<usize> = shared.held.lock().iter().map(Vec::len).collect();
     let mut out = format!(
-        "stall: {} outstanding (by layer {by_layer:?}, held {held:?}), {idle} of {spawned} workers idle for {secs} s; nodes not clean:\n",
+        "stall: {} outstanding, {idle} of {spawned} workers idle for {secs} s; nodes not clean:\n",
         shared.outstanding.load(Ordering::SeqCst)
     );
     for sid in eng.order.all() {
@@ -1113,12 +1020,8 @@ fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), E
 
 fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
     let node = eng.node(n);
-    // (a layer above one not yet quiet: held, still outstanding)
-    if node.state() == State::Dirty && !pool.shared.admit(node) {
-        return Ok(());
-    }
     if !node.cas_state(State::Dirty, State::Running) {
-        pool.shared.done_one(node.qlayer());
+        pool.shared.done_one();
         return Ok(());
     }
     let first = node.run_epoch.swap(pool.epoch, Ordering::AcqRel) != pool.epoch;
@@ -1193,7 +1096,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             give_back(eng, node);
             pool.shared.panicked_roots.lock().extend(reads.iter().filter_map(|r| r.seen));
             w.log.lock().panicked.push((n, reads, op.name(), message));
-            pool.shared.done_one(node.qlayer());
+            pool.shared.done_one();
             Ok(())
         }
         Ok(Err(_stop)) => {
@@ -1275,7 +1178,7 @@ fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
             // (removed meanwhile; nothing else leaves a run's states)
             State::Gone | State::Inert | State::Clean | State::Dirty => {
                 node.committing.store(false, Ordering::Release);
-                pool.shared.done_one(node.qlayer());
+                pool.shared.done_one();
                 return false;
             }
         };
@@ -1287,7 +1190,7 @@ fn end_run(pool: &Pool, w: &Worker, node: &Node, done: State) -> bool {
             w.local.push(node.id);
             w.shared.wake_one();
         } else {
-            pool.shared.done_one(node.qlayer());
+            pool.shared.done_one();
         }
         return to == State::Clean;
     }

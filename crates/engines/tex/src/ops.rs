@@ -307,10 +307,6 @@ pub(crate) fn predicted_effect(o: &Ops, v: &Values, args: &[ValueId], resume: bo
 pub(crate) struct Exec(pub Shared);
 
 impl Operation for Exec {
-    /// Layer 2 (docs/spec-layers.md §2): expansion, a piece of the text.
-    fn layer(&self) -> u8 {
-        2
-    }
     fn name(&self) -> &'static str {
         "exec"
     }
@@ -484,10 +480,6 @@ impl Operation for Exec {
 pub(crate) struct Put(pub Shared);
 
 impl Operation for Put {
-    /// Layer 2 (docs/spec-layers.md §2): a group's end, part of expansion.
-    fn layer(&self) -> u8 {
-        2
-    }
     fn name(&self) -> &'static str {
         "put"
     }
@@ -562,10 +554,6 @@ impl Operation for Put {
 pub(crate) struct Dvi(pub Shared);
 
 impl Operation for Dvi {
-    /// Layer 6 (docs/spec-layers.md §2): the output file, after every page is finished.
-    fn layer(&self) -> u8 {
-        6
-    }
     fn name(&self) -> &'static str {
         "dvi"
     }
@@ -584,10 +572,6 @@ impl Operation for Dvi {
 pub(crate) struct Link(pub Shared);
 
 impl Operation for Link {
-    /// Layer 6 (docs/spec-layers.md §2): the PDF file from the pages' records, after every page is finished.
-    fn layer(&self) -> u8 {
-        6
-    }
     fn name(&self) -> &'static str {
         "link"
     }
@@ -637,10 +621,6 @@ impl Operation for Mark {
 pub(crate) struct Files(pub Shared);
 
 impl Operation for Files {
-    /// Layer 7 (docs/spec-layers.md §2): the files the job wrote, after the output is linked.
-    fn layer(&self) -> u8 {
-        7
-    }
     fn name(&self) -> &'static str {
         "files"
     }

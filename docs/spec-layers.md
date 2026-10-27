@@ -59,41 +59,6 @@ guessed wrong run again. Each case is named; a new one is added here.
 | catcode changes | 2 → 1 | the line's regime key |
 | page references, contents, index, citations | 7 | the rounds, as latexmk |
 
-## 3b. The order of the layers in the engine (2026-10-27)
-
-The engine keeps the layers in order (`Operation::layer`, defuse
-`sched::Shared::admit`): a dirty node of layer k runs only while no node
-of a layer below k is dirty, held or running. A node that cannot start is
-held, still counted outstanding, and let go when the last lower node is
-done. Nodes of one layer run beside each other as before, and a lower
-layer never waits for a higher one.
-
-What it buys. The page builder (4) runs once, when every piece and its
-lines (2, 3) have committed: no hole, no park at a hole, no resume at
-each fill, and every finisher placed once with the builder's final
-prediction. The finishers (5) run beside each other after it, the link
-(6) after them, the files (7) last. Measured before the rule, course1 at
-one thread ran 1.7 times a node and at eight threads 11.1: the whole
-difference was the builder resuming and re-predicting at every hole.
-
-What it does not do. A piece (2) that reads a page-layer value (a
-counter a finisher moves, `\pagegoal`) still speculates: layer 2 cannot
-wait for layer 5, which is placed from it. The finisher's commit re-asks
-the piece, and the layers above wait for the piece again before they go
-on; the stack settles as the passes of §3 do. The reads themselves are
-the §3 table's business: predicted, or deferred to the layer that knows
-them (the page number inside a deferred write is expanded by the
-finisher, never by the piece).
-
-What it costs. No pipelining between layers: a finisher of an early page
-does not start while late paragraphs run. The page side is about a fifth
-of a cold build's run time and runs in parallel after the settle.
-
-Layers in the client: Exec, Put, Resume, Break and a `\write18`'s tool
-node 2 (line breaking stays beside its piece: the next piece reads what
-its lines leave the main list); Pages 4; Finish and PdfPage 5; Link and
-Dvi 6; Files 7; Mark, the loads and a tool's run 0.
-
 ## 4. A cold build
 
 1. The preamble's loads run in sequence: TeX's real chain. Later it is a

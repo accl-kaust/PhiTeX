@@ -112,13 +112,6 @@ pub(crate) struct Node {
     /// continuation (`Ctx::follow`). Those of a lower slot stand before
     /// those of a higher one.
     pub(crate) slot: AtomicU8,
-    /// Its operation's layer (`Operation::layer`), asked when it is made
-    /// or its text replaced; and the layer it was queued in: the count of
-    /// outstanding nodes it is held in (`sched::Shared::by_layer`) and
-    /// the gate at its run's start read `qlayer`, never the operation
-    /// again, so a text replaced while it waits keeps the count matched.
-    pub(crate) layer: AtomicU8,
-    pub(crate) qlayer: AtomicU8,
     /// Its operation's static effect (`Operation::effect`), packed
     /// (`pack_effect`): asked once when the node is made or its text
     /// replaced.
@@ -152,11 +145,8 @@ impl Node {
         parent: Option<NodeId>,
         seg: SegId,
         pos: Pos,
-        layer: u8,
     ) -> Node {
         Node {
-            layer: AtomicU8::new(layer),
-            qlayer: AtomicU8::new(layer),
             final_reruns: AtomicU32::new(0),
             final_epoch: AtomicU64::new(0),
             claimer: AtomicU64::new(0),
@@ -193,14 +183,6 @@ impl Node {
 
     pub(crate) fn op(&self) -> OpId {
         OpId(self.op.load(Ordering::Acquire))
-    }
-
-    pub(crate) fn layer(&self) -> u8 {
-        self.layer.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn qlayer(&self) -> u8 {
-        self.qlayer.load(Ordering::Acquire)
     }
 
     pub(crate) fn args(&self) -> Arc<[ValueId]> {

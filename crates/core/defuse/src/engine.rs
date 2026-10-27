@@ -832,7 +832,6 @@ impl Engine {
         *n.text.write() = args.into();
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
         n.effect.store(crate::node::pack_effect(effect), Ordering::Release);
-        n.layer.store(self.op(op).layer().min(crate::sched::LAST_LAYER), Ordering::Release);
         if n.taken() {
             self.wake_claimer(n);
             return;
@@ -1119,7 +1118,6 @@ impl Engine {
         let _busy = Unbusy(&self.busy, 1);
         let n = threads.max(1);
         let mut all: Vec<crate::sched::Worker> = Vec::new();
-        let mut holds: u64 = 0;
         if self.repair.swap(false, Ordering::AcqRel) {
             self.repair_line();
         }
@@ -1134,14 +1132,13 @@ impl Engine {
             if !seed.is_empty() {
                 let per = seed.len().div_ceil(n);
                 for (i, chunk) in seed.chunks(per).enumerate() {
-                    workers[i].seed(self, chunk);
+                    workers[i].seed(chunk);
                 }
             }
             // (the trait object's lifetime shortened for the reborrow, which
             // `as_deref_mut` cannot)
             #[allow(clippy::option_as_ref_deref)]
             let workers = pool.run(self, workers, src.as_mut().map(|s| -> &mut dyn EditSource { &mut **s }))?;
-            holds += pool.layer_holds();
             // a run that panicked: a failure if what it read still holds
             // now the line is quiet, else run again with the rest pending
             let panicked: Vec<_> = workers.iter().flat_map(|w| std::mem::take(&mut w.log.lock().panicked)).collect();
@@ -1172,7 +1169,6 @@ impl Engine {
         let swept = self.sweep_readers() as u64 + workers.iter().map(|w| std::mem::take(&mut w.log.lock().swept)).sum::<u64>();
         let mut rep = Report {
             readers_swept: swept,
-            layer_holds: holds,
             collections: workers.iter().flat_map(|w| std::mem::take(&mut w.log.lock().collections)).collect(),
             ..Report::default()
         };
