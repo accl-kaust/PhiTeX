@@ -247,6 +247,17 @@ pub trait Operation: Send + Sync {
         None
     }
 
+    /// What a node of this operation with `args` will define as a
+    /// relation on the value reaching it, before it runs (a counter the
+    /// text steps: `\stepcounter{X}` predicts +1 on X's register): filed
+    /// as provisional relations when the node is made, as a learned shape
+    /// is (`Ctx::define_rel` by the run replaces them; a run that defines
+    /// the field otherwise, or not at all, refutes only the readers whose
+    /// answer moves). `None`: no prediction.
+    fn predicted_rels(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, i64)>> {
+        None
+    }
+
     /// Whether what its runs define is read back (`At::Final`: a file the
     /// job writes and reads): all of it published together at each quiet
     /// point (`commit::publish_finals`), so a pass reads one whole state

@@ -323,3 +323,70 @@ fn a_continuation_goes_after_what_others_placed_after_the_node() {
     assert_eq!(e.children(p), kids, "the step's placements stand: {r:?}");
     assert!(e.check_invariants().is_empty());
 }
+
+
+/// `[ms]`: works `ms` milliseconds, then defines "c" as a relation +1 on
+/// the value reaching it; predicts that relation (`Operation::predicted_rels`).
+struct Counter;
+
+impl Operation for Counter {
+    fn name(&self) -> &'static str {
+        "counter"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let ms = cx.values().as_int(cx.args()[0]).unwrap_or(0).unsigned_abs();
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(ms) {
+            std::hint::spin_loop();
+        }
+        let c = cx.values().field("c");
+        cx.define_rel(c, 1);
+        Ok(ValueId::UNIT)
+    }
+
+    fn may_define(&self, _: &[ValueId], v: &phitex_defuse::Values) -> phitex_defuse::MayDefine {
+        phitex_defuse::MayDefine::Names(vec![v.field("c")])
+    }
+
+    fn predicted_rels(&self, _: &[ValueId], v: &phitex_defuse::Values) -> Option<Vec<(Field, i64)>> {
+        Some(vec![(v.field("c"), 1)])
+    }
+}
+
+/// `[]`: reads "c"; counts its runs; its output the value.
+struct ReadC(AtomicU64);
+
+impl Operation for ReadC {
+    fn name(&self) -> &'static str {
+        "read_c"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let v = cx.values();
+        Ok(cx.read(v.field("c"))?.unwrap_or(v.int(0)))
+    }
+}
+
+/// A relation an operation predicts from its arguments is filed when the
+/// node is made, as a learned shape is: a reader after two slow counters
+/// reads 2 before they run, and their runs, defining what was predicted,
+/// re-ask nobody (a `\stepcounter` in a piece's text, predicted by the
+/// hint pass: the readers after it right the first time).
+#[test]
+fn a_predicted_relation_stands_until_the_run_confirms_it() {
+    let e = Engine::new();
+    let v = e.values();
+    let counter = e.register(Arc::new(Counter));
+    let reader = Arc::new(ReadC(AtomicU64::new(0)));
+    let rd = e.register(reader.clone());
+    let u = e.new_unit();
+    e.push(u, counter, vec![v.int(40)]);
+    e.push(u, counter, vec![v.int(40)]);
+    let r = e.push(u, rd, vec![]);
+    let rep = e.evaluate(4).unwrap();
+    assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(2), "{rep:?}");
+    assert_eq!(reader.0.load(Ordering::Relaxed), 1, "the reader ran once, on the predicted value: {rep:?}");
+    assert!(e.check_invariants().is_empty());
+}

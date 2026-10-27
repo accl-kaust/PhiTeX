@@ -521,11 +521,13 @@ impl Pool {
 
     /// Rests until there is work, the evaluation stops, or nothing is
     /// outstanding (then the caller's thread decides).
-    fn idle_wait(&self, w: &Worker) -> Option<NodeId> {
+    fn idle_wait(&self, eng: &Engine, w: &Worker) -> Option<NodeId> {
         let (m, cv) = &self.shared.park;
         self.shared.idle.fetch_add(1, Ordering::SeqCst);
         fence(Ordering::SeqCst);
+        let t_idle = Instant::now();
         let r = loop {
+            stall_dump(eng, &self.shared, t_idle);
             if self.shared.stop.load(Ordering::SeqCst) {
                 break None;
             }
@@ -602,7 +604,7 @@ fn run_worker(
             std::hint::spin_loop();
         }
         if found.is_none() && pool.outstanding() > 0 {
-            found = pool.idle_wait(w);
+            found = pool.idle_wait(eng, w);
         }
         Worker::add(&w.idle_ns, ns(t));
         if let Some(n) = found {
@@ -644,7 +646,7 @@ fn run_worker(
             break;
         }
         let t = Instant::now();
-        let r = pool.idle_wait(w);
+        let r = pool.idle_wait(eng, w);
         Worker::add(&w.idle_ns, ns(t));
         if let Some(n) = r
             && let Err(e) = work(eng, pool, w, n)
@@ -723,6 +725,45 @@ pub(crate) fn mark_dirty(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
             State::Dirty | State::RunningDirty | State::Inert | State::RunningInert | State::Gone => return false,
         }
     }
+}
+
+/// (`PHITEX_STALL_SECS=n`, profile) Every worker idle for `n` seconds
+/// with nodes outstanding: the evaluation is stuck (a count not released,
+/// a wake lost); the outstanding count and every node not clean, inert
+/// or gone are printed once, with their states.
+fn stall_dump(eng: &Engine, shared: &Shared, t_idle: Instant) {
+    static SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    static DONE: AtomicBool = AtomicBool::new(false);
+    let secs = *SECS.get_or_init(|| std::env::var("PHITEX_STALL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
+    if secs == 0 || !crate::obs::enabled() || t_idle.elapsed().as_secs() < secs || DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let idle = shared.idle.load(Ordering::SeqCst);
+    let spawned = shared.spawned.load(Ordering::SeqCst);
+    if idle < spawned.max(1) {
+        return;
+    }
+    if DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let mut out = format!(
+        "stall: {} outstanding, {idle} of {spawned} workers idle for {secs} s; nodes not clean:\n",
+        shared.outstanding.load(Ordering::SeqCst)
+    );
+    for sid in eng.order.all() {
+        let seg = eng.seg(sid);
+        let inner = seg.inner.read();
+        for (pos, nid) in &inner.nodes {
+            let n = eng.node(*nid);
+            let st = n.state();
+            if matches!(st, State::Clean | State::Inert | State::Gone) {
+                continue;
+            }
+            let op = eng.ops.get(n.op().0 as usize).map_or("?", |o| o.name());
+            out.push_str(&format!("  node {} {op} {st:?} pos {:?} committing {}\n", nid.raw(), pos.0, n.committing.load(Ordering::Acquire)));
+        }
+    }
+    eprint!("{out}");
 }
 
 /// (`PHITEX_WAKE_LOG`, profile) Whether every wake of a committed node is

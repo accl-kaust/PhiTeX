@@ -2130,16 +2130,18 @@ pub(crate) fn predict(eng: &Engine, op: OpId, args: &[ValueId]) -> Predicted {
             });
         }
     }
-    let shapes = if eng.shapes_n.load(Ordering::Acquire) == 0 {
+    let mut shapes: Vec<(Field, i64)> = eng.op(op).predicted_rels(args, eng.values()).unwrap_or_default();
+    let learned = if eng.shapes_n.load(Ordering::Acquire) == 0 {
         Vec::new()
     } else {
         eng.shapes
             .read()
             .iter()
-            .filter(|((o, f), _)| *o == op && !defs.iter().any(|d| d.f == *f))
+            .filter(|((o, f), _)| *o == op && !defs.iter().any(|d| d.f == *f) && !shapes.iter().any(|s| s.0 == *f))
             .map(|((_, f), c)| (*f, *c))
-            .collect()
+            .collect::<Vec<_>>()
     };
+    shapes.extend(learned);
     let effect = eng.op(op).effect(args, eng.values());
     Predicted { defs, shapes, effect }
 }

@@ -842,10 +842,12 @@ impl Session {
                 };
                 let opts = Options {
                     edits: Some(self.absorb.tx.clone()),
-                    time_limit: if first {
-                        Some(Duration::from_mins(30))
-                    } else {
-                        opts.time_limit
+                    // (`PHITEX_TIME_LIMIT_SECS`: a longer limit for a
+                    // measurement of a document the kernel is still slow on)
+                    time_limit: match std::env::var("PHITEX_TIME_LIMIT_SECS").ok().and_then(|v| v.parse().ok()) {
+                        Some(secs) => Some(Duration::from_secs(secs)),
+                        None if first => Some(Duration::from_mins(30)),
+                        None => opts.time_limit,
                     },
                     ..opts
                 };
