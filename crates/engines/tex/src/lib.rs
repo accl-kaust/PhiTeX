@@ -30,6 +30,7 @@ mod assemble;
 mod build;
 mod collect;
 mod control;
+mod defer;
 mod etex;
 mod exec;
 mod expand;
