@@ -226,6 +226,12 @@ pub(crate) struct Ops {
     /// defined again, or not yet, is a wrong or a missing guess, never
     /// a wrong value.
     pub counters: std::sync::Arc<std::sync::RwLock<crate::FxHashMap<&'static str, phitex_defuse::Field>>>,
+    /// What the last run of a text of each scope shape left
+    /// ([`crate::hints::ScopeShape`], by the opener's or closer's name):
+    /// whether an opener was left to the engine as a scope, whether a
+    /// closer closed the scope its node ran in. The brackets of a node
+    /// not yet run are predicted on them ([`crate::hints::predicted_brackets`]).
+    pub scope_learned: std::sync::Arc<std::sync::RwLock<crate::FxHashMap<String, bool>>>,
     /// [`crate::Options::node_records`].
     pub node_rec: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The class projection of meanings ([`crate::val::class_projection`],
@@ -4472,7 +4478,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let k = r?;
         if crate::exec::prof_flag!("PHITEX_SKIND_LOG") {
-            eprintln!("skindlog: {} {}", self.cx.node().raw(), k.map_or_else(|| "none".to_owned(), |x| self.v.render(x)));
+            let v = self.v;
+            let text: String = self.cx.args().first().map_or_else(String::new, |&a| v.render(a).chars().take(100).collect());
+            eprintln!("skindlog: {} {} op {} {text}", self.cx.node().raw(), k.map_or_else(|| "none".to_owned(), |x| v.render(x)), self.op_name());
         }
         self.scope_kind_memo = Some(k);
         Ok(k)
@@ -4997,8 +5005,53 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cx.node().raw()
             );
         }
-        if self.effect != Effect::None {
+        // (a piece's: its brackets were predicted from its text, which
+        // the run confirms or puts right, none among them)
+        if self.effect != Effect::None || op == self.ops.exec || op == self.ops.resume {
             self.cx.set_effect(self.effect);
+        }
+        if crate::exec::prof_flag!("PHITEX_SKIND_LOG") && self.cut.is_some() && (op == self.ops.exec || op == self.ops.resume) {
+            let shape = crate::ops::scope_shape_of(self.v, self.cx.args(), op == self.ops.resume);
+            eprintln!("skindcut: {} op {} effect {:?} shape {shape:?}", self.cx.node().raw(), self.op_name(), self.effect);
+        }
+        // (a run cut at a candidate, or one that ended the job, ran not
+        // to its text's end: its brackets say nothing of its shape's)
+        if (op == self.ops.exec || op == self.ops.resume) && self.cut.is_none() && !self.claim_rest {
+            let shape = crate::ops::scope_shape_of(self.v, self.cx.args(), op == self.ops.resume);
+            let opened = match self.effect {
+                Effect::Scope(b) if b.closes == 0 => usize::from(b.opens),
+                _ => 0,
+            };
+            let learn: Vec<(String, bool)> = match shape {
+                // (a closer that ran inside a scope: one that found none
+                // open, its opener not yet run, says nothing)
+                crate::hints::ScopeShape::Close(c) if matches!(self.scope_kind_memo, Some(Some(_))) => vec![(c, self.effect == CLOSE)],
+                crate::hints::ScopeShape::Open(os) => {
+                    let ok = opened == os.len();
+                    os.into_iter().map(|o| (o, ok)).collect()
+                }
+                _ => Vec::new(),
+            };
+            if crate::exec::prof_flag!("PHITEX_SKIND_LOG") && !learn.is_empty() {
+                let m = self.ops.scope_learned.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let was: Vec<(String, Option<bool>)> = learn.iter().map(|(k, _)| (k.clone(), m.get(k).copied())).collect();
+                let v = self.v;
+                let carried: Vec<i64> = if op == self.ops.resume {
+                    let c = list_of(v, self.cx.args().first().copied().unwrap_or(ValueId::UNIT));
+                    c.get(1).map(|&l| list_of(v, l).iter().map(|&e| list_of(v, e).get(1).map_or(-1, |&g| int_of(v, g))).collect()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                eprintln!("skindlearn: {} op {} effect {:?} learned before {was:?} carried {carried:?} pulled {}", self.cx.node().raw(), self.op_name(), self.effect, self.pulled);
+            }
+            if !learn.is_empty() {
+                let mut m = self.ops.scope_learned.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                for (k, ok) in learn {
+                    if m.get(&k) != Some(&ok) {
+                        m.insert(k, ok);
+                    }
+                }
+            }
         }
         // (`PHITEX_SKIND_LOG`: the brackets a run sets, and its text)
         if crate::exec::prof_flag!("PHITEX_SKIND_LOG") && self.effect != Effect::None {

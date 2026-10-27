@@ -4827,6 +4827,198 @@ fn braced(s: &str) -> Option<(&str, &str)> {
     (s.as_bytes()[e] == b'}').then(|| (&s[..e], &s[e + 1..]))
 }
 
+/// The scope a node's text leaves to the engine, as its source and tokens
+/// show it: braces, `\\begingroup`/`\\endgroup`, `\\bgroup`/`\\egroup` and
+/// `\\begin`/`\\end` (not of `document`, whose end ends the job), outside
+/// comments and control symbols.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ScopeShape {
+    /// Balanced: no bracket the text shows.
+    Balanced,
+    /// A closer with no opener before it in the text (and none of the
+    /// groups a continuation carries): it closes the scope the node runs
+    /// in, and the run ends there ([`crate::run::CLOSE`]).
+    Close(String),
+    /// Openers left open at the text's end, outermost first.
+    Open(Vec<String>),
+    /// A text the scan does not read (a unit to resolve, an unknown frame).
+    Unknown,
+}
+
+/// The [`ScopeShape`] of frames `fr` (a node's text, or a continuation's
+/// rest) inside `carried` groups a continuation carries open.
+pub(crate) fn scope_shape(v: &Values, fr: ValueId, carried: usize) -> ScopeShape {
+    let mut st = ShapeScan {
+        open: vec![String::new(); carried],
+        close: None,
+    };
+    for f in list_of(v, fr) {
+        let xs = list_of(v, f);
+        let Some(&t0) = xs.first() else {
+            return ScopeShape::Unknown;
+        };
+        match str_of(v, t0).as_str() {
+            "s" => {
+                let Some(&t) = xs.get(1) else { return ScopeShape::Unknown };
+                st.text(&str_of(v, t));
+            }
+            "f" => {
+                let (Some(&id), Some(&o)) = (xs.get(1), xs.get(2)) else {
+                    return ScopeShape::Unknown;
+                };
+                let t = str_of(v, id);
+                let off = usize::try_from(int_of(v, o)).unwrap_or(0).min(t.len());
+                if !t.is_char_boundary(off) {
+                    return ScopeShape::Unknown;
+                }
+                let end = line_span_end(&t, off);
+                st.text(&t[off..end]);
+            }
+            "t" => {
+                let toks = crate::val::toks_of(v, xs.get(1).copied());
+                let mut i = 0;
+                while i < toks.len() && st.close.is_none() {
+                    let t = toks[i];
+                    i += 1;
+                    if let Some(c) = t.as_cs() {
+                        // (`\begin{name}`: the name's letters follow)
+                        let env = |i: usize| -> Option<(String, usize)> {
+                            if toks.get(i)?.cat() != Some(1) {
+                                return None;
+                            }
+                            let mut n = String::new();
+                            let mut j = i + 1;
+                            while let Some(&x) = toks.get(j) {
+                                if x.cat() == Some(2) {
+                                    return Some((n, j + 1));
+                                }
+                                n.push(char::from_u32(x.chr())?);
+                                j += 1;
+                            }
+                            None
+                        };
+                        match c.name() {
+                            n @ ("begin" | "end") => {
+                                let Some((e, j)) = env(i) else {
+                                    return ScopeShape::Unknown;
+                                };
+                                i = j;
+                                st.event(n == "begin", &cat(&[n, ":", &e]));
+                            }
+                            n @ ("begingroup" | "bgroup") => st.event(true, n),
+                            n @ ("endgroup" | "egroup") => st.event(false, n),
+                            _ => {}
+                        }
+                    } else {
+                        match t.cat() {
+                            Some(1) => st.event(true, "{"),
+                            Some(2) => st.event(false, "}"),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => return ScopeShape::Unknown,
+        }
+        if st.close.is_some() {
+            break;
+        }
+    }
+    if let Some(c) = st.close {
+        return ScopeShape::Close(c);
+    }
+    let open: Vec<String> = st.open.into_iter().skip(carried).collect();
+    if open.is_empty() { ScopeShape::Balanced } else { ScopeShape::Open(open) }
+}
+
+/// [`scope_shape`]'s scan: the openers still open (a carried group's
+/// name empty) and the first closer with none open.
+struct ShapeScan {
+    open: Vec<String>,
+    close: Option<String>,
+}
+
+impl ShapeScan {
+    fn event(&mut self, opens: bool, name: &str) {
+        if name.ends_with(":document") || self.close.is_some() {
+            return;
+        }
+        if opens {
+            self.open.push(name.to_owned());
+        } else if self.open.pop().is_none() {
+            self.close = Some(name.to_owned());
+        }
+    }
+
+    /// Source text under the document's catcodes.
+    fn text(&mut self, text: &str) {
+        let b = text.as_bytes();
+        let mut i = 0;
+        while i < b.len() && self.close.is_none() {
+            match b[i] {
+                b'%' => {
+                    i = b[i..].iter().position(|&c| c == b'\n').map_or(b.len(), |k| i + k);
+                }
+                b'{' => {
+                    self.event(true, "{");
+                    i += 1;
+                }
+                b'}' => {
+                    self.event(false, "}");
+                    i += 1;
+                }
+                b'\\' => {
+                    let s = i + 1;
+                    let e = b[s..].iter().position(|c| !c.is_ascii_alphabetic()).map_or(b.len(), |k| s + k);
+                    if e == s {
+                        // (a control symbol: `\{`, `\%`, `\\`)
+                        i = s + 1;
+                        continue;
+                    }
+                    i = e;
+                    match &text[s..e] {
+                        n @ ("begin" | "end") => {
+                            let rest = &text[e..];
+                            let Some((env, after)) = braced(rest) else { continue };
+                            i = text.len() - after.len();
+                            self.event(n == "begin", &cat(&[n, ":", env]));
+                        }
+                        n @ ("begingroup" | "bgroup") => self.event(true, n),
+                        n @ ("endgroup" | "egroup") => self.event(false, n),
+                        _ => {}
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+    }
+}
+
+/// The brackets a node's text predicts from [`scope_shape`] and what runs
+/// of texts of the same shape left (`learned`, by the shape's names, the
+/// last run's outcome): a closer closes the scope the node runs in unless
+/// a run said otherwise (an environment collecting its body, whose end
+/// its opener's run takes); openers are left open only where runs left
+/// each as a scope (one that opens a box, or collects its body, the run
+/// reads on: no bracket). Else unknown until the run (`Pending`).
+pub(crate) fn predicted_brackets(shape: &ScopeShape, learned: &FxHashMap<String, bool>) -> Option<phitex_defuse::Brackets> {
+    match shape {
+        ScopeShape::Close(c) => (learned.get(c) != Some(&false)).then_some(phitex_defuse::Brackets {
+            closes: 1,
+            opens: 0,
+            before: false,
+        }),
+        ScopeShape::Open(os) => (os.len() < usize::from(u8::MAX - 2) && os.iter().all(|o| learned.get(o) == Some(&true))).then(|| {
+            phitex_defuse::Brackets {
+                closes: 0,
+                opens: u8::try_from(os.len()).unwrap_or(0),
+                before: false,
+            }
+        }),
+        ScopeShape::Balanced | ScopeShape::Unknown => None,
+    }
+}
+
 /// A fragment's context is not in its text: it may start a paragraph,
 /// follow an `\afterassignment`, and the state of what it calls is
 /// known only by name.
@@ -5447,5 +5639,38 @@ mod tests {
             counter_steps(t),
             vec![("exercise".to_owned(), 1), ("page".to_owned(), 1), ("x@y".to_owned(), -3), ("d".to_owned(), 1)]
         );
+    }
+
+    #[test]
+    fn scope_shapes_of_source_text() {
+        let shape = |t: &str, carried: usize| {
+            let mut st = ShapeScan {
+                open: vec![String::new(); carried],
+                close: None,
+            };
+            st.text(t);
+            match st.close {
+                Some(c) => ScopeShape::Close(c),
+                None => {
+                    let o: Vec<String> = st.open.into_iter().skip(carried).collect();
+                    if o.is_empty() { ScopeShape::Balanced } else { ScopeShape::Open(o) }
+                }
+            }
+        };
+        assert_eq!(shape("\\begin{center}\n", 0), ScopeShape::Open(vec!["begin:center".into()]));
+        assert_eq!(shape("x \\end{center} \\begin{itemize}", 0), ScopeShape::Close("end:center".into()));
+        assert_eq!(shape("\\begin{a}{x}\\end{a} \\{ % \\endgroup\n", 0), ScopeShape::Balanced);
+        assert_eq!(shape("\\end{document}", 0), ScopeShape::Balanced);
+        assert_eq!(shape("\\endgroup\\egroup", 2), ScopeShape::Balanced);
+        assert_eq!(shape("\\endgroup\\egroup", 1), ScopeShape::Close("egroup".into()));
+        let mut learned = FxHashMap::default();
+        let open = ScopeShape::Open(vec!["begin:center".into()]);
+        assert_eq!(predicted_brackets(&open, &learned), None, "an opener no run left as a scope yet");
+        learned.insert("begin:center".to_owned(), true);
+        assert_eq!(predicted_brackets(&open, &learned).map(|b| b.opens), Some(1));
+        let close = ScopeShape::Close("end:align".into());
+        assert_eq!(predicted_brackets(&close, &learned).map(|b| b.closes), Some(1));
+        learned.insert("end:align".to_owned(), false);
+        assert_eq!(predicted_brackets(&close, &learned), None, "a closer its opener's run takes");
     }
 }

@@ -2213,6 +2213,7 @@ impl Graph {
             fin_defs_start: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             counters: Arc::default(),
+            scope_learned: Arc::default(),
             node_rec: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pdf_cmds: Arc::default(),
             class_proj,

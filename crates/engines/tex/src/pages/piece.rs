@@ -1656,8 +1656,10 @@ impl Operation for Resume {
     fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
         MayDefine::Any
     }
-    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
-        Effect::Pending
+    /// The brackets its rest's text shows inside the groups it carries
+    /// ([`crate::ops::predicted_effect`]).
+    fn effect(&self, args: &[ValueId], v: &Values) -> Effect {
+        crate::ops::predicted_effect(ops(&self.0), v, args, true)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());

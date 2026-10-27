@@ -261,6 +261,45 @@ pub(crate) fn run_node(
     }
 }
 
+/// The scope shape of a piece's text (an exec node's frames) or of a
+/// continuation's rest inside the groups it carries open (a resume's,
+/// `[cont, ..]`, the continuation `[frames, levels, ..]`).
+pub(crate) fn scope_shape_of(v: &Values, args: &[ValueId], resume: bool) -> crate::hints::ScopeShape {
+    let Some(&a0) = args.first() else {
+        return crate::hints::ScopeShape::Unknown;
+    };
+    if !resume {
+        return crate::hints::scope_shape(v, a0, 0);
+    }
+    // (a continuation's levels: a group code at index 1)
+    let xs = list_of(v, a0);
+    let (Some(&fr), Some(&ls)) = (xs.first(), xs.get(1)) else {
+        return crate::hints::ScopeShape::Unknown;
+    };
+    let carried = list_of(v, ls)
+        .iter()
+        .filter(|&&e| list_of(v, e).get(1).is_some_and(|&g| int_of(v, g) != 0))
+        .count();
+    crate::hints::scope_shape(v, fr, carried)
+}
+
+/// A piece's brackets from its text's scope shape and what earlier runs
+/// of that shape left ([`crate::hints::predicted_brackets`]); `Pending`
+/// where they do not say.
+pub(crate) fn predicted_effect(o: &Ops, v: &Values, args: &[ValueId], resume: bool) -> Effect {
+    let shape = scope_shape_of(v, args, resume);
+    if matches!(shape, crate::hints::ScopeShape::Balanced | crate::hints::ScopeShape::Unknown) {
+        return Effect::Pending;
+    }
+    let m = o.scope_learned.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let e = crate::hints::predicted_brackets(&shape, &m).map_or(Effect::Pending, Effect::Scope);
+    if crate::exec::prof_flag!("PHITEX_SKIND_LOG") {
+        let text: String = args.first().map_or_else(String::new, |&a| v.render(a).chars().take(100).collect());
+        eprintln!("skindpred: {shape:?} {e:?} {text}");
+    }
+    e
+}
+
 /// One command (§1030) of the node's text: the first token decides; the
 /// command reads on into the siblings it claims; what it produced
 /// (expansion, tokens put back) and the text it did not read are its
@@ -313,7 +352,7 @@ impl Operation for Exec {
         if crate::hints::effect_none(reg(&self.0), v, args) {
             Effect::None
         } else {
-            Effect::Pending
+            predicted_effect(ops(&self.0), v, args, false)
         }
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
