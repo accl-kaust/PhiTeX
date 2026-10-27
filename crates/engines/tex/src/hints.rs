@@ -3842,6 +3842,17 @@ impl<V> Shards<V> {
         self.0[i % SHARDS].locked()
     }
 
+    /// Only the entries `keep` holds.
+    fn retain(&self, keep: impl Fn(u64) -> bool) {
+        for s in &*self.0 {
+            let mut m = s.locked();
+            m.retain(|&k, _| keep(k));
+            if m.capacity() > 2 * m.len() + 16 {
+                m.shrink_to_fit();
+            }
+        }
+    }
+
     /// Everything in it, taken out.
     fn take_all(&self) -> Vec<FxHashMap<u64, V>> {
         self.0.iter().map(|s| std::mem::take(&mut *s.locked())).collect()
@@ -3886,6 +3897,15 @@ enum Kept<T> {
 struct Prepared {
     may: Option<MayDefine>,
     reads: Kept<Option<Vec<Field>>>,
+}
+
+/// The nodes' hints of arguments no live node has dropped (`live`, by
+/// [`args_key`]): run between evaluations. A continuation run again
+/// is a node of new arguments, its hint another entry; those of the
+/// runs thrown away stayed (the book at -j8: 0.26 to 0.5 GB of hints
+/// from 120 to 900 s).
+pub(crate) fn prune(reg: &Registry, live: &phitex_defuse::FxHashSet<u64>) {
+    reg.hints.retain(|k| live.contains(&k));
 }
 
 /// Registers a text's analysis under `name` (a string value) in the
@@ -4420,7 +4440,7 @@ pub(crate) fn file_hints(reg: &Registry, v: &Values, id: ValueId, name: ValueId)
 }
 
 /// The key of a node's arguments in the registry's tables.
-fn args_key(args: &[ValueId]) -> u64 {
+pub(crate) fn args_key(args: &[ValueId]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for a in args {
         a.raw().hash(&mut h);

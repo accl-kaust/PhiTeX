@@ -113,6 +113,9 @@ pub(crate) struct WorkerLog {
     /// The edits taken during the evaluation: their version and the runs
     /// made before (the caller's worker only).
     pub(crate) absorbed: Vec<(u64, u64)>,
+    /// The reader records of earlier runs dropped at the passes' quiet
+    /// points (`Engine::sweep_readers`; the caller's worker only).
+    pub(crate) swept: u64,
 }
 
 /// One worker's deques and counters (nanoseconds).
@@ -627,7 +630,12 @@ fn run_worker(
             if pass {
                 let k = pool.shared.passes.fetch_add(1, Ordering::SeqCst) + 1;
                 Worker::max(&w.final_max, k);
-                w.log.lock().pass_starts.push(pool.shared.runs_now.load(Ordering::SeqCst));
+                // (the line quiet between passes: the records of the runs
+                // the pass before threw away dropped)
+                let swept = eng.sweep_readers() as u64;
+                let mut log = w.log.lock();
+                log.pass_starts.push(pool.shared.runs_now.load(Ordering::SeqCst));
+                log.swept += swept;
             }
             if k > 0 {
                 continue;

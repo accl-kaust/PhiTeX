@@ -1119,6 +1119,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         Arc::get_mut(&mut rec).expect("the record is not shared yet").placed = std::mem::take(&mut placed);
         let old = node.last.lock().replace(rec.clone());
         node.serial.store(serial, Ordering::Release);
+        if let Some(o) = &old {
+            eng.stale_reads.fetch_add(o.reads.len() as u64, Ordering::Relaxed);
+        }
         let old_output = last.as_ref().filter(|r| !r.provisional).map(|r| r.output);
         lap.lap("checks");
         std::mem::take(&mut ix).apply(eng, seg, &inner);
@@ -2248,6 +2251,9 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
             }
         }
         node.set_state(State::Gone);
+        if let Some(o) = node.last.lock().as_ref() {
+            eng.stale_reads.fetch_add(o.reads.len() as u64, Ordering::Relaxed);
+        }
         inner.nodes.remove(&pos);
         if was_hole {
             inner.holes = inner.holes.saturating_sub(1);

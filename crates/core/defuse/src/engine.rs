@@ -128,6 +128,11 @@ pub struct Engine {
     /// A change count per field bucket ([`Engine::field_epoch`]): a run's
     /// read whose bucket did not move by its commit needs no second look.
     pub(crate) field_epochs: Box<[AtomicU64]>,
+    /// Reader records filed by runs no longer their node's last (a run
+    /// committed after them, the node gone), since the last sweep; and
+    /// the records the last sweep left ([`Engine::sweep_readers`]).
+    pub(crate) stale_reads: AtomicU64,
+    pub(crate) swept_left: AtomicU64,
     /// Counts the changes of any node's brackets: a chain of open scopes
     /// cached at an older count is stale (`read::chain_start`), and a run
     /// that began before one checks every read at its commit.
@@ -184,6 +189,8 @@ impl Engine {
         let depth_field = values.field("\u{0}depth");
         Engine {
             field_epochs: (0..EPOCH_BUCKETS).map(|_| AtomicU64::new(0)).collect(),
+            stale_reads: AtomicU64::new(0),
+            swept_left: AtomicU64::new(0),
             scope_gen: AtomicU64::new(1),
             bracket_nodes: AtomicUsize::new(0),
             depth_field,
@@ -1094,7 +1101,11 @@ impl Engine {
             }
         }
         let workers = all;
-        let mut rep = Report::default();
+        let swept = self.sweep_readers() as u64 + workers.iter().map(|w| std::mem::take(&mut w.log.lock().swept)).sum::<u64>();
+        let mut rep = Report {
+            readers_swept: swept,
+            ..Report::default()
+        };
         let mut by_op: FxHashMap<OpId, u64> = FxHashMap::default();
         let mut rbf: FxHashMap<Field, u64> = FxHashMap::default();
         let load = |c: &AtomicU64| c.load(Ordering::Relaxed);
@@ -1201,6 +1212,46 @@ impl Engine {
 
     /// (measure) The reader records filed in segments, those still
     /// standing for their node, and the segments' fields read.
+    /// The reader records of runs no longer their node's last dropped from
+    /// every segment, and the lists they leave shrunk: at a quiet point
+    /// (the end of an evaluation, a pass's quiescence), where nothing
+    /// files a reader, once they outnumber the standing ones. The records
+    /// of a node's earlier runs stay filed
+    /// until met otherwise ([`crate::segment::push_pruned`]): in a build
+    /// that runs most nodes again they were two in three records filed.
+    /// The records dropped.
+    pub(crate) fn sweep_readers(&self) -> usize {
+        // (a sweep costs every record filed: only once the stale ones
+        // outnumber those the last sweep left, so it costs each stale
+        // record a few visits, and an edit of a few nodes nothing)
+        let stale = self.stale_reads.load(Ordering::Relaxed);
+        if stale < (1 << 16).max(self.swept_left.load(Ordering::Relaxed)) {
+            return 0;
+        }
+        self.stale_reads.store(0, Ordering::Relaxed);
+        let mut dropped = 0;
+        let mut left = 0;
+        for sid in self.order.all() {
+            let s = self.seg(sid);
+            let mut inner = s.inner.write();
+            inner.readers.retain(|_, rs| {
+                let n = rs.len();
+                rs.retain(|r| crate::segment::live(self, r.node, r.serial));
+                dropped += n - rs.len();
+                if rs.capacity() > 2 * rs.len() + 4 {
+                    rs.shrink_to(rs.len());
+                }
+                left += rs.len();
+                !rs.is_empty()
+            });
+            let n = inner.stops.len();
+            inner.stops.retain(|(_, _, r)| crate::segment::live(self, r.node, r.serial));
+            dropped += n - inner.stops.len();
+        }
+        self.swept_left.store(left as u64, Ordering::Relaxed);
+        dropped
+    }
+
     pub fn reader_records(&self) -> (usize, usize, usize) {
         let (mut filed, mut standing, mut fields) = (0usize, 0usize, 0usize);
         for sid in self.order.all() {

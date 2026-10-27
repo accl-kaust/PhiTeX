@@ -387,6 +387,8 @@ pub(crate) struct PagePiece {
     /// Its break inside a piece that goes on after it (`[piece,
     /// candidate]`), for the line's order ([`order_line`]).
     brk: Option<(i64, i64)>,
+    /// The value store of the build that shipped it ([`prune_pieces`]).
+    inst: u64,
 }
 
 type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
@@ -424,7 +426,7 @@ type Made = (phitex_pdf::PageRecord, BTreeSet<FontId>, usize);
 /// The pages written, by their piece's key and their sealed lines (their
 /// boxes as their pieces made them, `crate::pages::seal`): the piece is
 /// the page's shape, the lines what it holds besides.
-type RecordMemo = Mutex<FxHashMap<u64, Arc<OnceLock<Made>>>>;
+type RecordMemo = Mutex<FxHashMap<(u64, u64), Arc<OnceLock<Made>>>>;
 
 fn records() -> &'static RecordMemo {
     static P: OnceLock<RecordMemo> = OnceLock::new();
@@ -484,7 +486,7 @@ fn record_of(
     h: u64,
     line: &mut dyn FnMut(&crate::nodes::Sealed) -> Option<ValueId>,
 ) -> Arc<OnceLock<Made>> {
-    let k = phitex_defuse::hash_words(0x7265_636f_7264_0001, &[key, h]);
+    let k = (key, h);
     let m = {
         let mut all = records().locked();
         // (the records of builds gone: dropped wholesale past a bound,
@@ -1857,6 +1859,28 @@ pub(crate) fn command_forms(
     Ok(None)
 }
 
+/// The pages of this build no record on the line names dropped, with
+/// their written records ([`pieces`], [`records`]): run between
+/// evaluations, as [`prune_cmds`]. A finisher run again ships its page
+/// anew, another key where anything on it moved; the pages of the runs
+/// thrown away stayed for the process's life (the book's course edition
+/// at -j8: 0.6 GB of pages and their fonts at 900 s, growing with the
+/// finishers' runs). Another build's pages are its own to prune.
+pub(crate) fn prune_pieces(v: &Values, line: &[ValueId]) {
+    let keep: FxHashSet<u64> = recs(v, line)
+        .into_iter()
+        .filter_map(|r| match r {
+            Rec::Page(k) => Some(u64::from_ne_bytes(k.to_ne_bytes())),
+            _ => None,
+        })
+        .collect();
+    let inst = v.instance();
+    let mut m = pieces().locked();
+    m.retain(|k, pc| pc.inst != inst || keep.contains(k));
+    let mut rs = records().locked();
+    rs.retain(|(k, _), _| m.contains_key(k));
+}
+
 /// The commands no record on the line names dropped ([`CmdMemo`]):
 /// run between evaluations, when no run is in work. (During one, a run
 /// that made a command may commit after a link read the line: the link
@@ -2192,6 +2216,7 @@ fn ship_apart(
     let wparams = writer_params(r)?;
     let base_in = base_inputs(r)?;
     let pc = PagePiece {
+        inst: v.instance(),
         wparams,
         params: p.to_vec(),
         margins,

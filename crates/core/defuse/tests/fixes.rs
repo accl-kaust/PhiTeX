@@ -301,6 +301,37 @@ impl Operation for Def {
     }
 }
 
+/// The records of a node's earlier runs are dropped where the line is
+/// quiet once they outnumber those standing: what is filed stays within
+/// a bound of what stands, and an evaluation that swept ends with only
+/// standing records.
+#[test]
+fn reader_records_of_earlier_runs_are_swept_at_quiet_points() {
+    let e = Engine::new();
+    let v = e.values();
+    let def = e.register(Arc::new(Def));
+    let rd = e.register(Arc::new(ReadMany));
+    let x = v.field("x");
+    let u = e.new_unit();
+    let d = e.push(u, def, vec![x.0, v.int(0)]);
+    let r = e.push(u, rd, vec![x.0, v.int(3000)]);
+    e.evaluate(2).unwrap();
+    let mut sweeps = 0;
+    for i in 1..80 {
+        e.replace(d, def, vec![x.0, v.int(i)]);
+        let rep = e.evaluate(2).unwrap();
+        assert_eq!(e.output(r), Some(v.int(i)));
+        let (filed, standing, _) = e.reader_records();
+        if rep.readers_swept > 0 {
+            sweeps += 1;
+            assert_eq!(filed, standing, "after the sweep of evaluation {i}");
+        }
+        assert!(filed <= standing + (1 << 16) + 2 * 3001, "{filed} filed for {standing} standing");
+    }
+    assert!(sweeps >= 2, "{sweeps} sweeps");
+    assert!(e.check_invariants().is_empty());
+}
+
 /// A node run again and again files its reads anew each time; the records
 /// of its earlier runs go as a list runs out of room, so what a segment
 /// holds stays a few times what stands (the course's segments held ten

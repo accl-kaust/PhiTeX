@@ -472,6 +472,9 @@ pub struct Report {
     /// The edits taken during the evaluation (`EditSource::absorb`): each
     /// one's version and the runs made before it.
     pub absorbed: Vec<(u64, u64)>,
+    /// The reader records of earlier runs dropped at the evaluation's
+    /// quiet points.
+    pub readers_swept: u64,
 }
 
 impl Report {

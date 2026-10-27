@@ -2747,7 +2747,18 @@ impl Graph {
                 if let Some(line) = self.eng.acc_value(unit, v.field(crate::pdfout::XPAGES)) {
                     let line: Vec<ValueId> = crate::val::CatMemo::default().walk(v, line, Some);
                     crate::pdfout::prune_cmds(v, &line, &self.ops.pdf_cmds);
+                    crate::pdfout::prune_pieces(v, &line);
                 }
+                // (the hints of nodes gone, by their arguments: a
+                // continuation run again is another node's arguments)
+                let live: phitex_defuse::FxHashSet<u64> = self
+                    .eng
+                    .order(unit)
+                    .into_iter()
+                    .filter_map(|n| self.eng.node_info(n))
+                    .map(|i| crate::hints::args_key(&i.args))
+                    .collect();
+                crate::hints::prune(&self.ops.hints, &live);
             }
             if let (Ok(r), Some(path)) = (&res, crate::exec::env_str!("PHITEX_CHAIN_TSV")) {
                 dump_chain(&self.eng, r, path);
