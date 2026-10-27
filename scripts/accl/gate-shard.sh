@@ -642,12 +642,14 @@ PY
     fetched
     bin=$w/bin/cli/prof/phitex
     : > "$r/cg.txt"
-    for doc in ${GATE_CG_DOC:-para4000 macros}; do
+    for path in ${GATE_CG_DOC:-para4000 macros}; do
+      # (a document under bench/, by its path there: idioms/idiom-def)
+      doc=${path##*/}
       p=$r/cg; [ "$doc" = para4000 ] || p=$r/cg-$doc
-      mkdir -p "$w/cg" && cp "bench/$doc.tex" "$w/cg/"
+      mkdir -p "$w/cg" && cp "bench/$path.tex" "$w/cg/"
       (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 1 --output-dir=warm --program pdftex "$doc.tex" > "$p-warm.log" 2>&1)
       (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_THREADS=1 \
-        timeout 3000 valgrind --tool=callgrind --callgrind-out-file="$p.out" "$bin" build -j 1 --output-dir=o1 --program pdftex "$doc.tex" > "$p-run.log" 2>&1) \
+        timeout 3000 valgrind --tool=callgrind --dump-instr=yes --callgrind-out-file="$p.out" "$bin" build -j 1 --output-dir=o1 --program pdftex "$doc.tex" > "$p-run.log" 2>&1) \
         || red "cg: callgrind run of $doc exit $?"
       # (the document's PDF against pdfTeX's: GATE_CG_MD5_<doc>)
       want=$(eval echo "\${GATE_CG_MD5_$doc:-}")
