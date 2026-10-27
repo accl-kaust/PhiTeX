@@ -77,15 +77,10 @@ impl Operation for Loop {
             }
             None => (None, 0),
         };
-        loop {
-            match cx.next_contribution(s, cur)? {
-                Some((n, x)) => {
-                    self.folded.fetch_add(1, Ordering::Relaxed);
-                    sum += v.as_int(x).unwrap_or(0);
-                    cur = Some(n);
-                }
-                None => break,
-            }
+        while let Some((n, x)) = cx.next_contribution(s, cur)? {
+            self.folded.fetch_add(1, Ordering::Relaxed);
+            sum += v.as_int(x).unwrap_or(0);
+            cur = Some(n);
         }
         let state = v.list(vec![v.int(cur.map_or(-1, |n| i64::try_from(n.raw()).unwrap())), v.int(sum)]);
         if cx.stopped_at().is_some() {

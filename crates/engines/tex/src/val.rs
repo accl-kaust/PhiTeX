@@ -212,40 +212,6 @@ const CS_CHUNKS: usize = 1 << 12;
 type CsChunk = [std::sync::OnceLock<&'static CsEntry>];
 static CS_BY_ID: [OnceLock<&'static CsChunk>; CS_CHUNKS] = [const { OnceLock::new() }; CS_CHUNKS];
 
-/// FxHash a word at a time: a name's bytes in 8-byte words (the
-/// engine's `FxHasher` takes them one by one).
-#[derive(Default)]
-pub(crate) struct WordHasher(u64);
-
-impl std::hash::Hasher for WordHasher {
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-        let mut chunks = bytes.chunks_exact(8);
-        for c in &mut chunks {
-            let w = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-            self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(SEED);
-        }
-        let r = chunks.remainder();
-        if !r.is_empty() {
-            let mut b = [0u8; 8];
-            b[..r.len()].copy_from_slice(r);
-            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(b)).wrapping_mul(SEED);
-        }
-    }
-
-    #[inline]
-    fn write_u8(&mut self, i: u8) {
-        const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-        self.0 = (self.0.rotate_left(5) ^ u64::from(i)).wrapping_mul(SEED);
-    }
-
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-}
-
 /// A control sequence: its interned entry ([`CsEntry`]).
 #[derive(Clone, Copy)]
 pub(crate) struct CsId(&'static CsEntry);
@@ -254,7 +220,7 @@ impl CsId {
     /// The entry of `name`, made on its first sight.
     pub(crate) fn intern(name: &str) -> CsId {
         thread_local! {
-            static LOCAL: std::cell::RefCell<std::collections::HashMap<Box<str>, CsId, std::hash::BuildHasherDefault<WordHasher>>> =
+            static LOCAL: std::cell::RefCell<std::collections::HashMap<Box<str>, CsId, std::hash::BuildHasherDefault<phitex_defuse::FxHasher>>> =
                 std::cell::RefCell::default();
         }
         /// The names by text, and how many frozen and other ones there are.

@@ -1046,24 +1046,47 @@ pub struct FxHasher(u64);
 const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
 
 impl Hasher for FxHasher {
+    /// A word at a time: the bytes in little-endian 8-byte words, the
+    /// last one padded with zeros.
+    #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 = (self.0.rotate_left(5) ^ u64::from(b)).wrapping_mul(SEED);
+        let (words, r) = bytes.as_chunks::<8>();
+        for w in words {
+            self.write_u64(u64::from_le_bytes(*w));
+        }
+        if !r.is_empty() {
+            let mut b = [0u8; 8];
+            b[..r.len()].copy_from_slice(r);
+            self.write_u64(u64::from_le_bytes(b));
         }
     }
 
+    #[inline]
     fn write_u64(&mut self, i: u64) {
         self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(SEED);
     }
 
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.write_u64(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.write_u64(u64::from(i));
+    }
+
+    #[inline]
     fn write_u32(&mut self, i: u32) {
         self.write_u64(u64::from(i));
     }
 
+    #[inline]
     fn write_usize(&mut self, i: usize) {
         self.write_u64(i as u64);
     }
 
+    #[inline]
     fn finish(&self) -> u64 {
         self.0
     }
@@ -1073,6 +1096,7 @@ pub type FxHashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Fx
 pub type FxHashSet<K> = std::collections::HashSet<K, BuildHasherDefault<FxHasher>>;
 
 /// A hash of words, seeded.
+#[inline]
 pub fn hash_words(seed: u64, words: &[u64]) -> u64 {
     let mut h = FxHasher(seed);
     for &w in words {
@@ -1082,6 +1106,7 @@ pub fn hash_words(seed: u64, words: &[u64]) -> u64 {
 }
 
 /// A hash of bytes, seeded.
+#[inline]
 pub fn hash_bytes(seed: u64, b: &[u8]) -> u64 {
     let mut h = FxHasher(seed);
     h.write(b);

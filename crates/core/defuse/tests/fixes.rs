@@ -247,9 +247,7 @@ fn a_view_whose_bound_is_removed_runs_once_more_and_settles() {
     e.evaluate(2).unwrap();
     assert_eq!(view.0.load(Ordering::Relaxed), 1);
     e.remove(c);
-    let mut lim = phitex_defuse::Limits::default();
-    lim.runs_per_node = 50;
-    e.set_limits(lim);
+    e.set_limits(phitex_defuse::Limits { runs_per_node: 50, ..Default::default() });
     let r = e.evaluate(2);
     assert!(r.is_ok(), "the reader ran on for ever: {r:?}");
     assert_eq!(view.0.load(Ordering::Relaxed), 2, "once more, on the bound gone");
@@ -356,4 +354,25 @@ fn reader_records_of_earlier_runs_do_not_pile_up() {
     assert!(standing >= 101, "{standing}");
     assert!(filed <= 8 * standing, "{filed} records filed for {standing} standing");
     assert!(e.check_invariants().is_empty());
+}
+
+#[test]
+fn strings_hashed_a_word_at_a_time_intern_by_their_content() {
+    // (the hash takes 8-byte words, the last padded with zeros: a string
+    // and the same with zero bytes after it hash alike and intern apart)
+    let e = Engine::new();
+    let v = e.values();
+    let mut texts: Vec<String> = (0..=24).map(|n| "abcdefghijklmnopqrstuvwxyz"[..n].to_string()).collect();
+    texts.extend(["abc\0", "abc\0\0\0\0\0", "abcdefgh\0", "abcdefghabcdefgh", "abcdefgiabcdefgh", "abcdefghabcdefgi"].map(String::from));
+    let ids: Vec<ValueId> = texts.iter().map(|t| v.str(t)).collect();
+    for (i, t) in texts.iter().enumerate() {
+        assert_eq!(v.as_str(ids[i]).as_deref(), Some(t.as_str()));
+        assert_eq!(v.str(t), ids[i], "{t:?} interned twice");
+        for j in 0..i {
+            assert_ne!(ids[i], ids[j], "{t:?} and {:?}", texts[j]);
+        }
+    }
+    let h = |s: &str| phitex_defuse::hash_bytes(7, s.as_bytes());
+    assert_ne!(h("abcdefghabcdefgh"), h("abcdefghabcdefgi"), "a byte of the second word");
+    assert_ne!(h("abcdefgh"), h("abcdefghabcdefgh"), "a second word");
 }
