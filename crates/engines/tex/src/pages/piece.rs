@@ -1646,6 +1646,10 @@ impl Run<'_, '_> {
 pub(crate) struct Resume(pub Shared);
 
 impl Operation for Resume {
+    /// Layer 2 (docs/spec-layers.md §2): the rest of a cut piece, expansion.
+    fn layer(&self) -> u8 {
+        2
+    }
     fn name(&self) -> &'static str {
         "resume"
     }

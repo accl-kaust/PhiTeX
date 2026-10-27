@@ -2377,6 +2377,10 @@ pub(crate) struct PdfPage;
 pub(crate) const PAGE_KEYS: &str = "pdf:pagekeys";
 
 impl phitex_defuse::Operation for PdfPage {
+    /// Layer 5 (docs/spec-layers.md §2): a page's PDF side, with its finisher.
+    fn layer(&self) -> u8 {
+        5
+    }
     fn name(&self) -> &'static str {
         "pdfpage"
     }

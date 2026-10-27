@@ -303,6 +303,21 @@ pub trait Operation: Send + Sync {
     fn contributes(&self, _args: &[ValueId], _values: &Values, _f: Field) -> bool {
         true
     }
+
+    /// The layer its nodes run in (default 0; at most 15). A dirty node
+    /// runs only while no node of a lower layer is dirty or running: the
+    /// layers below it are quiet when it starts, so a loop over their
+    /// contributions meets no hole and runs once over all of them, and a
+    /// node that predicts what they define guesses from their final
+    /// state. A node of a lower layer never waits for a higher one: a
+    /// higher node's commit may re-ask a lower node (a page's finisher
+    /// moving a counter a paragraph read), and then the higher layers
+    /// wait for it again before they go on. The nodes of one layer run
+    /// beside each other as before, and the order of definitions is the
+    /// line's whatever the layers, so the result does not depend on it.
+    fn layer(&self) -> u8 {
+        0
+    }
 }
 
 use crate::ctx::Ctx;
@@ -488,6 +503,9 @@ pub struct Report {
     /// The reader records of earlier runs dropped at the evaluation's
     /// quiet points.
     pub readers_swept: u64,
+    /// Runs put off at their start because a lower layer was not quiet
+    /// (`Operation::layer`): each wait of a node counts once.
+    pub layer_holds: u64,
     /// The collections the evaluation made (`Limits::collect_at_bytes`):
     /// what each freed, and the nanoseconds each held the workers.
     pub collections: Vec<(crate::Collected, u64)>,

@@ -112,6 +112,10 @@ fn break_defs(v: &Values) -> Vec<Field> {
 pub(crate) struct Break(pub Shared);
 
 impl Operation for Break {
+    /// Layer 2 (docs/spec-layers.md §2): a paragraph's line breaking, beside the piece that made it (the next piece reads what its lines leave the main list).
+    fn layer(&self) -> u8 {
+        2
+    }
     fn name(&self) -> &'static str {
         "break"
     }

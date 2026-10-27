@@ -506,6 +506,10 @@ pub(crate) fn command_args(
 pub(crate) struct ToolNode(pub Shared);
 
 impl Operation for ToolNode {
+    /// Layer 2 (docs/spec-layers.md §2): a `\write18`'s tool in the round, among the text's pieces.
+    fn layer(&self) -> u8 {
+        2
+    }
     fn name(&self) -> &'static str {
         "toolnode"
     }

@@ -240,6 +240,10 @@ impl Operation for Kick {
 pub(crate) struct Pages(pub Shared);
 
 impl Operation for Pages {
+    /// Layer 4 (docs/spec-layers.md §2): the page builder, once every piece and its lines are quiet: it meets no hole.
+    fn layer(&self) -> u8 {
+        4
+    }
     fn name(&self) -> &'static str {
         "pages"
     }
