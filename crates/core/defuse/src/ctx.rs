@@ -100,6 +100,11 @@ impl<'a> Ctx<'a> {
         &self.eng.values
     }
 
+    /// My unit: a read at its end (`At::End`).
+    pub fn unit(&self) -> crate::api::UnitId {
+        self.me.unit
+    }
+
     pub fn node(&self) -> NodeId {
         self.me.id
     }

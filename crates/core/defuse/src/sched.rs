@@ -118,6 +118,8 @@ pub(crate) struct Pool {
 #[derive(Default)]
 pub(crate) struct WorkerLog {
     pub(crate) runs_by_op: FxHashMap<OpId, u64>,
+    /// Nodes the commits' placements made, by operation.
+    pub(crate) placed_by_op: FxHashMap<OpId, u64>,
     pub(crate) causes: Vec<(NodeId, Cause)>,
     pub(crate) refuted_by_field: FxHashMap<Field, u64>,
     pub(crate) run_times: Vec<(NodeId, Duration)>,

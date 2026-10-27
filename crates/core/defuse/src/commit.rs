@@ -1342,6 +1342,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     for (f, k, r) in holes {
         reask_range(eng, ww, f, k, &r, node.id, &mut st, &mut memo);
     }
+    if !made.is_empty() {
+        let mut log = w.log.lock();
+        for n in &made {
+            *log.placed_by_op.entry(n.op()).or_default() += 1;
+        }
+    }
     // (the last first: a worker's deque gives the newest first, so its
     // placements run in their order, a child before the node after it)
     for n in made.iter().rev() {

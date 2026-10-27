@@ -133,12 +133,14 @@ fn placements_after_a_placement_stand_in_order() {
     let a = e.push(u, leaf, vec![v.int(-1)]);
     let b = e.push(u, leaf, vec![v.int(-2)]);
     let ch = e.push(u, op, vec![v.int(i64::try_from(a.raw()).unwrap()), v.int(3), v.int(1)]);
-    e.evaluate(2).unwrap();
+    let r = e.evaluate(2).unwrap();
+    assert!(r.placed_by_op.contains(&("leaf", 3)), "three placements made: {:?}", r.placed_by_op);
     let outs = |e: &Engine| -> Vec<i64> { e.order(u).into_iter().filter_map(|n| e.output(n).and_then(|x| v.as_int(x))).collect() };
     assert_eq!(outs(&e), vec![-1, 100, 101, 102, -2], "after the anchor, in the placer's order");
     // (the middle one made anew: the others kept, the order the same)
     e.replace(ch, op, vec![v.int(i64::try_from(a.raw()).unwrap()), v.int(4), v.int(1)]);
-    e.evaluate(2).unwrap();
+    let r = e.evaluate(2).unwrap();
+    assert!(r.placed_by_op.contains(&("leaf", 1)), "one placement made, three kept: {:?}", r.placed_by_op);
     assert_eq!(outs(&e), vec![-1, 100, 101, 102, 103, -2]);
     let _ = b;
     assert!(e.check_invariants().is_empty());

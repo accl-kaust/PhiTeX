@@ -1173,6 +1173,7 @@ impl Engine {
             ..Report::default()
         };
         let mut by_op: FxHashMap<OpId, u64> = FxHashMap::default();
+        let mut placed: FxHashMap<OpId, u64> = FxHashMap::default();
         let mut rbf: FxHashMap<Field, u64> = FxHashMap::default();
         let load = |c: &AtomicU64| c.load(Ordering::Relaxed);
         for w in &workers {
@@ -1203,6 +1204,9 @@ impl Engine {
             for (op, k) in log.runs_by_op.drain() {
                 *by_op.entry(op).or_default() += k;
             }
+            for (op, k) in log.placed_by_op.drain() {
+                *placed.entry(op).or_default() += k;
+            }
             rep.rerun_causes.append(&mut log.causes);
             rep.capped.append(&mut log.capped);
             for (f, k) in log.refuted_by_field.drain() {
@@ -1223,6 +1227,8 @@ impl Engine {
         rep.first_runs = rep.nodes_run.saturating_sub(rep.refuted_nodes);
         rep.runs_by_op = by_op.into_iter().map(|(op, k)| (self.op(op).name(), k)).collect();
         rep.runs_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        rep.placed_by_op = placed.into_iter().map(|(op, k)| (self.op(op).name(), k)).collect();
+        rep.placed_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         rep.refuted_by_field = rbf.into_iter().collect();
         rep.refuted_by_field.sort_by_key(|x| std::cmp::Reverse(x.1));
         rep.segments = self.order.count();

@@ -429,6 +429,9 @@ pub struct Report {
     /// Runs in all: a node run again counts each time.
     pub runs: u64,
     pub runs_by_op: Vec<(&'static str, u64)>,
+    /// Nodes the runs' placements made (a placement kept makes none), by
+    /// operation.
+    pub placed_by_op: Vec<(&'static str, u64)>,
     /// Nodes that ran once and were never refuted.
     pub first_runs: u64,
     /// The summed run time of every run that was not its node's last.
