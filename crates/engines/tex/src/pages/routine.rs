@@ -52,7 +52,7 @@ pub(crate) const RTN: &str = "rtn";
 /// rest of the piece, [`Run::define_page_start`]).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FinCtx {
-    /// The pages fired in its page's piece before it ([`PageKey::nth`]).
+    /// The pages fired in its page's piece before it ([`Page::nth`]).
     pub nth: i64,
     /// Whether its page is the first the page builder fired (no page
     /// fired before it: [`Page::prev_fire`]).

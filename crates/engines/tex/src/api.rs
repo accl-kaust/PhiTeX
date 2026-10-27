@@ -1482,8 +1482,17 @@ pub struct Stats {
     /// evaluations (a placement kept makes none).
     pub placed_by_op: Vec<(&'static str, u64)>,
     /// Placements relocated instead of remade over the build's
-    /// evaluations (`phitex_defuse::Report::placements_moved`).
+    /// evaluations (`phitex_defuse::Report::placements_moved`), and by
+    /// the relocated node's operation.
     pub placements_moved: u64,
+    pub placements_moved_by_op: Vec<(&'static str, u64)>,
+    /// Runs whose commit found every output of the node's run before
+    /// equal (`phitex_defuse::Report::runs_wasted`: definitions,
+    /// relations, contributions, output, brackets, placements), over
+    /// the build's evaluations, and by operation: the ledger's wasted
+    /// runs (`acct: ledger`).
+    pub runs_wasted: u64,
+    pub wasted_by_op: Vec<(&'static str, u64)>,
     /// The profile units the page loop folded over all its runs.
     pub units_folded: u64,
     /// The units of each accumulator the last evaluation ended with
@@ -1590,6 +1599,47 @@ fn print_rerun_classes(eng: &Engine, r: &Report) {
     }
 }
 
+/// The ledger of an evaluation (`acct: ledger`, with `PHITEX_TEX_TIME`):
+/// one row per operation: its live nodes, its runs, its wasted runs
+/// (`Report::runs_wasted`: reruns that left every output as it was),
+/// the three fields that re-asked its nodes most (`Report::rerun_causes`
+/// by the woken node's operation), the nodes its placements made and
+/// the nodes of the operation relocated. The ideal row is nodes == runs,
+/// 0 wasted, made == nodes, 0 moved.
+fn print_ledger(eng: &Engine, r: &Report, nodes_by_op: &std::collections::BTreeMap<&'static str, u64>) {
+    let v = eng.values();
+    let mut refuted: std::collections::BTreeMap<&'static str, std::collections::BTreeMap<String, u64>> = std::collections::BTreeMap::new();
+    for (n, c) in &r.rerun_causes {
+        let Some(f) = cause_parts(c).1 else { continue };
+        let Some(op) = eng.node_info(*n).map(|i| i.op) else { continue };
+        *refuted.entry(op).or_default().entry(field_name(v, f)).or_default() += 1;
+    }
+    let by = |list: &[(&'static str, u64)], op: &str| Report::by_op(list, op);
+    let mut ops: Vec<&'static str> = nodes_by_op.keys().copied().collect();
+    for &(op, _) in r.runs_by_op.iter().chain(&r.placed_by_op) {
+        if !ops.contains(&op) {
+            ops.push(op);
+        }
+    }
+    eprintln!("acct: ledger (op: nodes runs wasted | refuted by field, top three | placed moved)");
+    for op in ops {
+        let mut top: Vec<(String, u64)> = refuted.get(op).map(|m| m.iter().map(|(f, n)| (f.clone(), *n)).collect()).unwrap_or_default();
+        top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top.truncate(3);
+        let top: Vec<String> = top.iter().map(|(f, n)| format!("{f} {n}")).collect();
+        eprintln!(
+            "acct: ledger {op}: {} {} {} | {} | {} {}",
+            nodes_by_op.get(op).copied().unwrap_or(0),
+            by(&r.runs_by_op, op),
+            by(&r.wasted_by_op, op),
+            if top.is_empty() { "-".to_owned() } else { top.join(", ") },
+            by(&r.placed_by_op, op),
+            by(&r.placements_moved_by_op, op)
+        );
+    }
+    eprintln!("acct: ledger all: {} {} {} | placed {} moved {}", eng.live_nodes(), r.runs, r.runs_wasted, r.placed_by_op.iter().map(|x| x.1).sum::<u64>(), r.placements_moved);
+}
+
 /// The cold accounting of an evaluation (spec-final §1), with
 /// `PHITEX_TEX_TIME`: the engine's split of its time, the runs per node,
 /// the op time by node kind, the realised critical path in nodes and
@@ -1656,7 +1706,7 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
     eprintln!("acct: op time by kind: {}", kinds.join(", "));
     // (runs against live nodes per operation: where the runs beyond one a
     // node go)
-    {
+    let nodes_by_op: std::collections::BTreeMap<&'static str, u64> = {
         let mut nodes: std::collections::BTreeMap<&'static str, u64> = std::collections::BTreeMap::new();
         let (mut found, mut i, target) = (0usize, 0u64, eng.live_nodes());
         while found < target && i < 1 << 32 {
@@ -1666,6 +1716,10 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
             }
             i += 1;
         }
+        nodes
+    };
+    {
+        let nodes = &nodes_by_op;
         let by: Vec<String> = nodes
             .iter()
             .map(|(op, n)| {
@@ -1709,6 +1763,7 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
     by_field.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     by_field.truncate(20);
     eprintln!("acct: {} nodes refuted; refuted by field {by_field:?}", r.refuted_nodes);
+    print_ledger(eng, r, &nodes_by_op);
     if crate::exec::prof_flag!("PHITEX_RUN_AUDIT") {
         print_rerun_classes(eng, r);
     }
@@ -1846,8 +1901,14 @@ pub struct RunReport {
     pub placed_by_op: Vec<(&'static str, u64)>,
     /// Placements relocated instead of remade over the evaluations
     /// (`phitex_defuse::Report::placements_moved`,
-    /// docs/spec-continuations.md §2.3).
+    /// docs/spec-continuations.md §2.3), and by the relocated node's
+    /// operation.
     pub placements_moved: u64,
+    pub placements_moved_by_op: Vec<(&'static str, u64)>,
+    /// Runs that left every output of their node's run before as it was
+    /// (`phitex_defuse::Report::runs_wasted`), and by operation.
+    pub runs_wasted: u64,
+    pub wasted_by_op: Vec<(&'static str, u64)>,
 }
 
 impl RunReport {
@@ -1855,6 +1916,24 @@ impl RunReport {
     #[must_use]
     pub fn placements_made(&self, op: &str) -> usize {
         self.placed_by_op.iter().find(|x| x.0 == op).map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
+    }
+
+    /// The nodes of operation `op` relocated.
+    #[must_use]
+    pub fn placements_moved_of(&self, op: &str) -> usize {
+        self.placements_moved_by_op.iter().find(|x| x.0 == op).map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
+    }
+
+    /// The wasted runs of operation `op`.
+    #[must_use]
+    pub fn runs_wasted_of(&self, op: &str) -> usize {
+        self.wasted_by_op.iter().find(|x| x.0 == op).map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
+    }
+
+    /// The runs of operation `op`.
+    #[must_use]
+    pub fn runs_of(&self, op: &str) -> usize {
+        self.runs_by_op.iter().find(|x| x.0 == op).map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
     }
 }
 
@@ -2055,6 +2134,20 @@ impl Stats {
         self.page_steps += Report::by_op(&r.runs_by_op, "finish");
         self.placements_moved += r.placements_moved;
         self.last.placements_moved += r.placements_moved;
+        self.runs_wasted += r.runs_wasted;
+        self.last.runs_wasted += r.runs_wasted;
+        let merge = |into: &mut Vec<(&'static str, u64)>, from: &[(&'static str, u64)]| {
+            for &(k, n) in from {
+                match into.iter_mut().find(|x| x.0 == k) {
+                    Some(x) => x.1 += n,
+                    None => into.push((k, n)),
+                }
+            }
+        };
+        merge(&mut self.placements_moved_by_op, &r.placements_moved_by_op);
+        merge(&mut self.last.placements_moved_by_op, &r.placements_moved_by_op);
+        merge(&mut self.wasted_by_op, &r.wasted_by_op);
+        merge(&mut self.last.wasted_by_op, &r.wasted_by_op);
         for &(k, n) in &r.placed_by_op {
             match self.placed_by_op.iter_mut().find(|x| x.0 == k) {
                 Some(x) => x.1 += n,

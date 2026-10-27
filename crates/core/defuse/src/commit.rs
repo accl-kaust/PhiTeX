@@ -1378,6 +1378,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             };
             if relocate(eng, ww, node.id, &n, to, &mut st) {
                 moves += 1;
+                *w.log.lock().moved_by_op.entry(n.op()).or_default() += 1;
             }
             continue;
         };
@@ -1396,6 +1397,21 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     if moves > 0 {
         w.log.lock().placements_moved += moves;
+    }
+    // (the ledger: a run after a run of the same node that left every
+    // output as it was, its definitions and relations, its contributions,
+    // its output, its brackets and its placements, is a wasted run:
+    // nothing after it is asked again for it, `Report::runs_wasted`)
+    if last.as_ref().is_some_and(|r| !r.provisional)
+        && changed_defs.is_empty()
+        && changed_contribs.is_empty()
+        && old_output == Some(rec.output)
+        && bracket_change.is_none()
+        && made.is_empty()
+        && removed.is_empty()
+        && moves == 0
+    {
+        *w.log.lock().wasted_by_op.entry(node.op()).or_default() += 1;
     }
     // what this run no longer places goes once what replaces it stands: a
     // node made anew in place of a removed one has filed its definitions

@@ -503,6 +503,14 @@ pub struct Report {
     /// Placements relocated instead of remade (docs/spec-continuations.md
     /// §2.3): a kept node moved to the place its placer wants now.
     pub placements_moved: u64,
+    /// [`Report::placements_moved`] by the relocated node's operation.
+    pub placements_moved_by_op: Vec<(&'static str, u64)>,
+    /// Runs whose commit found every output of the node's run before
+    /// equal (its definitions and relations, contributions, output,
+    /// brackets and placements): reruns that asked nothing again, the
+    /// runs an exact engine would not have made; and by operation.
+    pub runs_wasted: u64,
+    pub wasted_by_op: Vec<(&'static str, u64)>,
     /// The collections the evaluation made (`Limits::collect_at_bytes`):
     /// what each freed, and the nanoseconds each held the workers.
     pub collections: Vec<(crate::Collected, u64)>,

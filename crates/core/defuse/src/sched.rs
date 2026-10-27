@@ -123,8 +123,14 @@ pub(crate) struct WorkerLog {
     pub(crate) runs_by_op: FxHashMap<OpId, u64>,
     /// Nodes the commits' placements made, by operation.
     pub(crate) placed_by_op: FxHashMap<OpId, u64>,
-    /// Placements relocated instead of remade (`commit::relocate`).
+    /// Placements relocated instead of remade (`commit::relocate`), and
+    /// by the relocated node's operation.
     pub(crate) placements_moved: u64,
+    pub(crate) moved_by_op: FxHashMap<OpId, u64>,
+    /// Runs whose commit found every output of the run before them
+    /// (`commit`: no definition, contribution, output, bracket or
+    /// placement changed), by operation ([`crate::Report::runs_wasted`]).
+    pub(crate) wasted_by_op: FxHashMap<OpId, u64>,
     /// The commits' whole time (under the lock and the re-asks after)
     /// and the reads their records file, by operation.
     pub(crate) commit_by_op: FxHashMap<OpId, (u64, u64)>,

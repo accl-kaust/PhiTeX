@@ -82,6 +82,20 @@ Finisher keys (`PageKey`, chained through a cut piece's rest) are unchanged
 in form; with 2.1 and 2.3 the chain is stable across a cold build: a key
 changes only when the page really fires in another piece.
 
+Measured after 2.3 (the ledger, 2026-10-28): the chain was not stable. On
+course3 at one thread the fires moved between neighbouring pieces while
+the breaks settled (the loop's key set changed in 64 of 170 runs), 384
+finishers were made for 95 pages, and each one made anew unfiled the old
+one's definitions, re-asking every finisher after it through the page
+counters (count:189 362 wakes, count:0 126). Keys as the fires' ordinals
+were measured worse again, relocation or not (a page appearing or
+vanishing moves every finisher after it: 2322 relocations, 2046 finisher
+runs at one thread). So a key is minted where the page first fires (the
+piece and a number past the last run's keys in it) and **kept by the
+page's start** (`Checkpoint::start`, `LoopKeys`): a page fired again from
+the same first item takes the key it had, wherever it fires now, and 2.3
+relocates its finisher after the other piece.
+
 ## 3. What is deleted
 
 - In `Resume`'s arguments: `cont` and the claim guess.

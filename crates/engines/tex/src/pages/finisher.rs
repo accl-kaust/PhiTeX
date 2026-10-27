@@ -215,7 +215,7 @@ impl Run<'_, '_> {
             },
             None => None,
         };
-        let nth = key.map_or(0, |k| i64::from(k.nth));
+        let nth = page.as_ref().map_or(0, |p| i64::from(p.nth));
         if crate::exec::obs_flag!("PHITEX_FIN_TRACE") {
             eprintln!(
                 "fin-trace: node {} page {nth} of its piece spec {} page {}",
@@ -1000,7 +1000,7 @@ impl Run<'_, '_> {
         };
         let locals = self.lazy_locals(own_view);
         let mut args = vec![
-            v.int(i64::from(fin.key.nth)),
+            v.int(i64::from(fin.nth)),
             fire.data,
             v.list(fire.carried.clone()),
             v.list(locals),

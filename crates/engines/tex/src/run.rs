@@ -849,6 +849,8 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) pubs: Option<(((usize, usize, usize, u64), u64), Vec<(Field, crate::state::Pub, Locality)>, Vec<Loc>)>,
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
+    /// The page loop's keys for this run ([`crate::pages::LoopKeys`]).
+    pub loop_keys: crate::pages::LoopKeys,
     pub cut: Option<u32>,
     /// The candidate a second pass ends at ([`Halt::Recut`]).
     pub stop_at: Option<u32>,
@@ -1015,6 +1017,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pubs: None,
             ins_pending: Vec::new(),
             fin: None,
+            loop_keys: crate::pages::LoopKeys::default(),
             cut: None,
             stop_at: None,
             chars_live: None,

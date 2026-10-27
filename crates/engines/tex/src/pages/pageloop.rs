@@ -36,9 +36,9 @@
 //! ([`phitex_defuse::Ctx::placed_output_or`]), and waits for nothing.
 //!
 //! Identity: one node, arguments `[]`; a page's key is `(piece, nth)`,
-//! the piece it fired in and its place among the pages fired in that
-//! piece. State is in definitions and the parked [`LoopState`]; nothing
-//! of it is an argument of any node.
+//! minted where it first fired and kept by its start ([`PageKey`],
+//! [`LoopKeys`]). State is in definitions and the parked [`LoopState`];
+//! nothing of it is an argument of any node.
 
 use phitex_defuse::{Cause, Ctx, Effect, MayDefine, NodeId, Operation, Stop, ValueId, Values};
 
@@ -78,6 +78,71 @@ pub(crate) struct Checkpoint {
     /// (the finisher's output where it has run, else the guess).
     pub guess: ValueId,
     pub gave: ValueId,
+    /// Where the page began: its first item from a piece (the piece and
+    /// the item), by which the next run gives a page fired again from
+    /// there the same key ([`LoopKeys`]); none for a page made of the
+    /// routine's material alone.
+    pub start: Option<(i64, u32)>,
+}
+
+/// The page keys of one run of the loop ([`PageKey`]): the last run's
+/// pages by their start, the keys this run has placed, and the next
+/// fresh key per piece.
+#[derive(Default)]
+pub(crate) struct LoopKeys {
+    /// The last run's pages by where each began ([`Checkpoint::start`]):
+    /// the key a page fired again from there keeps.
+    old: Vec<((i64, u32), PageKey)>,
+    /// The keys placed in this run: each is one page's.
+    taken: phitex_defuse::FxHashSet<PageKey>,
+    /// Per piece, the next fresh key's number: past every key of the last
+    /// run in that piece, so that a fresh key never takes an old page's.
+    next: phitex_defuse::FxHashMap<NodeId, u32>,
+}
+
+impl LoopKeys {
+    fn of(old: &LoopState) -> LoopKeys {
+        let mut k = LoopKeys::default();
+        for c in old.checkpoints.iter().chain(&old.beyond) {
+            if let Some(s) = c.start {
+                k.old.push((s, c.key));
+            }
+            let e = k.next.entry(c.key.piece).or_default();
+            *e = (*e).max(c.key.nth.saturating_add(1));
+        }
+        k
+    }
+
+    /// The key of a page firing in `node` that begins at `start`: the
+    /// last run's page beginning there keeps its key, where this run has
+    /// not placed it yet; else a fresh one of `node`.
+    fn key(&mut self, node: NodeId, start: Option<(i64, u32)>) -> PageKey {
+        if let Some(s) = start
+            && let Some(&(_, k)) = self.old.iter().find(|e| e.0 == s)
+            && !self.taken.contains(&k)
+        {
+            return k;
+        }
+        let e = self.next.entry(node).or_default();
+        let mut k = PageKey { piece: node, nth: *e };
+        while self.taken.contains(&k) {
+            k.nth += 1;
+        }
+        *e = k.nth + 1;
+        k
+    }
+
+    fn taken(&self, k: PageKey) -> bool {
+        self.taken.contains(&k)
+    }
+}
+
+/// Where a page's spans begin: its first item from a piece.
+fn page_start(spans: &[Span]) -> Option<(i64, u32)> {
+    spans.iter().find_map(|s| match s.src {
+        Src::Piece { piece, item } => Some((piece, item)),
+        _ => None,
+    })
 }
 
 /// The parked state of the loop: its checkpoints in fire order and where
@@ -102,7 +167,7 @@ pub(crate) struct LoopState {
 }
 
 /// The tag of a parked [`LoopState`] of this version.
-const STATE_TAG: &str = "\u{1}pages-loop-3";
+const STATE_TAG: &str = "\u{1}pages-loop-4";
 
 impl LoopState {
     pub(crate) fn encode(&self, v: &Values) -> ValueId {
@@ -118,6 +183,8 @@ impl LoopState {
                     c.state,
                     c.guess,
                     c.gave,
+                    v.int(c.start.map_or(-1, |s| s.0)),
+                    v.int(c.start.map_or(0, |s| i64::from(s.1))),
                 ])
             })
             .collect()
@@ -142,7 +209,7 @@ impl LoopState {
         let mut checkpoints = Vec::new();
         for (i, c) in list_of(v, x).into_iter().enumerate() {
             let cs = list_of(v, c);
-            if cs.len() != 8 {
+            if cs.len() != 10 {
                 return None;
             }
             checkpoints.push(Checkpoint {
@@ -157,6 +224,7 @@ impl LoopState {
                 state: cs[5],
                 guess: cs[6],
                 gave: cs[7],
+                start: (int_of(v, cs[8]) != -1).then(|| (int_of(v, cs[8]), u32::try_from(int_of(v, cs[9])).unwrap_or(0))),
             });
         }
         Some(checkpoints)
@@ -352,6 +420,7 @@ impl Run<'_, '_> {
         let v = self.v;
         // 1. the parked state
         let old = self.cx.resumed().and_then(|x| LoopState::decode(v, x)).unwrap_or_default();
+        self.loop_keys = LoopKeys::of(&old);
         // 2. where to start
         let me = self.cx.node();
         let n_old = old.checkpoints.len();
@@ -523,6 +592,7 @@ impl Run<'_, '_> {
     /// the piece's rest).
     fn emit_page(&mut self, i: usize, key: PageKey, cursor: NodeId, x: ValueId, args: ValueId, prev: Option<NodeId>) {
         let v = self.v;
+        self.loop_keys.taken.insert(key);
         self.cx.define_with(key.field(v, PAGE_OF), x, Locality::Global);
         let args = list_of(v, args);
         let at = match prev {
@@ -570,6 +640,13 @@ impl Run<'_, '_> {
             {
                 let mut moved = None;
                 for j in *i + 1..old.checkpoints.len() {
+                    // (an old page whose key a page of this run has
+                    // taken, fired again from the old page's start: not
+                    // kept, the fold goes on from the page before it)
+                    if self.loop_keys.taken(old.checkpoints[j].key) {
+                        moved = Some(j - 1);
+                        break;
+                    }
                     let gave = self.emit_kept(ls, &old.checkpoints[j]);
                     if gave != old.checkpoints[j].gave {
                         moved = Some(j);
@@ -713,6 +790,7 @@ impl Run<'_, '_> {
             state: encode_state(v, st, lc, &q),
             guess: q.rtn_guess,
             gave,
+            start: page_start(&page.spans),
         });
         (i, q)
     }
@@ -980,16 +1058,12 @@ impl Run<'_, '_> {
                 spans_pieces.push(piece);
             }
         }
-        // (the page's key: a fire in the contributor the last page fired
-        // in, or in the one right after it (the rest of that piece where
-        // the fire cut it), counts on in that chain; any other begins one)
-        let chained = lc.chain_at.is_some() && (lc.chain_at == Some(node) || lc.chain_at == lc.cur);
-        let (root, nth) = match lc.nth.0 {
-            Some(r) if chained => (r, lc.nth.1),
-            _ => (node, 0),
-        };
-        lc.nth = (Some(root), nth + 1);
-        lc.chain_at = Some(node);
+        // (the pages fired in this contributor before this one, the
+        // finisher's place among those placed after it; the page's key
+        // is the one it had where it began, else fresh, [`LoopKeys`])
+        let nth = if lc.nth.0 == Some(node) { lc.nth.1 } else { 0 };
+        lc.nth = (Some(node), nth + 1);
+        let pkey = self.loop_keys.key(node, page_start(&spans));
         // (a routine's material by the pages before this one counted back
         // from it, not by their index among all the pages)
         let rel = |src: Src| match src {
@@ -997,8 +1071,9 @@ impl Run<'_, '_> {
             s => s,
         };
         let page = Page {
-            key: PageKey { piece: root, nth },
+            key: pkey,
             at: node,
+            nth,
             normal: st.normal,
             special: f.output_penalty <= -10001,
             hint,
@@ -1028,8 +1103,8 @@ impl Run<'_, '_> {
                 self.cx.node().raw(),
                 j + 1,
                 node.raw(),
-                root.raw(),
-                nth,
+                pkey.piece.raw(),
+                pkey.nth,
                 f.k,
                 page.spans.len(),
                 f.best,
@@ -1994,7 +2069,6 @@ pub(crate) fn encode_state(v: &Values, st: &ScanState, lc: &LoopCarry, p: &FireN
     }
     e.node(lc.nth.0);
     e.i(i64::from(lc.nth.1));
-    e.node(lc.chain_at);
     encode_fire(&mut e, p);
     v.list(e.xs)
 }
@@ -2099,7 +2173,6 @@ pub(crate) fn encode_tail(v: &Values, st: &ScanState, lc: &LoopCarry) -> ValueId
     e.i(i64::try_from(lc.seq).unwrap_or(0));
     e.node(lc.nth.0);
     e.i(i64::from(lc.nth.1));
-    e.node(lc.chain_at);
     e.i(i64::from(lc.ended));
     v.list(e.xs)
 }
@@ -2162,7 +2235,6 @@ impl Run<'_, '_> {
             lc.rtns.push((page, val, std::sync::Arc::new(items)));
         }
         lc.nth = (d.node(), d.u32());
-        lc.chain_at = d.node();
         let p = decode_fire(&mut d);
         (st, lc, p)
     }
@@ -2240,7 +2312,6 @@ impl Run<'_, '_> {
         }
         lc.seq = u64::try_from(d.i()).unwrap_or(0);
         lc.nth = (d.node(), d.u32());
-        lc.chain_at = d.node();
         lc.ended = d.i() != 0;
         (st, lc)
     }

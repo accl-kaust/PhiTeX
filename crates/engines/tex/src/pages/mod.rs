@@ -76,13 +76,23 @@ pub(crate) use replay::*;
 pub(crate) use routine::*;
 pub(crate) use seal::*;
 
-/// A page's key: the piece its chain of fires began in and its place
-/// among the pages of that chain (a page fired in the rest of a piece cut
-/// at the page before, a resume node, counts on from that piece: re-cut,
-/// the rest is placed anew and the key stands). Identity of its
-/// finisher; the name of its field (`pages:page:<piece raw id>:<nth>`,
-/// `pages:out:<piece>:<nth>`). An earlier change of the text moves no
-/// later page's key unless the page moves to another piece.
+/// A page's key: the identity of its finisher and the name of its
+/// fields (`pages:page:<piece raw id>:<nth>`, `pages:out:<piece>:<nth>`),
+/// minted when the page first fires (the piece it fired in and a number
+/// past every key the loop's last run had in that piece) and **kept by
+/// the page's start** ([`Checkpoint::start`], [`LoopKeys`]): a page
+/// fired again from the same first item takes the key it had, wherever
+/// it fires now. A fire that moves to another piece then keeps its node:
+/// the loop places the finisher after the other piece and the engine
+/// relocates it there (`commit::relocate`, docs/spec-continuations.md
+/// §2.3) with its record's definitions as predictions, so nothing after
+/// it is re-asked for a value that stands. (Keyed by the piece chain it
+/// fired in, a cold build of course3 made 384 finishers for 95 pages at
+/// one thread, the fires moving between neighbouring pieces while the
+/// breaks settled, every finisher made anew unfiling the old one's
+/// definitions and re-asking every finisher after it through the page
+/// counters; keyed by the fire's ordinal, a page appearing or vanishing
+/// moved every finisher after it: 2322 relocations, 2046 runs.)
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct PageKey {
     pub piece: phitex_defuse::NodeId,
@@ -105,9 +115,13 @@ pub(crate) struct Page {
     /// The page's identity ([`PageKey`]).
     pub key: PageKey,
     /// The contributor the page fired in: the finisher is placed right
-    /// after it, its window ends there, and the pages fired in it before
-    /// this one give its place among the finishers placed after it.
+    /// after it and its window ends there.
     pub at: phitex_defuse::NodeId,
+    /// The pages fired in [`Page::at`] before this one: its place among
+    /// the finishers placed after that contributor (the finisher's
+    /// `nth`, the document's order of what its routine writes). Not the
+    /// key's `nth`, which is an identity.
+    pub nth: u32,
     /// The ordinary pages fired up to this one, with it where it is one.
     pub normal: i64,
     /// Whether `\outputpenalty` is -10001 or less (§1013).
@@ -210,13 +224,14 @@ impl Page {
             v.int(i64::from(self.special)),
             v.list(self.classes.iter().map(|&n| v.int(i64::from(n))).collect()),
             raw(self.at),
+            v.int(i64::from(self.nth)),
         ])
     }
 
     /// [`Page::encode`]'s page; `None` on any other value.
     pub(crate) fn decode(v: &Values, x: ValueId) -> Option<Page> {
         let p = list_of(v, x);
-        if p.len() != 28 {
+        if p.len() != 29 {
             return None;
         }
         let n = |i: usize| int_of(v, p[i]);
@@ -227,6 +242,7 @@ impl Page {
                 nth: u32::try_from(n(15)).unwrap_or(0),
             },
             at: node_of(n(27)),
+            nth: u32::try_from(n(28)).unwrap_or(0),
             normal: n(24),
             special: n(25) != 0,
             hint: p[23],

@@ -115,11 +115,9 @@ pub(crate) struct LoopCarry {
     /// ([`OwnerReads`]): a piece's unit and its paragraphs' lines' units
     /// share it.
     pub own: OwnerReads,
-    /// The piece the last page's chain of fires began in and the pages
-    /// of that chain ([`PageKey`]).
+    /// The contributor the last page fired in and the pages fired in it
+    /// ([`Page::nth`]).
     pub nth: (Option<phitex_defuse::NodeId>, u32),
-    /// The contributor the last page fired in ([`Page::at`]).
-    pub chain_at: Option<phitex_defuse::NodeId>,
     /// Whether `\end` has ended the job (§1054: its page empty, nothing
     /// left, no dead cycle), or the job was aborted: nothing after it is
     /// read.
@@ -158,7 +156,6 @@ impl LoopCarry {
             seq: 0,
             own: OwnerReads::default(),
             nth: (None, 0),
-            chain_at: None,
             ended: false,
         }
     }

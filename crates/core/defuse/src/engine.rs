@@ -1223,6 +1223,8 @@ impl Engine {
         };
         let mut by_op: FxHashMap<OpId, u64> = FxHashMap::default();
         let mut placed: FxHashMap<OpId, u64> = FxHashMap::default();
+        let mut moved: FxHashMap<OpId, u64> = FxHashMap::default();
+        let mut wasted: FxHashMap<OpId, u64> = FxHashMap::default();
         let mut commit_by: FxHashMap<OpId, (u64, u64)> = FxHashMap::default();
         let mut rbf: FxHashMap<Field, u64> = FxHashMap::default();
         let mut pbf: FxHashMap<Field, u64> = FxHashMap::default();
@@ -1259,6 +1261,12 @@ impl Engine {
                 *placed.entry(op).or_default() += k;
             }
             rep.placements_moved += std::mem::take(&mut log.placements_moved);
+            for (op, k) in log.moved_by_op.drain() {
+                *moved.entry(op).or_default() += k;
+            }
+            for (op, k) in log.wasted_by_op.drain() {
+                *wasted.entry(op).or_default() += k;
+            }
             for (op, (t, k)) in log.commit_by_op.drain() {
                 let e = commit_by.entry(op).or_default();
                 e.0 += t;
@@ -1289,6 +1297,11 @@ impl Engine {
         rep.runs_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         rep.placed_by_op = placed.into_iter().map(|(op, k)| (self.op(op).name(), k)).collect();
         rep.placed_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        rep.placements_moved_by_op = moved.into_iter().map(|(op, k)| (self.op(op).name(), k)).collect();
+        rep.placements_moved_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        rep.wasted_by_op = wasted.into_iter().map(|(op, k)| (self.op(op).name(), k)).collect();
+        rep.wasted_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        rep.runs_wasted = rep.wasted_by_op.iter().map(|x| x.1).sum();
         rep.commit_by_op = commit_by.into_iter().map(|(op, (t, k))| (self.op(op).name(), t, k)).collect();
         rep.commit_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         rep.refuted_by_field = rbf.into_iter().collect();
