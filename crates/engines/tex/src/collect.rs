@@ -8,7 +8,8 @@
 //!   (`pdfout::PAGE_KEYS`, `pdfout::collect_pieces`: their parameters,
 //!   sealed lines' stand-ins, glyph table and color stacks); the rest
 //!   dropped with their written records;
-//! - the finishers' tables (`Ops::fin_defs`, `Ops::fin_defs_start`);
+//! - the finishers' tables (`Ops::fin_defs`, `Ops::fin_defs_start`) and
+//!   the pages' routine hints the loop left for them (`Ops::fin_class`);
 //! - the cut document files' kept arguments (`Ops::docs`);
 //! - the format's values made for the build (`Ops::fmt_made`);
 //! - the build's environment, job and files (`Ops::held`).
@@ -58,6 +59,9 @@ pub(crate) fn roots(o: &Ops, eng: &Engine, keep: &mut dyn FnMut(ValueId)) {
     }
     for d in o.fin_defs_start.locked().values() {
         d.roots(keep);
+    }
+    for &(hint, _) in o.fin_class.locked().values() {
+        keep(hint);
     }
     for f in o.docs.locked().values() {
         f.locked().roots(keep);

@@ -796,10 +796,18 @@ pub(crate) fn bot_marks_after(v: &Values, before: ValueId, page: &[u32], table: 
 /// routine and `\outputpenalty`, give the same guess in every attempt,
 /// whatever page `j`'s own output; one changed by it is a defect (its
 /// finisher placed anew on its own output).
+type GuessSeen = Option<phitex_defuse::FxHashMap<(u64, i64, u64), ValueId>>;
+static GUESS_SEEN: std::sync::Mutex<GuessSeen> = std::sync::Mutex::new(None);
+
+/// At a collection ([`crate::collect`]): the guesses [`guess_check`] saw
+/// dropped (a guess made again after it may have another id).
+pub(crate) fn clear_guess_seen() {
+    *GUESS_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
 pub(crate) fn guess_check(node: u64, j: i64, how: impl std::hash::Hash, guess: ValueId) {
     use std::hash::Hasher as _;
-    type Seen = Option<phitex_defuse::FxHashMap<(u64, i64, u64), ValueId>>;
-    static SEEN: std::sync::Mutex<Seen> = std::sync::Mutex::new(None);
+    static SEEN: &std::sync::Mutex<GuessSeen> = &GUESS_SEEN;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(&how, &mut h);
     let key = (node, j, h.finish());

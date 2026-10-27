@@ -356,6 +356,20 @@ pub(crate) struct FinDefs {
 }
 
 impl FinDefs {
+    /// Every value it holds, for a collection ([`crate::collect`]).
+    pub(crate) fn roots(&self, keep: &mut dyn FnMut(ValueId)) {
+        let defs = self.prev.iter().chain(&self.last).chain(self.pages.values().flat_map(|p| &p.1));
+        for &(f, x) in defs {
+            keep(f.0);
+            keep(x);
+        }
+        for &(f, x, _, _) in &self.recent {
+            keep(f.0);
+            keep(x);
+        }
+        self.gdefs.into_iter().for_each(&mut *keep);
+    }
+
     /// The history a finisher of page `idx` predicts from: the page's
     /// own last run where it ran before (a finisher placed again, a round
     /// after the first), both runs that one; else the last two runs. (A
@@ -1177,7 +1191,7 @@ impl Run<'_, '_> {
             );
         }
         let mut rels: Vec<(Field, i64)> = Vec::new();
-        let maps: Vec<(Loc, crate::regfold::Affine)> = self.reg_pending.iter().map(|(&l, &m)| (l, m)).collect();
+        let maps: Vec<(Loc, crate::regfold::Affine)> = self.reg_pending.iter().collect();
         for (l, m) in maps {
             if m.keep && self.count_reg(l).is_some() && !self.st.defined_after(l, 0) {
                 rels.push((self.loc_field(l), i64::from(m.add)));
