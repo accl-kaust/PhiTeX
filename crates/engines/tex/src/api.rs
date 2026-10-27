@@ -1478,6 +1478,11 @@ pub struct Stats {
     /// Placements relocated instead of remade over the build's
     /// evaluations (`phitex_defuse::Report::placements_moved`).
     pub placements_moved: u64,
+    /// Runs held back until the node that woke them had run again, and
+    /// those released at a quiet point instead, over the build
+    /// (`phitex_defuse::Report::runs_waited`, `waits_broken`).
+    pub runs_waited: u64,
+    pub waits_broken: u64,
     /// The profile units the page loop folded over all its runs.
     pub units_folded: u64,
     /// The units of each accumulator the last evaluation ended with
@@ -1694,7 +1699,14 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         .take(8)
         .map(|(o, t, k)| format!("{o} {:.3} ms/{k} reads", std::time::Duration::from_nanos(*t).as_secs_f64() * 1e3))
         .collect();
-    eprintln!("acct: commits by op (whole time, reads filed): {}; placed by op {:?}; moved {}", commits.join(", "), r.placed_by_op, r.placements_moved);
+    eprintln!(
+        "acct: commits by op (whole time, reads filed): {}; placed by op {:?}; moved {}; runs waited {} (broken at quiet points {})",
+        commits.join(", "),
+        r.placed_by_op,
+        r.placements_moved,
+        r.runs_waited,
+        r.waits_broken
+    );
     let mut by_field: Vec<(String, u64)> = r
         .refuted_by_field
         .iter()
@@ -1842,6 +1854,11 @@ pub struct RunReport {
     /// (`phitex_defuse::Report::placements_moved`,
     /// docs/spec-continuations.md §2.3).
     pub placements_moved: u64,
+    /// Runs held back until the node that woke them had run again, and
+    /// those released at a quiet point instead
+    /// (`phitex_defuse::Report::runs_waited`, `waits_broken`).
+    pub runs_waited: u64,
+    pub waits_broken: u64,
 }
 
 impl RunReport {
@@ -2049,6 +2066,10 @@ impl Stats {
         self.page_steps += Report::by_op(&r.runs_by_op, "finish");
         self.placements_moved += r.placements_moved;
         self.last.placements_moved += r.placements_moved;
+        self.runs_waited += r.runs_waited;
+        self.last.runs_waited += r.runs_waited;
+        self.waits_broken += r.waits_broken;
+        self.last.waits_broken += r.waits_broken;
         for &(k, n) in &r.placed_by_op {
             match self.placed_by_op.iter_mut().find(|x| x.0 == k) {
                 Some(x) => x.1 += n,

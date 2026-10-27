@@ -126,6 +126,13 @@ pub(crate) struct Node {
     /// commit checks its placements where it stands now, though its run
     /// published nothing new (`Ctx::unchanged`).
     pub(crate) moved: AtomicBool,
+    /// The node it waits for before it runs again (raw id + 1; 0: none):
+    /// the one whose commit woke it last, itself to run again
+    /// (`sched::wait_for_writer`). Released when that node's run ends
+    /// (`sched::end_run`), or at a quiet point with nothing else to run.
+    pub(crate) waits_on: AtomicU64,
+    /// The nodes whose `waits_on` is it.
+    pub(crate) waiters: Mx<Vec<NodeId>>,
 }
 
 /// An effect as 32 bits: closes, opens, `before`, and whether pending.
@@ -163,6 +170,8 @@ impl Node {
             has_brackets: AtomicBool::new(false),
             anchored: Mx::new(Vec::new()),
             moved: AtomicBool::new(false),
+            waits_on: AtomicU64::new(0),
+            waiters: Mx::new(Vec::new()),
             id,
             unit,
             op: AtomicU32::new(op.0),

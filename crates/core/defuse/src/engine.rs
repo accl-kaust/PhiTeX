@@ -1203,6 +1203,8 @@ impl Engine {
             rep.commits += load(&w.commits);
             rep.final_reruns = rep.final_reruns.max(u32::try_from(load(&w.final_max)).unwrap_or(u32::MAX));
             rep.steals += load(&w.steals);
+            rep.runs_waited += load(&w.waited);
+            rep.waits_broken += load(&w.waits_broken);
             rep.times.op_ns += load(&w.op_ns);
             rep.times.wasted_ns += load(&w.wasted_ns);
             rep.times.commit_ns += load(&w.commit_ns);

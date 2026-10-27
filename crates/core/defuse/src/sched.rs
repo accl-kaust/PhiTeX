@@ -10,7 +10,19 @@
 //! left (a block's tail is its owner's, so no steal cuts a definer from
 //! the reader right after it), then parks. The evaluation ends when
 //! `outstanding` (queued plus running nodes) is zero: no step, no round,
-//! no barrier. Nothing waits for a node.
+//! no barrier. Nothing waits for a node, with one exception:
+//!
+//! A node woken by another's commit runs only once that node is not
+//! going to run again on newer information (`wait_for_writer`): taken
+//! from a deque while its waker was re-asked after waking it (in its run,
+//! or queued again by a later wake), it is put aside, uncounted,
+//! on the waker's list (`Node::waiters`) and the pool's (`Shared::waiting`),
+//! and queued again when the waker's run ends in any state but queued
+//! again (`end_run`), on that worker's `later` deque. A value settles in
+//! steps; its reader runs once after the last, not once per step. A
+//! waiter whose waker never ends so (a cycle of waiters, a waker taken by
+//! a claim) is released at the quiet point, before the `final_only` nodes:
+//! nothing else could run, so it runs on what there is.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
@@ -69,6 +81,10 @@ pub(crate) struct Shared {
     /// Dirty nodes of `Operation::final_only` operations, uncounted, run
     /// when the line is next quiet.
     deferred: Mx<Vec<NodeId>>,
+    /// Nodes put aside for their waker (`wait_for_writer`), uncounted:
+    /// those still waiting at a quiet point are released there. An entry
+    /// whose node was released by its waker meanwhile is stale and skipped.
+    waiting: Mx<Vec<NodeId>>,
     /// The roots the caller's edit source holds (`EditSource::roots`),
     /// given by the caller's worker as it comes to the barrier.
     extra_roots: Mx<Vec<crate::values::ValueId>>,
@@ -183,6 +199,10 @@ pub(crate) struct Worker {
     pub(crate) lock_wait_ns: AtomicU64,
     pub(crate) lock_wait_max_ns: AtomicU64,
     pub(crate) steals: AtomicU64,
+    /// Nodes it put aside for their waker (`wait_for_writer`), and the
+    /// waiters it released at quiet points.
+    pub(crate) waited: AtomicU64,
+    pub(crate) waits_broken: AtomicU64,
     pub(crate) woken: AtomicU64,
     pub(crate) relative_resolved: AtomicU64,
     pub(crate) predictions_confirmed: AtomicU64,
@@ -292,6 +312,7 @@ impl Pool {
             final_limit: limits.final_reruns,
             collect_wanted: AtomicBool::new(false),
             deferred: Mx::new(Vec::new()),
+            waiting: Mx::new(Vec::new()),
             extra_roots: Mx::new(Vec::new()),
             panicked_roots: Mx::new(Vec::new()),
             collecting: AtomicBool::new(false),
@@ -326,6 +347,8 @@ impl Pool {
                 lock_wait_ns: AtomicU64::new(0),
                 lock_wait_max_ns: AtomicU64::new(0),
                 steals: AtomicU64::new(0),
+                waited: AtomicU64::new(0),
+                waits_broken: AtomicU64::new(0),
                 woken: AtomicU64::new(0),
                 relative_resolved: AtomicU64::new(0),
                 predictions_confirmed: AtomicU64::new(0),
@@ -422,6 +445,11 @@ impl Pool {
                 Steal::Success(n) => left.push(n),
                 Steal::Empty => break,
                 Steal::Retry => {}
+            }
+        }
+        for n in std::mem::take(&mut *self.shared.waiting.lock()) {
+            if eng.node(n).waits_on.swap(0, Ordering::AcqRel) != 0 {
+                left.push(n);
             }
         }
         for n in left {
@@ -736,6 +764,22 @@ fn run_worker(
         // released, and once they are done, the loop-back values
         // published, their readers whose answer moved run again (a pass)
         if w.ix == 0 {
+            // (nothing else can run: whoever is still waiting for a waker
+            // runs on what there is)
+            let waiting: Vec<NodeId> = std::mem::take(&mut *pool.shared.waiting.lock());
+            let rel: Vec<NodeId> = waiting
+                .into_iter()
+                .filter(|&n| {
+                    let node = eng.node(n);
+                    node.waits_on.swap(0, Ordering::AcqRel) != 0 && node.state() == State::Dirty
+                })
+                .collect();
+            if !rel.is_empty() {
+                Worker::add(&w.waits_broken, rel.len() as u64);
+                w.seed(&rel);
+                pool.shared.wake_all();
+                continue;
+            }
             let rel: Vec<NodeId> = std::mem::take(&mut *pool.shared.deferred.lock())
                 .into_iter()
                 .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty))
@@ -1057,6 +1101,12 @@ fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), E
 
 fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
     let node = eng.node(n);
+    if node.state() == State::Dirty
+        && let Some(by) = wait_for_writer(eng, node)
+    {
+        park_waiting(eng, pool, w, node, by);
+        return Ok(());
+    }
     if !node.cas_state(State::Dirty, State::Running) {
         pool.shared.done_one();
         return Ok(());
@@ -1215,6 +1265,7 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
             // (removed meanwhile; nothing else leaves a run's states)
             State::Gone | State::Inert | State::Clean | State::Dirty => {
                 node.committing.store(false, Ordering::Release);
+                release_waiters(eng, w, node);
                 pool.shared.done_one();
                 return false;
             }
@@ -1229,8 +1280,78 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
         } else {
             pool.shared.done_one();
         }
+        // (queued again: its waiters wait for that run; deferred to the
+        // quiet point: they are released there before it runs)
+        if to != State::Dirty {
+            release_waiters(eng, w, node);
+        }
         return to == State::Clean;
     }
+}
+
+/// The node `node` (dirty, taken from a deque) waits for before it runs:
+/// the one whose commit woke it last (`Wake::by`), when that one was
+/// re-asked after it woke `node` (in its run, `RunningDirty`; or queued
+/// again by a later wake), so it will run again on something newer than
+/// what it woke `node` for. A waker still in the run whose commit woke
+/// `node`, or queued by a wake older than `node`'s (one commit waking a
+/// chain of readers at once, each naming the one before it: they run
+/// side by side), clean, parked, taken or gone is no reason to wait; nor
+/// is a wake with no waker (an edit, the environment, a push).
+fn wait_for_writer(eng: &Engine, node: &Node) -> Option<NodeId> {
+    let (by, mine) = {
+        let g = node.woke.lock();
+        let wk = g.as_ref()?;
+        (wk.by?, wk.at_ns)
+    };
+    if by == node.id {
+        return None;
+    }
+    let waker = eng.placed_node(by)?;
+    match waker.state() {
+        State::RunningDirty => Some(by),
+        State::Dirty => waker.woke.lock().as_ref().is_some_and(|w| w.at_ns > mine).then_some(by),
+        State::Clean | State::Running | State::Inert | State::RunningInert | State::Gone => None,
+    }
+}
+
+/// Puts `node` aside for `by`: on `by`'s waiters, the pool's waiting
+/// list, uncounted. The waker may end between the look and the listing:
+/// then this release is ours.
+fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, by: NodeId) {
+    node.waits_on.store(by.raw() + 1, Ordering::Release);
+    let waker = eng.node(by);
+    waker.waiters.lock().push(node.id);
+    pool.shared.waiting.lock().push(node.id);
+    Worker::add(&w.waited, 1);
+    pool.shared.done_one();
+    if !matches!(waker.state(), State::Dirty | State::RunningDirty | State::Running) {
+        release_waiter(eng, w, node, by);
+    }
+}
+
+/// Queues the nodes waiting for `waker`, whose run ended.
+fn release_waiters(eng: &Engine, w: &Worker, waker: &Node) {
+    let waiters = std::mem::take(&mut *waker.waiters.lock());
+    for n in waiters {
+        release_waiter(eng, w, eng.node(n), waker.id);
+    }
+}
+
+/// Queues `node` if it still waits for `by` (one release per wait: the
+/// waker's end and the quiet point both come here).
+fn release_waiter(eng: &Engine, w: &Worker, node: &Node, by: NodeId) {
+    if node.waits_on.compare_exchange(by.raw() + 1, 0, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    if node.state() != State::Dirty {
+        // (taken or removed meanwhile; given back, it is queued by that)
+        return;
+    }
+    let _ = eng;
+    w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
+    w.later.push(node.id);
+    w.shared.wake_one();
 }
 
 /// A loop-back reader re-asked at a quiet point (`commit::publish_finals`):
