@@ -1637,6 +1637,29 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         .map(|(k, d, n)| format!("{k} {:.3} ms/{n}", d.as_secs_f64() * 1e3))
         .collect();
     eprintln!("acct: op time by kind: {}", kinds.join(", "));
+    // (runs against live nodes per operation: where the runs beyond one a
+    // node go)
+    {
+        let mut nodes: std::collections::BTreeMap<&'static str, u64> = std::collections::BTreeMap::new();
+        let (mut found, mut i, target) = (0usize, 0u64, eng.live_nodes());
+        while found < target && i < 1 << 32 {
+            if let Some(info) = eng.node_info(phitex_defuse::NodeId::from_raw(i)) {
+                *nodes.entry(info.op).or_default() += 1;
+                found += 1;
+            }
+            i += 1;
+        }
+        let by: Vec<String> = nodes
+            .iter()
+            .map(|(op, n)| {
+                let runs = r.runs_by_op.iter().find(|x| x.0 == *op).map_or(0, |x| x.1);
+                #[allow(clippy::cast_precision_loss)]
+                let per = runs as f64 / *n as f64;
+                format!("{op} {runs}/{n} ({per:.2})")
+            })
+            .collect();
+        eprintln!("acct: runs/live nodes by op: {}", by.join(", "));
+    }
     if !r.collections.is_empty() {
         let cs: Vec<String> = r
             .collections
