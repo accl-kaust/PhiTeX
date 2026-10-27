@@ -668,12 +668,13 @@ impl Run<'_, '_> {
     /// the rest in [`Run::prefixed_rest`].
     pub(crate) fn prefixed_command(&mut self) -> R<()> {
         let c = self.cur.cmd;
-        if matches!(c, cmd::DEF | cmd::LET | cmd::REGISTER | cmd::ADVANCE) {
+        if matches!(c, cmd::DEF | cmd::LET | cmd::REGISTER | cmd::ADVANCE | cmd::ASSIGN_INT) {
             let gd = self.ipar(Par::globaldefs)?;
             let global = gd > 0;
             match c {
                 cmd::DEF => self.def_cmd(if global { 4 } else { 0 }, false, gd, global)?,
                 cmd::LET => self.let_cmd(global)?,
+                cmd::ASSIGN_INT => self.assign_int(global)?,
                 _ => self.do_register_command(global)?,
             }
             return self.after_assignment();
@@ -795,17 +796,7 @@ impl Run<'_, '_> {
                 let val = toks_value(v, &body);
                 self.set_f(field, val, global);
             }
-            cmd::ASSIGN_INT => {
-                let l = self.quantity_loc(cmd::ASSIGN_INT, self.cur.chr);
-                self.scan_optional_equals()?;
-                let n = self.scan_int()?;
-                // (an integer register's: a map, `crate::regfold`)
-                if self.reg_map_ok(l, global)? {
-                    self.reg_apply_map(l, crate::regfold::Affine::set(n));
-                } else {
-                    self.set_loc(l, Entry::int(n), global);
-                }
-            }
+            cmd::ASSIGN_INT => self.assign_int(global)?,
             cmd::ASSIGN_DIMEN => {
                 let l = self.quantity_loc(cmd::ASSIGN_DIMEN, self.cur.chr);
                 self.scan_optional_equals()?;
@@ -1048,6 +1039,20 @@ impl Run<'_, '_> {
                 Some(l) => self.st.taint(l),
                 None => self.lt.strong = true,
             }
+        }
+        Ok(())
+    }
+
+    /// An integer parameter's or `\countdef` register's assignment (§1228).
+    fn assign_int(&mut self, global: bool) -> R<()> {
+        let l = self.quantity_loc(cmd::ASSIGN_INT, self.cur.chr);
+        self.scan_optional_equals()?;
+        let n = self.scan_int()?;
+        // (an integer register's: a map, `crate::regfold`)
+        if self.reg_map_ok(l, global)? {
+            self.reg_apply_map(l, crate::regfold::Affine::set(n));
+        } else {
+            self.set_loc(l, Entry::int(n), global);
         }
         Ok(())
     }

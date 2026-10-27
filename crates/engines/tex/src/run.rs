@@ -622,7 +622,7 @@ pub(crate) struct Run<'c, 'a> {
     /// The integer registers' writes this run made as maps of their
     /// value, composed in order, contributed at its end instead of
     /// definitions ([`crate::regfold`], [`Run::reg_write_map`]).
-    pub reg_pending: phitex_defuse::FxHashMap<Loc, crate::regfold::Affine>,
+    pub reg_pending: crate::regfold::Maps,
     /// Whether the node is a package load at the unit's top level, whose
     /// run is recorded (`crate::pkgrec`) and publishes its net effect.
     pub rec_load: bool,
@@ -999,7 +999,7 @@ impl<'c, 'a> Run<'c, 'a> {
             in_skip: false,
             skip_from: (None, 0),
             skip_first: Vec::new(),
-            reg_pending: phitex_defuse::FxHashMap::default(),
+            reg_pending: crate::regfold::Maps::default(),
             rec_load: false,
             no_pull: false,
             st: crate::runstate::State::new(),
@@ -1620,7 +1620,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let mut x = r?;
         // (an integer register: this run's own map writes before the read
         // applied, [`Run::reg_apply_map`])
-        if let Some(&own) = self.reg_pending.get(&loc) {
+        if let Some(own) = self.reg_pending.get(loc) {
             let v = self.v;
             x = Some(v.int(i64::from(own.apply(crate::val::i32_of(v, x)))));
         }
@@ -1711,7 +1711,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.count_reg(loc)
             );
         }
-        let own = self.reg_pending.get(&loc).copied().unwrap_or(crate::regfold::Affine::ID);
+        let own = self.reg_pending.get(loc).unwrap_or(crate::regfold::Affine::ID);
         self.reg_pending.insert(loc, own.then(map));
         if self.st.is_loaded(loc) {
             let x = map.apply(self.st.int_of(loc, self.v));
@@ -4933,7 +4933,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // (inside a scope every map is a global write's, `Run::reg_map_ok`:
         // it stands past the scope)
         let loc = if matches!(self.scope_kind_memo, Some(Some(_))) { Locality::Global } else { Locality::Local };
-        for (l, m) in std::mem::take(&mut self.reg_pending) {
+        for (l, m) in self.reg_pending.take() {
             if self.count_reg(l).is_none() || self.st.defined_after(l, 0) {
                 continue;
             }
@@ -6042,7 +6042,7 @@ impl Run<'_, '_> {
             .map(|l| self.loc_field(l))
             .collect();
         // (the memos by field: their order the same for equal memos)
-        let m = self.reg_pending.iter().map(|(&l, &m)| (l, m)).collect();
+        let m = self.reg_pending.iter().collect();
         let reg_pending = by_field(self, m);
         let m = self.memos.with(M_CLASS).into_iter().map(|(l, x)| (l, x.class)).collect();
         let class_memo = by_field(self, m);

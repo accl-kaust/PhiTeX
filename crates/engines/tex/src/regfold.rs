@@ -51,3 +51,57 @@ impl Affine {
         if self.keep { x.wrapping_add(self.add) } else { self.add }
     }
 }
+
+/// A run's maps by register location ([`crate::run::Run::reg_pending`]):
+/// a few registers a run, looked up at every write, so a list searched
+/// in order (an index made past [`Maps::INDEXED`] of them).
+#[derive(Default, Clone)]
+pub(crate) struct Maps {
+    xs: Vec<(u32, Affine)>,
+    ix: phitex_defuse::FxHashMap<u32, usize>,
+}
+
+impl Maps {
+    const INDEXED: usize = 32;
+
+    fn find(&self, loc: u32) -> Option<usize> {
+        if self.xs.len() > Self::INDEXED {
+            self.ix.get(&loc).copied()
+        } else {
+            self.xs.iter().position(|x| x.0 == loc)
+        }
+    }
+
+    /// `loc`'s map, if the run wrote one.
+    #[inline]
+    pub(crate) fn get(&self, loc: u32) -> Option<Affine> {
+        self.find(loc).map(|i| self.xs[i].1)
+    }
+
+    /// Sets `loc`'s map.
+    pub(crate) fn insert(&mut self, loc: u32, m: Affine) {
+        if let Some(i) = self.find(loc) {
+            self.xs[i].1 = m;
+            return;
+        }
+        self.xs.push((loc, m));
+        if self.xs.len() > Self::INDEXED {
+            if self.ix.is_empty() {
+                self.ix = self.xs.iter().enumerate().map(|(i, x)| (x.0, i)).collect();
+            } else {
+                self.ix.insert(loc, self.xs.len() - 1);
+            }
+        }
+    }
+
+    /// The maps, in the order written first.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (u32, Affine)> + '_ {
+        self.xs.iter().copied()
+    }
+
+    /// The maps, taken.
+    pub(crate) fn take(&mut self) -> Vec<(u32, Affine)> {
+        self.ix.clear();
+        std::mem::take(&mut self.xs)
+    }
+}

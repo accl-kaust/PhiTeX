@@ -326,7 +326,8 @@ impl Run<'_, '_> {
             "@empty",
             "@nnil",
         ];
-        if name.as_cs().is_none_or(|c| c.name() != "MT@in@clist")
+        static CLIST: std::sync::OnceLock<Tok> = std::sync::OnceLock::new();
+        if name != *CLIST.get_or_init(|| Tok::cs("MT@in@clist"))
             || !m.body.iter().filter_map(|t| t.as_cs().map(crate::val::CsId::name)).eq(BODY)
         {
             return false;
@@ -619,31 +620,50 @@ impl Run<'_, '_> {
 
     /// §507: `\ifx`'s two tokens compared.
     fn if_x(&mut self) -> R<bool> {
-        Ok(if self.next_ck()? {
-            let m1 = self.cur_mean()?;
-            let t1 = self.cur.tok;
-            let (p, q) = self.cur_cmd_chr_for_ifx(t1, &m1);
-            if self.next_ck()? {
-                let m2 = self.cur_mean()?;
-                let t2 = self.cur.tok;
-                let (c2, h2) = self.cur_cmd_chr_for_ifx(t2, &m2);
-                if c2 != p {
-                    false
-                } else if c2 < cmd::CALL {
-                    h2 == q
-                } else {
-                    match (&m1, &m2) {
-                        (Mean::Macro(a), Mean::Macro(b)) => {
-                            Rc::ptr_eq(a, b) || (a.params == b.params && a.body == b.body)
-                        }
-                        _ => false,
-                    }
-                }
-            } else {
-                false
-            }
-        } else {
+        if !self.next_ck()? {
+            return Ok(false);
+        }
+        let (p, h1, m1) = self.ifx_side()?;
+        if !self.next_ck()? {
+            return Ok(false);
+        }
+        let (c2, h2, m2) = self.ifx_side()?;
+        Ok(if c2 != p {
             false
+        } else if c2 < cmd::CALL {
+            h2 == h1
+        } else {
+            match (m1, m2) {
+                (Some(a), Some(b)) => Rc::ptr_eq(&a, &b) || (a.params == b.params && a.body == b.body),
+                _ => false,
+            }
+        })
+    }
+
+    /// One side of `\ifx` (§507): the current token's command code, its
+    /// modifier (0 for a macro), and its macro if it is one. A decoded
+    /// meaning of the run's table is read in place, no `Mean` made.
+    fn ifx_side(&mut self) -> R<(u8, i32, Option<Rc<Macro>>)> {
+        let (c, h) = (self.cur.cmd, self.cur.chr);
+        if self.interp.is_none()
+            && !(c == cmd::RELAX && h == crate::val::NO_EXPAND_FLAG)
+            && !self.cur.tok.is_frozen_cs()
+            && let Some(i) = self.cur.tok.cs_index()
+        {
+            let l = crate::runstate::Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(u32::MAX);
+            if self.st.meaning_entry(l).is_some() {
+                return Ok(match self.st.macro_at(l) {
+                    Some(m) => (c, 0, Some(m)),
+                    None => (c, h, None),
+                });
+            }
+        }
+        let t = self.cur.tok;
+        let m = self.cur_mean()?;
+        let (c, h) = self.cur_cmd_chr_for_ifx(t, &m);
+        Ok(match m {
+            Mean::Macro(x) => (c, h, Some(x)),
+            _ => (c, h, None),
         })
     }
 

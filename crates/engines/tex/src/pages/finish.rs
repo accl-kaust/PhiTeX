@@ -2178,7 +2178,7 @@ impl Run<'_, '_> {
             );
         }
         let mut rels: Vec<(Field, i64)> = Vec::new();
-        let maps: Vec<(Loc, crate::regfold::Affine)> = self.reg_pending.iter().map(|(&l, &m)| (l, m)).collect();
+        let maps: Vec<(Loc, crate::regfold::Affine)> = self.reg_pending.iter().collect();
         for (l, m) in maps {
             if m.keep && self.count_reg(l).is_some() && !self.st.defined_after(l, 0) {
                 rels.push((self.loc_field(l), i64::from(m.add)));

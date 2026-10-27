@@ -409,7 +409,8 @@ impl Run<'_, '_> {
     /// the meaning is not needed, every test there is on `cur_tok`); the
     /// internal markers still go through the slow path. A halt is raised
     /// (the sentinel returned).
-    #[inline]
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub(crate) fn get_token_tok(&mut self) -> Tok {
         // (an alignment of this run counts every brace, §342: the slow
         // path then)
@@ -424,6 +425,11 @@ impl Run<'_, '_> {
                 return t;
             }
         }
+        self.get_token_tok_slow()
+    }
+
+    #[inline(never)]
+    fn get_token_tok_slow(&mut self) -> Tok {
         self.get_token_stored();
         self.cur.tok
     }

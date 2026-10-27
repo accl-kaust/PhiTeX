@@ -131,11 +131,23 @@ impl Arena {
     /// Copies `xs` in as one list.
     pub(crate) fn alloc(&mut self, xs: &[Tok]) -> Range {
         let start = self.mark();
-        self.toks.extend_from_slice(xs);
+        push_short(&mut self.toks, xs);
         Range {
             start,
             end: self.mark(),
         }
+    }
+}
+
+/// Appends `xs` to `to`: token by token when short (no `memcpy` call).
+#[inline]
+fn push_short(to: &mut Vec<Tok>, xs: &[Tok]) {
+    if xs.len() <= 16 {
+        for &t in xs {
+            to.push(t);
+        }
+    } else {
+        to.extend_from_slice(xs);
     }
 }
 
@@ -193,14 +205,23 @@ impl Arena {
     ) -> Range {
         let start = self.mark();
         let (t0, b0) = (b.toks as usize, b.bounds as usize);
+        // (the pieces are short: copied token by token into room made
+        // once, not by a `memcpy` call each)
+        let arg = |sb: &[(u32, u32)], p: u8| {
+            if p == 0 {
+                return None;
+            }
+            sb.get(b0 + usize::from(p) - 1).map(|&(lo, hi)| t0 + lo as usize..t0 + hi as usize)
+        };
+        let n: usize = segs
+            .iter()
+            .map(|s| (s.hi - s.lo) as usize + arg(&self.sbounds, s.param).map_or(0, |r| r.len()))
+            .sum();
+        self.toks.reserve(n);
         for s in segs {
-            self.toks
-                .extend_from_slice(&body[s.lo as usize..s.hi as usize]);
-            if s.param != 0
-                && let Some(&(lo, hi)) = self.sbounds.get(b0 + usize::from(s.param) - 1)
-            {
-                self.toks
-                    .extend_from_slice(&self.scratch[t0 + lo as usize..t0 + hi as usize]);
+            push_short(&mut self.toks, &body[s.lo as usize..s.hi as usize]);
+            if let Some(r) = arg(&self.sbounds, s.param) {
+                push_short(&mut self.toks, &self.scratch[r]);
             }
         }
         Range {
