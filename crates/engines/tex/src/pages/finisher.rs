@@ -260,6 +260,15 @@ impl Run<'_, '_> {
             });
             return Ok(());
         };
+        // (a page fired at a forced special penalty, \outputpenalty at
+        // -10001 or below: no layout decision, TeX's own serial chain from
+        // the text to the routine and back (LaTeX's floats and marginpars
+        // taking boxes from \@freelist and giving them back at -10002):
+        // what the routine defines re-asks the text at once,
+        // docs/spec-settle.md §2)
+        if page.as_ref().is_some_and(|p| p.output_penalty <= FORCED_SPECIAL) {
+            self.cx.settle_now();
+        }
         // 3. the routine on its page
         let a = |i: usize| fargs.get(i).copied().unwrap_or(ValueId::UNIT);
         self.fin = Some(FinCtx {
@@ -614,8 +623,13 @@ pub(crate) const FINISHER_FIELDS: &[&str] = &[
 /// routine defines and gives back otherwise in each class, so each has
 /// its own history ([`FinDefs`]).
 pub(crate) fn pen_class(p: i32) -> i32 {
-    if p > -10001 { i32::MAX } else { p }
+    if p > FORCED_SPECIAL { i32::MAX } else { p }
 }
+
+/// The highest special `\outputpenalty` (§1013's forced break below
+/// -10000, `\penalty-10001` and lower): a page fired there is no layout
+/// decision of the builder but the text calling its routine.
+pub(crate) const FORCED_SPECIAL: i32 = -10001;
 
 /// [`fin_key`] of routine `t` on a page of class `pen`.
 pub(crate) fn fin_key_class(t: ValueId, pen: i32) -> u64 {

@@ -93,6 +93,7 @@ impl<'a> Ctx<'a> {
                 state: None,
                 resumed: std::cell::Cell::new(false),
                 woken_at: None,
+                settle_now: false,
             },
             views: Vec::new(),
             ep: u64::MAX,
@@ -710,6 +711,17 @@ impl<'a> Ctx<'a> {
     /// is nothing to keep (a prediction stands as made).
     pub fn unchanged(&mut self) {
         self.product.unchanged = true;
+    }
+
+    /// What this run defines is no decision of its settling layer
+    /// (`Operation::settles_at_quiet`) but a step of a serial chain the
+    /// text waits on: a changed definition re-asks a reader outside the
+    /// layer at once, as it re-asks one inside it, instead of holding the
+    /// wake to the next quiet point (docs/spec-settle.md §2). Kept with
+    /// the run's record: a run that publishes nothing new
+    /// (`Ctx::unchanged`) keeps its last run's.
+    pub fn settle_now(&mut self) {
+        self.product.settle_now = true;
     }
 
     /// Stores `state` with this run's record for my next run (`resumed`):

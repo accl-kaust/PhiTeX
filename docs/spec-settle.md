@@ -38,6 +38,22 @@ An operation may declare that its definitions settle at quiet points
 - Readers of a settling node's output (`Ctx::placed_output`), of its
   contributions, of structure, are not held: those edges are the page
   layer's own.
+- A run of a settling operation that says its definitions are no
+  decision of the layer (`Ctx::settle_now`) re-asks every reader at once,
+  the text too. A finisher says so for a page fired at a forced special
+  penalty (`\outputpenalty` at -10001 or below, §1013: the text called
+  its routine, the builder decided nothing): that is TeX's own serial
+  chain, text to routine to text, which a quiet point can only cut into
+  one step a pass. Every other page-layer wake stays held.
+  Why (2026-10-28): LaTeX's `\marginpar` (and a float in the text) takes
+  two boxes from `\@freelist` where the text is, and its routine at
+  `\penalty-10002` (`\@specialoutput`, `\@addmarginpar`) gives them
+  back; the next marginpar's text reads the list that routine left.
+  Held, a reader of `\@freelist` ran again only at the next quiet point,
+  so each pass advanced one marginpar: an article with 20 or 28
+  marginpar paragraphs ran out the 12 passes ('the page layout did not
+  settle', then LaTeX's 'Float(s) lost'; 162 of 163 held wakes on
+  `cs:@freelist`), and so did the manuals of that group.
 - The passes are bounded as latexmk bounds its runs
   (`Limits::settle_passes`; latexmk's `max_repeat` is 5 whole runs, the
   default here is 12 passes while the text still speculates ahead of the

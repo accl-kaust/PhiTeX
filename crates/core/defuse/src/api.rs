@@ -286,7 +286,9 @@ pub trait Operation: Send + Sync {
     /// (`sched::hold_wake`): the page layer converges among itself inside
     /// a pass, and the text sees one state of it per pass, as TeX's own
     /// passes read the aux file the run before wrote, never a part of
-    /// what this one is writing.
+    /// what this one is writing. A run that says its definitions are no
+    /// decision of the layer (`Ctx::settle_now`) re-asks every reader at
+    /// once.
     fn settles_at_quiet(&self) -> bool {
         false
     }

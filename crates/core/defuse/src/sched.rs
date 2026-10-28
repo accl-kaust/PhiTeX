@@ -1038,9 +1038,12 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
 }
 
 /// Whether a definition by `by` reaches `reader` across the settling
-/// line: `by`'s operation settles at quiet points, `reader`'s does not.
+/// line: `by`'s operation settles at quiet points and its last run said
+/// nothing of `Ctx::settle_now`, `reader`'s does not settle.
 pub(crate) fn settles_edge(eng: &Engine, by: NodeId, reader: &Node) -> bool {
-    eng.placed_node(by).is_some_and(|b| eng.op(b.op()).settles_at_quiet()) && !eng.op(reader.op()).settles_at_quiet()
+    eng.placed_node(by)
+        .is_some_and(|b| eng.op(b.op()).settles_at_quiet() && !b.settle_now.load(Ordering::Acquire))
+        && !eng.op(reader.op()).settles_at_quiet()
 }
 
 /// Lists a wake for the next quiet point (`Report::held_deferred`).

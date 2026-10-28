@@ -594,6 +594,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // moved as a run's are, `relocate`)
     let moved = node.moved.swap(false, Ordering::AcqRel);
     let keep_placed = p.unchanged && node.record().is_some() && !moved;
+    // (whether its definitions reach readers outside its settling layer
+    // at once: before any walk of this commit asks, `sched::settles_edge`)
+    if !p.unchanged {
+        node.settle_now.store(p.settle_now, Ordering::Release);
+    }
     if let Some(r) = node.record().filter(|_| p.unchanged) {
         p.defs.clone_from(&r.defs);
         p.contribs.clone_from(&r.contribs);

@@ -112,6 +112,11 @@ pub(crate) struct Node {
     /// that went on from it read one kept from the run before that no
     /// longer holds. The next run is offered none (`Ctx::resumed`).
     pub(crate) state_stale: AtomicBool,
+    /// Its last commit's definitions are none of a settling layer's
+    /// decisions (`Ctx::settle_now`): a reader outside the layer is
+    /// re-asked at once, not held to the quiet point
+    /// (`sched::settles_edge`).
+    pub(crate) settle_now: AtomicBool,
     /// Where it stands among the nodes placed at its anchor: 0 a child
     /// of it, 1 after it and its children (another's `Ctx::follow_after`,
     /// or the placement after it in its placer's run), 2 its own
@@ -168,6 +173,7 @@ impl Node {
             follows: AtomicBool::new(false),
             anchor: AtomicU64::new(0),
             state_stale: AtomicBool::new(false),
+            settle_now: AtomicBool::new(false),
             slot: AtomicU8::new(0),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
@@ -501,4 +507,7 @@ pub(crate) struct Product {
     /// at the commit is one the run did not read again where it was told
     /// to go back before it.
     pub(crate) woken_at: Option<NodeId>,
+    /// `Ctx::settle_now`: its definitions reach readers outside the
+    /// settling layer at once.
+    pub(crate) settle_now: bool,
 }

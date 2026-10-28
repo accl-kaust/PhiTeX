@@ -631,6 +631,46 @@ fn latex_paragraph_nodes() {
     edit_check("paras30", &b, &cold, &before);
 }
 
+/// `pdflatex` on articles of 20 and 28 paragraphs, each with a
+/// `\marginpar` (`pdfdocs/marginpars20.tex`, `marginpars28.tex`, 2 and 3
+/// pages): each marginpar takes two boxes from `\@freelist` in the text,
+/// and its routine, fired at `\penalty-10002`, gives them back; the next
+/// marginpar's text reads the list that routine left, a serial chain
+/// through the page layer (docs/spec-settle.md §2): held to quiet points,
+/// a pass advanced one marginpar and the 12 passes ran out ('the page
+/// layout did not settle', 'Float(s) lost'). The PDF equals pdfTeX's at
+/// -j1 and -j8, settled.
+#[test]
+fn latex_marginpars_settle() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    for name in ["marginpars20", "marginpars28"] {
+        let src = common::read(&dir.join(format!("{name}.tex")));
+        let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf"))).expect("the oracle");
+        for threads in [1, 8] {
+            let opts = Options {
+                threads: Some(threads),
+                ..pdf_opts(name, &dir)
+            };
+            let b = common::build(opts, Some(&prelude(true)), &src);
+            let (pdf, log) = b.output();
+            let bad: Vec<String> = b
+                .diagnostics()
+                .into_iter()
+                .map(|d| d.message)
+                .filter(|m| m.contains("did not settle") || m.contains("Float(s) lost"))
+                .collect();
+            eprintln!("{name} -j {threads}: {}", report(name, &b));
+            assert!(
+                bad.is_empty() && !log.contains("Float(s) lost"),
+                "{name} -j {threads}: {bad:?}"
+            );
+            if let Some(d) = common::first_difference(&pdf, &want) {
+                panic!("{name} -j {threads}: pdf {d}");
+            }
+        }
+    }
+}
+
 /// `pdflatex` on an article with an abstract, two sections, itemize,
 /// enumerate, a theorem and a proof (amsthm), a figure with a caption
 /// and a quotation (`pdfdocs/envs.tex`, 4 pages): every paragraph end
