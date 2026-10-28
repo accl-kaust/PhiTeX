@@ -142,6 +142,37 @@ Recurring kinds among them:
   translation-enumitem-de, tugboat ltubguid, typstfun, ucalgmthesis,
   webquiz, zed-csp.
 
+## The oracle for Shelf's retrace
+
+Shelf's retrace (mc 75761, PhiTeX 7e165b00) builds each class or
+package with Shelf's own files: a flat directory of TeX Live's newest
+archives. It reported "! TeX capacity exceeded, sorry [input stack
+size=10000]" for `pst-doc.cls` and `tudscrmanual.cls`, where TeX Live
+builds fine. That comparison was with the system TeX Live: LaTeX
+2025-11-01 and its older packages, not the files PhiTeX read.
+
+On the same files pdfTeX overflows at the same place (mc 75779):
+
+- Shelf's archives at their newest revision, `tex/` only (4493
+  packages), first on `TEXINPUTS`.
+- A pdflatex format made from that tree (LaTeX 2026-06-01, L3
+  2026-09-09).
+- The trace's own job body.
+
+| class | where pdftex (that format) stops | PhiTeX |
+|---|---|---|
+| pst-doc | after "Checking defaults for PU/pdf/m/n ... okay" (log line 1624) | the same (line 1470) |
+| tudscrmanual | after "strongly recommended to load package `hyperref'"; `\extrasenglish ->\extrasenglish` calls itself | the same |
+
+PhiTeX's tail recursion matches pdftex (mc 75774). Loops driven by
+`\expandafter`, `\loop`, `\afterassignment`, `\the\toks` and
+`\romannumeral` run 20000 steps in both. A recursion that is not a
+tail (`\a\fi`) overflows in both.
+
+Rule: the retrace's oracle is pdftex (or xetex) on a format made from
+the same tree, never the system TeX Live. Only a difference from that
+oracle is a PhiTeX difference.
+
 ## Notes for whoever goes on
 
 - `pages::an_edit_that_moves_a_break_out_of_a_claimed_span` failed once

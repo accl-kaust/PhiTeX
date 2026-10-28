@@ -5,6 +5,138 @@ Fixed and on dev: the lost wake of `At::End` readers (7ffbf9b1) and the
 block-head-first scheduling rule (0ccf5e9b). Everything below is open.
 Numbers come from accl jobs unless a job says mc.
 
+## 0. The reds agent's queue (2026-10-28, at the session's halt)
+
+In order. Each item has its state and the next step. Loop scripts are
+in `~/code/tmp/phitex-reds/.reds/`, outside the repository:
+
+- `amsloop.sh N J...`: N cold amsldoc builds per -j, with md5 and the
+  skip trace.
+- `showbox*.sh`, `specials*.sh`, `stack*.sh`, `shelfrepro.sh`: pdftex
+  oracles.
+
+Submit them with `CLUSTER=mc scripts/accl/accl submit cmd bash -c '...'`.
+
+### 0.1 The read-on rule (branch reds11, fa388673)
+
+**Cause.** The `\item` pieces of amsldoc skipped to the document's end
+at -j16 (21 of 40 builds, mc 75763). A speculative piece read a mix:
+imakeidx's two-parameter `\@wrindex` (its `\let` had committed) and
+the kernel `\makeindex`'s `\index` (imakeidx's `\makeindex[intoc]` had
+not). The mix opened an `\if@endpe` inside protected@write's `\edef`,
+and the skip then pulled 735 to 774 siblings.
+
+**Rule (main's decision).** A read-on (a pull that claims the next
+sibling) is taken only when every node before the puller has
+committed. Otherwise the run halts with `Halt::Hole` and is filed with
+that node, which runs it again when it commits, is taken, is removed or
+moves.
+
+Test: `fatal::a_read_on_waits_for_the_text_before_it`.
+
+**First version (3a90060b).** A waiting run committed with
+`Ctx::unchanged`. Gate 22038-22049 was red:
+
+- amsldoc -j8 and -j16 gave wrong PDFs: 43 pages, and at -j16 "File
+  ended while scanning use of \@newl@bel".
+- Walls were 5.0 s at -j8 and 5.2 s at -j16, against 2.7-3.1 s and
+  2.3-2.7 s.
+
+**Second version (fa388673).** The waiting run ends as a starved run
+does (`stall "hole"`, nothing defined). Gate 22056-22067 was red, so
+**do not merge reds11**:
+
+- amsldoc was wrong at -j1 and at -j8 (md5 e35ec8b6, 43 pages); -j16
+  was right.
+- Walls were 32.5 s at -j1, 9.7 s at -j8 and 9.2 s at -j16.
+- editkinds -j1 differed.
+
+A wrong output at -j1 is not a race. Next step:
+
+1. Count the waits per build, and the node kinds waited on. The rule
+   waits for every node before the puller that has not committed,
+   including page-layer nodes, finishers and paragraph children. Some of
+   these wait on text after the puller. Each wait that ends in a stall
+   also takes back that node's definitions, which re-asks its readers.
+2. Restrict "before" to the text nodes (`exec`, `resume`) of the
+   puller's unit, and keep a waiting run's last record (`unchanged`)
+   only when the run is not a first run.
+3. Find the lost output at -j1 with `PHITEX_NODE_DUMP` on -j1 builds. The
+   suspect is a waiter whose wake is lost between `file_waits` and
+   `wake_waiters`, so its stall stands at the end.
+
+### 0.2 §1069 and `\showbox` / `\showlists` "! OK." (branch reds13, a0a22209, on dev)
+
+**Done.**
+
+- `\showbox` displays the box as `show_box` does (new `showbox.rs`,
+  §180-§198), then "! OK.". It counts for the exit status and never
+  towards the hundred errors.
+- An extra `}` is reported: "Too many }'s", or "Extra }, or forgotten
+  \endgroup / $ / \right".
+- Tests: `diagnostics::showbox_displays_the_box_and_says_ok` (oracle mc
+  75792) and `an_extra_right_brace_is_reported`, 16 of 16 on mc 75793.
+- Gate 22080-22091 (the same change on top of reds11 is reds12,
+  145eacb9).
+
+**Left, each with its next step.**
+
+- `\showlists` logs the empty line and "! OK." only.
+  - Its activities need: each nest level's entry line (a field on
+    `nest::Level`), the page's status at the outer level (a read of the
+    page loop's state), prevdepth and spacefactor, and the display of
+    noads (§690-§698).
+  - Next step: the outer vertical level with an empty page. "### vertical
+    mode entered at line 0" and "prevdepth ignored" is most of the
+    l3build uses.
+- `\show`, `\showthe`, `\showtokens`, `\showgroups` and `\showifs` exit
+  0. pdftex exits 1, because `error()` sets the history (mc 75789).
+  - The CLI's exit status comes from "! " lines (compat.rs, session.rs).
+  - Next step: a `Build::history` (`log:errors` plus the show events),
+    and compat's exit status read from it.
+- Layout differences:
+  - The log is laid out in batch mode. pdftex in nonstop mode prints an
+    extra blank line before "! OK." when the terminal's offset is not 0
+    (mc 75790).
+  - Errors have no context lines.
+  - Overfull and underfull boxes show no box (§663 calls `show_box`).
+    `Run::show_box_lines` now makes that display.
+
+### 0.3 The 46 XeTeX page-one `\special`s (note-xetex-corpus.md §2.1)
+
+**State.**
+
+- Plain probes match pdftex's DVI: a `\special` before the first box,
+  with `\write`, `\message`, a kern or a penalty after it
+  (`.reds/specials.sh`).
+- fs5 and fs6 differ under pdflatex's DVI path too, not only under
+  XeTeX. fs5 is `regression-test.tex` plus `\geometry`. fs6 is
+  `\START\OMIT` before the first word.
+- The lost specials are issued in vertical mode by
+  `regression-test.tex` lines 215-300, before `\documentclass` (mc
+  75769 printed them).
+
+**Next step.**
+
+1. Cut fs6 down: drop `regression-test.tex` and keep its two `\special`s,
+   then `\OMIT`'s `\typeout`, then `\documentclass`.
+2. Compare `pdftex -output-format=dvi` with `phitex --compat=pdftex
+   -output-format=dvi`.
+3. Then follow the whatsits through the page builder's first page
+   (§1000: a whatsit on an empty page is kept, not discarded) in
+   `pages/`.
+
+### 0.4 The rest, in order
+
+- The intermittents below: §1 (stale reads at `Me`, branch
+  intermit-scope b503f662), §2 (the placement orphan), §3 (core.rs
+  counters).
+- Run-137 cut mode: 858 of 863 uncut, so the indentation is wrong at
+  -j16. Main asked for the cause with a test that fails before the fix.
+- Closed: Shelf's input-stack overflow. It is no PhiTeX difference:
+  pdftex on Shelf's tree overflows at the same place (mc 75779). The
+  oracle rule is in note-corpus-differs.md.
+
 ## Tools
 
 Loop scripts live outside the repository, in `~/code/tmp/intermit-tools/`:
