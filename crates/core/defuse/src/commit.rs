@@ -2825,6 +2825,8 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     let mut k = 0usize;
     let mut retracts: Vec<Arc<Node>> = Vec::new();
     let mut releases: Vec<Arc<Node>> = Vec::new();
+    // (those of `releases` made `Dirty`, for the queue)
+    let mut freed: Vec<Arc<Node>> = Vec::new();
     let mut taken_holes: Vec<Arc<Node>> = Vec::new();
     let mut stops: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
     // (what it held before, up to there; what it holds now, to here)
@@ -2881,6 +2883,13 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
                     // takes: given back, whatever it claims now)
                     if s.claimer() == Some(me.id) {
                         s.claimer.store(0, Ordering::Release);
+                        // (free at once, under the segment's lock: a node
+                        // taken with no holder is neither held nor free,
+                        // and another claim's walk meeting it counted it
+                        // as its own without taking it)
+                        if s.release() {
+                            freed.push(s.clone());
+                        }
                         releases.push(s.clone());
                     }
                     if k >= want && Some(s.id) == old_end {
@@ -2912,6 +2921,13 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
                 } else {
                     if s.claimer() == Some(me.id) {
                         s.claimer.store(0, Ordering::Release);
+                        // (free at once, under the segment's lock: a node
+                        // taken with no holder is neither held nor free,
+                        // and another claim's walk meeting it counted it
+                        // as its own without taking it)
+                        if s.release() {
+                            freed.push(s.clone());
+                        }
                         releases.push(s.clone());
                     }
                     if Some(s.id) == old_end || old_end.is_none() {
@@ -2936,6 +2952,8 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     }
     me.claim_end.store(new_end.map_or(0, |n| n.raw() + 1), Ordering::Release);
     drop(walk);
+    #[cfg(test)]
+    tests::paused_after(me.id);
     for s in retracts {
         retract(eng, w, &s);
     }
@@ -2966,19 +2984,17 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     for s in &releases {
         wake_puller(eng, w, s, me.id);
     }
-    for s in releases {
-        if s.release() {
-            enqueue(
-                eng,
-                w,
-                &s,
-                Wake {
-                    by: Some(me.id),
-                    cause: Cause::Structure,
-                    at_ns: eng.now_ns(),
-                },
-            );
-        }
+    for s in freed {
+        enqueue(
+            eng,
+            w,
+            &s,
+            Wake {
+                by: Some(me.id),
+                cause: Cause::Structure,
+                at_ns: eng.now_ns(),
+            },
+        );
     }
 }
 
@@ -3762,6 +3778,8 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
 /// whose answer moved: a bracket decides which definitions reach
 /// everything after it.
 pub(crate) fn file_effect(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, b: Option<Brackets>, st: &mut CommitStats) {
+    // (`Some`: a node taken, its brackets none; `None`: its own, free)
+    let taken = b.is_some();
     let b = match b {
         Some(b) => b,
         None => {
@@ -3778,6 +3796,11 @@ pub(crate) fn file_effect(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, b:
     let Some((_, mut inner)) = own_write(eng, node) else {
         return;
     };
+    // (under the lock a claim takes and gives back under: brackets of a
+    // node given back, of one taken none, whichever walk came last)
+    if node.taken() != taken {
+        return;
+    }
     let pos = node.pos_hint();
     let old = file_brackets(eng, &mut inner, node, pos, b);
     drop(inner);
@@ -3934,6 +3957,23 @@ mod tests {
     /// Held by each test here for its length: node ids are per engine, so
     /// another test's node could stand for the one paused at.
     static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    /// The node whose walk pauses after it stored its `claim_end` (raw
+    /// id + 1), before what it gave back is filed and queued; the same
+    /// barrier.
+    static PAUSE_AFTER: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn paused_after(me: NodeId) {
+        if PAUSE_AFTER.load(Ordering::Acquire) != me.raw() + 1 {
+            return;
+        }
+        PAUSE_AFTER.store(0, Ordering::Release);
+        let b = PAUSE.lock().unwrap().clone();
+        if let Some(b) = b {
+            b.wait();
+            b.wait();
+        }
+    }
 
     pub(super) fn paused(me: NodeId, want: usize) {
         if want != 0 || PAUSE_AT.load(Ordering::Acquire) != me.raw() + 1 {
@@ -4178,6 +4218,42 @@ mod tests {
             assert!(i.state != NodeState::Inert && i.claimer.is_none(), "T{k} still held by {:?}", i.claimer.map(|n| n.raw()));
         }
         assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+    }
+
+    #[test]
+    fn a_sibling_given_back_while_another_claim_walks_is_held_by_that_claim() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // P claims nothing, Q holds T. Q's claim goes to none: its walk
+        // gives T back and pauses before T is queued; P's claim of two
+        // then takes Q and T. T is P's: held by it, not run on its own
+        // (amsldoc at sixteen threads: a `\begin{minipage}` claiming 21
+        // counted its `\end{center}` while a resume's give-back of it was
+        // under way, and the `\end{center}` then ran as a node too: 'Extra
+        // \endgroup', md5 f5ec0654).
+        let e = Engine::new();
+        let claimer = e.register(Arc::new(Claimer));
+        let text = e.register(Arc::new(Text));
+        let v = e.values();
+        let u = e.new_unit();
+        let p = e.push(u, claimer, vec![v.int(0)]);
+        let q = e.push(u, claimer, vec![v.int(1)]);
+        let t = e.push(u, text, vec![v.int(7)]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.node_info(t).unwrap().claimer, Some(q));
+        let b = Arc::new(Barrier::new(2));
+        *PAUSE.lock().unwrap() = Some(b.clone());
+        PAUSE_AFTER.store(q.raw() + 1, Ordering::Release);
+        std::thread::scope(|s| {
+            let er = &e;
+            let give_back = s.spawn(move || super::apply_claim(er, None, er.node(q), 0));
+            b.wait();
+            super::apply_claim(&e, None, e.node(p), 2);
+            b.wait();
+            give_back.join().unwrap();
+        });
+        *PAUSE.lock().unwrap() = None;
+        let i = e.node_info(t).unwrap();
+        assert_eq!((i.state, i.claimer), (NodeState::Inert, Some(p)), "T held by P");
     }
 
     #[test]
