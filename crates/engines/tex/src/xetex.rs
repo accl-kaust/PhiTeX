@@ -885,9 +885,12 @@ pub(crate) const LINEBREAK_SKIP_CODE: u8 = 15;
 
 /// The line break opportunities ICU's line break iterator gives in
 /// `text` (UTF-16) for locale `loc` (`ubrk_open(UBRK_LINE, loc)`): 0,
-/// each break, the length. Japanese and Chinese get ICU's `_cj` rules,
-/// the `lb` keyword (`@lb=loose`, `-u-lb-loose`) the strictness, ICU's
-/// default strict (normal for Japanese and Chinese).
+/// each break, the length. The `lb` keyword (`@lb=loose`, `-u-lb-loose`)
+/// is the strictness, ICU's default strict; Japanese and Chinese default
+/// to ICU's `line_normal` rules (their `line` entry: small kana and `ー`
+/// break as ideographs) and take the `_cj` rules only under a keyword
+/// (`line_normal_cj`, `line_loose_cj`: a break before `〜` and `゠`, a
+/// `content_locale` of theirs to ICU4X).
 pub(crate) fn line_breaks(loc: &str, text: &[u16]) -> Vec<usize> {
     use icu_segmenter::LineSegmenter;
     use icu_segmenter::options::{LineBreakOptions, LineBreakStrictness};
@@ -913,6 +916,7 @@ pub(crate) fn line_breaks(loc: &str, text: &[u16]) -> Vec<usize> {
     let mut options = LineBreakOptions::default();
     options.strictness = Some(strictness);
     options.content_locale = match lang {
+        _ if lb.is_none() => None,
         "ja" => Some(&ja),
         "zh" => Some(&zh),
         _ => None,

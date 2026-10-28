@@ -201,7 +201,7 @@ fn ini_bidi() {
 /// without spaces.
 #[test]
 fn ini_linebreak() {
-    run_owned(&ini_cases(&["linebreak"]));
+    run_owned(&ini_cases(&["linebreak", "linebreak-cj"]));
 }
 
 /// OpenType math: `\Umathchar`, the font's constants, variants and
