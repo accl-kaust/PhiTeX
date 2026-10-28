@@ -157,15 +157,15 @@ the engine spawns a process or touches the file system.
 
 ## The wasm hosts (`tools/minted-pyodide`)
 
-`host-glue.mjs` describes the old core's `Host::system`; the frontends map
-it onto this contract:
+phitex-tex has no wasm imports for this: a wasm host implements
+`ShellHook` in Rust, with whatever runs the command behind it
+(`tools/minted-pyodide`'s runner):
 
-- the engine's wasm side implements `ShellHook::run` with the same two
-  imports, `system_run(cmd, cmd_len, files, files_len) -> u32` and
-  `system_copy(dst)`, the files framed as there
-  (`u32 n, (u32 len, name, u32 len, bytes) × n`, little-endian), the answer
-  `i32 status`, the files written framed, the names removed framed with no
-  bytes;
+- its `run` is called on an engine worker; it posts the framed call
+  (`u32 n, (u32 len, name, u32 len, bytes) × n`, little-endian, as
+  `host-glue.mjs` frames files) to the host's thread that holds Pyodide
+  (thread 0) and waits on a `Condvar` for the answer (`i32 status`, the
+  files written framed, the names removed framed with no bytes);
 - `files` is exactly what `run` is given: the host adds nothing of its own
   (the old glue added the host's project files and its own written files:
   the engine now hands those it means the command to see);
@@ -178,3 +178,28 @@ it onto this contract:
   that are not given this time;
 - the engine's options: `shell_escape: 2` and the default
   `shell_commands` (latexminted is in it).
+
+## Time, threads, thrown-away calls
+
+- **A call may take seconds** (Pyodide's first load, about 10 MB, then
+  latexminted's start). `run` is called inside the command's node run, with
+  no engine lock held that another worker needs: the rest of the
+  evaluation goes on while a command runs (the nodes before it, and the
+  ones after it that do not read what it makes); only its readers wait.
+  A test holds this: a fake hook that sleeps 2 s while 300 paragraphs on
+  the other workers finish.
+- **The engine never assumes two calls run in parallel.** It may make
+  several at once from different workers; a host may serialise them (the
+  wasm hosts do, on Pyodide's thread). Since a call's result depends only
+  on its command and files, the order they run in changes nothing.
+- **A thrown-away call is a known cost.** The engine runs a command's node
+  as soon as the files at its place are known, as it runs any node; where
+  what comes before it is still moving (a cold build's first pass, a run
+  on a value that is later refuted), the call may be made on files that
+  turn out stale and its result dropped. The engine has no way to hold a
+  node until its inputs are final that the text could still wait on
+  (`Operation::final_only` nodes run only at quiet points, and nothing the
+  text reads may come from one), so such a call is made and its time
+  spent; a call with the same command and files as any earlier one is
+  answered from the memo without calling the host. In wasm a dropped call
+  costs its seconds.
