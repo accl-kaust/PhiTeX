@@ -444,26 +444,38 @@ def trace(tool: str | None, flat_files: dict[str, bytes], names: list[str], what
         try:
             r = subprocess.run([*args, *batch], capture_output=True, text=True, timeout=600)
             log.write(r.stderr)
+            if r.returncode:
+                log.write(f"batch {batch[0]}..: exit {r.returncode}\n")
             return r.stdout.splitlines()
         except subprocess.TimeoutExpired as e:  # (a job that never ends: its batch's done lines only)
             out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else e.stdout or ""
             log.write(f"batch {batch[0]}..: timed out\n")
             return out.splitlines()
 
+    def done(lines: list[str]) -> None:
+        for line in lines:
+            name, _, fs = line.partition("\t")
+            read[name] = set(filter(None, fs.split(",")))
+
     read: dict[str, set[str]] = {}
-    lines = run(["article.cls"])
+    done(run(["article.cls"]))
     with ThreadPoolExecutor(int(os.environ.get("TRACE_JOBS", "12"))) as ex:
         for i, more in enumerate(ex.map(run, batches), 1):
-            lines += more
+            done(more)
             if i % 40 == 0:
                 print(f"  {what}: traced {i}/{len(batches)} batches", file=sys.stderr)
-    for line in lines:
-        name, _, fs = line.partition("\t")
-        read[name] = set(filter(None, fs.split(",")))
+    # (the names of a batch that timed out or was killed, its memory cap
+    # reached, once more, a process each, two at once)
+    again = [n for n in names if n not in read]
+    if again:
+        print(f"  {what}: {len(again)} names again, one a process", file=sys.stderr)
+        with ThreadPoolExecutor(2) as ex:
+            for more in ex.map(run, [[n] for n in again]):
+                done(more)
     log.close()
-    missing = len(set(names) - read.keys())
+    missing = sorted(set(names) - read.keys())
     if missing:
-        print(f"  {what}: {missing} names not traced (a batch timed out)", file=sys.stderr)
+        print(f"  {what}: {len(missing)} names not traced (timed out or killed): {' '.join(missing)}", file=sys.stderr)
     saved.write_text(json.dumps({"key": key, "traced_by": version, "read": {n: sorted(fs) for n, fs in sorted(read.items())}}))
     return read, version
 

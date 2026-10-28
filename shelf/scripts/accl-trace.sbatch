@@ -90,7 +90,7 @@ echo "tracer and font index $(date +%T)"
 names=${4:-${CHECK_NAMES:-amsmath.sty,hyperref.sty,tikz.sty,geometry.sty,graphicx.sty,biblatex.sty,beamer.cls,fontspec.sty,unicode-math.sty,polyglossia.sty,xeCJK.sty,ctex.sty}}
 status=0
 box env SHELF_TRACE_LOGS="$w/results/logs" TLPDB=cache/texlive.tlpdb.xz TRACE=trace/target/release/shelf-trace TRACE_FONT_INDEX="$w/fontindex.pxfi" \
-  TRACE_JOBS="$jobs" PACK_JOBS="$jobs" $([ "$mode" = check ] && echo TRACE_NAMES="$names") \
+  TRACE_JOBS="$((jobs - 1))" PACK_JOBS="$jobs" $([ "$mode" = check ] && echo TRACE_NAMES="$names") \
   python3 build.py > "$w/results/build.log" 2>&1 || status=$?
 tail -40 "$w/results/build.log"
 cp "$w/shelf/cache/"trace-*.json "$w/shelf/cache/"trace-*.log "$w/results/" 2>/dev/null || true
