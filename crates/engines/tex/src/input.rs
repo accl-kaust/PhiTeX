@@ -316,6 +316,11 @@ impl Level {
 /// §307 token types, for diagnostics and §325's rules (the ones in use).
 pub(crate) mod ty {
     pub const BACKED_UP: u8 = 3;
+    /// XeTeX's `backed_up_char`: a character put back before the
+    /// `\XeTeXinterchartoks` inserted ahead of it.
+    pub const BACKED_UP_CHAR: u8 = 4;
+    /// XeTeX's `inter_char_text`.
+    pub const INTER_CHAR: u8 = 18;
     pub const MACRO: u8 = 5;
     /// A list no diagnostic names (`\the`, `\csname`, conversions).
     pub const OTHER: u8 = 17;
@@ -325,6 +330,7 @@ pub(crate) mod ty {
 /// `limit`, `state`): the characters, with `\endlinechar` appended once
 /// its end is reached.
 #[derive(Clone, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Line {
     pub buf: Vec<u32>,
     pub loc: usize,
@@ -352,6 +358,9 @@ pub(crate) struct Line {
     /// analysis of a file saw: a pseudo file's lines (pdfTeX §1766) and
     /// a `\read` line (§483).
     pub rescanned: bool,
+    /// XeTeX: `buf` is characters already (the line was read, its bytes
+    /// decoded in its file's mode), not a file's bytes.
+    pub chars: bool,
 }
 
 pub(crate) const MID_LINE: u8 = 0;
@@ -390,6 +399,7 @@ impl Line {
             origin: None,
             lineno: 0,
             rescanned,
+            chars: false,
         }
     }
 }

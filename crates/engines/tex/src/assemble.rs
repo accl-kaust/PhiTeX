@@ -49,7 +49,7 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
     } else {
         let pages = v.seq_to_vec(cx.fold(v.field("pages"), None, None)?);
         n = pages.len();
-        dvi_file(cx, &pages, o.xe.get().is_some())
+        dvi_file(cx, &pages, o.xe.get())
     };
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -261,7 +261,9 @@ fn latin1(bytes: &[u8]) -> String {
 /// and 2, give `pre … bop 1 … eop bop 2 … eop post … post_post`; the
 /// value is those bytes as characters. No page: no file (§642), the
 /// empty string.
-fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId], xdv: bool) -> Result<ValueId, Stop> {
+#[allow(clippy::too_many_lines)]
+fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId], xe: Option<&crate::xetex::XeTeX>) -> Result<ValueId, Stop> {
+    let xdv = xe.is_some();
     let v = cx.values();
     if pages.is_empty() {
         return Ok(v.str(""));
@@ -318,7 +320,23 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId], xdv: bool) -> Result<ValueId, S
             }
             let name = crate::fields::font_cell_name(i64::from(id), crate::fields::FontCell::Info);
             let info = cx.read(v.field(&name))?;
-            if let Some(i) = crate::fonts::info(v, info)
+            if let Some(xe) = xe
+                && let Some(nf) = crate::native::of_info(xe, v, info)
+            {
+                // (XeTeX's native font: `define_native_font`)
+                defs.insert(
+                    id,
+                    phitex_dvi::FontDef {
+                        checksum: [0; 4],
+                        size: nf.size,
+                        design_size: nf.font.design_size,
+                        area: Vec::new(),
+                        name: nf.font.name_of_file.as_bytes().to_vec(),
+                        widths: Vec::new(),
+                        native: Some(nf.def.clone()),
+                    },
+                );
+            } else if let Some(i) = crate::fonts::info(v, info)
                 && let Some(l) = crate::fonts::load_info(v, &i)
             {
                 defs.insert(id, crate::fonts::font_def(&l, &i.name));
@@ -528,7 +546,12 @@ fn font_def_of(
 fn special_of(v: &Values, whats: &[ValueId], h: u32, xdv: bool) -> Option<Vec<u8>> {
     let w = *whats.get(h as usize)?;
     let ys = list_of(v, w);
-    if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
+    let kind = ys.first().map(|&k| str_of(v, k));
+    // (XeTeX's picture: `pic_out`'s special, made with the node)
+    if xdv && kind.as_deref() == Some("xpic") {
+        return Some(bytes_of(&ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default()));
+    }
+    if kind.as_deref() == Some("special") {
         let s = ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default();
         // (XeTeX's `special_out`: UTF-8)
         Some(if xdv {

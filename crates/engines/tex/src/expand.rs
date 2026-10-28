@@ -1093,7 +1093,20 @@ impl Run<'_, '_> {
         if let Some(info) = info {
             let xs = crate::val::list_of(self.v, info);
             let name = xs.first().map(|&x| str_of(self.v, x)).unwrap_or_default();
+            // (XeTeX: a native font's name quoted, with `'` where it
+            // holds `"`)
+            let native = self.xe
+                && xs
+                    .get(3)
+                    .is_some_and(|&x| crate::native::native_spec(self.v, x).is_some());
+            let quote = if name.contains('"') { '\'' } else { '"' };
+            if native {
+                s.push(quote);
+            }
             s.push_str(&name);
+            if native {
+                s.push(quote);
+            }
             let size = xs.get(1).map_or(0, |&x| int_of(self.v, x));
             let dsize = xs.get(2).map_or(0, |&x| int_of(self.v, x));
             if size != dsize {
@@ -1338,12 +1351,19 @@ impl Run<'_, '_> {
 
     /// `scan_file_name` (§526).
     pub(crate) fn scan_file_name(&mut self) -> R<String> {
+        Ok(self.scan_file_name_q()?.0)
+    }
+
+    /// [`Run::scan_file_name`], and whether a `\"` was in it (XeTeX's
+    /// `quoted_filename`).
+    pub(crate) fn scan_file_name_q(&mut self) -> R<(String, bool)> {
+        let mut was_quoted = false;
         self.skip_blanks_x()?;
         let mut name = String::new();
         let mut quoted = false;
         loop {
             if self.cur.cmd > cmd::OTHER_CHAR
-                || self.cur.chr > 255
+                || (self.cur.chr > 255 && !self.xe)
                 || self.cur.is_cs() && !matches!(self.cur_mean()?, Mean::Char(..))
             {
                 let t = self.cur.tok;
@@ -1357,6 +1377,7 @@ impl Run<'_, '_> {
             }
             if self.cur.chr == 34 {
                 quoted = !quoted;
+                was_quoted = true;
             } else {
                 print::push_code(&mut name, u32::try_from(self.cur.chr).unwrap_or(0));
             }
@@ -1372,7 +1393,7 @@ impl Run<'_, '_> {
                 self.cur.chr
             );
         }
-        Ok(name)
+        Ok((name, was_quoted))
     }
 }
 

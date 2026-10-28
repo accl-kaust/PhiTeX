@@ -138,6 +138,19 @@ pub trait Fonts {
     fn param(&self, font: FontId, n: u16) -> Scaled;
     /// The number of parameters (`font_params`), for math's checks (§1195).
     fn param_count(&self, font: FontId) -> u16;
+    /// XeTeX's `set_native_metrics` on a word of `like`'s font and kind
+    /// whose text is `text` (the words of a run merged in a box), where
+    /// the fonts can shape; `None` where they cannot.
+    fn shape_native(&self, like: &crate::node::Native, text: &[u16]) -> Option<crate::node::Native> {
+        let _ = (like, text);
+        None
+    }
+    /// XeTeX's `new_native_character(f, c)` in `like`'s font (through
+    /// the font's mapping), where the fonts can shape.
+    fn native_char(&self, like: &crate::node::Native, c: u32) -> Option<crate::node::Native> {
+        let _ = (like, c);
+        None
+    }
     /// The font's expansion (pdfTeX), if it is expandable.
     fn expansion(&self, font: FontId) -> Option<Expansion> {
         let _ = font;

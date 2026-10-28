@@ -421,6 +421,8 @@ fn disc_item_width(n: &Node, fonts: &dyn Fonts) -> Scaled {
     match n {
         Node::Char { font, ch } => fonts.char_width(*font, *ch),
         Node::Lig(l) => fonts.char_width(l.font, l.ch),
+        // (XeTeX: a native word or glyph in a discretionary)
+        Node::Native(x) => x.width,
         Node::Box(_) | Node::Rule(_) | Node::Kern(..) => n.box_dims().map_or_else(
             || match n {
                 Node::Kern(w, _) => *w,
@@ -1174,6 +1176,8 @@ pub fn line_break(
                     // line_break loop"
                     b.add_width(size.map_or(0, |s| s.width));
                 }
+                // (XeTeX's `adv_past_linebreak`)
+                Node::Native(n) => b.add_width(n.width),
                 // (§1362: a language node goes to the hyphenation, done
                 // before the pass, [`hyphenate_all`])
                 Node::Mark(_) | Node::Ins(_) | Node::Adjust(_) | Node::Language { .. } => {}

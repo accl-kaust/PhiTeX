@@ -1103,7 +1103,12 @@ pub(crate) fn line_frame(v: &Values, s: &Line) -> Option<ValueId> {
         v.str(&text),
         v.int(i64::from(s.state)),
         v.int(-2),
-        v.int(i64::from(starts) | (i64::from(end_due) << 1) | (i64::from(s.rescanned) << 2)),
+        v.int(
+            i64::from(starts)
+                | (i64::from(end_due) << 1)
+                | (i64::from(s.rescanned) << 2)
+                | (i64::from(s.chars) << 3),
+        ),
     ];
     if let Some((name, at, unit)) = s.origin {
         let at = at + s.loc.min(s.buf.len());

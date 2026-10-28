@@ -19,21 +19,26 @@ use crate::val::{Tok, cmd};
 /// come from.
 #[derive(Clone, Default)]
 pub struct XeTeX {
-    /// kpathsea's lookup of a font file (`[file]` names, a name's file in
-    /// the index, TECkit mappings): the name as XeTeX asks it and the
-    /// format searched, its path and bytes.
-    pub font_file: Option<FontFile>,
+    /// The font files: kpathsea's lookups (`[file]` names, `TECkit`
+    /// mappings) and the bytes of a path (a face the index names).
+    pub fonts: Option<FontFiles>,
     /// The fonts a name (`"Latin Modern Roman/B"`) is looked up in
     /// (fontconfig's list as the oracle sees it, `phitex_otf::index`).
     pub font_index: Option<Arc<phitex_otf::index::FontIndex>>,
 }
 
-/// [`XeTeX::font_file`].
-pub type FontFile =
-    Arc<dyn Fn(&str, phitex_otf::KpseFormat) -> Option<(String, Arc<[u8]>)> + Send + Sync>;
+/// [`XeTeX::fonts`].
+pub type FontFiles = Arc<dyn phitex_otf::FontSource + Send + Sync>;
 
 /// `biggest_usv` (xetex.web §12).
 pub(crate) const BIGGEST_USV: u32 = 0x10_FFFF;
+
+/// `char_class_boundary` and `char_class_ignored` (xetex.web).
+/// `\XeTeXinterchartoks`'s code (`XeTeX_inter_char_loc`).
+pub(crate) const INTER_CHAR_LOC: i32 = XI;
+
+pub(crate) const CLASS_BOUNDARY: i32 = CHAR_CLASS_LIMIT - 1;
+pub(crate) const CLASS_IGNORED: i32 = CHAR_CLASS_LIMIT;
 
 /// `char_class_limit` (xetex.web): `\XeTeXcharclass` is 0–4096, kept in
 /// a character's `\sfcode` from bit 16 up.
@@ -326,7 +331,7 @@ pub(crate) fn initex_prims() -> impl Iterator<Item = (&'static str, u8, i32)> {
 
 // -------------------------------------------------------------- reading
 
-/// The input modes of a file (XeTeX_ext.h): how its bytes become
+/// The input modes of a file (`XeTeX_ext.h`): how its bytes become
 /// characters.
 pub(crate) mod mode {
     pub const AUTO: i64 = 0;
@@ -358,6 +363,7 @@ pub(crate) fn mode_of_name(name: &str) -> i64 {
 /// UTF-8 byte-order mark is skipped (the mode was `auto`). True when a
 /// sequence was ill-formed ("Invalid UTF-8 byte or sequence").
 pub(crate) fn decode_line(buf: &mut Vec<u32>, m: i64, first: bool) -> bool {
+    const OFFSETS: [u32; 4] = [0, 0x3080, 0xE_2080, 0x3C8_2080];
     if m == mode::RAW || buf.iter().all(|&c| c < 0x80) {
         return false;
     }
@@ -401,7 +407,6 @@ pub(crate) fn decode_line(buf: &mut Vec<u32>, m: i64, first: bool) -> bool {
             out.push(0xFFFD);
             continue;
         }
-        const OFFSETS: [u32; 4] = [0, 0x3080, 0xE_2080, 0x3C8_2080];
         let r = r.wrapping_sub(OFFSETS[extra]);
         if r > BIGGEST_USV {
             bad = true;
@@ -533,6 +538,37 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             r.push_toks([Tok::ch(cat, ch)]);
         }
         cv::REVISION => r.push_toks(crate::expand::str_toks(".999998")),
+        cv::GLYPH_NAME => {
+            let f = r.scan_font_ident()?;
+            if let Some(nf) = r.native_font(f)? {
+                let g = r.scan_int()?;
+                let name = nf.font.glyph_name(g.cast_unsigned());
+                let s: String = name.iter().map(|&b| char::from(b)).collect();
+                r.push_toks(crate::expand::str_toks(&s));
+            } else {
+                font_error(r, cmd::CONVERT, c, f, NOT_NATIVE)?;
+            }
+        }
+        cv::VARIATION_NAME => {
+            let f = r.scan_font_ident()?;
+            font_error(r, cmd::CONVERT, c, f, NOT_AAT)?;
+        }
+        cv::FEATURE_NAME | cv::SELECTOR_NAME => {
+            let f = r.scan_font_ident()?;
+            if let Some(nf) = r.native_font(f)?.filter(|nf| is_gr(nf)) {
+                let a1 = r.scan_int()?;
+                let a2 = if c == cv::SELECTOR_NAME { r.scan_int()? } else { 0 };
+                let what = if c == cv::FEATURE_NAME {
+                    phitex_otf::xetex::what::FEATURE_NAME
+                } else {
+                    phitex_otf::xetex::what::SELECTOR_NAME
+                };
+                let s = nf.font.gr_font_name(what, a1, a2).unwrap_or_default();
+                r.push_toks(crate::expand::str_toks(&s));
+            } else {
+                font_error(r, cmd::CONVERT, c, f, NOT_AAT_GR)?;
+            }
+        }
         _ => {
             r.log("error", "this XeTeX primitive is not supported")?;
         }
@@ -540,20 +576,274 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
     Ok(())
 }
 
-/// XeTeX's `last_item` queries.
+/// The name `\print_cmd_chr` gives XeTeX's primitive `(c, code)`.
+fn prim_name(c: u8, code: i32) -> &'static str {
+    PRIMS
+        .iter()
+        .rev()
+        .find(|p| p.1 == c && p.2 == code)
+        .map_or("", |p| p.0)
+}
+
+/// Whether a native font shapes with Graphite (`is_gr_font`; else it is
+/// an OpenType one, `is_ot_font`).
+fn is_gr(nf: &crate::native::NativeFont) -> bool {
+    nf.font.req_engine == b'G' && nf.font.face.graphite().is_some()
+}
+
+/// `not_native_font_error` and its kin: "Cannot use \x with
+/// <font>; not ...".
+fn font_error(r: &mut Run<'_, '_>, c: u8, code: i32, f: i64, what: &str) -> R<()> {
+    let info = r.font_get(f, crate::fields::FontCell::Info)?;
+    let name = crate::fonts::info(r.v, info).map(|i| i.name).unwrap_or_default();
+    let p = prim_name(c, code);
+    r.log("error", &format!("Cannot use \\{p} with {name}; {what}"))
+}
+
+const NOT_NATIVE: &str = "not a native platform font";
+const NOT_OT: &str = "not an OpenType Layout font";
+const NOT_AAT_GR: &str = "not an AAT or Graphite font";
+const NOT_AAT: &str = "not an AAT font";
+
+/// XeTeX's `last_item` queries (xetex.web "Cases for fetching an
+/// integer value", `\XeTeXglyphbounds` a dimension).
+#[allow(clippy::too_many_lines)]
 pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
-    Ok(IVal::Int(match m {
+    // (`m - XeTeX_int`: the font library's query codes)
+    let what = m - li::VERSION;
+    let li_cmd = crate::val::cmd::LAST_ITEM;
+    let n = match m {
         li::VERSION => 0,
+        li::COUNT_GLYPHS => {
+            let f = r.scan_font_ident()?;
+            r.native_font(f)?.map_or(0, |nf| nf.font.ot_font_get(what))
+        }
+        li::COUNT_FEATURES => {
+            let f = r.scan_font_ident()?;
+            r.native_font(f)?
+                .filter(|nf| is_gr(nf))
+                .map_or(0, |nf| nf.font.ot_font_get(what))
+        }
+        li::VARIATION | li::VARIATION_MIN | li::VARIATION_MAX | li::VARIATION_DEFAULT | li::COUNT_VARIATIONS => {
+            r.scan_font_ident()?;
+            0
+        }
+        li::FEATURE_CODE | li::IS_EXCLUSIVE_FEATURE | li::COUNT_SELECTORS => {
+            let f = r.scan_font_ident()?;
+            if let Some(nf) = r.native_font(f)?.filter(|nf| is_gr(nf)) {
+                let k = r.scan_int()?;
+                nf.font.ot_font_get1(what, k)
+            } else {
+                font_error(r, li_cmd, m, f, NOT_AAT_GR)?;
+                -1
+            }
+        }
+        li::SELECTOR_CODE | li::IS_DEFAULT_SELECTOR => {
+            let f = r.scan_font_ident()?;
+            if let Some(nf) = r.native_font(f)?.filter(|nf| is_gr(nf)) {
+                let k = r.scan_int()?;
+                let n = r.scan_int()?;
+                nf.font.ot_font_get2(what, k, n)
+            } else {
+                font_error(r, li_cmd, m, f, NOT_AAT_GR)?;
+                -1
+            }
+        }
+        li::FIND_VARIATION_BY_NAME => {
+            let f = r.scan_font_ident()?;
+            font_error(r, li_cmd, m, f, NOT_AAT)?;
+            -1
+        }
+        li::FIND_FEATURE_BY_NAME => {
+            let f = r.scan_font_ident()?;
+            if let Some(nf) = r.native_font(f)?.filter(|nf| is_gr(nf)) {
+                let name = r.scan_file_name()?;
+                nf.font.gr_font_get_named(what, name.as_bytes())
+            } else {
+                font_error(r, li_cmd, m, f, NOT_AAT_GR)?;
+                -1
+            }
+        }
+        li::FIND_SELECTOR_BY_NAME => {
+            let f = r.scan_font_ident()?;
+            if let Some(nf) = r.native_font(f)?.filter(|nf| is_gr(nf)) {
+                let k = r.scan_int()?;
+                let name = r.scan_file_name()?;
+                nf.font.gr_font_get_named1(what, k, name.as_bytes())
+            } else {
+                font_error(r, li_cmd, m, f, NOT_AAT_GR)?;
+                -1
+            }
+        }
+        li::OT_COUNT_SCRIPTS => {
+            let f = r.scan_font_ident()?;
+            r.native_font(f)?
+                .filter(|nf| !is_gr(nf))
+                .map_or(0, |nf| nf.font.ot_font_get(what))
+        }
+        li::OT_COUNT_LANGUAGES | li::OT_SCRIPT => {
+            let f = r.scan_font_ident()?;
+            if let Some(nf) = r.native_font(f)?.filter(|nf| !is_gr(nf)) {
+                let k = r.scan_int()?;
+                nf.font.ot_font_get1(what, k)
+            } else {
+                font_error(r, li_cmd, m, f, NOT_OT)?;
+                -1
+            }
+        }
+        li::OT_COUNT_FEATURES | li::OT_LANGUAGE => {
+            let f = r.scan_font_ident()?;
+            if let Some(nf) = r.native_font(f)?.filter(|nf| !is_gr(nf)) {
+                let k = r.scan_int()?;
+                let n = r.scan_int()?;
+                nf.font.ot_font_get2(what, k, n)
+            } else {
+                font_error(r, li_cmd, m, f, NOT_OT)?;
+                -1
+            }
+        }
+        li::OT_FEATURE => {
+            let f = r.scan_font_ident()?;
+            if let Some(nf) = r.native_font(f)?.filter(|nf| !is_gr(nf)) {
+                let k = r.scan_int()?;
+                let kk = r.scan_int()?;
+                let n = r.scan_int()?;
+                nf.font.ot_font_get3(what, k, kk, n)
+            } else {
+                font_error(r, li_cmd, m, f, NOT_OT)?;
+                -1
+            }
+        }
+        li::MAP_CHAR_TO_GLYPH => {
+            let f = r.cint(crate::fields::cell::FONT)?;
+            if let Some(nf) = r.native_font(f)? {
+                let n = r.scan_int()?;
+                nf.font.map_char_to_glyph(n)
+            } else {
+                font_error(r, li_cmd, m, f, NOT_NATIVE)?;
+                0
+            }
+        }
+        li::GLYPH_INDEX => {
+            let f = r.cint(crate::fields::cell::FONT)?;
+            if let Some(nf) = r.native_font(f)? {
+                let name = r.scan_file_name()?;
+                nf.font.map_glyph_to_index(name.as_bytes())
+            } else {
+                font_error(r, li_cmd, m, f, NOT_NATIVE)?;
+                0
+            }
+        }
+        li::GLYPH_BOUNDS => {
+            let f = r.cint(crate::fields::cell::FONT)?;
+            let Some(nf) = r.native_font(f)? else {
+                font_error(r, li_cmd, m, f, NOT_NATIVE)?;
+                return Ok(IVal::Dimen(0));
+            };
+            let edge = r.scan_int()?;
+            if !(1..=4).contains(&edge) {
+                r.log(
+                    "error",
+                    &format!(
+                        "\\XeTeXglyphbounds requires an edge index from 1 to 4; I don't know anything about edge {edge}"
+                    ),
+                )?;
+                return Ok(IVal::Dimen(0));
+            }
+            let g = r.scan_int()?;
+            return Ok(IVal::Dimen(
+                nf.font.glyph_bounds_edge(edge, g.cast_unsigned()),
+            ));
+        }
+        li::PDF_PAGE_COUNT => r.pdf_page_count()?,
+        li::FONT_TYPE => {
+            let f = r.scan_font_ident()?;
+            match r.native_font(f)? {
+                Some(nf) if is_gr(&nf) => 3,
+                Some(_) => 2,
+                None => 0,
+            }
+        }
+        li::FIRST_CHAR | li::LAST_CHAR => {
+            let f = r.scan_font_ident()?;
+            if let Some(nf) = r.native_font(f)? {
+                nf.font.font_char_range(m == li::FIRST_CHAR)
+            } else {
+                let mut view = crate::fonts::View::default();
+                let fu = u32::try_from(f).unwrap_or(0);
+                r.add_font(&mut view, fu)?;
+                // (the null font: `font_bc` 1, `font_ec` 0)
+                view.fonts.get(fu).map_or(i32::from(m == li::FIRST_CHAR), |(l, _)| {
+                    i32::from(if m == li::FIRST_CHAR { l.tfm.bc } else { l.tfm.ec })
+                })
+            }
+        }
         _ => {
             r.log("error", "this XeTeX primitive is not supported")?;
             0
         }
+    };
+    Ok(IVal::Int(n))
+}
+
+/// `\fontcharwd`, `\fontcharht`, `\fontchardp`, `\fontcharic` of a
+/// native font (`getnativecharwd` and the others; `None` for a TFM
+/// font).
+pub(crate) fn native_char_dim(r: &mut Run<'_, '_>, f: i64, c: i32, m: i32) -> R<Option<i32>> {
+    let Some(nf) = r.native_font(f)? else {
+        return Ok(None);
+    };
+    Ok(Some(match m {
+        crate::etex::li::FONT_CHAR_WD => nf.font.char_wd(c),
+        crate::etex::li::FONT_CHAR_IC => nf.font.char_ic(c, nf.font.letter_space),
+        _ => {
+            let quad = r.font_dimen(f, 6)?;
+            let x_height = r.font_dimen(f, 5)?;
+            let cap = r.font_dimen(f, 8)?;
+            let (h, d) = nf.font.char_height_depth(c, quad, x_height, cap);
+            if m == crate::etex::li::FONT_CHAR_HT { h } else { d }
+        }
     }))
 }
 
+/// `\iffontchar` of a native font: whether the character maps to a
+/// glyph (`None` for a TFM font).
+pub(crate) fn native_has_char(r: &mut Run<'_, '_>, f: i64, c: i32) -> R<Option<bool>> {
+    Ok(r.native_font(f)?.map(|nf| nf.font.map_char_to_glyph(c) > 0))
+}
+
+/// `\XeTeXglyph` (xetex.web's "Implement `\XeTeXglyph`").
+fn xetex_glyph(r: &mut Run<'_, '_>, md: &crate::build::Mode) -> R<()> {
+    match md.m.abs() {
+        1 => {
+            r.back_cur();
+            r.new_graf(md, true)?;
+        }
+        203 => r.report_illegal_case(md)?,
+        _ => {
+            let f = r.cint(crate::fields::cell::FONT)?;
+            let Some(nf) = r.native_font(f)? else {
+                return font_error(r, crate::val::cmd::EXTENSION, ex::GLYPH, f, NOT_NATIVE);
+            };
+            let mut g = r.scan_int()?;
+            if !(0..=0xFFFF).contains(&g) {
+                r.log("error", "Bad glyph number")?;
+                g = 0;
+            }
+            let n = r.native_glyph(&nf, f, u16::try_from(g).unwrap_or(0))?;
+            let x = crate::nodes::encode(r.v, &phitex_typeset::node::Node::Native(Box::new(n)), &crate::nodes::Side::default());
+            r.append(md.lid, x);
+        }
+    }
+    Ok(())
+}
+
 /// XeTeX's extensions (`do_extension`).
-pub(crate) fn extension(r: &mut Run<'_, '_>, _md: &crate::build::Mode) -> R<()> {
+pub(crate) fn extension(r: &mut Run<'_, '_>, md: &crate::build::Mode) -> R<()> {
     match r.cur.chr {
+        ex::GLYPH => xetex_glyph(r, md)?,
+        ex::PIC_FILE => r.implement_picture(md, false)?,
+        ex::PDF_FILE => r.implement_picture(md, true)?,
         ex::INPUT_ENCODING => {
             let name = r.scan_file_name()?;
             let m = mode_of_name(&name);
@@ -617,11 +907,10 @@ impl Run<'_, '_> {
             .iter()
             .rev()
             .filter(|l| l.kind == crate::input::kind::LINE)
-            .find_map(|&l| {
-                let line = self.input.line(l);
-                (!line.rescanned).then_some(line.origin).flatten()
-            })
-            .map(|o| o.0);
+            .map(|&l| self.input.line(l))
+            .find(|line| !line.rescanned)
+            // (the document's own text has no origin: `UNIT` names it)
+            .map(|line| line.origin.map_or(ValueId::UNIT, |o| o.0));
         let Some(name) = name else { return };
         let v = self.v;
         self.set(
@@ -641,16 +930,14 @@ impl Run<'_, '_> {
         let Some(s) = self.input.top_line() else {
             return Ok(());
         };
-        if s.rescanned || s.buf.iter().all(|&c| c < 0x80) {
+        if s.rescanned || s.chars || s.buf.iter().all(|&c| c < 0x80) {
             return Ok(());
         }
         let first = s.starts && s.origin.is_some_and(|o| o.1 == 0);
-        let m = match s.origin {
-            Some(o) => self.input_mode(o.0)?,
-            None => mode::AUTO,
-        };
+        let m = self.input_mode(s.origin.map_or(ValueId::UNIT, |o| o.0))?;
         if let Some(s) = self.input.top_line_mut() {
             decode_line(&mut s.buf, m, first);
+            s.chars = true;
         }
         Ok(())
     }
@@ -665,10 +952,7 @@ impl Run<'_, '_> {
         if buf.iter().all(|&c| c < 0x80) {
             return Ok(());
         }
-        let m = match origin {
-            Some(n) => self.input_mode(n)?,
-            None => mode::AUTO,
-        };
+        let m = self.input_mode(origin.unwrap_or(ValueId::UNIT))?;
         decode_line(buf, m, false);
         Ok(())
     }
@@ -906,6 +1190,95 @@ impl Run<'_, '_> {
             }
             _ => 0,
         })
+    }
+}
+
+impl Run<'_, '_> {
+    /// `\XeTeXinterchartoks`'s field for the two classes scanned
+    /// (`scan_char_class_not_ignored` twice): `ict:<a*4096+b>`.
+    pub(crate) fn ic_field(&mut self) -> R<phitex_defuse::Field> {
+        let mut k = [0; 2];
+        for x in &mut k {
+            let n = self.scan_int()?;
+            *x = if (0..=CHAR_CLASS_LIMIT).contains(&n) {
+                n
+            } else {
+                self.log("error", "Bad character class")?;
+                0
+            };
+        }
+        Ok(self.v.field(&format!("ict:{}", k[0] * CHAR_CLASS_LIMIT + k[1])))
+    }
+
+    /// The tokens between classes `a` and `b`, where there are any.
+    fn ic_toks(&mut self, a: i32, b: i32) -> R<Option<Vec<Tok>>> {
+        let x = self.get(&format!("ict:{}", a * CHAR_CLASS_LIMIT + b))?;
+        let t = crate::val::toks_of(self.v, x);
+        Ok((!t.is_empty()).then_some(t))
+    }
+
+    /// `back_input` of character `ch` as `backed_up_char` (a letter's
+    /// category kept, anything else other), then the tokens `t` ahead
+    /// of it (`inter_char_text`).
+    fn ic_insert(&mut self, ch: u32, letter: bool, t: &[Tok]) {
+        let c = Tok::ch(if letter { 11 } else { 12 }, ch);
+        let r = self.input.arena.alloc(&[c]);
+        self.input.push_toks(r, crate::input::ty::BACKED_UP_CHAR);
+        let r = self.input.arena.alloc(t);
+        self.input.push_toks(r, crate::input::ty::INTER_CHAR);
+    }
+
+    /// `check_for_inter_char_toks` (xetex.web) for character `ch`, just
+    /// read (`letter`: of category 11): where tokens go between the
+    /// class before it and its own, the character is put back after
+    /// them and true is returned (`goto` the label: the characters so far
+    /// end there).
+    pub(crate) fn ic_check(&mut self, ch: u32, letter: bool) -> R<bool> {
+        if self.param("XeTeXinterchartokenstate")? <= 0 {
+            return Ok(false);
+        }
+        let class = self.code_slow(2, ch)? / 0x1_0000;
+        if class == CLASS_IGNORED {
+            return Ok(false);
+        }
+        self.ic_space = class;
+        if self.ic_prev == CLASS_BOUNDARY {
+            // (a character put back here is past its boundary already)
+            let backed = self.input.top().is_some_and(|l| {
+                l.kind == crate::input::kind::TOKS && l.ty == crate::input::ty::BACKED_UP_CHAR
+            });
+            if !backed && let Some(t) = self.ic_toks(CLASS_BOUNDARY, class)? {
+                self.ic_insert(ch, letter, &t);
+                return Ok(true);
+            }
+        } else if let Some(t) = self.ic_toks(self.ic_prev, class)? {
+            self.ic_insert(ch, letter, &t);
+            self.ic_prev = CLASS_BOUNDARY;
+            return Ok(true);
+        }
+        self.ic_prev = class;
+        Ok(false)
+    }
+
+    /// `check_for_post_char_toks` (xetex.web): after a run of characters,
+    /// at the token `cur` that is not one, the tokens between the last
+    /// character's class and the boundary go ahead of `cur` (put back);
+    /// true where they did.
+    pub(crate) fn ic_post(&mut self) -> R<bool> {
+        if self.ic_prev == CLASS_BOUNDARY
+            || self.ic_space == CLASS_IGNORED
+            || self.param("XeTeXinterchartokenstate")? <= 0
+        {
+            return Ok(false);
+        }
+        self.ic_prev = CLASS_BOUNDARY;
+        let Some(t) = self.ic_toks(self.ic_space, CLASS_BOUNDARY)? else {
+            return Ok(false);
+        };
+        self.back_cur();
+        let r = self.input.arena.alloc(&t);
+        self.input.push_toks(r, crate::input::ty::INTER_CHAR);
+        Ok(true)
     }
 }
 

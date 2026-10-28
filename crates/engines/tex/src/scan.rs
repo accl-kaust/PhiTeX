@@ -118,7 +118,7 @@ impl Run<'_, '_> {
     }
 
     /// §441: the next non-blank non-sign token; whether it is negative.
-    fn skip_signs(&mut self) -> R<bool> {
+    pub(crate) fn skip_signs(&mut self) -> R<bool> {
         let mut negative = false;
         loop {
             self.skip_blanks_x()?;
@@ -269,6 +269,7 @@ impl Run<'_, '_> {
     }
 
     /// `scan_int` (§440) from its first token after the signs.
+    #[allow(clippy::too_many_lines)]
     fn scan_int_from(&mut self, negative: bool) -> R<i32> {
         let mut ok_so_far = true;
         let mut val: i32;
@@ -304,7 +305,7 @@ impl Run<'_, '_> {
                     match (cs.next(), cs.next()) {
                         (Some(c), None)
                             if !n.starts_with('\u{10FFFE}')
-                                && !(self.xe && u32::from(c) > 0xFFFF) =>
+                                && (!self.xe || u32::from(c) <= 0xFFFF) =>
                         {
                             i32::try_from(u32::from(c)).unwrap_or(limit + 1)
                         }
@@ -579,7 +580,7 @@ impl Run<'_, '_> {
         Ok(Self::attach_sign(v, negative, err))
     }
 
-    fn attach_sign(val: i32, negative: bool, arith_error: bool) -> i32 {
+    pub(crate) fn attach_sign(val: i32, negative: bool, arith_error: bool) -> i32 {
         let mut v = val;
         if arith_error || v.unsigned_abs() >= 0o10000000000 {
             // "Dimension too large"
@@ -769,7 +770,12 @@ impl Run<'_, '_> {
                     } else {
                         m
                     };
-                    let x = self.qget(cmd::ASSIGN_TOKS, loc)?;
+                    let x = if self.xe && c == cmd::ASSIGN_TOKS && loc == crate::xetex::INTER_CHAR_LOC {
+                        let f = self.ic_field()?;
+                        self.read_f(f)?
+                    } else {
+                        self.qget(cmd::ASSIGN_TOKS, loc)?
+                    };
                     IVal::Toks(toks_of(self.v, x))
                 } else {
                     self.back_cur();

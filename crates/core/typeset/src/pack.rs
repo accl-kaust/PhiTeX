@@ -3,7 +3,7 @@
 use crate::arith::{MAX_DIMEN, Scaled, badness};
 use crate::fonts::Fonts;
 use crate::glue::{GlueSet, GlueSign, Order, OrderTotals};
-use crate::node::{BoxKind, BoxNode, List, Node, RUNNING, Rule};
+use crate::node::{BoxKind, BoxNode, List, NativeKind, Node, RUNNING, Rule};
 
 /// A box size specification (§644).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +130,12 @@ fn scan_hlist(
                 hdx.0 = hdx.0.max(s.height);
                 hdx.1 = hdx.1.max(s.depth);
             }
+            Node::Native(n) => {
+                // XeTeX: "Incorporate a whatsit node into an hbox"
+                hdx.2 += n.width;
+                hdx.0 = hdx.0.max(n.height);
+                hdx.1 = hdx.1.max(n.depth);
+            }
             // The replacement text is part of the hlist in tex.web.
             Node::Disc(d) => scan_hlist(&d.replace, fonts, t, hdx),
             Node::Ins(_)
@@ -211,6 +217,7 @@ pub fn hpack(
     } else {
         List::new()
     };
+    merge_native(&mut list, fonts);
     let mut t = Totals::default();
     let mut hdx = (0, 0, 0);
     scan_hlist(&list, fonts, &mut t, &mut hdx);
@@ -241,6 +248,97 @@ pub fn hpack(
         report,
         adjustments,
     }
+}
+
+/// XeTeX's "Incorporate a whatsit node into an hbox" (xetex.web): a
+/// run of native words of one font, with the discretionaries between
+/// them (and a discretionary's replacement where it is such words),
+/// becomes one word of the run's text shaped again, the
+/// discretionaries' breaks gone. A list without native words is left as
+/// it is.
+fn merge_native(list: &mut List, fonts: &dyn Fonts) {
+    fn word(n: &Node, f: crate::fonts::FontId) -> Option<&crate::node::Native> {
+        match n {
+            Node::Native(w) if w.kind != NativeKind::Glyph && w.font == f => Some(w),
+            _ => None,
+        }
+    }
+    let is_word = |n: &Node| matches!(n, Node::Native(w) if w.kind != NativeKind::Glyph);
+    if !list.iter().any(is_word) {
+        return;
+    }
+    // (each run's first and last-but-one place and its merged word)
+    let mut merged: Vec<(usize, usize, crate::node::Native)> = Vec::new();
+    let mut i = 0;
+    while i < list.len() {
+        let Node::Native(first) = &list[i] else {
+            i += 1;
+            continue;
+        };
+        if first.kind == NativeKind::Glyph {
+            i += 1;
+            continue;
+        }
+        let f = first.font;
+        let mut text: Vec<u16> = first.text.to_vec();
+        let mut j = i + 1;
+        loop {
+            match list.get(j) {
+                Some(m) if word(m, f).is_some() => {
+                    if let Some(w) = word(m, f) {
+                        text.extend_from_slice(&w.text);
+                    }
+                    j += 1;
+                }
+                Some(Node::Disc(d)) if !d.replace.is_empty() => {
+                    if !d.replace.iter().all(|r| word(r, f).is_some()) {
+                        break;
+                    }
+                    for r in &d.replace {
+                        if let Some(w) = word(r, f) {
+                            text.extend_from_slice(&w.text);
+                        }
+                    }
+                    j += 1;
+                }
+                Some(Node::Disc(_)) => {
+                    // (an empty replacement: the word after it, if any)
+                    let Some(w) = list.get(j + 1).and_then(|m| word(m, f)) else {
+                        break;
+                    };
+                    text.extend_from_slice(&w.text);
+                    j += 2;
+                }
+                _ => break,
+            }
+        }
+        if j > i + 1
+            && let Some(m) = fonts.shape_native(first, &text)
+        {
+            merged.push((i, j, m));
+        }
+        i = j;
+    }
+    if merged.is_empty() {
+        return;
+    }
+    let mut out = List::with_capacity(list.len());
+    let mut runs = merged.into_iter();
+    let mut next = runs.next();
+    for (k, n) in std::mem::take(list).into_iter().enumerate() {
+        match &mut next {
+            Some((a, b, m)) if k >= *a => {
+                if k == *a {
+                    out.push(Node::Native(Box::new(std::mem::take(m))));
+                }
+                if k + 1 == *b {
+                    next = runs.next();
+                }
+            }
+            _ => out.push(n),
+        }
+    }
+    *list = out;
 }
 
 /// `vpackage(p, h, m, l)` (§668); `vpack` is `max_depth = MAX_DIMEN`.

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::fonts::{FontId, Fonts, Left, LigKern, LigOp};
 use crate::linebreak::{Hyphenator, LangState};
-use crate::node::{Disc, KernKind, Ligature, List, Node};
+use crate::node::{Disc, KernKind, Ligature, List, NativeKind, Node};
 
 /// `non_char` (§549): no character, or the left boundary in `hu`.
 pub const NON_CHAR: u16 = 256;
@@ -422,7 +422,20 @@ impl Hyphenator for TexHyphenator<'_> {
                     }
                     Some(&c) => (c, l.font),
                 },
-                Node::Kern(_, KernKind::Normal) | Node::Whatsit(..) => {
+                // (XeTeX: a native word with a letter is the word, `ha`
+                // itself; one without, and a glyph, a whatsit passed)
+                Node::Native(w) if w.kind != NativeKind::Glyph => {
+                    if let Some(c) = usvs(&w.text).map(|(c, _)| c).find(|&c| lc_of(self.lc_code, c) != 0) {
+                        if lc_of(self.lc_code, c) == c || self.uc_hyph > 0 {
+                            return self.hyphenate_native(list, s, lang, fonts);
+                        }
+                        return None;
+                    }
+                    prev_s = s;
+                    s += 1;
+                    continue;
+                }
+                Node::Kern(_, KernKind::Normal) | Node::Whatsit(..) | Node::Native(_) => {
                     prev_s = s;
                     s += 1;
                     continue;
@@ -535,6 +548,7 @@ impl Hyphenator for TexHyphenator<'_> {
                 Some(
                     Node::Kern(..)
                     | Node::Whatsit(..)
+                    | Node::Native(_)
                     | Node::Language { .. }
                     | Node::Glue(_)
                     | Node::Penalty(_)
@@ -689,6 +703,171 @@ impl Hyphenator for TexHyphenator<'_> {
         }
         let from = if keep_ha { ha + 1 } else { ha };
         Some((from, hb, out))
+    }
+}
+
+/// The characters of a native word's UTF-16 text with the index each
+/// begins at (a surrogate pair one character; a lone surrogate itself).
+fn usvs(text: &[u16]) -> impl Iterator<Item = (u32, usize)> + '_ {
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        let u = u32::from(*text.get(i)?);
+        let at = i;
+        i += 1;
+        if (0xD800..0xDC00).contains(&u)
+            && let Some(&l) = text.get(i)
+            && (0xDC00..0xE000).contains(&l)
+        {
+            i += 1;
+            return Some((0x1_0000 + (u - 0xD800) * 0x400 + (u32::from(l) - 0xDC00), at));
+        }
+        Some((u, at))
+    })
+}
+
+/// `lc_code(c)` of any character (none past the 16-bit codes here).
+fn lc_of(lc: &dyn Fn(u16) -> u16, c: u32) -> u32 {
+    u16::try_from(c).map_or(0, |c| u32::from(lc(c)))
+}
+
+/// `get_native_usv(p, l)`: the character at unit `l` (a surrogate pair's
+/// whole character at its high half).
+fn usv_at(text: &[u16], l: usize) -> u32 {
+    let u = u32::from(text[l]);
+    if (0xD800..0xDC00).contains(&u)
+        && let Some(&lo) = text.get(l + 1)
+        && (0xDC00..0xE000).contains(&lo)
+    {
+        return 0x1_0000 + (u - 0xD800) * 0x400 + (u32::from(lo) - 0xDC00);
+    }
+    u
+}
+
+impl TexHyphenator<'_> {
+    /// XeTeX's hyphenation of the native word `list[ha]` (xetex.web "Check
+    /// that nodes after `native_word` permit hyphenation", "Prepare a
+    /// `native_word_node` for hyphenation", "Hyphenate the
+    /// `native_word_node` at `ha`"): the letters from its first are the
+    /// word (characters before them split off as a word of their own,
+    /// characters after them too, each part shaped again, which stays
+    /// even when no hyphen is found); each hyphen splits the word, with
+    /// a discretionary whose pre-break is the font's hyphen character.
+    #[allow(clippy::too_many_lines)]
+    fn hyphenate_native(
+        &mut self,
+        list: &[Node],
+        ha: usize,
+        lang: LangState,
+        fonts: &dyn Fonts,
+    ) -> Option<(usize, usize, List)> {
+        // (`max_hyphenatable_length`: `\XeTeXhyphenatablelength`, 63)
+        const MAX: usize = 63;
+        let Node::Native(w) = &list[ha] else {
+            return None;
+        };
+        let hf = w.font;
+        let hyf_char = u32::try_from((self.hyphen_char)(hf)).ok()?;
+        if hyf_char > 0xFFFF {
+            return None;
+        }
+        let (l_hyf, r_hyf) = (usize::from(lang.lhm), usize::from(lang.rhm));
+        if l_hyf + r_hyf > MAX {
+            return None;
+        }
+        let mut s = ha + 1;
+        loop {
+            match list.get(s) {
+                Some(Node::Lig(_) | Node::Kern(_, KernKind::Normal)) => s += 1,
+                None
+                | Some(
+                    Node::Kern(..)
+                    | Node::Whatsit(..)
+                    | Node::Native(_)
+                    | Node::Language { .. }
+                    | Node::Glue(_)
+                    | Node::Penalty(_)
+                    | Node::Ins(_)
+                    | Node::Adjust(_)
+                    | Node::Mark(_),
+                ) => break,
+                _ => return None,
+            }
+        }
+        let code = |c: u32| -> u16 {
+            u16::try_from(c).map_or(0, |c| self.patterns.hyph_code(lang.lang, c, self.lc_code))
+        };
+        let shape = |t: &[u16]| fonts.shape_native(w, t);
+        let text: &[u16] = &w.text;
+        // (the parts before the word, the word's text, the part after)
+        let mut out: List = Vec::new();
+        let mut start = 0;
+        let mut end = text.len();
+        let mut split = false;
+        let mut hc: Vec<u16> = Vec::with_capacity(MAX + 1);
+        'restart: loop {
+            hc.clear();
+            let mut l = start;
+            while l < end {
+                let c = usv_at(text, l);
+                let h = code(c);
+                if h == 0 {
+                    if !hc.is_empty() {
+                        end = l;
+                        split = true;
+                        break;
+                    }
+                } else if hc.is_empty() && l > start {
+                    out.push(Node::Native(Box::new(shape(&text[start..l])?)));
+                    start = l;
+                    split = true;
+                    continue 'restart;
+                } else if hc.len() == MAX {
+                    break;
+                } else if c < 0x1_0000 {
+                    hc.push(h);
+                } else {
+                    let h = u32::from(h);
+                    hc.push(u16::try_from((h.saturating_sub(0x1_0000)) / 0x400 + 0xD800).unwrap_or(0));
+                    hc.push(u16::try_from(h % 0x400 + 0xDC00).unwrap_or(0));
+                    l += 1;
+                }
+                l += 1;
+            }
+            break;
+        }
+        let hn = hc.len();
+        let mut hyf = vec![0u8; hn + 2];
+        let found = hn >= l_hyf + r_hyf
+            && self
+                .patterns
+                .hyphenate_word_into(lang.lang, &hc, l_hyf, r_hyf, &mut hyf)
+            && (l_hyf..=hn - r_hyf).any(|j| hyf[j] & 1 != 0);
+        if !found && !split {
+            return None;
+        }
+        let word = &text[start..end];
+        if found {
+            let mut passed = 0;
+            for j in l_hyf..=hn - r_hyf {
+                if hyf[j] & 1 != 0 {
+                    out.push(Node::Native(Box::new(shape(&word[passed..j])?)));
+                    let pre = fonts.native_char(w, hyf_char).map(|n| Node::Native(Box::new(n)));
+                    out.push(Node::Disc(Box::new(Disc {
+                        pre: pre.into_iter().collect(),
+                        post: Vec::new(),
+                        replace: Vec::new(),
+                    })));
+                    passed = j;
+                }
+            }
+            out.push(Node::Native(Box::new(shape(&word[passed..])?)));
+        } else {
+            out.push(Node::Native(Box::new(shape(word)?)));
+        }
+        if end < text.len() {
+            out.push(Node::Native(Box::new(shape(&text[end..])?)));
+        }
+        Some((ha, ha, out))
     }
 }
 

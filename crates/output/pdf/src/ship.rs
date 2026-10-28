@@ -1038,7 +1038,9 @@ impl PdfState {
                 | Node::Mark(_)
                 | Node::Adjust(_)
                 | Node::Language { .. }
-                | Node::Penalty(_) => None,
+                | Node::Penalty(_)
+                // (XeTeX's, never in a pdfTeX list)
+                | Node::Native(_) => None,
             };
             if let Some((mut rule_ht, mut rule_dp, rule_wd)) = rule {
                 // §734

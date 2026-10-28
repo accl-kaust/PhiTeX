@@ -994,6 +994,9 @@ impl Run<'_, '_> {
                             last = Some(g.font);
                         }
                     }
+                    Node::Native(n) => {
+                        ids.insert(n.font);
+                    }
                     Node::Box(b) => walk(&b.list, ids),
                     Node::Unset(u) => walk(&u.list, ids),
                     Node::Disc(d) => {
@@ -1035,6 +1038,14 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let Some(l) = crate::fonts::load_info(self.v, &i) else {
+            // (XeTeX's native font: no metrics here, its words carry
+            // theirs; named among the list's fonts)
+            if let Some(nf) = self.native_font(i64::from(f))? {
+                let hc = self.font_int(f, crate::fields::FontCell::Hc)?;
+                view.hyphen.insert(f, hc);
+                view.natives.insert(f, nf);
+                view.glyph_metrics = self.param("XeTeXuseglyphmetrics")? > 0;
+            }
             return Ok(());
         };
         if let Some((b, ..)) = i.ex {
@@ -1340,9 +1351,27 @@ impl Run<'_, '_> {
                 *x = u16::try_from(i64::from(self.code(0, c)?)).unwrap_or(0);
             }
         }
+        // (XeTeX: the characters of the native words, past 255 kept apart)
+        let mut wide: phitex_defuse::FxHashMap<u16, u16> = phitex_defuse::FxHashMap::default();
+        if self.xe {
+            for n in &list {
+                if let Node::Native(w) = n {
+                    for &u in w.text.iter() {
+                        if let Some(x) = lc.get_mut(usize::from(u)) {
+                            *x = u16::try_from(i64::from(self.code(0, u)?)).unwrap_or(0);
+                        } else if let std::collections::hash_map::Entry::Vacant(e) = wide.entry(u) {
+                            e.insert(u16::try_from(i64::from(self.code(0, u)?)).unwrap_or(0));
+                        }
+                    }
+                }
+            }
+        }
         let uc_hyph = self.ipar(Par::uchyph)?;
         let hyphen = &view.hyphen;
-        let lcf = |c: u16| lc.get(usize::from(c)).copied().unwrap_or(0);
+        let lcf = |c: u16| match lc.get(usize::from(c)) {
+            Some(&x) => x,
+            None => wide.get(&c).copied().unwrap_or(0),
+        };
         let hcf = |f: u32| hyphen.get(&f).copied().unwrap_or(-1);
         let mut hy = phitex_typeset::hyph::TexHyphenator {
             patterns: &patterns,
@@ -1869,6 +1898,25 @@ impl Run<'_, '_> {
         let (f, c) = match nodes::decode(v, last, &mut side) {
             Some(Node::Char { font, ch }) => (font, ch),
             Some(Node::Lig(l)) => (l.font, l.ch),
+            // (XeTeX: a native word's last glyph's correction and the
+            // font's letter space, a glyph's own)
+            Some(Node::Native(n)) => {
+                let Some(nf) = self.native_font(i64::from(n.font))? else {
+                    return Ok(());
+                };
+                let ic = match (n.kind, n.glyphs.last()) {
+                    (_, None) => 0,
+                    (phitex_typeset::node::NativeKind::Glyph, Some(g)) => {
+                        nf.font.glyph_italic_correction(u32::from(g.gid))
+                    }
+                    (_, Some(g)) => {
+                        nf.font.glyph_italic_correction(u32::from(g.gid)) + nf.font.letter_space
+                    }
+                };
+                let k = nodes::kern_node(v, ic, KernKind::Explicit);
+                self.append(md.lid, k);
+                return Ok(());
+            }
             _ => return Ok(()),
         };
         let mut view = crate::fonts::View::default();
@@ -1886,7 +1934,14 @@ impl Run<'_, '_> {
             let f = self.cint(crate::fields::cell::FONT)?;
             let c = self.font_int(f, crate::fields::FontCell::Hc)?;
             let mut d = Disc::default();
-            if (0..256).contains(&c) {
+            // (XeTeX: `new_character` of a native font is its
+            // `new_native_character`, any character to 65535)
+            if let Some(nf) = self.native_font(f)? {
+                if (0..=0xFFFF).contains(&c) {
+                    let n = self.native_char(f, &nf, u32::try_from(c).unwrap_or(0))?;
+                    d.pre.push(Node::Native(Box::new(n)));
+                }
+            } else if (0..256).contains(&c) {
                 let mut view = crate::fonts::View::default();
                 self.add_font(&mut view, u32::try_from(f).unwrap_or(0))?;
                 if view.exists(u32::try_from(f).unwrap_or(0), u32::try_from(c).unwrap_or(0)) {
@@ -2243,7 +2298,9 @@ impl Run<'_, '_> {
                     | Node::Kern(..)
                     | Node::Box(_)
                     | Node::Rule(_)
-                    | Node::Lig(_) => list.push(n),
+                    | Node::Lig(_)
+                    // (XeTeX: native words and glyphs)
+                    | Node::Native(_) => list.push(n),
                     _ => break, // "Improper discretionary list"
                 }
             }
@@ -2303,6 +2360,13 @@ impl Run<'_, '_> {
     fn char_run_(&mut self, md: &Mode, cancel: bool) -> R<()> {
         let v = self.v;
         let f = u32::try_from(self.cint(crate::fields::cell::FONT)?).unwrap_or(0);
+        // (XeTeX: a native font's characters are its words, §1034's
+        // "added code for native font support")
+        if self.xe
+            && let Some(nf) = self.native_font(i64::from(f))?
+        {
+            return self.native_char_run(md, f, &nf);
+        }
         // (the view of the worker's last character run, kept while it is
         // this table's of the same font and no font's cell changed since,
         // [`State::font_gen`] (the run read its cells making it); else
@@ -2337,8 +2401,12 @@ impl Run<'_, '_> {
                     // (words of plain characters, each with the space
                     // after it, straight from the line: then at
                     // big_switch, the space in `cur`)
+                    // (XeTeX's `\XeTeXinterchartoks` look at each character:
+                    // none taken in words)
+                    let ic = self.xe && self.param("XeTeXinterchartokenstate")? > 0;
                     let plain = c != cmd::CHAR_GIVEN
                         && c != cmd::CHAR_NUM
+                        && !ic
                         && self
                             .plain_words(md, f, &view, &mut sf, &mut out, &mut raws, &mut space)?;
                     if plain {
@@ -2349,7 +2417,18 @@ impl Run<'_, '_> {
                         } else {
                             self.cur.chr
                         };
-                        let next = self.main_loop(
+                        // (XeTeX: the class before is the boundary; tokens
+                        // between it and this character's go first,
+                        // `goto big_switch`)
+                        let ins = ic && {
+                            self.ic_prev = crate::xetex::CLASS_BOUNDARY;
+                            let i = self.ic_check(ch.cast_unsigned(), self.cur.cmd == cmd::LETTER)?;
+                            if i {
+                                self.adjust_sf(md, ch.cast_unsigned(), &mut sf)?;
+                            }
+                            i
+                        };
+                        let next = !ins && self.main_loop(
                             md,
                             f,
                             &view,
@@ -2381,14 +2460,17 @@ impl Run<'_, '_> {
                     continue;
                 }
                 cmd::SPACER | cmd::EX_SPACE => {
-                    self.char_space(
-                        f,
-                        c == cmd::EX_SPACE,
-                        &mut sf,
-                        &mut out,
-                        &mut raws,
-                        &mut space,
-                    )?;
+                    // (XeTeX's `othercases`: `check_for_post_char_toks`)
+                    if !(self.xe && self.ic_post()?) {
+                        self.char_space(
+                            f,
+                            c == cmd::EX_SPACE,
+                            &mut sf,
+                            &mut out,
+                            &mut raws,
+                            &mut space,
+                        )?;
+                    }
                 }
                 _ => {
                     self.back_cur();
@@ -2442,7 +2524,7 @@ impl Run<'_, '_> {
     /// A space in a run of characters (§1041–§1044): its glue where the
     /// space factor is known (or not needed, `\\ `), else a waiting space
     /// after the factor's transition.
-    fn char_space(
+    pub(crate) fn char_space(
         &mut self,
         f: u32,
         ex: bool,
@@ -2594,7 +2676,7 @@ impl Run<'_, '_> {
 
     /// A character run's nodes and transitions (each transition before
     /// `out[k]`) put on list `lid`, `out` emptied.
-    fn flush_chars(&mut self, lid: i64, out: &mut Vec<crate::nest::Item>, raws: Vec<(usize, ValueId)>) {
+    pub(crate) fn flush_chars(&mut self, lid: i64, out: &mut Vec<crate::nest::Item>, raws: Vec<(usize, ValueId)>) {
         let v = self.v;
         let mut raws = raws.into_iter().peekable();
         if let Some(l) = self.level_of(lid) {
@@ -2745,7 +2827,7 @@ impl Run<'_, '_> {
     /// only through "below 1000?", so with the old factor unknown it is
     /// kept as the update itself (`-s`), never read.
     #[inline]
-    fn adjust_sf(&mut self, _md: &Mode, ch: u32, sf: &mut i32) -> R<()> {
+    pub(crate) fn adjust_sf(&mut self, _md: &Mode, ch: u32, sf: &mut i32) -> R<()> {
         let s = self.code(2, ch)?;
         if s == 1000 {
             *sf = 1000;
@@ -2877,6 +2959,8 @@ impl Run<'_, '_> {
         let false_bchar: Option<u32> = tfm.false_bchar().map(u32::from);
         let hyphen_char = view.hyphen.get(&f).copied().unwrap_or(-1);
         let para = md.m > 0;
+        // (XeTeX's `\XeTeXinterchartoks` look at each character)
+        let ic = self.xe && self.param("XeTeXinterchartokenstate")? > 0;
         self.adjust_sf(md, ch, sf)?;
         let mut lig_stack = std::mem::take(&mut self.lig_buf);
         lig_stack.clear();
@@ -3028,7 +3112,7 @@ impl Run<'_, '_> {
                     // lookahead, §1039's lookup finding nothing, nothing
                     // to wrap up, §1036's move; the first that is not
                     // plain is left to them)
-                    if lig_stack.is_empty() && !lig_present && !ins_disc {
+                    if lig_stack.is_empty() && !lig_present && !ins_disc && !ic {
                         self.plain_letters(md, f, view, (hyphen_char, false_bchar), sf, out, (&mut cur_l, &mut cur_q))?;
                     }
                     // §1038; at the end of the node's text the next token
@@ -3079,6 +3163,12 @@ impl Run<'_, '_> {
                     }
                     if let Some(c) = got {
                         self.adjust_sf(md, c, sf)?;
+                        // (XeTeX: tokens between the classes go first,
+                        // `goto big_switch`: nothing wrapped up)
+                        if ic && self.ic_check(c, self.cur.cmd == cmd::LETTER)? {
+                            self.lig_buf = lig_stack;
+                            return Ok(false);
+                        }
                         lig_stack.push(Item {
                             ch: c,
                             lig: false,
@@ -3267,7 +3357,7 @@ impl Run<'_, '_> {
     }
 
     /// `char_warning` (§581).
-    fn char_warning(&mut self, f: u32, c: u32) -> R<()> {
+    pub(crate) fn char_warning(&mut self, f: u32, c: u32) -> R<()> {
         if self.ipar(Par::tracinglostchars)? > 0 {
             let mut s = String::from("Missing character: There is no ");
             crate::print::push_code(&mut s, c);
@@ -3459,6 +3549,9 @@ fn fonts_chars_of(l: &[Node], ids: &mut std::collections::BTreeSet<u32>, seen: &
                     last = Some(g.font);
                 }
             }
+            Node::Native(n) => {
+                ids.insert(n.font);
+            }
             Node::Box(b) => fonts_chars_of(&b.list, ids, seen),
             Node::Unset(u) => fonts_chars_of(&u.list, ids, seen),
             Node::Disc(d) => {
@@ -3523,7 +3616,7 @@ thread_local! {
 }
 
 /// The space factor not read yet in a run of characters.
-const SF_UNREAD: i32 = i32::MIN;
+pub(crate) const SF_UNREAD: i32 = i32::MIN;
 
 /// Two space factor effects one after the other (each `SF_UNREAD`
 /// none, `n >= 0` set to `n`, `-s` §1034's update by an `sf_code` `s`
@@ -3558,7 +3651,7 @@ pub(crate) fn sf_apply(base: i32, e: i32) -> i32 {
 /// `\\spaceskip`, `\\xspaceskip`, the font's dimensions 2, 3, 4 and 7,
 /// and a waiting space's value.
 #[derive(Default)]
-struct SpaceMemo {
+pub(crate) struct SpaceMemo {
     /// The last glue made, for its space factor and normality.
     last: Option<(i32, bool, Node)>,
     ss: Option<Glue>,
@@ -4039,7 +4132,7 @@ fn sf_set(v: &Values, s: i32) -> ValueId {
 }
 
 /// The transition of a run's effect `sf` (not `SF_UNREAD`).
-fn sf_value(v: &Values, sf: i32) -> ValueId {
+pub(crate) fn sf_value(v: &Values, sf: i32) -> ValueId {
     if sf >= 0 {
         sf_set(v, sf)
     } else {

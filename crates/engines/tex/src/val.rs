@@ -1278,9 +1278,16 @@ fn prim_index() -> &'static phitex_defuse::FxHashMap<&'static str, (u8, i32)> {
 fn prim_names() -> &'static phitex_defuse::FxHashMap<(u8, i32), &'static str> {
     static M: OnceLock<phitex_defuse::FxHashMap<(u8, i32), &'static str>> = OnceLock::new();
     M.get_or_init(|| {
-        crate::etex::all_prims()
+        let mut m: phitex_defuse::FxHashMap<(u8, i32), &'static str> = crate::etex::all_prims()
             .map(|&(n, c, h)| ((c, h), n))
-            .collect()
+            .collect();
+        // (XeTeX's own quantities, by codes no other primitive has; of
+        // two names of one, the later, `\U…` over `\XeTeX…`)
+        let own: Vec<_> = crate::xetex::own_prims().collect();
+        for &(n, c, h) in own.iter().rev() {
+            m.entry((c, h)).or_insert(n);
+        }
+        m
     })
 }
 
@@ -1362,7 +1369,7 @@ impl Mean {
             Mean::Font(f) => (cmd::SET_FONT, i32::try_from(*f).unwrap_or(0)),
             Mean::CharDef(n) => (cmd::CHAR_GIVEN, i32::try_from(*n).unwrap_or(0)),
             Mean::MathCharDef(n) if *n >= crate::xetex::U_MATH => {
-                (cmd::MATH_GIVEN, (*n as u32).cast_signed())
+                (cmd::MATH_GIVEN, u32::try_from(*n & 0xFFFF_FFFF).unwrap_or(0).cast_signed())
             }
             Mean::MathCharDef(n) => (cmd::MATH_GIVEN, i32::try_from(*n).unwrap_or(0)),
             Mean::NotExpanded => (cmd::RELAX, NO_EXPAND_FLAG),

@@ -257,6 +257,12 @@ pub(crate) struct View {
     pub fonts: FontTable,
     pub hyphen: FxHashMap<FontId, i32>,
     pub names: FxHashMap<FontId, (String, i32)>,
+    /// XeTeX's native fonts among the list's (no metrics: their words
+    /// carry theirs).
+    pub natives: std::collections::BTreeMap<FontId, Arc<crate::native::NativeFont>>,
+    /// `\XeTeXuseglyphmetrics` where the view was made (a merged word's
+    /// height and depth).
+    pub glyph_metrics: bool,
     pub px: FxHashMap<FontId, Box<Px>>,
     /// An expanded font's base, for its codes.
     pub ex_base: FxHashMap<FontId, FontId>,
@@ -404,6 +410,8 @@ impl View {
             fonts: self.fonts.clone(),
             hyphen: self.hyphen.clone(),
             names: self.names.clone(),
+            natives: self.natives.clone(),
+            glyph_metrics: self.glyph_metrics,
             ex_base: self.ex_base.clone(),
             ..View::default()
         }
@@ -411,6 +419,7 @@ impl View {
 
     /// Empties the view, its room kept.
     pub(crate) fn clear(&mut self) {
+        self.natives.clear();
         self.fonts.clear();
         self.hyphen.clear();
         self.names.clear();
@@ -465,6 +474,33 @@ fn lig_op(op: u8) -> LigOp {
 }
 
 impl Fonts for View {
+    fn shape_native(
+        &self,
+        like: &phitex_typeset::node::Native,
+        text: &[u16],
+    ) -> Option<phitex_typeset::node::Native> {
+        let nf = self.natives.get(&like.font)?;
+        Some(crate::native::reshape(nf, like, text, self.glyph_metrics))
+    }
+
+    fn native_char(
+        &self,
+        like: &phitex_typeset::node::Native,
+        c: u32,
+    ) -> Option<phitex_typeset::node::Native> {
+        let nf = self.natives.get(&like.font)?;
+        let mut units = Vec::with_capacity(2);
+        crate::native::utf16(c, &mut units);
+        if nf.font.mapping.is_some() {
+            units = nf.font.apply_mapping(&units);
+        }
+        let word = phitex_typeset::node::Native {
+            kind: phitex_typeset::node::NativeKind::Word,
+            ..like.clone()
+        };
+        Some(crate::native::reshape(nf, &word, &units, self.glyph_metrics))
+    }
+
     fn whd_table(&self, font: FontId) -> Option<&[(i32, i32, i32)]> {
         self.get(font).map(|(l, _)| l.whd_table())
     }

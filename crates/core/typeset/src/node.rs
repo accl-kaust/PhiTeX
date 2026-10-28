@@ -219,6 +219,55 @@ pub struct WhatsitSize {
     pub depth: Scaled,
 }
 
+/// One glyph of a [`Native`] node: its id and its position from the
+/// node's origin (scaled points; `y` down is negative, as XeTeX keeps
+/// it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Glyph {
+    /// The glyph id.
+    pub gid: u16,
+    /// Its x offset.
+    pub x: Scaled,
+    /// Its y offset.
+    pub y: Scaled,
+}
+
+/// What a [`Native`] node is (XeTeX's whatsit subtypes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum NativeKind {
+    /// `native_word_node`: a word shaped in a native font.
+    #[default]
+    Word,
+    /// `native_word_node_AT`: a word whose text the output carries too
+    /// (`\XeTeXgenerateactualtext`).
+    WordText,
+    /// `glyph_node`: one glyph by its id (`\XeTeXglyph`, math).
+    Glyph,
+}
+
+/// XeTeX's native word or glyph: a box-like item of a font the engine
+/// shapes outside TeX, its glyphs laid out (docs/spec-xetex.md §4.1).
+/// To the algorithms here it is its width, height and depth (XeTeX's
+/// "incorporate a whatsit node" cases); its text is for hyphenation and
+/// the output.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Native {
+    /// Word, word with its text, or glyph.
+    pub kind: NativeKind,
+    /// The font.
+    pub font: FontId,
+    /// Width.
+    pub width: Scaled,
+    /// Height.
+    pub height: Scaled,
+    /// Depth.
+    pub depth: Scaled,
+    /// The text, in UTF-16 units as XeTeX keeps it (empty for a glyph).
+    pub text: std::sync::Arc<[u16]>,
+    /// The glyphs as laid out.
+    pub glyphs: std::sync::Arc<[Glyph]>,
+}
+
 /// A list item.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Node {
@@ -271,6 +320,8 @@ pub enum Node {
     Penalty(i32),
     /// An unset box.
     Unset(Box<Unset>),
+    /// XeTeX's native word or glyph (apart: never in a pdfTeX list).
+    Native(Box<Native>),
 }
 
 // (a list is a run of these, mostly characters: the large variants apart

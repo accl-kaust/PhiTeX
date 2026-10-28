@@ -414,7 +414,7 @@ fn node_type(n: &Node) -> i32 {
         Node::Adjust(_) => 6,
         Node::Lig(_) => 7,
         Node::Disc(_) => 8,
-        Node::Whatsit(..) | Node::Language { .. } => 9,
+        Node::Whatsit(..) | Node::Language { .. } | Node::Native(_) => 9,
         Node::Math(..) => 10,
         Node::Glue(_) => 11,
         Node::Kern(..) => 12,

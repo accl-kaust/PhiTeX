@@ -488,6 +488,7 @@ impl Run<'_, '_> {
         // (spec-final §3.2: the page's own font usage, by id; the end
         // node resolves names and files from the fonts' fields)
         let mut ids: Vec<u32> = view.fonts.ids();
+        ids.extend(view.natives.keys().copied());
         ids.sort_unstable();
         let fonts: Vec<ValueId> = ids.iter().map(|&f| v.int(i64::from(f))).collect();
         let cs = v.list(counts.iter().map(|&c| v.int(i64::from(c))).collect());

@@ -396,7 +396,10 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
             // pdfTeX §1762
             let f = r.scan_font_ident()?;
             let c = r.scan_char_num()?;
-            char_dims(r, f, c)?.is_some()
+            match if r.xe { crate::xetex::native_has_char(r, f, c)? } else { None } {
+                Some(b) => b,
+                None => char_dims(r, f, c)?.is_some(),
+            }
         }
         IF_IN_CSNAME => IN_CSNAME.with(|c| c.get() > 0),
         IF_PDFABS_NUM | IF_PDFABS_DIM => {
@@ -486,6 +489,11 @@ pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
         li::FONT_CHAR_WD | li::FONT_CHAR_HT | li::FONT_CHAR_DP | li::FONT_CHAR_IC => {
             let f = r.scan_font_ident()?;
             let c = r.scan_char_num()?;
+            if r.xe
+                && let Some(d) = crate::xetex::native_char_dim(r, f, c, m)?
+            {
+                return Ok(IVal::Dimen(d));
+            }
             IVal::Dimen(char_dims(r, f, c)?.map_or(0, |d| match m {
                 li::FONT_CHAR_WD => d.width,
                 li::FONT_CHAR_HT => d.height,
@@ -956,6 +964,7 @@ fn pseudo_start(r: &mut Run<'_, '_>) -> R<()> {
             origin: None,
             lineno: u32::try_from(k + 1).unwrap_or(u32::MAX),
             rescanned: true,
+            chars: false,
         });
     }
     Ok(())

@@ -63,13 +63,17 @@ mod tools;
 mod val;
 mod vprof;
 mod xetex;
+mod native;
+mod xpic;
 
 pub use api::{
     Build, Diagnostic, EditSender, Finder, Hint, Options, PageSettled, RunReport as Report, Severity, Speculation,
     Stats, ToolFinder, ToolSearch, byte_ends, engine_id,
 };
 pub use exec::{Progress, SpawnWorker, set_spawn_worker};
-pub use xetex::{FontFile, XeTeX};
+pub use phitex_otf::{FontSource, KpseFormat};
+pub use phitex_otf::index::FontIndex;
+pub use xetex::{FontFiles, XeTeX};
 
 /// Whether this build has the timing and counter lines (`profile`).
 pub const PROFILE: bool = cfg!(feature = "profile");

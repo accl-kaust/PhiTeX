@@ -8,8 +8,8 @@
 use phitex_defuse::{Value, ValueId, Values};
 use phitex_typeset::glue::{Glue, GlueSet, GlueSign};
 use phitex_typeset::node::{
-    BoxKind, BoxNode, Disc, GlueKind, GlueNode, Insert, KernKind, Ligature, List, MathKind, Node,
-    Rule, Unset,
+    BoxKind, BoxNode, Disc, Glyph, GlueKind, GlueNode, Insert, KernKind, Ligature, List, MathKind,
+    Native, NativeKind, Node, Rule, Unset,
 };
 
 use crate::val::{glue_of, glue_value, int_of, list_of, node_id};
@@ -31,6 +31,11 @@ pub(crate) const T_PENALTY: i64 = 13;
 /// `[T_UNSET, span, width, height, depth, stretch, its order, shrink,
 /// its order, list]` (dimensions where a box has them).
 pub(crate) const T_UNSET: i64 = 14;
+/// XeTeX's native word or glyph ([`phitex_typeset::node::Native`]):
+/// `[tag, kind, font, width, height, depth, text, glyphs]`, the text its
+/// UTF-16 units and the glyphs their id, x, y as bytes in two strings
+/// ([`native_bytes`]).
+pub(crate) const T_NATIVE: i64 = 83;
 /// "Remove the last node of the list" (`\unskip` and its kind, §1105).
 pub(crate) const T_DELETE: i64 = 99;
 /// A point where tex.web calls `build_page` (§994).
@@ -338,6 +343,7 @@ fn encode_fixed(v: &Values, n: &Node) -> Option<ValueId> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
     if let Some(x) = encode_fixed(v, n) {
         return x;
@@ -418,6 +424,19 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
                 .as_ref()
                 .map_or(ValueId::UNIT, |l| encode(v, l, side)),
         ]),
+        Node::Native(n) => {
+            let (text, glyphs) = native_bytes(n);
+            v.list(vec![
+                i(v, T_NATIVE),
+                i(v, n.kind as i64),
+                i(v, i64::from(n.font)),
+                i(v, i64::from(n.width)),
+                i(v, i64::from(n.height)),
+                i(v, i64::from(n.depth)),
+                v.str(&text),
+                v.str(&glyphs),
+            ])
+        }
         Node::Unset(u) => v.list(vec![
             i(v, T_UNSET),
             i(v, i64::from(u.span_count)),
@@ -1053,6 +1072,20 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
         }),
         T_KERN => Node::Kern(g(1), kern_kind(xs.get(2).map_or(0, |&y| int_of(v, y)))),
         T_PENALTY => Node::Penalty(g(1)),
+        T_NATIVE => {
+            let s = |k: usize| xs.get(k).map(|&y| crate::val::str_of(v, y)).unwrap_or_default();
+            Node::Native(Box::new(native_of_bytes(
+                match g(1) {
+                    1 => NativeKind::WordText,
+                    2 => NativeKind::Glyph,
+                    _ => NativeKind::Word,
+                },
+                u32::try_from(g(2)).unwrap_or(0),
+                [g(3), g(4), g(5)],
+                &s(6),
+                &s(7),
+            )))
+        }
         T_UNSET => Node::Unset(Box::new(Unset {
             span_count: u16::try_from(g(1)).unwrap_or(0),
             width: g(2),
@@ -1068,6 +1101,52 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
         })),
         _ => return None,
     })
+}
+
+/// A native node's text and glyphs as strings of bytes, one character
+/// each: two per UTF-16 unit; per glyph its id (2), x (4) and y (4),
+/// big-endian.
+fn native_bytes(n: &Native) -> (String, String) {
+    let ch = |b: u8| char::from(b);
+    let text = n.text.iter().flat_map(|u| u.to_be_bytes()).map(ch).collect();
+    let glyphs = n
+        .glyphs
+        .iter()
+        .flat_map(|g| {
+            let mut b = [0u8; 10];
+            b[..2].copy_from_slice(&g.gid.to_be_bytes());
+            b[2..6].copy_from_slice(&g.x.to_be_bytes());
+            b[6..].copy_from_slice(&g.y.to_be_bytes());
+            b
+        })
+        .map(ch)
+        .collect();
+    (text, glyphs)
+}
+
+/// [`native_bytes`] read back.
+fn native_of_bytes(kind: NativeKind, font: u32, whd: [i32; 3], text: &str, glyphs: &str) -> Native {
+    let tb: Vec<u8> = text.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(0)).collect();
+    let gb: Vec<u8> = glyphs.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(0)).collect();
+    let be4 = |b: &[u8]| i32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+    Native {
+        kind,
+        font,
+        width: whd[0],
+        height: whd[1],
+        depth: whd[2],
+        text: tb.as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes(*b)).collect(),
+        glyphs: gb
+            .as_chunks::<10>()
+            .0
+            .iter()
+            .map(|b| Glyph {
+                gid: u16::from_be_bytes([b[0], b[1]]),
+                x: be4(&b[2..6]),
+                y: be4(&b[6..10]),
+            })
+            .collect(),
+    }
 }
 
 /// Whether the box value `b` is an hbox.
@@ -1383,6 +1462,10 @@ fn native_walk(l: &[Node], out: &mut FontIds) -> bool {
         }
         Node::Lig(g) => {
             out.insert(g.font);
+            true
+        }
+        Node::Native(n) => {
+            out.insert(n.font);
             true
         }
         Node::Box(b) => native_walk(&b.list, out),

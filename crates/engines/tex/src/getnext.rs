@@ -1466,7 +1466,7 @@ impl Run<'_, '_> {
             return Ok(());
         };
         // (a reached line's continuation, read now: XeTeX's characters)
-        if self.xe && self.input.line(top).endch != -2 {
+        if self.xe && self.input.line(top).endch != -2 && !next.chars {
             let origin = next.origin.map(|o| o.0);
             let mut buf = std::mem::take(&mut next.buf);
             self.xe_decode_joined(&mut buf, origin)?;

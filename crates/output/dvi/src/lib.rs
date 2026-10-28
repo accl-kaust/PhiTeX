@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::glue::{GlueSign, Order};
-use phitex_typeset::node::{BoxKind, BoxNode, GlueKind, GlueNode, Node, RUNNING};
+use phitex_typeset::node::{BoxKind, BoxNode, GlueKind, GlueNode, Native, NativeKind, Node, RUNNING};
 
 /// DVI opcodes (§586).
 pub mod op {
@@ -788,6 +788,80 @@ impl DviWriter {
     fn char_out(&mut self, f: FontId, c: u16, fonts: &dyn Fn(FontId) -> FontDef) {
         self.synch_h();
         self.synch_v();
+        self.set_font(f, fonts);
+        // §620 (web2c: a character that doesn't exist is not output)
+        let width = self.fonts[&f].widths.get(usize::from(c)).copied().flatten();
+        if let Some(w) = width {
+            let c = low(u32::from(c));
+            if c >= 128 {
+                self.dvi_out(op::SET1);
+            }
+            self.dvi_out(c);
+            self.cur_h += w;
+        }
+        self.dvi_h = self.cur_h;
+    }
+
+    /// A native word or glyph in an hlist (XeTeX's "Output the whatsit
+    /// node `p` in an hlist": `set_glyphs`, or `set_text_and_glyphs`
+    /// with the word's text).
+    fn native_out(&mut self, n: &Native, fonts: &dyn Fn(FontId) -> FontDef) {
+        self.synch_h();
+        self.synch_v();
+        self.set_font(n.font, fonts);
+        match n.kind {
+            NativeKind::Glyph => {
+                self.dvi_out(op::SET_GLYPHS);
+                self.dvi_four(n.width);
+                self.dvi_two(1);
+                self.dvi_four(0);
+                self.dvi_four(0);
+                self.dvi_two(n.glyphs.first().map_or(0, |g| g.gid));
+            }
+            NativeKind::WordText => {
+                if !n.text.is_empty() || !n.glyphs.is_empty() {
+                    self.dvi_out(op::SET_TEXT_AND_GLYPHS);
+                    self.dvi_two(u16::try_from(n.text.len()).unwrap_or(u16::MAX));
+                    for &u in n.text.iter() {
+                        self.dvi_two(u);
+                    }
+                    self.glyph_array(n);
+                }
+            }
+            NativeKind::Word => {
+                if !n.glyphs.is_empty() {
+                    self.dvi_out(op::SET_GLYPHS);
+                    self.glyph_array(n);
+                }
+            }
+        }
+        self.cur_h += n.width;
+        self.dvi_h = self.cur_h;
+    }
+
+    /// `make_xdv_glyph_array_data`: the width, the count, each glyph's x
+    /// and y, then each glyph's id.
+    fn glyph_array(&mut self, n: &Native) {
+        self.dvi_four(n.width);
+        self.dvi_two(u16::try_from(n.glyphs.len()).unwrap_or(u16::MAX));
+        for g in n.glyphs.iter() {
+            self.dvi_four(g.x);
+            self.dvi_four(g.y);
+        }
+        for g in n.glyphs.iter() {
+            self.dvi_two(g.gid);
+        }
+    }
+
+    /// `dvi_two` (XeTeX): two bytes.
+    fn dvi_two(&mut self, s: u16) {
+        let [a, b] = s.to_be_bytes();
+        self.dvi_out(a);
+        self.dvi_out(b);
+    }
+
+    /// The font `f` selected (§621), defined at its first use.
+    fn set_font(&mut self, f: FontId, fonts: &dyn Fn(FontId) -> FontDef) {
         if self.dvi_f != Some(f) {
             if let Some(r) = &mut self.rec
                 && !r.used.contains(&f)
@@ -817,17 +891,6 @@ impl DviWriter {
             }
             self.dvi_f = Some(id);
         }
-        // §620 (web2c: a character that doesn't exist is not output)
-        let width = self.fonts[&f].widths.get(usize::from(c)).copied().flatten();
-        if let Some(w) = width {
-            let c = low(u32::from(c));
-            if c >= 128 {
-                self.dvi_out(op::SET1);
-            }
-            self.dvi_out(c);
-            self.cur_h += w;
-        }
-        self.dvi_h = self.cur_h;
     }
 
     /// `hlist_out` (§619).
@@ -876,9 +939,26 @@ impl DviWriter {
                     None
                 }
                 Node::Rule(r) => Some((r.height, r.depth, r.width)),
+                // (XeTeX's picture: its special at the baseline, the
+                // width passed over)
+                Node::Whatsit(h, Some(sz)) if self.xdv => {
+                    let (save_h, save_v) = (self.dvi_h, self.dvi_v);
+                    self.cur_v = fr.base;
+                    let edge = self.cur_h + sz.width;
+                    self.out_what(*h, wh);
+                    self.dvi_h = save_h;
+                    self.dvi_v = save_v;
+                    self.cur_h = edge;
+                    self.cur_v = fr.base;
+                    None
+                }
                 // a sized whatsit is pdfTeX's, refused in DVI mode
                 Node::Whatsit(h, _) => {
                     self.out_what(*h, wh);
+                    None
+                }
+                Node::Native(n) => {
+                    self.native_out(n, fonts);
                     None
                 }
                 Node::Glue(g) => self.hglue(g, fr, fonts, wh),
@@ -1019,9 +1099,38 @@ impl DviWriter {
                     None
                 }
                 Node::Rule(r) => Some((r.height, r.depth, r.width)),
+                // (XeTeX's picture: its special at its top, then below
+                // it from where the output stood)
+                Node::Whatsit(h, Some(sz)) if self.xdv => {
+                    let (save_h, save_v) = (self.dvi_h, self.dvi_v);
+                    self.cur_v += sz.height;
+                    self.out_what(*h, wh);
+                    self.dvi_h = save_h;
+                    self.dvi_v = save_v;
+                    self.cur_v = save_v + sz.depth;
+                    self.cur_h = left_edge;
+                    None
+                }
                 // a sized whatsit is pdfTeX's, refused in DVI mode
                 Node::Whatsit(h, _) => {
                     self.out_what(*h, wh);
+                    None
+                }
+                Node::Native(n) if n.kind == NativeKind::Glyph => {
+                    // XeTeX's "Output the whatsit node `p` in a vlist"
+                    self.cur_v += n.height;
+                    self.cur_h = left_edge;
+                    self.synch_h();
+                    self.synch_v();
+                    self.set_font(n.font, fonts);
+                    self.dvi_out(op::SET_GLYPHS);
+                    self.dvi_four(0);
+                    self.dvi_two(1);
+                    self.dvi_four(0);
+                    self.dvi_four(0);
+                    self.dvi_two(n.glyphs.first().map_or(0, |g| g.gid));
+                    self.cur_v += n.depth;
+                    self.cur_h = left_edge;
                     None
                 }
                 Node::Glue(g) => self.vglue(g, &mut fr, fonts, wh),

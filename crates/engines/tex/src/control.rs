@@ -426,6 +426,15 @@ impl Run<'_, '_> {
         // (§1210's prefixed commands are the same in every mode, and
         // `\relax` does nothing: no mode read)
         let c = self.cur.cmd;
+        // (XeTeX's `othercases` after a run of characters:
+        // `check_for_post_char_toks(big_switch)`)
+        if self.xe
+            && self.ic_prev != crate::xetex::CLASS_BOUNDARY
+            && !matches!(c, cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN | cmd::CHAR_NUM | cmd::NO_BOUNDARY)
+            && self.ic_post()?
+        {
+            return Ok(());
+        }
         if (cmd::TOKS_REGISTER..=cmd::SET_INTERACTION).contains(&c) {
             return self.prefixed_command();
         }
@@ -914,7 +923,12 @@ impl Run<'_, '_> {
                 } else {
                     self.cur.chr
                 };
-                let field = self.quantity(cmd::ASSIGN_TOKS, loc);
+                // (XeTeX's `\XeTeXinterchartoks` names its pair of classes)
+                let field = if self.xe && self.cur.cmd == cmd::ASSIGN_TOKS && loc == crate::xetex::INTER_CHAR_LOC {
+                    self.ic_field()?
+                } else {
+                    self.quantity(cmd::ASSIGN_TOKS, loc)
+                };
                 self.scan_optional_equals()?;
                 self.skip_blanks_relax_x()?;
                 if self.cur.cmd != cmd::LEFT_BRACE {
@@ -927,7 +941,12 @@ impl Run<'_, '_> {
                         src = Some(self.cur.chr);
                     }
                     if let Some(s) = src {
-                        let x = self.qget(cmd::ASSIGN_TOKS, s)?;
+                        let x = if self.xe && self.cur.cmd == cmd::ASSIGN_TOKS && s == crate::xetex::INTER_CHAR_LOC {
+                            let f = self.ic_field()?;
+                            self.read_f(f)?
+                        } else {
+                            self.qget(cmd::ASSIGN_TOKS, s)?
+                        };
                         let val = x.unwrap_or_else(|| v.list(Vec::new()));
                         self.set_f(field, val, global);
                         return self.after_assignment();
@@ -1435,7 +1454,7 @@ impl Run<'_, '_> {
         };
         self.define_cs(&u, &Mean::Font(0), global);
         self.scan_optional_equals()?;
-        let name = self.scan_file_name()?;
+        let (name, quoted) = self.scan_file_name_q()?;
         // §1258
         let s: i32 = if self.scan_keyword("at")? {
             let s = self.scan_normal_dimen()?;
@@ -1453,7 +1472,11 @@ impl Run<'_, '_> {
         // §1260: a font of the same name and size is that font, its key
         // the font's own ([`crate::fonts::key_of`]): one read, of that
         // font's fields, never of the fonts loaded before
-        let f = self.read_font_info(&name, s)?;
+        let f = if self.xe {
+            self.xe_read_font_info(&name, quoted, s)?
+        } else {
+            self.read_font_info(&name, s)?
+        };
         let v = self.v;
         self.define_cs(&u, &Mean::Font(f), global);
         // §1257: the font identifier
@@ -1471,15 +1494,23 @@ impl Run<'_, '_> {
     /// where its number comes from, [`crate::pdfout::font_load`]) and is
     /// the last font loaded (`fontlast`, §578).
     pub(crate) fn read_font_info(&mut self, name: &str, s: i32) -> R<i64> {
+        if let Some(f) = self.tfm_font_info(name, s)? {
+            return Ok(f);
+        }
+        self.log("error", "Font not loadable")?;
+        Ok(0)
+    }
+
+    /// [`Run::read_font_info`] of a TFM file: `None` where it can't be
+    /// had.
+    pub(crate) fn tfm_font_info(&mut self, name: &str, s: i32) -> R<Option<i64>> {
         let key = format!("{name}.tfm");
         let Some(file) = self.file(&key)? else {
-            self.log("error", "Font not loadable")?;
-            return Ok(0);
+            return Ok(None);
         };
         let v = self.v;
         let Some(l) = crate::fonts::load(v, file, s) else {
-            self.log("error", "Font not loadable")?;
-            return Ok(0);
+            return Ok(None);
         };
         // (§1260: `s > 0` is the size; a scaled load's size is the
         // design size scaled, `l.at.size` both ways)
@@ -1493,7 +1524,7 @@ impl Run<'_, '_> {
         })?;
         let f = i64::from(k);
         if held {
-            return Ok(f);
+            return Ok(Some(f));
         }
         self.set("fontlast", v.int(f), true);
         self.font_loaded(f);
@@ -1529,7 +1560,7 @@ impl Run<'_, '_> {
         let sc = i64::from(self.ipar(Par::defaultskewchar)?);
         self.font_set(f, crate::fields::FontCell::Hc, v.int(hc), true);
         self.font_set(f, crate::fields::FontCell::Sc, v.int(sc), true);
-        Ok(f)
+        Ok(Some(f))
     }
 
     /// `\patterns` (§960–§965): the words as §962 reads them (letters

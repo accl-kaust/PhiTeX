@@ -418,6 +418,7 @@ impl FileRest {
             origin: Some((self.name, at, ValueId::UNIT)),
             lineno: self.line,
             rescanned: false,
+            chars: false,
         }
     }
 }
@@ -923,6 +924,16 @@ pub(crate) struct Run<'c, 'a> {
     /// file's name, as first read or as this run set them
     /// (`crate::xetex`, `\XeTeXinputencoding`).
     pub(crate) xenc: Vec<(ValueId, i64)>,
+    /// The native fonts this run met, by font (`crate::native`).
+    pub(crate) xfonts: Vec<(i64, Option<std::sync::Arc<crate::native::NativeFont>>)>,
+    /// The native fonts' last scripts as this run has them
+    /// (`crate::native`, `fontdir:<f>`).
+    pub(crate) xdirs: Vec<(i64, Option<u32>)>,
+    /// XeTeX's `prev_class` and `space_class`: the class of the last
+    /// character of the run of characters just made (`char_class_boundary`
+    /// where none is), for `\XeTeXinterchartoks` (`crate::xetex`).
+    pub(crate) ic_prev: i32,
+    pub(crate) ic_space: i32,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -937,6 +948,10 @@ impl<'c, 'a> Run<'c, 'a> {
         Run {
             xe,
             xenc: Vec::new(),
+            xfonts: Vec::new(),
+            xdirs: Vec::new(),
+            ic_prev: crate::xetex::CLASS_BOUNDARY,
+            ic_space: 0,
             _scope: crate::val::EpochScope::enter(v, cx.values_epoch()),
             cx,
             v,
@@ -3122,6 +3137,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 origin: None,
                 lineno: 0,
                 rescanned: true,
+                chars: false,
             }));
         }
         let mut res = Ok(());
@@ -5191,6 +5207,7 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
                     starts: xs.get(4).is_none_or(|&x| int_of(v, x) & 1 != 0),
                     ends: xs.get(4).is_none_or(|&x| int_of(v, x) & 2 != 0),
                     rescanned: xs.get(4).is_some_and(|&x| int_of(v, x) & 4 != 0),
+                    chars: xs.get(4).is_some_and(|&x| int_of(v, x) & 8 != 0),
                     origin: match (xs.get(5), xs.get(6)) {
                         (Some(&n), Some(&o)) => Some((
                             n,
