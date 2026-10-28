@@ -1176,6 +1176,11 @@ impl State {
             K_CHAR => Mean::Char(e.cmd, e.chr.cast_unsigned()),
             K_FONT => Mean::Font(i64::from(e.chr)),
             K_CHARDEF => Mean::CharDef(i64::from(e.chr)),
+            // (payload 1: XeTeX's `\\Umathchardef`, its code's 32 bits
+            // flagged past them, `crate::xetex::U_MATH`)
+            K_MATHCHARDEF if e.payload == 1 => {
+                Mean::MathCharDef(crate::xetex::U_MATH | i64::from(e.chr.cast_unsigned()))
+            }
             K_MATHCHARDEF => Mean::MathCharDef(i64::from(e.chr)),
             K_REG => Mean::Reg(e.cmd, e.chr),
             K_NOTEXP => Mean::NotExpanded,
@@ -1210,7 +1215,7 @@ impl State {
             Mean::Undefined => (K_UNDEF, 0),
             Mean::Font(_) => (K_FONT, 0),
             Mean::CharDef(_) => (K_CHARDEF, 0),
-            Mean::MathCharDef(_) => (K_MATHCHARDEF, 0),
+            Mean::MathCharDef(n) => (K_MATHCHARDEF, u32::from(n >= crate::xetex::U_MATH)),
             Mean::Reg(..) => (K_REG, 0),
             Mean::NotExpanded => (K_NOTEXP, 0),
         };

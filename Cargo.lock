@@ -1702,6 +1702,7 @@ dependencies = [
  "phitex-dvi",
  "phitex-kpse",
  "phitex-makeindex",
+ "phitex-otf",
  "phitex-pdf",
  "phitex-source",
  "phitex-tfm",

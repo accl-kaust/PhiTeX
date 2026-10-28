@@ -116,6 +116,7 @@ fn font_def(f: &ScaledFont, checksum: [u8; 4]) -> FontDef {
         area: Vec::new(),
         name: b"cmr10".to_vec(),
         widths: f.chars.iter().map(|c| c.map(|d| d.width)).collect(),
+        native: None,
     }
 }
 

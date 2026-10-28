@@ -600,7 +600,7 @@ impl Run<'_, '_> {
                     }
                     let f = self.input.file_mut(top);
                     if f.has_lines() {
-                        let line = f.take_line();
+                        let line = f.take_line(self.xe);
                         self.input.push_line(line);
                     } else {
                         self.pop_input_level();
@@ -1303,6 +1303,10 @@ impl Run<'_, '_> {
             && s.endch == -2
         {
             let (starts, ends) = (s.starts, s.ends);
+            // (XeTeX's `input_line`: the line's bytes made characters)
+            if self.xe {
+                self.xe_decode_top()?;
+            }
             // §360: `\endlinechar` as it is when the line is read goes
             // after its last character (an assignment on the line itself
             // reaches the next line only: `\endlinechar=-1` on a line
@@ -1327,7 +1331,7 @@ impl Run<'_, '_> {
                 }
             }
             if let Some(s) = self.input.top_line_mut() {
-                if (0..256).contains(&e) {
+                if (0..crate::run::max_char_end(self.xe)).contains(&e) {
                     s.buf.push(u32::try_from(e).unwrap_or(13));
                 }
                 s.endch = e;
@@ -1458,9 +1462,16 @@ impl Run<'_, '_> {
         } else {
             -1
         };
-        let Seg::Line(next) = self.input.text.remove(at) else {
+        let Seg::Line(mut next) = self.input.text.remove(at) else {
             return Ok(());
         };
+        // (a reached line's continuation, read now: XeTeX's characters)
+        if self.xe && self.input.line(top).endch != -2 {
+            let origin = next.origin.map(|o| o.0);
+            let mut buf = std::mem::take(&mut next.buf);
+            self.xe_decode_joined(&mut buf, origin)?;
+            next.buf = buf;
+        }
         // (a sibling whose text began here now continues the line on top)
         for p in &mut self.pull_at {
             *p = match *p {
@@ -1473,7 +1484,7 @@ impl Run<'_, '_> {
         line.buf.extend_from_slice(&next.buf);
         line.ends = next.ends;
         if completes {
-            if (0..256).contains(&e) {
+            if (0..crate::run::max_char_end(self.xe)).contains(&e) {
                 line.buf.push(u32::try_from(e).unwrap_or(13));
             }
             line.endch = e;
@@ -1502,6 +1513,9 @@ impl Run<'_, '_> {
     /// §352: an expanded character `^^A` or `^^df` after the `sup_mark`
     /// `c` just read.
     fn sup_mark(&mut self, c: u32) -> Option<u32> {
+        if self.xe {
+            return self.sup_mark_xe(c);
+        }
         let s = self.input.top_line_mut()?;
         let limit = s.buf.len().checked_sub(1)?;
         let loc = s.loc;
@@ -1520,6 +1534,73 @@ impl Run<'_, '_> {
             }
         }
         None
+    }
+
+    /// XeTeX's §352: `^^` to `^^^^^^` with as many hex digits, or `^^X`.
+    fn sup_mark_xe(&mut self, c: u32) -> Option<u32> {
+        let s = self.input.top_line_mut()?;
+        let limit = s.buf.len().checked_sub(1)?;
+        let loc = s.loc;
+        if loc >= s.buf.len() || s.buf[loc] != c || loc >= limit {
+            return None;
+        }
+        let mut n = 2;
+        while n < 6 && loc + 2 * n - 2 <= limit && s.buf.get(loc + n - 1) == Some(&c) {
+            n += 1;
+        }
+        let at = |k: usize| s.buf.get(k).copied().unwrap_or(0);
+        if (1..=n).any(|d| !is_hex(at(loc + n - 2 + d))) {
+            let c1 = at(loc + 1);
+            if c1 < 0o200 {
+                s.loc = loc + 2;
+                return Some(if c1 < 0o100 { c1 + 0o100 } else { c1 - 0o100 });
+            }
+            return None;
+        }
+        let x = (1..=n).fold(0u32, |x, d| 16 * x + hex(at(loc + n - 2 + d)));
+        if x > crate::xetex::BIGGEST_USV {
+            return None;
+        }
+        s.loc = loc + 2 * n - 1;
+        Some(x)
+    }
+
+    /// XeTeX's §355: [`Run::reduce_expanded`] with `^^^^` forms.
+    fn reduce_expanded_xe(&mut self, k: usize, cat: u8) -> bool {
+        let Some(s) = self.input.top_line_mut() else {
+            return false;
+        };
+        let limit = s.buf.len() - 1;
+        if cat != 7 || k >= limit || k == 0 {
+            return false;
+        }
+        let cur = s.buf[k - 1];
+        if s.buf[k] != cur {
+            return false;
+        }
+        let mut n = 2;
+        while n < 6 && k + 2 * n - 2 <= limit && s.buf.get(k + n - 1) == Some(&cur) {
+            n += 1;
+        }
+        let at = |b: &[u32], i: usize| b.get(i).copied().unwrap_or(0);
+        if (1..=n).any(|d| !is_hex(at(&s.buf, k + n - 2 + d))) {
+            let c = at(&s.buf, k + 1);
+            if c >= 0o200 {
+                return false;
+            }
+            s.buf[k - 1] = if c < 0o100 { c + 0o100 } else { c - 0o100 };
+            s.buf.drain(k..k + 2);
+            self.muts += 1;
+            return true;
+        }
+        let x = (1..=n).fold(0u32, |x, d| 16 * x + hex(at(&s.buf, k + n - 2 + d)));
+        if x > crate::xetex::BIGGEST_USV {
+            return false;
+        }
+        s.buf[k - 1] = x;
+        s.buf.drain(k..k + 2 * n - 1);
+        self.muts += 1;
+        true
     }
 
     /// §354–§356: a control sequence after an escape character.
@@ -1648,6 +1729,9 @@ impl Run<'_, '_> {
     /// §355: with `buffer[k-1]` of category `cat`, reduces an expanded code
     /// there; true if it did (`goto start_cs`).
     fn reduce_expanded(&mut self, k: usize, cat: u8) -> bool {
+        if self.xe {
+            return self.reduce_expanded_xe(k, cat);
+        }
         let Some(s) = self.input.top_line_mut() else {
             return false;
         };

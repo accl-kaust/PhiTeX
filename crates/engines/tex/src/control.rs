@@ -780,7 +780,7 @@ impl Run<'_, '_> {
                 for t in body {
                     match t.as_cs() {
                         None => {
-                            let ch = t.chr() & 0xFF;
+                            let ch = t.chr();
                             let e = self.code(table, ch)?;
                             if e != 0 {
                                 out.push(Tok::ch(
@@ -875,6 +875,10 @@ impl Run<'_, '_> {
                 let m = match n {
                     0 => Mean::CharDef(i64::from(self.scan_char_num()?)),
                     1 => Mean::MathCharDef(i64::from(self.scan_fifteen_bit_int()?)),
+                    crate::xetex::UMATHCHAR_DEF | crate::xetex::UMATHCHARNUM_DEF => {
+                        let x = self.scan_umath(n == crate::xetex::UMATHCHAR_DEF)?;
+                        Mean::MathCharDef(crate::xetex::U_MATH | i64::from(x.cast_unsigned()))
+                    }
                     _ => {
                         let r = self.scan_eight_bit_int()?;
                         match n {
@@ -954,6 +958,7 @@ impl Run<'_, '_> {
                 let e = self.st.glue_entry(g);
                 self.set_loc(l, e, global);
             }
+            cmd::DEF_CODE if self.xe => self.xe_def_code(global)?,
             cmd::DEF_CODE => {
                 // §1232
                 let base = self.cur.chr;
@@ -2012,6 +2017,13 @@ impl Run<'_, '_> {
                 })
                 .collect();
             line.push('\n');
+            // (XeTeX writes UTF-8, controls in `^^` form; the line read
+            // back here is those bytes read as XeTeX reads them)
+            let line = if self.xe {
+                crate::xetex::file_text(&line)
+            } else {
+                line
+            };
             // a file whose read-back only defines: the definitions this
             // line's read-back makes go with it (`wdef:<field>`); a line
             // that does more (contributes, typesets, opens a scope) makes
@@ -2034,7 +2046,11 @@ impl Run<'_, '_> {
                     None => line.clone(),
                 };
                 self.interp_point = self.read_point_of(&name)?;
-                let r = self.interpret_line(&text);
+                let r = if self.xe {
+                    self.interpret_line(&crate::xetex::reread(&text))
+                } else {
+                    self.interpret_line(&text)
+                };
                 self.interp_point = None;
                 let r = r?;
                 if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {

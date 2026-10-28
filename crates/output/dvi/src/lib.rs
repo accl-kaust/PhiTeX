@@ -76,6 +76,14 @@ pub mod op {
     pub const POST_POST: u8 = 249;
     /// `id_byte` (§587).
     pub const ID_BYTE: u8 = 2;
+    /// XeTeX's `id_byte`: an XDV file.
+    pub const XDV_ID_BYTE: u8 = 7;
+    /// XeTeX's `define_native_font`.
+    pub const DEFINE_NATIVE_FONT: u8 = 252;
+    /// XeTeX's `set_glyphs`.
+    pub const SET_GLYPHS: u8 = 253;
+    /// XeTeX's `set_text_and_glyphs`.
+    pub const SET_TEXT_AND_GLYPHS: u8 = 254;
 }
 
 /// web2c's default `dvi_buf_size` (texmf.cnf), a multiple of 8.
@@ -99,6 +107,10 @@ pub struct FontDef {
     /// the character doesn't exist, which web2c's TeX doesn't output
     /// (`tex.ch`, `MLTeX` disabled).
     pub widths: Vec<Option<Scaled>>,
+    /// A XeTeX native font's definition after its number
+    /// (`make_font_def`: size, flags, path, face index, ...): written as
+    /// `define_native_font` instead of `fnt_def`.
+    pub native: Option<Vec<u8>>,
 }
 
 /// The direction of a [`DviWriter::movement`] (§607): `o` is `down1` or
@@ -257,6 +269,11 @@ pub struct DviWriter {
     /// While [`DviWriter::ship_out_kept`] ships a page: its first byte,
     /// the buffer-dependent decisions so far and the fonts it uses.
     rec: Option<Recording>,
+    /// XeTeX's XDV file ([`DviWriter::new_xdv`]).
+    xdv: bool,
+    /// The next page's `\pdfpagewidth` and `\pdfpageheight` (XDV: the
+    /// `pdf:pagesize` special each page begins with).
+    pub page_size: (Scaled, Scaled),
 }
 
 /// The output buffer's state at a byte (§595–§598): `dvi_ptr`,
@@ -406,7 +423,29 @@ impl DviWriter {
     /// [`DviWriter::new`] with another `dvi_buf_size` (a multiple of 8).
     #[must_use]
     pub fn with_buf_size(mag: i32, comment: &str, buf_size: usize) -> DviWriter {
+        Self::make(mag, comment, buf_size, false)
+    }
+
+    /// XeTeX's writer (xetex.web §583 ff.): an XDV file, `id_byte` 7,
+    /// each page beginning with its `pdf:pagesize` special, native fonts
+    /// and glyph runs.
+    #[must_use]
+    pub fn new_xdv(mag: i32, comment: &str) -> DviWriter {
+        Self::make(mag, comment, DVI_BUF_SIZE, true)
+    }
+
+    fn id_byte(&self) -> u8 {
+        if self.xdv {
+            op::XDV_ID_BYTE
+        } else {
+            op::ID_BYTE
+        }
+    }
+
+    fn make(mag: i32, comment: &str, buf_size: usize, xdv: bool) -> DviWriter {
         let mut w = DviWriter {
+            xdv,
+            page_size: (0, 0),
             out: Vec::new(),
             buf_size,
             dvi_ptr: 0,
@@ -436,7 +475,7 @@ impl DviWriter {
         };
         // §617
         w.dvi_out(op::PRE);
-        w.dvi_out(op::ID_BYTE);
+        w.dvi_out(w.id_byte());
         w.dvi_four(25400000);
         w.dvi_four(473628672);
         w.dvi_four(mag);
@@ -525,6 +564,15 @@ impl DviWriter {
     fn dvi_font_def(&mut self, id: FontId) {
         let f = self.num(id);
         let n = f - 1;
+        if let Some(def) = self.fonts[&id].native.clone() {
+            // XeTeX's `dvi_native_font_def`
+            self.dvi_out(op::DEFINE_NATIVE_FONT);
+            self.dvi_four(n.cast_signed());
+            for b in def {
+                self.dvi_out(b);
+            }
+            return;
+        }
         if f <= 256 {
             self.dvi_out(op::FNT_DEF1);
             self.dvi_out(low(n));
@@ -539,10 +587,20 @@ impl DviWriter {
         }
         self.dvi_four(d.size);
         self.dvi_four(d.design_size);
+        // (XeTeX: the name to its first colon, a mapping option cut)
+        let name = if self.xdv {
+            d.name
+                .iter()
+                .position(|&b| b == b':')
+                .filter(|&k| k > 0)
+                .map_or(&d.name[..], |k| &d.name[..k])
+        } else {
+            &d.name[..]
+        };
         self.dvi_out(low(u32::try_from(d.area.len()).unwrap_or(0)));
-        self.dvi_out(low(u32::try_from(d.name.len()).unwrap_or(0)));
+        self.dvi_out(low(u32::try_from(name.len()).unwrap_or(0)));
         // §603
-        for &b in d.area.iter().chain(&d.name) {
+        for &b in d.area.iter().chain(name) {
             self.dvi_out(b);
         }
     }
@@ -1103,6 +1161,25 @@ impl DviWriter {
         }
         self.dvi_four(self.last_bop);
         self.last_bop = page_loc;
+        if self.xdv {
+            // XeTeX: "generate a pagesize special at start of page"
+            let mut s = String::from("pdf:pagesize ");
+            let (w, h) = self.page_size;
+            if w > 0 && h > 0 {
+                s.push_str("width ");
+                print_scaled(&mut s, w);
+                s.push_str("pt height ");
+                print_scaled(&mut s, h);
+                s.push_str("pt");
+            } else {
+                s.push_str("default");
+            }
+            self.dvi_out(op::XXX1);
+            self.dvi_out(low(u32::try_from(s.len()).unwrap_or(0)));
+            for &b in s.as_bytes() {
+                self.dvi_out(b);
+            }
+        }
         self.cur_v = page.height + self.v_offset;
         self.box_out(page, fonts, whatsits);
         self.dvi_out(op::EOP);
@@ -1276,12 +1353,36 @@ impl DviWriter {
         }
         self.dvi_out(op::POST_POST);
         self.dvi_four(self.last_bop);
-        self.dvi_out(op::ID_BYTE);
+        self.dvi_out(self.id_byte());
         let k = 4 + (self.buf_size - self.dvi_ptr) % 4;
         for _ in 0..k {
             self.dvi_out(223);
         }
         self.out
+    }
+}
+
+/// `print_scaled` (§103).
+fn print_scaled(out: &mut String, s: Scaled) {
+    let mut s = i64::from(s);
+    if s < 0 {
+        out.push('-');
+        s = -s;
+    }
+    out.push_str(&(s / 65536).to_string());
+    out.push('.');
+    s = 10 * (s % 65536) + 5;
+    let mut delta = 10;
+    loop {
+        if delta > 65536 {
+            s += 0o100000 - 50000;
+        }
+        out.push(char::from(b'0' + u8::try_from(s / 65536).unwrap_or(0)));
+        s = 10 * (s % 65536);
+        delta *= 10;
+        if s <= delta {
+            break;
+        }
     }
 }
 

@@ -291,19 +291,29 @@ impl Run<'_, '_> {
                     self.set_astate(a - 1);
                 }
             }
+            // (XeTeX's constants run to `biggest_usv`; a one-character
+            // name past 0xFFFF is a multi-letter one there)
+            let limit = if self.xe {
+                crate::xetex::BIGGEST_USV.cast_signed()
+            } else {
+                255
+            };
             val = match t.as_cs() {
                 Some(n) => {
                     let mut cs = n.chars();
                     match (cs.next(), cs.next()) {
-                        (Some(c), None) if !n.starts_with('\u{10FFFE}') => {
-                            i32::try_from(u32::from(c)).unwrap_or(256)
+                        (Some(c), None)
+                            if !n.starts_with('\u{10FFFE}')
+                                && !(self.xe && u32::from(c) > 0xFFFF) =>
+                        {
+                            i32::try_from(u32::from(c)).unwrap_or(limit + 1)
                         }
-                        _ => 256,
+                        _ => limit + 1,
                     }
                 }
                 None => i32::try_from(t.chr()).unwrap_or(0),
             };
-            if val > 255 {
+            if val > limit {
                 // "Improper alphabetic constant"
                 val = i32::from(b'0');
                 self.back_cur();
@@ -647,6 +657,10 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn scan_char_num(&mut self) -> R<i32> {
+        // (XeTeX's `scan_char_num` is `scan_usv_num`)
+        if self.xe {
+            return self.scan_usv_num();
+        }
         let n = self.scan_int()?;
         Ok(if (0..=255).contains(&n) { n } else { 0 })
     }
@@ -722,6 +736,7 @@ impl Run<'_, '_> {
         // not a register read while it is scanned)
         let defer = std::mem::take(&mut self.defer_ok);
         let mut val = match c {
+            cmd::DEF_CODE if self.xe => IVal::Int(self.xe_fetch_code(m)?),
             cmd::DEF_CODE => {
                 // §414
                 let n = self.scan_char_num()?;

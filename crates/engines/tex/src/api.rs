@@ -186,6 +186,11 @@ pub struct Options {
     /// TeX Live's default, `openout_any = p` with no output directory
     /// (`control::out_name_ok_p`).
     pub out_name_ok: Option<OutNameOk>,
+    /// The engine is XeTeX (docs/spec-xetex.md): UTF-8 input, its
+    /// primitives, native fonts, an XDV file; `None` runs pdfTeX. The
+    /// format is XeTeX's too: a format is built by the engine that loads
+    /// it.
+    pub xetex: Option<crate::XeTeX>,
 }
 
 /// Whether a package load never seen runs on the optimistic hint
@@ -710,6 +715,7 @@ impl Default for Options {
             tool_finder: None,
             bibtex: phitex_bibtex::Options::default(),
             out_name_ok: None,
+            xetex: None,
         }
     }
 }
@@ -2578,6 +2584,7 @@ impl Graph {
             held: Arc::default(),
             node_rec: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pdf_cmds: Arc::default(),
+            xe: Arc::default(),
             class_proj,
             outer_proj,
             step_proj,
@@ -4449,12 +4456,25 @@ fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> 
 // (its phases timed and measured inline, PHITEX_TEX_TIME)
 #[allow(clippy::too_many_lines)]
 fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
-    let key = prelude.map_or(0, |p| {
-        let mut b = p.as_bytes().to_vec();
-        b.push(0);
-        b.extend_from_slice(opts.prelude_jobname.as_bytes());
-        phitex_defuse::hash_bytes(7, &b)
-    });
+    // (a XeTeX format is another format: its INITEX is XeTeX's)
+    let key = phitex_defuse::hash_bytes(
+        if opts.xetex.is_some() {
+            0x58_6554_6558
+        } else {
+            7
+        },
+        &prelude.map_or_else(Vec::new, |p| {
+            let mut b = p.as_bytes().to_vec();
+            b.push(0);
+            b.extend_from_slice(opts.prelude_jobname.as_bytes());
+            b
+        }),
+    );
+    let key = if prelude.is_none() && opts.xetex.is_none() {
+        0
+    } else {
+        key
+    };
     let t_start = std::time::Instant::now();
     let time = crate::exec::prof_flag!("PHITEX_TEX_TIME");
     let known = match cached_prelude(key, opts) {
@@ -4473,6 +4493,9 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let m_check = mem_mb();
     let finder = opts.prelude_finder();
     let mut g = Graph::new(opts.time_limit, opts.threads, opts.stuck_after);
+    if let Some(x) = &opts.xetex {
+        let _ = g.ops.xe.set(x.clone());
+    }
     g.ops.fin_predict.store(
         opts.finisher_predictions,
         std::sync::atomic::Ordering::Relaxed,
@@ -4495,7 +4518,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let mut m_settle = m_supply;
     let mut t_settle = t_supply;
     let mut diags = Vec::new();
-    let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values());
+    let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values(), opts.xetex.is_some());
     for (name, x) in &env {
         let f = g.eng.values().field(name);
         g.eng.set_environment([(f, *x)]);
@@ -4867,6 +4890,9 @@ impl Build {
             );
         }
         let mut g = Graph::new(opts.time_limit, opts.threads, opts.stuck_after);
+        if let Some(x) = &opts.xetex {
+            let _ = g.ops.xe.set(x.clone());
+        }
         g.ops.fin_predict.store(
             opts.finisher_predictions,
             std::sync::atomic::Ordering::Relaxed,

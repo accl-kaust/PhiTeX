@@ -1141,6 +1141,15 @@ impl Run<'_, '_> {
                 print::print_esc(s, "char", esc);
                 print::print_hex(s, *n);
             }
+            Mean::MathCharDef(n) if *n >= crate::xetex::U_MATH => {
+                // (XeTeX's `XeTeX_math_given`)
+                #[allow(clippy::cast_possible_truncation)]
+                let (class, fam, ch) = crate::xetex::math_fields(*n as i32);
+                print::print_esc(s, "Umathchar", esc);
+                print::print_hex(s, i64::from(class));
+                print::print_hex(s, i64::from(fam));
+                print::print_hex(s, i64::from(ch));
+            }
             Mean::MathCharDef(n) => {
                 print::print_esc(s, "mathchar", esc);
                 print::print_hex(s, *n);

@@ -62,12 +62,14 @@ pub mod timeline;
 mod tools;
 mod val;
 mod vprof;
+mod xetex;
 
 pub use api::{
     Build, Diagnostic, EditSender, Finder, Hint, Options, PageSettled, RunReport as Report, Severity, Speculation,
     Stats, ToolFinder, ToolSearch, byte_ends, engine_id,
 };
 pub use exec::{Progress, SpawnWorker, set_spawn_worker};
+pub use xetex::{FontFile, XeTeX};
 
 /// Whether this build has the timing and counter lines (`profile`).
 pub const PROFILE: bool = cfg!(feature = "profile");

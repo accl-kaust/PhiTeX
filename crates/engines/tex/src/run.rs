@@ -109,6 +109,9 @@ pub(crate) struct Ops {
     pub tool_opts: std::sync::Arc<std::sync::Mutex<crate::tools::ToolOptions>>,
     /// The build's field handles (`crate::fields`).
     pub fields: std::sync::Arc<crate::fields::Fields>,
+    /// The engine is XeTeX (set once, before the first evaluation):
+    /// `crate::xetex`.
+    pub xe: std::sync::Arc<std::sync::OnceLock<crate::xetex::XeTeX>>,
     /// The format's definitions the build analyses document texts with
     /// (set by `api::Build::with`; none while a format is built): a
     /// document file `\input` is sliced with them ([`Run::leftover`]).
@@ -382,7 +385,7 @@ impl FileRest {
     /// node's arguments for it decode to, without a value or a string per
     /// line: its bytes are its characters, trailing blanks removed, as
     /// web2c's `input_line`); the offset moves past it.
-    pub(crate) fn take_line(&mut self) -> Line {
+    pub(crate) fn take_line(&mut self, xetex: bool) -> Line {
         let at = self.pos;
         let s = self.str();
         let rest = &s[self.off..];
@@ -393,7 +396,8 @@ impl FileRest {
         while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
             end -= 1;
         }
-        while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
+        // (XeTeX's `input_line` trims spaces and line ends, not tabs)
+        while end > 0 && (bytes[end - 1] == b' ' || (!xetex && bytes[end - 1] == b'\t')) {
             end -= 1;
         }
         // (the text holds one character per byte of the file, §31: a byte
@@ -415,6 +419,17 @@ impl FileRest {
             lineno: self.line,
             rescanned: false,
         }
+    }
+}
+
+/// One past the largest character code an `\\endlinechar` may append
+/// (§360: `0..255`; XeTeX's `0..biggest_usv`).
+#[inline]
+pub(crate) fn max_char_end(xetex: bool) -> i64 {
+    if xetex {
+        i64::from(crate::xetex::BIGGEST_USV) + 1
+    } else {
+        256
     }
 }
 
@@ -902,6 +917,12 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) font_sets: crate::FxHashMap<u64, (Vec<u32>, ValueId)>,
     /// The main loop's `lig_stack`, kept between words (§1034).
     pub(crate) lig_buf: Vec<crate::build::LigItem>,
+    /// The engine is XeTeX ([`Ops::xe`]): `crate::xetex`.
+    pub(crate) xe: bool,
+    /// XeTeX's input modes of the files this run read lines of, by the
+    /// file's name, as first read or as this run set them
+    /// (`crate::xetex`, `\XeTeXinputencoding`).
+    pub(crate) xenc: Vec<(ValueId, i64)>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -912,7 +933,10 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::obs_flag!("PHITEX_LOOP_TRACE") {
             eprintln!("lb-run node {:x} op {op:?}", cx.node().raw());
         }
+        let xe = ops.xe.get().is_some();
         Run {
+            xe,
+            xenc: Vec::new(),
             _scope: crate::val::EpochScope::enter(v, cx.values_epoch()),
             cx,
             v,
@@ -1840,6 +1864,11 @@ impl<'c, 'a> Run<'c, 'a> {
     #[inline]
     pub(crate) fn code(&mut self, table: usize, c: impl TryInto<u32>) -> R<i32> {
         let c = c.try_into().unwrap_or(u32::MAX);
+        if self.xe && table == 2 {
+            // (XeTeX keeps `\\XeTeXcharclass` in the code's high half:
+            // `sf_code(c) mod "10000` is the space factor code)
+            return Ok(self.code_slow(2, c)? % 0x1_0000);
+        }
         if c < 256 && table < 5 && self.interp.is_none() {
             let g = self.st.cat_gen();
             if self.code_gen != g {
@@ -1858,7 +1887,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     #[inline(never)]
-    fn code_slow(&mut self, table: usize, c: u32) -> R<i32> {
+    pub(crate) fn code_slow(&mut self, table: usize, c: u32) -> R<i32> {
         let l = if let Some(s) = crate::fields::code_slot(table, c) {
             Loc::try_from(s).unwrap_or(0)
         } else {
@@ -1866,6 +1895,19 @@ impl<'c, 'a> Run<'c, 'a> {
             let f = self.v.field(&format!("{name}:{c}"));
             self.loc_of(f)
         };
+        if self.xe && c >= 256 {
+            // (XeTeX's INITEX, xetex.web §232: `\sfcode` 1000, the math
+            // code the character itself, `\delcode` -1, no case codes)
+            let d = match table {
+                2 => 1000,
+                3 => c.cast_signed(),
+                4 => -1,
+                _ => 0,
+            };
+            return Ok(self
+                .get_loc(l)?
+                .map_or(d, |x| i32::try_from(int_of(self.v, x)).unwrap_or(d)));
+        }
         self.int_loc(l)
     }
 
@@ -3337,7 +3379,14 @@ impl<'c, 'a> Run<'c, 'a> {
         } else {
             let f = self.ops.fields.cat(self.v, c);
             let l = self.loc_of(f);
-            self.int_loc(l)?
+            if self.xe {
+                // (XeTeX's INITEX: every character past 255 is other,
+                // xetex.web §232; none has a field until set)
+                self.get_loc(l)?
+                    .map_or(12, |x| i32::try_from(int_of(self.v, x)).unwrap_or(12))
+            } else {
+                self.int_loc(l)?
+            }
         };
         Ok(u8::try_from(x).unwrap_or(12))
     }

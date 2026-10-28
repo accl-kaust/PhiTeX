@@ -621,6 +621,7 @@ pub(crate) fn font_def(l: &Loaded, name: &str) -> phitex_dvi::FontDef {
         area: Vec::new(),
         name: name.as_bytes().to_vec(),
         widths: l.at.chars.iter().map(|c| c.map(|d| d.width)).collect(),
+        native: None,
     }
 }
 

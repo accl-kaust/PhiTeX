@@ -1265,8 +1265,12 @@ pub(crate) const OUT_PARAM_CAT: u8 = 5;
 fn prim_index() -> &'static phitex_defuse::FxHashMap<&'static str, (u8, i32)> {
     static M: OnceLock<phitex_defuse::FxHashMap<&'static str, (u8, i32)>> = OnceLock::new();
     M.get_or_init(|| {
+        // (XeTeX's own names among them: a name is one primitive in
+        // either engine, a meaning names it)
         crate::etex::all_prims()
-            .map(|&(n, c, h)| (n, (c, h)))
+            .copied()
+            .chain(crate::xetex::own_prims())
+            .map(|(n, c, h)| (n, (c, h)))
             .collect()
     })
 }
@@ -1292,12 +1296,9 @@ pub(crate) fn prim(name: &str) -> Option<(&'static str, u8, i32)> {
         "\u{10FFFE}alignpeek" => return Some(("\u{10FFFE}alignpeek", cmd::NO_ALIGN, 1)),
         _ => {}
     }
-    prim_index().get(base).map(|&(c, h)| {
-        let n = crate::etex::all_prims()
-            .find(|p| p.0 == base)
-            .map_or("", |p| p.0);
-        (n, c, h)
-    })
+    prim_index()
+        .get_key_value(base)
+        .map(|(&n, &(c, h))| (n, c, h))
 }
 
 /// The internal primitives' names ([`prim`]'s own).
@@ -1324,6 +1325,7 @@ fn prim_handles() -> &'static (
         let mut ix = phitex_defuse::FxHashMap::default();
         for n in crate::etex::all_prims()
             .map(|p| p.0)
+            .chain(crate::xetex::own_prims().map(|p| p.0))
             .chain(INTERNAL_PRIMS.iter().copied())
         {
             ix.entry(n).or_insert_with(|| {
@@ -1359,6 +1361,9 @@ impl Mean {
             Mean::Undefined => (cmd::UNDEFINED_CS, 0),
             Mean::Font(f) => (cmd::SET_FONT, i32::try_from(*f).unwrap_or(0)),
             Mean::CharDef(n) => (cmd::CHAR_GIVEN, i32::try_from(*n).unwrap_or(0)),
+            Mean::MathCharDef(n) if *n >= crate::xetex::U_MATH => {
+                (cmd::MATH_GIVEN, (*n as u32).cast_signed())
+            }
             Mean::MathCharDef(n) => (cmd::MATH_GIVEN, i32::try_from(*n).unwrap_or(0)),
             Mean::NotExpanded => (cmd::RELAX, NO_EXPAND_FLAG),
         }
@@ -1622,7 +1627,7 @@ pub(crate) fn i32_of(v: &Values, id: Option<ValueId>) -> i32 {
 /// INITEX's state (§222–§240) that differs from zero, void, empty and
 /// undefined: the category codes, the other code tables, the parameters,
 /// and the frozen control sequences.
-pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
+pub(crate) fn initex(v: &Values, xetex: bool) -> Vec<(String, ValueId)> {
     let mut out = Vec::new();
     for k in 0..256i64 {
         let c = u8::try_from(k).unwrap_or(0);
@@ -1648,9 +1653,13 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
             out.push((format!("uc:{k}"), v.int(uc)));
         }
         out.push((format!("sf:{k}"), v.int(sf)));
-        let mc = match c {
-            b'0'..=b'9' => k + 0x7000,
-            b'a'..=b'z' | b'A'..=b'Z' => k + 0x7100,
+        // (XeTeX's math codes: class from bit 21, family from bit 24,
+        // `set_class_field`, `set_family_field`)
+        let mc = match (c, xetex) {
+            (b'0'..=b'9', false) => k + 0x7000,
+            (b'a'..=b'z' | b'A'..=b'Z', false) => k + 0x7100,
+            (b'0'..=b'9', true) => k + (7 << 21),
+            (b'a'..=b'z' | b'A'..=b'Z', true) => k + (7 << 21) + (1 << 24),
             _ => k,
         };
         out.push((format!("mc:{k}"), v.int(mc)));
@@ -1684,9 +1693,17 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
     ] {
         out.push((format!("cs:{n}"), v.list(vec![v.str("prim"), v.str(n)])));
     }
-    out.extend(crate::pdfprim::initex(v));
-    for &(n, _, _) in crate::etex::all_prims() {
-        out.push((format!("cs:{n}"), v.list(vec![v.str("prim"), v.str(n)])));
+    if xetex {
+        // (xetex.web: "for backward compatibility with standard TeX")
+        out.push(("param:XeTeXhyphenatablelength".to_owned(), v.int(63)));
+        for (n, _, _) in crate::xetex::initex_prims() {
+            out.push((format!("cs:{n}"), v.list(vec![v.str("prim"), v.str(n)])));
+        }
+    } else {
+        out.extend(crate::pdfprim::initex(v));
+        for &(n, _, _) in crate::etex::all_prims() {
+            out.push((format!("cs:{n}"), v.list(vec![v.str("prim"), v.str(n)])));
+        }
     }
     // §552: the null font's name
     out.push((

@@ -29,7 +29,7 @@ use crate::val::{int_of, list_of, str_of};
 /// this one: `pdf:file`); the end node defines nothing a piece reads
 /// (spec-final §4.4: the cuts are the finishers', the link's loop-backs
 /// the link's).
-pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, Stop> {
+pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let t0 = std::time::Instant::now();
     let v = cx.values();
     // where the pages end and their finishers have run first: read first,
@@ -49,7 +49,7 @@ pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, 
     } else {
         let pages = v.seq_to_vec(cx.fold(v.field("pages"), None, None)?);
         n = pages.len();
-        dvi_file(cx, &pages)
+        dvi_file(cx, &pages, o.xe.get().is_some())
     };
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -261,7 +261,7 @@ fn latin1(bytes: &[u8]) -> String {
 /// and 2, give `pre … bop 1 … eop bop 2 … eop post … post_post`; the
 /// value is those bytes as characters. No page: no file (§642), the
 /// empty string.
-fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
+fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId], xdv: bool) -> Result<ValueId, Stop> {
     let v = cx.values();
     if pages.is_empty() {
         return Ok(v.str(""));
@@ -276,7 +276,10 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
     // defined before a page are the prefix's)
     let (nums, nums_hash) = font_numbers(cx)?;
     let head = phitex_defuse::hash_bytes(
-        phitex_defuse::hash_words(v.instance(), &[u64::from(mag.cast_unsigned()), nums_hash]),
+        phitex_defuse::hash_words(
+            v.instance(),
+            &[u64::from(mag.cast_unsigned()), nums_hash, u64::from(xdv)],
+        ),
         comment.as_bytes(),
     );
     let ids: Vec<u64> = pages.iter().map(|p| p.raw()).collect();
@@ -296,7 +299,7 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
                     )
                 })
         });
-        found.unwrap_or_else(|| (phitex_dvi::DviWriter::new(mag, &comment), 0, Vec::new()))
+        found.unwrap_or_else(|| (new_writer(mag, &comment, xdv), 0, Vec::new()))
     };
     w.set_font_numbers(nums.clone());
     // (the pages' fonts by id, resolved here from the fonts' fields: a
@@ -340,14 +343,14 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
     let apart: Vec<Option<phitex_dvi::PageBytes>> = {
         let mut ex = crate::exec::Inner(crate::exec::threads(None));
         crate::exec::map_on(&mut ex, rest.len(), &|i| {
-            let mut wi = phitex_dvi::DviWriter::new(mag, &comment);
+            let mut wi = new_writer(mag, &comment, xdv);
             wi.set_font_numbers(nums.clone());
             for &f in &before[i] {
                 if let Some(d) = defs.get(&f) {
                     wi.assume_defined(f, d.clone());
                 }
             }
-            dvi_page_kept(v, &mut wi, rest[i], &defs)
+            dvi_page_kept(v, &mut wi, rest[i], &defs, xdv)
         })
     };
     for (i, (&page, pb)) in rest.iter().zip(apart).enumerate() {
@@ -357,12 +360,36 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
         }
         (w.h_offset, w.v_offset) = dvi_offsets(v, page);
         if !pb.is_some_and(|pb| w.ship_kept(&pb)) {
-            dvi_page(v, &mut w, page, &defs);
+            dvi_page(v, &mut w, page, &defs, xdv);
         }
     }
     *dvi_memo().locked() = Some(DviMemo { head, ids, snaps });
     let bytes = w.finish();
     Ok(v.intern(Value::Str(latin1(&bytes).into_boxed_str())))
+}
+
+/// A DVI writer, or XeTeX's XDV writer.
+fn new_writer(mag: i32, comment: &str, xdv: bool) -> phitex_dvi::DviWriter {
+    if xdv {
+        phitex_dvi::DviWriter::new_xdv(mag, comment)
+    } else {
+        phitex_dvi::DviWriter::new(mag, comment)
+    }
+}
+
+/// XeTeX's page size for page entry `page`'s `pdf:pagesize`
+/// (`\pdfpagewidth`, `\pdfpageheight` at its shipout: its PDF
+/// parameters' fourth and fifth).
+fn xdv_page_size(v: &Values, page: ValueId) -> (i32, i32) {
+    let ps = list_of(v, page)
+        .get(3)
+        .map(|&p| list_of(v, p))
+        .unwrap_or_default();
+    let n = |k: usize| {
+        ps.get(k)
+            .map_or(0, |&x| i32::try_from(int_of(v, x)).unwrap_or(0))
+    };
+    (n(3), n(4))
 }
 
 /// The pages between two of the DVI writer's kept states ([`DviMemo`]).
@@ -399,11 +426,15 @@ fn dvi_page_kept(
     w: &mut phitex_dvi::DviWriter,
     page: ValueId,
     defs: &phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef>,
+    xdv: bool,
 ) -> Option<phitex_dvi::PageBytes> {
     let (bx, counts, whats) = dvi_parts(v, page)?;
     (w.h_offset, w.v_offset) = dvi_offsets(v, page);
     let fonts = |f: u32| font_def_of(defs, f);
-    let mut wh = |h: u32, _leaders: bool| special_of(v, &whats, h);
+    let mut wh = |h: u32, _leaders: bool| special_of(v, &whats, h, xdv);
+    if xdv {
+        w.page_size = xdv_page_size(v, page);
+    }
     w.ship_out_kept(&bx, counts, &fonts, &mut wh).ok()
 }
 
@@ -489,17 +520,22 @@ fn font_def_of(
         area: Vec::new(),
         name: Vec::new(),
         widths: Vec::new(),
+        native: None,
     })
 }
 
 /// A `\special`'s bytes, for whatsit `h` of a page.
-fn special_of(v: &Values, whats: &[ValueId], h: u32) -> Option<Vec<u8>> {
+fn special_of(v: &Values, whats: &[ValueId], h: u32, xdv: bool) -> Option<Vec<u8>> {
     let w = *whats.get(h as usize)?;
     let ys = list_of(v, w);
     if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
-        Some(bytes_of(
-            &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
-        ))
+        let s = ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default();
+        // (XeTeX's `special_out`: UTF-8)
+        Some(if xdv {
+            crate::xetex::special_bytes(&s)
+        } else {
+            bytes_of(&s)
+        })
     } else {
         None
     }
@@ -513,13 +549,17 @@ fn dvi_page(
     w: &mut phitex_dvi::DviWriter,
     page: ValueId,
     defs: &phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef>,
+    xdv: bool,
 ) {
     let Some((bx, counts, whats)) = dvi_parts(v, page) else {
         return;
     };
     (w.h_offset, w.v_offset) = dvi_offsets(v, page);
     let fonts = |f: u32| font_def_of(defs, f);
-    let mut wh = |h: u32, _leaders: bool| special_of(v, &whats, h);
+    let mut wh = |h: u32, _leaders: bool| special_of(v, &whats, h, xdv);
+    if xdv {
+        w.page_size = xdv_page_size(v, page);
+    }
     let _ = w.ship_out(&bx, counts, &fonts, &mut wh);
 }
 

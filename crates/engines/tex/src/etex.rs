@@ -298,6 +298,7 @@ fn expand_mine(r: &mut Run<'_, '_>) -> R<bool> {
             r.push_toks(toks);
         }
         cmd::CONVERT if chr == 100 => r.push_toks(str_toks(".6")),
+        cmd::CONVERT if chr >= 300 => crate::xetex::convert(r, chr)?,
         cmd::CONVERT if chr > 100 => crate::pdfprim::convert(r, chr)?,
         _ => return Ok(false),
     }
@@ -530,6 +531,7 @@ pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
             let l = u8::try_from(m - li::NUM_EXPR).unwrap_or(0);
             scan_expr(r, l)?
         }
+        _ if m >= 300 => crate::xetex::last_item(r, m)?,
         _ => crate::pdfprim::last_item(r, m)?,
     })
 }
@@ -1203,6 +1205,7 @@ fn command_mine(r: &mut Run<'_, '_>, md: &Mode) -> R<bool> {
             // pdfTeX §1093: \quitvmode in horizontal and math mode
         }
         cmd::LEFT_RIGHT if chr == MIDDLE_NOAD && am == 203 => r.math_middle(md)?,
+        cmd::EXTENSION if chr >= 300 => crate::xetex::extension(r, md)?,
         cmd::EXTENSION if chr >= 6 => crate::pdfprim::extension(r, md)?,
         _ => return Ok(false),
     }

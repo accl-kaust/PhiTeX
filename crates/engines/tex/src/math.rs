@@ -406,7 +406,26 @@ impl Run<'_, '_> {
     }
 
     fn mathcode(&mut self, c: i32) -> R<i32> {
-        self.code(3, c)
+        let x = self.code(3, c)?;
+        if self.xe {
+            // (XeTeX's math code in TeX's form where it has one: a
+            // character past 255 or a family past 15 is Unicode math)
+            return Ok(crate::xetex::math15(x));
+        }
+        Ok(x)
+    }
+
+    /// The math code of the `math_given` command in `cur` (a
+    /// `\\Umathchardef`'s in `TeX82`'s form, [`crate::xetex::math15`]).
+    fn math_given(&mut self) -> R<i32> {
+        if self.xe
+            && let crate::val::Mean::MathCharDef(n) = self.cur_mean()?
+            && n >= crate::xetex::U_MATH
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            return Ok(crate::xetex::math15(n as i32));
+        }
+        Ok(self.cur.chr)
     }
 
     fn fam_in_range(&mut self) -> R<Option<i32>> {
@@ -461,8 +480,16 @@ impl Run<'_, '_> {
                     }
                     c
                 }
+                cmd::MATH_CHAR_NUM if self.cur.chr > 0 => {
+                    let x = self.scan_umath(self.cur.chr == 2)?;
+                    crate::xetex::math15(x)
+                }
                 cmd::MATH_CHAR_NUM => self.scan_fifteen_bit_int()?,
-                cmd::MATH_GIVEN => self.cur.chr,
+                cmd::MATH_GIVEN => self.math_given()?,
+                cmd::DELIM_NUM if self.cur.chr > 0 => {
+                    let x = self.scan_umath(true)?;
+                    crate::xetex::math15(x)
+                }
                 cmd::DELIM_NUM => self.scan_twenty_seven_bit_int()? / 0x1000,
                 _ => {
                     self.back_cur();
@@ -529,11 +556,22 @@ impl Run<'_, '_> {
                 let c = self.mathcode(ch)?;
                 self.set_math_char(md, c, ch)?;
             }
+            cmd::MATH_CHAR_NUM if self.cur.chr > 0 => {
+                let x = self.scan_umath(self.cur.chr == 2)?;
+                self.set_math_char(md, crate::xetex::math15(x), 0)?;
+            }
             cmd::MATH_CHAR_NUM => {
                 let c = self.scan_fifteen_bit_int()?;
                 self.set_math_char(md, c, 0)?;
             }
-            cmd::MATH_GIVEN => self.set_math_char(md, self.cur.chr, 0)?,
+            cmd::MATH_GIVEN => {
+                let c = self.math_given()?;
+                self.set_math_char(md, c, 0)?;
+            }
+            cmd::DELIM_NUM if self.cur.chr > 0 => {
+                let x = self.scan_umath(true)?;
+                self.set_math_char(md, crate::xetex::math15(x), 0)?;
+            }
             cmd::DELIM_NUM => {
                 let c = self.scan_twenty_seven_bit_int()? / 0x1000;
                 self.set_math_char(md, c, 0)?;
