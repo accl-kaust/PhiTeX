@@ -1325,6 +1325,12 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
 /// What the evaluations of one build or edit did.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
+    /// Memory after the build: the process's resident set (kB, from
+    /// /proc; 0 where there is none), the value store's payload (bytes),
+    /// and the collections the evaluations made.
+    pub rss_kb: u64,
+    pub values_bytes: u64,
+    pub collections: u64,
     /// The engine's counters, summed over the evaluations.
     pub nodes_run: u64,
     pub runs: u64,
@@ -2116,6 +2122,8 @@ impl Stats {
     }
 
     fn add(&mut self, r: &Report) {
+        self.collections += r.collections.len() as u64;
+        self.rss_kb = rss_kb();
         self.piece_times.extend(
             r.run_times
                 .iter()
@@ -2468,10 +2476,15 @@ impl Graph {
     fn new(time: Option<std::time::Duration>, threads: Option<usize>) -> Graph {
         let eng = Engine::new();
         // (`PHITEX_COLLECT_MB`: the value store collected when its payload
-        // passes it, `phitex_defuse::Limits::collect_at_bytes`)
-        let collect_at_bytes = crate::exec::env_str!("PHITEX_COLLECT_MB")
-            .and_then(|x| x.parse::<u64>().ok())
-            .map(|mb| mb << 20);
+        // passes it, `phitex_defuse::Limits::collect_at_bytes`; default
+        // 1024, 0 never: without a collection every rerun's values stay
+        // for the session, an 18-page paper reached 40 GB resident in a
+        // watch session)
+        let collect_at_bytes = match crate::exec::env_str!("PHITEX_COLLECT_MB").and_then(|x| x.parse::<u64>().ok()) {
+            Some(0) => None,
+            Some(mb) => Some(mb << 20),
+            None => Some(1u64 << 30),
+        };
         // (`PHITEX_RUNS_PER_NODE`: a node run more often in one evaluation
         // ends it with `EvalError::RunawayNode`, naming the node: a run
         // that never settles found, not waited for)
@@ -3252,6 +3265,7 @@ impl Graph {
                 }
             }
             crate::timeline::lap("engine: the accounting printed (PHITEX_TEX_TIME only)");
+            stats.values_bytes = self.eng.values().payload_bytes();
             stats.add(&r);
             stats.units_folded = self.ops.units_folded.load(std::sync::atomic::Ordering::Relaxed);
             {
@@ -5106,14 +5120,7 @@ impl Build {
         );
         let (nodes, units, values) = self.sizes();
         let (node, use_) = (std::mem::size_of::<phitex_defuse::NodeInfo>(), 0);
-        let rss = std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|t| {
-                t.lines()
-                    .find_map(|l| l.strip_prefix("VmRSS:"))
-                    .map(|v| v.trim().to_owned())
-            })
-            .unwrap_or_default();
+        let rss = format!("{} kB", rss_kb());
         eprintln!(
             "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B), rss {rss}"
         );
@@ -7590,4 +7597,17 @@ mod canonical_tests {
             );
         }
     }
+}
+
+/// The process's resident set in kB (/proc/self/status; 0 where there is
+/// none).
+pub fn rss_kb() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix("VmRSS:"))
+                .and_then(|v| v.split_whitespace().next().and_then(|n| n.parse().ok()))
+        })
+        .unwrap_or(0)
 }

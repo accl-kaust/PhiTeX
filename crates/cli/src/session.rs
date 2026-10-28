@@ -203,6 +203,11 @@ pub struct RunInfo {
     /// hints whose assumptions failed, definitions outside a bound, the
     /// stops and pending waits.
     pub hints: [u64; 6],
+    /// Memory after the build: resident set (kB; 0: not known), the value
+    /// store's payload (bytes), the collections made.
+    pub rss_kb: u64,
+    pub values_bytes: u64,
+    pub collections: u64,
 }
 
 impl RunInfo {
@@ -1128,6 +1133,9 @@ impl Session {
                     s.stops,
                     s.pending_waits,
                 ],
+                rss_kb: s.rss_kb,
+                values_bytes: s.values_bytes,
+                collections: s.collections,
             }],
             internal,
             diagnostics,

@@ -1024,6 +1024,23 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     p.push_str(&format!(" · at most {} at once", x.peak_running));
                 }
                 rows.push(("parallel".to_owned(), p));
+                if x.rss_kb > 0 {
+                    #[allow(clippy::cast_precision_loss, reason = "a display of bytes")]
+                    let gb = |b: u64| -> String {
+                        let g = b as f64 / f64::from(1u32 << 30);
+                        if g >= 1.0 { format!("{g:.1} GB") } else { format!("{:.0} MB", b as f64 / f64::from(1u32 << 20)) }
+                    };
+                    rows.push((
+                        "memory".to_owned(),
+                        format!(
+                            "{} resident · {} of values · {} collection{}",
+                            gb(x.rss_kb << 10),
+                            gb(x.values_bytes),
+                            x.collections,
+                            if x.collections == 1 { "" } else { "s" }
+                        ),
+                    ));
+                }
                 if x.batches > 0 {
                     rows.push((
                         "batches".to_owned(),
