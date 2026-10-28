@@ -1565,24 +1565,30 @@ fn watch_save_by_rename_builds_the_new_text() {
     );
 }
 
-/// XeLaTeX and LuaLaTeX are not supported, by any name, and nothing
-/// external runs in their place.
+/// LuaLaTeX is not supported, by any name, nor found for a document
+/// that needs it (luacode loaded, nothing named), and nothing external
+/// runs in its place. (XeLaTeX is: `xelatex_fontspec`.)
 #[test]
-fn xelatex_lualatex_refused() {
+fn lualatex_refused() {
     let dir = scratch("refused");
     std::fs::write(dir.join("a.tex"), "\\documentclass{article}\n").expect("the document");
     std::fs::write(dir.join("b.tex"), "% !TEX program = lualatex\n\\relax\n")
         .expect("the document");
+    std::fs::write(
+        dir.join("c.tex"),
+        "\\documentclass{article}\n\\usepackage{luacode}\n\\begin{document}x\\end{document}\n",
+    )
+    .expect("the document");
     let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
-    for (args, file) in [
-        (&["build", "--engine", "xelatex", "a.tex"][..], "a.pdf"),
-        (&["build", "--engine", "lualatex", "a.tex"][..], "a.pdf"),
-        (&["build", "b.tex"][..], "b.pdf"),
+    for (args, file, says) in [
+        (&["build", "--engine", "lualatex", "a.tex"][..], "a.pdf", "not supported"),
+        (&["build", "b.tex"][..], "b.pdf", "not supported"),
+        (&["build", "c.tex"][..], "c.pdf", "needs lualatex (it loads luacode)"),
     ] {
         let out = command(bin, &dir).args(args).output().expect("phitex runs");
         let errs = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{args:?} succeeded");
-        assert!(errs.contains("not supported"), "{args:?}: {errs}");
+        assert!(errs.contains(says), "{args:?}: {errs}");
         assert!(!dir.join(file).exists(), "{args:?} wrote {file}");
     }
 }
