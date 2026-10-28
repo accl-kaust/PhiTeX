@@ -529,6 +529,10 @@ pub(crate) struct Run<'c, 'a> {
     pub exps: u64,
     pub hb_at: u64,
     pub hb_done: u64,
+    /// Whether the glue `scan_glue` last gave has a spec of its own
+    /// (made from a dimension, or a register negated), not the value of
+    /// a glue register or parameter (`GlueNode::own_spec`).
+    pub glue_own: bool,
     /// The run's progress as the stuck check last saw it
     /// ([`Run::watchdog`]).
     pub(crate) wd: crate::control::Watchdog,
@@ -964,6 +968,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cmds: 0,
             exps: 0,
             hb_at: Run::heartbeat_start(),
+            glue_own: false,
             hb_done: 0,
             wd: crate::control::Watchdog::default(),
             pulled: 0,

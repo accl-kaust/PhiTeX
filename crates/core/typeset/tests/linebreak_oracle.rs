@@ -29,6 +29,7 @@ fn list(spec: &str) -> Vec<Node> {
                     Node::Glue(GlueNode {
                         spec: Glue { ..g },
                         kind: GlueKind::Normal,
+                        own_spec: false,
                         leader: None,
                     })
                 }

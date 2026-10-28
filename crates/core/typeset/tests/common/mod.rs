@@ -360,12 +360,14 @@ pub fn parse_list(lines: &[&str], prefix: &str) -> Vec<Node> {
             Node::Glue(GlueNode {
                 spec: Glue::ZERO,
                 kind: GlueKind::CondMath,
+                own_spec: false,
                 leader: None,
             })
         } else if let Some(rest) = body.strip_prefix("\\glue(\\mskip) ") {
             Node::Glue(GlueNode {
                 spec: parse_glue_text(&rest.replace("mu", "")),
                 kind: GlueKind::Mu,
+                own_spec: false,
                 leader: None,
             })
         } else if let Some(rest) = body.strip_prefix("\\mkern") {

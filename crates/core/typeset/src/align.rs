@@ -237,6 +237,7 @@ fn tab_glue(g: Glue) -> Node {
     Node::Glue(GlueNode {
         spec: g,
         kind: GlueKind::Param(TAB_SKIP),
+        own_spec: false,
         leader: None,
     })
 }

@@ -439,6 +439,7 @@ impl Reader<'_> {
                 Node::Glue(GlueNode {
                     spec: glue_text(rest.1),
                     kind: rest.0,
+                    own_spec: false,
                     leader,
                 })
             } else if let Some(rest) = body.strip_prefix("\\glue(\\") {

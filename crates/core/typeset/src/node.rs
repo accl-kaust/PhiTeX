@@ -155,6 +155,13 @@ pub struct GlueNode {
     pub spec: Glue,
     /// Its kind.
     pub kind: GlueKind,
+    /// Its specification is its own, a new one, not the shared
+    /// `zero_glue` even when all of it is zero: glue made by `scan_glue`
+    /// from a dimension (`\hskip 0pt`, `\hskip\z@`, a negated register),
+    /// where a glue register or parameter set to zero is `zero_glue`
+    /// itself (§1229 `trap_zero_glue`). pdfTeX's margin protrusion
+    /// passes over glue only when it is `zero_glue` (`cp_skipable`).
+    pub own_spec: bool,
     /// The leader box or rule, for leaders.
     pub leader: Option<Box<Node>>,
 }
@@ -335,6 +342,7 @@ impl Node {
         Node::Glue(GlueNode {
             spec,
             kind: GlueKind::Normal,
+            own_spec: false,
             leader: None,
         })
     }
@@ -345,6 +353,7 @@ impl Node {
         Node::Glue(GlueNode {
             spec,
             kind: GlueKind::Param(code),
+            own_spec: false,
             leader: None,
         })
     }

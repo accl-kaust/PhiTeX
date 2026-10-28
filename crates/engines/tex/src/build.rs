@@ -1777,6 +1777,7 @@ impl Run<'_, '_> {
                     let node = Node::Glue(phitex_typeset::node::GlueNode {
                         spec: g,
                         kind,
+                        own_spec: false,
                         leader,
                     });
                     let x = nodes::encode(v, &node, &side);
@@ -1823,7 +1824,14 @@ impl Run<'_, '_> {
         } else {
             GlueKind::Normal
         };
-        let n = nodes::glue_node(self.v, &g, kind);
+        // (`\hskip` of a dimension, all of it zero: glue of a spec of its
+        // own, which margin protrusion does not pass over as it does
+        // `zero_glue`, a zero register's or parameter's)
+        let n = if s == 4 && self.glue_own && g == Glue::ZERO {
+            nodes::own_glue_node(self.v, &g)
+        } else {
+            nodes::glue_node(self.v, &g, kind)
+        };
         self.append(md.lid, n);
         Ok(())
     }

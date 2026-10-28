@@ -200,7 +200,25 @@ fn glue_kind_code(k: GlueKind) -> i64 {
     }
 }
 
+/// The bit of a glue node's kind code that says its spec is its own
+/// (`GlueNode::own_spec`): set only on ordinary glue, so the code of
+/// every other kind reads as before.
+const OWN_SPEC: i64 = 1 << 16;
+
+/// A glue node's kind code: the kind's, with [`OWN_SPEC`] for an
+/// ordinary glue of its own spec.
+fn glue_code(g: &GlueNode) -> i64 {
+    let k = glue_kind_code(g.kind);
+    if g.own_spec && g.kind == GlueKind::Normal { k | OWN_SPEC } else { k }
+}
+
+/// Whether a glue node's kind code says its spec is its own.
+fn own_spec_of(c: i64) -> bool {
+    c & OWN_SPEC != 0
+}
+
 fn glue_kind(c: i64) -> GlueKind {
+    let c = c & !OWN_SPEC;
     match c {
         1 => GlueKind::CondMath,
         2 => GlueKind::Mu,
@@ -317,7 +335,7 @@ fn encode_fixed(v: &Values, n: &Node) -> Option<ValueId> {
     Some(match n {
         Node::Char { font, ch } => char_value(v, *font, *ch),
         Node::Glue(g) if g.leader.is_none() => {
-            let k = glue_kind_code(g.kind);
+            let k = glue_code(g);
             node_id(v, (T_GLUE, [k, 0, 0], Some(g.spec)), || {
                 v.list(vec![
                     i(v, T_GLUE),
@@ -419,7 +437,7 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
         Node::Glue(g) => v.list(vec![
             i(v, T_GLUE),
             glue_value(v, &g.spec),
-            i(v, glue_kind_code(g.kind)),
+            i(v, glue_code(g)),
             g.leader
                 .as_ref()
                 .map_or(ValueId::UNIT, |l| encode(v, l, side)),
@@ -1064,6 +1082,7 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
         T_GLUE => Node::Glue(GlueNode {
             spec: glue_of(v, xs.get(1).copied()),
             kind: glue_kind(i64::from(g(2))),
+            own_spec: own_spec_of(i64::from(g(2))),
             leader: xs
                 .get(3)
                 .filter(|&&l| l != ValueId::UNIT)
@@ -1201,6 +1220,17 @@ pub(crate) fn glue_node(v: &Values, g: &Glue, kind: GlueKind) -> ValueId {
         i(v, T_GLUE),
         glue_value(v, g),
         i(v, glue_kind_code(kind)),
+        ValueId::UNIT,
+    ])
+}
+
+/// An ordinary glue node whose spec is its own (`GlueNode::own_spec`):
+/// `\hskip` of a dimension, all of it zero.
+pub(crate) fn own_glue_node(v: &Values, g: &Glue) -> ValueId {
+    v.list(vec![
+        i(v, T_GLUE),
+        glue_value(v, g),
+        i(v, glue_kind_code(GlueKind::Normal) | OWN_SPEC),
         ValueId::UNIT,
     ])
 }

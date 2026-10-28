@@ -1356,6 +1356,7 @@ impl Ctx<'_> {
                     hl.push(Node::Glue(GlueNode {
                         spec: Self::math_glue(&g, self.cur_mu),
                         kind: GlueKind::Param(x),
+                        own_spec: false,
                         leader: None,
                     }));
                 }

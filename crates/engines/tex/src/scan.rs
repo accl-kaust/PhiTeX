@@ -627,7 +627,12 @@ impl Run<'_, '_> {
         if self.cur.cmd >= cmd::CHAR_GIVEN && self.cur.cmd <= cmd::MAX_INTERNAL {
             let x = self.scan_something_internal(level, negative)?;
             match x {
-                IVal::Glue(g) | IVal::Mu(g) => return Ok(g),
+                IVal::Glue(g) | IVal::Mu(g) => {
+                    // (a register's or parameter's spec, a new one when
+                    // negated, §461)
+                    self.glue_own = negative;
+                    return Ok(g);
+                }
                 IVal::Int(n) => width = self.scan_dimen(mu, false, Some(n))?,
                 other => width = other.int(),
             }
@@ -648,6 +653,8 @@ impl Run<'_, '_> {
             g.shrink = self.scan_dimen(mu, true, None)?;
             g.shrink_order = self.cur_order;
         }
+        // (`new_spec`, §461: its own)
+        self.glue_own = true;
         Ok(g)
     }
 

@@ -61,10 +61,12 @@ fn hlist_with_list(n: &Node) -> Option<&List> {
     }
 }
 
-/// Whether glue is `zero_glue` (the shared spec of zero glue: here, glue
-/// of no width, stretch or shrink).
+/// Whether glue is `zero_glue` (the shared spec of zero glue: glue of no
+/// width, stretch or shrink whose spec is not its own, [`crate::node::GlueNode::own_spec`]:
+/// `\hskip 0pt` is no `zero_glue`, and LaTeX's section number after
+/// `\hskip\z@` in `\@hangfrom` does not protrude).
 fn zero_glue(n: &Node) -> bool {
-    matches!(n, Node::Glue(g) if g.spec.width == 0 && g.spec.stretch == 0 && g.spec.shrink == 0
+    matches!(n, Node::Glue(g) if !g.own_spec && g.spec.width == 0 && g.spec.stretch == 0 && g.spec.shrink == 0
         && g.spec.stretch_order == Order::Normal && g.spec.shrink_order == Order::Normal)
 }
 

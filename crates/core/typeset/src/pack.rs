@@ -643,6 +643,7 @@ mod tests {
         let leader = Node::Glue(GlueNode {
             spec: Glue::new(2 * UNITY, 0, 0),
             kind: GlueKind::ALeaders,
+            own_spec: false,
             leader: Some(Box::new(Node::Rule(Rule {
                 width: 20 * UNITY,
                 height: RUNNING,

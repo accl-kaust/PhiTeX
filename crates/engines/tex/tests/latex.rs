@@ -1123,6 +1123,11 @@ latexmk_tests! {
     latexmk_corpus_char_string_j8: "corpus-char-string", 8;
     latexmk_corpus_version_class_j1: "corpus-version-class", 1;
     latexmk_corpus_version_class_j8: "corpus-version-class", 8;
+    // (a numbered heading's number after \hskip\z@ in \@hangfrom's box:
+    // glue of its own spec, which margin protrusion does not pass over;
+    // 79 corpus manuals with microtype)
+    latexmk_corpus_protrude_heading_j1: "corpus-protrude-heading", 1;
+    latexmk_corpus_protrude_heading_j8: "corpus-protrude-heading", 8;
     // (a stream closed and opened again on another file in one run)
     latexmk_reopen_stream_j1: "reopen-stream", 1;
     latexmk_reopen_stream_j8: "reopen-stream", 8;
