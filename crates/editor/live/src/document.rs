@@ -540,4 +540,155 @@ mod tests {
         let built = ev.iter().find(|e| e["event"] == "build").expect("built");
         assert_eq!(built["pages"], 3, "{ev:?}");
     }
+
+    /// No files but dvipdfmx's finder, which finds nothing and counts
+    /// what it was asked.
+    struct Dpx(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Host for Dpx {
+        fn locate(&self, _name: &str) -> Option<PathBuf> {
+            None
+        }
+        fn read(&self, _path: &Path) -> Option<Vec<u8>> {
+            None
+        }
+        fn dpx_finder(&self) -> Option<Arc<crate::dvipdf::DpxFinder>> {
+            let n = self.0.clone();
+            Some(Arc::new(crate::dvipdf::DpxFinder::new(
+                Box::new(move |_name, _format, _prog| {
+                    n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    None
+                }),
+                Box::new(|_path| None),
+            )))
+        }
+    }
+
+    /// A DVI build's viewer PDF made in process through the host's finder
+    /// (no kpathsea): two pages of rules, dvipdfmx's files asked of the
+    /// finder; a host without one says so.
+    #[test]
+    fn a_dvi_build_is_shown_as_a_pdf_through_the_hosts_finder() {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\shipout\\hbox{\\vrule width 20pt height 10pt}\\shipout\\hbox{\\vrule width 5pt height 5pt}\\end\n";
+        let s = Session::new(
+            job(),
+            Arc::from(text),
+            Arc::new(Dpx(asked.clone())),
+            None,
+            Arc::new(Memory::default()),
+            Arc::new(Status::default()),
+        );
+        let mut d = Document::new(s, "doc.tex");
+        let ev = d.step();
+        let built = ev.iter().find(|e| e["event"] == "build").expect("built");
+        assert_eq!(built["errors"], json!([]), "{ev:?}");
+        assert_eq!(d.output().map(|o| o.0), Some("dvi"));
+        let pdf = d.viewer().pdf().expect("the viewer's PDF");
+        assert!(pdf.starts_with(b"%PDF-"), "{:?}", &pdf[..pdf.len().min(16)]);
+        let pages = d.request(&json!({"id": 1, "op": "pages"}));
+        assert_eq!(pages["json"]["pages"].as_array().map(Vec::len), Some(2), "{pages}");
+        assert!(asked.load(std::sync::atomic::Ordering::Relaxed) > 0, "the finder asked");
+        // (a host without a finder: no PDF, said)
+        let mut d = Document::new(session(text, Arc::new(Memory::default())), "doc.tex");
+        let ev = d.step();
+        let built = ev.iter().find(|e| e["event"] == "build").expect("built");
+        assert!(built["errors"].to_string().contains("no dvipdfmx here"), "{ev:?}");
+    }
+
+    /// XeTeX's fonts from closures and a relative index, as a wasm host
+    /// gives them: TeX Live's Latin Modern Roman indexed with its path
+    /// relative to `TEXMFDIST` (kpsewhich's, the test machine's), read by
+    /// the host from its copy.
+    struct XeHost {
+        dist: PathBuf,
+        index: Option<Vec<u8>>,
+        /// The face's relative path read by XeTeX's fonts.
+        read_face: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Host for XeHost {
+        fn locate(&self, _name: &str) -> Option<PathBuf> {
+            None
+        }
+        fn read(&self, _path: &Path) -> Option<Vec<u8>> {
+            None
+        }
+        fn xetex(&self) -> Option<phitex_tex::XeTeX> {
+            let dist = self.dist.clone();
+            let seen = self.read_face.clone();
+            crate::xefonts::xetex(
+                Box::new(move |p| {
+                    assert!(!p.starts_with('/'), "a shipped index's path: {p}");
+                    seen.store(true, std::sync::atomic::Ordering::Relaxed);
+                    std::fs::read(dist.join(p)).ok().map(Arc::from)
+                }),
+                Box::new(|_, _| None),
+                self.index.as_deref(),
+            )
+            .ok()
+        }
+        fn dpx_finder(&self) -> Option<Arc<crate::dvipdf::DpxFinder>> {
+            let (d1, d2) = (self.dist.clone(), self.dist.clone());
+            Some(Arc::new(crate::dvipdf::DpxFinder::new(
+                Box::new(move |name, _format, _prog| {
+                    let n = String::from_utf8_lossy(name).into_owned();
+                    d1.join(&n).is_file().then(|| n.into_bytes())
+                }),
+                Box::new(move |path| std::fs::read(d2.join(String::from_utf8_lossy(path).as_ref())).ok().map(Arc::from)),
+            )))
+        }
+    }
+
+    /// An `-ini` XeTeX job loading a font by name: through the host's
+    /// shipped index (relative paths) and its reads, the XDV names the
+    /// face's relative path and xdvipdfmx, through the host's finder, makes
+    /// the PDF with the face embedded; without the index the name is not
+    /// found.
+    #[test]
+    fn xetex_finds_a_font_by_name_in_a_shipped_index() {
+        let out = std::process::Command::new("kpsewhich")
+            .args(["-var-value", "TEXMFDIST"])
+            .output()
+            .expect("kpsewhich (TeX Live) on the test machine");
+        let dist = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let rel = "fonts/opentype/public/lm/lmroman10-regular.otf";
+        let data: Arc<[u8]> = Arc::from(std::fs::read(dist.join(rel)).expect("Latin Modern Roman"));
+        let abs = dist.join(rel).to_string_lossy().into_owned();
+        let mut e = phitex_otf::index::FaceEntry::read(&abs, data, 0);
+        e.fc_names = Some(phitex_otf::xetex::fontmgr::fc_names(&e));
+        let index = phitex_tex::FontIndex { entries: vec![e] }.relative_to(&dist.to_string_lossy());
+        assert_eq!(&*index.entries[0].path, rel);
+        let bytes = index.to_bytes();
+        let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=\"Latin Modern Roman\" at 10pt \\x \\setbox0\\hbox{Hi}\\shipout\\box0 \\end\n";
+        let read_face = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let run = |index: Option<Vec<u8>>| {
+            let job = Job {
+                engine: crate::tex::engine("xetex").unwrap(),
+                ..job()
+            };
+            let s = Session::new(
+                job,
+                Arc::from(text),
+                Arc::new(XeHost { dist: dist.clone(), index, read_face: read_face.clone() }),
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            );
+            let mut d = Document::new(s, "doc.tex");
+            let ev = d.step();
+            let built = ev.iter().find(|e| e["event"] == "build").cloned().expect("built");
+            (built, d.output())
+        };
+        let (built, out) = run(Some(bytes));
+        assert_eq!(built["errors"], json!([]), "{built}");
+        assert_eq!(built["ok"], true, "{built}");
+        assert_eq!(built["pages"], 1, "{built}");
+        let (ext, pdf) = out.expect("the PDF");
+        assert_eq!(ext, "pdf");
+        assert!(pdf.starts_with(b"%PDF-"), "the PDF");
+        assert!(read_face.load(std::sync::atomic::Ordering::Relaxed), "the face read by its relative path");
+        let (built, _) = run(None);
+        assert_eq!(built["ok"], false, "{built}");
+    }
 }

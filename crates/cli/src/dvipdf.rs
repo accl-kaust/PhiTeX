@@ -1,13 +1,12 @@
-//! A DVI file shown in the live viewer: made a PDF by dvipdfmx, in
-//! process (`phitex-xdvipdfmx`), its files through kpathsea as dvipdfmx
-//! finds them. Only for the viewer: the build's output is the DVI file.
+//! A DVI or XDV file made a PDF (`phitex_live::dvipdf`, dvipdfmx in
+//! process), its files through kpathsea as dvipdfmx finds them: the CLI's
+//! finder; a wasm host gives its own.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use phitex_kpse::{Format as KpseFormat, Kpse};
-use phitex_xdvipdfmx::api::{Options, Session};
-use phitex_xdvipdfmx::io::{Files, Format};
+use phitex_live::dvipdf::{Files, Format};
 
 fn kpse_format(format: Format) -> KpseFormat {
     match format {
@@ -75,23 +74,7 @@ impl Files for DpxFiles {
 
 /// The PDF dvipdfmx makes of `dvi` (named `pdf_name`), or why not.
 pub fn dvi_to_pdf(dvi: &[u8], pdf_name: &str, date: i64) -> Result<Vec<u8>, String> {
-    let options = Options {
-        pdf_filename: Some(pdf_name.as_bytes().to_vec()),
-        dvi_filename: None,
-        args: vec![b"-q".to_vec()],
-        source_date_epoch: Some(date),
-        now: date,
-        utc_offset_min: 0,
-        system_paper: None,
-        glyph_runs: false,
-    };
-    Session::convert(
-        options,
-        Box::new(DpxFiles::new()),
-        Box::new(|level, data| phitex_codecs::deflate::compress(data, level)),
-        dvi,
-    )
-    .map_err(|e| format!("dvipdfmx: {e}"))
+    phitex_live::dvipdf::dvi_to_pdf(dvi, pdf_name, date, Box::new(DpxFiles::new()))
 }
 
 /// dvipdfmx's files for an XDV file: names relative to the document's
@@ -135,20 +118,13 @@ pub fn xdv_to_pdf(xdv: &[u8], pdf_name: &str, date: i64, dir: &std::path::Path) 
     let dpx = DPX
         .get_or_init(|| Arc::new(std::sync::Mutex::new(DpxFiles::new())))
         .clone();
-    let options = Options {
-        pdf_filename: Some(pdf_name.as_bytes().to_vec()),
-        source_date_epoch: Some(date),
-        now: date,
-        ..Options::default()
-    };
-    Session::convert(
-        options,
+    phitex_live::dvipdf::xdv_to_pdf(
+        xdv,
+        pdf_name,
+        date,
         Box::new(XdvFiles {
             dir: dir.to_path_buf(),
             dpx,
         }),
-        Box::new(|level, data| phitex_codecs::deflate::compress(data, level)),
-        xdv,
     )
-    .map_err(|e| format!("xdvipdfmx: {e}"))
 }

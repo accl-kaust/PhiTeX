@@ -86,27 +86,42 @@ pub trait Host: Send + Sync {
         None
     }
 
+    /// dvipdfmx's files (fonts, maps, encodings, the document's
+    /// pictures): what [`Host::dvi_to_pdf`] and [`Host::xdv_to_pdf`] read
+    /// by default (none: no PDF of a DVI or XDV).
+    fn dpx_finder(&self) -> Option<Arc<crate::dvipdf::DpxFinder>> {
+        None
+    }
+
     /// XeTeX's XDV file made a PDF named `pdf_name` (xdvipdfmx), its
-    /// pictures read from `dir`.
+    /// pictures read from `dir` (by default through
+    /// [`Host::dpx_finder`], which finds them).
     ///
     /// # Errors
     /// Why it could not be made.
     fn xdv_to_pdf(
         &self,
-        _xdv: &[u8],
-        _pdf_name: &str,
-        _date: i64,
+        xdv: &[u8],
+        pdf_name: &str,
+        date: i64,
         _dir: &Path,
     ) -> Result<Vec<u8>, String> {
-        Err("no xdvipdfmx here: XeTeX's XDV is not made a PDF".to_owned())
+        match self.dpx_finder() {
+            Some(f) => crate::dvipdf::xdv_to_pdf(xdv, pdf_name, date, f.files()),
+            None => Err("no xdvipdfmx here: XeTeX's XDV is not made a PDF".to_owned()),
+        }
     }
 
-    /// A DVI file made a PDF named `pdf_name` (dvipdfmx), for a viewer.
+    /// A DVI file made a PDF named `pdf_name` (dvipdfmx), for a viewer
+    /// (by default through [`Host::dpx_finder`]).
     ///
     /// # Errors
     /// Why it could not be made.
-    fn dvi_to_pdf(&self, _dvi: &[u8], _pdf_name: &str, _date: i64) -> Result<Vec<u8>, String> {
-        Err("no dvipdfmx here: the DVI file is not made a PDF".to_owned())
+    fn dvi_to_pdf(&self, dvi: &[u8], pdf_name: &str, date: i64) -> Result<Vec<u8>, String> {
+        match self.dpx_finder() {
+            Some(f) => crate::dvipdf::dvi_to_pdf(dvi, pdf_name, date, f.files()),
+            None => Err("no dvipdfmx here: the DVI file is not made a PDF".to_owned()),
+        }
     }
 
     /// An engine failure kept for a bug report: the document's name, why

@@ -1680,7 +1680,6 @@ dependencies = [
  "phitex-otf",
  "phitex-pdf",
  "phitex-tex",
- "phitex-xdvipdfmx",
  "rustix",
  "serde",
  "serde_json",
@@ -1751,8 +1750,10 @@ version = "0.0.0"
 dependencies = [
  "phitex-bibtex",
  "phitex-codecs",
+ "phitex-otf",
  "phitex-pdf",
  "phitex-tex",
+ "phitex-xdvipdfmx",
  "serde_json",
 ]
 

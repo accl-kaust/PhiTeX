@@ -10,10 +10,14 @@
 //!   ([`host::Store`]), where the outputs go ([`host::Sink`]); and, on the
 //!   Build's own options, the shell hook. Nothing here reads a file,
 //!   starts a process or watches the disk.
+//! - [`dvipdf`]: a DVI or XDV made a PDF for the viewer (dvipdfmx in
+//!   process), its files through the host's finder.
 //! - [`view`]: the viewer's protocol (its requests answered, its events,
 //!   the state it is shown), without its transport.
 //! - [`watch`]: the editor's buffers given to the session, a build's
 //!   diagnostics, PDF and cursor for the viewers.
+//! - [`xefonts`]: XeTeX's fonts for a host without fontconfig or
+//!   kpathsea, from its files and a font index it ships.
 //! - [`document`]: the three driven by a host that calls in (the wasm
 //!   core): requests, the editor's changes, a step that builds.
 //! - [`tex`], [`problems`], [`failure`], [`warnings`], [`panics`]: what the
@@ -39,6 +43,7 @@
 )]
 
 pub mod document;
+pub mod dvipdf;
 pub mod failure;
 pub mod host;
 pub mod panics;
@@ -49,3 +54,4 @@ pub mod tex;
 pub mod view;
 pub mod warnings;
 pub mod watch;
+pub mod xefonts;

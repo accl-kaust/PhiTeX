@@ -1,6 +1,6 @@
 //! Builds the font index (DESIGN 4.7; format: `phitex_otf::index`).
 //!
-//!     scripts/sandbox cargo run -p phitex-otf --release --example otf-index -- OUT [--check-fc]
+//!     scripts/sandbox cargo run -p phitex-otf --release --example otf-index -- OUT [--check-fc] [--relative ROOT]
 //!
 //! The faces and their order are fontconfig's: `fc-list` run with
 //! `scripts/xetex/fonts.conf` (TeX Live's `fonts/opentype` and
@@ -11,7 +11,10 @@
 //! its absolute path, which the index keeps.
 //!
 //! `--check-fc` compares fontconfig's family, style and full names with
-//! the ones `fontmgr::fc_names` derives from the records.
+//! the ones `fontmgr::fc_names` derives from the records. `--relative
+//! ROOT` (TeX Live's `TEXMFDIST`) keeps each path under ROOT relative to
+//! it: the index a host ships with its copy of the fonts
+//! (`FontIndex::relative_to`).
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -97,7 +100,8 @@ fn fc_list(conf: &str) -> Vec<FcFace> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let out_path = args.get(1).expect("usage: otf-index OUT [--check-fc]");
+    let out_path = args.get(1).expect("usage: otf-index OUT [--check-fc] [--relative ROOT]");
+    let relative = args.iter().position(|a| a == "--relative").and_then(|i| args.get(i + 1)).cloned();
     let check = args.iter().any(|a| a == "--check-fc");
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let conf = root.join("scripts/xetex/fonts.conf");
@@ -151,6 +155,10 @@ fn main() {
         }
         index.entries.push(e);
     }
+    let index = match &relative {
+        Some(root) => index.relative_to(root),
+        None => index,
+    };
     let bytes = index.to_bytes();
     std::fs::write(out_path, &bytes).expect("index written");
     assert_eq!(

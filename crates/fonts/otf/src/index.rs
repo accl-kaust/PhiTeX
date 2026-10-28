@@ -11,7 +11,12 @@
 //! runs `fc-list` with `scripts/xetex/fonts.conf` (TeX Live's
 //! `fonts/opentype` and `fonts/truetype`, as the oracle sees them), reads
 //! every listed face's bytes from its absolute TeX Live path, and writes
-//! [`FontIndex::to_bytes`]. Paths in the index are those absolute paths.
+//! [`FontIndex::to_bytes`]. Paths in the index are those absolute paths;
+//! with `--relative ROOT` (`$TEXMFDIST`), each path under ROOT is kept
+//! relative to it (`fonts/opentype/public/lm/lmroman10-regular.otf`,
+//! [`FontIndex::relative_to`]): an index a host ships with its own copy of
+//! the fonts (a wasm host's), its `FontSource` reading those paths from
+//! its files (`phitex_live::xefonts`). The format is the same.
 //!
 //! # The format (version 2, stable; version 1 is read too)
 //!
@@ -248,6 +253,21 @@ impl FontIndex {
     pub fn with_front(&self, faces: Vec<FaceEntry>) -> FontIndex {
         let mut entries = faces;
         entries.extend(self.entries.iter().cloned());
+        FontIndex { entries }
+    }
+
+    /// The index with each path under `root` made relative to it (the
+    /// separator after `root` dropped), the others as they are: a shipped
+    /// index's paths, read by its host's `FontSource` from its own files.
+    #[must_use]
+    pub fn relative_to(&self, root: &str) -> FontIndex {
+        let root = root.trim_end_matches('/');
+        let mut entries = self.entries.clone();
+        for e in &mut entries {
+            if let Some(rest) = e.path.strip_prefix(root).and_then(|r| r.strip_prefix('/')) {
+                e.path = Arc::from(rest);
+            }
+        }
         FontIndex { entries }
     }
 
