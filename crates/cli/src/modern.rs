@@ -430,21 +430,42 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     let mut engine = if let Some(e) = named {
         tex::engine(&e)?
     } else {
-        let t = read(&file, true)?;
-        let mut e = config::default_engine(&t);
-        // (a file that inputs a LaTeX document is one: a second
-        // edition's main file setting a switch before its first's)
-        if e == "pdftex" {
-            let dir = Path::new(&file).parent().unwrap_or(Path::new(""));
-            for name in config::braced_inputs(&t) {
-                let f = dir.join(name).to_string_lossy().into_owned();
-                if read(&f, true).is_ok_and(|u| config::default_engine(&u) == "pdflatex") {
-                    e = "pdflatex";
-                    break;
-                }
+        // (the main file, the files it inputs by name, and the classes and
+        // packages of those beside them: a file that inputs a LaTeX
+        // document is one, a second edition's main file setting a switch
+        // before its first's; a thesis class may load fontspec)
+        let dir = Path::new(&file).parent().unwrap_or(Path::new("")).to_path_buf();
+        let at = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        let main = read(&file, true)?;
+        let mut texts: Vec<String> = config::braced_inputs(&main)
+            .into_iter()
+            .filter_map(|name| read(&at(name), true).ok())
+            .collect();
+        texts.insert(0, main);
+        let own: Vec<String> = texts
+            .iter()
+            .flat_map(|t| config::packages(t))
+            .flat_map(|n| [format!("{n}.cls"), format!("{n}.sty")])
+            .collect();
+        for f in own {
+            if let Ok(t) = std::fs::read(at(&f)) {
+                texts.push(String::from_utf8_lossy(&t).into_owned());
             }
         }
-        tex::engine(e)?
+        let latex = texts.iter().any(|t| config::default_engine(t) == "pdflatex");
+        let native = texts.iter().find_map(|t| config::native_engine(t));
+        match native {
+            Some((n, why)) => {
+                let e = config::native_program(n, latex);
+                tex::engine(e).map_err(|err| {
+                    format!(
+                        "{file} needs {e} (it {why}): {err}; if it runs under pdflatex too, \
+                         name that engine (--engine pdflatex, or `% !TEX program = pdflatex`)"
+                    )
+                })?
+            }
+            None => tex::engine(if latex { "pdflatex" } else { "pdftex" })?,
+        }
     };
     if let Some(out) = o.output {
         engine = engine.with_output(out)?;

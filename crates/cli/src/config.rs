@@ -217,6 +217,141 @@ pub fn default_engine(text: &str) -> &'static str {
     }
 }
 
+/// The packages that run only under XeTeX or LuaTeX, and the engine each
+/// asks for (fontspec and unicode-math run under both: XeTeX's is the one
+/// PhiTeX runs). LuaTeX's come first: a document with luacode and fontspec
+/// needs LuaTeX.
+const NATIVE_PACKAGES: [(&str, &str); 14] = [
+    ("luacode", "luatex"),
+    ("luatexja", "luatex"),
+    ("luatexja-fontspec", "luatex"),
+    ("luaotfload", "luatex"),
+    ("luamplib", "luatex"),
+    ("fontspec", "xetex"),
+    ("unicode-math", "xetex"),
+    ("polyglossia", "xetex"),
+    ("xeCJK", "xetex"),
+    ("xltxtra", "xetex"),
+    ("xunicode", "xetex"),
+    ("mathspec", "xetex"),
+    ("xgreek", "xetex"),
+    ("bidi", "xetex"),
+];
+
+/// The commands that exist only under XeTeX or LuaTeX (fontspec's, in a
+/// file a shared preamble or class loads it for).
+const NATIVE_COMMANDS: [(&str, &str); 6] = [
+    ("\\directlua", "luatex"),
+    ("\\setmainfont", "xetex"),
+    ("\\setsansfont", "xetex"),
+    ("\\setmonofont", "xetex"),
+    ("\\newfontfamily", "xetex"),
+    ("\\setmathfont", "xetex"),
+];
+
+/// The tests a document makes of its engine: one that has them runs under
+/// pdfTeX too, on its own branch.
+const ENGINE_TESTS: [&str; 9] = [
+    "\\ifxetex", "\\ifXeTeX", "\\ifluatex", "\\ifLuaTeX", "\\iftutex", "\\ifPDFTeX",
+    "\\ifpdftex", "\\ifxetexorluatex", "\\sys_if_engine",
+];
+
+/// The engine `text` needs beyond pdfTeX, `xetex` or `luatex`, and why
+/// (`loads fontspec`), when nothing names one: a package or command that
+/// runs only there, outside comments. None for a file that tests its
+/// engine (it has a pdfTeX branch).
+#[must_use]
+pub fn native_engine(text: &str) -> Option<(&'static str, String)> {
+    let text = uncommented(text);
+    if ENGINE_TESTS.iter().any(|t| has_command(&text, t)) {
+        return None;
+    }
+    let packages = packages(&text);
+    for (name, engine) in NATIVE_PACKAGES {
+        if packages.contains(&name) {
+            return Some((engine, format!("loads {name}")));
+        }
+    }
+    for (cmd, engine) in NATIVE_COMMANDS {
+        if has_command(&text, cmd) {
+            return Some((engine, format!("uses {cmd}")));
+        }
+    }
+    // (XeTeX's primitives: \XeTeXinputencoding, not the logo \XeTeX)
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("\\XeTeX") {
+        rest = &rest[i + 6..];
+        if rest.starts_with(|c: char| c.is_ascii_lowercase()) {
+            let name: String = rest.chars().take_while(char::is_ascii_alphabetic).collect();
+            return Some(("xetex", format!("uses \\XeTeX{name}")));
+        }
+    }
+    None
+}
+
+/// The program name for a document of `native`'s engine (`xetex`,
+/// `luatex`), LaTeX or not.
+#[must_use]
+pub fn native_program(native: &str, latex: bool) -> &'static str {
+    match (native, latex) {
+        ("luatex", true) => "lualatex",
+        ("luatex", false) => "luatex",
+        (_, true) => "xelatex",
+        (_, false) => "xetex",
+    }
+}
+
+/// `text` without its comments (from an unescaped `%` to the line's end).
+fn uncommented(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let mut escaped = false;
+        let mut end = line.len();
+        for (i, c) in line.char_indices() {
+            if c == '%' && !escaped {
+                end = i;
+                break;
+            }
+            escaped = c == '\\' && !escaped;
+        }
+        out.push_str(&line[..end]);
+        out.push('\n');
+    }
+    out
+}
+
+/// Whether `text` has the control sequence `cmd` (not a longer name it
+/// begins).
+fn has_command(text: &str, cmd: &str) -> bool {
+    text.match_indices(cmd).any(|(i, _)| {
+        !text[i + cmd.len()..].starts_with(|c: char| c.is_ascii_alphabetic())
+    })
+}
+
+/// The classes and packages `text` loads by name (`\documentclass`,
+/// `\LoadClass`, `\usepackage`, `\RequirePackage`, options skipped,
+/// lists split), in order.
+#[must_use]
+pub fn packages(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for cmd in ["\\documentclass", "\\LoadClass", "\\usepackage", "\\RequirePackage"] {
+        for (i, _) in text.match_indices(cmd) {
+            let mut rest = text[i + cmd.len()..].trim_start();
+            if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                continue;
+            }
+            if let Some(r) = rest.strip_prefix('[') {
+                let Some(j) = r.find(']') else { continue };
+                rest = r[j + 1..].trim_start();
+            }
+            let Some(r) = rest.strip_prefix('{') else { continue };
+            let Some(j) = r.find('}') else { continue };
+            out.extend(r[..j].split(',').map(str::trim).filter(|n| !n.is_empty()));
+        }
+    }
+    out
+}
+
 /// The files `text` inputs by name in braces (`\input{name}`,
 /// `\include{name}`), in order.
 #[must_use]
@@ -317,5 +452,43 @@ mod tests {
             default_engine("\\input{preamble}\n\\begin{document}\nx\n\\end{document}"),
             "pdflatex"
         );
+    }
+
+    #[test]
+    fn native() {
+        let e = |t: &str| native_engine(t).map(|(e, why)| format!("{e}: {why}"));
+        assert_eq!(e("\\documentclass{article}\n\\usepackage{amsmath}"), None);
+        assert_eq!(
+            e("\\documentclass{article}\n\\usepackage[no-math]{fontspec}"),
+            Some("xetex: loads fontspec".into())
+        );
+        assert_eq!(
+            e("\\usepackage{amsmath, unicode-math}"),
+            Some("xetex: loads unicode-math".into())
+        );
+        assert_eq!(
+            e("\\usepackage{fontspec}\\usepackage{luacode}"),
+            Some("luatex: loads luacode".into())
+        );
+        // commented out, a percent escaped, an engine test
+        assert_eq!(e("% \\usepackage{fontspec}\n\\usepackage{xcolor}"), None);
+        assert_eq!(
+            e("50\\% \\setmainfont{Libertinus Serif}"),
+            Some("xetex: uses \\setmainfont".into())
+        );
+        assert_eq!(
+            e("\\ifxetex\\usepackage{fontspec}\\else\\usepackage[T1]{fontenc}\\fi"),
+            None
+        );
+        // the logo is not the primitive; a longer name is not the command
+        assert_eq!(e("\\XeTeX{} and \\XeLaTeX"), None);
+        assert_eq!(
+            e("\\XeTeXinputencoding \"bytes\""),
+            Some("xetex: uses \\XeTeXinputencoding".into())
+        );
+        assert_eq!(e("\\directluax"), None);
+        assert_eq!(native_program("xetex", true), "xelatex");
+        assert_eq!(native_program("luatex", false), "luatex");
+        assert_eq!(packages("\\documentclass[11pt]{mythesis}\\usepackage{a,b}"), vec!["mythesis", "a", "b"]);
     }
 }
