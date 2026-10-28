@@ -2676,8 +2676,8 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     Some(_) => side.whats,
                     None => Vec::new(),
                 };
-                let named = crate::pdfout::forms_named(r, &whats)?;
-                for n in crate::pdfout::forms_first_written(r, &named)? {
+                let forms = crate::pdfout::forms_named(r, &whats)?;
+                for n in crate::pdfout::forms_first_written(r, &forms)? {
                     let _ = alloc_obj(r)?;
                     let fb = r
                         .get(&format!("pdf:xform:{n}"))?
