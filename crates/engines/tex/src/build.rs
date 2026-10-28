@@ -1358,7 +1358,17 @@ impl Run<'_, '_> {
             // (e-TeX's TeXXeT_en, read where the list has its nodes)
             texxet: has_lr && self.param("TeXXeTstate")? > 0,
         };
-        let patterns = self.patterns()?;
+        // (the languages the paragraph hyphenates in: its own and those
+        // its \language changes name)
+        let mut langs = vec![lang.lang];
+        for n in &list {
+            if let Node::Language { lang: l, .. } = n
+                && !langs.contains(l)
+            {
+                langs.push(*l);
+            }
+        }
+        let patterns = self.patterns(langs)?;
         let mut lc = [0u16; 256];
         for (c, x) in lc.iter_mut().enumerate() {
             if seen[c] {
@@ -1497,38 +1507,58 @@ impl Run<'_, '_> {
 
     /// The hyphenation patterns and exceptions so far, entered once per
     /// value for the process.
-    fn patterns(&mut self) -> R<Arc<phitex_typeset::hyph::Patterns>> {
-        type Cache = Mutex<phitex_defuse::FxHashMap<u64, Arc<phitex_typeset::hyph::Patterns>>>;
+    /// The hyphenation patterns and exceptions of languages `langs` (a
+    /// trie of those alone: TeX's lookups for a language read only its
+    /// own), made once per patterns value and language set, by one
+    /// thread while the others asking wait: a format with every
+    /// language of TeX Live's language.dat makes a trie of one in a few
+    /// milliseconds, of all of them in seconds.
+    fn patterns(&mut self, mut langs: Vec<u16>) -> R<Arc<phitex_typeset::hyph::Patterns>> {
+        type Once = Arc<OnceLock<Arc<phitex_typeset::hyph::Patterns>>>;
+        type Cache = Mutex<phitex_defuse::FxHashMap<(u64, Vec<u16>), Once>>;
         static C: OnceLock<Cache> = OnceLock::new();
         let x = self.get_loc(crate::fields::cell::PATTERNS)?;
-        let key = x.map_or(0, ValueId::raw);
-        let cache = C.get_or_init(|| Mutex::new(phitex_defuse::FxHashMap::default()));
-        if let Some(p) = cache.locked().get(&key) {
+        langs.sort_unstable();
+        let once = C
+            .get_or_init(Default::default)
+            .locked()
+            .entry((x.map_or(0, ValueId::raw), langs.clone()))
+            .or_default()
+            .clone();
+        if let Some(p) = once.get() {
             return Ok(p.clone());
         }
         let v = self.v;
-        let mut p = phitex_typeset::hyph::Patterns::default();
+        // (the patterns' words read here, outside the cell: an error
+        // reading them stays this run's)
+        let mut words: Vec<(u16, bool, Vec<String>)> = Vec::new();
         if let Some(x) = x {
             for e in list_of(v, x) {
                 let xs = list_of(v, e);
                 let lang = u16::try_from(xs.first().map_or(0, |&l| int_of(v, l))).unwrap_or(0);
-                let kind = xs
-                    .get(1)
-                    .map(|&k| crate::val::str_of(v, k))
-                    .unwrap_or_default();
-                for w in xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default() {
-                    let word = crate::val::str_of(v, w);
-                    if kind == "p" {
-                        let _ = p.add_pattern_str(lang, &word, &|c| c);
-                    } else {
-                        let _ = p.add_exception_str(lang, &word, &|c| c);
-                    }
+                if langs.binary_search(&lang).is_err() {
+                    continue;
                 }
+                let pattern = xs.get(1).is_some_and(|&k| crate::val::str_of(v, k) == "p");
+                let ws = xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default();
+                words.push((lang, pattern, ws.iter().map(|&w| crate::val::str_of(v, w)).collect()));
             }
         }
-        let p = Arc::new(p);
-        cache.locked().insert(key, p.clone());
-        Ok(p)
+        Ok(once
+            .get_or_init(|| {
+                let mut p = phitex_typeset::hyph::Patterns::default();
+                for (lang, pattern, ws) in &words {
+                    for w in ws {
+                        if *pattern {
+                            let _ = p.add_pattern_str(*lang, w, &|c| c);
+                        } else {
+                            let _ = p.add_exception_str(*lang, w, &|c| c);
+                        }
+                    }
+                }
+                Arc::new(p)
+            })
+            .clone())
     }
 
     // ------------------------------------------------------------ boxes
