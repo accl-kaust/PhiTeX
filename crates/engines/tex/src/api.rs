@@ -7205,6 +7205,21 @@ impl Build {
         e.order(self.unit).into_iter().filter(|&n| e.node_info(n).is_some_and(|i| i.op == op)).count()
     }
 
+    /// The live nodes a claim of a node of operation `op` holds.
+    #[must_use]
+    pub fn nodes_held_by(&self, op: &str) -> usize {
+        let e = &self.g.eng;
+        e.order(self.unit)
+            .into_iter()
+            .filter(|&n| {
+                e.node_info(n)
+                    .and_then(|i| i.claimer)
+                    .and_then(|c| e.node_info(c))
+                    .is_some_and(|c| c.op == op)
+            })
+            .count()
+    }
+
     /// The index of the first page shipped whose text (its characters, a
     /// space for each glue and each box's end) holds `s`; `usize::MAX`
     /// where none does.

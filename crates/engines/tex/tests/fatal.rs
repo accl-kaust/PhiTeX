@@ -115,3 +115,29 @@ fn the_input_ending_inside_a_skipped_else_ends_the_job() {
         }
     }
 }
+
+/// A finisher's run reads its output routine only. A routine that leaves
+/// an `\iffalse` open skips to its input's end (TeX would skip on into the
+/// text after the page's break, which is the pieces' to read): the run
+/// starves there. Before, `run_all` took the text's kind from `args[1]`
+/// for every operation, a finisher's being its page's index in its piece,
+/// so the finisher of a piece's second page ran as the job's text and
+/// took the document's pieces after it (amsldoc at sixteen threads: a
+/// finisher whose skip overran its routine pulled 11 of them).
+#[test]
+fn a_finisher_reads_its_routine_only() {
+    let mut src = String::from("\\output={\\shipout\\box255 \\iffalse}\n");
+    for i in 0..400 {
+        let _ = write!(src, "Word {i} of the long paragraph runs on. ");
+    }
+    src.push_str("\n\nAfter one.\n\nAfter two.\n\nAfter three.\n\n\\bye\n");
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("fin-routine-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let b = common::build(opts, Some(&common::plain()), &src);
+        assert_eq!(b.nodes_held_by("finish"), 0, "-j{threads}: the document's nodes a finisher holds");
+    }
+}

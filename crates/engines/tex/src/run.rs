@@ -4416,8 +4416,15 @@ impl<'c, 'a> Run<'c, 'a> {
         let args = self.cx.args();
         // the node's text kind (`args[1]`: 1 the job's text, 2 a
         // document's; a resume's flags, its first)
-        let at = usize::from(self.cx.op() != self.ops.resume);
-        let k = args.get(at).map_or(0, |&t| int_of(self.v, t));
+        // (a text's node only: a finisher's runs the output routine, neither
+        // the job's text nor a document's, its `args[1]` its page's index)
+        let op = self.cx.op();
+        let at = usize::from(op != self.ops.resume);
+        let k = if op == self.ops.exec || op == self.ops.resume {
+            args.get(at).map_or(0, |&t| int_of(self.v, t))
+        } else {
+            0
+        };
         self.top = k & 1 != 0;
         self.doc = k & 2 != 0;
         loop {

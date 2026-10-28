@@ -677,7 +677,10 @@ impl Run<'_, '_> {
     /// Claims the next sibling's text (its frames go to the back of the
     /// text).
     pub(crate) fn pull(&mut self) -> R<bool> {
-        if self.eof || self.no_pull {
+        // (an output routine's run reads its routine only: TeX would read
+        // on into the text after the page's break, which is the pieces'
+        // to read, not the finisher's)
+        if self.eof || self.no_pull || self.fin.is_some() {
             return Ok(false);
         }
         match self.cx.following(self.pulled) {
