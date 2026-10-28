@@ -3294,7 +3294,7 @@ impl Graph {
         finder: &Finder,
         stats: &mut Stats,
         fixpoint: bool,
-        edits: &mut dyn phitex_defuse::EditSource,
+        edits: &mut (dyn phitex_defuse::EditSource + Send),
     ) {
         let needs_f = self.eng.values().field("needs");
         let tm = crate::exec::prof_flag!("PHITEX_TEX_TIME");

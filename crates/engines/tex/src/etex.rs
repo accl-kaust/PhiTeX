@@ -299,6 +299,7 @@ fn expand_mine(r: &mut Run<'_, '_>) -> R<bool> {
         }
         cmd::CONVERT if chr == 100 => r.push_toks(str_toks(".6")),
         cmd::CONVERT if chr >= 300 => crate::xetex::convert(r, chr)?,
+        cmd::CONVERT if chr == crate::pdfprim::cv::EXPANDED => crate::pdfprim::expanded(r)?,
         cmd::CONVERT if chr > 100 => crate::pdfprim::convert(r, chr)?,
         _ => return Ok(false),
     }

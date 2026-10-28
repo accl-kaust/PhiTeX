@@ -46,10 +46,27 @@ cs_once!(frozen_fi_tok, "\u{10FFFE}fi");
 cs_once!(notexpanded_tok, "\u{10FFFE}notexpanded");
 cs_once!(halt_tok, "\u{10FFFE}halt");
 
+/// TeX Live's `expand_depth` (texmf.cnf, 10000): how deep expansions
+/// nest before the job ends with "TeX capacity exceeded".
+pub(crate) const EXPAND_DEPTH: u32 = 10_000;
+
 impl Run<'_, '_> {
     /// `expand` (§366): `cur` is expandable. A halt is raised, never
     /// returned (spec-final §2.2).
     pub(crate) fn expand(&mut self) {
+        // (TeX Live's `expand_depth`, tex.ch §366: the expansions nested
+        // in one another, each a frame of the run's stack; at 10000 the
+        // job ends with pdfTeX's overflow, not the thread's stack)
+        self.expand_depth += 1;
+        if self.expand_depth >= EXPAND_DEPTH {
+            self.expand_depth -= 1;
+            return self.overflow_raise("expansion depth", EXPAND_DEPTH as usize);
+        }
+        self.expand_once();
+        self.expand_depth -= 1;
+    }
+
+    fn expand_once(&mut self) {
         let c = self.cur.cmd;
         if (cmd::CALL..cmd::END_TEMPLATE).contains(&c) {
             // (the common case: no other state to keep)
@@ -64,6 +81,7 @@ impl Run<'_, '_> {
     }
 
     /// `expand` of what is not a macro call.
+    #[inline]
     fn expand_other(&mut self) -> R<()> {
         let saved = (self.radix, self.cur_order);
         let c = self.cur.cmd;

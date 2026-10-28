@@ -609,6 +609,8 @@ pub(crate) struct Run<'c, 'a> {
     /// Inside `pass_text` (§494): a skipped text's tokens are read only
     /// to classify them (conditional, `\fi`/`\else`, or neither).
     pub in_skip: bool,
+    /// The expansions nested now ([`crate::expand::EXPAND_DEPTH`]).
+    pub(crate) expand_depth: u32,
     /// Where the conditional text being skipped began (§494's
     /// `skip_line`, [`Run::line_mark`]).
     pub skip_from: (Option<i64>, i64),
@@ -1005,6 +1007,7 @@ impl<'c, 'a> Run<'c, 'a> {
             fmiss: Vec::new(),
             uread: Vec::new(),
             in_skip: false,
+            expand_depth: 0,
             skip_from: (None, 0),
             skip_first: Vec::new(),
             defer_ok: false,

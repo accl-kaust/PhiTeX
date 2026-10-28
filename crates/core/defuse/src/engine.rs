@@ -190,6 +190,13 @@ impl Drop for Unbusy<'_> {
     }
 }
 
+thread_local! {
+    /// This thread runs evaluations with the engine's stack (its
+    /// evaluation thread): an evaluation begun here needs no thread of
+    /// its own.
+    static ENGINE_STACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl Engine {
     /// A bracket changed: a new scope count.
     pub(crate) fn scope_changed(&self) {
@@ -1142,11 +1149,34 @@ impl Engine {
 
     /// `evaluate`, then `src.absorb` while it gives edits; one report for
     /// all of it.
-    pub fn evaluate_absorbing(&self, threads: usize, src: &mut dyn EditSource) -> Result<Report, EvalError> {
+    pub fn evaluate_absorbing(&self, threads: usize, src: &mut (dyn EditSource + Send)) -> Result<Report, EvalError> {
         self.evaluate_with(threads, Some(src))
     }
 
-    fn evaluate_with(&self, threads: usize, mut src: Option<&mut dyn EditSource>) -> Result<Report, EvalError> {
+    /// The evaluation on a thread of the engine's own, with the stack every
+    /// run is given ([`crate::WORKER_STACK`]): the caller's thread, whose
+    /// stack the engine does not choose (std's 2 MiB for a spawned one),
+    /// only waits. Runs nest as deep as their client lets them (TeX: 10000
+    /// expansions), at 1 thread as at 16.
+    fn evaluate_with(&self, threads: usize, src: Option<&mut (dyn EditSource + Send)>) -> Result<Report, EvalError> {
+        if ENGINE_STACK.with(std::cell::Cell::get) {
+            return self.evaluate_here(threads, src);
+        }
+        std::thread::scope(|s| {
+            std::thread::Builder::new()
+                .name("defuse-eval".to_owned())
+                .stack_size(crate::WORKER_STACK)
+                .spawn_scoped(s, || {
+                    ENGINE_STACK.with(|f| f.set(true));
+                    self.evaluate_here(threads, src)
+                })
+                .expect("the evaluation's thread")
+                .join()
+                .unwrap_or_else(|p| std::panic::resume_unwind(p))
+        })
+    }
+
+    fn evaluate_here(&self, threads: usize, mut src: Option<&mut (dyn EditSource + Send)>) -> Result<Report, EvalError> {
         let t0 = Instant::now();
         if self.busy.fetch_add(1, Ordering::SeqCst) & COLLECTING != 0 {
             self.busy.fetch_sub(1, Ordering::SeqCst);

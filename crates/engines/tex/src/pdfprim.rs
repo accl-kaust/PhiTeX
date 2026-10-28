@@ -45,7 +45,7 @@ mod li {
 }
 
 /// `convert` modifiers.
-mod cv {
+pub(crate) mod cv {
     pub const EXPANDED: i32 = 101;
     pub const PDFTEX_REVISION: i32 = 102;
     pub const PDFTEX_BANNER: i32 = 103;
@@ -472,17 +472,23 @@ fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
     }))
 }
 
+/// `\expanded`: its argument expanded, then read again. Apart from
+/// [`convert`], whose frame holds every conversion's locals: expansions
+/// nest through it, each nesting a frame of the run's stack, and TeX Live
+/// allows 10000 of them (`crate::expand::EXPAND_DEPTH`).
+#[inline(never)]
+pub(crate) fn expanded(r: &mut Run<'_, '_>) -> R<()> {
+    let (_, body) = r.scan_toks(false, true);
+    r.ck()?;
+    r.push_toks(body);
+    Ok(())
+}
+
 /// The conversions pdfTeX adds to `conv_toks` (pdfTeX §470 ff.).
 #[allow(clippy::too_many_lines)]
 pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
     let v = r.v;
     let out: String = match c {
-        cv::EXPANDED => {
-            let (_, body) = r.scan_toks(false, true);
-            r.ck()?;
-            r.push_toks(body);
-            return Ok(());
-        }
         cv::PDFTEX_REVISION => "29".to_owned(),
         cv::PDFTEX_BANNER => "This is pdfTeX, Version 3.141592653-2.6-1.40.29".to_owned(),
         cv::FONT_NAME | cv::FONT_OBJNUM => {

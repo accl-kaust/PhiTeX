@@ -84,9 +84,11 @@ pub use ctx::{Ctx, View};
 pub use read::{alias_of, alias_value};
 pub use engine::Engine;
 
-/// The stack of every thread the engine and its client start: std's
-/// default is smaller, and on wasm32 a thread's stack is heap memory with
-/// no guard page, so an overflow there writes over the heap (another
-/// thread fails later, in the allocator) instead of stopping.
-pub const WORKER_STACK: usize = 8 << 20;
+/// The stack of every thread a run is made on (the evaluation's own and
+/// the pool's): runs nest as deep as their client allows, and TeX allows
+/// 10000 nested expansions (TeX Live's `expand_depth`), at up to 1024
+/// bytes of stack each on the deepest path measured (`\expanded`, accl
+/// job 21489; `\number` 336, conditionals 456): 10 MB, with room for
+/// the run below them.
+pub const WORKER_STACK: usize = 16 << 20;
 pub use values::{Collected, Field, FxHashMap, FxHashSet, FxHasher, SeqNode, Value, ValueId, Values, hash_bytes, hash_words};
