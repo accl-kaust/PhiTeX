@@ -837,8 +837,14 @@ impl Cx<'_> {
         p
     }
 
-    /// An expression up to `\relax` (or what cannot continue it).
+    /// An expression up to `\relax` (or what cannot continue it). An
+    /// expression nested in it (`\numexpr` …) is counted, not recursed
+    /// into: TeX nests 10000 of them (`expand_depth`), more than a
+    /// thread's stack holds as frames.
     fn expr(&mut self, mut p: usize, r: &mut R) -> usize {
+        // (the expressions open inside the first; one ending resumes the
+        // one around it, as `scan_expr`'s own stack does)
+        let mut nested = 0usize;
         loop {
             p = skip(self.atoms, p);
             match self.kind(p) {
@@ -849,10 +855,16 @@ impl Cx<'_> {
                     let nm = self.name(p).to_owned();
                     self.mark(p);
                     if nm == "relax" {
-                        return p + 1;
+                        if nested == 0 {
+                            return p + 1;
+                        }
+                        nested -= 1;
+                        p += 1;
+                        continue;
                     }
                     if matches!(nm.as_str(), "numexpr" | "dimexpr" | "glueexpr" | "muexpr") {
-                        p = self.expr(p + 1, r);
+                        nested += 1;
+                        p += 1;
                         continue;
                     }
                     match self.resolve(&nm, self.atoms[p].start, 0) {
@@ -875,12 +887,20 @@ impl Cx<'_> {
                             // (etex.ch `scan_expr`: a macro may supply
                             // any part of the expression; it ends at
                             // `\relax` if one follows on the line)
-                            if let Some(e) = self.relax_on_line(p + 1) {
+                            let end = if let Some(e) = self.relax_on_line(p + 1) {
                                 r.worse(Status::Predicted, Some(cause("expression", &nm)));
-                                return e + 1;
+                                e + 1
+                            } else {
+                                r.pending("expression", &nm);
+                                p + 1
+                            };
+                            // (the innermost expression ends there; the one
+                            // around it goes on)
+                            if nested == 0 {
+                                return end;
                             }
-                            r.pending("expression", &nm);
-                            return p + 1;
+                            nested -= 1;
+                            p = end;
                         }
                     }
                 }
