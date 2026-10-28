@@ -2187,7 +2187,7 @@ fn stored(val: Entry) -> Entry {
 }
 
 /// Whether `loc` is one of the page builder's parameters (§980).
-fn is_page_param(loc: Loc) -> bool {
+pub(crate) fn is_page_param(loc: Loc) -> bool {
     use crate::fields::Par;
     [
         Par::vsize as Loc,

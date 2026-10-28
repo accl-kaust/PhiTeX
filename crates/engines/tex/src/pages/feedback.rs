@@ -312,6 +312,33 @@ impl Run<'_, '_> {
         Ok(fired == Some(true))
     }
 
+    /// The `[tag]` page parameter markers of piece `pid`'s `items` on a
+    /// page after the first (`cur`, the parameters in force, some): those
+    /// and what the text set since the page before fired in piece
+    /// `since` ([`Run::text_params_since`]); a marker with values sets
+    /// `cur`.
+    fn text_resolve(&mut self, pid: i64, since: i64, cur: &mut Option<crate::pages::PageParams>, items: &mut [crate::vprof::PItem]) -> R<()> {
+        use crate::vprof::PItem;
+        for x in items.iter_mut() {
+            match x {
+                PItem::Params(Some(q)) => *cur = Some(*q),
+                PItem::Params(None) if pid >= 0 => {
+                    if let Some(c) = *cur {
+                        let ch = self.text_params_since(pid, since)?;
+                        if !ch.is_empty() {
+                            let q = crate::pages::with_text(self.v, c, &ch);
+                            *cur = Some(q);
+                            *x = PItem::Params(Some(q));
+                        }
+                    }
+                }
+                PItem::End(ys) => self.text_resolve(pid, since, cur, ys)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// The page builder over the profiles where this piece's page began
     /// ([`PAGE_START`]) to its own last candidate: its state, stopped at
     /// the first page firing, and where that page fired (`Some(true)` in
@@ -345,7 +372,13 @@ impl Run<'_, '_> {
         let units = v.seq_to_vec(self.cx.fold(v.field(crate::vprof::VPROF), s.anchor, None)?);
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
         let mut st = s.state(v);
+        // (a `[tag]` marker on a later page: the parameters in force and
+        // what the text set since the page before fired, as the builder
+        // reads it, docs/spec-settle.md §2.1)
+        let since = s.anchor.map_or(-1, |a| i64::from_ne_bytes(a.raw().to_ne_bytes()));
+        let mut cur = st.params;
         let mut items = vec![crate::vprof::decode(&s.prof)];
+        self.text_resolve(-1, since, &mut cur, &mut items[0])?;
         if let (Some((after, k)), Some(a)) = (s.tail, s.anchor)
             && a != self.cx.node()
         {
@@ -362,6 +395,7 @@ impl Run<'_, '_> {
                     {
                         x.drain(..=p);
                         self.resolve_prof_of(pid, &mut x)?;
+                        self.text_resolve(pid, since, &mut cur, &mut x)?;
                         items.push(x);
                     }
                 }
@@ -371,9 +405,13 @@ impl Run<'_, '_> {
             let (pid, ints) = crate::vprof::unit_parts(v, u);
             let mut x = crate::vprof::decode(&ints);
             self.resolve_prof_of(pid, &mut x)?;
+            self.text_resolve(pid, since, &mut cur, &mut x)?;
             items.push(x);
         }
-        items.push(crate::vprof::decode(&crate::vprof::encode(v, &head)));
+        let mut own_items = crate::vprof::decode(&crate::vprof::encode(v, &head));
+        let me = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        self.text_resolve(me, since, &mut cur, &mut own_items)?;
+        items.push(own_items);
         let own = items.len() - 1;
         let mut rd = RunReaching(self, None);
         let mut fired = None;

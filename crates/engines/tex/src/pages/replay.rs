@@ -1401,6 +1401,20 @@ impl PageState {
     }
 }
 
+/// `p` with the page parameters `ch` names (`(index in PAGE_PARAMS,
+/// value)`, [`Run::text_params_since`]) set.
+pub(crate) fn with_text(v: &Values, mut p: PageParams, ch: &[(usize, ValueId)]) -> PageParams {
+    for &(i, x) in ch {
+        match i {
+            0 => p.vsize = crate::val::i32_of(v, Some(x)),
+            1 => p.max_depth = crate::val::i32_of(v, Some(x)),
+            2 => p.top_skip = glue_of(v, Some(x)),
+            _ => p.holding_inserts = crate::val::i32_of(v, Some(x)),
+        }
+    }
+    p
+}
+
 /// A `T_PAGE_PARAMS` marker's parameters (§980).
 pub(crate) fn params_of(v: &Values, m: ValueId) -> PageParams {
     let xs = list_of(v, m);
@@ -1569,11 +1583,39 @@ impl Run<'_, '_> {
         Ok(Some(xs))
     }
 
+    /// The page parameters the text set (`tpp:`, [`Run::set_loc`]) that
+    /// reach piece `pid` from a definition after piece `since` (its raw
+    /// id; -1: any): each `(index in PAGE_PARAMS, value)`. A routine's
+    /// setting is not among them: it reaches the builder through its
+    /// give-back (docs/spec-settle.md §2.1).
+    pub(crate) fn text_params_since(&mut self, pid: i64, since: i64) -> R<Vec<(usize, ValueId)>> {
+        let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
+        let after = (since >= 0).then(|| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(since.to_ne_bytes())));
+        let mut out = Vec::new();
+        for (i, p) in crate::pages::PAGE_PARAMS.into_iter().enumerate() {
+            let t = self.tpp_loc(p as crate::state::Loc);
+            let f = self.loc_field(t);
+            if let phitex_defuse::FieldAt::Def(x, Some(d)) = self.cx.read_at(f, phitex_defuse::At::AfterOwn(at))?
+                && after.is_none_or(|s| s != d && self.cx.alive(s) && self.cx.alive(d) && self.cx.before(s, d))
+            {
+                out.push((i, x));
+            }
+        }
+        Ok(out)
+    }
+
     /// `raw`'s `[tag]` page parameter markers, of piece `pid`, given the
     /// parameters reaching it ([`Run::page_params_at`]), and its `[tag,
     /// n]` insertion class markers the class's registers reaching it
     /// ([`Run::insert_class_at`]).
-    pub(crate) fn resolve_params_of(&mut self, pid: i64, raw: &mut [ValueId], reaching: bool) -> R<()> {
+    /// `text`: on a page after the first, the piece the page before fired
+    /// in and the parameters in force so far on this page: a `[tag]`
+    /// marker is then those, with what the text set since that fire
+    /// ([`Run::text_params_since`]), or left `[tag]` (no change) where
+    /// it set nothing; none: read where the piece is (the first page).
+    pub(crate) fn resolve_params_of(&mut self, pid: i64, raw: &mut [ValueId], text: Option<(i64, &mut Option<PageParams>)>) -> R<()> {
+        let reaching = text.is_none();
+        let mut text = text;
         let v = self.v;
         let mut m = None;
         let mut classes: Vec<(u16, ValueId)> = Vec::new();
@@ -1590,6 +1632,21 @@ impl Run<'_, '_> {
                     classes.push((n, c));
                     c
                 };
+                continue;
+            }
+            if let Some((since, cur)) = text.as_mut()
+                && nodes::tag(v, *x) == nodes::T_PAGE_PARAMS
+            {
+                if list_of(v, *x).len() > 1 {
+                    **cur = Some(params_of(v, *x));
+                } else if let Some(c) = **cur {
+                    let ch = self.text_params_since(pid, *since)?;
+                    if !ch.is_empty() {
+                        let q = with_text(v, c, &ch);
+                        **cur = Some(q);
+                        *x = params_marker(v, &q);
+                    }
+                }
                 continue;
             }
             if reaching && nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {
@@ -1625,6 +1682,8 @@ impl Run<'_, '_> {
         items: &mut [crate::vprof::PItem],
         own: &mut OwnerReads,
     ) -> R<()> {
+        // (a `[tag]` page parameter marker stays one: the fold reads it
+        // as the parameters it has in force, docs/spec-settle.md §2.1)
         for x in items.iter_mut() {
             if let crate::vprof::PItem::InsParams(n, c @ None) = x {
                 let n = *n;
@@ -1636,10 +1695,7 @@ impl Run<'_, '_> {
                     own.classes.push((n, k));
                     k
                 });
-                continue;
             }
-            // (a `[tag]` page parameter marker stays one: the fold reads it
-            // as the parameters it has in force, docs/spec-settle.md §2.1)
         }
         Ok(())
     }

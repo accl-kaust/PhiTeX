@@ -1579,7 +1579,22 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let grp = self.innermost_group();
         self.st.set(loc, val, global, grp);
+        // (a page parameter the text sets, also as the text's own
+        // (`tpp:`): what the page builder reads of the text, a routine's
+        // reaching it through its give-back, docs/spec-settle.md §2.1)
+        if crate::state::is_page_param(loc) && self.cx.op() != self.ops.finish {
+            let t = self.tpp_loc(loc);
+            self.st.set(t, val, global, grp);
+        }
         self.muts += 1;
+    }
+
+    /// The location of page parameter `loc` as the text sets it
+    /// ([`Run::set_loc`]): `tpp:` and the parameter's field.
+    pub(crate) fn tpp_loc(&mut self, loc: Loc) -> Loc {
+        let v = self.v;
+        let name = crate::val::field_name(v, self.loc_field(loc));
+        self.loc_of(v.field(&format!("tpp:{name}")))
     }
 
     /// (observe) `PHITEX_DEF_TRACE=<field>`: each definition of the

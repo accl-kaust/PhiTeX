@@ -891,12 +891,26 @@ impl Run<'_, '_> {
             // place, which the builder's own placements move,
             // docs/spec-settle.md §2.1)
             let rp;
-            let x = if matches!(x, PItem::Params(None))
-                && st.params.is_none()
-                && !lc.pend.iter().any(|(y, _)| matches!(y, PItem::Params(Some(_))))
-            {
-                rp = PItem::Params(Some(self.page_params_struct_at(pid)?));
-                &rp
+            let x = if matches!(x, PItem::Params(None)) {
+                let pending = lc.pend.iter().rev().find_map(|(y, _)| match y {
+                    PItem::Params(Some(q)) => Some(*q),
+                    _ => None,
+                });
+                match pending.or(st.params) {
+                    None => {
+                        rp = PItem::Params(Some(self.page_params_struct_at(pid)?));
+                        &rp
+                    }
+                    Some(cur) => {
+                        let ch = self.text_params_since(pid, lc.prev_fire.0)?;
+                        if ch.is_empty() {
+                            x
+                        } else {
+                            rp = PItem::Params(Some(crate::pages::with_text(self.v, cur, &ch)));
+                            &rp
+                        }
+                    }
+                }
             } else {
                 x
             };
@@ -1236,7 +1250,7 @@ impl Run<'_, '_> {
         // it, given back with its material)
         lc.dead = lc.rtn_dead;
         lc.prev_fire = (p.pid, lc.rtn_dead);
-        self.resolve_params_of(p.pid, &mut markers, false)?;
+        self.resolve_params_of(p.pid, &mut markers, Some((-1, &mut None)))?;
         let m_len = markers.len();
         let rtn_value = v.list(vec![v.list(markers), v.list(list)]);
         let rtn_items = std::sync::Arc::new(self.rtn_items(lc, rtn_value));

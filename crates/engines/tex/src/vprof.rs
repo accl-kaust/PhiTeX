@@ -627,6 +627,7 @@ impl ScanState {
 
     /// [`crate::pages::PageState`]'s `build` over profile items: whether
     /// a page fired.
+    #[allow(clippy::too_many_lines)]
     fn build(&mut self, buf: &mut Vec<PItem>, dead: i64, rd: &mut dyn Reaching) -> bool {
         let mut classes: Vec<(u16, InsertClass)> = Vec::new();
         let mut page_params = None;

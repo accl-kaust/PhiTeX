@@ -1152,6 +1152,11 @@ impl Run<'_, '_> {
         // fonts, not their characters, `crate::pages::seal`;
         // `PHITEX_NO_SEAL=1` reads them whole)
         let seal = !crate::exec::obs_flag!("PHITEX_NO_SEAL") && self.param("pdfoutput")? > 0;
+        // (the page parameters in force as the window's pieces come, from
+        // those the page began with: a piece's `[tag]` marker is those and
+        // what the text set since the page before fired,
+        // docs/spec-settle.md §2.1)
+        let mut cur = fin.params.map(|m| crate::pages::params_of(v, m));
         for (i, &p) in pids.iter().enumerate() {
             if !want.contains(&p) || units.iter().any(|u| u.0 == p) {
                 continue;
@@ -1203,7 +1208,8 @@ impl Run<'_, '_> {
             // a later page it is the parameters the page began with or
             // the text set since, never a finisher's definition read by
             // its place, docs/spec-settle.md §2.1)
-            self.resolve_params_of(p, &mut raw, fin.params.is_none())?;
+            let text = fin.params.is_some().then_some((fin.prev_fire.0, &mut cur));
+            self.resolve_params_of(p, &mut raw, text)?;
             // (whether the page's candidate is the own piece's last, read
             // as that alone (a piece growing after the page's cut leaves
             // it standing): the candidate where so, else none (-2); its
