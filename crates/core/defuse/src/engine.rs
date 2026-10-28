@@ -1865,6 +1865,18 @@ impl Engine {
             {
                 out.push(format!("node {} is on the line, its placer {} holding it no more", n.raw(), p.raw()));
             }
+            // (a node taken is held by a claimer on the line that is not
+            // taken itself: a node removed or taken claims nothing)
+            if node.state() == State::Inert {
+                match node.claimer().map(|c| self.node(c).state()) {
+                    Some(State::Gone | State::Inert) | None => out.push(format!(
+                        "node {} is taken, its claimer {} gone, taken or none",
+                        n.raw(),
+                        node.claimer().map_or(-1, |c| i64::try_from(c.raw()).unwrap_or(-1))
+                    )),
+                    _ => {}
+                }
+            }
             match node.state() {
                 State::Gone | State::Inert => continue,
                 State::Dirty | State::Running | State::RunningDirty | State::RunningInert => {

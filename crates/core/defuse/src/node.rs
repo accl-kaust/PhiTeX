@@ -99,6 +99,13 @@ pub(crate) struct Node {
     /// claim made smaller gives back what it holds up to there, past
     /// siblings it never held.
     pub(crate) claim_end: AtomicU64,
+    /// Held over one claim's walk of its siblings (`commit::apply_claim`:
+    /// `claim_end` read, the siblings taken or given back, `claim_end`
+    /// stored): two walks of one claimer (its run's claim, its commit's,
+    /// the give-back when it is taken or removed) interleaved, the later
+    /// store left `claim_end` short of a sibling the other took, which no
+    /// give-back reached again.
+    pub(crate) claim_mx: Mx<()>,
     /// Placed as its placer's continuation (`Ctx::follow`,
     /// `Ctx::follow_after`), not as its child: a node placed after the
     /// placer and its children goes before it.
@@ -170,6 +177,7 @@ impl Node {
             final_epoch: AtomicU64::new(0),
             claimer: AtomicU64::new(0),
             claim_end: AtomicU64::new(0),
+            claim_mx: Mx::new(()),
             follows: AtomicBool::new(false),
             anchor: AtomicU64::new(0),
             state_stale: AtomicBool::new(false),

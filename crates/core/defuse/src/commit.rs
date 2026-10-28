@@ -2799,8 +2799,13 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
     let mut releases: Vec<Arc<Node>> = Vec::new();
     let mut taken_holes: Vec<Arc<Node>> = Vec::new();
     let mut stops: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
+    // (one walk of this claimer's at a time, from its `claim_end` to the
+    // one it stores: `Node::claim_mx`)
+    let walk = me.claim_mx.lock();
     // (what it held before, up to there; what it holds now, to here)
     let old_end = me.claim_end.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw);
+    #[cfg(test)]
+    tests::paused(me.id, want);
     if want == 0 && old_end.is_none() {
         return;
     }
@@ -2894,6 +2899,7 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
         cur = eng.order.next(sid, seg.lo);
     }
     me.claim_end.store(new_end.map_or(0, |n| n.raw() + 1), Ordering::Release);
+    drop(walk);
     for s in retracts {
         retract(eng, w, &s);
     }
@@ -3323,6 +3329,8 @@ pub(crate) fn relocate(eng: &Engine, w: Option<&Worker>, placer: NodeId, k: &Arc
             *m.last.lock() = None;
             lifted_walks(eng, w, &m, left, st);
             unfile_placements(eng, w, &m);
+            // (a node removed claims nothing: what it holds goes back)
+            release_claimed(eng, w, &m);
             continue;
         };
         first = false;
@@ -3861,5 +3869,120 @@ pub(crate) fn def_depth(loc: Locality, b: &Brackets) -> u16 {
         Locality::Global => GLOBAL,
         Locality::Scope => u16::from(b.opens),
         Locality::ScopeAt(k) => u16::from(k) + 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! A claimer's two walks forced to interleave (`apply_claim`): its
+    //! give-back paused between reading `claim_end` and storing its own,
+    //! while its commit's walk takes a sibling past it. Found on amsldoc
+    //! at sixteen threads: the give-back's store left `claim_end` short of
+    //! the sibling, the next give-back stopped there, and the sibling
+    //! stayed taken by a node removed, its text never run.
+
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::time::Duration;
+
+    use crate::api::{NodeId, NodeState, Operation, Stop};
+    use crate::values::ValueId;
+    use crate::ctx::Ctx;
+    use crate::engine::Engine;
+
+    /// The node whose walk with `want` 0 pauses after reading
+    /// `claim_end` (raw id + 1; 0: none), and the barrier it waits at
+    /// twice: once to say it paused, once to go on.
+    static PAUSE_AT: AtomicU64 = AtomicU64::new(0);
+    static PAUSE: Mutex<Option<Arc<Barrier>>> = Mutex::new(None);
+
+    pub(super) fn paused(me: NodeId, want: usize) {
+        if want != 0 || PAUSE_AT.load(Ordering::Acquire) != me.raw() + 1 {
+            return;
+        }
+        PAUSE_AT.store(0, Ordering::Release);
+        let b = PAUSE.lock().unwrap().clone();
+        if let Some(b) = b {
+            b.wait();
+            b.wait();
+        }
+    }
+
+    /// `[n]`: claims its next n siblings.
+    struct Claimer;
+
+    impl Operation for Claimer {
+        fn name(&self) -> &'static str {
+            "claimer"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let n = usize::try_from(cx.values().as_int(cx.args()[0]).unwrap()).unwrap();
+            for i in 0..n {
+                let _ = cx.following(i);
+            }
+            cx.claim(n);
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// `[x]`: outputs x.
+    struct Text;
+
+    impl Operation for Text {
+        fn name(&self) -> &'static str {
+            "text"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            Ok(cx.args()[0])
+        }
+    }
+
+    #[test]
+    fn a_give_back_interleaved_with_a_claim_leaves_nothing_held() {
+        // C holds T0. Its give-back (want 0) reads claim_end (T0) and
+        // pauses; its commit's walk then takes T0 and T1; the give-back
+        // goes on. Whatever order the lock lets them run in, a last
+        // give-back leaves T0 and T1 held by no one.
+        let e = Engine::new();
+        let claimer = e.register(Arc::new(Claimer));
+        let text = e.register(Arc::new(Text));
+        let v = e.values();
+        let u = e.new_unit();
+        let c = e.push(u, claimer, vec![v.int(1)]);
+        let ts: Vec<NodeId> = (0..3).map(|k| e.push(u, text, vec![v.int(k)])).collect();
+        e.evaluate(1).unwrap();
+        assert_eq!(e.claimed(c), vec![ts[0]]);
+        let b = Arc::new(Barrier::new(2));
+        *PAUSE.lock().unwrap() = Some(b.clone());
+        PAUSE_AT.store(c.raw() + 1, Ordering::Release);
+        let a_done = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|s| {
+            let give_back = s.spawn(|| super::apply_claim(&e, None, e.node(c), 0));
+            b.wait();
+            let done = a_done.clone();
+            let er = &e;
+            let walk = s.spawn(move || {
+                super::apply_claim(er, None, er.node(c), 2);
+                done.store(true, Ordering::Release);
+            });
+            // (the walk runs while the give-back is paused, unless a lock
+            // holds it back: then the give-back goes on first)
+            let t = std::time::Instant::now();
+            while !a_done.load(Ordering::Acquire) && t.elapsed() < Duration::from_millis(200) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            b.wait();
+            give_back.join().unwrap();
+            walk.join().unwrap();
+        });
+        *PAUSE.lock().unwrap() = None;
+        // (C taken or removed: what it holds goes back)
+        super::release_claimed(&e, None, e.node(c));
+        for (k, &t) in ts.iter().enumerate() {
+            let i = e.node_info(t).unwrap();
+            assert!(i.state != NodeState::Inert && i.claimer.is_none(), "T{k} still held by {:?}", i.claimer.map(|n| n.raw()));
+        }
     }
 }

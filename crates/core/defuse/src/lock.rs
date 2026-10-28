@@ -10,6 +10,7 @@
 //! | a value shard (`values::Values`) | an intern; a sequence node lookup | one insert or one lookup; plain reads take none |
 //! | paths and their extensions, monoids, environment values, shapes, memo, marks, pending (`engine::Engine`) | setup; rare inserts; a view's step; a push or an edit outside an evaluation | one map operation |
 //! | a node's `last`, `woke`, `text`, `stopped`, `bounded` and `anchored` (`node::Node`) | its commit; its re-ask; an edit; a read of its arguments; a walk stopping at it; a range reader bounded by it filed or taken; a reader anchored at it filed (under that reader's segment's lock) or its removal | a swap; a clone; a push |
+//! | a node's claim walk (`node::Node::claim_mx`) | a claim taking or giving back its siblings (`commit::apply_claim`) | one walk from its `claim_end` to the one it stores, each segment's `inner` taken in turn under it; never two nodes' at once, nor under a segment's lock |
 //! | an edit source's roots (`sched::Shared::extra_roots`) | the caller's worker coming to a collection's barrier; the collector | one extend; one take |
 //! | the lists a collection took while a reader was pinned (`values::Values::graveyard`) | a collection | one take or one extend |
 //! | the panicked runs' reads (`sched::Shared::panicked_roots`) | a run that panicked on inputs that held; the collector | one extend; one copy |
