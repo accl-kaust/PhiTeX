@@ -18,9 +18,10 @@ import { accessSync, constants, readFileSync, writeSync } from "node:fs";
 import { WASI } from "node:wasi";
 import { Worker, isMainThread, workerData } from "node:worker_threads";
 
-// (the limits crates/wasm/build.rs links with: 1 GiB at first, up to 4 GiB)
-const PAGES_INITIAL = 16384;
-const PAGES_MAX = 65536;
+// (the limits crates/wasm/build.rs links with: the maximum from the start,
+// 65535 pages, so the memory never grows)
+const PAGES_INITIAL = 65535;
+const PAGES_MAX = 65535;
 
 // The file system as the program sees it: the directory Node runs in as
 // the root itself, so that a relative path (WASI's are taken from "/", it
