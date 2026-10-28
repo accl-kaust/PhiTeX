@@ -12,7 +12,8 @@
 //   (anything else: status 127, as a shell that cannot find it).
 // - `files`: a Map (or [name, Uint8Array] pairs) of the job's files as
 //   the build holds them, by the names TeX uses (relative to the job's
-//   directory): copied into Pyodide's `/work` where they differ.
+//   directory): copied into Pyodide's `/work` where they differ, and
+//   nothing else left there (an earlier call's other files removed).
 // - `wrote`: a Map name -> Uint8Array of the files the command made or
 //   changed under `/work`, for the host to keep (and, in an SSA build,
 //   for the engine to store); `removed`: the names of those it removed.
@@ -105,6 +106,18 @@ function mkdirs(FS, path) {
   }
 }
 
+// The files under `dir`, by their names relative to it.
+function filesUnder(FS, dir, rel = '', out = []) {
+  for (const e of FS.readdir(dir)) {
+    if (e === '.' || e === '..') continue;
+    const path = `${dir}/${e}`;
+    const name = rel ? `${rel}/${e}` : e;
+    if (FS.isDir(FS.stat(path).mode)) filesUnder(FS, path, name, out);
+    else out.push(name);
+  }
+  return out;
+}
+
 function sameBytes(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -142,7 +155,16 @@ export async function createMintedRunner({ loadPyodide, pyodideOptions = {}, whe
   const copied = new Map();
 
   function system(command, files) {
-    for (const [name, bytes] of files instanceof Map ? files.entries() : files) {
+    const given = [...(files instanceof Map ? files.entries() : files)];
+    // (the working directory holds exactly the files given: an earlier
+    // call's files the engine did not hand over again are removed)
+    const names = new Set(given.map(([name]) => name.replace(/^\.\//, '')));
+    for (const name of filesUnder(FS, WORK)) {
+      if (names.has(name)) continue;
+      FS.unlink(`${WORK}/${name}`);
+      copied.delete(`${WORK}/${name}`);
+    }
+    for (const [name, bytes] of given) {
       const path = `${WORK}/${name.replace(/^\.\//, '')}`;
       const last = copied.get(path);
       if (last && sameBytes(last, bytes) && FS.analyzePath(path).exists) continue;
