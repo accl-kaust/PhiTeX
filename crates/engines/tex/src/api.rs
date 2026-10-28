@@ -7215,6 +7215,23 @@ impl Build {
             .unwrap_or(usize::MAX)
     }
 
+    /// The live nodes by operation (`finish`: one a page fired, the
+    /// ordinary and the special ones; `exec`: the document's text nodes).
+    #[must_use]
+    pub fn live_by_op(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        let eng = &self.g.eng;
+        let mut nodes = std::collections::BTreeMap::new();
+        let (mut found, mut i, target) = (0usize, 0u64, eng.live_nodes());
+        while found < target && i < 1 << 32 {
+            if let Some(info) = eng.node_info(phitex_defuse::NodeId::from_raw(i)) {
+                *nodes.entry(info.op).or_default() += 1;
+                found += 1;
+            }
+            i += 1;
+        }
+        nodes
+    }
+
     /// The pages shipped, first first: a hash of what each shows (a PDF
     /// page's content stream, uncompressed, with its size and
     /// `\pdfpageattr`; a DVI page's `bop`..`eop` bytes, the back pointer

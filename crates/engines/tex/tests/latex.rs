@@ -671,6 +671,50 @@ fn latex_marginpars_settle() {
     }
 }
 
+/// `pdflatex` on a two-column article with 56 marginpars, 19 figures, 5
+/// wide figures and 7 tables (`pdfdocs/floats2col.tex`): LaTeX's output
+/// routine gives back floats, `\@freelist` and the column box at every
+/// fire, and the page loop must not re-fire every later page after each
+/// give-back it guessed wrong (Grail's -j1 that never ended: the loop
+/// stepping one checkpoint a run, re-running every later finisher). The
+/// finishers' runs stay within twice the fires at -j1, three times at
+/// -j8, and the PDF is pdfTeX's.
+#[test]
+#[ignore = "the page loop re-fires every later page after a give-back miss: finisher runs grow with the square of the fires"]
+fn latex_twocol_floats_runs() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "floats2col";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf"))).expect("the oracle");
+    let mut bad = Vec::new();
+    for (threads, bound) in [(1u64, 2u64), (8, 3)] {
+        let opts = Options {
+            threads: Some(usize::try_from(threads).unwrap_or(1)),
+            ..pdf_opts(name, &dir)
+        };
+        let t0 = std::time::Instant::now();
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let wall = t0.elapsed();
+        let (pdf, _) = b.output();
+        let fires = b.live_by_op().get("finish").copied().unwrap_or(0);
+        let by = |op: &str| b.stats.runs_by_op.iter().find(|x| x.0 == op).map_or(0, |x| x.1);
+        eprintln!(
+            "{name} -j {threads}: {fires} fires, {} finisher runs, {} page loop runs, {} pages, wall {wall:?}\n  {}",
+            by("finish"),
+            by("pages"),
+            b.pages().len(),
+            report(name, &b)
+        );
+        if let Some(d) = common::first_difference(&pdf, &want) {
+            bad.push(format!("-j {threads}: pdf {d}"));
+        }
+        if by("finish") > bound * fires {
+            bad.push(format!("-j {threads}: {} finisher runs for {fires} fires (bound {bound}x)", by("finish")));
+        }
+    }
+    assert!(bad.is_empty(), "{name}: {bad:?}");
+}
+
 /// `pdflatex` on an article with an abstract, two sections, itemize,
 /// enumerate, a theorem and a proof (amsthm), a figure with a caption
 /// and a quotation (`pdfdocs/envs.tex`, 4 pages): every paragraph end
