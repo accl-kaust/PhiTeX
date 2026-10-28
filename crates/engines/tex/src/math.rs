@@ -382,8 +382,10 @@ impl Run<'_, '_> {
                 Node::Box(x) => (x.width, true),
                 Node::Rule(r) => (r.width, true),
                 Node::Kern(k, _) | Node::Math(_, k) => (*k, false),
-                // pdfTeX §1146: "Let d be the width of the whatsit p"
-                Node::Whatsit(_, Some(s)) => (s.width, false),
+                // pdfTeX §1146: "Let d be the width of the whatsit p";
+                // XeTeX's pictures, native words and glyphs are visible
+                Node::Whatsit(_, Some(s)) => (s.width, self.xe),
+                Node::Native(n) => (n.width, true),
                 Node::Glue(g) => {
                     let q = &g.spec;
                     match b.glue.sign {
