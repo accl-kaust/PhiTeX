@@ -902,7 +902,11 @@ pub fn main(args: &[String]) -> ! {
             ui.error("--lsp and --json both speak on standard output: one of them");
             std::process::exit(crate::EXIT_FAILED);
         }
-        Some(crate::lsp::Lsp::begin(&mut o.file))
+        let l = crate::lsp::Lsp::begin(&mut o.file);
+        if l.wants_main() {
+            o.file = Some(l.main_from_open());
+        }
+        Some(l)
     } else {
         None
     };

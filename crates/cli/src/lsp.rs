@@ -11,7 +11,10 @@
 //!   (`rootUri`, else the first of `workspaceFolders`) is where the watch
 //!   runs; the main file is the watch's argument, else `phitex.toml`'s,
 //!   else `initializationOptions.main`, else the one `.tex` file at the
-//!   root with a `\documentclass` (`main.tex` among several). Answered
+//!   root with a `\documentclass` (`main.tex` among several), else the
+//!   first `.tex` document opened (it, if it has a `\documentclass`, else
+//!   the one `.tex` file with one beside it): an editor's root may be the
+//!   repository's, above the TeX project's folder. Answered
 //!   ([`Lsp::accept`]) with: text synchronised incrementally, positions
 //!   in UTF-16 (the viewer's `edit` counts in it already), and the
 //!   commands `phitex.openViewer`, `phitex.rebuild` and
@@ -374,6 +377,11 @@ pub struct Lsp {
     /// Standard input, as `initialize` left it (what came after it may
     /// be read already), until served.
     input: Mutex<Option<BufReader<std::io::Stdin>>>,
+    /// Whether `initialize` left the main file unnamed: the first `.tex`
+    /// document opened names it ([`Lsp::main_from_open`]).
+    wants_main: bool,
+    /// The messages read before the watch began, served first.
+    pending: Mutex<Vec<Value>>,
 }
 
 /// The main file to build in `root` when nothing names one: the one
@@ -473,6 +481,8 @@ impl Lsp {
                 shared: Arc::new(s),
                 init: Mutex::new(Some(m["id"].clone())),
                 input: Mutex::new(Some(input)),
+                wants_main: file.is_none() && !configured,
+                pending: Mutex::default(),
             };
         }
     }
@@ -490,12 +500,74 @@ impl Lsp {
         std::process::exit(crate::EXIT_FAILED);
     }
 
-    /// `initialize` answered: the watch runs in `root` on `main`.
-    pub fn accept(&self, root: &Path, main: &str) {
-        *lock(&self.shared.root) = (
-            root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
-            main.to_owned(),
+    /// Whether nothing named the main file: [`Lsp::main_from_open`]
+    /// does.
+    pub fn wants_main(&self) -> bool {
+        self.wants_main
+    }
+
+    /// The main file, named by the first `.tex` document the editor opens
+    /// (an editor's root is its own choice, often the repository's, above
+    /// the TeX project's folder): that document if it has a
+    /// `\documentclass`, else the one `.tex` file with one in its
+    /// directory ([`find_main`]); its path. `initialize` is answered
+    /// first; what the editor sends meanwhile is served once the watch
+    /// runs.
+    pub fn main_from_open(&self) -> String {
+        self.answer_init();
+        let s = &self.shared;
+        s.log(
+            3,
+            "phitex watch: no main file here (no argument, phitex.toml or initializationOptions.main): the first .tex document opened names it",
         );
+        let mut input = lock(&self.input)
+            .take()
+            .unwrap_or_else(|| BufReader::new(std::io::stdin()));
+        let mut pending = Vec::new();
+        let main = loop {
+            let Some(m) = read(&mut input) else {
+                std::process::exit(crate::EXIT_FAILED);
+            };
+            match m["method"].as_str().unwrap_or("") {
+                "exit" => std::process::exit(crate::EXIT_FAILED),
+                "shutdown" => {
+                    s.reply(&m["id"], Value::Null);
+                    continue;
+                }
+                "textDocument/didOpen" => {}
+                _ => {
+                    pending.push(m);
+                    continue;
+                }
+            }
+            let d = &m["params"]["textDocument"];
+            let path = d["uri"].as_str().and_then(path_of);
+            pending.push(m.clone());
+            let Some(path) = path.filter(|p| p.extension().is_some_and(|e| e == "tex")) else {
+                continue;
+            };
+            if d["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("\\documentclass"))
+            {
+                break path;
+            }
+            let dir = path.parent().unwrap_or(Path::new("/")).to_path_buf();
+            if let Some(n) = find_main(&dir) {
+                break dir.join(n);
+            }
+            s.notify(
+                "window/showMessage",
+                json!({"type": 2, "message": format!("phitex watch: {} has no \\documentclass, nor one .tex file beside it: open the main file", path.display())}),
+            );
+        };
+        *lock(&self.input) = Some(input);
+        *lock(&self.pending) = pending;
+        main.to_string_lossy().into_owned()
+    }
+
+    /// `initialize` answered with the server's capabilities (once).
+    fn answer_init(&self) {
         if let Some(id) = lock(&self.init).take() {
             self.shared.reply(
                 &id,
@@ -509,6 +581,15 @@ impl Lsp {
                 }),
             );
         }
+    }
+
+    /// `initialize` answered: the watch runs in `root` on `main`.
+    pub fn accept(&self, root: &Path, main: &str) {
+        *lock(&self.shared.root) = (
+            root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            main.to_owned(),
+        );
+        self.answer_init();
     }
 
     /// Call `wake` when the editor asks the watch for something.
@@ -633,9 +714,17 @@ impl Lsp {
     pub fn serve(&self, quit: Box<dyn Fn() + Send>) {
         let s = self.shared.clone();
         let input = lock(&self.input).take();
+        let pending = std::mem::take(&mut *lock(&self.pending));
         std::thread::Builder::new()
             .name("phitex-lsp".into())
             .spawn(move || {
+                // (what came while the main file was waited for first)
+                for m in &pending {
+                    if !message(&s, m) {
+                        quit();
+                        return;
+                    }
+                }
                 let mut input = input.unwrap_or_else(|| BufReader::new(std::io::stdin()));
                 while let Some(m) = read(&mut input) {
                     if !message(&s, &m) {

@@ -1136,6 +1136,89 @@ fn watch_lsp() {
     assert!(status.success(), "the watch ended with {status}");
 }
 
+/// `phitex watch --lsp` started by an editor whose root is above the
+/// TeX project (a repository's): no file named, no `phitex.toml`, no
+/// `.tex` file at the root; `initialize` is answered all the same, and the
+/// first `.tex` document opened names the main file (it has a
+/// `\documentclass`, here in a comment: the document is plain TeX), whose
+/// folder the watch runs in; its build's diagnostics are published, and
+/// `shutdown`/`exit` end the watch with status 0.
+#[test]
+fn watch_lsp_main_from_open() {
+    use serde_json::json;
+    let _one = one();
+    let text = "% \\documentclass is not needed: plain TeX\n".to_string()
+        + &plain()
+        + "Alpha bravo charlie delta.\n\\bye\n";
+    let repo = scratch("watch-lsp-open");
+    let dir = repo.join("paper");
+    std::fs::create_dir_all(&dir).expect("the project's folder");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the document");
+    let root = repo.canonicalize().expect("the directory");
+    let uri = format!("file://{}/paper/doc.tex", root.display());
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &repo)
+        .args(["watch", "--lsp", "--ini", "--etex", "-j", "4"])
+        .env("XDG_RUNTIME_DIR", &repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut to = child.stdin.take().expect("its input");
+    let rx = lsp_messages(child.stdout.take().expect("its output"));
+    let mut seen = Vec::new();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null,
+            "rootUri": format!("file://{}", root.display()),
+            "capabilities": {},
+        }}),
+    );
+    let init = lsp_until(&rx, &mut seen, |m| m["id"] == 1);
+    assert!(init.get("error").is_none(), "{init}");
+    assert_eq!(
+        init["result"]["capabilities"]["textDocumentSync"]["change"], 2,
+        "{init}"
+    );
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    );
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uri, "languageId": "tex", "version": 1, "text": text},
+        }}),
+    );
+    let cold = lsp_until(&rx, &mut seen, |m| {
+        m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri.as_str()
+    });
+    assert_eq!(cold["params"]["diagnostics"], json!([]), "{cold}");
+    assert!(
+        dir.join("doc.dvi").exists(),
+        "the output beside the main file"
+    );
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": null}),
+    );
+    lsp_until(&rx, &mut seen, |m| m["id"] == 9);
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    );
+    let end = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("the watch") {
+            break s;
+        }
+        assert!(Instant::now() < end, "the watch did not end after exit");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "the watch ended with {status}");
+}
+
 #[test]
 #[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_sections() {
