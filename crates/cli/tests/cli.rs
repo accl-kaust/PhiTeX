@@ -1739,3 +1739,101 @@ fn nonstop_fatal_errors_end_the_job() {
         assert!(!dir.join(format!("{name}.pdf")).exists(), "{name}");
     }
 }
+
+/// The XeTeX documents (`oracle/fixtures/xetex/docs`) and their
+/// `xelatex` oracles (`oracle/fixtures/xetex/oracle/docs`: the first
+/// run's XDV and PDF, `SOURCE_DATE_EPOCH=0`, `FORCE_SOURCE_DATE=1`, TeX
+/// Live's OpenType and TrueType fonts only, as the CLI's font index has
+/// them).
+fn xetex_docs() -> PathBuf {
+    fixtures().join("xetex/docs")
+}
+
+/// `xelatex -interaction=batchmode fontspec.tex` through phitex (one
+/// run, as TeX Live's): the xelatex format built and cached, the XDV
+/// made a PDF in process by xdvipdfmx, and that PDF is xelatex's, byte
+/// for byte.
+#[test]
+#[ignore = "heavy: the xelatex format; run on accl"]
+fn xelatex_fontspec() {
+    let _one = one();
+    let dir = scratch("xelatex-fontspec");
+    std::fs::copy(xetex_docs().join("fontspec.tex"), dir.join("fontspec.tex")).expect("a copy");
+    let t = Instant::now();
+    let out = command(&as_program("xelatex"), &dir)
+        .args(["-interaction=batchmode", "fontspec.tex"])
+        .output()
+        .expect("phitex runs as xelatex");
+    eprintln!(
+        "fontspec: xelatex through phitex in {:.2} s, status {:?}\n{}",
+        t.elapsed().as_secs_f64(),
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = chars(&std::fs::read(dir.join("fontspec.log")).unwrap_or_default());
+    assert!(out.status.success(), "fontspec: phitex failed:\n{log}");
+    let want = std::fs::read(fixtures().join("xetex/oracle/docs/fontspec.pdf")).expect("the oracle");
+    let got = std::fs::read(dir.join("fontspec.pdf")).unwrap_or_default();
+    assert!(
+        got == want,
+        "fontspec: the PDF is not xelatex's: {} (ours in {})",
+        first_difference(&got, &want),
+        dir.display()
+    );
+}
+
+/// `phitex watch --engine xelatex`, headless, on the fontspec document:
+/// the cold build writes a PDF; a word edited in the file is built as an
+/// edit, and the PDF it writes is `phitex build --engine xelatex`'s of
+/// the edited text.
+#[test]
+#[ignore = "heavy: the xelatex format; run on accl"]
+fn xelatex_watch_edit() {
+    let _one = one();
+    let text = std::fs::read_to_string(xetex_docs().join("fontspec.tex")).expect("the document");
+    let dir = scratch("xelatex-watch");
+    std::fs::write(dir.join("fontspec.tex"), &text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--json", "--no-view", "--engine", "xelatex", "-j", "8", "fontspec.tex"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    eprintln!("{cold}");
+    let first = std::fs::read(dir.join("fontspec.pdf")).expect("the watch's first PDF");
+    assert!(first.starts_with(b"%PDF"), "the watch's first PDF is not a PDF");
+    let edited = text.replacen("Pagella text", "Palatino words", 1);
+    assert_ne!(edited, text);
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("fontspec.tex"), &edited).expect("the edit");
+    let line = until(&mut lines, "build", &2.into(), &mut seen);
+    eprintln!("{line}");
+    let watched = std::fs::read(dir.join("fontspec.pdf")).expect("the watch's PDF");
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    let cold_dir = scratch("xelatex-watch-cold");
+    std::fs::write(cold_dir.join("fontspec.tex"), &edited).expect("the edited document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
+        .args(["build", "--engine", "xelatex", "-j", "8", "fontspec.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "the cold build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cold_pdf = std::fs::read(cold_dir.join("fontspec.pdf")).expect("the cold PDF");
+    assert!(watched != first, "the edit did not change the PDF");
+    assert!(
+        watched == cold_pdf,
+        "the watch's PDF after the edit is not the cold build's: {}",
+        first_difference(&watched, &cold_pdf)
+    );
+}

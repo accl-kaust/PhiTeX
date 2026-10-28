@@ -811,13 +811,21 @@ impl Session {
                     "engine".to_owned()
                 });
                 let workers = threads(self.job.threads);
+                let xe = self.job.engine.output == tex::Output::Xdv;
                 let progress = Arc::new(phitex_tex::Progress::new(workers));
                 snapshots(&progress);
                 self.status.set_live(Some(live(progress.clone())));
                 let opts = Options {
                     name: self.printed_name(),
                     jobname: self.job.jobname.clone(),
-                    comment: dvi_comment(self.job.pdf_date),
+                    comment: if xe {
+                        dvi_comment(self.job.pdf_date).replacen(" TeX", " XeTeX", 1)
+                    } else {
+                        dvi_comment(self.job.pdf_date)
+                    },
+                    // (XeTeX's native fonts: TeX Live's, by file and by
+                    // name)
+                    xetex: xe.then(crate::xefonts::xetex),
                     finder: self.finder(),
                     prelude_finder: Some(self.format_finder()),
                     tool_finder: Some(self.tool_finder()),
@@ -1055,7 +1063,7 @@ impl Session {
         // evaluation error: the result is not the document's — then the
         // format's errors, then TeX's; a failure's first line, cut, as
         // its own error: it never hides behind TeX's)
-        let errors = diagnostics
+        let errors: Vec<String> = diagnostics
             .iter()
             .filter(|d| {
                 d.severity == phitex_tex::Severity::Error
@@ -1100,11 +1108,31 @@ impl Session {
         self.built_text = Some(text);
         lap(&mut phases, "pages and files");
         // (the output's bytes moved to their place, not copied)
-        let (pdf_bytes, dvi_bytes) = if pdf {
+        let (mut pdf_bytes, dvi_bytes) = if pdf {
             (bytes, Arc::default())
         } else {
             (Arc::default(), bytes)
         };
+        // (XeTeX's XDV made the PDF, as xelatex runs xdvipdfmx)
+        let mut errors = errors;
+        if self.job.engine.output == tex::Output::Xdv && !dvi_bytes.is_empty() {
+            let dir = self
+                .job
+                .path
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+            match crate::dvipdf::xdv_to_pdf(
+                &dvi_bytes,
+                &format!("{}.pdf", self.job.jobname),
+                self.job.pdf_date,
+                &dir,
+            ) {
+                Ok(p) => pdf_bytes = Arc::new(p),
+                Err(e) => errors.push(e),
+            }
+            lap(&mut phases, "xdvipdfmx");
+        }
         let wall = t0.elapsed();
         if phitex_tex::tex_time() {
             let shown: Vec<String> = phases.iter().map(|(n, d)| format!("{n} {d:?}")).collect();

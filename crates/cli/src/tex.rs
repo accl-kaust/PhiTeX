@@ -16,13 +16,17 @@ use phitex_kpse::{Format, Kpse};
 pub enum Output {
     Dvi,
     Pdf,
+    /// XeTeX's XDV file, made a PDF as xelatex has xdvipdfmx make it
+    /// (in process: `dvipdf::xdv_to_pdf`).
+    Xdv,
 }
 
 impl Output {
+    /// The written file's extension (an XDV is written as its PDF).
     pub fn ext(self) -> &'static str {
         match self {
             Output::Dvi => "dvi",
-            Output::Pdf => "pdf",
+            Output::Pdf | Output::Xdv => "pdf",
         }
     }
 }
@@ -45,8 +49,10 @@ pub struct Engine {
 
 /// fmtutil.cnf: `tex tex - tex.ini`, `etex pdftex language.def … *etex.ini`,
 /// `pdftex pdftex language.def … *pdfetex.ini`, `latex pdftex language.dat
-/// … *latex.ini`, `pdflatex pdftex language.dat … *pdflatex.ini`.
-const ENGINES: [Engine; 5] = [
+/// … *latex.ini`, `pdflatex pdftex language.dat … *pdflatex.ini`, `xetex
+/// xetex language.def -etex xetex.ini`, `xelatex xetex language.dat -etex
+/// xelatex.ini`.
+const ENGINES: [Engine; 7] = [
     Engine {
         name: "tex",
         ini: "tex.ini",
@@ -82,6 +88,20 @@ const ENGINES: [Engine; 5] = [
         kpse_engine: "pdftex",
         output: Output::Pdf,
     },
+    Engine {
+        name: "xetex",
+        ini: "xetex.ini",
+        etex: true,
+        kpse_engine: "xetex",
+        output: Output::Xdv,
+    },
+    Engine {
+        name: "xelatex",
+        ini: "xelatex.ini",
+        etex: true,
+        kpse_engine: "xetex",
+        output: Output::Xdv,
+    },
 ];
 
 /// The engine a program name (or a magic comment's, `phitex.toml`'s
@@ -89,10 +109,9 @@ const ENGINES: [Engine; 5] = [
 pub fn engine(name: &str) -> Result<Engine, String> {
     let n = name.trim().to_ascii_lowercase();
     match n.as_str() {
-        "xetex" | "xelatex" | "xelatex-dev" | "luatex" | "lualatex" | "luahbtex"
-        | "lualatex-dev" | "dvilualatex" => Err(format!(
-            "{n} is not supported yet: phitex runs pdflatex, latex, pdftex, etex and tex \
-             (there is no external TeX compiler)"
+        "xelatex-dev" | "luatex" | "lualatex" | "luahbtex" | "lualatex-dev" | "dvilualatex" => Err(format!(
+            "{n} is not supported yet: phitex runs pdflatex, latex, xelatex, pdftex, xetex, \
+             etex and tex (there is no external TeX compiler)"
         )),
         "pdfetex" => engine("pdftex"),
         "initex" | "virtex" => engine("tex"),
@@ -109,7 +128,8 @@ impl Engine {
     /// `latex` (DVI) and `pdflatex`, plain's `etex` and `pdftex` (pdfTeX's
     /// `-output-format` given to a format of the other kind).
     pub fn with_output(self, out: Output) -> Result<Engine, String> {
-        if self.output == out {
+        // (XeTeX's XDV is written as its PDF)
+        if self.output == out || (self.output == Output::Xdv && out == Output::Pdf) {
             return Ok(self);
         }
         match (self.name, out) {
@@ -390,9 +410,19 @@ mod tests {
             "etex"
         );
         assert!(engine("tex").unwrap().with_output(Output::Pdf).is_err());
-        for n in ["XeLaTeX", "xetex", "lualatex", "luatex"] {
+        for n in ["lualatex", "luatex"] {
             assert!(engine(n).unwrap_err().contains("not supported"), "{n}");
         }
+        assert_eq!(engine("XeLaTeX").unwrap().ini, "xelatex.ini");
+        assert_eq!(engine("xetex").unwrap().kpse_engine, "xetex");
+        assert_eq!(
+            engine("xelatex")
+                .unwrap()
+                .with_output(Output::Pdf)
+                .unwrap()
+                .output,
+            Output::Xdv
+        );
         assert!(engine("foo").is_err());
     }
 

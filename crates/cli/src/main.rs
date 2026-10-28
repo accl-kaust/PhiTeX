@@ -46,6 +46,7 @@ mod view;
 mod warnings;
 mod watch;
 mod ws;
+mod xefonts;
 
 #[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]
 #[global_allocator]

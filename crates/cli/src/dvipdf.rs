@@ -93,3 +93,62 @@ pub fn dvi_to_pdf(dvi: &[u8], pdf_name: &str, date: i64) -> Result<Vec<u8>, Stri
     )
     .map_err(|e| format!("dvipdfmx: {e}"))
 }
+
+/// dvipdfmx's files for an XDV file: names relative to the document's
+/// directory found there first (xelatex runs xdvipdfmx in the
+/// directory its pictures are named from), the rest as [`DpxFiles`],
+/// whose lookups and reads one process keeps.
+struct XdvFiles {
+    dir: std::path::PathBuf,
+    dpx: Arc<std::sync::Mutex<DpxFiles>>,
+}
+
+impl Files for XdvFiles {
+    fn find(&mut self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>> {
+        let rel = std::path::Path::new(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(name));
+        if rel.is_relative() && matches!(format, Format::Pict | Format::Tex | Format::ProgramBinary) {
+            let p = self.dir.join(rel);
+            if p.is_file() {
+                return Some(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::as_bytes(p.as_os_str()).to_vec());
+            }
+        }
+        let mut d = self.dpx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        d.find(name, format, progname)
+    }
+
+    fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>> {
+        // (the document's own files read again each time: they change
+        // between a watch's builds)
+        let p = std::path::Path::new(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path));
+        if p.is_relative() || p.starts_with(&self.dir) {
+            return std::fs::read(self.dir.join(p)).ok().map(Arc::from);
+        }
+        let mut d = self.dpx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        d.read(path)
+    }
+}
+
+/// The PDF xelatex has xdvipdfmx make of `xdv` (`xdvipdfmx -q -E -o
+/// pdf_name`), its pictures named from `dir`, or why not.
+pub fn xdv_to_pdf(xdv: &[u8], pdf_name: &str, date: i64, dir: &std::path::Path) -> Result<Vec<u8>, String> {
+    static DPX: std::sync::OnceLock<Arc<std::sync::Mutex<DpxFiles>>> = std::sync::OnceLock::new();
+    let dpx = DPX
+        .get_or_init(|| Arc::new(std::sync::Mutex::new(DpxFiles::new())))
+        .clone();
+    let options = Options {
+        pdf_filename: Some(pdf_name.as_bytes().to_vec()),
+        source_date_epoch: Some(date),
+        now: date,
+        ..Options::default()
+    };
+    Session::convert(
+        options,
+        Box::new(XdvFiles {
+            dir: dir.to_path_buf(),
+            dpx,
+        }),
+        Box::new(|level, data| phitex_codecs::deflate::compress(data, level)),
+        xdv,
+    )
+    .map_err(|e| format!("xdvipdfmx: {e}"))
+}

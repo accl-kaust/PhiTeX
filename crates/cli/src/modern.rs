@@ -132,8 +132,8 @@ struct Opts {
         global = true
     )]
     output_dir: Option<String>,
-    /// pdflatex (default for LaTeX), latex, pdftex (default otherwise),
-    /// etex, tex (xelatex and lualatex are not supported yet)
+    /// pdflatex (default for LaTeX), latex, xelatex, pdftex (default
+    /// otherwise), xetex, etex, tex (lualatex is not supported yet)
     #[arg(long, alias = "program", value_name = "NAME", global = true)]
     engine: Option<String>,
     /// dvi or pdf
