@@ -147,126 +147,6 @@ pub fn offset(text: &str, line: usize, character: usize) -> usize {
     off + character.min(l.encode_utf16().count())
 }
 
-/// The words around UTF-16 column `col` of source line `line`, as the
-/// page would show them, longest first: what forward search looks for on
-/// the pages until the engine records origins. The line is cut at its
-/// comment; control sequences, math and TeX's specials break it into
-/// pieces (their text is not the page's), braces go; in the piece at the
-/// cursor (else the nearest), windows of 6 to 2 words holding the word at
-/// the cursor, centred first, then that word alone if it is long enough
-/// to be telling.
-pub fn needles(line: &str, col: usize) -> Vec<String> {
-    // (the cursor as a char index)
-    let mut at = line.chars().count();
-    let mut u = 0;
-    for (k, c) in line.chars().enumerate() {
-        if u >= col {
-            at = k;
-            break;
-        }
-        u += c.len_utf16();
-    }
-    // (the pieces: (first char index, words with their char indices))
-    let cs: Vec<char> = line.chars().collect();
-    let mut pieces: Vec<Vec<(usize, String)>> = vec![Vec::new()];
-    let mut word = String::new();
-    let mut word_at = 0;
-    let mut math = false;
-    let end_word = |pieces: &mut Vec<Vec<(usize, String)>>, word: &mut String, word_at: usize| {
-        if !word.is_empty() {
-            pieces
-                .last_mut()
-                .expect("a piece")
-                .push((word_at, std::mem::take(word)));
-        }
-    };
-    let mut k = 0;
-    while k < cs.len() {
-        let c = cs[k];
-        if c == '%' {
-            break;
-        }
-        let brk = |pieces: &mut Vec<Vec<(usize, String)>>| {
-            if pieces.last().is_some_and(|p| !p.is_empty()) {
-                pieces.push(Vec::new());
-            }
-        };
-        if c == '\\' {
-            end_word(&mut pieces, &mut word, word_at);
-            brk(&mut pieces);
-            k += 1;
-            // (a control word and its star, or one control symbol)
-            if cs.get(k).is_some_and(char::is_ascii_alphabetic) {
-                while cs
-                    .get(k)
-                    .is_some_and(|c| c.is_ascii_alphabetic() || *c == '@')
-                {
-                    k += 1;
-                }
-                if cs.get(k) == Some(&'*') {
-                    k += 1;
-                }
-            } else {
-                k += 1;
-            }
-            continue;
-        }
-        if c == '$' {
-            end_word(&mut pieces, &mut word, word_at);
-            brk(&mut pieces);
-            math = !math;
-        } else if math || "&#^_[]".contains(c) {
-            end_word(&mut pieces, &mut word, word_at);
-            brk(&mut pieces);
-        } else if c.is_whitespace() || c == '~' {
-            end_word(&mut pieces, &mut word, word_at);
-        } else if c != '{' && c != '}' {
-            if word.is_empty() {
-                word_at = k;
-            }
-            word.push(c);
-        }
-        k += 1;
-    }
-    end_word(&mut pieces, &mut word, word_at);
-    pieces.retain(|p| !p.is_empty());
-    // (the piece at the cursor: the one whose word starts last at or
-    // before it, else the first)
-    let Some(piece) = pieces
-        .iter()
-        .rev()
-        .find(|p| p[0].0 <= at)
-        .or_else(|| pieces.first())
-    else {
-        return Vec::new();
-    };
-    let w = piece.iter().rposition(|(s, _)| *s <= at).unwrap_or(0);
-    let mut out: Vec<String> = Vec::new();
-    for n in (2..=6).rev().filter(|&n| n <= piece.len()) {
-        // (the windows of n words holding word w, centred first)
-        let lo = w.saturating_sub(n - 1);
-        let hi = w.min(piece.len() - n);
-        let mut starts: Vec<usize> = (lo..=hi).collect();
-        let mid = w.saturating_sub(n / 2).clamp(lo, hi);
-        starts.sort_by_key(|&s| s.abs_diff(mid));
-        for s in starts {
-            let t = piece[s..s + n]
-                .iter()
-                .map(|(_, w)| w.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            if !out.contains(&t) {
-                out.push(t);
-            }
-        }
-    }
-    let alone = &piece[w].1;
-    if alone.chars().count() >= 5 && !out.contains(alone) {
-        out.push(alone.clone());
-    }
-    out
-}
-
 struct Shared {
     out: Mutex<std::io::Stdout>,
     /// The watch's directory (where its file names start) and main file.
@@ -826,7 +706,7 @@ fn message(s: &Shared, m: &Value) -> bool {
                     let r = &c["range"];
                     let start = offset(d, n(&r["start"]["line"]), n(&r["start"]["character"]));
                     let end = offset(d, n(&r["end"]["line"]), n(&r["end"]["character"]));
-                    *d = crate::watch::splice_utf16(d, start, end, &text);
+                    *d = phitex_live::watch::splice_utf16(d, start, end, &text);
                     drop(docs);
                     s.ask(Ask::Edit {
                         file: file.clone(),
@@ -926,22 +806,5 @@ mod tests {
         assert_eq!(offset(t, 1, 99), 7);
         assert_eq!(offset(t, 3, 2), 11);
         assert_eq!(offset(t, 9, 0), 13);
-    }
-
-    #[test]
-    fn words_around_the_cursor() {
-        let l = r"Some \emph{quite} long words, here $x^2$ and there % a comment";
-        let col = l.find("words").unwrap();
-        let n = needles(l, col);
-        assert_eq!(n[0], "quite long words, here");
-        assert!(n.contains(&"long words,".to_owned()), "{n:?}");
-        assert!(
-            n.iter().all(|w| !w.contains("comment") && !w.contains('x')),
-            "{n:?}"
-        );
-        let n = needles(l, l.find("there").unwrap());
-        assert_eq!(n[0], "and there");
-        assert_eq!(n.last().unwrap(), "there");
-        assert_eq!(needles("% only a comment", 3), Vec::<String>::new());
     }
 }

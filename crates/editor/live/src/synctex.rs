@@ -91,7 +91,9 @@ fn sheet(k: usize, p: &PageOrigins, lines: &[Option<Vec<usize>>]) -> (String, us
         {
             j += 1;
         }
-        let ks: Vec<usize> = (i..j).filter(|&k| p.file[k] == f && p.size[k] > 0.0).collect();
+        let ks: Vec<usize> = (i..j)
+            .filter(|&k| p.file[k] == f && p.size[k] > 0.0)
+            .collect();
         let (Some(&a), Some(&z)) = (ks.first(), ks.last()) else {
             i = j;
             continue;
@@ -110,7 +112,9 @@ fn sheet(k: usize, p: &PageOrigins, lines: &[Option<Vec<usize>>]) -> (String, us
         let mut s = 0;
         while s < ks.len() {
             let mut e = s + 1;
-            while e < ks.len() && p.x[ks[e]] <= p.x[ks[e - 1]] + p.w[ks[e - 1]] + p.size[ks[e - 1]] / 6.0 {
+            while e < ks.len()
+                && p.x[ks[e]] <= p.x[ks[e - 1]] + p.w[ks[e - 1]] + p.size[ks[e - 1]] / 6.0
+            {
                 e += 1;
             }
             let _ = writeln!(out, "x{tag},{l}:{},{v}", sp(p.x[ks[s]]));
@@ -122,7 +126,12 @@ fn sheet(k: usize, p: &PageOrigins, lines: &[Option<Vec<usize>>]) -> (String, us
     }
     let mut sheet = format!("{{{k}\n");
     if let Some((tag, l)) = first {
-        let _ = writeln!(sheet, "[{tag},{l}:{lo_h},{hi_v}:{},{},0", hi_h - lo_h, hi_v - lo_v);
+        let _ = writeln!(
+            sheet,
+            "[{tag},{l}:{lo_h},{hi_v}:{},{},0",
+            hi_h - lo_h,
+            hi_v - lo_v
+        );
         sheet.push_str(&out);
         sheet.push_str("]\n");
         n += 1;
@@ -188,7 +197,12 @@ impl Writer {
             .map(|t| {
                 t.as_ref().map(|t| {
                     std::iter::once(0)
-                        .chain(t.iter().enumerate().filter(|x| *x.1 == b'\n').map(|x| x.0 + 1))
+                        .chain(
+                            t.iter()
+                                .enumerate()
+                                .filter(|x| *x.1 == b'\n')
+                                .map(|x| x.0 + 1),
+                        )
                         .collect()
                 })
             })
@@ -234,7 +248,11 @@ impl Writer {
         ));
         phitex_tex::timeline::note("synctex: the file", t0.elapsed());
         if std::env::var_os("PHITEX_ORIGINS_TIME").is_some() {
-            eprintln!("synctex: {:?} in all, {fresh} of {} pages compressed", t0.elapsed(), pages.len());
+            eprintln!(
+                "synctex: {:?} in all, {fresh} of {} pages compressed",
+                t0.elapsed(),
+                pages.len()
+            );
         }
         Some(out)
     }

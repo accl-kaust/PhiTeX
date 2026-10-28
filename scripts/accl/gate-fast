@@ -17,7 +17,8 @@
 # task, so any commit can be gated): build (once per commit: phitex-tex's
 # test binaries and the release CLI, published under
 # phitex-runs/gate-bin/COMMIT on accl; a commit built before is not built
-# again); lint (clippy -D warnings; fmt is local only, the image's rustfmt
+# again); lint (clippy -D warnings, and phitex-live checked for
+# wasm32-wasip1-threads; fmt is local only, the image's rustfmt
 # is another version; it builds its own, no wait); and, after the build
 # (Slurm dependency, cancelled if it fails), on its binaries: suites
 # (phitex-tex's pdftex edits pages plain etex hints inputs);

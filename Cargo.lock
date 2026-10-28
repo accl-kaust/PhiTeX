@@ -1675,6 +1675,7 @@ dependencies = [
  "phitex-diff",
  "phitex-git",
  "phitex-kpse",
+ "phitex-live",
  "phitex-makeindex",
  "phitex-otf",
  "phitex-pdf",
@@ -1738,6 +1739,17 @@ version = "0.0.0"
 [[package]]
 name = "phitex-kpse"
 version = "0.0.0"
+
+[[package]]
+name = "phitex-live"
+version = "0.0.0"
+dependencies = [
+ "phitex-bibtex",
+ "phitex-codecs",
+ "phitex-pdf",
+ "phitex-tex",
+ "serde_json",
+]
 
 [[package]]
 name = "phitex-lua"

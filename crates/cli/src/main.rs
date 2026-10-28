@@ -41,15 +41,15 @@ mod modern;
 mod problems;
 mod session;
 mod shell;
-mod synctex;
 mod tex;
 mod tools;
 mod ui;
 mod view;
-mod warnings;
 mod watch;
 mod ws;
 mod xefonts;
+
+use phitex_live::warnings;
 
 #[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]
 #[global_allocator]

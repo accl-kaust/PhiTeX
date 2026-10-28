@@ -262,7 +262,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         );
         std::process::exit(crate::EXIT_FAILED);
     });
-    print!("{}", Session::terminal(&r));
+    print!("{}", phitex_live::session::Session::terminal(&r));
     // (the engine's own failures and warnings, which TeX's transcript
     // does not have: on standard error, said as sentences)
     for e in r.out.errors.iter().filter(|e| !e.starts_with("! ")) {

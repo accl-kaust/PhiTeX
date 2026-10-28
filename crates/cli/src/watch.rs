@@ -32,6 +32,7 @@ use crate::session::{self, Session, Status};
 use crate::tex;
 use crate::ui::pad;
 use crate::view::{self, Ask, Built, View};
+use phitex_live::watch::{Applied, Edits, diagnostics, splice_utf16, tex_text};
 
 /// What wakes the watch.
 enum Event {
@@ -201,86 +202,6 @@ fn recv_unique<T>(rx: &mut mpsc::Receiver<T>) -> Result<T, mpsc::RecvError> {
     rx.recv()
 }
 
-/// `s` with UTF-16 code units `start..end` replaced by `text` (the
-/// viewer's offsets).
-pub(crate) fn splice_utf16(s: &str, start: usize, end: usize, text: &str) -> String {
-    let at = |off: usize| {
-        let mut u = 0;
-        for (i, c) in s.char_indices() {
-            if u >= off {
-                return i;
-            }
-            u += c.len_utf16();
-        }
-        s.len()
-    };
-    let (a, b) = (at(start), at(end.max(start)));
-    format!("{}{text}{}", &s[..a], &s[b..])
-}
-
-/// A Unicode text as the bytes of its file, read by TeX as characters.
-fn tex_text(s: &str) -> String {
-    tex::chars(s.as_bytes())
-}
-
-/// The diagnostics of a build for the viewer: the engine's, at their
-/// places, each a whole problem (the viewer's `Problem`: its line, the
-/// culprit underlined, TeX's context and help), else the transcript's.
-fn diagnostics(s: &Session, r: &session::Report, log: &str) -> Vec<Value> {
-    if r.internal.is_none() && !r.diagnostics.is_empty() {
-        return r
-            .diagnostics
-            .iter()
-            .map(|d| {
-                let p = crate::problems::from_diagnostic(d, s.source(&d.file).as_deref(), false);
-                let chars = |b: usize| p.text.get(..b.min(p.text.len())).map_or(0, |t| t.chars().count());
-                let error = d.severity == phitex_tex::Severity::Error;
-                let engine = d.severity == phitex_tex::Severity::Diagnostic;
-                let excerpt = (!p.text.is_empty()).then(|| {
-                    json!({"text": p.text, "start": chars(p.start), "len": chars(p.end).saturating_sub(chars(p.start))})
-                });
-                json!({
-                    "severity": if error { "error" } else if engine { "diagnostic" } else { "warning" },
-                    "code": "tex",
-                    "message": d.message,
-                    "notes": p.label.iter().collect::<Vec<_>>(),
-                    "help": d.help.iter().flat_map(|h| h.lines()).collect::<Vec<_>>(),
-                    "suggestions": [],
-                    "file": p.file,
-                    "line": d.line,
-                    "col": excerpt.as_ref().map(|_| chars(p.start) + 1),
-                    "excerpt": excerpt,
-                    "context": [],
-                    "included": [],
-                    "box": null,
-                    "detail": d.context,
-                })
-            })
-            .collect();
-    }
-    let mut v: Vec<Value> = r
-        .out
-        .errors
-        .iter()
-        .map(|e| match &r.internal {
-            // (the engine's stop: its sentence, the dump under it)
-            Some(d) => json!({"severity": "error", "code": "engine", "message": e, "detail": d}),
-            None => {
-                json!({"severity": "error", "code": "tex", "message": crate::problems::bare(e)})
-            }
-        })
-        .collect();
-    for (k, n, first) in crate::warnings::summarize(&r.log_text()) {
-        v.push(json!({
-            "severity": "warning",
-            "code": format!("{k:?}"),
-            "message": format!("{n} × {}", first.first().cloned().unwrap_or_default()),
-            "detail": format!("see {log}"),
-        }));
-    }
-    v
-}
-
 /// The diff's state told the viewer, its files known as the watch's own,
 /// a line on the terminal (none: no diff).
 fn diff_told(ui: &Ui, v: &View, ours: &Ours, c: Option<&crate::compare::Compare>) {
@@ -313,54 +234,6 @@ fn diff_told(ui: &Ui, v: &View, ours: &Ours, c: Option<&crate::compare::Compare>
         ui.line(e);
     }
     ui.event(&json!({"event": "diff", "label": c.label, "changes": n, "errors": errors}));
-}
-
-/// Where the editor's cursor, line `line` and UTF-16 column `col` (from
-/// 0) of `text` (file `file`'s buffer), is on the pages: the words around
-/// it as a page would show them (`lsp::needles`, longest first), and the
-/// page (from 1) and word of the cursor's. The page is the one whose
-/// glyphs came from the word's bytes (the engine's glyph origins,
-/// `Build::glyphs_of`, docs/note-origins.md), else from its line's; where
-/// the build keeps none, the first page whose text holds one of the
-/// words (`Build::page_of_text`, a DVI build's: a PDF build's pages leave
-/// the page loop as their writers' shapes, so there the browser looks for
-/// the words itself, MuPDF's text of the PDF).
-fn locate(
-    s: &Session,
-    file: &str,
-    text: &str,
-    line: usize,
-    col: usize,
-) -> (Option<(usize, String)>, Vec<String>) {
-    let src = text.lines().nth(line).unwrap_or("");
-    let words = crate::lsp::needles(src, col);
-    // (the line's bytes in the text, and the cursor's: the word of
-    // letters around it, else the line)
-    let start: usize = text.split_inclusive('\n').take(line).map(str::len).sum();
-    let mut units = 0;
-    let at = start
-        + src
-            .char_indices()
-            .find(|&(_, c)| {
-                units += c.len_utf16();
-                units > col
-            })
-            .map_or(src.len(), |(i, _)| i);
-    let b = text.as_bytes();
-    let word = |c: u8| c.is_ascii_alphanumeric() || c >= 0x80;
-    let (mut lo, mut hi) = (at, at);
-    while lo > start && word(b[lo - 1]) {
-        lo -= 1;
-    }
-    while hi < start + src.len() && word(b[hi]) {
-        hi += 1;
-    }
-    let found = [(lo, hi), (start, start + src.len())]
-        .into_iter()
-        .filter(|&(a, z)| a < z)
-        .find_map(|(a, z)| s.origin_page(file, a, z).map(|k| (k + 1, text[a..z].to_owned())))
-        .or_else(|| words.iter().find_map(|w| s.page_of_text(w).map(|k| (k + 1, w.clone()))));
-    (found, words)
 }
 
 /// What a line on standard input (a pipe) asks.
@@ -672,7 +545,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
     // with `--exact`)
     s.watching = true;
     if !o.exact_file {
-        s.updates = Some(Arc::default());
+        s.set_updates(Some(Arc::default()));
     }
     // (since when the PDF file is not the exact one: written when the
     // editor has been idle for `o.idle`)
@@ -775,7 +648,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
     }
     // (what the viewer and the editor asked, taken together)
     let take_asks = || {
-        let mut a = view.as_ref().map(View::take_asks).unwrap_or_default();
+        let mut a = view.as_ref().map(|v| v.take_asks()).unwrap_or_default();
         a.extend(lsp.as_ref().map(|l| l.take_asks()).unwrap_or_default());
         a
     };
@@ -830,7 +703,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         // (the records the builds changed, stored before the watch ends;
         // the exact PDF file and, with `--log`, the log)
         s.flush_records();
-        if let Some(u) = &s.updates
+        if let Some(u) = &s.updates()
             && let Err(e) = session::compact(u)
         {
             ui.error(&e);
@@ -868,7 +741,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         ui.status(Some(&parts.join(sep)), l.build.as_ref().map(|b| b.1));
     };
     // (the editor's buffers, as Unicode text, by file name)
-    let mut buffers: HashMap<String, String> = HashMap::new();
+    let mut edits = Edits::new(&main_rel, &main_file);
     let mut builds = 0usize;
     // (the last output written without errors, and its PDF for the viewer)
     let mut last_pdf = None;
@@ -942,6 +815,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                     ms: 0.0,
                     since_ms: None,
                     origins: None,
+                    changed: None,
                     diagnostics: vec![
                         json!({"severity": "error", "code": "engine", "message": first}),
                     ],
@@ -988,7 +862,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
             }
         };
         drop(mine);
-        if let Some(u) = &s.updates {
+        if let Some(u) = &s.updates() {
             let exact = u.lock().unwrap_or_else(PoisonError::into_inner).exact;
             idle_since.set((!exact || o.log).then(Instant::now));
         } else if o.log {
@@ -1008,25 +882,14 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         }
         if view.is_some() || lsp.is_some() {
             if view.is_some() {
-                last_pdf = match r.main_output() {
-                    // (a file written as update sections: as it is)
-                    None if r.out.layout.is_some() => written
-                        .as_ref()
-                        .and_then(|p| std::fs::read(p).ok())
-                        .map(|b| session::shared(&b)),
-                    Some(("pdf", b)) => Some(session::shared(b)),
-                    Some((_, dvi)) => match crate::dvipdf::dvi_to_pdf(
-                        dvi,
-                        &format!("{}.pdf", s.job.jobname),
-                        s.job.pdf_date,
-                    ) {
-                        Ok(p) => Some(session::shared(&p)),
-                        Err(e) => {
-                            ui.warning(&format!("the viewer's PDF of the DVI file: {e}"));
-                            None
-                        }
-                    },
-                    None => None,
+                last_pdf = match phitex_live::watch::viewer_pdf(s, &r, || {
+                    written.as_ref().and_then(|p| std::fs::read(p).ok())
+                }) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        ui.warning(&format!("the viewer's PDF of the DVI file: {e}"));
+                        None
+                    }
                 };
             }
             let log = s
@@ -1044,6 +907,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                 ms: r.wall.as_secs_f64() * 1e3,
                 since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
                 origins: s.origins(),
+                changed: None,
                 diagnostics: diagnostics(s, &r, &log),
             };
             if let Some(v) = &view {
@@ -1420,29 +1284,6 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         false
     };
     rebuild(&mut s, "cold", None, &mut cold_meanwhile);
-    let set = |s: &mut Session, buffers: &HashMap<String, String>, file: &str| {
-        let text = buffers.get(file).map(|b| tex_text(b));
-        if file == main_rel {
-            // (a main file not there to read, removed and not written
-            // again: its last text stands, not an empty one)
-            let Some(t) = text.or_else(|| {
-                let t0 = Instant::now();
-                let b = std::fs::read(&main_file).ok()?;
-                phitex_tex::timeline::note("watch: the main file read", t0.elapsed());
-                let t0 = Instant::now();
-                let t = tex::chars_owned(b);
-                phitex_tex::timeline::note("watch: its characters", t0.elapsed());
-                Some(t)
-            }) else {
-                return;
-            };
-            let t0 = Instant::now();
-            s.set_text(t);
-            phitex_tex::timeline::note("watch: the text set (shared)", t0.elapsed());
-        } else {
-            s.set_buffer(file, text.as_deref());
-        }
-    };
     // (the diff against a past version, and what the viewer asked of it)
     let mut comparing: Option<crate::compare::Compare> = None;
     let mut diff_asks: Vec<Ask> = Vec::new();
@@ -1465,7 +1306,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                     {
                         ui.error(&e);
                     }
-                    if let Some(u) = s.updates.clone() {
+                    if let Some(u) = s.updates() {
                         let tx = compacted.clone();
                         let b = last.borrow().builds;
                         std::thread::Builder::new()
@@ -1538,7 +1379,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                         }
                     }
                     Key::Problems
-                        if view.as_ref().is_some_and(View::diff_is_shown)
+                        if view.as_ref().is_some_and(|v| v.diff_is_shown())
                             && comparing.is_some() =>
                     {
                         let errs = comparing
@@ -1632,19 +1473,19 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                             continue;
                         }
                         // (a buffer the editor saved is the file again)
-                        if let Some(b) = buffers.get(&rel)
+                        if let Some(b) = edits.buffers.get(&rel)
                             && std::fs::read(&p).is_ok_and(|d| d == b.as_bytes())
                         {
-                            buffers.remove(&rel);
-                            set(&mut s, &buffers, &rel);
+                            edits.buffers.remove(&rel);
+                            edits.set(&mut s, &rel);
                         }
                         // (the main file read once for all its events;
                         // another file the build reads again from disk)
-                        if !buffers.contains_key(&rel) {
+                        if !edits.buffers.contains_key(&rel) {
                             if rel == main_rel {
                                 main_changed = true;
                             } else {
-                                set(&mut s, &buffers, &rel);
+                                edits.set(&mut s, &rel);
                             }
                         }
                         why.push(rel);
@@ -1670,7 +1511,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                 }
                 Event::Compacted(_, Err(e)) => ui.error(&e),
                 Event::Edited(file) => {
-                    set(&mut s, &buffers, &file);
+                    edits.set(&mut s, &file);
                     why.push(format!("{file} (editor)"));
                     again = true;
                 }
@@ -1678,8 +1519,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                     let mut asks = std::mem::take(&mut held_asks);
                     asks.extend(take_asks());
                     for a in asks {
-                        let file = match a {
-                            Ask::Painted(us) => {
+                        match edits.apply(&mut s, view.as_deref(), a) {
+                            Applied::Painted(us) => {
                                 let mut l = last.borrow_mut();
                                 let d = Duration::from_micros(us);
                                 l.screen = Some(d);
@@ -1690,62 +1531,18 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                                     "ms": d.as_secs_f64() * 1e3,
                                 }));
                                 show(ui, &l);
-                                continue;
                             }
-                            Ask::Rebuild => {
+                            Applied::Rebuild => {
                                 why.push("asked in the viewer".to_owned());
                                 again = true;
-                                continue;
                             }
-                            Ask::DiffStart { .. }
-                            | Ask::DiffShow(_)
-                            | Ask::DiffRestyle { .. }
-                            | Ask::DiffStop => {
-                                diff_asks.push(a);
-                                continue;
+                            Applied::Diff(a) => diff_asks.push(a),
+                            Applied::Edited(file) => {
+                                why.push(format!("{file} (editor)"));
+                                again = true;
                             }
-                            Ask::SetFile { file, text } => {
-                                buffers.insert(file.clone(), text);
-                                file
-                            }
-                            Ask::Closed { file } => {
-                                buffers.remove(&file);
-                                file
-                            }
-                            Ask::Cursor { file, line, col } => {
-                                if let Some(v) = &view {
-                                    let text = buffers.get(&file).cloned().unwrap_or_else(|| {
-                                        std::fs::read(root.join(&file))
-                                            .map(|b| String::from_utf8_lossy(&b).into_owned())
-                                            .unwrap_or_default()
-                                    });
-                                    let (found, words) = locate(&s, &file, &text, line, col);
-                                    v.reveal(found, &words, &file, line + 1);
-                                }
-                                continue;
-                            }
-                            Ask::Edit {
-                                file,
-                                start,
-                                end,
-                                text,
-                            } => {
-                                let cur = buffers.get(&file).cloned().unwrap_or_else(|| {
-                                    std::fs::read(root.join(&file))
-                                        .map(|b| String::from_utf8_lossy(&b).into_owned())
-                                        .unwrap_or_default()
-                                });
-                                buffers.insert(file.clone(), splice_utf16(&cur, start, end, &text));
-                                file
-                            }
-                        };
-                        if file.is_empty() || file.starts_with('/') || file.contains("..") {
-                            buffers.remove(&file);
-                            continue;
+                            Applied::Nothing => {}
                         }
-                        set(&mut s, &buffers, &file);
-                        why.push(format!("{file} (editor)"));
-                        again = true;
                     }
                 }
             }
@@ -1753,8 +1550,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         // (a change the last build took while it ran: built already)
         // (r, or Rebuild in the viewer: built again whatever)
         phitex_tex::timeline::lap("watch: the events taken");
-        if main_changed && !buffers.contains_key(&main_rel) {
-            set(&mut s, &buffers, &main_rel);
+        if main_changed && !edits.buffers.contains_key(&main_rel) {
+            edits.set(&mut s, &main_rel);
             phitex_tex::timeline::lap("watch: the main file read and set");
         }
         let asked = why.iter().any(|w| w.starts_with("asked"));
@@ -1793,7 +1590,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                         for a in take_asks() {
                             match a {
                                 Ask::SetFile { ref file, ref text } if *file == main_rel => {
-                                    buffers.insert(file.clone(), text.clone());
+                                    edits.buffers.insert(file.clone(), text.clone());
                                 }
                                 Ask::Edit {
                                     ref file,
@@ -1801,12 +1598,14 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                                     end,
                                     ref text,
                                 } if *file == main_rel => {
-                                    let cur = buffers.get(file).cloned().unwrap_or_else(|| {
-                                        std::fs::read(&main_file)
-                                            .map(|b| String::from_utf8_lossy(&b).into_owned())
-                                            .unwrap_or_default()
-                                    });
-                                    buffers
+                                    let cur =
+                                        edits.buffers.get(file).cloned().unwrap_or_else(|| {
+                                            std::fs::read(&main_file)
+                                                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                                                .unwrap_or_default()
+                                        });
+                                    edits
+                                        .buffers
                                         .insert(file.clone(), splice_utf16(&cur, start, end, text));
                                 }
                                 other => {
@@ -1814,7 +1613,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                                     continue;
                                 }
                             }
-                            if send_main(&buffers, &main_rel) {
+                            if send_main(&edits.buffers, &main_rel) {
                                 held.push_back((at, Event::Edited(main_rel.clone())));
                             }
                         }
@@ -1825,9 +1624,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                     Event::Files(ps)
                         if ps.iter().all(|p| {
                             p.strip_prefix(&root).unwrap_or(p) == Path::new(&main_rel)
-                        }) && !buffers.contains_key(&main_rel) =>
+                        }) && !edits.buffers.contains_key(&main_rel) =>
                     {
-                        send_main(&buffers, &main_rel);
+                        send_main(&edits.buffers, &main_rel);
                         held.push_back((at, Event::Files(ps)));
                     }
                     e => held.push_back((at, e)),
@@ -1840,7 +1639,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         if let Some(v) = &view {
             let now = crate::compare::Now {
                 root: &root,
-                buffers: &buffers,
+                buffers: &edits.buffers,
             };
             let edited = again && comparing.as_ref().is_some_and(|c| c.to.is_none());
             for a in std::mem::take(&mut diff_asks) {
@@ -1943,12 +1742,5 @@ mod tests {
         let q = farewell(st, &l).unwrap();
         assert!(q.contains("to the screen 12"), "{q}");
         assert!(q.contains("(median 25"), "{q}");
-    }
-
-    #[test]
-    fn utf16_splices() {
-        assert_eq!(splice_utf16("héllo", 1, 2, "e"), "hello");
-        assert_eq!(splice_utf16("a😀b", 3, 3, "c"), "a😀cb");
-        assert_eq!(splice_utf16("ab", 5, 9, "c"), "abc");
     }
 }

@@ -9,7 +9,8 @@
 #                                       CLI, built side by side, left in
 #                                       $r/store for the other shards
 #                                       (job.sbatch ACCL_STORE_OUT/IN)
-#   gate-shard.sh lint                  clippy -D warnings (no fmt: version skew)
+#   gate-shard.sh lint                  clippy -D warnings (no fmt: version skew),
+#                                       phitex-live checked for wasm32-wasip1-threads
 #   gate-shard.sh suites                the local suites of phitex-tex
 #   gate-shard.sh latex K N             the latex target's tests, shard K of N
 #   gate-shard.sh ams ORACLE_MD5 CTL    amsldoc --exact-pdf at -j 1, 8 and 16;
@@ -217,6 +218,20 @@ case $shard in
     if ! cargo clippy --workspace --exclude phitex-defuse --no-deps --all-targets --keep-going -q --message-format short -- -D warnings > "$r/clippy.txt" 2>&1; then
       grep -E '^[^ ]+:[0-9]+:[0-9]+: (error|warning)' "$r/clippy.txt" | sort -u | head -60 | while IFS= read -r l; do echo "clippy: $l"; done >> "$r/red.txt"
       grep -q . "$r/red.txt" || echo "clippy: $(grep -m1 '^error' "$r/clippy.txt")" >> "$r/red.txt"
+      status=red
+    fi
+    # (phitex-live, the session and viewer protocol the frontends' wasm
+    # core runs, builds for its target: nothing of the machine in it; an
+    # image made before phitex.def added that target's std (7c63e95b)
+    # checks wasm32-unknown-unknown, said in wasm-live.txt)
+    wt=wasm32-wasip1-threads
+    if [ ! -d "$(rustc --print sysroot)/lib/rustlib/$wt" ]; then
+      wt=wasm32-unknown-unknown
+      echo "the image has no wasm32-wasip1-threads std: checked for $wt" > "$r/wasm-live.txt"
+    fi
+    if ! cargo check -p phitex-live --target $wt -q --message-format short >> "$r/wasm-live.txt" 2>&1; then
+      grep -E '^[^ ]+:[0-9]+:[0-9]+: error' "$r/wasm-live.txt" | sort -u | head -20 | while IFS= read -r l; do echo "$wt (phitex-live): $l"; done >> "$r/red.txt"
+      grep -q "$wt (phitex-live)" "$r/red.txt" || echo "$wt (phitex-live): $(grep -m1 '^error' "$r/wasm-live.txt")" >> "$r/red.txt"
       status=red
     fi
     cache_off

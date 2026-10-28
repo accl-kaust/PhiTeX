@@ -30,6 +30,7 @@ phitex-otf = { path = "../fonts/otf" }
 phitex-codecs = { path = "../codecs" }
 phitex-diff = { path = "../editor/diff" }
 phitex-git = { path = "../editor/diff/git" }
+phitex-live = { path = "../editor/live" }
 serde_json = "=1.0.154"
 notify = "=8.2.0"
 tungstenite = "=0.30.0"
