@@ -2782,8 +2782,11 @@ fn release_claimed(eng: &Engine, w: Option<&Worker>, me: &Node) {
 }
 
 /// Makes the next `want` pushed siblings of `me` inert, and dirty again
-/// those beyond that an earlier claim took.
+/// those beyond that an earlier claim took. With `Node::claim_all` set
+/// (`Ctx::claim_rest`), every node after `me` in its unit that a claim may
+/// take, whatever placed it.
 pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize) {
+    let all = me.claim_all.load(Ordering::Acquire) && want > 0;
     let mut cur = Some(me.seg_hint());
     let mut lower = Some(me.pos_hint());
     let mut k = 0usize;
@@ -2830,7 +2833,12 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
                     break;
                 }
                 let s = eng.node(*id);
-                if !ps.takes(eng, s) {
+                let takes = if all {
+                    s.state() != State::Gone && eng.op(s.op()).sibling() && !s.held_before(eng, me.id, me.pos_hint())
+                } else {
+                    ps.takes(eng, s)
+                };
+                if !takes {
                     continue;
                 }
                 if k < want {

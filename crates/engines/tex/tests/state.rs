@@ -5,6 +5,8 @@
 
 mod common;
 
+use std::fmt::Write as _;
+
 use phitex_tex::Options;
 
 fn runs_of_report(r: &phitex_tex::Report, op: &str) -> u64 {
@@ -21,7 +23,7 @@ fn doc(n: usize, k: usize, mid: &str) -> String {
             s.push_str("\n\n");
         }
         for _ in 0..3 {
-            s.push_str(&format!("Paragraph {i} of the document, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches. "));
+            let _ = write!(s, "Paragraph {i} of the document, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches. ");
         }
         s.push_str("\n\n");
     }

@@ -154,3 +154,39 @@ fn input_file_bytes_past_127_are_one_character_each() {
     );
     assert!(!log.contains("Undefined control sequence"), "{log}");
 }
+
+/// A file of the TeX distribution (under a texmf tree) is read as one
+/// load however its text looks: glyphtounicode.tex, a 300000-line table
+/// of `\pdfglyphtounicode` calls that acmart's microtype setup inputs,
+/// looked like a document's text and was cut into 11000 pieces run side
+/// by side (on a paper whose preamble then failed, each ran 60 times on
+/// the broken state: 754035 runs, 9.6 GB resident); the document's own
+/// `\input` files are still cut.
+#[test]
+fn a_distribution_file_is_not_cut_into_pieces() {
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("inputs-texmf-{threads}"));
+        std::fs::create_dir_all(dir.join("texmf/tex/generic")).unwrap();
+        let mut table = String::new();
+        for i in 0..300 {
+            table.push_str(&format!("Line {i} of the table, long enough to look like a paragraph of text when set in the plain format's ten point roman over a text width of six and a half inches.\n\n"));
+        }
+        std::fs::write(dir.join("texmf/tex/generic/table.tex"), &table).unwrap();
+        std::fs::write(dir.join("body.tex"), &table).unwrap();
+        let src = "\\input texmf/tex/generic/table\n\n\\input body\n\nThe last paragraph of the document, after both files.\n\n\\bye\n";
+        let opts = phitex_tex::Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let b = common::build(opts, Some(&common::plain()), src);
+        assert!(!b.fatal(), "-j{threads}: {:?}", b.stats.runs_by_op);
+        let exec = b.nodes_by_op("exec");
+        // (body.tex's 300 paragraphs are pieces; the distribution file's
+        // are one load from the piece that inputs it)
+        assert!(
+            (300..400).contains(&exec),
+            "-j{threads}: the document's own file in pieces, the distribution's as one load: {exec} exec nodes, {:?}",
+            b.stats.runs_by_op
+        );
+    }
+}

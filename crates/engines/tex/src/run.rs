@@ -539,6 +539,10 @@ pub(crate) struct Run<'c, 'a> {
     pub top: bool,
     /// Whether `\end` takes every following sibling.
     pub claim_rest: bool,
+    /// The run hit a fatal error (`Halt::Fatal`): its claim takes every
+    /// node after it in the unit (`Ctx::claim_rest`), not its text
+    /// siblings alone.
+    pub fatal_hit: bool,
     /// Whether the node's hint was found violated when it started.
     pub hint_void: bool,
     /// The semantic nest (§211): the lists and groups this run has open
@@ -917,6 +921,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pull_box: Vec::new(),
             top: false,
             claim_rest: false,
+            fatal_hit: false,
             hint_void: false,
             nest: Vec::new(),
             next_lid: 0,
@@ -4707,7 +4712,13 @@ impl<'c, 'a> Run<'c, 'a> {
         // siblings it declared it would take and did not read stayed
         // taken, unread; the engine drops a claim of none where none
         // was declared or held)
-        self.cx.claim(n);
+        // (a fatal error: everything after this node in the unit, the
+        // included files' pieces among it, is dead input)
+        if self.fatal_hit {
+            self.cx.claim_rest();
+        } else {
+            self.cx.claim(n);
+        }
         if crate::exec::obs_flag!("PHITEX_TEX_TRACE")
             && self.effect != Effect::None
             && crate::hints::effect_none(&self.ops.hints, self.v, self.cx.args())
@@ -4831,7 +4842,13 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn claim_count(&mut self) -> usize {
         let mut n = self.pulled;
         if self.claim_rest {
-            while matches!(self.cx.following(n), Some((op, _)) if op == self.ops.exec) {
+            // (nothing after this one is read, §93 and §1054: every text
+            // sibling after it, a piece, a rest or a box put, is dead
+            // input; the end mark, the page builder's kick, the writers and
+            // the link after the text are not text and stay: a count that
+            // took them left no PDF, and one that stopped at the first
+            // sibling of another text operation left the rest to run on)
+            while matches!(self.cx.following(n), Some((op, _)) if op == self.ops.exec || op == self.ops.resume || op == self.ops.put) {
                 n += 1;
             }
         }

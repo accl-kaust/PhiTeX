@@ -148,9 +148,11 @@ pub struct Engine {
     /// Wakes held to the next quiet point (`sched::hold_wake`): a reader
     /// re-asked by a change a settling operation's node made.
     pub(crate) held: crate::lock::Mx<Vec<(NodeId, crate::node::Wake)>>,
-    /// A run asked the evaluation to end (`Ctx::halt`); cleared as one
-    /// begins.
+    /// The evaluation ends (`Ctx::halt` granted); cleared as one begins.
     pub(crate) halted: std::sync::atomic::AtomicBool,
+    /// Runs that asked the evaluation to end (`Ctx::halt`), granted at the
+    /// next quiet point if the run still stands and its reads hold.
+    pub(crate) halt_asked: crate::lock::Mx<Vec<(NodeId, u32)>>,
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
     pub(crate) layout_gen: AtomicU64,
@@ -231,6 +233,7 @@ impl Engine {
             has_finals: std::sync::atomic::AtomicBool::new(false),
             held: crate::lock::Mx::new(Vec::new()),
             halted: std::sync::atomic::AtomicBool::new(false),
+            halt_asked: crate::lock::Mx::new(Vec::new()),
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
             busy: AtomicU64::new(0),
@@ -1166,6 +1169,7 @@ impl Engine {
 
     fn evaluate_with(&self, threads: usize, mut src: Option<&mut dyn EditSource>) -> Result<Report, EvalError> {
         self.halted.store(false, Ordering::Release);
+        self.halt_asked.lock().clear();
         let mut halted = false;
         let t0 = Instant::now();
         if self.busy.fetch_add(1, Ordering::SeqCst) & COLLECTING != 0 {

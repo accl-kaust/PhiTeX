@@ -1284,10 +1284,11 @@ impl Run<'_, '_> {
             return f.sliceable;
         }
         // (the same test as for a file the text names, `inputs.rs`: a
-        // file that ends itself early or reads its own line numbers is
-        // read inline)
-        phitex_source::pass::FileKind::from_path(&crate::val::str_of(self.v, f.name))
-            == phitex_source::pass::FileKind::Document
+        // file of the distribution is read as one load, and a file that
+        // ends itself early or reads its own line numbers is read inline)
+        let name = crate::val::str_of(self.v, f.name);
+        !crate::inputs::distribution_file(&name)
+            && phitex_source::pass::FileKind::from_path(&name) == phitex_source::pass::FileKind::Document
             && crate::hints::document_text_of(self.v, f.id)
     }
 

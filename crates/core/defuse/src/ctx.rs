@@ -621,8 +621,22 @@ impl<'a> Ctx<'a> {
     /// Takes my next `n` siblings: they become inert and `following` gives
     /// their (op, args). Pushed siblings only, not placements.
     pub fn claim(&mut self, n: usize) {
+        self.me.claim_all.store(false, std::sync::atomic::Ordering::Release);
         self.product.claim = n;
         crate::commit::apply_claim(self.eng, self.worker, self.me, n);
+    }
+
+    /// Claims every node after this one in its unit, whatever placed it
+    /// (not its siblings alone, as `claim` does): the job is over here
+    /// (TeX's fatal error, §93: nothing after it is read). The nodes are
+    /// inert, their products withdrawn, until a run of this node claims
+    /// otherwise. A fatal error in a paper's preamble claimed its one
+    /// pushed sibling and left the 11000 pieces of the included files to
+    /// run on, 65 times each at ten threads.
+    pub fn claim_rest(&mut self) {
+        self.me.claim_all.store(true, std::sync::atomic::Ordering::Release);
+        self.product.claim = usize::MAX;
+        crate::commit::apply_claim(self.eng, self.worker, self.me, usize::MAX);
     }
 
     /// The `i`-th claimed sibling's (op, args).
@@ -731,14 +745,23 @@ impl<'a> Ctx<'a> {
         self.woke.clone()
     }
 
-    /// Ends the evaluation once this run has committed: the job is over
-    /// (TeX's fatal error, §93's `fatal_error_stop`). Nothing queued runs;
-    /// the nodes still queued are pending for the next evaluation, and
-    /// `Report::halted` says so. Before this, a fatal error in one piece
-    /// left every other node running on, 65 times each at ten threads on
-    /// a paper that needed another engine (754035 runs, 9.6 GB resident).
+    /// Asks to end the evaluation: the job is over (TeX's fatal error,
+    /// §93's `fatal_error_stop`). Granted at the next quiet point if this
+    /// run still stands then with its reads holding: a run speculating on
+    /// a guessed state may hit a fatal condition its settled rerun never
+    /// hits (amsldoc at eight threads ran 418 of 1019 nodes and differed
+    /// when the request was granted at the commit), and no definition is
+    /// settled before the line is quiet. Granted, the `final_only` nodes
+    /// and the loop-back passes are skipped, the nodes still queued are
+    /// pending for the next evaluation, and `Report::halted` says so. What
+    /// keeps the rest of the document from running meanwhile is the
+    /// client's claim of it (`Ctx::claim`), which a rerun without the
+    /// error gives back.
     pub fn halt(&self) {
-        self.eng.halted.store(true, std::sync::atomic::Ordering::Release);
+        // (the request is this run's: its commit's serial; a rerun that does
+        // not ask voids it)
+        let serial = self.me.serial.load(std::sync::atomic::Ordering::Acquire) + 1;
+        self.eng.halt_asked.lock().push((self.me.id, serial));
     }
 
     /// Forgets my reads of `f` in this run: the commit records none.

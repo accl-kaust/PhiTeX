@@ -236,6 +236,7 @@ pub(crate) fn run_node(
             r.input = crate::input::Input::new();
             r.muts += 1;
             r.claim_rest = true;
+            r.fatal_hit = true;
             // (for the output: pdfTeX writes no PDF file after one)
             // (`pdf`: pdfTeX says no PDF file was produced, §1335, pdfTeX
             // `close_files_and_terminate`)

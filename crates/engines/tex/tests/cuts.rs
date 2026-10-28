@@ -6,6 +6,8 @@
 
 mod common;
 
+use std::fmt::Write as _;
+
 use phitex_tex::Options;
 
 fn doc(n: usize, k: usize, mid: &str) -> String {
@@ -16,7 +18,7 @@ fn doc(n: usize, k: usize, mid: &str) -> String {
             s.push_str("\n\n");
         }
         for _ in 0..3 {
-            s.push_str(&format!("Paragraph {i} of the document, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches. "));
+            let _ = write!(s, "Paragraph {i} of the document, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches. ");
         }
         s.push_str("\n\n");
     }
@@ -28,7 +30,7 @@ fn doc(n: usize, k: usize, mid: &str) -> String {
 fn group_mid() -> String {
     let mut s = String::from("\\begingroup\\count5=1 ");
     for j in 0..4 {
-        s.push_str(&format!("\\advance\\count5 by 1 Group paragraph {j}, with a counter stepped before it, long enough to make a few lines when set in the plain format's ten point roman over the text width, and then some more words to be sure.\n\n"));
+        let _ = write!(s, "\\advance\\count5 by 1 Group paragraph {j}, with a counter stepped before it, long enough to make a few lines when set in the plain format's ten point roman over the text width, and then some more words to be sure.\n\n");
     }
     s.push_str("\\endgroup");
     s

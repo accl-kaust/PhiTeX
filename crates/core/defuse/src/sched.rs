@@ -784,6 +784,28 @@ fn run_worker(
         // released, and once they are done, the loop-back values
         // published, their readers whose answer moved run again (a pass)
         if w.ix == 0 {
+            // (a run that asked the job to end: granted at the quiet point
+            // only, when nothing is running and its run still stands with
+            // its reads holding; a run speculating on a guessed state may
+            // hit a fatal condition its settled rerun never hits, and a
+            // committed definition is no settled one while its definer may
+            // run again, so no grant is safe before the line is quiet.
+            // One re-asked meanwhile asks again if its rerun still ends so)
+            let asked: Vec<(NodeId, u32)> = std::mem::take(&mut *eng.halt_asked.lock());
+            if !asked.is_empty() {
+                let mut memo = crate::read::FoldMemo::new();
+                let real = asked.iter().any(|&(n, serial)| {
+                    let node = eng.node(n);
+                    node.state() == State::Clean
+                        && node.serial.load(Ordering::Acquire) == serial
+                        && node.record().is_some_and(|r| r.reads.iter().all(|rd| crate::read::holds(eng, node, rd, &mut memo)))
+                });
+                if real {
+                    eng.halted.store(true, Ordering::Release);
+                    pool.halt();
+                    break;
+                }
+            }
             // (the wakes held to this quiet point: each reader's reads of
             // the field checked again now, re-asked where one moved; a
             // pass of the page layer's feedback into the text)
@@ -1325,10 +1347,6 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             w.last_done.store(done, Ordering::Relaxed);
             if end_run(eng, pool, w, node, State::Clean) {
                 eng.note_settled(node, out, version);
-            }
-            // (the run asked the job to end: once it has committed)
-            if eng.halted.load(Ordering::Acquire) {
-                pool.halt();
             }
             Ok(())
         }

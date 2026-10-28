@@ -6,6 +6,8 @@
 
 mod common;
 
+use std::fmt::Write as _;
+
 use phitex_tex::Options;
 
 /// `n` paragraphs after a `\read16` in nonstop mode, which is fatal:
@@ -13,11 +15,11 @@ use phitex_tex::Options;
 fn doc(n: usize) -> String {
     let mut s = String::new();
     for i in 0..2 {
-        s.push_str(&format!("Paragraph {i} before the error, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches.\n\n"));
+        let _ = write!(s, "Paragraph {i} before the error, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches.\n\n");
     }
     s.push_str("\\batchmode\\read16 to\\x\n\n");
     for i in 0..n {
-        s.push_str(&format!("Paragraph {i} after the error, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, which pdfTeX never reads.\n\n"));
+        let _ = write!(s, "Paragraph {i} after the error, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, which pdfTeX never reads.\n\n");
     }
     s.push_str("\\bye\n");
     s
@@ -53,4 +55,31 @@ fn a_fatal_error_ends_the_job_on_eight_threads() {
     let (exec, live) = (common::runs_of(&b, "exec"), b.nodes_by_op("exec") as u64);
     assert!(exec < live / 2, "at most the pieces that had started: {exec} runs of {live} pieces, {:?}", b.stats.runs_by_op);
     assert_eq!(common::runs_of(&b, "finish"), 0, "no page is finished after a fatal error: {:?}", b.stats.runs_by_op);
+}
+
+/// The paragraphs after the error in an included file, placed by the
+/// piece that inputs them, not pushed: the claim after a fatal error
+/// takes them too (the paper's case: 11000 pieces of included files).
+#[test]
+fn a_fatal_error_ends_the_job_before_an_included_file() {
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("fatal-input-{threads}"));
+        let mut body = String::new();
+        for i in 0..300 {
+            let _ = write!(body, "Paragraph {i} of the included file, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, which pdfTeX never reads.\n\n");
+        }
+        std::fs::write(dir.join("body.tex"), body).unwrap();
+        let src = "Paragraph before the error, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches.\n\n\\batchmode\\read16 to\\x\n\n\\input body\n\n\\bye\n";
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let b = common::build(opts, Some(&common::plain()), src);
+        assert!(b.fatal(), "-j{threads}: {:?}", b.stats.runs_by_op);
+        // (whether the file's pieces were staged before the error or the
+        // file was never read: nothing after the error runs)
+        let exec = common::runs_of(&b, "exec");
+        assert!(exec <= 6, "-j{threads}: the pieces before the error and the error's, no more: {exec} exec runs, {:?}", b.stats.runs_by_op);
+        assert_eq!(common::runs_of(&b, "finish"), 0, "-j{threads}: {:?}", b.stats.runs_by_op);
+    }
 }

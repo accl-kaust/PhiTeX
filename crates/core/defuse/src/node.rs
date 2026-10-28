@@ -126,6 +126,10 @@ pub(crate) struct Node {
     /// commit checks its placements where it stands now, though its run
     /// published nothing new (`Ctx::unchanged`).
     pub(crate) moved: AtomicBool,
+    /// Its claim takes every node after it in its unit, not its siblings
+    /// alone (`Ctx::claim_rest`: the job is over at it); cleared by an
+    /// ordinary claim.
+    pub(crate) claim_all: AtomicBool,
 }
 
 /// An effect as 32 bits: closes, opens, `before`, and whether pending.
@@ -163,6 +167,7 @@ impl Node {
             has_brackets: AtomicBool::new(false),
             anchored: Mx::new(Vec::new()),
             moved: AtomicBool::new(false),
+            claim_all: AtomicBool::new(false),
             id,
             unit,
             op: AtomicU32::new(op.0),
