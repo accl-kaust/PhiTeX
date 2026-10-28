@@ -291,7 +291,11 @@ fn xelatex_finder(dirs: Vec<std::path::PathBuf>) -> Finder {
 /// LaTeX documents under `xelatex` (the format from `xelatex.ini`, the
 /// first run, no `.aux`): `oracle/fixtures/xetex/docs` and
 /// `oracle/fixtures/latex/docs`, against `oracle/docs/NAME.xdv`. Heavy:
-/// ignored by default, `PHITEX_GATE=NAME` for one.
+/// ignored by default, `PHITEX_GATE=NAME` for one. With `TEXMFHOME` set
+/// (a tree holding TeX Live's xecjk, ctex, fandol, zhnumber, cjk,
+/// cjkpunct and l3packages, which TeX Live's scheme on accl lacks, and
+/// the font index made with its fonts: `scripts/xetex/cjk.sh`) also
+/// `oracle/fixtures/xetex/cjk`.
 #[test]
 #[ignore = "the xelatex format: run with --ignored"]
 fn xelatex_docs() {
@@ -300,7 +304,11 @@ fn xelatex_docs() {
     let only = std::env::var("PHITEX_GATE").ok();
     let mut failed = Vec::new();
     let mut names: Vec<(String, std::path::PathBuf)> = Vec::new();
-    for d in [x.join("docs"), fx.join("latex/docs")] {
+    let mut dirs = vec![x.join("docs"), fx.join("latex/docs")];
+    if std::env::var_os("TEXMFHOME").is_some() {
+        dirs.push(x.join("cjk"));
+    }
+    for d in dirs {
         for e in std::fs::read_dir(&d).expect("the documents").flatten() {
             let f = e.file_name().to_string_lossy().into_owned();
             if let Some(n) = f.strip_suffix(".tex")

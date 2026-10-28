@@ -703,9 +703,15 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             last_match(r, n)?
         }
         cv::STRCMP => {
-            let a = bytes(&ext_string(r)?);
-            let b = bytes(&ext_string(r)?);
-            match a.cmp(&b) {
+            let (sa, sb) = (ext_string(r)?, ext_string(r)?);
+            // (XeTeX's strings are UTF-16: compared by code unit, every
+            // character past 255 its own)
+            let ord = if r.xe {
+                sa.encode_utf16().cmp(sb.encode_utf16())
+            } else {
+                bytes(&sa).cmp(&bytes(&sb))
+            };
+            match ord {
                 std::cmp::Ordering::Less => "-1",
                 std::cmp::Ordering::Equal => "0",
                 std::cmp::Ordering::Greater => "1",

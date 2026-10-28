@@ -382,7 +382,9 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
                 if r.cur.is_cs() {
                     break Tok::cs(&name);
                 }
-                crate::print::push_code(&mut name, r.cur.tok.chr() & 0xFF);
+                // (XeTeX's names take every Unicode character)
+                let c = r.cur.tok.chr();
+                crate::print::push_code(&mut name, if r.xe { c } else { c & 0xFF });
             };
             crate::expand::NAME.with(|c| c.set(name));
             if r.cur.cmd != cmd::END_CS_NAME {

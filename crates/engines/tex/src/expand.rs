@@ -251,7 +251,9 @@ impl Run<'_, '_> {
             if self.cur.is_cs() {
                 return Ok(());
             }
-            print::push_code(name, self.cur.tok.chr() & 0xFF);
+            // (XeTeX's names take every Unicode character)
+            let c = self.cur.tok.chr();
+            print::push_code(name, if self.xe { c } else { c & 0xFF });
         }
     }
 
@@ -464,7 +466,18 @@ impl Run<'_, '_> {
                 if s != Some(r) {
                     let Some(s0) = s else {
                         // §398: "Use of \x doesn't match its definition"
-                        self.lift(|r| r.log("error", "doesn't match its definition"));
+                        let mut msg = String::from("Use of ");
+                        crate::print::sprint_cs(&mut msg, name, i64::from(b'\\'));
+                        msg.push_str(" doesn't match its definition");
+                        if crate::exec::obs_flag!("PHITEX_MATCH_TRACE") {
+                            let show = |t: &Tok| match t.as_cs() {
+                                Some(c) => format!("cs {:?}", c.name()),
+                                None => format!("chr {:#x} cat {}", t.chr(), t.raw() >> 21),
+                            };
+                            let want: Vec<String> = p.iter().take(8).map(show).collect();
+                            eprintln!("match-trace: {msg}: got {} at {r}, params {want:?}", show(&tok));
+                        }
+                        self.lift(|r| r.log("error", &msg));
                         return false;
                     };
                     let mut t = s0;
@@ -647,6 +660,8 @@ impl Run<'_, '_> {
     fn x_char_or_active(&mut self) -> R<(u8, i32)> {
         self.get_x_token();
         self.ck()?;
+        // (XeTeX: every Unicode character, `too_big_usv` past them)
+        let big = if self.xe { 0x10_FFFF } else { 255 };
         let (mut c, mut h) = (self.cur.cmd, self.cur.chr);
         if c == cmd::RELAX && h == crate::val::NO_EXPAND_FLAG {
             if self.cur.tok.cat() == Some(13) && !self.cur.tok.is_cs() {
@@ -654,11 +669,17 @@ impl Run<'_, '_> {
                 h = i32::try_from(self.cur.tok.chr()).unwrap_or(0);
             } else {
                 c = cmd::ACTIVE_CHAR;
-                h = 256;
+                h = big + 1;
             }
         }
-        if c > cmd::ACTIVE_CHAR || h > 255 {
-            return Ok((cmd::RELAX, 256));
+        // (the codes past 255 of `\relax`, `\par`, `\span`, `\cr` and
+        // `\crcr`: XeTeX's `too_big_usv` and kin, never a character)
+        let special = self.xe
+            && self.cur.tok.is_cs()
+            && matches!(c, cmd::RELAX | cmd::TAB_MARK | cmd::CAR_RET | cmd::PAR_END)
+            && (256..=258).contains(&h);
+        if c > cmd::ACTIVE_CHAR || h > big || special {
+            return Ok((cmd::RELAX, big + 1));
         }
         Ok((c, h))
     }
