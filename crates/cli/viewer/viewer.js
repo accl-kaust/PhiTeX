@@ -4205,6 +4205,47 @@ click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
   }
 };
 
+// viewer/src/current.ts
+var Current = class {
+  load;
+  drop;
+  /** The versions announced, and the one the value is of. */
+  version = 0;
+  valueVersion = -1;
+  value = null;
+  loading = null;
+  /** `load` makes the value as it is now (null: none); `drop` frees one replaced. */
+  constructor(load, drop = () => {
+  }) {
+    this.load = load;
+    this.drop = drop;
+  }
+  /** A new version is out (a `settled`): the next `get` loads it. */
+  moved() {
+    this.version++;
+  }
+  /** The value of the latest version, loaded until the one it is of is the latest (null: none). */
+  async get() {
+    for (; ; ) {
+      if (this.value !== null && this.valueVersion === this.version) return this.value;
+      if (!this.loading) {
+        const v = this.version;
+        this.loading = this.load().then((x2) => {
+          if (x2 !== null) {
+            if (this.value !== null && this.value !== x2) this.drop(this.value);
+            this.value = x2;
+            this.valueVersion = v;
+          }
+          return x2;
+        }).finally(() => this.loading = null);
+      }
+      const x = await this.loading;
+      if (x === null) return null;
+      if (this.valueVersion === this.version) return this.value;
+    }
+  }
+};
+
 // crates/cli/viewer/cli.ts
 var Socket = class {
   ws;
@@ -4273,38 +4314,29 @@ var Socket = class {
 var Pages = class {
   sock;
   mupdf = null;
-  doc = null;
-  /** The builds settled, and the one the open PDF is of. */
-  version = 0;
-  docVersion = -1;
-  loading = null;
+  /** doc.pdf as the last build settled it (loaded again until its version is the latest). */
+  doc = new Current(() => this.load(), (d) => d.destroy());
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
   change = null;
   constructor(sock2) {
     this.sock = sock2;
     sock2.onEvent((e) => {
       if (e.event !== "settled") return;
-      this.version++;
+      this.doc.moved();
       const since = e.since_ms;
       this.change = typeof since === "number" ? { since, at: performance.now() } : null;
     });
   }
-  async open() {
-    if (this.doc && this.docVersion === this.version) return this.doc;
-    if (this.loading) return this.loading;
-    const v = this.version;
-    this.loading = (async () => {
-      this.mupdf ??= import(new URL("mupdf/mupdf.js", location.href).href);
-      const m = await this.mupdf;
-      const r = await fetch(new URL("doc.pdf", location.href), { cache: "no-store" });
-      if (!r.ok) return null;
-      const pdf = new Uint8Array(await r.arrayBuffer());
-      this.doc?.destroy();
-      this.doc = new MupdfDoc(m, pdf);
-      this.docVersion = v;
-      return this.doc;
-    })().finally(() => this.loading = null);
-    return this.loading;
+  open() {
+    return this.doc.get();
+  }
+  /** doc.pdf as it is now, opened. */
+  async load() {
+    this.mupdf ??= import(new URL("mupdf/mupdf.js", location.href).href);
+    const m = await this.mupdf;
+    const r = await fetch(new URL("doc.pdf", location.href), { cache: "no-store" });
+    if (!r.ok) return null;
+    return new MupdfDoc(m, new Uint8Array(await r.arrayBuffer()));
   }
   async request(op) {
     const o = op;

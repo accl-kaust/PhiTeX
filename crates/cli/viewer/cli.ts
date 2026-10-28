@@ -21,6 +21,7 @@ import { MupdfDoc, toCanvas, type Hit } from "../../../viewer/src/mupdf.ts";
 import { DiffControls, LATEXDIFF_LOOK, type DiffRunner } from "../../../viewer/src/compare.ts";
 import type { DiffLook } from "../../../viewer/src/panel.ts";
 import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.ts";
+import { Current } from "../../../viewer/src/current.ts";
 
 
 /** The watch's core, over a WebSocket: requests answered in order, events pushed; joined again when it drops. */
@@ -102,11 +103,8 @@ class Socket implements CoreTransport {
 class Pages implements CoreTransport {
   private sock: Socket;
   private mupdf: Promise<any> | null = null;
-  private doc: MupdfDoc | null = null;
-  /** The builds settled, and the one the open PDF is of. */
-  private version = 0;
-  private docVersion = -1;
-  private loading: Promise<MupdfDoc | null> | null = null;
+  /** doc.pdf as the last build settled it (loaded again until its version is the latest). */
+  private doc = new Current<MupdfDoc>(() => this.load(), (d) => d.destroy());
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
   private change: { since: number; at: number } | null = null;
 
@@ -114,29 +112,24 @@ class Pages implements CoreTransport {
     this.sock = sock;
     sock.onEvent((e) => {
       if (e.event !== "settled") return;
-      this.version++;
+      this.doc.moved();
       const since = (e as { since_ms?: number | null }).since_ms;
       this.change = typeof since === "number" ? { since, at: performance.now() } : null;
     });
   }
 
-  private async open(): Promise<MupdfDoc | null> {
-    if (this.doc && this.docVersion === this.version) return this.doc;
-    if (this.loading) return this.loading;
-    const v = this.version;
-    this.loading = (async () => {
-      // (MuPDF's module, from the watch, its .wasm beside it)
-      this.mupdf ??= import(new URL("mupdf/mupdf.js", location.href).href);
-      const m = await this.mupdf;
-      const r = await fetch(new URL("doc.pdf", location.href), { cache: "no-store" });
-      if (!r.ok) return null;
-      const pdf = new Uint8Array(await r.arrayBuffer());
-      this.doc?.destroy();
-      this.doc = new MupdfDoc(m, pdf);
-      this.docVersion = v;
-      return this.doc;
-    })().finally(() => (this.loading = null));
-    return this.loading;
+  private open(): Promise<MupdfDoc | null> {
+    return this.doc.get();
+  }
+
+  /** doc.pdf as it is now, opened. */
+  private async load(): Promise<MupdfDoc | null> {
+    // (MuPDF's module, from the watch, its .wasm beside it)
+    this.mupdf ??= import(new URL("mupdf/mupdf.js", location.href).href);
+    const m = await this.mupdf;
+    const r = await fetch(new URL("doc.pdf", location.href), { cache: "no-store" });
+    if (!r.ok) return null;
+    return new MupdfDoc(m, new Uint8Array(await r.arrayBuffer()));
   }
 
   async request(op: object): Promise<CoreRes> {
