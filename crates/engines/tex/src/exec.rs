@@ -121,6 +121,18 @@ pub(crate) fn thread<T: Send + 'static>(
         .expect("a thread")
 }
 
+/// `f` beside the evaluation on a thread of its own that nothing joins;
+/// on wasm32 in place: a thread there is a host worker whose exit tears
+/// down its stack and thread-locals (wasi-libc), short ones by the
+/// thousand are not worth that risk for a drop or a warm-up.
+pub(crate) fn detach(f: impl FnOnce() + Send + 'static) {
+    if cfg!(target_family = "wasm") {
+        f();
+    } else {
+        drop(thread(f));
+    }
+}
+
 /// A clock for the executor's counters: nanoseconds from some fixed
 /// point, `None` where the target has none (wasm32: the host's clock is
 /// not reachable from here).

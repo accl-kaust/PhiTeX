@@ -1837,7 +1837,7 @@ pub(crate) fn warm_g2u(v: &Values, t: ValueId) {
         return;
     }
     let pairs = g2u_pairs(v, t);
-    crate::exec::thread(move || {
+    crate::exec::detach(move || {
         cell.get_or_init(|| g2u_state(&pairs));
     });
 }
