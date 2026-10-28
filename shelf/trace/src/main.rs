@@ -10,7 +10,7 @@
 //!             [--font-index FILE] NAME...      # NAME <TAB> file,file,...
 //! ```
 //!
-//! A line per name as soon as it is done (tracer.py runs batches with a
+//! A line per name as soon as it is done (build.py runs batches with a
 //! timeout: a job that never ends costs its batch, not the trace).
 //!
 //! What a job reads is what the build asks its finders for and gets: the
@@ -24,7 +24,8 @@
 //! the build's own query, not a log or a recorder file after the fact.
 //!
 //! The format (the prelude, `\input pdflatex.ini` or `xelatex.ini`) is
-//! TeX Live's, through kpathsea (a TeX Live on PATH), and its reads are
+//! made of Shelf's files (DIR), as a client makes it, with TeX Live's
+//! (kpathsea, a TeX Live on PATH) for what Shelf has not; its reads are
 //! not printed: every document has them (the old trace's `.fmt`). Its
 //! state is made once and kept in `--prelude FILE` when given.
 //! `SHELF_TRACE_LOGS=DIR`: the TeX log of each job that made no page,
@@ -44,7 +45,7 @@ use phitex_kpse::{Format, Kpse};
 use phitex_tex::{Build, FontIndex, FontSource, Finder, KpseFormat, Options, Severity, XeTeX};
 
 /// The output's version: bumped when what a line means changes.
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
 
 /// A body that uses the shapes a paper does: the fonts a package brings
 /// are read then, so they arrive with it (the old trace-deps' body).
@@ -90,9 +91,13 @@ fn format_of(name: &str) -> Format {
     }
 }
 
-/// The format's finder: TeX Live's, without the current directory (as
-/// fmtutil builds it), nothing recorded.
-fn prelude_finder(progname: &str, engine: &str) -> Finder {
+/// The format's finder: Shelf's files (the flat directory), as a client
+/// makes the format, and TeX Live's through kpathsea, without the current
+/// directory (as fmtutil builds it), for what Shelf has not (language.dat,
+/// which tlmgr writes); nothing recorded. (A format of another TeX Live's
+/// files would not match Shelf's: LaTeX refuses a tree whose expl3 is
+/// newer than its format's.)
+fn prelude_finder(progname: &str, engine: &str, flat: PathBuf) -> Finder {
     let mut k = kpse(progname, engine);
     for f in [
         Format::Tex,
@@ -108,6 +113,11 @@ fn prelude_finder(progname: &str, engine: &str) -> Finder {
     }
     let k = Mutex::new(k);
     Arc::new(move |name: &str| {
+        if let Some(n) = flat_name(name)
+            && let Ok(b) = std::fs::read(flat.join(n))
+        {
+            return Some((flat.join(n).to_string_lossy().into_owned(), b));
+        }
         let p = lock(&k).find_file(name.as_bytes(), format_of(name), false)?;
         let p = String::from_utf8(p).ok()?;
         let b = std::fs::read(&p).ok()?;
@@ -234,7 +244,7 @@ fn main() {
     if xe && index.is_none() {
         eprintln!("shelf-trace: xetex without --font-index: no font is found by name");
     }
-    let pfinder = prelude_finder(progname, kengine);
+    let pfinder = prelude_finder(progname, kengine, flat.clone());
     let mut prelude_bytes = prelude_file.as_ref().and_then(|p| std::fs::read(p).ok());
     let mut out = std::io::stdout().lock();
     for name in &names {

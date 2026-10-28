@@ -5,11 +5,12 @@
 #   rsync -a --delete --exclude-from=scripts/accl-exclude ./ acclhead1:code/flinner/shelf-accl/
 #   ssh acclhead1 'export PATH=/opt/slurm/current/bin:$PATH; cd code/flinner/shelf-runs &&
 #     sbatch -p build --qos=build4 -c 48 --mem=128G -t 04:00:00 \
-#       ~/code/flinner/shelf-accl/scripts/accl-trace.sbatch ~/code/flinner/shelf-accl COMMIT [check|full]'
+#       ~/code/flinner/shelf-accl/scripts/accl-trace.sbatch ~/code/flinner/shelf-accl COMMIT [check [NAMES]|full]'
 #
 # COMMIT: trace/phitex's (`git -C trace/phitex rev-parse HEAD`), cloned
-# from ~/code/flinner/phitex.git (or fetched from SRC/phitex.bundle). `check` traces CHECK_NAMES only
-# (TRACE_NAMES: cache/trace-<engine>-check.json) and builds nothing;
+# from ~/code/flinner/phitex.git (or fetched from SRC/phitex.bundle).
+# `check` traces NAMES only (a.sty,b.cls; default: a dozen common ones;
+# TRACE_NAMES: cache/trace-<engine>-check.json) and builds nothing;
 # `full` traces every name and builds (build/<label>, MANIFEST.tsv).
 # TLPDB=path (sbatch --export=ALL,TLPDB=...): build from that package
 # database, not tlnet's current one.
@@ -86,7 +87,7 @@ cp "$w/fontindex.pxfi" "$w/results/"
 echo "tracer and font index $(date +%T)"
 
 # (3) the traces and the build
-names=${CHECK_NAMES:-amsmath.sty,hyperref.sty,tikz.sty,geometry.sty,graphicx.sty,biblatex.sty,beamer.cls,fontspec.sty,unicode-math.sty,polyglossia.sty,xeCJK.sty,ctex.sty}
+names=${4:-${CHECK_NAMES:-amsmath.sty,hyperref.sty,tikz.sty,geometry.sty,graphicx.sty,biblatex.sty,beamer.cls,fontspec.sty,unicode-math.sty,polyglossia.sty,xeCJK.sty,ctex.sty}}
 status=0
 box env SHELF_TRACE_LOGS="$w/results/logs" TLPDB=cache/texlive.tlpdb.xz TRACE=trace/target/release/shelf-trace TRACE_FONT_INDEX="$w/fontindex.pxfi" \
   TRACE_JOBS="$jobs" PACK_JOBS="$jobs" $([ "$mode" = check ] && echo TRACE_NAMES="$names") \
