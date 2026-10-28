@@ -2766,8 +2766,8 @@ impl Graph {
         let mut ids: Vec<NodeId> = Vec::new();
         match e {
             E::RunawayNode { node, .. } | E::OpPanicked { node, .. } => ids.push(*node),
-            E::Stuck { node: Some(n), .. } => ids.push(*n),
-            E::TotalRuns { .. } | E::Deadline | E::Stuck { node: None, .. } => {}
+            E::Stuck { node: Some(n), .. } | E::SeqCollision { node: Some(n), .. } => ids.push(*n),
+            E::TotalRuns { .. } | E::Deadline | E::Stuck { node: None, .. } | E::SeqCollision { node: None, .. } => {}
         }
         // (the field and the nodes' texts first: a harness shows the
         // head of the message; the error's full form last)

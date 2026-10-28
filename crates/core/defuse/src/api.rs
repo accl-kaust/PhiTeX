@@ -628,6 +628,11 @@ pub enum EvalError {
     /// said so (`Ctx::stuck`, its node and why), or the workers idle with
     /// work outstanding (no node).
     Stuck { node: Option<NodeId>, op: &'static str, why: String },
+    /// Two different sequences met in one id (`Values::seq_collision`):
+    /// the run that saw it (its node), or none where a client made it
+    /// between runs. The build stops rather than read the one for the
+    /// other.
+    SeqCollision { node: Option<NodeId>, op: &'static str, id: u64 },
 }
 
 impl std::fmt::Display for EvalError {
@@ -639,6 +644,10 @@ impl std::fmt::Display for EvalError {
             EvalError::Deadline => write!(f, "deadline"),
             EvalError::Stuck { node: Some(n), op, why } => write!(f, "stuck: node {} ({op}): {why}", n.0),
             EvalError::Stuck { node: None, why, .. } => write!(f, "stuck: {why}"),
+            EvalError::SeqCollision { node: Some(n), op, id } => {
+                write!(f, "two sequences met in one id {id:#x}: node {} ({op})", n.0)
+            }
+            EvalError::SeqCollision { node: None, id, .. } => write!(f, "two sequences met in one id {id:#x}"),
         }
     }
 }

@@ -109,11 +109,15 @@ pub enum Value {
 }
 
 /// A rope node: `left` then `right`, `len` elements; a unit node holds its
-/// one element in `right` with `left` NIL. `pow` is B^len mod P.
+/// one element in `right` with `left` NIL. `pow` is B^len mod P. `h2` is
+/// the sequence's second hash (its elements by [`elem_hash2`], the same
+/// base): the id is the first, a 61-bit hash two sequences can meet in;
+/// one met under another's id is told by this ([`Values::seq_collision`]).
 #[derive(Clone, Copy)]
 struct Rope {
     len: u64,
     pow: u64,
+    h2: u64,
     left: ValueId,
     right: ValueId,
     unit: bool,
@@ -246,6 +250,13 @@ pub struct Values {
     seqs: Box<[Shard<Rope>]>,
     /// Distinct per store, for caches keyed by ids (`instance`).
     instance: u64,
+    /// The first id two sequences met in, with [`COLLIDED`] set (0: none):
+    /// the id names the first one made, and a reader of it would take it
+    /// for the other ([`Values::seq_collision`]).
+    collided: AtomicU64,
+    /// (test) Every unit sequence made under one id: two sequences meet.
+    #[cfg(test)]
+    one_id: std::sync::atomic::AtomicBool,
     /// Its plain values' first payload (`PLAIN_SPAN` times its instance):
     /// the stores of one process give their plain values distinct ids, so
     /// a cache of the process keyed by ids (a font's file, a map's text)
@@ -262,8 +273,17 @@ impl Default for Values {
     }
 }
 
+/// `a * b mod P` for P = 2^61 - 1 without a division: 2^61 is 1 mod P,
+/// so the product's bits past 61 add to its low 61 (the sequence hash's
+/// every node takes three: its id, its power, its second hash).
 fn mulmod(a: u64, b: u64) -> u64 {
-    u64::try_from((u128::from(a) * u128::from(b)) % u128::from(P)).unwrap_or(0)
+    let x = u128::from(a) * u128::from(b);
+    let lo = u64::try_from(x & u128::from(P)).unwrap_or(0);
+    let hi = u64::try_from(x >> 61).unwrap_or(0);
+    // (hi < 2^61 for a, b < 2^61; the sum's carry folded the same way)
+    let s = lo + hi;
+    let r = (s & P) + (s >> 61);
+    if r >= P { r - P } else { r }
 }
 
 fn addmod(a: u64, b: u64) -> u64 {
@@ -276,6 +296,15 @@ fn elem_hash(x: ValueId) -> u64 {
     let h = hash_words(0x9e37_79b9_7f4a_7c15, &[x.0]) % P;
     if h == 0 { 1 } else { h }
 }
+
+/// An element's second hash ([`Rope::h2`]): another seed, never zero.
+fn elem_hash2(x: ValueId) -> u64 {
+    let h = hash_words(0x2545_f491_4f6c_dd1d, &[x.0]) % P;
+    if h == 0 { 1 } else { h }
+}
+
+/// Set in [`Values::collided`] beside the id: an id of 0 is one too.
+const COLLIDED: u64 = 1 << 63;
 
 /// Weight-balanced with weights len + 1 and ratio 3.
 fn balanced(x: u64, y: u64) -> bool {
@@ -313,6 +342,9 @@ impl Values {
             gone_ropes: Lock::new(FxHashSet::default()),
             instance,
             base: (instance % (PAYLOAD / PLAIN_SPAN)) * PLAIN_SPAN,
+            collided: AtomicU64::new(0),
+            #[cfg(test)]
+            one_id: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -411,7 +443,7 @@ impl Values {
     }
 
     /// A sequence node's bytes, as [`Values::payload_bytes`] counts them.
-    const ROPE_BYTES: u64 = 64;
+    const ROPE_BYTES: u64 = 72;
 
     /// Keeps [`Values::payload_bytes`] from now (`on`), counted afresh
     /// from what the store holds, or stops keeping it (then 0): a store
@@ -825,23 +857,52 @@ impl Values {
         r
     }
 
+    /// Node `r` under id `payload`, if none is; one there of another
+    /// sequence (its length or second hash not `r`'s) is a collision, kept
+    /// for [`Values::seq_collision`]: the id goes on naming the first.
     fn insert_rope(&self, payload: u64, r: Rope) {
-        if let std::collections::hash_map::Entry::Vacant(e) = self.seqs[shard_of(payload)].0.write().entry(payload) {
-            e.insert(r);
-            if self.counting.load(Ordering::Relaxed) {
-                self.bytes[shard_of(payload) % BYTE_SHARDS].0.fetch_add(Self::ROPE_BYTES, Ordering::Relaxed);
+        match self.seqs[shard_of(payload)].0.write().entry(payload) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(r);
+                if self.counting.load(Ordering::Relaxed) {
+                    self.bytes[shard_of(payload) % BYTE_SHARDS].0.fetch_add(Self::ROPE_BYTES, Ordering::Relaxed);
+                }
+            }
+            std::collections::hash_map::Entry::Occupied(e) => {
+                let o = e.get();
+                if o.len != r.len || o.h2 != r.h2 {
+                    let _ = self.collided.compare_exchange(0, payload | COLLIDED, Ordering::SeqCst, Ordering::SeqCst);
+                }
             }
         }
+    }
+
+    /// The id two different sequences met in, if any has since the store
+    /// began: the engine stops an evaluation on it
+    /// (`EvalError::SeqCollision`), as a reader of the id may have taken
+    /// the one for the other.
+    pub fn seq_collision(&self) -> Option<u64> {
+        let c = self.collided.load(Ordering::Relaxed);
+        (c != 0).then_some(c & !COLLIDED)
+    }
+
+    /// (test) Makes every unit sequence from now under one id.
+    #[cfg(test)]
+    pub(crate) fn force_one_seq_id(&self) {
+        self.one_id.store(true, Ordering::Relaxed);
     }
 
     /// The one-element sequence.
     pub fn seq_unit(&self, x: ValueId) -> ValueId {
         let h = elem_hash(x);
+        #[cfg(test)]
+        let h = if self.one_id.load(Ordering::Relaxed) { 1 } else { h };
         self.insert_rope(
             h,
             Rope {
                 len: 1,
                 pow: B,
+                h2: elem_hash2(x),
                 left: ValueId::NIL,
                 right: x,
                 unit: true,
@@ -872,6 +933,7 @@ impl Values {
         self.rope(s).unwrap_or(Rope {
             len: 1,
             pow: B,
+            h2: elem_hash2(s),
             left: ValueId::NIL,
             right: s,
             unit: true,
@@ -886,6 +948,7 @@ impl Values {
             Rope {
                 len: lr.len + rr.len,
                 pow: mulmod(lr.pow, rr.pow),
+                h2: addmod(mulmod(lr.h2, rr.pow), rr.h2),
                 left: l,
                 right: r,
                 unit: false,
@@ -1157,4 +1220,131 @@ pub fn hash_bytes(seed: u64, b: &[u8]) -> u64 {
         h = fp_step(h, u64::from_le_bytes(x));
     }
     fp_finish(h ^ (b.len() as u64))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::{Ctx, Engine, EvalError, Operation, Stop, ValueId};
+
+    /// `[a, b]`: the sequences of a and of b, every unit sequence under one
+    /// id where the store was told so.
+    struct Units;
+
+    impl Operation for Units {
+        fn name(&self) -> &'static str {
+            "units"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let v = cx.values();
+            let (a, b) = (v.seq_unit(cx.args()[0]), v.seq_unit(cx.args()[1]));
+            Ok(v.seq_concat(a, b))
+        }
+    }
+
+    /// The division-free product is the remainder's, over the inputs'
+    /// edges and a spread of others.
+    #[test]
+    fn mulmod_is_the_remainder() {
+        let p = u128::from(super::P);
+        let mut xs = vec![0, 1, 2, super::P - 1, super::P, super::P - 2, 1 << 60, (1 << 61) - 1, super::B];
+        let mut h = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..2000 {
+            h = h.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            xs.push(h >> 3);
+        }
+        for &a in &xs {
+            for &b in xs.iter().take(64) {
+                let want = u64::try_from((u128::from(a) * u128::from(b)) % p).unwrap();
+                assert_eq!(super::mulmod(a, b), want, "{a} * {b}");
+            }
+        }
+    }
+
+    /// One content through different concatenations (left-deep,
+    /// right-deep, halves, units and NIL in between, nested sequences as
+    /// elements) is one id and one second hash: the second hash composes
+    /// as the first, and no node of it is a collision.
+    #[test]
+    fn a_sequence_is_one_id_and_second_hash_whatever_its_tree() {
+        let v = super::Values::new();
+        let xs: Vec<ValueId> = (0..200).map(|i| v.int(i * 7 - 300)).collect();
+        let inner = xs[..5].iter().fold(ValueId::NIL, |s, &x| v.seq_concat(s, x));
+        let mut xs = xs;
+        xs.push(inner);
+        // (an element by its unit: a sequence as an element is not spliced)
+        let left = xs.iter().fold(ValueId::NIL, |s, &x| v.seq_concat(s, v.seq_unit(x)));
+        let right = xs.iter().rev().fold(ValueId::NIL, |s, &x| v.seq_concat(v.seq_unit(x), s));
+        fn halves(v: &super::Values, xs: &[ValueId]) -> ValueId {
+            match xs.len() {
+                0 => ValueId::NIL,
+                1 => v.seq_concat(ValueId::NIL, v.seq_unit(xs[0])),
+                n => {
+                    let (a, b) = (halves(v, &xs[..n / 2]), halves(v, &xs[n / 2..]));
+                    v.seq_concat(v.seq_concat(a, ValueId::NIL), b)
+                }
+            }
+        }
+        let mid = halves(&v, &xs);
+        let thirds = {
+            let (a, b, c) = (halves(&v, &xs[..70]), halves(&v, &xs[70..71]), halves(&v, &xs[71..]));
+            v.seq_concat(a, v.seq_concat(b, c))
+        };
+        for s in [right, mid, thirds] {
+            assert_eq!(s, left);
+            assert_eq!(v.seq_to_vec(s), xs);
+        }
+        let h2 = |s: ValueId| v.rope(s).map(|r| (r.len, r.h2));
+        assert_eq!(h2(left), Some((201, h2(right).unwrap().1)));
+        assert_eq!(h2(left), h2(mid));
+        assert_eq!(h2(left), h2(thirds));
+        // (the second hash is the elements' polynomial: as made from the
+        // elements one by one)
+        let want = xs.iter().fold(0, |h, &x| super::addmod(super::mulmod(h, super::B), super::elem_hash2(x)));
+        assert_eq!(h2(left).unwrap().1, want);
+        assert_eq!(v.seq_collision(), None);
+    }
+
+    /// Two sequences under one id (forced: every unit sequence's id one)
+    /// stop the evaluation with the run that made them named, at -j1 and
+    /// -j4; a store without the collision builds the same nodes.
+    #[test]
+    fn sequences_that_meet_in_one_id_stop_the_build() {
+        for j in [1, 4] {
+            let e = Engine::new();
+            let v = e.values();
+            let units = e.register(Arc::new(Units));
+            let u = e.new_unit();
+            e.push(u, units, vec![v.int(1), v.int(2)]);
+            assert!(e.evaluate(j).is_ok());
+            assert_eq!(v.seq_collision(), None);
+            let e = Engine::new();
+            let v = e.values();
+            let units = e.register(Arc::new(Units));
+            let u = e.new_unit();
+            let n = e.push(u, units, vec![v.int(1), v.int(2)]);
+            v.force_one_seq_id();
+            match e.evaluate(j) {
+                Err(EvalError::SeqCollision { node: Some(m), op: "units", id: 1 }) => assert_eq!(m, n),
+                r => panic!("-j{j}: {r:?}"),
+            }
+            assert_eq!(v.seq_collision(), Some(1));
+        }
+    }
+
+    /// Two sequences a client makes under one id between runs stop the
+    /// next evaluation, no node named.
+    #[test]
+    fn sequences_a_client_makes_in_one_id_stop_the_build() {
+        let e = Engine::new();
+        let v = e.values();
+        v.force_one_seq_id();
+        let (a, b) = (v.seq_unit(v.int(1)), v.seq_unit(v.int(2)));
+        assert_eq!(a, b, "the forced id");
+        let r = e.evaluate(2);
+        assert!(matches!(r, Err(EvalError::SeqCollision { node: None, id: 1, .. })), "{r:?}");
+        assert!(r.is_err_and(|x| x.to_string() == "two sequences met in one id 0x1"));
+    }
 }

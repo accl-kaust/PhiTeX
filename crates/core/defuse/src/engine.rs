@@ -1218,6 +1218,10 @@ impl Engine {
                 });
             }
         }
+        // (two sequences met in one id outside every run: a client's)
+        if let Some(id) = self.values().seq_collision() {
+            return Err(EvalError::SeqCollision { node: None, op: "", id });
+        }
         let workers = all;
         let swept = self.sweep_readers() as u64 + workers.iter().map(|w| std::mem::take(&mut w.log.lock().swept)).sum::<u64>();
         let mut rep = Report {

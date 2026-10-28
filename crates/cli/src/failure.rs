@@ -157,6 +157,12 @@ pub fn explain(m: &str) -> String {
             "the build stopped: it made no progress ({why}){node}. The last good output is kept. If pdflatex finishes this document, this is a bug in PhiTeX: please report it with the report file named below"
         );
     }
+    // (two token sequences met in one id, `EvalError::SeqCollision`)
+    if e.starts_with("two sequences met in one id ") {
+        return format!(
+            "PhiTeX's engine stopped: two different sequences hashed to one identity{node}, and the build would have read the one for the other. {BUG}"
+        );
+    }
     if let Some(rest) = e.strip_prefix("no fixpoint after ") {
         let rounds = rest.split(' ').next().unwrap_or("?");
         let written: Vec<String> = m
@@ -273,6 +279,14 @@ mod tests {
         assert!(s.contains("last good output is kept"), "{s}");
         let s = explain("evaluation: stuck: every worker idle for 10 s with 3 nodes outstanding: a wake was lost");
         assert!(s.contains("(every worker idle for 10 s with 3 nodes outstanding: a wake was lost)"), "{s}");
+    }
+
+    #[test]
+    fn a_sequence_collision_is_the_engines_fault() {
+        let m = "evaluation: two sequences met in one id 0x1: node 12 (exec)\n  NodeId(12): exec Running, parent None, hint \"\\section\" (cause), args";
+        let s = explain(m);
+        assert!(s.starts_with("PhiTeX's engine stopped: two different sequences hashed to one identity at exec on \"\\section\""), "{s}");
+        assert!(s.ends_with("the report file named below"), "{s}");
     }
 
     #[test]
