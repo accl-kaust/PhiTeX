@@ -210,3 +210,43 @@ fn a_diagnostic_after_a_deletion_before_it_is_where_its_text_now_is() {
         "the edit's diagnostic against a cold build's"
     );
 }
+
+/// An `\input` file that ends inside the text an `\else` skips: TeX's
+/// end of the file (§362) checks it (§336), "Incomplete \iftrue; all text
+/// was ignored after line 1" and a `\fi` inserted there; the document's
+/// `\fi` after the `\input` then matches no `\if` (§510): "Extra \fi",
+/// ignored. Oracle: pdftex (TeX Live 2026, accl job 21719), those two
+/// errors at l.1 and l.2 and the page with "x after text". Before, the
+/// skip went on into the document to its `\fi` and neither was reported.
+#[test]
+fn an_input_file_ending_inside_a_skipped_else() {
+    for threads in [1, 8] {
+        let doc = "\\input skipend\nafter \\fi text\n\\bye\n";
+        let b = build(doc, |o| Options { threads: Some(threads), ..o });
+        let ds = b.diagnostics();
+        show(&ds);
+        let errs: Vec<(&str, usize)> = ds.iter().filter(|d| d.severity == Severity::Error).map(|d| (d.message.as_str(), d.line)).collect();
+        assert_eq!(
+            errs,
+            vec![("Incomplete \\iftrue; all text was ignored after line 1", 1), ("Extra \\fi", 2)],
+            "-j{threads}"
+        );
+    }
+}
+
+/// §510's and §500's "Extra" errors: an `\else` outside every
+/// conditional, an `\or` in an `\iftrue`'s taken text, an `\or` met in an
+/// `\iffalse`'s skipped text. Each ignored, and reported. Oracle: pdftex
+/// (TeX Live 2026, accl job 21793), the three errors in this order and
+/// "a b c g" set.
+#[test]
+fn an_extra_else_or_or_is_reported() {
+    for threads in [1, 8] {
+        let doc = "\\iftrue a\\fi\\else b \\iftrue c\\or d\\fi\n\\iffalse e\\or f\\else g\\fi\n\\bye\n";
+        let b = build(doc, |o| Options { threads: Some(threads), ..o });
+        let ds = b.diagnostics();
+        show(&ds);
+        let errs: Vec<(&str, usize)> = ds.iter().filter(|d| d.severity == Severity::Error).map(|d| (d.message.as_str(), d.line)).collect();
+        assert_eq!(errs, vec![("Extra \\else", 1), ("Extra \\or", 1), ("Extra \\or", 2)], "-j{threads}");
+    }
+}

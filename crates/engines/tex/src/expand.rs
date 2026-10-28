@@ -26,6 +26,8 @@ enum IfxMacro {
 
 /// A conditional begun before this run is in its taken branch (§510).
 const OUTSIDE_LIMIT: u8 = 4;
+/// TeX's `if_limit` outside every conditional (§489's `normal`).
+const NORMAL_LIMIT: u8 = 0;
 
 thread_local! {
     pub(crate) static NAME: std::cell::Cell<String> = std::cell::Cell::default();
@@ -826,12 +828,24 @@ impl Run<'_, '_> {
         if self.conds.is_empty() {
             self.load_cond_stack()?;
         }
-        let limit = self.conds.last().copied().unwrap_or(OUTSIDE_LIMIT);
+        // (outside every conditional TeX's limit is `normal`, and a `\fi`,
+        // `\else` or `\or` there is extra; that is known where the run
+        // read the conditionals the nodes before it left, a document's
+        // node, [`Run::load_cond_stack`]; another takes them as open)
+        let outside = if self.cond_loaded { NORMAL_LIMIT } else { OUTSIDE_LIMIT };
+        let limit = self.conds.last().copied().unwrap_or(outside);
         if self.cur.chr > i32::from(limit) {
             if limit == IF_CODE {
                 self.insert_relax();
+            } else {
+                // §510: "Extra \or", "\else", "\fi", ignored
+                let what = match self.cur.chr {
+                    FI_CODE => "\\fi",
+                    ELSE_CODE => "\\else",
+                    _ => "\\or",
+                };
+                self.log("error", &format!("Extra {what}"))?;
             }
-            // "Extra \or/\else/\fi": ignored
         } else {
             while self.cur.chr != FI_CODE {
                 self.pass_text();
@@ -1009,7 +1023,8 @@ impl Run<'_, '_> {
                 if self.cur.chr != OR_CODE {
                     break;
                 }
-                // "Extra \or": ignored
+                // (§500: an `\or` of this conditional, not an `\ifcase`)
+                self.log("error", "Extra \\or")?;
             } else if self.cur.chr == FI_CODE {
                 self.muts += 1;
                 self.conds.pop();
