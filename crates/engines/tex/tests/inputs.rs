@@ -5,6 +5,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 const PARAGRAPHS: u64 = 6;
@@ -169,7 +170,7 @@ fn a_distribution_file_is_not_cut_into_pieces() {
         std::fs::create_dir_all(dir.join("texmf/tex/generic")).unwrap();
         let mut table = String::new();
         for i in 0..300 {
-            table.push_str(&format!("Line {i} of the table, long enough to look like a paragraph of text when set in the plain format's ten point roman over a text width of six and a half inches.\n\n"));
+            let _ = write!(table, "Line {i} of the table, long enough to look like a paragraph of text when set in the plain format's ten point roman over a text width of six and a half inches.\n\n");
         }
         std::fs::write(dir.join("texmf/tex/generic/table.tex"), &table).unwrap();
         std::fs::write(dir.join("body.tex"), &table).unwrap();

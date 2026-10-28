@@ -307,6 +307,16 @@ pub trait Operation: Send + Sync {
         true
     }
 
+    /// Whether its nodes are pieces of the unit's text, the rest of which
+    /// a run's `Ctx::claim_rest` takes (default no): what a client sets
+    /// beside or after the text to work on it (its marks, writers, links)
+    /// is not text, and a claim of the rest passes over it. A claim that
+    /// took them wrote no output after a fatal error, where TeX writes the
+    /// pages shipped before it.
+    fn text(&self) -> bool {
+        false
+    }
+
     /// Its scope effect, if known before it runs.
     fn effect(&self, _args: &[ValueId], _values: &Values) -> Effect {
         Effect::None
@@ -524,10 +534,6 @@ pub struct Report {
     pub held_deferred: u64,
     pub held_fired: u64,
     pub held_passes: u32,
-    /// A run ended the evaluation (`Ctx::halt`: the job is over, as at
-    /// TeX's fatal error): the nodes still queued are pending for the
-    /// next evaluation, nothing after the halting run was run.
-    pub halted: bool,
     /// Held wakes were dropped past `Limits::settle_passes`: the page
     /// layer did not settle; the output is the last pass's.
     pub held_unsettled: bool,

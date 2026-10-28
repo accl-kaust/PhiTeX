@@ -626,11 +626,12 @@ impl<'a> Ctx<'a> {
         crate::commit::apply_claim(self.eng, self.worker, self.me, n);
     }
 
-    /// Claims every node after this one in its unit, whatever placed it
-    /// (not its siblings alone, as `claim` does): the job is over here
-    /// (TeX's fatal error, §93: nothing after it is read). The nodes are
-    /// inert, their products withdrawn, until a run of this node claims
-    /// otherwise. A fatal error in a paper's preamble claimed its one
+    /// Claims every text node (`Operation::text`) after this one in its
+    /// unit, whatever placed it (not its pushed siblings alone, as `claim`
+    /// does): the job is over here (TeX's fatal error, §93: nothing after
+    /// it is read). The nodes are inert, their products withdrawn, until a
+    /// run of this node claims otherwise; what is not text (the writers
+    /// after the text) stays and runs on what was made before. A fatal error in a paper's preamble claimed its one
     /// pushed sibling and left the 11000 pieces of the included files to
     /// run on, 65 times each at ten threads.
     pub fn claim_rest(&mut self) {
@@ -743,25 +744,6 @@ impl<'a> Ctx<'a> {
     /// site. `None` where the engine recorded none.
     pub fn woken_by(&self) -> Option<Cause> {
         self.woke.clone()
-    }
-
-    /// Asks to end the evaluation: the job is over (TeX's fatal error,
-    /// §93's `fatal_error_stop`). Granted at the next quiet point if this
-    /// run still stands then with its reads holding: a run speculating on
-    /// a guessed state may hit a fatal condition its settled rerun never
-    /// hits (amsldoc at eight threads ran 418 of 1019 nodes and differed
-    /// when the request was granted at the commit), and no definition is
-    /// settled before the line is quiet. Granted, the `final_only` nodes
-    /// and the loop-back passes are skipped, the nodes still queued are
-    /// pending for the next evaluation, and `Report::halted` says so. What
-    /// keeps the rest of the document from running meanwhile is the
-    /// client's claim of it (`Ctx::claim`), which a rerun without the
-    /// error gives back.
-    pub fn halt(&self) {
-        // (the request is this run's: its commit's serial; a rerun that does
-        // not ask voids it)
-        let serial = self.me.serial.load(std::sync::atomic::Ordering::Acquire) + 1;
-        self.eng.halt_asked.lock().push((self.me.id, serial));
     }
 
     /// Forgets my reads of `f` in this run: the commit records none.

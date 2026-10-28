@@ -1659,6 +1659,10 @@ impl Operation for Resume {
     fn name(&self) -> &'static str {
         "resume"
     }
+    /// A piece's rest: dead input after a fatal error.
+    fn text(&self) -> bool {
+        true
+    }
     /// Each runs its own text: a counter one steps is not another's.
     fn alike(&self) -> bool {
         false

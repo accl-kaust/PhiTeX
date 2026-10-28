@@ -40,7 +40,7 @@ fn cold(name: &str, src: &str, threads: usize) -> (Vec<u8>, String) {
     };
     let b = common::build(opts, Some(&common::plain()), src);
     let (dvi, _) = b.output();
-    let out = b.writes().into_iter().filter(|(k, _)| *k == 1).map(|(_, t)| t).collect::<Vec<_>>().join("");
+    let out = b.writes().into_iter().filter(|(k, _)| *k == 1).map(|(_, t)| t).collect::<String>();
     (dvi, out)
 }
 
@@ -68,7 +68,7 @@ fn a_deferred_write_of_the_page_number_is_resolved_at_shipout_without_a_read_in_
         common::rebuild(&mut b, &edited);
         let (want_dvi, want_out) = cold("write-edited", &edited, 1);
         assert_eq!(b.output().0, want_dvi, "-j{threads}: the edited document equals its cold build");
-        let got_out = b.writes().into_iter().filter(|(k, _)| *k == 1).map(|(_, t)| t).collect::<Vec<_>>().join("");
+        let got_out = b.writes().into_iter().filter(|(k, _)| *k == 1).map(|(_, t)| t).collect::<String>();
         assert_eq!(got_out, want_out, "-j{threads}: the written page number followed the page");
         assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "-j{threads}: still no read of the page number by a paragraph");
     }

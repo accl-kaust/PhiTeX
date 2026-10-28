@@ -1325,9 +1325,6 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
 /// What the evaluations of one build or edit did.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
-    /// An evaluation was halted by a run (`phitex_defuse::Report::halted`:
-    /// TeX's fatal error ends the job; nothing after it ran).
-    pub halted: bool,
     /// Memory after the build: the process's resident set (kB, from
     /// /proc; 0 where there is none), the value store's payload (bytes),
     /// and the collections the evaluations made.
@@ -1775,9 +1772,6 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
     if r.held_unsettled {
         eprintln!("acct: held wakes dropped past the settle_passes limit: the layout did not settle");
     }
-    if r.halted {
-        eprintln!("acct: the evaluation was halted by a run (a fatal error)");
-    }
     let mut by_field: Vec<(String, u64)> = r
         .refuted_by_field
         .iter()
@@ -2128,7 +2122,6 @@ impl Stats {
     }
 
     fn add(&mut self, r: &Report) {
-        self.halted |= r.halted;
         self.collections += r.collections.len() as u64;
         self.rss_kb = rss_kb();
         self.piece_times.extend(
@@ -3145,11 +3138,6 @@ impl Graph {
             // (as latexmk past its maximum runs: reported, the output of
             // the last pass kept and written; an error here would keep the
             // PDF from being written)
-            // (the job ended on a fatal error: said once, with the log's
-            // own error; nothing after the erring piece ran)
-            if r.halted {
-                self.eval_warnings.push("the job ended on a fatal error: nothing after it was run or written (pdfTeX's emergency stop)".to_owned());
-            }
             if r.held_unsettled {
                 self.eval_warnings.push(format!(
                     "the page layout did not settle after {} passes (the maximum, as latexmk's): the output is the last pass's",

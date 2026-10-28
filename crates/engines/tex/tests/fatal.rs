@@ -40,7 +40,6 @@ fn build(threads: usize) -> phitex_tex::Build {
 fn a_fatal_error_ends_the_job_on_one_thread() {
     let b = build(1);
     assert!(b.fatal(), "the job ended on the fatal error: {:?}", b.stats.runs_by_op);
-    assert!(b.stats.halted, "the evaluation was halted: {:?}", b.stats.runs_by_op);
     let exec = common::runs_of(&b, "exec");
     assert!(exec <= 4, "the pieces before the error and the error's, no more: {exec} exec runs, {:?}", b.stats.runs_by_op);
 }
@@ -51,7 +50,6 @@ fn a_fatal_error_ends_the_job_on_one_thread() {
 fn a_fatal_error_ends_the_job_on_eight_threads() {
     let b = build(8);
     assert!(b.fatal(), "{:?}", b.stats.runs_by_op);
-    assert!(b.stats.halted, "{:?}", b.stats.runs_by_op);
     let (exec, live) = (common::runs_of(&b, "exec"), b.nodes_by_op("exec") as u64);
     assert!(exec < live / 2, "at most the pieces that had started: {exec} runs of {live} pieces, {:?}", b.stats.runs_by_op);
     assert_eq!(common::runs_of(&b, "finish"), 0, "no page is finished after a fatal error: {:?}", b.stats.runs_by_op);

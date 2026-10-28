@@ -243,10 +243,6 @@ pub(crate) fn run_node(
             let pdf = r.param("pdfoutput").is_ok_and(|p| p > 0);
             let _ = r.log("fatal", if pdf { "pdf" } else { "" });
             r.end_fatal();
-            // (and the job: pdfTeX stops here, §93's fatal_error_stop;
-            // nothing after this run is run, the nodes queued are pending
-            // for the next build)
-            r.cx.halt();
             // (the main list's end, an abort, given to the page builder as
             // a piece's items are: it ends the pages there, and the output
             // is assembled from the pages shipped before)
@@ -309,6 +305,10 @@ pub(crate) struct Exec(pub Shared);
 impl Operation for Exec {
     fn name(&self) -> &'static str {
         "exec"
+    }
+    /// A piece of the text: dead input after a fatal error.
+    fn text(&self) -> bool {
+        true
     }
     /// The client's roots of a collection, for every operation of the
     /// build ([`crate::collect`]).
@@ -484,6 +484,10 @@ pub(crate) struct Put(pub Shared);
 impl Operation for Put {
     fn name(&self) -> &'static str {
         "put"
+    }
+    /// A box put from the text: dead input after a fatal error.
+    fn text(&self) -> bool {
+        true
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
