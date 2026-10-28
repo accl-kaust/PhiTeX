@@ -1032,7 +1032,7 @@ impl Run<'_, '_> {
 
     /// `scan_math_class_int`, `scan_math_fam_int`, `scan_char_class`:
     /// an integer in `0..=max`, else 0 (with the error).
-    fn scan_bounded(&mut self, max: i32, what: &str) -> R<i32> {
+    pub(crate) fn scan_bounded(&mut self, max: i32, what: &str) -> R<i32> {
         let n = self.scan_int()?;
         if (0..=max).contains(&n) {
             Ok(n)

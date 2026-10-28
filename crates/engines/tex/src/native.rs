@@ -826,3 +826,94 @@ impl Run<'_, '_> {
 pub(crate) fn is_word_of(n: &Node, f: u32) -> bool {
     matches!(n, Node::Native(w) if w.font == f && w.kind != NativeKind::Glyph)
 }
+
+/// A native font as math reads it (XeTeX's `XeTeXOTMath.cpp` over the
+/// font's layout engine; `size`: the TeX font's `font_size`).
+impl phitex_typeset::fonts::NativeMath for NativeFont {
+    fn is_math(&self) -> bool {
+        self.font.is_math_font()
+    }
+
+    fn mathsy(&self, n: u16) -> i32 {
+        self.font.mathsy_param(i32::from(n), self.size)
+    }
+
+    fn mathex(&self, n: u16) -> i32 {
+        self.font.mathex_param(i32::from(n), self.size)
+    }
+
+    fn constant(&self, n: u32) -> i32 {
+        self.font.ot_math_constant(n)
+    }
+
+    fn map_char(&self, c: u32) -> u16 {
+        u16::try_from(self.font.map_char_to_glyph(c.cast_signed()) & 0xFFFF).unwrap_or(0)
+    }
+
+    fn char_glyph(&self, c: u32) -> u16 {
+        let mut units = Vec::with_capacity(2);
+        utf16(c, &mut units);
+        if self.font.mapping.is_some() {
+            units = self.font.apply_mapping(&units);
+        }
+        let (layout, _) = SHAPER.with(|sh| {
+            let mut sh = sh.borrow_mut();
+            self.font.layout(&mut sh, &units, false, self.font.letter_space)
+        });
+        layout.glyphs.first().map_or(0, |g| g.gid)
+    }
+
+    fn glyph_whd(&self, g: u16) -> (i32, i32, i32) {
+        let (w, hd) = self.font.measure_glyph(u32::from(g), true);
+        let (h, d) = hd.unwrap_or((self.height_base, self.depth_base));
+        (w, h, d)
+    }
+
+    fn variant(&self, g: u16, n: u32, horiz: bool) -> (u16, i32) {
+        let (v, adv) = self.font.ot_math_variant(u32::from(g), n, horiz);
+        (u16::try_from(v & 0xFFFF).unwrap_or(0), adv)
+    }
+
+    fn assembly(&self, g: u16, horiz: bool) -> Option<Vec<phitex_typeset::fonts::GlyphPart>> {
+        self.font.ot_assembly(u32::from(g), horiz).map(|parts| {
+            parts
+                .into_iter()
+                .map(|p| phitex_typeset::fonts::GlyphPart {
+                    glyph: u16::try_from(p.glyph & 0xFFFF).unwrap_or(0),
+                    start_connector: p.start_connector_length,
+                    end_connector: p.end_connector_length,
+                    full_advance: p.full_advance,
+                    extender: p.extender,
+                })
+                .collect()
+        })
+    }
+
+    fn min_connector_overlap(&self) -> i32 {
+        self.font.ot_min_connector_overlap()
+    }
+
+    fn ital_corr(&self, g: u16) -> i32 {
+        self.font.ot_math_ital_corr(u32::from(g))
+    }
+
+    fn accent_pos(&self, g: u16) -> i32 {
+        self.font.ot_math_accent_pos(u32::from(g))
+    }
+
+    fn math_kern(&self, g: u16, script: (&dyn phitex_typeset::fonts::NativeMath, u16), sup: bool, shift: i32) -> i32 {
+        let Some(sf) = script.0.as_any().downcast_ref::<NativeFont>() else {
+            return 0;
+        };
+        let kind = if sup {
+            phitex_otf::xetex::ScriptKind::Sup
+        } else {
+            phitex_otf::xetex::ScriptKind::Sub
+        };
+        self.font.ot_math_kern(u32::from(g), &sf.font, u32::from(script.1), kind, shift)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}

@@ -90,7 +90,17 @@ pub(crate) fn box_noad(v: &Values, b: ValueId) -> ValueId {
 }
 
 fn delimiter(d: i64) -> Delimiter {
-    let g = |s: u32, m: i64| u16::try_from((d >> s) & m).unwrap_or(0);
+    // (XeTeX's extended delimiter code, `\Udelimiter`, `\Uradical`,
+    // `\Udelcode`: a family of 8 bits and a character of 21, one size)
+    if d >= XE_DELIM {
+        return Delimiter {
+            small_fam: u8::try_from((d / 0x20_0000) % 0x100).unwrap_or(0),
+            small_char: u32::try_from(d % 0x20_0000).unwrap_or(0),
+            large_fam: 0,
+            large_char: 0,
+        };
+    }
+    let g = |s: u32, m: i64| u32::try_from((d >> s) & m).unwrap_or(0);
     Delimiter {
         small_fam: u8::try_from(g(20, 15)).unwrap_or(0),
         small_char: g(12, 255),
@@ -99,13 +109,22 @@ fn delimiter(d: i64) -> Delimiter {
     }
 }
 
+/// A `TeX82` math code (15 bits) as XeTeX's (`set_class_field` and
+/// the others).
+fn xe_of15(c: i32) -> i32 {
+    crate::xetex::math_code(c / 0x1000, (c % 0x1000) / 0x100, c % 0x100)
+}
+
+/// XeTeX's extended delimiter code flag (`"40000000`).
+pub(crate) const XE_DELIM: i64 = 0x4000_0000;
+
 fn decode_field(v: &Values, f: ValueId, side: &mut Side) -> Field {
     let xs = list_of(v, f);
     let n = |i: usize| xs.get(i).map_or(0, |&y| int_of(v, y));
     match n(0) {
         1 => Field::MathChar {
             fam: u8::try_from(n(1)).unwrap_or(0),
-            ch: u16::try_from(n(2)).unwrap_or(0),
+            ch: u32::try_from(n(2)).unwrap_or(0),
         },
         3 => match xs.get(1).and_then(|&b| nodes::decode(v, b, side)) {
             Some(Node::Box(b)) => Field::SubBox(*b),
@@ -150,9 +169,11 @@ pub(crate) fn decode_mlist(v: &Values, items: &[ValueId], side: &mut Side) -> ML
                     24 => NoadKind::Radical(delimiter(n(2))),
                     26 => NoadKind::Under,
                     27 => NoadKind::Over,
+                    // (XeTeX's subtype above the family)
                     28 => NoadKind::Accent(
-                        u8::try_from(n(2)).unwrap_or(0),
-                        u16::try_from(n(3)).unwrap_or(0),
+                        u8::try_from(n(2) % 0x100).unwrap_or(0),
+                        u32::try_from(n(3)).unwrap_or(0),
+                        u8::try_from(n(2) / 0x100).unwrap_or(0),
                     ),
                     29 => NoadKind::Vcenter,
                     _ => NoadKind::Ord,
@@ -428,6 +449,69 @@ impl Run<'_, '_> {
         Ok(self.cur.chr)
     }
 
+    /// XeTeX's `fam_in_range` (`number_math_families`: 256).
+    fn xe_fam_in_range(&mut self) -> R<Option<i32>> {
+        let f = self.ipar(Par::fam)?;
+        Ok((0..256).contains(&f).then_some(f))
+    }
+
+    /// XeTeX's math char field of code `c` (class, family, character):
+    /// the family `\fam` for a variable one in range.
+    fn xe_math_field(&mut self, c: i32) -> R<(i32, i32, i32)> {
+        let (class, mut fam, ch) = crate::xetex::math_fields(c);
+        if class == 7
+            && let Some(f) = self.xe_fam_in_range()?
+        {
+            fam = f;
+        }
+        Ok((class, fam, ch))
+    }
+
+    /// XeTeX's `set_math_char(c)`: `c` a math code of 21-bit characters
+    /// and 8-bit families (an active one: `chr` as an active character).
+    fn xe_set_math_char(&mut self, md: &Mode, c: i32, chr: i32) -> R<()> {
+        if crate::xetex::math_fields(c).2 == crate::xetex::ACTIVE_MATH_CHAR {
+            self.back_input(Tok::ch(13, u32::try_from(chr).unwrap_or(0)));
+            return Ok(());
+        }
+        let (class, fam, ch) = self.xe_math_field(c)?;
+        let t = if class == 7 { ORD } else { ORD + i64::from(class) };
+        let v = self.v;
+        let e = empty(v);
+        let n = noad(v, t, 0, 0, math_char(v, fam, ch), e, e);
+        self.append(md.lid, n);
+        Ok(())
+    }
+
+    /// XeTeX's math code of the math character command in `cur`
+    /// (`\mathchar`, `\Umathchar`, `\Umathcharnum`, a math character
+    /// given, `\delimiter`, `\Udelimiter`), scanned.
+    fn xe_math_char_code(&mut self) -> R<i32> {
+        Ok(match self.cur.cmd {
+            cmd::MATH_CHAR_NUM => match self.cur.chr {
+                2 => self.scan_umath(true)?,
+                1 => self.scan_umath(false)?,
+                _ => xe_of15(self.scan_fifteen_bit_int()?),
+            },
+            cmd::MATH_GIVEN => {
+                if let crate::val::Mean::MathCharDef(n) = self.cur_mean()?
+                    && n >= crate::xetex::U_MATH
+                {
+                    i32::try_from(n & 0xFFFF_FFFF).unwrap_or(0)
+                } else {
+                    xe_of15(self.cur.chr)
+                }
+            }
+            _ => {
+                if self.cur.chr == 1 {
+                    self.scan_umath(true)?
+                } else {
+                    xe_of15(self.scan_twenty_seven_bit_int()? / 0x1000)
+                }
+            }
+        })
+    }
+
     fn fam_in_range(&mut self) -> R<Option<i32>> {
         let f = self.ipar(Par::fam)?;
         Ok((0..16).contains(&f).then_some(f))
@@ -459,6 +543,9 @@ impl Run<'_, '_> {
     /// `scan_math` (§1151): the field, or `None` when a math group
     /// opened whose end fills field `code` of the list's last noad.
     fn scan_math(&mut self, md: &Mode, code: i64) -> R<Option<ValueId>> {
+        if self.xe {
+            return self.xe_scan_math(md, code);
+        }
         let c = loop {
             self.skip_blanks_relax_x()?;
             let c = match self.cur.cmd {
@@ -510,6 +597,93 @@ impl Run<'_, '_> {
         Ok(Some(math_char(self.v, fam, c % 256)))
     }
 
+    /// XeTeX's `scan_math`.
+    fn xe_scan_math(&mut self, md: &Mode, code: i64) -> R<Option<ValueId>> {
+        let c = loop {
+            self.skip_blanks_relax_x()?;
+            let c = match self.cur.cmd {
+                cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN | cmd::CHAR_NUM => {
+                    let ch = if self.cur.cmd == cmd::CHAR_NUM {
+                        self.scan_char_num()?
+                    } else {
+                        self.cur.chr
+                    };
+                    let c = self.code(3, ch)?;
+                    if crate::xetex::math_fields(c).2 == crate::xetex::ACTIVE_MATH_CHAR {
+                        self.back_input(Tok::ch(13, u32::try_from(ch).unwrap_or(0)));
+                        continue;
+                    }
+                    c
+                }
+                cmd::MATH_CHAR_NUM | cmd::MATH_GIVEN | cmd::DELIM_NUM => self.xe_math_char_code()?,
+                _ => {
+                    self.back_cur();
+                    self.scan_left_brace()?;
+                    let v = self.v;
+                    self.push_math(md, group::MATH, -203, vec![v.int(code), v.int(md.lid)]);
+                    return Ok(None);
+                }
+            };
+            break c;
+        };
+        let (_, fam, ch) = self.xe_math_field(c)?;
+        Ok(Some(math_char(self.v, fam, ch)))
+    }
+
+    /// XeTeX's `scan_delimiter`: an extended code ([`XE_DELIM`]) for
+    /// `\Uradical`, `\Udelimiter` and a `\Udelcode`.
+    fn xe_scan_delimiter(&mut self, radical: bool) -> R<i64> {
+        let ext = |r: &mut Self| -> R<i64> {
+            let fam = r.scan_bounded(255, "Bad math family")?;
+            let ch = r.scan_usv_num()?;
+            Ok(XE_DELIM + i64::from(fam) * 0x20_0000 + i64::from(ch))
+        };
+        let mut val = if radical {
+            if self.cur.chr == 1 {
+                ext(self)?
+            } else {
+                i64::from(self.scan_twenty_seven_bit_int()?)
+            }
+        } else {
+            self.skip_blanks_relax_x()?;
+            match self.cur.cmd {
+                cmd::LETTER | cmd::OTHER_CHAR => i64::from(self.code(4, self.cur.chr)?),
+                cmd::DELIM_NUM if self.cur.chr == 1 => {
+                    let _ = self.scan_bounded(7, "Bad math class")?;
+                    ext(self)?
+                }
+                cmd::DELIM_NUM => i64::from(self.scan_twenty_seven_bit_int()?),
+                _ => -1,
+            }
+        };
+        if val < 0 {
+            self.log("error", "Missing delimiter (. inserted)")?;
+            self.back_cur();
+            val = 0;
+        }
+        Ok(val)
+    }
+
+    /// XeTeX's `math_ac`: `\Umathaccent` with `fixed` and `bottom`.
+    fn xe_math_ac(&mut self, md: &Mode) -> R<()> {
+        if self.cur.cmd == cmd::ACCENT {
+            self.log("error", "Please use \\mathaccent for accents in math mode")?;
+        }
+        let mut sub = 0;
+        let c = if self.cur.chr == 1 {
+            if self.scan_keyword("fixed")? {
+                sub = 1;
+            } else if self.scan_keyword("bottom")? {
+                sub = if self.scan_keyword("fixed")? { 3 } else { 2 };
+            }
+            self.scan_umath(true)?
+        } else {
+            xe_of15(self.scan_fifteen_bit_int()?)
+        };
+        let (_, fam, ch) = self.xe_math_field(c)?;
+        self.noad_with_nucleus(md, ACCENT, i64::from(fam) + sub * 0x100, i64::from(ch))
+    }
+
     /// A new noad of type `t` whose nucleus is scanned (§1154, §1158).
     fn noad_with_nucleus(&mut self, md: &Mode, t: i64, a: i64, b: i64) -> R<()> {
         let v = self.v;
@@ -522,6 +696,9 @@ impl Run<'_, '_> {
 
     /// `scan_delimiter` (§1160).
     pub(crate) fn scan_delimiter(&mut self, radical: bool) -> R<i64> {
+        if self.xe {
+            return self.xe_scan_delimiter(radical);
+        }
         let mut val = if radical {
             self.scan_twenty_seven_bit_int()?
         } else {
@@ -546,6 +723,26 @@ impl Run<'_, '_> {
     pub(crate) fn math_command(&mut self, md: &Mode) -> R<bool> {
         let v = self.v;
         match self.cur.cmd {
+            // (XeTeX: math codes of 21-bit characters, 8-bit families)
+            cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN if self.xe => {
+                let ch = self.cur.chr;
+                let c = self.code(3, ch)?;
+                self.xe_set_math_char(md, c, ch)?;
+            }
+            cmd::CHAR_NUM if self.xe => {
+                let ch = self.scan_char_num()?;
+                let c = self.code(3, ch)?;
+                self.xe_set_math_char(md, c, ch)?;
+            }
+            cmd::MATH_CHAR_NUM | cmd::MATH_GIVEN | cmd::DELIM_NUM if self.xe => {
+                let c = self.xe_math_char_code()?;
+                self.xe_set_math_char(md, c, 0)?;
+            }
+            cmd::RADICAL if self.xe => {
+                let d = self.xe_scan_delimiter(true)?;
+                self.noad_with_nucleus(md, RADICAL, d, 0)?;
+            }
+            cmd::ACCENT | cmd::MATH_ACCENT if self.xe => self.xe_math_ac(md)?,
             cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN => {
                 let ch = self.cur.chr;
                 let c = self.mathcode(ch)?;
@@ -1217,12 +1414,29 @@ impl Run<'_, '_> {
                 }
             }
         }
+        // (XeTeX's families past sixteen, up to the highest ever set)
+        let mut xfams: Vec<[Option<u32>; 3]> = Vec::new();
+        if self.xe {
+            let v = self.v;
+            let top = self.get("famxmax")?.map_or(15, |x| int_of(v, x));
+            for k in 16..=i32::try_from(top).unwrap_or(15) {
+                let mut row = [None; 3];
+                for (s, slot) in row.iter_mut().enumerate() {
+                    let size = i32::try_from(s * 16).unwrap_or(0);
+                    let f = u32::try_from(self.fam_font(size, k)?).unwrap_or(0);
+                    if f != 0 {
+                        *slot = Some(f);
+                    }
+                }
+                xfams.push(row);
+            }
+        }
         // (the last formula's fonts while no font cell changed since)
         let g = self.st.font_gen();
         let fonts = match &self.math_memo {
-            Some(m) if m.0 == g && m.1 == fam_fnt && self.interp.is_none() => m.2.clone(),
+            Some(m) if m.0 == g && m.1 == fam_fnt && m.2.0.xfams == xfams && self.interp.is_none() => m.2.clone(),
             _ => {
-                let f = Rc::new(self.math_fonts(&fam_fnt)?);
+                let f = Rc::new(self.math_fonts(&fam_fnt, &xfams)?);
                 if self.interp.is_none() {
                     self.math_memo = Some((self.st.font_gen(), fam_fnt, f.clone()));
                 }
@@ -1260,16 +1474,65 @@ impl Run<'_, '_> {
             rel_penalty: self.ipar(Par::relpenalty)?,
             skew_char: &sk,
         };
+        // (XeTeX's `cur_f` as the last formula left it)
+        let curf = if self.xe {
+            let v = self.v;
+            let x = self.get("mathcurf")?.map_or(-1, |x| int_of(v, x));
+            view.math_cur_f.store(x, std::sync::atomic::Ordering::Relaxed);
+            Some(x)
+        } else {
+            None
+        };
         let (h, _diags) =
             phitex_typeset::math::mlist_to_hlist(mlist, style, penalties, &params, view);
+        if let Some(x) = curf {
+            let y = view.math_cur_f.load(std::sync::atomic::Ordering::Relaxed);
+            if y != x {
+                let v = self.v;
+                self.set("mathcurf", v.int(y), true);
+            }
+        }
         Ok(h)
     }
 
     /// The families' fonts `fam_fnt` decoded for a formula, with their
     /// `\skewchar`s.
-    fn math_fonts(&mut self, fam_fnt: &[[Option<u32>; 16]; 3]) -> R<(crate::fonts::View, crate::FxHashMap<u32, i32>)> {
+    fn math_fonts(
+        &mut self,
+        fam_fnt: &[[Option<u32>; 16]; 3],
+        xfams: &[[Option<u32>; 3]],
+    ) -> R<(crate::fonts::View, crate::FxHashMap<u32, i32>)> {
         let mut view = crate::fonts::View::default();
         let mut skew = crate::FxHashMap::default();
+        // (XeTeX: the native fonts with their `\fontdimen`s, and the
+        // families past sixteen)
+        if self.xe {
+            view.xfams = xfams.to_vec();
+            let all: Vec<u32> = fam_fnt
+                .iter()
+                .flatten()
+                .flatten()
+                .chain(xfams.iter().flatten().flatten())
+                .copied()
+                .collect();
+            for f in all {
+                if view.natives.contains_key(&f) || view.fonts.contains_key(f) {
+                    continue;
+                }
+                if let Some(nf) = self.native_font(i64::from(f))? {
+                    let n = self.font_int(f, crate::fields::FontCell::Fdn)?;
+                    let mut params = Vec::new();
+                    for k in 1..=n {
+                        params.push(self.font_int(f, crate::fields::FontCell::Fd(k))?);
+                    }
+                    view.native_params.insert(f, params);
+                    view.natives.insert(f, nf);
+                } else {
+                    self.add_font(&mut view, f)?;
+                }
+                skew.insert(f, self.font_int(f, crate::fields::FontCell::Sc)?);
+            }
+        }
         // (the symbol and extension families' fonts with all their
         // `\fontdimen`s, §700–§701; another family's with those math
         // reads of any font, the space and the x-height, §738, §752)

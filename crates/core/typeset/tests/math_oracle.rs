@@ -48,9 +48,9 @@ fn parse_delim(hex: &str) -> Delimiter {
     let (small, large) = (a >> 12, a & 0xFFF);
     Delimiter {
         small_fam: u8::try_from(small >> 8).unwrap(),
-        small_char: u16::try_from(small & 0xFF).unwrap(),
+        small_char: small & 0xFF,
         large_fam: u8::try_from(large >> 8).unwrap(),
-        large_char: u16::try_from(large & 0xFF).unwrap(),
+        large_char: large & 0xFF,
     }
 }
 
@@ -62,7 +62,7 @@ fn parse_field(sub: &[&str], p: &str) -> Field {
             let rest = &l[p.len()..];
             if rest.starts_with("\\fam") {
                 let (fam, ch) = parse_char(rest);
-                Field::MathChar { fam, ch }
+                Field::MathChar { fam, ch: ch.into() }
             } else if rest == "{}" {
                 Field::SubMlist(Vec::new())
             } else if rest.starts_with("\\hbox(") || rest.starts_with("\\vbox(") {
@@ -125,7 +125,7 @@ fn parse_mlist(lines: &[&str], prefix: &str) -> MList {
             noad(NoadKind::Radical(parse_delim(rest)))
         } else if let Some(rest) = head.strip_prefix("\\accent") {
             let (fam, ch) = parse_char(rest);
-            noad(NoadKind::Accent(fam, ch))
+            noad(NoadKind::Accent(fam, ch.into(), 0))
         } else if let Some(rest) = head.strip_prefix("\\left") {
             MItem::Left(parse_delim(rest))
         } else if let Some(rest) = head.strip_prefix("\\right") {

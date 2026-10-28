@@ -349,3 +349,45 @@ fn xelatex_docs() {
     }
     assert!(failed.is_empty(), "failed: {failed:?}");
 }
+
+/// A document of the client's under `xelatex` (the first run): the
+/// directory `PHITEX_DOC_DIR` (its main file `PHITEX_DOC`, default
+/// `main`), against `oracle/NAME.xdv` in it. Ignored by default.
+#[test]
+#[ignore = "a document of the client's: PHITEX_DOC_DIR"]
+fn xelatex_document() {
+    let Ok(dir) = std::env::var("PHITEX_DOC_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let name = std::env::var("PHITEX_DOC").unwrap_or_else(|_| "main".to_owned());
+    let want = std::fs::read(dir.join(format!("oracle/{name}.xdv"))).unwrap_or_default();
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    for threads in [1, 8] {
+        let t0 = std::time::Instant::now();
+        let opts = Options {
+            epoch: Some(0),
+            threads: Some(threads),
+            xetex: Some(xetex()),
+            prelude_jobname: "xelatex".to_owned(),
+            finder: xelatex_finder(vec![dir.clone()]),
+            ..common::options(&format!("./{name}.tex"), &name, &common::dvi_comment(&want), &dir)
+        };
+        let b = common::build(opts, Some("\\input xelatex.ini\n"), &src);
+        let (xdv, log) = b.output();
+        if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
+            let _ = std::fs::write(format!("{d}/{name}-j{threads}.xdv"), &xdv);
+            let _ = std::fs::write(format!("{d}/{name}-j{threads}.log"), log.as_bytes());
+        }
+        let diags: Vec<String> = b
+            .diagnostics()
+            .iter()
+            .take(20)
+            .map(|d| format!("  {}:{} {}", d.file, d.line, d.message.chars().take(300).collect::<String>()))
+            .collect();
+        match common::first_difference(&xdv, &want) {
+            None => eprintln!("ok {name} -j{threads}: {} bytes, {:?}", xdv.len(), t0.elapsed()),
+            Some(d) => eprintln!("{name} -j{threads}: FAIL {d} ({:?})\n{}", t0.elapsed(), diags.join("\n")),
+        }
+    }
+}

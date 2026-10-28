@@ -696,7 +696,7 @@ impl Run<'_, '_> {
             cmd::SET_FONT => i64::from(self.cur.chr),
             cmd::DEF_FAMILY => {
                 let m = self.cur.chr;
-                let n = self.scan_four_bit_int()?;
+                let n = self.scan_fam()?;
                 self.fam_font(m - MATH_FONT_BASE, n)?
             }
             _ => {
@@ -708,8 +708,27 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn fam_font(&mut self, size: i32, n: i32) -> R<i64> {
-        let l = crate::fields::fam_slot(size, n);
+        let l = self.fam_loc(size, n);
         Ok(i64::from(self.int_loc(l)?))
+    }
+
+    /// Where family `n`'s font at `size` (0, 16, 32) is: XeTeX's families
+    /// past sixteen in fields of their own (`famx:<size>:<n>`).
+    pub(crate) fn fam_loc(&mut self, size: i32, n: i32) -> crate::state::Loc {
+        if self.xe && n >= 16 {
+            let f = self.v.field(&format!("famx:{}:{n}", size / 16));
+            return self.loc_of(f);
+        }
+        crate::fields::fam_slot(size, n)
+    }
+
+    /// A family number: TeX's four bits, XeTeX's eight
+    /// (`scan_math_fam_int`).
+    pub(crate) fn scan_fam(&mut self) -> R<i32> {
+        if self.xe {
+            return self.scan_bounded(255, "Bad math family");
+        }
+        self.scan_four_bit_int()
     }
 
     /// `find_font_dimen` (§578): the font and parameter number, `None`

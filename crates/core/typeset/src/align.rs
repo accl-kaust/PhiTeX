@@ -57,22 +57,6 @@ impl AlignColumn {
     }
 }
 
-/// `round` as web2c computes it (`zround`, texmfmp.c).
-fn zround(r: f64) -> Scaled {
-    if r > 2_147_483_647.0 {
-        i32::MAX
-    } else if r < -2_147_483_647.0 {
-        -i32::MAX
-    } else {
-        // in range by the tests above
-        #[allow(clippy::cast_possible_truncation)]
-        if r >= 0.0 {
-            (r + 0.5).floor() as i32
-        } else {
-            (r - 0.5).ceil() as i32
-        }
-    }
-}
 
 /// Packages an entry (§796): `hpack` natural for `\halign` (its
 /// adjustments are returned), `vpackage` natural with depth limit 0 for
@@ -332,10 +316,10 @@ fn set_row(row: Unset, p: &BoxNode, halign: bool, o: Scaled) -> BoxNode {
             t += v.width;
             match p.glue.sign {
                 GlueSign::Stretching if v.stretch_order == p.glue.order => {
-                    t += zround(p.glue.ratio * f64::from(v.stretch));
+                    t += crate::arith::zround(p.glue.ratio * f64::from(v.stretch));
                 }
                 GlueSign::Shrinking if v.shrink_order == p.glue.order => {
-                    t -= zround(p.glue.ratio * f64::from(v.shrink));
+                    t -= crate::arith::zround(p.glue.ratio * f64::from(v.shrink));
                 }
                 _ => {}
             }

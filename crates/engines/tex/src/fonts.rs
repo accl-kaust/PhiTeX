@@ -263,6 +263,12 @@ pub(crate) struct View {
     /// `\XeTeXuseglyphmetrics` where the view was made (a merged word's
     /// height and depth).
     pub glyph_metrics: bool,
+    /// The native fonts' `\fontdimen`s, for math.
+    pub native_params: FxHashMap<FontId, Vec<i32>>,
+    /// XeTeX's math families 16 to 255 at the three sizes.
+    pub xfams: Vec<[Option<FontId>; 3]>,
+    /// XeTeX's `cur_f` as math leaves it (-1: the null font).
+    pub math_cur_f: std::sync::atomic::AtomicI64,
     pub px: FxHashMap<FontId, Box<Px>>,
     /// An expanded font's base, for its codes.
     pub ex_base: FxHashMap<FontId, FontId>,
@@ -412,6 +418,8 @@ impl View {
             names: self.names.clone(),
             natives: self.natives.clone(),
             glyph_metrics: self.glyph_metrics,
+            native_params: self.native_params.clone(),
+            xfams: self.xfams.clone(),
             ex_base: self.ex_base.clone(),
             ..View::default()
         }
@@ -568,14 +576,45 @@ impl Fonts for View {
     }
 
     fn param(&self, font: FontId, n: u16) -> i32 {
-        self.get(font)
-            .and_then(|(_, p)| p.get(usize::from(n).checked_sub(1)?).copied())
-            .unwrap_or(0)
+        let k = usize::from(n).checked_sub(1);
+        match self.get(font) {
+            Some((_, p)) => k.and_then(|k| p.get(k)).copied().unwrap_or(0),
+            None => self
+                .native_params
+                .get(&font)
+                .and_then(|p| p.get(k?).copied())
+                .unwrap_or(0),
+        }
     }
 
     fn param_count(&self, font: FontId) -> u16 {
-        self.get(font)
-            .map_or(0, |(_, p)| u16::try_from(p.len()).unwrap_or(0))
+        match self.get(font) {
+            Some((_, p)) => u16::try_from(p.len()).unwrap_or(0),
+            None => self
+                .native_params
+                .get(&font)
+                .map_or(0, |p| u16::try_from(p.len()).unwrap_or(0)),
+        }
+    }
+
+    fn native_math(&self, font: FontId) -> Option<&dyn phitex_typeset::fonts::NativeMath> {
+        self.natives
+            .get(&font)
+            .map(|n| n.as_ref() as &dyn phitex_typeset::fonts::NativeMath)
+    }
+
+    fn math_family(&self, fam: u8, size: usize) -> Option<Option<FontId>> {
+        let k = usize::from(fam).checked_sub(16)?;
+        Some(self.xfams.get(k).and_then(|r| r.get(size).copied().flatten()))
+    }
+
+    fn math_cur_f(&self) -> Option<FontId> {
+        u32::try_from(self.math_cur_f.load(std::sync::atomic::Ordering::Relaxed)).ok()
+    }
+
+    fn set_math_cur_f(&self, f: Option<FontId>) {
+        self.math_cur_f
+            .store(f.map_or(-1, i64::from), std::sync::atomic::Ordering::Relaxed);
     }
 
     fn expansion(&self, font: FontId) -> Option<phitex_typeset::fonts::Expansion> {

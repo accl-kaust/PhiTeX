@@ -1019,11 +1019,19 @@ impl Run<'_, '_> {
             cmd::DEF_FAMILY => {
                 // §1234
                 let size = self.cur.chr - crate::val::MATH_FONT_BASE;
-                let n = self.scan_four_bit_int()?;
+                let n = self.scan_fam()?;
                 self.scan_optional_equals()?;
                 let f = self.scan_font_ident()?;
-                let l = crate::fields::fam_slot(size, n);
+                let l = self.fam_loc(size, n);
                 self.set_loc(l, Entry::raw(Some(v.int(f))), global);
+                // (XeTeX: the highest family past sixteen ever set, which
+                // math looks at up to)
+                if self.xe && n >= 16 {
+                    let top = self.get("famxmax")?.map_or(15, |x| crate::val::int_of(v, x));
+                    if i64::from(n) > top {
+                        self.set("famxmax", v.int(i64::from(n)), true);
+                    }
+                }
             }
             cmd::REGISTER | cmd::ADVANCE | cmd::MULTIPLY | cmd::DIVIDE => {
                 self.do_register_command(global)?;

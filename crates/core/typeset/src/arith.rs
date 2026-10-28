@@ -242,6 +242,24 @@ pub fn divide_scaled(s: Scaled, m: Scaled, dd: u32) -> Scaled {
     sign * q
 }
 
+/// `round` as web2c computes it (`zround`, texmfmp.c).
+#[must_use]
+pub fn zround(r: f64) -> Scaled {
+    if r > 2_147_483_647.0 {
+        i32::MAX
+    } else if r < -2_147_483_647.0 {
+        -i32::MAX
+    } else {
+        // in range by the tests above
+        #[allow(clippy::cast_possible_truncation)]
+        if r >= 0.0 {
+            (r + 0.5).floor() as i32
+        } else {
+            (r - 0.5).ceil() as i32
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
