@@ -350,6 +350,23 @@ fn xelatex_docs() {
     assert!(failed.is_empty(), "failed: {failed:?}");
 }
 
+/// The native runner of `\write18`'s commands, as the CLI has it.
+#[path = "../../../cli/src/shell.rs"]
+mod process_hook;
+
+/// With `PHITEX_SHELL_ESCAPE=1`, TeX Live's commands (minted's
+/// `latexminted`) run as processes for a document in `dir`, as the CLI
+/// runs them; else none.
+fn shell_hook(dir: &Path) -> Option<Arc<dyn phitex_tex::ShellHook>> {
+    if std::env::var("PHITEX_SHELL_ESCAPE").ok().as_deref() != Some("1") {
+        return None;
+    }
+    let path = std::env::var("PATH").unwrap_or_default();
+    let bin = std::env::split_paths(&path).find(|d| d.join("kpsewhich").is_file())?;
+    let k = phitex_kpse::Kpse::new(&bin, "xelatex", "xetex");
+    Some(Arc::new(process_hook::ProcessHook::new(dir, k.exported())))
+}
+
 /// A document of the client's under `xelatex` (the first run): the
 /// directory `PHITEX_DOC_DIR` (its main file `PHITEX_DOC`, default
 /// `main`), against `oracle/NAME.xdv` in it. Ignored by default.
@@ -371,6 +388,7 @@ fn xelatex_document() {
             xetex: Some(xetex()),
             prelude_jobname: "xelatex".to_owned(),
             finder: xelatex_finder(vec![dir.clone()]),
+            shell_hook: shell_hook(&dir),
             ..common::options(&format!("./{name}.tex"), &name, &common::dvi_comment(&want), &dir)
         };
         let b = common::build(opts, Some("\\input xelatex.ini\n"), &src);
@@ -388,6 +406,9 @@ fn xelatex_document() {
         match common::first_difference(&xdv, &want) {
             None => eprintln!("ok {name} -j{threads}: {} bytes, {:?}", xdv.len(), t0.elapsed()),
             Some(d) => eprintln!("{name} -j{threads}: FAIL {d} ({:?})\n{}", t0.elapsed(), diags.join("\n")),
+        }
+        if b.stats.shell_passes > 0 {
+            eprintln!("{name} -j{threads}: {} evaluations again for the commands' files, {} of them", b.stats.shell_passes, b.shell_files().len());
         }
     }
 }
