@@ -38,8 +38,9 @@
 # Every test runs in its own process, killed after GATE_TEST_TIMEOUT s
 # (120): a hang is a red line, not a shard's timeout.
 # GATE_LATEX_ORDER (test names, heaviest first) balances the latex shards.
-# GATE_SBATCH adds sbatch options to every shard (GATE_SBATCH=--exclude=harrier
-# when a node's /tmp is short of job.sbatch's 20 GB).
+# GATE_SBATCH adds sbatch options to every shard; unset it is
+# --exclude=harrier (harrier's /tmp is filled by other users past job.sbatch's
+# 20 GB check), and GATE_SBATCH= gives none.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 H=acclhead1
@@ -100,7 +101,7 @@ sub() {
   # not submitted twice)
   tag="gf-$c-$1-$$-$RANDOM"
   for try in 1 2 3; do
-    out=$(ACCL_COMMIT=$c ACCL_OPTS="$(with_scripts "$opts") --comment=$tag ${GATE_SBATCH:-}" "$here/accl" submit cmd \
+    out=$(ACCL_COMMIT=$c ACCL_OPTS="$(with_scripts "$opts") --comment=$tag ${GATE_SBATCH---exclude=harrier}" "$here/accl" submit cmd \
       env GATE_TEST_TIMEOUT="${GATE_TEST_TIMEOUT:-120}" GATE_TEST_PAR="${GATE_TEST_PAR:-5}" GATE_AMS_EDITS="${GATE_AMS_EDITS:-10}" GATE_CG_DOC="${GATE_CG_DOC:-para4000 macros}" \
       bash -c "$boot" gate-shard "$@" 2> "$err") || true
     id=$(tail -1 <<< "$out")
