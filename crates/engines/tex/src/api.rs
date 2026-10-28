@@ -452,13 +452,6 @@ fn edit_apply_note(t_all: std::time::Instant, t: [std::time::Duration; 3], n: [u
     );
 }
 
-/// The most nodes an edit's text and files may change for its
-/// evaluation to run on the calling thread, no pool woken (an edit's
-/// evaluation of a few nodes on the pool spent more waking and stealing
-/// than running), and the most it runs and queues there: past them it
-/// goes on the pool, in steps, as a cold build (`Executor::widen`).
-const INLINE_NODES: usize = 16;
-
 /// The lengths of the key prefix and suffix `old` and `new` share
 /// (not overlapping).
 fn common_ends(old: &[(u64, NodeId, Src)], new: &[(u64, DocNode)]) -> (usize, usize) {
@@ -2257,9 +2250,6 @@ struct Graph {
     opened_last: Vec<String>,
     /// The executor's threads ([`Options::threads`]).
     threads: usize,
-    /// Whether the next evaluation runs on the calling thread alone: an
-    /// edit's few nodes, no pool woken ([`INLINE_NODES`]).
-    inline: bool,
     /// The comments of the document's canonical text
     /// ([`canonical_text`]): `doc:mark:<id>` in the environment, read by a
     /// run that reads a comment's mark as text (`Run::splice_mark`).
@@ -2616,7 +2606,6 @@ impl Graph {
             written: Vec::new(),
             seeds: Vec::new(),
             threads: crate::exec::threads(threads),
-            inline: false,
             marks: Marks::default(),
             opened_memo: std::sync::Mutex::new(None),
             wkeys_guess: Vec::new(),
@@ -3088,9 +3077,13 @@ impl Graph {
                 *o.held.write().unwrap_or_else(std::sync::PoisonError::into_inner) = held;
             }
             let t0 = std::time::Instant::now();
-            // (an edit's few nodes: on this thread, no worker started,
-            // [`INLINE_NODES`])
-            let n = if self.inline { 1 } else { self.threads };
+            // (every evaluation on the pool: it starts no thread for a
+            // few nodes (`sched`: workers start when a deque holds more
+            // than its owner runs next), and one that grows takes them.
+            // An edit that began with few nodes ran on this thread alone
+            // to its end: a one-letter edit of amsldoc that reran 1275
+            // nodes took 26 s on one thread of 24)
+            let n = self.threads;
             // (`PHITEX_MEM_LOG=secs`, profile: every `secs` seconds of the
             // evaluation, the resident memory, the value store and the live
             // nodes)
@@ -4801,8 +4794,6 @@ pub struct Build {
     /// [`Build::absorb_pending`] evaluates them with the text sent, one
     /// evaluation (its stats the nodes both ran).
     staged: bool,
-    /// The nodes the files staged since the last evaluation changed.
-    staged_nodes: usize,
     /// Whether the build has evaluated (its cold build done).
     evaluated: bool,
 }
@@ -4988,7 +4979,6 @@ impl Build {
             lines: Mutex::default(),
             loads_ran: false,
             staged: false,
-            staged_nodes: 0,
             evaluated: false,
         };
         b.settle();
@@ -5210,12 +5200,6 @@ impl Build {
             self.g.eng.set_version(v);
         }
         let t_apply = t_all.elapsed();
-        // (an edit that starts with few nodes runs inline, [`INLINE_NODES`];
-        // the cold build and large edits on the pool)
-        self.g.inline = self.evaluated
-            && absorb.applied <= INLINE_NODES
-            && std::mem::take(&mut self.staged_nodes) <= INLINE_NODES
-            && !crate::exec::obs_flag!("PHITEX_NO_INLINE");
         self.evaluated = true;
         self.g.settle(
             self.unit,
@@ -5383,7 +5367,7 @@ impl Build {
             let text = found.as_ref().map(|(p, b)| (p, latin1(b)));
             match (doc, text) {
                 (Some(df), Some((path, t))) if crate::inputs::document_file(path, &t) => {
-                    self.staged_nodes += self.stage_doc_file(&df, t);
+                    self.stage_doc_file(&df, t);
                 }
                 (_, found_text) => {
                     self.g.files.retain(|&(g, _)| g != d);
@@ -5404,12 +5388,9 @@ impl Build {
                     } else {
                         self.g.absent.push(d);
                     }
-                    self.staged_nodes += INLINE_NODES + 1;
                 }
             }
             crate::timeline::lap("stage: the file cut again, its pieces edited");
-        } else {
-            self.staged_nodes += 1;
         }
         if let Some(r) = self.g.reads.iter_mut().find(|(n, _)| n == name) {
             r.1 = file_hash(found.as_ref());
@@ -5460,10 +5441,10 @@ impl Build {
     /// the new slices as the document's nodes are ([`apply_slices`]); a
     /// node whose pieces are not the last cut's runs again. The pieces
     /// replaced, inserted or removed.
-    fn stage_doc_file(&mut self, df: &Arc<std::sync::Mutex<DocFile>>, text: String) -> usize {
+    fn stage_doc_file(&mut self, df: &Arc<std::sync::Mutex<DocFile>>, text: String) {
         let mut df = df.locked();
         if df.text == text {
-            return 0;
+            return;
         }
         let (p, s) = byte_ends(df.text.as_bytes(), text.as_bytes());
         let range = (p, df.text.len() - s, text.len() - s);
@@ -5477,7 +5458,6 @@ impl Build {
         crate::timeline::lap("stage: the file cut again");
         let loads = self.g.loads.clone();
         let exec = self.g.ops.exec;
-        let mut n = 0;
         let mut redo = Vec::new();
         let readers = std::mem::take(&mut df.readers);
         let mut kept = Vec::with_capacity(readers.len());
@@ -5514,7 +5494,6 @@ impl Build {
             };
             match apply_slices(&self.g.eng, exec, Placing::Placed, &mut nodes, &new, &args_of) {
                 Some(a) => {
-                    n += a.changed();
                     // (each piece's move since it was made: a kept one's
                     // text, and the places in it, as when it was made; those
                     // made now are where they are; those after the change
@@ -5544,7 +5523,6 @@ impl Build {
             if let Some(i) = self.g.eng.node_info(r) {
                 let args = i.args;
                 self.g.eng.refresh_where(&|_, a, _| *a == args[..]);
-                n += INLINE_NODES + 1;
             }
         }
         shifts.retain(|&k, _| self.g.eng.is_live(NodeId::from_raw(k)));
@@ -5556,7 +5534,6 @@ impl Build {
         df.placed = placed;
         df.slices = new;
         crate::timeline::lap("stage: the file's pieces edited");
-        n
     }
 
     /// The document's nodes' texts: each node's raw id, its text (`None`:
