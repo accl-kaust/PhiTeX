@@ -223,6 +223,12 @@ impl Run<'_, '_> {
             None => None,
         };
         let nth = page.as_ref().map_or(0, |p| i64::from(p.nth));
+        // (the progress shown: the page the build has reached)
+        if let Some(p) = page.as_ref().filter(|p| p.normal > 0)
+            && let Some(w) = self.ops.watch.read().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
+        {
+            w.progress.note_page(u64::try_from(p.normal).unwrap_or(0));
+        }
         if crate::exec::obs_flag!("PHITEX_FIN_TRACE") {
             eprintln!(
                 "fin-trace: node {} page {nth} of its piece spec {} page {}",

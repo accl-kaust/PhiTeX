@@ -104,6 +104,12 @@ pub struct Options {
     /// take; past it the build ends with the engine's deadline error,
     /// naming what waits, in the log. `None`: no limit.
     pub time_limit: Option<std::time::Duration>,
+    /// How long a build may make no progress before it ends stuck
+    /// (`phitex_defuse::Limits::stall`, [`crate::run::Run::watchdog`]):
+    /// `None` takes `PHITEX_STUCK_SECS` (0: never), else 300 s, a cold
+    /// build's bound (a front end sets an edit's from the cold build's
+    /// time, [`Build::set_stuck_after`]).
+    pub stuck_after: Option<std::time::Duration>,
     /// The threads the engine's batches run on: `None` takes
     /// `PHITEX_THREADS`, else the available parallelism; `Some(1)` runs
     /// them in order. The output is the same at any count.
@@ -699,6 +705,7 @@ impl Default for Options {
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
+            stuck_after: None,
             threads: None,
             progress: None,
             edits: None,
@@ -1389,6 +1396,12 @@ pub struct Stats {
     /// is the parallelism achieved. A worker waiting for work counts
     /// nothing.
     pub busy: std::time::Duration,
+    /// The engine's own count of the runs' time, summed over workers
+    /// (`phitex_defuse::Times::op_ns`, always measured, unlike `busy`),
+    /// and of it the runs thrown away (`Times::wasted_ns`: not their
+    /// node's last).
+    pub engine_busy: std::time::Duration,
+    pub engine_wasted: std::time::Duration,
     /// The most operation runs at once (not worker loops).
     pub peak_running: usize,
     /// The batches of tasks the executor was given, those it ran on
@@ -2122,6 +2135,8 @@ impl Stats {
     }
 
     fn add(&mut self, r: &Report) {
+        self.engine_busy += std::time::Duration::from_nanos(r.times.op_ns);
+        self.engine_wasted += std::time::Duration::from_nanos(r.times.wasted_ns);
         self.collections += r.collections.len() as u64;
         self.rss_kb = rss_kb();
         self.piece_times.extend(
@@ -2473,7 +2488,7 @@ fn piece_shift(eng: &Engine, shifts: &FxHashMap<u64, (ValueId, i64)>, n: NodeId)
 
 impl Graph {
     #[allow(clippy::too_many_lines)]
-    fn new(time: Option<std::time::Duration>, threads: Option<usize>) -> Graph {
+    fn new(time: Option<std::time::Duration>, threads: Option<usize>, stuck_after: Option<std::time::Duration>) -> Graph {
         let eng = Engine::new();
         // (`PHITEX_COLLECT_MB`: the value store collected when its payload
         // passes it, `phitex_defuse::Limits::collect_at_bytes`; default
@@ -2491,10 +2506,29 @@ impl Graph {
         let runs_per_node = crate::exec::env_str!("PHITEX_RUNS_PER_NODE")
             .and_then(|x| x.parse::<u32>().ok())
             .unwrap_or(phitex_defuse::Limits::default().runs_per_node);
+        // (a build that stops making progress ends stuck, reported, never
+        // waited on: 300 s without a new line read by a run (an edit's
+        // bound set from the cold build's time by the front end), or the
+        // workers idle a sixth of it with work left; `PHITEX_STUCK_SECS`,
+        // 0 never. A run past half the machine's memory is stuck too;
+        // `PHITEX_STUCK_MB`)
+        let stall = match (stuck_after, crate::exec::env_str!("PHITEX_STUCK_SECS").and_then(|x| x.parse::<u64>().ok())) {
+            (Some(d), _) => Some(d),
+            (None, Some(0)) => None,
+            (None, Some(s)) => Some(std::time::Duration::from_secs(s)),
+            (None, None) => Some(std::time::Duration::from_secs(300)),
+        };
+        let memory_bytes = match crate::exec::env_str!("PHITEX_STUCK_MB").and_then(|x| x.parse::<u64>().ok()) {
+            Some(0) => None,
+            Some(mb) => Some(mb << 20),
+            None => half_of_memory(),
+        };
         eng.set_limits(phitex_defuse::Limits {
             time,
             collect_at_bytes,
             runs_per_node,
+            stall,
+            memory_bytes,
             ..phitex_defuse::Limits::default()
         });
         let shared: Shared = Arc::new(OnceLock::new());
@@ -2605,7 +2639,8 @@ impl Graph {
         let mut ids: Vec<NodeId> = Vec::new();
         match e {
             E::RunawayNode { node, .. } | E::OpPanicked { node, .. } => ids.push(*node),
-            E::TotalRuns { .. } | E::Deadline => {}
+            E::Stuck { node: Some(n), .. } => ids.push(*n),
+            E::TotalRuns { .. } | E::Deadline | E::Stuck { node: None, .. } => {}
         }
         // (the field and the nodes' texts first: a harness shows the
         // head of the message; the error's full form last)
@@ -4412,7 +4447,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let t_check = t_start.elapsed();
     let m_check = mem_mb();
     let finder = opts.prelude_finder();
-    let mut g = Graph::new(opts.time_limit, opts.threads);
+    let mut g = Graph::new(opts.time_limit, opts.threads, opts.stuck_after);
     g.ops.fin_predict.store(
         opts.finisher_predictions,
         std::sync::atomic::Ordering::Relaxed,
@@ -4808,7 +4843,7 @@ impl Build {
                 t1.checked_sub(t_env).unwrap_or_default()
             );
         }
-        let mut g = Graph::new(opts.time_limit, opts.threads);
+        let mut g = Graph::new(opts.time_limit, opts.threads, opts.stuck_after);
         g.ops.fin_predict.store(
             opts.finisher_predictions,
             std::sync::atomic::Ordering::Relaxed,
@@ -6053,6 +6088,16 @@ impl Build {
                 })
             })
             .collect()
+    }
+
+    /// How long a run of this build's later evaluations may read no new
+    /// line before the build ends stuck ([`Options::stuck_after`]): a
+    /// front end sets it from the cold build's time, so that an edit is
+    /// held to what the document has shown it needs. `None`: no bound by
+    /// time (the command and memory bounds stay).
+    pub fn set_stuck_after(&self, d: Option<std::time::Duration>) {
+        let l = self.g.eng.limits();
+        self.g.eng.set_limits(phitex_defuse::Limits { stall: d, ..l });
     }
 
     /// Whether the job ended on a fatal error (§93, `history =
@@ -7597,6 +7642,20 @@ mod canonical_tests {
             );
         }
     }
+}
+
+/// Half the machine's memory (/proc/meminfo's `MemTotal`; none where
+/// there is none): past it a run is stuck ([`Run::watchdog`]).
+fn half_of_memory() -> Option<u64> {
+    let t = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: u64 = t
+        .lines()
+        .find_map(|l| l.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some((kb << 10) / 2)
 }
 
 /// The process's resident set in kB (/proc/self/status; 0 where there is

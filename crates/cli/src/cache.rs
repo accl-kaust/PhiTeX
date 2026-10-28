@@ -242,19 +242,21 @@ impl Cache {
         self.remove(&self.dir)
     }
 
-    /// The line after a build or a watch: what the cache holds, and how
-    /// to empty it.
-    pub fn summary(&self) -> String {
+    /// The line after a build or a watch: what the cache holds (how to
+    /// empty it is the caller's, [`Cache::EMPTY_IT`]); `None` when the
+    /// cache is off.
+    pub fn summary(&self) -> (String, bool) {
         let dir = home_relative(&self.dir);
         if self.limit == 0 {
-            return format!("cache: off (cache-limit = 0) · {dir}");
+            return (format!("cache: off (cache-limit = 0) · {dir}"), false);
         }
-        format!(
-            "cache: {} of {} in {dir} (phitex clean)",
-            size(self.usage()),
-            size(self.limit)
-        )
+        (format!("cache: {} of {} in {dir}", size(self.usage()), size(self.limit)), true)
     }
+
+    /// The command that empties the whole cache, as the summary names it:
+    /// a bare `phitex clean` needs a document (an argument or a
+    /// phitex.toml's `main`) and fails without one.
+    pub const EMPTY_IT: &'static str = "phitex clean --all";
 }
 
 /// `p` with the home directory as `~`.

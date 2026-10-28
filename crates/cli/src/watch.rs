@@ -602,12 +602,14 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         .to_owned();
     let (tx, mut rx) = mpsc::channel::<(Instant, Event)>();
     // (a terminal editor, or an unknown one: the viewer shows the place
-    // instead of opening it)
+    // instead of opening it, said with -v only: the user chose the editor
+    // and knows where it runs)
     let editor = crate::editor::Editor::configured(t.editor.as_deref()).unwrap_or_else(|e| {
-        ui.line(&format!(
-            "{}: editor `{e}`: the viewer can't open it (--editor code, nvim, emacsclient, …)",
-            st.yellow("note")
-        ));
+        if ui.verbose > 0 {
+            ui.line(&st.dim(&format!(
+                "editor `{e}`: the viewer shows a clicked place instead of opening it (--editor code, nvim, emacsclient, …)"
+            )));
+        }
         None
     });
     let view = if o.view {
@@ -827,7 +829,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
         // (every build writes the output pdfTeX would for its input, errors
         // or not: the pages shipped; none when nothing was shipped)
-        let written = match s.write(&r, true) {
+        // (an engine failure, `Report::internal`: nothing written, the
+        // last good build's files kept)
+        let written = match if r.internal.is_some() { Err(String::new()) } else { s.write(&r, true) } {
             Ok(w) => {
                 let ours = &mut *mine;
                 for (p, h) in &w.files {
@@ -837,7 +841,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 w.main
             }
             Err(e) => {
-                ui.error(&e);
+                if !e.is_empty() {
+                    ui.error(&e);
+                }
                 None
             }
         };
@@ -1038,25 +1044,30 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 rows.push((name, ms(d)));
             }
             if let Some(x) = r.runs.last() {
-                // (a run too short to measure says only its threads)
+                // (how parallel the build was, in three facts: the cores
+                // its runs kept busy on average, the runs made for the
+                // nodes that ran (more runs than nodes: steps run ahead of
+                // their inputs and run again), and the time of the runs
+                // thrown away; a build too short to measure says its
+                // threads and runs)
                 let mut p = match x.speedup().filter(|_| x.engine_wall.as_millis() >= 50) {
-                    Some(p) => format!("{p:.1}× on {} threads", x.threads),
+                    Some(c) => format!("{c:.1} of {} cores busy", x.threads),
                     None => format!(
                         "{} thread{}",
                         x.threads,
                         if x.threads == 1 { "" } else { "s" }
                     ),
                 };
-                // (the chain is the whole document's: an edit that ran fewer
-                // nodes says nothing by it)
-                if let Some(c) = x
-                    .critical_path
-                    .filter(|&c| c > 0 && x.commands_run >= c as u64)
-                {
-                    p.push_str(&format!(" · longest chain {c} nodes"));
+                if x.runs > 0 {
+                    #[allow(clippy::cast_precision_loss, reason = "a ratio for display")]
+                    let k = x.runs as f64 / x.commands_run.max(1) as f64;
+                    p.push_str(&format!(" · {} runs for {} nodes", x.runs, x.commands_run));
+                    if k >= 1.05 {
+                        p.push_str(&format!(" ({k:.1}×)"));
+                    }
                 }
-                if x.peak_running > 0 {
-                    p.push_str(&format!(" · at most {} at once", x.peak_running));
+                if !x.wasted.is_zero() && !x.busy.is_zero() {
+                    p.push_str(&format!(" · {} of {} run again", ms(x.wasted), ms(x.busy)));
                 }
                 rows.push(("parallel".to_owned(), p));
                 if x.rss_kb > 0 {

@@ -53,6 +53,8 @@ pub struct Ctx<'a> {
     /// My last run's placements by operation and arguments, made on the
     /// first `placed_output_or`.
     placed_keys: Option<PlacedKeys>,
+    /// Why the run said it is stuck (`Ctx::stuck`).
+    pub(crate) stuck: Option<String>,
 }
 
 /// A run's placements by operation and arguments.
@@ -91,6 +93,7 @@ impl<'a> Ctx<'a> {
             woke: me.woke.lock().as_ref().map(|w| w.cause.clone()),
             placed_keys: None,
             last: me.run_record(),
+            stuck: None,
         }
     }
 
@@ -763,6 +766,19 @@ impl<'a> Ctx<'a> {
     /// Accepted and ignored: no fuel, no heartbeat.
     pub fn tick(&mut self, _n: u64) -> Result<(), Stop> {
         self.check()
+    }
+
+    /// The run makes no progress (`why`, the client's measure against
+    /// `Limits::stall` and `Limits::memory_bytes`): the `Stop` to return,
+    /// and the evaluation ends with `EvalError::Stuck` naming this node.
+    pub fn stuck(&mut self, why: String) -> Stop {
+        self.stuck = Some(why);
+        stop()
+    }
+
+    /// The engine's limits (`Engine::set_limits`).
+    pub fn limits(&self) -> crate::Limits {
+        self.eng.limits()
     }
 
 }

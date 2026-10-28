@@ -582,6 +582,15 @@ pub struct Limits {
     pub total_runs: Option<u64>,
     /// Wall time (default none).
     pub time: Option<Duration>,
+    /// How long a build may make no progress before it is stuck (default
+    /// none): a run that reports no progress for this long
+    /// (`Ctx::stuck`, the client's measure), or every worker idle for a
+    /// sixth of it with nodes still outstanding (a wake lost), ends the
+    /// evaluation with `EvalError::Stuck`, the nodes queued pending.
+    pub stall: Option<Duration>,
+    /// The process's resident memory past which a run reports itself
+    /// stuck (default none; the client measures it, `Ctx::stuck`).
+    pub memory_bytes: Option<u64>,
     /// The value store's payload at which the evaluation stops every
     /// worker at the end of its run and collects (`Engine::collect`;
     /// default none): then at twice what the last collection left, if
@@ -597,6 +606,8 @@ impl Default for Limits {
             settle_passes: 12,
             total_runs: None,
             time: None,
+            stall: None,
+            memory_bytes: None,
             collect_at_bytes: None,
         }
     }
@@ -608,6 +619,10 @@ pub enum EvalError {
     OpPanicked { node: NodeId, op: &'static str, message: String },
     TotalRuns { runs: u64 },
     Deadline,
+    /// The build stopped making progress (`Limits::stall`): a run that
+    /// said so (`Ctx::stuck`, its node and why), or the workers idle with
+    /// work outstanding (no node).
+    Stuck { node: Option<NodeId>, op: &'static str, why: String },
 }
 
 impl std::fmt::Display for EvalError {
@@ -617,6 +632,8 @@ impl std::fmt::Display for EvalError {
             EvalError::OpPanicked { node, op, message } => write!(f, "node {} ({op}) panicked: {message}", node.0),
             EvalError::TotalRuns { runs } => write!(f, "{runs} runs in all"),
             EvalError::Deadline => write!(f, "deadline"),
+            EvalError::Stuck { node: Some(n), op, why } => write!(f, "stuck: node {} ({op}): {why}", n.0),
+            EvalError::Stuck { node: None, why, .. } => write!(f, "stuck: {why}"),
         }
     }
 }

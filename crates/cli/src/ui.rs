@@ -136,33 +136,71 @@ impl Tap {
 #[derive(Default)]
 struct Bottom {
     spin: Vec<String>,
-    idle: Option<String>,
+    /// The watch's status line as given ([`Ui::status`]): its text, its
+    /// mark and the style, laid out at the terminal's width each time it
+    /// is drawn (a line laid out for a wider terminal wraps when it
+    /// narrows, and its copies piled up under every line printed).
+    idle: Option<(String, Option<bool>, Style)>,
     /// The keys shown at the status line's right end.
     keys: Option<&'static str>,
-    /// The lines on the screen now.
+    /// The lines on the screen now, and each one's width when drawn.
     drawn: usize,
+    drawn_widths: Vec<usize>,
     /// Nothing drawn below any more (the watch is quitting).
     gone: bool,
 }
 
 impl Bottom {
-    fn shown(&self) -> &[String] {
-        if self.spin.is_empty() {
-            self.idle.as_slice()
-        } else {
-            &self.spin
+    fn shown(&self) -> Vec<String> {
+        if !self.spin.is_empty() {
+            return self.spin.clone();
         }
+        let w = crate::keys::width().unwrap_or(80).saturating_sub(1);
+        self.idle
+            .iter()
+            .map(|(t, ok, st)| idle_line(*st, t, *ok, self.keys.unwrap_or(""), w))
+            .collect()
     }
 
-    /// The lines on the screen erased, the cursor at the first's start.
+    /// The lines on the screen erased, the cursor at the first's start:
+    /// each counted by the rows it takes at the terminal's width now (a
+    /// terminal that narrowed has wrapped the wider ones), then the
+    /// screen cleared from the first down.
     fn erase(&mut self, e: &mut impl std::io::Write) {
         if self.drawn > 0 {
-            let _ = write!(e, "\r\x1b[2K");
-            for _ in 1..self.drawn {
-                let _ = write!(e, "\x1b[1A\x1b[2K");
+            let cols = crate::keys::width().unwrap_or(80).max(1);
+            let rows: usize = self
+                .drawn_widths
+                .iter()
+                .map(|&w| w.div_ceil(cols).max(1))
+                .sum::<usize>()
+                .max(self.drawn);
+            let _ = write!(e, "\r");
+            if rows > 1 {
+                let _ = write!(e, "\x1b[{}A", rows - 1);
             }
+            let _ = write!(e, "\x1b[J");
             self.drawn = 0;
+            self.drawn_widths.clear();
         }
+    }
+}
+
+/// The watch's status line at width `w`: its mark, its text, and the
+/// keys at the right end when there is room.
+fn idle_line(st: Style, t: &str, ok: Option<bool>, keys: &str, w: usize) -> String {
+    let mark = match ok {
+        Some(true) => st.green("●"),
+        Some(false) => st.red("●"),
+        None => st.dim("●"),
+    };
+    let room = w.saturating_sub(2);
+    let fits = !keys.is_empty() && t.chars().count() + 3 + keys.chars().count() <= room;
+    if fits {
+        let gap = room - t.chars().count() - keys.chars().count();
+        format!("{mark} {}{}{}", st.dim(t), " ".repeat(gap), st.dim(keys))
+    } else {
+        format!("{mark} {}", st.dim(&clip(t, room)))
     }
 }
 
@@ -235,8 +273,12 @@ fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -
                 3 => "page",
                 _ => "other",
             };
-            let place = if at == phitex_tex::Progress::INSIDE {
-                "inside a macro".to_owned()
+            // (a node not in the main text: a piece of an included file,
+            // or a page's output routine)
+            let place = if op == 3 {
+                "the output routine".to_owned()
+            } else if at == phitex_tex::Progress::INSIDE {
+                "an included file".to_owned()
             } else {
                 let line = live.line_of(at);
                 format!("{}:{line}", live.file)
@@ -247,10 +289,20 @@ fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -
                 None => rows.push((row, 1)),
             }
         }
+        // (where the build is, as a reader counts: the page reached, of
+        // the last build's pages; the runs only as a sign of life)
+        let _ = (done, total);
+        let page = p.page();
+        let at = match (page, live.pages_before) {
+            (0, _) => "before the first page".to_owned(),
+            (n, 0) => format!("page {n}"),
+            (n, m) => format!("page {n} of {m}"),
+        };
         out.push(format!(
-            "       {}",
+            "       {} {}",
+            st.bold(&at),
             st.dim(&format!(
-                "[{done}/{total}] runs (a node run again counts again) · {} running · {idle} idle",
+                "· {} running · {idle} idle",
                 rows.iter().map(|r| r.1).sum::<usize>()
             ))
         ));
@@ -354,6 +406,7 @@ fn redraw(e: &mut impl std::io::Write, b: &mut Bottom) {
     let lines = b.shown();
     let _ = write!(e, "{}", lines.join("\n"));
     b.drawn = lines.len();
+    b.drawn_widths = lines.iter().map(|l| width(l)).collect();
     let _ = e.flush();
 }
 
@@ -451,24 +504,7 @@ impl Ui {
         let st = self.st;
         if st.tty && !self.json {
             let mut b = lock(&self.bottom);
-            b.idle = text.map(|t| {
-                let w = crate::keys::width().unwrap_or(80).saturating_sub(1);
-                let mark = match ok {
-                    Some(true) => st.green("●"),
-                    Some(false) => st.red("●"),
-                    None => st.dim("●"),
-                };
-                // (the keys at the right end, when there is room)
-                let keys = b.keys.unwrap_or("");
-                let room = w.saturating_sub(2);
-                let fits = !keys.is_empty() && t.chars().count() + 3 + keys.len() <= room;
-                if fits {
-                    let gap = room - t.chars().count() - keys.len();
-                    format!("{mark} {}{}{}", st.dim(t), " ".repeat(gap), st.dim(keys))
-                } else {
-                    format!("{mark} {}", st.dim(&clip(t, room)))
-                }
-            });
+            b.idle = text.map(|t| (t.to_owned(), ok, st));
             if b.spin.is_empty() {
                 redraw(&mut std::io::stderr().lock(), &mut b);
             }
@@ -486,9 +522,34 @@ impl Ui {
         }
     }
 
-    /// `keys` at the status line's right end from now on.
+    /// `keys` at the status line's right end from now on; and, the watch
+    /// being on a terminal, the bottom lines drawn again when the
+    /// terminal's width changes (looked at four times a second: a resize
+    /// while idle left the status line wrapped until the next build).
     pub fn keys(&self, keys: &'static str) {
+        static WATCHING: AtomicBool = AtomicBool::new(false);
         lock(&self.bottom).keys = Some(keys);
+        if self.st.tty && !self.json && !WATCHING.swap(true, Ordering::SeqCst) {
+            let bottom = self.bottom.clone();
+            let _ = std::thread::Builder::new().name("phitex-resize".into()).spawn(move || {
+                let mut was = crate::keys::width();
+                loop {
+                    std::thread::sleep(Duration::from_millis(250));
+                    let now = crate::keys::width();
+                    if now == was {
+                        continue;
+                    }
+                    was = now;
+                    let mut b = lock(&bottom);
+                    if b.gone {
+                        return;
+                    }
+                    if b.drawn > 0 {
+                        redraw(&mut std::io::stderr().lock(), &mut b);
+                    }
+                }
+            });
+        }
     }
 
     /// The screen cleared, the bottom lines again.
@@ -736,5 +797,25 @@ mod tests {
             e.starts_with("the sequence of pieces did not settle"),
             "{e}"
         );
+    }
+
+    /// A status line drawn 150 columns wide, the terminal then 80 (no
+    /// terminal in a test: 80): it takes two rows now, and the erase goes
+    /// up one and clears to the screen's end, not one row only (the copy
+    /// left under every printed line).
+    #[test]
+    fn erase_counts_the_rows_a_wider_line_wraps_to() {
+        let mut b = Bottom {
+            drawn: 1,
+            drawn_widths: vec![150],
+            ..Bottom::default()
+        };
+        let mut out = Vec::new();
+        b.erase(&mut out);
+        assert_eq!(String::from_utf8(out).unwrap(), "\r\x1b[1A\x1b[J");
+        assert_eq!(b.drawn, 0);
+        let st = Style { color: false, tty: false };
+        let l = idle_line(st, "amsldoc.tex · build 1 · 44 pages", Some(true), "h: keys", 30);
+        assert!(width(&l) <= 30, "{l}");
     }
 }

@@ -754,7 +754,18 @@ pub fn cache_summary(t: &Target, ui: &Ui) {
     match crate::cache::Cache::open(t.cache_limit) {
         Ok(c) => {
             if !ui.quiet {
-                ui.line(&ui.st.dim(&c.summary()));
+                let (text, on) = c.summary();
+                let st = ui.st;
+                if on {
+                    ui.line(&format!(
+                        "{}{}{}",
+                        st.dim(&format!("{text} · run ")),
+                        st.cyan(crate::cache::Cache::EMPTY_IT),
+                        st.dim(" to empty it")
+                    ));
+                } else {
+                    ui.line(&st.dim(&text));
+                }
             }
             ui.event(&json!({
                 "event": "cache",
@@ -853,6 +864,18 @@ pub fn main(args: &[String]) -> ! {
     };
     let t = resolve(&o).unwrap_or_else(|e| {
         ui.error(&e);
+        // (a bare `clean` with no document: what it can do instead)
+        if command == Command::Clean && o.file.is_none() {
+            let st = ui.st;
+            ui.line(&format!(
+                "{} {} {} {} {}",
+                st.dim("run"),
+                st.cyan("phitex clean paper.tex"),
+                st.dim("for one document's outputs and cache, or"),
+                st.cyan(crate::cache::Cache::EMPTY_IT),
+                st.dim("for the whole cache")
+            ));
+        }
         std::process::exit(crate::EXIT_FAILED);
     });
     phitex_tex::timeline::lap("cli: the arguments, the target (configuration read)");

@@ -27,6 +27,18 @@ pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
 /// `PHITEX_HEARTBEAT_FROM`: the command count the per-command trace starts at.
 static HEARTBEAT_FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
+/// What the stuck check ([`Run::watchdog`]) last saw of a run: its lines
+/// read, its assignments' clock, when a line was last read, the command
+/// count at its last progress, and the checks made.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Watchdog {
+    lines: (i64, usize),
+    stamp: u64,
+    at: Option<std::time::Instant>,
+    cmds_at: u64,
+    ticks: u64,
+}
+
 impl Run<'_, '_> {
     /// The node's command: expand once, or do one command (§1030). An
     /// expansion is followed by the next command here, as §1030's
@@ -39,10 +51,16 @@ impl Run<'_, '_> {
             // heartbeat's own work every `HB_BATCH` commands)
             self.cmds += 1;
             if self.cmds >= self.hb_at {
-                let done = self.hb_done;
-                self.heartbeat_tick();
-                // (the engine bounds a run on a guess by its work)
-                self.cx.tick(self.cmds - done)?;
+                if Self::heartbeat_on() {
+                    let done = self.hb_done;
+                    self.heartbeat_tick();
+                    // (the engine bounds a run on a guess by its work)
+                    self.cx.tick(self.cmds - done)?;
+                } else {
+                    self.hb_done = self.cmds;
+                    self.hb_at = self.cmds + Self::HB_BATCH;
+                }
+                self.watchdog()?;
             }
             self.no_pull = true;
             let got = self.get_next();
@@ -121,12 +139,138 @@ impl Run<'_, '_> {
     /// The commands between two heartbeat ticks ([`Run::heartbeat_tick`]).
     pub(crate) const HB_BATCH: u64 = 4096;
 
+    /// Whether the heartbeat's diagnostics are on (`PHITEX_HEARTBEAT=1`).
+    fn heartbeat_on() -> bool {
+        crate::exec::obs_flag!("PHITEX_HEARTBEAT")
+    }
+
+    /// The run's progress, every [`Run::HB_BATCH`] commands (always: a
+    /// clock read, a walk of the input's levels and a few compares): a run
+    /// that reads no new line of its input (a document line, or a file's
+    /// read here) for `Limits::stall`, that runs 20 million commands
+    /// without an assignment or a new line, or past `Limits::memory_bytes`
+    /// resident (looked at every 64 checks), is stuck, and the evaluation
+    /// ends with `EvalError::Stuck` naming it and where it is. A
+    /// one-letter edit of amsldoc left a page's run going for minutes at
+    /// 5 GB and growing, the watch waiting on it with no way out.
+    pub(crate) fn watchdog(&mut self) -> R<()> {
+        let lim = self.cx.limits();
+        let now = std::time::Instant::now();
+        // (input read: the document lines entered, and where each file
+        // read here is; a package's lines are a file's)
+        let off: usize = self
+            .input
+            .levels
+            .iter()
+            .filter(|l| l.kind == crate::input::kind::FILE)
+            .map(|l| self.input.file(*l).off)
+            .sum();
+        let lines = (self.lines_entered, off);
+        let (stamp, cmds) = (self.st.stamp(), self.cmds);
+        let w = &mut self.wd;
+        let Some(at) = w.at else {
+            *w = Watchdog {
+                lines,
+                stamp,
+                at: Some(now),
+                cmds_at: cmds,
+                ticks: 0,
+            };
+            return Ok(());
+        };
+        let mut at = at;
+        if lines != w.lines {
+            w.lines = lines;
+            w.at = Some(now);
+            at = now;
+            w.cmds_at = cmds;
+        }
+        if stamp != w.stamp {
+            w.stamp = stamp;
+            w.cmds_at = cmds;
+        }
+        w.ticks += 1;
+        let (still, ticks) = (cmds - w.cmds_at, w.ticks);
+        let since = now.duration_since(at);
+        let why = if lim.stall.is_some_and(|s| since >= s) {
+            Some(format!("it read no new line of its input for {} s", since.as_secs()))
+        } else if still >= 20_000_000 {
+            Some(format!(
+                "it ran {} million commands without an assignment or a new line of input, an endless loop",
+                still / 1_000_000
+            ))
+        } else if ticks % 64 == 0
+            && let Some(m) = lim.memory_bytes
+            && crate::api::rss_kb() << 10 > m
+        {
+            #[allow(clippy::cast_precision_loss, reason = "a display of bytes")]
+            let gb = |b: u64| b as f64 / f64::from(1u32 << 30);
+            Some(format!(
+                "the process holds {:.1} GB, past the limit of {:.1} GB",
+                gb(crate::api::rss_kb() << 10),
+                gb(m)
+            ))
+        } else {
+            None
+        };
+        match why {
+            Some(why) => {
+                let at = self.where_now();
+                Err(crate::run::Halt::Stop(self.cx.stuck(format!("{why}; at {at}"))))
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Where the run is, for a report: the innermost file's name and line,
+    /// the command it is on, and how deep its input and its lists are.
+    pub(crate) fn where_now(&self) -> String {
+        // (the innermost file read here, by line; else the innermost line
+        // of a document piece, by its byte in its file: `the main file
+        // byte N` for the main text, which the front end turns into a line)
+        let place = self.input.levels.iter().rev().find_map(|l| match l.kind {
+            crate::input::kind::FILE => {
+                let (file, line) = self.input.file(*l).where_(self.v);
+                Some(format!("{file}:{line}"))
+            }
+            crate::input::kind::LINE => {
+                let s = &self.input.lines[l.a as usize];
+                s.origin.map(|(name, pos, _)| {
+                    let name = crate::val::str_of(self.v, name);
+                    let name = if name.starts_with('\u{10FFFE}') { "the main file".to_owned() } else { name };
+                    if s.lineno > 0 {
+                        format!("{name}:{}", s.lineno)
+                    } else {
+                        format!("{name} byte {pos}")
+                    }
+                })
+            }
+            _ => None,
+        });
+        let mut last = String::new();
+        crate::print::print_cs(&mut last, self.cur.tok, i64::from(b'\\'), &mut |c| {
+            if char::from_u32(c).is_some_and(char::is_alphabetic) {
+                11
+            } else {
+                12
+            }
+        });
+        let place = place.unwrap_or_else(|| "no file".to_owned());
+        format!(
+            "{place}, on {last}, input {} levels deep, {} lists open, {} commands run",
+            self.input.depth(),
+            self.nest.len(),
+            self.cmds
+        )
+    }
+
     /// Where the heartbeat's first tick of a run is: every command
     /// while a trace window is asked for (`PHITEX_HEARTBEAT_FROM`), every
-    /// [`Run::HB_BATCH`] commands with `PHITEX_HEARTBEAT=1`, never else.
+    /// [`Run::HB_BATCH`] commands with `PHITEX_HEARTBEAT=1`, else every
+    /// [`Run::HB_BATCH`] for the stuck check ([`Run::watchdog`]) alone.
     pub(crate) fn heartbeat_start() -> u64 {
         if !crate::exec::obs_flag!("PHITEX_HEARTBEAT") {
-            return u64::MAX;
+            return Self::HB_BATCH;
         }
         if std::env::var_os("PHITEX_HEARTBEAT_FROM").is_some() {
             1

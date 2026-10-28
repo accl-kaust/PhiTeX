@@ -35,6 +35,8 @@ pub struct Live {
     /// shown (an edit too quick to show one never counts them).
     pub text: Arc<str>,
     pub lines: Arc<std::sync::OnceLock<Vec<usize>>>,
+    /// The pages the last build made (0: none, a cold build).
+    pub pages_before: usize,
 }
 
 impl Live {
@@ -182,6 +184,10 @@ pub struct RunInfo {
     pub threads: usize,
     pub busy: Duration,
     pub engine_wall: Duration,
+    /// Runs in all (a node run again counts again), and of the busy time
+    /// the runs thrown away (not their node's last).
+    pub runs: u64,
+    pub wasted: Duration,
     /// The longest chain of nodes each waiting on the last (none: not
     /// known): nodes run / it is the most parallel the run could be.
     pub critical_path: Option<usize>,
@@ -757,11 +763,13 @@ impl Session {
         let lines: Arc<std::sync::OnceLock<Vec<usize>>> = Arc::default();
         phitex_tex::timeline::lap("session: files to read again, the line starts");
         let file = plain_name(&self.job.path.to_string_lossy());
+        let pages_before = self.page_hashes.len();
         let live = |progress| Live {
             progress,
             file: file.clone(),
             text: text.clone(),
             lines: lines.clone(),
+            pages_before,
         };
         let ran = crate::ui::catch(|| -> Result<(), String> {
             if let Some(b) = &mut self.build {
@@ -882,6 +890,14 @@ impl Session {
         // cold one: the files a later change of one is matched against)
         if let Some(b) = &self.build {
             if cold {
+                // (an edit may take what the cold build took, five times
+                // over, at least a minute, before it is stuck: held to
+                // what this document has shown it needs, not to a clock
+                // a slow machine or a large document would trip;
+                // `PHITEX_STUCK_SECS` over it)
+                if std::env::var_os("PHITEX_STUCK_SECS").is_none() {
+                    b.set_stuck_after(Some((t0.elapsed() * 5).max(Duration::from_secs(60))));
+                }
                 self.inputs.clear();
             }
             for (n, found) in b.reads() {
@@ -1090,7 +1106,7 @@ impl Session {
             let shown: Vec<String> = phases.iter().map(|(n, d)| format!("{n} {d:?}")).collect();
             eprintln!("session phases ({why}): {}", shown.join(", "));
         }
-        Report {
+        let mut report = Report {
             out: Output {
                 pdf: pdf_bytes,
                 dvi: dvi_bytes,
@@ -1116,8 +1132,12 @@ impl Session {
                 rounds: s.loop_rounds,
                 live: s.live,
                 threads: s.threads,
-                busy: s.busy,
+                // (the engine's own measure: the client's is a profile
+                // build's only, zero in a release)
+                busy: if s.busy.is_zero() { s.engine_busy } else { s.busy },
                 engine_wall: s.wall,
+                runs: s.runs,
+                wasted: s.engine_wasted,
                 critical_path: s.critical_path,
                 peak_running: s.peak_running,
                 batches: s.batches,
@@ -1178,7 +1198,40 @@ impl Session {
             }))
             .collect(),
             wall,
+        };
+        // (the engine failed: its account written for a bug report and
+        // named after the errors; the engine dropped, so the next build
+        // starts cold instead of running the failed node again)
+        if let Some(internal) = report.internal.clone() {
+            // (`the main file byte N`, the engine's place in the main
+            // text, said as its line)
+            if let Some(text) = &self.built_text {
+                let file = self.job.file.clone();
+                let at_line = |s: &str| -> String {
+                    let key = "the main file byte ";
+                    let Some(k) = s.find(key) else {
+                        return s.to_owned();
+                    };
+                    let rest = &s[k + key.len()..];
+                    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                    let Ok(pos) = digits.parse::<usize>() else {
+                        return s.to_owned();
+                    };
+                    let lineno = text[..pos.min(text.len())].matches('\n').count() + 1;
+                    format!("{}{file}:{lineno}{}", &s[..k], &rest[digits.len()..])
+                };
+                report.out.errors = report.out.errors.iter().map(|e| at_line(e)).collect();
+                report.internal = Some(at_line(&internal));
+            }
+            let internal = report.internal.clone().unwrap_or(internal);
+            let threads = report.runs.last().map_or(0, |x| x.threads);
+            if let Some(p) = crate::failure::report_file(&self.job.file, why, threads, &internal, &report.out.errors) {
+                report.out.errors.push(format!("the report for it: {}", crate::cache::home_relative(&p)));
+            }
+            self.build = None;
+            self.built_text = None;
         }
+        report
     }
 
     /// File `name`'s bytes as a diagnostic names it: the main text as the

@@ -513,6 +513,9 @@ pub(crate) struct Run<'c, 'a> {
     pub exps: u64,
     pub hb_at: u64,
     pub hb_done: u64,
+    /// The run's progress as the stuck check last saw it
+    /// ([`Run::watchdog`]).
+    pub(crate) wd: crate::control::Watchdog,
     pub pulled: usize,
     /// In a run resumed from a park, how many segments at the head of the
     /// input's text were levels of the input when it parked (top first,
@@ -913,6 +916,7 @@ impl<'c, 'a> Run<'c, 'a> {
             exps: 0,
             hb_at: Run::heartbeat_start(),
             hb_done: 0,
+            wd: crate::control::Watchdog::default(),
             pulled: 0,
             parked_levels: 0,
             pull_at: Vec::new(),

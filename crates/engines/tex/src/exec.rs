@@ -148,6 +148,8 @@ pub struct Progress {
     slots: Box<[AtomicU64]>,
     done: AtomicU64,
     total: AtomicU64,
+    /// The highest page number a finisher reached in this evaluation.
+    page: AtomicU64,
 }
 
 impl Progress {
@@ -163,6 +165,7 @@ impl Progress {
             slots: (0..=workers).map(|_| AtomicU64::new(0)).collect(),
             done: AtomicU64::new(0),
             total: AtomicU64::new(0),
+            page: AtomicU64::new(0),
         }
     }
 
@@ -193,6 +196,20 @@ impl Progress {
     pub(crate) fn begin(&self) {
         self.done.store(0, Ordering::Relaxed);
         self.total.store(0, Ordering::Relaxed);
+        self.page.store(0, Ordering::Relaxed);
+    }
+
+    /// A finisher reached page `n` (its ordinary pages counted, the
+    /// first 1).
+    pub(crate) fn note_page(&self, n: u64) {
+        self.page.fetch_max(n, Ordering::Relaxed);
+    }
+
+    /// The highest page a finisher reached in this evaluation (0: none
+    /// yet): where the build is, as a reader counts pages.
+    #[must_use]
+    pub fn page(&self) -> u64 {
+        self.page.load(Ordering::Relaxed)
     }
 
     /// The jobs finished in this evaluation.

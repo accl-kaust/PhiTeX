@@ -656,8 +656,26 @@ impl Pool {
         self.shared.idle.fetch_add(1, Ordering::SeqCst);
         fence(Ordering::SeqCst);
         let t_idle = Instant::now();
+        let runs0 = self.shared.runs_now.load(Ordering::Relaxed);
         let r = loop {
             stall_dump(eng, &self.shared, t_idle);
+            // (every worker idle, work outstanding and no run ended for a
+            // sixth of `Limits::stall`: a wake was lost and nothing will
+            // run it; the evaluation ends stuck instead of waiting)
+            if let Some(s) = self.limits.stall
+                && t_idle.elapsed() >= s / 6
+                && self.shared.idle.load(Ordering::SeqCst) >= self.shared.spawned.load(Ordering::SeqCst)
+                && self.shared.outstanding.load(Ordering::SeqCst) > 0
+                && self.shared.runs_now.load(Ordering::Relaxed) == runs0
+            {
+                let n = self.shared.outstanding.load(Ordering::SeqCst);
+                self.fail(EvalError::Stuck {
+                    node: None,
+                    op: "",
+                    why: format!("every worker idle for {} s with {n} nodes outstanding: a wake was lost", (s / 6).as_secs()),
+                });
+                break None;
+            }
             if self.shared.stop.load(Ordering::SeqCst) || self.shared.collect_wanted.load(Ordering::SeqCst) {
                 break None;
             }
@@ -1266,6 +1284,16 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             w.log.lock().panicked.push((n, reads, op.name(), message));
             pool.shared.done_one();
             Ok(())
+        }
+        Ok(Err(_stop)) if cx.stuck.is_some() => {
+            let why = cx.stuck.take().unwrap_or_default();
+            drop(cx);
+            give_back(eng, node);
+            Err(EvalError::Stuck {
+                node: Some(n),
+                op: op.name(),
+                why,
+            })
         }
         Ok(Err(_stop)) => {
             drop(cx);

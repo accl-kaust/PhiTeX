@@ -7,7 +7,43 @@
 //! whose fault it is. The whole text stays for `-v` (`Report::internal`).
 
 /// What the engine's own failures end with: not the document's fault.
-const BUG: &str = "This is a bug in PhiTeX, not in the document: please report it with the output of `phitex build -v`";
+const BUG: &str = "This is a bug in PhiTeX, not in the document: please report it with the report file named below";
+
+/// An engine failure written out for a bug report: what PhiTeX was, the
+/// command, the document's name (not its text), the build, the engine's
+/// whole account (`internal`) and the errors shown. In the cache's
+/// `reports` directory; its path, or none where it could not be written.
+pub fn report_file(file: &str, why: &str, threads: usize, internal: &str, errors: &[String]) -> Option<std::path::PathBuf> {
+    let dir = crate::tex::cache_dir().join("reports");
+    std::fs::create_dir_all(&dir).ok()?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let exe = std::env::current_exe().ok();
+    let built = exe
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    let mut s = String::new();
+    s.push_str("PhiTeX failure report\n");
+    s.push_str(&format!("version: {} (binary {}, built at unix {built})\n", env!("CARGO_PKG_VERSION"), exe.map_or_else(String::new, |p| p.display().to_string())));
+    s.push_str(&format!("time: unix {secs}\n"));
+    s.push_str(&format!("command: {}\n", std::env::args().collect::<Vec<_>>().join(" ")));
+    s.push_str(&format!("document: {file}\n"));
+    s.push_str(&format!("build: {why}, {threads} threads\n"));
+    s.push_str("errors shown:\n");
+    for e in errors {
+        s.push_str(&format!("  {e}\n"));
+    }
+    s.push_str("engine:\n");
+    s.push_str(internal);
+    s.push('\n');
+    let p = dir.join(format!("report-{secs}-{}.txt", std::process::id()));
+    std::fs::write(&p, s).ok()?;
+    Some(p)
+}
 
 /// The node an engine message names first (its lines `  NodeId(..): op
 /// state, parent .., hint "text" (cause), args ..`), as ` at <op> on
@@ -110,6 +146,17 @@ pub fn explain(m: &str) -> String {
         return format!("PhiTeX's engine failed: the {what} panicked{at}: {msg}. {BUG}");
     }
     let e = first.strip_prefix("evaluation: ").unwrap_or(first);
+    // (the build stopped making progress, `EvalError::Stuck`: `stuck: node
+    // N (op): why; at place` or `stuck: why`)
+    if let Some(rest) = e.strip_prefix("stuck: ") {
+        let why = match rest.strip_prefix("node ") {
+            Some(r) => r.split_once("): ").map_or(rest, |(_, w)| w),
+            None => rest,
+        };
+        return format!(
+            "the build stopped: it made no progress ({why}){node}. The last good output is kept. If pdflatex finishes this document, this is a bug in PhiTeX: please report it with the report file named below"
+        );
+    }
     if let Some(rest) = e.strip_prefix("no fixpoint after ") {
         let rounds = rest.split(' ').next().unwrap_or("?");
         let written: Vec<String> = m
@@ -213,6 +260,19 @@ mod tests {
             s.starts_with("PhiTeX's engine failed: a step panicked at page on \"x\": oops."),
             "{s}"
         );
+    }
+
+    #[test]
+    fn stuck_says_why_and_where() {
+        let m = "evaluation: stuck: node 2167 (finish): it read no new line of its input for 60 s; at amsldoc.tex:2174, on \\foo, input 9 levels deep, 3 lists open, 812 commands run\n  NodeId(2167): finish Running, parent None, hint \"\" (none), args";
+        let s = explain(m);
+        assert!(
+            s.starts_with("the build stopped: it made no progress (it read no new line of its input for 60 s; at amsldoc.tex:2174"),
+            "{s}"
+        );
+        assert!(s.contains("last good output is kept"), "{s}");
+        let s = explain("evaluation: stuck: every worker idle for 10 s with 3 nodes outstanding: a wake was lost");
+        assert!(s.contains("(every worker idle for 10 s with 3 nodes outstanding: a wake was lost)"), "{s}");
     }
 
     #[test]
