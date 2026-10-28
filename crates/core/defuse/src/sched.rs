@@ -224,10 +224,12 @@ impl Worker {
     /// Seeds the block with nodes to run in this order.
     pub(crate) fn seed(&self, nodes: &[NodeId]) {
         let run = self.block_runs.fetch_add(1, Ordering::Relaxed);
+        // (counted before pushed: a count that reaches zero ends the
+        // evaluation, so no entry may be seen before its count)
+        self.shared.outstanding.fetch_add(nodes.len(), Ordering::SeqCst);
         for &n in nodes.iter().rev() {
             self.block.push((n, run));
         }
-        self.shared.outstanding.fetch_add(nodes.len(), Ordering::SeqCst);
     }
 }
 

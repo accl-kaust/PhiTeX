@@ -9,6 +9,12 @@ use phitex_defuse::{
     At, Ctx, Engine, Field, FieldAt, Limits, NodeId, NodeState, OpId, Operation, Report, Step, Stop, ValueId, Values,
 };
 
+/// Whether the wall-clock bounds are checked: not with `PHITEX_SKIP_TIMING`
+/// set (a loaded machine; the counts are checked always).
+fn timing() -> bool {
+    std::env::var_os("PHITEX_SKIP_TIMING").is_none()
+}
+
 /// `[f, v]`: defines f = v; outputs v.
 struct Def;
 
@@ -314,7 +320,7 @@ fn a_learned_shape_runs_the_chain_side_by_side() {
     let runs = o.routine_runs.0.load(Ordering::Relaxed);
     assert!(runs <= 2 * 200, "each routine runs at most twice (predicted, then confirmed): {runs}");
     assert!(r.shaped >= 190, "pending routines were given the relation: {r:?}");
-    assert!(wall < Duration::from_millis(150), "200 x 2 ms serial is 400 ms, twice over 8 threads is 100 ms: {wall:?}");
+    assert!(!timing() || wall < Duration::from_millis(150), "200 x 2 ms serial is 400 ms, twice over 8 threads is 100 ms: {wall:?}");
     assert!(e.check_invariants().is_empty());
 }
 
@@ -344,8 +350,8 @@ fn commits_do_not_wait_on_each_other() {
     );
     assert!(r.commits >= r.runs);
     let avg_commit_ns = r.times.commit_ns / r.commits;
-    assert!(avg_commit_ns <= 20_000, "a commit is a few microseconds, not {avg_commit_ns} ns: {:?}", r.times);
-    assert!(r.times.commit_max_ns < 1_000_000, "no commit takes a millisecond: {:?}", r.times);
+    assert!(!timing() || avg_commit_ns <= 20_000, "a commit is a few microseconds, not {avg_commit_ns} ns: {:?}", r.times);
+    assert!(!timing() || r.times.commit_max_ns < 1_000_000, "no commit takes a millisecond: {:?}", r.times);
     assert!(e.check_invariants().is_empty());
 }
 
@@ -393,7 +399,7 @@ fn a_fold_is_a_monoid_over_segments() {
     e.replace(cs[2500], o.contrib, vec![s, v.int(-1)]);
     let t = Instant::now();
     let rep = e.evaluate(4).unwrap();
-    assert!(t.elapsed() < Duration::from_millis(10), "a fold over segment sums, not over 5000 items: {:?}", t.elapsed());
+    assert!(!timing() || t.elapsed() < Duration::from_millis(10), "a fold over segment sums, not over 5000 items: {:?}", t.elapsed());
     let xs = e.values().seq_to_vec(e.output(r).unwrap());
     assert_eq!(e.values().as_int(xs[2500]), Some(-1));
     assert_eq!(rep.nodes_run, 2, "the contributor and the fold's reader, not {}: {rep:?}", rep.nodes_run);
@@ -438,7 +444,7 @@ fn an_edit_costs_what_changed() {
     let t = Instant::now();
     let r = e.evaluate(4).unwrap();
     assert_eq!(r.nodes_run, 2, "{r:?}");
-    assert!(t.elapsed() < Duration::from_millis(5), "an edit of two nodes among 20000 in {:?}", t.elapsed());
+    assert!(!timing() || t.elapsed() < Duration::from_millis(5), "an edit of two nodes among 20000 in {:?}", t.elapsed());
     assert!(e.check_invariants().is_empty());
 }
 
@@ -558,7 +564,7 @@ fn a_commit_walks_only_to_the_next_definition() {
     let t = Instant::now();
     let r = e.evaluate(4).unwrap();
     assert_eq!(r.nodes_run, 10, "the definer and its nine readers up to the next definition: {r:?}");
-    assert!(t.elapsed() < Duration::from_millis(2), "ten nodes among 100000 in {:?}", t.elapsed());
+    assert!(!timing() || t.elapsed() < Duration::from_millis(2), "ten nodes among 100000 in {:?}", t.elapsed());
     assert!(e.check_invariants().is_empty());
 }
 
@@ -589,7 +595,7 @@ fn an_insert_shifts_a_counter_chain_side_by_side() {
     let runs = o.routine_runs.0.load(Ordering::Relaxed) - before;
     assert!(runs <= 501 + 10, "the inserted one and the 500 whose read shifted, once each: {runs}");
     assert!(r.relative_resolved >= 500, "the shifted relations are recomputed in place: {r:?}");
-    assert!(wall < Duration::from_millis(250), "500 x 1 ms side by side on 8 is about 63 ms, serial is 500 ms: {wall:?}");
+    assert!(!timing() || wall < Duration::from_millis(250), "500 x 1 ms side by side on 8 is about 63 ms, serial is 500 ms: {wall:?}");
     assert!(e.check_invariants().is_empty());
 }
 
@@ -1111,7 +1117,7 @@ fn a_claim_reads_its_siblings_in_one_pass() {
     e.evaluate(1).unwrap();
     let wall = t.elapsed();
     assert_eq!(e.claimed(cl).len(), n as usize);
-    assert!(wall < Duration::from_millis(80), "a claim of {n} read in {wall:?}: one pass is about 15 ms, one per sibling about 250");
+    assert!(!timing() || wall < Duration::from_millis(80), "a claim of {n} read in {wall:?}: one pass is about 15 ms, one per sibling about 250");
 }
 
 /// Integer sum whose every combine takes 300 microseconds.
@@ -1145,7 +1151,7 @@ fn a_fold_sums_a_segment_outside_its_lock() {
         }
     }
     let r = e.evaluate(8).unwrap();
-    assert!(r.times.lock_wait_max_ns < 3_000_000, "a lock waited for a fold's sum: {:?}", r.times);
+    assert!(!timing() || r.times.lock_wait_max_ns < 3_000_000, "a lock waited for a fold's sum: {:?}", r.times);
 }
 
 #[test]
