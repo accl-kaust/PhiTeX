@@ -80,6 +80,18 @@ impl Layout {
         chunks_hash(self.chunks())
     }
 
+    /// Whether `o` is the same file as [`Layout::hash`] sees it, compared
+    /// whole: the same chunks, each the same bytes with the same objects
+    /// (a file cut into other chunks counts as another, as its hash may).
+    #[must_use]
+    pub fn same_chunks(&self, o: &Layout) -> bool {
+        self.count() == o.count()
+            && self
+                .chunks()
+                .zip(o.chunks())
+                .all(|(a, b)| (Arc::ptr_eq(&a.bytes, &b.bytes) || a.bytes == b.bytes) && a.objs == b.objs)
+    }
+
     /// The bytes before the cross-reference section.
     #[must_use]
     pub fn len(&self) -> usize {

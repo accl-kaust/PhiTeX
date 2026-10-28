@@ -316,6 +316,10 @@ pub(crate) struct Cmd {
     f: Mutex<CmdFn>,
     fonts: Fonts,
     wparams: WParams,
+    /// What the command is apart from its fonts (its node, its place
+    /// among the node's commands, its input, its parameters): with the
+    /// fonts, the key its serial is the hash of ([`remember_cmd`]).
+    words: Box<[u64]>,
     /// The node that ran it (for the link's trace).
     node: u64,
 }
@@ -346,10 +350,24 @@ pub(crate) fn note_read_time(r: &mut Run<'_, '_>, n: i64) {
 /// The build's read-time commands by serial ([`crate::run::Ops::pdf_cmds`]).
 pub(crate) type CmdMemo = Mutex<FxHashMap<u64, Arc<Cmd>>>;
 
-/// Command `c` under `serial` (a run made again makes the same handle:
-/// the same command).
-fn remember_cmd(cmds: &CmdMemo, serial: u64, c: Cmd) {
-    cmds.locked().insert(serial, Arc::new(c));
+/// Command `c` under its serial, `serial` unless another command holds
+/// that (the hash of its key, [`Cmd::words`] and its fonts: a run made
+/// again makes the same command, and the same serial): then the next
+/// free one of the serials its hash probes on to. The serial it is
+/// under.
+fn remember_cmd(cmds: &CmdMemo, mut serial: u64, c: Cmd) -> u64 {
+    let mut m = cmds.locked();
+    loop {
+        match m.get(&serial) {
+            Some(o) if o.words != c.words || !o.fonts.same_as(&c.fonts) => {
+                serial = phitex_defuse::hash_words(serial, &[1]);
+            }
+            _ => {
+                m.insert(serial, Arc::new(c));
+                return serial;
+            }
+        }
+    }
 }
 
 /// One page as the exact writer ships it, made by the page's own step
@@ -359,6 +377,10 @@ fn remember_cmd(cmds: &CmdMemo, serial: u64, c: Cmd) {
 /// shipped it has already written it once, apart, so that the link finds
 /// its content stream compressed.
 pub(crate) struct PagePiece {
+    /// What it is made of (by the values' identities) but its fonts, its
+    /// date and its jobname: with those, the key its key is the hash of
+    /// ([`keep_piece`]).
+    words: Box<[u64]>,
     /// The writer's parameters where it was shipped ([`WParams`]).
     wparams: WParams,
     params: Vec<ValueId>,
@@ -394,14 +416,14 @@ pub(crate) struct PagePiece {
 type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
 
 /// A page's box ([`PagePiece::bx`]) and, where its sealed lines are
-/// filled in, the hash of the units they were read from
-/// ([`lines_hash`]) and what the filling replaced
+/// filled in, the units they were read from ([`lines_key`]) and what the
+/// filling replaced
 /// (`crate::nodes::fill_sealed`): the lines stay filled while the units
 /// are the same (a cold build fills each page once and never puts the
 /// stand-ins back, nor drops the lines).
 struct PageBox {
     bx: BoxNode,
-    filled: Option<u64>,
+    filled: Option<Lines>,
     saved: Vec<(usize, phitex_typeset::glue::GlueSet, phitex_typeset::node::List)>,
 }
 
@@ -426,38 +448,37 @@ type Made = (phitex_pdf::PageRecord, BTreeSet<FontId>, usize);
 /// The pages written, by their piece's key and their sealed lines (their
 /// boxes as their pieces made them, `crate::pages::seal`): the piece is
 /// the page's shape, the lines what it holds besides.
-type RecordMemo = Mutex<FxHashMap<(u64, u64), Arc<OnceLock<Made>>>>;
+type RecordMemo = Mutex<FxHashMap<(u64, Lines), Arc<OnceLock<Made>>>>;
 
 fn records() -> &'static RecordMemo {
     static P: OnceLock<RecordMemo> = OnceLock::new();
     P.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
-/// A hash of the items of the pieces page `pc`'s sealed lines are in
-/// (`units`, by piece): what its lines are a function of; `None` where
-/// one is not found.
-fn lines_hash(pc: &PagePiece, units: &FxHashMap<i64, ValueId>) -> Option<u64> {
-    let mut h = 0x7061_6765_6c69_6e65_u64;
-    for &p in &pc.pieces {
-        h = phitex_defuse::hash_words(h, &[p.cast_unsigned(), units.get(&p)?.raw()]);
-    }
-    Some(h)
+/// The items of the pieces a page's sealed lines are in, by piece
+/// ([`lines_key`]): what its lines are a function of.
+type Lines = Arc<[(i64, ValueId)]>;
+
+/// [`Lines`] of page `pc` (`units`, by piece); `None` where one is not
+/// found.
+fn lines_key(pc: &PagePiece, units: &FxHashMap<i64, ValueId>) -> Option<Lines> {
+    pc.pieces.iter().map(|&p| Some((p, *units.get(&p)?))).collect()
 }
 
 /// `f` of page `pc`'s box with its sealed lines filled in
 /// ([`crate::nodes::fill_sealed`], `line` giving a line's box as its
-/// piece made it from the units hashed `h`, [`lines_hash`]), the box
+/// piece made it from the units `h`, [`lines_key`]), the box
 /// filled in place (no copy of the page) and left so while the units
 /// are the same ([`PageBox`]); `None` where a line is not found.
 fn with_page_box<T>(
     v: &Values,
     pc: &PagePiece,
-    h: u64,
+    h: &Lines,
     line: &mut dyn FnMut(&crate::nodes::Sealed) -> Option<ValueId>,
     f: impl FnOnce(&BoxNode) -> T,
 ) -> Option<T> {
     let mut g = pc.bx.locked();
-    if pc.lazy.is_empty() || g.filled == Some(h) {
+    if pc.lazy.is_empty() || g.filled.as_ref() == Some(h) {
         return Some(f(&g.bx));
     }
     g.unfill();
@@ -472,21 +493,21 @@ fn with_page_box<T>(
         g.unfill();
         return None;
     }
-    g.filled = Some(h);
+    g.filled = Some(h.clone());
     Some(f(&g.bx))
 }
 
-/// The record of page `pc` (key `key`), its sealed lines' units hashed
-/// `h` ([`lines_hash`], `line` giving the lines), made once, by whichever asks
+/// The record of page `pc` (key `key`), its sealed lines' units `h`
+/// ([`lines_key`], `line` giving the lines), made once, by whichever asks
 /// first ([`write_page`]).
 fn record_of(
     v: &Values,
     key: u64,
     pc: &PagePiece,
-    h: u64,
+    h: &Lines,
     line: &mut dyn FnMut(&crate::nodes::Sealed) -> Option<ValueId>,
 ) -> Arc<OnceLock<Made>> {
-    let k = (key, h);
+    let k = (key, h.clone());
     let m = {
         let mut all = records().locked();
         // (the records of builds gone: dropped wholesale past a bound,
@@ -596,10 +617,10 @@ type Map = phitex_pdf::map::MapIndex;
 /// first caller computes it, concurrent callers of the same key wait for
 /// that result instead of computing it again (every page step asks for
 /// `pdftex.map` at once in a cold build).
-type Once<V> = Mutex<FxHashMap<u64, Arc<OnceLock<V>>>>;
+type Once<V, K = u64> = Mutex<FxHashMap<K, Arc<OnceLock<V>>>>;
 
 /// The memo's value for `key`, `f` run only by the key's first caller.
-fn once<V: Clone>(m: &Once<V>, key: u64, f: impl FnOnce() -> V) -> V {
+fn once<V: Clone, K: std::hash::Hash + Eq>(m: &Once<V, K>, key: K, f: impl FnOnce() -> V) -> V {
     let cell = m.locked().entry(key).or_default().clone();
     cell.get_or_init(f).clone()
 }
@@ -1226,6 +1247,33 @@ impl Fonts {
         }
         phitex_defuse::hash_words(h, &[u64::from(self.space.unwrap_or(0))])
     }
+
+    /// Whether `o` is these fonts as [`Fonts::digest`] sees them,
+    /// compared whole: the digest is a hash, a key's equality is this.
+    pub(crate) fn same_as(&self, o: &Fonts) -> bool {
+        // (no file and an empty one alike, as `blob_hash` has them)
+        fn blob(a: Option<&Arc<[u8]>>, b: Option<&Arc<[u8]>>) -> bool {
+            match (a.filter(|x| !x.is_empty()), b.filter(|x| !x.is_empty())) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a[..] == b[..],
+                _ => false,
+            }
+        }
+        self.space.unwrap_or(0) == o.space.unwrap_or(0)
+            && self.nums == o.nums
+            && self.by_id.len() == o.by_id.len()
+            && self.by_id.iter().all(|(f, x)| {
+                o.by_id.get(f).is_some_and(|y| {
+                    x.name == y.name
+                        && x.loaded.at.size == y.loaded.at.size
+                        && x.entry == y.entry
+                        && blob(x.ff.as_ref(), y.ff.as_ref())
+                        && blob(x.enc.as_ref(), y.enc.as_ref())
+                })
+            })
+            && self.files.len() == o.files.len()
+            && self.files.iter().all(|(n, b)| blob(Some(b), o.files.get(n)))
+    }
 }
 
 /// The content hash of a file's bytes, memoized by their allocation
@@ -1836,16 +1884,18 @@ pub(crate) fn command_forms(
     // its input, the fonts and parameters it runs with), never a count
     // of the commands made so far, which the threads' schedule orders;
     // two runs that make the same handle made the same command)
-    let mut words = vec![key, input.raw(), fs.digest()];
+    let mut words = vec![r.cx.node().raw(), r.pdf_occ as u64, input.raw()];
     words.extend(wparams.iter().map(|&p| u64::from(p.cast_unsigned())));
     let serial = phitex_defuse::hash_words(0x6364_6d73_6572_0001, &words);
-    remember_cmd(
+    let serial = phitex_defuse::hash_words(serial, &[fs.digest()]);
+    let serial = remember_cmd(
         &r.ops.pdf_cmds,
         serial,
         Cmd {
             f: Mutex::new(Box::new(f)),
             fonts: fs,
             wparams,
+            words: words.into(),
             node: r.cx.node().raw(),
         },
     );
@@ -2241,7 +2291,8 @@ fn ship_apart(
     }
     let wparams = writer_params(r)?;
     let base_in = base_inputs(r)?;
-    let pc = PagePiece {
+    let mut pc = PagePiece {
+        words: Box::default(),
         inst: v.instance(),
         wparams,
         params: p.to_vec(),
@@ -2313,7 +2364,8 @@ fn ship_apart(
     }
     words.extend(pc.wparams.iter().map(|&m| u64::from(m.cast_unsigned())));
     let key = phitex_defuse::hash_words(0x7067_7069_6563_6531, &words).max(1);
-    pieces().locked().entry(key).or_insert_with(|| Arc::new(pc));
+    pc.words = words.into();
+    let key = keep_piece(pc, key);
     // the page's place in the file: its record in the line, where it
     // shipped; the link numbers its objects after every record before
     // it and before every one after
@@ -2322,6 +2374,31 @@ fn ship_apart(
     let op = r.ops.pdfpage;
     r.kid(op, vec![k]);
     Ok(())
+}
+
+/// Page `pc` kept for the link under the hash of what it is (`key`), or
+/// the next free key it probes on to where another page holds that:
+/// equal keys, equal pages ([`PagePiece::words`], its date, jobname and
+/// fonts compared whole). The key it is under.
+fn keep_piece(pc: PagePiece, mut key: u64) -> u64 {
+    let mut m = pieces().locked();
+    loop {
+        match m.get(&key) {
+            None => {
+                m.insert(key, Arc::new(pc));
+                return key;
+            }
+            Some(o)
+                if o.words == pc.words
+                    && o.base_in.date == pc.base_in.date
+                    && o.base_in.jobname == pc.base_in.jobname
+                    && o.fonts.same_as(&pc.fonts) =>
+            {
+                return key;
+            }
+            Some(_) => key = phitex_defuse::hash_words(key, &[1]).max(1),
+        }
+    }
 }
 
 /// Page `pc`'s PDF side ([`PdfPage`]), its box `bx` (its sealed lines
@@ -2416,8 +2493,8 @@ impl phitex_defuse::Operation for PdfPage {
         };
         let units = sealed_units(cx, &pc)?;
         let mut line = |s: &crate::nodes::Sealed| line_of(v, &units, s);
-        if let Some(h) = lines_hash(&pc, &units) {
-            record_of(v, key, &pc, h, &mut line);
+        if let Some(h) = lines_key(&pc, &units) {
+            record_of(v, key, &pc, &h, &mut line);
         }
 
         Ok(ValueId::UNIT)
@@ -3276,7 +3353,8 @@ pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, f: i64) -> R<i64> {
 /// written apart names its fonts by it): the link numbers by the line's
 /// records in TeX's order ([`FontNums`]) and rewrites a name it moved.
 pub(crate) fn load_numbers(r: &mut Run<'_, '_>) -> R<FxHashMap<i64, i64>> {
-    static M: OnceLock<Once<Arc<FxHashMap<i64, i64>>>> = OnceLock::new();
+    type Numbers = Once<Arc<FxHashMap<i64, i64>>, (u64, u64)>;
+    static M: OnceLock<Numbers> = OnceLock::new();
     let v = r.v;
     let put = |k: i64, out: &mut FxHashMap<i64, i64>| {
         let n = i64::try_from(out.len()).unwrap_or(0) + 1;
@@ -3287,10 +3365,7 @@ pub(crate) fn load_numbers(r: &mut Run<'_, '_>) -> R<FxHashMap<i64, i64>> {
     let before = r.cx.fold(f, None, None)?;
     // (the numbers of the format's fonts and of the loads before the run:
     // a pure function's memo by those values, every page step asks)
-    let key = phitex_defuse::hash_words(
-        0x6c6f_6164_6e75_6d73,
-        &[order.map_or(0, ValueId::raw), before.raw()],
-    );
+    let key = (order.map_or(0, ValueId::raw), before.raw());
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
     {
         let mut g = m.locked();
@@ -3556,21 +3631,21 @@ fn apart_names(whats: &BTreeMap<u32, Whatsit>, floor: usize) -> (usize, Vec<(usi
 
 /// The line as the last link read it: its records ([`recs`]), its
 /// pages' pieces, the pages each piece's sealed lines are on, and each
-/// page's lines' hash ([`lines_hash`]).
+/// page's lines' units ([`lines_key`]).
 struct LineCache {
     inst: u64,
     xpages: Vec<ValueId>,
     rs: Vec<Rec>,
     pcs: Vec<Option<Arc<PagePiece>>>,
     on: FxHashMap<i64, Vec<usize>>,
-    hashes: Vec<Option<u64>>,
+    hashes: Vec<Option<Lines>>,
 }
 
 static LINE_CACHE: Mutex<Option<LineCache>> = Mutex::new(None);
 
 /// [`LineCache`] of line `xpages` with the pieces' items `units`: the
 /// last link's for the same line, its pages on the pieces `changed`
-/// hashed again (none: all of them).
+/// taken again (none: all of them).
 fn line_cache(
     v: &Values,
     xpages: &[ValueId],
@@ -3586,16 +3661,16 @@ fn line_cache(
     if let (Some(mut c), Some(changed)) = (last, changed) {
         for p in changed {
             for &i in c.on.get(p).into_iter().flatten() {
-                c.hashes[i] = c.pcs[i].as_ref().and_then(|pc| lines_hash(pc, units));
+                c.hashes[i] = c.pcs[i].as_ref().and_then(|pc| lines_key(pc, units));
             }
         }
         if crate::exec::obs_flag!("PHITEX_LINK_CHECK") {
-            let all: Vec<Option<u64>> = c
+            let all: Vec<Option<Lines>> = c
                 .pcs
                 .iter()
-                .map(|pc| pc.as_ref().and_then(|pc| lines_hash(pc, units)))
+                .map(|pc| pc.as_ref().and_then(|pc| lines_key(pc, units)))
                 .collect();
-            assert!(all == c.hashes, "link check: the pages' lines hashed again are not all of them hashed");
+            assert!(all == c.hashes, "link check: the pages' lines taken again are not all of them");
         }
         return c;
     }
@@ -3617,7 +3692,7 @@ fn line_cache(
     }
     let hashes = pcs
         .iter()
-        .map(|pc| pc.as_ref().and_then(|pc| lines_hash(pc, units)))
+        .map(|pc| pc.as_ref().and_then(|pc| lines_key(pc, units)))
         .collect();
     LineCache {
         inst: v.epoch(),
@@ -3629,14 +3704,19 @@ fn line_cache(
     }
 }
 
+/// What a link's writer starts from ([`LinkMemo::head`]): the values'
+/// epoch, the glyph-to-unicode resource, the date, the jobname, the
+/// fonts loaded before the document.
+type LinkHead = (u64, u64, String, String, Vec<(FontId, String, i32)>);
+
 /// The last link of the process: its records (by value), each record's
 /// chunks, the writer every [`LINK_SNAP`] records, and what it gave the
 /// commands; an edit's link copies the records it shares from the start
 /// (spec-final §6.2).
 struct LinkMemo {
-    /// The values' instance and what the writer starts from, hashed.
-    head: u64,
-    ids: Vec<u64>,
+    /// The values' instance and what the writer starts from.
+    head: LinkHead,
+    ids: Vec<(u64, Option<Lines>)>,
     chunks: Vec<Vec<phitex_pdf::Chunk>>,
     snaps: Vec<LinkSnap>,
     got: Vec<ValueId>,
@@ -3846,7 +3926,7 @@ pub(crate) struct Linked {
     pub placed: u64,
     pub shipped: u64,
     /// Each page's identity in the file's order: its key with its sealed
-    /// lines ([`lines_hash`]): what a viewer compares to find the pages
+    /// lines ([`lines_key`], hashed): what a viewer compares to find the pages
     /// an edit changed (`crate::api::Build::pages`).
     pub shown: Vec<u64>,
 }
@@ -3940,7 +4020,7 @@ fn link(
     let mut got: Vec<ValueId> = Vec::new();
     let mut errors: Vec<(String, i64)> = Vec::new();
     let (mut placed, mut shipped) = (0usize, 0usize);
-    // (the line's records, their pages and their lines' hashes: the
+    // (the line's records, their pages and their lines' units: the
     // last link's where the line is the same, the hashes of the pages
     // whose pieces' items changed made again, [`LineCache`])
     let LineCache {
@@ -3967,36 +4047,20 @@ fn link(
     // (a page by its key and its sealed lines: a word edited in one of
     // its lines changes those, not the key)
     let mut line = |s: &crate::nodes::Sealed| line_of(v, units, s);
-    let ids: Vec<u64> = xpages
-        .iter()
-        .zip(&hashes)
-        .map(|(x, h)| match h {
-            Some(h) => phitex_defuse::hash_words(x.raw(), &[*h]),
-            None => x.raw(),
-        })
-        .collect();
+    let ids: Vec<(u64, Option<Lines>)> = xpages.iter().zip(&hashes).map(|(x, h)| (x.raw(), h.clone())).collect();
+    // (a viewer's identity of each page: a hash, which only says what a
+    // viewer shows again)
     let shown: Vec<u64> = rs
         .iter()
         .zip(&ids)
         .filter(|(r, _)| matches!(r, Rec::Page(_)))
-        .map(|(_, &id)| id)
+        .map(|(_, (x, h))| match h {
+            Some(h) => phitex_defuse::hash_words(*x, &h.iter().flat_map(|&(p, u)| [p.cast_unsigned(), u.raw()]).collect::<Vec<u64>>()),
+            None => *x,
+        })
         .collect();
     // (what the writer starts from: the same for the copy to stand)
-    let mut head = phitex_defuse::hash_bytes(
-        phitex_defuse::hash_words(
-            v.epoch(),
-            &[f.g2u.map_or(0, ValueId::raw), f.date.len() as u64],
-        ),
-        [f.date.as_bytes(), f.jobname.as_bytes()]
-            .concat()
-            .as_slice(),
-    );
-    for (k, n, sz) in &f.seed {
-        head = phitex_defuse::hash_words(
-            phitex_defuse::hash_bytes(head, n.as_bytes()),
-            &[u64::from(sz.cast_unsigned()), u64::from(*k)],
-        );
-    }
+    let head: LinkHead = (v.epoch(), f.g2u.map_or(0, ValueId::raw), f.date.clone(), f.jobname.clone(), f.seed.clone());
     let mut chunks_of: Vec<Vec<phitex_pdf::Chunk>> = Vec::with_capacity(xpages.len());
     let mut snaps: Vec<LinkSnap> = Vec::new();
     let mut start = 0usize;
@@ -4136,11 +4200,11 @@ fn link(
             // its virtual fonts' local fonts numbered where its walk
             // reads them in, after every font loaded before it
             // (a page whose PDF side has not run yet: written here)
-            // (its sealed lines from their pieces' units, [`lines_hash`])
-            let Some(h) = hashes.get(i).copied().flatten() else {
+            // (its sealed lines from their pieces' units, [`lines_key`])
+            let Some(h) = hashes.get(i).cloned().flatten() else {
                 return none;
             };
-            let made = record_of(v, u64::from_ne_bytes(v.as_int(x).unwrap_or(0).to_ne_bytes()), pc, h, &mut line);
+            let made = record_of(v, u64::from_ne_bytes(v.as_int(x).unwrap_or(0).to_ne_bytes()), pc, &h, &mut line);
             let empty = (phitex_pdf::PageRecord::default(), BTreeSet::new(), 0);
             let made = made.get().unwrap_or(&empty);
             let rec = &made.0;
@@ -4179,7 +4243,7 @@ fn link(
                 let mut wh = |h: u32, _leaders: bool| {
                     page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &reloc))
                 };
-                if let Some(Err(e)) = with_page_box(v, pc, h, &mut line, |bx| st.ship_out_with(bx, &src, &mut wh)) {
+                if let Some(Err(e)) = with_page_box(v, pc, &h, &mut line, |bx| st.ship_out_with(bx, &src, &mut wh)) {
                     errors.push((format!("pdfTeX error: {e}"), pc.node));
                 }
                 shipped += 1;
@@ -4476,5 +4540,33 @@ mod tests {
         let without = v.list(vec![v.str("cmd"), v.int(3), v.int(7)]);
         assert_eq!(rec_of(&v, with, &tags), Rec::Cmd(7));
         assert_eq!(rec_of(&v, without, &tags), Rec::Cmd(7));
+    }
+
+    /// Two commands whose serials' hash meets (forced: both given one
+    /// serial) are two commands under two serials; the same command
+    /// again is under its serial again. (A serial was the hash alone: the
+    /// second command took the first's place, the link ran it for both.)
+    #[test]
+    fn commands_whose_serials_meet_stay_apart() {
+        let memo = CmdMemo::default();
+        let cmd = |input: u64, n: i64| Cmd {
+            f: Mutex::new(Box::new(move |_: &mut PdfState, _: &mut Forms, _: &dyn FontSource| CmdOut {
+                nums: vec![n],
+                err: None,
+            })),
+            fonts: Fonts::default(),
+            wparams: [0; 5],
+            words: vec![1, 1, input].into(),
+            node: 1,
+        };
+        let a = remember_cmd(&memo, 99, cmd(10, 1));
+        let b = remember_cmd(&memo, 99, cmd(20, 2));
+        assert_eq!(a, 99);
+        assert_ne!(a, b);
+        assert_eq!(remember_cmd(&memo, 99, cmd(20, 2)), b);
+        assert_eq!(remember_cmd(&memo, 99, cmd(10, 1)), a);
+        let m = memo.locked();
+        assert_eq!(*m[&a].words, [1, 1, 10]);
+        assert_eq!(*m[&b].words, [1, 1, 20]);
     }
 }

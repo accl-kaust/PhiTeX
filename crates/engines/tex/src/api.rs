@@ -325,6 +325,9 @@ impl phitex_defuse::EditSource for Absorb<'_> {
         // lines already; a text cut off mid-line, as a file read while
         // its editor writes it, has them a byte longer)
         let whole = self.text.is_empty() || self.text.ends_with('\n');
+        // (the text the nodes were cut from: a slice is kept where its
+        // text is the same, `apply_slices`)
+        let old_text = self.text.clone();
         // (the sender's prefix and suffix, where its last text is the one
         // the canonical text is of: what changed is looked at alone)
         let ends = hint
@@ -418,6 +421,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             self.end,
             self.nodes,
             self.text,
+            &old_text,
             range.filter(|_| whole),
             self.incr.as_deref_mut(),
             self.loads,
@@ -459,16 +463,22 @@ fn edit_apply_note(t_all: std::time::Instant, t: [std::time::Duration; 3], n: [u
 
 /// The lengths of the key prefix and suffix `old` and `new` share
 /// (not overlapping).
-fn common_ends(old: &[(u64, NodeId, Src)], new: &[(u64, DocNode)]) -> (usize, usize) {
+/// Whether node `old` (cut from `texts.0`) is slice `new` of `texts.1`:
+/// the same key, and the same text (the key is its hash).
+fn slice_same(old: &(u64, NodeId, Src), new: &(u64, DocNode), texts: (&str, &str)) -> bool {
+    old.0 == new.0 && {
+        let DocNode::Doc(s, e) = new.1;
+        old.2.text(texts.0) == texts.1.get(s..e).unwrap_or("")
+    }
+}
+
+fn common_ends(old: &[(u64, NodeId, Src)], new: &[(u64, DocNode)], same: &dyn Fn(usize, usize) -> bool) -> (usize, usize) {
     let mut a = 0;
-    while a < old.len() && a < new.len() && old[a].0 == new[a].0 {
+    while a < old.len() && a < new.len() && same(a, a) {
         a += 1;
     }
     let mut b = 0;
-    while b < old.len() - a
-        && b < new.len() - a
-        && old[old.len() - 1 - b].0 == new[new.len() - 1 - b].0
-    {
+    while b < old.len() - a && b < new.len() - a && same(old.len() - 1 - b, new.len() - 1 - b) {
         b += 1;
     }
     (a, b)
@@ -569,17 +579,22 @@ impl Applied {
 /// are replaced, removed or inserted (their arguments `args_of`'s).
 /// The document's text and a document file's are edited so alike, the
 /// file's pieces under each node that placed them ([`Build::stage_file`]).
-/// `None`: a file's pieces with none to place new ones beside.
+/// A slice is the node's again where its key is and its text is
+/// (`texts`: the text the nodes were cut from, the text now): the key is
+/// the text's hash, compared whole on a match. `None`: a file's pieces
+/// with none to place new ones beside.
 fn apply_slices(
     eng: &Engine,
     exec: OpId,
     at: Placing,
     nodes_now: &mut Vec<(u64, NodeId, Src)>,
     new: &[(u64, DocNode)],
+    texts: (&str, &str),
     args_of: &dyn Fn(&Engine, usize) -> Vec<ValueId>,
 ) -> Option<Applied> {
     let old = &*nodes_now;
-    if old.len() == new.len() && old.iter().zip(new).all(|(o, n)| o.0 == n.0) {
+    let same = |i: usize, j: usize| slice_same(&old[i], &new[j], texts);
+    if old.len() == new.len() && (0..old.len()).all(|i| same(i, i)) {
         return Some(Applied {
             prefix: old.len(),
             ..Applied::default()
@@ -588,7 +603,7 @@ fn apply_slices(
     if old.is_empty() && matches!(at, Placing::Placed) {
         return None;
     }
-    let (a, b) = common_ends(old, new);
+    let (a, b) = common_ends(old, new, &same);
     let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
     let common = old_mid.min(new_mid);
     crate::timeline::lap("engine: the slice-key diff");
@@ -631,9 +646,9 @@ fn apply_slices(
     })
 }
 
-/// Edits the document's nodes `nodes` to the text `text` ([`cut_text`],
-/// [`apply_slices`]). The nodes replaced, inserted or removed (0: a text
-/// whose slices are the nodes' already).
+/// Edits the document's nodes `nodes`, cut from `old_text`, to the text
+/// `text` ([`cut_text`], [`apply_slices`]). The nodes replaced, inserted
+/// or removed (0: a text whose slices are the nodes' already).
 // one call site (Absorb::absorb), which passes its fields apart
 #[allow(clippy::too_many_arguments)]
 fn apply_text(
@@ -643,12 +658,14 @@ fn apply_text(
     end: NodeId,
     nodes_now: &mut Vec<(u64, NodeId, Src)>,
     text: &str,
+    old_text: &str,
     range: Option<(usize, usize, usize)>,
     mut incr: Option<&mut Incr>,
     loads: Option<&crate::pkgrec::LoadHints>,
 ) -> usize {
     let t_all = std::time::Instant::now();
     let text = as_file(text);
+    let old_text = as_file(old_text);
     crate::timeline::lap("engine: the text as a file");
     // (the range that changed where it is known and the text is the file
     // as it is)
@@ -660,7 +677,7 @@ fn apply_text(
     let old_len = nodes_now.len();
     let args_of = |eng: &Engine, k: usize| node_args(eng.values(), &text, incr, &new[k].1, loads, None);
     let t_diff = t_all.elapsed();
-    let Some(d) = apply_slices(eng, exec, Placing::Top(end), nodes_now, &new, &args_of) else {
+    let Some(d) = apply_slices(eng, exec, Placing::Top(end), nodes_now, &new, (&old_text, &text), &args_of) else {
         return 0;
     };
     if d.changed() == 0 {
@@ -2585,6 +2602,7 @@ impl Graph {
             node_rec: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pdf_cmds: Arc::default(),
             xe: Arc::default(),
+            rel_keys: Arc::default(),
             class_proj,
             outer_proj,
             step_proj,
@@ -3967,7 +3985,17 @@ pub(crate) fn canonical_text(text: &str) -> Option<(String, Vec<CommentMark>)> {
     let (mut marks, mut at) = (Vec::new(), Vec::new());
     canonical_lines(text, 0, &mut out, &mut marks, &mut at);
     fill_ids(&mut out, &at, &marks, &collisions(&marks));
-    Some((out, marks))
+    ids_hold(&marks).then_some((out, marks))
+}
+
+/// Whether the ids of `marks` ([`mark_id`], hashes) name one comment
+/// each: two comments of one id would read each other's text. Where not,
+/// the text is not marked ([`canonical_text`]'s `None`: its comments stay
+/// where they are).
+fn ids_hold(marks: &[CommentMark]) -> bool {
+    let collide = collisions(marks);
+    let mut by: FxHashMap<u64, &str> = FxHashMap::default();
+    marks.iter().all(|(_, h, c)| *by.entry(mark_id(*h, c, collide.contains(h))).or_insert(c) == c.as_str())
 }
 
 /// Whether `text` has what [`canonical_text`] cannot stand for (a NUL,
@@ -4190,6 +4218,9 @@ fn canonical_lines_splice(
             .filter(|m| m.0 > hi && le_old < o.len())
             .map(|(l, h, c)| (shift(*l), *h, c.clone())),
     );
+    if !ids_hold(&ms) {
+        return None;
+    }
     Some((ms, (cs, ce, cs + out.len())))
 }
 
@@ -5514,7 +5545,7 @@ impl Build {
         let (p, s) = byte_ends(df.text.as_bytes(), text.as_bytes());
         let range = (p, df.text.len() - s, text.len() - s);
         let old = std::mem::take(&mut df.slices);
-        df.text = text;
+        let old_text = std::mem::replace(&mut df.text, text);
         let pv = self.g.eng.values().str(&df.path);
         let new = {
             let DocFile { text, incr, .. } = &mut *df;
@@ -5557,7 +5588,7 @@ impl Build {
             let args_of = |eng: &Engine, k: usize| {
                 node_args(eng.values(), &df.text, Some(&df.incr), &new[k].1, loads.as_deref(), Some(pv))
             };
-            match apply_slices(&self.g.eng, exec, Placing::Placed, &mut nodes, &new, &args_of) {
+            match apply_slices(&self.g.eng, exec, Placing::Placed, &mut nodes, &new, (&old_text, &df.text), &args_of) {
                 Some(a) => {
                     // (each piece's move since it was made: a kept one's
                     // text, and the places in it, as when it was made; those
@@ -7641,6 +7672,37 @@ mod prelude_tests {
 #[cfg(test)]
 mod canonical_tests {
     use super::*;
+
+    /// A slice whose key is a node's but whose text is not (forced: both
+    /// keyed 5) is no node's: the edit replaces it. (Matched by the key
+    /// alone, the node kept its old text.)
+    #[test]
+    fn a_slice_whose_key_meets_another_text_is_replaced() {
+        let (old_t, new_t) = ("a\nb\nc\n", "a\nx\nc\n");
+        let n = |k: u64| NodeId::from_raw(k);
+        let old = vec![(1, n(1), Src::Doc(0, 2)), (5, n(2), Src::Doc(2, 4)), (3, n(3), Src::Doc(4, 6))];
+        let new = vec![(1, DocNode::Doc(0, 2)), (5, DocNode::Doc(2, 4)), (3, DocNode::Doc(4, 6))];
+        let same = |i: usize, j: usize| slice_same(&old[i], &new[j], (old_t, new_t));
+        assert!(same(0, 0) && !same(1, 1) && same(2, 2));
+        assert_eq!(common_ends(&old, &new, &same), (1, 1));
+        let same_t = |i: usize, j: usize| slice_same(&old[i], &new[j], (old_t, old_t));
+        assert_eq!(common_ends(&old, &new, &same_t), (3, 0));
+    }
+
+    /// Comments whose ids meet (forced: a line's prefix hash is the id
+    /// two other comments on a shared prefix get) are no marks: two
+    /// comments of one id would read each other's text. Apart, they are.
+    #[test]
+    fn comments_whose_ids_meet_are_not_marked() {
+        let k = prefix_hash("x ");
+        let met = mark_id(k, "b", true);
+        let marks: Vec<CommentMark> = vec![(1, met, "a".to_owned()), (2, k, "b".to_owned()), (3, k, "c".to_owned())];
+        assert!(!ids_hold(&marks));
+        let apart: Vec<CommentMark> = vec![(1, met ^ 1, "a".to_owned()), (2, k, "b".to_owned()), (3, k, "c".to_owned())];
+        assert!(ids_hold(&apart));
+        // (one comment twice under one id: the same text, one mark)
+        assert!(ids_hold(&[(1, k, "a".to_owned()), (2, k, "a".to_owned())]));
+    }
 
     /// The marking line by line, as it was before the copy between
     /// lines with comments (the invariant: the same text and marks).

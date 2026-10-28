@@ -3841,6 +3841,9 @@ impl FoldOut for Vec<crate::nest::Item> {
 /// glue, spaces resolved) kept outside the value table (a sweep may free
 /// them).
 struct BlockMemo {
+    /// Its key ([`fold_entries`]' words: the state in and the entries),
+    /// compared whole on a hit of its hash.
+    words: Box<[u64]>,
     sf: i32,
     pd: i32,
     since_bp: usize,
@@ -3901,7 +3904,7 @@ pub(crate) fn fold_entries(
         ];
         words.extend(block.iter().map(|x| x.raw()));
         let key = phitex_defuse::hash_words(13, &words);
-        let hit = block_cache().locked().get(&key).cloned();
+        let hit = block_cache().locked().get(&key).filter(|m| *m.words == words[..]).cloned();
         if let Some(m) = hit {
             out.extend(m.out.iter().map(|x| match x {
                 Ok(id) => *id,
@@ -3929,6 +3932,7 @@ pub(crate) fn fold_entries(
             }
         }
         let memo = BlockMemo {
+            words: words.into(),
             sf: st.sf,
             pd: st.pd,
             since_bp: st.since_bp,

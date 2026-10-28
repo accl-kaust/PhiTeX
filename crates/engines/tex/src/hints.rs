@@ -3459,14 +3459,16 @@ fn analyse_reusing(
         crate::timeline::note("hints: the slices", t0.elapsed());
     }
     let t0 = std::time::Instant::now();
-    // (one value per distinct hint, keyed by the hash of its encoding:
-    // no string keys in the pass, spec-final §5.2)
-    let mut memo: FxHashMap<u64, Arc<str>> = FxHashMap::default();
+    // (one value per distinct hint, by its encoding)
+    let mut memo: phitex_defuse::FxHashSet<Arc<str>> = phitex_defuse::FxHashSet::default();
     let mut intern = |h: &Hint| -> Arc<str> {
         let s = h.encode();
-        memo.entry(phitex_defuse::hash_bytes(0x6869_6e74, s.as_bytes()))
-            .or_insert_with(|| Arc::from(s))
-            .clone()
+        if let Some(x) = memo.get(s.as_str()) {
+            return x.clone();
+        }
+        let x: Arc<str> = Arc::from(s);
+        memo.insert(x.clone());
+        x
     };
     // (the bytes around the edit: from the start of the slice before
     // the one it begins in to the end of the slice after the one it ends
@@ -3812,9 +3814,11 @@ type Cache<K> = Mutex<FxHashMap<K, Arc<TextHints>>>;
 /// chained definitions (`incr::Incr::chain`, made per build and dropped
 /// with it) could be followed by another set at the same address, which
 /// would get the analysis made under the first.
-/// (`phitex_pdf::digest::blob_hash` memoizes the same way.)
+/// (`phitex_pdf::digest::blob_hash` memoizes the same way.) The text is
+/// kept with its entry and compared whole on a hit of its hash.
+#[allow(clippy::type_complexity)]
 type TextsCache = Mutex<
-    FxHashMap<(u64, u8, usize, Option<u64>), (std::sync::Weak<pass::Definitions>, Arc<TextHints>)>,
+    FxHashMap<(u64, u8, usize, Option<pass::Start>), (std::sync::Weak<pass::Definitions>, Arc<str>, Arc<TextHints>)>,
 >;
 
 fn texts() -> &'static TextsCache {
@@ -3868,12 +3872,14 @@ pub(crate) struct Registry {
     /// Each text's analysis by its name, in chunks (their starts in the
     /// text, [`register_chunks`]).
     by_name: Mutex<FxHashMap<u64, Chunks>>,
-    hints: Shards<Arc<Hint>>,
+    /// Each node's hint by its arguments' key ([`args_key`]), with the
+    /// arguments, compared whole on a hit.
+    hints: Shards<(Box<[ValueId]>, Arc<Hint>)>,
     /// The engine's answers ([`may_define`]) made ahead on the pool for
     /// nodes about to be pushed ([`prepare`]), by their arguments' key:
     /// each taken by the push's one question, the rest dropped after it
     /// ([`prepared_done`]).
-    prepared: Shards<Prepared>,
+    prepared: Shards<(Box<[ValueId]>, Prepared)>,
     /// The hints decoded, by their string's value (the nodes of a
     /// document share a few hint strings among thousands of slices).
     decoded: Shards<Arc<Hint>>,
@@ -4037,17 +4043,9 @@ pub(crate) fn text_hints_with(
 ) -> Arc<TextHints> {
     let named = kind;
     let kind = kind_of(text, kind);
-    let key = (
-        hash_str(text),
-        kind as u8,
-        Arc::as_ptr(defs) as usize,
-        start.map(|s| {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            s.hash(&mut h);
-            h.finish()
-        }),
-    );
-    if let Some((d, t)) = texts().locked().get(&key)
+    let key = (hash_str(text), kind as u8, Arc::as_ptr(defs) as usize, start.copied());
+    if let Some((d, x, t)) = texts().locked().get(&key)
+        && **x == *text
         && d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
     {
         return t.clone();
@@ -4058,7 +4056,7 @@ pub(crate) fn text_hints_with(
     if c.len() > 256 {
         c.clear();
     }
-    c.insert(key, (Arc::downgrade(defs), t.clone()));
+    c.insert(key, (Arc::downgrade(defs), Arc::from(text), t.clone()));
     t
 }
 
@@ -4458,7 +4456,7 @@ pub(crate) fn prepare(reg: &Registry, v: &Values, args: &[ValueId]) {
         reads: Kept::Ready(reads_now(reg, v, args)),
     };
     let k = args_key(args);
-    reg.prepared.of(k).insert(k, p);
+    reg.prepared.of(k).insert(k, (args.into(), p));
 }
 
 /// The answer `f` takes from a node's prepared ones, if it was prepared.
@@ -4472,7 +4470,7 @@ fn take_prepared<T>(
     if p.is_empty() {
         return None;
     }
-    p.get_mut(&k).and_then(f)
+    p.get_mut(&k).filter(|(a, _)| **a == *args).and_then(|(_, p)| f(p))
 }
 
 /// The push the answers were [`prepare`]d for is done: those it did not
@@ -4496,7 +4494,7 @@ pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<
             .clone();
     }
     let key = args_key(args);
-    if let Some(h) = reg.hints.of(key).get(&key) {
+    if let Some((_, h)) = reg.hints.of(key).get(&key).filter(|(a, _)| **a == *args) {
         return h.clone();
     }
     let mut registry = false;
@@ -4525,7 +4523,7 @@ pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<
     if c.len() > (1 << 20) / SHARDS {
         c.clear();
     }
-    c.insert(key, h.clone());
+    c.insert(key, (args.into(), h.clone()));
     h
 }
 

@@ -217,6 +217,10 @@ pub(crate) struct Ops {
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
+    /// The identities of the objects only PDF bytes name, each with its
+    /// node and its place among the node's commands
+    /// (`crate::pdfprim::alloc_rel`): one identity, one object.
+    pub rel_keys: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<i64, (u64, u64)>>>,
     /// What each node's last run published and read of the state, by
     /// node ([`NodeAudit`]): the state model's tests ask it
     /// (`Build::definitions_by_op`, `Build::reads_by_op`,
@@ -732,10 +736,6 @@ pub(crate) struct Run<'c, 'a> {
     pub rt_made: i64,
     pub rt_cells: i64,
     pub rt_rels: i64,
-    /// A digest of the node's arguments but its text (where it is, its
-    /// kind, its hint): what the run reads of them after its start is
-    /// part of its state at a mark ([`parked_rest`]).
-    pub args_key: u64,
     /// Changes to the run's state a stopped command cannot undo (own
     /// definitions, a buffer reduced in place): a stop after one does
     /// not park ([`Run::rewind`]).
@@ -1039,7 +1039,6 @@ impl<'c, 'a> Run<'c, 'a> {
             rt_made: 0,
             rt_cells: 0,
             rt_rels: 0,
-            args_key: 0,
             muts: 0,
             interp: None,
             interp_short: false,

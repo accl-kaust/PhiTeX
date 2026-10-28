@@ -1003,9 +1003,24 @@ fn alloc_rel(r: &mut Run<'_, '_>) -> R<(i64, i64)> {
     }
     let v = r.v;
     let me = r.cx.node().raw();
-    let key = phitex_defuse::hash_words(0x7265_6c6f_626a_0001, &[me, r.pdf_occ as u64]);
-    let t =
-        i64::from_ne_bytes((key & (u64::MAX >> 1) & !(REL.cast_unsigned())).to_ne_bytes()) | REL;
+    let occ = r.pdf_occ as u64;
+    // (the hash of the node and the place, or the next free identity it
+    // probes on to where another object holds that one)
+    let mut key = phitex_defuse::hash_words(0x7265_6c6f_626a_0001, &[me, occ]);
+    let t = {
+        let mut m = crate::exec::LockWait::locked(&*r.ops.rel_keys);
+        loop {
+            let t = i64::from_ne_bytes((key & (u64::MAX >> 1) & !(REL.cast_unsigned())).to_ne_bytes()) | REL;
+            match m.get(&t) {
+                Some(&o) if o != (me, occ) => key = phitex_defuse::hash_words(key, &[1]),
+                Some(_) => break t,
+                None => {
+                    m.insert(t, (me, occ));
+                    break t;
+                }
+            }
+        }
+    };
     r.rt_made += 1;
     r.rt_rels += 1;
     let u = v.seq_unit(v.list(vec![node_int(r), v.int(i64::from(r.cand))]));

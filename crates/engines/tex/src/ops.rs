@@ -386,16 +386,6 @@ impl Operation for Exec {
                 // (`PHITEX_PKG_NONET=1`: no load recorded, for comparison)
                 r.rec_load = load && r.scope_kind()?.is_none();
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
-                // (what the run reads of its arguments but its text after
-                // its start, its hint's counts among them: in its state)
-                r.args_key = {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = phitex_defuse::FxHasher::default();
-                    for a in args.get(1..).unwrap_or_default() {
-                        a.raw().hash(&mut h);
-                    }
-                    h.finish()
-                };
                 let args = r.resolve_units(&args)?;
                 let fs = crate::run::decode_segs(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
@@ -986,8 +976,10 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
         bool,
     );
     type Last = std::sync::Mutex<FxHashMap<String, (Arc<str>, Kept)>>;
-    static MEMO: std::sync::OnceLock<std::sync::Mutex<FxHashMap<(u64, usize), Kept>>> =
-        std::sync::OnceLock::new();
+    // (by the text's hash and the definitions' address, the text kept to
+    // compare whole on a hit)
+    type Memo = std::sync::Mutex<FxHashMap<(u64, usize), (Arc<str>, Kept)>>;
+    static MEMO: std::sync::OnceLock<Memo> = std::sync::OnceLock::new();
     // (the file's text the last time it was cut, with its cuts: the part
     // of the text an edit left keeps its units, the rest is cut again,
     // [`units_again`])
@@ -997,7 +989,8 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
         phitex_defuse::hash_bytes(0x756e_6974_656e_6473, text.as_bytes()),
         Arc::as_ptr(defs) as usize,
     );
-    if let Some((d, ends, sl)) = memo.locked().get(&key)
+    if let Some((t, (d, ends, sl))) = memo.locked().get(&key)
+        && **t == *text
         && d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
     {
         return (ends.clone(), *sl);
@@ -1041,12 +1034,10 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
     if m.len() > 64 {
         m.clear();
     }
-    m.insert(key, (Arc::downgrade(defs), ends.clone(), sliceable));
+    let t: Arc<str> = Arc::from(text);
+    m.insert(key, (t.clone(), (Arc::downgrade(defs), ends.clone(), sliceable)));
     drop(m);
-    last.locked().insert(
-        name.to_owned(),
-        (Arc::from(text), (Arc::downgrade(defs), ends.clone(), sliceable)),
-    );
+    last.locked().insert(name.to_owned(), (t, (Arc::downgrade(defs), ends.clone(), sliceable)));
     (ends, sliceable)
 }
 

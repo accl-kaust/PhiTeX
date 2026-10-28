@@ -34,6 +34,10 @@ pub(crate) struct FormatEnv {
 
 /// A field's key in [`FormatEnv`]: its name's hash.
 fn name_key(name: &str) -> u64 {
+    #[cfg(test)]
+    if tests::ONE_KEY.with(std::cell::Cell::get) {
+        return 1;
+    }
     phitex_defuse::hash_bytes(0, name.as_bytes())
 }
 
@@ -296,6 +300,11 @@ fn list_body(ks: &[u32]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    thread_local! {
+        /// Every name under one key ([`name_key`]): a collision forced.
+        pub(super) static ONE_KEY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
     #[test]
     fn a_format_env_reads_back_what_it_wrote() {
         let v = Values::new();
@@ -326,10 +335,12 @@ mod tests {
         let mut names: Vec<&str> = g.names().collect();
         names.sort_unstable();
         assert_eq!(names, ["cs:a", "cs:b"]);
-        // (two names under one key, each bound to its own value: the
-        // hash of `cs:fp_set:Nn` is `cs:fp_sub:Nn`'s, and a format that
-        // kept one binding for both gave `\fp_set:Nn` the meaning of
-        // `\fp_sub:Nn`, which calls it: an endless loop)
+        // (two names under one key, each bound to its own value: under
+        // FxHash the hash of `cs:fp_set:Nn` was `cs:fp_sub:Nn`'s, and a
+        // format that kept one binding for both gave `\fp_set:Nn` the
+        // meaning of `\fp_sub:Nn`, which calls it: an endless loop; the
+        // collision forced, every name under one key)
+        ONE_KEY.with(|k| k.set(true));
         assert_eq!(name_key("cs:fp_set:Nn"), name_key("cs:fp_sub:Nn"));
         let pair = vec![("cs:fp_set:Nn".to_owned(), v.str("set")), ("cs:fp_sub:Nn".to_owned(), v.str("sub"))];
         let p = FormatEnv::of(&v, &pair);
@@ -341,6 +352,7 @@ mod tests {
         assert_eq!(q.get(&w, "cs:fp_set:Nn", &qm).map(|x| w.render(x)), Some(v.render(v.str("set"))));
         assert_eq!(q.get(&w, "cs:fp_sub:Nn", &qm).map(|x| w.render(x)), Some(v.render(v.str("sub"))));
         assert_eq!(q.get_field(&w, w.field("cs:fp_sub:Nn"), &qm).map(|x| w.render(x)), Some(v.render(v.str("sub"))));
+        ONE_KEY.with(|k| k.set(false));
         // (a table cut short is refused)
         let mut bad = b.clone();
         bad.truncate(b.len() - 1);

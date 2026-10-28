@@ -97,13 +97,27 @@ enum File {
     Layout(phitex_pdf::Layout),
 }
 
+impl File {
+    /// Whether `o` is this file, compared whole (its hash is the key it
+    /// is kept under, [`file_value`]).
+    fn same(&self, o: &File) -> bool {
+        match (self, o) {
+            (File::Bytes(a), File::Bytes(b)) => std::sync::Arc::ptr_eq(a, b) || a == b,
+            (File::Layout(a), File::Layout(b)) => a.same_chunks(b),
+            _ => false,
+        }
+    }
+}
+
 /// The files linked in values table `instance` dropped: its build goes.
 pub(crate) fn forget_linked(instance: u64) {
     linked_files().locked().retain(|(i, _)| *i != instance);
 }
 
-/// The value standing for file `f` ([`linked_files`]).
-fn file_value(v: &phitex_defuse::Values, f: File, h: u64, n: usize) -> ValueId {
+/// The value standing for file `f` ([`linked_files`]), under its hash
+/// `h`, or the next free one the hash probes on to where another file
+/// of the table holds `h`: equal values, equal files.
+fn file_value(v: &phitex_defuse::Values, f: File, mut h: u64, n: usize) -> ValueId {
     let mut all = linked_files().locked();
     let k = if let Some(k) = all.iter().position(|(i, _)| *i == v.instance()) {
         k
@@ -112,6 +126,9 @@ fn file_value(v: &phitex_defuse::Values, f: File, h: u64, n: usize) -> ValueId {
         all.len() - 1
     };
     let m = &mut all[k].1;
+    while m.iter().any(|e| e.0 == h && !e.1.same(&f)) {
+        h = phitex_defuse::hash_words(h, &[1]);
+    }
     if !m.iter().any(|e| e.0 == h) {
         m.push_back((h, f));
         while m.len() > 4 {
@@ -276,14 +293,8 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId], xe: Option<&crate::xetex::XeTeX
     // the same from its start, are not shipped again: the writer goes on
     // from its state after them, kept every `DVI_SNAP` pages; the fonts
     // defined before a page are the prefix's)
-    let (nums, nums_hash) = font_numbers(cx)?;
-    let head = phitex_defuse::hash_bytes(
-        phitex_defuse::hash_words(
-            v.instance(),
-            &[u64::from(mag.cast_unsigned()), nums_hash, u64::from(xdv)],
-        ),
-        comment.as_bytes(),
-    );
+    let (nums, order) = font_numbers(cx)?;
+    let head: DviHead = (v.instance(), mag, xdv, order, comment.clone());
     let ids: Vec<u64> = pages.iter().map(|p| p.raw()).collect();
     let (mut w, start, mut snaps) = {
         let m = dvi_memo().locked();
@@ -415,8 +426,12 @@ const DVI_SNAP: usize = 16;
 
 /// The last DVI file of the process: its pages (by value) and the writer
 /// every [`DVI_SNAP`] pages.
+/// What a DVI writer starts from: the values' instance, `\mag`, whether
+/// it writes XDV, the fonts' order ([`font_numbers`]), the comment.
+type DviHead = (u64, i32, bool, Vec<i64>, String);
+
 struct DviMemo {
-    head: u64,
+    head: DviHead,
     ids: Vec<u64>,
     snaps: Vec<(usize, phitex_dvi::DviWriter)>,
 }
@@ -469,10 +484,11 @@ fn dvi_offsets(v: &Values, page: ValueId) -> (i32, i32) {
 /// The fonts' numbers by key (TeX's `f`, which its DVI file writes as
 /// `f - 1`): their ranks in the order of first loads, the format's
 /// fonts first ([`crate::api::FONT_ORDER`]), then the line's
-/// `fontload` records in TeX's order; and a hash of that order.
+/// `fontload` records in TeX's order; and that order.
+#[allow(clippy::type_complexity)]
 fn font_numbers(
     cx: &mut Ctx<'_>,
-) -> Result<(std::sync::Arc<std::collections::BTreeMap<u32, u32>>, u64), Stop> {
+) -> Result<(std::sync::Arc<std::collections::BTreeMap<u32, u32>>, Vec<i64>), Stop> {
     let v = cx.values();
     let mut order: Vec<i64> = field(cx, crate::api::FONT_ORDER)?
         .map(|x| list_of(v, x).iter().map(|&k| int_of(v, k)).collect())
@@ -490,11 +506,7 @@ fn font_numbers(
         .enumerate()
         .filter_map(|(i, &k)| Some((u32::try_from(k).ok()?, u32::try_from(i + 1).ok()?)))
         .collect();
-    let hash = phitex_defuse::hash_words(
-        0,
-        &order.iter().map(|&k| k.cast_unsigned()).collect::<Vec<u64>>(),
-    );
-    Ok((std::sync::Arc::new(nums), hash))
+    Ok((std::sync::Arc::new(nums), order))
 }
 
 /// A page entry's box (decoded), counts and whatsits.
@@ -838,5 +850,21 @@ mod tests {
         for o in &others {
             forget_linked(o.instance());
         }
+    }
+
+    /// Two files of one hash and length (forced: both given hash 7) are
+    /// two values, each reading its own bytes; the first again is its
+    /// value again. (Kept by the hash alone, the second file was not
+    /// kept and its value read the first file's bytes.)
+    #[test]
+    fn files_whose_hashes_meet_are_two_values() {
+        let v = phitex_defuse::Values::new();
+        let a = bytes_value(&v, b"%PDF one".to_vec(), Some(7));
+        let b = bytes_value(&v, b"%PDF two".to_vec(), Some(7));
+        assert_ne!(a, b);
+        assert_eq!(file_bytes_shared(&v, a).as_slice(), b"%PDF one");
+        assert_eq!(file_bytes_shared(&v, b).as_slice(), b"%PDF two");
+        assert_eq!(bytes_value(&v, b"%PDF one".to_vec(), Some(7)), a);
+        forget_linked(v.instance());
     }
 }
