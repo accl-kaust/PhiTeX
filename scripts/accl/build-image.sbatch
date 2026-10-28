@@ -13,7 +13,12 @@ mkdir -p "$w/tmp" "$w/cache"
 trap 'rm -rf "$w"' EXIT
 export APPTAINER_TMPDIR=$w/tmp APPTAINER_CACHEDIR=$w/cache
 cd "$w"
-apptainer build --fakeroot phitex.sif "$def"
+# (mc: no subuid range, so Apptainer's fakeroot is a root-mapped user
+# namespace plus the fakeroot command, whose faked died under pacman's
+# keyring check and left gpg waiting on its semaphore for good (job
+# 75697); BUILD_FLAGS=--ignore-fakeroot-command runs %post as root of the
+# user namespace alone)
+apptainer build --fakeroot ${BUILD_FLAGS:-} phitex.sif "$def"
 apptainer exec phitex.sif sh -c 'pacman -Q; pdflatex --version | head -1; rustc --version; valgrind --version; qpdf --version | head -1; node --version 2>/dev/null; rustup target list --installed 2>/dev/null' > versions.txt
 out=$HOME/shared-cache/phitex
 mkdir -p "$out"
