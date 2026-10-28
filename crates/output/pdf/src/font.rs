@@ -312,7 +312,7 @@ impl PdfState {
         fd: &mut Fd,
     ) -> Result<t1::Embedded, PdfError> {
         type Made = (t1::Embedded, t1::FontDesc, i32);
-        static MEMO: std::sync::Mutex<Vec<(u64, std::sync::Arc<Made>)>> =
+        static MEMO: std::sync::Mutex<Vec<(u128, std::sync::Arc<Made>)>> =
             std::sync::Mutex::new(Vec::new());
         // (the subset tags taken before are not in the key: the program
         // depends on them only through the tag chosen, chosen again here

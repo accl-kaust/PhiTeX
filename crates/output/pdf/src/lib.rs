@@ -378,7 +378,7 @@ pub struct VirtualFont {
 /// The digest of metrics `m` a writer's font state carries
 /// ([`FontSource::metrics_hash`]).
 #[must_use]
-pub fn metrics_hash(m: &ScaledFont) -> u64 {
+pub fn metrics_hash(m: &ScaledFont) -> u128 {
     digest::debug_hash(m)
 }
 
@@ -413,7 +413,7 @@ pub trait FontSource {
     }
     /// The digest of the font's metrics ([`metrics_hash`]), kept where
     /// the source keeps it (each page's writer loads the font anew).
-    fn metrics_hash(&self, f: FontId) -> u64 {
+    fn metrics_hash(&self, f: FontId) -> u128 {
         metrics_hash(self.metrics(f))
     }
     /// The font's expansion, if it is an expanded font.
@@ -503,7 +503,7 @@ struct FontState {
     /// The hash of `metrics` (fixed once loaded), what the digest reads
     /// of them: a font changed by a step (a character marked) is hashed
     /// again without formatting its metrics.
-    metrics_hash: u64,
+    metrics_hash: u128,
     map: Option<MapEntry>,
     file: Option<Arc<[u8]>>,
     enc: Option<Arc<[u8]>>,

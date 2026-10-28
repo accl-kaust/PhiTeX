@@ -18,7 +18,7 @@ pub(crate) struct Loaded {
     pub at: ScaledFont,
     /// The digest of `at` a PDF writer's font state carries, made once
     /// ([`phitex_pdf::metrics_hash`]).
-    pub at_hash: OnceLock<u64>,
+    pub at_hash: OnceLock<u128>,
     /// Each character's width, height and depth by code, made once
     /// (`phitex_typeset::fonts::Fonts::whd_table`).
     pub whd: OnceLock<Vec<(i32, i32, i32)>>,

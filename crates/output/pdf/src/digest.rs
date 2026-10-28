@@ -13,7 +13,39 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use crate::PdfState;
 
-type Memo = Mutex<HashMap<usize, (Weak<[u8]>, u64)>>;
+/// A 128-bit hash: two `SipHash`es, the second keyed by a word written
+/// first (a state's digest is its identity where a link resumes or a
+/// tail is kept: 64 bits made a collision a wrong file).
+pub(crate) struct H128(DefaultHasher, DefaultHasher);
+
+impl H128 {
+    pub(crate) fn new() -> H128 {
+        let mut b = DefaultHasher::new();
+        b.write_u64(0x9e37_79b9_7f4a_7c15);
+        H128(DefaultHasher::new(), b)
+    }
+    pub(crate) fn write(&mut self, x: &[u8]) {
+        self.0.write(x);
+        self.1.write(x);
+    }
+    pub(crate) fn write_u64(&mut self, x: u64) {
+        self.0.write_u64(x);
+        self.1.write_u64(x);
+    }
+    pub(crate) fn write_u128(&mut self, x: u128) {
+        self.0.write_u128(x);
+        self.1.write_u128(x);
+    }
+    pub(crate) fn write_usize(&mut self, x: usize) {
+        self.0.write_usize(x);
+        self.1.write_usize(x);
+    }
+    pub(crate) fn finish(&self) -> u128 {
+        (u128::from(self.0.finish()) << 64) | u128::from(self.1.finish())
+    }
+}
+
+type Memo = Mutex<HashMap<usize, (Weak<[u8]>, u128)>>;
 
 fn memo() -> &'static Memo {
     static M: OnceLock<Memo> = OnceLock::new();
@@ -21,7 +53,7 @@ fn memo() -> &'static Memo {
 }
 
 /// The content hash of a blob, memoized by its allocation.
-fn blob_hash(b: &Arc<[u8]>) -> u64 {
+fn blob_hash(b: &Arc<[u8]>) -> u128 {
     let key = Arc::as_ptr(b).cast::<u8>() as usize;
     let mut m = memo().lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((w, h)) = m.get(&key)
@@ -29,7 +61,7 @@ fn blob_hash(b: &Arc<[u8]>) -> u64 {
     {
         return *h;
     }
-    let mut s = DefaultHasher::new();
+    let mut s = H128::new();
     s.write_usize(b.len());
     s.write(b);
     let h = s.finish();
@@ -54,7 +86,7 @@ pub(crate) struct Bytes<'a>(pub &'a [u8]);
 
 impl fmt::Debug for Bytes<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut s = DefaultHasher::new();
+        let mut s = H128::new();
         s.write(self.0);
         write!(f, "bytes({},{:x})", self.0.len(), s.finish())
     }
@@ -84,7 +116,7 @@ impl fmt::Debug for Toks {
 }
 
 /// The hash of `x`'s `Debug` form.
-pub(crate) fn debug_hash(x: &dyn fmt::Debug) -> u64 {
+pub(crate) fn debug_hash(x: &dyn fmt::Debug) -> u128 {
     let mut w = Writer::default();
     let _ = fmt::write(&mut w, format_args!("{x:?}"));
     w.finish()
@@ -102,8 +134,8 @@ pub(crate) fn opt(b: Option<&Arc<[u8]>>) -> Option<Blob<'_>> {
 struct Writer(String);
 
 impl Writer {
-    fn finish(&self) -> u64 {
-        let mut h = DefaultHasher::new();
+    fn finish(&self) -> u128 {
+        let mut h = H128::new();
         h.write(self.0.as_bytes());
         h.finish()
     }
@@ -124,7 +156,7 @@ impl PdfState {
     /// elements changed since the last digest, so a step costs the size
     /// of what it changed.
     #[must_use]
-    pub fn digest(&mut self) -> u64 {
+    pub fn digest(&mut self) -> u128 {
         let d = self.digest_sans_chars();
         with_chars(d, self)
     }
@@ -135,11 +167,11 @@ impl PdfState {
     /// ones. The characters are kept out of the fonts' element hashes,
     /// so this formats nothing more than the digest does.
     #[must_use]
-    pub fn digest_sans_chars(&mut self) -> u64 {
+    pub fn digest_sans_chars(&mut self) -> u128 {
         let (core, os) = self.digest_parts();
-        let mut s = DefaultHasher::new();
-        s.write_u64(core);
-        s.write_u64(os);
+        let mut s = H128::new();
+        s.write_u128(core);
+        s.write_u128(os);
         s.finish()
     }
 
@@ -150,12 +182,12 @@ impl PdfState {
     /// written: two states equal in the first part are equal in all once
     /// the same steps have written that stream ([`PdfState::os_stream`]).
     #[must_use]
-    pub fn digest_parts(&mut self) -> (u64, u64) {
+    pub fn digest_parts(&mut self) -> (u128, u128) {
         self.refresh_digests();
         SANS_OS.with(|c| c.set(true));
         let core = fast_hash(self);
         SANS_OS.with(|c| c.set(false));
-        let mut s = DefaultHasher::new();
+        let mut s = H128::new();
         s.write(self.os_bytes());
         (core, s.finish())
     }
@@ -164,7 +196,7 @@ impl PdfState {
     /// [`PdfState::digest`] (equal states, equal digests, for both).
     #[doc(hidden)]
     #[must_use]
-    pub fn digest_full(&self) -> u64 {
+    pub fn digest_full(&self) -> u128 {
         let mut w = Writer::default();
         let _ = fmt::write(&mut w, format_args!("{self:?}"));
         with_chars(w.finish(), self)
@@ -173,9 +205,9 @@ impl PdfState {
 
 /// `d` with the characters each font used hashed in (the fonts' own
 /// formatting leaves them out).
-fn with_chars(d: u64, st: &PdfState) -> u64 {
-    let mut s = DefaultHasher::new();
-    s.write_u64(d);
+fn with_chars(d: u128, st: &PdfState) -> u128 {
+    let mut s = H128::new();
+    s.write_u128(d);
     for (f, fs) in st.fonts.iter() {
         if fs.chars.iter().any(|&c| c) {
             s.write_u64(u64::from(*f));
@@ -208,7 +240,7 @@ pub(crate) fn element_hashes(name: &str) -> u64 {
     HASHED.with(|h| h.borrow().get(name).copied().unwrap_or(0))
 }
 
-fn element_hash(name: &'static str, x: &dyn fmt::Debug) -> u64 {
+fn element_hash(name: &'static str, x: &dyn fmt::Debug) -> u128 {
     HASHED.with(|h| *h.borrow_mut().entry(name).or_default() += 1);
     let mut w = Writer::default();
     let _ = fmt::write(&mut w, format_args!("{x:?}"));
@@ -221,9 +253,9 @@ fn element_hash(name: &'static str, x: &dyn fmt::Debug) -> u64 {
 pub(crate) struct TVec<T> {
     name: &'static str,
     items: Vec<T>,
-    hashes: Vec<u64>,
+    hashes: Vec<u128>,
     dirty: Vec<usize>,
-    sum: u64,
+    sum: u128,
 }
 
 impl<T: fmt::Debug> TVec<T> {
@@ -311,9 +343,9 @@ impl<T: fmt::Debug> fmt::Debug for TVec<T> {
 pub(crate) struct TMap<K, V> {
     name: &'static str,
     map: Arc<std::collections::BTreeMap<K, V>>,
-    hashes: Arc<std::collections::BTreeMap<K, u64>>,
+    hashes: Arc<std::collections::BTreeMap<K, u128>>,
     dirty: std::collections::BTreeSet<K>,
-    sum: u64,
+    sum: u128,
 }
 
 impl<K: Ord + Clone + fmt::Debug, V: Clone + fmt::Debug> TMap<K, V> {
@@ -351,7 +383,7 @@ impl<K: Ord + Clone + fmt::Debug, V: Clone + fmt::Debug> TMap<K, V> {
     }
     /// The map's content as its digest and its size (equal maps, equal
     /// keys): a key to memoize a function of the map by.
-    pub(crate) fn content_key(&mut self) -> (u64, usize) {
+    pub(crate) fn content_key(&mut self) -> (u128, usize) {
         self.refresh();
         (self.sum, self.map.len())
     }
@@ -399,7 +431,7 @@ pub(crate) fn sans_os() -> bool {
 }
 
 /// Formats `x` with the tracked collections as their sums.
-pub(crate) fn fast_hash(x: &dyn fmt::Debug) -> u64 {
+pub(crate) fn fast_hash(x: &dyn fmt::Debug) -> u128 {
     FAST.with(|c| c.set(true));
     let mut w = Writer::default();
     let _ = fmt::write(&mut w, format_args!("{x:?}"));

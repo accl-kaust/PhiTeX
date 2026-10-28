@@ -696,7 +696,7 @@ pub(crate) struct Fold {
     forms: Forms,
 }
 
-type TailMemo = Mutex<FxHashMap<u64, Arc<phitex_pdf::Tail>>>;
+type TailMemo = Mutex<FxHashMap<u128, Arc<phitex_pdf::Tail>>>;
 
 /// The end of the file's objects by the final state's digest
 /// ([`finish_exact`]): a pure function's memo.
@@ -937,7 +937,7 @@ impl FontSource for Mapped<'_> {
     fn file_shared(&self, name: &[u8]) -> Option<Arc<[u8]>> {
         self.fonts.file_shared(name)
     }
-    fn metrics_hash(&self, f: FontId) -> u64 {
+    fn metrics_hash(&self, f: FontId) -> u128 {
         self.fonts.metrics_hash(self.step(f))
     }
     fn map_by_ps_name(&self, ps_name: &[u8], slant: i32, extend: i32) -> Option<MapEntry> {
@@ -1404,7 +1404,7 @@ impl FontSource for Fonts {
         }
         f
     }
-    fn metrics_hash(&self, f: FontId) -> u64 {
+    fn metrics_hash(&self, f: FontId) -> u128 {
         self.by_id.get(&f).map_or_else(
             || phitex_pdf::metrics_hash(self.metrics(f)),
             |x| {
@@ -3779,7 +3779,7 @@ struct LinkMemo {
 /// A snapshot's digests ([`PdfState::digest_parts`]: but for the
 /// object stream's bytes, and those bytes) and the characters its
 /// writer used ([`LinkSnap`]).
-type SnapDigests = (u64, u64, Vec<(FontId, [bool; 256])>);
+type SnapDigests = (u128, u128, Vec<(FontId, [bool; 256])>);
 
 impl LinkSnap {
     /// [`LinkSnap::digests`], taken now if not yet.
