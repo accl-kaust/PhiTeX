@@ -785,16 +785,14 @@ fn run_worker(
                     if node.state() != State::Clean {
                         continue;
                     }
-                    let field = match &wake.cause {
-                        Cause::Changed { field, .. } | Cause::Rebind { field, .. } => Some(*field),
-                        _ => None,
-                    };
-                    let moved = node.record().is_some_and(|r| {
-                        r.reads
-                            .iter()
-                            .filter(|rd| field.is_none() || rd.kind.field() == field)
-                            .any(|rd| !crate::read::holds(eng, node, rd, &mut memo))
-                    });
+                    // (every read of the node checked, not the woken field's
+                    // alone: a node held for two fields is listed twice and
+                    // seen once, and a first form that checked the first
+                    // wake's field let a stale read of the second stand, an
+                    // amsldoc -j16 build wrong by one /PageLabels entry)
+                    let moved = node
+                        .record()
+                        .is_some_and(|r| r.reads.iter().any(|rd| !crate::read::holds(eng, node, rd, &mut memo)));
                     if !moved {
                         continue;
                     }
