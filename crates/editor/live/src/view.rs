@@ -179,6 +179,8 @@ pub struct Viewer {
     read: Mutex<Option<Box<dyn Fn(&str) -> Option<Vec<u8>> + Send>>>,
     /// Where the events go (every viewer).
     emit: Mutex<Option<Box<dyn Fn(&str) + Send>>>,
+    /// What every ask goes through before it is queued ([`Viewer::route_asks`]).
+    route: Mutex<Option<Box<dyn Fn(Ask) -> Ask + Send>>>,
 }
 
 /// The messages a viewer that joins is shown.
@@ -198,6 +200,7 @@ impl Default for Viewer {
             goto: Mutex::new(None),
             read: Mutex::new(None),
             emit: Mutex::new(None),
+            route: Mutex::new(None),
         }
     }
 }
@@ -242,6 +245,14 @@ impl Viewer {
 
     pub fn diff_tex(&self) -> Option<String> {
         lock(&self.diff).tex.clone()
+    }
+
+    /// Every ask from now on (a request's, [`Viewer::answer`], or a host's,
+    /// [`Viewer::push`]) goes through `route` before it is queued, in the
+    /// order they came (the live document's main-file edits sent to a
+    /// running build, [`crate::document::Document::absorber`]).
+    pub fn route_asks(&self, route: Box<dyn Fn(Ask) -> Ask + Send>) {
+        *lock(&self.route) = Some(route);
     }
 
     /// Call `wake` when a browser asks the watch for something.
@@ -427,7 +438,15 @@ fn hashes_json(hs: &[u64]) -> Value {
 
 impl Viewer {
     fn ask(&self, a: Ask) {
-        lock(&self.asks).push(a);
+        // (routed and queued under the queue's lock: the asks keep their
+        // order, whatever thread sends them)
+        let mut q = lock(&self.asks);
+        let a = match lock(&self.route).as_ref() {
+            Some(r) => r(a),
+            None => a,
+        };
+        q.push(a);
+        drop(q);
         if let Some(w) = lock(&self.wake).as_ref() {
             w();
         }
