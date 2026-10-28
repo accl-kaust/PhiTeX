@@ -20,6 +20,8 @@
 # inside and filled from /w/oracle-new after.
 #SBATCH -J phitex-ci -o phitex-ci-%A_%a.out
 set -euo pipefail
+# (mc's nodes have no apptainer: the user-space one, apptainer-user.sbatch)
+command -v apptainer > /dev/null || PATH=$HOME/shared-cache/apptainer/usr/bin:$PATH
 stage=$1 run=$2
 shift 2
 CI=$HOME/code/flinner/phitex-ci

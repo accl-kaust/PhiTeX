@@ -11,6 +11,8 @@
 # $CI/runs/<run>/docs as they come (a job killed at its limit keeps them).
 #SBATCH -J phitex-sweep -o phitex-sweep-%j.out
 set -euo pipefail
+# (mc's nodes have no apptainer: the user-space one, apptainer-user.sbatch)
+command -v apptainer > /dev/null || PATH=$HOME/shared-cache/apptainer/usr/bin:$PATH
 run=$1 bin=$2 jobs=$3 par=$4 tmo=$5 ids=${6:-}
 CI=$HOME/code/flinner/phitex-ci
 image=${CI_IMAGE:-phitex-ci-2026-09-25}

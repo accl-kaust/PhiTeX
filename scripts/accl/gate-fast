@@ -42,15 +42,23 @@
 # GATE_SBATCH adds sbatch options to every shard; unset it is
 # --exclude=harrier (harrier's /tmp is filled by other users past job.sbatch's
 # 20 GB check), and GATE_SBATCH= gives none.
+#
+# CLUSTER=mc gates on the mc cluster instead (cluster.sh; the accl driver
+# it calls reads the same setting): the same shards on mcnode42/44, the
+# epoch oracle and gate-bin stores under mc's home, GATE_SBATCH none by
+# default, no control timings by default (gate-control/ holds accl's, of
+# other machines), the results here under ~/code/flinner/phitex-runs/mc/:
+#   CLUSTER=mc scripts/accl/gate-fast [COMMIT]
+#   CLUSTER=mc scripts/accl/gate-fast wait ID...
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-H=acclhead1
+# (H, runs, gate_x: cluster.sh)
+. "$here/cluster.sh"
 slurm='export PATH=/opt/slurm/current/bin:$PATH;'
 # (acclhead1 resets connections under load: every ssh, rsync and git
 # call here and in the accl it runs retried, sshmux/ssh)
 export SSH=$here/sshmux/ssh
 export RSYNC_RSH=$SSH GIT_SSH_COMMAND=$SSH
-runs=$HOME/code/flinner/phitex-runs
 ORACLE=code/flinner/phitex-runs/amsldoc-oracle-epoch.pdf
 # the latex tests heaviest first (measured: test-walls.txt of the shards)
 ORDER_FILE=$here/gate-latex-order.txt
@@ -102,7 +110,7 @@ sub() {
   # not submitted twice)
   tag="gf-$c-$1-$$-$RANDOM"
   for try in 1 2 3; do
-    out=$(ACCL_COMMIT=$c ACCL_OPTS="$(with_scripts "$opts") --comment=$tag ${GATE_SBATCH---exclude=harrier}" "$here/accl" submit cmd \
+    out=$(ACCL_COMMIT=$c ACCL_OPTS="$(with_scripts "$opts") --comment=$tag ${GATE_SBATCH-$gate_x}" "$here/accl" submit cmd \
       env GATE_TEST_TIMEOUT="${GATE_TEST_TIMEOUT:-120}" GATE_TEST_PAR="${GATE_TEST_PAR:-5}" GATE_AMS_EDITS="${GATE_AMS_EDITS:-10}" GATE_CG_DOC="${GATE_CG_DOC:-para4000 macros}" \
       bash -c "$boot" gate-shard "$@" 2> "$err") || true
     id=$(tail -1 <<< "$out")
@@ -181,7 +189,7 @@ submit() {
   # (the timing control: its timings as `gate-fast control` recorded
   # them, never built per gate; GATE_CONTROL= none)
   if on ams; then
-    ids+=("$(sub "-c 18 --mem=16G -t 00:30:00 -J gf-ams $(on_bins "$C")" ams "$want" "${GATE_CONTROL-566fb842}")")
+    ids+=("$(sub "-c 18 --mem=16G -t 00:30:00 -J gf-ams $(on_bins "$C")" ams "$want" "${GATE_CONTROL-$gate_ctl}")")
     ids+=("$(sub "-c 10 --mem=16G -t 00:30:00 -J gf-amsedit8 $(on_bins "$C")" amsedit 8)")
     ids+=("$(sub "-c 18 --mem=16G -t 00:30:00 -J gf-amsedit16 $(on_bins "$C")" amsedit 16)")
   fi
@@ -231,7 +239,7 @@ control() {
   d=$here/gate-control/$ctl
   mkdir -p "$d"
   cp "$runs/cmd-$j"/cold-control-j*.json "$d/" || { echo "gate-fast: job $j recorded nothing" >&2; exit 1; }
-  echo "accl job $j, $(date -u +%Y-%m-%d), on $(sed -n 's/^node \([^,]*\),.*/\1/p' "$runs/cmd-$j/job.log" 2>/dev/null | head -1)" > "$d/recorded.txt"
+  echo "${CLUSTER:-accl} job $j, $(date -u +%Y-%m-%d), on $(sed -n 's/^node \([^,]*\),.*/\1/p' "$runs/cmd-$j/job.log" 2>/dev/null | head -1)" > "$d/recorded.txt"
   ls "$d"
 }
 

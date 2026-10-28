@@ -24,35 +24,66 @@
 # and the stash are untouched. It is pushed to the `accl` remote as
 # refs/wip/<commit>. Results land in ~/code/flinner/phitex-runs/<task>-<job>/
 # here and on accl.
+#
+# CLUSTER=mc runs all of it on the mc cluster instead (`ssh mcmgt01`,
+# partition mc, its CPU-only nodes; the git remote `mc`; results here
+# under ~/code/flinner/phitex-runs/mc/): cluster.sh. Unset, accl.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-H=acclhead1
+# (H, remote, part, light, ws_node, runs: cluster.sh)
+. "$here/cluster.sh"
 slurm='export PATH=/opt/slurm/current/bin:$PATH;'
 # (acclhead1 resets connections under load: every ssh, scp, rsync and
 # git call retried, sshmux/ssh)
 SSH=$here/sshmux/ssh
 export RSYNC_RSH=$SSH GIT_SSH_COMMAND=$SSH
-runs=$HOME/code/flinner/phitex-runs
 
 preset() {
   case $1 in
-    gate) echo "-p build --qos=build4 -c 48 --mem=128G -t 03:00:00" ;;
-    *) echo "-p build --qos=build4 -c 16 --mem=64G -t 02:00:00" ;;
+    gate) echo "$part -c 48 --mem=128G -t 03:00:00" ;;
+    *) echo "$part -c 16 --mem=64G -t 02:00:00" ;;
   esac
 }
 
+# (where snapshots go: the cluster's remote in this repository, else its
+# URL, as in a repository without that remote, phitex-frontends, and in
+# its submodules)
+dest() { git remote get-url $remote > /dev/null 2>&1 && echo $remote || echo "$H:code/flinner/phitex.git"; }
+
+# the gitlinks (submodules) of commit or index: "commit<TAB>path" lines
+# (of `git ls-files -s` or `git ls-tree -r`: the field of 40 hex digits)
+gitlinks() { awk -F'\t' '$1 ~ /^160000 / {n = split($1, a, " "); for (i = 2; i <= n; i++) if (length(a[i]) == 40 && a[i] !~ /[^0-9a-f]/) print a[i] "\t" $2}'; }
+
 snap() {
-  local repo idx tree head c
+  local c sc p d
+  d=$(dest)
   if [ -n "${ACCL_COMMIT:-}" ]; then
     c=$(git rev-parse "$ACCL_COMMIT^{commit}")
-    git push -q accl "$c:refs/wip/$c" 2>/dev/null || true
+    git push -q $d "$c:refs/wip/$c" 2>/dev/null || true
+    # (its submodules' commits too, from their checkouts)
+    while IFS=$'\t' read -r sc p; do
+      git -C "$p" push -q "$H:code/flinner/phitex.git" "$sc:refs/wip/$sc" 2>/dev/null || true
+    done < <(git ls-tree -r "$c" | gitlinks)
     echo "$c"
     return
   fi
+  snap_tree "$d"
+}
+
+# snap_tree DEST: the working tree of the repository here as a commit,
+# pushed to DEST; a checked-out submodule's working tree snapshotted the
+# same way, its gitlink pointing at that commit
+snap_tree() {
+  local repo idx tree head c sc p
   repo=$(git rev-parse --show-toplevel)
   idx=$(mktemp)
   cp "$(git rev-parse --git-path index)" "$idx"
   (cd "$repo" && GIT_INDEX_FILE=$idx git add -A -- . ':!HANDOFF.md' ':!GPT_HANDOFF.md' ':!presentation')
+  while IFS=$'\t' read -r sc p; do
+    [ -e "$repo/$p/.git" ] || continue
+    sc=$(cd "$repo/$p" && snap_tree "$H:code/flinner/phitex.git") || { rm -f "$idx"; return 1; }
+    GIT_INDEX_FILE=$idx git update-index --cacheinfo "160000,$sc,$p"
+  done < <(GIT_INDEX_FILE=$idx git ls-files -s | gitlinks)
   tree=$(GIT_INDEX_FILE=$idx git write-tree)
   rm -f "$idx"
   head=$(git rev-parse HEAD)
@@ -61,7 +92,7 @@ snap() {
   else
     c=$(git commit-tree "$tree" -p "$head" -m "wip snapshot of $(git rev-parse --short HEAD)")
   fi
-  git push -q accl "$c:refs/wip/$c" 2>/dev/null || git push -q accl "+$c:refs/wip/$c"
+  git push -q $1 "$c:refs/wip/$c" 2>/dev/null || git push -q $1 "+$c:refs/wip/$c"
   echo "$c"
 }
 
@@ -77,7 +108,7 @@ submit() {
   opts="$(preset "$@") ${ACCL_OPTS:-}"
   # (a kept workspace, job.sbatch's ACCL_WS: on its node, every job)
   if [ -n "${ACCL_WS:-}" ]; then
-    opts="$opts -w ${ACCL_WS_NODE:-acclnode01} --export=ALL,ACCL_WS=$ACCL_WS"
+    opts="$opts -w ${ACCL_WS_NODE:-$ws_node} --export=ALL,ACCL_WS=$ACCL_WS"
   fi
   echo "accl: commit $c, $opts" >&2
   $SSH $H "$slurm cd code/flinner/phitex-runs && sbatch --parsable -J phitex-$task $opts \$HOME/code/flinner/phitex-accl/job.sbatch $c $(printf '%q ' "$@")"
@@ -132,7 +163,7 @@ ci_sync() {
 }
 # sb OPTS... STAGE RUN ARGS...: sbatch a stage, its job id
 sb() { $SSH $H "$slurm cd $CI && sbatch --parsable --nice=1000 $*"; }
-PERF_NODE=${CI_PERF_NODE:-acclnode04}
+PERF_NODE=${CI_PERF_NODE:-$perf_node}
 
 cmd=${1:-}
 shift || true
@@ -147,17 +178,17 @@ case $cmd in
   ws-clean)
     # (a job on the workspace's node, after any job holding its lock)
     n=${1:?accl ws-clean NAME}
-    $SSH $H "$slurm cd code/flinner/phitex-runs && sbatch --parsable -J ws-clean -p build --qos=build4 -c 1 --mem=1G -t 00:30:00 -w ${ACCL_WS_NODE:-acclnode01} --wrap 'flock /tmp/\$USER-ws-$n.lock rm -rf /tmp/\$USER-ws-$n; rm -f /tmp/\$USER-ws-$n.lock'" ;;
+    $SSH $H "$slurm cd code/flinner/phitex-runs && sbatch --parsable -J ws-clean $part -c 1 --mem=1G -t 00:30:00 -w ${ACCL_WS_NODE:-$ws_node} --wrap 'flock /tmp/\$USER-ws-$n.lock rm -rf /tmp/\$USER-ws-$n; rm -f /tmp/\$USER-ws-$n.lock'" ;;
   ci-oracle)
     ci_sync
     # (the list beside the harness, not in it: a sync would remove it)
     l=lists/$(date +%Y%m%d-%H%M%S)-$(basename "$1")
     $SSH $H "mkdir -p $CI/lists"
     scp -q -S "$SSH" "$1" "$H:$CI/$l"
-    sb -J ci-oracle --array=0-${CI_SHARDS:-63}%24 -x "$PERF_NODE" -p build --qos=build4 -c 2 --mem=6G -t 12:00:00 \
+    sb -J ci-oracle --array=0-${CI_SHARDS:-63}%24 ${PERF_NODE:+-x "$PERF_NODE"} $part -c 2 --mem=6G -t 12:00:00 \
       "\$HOME/$CI/harness/ci.sbatch" oracle "oracle-$(date +%Y%m%d-%H%M%S)" "\$HOME/$CI/$l" ;;
   ci-discover)
     ci_sync
-    sb -J ci-discover -p light -c 2 --mem=8G -t 01:00:00 "\$HOME/$CI/harness/ci.sbatch" discover discover ;;
+    sb -J ci-discover $light -c 2 --mem=8G -t 01:00:00 "\$HOME/$CI/harness/ci.sbatch" discover discover ;;
   *) sed -n '2,30p' "$0"; exit 2 ;;
 esac

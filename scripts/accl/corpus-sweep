@@ -13,14 +13,18 @@
 # SWEEP_IDS=a,b limits the documents; SWEEP_JOBS, SWEEP_PAR and
 # SWEEP_TIMEOUT pass to scripts/ci/sweep.py; SWEEP_SLURM overrides the
 # job's size. Local copy: ~/code/flinner/phitex-runs/<run>/.
+#
+# CLUSTER=mc sweeps on the mc cluster (cluster.sh): the commit's gate
+# store there (a mc gate-fast builds it), mc's copy of the CI image and
+# of the oracle cache; local copy under ~/code/flinner/phitex-runs/mc/.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(git -C "$here" rev-parse --show-toplevel)
-H=acclhead1
+# (H, part, runs: cluster.sh)
+. "$here/cluster.sh"
 slurm='export PATH=/opt/slurm/current/bin:$PATH;'
 export PATH="$here/sshmux":$PATH
 export RSYNC_RSH=$here/sshmux/ssh
-runs=$HOME/code/flinner/phitex-runs
 CI=code/flinner/phitex-ci
 reg=$runs/sweep-runs.txt
 
@@ -34,7 +38,7 @@ submit() {
   rsync -a "$repo/scripts/xetex/fonts.conf" "$H:$CI/runs/$run/harness/xetex/"
   rsync -a "$repo/ci/" "$H:$CI/runs/$run/harness/data/"
   rsync -a "$here/corpus-sweep.sbatch" "$H:$CI/runs/$run/harness/"
-  j=$(ssh $H "$slurm cd $CI/runs/$run && sbatch --parsable -J sweep ${SWEEP_SLURM:--p build --qos=build4 -c 48 --mem=128G -t 08:00:00} \
+  j=$(ssh $H "$slurm cd $CI/runs/$run && sbatch --parsable -J sweep ${SWEEP_SLURM:-$part -c 48 --mem=128G -t 08:00:00} \
     \$HOME/$CI/runs/$run/harness/corpus-sweep.sbatch $run \$HOME/code/flinner/phitex-runs/gate-bin/$c/cli/prof/phitex \
     ${SWEEP_JOBS:-1,8} ${SWEEP_PAR:-1:20,8:5} ${SWEEP_TIMEOUT:-120} ${SWEEP_IDS:-}")
   mkdir -p "$runs"

@@ -2,6 +2,10 @@
 # an Arch Linux Archive snapshot, so pdfTeX, TeX Live, zlib and the fonts
 # are the versions the oracle outputs come from, and the repository's Rust
 # toolchain. Built by build-image.sbatch (kept outside the repository).
+# phitex-2026-09-25-tools was built from this file before nodejs and the
+# wasm32-wasip1-threads target were added (10-18); phitex-2026-09-25-node26
+# is built from it as it is (on mc: CLUSTER=mc, user-space Apptainer):
+#   sbatch -p mc -C cpu_amd_epyc_9754 -c 16 --mem=48G -t 02:00:00 build-image.sbatch phitex-2026-09-25-node26
 Bootstrap: docker
 From: archlinux:base
 
@@ -22,6 +26,10 @@ From: archlinux:base
     rustup toolchain install nightly-2026-08-08 --profile minimal \
         --component rustfmt,clippy --target wasm32-unknown-unknown,wasm32-wasip1-threads
     rustup default nightly-2026-08-08
+    # (what the frontends' core build and the lint shard's wasm check
+    # need: Node 26, the snapshot's nodejs, and wasip1-threads' std)
+    node --version | grep -q '^v26\.'
+    test -d /opt/rust/rustup/toolchains/nightly-2026-08-08-x86_64-unknown-linux-gnu/lib/rustlib/wasm32-wasip1-threads/lib
     pacman -Scc --noconfirm
 
 %environment

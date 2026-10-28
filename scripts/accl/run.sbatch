@@ -9,6 +9,8 @@
 # ~/code/flinner/phitex-runs/<commit>-<job>/.
 #SBATCH -J phitex-run -o phitex-run-%j.out
 set -euo pipefail
+# (mc's nodes have no apptainer: the user-space one, apptainer-user.sbatch)
+command -v apptainer > /dev/null || PATH=$HOME/shared-cache/apptainer/usr/bin:$PATH
 commit=$1
 shift
 sif=$HOME/shared-cache/phitex/phitex-2026-09-25.sif
