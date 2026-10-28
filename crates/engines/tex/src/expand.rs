@@ -608,8 +608,19 @@ impl Run<'_, '_> {
         // (§494: `skip_line:=line`, for §336's message)
         self.skip_from = self.line_mark();
         let mut l = 0;
+        let mut n = 0u64;
         loop {
             if !self.get_next() || self.halt.is_some() {
+                break;
+            }
+            // (the command loop's checks, which a skip never reaches: a
+            // run whose read moved stops, and one that skips for ever is
+            // stuck, `Run::watchdog`)
+            n += 1;
+            if n.is_multiple_of(Self::HB_BATCH)
+                && let Err(h) = self.skip_check()
+            {
+                self.raise(h);
                 break;
             }
             if self.cur.cmd == cmd::FI_OR_ELSE {
@@ -624,6 +635,12 @@ impl Run<'_, '_> {
             }
         }
         self.in_skip = false;
+    }
+
+    /// [`Run::pass_text`]'s check every [`Run::HB_BATCH`] tokens skipped.
+    fn skip_check(&mut self) -> R<()> {
+        self.cx.tick(Self::HB_BATCH)?;
+        self.watchdog()
     }
 
     /// `get_x_token_or_active_char` (§506): `(cmd, chr)` for `\if`.
