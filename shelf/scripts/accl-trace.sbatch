@@ -8,7 +8,7 @@
 #       ~/code/flinner/shelf-accl/scripts/accl-trace.sbatch ~/code/flinner/shelf-accl COMMIT [check|full]'
 #
 # COMMIT: trace/phitex's (`git -C trace/phitex rev-parse HEAD`), cloned
-# from ~/code/flinner/phitex.git. `check` traces CHECK_NAMES only
+# from ~/code/flinner/phitex.git (or fetched from SRC/phitex.bundle). `check` traces CHECK_NAMES only
 # (TRACE_NAMES: cache/trace-<engine>-check.json) and builds nothing;
 # `full` traces every name and builds (build/<label>, MANIFEST.tsv).
 # TLPDB=path (sbatch --export=ALL,TLPDB=...): build from that package
@@ -23,7 +23,7 @@
 # job's scratch clone pointed at the tree); (3) without it, build.py with
 # TRACE (both engines). Everything runs in /tmp/$USER-$SLURM_JOB_ID; the
 # results go to ~/code/flinner/shelf-runs/<mode>-<job>/: trace-*.json,
-# trace-*.log, texlive.tlpdb.xz, fontindex.pxfi, the tracer's Cargo.lock,
+# trace-*.log, logs/ (the TeX log of each job that made no page), texlive.tlpdb.xz, fontindex.pxfi, the tracer's Cargo.lock,
 # build.log and (full) build/ and MANIFEST.tsv.
 #SBATCH -J shelf-trace -o shelf-trace-%j.out
 set -euo pipefail
@@ -41,6 +41,9 @@ echo "node $(hostname), $jobs jobs, mode $mode, start $(date +%T)"
 cp -a "$src/." "$w/shelf/"
 rm -rf "$w/shelf/trace/phitex"
 git clone -q "$HOME/code/flinner/phitex.git" "$w/shelf/trace/phitex"
+# (a commit ~/code/flinner/phitex.git lacks comes in SRC/phitex.bundle:
+# git bundle create phitex.bundle <a commit it has>..<branch>)
+[ -f "$src/phitex.bundle" ] && git -C "$w/shelf/trace/phitex" fetch -q "$src/phitex.bundle" "+refs/*:refs/bundle/*"
 git -C "$w/shelf/trace/phitex" -c advice.detachedHead=false checkout -q "$commit"
 key=$(sha256sum "$w/shelf/trace/phitex/Cargo.lock" | cut -c1-16)
 [ -d "$HOME/shared-cache/phitex/cargo-$key" ] || { echo "FAILED: no crate cache cargo-$key (a PhiTeX job for $commit fetches it)"; exit 3; }
@@ -85,7 +88,7 @@ echo "tracer and font index $(date +%T)"
 # (3) the traces and the build
 names=${CHECK_NAMES:-amsmath.sty,hyperref.sty,tikz.sty,geometry.sty,graphicx.sty,biblatex.sty,beamer.cls,fontspec.sty,unicode-math.sty,polyglossia.sty,xeCJK.sty,ctex.sty}
 status=0
-box env TLPDB=cache/texlive.tlpdb.xz TRACE=trace/target/release/shelf-trace TRACE_FONT_INDEX="$w/fontindex.pxfi" \
+box env SHELF_TRACE_LOGS="$w/results/logs" TLPDB=cache/texlive.tlpdb.xz TRACE=trace/target/release/shelf-trace TRACE_FONT_INDEX="$w/fontindex.pxfi" \
   TRACE_JOBS="$jobs" PACK_JOBS="$jobs" $([ "$mode" = check ] && echo TRACE_NAMES="$names") \
   python3 build.py > "$w/results/build.log" 2>&1 || status=$?
 tail -40 "$w/results/build.log"

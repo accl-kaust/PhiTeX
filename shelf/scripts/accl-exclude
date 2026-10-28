@@ -9,3 +9,4 @@
 /trace/target/
 /MANIFEST.tsv
 __pycache__/
+/phitex.bundle

@@ -27,6 +27,8 @@
 //! TeX Live's, through kpathsea (a TeX Live on PATH), and its reads are
 //! not printed: every document has them (the old trace's `.fmt`). Its
 //! state is made once and kept in `--prelude FILE` when given.
+//! `SHELF_TRACE_LOGS=DIR`: the TeX log of each job that made no page,
+//! in `DIR/<engine>/<name>.log`.
 //! `--font-index` is `phitex-otf`'s font index (`otf-index`), which
 //! XeTeX's font names are looked up in. TECkit mappings (fonts/misc, not
 //! on Shelf) come from TeX Live. XeTeX's XDV is not made a PDF: what
@@ -287,6 +289,15 @@ fn main() {
             .collect();
         let pages = b.pages().len();
         let files: Vec<String> = lock(&read).iter().cloned().collect();
+        // (SHELF_TRACE_LOGS=DIR: the log of a job that made no page, in
+        // DIR/<engine>/<name>.log: why a load stopped short)
+        if pages == 0
+            && let Some(dir) = std::env::var_os("SHELF_TRACE_LOGS")
+        {
+            let d = Path::new(&dir).join(&engine);
+            let _ = std::fs::create_dir_all(&d);
+            let _ = std::fs::write(d.join(format!("{name}.log")), b.output().1);
+        }
         drop(b);
         let _ = writeln!(out, "{name}\t{}", files.join(","));
         let _ = out.flush();

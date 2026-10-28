@@ -4,3 +4,4 @@ cache/
 .home/
 releases*/
 build/
+trace/target/
