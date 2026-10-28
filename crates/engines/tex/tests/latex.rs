@@ -1224,6 +1224,10 @@ latexmk_tests! {
     // 79 corpus manuals with microtype)
     latexmk_corpus_protrude_heading_j1: "corpus-protrude-heading", 1;
     latexmk_corpus_protrude_heading_j8: "corpus-protrude-heading", 8;
+    // (KOMA-Script's heading: \hskip\glueexpr<indent>\relax before the
+    // number, a spec of its own as e-TeX's scan_expr leaves it)
+    latexmk_corpus_protrude_koma_j1: "corpus-protrude-koma", 1;
+    latexmk_corpus_protrude_koma_j8: "corpus-protrude-koma", 8;
     // (tikz's fadings: an \immediate\pdfxform whose box names a form
     // not written yet writes it, an object for its resources, before the
     // next \pdflastxform; 10 corpus manuals' /pgfsmask names)

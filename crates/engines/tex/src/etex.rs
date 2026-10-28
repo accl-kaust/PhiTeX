@@ -723,6 +723,9 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
     let mut stack: Vec<Level> = Vec::new();
     let mut l = l0;
     let (mut r, mut e, mut s, mut t, mut n);
+    // (a glue result's spec: its own once an operator made one, else
+    // its one factor's, as `scan_glue` gave it)
+    let (mut any_op, mut factor_own) = (false, false);
     'restart: loop {
         r = EXPR_NONE;
         e = zero;
@@ -751,6 +754,9 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
                 2 => run.scan_glue(2)?,
                 _ => run.scan_glue(3)?,
             };
+            if o_type >= 2 {
+                factor_own = run.glue_own;
+            }
             'found: loop {
                 // §1666: the next operator
                 run.skip_blanks_x()?;
@@ -788,6 +794,9 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
                 {
                     err = true;
                     f = zero;
+                }
+                if o != EXPR_NONE {
+                    any_op = true;
                 }
                 let mut o = o;
                 // §1672 and the others: the current term
@@ -898,6 +907,7 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
         run.log("error", "Arithmetic overflow")?;
         e = zero;
     }
+    run.glue_fresh = any_op || factor_own;
     Ok(match l0 {
         0 => IVal::Int(e.width),
         1 => IVal::Dimen(e.width),

@@ -549,6 +549,11 @@ pub(crate) struct Run<'c, 'a> {
     /// (made from a dimension, or a register negated), not the value of
     /// a glue register or parameter (`GlueNode::own_spec`).
     pub glue_own: bool,
+    /// Whether the internal glue `scan_something_internal` last gave is a
+    /// spec of its own: a `\glueexpr` or `\muexpr` with an operator, or
+    /// whose one factor's spec was its own (e-TeX's `scan_expr`: `t:=f`,
+    /// `e:=t` keep the factor's spec, an operation makes a new one).
+    pub glue_fresh: bool,
     /// The run's progress as the stuck check last saw it
     /// ([`Run::watchdog`]).
     pub(crate) wd: crate::control::Watchdog,
@@ -995,6 +1000,7 @@ impl<'c, 'a> Run<'c, 'a> {
             exps: 0,
             hb_at: Run::heartbeat_start(),
             glue_own: false,
+            glue_fresh: false,
             hb_done: 0,
             wd: crate::control::Watchdog::default(),
             pulled: 0,

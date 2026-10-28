@@ -625,12 +625,13 @@ impl Run<'_, '_> {
         let negative = self.skip_signs()?;
         let width;
         if self.cur.cmd >= cmd::CHAR_GIVEN && self.cur.cmd <= cmd::MAX_INTERNAL {
+            self.glue_fresh = false;
             let x = self.scan_something_internal(level, negative)?;
             match x {
                 IVal::Glue(g) | IVal::Mu(g) => {
                     // (a register's or parameter's spec, a new one when
-                    // negated, §461)
-                    self.glue_own = negative;
+                    // negated, §461; an expression's as `scan_expr` made it)
+                    self.glue_own = negative || self.glue_fresh;
                     return Ok(g);
                 }
                 IVal::Int(n) => width = self.scan_dimen(mu, false, Some(n))?,
