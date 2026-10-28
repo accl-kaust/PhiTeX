@@ -582,7 +582,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             st.dim(env!("CARGO_PKG_VERSION")),
             st.bold(&t.file),
             st.bold(&format!("{}.{}", job.jobname, job.engine.output.ext())),
-            st.dim(&format!("{} · {threads} threads", job.engine.name))
+            st.dim(&format!("{} · {threads} thread{}", job.engine.name, if threads == 1 { "" } else { "s" }))
         ));
     }
     for n in session::waiting_notes(&job) {

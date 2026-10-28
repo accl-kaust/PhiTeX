@@ -3016,6 +3016,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// definitions are restored): what it writes to other files (LaTeX's
     /// `\@writefile{toc}{...}`) is written where the run reads the text
     /// back, as `\enddocument` does.
+    #[allow(clippy::too_many_lines, reason = "one scratch interpretation: its save, run and restore read as one")]
     pub(crate) fn interpret_line(&mut self, line: &str) -> R<Option<ValueId>> {
         let v = self.v;
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());

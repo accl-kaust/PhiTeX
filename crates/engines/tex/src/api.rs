@@ -5368,6 +5368,13 @@ impl Build {
                 }
                 None => v.list(Vec::new()),
             };
+            // (the same bytes at the same path, a file no one cut: nothing
+            // changed, nothing to stage. `r` in a watch stages every file
+            // the build read; each one's package-load record was dropped,
+            // so the preamble's loads ran again in full: 4 nodes, 2.5 s)
+            if found.is_some() && !cut && self.g.files[k].1 == val {
+                return;
+            }
             if found.is_none() {
                 self.g.files.remove(k);
                 self.g.absent.push(f);

@@ -37,6 +37,8 @@ pub struct Live {
     pub lines: Arc<std::sync::OnceLock<Vec<usize>>>,
     /// The pages the last build made (0: none, a cold build).
     pub pages_before: usize,
+    /// The engine's threads (the idle ones are these less the running).
+    pub threads: usize,
 }
 
 impl Live {
@@ -764,12 +766,14 @@ impl Session {
         phitex_tex::timeline::lap("session: files to read again, the line starts");
         let file = plain_name(&self.job.path.to_string_lossy());
         let pages_before = self.page_hashes.len();
+        let n_threads = threads(self.job.threads);
         let live = |progress| Live {
             progress,
             file: file.clone(),
             text: text.clone(),
             lines: lines.clone(),
             pages_before,
+            threads: n_threads,
         };
         let ran = crate::ui::catch(|| -> Result<(), String> {
             if let Some(b) = &mut self.build {
@@ -802,7 +806,7 @@ impl Session {
                 // document, so this phase's time is both; it is built again
                 // whenever the engine's sources changed, its cache key)
                 self.status.set(if first {
-                    format!("engine · the {} format built first (once per engine build)", self.job.engine.name)
+                    format!("engine · {} format rebuilt (once per PhiTeX update)", self.job.engine.name)
                 } else {
                     "engine".to_owned()
                 });

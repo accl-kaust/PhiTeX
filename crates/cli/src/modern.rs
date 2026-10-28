@@ -208,8 +208,9 @@ struct Opts {
     /// written over the updated one (default 300)
     #[arg(long, value_name = "MS", global = true)]
     idle: Option<u64>,
-    /// watch: the log written too, with the exact PDF file when idle
-    /// (else a watch writes no log)
+    /// watch: also write the .log file, each time the watch goes idle
+    /// (beside the exact PDF). Without it a watch writes no .log; build
+    /// always writes one
     #[arg(long, global = true)]
     log: bool,
     /// watch: the viewer's port (default: a free one)

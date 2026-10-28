@@ -292,20 +292,29 @@ fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -
         // (where the build is, as a reader counts: the page reached, of
         // the last build's pages; the runs only as a sign of life)
         let _ = (done, total);
+        // (idle: the threads less those running; the slots are one more
+        // than the threads, the evaluating thread's own)
+        let _ = idle;
+        let running = rows.iter().map(|r| r.1).sum::<usize>();
+        let idle = live.threads.saturating_sub(running);
         let page = p.page();
         let at = match (page, live.pages_before) {
+            // (no piece has started: the format and the preamble load,
+            // which are not counted as the document's runs)
+            (0, _) if total == 0 => "loading the format and the preamble".to_owned(),
             (0, _) => "before the first page".to_owned(),
             (n, 0) => format!("page {n}"),
             (n, m) => format!("page {n} of {m}"),
         };
-        out.push(format!(
-            "       {} {}",
-            st.bold(&at),
-            st.dim(&format!(
-                "· {} running · {idle} idle",
-                rows.iter().map(|r| r.1).sum::<usize>()
-            ))
-        ));
+        if total == 0 {
+            out.push(format!("       {}", st.bold(&at)));
+        } else {
+            out.push(format!(
+                "       {} {}",
+                st.bold(&at),
+                st.dim(&format!("· {running} running · {idle} idle"))
+            ));
+        }
         let shown = rows.len().min(6);
         for (k, (row, n)) in rows.iter().take(shown).enumerate() {
             let branch = if k + 1 == shown { "└─" } else { "├─" };
