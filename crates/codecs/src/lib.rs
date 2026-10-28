@@ -19,4 +19,5 @@ pub mod md5;
 pub mod pdfread;
 pub mod pdftext;
 pub mod png;
+pub mod sha256;
 pub mod zlib;
