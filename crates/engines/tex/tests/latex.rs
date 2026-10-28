@@ -1104,6 +1104,34 @@ fn latexmk_cold(name: &str, threads: usize) {
     );
 }
 
+// (a group opened by an earlier node, closed inside a paragraph: the
+// node is cut at the paragraph's start (`\begingroup\leftskip=5pt` before
+// it), the run closes the engine scope at `\endgroup` but runs on with
+// its own bindings of the closed scope while its paragraph is open
+// (`Run::closed_scope` needs an empty nest); LaTeX's center with
+// \centering or \small after \item: the next paragraphs centered, or set
+// at \small's size; 0 of 2 exact)
+#[test]
+#[ignore = "scope closed inside a paragraph begun in another node"]
+fn latexmk_corpus_center_after_item_j1() {
+    latexmk_cold("corpus-center-after-item", 1);
+}
+#[test]
+#[ignore = "scope closed inside a paragraph begun in another node"]
+fn latexmk_corpus_center_after_item_j8() {
+    latexmk_cold("corpus-center-after-item", 8);
+}
+#[test]
+#[ignore = "scope closed inside a paragraph begun in another node"]
+fn latexmk_corpus_center_small_j1() {
+    latexmk_cold("corpus-center-small", 1);
+}
+#[test]
+#[ignore = "scope closed inside a paragraph begun in another node"]
+fn latexmk_corpus_center_small_j8() {
+    latexmk_cold("corpus-center-small", 8);
+}
+
 macro_rules! latexmk_tests {
     ($($test:ident: $name:literal, $j:literal;)*) => {
         $(
