@@ -203,6 +203,8 @@ pub(crate) struct Worker {
     pub(crate) held_deferred: AtomicU64,
     pub(crate) held_fired: AtomicU64,
     pub(crate) held_passes: AtomicU64,
+    /// Held wakes dropped past `Limits::settle_passes` (1: yes).
+    pub(crate) held_unsettled: AtomicU64,
     pub(crate) woken: AtomicU64,
     pub(crate) relative_resolved: AtomicU64,
     pub(crate) predictions_confirmed: AtomicU64,
@@ -351,6 +353,7 @@ impl Pool {
                 held_deferred: AtomicU64::new(0),
                 held_fired: AtomicU64::new(0),
                 held_passes: AtomicU64::new(0),
+                held_unsettled: AtomicU64::new(0),
                 woken: AtomicU64::new(0),
                 relative_resolved: AtomicU64::new(0),
                 predictions_confirmed: AtomicU64::new(0),
@@ -765,7 +768,12 @@ fn run_worker(
             // the field checked again now, re-asked where one moved; a
             // pass of the page layer's feedback into the text)
             let held: Vec<(NodeId, Wake)> = std::mem::take(&mut *eng.held.lock());
-            if !held.is_empty() {
+            if !held.is_empty() && w.held_passes.load(Ordering::Relaxed) >= u64::from(pool.limits.settle_passes) {
+                // (as latexmk past its maximum runs: the wakes still held
+                // are dropped, the last state is written out, and the
+                // client reports it)
+                w.held_unsettled.store(1, Ordering::Relaxed);
+            } else if !held.is_empty() {
                 let mut seen: crate::values::FxHashSet<NodeId> = crate::values::FxHashSet::default();
                 let mut memo = crate::read::FoldMemo::new();
                 let mut k = 0u64;
@@ -787,7 +795,7 @@ fn run_worker(
                             .filter(|rd| field.is_none() || rd.kind.field() == field)
                             .any(|rd| !crate::read::holds(eng, node, rd, &mut memo))
                     });
-                    if !moved || !allow_final_rerun(eng, w, node) {
+                    if !moved {
                         continue;
                     }
                     if mark_stale_now(eng, Some(w), node, wake) {
@@ -822,6 +830,11 @@ fn run_worker(
                 log.swept += swept;
             }
             if k > 0 {
+                continue;
+            }
+            // (a wake held since the drain above, by anything run at this
+            // quiet point: the next quiet point drains it, never the end)
+            if !eng.held.lock().is_empty() {
                 continue;
             }
             if let Some(s) = src.as_deref_mut() {
@@ -1035,27 +1048,39 @@ fn merge_woke(eng: &Engine, n: &Node, wake: Wake) {
     }
 }
 
-/// (`PHITEX_STALL_SECS=n`, profile) Every worker idle for `n` seconds
-/// with nodes outstanding: the evaluation is stuck (a count not released,
-/// a wake lost); the outstanding count and every node not clean, inert
-/// or gone are printed once, with their states.
+/// (`PHITEX_STALL_SECS=n`, profile) No run has ended for `n` seconds
+/// while this worker was idle with nodes outstanding: the evaluation is
+/// stuck (every worker idle: a count not released, a wake lost; some
+/// still running: a run that never ends, a spin); the outstanding count,
+/// the idle workers and every node not clean, inert or gone are printed
+/// once, with their states (a `Running` one is the run that never ends).
 fn stall_dump(eng: &Engine, shared: &Shared, t_idle: Instant) {
     static SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     static DONE: AtomicBool = AtomicBool::new(false);
+    static LAST_RUNS: AtomicU64 = AtomicU64::new(u64::MAX);
+    static LAST_CHANGE_MS: AtomicU64 = AtomicU64::new(0);
     let secs = *SECS.get_or_init(|| std::env::var("PHITEX_STALL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
     if secs == 0 || !crate::obs::enabled() || t_idle.elapsed().as_secs() < secs || DONE.load(Ordering::Relaxed) {
         return;
     }
-    let idle = shared.idle.load(Ordering::SeqCst);
-    let spawned = shared.spawned.load(Ordering::SeqCst);
-    if idle < spawned.max(1) {
+    // (progress: runs ending anywhere; none for `secs` is a stall even
+    // with workers busy)
+    let runs = shared.runs_now.load(Ordering::Relaxed);
+    let now_ms = u64::try_from(t_idle.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if LAST_RUNS.swap(runs, Ordering::Relaxed) != runs {
+        LAST_CHANGE_MS.store(now_ms, Ordering::Relaxed);
         return;
     }
+    if now_ms.saturating_sub(LAST_CHANGE_MS.load(Ordering::Relaxed)) < secs * 1000 {
+        return;
+    }
+    let idle = shared.idle.load(Ordering::SeqCst);
+    let spawned = shared.spawned.load(Ordering::SeqCst);
     if DONE.swap(true, Ordering::Relaxed) {
         return;
     }
     let mut out = format!(
-        "stall: {} outstanding, {idle} of {spawned} workers idle for {secs} s; nodes not clean:\n",
+        "stall: {} outstanding, {idle} of {spawned} workers idle, no run ended for {secs} s; nodes not clean:\n",
         shared.outstanding.load(Ordering::SeqCst)
     );
     for sid in eng.order.all() {

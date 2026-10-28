@@ -524,6 +524,9 @@ pub struct Report {
     pub held_deferred: u64,
     pub held_fired: u64,
     pub held_passes: u32,
+    /// Held wakes were dropped past `Limits::settle_passes`: the page
+    /// layer did not settle; the output is the last pass's.
+    pub held_unsettled: bool,
     /// Runs whose commit found every output of the node's run before
     /// equal (its definitions and relations, contributions, output,
     /// brackets and placements): reruns that asked nothing again, the
@@ -555,6 +558,13 @@ pub struct Limits {
     /// passes): past it the node is capped (`Report::capped`), never an
     /// error.
     pub final_reruns: u32,
+    /// The quiet points of one build at which held wakes may fire
+    /// (`Operation::settles_at_quiet`; default 5, latexmk's `max_repeat`):
+    /// past it the wakes still held are dropped, the last state is
+    /// written out, and `Report::held_unsettled` says so, for the client
+    /// to report as latexmk reports "maximum runs reached": an error, the
+    /// output kept.
+    pub settle_passes: u32,
     /// Runs in the whole evaluation (default none).
     pub total_runs: Option<u64>,
     /// Wall time (default none).
@@ -571,6 +581,7 @@ impl Default for Limits {
         Limits {
             runs_per_node: 1 << 20,
             final_reruns: 10,
+            settle_passes: 5,
             total_runs: None,
             time: None,
             collect_at_bytes: None,

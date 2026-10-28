@@ -1249,6 +1249,7 @@ impl Engine {
             rep.held_deferred += load(&w.held_deferred);
             rep.held_fired += load(&w.held_fired);
             rep.held_passes = rep.held_passes.max(u32::try_from(load(&w.held_passes)).unwrap_or(u32::MAX));
+            rep.held_unsettled |= load(&w.held_unsettled) > 0;
             rep.times.op_ns += load(&w.op_ns);
             rep.times.wasted_ns += load(&w.wasted_ns);
             rep.times.commit_ns += load(&w.commit_ns);

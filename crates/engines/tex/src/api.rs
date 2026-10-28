@@ -1761,8 +1761,11 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         r.placements_moved,
         r.held_deferred,
         r.held_fired,
-        r.held_passes
+        r.held_passes,
     );
+    if r.held_unsettled {
+        eprintln!("acct: held wakes dropped past the settle_passes limit: the layout did not settle");
+    }
     let mut by_field: Vec<(String, u64)> = r
         .refuted_by_field
         .iter()
@@ -2469,9 +2472,16 @@ impl Graph {
         let collect_at_bytes = crate::exec::env_str!("PHITEX_COLLECT_MB")
             .and_then(|x| x.parse::<u64>().ok())
             .map(|mb| mb << 20);
+        // (`PHITEX_RUNS_PER_NODE`: a node run more often in one evaluation
+        // ends it with `EvalError::RunawayNode`, naming the node: a run
+        // that never settles found, not waited for)
+        let runs_per_node = crate::exec::env_str!("PHITEX_RUNS_PER_NODE")
+            .and_then(|x| x.parse::<u32>().ok())
+            .unwrap_or(phitex_defuse::Limits::default().runs_per_node);
         eng.set_limits(phitex_defuse::Limits {
             time,
             collect_at_bytes,
+            runs_per_node,
             ..phitex_defuse::Limits::default()
         });
         let shared: Shared = Arc::new(OnceLock::new());
@@ -3112,6 +3122,15 @@ impl Graph {
             // (a reader of a file read back still moving at the cap: the
             // output is its last run's, as latexmk's is after its last
             // run, and LaTeX's warning says so)
+            // (as latexmk past its maximum runs: reported, the output of
+            // the last pass kept and written; an error here would keep the
+            // PDF from being written)
+            if r.held_unsettled {
+                self.eval_warnings.push(format!(
+                    "the page layout did not settle after {} passes (the maximum, as latexmk's): the output is the last pass's",
+                    self.eng.limits().settle_passes
+                ));
+            }
             if !r.capped.is_empty() {
                 let v = self.eng.values();
                 let mut moving: Vec<String> = r

@@ -38,8 +38,16 @@ An operation may declare that its definitions settle at quiet points
 - Readers of a settling node's output (`Ctx::placed_output`), of its
   contributions, of structure, are not held: those edges are the page
   layer's own.
-- `Limits::final_reruns` caps a reader's held reruns as it caps loop-back
-  reruns.
+- The passes are bounded as latexmk bounds its runs
+  (`Limits::settle_passes`, default 5, latexmk's `max_repeat`): past it
+  the wakes still held are dropped, the last state is written out, and
+  the build reports it (`Report::held_unsettled`: "the page layout did
+  not settle after 5 passes", a warning in the log so the PDF of the last
+  pass is still written; latexmk's non-zero exit is not matched yet). No
+  per-node budget: a first form spent the loop-back cap
+  (`Limits::final_reruns`, 10 per node) on held reruns and left readers
+  silently stale at eight threads (course3 -j8, 12 passes, 11 undefined
+  references, md5 wrong).
 
 Inside a pass the text runs once, on predictions or on the last pass's
 values; the loop folds the boxes once (its parks at holes are resumes);

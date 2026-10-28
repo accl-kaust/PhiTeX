@@ -2099,7 +2099,9 @@ pub(crate) fn publish_finals(eng: &Engine, w: &Worker) -> (usize, bool) {
                 cause: Cause::Changed { field: *f, site: last.by },
                 at_ns: eng.now_ns(),
             };
-            if mark_stale(eng, Some(w), n, wake) {
+            // (a quiet point's own wake, never held: holding it would leave
+            // the reader for a quiet point that never comes)
+            if crate::sched::mark_stale_now(eng, Some(w), n, wake) {
                 k += 1;
             }
         }
