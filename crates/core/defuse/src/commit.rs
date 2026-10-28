@@ -2632,10 +2632,10 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     // (a node removed gives back what it holds while it is still on the
     // line: its walk starts where it stands, and a node off the line keeps
     // the label it had, which a rebalance since may have given a sibling
-    // it holds, so the walk would start past it; what a run of it claims
-    // after this goes back at the end, as before)
+    // it holds, so the walk would start past it; a run of it still going
+    // claims nothing after this: `release_leaving`)
     if remove {
-        release_claimed(eng, w, node);
+        release_leaving(eng, w, node);
     }
     let Some((seg, mut inner)) = own_write(eng, node) else {
         return Vec::new();
@@ -2799,6 +2799,26 @@ fn release_claimed(eng: &Engine, w: Option<&Worker>, me: &Node) {
 /// (`Ctx::claim_rest`), every text node (`Operation::text`) after `me` in
 /// its unit, whatever placed it.
 pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize) {
+    claim_walk(eng, w, me, want, false);
+}
+
+/// A node about to leave the line gives back what it holds, from where it
+/// still stands, and claims nothing after: a run of it still going claims
+/// nothing more, so nothing is left for a walk from the label it keeps
+/// off the line, which a rebalance may since have given a sibling it
+/// would hold (the walk would begin past it).
+fn release_leaving(eng: &Engine, w: Option<&Worker>, me: &Node) {
+    claim_walk(eng, w, me, 0, true);
+}
+
+fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: bool) {
+    // (one walk of this claimer's at a time, from its `claim_end` to the
+    // one it stores: `Node::claim_mx`)
+    let mut walk = me.claim_mx.lock();
+    *walk |= leave;
+    // (a node removed or taken claims nothing: a run of it still going
+    // when it was gives back what it held instead of taking siblings)
+    let want = if *walk || matches!(me.state(), State::Gone | State::Inert | State::RunningInert) { 0 } else { want };
     let all = me.claim_all.load(Ordering::Acquire) && want > 0;
     let mut cur = Some(me.seg_hint());
     let mut lower = Some(me.pos_hint());
@@ -2807,9 +2827,6 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
     let mut releases: Vec<Arc<Node>> = Vec::new();
     let mut taken_holes: Vec<Arc<Node>> = Vec::new();
     let mut stops: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
-    // (one walk of this claimer's at a time, from its `claim_end` to the
-    // one it stores: `Node::claim_mx`)
-    let walk = me.claim_mx.lock();
     // (what it held before, up to there; what it holds now, to here)
     let old_end = me.claim_end.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw);
     #[cfg(test)]
@@ -3349,7 +3366,7 @@ pub(crate) fn relocate(eng: &Engine, w: Option<&Worker>, placer: NodeId, k: &Arc
             lifted_walks(eng, w, &m, left, st);
             unfile_placements(eng, w, &m);
             // (a node removed claims nothing: what it holds goes back)
-            release_claimed(eng, w, &m);
+            release_leaving(eng, w, &m);
             continue;
         };
         first = false;
@@ -4113,6 +4130,54 @@ mod tests {
             let i = e.node_info(t).unwrap();
             assert!(i.state != NodeState::Inert && i.claimer.is_none(), "T{k} still held by {:?}", i.claimer.map(|n| n.raw()));
         }
+    }
+
+    #[test]
+    fn a_node_removed_claims_nothing_after() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // C, claiming nothing, is removed; a run of it still going then
+        // claims two (amsldoc at sixteen threads: an exec removed with its
+        // placer claimed ten pieces after its removal gave back what it
+        // held). The give-back of a claimer gone after its walk pauses
+        // while the segment is relabelled evenly, T0 landing below the
+        // label C kept. Nothing is held: a removed node claims nothing.
+        let e = Engine::new();
+        let claimer = e.register(Arc::new(Claimer));
+        let text = e.register(Arc::new(Text));
+        let v = e.values();
+        let u = e.new_unit();
+        let c = e.push(u, claimer, vec![v.int(0)]);
+        let ts: Vec<NodeId> = (0..3).map(|k| e.push(u, text, vec![v.int(k)])).collect();
+        e.evaluate(1).unwrap();
+        let seg = e.node(ts[0]).seg_hint();
+        assert!(e.order.rebalance(&e, seg, 0));
+        for k in 0..30 {
+            e.push(u, text, vec![v.int(10 + k)]);
+        }
+        e.evaluate(1).unwrap();
+        e.remove(c);
+        let c_at = e.node(c).pos_hint();
+        let b = Arc::new(Barrier::new(2));
+        *PAUSE.lock().unwrap() = Some(b.clone());
+        PAUSE_AT.store(c.raw() + 1, Ordering::Release);
+        let moved = std::thread::scope(|s| {
+            let er = &e;
+            let run = s.spawn(move || super::apply_claim(er, None, er.node(c), 2));
+            b.wait();
+            let seg = e.node(ts[0]).seg_hint();
+            e.order.rebalance(&e, seg, 0);
+            let moved = e.node(ts[0]).pos_hint() < c_at;
+            b.wait();
+            run.join().unwrap();
+            moved
+        });
+        *PAUSE.lock().unwrap() = None;
+        assert!(moved, "the relabel moved T0 below the label C had ({c_at:?})");
+        for (k, &t) in ts.iter().enumerate() {
+            let i = e.node_info(t).unwrap();
+            assert!(i.state != NodeState::Inert && i.claimer.is_none(), "T{k} still held by {:?}", i.claimer.map(|n| n.raw()));
+        }
+        assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
     }
 
     #[test]

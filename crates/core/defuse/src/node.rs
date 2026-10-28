@@ -104,8 +104,9 @@ pub(crate) struct Node {
     /// stored): two walks of one claimer (its run's claim, its commit's,
     /// the give-back when it is taken or removed) interleaved, the later
     /// store left `claim_end` short of a sibling the other took, which no
-    /// give-back reached again.
-    pub(crate) claim_mx: Mx<()>,
+    /// give-back reached again. True once it leaves the line
+    /// (`commit::release_leaving`): from then on it claims nothing.
+    pub(crate) claim_mx: Mx<bool>,
     /// Placed as its placer's continuation (`Ctx::follow`,
     /// `Ctx::follow_after`), not as its child: a node placed after the
     /// placer and its children goes before it.
@@ -177,7 +178,7 @@ impl Node {
             final_epoch: AtomicU64::new(0),
             claimer: AtomicU64::new(0),
             claim_end: AtomicU64::new(0),
-            claim_mx: Mx::new(()),
+            claim_mx: Mx::new(false),
             follows: AtomicBool::new(false),
             anchor: AtomicU64::new(0),
             state_stale: AtomicBool::new(false),
