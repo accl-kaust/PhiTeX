@@ -567,3 +567,17 @@ pub fn origin_failures(b: &Build, src: &str, file: &str) -> Vec<String> {
     }
     fails
 }
+
+/// The test process's resident set in bytes (/proc/self/status; 0 where
+/// there is none).
+#[allow(dead_code)]
+pub fn rss_bytes() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix("VmRSS:"))
+                .and_then(|v| v.split_whitespace().next().and_then(|n| n.parse::<u64>().ok()))
+        })
+        .map_or(0, |kb| kb << 10)
+}

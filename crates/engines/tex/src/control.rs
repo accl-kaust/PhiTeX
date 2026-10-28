@@ -152,7 +152,8 @@ impl Run<'_, '_> {
     /// that reads no new line of its input (a document line, or a file's
     /// read here) for `Limits::stall`, that runs 20 million commands
     /// without an assignment or a new line, or past `Limits::memory_bytes`
-    /// resident (looked at every 64 checks), is stuck, and the evaluation
+    /// resident (looked at every 64 checks), or past the build's time
+    /// limit (`Limits::time`), is stuck, and the evaluation
     /// ends with `EvalError::Stuck` naming it and where it is. A
     /// one-letter edit of amsldoc left a page's run going for minutes at
     /// 5 GB and growing, the watch waiting on it with no way out.
@@ -195,7 +196,14 @@ impl Run<'_, '_> {
         w.ticks += 1;
         let (still, ticks) = (cmds - w.cmds_at, w.ticks);
         let since = now.duration_since(at);
-        let why = if lim.stall.is_some_and(|s| since >= s) {
+        let why = if let Some(t) = lim.time
+            && self.cx.elapsed().is_some_and(|e| e > t)
+        {
+            // (the build's time limit, `Options::time_limit`: the
+            // scheduler checks it between runs, a run that never ends
+            // checks it here)
+            Some(format!("the build passed its time limit of {} s", t.as_secs()))
+        } else if lim.stall.is_some_and(|s| since >= s) {
             Some(format!("it read no new line of its input for {} s", since.as_secs()))
         } else if still >= 20_000_000 {
             Some(format!(

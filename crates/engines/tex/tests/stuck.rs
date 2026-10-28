@@ -23,6 +23,22 @@ fn build(name: &str, threads: usize, src: &str) -> (phitex_tex::Build, Duration)
     (b, t.elapsed())
 }
 
+/// A build of `src` with the clock's bound at 300 s, the default, and
+/// the given memory and time limits.
+fn build_limited(name: &str, threads: usize, memory: Option<u64>, time: Option<Duration>, src: &str) -> (phitex_tex::Build, Duration) {
+    let dir = common::scratch(&format!("stuck-{name}-{threads}"));
+    let opts = Options {
+        threads: Some(threads),
+        stuck_after: Some(Duration::from_secs(300)),
+        memory_limit: memory,
+        time_limit: time,
+        ..common::options("./d.tex", "d", "", &dir)
+    };
+    let t = Instant::now();
+    let b = common::build(opts, Some(&common::plain()), src);
+    (b, t.elapsed())
+}
+
 fn stuck(b: &phitex_tex::Build) -> Option<String> {
     b.diagnostics().into_iter().map(|d| d.message).find(|m| m.contains("stuck:"))
 }
@@ -56,4 +72,27 @@ fn a_run_that_makes_no_progress_ends_the_build_stuck() {
     let (b, _) = build("plain", 8, &src);
     assert_eq!(stuck(&b), None);
     assert!(!b.output().0.is_empty(), "the document's output is made");
+}
+
+/// A run past the memory limit ends the build stuck, and so does one past
+/// the build's time limit, inside the run: a compat build with an `.aux`
+/// on disk read an endless file of empty lines, grew past 10 GB in 45 s,
+/// and neither stopped it (the limit was half the host's memory, past the
+/// job's cgroup, and the time limit was checked only between runs).
+#[test]
+fn a_run_past_the_memory_or_time_limit_ends_the_build_stuck() {
+    // (a loop that assigns at every step and reads no new line: the
+    // clock's bound is 300 s here, so only the limit under test stops it)
+    let src = "Before the loop.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\iftrue\\repeat\n\nAfter it.\n\n\\bye\n";
+    for threads in [1, 8] {
+        let (b, t) = build_limited("memory", threads, Some(1 << 20), Some(Duration::from_secs(600)), src);
+        let m = stuck(&b).unwrap_or_else(|| panic!("-j{threads}: no stuck error after {t:?}: {:?}", b.diagnostics().iter().map(|d| &d.message).collect::<Vec<_>>()));
+        assert!(m.contains("past the limit of"), "-j{threads}: the memory named: {m}");
+        assert!(m.contains("the main file byte"), "-j{threads}: the place named: {m}");
+        assert!(t < Duration::from_secs(30), "-j{threads}: stuck found after {t:?}: {m}");
+        let (b, t) = build_limited("time", threads, Some(u64::MAX), Some(Duration::from_secs(3)), src);
+        let m = stuck(&b).unwrap_or_else(|| panic!("-j{threads}: no stuck error after {t:?}: {:?}", b.diagnostics().iter().map(|d| &d.message).collect::<Vec<_>>()));
+        assert!(m.contains("time limit of 3 s"), "-j{threads}: the time limit named: {m}");
+        assert!(t < Duration::from_secs(30), "-j{threads}: stuck found after {t:?}: {m}");
+    }
 }

@@ -68,6 +68,9 @@ pub(crate) struct Shared {
     n: usize,
     /// `Limits::final_reruns`.
     final_limit: u32,
+    /// When the evaluation began (`Ctx::elapsed`, a run's own check of
+    /// `Limits::time`).
+    pub(crate) t0: Instant,
     /// A collection is wanted (`Limits::collect_at_bytes`): every worker
     /// ending a run, or idle, comes to the barrier (`Pool::barrier`); the
     /// last to come collects, with no run in flight. `active` counts the
@@ -181,7 +184,7 @@ pub(crate) struct Worker {
     block: Deque<(NodeId, u32)>,
     /// The runs it has put in its block.
     block_runs: AtomicU32,
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
     pub(crate) runs: AtomicU64,
     pub(crate) nodes_run: AtomicU64,
     pub(crate) refuted_nodes: AtomicU64,
@@ -320,6 +323,7 @@ impl Pool {
             want_spawn: AtomicBool::new(false),
             n,
             final_limit: limits.final_reruns,
+            t0: Instant::now(),
             collect_wanted: AtomicBool::new(false),
             deferred: Mx::new(Vec::new()),
             extra_roots: Mx::new(Vec::new()),

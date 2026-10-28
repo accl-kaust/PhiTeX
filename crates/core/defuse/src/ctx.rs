@@ -861,4 +861,11 @@ impl<'a> Ctx<'a> {
         self.eng.limits()
     }
 
+    /// How long the evaluation running this has been going (`None` for a
+    /// run outside one): a run checks `Limits::time` itself, which the
+    /// scheduler checks only between runs.
+    pub fn elapsed(&self) -> Option<std::time::Duration> {
+        self.worker.map(|w| w.shared.t0.elapsed())
+    }
+
 }

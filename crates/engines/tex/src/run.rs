@@ -279,6 +279,9 @@ pub(crate) struct FileRest {
     /// its text read only when a run reads its lines itself
     /// ([`Run::load_written`]).
     pub cut: Option<ValueId>,
+    /// Its text read from its units or its cut ([`Run::load_written`]):
+    /// an empty text read is a file at its end, not one still to read.
+    loaded: bool,
 }
 
 impl FileRest {
@@ -303,6 +306,7 @@ impl FileRest {
             units: None,
             sliceable: false,
             cut: None,
+            loaded: false,
         }
     }
 
@@ -346,9 +350,13 @@ impl FileRest {
     }
 
     /// Whether its text is still to be read: from its units, or a cut
-    /// file's from the file.
+    /// file's from the file. Once read it is not, even empty: a cut file
+    /// whose text read empty (the job writes it, so outside a fixpoint it
+    /// is absent) gave an empty line for ever, a compat build with an
+    /// `.aux` on disk past 10 GB in 45 s.
     pub(crate) fn lazy(&self) -> bool {
-        (self.cut.is_some() || self.units.as_ref().is_some_and(|u| !u.is_empty()))
+        !self.loaded
+            && (self.cut.is_some() || self.units.as_ref().is_some_and(|u| !u.is_empty()))
             && self.str().is_empty()
     }
 
@@ -356,6 +364,7 @@ impl FileRest {
     pub(crate) fn set_text(&mut self, v: &Values, id: ValueId) {
         self.id = id;
         self.text = v.get(id);
+        self.loaded = true;
     }
 
     /// The file's name and the line number of the next line, for

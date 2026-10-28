@@ -1543,3 +1543,46 @@ fn latex_glyph_origins() {
     let f = common::origin_failures(&b, &new, "envs.tex");
     assert!(f.is_empty(), "origins after the edit:\n{}", f.join("\n"));
 }
+
+/// A two-section article with its `.aux` on disk from a pdflatex run,
+/// built outside a fixpoint (`--compat=pdflatex`): the file the job
+/// writes reads as absent, so the build is the one without the file.
+/// The `.aux` was cut as a document file when `\@input` first read it;
+/// once the job opened it for writing its text read absent while the
+/// engine kept the cut, and the reader read an empty line from it for
+/// ever: past 10 GB in 45 s, never stopped.
+#[test]
+fn latex_aux_on_disk_outside_a_fixpoint() {
+    let art = "\\documentclass{article}\n\\begin{document}\n\\section{Origins}\nOrigins tell a viewer where each glyph of a page came from in the source,\nso that a double click finds the word.\n\n\\section{Lines}\nA second paragraph, with \\emph{emphasis} and a footnote\\footnote{The\nfootnote's text.} in it, ends here.\n\\end{document}\n";
+    let aux = "\\relax \n\\@writefile{toc}{\\contentsline {section}{\\numberline {1}Origins}{1}{}\\protected@file@percent }\n\\gdef \\@abspage@last{1}\n";
+    let mut pages = Vec::new();
+    for (name, aux) in [("none", None), ("relax", Some("\\relax \n")), ("full", Some(aux))] {
+        let dir = common::scratch(&format!("aux-on-disk-{name}"));
+        std::fs::write(dir.join("art.tex"), art).unwrap();
+        if let Some(a) = aux {
+            std::fs::write(dir.join("art.aux"), a).unwrap();
+        }
+        let t = std::time::Instant::now();
+        let opts = Options {
+            time_limit: Some(std::time::Duration::from_secs(60)),
+            memory_limit: Some(common::rss_bytes() + (4 << 30)),
+            ..pdf_opts("art", &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), art);
+        let stuck: Vec<String> = b.diagnostics().into_iter().map(|d| d.message).filter(|m| m.contains("stuck") || m.contains("deadline")).collect();
+        assert!(stuck.is_empty(), "{name}: the build ends, not stuck, after {:?}: {stuck:?}", t.elapsed());
+        if let Ok(out) = std::env::var("PHITEX_TEST_OUT") {
+            let (pdf, log) = b.output();
+            let _ = std::fs::write(format!("{out}/aux-{name}.pdf"), pdf);
+            let _ = std::fs::write(format!("{out}/aux-{name}.log"), log);
+        }
+        assert_eq!(b.pages().len(), 1, "{name}: {}", report(name, &b));
+        pages.push((name, b.output()));
+    }
+    for (name, (pdf, log)) in &pages[1..] {
+        if let Some(d) = common::first_difference(pdf, &pages[0].1.0) {
+            panic!("{name}: the PDF differs from the one built without the .aux: {d}");
+        }
+        assert_eq!(log, &pages[0].1.1, "{name}: the log is the one built without the .aux");
+    }
+}
