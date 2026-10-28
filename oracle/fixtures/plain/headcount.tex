@@ -1,0 +1,10 @@
+\newcount\heads
+\def\hcmd#1{\global\advance\heads by1
+  \expandafter\gdef\csname h\the\heads\endcsname{#1}}
+\openin15=\jobname.aux \ifeof15 \else\closein15 \input\jobname.aux \fi
+\immediate\openout1=\jobname.aux
+\immediate\write1{\noexpand\hcmd{one}}
+\immediate\write1{\noexpand\hcmd{two}}
+\immediate\write1{\noexpand\hcmd{three}}
+Heads: \the\heads: \csname h1\endcsname, \csname h2\endcsname, \csname h3\endcsname.
+\bye

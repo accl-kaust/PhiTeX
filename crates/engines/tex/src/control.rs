@@ -2049,7 +2049,7 @@ impl Run<'_, '_> {
                 if let Some(made) = r
                     && self.interp_plain
                 {
-                    v.list(vec![v.str(&name), v.str(&line), made])
+                    v.list(vec![v.str(&name), v.str(&line), made, self.interp_reads])
                 } else if r.is_some() {
                     self.muts += 1;
                     self.text_written.push(name.clone());
@@ -2174,7 +2174,7 @@ impl Run<'_, '_> {
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!("aux-trace: {name} ends inside a command: {errs:?}");
         }
-        self.contribute_stream(v.list(vec![v.str(&name), v.str(""), v.list(ds)]));
+        self.contribute_stream(v.list(vec![v.str(&name), v.str(""), v.list(ds), self.interp_reads]));
         Ok(())
     }
 

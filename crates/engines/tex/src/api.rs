@@ -3588,15 +3588,46 @@ pub(crate) fn text_mark(v: &Values) -> ValueId {
 pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<String> {
     let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
-    for &e in &streams {
-        if is_cand_marker(v, e) {
+    // (per file, the fields its lines so far define, in the order TeX
+    // writes them: a line that reads one depends on the lines before it,
+    // which TeX reads first and its read-back by fields, each line on its
+    // own, does not: beamer's `\headcommand` advances a count line by
+    // line, and the file is read back as its text)
+    let mut defined: Vec<(String, phitex_defuse::FxHashSet<String>)> = Vec::new();
+    for e in doc_order(v, &streams) {
+        let xs = list_of(v, stream_entry(v, e));
+        let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
+        if out.contains(&name) {
             continue;
         }
-        let xs = list_of(v, stream_entry(v, e));
-        if xs.get(2) == Some(&ValueId::UNIT) {
-            let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
-            if !out.contains(&name) {
-                out.push(name);
+        // (the file opened again: its lines so far gone)
+        if xs.len() == 1 {
+            defined.retain(|(n, _)| *n != name);
+            continue;
+        }
+        let Some(&made) = xs.get(2) else { continue };
+        if made == ValueId::UNIT {
+            out.push(name);
+            continue;
+        }
+        let k = if let Some(k) = defined.iter().position(|(n, _)| *n == name) {
+            k
+        } else {
+            defined.push((name.clone(), phitex_defuse::FxHashSet::default()));
+            defined.len() - 1
+        };
+        if let Some(&reads) = xs.get(3)
+            && let Some(&r) = list_of(v, reads).iter().find(|&&r| v.with_str(r, |s| defined[k].1.contains(s)).unwrap_or(false))
+        {
+            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+                eprintln!("aux-trace: {name} read back as text: a line reads {}, which a line before it defines", str_of(v, r));
+            }
+            out.push(name);
+            continue;
+        }
+        for d in list_of(v, made) {
+            if let [f, _, _] = list_of(v, d).as_slice() {
+                defined[k].1.insert(str_of(v, *f));
             }
         }
     }

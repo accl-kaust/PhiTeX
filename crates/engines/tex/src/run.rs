@@ -728,6 +728,16 @@ pub(crate) struct Run<'c, 'a> {
     /// The interpreted text ran out inside a command: it needs the next
     /// line written to its stream ([`Run::interpret_line`]).
     pub interp_short: bool,
+    /// The read-back fields the line [`Run::interpret_line`] interpreted
+    /// last read, by name, sorted: a file whose line reads a field an
+    /// earlier line of it defines is read back as its text
+    /// ([`crate::api::written_as_text`]).
+    pub interp_reads: ValueId,
+    /// The locations the line being interpreted read before it defined
+    /// them, if it did ([`Run::interp_reads`]).
+    pub interp_first: Vec<Loc>,
+    /// [`Run::set_mean`] finds the location it defines.
+    pub defining: bool,
     /// The fields a read-back nested in a line's interpretation set (a
     /// written `\@input{part.aux}`): the part file's definitions, which
     /// that file's own lines publish; the line lists them as keys only.
@@ -989,6 +999,9 @@ impl<'c, 'a> Run<'c, 'a> {
             muts: 0,
             interp: None,
             interp_short: false,
+            interp_reads: ValueId::NIL,
+            interp_first: Vec::new(),
+            defining: false,
             interp_nested: phitex_defuse::FxHashMap::default(),
             interp_eof: false,
             interp_errs: Vec::new(),
@@ -1127,6 +1140,12 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if self.st.defined_after(loc, self.interp_base) {
             return Ok(());
+        }
+        // (read before the line defined it: what the lines before it
+        // left there, [`Run::interp_reads`]; a meaning about to be
+        // defined is not read)
+        if !self.defining {
+            self.interp_first.push(loc);
         }
         if self.pre_memo_at != self.interp_point {
             self.pre_memo.clear();
@@ -3015,6 +3034,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // (interpreting from here: the run's own bookkeeping, as
         // [`Run::note_pre`], is not the line's)
         self.interp = Some(phitex_defuse::FxHashSet::default());
+        self.interp_first.clear();
         self.set("cat:64", v.int(11), false);
         // (on a list of its own, dropped after: what a line typesets,
         // an error's text, goes nowhere)
@@ -3088,7 +3108,18 @@ impl<'c, 'a> Run<'c, 'a> {
         if !self.interp_plain && crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             self.trace_more_than_define(res.is_ok(), (nc, nk, nest_len), &conds);
         }
+        // (what the line read, by name: a line that reads what an earlier
+        // line of its file defines depends on the lines before it, which
+        // its read-back by fields does not see)
         self.interp = None;
+        let mut reads: Vec<String> = std::mem::take(&mut self.interp_first)
+            .into_iter()
+            .map(|l| str_of(v, self.loc_field(l).0))
+            .filter(|n| is_read_back_definition(n))
+            .collect();
+        reads.sort_unstable();
+        reads.dedup();
+        self.interp_reads = v.list(reads.iter().map(|n| v.str(n)).collect());
         self.input = input;
         match st {
             // (the outer line's kept changes go on: what this line
@@ -3552,7 +3583,12 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Defines token `t`'s meaning (`\def`, `\let`, …): kept native,
     /// encoded only if the run publishes it.
     pub(crate) fn set_mean(&mut self, t: Tok, m: Mean, global: bool) {
-        if let Some(l) = self.mean_loc(t) {
+        // (the meaning defined is not read: [`Run::interp_first`] keeps
+        // what the line read)
+        self.defining = true;
+        let l = self.mean_loc(t);
+        self.defining = false;
+        if let Some(l) = l {
             let e = self.st.mean_entry(m);
             self.set_loc(l, e, global);
         }

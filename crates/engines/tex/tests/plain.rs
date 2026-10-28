@@ -176,3 +176,26 @@ fn outer_validity() {
 fn line_claims() {
     run(&[("plain", "lineclaim", false, true)]);
 }
+
+/// A file read back whose lines build on each other (beamer's `.nav`:
+/// each `\headcommand` advances a count and defines a macro named by
+/// it): TeX's second run reads the lines in order, three heads named
+/// `h1` to `h3`. Read back per field, each line on its own, all three
+/// lines defined `h1` from a count of zero, and the page said
+/// `Heads: 1: three, , .` (the plain/headcount oracle: TeX run twice).
+#[test]
+fn a_file_whose_lines_build_on_each_other_is_read_in_order() {
+    let fx = common::fixtures().join("plain");
+    let src = common::read(&fx.join("headcount.tex"));
+    let want = std::fs::read(fx.join("headcount.dvi")).expect("the oracle");
+    for threads in [1, 8] {
+        let opts = phitex_tex::Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..common::options("./headcount.tex", "headcount", &common::dvi_comment(&want), &fx)
+        };
+        let b = common::build(opts, Some(&common::plain()), &src);
+        let (dvi, log) = b.output();
+        assert_eq!(common::first_difference(&dvi, &want), None, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
+    }
+}
