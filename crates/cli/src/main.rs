@@ -36,6 +36,7 @@ mod dvipdf;
 mod editor;
 mod failure;
 mod keys;
+mod lsp;
 mod modern;
 mod problems;
 mod session;

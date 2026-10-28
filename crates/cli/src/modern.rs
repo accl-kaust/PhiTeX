@@ -53,6 +53,7 @@ fn after_help() -> String {
         "{h}Examples:{h:#}
   {l}phitex build paper.tex{l:#}              the PDF beside it, pdflatex for LaTeX
   {l}phitex watch -o out paper.tex{l:#}       rebuild on each change, the viewer in the browser
+  {l}phitex watch --lsp{l:#}                  the same for an editor's LSP client (its buffers, problems, cursor)
   {l}phitex build --json paper.tex{l:#}       the build's events as JSON lines
   {l}phitex clean paper.tex{l:#}              remove its outputs and its part of the cache
   {l}phitex clean --all{l:#}                  remove the whole cache, every document's
@@ -103,7 +104,7 @@ enum Sub {
     },
     /// Build, then rebuild whenever an input changes (an edit of the
     /// graph), the pages live in the browser; keys on standard input:
-    /// r rebuild, q quit
+    /// r rebuild, q quit (with --lsp: an editor's language client there)
     Watch {
         #[arg(value_name = "FILE")]
         file: Option<String>,
@@ -213,6 +214,12 @@ struct Opts {
     /// always writes one
     #[arg(long, global = true)]
     log: bool,
+    /// watch: be an editor's language server on standard input and
+    /// output (LSP): its unsaved buffers built as you type, the problems
+    /// shown in it, a double-click on a page opening it there, its cursor
+    /// shown on the page (`phitex/cursor`); nothing else on standard output
+    #[arg(long, global = true)]
+    lsp: bool,
     /// watch: the viewer's port (default: a free one)
     #[arg(long, value_name = "N", global = true)]
     port: Option<u16>,
@@ -270,6 +277,8 @@ pub struct Options {
     /// watch: the log written with the exact file (`--log`).
     pub log: bool,
     pub port: Option<u16>,
+    /// watch: an editor's language server on standard input and output.
+    pub lsp: bool,
     pub editor: Option<String>,
     pub copy_pdf: Option<config::CopyPdf>,
     pub synctex: Option<bool>,
@@ -311,6 +320,7 @@ impl Cli {
             idle: Duration::from_millis(o.idle.unwrap_or(300)),
             log: o.log,
             port: o.port,
+            lsp: o.lsp,
             editor: o.editor,
             copy_pdf: if o.no_copy_pdf {
                 Some(config::CopyPdf::Off)
@@ -533,7 +543,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         // (the files the job reads back, .aux and .toc, to their fixpoint)
         fixpoint: true,
         cache_limit: t.cache_limit,
-        edit_diagnostics: o.diagnostics || o.view,
+        edit_diagnostics: o.diagnostics || o.view || o.lsp,
     })
 }
 
@@ -858,7 +868,7 @@ fn clean_all(ui: &Ui) -> ! {
 /// Run the modern command line with `args`.
 pub fn main(args: &[String]) -> ! {
     // (clap's own exit status for a usage error is 2: pdflatex's is 1)
-    let o = match parse(args) {
+    let mut o = match parse(args) {
         Ok(o) => o,
         Err(e) => {
             let _ = e.print();
@@ -884,7 +894,21 @@ pub fn main(args: &[String]) -> ! {
         ui.error("no command given: build, watch or clean (`phitex --help`)");
         std::process::exit(crate::EXIT_FAILED);
     };
+    // (an editor's language server: its `initialize` first, which says
+    // where the watch runs and may name the main file)
+    let lsp = if o.lsp && command == Command::Watch {
+        if o.json {
+            ui.error("--lsp and --json both speak on standard output: one of them");
+            std::process::exit(crate::EXIT_FAILED);
+        }
+        Some(crate::lsp::Lsp::begin(&mut o.file))
+    } else {
+        None
+    };
     let t = resolve(&o).unwrap_or_else(|e| {
+        if let Some(l) = &lsp {
+            l.refuse(&e);
+        }
         ui.error(&e);
         // (a bare `clean` with no document: what it can do instead)
         if command == Command::Clean && o.file.is_none() {
@@ -904,7 +928,7 @@ pub fn main(args: &[String]) -> ! {
     match command {
         Command::Build => std::process::exit(build(&t, &o, &ui)),
         Command::Clean => std::process::exit(clean(&t, &ui)),
-        Command::Watch => crate::watch::main(&t, &o, &ui),
+        Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
     }
 }
 

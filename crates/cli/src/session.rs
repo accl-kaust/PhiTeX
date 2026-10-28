@@ -1287,6 +1287,16 @@ impl Session {
         std::fs::read(&n).ok()
     }
 
+    /// The index of the first page of the last build whose text holds
+    /// `s` ([`phitex_tex::Build::page_of_text`]; none: no build, no such
+    /// page).
+    pub fn page_of_text(&self, s: &str) -> Option<usize> {
+        self.build
+            .as_ref()
+            .map(|b| b.page_of_text(s))
+            .filter(|&k| k != usize::MAX)
+    }
+
     /// The main text with the editor's buffer for it, if there is one.
     fn text_now(&self) -> Arc<str> {
         let name = plain_name(&self.job.path.to_string_lossy());

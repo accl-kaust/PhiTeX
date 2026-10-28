@@ -27,6 +27,17 @@
 //!   their source lines (what a double-click finds and forward search
 //!   highlights): empty, no engine records them yet. The diff ops
 //!   (`diff_*`) say they are not there.
+//! - **Forward search.** `{"event":"reveal","page":K,"text":…,"texts":[…],
+//!   "file":…,"line":L}`: the editor's cursor (`phitex watch --lsp`'s
+//!   `phitex/cursor`, `lsp.rs`) is at line `L` (from 1) of `file`; `texts`
+//!   are the words around it as a page would show them, longest first,
+//!   and the build found `text`, one of them, on page `K` (from 1). The
+//!   browser finds the words there in MuPDF's text and marks them; with
+//!   `K` null (no page found: a PDF build, whose page text the engine does
+//!   not read), the first of `texts` it finds, nearest the place it last
+//!   revealed. A `source` asked while an editor speaks LSP to the watch
+//!   is shown by that editor ([`View::on_source`]), not the `--editor`
+//!   command.
 
 use std::fmt::Write as _;
 use std::io::BufReader;
@@ -122,6 +133,18 @@ pub enum Ask {
         del: Option<String>,
     },
     DiffStop,
+    /// The editor's buffer of `file` is gone (closed): the file as on
+    /// disk again.
+    Closed {
+        file: String,
+    },
+    /// The editor's cursor is at `line` and UTF-16 column `col` (from 0)
+    /// of `file`: shown on the pages.
+    Cursor {
+        file: String,
+        line: usize,
+        col: usize,
+    },
 }
 
 /// The diff the viewer is told of: its state (`compare.rs`'s), whether
@@ -174,6 +197,9 @@ struct Shared {
     diff: Mutex<Diff>,
     /// The commits of the project's history (the diff's picker).
     log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
+    /// Shows a source place (file, line, column from 1) in the editor
+    /// instead of the `--editor` command, when it says it did.
+    goto: Mutex<Option<Box<dyn Fn(&str, usize, usize) -> bool + Send>>>,
 }
 
 /// The messages a browser that joins is shown.
@@ -232,6 +258,7 @@ impl View {
             on_clients: Mutex::new(None),
             diff: Mutex::new(Diff::default()),
             log: Mutex::new(None),
+            goto: Mutex::new(None),
         });
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
         let s = shared.clone();
@@ -283,6 +310,35 @@ impl View {
             }
             broadcast(&s, &json!({"event": "console", "item": item}).to_string());
         })
+    }
+
+    /// A `source` place shown by `goto(file, line, col)` (an editor that
+    /// speaks LSP to the watch) where it returns true, else by the
+    /// `--editor` command.
+    pub fn on_source(&self, goto: Box<dyn Fn(&str, usize, usize) -> bool + Send>) {
+        *lock(&self.shared.goto) = Some(goto);
+    }
+
+    /// The editor's cursor, at `line` (from 1) of `file`, shown on the
+    /// page the build `found` with the words it found there (none: the
+    /// browser looks for `texts`, the words around the cursor, longest
+    /// first).
+    pub fn reveal(
+        &self,
+        found: Option<(usize, String)>,
+        texts: &[String],
+        file: &str,
+        line: usize,
+    ) {
+        let (page, text) = match found {
+            Some((k, t)) => (Some(k), t),
+            None => (None, texts.first().cloned().unwrap_or_default()),
+        };
+        broadcast(
+            &self.shared,
+            &json!({"event": "reveal", "page": page, "text": text, "texts": texts, "file": file, "line": line})
+                .to_string(),
+        );
     }
 
     /// The history the diff's picker lists, from `log(skip, limit)`.
@@ -761,6 +817,10 @@ fn to_source(
     };
     let (line, col) = at.unwrap_or_else(|| line_col(&text, start));
     let place = format!("{file}:{line}:{col}");
+    if lock(&s.goto).as_ref().is_some_and(|g| g(file, line, col)) {
+        eprintln!("source: {place} (shown in the editor)");
+        return Ok(place);
+    }
     match &s.editor {
         Some(e) => match e.open(file, line, col) {
             Ok(()) => eprintln!("source: {place} (opened in the editor)"),

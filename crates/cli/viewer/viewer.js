@@ -4447,6 +4447,22 @@ var gotoChange = async (k) => {
   lastAt = { k, page: hits[at].k };
   panel.reveal(hits.slice(at, at + 1));
 };
+var revealed = 0;
+sock.onEvent(async (e) => {
+  if (e.event !== "reveal") return;
+  const k = typeof e.page === "number" ? e.page - 1 : -1;
+  for (const q of e.texts ?? [e.text]) {
+    const hits = q ? await pages.find(q) : [];
+    const near = (a, h) => Math.abs(h.k - revealed) < Math.abs(a.k - revealed) ? h : a;
+    const hit = k >= 0 ? hits.find((h) => h.k === k) : hits.length ? hits.reduce(near) : void 0;
+    if (!hit) continue;
+    revealed = hit.k;
+    return panel.reveal([hit]);
+  }
+  if (k < 0) return;
+  revealed = k;
+  panel.reveal([{ k, boxes: [[0, 0, 0, 0]] }]);
+});
 var runner = {
   async start(v, say, count) {
     counted = count;

@@ -806,6 +806,336 @@ fn json_string(s: &str) -> String {
     o
 }
 
+/// An LSP message to the server, framed (`Content-Length`).
+fn lsp_send(w: &mut impl std::io::Write, v: &serde_json::Value) {
+    let b = v.to_string();
+    write!(w, "Content-Length: {}\r\n\r\n{b}", b.len()).expect("the server reads");
+    w.flush().expect("the server reads");
+}
+
+/// The server's messages, read on a thread of their own.
+fn lsp_messages(out: std::process::ChildStdout) -> std::sync::mpsc::Receiver<serde_json::Value> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut r = BufReader::new(out);
+        loop {
+            let mut len = 0usize;
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap_or(0) == 0 {
+                    return;
+                }
+                let h = h.trim_end();
+                if h.is_empty() {
+                    break;
+                }
+                let (k, v) = h
+                    .split_once(':')
+                    .expect("a header, nothing else on standard output");
+                if k.eq_ignore_ascii_case("content-length") {
+                    len = v.trim().parse().expect("a length");
+                }
+            }
+            let mut b = vec![0; len];
+            std::io::Read::read_exact(&mut r, &mut b).expect("the message");
+            let v = serde_json::from_slice(&b).expect("JSON");
+            if tx.send(v).is_err() {
+                return;
+            }
+        }
+    });
+    rx
+}
+
+/// The server's next message `what` says is the one (those before it
+/// kept in `seen`).
+fn lsp_until(
+    rx: &std::sync::mpsc::Receiver<serde_json::Value>,
+    seen: &mut Vec<serde_json::Value>,
+    what: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let end = Instant::now() + Duration::from_secs(600);
+    loop {
+        let left = end.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(m) => {
+                seen.push(m.clone());
+                if what(&m) {
+                    return m;
+                }
+            }
+            Err(e) => panic!(
+                "the server ended or was silent ({e}); it sent:\n{}",
+                seen.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        }
+    }
+}
+
+/// The viewer's WebSocket (a browser's): requests answered, events kept.
+struct Viewer {
+    ws: tungstenite::WebSocket<std::net::TcpStream>,
+    events: Vec<serde_json::Value>,
+}
+
+impl Viewer {
+    fn connect(url: &str) -> Viewer {
+        let rest = url.trim().strip_prefix("http://").expect("an http URL");
+        let (addr, _) = rest.split_once('/').expect("a path");
+        let tcp = std::net::TcpStream::connect(addr).expect("the viewer answers");
+        let (ws, _) = tungstenite::client(format!("ws://{rest}ws"), tcp).expect("a WebSocket");
+        ws.get_ref()
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("a timeout");
+        Viewer {
+            ws,
+            events: Vec::new(),
+        }
+    }
+
+    /// The next message `what` says is the one (events kept).
+    fn until(&mut self, what: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        let end = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < end {
+            match self.ws.read() {
+                Ok(tungstenite::Message::Text(t)) => {
+                    let v: serde_json::Value = serde_json::from_str(t.as_str()).expect("JSON");
+                    if what(&v) {
+                        return v;
+                    }
+                    if v.get("event").is_some() {
+                        self.events.push(v);
+                    }
+                }
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(e) => panic!("the viewer's socket: {e}"),
+            }
+        }
+        panic!(
+            "the viewer said nothing of the kind; its events: {:?}",
+            self.events
+        );
+    }
+
+    fn ask(&mut self, req: &serde_json::Value) -> serde_json::Value {
+        self.ws
+            .send(tungstenite::Message::text(req.to_string()))
+            .expect("the request");
+        let id = req["id"].clone();
+        self.until(|v| v["id"] == id && v.get("event").is_none())
+    }
+}
+
+/// `phitex watch --lsp`: an editor's language client over pipes, on a
+/// plain TeX document in DVI mode (the engine's page text, which forward
+/// search reads until origins, is a DVI build's; the viewer shows it as
+/// dvipdfmx's PDF). Its
+/// unsaved buffer (`didOpen`, `didChange`) is what is built: an edit that
+/// makes an error is published at its line, the fix clears it and the
+/// pages change; a double-click in the viewer (its `source`) is
+/// `window/showDocument` at that line; `phitex/cursor` on a word of the
+/// second page makes the viewer reveal page 2; `shutdown` and `exit` end
+/// the watch with status 0. Nothing but LSP messages on standard output.
+#[test]
+#[allow(clippy::too_many_lines, reason = "one editor's session, in order")]
+fn watch_lsp() {
+    use serde_json::json;
+    let _one = one();
+    let body = "Alpha bravo charlie delta.\n\\vfill\\eject\nEcho foxtrot golf hotel.\n\\bye\n";
+    let text = plain() + body;
+    let line_of = |w: &str| {
+        text[..text.find(w).expect("the word")]
+            .matches('\n')
+            .count()
+    };
+    let (first, second) = (line_of("Alpha bravo"), line_of("Echo foxtrot"));
+    let dir = scratch("watch-lsp");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the document");
+    let root = dir.canonicalize().expect("the directory");
+    let uri = format!("file://{}/doc.tex", root.display());
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--lsp", "--ini", "--etex", "-j", "4", "doc.tex"])
+        .env("XDG_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut to = child.stdin.take().expect("its input");
+    let rx = lsp_messages(child.stdout.take().expect("its output"));
+    let mut seen = Vec::new();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null,
+            "rootUri": format!("file://{}", root.display()),
+            "capabilities": {"window": {"showDocument": {"support": true}, "workDoneProgress": true}},
+        }}),
+    );
+    let init = lsp_until(&rx, &mut seen, |m| m["id"] == 1);
+    let caps = &init["result"]["capabilities"];
+    assert_eq!(caps["textDocumentSync"]["change"], 2, "{init}");
+    assert_eq!(caps["positionEncoding"], "utf-16", "{init}");
+    assert!(
+        caps["executeCommandProvider"]["commands"]
+            .as_array()
+            .is_some_and(|c| c.contains(&json!("phitex.showOnPage"))),
+        "{init}"
+    );
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    );
+    let logged = lsp_until(&rx, &mut seen, |m| {
+        m["method"] == "window/logMessage"
+            && m["params"]["message"]
+                .as_str()
+                .is_some_and(|t| t.contains("http://127.0.0.1:"))
+    });
+    let msg = logged["params"]["message"].as_str().unwrap_or_default();
+    let url: String = msg[msg.find("http://").expect("the URL")..]
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect();
+    // (the cold build in: the main file's diagnostics published, none)
+    let is_main = |m: &serde_json::Value| {
+        m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri.as_str()
+    };
+    let cold = lsp_until(&rx, &mut seen, is_main);
+    assert_eq!(cold["params"]["diagnostics"], json!([]), "{cold}");
+    let mut viewer = Viewer::connect(&url);
+    let before = viewer.ask(&json!({"id": 1, "op": "pages"}))["json"]["pages"].clone();
+    assert_eq!(
+        before.as_array().map(Vec::len),
+        Some(2),
+        "two pages: {before}"
+    );
+    // (the buffer opened as on disk; an unsaved edit makes an error)
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uri, "languageId": "tex", "version": 1, "text": text},
+        }}),
+    );
+    let at = |l: usize, c: usize| json!({"line": l, "character": c});
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"range": {"start": at(first, 0), "end": at(first, 0)}, "text": "\\undefinedmacro "}],
+        }}),
+    );
+    let bad = lsp_until(&rx, &mut seen, |m| {
+        is_main(m)
+            && m["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|d| d.iter().any(|d| d["severity"] == 1))
+    });
+    let err = bad["params"]["diagnostics"]
+        .as_array()
+        .and_then(|d| d.iter().find(|d| d["severity"] == 1))
+        .expect("an error")
+        .clone();
+    assert_eq!(
+        err["range"]["start"]["line"], first,
+        "the error's line: {err}"
+    );
+    assert!(
+        err["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Undefined control sequence")),
+        "{err}"
+    );
+    // (the fix, with a word of page 2 changed first: whatever build
+    // takes the first change alone still has the error)
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": {"uri": uri, "version": 3},
+            "contentChanges": [
+                {"range": {"start": at(second, 0), "end": at(second, 4)}, "text": "Xray"},
+                {"range": {"start": at(first, 0), "end": at(first, 16)}, "text": ""},
+            ],
+        }}),
+    );
+    let fixed = lsp_until(&rx, &mut seen, |m| {
+        is_main(m)
+            && m["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|d| d.iter().all(|d| d["severity"] != 1))
+    });
+    eprintln!("fixed: {fixed}");
+    let after = viewer.ask(&json!({"id": 2, "op": "pages"}))["json"]["pages"].clone();
+    assert_eq!(before[0], after[0], "page 1 is not edited");
+    assert_ne!(before[1], after[1], "page 2 did not change");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("doc.tex")).expect("the file"),
+        text,
+        "the file on disk changed"
+    );
+    // (a double-click's place in the viewer: shown by the editor)
+    let r = viewer
+        .ask(&json!({"id": 3, "op": "source", "file": "doc.tex", "line": second + 1, "col": 3}));
+    assert_eq!(r["ok"], true, "{r}");
+    let show = lsp_until(&rx, &mut seen, |m| m["method"] == "window/showDocument");
+    assert_eq!(show["params"]["uri"], uri.as_str(), "{show}");
+    assert_eq!(
+        show["params"]["selection"]["start"],
+        at(second, 2),
+        "{show}"
+    );
+    assert_eq!(show["params"]["takeFocus"], true, "{show}");
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": show["id"], "result": {"success": true}}),
+    );
+    // (the editor's cursor on a word of page 2: the viewer reveals it there)
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "phitex/cursor", "params": {
+            "textDocument": {"uri": uri}, "position": at(second, 7),
+        }}),
+    );
+    let shown = viewer.until(|v| v["event"] == "reveal");
+    assert_eq!(shown["page"], 2, "{shown}");
+    assert!(
+        shown["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("foxtrot")),
+        "{shown}"
+    );
+    assert_eq!(shown["texts"][0], "Xray foxtrot golf hotel.", "{shown}");
+    assert_eq!(shown["line"], second + 1, "{shown}");
+    // (the end, as the editor ends it)
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": null}),
+    );
+    let down = lsp_until(&rx, &mut seen, |m| m["id"] == 9);
+    assert!(down.get("error").is_none(), "{down}");
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    );
+    let end = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("the watch") {
+            break s;
+        }
+        assert!(Instant::now() < end, "the watch did not end after exit");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "the watch ended with {status}");
+}
+
 #[test]
 #[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_sections() {

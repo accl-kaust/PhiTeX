@@ -8,7 +8,10 @@
 //! errors again, `w` the warnings, `s` how the build went, `h` lists
 //! them, `q` quits; a live tree of the build's phases while it runs) and a status line below
 //! what is printed; on a pipe, the same as lines (its end quits). Every
-//! message the terminal shows is the viewer's too (its console).
+//! message the terminal shows is the viewer's too (its console). With
+//! `--lsp`, standard input and output are an editor's language client's
+//! instead (`lsp.rs`): its buffers are asked as the viewer's are, its
+//! problems published after each build, its cursor shown on the pages.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -23,6 +26,7 @@ use notify::{EventKind, RecursiveMode, Watcher as _};
 use serde_json::{Value, json};
 
 use crate::keys::{self, Key};
+use crate::lsp::Lsp;
 use crate::modern::{self, Options, Target, Ui, ms};
 use crate::session::{self, Session, Status};
 use crate::tex;
@@ -199,7 +203,7 @@ fn recv_unique<T>(rx: &mut mpsc::Receiver<T>) -> Result<T, mpsc::RecvError> {
 
 /// `s` with UTF-16 code units `start..end` replaced by `text` (the
 /// viewer's offsets).
-fn splice_utf16(s: &str, start: usize, end: usize, text: &str) -> String {
+pub(crate) fn splice_utf16(s: &str, start: usize, end: usize, text: &str) -> String {
     let at = |off: usize| {
         let mut u = 0;
         for (i, c) in s.char_indices() {
@@ -309,6 +313,28 @@ fn diff_told(ui: &Ui, v: &View, ours: &Ours, c: Option<&crate::compare::Compare>
         ui.line(e);
     }
     ui.event(&json!({"event": "diff", "label": c.label, "changes": n, "errors": errors}));
+}
+
+/// Where the editor's cursor, line `line` and UTF-16 column `col` (from
+/// 0) of `text`, is on the pages: the words around it as a page would
+/// show them (`lsp::needles`, longest first), and the page (from 1) and
+/// words of the first that a page of the build holds. Text matching for
+/// now; the engine's origins of the pages' glyphs will replace it. The
+/// engine's page text (`Build::page_of_text`) is a DVI build's: a PDF
+/// build's pages leave the page loop as their writers' shapes, which it
+/// does not read, so there no page is found and the browser looks for
+/// the words itself (MuPDF's text of the PDF).
+fn locate(
+    s: &Session,
+    text: &str,
+    line: usize,
+    col: usize,
+) -> (Option<(usize, String)>, Vec<String>) {
+    let words = crate::lsp::needles(text.lines().nth(line).unwrap_or(""), col);
+    let found = words
+        .iter()
+        .find_map(|w| s.page_of_text(w).map(|k| (k + 1, w.clone())));
+    (found, words)
 }
 
 /// What a line on standard input (a pipe) asks.
@@ -565,14 +591,25 @@ fn faster(cold: Duration, wall: Duration) -> Option<String> {
     })
 }
 
-/// Watch target `t`; never returns.
+/// Watch target `t` (`lsp`: for the editor that initialized it, on
+/// standard input and output); never returns.
 #[allow(clippy::too_many_lines)]
-pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
+pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
     let st = ui.st;
+    let lsp = lsp.map(Arc::new);
     let mut job = modern::job(t, o).unwrap_or_else(|e| {
+        if let Some(l) = &lsp {
+            l.refuse(&e);
+        }
         ui.error(&e);
         std::process::exit(crate::EXIT_FAILED);
     });
+    if let Some(l) = &lsp {
+        l.accept(
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            job.path.to_string_lossy().trim_start_matches("./"),
+        );
+    }
     // (the banner: what is built into what, by which engine)
     if !ui.quiet {
         let threads = session::threads(job.threads);
@@ -598,6 +635,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     let spin = ui.spin(what.clone(), status.clone());
     let mut s = Session::new(job, status.clone(), &mut |n: &str| ui.note(n)).unwrap_or_else(|e| {
         ui.error(&e);
+        if let Some(l) = &lsp {
+            l.refuse(&e);
+        }
         std::process::exit(crate::EXIT_FAILED);
     });
     spin.done();
@@ -634,7 +674,6 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     let view = if o.view {
         match View::start(editor, o.port) {
             Ok(v) => {
-                ui.tap(v.console());
                 // (the diff's picker: the project's git history)
                 let here = root.clone();
                 v.on_log(Box::new(move |skip, limit| {
@@ -658,8 +697,18 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     "{}  {}  {}",
                     st.dim("viewer"),
                     st.cyan(v.url()),
-                    st.dim("(o opens it)")
+                    st.dim(if lsp.is_some() {
+                        "(phitex.openViewer opens it)"
+                    } else {
+                        "(o opens it)"
+                    })
                 ));
+                if let Some(l) = &lsp {
+                    l.viewer(v.url());
+                    // (a double-click's place shown by the editor itself)
+                    let l = l.clone();
+                    v.on_source(Box::new(move |f, line, col| l.show(f, line, col)));
+                }
                 ui.event(&json!({"event": "viewer", "url": v.url()}));
                 if o.open && t.viewer.is_none() && !view::open_browser(v.url()) {
                     ui.warning("could not start a browser");
@@ -674,13 +723,44 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     } else {
         None
     };
+    // (the terminal's messages: the viewer's console, the editor's log)
+    {
+        let console = view.as_ref().map(View::console);
+        let log = lsp.as_ref().map(|l| l.console());
+        if console.is_some() || log.is_some() {
+            ui.tap(Box::new(move |item: Value| {
+                if let Some(l) = &log {
+                    l(&item);
+                }
+                if let Some(c) = &console {
+                    c(item);
+                }
+            }));
+        }
+    }
+    if let Some(l) = &lsp {
+        let wake = Mutex::new(tx.clone());
+        l.on_ask(Box::new(move || {
+            let _ = wake
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .send((Instant::now(), Event::Asked));
+        }));
+    }
+    // (what the viewer and the editor asked, taken together)
+    let take_asks = || {
+        let mut a = view.as_ref().map(View::take_asks).unwrap_or_default();
+        a.extend(lsp.as_ref().map(|l| l.take_asks()).unwrap_or_default());
+        a
+    };
+    let owned = |f: &str| lsp.as_ref().is_some_and(|l| l.owns(f));
     let ours: Ours = Arc::default();
     // (kept for the watch's life: dropping it stops the events)
     let _files = watcher(&root, ours.clone(), tx.clone()).unwrap_or_else(|e| {
         ui.error(&format!("can't watch {}: {e}", root.display()));
         std::process::exit(crate::EXIT_FAILED);
     });
-    let raw = !ui.json && keys::raw();
+    let raw = lsp.is_none() && !ui.json && keys::raw();
     let building = Arc::new(AtomicBool::new(false));
     let told = Arc::new(AtomicBool::new(false));
     {
@@ -695,10 +775,20 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             told: told.clone(),
             target: t.clone(),
         };
-        std::thread::Builder::new()
-            .name("phitex-watch-stdin".into())
-            .spawn(move || read_keys(&tx, raw, &here))
-            .expect("a thread");
+        match &lsp {
+            // (the editor's `exit`, or its end: as `q`)
+            Some(l) => l.serve(Box::new(move || {
+                if !here.answer(Key::Quit) {
+                    let _ = tx.send((Instant::now(), Event::Key(Key::Quit)));
+                }
+            })),
+            None => {
+                std::thread::Builder::new()
+                    .name("phitex-watch-stdin".into())
+                    .spawn(move || read_keys(&tx, raw, &here))
+                    .expect("a thread");
+            }
+        }
     }
     // (the build's thread's end, sent to the loop that waits on it)
     let built = Mutex::new(tx.clone());
@@ -819,18 +909,22 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 ui.event(
                     &json!({"event": "failed", "build": builds, "why": why, "message": first}),
                 );
+                let b = Built {
+                    pdf: last_pdf.clone(),
+                    hashes: last_hashes.clone(),
+                    history: 2,
+                    ms: 0.0,
+                    since_ms: None,
+                    diagnostics: vec![
+                        json!({"severity": "error", "code": "engine", "message": first}),
+                    ],
+                };
                 if let Some(v) = &view {
-                    v.built(&Built {
-                        pdf: last_pdf.clone(),
-                        hashes: last_hashes.clone(),
-                        history: 2,
-                        ms: 0.0,
-                        since_ms: None,
-                        diagnostics: vec![
-                            json!({"severity": "error", "code": "engine", "message": first}),
-                        ],
-                    });
+                    v.built(&b);
                     v.building(false);
+                }
+                if let Some(l) = &lsp {
+                    l.built(&b);
                 }
                 let mut l = last.borrow_mut();
                 l.build = Some((format!("build {builds} failed in the engine"), false));
@@ -885,8 +979,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         if let Some(out) = &written {
             last.borrow_mut().good = Some(out.clone());
         }
-        if let Some(v) = &view {
-            {
+        if view.is_some() || lsp.is_some() {
+            if view.is_some() {
                 last_pdf = match r.main_output() {
                     // (a file written as update sections: as it is)
                     None if r.out.layout.is_some() => written
@@ -916,15 +1010,21 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 .to_string();
             status.set("viewer");
             last_hashes.clone_from(&r.out.page_hashes);
-            v.built(&Built {
+            let b = Built {
                 pdf: last_pdf.clone(),
                 hashes: last_hashes.clone(),
                 history: r.history(),
                 ms: r.wall.as_secs_f64() * 1e3,
                 since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
                 diagnostics: diagnostics(s, &r, &log),
-            });
-            v.building(false);
+            };
+            if let Some(v) = &view {
+                v.built(&b);
+                v.building(false);
+            }
+            if let Some(l) = &lsp {
+                l.built(&b);
+            }
             status.set("");
             phitex_tex::timeline::lap("watch: the viewer's PDF and its diagnostics");
         }
@@ -1280,6 +1380,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             return true;
         }
         if let Event::Files(ps) = &e
+            && !owned(&main_rel)
             && ps
                 .iter()
                 .all(|p| p.strip_prefix(&root).unwrap_or(p) == Path::new(&main_rel))
@@ -1497,6 +1598,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                             .unwrap_or(&p)
                             .to_string_lossy()
                             .into_owned();
+                        // (a file open in an LSP editor is its buffer's
+                        // until closed: the disk's changes not read)
+                        if owned(&rel) {
+                            continue;
+                        }
                         // (a buffer the editor saved is the file again)
                         if let Some(b) = buffers.get(&rel)
                             && std::fs::read(&p).is_ok_and(|d| d == b.as_bytes())
@@ -1542,7 +1648,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 }
                 Event::Asked => {
                     let mut asks = std::mem::take(&mut held_asks);
-                    asks.extend(view.as_ref().map(View::take_asks).unwrap_or_default());
+                    asks.extend(take_asks());
                     for a in asks {
                         let file = match a {
                             Ask::Painted(us) => {
@@ -1573,6 +1679,22 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                             Ask::SetFile { file, text } => {
                                 buffers.insert(file.clone(), text);
                                 file
+                            }
+                            Ask::Closed { file } => {
+                                buffers.remove(&file);
+                                file
+                            }
+                            Ask::Cursor { file, line, col } => {
+                                if let Some(v) = &view {
+                                    let text = buffers.get(&file).cloned().unwrap_or_else(|| {
+                                        std::fs::read(root.join(&file))
+                                            .map(|b| String::from_utf8_lossy(&b).into_owned())
+                                            .unwrap_or_default()
+                                    });
+                                    let (found, words) = locate(&s, &text, line, col);
+                                    v.reveal(found, &words, &file, line + 1);
+                                }
+                                continue;
                             }
                             Ask::Edit {
                                 file,
@@ -1640,7 +1762,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 match e {
                     Event::Built => return true,
                     Event::Asked => {
-                        for a in view.as_ref().map(View::take_asks).unwrap_or_default() {
+                        for a in take_asks() {
                             match a {
                                 Ask::SetFile { ref file, ref text } if *file == main_rel => {
                                     buffers.insert(file.clone(), text.clone());
