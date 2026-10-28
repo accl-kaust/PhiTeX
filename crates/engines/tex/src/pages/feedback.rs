@@ -222,7 +222,10 @@ impl Run<'_, '_> {
             .rev()
             .find(|&x| nodes::tag(v, x) == nodes::T_PAGE_PARAMS && list_of(v, x).len() > 1);
         let params = set.or_else(|| xs.get(3).copied().and_then(some));
-        let mut mat: Vec<ValueId> = c.pending.clone();
+        // (the held-over insertions' classes and `\insertpenalties` as the
+        // output left them, first, `Run::rtn_page_markers`)
+        let mut mat: Vec<ValueId> = self.rtn_page_markers()?;
+        mat.extend(c.pending.iter().copied());
         mat.extend(c.args.get(2).map(|&x| list_of(v, x)).unwrap_or_default());
         mat.push(v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(0)]));
         mat.extend(xs.get(4).map(|&x| list_of(v, x)).unwrap_or_default());

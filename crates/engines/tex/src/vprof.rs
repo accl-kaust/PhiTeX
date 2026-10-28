@@ -631,6 +631,7 @@ impl ScanState {
     fn build(&mut self, buf: &mut Vec<PItem>, dead: i64, rd: &mut dyn Reaching) -> bool {
         let mut classes: Vec<(u16, InsertClass)> = Vec::new();
         let mut page_params = None;
+        let mut ins_pen = None;
         let so_far = &mut self.pb.so_far;
         buf.retain(|x| match x {
             PItem::Params(p) => {
@@ -645,8 +646,11 @@ impl ScanState {
                 false
             }
             PItem::SetPage(i, x) => {
-                let i = usize::try_from(*i).unwrap_or(8);
-                if i < 8 {
+                if *i == crate::pages::INSPEN_SLOT {
+                    ins_pen = Some(*x);
+                } else if let Ok(i) = usize::try_from(*i)
+                    && i < 8
+                {
                     so_far[i] = *x;
                 }
                 false
@@ -657,6 +661,9 @@ impl ScanState {
             }
             _ => true,
         });
+        if let Some(p) = ins_pen {
+            self.pb.insert_penalties = p;
+        }
         if page_params.is_some() {
             self.params = page_params;
         }

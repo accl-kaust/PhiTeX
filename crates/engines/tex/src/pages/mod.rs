@@ -336,6 +336,10 @@ pub(crate) const PAGES_END: &str = "pages:end";
 /// (§1246): after the eight of `\pagegoal` and its kin (§1245).
 pub(crate) const DEAD_SLOT: i64 = 8;
 
+/// A `T_SET_PAGE` marker's slot for `\insertpenalties` as the output
+/// leaves it for the build after it ([`Run::rtn_page_markers`]).
+pub(crate) const INSPEN_SLOT: i64 = 9;
+
 /// A sequence read past its contributors still in work as they last
 /// contributed (nothing, for a node that never did,
 /// [`phitex_defuse::Monoid::speculate`]); a contribution that comes in

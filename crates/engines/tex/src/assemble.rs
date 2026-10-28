@@ -355,6 +355,7 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
         if i > start && (i - start).is_multiple_of(DVI_SNAP) {
             snaps.push((i, w.clone()));
         }
+        (w.h_offset, w.v_offset) = dvi_offsets(v, page);
         if !pb.is_some_and(|pb| w.ship_kept(&pb)) {
             dvi_page(v, &mut w, page, &defs);
         }
@@ -400,9 +401,20 @@ fn dvi_page_kept(
     defs: &phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef>,
 ) -> Option<phitex_dvi::PageBytes> {
     let (bx, counts, whats) = dvi_parts(v, page)?;
+    (w.h_offset, w.v_offset) = dvi_offsets(v, page);
     let fonts = |f: u32| font_def_of(defs, f);
     let mut wh = |h: u32, _leaders: bool| special_of(v, &whats, h);
     w.ship_out_kept(&bx, counts, &fonts, &mut wh).ok()
+}
+
+/// `\hoffset` and `\voffset` as the page's `\shipout` read them (§640:
+/// the page's margins), from its parameters
+/// (`Run::pdf_page_params`: `[pdf, hor, vor, width, height, hoffset,
+/// voffset, ...]`).
+fn dvi_offsets(v: &Values, page: ValueId) -> (i32, i32) {
+    let ps = list_of(v, page).get(3).map(|&x| list_of(v, x)).unwrap_or_default();
+    let at = |k: usize| ps.get(k).map_or(0, |&x| i32::try_from(int_of(v, x)).unwrap_or(0));
+    (at(5), at(6))
 }
 
 /// The fonts' numbers by key (TeX's `f`, which its DVI file writes as
@@ -505,6 +517,7 @@ fn dvi_page(
     let Some((bx, counts, whats)) = dvi_parts(v, page) else {
         return;
     };
+    (w.h_offset, w.v_offset) = dvi_offsets(v, page);
     let fonts = |f: u32| font_def_of(defs, f);
     let mut wh = |h: u32, _leaders: bool| special_of(v, &whats, h);
     let _ = w.ship_out(&bx, counts, &fonts, &mut wh);

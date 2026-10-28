@@ -446,6 +446,7 @@ pub(crate) fn build_t(
     let mut page_params = None;
     let mut buf = std::mem::take(&mut lc.pend);
     let mut dead_set = None;
+    let mut ins_pen = None;
     {
         let so_far = &mut st.pb.so_far;
         buf.retain(|(x, _)| match x {
@@ -460,6 +461,8 @@ pub(crate) fn build_t(
             PItem::SetPage(i, x) => {
                 if *i == crate::pages::DEAD_SLOT {
                     dead_set = Some(i64::from(*x));
+                } else if *i == crate::pages::INSPEN_SLOT {
+                    ins_pen = Some(*x);
                 } else if let Ok(i) = usize::try_from(*i)
                     && i < 8
                 {
@@ -476,6 +479,9 @@ pub(crate) fn build_t(
     }
     if let Some(d) = dead_set {
         lc.dead = d;
+    }
+    if let Some(p) = ins_pen {
+        st.pb.insert_penalties = p;
     }
     let dead = lc.dead;
     if page_params.is_some() {
@@ -1243,6 +1249,7 @@ impl PageState {
         let mut page_params = None;
         let so_far = &mut self.pb.so_far;
         let mut dead_set = None;
+        let mut ins_pen = None;
         buf.retain(|&x| match nodes::tag(v, x) {
             nodes::T_PAGE_PARAMS => {
                 // (a `[tag]` marker, the parameters reaching a piece: those
@@ -1255,6 +1262,8 @@ impl PageState {
             nodes::T_SET_PAGE => {
                 if int_at(v, x, 1) == crate::pages::DEAD_SLOT {
                     dead_set = Some(int_at(v, x, 2));
+                } else if int_at(v, x, 1) == crate::pages::INSPEN_SLOT {
+                    ins_pen = Some(i32::try_from(int_at(v, x, 2)).unwrap_or(0));
                 } else if let Ok(i) = usize::try_from(int_at(v, x, 1))
                     && i < 8
                 {
@@ -1274,6 +1283,9 @@ impl PageState {
         });
         if let Some(d) = dead_set {
             self.dead = d;
+        }
+        if let Some(p) = ins_pen {
+            self.pb.insert_penalties = p;
         }
         // (a marker no step resolved: the registers as the fold has them)
         for n in unresolved {

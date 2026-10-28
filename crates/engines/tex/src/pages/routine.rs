@@ -60,6 +60,10 @@ pub(crate) struct FinCtx {
     pub pending: Vec<ValueId>,
     /// How many of `pending` are the held-over insertions (§1022).
     pub held_n: usize,
+    /// The page was shipped by the default output routine (§1023): the
+    /// held-over insertions' count stays `\insertpenalties` (§1014), which
+    /// a routine's end sets to 0 (§1026).
+    pub default_out: bool,
     /// The `rtn` the finisher defined.
     pub rtn: Option<ValueId>,
     /// Its arguments in full ([`Run::finisher_args`]).
@@ -86,6 +90,7 @@ impl Run<'_, '_> {
         if self.st.take_page_params() {
             raw.push(self.page_params_marker()?);
         }
+        raw.extend(self.rtn_page_markers()?);
         let c = self.fin.clone().unwrap_or_default();
         let list = c.pending.get(c.held_n..).unwrap_or_default().to_vec();
         // (and `\deadcycles` as it leaves it where not 0, a page not
@@ -101,6 +106,46 @@ impl Run<'_, '_> {
             c.rtn = Some(x);
         }
         Ok(())
+    }
+
+    /// What the build after the output (§1026) reads of the routine's end
+    /// besides its list and the page parameters, as markers before the
+    /// held-over insertions: `\insertpenalties` where the default output
+    /// (§1023) leaves it the held-over insertions' count (§1014; a
+    /// routine's end sets it to 0, §1026), and each held-over insertion's
+    /// class registers as the fire and the routine left them (§1008 reads
+    /// them as the class's first insertion meets the next page: `fire_up`
+    /// filled the box, a routine may have emptied it), never where the
+    /// page fired: the page builder and the text read them in the
+    /// give-back's order, as the page parameters (docs/spec-settle.md
+    /// §2.1).
+    pub(crate) fn rtn_page_markers(&mut self) -> R<Vec<ValueId>> {
+        let v = self.v;
+        let Some(c) = self.fin.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let held = c.pending.get(..c.held_n).unwrap_or_default();
+        let mut out = Vec::new();
+        if c.default_out && !held.is_empty() {
+            out.push(v.list(vec![
+                v.int(nodes::T_SET_PAGE),
+                v.int(crate::pages::INSPEN_SLOT),
+                v.int(i64::try_from(held.len()).unwrap_or(0)),
+            ]));
+        }
+        let mut ns: Vec<u16> = Vec::new();
+        for &x in held {
+            if nodes::tag(v, x) == nodes::T_INS {
+                let n = u16::try_from(crate::val::int_at(v, x, 1)).unwrap_or(0);
+                if !ns.contains(&n) {
+                    ns.push(n);
+                }
+            }
+        }
+        for n in ns {
+            out.push(self.ins_params_marker(n)?);
+        }
+        Ok(out)
     }
 
     /// The pages fired in a finisher's page's piece before it (its first
@@ -274,6 +319,7 @@ impl Run<'_, '_> {
             // go back to the contributions, the page is shipped
             if let Some(c) = self.fin.as_mut() {
                 c.pending = held;
+                c.default_out = true;
             }
             self.ship_out(b255)?;
             return Ok(false);
