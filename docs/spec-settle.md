@@ -39,7 +39,10 @@ An operation may declare that its definitions settle at quiet points
   contributions, of structure, are not held: those edges are the page
   layer's own.
 - The passes are bounded as latexmk bounds its runs
-  (`Limits::settle_passes`, default 5, latexmk's `max_repeat`): past it
+  (`Limits::settle_passes`; latexmk's `max_repeat` is 5 whole runs, the
+  default here is 12 passes while the text still speculates ahead of the
+  page layer at eight threads, where course3 takes 8 to 12; 5 ended every
+  course3 -j8 cold build unsettled and wrong): past it
   the wakes still held are dropped, the last state is written out, and
   the build reports it (`Report::held_unsettled`: "the page layout did
   not settle after 5 passes", a warning in the log so the PDF of the last
