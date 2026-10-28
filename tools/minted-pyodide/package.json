@@ -1,0 +1,8 @@
+{
+  "name": "partex-minted-pyodide",
+  "private": true,
+  "type": "module",
+  "description": "latexminted in Pyodide: a \\write18 runner for partex's wasm hosts",
+  "scripts": { "test": "node test.mjs" },
+  "dependencies": { "pyodide": "314.0.7" }
+}

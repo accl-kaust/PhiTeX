@@ -1,0 +1,14 @@
+{
+"command": "clean",
+"jobname": "minted",
+"timestamp": "20261004025642",
+"cachepath": "_minted/",
+"cachefiles":
+"""\
+[
+\"default.style.minted\",
+\"57268CE49718FCD8231E16EE61A5E20F.highlight.minted\",
+\"059FF7C0E547B63B18503B57575A84F2.highlight.minted\",
+]
+""",
+}
