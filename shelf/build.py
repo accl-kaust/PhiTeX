@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build Shelf (schema 3): TeX Live's files for the engines PhiTeX runs, in
+"""Build Shelf (schema 4): TeX Live's files for the engines PhiTeX runs, in
 packs, with an index from each file's texmf path to its pack.
 
     python3 build.py [LABEL]          # default tl2026; then release.py
@@ -50,18 +50,36 @@ in cold packs by directory and font family. No pack over 20 MB (Cloudflare
 takes 25 MiB a file).
 
 Dependencies, a column per engine (meta.json's `deps`): for each .sty and
-.cls, the packs loading it reads on the preview's own engine, less what a
-bare article reads and its own pack, so a client fetching it fetches those
-too, in one round instead of one build per file.
-- pdftex: TRACE=path/to/trace-deps and TRACE_FMT=its pdflatex.fmt (the
-  extension's core-partex), over a flat directory of what pdflatex finds by
-  each name (the search above).
-- xetex: TRACE_XETEX and TRACE_XETEX_FMT (the same protocol, xelatex.fmt,
-  with the engine's font index, fontindex.pxfi, beside it: the extension's
-  trace-deps runs XeTeX for an xelatex.fmt), over what xelatex finds;
-  without them the column is empty.
-A trace is kept in cache/trace-<engine>.json, by its tool, format, names and
-flat directory: the same inputs are traced once.
+.cls, the packs loading it reads on PhiTeX, less what a bare article reads
+and its own pack, so a client fetching it fetches those too, in one round
+instead of one build per file. The columns are hints: a client that
+ignores them, or meets a wrong one, still asks for each file the build
+needs; they only save rounds.
+- TRACE=path/to/shelf-trace (trace/: phitex_tex::Build at the `phitex`
+  submodule's commit, a job per name, every file its finders gave
+  printed), run for pdftex (pdflatex.ini's format) and xetex (xelatex.ini's,
+  with TRACE_FONT_INDEX, phitex-otf's font index of Shelf's
+  OpenType/TrueType fonts (FONT_TREE below), for fonts by name), each over
+  a flat directory of what that engine finds by each name (the search
+  above). A TeX Live on PATH gives the formats and TECkit's mappings.
+- TRACE_ENGINES (default `pdftex,xetex`): the columns traced with TRACE;
+  TRACE_JOBS: batches at once (default 12); TRACE_NAMES=a.sty,b.cls: only
+  those names (a check, kept apart in cache/trace-<engine>-check.json).
+A trace is kept in cache/trace-<engine>.json with the tracer's version
+(`shelf-trace --version`: the engine's commit, meta.json's `traced_by`),
+by its inputs (the names and the flat directory): the same inputs are
+traced once, and a build without TRACE takes a kept trace whose inputs
+match (else the column is empty).
+
+TLPDB=path: the package database to build from (a `texlive.tlpdb.xz`)
+instead of tlnet's current one; the one used is kept as
+cache/texlive.tlpdb.xz, so a build can be repeated (on another machine:
+that file and cache/'s archives). FETCH_ONLY=1: fetch the database and
+the archives, then stop (a networked step before an offline build).
+FONT_TREE=dir: the OpenType/TrueType fonts also written there at their
+texmf paths (dir/fonts/opentype/...), for the tracer's font index (made by
+phitex-otf's otf-index with a fonts.conf naming those two directories:
+scripts/accl-trace.sbatch).
 
 The engine's font index (FONT_INDEX=path: the PhiTeX engine's builder over
 fonts/opentype and fonts/truetype) is served, when given, at the path
@@ -381,55 +399,73 @@ def common(pkg: str, files: list[tuple[str, bytes]], freq: dict[str, int]) -> di
     return out
 
 
-def trace(tool: str | None, fmt: str | None, flat_files: dict[str, bytes], names: list[str], what: str) -> dict[str, set[str]]:
-    """Each name (and article.cls, the baseline): the names loading it reads,
-    on `tool` with `fmt`, from a flat directory of `flat_files`."""
-    if not (tool and fmt):
-        print(f"no {what} trace: its dependency column is empty", file=sys.stderr)
-        return {}
-    # (kept in cache/trace-<engine>.json, by what it depends on: the tool,
-    # the format, the names and the flat directory's files; the same inputs
-    # trace once, so a rebuild for another column leaves this one as it was)
+def trace(tool: str | None, flat_files: dict[str, bytes], names: list[str], what: str, check: bool = False) -> tuple[dict[str, set[str]], str | None]:
+    """Each name (and article.cls, the baseline): the names loading it reads
+    (a font found by path: its texmf path), on `tool` (shelf-trace) as
+    `what`, from a flat directory of `flat_files`; and the tracer's
+    version."""
+    # (kept in cache/trace-<engine>.json, by its inputs: the names and the
+    # flat directory's files; the same inputs trace once, so a rebuild for
+    # another column leaves this one as it was, and a build without TRACE
+    # takes it)
     h = hashlib.sha256()
-    for b in (Path(tool).read_bytes(), Path(fmt).read_bytes(), "\0".join(names).encode()):
-        h.update(hashlib.sha256(b).digest())
+    h.update(hashlib.sha256("\0".join(names).encode()).digest())
     for name in sorted(flat_files):
         h.update(name.encode() + b"\0" + hashlib.sha256(flat_files[name]).digest())
     key = h.hexdigest()
-    saved = CACHE / f"trace-{what}.json"
+    saved = CACHE / f"trace-{what}{'-check' if check else ''}.json"
+    version = subprocess.run([tool, "--version"], capture_output=True, text=True, check=True).stdout.strip() if tool else None
     if saved.exists():
         s = json.loads(saved.read_text())
-        if s.get("key") == key:
-            print(f"  {what}: trace from {saved}", file=sys.stderr)
-            return {n: set(fs) for n, fs in s["read"].items()}
+        if s.get("key") == key and s.get("traced_by") and (version is None or s["traced_by"] == version):
+            print(f"  {what}: trace from {saved}, by {s['traced_by']}", file=sys.stderr)
+            return {n: set(fs) for n, fs in s["read"].items()}, s["traced_by"]
+    if not tool:
+        print(f"no {what} trace (TRACE, or a kept one for these inputs): its dependency column is empty", file=sys.stderr)
+        return {}, None
     flat = CACHE / f"flat-{what}"
     if flat.exists():
         shutil.rmtree(flat)
     flat.mkdir()
     for name, b in flat_files.items():
         (flat / name).write_bytes(b)
+    # (the format's state: made by the first batch, alone, read by the rest)
+    prelude = CACHE / f"trace-{what}.prelude"
+    prelude.unlink(missing_ok=True)
+    args = [tool, "--engine", what, "--flat", str(flat), "--prelude", str(prelude)]
+    if what == "xetex":
+        if not os.environ.get("TRACE_FONT_INDEX"):
+            raise SystemExit("xetex trace: TRACE_FONT_INDEX (phitex-otf's otf-index) is needed")
+        args += ["--font-index", os.environ["TRACE_FONT_INDEX"]]
     batches = [names[i : i + 25] for i in range(0, len(names), 25)]
+    log = open(CACHE / f"trace-{what}.log", "w")
 
     def run(batch: list[str]) -> list[str]:
         try:
-            r = subprocess.run([tool, fmt, str(flat), *batch], capture_output=True, text=True, timeout=300)
+            r = subprocess.run([*args, *batch], capture_output=True, text=True, timeout=600)
+            log.write(r.stderr)
             return r.stdout.splitlines()
         except subprocess.TimeoutExpired as e:  # (a job that never ends: its batch's done lines only)
-            return (e.stdout or b"").decode(errors="replace").splitlines() if isinstance(e.stdout, bytes) else (e.stdout or "").splitlines()
+            out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else e.stdout or ""
+            log.write(f"batch {batch[0]}..: timed out\n")
+            return out.splitlines()
 
     read: dict[str, set[str]] = {}
+    lines = run(["article.cls"])
     with ThreadPoolExecutor(int(os.environ.get("TRACE_JOBS", "12"))) as ex:
-        for i, lines in enumerate(ex.map(run, [["article.cls"]] + batches)):
-            for line in lines:
-                name, _, fs = line.partition("\t")
-                read[name] = set(filter(None, fs.split(",")))
+        for i, more in enumerate(ex.map(run, batches), 1):
+            lines += more
             if i % 40 == 0:
                 print(f"  {what}: traced {i}/{len(batches)} batches", file=sys.stderr)
+    for line in lines:
+        name, _, fs = line.partition("\t")
+        read[name] = set(filter(None, fs.split(",")))
+    log.close()
     missing = len(set(names) - read.keys())
     if missing:
         print(f"  {what}: {missing} names not traced (a batch timed out)", file=sys.stderr)
-    saved.write_text(json.dumps({"key": key, "read": {n: sorted(fs) for n, fs in sorted(read.items())}}))
-    return read
+    saved.write_text(json.dumps({"key": key, "traced_by": version, "read": {n: sorted(fs) for n, fs in sorted(read.items())}}))
+    return read, version
 
 
 def safe(s: str) -> str:
@@ -439,7 +475,11 @@ def safe(s: str) -> str:
 def main() -> None:
     t0 = time.time()
     CACHE.mkdir(exist_ok=True)
-    db = lzma.decompress(get(f"{MIRROR}/tlpkg/texlive.tlpdb.xz")).decode()
+    # (the database used kept beside the archives: TLPDB=it repeats the build)
+    raw = Path(os.environ["TLPDB"]).read_bytes() if os.environ.get("TLPDB") else get(f"{MIRROR}/tlpkg/texlive.tlpdb.xz")
+    if not (CACHE / "texlive.tlpdb.xz").exists() or (CACHE / "texlive.tlpdb.xz").read_bytes() != raw:
+        (CACHE / "texlive.tlpdb.xz").write_bytes(raw)
+    db = lzma.decompress(raw).decode()
     pkgs, every = packages(db)
     print(f"{len(pkgs)} packages", file=sys.stderr)
     files: dict[str, tuple[dict, bytes]] = {}
@@ -449,7 +489,15 @@ def main() -> None:
                 files[path] = (p, b)
             if i % 500 == 0:
                 print(f"  {i}/{len(pkgs)}", file=sys.stderr)
-    print(f"fetched in {time.time() - t0:.0f} s", file=sys.stderr)
+    print(f"fetched in {time.time() - t0:.0f} s, database sha256 {hashlib.sha256(raw).hexdigest()[:16]}", file=sys.stderr)
+    if os.environ.get("FONT_TREE"):  # (the fonts the tracer's font index is made of)
+        for path, (_, b) in files.items():
+            if path.startswith(OPEN):
+                (Path(os.environ["FONT_TREE"]) / path).parent.mkdir(parents=True, exist_ok=True)
+                (Path(os.environ["FONT_TREE"]) / path).write_bytes(b)
+    if os.environ.get("FETCH_ONLY"):
+        fetch(every["kpathsea"], {"web2c/texmf.cnf"})
+        return
 
     # the search orders, from TeX Live's own texmf.cnf
     cnf = fetch(every["kpathsea"], {"web2c/texmf.cnf"})["web2c/texmf.cnf"].decode()
@@ -496,17 +544,23 @@ def main() -> None:
         print(f"  {name}: pdftex finds {pd}, xetex {xe} (of {', '.join(paths)})", file=sys.stderr)
 
     # the dependency columns: each engine's trace over what it finds by name
-    flats, reads = {}, {}
+    # (a name the tracer prints with a '/' is a texmf path: a font found by path)
+    flats, reads, traced_by = {}, {}, {}
+    only = [n for n in os.environ.get("TRACE_NAMES", "").split(",") if n]
     for engine, own in (("pdftex", XETEX + LUATEX), ("xetex", LUATEX)):
         resolve, names = res[engine]
         flats[engine] = flat = {n: p for n in names if (p := resolve(n))}
         # (another engine's own packages: this one can't load them)
         traced = sorted(n for n, p in flat.items() if n.endswith((".sty", ".cls")) and not p.startswith(own))
-        env = "TRACE" if engine == "pdftex" else "TRACE_XETEX"
+        if only:
+            traced = [n for n in traced if n in only]
+        tool = os.environ.get("TRACE") if engine in os.environ.get("TRACE_ENGINES", "pdftex,xetex").split(",") else None
         t1 = time.time()
-        r = trace(os.environ.get(env), os.environ.get(env + "_FMT"), {n: files[p][1] for n, p in flat.items()}, traced, engine)
+        r, traced_by[engine] = trace(tool, {n: files[p][1] for n, p in flat.items()}, traced, engine, bool(only))
         print(f"{engine} trace: {len(r)} of {len(traced)} names in {time.time() - t1:.0f} s", file=sys.stderr)
-        reads[engine] = {flat[n]: {flat[f] for f in fs if f in flat} for n, fs in r.items() if n in flat}
+        reads[engine] = {flat[n]: {q for f in fs if (q := f if "/" in f else flat.get(f)) in files} for n, fs in r.items() if n in flat}
+    if only:
+        return
     freq: dict[str, int] = defaultdict(int)
     for fs in reads["pdftex"].values():
         for f in fs:
@@ -553,7 +607,7 @@ def main() -> None:
         f"{path}\t{pack_of[path]}\t" + "\t".join(",".join(deps[e].get(path, [])) for e in DEPS) + "\n" for path in sorted(pack_of)
     )
     (out / "index.tsv").write_text(index)
-    (out / "meta.json").write_text(json.dumps({"deps": DEPS, "search": order}, indent=1) + "\n")
+    (out / "meta.json").write_text(json.dumps({"deps": DEPS, "traced_by": traced_by, "search": order}, indent=1) + "\n")
     Path("MANIFEST.tsv").write_text(f"# {LABEL} from {MIRROR}: path, package, revision, sha256\n" + "\n".join(sorted(rows)) + "\n")
 
     for engine in DEPS:
