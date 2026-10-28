@@ -28,6 +28,19 @@
 # CLUSTER=mc runs all of it on the mc cluster instead (`ssh mcmgt01`,
 # partition mc, its CPU-only nodes; the git remote `mc`; results here
 # under ~/code/flinner/phitex-runs/mc/): cluster.sh. Unset, accl.
+#
+# From another repository with PhiTeX as its phitex/ submodule
+# (phitex-frontends), run this script by its path there: the snapshot is
+# that repository's working tree, its checked-out submodules each
+# snapshotted too, pushed to the cluster's PhiTeX bare repo by URL (no
+# remote needed). The job checks the submodules out, fetches crates for
+# every Cargo.lock one level down, phitex/'s upstream copy and
+# node_modules (npm ci, by package-lock.json). Node 26, npm and the
+# wasm32-wasip1 and -threads std are in the image phitex-2026-09-25-node26
+# (on mc; accl has only phitex-2026-09-25-tools so far):
+#   cd ~/code/flinner/phitex-frontends
+#   CLUSTER=mc ACCL_OPTS="-c 16 --mem=32G -t 01:00:00 --export=ALL,ACCL_IMAGE=phitex-2026-09-25-node26" \
+#     ~/code/flinner/PhiTeX/scripts/accl/accl run cmd bash -c '<command in the repo root>'
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 # (H, remote, part, light, ws_node, runs: cluster.sh)
@@ -190,5 +203,5 @@ case $cmd in
   ci-discover)
     ci_sync
     sb -J ci-discover $light -c 2 --mem=8G -t 01:00:00 "\$HOME/$CI/harness/ci.sbatch" discover discover ;;
-  *) sed -n '2,30p' "$0"; exit 2 ;;
+  *) sed -n '2,43p' "$0"; exit 2 ;;
 esac

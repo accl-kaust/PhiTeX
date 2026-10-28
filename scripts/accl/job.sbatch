@@ -118,7 +118,9 @@ fi
 git -C "$w/phitex" ls-files -s | awk -F'\t' '$1 ~ /^160000 / {split($1, a, " "); print a[2] "\t" $2}' | while IFS=$'\t' read -r sc p; do
   git -C "$w/phitex" cat-file -e "$sc^{commit}" 2>/dev/null || git -C "$w/phitex" fetch -q origin "+refs/wip/$sc:refs/wip/$sc"
   rm -rf "${w:?}/phitex/$p"
-  git clone -q --shared --no-checkout "$w/phitex" "$w/phitex/$p"
+  # (a local clone: its objects hard links, no alternates file naming the
+  # node path, which the box sees elsewhere, at $root; mc job 75726)
+  git clone -q --no-checkout "$w/phitex" "$w/phitex/$p"
   git -C "$w/phitex/$p" -c advice.detachedHead=false checkout -q "$sc"
 done
 cd "$w/phitex"

@@ -16,8 +16,9 @@ cd "$w"
 # (mc: no subuid range, so Apptainer's fakeroot is a root-mapped user
 # namespace plus the fakeroot command, whose faked died under pacman's
 # keyring check and left gpg waiting on its semaphore for good (job
-# 75697); BUILD_FLAGS=--ignore-fakeroot-command runs %post as root of the
-# user namespace alone)
+# 75697); BUILD_FLAGS="--ignore-fakeroot-command --ignore-proot" runs %post
+# as root of the user namespace alone and mksquashfs without the bundled
+# proot, which needs libprotobuf-c.so.1, absent on mc's nodes (job 75717))
 apptainer build --fakeroot ${BUILD_FLAGS:-} phitex.sif "$def"
 apptainer exec phitex.sif sh -c 'pacman -Q; pdflatex --version | head -1; rustc --version; valgrind --version; qpdf --version | head -1; node --version 2>/dev/null; rustup target list --installed 2>/dev/null' > versions.txt
 out=$HOME/shared-cache/phitex
