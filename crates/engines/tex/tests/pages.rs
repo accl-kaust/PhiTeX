@@ -298,3 +298,27 @@ fn para4000_bytes_without_finisher_predictions() {
         );
     }
 }
+
+/// A loop in vertical mode that waits for `\pagetotal` to reach a height
+/// (fillwith's `\fillwithrules`), on a page that began with a page fired
+/// before it: its piece's first run reads a page start the finisher has
+/// not placed yet, and the page it reads must still fill with its own
+/// items, or the loop never ends; at one thread nothing else runs to
+/// refute that read (the dvi/pagewait oracle: TeX ends the loop at its
+/// twentieth rule).
+#[test]
+fn a_loop_waiting_for_the_page_to_fill_ends() {
+    let dir = common::fixtures().join("dvi");
+    let src = common::read(&dir.join("pagewait.tex"));
+    let want = std::fs::read(dir.join("pagewait.dvi")).expect("the oracle");
+    for threads in [1, 8] {
+        let opts = phitex_tex::Options {
+            threads: Some(threads),
+            ..common::options("./pagewait.tex", "pagewait", &common::dvi_comment(&want), &dir)
+        };
+        let b = common::build(opts, Some(&common::plain()), &src);
+        let (dvi, log) = b.output();
+        assert_eq!(dvi, want, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
+        assert!(log.contains("[n=20]"), "-j{threads}: the loop ends at the twentieth rule");
+    }
+}
