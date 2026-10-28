@@ -856,6 +856,13 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &crate::build::Mode) -> R<()> {
             }
             r.set_input_mode(m);
         }
+        ex::LINEBREAK_LOCALE => {
+            // (an assignment of eqtb's own, never restored: the locale
+            // stays past the group)
+            let name = r.scan_file_name()?;
+            let v = r.v;
+            r.set(LINEBREAK_LOCALE_FIELD, v.str(&name), true);
+        }
         ex::DEFAULT_ENCODING => {
             let name = r.scan_file_name()?;
             let m = mode_of_name(&name);
@@ -867,6 +874,50 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &crate::build::Mode) -> R<()> {
         }
     }
     Ok(())
+}
+
+/// The field of `\XeTeXlinebreaklocale`'s name ("" none).
+pub(crate) const LINEBREAK_LOCALE_FIELD: &str = "xlbloc";
+
+/// `XeTeX_linebreak_skip_code`, the parameter of `\XeTeXlinebreakskip`'s
+/// glue between a word's parts.
+pub(crate) const LINEBREAK_SKIP_CODE: u8 = 15;
+
+/// The line break opportunities ICU's line break iterator gives in
+/// `text` (UTF-16) for locale `loc` (`ubrk_open(UBRK_LINE, loc)`): 0,
+/// each break, the length. Japanese and Chinese get ICU's `_cj` rules,
+/// the `lb` keyword (`@lb=loose`, `-u-lb-loose`) the strictness, ICU's
+/// default strict (normal for Japanese and Chinese).
+pub(crate) fn line_breaks(loc: &str, text: &[u16]) -> Vec<usize> {
+    use icu_segmenter::LineSegmenter;
+    use icu_segmenter::options::{LineBreakOptions, LineBreakStrictness};
+    let lower = loc.to_ascii_lowercase();
+    let lang_end = lower.find(['_', '-', '@']).unwrap_or(lower.len());
+    let lang = &lower[..lang_end];
+    let lb = lower
+        .split_once("lb=")
+        .map(|x| x.1)
+        .or_else(|| lower.split_once("-u-lb-").map(|x| x.1))
+        .map(|s| s.split([';', '-', '_', '@']).next().unwrap_or(""));
+    let cj = lang == "ja" || lang == "zh";
+    let strictness = match lb {
+        Some("loose") => LineBreakStrictness::Loose,
+        Some("normal") => LineBreakStrictness::Normal,
+        Some("strict") => LineBreakStrictness::Strict,
+        // (ICU's Japanese and Chinese default to their normal rules)
+        _ if cj => LineBreakStrictness::Normal,
+        _ => LineBreakStrictness::Strict,
+    };
+    let ja: icu_locale_core::LanguageIdentifier = icu_locale_core::langid!("ja");
+    let zh: icu_locale_core::LanguageIdentifier = icu_locale_core::langid!("zh");
+    let mut options = LineBreakOptions::default();
+    options.strictness = Some(strictness);
+    options.content_locale = match lang {
+        "ja" => Some(&ja),
+        "zh" => Some(&zh),
+        _ => None,
+    };
+    LineSegmenter::new_dictionary(options).segment_utf16(text).collect()
 }
 
 impl Run<'_, '_> {

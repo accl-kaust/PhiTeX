@@ -263,6 +263,8 @@ pub(crate) struct View {
     /// `\XeTeXuseglyphmetrics` where the view was made (a merged word's
     /// height and depth).
     pub glyph_metrics: bool,
+    /// XeTeX's engine (`cp_skipable` without whatsits).
+    pub xe: bool,
     /// The native fonts' `\fontdimen`s, for math.
     pub native_params: FxHashMap<FontId, Vec<i32>>,
     /// XeTeX's math families 16 to 255 at the three sizes.
@@ -285,9 +287,9 @@ pub(crate) struct View {
 pub(crate) struct Px {
     pub expansion: Option<phitex_typeset::fonts::Expansion>,
     pub auto: bool,
-    pub lp: Box<[i32; 256]>,
-    pub rp: Box<[i32; 256]>,
-    pub ef: Box<[i32; 256]>,
+    pub lp: Box<[i32]>,
+    pub rp: Box<[i32]>,
+    pub ef: Box<[i32]>,
     pub quad: i32,
     pub slots: Box<[Slot]>,
 }
@@ -418,6 +420,7 @@ impl View {
             names: self.names.clone(),
             natives: self.natives.clone(),
             glyph_metrics: self.glyph_metrics,
+            xe: self.xe,
             native_params: self.native_params.clone(),
             xfams: self.xfams.clone(),
             ex_base: self.ex_base.clone(),
@@ -637,6 +640,10 @@ impl Fonts for View {
         self.px
             .get(&self.base_of(font))
             .map_or(0, |p| p.rp.get(usize::from(ch)).copied().unwrap_or(0))
+    }
+
+    fn xetex(&self) -> bool {
+        self.xe
     }
 
     fn quad(&self, font: FontId) -> i32 {

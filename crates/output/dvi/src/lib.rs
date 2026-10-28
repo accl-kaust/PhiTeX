@@ -18,7 +18,9 @@ use std::collections::BTreeMap;
 use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::glue::{GlueSign, Order};
-use phitex_typeset::node::{BoxKind, BoxNode, GlueKind, GlueNode, Native, NativeKind, Node, RUNNING};
+use phitex_typeset::node::{
+    BoxKind, BoxNode, GlueKind, GlueNode, KernKind, MathKind, Native, NativeKind, Node, RUNNING,
+};
 
 /// DVI opcodes (§586).
 pub mod op {
@@ -217,6 +219,27 @@ impl Frame {
     }
 }
 
+/// An item of an hlist being output with TeX--XeT: a node, e-TeX's
+/// edge node (a change of direction: `cur_h` moves by `width`, the new
+/// left edge is `dist` beyond), or leaders glue whose width `reverse`
+/// has fixed.
+enum Lr {
+    N(Node),
+    Edge { dir: u8, width: Scaled, dist: Scaled },
+    Fixed(GlueNode),
+}
+
+/// `list`'s nodes, a discretionary's replacement text in its place (the
+/// nodes TeX's list has after the discretionary node).
+fn flatten_into(list: &[Node], q: &mut std::collections::VecDeque<Lr>) {
+    for n in list {
+        match n {
+            Node::Disc(d) => flatten_into(&d.replace, q),
+            n => q.push_back(Lr::N(n.clone())),
+        }
+    }
+}
+
 /// `vet_glue(float(glue_set(this_box))*cur_glue)` then
 /// `cur_g:=round(glue_temp)` (§625), in doubles as web2c computes it
 /// (`glueratio` and `real` are C `double`; `round` is `zround`).
@@ -266,6 +289,8 @@ pub struct DviWriter {
     dvi_f: Option<FontId>,
     cur_s: i32,
     doing_leaders: bool,
+    /// e-TeX's `cur_dir`: 1 inside right-to-left text (TeX--XeT).
+    cur_dir: u8,
     /// While [`DviWriter::ship_out_kept`] ships a page: its first byte,
     /// the buffer-dependent decisions so far and the fonts it uses.
     rec: Option<Recording>,
@@ -471,6 +496,7 @@ impl DviWriter {
             dvi_f: None,
             cur_s: -1,
             doing_leaders: false,
+            cur_dir: 0,
             rec: None,
         };
         // §617
@@ -897,8 +923,239 @@ impl DviWriter {
     fn hlist_out(&mut self, b: &BoxNode, fonts: &dyn Fn(FontId) -> FontDef, wh: &mut Whatsits<'_>) {
         let save_loc = self.enter();
         let mut fr = Frame::new(b, self.cur_v, self.cur_h);
-        self.hlist_nodes(&b.list, &mut fr, fonts, wh);
+        // (e-TeX: a list without text direction nodes, outside
+        // right-to-left text, comes out as TeX's)
+        if self.cur_dir == 0
+            && !b.list.iter().any(|n| matches!(n, Node::Math(k, _) if k.is_lr()))
+        {
+            self.hlist_nodes(&b.list, &mut fr, fonts, wh);
+        } else {
+            self.hlist_lr(&b.list, &mut fr, fonts, wh);
+        }
         self.leave(save_loc);
+    }
+
+    /// `hlist_out` for mixed direction text (e-TeX's TeX--XeT, XeTeX
+    /// §1409ff): right-to-left segments reversed as the output reaches
+    /// them, between edges.
+    fn hlist_lr(
+        &mut self,
+        list: &[Node],
+        fr: &mut Frame,
+        fonts: &dyn Fn(FontId) -> FontDef,
+        wh: &mut Whatsits<'_>,
+    ) {
+        let mut q: std::collections::VecDeque<Lr> = std::collections::VecDeque::new();
+        flatten_into(list, &mut q);
+        // "Initialize the LR stack": `before`, never matched
+        let mut lr: Vec<u8> = vec![0];
+        if self.cur_dir == 1 {
+            // "Reverse the complete hlist"
+            let save_h = self.cur_h;
+            self.cur_h = 0;
+            let mut rev = self.reverse(fr, &mut q, None, &mut lr, fonts);
+            rev.push_front(Lr::N(Node::Kern(-self.cur_h, KernKind::Explicit)));
+            q = rev;
+            self.cur_h = save_h;
+        }
+        fr.left_edge = self.cur_h;
+        while let Some(it) = q.pop_front() {
+            match it {
+                Lr::Edge { dir, width, dist } => {
+                    self.cur_h += width;
+                    fr.left_edge = self.cur_h + dist;
+                    self.cur_dir = dir;
+                }
+                Lr::Fixed(g) => {
+                    let w = g.spec.width;
+                    if let Some(rule) = self.hglue_wd(&g, w, fr, fonts, wh) {
+                        self.hrule(rule, fr);
+                    }
+                }
+                Lr::N(Node::Math(k, w)) => {
+                    // "Adjust the LR stack for the `hlist_out` routine"
+                    if k.is_end() {
+                        if lr.last() == Some(&k.end_type()) {
+                            lr.pop();
+                        }
+                    } else {
+                        lr.push(k.end_type());
+                        if k.dir() != self.cur_dir {
+                            // "Reverse an hlist segment"
+                            let save_h = self.cur_h;
+                            self.cur_dir = 1 - self.cur_dir;
+                            let dir = self.cur_dir;
+                            self.cur_h = self.cur_h - fr.left_edge + w;
+                            let tail = Lr::Edge {
+                                dir: 1 - dir,
+                                width: 0,
+                                dist: 0,
+                            };
+                            let mut rev = self.reverse(fr, &mut q, Some(tail), &mut lr, fonts);
+                            let dist = self.cur_h;
+                            self.cur_dir = 1 - self.cur_dir;
+                            self.cur_h = save_h;
+                            rev.append(&mut q);
+                            rev.push_front(Lr::Edge {
+                                dir,
+                                width: w,
+                                dist,
+                            });
+                            q = rev;
+                            continue;
+                        }
+                    }
+                    self.cur_h += w;
+                }
+                Lr::N(n) => self.hlist_nodes(std::slice::from_ref(&n), fr, fonts, wh),
+            }
+        }
+    }
+
+    /// e-TeX's `reverse`: the nodes of `q` up to the end of the segment
+    /// (all of them when `t` is `None`) in reverse order, `t` last, with
+    /// glue set as it is output, `cur_h` advanced by their widths.
+    #[allow(clippy::too_many_lines)]
+    fn reverse(
+        &mut self,
+        fr: &mut Frame,
+        q: &mut std::collections::VecDeque<Lr>,
+        mut t: Option<Lr>,
+        lr: &mut Vec<u8>,
+        fonts: &dyn Fn(FontId) -> FontDef,
+    ) -> std::collections::VecDeque<Lr> {
+        let mut l: std::collections::VecDeque<Lr> = std::collections::VecDeque::new();
+        let mut m = 0u32;
+        let mut n = 0u32;
+        loop {
+            while let Some(it) = q.pop_front() {
+                let mut node = match it {
+                    Lr::N(node) => node,
+                    Lr::Fixed(g) => {
+                        self.cur_h += g.spec.width;
+                        l.push_front(Lr::Fixed(g));
+                        continue;
+                    }
+                    other @ Lr::Edge { .. } => {
+                        l.push_front(other);
+                        continue;
+                    }
+                };
+                let rule_wd = match &mut node {
+                    Node::Char { font, ch } => self.char_width(*font, *ch, fonts),
+                    Node::Lig(lg) => {
+                        let w = self.char_width(lg.font, lg.ch, fonts);
+                        node = Node::Char {
+                            font: lg.font,
+                            ch: lg.ch,
+                        };
+                        w
+                    }
+                    Node::Box(bx) => bx.width,
+                    Node::Rule(r) => r.width,
+                    Node::Kern(w, _) => *w,
+                    Node::Native(nw) => nw.width,
+                    Node::Whatsit(_, Some(sz)) => sz.width,
+                    Node::Glue(g) => {
+                        let w = fr.glue(g);
+                        // "Handle a glue node for mixed direction"
+                        let set = match fr.g_sign {
+                            GlueSign::Stretching => g.spec.stretch_order == fr.g_order,
+                            GlueSign::Shrinking => g.spec.shrink_order == fr.g_order,
+                            GlueSign::Normal => false,
+                        };
+                        if set {
+                            if matches!(
+                                g.kind,
+                                GlueKind::ALeaders | GlueKind::CLeaders | GlueKind::XLeaders
+                            ) {
+                                let mut g = g.clone();
+                                g.spec.width = w;
+                                self.cur_h += w;
+                                l.push_front(Lr::Fixed(g));
+                                continue;
+                            }
+                            node = Node::Kern(w, KernKind::Normal);
+                        }
+                        w
+                    }
+                    Node::Math(k, w) => {
+                        let (k, w) = (*k, *w);
+                        if k.is_end() {
+                            if lr.last() == Some(&k.end_type()) {
+                                lr.pop();
+                                if n > 0 {
+                                    n -= 1;
+                                    node = Node::Math(k.flipped(), w);
+                                } else {
+                                    node = Node::Kern(w, KernKind::Normal);
+                                    if m > 0 {
+                                        m -= 1;
+                                    } else {
+                                        // "Finish the reversed hlist segment"
+                                        let cur_h = self.cur_h;
+                                        if let Some(Lr::Edge { dir, .. }) = t {
+                                            l.push_back(Lr::Edge {
+                                                dir,
+                                                width: w,
+                                                dist: -cur_h - w,
+                                            });
+                                        }
+                                        return l;
+                                    }
+                                }
+                            } else {
+                                node = Node::Kern(w, KernKind::Normal);
+                            }
+                        } else {
+                            lr.push(k.end_type());
+                            if n > 0 || k.dir() != self.cur_dir {
+                                n += 1;
+                                node = Node::Math(k.flipped(), w);
+                            } else {
+                                node = Node::Kern(w, KernKind::Normal);
+                                m += 1;
+                            }
+                        }
+                        w
+                    }
+                    _ => {
+                        l.push_front(Lr::N(node));
+                        continue;
+                    }
+                };
+                self.cur_h += rule_wd;
+                if matches!(node, Node::Kern(..)) && (rule_wd == 0 || (l.is_empty() && t.is_none())) {
+                    continue;
+                }
+                l.push_front(Lr::N(node));
+            }
+            if t.is_none() && m == 0 && n == 0 {
+                break;
+            }
+            // "manufacture one missing math node"
+            let top = lr.last().copied().unwrap_or(0);
+            q.push_back(Lr::N(Node::Math(MathKind::of_subtype(i64::from(top)), 0)));
+            if top == 0 {
+                // (an empty stack: nothing left to close)
+                q.clear();
+                break;
+            }
+        }
+        if let Some(t) = t.take() {
+            l.push_back(t);
+        }
+        l
+    }
+
+    /// `char_width(f)(char_info(f)(c))`: 0 for a character the font
+    /// does not have.
+    fn char_width(&self, f: FontId, c: u16, fonts: &dyn Fn(FontId) -> FontDef) -> Scaled {
+        let w = |d: &FontDef| d.widths.get(usize::from(c)).copied().flatten().unwrap_or(0);
+        match self.fonts.get(&f) {
+            Some(d) => w(d),
+            None => w(&fonts(f)),
+        }
     }
 
     /// The nodes of an hlist (§620, §622); a discretionary's replacement
@@ -929,11 +1186,14 @@ impl DviWriter {
                     } else {
                         let (save_h, save_v) = (self.dvi_h, self.dvi_v);
                         self.cur_v = fr.base + bx.shift;
-                        let edge = self.cur_h;
+                        let edge = self.cur_h + bx.width;
+                        if self.cur_dir == 1 {
+                            self.cur_h = edge;
+                        }
                         self.box_out(bx, fonts, wh);
                         self.dvi_h = save_h;
                         self.dvi_v = save_v;
-                        self.cur_h = edge + bx.width;
+                        self.cur_h = edge;
                         self.cur_v = fr.base;
                     }
                     None
@@ -977,29 +1237,32 @@ impl DviWriter {
                 | Node::Language { .. }
                 | Node::Penalty(_) => None,
             };
-            if let Some((mut rule_ht, mut rule_dp, rule_wd)) = rule {
-                // §624
-                if rule_ht == RUNNING {
-                    rule_ht = fr.height;
-                }
-                if rule_dp == RUNNING {
-                    rule_dp = fr.depth;
-                }
-                rule_ht += rule_dp;
-                if rule_ht > 0 && rule_wd > 0 {
-                    self.synch_h();
-                    self.cur_v = fr.base + rule_dp;
-                    self.synch_v();
-                    self.dvi_out(op::SET_RULE);
-                    self.dvi_four(rule_ht);
-                    self.dvi_four(rule_wd);
-                    self.cur_v = fr.base;
-                    self.dvi_h += rule_wd;
-                }
-                // §622 `move_past`
-                self.cur_h += rule_wd;
+            if let Some(rule) = rule {
+                self.hrule(rule, fr);
             }
         }
+    }
+
+    /// A rule in an hlist (§624), then past it (§622 `move_past`).
+    fn hrule(&mut self, (mut rule_ht, mut rule_dp, rule_wd): (Scaled, Scaled, Scaled), fr: &Frame) {
+        if rule_ht == RUNNING {
+            rule_ht = fr.height;
+        }
+        if rule_dp == RUNNING {
+            rule_dp = fr.depth;
+        }
+        rule_ht += rule_dp;
+        if rule_ht > 0 && rule_wd > 0 {
+            self.synch_h();
+            self.cur_v = fr.base + rule_dp;
+            self.synch_v();
+            self.dvi_out(op::SET_RULE);
+            self.dvi_four(rule_ht);
+            self.dvi_four(rule_wd);
+            self.cur_v = fr.base;
+            self.dvi_h += rule_wd;
+        }
+        self.cur_h += rule_wd;
     }
 
     /// Glue in an hlist (§625–§628): the rule to output (`fin_rule`), or
@@ -1011,7 +1274,20 @@ impl DviWriter {
         fonts: &dyn Fn(FontId) -> FontDef,
         wh: &mut Whatsits<'_>,
     ) -> Option<(Scaled, Scaled, Scaled)> {
-        let mut rule_wd = fr.glue(g);
+        let rule_wd = fr.glue(g);
+        self.hglue_wd(g, rule_wd, fr, fonts, wh)
+    }
+
+    /// Glue in an hlist set to `rule_wd` (§626–§628, with e-TeX's
+    /// right-to-left leaders).
+    fn hglue_wd(
+        &mut self,
+        g: &GlueNode,
+        mut rule_wd: Scaled,
+        fr: &mut Frame,
+        fonts: &dyn Fn(FontId) -> FontDef,
+        wh: &mut Whatsits<'_>,
+    ) -> Option<(Scaled, Scaled, Scaled)> {
         if matches!(
             g.kind,
             GlueKind::ALeaders | GlueKind::CLeaders | GlueKind::XLeaders
@@ -1023,6 +1299,9 @@ impl DviWriter {
                     let leader_wd = lb.width;
                     if leader_wd > 0 && rule_wd > 0 {
                         rule_wd += 10;
+                        if self.cur_dir == 1 {
+                            self.cur_h -= 10;
+                        }
                         let edge = self.cur_h + rule_wd;
                         let mut lx = 0;
                         // §627
@@ -1050,6 +1329,9 @@ impl DviWriter {
                             let save_v = self.dvi_v;
                             self.synch_h();
                             let save_h = self.dvi_h;
+                            if self.cur_dir == 1 {
+                                self.cur_h += leader_wd;
+                            }
                             let outer = self.doing_leaders;
                             self.doing_leaders = true;
                             self.box_out(lb, fonts, wh);
@@ -1059,7 +1341,7 @@ impl DviWriter {
                             self.cur_v = fr.base;
                             self.cur_h = save_h + leader_wd + lx;
                         }
-                        self.cur_h = edge - 10;
+                        self.cur_h = if self.cur_dir == 1 { edge } else { edge - 10 };
                         return None;
                     }
                 }
@@ -1089,7 +1371,11 @@ impl DviWriter {
                         self.cur_v += bx.height;
                         self.synch_v();
                         let (save_h, save_v) = (self.dvi_h, self.dvi_v);
-                        self.cur_h = left_edge + bx.shift;
+                        self.cur_h = if self.cur_dir == 1 {
+                            left_edge - bx.shift
+                        } else {
+                            left_edge + bx.shift
+                        };
                         self.box_out(bx, fonts, wh);
                         self.dvi_h = save_h;
                         self.dvi_v = save_v;
@@ -1148,11 +1434,15 @@ impl DviWriter {
                 let rule_ht = rule_ht + rule_dp;
                 self.cur_v += rule_ht;
                 if rule_ht > 0 && rule_wd > 0 {
+                    if self.cur_dir == 1 {
+                        self.cur_h -= rule_wd;
+                    }
                     self.synch_h();
                     self.synch_v();
                     self.dvi_out(op::PUT_RULE);
                     self.dvi_four(rule_ht);
                     self.dvi_four(rule_wd);
+                    self.cur_h = left_edge;
                 }
             }
         }
@@ -1201,7 +1491,11 @@ impl DviWriter {
                         }
                         while self.cur_v + leader_ht <= edge {
                             // §637
-                            self.cur_h = fr.left_edge + lb.shift;
+                            self.cur_h = if self.cur_dir == 1 {
+                                fr.left_edge - lb.shift
+                            } else {
+                                fr.left_edge + lb.shift
+                            };
                             self.synch_h();
                             let save_h = self.dvi_h;
                             self.cur_v += lb.height;

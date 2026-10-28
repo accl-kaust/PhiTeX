@@ -577,6 +577,19 @@ impl Run<'_, '_> {
         Ok(())
     }
 
+    /// The space factor the characters so far set, made the list's
+    /// (as XeTeX's `space_factor` is at once) before anything reads it.
+    fn flush_sf(&mut self, md: &crate::build::Mode, sf: &mut i32) {
+        use crate::build::SF_UNREAD;
+        if *sf != SF_UNREAD {
+            let v = self.v;
+            let raws = vec![(0, crate::build::sf_value(v, *sf))];
+            self.chars_eff = crate::build::sf_compose(self.chars_eff, *sf);
+            *sf = SF_UNREAD;
+            self.flush_chars(md.lid, &mut Vec::new(), raws);
+        }
+    }
+
     /// `collect_native` .. `collected`: the characters from `ch` on in
     /// font `f`, made words on the list. True when `cur` holds the token
     /// that ended them (`reswitch`).
@@ -626,6 +639,10 @@ impl Run<'_, '_> {
             }
             if self.next_ck()? {
                 if !matches!(self.cur.cmd, cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN) {
+                    // (the space factor as XeTeX's `adjust_space_factor`
+                    // left it, for what the expansion reads: acmart's
+                    // `\@addpunct` after a run-in head ending in `.`)
+                    self.flush_sf(md, sf);
                     self.x_token();
                     self.ck()?;
                 }
@@ -754,8 +771,40 @@ impl Run<'_, '_> {
     /// `do_locale_linebreaks`: `text` as words on list `lid` (one word
     /// without a `\XeTeXlinebreaklocale`).
     fn locale_words(&mut self, lid: i64, f: i64, nf: &Arc<NativeFont>, text: &[u16], kind: NativeKind) -> R<()> {
-        let w = self.native_word(f, nf, text, kind)?;
-        self.append_node(lid, Node::Native(Box::new(w)));
+        let v = self.v;
+        let loc = self
+            .get(crate::xetex::LINEBREAK_LOCALE_FIELD)?
+            .map(|x| crate::val::str_of(v, x))
+            .unwrap_or_default();
+        if loc.is_empty() || text.len() == 1 {
+            let w = self.native_word(f, nf, text, kind)?;
+            self.append_node(lid, Node::Native(Box::new(w)));
+            return Ok(());
+        }
+        // (ICU's line breaks for the locale: a penalty and the glue
+        // between the parts, the glue unless zero_glue, the penalty
+        // unless zero with glue)
+        let skip = self.glue_param("XeTeXlinebreakskip")?;
+        let use_skip = skip.width != 0 || skip.stretch != 0 || skip.shrink != 0;
+        let pen = self.param("XeTeXlinebreakpenalty")?;
+        let use_penalty = pen != 0 || !use_skip;
+        let mut prev = 0;
+        for offs in crate::xetex::line_breaks(&loc, text) {
+            if offs == 0 {
+                continue;
+            }
+            if prev != 0 {
+                if use_penalty {
+                    self.append_node(lid, Node::Penalty(pen));
+                }
+                if use_skip {
+                    self.append_node(lid, Node::param_glue(crate::xetex::LINEBREAK_SKIP_CODE, skip));
+                }
+            }
+            let w = self.native_word(f, nf, &text[prev..offs], kind)?;
+            self.append_node(lid, Node::Native(Box::new(w)));
+            prev = offs;
+        }
         Ok(())
     }
 

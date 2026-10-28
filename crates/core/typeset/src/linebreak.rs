@@ -11,7 +11,7 @@
 use crate::arith::{INF_BAD, MAX_DIMEN, Scaled, badness, fract};
 use crate::fonts::{FontId, Fonts};
 use crate::glue::{Glue, Order};
-use crate::node::{List, Node, param};
+use crate::node::{List, MathKind, Node, param};
 use crate::pack::{PackParams, Packed, Spec, hpack};
 
 /// `inf_penalty` (§157).
@@ -97,7 +97,8 @@ fn hyphenate_all(
                     rhm: *rhm,
                 };
             }
-            Node::Math(kind, _) => auto_breaking = *kind == crate::node::MathKind::After,
+            // (e-TeX: TeX--XeT's nodes leave it)
+            Node::Math(kind, _) if !kind.is_lr() => auto_breaking = kind.is_end(),
             Node::Glue(_) if auto_breaking => {
                 if let Some(e) = hyphenator.hyphenate(&list, at, lang, fonts) {
                     edits.push(e);
@@ -201,6 +202,9 @@ pub struct LineBreakParams {
     /// `\pdfprotrudechars` (pdfTeX): character protrusion in the breaking
     /// (above 1) and the lines (above 0).
     pub protrude_chars: i32,
+    /// e-TeX's `TeXXeT_en`: the lines get TeX--XeT's nodes where a text
+    /// direction crosses a break (§1517–§1519 of e-TeX).
+    pub texxet: bool,
 }
 
 impl Default for LineBreakParams {
@@ -247,6 +251,7 @@ impl Default for LineBreakParams {
             pack: PackParams::default(),
             adjust_spacing: 0,
             protrude_chars: 0,
+            texxet: false,
         }
     }
 }
@@ -575,7 +580,7 @@ impl Breaker<'_> {
                     None => list.len().checked_sub(1),
                 };
                 match (l, r) {
-                    (Some(l), Some(r)) => find_protchar_right(list, l, r),
+                    (Some(l), Some(r)) => find_protchar_right(list, l, r, self.fonts.xetex()),
                     _ => None,
                 }
             }
@@ -583,8 +588,8 @@ impl Breaker<'_> {
         let left = match l {
             Some(li) => match &list[li] {
                 Node::Disc(d) if !d.post.is_empty() => d.post.first(),
-                Node::Disc(_) => find_protchar_left(list, li + 1, true),
-                _ => find_protchar_left(list, li, true),
+                Node::Disc(_) => find_protchar_left(list, li + 1, true, self.fonts.xetex()),
+                _ => find_protchar_left(list, li, true, self.fonts.xetex()),
             },
             None => None,
         };
@@ -1247,7 +1252,9 @@ pub fn line_break(
                 }
                 Node::Math(kind, w) => {
                     let w = *w;
-                    auto_breaking = *kind == crate::node::MathKind::After;
+                    if !kind.is_lr() {
+                        auto_breaking = kind.is_end();
+                    }
                     b.kern_break(&list, cur, auto_breaking, w);
                 }
                 Node::Penalty(pen) => {
@@ -1353,6 +1360,17 @@ pub fn line_break(
     }
 }
 
+/// e-TeX's "Adjust the LR stack for the `post_line_break` routine".
+fn adjust_lr(lr: &mut Vec<u8>, kind: MathKind) {
+    if kind.is_end() {
+        if lr.last() == Some(&kind.end_type()) {
+            lr.pop();
+        }
+    } else {
+        lr.push(kind.end_type());
+    }
+}
+
 /// `post_line_break(d)` (§877–§890).
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
@@ -1376,6 +1394,9 @@ fn post_line_break(
     let mut front: Vec<Node> = Vec::new();
     let mut lines = Vec::with_capacity(breaks.len());
     let mut last_at = 0usize;
+    // (e-TeX's `LR_ptr` of `post_line_break`: the end subtypes of the
+    // text direction and math nodes open, innermost last)
+    let mut lr: Vec<u8> = Vec::new();
     for (cur_line, (k, &brk)) in (params.prev_graf + 1..).zip(breaks.iter().enumerate()) {
         // §881
         let mut line = spare.pop().unwrap_or_default();
@@ -1457,9 +1478,34 @@ fn post_line_break(
                 }
             }
         }
+        if params.texxet {
+            // e-TeX §1517–§1519: the nodes open at the line's start
+            // reopened, those open at its end closed before \rightskip
+            let begins: Vec<Node> = lr
+                .iter()
+                .map(|&e| Node::Math(MathKind::of_subtype(i64::from(e) - 1), 0))
+                .collect();
+            for n in &line {
+                if let Node::Math(kind, _) = n {
+                    adjust_lr(&mut lr, *kind);
+                }
+            }
+            if !lr.is_empty() {
+                let at = line.len() - 1;
+                let ends: Vec<Node> = lr
+                    .iter()
+                    .rev()
+                    .map(|&e| Node::Math(MathKind::of_subtype(i64::from(e)), 0))
+                    .collect();
+                line.splice(at..at, ends);
+            }
+            if !begins.is_empty() {
+                line.splice(0..0, begins);
+            }
+        }
         // pdfTeX: the left margin's kern
         if protrude {
-            let p = crate::microtype::find_protchar_left(&line, 0, false);
+            let p = crate::microtype::find_protchar_left(&line, 0, false, b.fonts.xetex());
             let (w, ch) = crate::microtype::char_pw(b.fonts, p, true);
             if w != 0
                 && let Some((font, ch)) = ch
@@ -1550,6 +1596,11 @@ fn post_line_break(
                 if !prune {
                     break;
                 }
+                if params.texxet
+                    && let Node::Math(kind, _) = n
+                {
+                    adjust_lr(&mut lr, *kind);
+                }
                 if front.pop().is_none() {
                     it.next();
                     pos += 1;
@@ -1569,7 +1620,7 @@ fn right_margin(line: &mut List, q: usize, pre: bool, fonts: &dyn Fonts) {
     let p = if pre {
         line.get(pt)
     } else {
-        crate::microtype::find_protchar_right(line, 0, pt)
+        crate::microtype::find_protchar_right(line, 0, pt, fonts.xetex())
     };
     let (w, ch) = crate::microtype::char_pw(fonts, p, false);
     if w != 0

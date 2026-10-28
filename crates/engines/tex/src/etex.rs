@@ -1183,10 +1183,9 @@ fn command_mine(r: &mut Run<'_, '_>, md: &Mode) -> R<bool> {
                 // pdfTeX §1130: TeX--XeT's math nodes
                 if r.param("TeXXeTstate")? > 0 {
                     let v = r.v;
-                    let after = chr == END_L || chr == END_R;
                     let node = v.list(vec![
                         v.int(nodes::T_MATH),
-                        v.int(i64::from(after)),
+                        v.int(i64::from(chr)),
                         v.int(0),
                     ]);
                     r.append(md.lid, node);

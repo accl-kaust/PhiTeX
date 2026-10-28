@@ -42,6 +42,15 @@ pub fn pw_of(fonts: &dyn Fonts, font: FontId, ch: u16, left: bool) -> Scaled {
 /// character or a ligature.
 #[must_use]
 pub fn char_pw(fonts: &dyn Fonts, n: Option<&Node>, left: bool) -> (Scaled, Option<(FontId, u16)>) {
+    // XeTeX: a native word's first or last glyph, a glyph node's glyph
+    // (its codes are by glyph)
+    if let Some(Node::Native(w)) = n {
+        let g = if left { w.glyphs.first() } else { w.glyphs.last() };
+        return match g {
+            Some(g) => (pw_of(fonts, w.font, g.gid, left), Some((w.font, g.gid))),
+            None => (0, None),
+        };
+    }
     match n.and_then(char_of) {
         Some((f, c)) => (pw_of(fonts, f, c, left), Some((f, c))),
         None => (0, None),
@@ -73,15 +82,13 @@ fn zero_glue(n: &Node) -> bool {
 /// `cp_skipable`: what a line's margin passes over to its protruding
 /// character.
 #[must_use]
-pub fn cp_skipable(n: &Node) -> bool {
+pub fn cp_skipable(n: &Node, xe: bool) -> bool {
     match n {
-        Node::Ins(_)
-        | Node::Mark(_)
-        | Node::Adjust(_)
-        | Node::Penalty(_)
-        | Node::Language { .. } => true,
-        // (a whatsit but a reference to an image or a form)
-        Node::Whatsit(_, size) => size.is_none(),
+        Node::Ins(_) | Node::Mark(_) | Node::Adjust(_) | Node::Penalty(_) => true,
+        // (a whatsit but a reference to an image or a form; XeTeX's
+        // passes over none)
+        Node::Language { .. } => !xe,
+        Node::Whatsit(_, size) => !xe && size.is_none(),
         Node::Disc(d) => d.pre.is_empty() && d.post.is_empty() && d.replace.is_empty(),
         Node::Math(_, w) => *w == 0,
         Node::Kern(w, k) => *w == 0 || *k == KernKind::Normal,
@@ -95,7 +102,7 @@ pub fn cp_skipable(n: &Node) -> bool {
 /// first node not skipable; with `d`, the discardables at a break
 /// passed first.
 #[must_use]
-pub fn find_protchar_left(list: &[Node], at: usize, d: bool) -> Option<&Node> {
+pub fn find_protchar_left(list: &[Node], at: usize, d: bool, xe: bool) -> Option<&Node> {
     let mut cl: &[Node] = list;
     let mut i = at;
     if i >= cl.len() {
@@ -118,7 +125,7 @@ pub fn find_protchar_left(list: &[Node], at: usize, d: bool) -> Option<&Node> {
             cl = l;
             i = 0;
         }
-        while run && cp_skipable(&cl[i]) {
+        while run && cp_skipable(&cl[i], xe) {
             while i + 1 >= cl.len()
                 && let Some((pl, pi)) = stack.pop()
             {
@@ -142,7 +149,7 @@ pub fn find_protchar_left(list: &[Node], at: usize, d: bool) -> Option<&Node> {
 /// `find_protchar_right(l, r)`: from `list[r]` back to `list[l]`, into
 /// hlists, the first node not skipable.
 #[must_use]
-pub fn find_protchar_right(list: &[Node], l: usize, r: usize) -> Option<&Node> {
+pub fn find_protchar_right(list: &[Node], l: usize, r: usize, xe: bool) -> Option<&Node> {
     if r >= list.len() {
         return None;
     }
@@ -157,7 +164,7 @@ pub fn find_protchar_right(list: &[Node], l: usize, r: usize) -> Option<&Node> {
             l = 0;
             r = b.len() - 1;
         }
-        while run && cp_skipable(&cl[r]) {
+        while run && cp_skipable(&cl[r], xe) {
             while r == l
                 && let Some((pl, ll, rr)) = stack.pop()
             {
@@ -527,11 +534,11 @@ mod tests {
             Node::Kern(0, KernKind::Explicit),
         ];
         assert_eq!(
-            find_protchar_left(&list, 0, true).and_then(char_of),
+            find_protchar_left(&list, 0, true, false).and_then(char_of),
             Some((1, 65))
         );
         assert_eq!(
-            find_protchar_right(&list, 0, 3).and_then(char_of),
+            find_protchar_right(&list, 0, 3, false).and_then(char_of),
             Some((1, 66))
         );
     }

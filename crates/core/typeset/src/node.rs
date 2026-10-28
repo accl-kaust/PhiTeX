@@ -100,13 +100,92 @@ pub struct Disc {
     pub replace: List,
 }
 
-/// Math on or off (§147).
+/// Math on or off (§147), or TeX--XeT's text direction nodes (e-TeX's
+/// math node subtypes `begin_L_code` .. `end_R_code`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MathKind {
     /// `before`.
     Before,
     /// `after`.
     After,
+    /// `begin_M_code`: math resumed at a line's start (TeX--XeT).
+    BeginM,
+    /// `end_M_code`: math cut at a line's end (TeX--XeT).
+    EndM,
+    /// `\beginL` (`begin_L_code`).
+    BeginL,
+    /// `\endL` (`end_L_code`).
+    EndL,
+    /// `\beginR` (`begin_R_code`).
+    BeginR,
+    /// `\endR` (`end_R_code`).
+    EndR,
+}
+
+impl MathKind {
+    /// e-TeX's subtype: 0, 1, 2, 3, 6, 7, 10, 11.
+    #[must_use]
+    pub fn subtype(self) -> u8 {
+        match self {
+            MathKind::Before => 0,
+            MathKind::After => 1,
+            MathKind::BeginM => 2,
+            MathKind::EndM => 3,
+            MathKind::BeginL => 6,
+            MathKind::EndL => 7,
+            MathKind::BeginR => 10,
+            MathKind::EndR => 11,
+        }
+    }
+
+    /// The kind of e-TeX's subtype `s` (`before` for one it has no
+    /// kind for).
+    #[must_use]
+    pub fn of_subtype(s: i64) -> MathKind {
+        match s {
+            1 => MathKind::After,
+            2 => MathKind::BeginM,
+            3 => MathKind::EndM,
+            6 => MathKind::BeginL,
+            7 => MathKind::EndL,
+            10 => MathKind::BeginR,
+            11 => MathKind::EndR,
+            _ => MathKind::Before,
+        }
+    }
+
+    /// A text direction node (`subtype>=L_code`): one that leaves the
+    /// line breaker's `auto_breaking`.
+    #[must_use]
+    pub fn is_lr(self) -> bool {
+        self.subtype() >= 4
+    }
+
+    /// `end_LR`: an end node.
+    #[must_use]
+    pub fn is_end(self) -> bool {
+        self.subtype() & 1 == 1
+    }
+
+    /// `end_LR_type`: the subtype of the end node matching this one.
+    #[must_use]
+    pub fn end_type(self) -> u8 {
+        4 * (self.subtype() / 4) + 3
+    }
+
+    /// `LR_dir`: 1 for right-to-left text, else 0.
+    #[must_use]
+    pub fn dir(self) -> u8 {
+        self.subtype() / 8
+    }
+
+    /// The node one subtype on (`incr(subtype)`: a begin node made the
+    /// matching end node) or back (`decr`), for `reverse`.
+    #[must_use]
+    pub fn flipped(self) -> MathKind {
+        let s = self.subtype();
+        MathKind::of_subtype(i64::from(if s & 1 == 1 { s - 1 } else { s + 1 }))
+    }
 }
 
 /// Glue parameter codes (§224) for [`GlueKind::Param`].

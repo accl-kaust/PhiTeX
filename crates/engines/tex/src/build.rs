@@ -1064,9 +1064,12 @@ impl Run<'_, '_> {
     /// ready.
     pub(crate) fn add_px(&mut self, view: &mut crate::fonts::View, f: u32) -> R<()> {
         let fi = i64::from(f);
-        let codes = |r: &mut Self, m: i32, d: i32| -> R<Box<[i32; 256]>> {
-            let mut a = Box::new([d; 256]);
-            for (c, n) in crate::pdfprim::code_table(r, m, fi)? {
+        // (a native font's codes are by glyph, past 255)
+        let codes = |r: &mut Self, m: i32, d: i32| -> R<Box<[i32]>> {
+            let t = crate::pdfprim::code_table(r, m, fi)?;
+            let n = t.iter().map(|x| usize::from(x.0) + 1).max().unwrap_or(0).max(256);
+            let mut a = vec![d; n].into_boxed_slice();
+            for (c, n) in t {
                 if let Some(x) = a.get_mut(usize::from(c)) {
                     *x = n;
                 }
@@ -1245,6 +1248,7 @@ impl Run<'_, '_> {
         let mut ids = std::collections::BTreeSet::new();
         let mut seen = [false; 256];
         let mut font_was = u32::MAX;
+        let mut has_lr = false;
         let list: List = items
             .into_iter()
             .filter_map(|x| {
@@ -1264,6 +1268,7 @@ impl Run<'_, '_> {
                     }
                     // (no character in it)
                     Node::Glue(g) if g.leader.is_none() => {}
+                    Node::Math(k, _) if k.is_lr() => has_lr = true,
                     Node::Kern(..)
                     | Node::Penalty(_)
                     | Node::Math(..)
@@ -1283,10 +1288,17 @@ impl Run<'_, '_> {
         let mut view = self.view_of(ids)?;
         // (pdfTeX's protrusion and expansion: the fonts' codes and
         // expansion)
-        let adjust_spacing = self.param("pdfadjustspacing")?;
-        let protrude_chars = self.param("pdfprotrudechars")?;
+        // (XeTeX: \XeTeXprotrudechars, no expansion)
+        let (adjust_spacing, protrude_chars) = if self.xe {
+            (0, self.param("XeTeXprotrudechars")?)
+        } else {
+            (self.param("pdfadjustspacing")?, self.param("pdfprotrudechars")?)
+        };
+        view.xe = self.xe;
         if adjust_spacing > 0 || protrude_chars > 0 {
-            for f in view.fonts.ids() {
+            let mut ids = view.fonts.ids();
+            ids.extend(view.natives.keys().copied());
+            for f in ids {
                 self.add_px(&mut view, f)?;
             }
         }
@@ -1343,6 +1355,8 @@ impl Run<'_, '_> {
             pack: self.pack_params(true)?,
             adjust_spacing,
             protrude_chars,
+            // (e-TeX's TeXXeT_en, read where the list has its nodes)
+            texxet: has_lr && self.param("TeXXeTstate")? > 0,
         };
         let patterns = self.patterns()?;
         let mut lc = [0u16; 256];

@@ -241,6 +241,11 @@ pub trait Fonts {
         let _ = (font, ch);
         0
     }
+    /// XeTeX's engine: protrusion does not pass over whatsits (its
+    /// `cp_skipable`).
+    fn xetex(&self) -> bool {
+        false
+    }
     /// `quad(f)`, `\fontdimen6`.
     fn quad(&self, font: FontId) -> Scaled {
         self.param(font, 6)

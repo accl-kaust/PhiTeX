@@ -16,6 +16,8 @@ phitex-pdf = { path = "../../output/pdf" }
 phitex-otf = { path = "../../fonts/otf" }
 phitex-codecs = { path = "../../codecs" }
 libm = "0.2"
+icu_segmenter = { version = "=2.1.0", default-features = false, features = ["compiled_data"] }
+icu_locale_core = "2.1"
 phitex-makeindex = { path = "../../tools/makeindex" }
 phitex-bibtex = { path = "../../tools/bibtex" }
 phitex-biber = { path = "../../tools/biber" }

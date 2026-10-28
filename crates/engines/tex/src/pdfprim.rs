@@ -558,7 +558,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                 _ => Vec::new(),
             };
             let skip = |n: &&Node| {
-                phitex_typeset::microtype::cp_skipable(n)
+                phitex_typeset::microtype::cp_skipable(n, r.xe)
                     || matches!(n, Node::Glue(g) if g.kind == phitex_typeset::node::GlueKind::Param(
                         if left { phitex_typeset::node::param::LEFT_SKIP } else { phitex_typeset::node::param::RIGHT_SKIP }))
             };
@@ -637,10 +637,20 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
         cv::FILE_MOD_DATE => {
             // PDF-BACKEND-GAP: the files the client supplies carry no
             // modification time; pdfTeX prints nothing for a file it
-            // cannot stat
+            // cannot stat. The job's own log exists from the job's start
+            // (TeX opens it before the first line): its date is the
+            // build's clock, as \pdfcreationdate's (hyperxmp's date
+            // under XeTeX, which has no \pdfcreationdate)
             let name = ext_string(r)?;
-            let _ = file_size(r, &name)?;
-            String::new()
+            let job = r
+                .get_loc(crate::fields::cell::JOBNAME)?
+                .map_or_else(|| "texput".to_owned(), |x| str_of(r.v, x));
+            if name == format!("{job}.log") {
+                creation_date(r)?
+            } else {
+                let _ = file_size(r, &name)?;
+                String::new()
+            }
         }
         cv::FILE_SIZE => {
             let name = ext_string(r)?;
@@ -1868,12 +1878,32 @@ pub(crate) fn code_table(r: &mut Run<'_, '_>, m: i32, f: i64) -> R<Vec<(u16, i32
 }
 
 /// `\lpcode` and the other font codes, read (pdfTeX §426).
+/// The character a font code of font `f` is for: XeTeX's
+/// `scan_glyph_number` for a native font (a glyph id: `/name`, `u`
+/// and a character, or a number), else `scan_char_num`.
+fn scan_code_index(r: &mut Run<'_, '_>, f: i64) -> R<i32> {
+    if r.xe
+        && let Some(nf) = r.native_font(f)?
+    {
+        if r.scan_keyword("/")? {
+            let name = r.scan_file_name()?;
+            return Ok(nf.font.map_glyph_to_index(name.as_bytes()));
+        }
+        if r.scan_keyword("u")? {
+            let c = r.scan_char_num()?;
+            return Ok(nf.font.map_char_to_glyph(c));
+        }
+        return r.scan_int();
+    }
+    r.scan_char_num()
+}
+
 pub(crate) fn font_code(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
     let f = r.scan_font_ident()?;
     if m == NO_LIG {
         return Ok(IVal::Int(r.int32(&format!("fcode:nolig:{f}"))?));
     }
-    let c = r.scan_char_num()?;
+    let c = scan_code_index(r, f)?;
     if tabled(m) {
         let t = code_table(r, m, f)?;
         let at = u16::try_from(c)
@@ -1930,7 +1960,7 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
             r.set(&format!("fcode:nolig:{f}"), v.int(1), true);
             return Ok(true);
         }
-        let ch = r.scan_char_num()?;
+        let ch = scan_code_index(r, f)?;
         r.scan_optional_equals()?;
         let n = r.scan_int()?;
         let n = if chr == 4 {

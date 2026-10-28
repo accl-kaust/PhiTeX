@@ -431,7 +431,7 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
         ]),
         Node::Math(k, w) => v.list(vec![
             i(v, T_MATH),
-            i(v, i64::from(*k == MathKind::After)),
+            i(v, i64::from(k.subtype())),
             i(v, i64::from(*w)),
         ]),
         Node::Glue(g) => v.list(vec![
@@ -1071,14 +1071,7 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
             lhm: u8::try_from(g(2)).unwrap_or(0),
             rhm: u8::try_from(g(3)).unwrap_or(0),
         },
-        T_MATH => Node::Math(
-            if g(1) == 0 {
-                MathKind::Before
-            } else {
-                MathKind::After
-            },
-            g(2),
-        ),
+        T_MATH => Node::Math(MathKind::of_subtype(i64::from(g(1))), g(2)),
         T_GLUE => Node::Glue(GlueNode {
             spec: glue_of(v, xs.get(1).copied()),
             kind: glue_kind(i64::from(g(2))),
