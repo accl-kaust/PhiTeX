@@ -1315,18 +1315,6 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             log.run_times.push((n, Duration::from_nanos(run_ns)));
         }
     }
-    // (two sequences met in one id, in this run or another: what it read
-    // or made may be the one taken for the other; the build stops on it
-    // instead of committing)
-    if let Some(id) = eng.values().seq_collision() {
-        drop(cx);
-        give_back(eng, node);
-        return Err(EvalError::SeqCollision {
-            node: Some(n),
-            op: op.name(),
-            id,
-        });
-    }
     match r {
         // (a run that read what has moved since, or one re-asked or taken
         // meanwhile, panicked on inputs no longer current: run again)

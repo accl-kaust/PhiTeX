@@ -7,10 +7,13 @@
 //! nothing running) frees the lists and sequence nodes no root reaches; a
 //! list's slot stays, empty, its index never given again, so an id held
 //! past its collection never names another value. A sequence (the monoid of folds) is a rope
-//! whose id is a function of its elements alone, a polynomial hash modulo
-//! 2^61 - 1 as a 61-bit payload under the sequence tag: two folds of the
-//! same elements made in different shapes are one value, so a reader's
-//! `seen` compares by id.
+//! interned as plain values are, by content: its content hash, a
+//! polynomial hash of its elements modulo 2^61 - 1, is its id's payload,
+//! a node found there verified by its elements (shared subtrees skipped
+//! by id), a different sequence met there probed past (as
+//! [`Values::intern_plain`] does): two folds of the same elements made in
+//! different shapes are one value, two different ones never are, so a
+//! reader's `seen` compares by id.
 
 use std::hash::{BuildHasherDefault, Hasher};
 use std::cell::Cell;
@@ -109,18 +112,26 @@ pub enum Value {
 }
 
 /// A rope node: `left` then `right`, `len` elements; a unit node holds its
-/// one element in `right` with `left` NIL. `pow` is B^len mod P. `h2` is
-/// the sequence's second hash (its elements by [`elem_hash2`], the same
-/// base): the id is the first, a 61-bit hash two sequences can meet in;
-/// one met under another's id is told by this ([`Values::seq_collision`]).
+/// one element in `right` with `left` NIL. `pow` is B^len mod P, `hc` the
+/// content hash (its elements' polynomial): the id's payload where no other
+/// sequence held it first, else a probe's ([`Values::intern_rope`]).
 #[derive(Clone, Copy)]
 struct Rope {
     len: u64,
     pow: u64,
-    h2: u64,
+    hc: u64,
     left: ValueId,
     right: ValueId,
     unit: bool,
+}
+
+/// A sequence slot: a node, or a tombstone where a collected node stood
+/// that a live node's probe chain passes ([`Values::collect`]): a lookup
+/// walks on past it, so a content met again finds its id, never a second.
+#[derive(Clone, Copy)]
+enum SeqSlot {
+    Node(Rope),
+    Tomb,
 }
 
 /// A shard's lock on a cache line of its own.
@@ -247,16 +258,16 @@ pub struct Values {
     /// Sequence nodes by their id's payload, sharded by it; a lookup holds a
     /// shard's read lock for one map get. Balanced on concat so a sequence
     /// of n elements is O(log n) deep.
-    seqs: Box<[Shard<Rope>]>,
+    seqs: Box<[Shard<SeqSlot>]>,
     /// Distinct per store, for caches keyed by ids (`instance`).
     instance: u64,
-    /// The first id two sequences met in, with [`COLLIDED`] set (0: none):
-    /// the id names the first one made, and a reader of it would take it
-    /// for the other ([`Values::seq_collision`]).
-    collided: AtomicU64,
-    /// (test) Every unit sequence made under one id: two sequences meet.
+    /// Sequences that met another's content hash and took a probe's id
+    /// (a true 61-bit collision).
+    probed: AtomicU64,
+    /// (test) Every element's hash one: every unit sequence's content hash
+    /// meets every other's.
     #[cfg(test)]
-    one_id: std::sync::atomic::AtomicBool,
+    same_hash: std::sync::atomic::AtomicBool,
     /// Its plain values' first payload (`PLAIN_SPAN` times its instance):
     /// the stores of one process give their plain values distinct ids, so
     /// a cache of the process keyed by ids (a font's file, a map's text)
@@ -297,14 +308,12 @@ fn elem_hash(x: ValueId) -> u64 {
     if h == 0 { 1 } else { h }
 }
 
-/// An element's second hash ([`Rope::h2`]): another seed, never zero.
-fn elem_hash2(x: ValueId) -> u64 {
-    let h = hash_words(0x2545_f491_4f6c_dd1d, &[x.0]) % P;
-    if h == 0 { 1 } else { h }
+/// Probe `k` of content hash `hc`: the payload tried `k`-th (0: the hash
+/// itself), never 0 (NIL's).
+fn seq_probe(hc: u64, k: u64) -> u64 {
+    let p = if k == 0 { hc } else { hash_words(hc, &[k]) % P };
+    if p == 0 { seq_probe(hc, k + 1) } else { p }
 }
-
-/// Set in [`Values::collided`] beside the id: an id of 0 is one too.
-const COLLIDED: u64 = 1 << 63;
 
 /// Weight-balanced with weights len + 1 and ratio 3.
 fn balanced(x: u64, y: u64) -> bool {
@@ -342,9 +351,9 @@ impl Values {
             gone_ropes: Lock::new(FxHashSet::default()),
             instance,
             base: (instance % (PAYLOAD / PLAIN_SPAN)) * PLAIN_SPAN,
-            collided: AtomicU64::new(0),
+            probed: AtomicU64::new(0),
             #[cfg(test)]
-            one_id: std::sync::atomic::AtomicBool::new(false),
+            same_hash: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -510,7 +519,7 @@ impl Values {
                 bytes += usize::try_from(w).unwrap_or(0);
             }
         }
-        let seqs = self.seqs.iter().map(|s| s.0.read().len()).sum();
+        let seqs = self.seqs.iter().map(|s| s.0.read().values().filter(|x| matches!(x, SeqSlot::Node(_))).count()).sum();
         (count, bytes, seqs)
     }
 
@@ -520,7 +529,9 @@ impl Values {
     /// reached from them. Strings and big integers stay (names, a small
     /// share of the payload); a freed list's slot stays, empty, its id
     /// never given again; a sequence node is made again by the same
-    /// elements under the same id. The hash index is made anew from what
+    /// elements under the same id, a collected node's slot that a live
+    /// node's probe chain passes kept as a tombstone ([`SeqSlot::Tomb`]) so
+    /// that chain stays whole. The hash index is made anew from what
     /// stays, its probe chains whole.
     #[allow(unsafe_code)]
     pub(crate) fn collect(&self, roots: impl IntoIterator<Item = ValueId>) -> Collected {
@@ -542,7 +553,7 @@ impl Values {
                     if !rope_mark.insert(p) {
                         continue;
                     }
-                    if let Some(r) = self.seqs[shard_of(p)].0.read().get(&p).copied() {
+                    if let Some(SeqSlot::Node(r)) = self.seqs[shard_of(p)].0.read().get(&p).copied() {
                         if !r.unit {
                             stack.push(r.left);
                         }
@@ -609,18 +620,41 @@ impl Values {
         } else {
             self.graveyard.write().extend(taken);
         }
+        // (the slots a live node's probe chain passes, its content hash's
+        // probes before its own: kept as tombstones where their nodes go)
+        let mut passed: FxHashSet<u64> = FxHashSet::default();
+        for sh in &*self.seqs {
+            for (&p, x) in sh.0.read().iter() {
+                if let SeqSlot::Node(r) = x
+                    && p != r.hc
+                    && rope_mark.contains(&p)
+                {
+                    let mut k = 0;
+                    while seq_probe(r.hc, k) != p {
+                        passed.insert(seq_probe(r.hc, k));
+                        k += 1;
+                    }
+                }
+            }
+        }
         for sh in &*self.seqs {
             let mut m = sh.0.write();
-            let k = m.len();
+            let k = m.iter().filter(|(_, x)| matches!(x, SeqSlot::Node(_))).count();
             #[cfg(feature = "observe")]
             {
                 let mut gone = self.gone_ropes.write();
                 gone.extend(m.keys().filter(|p| !rope_mark.contains(p)).copied());
             }
-            m.retain(|p, _| rope_mark.contains(p));
+            m.retain(|p, _| rope_mark.contains(p) || passed.contains(p));
+            for (p, x) in m.iter_mut() {
+                if !rope_mark.contains(p) {
+                    *x = SeqSlot::Tomb;
+                }
+            }
             m.shrink_to_fit();
-            out.ropes += k - m.len();
-            kept += m.len() as u64 * Self::ROPE_BYTES;
+            let live = m.iter().filter(|(_, x)| matches!(x, SeqSlot::Node(_))).count();
+            out.ropes += k - live;
+            kept += live as u64 * Self::ROPE_BYTES;
         }
         for sh in &*self.plain_ix {
             sh.0.write().clear();
@@ -848,7 +882,10 @@ impl Values {
             return None;
         }
         let p = id.payload();
-        let r = self.seqs[shard_of(p)].0.read().get(&p).copied();
+        let r = match self.seqs[shard_of(p)].0.read().get(&p) {
+            Some(SeqSlot::Node(r)) => Some(*r),
+            _ => None,
+        };
         #[cfg(feature = "observe")]
         assert!(
             r.is_some() || !self.gone_ropes.read().contains(&p),
@@ -857,58 +894,133 @@ impl Values {
         r
     }
 
-    /// Node `r` under id `payload`, if none is; one there of another
-    /// sequence (its length or second hash not `r`'s) is a collision, kept
-    /// for [`Values::seq_collision`]: the id goes on naming the first.
-    fn insert_rope(&self, payload: u64, r: Rope) {
-        match self.seqs[shard_of(payload)].0.write().entry(payload) {
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(r);
-                if self.counting.load(Ordering::Relaxed) {
-                    self.bytes[shard_of(payload) % BYTE_SHARDS].0.fetch_add(Self::ROPE_BYTES, Ordering::Relaxed);
+    /// The id of the sequence node `r`: its content hash's slot, or the
+    /// first probe's past slots that hold other sequences (and tombstones,
+    /// [`SeqSlot::Tomb`]); a node there of the same elements (the same
+    /// children, else verified element by element, [`Values::seq_eq`]) is
+    /// the sequence's id already, whatever its shape.
+    fn intern_rope(&self, r: Rope) -> ValueId {
+        let mut k = 0;
+        loop {
+            let p = seq_probe(r.hc, k);
+            let shard = &self.seqs[shard_of(p)].0;
+            let hit = shard.read().get(&p).copied();
+            let hit = match hit {
+                Some(x) => Some(x),
+                None => {
+                    // (an empty slot: the content is not in the store; it is
+                    // made here, unless another thread made a node here
+                    // since, which is looked at as a hit)
+                    match shard.write().entry(p) {
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(SeqSlot::Node(r));
+                            if self.counting.load(Ordering::Relaxed) {
+                                self.bytes[shard_of(p) % BYTE_SHARDS].0.fetch_add(Self::ROPE_BYTES, Ordering::Relaxed);
+                            }
+                            if k > 0 {
+                                self.probed.fetch_add(1, Ordering::Relaxed);
+                            }
+                            return ValueId::make(T_SEQ, p);
+                        }
+                        std::collections::hash_map::Entry::Occupied(e) => Some(*e.get()),
+                    }
                 }
+            };
+            if let Some(SeqSlot::Node(o)) = hit
+                && self.same_rope(p, &o, &r)
+            {
+                return ValueId::make(T_SEQ, p);
             }
-            std::collections::hash_map::Entry::Occupied(e) => {
-                let o = e.get();
-                if o.len != r.len || o.h2 != r.h2 {
-                    let _ = self.collided.compare_exchange(0, payload | COLLIDED, Ordering::SeqCst, Ordering::SeqCst);
+            k += 1;
+        }
+    }
+
+    /// Whether node `o` (at payload `p`) has the elements of `r`: the same
+    /// content hash and length first, then the same children (or element),
+    /// else element by element.
+    fn same_rope(&self, p: u64, o: &Rope, r: &Rope) -> bool {
+        if o.hc != r.hc || o.len != r.len || o.unit != r.unit {
+            return false;
+        }
+        if o.unit {
+            return o.right == r.right;
+        }
+        if o.left == r.left && o.right == r.right {
+            return true;
+        }
+        self.seq_eq(&[ValueId::make(T_SEQ, p)], &[r.left, r.right])
+    }
+
+    /// Whether the elements of the sequences `a` (in order) are those of
+    /// `b`: ids equal are equal sequences (every id is verified when made),
+    /// so a subtree both share is skipped whole; a node unlike the other
+    /// side's is opened, the longer first.
+    fn seq_eq(&self, a: &[ValueId], b: &[ValueId]) -> bool {
+        let mut x: Vec<ValueId> = a.iter().rev().copied().collect();
+        let mut y: Vec<ValueId> = b.iter().rev().copied().collect();
+        loop {
+            let (p, q) = match (x.last().copied(), y.last().copied()) {
+                (None, None) => return true,
+                (Some(p), Some(q)) => (p, q),
+                _ => return false,
+            };
+            if p == q {
+                x.pop();
+                y.pop();
+                continue;
+            }
+            let (pr, qr) = (self.rope_of(p), self.rope_of(q));
+            if pr.unit && qr.unit {
+                if pr.right != qr.right {
+                    return false;
                 }
+                x.pop();
+                y.pop();
+            } else if !pr.unit && (qr.unit || pr.len >= qr.len) {
+                x.pop();
+                x.push(pr.right);
+                x.push(pr.left);
+            } else {
+                y.pop();
+                y.push(qr.right);
+                y.push(qr.left);
             }
         }
     }
 
-    /// The id two different sequences met in, if any has since the store
-    /// began: the engine stops an evaluation on it
-    /// (`EvalError::SeqCollision`), as a reader of the id may have taken
-    /// the one for the other.
-    pub fn seq_collision(&self) -> Option<u64> {
-        let c = self.collided.load(Ordering::Relaxed);
-        (c != 0).then_some(c & !COLLIDED)
+    /// The sequences made under a probe's id since the store began: two
+    /// contents met in one content hash (61 bits) and each kept its own id.
+    pub fn seq_probed(&self) -> u64 {
+        self.probed.load(Ordering::Relaxed)
     }
 
-    /// (test) Makes every unit sequence from now under one id.
+    /// (test) Every element's hash one from now: unit sequences of
+    /// different elements meet in one content hash, and so do sequences of
+    /// their permutations.
     #[cfg(test)]
-    pub(crate) fn force_one_seq_id(&self) {
-        self.one_id.store(true, Ordering::Relaxed);
+    pub(crate) fn force_one_elem_hash(&self) {
+        self.same_hash.store(true, Ordering::Relaxed);
+    }
+
+    /// An element's hash in this store (see [`Values::force_one_elem_hash`]).
+    fn elem_hash_of(&self, x: ValueId) -> u64 {
+        #[cfg(test)]
+        if self.same_hash.load(Ordering::Relaxed) {
+            return 1;
+        }
+        elem_hash(x)
     }
 
     /// The one-element sequence.
     pub fn seq_unit(&self, x: ValueId) -> ValueId {
-        let h = elem_hash(x);
-        #[cfg(test)]
-        let h = if self.one_id.load(Ordering::Relaxed) { 1 } else { h };
-        self.insert_rope(
-            h,
-            Rope {
-                len: 1,
-                pow: B,
-                h2: elem_hash2(x),
-                left: ValueId::NIL,
-                right: x,
-                unit: true,
-            },
-        );
-        ValueId::make(T_SEQ, h)
+        self.intern_rope(Rope {
+            len: 1,
+            pow: B,
+            hc: self.elem_hash_of(x),
+            left: ValueId::NIL,
+            right: x,
+            unit: true,
+        })
     }
 
     /// A sequence: a non-sequence is the unit sequence of itself.
@@ -916,7 +1028,8 @@ impl Values {
         if x.tag() == T_SEQ { x } else { self.seq_unit(x) }
     }
 
-    /// `a` then `b`; the id depends on the elements only.
+    /// `a` then `b`; the id is the elements' (one per content, whatever the
+    /// shape).
     pub fn seq_concat(&self, a: ValueId, b: ValueId) -> ValueId {
         let (a, b) = (self.as_seq(a), self.as_seq(b));
         if a == ValueId::NIL {
@@ -933,7 +1046,7 @@ impl Values {
         self.rope(s).unwrap_or(Rope {
             len: 1,
             pow: B,
-            h2: elem_hash2(s),
+            hc: self.elem_hash_of(s),
             left: ValueId::NIL,
             right: s,
             unit: true,
@@ -942,19 +1055,14 @@ impl Values {
 
     /// The node `l` then `r`.
     fn node(&self, l: ValueId, lr: &Rope, r: ValueId, rr: &Rope) -> ValueId {
-        let h = addmod(mulmod(l.payload(), rr.pow), r.payload());
-        self.insert_rope(
-            h,
-            Rope {
-                len: lr.len + rr.len,
-                pow: mulmod(lr.pow, rr.pow),
-                h2: addmod(mulmod(lr.h2, rr.pow), rr.h2),
-                left: l,
-                right: r,
-                unit: false,
-            },
-        );
-        ValueId::make(T_SEQ, h)
+        self.intern_rope(Rope {
+            len: lr.len + rr.len,
+            pow: mulmod(lr.pow, rr.pow),
+            hc: addmod(mulmod(lr.hc, rr.pow), rr.hc),
+            left: l,
+            right: r,
+            unit: false,
+        })
     }
 
     fn node2(&self, l: ValueId, r: ValueId) -> ValueId {
@@ -1226,10 +1334,10 @@ pub fn hash_bytes(seed: u64, b: &[u8]) -> u64 {
 mod tests {
     use std::sync::Arc;
 
-    use crate::{Ctx, Engine, EvalError, Operation, Stop, ValueId};
+    use crate::{Ctx, Engine, Operation, Stop, ValueId};
 
-    /// `[a, b]`: the sequences of a and of b, every unit sequence under one
-    /// id where the store was told so.
+    /// `[a, b]`: the sequence of a then b (every element's hash one where
+    /// the store was told so).
     struct Units;
 
     impl Operation for Units {
@@ -1263,20 +1371,31 @@ mod tests {
         }
     }
 
-    /// One content through different concatenations (left-deep,
-    /// right-deep, halves, units and NIL in between, nested sequences as
-    /// elements) is one id and one second hash: the second hash composes
-    /// as the first, and no node of it is a collision.
+    /// The same elements through different concatenations (left-deep,
+    /// right-deep, halves, thirds, units and NIL in between, a nested
+    /// sequence as an element) are one id; the content hash composes as the
+    /// elements' polynomial; nothing probed.
     #[test]
-    fn a_sequence_is_one_id_and_second_hash_whatever_its_tree() {
+    fn one_content_in_any_concat_shape_is_one_id() {
         let v = super::Values::new();
         let xs: Vec<ValueId> = (0..200).map(|i| v.int(i * 7 - 300)).collect();
         let inner = xs[..5].iter().fold(ValueId::NIL, |s, &x| v.seq_concat(s, x));
         let mut xs = xs;
         xs.push(inner);
-        // (an element by its unit: a sequence as an element is not spliced)
-        let left = xs.iter().fold(ValueId::NIL, |s, &x| v.seq_concat(s, v.seq_unit(x)));
-        let right = xs.iter().rev().fold(ValueId::NIL, |s, &x| v.seq_concat(v.seq_unit(x), s));
+        let shapes = shapes(&v, &xs);
+        for &s in &shapes[1..] {
+            assert_eq!(s, shapes[0]);
+        }
+        assert_eq!(v.seq_to_vec(shapes[0]), xs);
+        let hc = v.rope(shapes[0]).map(|r| (r.len, r.hc));
+        let want = xs.iter().fold(0, |h, &x| super::addmod(super::mulmod(h, super::B), super::elem_hash(x)));
+        assert_eq!(hc, Some((201, want)));
+        assert_eq!(v.seq_probed(), 0);
+    }
+
+    /// The same elements made in four shapes: left-deep, right-deep, by
+    /// halves (NIL between), by thirds.
+    fn shapes(v: &super::Values, xs: &[ValueId]) -> Vec<ValueId> {
         fn halves(v: &super::Values, xs: &[ValueId]) -> ValueId {
             match xs.len() {
                 0 => ValueId::NIL,
@@ -1287,64 +1406,98 @@ mod tests {
                 }
             }
         }
-        let mid = halves(&v, &xs);
+        let left = xs.iter().fold(ValueId::NIL, |s, &x| v.seq_concat(s, v.seq_unit(x)));
+        let right = xs.iter().rev().fold(ValueId::NIL, |s, &x| v.seq_concat(v.seq_unit(x), s));
+        let t = xs.len() / 3;
         let thirds = {
-            let (a, b, c) = (halves(&v, &xs[..70]), halves(&v, &xs[70..71]), halves(&v, &xs[71..]));
+            let (a, b, c) = (halves(v, &xs[..t]), halves(v, &xs[t..t + 1]), halves(v, &xs[t + 1..]));
             v.seq_concat(a, v.seq_concat(b, c))
         };
-        for s in [right, mid, thirds] {
-            assert_eq!(s, left);
-            assert_eq!(v.seq_to_vec(s), xs);
-        }
-        let h2 = |s: ValueId| v.rope(s).map(|r| (r.len, r.h2));
-        assert_eq!(h2(left), Some((201, h2(right).unwrap().1)));
-        assert_eq!(h2(left), h2(mid));
-        assert_eq!(h2(left), h2(thirds));
-        // (the second hash is the elements' polynomial: as made from the
-        // elements one by one)
-        let want = xs.iter().fold(0, |h, &x| super::addmod(super::mulmod(h, super::B), super::elem_hash2(x)));
-        assert_eq!(h2(left).unwrap().1, want);
-        assert_eq!(v.seq_collision(), None);
+        vec![left, right, halves(v, xs), thirds]
     }
 
-    /// Two sequences under one id (forced: every unit sequence's id one)
-    /// stop the evaluation with the run that made them named, at -j1 and
-    /// -j4; a store without the collision builds the same nodes.
+    /// Every element's hash forced to one: unit sequences of different
+    /// elements, and a sequence and its permutations, meet in one content
+    /// hash. Each content keeps an id of its own (probed past the first),
+    /// its elements the right ones; the same content in other shapes is
+    /// still one id (verified element by element); an evaluation at -j1
+    /// and -j4 makes them and ends well.
     #[test]
-    fn sequences_that_meet_in_one_id_stop_the_build() {
+    fn contents_that_meet_in_one_hash_keep_their_own_ids() {
+        let v = super::Values::new();
+        v.force_one_elem_hash();
+        let xs: Vec<ValueId> = (1..=6).map(|i| v.int(i)).collect();
+        let units: Vec<ValueId> = xs.iter().map(|&x| v.seq_unit(x)).collect();
+        for (i, &u) in units.iter().enumerate() {
+            assert_eq!(v.seq_to_vec(u), vec![xs[i]]);
+            for &w in &units[..i] {
+                assert_ne!(u, w);
+            }
+            assert_eq!(v.seq_unit(xs[i]), u, "made again: the same id");
+        }
+        let ab = v.seq_concat(units[0], units[1]);
+        let ba = v.seq_concat(units[1], units[0]);
+        assert_ne!(ab, ba);
+        assert_eq!(v.seq_to_vec(ab), vec![xs[0], xs[1]]);
+        assert_eq!(v.seq_to_vec(ba), vec![xs[1], xs[0]]);
+        assert_eq!(v.rope(ab).map(|r| r.hc), v.rope(ba).map(|r| r.hc), "one content hash");
+        // (permutations of 40 elements over 6 values, each in four shapes)
+        let mut seen: Vec<(Vec<ValueId>, ValueId)> = Vec::new();
+        for k in 0..8u64 {
+            let ys: Vec<ValueId> = (0..40u64).map(|i| xs[usize::try_from((i * (k + 1) + k * k) % 6).unwrap()]).collect();
+            let sh = shapes(&v, &ys);
+            for &s in &sh[1..] {
+                assert_eq!(s, sh[0], "permutation {k}: one id whatever the shape");
+            }
+            assert_eq!(v.seq_to_vec(sh[0]), ys);
+            for (zs, id) in &seen {
+                assert_eq!(*zs == ys, *id == sh[0], "permutation {k}: ids equal as contents are");
+            }
+            seen.push((ys, sh[0]));
+        }
+        assert!(v.seq_probed() > 0);
         for j in [1, 4] {
             let e = Engine::new();
             let v = e.values();
+            v.force_one_elem_hash();
             let units = e.register(Arc::new(Units));
             let u = e.new_unit();
             e.push(u, units, vec![v.int(1), v.int(2)]);
-            assert!(e.evaluate(j).is_ok());
-            assert_eq!(v.seq_collision(), None);
-            let e = Engine::new();
-            let v = e.values();
-            let units = e.register(Arc::new(Units));
-            let u = e.new_unit();
-            let n = e.push(u, units, vec![v.int(1), v.int(2)]);
-            v.force_one_seq_id();
-            match e.evaluate(j) {
-                Err(EvalError::SeqCollision { node: Some(m), op: "units", id: 1 }) => assert_eq!(m, n),
-                r => panic!("-j{j}: {r:?}"),
-            }
-            assert_eq!(v.seq_collision(), Some(1));
+            e.push(u, units, vec![v.int(2), v.int(1)]);
+            assert!(e.evaluate(j).is_ok(), "-j{j}");
+            let (a, b) = (v.seq_unit(v.int(1)), v.seq_unit(v.int(2)));
+            assert_ne!(a, b);
+            assert_eq!(v.seq_to_vec(v.seq_concat(a, b)), vec![v.int(1), v.int(2)]);
         }
     }
 
-    /// Two sequences a client makes under one id between runs stop the
-    /// next evaluation, no node named.
+    /// A content whose id is a probe's, its content hash's slot held by
+    /// another that is collected: the slot stays a tombstone, and the
+    /// content made again walks past it to its id, one id still; the
+    /// collected content made again takes a new one, not the tombstone.
     #[test]
-    fn sequences_a_client_makes_in_one_id_stop_the_build() {
-        let e = Engine::new();
-        let v = e.values();
-        v.force_one_seq_id();
-        let (a, b) = (v.seq_unit(v.int(1)), v.seq_unit(v.int(2)));
-        assert_eq!(a, b, "the forced id");
-        let r = e.evaluate(2);
-        assert!(matches!(r, Err(EvalError::SeqCollision { node: None, id: 1, .. })), "{r:?}");
-        assert!(r.is_err_and(|x| x.to_string() == "two sequences met in one id 0x1"));
+    fn a_collected_slot_a_probe_passed_keeps_one_id() {
+        let v = super::Values::new();
+        v.force_one_elem_hash();
+        let (x1, x2) = (v.int(1), v.int(2));
+        let a = v.seq_unit(x1);
+        let b = v.seq_unit(x2);
+        assert_ne!(a, b);
+        assert_eq!(a.payload(), 1, "the content hash's slot");
+        let c = v.collect([b]);
+        assert_eq!(c.ropes, 1, "a collected");
+        assert!(v.rope(a).is_none());
+        assert_eq!(v.seq_unit(x2), b, "made again across the tombstone: its id");
+        assert_eq!(v.seq_to_vec(b), vec![x2]);
+        let a2 = v.seq_unit(x1);
+        assert_ne!(a2, a, "the tombstone is not taken");
+        assert_ne!(a2, b);
+        assert_eq!(v.seq_to_vec(a2), vec![x1]);
+        // (b collected too: a2's chain passes both slots, both tombstones,
+        // and a2 made again is a2)
+        let c = v.collect([a2]);
+        assert_eq!(c.ropes, 1, "b collected");
+        assert_eq!(v.footprint().2, 1);
+        assert_eq!(v.seq_unit(x1), a2);
     }
 }
