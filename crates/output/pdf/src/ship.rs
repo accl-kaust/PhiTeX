@@ -422,6 +422,9 @@ impl PdfState {
         };
         self.set_font(d, src);
         self.print(b"( )Tj");
+        if let Some(t) = self.tap.sink.as_mut() {
+            t.none(1);
+        }
     }
 
     /// The horizontal offset from where the `TJ` string's last glyph
@@ -559,6 +562,9 @@ impl PdfState {
         if let Some(d) = self.read_dummy_font(src) {
             self.begin_string(d, src);
             self.print(b" ");
+            if let Some(t) = self.tap.sink.as_mut() {
+                t.none(1);
+            }
             self.adv_char_width(d, 32);
             self.end_string_nl();
         } else {
@@ -589,6 +595,9 @@ impl PdfState {
 
     /// The bytes of `pdf_print_char` (the character already marked).
     fn print_char_bytes(&mut self, c: u8) {
+        if self.tap.on() {
+            self.tap_code(c);
+        }
         if c <= 32 || c == 92 || c == 40 || c == 41 || c > 127 {
             self.print(&[
                 b'\\',
@@ -706,6 +715,9 @@ impl PdfState {
             }
             LiteralMode::DirectPage => self.end_text(),
             _ => self.end_string_nl(),
+        }
+        if let Some(t) = self.tap.sink.as_mut() {
+            t.literal(body);
         }
         self.print(body);
         self.pdf_out(b'\n');
@@ -990,13 +1002,26 @@ impl PdfState {
             i += 1;
             let rule = match p {
                 Node::Char { font, ch } => {
-                    self.char_out(*font, *ch, src);
-                    i = self.char_run(*font, list, i, fr, src);
+                    if self.tap.on() {
+                        // (one by one, each code told as its node's)
+                        self.tap.node(Some((*font, *ch)), &[]);
+                        self.char_out(*font, *ch, src);
+                        self.tap.node(None, &[]);
+                    } else {
+                        self.char_out(*font, *ch, src);
+                        i = self.char_run(*font, list, i, fr, src);
+                    }
                     None
                 }
                 Node::Lig(l) => {
-                    self.char_out(l.font, l.ch, src);
-                    i = self.char_run(l.font, list, i, fr, src);
+                    if self.tap.on() {
+                        self.tap.node(Some((l.font, l.ch)), &l.original);
+                        self.char_out(l.font, l.ch, src);
+                        self.tap.node(None, &[]);
+                    } else {
+                        self.char_out(l.font, l.ch, src);
+                        i = self.char_run(l.font, list, i, fr, src);
+                    }
                     None
                 }
                 Node::Box(bx) => {
@@ -1419,6 +1444,9 @@ impl PdfState {
         self.print(b"/Fm");
         self.print_int(self.objs[n].info);
         self.print_ln(b" Do");
+        if let Some(t) = self.tap.sink.as_mut() {
+            t.xobject();
+        }
         self.print_ln(b"Q");
     }
 

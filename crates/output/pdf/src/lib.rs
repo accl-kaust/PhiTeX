@@ -142,6 +142,8 @@ mod replay;
 pub use replay::{PageRecord, Part};
 mod ship;
 pub mod t1;
+mod tap;
+pub use tap::GlyphTap;
 mod tounicode;
 mod ttf;
 mod vf;
@@ -892,6 +894,8 @@ pub struct PdfState {
     last_byte: u8,
     /// A page's walk being recorded ([`PdfState::ship_recorded`]).
     rec: Option<Box<replay::Recording>>,
+    /// The glyph tap ([`PdfState::set_tap`]): none unless one is set.
+    tap: tap::Tap,
     /// Object streams left to the caller to compress
     /// ([`PdfState::defer_streams`]), and the parts so far.
     defer: bool,
@@ -1008,6 +1012,7 @@ impl PdfState {
             vf_cur_s: 0,
             last_byte: 0,
             rec: None,
+            tap: tap::Tap::default(),
             defer: false,
             pending: Vec::new(),
         }

@@ -1446,3 +1446,41 @@ fn latexmk_minted_j1() {
 fn latexmk_minted_j8() {
     latexmk_minted(8);
 }
+
+/// Glyph origins of `pdflatex` on `pdfdocs/envs.tex` (an abstract,
+/// sections, lists, a theorem, a figure, a quotation; its paragraphs
+/// repeat their sentences): every page's codes have one each, every word
+/// of the text maps to its bytes, the same at -j1 and -j8, the PDF still
+/// pdfTeX's; after a word's edit, a cold build's answers
+/// (docs/note-origins.md).
+#[test]
+fn latex_glyph_origins() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("envs.tex"));
+    let want = std::fs::read(common::fixtures().join("latex/pdf/envs.pdf")).expect("the oracle");
+    let build = |text: &str, threads: usize| {
+        let opts = Options {
+            threads: Some(threads),
+            origins: true,
+            ..pdf_opts("envs", &dir)
+        };
+        common::build(opts, Some(&prelude(true)), text)
+    };
+    let mut b = build(&src, 1);
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("envs with origins: pdf {d}");
+    }
+    let f = common::origin_failures(&b, &src, "envs.tex");
+    assert!(f.is_empty(), "origins:\n{}", f.join("\n"));
+    let b8 = build(&src, 8);
+    assert_eq!(b8.all_page_origins(), b.all_page_origins(), "-j8's origins are -j1's");
+    let _ = b.origins_changed();
+    let new = quack(&src, "Item 3 of the list: the quick ");
+    b.edit(&new);
+    let (changed, _) = b.origins_changed();
+    eprintln!("envs: origins changed on pages {changed:?} of {}", b.pages().len());
+    let cold = build(&new, 1);
+    assert_eq!(b.all_page_origins(), cold.all_page_origins(), "the edit's origins are a cold build's");
+    let f = common::origin_failures(&b, &new, "envs.tex");
+    assert!(f.is_empty(), "origins after the edit:\n{}", f.join("\n"));
+}

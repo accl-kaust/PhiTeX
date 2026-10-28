@@ -234,8 +234,8 @@ struct Opts {
     copy_pdf: Option<String>,
     #[arg(long, global = true, hide = true)]
     no_copy_pdf: bool,
-    /// No <job>.synctex.gz (the default until PhiTeX writes SyncTeX; a
-    /// `phitex.toml`'s `synctex = true` asks for it, with a note)
+    /// No <job>.synctex.gz (the default; a `phitex.toml`'s
+    /// `synctex = true` asks for it)
     #[arg(long, global = true)]
     no_synctex: bool,
 }
@@ -499,8 +499,8 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         engine,
         output_dir,
         copy_pdf,
-        // (off unless asked for: PhiTeX writes no SyncTeX yet, and a
-        // build that asks for it says so)
+        // (off unless asked for: the pages' glyph origins it is made
+        // from cost the build a little)
         synctex: o.synctex.or(cfg.synctex).unwrap_or(false),
         shell_escape: o.shell_escape || cfg.shell_escape.unwrap_or(false),
         editor: o.editor.clone().or(cfg.editor),
@@ -544,6 +544,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         fixpoint: true,
         cache_limit: t.cache_limit,
         edit_diagnostics: o.diagnostics || o.view || o.lsp,
+        origins: o.view || o.lsp,
     })
 }
 

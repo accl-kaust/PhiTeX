@@ -23,9 +23,12 @@
 //!   double-click's or an error's place: the editor opens there), and the
 //!   editor's buffer: `set_file {file, text}` and `edit {file, start, end,
 //!   text}` (UTF-16 offsets) become the Build's new versions of the file,
-//!   built as an edit. `origins` would answer a page's characters with
-//!   their source lines (what a double-click finds and forward search
-//!   highlights): empty, no engine records them yet. The diff ops
+//!   built as an edit. `origins` answers a page's characters with the
+//!   source bytes each came from (what a double-click finds and forward
+//!   search highlights; docs/note-origins.md): `{files, files_from, n,
+//!   file, start, end, synth, x, y}`, each array base64 of its
+//!   little-endian words (`u32`, `f32`), `files` the names from the
+//!   client's `files_from` on (the table only grows). The diff ops
 //!   (`diff_*`) say they are not there.
 //! - **Forward search.** `{"event":"reveal","page":K,"text":…,"texts":[…],
 //!   "file":…,"line":L}`: the editor's cursor (`phitex watch --lsp`'s
@@ -95,6 +98,17 @@ pub struct Built {
     /// (none: no change, a cold build): the viewer adds its drawing to it
     /// for the ⚡ chip.
     pub since_ms: Option<f64>,
+    /// The pages' glyph origins and the files they name (none: not
+    /// kept, `phitex_tex::Build::page_origins`).
+    pub origins: Option<Origins>,
+}
+
+/// The pages' glyph origins (`phitex_tex::Build::all_page_origins`) and
+/// the files they name (`origin_files`).
+#[derive(Clone, Default)]
+pub struct Origins {
+    pub files: Vec<String>,
+    pub pages: Vec<Option<Arc<phitex_tex::PageOrigins>>>,
 }
 
 /// What the browsers ask the watch for.
@@ -165,6 +179,7 @@ struct Pages {
     hashes: Vec<u64>,
     history: i32,
     ms: f64,
+    origins: Option<Origins>,
 }
 
 struct Client {
@@ -448,6 +463,7 @@ impl View {
             .map(|(k, _)| k + 1)
             .collect();
         pages.pdf.clone_from(&b.pdf);
+        pages.origins.clone_from(&b.origins);
         pages.history = b.history;
         pages.ms = b.ms;
         let n = b.hashes.len();
@@ -701,7 +717,7 @@ fn answer(s: &Shared, req: &Value) -> String {
                 "stats": {"rebuilt": 0, "reused": 0, "passes": 1},
             }))
         }
-        "origins" => ok(origins(s, page.unwrap_or(0))),
+        "origins" => ok(origins(s, page.unwrap_or(0), req.get("files_from").and_then(index).unwrap_or(0))),
         "source" => {
             let file = text("file").unwrap_or_default();
             let at = req
@@ -831,10 +847,53 @@ fn to_source(
     Ok(place)
 }
 
-/// Page `k`'s characters with their sources (`session.ts`'s `origins`:
-/// `{files, g}`): none, no engine records origins yet.
-fn origins(_s: &Shared, _k: usize) -> Value {
-    json!({"files": [], "g": []})
+/// Page `k`'s characters with their sources (the module's `origins`):
+/// none where the build kept none.
+fn origins(s: &Shared, k: usize, files_from: usize) -> Value {
+    let p = lock(&s.pages);
+    match &p.origins {
+        Some(o) => origins_json(o, k, files_from),
+        None => json!({"files": [], "files_from": files_from, "n": 0}),
+    }
+}
+
+/// [`origins`]'s answer from the pages' origins `o`.
+fn origins_json(o: &Origins, k: usize, files_from: usize) -> Value {
+    let files: Vec<&String> = o.files.iter().skip(files_from).collect();
+    let Some(Some(g)) = o.pages.get(k) else {
+        return json!({"files": files, "files_from": files_from, "n": 0});
+    };
+    let words = |xs: &mut dyn Iterator<Item = u32>| {
+        let mut b = Vec::new();
+        for x in xs {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        base64(&b)
+    };
+    json!({
+        "files": files,
+        "files_from": files_from,
+        "n": g.len(),
+        "file": words(&mut g.file.iter().copied()),
+        "start": words(&mut g.start.iter().copied()),
+        "end": words(&mut g.end.iter().copied()),
+        "synth": words(&mut g.synth.iter().copied()),
+        "x": words(&mut g.x.iter().map(|x| x.to_bits())),
+        "y": words(&mut g.y.iter().map(|y| y.to_bits())),
+    })
+}
+
+/// `b` in base64 (RFC 4648, padded).
+fn base64(b: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(b.len().div_ceil(3) * 4);
+    for c in b.chunks(3) {
+        let n = (u32::from(c[0]) << 16) | (u32::from(*c.get(1).unwrap_or(&0)) << 8) | u32::from(*c.get(2).unwrap_or(&0));
+        for (i, sh) in [18, 12, 6, 0].into_iter().enumerate() {
+            out.push(if i <= c.len() { char::from(A[(n >> sh & 63) as usize]) } else { '=' });
+        }
+    }
+    out
 }
 
 /// Start viewer program `cmd` (its words; `{file}` where the file goes,
@@ -894,6 +953,38 @@ mod tests {
         assert_eq!(line_col(t, 0), (1, 1));
         assert_eq!(line_col(t, 3), (2, 1));
         assert_eq!(line_col(t, 6), (2, 3));
+    }
+
+    #[test]
+    fn base64_as_rfc_4648() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    /// A page's origins as the viewer gets them: little-endian words in
+    /// base64, the files from `files_from` on.
+    #[test]
+    fn origins_answer() {
+        let g = phitex_tex::PageOrigins {
+            file: vec![1, u32::MAX],
+            start: vec![5, 0],
+            end: vec![6, 0],
+            synth: vec![0],
+            x: vec![1.0, 2.0],
+            y: vec![3.0, 4.0],
+            w: vec![0.5, 0.0],
+            size: vec![10.0, 0.0],
+        };
+        let o = Origins { files: vec!["a.tex".into(), "b.tex".into()], pages: vec![Some(Arc::new(g))] };
+        let v = origins_json(&o, 0, 1);
+        assert_eq!(v["n"], 2);
+        assert_eq!(v["files"], json!(["b.tex"]));
+        assert_eq!(v["file"], base64(&[1, 0, 0, 0, 255, 255, 255, 255]));
+        assert_eq!(v["start"], base64(&[5, 0, 0, 0, 0, 0, 0, 0]));
+        assert_eq!(origins_json(&o, 3, 0)["n"], 0);
     }
 
     #[test]

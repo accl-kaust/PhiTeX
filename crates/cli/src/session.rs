@@ -151,6 +151,9 @@ pub struct Job {
     pub node_records: bool,
     /// `-synctex`.
     pub synctex: bool,
+    /// Whether the build keeps the pages' glyph origins (the viewer's
+    /// `origins`; on with `synctex` too).
+    pub origins: bool,
     /// `-recorder`: `JOB.fls`.
     pub recorder: bool,
     /// `-shell-escape`: `\write18` runs its commands.
@@ -448,6 +451,8 @@ pub struct Session {
     /// A watch's session: no log laid out after a build (`--log`: with
     /// the exact file when idle, [`Session::write_log`]).
     pub watching: bool,
+    /// `JOB.synctex.gz`'s members made last (`-synctex`).
+    synctex: Mutex<crate::synctex::Writer>,
     /// The PDF file written as update sections (a watch's, but with
     /// `--exact`): what it holds ([`UpdateFile`]).
     pub updates: Option<Arc<Mutex<UpdateFile>>>,
@@ -659,6 +664,7 @@ impl Session {
             absorb: Absorb::default(),
             absorbed_at: None,
             watching: false,
+            synctex: Mutex::default(),
             updates: None,
             lines: LineMarks::default(),
         })
@@ -875,6 +881,7 @@ impl Session {
                     // (a recorded node's outputs predicted from its record,
                     // so its readers run ahead on them)
                     pkg_predict: true,
+                    origins: self.job.origins || self.job.synctex,
                     ..Options::default()
                 };
                 let opts = Options {
@@ -1290,6 +1297,14 @@ impl Session {
     /// The index of the first page of the last build whose text holds
     /// `s` ([`phitex_tex::Build::page_of_text`]; none: no build, no such
     /// page).
+    /// The first page (from 0) with a glyph from bytes `lo..hi` of file
+    /// `file` (the build's glyph origins, where it keeps them).
+    pub fn origin_page(&self, file: &str, lo: usize, hi: usize) -> Option<usize> {
+        let b = self.build.as_ref().filter(|_| self.job.origins || self.job.synctex)?;
+        let (lo, hi) = (u32::try_from(lo).ok()?, u32::try_from(hi).ok()?);
+        b.glyphs_of(file, lo, hi).first().map(|&(k, _)| k)
+    }
+
     pub fn page_of_text(&self, s: &str) -> Option<usize> {
         self.build
             .as_ref()
@@ -1663,6 +1678,13 @@ impl Session {
         })
     }
 
+    /// The pages' glyph origins and the files they name, where the build
+    /// keeps them (the viewer's `origins`).
+    pub fn origins(&self) -> Option<crate::view::Origins> {
+        let b = self.build.as_ref().filter(|_| self.job.origins || self.job.synctex)?;
+        Some(crate::view::Origins { pages: b.all_page_origins(), files: b.origin_files() })
+    }
+
     /// Writes what the build made: `JOB.pdf` or `JOB.dvi` (with `main_too`),
     /// the files TeX wrote, `JOB.log`, `JOB.fls` (`-recorder`).
     pub fn write(&self, r: &Report, main_too: bool) -> Result<Written, String> {
@@ -1745,6 +1767,22 @@ impl Session {
         if self.job.recorder {
             let fls = self.recorder(r, &format!("{}.{ext}", self.job.jobname));
             put(&format!("{}.fls", self.job.jobname), fls.as_bytes())?;
+        }
+        // (`-synctex`: from the pages' glyph origins, the files named from
+        // the main file's directory)
+        if self.job.synctex
+            && let Some(b) = &self.build
+        {
+            let root = match self.job.path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+                _ => PathBuf::from("."),
+            };
+            let root = std::fs::canonicalize(&root).unwrap_or(root);
+            let gz = self.synctex.lock().unwrap_or_else(PoisonError::into_inner).write(b, &root);
+            if let Some(gz) = gz {
+                put(&format!("{}.synctex.gz", self.job.jobname), &gz)?;
+            }
+            phitex_tex::timeline::lap("write: the SyncTeX file");
         }
         phitex_tex::timeline::lap("write: the log, the files TeX wrote");
         Ok(Written { main, files })
@@ -1897,12 +1935,8 @@ impl Session {
 }
 
 /// The notes a job's options that the native engine cannot do yet give, once.
-pub fn waiting_notes(job: &Job) -> Vec<String> {
-    let mut v = Vec::new();
-    if job.synctex {
-        v.push("no SyncTeX yet (-synctex)".to_owned());
-    }
-    v
+pub fn waiting_notes(_job: &Job) -> Vec<String> {
+    Vec::new()
 }
 
 /// The `.aux` file latexmk writes before its first run where the job has

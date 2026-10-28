@@ -243,6 +243,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         fixpoint: false,
         cache_limit: None,
         edit_diagnostics: true,
+        origins: false,
     };
     for n in session::waiting_notes(&job) {
         eprintln!("{progname}: {n}");

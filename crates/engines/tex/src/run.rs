@@ -157,6 +157,9 @@ pub(crate) struct Ops {
     pub fin_class: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, FinClass>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// [`crate::Options::origins`]: the pages' writers keep their glyphs
+    /// (`crate::origins`).
+    pub origins: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The profile units the page loop folded over all its runs
     /// (`crate::pages::Run::fold_unit`; `Stats::units_folded`).
     pub units_folded: std::sync::Arc<std::sync::atomic::AtomicU64>,

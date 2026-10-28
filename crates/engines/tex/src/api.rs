@@ -204,6 +204,10 @@ pub struct Options {
     /// format is XeTeX's too: a format is built by the engine that loads
     /// it.
     pub xetex: Option<crate::XeTeX>,
+    /// Whether the pages' writers keep each page's glyphs, for
+    /// [`Build::page_origins`] (docs/note-origins.md): off by default.
+    /// The output is the same either way.
+    pub origins: bool,
 }
 
 /// Whether a package load never seen runs on the optimistic hint
@@ -749,6 +753,7 @@ impl Default for Options {
             bibtex: phitex_bibtex::Options::default(),
             out_name_ok: None,
             xetex: None,
+            origins: false,
         }
     }
 }
@@ -2586,7 +2591,8 @@ impl Graph {
         let files_op = eng.register(Arc::new(Files(shared.clone())));
         let tool = eng.register(Arc::new(crate::tools::ToolRun(shared.clone())));
         let toolnode = eng.register(Arc::new(crate::tools::ToolNode(shared.clone())));
-        let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage));
+        let origins_on: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage(origins_on.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
         let outer_proj = eng.register_projection(Arc::new(crate::val::outer_projection));
@@ -2620,6 +2626,7 @@ impl Graph {
             fin_class: Arc::default(),
             audit: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            origins: origins_on,
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
             scope_learned: Arc::default(),
@@ -5007,6 +5014,8 @@ pub struct Build {
     staged: bool,
     /// Whether the build has evaluated (its cold build done).
     evaluated: bool,
+    /// Glyph origins' memos ([`Build::page_origins`]).
+    origins: crate::origins::State,
 }
 
 impl Drop for Build {
@@ -5053,6 +5062,9 @@ impl Build {
             opts.finisher_predictions,
             std::sync::atomic::Ordering::Relaxed,
         );
+        g.ops
+            .origins
+            .store(opts.origins, std::sync::atomic::Ordering::Relaxed);
         g.ops
             .node_rec
             .store(opts.node_records, std::sync::atomic::Ordering::Relaxed);
@@ -5200,6 +5212,7 @@ impl Build {
             loads_ran: false,
             staged: false,
             evaluated: false,
+            origins: crate::origins::State::default(),
         };
         b.settle();
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -5768,11 +5781,50 @@ impl Build {
     /// it is a slice of) and its byte range in it.
     #[must_use]
     pub fn node_spans(&self) -> Vec<(u64, Option<Arc<str>>, usize, usize)> {
-        let mut out: Vec<(u64, Option<Arc<str>>, usize, usize)> = self
+        self.spans_named()
+            .into_iter()
+            .map(|(n, f, s, e, _)| (n, f.map(|f| f.1), s, e))
+            .collect()
+    }
+
+    /// What glyph origins are made from (`crate::origins`): the pages'
+    /// identities in the link, the text nodes, the document's text.
+    pub(crate) fn origins_input(&self) -> crate::origins::Input<'_> {
+        let v = self.g.eng.values();
+        let shown = self
+            .g
+            .eng
+            .acc_value(self.unit, v.field(crate::pdfout::SHOWN))
+            .and_then(|x| v.seq_to_vec(x).first().map(|&l| list_of(v, l)))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()))
+            .collect();
+        crate::origins::Input {
+            inst: v.instance(),
+            shown,
+            spans: self.spans_named(),
+            doc_name: self.opts.name.trim_start_matches("./").to_owned(),
+            doc_text: &self.text,
+            doc_raw: if self.canon { self.raw.as_deref() } else { None },
+        }
+    }
+
+    /// Glyph origins' memos.
+    pub(crate) fn origins_state(&self) -> &crate::origins::State {
+        &self.origins
+    }
+
+    /// [`Build::node_spans`] with each file's name, and the index of the
+    /// document node each node is under (its place in the document).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn spans_named(&self) -> Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)> {
+        let mut out: Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)> = self
             .nodes
             .iter()
-            .map(|(_, n, src)| match src {
-                &Src::Doc(s, e) => (n.raw(), None, s, e),
+            .enumerate()
+            .map(|(i, (_, n, src))| match src {
+                &Src::Doc(s, e) => (n.raw(), None, s, e, i),
             })
             .collect();
         // (the nodes a run made of a file's slices, under the document's
@@ -5790,20 +5842,20 @@ impl Build {
             .collect();
         let mut texts: FxHashMap<String, Option<Arc<str>>> = FxHashMap::default();
         let mut seen: phitex_defuse::FxHashSet<u64> = phitex_defuse::FxHashSet::default();
-        let mut stack: Vec<(NodeId, i64)> = self.nodes.iter().map(|(_, n, _)| (*n, 0)).collect();
-        while let Some((x, sh)) = stack.pop() {
+        let mut stack: Vec<(NodeId, i64, usize)> = self.nodes.iter().enumerate().map(|(k, (_, n, _))| (*n, 0, k)).collect();
+        while let Some((x, sh, top)) = stack.pop() {
             if !seen.insert(x.raw()) {
                 continue;
             }
             let Some(i) = self.g.eng.node_info(x) else {
-                stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh)));
+                stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh, top)));
                 continue;
             };
             let sh = match (shifts.get(&x.raw()), i.args.first()) {
                 (Some(&(fs, d)), Some(&a)) if fs == a => d,
                 _ => sh,
             };
-            stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh)));
+            stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh, top)));
             let Some(&fs) = i.args.first() else { continue };
             let mut span: Option<(String, usize, usize)> = None;
             for f in list_of(v, fs) {
@@ -5828,7 +5880,7 @@ impl Build {
                 .or_insert_with(|| self.g.file_text(&name))
                 .clone();
             if let Some(t) = text {
-                out.push((x.raw(), Some(t), s, e));
+                out.push((x.raw(), Some((name, t)), s, e, top));
             }
         }
         out

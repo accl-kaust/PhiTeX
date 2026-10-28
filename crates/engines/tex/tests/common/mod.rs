@@ -462,3 +462,108 @@ pub fn rebuild(b: &mut Build, src: &str) -> phitex_tex::Report {
     b.edit(src);
     b.stats.last.clone()
 }
+
+/// The words of `src` a glyph origins test checks: the runs of three
+/// ASCII letters or more on lines that begin with a letter (a
+/// paragraph's text), not a control word's name nor in a `\label`'s or
+/// `\ref`'s argument: `(byte, word)` each.
+#[allow(dead_code)]
+pub fn origin_words(src: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut line_start = 0;
+    for line in src.split_inclusive('\n') {
+        let lb = line.as_bytes();
+        if lb.first().is_some_and(u8::is_ascii_alphabetic) {
+            let mut i = 0;
+            while i < lb.len() {
+                if lb[i] == b'%' {
+                    break;
+                }
+                if lb[i] == b'\\' {
+                    let mut j = i + 1;
+                    while j < lb.len() && lb[j].is_ascii_alphabetic() {
+                        j += 1;
+                    }
+                    let name = &line[i + 1..j];
+                    if matches!(name, "label" | "ref" | "cite" | "begin" | "end") {
+                        while j < lb.len() && lb[j] != b'}' {
+                            j += 1;
+                        }
+                    }
+                    i = j.max(i + 2);
+                    continue;
+                }
+                if lb[i].is_ascii_alphabetic() {
+                    let mut j = i;
+                    while j < lb.len() && lb[j].is_ascii_alphabetic() {
+                        j += 1;
+                    }
+                    if j - i >= 3 {
+                        out.push((line_start + i, line[i..j].to_owned()));
+                    }
+                    i = j;
+                    continue;
+                }
+                i += 1;
+            }
+        }
+        line_start += line.len();
+    }
+    out
+}
+
+/// What is wrong with build `b`'s glyph origins for its document `src`
+/// (file `file`, as `Build::origin_files` names it): each page's count
+/// is `pdftext::page_codes`', every word of [`origin_words`] has each
+/// of its bytes shown by a glyph that came from it, and every glyph
+/// placed on one byte shows the character there.
+#[allow(dead_code, clippy::many_single_char_names, clippy::needless_range_loop)]
+pub fn origin_failures(b: &Build, src: &str, file: &str) -> Vec<String> {
+    use std::sync::Arc;
+    let mut fails = Vec::new();
+    let pdf: Arc<[u8]> = Arc::from(b.output_bytes().as_slice());
+    let doc = phitex_codecs::pdfread::Doc::open(&pdf).expect("the PDF opens");
+    let pages = b.all_page_origins();
+    let files = b.origin_files();
+    let Some(f) = files.iter().position(|n| n == file) else {
+        return vec![format!("no file {file} among {files:?}")];
+    };
+    let f = u32::try_from(f).unwrap();
+    let bytes = src.as_bytes();
+    let mut covered = vec![false; bytes.len() + 1];
+    for (k, p) in pages.iter().enumerate() {
+        let Some(p) = p else {
+            fails.push(format!("page {}: no origins", k + 1));
+            continue;
+        };
+        let codes = doc.page(k + 1).map(|pg| phitex_codecs::pdftext::page_codes(&doc, &pg)).unwrap_or_default();
+        if codes.len() != p.len() {
+            fails.push(format!("page {}: {} origins for {} codes", k + 1, p.len(), codes.len()));
+            continue;
+        }
+        for i in 0..p.len() {
+            if p.file[i] != f || p.is_synth(i) {
+                continue;
+            }
+            let (s, e) = (p.start[i] as usize, p.end[i] as usize);
+            if e <= bytes.len() {
+                covered[s..e].iter_mut().for_each(|c| *c = true);
+            }
+            let c = codes[i].code;
+            if e == s + 1 && c < 128 && bytes.get(s).is_some_and(u8::is_ascii_alphanumeric) && u32::from(bytes[s]) != c {
+                fails.push(format!(
+                    "page {}: code {i} {:?} placed at byte {s} {:?}",
+                    k + 1,
+                    char::from_u32(c).unwrap_or('?'),
+                    char::from(bytes[s])
+                ));
+            }
+        }
+    }
+    for (at, w) in origin_words(src) {
+        if !covered[at..at + w.len()].iter().all(|&c| c) {
+            fails.push(format!("word {w:?} at byte {at}: not every byte shown by a glyph from it"));
+        }
+    }
+    fails
+}

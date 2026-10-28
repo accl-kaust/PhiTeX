@@ -46,6 +46,7 @@ mod log;
 mod math;
 mod nest;
 mod nodes;
+mod origins;
 mod ops;
 mod pages;
 mod parbreak;
@@ -76,6 +77,7 @@ pub use exec::{Progress, SpawnWorker, set_spawn_worker};
 pub use phitex_otf::{FontSource, KpseFormat};
 pub use phitex_otf::index::FontIndex;
 pub use xetex::{FontFiles, XeTeX};
+pub use origins::{OriginsSnapshot, PageOrigins};
 
 /// Whether this build has the timing and counter lines (`profile`).
 pub const PROFILE: bool = cfg!(feature = "profile");

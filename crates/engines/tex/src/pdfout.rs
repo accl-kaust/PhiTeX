@@ -442,7 +442,7 @@ impl PageBox {
 
 /// A page as its PDF side wrote it, for the link to place, and the fonts
 /// used on the state it was written on, and the objects numbered before
-/// its own ([`write_page`]).
+/// its own ([`write_page_with`]).
 type Made = (phitex_pdf::PageRecord, BTreeSet<FontId>, usize);
 
 /// The pages written, by their piece's key and their sealed lines (their
@@ -463,6 +463,16 @@ type Lines = Arc<[(i64, ValueId)]>;
 /// found.
 fn lines_key(pc: &PagePiece, units: &FxHashMap<i64, ValueId>) -> Option<Lines> {
     pc.pieces.iter().map(|&p| Some((p, *units.get(&p)?))).collect()
+}
+
+/// A page's identity in the link (`Linked::shown`): its record `x` in
+/// the line and its sealed lines' units `h` (also the key its glyphs are
+/// kept by, `crate::origins`).
+pub(crate) fn shown_id(x: u64, h: Option<&Lines>) -> u64 {
+    match h {
+        Some(h) => phitex_defuse::hash_words(x, &h.iter().flat_map(|&(p, u)| [p.cast_unsigned(), u.raw()]).collect::<Vec<u64>>()),
+        None => x,
+    }
 }
 
 /// `f` of page `pc`'s box with its sealed lines filled in
@@ -499,13 +509,14 @@ fn with_page_box<T>(
 
 /// The record of page `pc` (key `key`), its sealed lines' units `h`
 /// ([`lines_key`], `line` giving the lines), made once, by whichever asks
-/// first ([`write_page`]).
+/// first ([`write_page_with`]).
 fn record_of(
     v: &Values,
     key: u64,
     pc: &PagePiece,
     h: &Lines,
     line: &mut dyn FnMut(&crate::nodes::Sealed) -> Option<ValueId>,
+    glyphs: Option<u64>,
 ) -> Arc<OnceLock<Made>> {
     let k = (key, h.clone());
     let m = {
@@ -517,10 +528,33 @@ fn record_of(
         }
         all.entry(k).or_default().clone()
     };
+    // (origins on: the page's glyphs as the writer shows them, kept by
+    // its identity in the link, `crate::origins`)
+    let inst = v.instance();
+    let tapped = |bx: &BoxNode| {
+        let (made, g) = write_page_with(v, pc, bx, glyphs.is_some());
+        if let (Some(id), Some(g)) = (glyphs, g) {
+            crate::origins::keep(inst, id, g);
+        }
+        made
+    };
     m.get_or_init(|| {
-        with_page_box(v, pc, h, line, |bx| write_page(v, pc, bx))
-            .unwrap_or_else(|| write_page(v, pc, &pc.bx.locked().bx))
+        with_page_box(v, pc, h, line, tapped)
+            .unwrap_or_else(|| tapped(&pc.bx.locked().bx))
     });
+    // (its record made before without them: written again for them)
+    if let Some(id) = glyphs
+        && !crate::origins::has(inst, id)
+    {
+        let again = |bx: &BoxNode| {
+            if let (_, Some(g)) = write_page_with(v, pc, bx, true) {
+                crate::origins::keep(inst, id, g);
+            }
+        };
+        if with_page_box(v, pc, h, line, again).is_none() {
+            again(&pc.bx.locked().bx);
+        }
+    }
     m
 }
 
@@ -2407,8 +2441,15 @@ fn keep_piece(pc: PagePiece, mut key: u64) -> u64 {
 /// kept for the link (a page whose record is not placed as it is is
 /// shipped again by the link, whose error is the job's,
 /// [`Linked::errors`]).
-fn write_page(v: &Values, pc: &PagePiece, bx: &BoxNode) -> Made {
+/// With `tap`, also the page's glyphs as its writer shows them
+/// (`crate::origins::Recorder`).
+fn write_page_with(v: &Values, pc: &PagePiece, bx: &BoxNode, tap: bool) -> (Made, Option<crate::origins::PageGlyphs>) {
     let Fold { mut st, forms } = base_fold(v, &pc.base_in, &pc.params, pc.wparams);
+    let out = tap.then(|| {
+        let (r, out) = crate::origins::Recorder::new();
+        st.set_tap(Some(Box::new(r)));
+        out
+    });
     set_writer_params(&mut st, pc.wparams);
     set_page_params(v, &mut st, &pc.params, pc.margins);
     let base = st.fonts_used();
@@ -2436,16 +2477,18 @@ fn write_page(v: &Values, pc: &PagePiece, bx: &BoxNode) -> Made {
         st.ship_recorded(bx, &pc.fonts, &mut wh)
     };
     let _ = res.err();
-    (rec, base, floor)
+    drop(st.set_tap(None));
+    let g = out.and_then(|o| o.locked().take());
+    ((rec, base, floor), g)
 }
 
 /// A page's PDF side (`[key]`, the [`PagePiece`] its finisher kept):
-/// [`write_page`], so that the pages' content streams are compressed in
+/// [`write_page_with`], so that the pages' content streams are compressed in
 /// parallel before the link places them (the link writes a page whose
 /// record is not made yet itself: it never waits for these). Final
 /// (`Operation::final_only`): it runs once the loop-backs settle, and
 /// nothing it does feeds one.
-pub(crate) struct PdfPage;
+pub(crate) struct PdfPage(pub(crate) Arc<std::sync::atomic::AtomicBool>);
 
 /// The keys of the pages a run shipped ([`PagePiece`]s, in its shipouts'
 /// order), defined by that run and read by its [`PdfPage`] children,
@@ -2478,9 +2521,9 @@ impl phitex_defuse::Operation for PdfPage {
         // (its own key only: a shipout of the same run elsewhere in the
         // list changing leaves it standing)
         let p = cx.path(&[phitex_defuse::Step::Index(u32::try_from(i).unwrap_or(u32::MAX))]);
-        let Some(k) = cx
+        let Some((kx, k)) = cx
             .read_path(v.field(PAGE_KEYS), p)?
-            .and_then(|x| v.as_int(x))
+            .and_then(|x| Some((x, v.as_int(x)?)))
         else {
             return Ok(ValueId::UNIT);
         };
@@ -2494,7 +2537,13 @@ impl phitex_defuse::Operation for PdfPage {
         let units = sealed_units(cx, &pc)?;
         let mut line = |s: &crate::nodes::Sealed| line_of(v, &units, s);
         if let Some(h) = lines_key(&pc, &units) {
-            record_of(v, key, &pc, &h, &mut line);
+            // (origins on: kept by the page's identity in the link,
+            // `Linked::shown`)
+            let glyphs = self
+                .0
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .then(|| shown_id(kx.raw(), Some(&h)));
+            record_of(v, key, &pc, &h, &mut line, glyphs);
         }
 
         Ok(ValueId::UNIT)
@@ -4054,10 +4103,7 @@ fn link(
         .iter()
         .zip(&ids)
         .filter(|(r, _)| matches!(r, Rec::Page(_)))
-        .map(|(_, (x, h))| match h {
-            Some(h) => phitex_defuse::hash_words(*x, &h.iter().flat_map(|&(p, u)| [p.cast_unsigned(), u.raw()]).collect::<Vec<u64>>()),
-            None => *x,
-        })
+        .map(|(_, (x, h))| shown_id(*x, h.as_ref()))
         .collect();
     // (what the writer starts from: the same for the copy to stand)
     let head: LinkHead = (v.epoch(), f.g2u.map_or(0, ValueId::raw), f.date.clone(), f.jobname.clone(), f.seed.clone());
@@ -4204,7 +4250,7 @@ fn link(
             let Some(h) = hashes.get(i).cloned().flatten() else {
                 return none;
             };
-            let made = record_of(v, u64::from_ne_bytes(v.as_int(x).unwrap_or(0).to_ne_bytes()), pc, &h, &mut line);
+            let made = record_of(v, u64::from_ne_bytes(v.as_int(x).unwrap_or(0).to_ne_bytes()), pc, &h, &mut line, None);
             let empty = (phitex_pdf::PageRecord::default(), BTreeSet::new(), 0);
             let made = made.get().unwrap_or(&empty);
             let rec = &made.0;

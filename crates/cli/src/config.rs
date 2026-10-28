@@ -35,8 +35,7 @@ pub struct Config {
     #[serde(default, deserialize_with = "copy_pdf")]
     pub copy_pdf: Option<CopyPdf>,
     /// Whether `phitex build` and `phitex watch` write `<job>.synctex.gz`
-    /// (off by default until PhiTeX writes SyncTeX; `synctex = true`
-    /// asks for it, and the build notes that it is not written yet).
+    /// (off by default; `synctex = true` asks for it).
     pub synctex: Option<bool>,
     /// The cache's size limit in bytes (`cache-limit = "4GB"`; 0: no cache).
     #[serde(default, deserialize_with = "size")]

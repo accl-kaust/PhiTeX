@@ -316,24 +316,50 @@ fn diff_told(ui: &Ui, v: &View, ours: &Ours, c: Option<&crate::compare::Compare>
 }
 
 /// Where the editor's cursor, line `line` and UTF-16 column `col` (from
-/// 0) of `text`, is on the pages: the words around it as a page would
-/// show them (`lsp::needles`, longest first), and the page (from 1) and
-/// words of the first that a page of the build holds. Text matching for
-/// now; the engine's origins of the pages' glyphs will replace it. The
-/// engine's page text (`Build::page_of_text`) is a DVI build's: a PDF
-/// build's pages leave the page loop as their writers' shapes, which it
-/// does not read, so there no page is found and the browser looks for
-/// the words itself (MuPDF's text of the PDF).
+/// 0) of `text` (file `file`'s buffer), is on the pages: the words around
+/// it as a page would show them (`lsp::needles`, longest first), and the
+/// page (from 1) and word of the cursor's. The page is the one whose
+/// glyphs came from the word's bytes (the engine's glyph origins,
+/// `Build::glyphs_of`, docs/note-origins.md), else from its line's; where
+/// the build keeps none, the first page whose text holds one of the
+/// words (`Build::page_of_text`, a DVI build's: a PDF build's pages leave
+/// the page loop as their writers' shapes, so there the browser looks for
+/// the words itself, MuPDF's text of the PDF).
 fn locate(
     s: &Session,
+    file: &str,
     text: &str,
     line: usize,
     col: usize,
 ) -> (Option<(usize, String)>, Vec<String>) {
-    let words = crate::lsp::needles(text.lines().nth(line).unwrap_or(""), col);
-    let found = words
-        .iter()
-        .find_map(|w| s.page_of_text(w).map(|k| (k + 1, w.clone())));
+    let src = text.lines().nth(line).unwrap_or("");
+    let words = crate::lsp::needles(src, col);
+    // (the line's bytes in the text, and the cursor's: the word of
+    // letters around it, else the line)
+    let start: usize = text.split_inclusive('\n').take(line).map(str::len).sum();
+    let mut units = 0;
+    let at = start
+        + src
+            .char_indices()
+            .find(|&(_, c)| {
+                units += c.len_utf16();
+                units > col
+            })
+            .map_or(src.len(), |(i, _)| i);
+    let b = text.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c >= 0x80;
+    let (mut lo, mut hi) = (at, at);
+    while lo > start && word(b[lo - 1]) {
+        lo -= 1;
+    }
+    while hi < start + src.len() && word(b[hi]) {
+        hi += 1;
+    }
+    let found = [(lo, hi), (start, start + src.len())]
+        .into_iter()
+        .filter(|&(a, z)| a < z)
+        .find_map(|(a, z)| s.origin_page(file, a, z).map(|k| (k + 1, text[a..z].to_owned())))
+        .or_else(|| words.iter().find_map(|w| s.page_of_text(w).map(|k| (k + 1, w.clone()))));
     (found, words)
 }
 
@@ -915,6 +941,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                     history: 2,
                     ms: 0.0,
                     since_ms: None,
+                    origins: None,
                     diagnostics: vec![
                         json!({"severity": "error", "code": "engine", "message": first}),
                     ],
@@ -1016,6 +1043,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                 history: r.history(),
                 ms: r.wall.as_secs_f64() * 1e3,
                 since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
+                origins: s.origins(),
                 diagnostics: diagnostics(s, &r, &log),
             };
             if let Some(v) = &view {
@@ -1691,7 +1719,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                                             .map(|b| String::from_utf8_lossy(&b).into_owned())
                                             .unwrap_or_default()
                                     });
-                                    let (found, words) = locate(&s, &text, line, col);
+                                    let (found, words) = locate(&s, &file, &text, line, col);
                                     v.reveal(found, &words, &file, line + 1);
                                 }
                                 continue;

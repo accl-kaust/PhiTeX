@@ -876,6 +876,9 @@ impl PdfState {
         self.print(b"/Im");
         self.print_int(self.objs[n].info);
         self.print_ln(b" Do");
+        if let Some(t) = self.tap.sink.as_mut() {
+            t.xobject();
+        }
         self.print_ln(b"Q");
     }
 

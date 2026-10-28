@@ -367,3 +367,94 @@ fn openout_refused() {
         }
     }
 }
+
+/// A plain pdfTeX document for glyph origins: paragraphs of varied
+/// words over a few pages, a logo, a footnote, ligatures.
+fn origins_doc() -> String {
+    use std::fmt::Write as _;
+    const WORDS: &[&str] = &[
+        "origins", "viewer", "glyph", "source", "editor", "cursor", "paragraph", "letter", "column", "margin",
+        "printer", "reader", "galley", "proof", "kerning", "spacing", "chapter", "section", "figure", "table",
+        "index", "note", "line", "page", "word", "quiet", "modest", "elegant", "careful", "patient", "rebuilt",
+        "shrank", "looked", "thought", "admired", "signature", "glossary", "breakfast", "ruler", "hyphen",
+        "the", "of", "and", "a", "to", "in", "with", "from", "under", "over", "between", "around",
+    ];
+    let mut s = String::from("\\pdfoutput=1\n\\hsize=4in \\vsize=4in \\parindent=20pt\n\\centerline{\\bf Glyph origins}\n\\medskip\n");
+    let mut x: u64 = 7;
+    for k in 0..14 {
+        let mut line = String::new();
+        for _ in 0..(40 + k * 3) {
+            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let w = WORDS[((x >> 33) as usize) % WORDS.len()];
+            if line.is_empty() {
+                let mut c = w.chars();
+                let first = c.next().unwrap().to_ascii_uppercase();
+                line.push(first);
+                line.push_str(c.as_str());
+            } else {
+                line.push(' ');
+                line.push_str(w);
+            }
+        }
+        let _ = writeln!(s, "{line}.\n");
+        if k == 4 {
+            s.push_str("Here \\TeX\\ makes its logo, and a footnote\\footnote*{Footnotes come from the same paragraph as their mark.} follows the mark.\n\n");
+        }
+        if k == 8 {
+            s.push_str("Ligatures like office, fluffy, affluent and difficult waffles join their letters.\n\n");
+        }
+    }
+    s.push_str("\\bye\n");
+    s
+}
+
+fn origins_build(src: &str, threads: usize, on: bool) -> phitex_tex::Build {
+    let dir = common::fixtures().join("pdf");
+    let opts = phitex_tex::Options {
+        epoch: Some(0),
+        threads: Some(threads),
+        origins: on,
+        ..common::options("./orig.tex", "orig", "", &dir)
+    };
+    common::build(opts, Some(&common::plain()), src)
+}
+
+/// Glyph origins of a plain document: every page's codes have one
+/// each, every word maps to its bytes, the same at -j1 and -j8, the PDF
+/// the same with them off; after a word's edit and a line inserted
+/// before, the answers are a cold build's of the new text, and the
+/// pages the edit left keep theirs (docs/note-origins.md).
+#[test]
+fn glyph_origins_plain() {
+    let src = origins_doc();
+    let b = origins_build(&src, 1, true);
+    assert!(b.pages().len() >= 3, "pages: {}", b.pages().len());
+    let f = common::origin_failures(&b, &src, "orig.tex");
+    assert!(f.is_empty(), "origins:\n{}", f.join("\n"));
+    let off = origins_build(&src, 1, false);
+    assert!(off.output_bytes() == b.output_bytes(), "the PDF with origins on is not the PDF with them off");
+    assert!(off.page_origins(0).is_none(), "origins off: none");
+    let b8 = origins_build(&src, 8, true);
+    assert_eq!(b8.all_page_origins(), b.all_page_origins(), "-j8's origins are -j1's");
+    // edits: a word, then a line before everything
+    let mut b = b;
+    let (first, _) = b.origins_changed();
+    assert_eq!(first.len(), b.pages().len(), "the first ask lists every page");
+    let at = src.find("Ligatures like office").expect("the ligature line");
+    let new1 = format!("{}Lagatures{}", &src[..at], &src[at + "Ligatures".len()..]);
+    b.edit(&new1);
+    let (changed, deltas) = b.origins_changed();
+    assert!(!changed.is_empty() && changed.len() < b.pages().len(), "a word's edit changes some pages: {changed:?}");
+    assert!(deltas.is_empty(), "a word of the same length moves nothing: {deltas:?}");
+    let cold = origins_build(&new1, 1, true);
+    assert_eq!(b.all_page_origins(), cold.all_page_origins(), "the edit's origins are a cold build's");
+    let new2 = format!("\\relax\n{new1}");
+    b.edit(&new2);
+    let (changed, deltas) = b.origins_changed();
+    assert!(matches!(deltas[..], [(0, 0 | 1, 7)]), "a line inserted before: every byte moved: {deltas:?}");
+    assert!(changed.is_empty(), "a line inserted before: no page's origins changed but by the delta: {changed:?}");
+    let cold = origins_build(&new2, 1, true);
+    assert_eq!(b.all_page_origins(), cold.all_page_origins(), "the second edit's origins are a cold build's");
+    let f = common::origin_failures(&b, &new2, "orig.tex");
+    assert!(f.is_empty(), "origins after the edits:\n{}", f.join("\n"));
+}

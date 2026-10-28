@@ -41,6 +41,7 @@ mod modern;
 mod problems;
 mod session;
 mod shell;
+mod synctex;
 mod tex;
 mod tools;
 mod ui;
