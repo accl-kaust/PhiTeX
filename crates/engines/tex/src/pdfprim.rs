@@ -2226,7 +2226,7 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
     };
     let name = crate::fonts::expanded_name(&i.name, e);
     if !auto {
-        return r.read_font_info(&name, i.size);
+        return r.read_font_info(None, &name, i.size);
     }
     let k = i64::from(crate::fonts::expanded_key(&i.name, i.size, e));
     let held = crate::fonts::info(v, r.font_get(k, FontCell::Info)?)

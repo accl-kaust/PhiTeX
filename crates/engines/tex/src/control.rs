@@ -1491,7 +1491,7 @@ impl Run<'_, '_> {
         let f = if self.xe {
             self.xe_read_font_info(&name, quoted, s)?
         } else {
-            self.read_font_info(&name, s)?
+            self.read_font_info(Some(u), &name, s)?
         };
         let v = self.v;
         self.define_cs(&u, &Mean::Font(f), global);
@@ -1509,11 +1509,44 @@ impl Run<'_, '_> {
     /// font to the line (`fontload`, in TeX's order of loads, which is
     /// where its number comes from, [`crate::pdfout::font_load`]) and is
     /// the last font loaded (`fontlast`, §578).
-    pub(crate) fn read_font_info(&mut self, name: &str, s: i32) -> R<i64> {
+    pub(crate) fn read_font_info(&mut self, u: Option<Tok>, name: &str, s: i32) -> R<i64> {
         if let Some(f) = self.tfm_font_info(name, s)? {
             return Ok(f);
         }
-        self.log("error", "Font not loadable")?;
+        // §561 (`start_font_error_message`, §1260's font identifier `u`,
+        // `null_cs` where there is none) and web2c's reasons
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
+        let mut m = String::from("Font ");
+        if let Some(t) = u {
+            crate::print::sprint_cs(&mut m, t, esc);
+        } else {
+            crate::print::print_esc(&mut m, "csname", esc);
+            crate::print::print_esc(&mut m, "endcsname", esc);
+        }
+        m.push('=');
+        if name.contains(' ') {
+            m.push('"');
+            m.push_str(name);
+            m.push('"');
+        } else {
+            m.push_str(name);
+        }
+        if s >= 0 {
+            m.push_str(" at ");
+            crate::print::print_scaled(&mut m, s);
+            m.push_str("pt");
+        } else if s != -1000 {
+            m.push_str(" scaled ");
+            m.push_str(&(-s).to_string());
+        }
+        m.push_str(if self.file(&format!("{name}.tfm"))?.is_some() {
+            " not loadable: Bad metric (TFM) file"
+        } else if name.len() > 255 {
+            " not loadable: Metric (TFM) file name too long"
+        } else {
+            " not loadable: Metric (TFM) file not found"
+        });
+        self.log("error", &m)?;
         Ok(0)
     }
 

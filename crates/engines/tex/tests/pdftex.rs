@@ -32,6 +32,28 @@ fn expandable() {
     log_gate("pdfexpand").unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// A font that cannot be loaded: pdfTeX's error for it (§561's
+/// `start_font_error_message`, web2c's reasons: a TFM not found, a bad
+/// one, a name in quotes where it has a space, `at` and `scaled`), as
+/// `pdftex -ini` logs it (`pdf/fontload.log`, TeX Live 2026, with
+/// `fontloadbad.tfm`, not a TFM).
+#[test]
+fn font_not_loadable_messages() {
+    let dir = common::fixtures().join("pdf");
+    let src = common::read(&dir.join("fontload.tex"));
+    let want = common::read(&dir.join("fontload.log"));
+    let opts = common::options("./fontload.tex", "fontload", "", &dir);
+    let b = common::build(opts, None, &src);
+    let (_, log) = b.output();
+    let errs = |s: &str| -> Vec<String> {
+        s.lines()
+            .filter(|l| l.starts_with("! "))
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(errs(&log), errs(&want));
+}
+
 #[test]
 fn random() {
     log_gate("pdfrandom").unwrap_or_else(|e| panic!("{e}"));
