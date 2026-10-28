@@ -2363,8 +2363,11 @@ struct Graph {
     tool_finder: Option<ToolFinder>,
     /// The files `\write18`'s commands made, as the last evaluation
     /// left them (`crate::shell`): name, text (TeX's characters), `None`
-    /// for a name removed. What the next evaluation starts from, as
-    /// `pdflatex`'s next run starts from the directory.
+    /// for a name removed. With `fixpoint` (latexmk's runs), what the
+    /// next evaluation starts from, as `pdflatex`'s next run starts from
+    /// the directory; without (one run from nothing), what the run made,
+    /// read by no evaluation: every read of a name before its command, in
+    /// TeX's order, finds none, as TeX's first run does.
     shell_store: std::collections::BTreeMap<String, Option<String>>,
     /// [`Options::shell_passes`].
     shell_cap: usize,
@@ -3140,15 +3143,20 @@ impl Graph {
     /// in TeX's order) applied to the store of command files: each name's
     /// last result there, a name the job writes left to the job. The
     /// names whose file changed.
-    fn shell_absorb(&mut self, unit: UnitId) -> Vec<String> {
+    fn shell_absorb(&mut self, unit: UnitId, fixpoint: bool) -> Vec<String> {
         let v = self.eng.values();
-        let Some(outs) = self.eng.acc_value(unit, v.field(crate::shell::OUTS)) else {
-            return Vec::new();
-        };
+        let outs = self.eng.acc_value(unit, v.field(crate::shell::OUTS));
         let mut last: std::collections::BTreeMap<String, Option<String>> = std::collections::BTreeMap::new();
-        for e in v.seq_to_vec(outs) {
+        for e in outs.map(|o| v.seq_to_vec(o)).unwrap_or_default() {
             let [n, x] = list_of(v, e)[..] else { continue };
             last.insert(str_of(v, n), list_of(v, x).get(1).map(|&t| str_of(v, t)));
+        }
+        // (one run from nothing: what it made is reported, and no
+        // evaluation reads it, neither this build's nor an edit's)
+        if !fixpoint {
+            last.retain(|n, _| !self.written.contains(n));
+            self.shell_store = last;
+            return Vec::new();
         }
         let mut changed = Vec::new();
         for (n, t) in last {
@@ -3201,8 +3209,9 @@ impl Graph {
         let mut env = self.files.clone();
         env.extend(self.marks.entries(v));
         // (the files the commands made, as the evaluation before left
-        // them: a read before any command reads them, `crate::shell`)
-        if !self.shell_store.is_empty() {
+        // them: a read before any command reads them, `crate::shell`;
+        // only between latexmk's runs, a fixpoint's)
+        if fixpoint && !self.shell_store.is_empty() {
             let mut names = Vec::new();
             for (n, t) in &self.shell_store {
                 let x = match t {
@@ -3673,7 +3682,7 @@ impl Graph {
             // (the files the commands made, in TeX's order, into the
             // store: changed, the next evaluation starts from them, as
             // latexmk runs pdflatex again, up to its cap)
-            let shell_changed = self.shell_absorb(unit);
+            let shell_changed = self.shell_absorb(unit, fixpoint);
             if !shell_changed.is_empty() {
                 if stats.shell_passes < self.shell_cap as u64 {
                     stats.shell_passes += 1;

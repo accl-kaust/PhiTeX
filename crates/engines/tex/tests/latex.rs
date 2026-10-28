@@ -1479,6 +1479,21 @@ fn latexmk_minted(threads: usize) {
     };
     assert_eq!(of("highlight"), 1, "{name} edit -j {threads}: {calls:#?}");
     assert_eq!(of("batch"), 0, "{name} edit -j {threads}: {calls:#?}");
+    // (one run from nothing, without the fixpoint: pdflatex once in an
+    // empty directory, `minted.run1.pdf` (SOURCE_DATE_EPOCH=0,
+    // FORCE_SOURCE_DATE=1, `-interaction=batchmode`): no file a command
+    // makes is read before the command, so minted's placeholders, and
+    // `batch` at the end)
+    let one = Options {
+        fixpoint: false,
+        ..opts()
+    };
+    let b = common::build(one, Some(&prelude(true)), &src);
+    let want = std::fs::read(fx.join(format!("{name}.run1.pdf"))).expect("the first run's oracle");
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("{name} one run -j {threads}: {d}");
+    }
+    assert_eq!(b.stats.shell_passes, 0, "{name} one run -j {threads}");
 }
 
 #[test]

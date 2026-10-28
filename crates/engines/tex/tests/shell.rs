@@ -260,9 +260,16 @@ fn files_commands_make_stay_for_the_next_evaluation() {
             ["[one]", "[two]", "[three]"],
             "-j{threads}: {log}"
         );
-        // (the last evaluation read the files the first made)
-        assert_eq!(hits(&log), ["k1", "k2", "k3"], "-j{threads}: {log}");
-        assert_eq!(b.stats.shell_passes, 1, "-j{threads}");
+        // (at a fixpoint the last evaluation read the files the first
+        // made, as pdflatex's second run; one run from nothing reads none
+        // before its command, as TeX's first run)
+        let want: &[&str] = if fixpoint { &["k1", "k2", "k3"] } else { &[] };
+        assert_eq!(hits(&log), want, "-j{threads} fixpoint {fixpoint}: {log}");
+        assert_eq!(
+            b.stats.shell_passes,
+            u64::from(fixpoint),
+            "-j{threads} fixpoint {fixpoint}"
+        );
         assert_eq!(
             fake.distinct().len(),
             3,
@@ -285,8 +292,13 @@ fn files_commands_make_stay_for_the_next_evaluation() {
             ["[one]", "[deux]", "[three]"],
             "-j{threads}: {log}"
         );
-        assert_eq!(hits(&log), ["k1", "k2b", "k3"], "-j{threads}: {log}");
-        assert_eq!(b.stats.shell_passes, 1, "-j{threads}");
+        let want: &[&str] = if fixpoint { &["k1", "k2b", "k3"] } else { &[] };
+        assert_eq!(hits(&log), want, "-j{threads} fixpoint {fixpoint}: {log}");
+        assert_eq!(
+            b.stats.shell_passes,
+            u64::from(fixpoint),
+            "-j{threads} fixpoint {fixpoint}"
+        );
         assert_eq!(
             fake.distinct().len(),
             4,
@@ -303,6 +315,57 @@ fn files_commands_make_stay_for_the_next_evaluation() {
             None,
             "-j{threads}"
         );
+    }
+}
+
+/// A read of a name before the command that makes it, in TeX's order,
+/// finds no file in one run from nothing, as TeX's first run does
+/// (`pdftex -shell-restricted` once: minted's placeholders before its
+/// `batch` at the end); a read after it finds the file. At a fixpoint
+/// (latexmk's runs) the read before it finds what the run before made,
+/// as pdflatex's second run finds it in the directory. At -j1 and -j8.
+#[test]
+fn a_read_before_the_command_finds_its_file_only_in_the_next_run() {
+    let doc = r"\def\made{none}
+\openin1=outa.tex \ifeof1 \immediate\write16{EARLY:missing}\else\closein1 \immediate\write16{EARLY:found}\fi
+Text before.\par
+\immediate\openout3=ina.txt \immediate\write3{alpha}\immediate\closeout3
+\immediate\write18{fakecmd up ina.txt outa.tex}
+\openin1=outa.tex \ifeof1 \immediate\write16{LATE:missing}\else\closein1 \immediate\write16{LATE:found}\fi
+\bye
+";
+    let lines = |log: &str, p: &str| -> Vec<String> {
+        log.lines()
+            .filter_map(|l| l.strip_prefix(p).map(str::to_owned))
+            .collect()
+    };
+    for threads in [1, 8] {
+        for fixpoint in [false, true] {
+            let opts = Options {
+                fixpoint,
+                ..options("early", Some(Arc::new(Fake::default())), threads)
+            };
+            let b = common::build(opts, Some(&common::plain()), doc);
+            let (_, log) = b.output();
+            let early = if fixpoint { "found" } else { "missing" };
+            assert_eq!(
+                lines(&log, "EARLY:"),
+                [early],
+                "-j{threads} fixpoint {fixpoint}: {log}"
+            );
+            assert_eq!(
+                lines(&log, "LATE:"),
+                ["found"],
+                "-j{threads} fixpoint {fixpoint}: {log}"
+            );
+            assert!(
+                b.shell_files()
+                    .iter()
+                    .any(|(n, t)| n == "outa.tex" && t.is_some()),
+                "-j{threads} fixpoint {fixpoint}: {:?}",
+                b.shell_files()
+            );
+        }
     }
 }
 

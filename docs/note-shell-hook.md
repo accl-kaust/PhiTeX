@@ -116,7 +116,14 @@ The files commands make are not loop-backs (a read at the front of the
 document of a value written at its back): minted writes a highlight file
 only where it is missing, and a read of the final value would find it,
 skip the command, and lose the file the next pass. They behave as the
-working directory does for `pdflatex` run again and again:
+working directory does for `pdflatex` run again and again, and only when
+the build runs to the fixpoint of the files the job reads back
+(`Options::fixpoint`, as latexmk runs pdflatex). A build of one run from
+nothing (`fixpoint` off: the CLI's compat mode, as one `pdflatex`) reads
+none of them before its command, in this evaluation or any other, as
+TeX's first run in an empty directory: minted's first run shows its
+placeholders and runs `batch` at the end. `Build::shell_files()` then
+gives what that run made. With `fixpoint`:
 
 - after an evaluation the engine applies the commands' results, in TeX's
   order, to the build's store of command files (kept across edits);
