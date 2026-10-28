@@ -187,6 +187,9 @@ pub(crate) struct Worker {
     pub(crate) refuted_nodes: AtomicU64,
     /// Runs that panicked on inputs that moved during the run.
     pub(crate) stale_panics: AtomicU64,
+    /// Runs stopped at a check because a read moved while they ran
+    /// (`Ctx::tick`).
+    pub(crate) stopped_stale: AtomicU64,
     pub(crate) op_ns: AtomicU64,
     pub(crate) wasted_ns: AtomicU64,
     pub(crate) commit_ns: AtomicU64,
@@ -220,7 +223,7 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    fn add(c: &AtomicU64, x: u64) {
+    pub(crate) fn add(c: &AtomicU64, x: u64) {
         c.fetch_add(x, Ordering::Relaxed);
     }
 
@@ -339,6 +342,7 @@ impl Pool {
                 runs: AtomicU64::new(0),
                 nodes_run: AtomicU64::new(0),
                 refuted_nodes: AtomicU64::new(0),
+                stopped_stale: AtomicU64::new(0),
                 stale_panics: AtomicU64::new(0),
                 op_ns: AtomicU64::new(0),
                 wasted_ns: AtomicU64::new(0),
@@ -651,7 +655,11 @@ impl Pool {
         }
     }
 
-    fn idle_wait(&self, eng: &Engine, w: &Worker) -> Option<NodeId> {
+    /// Waits for work while some is outstanding: a node to run, or none
+    /// when nothing is outstanding, the pool stops or collects, or (the
+    /// worker that asks the edit source, `edits`) [`ABSORB_EVERY`] has
+    /// passed, for it to ask.
+    fn idle_wait(&self, eng: &Engine, w: &Worker, edits: bool) -> Option<NodeId> {
         let (m, cv) = &self.shared.park;
         self.shared.idle.fetch_add(1, Ordering::SeqCst);
         fence(Ordering::SeqCst);
@@ -689,6 +697,9 @@ impl Pool {
                 break None;
             }
             if w.ix == 0 && self.shared.want_spawn.load(Ordering::SeqCst) {
+                break None;
+            }
+            if edits && t_idle.elapsed() >= ABSORB_EVERY {
                 break None;
             }
             let g = m.lock().unwrap_or_else(PoisonError::into_inner);
@@ -765,7 +776,7 @@ fn run_worker(
             std::hint::spin_loop();
         }
         if found.is_none() && pool.outstanding() > 0 {
-            found = pool.idle_wait(eng, w);
+            found = pool.idle_wait(eng, w, src.is_some());
         }
         Worker::add(&w.idle_ns, ns(t));
         if let Some(n) = found {
@@ -776,6 +787,19 @@ fn run_worker(
             continue;
         }
         if pool.outstanding() > 0 {
+            // (idle while others run: an edit is taken now as after a
+            // run of this worker's, not at the quiet point alone, which
+            // a run that goes on for long, or for ever, keeps away; what
+            // it changes under a running node stops that run at its next
+            // check)
+            if let Some(s) = src.as_deref_mut()
+                && last_absorb.elapsed() >= ABSORB_EVERY
+            {
+                last_absorb = Instant::now();
+                if absorb(eng, pool, w, s) {
+                    pool.drain_pending(eng, w);
+                }
+            }
             continue;
         }
         // quiescent: the nodes that run only then (`Operation::final_only`)
@@ -874,7 +898,7 @@ fn run_worker(
             break;
         }
         let t = Instant::now();
-        let r = pool.idle_wait(eng, w);
+        let r = pool.idle_wait(eng, w, false);
         Worker::add(&w.idle_ns, ns(t));
         if let Some(n) = r
             && let Err(e) = work_caught(eng, pool, w, n)
@@ -948,10 +972,28 @@ pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wak
 /// marks it.
 pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
     if held_edge(eng, &wake, n) {
+        // (a running reader is told too: a run on what moved may never
+        // end, a TeX loop on a stale float state, and the quiet point the
+        // wake is held for never comes while it runs)
+        if n.state() == State::Running {
+            note_stale(n, Wake { by: wake.by, cause: wake.cause.clone(), at_ns: wake.at_ns });
+        }
         hold_wake(eng, w, n.id, wake);
         return false;
     }
     mark_stale_now(eng, w, n, wake)
+}
+
+/// A re-ask of running node `n`, kept for its run's next check
+/// (`Ctx::tick`): the run is stopped there if one of its reads moved,
+/// and goes on if all still hold.
+fn note_stale(n: &Node, wake: Wake) {
+    let mut s = n.stale_wake.lock();
+    match &*s {
+        Some(_) => {}
+        None => *s = Some(wake),
+    }
+    n.stale.store(true, Ordering::Release);
 }
 
 /// `mark_stale` with no wake held.
@@ -964,8 +1006,10 @@ pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
         enqueue(eng, w, n, wake);
         return true;
     }
-    if n.state() == State::Dirty {
-        merge_woke(eng, n, wake);
+    match n.state() {
+        State::Dirty => merge_woke(eng, n, wake),
+        State::Running => note_stale(n, wake),
+        _ => {}
     }
     false
 }
@@ -1245,6 +1289,10 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     let version = eng.version.load(Ordering::Acquire);
     let mut cx = Ctx::new(eng, Some(w), node);
     let r = catch_unwind(AssertUnwindSafe(|| op.run(&mut cx)));
+    // (a re-ask kept for this run's checks is its commit's now)
+    if node.stale.swap(false, Ordering::AcqRel) {
+        node.stale_wake.lock().take();
+    }
     let run_ns = ns(t);
     node.run_ns.store(run_ns, Ordering::Relaxed);
     Worker::add(&w.op_ns, run_ns);

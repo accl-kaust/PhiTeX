@@ -472,6 +472,9 @@ pub struct Report {
     /// The summed run time of every run that was not its node's last.
     pub wasted_ns: u64,
     pub refuted_nodes: u64,
+    /// Runs stopped at a check (`Ctx::tick`) because a read moved while
+    /// they ran: run again on what it moved to.
+    pub stopped_stale: u64,
     /// Runs that panicked on inputs that moved while they ran, run again
     /// (a panic on inputs that still hold is `EvalError::OpPanicked`).
     pub stale_panics: u64,

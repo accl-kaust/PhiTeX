@@ -59,6 +59,9 @@ impl Run<'_, '_> {
                 } else {
                     self.hb_done = self.cmds;
                     self.hb_at = self.cmds + Self::HB_BATCH;
+                    // (a run whose read moved while it ran stops here, not
+                    // at its commit: a loop on what moved never commits)
+                    self.cx.tick(Self::HB_BATCH)?;
                 }
                 self.watchdog()?;
             }

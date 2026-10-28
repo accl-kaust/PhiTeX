@@ -1238,6 +1238,7 @@ impl Engine {
             rep.runs += load(&w.runs);
             rep.refuted_nodes += load(&w.refuted_nodes);
             rep.stale_panics += load(&w.stale_panics);
+            rep.stopped_stale += load(&w.stopped_stale);
             rep.wasted_ns += load(&w.wasted_ns);
             rep.predictions_confirmed += load(&w.predictions_confirmed);
             rep.predictions_refuted += load(&w.predictions_refuted);

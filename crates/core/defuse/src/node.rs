@@ -65,6 +65,12 @@ pub(crate) struct Node {
     pub(crate) last: Mx<Option<Arc<RunRecord>>>,
     /// Who woke it last and why: the realised chain.
     pub(crate) woke: Mx<Option<Wake>>,
+    /// A re-ask that came while it ran (`sched::mark_stale` leaves a
+    /// running node to its commit): the wake, for the run's next check
+    /// (`Ctx::tick`) to stop it on if one of its reads moved; the flag
+    /// says one waits, read without the lock.
+    pub(crate) stale_wake: Mx<Option<Wake>>,
+    pub(crate) stale: AtomicBool,
     /// Fields whose walks stopped at it while it had not committed
     /// (`commit::first_hole`), each with the scope depth of the definition
     /// walked from: walked on from it when it commits, is taken or is
@@ -182,6 +188,8 @@ impl Node {
             serial: AtomicU32::new(0),
             last: Mx::new(None),
             woke: Mx::new(None),
+            stale_wake: Mx::new(None),
+            stale: AtomicBool::new(false),
             stopped: Mx::new(Vec::new()),
             bounded: Mx::new(Vec::new()),
             run_ns: AtomicU64::new(0),

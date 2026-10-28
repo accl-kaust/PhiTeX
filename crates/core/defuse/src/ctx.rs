@@ -55,7 +55,16 @@ pub struct Ctx<'a> {
     placed_keys: Option<PlacedKeys>,
     /// Why the run said it is stuck (`Ctx::stuck`).
     pub(crate) stuck: Option<String>,
+    /// Its checks so far ([`Ctx::tick`]).
+    ticks: u64,
 }
+
+/// The check ([`Ctx::tick`]) from which a run's reads are looked at
+/// again: a TeX run's 64 checks are a quarter of a million commands,
+/// past the longest run of a document's piece or page, so ordinary runs
+/// are never looked at, and a run that goes on for ever is looked at a
+/// logarithmic number of times and after each re-ask.
+const LONG_RUN_TICKS: u64 = 64;
 
 /// A run's placements by operation and arguments.
 type PlacedKeys = FxHashMap<(OpId, Arc<[ValueId]>), NodeId>;
@@ -94,6 +103,7 @@ impl<'a> Ctx<'a> {
             placed_keys: None,
             last: me.run_record(),
             stuck: None,
+            ticks: 0,
         }
     }
 
@@ -763,9 +773,67 @@ impl<'a> Ctx<'a> {
         self.eng.path(steps)
     }
 
-    /// Accepted and ignored: no fuel, no heartbeat.
+    /// The run's periodic check (a client calls it every so much work,
+    /// a TeX run every 4096 commands): `Stop` when the run is refuted
+    /// (`RunningDirty`); and from its 64th check on, a long run, when one
+    /// of its reads so far no longer holds, looked at at every power of
+    /// two and at the next check after a re-ask came while it ran
+    /// (`sched::mark_stale` leaves a running node to its commit). A run
+    /// on what moved may never end (a TeX loop on a stale page or float
+    /// state) and so never reach the commit that would refute it, and a
+    /// run's first reads are filed nowhere a walk could re-ask it by. A
+    /// run whose reads all hold goes on; a short run is left to its
+    /// commit, as before.
     pub fn tick(&mut self, _n: u64) -> Result<(), Stop> {
-        self.check()
+        self.check()?;
+        self.ticks += 1;
+        if self.ticks >= LONG_RUN_TICKS
+            && (self.ticks.is_power_of_two() || self.me.stale.load(std::sync::atomic::Ordering::Acquire))
+        {
+            self.recheck()?;
+        }
+        Ok(())
+    }
+
+    /// [`Ctx::tick`]'s look at the reads: the run marked dirty (for the
+    /// re-ask that came, if one) and stopped if one moved; as the
+    /// commit's check, a field no change has counted since it was read
+    /// stands, and a sibling's read is left to the commit.
+    #[cold]
+    fn recheck(&mut self) -> Result<(), Stop> {
+        use std::sync::atomic::Ordering;
+        self.me.stale.store(false, Ordering::Release);
+        let wake = self.me.stale_wake.lock().take();
+        let scope_moved = read::scoped(self.eng)
+            && self.eng.scope_gen.load(Ordering::Acquire) != self.product.scope_gen;
+        let mut memo = crate::read::FoldMemo::new();
+        let moved = self.product.reads.iter().any(|rd| {
+            if matches!(rd.kind, ReadKind::Following { .. }) {
+                return false;
+            }
+            if !scope_moved
+                && !matches!(rd.kind, ReadKind::Next { .. })
+                && rd.kind.field().is_some_and(|f| self.eng.field_epoch(f) == rd.epoch)
+            {
+                return false;
+            }
+            !crate::read::holds(self.eng, self.me, rd, &mut memo)
+        });
+        if !moved {
+            return Ok(());
+        }
+        match wake {
+            Some(wake) => {
+                crate::sched::mark_dirty_now(self.eng, self.worker, self.me, wake);
+            }
+            None => {
+                let _ = self.me.cas_state(State::Running, State::RunningDirty);
+            }
+        }
+        if let Some(w) = self.worker {
+            Worker::add(&w.stopped_stale, 1);
+        }
+        Err(stop())
     }
 
     /// The run makes no progress (`why`, the client's measure against

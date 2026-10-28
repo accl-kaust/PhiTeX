@@ -1896,6 +1896,7 @@ fn print_round(t: std::time::Duration, r: &Report) {
         "lines: {} runs' reads of the lines before them taken back",
         crate::control::LINES_TAKEN.load(std::sync::atomic::Ordering::Relaxed)
     );
+    eprintln!("stopped: {} runs stopped at a check on a read that moved while they ran", r.stopped_stale);
     let mut longest: Vec<(phitex_defuse::NodeId, std::time::Duration)> = r.run_times.clone();
     longest.sort_by_key(|x| std::cmp::Reverse(x.1));
     eprintln!(
