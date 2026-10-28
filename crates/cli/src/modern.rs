@@ -137,8 +137,8 @@ struct Opts {
     /// otherwise), xetex, etex, tex (lualatex is not supported yet)
     #[arg(long, alias = "program", value_name = "NAME", global = true)]
     engine: Option<String>,
-    /// dvi or pdf
-    #[arg(long, value_name = "FORMAT", value_parser = ["dvi", "pdf"], global = true)]
+    /// dvi or pdf (xdv: XeTeX's XDV file, not made a PDF)
+    #[arg(long, value_name = "FORMAT", value_parser = ["dvi", "pdf", "xdv"], global = true)]
     output_format: Option<String>,
     /// The file is the whole job: no format (TeX's -ini)
     #[arg(long, global = true)]
@@ -300,6 +300,7 @@ impl Cli {
             engine: o.engine,
             output: o.output_format.as_deref().map(|f| match f {
                 "dvi" => Output::Dvi,
+                "xdv" => Output::XdvFile,
                 _ => Output::Pdf,
             }),
             ini: o.ini,

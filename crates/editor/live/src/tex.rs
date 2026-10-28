@@ -11,6 +11,8 @@ pub enum Output {
     /// XeTeX's XDV file, made a PDF as xelatex has xdvipdfmx make it
     /// (in process: `dvipdf::xdv_to_pdf`).
     Xdv,
+    /// XeTeX's XDV file written as it is (`xelatex -no-pdf`).
+    XdvFile,
 }
 
 impl Output {
@@ -19,6 +21,7 @@ impl Output {
         match self {
             Output::Dvi => "dvi",
             Output::Pdf | Output::Xdv => "pdf",
+            Output::XdvFile => "xdv",
         }
     }
 }
@@ -37,6 +40,13 @@ pub struct Engine {
     pub kpse_engine: &'static str,
     /// What the format writes.
     pub output: Output,
+}
+
+impl Engine {
+    /// XeTeX's: native fonts, an XDV file.
+    pub fn xetex(&self) -> bool {
+        self.kpse_engine == "xetex"
+    }
 }
 
 /// fmtutil.cnf: `tex tex - tex.ini`, `etex pdftex language.def … *etex.ini`,
@@ -122,9 +132,12 @@ impl Engine {
     /// `latex` (DVI) and `pdflatex`, plain's `etex` and `pdftex` (pdfTeX's
     /// `-output-format` given to a format of the other kind).
     pub fn with_output(self, out: Output) -> Result<Engine, String> {
-        // (XeTeX's XDV is written as its PDF)
+        // (XeTeX's XDV is written as its PDF, or as it is with -no-pdf)
         if self.output == out || (self.output == Output::Xdv && out == Output::Pdf) {
             return Ok(self);
+        }
+        if self.output == Output::Xdv && out == Output::XdvFile {
+            return Ok(Engine { output: out, ..self });
         }
         match (self.name, out) {
             ("latex", Output::Pdf) => engine("pdflatex"),

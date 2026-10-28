@@ -744,7 +744,7 @@ impl Session {
                     "engine".to_owned()
                 });
                 let workers = threads(self.job.threads);
-                let xe = self.job.engine.output == tex::Output::Xdv;
+                let xe = self.job.engine.xetex();
                 let progress = Arc::new(phitex_tex::Progress::new(workers));
                 self.host.progress(&progress);
                 self.status.set_live(Some(live(progress.clone())));
@@ -1619,9 +1619,11 @@ impl Session {
         phitex_tex::timeline::lap("write: the output directory");
         let mut files = Vec::new();
         let mut main = None;
+        // (XeTeX's -no-pdf: the XDV file as `.xdv`)
+        let xdv = |e: &'static str| if e == "dvi" && self.job.engine.output == tex::Output::XdvFile { "xdv" } else { e };
         let ext = r
             .main_output()
-            .map_or(self.job.engine.output.ext(), |(e, _)| e);
+            .map_or(self.job.engine.output.ext(), |(e, _)| xdv(e));
         if let (Some(l), true, true) = (&r.out.layout, sink.updates(), main_too) {
             let p = sink.put_update(&format!("{}.pdf", self.job.jobname), l)?;
             phitex_tex::timeline::lap("write: the main output (an update section)");
@@ -1635,7 +1637,7 @@ impl Session {
                 &r.out.pdf
             };
             let h = tex::fingerprint(shared);
-            let p = sink.put_main(&format!("{}.{e}", self.job.jobname), shared, h)?;
+            let p = sink.put_main(&format!("{}.{}", self.job.jobname, xdv(e)), shared, h)?;
             phitex_tex::timeline::lap("write: the main output");
             files.push((p.clone(), h));
             main = Some(p);

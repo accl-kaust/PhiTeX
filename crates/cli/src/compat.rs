@@ -158,6 +158,8 @@ pub fn main(progname: &str, args: &[String]) -> ! {
                     _ => usage(progname),
                 });
             }
+            // (xetex's: the XDV file, not made a PDF)
+            "no-pdf" => output = Some(Output::XdvFile),
             "fmt" | "progname" => fmt = Some(v()),
             "recorder" => recorder = true,
             "synctex" => synctex = v().trim() != "0",
