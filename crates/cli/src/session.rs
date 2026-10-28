@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use phitex_tex::{Build, Finder, Options};
+use phitex_tex::{Build, ContentKey, Finder, Options};
 
 use crate::cache::Cache;
 use crate::tex::{self, Engine};
@@ -837,6 +837,7 @@ impl Session {
                     xetex: xe.then(crate::xefonts::xetex),
                     finder: self.finder(),
                     prelude_finder: Some(self.format_finder()),
+                    content_key: Some(self.format_key()),
                     tool_finder: Some(self.tool_finder()),
                     bibtex: crate::tools::bib_options(
                         &mut crate::tex::kpse("bibtex", ""),
@@ -1651,6 +1652,18 @@ impl Session {
             let p = tree.input(name)?;
             let bytes = std::fs::read(&p).ok()?;
             Some((p.to_string_lossy().into_owned(), bytes))
+        })
+    }
+
+    /// The format's files located as [`Session::format_finder`] finds
+    /// them, keyed by their stat, none read: a warm start checks the
+    /// format against them without reading them.
+    fn format_key(&self) -> ContentKey {
+        let tree = self.format_tree.clone();
+        Arc::new(move |name: &str| {
+            let p = tree.input(name)?.to_string_lossy().into_owned();
+            let k = phitex_tex::file_stat_key(&p);
+            (!k.is_empty()).then_some((p, k))
         })
     }
 

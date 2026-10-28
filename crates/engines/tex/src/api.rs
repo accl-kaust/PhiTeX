@@ -27,11 +27,13 @@ use crate::val::{field_name, int_of, list_of, str_of};
 /// bytes.
 pub type Finder = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 
-/// A file's content key, by the path its finder gave ([`Options::content_key`]):
-/// opaque bytes, compared for equality only. The contract: a file's key
-/// changes whenever its bytes change, so equal keys promise equal bytes;
-/// `None` where the host has none (the file is hashed).
-pub type ContentKey = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
+/// A file located and keyed by the name TeX asks for, no bytes read
+/// ([`Options::content_key`]): the path the finder would give and its
+/// content key, opaque bytes compared for equality only. The contract: a
+/// file's key changes whenever its bytes change, so equal keys promise
+/// equal bytes; `None` where the host has none (the file is read and
+/// hashed).
+pub type ContentKey = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 
 /// The searches a tool's support files are found by ([`Options::tool_finder`]):
 /// kpathsea's formats for them, as `bibtex`, `biber` and `makeindex` ask.
@@ -91,12 +93,14 @@ pub struct Options {
     /// it in a scratch directory), so a document named `plain.tex` is not
     /// what `\input plain` reads while the format is made.
     pub prelude_finder: Option<Finder>,
-    /// The content key of each file the finders give ([`ContentKey`]):
-    /// a prelude kept on disk is checked against the files it read by
-    /// it, a file hashed only where it has none or its key changed. A
-    /// host whose files carry an exact content identity gives it here (a
-    /// pack's content hash, a hash made once at load); `None`: the file's
-    /// length, modification time and inode ([`file_stat`]).
+    /// Each file the prelude's finder gives, located and keyed without
+    /// its bytes ([`ContentKey`]): a prelude kept on disk is checked
+    /// against the files it read by it, a file whose path and key are as
+    /// stored holding without the finder, one with none or another read
+    /// and hashed. A host whose files carry an exact content identity
+    /// gives it here (a pack's content hash, a hash made once at load;
+    /// natively the lookup and the file's stat, [`file_stat_key`]);
+    /// `None`: the finder's file, keyed by its stat.
     pub content_key: Option<ContentKey>,
     /// The job's start (`SOURCE_DATE_EPOCH` with `FORCE_SOURCE_DATE`):
     /// `\time`, `\day`, `\month`, `\year` (§241) and the PDF file's
@@ -834,10 +838,10 @@ struct Cached {
     /// The SHA-256 of its text and jobname (and the engine's tag): what
     /// a prelude found under `text_key` is compared by.
     text_digest: [u8; 32],
-    /// Each file it read: its name, digest ([`file_digest`]) and the
-    /// file's content key as it was digested ([`content_key`]; empty:
-    /// none, the file is hashed).
-    reads: Vec<(String, [u8; 32], Vec<u8>)>,
+    /// Each file it read: its name, digest ([`file_digest`]), and the
+    /// path and content key it was digested under ([`located_key`];
+    /// empty key: none, the file is read and hashed).
+    reads: Vec<Read>,
     env: Env,
     /// The prelude's evaluation errors: such a prelude is not cached.
     errors: Vec<String>,
@@ -873,10 +877,15 @@ fn file_digest(f: Option<&(String, Vec<u8>)>) -> [u8; 32] {
     })
 }
 
+/// A file a prelude read: its name, digest, path and content key.
+type Read = (String, [u8; 32], String, Vec<u8>);
+
 /// The native content key of the file at `path`: its length,
 /// modification time (ns) and inode, little-endian; empty where the
-/// metadata is not there.
-fn file_stat(path: &str) -> Vec<u8> {
+/// metadata is not there. What a native host's [`ContentKey`] gives
+/// with the path its lookup finds.
+#[must_use]
+pub fn file_stat_key(path: &str) -> Vec<u8> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -889,23 +898,33 @@ fn file_stat(path: &str) -> Vec<u8> {
     Vec::new()
 }
 
-/// The content key of the file at `path`: the host's
-/// ([`Options::content_key`]), else its stat ([`file_stat`]); empty: none.
-fn content_key(keys: Option<&ContentKey>, path: &str) -> Vec<u8> {
+/// File `n`'s path and content key, `found` its finder's file: the
+/// host's ([`Options::content_key`]), else the finder's path and its
+/// stat ([`file_stat_key`]); an empty key: none.
+fn located_key(keys: Option<&ContentKey>, n: &str, found: Option<&(String, Vec<u8>)>) -> (String, Vec<u8>) {
     match keys {
-        Some(k) => k(path).unwrap_or_default(),
-        None => file_stat(path),
+        Some(k) => k(n).unwrap_or_default(),
+        None => found.map_or_else(Default::default, |(p, _)| (p.clone(), file_stat_key(p))),
     }
 }
 
-/// Whether file `n` is as a prelude read it (`h`, `key`): its content
-/// key the same (not hashed again, so a session start pays no digest of
-/// the files the prelude read), else its digest the same.
-fn read_holds(finder: &Finder, keys: Option<&ContentKey>, n: &str, h: &[u8; 32], key: &[u8]) -> bool {
+/// Whether file `n` is as a prelude read it (digest `h`, `path`, `key`):
+/// located with the same path and key, without the finder (no bytes
+/// read: a session start reads and hashes none of the files the prelude
+/// read), else, the finder's file, its stat or its digest the same.
+fn read_holds(finder: &Finder, keys: Option<&ContentKey>, n: &str, h: &[u8; 32], path: &str, key: &[u8]) -> bool {
+    if !key.is_empty()
+        && let Some(k) = keys
+        && k(n).is_some_and(|(p, x)| p == path && x == key)
+    {
+        return true;
+    }
     let f = finder(n);
-    if let Some((p, _)) = &f
+    if keys.is_none()
         && !key.is_empty()
-        && content_key(keys, p) == key
+        && let Some((p, _)) = &f
+        && p == path
+        && file_stat_key(p) == key
     {
         return true;
     }
@@ -1280,9 +1299,9 @@ impl Rd<'_> {
 // `fontorder`)
 // (5: the environment a table of distinct value nodes and the bindings
 // by field, `crate::fmtenv`)
-// (8: the files a prelude read and its text by their SHA-256, each file
-// with its content key)
-pub const PRELUDE_LAYOUT: u32 = 8;
+// (9: the files a prelude read and its text by their SHA-256, each file
+// with its path and content key)
+pub const PRELUDE_LAYOUT: u32 = 9;
 
 /// The exported prelude's magic, before the layout and the engine's
 /// identity.
@@ -1329,11 +1348,11 @@ pub(crate) fn font_order(v: &Values, line: Option<ValueId>) -> Vec<i64> {
 
 /// The key of a prelude: the SHA-256 of the layout and the engine, its
 /// text and jobname (their digest) and what it read (each file's).
-fn prelude_key_of(text_digest: &[u8; 32], reads: &[(String, [u8; 32], Vec<u8>)]) -> [u8; 32] {
+fn prelude_key_of(text_digest: &[u8; 32], reads: &[Read]) -> [u8; 32] {
     let mut b = PRELUDE_LAYOUT.to_le_bytes().to_vec();
     b.extend_from_slice(&engine_identity().to_le_bytes());
     b.extend_from_slice(text_digest);
-    for (n, h, _) in reads {
+    for (n, h, _, _) in reads {
         b.extend_from_slice(n.as_bytes());
         b.push(0);
         b.extend_from_slice(h);
@@ -1355,9 +1374,10 @@ fn serialise_as(c: &Cached, layout: u32, engine: u64) -> Vec<u8> {
     out.extend_from_slice(&c.text_key.to_le_bytes());
     out.extend_from_slice(&c.text_digest);
     out.extend_from_slice(&(c.reads.len() as u64).to_le_bytes());
-    for (n, h, key) in &c.reads {
+    for (n, h, path, key) in &c.reads {
         put_bytes(&mut out, n.as_bytes());
         out.extend_from_slice(h);
+        put_bytes(&mut out, path.as_bytes());
         put_bytes(&mut out, key);
     }
     c.env.write(&mut out);
@@ -1399,9 +1419,10 @@ fn deserialise_as(b: &[u8], layout: u32, engine: u64) -> Option<Cached> {
     for _ in 0..n {
         let name = r.string()?;
         let h: [u8; 32] = r.take(32)?.try_into().ok()?;
+        let path = r.string()?;
         let k = usize::try_from(r.u64()?).ok()?;
         let key = r.take(k)?.to_vec();
-        reads.push((name, h, key));
+        reads.push((name, h, path, key));
     }
     let (env, rest) = crate::fmtenv::FormatEnv::read(r.0)?;
     let mut r = Rd(rest);
@@ -4565,7 +4586,7 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
         defs.harvest(p, crate::hints::kind_of(p, pass::FileKind::Package), 0);
         order.push(0);
     }
-    for (k, (name, h, _)) in c.reads.iter().enumerate() {
+    for (k, (name, h, _, _)) in c.reads.iter().enumerate() {
         if *h == [0; 32] || !is_tex_text(name) {
             continue;
         }
@@ -4645,7 +4666,7 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
         let (finder, cc, keys) = (finder.clone(), c.clone(), opts.content_key.clone());
         let h = crate::exec::thread(move || {
             let t1 = std::time::Instant::now();
-            let fresh = cc.reads.iter().all(|(n, h, key)| read_holds(&finder, keys.as_ref(), n, h, key));
+            let fresh = cc.reads.iter().all(|(n, h, p, key)| read_holds(&finder, keys.as_ref(), n, h, p, key));
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 eprintln!(
                     "format check: {} files found and hashed in {:?} ({}, beside the start)",
@@ -4667,8 +4688,8 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
             opts.threads,
         ));
         let fresh = crate::exec::map_on(&mut ex, c.reads.len(), &|k| {
-            let (n, h, key) = &c.reads[k];
-            read_holds(finder, opts.content_key.as_ref(), n, h, key)
+            let (n, h, p, key) = &c.reads[k];
+            read_holds(finder, opts.content_key.as_ref(), n, h, p, key)
         })
         .into_iter()
         .all(|x| x);
@@ -4684,7 +4705,7 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
             return Ok(c);
         }
         // (a stale cache entry still names the files the prelude reads)
-        for (n, _, _) in &c.reads {
+        for (n, _, _, _) in &c.reads {
             if !known.contains(n) {
                 known.push(n.clone());
             }
@@ -4820,7 +4841,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     }
     // (each file it read by its digest, found again: what the prelude is
     // checked against in a later session)
-    let reads: Vec<(String, [u8; 32], Vec<u8>)> = g
+    let reads: Vec<Read> = g
         .reads
         .iter()
         .map(|(n, h)| {
@@ -4828,9 +4849,12 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             // (one changed since the build read it: a digest no file has
             // and no stat, so the prelude is never found fresh)
             match &f {
-                Some((p, _)) if *h != 0 && file_hash(f.as_ref()) == *h => (n.clone(), file_digest(f.as_ref()), content_key(opts.content_key.as_ref(), p)),
-                _ if *h == 0 => (n.clone(), [0; 32], Vec::new()),
-                _ => (n.clone(), [0xff; 32], Vec::new()),
+                Some(_) if *h != 0 && file_hash(f.as_ref()) == *h => {
+                    let (p, key) = located_key(opts.content_key.as_ref(), n, f.as_ref());
+                    (n.clone(), file_digest(f.as_ref()), p, key)
+                }
+                _ if *h == 0 => (n.clone(), [0; 32], String::new(), Vec::new()),
+                _ => (n.clone(), [0xff; 32], String::new(), Vec::new()),
             }
         })
         .collect();
@@ -7942,36 +7966,47 @@ fn debug_nodes(eng: &Engine, when: &str) {
 mod prelude_tests {
     use super::*;
 
-    /// A file a prelude read holds by its content key (not hashed again:
-    /// a wrong digest beside the same key still holds), else by its
-    /// SHA-256: the same bytes hold, other bytes do not; natively the key
-    /// is the file's stat, which a write of other bytes changes.
+    /// A file a prelude read holds where it is located with the path and
+    /// key it was digested under, the finder never called (a host's key,
+    /// or natively the lookup and the stat); else the finder's file holds
+    /// by its stat (no host key) or its SHA-256: a changed path or key
+    /// reads it and hashes it, the same bytes holding, other bytes not.
     #[test]
-    fn a_read_file_holds_by_its_content_key_or_its_digest() {
+    fn a_read_file_holds_by_its_located_key_or_its_digest() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let dir = std::env::temp_dir().join(format!("phitex-read-holds-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.tex").to_string_lossy().into_owned();
         std::fs::write(&path, b"\\relax").unwrap();
-        let p2 = path.clone();
-        let finder: Finder = Arc::new(move |_: &str| std::fs::read(&p2).ok().map(|b| (p2.clone(), b)));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (p2, c2) = (path.clone(), calls.clone());
+        let finder: Finder = Arc::new(move |_: &str| {
+            c2.fetch_add(1, Ordering::SeqCst);
+            std::fs::read(&p2).ok().map(|b| (p2.clone(), b))
+        });
         let f = finder("a.tex");
-        let (h, st) = (file_digest(f.as_ref()), content_key(None, &path));
-        assert_eq!(st.len(), 24);
-        assert!(read_holds(&finder, None, "a.tex", &h, &st));
-        assert!(read_holds(&finder, None, "a.tex", &[1; 32], &st), "the stat holds");
-        assert!(read_holds(&finder, None, "a.tex", &h, &[]), "the digest holds");
-        assert!(!read_holds(&finder, None, "a.tex", &[1; 32], &[]));
-        std::fs::write(&path, b"\\relax\\relax").unwrap();
-        assert!(!read_holds(&finder, None, "a.tex", &h, &st), "another length, other bytes");
-        // (a host's key: the same key skips the digest, another forces it)
-        let key = |k: &'static [u8]| -> ContentKey { Arc::new(move |_: &str| Some(k.to_vec())) };
-        let f = finder("a.tex");
-        let h2 = file_digest(f.as_ref());
-        assert!(read_holds(&finder, Some(&key(b"pack:1")), "a.tex", &[1; 32], b"pack:1"), "the same key, no digest");
-        assert!(!read_holds(&finder, Some(&key(b"pack:2")), "a.tex", &[1; 32], b"pack:1"), "another key: the digest, which differs");
-        assert!(read_holds(&finder, Some(&key(b"pack:2")), "a.tex", &h2, b"pack:1"), "another key: the digest, which holds");
+        let h = file_digest(f.as_ref());
+        // (natively, no host key: the finder's file and its stat)
+        let (p, st) = located_key(None, "a.tex", f.as_ref());
+        assert_eq!((p.as_str(), st.len()), (path.as_str(), 24));
+        assert!(read_holds(&finder, None, "a.tex", &[1; 32], &path, &st), "the stat holds");
+        assert!(read_holds(&finder, None, "a.tex", &h, &path, &[]), "the digest holds");
+        assert!(!read_holds(&finder, None, "a.tex", &[1; 32], &path, &[]));
+        assert!(!read_holds(&finder, None, "a.tex", &[1; 32], "/elsewhere/a.tex", &st), "another path: the digest");
+        // (a host's located key: the same path and key, no finder)
+        let key = |p: String, k: &'static [u8]| -> ContentKey { Arc::new(move |_: &str| Some((p.clone(), k.to_vec()))) };
+        let n0 = calls.load(Ordering::SeqCst);
+        assert!(read_holds(&finder, Some(&key(path.clone(), b"pack:1")), "a.tex", &[1; 32], &path, b"pack:1"), "the same key");
+        assert_eq!(calls.load(Ordering::SeqCst), n0, "the finder not called");
+        assert!(!read_holds(&finder, Some(&key(path.clone(), b"pack:2")), "a.tex", &[1; 32], &path, b"pack:1"), "another key: read and hashed");
+        assert!(read_holds(&finder, Some(&key(path.clone(), b"pack:2")), "a.tex", &h, &path, b"pack:1"), "another key, the same bytes");
+        assert!(!read_holds(&finder, Some(&key("/b/a.tex".into(), b"pack:1")), "a.tex", &[1; 32], &path, b"pack:1"), "another path: read and hashed");
+        assert_eq!(calls.load(Ordering::SeqCst), n0 + 3, "the finder called for each change");
         let none: ContentKey = Arc::new(|_: &str| None);
-        assert!(!read_holds(&finder, Some(&none), "a.tex", &[1; 32], b"pack:1"), "no key now: the digest");
+        assert!(!read_holds(&finder, Some(&none), "a.tex", &[1; 32], &path, b"pack:1"), "no key now: the digest");
+        // (natively, other bytes: another stat and digest)
+        std::fs::write(&path, b"\\relax\\relax").unwrap();
+        assert!(!read_holds(&finder, None, "a.tex", &h, &path, &st), "another length, other bytes");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -7983,7 +8018,7 @@ mod prelude_tests {
             key: [3; 32],
             text_key: 5,
             text_digest: [7; 32],
-            reads: vec![("a.tex".to_owned(), [9; 32], vec![1, 2, 3])],
+            reads: vec![("a.tex".to_owned(), [9; 32], "/a.tex".to_owned(), vec![1, 2, 3])],
             env: {
                 let v = Values::new();
                 Arc::new(crate::fmtenv::FormatEnv::of(&v, &[("x".to_owned(), v.int(1))]))

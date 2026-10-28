@@ -69,8 +69,8 @@ mod native;
 mod xpic;
 
 pub use api::{
-    Build, Diagnostic, EditSender, Finder, Hint, Options, PageSettled, RunReport as Report, Severity, Speculation,
-    Stats, ToolFinder, ToolSearch, byte_ends, engine_id,
+    Build, ContentKey, Diagnostic, EditSender, Finder, Hint, Options, PageSettled, RunReport as Report, Severity,
+    Speculation, Stats, ToolFinder, ToolSearch, byte_ends, engine_id, file_stat_key,
 };
 pub use shell::{ShellHook, ShellRan, TEXLIVE_COMMANDS, texlive_commands};
 pub use exec::{Progress, SpawnWorker, set_spawn_worker};
