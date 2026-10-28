@@ -10,3 +10,4 @@
 /MANIFEST.tsv
 __pycache__/
 /phitex.bundle
+/texlive.tlpdb.xz

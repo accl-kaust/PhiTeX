@@ -1,6 +1,8 @@
 #!/bin/bash
-# Shelf's build with its dependency traces, on the accl cluster, in
-# PhiTeX's cluster image (TeX Live 2026, Rust; PhiTeX's scripts/accl):
+# Shelf's build with its dependency traces, on the accl or mc cluster, in
+# PhiTeX's cluster image (TeX Live 2026, Rust; PhiTeX's scripts/accl;
+# mc: ssh mcmgt01, sbatch -p mc -C cpu_amd_epyc_9754, the same paths under
+# the home):
 #
 #   rsync -a --delete --exclude-from=scripts/accl-exclude ./ acclhead1:code/flinner/shelf-accl/
 #   ssh acclhead1 'export PATH=/opt/slurm/current/bin:$PATH; cd code/flinner/shelf-runs &&
@@ -47,13 +49,16 @@ git clone -q "$HOME/code/flinner/phitex.git" "$w/shelf/trace/phitex"
 [ -f "$src/phitex.bundle" ] && git -C "$w/shelf/trace/phitex" fetch -q "$src/phitex.bundle" "+refs/*:refs/bundle/*"
 git -C "$w/shelf/trace/phitex" -c advice.detachedHead=false checkout -q "$commit"
 key=$(sha256sum "$w/shelf/trace/phitex/Cargo.lock" | cut -c1-16)
-[ -d "$HOME/shared-cache/phitex/cargo-$key" ] || { echo "FAILED: no crate cache cargo-$key (a PhiTeX job for $commit fetches it)"; exit 3; }
-cp -a "$HOME/shared-cache/phitex/cargo-$key" "$w/cargo"
+# (the engine's crates: PhiTeX's cache for its Cargo.lock, else fetched
+# below, with the network, and kept there)
+[ -d "$HOME/shared-cache/phitex/cargo-$key" ] && cp -a "$HOME/shared-cache/phitex/cargo-$key" "$w/cargo"
 [ -f "$w/shelf/trace/Cargo.lock" ] || cp "$w/shelf/trace/phitex/Cargo.lock" "$w/shelf/trace/Cargo.lock"
 mkdir -p "$w/shelf/cache"
 cp -a "$arch/." "$w/shelf/cache/"
 mkdir -p "$w/results"
 
+# (mc's nodes have no Apptainer: the user-space one in the shared cache)
+command -v apptainer > /dev/null || PATH=$HOME/shared-cache/apptainer/usr/bin:$PATH
 net() {
   apptainer exec --containall --bind "$w" --home "$w" --pwd "$w/shelf" "$sif" "$@"
 }
@@ -63,6 +68,11 @@ box() {
 }
 if box getent hosts mirror.ctan.org >/dev/null 2>&1; then echo "FAILED: the box resolves names"; exit 76; fi
 
+if [ ! -d "$w/cargo" ]; then
+  net env CARGO_HOME="$w/cargo" sh -c "cd trace/phitex && cargo fetch -q"
+  p=$HOME/shared-cache/phitex/cargo-$key.part-$SLURM_JOB_ID
+  cp -a "$w/cargo" "$p" && { mv -T "$p" "$HOME/shared-cache/phitex/cargo-$key" 2>/dev/null || rm -rf "$p"; }
+fi
 # (1) the database and the archives, the fonts' tree
 net env FETCH_ONLY=1 FONT_TREE="$w/ftree" ${TLPDB:+TLPDB="$TLPDB"} python3 build.py
 cp -n "$w/shelf/cache/"*.tar.xz "$arch/" 2>/dev/null || true
