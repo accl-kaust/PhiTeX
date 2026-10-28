@@ -1385,7 +1385,7 @@ impl Run<'_, '_> {
         let mut post_classes: Vec<(u16, InsertClass)> = Vec::new();
         // (as the builder has them now the routine gave back, never by a
         // finisher's place, [`Run::insert_class_at`])
-        let fold = std::mem::replace(&mut self.ins_fold, Some((lc.prev_fire.0, st.ins.clone())));
+        let fold = self.ins_fold.replace((lc.prev_fire.0, st.ins.clone()));
         for n in ns {
             let c = self.insert_class_at(n, node);
             let c = match c {
