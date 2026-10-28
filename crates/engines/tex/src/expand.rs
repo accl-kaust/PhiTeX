@@ -1358,8 +1358,29 @@ impl Run<'_, '_> {
     /// `quoted_filename`).
     pub(crate) fn scan_file_name_q(&mut self) -> R<(String, bool)> {
         let mut was_quoted = false;
-        self.skip_blanks_x()?;
+        // (tex.ch's scan_file_name since TeX Live 2020: the next
+        // non-blank non-relax non-call token; a left brace begins a name
+        // in braces, `scan_file_name_braced`: the balanced text expanded
+        // as `\edef` expands, printed as `show_token_list` prints it,
+        // spaces kept, a `"` toggling quoting as `more_name` does)
+        self.skip_blanks_relax_x()?;
         let mut name = String::new();
+        if self.cur.cmd == cmd::LEFT_BRACE {
+            let t = self.cur.tok;
+            self.back_input(t);
+            let (_, body) = self.scan_toks(false, true);
+            self.ck()?;
+            let mut s = String::new();
+            self.show_toks_into(&mut s, &body)?;
+            for c in s.chars() {
+                if c == '"' {
+                    was_quoted = true;
+                } else {
+                    name.push(c);
+                }
+            }
+            return Ok((name, was_quoted));
+        }
         let mut quoted = false;
         loop {
             if self.cur.cmd > cmd::OTHER_CHAR

@@ -1,0 +1,20 @@
+\documentclass{article}
+\begin{filecontents*}[overwrite]{\jobname-data.tex}
+first line of the data
+second line
+\end{filecontents*}
+\newread\src
+\def\dataname{\jobname-data.tex}
+\begin{document}
+\immediate\openin\src\expandafter{\dataname}
+\ifeof\src Not found in braces.\else Found in braces: \read\src to\x \x.\fi
+\closein\src
+
+\openin\src={\jobname-data}\relax
+\ifeof\src Not found without the extension.\else Found without the extension.\fi
+\closein\src
+
+\makeatletter
+Input in braces: \@@input{\jobname-data.tex}
+\makeatother
+\end{document}

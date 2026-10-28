@@ -1133,6 +1133,10 @@ latexmk_tests! {
     // next \pdflastxform; 10 corpus manuals' /pgfsmask names)
     latexmk_corpus_pgf_fading_j1: "corpus-pgf-fading", 1;
     latexmk_corpus_pgf_fading_j8: "corpus-pgf-fading", 8;
+    // (a file name in braces, \openin and \input: TeX Live's
+    // scan_file_name_braced; pgfmanual's `from file` code examples)
+    latexmk_corpus_braced_filename_j1: "corpus-braced-filename", 1;
+    latexmk_corpus_braced_filename_j8: "corpus-braced-filename", 8;
     // (a stream closed and opened again on another file in one run)
     latexmk_reopen_stream_j1: "reopen-stream", 1;
     latexmk_reopen_stream_j8: "reopen-stream", 8;
