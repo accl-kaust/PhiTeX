@@ -81,3 +81,37 @@ fn a_fatal_error_ends_the_job_before_an_included_file() {
         assert_eq!(common::runs_of(&b, "finish"), 0, "-j{threads}: {:?}", b.stats.runs_by_op);
     }
 }
+
+/// The job's text ending inside the text an `\else` skips: TeX's end of
+/// the file (§362) checks it (§336), "Incomplete \iftrue; all text was
+/// ignored after line n", puts a `\fi` there, and the input then ends for
+/// good (§360): "*** (job aborted, no legal \end found)". Before, the skip
+/// returned at the end of the input as if at an `\else`, and `\else`'s
+/// loop (§510) skipped again for ever: the build never ended, at one
+/// thread as at sixteen (an output routine's `\else` at sixteen threads,
+/// amsldoc, 1 build in about 300). Oracle: pdftex (TeX Live 2026, accl job
+/// 21617), the same two lines in the log and no output file.
+#[test]
+fn the_input_ending_inside_a_skipped_else_ends_the_job() {
+    let cases = [("\\iftrue x\\else y\n", 1), ("\\def\\x{\\iftrue a\\else b}\n\\x\nc\n", 2)];
+    for (k, (src, line)) in cases.into_iter().enumerate() {
+        for threads in [1, 8] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let dir = common::scratch(&format!("skip-end-{k}-{threads}"));
+                let opts = Options {
+                    threads: Some(threads),
+                    ..common::options("./d.tex", "d", "", &dir)
+                };
+                let b = common::build(opts, Some(&common::plain()), src);
+                let _ = tx.send((b.fatal(), b.output().1));
+            });
+            let (fatal, log) = rx
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .unwrap_or_else(|_| panic!("case {k} -j{threads}: the build did not end in 120 s"));
+            let want = format!("! Incomplete \\iftrue; all text was ignored after line {line}.");
+            assert!(log.contains(&want), "case {k} -j{threads}: {want:?} not in the log:\n{log}");
+            assert!(fatal && log.contains("*** (job aborted, no legal \\end found)"), "case {k} -j{threads}: the job is aborted:\n{log}");
+        }
+    }
+}

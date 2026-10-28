@@ -275,17 +275,18 @@ impl Run<'_, '_> {
     /// Where a line is now, for a message that names it later: the
     /// line's own number where it has one, else this run's lines begun
     /// so far ([`Run::input_line_no`] reads the rest when needed).
-    pub(crate) fn line_mark(&self) -> (Option<i64>, i64) {
+    pub(crate) fn line_mark(&self) -> (Option<i64>, i64, Option<phitex_defuse::ValueId>) {
         match self.file_line_here() {
-            Some(crate::run::FileLine::Known(n)) => (Some(n), 0),
+            Some(crate::run::FileLine::Known(n)) => (Some(n), 0, None),
             Some(crate::run::FileLine::Piece(name)) => (
                 None,
                 self.doc_lines
                     .iter()
                     .find(|(n, _)| *n == name)
                     .map_or(0, |&(_, k)| k),
+                Some(name),
             ),
-            None => (Some(0), 0),
+            None => (Some(0), 0, None),
         }
     }
 
@@ -330,14 +331,24 @@ impl Run<'_, '_> {
             return Ok(());
         }
         // §336's skipping case
+        self.incomplete_if()
+    }
+
+    /// §336's skipping case: "Incomplete \if...; all text was ignored
+    /// after line n", and a `\fi` inserted to end the skip.
+    pub(crate) fn incomplete_if(&mut self) -> R<()> {
         let code = self.if_codes.last().copied().unwrap_or(0);
         let name = crate::prims::PRIMS
             .iter()
             .find(|&&(_, c, h)| c == cmd::IF_TEST && h == code)
             .map_or("if", |&(n, _, _)| n);
+        // (a piece's line: its file's lines the nodes before it began and
+        // those it had begun when the skip began, wherever the input is
+        // now, the end of all input included)
         let line = match self.skip_from {
-            (Some(n), _) => n,
-            (None, mine) => {
+            (Some(n), _, _) => n,
+            (None, mine, Some(name)) => self.piece_lines_before(name)? + mine,
+            (None, mine, None) => {
                 let now = self.line_mark().1;
                 i64::from(self.input_line_no()?) - (now - mine)
             }
@@ -363,6 +374,12 @@ impl Run<'_, '_> {
     /// for an argument, which then ends without "Paragraph ended",
     /// §392). False if nothing was being scanned (`normal`: no error).
     pub(crate) fn file_ended(&mut self) -> R<bool> {
+        // (§362's `check_outer_validity` while skipping: the skip ends at
+        // the file's end, §336)
+        if self.in_skip {
+            self.incomplete_if()?;
+            return Ok(true);
+        }
         let Some((status, w)) = self.scanner else {
             return Ok(false);
         };

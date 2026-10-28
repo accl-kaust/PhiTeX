@@ -613,7 +613,7 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) expand_depth: u32,
     /// Where the conditional text being skipped began (§494's
     /// `skip_line`, [`Run::line_mark`]).
-    pub skip_from: (Option<i64>, i64),
+    pub skip_from: (Option<i64>, i64, Option<ValueId>),
     /// The locations a load's run first read from the engine while
     /// skipping (`PHITEX_PKG_TRACE`: which chaining reads are skips).
     pub skip_first: Vec<Loc>,
@@ -1008,7 +1008,7 @@ impl<'c, 'a> Run<'c, 'a> {
             uread: Vec::new(),
             in_skip: false,
             expand_depth: 0,
-            skip_from: (None, 0),
+            skip_from: (None, 0, None),
             skip_first: Vec::new(),
             defer_ok: false,
             defer_hit: None,

@@ -640,8 +640,22 @@ impl Run<'_, '_> {
         self.skip_from = self.line_mark();
         let mut l = 0;
         let mut n = 0u64;
+        let mut ended = false;
         loop {
-            if !self.get_next() || self.halt.is_some() {
+            if !self.get_next() {
+                // (the input ended inside the skipped text: TeX's skip
+                // never meets an end, §362 checks a file's end and §336
+                // puts a `\fi` there; returned as if at an `\else`, the
+                // loops of §500 and §510 called this again for ever)
+                if self.halt.is_none() {
+                    self.skip_ended(&mut ended);
+                    if self.halt.is_none() {
+                        continue;
+                    }
+                }
+                break;
+            }
+            if self.halt.is_some() {
                 break;
             }
             // (the command loop's checks, which a skip never reaches: a
@@ -666,6 +680,30 @@ impl Run<'_, '_> {
             }
         }
         self.in_skip = false;
+    }
+
+    /// [`Run::pass_text`] at the end of the run's input. At the end of all
+    /// input (the job's text read to its end, `eof`), what TeX does at the
+    /// end of the last file: §336's "Incomplete \if...; all text was
+    /// ignored after line n" and a `\fi` inserted, once; at the end again
+    /// (the `\fi` closed a conditional nested in the skipped text), §360's
+    /// "*** (job aborted, no legal \end found)". At the end of a node's own
+    /// input (an output routine's list, a text with no sibling to take),
+    /// the text that follows is not the node's to read: it starves
+    /// ([`Halt::Starve`]).
+    #[cold]
+    #[inline(never)]
+    fn skip_ended(&mut self, ended: &mut bool) {
+        if !self.eof {
+            return self.raise(crate::run::Halt::Starve);
+        }
+        if *ended {
+            return self.raise(crate::run::Halt::Fatal);
+        }
+        *ended = true;
+        if let Err(h) = self.incomplete_if() {
+            self.raise(h);
+        }
     }
 
     /// [`Run::pass_text`]'s check every [`Run::HB_BATCH`] tokens skipped.

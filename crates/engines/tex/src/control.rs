@@ -2506,6 +2506,27 @@ impl Run<'_, '_> {
         self.cx.unread(v.field("lines"));
     }
 
+    /// The lines of the document file `name` the nodes before this one
+    /// began (the `lines` accumulator, its own file's count only).
+    pub(crate) fn piece_lines_before(&mut self, name: ValueId) -> R<i64> {
+        let v = self.v;
+        let lines = v.field("lines");
+        // (observe, `PHITEX_READS=lines`: each reader, where)
+        if crate::exec::obs_flag!("PHITEX_READS") {
+            self.trace_read(lines, false);
+        }
+        // (its own file's count only: an edit of another file's
+        // lines leaves the read standing)
+        let p = self.cx.path(&[phitex_defuse::Step::Key(name)]);
+        let x = self.cx.fold_path(lines, None, None, p);
+        if x.is_err() {
+            self.trace_stop("range lines");
+        }
+        let x = x?;
+        self.note_lines_read();
+        Ok(x.map_or(0, |k| int_of(v, k)))
+    }
+
     /// The input left as one source line, for `\inputlineno`.
     ///
     /// TeX's `line` (§304): the line of the innermost file read. A line
@@ -2516,22 +2537,7 @@ impl Run<'_, '_> {
         let n = match self.file_line_here() {
             Some(crate::run::FileLine::Known(n)) => n,
             Some(crate::run::FileLine::Piece(name)) => {
-                let v = self.v;
-                let lines = v.field("lines");
-                // (observe, `PHITEX_READS=lines`: each reader, where)
-                if crate::exec::obs_flag!("PHITEX_READS") {
-                    self.trace_read(lines, false);
-                }
-                // (its own file's count only: an edit of another file's
-                // lines leaves the read standing)
-                let p = self.cx.path(&[phitex_defuse::Step::Key(name)]);
-                let x = self.cx.fold_path(lines, None, None, p);
-                if x.is_err() {
-                    self.trace_stop("range lines");
-                }
-                let x = x?;
-                self.note_lines_read();
-                let before = x.map_or(0, |k| int_of(v, k));
+                let before = self.piece_lines_before(name)?;
                 let mine = self
                     .doc_lines
                     .iter()
