@@ -1095,20 +1095,66 @@ impl Hasher for FxHasher {
 pub type FxHashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<FxHasher>>;
 pub type FxHashSet<K> = std::collections::HashSet<K, BuildHasherDefault<FxHasher>>;
 
-/// A hash of words, seeded.
+/// The 128-bit product of `a` and `b`, its halves folded (wyhash's
+/// `mum`): every bit of each factor reaches every bit of the result.
 #[inline]
-pub fn hash_words(seed: u64, words: &[u64]) -> u64 {
-    let mut h = FxHasher(seed);
-    for &w in words {
-        h.write_u64(w);
-    }
-    h.finish()
+fn mum(a: u64, b: u64) -> u64 {
+    let r = u128::from(a) * u128::from(b);
+    (r as u64) ^ ((r >> 64) as u64)
 }
 
-/// A hash of bytes, seeded.
+const FP0: u64 = 0xa076_1d64_78bd_642f;
+const FP1: u64 = 0xe703_7ed1_a0b4_28db;
+const FP2: u64 = 0x8ebc_6af0_9c88_c6e3;
+
+/// One word into a fingerprint's state: the word and the state are
+/// multiplied out whole, so a difference in any bit of either moves the
+/// state everywhere (no two inputs collide by construction, as
+/// [`FxHasher`]'s rotate-xor-multiply does when one word's high byte and
+/// the next word's low bits differ: `cs:fp_set:Nn` and `cs:fp_sub:Nn`).
+#[inline]
+fn fp_step(h: u64, w: u64) -> u64 {
+    mum(h ^ w ^ FP0, h.rotate_left(32) ^ FP1)
+}
+
+/// A fingerprint's last step (murmur3's `fmix64`).
+#[inline]
+fn fp_finish(mut h: u64) -> u64 {
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^ (h >> 33)
+}
+
+/// A fingerprint of words, seeded: what this crate and its clients key
+/// values, caches and identities by where they do not compare the whole
+/// key (the value store's digests, a page's identity). Not [`FxHasher`],
+/// whose structure makes colliding inputs easy to meet; two inputs
+/// collide here only as two random 64-bit numbers do.
+#[inline]
+pub fn hash_words(seed: u64, words: &[u64]) -> u64 {
+    let mut h = seed ^ FP2;
+    for &w in words {
+        h = fp_step(h, w);
+    }
+    fp_finish(h ^ (words.len() as u64))
+}
+
+/// A fingerprint of bytes, seeded ([`hash_words`]): the bytes in
+/// little-endian 8-byte words, the last one padded with zeros, and the
+/// length, so that a text and the same text with NULs after it differ.
 #[inline]
 pub fn hash_bytes(seed: u64, b: &[u8]) -> u64 {
-    let mut h = FxHasher(seed);
-    h.write(b);
-    h.finish()
+    let mut h = seed ^ FP2;
+    let (words, r) = b.as_chunks::<8>();
+    for w in words {
+        h = fp_step(h, u64::from_le_bytes(*w));
+    }
+    if !r.is_empty() {
+        let mut x = [0u8; 8];
+        x[..r.len()].copy_from_slice(r);
+        h = fp_step(h, u64::from_le_bytes(x));
+    }
+    fp_finish(h ^ (b.len() as u64))
 }

@@ -376,3 +376,35 @@ fn strings_hashed_a_word_at_a_time_intern_by_their_content() {
     assert_ne!(h("abcdefghabcdefgh"), h("abcdefghabcdefgi"), "a byte of the second word");
     assert_ne!(h("abcdefgh"), h("abcdefghabcdefgh"), "a second word");
 }
+
+/// The fingerprints (`hash_bytes`, `hash_words`) keep apart the inputs a
+/// rotate-xor-multiply hash (FxHash) collides on by its structure: two
+/// texts that differ in the high byte of one word and the low byte of the
+/// next (`cs:fp_set:Nn` and `cs:fp_sub:Nn` hashed alike, and a format
+/// that keyed its bindings by that hash gave `\fp_set:Nn` the meaning of
+/// `\fp_sub:Nn`), every such pair over all 65536 values of the two bytes,
+/// at several seeds; a text and the same text with NULs after it; a list
+/// of words and the same list with a zero after it.
+#[test]
+fn fingerprints_keep_structured_near_inputs_apart() {
+    use phitex_defuse::{hash_bytes, hash_words};
+    for seed in [0u64, 1, 7, 0x6e6f_6465] {
+        assert_ne!(hash_bytes(seed, b"cs:fp_set:Nn"), hash_bytes(seed, b"cs:fp_sub:Nn"));
+        let mut seen = std::collections::HashSet::new();
+        let mut words = std::collections::HashSet::new();
+        for hi in 0..=255u8 {
+            for lo in 0..=255u8 {
+                let mut t = *b"cs:fp_s_?:Nn";
+                t[7] = hi;
+                t[8] = lo;
+                assert!(seen.insert(hash_bytes(seed, &t)), "seed {seed}: bytes {hi} {lo} collide");
+                let w = [0x5f70_665f_3a73_63u64 | (u64::from(hi) << 56), 0x6e4e_3a00 | u64::from(lo)];
+                assert!(words.insert(hash_words(seed, &w)), "seed {seed}: words {hi} {lo} collide");
+            }
+        }
+        assert_ne!(hash_bytes(seed, b"ab"), hash_bytes(seed, b"ab\0"));
+        assert_ne!(hash_bytes(seed, b""), hash_bytes(seed, b"\0"));
+        assert_ne!(hash_words(seed, &[5]), hash_words(seed, &[5, 0]));
+        assert_ne!(hash_words(seed, &[]), hash_words(seed, &[0]));
+    }
+}
