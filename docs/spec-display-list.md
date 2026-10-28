@@ -107,26 +107,28 @@ fonts (PK bitmaps, METAFONT) are lists (their `CharProcs`) drawn through
 the interpreter. A glyph raster cache per (font hash, glyph, size in
 device pixels, sub-pixel offset in quarter pixels), session-long.
 
-## 3. The interpreter and the rasterizer
+## 3. The interpreter and the rasterizer: hayro
 
-Rust, in the same wasm as the engine (`crates/output/render`, new):
+Decided 2026-10-28 (the user, relayed by the frontends session): no
+PDF interpreter of our own. Every content PhiTeX did not generate is
+drawn by **hayro** (Laurenz Stampfl; hayro-syntax, hayro-interpret,
+hayro; MIT or Apache-2.0, compatible with our AGPL; pure Rust, its SIMD
+through fearless_simd, so it builds for wasm32 in the engine's wasm, as
+Typst's web app runs it): included PDF pages, Form XObjects,
+`pdf:literal` and pgf drawings, images and their filters, shadings,
+patterns, transparency, Type 3 fonts. Each is drawn once per (content
+hash, scale, transform's non-translation part) and cached as tiles, so
+its speed rarely matters.
 
-* the interpreter of §1.1's ops, the full imaging model a TeX document
-  carries: paths, every colour space (DeviceGray/RGB/CMYK, CalRGB, Lab,
-  ICCBased, Indexed, Separation, DeviceN), shadings (types 1-7) and
-  patterns (tiling and shading), transparency groups (isolated,
-  knockout), soft masks (alpha and luminosity), blend modes, Type 3
-  fonts, images with every filter (Flate, LZW, RunLength, ASCIIHex,
-  ASCII85, DCT, JPX, JBIG2, CCITT) and their decode arrays, masks and
-  `/SMask`s, Form XObjects, and included PDF pages (`pdftoepdf`'s
-  forms: their own resources, their own fonts);
-* a tile rasterizer (a tiny-skia-class crate; the user's approval of
-  external crates was relayed by the frontends session 2026-10-28, to be
-  confirmed directly before any is added) drawing only the tiles under damage (§1.3), at
-  the viewer's scale; on a zoom, tiles redraw at the new scale while the
-  old ones stay up stretched;
-* opaque objects (a form, an image, a shading) rasterized once per
-  (hash, scale, transform's non-translation part) and cached.
+Ours: the tap (§1), groups and damage (§1.3), the font and glyph cache
+for the text the writer generated (§2: the hot path of a keystroke),
+tiles, the exactness gate. The rasterizer is hayro's own CPU backend
+(vello_cpu), shared by our glyphs and tiles; no second rasterizer.
+
+No fallback still holds: hayro's gaps (blending and isolation, knockout
+groups, colour-key masking, encrypted PDFs; no performance work yet)
+are our bugs, fixed in hayro and contributed upstream, never routed
+around; the coverage gate (§5.2) counts what hayro did not draw.
 
 ## 4. The reader (for the gate only)
 
