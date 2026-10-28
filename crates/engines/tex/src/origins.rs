@@ -177,6 +177,46 @@ impl GlyphTap for Recorder {
             ..Code::default()
         });
     }
+
+    /// A native word's glyphs: the first carries the word's text (as a
+    /// ligature its characters), the others are its node's further
+    /// codes.
+    fn native(&mut self, _font: FontId, text: &[u16], glyphs: &[(Scaled, Scaled, Scaled)], size: Scaled) {
+        // (a glyph with no text, `\XeTeXglyph`, a math font's: a glyph
+        // no character reads as)
+        if text.is_empty() {
+            for &(h, v, w) in glyphs {
+                self.g.codes.push(Code {
+                    kind: GLYPH,
+                    first: true,
+                    ch: 0xFFFD,
+                    h,
+                    v,
+                    w,
+                    size,
+                    ..Code::default()
+                });
+            }
+            return;
+        }
+        let at = u32::try_from(self.g.lig.len()).unwrap_or(u32::MAX);
+        if !glyphs.is_empty() {
+            self.g.lig.extend_from_slice(text);
+        }
+        for (i, &(h, v, w)) in glyphs.iter().enumerate() {
+            self.g.codes.push(Code {
+                kind: GLYPH,
+                first: i == 0,
+                ch: text[0],
+                lig_n: if i == 0 { u16::try_from(text.len()).unwrap_or(u16::MAX) } else { 0 },
+                lig: at,
+                h,
+                v,
+                w,
+                size,
+            });
+        }
+    }
 }
 
 /// The pages' glyphs by the value store and the page's identity in the
@@ -223,6 +263,31 @@ pub(crate) struct NodeScan {
     words: Vec<(u32, u32, u64)>,
     /// Its control sequences' byte ranges (`\\LaTeX`), in order.
     calls: Vec<(u32, u32)>,
+}
+
+/// A character as the matcher reads it: the dashes and quotes TeX's
+/// ligatures make (`---`, `--`, ` `` `, `''`) as the characters they are
+/// typed with, on both sides (XeTeX's `tex-text` mapping puts `—` in a
+/// native word where the source has `---`, or the source has `—`
+/// itself), each folded ([`fold`]).
+fn folded(c: char) -> &'static [char] {
+    match c {
+        '\u{2014}' => &['-', '-', '-'],
+        '\u{2013}' => &['-', '-'],
+        '\u{201C}' => &['`', '`'],
+        '\u{201D}' => &['\'', '\''],
+        '\u{2018}' => &['`'],
+        '\u{2019}' => &['\''],
+        _ => &[],
+    }
+}
+
+/// Character `c` read ([`folded`], [`fold`]), each told `f`.
+fn each_folded(c: char, mut f: impl FnMut(char)) {
+    match folded(c) {
+        [] => f(fold(c)),
+        cs => cs.iter().for_each(|&x| f(x)),
+    }
 }
 
 /// Latin-1 accented letters folded to their base letter.
@@ -338,11 +403,11 @@ pub(crate) fn scan(t: &str) -> NodeScan {
                         .ok()
                         .and_then(|s| s.chars().next())
                         .unwrap_or(c);
-                    cands.push((fold(ch), at(i), at(i + n) - at(i)));
+                    each_folded(ch, |x| cands.push((x, at(i), at(i + n) - at(i))));
                     i += n;
                     continue;
                 }
-                cands.push((fold(c), at(i), at(i + 1) - at(i)));
+                each_folded(c, |x| cands.push((x, at(i), at(i + 1) - at(i))));
             }
         }
         i += 1;
@@ -380,6 +445,22 @@ fn shingle(ws: &[u64]) -> u64 {
     hash_words(0x7368_696e, ws)
 }
 
+/// The shingles of five words in a row with one of the middle three
+/// left out.
+fn skip_one(s: &[u64]) -> [u64; 3] {
+    [1, 2, 3].map(|k| {
+        let mut w = [0u64; 4];
+        let mut i = 0;
+        for (j, &x) in s.iter().enumerate() {
+            if j != k {
+                w[i] = x;
+                i += 1;
+            }
+        }
+        shingle(&w)
+    })
+}
+
 impl Index {
     pub(crate) fn new(nodes: Vec<Node>) -> Index {
         let mut ix = Index {
@@ -391,6 +472,13 @@ impl Index {
             let hs: Vec<u64> = n.scan.words.iter().map(|w| w.2).collect();
             for s in hs.windows(4) {
                 add(&mut ix.shingles, shingle(s), k);
+            }
+            // (and four of five in a row, the middle one left out: a word
+            // no page shows, a label's, between them)
+            for s in hs.windows(5) {
+                for x in skip_one(s) {
+                    add(&mut ix.shingles, x, k);
+                }
             }
             for w in &n.scan.words {
                 if w.1 - w.0 >= 4 {
@@ -484,12 +572,23 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
     // (each glyph's atoms: a range)
     let mut glyph_atoms: Vec<(u32, u32)> = Vec::new();
     for (i, c) in g.codes.iter().enumerate() {
-        if c.kind != GLYPH || !c.first {
+        if c.kind != GLYPH {
+            continue;
+        }
+        // (a node's further codes: its extent to their end, a native
+        // word's glyphs after its first)
+        if !c.first {
+            if let Some(gl) = glyphs.last_mut()
+                && c.v == gl.v
+                && c.h + c.w > gl.h + gl.w
+            {
+                gl.w = c.h + c.w - gl.h;
+            }
             continue;
         }
         let a = u32::try_from(atoms.len()).unwrap_or(u32::MAX);
         for ch in g.chars(c) {
-            atoms.push(Atom { ch: fold(ch) });
+            each_folded(ch, |x| atoms.push(Atom { ch: x }));
         }
         glyph_atoms.push((a, u32::try_from(atoms.len()).unwrap_or(u32::MAX)));
         glyphs.push(Glyph {
@@ -511,9 +610,13 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
             let gap = gl.h > p.h + p.w + p.size.max(1) / 6 || gl.h < p.h - p.size.max(1) / 2;
             if line || gap {
                 // (the next line's: just below, not a page's foot)
+                // (a glyph that is a hyphen alone: not a dash, read as
+                // hyphens too, [`folded`])
+                let (ha, hb) = glyph_atoms[k - 1];
                 let hyphen = line
                     && cur.len() > 1
-                    && cur.last().is_some_and(|&a| atoms[a as usize].ch == '-')
+                    && hb == ha + 1
+                    && atoms[ha as usize].ch == '-'
                     && gl.v > p.v
                     && (gl.v - p.v) * 5 <= 8 * p.size.max(gl.size);
                 if hyphen {
@@ -539,8 +642,15 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
         .collect();
     // which nodes: the shingles' votes
     let mut votes: FxHashMap<u32, f64> = FxHashMap::default();
-    for s in whash.windows(4) {
-        if let Some(ns) = ix.shingles.get(&shingle(s))
+    // (four words in a row, and four of five with one of the middle
+    // left out: a run of glyphs no source word gives, a cross-reference's
+    // `??`, a counter, between them)
+    let page_shingles = whash
+        .windows(4)
+        .map(shingle)
+        .chain(whash.windows(5).flat_map(skip_one));
+    for sh in page_shingles {
+        if let Some(ns) = ix.shingles.get(&sh)
             && ns.len() <= CAP
         {
             #[allow(clippy::cast_precision_loss)]
@@ -593,21 +703,13 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
     let mut src_used: phitex_defuse::FxHashSet<(u32, u32)> = phitex_defuse::FxHashSet::default();
     // (the heaviest cluster with every word of the page; then it and the
     // other clusters again with the runs of words left: floats,
-    // footnotes, captions)
-    let passes: Vec<usize> = order
-        .first()
-        .into_iter()
-        .copied()
-        .chain(
-            order
-                .iter()
-                .copied()
-                .enumerate()
-                .filter(|&(i, ci)| i == 0 || clusters[ci].2 >= 2.0)
-                .map(|x| x.1),
-        )
-        .collect();
-    for (round, &ci) in passes.iter().enumerate() {
+    // footnotes, captions, a title; a later pass again while it matches
+    // runs, the page's order no longer theirs: a footnote after the
+    // text that follows its mark)
+    let mut passes: Vec<usize> = order.first().into_iter().copied().chain(order.iter().copied()).collect();
+    let mut round = 0;
+    while round < passes.len() {
+        let ci = passes[round];
         let (a, b, _) = clusters[ci];
         // (and the nodes around it too short to vote: a heading, an
         // environment's line)
@@ -678,7 +780,19 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
             }
             out
         };
+        if debug {
+            eprintln!(
+                "origins: round {round} cluster {:?} nodes {a}..={b}: {} free, {} src words, {} pairs",
+                clusters[ci],
+                pa.len(),
+                pb.len(),
+                pairs.len()
+            );
+        }
         let pairs = keep_run(&pairs);
+        if round > 0 && !pairs.is_empty() {
+            passes.insert(round + 1, ci);
+        }
         for &(i, j) in &pairs {
             let wi = free[i];
             word_done[wi] = true;
@@ -745,6 +859,7 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
                 }
             }
         }
+        round += 1;
     }
     // the characters left between two matched ones of one node: matched
     // to that node's characters between them (`footnote*` against
@@ -915,6 +1030,47 @@ fn synthesize(glyphs: &[Glyph], gorg: &mut [Org], ix: &Index) {
                 synth: true,
             },
             _ => Org::NONE,
+        };
+        // (a run with no glyph of its line placed, a page's number, a
+        // running head, a heading's counter on a line of its own: the
+        // call after the glyph placed before it in the page's order, or
+        // before the one after it; else that place itself)
+        let o = if o.node != NO_NODE {
+            o
+        } else if k > 0 && gorg[k - 1].node != NO_NODE {
+            let p = gorg[k - 1];
+            first_call(p.node, p.to, p.to + 64).map_or(
+                Org {
+                    node: p.node,
+                    from: p.to,
+                    to: p.to,
+                    synth: true,
+                },
+                |(n, a, b)| Org {
+                    node: n,
+                    from: a,
+                    to: b,
+                    synth: true,
+                },
+            )
+        } else if e < glyphs.len() && gorg[e].node != NO_NODE {
+            let n = gorg[e];
+            last_call(n.node, n.from.saturating_sub(64), n.from).map_or(
+                Org {
+                    node: n.node,
+                    from: n.from,
+                    to: n.from,
+                    synth: true,
+                },
+                |(m, a, b)| Org {
+                    node: m,
+                    from: a,
+                    to: b,
+                    synth: true,
+                },
+            )
+        } else {
+            Org::NONE
         };
         for x in &mut gorg[k..e] {
             *x = o;
@@ -1367,6 +1523,9 @@ pub(crate) struct State {
     answers: Mutex<FxHashMap<u64, (u64, Arc<PageOrigins>)>>,
     files: Mutex<Vec<String>>,
     last: Mutex<Last>,
+    /// The PDF a DVI or XDV build's file became, as its client made it
+    /// ([`crate::Build::set_origins_pdf`]): its forms' codes.
+    pdf: Mutex<Option<Arc<Vec<u8>>>>,
 }
 
 /// The answers [`crate::Build::origins_changed`] gave last, and the
@@ -1666,6 +1825,22 @@ fn answer(
 }
 
 impl crate::Build {
+    /// The PDF a DVI or XDV file became (dvipdfmx, xdvipdfmx), made by
+    /// the client: where a page draws a picture or a form, the codes it
+    /// shows are counted in it. A PDF build's file is its own.
+    pub fn set_origins_pdf(&self, pdf: Arc<Vec<u8>>) {
+        *self.origins_state().pdf.locked() = Some(pdf);
+    }
+
+    /// The PDF the pages' codes are counted in: the client's
+    /// ([`Self::set_origins_pdf`]), or the build's file.
+    fn origins_pdf(&self) -> Arc<Vec<u8>> {
+        if let Some(p) = self.origins_state().pdf.locked().clone() {
+            return p;
+        }
+        self.output_bytes()
+    }
+
     /// Page `k`'s glyph origins (0 the first; docs/note-origins.md): per
     /// code the page shows, in `pdftext::page_codes`' order, the file
     /// ([`Self::origin_files`]) and byte range it came from, in the
@@ -1677,7 +1852,7 @@ impl crate::Build {
     pub fn page_origins(&self, k: usize) -> Option<Arc<PageOrigins>> {
         let st = self.origins_state();
         let cx = st.ctx(self.origins_input());
-        answer(st, &cx, k, &|| self.output_bytes())
+        answer(st, &cx, k, &|| self.origins_pdf())
     }
 
     /// Every page's origins ([`Self::page_origins`]), made with one
@@ -1687,7 +1862,7 @@ impl crate::Build {
         let st = self.origins_state();
         let cx = st.ctx(self.origins_input());
         let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
-        let get = || pdf.get_or_init(|| self.output_bytes()).clone();
+        let get = || pdf.get_or_init(|| self.origins_pdf()).clone();
         (0..cx.inp.shown.len())
             .map(|k| answer(st, &cx, k, &get))
             .collect()
@@ -1712,7 +1887,7 @@ impl crate::Build {
         let cx = st.ctx(inp);
         let t2 = t0.elapsed();
         let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
-        let get = || pdf.get_or_init(|| self.output_bytes()).clone();
+        let get = || pdf.get_or_init(|| self.origins_pdf()).clone();
         let pages = (0..cx.inp.shown.len()).map(|k| answer(st, &cx, k, &get)).collect();
         let t3 = t0.elapsed();
         let files = st.files.locked().clone();

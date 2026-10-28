@@ -1067,7 +1067,13 @@ impl Session {
                 self.job.pdf_date,
                 &dir,
             ) {
-                Ok(p) => pdf_bytes = Arc::new(p),
+                Ok(p) => {
+                    pdf_bytes = Arc::new(p);
+                    // (the glyph origins' codes are this PDF's)
+                    if self.job.origins || self.job.synctex {
+                        b.set_origins_pdf(pdf_bytes.clone());
+                    }
+                }
                 Err(e) => errors.push(e),
             }
             lap(&mut phases, "xdvipdfmx");

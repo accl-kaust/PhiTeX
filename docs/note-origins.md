@@ -142,8 +142,8 @@ none.
    characters (`fi` is `f i`, `--` is `- -`, ` `` ` is `` ` ` ``).
    Words split where the next glyph is on another baseline (`v`) or
    starts more than a fifth of an em after the last one ends (`h + w`).
-   A word ending in `-` at a line end is joined to the next line's
-   first word (a hyphenation; the `-` is synthesized, as the old
+   A word ending in a glyph that is `-` alone at a line end is joined
+   to the next line's first word (a hyphenation; the `-` is synthesized, as the old
    core's break hyphen was).
 2. **Source text.** A node's text scanned as TeX reads a document:
    control words and symbols (`\emph`, `\'`), comments (and the
@@ -152,7 +152,10 @@ none.
    candidate with its byte range (UTF-8 decoded, `é` matching T1's
    `é`; a folded comparison lets `\'e`'s `e` match `é`).
 3. **Which nodes.** The page's words looked up in an index of the text
-   nodes' 4-word shingles (hashes, weighted by how rare they are; built
+   nodes' 4-word shingles, and of 4 of 5 words in a row with one of
+   the middle three left out on both sides, so that a run of glyphs no
+   source word gives (a `??`, a counter) or a source word no glyph
+   shows (a label) does not break them (hashes, weighted by how rare they are; built
    when origins are first asked for, per text version, nodes an edit
    made indexed again): the page's nodes are the run of nodes in
    document order holding most of its weight; a tie between equal texts
@@ -175,13 +178,20 @@ none.
    the characters left between two matched ones of one node
    (`footnote*` against `footnote\footnote*`). Last, the page's
    unmatched runs of three words or more aligned again against every
-   cluster: floats, footnotes, captions.
+   cluster, each pass repeated while it matches runs (a footnote's
+   words come after the text that follows its mark: one pass's
+   in-order alignment takes the longer run, the next the footnote's):
+   floats, footnotes, captions, a title.
 5. **What the unmatched get.** A glyph between two matched glyphs of
    the same node on its baseline is *synthesized*: its range is the
    source between them, narrowed to the first control sequence there
    (`\LaTeX`, `\ref{x}`, `\thesection`), as the old core gave a macro's
-   glyphs the call's range. Any other (a running head, a page number,
-   `\pdfliteral` text, a form's) has none.
+   glyphs the call's range. A run with no glyph of its line placed (a
+   page number, a running head, a counter on a line of its own) gets
+   the first control sequence after the glyph placed before it in the
+   page's order (else the last before the one placed after it), or
+   that place itself, an empty range: every glyph has an origin. A
+   code no character made (`\pdfliteral` text, a form's) has none.
 
 Every step is a function of the glyph list and the node texts:
 deterministic, and the same at every thread count.
@@ -344,12 +354,22 @@ What it needs beyond the origins:
 
 ## 7. What it does not cover
 
-- The DVI writer (a DVI build's viewer PDF is dvipdfmx's) and XDV
-  native words: the tap is a trait of the writer; XDV's is on agent
-  "xetex"'s list.
+- A DVI or XDV build's PDF is dvipdfmx's (xdvipdfmx's): the DVI
+  writer has the tap (`DviWriter::set_tap`), positions from dvipdfmx's
+  origin an inch in, a native word one code a glyph (`GlyphTap::native`,
+  the first carrying the word's text, each glyph the word's bytes),
+  `pdf:image`/`pdf:uxobj` a form drawn, `pdf:literal`/`content`/`code`
+  a literal; the forms' codes are counted in the client's PDF
+  (`Build::set_origins_pdf`). The matcher reads TeX's ligature dashes
+  and quotes as typed on both sides (`—` as `---`, `’` as `'`: XeTeX's
+  `tex-text` mapping puts the former in its words). Not covered there: a virtual font's
+  character (one code; dvipdfmx shows its packet's), text between
+  `pdf:bxobj` and `pdf:exobj` (the form's, told as the page's), `\mag`
+  other than 1000, characters past the BMP in a native word (two
+  units, read as two characters).
 - Glyphs whose text is nowhere in the sources (a counter, `\today`, a
-  running head made from marks, a form's text): none, or synthesized
-  with the call's range (2.2.5).
+  running head made from marks): synthesized, a call's range or a
+  place (2.2.5), not the text that made them; a form's text has none.
 - Repeated identical text: the alignment keeps a page's text together
   (§2.2.4); a page made only of a sentence repeated elsewhere, with
   nothing around it to place it, takes the first copy.

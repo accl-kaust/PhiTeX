@@ -38,6 +38,15 @@ pub trait GlyphTap: Send + Sync {
     /// A form or an included page drawn (`Do`): its codes are its own
     /// stream's.
     fn xobject(&mut self);
+    /// A native word or glyph of XeTeX's XDV file (`font` `size` big):
+    /// its text in UTF-16 units (empty: a glyph, `\XeTeXglyph`), and
+    /// each glyph's position (sp from the page's top left) and advance;
+    /// the PDF made from the file (xdvipdfmx) shows one code a glyph.
+    /// Untold, its codes are none.
+    fn native(&mut self, font: FontId, text: &[u16], glyphs: &[(Scaled, Scaled, Scaled)], size: Scaled) {
+        let _ = (font, text, size);
+        self.none(glyphs.len());
+    }
 }
 
 /// The writer's tap and the character node being written: outside the

@@ -49,7 +49,8 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
     } else {
         let pages = v.seq_to_vec(cx.fold(v.field("pages"), None, None)?);
         n = pages.len();
-        dvi_file(cx, &pages, o.xe.get())
+        let origins = o.origins.load(std::sync::atomic::Ordering::Relaxed);
+        dvi_file(cx, &pages, o.xe.get(), origins)
     };
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -279,7 +280,12 @@ fn latin1(bytes: &[u8]) -> String {
 /// value is those bytes as characters. No page: no file (§642), the
 /// empty string.
 #[allow(clippy::too_many_lines)]
-fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId], xe: Option<&crate::xetex::XeTeX>) -> Result<ValueId, Stop> {
+fn dvi_file(
+    cx: &mut Ctx<'_>,
+    pages: &[ValueId],
+    xe: Option<&crate::xetex::XeTeX>,
+    origins: bool,
+) -> Result<ValueId, Stop> {
     let xdv = xe.is_some();
     let v = cx.values();
     if pages.is_empty() {
@@ -320,39 +326,7 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId], xe: Option<&crate::xetex::XeTeX
     let mut defs: phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef> =
         phitex_defuse::FxHashMap::default();
     for &page in &pages[start..] {
-        for fx in list_of(v, page)
-            .get(2)
-            .map(|&l| list_of(v, l))
-            .unwrap_or_default()
-        {
-            let id = u32::try_from(int_of(v, fx)).unwrap_or(0);
-            if defs.contains_key(&id) {
-                continue;
-            }
-            let name = crate::fields::font_cell_name(i64::from(id), crate::fields::FontCell::Info);
-            let info = cx.read(v.field(&name))?;
-            if let Some(xe) = xe
-                && let Some(nf) = crate::native::of_info(xe, v, info)
-            {
-                // (XeTeX's native font: `define_native_font`)
-                defs.insert(
-                    id,
-                    phitex_dvi::FontDef {
-                        checksum: [0; 4],
-                        size: nf.size,
-                        design_size: nf.font.design_size,
-                        area: Vec::new(),
-                        name: nf.font.name_of_file.as_bytes().to_vec(),
-                        widths: Vec::new(),
-                        native: Some(nf.def.clone()),
-                    },
-                );
-            } else if let Some(i) = crate::fonts::info(v, info)
-                && let Some(l) = crate::fonts::load_info(v, &i)
-            {
-                defs.insert(id, crate::fonts::font_def(&l, &i.name));
-            }
-        }
+        page_defs(cx, page, xe, &mut defs)?;
     }
     // (spec-final §6.3: each page written apart, on the executor, the
     // fonts defined before it the prefix of the pages' own font use;
@@ -379,7 +353,7 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId], xe: Option<&crate::xetex::XeTeX
                     wi.assume_defined(f, d.clone());
                 }
             }
-            dvi_page_kept(v, &mut wi, rest[i], &defs, xdv)
+            dvi_page_kept(v, &mut wi, rest[i], &defs, xdv, origins)
         })
     };
     for (i, (&page, pb)) in rest.iter().zip(apart).enumerate() {
@@ -393,8 +367,69 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId], xe: Option<&crate::xetex::XeTeX
         }
     }
     *dvi_memo().locked() = Some(DviMemo { head, ids, snaps });
+    // (origins on: each page's glyphs kept by its value, and the pages'
+    // values as the file shows them, `crate::origins`; the pages kept
+    // from the last file whose glyphs were not are written for them)
+    if origins {
+        for &page in &pages[..start] {
+            if !crate::origins::has(v.instance(), page.raw()) {
+                page_defs(cx, page, xe, &mut defs)?;
+                let mut wi = new_writer(mag, &comment, xdv);
+                wi.set_font_numbers(nums.clone());
+                let _ = dvi_page_kept(v, &mut wi, page, &defs, xdv, true);
+            }
+        }
+        let shown = v.list(pages.iter().map(|p| v.int(i64::from_ne_bytes(p.raw().to_ne_bytes()))).collect());
+        cx.contribute(v.field(crate::pdfout::SHOWN), v.seq_unit(shown));
+    }
     let bytes = w.finish();
     Ok(v.intern(Value::Str(latin1(&bytes).into_boxed_str())))
+}
+
+/// The definitions of the fonts page entry `page` uses, by id, put in
+/// `defs` where not there: resolved from the fonts' fields (a font's
+/// fields are defined once, at its load).
+fn page_defs(
+    cx: &mut Ctx<'_>,
+    page: ValueId,
+    xe: Option<&crate::xetex::XeTeX>,
+    defs: &mut phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef>,
+) -> Result<(), Stop> {
+    let v = cx.values();
+    for fx in list_of(v, page)
+        .get(2)
+        .map(|&l| list_of(v, l))
+        .unwrap_or_default()
+    {
+        let id = u32::try_from(int_of(v, fx)).unwrap_or(0);
+        if defs.contains_key(&id) {
+            continue;
+        }
+        let name = crate::fields::font_cell_name(i64::from(id), crate::fields::FontCell::Info);
+        let info = cx.read(v.field(&name))?;
+        if let Some(xe) = xe
+            && let Some(nf) = crate::native::of_info(xe, v, info)
+        {
+            // (XeTeX's native font: `define_native_font`)
+            defs.insert(
+                id,
+                phitex_dvi::FontDef {
+                    checksum: [0; 4],
+                    size: nf.size,
+                    design_size: nf.font.design_size,
+                    area: Vec::new(),
+                    name: nf.font.name_of_file.as_bytes().to_vec(),
+                    widths: Vec::new(),
+                    native: Some(nf.def.clone()),
+                },
+            );
+        } else if let Some(i) = crate::fonts::info(v, info)
+            && let Some(l) = crate::fonts::load_info(v, &i)
+        {
+            defs.insert(id, crate::fonts::font_def(&l, &i.name));
+        }
+    }
+    Ok(())
 }
 
 /// A DVI writer, or XeTeX's XDV writer.
@@ -460,6 +495,7 @@ fn dvi_page_kept(
     page: ValueId,
     defs: &phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef>,
     xdv: bool,
+    origins: bool,
 ) -> Option<phitex_dvi::PageBytes> {
     let (bx, counts, whats) = dvi_parts(v, page)?;
     (w.h_offset, w.v_offset) = dvi_offsets(v, page);
@@ -468,7 +504,19 @@ fn dvi_page_kept(
     if xdv {
         w.page_size = xdv_page_size(v, page);
     }
-    w.ship_out_kept(&bx, counts, &fonts, &mut wh).ok()
+    // (origins on: the page's glyphs as dvipdfmx's PDF shows them, kept
+    // by the page's value, `crate::origins`)
+    let out = origins.then(|| {
+        let (r, out) = crate::origins::Recorder::new();
+        w.set_tap(Some(Box::new(r)));
+        out
+    });
+    let made = w.ship_out_kept(&bx, counts, &fonts, &mut wh).ok();
+    drop(w.set_tap(None));
+    if let Some(g) = out.and_then(|o| o.locked().take()) {
+        crate::origins::keep(v.instance(), page.raw(), g);
+    }
+    made
 }
 
 /// `\hoffset` and `\voffset` as the page's `\shipout` read them (§640:

@@ -517,11 +517,22 @@ pub fn origin_words(src: &str) -> Vec<(usize, String)> {
 /// is `pdftext::page_codes`', every word of [`origin_words`] has each
 /// of its bytes shown by a glyph that came from it, and every glyph
 /// placed on one byte shows the character there.
-#[allow(dead_code, clippy::many_single_char_names, clippy::needless_range_loop)]
+#[allow(dead_code)]
 pub fn origin_failures(b: &Build, src: &str, file: &str) -> Vec<String> {
+    origin_failures_in(b, &b.output_bytes(), src, file, true, true)
+}
+
+/// [`origin_failures`] against `pdf`, the PDF the build's file became
+/// (a DVI or XDV build's: dvipdfmx's); `chars`: a code is its
+/// character where it is ASCII (not a native font's glyph id); `words`:
+/// the words of the source are checked too. Every glyph (a code a
+/// character node made: its font size not 0) has an origin, its source
+/// bytes or a call's range synthesized.
+#[allow(dead_code, clippy::many_single_char_names, clippy::needless_range_loop)]
+pub fn origin_failures_in(b: &Build, pdf: &[u8], src: &str, file: &str, chars: bool, words: bool) -> Vec<String> {
     use std::sync::Arc;
     let mut fails = Vec::new();
-    let pdf: Arc<[u8]> = Arc::from(b.output_bytes().as_slice());
+    let pdf: Arc<[u8]> = Arc::from(pdf);
     let doc = phitex_codecs::pdfread::Doc::open(&pdf).expect("the PDF opens");
     let pages = b.all_page_origins();
     let files = b.origin_files();
@@ -529,7 +540,23 @@ pub fn origin_failures(b: &Build, src: &str, file: &str) -> Vec<String> {
         return vec![format!("no file {file} among {files:?}")];
     };
     let f = u32::try_from(f).unwrap();
-    let bytes = src.as_bytes();
+    // (the origins are the file's bytes: a text of Latin-1 characters,
+    // as a document's bytes are given, has one a character)
+    let latin = src.chars().all(|c| u32::from(c) <= 0xFF);
+    let bytes: Vec<u8> = if latin {
+        src.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(0)).collect()
+    } else {
+        src.as_bytes().to_vec()
+    };
+    let mut byte_at: Vec<usize> = vec![0; src.len() + 1];
+    let mut k = 0;
+    for (i, c) in src.char_indices() {
+        for j in 0..c.len_utf8() {
+            byte_at[i + j] = k;
+        }
+        k += if latin { 1 } else { c.len_utf8() };
+    }
+    byte_at[src.len()] = k;
     let mut covered = vec![false; bytes.len() + 1];
     for (k, p) in pages.iter().enumerate() {
         let Some(p) = p else {
@@ -541,6 +568,10 @@ pub fn origin_failures(b: &Build, src: &str, file: &str) -> Vec<String> {
             fails.push(format!("page {}: {} origins for {} codes", k + 1, p.len(), codes.len()));
             continue;
         }
+        let none: Vec<usize> = (0..p.len()).filter(|&i| p.size[i] > 0.0 && p.file[i] == u32::MAX).collect();
+        if !none.is_empty() {
+            fails.push(format!("page {}: {} glyphs of {} with no origin (codes {:?})", k + 1, none.len(), p.len(), &none[..none.len().min(24)]));
+        }
         for i in 0..p.len() {
             if p.file[i] != f || p.is_synth(i) {
                 continue;
@@ -550,7 +581,7 @@ pub fn origin_failures(b: &Build, src: &str, file: &str) -> Vec<String> {
                 covered[s..e].iter_mut().for_each(|c| *c = true);
             }
             let c = codes[i].code;
-            if e == s + 1 && c < 128 && bytes.get(s).is_some_and(u8::is_ascii_alphanumeric) && u32::from(bytes[s]) != c {
+            if chars && e == s + 1 && c < 128 && bytes.get(s).is_some_and(u8::is_ascii_alphanumeric) && u32::from(bytes[s]) != c {
                 fails.push(format!(
                     "page {}: code {i} {:?} placed at byte {s} {:?}",
                     k + 1,
@@ -560,8 +591,8 @@ pub fn origin_failures(b: &Build, src: &str, file: &str) -> Vec<String> {
             }
         }
     }
-    for (at, w) in origin_words(src) {
-        if !covered[at..at + w.len()].iter().all(|&c| c) {
+    for (at, w) in origin_words(src).into_iter().filter(|_| words) {
+        if !covered[byte_at[at]..byte_at[at + w.len()]].iter().all(|&c| c) {
             fails.push(format!("word {w:?} at byte {at}: not every byte shown by a glyph from it"));
         }
     }

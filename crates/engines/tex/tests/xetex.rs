@@ -358,6 +358,80 @@ fn xelatex_docs() {
     assert!(failed.is_empty(), "failed: {failed:?}");
 }
 
+/// Glyph origins of XeLaTeX's documents (`xelatex_docs`' set, with
+/// TeX Live's PDF of each, xdvipdfmx's of the oracle's XDV): the XDV
+/// writer's tap gives each page as many codes as the PDF's page shows
+/// (`pdftext::page_codes`), every glyph has an origin (its source bytes
+/// or a call's range synthesized), the same at -j1 and -j8, the XDV the same with them on
+/// (docs/note-origins.md). Ignored by default, `PHITEX_GATE=NAME` for
+/// one.
+#[test]
+#[ignore = "the xelatex format: run with --ignored"]
+fn xelatex_glyph_origins() {
+    let fx = common::fixtures();
+    let x = fx.join("xetex");
+    let only = std::env::var("PHITEX_GATE").ok();
+    let mut failed = Vec::new();
+    let mut names: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut dirs = vec![x.join("docs"), fx.join("latex/docs")];
+    if std::env::var_os("TEXMFHOME").is_some() {
+        dirs.push(x.join("cjk"));
+    }
+    for d in dirs {
+        for e in std::fs::read_dir(&d).expect("the documents").flatten() {
+            let f = e.file_name().to_string_lossy().into_owned();
+            if let Some(n) = f.strip_suffix(".tex")
+                && n != "umath-body"
+                && x.join(format!("oracle/docs/{n}.pdf")).is_file()
+                && only.as_ref().is_none_or(|o| o.split(',').any(|x| x == n))
+            {
+                names.push((n.to_owned(), d.clone()));
+            }
+        }
+    }
+    names.sort();
+    for (name, dir) in &names {
+        let want = std::fs::read(x.join(format!("oracle/docs/{name}.xdv"))).expect("the oracle");
+        let pdf = Arc::new(std::fs::read(x.join(format!("oracle/docs/{name}.pdf"))).expect("the oracle's PDF"));
+        let src = common::read(&dir.join(format!("{name}.tex")));
+        let build = |threads: usize| {
+            let opts = Options {
+                epoch: Some(0),
+                threads: Some(threads),
+                xetex: Some(xetex()),
+                origins: true,
+                prelude_jobname: "xelatex".to_owned(),
+                finder: xelatex_finder(vec![dir.clone()]),
+                ..common::options(&format!("./{name}.tex"), name, &common::dvi_comment(&want), dir)
+            };
+            let b = common::build(opts, Some("\\input xelatex.ini\n"), &src);
+            b.set_origins_pdf(pdf.clone());
+            b
+        };
+        let b = build(1);
+        if let Some(d) = common::first_difference(&b.output().0, &want) {
+            eprintln!("{name}: the XDV with origins on: {d}");
+            failed.push(format!("{name} xdv"));
+            continue;
+        }
+        let f = common::origin_failures_in(&b, &pdf, &src, &format!("{name}.tex"), false, false);
+        let pages = b.all_page_origins();
+        let codes: usize = pages.iter().flatten().map(|p| p.len()).sum();
+        if f.is_empty() {
+            eprintln!("ok {name}: {} pages, {codes} codes", pages.len());
+        } else {
+            eprintln!("{name}: origins:\n{}", f.join("\n"));
+            failed.push(name.clone());
+        }
+        let b8 = build(8);
+        if b8.all_page_origins() != pages {
+            eprintln!("{name}: -j8's origins are not -j1's");
+            failed.push(format!("{name} -j8"));
+        }
+    }
+    assert!(failed.is_empty(), "failed: {failed:?}");
+}
+
 /// The native runner of `\write18`'s commands, as the CLI has it.
 #[path = "../../../cli/src/shell.rs"]
 mod process_hook;

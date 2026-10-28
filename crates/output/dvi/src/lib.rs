@@ -15,6 +15,8 @@
 
 use std::collections::BTreeMap;
 
+use phitex_pdf::GlyphTap;
+
 use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::glue::{GlueSign, Order};
@@ -299,7 +301,24 @@ pub struct DviWriter {
     /// The next page's `\pdfpagewidth` and `\pdfpageheight` (XDV: the
     /// `pdf:pagesize` special each page begins with).
     pub page_size: (Scaled, Scaled),
+    /// The tap told the glyphs written ([`DviWriter::set_tap`]).
+    tap: Tap,
 }
+
+/// The writer's tap (`phitex_pdf::GlyphTap`): outside the bytes, and
+/// not cloned (a clone tells none).
+#[derive(Default)]
+struct Tap(Option<Box<dyn GlyphTap>>);
+
+impl Clone for Tap {
+    fn clone(&self) -> Tap {
+        Tap(None)
+    }
+}
+
+/// dvipdfmx's origin, one inch from the page's top and left edges
+/// (TeX's `one_true_inch`): the tap's positions are from the corner.
+const ONE_TRUE_INCH: Scaled = 4736287;
 
 /// The output buffer's state at a byte (§595–§598): `dvi_ptr`,
 /// `dvi_limit` and how many bytes back `dvi_gone` is.
@@ -498,6 +517,7 @@ impl DviWriter {
             doing_leaders: false,
             cur_dir: 0,
             rec: None,
+            tap: Tap(None),
         };
         // §617
         w.dvi_out(op::PRE);
@@ -511,6 +531,13 @@ impl DviWriter {
             w.dvi_out(b);
         }
         w
+    }
+
+    /// Sets the tap the writer tells the glyphs it writes (`None`:
+    /// none), as dvipdfmx's PDF shows them, and gives back the one set
+    /// before. The bytes are the same either way.
+    pub fn set_tap(&mut self, t: Option<Box<dyn GlyphTap>>) -> Option<Box<dyn GlyphTap>> {
+        std::mem::replace(&mut self.tap.0, t)
     }
 
     /// The bytes so far.
@@ -797,6 +824,9 @@ impl DviWriter {
         if let Some(s) = wh(h, self.doing_leaders) {
             self.synch_h();
             self.synch_v();
+            if let Some(t) = self.tap.0.as_mut() {
+                tap_special(t.as_mut(), &s);
+            }
             if s.len() < 256 {
                 self.dvi_out(op::XXX1);
                 self.dvi_out(low(u32::try_from(s.len()).unwrap_or(0)));
@@ -810,14 +840,20 @@ impl DviWriter {
         }
     }
 
-    /// One character in an hlist (§620–§621).
-    fn char_out(&mut self, f: FontId, c: u16, fonts: &dyn Fn(FontId) -> FontDef) {
+    /// One character in an hlist (§620–§621); `lig`: the characters a
+    /// ligature replaces, for the tap.
+    fn char_out(&mut self, f: FontId, c: u16, lig: &[u16], fonts: &dyn Fn(FontId) -> FontDef) {
         self.synch_h();
         self.synch_v();
         self.set_font(f, fonts);
         // §620 (web2c: a character that doesn't exist is not output)
         let width = self.fonts[&f].widths.get(usize::from(c)).copied().flatten();
         if let Some(w) = width {
+            if let Some(t) = self.tap.0.as_mut() {
+                let size = self.fonts[&f].size;
+                let (h, v) = (self.cur_h + ONE_TRUE_INCH, self.cur_v + ONE_TRUE_INCH);
+                t.code((f, c), lig, true, f, low(u32::from(c)), h, v, w, size);
+            }
             let c = low(u32::from(c));
             if c >= 128 {
                 self.dvi_out(op::SET1);
@@ -835,6 +871,9 @@ impl DviWriter {
         self.synch_h();
         self.synch_v();
         self.set_font(n.font, fonts);
+        if self.tap.0.is_some() {
+            self.tap_native(n);
+        }
         match n.kind {
             NativeKind::Glyph => {
                 self.dvi_out(op::SET_GLYPHS);
@@ -863,6 +902,30 @@ impl DviWriter {
         }
         self.cur_h += n.width;
         self.dvi_h = self.cur_h;
+    }
+
+    /// Native word or glyph `n`, at the current position, told the tap:
+    /// the glyphs the file shows (a word's, or the glyph's one).
+    fn tap_native(&mut self, n: &Native) {
+        let (h, v) = (self.cur_h + ONE_TRUE_INCH, self.cur_v + ONE_TRUE_INCH);
+        let size = self.fonts.get(&n.font).map_or(0, |d| d.size);
+        let (text, gs): (&[u16], Vec<(Scaled, Scaled, Scaled)>) = match n.kind {
+            NativeKind::Glyph => (&[], vec![(h, v, n.width)]),
+            NativeKind::Word | NativeKind::WordText => (
+                &n.text,
+                n.glyphs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, g)| {
+                        let next = n.glyphs.get(i + 1).map_or(n.width, |x| x.x);
+                        (h + g.x, v, next - g.x)
+                    })
+                    .collect(),
+            ),
+        };
+        if let Some(t) = self.tap.0.as_mut() {
+            t.native(n.font, text, &gs, size);
+        }
     }
 
     /// `make_xdv_glyph_array_data`: the width, the count, each glyph's x
@@ -1171,12 +1234,12 @@ impl DviWriter {
         for p in list {
             let rule = match p {
                 Node::Char { font, ch } => {
-                    self.char_out(*font, *ch, fonts);
+                    self.char_out(*font, *ch, &[], fonts);
                     None
                 }
                 // §652: a ligature is output as its character
                 Node::Lig(l) => {
-                    self.char_out(l.font, l.ch, fonts);
+                    self.char_out(l.font, l.ch, &l.original, fonts);
                     None
                 }
                 Node::Box(bx) => {
@@ -1409,6 +1472,9 @@ impl DviWriter {
                     self.synch_h();
                     self.synch_v();
                     self.set_font(n.font, fonts);
+                    if self.tap.0.is_some() {
+                        self.tap_native(n);
+                    }
                     self.dvi_out(op::SET_GLYPHS);
                     self.dvi_four(0);
                     self.dvi_two(1);
@@ -1792,4 +1858,24 @@ fn print_scaled(out: &mut String, s: Scaled) {
 /// The low byte of `n`.
 fn low(n: u32) -> u8 {
     n.to_be_bytes()[3]
+}
+
+/// A `\special` told the tap as dvipdfmx draws it: a picture or form
+/// placed (`pdf:image`, `pdf:uxobj`, XeTeX's pictures among them), or
+/// content put in the page's stream (`pdf:literal`, `pdf:content`,
+/// `pdf:code`), whose text's codes the tap counts.
+fn tap_special(t: &mut dyn GlyphTap, s: &[u8]) {
+    let s = s.trim_ascii_start();
+    let Some(rest) = s.strip_prefix(b"pdf:") else {
+        return;
+    };
+    let word = rest
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .map_or(rest, |k| &rest[..k]);
+    match word {
+        b"image" | b"uxobj" => t.xobject(),
+        b"literal" | b"content" | b"code" => t.literal(&rest[word.len()..]),
+        _ => {}
+    }
 }
