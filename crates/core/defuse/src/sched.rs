@@ -497,11 +497,38 @@ impl Pool {
         nodes.len()
     }
 
-    fn find_work(&self, w: &Worker) -> Option<NodeId> {
-        if let Some(n) = w.local.pop() {
-            return Some(n);
-        }
-        if let Some(n) = w.later.pop() {
+    fn find_work(&self, eng: &Engine, w: &Worker) -> Option<NodeId> {
+        // (its placed nodes, then its re-asked ones; but the head of its
+        // block, a node dirty before the evaluation and not run yet, goes
+        // first where it stands before them on the line: a reader re-run
+        // behind a definer still to run reads what that definer will
+        // change, and runs again once it has. Taken the other way, the
+        // re-asks a block's definers make kept their owner from the next
+        // definer: amsldoc at -j8, its preamble's last block run after
+        // 2203 nodes in a quarter of the builds (365 in the rest), every
+        // piece of the document run on the preamble's state and again on
+        // the document's, 13-15 thousand runs against 4)
+        let mine = match w.local.pop() {
+            Some(n) => Some((n, true)),
+            None => w.later.pop().map(|n| (n, false)),
+        };
+        if let Some((n, placed)) = mine {
+            if let Some((b, run)) = w.block.pop() {
+                if eng.node(b).pos_hint() < eng.node(n).pos_hint() {
+                    // (put back where a thief finds it: an idle
+                    // worker runs it meanwhile; held by this one alone,
+                    // the page loop, re-asked by every piece, waited for
+                    // this worker's whole block, para4000 at -j8 10x
+                    // slower)
+                    if placed {
+                        w.local.push(n);
+                    } else {
+                        self.shared.injector.push(n);
+                    }
+                    return Some(b);
+                }
+                w.block.push((b, run));
+            }
             return Some(n);
         }
         if let Some((n, _)) = w.block.pop() {
@@ -697,7 +724,7 @@ impl Pool {
             // (looked for outside the park's lock: a steal is no reason to
             // keep another idle worker or a waker out)
             let seen = self.shared.wakes.load(Ordering::SeqCst);
-            if let Some(n) = self.find_work(w) {
+            if let Some(n) = self.find_work(eng, w) {
                 break Some(n);
             }
             if self.shared.outstanding.load(Ordering::SeqCst) == 0 {
@@ -758,7 +785,7 @@ fn run_worker(
         {
             sp();
         }
-        if let Some(n) = pool.find_work(w) {
+        if let Some(n) = pool.find_work(eng, w) {
             if let Err(e) = work_caught(eng, pool, w, n) {
                 pool.fail(e);
                 break;
@@ -776,7 +803,7 @@ fn run_worker(
         let t = Instant::now();
         let mut found = None;
         for _ in 0..SPINS {
-            if let Some(n) = pool.find_work(w) {
+            if let Some(n) = pool.find_work(eng, w) {
                 found = Some(n);
                 break;
             }
