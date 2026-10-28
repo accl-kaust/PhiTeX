@@ -2850,6 +2850,17 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
                     ps.takes(eng, s)
                 };
                 if !takes {
+                    // (one it holds that this walk's rule passes over: a
+                    // placed text node a claim of the rest took,
+                    // `Ctx::claim_rest`, which a claim of siblings never
+                    // takes: given back, whatever it claims now)
+                    if s.claimer() == Some(me.id) {
+                        s.claimer.store(0, Ordering::Release);
+                        releases.push(s.clone());
+                    }
+                    if k >= want && Some(s.id) == old_end {
+                        done = true;
+                    }
                     continue;
                 }
                 if k < want {
@@ -3936,6 +3947,111 @@ mod tests {
 
         fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             Ok(cx.args()[0])
+        }
+    }
+
+    /// `[f]`: claims the rest of the text (`Ctx::claim_rest`) where f is
+    /// 1, nothing otherwise.
+    struct RestIf;
+
+    impl Operation for RestIf {
+        fn name(&self) -> &'static str {
+            "rest_if"
+        }
+
+        fn text(&self) -> bool {
+            true
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let v = cx.values();
+            if cx.read(crate::values::Field(cx.args()[0]))?.and_then(|x| v.as_int(x)) == Some(1) {
+                cx.claim_rest();
+            } else {
+                cx.claim(0);
+            }
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// `[x]`: a text node.
+    struct Piece;
+
+    impl Operation for Piece {
+        fn name(&self) -> &'static str {
+            "piece"
+        }
+
+        fn text(&self) -> bool {
+            true
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            Ok(cx.args()[0])
+        }
+    }
+
+    /// `[]`: not text; places a `Piece` after itself.
+    struct Placer(crate::api::OpId);
+
+    impl Operation for Placer {
+        fn name(&self) -> &'static str {
+            "placer"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            cx.follow(self.0, vec![cx.values().int(9)]);
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    #[test]
+    fn a_claim_of_the_rest_made_smaller_gives_back_the_placed_text_it_took() {
+        // Built with f = 0, then f = 1: C claims the rest of the text, the
+        // pushed piece T and the piece R that Q (not text) placed. f set to 0 again, C claims
+        // nothing and both run again: R, which no claim of C's siblings
+        // takes, is given back too (amsldoc at sixteen threads: an
+        // `\item` run on a guess that ended the job took the rests of the
+        // pieces after it, and eight stayed taken, their text lost).
+        let e = Engine::new();
+        let piece = e.register(Arc::new(Piece));
+        let rest_if = e.register(Arc::new(RestIf));
+        let placer = e.register(Arc::new(Placer(piece)));
+        let def = e.register(Arc::new(Def));
+        let v = e.values();
+        let f = v.field("f");
+        let u = e.new_unit();
+        let d = e.push(u, def, vec![f.0, v.int(0)]);
+        let c = e.push(u, rest_if, vec![f.0]);
+        e.push(u, placer, vec![]);
+        let t = e.push(u, piece, vec![v.int(1)]);
+        e.evaluate(1).unwrap();
+        let r = e.order(u).into_iter().find(|&n| e.node_info(n).is_some_and(|i| i.op == "piece" && i.parent.is_some())).unwrap();
+        e.replace(d, def, vec![f.0, v.int(1)]);
+        e.evaluate(1).unwrap();
+        for n in [t, r] {
+            assert_eq!(e.node_info(n).unwrap().claimer, Some(c), "taken by the claim of the rest");
+        }
+        e.replace(d, def, vec![f.0, v.int(0)]);
+        e.evaluate(1).unwrap();
+        for n in [t, r] {
+            let i = e.node_info(n).unwrap();
+            assert_eq!((i.state, i.claimer.map(|x| x.raw())), (NodeState::Done, None), "node {}", n.raw());
+        }
+        assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+    }
+
+    /// `[f, x]`: defines f = x.
+    struct Def;
+
+    impl Operation for Def {
+        fn name(&self) -> &'static str {
+            "def"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            cx.define(crate::values::Field(cx.args()[0]), cx.args()[1]);
+            Ok(cx.args()[1])
         }
     }
 
