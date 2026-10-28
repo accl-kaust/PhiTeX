@@ -4479,7 +4479,7 @@ pub(crate) fn prepared_done(reg: &Registry) {
     // (dropped on a thread of their own: a document's thousands of
     // answers are freed beside its evaluation)
     let left = reg.prepared.take_all();
-    std::thread::spawn(move || drop(left));
+    crate::exec::thread(move || drop(left));
 }
 
 /// The hint of a node from its arguments: the extra argument when the

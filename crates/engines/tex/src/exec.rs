@@ -110,6 +110,17 @@ pub fn set_spawn_worker(f: SpawnWorker) {
     let _ = SPAWN.set(f);
 }
 
+/// A thread of the engine's own beside the evaluation, with the workers'
+/// stack ([`phitex_defuse::WORKER_STACK`]), not std's default.
+pub(crate) fn thread<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> std::thread::JoinHandle<T> {
+    std::thread::Builder::new()
+        .stack_size(phitex_defuse::WORKER_STACK)
+        .spawn(f)
+        .expect("a thread")
+}
+
 /// A clock for the executor's counters: nanoseconds from some fixed
 /// point, `None` where the target has none (wasm32: the host's clock is
 /// not reachable from here).
@@ -546,6 +557,7 @@ fn scoped(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
         for _ in 1..threads.min(n.div_ceil(grain)) {
             std::thread::Builder::new()
                 .name("phitex-worker".to_owned())
+                .stack_size(phitex_defuse::WORKER_STACK)
                 .spawn_scoped(sc, work)
                 .expect("a worker thread");
         }

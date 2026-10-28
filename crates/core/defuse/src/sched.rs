@@ -268,13 +268,16 @@ fn spawn_tree<'s, 'e: 's>(
     let w = ws.remove(0);
     pool.shared.spawned.fetch_add(1, Ordering::SeqCst);
     pool.shared.active.fetch_add(1, Ordering::SeqCst);
-    s.spawn(move || {
-        let right = ws.split_off(ws.len() / 2);
-        spawn_tree(s, eng, pool, back, ws);
-        spawn_tree(s, eng, pool, back, right);
-        run_worker(eng, pool, &w, None, None);
-        back.lock().unwrap_or_else(PoisonError::into_inner).push(w);
-    });
+    std::thread::Builder::new()
+        .stack_size(crate::WORKER_STACK)
+        .spawn_scoped(s, move || {
+            let right = ws.split_off(ws.len() / 2);
+            spawn_tree(s, eng, pool, back, ws);
+            spawn_tree(s, eng, pool, back, right);
+            run_worker(eng, pool, &w, None, None);
+            back.lock().unwrap_or_else(PoisonError::into_inner).push(w);
+        })
+        .expect("a worker thread");
 }
 
 /// Spins before parking.

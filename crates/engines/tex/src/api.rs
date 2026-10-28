@@ -4431,7 +4431,7 @@ fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> 
     // takes the answer before its first evaluation, `format_holds`)
     if let Some(c) = given {
         let (finder, cc) = (finder.clone(), c.clone());
-        let h = std::thread::spawn(move || {
+        let h = crate::exec::thread(move || {
             let t1 = std::time::Instant::now();
             let fresh = cc.reads.iter().all(|(n, h)| file_hash(finder(n).as_ref()) == *h);
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {

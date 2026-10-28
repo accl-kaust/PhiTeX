@@ -83,4 +83,10 @@ pub use api::{
 pub use ctx::{Ctx, View};
 pub use read::{alias_of, alias_value};
 pub use engine::Engine;
+
+/// The stack of every thread the engine and its client start: std's
+/// default is smaller, and on wasm32 a thread's stack is heap memory with
+/// no guard page, so an overflow there writes over the heap (another
+/// thread fails later, in the allocator) instead of stopping.
+pub const WORKER_STACK: usize = 8 << 20;
 pub use values::{Collected, Field, FxHashMap, FxHashSet, FxHasher, SeqNode, Value, ValueId, Values, hash_bytes, hash_words};
