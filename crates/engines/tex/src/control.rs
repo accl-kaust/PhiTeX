@@ -2129,46 +2129,75 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// `\\write18{cmd}` with shell escape on (web2c's `runsystem`):
-    /// in restricted mode (2) only a command of TeX Live's
-    /// `shell_escape_commands` is allowed, as kpathsea's
-    /// `shell_cmd_is_allowed` judges it (texmfmp.c). No command runs as
-    /// a process: an allowed command that is one of the tools
+    /// `\\write18{cmd}` with shell escape on (web2c's `runsystem`,
+    /// [`crate::shell::runsystem`]): in restricted mode (2) only a
+    /// command of [`crate::Options::shell_commands`] is allowed, each
+    /// argument quoted; unrestricted (1), any, as written. No command runs
+    /// as a process here: an allowed command that is one of the tools
     /// ([`crate::tools`]) is that tool's node, placed where the command
     /// is ([`Run::tool_command`]): a later read of its output reads what
     /// it made of its input as written up to the command this round; any
-    /// other command is refused with a diagnostic.
+    /// other command runs here through the host's hook
+    /// ([`Run::shell_run`]), or is refused with a diagnostic where the
+    /// client gave no hook.
     fn shell_command(&mut self, cmd: &str) -> R<()> {
         let restricted = self.int32("shellescape")? == 2;
-        let Some(args) = shell_words(cmd) else {
+        let (allowed, hook) = {
+            let o = self.ops.tool_opts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            (o.shell_commands.clone(), o.shell_hook.is_some())
+        };
+        let quoted = match crate::shell::runsystem(cmd, restricted, &allowed) {
+            crate::shell::Decision::QuotationError => {
+                self.log(
+                    "wlog",
+                    &format!("runsystem({cmd})...quotation error in system command."),
+                )?;
+                return Ok(());
+            }
+            crate::shell::Decision::Restricted => {
+                self.log(
+                    "wlog",
+                    &format!("runsystem({cmd})...disabled (restricted)."),
+                )?;
+                return Ok(());
+            }
+            crate::shell::Decision::Any(c) | crate::shell::Decision::Allowed(c) => c,
+        };
+        let done = if restricted {
+            "executed safely (allowed)"
+        } else {
+            "executed"
+        };
+        let words = shell_words(cmd);
+        let name = match &words {
+            Some(w) => w.first().cloned().unwrap_or_default(),
+            None => cmd.split_whitespace().next().unwrap_or_default().to_owned(),
+        };
+        let Some(tool) = crate::tools::Tool::of_name(&name) else {
+            if !hook {
+                self.diag(
+                    false,
+                    &format!("\\write18{{{cmd}}}: `{name}' has no in-process version here and the client runs no commands; not run"),
+                );
+                return Ok(());
+            }
+            self.log("wlog", &format!("runsystem({cmd})...{done}."))?;
+            // (the command runs here, in this run, in TeX's order: what
+            // the run reads after it reads what it made)
+            return self.shell_run(&quoted);
+        };
+        // (a tool's arguments, as its command line has them)
+        let Some(args) = words else {
             self.log(
                 "wlog",
                 &format!("runsystem({cmd})...quotation error in system command."),
             )?;
             return Ok(());
         };
-        let name = args.first().cloned().unwrap_or_default();
-        if restricted && !crate::tools::SHELL_ESCAPE_COMMANDS.contains(&name.as_str()) {
-            self.log(
-                "wlog",
-                &format!("runsystem({cmd})...disabled (restricted)."),
-            )?;
-            return Ok(());
-        }
-        let Some(tool) = crate::tools::Tool::of_name(&name) else {
-            self.diag(
-                false,
-                &format!("\\write18{{{cmd}}}: `{name}' has no in-process version here; not run"),
-            );
-            return Ok(());
-        };
         let Some((output, input)) = tool.command_files(&args[1..]) else {
             return Ok(());
         };
-        self.log(
-            "wlog",
-            &format!("runsystem({cmd})...executed safely (allowed)."),
-        )?;
+        self.log("wlog", &format!("runsystem({cmd})...{done}."))?;
         // (the command runs here, in this round: a node of its own where
         // the command is, reading the input as written up to there)
         let a = crate::tools::command_args(self.v, tool, &output, &input, &args[1..]);

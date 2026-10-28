@@ -169,10 +169,23 @@ pub struct Options {
     pub finisher_predictions: bool,
     /// `\\pdfshellescape` (pdfTeX's `shellenabledp`): 0 off, 1 on,
     /// 2 restricted (TeX Live's `shell_escape = p`, the default). No
-    /// command ever runs as a process: an allowed `makeindex` runs in
-    /// process (`phitex-makeindex`); the others are refused with a
-    /// diagnostic.
+    /// command runs as a process in the engine: an allowed `bibtex`,
+    /// `biber` or `makeindex` runs in process (`crate::tools`); any other
+    /// runs through [`Options::shell_hook`], or is refused with a
+    /// diagnostic without one.
     pub shell_escape: i32,
+    /// What restricted shell escape allows: the first words of TeX Live's
+    /// `shell_escape_commands` ([`crate::shell::texlive_commands`]).
+    pub shell_commands: Vec<String>,
+    /// The client's runner of the commands `\write18` allows that the
+    /// engine has no in-process version of ([`crate::ShellHook`],
+    /// docs/note-shell-hook.md): `None` refuses them.
+    pub shell_hook: Option<Arc<dyn crate::shell::ShellHook>>,
+    /// The most evaluations a build makes again because the files its
+    /// commands made changed (as `latexmk` runs `pdflatex` again while
+    /// they do, its `max_repeat`): past them the output is the last
+    /// one's, with a warning.
+    pub shell_passes: usize,
     /// Where a tool's support files come from (bibliography styles and
     /// databases, index styles: [`ToolSearch`]); `None` asks
     /// [`Options::finder`] by name.
@@ -717,6 +730,9 @@ impl Default for Options {
             pkg_predict: false,
             finisher_predictions: true,
             shell_escape: 2,
+            shell_commands: crate::shell::texlive_commands(),
+            shell_hook: None,
+            shell_passes: 5,
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
@@ -1383,6 +1399,10 @@ pub struct Stats {
     /// The passes the files read back took to their fixpoint
     /// (`Report::passes`).
     pub loop_rounds: u64,
+    /// The evaluations made again because the files `\write18`'s
+    /// commands made changed ([`Options::shell_passes`]): a cold build of
+    /// a minted document makes one, as `pdflatex` is run twice.
+    pub shell_passes: u64,
     /// The runs of each pass of the last evaluation (`Report::pass_runs`).
     pub pass_runs: Vec<u64>,
     /// Nodes that waited on a value not known yet, and stops.
@@ -2239,6 +2259,13 @@ struct Graph {
     eval_warnings: Vec<String>,
     /// [`Options::tool_finder`].
     tool_finder: Option<ToolFinder>,
+    /// The files `\write18`'s commands made, as the last evaluation
+    /// left them (`crate::shell`): name, text (TeX's characters), `None`
+    /// for a name removed. What the next evaluation starts from, as
+    /// `pdflatex`'s next run starts from the directory.
+    shell_store: std::collections::BTreeMap<String, Option<String>>,
+    /// [`Options::shell_passes`].
+    shell_cap: usize,
     ops: Ops,
     mark: OpId,
     dvi: OpId,
@@ -2640,6 +2667,8 @@ impl Graph {
             eval_errors: Vec::new(),
             eval_warnings: Vec::new(),
             tool_finder: None,
+            shell_store: std::collections::BTreeMap::new(),
+            shell_cap: 5,
             provided: Arc::default(),
             loads: None,
             env_base: None,
@@ -3003,11 +3032,86 @@ impl Graph {
         }
     }
 
+    /// The commands' results of the last evaluation ([`crate::shell::OUTS`],
+    /// in TeX's order) applied to the store of command files: each name's
+    /// last result there, a name the job writes left to the job. The
+    /// names whose file changed.
+    fn shell_absorb(&mut self, unit: UnitId) -> Vec<String> {
+        let v = self.eng.values();
+        let Some(outs) = self.eng.acc_value(unit, v.field(crate::shell::OUTS)) else {
+            return Vec::new();
+        };
+        let mut last: std::collections::BTreeMap<String, Option<String>> = std::collections::BTreeMap::new();
+        for e in v.seq_to_vec(outs) {
+            let [n, x] = list_of(v, e)[..] else { continue };
+            last.insert(str_of(v, n), list_of(v, x).get(1).map(|&t| str_of(v, t)));
+        }
+        let mut changed = Vec::new();
+        for (n, t) in last {
+            if self.written.contains(&n) {
+                continue;
+            }
+            // (a name removed that the store never had: nothing to keep)
+            if t.is_none() && !self.shell_store.contains_key(&n) {
+                continue;
+            }
+            if self.shell_store.get(&n) != Some(&t) {
+                if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+                    eprintln!("shell store: {n} {}", t.as_ref().map_or_else(|| "removed".to_owned(), |t| format!("{} chars", t.chars().count())));
+                }
+                self.shell_store.insert(n.clone(), t);
+                changed.push(n);
+            }
+        }
+        changed
+    }
+
+    /// The environment's entries of the store's files `names` and of the
+    /// store's list ([`crate::shell::STORE`]), given to the engine so that
+    /// their readers are asked again.
+    fn shell_publish(&mut self, names: &[String]) {
+        let v = self.eng.values();
+        let mut changes: Vec<(Field, Option<ValueId>)> = names
+            .iter()
+            .map(|n| {
+                let x = match self.shell_store.get(n) {
+                    Some(Some(t)) => crate::shell::made_value(v, n, v.str(t)),
+                    _ => crate::shell::removed_value(v),
+                };
+                (crate::tools::out_field(v, n), Some(x))
+            })
+            .collect();
+        let list = self
+            .shell_store
+            .iter()
+            .filter(|(_, t)| t.is_some())
+            .map(|(n, _)| v.str(n))
+            .collect();
+        changes.push((v.field(crate::shell::STORE), Some(v.list(list))));
+        self.eng.update_environment(&changes);
+    }
+
     /// The environment: the files supplied, and the loop-back files.
     fn environment(&self, fixpoint: bool) -> Vec<(Field, ValueId)> {
         let v = self.eng.values();
         let mut env = self.files.clone();
         env.extend(self.marks.entries(v));
+        // (the files the commands made, as the evaluation before left
+        // them: a read before any command reads them, `crate::shell`)
+        if !self.shell_store.is_empty() {
+            let mut names = Vec::new();
+            for (n, t) in &self.shell_store {
+                let x = match t {
+                    Some(t) => {
+                        names.push(v.str(n));
+                        crate::shell::made_value(v, n, v.str(t))
+                    }
+                    None => crate::shell::removed_value(v),
+                };
+                env.push((crate::tools::out_field(v, n), x));
+            }
+            env.push((v.field(crate::shell::STORE), v.list(names)));
+        }
         // (the files the job writes kept in memory, a fixpoint's; none
         // otherwise: `UNIT`, never a wait on the client. Listed: the files
         // written before that the last evaluation did not open, each
@@ -3462,6 +3566,22 @@ impl Graph {
             // files (an edit of one replaces it, [`Build::edit_file`]),
             // whether or not this round asked for more
             self.absorb_provided();
+            // (the files the commands made, in TeX's order, into the
+            // store: changed, the next evaluation starts from them, as
+            // latexmk runs pdflatex again, up to its cap)
+            let shell_changed = self.shell_absorb(unit);
+            if !shell_changed.is_empty() {
+                if stats.shell_passes < self.shell_cap as u64 {
+                    stats.shell_passes += 1;
+                    asked = true;
+                    ask_why("the files the commands made changed");
+                } else {
+                    self.eval_warnings.push(format!(
+                        "the files \\write18's commands make still changed after {} runs (the maximum, as latexmk's): the output is the last run's",
+                        self.shell_cap + 1
+                    ));
+                }
+            }
             // (an edit taken during the evaluation changed the comments:
             // the environment holds them before it ends)
             asked |= self.marks.dirty();
@@ -3473,6 +3593,11 @@ impl Graph {
             let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
             env_trace(&self.eng, &env);
             self.push_env(env);
+            // (the commands' files changed: their readers asked again,
+            // whichever way the environment went in)
+            if !shell_changed.is_empty() {
+                self.shell_publish(&shell_changed);
+            }
         }
         let v = self.eng.values();
         if let Some(t) = self.eng.acc_value(unit, v.field("ifviol")) {
@@ -4932,7 +5057,13 @@ impl Build {
             .node_rec
             .store(opts.node_records, std::sync::atomic::Ordering::Relaxed);
         (*g.ops.out_ok.locked()).clone_from(&opts.out_name_ok);
-        g.ops.tool_opts.locked().bibtex.clone_from(&opts.bibtex);
+        {
+            let mut t = g.ops.tool_opts.locked();
+            t.bibtex.clone_from(&opts.bibtex);
+            t.shell_hook.clone_from(&opts.shell_hook);
+            t.shell_commands.clone_from(&opts.shell_commands);
+        }
+        g.shell_cap = opts.shell_passes;
         g.tool_finder.clone_from(&opts.tool_finder);
             if let Some(p) = &opts.progress {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
@@ -6066,6 +6197,22 @@ impl Build {
         let fs = Arc::new(written_texts(v, streams));
         m.files = Some((streams, fs.clone()));
         fs.to_vec()
+    }
+
+    /// The files `\write18`'s commands made through the hook, as the last
+    /// evaluation left them (`crate::shell`): name, bytes, `None` for a
+    /// name a command removed. What `pdflatex` leaves in its directory
+    /// (minted's `_minted/`).
+    #[must_use]
+    pub fn shell_files(&self) -> Vec<(String, Option<Vec<u8>>)> {
+        self.g
+            .shell_store
+            .iter()
+            .map(|(n, t)| {
+                let b = t.as_ref().map(|t| t.chars().map(|c| u8::try_from(c).unwrap_or(b'?')).collect());
+                (n.clone(), b)
+            })
+            .collect()
     }
 
     /// What [`Build::wkeys`] is made from (the written files'
@@ -7364,6 +7511,8 @@ fn declare_fields(eng: &Engine) {
         .map(|k| eng.values().field(&format!("wstreams:{k}")))
         .collect();
     per.push(eng.values().field(crate::run::WNAMES));
+    per.push(eng.values().field(crate::shell::OUTS));
+    per.push(eng.values().field(crate::shell::NAMES));
     for fld in per {
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));
     }

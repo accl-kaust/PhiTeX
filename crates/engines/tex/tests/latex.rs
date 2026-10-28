@@ -1300,3 +1300,149 @@ fn inputlineno_in_a_resumed_piece_is_the_file_line_below_it() {
         assert_eq!(got, ["P=3", "H=5", "D=6"], "-j {threads}");
     }
 }
+
+/// The native runner of `\write18`'s commands, as the CLI has it.
+#[path = "../../../cli/src/shell.rs"]
+mod process_hook;
+
+/// The process runner, its calls counted.
+struct Counting {
+    inner: process_hook::ProcessHook,
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl phitex_tex::ShellHook for Counting {
+    fn run(&self, command: &str, files: &[(String, std::sync::Arc<[u8]>)]) -> phitex_tex::ShellRan {
+        let r = self.inner.run(command, files);
+        // (the data files it was handed: two calls on the same are one
+        // call made twice, by runs at once)
+        let data: Vec<u64> = files
+            .iter()
+            .filter(|(n, _)| n.ends_with(".data.minted"))
+            .map(|(_, b)| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                b.hash(&mut h);
+                h.finish()
+            })
+            .collect();
+        self.calls.lock().unwrap().push(format!(
+            "{command} on {data:x?}: status {}, {} files, read {:?}, wrote {:?}, removed {:?}",
+            r.status,
+            files.len(),
+            r.read,
+            r.wrote.iter().map(|w| &w.0).collect::<Vec<_>>(),
+            r.removed
+        ));
+        r
+    }
+}
+
+/// `latexmk -pdf` on a document with minted listings (python, C, Rust,
+/// an inline one; `oracle/fixtures/latexmk/minted/`): pdflatex runs
+/// `latexminted` through TeX Live's restricted shell escape, the build
+/// through the hook (here TeX Live's own latexminted as a process, as the
+/// CLI runs it): the PDF equals latexmk's at `threads`, the first
+/// evaluation as pdflatex's first run (placeholders, `batch` at the end)
+/// and the second from the files it made (`Stats::shell_passes` 1). Then
+/// the first listing edited (`minted.edit.tex`, latexmk run on it after
+/// the first in the same directory: `minted.edit.pdf`): equal again, the
+/// one listing highlighted again and no `batch`.
+fn latexmk_minted(threads: usize) {
+    let name = "minted";
+    let fx = common::fixtures().join("latexmk");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("latexmk")
+        .join(format!("{name}-j{threads}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for e in std::fs::read_dir(fx.join(name)).expect("the sources").flatten() {
+        std::fs::copy(e.path(), dir.join(e.file_name())).expect("a source");
+    }
+    let path = std::env::var("PATH").unwrap_or_default();
+    let bin = std::env::split_paths(&path)
+        .find(|d| d.join("kpsewhich").is_file())
+        .expect("TeX Live's kpsewhich on PATH");
+    let k = phitex_kpse::Kpse::new(&bin, "pdftex", "pdftex");
+    let hook = std::sync::Arc::new(Counting {
+        inner: process_hook::ProcessHook::new(&dir, k.exported()),
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let opts = || Options {
+        fixpoint: true,
+        threads: Some(threads),
+        shell_hook: Some(hook.clone() as std::sync::Arc<dyn phitex_tex::ShellHook>),
+        ..pdf_opts(name, &dir)
+    };
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let mut b = common::build(opts(), Some(&prelude(true)), &src);
+    let calls = std::mem::take(&mut *hook.calls.lock().unwrap());
+    eprintln!(
+        "minted -j {threads}: {} shell passes, {} rounds, {} calls; {}",
+        b.stats.shell_passes,
+        b.stats.loop_rounds,
+        calls.len(),
+        report(name, &b)
+    );
+    for c in &calls {
+        eprintln!("  call {c}");
+    }
+    for d in b.diagnostics() {
+        if d.severity == phitex_tex::Severity::Error {
+            eprintln!("{d:?}");
+        }
+    }
+    if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
+        let _ = std::fs::write(format!("{d}/{name}-j{threads}.pdf"), b.output().0);
+        let _ = std::fs::write(format!("{d}/{name}-j{threads}.log"), b.output().1);
+    }
+    let want = std::fs::read(fx.join(format!("{name}.pdf"))).expect("the oracle");
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("{name} -j {threads}: {d}");
+    }
+    assert_eq!(b.stats.shell_passes, 1, "{name} -j {threads}: evaluations again for the commands' files");
+    // (the first listing edited)
+    let new = common::read(&fx.join(format!("{name}.edit.tex")));
+    b.edit(&new);
+    let calls = std::mem::take(&mut *hook.calls.lock().unwrap());
+    eprintln!(
+        "minted edit -j {threads}: {} shell passes, {} calls, {} nodes run, {} runs",
+        b.stats.shell_passes,
+        calls.len(),
+        b.stats.nodes_run,
+        b.stats.runs
+    );
+    for c in &calls {
+        eprintln!("  call {c}");
+    }
+    if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
+        let _ = std::fs::write(format!("{d}/{name}-edit-j{threads}.pdf"), b.output().0);
+        let _ = std::fs::write(format!("{d}/{name}-edit-j{threads}.log"), b.output().1);
+    }
+    let want = std::fs::read(fx.join(format!("{name}.edit.pdf"))).expect("the edit's oracle");
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("{name} edit -j {threads}: {d}");
+    }
+    let of = |what: &str| {
+        let mut x: Vec<&str> = calls
+            .iter()
+            .filter(|c| c.contains(&format!("'{what}'")))
+            .map(|c| c.split(':').next().unwrap_or(c))
+            .collect();
+        x.sort_unstable();
+        x.dedup();
+        x.len()
+    };
+    assert_eq!(of("highlight"), 1, "{name} edit -j {threads}: {calls:#?}");
+    assert_eq!(of("batch"), 0, "{name} edit -j {threads}: {calls:#?}");
+}
+
+#[test]
+fn latexmk_minted_j1() {
+    latexmk_minted(1);
+}
+
+#[test]
+fn latexmk_minted_j8() {
+    latexmk_minted(8);
+}

@@ -39,6 +39,7 @@ mod keys;
 mod modern;
 mod problems;
 mod session;
+mod shell;
 mod tex;
 mod tools;
 mod ui;

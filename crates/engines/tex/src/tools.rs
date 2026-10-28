@@ -33,7 +33,12 @@ use crate::val::{list_of, str_of};
 /// its [`ToolRun`] value (`UNIT`: it made none), read where the name is
 /// opened after the node.
 pub(crate) fn out_field(v: &Values, name: &str) -> Field {
-    v.field(&format!("toolout:{name}"))
+    v.field(&out_name(name))
+}
+
+/// [`out_field`]'s name.
+pub(crate) fn out_name(name: &str) -> String {
+    format!("toolout:{name}")
 }
 
 /// What a tool makes of a name by default from a file the job writes
@@ -147,24 +152,17 @@ pub(crate) fn claims(output: &str) -> Vec<(Tool, String)> {
         .collect()
 }
 
-/// TeX Live 2026's `shell_escape_commands` (texmf.cnf): what restricted
-/// mode allows.
-pub(crate) const SHELL_ESCAPE_COMMANDS: &[&str] = &[
-    "bibtex",
-    "bibtex8",
-    "extractbb",
-    "gregorio",
-    "kpsewhich",
-    "makeindex",
-    "repstopdf",
-    "r-mpost",
-    "texosquery-jre8",
-];
-
 /// The tools' settings the client gives ([`crate::Options::bibtex`]).
 #[derive(Clone, Default)]
 pub(crate) struct ToolOptions {
     pub bibtex: phitex_bibtex::Options,
+    /// The host's runner of other commands ([`crate::Options::shell_hook`]).
+    pub shell_hook: Option<std::sync::Arc<dyn crate::shell::ShellHook>>,
+    /// What restricted mode allows ([`crate::Options::shell_commands`]).
+    pub shell_commands: Vec<String>,
+    /// The hook's calls made, by command and the files each read
+    /// ([`crate::shell::Memo`]).
+    pub shell_memo: std::sync::Arc<std::sync::Mutex<crate::shell::Memo>>,
 }
 
 /// makeindex's banner: 2.18 as TeX Live 2026 builds it.

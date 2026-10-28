@@ -267,6 +267,9 @@ pub struct Output {
     pub log: String,
     /// The files TeX wrote.
     pub writes: Vec<(String, String)>,
+    /// The files `\write18`'s commands made (`None`: removed), as
+    /// pdflatex leaves them in its directory.
+    pub shell_files: Vec<(String, Option<Vec<u8>>)>,
     /// The PDF file's layout, where the session writes update sections
     /// ([`Session::updates`]; `pdf` is then empty).
     pub layout: Option<phitex_pdf::Layout>,
@@ -843,6 +846,12 @@ impl Session {
                     // (pdfTeX's `\pdfshellescape`: 1 with -shell-escape,
                     // else TeX Live's restricted default)
                     shell_escape: if self.job.shell_escape { 1 } else { 2 },
+                    // (the commands neither in process nor refused: run as
+                    // processes, each in a scratch directory of its own)
+                    shell_hook: Some(Arc::new(crate::shell::ProcessHook::new(
+                        self.job.path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new(".")),
+                        crate::tex::kpse("pdftex", "pdftex").exported(),
+                    ))),
                     speculation: match self.job.spec.as_deref() {
                         Some("off") => phitex_tex::Speculation::Off,
                         Some("all") => phitex_tex::Speculation::All,
@@ -1100,6 +1109,7 @@ impl Session {
             .into_iter()
             .map(|(n, t)| (plain_name(&n), t))
             .collect();
+        let shell_files = b.shell_files();
         let pages_changed: Vec<usize> = (0..hashes.len())
             .filter(|&k| self.page_hashes.get(k) != Some(&hashes[k]))
             .map(|k| k + 1)
@@ -1143,6 +1153,7 @@ impl Session {
                 pdf: pdf_bytes,
                 dvi: dvi_bytes,
                 writes,
+                shell_files,
                 pages,
                 pages_changed,
                 page_hashes: hashes,
@@ -1679,7 +1690,7 @@ impl Session {
             let h = tex::fingerprint(bytes);
             // (bytes the last write wrote, still there: not written again)
             if written.get(&p) != Some(&h) || !p.is_file() {
-                let tmp = dir.join(format!(".{name}.phitex-tmp"));
+                let tmp = p.with_file_name(format!(".{}.phitex-tmp", p.file_name().map_or_else(Default::default, |f| f.to_string_lossy())));
                 std::fs::write(&tmp, bytes)
                     .and_then(|()| std::fs::rename(&tmp, &p))
                     .map_err(|e| format!("can't write {}: {e}", p.display()))?;
@@ -1697,6 +1708,23 @@ impl Session {
                 continue;
             }
             put(n, &tex::bytes(t))?;
+        }
+        for (n, b) in &r.out.shell_files {
+            if !out_name_ok(n) {
+                continue;
+            }
+            let p = dir.join(n);
+            match b {
+                Some(b) => {
+                    if let Some(d) = p.parent() {
+                        std::fs::create_dir_all(d).map_err(|e| format!("can't make {}: {e}", d.display()))?;
+                    }
+                    put(n, b)?;
+                }
+                None => {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
         }
         if !self.watching {
             put(
@@ -1863,13 +1891,6 @@ pub fn waiting_notes(job: &Job) -> Vec<String> {
     let mut v = Vec::new();
     if job.synctex {
         v.push("no SyncTeX yet (-synctex)".to_owned());
-    }
-    if job.shell_escape {
-        v.push(
-            "-shell-escape: \\write18 may name any command, but PhiTeX runs no external program: \
-             bibtex, biber and makeindex run in process, any other command is refused"
-                .to_owned(),
-        );
     }
     v
 }

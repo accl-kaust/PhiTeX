@@ -5,7 +5,8 @@
 # bibtex, biber, makeindex as latexmk runs them) under /tmp/tex with
 # SOURCE_DATE_EPOCH=0, as the latex tests' PDF oracles are made. Writes
 # NAME.pdf beside the directory and NAME.runs (the pdflatex runs latexmk
-# made: the most rounds a cold build may take).
+# made: the most rounds a cold build may take); with NAME.edit.tex beside
+# it, also NAME.edit.pdf (below).
 # Usage: scripts/bless-latexmk.sh [NAME...]   (run under nice -n 19 ionice -c 3)
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -22,4 +23,14 @@ for d in "$fx"/*/; do
   cp "$w/$name.pdf" "$fx/$name.pdf"
   grep -c "^Running 'pdflatex" "$w/latexmk.out" > "$fx/$name.runs" || true
   echo "$name: $(cat "$fx/$name.runs") pdflatex runs, $(md5sum < "$fx/$name.pdf" | cut -c1-32)"
+  # (an edit, NAME.edit.tex beside the directory: latexmk again in the
+  # same directory on the edited text, its files from the first build
+  # there, as an edit finds them: NAME.edit.pdf, NAME.edit.runs)
+  if [ -f "$fx/$name.edit.tex" ]; then
+    cp "$fx/$name.edit.tex" "$w/$name.tex"
+    (cd "$w" && latexmk -pdf -interaction=batchmode "$name.tex" > latexmk-edit.out 2>&1) || { echo "$name: latexmk on the edit failed"; exit 1; }
+    cp "$w/$name.pdf" "$fx/$name.edit.pdf"
+    grep -c "^Running 'pdflatex" "$w/latexmk-edit.out" > "$fx/$name.edit.runs" || true
+    echo "$name edit: $(cat "$fx/$name.edit.runs") pdflatex runs, $(md5sum < "$fx/$name.edit.pdf" | cut -c1-32)"
+  fi
 done

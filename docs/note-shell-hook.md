@@ -182,24 +182,26 @@ phitex-tex has no wasm imports for this: a wasm host implements
 ## Time, threads, thrown-away calls
 
 - **A call may take seconds** (Pyodide's first load, about 10 MB, then
-  latexminted's start). `run` is called inside the command's node run, with
-  no engine lock held that another worker needs: the rest of the
-  evaluation goes on while a command runs (the nodes before it, and the
-  ones after it that do not read what it makes); only its readers wait.
+  latexminted's start). `run` is called inside the run of the text that
+  makes the command (`phitex_tex`'s `Run::shell_run`, in TeX's order, so
+  the reads after it in the same run read what it made), with no engine
+  lock held that another worker needs: the rest of the evaluation goes on
+  while a command runs; only what reads that run's results waits.
   A test holds this: a fake hook that sleeps 2 s while 300 paragraphs on
   the other workers finish.
 - **The engine never assumes two calls run in parallel.** It may make
   several at once from different workers; a host may serialise them (the
   wasm hosts do, on Pyodide's thread). Since a call's result depends only
   on its command and files, the order they run in changes nothing.
-- **A thrown-away call is a known cost.** The engine runs a command's node
-  as soon as the files at its place are known, as it runs any node; where
+- **A thrown-away call is a known cost.** The engine runs the text that
+  makes a command as soon as what it reads is known, as it runs any node; where
   what comes before it is still moving (a cold build's first pass, a run
   on a value that is later refuted), the call may be made on files that
   turn out stale and its result dropped. The engine has no way to hold a
-  node until its inputs are final that the text could still wait on
+  run of the text until its inputs are final
   (`Operation::final_only` nodes run only at quiet points, and nothing the
   text reads may come from one), so such a call is made and its time
-  spent; a call with the same command and files as any earlier one is
-  answered from the memo without calling the host. In wasm a dropped call
-  costs its seconds.
+  spent; a call whose command and read files are as an earlier call's is
+  answered from the memo without calling the host (the memo keeps, per
+  command, the files each call read and their texts' hashes, with what it
+  made). In wasm a dropped call costs its seconds.

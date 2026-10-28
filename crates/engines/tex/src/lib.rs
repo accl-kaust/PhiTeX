@@ -57,6 +57,7 @@ mod print;
 mod prof;
 mod run;
 mod scan;
+mod shell;
 mod state;
 pub mod timeline;
 mod tools;
@@ -70,6 +71,7 @@ pub use api::{
     Build, Diagnostic, EditSender, Finder, Hint, Options, PageSettled, RunReport as Report, Severity, Speculation,
     Stats, ToolFinder, ToolSearch, byte_ends, engine_id,
 };
+pub use shell::{ShellHook, ShellRan, TEXLIVE_COMMANDS, texlive_commands};
 pub use exec::{Progress, SpawnWorker, set_spawn_worker};
 pub use phitex_otf::{FontSource, KpseFormat};
 pub use phitex_otf::index::FontIndex;

@@ -2438,7 +2438,9 @@ impl<'c, 'a> Run<'c, 'a> {
     /// ([`crate::tools::made_field`], `[path, text]`). `None`: no tool
     /// makes it, or the run made none.
     fn tool_output(&mut self, key: &str) -> R<Option<ValueId>> {
-        if let Some(x) = self.eng_read(crate::tools::out_field(self.v, key))? {
+        // (through the run's state: a command this run made before here
+        // defined it, `crate::shell`)
+        if let Some(x) = self.get(&crate::tools::out_name(key))? {
             return Ok((x != ValueId::UNIT).then_some(x));
         }
         let x = self.lb(crate::tools::made_field(self.v, key))?;
@@ -2448,7 +2450,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Whether a tool makes file `key` ([`Run::tool_output`]): its text is
     /// then not the file system's units.
     fn tool_makes(&mut self, key: &str) -> R<bool> {
-        if let Some(x) = self.eng_read(crate::tools::out_field(self.v, key))? {
+        if let Some(x) = self.get(&crate::tools::out_name(key))? {
             return Ok(x != ValueId::UNIT);
         }
         Ok(self.lb(crate::tools::made_field(self.v, key))?.is_some())
