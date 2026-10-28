@@ -62,7 +62,7 @@ the reader's depth. Its mc build was submitted (mc job 75723). Then:
    PHITEX_CHECK_READS=1` with `WANT_MD5=861b74bd6b22fb11405533e21c65fe02`
    and `BINV=` (the observe CLI). Read the field and the hidden definer.
 2. Trace that field with a `PHITEX_TRACE_FIELDS` probe: the tr- lines of
-   97ad8d5e / 490dfe1f on branch intermit-probe, extended to
+   9dbab443 and 490dfe1f on branch intermit-probe (on a5cdfa90), extended to
    `reask_after_effect_at`.
 
 ## 2. A placement orphan at -j16
@@ -141,8 +141,8 @@ only.
     9 of 32 above 11k) to 3613-6869 (median 5291), same md5 (accl 21759
     and im-ams4-1d15b6).
   - At -j16 the spread is still 6.2k-17.6k on builds without 0ccf5e9b
-    (accl 21848, 21849); with it, 4.8k-? (accl 21908, im-ams16st).
-    Not measured further.
+    (accl 21848, 21849); with it, the lowest of 60 builds was 4816 (accl 21908, im-ams16st); its
+    full spread was not tabulated.
 - **tqft** at -j8 was exact in 6 of 6 and 12 of 12 on b070fd91 (accl
   21385, 21407) and 12 of 12 with 7ffbf9b1 (accl 21611). The md5
   23588526 was never reproduced.
