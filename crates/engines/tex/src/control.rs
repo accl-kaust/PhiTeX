@@ -1899,9 +1899,29 @@ impl Run<'_, '_> {
                 self.show_toks_into(&mut s, &t)?;
             }
             1 => {
-                let _ = self.scan_eight_bit_int()?;
+                // §1296: `> \\box<n>=`, the box, then "OK" (§1298)
+                let n = self.scan_register_num()?;
+                self.ck()?;
+                let esc = i64::from(self.ipar(Par::escapechar)?);
+                let mut head = String::from("> ");
+                crate::print::print_esc(&mut head, "box", esc);
+                crate::print::print_int(&mut head, i64::from(n));
+                head.push('=');
+                let mut lines = match self.box_reg(n)? {
+                    None => vec!["void".to_owned()],
+                    Some(b) => self.show_box_lines(b)?,
+                };
+                lines[0].insert_str(0, &head);
+                let sep = crate::log::BOX_LINE.to_string();
+                self.log("box", &lines.join(&sep))?;
+                return self.log_ok();
             }
-            _ => {}
+            _ => {
+                // \\showlists (§1293's `show_activities`, §218): its
+                // display begins with an empty line
+                self.log("box", "")?;
+                return self.log_ok();
+            }
         }
         s.push('.');
         self.log("show", &s)

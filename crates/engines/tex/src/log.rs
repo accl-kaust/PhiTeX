@@ -12,6 +12,9 @@ use crate::val::{int_of, list_of, str_of};
 
 const MAX_PRINT_LINE: usize = 79;
 
+/// The line break of a `box` event's text: no character TeX prints.
+pub(crate) const BOX_LINE: char = '\u{10FFFD}';
+
 /// The `.log` writer: `file_offset` and the text.
 #[derive(Default)]
 pub struct Log {
@@ -118,6 +121,19 @@ impl Log {
                 // §1294
                 self.print_nl("> ", nl);
                 self.print(text, nl);
+            }
+            "box" => {
+                // begin_diagnostic … end_diagnostic(true) (§245) around
+                // lines each begun by `print_ln` (`show_box`, §182, and
+                // `show_activities`, §218)
+                let mut lines = text.split(BOX_LINE);
+                self.print_nl(lines.next().unwrap_or_default(), nl);
+                for l in lines {
+                    self.print_ln();
+                    self.print(l, nl);
+                }
+                self.print_nl("", nl);
+                self.print_ln();
             }
             "diag" => {
                 // begin_diagnostic … end_diagnostic(false) (§245)

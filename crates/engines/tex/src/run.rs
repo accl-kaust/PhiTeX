@@ -3574,6 +3574,21 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(())
     }
 
+    /// `print_err("OK")` and `error` after `\\showbox` or `\\showlists`
+    /// (§1298): an error, counted for the exit status, never towards
+    /// the hundred (`decr(error_count)` outside `error_stop_mode`; a
+    /// build runs as `nonstop_mode` does).
+    pub(crate) fn log_ok(&mut self) -> R<()> {
+        self.diag(true, "OK");
+        let nl = i64::from(self.ipar(Par::newlinechar)?);
+        let e = self.v.list(vec![self.v.str("error"), self.v.str("OK"), self.v.int(nl)]);
+        let s = self.v.seq_unit(e);
+        self.contribute("log", s);
+        let one = self.v.int(1);
+        self.contribute(LOG_ERRORS, one);
+        Ok(())
+    }
+
     /// `fatal_error` (§93): `s` logged, and the job ends there (§1335).
     /// A build has no terminal: it runs as `nonstop_mode` does, so every
     /// read from the terminal and every file error ends the job (§71,

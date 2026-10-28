@@ -2295,8 +2295,22 @@ impl Run<'_, '_> {
             group::NO_ALIGN => self.noalign_end(md),
             group::VCENTER => self.vcenter_end(md),
             group::MATH_CHOICE => self.build_choices(md),
-            // MATH_SHIFT, MATH_LEFT: "Extra }, or forgotten $" / "\right"
-            // (§1069); SEMI_SIMPLE: off_save
+            // §1069: an extra one at the bottom level, ignored
+            group::BOTTOM => self.log("error", "Too many }'s"),
+            // §1069 `extra_right_brace`: ignored, `align_state` counting
+            // it as read
+            group::SEMI_SIMPLE | group::MATH_SHIFT | group::MATH_LEFT => {
+                let what = match md.group {
+                    group::SEMI_SIMPLE => "\\endgroup",
+                    group::MATH_SHIFT => "$",
+                    _ => "\\right",
+                };
+                self.log("error", &format!("Extra }}, or forgotten {what}"))?;
+                if let Some(s) = self.astate {
+                    self.set_astate(s + 1);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }

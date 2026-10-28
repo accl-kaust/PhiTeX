@@ -250,3 +250,67 @@ fn an_extra_else_or_or_is_reported() {
         assert_eq!(errs, vec![("Extra \\else", 1), ("Extra \\or", 1), ("Extra \\or", 2)], "-j{threads}");
     }
 }
+
+/// `\showbox` (§1296): the box as `show_box` displays it (§182–§198),
+/// then "! OK." (§1298), an error. Oracle: pdftex in batch mode (TeX
+/// Live 2026, mc job 75792), each block from "> \box" to "! OK."; the
+/// log here has no context lines after an error.
+#[test]
+fn showbox_displays_the_box_and_says_ok() {
+    let doc = "\\batchmode\n\
+\\setbox0\\hbox{A\\kern1pt\\vrule\\hskip 2pt plus 1fil B}\n\
+\\showbox0\n\
+\\showbox1\n\
+\\setbox2\\hbox{a\\-b\\discretionary{x}{y}{zw}\\leaders\\hrule\\hskip3pt\\mark{q}\\vadjust{\\kern1pt}$x$\\special{s}\\write3{w}\\penalty7\\hbox to 20pt{\\hfil}\\lower2pt\\hbox{}}\n\
+{\\showboxdepth=5 \\showboxbreadth=100 \\showbox2}\n\
+\\setbox4\\hbox{\\hbox{\\hbox{x}}abc}\n\
+{\\showboxdepth=1 \\showboxbreadth=2 \\showbox4}\n\
+\\setbox6\\vbox{\\hsize=50pt \\noindent A long paragraph here.\\par}\n\
+{\\showboxdepth=5 \\showboxbreadth=100 \\showbox6}\n\
+\\showlists\n\
+\\bye\n";
+    let want = [
+        "> \\box0=\n\\hbox(6.83331+0.0)x17.98337\n.\\tenrm A\n.\\kern 1.0\n.\\rule(*+*)x0.4\n.\\glue 2.0 plus 1.0fil\n.\\tenrm B\n\n! OK.\n",
+        "> \\box1=void\n\n! OK.\n",
+        "> \\box2=\n\\hbox(6.94444+2.0)x50.93753\n.\\tenrm a\n.\\discretionary\n..\\tenrm -\n.\\tenrm b\n\
+.\\discretionary replacing 2\n..\\tenrm x\n.|\\tenrm y\n.\\tenrm z\n.\\tenrm w\n.\\leaders 3.0\n..\\rule(0.4+0.0)x*\n\
+.\\mark{q}\n.\\vadjust\n..\\kern 1.0\n.\\mathon\n.\\teni x\n.\\mathoff\n.\\special{s}\n.\\write3{w}\n.\\penalty 7\n\
+.\\hbox(0.0+0.0)x20.0, glue set 20.0fil\n..\\glue 0.0 plus 1.0fil\n.\\hbox(0.0+0.0)x0.0, shifted 2.0\n\n! OK.\n",
+        "> \\box4=\n\\hbox(6.94444+0.0)x20.55562\n.\\hbox(4.30554+0.0)x5.2778 []\n.\\tenrm a\n.etc.\n\n! OK.\n",
+        "> \\box6=\n\\vbox(18.94444+1.94444)x50.0\n.\\hbox(6.94444+1.94444)x50.0, glue set - 1.0\n..\\tenrm A\n\
+..\\glue 3.33333 plus 1.66498 minus 1.11221\n..\\tenrm l\n..\\tenrm o\n..\\tenrm n\n..\\tenrm g\n\
+..\\glue 3.33333 plus 1.66666 minus 1.11111\n..\\tenrm p\n..\\tenrm a\n..\\tenrm r\n..\\tenrm a\n..\\discretionary\n\
+..\\tenrm -\n..\\glue(\\rightskip) 0.0\n..\\rule(*+*)x5.0\n.\\penalty 400\n.\\glue(\\baselineskip) 3.11111\n\
+.\\hbox(6.94444+1.94444)x50.0, glue set 0.49991fil\n..\\tenrm g\n..\\tenrm r\n..\\tenrm a\n..\\tenrm p\n..\\tenrm h\n\
+..\\glue 3.33333 plus 1.66666 minus 1.11111\n..\\tenrm h\n..\\tenrm e\n..\\tenrm r\n..\\tenrm e\n..\\tenrm .\n\
+..\\penalty 10000\n..\\glue(\\parfillskip) 0.0 plus 1.0fil\n..\\glue(\\rightskip) 0.0\n\n! OK.\n",
+    ];
+    for threads in [1, 8] {
+        let b = build(doc, |o| Options { threads: Some(threads), ..o });
+        let (_, log) = b.output();
+        for w in want {
+            assert!(log.contains(w), "-j{threads}: the log has\n{w}\nlog:\n{log}");
+        }
+        let oks = b.error_lines().iter().filter(|l| *l == "! OK.").count();
+        assert_eq!(oks, 6, "-j{threads}: an error for each \\showbox and the \\showlists");
+    }
+}
+
+/// An extra `}` (§1069): "Too many }'s" at the bottom level, "Extra },
+/// or forgotten ..." in a semi-simple group or a formula; each ignored.
+/// Oracle: pdftex (TeX Live 2026, mc job 75792).
+#[test]
+fn an_extra_right_brace_is_reported() {
+    for threads in [1, 8] {
+        let doc = "x}\n\\begingroup } \\endgroup\n$x}$\n\\bye\n";
+        let b = build(doc, |o| Options { threads: Some(threads), ..o });
+        let ds = b.diagnostics();
+        show(&ds);
+        let errs: Vec<(&str, usize)> = ds.iter().filter(|d| d.severity == Severity::Error).map(|d| (d.message.as_str(), d.line)).collect();
+        assert_eq!(
+            errs,
+            vec![("Too many }'s", 1), ("Extra }, or forgotten \\endgroup", 2), ("Extra }, or forgotten $", 3)],
+            "-j{threads}"
+        );
+    }
+}
