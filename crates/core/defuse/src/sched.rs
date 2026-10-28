@@ -120,6 +120,9 @@ pub(crate) struct Pool {
     pub(crate) n: usize,
     shared: Arc<Shared>,
     failed: Mx<Option<EvalError>>,
+    /// A run ended the evaluation (`Ctx::halt`): stopped as a failure
+    /// stops it, the queued nodes pending, but no error.
+    halted: AtomicBool,
     total_runs: AtomicU64,
     pub(crate) epoch: u64,
     pub(crate) limits: Limits,
@@ -370,6 +373,7 @@ impl Pool {
             n,
             shared,
             failed: Mx::new(None),
+            halted: AtomicBool::new(false),
             total_runs: AtomicU64::new(0),
             epoch,
             limits,
@@ -426,8 +430,24 @@ impl Pool {
                 self.leave_queued(eng, &workers);
                 Err(e)
             }
+            None if self.halted.load(Ordering::SeqCst) => {
+                self.leave_queued(eng, &workers);
+                Ok(workers)
+            }
             None => Ok(workers),
         }
+    }
+
+    /// A run asked the evaluation to end (`Ctx::halt`): every worker
+    /// stops; the nodes queued are pended by `run`.
+    fn halt(&self) {
+        self.halted.store(true, Ordering::SeqCst);
+        self.shared.stop.store(true, Ordering::SeqCst);
+        self.shared.wake_all();
+    }
+
+    pub(crate) fn halted(&self) -> bool {
+        self.halted.load(Ordering::SeqCst)
     }
 
     /// The nodes still queued when a failure stopped the evaluation, to the
@@ -1305,6 +1325,10 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             w.last_done.store(done, Ordering::Relaxed);
             if end_run(eng, pool, w, node, State::Clean) {
                 eng.note_settled(node, out, version);
+            }
+            // (the run asked the job to end: once it has committed)
+            if eng.halted.load(Ordering::Acquire) {
+                pool.halt();
             }
             Ok(())
         }

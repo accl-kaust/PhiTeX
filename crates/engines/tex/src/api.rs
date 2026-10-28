@@ -1325,6 +1325,9 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
 /// What the evaluations of one build or edit did.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
+    /// An evaluation was halted by a run (`phitex_defuse::Report::halted`:
+    /// TeX's fatal error ends the job; nothing after it ran).
+    pub halted: bool,
     /// Memory after the build: the process's resident set (kB, from
     /// /proc; 0 where there is none), the value store's payload (bytes),
     /// and the collections the evaluations made.
@@ -2122,6 +2125,7 @@ impl Stats {
     }
 
     fn add(&mut self, r: &Report) {
+        self.halted |= r.halted;
         self.collections += r.collections.len() as u64;
         self.rss_kb = rss_kb();
         self.piece_times.extend(

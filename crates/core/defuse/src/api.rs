@@ -524,6 +524,10 @@ pub struct Report {
     pub held_deferred: u64,
     pub held_fired: u64,
     pub held_passes: u32,
+    /// A run ended the evaluation (`Ctx::halt`: the job is over, as at
+    /// TeX's fatal error): the nodes still queued are pending for the
+    /// next evaluation, nothing after the halting run was run.
+    pub halted: bool,
     /// Held wakes were dropped past `Limits::settle_passes`: the page
     /// layer did not settle; the output is the last pass's.
     pub held_unsettled: bool,

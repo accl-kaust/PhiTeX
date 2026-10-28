@@ -731,6 +731,16 @@ impl<'a> Ctx<'a> {
         self.woke.clone()
     }
 
+    /// Ends the evaluation once this run has committed: the job is over
+    /// (TeX's fatal error, §93's `fatal_error_stop`). Nothing queued runs;
+    /// the nodes still queued are pending for the next evaluation, and
+    /// `Report::halted` says so. Before this, a fatal error in one piece
+    /// left every other node running on, 65 times each at ten threads on
+    /// a paper that needed another engine (754035 runs, 9.6 GB resident).
+    pub fn halt(&self) {
+        self.eng.halted.store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Forgets my reads of `f` in this run: the commit records none.
     pub fn unread(&mut self, f: Field) {
         self.seen.remove(&f);
