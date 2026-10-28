@@ -78,6 +78,29 @@ function shared(module, memory, args, env, next) {
   return { next, data: { module, memory, args, env, nextBuf: next.buffer } };
 }
 
+// `PHITEX_WASM_HEAP`: the memory the run touched, read at its end from
+// the memory itself (zero until written): the highest address written
+// and the 64 KiB pages written. A host reading a pointer as a signed i32
+// sees one at 2 GiB or above as negative.
+function heapReport(memory) {
+  const page = 65536;
+  const w = new BigUint64Array(memory.buffer);
+  const per = page / 8;
+  let touched = 0;
+  let top = 0;
+  for (let p = 0; p < w.length / per; p++) {
+    for (let i = p * per, e = i + per; i < e; i++) {
+      if (w[i] !== 0n) {
+        touched++;
+        top = p + 1;
+        break;
+      }
+    }
+  }
+  const mib = (n) => ((n * page) / 2 ** 20).toFixed(0);
+  writeSync(2, `phitex-wasm: heap top ${mib(top)} MiB, ${mib(touched)} MiB of pages written\n`);
+}
+
 if (isMainThread) {
   const [wasmPath, ...rest] = process.argv.slice(2);
   if (!wasmPath) {
@@ -102,6 +125,7 @@ if (isMainThread) {
   );
   // (node:wasi takes the memory from the exports; the module imports it)
   const code = wasi.start({ exports: { ...instance.exports, memory } });
+  if (process.env.PHITEX_WASM_HEAP) heapReport(memory);
   process.exit(code ?? 0);
 } else {
   const { module, memory, args, env, nextBuf, tid, startArg } = workerData;
