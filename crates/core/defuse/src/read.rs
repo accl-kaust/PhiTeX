@@ -897,8 +897,9 @@ pub(crate) fn reader_chain(inner: &Inner, start: &[u64], at: Pos, inclusive: boo
 }
 
 /// A definition's scope: its depth (0: it reaches every later position)
-/// and the scope it lives in. `closed`: the scopes open at its node after
-/// the node's closes; `own`: the node's brackets.
+/// and the scope it lives in. `closed`: the scopes open where its node
+/// makes it (after the node's closes where they come before its
+/// definitions, [`Brackets::before`]); `own`: the node's brackets.
 pub(crate) fn level(d: &Def, closed: &[u64], own: Option<&(NodeId, Brackets)>) -> (usize, u64) {
     if d.depth == GLOBAL {
         return (0, 0);
@@ -954,13 +955,21 @@ pub(crate) fn levels(v: &Values, inner: &Inner, f: Field, start: &[u64], limit: 
             }
             _ => None,
         };
-        let c = closed.as_deref().unwrap_or(&chain);
+        // (the node's closes come before its definitions with `before`,
+        // after them without: a local definition of a node that closes
+        // after it lives in the scope it closes and dies with it; a
+        // definition in a scope the node opens is in it, after the closes)
+        let lv = |p: &Def| {
+            let after = own.is_some_and(|x| x.1.before || (p.depth > 0 && x.1.opens > 0));
+            let c = if after { closed.as_deref().unwrap_or(&chain) } else { &chain };
+            level(p, c, own)
+        };
         if d.multi {
             for p in d.parts(v) {
-                out.push((*q, p, level(&p, c, own)));
+                out.push((*q, p, lv(&p)));
             }
         } else {
-            out.push((*q, *d, level(d, c, own)));
+            out.push((*q, *d, lv(d)));
         }
     }
     out

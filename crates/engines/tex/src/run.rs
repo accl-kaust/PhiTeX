@@ -1337,14 +1337,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let top = self.rec_load || (self.st.has_global_restore(self.v) && self.scope_kind()?.is_none());
         let (pubs, restored) = self.st.publication(self.v, top);
         let mut out = Vec::with_capacity(pubs.len());
-        let closed = self.closed_scope();
         for p in pubs {
-            // (a run that closed its scope: its local bindings were the
-            // scope's, unsaved at the close, §282; the engine places a
-            // closing node's definitions after its close)
-            if closed && p.at == Locality::Local {
-                continue;
-            }
             let f = self.loc_field(p.loc);
             if p.carried
                 && let crate::state::Pub::Value(x) = p.what
@@ -1375,11 +1368,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let top = self.rec_load || matches!(self.scope_kind_memo, Some(None));
         let (pubs, _) = self.st.publication(self.v, top);
-        let closed = self.closed_scope();
-        pubs.into_iter()
-            .filter(|p| !(closed && p.at == Locality::Local))
-            .map(|p| (self.loc_field(p.loc), p.what, p.at))
-            .collect()
+        pubs.into_iter().map(|p| (self.loc_field(p.loc), p.what, p.at)).collect()
     }
 
     /// The values the run publishes (its relations left out).

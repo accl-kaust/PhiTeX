@@ -177,6 +177,32 @@ impl Operation for Pending {
     }
 }
 
+/// `[f, a, g, b]`: defines f = a locally and g = b globally, then
+/// closes the scope it runs in (its closes after its definitions): a run
+/// that ends at the `\\endgroup` it closes its group with.
+struct DefThenClose;
+
+impl Operation for DefThenClose {
+    fn name(&self) -> &'static str {
+        "def_then_close"
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::Scope(Brackets {
+            closes: 1,
+            opens: 0,
+            before: false,
+        })
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args().to_vec();
+        cx.define(Field(a[0]), a[1]);
+        cx.define_with(Field(a[2]), a[3], Locality::Global);
+        Ok(ValueId::UNIT)
+    }
+}
+
 /// `[f, a, b, c]`: opens two scopes after itself and defines f = a
 /// outside them, b in the first, c in the second: a run that leaves two
 /// groups open with a value in each.
@@ -231,6 +257,7 @@ struct Ops {
     depth: OpId,
     def_frames: OpId,
     rel_global: OpId,
+    def_then_close: OpId,
 }
 
 fn engine() -> (Engine, Ops) {
@@ -248,6 +275,7 @@ fn engine() -> (Engine, Ops) {
         depth: e.register(Arc::new(Depth)),
         def_frames: e.register(Arc::new(DefFrames)),
         rel_global: e.register(Arc::new(RelGlobal)),
+        def_then_close: e.register(Arc::new(DefThenClose)),
     };
     (e, ops)
 }
@@ -271,6 +299,34 @@ fn a_local_definition_dies_at_its_close() {
     e.evaluate(2).unwrap();
     assert_eq!(int(&e, inside), 2);
     assert_eq!(int(&e, after), 1, "the definition inside the scope does not reach past its close");
+    assert!(e.check_invariants().is_empty());
+}
+
+/// A node whose closes come after its definitions (`before: false`): its
+/// local definition is the scope's and dies with it, its global one
+/// stands; a reader inside the scope before it is not touched.
+#[test]
+fn a_closing_nodes_local_definition_dies_with_the_scope_it_closes() {
+    let (e, o) = engine();
+    let v = e.values();
+    let (x, y) = (v.field("x").0, v.field("y").0);
+    let u = e.new_unit();
+    e.push(u, o.def, vec![x, v.int(1)]);
+    e.push(u, o.def, vec![y, v.int(1)]);
+    e.push(u, o.open, vec![]);
+    e.push(u, o.def, vec![x, v.int(2)]);
+    let inside = e.push(u, o.get, vec![x]);
+    e.push(u, o.def_then_close, vec![x, v.int(3), y, v.int(4)]);
+    let after_x = e.push(u, o.get, vec![x]);
+    let after_y = e.push(u, o.get, vec![y]);
+    let dep = e.push(u, o.depth, vec![]);
+    for threads in [1, 4] {
+        e.evaluate(threads).unwrap();
+        assert_eq!(int(&e, inside), 2);
+        assert_eq!(int(&e, after_x), 1, "the closing node's local definition does not reach past its close");
+        assert_eq!(int(&e, after_y), 4, "its global definition stands");
+        assert_eq!(int(&e, dep), 0);
+    }
     assert!(e.check_invariants().is_empty());
 }
 
