@@ -426,20 +426,6 @@ impl Engine {
         out
     }
 
-    /// The last node of a unit, if any.
-    pub(crate) fn unit_last_node(&self, u: UnitId) -> Option<NodeId> {
-        for sid in self.order.all().into_iter().rev() {
-            let s = self.seg(sid);
-            if s.unit != u {
-                continue;
-            }
-            if let Some((_, &n)) = s.inner.read().nodes.iter().next_back() {
-                return Some(n);
-            }
-        }
-        None
-    }
-
     pub fn register(&self, op: Arc<dyn Operation>) -> OpId {
         OpId(u32::try_from(self.ops.push(op)).expect("operation ids"))
     }

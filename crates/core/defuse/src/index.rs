@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::api::UnitId;
 use crate::engine::EnvReader;
 use crate::lock::Lock;
 use crate::read::Reaching;
@@ -201,6 +202,10 @@ struct Ranges {
     pending: bool,
     /// Readers of the environment's value.
     envs: Vec<EnvReader>,
+    /// `At::End` readers, with the unit whose end they read at: filed
+    /// here, not at a node, and re-asked by every walk of the field that
+    /// passes that unit's end (`commit::reask_ends`).
+    ends_of: Vec<(UnitId, Reader)>,
 }
 
 /// Where a range reader is filed, to take it out again: its filing.
@@ -256,7 +261,7 @@ impl Ranges {
     }
 
     fn is_empty(&self) -> bool {
-        self.len == 0 && self.finals.is_empty() && self.envs.is_empty() && self.published.is_none() && !self.dirty && !self.pending
+        self.len == 0 && self.finals.is_empty() && self.envs.is_empty() && self.ends_of.is_empty() && self.published.is_none() && !self.dirty && !self.pending
     }
 
     /// Drops the dead once as many have been filed as the list held.
@@ -416,6 +421,9 @@ impl RangeIndex {
                 for r in rs.envs.iter().filter(|r| live(r.node, r.serial)) {
                     r.seen.into_iter().for_each(&mut *keep);
                 }
+                for (_, r) in rs.ends_of.iter().filter(|(_, r)| live(r.node, r.serial)) {
+                    r.seen.into_iter().for_each(&mut *keep);
+                }
             }
         }
     }
@@ -515,6 +523,23 @@ impl RangeIndex {
     /// The `At::Final` readers of `f` that still stand.
     pub(crate) fn finals(&self, f: Field, live: impl Fn(&Reader) -> bool) -> Vec<Reader> {
         self.shards[range_shard(f)].0.read().get(&f).map(|m| m.finals.iter().filter(|r| live(r)).cloned().collect()).unwrap_or_default()
+    }
+
+    /// Files an `At::End(u)` reader of `f`, the dead dropped when the
+    /// list is about to grow.
+    pub(crate) fn add_end(&self, f: Field, u: UnitId, r: Reader, live: impl Fn(&Reader) -> bool) {
+        let mut w = self.shards[range_shard(f)].0.write();
+        push_pruned(&mut w.entry(f).or_default().ends_of, (u, r), |(_, r)| live(r));
+    }
+
+    /// The `At::End(u)` readers of `f` that still stand.
+    pub(crate) fn ends(&self, f: Field, u: UnitId, live: impl Fn(&Reader) -> bool) -> Vec<Reader> {
+        self.shards[range_shard(f)]
+            .0
+            .read()
+            .get(&f)
+            .map(|m| m.ends_of.iter().filter(|(v, r)| *v == u && live(r)).map(|(_, r)| r.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// Files environment readers of `f`, the dead dropped as the list

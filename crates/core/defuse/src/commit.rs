@@ -1351,13 +1351,19 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (a node read at that is gone by now: a read that found a value there
     // finds none, and no removal will ask it again)
     let mut anchor_gone: Vec<(Field, NodeId)> = gone_kept;
-    for (f, mut r, at) in other_reads {
+    for (f, r, at) in other_reads {
+        // (a read at a unit's end: filed with the field, not at the node
+        // that was last when it committed. A node placed after that one,
+        // or a split of the last segment under way while the last node
+        // was looked up (the lookup's order of segments taken before the
+        // split's new one is in it), left the reader before a definition
+        // reaching the end, whose walk never came back to it: finishers
+        // at -j8 kept a page their loop had moved on from, marginpars28
+        // wrong in 10 of 120 builds. The walks that pass the unit's end
+        // re-ask it, `reask_ends`)
         if let Anchor::End(u) = at {
-            let Some(last_node) = eng.unit_last_node(u) else {
-                continue;
-            };
-            r.anchor = last_node;
-            r.inclusive = true;
+            eng.ranges.add_end(f, u, r, |x| live(eng, x.node, x.serial));
+            continue;
         }
         let a = eng.node(r.anchor);
         let mut spare: Vec<Reader> = Vec::with_capacity(4);
@@ -1483,7 +1489,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     for (f, h) in walks {
         match h {
             Here::Done => {}
-            Here::On(by) => reask_later(eng, ww, f, seg_lo, by, &mut st),
+            Here::On(by) => reask_later(eng, ww, f, seg_id, seg_lo, by, &mut st),
             Here::From(by) => reask(eng, ww, f, eng.node(by).pos_hint(), seg_id, by, &mut st),
             Here::Stopped(h) => stop_at(eng, ww, h, f, 0, &mut st),
         }
@@ -2057,7 +2063,13 @@ pub(crate) fn reask_from(
                 passed = false;
             }
             None => {
-                let Some(next) = next_with(eng, f, s.lo) else {
+                let next = next_with(eng, f, s.lo);
+                // (the walk passes the end of this segment's unit: its
+                // readers at that end)
+                if next.is_none_or(|x| eng.seg(x).unit != s.unit) {
+                    reask_ends(eng, w, f, s.unit, by, st);
+                }
+                let Some(next) = next else {
                     if !passed {
                         reask_final(eng, f);
                     }
@@ -2087,8 +2099,13 @@ fn next_with(eng: &Engine, f: Field, lo: Pos) -> Option<SegId> {
 /// The walk forward of a definition of `f` by `by`, the last of its
 /// segment (starting at `lo`), on from the next segment; at the end of
 /// the line, the loop-back readers.
-fn reask_later(eng: &Engine, w: Option<&Worker>, f: Field, lo: Pos, by: NodeId, st: &mut CommitStats) {
-    if let Some(cur) = next_with(eng, f, lo) {
+fn reask_later(eng: &Engine, w: Option<&Worker>, f: Field, seg: SegId, lo: Pos, by: NodeId, st: &mut CommitStats) {
+    let next = next_with(eng, f, lo);
+    let unit = eng.seg(seg).unit;
+    if next.is_none_or(|x| eng.seg(x).unit != unit) {
+        reask_ends(eng, w, f, unit, Some(by), st);
+    }
+    if let Some(cur) = next {
         let op = eng.node(by).op();
         reask_from(
             eng,
@@ -2228,6 +2245,37 @@ fn walk_stopped(
     for (f, level) in fs {
         if !defined.iter().any(|&(g, k)| g == f && k <= level) {
             reask_from(eng, w, f, pos, seg, Some(node.id), None, level, st);
+        }
+    }
+}
+
+/// Re-asks the `At::End(u)` readers of `f` whose answer moved: a walk
+/// of `f` passed unit `u`'s end (no definition hid the one walked from
+/// before it, or one went).
+fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<NodeId>, st: &mut CommitStats) {
+    let rs = eng.ranges.ends(f, u, |x| live(eng, x.node, x.serial));
+    if rs.is_empty() {
+        return;
+    }
+    let now = read::reaching_visible(eng, f, Pos(eng.unit(u).end.0 - 1), true);
+    let cause = match by {
+        Some(b) => Cause::Changed { field: f, site: Some(b) },
+        None => Cause::Environment { field: f },
+    };
+    for r in rs {
+        if through(eng, now, r.path) != r.seen
+            && mark_stale(
+                eng,
+                w,
+                eng.node(r.node),
+                Wake {
+                    by,
+                    cause: cause.clone(),
+                    at_ns: eng.now_ns(),
+                },
+            )
+        {
+            st.woken += 1;
         }
     }
 }
