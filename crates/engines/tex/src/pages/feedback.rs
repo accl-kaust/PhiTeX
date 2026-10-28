@@ -379,13 +379,21 @@ impl Run<'_, '_> {
                         _ => None,
                     };
                 }
-                fired = Some(i == own);
-                if i != own || n_fires > 1000 {
+                if fired.is_none() {
+                    fired = Some(i == own);
+                }
+                if n_fires > 1000 {
                     break 'items;
                 }
-                // (a page fired in its own items: its routine run, the
-                // build after it (§1026) takes what is left, the routine
-                // giving back nothing; the page the text goes on with)
+                // (a page fired: its routine run, the build after it
+                // (§1026) takes what is left, the routine giving back
+                // nothing; the page the text goes on with. A page fired
+                // before its own items says the run goes again on the
+                // page start the finisher places, and the page it reads
+                // until then folds its own items all the same: one read
+                // as empty ended no loop that waits for the page to fill,
+                // and at one thread the finisher that refutes it never
+                // ran)
                 rest = &rest[st.fired_at..];
                 st.resume();
             }
