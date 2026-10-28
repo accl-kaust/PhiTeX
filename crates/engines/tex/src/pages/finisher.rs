@@ -174,6 +174,13 @@ impl Operation for Finish {
         Effect::None
     }
 
+    /// The page layer settles at quiet points (docs/spec-settle.md): what
+    /// a finisher defines re-asks the loop and the other finishers at
+    /// once, and the text at the next quiet point.
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+
     /// 1. `args` = [`FinishArgs::decode`]; the page =
     ///    `read_at(PAGE_OF:<piece>:<nth>, At::End(unit))` decoded as
     ///    [`Page`]. Unset: the loop has not fired this page (the

@@ -145,6 +145,9 @@ pub struct Engine {
     pub(crate) depth_field: Field,
     /// Some `At::Final` reader was ever filed.
     pub(crate) has_finals: std::sync::atomic::AtomicBool,
+    /// Wakes held to the next quiet point (`sched::hold_wake`): a reader
+    /// re-asked by a change a settling operation's node made.
+    pub(crate) held: crate::lock::Mx<Vec<(NodeId, crate::node::Wake)>>,
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
     pub(crate) layout_gen: AtomicU64,
@@ -223,6 +226,7 @@ impl Engine {
             bracket_nodes: AtomicUsize::new(0),
             depth_field,
             has_finals: std::sync::atomic::AtomicBool::new(false),
+            held: crate::lock::Mx::new(Vec::new()),
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
             busy: AtomicU64::new(0),
@@ -1242,6 +1246,9 @@ impl Engine {
             rep.commits += load(&w.commits);
             rep.final_reruns = rep.final_reruns.max(u32::try_from(load(&w.final_max)).unwrap_or(u32::MAX));
             rep.steals += load(&w.steals);
+            rep.held_deferred += load(&w.held_deferred);
+            rep.held_fired += load(&w.held_fired);
+            rep.held_passes = rep.held_passes.max(u32::try_from(load(&w.held_passes)).unwrap_or(u32::MAX));
             rep.times.op_ns += load(&w.op_ns);
             rep.times.wasted_ns += load(&w.wasted_ns);
             rep.times.commit_ns += load(&w.commit_ns);

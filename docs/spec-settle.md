@@ -1,74 +1,94 @@
-# Scheduling rules measured and rejected
+# Settling: the page layer's feedback reaches the text once a pass
 
-Two rules for holding a re-asked node back were written, tested and
-measured on the book's chapters. Both made the counts worse. The record
-is here so neither is tried again. The scheduler stays as it is: a node
-re-asked by a commit is queued on the committing worker's `later` deque
-(FIFO), a node placed on its `local` deque, idle workers steal, nothing
-waits for a node.
+## 1. The root issue
 
-## 1. Wait for the waker (3db3086bc, reverted in 39c17d37a)
+TeX's text never sees a page value that is still converging: the aux file
+is written at the end of a run and read at the start of the next, so a
+paragraph only ever reads a page number a whole pass agreed on. This engine
+made every intermediate value a finisher committed visible to the text at
+once and re-asked the text against each. Every rerun chased on 2026-10-28
+was a consequence: finishers remade or relocated publishing intermediates;
+paragraphs reading a page number that changed three times while the
+layout settled; the loop at eight threads firing pages on partial input
+whose numbers the text ran on; two scheduling rules that tried to order
+runs so the intermediates would be fewer (both measured worse, §5).
 
-A node taken from a deque while the node whose commit woke it was
-re-asked after that (in its run, or queued by a newer wake) was put
-aside until that node's run ended.
+## 2. The rule
 
-course3 (md5 7705960b), one thread, deterministic: 3.25 runs per node
-from 2.27; the page loop 170 runs from 45; finisher placements 375 from
-202; exec 2734 runs from 1732. Diagnosis from the wake log (4558 waits):
-91% were finishers parked behind the page loop; with them held back the
-loop ran first after each finisher's give-back, and each of its runs
-re-asked the finishers through the page counters and the text through
-the page number. The loop needed to wait for the finishers, not the
-finishers for the loop.
+An operation may declare that its definitions settle at quiet points
+(`Operation::settles_at_quiet`). The page builder and the finishers do.
 
-## 2. Wait for the downstream (branch sched2, never merged)
+- A changed or rebound definition by such a node re-asks a reader of
+  another such operation at once: the page layer converges among itself
+  inside a pass (the loop reads the finishers' give-backs and page
+  parameters, a finisher reads what the finisher before left: counters,
+  float queues).
+- The same change re-asks any other reader (the text) only at the next
+  quiet point (`sched::hold_wake`, `Engine::held`): the wake is listed,
+  uncounted. At the quiet point, before the `final_only` nodes run, each
+  listed reader's reads of that field are checked again
+  (`read::holds`); one that moved is re-asked (`Report::held_fired`), one
+  that holds is not: a reader that ran meanwhile for another reason read
+  the live value and stands. Firing any makes a pass
+  (`Report::held_passes`); the line runs quiet again and the next quiet
+  point publishes again, until nothing moves.
+- A run's own read that moved across the settling line (a text node whose
+  read of a page value changed during its run) is held the same way, not
+  re-run at once (`commit`: the causes loop).
+- Readers of a settling node's output (`Ctx::placed_output`), of its
+  contributions, of structure, are not held: those edges are the page
+  layer's own.
+- `Limits::final_reruns` caps a reader's held reruns as it caps loop-back
+  reruns.
 
-A node re-asked while a node its last commit woke was still to run, and
-had not committed since that wake, let that one go first. A chain shifted
-by one edit ran side by side (the serial guard); a fold woken by many
-readers ran once after them.
+Inside a pass the text runs once, on predictions or on the last pass's
+values; the loop folds the boxes once (its parks at holes are resumes);
+each finisher runs about once, re-asked only by the page layer itself. At
+the quiet point the text readers whose page values moved run once, in
+parallel. If a box changed height, a second pass. As latexmk: two to three
+passes on a cold build, one on an edit with the previous build's values
+as predictions.
 
-course3, same recipe, md5 right at both thread counts:
+## 3. Bars
 
-| | base fdbdf7fab | downstream rule |
-|---|---|---|
-| -j1 runs per node | 2.15 | 3.38 |
-| -j1 finisher runs a page | 9.86 | 17.9 |
-| -j1 page loop runs | 39 | 41 |
-| -j8 runs per node | 5.63 | 8.92 |
-| -j8 finisher runs a page | 23.0 | 42.0 |
+course3 (md5 7705960b) and course1 (9bf25c07), measured on the final
+tree, at -j1 and -j8:
 
-Without the serial guard the first form serialised every chain woken by
-one event (tests/core.rs an_insert_shifts_a_counter_chain_side_by_side
-568 ms for a 63 ms bar; course3 -j1 past the engine's time limit at
-229 s). With it, the ledger shows why it is still worse: a finisher
-re-asked waits for the text pieces it woke, which run on its stale
-values and then again on its fresh ones. Waiting for readers pays only
-where the readers feed back into the writer (the page loop and its
-finishers); on a feed-forward edge, most edges, the writer must go first.
+- finisher runs a page at or under the number of held passes plus one;
+- runs per node at -j8 within 10% of -j1;
+- -j1 runs per node not above 2.15 (course3), the page loop's runs not
+  above 39;
+- `held_passes` at most 3 on a cold build.
 
-## 3. What was learned
+## 4. Tests
 
-- At one thread the FIFO order already runs a fold's readers before its
-  rerun; the loop's 39 to 45 runs are not a scheduling loss.
-- The eight-thread excess (the loop 152 runs, finishers 23 a page) is
-  the loop starting on partial input: it parks at each hole and resumes
-  as profiles arrive, firing pages that move. A rule for that is about
-  readiness of the loop by position (no piece pending before its place),
-  not a generic wait; it is not written.
-- A generic "hold a node back" rule needs the direction of the edge
-  (does the reader feed back into the writer?), which the engine does
-  not record. Two forms that guessed it were both wrong on the majority
-  of edges.
+`crates/core/defuse/tests/settle.rs`:
 
-## 4. Kept from the attempt
+- `text_readers_of_a_page_value_run_once_at_the_quiet_point`: a page node
+  edited; the page node reading it is re-asked at once, the two text
+  readers at the quiet point, once each; two held, two fired, one pass.
+- `a_held_reader_that_read_the_final_value_meanwhile_is_not_run_again`:
+  held, then re-asked by a text change, it runs once on the final values;
+  the held wake fires nothing.
+- `a_page_node_reading_the_text_is_re_asked_at_once`.
+- `held_wakes_are_never_lost_on_many_workers`: four workers, thirty edits.
 
-- `Worker::seed` counts the nodes outstanding before pushing them: a
-  count that reaches zero ends the evaluation, so no entry may be seen
-  before its count. The rule's own release paths had this hazard the
-  other way round and lost runs; the base's seed had it only on the one
-  thread that seeds.
-- tests/core.rs: the wall-clock bounds are skipped with
-  `PHITEX_SKIP_TIMING` set (a loaded machine); the run counts are
-  checked always; the gate on accl leaves timing on.
+## 5. The two scheduling rules rejected before this (record)
+
+Both held a re-asked node back by its relation to the node that woke it,
+and both were measured worse on course3 at one thread (md5 right):
+
+| | base | wait for the waker (3db3086bc) | wait for the downstream (sched2) |
+|---|---|---|---|
+| -j1 runs per node | 2.15 (2.27 before first-item keys) | 3.25 | 3.38 |
+| -j1 finisher runs a page | 9.86 | 12.3 | 17.9 |
+| -j1 page loop runs | 39 | 170 | 41 |
+| -j8 runs per node | 5.63 | 6.05 | 8.92 |
+
+The first held finishers behind the loop, which then ran first after each
+give-back; the second made a finisher wait for the text it woke, which
+ran on the stale value and again on the fresh. Ordering runs cannot fix
+what is a question of when values become visible; the engine does not
+record an edge's direction, and both guesses were wrong on most edges.
+Kept from those attempts: `Worker::seed` counts before pushing, and the
+core tests' wall-clock bounds skip with `PHITEX_SKIP_TIMING`.

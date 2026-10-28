@@ -1754,7 +1754,15 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         .take(8)
         .map(|(o, t, k)| format!("{o} {:.3} ms/{k} reads", std::time::Duration::from_nanos(*t).as_secs_f64() * 1e3))
         .collect();
-    eprintln!("acct: commits by op (whole time, reads filed): {}; placed by op {:?}; moved {}", commits.join(", "), r.placed_by_op, r.placements_moved);
+    eprintln!(
+        "acct: commits by op (whole time, reads filed): {}; placed by op {:?}; moved {}; held wakes {} deferred, {} fired, {} passes",
+        commits.join(", "),
+        r.placed_by_op,
+        r.placements_moved,
+        r.held_deferred,
+        r.held_fired,
+        r.held_passes
+    );
     let mut by_field: Vec<(String, u64)> = r
         .refuted_by_field
         .iter()

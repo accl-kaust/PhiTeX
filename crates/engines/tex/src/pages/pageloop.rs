@@ -336,6 +336,13 @@ impl Operation for Pages {
         false
     }
 
+    /// The page layer settles at quiet points (docs/spec-settle.md): what
+    /// the builder defines re-asks the finishers at once, and the text at
+    /// the next quiet point.
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }

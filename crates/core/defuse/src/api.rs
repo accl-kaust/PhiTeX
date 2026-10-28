@@ -279,6 +279,18 @@ pub trait Operation: Send + Sync {
         false
     }
 
+    /// Whether its nodes' definitions settle at quiet points (default no;
+    /// docs/spec-settle.md). A change of a definition by such a node
+    /// re-asks a reader of another such operation at once, and any other
+    /// reader only at the next quiet point, its read checked again then
+    /// (`sched::hold_wake`): the page layer converges among itself inside
+    /// a pass, and the text sees one state of it per pass, as TeX's own
+    /// passes read the aux file the run before wrote, never a part of
+    /// what this one is writing.
+    fn settles_at_quiet(&self) -> bool {
+        false
+    }
+
     /// Whether its nodes define alike (default yes): a relation one of
     /// them makes (`Ctx::define_rel`) is then predicted for the others
     /// that have not run (`commit::learn_shape`). An operation whose nodes
@@ -505,6 +517,13 @@ pub struct Report {
     pub placements_moved: u64,
     /// [`Report::placements_moved`] by the relocated node's operation.
     pub placements_moved_by_op: Vec<(&'static str, u64)>,
+    /// Wakes held to a quiet point (`Operation::settles_at_quiet`): those
+    /// deferred, those that re-asked their reader there (the rest found
+    /// the read holding), and the quiet points at which any did (the
+    /// passes of the page layer's feedback).
+    pub held_deferred: u64,
+    pub held_fired: u64,
+    pub held_passes: u32,
     /// Runs whose commit found every output of the node's run before
     /// equal (its definitions and relations, contributions, output,
     /// brackets and placements): reruns that asked nothing again, the

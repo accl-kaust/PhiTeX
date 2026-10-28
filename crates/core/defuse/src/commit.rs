@@ -1613,7 +1613,25 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     } else if causes.is_empty() && !anchor_gone.is_empty() {
         causes.push(Cause::Structure);
     }
+    // (a read of a field whose definition reaching here is a settling
+    // operation's, by a node of another: held to the quiet point as a
+    // walk's wake of it is, `sched::hold_wake`; the rest re-ask the run
+    // now)
     for cause in causes {
+        let by = match &cause {
+            Cause::Changed { field, .. } => read::reaching_at(eng, *field, node.id, false).and_then(|r| r.by),
+            _ => None,
+        };
+        if let Some(by) = by
+            && crate::sched::settles_edge(eng, by, node)
+        {
+            let cause = match cause {
+                Cause::Changed { field, .. } => Cause::Changed { field, site: Some(by) },
+                c => c,
+            };
+            crate::sched::hold_wake(eng, ww, node.id, Wake { by: Some(by), cause, at_ns: eng.now_ns() });
+            continue;
+        }
         mark_dirty(
             eng,
             ww,

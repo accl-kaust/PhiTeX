@@ -11,6 +11,15 @@
 //! the reader right after it), then parks. The evaluation ends when
 //! `outstanding` (queued plus running nodes) is zero: no step, no round,
 //! no barrier. Nothing waits for a node.
+//!
+//! One kind of wake is held (`hold_wake`, docs/spec-settle.md): a reader
+//! re-asked by a changed definition of a node whose operation settles at
+//! quiet points (`Operation::settles_at_quiet`), when the reader's own
+//! operation does not. It is listed on the engine, uncounted, and at the
+//! next quiet point each listed reader's reads of that field are checked
+//! again: those that moved are re-asked then, the rest not at all. The
+//! page layer converges among itself inside a pass; the text sees one
+//! state of it per pass.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
@@ -189,6 +198,11 @@ pub(crate) struct Worker {
     pub(crate) lock_wait_ns: AtomicU64,
     pub(crate) lock_wait_max_ns: AtomicU64,
     pub(crate) steals: AtomicU64,
+    /// Wakes it held to a quiet point, those it fired there, and the quiet
+    /// points at which it fired any (`hold_wake`).
+    pub(crate) held_deferred: AtomicU64,
+    pub(crate) held_fired: AtomicU64,
+    pub(crate) held_passes: AtomicU64,
     pub(crate) woken: AtomicU64,
     pub(crate) relative_resolved: AtomicU64,
     pub(crate) predictions_confirmed: AtomicU64,
@@ -334,6 +348,9 @@ impl Pool {
                 lock_wait_ns: AtomicU64::new(0),
                 lock_wait_max_ns: AtomicU64::new(0),
                 steals: AtomicU64::new(0),
+                held_deferred: AtomicU64::new(0),
+                held_fired: AtomicU64::new(0),
+                held_passes: AtomicU64::new(0),
                 woken: AtomicU64::new(0),
                 relative_resolved: AtomicU64::new(0),
                 predictions_confirmed: AtomicU64::new(0),
@@ -744,6 +761,46 @@ fn run_worker(
         // released, and once they are done, the loop-back values
         // published, their readers whose answer moved run again (a pass)
         if w.ix == 0 {
+            // (the wakes held to this quiet point: each reader's reads of
+            // the field checked again now, re-asked where one moved; a
+            // pass of the page layer's feedback into the text)
+            let held: Vec<(NodeId, Wake)> = std::mem::take(&mut *eng.held.lock());
+            if !held.is_empty() {
+                let mut seen: crate::values::FxHashSet<NodeId> = crate::values::FxHashSet::default();
+                let mut memo = crate::read::FoldMemo::new();
+                let mut k = 0u64;
+                for (n, wake) in held {
+                    if !seen.insert(n) {
+                        continue;
+                    }
+                    let node = eng.node(n);
+                    if node.state() != State::Clean {
+                        continue;
+                    }
+                    let field = match &wake.cause {
+                        Cause::Changed { field, .. } | Cause::Rebind { field, .. } => Some(*field),
+                        _ => None,
+                    };
+                    let moved = node.record().is_some_and(|r| {
+                        r.reads
+                            .iter()
+                            .filter(|rd| field.is_none() || rd.kind.field() == field)
+                            .any(|rd| !crate::read::holds(eng, node, rd, &mut memo))
+                    });
+                    if !moved || !allow_final_rerun(eng, w, node) {
+                        continue;
+                    }
+                    if mark_stale_now(eng, Some(w), node, wake) {
+                        k += 1;
+                    }
+                }
+                if k > 0 {
+                    Worker::add(&w.held_fired, k);
+                    Worker::add(&w.held_passes, 1);
+                    pool.shared.wake_all();
+                    continue;
+                }
+            }
             let rel: Vec<NodeId> = std::mem::take(&mut *pool.shared.deferred.lock())
                 .into_iter()
                 .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty))
@@ -861,8 +918,17 @@ pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wak
 /// commit has checked (`Node::committing`), it is marked as `mark_dirty`
 /// marks it.
 pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    if held_edge(eng, &wake, n) {
+        hold_wake(eng, w, n.id, wake);
+        return false;
+    }
+    mark_stale_now(eng, w, n, wake)
+}
+
+/// `mark_stale` with no wake held.
+pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
     if n.committing.load(Ordering::Acquire) {
-        return mark_dirty(eng, w, n, wake);
+        return mark_dirty_now(eng, w, n, wake);
     }
     if n.state() == State::Clean && n.cas_state(State::Clean, State::Dirty) {
         log_wake(eng, w, n, &wake);
@@ -880,6 +946,40 @@ pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
 /// reads return `Stop` from now, its commit goes through, and it is queued
 /// after. Returns whether it was newly marked.
 pub(crate) fn mark_dirty(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    if held_edge(eng, &wake, n) {
+        hold_wake(eng, w, n.id, wake);
+        return false;
+    }
+    mark_dirty_now(eng, w, n, wake)
+}
+
+/// Whether `wake` of `n` is held to the next quiet point: a changed or
+/// rebound definition by a node of an operation that settles at quiet
+/// points, read by a node of one that does not.
+fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
+    let Some(by) = wake.by else { return false };
+    if !matches!(wake.cause, Cause::Changed { .. } | Cause::Rebind { .. }) {
+        return false;
+    }
+    settles_edge(eng, by, n)
+}
+
+/// Whether a definition by `by` reaches `reader` across the settling
+/// line: `by`'s operation settles at quiet points, `reader`'s does not.
+pub(crate) fn settles_edge(eng: &Engine, by: NodeId, reader: &Node) -> bool {
+    eng.placed_node(by).is_some_and(|b| eng.op(b.op()).settles_at_quiet()) && !eng.op(reader.op()).settles_at_quiet()
+}
+
+/// Lists a wake for the next quiet point (`Report::held_deferred`).
+pub(crate) fn hold_wake(eng: &Engine, w: Option<&Worker>, n: NodeId, wake: Wake) {
+    eng.held.lock().push((n, wake));
+    if let Some(w) = w {
+        Worker::add(&w.held_deferred, 1);
+    }
+}
+
+/// `mark_dirty` with no wake held.
+pub(crate) fn mark_dirty_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
     loop {
         match n.state() {
             State::Clean => {
