@@ -442,6 +442,41 @@ struct Last {
     edits: Vec<Duration>,
     /// The last build's summary, for `s`.
     summary: Vec<String>,
+    /// `s` and `w` toggle: while on, the summary (the warnings) are shown
+    /// after every build, not only when asked.
+    pin_summary: bool,
+    pin_warnings: bool,
+}
+
+/// The last build's warnings, as `w` shows them: at their places where
+/// the diagnostics have them, else summarised from the log by kind.
+fn show_warnings(ui: &crate::ui::Ui, st: crate::ui::Style, s: &Session, l: &Last) {
+    if l.placed.1 > 0 {
+        let max = if ui.verbose > 0 { usize::MAX } else { 20 };
+        let placed = crate::problems::rendered_of(s, &l.diags, true, st.color, ui.verbose > 0);
+        for p in placed.iter().take(max) {
+            ui.line(p);
+        }
+        if placed.len() > max {
+            ui.line(&st.dim(&format!("… {} warnings in all (-v shows every one)", placed.len())));
+        }
+        return;
+    }
+    match &l.problems {
+        Some((_, log)) => {
+            let ws = crate::warnings::summarize(log);
+            if ws.is_empty() {
+                ui.line(&st.green("no warnings"));
+            }
+            for (k, n, first) in ws {
+                ui.warning(&format!("{n} × {k:?}"));
+                for l in first {
+                    ui.line(&st.dim(&format!("  {l}")));
+                }
+            }
+        }
+        None => ui.line("phitex watch: no build yet"),
+    }
 }
 
 /// The quit line: `✓ 9 builds · fastest edit 9.2 ms · median 412 ms ·
@@ -1086,6 +1121,19 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             );
             last.borrow_mut().summary = tree(st, head, &rows);
         }
+        // (the panels `s` and `w` pinned: shown after every build, so the
+        // keys need not be pressed again)
+        {
+            let l = last.borrow();
+            if l.pin_summary {
+                for line in &l.summary {
+                    ui.line(line);
+                }
+            }
+            if l.pin_warnings {
+                show_warnings(ui, st, s, &l);
+            }
+        }
         phitex_tex::timeline::lap("watch: the build's line and summary");
         ui.event(&json!({
             "event": "build",
@@ -1353,24 +1401,17 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                             ui.line(&p);
                         }
                     }
-                    Key::Warnings if last.borrow().placed.1 > 0 => {
-                        let l = last.borrow();
-                        let max = if ui.verbose > 0 { usize::MAX } else { 20 };
-                        let placed = crate::problems::rendered_of(
-                            &s,
-                            &l.diags,
-                            true,
-                            st.color,
-                            ui.verbose > 0,
-                        );
-                        for p in placed.iter().take(max) {
-                            ui.line(p);
-                        }
-                        if placed.len() > max {
-                            ui.line(&st.dim(&format!(
-                                "… {} warnings in all (-v shows every one)",
-                                placed.len()
-                            )));
+                    Key::Warnings => {
+                        let on = {
+                            let mut l = last.borrow_mut();
+                            l.pin_warnings = !l.pin_warnings;
+                            l.pin_warnings
+                        };
+                        if on {
+                            show_warnings(ui, st, &s, &last.borrow());
+                            ui.line(&st.dim("warnings shown after every build now (w hides them)"));
+                        } else {
+                            ui.line(&st.dim("warnings hidden (w shows them)"));
                         }
                     }
                     Key::Problems => match &last.borrow().problems {
@@ -1380,28 +1421,23 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         Some((errors, log)) => crate::problems::show(ui, errors, log, &t.file),
                         None => ui.line("phitex watch: no build yet"),
                     },
-                    Key::Warnings => match &last.borrow().problems {
-                        Some((_, log)) => {
-                            let ws = crate::warnings::summarize(log);
-                            if ws.is_empty() {
-                                ui.line(&st.green("no warnings"));
-                            }
-                            for (k, n, first) in ws {
-                                ui.warning(&format!("{n} × {k:?}"));
-                                for l in first {
-                                    ui.line(&st.dim(&format!("  {l}")));
-                                }
-                            }
-                        }
-                        None => ui.line("phitex watch: no build yet"),
-                    },
                     Key::Summary => {
-                        let l = last.borrow();
-                        if l.summary.is_empty() {
-                            ui.line("phitex watch: no build yet");
-                        }
-                        for line in &l.summary {
-                            ui.line(line);
+                        let on = {
+                            let mut l = last.borrow_mut();
+                            l.pin_summary = !l.pin_summary;
+                            l.pin_summary
+                        };
+                        if on {
+                            let l = last.borrow();
+                            if l.summary.is_empty() {
+                                ui.line("phitex watch: no build yet");
+                            }
+                            for line in &l.summary {
+                                ui.line(line);
+                            }
+                            ui.line(&st.dim("stats shown after every build now (s hides them)"));
+                        } else {
+                            ui.line(&st.dim("stats hidden (s shows them)"));
                         }
                     }
                     Key::Clear => ui.clear(),

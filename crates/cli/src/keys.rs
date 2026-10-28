@@ -119,10 +119,10 @@ pub const HELP: &[(&str, &str)] = &[
     ("r, Enter", "build again now"),
     ("o", "open the viewer (or the --open program on the output)"),
     ("p", "show the last build's errors again"),
-    ("w", "show the last build's warnings"),
+    ("w", "the warnings, now and after every build (again: hide them)"),
     (
         "s",
-        "how the last build went: its phases, reuse, parallelism",
+        "how the build went (phases, reuse, parallelism, memory), now and after every build (again: hide it)",
     ),
     ("c", "clear the screen"),
     ("h, ?", "these keys"),
