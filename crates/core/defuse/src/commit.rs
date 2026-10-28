@@ -2629,6 +2629,14 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
 /// its write lock) and re-asks their readers, and, when it is removed, the
 /// reads made at its label. Its placements, for the caller to unfile.
 fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: bool) -> Vec<NodeId> {
+    // (a node removed gives back what it holds while it is still on the
+    // line: its walk starts where it stands, and a node off the line keeps
+    // the label it had, which a rebalance since may have given a sibling
+    // it holds, so the walk would start past it; what a run of it claims
+    // after this goes back at the end, as before)
+    if remove {
+        release_claimed(eng, w, node);
+    }
     let Some((seg, mut inner)) = own_write(eng, node) else {
         return Vec::new();
     };
@@ -3906,6 +3914,9 @@ mod tests {
     /// twice: once to say it paused, once to go on.
     static PAUSE_AT: AtomicU64 = AtomicU64::new(0);
     static PAUSE: Mutex<Option<Arc<Barrier>>> = Mutex::new(None);
+    /// Held by each test here for its length: node ids are per engine, so
+    /// another test's node could stand for the one paused at.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
     pub(super) fn paused(me: NodeId, want: usize) {
         if want != 0 || PAUSE_AT.load(Ordering::Acquire) != me.raw() + 1 {
@@ -4007,6 +4018,7 @@ mod tests {
 
     #[test]
     fn a_claim_of_the_rest_made_smaller_gives_back_the_placed_text_it_took() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Built with f = 0, then f = 1: C claims the rest of the text, the
         // pushed piece T and the piece R that Q (not text) placed. f set to 0 again, C claims
         // nothing and both run again: R, which no claim of C's siblings
@@ -4056,7 +4068,56 @@ mod tests {
     }
 
     #[test]
+    fn a_node_removed_gives_back_what_it_held_whatever_the_labels_became() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // C holds T0 and T1. C is removed; its give-back pauses after
+        // reading claim_end while the segment is relabelled evenly (a
+        // rebalance, as a placement that finds the labels used up makes
+        // one). T0 and T1 go back however their labels moved.
+        let e = Engine::new();
+        let claimer = e.register(Arc::new(Claimer));
+        let text = e.register(Arc::new(Text));
+        let v = e.values();
+        let u = e.new_unit();
+        let c = e.push(u, claimer, vec![v.int(2)]);
+        let ts: Vec<NodeId> = (0..3).map(|k| e.push(u, text, vec![v.int(k)])).collect();
+        e.evaluate(1).unwrap();
+        assert_eq!(e.claimed(c), vec![ts[0], ts[1]]);
+        // (the four spread over the segment, then thirty after them in the
+        // gap after T2: the relabel below spreads them all, and T0 and T1
+        // land below the label C had)
+        let seg = e.node(ts[0]).seg_hint();
+        assert!(e.order.rebalance(&e, seg, 0));
+        for k in 0..30 {
+            e.push(u, text, vec![v.int(10 + k)]);
+        }
+        e.evaluate(1).unwrap();
+        let c_at = e.node(c).pos_hint();
+        let b = Arc::new(Barrier::new(2));
+        *PAUSE.lock().unwrap() = Some(b.clone());
+        PAUSE_AT.store(c.raw() + 1, Ordering::Release);
+        let moved = std::thread::scope(|s| {
+            let er = &e;
+            let remover = s.spawn(move || er.remove(c));
+            b.wait();
+            let seg = e.node(ts[0]).seg_hint();
+            e.order.rebalance(&e, seg, 0);
+            let moved = e.node(ts[0]).pos_hint() < c_at;
+            b.wait();
+            remover.join().unwrap();
+            moved
+        });
+        *PAUSE.lock().unwrap() = None;
+        assert!(moved, "the relabel moved T0 below the label C had ({c_at:?})");
+        for (k, &t) in ts.iter().enumerate() {
+            let i = e.node_info(t).unwrap();
+            assert!(i.state != NodeState::Inert && i.claimer.is_none(), "T{k} still held by {:?}", i.claimer.map(|n| n.raw()));
+        }
+    }
+
+    #[test]
     fn a_give_back_interleaved_with_a_claim_leaves_nothing_held() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // C holds T0. Its give-back (want 0) reads claim_end (T0) and
         // pauses; its commit's walk then takes T0 and T1; the give-back
         // goes on. Whatever order the lock lets them run in, a last
