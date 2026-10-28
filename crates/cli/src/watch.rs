@@ -99,18 +99,26 @@ fn not_ours(ours: &Ours, changed: &mut Vec<PathBuf>) {
 /// a writer closes a file ([`CLOSES`]), a file created or written is a
 /// change once closed, not at each write of its save: an editor that
 /// saves in place truncates the file first, and a build of it read
-/// between would be one of a cut text.
+/// between would be one of a cut text. A file removed or renamed away is
+/// a change only when nothing writes it again within [`WRITE_WAIT`]: an
+/// editor that saves by renaming the old file to a backup and writing a
+/// new one (vim's `backupcopy=no`, many others) leaves no file at that
+/// name for a moment, and a build read then is one of an empty text.
 fn watcher(
     root: &Path,
     ours: Ours,
     tx: mpsc::Sender<(Instant, Event)>,
 ) -> notify::Result<notify::RecommendedWatcher> {
-    use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind};
+    use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RenameMode};
     let r = root.to_path_buf();
     // (the files written and not closed yet)
     let writing: Arc<Mutex<HashSet<PathBuf>>> = Arc::default();
     let mut w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
         let Ok(ev) = ev else { return };
+        // (a rename's pair: its two halves come as `From` and `To` too)
+        if matches!(ev.kind, EventKind::Modify(ModifyKind::Name(RenameMode::Both))) {
+            return;
+        }
         let closed = CLOSES
             && matches!(
                 ev.kind,
@@ -131,8 +139,14 @@ fn watcher(
                 EventKind::Create(CreateKind::File | CreateKind::Any)
                     | EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Any)
             );
+            // (gone from its name: a change once nothing writes it again
+            // within WRITE_WAIT, as a file written and not closed)
+            let gone = matches!(
+                ev.kind,
+                EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From))
+            );
             let mut open = writing.lock().unwrap_or_else(PoisonError::into_inner);
-            if written {
+            if written || gone {
                 // (read after WRITE_WAIT if its writer keeps it open)
                 for p in changed.drain(..) {
                     if open.insert(p.clone()) {
@@ -156,10 +170,15 @@ fn watcher(
             } else if closed {
                 // (a close of a file not written changes nothing)
                 changed.retain(|p| open.remove(p));
-            } else {
+            } else if matches!(ev.kind, EventKind::Modify(ModifyKind::Name(_))) {
+                // (a whole file renamed to the name: read now)
                 for p in &changed {
                     open.remove(p);
                 }
+            } else {
+                // (its attributes changed, a touch: read now, but a file
+                // still written is read once closed)
+                changed.retain(|p| !open.contains(p));
             }
         }
         not_ours(&ours, &mut changed);
@@ -1275,15 +1294,19 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     let set = |s: &mut Session, buffers: &HashMap<String, String>, file: &str| {
         let text = buffers.get(file).map(|b| tex_text(b));
         if file == main_rel {
-            let t = text.unwrap_or_else(|| {
+            // (a main file not there to read, removed and not written
+            // again: its last text stands, not an empty one)
+            let Some(t) = text.or_else(|| {
                 let t0 = Instant::now();
-                let b = std::fs::read(&main_file).unwrap_or_default();
+                let b = std::fs::read(&main_file).ok()?;
                 phitex_tex::timeline::note("watch: the main file read", t0.elapsed());
                 let t0 = Instant::now();
                 let t = tex::chars_owned(b);
                 phitex_tex::timeline::note("watch: its characters", t0.elapsed());
-                t
-            });
+                Some(t)
+            }) else {
+                return;
+            };
             let t0 = Instant::now();
             s.set_text(t);
             phitex_tex::timeline::note("watch: the text set (shared)", t0.elapsed());
@@ -1602,14 +1625,15 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     if file != main_rel {
                         return false;
                     }
-                    let t = buffers.get(file).map_or_else(
-                        || {
-                            std::fs::read(&main_file)
-                                .map(|b| tex::chars(&b))
-                                .unwrap_or_default()
+                    // (a main file not there to read is not sent as an
+                    // empty text)
+                    let t = match buffers.get(file) {
+                        Some(b) => tex_text(b),
+                        None => match std::fs::read(&main_file) {
+                            Ok(b) => tex::chars(&b),
+                            Err(_) => return false,
                         },
-                        |b| tex_text(b),
-                    );
+                    };
                     absorb.send(&t, at);
                     true
                 };

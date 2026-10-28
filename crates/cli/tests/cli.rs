@@ -1172,6 +1172,69 @@ fn watch_plain_edit() {
     );
 }
 
+/// `phitex watch`, headless: a save that renames the old file away and
+/// writes a new one in pieces (vim's `backupcopy=no`, many editors) is
+/// one edit of the whole new text: no build starts while no file is at
+/// the name (it read an empty text, and the save's text came as an edit
+/// absorbed into that build), the edit's line is the line changed.
+#[test]
+fn watch_save_by_rename_builds_the_new_text() {
+    let _one = one();
+    let text = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("story.tex");
+    let dir = scratch("watch-rename-save");
+    std::fs::write(dir.join("story.tex"), &text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--json",
+            "--no-view",
+            "--engine",
+            "tex",
+            "story.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let at = text.find(" the ").expect("a word");
+    let line = text[..at].matches('\n').count() + 1;
+    let edited = format!("{} thy {}", &text[..at], &text[at + 5..]);
+    std::thread::sleep(Duration::from_millis(50));
+    let path = dir.join("story.tex");
+    let backup = dir.join("story.tex~");
+    std::fs::rename(&path, &backup).expect("the old file renamed away");
+    std::thread::sleep(Duration::from_millis(100));
+    {
+        let mut f = std::fs::File::create(&path).expect("the new file");
+        for piece in edited.as_bytes().chunks(512) {
+            f.write_all(piece).expect("a piece");
+            f.flush().expect("flushed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    std::fs::remove_file(&backup).expect("the backup removed");
+    let ev = until(&mut lines, "build", &2.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    assert_eq!(ev["absorbed"], 0, "the build began before the save ended: {ev}");
+    assert_eq!(ev["edit"], format!("story.tex:{line}"), "{ev}");
+    std::thread::sleep(Duration::from_millis(700));
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    let rest: Vec<String> = lines.collect();
+    assert!(
+        !rest.iter().any(|l| l.contains("\"event\":\"build\"")),
+        "a third build ran: {rest:?}"
+    );
+}
+
 /// XeLaTeX and LuaLaTeX are not supported, by any name, and nothing
 /// external runs in their place.
 #[test]
