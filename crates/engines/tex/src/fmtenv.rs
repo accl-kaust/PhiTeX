@@ -24,9 +24,11 @@ pub(crate) struct FormatEnv {
     /// The nodes, serialised in order: node `k` at `offs[k]`.
     nodes: Vec<u8>,
     offs: Vec<u32>,
-    /// By field (a hash of its name, [`name_key`]: a field's id is its
-    /// value store's), each field once: the key, its name's node, its
-    /// value's node.
+    /// By field (a hash of its name, [`name_key`], then the name: a
+    /// field's id is its value store's), each field once: the key, its
+    /// name's node, its value's node. Two names may share a key (the
+    /// hash is not an identity: `cs:fp_set:Nn` and `cs:fp_sub:Nn` do),
+    /// so a lookup compares the names under its key.
     binds: Vec<(u64, u32, u32)>,
 }
 
@@ -53,22 +55,23 @@ impl FormatEnv {
             out: FormatEnv::default(),
             memo: FxHashMap::default(),
         };
-        let mut binds: Vec<(u64, u32, u32)> = env
+        let mut binds: Vec<(u64, &str, u32, u32)> = env
             .iter()
             .map(|(name, x)| {
                 let f = v.field(name);
                 let n = w.node(v, f.0);
                 let k = w.node(v, *x);
-                (name_key(name), n, k)
+                (name_key(name), name.as_str(), n, k)
             })
             .collect();
         // (the last given of a field first among its own, which the
-        // dedup keeps)
+        // dedup keeps; by key, then by name: a key two names share
+        // keeps both)
         binds.reverse();
-        binds.sort_by_key(|b| b.0);
-        binds.dedup_by_key(|b| b.0);
+        binds.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        binds.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
         let mut out = w.out;
-        out.binds = binds;
+        out.binds = binds.into_iter().map(|(f, _, n, k)| (f, n, k)).collect();
         out
     }
 
@@ -92,17 +95,23 @@ impl FormatEnv {
 
     /// The value bound to `name`, made in `v`.
     pub(crate) fn get(&self, v: &Values, name: &str, made: &Made) -> Option<ValueId> {
-        let f = name_key(name);
-        let i = self.binds.binary_search_by_key(&f, |b| b.0).ok()?;
-        Some(self.value(v, self.binds[i].2, made))
+        let k = self.find(name)?;
+        Some(self.value(v, k, made))
     }
 
     /// The value bound to field `f`, made in `v` (none: the format binds
     /// no such field).
     pub(crate) fn get_field(&self, v: &Values, f: Field, made: &Made) -> Option<ValueId> {
-        let k = v.with_str(f.0, name_key)?;
-        let i = self.binds.binary_search_by_key(&k, |b| b.0).ok()?;
-        Some(self.value(v, self.binds[i].2, made))
+        let k = v.with_str(f.0, |name| self.find(name))??;
+        Some(self.value(v, k, made))
+    }
+
+    /// The value node bound to `name`: among the bindings under its key,
+    /// the one of this name.
+    fn find(&self, name: &str) -> Option<u32> {
+        let f = name_key(name);
+        let i = self.binds.partition_point(|b| b.0 < f);
+        self.binds[i..].iter().take_while(|b| b.0 == f).find(|b| self.str_at(b.1) == Some(name)).map(|b| b.2)
     }
 
     /// The names bound, in the bindings' order.
@@ -206,7 +215,7 @@ impl FormatEnv {
         for _ in 0..n {
             let f = u64_at(rest, 0)?;
             let (nm, k) = (u32_at(rest, 8)?, u32_at(rest, 12)?);
-            if nm as usize >= count || k as usize >= count || binds.last().is_some_and(|l: &(u64, u32, u32)| l.0 >= f) {
+            if nm as usize >= count || k as usize >= count || binds.last().is_some_and(|l: &(u64, u32, u32)| l.0 > f) {
                 return None;
             }
             binds.push((f, nm, k));
@@ -317,6 +326,21 @@ mod tests {
         let mut names: Vec<&str> = g.names().collect();
         names.sort_unstable();
         assert_eq!(names, ["cs:a", "cs:b"]);
+        // (two names under one key, each bound to its own value: the
+        // hash of `cs:fp_set:Nn` is `cs:fp_sub:Nn`'s, and a format that
+        // kept one binding for both gave `\fp_set:Nn` the meaning of
+        // `\fp_sub:Nn`, which calls it: an endless loop)
+        assert_eq!(name_key("cs:fp_set:Nn"), name_key("cs:fp_sub:Nn"));
+        let pair = vec![("cs:fp_set:Nn".to_owned(), v.str("set")), ("cs:fp_sub:Nn".to_owned(), v.str("sub"))];
+        let p = FormatEnv::of(&v, &pair);
+        assert_eq!(p.len(), 2);
+        let mut pb = Vec::new();
+        p.write(&mut pb);
+        let (q, _) = FormatEnv::read(&pb).expect("read back");
+        let qm = q.made();
+        assert_eq!(q.get(&w, "cs:fp_set:Nn", &qm).map(|x| w.render(x)), Some(v.render(v.str("set"))));
+        assert_eq!(q.get(&w, "cs:fp_sub:Nn", &qm).map(|x| w.render(x)), Some(v.render(v.str("sub"))));
+        assert_eq!(q.get_field(&w, w.field("cs:fp_sub:Nn"), &qm).map(|x| w.render(x)), Some(v.render(v.str("sub"))));
         // (a table cut short is refused)
         let mut bad = b.clone();
         bad.truncate(b.len() - 1);
