@@ -1104,34 +1104,6 @@ fn latexmk_cold(name: &str, threads: usize) {
     );
 }
 
-// (a group opened by an earlier node, closed inside a paragraph: the
-// node is cut at the paragraph's start (`\begingroup\leftskip=5pt` before
-// it), the run closes the engine scope at `\endgroup` but runs on with
-// its own bindings of the closed scope while its paragraph is open
-// (`Run::closed_scope` needs an empty nest); LaTeX's center with
-// \centering or \small after \item: the next paragraphs centered, or set
-// at \small's size; 0 of 2 exact)
-#[test]
-#[ignore = "scope closed inside a paragraph begun in another node"]
-fn latexmk_corpus_center_after_item_j1() {
-    latexmk_cold("corpus-center-after-item", 1);
-}
-#[test]
-#[ignore = "scope closed inside a paragraph begun in another node"]
-fn latexmk_corpus_center_after_item_j8() {
-    latexmk_cold("corpus-center-after-item", 8);
-}
-#[test]
-#[ignore = "scope closed inside a paragraph begun in another node"]
-fn latexmk_corpus_center_small_j1() {
-    latexmk_cold("corpus-center-small", 1);
-}
-#[test]
-#[ignore = "scope closed inside a paragraph begun in another node"]
-fn latexmk_corpus_center_small_j8() {
-    latexmk_cold("corpus-center-small", 8);
-}
-
 macro_rules! latexmk_tests {
     ($($test:ident: $name:literal, $j:literal;)*) => {
         $(
@@ -1142,6 +1114,58 @@ macro_rules! latexmk_tests {
         )*
     };
 }
+
+// (a group opened by an earlier node and closed inside a paragraph: the
+// node is cut at the paragraph's start (`\begingroup\leftskip=50pt`
+// before it), and the run that closes the engine scope ends there, its
+// paragraph going on outside the scope as a resume, none of the scope's
+// bindings carried (§282); LaTeX's center with \centering or \small
+// after \item left them standing past \end{center}: the next paragraphs
+// centered, or at \small's size)
+latexmk_tests! {
+    latexmk_corpus_group_par_close_j1: "corpus-group-par-close", 1;
+    latexmk_corpus_group_par_close_j8: "corpus-group-par-close", 8;
+    latexmk_corpus_group_close_after_par_j1: "corpus-group-close-after-par", 1;
+    latexmk_corpus_group_close_after_par_j8: "corpus-group-close-after-par", 8;
+    latexmk_corpus_center_after_item_j1: "corpus-center-after-item", 1;
+    latexmk_corpus_center_after_item_j8: "corpus-center-after-item", 8;
+    latexmk_corpus_center_small_j1: "corpus-center-small", 1;
+    latexmk_corpus_center_small_j8: "corpus-center-small", 8;
+}
+
+/// The paragraph after `\end{center}` edited (one word): the build equals
+/// a cold one of the new text, at one thread and at eight.
+#[test]
+fn latexmk_corpus_center_edit() {
+    let name = "corpus-center-after-item";
+    let fx = common::fixtures().join("latexmk").join(name);
+    for threads in [1, 8] {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join("latexmk")
+            .join(format!("{name}-edit-j{threads}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        for e in std::fs::read_dir(&fx).expect("the sources").flatten() {
+            std::fs::copy(e.path(), dir.join(e.file_name())).expect("a source");
+        }
+        let src = common::read(&dir.join(format!("{name}.tex")));
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            tool_finder: Some(common::tool_finder(&dir)),
+            ..pdf_opts(name, &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &src);
+        let new = src.replacen("powerful", "mighty", 1);
+        assert_ne!(new, src, "the edited word is in the text");
+        b.edit(&new);
+        let cold = common::build(opts(), Some(&prelude(true)), &new);
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("{name} -j {threads}: edit differs from cold: {d}");
+        }
+    }
+}
+
 
 // (a group-local binding around a read-back file, its close after the
 // file's units: restored there, and a written file's lines in TeX's

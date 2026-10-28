@@ -167,7 +167,7 @@ pub(crate) fn run_node(
         Ok(()) | Err(Halt::Cut) => {
             // (a run cut at a candidate keeps its open groups and lists:
             // they are its continuation's)
-            if r.cut.is_none() {
+            if r.cut.is_none() && r.close_cont.is_none() {
                 r.end_open();
             }
             // (what a continuation republishes and the records the run

@@ -207,6 +207,9 @@ impl Run<'_, '_> {
             return self.mode();
         }
         self.effect = crate::run::CLOSE;
+        if crate::exec::obs_flag!("PHITEX_CLOSE_TRACE") {
+            eprintln!("close-trace: node {} closes its scope, nest {:?}", self.cx.node().raw(), self.nest.iter().map(|l| (l.mode, l.group, l.owns)).collect::<Vec<_>>());
+        }
         self.unsave_extras(md)?;
         self.kind_outer(md)
     }

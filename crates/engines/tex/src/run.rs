@@ -801,6 +801,10 @@ pub(crate) struct Run<'c, 'a> {
     /// lines), and the siblings it takes where the piece's text says so.
     pub cont_val: Option<ValueId>,
     pub cont_guess: Option<usize>,
+    /// The continuation of a run that closed the engine scope it ran in
+    /// inside a level of its own (a paragraph begun in the scope): its
+    /// rest goes on outside the scope as a resume ([`Run::close_resume`]).
+    pub close_cont: Option<ValueId>,
     /// A read-back point not known to be one yet: the file this run
     /// looked for in vain from the macro running ([`Run::read_back_at`]).
     /// When the run opens that file for writing, the point was its
@@ -1066,6 +1070,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cont_lines: Vec::new(),
             cont_val: None,
             cont_guess: None,
+            close_cont: None,
             read_point_pending: None,
             vain_after_point: Vec::new(),
             pending_pre: Vec::new(),
@@ -1332,7 +1337,14 @@ impl<'c, 'a> Run<'c, 'a> {
         let top = self.rec_load || (self.st.has_global_restore(self.v) && self.scope_kind()?.is_none());
         let (pubs, restored) = self.st.publication(self.v, top);
         let mut out = Vec::with_capacity(pubs.len());
+        let closed = self.closed_scope();
         for p in pubs {
+            // (a run that closed its scope: its local bindings were the
+            // scope's, unsaved at the close, §282; the engine places a
+            // closing node's definitions after its close)
+            if closed && p.at == Locality::Local {
+                continue;
+            }
             let f = self.loc_field(p.loc);
             if p.carried
                 && let crate::state::Pub::Value(x) = p.what
@@ -1363,7 +1375,11 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let top = self.rec_load || matches!(self.scope_kind_memo, Some(None));
         let (pubs, _) = self.st.publication(self.v, top);
-        pubs.into_iter().map(|p| (self.loc_field(p.loc), p.what, p.at)).collect()
+        let closed = self.closed_scope();
+        pubs.into_iter()
+            .filter(|p| !(closed && p.at == Locality::Local))
+            .map(|p| (self.loc_field(p.loc), p.what, p.at))
+            .collect()
     }
 
     /// The values the run publishes (its relations left out).
@@ -4382,6 +4398,15 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.command()?;
                 self.mark.active = false;
                 if self.claim_rest || self.closed_scope() {
+                    // (a scope closed inside a level of the run's own:
+                    // the rest runs outside it from a continuation)
+                    if self.closed_scope() && !self.claim_rest && !self.nest.is_empty() {
+                        let (c, _) = self.cont_encode_as(true)?;
+                        if crate::exec::obs_flag!("PHITEX_CLOSE_TRACE") {
+                            eprintln!("close-trace: node {} ends at the close, its rest a resume: {}", self.cx.node().raw(), self.v.render(c).chars().take(300).collect::<String>());
+                        }
+                        self.close_cont = Some(c);
+                    }
                     return Ok(());
                 }
             }
@@ -4462,15 +4487,18 @@ impl<'c, 'a> Run<'c, 'a> {
             && !crate::hints::effect_none(&self.ops.hints, self.v, self.cx.args())
     }
 
-    /// Whether the run closed the engine scope it ran in, with nothing
-    /// of its own open but conditionals: it ends after that command
-    /// ([`CLOSE`], its reads and definitions inside the scope), and
-    /// what it has left of its input runs outside it as the following
-    /// nodes, the conditionals carried ([`Run::leftover`]). (Any run: a
-    /// run going on past the close would read on with its own bindings
-    /// of the closed scope, §282 not done.)
+    /// Whether the run closed the engine scope it ran in: it ends after
+    /// that command ([`CLOSE`], its reads and definitions inside the
+    /// scope), and what it has left of its input runs outside it: as the
+    /// following nodes, the conditionals carried ([`Run::leftover`]),
+    /// where nothing of its own is open; else, a level of its own open
+    /// (a paragraph begun inside the scope), as one resume carrying the
+    /// levels, the input and the conditionals and none of the scope's
+    /// bindings ([`Run::close_resume`]). (Any run: a run going on past
+    /// the close would read on with its own bindings of the closed
+    /// scope, §282 not done.)
     pub(crate) fn closed_scope(&self) -> bool {
-        self.effect == CLOSE && self.nest.is_empty()
+        self.effect == CLOSE
     }
 
     /// The conditionals a node before this one left open
@@ -4798,11 +4826,12 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a run cut at a candidate: its input left is its continuation,
         // the resume piece's, `crate::pages`)
-        let leftover = if self.cut.is_some() {
+        let leftover = if self.cut.is_some() || self.close_cont.is_some() {
             Vec::new()
         } else {
             self.leftover()
         };
+        self.close_resume();
         for args in leftover {
             if crate::exec::obs_flag!("PHITEX_TEX_TRACE") {
                 let v = self.v;

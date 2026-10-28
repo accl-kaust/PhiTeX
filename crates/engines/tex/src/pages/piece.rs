@@ -1161,8 +1161,18 @@ impl Run<'_, '_> {
     /// definition in between stands, §283), and the rest of the run's
     /// counters. Also the group-local bindings themselves, for the
     /// finisher.
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn cont_encode(&mut self) -> R<(ValueId, Vec<ValueId>)> {
+        self.cont_encode_as(false)
+    }
+
+    /// [`Run::cont_encode`]; `closed`: at the close of the engine scope
+    /// the run ran in, a level of its own open ([`Run::closed_scope`]):
+    /// no state table (the run's bindings were the closed scope's,
+    /// unsaved there, §282; the rest reads what stands outside it from
+    /// the engine, the run's global definitions among it), its levels
+    /// with no saves or definitions below them.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn cont_encode_as(&mut self, closed: bool) -> R<(ValueId, Vec<ValueId>)> {
         let v = self.v;
         // (each token level's file line: of the innermost file read
         // below it, §304, a file it is inside staying open until the
@@ -1246,7 +1256,12 @@ impl Run<'_, '_> {
                 self.st.debug_marks(l)
             );
         }
-        let c = self.st.cont(v, &open);
+        let mut c = self.st.cont(v, &open);
+        if closed {
+            c.slots.clear();
+            c.save.clear();
+            c.defined.clear();
+        }
         // (the stamps and the group numbers the continuation carries, by
         // their order only: a resume compares them with each other and
         // with its own, all later; what a run made before them, or how
@@ -1309,10 +1324,10 @@ impl Run<'_, '_> {
                     packed,
                     v.int(l.prev_graf),
                     v.list(l.extra.clone()),
-                    v.int(i64::from(gid_of(l.gid))),
-                    v.int(i64::try_from(l.save_base).unwrap_or(0)),
-                    v.int(i64::try_from(l.def_base).unwrap_or(0)),
-                    v.int(i64::from_ne_bytes(st_of(l.open_stamp).to_ne_bytes())),
+                    v.int(i64::from(if closed { 0 } else { gid_of(l.gid) })),
+                    v.int(if closed { 0 } else { i64::try_from(l.save_base).unwrap_or(0) }),
+                    v.int(if closed { 0 } else { i64::try_from(l.def_base).unwrap_or(0) }),
+                    v.int(if closed { 0 } else { i64::from_ne_bytes(st_of(l.open_stamp).to_ne_bytes()) }),
                     toks_value(v, &l.ag),
                 ])
             })
@@ -1639,6 +1654,26 @@ impl Run<'_, '_> {
         self.rec_load = n(17) != 0;
         self.cond_loaded = n(18) != 0;
         Ok(())
+    }
+}
+
+/// The candidate number of a resume after a run that closed its scope
+/// inside a level of its own ([`Run::close_resume`]): no candidate's.
+pub(crate) const CLOSE_K: u32 = u32::MAX;
+
+impl Run<'_, '_> {
+    /// A run that closed the engine scope it ran in with a level of its
+    /// own open ([`Run::closed_scope`]): its rest, the continuation taken
+    /// at the close ([`Run::close_cont`]), runs as a resume after it,
+    /// outside the scope, from the field `cont:<node>:<CLOSE_K>` it
+    /// reads as a cut piece's rest reads its own.
+    pub(crate) fn close_resume(&mut self) {
+        let Some(c) = self.close_cont else { return };
+        let v = self.v;
+        let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+        let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
+        self.cx.define_with(cont_field(v, pid, CLOSE_K), v.list(vec![c, v.int(-1)]), Locality::Global);
+        self.cx.follow(self.ops.resume, vec![v.int(flags), pid, v.int(i64::from(CLOSE_K))]);
     }
 }
 
