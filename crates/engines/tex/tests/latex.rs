@@ -1128,6 +1128,11 @@ latexmk_tests! {
     // 79 corpus manuals with microtype)
     latexmk_corpus_protrude_heading_j1: "corpus-protrude-heading", 1;
     latexmk_corpus_protrude_heading_j8: "corpus-protrude-heading", 8;
+    // (tikz's fadings: an \immediate\pdfxform whose box names a form
+    // not written yet writes it, an object for its resources, before the
+    // next \pdflastxform; 10 corpus manuals' /pgfsmask names)
+    latexmk_corpus_pgf_fading_j1: "corpus-pgf-fading", 1;
+    latexmk_corpus_pgf_fading_j8: "corpus-pgf-fading", 8;
     // (a stream closed and opened again on another file in one run)
     latexmk_reopen_stream_j1: "reopen-stream", 1;
     latexmk_reopen_stream_j8: "reopen-stream", 8;

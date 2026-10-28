@@ -2664,6 +2664,28 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 // (its resources' dictionary, written into an object
                 // stream where they compress)
                 crate::pdfout::os_write(r)?;
+                // (the forms its box names that no page and no read-time
+                // write wrote before, written after it as pdfTeX writes a
+                // shipout's pending forms: an object for each one's
+                // resources, its fonts, its resources' dictionary into an
+                // object stream; the form itself written, so a page that
+                // names it later does not write it)
+                crate::pdfout::forms_first_written(r, &[o])?;
+                let mut side = nodes::Side::default();
+                let whats = match b.and_then(|b| nodes::decode(v, b, &mut side)) {
+                    Some(_) => side.whats,
+                    None => Vec::new(),
+                };
+                let named = crate::pdfout::forms_named(r, &whats)?;
+                for n in crate::pdfout::forms_first_written(r, &named)? {
+                    let _ = alloc_obj(r)?;
+                    let fb = r
+                        .get(&format!("pdf:xform:{n}"))?
+                        .and_then(|x| list_of(v, x).first().copied());
+                    let names = box_font_names(r, fb)?;
+                    crate::pdfout::fonts_first_used(r, &names)?;
+                    crate::pdfout::os_write(r)?;
+                }
             }
             let fx = r.cint(crate::fields::cell::PDF_XFORMCOUNT)? + 1;
             r.set_cell(crate::fields::cell::PDF_XFORMCOUNT, v.int(fx), true);

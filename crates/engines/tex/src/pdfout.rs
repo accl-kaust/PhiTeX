@@ -2470,7 +2470,8 @@ fn line_of(v: &Values, units: &FxHashMap<i64, ValueId>, s: &crate::nodes::Sealed
 /// finisher, every round) where it ships: `[fixed, [font names],
 /// [destination names], [shipout fonts], compressible, read-time count,
 /// [read-time fonts], [read-time destinations], read-time object stream
-/// writes, [mark events], node, [read-time pages]`: the objects the page
+/// writes, [mark events], node, [read-time pages], break, [forms],
+/// [read-time forms]`: the objects the page
 /// always takes (its object unless a `\\pdfpageref` or an action made it
 /// first, by its place in the line, its contents, its resources),
 /// the fonts it uses by name (an object for each name first used), the
@@ -2480,8 +2481,10 @@ fn line_of(v: &Values, units: &FxHashMap<i64, ValueId>, s: &crate::nodes::Sealed
 /// numbers after them), and the objects it writes into object streams
 /// besides its destinations (its dictionary, its resources, its
 /// annotations; a stream's own object every 100, `\\pdfobjcompresslevel`
-/// above 0). A read-time command's object number is TeX's count of the
-/// read-time allocations before it plus the fold of this over the line
+/// above 0), and the forms it names that nothing wrote before (pdfTeX
+/// writes each after the page, an object for its resources each, into an
+/// object stream where they compress: [`forms_named`]). A read-time
+/// command's object number is TeX's count of the read-time allocations before it plus the fold of this over the line
 /// before it ([`page_offset`]): an in-round value, no loop-back.
 ///
 /// The read-time count before the page is in the entry only where the
@@ -2592,6 +2595,13 @@ pub(crate) fn page_allocs(
     let rt_dests = r.get(RT_DESTS)?.unwrap_or_else(|| v.list(Vec::new()));
     let rt_os = r.get(RT_OS)?.unwrap_or_else(|| v.int(0));
     let rt_pages = r.get(RT_PAGES)?.unwrap_or_else(|| v.list(Vec::new()));
+    // (the forms the page names, written with it where nothing wrote
+    // them before, and those read-time writes wrote: [`forms_named`])
+    let forms: Vec<ValueId> = forms_named(r, side_whats)?
+        .into_iter()
+        .map(|n| v.int(n))
+        .collect();
+    let rt_forms = r.get(RT_FORMS)?.unwrap_or_else(|| v.list(Vec::new()));
     // (where the page broke, for a page firing inside a piece: the
     // piece and its candidate, [`page_offset_at`])
     let brk = r
@@ -2614,6 +2624,8 @@ pub(crate) fn page_allocs(
         v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes())),
         rt_pages,
         brk,
+        v.list(forms),
+        rt_forms,
     ]);
     if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
         eprintln!("alloc: page (node {}): {}", r.cx.node().raw(), v.render(e));
@@ -2796,6 +2808,68 @@ const RT_OS: &str = "pdf:rtos";
 /// (`\\pdfpageref`, an action's `goto page`: [`page_made_at_read_time`]).
 const RT_PAGES: &str = "pdf:rtpages";
 
+/// The forms read-time writes wrote ([`forms_first_written`]).
+const RT_FORMS: &str = "pdf:rtforms";
+
+/// The forms whatsits `whats` name (`\\pdfrefxform`), with the forms
+/// their boxes name in turn: pdfTeX writes each that is not written yet
+/// when it ships the page or form they are in (§752's "Write out pending
+/// forms", a form's own shipout writing those it names), an object for
+/// its resources each.
+pub(crate) fn forms_named(r: &mut Run<'_, '_>, whats: &[ValueId]) -> R<Vec<i64>> {
+    let v = r.v;
+    let mut out: Vec<i64> = Vec::new();
+    let mut todo: Vec<ValueId> = whats.to_vec();
+    while let Some(w) = todo.pop() {
+        let xs = list_of(v, w);
+        if xs.first().map(|&k| str_of(v, k)).as_deref() != Some("pdf:refxform") {
+            continue;
+        }
+        let n = xs.get(1).map_or(0, |&x| int_of(v, x));
+        if out.contains(&n) {
+            continue;
+        }
+        out.push(n);
+        let Some(x) = r.get(&format!("pdf:xform:{n}"))? else {
+            continue;
+        };
+        if let Some(&b) = list_of(v, x).first() {
+            let mut side = Side::default();
+            if crate::nodes::decode(v, b, &mut side).is_some() {
+                todo.extend(side.whats);
+            }
+        }
+    }
+    out.sort_unstable();
+    Ok(out)
+}
+
+/// Of forms `forms`, those no page before this run and no read-time
+/// write before wrote: an `\\immediate\\pdfxform` writes them (and
+/// itself), each a read-time object for its resources; all of them noted
+/// written ([`RT_FORMS`]), so a page after does not count them.
+pub(crate) fn forms_first_written(r: &mut Run<'_, '_>, forms: &[i64]) -> R<Vec<i64>> {
+    if forms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let v = r.v;
+    let range = allocs_range(r, "forms_first_written")?;
+    let f = fold_allocs(v, range);
+    let mut rt: Vec<ValueId> = r.get(RT_FORMS)?.map(|x| list_of(v, x)).unwrap_or_default();
+    let mut new = Vec::new();
+    for &n in forms {
+        let x = v.int(n);
+        if !f.forms.contains(&x) && !rt.contains(&x) {
+            new.push(n);
+            rt.push(x);
+        }
+    }
+    if !new.is_empty() {
+        r.set(RT_FORMS, v.list(rt), true);
+    }
+    Ok(new)
+}
+
 /// Page `n`'s object made by a read-time command before the page
 /// shipped: the page then makes no object of its own ([`ALLOCS`]).
 pub(crate) fn page_made_at_read_time(r: &mut Run<'_, '_>, n: i64) -> R<()> {
@@ -2892,6 +2966,9 @@ struct AllocFold {
     fonts: Arc<BTreeSet<ValueId>>,
     /// The destinations the pages made.
     dests: Arc<BTreeSet<ValueId>>,
+    /// The forms written: those the pages wrote and those read-time
+    /// writes wrote before them.
+    forms: Arc<BTreeSet<ValueId>>,
     /// The objects the pages wrote into object streams.
     os_written: i64,
 }
@@ -3023,6 +3100,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     // another definition is ignored, pdfTeX's "duplicate ignored")
     let mut defined: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_ship: BTreeSet<ValueId> = BTreeSet::new();
+    let mut seen_forms: BTreeSet<ValueId> = BTreeSet::new();
     let mut ms = MarkState::default();
     for (pages, e) in v.seq_to_vec(range).into_iter().enumerate() {
         let xs = list_of(v, e);
@@ -3046,6 +3124,9 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
                 out.objects += 1;
             }
         }
+        // (the forms read-time writes wrote: their objects are read-time
+        // ones, counted there, [`forms_first_written`])
+        seen_forms.extend(l(14));
         // (the page's own object, after its resources' one, unless a
         // reference or a link's action made it before)
         let fixed = if ms.premade.contains(&pno) { 2 } else { i(0) };
@@ -3054,6 +3135,15 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         // (a pages-tree node every `pages_tree_kids_max` pages)
         if pages % 6 == 0 {
             out.objects += 1;
+        }
+        // (the forms the page names that nothing wrote before: written
+        // after it, an object for each one's resources)
+        let mut forms_written = 0i64;
+        for x in l(13) {
+            if seen_forms.insert(x) {
+                out.objects += 1;
+                forms_written += 1;
+            }
         }
         for n in l(1) {
             if seen.insert(n) {
@@ -3083,7 +3173,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         // count toward a stream's 100; a link piece's, a bead
         // rectangle's and a destination's object go into one too)
         let os = if i(4) > 0 {
-            i(4) + made.compressible + dests_written
+            i(4) + made.compressible + dests_written + forms_written
         } else {
             0
         };
@@ -3097,6 +3187,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     out.page_objs = Arc::new(page_objs);
     out.fonts = Arc::new(seen);
     out.dests = Arc::new(seen_dest);
+    out.forms = Arc::new(seen_forms);
     out.os_written = written;
     let mut g = m.locked();
     if g.len() > 1 << 12 {
