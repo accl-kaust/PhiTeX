@@ -79,8 +79,28 @@ piece's `[tag]` marker, the parameters reaching it, is those the fold has
 in force; it is read where the piece is only while the fold has none, on
 the first page, before any finisher. The builder never reads a
 finisher's definition of a page parameter by its place. Positional reads
-stay for what the text reads (`\the\vsize` after a page, held as in §2)
-and for an insertion class's registers.
+stay for what the text reads (`\the\vsize` after a page, held as in §2).
+
+An insertion class's registers (`\box n`, `\count n`, `\dimen n`,
+`\skip n`, which §1008 reads where the class's first insertion meets a
+page) reach the builder the same way: the routine's give-back carries a
+`T_INS_PARAMS` marker, with the registers as the routine left them, for
+each class the page's fire filled (§1018), held over, the builder had
+where the page began, or whose registers the routine set (any `n` under
+255: which numbers are classes only an `\insert` says;
+`Run::rtn_page_markers`); the builder keeps them in fold order
+(`ScanState::ins`, `Page::ins`), and a piece's `[tag, n]` marker is
+those, each register replaced by the text's own definition reaching the
+piece where the text set it after the page before fired
+(`Run::insert_class_since`); a class no routine gave back yet is the
+text's and the environment's registers reaching the piece. Neither reads
+a finisher's definition: the box as the text sets it has a field of its
+own (`tbox:<n>`, `Run::tbox_loc`, set beside `box:<n>` by every run but a
+finisher's), the other three pass a finisher's over. Read by place, LaTeX's `\box\footins`, emptied by each routine that ships a
+page with footnotes, made the same 2-cycle as `\vsize`: the manuals with
+footnotes of that group (biblatex-publist, envlab, jurabib, moreverb-de,
+esami) ran the loop until the timeout, moreverb-de at -j1 4717 loop runs
+in 30 s woken by `Environment{box:253}` and 4750 finisher relocations.
 
 Why (2026-10-28, the documents with floats or marginpars): LaTeX's two
 stage float output sets `\vsize` to `\maxdimen` in the routine at

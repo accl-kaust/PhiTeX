@@ -513,6 +513,12 @@ pub(crate) struct ScanState {
     pub pb: PageBuilder,
     pub fold: FoldState,
     pub params: Option<PageParams>,
+    /// The insertion classes' registers the builder has from the
+    /// routines' give-backs and the text's own markers, in fold order
+    /// (`T_INS_PARAMS` markers with values, the last of a class standing):
+    /// what a class's `[tag, n]` marker past the first page reads
+    /// ([`crate::run::Run::ins_fold`], docs/spec-settle.md §2.1).
+    pub ins: Vec<(u16, InsertClass)>,
     pub pending: Vec<PItem>,
     /// Where the last page fired, the contributions after it (§1017: the
     /// held-over insertions, the page's material past its break, the
@@ -528,6 +534,18 @@ pub(crate) struct ScanState {
 pub(crate) trait Reaching {
     fn params(&mut self) -> PageParams;
     fn class(&mut self, n: u16) -> InsertClass;
+    /// The classes the builder has now ([`ScanState::ins`]), before a
+    /// class is asked for.
+    fn note_ins(&mut self, _ins: &[(u16, InsertClass)]) {}
+}
+
+/// Class `n`'s registers `c` in force in `ins` (the last of a class
+/// standing, [`ScanState::ins`]).
+pub(crate) fn note_class(ins: &mut Vec<(u16, InsertClass)>, n: u16, c: InsertClass) {
+    match ins.iter_mut().find(|x| x.0 == n) {
+        Some(x) => x.1 = c,
+        None => ins.push((n, c)),
+    }
 }
 
 impl ScanState {
@@ -547,6 +565,7 @@ impl ScanState {
             pb,
             fold,
             params,
+            ins: Vec::new(),
             pending: Vec::new(),
             carry: Vec::new(),
             fired_at: 0,
@@ -656,7 +675,14 @@ impl ScanState {
                 false
             }
             PItem::InsParams(n, c) => {
-                classes.push((*n, c.unwrap_or_else(|| rd.class(*n))));
+                let c = if let Some(c) = c {
+                    note_class(&mut self.ins, *n, *c);
+                    *c
+                } else {
+                    rd.note_ins(&self.ins);
+                    rd.class(*n)
+                };
+                classes.push((*n, c));
                 false
             }
             _ => true,
@@ -664,6 +690,7 @@ impl ScanState {
         if let Some(p) = ins_pen {
             self.pb.insert_penalties = p;
         }
+        rd.note_ins(&self.ins);
         if page_params.is_some() {
             self.params = page_params;
         }

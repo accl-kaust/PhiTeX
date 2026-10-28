@@ -49,6 +49,9 @@ pub(crate) struct LoopCarry {
     /// The builder's state where the current page began: the main list's
     /// fold and the page parameters in force ([`Page::fold`]).
     pub began: (FoldState, Option<ValueId>),
+    /// The insertion classes the builder had where the current page
+    /// began, as `T_INS_PARAMS` markers ([`Page::ins`]).
+    pub began_ins: Vec<ValueId>,
     /// The marks in force where the current page began (§1012: the
     /// `\botmark` of every class before it), `[[class, mark]…]`
     /// ([`Page::top_marks`]); unit for none.
@@ -134,6 +137,7 @@ impl LoopCarry {
             post_markers: Vec::new(),
             post_k: 0,
             began: (crate::build::IGNORE_DEPTH_STATE, None),
+            began_ins: Vec::new(),
             top_marks: ValueId::UNIT,
             rtn_dead: 0,
             dead: 0,
@@ -471,6 +475,9 @@ pub(crate) fn build_t(
                 false
             }
             PItem::InsParams(n, c) => {
+                if let Some(c) = c {
+                    crate::vprof::note_class(&mut st.ins, *n, *c);
+                }
                 classes.push((*n, c.unwrap_or_else(|| class_of_live(*n))));
                 false
             }
@@ -1500,9 +1507,24 @@ impl Run<'_, '_> {
     /// `at` ([`phitex_defuse::Ctx::use_field_at`]), what the page
     /// builder read where the break was found; as they reach this run
     /// where `at` is gone or is this run's own node.
+    /// While a builder folds with class `n`'s registers from a routine
+    /// ([`Run::ins_fold`]): those, with what the text set since the page
+    /// before fired ([`Run::insert_class_since`]).
     pub(crate) fn insert_class_at(&mut self, n: u16, at: phitex_defuse::NodeId) -> R<InsertClass> {
         if at == self.cx.node() {
             return self.insert_class(n);
+        }
+        // (past the first page: the class as the routines gave it back,
+        // else, none having, as the text and the environment have it, a
+        // finisher's definition never read by its place)
+        if let Some((since, cs)) = self.ins_fold.as_ref() {
+            return match cs.iter().find(|c| c.0 == n) {
+                Some(c) => {
+                    let (since, base) = (*since, c.1);
+                    self.insert_class_since(n, at, since, Some(base))
+                }
+                None => self.insert_class_since(n, at, -1, None),
+            };
         }
         let v = self.v;
         let mut xs = Vec::with_capacity(4);
@@ -1538,6 +1560,65 @@ impl Run<'_, '_> {
             dimen: crate::val::i32_of(v, xs[2]),
             skip: glue_of(v, xs[3]),
         })
+    }
+
+    /// Class `n`'s registers as the builder has them (`base`, from the
+    /// routines' give-backs in fold order), each with the text's own
+    /// definition reaching `at` where the text set it after the piece
+    /// `since` (raw id, -1 none) the page before fired in: a finisher's
+    /// definition never reaches the builder by its place, which the
+    /// builder's own placements move (a routine's `\box\footins` read by
+    /// place: the loop relocated the finisher, the pieces between its
+    /// places read the environment's box, the page fired elsewhere and
+    /// back, docs/spec-settle.md §2.1).
+    /// `base` none: no routine gave the class back; then its registers
+    /// are the text's or the environment's (void, zero) as they reach
+    /// `at`, any finisher's passed over.
+    pub(crate) fn insert_class_since(&mut self, n: u16, at: phitex_defuse::NodeId, since: i64, base: Option<InsertClass>) -> R<InsertClass> {
+        let v = self.v;
+        let after = (since >= 0).then(|| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(since.to_ne_bytes())));
+        let fin = self.ops.finish;
+        // (the box as the text set it, `tbox:` ([`Run::tbox_loc`]): its
+        // own field no finisher defines, so a finisher the loop moves
+        // wakes no builder; the other three by their own fields, a
+        // finisher's definition passed over)
+        let tb = self.tbox_loc(usize::from(n));
+        let mut fields = vec![self.loc_field(tb)];
+        for r in 0..3 {
+            let l = self.reg_loc(r, i32::from(n));
+            fields.push(self.loc_field(l));
+        }
+        let env = base.is_none();
+        let mut c = base.unwrap_or(InsertClass {
+            box_height_plus_depth: None,
+            box_is_hbox: false,
+            count: 0,
+            dimen: 0,
+            skip: Glue::ZERO,
+        });
+        for (i, f) in fields.into_iter().enumerate() {
+            let x = match self.field_at(f, at, false)? {
+                phitex_defuse::FieldAt::Def(x, Some(d))
+                    if self.cx.op_of(d).is_some_and(|o| o != fin)
+                        && after.is_none_or(|s| s != d && self.cx.alive(s) && self.cx.before(s, d)) =>
+                {
+                    x
+                }
+                phitex_defuse::FieldAt::Def(x, None) if env => x,
+                _ => continue,
+            };
+            match i {
+                0 => {
+                    let b = list_of(v, x).get(1).copied().filter(|&b| b != ValueId::UNIT);
+                    c.box_height_plus_depth = b.map(|b| nodes::box_dim(v, b, 3) + nodes::box_dim(v, b, 2));
+                    c.box_is_hbox = b.is_some_and(|b| nodes::box_is_h(v, b));
+                }
+                1 => c.count = crate::val::i32_of(v, Some(x)),
+                2 => c.dimen = crate::val::i32_of(v, Some(x)),
+                _ => c.skip = glue_of(v, Some(x)),
+            }
+        }
+        Ok(c)
     }
 
     /// The page parameters (§980) reaching the position just after node
@@ -1632,6 +1713,16 @@ impl Run<'_, '_> {
         let mut m = None;
         let mut classes: Vec<(u16, ValueId)> = Vec::new();
         for x in raw.iter_mut() {
+            // (a class's registers given in full, past the first page: the
+            // builder's from here on, [`Run::ins_fold`])
+            if text.is_some() && nodes::tag(v, *x) == nodes::T_INS_PARAMS && list_of(v, *x).len() > 2 {
+                let (n, c) = class_of(v, *x);
+                if let Some(f) = self.ins_fold.as_mut() {
+                    crate::vprof::note_class(&mut f.1, n, c);
+                }
+                classes.retain(|k| k.0 != n);
+                continue;
+            }
             if nodes::tag(v, *x) == nodes::T_INS_PARAMS && list_of(v, *x).len() == 2 {
                 // (§1008: the class's registers as they reach the piece)
                 let n = u16::try_from(int_at(v, *x, 1)).unwrap_or(0);
@@ -1736,6 +1827,12 @@ impl crate::vprof::Reaching for RunReaching<'_, '_, '_> {
             },
             |m| params_of(v, m),
         )
+    }
+
+    fn note_ins(&mut self, ins: &[(u16, InsertClass)]) {
+        if let Some(f) = self.0.ins_fold.as_mut() {
+            f.1 = ins.to_vec();
+        }
     }
 
     fn class(&mut self, n: u16) -> InsertClass {

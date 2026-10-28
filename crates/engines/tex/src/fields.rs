@@ -232,6 +232,12 @@ pub(crate) const CODE0: usize = REG0 + 5 * 256;
 const CODES: [&str; 5] = ["lc", "uc", "sf", "mc", "dc"];
 /// Box registers 0–255.
 pub(crate) const BOX0: usize = CODE0 + 5 * 256;
+/// The box register number of `loc` where it is one an insertion class
+/// can be (0–254, §1009: not 255).
+pub(crate) fn box_of(loc: crate::state::Loc) -> Option<usize> {
+    usize::try_from(loc).ok().and_then(|l| l.checked_sub(BOX0)).filter(|&n| n < 255)
+}
+
 /// The math families' fonts (`fam:<size>:<n>`, §230's
 /// `math_font_base`): text, script and scriptscript size, 16 each.
 pub(crate) const FAM0: usize = BOX0 + 256;

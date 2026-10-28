@@ -245,6 +245,7 @@ impl Run<'_, '_> {
             },
             None => None,
         };
+        self.ins_fold = None;
         let first = page.as_ref().is_some_and(|f| f.prev_fire.0 == -1);
         let Some(Shipped { args: fargs, brk }) = shipped else {
             self.cx.unchanged();
@@ -750,6 +751,11 @@ impl Run<'_, '_> {
     pub(crate) fn assemble_page(&mut self, fin: &Page) -> R<Option<Assembled>> {
         let me = |n: phitex_defuse::NodeId| i64::from_ne_bytes(n.raw().to_ne_bytes());
         let pid = me(fin.at);
+        // (past the first page, the insertion classes' registers as the
+        // builder has them where the page began, the routine before's
+        // give-back among them: a class's marker in the window is those
+        // with what the text set since, [`Run::insert_class_at`])
+        self.ins_fold = (fin.prev_fire.0 >= 0).then(|| (fin.prev_fire.0, fin.ins.iter().map(|&m| crate::pages::class_of(self.v, m)).collect()));
         // (the window's units, by piece: their items with the markers
         // resolved where each piece is)
         // (the window read through paths, [`Run::window_units`]: each

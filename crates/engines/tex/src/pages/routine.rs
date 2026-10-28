@@ -142,6 +142,28 @@ impl Run<'_, '_> {
                 }
             }
         }
+        // (and each class the page's fire filled (§1018) or the builder
+        // had from a routine where the page began: their registers as
+        // this routine left them reach the builder through its give-back
+        // alone, never by the finisher's place, which the builder's
+        // placements move (LaTeX's `\box\footins`, emptied by every
+        // routine that ships a page with footnotes))
+        if let Some(p) = c.page.as_ref() {
+            for n in p.classes.iter().copied().chain(p.ins.iter().filter_map(|&m| u16::try_from(crate::val::int_at(v, m, 1)).ok())) {
+                if !ns.contains(&n) {
+                    ns.push(n);
+                }
+            }
+        }
+        // (and each class whose registers the routine set (§1008 reads
+        // them where the class's next insertion meets the page, not
+        // where the routine ran): a box, `\count`, `\dimen` or `\skip`
+        // under 255 this run defined)
+        for n in 0..255 {
+            if !ns.contains(&n) && self.ins_registers_defined(n) {
+                ns.push(n);
+            }
+        }
         for n in ns {
             out.push(self.ins_params_marker(n)?);
         }

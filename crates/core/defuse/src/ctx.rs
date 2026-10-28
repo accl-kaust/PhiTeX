@@ -757,6 +757,12 @@ impl<'a> Ctx<'a> {
         self.eng.node(a).pos_hint() < self.eng.node(b).pos_hint()
     }
 
+    /// Node `n`'s operation, where it stands (placed, not removed). Not a
+    /// read.
+    pub fn op_of(&self, n: NodeId) -> Option<OpId> {
+        self.eng.placed_node(n).filter(|x| x.state() != State::Gone).map(|x| x.op())
+    }
+
     /// Whether node `n` still stands (placed, not removed): a run about
     /// to place a node after `n` (`follow_after`) asks first. Not a read.
     pub fn alive(&self, n: NodeId) -> bool {

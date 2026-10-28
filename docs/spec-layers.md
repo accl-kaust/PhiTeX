@@ -55,6 +55,7 @@ guessed wrong run again. Each case is named; a new one is added here.
 | `\thepage` and page counters read in text | 5 | guessed folds, validated |
 | object numbers read back (`\pdflastobj`, `\pdflastlink`, `\pdfximage` and kin) | 6 | the piece ends before the command (r8's fix, 2026-10-21), then predicted |
 | `\hsize`, `\vsize` and kin changed by an output routine | 5 | predicted per page for the text; the page builder takes them from the routine's give-back in its fold's order only (spec-settle.md §2.1) |
+| an insertion class's registers (`\box\footins`) a routine leaves | 5 | the page builder takes them from the routine's give-back in its fold's order, with the text's own settings since the fire (spec-settle.md §2.1) |
 | `\prevgraf`, `\lastbox` after a paragraph | 3 | predicted, validated |
 | catcode changes | 2 → 1 | the line's regime key |
 | page references, contents, index, citations | 7 | the rounds, as latexmk |

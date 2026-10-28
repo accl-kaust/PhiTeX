@@ -155,6 +155,13 @@ pub(crate) struct Page {
     /// and the page parameters in force (a `T_PAGE_PARAMS` marker).
     pub fold: FoldState,
     pub params: Option<ValueId>,
+    /// The insertion classes' registers the builder had from the
+    /// routines (and the text's own markers) where the page began
+    /// (`T_INS_PARAMS` markers, [`crate::vprof::ScanState::ins`]): a
+    /// class's `[tag, n]` marker past the first page is those, with what
+    /// the text set since the page before fired (docs/spec-settle.md
+    /// §2.1).
+    pub ins: Vec<ValueId>,
     /// The builder's decisions where it fired (§1005–§1017): the best
     /// break's index on the page, `\outputpenalty` there, whether
     /// `\holdinginserts` was positive, the insertions held over.
@@ -225,13 +232,14 @@ impl Page {
             v.list(self.classes.iter().map(|&n| v.int(i64::from(n))).collect()),
             raw(self.at),
             v.int(i64::from(self.nth)),
+            v.list(self.ins.clone()),
         ])
     }
 
     /// [`Page::encode`]'s page; `None` on any other value.
     pub(crate) fn decode(v: &Values, x: ValueId) -> Option<Page> {
         let p = list_of(v, x);
-        if p.len() != 29 {
+        if p.len() != 30 {
             return None;
         }
         let n = |i: usize| int_of(v, p[i]);
@@ -269,6 +277,7 @@ impl Page {
             prev_fire: (n(19), n(20)),
             inf: ints(21).as_chunks::<5>().0.iter().filter_map(|c| span_of_ints(v, c).map(|s| s.src)).collect(),
             vers: ints(22).as_chunks::<2>().0.iter().map(|c| (int_of(v, c[0]), c[1])).collect(),
+            ins: ints(29),
         })
     }
 }

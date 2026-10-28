@@ -323,6 +323,37 @@ fn a_loop_waiting_for_the_page_to_fill_ends() {
     }
 }
 
+/// Plain TeX's footnotes on 20 pages (`dvi/footins.tex`): each page's
+/// routine empties `\box\footins` (`\pagebody`'s `\unvbox`), and the
+/// builder reads the class's box where the next page's first footnote
+/// comes (§1008). Read by place, that was the finisher's definition
+/// where the loop had placed the finisher; the loop relocated it as
+/// pages fired elsewhere, the pieces between read the environment's box,
+/// and the pages flipped (LaTeX manuals with footnotes: thousands of loop
+/// runs woken by `Environment{box:253}`). The routine's class registers
+/// reach the builder through its give-back in fold order
+/// (docs/spec-settle.md §2.1). The DVI is TeX's at -j1 and -j8.
+#[test]
+fn a_routines_insertion_box_reaches_the_builder_in_fold_order() {
+    let dir = common::fixtures().join("dvi");
+    let src = common::read(&dir.join("footins.tex"));
+    let want = std::fs::read(dir.join("footins.dvi")).expect("the oracle");
+    for threads in [1, 8] {
+        let opts = phitex_tex::Options {
+            threads: Some(threads),
+            ..common::options("./footins.tex", "footins", &common::dvi_comment(&want), &dir)
+        };
+        let b = common::build(opts, Some(&common::plain()), &src);
+        let (dvi, log) = b.output();
+        let loops = b.stats.runs_by_op.iter().find(|(o, _)| *o == "pages").map_or(0, |(_, n)| *n);
+        eprintln!("-j{threads}: loop runs {loops}, runs by op {:?}", b.stats.runs_by_op);
+        assert_eq!(dvi, want, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
+        if threads == 1 {
+            assert!(loops <= 20, "the loop ran {loops} times for 20 pages: {:?}", b.stats.runs_by_op);
+        }
+    }
+}
+
 /// LaTeX's two-stage float output in plain TeX: the routine at
 /// `\penalty-10004` holds the page and sets `\vsize` to `\maxdimen`, the
 /// one at `-10003` gives the held material back and sets `\vsize` again

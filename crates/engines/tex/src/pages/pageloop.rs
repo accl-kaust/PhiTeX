@@ -839,6 +839,15 @@ impl Run<'_, '_> {
         use crate::prof::pages as pp;
         pp::unit();
         self.ops.units_folded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // (its insertion classes' markers read as the builder has them
+        // from the routines, with the text's settings since the page
+        // before fired, [`Run::insert_class_at`])
+        let fold = Some((lc.prev_fire.0, st.ins.clone()));
+        if self.ins_fold != fold {
+            // (the reads an owner's units shared were made on the last)
+            lc.own = crate::pages::OwnerReads::default();
+            self.ins_fold = fold;
+        }
         let (pid, items, res) = self.unit_items(lc, x)?;
         let classes = self.unit_classes(lc, &items, node_of(pid))?;
         // (units no page needs any more dropped)
@@ -1140,6 +1149,7 @@ impl Run<'_, '_> {
             rtns: rtns.iter().map(|&(p, x)| (j - p, x)).collect(),
             fold: lc.began.0,
             params: lc.began.1,
+            ins: lc.began_ins.clone(),
             best: u32::try_from(f.best).unwrap_or(u32::MAX),
             output_penalty: f.output_penalty,
             holding: f.holding,
@@ -1251,6 +1261,15 @@ impl Run<'_, '_> {
         lc.dead = lc.rtn_dead;
         lc.prev_fire = (p.pid, lc.rtn_dead);
         self.resolve_params_of(p.pid, &mut markers, Some((-1, &mut None)))?;
+        // (the insertion classes' registers it gives back: the builder's
+        // from here, the next page's `[tag, n]` markers read as those with
+        // the text's settings after this fire, docs/spec-settle.md §2.1)
+        for &m in &markers {
+            if nodes::tag(v, m) == nodes::T_INS_PARAMS && list_of(v, m).len() > 2 {
+                let (n, c) = crate::pages::class_of(v, m);
+                crate::vprof::note_class(&mut st.ins, n, c);
+            }
+        }
         let m_len = markers.len();
         let rtn_value = v.list(vec![v.list(markers), v.list(list)]);
         let rtn_items = std::sync::Arc::new(self.rtn_items(lc, rtn_value));
@@ -1339,6 +1358,7 @@ impl Run<'_, '_> {
         // pieces' items fold from, the page parameters in force)
         st.fold = fold0;
         lc.began = (fold0, st.params.map(|q| params_marker(v, &q)));
+        lc.began_ins = st.ins.iter().map(|(n, c)| self.ins_marker(*n, c)).collect();
         lc.held_nodes.clone_from(&p.held);
         lc.srcs = next.iter().map(|x| x.0).collect();
         lc.post = lc.srcs.len();
@@ -1347,7 +1367,7 @@ impl Run<'_, '_> {
         lc.page_src.clear();
         lc.page_ins.clear();
         // (what the post-output build reads of the insertion classes on
-        // its material: their registers where the page fired)
+        // its material: their registers as the routine gave them back)
         let mut ns: Vec<u16> = Vec::new();
         for (src, raw) in &next {
             let y = if *raw {
@@ -1363,11 +1383,22 @@ impl Run<'_, '_> {
         }
         let mut post_markers = Vec::new();
         let mut post_classes: Vec<(u16, InsertClass)> = Vec::new();
+        // (as the builder has them now the routine gave back, never by a
+        // finisher's place, [`Run::insert_class_at`])
+        let fold = std::mem::replace(&mut self.ins_fold, Some((lc.prev_fire.0, st.ins.clone())));
         for n in ns {
-            let c = self.insert_class_at(n, node)?;
+            let c = self.insert_class_at(n, node);
+            let c = match c {
+                Ok(c) => c,
+                Err(e) => {
+                    self.ins_fold = fold;
+                    return Err(e);
+                }
+            };
             post_markers.push(self.ins_marker(n, &c));
             post_classes.push((n, c));
         }
+        self.ins_fold = fold;
         lc.post_markers = post_markers;
         // (folded: as they are, or folded again with their builds and
         // markers spent)
@@ -1426,6 +1457,11 @@ impl Enc<'_> {
     fn x(&mut self, x: ValueId) {
         self.xs.push(x);
     }
+    /// A run of values, its length first.
+    fn xs(&mut self, xs: &[ValueId]) {
+        self.len(xs.len());
+        self.xs.extend_from_slice(xs);
+    }
     fn node(&mut self, n: Option<NodeId>) {
         self.i(n.map_or(-1, |n| i64::from_ne_bytes(n.raw().to_ne_bytes())));
     }
@@ -1473,6 +1509,12 @@ impl Enc<'_> {
                 self.i(i64::from(q.holding_inserts));
             }
             None => self.i(0),
+        }
+    }
+    fn ins(&mut self, ins: &[(u16, InsertClass)]) {
+        self.len(ins.len());
+        for (n, c) in ins {
+            self.class(*n, c);
         }
     }
     fn class(&mut self, n: u16, c: &InsertClass) {
@@ -2072,6 +2114,7 @@ pub(crate) fn encode_state(v: &Values, st: &ScanState, lc: &LoopCarry, p: &FireN
     e.i(st.normal);
     e.fold(st.fold);
     e.params(st.params);
+    e.ins(&st.ins);
     e.node(lc.cur);
     e.node(lc.cur_units);
     e.x(lc.top_marks);
@@ -2144,19 +2187,18 @@ pub(crate) fn encode_tail(v: &Values, st: &ScanState, lc: &LoopCarry) -> ValueId
     e.i(st.normal);
     e.fold(st.fold);
     e.params(st.params);
+    e.ins(&st.ins);
     e.pb(&st.pb, m);
     e.len(lc.srcs.len());
     for &s in &lc.srcs {
         e.src(s);
     }
     e.len(lc.post);
-    e.len(lc.post_markers.len());
-    for &x in &lc.post_markers {
-        e.x(x);
-    }
+    e.xs(&lc.post_markers);
     e.i(i64::from(lc.post_k));
     e.fold(lc.began.0);
     e.x(lc.began.1.unwrap_or(ValueId::UNIT));
+    e.xs(&lc.began_ins);
     e.x(lc.top_marks);
     e.i(lc.rtn_dead);
     e.i(lc.dead);
@@ -2259,7 +2301,9 @@ impl Run<'_, '_> {
         let mut lc = LoopCarry::new();
         let (j, normal, fold) = (d.i(), d.i(), d.fold());
         let params = d.params();
-        let st = ScanState::fresh(j, normal, fold, params);
+        let mut st = ScanState::fresh(j, normal, fold, params);
+        let n = d.len();
+        st.ins = (0..n).map(|_| d.class()).collect();
         lc.cur = d.node();
         lc.cur_units = d.node();
         lc.top_marks = d.x();
@@ -2307,6 +2351,8 @@ impl Run<'_, '_> {
         let (j, normal, fold) = (d.i(), d.i(), d.fold());
         let params = d.params();
         let mut st = ScanState::fresh(j, normal, fold, params);
+        let n = d.len();
+        st.ins = (0..n).map(|_| d.class()).collect();
         st.pb = d.pb(&mut lc.marks);
         let n = d.len();
         lc.srcs = (0..n).filter_map(|_| d.src()).collect();
@@ -2315,6 +2361,8 @@ impl Run<'_, '_> {
         lc.post_markers = (0..n).map(|_| d.x()).collect();
         lc.post_k = d.u32();
         lc.began = (d.fold(), some(d.x()));
+        let n = d.len();
+        lc.began_ins = (0..n).map(|_| d.x()).collect();
         lc.top_marks = d.x();
         lc.rtn_dead = d.i();
         lc.dead = d.i();

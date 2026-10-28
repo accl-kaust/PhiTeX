@@ -342,6 +342,23 @@ impl Run<'_, '_> {
         Ok(())
     }
 
+    /// Past the first page, the insertion classes' registers as the
+    /// routine before gave them back (the page start's head, in full):
+    /// the builder's ([`Run::ins_fold`]); a class's marker after it is
+    /// those with what the text set since ([`Run::insert_class_at`]).
+    fn ins_at_start(&mut self, s: &PageStart) -> Vec<(u16, phitex_typeset::page::InsertClass)> {
+        let mut ins0: Vec<(u16, phitex_typeset::page::InsertClass)> = Vec::new();
+        if let Some(a) = s.anchor {
+            for x in crate::vprof::decode(&s.prof) {
+                if let crate::vprof::PItem::InsParams(n, Some(c)) = x {
+                    crate::vprof::note_class(&mut ins0, n, c);
+                }
+            }
+            self.ins_fold = Some((i64::from_ne_bytes(a.raw().to_ne_bytes()), ins0.clone()));
+        }
+        ins0
+    }
+
     /// The page builder over the profiles where this piece's page began
     /// ([`PAGE_START`]) to its own last candidate: its state, stopped at
     /// the first page firing, and where that page fired (`Some(true)` in
@@ -356,6 +373,7 @@ impl Run<'_, '_> {
             .map_or(0, |i| i + 1);
         let mut head = raw[..last].to_vec();
         let s = self.page_start()?;
+        let ins0 = self.ins_at_start(&s);
         // (its `[tag]` markers the parameters reaching it: a setting since
         // its last candidate is not the builds'; read here only where the
         // page start has none in force (the first page): else they are
@@ -375,6 +393,7 @@ impl Run<'_, '_> {
         let units = v.seq_to_vec(self.cx.fold(v.field(crate::vprof::VPROF), s.anchor, None)?);
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
         let mut st = s.state(v);
+        st.ins = ins0;
         // (a `[tag]` marker on a later page: the parameters in force and
         // what the text set since the page before fired, as the builder
         // reads it, docs/spec-settle.md §2.1)
@@ -463,6 +482,7 @@ impl Run<'_, '_> {
                 }
             }
         }
+        self.ins_fold = None;
         Ok((st, fired, own_k))
     }
 }

@@ -904,6 +904,14 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) pubs: Option<(((usize, usize, usize, u64), u64), Vec<(Field, crate::state::Pub, Locality)>, Vec<Loc>)>,
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
+    /// While a builder folds (the loop, a finisher's replay, the text's
+    /// page reads): the piece the page before fired in (raw id, -1 none)
+    /// and the insertion classes' registers the builder has from the
+    /// routines' give-backs and the text's own markers, in fold order. A
+    /// class's registers read where a piece is are those, with what the
+    /// text set since that fire, never a finisher's definition by its
+    /// place ([`Run::insert_class_at`], docs/spec-settle.md §2.1).
+    pub ins_fold: Option<(i64, Vec<(u16, phitex_typeset::page::InsertClass)>)>,
     /// The page loop's keys for this run ([`crate::pages::LoopKeys`]).
     pub loop_keys: crate::pages::LoopKeys,
     pub cut: Option<u32>,
@@ -1102,6 +1110,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pubs: None,
             ins_pending: Vec::new(),
             fin: None,
+            ins_fold: None,
             loop_keys: crate::pages::LoopKeys::default(),
             cut: None,
             stop_at: None,
@@ -1649,7 +1658,37 @@ impl<'c, 'a> Run<'c, 'a> {
             let t = self.tpp_loc(loc);
             self.st.set(t, val, global, grp);
         }
+        // (and a box register an insertion class can be (0–254), as the
+        // text's own (`tbox:`): the builder's class registers after the
+        // first page, a routine's emptying of `\box n` reaching it through
+        // its give-back, [`Run::insert_class_since`])
+        if let Some(n) = crate::fields::box_of(loc)
+            && self.cx.op() != self.ops.finish
+        {
+            let t = self.tbox_loc(n);
+            self.st.set(t, val, global, grp);
+        }
         self.muts += 1;
+    }
+
+    /// The location of box register `n` (0–254) as the text sets it
+    /// ([`Run::set_loc`], [`Run::modify_box_reg`]): `tbox:<n>`, its field
+    /// interned once per values epoch.
+    pub(crate) fn tbox_loc(&mut self, n: usize) -> Loc {
+        thread_local! {
+            static TBOX: std::cell::RefCell<(u64, u64, Vec<Option<phitex_defuse::Field>>)> =
+                const { std::cell::RefCell::new((u64::MAX, u64::MAX, Vec::new())) };
+        }
+        let v = self.v;
+        let epoch = self.cx.values_epoch();
+        let f = TBOX.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 != v.instance() || c.1 != epoch {
+                *c = (v.instance(), epoch, vec![None; 255]);
+            }
+            *c.2[n.min(254)].get_or_insert_with(|| self.ops.fields.get_at(v, epoch, &format!("tbox:{n}")))
+        });
+        self.loc_of(f)
     }
 
     /// The location of page parameter `loc` as the text sets it

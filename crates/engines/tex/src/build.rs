@@ -1640,6 +1640,13 @@ impl Run<'_, '_> {
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
         let base = self.base_mode()?.depth;
         self.modify_at(l, val, lvl, base);
+        // (the text's own, [`Run::tbox_loc`])
+        if let Some(n) = crate::fields::box_of(l)
+            && self.cx.op() != self.ops.finish
+        {
+            let t = self.tbox_loc(n);
+            self.modify_at(t, val, lvl, base);
+        }
         Ok(())
     }
 
