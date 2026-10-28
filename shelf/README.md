@@ -131,10 +131,10 @@ Measured (packs as served, gzip; MANIFEST.tsv and the releases built):
 | tl2026.3 (schema 3, a new layout) | 6,919 | 1,673 | 6,919 | 1,673 |
 | tl2026.4 (xetex column) | 6,919 | 1,673 | 0 | 0 |
 | tl2026.5 (columns only) | 6,919 | 1,673 | 0 | 0 |
-| tl2026.6 (22 days of tlnet, new traces) | 6,969 | 1,684 | 453 | 179 |
+| tl2026.6 (22 days of tlnet, new traces) | 6,969 | 1,684 | 450 | 179 |
 
 tl2026.6's new packs: 218 (90 MB) from the 161 packages TeX Live
-updated (118) or added (43) between 2026-10-06 and 2026-10-28, and 235
+updated (118) or added (43) between 2026-10-06 and 2026-10-28, and 232
 (89 MB) re-cut hot packs of big font packages (fira, cm-super, lm,
 libertine, ...), whose split into hot and cold packs follows the pdfTeX
 trace's counts: a trace by another engine version moves some files
@@ -142,7 +142,7 @@ between them. A release whose columns alone
 change adds none (tl2026.4, tl2026.5).
 
 Growth: TeX Live's updates come to about 300 new packs a month (about
-3,600 and 1.5 GB a year); a trace by a new engine version about 235
+3,600 and 1.5 GB a year); a trace by a new engine version about 230
 more. From tl2026.6's 6,977 files, monthly releases of one TeX Live reach
 15,000 files after about 26 months and 19,500 after about 41. But each
 TeX Live is a new prefix with a whole new set (about 7,000 packs, 1.7 GB)
