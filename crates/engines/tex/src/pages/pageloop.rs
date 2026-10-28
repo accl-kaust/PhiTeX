@@ -167,7 +167,7 @@ pub(crate) struct LoopState {
 }
 
 /// The tag of a parked [`LoopState`] of this version.
-const STATE_TAG: &str = "\u{1}pages-loop-4";
+const STATE_TAG: &str = "\u{1}pages-loop-5";
 
 impl LoopState {
     pub(crate) fn encode(&self, v: &Values) -> ValueId {
@@ -637,8 +637,8 @@ impl Run<'_, '_> {
     ) -> R<bool> {
         let v = self.v;
         let vprof = v.field(crate::vprof::VPROF);
-        // (the units of the contributor being folded)
-        let mut cur_xs: Option<(NodeId, Vec<ValueId>)> = None;
+        // (the contributor being folded, its contribution and its units)
+        let mut cur_xs: Option<(NodeId, ValueId, Vec<ValueId>)> = None;
         'fold: loop {
             // (a page fired at the last step: the old ones after it, if
             // it is the old one as it was)
@@ -685,13 +685,27 @@ impl Run<'_, '_> {
                     // (a page fired in the material, §1026's build)
                     let (mut q, page) = self.fire_at(st, lc, p.node, p.pid, &f, true)?;
                     q.xs_i = p.xs_i;
+                    q.units = p.units;
                     q.classes.clone_from(&p.classes);
                     *pending = Some(self.checkpoint(st, lc, q, &page, ls));
                     continue;
                 }
-                // (the rest of the contributor the page fired in)
-                let xs = if let Some(c) = cur_xs.take().filter(|c| c.0 == p.node) {
-                    c.1
+                // (the rest of the contributor the page fired in: from
+                // the contribution the fire was folded from, which the
+                // fire recorded; not read again, so that a change of it
+                // since refutes the read the fold up to here rested on,
+                // at this run's commit, and the next run goes back before
+                // it (a read again would answer the new units, replace
+                // that read, and leave the pages fired in the old ones
+                // standing). Gone: the removal runs this node again, from
+                // before it)
+                let (u, xs) = if let Some(c) = cur_xs.take().filter(|c| c.0 == p.node) {
+                    (c.1, c.2)
+                } else if p.units != ValueId::UNIT {
+                    if !self.cx.alive(p.node) {
+                        return Ok(true);
+                    }
+                    (p.units, v.seq_to_vec(p.units))
                 } else {
                     let t = crate::prof::pages::start();
                     let next = self.cx.next_contribution(vprof, lc.cur)?;
@@ -701,13 +715,14 @@ impl Run<'_, '_> {
                     let Some((_, u)) = next.filter(|n| n.0 == p.node) else {
                         return Ok(true);
                     };
-                    v.seq_to_vec(u)
+                    (u, v.seq_to_vec(u))
                 };
-                cur_xs = Some((p.node, xs.clone()));
+                cur_xs = Some((p.node, u, xs.clone()));
                 let (ui, from) = lc.frontier;
                 if let Some((mut q, page)) = self.fold_items(st, lc, p.node, p.pid, ui, from as usize, &p.classes)? {
                     q.classes.clone_from(&p.classes);
                     q.xs_i = p.xs_i;
+                    q.units = u;
                     *pending = Some(self.checkpoint(st, lc, q, &page, ls));
                     continue;
                 }
@@ -715,6 +730,7 @@ impl Run<'_, '_> {
                     if let Some((mut q, page, classes)) = self.fold_unit(st, lc, p.node, x)? {
                         q.classes = classes;
                         q.xs_i = i;
+                        q.units = u;
                         *pending = Some(self.checkpoint(st, lc, q, &page, ls));
                         continue 'fold;
                     }
@@ -737,11 +753,12 @@ impl Run<'_, '_> {
                 return Ok(self.cx.stopped_at().is_some());
             };
             let xs = v.seq_to_vec(u);
-            cur_xs = Some((node, xs.clone()));
+            cur_xs = Some((node, u, xs.clone()));
             for (i, &x) in xs.iter().enumerate() {
                 if let Some((mut q, page, classes)) = self.fold_unit(st, lc, node, x)? {
                     q.classes = classes;
                     q.xs_i = i;
+                    q.units = u;
                     *pending = Some(self.checkpoint(st, lc, q, &page, ls));
                     continue 'fold;
                 }
@@ -1126,6 +1143,7 @@ impl Run<'_, '_> {
                 j,
                 node,
                 xs_i: 0,
+                units: ValueId::UNIT,
                 pid,
                 in_material,
                 hint,
@@ -1893,6 +1911,7 @@ fn encode_fire(e: &mut Enc<'_>, p: &FireNote) {
     e.i(p.j);
     e.node(Some(p.node));
     e.len(p.xs_i);
+    e.x(p.units);
     e.i(p.pid);
     e.i(i64::from(p.in_material));
     e.x(p.hint);
@@ -1926,6 +1945,7 @@ fn decode_fire(d: &mut Dec<'_>) -> FireNote {
     let j = d.i();
     let node = d.node().unwrap_or_else(|| node_of(0));
     let xs_i = d.len();
+    let units = d.x();
     let pid = d.i();
     let in_material = d.i() != 0;
     let hint = d.x();
@@ -1952,6 +1972,7 @@ fn decode_fire(d: &mut Dec<'_>) -> FireNote {
         j,
         node,
         xs_i,
+        units,
         pid,
         in_material,
         hint,

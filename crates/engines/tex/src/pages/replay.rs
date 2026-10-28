@@ -181,6 +181,13 @@ pub(crate) struct FireNote {
     /// the fire was in, and that unit's piece.
     pub node: phitex_defuse::NodeId,
     pub xs_i: usize,
+    /// The contribution of `node` the fire was folded from (its units as
+    /// one sequence value): a run resuming at this fire folds the rest of
+    /// `node` from these, not from a read of `node` again, so the read
+    /// the fold rested on stays the one checked at the loop's commit (a
+    /// read again would answer the new units and hide that the fold up
+    /// to here was made from the old). `UNIT`: not known.
+    pub units: ValueId,
     pub pid: i64,
     pub in_material: bool,
     pub hint: ValueId,

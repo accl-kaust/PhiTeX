@@ -612,10 +612,33 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // reads: kept, but those it read again)
     let own_reads = p.reads.len();
     let mut gone_kept: Vec<(Field, NodeId)> = Vec::new();
+    // (the kept reads this run read again with another answer: the state
+    // it resumed from rested on the old one, `replaced_moved` below)
+    let mut replaced_moved: Vec<ReadKind> = Vec::new();
     if p.resumed.get()
         && let Some(r) = node.run_record()
     {
-        let again: FxHashSet<(ReadKind, PathId)> = p.reads.iter().map(|x| (x.kind.clone(), x.path)).collect();
+        let again: FxHashMap<(ReadKind, PathId), Option<ValueId>> = p.reads.iter().map(|x| ((x.kind.clone(), x.path), x.seen)).collect();
+        // (a kept read of the line this run read again and found moved: a
+        // range or a read at a node, which is what a state folded along
+        // the line rests on; the state it resumed from was built on the
+        // old answer, and the new read, which replaces the kept one in
+        // the record, holds, so no check would see it. Not a `next` that
+        // met a hole: nothing of the state rests on an answer there. A
+        // plain read of a field at the node, a placement's output, are
+        // the run's own to act on as it reads them each run)
+        for x in &r.reads {
+            if let Some(&seen) = again.get(&(x.kind.clone(), x.path))
+                && seen != x.seen
+                && matches!(
+                    x.kind,
+                    ReadKind::Fold { .. } | ReadKind::Next { .. } | ReadKind::Field { at: Anchor::Before(_) | Anchor::AfterOwn(_), .. }
+                )
+                && !(matches!(x.kind, ReadKind::Next { .. }) && x.seen.is_none())
+            {
+                replaced_moved.push(x.kind.clone());
+            }
+        }
         // (not the next contribution after a node gone: no run reads from
         // it again, and its going moved the read from the node before it,
         // which carries the change; kept, it would move at every commit)
@@ -631,12 +654,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             if let ReadKind::Field { f, at: Anchor::Before(n) | Anchor::AfterOwn(n) } = x.kind
                 && x.seen.is_some()
                 && is_gone(n)
-                && !again.contains(&(x.kind.clone(), x.path))
+                && !again.contains_key(&(x.kind.clone(), x.path))
             {
                 gone_kept.push((f, n));
             }
         }
-        p.reads.extend(r.reads.iter().filter(|x| !again.contains(&(x.kind.clone(), x.path)) && !gone(x)).cloned());
+        p.reads.extend(r.reads.iter().filter(|x| !again.contains_key(&(x.kind.clone(), x.path)) && !gone(x)).cloned());
     }
     for d in &mut p.defs {
         if let Some(c) = d.rel {
@@ -1599,6 +1622,34 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     stale = true;
                 }
             }
+        }
+    }
+    // (a kept read the run read again with another answer, `replaced_moved`:
+    // the state it resumed from rested on the old answer, as for a kept
+    // read that moved: a range from a node or a read at a node names
+    // where, and the next run, offered the state, goes back before it,
+    // unless the run was told to go back before that node, or (a `next`)
+    // before the contribution it answers, from where it read it afresh;
+    // from the unit's start, the state is stale)
+    for k in &replaced_moved {
+        match k {
+            ReadKind::Next { f, after: Some(n) } => {
+                let answer = read::pos_of(eng, *n).and_then(|at| read::next_contribution(eng, *f, Some(at)).stop);
+                if p.woken_at != Some(*n) && (answer.is_none() || p.woken_at != answer) {
+                    causes.push(cause_of(k));
+                }
+            }
+            ReadKind::Fold { from: Some(n), .. }
+            | ReadKind::Field { at: Anchor::Before(n) | Anchor::AfterOwn(n), .. } => {
+                if p.woken_at != Some(*n) {
+                    causes.push(cause_of(k));
+                }
+            }
+            ReadKind::Fold { from: None, .. } | ReadKind::Next { after: None, .. } => {
+                stale = true;
+                causes.push(cause_of(k));
+            }
+            _ => {}
         }
     }
     node.state_stale.store(stale, Ordering::Release);

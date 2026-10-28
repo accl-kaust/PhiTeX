@@ -96,6 +96,41 @@ page's start** (`Checkpoint::start`, `LoopKeys`): a page fired again from
 the same first item takes the key it had, wherever it fires now, and 2.3
 relocates its finisher after the other piece.
 
+### 2.5 A parked state and the reads it rests on
+
+Found on amsldoc at eight and sixteen threads (2026-10-28, bugs agent):
+the index piece recut between "no cut" and "cut at candidate 350"; its
+commit removed the old rest, whose walk woke the page loop with a site
+past the piece, and another worker took the loop at once; the piece's
+own re-ask then found the loop running and was left to the loop's
+commit (`mark_stale_now`). The loop resumed at a page fired inside the
+piece and read the piece again: the new read (the new units) replaced in
+the record the kept read the checkpoints rested on (the old units), so
+the commit checked a read that held. The pages fired in the old units
+stood beside the rest from 350: the index twice, a finisher on a reused
+key stale for ever ("invalid object number being reused"), or 46 pages
+and no PDF (the link never saw every finisher done).
+
+- **The loop.** A fire records the contribution of the contributor it
+  fired in (`FireNote::units`, state tag `pages-loop-5`); a run resuming
+  at that fire folds the rest of the contributor from it, not from a read
+  of the contributor again (the node still standing: `Ctx::alive`). The
+  read that built the checkpoints stays the record's kept read, and a
+  change of the contributor while the loop runs refutes it at the
+  loop's commit, naming the contributor before it.
+- **The engine** (`commit`, a resumed run). A kept read of the line (a
+  `next`, a fold, a read at a node) that the run read again and found
+  moved refutes the run as a kept read that moved does: `Cause::Range`
+  (or `Changed` at the node) from the read's start, the state kept; from
+  the unit's start, the state stale. Not refuted: a `next` that met a
+  hole (nothing rested on an answer there); a read from the node the run
+  was told to go back before, or a `next` answering that node, read
+  afresh (as for the kept reads that moved, `range` in `commit`); a plain
+  read of a field at the node, which the commit's own-read check covers
+  and which a state may outlive (tests/collect_review.rs, park_review.rs);
+  a placement's output, which every run reads again and acts on.
+  Test: tests/resumed_reread.rs.
+
 ## 3. What is deleted
 
 - In `Resume`'s arguments: `cont` and the claim guess.
