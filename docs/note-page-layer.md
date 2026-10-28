@@ -42,7 +42,9 @@ nodes: one scan and one continuation per page.
   - `\deadcycles`;
   - the float lists (three macros);
   - the column state (column height and room, nine column-mark macros);
-  - the page parameter record (`\vsize` etc.);
+  - the page parameter record (`\vsize` etc.; the builder takes a
+    routine's from its give-back in fold order, never by a finisher's
+    place, spec-settle.md §2.1);
   - fonts the routine loads first (`fontinfo:64`);
   - the PDF writer's object count (prefix sums, not a value chain).
   Every item except the float lists is a counter, a short list or a

@@ -2521,13 +2521,16 @@ impl<'c, 'a> Run<'c, 'a> {
     /// ([`Run::put_page_params_reaching`]) and the `[tag, n]` insertion
     /// class markers (`Run::finish_candidate`) given the values in force
     /// in this run.
-    pub(crate) fn resolve_page_params(&mut self, raw: &mut [ValueId]) -> R<()> {
+    pub(crate) fn resolve_page_params(&mut self, raw: &mut [ValueId], reaching: bool) -> R<()> {
         let v = self.v;
         let mut full = None;
         let mut classes: Vec<(u16, ValueId)> = Vec::new();
         for x in raw.iter_mut() {
             let tag = crate::nodes::tag(v, *x);
             if tag == crate::nodes::T_PAGE_PARAMS && crate::val::list_of(v, *x).len() == 1 {
+                if !reaching {
+                    continue;
+                }
                 let m = if let Some(m) = full {
                     m
                 } else {

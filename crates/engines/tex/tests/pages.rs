@@ -322,3 +322,34 @@ fn a_loop_waiting_for_the_page_to_fill_ends() {
         assert!(log.contains("[n=20]"), "-j{threads}: the loop ends at the twentieth rule");
     }
 }
+
+/// LaTeX's two-stage float output in plain TeX: the routine at
+/// `\penalty-10004` holds the page and sets `\vsize` to `\maxdimen`, the
+/// one at `-10003` gives the held material back and sets `\vsize` again
+/// (latex.ltx's `\output`), forty times over eight pages. The builder
+/// takes a routine's `\vsize` from its give-back in its fold's order, not
+/// from the finisher's definition by the finisher's place, which the
+/// builder's own placements move (docs/spec-settle.md §2.1): read by
+/// place, the loop ran 271 times at one thread on this document (the
+/// fold flipping as finishers were relocated; 49 manuals of the corpus
+/// never ended), at most once per routine fire with the rule (77 of 88).
+/// The DVI is TeX's (dvi/vsizeroutine).
+#[test]
+fn a_routines_vsize_reaches_the_builder_in_fold_order() {
+    let dir = common::fixtures().join("dvi");
+    let src = common::read(&dir.join("vsizeroutine.tex"));
+    let want = std::fs::read(dir.join("vsizeroutine.dvi")).expect("the oracle");
+    for threads in [1, 8] {
+        let opts = phitex_tex::Options {
+            threads: Some(threads),
+            ..common::options("./vsizeroutine.tex", "vsizeroutine", &common::dvi_comment(&want), &dir)
+        };
+        let b = common::build(opts, Some(&common::plain()), &src);
+        let (dvi, log) = b.output();
+        assert_eq!(dvi, want, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
+        if threads == 1 {
+            let loops = b.stats.runs_by_op.iter().find(|(o, _)| *o == "pages").map_or(0, |(_, n)| *n);
+            assert!(loops <= 88, "the loop ran {loops} times for 88 routine fires: {:?}", b.stats.runs_by_op);
+        }
+    }
+}

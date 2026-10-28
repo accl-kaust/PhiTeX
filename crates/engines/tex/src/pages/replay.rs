@@ -308,13 +308,12 @@ impl Resolved {
     }
 }
 
-/// The reads at one owner piece ([`crate::vprof::unit_owner`]): its page
-/// parameters and its insertion classes' registers, read once for all
-/// the units it owns ([`Run::resolve_prof_of`], [`Run::insert_class_at`]).
+/// The reads at one owner piece ([`crate::vprof::unit_owner`]): its
+/// insertion classes' registers, read once for all the units it owns
+/// ([`Run::resolve_prof_of`], [`Run::insert_class_at`]).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct OwnerReads {
     pub owner: Option<i64>,
-    pub params: Option<PageParams>,
     pub classes: Vec<(u16, InsertClass)>,
 }
 
@@ -451,13 +450,11 @@ pub(crate) fn build_t(
         let so_far = &mut st.pb.so_far;
         buf.retain(|(x, _)| match x {
             PItem::Params(p) => {
-                page_params = Some(p.unwrap_or(PageParams {
-                    vsize: 0,
-                    max_depth: 0,
-                    top_skip: Glue::ZERO,
-                    holding_inserts: 0,
-                    saving_vdiscards: false,
-                }));
+                // (`None`, the parameters reaching a piece: those the fold
+                // has in force, docs/spec-settle.md §2.1)
+                if p.is_some() {
+                    page_params = *p;
+                }
                 false
             }
             PItem::SetPage(i, x) => {
@@ -1248,7 +1245,11 @@ impl PageState {
         let mut dead_set = None;
         buf.retain(|&x| match nodes::tag(v, x) {
             nodes::T_PAGE_PARAMS => {
-                page_params = Some(x);
+                // (a `[tag]` marker, the parameters reaching a piece: those
+                // in force, the page's own (docs/spec-settle.md §2.1))
+                if list_of(v, x).len() > 1 {
+                    page_params = Some(x);
+                }
                 false
             }
             nodes::T_SET_PAGE => {
@@ -1572,7 +1573,7 @@ impl Run<'_, '_> {
     /// parameters reaching it ([`Run::page_params_at`]), and its `[tag,
     /// n]` insertion class markers the class's registers reaching it
     /// ([`Run::insert_class_at`]).
-    pub(crate) fn resolve_params_of(&mut self, pid: i64, raw: &mut [ValueId]) -> R<()> {
+    pub(crate) fn resolve_params_of(&mut self, pid: i64, raw: &mut [ValueId], reaching: bool) -> R<()> {
         let v = self.v;
         let mut m = None;
         let mut classes: Vec<(u16, ValueId)> = Vec::new();
@@ -1591,7 +1592,7 @@ impl Run<'_, '_> {
                 };
                 continue;
             }
-            if nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {
+            if reaching && nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {
                 let mm = if let Some(mm) = m {
                     mm
                 } else {
@@ -1637,16 +1638,8 @@ impl Run<'_, '_> {
                 });
                 continue;
             }
-            if let crate::vprof::PItem::Params(p @ None) = x {
-                let pp = if let Some(pp) = own.params {
-                    pp
-                } else {
-                    let pp = self.page_params_struct_at(pid)?;
-                    own.params = Some(pp);
-                    pp
-                };
-                *p = Some(pp);
-            }
+            // (a `[tag]` page parameter marker stays one: the fold reads it
+            // as the parameters it has in force, docs/spec-settle.md §2.1)
         }
         Ok(())
     }

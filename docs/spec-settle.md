@@ -52,6 +52,37 @@ An operation may declare that its definitions settle at quiet points
   silently stale at eight threads (course3 -j8, 12 passes, 11 undefined
   references, md5 wrong).
 
+### 2.1 A routine's page parameters reach the builder through its give-back
+
+The page builder (the loop, and each finisher replaying its page) takes
+the page parameters (`\vsize`, `\maxdepth`, `\topskip`,
+`\holdinginserts`) in its fold's order only: the text's from the markers
+its pieces put where they set them, a routine's from the marker its
+give-back carries (the routine's own setting, `Run::define_rtn`). A
+piece's `[tag]` marker, the parameters reaching it, is those the fold has
+in force; it is read where the piece is only while the fold has none, on
+the first page, before any finisher. The builder never reads a
+finisher's definition of a page parameter by its place. Positional reads
+stay for what the text reads (`\the\vsize` after a page, held as in §2)
+and for an insertion class's registers.
+
+Why (2026-10-28, the documents with floats or marginpars): LaTeX's two
+stage float output sets `\vsize` to `\maxdimen` in the routine at
+`\penalty-10004` and back to `\@colroom` in the one at `-10003`
+(latex.ltx `\output`), a parameter a routine sets and the builder reads
+at the next fire. Read by place, the builder read each finisher's
+definition where the loop had placed that finisher; when a fold fired a
+page elsewhere the loop relocated the finisher, its definition moved,
+the pieces between its old and new place read the environment's value or
+the finisher's before, and the fold fired the page where it had fired it
+two runs before: a 2-cycle inside the page layer, which §2's "converges
+among itself" does not bound. Each flip made a new page key (the page
+began elsewhere) and a new finisher. `latex_translator_translator`,
+`latex_ncctools_ncctools` and the other manuals of that group (49 in
+the sweep of 911115707) ran the loop until the sweep's timeout at -j1 (translator: 1000 loop runs in 12 s, 58 of 66
+woken by `Environment{param:vsize}`); with the rule both are exact at -j1
+and -j8 in 3.3 s and 3.9 s.
+
 Inside a pass the text runs once, on predictions or on the last pass's
 values; the loop folds the boxes once (its parks at holes are resumes);
 each finisher runs about once, re-asked only by the page layer itself. At

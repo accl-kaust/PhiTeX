@@ -48,9 +48,17 @@ pub(crate) enum Feedback {
     /// node runs again where that is not the guess.
     RoutineGivesBack,
     /// The page parameters and an insertion class's registers (§980,
-    /// §1008), set by text or by a routine: read by the page builder
-    /// where each piece is ([`Run::page_params_at`],
-    /// [`Run::insert_class_at`]), a read past the builder's own node.
+    /// §1008), set by text or by a routine. The page parameters reach the
+    /// builder in its fold's order alone: the text's as the markers its
+    /// pieces put where they set them, a routine's as the marker its
+    /// give-back carries ([`RoutineGivesBack`](Feedback::RoutineGivesBack));
+    /// a piece's `[tag]` marker (the parameters reaching it) is those the
+    /// fold has in force, read where the piece is
+    /// ([`Run::page_params_at`]) only before any are (the first page),
+    /// never a finisher's definition by its place
+    /// (docs/spec-settle.md §2.1). An insertion class's registers are read
+    /// where each piece is ([`Run::insert_class_at`]), a read past the
+    /// builder's own node.
     BuilderRegisters,
     /// The objects the pages shipped, read back in the text
     /// (`\pdflastobj`, `\pdflastlink`, `\pdfximage`'s number and their
@@ -218,7 +226,7 @@ impl Run<'_, '_> {
         mat.extend(c.args.get(2).map(|&x| list_of(v, x)).unwrap_or_default());
         mat.push(v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(0)]));
         mat.extend(xs.get(4).map(|&x| list_of(v, x)).unwrap_or_default());
-        self.resolve_page_params(&mut mat)?;
+        self.resolve_page_params(&mut mat, true)?;
         let anchor = c.brk.map_or(-1, |b| b.0);
         let (k, after) = if xs.len() > 7 && n(6) >= 0 { (n(6), n(7)) } else { (-1, -1) };
         let defs = [
@@ -317,19 +325,23 @@ impl Run<'_, '_> {
             .rposition(|&x| nodes::tag(v, x) == nodes::T_BUILD_PAGE)
             .map_or(0, |i| i + 1);
         let mut head = raw[..last].to_vec();
+        let s = self.page_start()?;
         // (its `[tag]` markers the parameters reaching it: a setting since
-        // its last candidate is not the builds')
+        // its last candidate is not the builds'; read here only where the
+        // page start has none in force (the first page): else they are
+        // those the fold has, as the builder reads them,
+        // docs/spec-settle.md §2.1)
+        let reaching = s.state(v).params.is_none();
         let mut reach = None;
         for x in &mut head {
-            if nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {
+            if reaching && nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {
                 *x = match reach {
                     Some(m) => m,
                     None => *reach.insert(self.page_params_reaching()?),
                 };
             }
         }
-        self.resolve_page_params(&mut head)?;
-        let s = self.page_start()?;
+        self.resolve_page_params(&mut head, reaching)?;
         let units = v.seq_to_vec(self.cx.fold(v.field(crate::vprof::VPROF), s.anchor, None)?);
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
         let mut st = s.state(v);

@@ -1198,7 +1198,12 @@ impl Run<'_, '_> {
                     );
                 }
             }
-            self.resolve_params_of(p, &mut raw)?;
+            // (a `[tag]` page parameter marker read where the piece is only
+            // on the first page, before the builder has any in force: on
+            // a later page it is the parameters the page began with or
+            // the text set since, never a finisher's definition read by
+            // its place, docs/spec-settle.md §2.1)
+            self.resolve_params_of(p, &mut raw, fin.params.is_none())?;
             // (whether the page's candidate is the own piece's last, read
             // as that alone (a piece growing after the page's cut leaves
             // it standing): the candidate where so, else none (-2); its

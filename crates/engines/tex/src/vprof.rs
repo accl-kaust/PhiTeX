@@ -633,7 +633,14 @@ impl ScanState {
         let so_far = &mut self.pb.so_far;
         buf.retain(|x| match x {
             PItem::Params(p) => {
-                page_params = Some(p.unwrap_or_else(|| rd.params()));
+                // (`None`, the parameters reaching the piece: those in force;
+                // read where the piece is only before any are, the first
+                // page's, docs/spec-settle.md §2.1)
+                match p {
+                    Some(q) => page_params = Some(*q),
+                    None if page_params.is_none() && self.params.is_none() => page_params = Some(rd.params()),
+                    None => {}
+                }
                 false
             }
             PItem::SetPage(i, x) => {

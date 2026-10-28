@@ -883,6 +883,23 @@ impl Run<'_, '_> {
                 }
                 None => x,
             };
+            // (a `[tag]` page parameter marker: the parameters the fold has
+            // in force, a routine's from its give-back in this order; read
+            // where the piece is only before the fold has any, on the first
+            // page, where no finisher's definition comes before the piece:
+            // a finisher's definitions never reach the builder by their
+            // place, which the builder's own placements move,
+            // docs/spec-settle.md §2.1)
+            let rp;
+            let x = if matches!(x, PItem::Params(None))
+                && st.params.is_none()
+                && !lc.pend.iter().any(|(y, _)| matches!(y, PItem::Params(Some(_))))
+            {
+                rp = PItem::Params(Some(self.page_params_struct_at(pid)?));
+                &rp
+            } else {
+                x
+            };
             let item = u32::try_from(i).unwrap_or(u32::MAX);
             let src = Src::Piece { piece: pid, item };
             let s = SrcRef {
@@ -1219,7 +1236,7 @@ impl Run<'_, '_> {
         // it, given back with its material)
         lc.dead = lc.rtn_dead;
         lc.prev_fire = (p.pid, lc.rtn_dead);
-        self.resolve_params_of(p.pid, &mut markers)?;
+        self.resolve_params_of(p.pid, &mut markers, false)?;
         let m_len = markers.len();
         let rtn_value = v.list(vec![v.list(markers), v.list(list)]);
         let rtn_items = std::sync::Arc::new(self.rtn_items(lc, rtn_value));
