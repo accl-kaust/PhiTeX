@@ -790,8 +790,11 @@ impl Session {
                 // until the kernel is fast, so a longer time limit for it;
                 // none would leave a stuck evaluation running for ever)
                 let first = prelude.is_some() && cached.is_none();
+                // (the format is built in the same evaluation as the
+                // document, so this phase's time is both; it is built again
+                // whenever the engine's sources changed, its cache key)
                 self.status.set(if first {
-                    format!("building the {} format (first time)", self.job.engine.name)
+                    format!("engine · the {} format built first (once per engine build)", self.job.engine.name)
                 } else {
                     "engine".to_owned()
                 });

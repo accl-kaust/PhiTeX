@@ -250,7 +250,7 @@ fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -
         out.push(format!(
             "       {}",
             st.dim(&format!(
-                "[{done}/{total}] jobs · {} running · {idle} idle",
+                "[{done}/{total}] runs (a node run again counts again) · {} running · {idle} idle",
                 rows.iter().map(|r| r.1).sum::<usize>()
             ))
         ));
