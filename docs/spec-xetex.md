@@ -29,6 +29,20 @@ HarfBuzz 14.5.0, FreeType 2.14.3, zlib 1.3.2.
    The PDF follows from the XDV: the converter is already exact (§0).
 3. The XDV bar is per page record: a page's bytes equal the oracle's
    page (bop..eop) once the link has placed the font definitions.
+4. The one deliberate difference: `\filemoddate` of the job's own
+   `.log` is the build's clock. The log is written while the job runs,
+   so its modification time is "now", and the build's "now" is the
+   clock unless `SOURCE_DATE_EPOCH` sets it, in which case the build
+   follows the epoch so that it reproduces. TeX Live gives the log
+   file's real mtime even under `SOURCE_DATE_EPOCH` and
+   `FORCE_SOURCE_DATE=1`, which is inconsistent with its own clock
+   primitives. We do not copy that. Measured on the user's paper (hyperxmp reads
+   that date; accl 21421): with `latexmk -xelatex` and `phitex build
+   -j8` both run to their fixpoint, the two XDVs have the same length,
+   1967692 bytes, and differ in 75 bytes. All 75 are in hyperxmp's XMP packet: the four
+   dates and the InstanceID uuid made from them. The PDFs differ only
+   in those, in xdvipdfmx's font subset tags and in /ID, which xdvipdfmx
+   seeds from the date.
 
 ## 2. Unicode character codes everywhere
 
