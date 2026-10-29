@@ -20,7 +20,11 @@ the one that will become `main`.
   for the alpha. A gate red only on those tests counts as green.
 - **Shelf is in the alpha:** `--shelf` / `files = "shelf"` (phitex-shelf,
   docs/spec-editor-protocol.md), XeTeX over Shelf's fonts included. The
-  hosted server and its default URL are the user's call.
+  hosted server and its default URL are the user's call: the user sets up
+  the hosting before dev goes to main. The release served there is built
+  with its TRACE step (the dependency packs) and FONT_INDEX, from Shelf's
+  branch `xetex-trees` (the trees XeTeX and xdvipdfmx read; every file
+  under tex/, images included).
 
 ## 1. The tree, locally
 
