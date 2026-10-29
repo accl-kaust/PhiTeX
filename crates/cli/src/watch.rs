@@ -121,7 +121,10 @@ fn watcher(
     let mut w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
         let Ok(ev) = ev else { return };
         // (a rename's pair: its two halves come as `From` and `To` too)
-        if matches!(ev.kind, EventKind::Modify(ModifyKind::Name(RenameMode::Both))) {
+        if matches!(
+            ev.kind,
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+        ) {
             return;
         }
         let closed = CLOSES
@@ -402,7 +405,10 @@ fn show_warnings(ui: &crate::ui::Ui, st: crate::ui::Style, s: &Session, l: &Last
             ui.line(p);
         }
         if placed.len() > max {
-            ui.line(&st.dim(&format!("… {} warnings in all (-v shows every one)", placed.len())));
+            ui.line(&st.dim(&format!(
+                "… {} warnings in all (-v shows every one)",
+                placed.len()
+            )));
         }
         return;
     }
@@ -518,7 +524,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
             st.dim(env!("CARGO_PKG_VERSION")),
             st.bold(&t.file),
             st.bold(&format!("{}.{}", job.jobname, job.engine.output.ext())),
-            st.dim(&format!("{} · {threads} thread{}", job.engine.name, if threads == 1 { "" } else { "s" }))
+            st.dim(&format!(
+                "{} · {threads} thread{}",
+                job.engine.name,
+                if threads == 1 { "" } else { "s" }
+            ))
         ));
     }
     for n in session::waiting_notes(&job) {
@@ -793,6 +803,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
             let _ = pump.join();
             r
         });
+        // (the records the build changed, stored as it settles: a no-op
+        // unless a load changed them)
+        s.flush_records();
         // (an edit the build took while it ran: timed from it)
         let since = match (since, s.absorbed_at()) {
             (Some(a), Some(b)) => Some(a.max(b)),
@@ -845,7 +858,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         // or not: the pages shipped; none when nothing was shipped)
         // (an engine failure, `Report::internal`: nothing written, the
         // last good build's files kept)
-        let written = match if r.internal.is_some() { Err(String::new()) } else { s.write(&r, true) } {
+        let written = match if r.internal.is_some() {
+            Err(String::new())
+        } else {
+            s.write(&r, true)
+        } {
             Ok(w) => {
                 let ours = &mut *mine;
                 for (p, h) in &w.files {
@@ -1085,7 +1102,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                     #[allow(clippy::cast_precision_loss, reason = "a display of bytes")]
                     let gb = |b: u64| -> String {
                         let g = b as f64 / f64::from(1u32 << 30);
-                        if g >= 1.0 { format!("{g:.1} GB") } else { format!("{:.0} MB", b as f64 / f64::from(1u32 << 20)) }
+                        if g >= 1.0 {
+                            format!("{g:.1} GB")
+                        } else {
+                            format!("{:.0} MB", b as f64 / f64::from(1u32 << 20))
+                        }
                     };
                     rows.push((
                         "memory".to_owned(),
@@ -1108,7 +1129,10 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                     ));
                 }
                 if x.max_ready > 0 {
-                    rows.push(("ready".to_owned(), format!("at most {} a step", x.max_ready)));
+                    rows.push((
+                        "ready".to_owned(),
+                        format!("at most {} a step", x.max_ready),
+                    ));
                 }
                 let [bounded, any, viol, undecl, stops, waits] = x.hints;
                 if bounded + any > 0 {
@@ -1287,8 +1311,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
     // (the diff against a past version, and what the viewer asked of it)
     let mut comparing: Option<crate::compare::Compare> = None;
     let mut diff_asks: Vec<Ask> = Vec::new();
-    // (no event for 2 s: the session is idle, the records the builds
-    // changed are stored then, not after every build)
+    // (no event for a while: the session is idle, the exact PDF file and,
+    // with `--log`, the log written then; the records are stored as each
+    // build settles)
     loop {
         let wait = idle_since.get().map_or(Duration::from_secs(2), |t| {
             o.idle.saturating_sub(t.elapsed())
@@ -1319,10 +1344,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                     }
                     continue;
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    s.flush_records();
-                    continue;
-                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             },
         };

@@ -442,8 +442,8 @@ pub struct Session {
     /// when it was first found): an edit compares names, not lookups.
     inputs: Vec<(String, bool, Option<PathBuf>)>,
     /// Whether the package loads' and the document nodes' records
-    /// changed since last stored ([`Session::flush_records`]: when the
-    /// session is idle, not after every build).
+    /// changed since last stored ([`Session::flush_records`], called when
+    /// a build settles: a no-op unless a load changed them).
     records_dirty: bool,
     /// The texts sent to the build while it runs, by version.
     absorb: Absorb,
@@ -907,7 +907,7 @@ impl Session {
             }
             lap(&mut phases, "written keys");
             // (no load ran: its records are as last stored; else stored
-            // when the session is idle, [`Session::flush_records`])
+            // when the build settles, [`Session::flush_records`])
             if b.pkgrec_changed() {
                 self.records_dirty = true;
             }

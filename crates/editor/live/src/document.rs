@@ -119,7 +119,11 @@ impl Document {
     /// (`build`, `failed`); [`Document::step`] returns none. The viewer's
     /// own hook ([`Viewer::on_emit`]) is the document's: a host that sets
     /// it takes the events from the document.
-    pub fn new_with_emit(session: Session, main: &str, emit: impl FnMut(Value) + Send + 'static) -> Document {
+    pub fn new_with_emit(
+        session: Session,
+        main: &str,
+        emit: impl FnMut(Value) + Send + 'static,
+    ) -> Document {
         let viewer = Arc::new(Viewer::default());
         let emit: Emit = Arc::new(Mutex::new(Box::new(emit)));
         {
@@ -297,6 +301,9 @@ impl Document {
             diagnostics: diagnostics(s, &r, &log),
         });
         v.building(false);
+        // (the records the build changed, stored now: only when a load
+        // changed them, compared with what is stored first; no idle timer)
+        s.flush_records();
         self.event(json!({
             "event": "build",
             "build": b,
@@ -307,11 +314,6 @@ impl Document {
             "wall_ms": r.wall.as_secs_f64() * 1e3,
             "errors": errors,
         }));
-    }
-
-    /// The records the builds changed, kept (when the host is idle).
-    pub fn idle(&mut self) {
-        self.session.flush_records();
     }
 }
 
@@ -458,13 +460,18 @@ mod tests {
     /// returning none.
     #[test]
     fn events_go_to_the_host_as_they_happen() {
-        let mut collected = Document::new(session(&pages(2), Arc::new(Memory::default())), "doc.tex");
+        let mut collected =
+            Document::new(session(&pages(2), Arc::new(Memory::default())), "doc.tex");
         let want: Vec<Value> = collected.step();
         let got: Arc<Mutex<Vec<Value>>> = Arc::default();
         let g = got.clone();
-        let mut d = Document::new_with_emit(session(&pages(2), Arc::new(Memory::default())), "doc.tex", move |v| {
-            lock(&g).push(v);
-        });
+        let mut d = Document::new_with_emit(
+            session(&pages(2), Arc::new(Memory::default())),
+            "doc.tex",
+            move |v| {
+                lock(&g).push(v);
+            },
+        );
         assert!(d.step().is_empty(), "the events are the host's");
         let kinds = |vs: &[Value]| vs.iter().map(|e| e["event"].clone()).collect::<Vec<_>>();
         let got = lock(&got).clone();
@@ -498,10 +505,16 @@ mod tests {
         let sender = std::thread::spawn(move || {
             rx.recv().expect("the edit's build began");
             std::thread::sleep(std::time::Duration::from_millis(300));
-            absorb(Ask::SetFile { file: "doc.tex".into(), text: e2 });
+            absorb(Ask::SetFile {
+                file: "doc.tex".into(),
+                text: e2,
+            });
         });
         lock(&events).clear();
-        d.push(Ask::SetFile { file: "doc.tex".into(), text: slow(4_000_000, 2) });
+        d.push(Ask::SetFile {
+            file: "doc.tex".into(),
+            text: slow(4_000_000, 2),
+        });
         let t = Instant::now();
         d.step();
         let wall = t.elapsed();
@@ -509,13 +522,24 @@ mod tests {
         let ev = lock(&events).clone();
         let builds: Vec<&Value> = ev.iter().filter(|e| e["event"] == "build").collect();
         assert_eq!(builds.len(), 1, "{ev:?}");
-        assert_eq!(builds[0]["pages"], 3, "the edit sent while it ran (the build took {wall:?}): {ev:?}");
+        assert_eq!(
+            builds[0]["pages"], 3,
+            "the edit sent while it ran (the build took {wall:?}): {ev:?}"
+        );
         lock(&events).clear();
         d.step();
-        assert!(lock(&events).iter().all(|e| e["event"] != "build"), "built already: {:?}", lock(&events));
+        assert!(
+            lock(&events).iter().all(|e| e["event"] != "build"),
+            "built already: {:?}",
+            lock(&events)
+        );
         let mut cold = Document::new(session(&edited, Arc::new(Memory::default())), "doc.tex");
         cold.step();
-        assert_eq!(d.output().map(|o| o.1), cold.output().map(|o| o.1), "the cold build's output");
+        assert_eq!(
+            d.output().map(|o| o.1),
+            cold.output().map(|o| o.1),
+            "the cold build's output"
+        );
     }
 
     /// An editor's ranged edits of the main file, from two threads in
@@ -526,11 +550,19 @@ mod tests {
         let mut d = Document::new(session(&pages(1), Arc::new(Memory::default())), "doc.tex");
         d.step();
         let text = pages(1);
-        d.push(Ask::SetFile { file: "doc.tex".into(), text: text.clone() });
+        d.push(Ask::SetFile {
+            file: "doc.tex".into(),
+            text: text.clone(),
+        });
         let at = text.find("\\end").unwrap();
         let absorb = d.absorber();
         std::thread::spawn(move || {
-            absorb(Ask::Edit { file: "doc.tex".into(), start: at, end: at, text: "\\shipout\\hbox{}".into() });
+            absorb(Ask::Edit {
+                file: "doc.tex".into(),
+                start: at,
+                end: at,
+                text: "\\shipout\\hbox{}".into(),
+            });
         })
         .join()
         .unwrap();
@@ -587,13 +619,23 @@ mod tests {
         let pdf = d.viewer().pdf().expect("the viewer's PDF");
         assert!(pdf.starts_with(b"%PDF-"), "{:?}", &pdf[..pdf.len().min(16)]);
         let pages = d.request(&json!({"id": 1, "op": "pages"}));
-        assert_eq!(pages["json"]["pages"].as_array().map(Vec::len), Some(2), "{pages}");
-        assert!(asked.load(std::sync::atomic::Ordering::Relaxed) > 0, "the finder asked");
+        assert_eq!(
+            pages["json"]["pages"].as_array().map(Vec::len),
+            Some(2),
+            "{pages}"
+        );
+        assert!(
+            asked.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the finder asked"
+        );
         // (a host without a finder: no PDF, said)
         let mut d = Document::new(session(text, Arc::new(Memory::default())), "doc.tex");
         let ev = d.step();
         let built = ev.iter().find(|e| e["event"] == "build").expect("built");
-        assert!(built["errors"].to_string().contains("no dvipdfmx here"), "{ev:?}");
+        assert!(
+            built["errors"].to_string().contains("no dvipdfmx here"),
+            "{ev:?}"
+        );
     }
 
     /// XeTeX's fonts from closures and a relative index, as a wasm host
@@ -635,7 +677,11 @@ mod tests {
                     let n = String::from_utf8_lossy(name).into_owned();
                     d1.join(&n).is_file().then(|| n.into_bytes())
                 }),
-                Box::new(move |path| std::fs::read(d2.join(String::from_utf8_lossy(path).as_ref())).ok().map(Arc::from)),
+                Box::new(move |path| {
+                    std::fs::read(d2.join(String::from_utf8_lossy(path).as_ref()))
+                        .ok()
+                        .map(Arc::from)
+                }),
             )))
         }
     }
@@ -670,14 +716,22 @@ mod tests {
             let s = Session::new(
                 job,
                 Arc::from(text),
-                Arc::new(XeHost { dist: dist.clone(), index, read_face: read_face.clone() }),
+                Arc::new(XeHost {
+                    dist: dist.clone(),
+                    index,
+                    read_face: read_face.clone(),
+                }),
                 None,
                 Arc::new(Memory::default()),
                 Arc::new(Status::default()),
             );
             let mut d = Document::new(s, "doc.tex");
             let ev = d.step();
-            let built = ev.iter().find(|e| e["event"] == "build").cloned().expect("built");
+            let built = ev
+                .iter()
+                .find(|e| e["event"] == "build")
+                .cloned()
+                .expect("built");
             (built, d.output())
         };
         let (built, out) = run(Some(bytes));
@@ -687,7 +741,10 @@ mod tests {
         let (ext, pdf) = out.expect("the PDF");
         assert_eq!(ext, "pdf");
         assert!(pdf.starts_with(b"%PDF-"), "the PDF");
-        assert!(read_face.load(std::sync::atomic::Ordering::Relaxed), "the face read by its relative path");
+        assert!(
+            read_face.load(std::sync::atomic::Ordering::Relaxed),
+            "the face read by its relative path"
+        );
         let (built, _) = run(None);
         assert_eq!(built["ok"], false, "{built}");
     }
