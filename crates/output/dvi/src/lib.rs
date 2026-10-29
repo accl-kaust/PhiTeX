@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 
 use phitex_pdf::GlyphTap;
+pub use phitex_xdvipdfmx::api::Op;
 
 use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
@@ -262,6 +263,14 @@ fn vet_round(glue_temp: f64) -> Scaled {
 #[derive(Clone)]
 pub struct DviWriter {
     out: Vec<u8>,
+    /// `dvi_offset+dvi_ptr`: the bytes written, kept or not.
+    loc: usize,
+    /// Whether the bytes are kept (none for a writer that only says its
+    /// operations, [`DviWriter::new_xdv_ops`]).
+    keep: bool,
+    /// The operations written since the last [`DviWriter::take_ops`], as
+    /// the XDV's opcodes would carry them (none: not said).
+    ops: Option<Vec<Op>>,
     buf_size: usize,
     dvi_ptr: usize,
     dvi_limit: usize,
@@ -486,8 +495,41 @@ impl DviWriter {
         }
     }
 
+    /// XeTeX's writer that keeps no bytes and says the operations it
+    /// writes instead ([`DviWriter::take_ops`]): what xdvipdfmx's
+    /// interpreter runs for a page when the engine writes the PDF
+    /// itself. Every decision the writer makes is as [`DviWriter::new_xdv`]
+    /// makes it (its buffer's state is counted, not kept), so the
+    /// operations are the opcodes of the XDV it would write.
+    #[must_use]
+    pub fn new_xdv_ops(mag: i32, comment: &str) -> DviWriter {
+        let mut w = Self::make_with(mag, comment, DVI_BUF_SIZE, true, false);
+        w.ops = Some(Vec::new());
+        w
+    }
+
+    /// The operations written since the last call (a page's, after
+    /// [`DviWriter::ship_out`]).
+    pub fn take_ops(&mut self) -> Vec<Op> {
+        self.ops.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// Operation `o` said.
+    fn op(&mut self, o: Op) {
+        if let Some(ops) = &mut self.ops {
+            ops.push(o);
+        }
+    }
+
     fn make(mag: i32, comment: &str, buf_size: usize, xdv: bool) -> DviWriter {
+        Self::make_with(mag, comment, buf_size, xdv, true)
+    }
+
+    fn make_with(mag: i32, comment: &str, buf_size: usize, xdv: bool, keep: bool) -> DviWriter {
         let mut w = DviWriter {
+            loc: 0,
+            keep,
+            ops: None,
             xdv,
             page_size: (0, 0),
             out: Vec::new(),
@@ -549,13 +591,16 @@ impl DviWriter {
     /// `dvi_offset+dvi_ptr`: the location of the next byte (§601).
     #[must_use]
     pub fn location(&self) -> usize {
-        self.out.len()
+        self.loc
     }
 
     /// `dvi_out` (§598) with `dvi_swap`'s bookkeeping (§598): a full half
     /// of the buffer is gone and can no longer change.
     pub fn dvi_out(&mut self, b: u8) {
-        self.out.push(b);
+        if self.keep {
+            self.out.push(b);
+        }
+        self.loc += 1;
         self.dvi_ptr += 1;
         if self.dvi_ptr == self.dvi_limit {
             let half = self.buf_size / 2;
@@ -592,9 +637,19 @@ impl DviWriter {
         }
         if l == self.dvi_offset + self.dvi_ptr && self.dvi_ptr > 0 {
             self.dvi_ptr -= 1;
-            self.out.pop();
+            if self.keep {
+                self.out.pop();
+            }
+            self.loc -= 1;
+            // (nothing was written after the `push`: it was the last
+            // operation)
+            if let Some(ops) = &mut self.ops {
+                let push = ops.pop();
+                debug_assert_eq!(push, Some(Op::Push));
+            }
         } else {
             self.dvi_out(op::POP);
+            self.op(Op::Pop);
         }
     }
 
@@ -619,6 +674,12 @@ impl DviWriter {
         let n = f - 1;
         if let Some(def) = self.fonts[&id].native.clone() {
             // XeTeX's `dvi_native_font_def`
+            if self.ops.is_some() {
+                self.op(Op::NativeFontDef {
+                    id: n.cast_signed(),
+                    record: def.clone(),
+                });
+            }
             self.dvi_out(op::DEFINE_NATIVE_FONT);
             self.dvi_four(n.cast_signed());
             for b in def {
@@ -650,6 +711,16 @@ impl DviWriter {
         } else {
             &d.name[..]
         };
+        if self.ops.is_some() {
+            let name = name.to_vec();
+            self.op(Op::FontDef {
+                id: n.cast_signed(),
+                checksum: u32::from_be_bytes(d.checksum),
+                size: d.size,
+                design_size: d.design_size,
+                name,
+            });
+        }
         self.dvi_out(low(u32::try_from(d.area.len()).unwrap_or(0)));
         self.dvi_out(low(u32::try_from(name.len()).unwrap_or(0)));
         // §603
@@ -660,7 +731,12 @@ impl DviWriter {
 
     /// `movement(w, o)` (§607): a `down`/`right` command for `w`, or a
     /// `y0`/`z0` (`w0`/`x0`) reusing an earlier one (§608–§615).
+    #[allow(clippy::too_many_lines)]
     pub fn movement(&mut self, w: Scaled, dir: Dir) {
+        self.op(match dir {
+            Dir::Down => Op::Down(w),
+            Dir::Right => Op::Right(w),
+        });
         let o = dir.base();
         let location = self.location();
         let gone = self.dvi_gone;
@@ -691,7 +767,9 @@ impl DviWriter {
                             break;
                         }
                         // §613
-                        self.out[e.location] += op::Y1 - op::DOWN1;
+                        if self.keep {
+                            self.out[e.location] += op::Y1 - op::DOWN1;
+                        }
                         stack[p].info = Y_HERE;
                         found = Some(p);
                         break;
@@ -701,7 +779,9 @@ impl DviWriter {
                             break;
                         }
                         // §614
-                        self.out[e.location] += op::Z1 - op::DOWN1;
+                        if self.keep {
+                            self.out[e.location] += op::Z1 - op::DOWN1;
+                        }
                         stack[p].info = Z_HERE;
                         found = Some(p);
                         break;
@@ -780,6 +860,7 @@ impl DviWriter {
         self.cur_s += 1;
         if self.cur_s > 0 {
             self.dvi_out(op::PUSH);
+            self.op(Op::Push);
         }
         self.max_push = self.max_push.max(self.cur_s);
         self.location()
@@ -827,6 +908,9 @@ impl DviWriter {
             if let Some(t) = self.tap.0.as_mut() {
                 tap_special(t.as_mut(), &s);
             }
+            if self.ops.is_some() {
+                self.op(Op::Special(s.clone()));
+            }
             if s.len() < 256 {
                 self.dvi_out(op::XXX1);
                 self.dvi_out(low(u32::try_from(s.len()).unwrap_or(0)));
@@ -855,6 +939,7 @@ impl DviWriter {
                 t.code((f, c), lig, true, f, low(u32::from(c)), h, v, w, size);
             }
             let c = low(u32::from(c));
+            self.op(Op::Set(i32::from(c)));
             if c >= 128 {
                 self.dvi_out(op::SET1);
             }
@@ -873,6 +958,44 @@ impl DviWriter {
         self.set_font(n.font, fonts);
         if self.tap.0.is_some() {
             self.tap_native(n);
+        }
+        if self.ops.is_some() {
+            let gs = |n: &Native| -> (Vec<(i32, i32)>, Vec<u16>) {
+                (
+                    n.glyphs.iter().map(|g| (g.x, g.y)).collect(),
+                    n.glyphs.iter().map(|g| g.gid).collect(),
+                )
+            };
+            let o = match n.kind {
+                NativeKind::Glyph => Some(Op::Glyphs {
+                    text: None,
+                    width: n.width,
+                    xy: vec![(0, 0)],
+                    ids: vec![n.glyphs.first().map_or(0, |g| g.gid)],
+                }),
+                NativeKind::WordText if !n.text.is_empty() || !n.glyphs.is_empty() => {
+                    let (xy, ids) = gs(n);
+                    Some(Op::Glyphs {
+                        text: Some(n.text.to_vec()),
+                        width: n.width,
+                        xy,
+                        ids,
+                    })
+                }
+                NativeKind::Word if !n.glyphs.is_empty() => {
+                    let (xy, ids) = gs(n);
+                    Some(Op::Glyphs {
+                        text: None,
+                        width: n.width,
+                        xy,
+                        ids,
+                    })
+                }
+                _ => None,
+            };
+            if let Some(o) = o {
+                self.op(o);
+            }
         }
         match n.kind {
             NativeKind::Glyph => {
@@ -968,6 +1091,7 @@ impl DviWriter {
             let id = f;
             let f = self.num(id);
             let n = f - 1;
+            self.op(Op::Font(n.cast_signed()));
             if f <= 64 {
                 self.dvi_out(op::FNT_NUM_0 + low(n));
             } else if f <= 256 {
@@ -1319,6 +1443,10 @@ impl DviWriter {
             self.synch_h();
             self.cur_v = fr.base + rule_dp;
             self.synch_v();
+            self.op(Op::SetRule {
+                height: rule_ht,
+                width: rule_wd,
+            });
             self.dvi_out(op::SET_RULE);
             self.dvi_four(rule_ht);
             self.dvi_four(rule_wd);
@@ -1475,6 +1603,12 @@ impl DviWriter {
                     if self.tap.0.is_some() {
                         self.tap_native(n);
                     }
+                    self.op(Op::Glyphs {
+                        text: None,
+                        width: 0,
+                        xy: vec![(0, 0)],
+                        ids: vec![n.glyphs.first().map_or(0, |g| g.gid)],
+                    });
                     self.dvi_out(op::SET_GLYPHS);
                     self.dvi_four(0);
                     self.dvi_two(1);
@@ -1505,6 +1639,10 @@ impl DviWriter {
                     }
                     self.synch_h();
                     self.synch_v();
+                    self.op(Op::PutRule {
+                        height: rule_ht,
+                        width: rule_wd,
+                    });
                     self.dvi_out(op::PUT_RULE);
                     self.dvi_four(rule_ht);
                     self.dvi_four(rule_wd);
@@ -1643,6 +1781,7 @@ impl DviWriter {
             } else {
                 s.push_str("default");
             }
+            self.op(Op::Special(s.as_bytes().to_vec()));
             self.dvi_out(op::XXX1);
             self.dvi_out(low(u32::try_from(s.len()).unwrap_or(0)));
             for &b in s.as_bytes() {
@@ -1775,6 +1914,7 @@ impl DviWriter {
         };
         let page_loc = self.location();
         self.out.extend_from_slice(&p.bytes);
+        self.loc += p.bytes.len();
         let back = i32::try_from(page_loc).unwrap_or(i32::MAX);
         self.out[page_loc + 41..page_loc + 45].copy_from_slice(&self.last_bop.to_be_bytes());
         self.last_bop = back;

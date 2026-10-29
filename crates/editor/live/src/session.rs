@@ -760,8 +760,16 @@ impl Session {
                         dvi_comment(self.job.pdf_date)
                     },
                     // (XeTeX's native fonts: TeX Live's, by file and by
-                    // name)
-                    xetex: if xe { self.host.xetex() } else { None },
+                    // name; its PDF written from the pages, as xelatex has
+                    // xdvipdfmx make it, unless the XDV is the output)
+                    xetex: if xe {
+                        self.host.xetex().map(|x| phitex_tex::XeTeX {
+                            pdf: self.xdv_pdf(),
+                            ..x
+                        })
+                    } else {
+                        None
+                    },
                     finder: self.finder(),
                     prelude_finder: Some(self.format_finder()),
                     content_key: self.host.content_key(),
@@ -1051,36 +1059,17 @@ impl Session {
         self.built_text = Some(text);
         lap(&mut phases, "pages and files");
         // (the output's bytes moved to their place, not copied)
-        let (mut pdf_bytes, dvi_bytes) = if pdf {
+        let (pdf_bytes, dvi_bytes) = if pdf {
             (bytes, Arc::default())
         } else {
             (Arc::default(), bytes)
         };
-        // (XeTeX's XDV made the PDF, as xelatex runs xdvipdfmx)
+        // (XeTeX's pages are a PDF the engine wrote, as xelatex has
+        // xdvipdfmx make it: an XDV here is one no host's files could make
+        // a PDF of)
         let mut errors = errors;
         if self.job.engine.output == tex::Output::Xdv && !dvi_bytes.is_empty() {
-            let dir = self
-                .job
-                .path
-                .parent()
-                .filter(|d| !d.as_os_str().is_empty())
-                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-            match self.host.xdv_to_pdf(
-                &dvi_bytes,
-                &format!("{}.pdf", self.job.jobname),
-                self.job.pdf_date,
-                &dir,
-            ) {
-                Ok(p) => {
-                    pdf_bytes = Arc::new(p);
-                    // (the glyph origins' codes are this PDF's)
-                    if self.job.origins || self.job.synctex {
-                        b.set_origins_pdf(pdf_bytes.clone());
-                    }
-                }
-                Err(e) => errors.push(e),
-            }
-            lap(&mut phases, "xdvipdfmx");
+            errors.push("no xdvipdfmx here: XeTeX's XDV is not made a PDF".to_owned());
         }
         let wall = t0.elapsed();
         if phitex_tex::tex_time() {
@@ -1286,6 +1275,26 @@ impl Session {
             .find(|(n, _)| *n == plain_name(&self.job.file) || *n == name)
             .and_then(|(_, t)| t.as_deref().map(Arc::from))
             .unwrap_or_else(|| self.text.clone())
+    }
+
+    /// XeTeX's PDF as xelatex makes it (`xdvipdfmx -q -E -o JOB.pdf`,
+    /// dated as the job), its files the host's for the document's
+    /// directory; none for `-no-pdf`, or a host without dvipdfmx's files.
+    fn xdv_pdf(&self) -> Option<phitex_tex::XdvPdf> {
+        if self.job.engine.output != tex::Output::Xdv {
+            return None;
+        }
+        let dir = self
+            .job
+            .path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        Some(phitex_tex::XdvPdf {
+            name: format!("{}.pdf", self.job.jobname),
+            date: self.job.pdf_date,
+            files: self.host.xdv_files(&dir)?,
+        })
     }
 
     /// The format's text (its ini file read, as `-ini` reads it: none

@@ -603,10 +603,10 @@ mod font_tests {
 
     struct NoFiles;
     impl Files for NoFiles {
-        fn find(&mut self, _: &[u8], _: Format, _: &[u8]) -> Option<Vec<u8>> {
+        fn find(&self, _: &[u8], _: Format, _: &[u8]) -> Option<Vec<u8>> {
             None
         }
-        fn read(&mut self, _: &[u8]) -> Option<Arc<[u8]>> {
+        fn read(&self, _: &[u8]) -> Option<Arc<[u8]>> {
             None
         }
     }

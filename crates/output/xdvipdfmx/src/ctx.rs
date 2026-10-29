@@ -131,7 +131,7 @@ impl Dpx {
     pub fn new(files: Box<dyn Files>, deflate: crate::obj::Deflate) -> Self {
         Dpx {
             o: PdfOut::new(deflate),
-            files: FilesRef(alloc::rc::Rc::new(core::cell::RefCell::new(files))),
+            files: FilesRef(alloc::sync::Arc::from(files)),
             conf: DpxConf::default(),
             dvi_filename: None,
             pdf_filename: None,
@@ -167,7 +167,7 @@ impl Dpx {
 
 /// The host's files, shared by a session's snapshots.
 #[derive(Clone)]
-pub struct FilesRef(pub alloc::rc::Rc<core::cell::RefCell<Box<dyn Files>>>);
+pub struct FilesRef(pub alloc::sync::Arc<dyn Files>);
 
 impl FilesRef {
     /// [`Files::find`].
@@ -177,11 +177,11 @@ impl FilesRef {
         format: crate::io::Format,
         progname: &[u8],
     ) -> Option<alloc::vec::Vec<u8>> {
-        self.0.borrow_mut().find(name, format, progname)
+        self.0.find(name, format, progname)
     }
     /// [`Files::read`].
     pub fn read(&mut self, path: &[u8]) -> Option<alloc::sync::Arc<[u8]>> {
-        self.0.borrow_mut().read(path)
+        self.0.read(path)
     }
     /// [`Files::apply_filter`].
     pub fn apply_filter(
@@ -190,6 +190,6 @@ impl FilesRef {
         input: &[u8],
         version: i32,
     ) -> Option<alloc::sync::Arc<[u8]>> {
-        self.0.borrow_mut().apply_filter(template, input, version)
+        self.0.apply_filter(template, input, version)
     }
 }

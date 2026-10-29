@@ -9,7 +9,7 @@ pub enum Output {
     Dvi,
     Pdf,
     /// XeTeX's XDV file, made a PDF as xelatex has xdvipdfmx make it
-    /// (in process: `dvipdf::xdv_to_pdf`).
+    /// (the engine writes it from its pages: `phitex_tex::XdvPdf`).
     Xdv,
     /// XeTeX's XDV file written as it is (`xelatex -no-pdf`).
     XdvFile,

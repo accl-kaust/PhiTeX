@@ -8,10 +8,9 @@
 //! [`PdfOut::ref_obj`] does not hold its target, as in C.
 
 use alloc::boxed::Box;
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 
 use crate::ctx::Result;
 use crate::fmt::{Buf, sprint_number};
@@ -110,12 +109,12 @@ pub struct XrefEntry {
 }
 
 /// A deflater: zlib's `compress2` at the given level.
-pub type Deflate = Box<dyn FnMut(i32, &[u8]) -> Vec<u8>>;
+pub type Deflate = Box<dyn Fn(i32, &[u8]) -> Vec<u8> + Send + Sync>;
 
 /// A deflater of many streams at once (each `(level, data)` as
 /// [`Deflate`] compresses it, the results in order): the host may
 /// compress them in parallel ([`PdfOut::set_batch_deflate`]).
-pub type BatchDeflate = Box<dyn FnMut(&[(i32, &[u8])]) -> Vec<Vec<u8>>>;
+pub type BatchDeflate = Box<dyn Fn(&[(i32, &[u8])]) -> Vec<Vec<u8>> + Send + Sync>;
 
 /// A stream whose compression waits for the batch
 /// ([`PdfOut::defer_streams`]): its bytes go in at `at` once compressed.
@@ -165,9 +164,9 @@ pub struct PdfOut {
     free_list: Vec<u8>,
 
     /// Shared by snapshots (none: `Default`'s writer, never deflating).
-    deflate: Option<Rc<RefCell<Deflate>>>,
+    deflate: Option<Arc<Deflate>>,
     /// The host's batch deflater, if it gives one.
-    batch: Option<Rc<RefCell<BatchDeflate>>>,
+    batch: Option<Arc<BatchDeflate>>,
     /// Streams written but not compressed yet (while deferring).
     pending: Vec<Pending>,
     deferring: bool,
@@ -175,6 +174,28 @@ pub struct PdfOut {
     pub files: Vec<crate::pdfread::PdfFile>,
     /// Where `parse_xref_table` found `trailer`.
     pub(crate) trailer_pos: usize,
+    /// What the cross-reference section said, once written
+    /// ([`PdfOut::flush`]): where each object is, for a link that
+    /// updates the file in place.
+    pub xref_written: Option<XrefWritten>,
+}
+
+/// The file's objects as its cross-reference section gives them, and
+/// its trailer's entries: what an update section repeats.
+#[derive(Clone, Debug, Default)]
+pub struct XrefWritten {
+    /// By object number: kind 0 free, 1 at offset `field2`, 2 in object
+    /// stream `field2` at index `field3`.
+    pub entries: Vec<XrefEntry>,
+    /// Where the section begins (`startxref`).
+    pub startxref: usize,
+    /// The cross-reference stream's own number (none: a table).
+    pub stream: Option<u32>,
+    /// `/Root`'s and `/Info`'s numbers.
+    pub root: u32,
+    pub info: Option<u32>,
+    /// `/ID`'s two strings.
+    pub id: [Vec<u8>; 2],
 }
 
 impl PdfOut {
@@ -201,12 +222,13 @@ impl PdfOut {
             xref_stream: None,
             current_objstm: None,
             free_list: Vec::new(),
-            deflate: Some(Rc::new(RefCell::new(deflate))),
+            deflate: Some(Arc::new(deflate)),
             batch: None,
             pending: Vec::new(),
             deferring: false,
             files: Vec::new(),
             trailer_pos: 0,
+            xref_written: None,
         }
     }
 
@@ -1165,10 +1187,8 @@ impl PdfOut {
             if self.deferring && self.defer_stream(dict, &mut filtered)? {
                 return Ok(());
             }
-            filtered = (self.deflate.as_ref().expect("deflater").borrow_mut())(
-                self.compression_level,
-                &filtered,
-            );
+            filtered =
+                (self.deflate.as_ref().expect("deflater"))(self.compression_level, &filtered);
         }
         let n = self.new_number(filtered.len() as f64);
         self.put(dict, b"Length", n)?;
@@ -1190,7 +1210,7 @@ impl PdfOut {
     /// compressed in one batch (in parallel, if the host does so). The
     /// bytes are the same as without it.
     pub fn set_batch_deflate(&mut self, batch: BatchDeflate) {
-        self.batch = Some(Rc::new(RefCell::new(batch)));
+        self.batch = Some(Arc::new(batch));
     }
 
     /// From now on, compressed streams wait for the batch (when the host
@@ -1271,8 +1291,9 @@ impl PdfOut {
         }
         let pending = core::mem::take(&mut self.pending);
         let jobs: Vec<(i32, &[u8])> = pending.iter().map(|p| (p.level, &p.data[..])).collect();
-        let packed = (self.batch.as_ref().expect("batch deflater").borrow_mut())(&jobs);
-        let mut out = Vec::with_capacity(self.out.len() + packed.iter().map(Vec::len).sum::<usize>());
+        let packed = (self.batch.as_ref().expect("batch deflater"))(&jobs);
+        let mut out =
+            Vec::with_capacity(self.out.len() + packed.iter().map(Vec::len).sum::<usize>());
         let (mut last, mut total) = (0, 0);
         let mut moved: Vec<(usize, usize)> = Vec::with_capacity(pending.len());
         for (p, z) in pending.iter().zip(&packed) {
@@ -1423,6 +1444,26 @@ impl PdfOut {
         self.startxref = self.file_position as u32;
         let t = self.trailer.expect("trailer");
         self.put_number(t, b"Size", f64::from(self.next_label))?;
+        let label_of = |o: &PdfOut, key: &[u8]| -> Result<Option<u32>> {
+            Ok(match o.lookup_dict(t, key)? {
+                Some(r) if o.is_indirect(Some(r)) => Some(o.indirect(r).label),
+                _ => None,
+            })
+        };
+        let mut written = XrefWritten {
+            startxref: self.startxref as usize,
+            stream: self.xref_stream.map(|xs| self.slot(xs).label),
+            root: label_of(self, b"Root")?.unwrap_or(0),
+            info: label_of(self, b"Info")?,
+            ..XrefWritten::default()
+        };
+        if let Some(ids) = self.lookup_dict(t, b"ID")? {
+            for (k, x) in self.array_items(ids)?.into_iter().take(2).enumerate() {
+                if let Some(x) = x.filter(|&x| self.is_string(Some(x))) {
+                    written.id[k] = self.string_value(x)?.to_vec();
+                }
+            }
+        }
         if self.xref_stream.is_some() {
             self.dump_xref_stream()?;
         } else {
@@ -1433,7 +1474,8 @@ impl PdfOut {
             self.trailer = None;
             self.out_char(b'\n')?;
         }
-        self.xref.clear();
+        written.entries = core::mem::take(&mut self.xref);
+        self.xref_written = Some(written);
         self.out_str(b"startxref\n")?;
         let mut b = Buf::new();
         b.uint(self.startxref);

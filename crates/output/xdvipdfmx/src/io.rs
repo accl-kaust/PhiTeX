@@ -39,16 +39,18 @@ pub enum Format {
     ProgramBinary,
 }
 
-/// What the host gives xdvipdfmx.
-pub trait Files {
+/// What the host gives xdvipdfmx: shared by a session's snapshots and
+/// by the threads that hold them, so it keeps its own caches behind its
+/// own locks.
+pub trait Files: Send + Sync {
     /// `kpse_find_file(name, format, 0)` as the program `progname` (dvipdfm-x
     /// searches as `dvipdfmx`, and "fools" kpathsea with other names for
     /// some formats): the path found.
-    fn find(&mut self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>>;
+    fn find(&self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>>;
 
     /// A file's contents by path (a path `find` returned, or an absolute
     /// path from the XDV).
-    fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>>;
+    fn read(&self, path: &[u8]) -> Option<Arc<[u8]>>;
 
     /// `dpx_file_apply_filter` for `ps_include_page`: the distiller
     /// (`dvipdfmx.cfg`'s `D` line, `template`) run on the file at `input`
@@ -56,7 +58,7 @@ pub trait Files {
     /// the output file and runs [`filter_command`]'s command, as C's
     /// `exec_spawn` would; `None`: it failed, or the host runs no
     /// commands (the default).
-    fn apply_filter(&mut self, template: &[u8], input: &[u8], version: i32) -> Option<Arc<[u8]>> {
+    fn apply_filter(&self, template: &[u8], input: &[u8], version: i32) -> Option<Arc<[u8]>> {
         let _ = (template, input, version);
         None
     }

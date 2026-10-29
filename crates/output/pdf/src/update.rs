@@ -31,18 +31,102 @@ use crate::{Chunk, PdfBytes, PdfError, Tail};
 #[derive(Clone, Debug)]
 pub struct Layout {
     bytes: Arc<PdfBytes>,
-    tail: Arc<Tail>,
+    tail: End,
     exact: Arc<OnceLock<Result<Arc<Vec<u8>>, PdfError>>>,
 }
 
 /// Where an object is in a layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Place {
+pub enum Place {
     Free,
     /// Written directly: its bytes are its span of the chunks.
     Direct,
     /// In object stream `.0` at index `.1`.
     In(usize, u32),
+}
+
+/// The end of a file another writer made whole (xdvipdfmx's: its
+/// objects numbered and placed as it wrote them, its cross-reference
+/// section written): what [`Layout::linked`] needs of it.
+#[derive(Clone, Debug)]
+pub struct Linked {
+    /// The objects written after the chunks, before the cross-reference
+    /// section.
+    pub chunk: Chunk,
+    /// The cross-reference section, the trailer and `startxref` (with
+    /// a stream, the stream object itself, whose number is past `places`).
+    pub xref: Arc<[u8]>,
+    /// Each object's place, by number (0 the free head; the cross-reference
+    /// stream's own not among them).
+    pub places: Vec<Place>,
+    /// Whether the file has object streams (and a cross-reference
+    /// stream).
+    pub streams: bool,
+    /// `/Root`'s and `/Info`'s numbers.
+    pub root: usize,
+    pub info: Option<usize>,
+    /// `/ID` as the trailer writes it (`/ID [<...> <...>]`).
+    pub id: Arc<[u8]>,
+}
+
+/// A layout's end: pdfTeX's tail, linked when asked, or a file another
+/// writer linked.
+#[derive(Clone, Debug)]
+enum End {
+    Tail(Arc<Tail>),
+    Linked(Arc<Linked>),
+}
+
+impl End {
+    fn chunk(&self) -> &Chunk {
+        match self {
+            End::Tail(t) => &t.chunk,
+            End::Linked(l) => &l.chunk,
+        }
+    }
+
+    fn link(&self, bytes: &PdfBytes) -> Result<Vec<u8>, PdfError> {
+        match self {
+            End::Tail(t) => t.link(bytes),
+            End::Linked(l) => {
+                let mut out = Vec::with_capacity(bytes.len() + l.chunk.bytes.len() + l.xref.len());
+                for c in &bytes.chunks {
+                    out.extend_from_slice(&c.bytes);
+                }
+                out.extend_from_slice(&l.chunk.bytes);
+                out.extend_from_slice(&l.xref);
+                Ok(out)
+            }
+        }
+    }
+
+    fn root(&self) -> usize {
+        match self {
+            End::Tail(t) => t.root,
+            End::Linked(l) => l.root,
+        }
+    }
+
+    fn info(&self) -> Option<usize> {
+        match self {
+            End::Tail(t) => t.info,
+            End::Linked(l) => l.info,
+        }
+    }
+
+    fn extra(&self) -> &[u8] {
+        match self {
+            End::Tail(t) => &t.extra,
+            End::Linked(_) => &[],
+        }
+    }
+
+    fn id(&self) -> Arc<[u8]> {
+        match self {
+            End::Tail(t) => t.id.clone(),
+            End::Linked(l) => l.id.clone(),
+        }
+    }
 }
 
 impl Layout {
@@ -52,7 +136,18 @@ impl Layout {
     pub fn new(tail: Arc<Tail>, bytes: PdfBytes) -> Layout {
         Layout {
             bytes: Arc::new(bytes),
-            tail,
+            tail: End::Tail(tail),
+            exact: Arc::default(),
+        }
+    }
+
+    /// The layout of a file another writer linked: `bytes` (its chunks,
+    /// each with the objects that begin in it) and its end.
+    #[must_use]
+    pub fn linked(bytes: PdfBytes, end: Linked) -> Layout {
+        Layout {
+            bytes: Arc::new(bytes),
+            tail: End::Linked(Arc::new(end)),
             exact: Arc::default(),
         }
     }
@@ -95,7 +190,7 @@ impl Layout {
     /// The bytes before the cross-reference section.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.bytes.len() + self.tail.chunk.bytes.len()
+        self.bytes.len() + self.tail.chunk().bytes.len()
     }
 
     /// Whether there are no bytes.
@@ -109,24 +204,30 @@ impl Layout {
     }
 
     fn chunk(&self, i: usize) -> &Chunk {
-        self.bytes.chunks.get(i).unwrap_or(&self.tail.chunk)
+        self.bytes.chunks.get(i).unwrap_or(self.tail.chunk())
     }
 
     fn chunks(&self) -> impl Iterator<Item = &Chunk> {
         self.bytes
             .chunks
             .iter()
-            .chain(std::iter::once(&self.tail.chunk))
+            .chain(std::iter::once(self.tail.chunk()))
     }
 
     /// The last object's number (the cross-reference section's own
     /// not among them).
     fn last(&self) -> usize {
-        self.tail.st.sys_obj_ptr()
+        match &self.tail {
+            End::Tail(t) => t.st.sys_obj_ptr(),
+            End::Linked(l) => l.places.len().saturating_sub(1),
+        }
     }
 
     fn place(&self, n: usize) -> Place {
-        let st = &self.tail.st;
+        let st = match &self.tail {
+            End::Tail(t) => &t.st,
+            End::Linked(l) => return l.places.get(n).copied().unwrap_or(Place::Free),
+        };
         if n == 0 || n > self.last() || !st.is_written(n) {
             return Place::Free;
         }
@@ -153,7 +254,10 @@ impl Layout {
     }
 
     fn streams(&self) -> bool {
-        self.tail.st.os.enable
+        match &self.tail {
+            End::Tail(t) => t.st.os.enable,
+            End::Linked(l) => l.streams,
+        }
     }
 
     /// The bytes from place `a` to place `b` (chunk, offset; `b` past
@@ -262,7 +366,7 @@ impl Updater {
         let xref = startxref(exact).unwrap_or(0);
         let last = layout.last();
         let size = if layout.streams() { last + 2 } else { last + 1 };
-        let id = layout.tail.id.clone();
+        let id = layout.tail.id();
         Updater {
             held: layout,
             len: exact.len() as u64,
@@ -389,11 +493,11 @@ impl Updater {
     ) -> Vec<u8> {
         let t = &new.tail;
         let mut keys = Vec::new();
-        keys.extend_from_slice(format!("/Root {} 0 R\n", t.root).as_bytes());
-        if let Some(i) = t.info {
+        keys.extend_from_slice(format!("/Root {} 0 R\n", t.root()).as_bytes());
+        if let Some(i) = t.info() {
             keys.extend_from_slice(format!("/Info {i} 0 R\n").as_bytes());
         }
-        keys.extend_from_slice(&t.extra);
+        keys.extend_from_slice(t.extra());
         keys.extend_from_slice(&self.id);
         if new.streams() {
             let x = self.size.max(new.last() + 1);
@@ -483,7 +587,11 @@ fn restream(
     rows: &mut BTreeMap<usize, Row>,
     put: &mut dyn FnMut(&[u8]) -> Row,
 ) {
-    let is_stream = |b: &[u8]| b[..b.len().min(64)].windows(13).any(|w| w == b"/Type /ObjStm");
+    // (pdfTeX writes `/Type /ObjStm`, xdvipdfmx `/Type/ObjStm`)
+    let is_stream = |b: &[u8]| {
+        let h = &b[..b.len().min(64)];
+        h.windows(13).any(|w| w == b"/Type /ObjStm") || h.windows(12).any(|w| w == b"/Type/ObjStm")
+    };
     let touched: BTreeSet<usize> = streams
         .iter()
         .copied()

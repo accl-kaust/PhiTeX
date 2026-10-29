@@ -5,8 +5,6 @@
 
 #![allow(non_snake_case)]
 
-use core::cell::RefCell;
-
 use crate::fontmap::{FONTMAP_OPT_NOEMBED, FontmapOpt};
 use crate::pdffont::{
     CIDFONT_FLAG_TRUETYPE, CIDFONT_FLAG_TYPE1, CIDFONT_FLAG_TYPE1C, FONT_STYLE_BOLD,
@@ -256,7 +254,7 @@ impl Dpx {
     pub fn CIDFont_get_usedchars(&mut self, font_id: i32) -> UsedChars {
         let font = &mut self.font.fonts[font_id as usize];
         font.usedchars
-            .get_or_insert_with(|| Rc::new(RefCell::new(vec![0u8; 8192])))
+            .get_or_insert_with(|| crate::pdffont::Used::new(8192))
             .clone()
     }
 
@@ -265,7 +263,7 @@ impl Dpx {
         let font = &mut self.font.fonts[font_id as usize];
         font.cid
             .usedchars_v
-            .get_or_insert_with(|| Rc::new(RefCell::new(vec![0u8; 8192])))
+            .get_or_insert_with(|| crate::pdffont::Used::new(8192))
             .clone()
     }
 

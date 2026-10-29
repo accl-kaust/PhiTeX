@@ -101,7 +101,7 @@ pub struct State {
     /// the session's start, a removed one as `None`.
     pub fontmap: Option<HtTable<Option<FontmapRec>>>,
     /// The records of the session's start, under `fontmap`.
-    pub start: Option<Rc<HtTable<FontmapRec>>>,
+    pub start: Option<Arc<HtTable<FontmapRec>>>,
 }
 
 /// `pdf_init_fontmap_record`.
@@ -845,7 +845,7 @@ impl Dpx {
             return;
         };
         let mut start = match self.fontmap.start.take() {
-            Some(s) => Rc::unwrap_or_clone(s),
+            Some(s) => Arc::unwrap_or_clone(s),
             None => HtTable::ht_init_table(),
         };
         for chain in &mut t.table {
@@ -861,7 +861,7 @@ impl Dpx {
             }
         }
         t.count = 0;
-        self.fontmap.start = Some(Rc::new(start));
+        self.fontmap.start = Some(Arc::new(start));
     }
 
     /// `pdf_close_fontmaps`. (C then calls subfont.c's

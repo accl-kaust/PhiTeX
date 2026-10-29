@@ -9,6 +9,7 @@ description = "The DVI writer, and XeTeX's XDV"
 [dependencies]
 phitex-pdf = { path = "../pdf" }
 phitex-typeset = { path = "../../core/typeset" }
+phitex-xdvipdfmx = { path = "../xdvipdfmx" }
 
 [dev-dependencies]
 phitex-tfm = { path = "../../fonts/tfm" }

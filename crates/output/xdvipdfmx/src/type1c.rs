@@ -176,7 +176,7 @@ impl Dpx {
             .usedchars
             .clone()
             .expect("usedchars");
-        let usedchars = usedchars.borrow().clone();
+        let usedchars = usedchars.to_vec();
 
         // The widhts array in the font dictionary must be given relative
         // to the default scaling of 1000:1, not relative to the scaling
@@ -326,7 +326,7 @@ impl Dpx {
             self.pdf_encoding_get_encoding(encoding_id)?
         } else {
             // Create enc_vec and ToUnicode CMap for built-in encoding.
-            let used = usedchars.borrow().clone();
+            let used = usedchars.to_vec();
             let mut enc_vec: Vec<Option<Vec<u8>>> = vec![None; 256];
             for code in 0..256usize {
                 if used[code] != 0 {
@@ -439,7 +439,7 @@ impl Dpx {
             widths[code] = notdef_width;
 
             let name = match enc_vec[code].as_deref() {
-                Some(n) if usedchars.borrow()[code] != 0 && n != b".notdef" => n,
+                Some(n) if usedchars.get(code) != 0 && n != b".notdef" => n,
                 _ => continue,
             };
 
@@ -465,7 +465,7 @@ impl Dpx {
                     let n = usize::from(encoding.num_supps);
                     encoding.supp[n].code = code as Card8;
                     encoding.supp[n].glyph = sid;
-                    usedchars.borrow_mut()[code] = 0; // Used but multiply-encoded.
+                    usedchars.set(code, 0); // Used but multiply-encoded.
                     encoding.num_supps = encoding.num_supps.wrapping_add(1);
                     break;
                 }
@@ -480,7 +480,7 @@ impl Dpx {
             if gid == 0 {
                 warn!("Glyph missing in font.");
                 warn!("Maybe incorrect encoding specified.");
-                usedchars.borrow_mut()[code] = 0; // Set unused for writing correct encoding
+                usedchars.set(code, 0); // Set unused for writing correct encoding
                 continue;
             }
             self.o.add_stream(pdfcharset, b"/")?;
@@ -521,7 +521,7 @@ impl Dpx {
             encoding.supp = Vec::new(); // FIXME
         }
         {
-            let used = usedchars.borrow();
+            let used = usedchars.to_vec();
             let is_enc = |code: usize| {
                 used[code] != 0 && enc_vec[code].as_deref().is_some_and(|n| n != b".notdef")
             };

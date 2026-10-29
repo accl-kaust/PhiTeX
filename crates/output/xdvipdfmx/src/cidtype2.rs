@@ -702,13 +702,13 @@ impl Dpx {
             .cid
             .usedchars_v
             .as_ref()
-            .map(|v| v.borrow().clone());
+            .map(|v| v.to_vec());
         assert!(h_used_chars.is_some() || v_used_chars.is_some());
         {
             // Quick check of max CID.
             let mut c: i32 = 0;
             if let Some(h) = h_used_chars.as_ref() {
-                let h = h.borrow();
+                let h = h.to_vec();
                 for i in (0..8192usize).rev() {
                     if h[i] != 0 {
                         last_cid = (i * 8 + 7) as u32;
@@ -750,7 +750,7 @@ impl Dpx {
         // Horizontal.
         if let Some(h) = h_used_chars.as_ref() {
             for cid in 1..=last_cid {
-                if !is_used_char2(&h.borrow(), u32::from(cid)) {
+                if !h.is_used2(u32::from(cid)) {
                     continue;
                 }
                 let (_code, gid) = self.cidtype2_map_cid(
@@ -797,7 +797,7 @@ impl Dpx {
                 // when font is used with /UCS. However, we simply ignore
                 // that...
                 if let Some(h) = h_used_chars.as_ref() {
-                    if is_used_char2(&h.borrow(), u32::from(cid)) {
+                    if h.is_used2(u32::from(cid)) {
                         continue;
                     }
                 }
@@ -820,7 +820,7 @@ impl Dpx {
 
                 if let Some(h) = h_used_chars.as_ref() {
                     // Merge vertical used_chars to horizontal.
-                    add_to_used_chars2(&mut h.borrow_mut(), u32::from(cid));
+                    h.add2(u32::from(cid));
                 }
 
                 num_glyphs = num_glyphs.wrapping_add(1);
@@ -830,7 +830,7 @@ impl Dpx {
         // used_chars: the horizontal ones (with the vertical merged), else
         // the vertical ones.
         let used_chars: Vec<u8> = match h_used_chars.as_ref() {
-            Some(h) => h.borrow().clone(),
+            Some(h) => h.to_vec(),
             None => v_used_chars.clone().unwrap(),
         };
 

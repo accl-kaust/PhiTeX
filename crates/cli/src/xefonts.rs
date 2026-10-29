@@ -45,6 +45,7 @@ pub fn xetex() -> XeTeX {
         XeTeX {
             fonts: Some(Arc::new(KpseFonts(Mutex::new(k)))),
             font_index: index,
+            pdf: None,
         }
     })
     .clone()

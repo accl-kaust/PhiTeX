@@ -257,9 +257,9 @@ pub struct State {
     next_cluster: u32,
     span: Option<Span>,
     /// By PDF font id.
-    fonts: BTreeMap<i32, Rc<RunFont>>,
+    fonts: BTreeMap<i32, Arc<RunFont>>,
     /// A native font's `ToUnicode` texts by glyph id, by PDF font id.
-    native: BTreeMap<i32, Rc<Vec<Option<String>>>>,
+    native: BTreeMap<i32, Arc<Vec<Option<String>>>>,
 }
 
 impl State {
@@ -393,7 +393,7 @@ impl Dpx {
         let table = match self.runs.native.get(&pdf_id) {
             Some(t) => t.clone(),
             None => {
-                let t = Rc::new(
+                let t = Arc::new(
                     self.native_tounicode(pdf_id)
                         .ok()
                         .flatten()
@@ -438,11 +438,11 @@ impl Dpx {
     }
 
     /// What TFM font `pdf_id`'s characters are drawn with.
-    fn run_font(&mut self, pdf_id: i32) -> Rc<RunFont> {
+    fn run_font(&mut self, pdf_id: i32) -> Arc<RunFont> {
         if let Some(f) = self.runs.fonts.get(&pdf_id) {
             return f.clone();
         }
-        let f = Rc::new(
+        let f = Arc::new(
             self.make_run_font(pdf_id)
                 .ok()
                 .flatten()

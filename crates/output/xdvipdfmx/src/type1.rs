@@ -291,7 +291,7 @@ impl Dpx {
             .usedchars
             .clone()
             .expect("usedchars");
-        let usedchars = usedchars.borrow().clone();
+        let usedchars = usedchars.to_vec();
         let mut norm_widths = [0.0f64; 256];
         let firstchar: i32;
         let lastchar: i32;
@@ -561,7 +561,7 @@ impl Dpx {
             let enc_vec = builtin.take().unwrap();
             // Create enc_vec and ToUnicode CMap for built-in encoding.
             if self.o.lookup_dict(fontdict, b"ToUnicode")?.is_none() {
-                let used = usedchars.borrow().clone();
+                let used = usedchars.to_vec();
                 let tounicode = self.pdf_create_ToUnicode_CMap(&fullname, &enc_vec, Some(&used))?;
                 if let Some(tounicode) = tounicode {
                     let r = self.o.ref_obj(tounicode)?;
@@ -616,27 +616,26 @@ impl Dpx {
             for code in 0..=0xffusize {
                 let glyph = enc_vec[code].as_deref();
 
-                if usedchars.borrow()[code] == 0 {
+                if usedchars.get(code) == 0 {
                     continue;
                 }
                 if glyph == Some(b".notdef") {
                     warn!("Character mapped to .notdef used in font.");
-                    usedchars.borrow_mut()[code] = 0;
+                    usedchars.set(code, 0);
                     continue;
                 }
 
                 let gid = i32::from(glyph_lookup(&cffont, glyph)?);
                 if gid < 1 || gid >= i32::from(cffont.cstrings.as_ref().unwrap().count) {
                     warn!("Glyph missing in font.");
-                    usedchars.borrow_mut()[code] = 0;
+                    usedchars.set(code, 0);
                     continue;
                 }
                 let glyph = glyph.unwrap();
 
                 let mut duplicate = 0;
                 while duplicate < code {
-                    if usedchars.borrow()[duplicate] != 0
-                        && enc_vec[duplicate].as_deref() == Some(glyph)
+                    if usedchars.get(duplicate) != 0 && enc_vec[duplicate].as_deref() == Some(glyph)
                     {
                         break;
                     }

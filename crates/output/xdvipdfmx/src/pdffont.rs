@@ -6,11 +6,11 @@
 //!
 //! `usedchars` is shared in C (a Type 0 font points to its CIDFont's
 //! array, flag `PDF_FONT_FLAG_USEDCHAR_SHARED`; pdfdev keeps the pointer):
-//! here it is a [`UsedChars`], an `Rc<RefCell<Vec<u8>>>`, cloned to share.
+//! here it is a [`UsedChars`], an `Arc<`[`Used`]`>`, cloned to share.
 //! 256 bytes (one per code) for simple fonts, 8192 (a bitmap, see
 //! [`add_to_used_chars2`]) for CIDFonts.
 
-use core::cell::RefCell;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::fontmap::{
     FONTMAP_STYLE_BOLD, FONTMAP_STYLE_BOLDITALIC, FONTMAP_STYLE_ITALIC, FONTMAP_STYLE_NONE,
@@ -75,7 +75,75 @@ pub const FONT_STYLE_BOLDITALIC: i32 = FONTMAP_STYLE_BOLDITALIC;
 pub const CACHE_ALLOC_SIZE: u32 = 16;
 
 /// A font's used-character array, shared as C shares the pointer.
-pub type UsedChars = Rc<RefCell<Vec<u8>>>;
+pub type UsedChars = Arc<Used>;
+
+/// The bytes of a used-character array, set through any of the fonts
+/// that share it. They are atomics only so that a session (and its
+/// snapshots) may move between threads; one thread uses a session at a
+/// time, so relaxed order is enough.
+#[derive(Debug, Default)]
+pub struct Used(Vec<AtomicU8>);
+
+impl Used {
+    /// `n` bytes, zero.
+    #[must_use]
+    pub fn new(n: usize) -> UsedChars {
+        Arc::new(Used((0..n).map(|_| AtomicU8::new(0)).collect()))
+    }
+
+    /// A copy of `bytes`, shared by none.
+    #[must_use]
+    pub fn of(bytes: &[u8]) -> UsedChars {
+        Arc::new(Used(bytes.iter().map(|&b| AtomicU8::new(b)).collect()))
+    }
+
+    /// Byte `i`.
+    #[must_use]
+    pub fn get(&self, i: usize) -> u8 {
+        self.0[i].load(Ordering::Relaxed)
+    }
+
+    /// Byte `i` set to `v`.
+    pub fn set(&self, i: usize, v: u8) {
+        self.0[i].store(v, Ordering::Relaxed);
+    }
+
+    /// [`add_to_used_chars2`] on the bytes.
+    pub fn add2(&self, c: u32) {
+        self.0[(c / 8) as usize].fetch_or(1 << (7 - (c % 8)), Ordering::Relaxed);
+    }
+
+    /// [`is_used_char2`] on the bytes.
+    #[must_use]
+    pub fn is_used2(&self, c: u32) -> bool {
+        self.get((c / 8) as usize) & (1 << (7 - (c % 8))) != 0
+    }
+
+    /// The bytes set to `bytes` (as many as there are of both).
+    pub fn store(&self, bytes: &[u8]) {
+        for (a, &b) in self.0.iter().zip(bytes) {
+            a.store(b, Ordering::Relaxed);
+        }
+    }
+
+    /// The bytes, copied.
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.iter().map(|b| b.load(Ordering::Relaxed)).collect()
+    }
+
+    /// The number of bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether there are no bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 /// `CIDSysInfo`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -362,7 +430,7 @@ impl Dpx {
                 // never shown; pdf_encoding_add_usedchars then does
                 // nothing)
                 if let Some(uc) = font.usedchars.clone() {
-                    let uc = uc.borrow();
+                    let uc = uc.to_vec();
                     self.pdf_encoding_add_usedchars(enc, &uc)?;
                 }
             }
@@ -528,7 +596,7 @@ impl Dpx {
         let f = self.get_font_reencoded(font_id);
         let font = &mut self.font.fonts[f];
         if font.subtype != PDF_FONT_FONTTYPE_TYPE0 && font.usedchars.is_none() {
-            font.usedchars = Some(Rc::new(RefCell::new(vec![0u8; 256])));
+            font.usedchars = Some(Used::new(256));
         }
         Ok(font.usedchars.clone())
     }

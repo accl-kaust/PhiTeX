@@ -759,7 +759,20 @@ impl Dpx {
         if font_name.len() != name_length {
             crate::fatal!("{}", core::str::from_utf8(INVALID_SIGNATURE).unwrap_or(""));
         }
-        if checksum == SIG_DVILUA_FNT_DEF && name_length > 0 && font_name[0] == b'[' {
+        self.define_font(tex_id, checksum, point_size, design_size, font_name)
+    }
+
+    /// `read_font_record`'s definition, its fields read: TeX's font
+    /// `tex_id` defined (a `fnt_def`'s).
+    pub(crate) fn define_font(
+        &mut self,
+        tex_id: i32,
+        checksum: u32,
+        point_size: u32,
+        design_size: u32,
+        font_name: Vec<u8>,
+    ) -> Result<()> {
+        if checksum == SIG_DVILUA_FNT_DEF && !font_name.is_empty() && font_name[0] == b'[' {
             self.proc_dvilua_font_record(tex_id, &font_name, point_size, design_size)?;
             return Ok(());
         }
@@ -783,7 +796,16 @@ impl Dpx {
     }
     /// `read_native_font_record`.
     fn read_native_font_record(&mut self, tex_id: i32) -> Result<()> {
-        let f = self.dvi_file();
+        let mut f = self.dvi.dvi_file.take().expect("DVI file");
+        let d = Self::native_font_record(tex_id, &mut f);
+        self.dvi.dvi_file = Some(f);
+        self.dvi.def_fonts.push(d?);
+        Ok(())
+    }
+
+    /// `read_native_font_record`'s definition of TeX's font `tex_id`,
+    /// read from `f` (the record after the font's number).
+    pub(crate) fn native_font_record(tex_id: i32, f: &mut MemFile) -> Result<FontDef> {
         let point_size = f.get_positive_quad("DVI", "point_size")?;
         let flags = f.get_unsigned_pair()?;
         let len = f.get_unsigned_byte()? as usize;
@@ -824,8 +846,7 @@ impl Dpx {
         if flags & XDV_FLAG_EMBOLDEN != 0 {
             d.embolden = f.get_signed_quad()?;
         }
-        self.dvi.def_fonts.push(d);
-        Ok(())
+        Ok(d)
     }
     /// `get_dvi_fonts`.
     fn get_dvi_fonts(&mut self, post_location: i32) -> Result<()> {
@@ -863,14 +884,14 @@ impl Dpx {
     }
 
     /// `clear_state`.
-    fn clear_state(&mut self) {
+    pub(crate) fn clear_state(&mut self) {
         self.dvi.dvi_state = DviRegisters::default();
         self.pdf_dev_set_dirmode(0);
         self.dvi.dvi_stack_depth = 0;
         self.dvi.current_font = -1;
     }
     /// `dvi_mark_depth`.
-    fn dvi_mark_depth(&mut self) -> Result<()> {
+    pub(crate) fn dvi_mark_depth(&mut self) -> Result<()> {
         if self.dvi.link_annot != 0
             && self.dvi.marked_depth as i32 == self.dvi.tagged_depth
             && self.dvi.dvi_stack_depth as i32 == self.dvi.tagged_depth - 1
@@ -1434,6 +1455,10 @@ impl Dpx {
     fn do_setrule(&mut self) -> Result<()> {
         let height = self.get_buffered_signed_quad();
         let width = self.get_buffered_signed_quad();
+        self.setrule(height, width)
+    }
+    /// `do_setrule`'s rule, its operands read.
+    pub(crate) fn setrule(&mut self, height: i32, width: i32) -> Result<()> {
         match self.dvi.lr_mode {
             LTYPESETTING => {
                 self.dvi_rule(width, height)?;
@@ -1451,6 +1476,10 @@ impl Dpx {
     fn do_putrule(&mut self) -> Result<()> {
         let height = self.get_buffered_signed_quad();
         let width = self.get_buffered_signed_quad();
+        self.putrule(height, width)
+    }
+    /// `do_putrule`'s rule, its operands read.
+    pub(crate) fn putrule(&mut self, height: i32, width: i32) -> Result<()> {
         match self.dvi.lr_mode {
             LTYPESETTING => self.dvi_rule(width, height)?,
             RTYPESETTING => {
@@ -1544,7 +1573,7 @@ impl Dpx {
         self.dvi.current_font = font_id;
     }
     /// `do_fnt`.
-    fn do_fnt(&mut self, tex_id: i32) -> Result<()> {
+    pub(crate) fn do_fnt(&mut self, tex_id: i32) -> Result<()> {
         let Some(i) = self.dvi.def_fonts.iter().position(|d| d.tex_id == tex_id) else {
             crate::fatal!(
                 "Tried to select a font that hasn't been defined: id={}",
@@ -1598,7 +1627,7 @@ impl Dpx {
         Ok(())
     }
     /// `do_bop`.
-    fn do_bop(&mut self) -> Result<()> {
+    pub(crate) fn do_bop(&mut self) -> Result<()> {
         if self.dvi.processing_page != 0 {
             crate::fatal!("Got a bop in the middle of a page!");
         }
@@ -1612,7 +1641,7 @@ impl Dpx {
         Ok(())
     }
     /// `do_eop`.
-    fn do_eop(&mut self) -> Result<()> {
+    pub(crate) fn do_eop(&mut self) -> Result<()> {
         self.dvi.processing_page = 0;
         if self.dvi.dvi_stack_depth != 0 {
             crate::fatal!("DVI stack depth is not zero at end of page");
@@ -1735,15 +1764,33 @@ impl Dpx {
             self.skip_glyphs();
             return Ok(());
         }
+        let slen = self.get_buffered_unsigned_pair() as usize;
+        let mut xy = Vec::with_capacity(slen);
+        for _ in 0..slen {
+            let x = self.get_buffered_signed_quad();
+            xy.push((x, self.get_buffered_signed_quad()));
+        }
+        let mut ids = Vec::with_capacity(slen);
+        for _ in 0..slen {
+            ids.push(self.get_buffered_unsigned_pair() as u16);
+        }
+        self.glyphs(do_actual_text != 0, width, &xy, &ids)
+    }
+
+    /// `do_glyphs`' typesetting, its operands read: `width`, each glyph's
+    /// offset and id; `actual_text`: an ActualText span begun before
+    /// (ended here).
+    pub(crate) fn glyphs(
+        &mut self,
+        actual_text: bool,
+        width: i32,
+        xy: &[(i32, i32)],
+        ids: &[u16],
+    ) -> Result<()> {
+        let cf = self.dvi.current_font as usize;
+        let slen = xy.len();
         if self.dvi.lr_mode == RTYPESETTING {
             self.dvi_right(width);
-        }
-        let slen = self.get_buffered_unsigned_pair() as usize;
-        let mut xloc = Vec::with_capacity(slen);
-        let mut yloc = Vec::with_capacity(slen);
-        for _ in 0..slen {
-            xloc.push(self.get_buffered_signed_quad());
-            yloc.push(self.get_buffered_signed_quad());
         }
         let (rgba_used, rgba_color, xgs_id) = {
             let f = &self.dvi.loaded_fonts[cf];
@@ -1783,7 +1830,8 @@ impl Dpx {
             0xff
         };
         for i in 0..slen {
-            let mut glyph_id = self.get_buffered_unsigned_pair() as u16;
+            let mut glyph_id = ids[i];
+            let (xloc, yloc) = (xy[i].0, xy[i].1);
             let mut advance: Spt = 0;
             let (h, v) = (self.dvi.dvi_state.h, self.dvi.dvi_state.v);
             if glyph_id < num_glyphs {
@@ -1794,8 +1842,8 @@ impl Dpx {
                 advance = g.advance;
                 if self.dvi_is_tracking_boxes() {
                     let rect = self.calc_rect(
-                        h.wrapping_add(xloc[i]),
-                        v.wrapping_neg().wrapping_sub(yloc[i]),
+                        h.wrapping_add(xloc),
+                        v.wrapping_neg().wrapping_sub(yloc),
                         advance,
                         g.ascent,
                         g.descent.wrapping_neg(),
@@ -1804,10 +1852,7 @@ impl Dpx {
                 }
             }
             let wbuf = [(glyph_id >> 8) as u8, glyph_id as u8];
-            let (x, y) = (
-                h.wrapping_add(xloc[i]),
-                v.wrapping_neg().wrapping_sub(yloc[i]),
-            );
+            let (x, y) = (h.wrapping_add(xloc), v.wrapping_neg().wrapping_sub(yloc));
             self.set_string(x, y, &wbuf, advance, font_id)?;
             self.record_glyph_run(cf, u32::from(glyph_id), x, y, alpha);
         }
@@ -1818,7 +1863,7 @@ impl Dpx {
             }
             self.pdf_color_pop()?;
         }
-        if do_actual_text != 0 {
+        if actual_text {
             self.pdf_dev_end_actualtext()?;
             self.glyph_runs_span_end();
         }
@@ -2159,7 +2204,7 @@ impl Dpx {
         Ok(error)
     }
     /// `scan_special`: status; `buf` is the special's bytes.
-    fn scan_special(&mut self, sp: &mut ScanSpecials, buf: &[u8]) -> Result<i32> {
+    pub(crate) fn scan_special(&mut self, sp: &mut ScanSpecials, buf: &[u8]) -> Result<i32> {
         use crate::dpxutil::{dpx_util_read_length, parse_c_ident, parse_float_decimal};
         let s = buf;
         let mut p = 0usize;

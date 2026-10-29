@@ -1,7 +1,7 @@
 //! vf.c, vf.h: virtual fonts.
 //!
 //! The loaded VFs are `self.vf.vf_fonts` (count = `len()`), indexed by the
-//! id `vf_locate_font` returns. Character packets are `Rc<[u8]>` so that
+//! id `vf_locate_font` returns. Character packets are `Arc<[u8]>` so that
 //! `vf_set_char` can hold one while it runs the DVI interpreter (which may
 //! load more VFs: C's "this code needs to be able to recurse").
 //! Packet readers take the packet slice (ending at C's `end`) and a
@@ -51,7 +51,7 @@ pub struct Vf {
     /// `max_dev_fonts`.
     pub max_dev_fonts: i32,
     /// `ch_pkt` (`num_chars` = `len()`).
-    pub ch_pkt: Vec<Option<Rc<[u8]>>>,
+    pub ch_pkt: Vec<Option<Arc<[u8]>>>,
     pub message_flag: u8,
     pub pkt_len: Vec<u32>,
     pub idx_to_char: Vec<u32>,
@@ -218,7 +218,7 @@ impl Dpx {
             if pkt.len() != pkt_len as usize {
                 crate::fatal!("VF file ended prematurely.");
             }
-            vf.ch_pkt[idx as usize] = Some(Rc::from(pkt));
+            vf.ch_pkt[idx as usize] = Some(Arc::from(pkt));
         }
         vf.pkt_len[idx as usize] = pkt_len;
         Ok(())
@@ -454,7 +454,7 @@ impl Dpx {
             } else {
                 self.vf.vf_fonts[v].ch_pkt[idx as usize].clone()
             };
-            let (pkt, end): (Option<Rc<[u8]>>, usize) = match pkt {
+            let (pkt, end): (Option<Arc<[u8]>>, usize) = match pkt {
                 None => {
                     // (C dereferences the NULL font list of a VF without fonts)
                     let Some(df) = self.vf.vf_fonts[v].dev_fonts.first() else {

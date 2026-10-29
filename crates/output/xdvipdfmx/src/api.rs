@@ -29,6 +29,7 @@
 
 use alloc::sync::Arc;
 
+pub use crate::direct::Op;
 use crate::dvi::{ScanSpecials, ScanSpecialsExt};
 pub use crate::glyphrun::{ColorSpec, GlyphRun, GlyphSource};
 use crate::io::Files;
@@ -85,8 +86,10 @@ pub struct PageOut {
     pub glyph_runs: Vec<GlyphRun>,
 }
 
-/// A conversion in progress.
-/// A conversion in progress.
+/// A conversion in progress. It may move between threads (an engine's
+/// link keeps one, and its snapshots, from one build to the next, run
+/// on whichever thread links): the host's files and deflaters are
+/// `Send + Sync`, the fonts' shared tables atomics.
 pub struct Session {
     dpx: Box<Dpx>,
     argv: Vec<Vec<u8>>,
@@ -103,11 +106,63 @@ impl Session {
     /// error here leaves no output.
     pub fn new(
         options: Options,
-        files: Box<dyn Files>,
+        files: Arc<dyn Files>,
         deflate: Deflate,
         preamble: &[u8],
     ) -> Result<Self> {
-        let mut dpx = Box::new(Dpx::new(files, deflate));
+        let mut dpx = Box::new(Dpx::new(Box::new(NoFiles), deflate));
+        dpx.files = crate::ctx::FilesRef(files);
+        let argv = Self::start(&mut dpx, &options)?;
+        dpx.dvi.dvi_file = Some(MemFile::new(Arc::from(preamble), b"stdin"));
+        dpx.dvi.peek_after_eop = false;
+        let mag = dpx.session.mag;
+        let dvi2pts = dpx.dvi_init(None, mag)?;
+        if dvi2pts == 0.0 {
+            crate::fatal!("dvi_init() failed!");
+        }
+        dpx.pdf_fontmaps_started();
+        Ok(Session {
+            dpx,
+            argv,
+            page_no: 0,
+            page_count: 0,
+            init_paper_width: 0.0,
+            init_paper_height: 0.0,
+        })
+    }
+
+    /// A session for pages given as operations ([`Session::page_ops`]),
+    /// not as an XDV: [`Session::new`] with XeTeX's preamble (`dvi_mag`,
+    /// `comment`) given as it is, not read.
+    pub fn direct(
+        options: Options,
+        files: Arc<dyn Files>,
+        deflate: Deflate,
+        dvi_mag: u32,
+        comment: &[u8],
+    ) -> Result<Self> {
+        let mut dpx = Box::new(Dpx::new(Box::new(NoFiles), deflate));
+        dpx.files = crate::ctx::FilesRef(files);
+        let argv = Self::start(&mut dpx, &options)?;
+        let mag = dpx.session.mag;
+        let dvi2pts = dpx.dvi_init_direct(mag, dvi_mag, comment);
+        if dvi2pts == 0.0 {
+            crate::fatal!("dvi_init() failed!");
+        }
+        dpx.pdf_fontmaps_started();
+        Ok(Session {
+            dpx,
+            argv,
+            page_no: 0,
+            page_count: 0,
+            init_paper_width: 0.0,
+            init_paper_height: 0.0,
+        })
+    }
+
+    /// `main` up to `dvi_init`: the options, the config file. The
+    /// arguments.
+    fn start(dpx: &mut Dpx, options: &Options) -> Result<Vec<Vec<u8>>> {
         dpx.session.source_date_epoch = options.source_date_epoch;
         dpx.session.now = options.now;
         dpx.session.utc_offset_min = options.utc_offset_min;
@@ -130,27 +185,27 @@ impl Session {
         if dpx.dvi_filename.is_some() && dpx.pdf_filename.is_none() {
             dpx.session_set_default_pdf_filename();
         }
-        dpx.dvi.dvi_file = Some(MemFile::new(Arc::from(preamble), b"stdin"));
-        dpx.dvi.peek_after_eop = false;
-        let mag = dpx.session.mag;
-        let dvi2pts = dpx.dvi_init(None, mag)?;
-        if dvi2pts == 0.0 {
-            crate::fatal!("dvi_init() failed!");
+        Ok(argv)
+    }
+
+    /// The host's files from now on (a session kept between builds reads
+    /// the document's files as they are now).
+    pub fn set_files(&mut self, files: Arc<dyn Files>) {
+        self.dpx.files = crate::ctx::FilesRef(files);
+    }
+
+    /// Page `page_no`'s specials scanned (and its fonts defined), from
+    /// the XDV or from its operations.
+    fn scan(d: &mut Dpx, page_no: i32, sp: &mut ScanSpecials, ops: Option<&[Op]>) -> Result<()> {
+        match ops {
+            Some(o) => d.dvi_scan_ops(page_no, sp, o),
+            None => d.dvi_scan_specials(page_no, sp),
         }
-        dpx.pdf_fontmaps_started();
-        Ok(Session {
-            dpx,
-            argv,
-            page_no: 0,
-            page_count: 0,
-            init_paper_width: 0.0,
-            init_paper_height: 0.0,
-        })
     }
 
     /// The rest of `main` once the first page is in: its specials, the
     /// options again, `pdf_open_document`, `do_dvi_pages`' start.
-    fn open(&mut self) -> Result<()> {
+    fn open(&mut self, ops: Option<&[Op]>) -> Result<()> {
         let d = &mut *self.dpx;
         let creator = d.dvi_comment();
         let mut sp = ScanSpecials {
@@ -168,7 +223,7 @@ impl Session {
                 ..ScanSpecialsExt::default()
             }),
         };
-        d.dvi_scan_specials(0, &mut sp)?;
+        Self::scan(d, 0, &mut sp, ops)?;
         d.session.paper_width = sp.page_width;
         d.session.paper_height = sp.page_height;
         d.session.x_offset = sp.x_offset;
@@ -263,10 +318,23 @@ impl Session {
     /// preamble) through this page's `eop`. After an `Err`, only
     /// [`Session::written`] is left to call.
     pub fn page(&mut self, bytes: &[u8]) -> Result<PageOut> {
-        let first = self.page_no == 0;
         self.dpx.dvi.dvi_file = Some(MemFile::new(Arc::from(bytes), b"stdin"));
+        self.page_from(None)
+    }
+
+    /// One page given as its operations (`bop` and `eop` not among
+    /// them), in a session made by [`Session::direct`]: the bytes as
+    /// [`Session::page`] gives them for the XDV page those operations
+    /// stand for. After an `Err`, only [`Session::written`] is left to
+    /// call.
+    pub fn page_ops(&mut self, ops: &[Op]) -> Result<PageOut> {
+        self.page_from(Some(ops))
+    }
+
+    fn page_from(&mut self, ops: Option<&[Op]>) -> Result<PageOut> {
+        let first = self.page_no == 0;
         if first {
-            self.open()?;
+            self.open(ops)?;
         }
         let d = &mut *self.dpx;
         let page_no = self.page_no;
@@ -279,7 +347,7 @@ impl Session {
             landscape: d.session.landscape_mode,
             ext: None,
         };
-        d.dvi_scan_specials(page_no, &mut sp)?;
+        Self::scan(d, page_no, &mut sp, ops)?;
         let (mut w, mut h) = (sp.page_width, sp.page_height);
         if sp.landscape != d.session.landscape_mode {
             core::mem::swap(&mut w, &mut h);
@@ -304,7 +372,10 @@ impl Session {
         }
         d.runs.page_begin();
         let (xo, yo) = (d.session.x_offset, d.session.y_offset);
-        d.dvi_do_page(page_height, xo, yo)?;
+        match ops {
+            Some(o) => d.dvi_do_ops(o, page_height, xo, yo)?,
+            None => d.dvi_do_page(page_height, xo, yo)?,
+        }
         self.page_count += 1;
         self.page_no += 1;
         Ok(PageOut {
@@ -347,6 +418,13 @@ impl Session {
         self.dpx.o.set_batch_deflate(batch);
     }
 
+    /// The file's cross-reference section as [`Session::finish`] wrote
+    /// it: each object's place, the trailer's entries (none before).
+    #[must_use]
+    pub fn xref_written(&self) -> Option<&crate::obj::XrefWritten> {
+        self.dpx.o.xref_written.as_ref()
+    }
+
     /// What was written but not yet taken: after an `Err`, the output
     /// file's rest as the fatal error left it (`pdf_error_cleanup` closes
     /// the file, which `error_cleanup` then does not remove).
@@ -359,7 +437,7 @@ impl Session {
     /// before it are dropped: [`Session`] keeps them.)
     pub fn convert(
         options: Options,
-        files: Box<dyn Files>,
+        files: Arc<dyn Files>,
         deflate: Deflate,
         xdv: &[u8],
     ) -> Result<Vec<u8>> {
@@ -373,6 +451,23 @@ impl Session {
         Ok(out)
     }
 }
+
+/// No files: a session's files until the host's are put in.
+struct NoFiles;
+
+impl Files for NoFiles {
+    fn find(&self, _: &[u8], _: crate::io::Format, _: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+    fn read(&self, _: &[u8]) -> Option<Arc<[u8]>> {
+        None
+    }
+}
+
+const _: () = {
+    const fn send<T: Send>() {}
+    send::<Session>();
+};
 
 /// Conversions that start alike, as a watch's builds of a document do:
 /// the start [`Session::new`] makes (the options, the config file, the
@@ -393,7 +488,7 @@ impl Starts {
     pub fn session(
         &mut self,
         options: Options,
-        files: Box<dyn Files>,
+        files: Arc<dyn Files>,
         deflate: Deflate,
         preamble: &[u8],
     ) -> Result<Session> {
@@ -514,17 +609,14 @@ impl Session {
     #[must_use]
     pub fn snapshot(&self) -> Session {
         let mut dpx = Box::new((*self.dpx).clone());
-        let mut map: Vec<(
-            *const core::cell::RefCell<Vec<u8>>,
-            crate::pdffont::UsedChars,
-        )> = Vec::new();
+        let mut map: Vec<(*const crate::pdffont::Used, crate::pdffont::UsedChars)> = Vec::new();
         let mut fresh = |uc: &mut Option<crate::pdffont::UsedChars>| {
             if let Some(old) = uc.take() {
-                let p = Rc::as_ptr(&old);
+                let p = Arc::as_ptr(&old);
                 let new = match map.iter().find(|(q, _)| *q == p) {
                     Some((_, n)) => n.clone(),
                     None => {
-                        let n = Rc::new(core::cell::RefCell::new(old.borrow().clone()));
+                        let n = crate::pdffont::Used::of(&old.to_vec());
                         map.push((p, n.clone()));
                         n
                     }
@@ -575,13 +667,13 @@ mod tests {
     struct MemFiles(Vec<(&'static [u8], Vec<u8>)>);
 
     impl Files for MemFiles {
-        fn find(&mut self, name: &[u8], _: crate::io::Format, _: &[u8]) -> Option<Vec<u8>> {
+        fn find(&self, name: &[u8], _: crate::io::Format, _: &[u8]) -> Option<Vec<u8>> {
             self.0
                 .iter()
                 .any(|(n, _)| *n == name)
                 .then(|| name.to_vec())
         }
-        fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>> {
+        fn read(&self, path: &[u8]) -> Option<Arc<[u8]>> {
             self.0
                 .iter()
                 .find(|(n, _)| *n == path)
@@ -622,7 +714,7 @@ mod tests {
             ..Options::default()
         };
         let deflate: Deflate = Box::new(|_, d: &[u8]| d.to_vec());
-        let mut s = Session::new(options, Box::new(MemFiles(files)), deflate, &preamble())
+        let mut s = Session::new(options, Arc::new(MemFiles(files)), deflate, &preamble())
             .map_err(|e| (e, Vec::new()))?;
         let mut out = Vec::new();
         let r = s.page(&page(special)).map(|p| out.extend(p.pdf));
@@ -662,7 +754,7 @@ mod tests {
         /// cmr10's metrics and Type 1 program, whatever the suffix asked.
         struct Cmr10;
         impl Files for Cmr10 {
-            fn find(&mut self, name: &[u8], f: crate::io::Format, _: &[u8]) -> Option<Vec<u8>> {
+            fn find(&self, name: &[u8], f: crate::io::Format, _: &[u8]) -> Option<Vec<u8>> {
                 use crate::io::Format;
                 if !name.starts_with(b"cmr10") {
                     return None;
@@ -673,7 +765,7 @@ mod tests {
                     _ => None,
                 }
             }
-            fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>> {
+            fn read(&self, path: &[u8]) -> Option<Arc<[u8]>> {
                 match path {
                     b"cmr10.tfm" => Some(Arc::from(CMR10_TFM)),
                     b"cmr10.pfb" => Some(Arc::from(CMR10_PFB)),
@@ -688,12 +780,12 @@ mod tests {
             ..Options::default()
         };
         let deflate: Deflate = Box::new(|l, d: &[u8]| phitex_codecs::deflate::compress(d, l));
-        let mut s = Session::new(options, Box::new(files), deflate, &preamble()).expect("starts");
-        let batched = Rc::new(core::cell::Cell::new(0));
+        let mut s = Session::new(options, Arc::new(files), deflate, &preamble()).expect("starts");
+        let batched = Arc::new(core::sync::atomic::AtomicUsize::new(0));
         if batch {
             let n = batched.clone();
             s.set_batch_deflate(Box::new(move |jobs: &[(i32, &[u8])]| {
-                n.set(n.get() + jobs.len());
+                n.fetch_add(jobs.len(), core::sync::atomic::Ordering::Relaxed);
                 let mut out: Vec<Vec<u8>> = jobs
                     .iter()
                     .rev()
@@ -706,7 +798,11 @@ mod tests {
         let page = s.page(&p).unwrap_or_else(|e| panic!("page: {e}"));
         let mut pdf = page.pdf;
         pdf.extend(s.finish().unwrap_or_else(|e| panic!("finish: {e}")));
-        (pdf, page.glyph_runs, batched.get())
+        (
+            pdf,
+            page.glyph_runs,
+            batched.load(core::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     #[test]
@@ -738,7 +834,7 @@ mod tests {
         for n in 0..xdv.len() {
             let options = Options::default();
             let deflate: Deflate = Box::new(|_, d: &[u8]| d.to_vec());
-            let r = Session::convert(options, Box::new(MemFiles(Vec::new())), deflate, &xdv[..n]);
+            let r = Session::convert(options, Arc::new(MemFiles(Vec::new())), deflate, &xdv[..n]);
             // (no page: "No pages fall in range!"; no preamble: dvi_init's)
             assert!(r.is_err(), "{n}");
         }

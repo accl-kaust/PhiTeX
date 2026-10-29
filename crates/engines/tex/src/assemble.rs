@@ -50,7 +50,12 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
         let pages = v.seq_to_vec(cx.fold(v.field("pages"), None, None)?);
         n = pages.len();
         let origins = o.origins.load(std::sync::atomic::Ordering::Relaxed);
-        dvi_file(cx, &pages, o.xe.get(), origins)
+        // (XeTeX's PDF written from the pages, where the client asks for
+        // it; else its XDV)
+        match o.xe.get().and_then(|x| x.pdf.as_ref()) {
+            Some(p) => crate::xdvpdf::file(cx, &pages, o.xe.get(), origins, p),
+            None => dvi_file(cx, &pages, o.xe.get(), origins),
+        }
     };
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -141,6 +146,12 @@ fn file_value(v: &phitex_defuse::Values, f: File, mut h: u64, n: usize) -> Value
         v.int(i64::from_ne_bytes(h.to_ne_bytes())),
         v.int(i64::try_from(n).unwrap_or(0)),
     ])
+}
+
+/// The value standing for the PDF file of layout `l` ([`linked_files`]).
+pub(crate) fn layout_value(v: &phitex_defuse::Values, l: phitex_pdf::Layout) -> ValueId {
+    let (h, n) = (l.hash(), l.len());
+    file_value(v, File::Layout(l), h, n)
 }
 
 /// The value standing for file bytes `b` ([`linked_files`]).
@@ -255,7 +266,7 @@ pub(crate) fn link(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Sto
 }
 
 /// A field reaching the end node.
-fn field(cx: &mut Ctx<'_>, name: &str) -> Result<Option<ValueId>, Stop> {
+pub(crate) fn field(cx: &mut Ctx<'_>, name: &str) -> Result<Option<ValueId>, Stop> {
     let f = cx.values().field(name);
     cx.read(f)
 }
@@ -280,7 +291,7 @@ fn latin1(bytes: &[u8]) -> String {
 /// value is those bytes as characters. No page: no file (§642), the
 /// empty string.
 #[allow(clippy::too_many_lines)]
-fn dvi_file(
+pub(crate) fn dvi_file(
     cx: &mut Ctx<'_>,
     pages: &[ValueId],
     xe: Option<&crate::xetex::XeTeX>,
@@ -389,7 +400,7 @@ fn dvi_file(
 /// The definitions of the fonts page entry `page` uses, by id, put in
 /// `defs` where not there: resolved from the fonts' fields (a font's
 /// fields are defined once, at its load).
-fn page_defs(
+pub(crate) fn page_defs(
     cx: &mut Ctx<'_>,
     page: ValueId,
     xe: Option<&crate::xetex::XeTeX>,
@@ -444,7 +455,7 @@ fn new_writer(mag: i32, comment: &str, xdv: bool) -> phitex_dvi::DviWriter {
 /// XeTeX's page size for page entry `page`'s `pdf:pagesize`
 /// (`\pdfpagewidth`, `\pdfpageheight` at its shipout: its PDF
 /// parameters' fourth and fifth).
-fn xdv_page_size(v: &Values, page: ValueId) -> (i32, i32) {
+pub(crate) fn xdv_page_size(v: &Values, page: ValueId) -> (i32, i32) {
     let ps = list_of(v, page)
         .get(3)
         .map(|&p| list_of(v, p))
@@ -523,9 +534,15 @@ fn dvi_page_kept(
 /// the page's margins), from its parameters
 /// (`Run::pdf_page_params`: `[pdf, hor, vor, width, height, hoffset,
 /// voffset, ...]`).
-fn dvi_offsets(v: &Values, page: ValueId) -> (i32, i32) {
-    let ps = list_of(v, page).get(3).map(|&x| list_of(v, x)).unwrap_or_default();
-    let at = |k: usize| ps.get(k).map_or(0, |&x| i32::try_from(int_of(v, x)).unwrap_or(0));
+pub(crate) fn dvi_offsets(v: &Values, page: ValueId) -> (i32, i32) {
+    let ps = list_of(v, page)
+        .get(3)
+        .map(|&x| list_of(v, x))
+        .unwrap_or_default();
+    let at = |k: usize| {
+        ps.get(k)
+            .map_or(0, |&x| i32::try_from(int_of(v, x)).unwrap_or(0))
+    };
     (at(5), at(6))
 }
 
@@ -534,9 +551,15 @@ fn dvi_offsets(v: &Values, page: ValueId) -> (i32, i32) {
 /// fonts first ([`crate::api::FONT_ORDER`]), then the line's
 /// `fontload` records in TeX's order; and that order.
 #[allow(clippy::type_complexity)]
-fn font_numbers(
+pub(crate) fn font_numbers(
     cx: &mut Ctx<'_>,
-) -> Result<(std::sync::Arc<std::collections::BTreeMap<u32, u32>>, Vec<i64>), Stop> {
+) -> Result<
+    (
+        std::sync::Arc<std::collections::BTreeMap<u32, u32>>,
+        Vec<i64>,
+    ),
+    Stop,
+> {
     let v = cx.values();
     let mut order: Vec<i64> = field(cx, crate::api::FONT_ORDER)?
         .map(|x| list_of(v, x).iter().map(|&k| int_of(v, k)).collect())
@@ -558,7 +581,7 @@ fn font_numbers(
 }
 
 /// A page entry's box (decoded), counts and whatsits.
-fn dvi_parts(
+pub(crate) fn dvi_parts(
     v: &Values,
     page: ValueId,
 ) -> Option<(phitex_typeset::node::BoxNode, [i32; 10], Vec<ValueId>)> {
@@ -587,7 +610,7 @@ fn dvi_parts(
 }
 
 /// Font `f`'s definition as the DVI file needs it.
-fn font_def_of(
+pub(crate) fn font_def_of(
     defs: &phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef>,
     f: u32,
 ) -> phitex_dvi::FontDef {
@@ -603,7 +626,7 @@ fn font_def_of(
 }
 
 /// A `\special`'s bytes, for whatsit `h` of a page.
-fn special_of(v: &Values, whats: &[ValueId], h: u32, xdv: bool) -> Option<Vec<u8>> {
+pub(crate) fn special_of(v: &Values, whats: &[ValueId], h: u32, xdv: bool) -> Option<Vec<u8>> {
     let w = *whats.get(h as usize)?;
     let ys = list_of(v, w);
     let kind = ys.first().map(|&k| str_of(v, k));

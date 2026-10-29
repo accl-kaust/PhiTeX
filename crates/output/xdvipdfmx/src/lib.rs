@@ -57,6 +57,7 @@ pub mod cmap_read;
 pub mod cmap_write;
 pub mod cs_type2;
 pub mod ctx;
+pub mod direct;
 pub mod dpxfile;
 pub mod dpxutil;
 pub mod dvi;
@@ -116,8 +117,8 @@ pub mod vf;
 pub mod prelude {
     pub use alloc::boxed::Box;
     pub use alloc::format;
-    pub use alloc::rc::Rc;
     pub use alloc::string::String;
+    pub use alloc::sync::Arc;
     pub use alloc::vec;
     pub use alloc::vec::Vec;
 

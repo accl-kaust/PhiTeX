@@ -2054,6 +2054,7 @@ dependencies = [
  "phitex-pdf",
  "phitex-tfm",
  "phitex-typeset",
+ "phitex-xdvipdfmx",
 ]
 
 [[package]]
@@ -2172,6 +2173,7 @@ dependencies = [
  "phitex-source",
  "phitex-tfm",
  "phitex-typeset",
+ "phitex-xdvipdfmx",
  "rayon",
  "tikv-jemallocator",
 ]

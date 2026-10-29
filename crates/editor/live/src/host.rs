@@ -87,29 +87,19 @@ pub trait Host: Send + Sync {
     }
 
     /// dvipdfmx's files (fonts, maps, encodings, the document's
-    /// pictures): what [`Host::dvi_to_pdf`] and [`Host::xdv_to_pdf`] read
-    /// by default (none: no PDF of a DVI or XDV).
+    /// pictures): what [`Host::dvi_to_pdf`] and [`Host::xdv_files`] read
+    /// by default (none: no PDF of a DVI, none of XeTeX's pages).
     fn dpx_finder(&self) -> Option<Arc<crate::dvipdf::DpxFinder>> {
         None
     }
 
-    /// XeTeX's XDV file made a PDF named `pdf_name` (xdvipdfmx), its
-    /// pictures read from `dir` (by default through
-    /// [`Host::dpx_finder`], which finds them).
-    ///
-    /// # Errors
-    /// Why it could not be made.
-    fn xdv_to_pdf(
-        &self,
-        xdv: &[u8],
-        pdf_name: &str,
-        date: i64,
-        _dir: &Path,
-    ) -> Result<Vec<u8>, String> {
-        match self.dpx_finder() {
-            Some(f) => crate::dvipdf::xdv_to_pdf(xdv, pdf_name, date, f.files()),
-            None => Err("no xdvipdfmx here: XeTeX's XDV is not made a PDF".to_owned()),
-        }
+    /// The files XeTeX's PDF reads (xdvipdfmx's: fonts, maps, the
+    /// document's pictures, named from `dir`), a fresh view for each
+    /// link of the pages ([`phitex_tex::XdvPdf::files`]); by default
+    /// [`Host::dpx_finder`]'s. None: no PDF, the build's XDV only.
+    fn xdv_files(&self, _dir: &Path) -> Option<crate::dvipdf::FilesFor> {
+        let f = self.dpx_finder()?;
+        Some(Arc::new(move || f.files()))
     }
 
     /// A DVI file made a PDF named `pdf_name` (dvipdfmx), for a viewer

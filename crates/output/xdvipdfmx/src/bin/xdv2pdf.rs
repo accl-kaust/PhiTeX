@@ -10,13 +10,11 @@
 //! threads (`PHITEX_THREADS`, else every CPU) with the same bytes.
 #![expect(unsafe_code, reason = "FFI to the system zlib")]
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{OsStr, c_int, c_ulong};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -108,26 +106,30 @@ impl Default for Kpsewhich {
 /// The files of a process: one [`Kpsewhich`], its lookups and the files
 /// read kept for every conversion the process makes.
 #[derive(Clone, Default)]
-struct Shared(Rc<RefCell<Kpsewhich>>, Rc<RefCell<Contents>>);
+struct Shared(Arc<Mutex<Kpsewhich>>, Arc<Mutex<Contents>>);
 
 /// The files read, by path.
 type Contents = HashMap<Vec<u8>, Option<Arc<[u8]>>>;
 
 impl Files for Shared {
-    fn find(&mut self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>> {
-        self.0.borrow_mut().find(name, format, progname)
+    fn find(&self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>> {
+        self.0
+            .lock()
+            .expect("kpathsea")
+            .find(name, format, progname)
     }
 
-    fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>> {
+    fn read(&self, path: &[u8]) -> Option<Arc<[u8]>> {
         self.1
-            .borrow_mut()
+            .lock()
+            .expect("the files read")
             .entry(path.to_vec())
             .or_insert_with(|| std::fs::read(OsStr::from_bytes(path)).ok().map(Arc::from))
             .clone()
     }
 }
 
-impl Files for Kpsewhich {
+impl Kpsewhich {
     fn find(&mut self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>> {
         let key = (name.to_vec(), format, progname.to_vec());
         if let Some(r) = self.found.get(&key) {
@@ -138,10 +140,6 @@ impl Files for Kpsewhich {
         self.kpse.reset_program_name(b"dvipdfmx");
         self.found.insert(key, r.clone());
         r
-    }
-
-    fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>> {
-        std::fs::read(OsStr::from_bytes(path)).ok().map(Arc::from)
     }
 }
 
@@ -216,12 +214,7 @@ fn main() {
     // was written until then, and so does stdout here.
     let mut stdout = std::io::stdout();
     let (pre, pages) = split_xdv(&xdv);
-    let mut session = match Session::new(
-        options,
-        Box::new(files),
-        Box::new(deflate),
-        &xdv[..pre],
-    ) {
+    let mut session = match Session::new(options, Arc::new(files), Box::new(deflate), &xdv[..pre]) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");
@@ -302,7 +295,7 @@ fn convert(
     let (pre, pages) = split_xdv(xdv);
     let mut session = match starts.session(
         options.clone(),
-        Box::new(files.clone()),
+        Arc::new(files.clone()),
         Box::new(deflate),
         &xdv[..pre],
     ) {
@@ -360,7 +353,7 @@ fn check_resume(options: Options, xdv: &[u8]) {
     let (pre, pages) = split_xdv(xdv);
     let mut s = Session::new(
         options,
-        Box::new(Kpsewhich::default()),
+        Arc::new(Shared::default()),
         Box::new(deflate),
         &xdv[..pre],
     )

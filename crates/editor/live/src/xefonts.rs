@@ -52,5 +52,6 @@ pub fn xetex(read: ReadFont, find: FindFont, index: Option<&[u8]>) -> Result<XeT
     Ok(XeTeX {
         fonts: Some(Arc::new(HostFonts { read, find })),
         font_index,
+        pdf: None,
     })
 }

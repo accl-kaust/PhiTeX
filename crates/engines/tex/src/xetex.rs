@@ -25,6 +25,9 @@ pub struct XeTeX {
     /// The fonts a name (`"Latin Modern Roman/B"`) is looked up in
     /// (fontconfig's list as the oracle sees it, `phitex_otf::index`).
     pub font_index: Option<Arc<phitex_otf::index::FontIndex>>,
+    /// The PDF written from the pages, as `xelatex` makes it (`crate::xdvpdf`);
+    /// none: the XDV file (`xelatex -no-pdf`).
+    pub pdf: Option<crate::xdvpdf::XdvPdf>,
 }
 
 /// [`XeTeX::fonts`].

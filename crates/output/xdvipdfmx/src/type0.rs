@@ -115,7 +115,7 @@ impl Dpx {
         let usedchars: Vec<u8> = self.font.fonts[font_id as usize]
             .usedchars
             .as_ref()
-            .map(|u| u.borrow().clone())
+            .map(|u| u.to_vec())
             .unwrap_or_default();
 
         let tounicode = match subtype {

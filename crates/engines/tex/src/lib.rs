@@ -67,6 +67,7 @@ mod val;
 mod vprof;
 mod xetex;
 mod native;
+mod xdvpdf;
 mod xpic;
 
 pub use api::{
@@ -77,6 +78,7 @@ pub use shell::{ShellHook, ShellRan, TEXLIVE_COMMANDS, texlive_commands};
 pub use exec::{Progress, SpawnWorker, cpus as exec_cpus, set_spawn_worker};
 pub use phitex_otf::{FontSource, KpseFormat};
 pub use phitex_otf::index::FontIndex;
+pub use xdvpdf::XdvPdf;
 pub use xetex::{FontFiles, XeTeX};
 pub use origins::{OriginsSnapshot, PageOrigins};
 

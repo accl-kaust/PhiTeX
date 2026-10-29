@@ -198,14 +198,8 @@ impl Host for Machine {
         )))
     }
 
-    fn xdv_to_pdf(
-        &self,
-        xdv: &[u8],
-        pdf_name: &str,
-        date: i64,
-        dir: &Path,
-    ) -> Result<Vec<u8>, String> {
-        crate::dvipdf::xdv_to_pdf(xdv, pdf_name, date, dir)
+    fn xdv_files(&self, dir: &Path) -> Option<phitex_live::dvipdf::FilesFor> {
+        Some(crate::dvipdf::xdv_files(dir))
     }
 
     fn dvi_to_pdf(&self, dvi: &[u8], pdf_name: &str, date: i64) -> Result<Vec<u8>, String> {

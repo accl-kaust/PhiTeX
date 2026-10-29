@@ -659,18 +659,16 @@ impl Dpx {
             }
             s = out;
             if let Some(uc) = used_chars {
-                let mut uc = uc.borrow_mut();
                 let mut i = 0;
                 while i + 1 < s.len() {
                     let cid = (u16::from(s[i]) << 8) | u16::from(s[i + 1]);
-                    crate::pdffont::add_to_used_chars2(&mut uc, u32::from(cid));
+                    uc.add2(u32::from(cid));
                     i += 2;
                 }
             }
         } else if let Some(uc) = used_chars {
-            let mut uc = uc.borrow_mut();
             for &c in &s {
-                uc[c as usize] = 1;
+                uc.set(c as usize, 1);
             }
         }
         let dir = self.dev.pdev.text_state.dir_mode;

@@ -646,7 +646,7 @@ impl Dpx {
             };
 
             cid_to_gid_map = vec![0u8; 2 * cid_count as usize];
-            let mut used_chars = used_chars_rc.borrow_mut();
+            let mut used_chars = used_chars_rc.to_vec();
             add_to_used_chars2(&mut used_chars, 0); // .notdef
             for cid in 0..=CID_MAX as u32 {
                 if is_used_char2(&used_chars, cid) {
@@ -662,6 +662,7 @@ impl Dpx {
                     num_glyphs = num_glyphs.wrapping_add(1);
                 }
             }
+            used_chars_rc.store(&used_chars);
         }
 
         // DW, W, DW2 and W2: Those values are obtained from OpenType table
@@ -731,7 +732,7 @@ impl Dpx {
         let mut prev_fd: i32 = -1;
         let mut gid: u16 = 0;
         let mut data = vec![0u8; CS_STR_LEN_MAX as usize];
-        let used_chars = used_chars_rc.borrow().clone();
+        let used_chars = used_chars_rc.to_vec();
         for cid in 0..=u32::from(last_cid) {
             if !is_used_char2(&used_chars, cid) {
                 continue;
@@ -809,7 +810,7 @@ impl Dpx {
         sfont.sfnt_close();
 
         if self.o.check_version(2, 0) < 0 {
-            let used_chars = used_chars_rc.borrow().clone();
+            let used_chars = used_chars_rc.to_vec();
             self.CIDFont_type0_add_CIDSet(font_id, &used_chars, last_cid)?;
         }
 
@@ -1126,7 +1127,7 @@ impl Dpx {
         let mut num_glyphs: u16 = 0;
         let mut last_cid: u16 = 0;
         {
-            let mut used_chars = used_chars_rc.borrow_mut();
+            let mut used_chars = used_chars_rc.to_vec();
             add_to_used_chars2(&mut used_chars, 0); // .notdef
             for i in 0..(i32::from(cffont.num_glyphs) + 7) / 8 {
                 let c = i32::from(used_chars[i as usize]);
@@ -1137,8 +1138,9 @@ impl Dpx {
                     }
                 }
             }
+            used_chars_rc.store(&used_chars);
         }
-        let used_chars = used_chars_rc.borrow().clone();
+        let used_chars = used_chars_rc.to_vec();
 
         cffont.fdselect = Some(CffFdselect {
             format: 3,
@@ -1673,7 +1675,7 @@ impl Dpx {
             self.o.put(descriptor, b"FontBBox", tmp)?;
         }
 
-        let used_chars = used_chars_rc.borrow().clone();
+        let used_chars = used_chars_rc.to_vec();
 
         // FIXME: This writes "CID CID width". I think it's better to handle
         // each 8 char block and to use "CID_start [ w0 w1 ...]".
@@ -1755,7 +1757,7 @@ impl Dpx {
         let mut num_glyphs: i32 = 0;
         let mut last_cid: u16 = 0;
         {
-            let mut used_chars = used_chars_rc.borrow_mut();
+            let mut used_chars = used_chars_rc.to_vec();
             add_to_used_chars2(&mut used_chars, 0); // .notdef
             for i in 0..(i32::from(cffont.num_glyphs) + 7) / 8 {
                 let c = i32::from(used_chars[i as usize]);
@@ -1766,8 +1768,9 @@ impl Dpx {
                     }
                 }
             }
+            used_chars_rc.store(&used_chars);
         }
-        let used_chars = used_chars_rc.borrow().clone();
+        let used_chars = used_chars_rc.to_vec();
 
         cffont.fdselect = Some(CffFdselect {
             format: 3,

@@ -409,8 +409,7 @@ impl Dpx {
             .usedchars
             .as_ref()
             .expect("pdf_font_load_truetype: no usedchars")
-            .borrow()
-            .clone();
+            .to_vec();
 
         let sfont = if let Some(fp) = self.dpx_open_file(&ident, ResType::TtFont)? {
             Sfnt::sfnt_open(fp)?
@@ -563,8 +562,7 @@ impl Dpx {
                 font.usedchars
                     .as_ref()
                     .expect("do_widths: no usedchars")
-                    .borrow()
-                    .clone(),
+                    .to_vec(),
                 font.ident.clone().unwrap_or_default(),
             )
         };
