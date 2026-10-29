@@ -274,6 +274,8 @@ fn main() {
                     read: read.clone(),
                 })),
                 font_index: index.clone(),
+                // (the trace reads; XDV out, no PDF written)
+                pdf: None,
             }),
             ..Options::default()
         };
