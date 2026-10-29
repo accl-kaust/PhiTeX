@@ -131,13 +131,13 @@ export type WatchEvent =
   | { event: "superseded" }
   | { event: "sync"; file: string; lo: number; hi: number; at: number; page?: number; y?: number };
 
-export type CoreEvent = StreamEvent | WatchEvent | { event: "fetching"; pack: string; name: string; failed?: boolean } | { event: "preparing"; on: boolean } | { event: "settled" } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
+export type CoreEvent = StreamEvent | WatchEvent | { event: "preparing"; on: boolean } | { event: "settled" } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
 
 export interface CoreTransport {
   request(req: CoreReq): Promise<CoreRes>;
   /** Called when the core is lost (the session reopens). */
   onLost?(cb: () => void): void;
-  /** What the core says unasked: a Shelf pack it is fetching mid-build. */
+  /** What the core says unasked: its progress (a Shelf pack it fetches mid-build among it), a page, its diagnostics. */
   onEvent?(cb: (e: CoreEvent) => void): void;
 }
 
@@ -288,16 +288,12 @@ export class PreviewSession {
   private tellPackages(): void {
     this.sink.packages?.({ ...this.pkg, loading: [...this.pkg.loading], unavailable: [...this.pkg.unavailable], done: [...(this.pkg.done ?? [])], failed: [...(this.pkg.failed ?? [])] });
   }
-  /** The core fetches a pack mid-build (the job goes on with it): the view says which. */
-  private onFetching(e: Extract<CoreEvent, { event: "fetching" }>): void {
-    // (a pack the worker could not get: Shelf unreachable, or not there)
-    if (e.failed) {
-      this.tr("package: core fetch failed", e);
-      this.pkg.loading = this.pkg.loading.filter((n) => n !== e.pack);
-      this.pkg.failed = [...(this.pkg.failed ?? []), { name: e.pack, error: `Shelf: ${e.name} not fetched` }];
-      this.tellPackages();
-      return;
-    }
+  /**
+   * The core fetches a pack mid-build (the job goes on with it), as its
+   * progress says (`phase: "fetching"`): the view says which. (A pack it
+   * could not get is the build's trouble, said by the host, not here.)
+   */
+  private onFetching(e: { pack: string; name: string }): void {
     this.tr("package: core fetches", e);
     this.pkg.source = this.source.label;
     // (one at a time, in order: the one before it has arrived)
@@ -339,7 +335,6 @@ export class PreviewSession {
         if (this.opened && !this.busy) this.chain = this.chain.then(() => this.layout()).then(() => this.statusSoon());
         return;
       }
-      if (e.event === "fetching") this.onFetching(e);
       if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e as StreamEvent);
     });
     this.core = {
@@ -1169,7 +1164,7 @@ export class PreviewSession {
         // The loading card lists the file asked for ("amsmath.sty", as $/progress's
         // "Fetching amsmath.sty (12 of 40)" says it), so it goes as `pack`, the card's item;
         // the pack's id goes as `name`, which a failure's text names: swapped on purpose)
-        if (e.phase === "fetching" && e.pack) return this.onFetching({ event: "fetching", pack: e.name ?? e.pack, name: e.pack });
+        if (e.phase === "fetching" && e.pack) return this.onFetching({ pack: e.name ?? e.pack, name: e.pack });
         // (typesetting before a page is in: what was fetched is in, the loading card at its last step)
         if (!this.hashes.length && (this.pkg.loading.length || !this.pkg.building)) {
           this.pkg.done = [...(this.pkg.done ?? []), ...this.pkg.loading];

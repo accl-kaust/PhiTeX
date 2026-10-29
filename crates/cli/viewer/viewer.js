@@ -2826,15 +2826,12 @@ var PreviewSession = class {
   tellPackages() {
     this.sink.packages?.({ ...this.pkg, loading: [...this.pkg.loading], unavailable: [...this.pkg.unavailable], done: [...this.pkg.done ?? []], failed: [...this.pkg.failed ?? []] });
   }
-  /** The core fetches a pack mid-build (the job goes on with it): the view says which. */
+  /**
+   * The core fetches a pack mid-build (the job goes on with it), as its
+   * progress says (`phase: "fetching"`): the view says which. (A pack it
+   * could not get is the build's trouble, said by the host, not here.)
+   */
   onFetching(e) {
-    if (e.failed) {
-      this.tr("package: core fetch failed", e);
-      this.pkg.loading = this.pkg.loading.filter((n) => n !== e.pack);
-      this.pkg.failed = [...this.pkg.failed ?? [], { name: e.pack, error: `Shelf: ${e.name} not fetched` }];
-      this.tellPackages();
-      return;
-    }
     this.tr("package: core fetches", e);
     this.pkg.source = this.source.label;
     const prev = this.inBuild.at(-1);
@@ -2868,7 +2865,6 @@ var PreviewSession = class {
         if (this.opened && !this.busy) this.chain = this.chain.then(() => this.layout()).then(() => this.statusSoon());
         return;
       }
-      if (e.event === "fetching") this.onFetching(e);
       if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e);
     });
     this.core = {
@@ -3584,7 +3580,7 @@ var PreviewSession = class {
       }
       case "progress":
         this.watchBusy(true);
-        if (e.phase === "fetching" && e.pack) return this.onFetching({ event: "fetching", pack: e.name ?? e.pack, name: e.pack });
+        if (e.phase === "fetching" && e.pack) return this.onFetching({ pack: e.name ?? e.pack, name: e.pack });
         if (!this.hashes.length && (this.pkg.loading.length || !this.pkg.building)) {
           this.pkg.done = [...this.pkg.done ?? [], ...this.pkg.loading];
           this.pkg.loading = [];
