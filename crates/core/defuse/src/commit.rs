@@ -3523,11 +3523,14 @@ pub(crate) fn relocate(eng: &Engine, w: Option<&Worker>, placer: NodeId, k: &Arc
         let place = land(eng, &m, prev, if first { before } else { None }, parent, &skip, left.hole);
         let Some((npos, nseg, defs, b)) = place else {
             // (its place gone with its placer: it goes with it, its old
-            // place's readers asked again)
+            // place's readers asked again, and its placements with it,
+            // from the record it had: one cleared first left them on the
+            // line with no placer, a finisher's page writers at -j16,
+            // note-intermittents §2)
             m.set_state(State::Gone);
-            *m.last.lock() = None;
+            let rec = m.last.lock().take();
             lifted_walks(eng, w, &m, left, st);
-            unfile_placements(eng, w, &m);
+            unfile_placed(eng, w, rec.as_deref());
             // (a node removed claims nothing: what it holds goes back)
             release_leaving(eng, w, &m);
             continue;
@@ -3830,9 +3833,9 @@ fn land(
 }
 
 /// The placements of a node that goes (`relocate` with nowhere to go),
-/// removed.
-fn unfile_placements(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>) {
-    if let Some(r) = m.record() {
+/// removed: those of record `r`, its last, taken off it first.
+fn unfile_placed(eng: &Engine, w: Option<&Worker>, r: Option<&RunRecord>) {
+    if let Some(r) = r {
         for &c in &r.placed {
             if let Some(cn) = eng.placed_node(c) {
                 unfile(eng, w, cn);
@@ -4318,6 +4321,66 @@ mod tests {
             let i = e.node_info(t).unwrap();
             assert!(i.state != NodeState::Inert && i.claimer.is_none(), "T{k} still held by {:?}", i.claimer.map(|n| n.raw()));
         }
+    }
+
+    /// `[]`: places a `Kid` after itself.
+    struct PlaceKid(crate::api::OpId);
+
+    impl Operation for PlaceKid {
+        fn name(&self) -> &'static str {
+            "place_kid"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            cx.follow(self.0, vec![]);
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// `[]`: places a `Text` as its child.
+    struct Kid(crate::api::OpId);
+
+    impl Operation for Kid {
+        fn name(&self) -> &'static str {
+            "kid"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            cx.child(self.0, vec![cx.values().int(5)]);
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    #[test]
+    fn a_node_relocated_to_a_place_gone_takes_its_placements_with_it() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // K, placed by P, with its child L, is moved back to after A, which
+        // is removed meanwhile: K has nowhere to go and is removed, and L,
+        // past where K was going, is no mover. L goes with K. Its record
+        // was cleared before its placements were looked up, which found
+        // none: amsldoc at sixteen threads left a finisher's page writer
+        // on the line, its placer gone (note-intermittents §2).
+        let e = Engine::new();
+        let text = e.register(Arc::new(Text));
+        let kid = e.register(Arc::new(Kid(text)));
+        let place_kid = e.register(Arc::new(PlaceKid(kid)));
+        let v = e.values();
+        let u = e.new_unit();
+        let a = e.push(u, text, vec![v.int(1)]);
+        e.push(u, text, vec![v.int(2)]);
+        let p = e.push(u, place_kid, vec![]);
+        e.evaluate(1).unwrap();
+        let of = |name: &str| e.order(u).into_iter().find(|&n| e.node_info(n).is_some_and(|i| i.op == name)).unwrap();
+        let k = of("kid");
+        let l = e.order(u).into_iter().find(|&n| e.node_info(n).is_some_and(|i| i.parent == Some(k))).unwrap();
+        e.remove(a);
+        let mut st = super::CommitStats::default();
+        let moved = super::relocate(&e, None, p, e.node(k), super::Target::After(a), &mut st);
+        assert!(!moved, "K had nowhere to go");
+        assert_eq!(e.node(k).state(), crate::node::State::Gone);
+        assert_eq!(e.node(l).state(), crate::node::State::Gone, "K's child L");
+        let bad: Vec<String> = e.check_invariants().into_iter().filter(|m| m.contains("holding it no more")).collect();
+        assert!(bad.is_empty(), "{bad:?}");
     }
 
     #[test]
