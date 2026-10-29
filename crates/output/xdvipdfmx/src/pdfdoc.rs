@@ -677,6 +677,21 @@ impl Dpx {
         self.doc.pdoc.outlines.first = Some(0);
     }
 
+    /// The outline emptied, as `pdf_doc_init_bookmarks` leaves it (its
+    /// open depth kept), to be made again ([`crate::api::Session::outlines_again`]).
+    pub(crate) fn reset_bookmarks(&mut self) -> Result<()> {
+        let first = self.doc.pdoc.outlines.first;
+        self.clean_bookmarks(first)?;
+        self.doc.pdoc.outlines.current_depth = 1;
+        self.doc.pdoc.outlines.items = vec![PdfOlitem {
+            is_open: 1,
+            ..PdfOlitem::default()
+        }];
+        self.doc.pdoc.outlines.current = Some(0);
+        self.doc.pdoc.outlines.first = Some(0);
+        Ok(())
+    }
+
     fn clean_bookmarks(&mut self, item: Option<usize>) -> Result<()> {
         let mut item = item;
         while let Some(i) = item {
@@ -1545,22 +1560,48 @@ impl Dpx {
 
     /// `pdf_close_document`.
     pub fn pdf_close_document(&mut self) -> Result<()> {
+        self.pdf_close_document_timed(&|| 0).map(|_| ())
+    }
+
+    /// [`Self::pdf_close_document`], each step timed by `clock` (its
+    /// name, the clock's ticks).
+    ///
+    /// # Errors
+    /// As [`Self::pdf_close_document`].
+    pub fn pdf_close_document_timed(
+        &mut self,
+        clock: &dyn Fn() -> u64,
+    ) -> Result<Vec<(&'static str, u64)>> {
+        let mut out = Vec::new();
+        let mut t = clock();
+        let mut lap = |what: &'static str, out: &mut Vec<(&'static str, u64)>| {
+            let now = clock();
+            out.push((what, now.saturating_sub(t)));
+            t = now;
+        };
         if let Some(g) = self.doc.global_names.take() {
             self.o.pdf_delete_name_tree(g)?;
         }
         self.pdf_close_device()?;
         self.pdf_doc_close_articles()?;
         self.pdf_doc_close_names()?;
+        lap("names", &mut out);
         self.pdf_doc_close_bookmarks()?;
+        lap("outline", &mut out);
         self.pdf_doc_close_page_tree()?;
+        lap("page tree", &mut out);
         self.pdf_doc_close_docinfo()?;
         self.pdf_doc_close_catalog()?;
         self.pdf_close_images()?;
+        lap("catalog and images", &mut out);
         self.pdf_close_fonts()?;
+        lap("fonts", &mut out);
         self.pdf_close_colors()?;
         self.pdf_close_resources()?;
+        lap("resources", &mut out);
         self.o.flush()?;
-        Ok(())
+        lap("flush", &mut out);
+        Ok(out)
     }
 
     fn pdf_doc_make_xform(

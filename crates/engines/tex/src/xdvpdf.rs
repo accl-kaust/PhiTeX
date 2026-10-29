@@ -247,6 +247,8 @@ struct Base {
     walks: Vec<Arc<Walk>>,
     /// Each page's operations (none: not shipped).
     ops: Vec<Option<Arc<[Op]>>>,
+    /// Each page's specials on the document ([`Docs`]).
+    docs: Vec<Arc<Docs>>,
     /// [`PageState`] before each page, and after the last.
     states: Vec<PageState>,
     /// Before page `.0`: the session and the walk's writer.
@@ -298,18 +300,113 @@ fn options(p: &XdvPdf) -> DpxOptions {
     }
 }
 
-/// zlib's `compress2`, as xdvipdfmx links it.
-fn deflate() -> phitex_xdvipdfmx::obj::Deflate {
-    Box::new(|level, data| phitex_codecs::deflate::compress(data, level))
+/// Streams compressed, by level and bytes: a link's end compresses the
+/// fonts' and object streams' bytes the last link's did, mostly the
+/// same, and finds them here. An entry neither the link nor the one
+/// before it used is dropped ([`packed_next`]).
+#[derive(Default)]
+struct Packed {
+    link: u64,
+    map: crate::FxHashMap<u64, Vec<PackedOne>>,
+    /// This link's streams found, and compressed: their number and bytes.
+    found: (usize, usize),
+    made: (usize, usize),
 }
 
-/// The end's streams compressed on the engine's threads.
+/// A stream's level, bytes and bytes compressed, and the last link that
+/// used them.
+type PackedOne = (i32, Arc<[u8]>, Arc<[u8]>, u64);
+
+thread_local! {
+    /// A live file's end compressing ([`live`]): a stream compressed at
+    /// any level will do, and one compressed here is not kept (its level
+    /// is not the exact file's).
+    static PACK_ANY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn packed() -> &'static Mutex<Packed> {
+    static P: std::sync::OnceLock<Mutex<Packed>> = std::sync::OnceLock::new();
+    P.get_or_init(Mutex::default)
+}
+
+/// The streams the memo keeps: smaller ones are compressed again.
+const PACKED_MIN: usize = 4096;
+
+/// A link that compresses streams begins: what the last two did not use
+/// is dropped.
+fn packed_next() {
+    let mut p = packed().locked();
+    p.link += 1;
+    p.found = (0, 0);
+    p.made = (0, 0);
+    let keep = p.link.saturating_sub(1);
+    p.map.retain(|_, v| {
+        v.retain(|e| e.3 >= keep);
+        !v.is_empty()
+    });
+}
+
+/// `data` compressed at `level`, from the memo if it has it.
+fn packed_get(level: i32, data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < PACKED_MIN {
+        return None;
+    }
+    let h = phitex_defuse::hash_bytes(0, data);
+    let any = PACK_ANY.with(std::cell::Cell::get);
+    let mut p = packed().locked();
+    let link = p.link;
+    let v = p.map.get_mut(&h)?;
+    let e = v.iter_mut().find(|e| (any || e.0 == level) && *e.1 == *data)?;
+    e.3 = link;
+    let out = e.2.to_vec();
+    p.found.0 += 1;
+    p.found.1 += data.len();
+    Some(out)
+}
+
+fn packed_put(level: i32, data: &[u8], out: &[u8]) {
+    let mut p = packed().locked();
+    p.made.0 += 1;
+    p.made.1 += data.len();
+    if data.len() < PACKED_MIN || PACK_ANY.with(std::cell::Cell::get) {
+        return;
+    }
+    let h = phitex_defuse::hash_bytes(0, data);
+    let link = p.link;
+    p.map
+        .entry(h)
+        .or_default()
+        .push((level, Arc::from(data), Arc::from(out), link));
+}
+
+/// zlib's `compress2`, as xdvipdfmx links it.
+fn deflate() -> phitex_xdvipdfmx::obj::Deflate {
+    Box::new(|level, data| {
+        packed_get(level, data).unwrap_or_else(|| {
+            let out = phitex_codecs::deflate::compress(data, level);
+            packed_put(level, data, &out);
+            out
+        })
+    })
+}
+
+/// The end's streams compressed on the engine's threads (those the memo
+/// has not).
 fn batch() -> phitex_xdvipdfmx::obj::BatchDeflate {
     Box::new(|jobs: &[(i32, &[u8])]| {
+        let mut out: Vec<Option<Vec<u8>>> = jobs.iter().map(|j| packed_get(j.0, j.1)).collect();
+        let miss: Vec<usize> = (0..jobs.len()).filter(|&i| out[i].is_none()).collect();
         let mut ex = crate::exec::Inner(crate::exec::threads(None));
-        crate::exec::map_on(&mut ex, jobs.len(), &|i| {
-            phitex_codecs::deflate::compress(jobs[i].1, jobs[i].0)
-        })
+        let made = crate::exec::map_on(&mut ex, miss.len(), &|k| {
+            let (level, data) = jobs[miss[k]];
+            phitex_codecs::deflate::compress(data, level)
+        });
+        for (k, m) in made.into_iter().enumerate() {
+            let (level, data) = jobs[miss[k]];
+            packed_put(level, data, &m);
+            out[miss[k]] = Some(m);
+        }
+        out.into_iter().map(Option::unwrap_or_default).collect()
     })
 }
 
@@ -373,15 +470,16 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
         from: k,
         ..Times::default()
     };
-    let (mut snaps, mut ops, mut states, mut chunks, old) = match f.base {
+    let (mut snaps, mut ops, mut docs, mut states, mut chunks, old) = match f.base {
         Some(b) => (
             b.snaps.iter().filter(|x| x.0 < k).map(|x| (x.0, x.1.snapshot(), x.2.clone())).collect(),
             b.ops[..k].to_vec(),
+            b.docs[..k].to_vec(),
             b.states[..k].to_vec(),
             b.chunks[..k].to_vec(),
             &b.chunks[..],
         ),
-        None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), &[][..]),
+        None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), &[][..]),
     };
     let every = n.div_ceil(SNAPS).max(1);
     for (i, p) in walks.iter().enumerate().skip(k) {
@@ -410,6 +508,7 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
             Some(x) if **x == *bytes => chunks.push(x.clone()),
             _ => chunks.push(bytes),
         }
+        docs.push(Arc::new(Docs::of(o.as_deref(), i, &mut s)));
         ops.push(o);
     }
     states.push(s.page_state().map_err(|e| fatal(&e))?);
@@ -427,6 +526,7 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
             ids: ids.to_vec(),
             walks: walks.to_vec(),
             ops,
+            docs,
             states,
             snaps,
             chunks,
@@ -439,15 +539,58 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
     ))
 }
 
+/// A special on the document: the page it names, if it names one; its
+/// bytes.
+type DocSpecial = (Option<usize>, Vec<u8>);
+
+/// A page's specials on the document, which a page written again does
+/// not do again ([`Again::Skip`], [`Again::Outline`]): the document's,
+/// in page order, are the file's, or the outline is made anew. One that
+/// names its page (`@thispage`, `@xpos`, ...) is that page's.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct Docs {
+    skip: Vec<DocSpecial>,
+    outline: Vec<DocSpecial>,
+    /// One that can't be done again ([`Again::Never`]): its start.
+    never: Option<String>,
+}
+
+impl Docs {
+    fn of(ops: Option<&[Op]>, page: usize, s: &mut Session) -> Docs {
+        let mut d = Docs::default();
+        for o in ops.unwrap_or_default() {
+            let Op::Special(x) = o else { continue };
+            let bound = [&b"@thispage"[..], b"@prevpage", b"@nextpage", b"@xpos", b"@ypos", b"@page"]
+                .iter()
+                .any(|k| x.windows(k.len()).any(|w| w == *k))
+                .then_some(page);
+            match s.again(x) {
+                Ok(Again::Do) => {}
+                Ok(Again::Skip) => d.skip.push((bound, x.clone())),
+                Ok(Again::Outline) => d.outline.push((bound, x.clone())),
+                Ok(Again::Never) | Err(_) => {
+                    d.never
+                        .get_or_insert_with(|| String::from_utf8_lossy(&x[..x.len().min(48)]).into_owned());
+                }
+            }
+        }
+        d
+    }
+}
+
 /// The live file of `walks` from base `b` ([`phitex_pdf::Layout::live`]):
-/// the pages whose operations differ from the base's written again after
-/// its last page ([`Session::reship`]), the end written again, the rest
-/// of the base's file kept, so that an update section holds those pages,
-/// what the end changed, and nothing else. None where a page can't be
-/// written again so (another number of pages, a special whose effect is
-/// on the document, a page taking or leaving another state than the
-/// base's last page left, [`PageState`]): the exact file's link then.
-/// The pages written again, the file and the link's times; or why not.
+/// the pages whose operations differ from the base's, and the pages past
+/// its last, written again after its last page ([`Session::reship`]),
+/// the pages past the document's last dropped, the outline made anew if
+/// it changed, the end written again, the rest of the base's file kept,
+/// so that an update section holds those pages, what the end changed,
+/// and nothing else. Not where a page can't be written again so (a
+/// special that can't be done again, the document's specials on the
+/// document not the file's, a page given or leaving another state than
+/// the page before it left or the page after it found, [`PageState`]):
+/// the exact file's link then. The pages written again, the file and the
+/// link's times; or why not.
+#[allow(clippy::too_many_lines)]
 fn live(
     b: &Base,
     walks: &[Arc<Walk>],
@@ -455,94 +598,124 @@ fn live(
     defs: &Defs,
     origins: Option<u64>,
 ) -> Result<(usize, phitex_pdf::Layout, String), String> {
-    let n = walks.len();
-    if b.ids.len() != n {
-        return Err(format!("{n} pages, the base's {}", b.ids.len()));
-    }
+    let (n, bn) = (walks.len(), b.ids.len());
     let t0 = std::time::Instant::now();
     let mut s = b.post.snapshot();
-    let t_snap = t0.elapsed();
     s.set_files(files);
+    let t_snap = t0.elapsed();
     let mut w = b.post_writer.clone();
-    let mut again = Vec::new();
+    // (each page's operations and specials on the document; the pages to
+    // write again)
+    let mut again: Vec<(usize, Vec<Op>)> = Vec::new();
+    let mut docs: Vec<Arc<Docs>> = Vec::with_capacity(n);
     for (i, p) in walks.iter().enumerate() {
-        if Arc::ptr_eq(p, &b.walks[i]) {
+        if i < bn && Arc::ptr_eq(p, &b.walks[i]) {
+            docs.push(b.docs[i].clone());
             continue;
         }
-        let ops = walk(&mut w, p, defs, origins);
-        let old = b.ops[i].as_deref();
-        match (&ops, old) {
-            (Some(o), Some(x)) if neutral(o).eq(neutral(x)) => {}
-            (Some(o), Some(x)) => again.push((i, o.clone(), x)),
-            _ => return Err(format!("page {} shipped or not, as it was not", i + 1)),
+        let Some(ops) = walk(&mut w, p, defs, origins) else {
+            return Err(format!("page {} is not shipped", i + 1));
+        };
+        if i < bn
+            && let Some(x) = b.ops[i].as_deref()
+            && neutral(&ops).eq(neutral(x))
+        {
+            docs.push(b.docs[i].clone());
+            continue;
         }
+        let d = Docs::of(Some(&ops), i, &mut s);
+        if let Some(x) = &d.never {
+            return Err(format!("page {} has a special that can't be done again: {x}", i + 1));
+        }
+        docs.push(Arc::new(d));
+        again.push((i, ops));
     }
     let t_walk = t0.elapsed().saturating_sub(t_snap);
-    let last = &b.states[n];
-    let mut chunk = Vec::new();
-    for (i, ops, old) in &again {
-        let k = i + 1;
-        let (before, after) = (&b.states[*i], &b.states[k]);
-        if !before.same_fixed(last) || !after.same_fixed(last) {
-            return Err(format!(
-                "page {k} found or left another state than the last page left: {}{}",
-                before.differs(last),
-                after.differs(last)
-            ));
-        }
-        // (a special whose effect is on the document: the same as the
-        // page first had, as the file has it already)
-        let (a, z) = (doc_specials(ops, &mut s), doc_specials(old, &mut s));
-        match (a, z) {
-            (Ok(a), Ok(z)) if a == z => {}
-            (Ok(_), Ok(_)) => return Err(format!("page {k}'s specials on the document changed")),
-            (Err(x), _) | (_, Err(x)) => {
-                return Err(format!("page {k} has a special that can't be done again: {x}"));
-            }
-        }
-        // (given what it was given, it leaves what it left; the last
-        // page's then set back)
-        s.set_page_state(before);
-        chunk.extend(s.reship(*i, ops, b.size).map_err(|e| fatal(&e))?.pdf);
-        let now = s.page_state().map_err(|e| fatal(&e))?;
-        if now != *after {
-            return Err(format!("page {k} written again left another state: {}", now.differs(after)));
-        }
-        s.set_page_state(last);
-    }
-    if again.is_empty() {
+    if again.is_empty() && n == bn {
         return Ok((0, b.layout.clone(), String::new()));
+    }
+    let seq = |ds: &[Arc<Docs>], f: fn(&Docs) -> &Vec<DocSpecial>| {
+        ds.iter().flat_map(|d| f(d).iter().cloned()).collect::<Vec<_>>()
+    };
+    if seq(&docs, |d| &d.skip) != seq(&b.docs, |d| &d.skip) {
+        return Err("the document's specials on the document changed".to_owned());
+    }
+    let (outline, old_outline) = (seq(&docs, |d| &d.outline), seq(&b.docs, |d| &d.outline));
+    let outline_again = outline != old_outline;
+    if outline_again && outline.iter().chain(&old_outline).any(|x| x.0.is_some()) {
+        return Err("the outline changed, an entry naming its page".to_owned());
+    }
+    let last = &b.states[bn];
+    let mut chunk = Vec::new();
+    // (what the page before the next one written again left, if it was
+    // written again)
+    let mut left: Option<(usize, PageState)> = None;
+    for (k, (i, ops)) in again.iter().enumerate() {
+        let i = *i;
+        let given = match &left {
+            Some((j, st)) if *j + 1 == i => st.clone(),
+            _ => b.states[i.min(bn)].clone(),
+        };
+        if !given.same_fixed(last) {
+            return Err(format!("page {} found another state than the last page left: {}", i + 1, given.differs(last)));
+        }
+        s.set_page_state(&given);
+        chunk.extend(s.reship(i, ops, b.size).map_err(|e| fatal(&e))?.pdf);
+        let now = s.page_state().map_err(|e| fatal(&e))?;
+        if !now.same_fixed(last) {
+            return Err(format!("page {} left another state than the last page: {}", i + 1, now.differs(last)));
+        }
+        // (the page after it, kept, found what it left)
+        let next_kept = i + 1 < n && again.get(k + 1).is_none_or(|x| x.0 != i + 1);
+        if next_kept && (i + 1 >= bn || now != b.states[i + 1]) {
+            return Err(format!("page {} left another state than page {} found", i + 1, i + 2));
+        }
+        left = Some((i, now));
+    }
+    // (the document's last page kept: what it left the end's)
+    let last_kept = again.last().is_none_or(|x| x.0 + 1 != n);
+    if last_kept && n < bn && !b.states[n].same_fixed(last) {
+        return Err(format!("page {n}, now the last, left another state than the last page"));
+    }
+    s.set_page_state(last);
+    if n < bn {
+        s.truncate(n);
+    }
+    if outline_again {
+        let specials: Vec<Vec<u8>> = outline.into_iter().map(|x| x.1).collect();
+        s.outlines_again(&specials).map_err(|e| fatal(&e))?;
     }
     let t_pages = t0.elapsed().saturating_sub(t_snap + t_walk);
     let t = std::time::Instant::now();
-    let tail = s.finish().map_err(|e| fatal(&e))?;
+    let clock = || u64::try_from(t.elapsed().as_micros()).unwrap_or(u64::MAX);
+    // (the end's streams: those compressed before taken at their level,
+    // the others compressed fast; the exact file's are made at its own)
+    s.compress_fast();
+    PACK_ANY.with(|c| c.set(true));
+    let r = s.finish_timed(&clock);
+    PACK_ANY.with(|c| c.set(false));
+    let (tail, steps) = r.map_err(|e| fatal(&e))?;
     let t_end = t.elapsed();
+    let steps: Vec<String> = steps.iter().map(|(w, us)| format!("{w} {us} µs")).collect();
     let mut chunks = b.chunks.clone();
     chunks.push(Arc::from(chunk));
+    let (found, made) = {
+        let p = packed().locked();
+        (p.found, p.made)
+    };
     let times = format!(
-        "the session taken {t_snap:?}, walk {t_walk:?}, the pages written {t_pages:?}, end {t_end:?}"
+        "the session taken {t_snap:?}, walk {t_walk:?}, the pages written {t_pages:?}, end {t_end:?} ({}; streams found compressed {} of {} bytes, compressed {} of {} bytes){}{}",
+        steps.join(", "),
+        found.0,
+        found.1,
+        made.0,
+        made.1,
+        if n == bn { String::new() } else { format!(", {bn} pages now {n}") },
+        if outline_again { ", the outline made anew" } else { "" }
     );
     layout(&chunks, &tail, &s)
         .map(|l| (again.len(), l, times))
         .ok_or_else(|| "no cross-reference section".to_owned())
-}
-
-/// The specials of `ops` whose effect is on the document, which a page
-/// written again does not do again ([`Again::Skip`]); or one that can't
-/// be done again ([`Again::Never`]), its start.
-fn doc_specials(ops: &[Op], s: &mut Session) -> Result<Vec<Vec<u8>>, String> {
-    let mut out = Vec::new();
-    for o in ops {
-        if let Op::Special(x) = o {
-            let never = || String::from_utf8_lossy(&x[..x.len().min(48)]).into_owned();
-            match s.again(x).map_err(|_| never())? {
-                Again::Never => return Err(never()),
-                Again::Skip => out.push(x.clone()),
-                Again::Do => {}
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// The PDF file of `pages` (the end node's, [`crate::assemble`]): its
@@ -657,6 +830,8 @@ pub(crate) fn file(
         }
     };
     let t_start = t_start.elapsed();
+    // (a link that compresses: what the last two such did not use dropped)
+    packed_next();
     // (each page decoded once while it is the same)
     let t = std::time::Instant::now();
     let walks: Vec<Arc<Walk>> = {

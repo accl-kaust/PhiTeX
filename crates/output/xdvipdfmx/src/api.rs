@@ -374,6 +374,14 @@ impl Session {
         self.dpx.spc_again(special)
     }
 
+    /// The streams written from now on compressed fast (level 1), if
+    /// they are compressed (the file's level, `-z`, is not 0).
+    pub fn compress_fast(&mut self) {
+        if self.dpx.o.compression_level > 0 {
+            self.dpx.o.compression_level = 1;
+        }
+    }
+
     /// The label the next object would take (after [`Session::finish`]:
     /// the file's `/Size`).
     #[must_use]
@@ -407,9 +415,11 @@ impl Session {
     /// A fatal error of xdvipdfmx's, a special that can't be done again.
     pub fn reship(&mut self, k: usize, ops: &[Op], size: u32) -> Result<PageOut> {
         let k32 = i32::try_from(k).unwrap_or(i32::MAX);
-        if k32 >= self.page_count {
+        if k32 > self.page_count {
             crate::fatal!("page {} written again, of {}", k + 1, self.page_count);
         }
+        // (a page past the last: added, with a page object of its own)
+        let added = k32 == self.page_count;
         let (count, no) = (self.page_count, self.page_no);
         let d = &mut *self.dpx;
         let entries = d.doc.pdoc.pages.num_entries;
@@ -430,10 +440,41 @@ impl Session {
         let d = &mut *self.dpx;
         d.o.live_end();
         d.doc.reship = false;
-        d.doc.pdoc.pages.num_entries = entries;
-        self.page_count = count;
-        self.page_no = no;
+        if !added {
+            d.doc.pdoc.pages.num_entries = entries;
+            self.page_count = count;
+            self.page_no = no;
+        }
         r
+    }
+
+    /// The pages past the first `n` dropped (the document lost them):
+    /// the end writes `n` pages.
+    pub fn truncate(&mut self, n: usize) {
+        let n32 = i32::try_from(n).unwrap_or(i32::MAX);
+        if n32 < self.page_count {
+            self.dpx.doc.pdoc.pages.num_entries = n;
+            self.page_count = n32;
+            self.page_no = n32;
+        }
+    }
+
+    /// The outline made anew from `outlines`, the document's outline
+    /// specials in order ([`crate::specials::Again::Outline`]), as the
+    /// pages first made it: a page written again does not make its
+    /// entries again, and where the document's outline specials are not
+    /// the file's, the outline is made from all of them.
+    ///
+    /// # Errors
+    /// A fatal error of a special's.
+    pub fn outlines_again(&mut self, outlines: &[Vec<u8>]) -> Result<()> {
+        let d = &mut *self.dpx;
+        d.reset_bookmarks()?;
+        d.pdfm.lowest_level = 255;
+        for o in outlines {
+            d.spc_exec_special(o, 0.0, 0.0, 1.0)?;
+        }
+        Ok(())
     }
 
     fn page_from(&mut self, ops: Option<&[Op]>) -> Result<PageOut> {
@@ -496,6 +537,19 @@ impl Session {
     /// `main`. The bytes written. After it (`Ok` or `Err`), only
     /// [`Session::written`] is left to call.
     pub fn finish(&mut self) -> Result<Vec<u8>> {
+        self.finish_timed(&|| 0).map(|x| x.0)
+    }
+
+    /// [`Session::finish`], its steps timed by `clock` (each step's name
+    /// and the clock's ticks; the streams' deflating, deferred to the
+    /// end, in `flush`).
+    ///
+    /// # Errors
+    /// As [`Session::finish`].
+    pub fn finish_timed(
+        &mut self,
+        clock: &dyn Fn() -> u64,
+    ) -> Result<(Vec<u8>, Vec<(&'static str, u64)>)> {
         if self.page_count < 1 {
             crate::fatal!("No pages fall in range!");
         }
@@ -505,17 +559,19 @@ impl Session {
         d.o.defer_streams();
         let r = (|| {
             d.spc_exec_at_end_document()?;
-            d.pdf_close_document()?;
+            let times = d.pdf_close_document_timed(clock)?;
             d.pdf_close_fontmaps();
             d.dvi_close();
-            Ok(())
+            Ok(times)
         })();
-        if let Err(e) = r {
-            // (what was written, the pending streams in place)
-            let _ = d.o.resolve_pending();
-            return Err(e);
+        match r {
+            Ok(times) => Ok((d.o.take_output(), times)),
+            Err(e) => {
+                // (what was written, the pending streams in place)
+                let _ = d.o.resolve_pending();
+                Err(e)
+            }
         }
-        Ok(d.o.take_output())
     }
 
     /// Compresses the streams of [`Session::finish`] (the fonts', the

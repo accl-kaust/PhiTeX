@@ -193,7 +193,13 @@ struct LiveLabels {
     high: u32,
     resume: u32,
     objstm: bool,
+    level: i32,
 }
+
+/// The compression level of what a page written again writes
+/// ([`PdfOut::live_begin`]): the live file is not the exact file, whose
+/// bytes the session's level makes, so its pages are compressed fast.
+const LIVE_LEVEL: i32 = 1;
 
 /// The file's objects as its cross-reference section gives them, and
 /// its trailer's entries: what an update section repeats.
@@ -502,17 +508,22 @@ impl PdfOut {
     /// Pages are written again into a file whose objects are numbered
     /// below `size` (its `/Size`): until [`PdfOut::live_end`], new
     /// objects are numbered from `size` on (after those of earlier pages
-    /// written again) and written directly, not into object streams.
+    /// written again) and written directly, not into object streams, compressed
+    /// fast ([`LIVE_LEVEL`]).
     pub fn live_begin(&mut self, size: u32) {
         let l = self.live.get_or_insert(LiveLabels {
             from: size,
             high: size,
             resume: self.next_label,
             objstm: self.use_objstm,
+            level: self.compression_level,
         });
         let high = l.high;
         self.next_label = high.max(self.next_label);
         self.use_objstm = false;
+        if self.compression_level > 0 {
+            self.compression_level = LIVE_LEVEL;
+        }
     }
 
     /// The end of a page written again ([`PdfOut::live_begin`]): the
@@ -522,6 +533,7 @@ impl PdfOut {
             l.high = self.next_label;
             self.next_label = l.resume;
             self.use_objstm = l.objstm;
+            self.compression_level = l.level;
         }
     }
 

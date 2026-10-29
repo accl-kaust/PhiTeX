@@ -527,7 +527,13 @@ impl Dpx {
     pub fn spc_push_object(&mut self, spe: &mut SpcEnv, key: &[u8], value: Obj) -> Result<()> {
         let key = cstr(key);
         let names = self.doc.global_names.as_mut().expect("global_names");
-        self.o.pdf_names_add_object(names, key, value)?;
+        // (a page written again: its named annotation the object the
+        // name had, its value the new)
+        if self.doc.reship {
+            self.o.pdf_names_replace_object(names, key, value)?;
+        } else {
+            self.o.pdf_names_add_object(names, key, value)?;
+        }
         Ok(())
     }
     /// `spc_flush_object`.
@@ -689,7 +695,7 @@ impl Dpx {
                 if self.doc.reship && error == 0 {
                     match again(ks.key, args.command, args.rest()) {
                         Again::Do => {}
-                        Again::Skip => return Ok((0, 0, rect)),
+                        Again::Skip | Again::Outline => return Ok((0, 0, rect)),
                         Again::Never => crate::fatal!(
                             "a page written again has a special that can't be done again: {}",
                             String::from_utf8_lossy(buffer)
@@ -723,11 +729,16 @@ pub enum Again {
     /// Done again: its effect is on the page (or it replaces what it did,
     /// a destination).
     Do,
-    /// Not done again: its effect is on the document, which has it.
+    /// Not done again: its effect is on the document, which has it (the
+    /// document's such specials, in order, the same as the file's).
     Skip,
+    /// An outline entry: not done again where the page is; the outline
+    /// made anew from all of the document's, in order, if they changed
+    /// ([`crate::api::Session::outlines_again`]).
+    Outline,
     /// The page can't be written again: its effect is on the document
-    /// and on the page together (a form, a bead, a named annotation),
-    /// or not known.
+    /// and on the page together (a form, a bead, a named picture), or
+    /// not known.
     Never,
 }
 
@@ -761,21 +772,26 @@ fn again(key: &[u8], command: Option<&[u8]>, rest: &[u8]) -> Again {
     let named = rest.first() == Some(&b'@');
     match key {
         b"pdf:" => match c {
-            b"outline" | b"out" | b"docinfo" | b"docview" | b"names" | b"mapline"
-            | b"mapfile" | b"object" | b"obj" | b"stream" | b"fstream" | b"close" => Again::Skip,
+            b"outline" | b"out" => Again::Outline,
+            b"names" | b"mapline" | b"mapfile" | b"object" | b"obj" | b"stream" | b"fstream"
+            | b"close" => Again::Skip,
+            // (the document's information and view, the catalog's
+            // entries: a value given again replaces the value)
+            b"docinfo" | b"docview" => Again::Do,
             b"put" => {
-                if rest.starts_with(b"@thispage") || rest.starts_with(b"@resources") {
+                if rest.starts_with(b"@thispage")
+                    || rest.starts_with(b"@resources")
+                    || rest.starts_with(b"@catalog")
+                {
                     Again::Do
                 } else {
                     Again::Skip
                 }
             }
-            b"annotation" | b"annotate" | b"annot" | b"ann" | b"bannot" | b"beginann"
-            | b"bann" | b"image" | b"img" | b"epdf"
-                if named =>
-            {
-                Again::Never
-            }
+            // (a named picture: its XObject made once, by name, and drawn
+            // on other pages; a named annotation is done again, the name's
+            // object given the new value)
+            b"image" | b"img" | b"epdf" if named => Again::Never,
             b"article" | b"art" | b"bead" | b"thread" | b"bform" | b"beginxobj" | b"bxobj"
             | b"eform" | b"endxobj" | b"exobj" | b"bop" | b"eop" | b"pageresources" => {
                 Again::Never
