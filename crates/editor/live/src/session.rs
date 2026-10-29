@@ -26,6 +26,9 @@ use crate::tex::{self, Engine};
 pub struct Status {
     now: Mutex<Phases>,
     live: Mutex<Option<Live>>,
+    /// The build's progress records (the viewer's `progress` event, the
+    /// language server's): [`crate::progress`].
+    meter: Arc<crate::progress::Meter>,
 }
 
 /// The engine at work: its progress (what each worker runs, the jobs done
@@ -71,6 +74,12 @@ struct Phases {
 }
 
 impl Status {
+    /// The build's progress records: listened to by the viewer and the
+    /// language server, told the fetches by the host's files.
+    pub fn meter(&self) -> &Arc<crate::progress::Meter> {
+        &self.meter
+    }
+
     /// Phase `phase` from now on (empty: none); the last one ends.
     pub fn set(&self, phase: impl Into<String>) {
         let phase = phase.into();
@@ -589,6 +598,12 @@ impl Session {
         &self.host
     }
 
+    /// What the session does now: its phases and its progress records
+    /// ([`Status::meter`]).
+    pub fn status(&self) -> &Arc<Status> {
+        &self.status
+    }
+
     /// The host's sink, where the session writes.
     pub fn sink(&self) -> &Arc<dyn Sink> {
         &self.sink
@@ -608,6 +623,14 @@ impl Session {
         bufs.push((name.clone(), text.map(str::to_owned)));
         drop(bufs);
         self.changed.push(name);
+    }
+
+    /// The next build cold: the engine's build dropped (its format kept
+    /// in the store), every file read again (`phitex.rebuild`).
+    pub fn forget_build(&mut self) {
+        self.reread_all();
+        self.build = None;
+        self.built_text = None;
     }
 
     /// Every file the builds read is to be read again from disk at the
@@ -710,7 +733,9 @@ impl Session {
         };
         let ran = crate::panics::catch(|| -> Result<(), String> {
             if let Some(b) = &mut self.build {
-                self.status.set_live(Some(live(b.progress())));
+                let progress = b.progress();
+                self.status.meter().build_begins(progress.evaluation());
+                self.status.set_live(Some(live(progress)));
                 self.status.set("engine");
                 // (evaluated with the text, one evaluation: its stats
                 // count the nodes the files' change ran)
@@ -749,6 +774,9 @@ impl Session {
                 let workers = threads(self.job.threads);
                 let xe = self.job.engine.xetex();
                 let progress = Arc::new(phitex_tex::Progress::new(workers));
+                // (its pages the session's progress records)
+                self.status.meter().build_begins(0);
+                self.status.meter().watch(&progress);
                 self.host.progress(&progress);
                 self.status.set_live(Some(live(progress.clone())));
                 let xetex = if xe {

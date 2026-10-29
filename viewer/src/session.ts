@@ -125,7 +125,7 @@ export type StreamEvent =
  */
 export type WatchEvent =
   | { event: "page"; k: number; hash: string; pages?: number }
-  | { event: "progress"; pass?: number; pages?: number; phase?: string; ms?: number }
+  | { event: "progress"; pass?: number; pages?: number; phase?: string; ms?: number; name?: string; pack?: string; done?: number; total?: number }
   | { event: "diagnostics"; items: Problem[] }
   | { event: "settled"; settling?: boolean; pass?: number }
   | { event: "superseded" }
@@ -1165,6 +1165,19 @@ export class PreviewSession {
       }
       case "progress":
         this.watchBusy(true);
+        // (a pack the build fetches, the engine's own Shelf, native or wasm: as a host's fetch.
+        // The loading card lists the file asked for ("amsmath.sty", as $/progress's
+        // "Fetching amsmath.sty (12 of 40)" says it), so it goes as `pack`, the card's item;
+        // the pack's id goes as `name`, which a failure's text names: swapped on purpose)
+        if (e.phase === "fetching" && e.pack) return this.onFetching({ event: "fetching", pack: e.name ?? e.pack, name: e.pack });
+        // (typesetting before a page is in: what was fetched is in, the loading card at its last step)
+        if (!this.hashes.length && (this.pkg.loading.length || !this.pkg.building)) {
+          this.pkg.done = [...(this.pkg.done ?? []), ...this.pkg.loading];
+          this.pkg.loading = [];
+          this.inBuild = [];
+          this.pkg.building = true;
+          this.tellPackages();
+        }
         this.sink.streaming?.({ pages: e.pages ?? 0, phase: e.phase ?? "typesetting" });
         return;
       case "superseded":

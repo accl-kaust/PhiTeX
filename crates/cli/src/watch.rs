@@ -650,6 +650,22 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
             }));
         }
     }
+    // (the build's progress records: the viewer's `progress` event, the
+    // editor's `$/progress` and `phitex/status`)
+    {
+        let shown = view.as_ref().map(View::viewer);
+        let server = lsp.as_ref().map(|l| l.server().clone());
+        if shown.is_some() || server.is_some() {
+            status.meter().listen(Box::new(move |p| {
+                if let Some(v) = &shown {
+                    v.progress(p);
+                }
+                if let Some(l) = &server {
+                    l.progress(p);
+                }
+            }));
+        }
+    }
     if let Some(l) = &lsp {
         let wake = Mutex::new(tx.clone());
         l.on_ask(Box::new(move || {
@@ -787,6 +803,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         status.take();
         building.store(true, Ordering::Relaxed);
         told.store(false, Ordering::Relaxed);
+        if let Some(l) = &lsp {
+            l.building();
+        }
         if let Some(v) = &view {
             v.building(true);
         }

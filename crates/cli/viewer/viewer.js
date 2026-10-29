@@ -3574,6 +3574,14 @@ var PreviewSession = class {
       }
       case "progress":
         this.watchBusy(true);
+        if (e.phase === "fetching" && e.pack) return this.onFetching({ event: "fetching", pack: e.name ?? e.pack, name: e.pack });
+        if (!this.hashes.length && (this.pkg.loading.length || !this.pkg.building)) {
+          this.pkg.done = [...this.pkg.done ?? [], ...this.pkg.loading];
+          this.pkg.loading = [];
+          this.inBuild = [];
+          this.pkg.building = true;
+          this.tellPackages();
+        }
         this.sink.streaming?.({ pages: e.pages ?? 0, phase: e.phase ?? "typesetting" });
         return;
       case "superseded":

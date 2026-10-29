@@ -23,6 +23,7 @@ use std::time::Instant;
 use serde_json::{Value, json};
 
 use crate::host::Host;
+use crate::lsp::{LspHost, Server};
 use crate::session::{Absorb, Session};
 use crate::view::{Ask, Built, Viewer};
 use crate::watch::{Applied, Edits, diagnostics, splice_utf16, tex_text, viewer_pdf};
@@ -44,7 +45,13 @@ pub struct Document {
     output: Option<(&'static str, Arc<Vec<u8>>)>,
     /// Whether the last build's origins are still to be made.
     origins_due: bool,
+    /// The language server attached ([`Document::lsp`]): told each
+    /// build's start, progress and end.
+    lsp: Lsp,
 }
+
+/// The document's language server, once attached.
+type Lsp = Arc<Mutex<Option<Arc<Server>>>>;
 
 /// The main file's buffer as the asks left it, each change of it sent to
 /// the session's build ([`Viewer::route_asks`]): an edit's offsets are of
@@ -145,6 +152,18 @@ impl Document {
             buffer: Mutex::new(None),
         };
         viewer.route_asks(Box::new(move |a| feed.route(a)));
+        // (the build's progress records: the viewer's `progress` event,
+        // the language server's `$/progress` and `phitex/status`)
+        let lsp: Lsp = Arc::default();
+        {
+            let (v, l) = (viewer.clone(), lsp.clone());
+            session.status().meter().listen(Box::new(move |p| {
+                v.progress(p);
+                if let Some(s) = lock(&l).as_ref() {
+                    s.progress(p);
+                }
+            }));
+        }
         Document {
             session,
             viewer,
@@ -154,7 +173,35 @@ impl Document {
             builds: 0,
             output: None,
             origins_due: false,
+            lsp,
         }
+    }
+
+    /// The language server of this document (docs/spec-editor-protocol.md
+    /// §4: the wasm core's `ph_lsp`), its messages to `out` (from any
+    /// thread), the main file named as the document's; the editor's asks
+    /// go to the viewer as a push would, and it is told each build's
+    /// start, progress and end. The commands the document cannot run
+    /// (`phitex.stop`, `phitex.clearCache`, `phitex.cacheStats`, ...) are
+    /// `commands`'s (none: not here). Attached again, it replaces the one
+    /// before.
+    pub fn lsp(
+        &self,
+        out: Box<dyn Fn(&Value) + Send + Sync>,
+        commands: Option<Commands>,
+    ) -> Arc<Server> {
+        let host = Arc::new(DocumentHost {
+            viewer: self.viewer.clone(),
+            commands,
+        });
+        let server = Arc::new(Server::new(out, host));
+        server.set_main(self.edits.main());
+        *lock(&self.lsp) = Some(server.clone());
+        server
+    }
+
+    fn lsp_server(&self) -> Option<Arc<Server>> {
+        lock(&self.lsp).clone()
     }
 
     /// A handle that asks `a` of the document from any thread, as
@@ -255,13 +302,17 @@ impl Document {
         self.builds += 1;
         let b = self.builds;
         let v = self.viewer.clone();
+        let lsp = self.lsp_server();
+        if let Some(l) = &lsp {
+            l.building();
+        }
         v.building(true);
         let s = &mut self.session;
         let r = match crate::panics::catch(|| s.build()) {
             Ok(r) => r,
             Err(m) => {
                 let first = m.lines().next().unwrap_or("the engine panicked").to_owned();
-                v.built(&Built {
+                let failed = Built {
                     pdf: v.pdf(),
                     hashes: Vec::new(),
                     history: 2,
@@ -272,7 +323,11 @@ impl Document {
                     diagnostics: vec![
                         json!({"severity": "error", "code": "engine", "message": first}),
                     ],
-                });
+                };
+                v.built(&failed);
+                if let Some(l) = &lsp {
+                    l.built(&failed);
+                }
                 v.building(false);
                 self.event(json!({"event": "failed", "build": b, "why": why, "message": first}));
                 return;
@@ -309,7 +364,7 @@ impl Document {
             (e, bytes)
         });
         let log = format!("{}.log", s.job.jobname);
-        v.built(&Built {
+        let built = Built {
             pdf,
             hashes: r.out.page_hashes.clone(),
             history: r.history(),
@@ -320,7 +375,11 @@ impl Document {
             origins: None,
             changed: None,
             diagnostics: diagnostics(s, &r, &log),
-        });
+        };
+        v.built(&built);
+        if let Some(l) = &lsp {
+            l.built(&built);
+        }
         self.origins_due = true;
         v.building(false);
         // (the records the build changed, stored now: only when a load
@@ -336,6 +395,42 @@ impl Document {
             "wall_ms": r.wall.as_secs_f64() * 1e3,
             "errors": errors,
         }));
+    }
+}
+
+/// The commands a document's host runs (`phitex.stop`, ...): the
+/// command's name and argument, its result; none: not the host's.
+pub type Commands = Box<dyn Fn(&str, &Value) -> Option<Result<Value, String>> + Send + Sync>;
+
+/// A document's language server's host: the editor's asks pushed to
+/// the viewer, `phitex.savePdf` answered with the viewer's PDF (no file
+/// system here: the client writes it), the rest the host's
+/// ([`Commands`]).
+struct DocumentHost {
+    viewer: Arc<Viewer>,
+    commands: Option<Commands>,
+}
+
+impl LspHost for DocumentHost {
+    fn ask(&self, a: Ask) {
+        self.viewer.push(a);
+    }
+
+    fn command(&self, name: &str, arg: &Value) -> Option<Result<Value, String>> {
+        if let Some(r) = self.commands.as_ref().and_then(|c| c(name, arg)) {
+            return Some(r);
+        }
+        match name {
+            "phitex.savePdf" => Some(match self.viewer.pdf() {
+                Some(pdf) => Ok(json!({"bytes": pdf.len(), "data": crate::view::base64(&pdf)})),
+                None => Err("no PDF yet".to_owned()),
+            }),
+            _ => None,
+        }
+    }
+
+    fn engine(&self) -> &'static str {
+        "wasm"
     }
 }
 
@@ -462,6 +557,83 @@ mod tests {
         assert_eq!(built["why"], "doc.tex (editor)", "{ev:?}");
         let p = d.request(&json!({"id": 8, "op": "pages"}));
         assert_eq!(p["json"]["pages"].as_array().map(Vec::len), Some(3), "{p}");
+    }
+
+    /// A document's language server (the wasm core's): told the cold
+    /// build's start, its progress (the same records as the viewer's
+    /// `progress` events) and its end; an editor's buffer given by
+    /// `didOpen` built at the next step, published.
+    #[test]
+    fn the_lsp_is_told_each_build() {
+        let mut d = Document::new(session(&pages(3), Arc::new(Memory::default())), "doc.tex");
+        let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let s = sent.clone();
+        let server = d.lsp(Box::new(move |v| lock(&s).push(v.clone())), None);
+        server.handle(
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "rootUri": "file:///p", "capabilities": {"window": {"workDoneProgress": true}}}}),
+        );
+        server.handle(&json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
+        let ev = d.step();
+        let progress: Vec<&Value> = ev.iter().filter(|e| e["event"] == "progress").collect();
+        assert!(
+            progress.iter().any(|e| e["phase"] == "typesetting"
+                && e["pass"] == 1
+                && e["pages"].as_u64() >= Some(1)),
+            "the viewer's progress events: {ev:?}"
+        );
+        let got = lock(&sent).clone();
+        let of = |m: &str| {
+            got.iter()
+                .filter(|v| v["method"] == m)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let p = of("$/progress");
+        assert_eq!(p[0]["params"]["value"]["kind"], "begin", "{got:?}");
+        assert!(
+            p.iter().any(|v| v["params"]["value"]["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("Typesetting page"))),
+            "{got:?}"
+        );
+        let end = &p.last().unwrap()["params"]["value"];
+        assert_eq!(end["kind"], "end", "{got:?}");
+        assert!(
+            end["message"]
+                .as_str()
+                .is_some_and(|m| m.ends_with(", 3 pages")),
+            "{end}"
+        );
+        let st = of("phitex/status");
+        assert_eq!(st[0]["params"]["state"], "starting", "{st:?}");
+        let last = &st.last().unwrap()["params"];
+        assert_eq!(
+            (&last["state"], &last["pages"], &last["engine"]),
+            (&json!("ready"), &json!(3), &json!("wasm")),
+            "{st:?}"
+        );
+        assert_eq!(
+            of("textDocument/publishDiagnostics")[0]["params"]["uri"],
+            "file:///p/doc.tex"
+        );
+        // (the editor's buffer: a document opened is built at the next step)
+        lock(&sent).clear();
+        server.handle(
+            &json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": "file:///p/doc.tex", "text": pages(1)}}}),
+        );
+        let ev = d.step();
+        let built = ev.iter().find(|e| e["event"] == "build").expect("built");
+        assert_eq!(built["pages"], 1, "{ev:?}");
+        let got = lock(&sent).clone();
+        assert_eq!(got.last().unwrap()["params"]["pages"], 1, "{got:?}");
+        // (savePdf: no PDF of a DVI build without dvipdfmx here: said)
+        server.handle(
+            &json!({"jsonrpc": "2.0", "id": 5, "method": "workspace/executeCommand",
+            "params": {"command": "phitex.savePdf", "arguments": [{}]}}),
+        );
+        assert!(lock(&sent).last().unwrap()["error"]["message"].is_string());
     }
 
     /// `n` pages after a loop of `k` steps (each an assignment): a build

@@ -171,6 +171,12 @@ impl View {
         Ok(View { shared, url, lsp })
     }
 
+    /// The viewer's state, shared (the session's progress records reach
+    /// it from the engine's threads).
+    pub fn viewer(&self) -> Arc<Viewer> {
+        self.shared.viewer.clone()
+    }
+
     /// The page's address.
     pub fn url(&self) -> &str {
         &self.url

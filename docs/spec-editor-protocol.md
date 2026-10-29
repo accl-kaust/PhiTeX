@@ -136,7 +136,9 @@ and used at once (the client's answer is not waited for).
 - Sent at every change of `state` and after every build.
 - `starting`: after `initialized`, before the first build is in.
   `fetching` / `typesetting`: the record's phase (sent when it changes,
-  not per record). `ready`: a build is in without errors; `failed`: a
+  not per record), in the builds whose progress is shown (§2.2: the
+  first, and those past 400 ms; a keystroke's build goes from `ready` to
+  `ready`). `ready`: a build is in without errors; `failed`: a
   build is in with errors, or the engine failed. `stopped`: the server
   ends on `phitex.stop` (the last message before the exit: a client
   tells a stop from a crash by it).
@@ -264,13 +266,17 @@ stays the viewer's `outline` op: it has pages, not source places.)
   `closed`/`cursor` are `didOpen`/`didChange`/`didClose`/`phitex/cursor`,
   its `rebuild` is `phitex.rebuild`. The viewer's events stay on
   `phitex.event` (the viewer's `progress` among them).
-- The core makes the server with `phitex_live::lsp::Server::new(out, host)`,
-  `out` calling the import, `host` a `phitex_live::lsp::DocumentHost`
-  over the document's viewer (its asks pushed, commands it cannot run
-  given to the core: `stop`, `clearCache`, `cacheStats` and `savePdf`
-  as JSON events to the host), and attaches it with
-  `Document::attach_lsp`: the document then tells it each build's start,
-  progress records and end.
+- The core makes the server with `Document::lsp(out, commands)` before
+  it moves the document to its session thread: `out` calls the import
+  (from any thread), `commands` runs what the document cannot
+  (`phitex.stop`, `phitex.clearCache`, `phitex.cacheStats`: the core's
+  store and its host; none: `-32601`). The editor's asks go to the
+  document's viewer as `ph_push` sent them; the document tells the server
+  each build's start, its progress records and its end; `phitex.savePdf`
+  is answered with the viewer's PDF (`{bytes, data}`). The server's
+  `Server::show(file, line, col)` is what the core's `goto` becomes
+  (`window/showDocument`), its `Server::console(item)` what its console
+  items become.
 - `engine: "wasm"` in `phitex/status`.
 - Files: the core's files are `phitex_shelf::Files` with the host's
   `phitex.fetch` as its `PackSource` (§5).

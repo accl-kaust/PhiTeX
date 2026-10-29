@@ -152,7 +152,8 @@ pub(crate) fn clock() -> &'static dyn Clock {
 /// document; 0 when idle), the jobs finished in this evaluation and
 /// the jobs begun so far (a run is a job: a node run again counts
 /// again). Workers only store into atomics (relaxed), once at a job's
-/// start and once at its end.
+/// start and once at its end. A reader may also be told each new page
+/// as it is reached ([`Progress::on_page`]).
 #[derive(Debug)]
 pub struct Progress {
     slots: Box<[AtomicU64]>,
@@ -160,6 +161,19 @@ pub struct Progress {
     total: AtomicU64,
     /// The highest page number a finisher reached in this evaluation.
     page: AtomicU64,
+    /// The evaluations begun (the first 1).
+    evaluations: AtomicU64,
+    on_page: OnceLock<PageHook>,
+}
+
+/// What is told of a new page: the evaluation (as
+/// [`Progress::evaluation`] counts) and the page reached.
+pub struct PageHook(Box<dyn Fn(u64, u64) + Send + Sync>);
+
+impl std::fmt::Debug for PageHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PageHook")
+    }
 }
 
 impl Progress {
@@ -176,7 +190,24 @@ impl Progress {
             done: AtomicU64::new(0),
             total: AtomicU64::new(0),
             page: AtomicU64::new(0),
+            evaluations: AtomicU64::new(0),
+            on_page: OnceLock::new(),
         }
+    }
+
+    /// `hook(evaluation, page)` called, on the finisher's thread, each
+    /// time an evaluation reaches a page beyond the highest it had
+    /// reached (once per progress: a second hook is not set; whether it
+    /// was).
+    pub fn on_page(&self, hook: Box<dyn Fn(u64, u64) + Send + Sync>) -> bool {
+        self.on_page.set(PageHook(hook)).is_ok()
+    }
+
+    /// The evaluations begun so far (0: none; each settle of a build
+    /// is one).
+    #[must_use]
+    pub fn evaluation(&self) -> u64 {
+        self.evaluations.load(Ordering::Relaxed)
     }
 
     /// A slot's value: `op` (1 a text node, 2 a box put, 3 an output
@@ -207,12 +238,17 @@ impl Progress {
         self.done.store(0, Ordering::Relaxed);
         self.total.store(0, Ordering::Relaxed);
         self.page.store(0, Ordering::Relaxed);
+        self.evaluations.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A finisher reached page `n` (its ordinary pages counted, the
     /// first 1).
     pub(crate) fn note_page(&self, n: u64) {
-        self.page.fetch_max(n, Ordering::Relaxed);
+        if self.page.fetch_max(n, Ordering::Relaxed) < n
+            && let Some(h) = self.on_page.get()
+        {
+            (h.0)(self.evaluations.load(Ordering::Relaxed), n);
+        }
     }
 
     /// The highest page a finisher reached in this evaluation (0: none

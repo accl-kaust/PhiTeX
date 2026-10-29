@@ -28,7 +28,8 @@
 //!   the host tells it (`{pages, edits}`: the pages whose origins changed,
 //!   from 0, and the edits since the last as `[file, at, delta]`, the
 //!   viewer shifting the offsets it keeps, [`OriginsChanged`]),
-//!   `preparing`, `diagnostics`,
+//!   `preparing`, `progress` (the build's progress record:
+//!   docs/spec-editor-protocol.md §2.1, [`crate::progress`]), `diagnostics`,
 //!   `console` (each message the host shows, and its status line), `diff`,
 //!   `written`, and `reveal` (forward search: `{"event":"reveal","page":K,
 //!   "text":…,"texts":[…],"file":…,"line":L}`, the editor's cursor at line
@@ -516,6 +517,12 @@ impl Viewer {
         std::mem::take(&mut *lock(&self.asks))
     }
 
+    /// A progress record of the build under way (the session's
+    /// [`crate::progress::Meter`]): `{"event":"progress", ...}`.
+    pub fn progress(&self, p: &crate::progress::Progress) {
+        self.emit(&p.event().to_string());
+    }
+
     /// A build began (`true`) or ended.
     pub fn building(&self, on: bool) {
         self.building.store(on, Ordering::Relaxed);
@@ -850,7 +857,7 @@ fn origins_json(o: &Origins, k: usize, files_from: usize) -> Value {
 }
 
 /// `b` in base64 (RFC 4648, padded).
-fn base64(b: &[u8]) -> String {
+pub fn base64(b: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(b.len().div_ceil(3) * 4);
     for c in b.chunks(3) {

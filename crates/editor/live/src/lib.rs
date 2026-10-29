@@ -20,6 +20,10 @@
 //!   kpathsea, from its files and a font index it ships.
 //! - [`document`]: the three driven by a host that calls in (the wasm
 //!   core): requests, the editor's changes, a step that builds.
+//! - [`lsp`]: the language server every editor speaks, without its
+//!   transport (docs/spec-editor-protocol.md); [`progress`], a build's
+//!   progress records, which the viewer's `progress` event and the
+//!   server's `$/progress` and `phitex/status` are made from.
 //! - [`tex`], [`problems`], [`failure`], [`warnings`], [`panics`]: what the
 //!   session says of a build (the engines, its problems, its failures and
 //!   warnings for a reader, a panic caught).
@@ -46,8 +50,10 @@ pub mod document;
 pub mod dvipdf;
 pub mod failure;
 pub mod host;
+pub mod lsp;
 pub mod panics;
 pub mod problems;
+pub mod progress;
 pub mod session;
 pub mod synctex;
 pub mod tex;

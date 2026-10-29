@@ -56,6 +56,11 @@ impl Edits {
         }
     }
 
+    /// The main file's name (from the project's directory).
+    pub fn main(&self) -> &str {
+        &self.main
+    }
+
     /// File `file`'s version from now on given to the session: its
     /// buffer, else as on disk (the host's).
     pub fn set(&self, s: &mut Session, file: &str) {

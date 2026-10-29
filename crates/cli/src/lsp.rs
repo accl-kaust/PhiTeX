@@ -3,9 +3,9 @@
 //! Code). The same session as `phitex watch`, its standard input and
 //! output speaking the Language Server Protocol (JSON-RPC 2.0, each
 //! message after a `Content-Length` header) instead of keys and a status
-//! line; nothing else is written to standard output. The terminal's
-//! messages go to the viewer's console, as always, and to the editor as
-//! `window/logMessage`; the viewer still runs, in the browser.
+//! line; nothing else is written to standard output. The server is
+//! `phitex_live::lsp::Server` (docs/spec-editor-protocol.md), the same the
+//! wasm core runs; this is its transport and its host on this machine:
 //!
 //! - **Start.** `initialize` comes first ([`Lsp::begin`]): its root
 //!   (`rootUri`, else the first of `workspaceFolders`) is where the watch
@@ -14,50 +14,24 @@
 //!   root with a `\documentclass` (`main.tex` among several), else the
 //!   first `.tex` document opened (it, if it has a `\documentclass`, else
 //!   the one `.tex` file with one beside it): an editor's root may be the
-//!   repository's, above the TeX project's folder. Answered
-//!   ([`Lsp::accept`]) with: text synchronised incrementally, positions
-//!   in UTF-16 (the viewer's `edit` counts in it already), and the
-//!   commands `phitex.openViewer`, `phitex.rebuild` and
-//!   `phitex.showOnPage`. The viewer's address is logged.
-//! - **Buffers.** `didOpen`, `didChange` (ranged or whole) and `didClose`
-//!   are what the viewer's `set_file` and `edit` are ([`Ask::SetFile`],
-//!   [`Ask::Edit`], and [`Ask::Closed`]: the file as on disk again),
-//!   asked of the watch the way the viewer asks: while a file is open in
-//!   the editor its buffer owns it ([`Lsp::owns`]), the disk's changes of
-//!   it are not read until it is closed. `didSave` brings nothing the
-//!   buffer did not.
-//! - **After a build** ([`Lsp::built`]): `textDocument/publishDiagnostics`
-//!   for each file with problems (the viewer's problems list: errors,
-//!   warnings, the engine's diagnostics; one without a place on the main
-//!   file's first line), an empty list for the files that had some and no
-//!   longer do, and for the main file always (the editor knows a build
-//!   is in). While a build runs, `$/progress` with the watch's phase
-//!   (a token made by `window/workDoneProgress/create`, where the client
-//!   allows it).
-//! - **Inverse search.** The viewer's `source` (a double-click, an
-//!   error's place) is `window/showDocument` with the place selected and
-//!   the focus taken ([`Lsp::show`]); the `--editor` command where the
-//!   client cannot show documents.
-//! - **Forward search.** The client's notification `phitex/cursor
-//!   {textDocument: {uri}, position}` (sent as the cursor moves, debounced
-//!   by the client), or the command `phitex.showOnPage` with the same
-//!   argument, is [`Ask::Cursor`]: the watch finds the place on the pages
-//!   and the viewer reveals it (`view.rs`'s `reveal` event).
-//! - **End.** `shutdown` is answered; `exit`, or the end of standard
-//!   input, ends the watch as `q` does.
+//!   repository's, above the TeX project's folder. Answered once the
+//!   watch runs ([`Lsp::accept`]), or with why it cannot.
+//! - **Messages.** Read on a thread of their own ([`Lsp::serve`]) and
+//!   handed to the server; what it asks of the watch ([`Ask`]) is queued
+//!   and the watch woken ([`Lsp::on_ask`], [`Lsp::take_asks`]).
+//! - **The host's commands**: `phitex.openViewer` (the browser opened on
+//!   the viewer).
+//! - **End.** `exit`, or the end of standard input, ends the watch as `q`
+//!   does.
 
-use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use phitex_live::lsp::{LspHost, Server, path_of};
 use serde_json::{Value, json};
 
 use crate::view::{Ask, Built};
-
-/// The commands the server runs (`workspace/executeCommand`).
-pub const COMMANDS: [&str; 3] = ["phitex.openViewer", "phitex.rebuild", "phitex.showOnPage"];
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -92,113 +66,24 @@ fn read(r: &mut impl BufRead) -> Option<Value> {
     }
 }
 
-/// `p` as a `file:` URI (its bytes past the unreserved ones and `/`
-/// percent-encoded).
-pub fn uri_of(p: &Path) -> String {
-    let mut s = String::from("file://");
-    for &b in p.to_string_lossy().as_bytes() {
-        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
-            s.push(char::from(b));
-        } else {
-            s.push_str(&format!("%{b:02X}"));
-        }
-    }
-    s
+/// `v` written to standard output after its `Content-Length` header.
+fn write(out: &Mutex<std::io::Stdout>, v: &Value) {
+    let body = v.to_string();
+    let mut o = lock(out);
+    let _ = write!(o, "Content-Length: {}\r\n\r\n{body}", body.len());
+    let _ = o.flush();
 }
 
-/// The path of a `file:` URI (none: another scheme).
-pub fn path_of(uri: &str) -> Option<PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-    let b = rest.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let hex = |c: u8| char::from(c).to_digit(16);
-        if b[i] == b'%'
-            && let (Some(&h), Some(&l)) = (b.get(i + 1), b.get(i + 2))
-            && let (Some(h), Some(l)) = (hex(h), hex(l))
-        {
-            out.push(u8::try_from(h * 16 + l).unwrap_or(b'?'));
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    Some(PathBuf::from(String::from_utf8_lossy(&out).into_owned()))
-}
-
-/// The UTF-16 offset in `text` of LSP position `line`, `character` (a
-/// character past the line's end is its end).
-pub fn offset(text: &str, line: usize, character: usize) -> usize {
-    let mut off = 0;
-    let mut rest = text;
-    for _ in 0..line {
-        match rest.find('\n') {
-            Some(i) => {
-                off += rest[..=i].encode_utf16().count();
-                rest = &rest[i + 1..];
-            }
-            None => return off + rest.encode_utf16().count(),
-        }
-    }
-    let l = rest.split('\n').next().unwrap_or("");
-    off + character.min(l.encode_utf16().count())
-}
-
-struct Shared {
-    out: Mutex<std::io::Stdout>,
-    /// The watch's directory (where its file names start) and main file.
-    root: Mutex<(PathBuf, String)>,
-    /// What the client said it can do: show documents, make progress
-    /// tokens.
-    show_document: bool,
-    work_done: bool,
-    /// The documents the editor has open, by the watch's name: their
-    /// texts, kept as the editor changes them (its positions are in them).
-    docs: Mutex<HashMap<String, String>>,
+/// The watch, as the server's host: its asks queued and the watch woken.
+struct Watch {
     asks: Mutex<Vec<Ask>>,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
-    /// The URIs of the last diagnostics published, not empty.
-    published: Mutex<HashSet<String>>,
-    /// The token of the progress shown now, if one is.
-    progress: Mutex<Option<String>>,
+    /// The watch's directory (where its file names start).
+    root: Mutex<PathBuf>,
     viewer: Mutex<Option<String>>,
-    next: AtomicU64,
 }
 
-impl Shared {
-    fn send(&self, v: &Value) {
-        let body = v.to_string();
-        let mut o = lock(&self.out);
-        let _ = write!(o, "Content-Length: {}\r\n\r\n{body}", body.len());
-        let _ = o.flush();
-    }
-
-    fn notify(&self, method: &str, params: Value) {
-        self.send(&json!({"jsonrpc": "2.0", "method": method, "params": params}));
-    }
-
-    fn request(&self, method: &str, params: Value) {
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
-        self.send(&json!({"jsonrpc": "2.0", "id": format!("phitex-{id}"), "method": method, "params": params}));
-    }
-
-    fn reply(&self, id: &Value, result: Value) {
-        self.send(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
-    }
-
-    fn fail(&self, id: &Value, code: i32, message: &str) {
-        self.send(
-            &json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
-        );
-    }
-
-    fn log(&self, kind: u8, text: &str) {
-        self.notify("window/logMessage", json!({"type": kind, "message": text}));
-    }
-
+impl LspHost for Watch {
     fn ask(&self, a: Ask) {
         lock(&self.asks).push(a);
         if let Some(w) = lock(&self.wake).as_ref() {
@@ -206,54 +91,34 @@ impl Shared {
         }
     }
 
-    /// The watch's name of the file at `uri` (from its directory), if it
-    /// is in it.
-    fn name(&self, uri: &str) -> Option<String> {
-        let p = path_of(uri)?;
-        let root = lock(&self.root).0.clone();
-        let rel = p
-            .strip_prefix(&root)
-            .ok()
-            .map(Path::to_path_buf)
-            .or_else(|| {
-                let c = p.canonicalize().ok()?;
-                c.strip_prefix(&root).ok().map(Path::to_path_buf)
-            })?;
-        let n = rel.to_string_lossy().into_owned();
-        (!n.is_empty() && !n.starts_with('.') && !n.contains("..")).then_some(n)
+    fn command(&self, name: &str, _arg: &Value) -> Option<Result<Value, String>> {
+        match name {
+            "phitex.openViewer" => Some(match lock(&self.viewer).clone() {
+                Some(url) if crate::view::open_browser(&url) => Ok(json!(url)),
+                Some(url) => Err(format!("could not start a browser: open {url}")),
+                None => Err("no viewer (--no-view)".to_owned()),
+            }),
+            _ => None,
+        }
     }
 
-    /// The URI of the file a diagnostic or the viewer names (from the
-    /// watch's directory, or absolute; `name.tex` for a `name` that is
-    /// not there).
-    fn uri(&self, file: &str) -> String {
-        let root = lock(&self.root).0.clone();
-        let f = file.trim_start_matches("./");
-        let p = root.join(f);
-        let p = if p.exists() || Path::new(f).extension().is_some() {
-            p
-        } else {
-            root.join(format!("{f}.tex"))
-        };
-        uri_of(&p)
+    fn canonical(&self, path: &Path) -> Option<PathBuf> {
+        path.canonicalize().ok()
     }
 
-    /// The `{textDocument, position}` of `params` as the watch's file,
-    /// line and UTF-16 column.
-    fn place(&self, params: &Value) -> Option<(String, usize, usize)> {
-        let file = self.name(params["textDocument"]["uri"].as_str()?)?;
-        let n = |v: &Value| v.as_u64().and_then(|n| usize::try_from(n).ok());
-        let line = n(&params["position"]["line"])?;
-        let col = n(&params["position"]["character"])?;
-        Some((file, line, col))
+    fn exists(&self, name: &str) -> bool {
+        lock(&self.root).join(name).exists()
+    }
+
+    fn engine(&self) -> &'static str {
+        "native"
     }
 }
 
 /// The watch's language server.
 pub struct Lsp {
-    shared: Arc<Shared>,
-    /// `initialize`'s id, until answered.
-    init: Mutex<Option<Value>>,
+    server: Arc<Server>,
+    watch: Arc<Watch>,
     /// Standard input, as `initialize` left it (what came after it may
     /// be read already), until served.
     input: Mutex<Option<BufReader<std::io::Stdin>>>,
@@ -289,20 +154,19 @@ impl Lsp {
     /// before it as the protocol says), enter its root, and name the main
     /// file in `file` if nothing has (`phitex.toml` may yet).
     pub fn begin(file: &mut Option<String>) -> Lsp {
+        let out = Arc::new(Mutex::new(std::io::stdout()));
         let mut input = BufReader::new(std::io::stdin());
-        let shared = |show_document, work_done| Shared {
-            out: Mutex::new(std::io::stdout()),
-            root: Mutex::new((PathBuf::new(), String::new())),
-            show_document,
-            work_done,
-            docs: Mutex::default(),
+        let watch = Arc::new(Watch {
             asks: Mutex::default(),
             wake: Mutex::new(None),
-            published: Mutex::default(),
-            progress: Mutex::new(None),
+            root: Mutex::new(PathBuf::new()),
             viewer: Mutex::new(None),
-            next: AtomicU64::new(1),
-        };
+        });
+        let o = out.clone();
+        let server = Arc::new(Server::new(
+            Box::new(move |v: &Value| write(&o, v)),
+            watch.clone(),
+        ));
         loop {
             let Some(m) = read(&mut input) else {
                 std::process::exit(crate::EXIT_FAILED);
@@ -312,17 +176,16 @@ impl Lsp {
                 std::process::exit(crate::EXIT_FAILED);
             }
             if method != "initialize" {
-                if m.get("id").is_some() {
-                    shared(false, false).fail(&m["id"], -32002, "not initialized");
+                if let Some(id) = m.get("id") {
+                    write(
+                        &out,
+                        &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32002, "message": "not initialized"}}),
+                    );
                 }
                 continue;
             }
+            server.initialize(&m);
             let p = &m["params"];
-            let caps = &p["capabilities"]["window"];
-            let s = shared(
-                caps["showDocument"]["support"].as_bool().unwrap_or(false),
-                caps["workDoneProgress"].as_bool().unwrap_or(false),
-            );
             // (a file named on the command line is the launching
             // directory's, whatever the root)
             if let Some(f) = file.as_mut()
@@ -339,11 +202,7 @@ impl Lsp {
             if let Some(r) = &root
                 && let Err(e) = std::env::set_current_dir(r)
             {
-                s.fail(
-                    &m["id"],
-                    -32603,
-                    &format!("can't enter {}: {e}", r.display()),
-                );
+                server.refuse(&format!("can't enter {}: {e}", r.display()));
                 std::process::exit(crate::EXIT_FAILED);
             }
             let here = std::env::current_dir().unwrap_or_default();
@@ -358,8 +217,8 @@ impl Lsp {
                     .or_else(|| find_main(&here));
             }
             return Lsp {
-                shared: Arc::new(s),
-                init: Mutex::new(Some(m["id"].clone())),
+                server,
+                watch,
                 input: Mutex::new(Some(input)),
                 wants_main: file.is_none() && !configured,
                 pending: Mutex::default(),
@@ -370,13 +229,7 @@ impl Lsp {
     /// The watch cannot run: `initialize` answered with why, or, answered
     /// already, the editor shown it; the watch ends.
     pub fn refuse(&self, e: &str) -> ! {
-        let e = format!("phitex watch: {e}");
-        match lock(&self.init).take() {
-            Some(id) => self.shared.fail(&id, -32603, &e),
-            None => self
-                .shared
-                .notify("window/showMessage", json!({"type": 1, "message": e})),
-        }
+        self.server.refuse(&format!("phitex watch: {e}"));
         std::process::exit(crate::EXIT_FAILED);
     }
 
@@ -394,8 +247,8 @@ impl Lsp {
     /// first; what the editor sends meanwhile is served once the watch
     /// runs.
     pub fn main_from_open(&self) -> String {
-        self.answer_init();
-        let s = &self.shared;
+        let s = &self.server;
+        s.answer_init();
         s.log(
             3,
             "phitex watch: no main file here (no argument, phitex.toml or initializationOptions.main): the first .tex document opened names it",
@@ -411,7 +264,7 @@ impl Lsp {
             match m["method"].as_str().unwrap_or("") {
                 "exit" => std::process::exit(crate::EXIT_FAILED),
                 "shutdown" => {
-                    s.reply(&m["id"], Value::Null);
+                    s.handle(&m);
                     continue;
                 }
                 "textDocument/didOpen" => {}
@@ -436,9 +289,12 @@ impl Lsp {
             if let Some(n) = find_main(&dir) {
                 break dir.join(n);
             }
-            s.notify(
-                "window/showMessage",
-                json!({"type": 2, "message": format!("phitex watch: {} has no \\documentclass, nor one .tex file beside it: open the main file", path.display())}),
+            s.show_message(
+                2,
+                &format!(
+                    "phitex watch: {} has no \\documentclass, nor one .tex file beside it: open the main file",
+                    path.display()
+                ),
             );
         };
         *lock(&self.input) = Some(input);
@@ -446,153 +302,69 @@ impl Lsp {
         main.to_string_lossy().into_owned()
     }
 
-    /// `initialize` answered with the server's capabilities (once).
-    fn answer_init(&self) {
-        if let Some(id) = lock(&self.init).take() {
-            self.shared.reply(
-                &id,
-                json!({
-                    "capabilities": {
-                        "positionEncoding": "utf-16",
-                        "textDocumentSync": {"openClose": true, "change": 2, "save": {"includeText": false}},
-                        "executeCommandProvider": {"commands": COMMANDS},
-                    },
-                    "serverInfo": {"name": "phitex", "version": env!("CARGO_PKG_VERSION")},
-                }),
-            );
-        }
-    }
-
     /// `initialize` answered: the watch runs in `root` on `main`.
     pub fn accept(&self, root: &Path, main: &str) {
-        *lock(&self.shared.root) = (
-            root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
-            main.to_owned(),
-        );
-        self.answer_init();
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        root.clone_into(&mut lock(&self.watch.root));
+        self.server.accept(&root, main);
     }
 
     /// Call `wake` when the editor asks the watch for something.
     pub fn on_ask(&self, wake: Box<dyn Fn() + Send>) {
-        *lock(&self.shared.wake) = Some(wake);
+        *lock(&self.watch.wake) = Some(wake);
     }
 
     /// What the editor asked for since last taken.
     pub fn take_asks(&self) -> Vec<Ask> {
-        std::mem::take(&mut *lock(&self.shared.asks))
+        std::mem::take(&mut *lock(&self.watch.asks))
     }
 
     /// Whether file `name` is open in the editor (its buffer owns it: the
     /// disk's changes of it are not read).
     pub fn owns(&self, name: &str) -> bool {
-        lock(&self.shared.docs).contains_key(name)
+        self.server.owns(name)
     }
 
     /// The viewer is at `url`: logged, and opened by `phitex.openViewer`.
     pub fn viewer(&self, url: &str) {
-        *lock(&self.shared.viewer) = Some(url.to_owned());
-        self.shared.log(
-            3,
-            &format!("phitex watch: the viewer is at {url} (phitex.openViewer opens it)"),
-        );
+        *lock(&self.watch.viewer) = Some(url.to_owned());
+        self.server.viewer(url);
+    }
+
+    /// The server, as the session's progress and the watch's builds
+    /// reach it.
+    pub fn server(&self) -> &Arc<Server> {
+        &self.server
     }
 
     /// Where the terminal's messages go (`Ui::tap`, beside the viewer's
-    /// console): lines, notes, warnings and errors logged; the spinner's
-    /// text as the build's progress.
+    /// console): lines, notes, warnings and errors logged.
     pub fn console(&self) -> Box<dyn Fn(&Value) + Send> {
-        let s = self.shared.clone();
-        Box::new(move |item: &Value| {
-            let text = item["text"].as_str().unwrap_or("");
-            match item["kind"].as_str().unwrap_or("") {
-                "error" => s.log(1, text),
-                "warning" => s.log(2, text),
-                "note" => s.log(3, text),
-                "line" => s.log(4, text),
-                "busy" if s.work_done => {
-                    let mut p = lock(&s.progress);
-                    match (&*p, text.is_empty()) {
-                        (None, false) => {
-                            let token =
-                                format!("phitex-build-{}", s.next.fetch_add(1, Ordering::Relaxed));
-                            s.request("window/workDoneProgress/create", json!({"token": token}));
-                            s.notify("$/progress", json!({"token": token, "value": {"kind": "begin", "title": "PhiTeX", "message": text}}));
-                            *p = Some(token);
-                        }
-                        (Some(t), false) => {
-                            s.notify(
-                                "$/progress",
-                                json!({"token": t, "value": {"kind": "report", "message": text}}),
-                            );
-                        }
-                        (Some(t), true) => {
-                            s.notify("$/progress", json!({"token": t, "value": {"kind": "end"}}));
-                            *p = None;
-                        }
-                        (None, true) => {}
-                    }
-                }
-                _ => {}
-            }
-        })
+        let s = self.server.clone();
+        Box::new(move |item: &Value| s.console(item))
     }
 
-    /// A build is in: its problems published by file (the viewer's items,
-    /// `watch.rs`'s `diagnostics`), those of files that had some and no
-    /// longer do cleared, the main file's always.
+    /// A build began.
+    pub fn building(&self) {
+        self.server.building();
+    }
+
+    /// A build is in ([`Server::built`]).
     pub fn built(&self, b: &Built) {
-        let s = &self.shared;
-        let main = lock(&s.root).1.clone();
-        let mut by: HashMap<String, Vec<Value>> = HashMap::new();
-        by.insert(s.uri(&main), Vec::new());
-        for d in &b.diagnostics {
-            let file = d["file"].as_str().unwrap_or(&main);
-            by.entry(s.uri(file)).or_default().push(lsp_diagnostic(d));
-        }
-        let mut published = lock(&s.published);
-        for gone in published.iter() {
-            by.entry(gone.clone()).or_default();
-        }
-        published.clear();
-        for (uri, ds) in by {
-            if !ds.is_empty() {
-                published.insert(uri.clone());
-            }
-            s.notify(
-                "textDocument/publishDiagnostics",
-                json!({"uri": uri, "diagnostics": ds}),
-            );
-        }
+        self.server.built(b);
     }
 
     /// The editor shows `file` (the watch's name) at `line` and character
-    /// `col` (from 1), the place selected and the focus taken: whether the
-    /// client can (else the `--editor` command opens it).
+    /// `col` (from 1): whether the client can (else the `--editor` command
+    /// opens it).
     pub fn show(&self, file: &str, line: usize, col: usize) -> bool {
-        let s = &self.shared;
-        if !s.show_document {
-            return false;
-        }
-        let line0 = line.saturating_sub(1);
-        // (characters as UTF-16 units, where the editor's buffer is known)
-        let mut ch = col.saturating_sub(1);
-        if let Some(d) = lock(&s.docs).get(file)
-            && let Some(l) = d.lines().nth(line0)
-        {
-            ch = l.chars().take(ch).map(char::len_utf16).sum();
-        }
-        let at = json!({"line": line0, "character": ch});
-        s.request(
-            "window/showDocument",
-            json!({"uri": s.uri(file), "takeFocus": true, "selection": {"start": at, "end": at}}),
-        );
-        true
+        self.server.show(file, line, col)
     }
 
     /// Serve the editor's messages on a thread of their own; `quit` ends
     /// the watch (`exit`, or the end of standard input).
     pub fn serve(&self, quit: Box<dyn Fn() + Send>) {
-        let s = self.shared.clone();
+        let s = self.server.clone();
         let input = lock(&self.input).take();
         let pending = std::mem::take(&mut *lock(&self.pending));
         std::thread::Builder::new()
@@ -600,14 +372,14 @@ impl Lsp {
             .spawn(move || {
                 // (what came while the main file was waited for first)
                 for m in &pending {
-                    if !message(&s, m) {
+                    if !s.handle(m) {
                         quit();
                         return;
                     }
                 }
                 let mut input = input.unwrap_or_else(|| BufReader::new(std::io::stdin()));
                 while let Some(m) = read(&mut input) {
-                    if !message(&s, &m) {
+                    if !s.handle(&m) {
                         break;
                     }
                 }
@@ -615,156 +387,6 @@ impl Lsp {
             })
             .expect("a thread");
     }
-}
-
-/// A viewer problem (`watch.rs`'s `diagnostics`) as an LSP diagnostic:
-/// its line, the culprit's columns where it has an excerpt (counted in
-/// UTF-16 in the excerpt's line), its help under its message.
-fn lsp_diagnostic(d: &Value) -> Value {
-    let n = |v: &Value| v.as_u64().and_then(|n| usize::try_from(n).ok());
-    let line = n(&d["line"]).unwrap_or(1).saturating_sub(1);
-    let (mut a, mut b) = (0, 0);
-    if let Some(t) = d["excerpt"]["text"].as_str() {
-        let start = n(&d["excerpt"]["start"]).unwrap_or(0);
-        let len = n(&d["excerpt"]["len"]).unwrap_or(0);
-        let u = |k: usize| -> usize { t.chars().take(k).map(char::len_utf16).sum() };
-        (a, b) = (u(start), u(start + len));
-    }
-    let mut message = d["message"].as_str().unwrap_or("").to_owned();
-    for h in d["help"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
-        message.push('\n');
-        message.push_str(h);
-    }
-    if message.is_empty() {
-        "a problem".clone_into(&mut message);
-    }
-    let severity = match d["severity"].as_str() {
-        Some("error") => 1,
-        Some("warning") => 2,
-        _ => 3,
-    };
-    json!({
-        "range": {"start": {"line": line, "character": a}, "end": {"line": line, "character": b}},
-        "severity": severity,
-        "code": d["code"],
-        "source": "phitex",
-        "message": message,
-    })
-}
-
-/// One message from the editor handled; false: it said to end.
-fn message(s: &Shared, m: &Value) -> bool {
-    let method = m["method"].as_str().unwrap_or("");
-    let id = m.get("id");
-    let p = &m["params"];
-    match method {
-        // (a response to one of ours, or a notification of no interest)
-        ""
-        | "initialized"
-        | "$/cancelRequest"
-        | "$/setTrace"
-        | "textDocument/didSave"
-        | "workspace/didChangeConfiguration"
-        | "workspace/didChangeWatchedFiles" => {}
-        "exit" => return false,
-        "shutdown" => {
-            if let Some(id) = id {
-                s.reply(id, Value::Null);
-            }
-        }
-        "textDocument/didOpen" => {
-            let d = &p["textDocument"];
-            if let (Some(uri), Some(text)) = (d["uri"].as_str(), d["text"].as_str())
-                && let Some(file) = s.name(uri)
-            {
-                lock(&s.docs).insert(file.clone(), text.to_owned());
-                s.ask(Ask::SetFile {
-                    file,
-                    text: text.to_owned(),
-                });
-            }
-        }
-        "textDocument/didChange" => {
-            let Some(file) = p["textDocument"]["uri"].as_str().and_then(|u| s.name(u)) else {
-                return true;
-            };
-            let n = |v: &Value| {
-                v.as_u64()
-                    .and_then(|n| usize::try_from(n).ok())
-                    .unwrap_or(0)
-            };
-            for c in p["contentChanges"].as_array().into_iter().flatten() {
-                let text = c["text"].as_str().unwrap_or("").to_owned();
-                let mut docs = lock(&s.docs);
-                let Some(d) = docs.get_mut(&file) else { break };
-                if c.get("range").is_some() {
-                    let r = &c["range"];
-                    let start = offset(d, n(&r["start"]["line"]), n(&r["start"]["character"]));
-                    let end = offset(d, n(&r["end"]["line"]), n(&r["end"]["character"]));
-                    *d = phitex_live::watch::splice_utf16(d, start, end, &text);
-                    drop(docs);
-                    s.ask(Ask::Edit {
-                        file: file.clone(),
-                        start,
-                        end,
-                        text,
-                    });
-                } else {
-                    d.clone_from(&text);
-                    drop(docs);
-                    s.ask(Ask::SetFile {
-                        file: file.clone(),
-                        text,
-                    });
-                }
-            }
-        }
-        "textDocument/didClose" => {
-            if let Some(file) = p["textDocument"]["uri"].as_str().and_then(|u| s.name(u))
-                && lock(&s.docs).remove(&file).is_some()
-            {
-                s.ask(Ask::Closed { file });
-            }
-        }
-        "phitex/cursor" => {
-            if let Some((file, line, col)) = s.place(p) {
-                s.ask(Ask::Cursor { file, line, col });
-            }
-        }
-        "workspace/executeCommand" => {
-            let Some(id) = id else { return true };
-            match p["command"].as_str().unwrap_or("") {
-                "phitex.openViewer" => match lock(&s.viewer).clone() {
-                    Some(url) if crate::view::open_browser(&url) => s.reply(id, json!(url)),
-                    Some(url) => s.fail(id, -32603, &format!("could not start a browser: open {url}")),
-                    None => s.fail(id, -32603, "no viewer (--no-view)"),
-                },
-                "phitex.rebuild" => {
-                    s.ask(Ask::Rebuild);
-                    s.reply(id, Value::Null);
-                }
-                "phitex.showOnPage" => match s.place(&p["arguments"][0]) {
-                    Some((file, line, col)) => {
-                        s.ask(Ask::Cursor { file, line, col });
-                        s.reply(id, Value::Null);
-                    }
-                    None => s.fail(id, -32602, "phitex.showOnPage: {textDocument: {uri}, position} of a file of the project"),
-                },
-                c => s.fail(id, -32601, &format!("no command {c:?} here")),
-            }
-        }
-        _ => {
-            if let Some(id) = id {
-                s.fail(id, -32601, &format!("no method {method:?} here"));
-            }
-        }
-    }
-    true
 }
 
 #[cfg(test)]
@@ -782,29 +404,5 @@ mod tests {
         assert_eq!(read(&mut r).unwrap()["method"], "initialize");
         assert_eq!(read(&mut r).unwrap(), json!({}));
         assert!(read(&mut r).is_none());
-    }
-
-    #[test]
-    fn uris() {
-        let p = Path::new("/home/a b/ü.tex");
-        let u = uri_of(p);
-        assert_eq!(u, "file:///home/a%20b/%C3%BC.tex");
-        assert_eq!(path_of(&u).unwrap(), p);
-        assert_eq!(
-            path_of("file://localhost/x/y.tex").unwrap(),
-            Path::new("/x/y.tex")
-        );
-        assert!(path_of("untitled:1").is_none());
-    }
-
-    #[test]
-    fn positions() {
-        let t = "ab\nc😀d\n\nlast";
-        assert_eq!(offset(t, 0, 0), 0);
-        assert_eq!(offset(t, 1, 0), 3);
-        assert_eq!(offset(t, 1, 3), 6);
-        assert_eq!(offset(t, 1, 99), 7);
-        assert_eq!(offset(t, 3, 2), 11);
-        assert_eq!(offset(t, 9, 0), 13);
     }
 }

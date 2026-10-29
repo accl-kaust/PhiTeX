@@ -1136,6 +1136,105 @@ fn watch_lsp() {
     assert!(status.success(), "the watch ended with {status}");
 }
 
+/// `phitex watch --lsp`'s progress (docs/spec-editor-protocol.md §2):
+/// the cold build's `$/progress` (a token made, begun with the title
+/// `PhiTeX`, ended with what it made) and `phitex/status` (`starting`, then
+/// `ready` with its pages, the native engine); the viewer's own
+/// `progress` events come from the same records (here: the editor's).
+#[test]
+fn watch_lsp_progress() {
+    use serde_json::json;
+    let _one = one();
+    let text = plain() + "Alpha.\\vfill\\eject Bravo.\\vfill\\eject Charlie.\\bye\n";
+    let dir = scratch("watch-lsp-progress");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the document");
+    let root = dir.canonicalize().expect("the directory");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--lsp",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "4",
+            "doc.tex",
+        ])
+        .env("XDG_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut to = child.stdin.take().expect("its input");
+    let rx = lsp_messages(child.stdout.take().expect("its output"));
+    let mut seen = Vec::new();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null,
+            "rootUri": format!("file://{}", root.display()),
+            "capabilities": {"window": {"workDoneProgress": true}},
+        }}),
+    );
+    lsp_until(&rx, &mut seen, |m| m["id"] == 1);
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    );
+    let ready = lsp_until(&rx, &mut seen, |m| {
+        m["method"] == "phitex/status" && m["params"]["state"] == "ready"
+    });
+    assert_eq!(ready["params"]["pages"], 3, "{ready}");
+    assert_eq!(ready["params"]["errors"], 0, "{ready}");
+    assert_eq!(ready["params"]["engine"], "native", "{ready}");
+    let create = seen
+        .iter()
+        .find(|m| m["method"] == "window/workDoneProgress/create")
+        .expect("a progress token made");
+    let token = create["params"]["token"].clone();
+    let progress: Vec<&serde_json::Value> = seen
+        .iter()
+        .filter(|m| m["method"] == "$/progress" && m["params"]["token"] == token)
+        .collect();
+    assert_eq!(progress[0]["params"]["value"]["kind"], "begin", "{seen:?}");
+    assert_eq!(
+        progress[0]["params"]["value"]["title"], "PhiTeX",
+        "{seen:?}"
+    );
+    let end = &progress.last().expect("an end")["params"]["value"];
+    assert_eq!(end["kind"], "end", "{seen:?}");
+    assert!(
+        end["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("Built in ") && m.ends_with(", 3 pages")),
+        "{end}"
+    );
+    assert!(
+        seen.iter()
+            .any(|m| m["method"] == "phitex/status" && m["params"]["state"] == "starting"),
+        "{seen:?}"
+    );
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": null}),
+    );
+    lsp_until(&rx, &mut seen, |m| m["id"] == 9);
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    );
+    let end = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("the watch") {
+            break s;
+        }
+        assert!(Instant::now() < end, "the watch did not end after exit");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "the watch ended with {status}");
+}
+
 /// `phitex watch --lsp` started by an editor whose root is above the
 /// TeX project (a repository's): no file named, no `phitex.toml`, no
 /// `.tex` file at the root; `initialize` is answered all the same, and the
