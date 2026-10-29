@@ -43,7 +43,7 @@ jobs:
           [ "$gate" -gt 0 ] || { echo "no green gate on $sha"; exit 1; }
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)
           [ "$v" = "$tag" ] || { echo "the tag says $tag, crates/cli/Cargo.toml $v"; exit 1; }
-          grep -q "^## $tag " NEWS.md || { echo "NEWS.md has no '## $tag' entry"; exit 1; }
+          grep -q "^## $tag " CHANGELOG.md || { echo "CHANGELOG.md has no '## $tag' entry"; exit 1; }
   build:
     needs: gated
     strategy:
@@ -132,7 +132,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # (NEWS.md's section for this version)
-          awk -v v="## ${GITHUB_REF_NAME#v} " '/^## / {on = index($0, v) == 1; next} on' NEWS.md > notes.md
+          # (CHANGELOG.md's section for this version)
+          awk -v v="## ${GITHUB_REF_NAME#v} " '/^## / {on = index($0, v) == 1; next} on' CHANGELOG.md > notes.md
           [ -s notes.md ] || echo "PhiTeX $GITHUB_REF_NAME" > notes.md
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "PhiTeX $GITHUB_REF_NAME" --notes-file notes.md dist/*

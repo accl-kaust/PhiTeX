@@ -38,6 +38,7 @@ mod failure;
 mod keys;
 mod lsp;
 mod modern;
+mod news;
 mod problems;
 mod session;
 mod shelf;

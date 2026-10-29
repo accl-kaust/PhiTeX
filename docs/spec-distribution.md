@@ -112,14 +112,14 @@ for each version tag.
   the method that installed it (`cargo install …`, the package manager).
 - `phitex upgrade --check` reports without installing.
 
-**`news.json`** is written from `NEWS.md` in the repo at each release:
+**`news.json`** is written from `CHANGELOG.md` in the repo at each release (an entry is a `## <version> (<date>)` heading; its first paragraph is the summary). The binary also carries its own version's entry: the first run of a version in a terminal says the summary once (`$XDG_STATE_HOME/phitex/news` keeps the last version shown), and `phitex news` prints the whole entry:
 
 ```json
 { "schema": 1,
   "latest": "0.2.0",
   "entries": [
     { "version": "0.2.0", "date": "2026-11-15", "kind": "release",
-      "summary": "XeLaTeX edits in milliseconds", "url": "https://…/NEWS.md#020" },
+      "summary": "XeLaTeX edits in milliseconds", "url": "https://…/CHANGELOG.md#020" },
     { "affects": "<0.1.3", "kind": "advisory",
       "summary": "0.1.0-0.1.2 can write a wrong PDF after deleting a page; upgrade" } ] }
 ```
@@ -214,7 +214,7 @@ for each version tag.
    - build tl2026.7 from the xetex-trees branch on mc, with TRACE and FONT_INDEX;
    - `release.py` writes `shelf.json`;
    - `deploy.sh` to `shelf-phitex-v1`.
-3. **`NEWS.md` → `news.json`** generator, the update check and `phitex
+3. **`CHANGELOG.md` → `news.json`** generator, the update check and `phitex
    upgrade`, and the release workflow (targets, `SHA256SUMS`, minisign).
 4. **`install.sh`.**
 5. **Editor:** the version exchange in `initialize`, and status lines.

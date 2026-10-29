@@ -133,6 +133,8 @@ enum Sub {
         #[arg(value_name = "FILE")]
         file: Option<String>,
     },
+    /// What is new in this version (CHANGELOG.md's entry)
+    News,
     /// Remove the files a build writes
     Clean {
         /// The whole cache, every document's (no file needed)
@@ -277,6 +279,7 @@ pub enum Command {
     Build,
     Watch,
     Clean,
+    News,
 }
 
 /// The modern command line's options, as the rest of the program reads
@@ -326,6 +329,7 @@ impl Cli {
             Some(Sub::Build { file }) => (Some(Command::Build), file, false),
             Some(Sub::Watch { file }) => (Some(Command::Watch), file, false),
             Some(Sub::Clean { all, file }) => (Some(Command::Clean), file, all),
+            Some(Sub::News) => (Some(Command::News), None, false),
             None => (None, None, false),
         };
         let o = self.opts;
@@ -961,6 +965,13 @@ pub fn main(args: &[String]) -> ! {
         ui.error("no command given: build, watch or clean (`phitex --help`)");
         std::process::exit(crate::EXIT_FAILED);
     };
+    if command == Command::News {
+        crate::news::print();
+        std::process::exit(0);
+    }
+    if !o.lsp && !o.json && !o.quiet {
+        crate::news::once(&ui);
+    }
     // (an editor's language server: its `initialize` first, which says
     // where the watch runs and may name the main file)
     let lsp = if o.lsp && command == Command::Watch {
@@ -1016,6 +1027,8 @@ pub fn main(args: &[String]) -> ! {
         Command::Build => std::process::exit(build(&t, &o, &ui)),
         Command::Clean => std::process::exit(clean(&t, &ui)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
+        // (answered before the target)
+        Command::News => unreachable!(),
     }
 }
 

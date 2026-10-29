@@ -91,7 +91,7 @@ there is no override.
    **A dry run** is a push to the branch `release-dry` (`git push github
    dev:release-dry`): every step but the release, signed with a key made for
    the run.
-3. **`NEWS.md`** gets the version's entry in the same pull request. The
+3. **`CHANGELOG.md`** gets the version's entry in the same pull request. The
    site (PhiTeX.org) regenerates `news.json` from it at its next deploy
    (docs/spec-distribution.md §4).
 4. **Shelf** is released on its own schedule (built on mc, deployed by
