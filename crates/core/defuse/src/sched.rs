@@ -1287,6 +1287,13 @@ fn stall_dump(eng: &Engine, shared: &Shared, t_idle: Instant) {
 
 /// (`PHITEX_WAKE_LOG`, profile) Whether every wake of a committed node is
 /// printed: the node, the field and the cause, as the re-ask happens.
+/// (`PHITEX_RUN_LOG`, profile) Whether every run is printed as it ends:
+/// the node, its operation and place, and how it ended.
+fn run_log() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| crate::obs::enabled() && std::env::var_os("PHITEX_RUN_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
 fn wake_log() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var_os("PHITEX_WAKE_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
@@ -1418,6 +1425,18 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     let version = eng.version.load(Ordering::Acquire);
     let mut cx = Ctx::new(eng, Some(w), node);
     let r = catch_unwind(AssertUnwindSafe(|| op.run(&mut cx)));
+    if run_log() {
+        let how = match &r {
+            Ok(Ok(_)) => "ok".to_owned(),
+            Ok(Err(_)) if cx.wait_frontier => "held at the frontier".to_owned(),
+            Ok(Err(_)) => match cx.wait_on {
+                Some(on) => format!("waits for {}", on.raw()),
+                None => "stopped".to_owned(),
+            },
+            Err(_) => "panicked".to_owned(),
+        };
+        eprintln!("run: node {} ({}) at {}: {how}", n.raw(), op.name(), node.pos_hint().0);
+    }
     // (a re-ask kept for this run's checks is its commit's now)
     if node.stale.swap(false, Ordering::AcqRel) {
         node.stale_wake.lock().take();
