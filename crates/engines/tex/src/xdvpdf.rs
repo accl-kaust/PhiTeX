@@ -240,13 +240,6 @@ fn neutral(ops: &[Op]) -> impl Iterator<Item = &Op> {
         .filter(|o| !matches!(o, Op::FontDef { .. } | Op::NativeFontDef { .. }))
 }
 
-/// Whether `PHITEX_XDV_REPLAY_CHECK` is set: a live link also writes
-/// its end whole and says whether the replayed one is the same.
-fn replay_check() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("PHITEX_XDV_REPLAY_CHECK").is_some())
-}
-
 /// The exact file's link, a fold over one xdvipdfmx session: what the
 /// file holds and what a later link goes on from.
 struct Base {
@@ -702,10 +695,13 @@ fn live(
     let clock = || u64::try_from(t.elapsed().as_micros()).unwrap_or(u64::MAX);
     // (the end's streams: those compressed before taken at their level,
     // the others compressed fast; the exact file's are made at its own)
-    s.compress_fast();
-    // (`PHITEX_XDV_REPLAY_CHECK`: the end also written whole, from a copy,
-    // and the two compared)
-    let mut twin = replay_check().then(|| s.snapshot());
+    // (`PHITEX_XDV_REPLAY_CHECK`, observe: the end also written whole,
+    // from a copy, and the two compared, both at the exact file's level,
+    // the replayed streams' level)
+    let mut twin = crate::exec::obs_flag!("PHITEX_XDV_REPLAY_CHECK").then(|| s.snapshot());
+    if twin.is_none() {
+        s.compress_fast();
+    }
     PACK_ANY.with(|c| c.set(true));
     let r = s.finish_replaying(&clock, &b.end);
     let whole = twin.as_mut().map(|x| x.finish_timed(&|| 0));
