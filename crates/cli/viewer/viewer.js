@@ -3079,16 +3079,38 @@ var PreviewSession = class {
     host2.onOpen((f0, t) => {
       const f = this.known(f0);
       this.open = f;
+      this.resending.delete(f);
       this.sync(f, t);
       this.status();
     });
-    host2.onChanges((f, es) => this.queue(this.known(f), es));
+    host2.onChanges((f0, es, len) => {
+      const f = this.known(f0);
+      this.queue(f, es);
+      if (len !== void 0) this.agree(f, len, es);
+    });
     core.onLost?.(() => {
       this.opened = false;
       this.sink.error("core lost; reopening");
       this.sink.connection?.(false, "the engine stopped; reopening");
       this.reopen();
     });
+  }
+  /** Files whose whole text was asked for again (host.resend), until it comes (onOpen). */
+  resending = /* @__PURE__ */ new Set();
+  /**
+   * The session's copy of `file` (its queued edits in) against the
+   * editor's length after `edits`: on a difference the copy has drifted
+   * (edits lost or applied twice, as an Overleaf history restore's were),
+   * so it is said and the whole text asked for again, sync() diffing it in.
+   * Once until it comes.
+   */
+  agree(file, len, edits) {
+    const have = this.text(file)?.length ?? 0;
+    if (have === len || this.resending.has(file)) return;
+    this.tr("editor and session disagree", { file, editor: len, session: have, edits: edits.slice(-5) });
+    if (!this.host.resend) return;
+    this.resending.add(file);
+    this.host.resend(file);
   }
   /**
    * The project's file the editor's name is: itself, else the one file

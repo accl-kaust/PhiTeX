@@ -36,7 +36,14 @@ export interface EditorHost {
   /** The main file among them, if the host knows it (else guessed). */
   mainFile?(files: Record<string, string>): string | null;
   onOpen(cb: (file: string, text: string) => void): void;
-  onChanges(cb: (file: string, edits: Edit[]) => void): void;
+  /**
+   * The editor's changes to `file`; `len`, its text's length after them
+   * (UTF-16 units, as a JS string's): the session checks its own copy
+   * against it and asks for the whole text again when they differ.
+   */
+  onChanges(cb: (file: string, edits: Edit[], len?: number) => void): void;
+  /** Announce `file`'s whole text again (onOpen): the session's copy drifted from the editor's. */
+  resend?(file: string): void;
   /** Called once the session is ready for onOpen (the host may re-announce the open file). */
   ready?(): void;
 }
@@ -406,16 +413,40 @@ export class PreviewSession {
     host.onOpen((f0, t) => {
       const f = this.known(f0);
       this.open = f;
+      this.resending.delete(f);
       this.sync(f, t);
       this.status();
     });
-    host.onChanges((f, es) => this.queue(this.known(f), es));
+    host.onChanges((f0, es, len) => {
+      const f = this.known(f0);
+      this.queue(f, es);
+      if (len !== undefined) this.agree(f, len, es);
+    });
     core.onLost?.(() => {
       this.opened = false;
       this.sink.error("core lost; reopening");
       this.sink.connection?.(false, "the engine stopped; reopening");
       this.reopen();
     });
+  }
+
+  /** Files whose whole text was asked for again (host.resend), until it comes (onOpen). */
+  private resending = new Set<string>();
+
+  /**
+   * The session's copy of `file` (its queued edits in) against the
+   * editor's length after `edits`: on a difference the copy has drifted
+   * (edits lost or applied twice, as an Overleaf history restore's were),
+   * so it is said and the whole text asked for again, sync() diffing it in.
+   * Once until it comes.
+   */
+  private agree(file: string, len: number, edits: Edit[]): void {
+    const have = this.text(file)?.length ?? 0;
+    if (have === len || this.resending.has(file)) return;
+    this.tr("editor and session disagree", { file, editor: len, session: have, edits: edits.slice(-5) });
+    if (!this.host.resend) return;
+    this.resending.add(file);
+    this.host.resend(file);
   }
 
   /**
