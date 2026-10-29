@@ -5,6 +5,11 @@
 # corpus's). Run by hand when ci/Dockerfile changes; the gate names the tag.
 name: ci-image
 on:
+  # (dispatch needs the workflow on main, the default branch: until the
+  # first merge, a push to dev that changes the image builds it)
+  push:
+    branches: [dev]
+    paths: [ci/Dockerfile, .github/workflows/ci-image.yml]
   workflow_dispatch:
     inputs:
       tag:
@@ -25,11 +30,11 @@ jobs:
       - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: base
         run: |
-          img=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/phitex-ci:${{ inputs.tag }}
+          img=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/phitex-ci:${{ inputs.tag || '2026-09-25' }}
           docker build --target base -t "$img" ci
           docker push "$img"
       - name: doc
         run: |
-          img=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/phitex-ci:${{ inputs.tag }}
+          img=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/phitex-ci:${{ inputs.tag || '2026-09-25' }}
           docker build --target doc -t "$img-doc" ci
           docker push "$img-doc"
