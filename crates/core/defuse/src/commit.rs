@@ -780,9 +780,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (the nodes of other segments between a kept placement and the
     // lowest floor its check can have, the placer or a node it places
     // after: its check under the lock sees its own segment only)
+    // (a kept placement's floor is the placer's, or one of the nodes it
+    // or a placement before it places after: each its own span, from the
+    // lowest of those to it. One span from the lowest anchor of all to
+    // the farthest kept placement took in the whole text between a page
+    // loop at the line's end, whose kept rest is next to it, and the
+    // text node its new finisher goes after: every loop commit read
+    // every node after that page's text, para4000 -j8's page chain 0.5 s
+    // of its 1.1 s)
     let others: Vec<NodeId> = {
         let mut lo = node.pos_hint();
-        let mut hi: Option<Pos> = None;
+        let mut spans: Vec<(Pos, Pos)> = Vec::new();
         for (what, k) in p.placements.iter().zip(&kept) {
             if let Placement::FollowAfter(at, ..) = what
                 && let Some(an) = eng.placed_node(*at)
@@ -791,10 +799,20 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             }
             if let Some(k) = k {
                 let kp = eng.node(*k).pos_hint();
-                hi = Some(hi.map_or(kp, |h| h.max(kp)));
+                if kp > lo {
+                    spans.push((lo, kp));
+                }
             }
         }
-        hi.filter(|h| *h > lo).map(|h| foreign_between(eng, node.id, lo, h)).unwrap_or_default()
+        spans.sort_unstable();
+        let mut merged: Vec<(Pos, Pos)> = Vec::with_capacity(spans.len());
+        for (a, b) in spans {
+            match merged.last_mut() {
+                Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        merged.into_iter().flat_map(|(a, b)| foreign_between(eng, node.id, a, b)).collect()
     };
     // everything a placement needs but its label, made before the lock
     let mut fresh: Vec<Option<(Arc<Node>, Predicted)>> = p
