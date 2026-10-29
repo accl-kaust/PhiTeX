@@ -8,6 +8,20 @@ the one that will become `main`.
 
     D=$(git rev-parse origin/dev)    # the candidate; every step below is on $D
 
+## 0. The user's decisions of 2026-10-29
+
+- **Speed:** the user is satisfied with today's speed for the alpha on
+  plain TeX and LaTeX. §3's scaling bars and §4's amsldoc edit bars are
+  measured and recorded, not gated. XeLaTeX's edit speed (§4b) still
+  has to improve before the alpha.
+- **The intermittents** of issue #3 (linkloop's object number, the
+  paragraph printed twice once in 600, the rare stale folds, the
+  load-dependent lock-wait test, the absorb test's timing) are waived
+  for the alpha. A gate red only on those tests counts as green.
+- **Shelf is in the alpha:** `--shelf` / `files = "shelf"` (phitex-shelf,
+  docs/spec-editor-protocol.md), XeTeX over Shelf's fonts included. The
+  hosted server and its default URL are the user's call.
+
 ## 1. The tree, locally
 
 Run these in a worktree at `$D`, through the sandbox, with the pinned
