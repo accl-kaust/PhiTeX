@@ -2601,6 +2601,9 @@ struct BaseSlot {
     loc: Loc,
     cur: Option<ValueId>,
     flags: u8,
+    /// The marks of the save a closed group restored (the save stack is
+    /// empty: they name no open group).
+    save: (u32, u64, u64),
     map: Map,
     mapped: u8,
     base: Option<ValueId>,
@@ -2639,9 +2642,6 @@ impl State {
             {
                 continue;
             }
-            if s.save_gid != 0 {
-                return None;
-            }
             let meta = usize::try_from(s.meta)
                 .ok()
                 .filter(|&m| m > 0)
@@ -2657,6 +2657,7 @@ impl State {
                 loc: l,
                 cur: self.encode(&s.e, v),
                 flags: s.e.flags,
+                save: (s.save_gid, s.save_stamp, s.ginert),
                 map: s.map,
                 mapped: s.mapped,
                 base: s.base,
@@ -2693,6 +2694,21 @@ impl State {
         })
     }
 
+    /// Why [`State::base_of`] gives none (a trace's).
+    pub(crate) fn base_why(&self) -> String {
+        let saved = self
+            .touched
+            .iter()
+            .filter(|&&l| self.slot_ref(l).is_some_and(|s| s.save_gid != 0))
+            .count();
+        format!(
+            "saves {}, carried {}, undo {}, slots a group saved {saved}",
+            self.save.len(),
+            self.cont_locs.len(),
+            self.undo.is_some()
+        )
+    }
+
     /// Takes up `b` ([`State::base_of`]) in a table with no definition
     /// of its own yet.
     pub(crate) fn with_base(&mut self, v: &Values, b: Base) {
@@ -2723,6 +2739,7 @@ impl State {
             };
             let slot = self.slot(s.loc);
             slot.e = e;
+            (slot.save_gid, slot.save_stamp, slot.ginert) = s.save;
             slot.map = s.map;
             slot.mapped = s.mapped;
             slot.base = s.base;
@@ -2747,6 +2764,73 @@ impl State {
         self.next_gid = b.next_gid;
         self.pp_dirty = b.pp_dirty;
         self.muts += 1;
+    }
+}
+
+impl BaseSlot {
+    /// One slot of [`Base::of_value`].
+    fn of_value(v: &Values, s: ValueId, loc: &mut dyn FnMut(Field) -> Loc) -> Option<BaseSlot> {
+        use crate::val::{int_of, list_of};
+        let opt = |x: ValueId| list_of(v, x).first().copied();
+        let at = |x: ValueId| match int_of(v, x) {
+            0 => Locality::Local,
+            1 => Locality::Global,
+            2 => Locality::Scope,
+            k => Locality::ScopeAt(u8::try_from(k - 3).unwrap_or(0)),
+        };
+        let u = |x: ValueId| u64::from_ne_bytes(int_of(v, x).to_ne_bytes());
+        let ys = list_of(v, s);
+        let [
+            f,
+            cur,
+            flags,
+            save_gid,
+            save_at,
+            ginert,
+            keep,
+            add,
+            mapped,
+            base,
+            lazy,
+            sym,
+            meta,
+        ] = ys[..]
+        else {
+            return None;
+        };
+        let ms = list_of(v, meta);
+        let meta = match ms[..] {
+            [eng, publ, stamp, local, gid] => Some(BaseMeta {
+                eng: list_of(v, eng).first().map(|&x| opt(x)),
+                publ: match list_of(v, publ)[..] {
+                    [x, l] => Some((opt(x), at(l))),
+                    _ => None,
+                },
+                ldef_stamp: u(stamp),
+                ldef_local: int_of(v, local) != 0,
+                ldef_gid: u32::try_from(int_of(v, gid)).ok(),
+            }),
+            _ => None,
+        };
+        Some(BaseSlot {
+            loc: loc(Field(f)),
+            cur: opt(cur),
+            flags: u8::try_from(int_of(v, flags)).unwrap_or(0),
+            save: (
+                u32::try_from(int_of(v, save_gid)).unwrap_or(0),
+                u(save_at),
+                u(ginert),
+            ),
+            map: Map {
+                keep: int_of(v, keep) != 0,
+                add: i32::try_from(int_of(v, add)).unwrap_or(0),
+            },
+            mapped: u8::try_from(int_of(v, mapped)).unwrap_or(0),
+            base: opt(base),
+            lazy: opt(lazy),
+            sym: int_of(v, sym) != 0,
+            meta,
+        })
     }
 }
 
@@ -2789,6 +2873,9 @@ impl Base {
                     field(s.loc).0,
                     opt(s.cur),
                     v.int(i64::from(s.flags)),
+                    v.int(i64::from(s.save.0)),
+                    u(s.save.1),
+                    u(s.save.2),
                     v.int(i64::from(s.map.keep)),
                     v.int(i64::from(s.map.add)),
                     v.int(i64::from(s.mapped)),
@@ -2872,38 +2959,7 @@ impl Base {
             pp_dirty: int_of(v, pp_dirty) != 0,
         };
         for s in list_of(v, slots) {
-            let ys = list_of(v, s);
-            let [f, cur, flags, keep, add, mapped, base, lazy, sym, meta] = ys[..] else {
-                return None;
-            };
-            let ms = list_of(v, meta);
-            let meta = match ms[..] {
-                [eng, publ, stamp, local, gid] => Some(BaseMeta {
-                    eng: list_of(v, eng).first().map(|&x| opt(x)),
-                    publ: match list_of(v, publ)[..] {
-                        [x, l] => Some((opt(x), at(l))),
-                        _ => None,
-                    },
-                    ldef_stamp: u(stamp),
-                    ldef_local: int_of(v, local) != 0,
-                    ldef_gid: u32::try_from(int_of(v, gid)).ok(),
-                }),
-                _ => None,
-            };
-            out.slots.push(BaseSlot {
-                loc: loc(Field(f)),
-                cur: opt(cur),
-                flags: u8::try_from(int_of(v, flags)).unwrap_or(0),
-                map: Map {
-                    keep: int_of(v, keep) != 0,
-                    add: i32::try_from(int_of(v, add)).unwrap_or(0),
-                },
-                mapped: u8::try_from(int_of(v, mapped)).unwrap_or(0),
-                base: opt(base),
-                lazy: opt(lazy),
-                sym: int_of(v, sym) != 0,
-                meta,
-            });
+            out.slots.push(BaseSlot::of_value(v, s, loc)?);
         }
         for c in list_of(v, cands) {
             let [st, xs] = list_of(v, c)[..] else {

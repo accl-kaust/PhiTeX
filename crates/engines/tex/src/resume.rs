@@ -4,11 +4,12 @@
 //! is a cut). A run of an edited node (woken by `Edited`) takes
 //! checkpoints as it goes: at a command's end, every so many ([`every`])
 //! commands, where the run stands in a paragraph of its own text with
-//! nothing but that text's line being read (no token list, no file, no
-//! group or conditional of its own, no sibling claimed). A checkpoint is
-//! the run's state as a continuation ([`Run::cont_encode`]: the state
-//! table, the nest with the paragraph's list, the conditionals, the
-//! counters) and what the run has produced so far that the continuation
+//! that text's line being read (above it at most the tokens a command
+//! read ahead and put back; no file, no group or conditional of its own,
+//! no sibling claimed). A checkpoint is the run's state table at its base
+//! level ([`crate::state::State::base_of`]), the nest with the
+//! paragraph's list, the conditionals and the counters
+//! ([`Run::cont_encode`]), the tokens read ahead, and what the run has produced so far that the continuation
 //! does not hold (its contributions, the lines it read, the files it
 //! read, its counters), with where it stood in its text: the segment and
 //! the character. The checkpoints go with the run's record
@@ -117,11 +118,11 @@ impl Run<'_, '_> {
     /// text's segment the line read is, the line's place and state, its
     /// `\endlinechar` and the characters the run appended to it.
     fn ck_where(&self) -> Option<(usize, u32, u8, i64, Vec<u32>)> {
-        // (the node's line at the bottom; above it only token lists read
-        // to their end, which the next read pops, §325)
-        let spent = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS && l.a >= l.b;
+        // (the node's line at the bottom; above it only token lists: the
+        // tokens a command read ahead and put back, kept with the place)
+        let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
         if self.input.levels.is_empty()
-            || !self.input.levels[1..].iter().all(spent)
+            || !self.input.levels[1..].iter().all(toks)
             || self.pulled != 0
             || !self.kids.is_empty()
             || self.claim_rest
@@ -176,18 +177,53 @@ impl Run<'_, '_> {
     fn ck_take(&mut self, at: (usize, u32, u8, i64, Vec<u32>)) -> R<()> {
         let (li, loc, state, endch, extra) = at;
         let v = self.v;
+        // (the token lists above the line, bottom first: their types and
+        // the tokens left)
+        let ahead: Vec<ValueId> = self.input.levels[1..]
+            .iter()
+            .filter(|l| l.a < l.b)
+            .map(|l| {
+                v.list(vec![
+                    v.int(i64::from(l.ty)),
+                    crate::val::toks_value(v, self.input.arena.get(l.rest())),
+                ])
+            })
+            .collect();
         if let Some(c) = self.ck.as_mut() {
             c.next = self.cmds + every();
         }
         // (the table at the run's base level: what it defined and stepped;
         // none where a group of its own saved a value)
         let Some(base) = self.st.base_of(v) else {
+            if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
+                eprintln!(
+                    "ck: node {} at command {}: no base table ({})",
+                    self.cx.node().raw(),
+                    self.cmds,
+                    self.st.base_why()
+                );
+            }
             return Ok(());
         };
         let base = base.to_value(v, &mut |l| self.loc_field(l));
         let (cont, locals) = self.cont_encode()?;
         if !locals.is_empty() {
+            if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
+                eprintln!(
+                    "ck: node {} at command {}: {} group-local bindings",
+                    self.cx.node().raw(),
+                    self.cmds,
+                    locals.len()
+                );
+            }
             return Ok(());
+        }
+        if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
+            eprintln!(
+                "ck: node {} at command {}: taken at segment {li}, character {loc}",
+                self.cx.node().raw(),
+                self.cmds
+            );
         }
         let int = |x: i64| v.int(x);
         let contribs = v.list(
@@ -233,6 +269,7 @@ impl Run<'_, '_> {
             misc,
             base,
             v.list(self.cand_marks.iter().map(|m| cand_value(v, m)).collect()),
+            v.list(ahead),
         ]);
         if let Some(c) = self.ck.as_mut() {
             c.taken.push(ck);
@@ -246,6 +283,13 @@ impl Run<'_, '_> {
         let Some(c) = self.ck.take() else {
             return;
         };
+        if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
+            eprintln!(
+                "ck: node {} parks {} checkpoints",
+                self.cx.node().raw(),
+                c.taken.len()
+            );
+        }
         if c.taken.is_empty() {
             return;
         }
@@ -293,7 +337,7 @@ impl Run<'_, '_> {
         let mut found = None;
         for (k, &ck) in cks.iter().enumerate().rev() {
             let c = list_of(v, ck);
-            if c.len() < 13 {
+            if c.len() < 14 {
                 continue;
             }
             let Ok(li) = usize::try_from(int_of(v, c[0])) else {
@@ -361,6 +405,14 @@ impl Run<'_, '_> {
         self.input.text = new_segs;
         self.input.text_at = li + 1;
         self.input.push_line(line);
+        for e in list_of(v, c[13]) {
+            if let [ty, t] = list_of(v, e)[..] {
+                let toks = crate::val::toks_of(v, Some(t));
+                let r = self.input.arena.alloc(&toks);
+                self.input
+                    .push_toks(r, u8::try_from(int_of(v, ty)).unwrap_or(0));
+            }
+        }
         self.cont_lines.clear();
         self.ck_restore(&c);
         self.cand_marks = list_of(v, c[12])
