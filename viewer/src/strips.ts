@@ -32,6 +32,12 @@ export type Frame = {
 export interface StripSource {
   frame(k: number, scale: number): Promise<Frame | null>;
   strips(keys: string[]): Promise<ArrayBuffer | null>;
+  /**
+   * Optional, one round trip: the frame and the strips of its bands not in
+   * `have` (phitex-live's Viewer::frame_with: the JSON's length as a
+   * little-endian u32, the JSON with `sent`, then those strips).
+   */
+  frameWith?(k: number, scale: number, have: string[]): Promise<ArrayBuffer | null>;
 }
 
 export class Strips {
@@ -47,12 +53,29 @@ export class Strips {
     this.chip = chip;
   }
 
+  /** Each page's bands' keys as last shown (what a frame of it most likely keeps). */
+  private shown = new Map<number, string[]>();
+
   /** Page `k` at `scale` pixels a point: its element (canvas and text), size and links. */
   async page(k: number, scale: number): Promise<{ el: HTMLElement; w: number; h: number; links: Link[] } | null> {
     const t0 = performance.now();
-    const f = await this.src.frame(k, scale);
+    let f: Frame | null = null;
+    let t1 = t0;
+    if (this.src.frameWith) {
+      const have = (this.shown.get(k) ?? []).filter((key) => this.kept.has(key));
+      const buf = await this.src.frameWith(k, scale, have);
+      if (!buf || buf.byteLength < 4) return null;
+      const n = new DataView(buf).getUint32(0, true);
+      f = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n))) as Frame & { sent?: string[] };
+      t1 = performance.now();
+      await this.take((f as Frame & { sent?: string[] }).sent ?? [], buf, 4 + n);
+    } else {
+      f = await this.src.frame(k, scale);
+      if (!f) return null;
+      t1 = performance.now();
+    }
     if (!f) return null;
-    const t1 = performance.now();
+    this.shown.set(k, f.bands.map((b) => b[0]));
     const want = [...new Set(f.bands.map((b) => b[0]).filter((key) => !this.kept.has(key)))];
     if (want.length) await this.fetch(want);
     const t2 = performance.now();
@@ -81,9 +104,12 @@ export class Strips {
   /** The strips of `keys`, made bitmaps and kept. */
   private async fetch(keys: string[]): Promise<void> {
     const buf = await this.src.strips(keys);
-    if (!buf) return;
+    if (buf) await this.take(keys, buf, 0);
+  }
+
+  /** The strips of `keys` in `buf` from byte `at` (each its size, then its pixels), made bitmaps and kept. */
+  private async take(keys: string[], buf: ArrayBuffer, at: number): Promise<void> {
     const dv = new DataView(buf);
-    let at = 0;
     const made: Promise<void>[] = [];
     for (const key of keys) {
       if (at + 8 > buf.byteLength) break;

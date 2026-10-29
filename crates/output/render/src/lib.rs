@@ -148,6 +148,8 @@ struct Doc {
     pdf: Pdf,
     /// Each page's text, by page (a frame's probe's, or the text's own).
     texts: HashMap<usize, Vec<TextLine>>,
+    /// The outline, read once a PDF.
+    outline: Option<Vec<Entry>>,
 }
 
 /// The strips of a viewer's pages, across builds.
@@ -800,6 +802,7 @@ impl Renderer {
                 bytes: pdf.clone(),
                 pdf: Pdf::new(Arc::new(Bytes(pdf.clone()))).ok()?,
                 texts: HashMap::new(),
+                outline: None,
             }),
         }
     }
@@ -832,10 +835,13 @@ impl Renderer {
 
     /// The PDF's outline (its bookmarks), its entries' pages and places.
     pub fn outline(&mut self, pdf: &Arc<[u8]>) -> Vec<Entry> {
-        let Some(doc) = self.open(pdf) else {
+        let Some(mut doc) = self.open(pdf) else {
             return Vec::new();
         };
-        let out = outline_of(&doc.pdf);
+        let out = doc
+            .outline
+            .get_or_insert_with(|| outline_of(&doc.pdf))
+            .clone();
         self.doc = Some(doc);
         out
     }

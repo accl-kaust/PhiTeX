@@ -22,9 +22,9 @@ crate's own docs say what it is; keep them current.
   versions, tag releases or adopt another scheme.
 - `scripts/sandbox` shares one sccache cache among all worktrees (the
   server runs inside the sandbox). `PHITEX_NO_SCCACHE=1` turns it off.
-- The viewer lives here, in `viewer/src`; its pages are drawn by MuPDF
-  (`viewer/src/mupdf.ts`; MuPDF itself fetched pinned by
-  `scripts/fetch-mupdf.sh` into `upstream/`, never committed):
+- The viewer lives here, in `viewer/src`; its pages are drawn as strips
+  by the core (`crates/output/render`, hayro; `viewer/src/strips.ts`
+  composes them; docs/spec-display-list.md):
   `phitex watch` bundles the viewer (`scripts/viewer-bundle.sh`, the
   bundle committed unminified and checked in CI), and the Overleaf extension
   copies it from the PhiTeX commit it pins. Change the viewer here;

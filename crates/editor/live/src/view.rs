@@ -294,6 +294,36 @@ impl Viewer {
         out
     }
 
+    /// [`Viewer::frame`] and the strips of its bands the viewer has not
+    /// got, in one answer (a host whose requests queue on one thread: one
+    /// round trip a page). `have`: the keys it has (hex, comma-separated;
+    /// those of the page it last showed do). The bytes are the frame's
+    /// JSON's length (`u32`, little-endian), the JSON (with `sent`: the
+    /// keys whose strips follow), then those strips as [`Viewer::strips`]
+    /// gives them.
+    pub fn frame_with(&self, k: usize, scale: f32, have: &str) -> Option<Vec<u8>> {
+        let mut f = self.frame(k, scale)?;
+        let have: std::collections::HashSet<&str> =
+            have.split(',').filter(|s| !s.is_empty()).collect();
+        let mut sent: Vec<String> = Vec::new();
+        for b in f["bands"].as_array().into_iter().flatten() {
+            if let Some(key) = b[0].as_str()
+                && !have.contains(key)
+                && !sent.iter().any(|s| s == key)
+            {
+                sent.push(key.to_owned());
+            }
+        }
+        let strips = self.strips(&sent.join(","));
+        f["sent"] = json!(sent);
+        let text = f.to_string();
+        let mut out = Vec::with_capacity(4 + text.len() + strips.len());
+        out.extend_from_slice(&u32::try_from(text.len()).unwrap_or(u32::MAX).to_le_bytes());
+        out.extend_from_slice(text.as_bytes());
+        out.extend_from_slice(&strips);
+        Some(out)
+    }
+
     /// Every page's text of the PDF shown, line by line (for finding).
     fn text_json(&self) -> Value {
         let Some(pdf) = self.pdf() else {

@@ -7,5 +7,5 @@
  */
 export type Link = [number, number, number, number, string | number, (number | null)?];
 
-/** A page: drawn by MuPDF (mupdf.ts) on a canvas, `w`/`h` its size in PDF points, its links. */
+/** A page: composed from its strips (strips.ts) on a canvas, `w`/`h` its size in PDF points, its links. */
 export type PageImage = { canvas: HTMLElement; w: number; h: number; links?: Link[] };

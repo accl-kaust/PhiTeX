@@ -2,7 +2,8 @@
 // bookmarks: what hyperref makes of \chapter, \section and the rest): a
 // title clicked goes to its place, the section being read is marked as
 // the pages scroll, and a part folds. Host-neutral: the host gives the
-// items (MuPDF's outline, viewer/src/mupdf.ts) and the viewer.
+// items (the core's `outline`: the PDF's /Outlines, crates/output/render)
+// and the viewer.
 
 /** An outline item: its title, its page (from 0) and top in points (null: none), its children. */
 export interface Entry {

@@ -3790,12 +3790,28 @@ var Strips = class {
     this.src = src;
     this.chip = chip2;
   }
+  /** Each page's bands' keys as last shown (what a frame of it most likely keeps). */
+  shown = /* @__PURE__ */ new Map();
   /** Page `k` at `scale` pixels a point: its element (canvas and text), size and links. */
   async page(k, scale) {
     const t0 = performance.now();
-    const f = await this.src.frame(k, scale);
+    let f = null;
+    let t1 = t0;
+    if (this.src.frameWith) {
+      const have = (this.shown.get(k) ?? []).filter((key) => this.kept.has(key));
+      const buf = await this.src.frameWith(k, scale, have);
+      if (!buf || buf.byteLength < 4) return null;
+      const n = new DataView(buf).getUint32(0, true);
+      f = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
+      t1 = performance.now();
+      await this.take(f.sent ?? [], buf, 4 + n);
+    } else {
+      f = await this.src.frame(k, scale);
+      if (!f) return null;
+      t1 = performance.now();
+    }
     if (!f) return null;
-    const t1 = performance.now();
+    this.shown.set(k, f.bands.map((b) => b[0]));
     const want = [...new Set(f.bands.map((b) => b[0]).filter((key) => !this.kept.has(key)))];
     if (want.length) await this.fetch(want);
     const t2 = performance.now();
@@ -3820,9 +3836,11 @@ var Strips = class {
   /** The strips of `keys`, made bitmaps and kept. */
   async fetch(keys) {
     const buf = await this.src.strips(keys);
-    if (!buf) return;
+    if (buf) await this.take(keys, buf, 0);
+  }
+  /** The strips of `keys` in `buf` from byte `at` (each its size, then its pixels), made bitmaps and kept. */
+  async take(keys, buf, at) {
     const dv = new DataView(buf);
-    let at = 0;
     const made = [];
     for (const key of keys) {
       if (at + 8 > buf.byteLength) break;

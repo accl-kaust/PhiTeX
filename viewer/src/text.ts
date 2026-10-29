@@ -1,7 +1,7 @@
 // A page's text as the viewer keeps it, line by line, and finding in it:
 // the lines the renderer gives (the watch's and the core's strips,
-// crates/output/render; MuPDF's structured text where a host still draws
-// with it), TeX's accents made one character with their letters, and a
+// crates/output/render), TeX's accents made one character with their
+// letters, and a
 // search across the pages' lines that ignores accents and case.
 
 /** A line of a page's text: its start on the baseline, its width, its font size (PDF points, from the page's top left). */

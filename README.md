@@ -72,7 +72,6 @@ This is bubblewrap: the repository is writable, `$HOME` is empty, and
 there is no network unless you pass `--net`.
 
     scripts/sandbox --net cargo fetch
-    scripts/sandbox --net scripts/fetch-mupdf.sh    # the live viewer's renderer, embedded in the binary
     scripts/sandbox cargo build --release -p phitex-cli
     scripts/sandbox cargo test
 
