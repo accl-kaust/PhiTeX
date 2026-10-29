@@ -246,7 +246,24 @@ pub(crate) fn file(
     let files = (p.files)();
     // (the last link's state, taken: a build linking meanwhile starts
     // its own)
-    let mut kept = memo().locked().take().filter(|m| m.head == head);
+    // (another head of the same session's start (a font loaded since,
+    // another build's values): the start and its files' log kept, the
+    // pages linked again)
+    let mut kept = memo().locked().take().and_then(|mut m| {
+        if m.head == head {
+            return Some(m);
+        }
+        let h = &m.head;
+        if (h.mag, &h.comment, &h.name, h.date) != (head.mag, &head.comment, &head.name, head.date) {
+            return None;
+        }
+        m.head = head.clone();
+        m.ids.clear();
+        m.snaps.clear();
+        m.chunks.clear();
+        m.layout = None;
+        Some(m)
+    });
     let t_files = std::time::Instant::now();
     if let Some(m) = &kept
         && !still(&m.log, &*files)
