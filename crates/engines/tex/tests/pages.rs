@@ -349,7 +349,12 @@ fn a_routines_insertion_box_reaches_the_builder_in_fold_order() {
         eprintln!("-j{threads}: loop runs {loops}, runs by op {:?}", b.stats.runs_by_op);
         assert_eq!(dvi, want, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
         if threads == 1 {
-            assert!(loops <= 20, "the loop ran {loops} times for 20 pages: {:?}", b.stats.runs_by_op);
+            // (a run a page, and the last run's: it folds the last page's
+            // give-back and ends the job, TeX's own last work, §1054; the
+            // loop never folds past a give-back it does not know, so no
+            // run fires two pages; the bound fires + 1 by the
+            // coordinator's decision of 2026-10-29)
+            assert!(loops <= 20 + 1, "the loop ran {loops} times for 20 pages: {:?}", b.stats.runs_by_op);
         }
     }
 }
@@ -380,7 +385,9 @@ fn a_routines_vsize_reaches_the_builder_in_fold_order() {
         assert_eq!(dvi, want, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
         if threads == 1 {
             let loops = b.stats.runs_by_op.iter().find(|(o, _)| *o == "pages").map_or(0, |(_, n)| *n);
-            assert!(loops <= 88, "the loop ran {loops} times for 88 routine fires: {:?}", b.stats.runs_by_op);
+            // (a run a fire, and the last run's, which folds the last
+            // give-back and ends the job, §1054: fires + 1, as above)
+            assert!(loops <= 88 + 1, "the loop ran {loops} times for 88 routine fires: {:?}", b.stats.runs_by_op);
         }
     }
 }
