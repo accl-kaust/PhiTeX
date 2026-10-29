@@ -1136,7 +1136,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 .filter(|n| !kept.contains(&Some(*n)))
                 .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() != State::Gone && x.slot() == 2))
                 .collect();
-            v.sort_by_key(|&n| eng.node(n).pos_hint());
+            // (each label read once: another segment's rebalance may move
+            // one while the sort runs, and a key that changes under it
+            // breaks the order the sort relies on, a panic)
+            v.sort_by_cached_key(|&n| eng.node(n).pos_hint());
             v.into()
         };
         // (a kept placement's subtree end found only where a placement
@@ -3499,7 +3502,9 @@ pub(crate) fn relocate(eng: &Engine, w: Option<&Worker>, placer: NodeId, k: &Arc
     let lim = before.map_or_else(|| eng.node(end).pos_hint(), |b| eng.node(b).pos_hint());
     let mut movers: Vec<Arc<Node>> = vec![k.clone()];
     let mut rest: Vec<Arc<Node>> = sub.iter().map(|&c| eng.node(c).clone()).filter(|c| c.pos_hint() < lim).collect();
-    rest.sort_by_key(|c| c.pos_hint());
+    // (each label read once, as above: a rebalance elsewhere may move one
+    // during the sort)
+    rest.sort_by_cached_key(|c| c.pos_hint());
     movers.extend(rest);
     // (a claim holding a sibling it would stand after: given back)
     for m in &movers {

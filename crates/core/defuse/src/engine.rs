@@ -1202,7 +1202,7 @@ impl Engine {
             seed.retain(|&n| !pool.defer(self, n));
             // (in position order, as the blocks run: a node inserted before
             // others runs with them, not after every node pushed)
-            seed.sort_by_key(|&n| self.node(n).pos_hint());
+            seed.sort_by_cached_key(|&n| self.node(n).pos_hint());
             if !seed.is_empty() {
                 let per = seed.len().div_ceil(n);
                 for (i, chunk) in seed.chunks(per).enumerate() {
