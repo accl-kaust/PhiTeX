@@ -876,7 +876,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut refuted: Option<usize> = None;
     let mut ix = IndexOps::with_capacity(nd, nc, rec.reads.len());
     let mut room: Option<Made> = None;
-    for r in &rec.reads {
+    let mut next_answers: FxHashMap<usize, Option<ValueId>> = FxHashMap::default();
+    for (ri, r) in rec.reads.iter().enumerate() {
         match &r.kind {
             ReadKind::Field { f, at } => {
                 let (anchor, inclusive) = match *at {
@@ -937,6 +938,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 };
                 let i = *range_at.entry((*f, *after, None, true, false)).or_insert_with(|| {
                     let n = next_contribution(eng, *f, from);
+                    next_answers.insert(range_reads.len(), read::next_value(eng, &n));
                     range_reads.push((
                         *f,
                         RangeReader {
@@ -954,6 +956,18 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     range_reads.len() - 1
                 });
                 range_seen[i].push((r.path, r.seen));
+                // (the range is filed as this search found it, its stop or
+                // the contribution it answers: a run that saw another
+                // answer is refuted here, not later by a search of its
+                // own, which may find what this one did not (a node that
+                // had contributed, re-asked meanwhile: its contribution
+                // passed over, `Node::is_open`) and let the run stand on a
+                // range filed past what it read; amsldoc -j16 ended with 0
+                // pages, the loop's rest on "none after 72" with node 75's
+                // contribution filed, 10 builds in 600 on one loaded node)
+                if refuted.is_none() && read::apply_path(eng, next_answers.get(&i).copied().flatten(), r.path) != r.seen {
+                    refuted = Some(ri);
+                }
             }
             ReadKind::Placed { .. } | ReadKind::Following { .. } => {}
             ReadKind::Hole => {
