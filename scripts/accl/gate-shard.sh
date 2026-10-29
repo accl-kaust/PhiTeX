@@ -120,7 +120,8 @@ if [ "$shard" = all ]; then
   # also at $w/bin/NAME, as a store part copied in alone puts it)
   for x in "$w0"/bin/tests/*; do [ -e "$x" ] && ln -sfn "$x" "$w0/bin/"; done
   # (two phases: the checks first, all at once; then the timed shards,
-  # alone on the job's cores, each its own share: timed beside a
+  # one after another, each alone on its share of the job's cores (timed
+  # together, amsldoc's -j8 cold build took 6.2 s, mc 76194; timed beside a
   # valgrind run and three test shards, amsldoc's -j8 cold build took
   # 5.5 s and its watch build 25.6 s, against 3.0 s in their own jobs)
   for phase in checks timed; do
@@ -130,7 +131,7 @@ if [ "$shard" = all ]; then
       IFS=, read -ra args <<< "$rest"
       case ${args[0]} in ams | amsedit | editkinds | para) p=timed ;; *) p=checks ;; esac
       [ "$p" = "$phase" ] || continue
-      one "$name" "$n" "${args[@]}" &
+      if [ "$phase" = checks ]; then one "$name" "$n" "${args[@]}" & else one "$name" "$n" "${args[@]}"; fi
     done
     wait
   done
