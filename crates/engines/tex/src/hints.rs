@@ -1434,7 +1434,19 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
         // (an operand a primitive reads never starts a slice; a macro's
         // operand range is the pass's guess and does not cut)
         if !(inside_if || operand.has(k) || pending || (ch && prev_char) || after_name) {
-            starts.push(a.start);
+            // (a slice whose first atom has only blanks before it on its
+            // line starts at the line's start: TeX reads those blanks in
+            // state N and stays in it (§347), so the line's end there is
+            // a `\par`; begun at the atom, mid-line, the run read it in
+            // state M, a space: `{a}` then a line of spaces lost its
+            // paragraph end, fontspec's fontload-sizefeatures-1 set two
+            // paragraphs as one line)
+            let b = text.as_bytes();
+            let mut ls = a.start;
+            while ls > 0 && matches!(b[ls - 1], b' ' | b'\t') {
+                ls -= 1;
+            }
+            starts.push(if ls == 0 || b[ls - 1] == b'\n' { ls } else { a.start });
         }
         prev_char = ch;
         k += 1;

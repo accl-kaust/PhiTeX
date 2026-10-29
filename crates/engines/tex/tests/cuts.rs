@@ -101,3 +101,34 @@ fn a_paragraph_insert_history_equals_the_cold_build() {
     common::rebuild(&mut b, &e3);
     assert_eq!(b.output().0, cold("history-3", &e3), "after the second insert");
 }
+
+/// A line of blanks after a group ends the paragraph, as an empty line
+/// does (§347: blanks at a line's start leave the state N, and the
+/// line's end in it is `\par`). The slice that begins with that line's
+/// end began mid-line, its run in state M: a space, the paragraph went
+/// on (fontspec's fontload-sizefeatures-1 set two paragraphs as one
+/// line; pdftex agrees with the empty line's DVI, mc 76382).
+#[test]
+fn a_line_of_blanks_after_a_group_ends_the_paragraph() {
+    let dir = common::scratch("cuts-blank-line");
+    let dvi = |src: &str, threads: usize| {
+        let mut o = common::options("./blank.tex", "blank", "", &dir);
+        o.threads = Some(threads);
+        common::build(o, Some(&common::plain()), src).output().0
+    };
+    for (blanks, empty) in [
+        ("{a}\n   \nb\\bye\n", "{a}\n\nb\\bye\n"),
+        ("{a}\n\t \nb\\bye\n", "{a}\n\nb\\bye\n"),
+        ("   {\\it a}\n   \n   b\\bye\n", "{\\it a}\n\nb\\bye\n"),
+        ("\\def\\x{x}\n   {a \\x}\n   \n   b \\x\n   \n   {c \\x}\n\n\\bye\n", "\\def\\x{x}\n{a \\x}\n\nb \\x\n\n{c \\x}\n\n\\bye\n"),
+    ] {
+        let want = dvi(empty, 1);
+        for threads in [1, 4] {
+            let got = dvi(blanks, threads);
+            assert!(!got.is_empty(), "{blanks:?}: no DVI");
+            if let Some(d) = common::first_difference(&got, &want) {
+                panic!("{blanks:?} at {threads} threads differs from the empty lines' DVI: {d}");
+            }
+        }
+    }
+}
