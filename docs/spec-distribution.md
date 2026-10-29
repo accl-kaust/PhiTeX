@@ -23,7 +23,7 @@ that.
 
 ## 2. The server (static files)
 
-One root, for example `https://shelf.example/`. Everything is static, so
+One root, `https://shelf.phitex.org/`: a Cloudflare R2 bucket on the phitex.org zone, cached by Cloudflare in front (free: 10 GB stored, 10M reads and 1M writes a month, no egress charge; cache hits are not R2 reads). R2 sets CORS, which the browser viewer's Shelf needs. Everything is static, so
 any file host or CDN works.
 
 ```
@@ -33,11 +33,14 @@ any file host or CDN works.
 /v1/releases/<release>/release.json immutable (schema, search, deps, notice)
 /v1/releases/<release>/index-<release>.tsv.gz
 /v1/releases/<release>/packs-<release>.tsv.gz
-/v1/phitex/<version>/<target>.tar.gz   binaries (§3)
-/v1/phitex/<version>/SHA256SUMS
-/v1/phitex/<version>/SHA256SUMS.minisig
-/install.sh
 ```
+
+Binaries are GitHub release assets (free, no bandwidth limit, no CORS
+needed for curl): `<target>.tar.gz`, `SHA256SUMS`, `SHA256SUMS.minisig` per
+version tag. `https://phitex.org/install.sh` and `phitex upgrade` fetch them
+from there. Storage budget: R2's 10 GB holds the current release (1.8 GB) and
+the shared packs of the releases in the support window (§6); a release
+re-uploads only its changed packs.
 
 `shelf.json`:
 
@@ -76,7 +79,7 @@ any file host or CDN works.
 
 ## 4. Updates and news
 
-**Install:** `curl -fsSL https://shelf.example/install.sh | sh`. The script:
+**Install:** `curl -fsSL https://phitex.org/install.sh | sh`. The script:
 1. picks the target (x86_64/aarch64, linux/macos);
 2. downloads the tarball, `SHA256SUMS` and `SHA256SUMS.minisig`;
 3. verifies the signature against the public key in the script;
