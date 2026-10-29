@@ -107,6 +107,25 @@ command line and makes one run, as the engine would:
     phitex --compat=pdflatex -interaction=nonstopmode doc.tex
     phitex --compat=pdftex -ini -etex doc.tex
 
+TeX's files come from TeX Live by kpathsea, or, with `--shelf` (or
+`files = "shelf"` in `phitex.toml`), from Shelf: TeX Live's files in
+packs, fetched as a document needs them (from `PHITEX_SHELF_URL`; no
+server is the default yet), checked against the release's pack table and
+kept in the cache's `shelf/<release>/`, so a later build needs no
+network. One source a run, never one after the other; the release is
+the binary's, so two machines build a document from the same files.
+XeTeX over Shelf needs a release that ships its font index
+(docs/spec-editor-protocol.md §5).
+
+`phitex watch --lsp` is a language server for any editor with an LSP
+client (VS Code, Neovim, Emacs, Helix, Zed): the editor's buffers are
+built as you type, its problems published, its cursor shown on the page,
+with progress (`$/progress`, `phitex/status`), the outline
+(`documentSymbol`), settings and the commands `phitex.rebuild`,
+`phitex.stop`, `phitex.savePdf`, `phitex.clearCache` and
+`phitex.cacheStats`. The protocol, the same for the WebAssembly core, is
+docs/spec-editor-protocol.md.
+
 The exit status is pdflatex's: 0 when the document built without errors
 (warnings allowed), 1 otherwise. Standard error says what went wrong. A
 failure inside PhiTeX itself is reported as a bug in PhiTeX, naming the

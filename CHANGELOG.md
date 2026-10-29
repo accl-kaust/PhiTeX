@@ -45,6 +45,23 @@ lists what has to be green before it reaches `main`.
   workers on shared memory. `scripts/wasm.sh check` makes the plain TeX
   and LaTeX formats in wasm and builds a document with each, at 1 and 4
   threads, byte-identical to pdfTeX's output.
+- **Editors over LSP.** `phitex watch --lsp` is a language server
+  (`phitex_live::lsp`, the same for the frontends' WebAssembly core):
+  buffers, diagnostics, progress (`$/progress` for the first build and
+  any past 400 ms, `phitex/status` after every build), messages for what
+  needs the user, the outline, settings (`threads`, `main`, `follow`,
+  `files`: a change of the session's starts a new one in the process,
+  the viewer kept), and commands: a cold rebuild, stop, save the PDF,
+  the caches' statistics and clearing by scope
+  (docs/spec-editor-protocol.md). The viewer gets the same progress
+  records (`{"event": "progress"}`), and is told when the file on disk
+  is exact at every idle point.
+- **Shelf.** `--shelf` / `files = "shelf"`: TeX's files from Shelf's
+  packs (phitex-shelf), fetched once over HTTP(S), checked against the
+  release's pack table, kept in the cache's `shelf/<release>/`; no TeX
+  Live needed. A plain pdfTeX document from the tl2026.6 release is
+  byte-identical to the one from TeX Live; XeTeX's fonts by name come
+  from the release's font index.
 - **pdflatex's command line.** Under an engine's name, or with
   `--compat=NAME`, `phitex` takes web2c's options and makes one run, so
   latexmk, editors and scripts can call it as pdflatex.
@@ -68,6 +85,9 @@ lists what has to be green before it reaches `main`.
   Without it, TeX Live's restricted mode (2) applies. No external program
   runs in either mode.
 - `--exact-pdf` is accepted and hidden: the PDF is always exact.
+- `--shelf` (or `files = "shelf"`): TeX's files from Shelf, from
+  `PHITEX_SHELF_URL`, kept in the cache; `phitex clean --all` empties
+  it with the rest.
 - SyncTeX is off by default (`--no-synctex` is the default) until PhiTeX
   writes it. Before, every build printed a note that it was not written.
 
@@ -77,6 +97,14 @@ lists what has to be green before it reaches `main`.
   rejected with an error.
 - **SyncTeX:** not written, and the live viewer has no links between
   source and page yet (a double-click on a page opens nothing).
+- **Shelf's server:** no hosted server is the default yet (the user's
+  choice): `--shelf` needs `PHITEX_SHELF_URL` until the index and the
+  packs a document needs are in the cache. XeTeX over Shelf needs a
+  release made with its font index (`FONT_INDEX`) and with xdvipdfmx's
+  and TECkit's trees (`dvipdfmx/`, `fonts/misc/xetex/fontmapping`,
+  `fonts/cmap`, `fonts/sfd`); tl2026.6 has neither, so an XeTeX job with
+  `--shelf` is refused there, and its PDF version follows xdvipdfmx's
+  defaults instead of `dvipdfmx.cfg`'s.
 - **External programs:** `\write18` runs only bibtex, makeindex and,
   with `--shell-escape`, biber, all in process. Every other command is
   refused, so packages that run programs (minted, or xindy- and

@@ -54,6 +54,7 @@ fn after_help() -> String {
   {l}phitex build paper.tex{l:#}              the PDF beside it, pdflatex for LaTeX
   {l}phitex watch -o out paper.tex{l:#}       rebuild on each change, the viewer in the browser
   {l}phitex watch --lsp{l:#}                  the same for an editor's LSP client (its buffers, problems, cursor)
+  {l}phitex build --shelf paper.tex{l:#}      TeX's files from Shelf's packs, not TeX Live (PHITEX_SHELF_URL)
   {l}phitex build --json paper.tex{l:#}       the build's events as JSON lines
   {l}phitex clean paper.tex{l:#}              remove its outputs and its part of the cache
   {l}phitex clean --all{l:#}                  remove the whole cache, every document's
@@ -64,6 +65,8 @@ fn after_help() -> String {
       copy-pdf = true   (or a directory, relative to phitex.toml's)
       synctex = false   shell-escape = true   editor = \"code\"   viewer = \"zathura\"
       cache-limit = \"4GB\"   (0: no cache; or PHITEX_CACHE_LIMIT)
+      files = \"shelf\"   (TeX's files from Shelf's packs, kept in the cache's shelf/;
+                          \"texlive\", kpathsea's, the default; one source a run)
   ~/.config/phitex/phitex.toml holds your own defaults; a project's
   phitex.toml wins over it key by key.
   A `% !TEX program = …` or `% !TEX root = …` comment in the file is honoured.
