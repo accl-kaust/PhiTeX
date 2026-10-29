@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use super::*;
 
 /// A one-page PDF (612 by 792 points) whose content is `lines`, each a
@@ -6,10 +8,10 @@ use super::*;
 fn pdf(lines: &[(f64, &str)]) -> Arc<[u8]> {
     let mut content = String::new();
     for (y, t) in lines {
-        content.push_str(&format!("BT /F1 12 Tf 72 {y} Td ({t}) Tj ET\n"));
+        let _ = writeln!(content, "BT /F1 12 Tf 72 {y} Td ({t}) Tj ET");
     }
     if let Some((y, _)) = lines.last() {
-        content.push_str(&format!("q 0 0 1 rg 72 {} 200 1 re f Q\n", y - 10.0));
+        let _ = writeln!(content, "q 0 0 1 rg 72 {} 200 1 re f Q", y - 10.0);
     }
     let objs = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
@@ -46,16 +48,22 @@ fn compose(r: &Renderer, f: &Frame) -> Vec<u8> {
     for b in &f.bands {
         let s = r.strip(b.key).expect("every band's strip is kept");
         for row in 0..s.h as usize {
-            let y = b.y as isize + row as isize;
-            if y < 0 || y as usize >= h {
+            let Ok(y) = usize::try_from(i64::from(b.y) + i64::from(u32::try_from(row).unwrap()))
+            else {
+                continue;
+            };
+            if y >= h {
                 continue;
             }
             for x in 0..(s.w as usize).min(w) {
                 let p = &s.rgba[(row * s.w as usize + x) * 4..][..4];
                 let a = u32::from(p[3]);
-                let o = &mut out[(y as usize * w + x) * 3..][..3];
+                let o = &mut out[(y * w + x) * 3..][..3];
                 for c in 0..3 {
-                    o[c] = ((u32::from(p[c]) * a + u32::from(o[c]) * (255 - a) + 127) / 255) as u8;
+                    o[c] = u8::try_from(
+                        (u32::from(p[c]) * a + u32::from(o[c]) * (255 - a) + 127) / 255,
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -79,7 +87,9 @@ fn whole(bytes: &Arc<[u8]>, scale: f32) -> Vec<u8> {
         },
     );
     pix.data_as_u8_slice()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| [p[0], p[1], p[2]])
         .collect()
 }
