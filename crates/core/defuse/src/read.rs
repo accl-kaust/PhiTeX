@@ -706,6 +706,32 @@ pub(crate) fn hole_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     None
 }
 
+/// The first node before `me` in its unit that is to run, again or for
+/// the first time (`Node::is_open`): while one is, what `me` read before
+/// it may be a guess its run will change.
+pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let from = unit_start(eng, me);
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            return None;
+        }
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
+                let n = eng.node(*id);
+                if *id != me.id && n.unit == me.unit && n.is_open() {
+                    return Some(*id);
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    None
+}
+
 /// [`hole_before`]'s answer as a read's value: the node's id.
 pub(crate) fn hole_value(eng: &Engine, h: Option<NodeId>) -> Option<ValueId> {
     h.map(|h| eng.values().int(i64::from_ne_bytes(h.raw().to_ne_bytes())))

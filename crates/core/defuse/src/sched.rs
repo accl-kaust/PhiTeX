@@ -1547,6 +1547,17 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         Ok(Err(_stop)) if cx.stuck.is_some() => {
             let why = cx.stuck.take().unwrap_or_default();
             drop(cx);
+            // (stuck on what the nodes before it have not settled: a guess
+            // of theirs, which TeX never reads, may loop where the true
+            // input does not (amsldoc -j16: an endless loop at line 1701
+            // in 1 build of 800, then 100 errors and no PDF); it runs again
+            // once that node commits, and is stuck in earnest only on a
+            // prefix every node of which has run)
+            if let Some(x) = crate::read::open_before(eng, node) {
+                Worker::add(&w.stale_panics, 1);
+                park_waiting(eng, pool, w, node, Some(x));
+                return Ok(());
+            }
             give_back(eng, node);
             Err(EvalError::Stuck {
                 node: Some(n),
