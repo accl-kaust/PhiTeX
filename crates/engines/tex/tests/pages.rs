@@ -44,11 +44,15 @@ fn vsize_document_pages() {
         eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
     }
     // a node runs once: a piece waiting for the page state parks at its
-    // fold and resumes there (docs/TARGET_GRAPH.md, Heights)
+    // fold and resumes there (docs/TARGET_GRAPH.md, Heights); a run going
+    // on from where its node parked is no second run
+    // (`Stats::resumptions`, by the coordinator's decision of 2026-10-29)
+    let fresh = b.stats.runs.saturating_sub(b.stats.resumptions);
     assert!(
-        b.stats.runs * 10 <= b.stats.nodes_run * 11,
-        "{} runs for {} nodes (> 1.1 a node)",
+        fresh * 10 <= b.stats.nodes_run * 11,
+        "{} runs, {} resumptions, for {} nodes (> 1.1 a node)",
         b.stats.runs,
+        b.stats.resumptions,
         b.stats.nodes_run
     );
     // (`[j]`, or `[j.c1...]` when `\count1` and the others are set)
@@ -375,6 +379,27 @@ fn a_loop_waiting_for_the_page_to_fill_ends() {
 /// runs woken by `Environment{box:253}`). The routine's class registers
 /// reach the builder through its give-back in fold order
 /// (docs/spec-settle.md §2.1). The DVI is TeX's at -j1 and -j8.
+/// The page loop's runs at one thread, `fires` routine fires (the
+/// coordinator's decision of 2026-10-29, exact where the bound before was
+/// fires + 1). The loop is a node per stretch of pages: the main node, and
+/// a rest for each fire, which the node that waits for that page's
+/// give-back places and which folds the pages after it; every loop node
+/// places its rest first (placement 0, so that a rest never moves with
+/// its finishers), before it knows whether it will wait, so the last node
+/// places one more rest, which finds no start and stays parked: fires + 2
+/// loop nodes. Each runs once; every other run of one goes on from where
+/// it parked (a contributor not in yet, its start, its first page's
+/// give-back) with none of its work done again, TeX's builder going on
+/// after a paragraph (`Stats::resumptions`, as
+/// `latex::at_one_thread_no_run_is_refuted` counts them).
+fn fold_order_runs(s: &phitex_tex::Stats, fires: u64) {
+    let by = |v: &[(&'static str, u64)]| v.iter().find(|(o, _)| *o == "pages").map_or(0, |(_, n)| *n);
+    let (runs, nodes) = (by(&s.runs_by_op), by(&s.placed_by_op));
+    let fresh = runs.saturating_sub(s.resumptions);
+    assert_eq!(fresh, nodes, "{runs} loop runs, {} resumptions, {nodes} loop nodes: a node ran twice: {:?}", s.resumptions, s.runs_by_op);
+    assert_eq!(nodes, fires + 2, "{nodes} loop nodes for {fires} fires: {:?}", s.placed_by_op);
+}
+
 #[test]
 fn a_routines_insertion_box_reaches_the_builder_in_fold_order() {
     let dir = common::fixtures().join("dvi");
@@ -391,12 +416,7 @@ fn a_routines_insertion_box_reaches_the_builder_in_fold_order() {
         eprintln!("-j{threads}: loop runs {loops}, runs by op {:?}", b.stats.runs_by_op);
         assert_eq!(dvi, want, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
         if threads == 1 {
-            // (a run a page, and the last run's: it folds the last page's
-            // give-back and ends the job, TeX's own last work, §1054; the
-            // loop never folds past a give-back it does not know, so no
-            // run fires two pages; the bound fires + 1 by the
-            // coordinator's decision of 2026-10-29)
-            assert!(loops <= 20 + 1, "the loop ran {loops} times for 20 pages: {:?}", b.stats.runs_by_op);
+            fold_order_runs(&b.stats, 20);
         }
     }
 }
@@ -426,10 +446,7 @@ fn a_routines_vsize_reaches_the_builder_in_fold_order() {
         let (dvi, log) = b.output();
         assert_eq!(dvi, want, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
         if threads == 1 {
-            let loops = b.stats.runs_by_op.iter().find(|(o, _)| *o == "pages").map_or(0, |(_, n)| *n);
-            // (a run a fire, and the last run's, which folds the last
-            // give-back and ends the job, §1054: fires + 1, as above)
-            assert!(loops <= 88 + 1, "the loop ran {loops} times for 88 routine fires: {:?}", b.stats.runs_by_op);
+            fold_order_runs(&b.stats, 88);
         }
     }
 }
