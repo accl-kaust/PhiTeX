@@ -3944,7 +3944,7 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
         node.has_brackets.store(false, Ordering::Release);
     }
     inner.sum_depth();
-    eng.scope_changed();
+    node.bracket_gen.store(eng.scope_changed(), Ordering::Release);
     eng.bump(eng.depth_field);
     Some(old.unwrap_or_default())
 }
@@ -4082,6 +4082,37 @@ fn reask_after_effect_at(
         }
         first = false;
         cur = eng.order.next(sid, lo);
+    }
+    // (where the depths agree again holds for the brackets as they are
+    // now; a reader's answer rests on them as they were when it read. A
+    // change filed since this one (any node's) may be one of those the
+    // walk passed or stopped at, and its own walk, from where the depths
+    // already reflect this change, may find nothing moved: a close filed
+    // just after another close's walk began made each walk stop at the
+    // other, and the readers after both kept a definition both closes
+    // hide (note-intermittents §1: \begin's scope kind at -j16). Then
+    // every reader past the stop is re-asked too, each by its answer)
+    if let Some((sid, q)) = end
+        && eng.scope_gen.load(Ordering::Acquire) != by.bracket_gen.load(Ordering::Acquire)
+    {
+        end = None;
+        let mut cur = Some(sid);
+        let mut first = true;
+        while let Some(sid) = cur {
+            let seg = eng.seg(sid);
+            let inner = seg.inner.read();
+            for (f, rs) in &inner.readers {
+                for r in rs {
+                    if (!first || eng.node(r.anchor).pos_hint() > q) && live(eng, r.node, r.serial) {
+                        readers.push((*f, r.clone()));
+                    }
+                }
+            }
+            let lo = seg.lo;
+            drop(inner);
+            first = false;
+            cur = eng.order.next(sid, lo);
+        }
     }
     for (f, r) in &readers {
         reask_reader(eng, w, *f, r, Some(by.id), st);
@@ -4446,6 +4477,74 @@ mod tests {
         assert_eq!(e.node(l).state(), crate::node::State::Gone, "K's child L");
         let bad: Vec<String> = e.check_invariants().into_iter().filter(|m| m.contains("holding it no more")).collect();
         assert!(bad.is_empty(), "{bad:?}");
+    }
+
+    /// `[f, k]`: opens a scope after itself and defines f = k inside it.
+    struct Opens;
+
+    impl Operation for Opens {
+        fn name(&self) -> &'static str {
+            "opens"
+        }
+
+        fn effect(&self, _: &[ValueId], _: &crate::values::Values) -> crate::api::Effect {
+            crate::api::Effect::Scope(crate::api::Brackets { closes: 0, opens: 1, before: false })
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let (f, k) = (crate::values::Field(cx.args()[0]), cx.args()[1]);
+            cx.define_with(f, k, crate::api::Locality::Scope);
+            Ok(k)
+        }
+    }
+
+    /// `[f]`: outputs the definition of f reaching it.
+    struct Reads;
+
+    impl Operation for Reads {
+        fn name(&self) -> &'static str {
+            "reads"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            Ok(cx.read(crate::values::Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
+        }
+    }
+
+    #[test]
+    fn two_closes_filed_before_either_walk_reask_the_readers_after_both() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // B opens a scope and defines f in it; X, Y and R read f, R last.
+        // X's and Y's runs each find a close, filed one after the other
+        // before either walk: X's walk, from depths that already have Y's
+        // close, stops at Y (past it the depths agree), and Y's, from a
+        // depth X's close already brought to 0, stops at itself. R read f
+        // inside the scope and now finds none: it has to run again
+        // (amsldoc at sixteen threads: the readers after an environment's
+        // \begin kept its scope kind, note-intermittents §1).
+        let e = Engine::new();
+        let opens = e.register(Arc::new(Opens));
+        let reads = e.register(Arc::new(Reads));
+        let v = e.values();
+        let f = v.field("f").0;
+        let u = e.new_unit();
+        e.push(u, opens, vec![f, v.int(7)]);
+        let x = e.push(u, reads, vec![f]);
+        let y = e.push(u, reads, vec![f]);
+        let r = e.push(u, reads, vec![f]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(r).and_then(|o| v.as_int(o)), Some(7));
+        let close = crate::api::Brackets { closes: 1, opens: 0, before: false };
+        let file = |n: NodeId| {
+            let node = e.node(n);
+            let (_, mut inner) = super::own_write(&e, node).expect("on the line");
+            super::file_brackets(&e, &mut inner, node, node.pos_hint(), close).expect("a change")
+        };
+        let (ox, oy) = (file(x), file(y));
+        let mut st = super::CommitStats::default();
+        super::reask_after_effect(&e, None, e.node(x), e.node(x).pos_hint(), ox, close, &mut st);
+        super::reask_after_effect(&e, None, e.node(y), e.node(y).pos_hint(), oy, close, &mut st);
+        assert_ne!(e.node(r).state(), crate::node::State::Clean, "R kept f, which both closes hide from it");
     }
 
     #[test]

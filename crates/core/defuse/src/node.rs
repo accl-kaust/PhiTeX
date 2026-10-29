@@ -141,6 +141,11 @@ pub(crate) struct Node {
     pub(crate) effect: AtomicU32,
     /// It has brackets filed in its segment.
     pub(crate) has_brackets: AtomicBool,
+    /// The scope epoch its last change of brackets made
+    /// (`Engine::scope_gen`): the walk that re-asks the readers after
+    /// that change trusts where depths agree again only if no other
+    /// change was filed since (`commit::reask_after_effect_at`).
+    pub(crate) bracket_gen: AtomicU64,
     /// The fields other nodes' reads anchored at it read (`At::Before`,
     /// `At::AfterOwn`): its removal looks for those readers in its
     /// segment, under those fields alone.
@@ -190,6 +195,7 @@ impl Node {
             slot: AtomicU8::new(0),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
+            bracket_gen: AtomicU64::new(0),
             anchored: Mx::new(Vec::new()),
             moved: AtomicBool::new(false),
             claim_all: AtomicBool::new(false),

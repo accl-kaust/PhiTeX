@@ -242,8 +242,9 @@ impl Engine {
     }
 
     /// A bracket changed: a new scope count.
-    pub(crate) fn scope_changed(&self) {
-        self.scope_gen.fetch_add(1, Ordering::AcqRel);
+    /// A new scope epoch: the epoch it begins.
+    pub(crate) fn scope_changed(&self) -> u64 {
+        self.scope_gen.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     pub fn new() -> Engine {
