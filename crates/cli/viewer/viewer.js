@@ -168,7 +168,17 @@ var Viewer = class {
     for (const m of have.slice(boxes2.length)) m.remove();
     const top = s.el.offsetTop + boxes2[0][1] / h * s.el.offsetHeight;
     const v = this.scroller;
-    if (scroll && (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40)) v.scrollTo({ top: top - v.clientHeight / 2, behavior: "smooth" });
+    if (scroll) {
+      const to = { behavior: "smooth" };
+      if (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40) to.top = top - v.clientHeight / 2;
+      if (v.scrollWidth > v.clientWidth) {
+        const [lx, , lw] = boxes2[boxes2.length - 1];
+        const end = s.el.offsetLeft + (lx + lw) / w * s.el.offsetWidth;
+        const margin = 24;
+        if (end + margin > v.scrollLeft + v.clientWidth || end - margin < v.scrollLeft) to.left = Math.max(0, end + margin - v.clientWidth);
+      }
+      if (to.top !== void 0 || to.left !== void 0) v.scrollTo(to);
+    }
     clearTimeout(this.fadeTimer);
     this.fadeTimer = setTimeout(() => this.root.querySelectorAll(".mark:not(.sel)").forEach((m) => m.classList.add("fade")), 1800);
   }

@@ -203,10 +203,22 @@ export class Viewer {
       Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
     });
     for (const m of have.slice(boxes.length)) m.remove();
-    // (the first box in the middle of the view, unless it is in view already)
+    // (the first box in the middle of the view, unless it is in view already;
+    // zoomed wider than the view, the highlight's end brought in from the side
+    // it is off, so typing at a line's end keeps that end in view)
     const top = s.el.offsetTop + (boxes[0][1] / h) * s.el.offsetHeight;
     const v = this.scroller;
-    if (scroll && (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40)) v.scrollTo({ top: top - v.clientHeight / 2, behavior: "smooth" });
+    if (scroll) {
+      const to: ScrollToOptions = { behavior: "smooth" };
+      if (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40) to.top = top - v.clientHeight / 2;
+      if (v.scrollWidth > v.clientWidth) {
+        const [lx, , lw] = boxes[boxes.length - 1];
+        const end = s.el.offsetLeft + ((lx + lw) / w) * s.el.offsetWidth;
+        const margin = 24;
+        if (end + margin > v.scrollLeft + v.clientWidth || end - margin < v.scrollLeft) to.left = Math.max(0, end + margin - v.clientWidth);
+      }
+      if (to.top !== undefined || to.left !== undefined) v.scrollTo(to);
+    }
     // (it fades once the cursor rests: each new mark restarts the clock)
     clearTimeout(this.fadeTimer);
     this.fadeTimer = setTimeout(() => this.root.querySelectorAll(".mark:not(.sel)").forEach((m) => m.classList.add("fade")), 1800);
