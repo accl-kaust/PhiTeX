@@ -145,9 +145,14 @@ impl Operation for Finish {
     /// and page class defined, with its values (`FinDefs`, keyed by
     /// `(piece, nth)` for the page's own last run, else the routine's
     /// last two; never a page after it): the text after this one runs on
-    /// them, and runs again only where a value differs. And its page's
-    /// give-back ([`PAGE_OUT`]) as the routine's last, else nothing given
-    /// back.
+    /// them, and runs again only where a value differs. Never its page's
+    /// give-back ([`PAGE_OUT`]): that carries the page the routine ran on
+    /// ([`page_out_value`]), which only the run knows, and a loop rest
+    /// goes on only from the give-back made on its own page
+    /// (`Pages::rest_begins`), so a guess of it was never read as one and
+    /// was refuted by every run that defined it (pkgrec's
+    /// `prediction_is_right_when_nothing_changed`: `pages:out:<piece>:0`
+    /// refuted in a build where nothing else was).
     fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         let r = self.predicted_defs_(args, v);
         let c = if r.is_some() {
@@ -156,22 +161,7 @@ impl Operation for Finish {
             &FIN_UNPREDICTED
         };
         c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut out = r.unwrap_or_default();
-        let Some(a) = FinishArgs::decode(v, args) else {
-            return Some(out);
-        };
-        let f = a.key.field(v, PAGE_OUT);
-        let rtn = v.field(RTN);
-        let given = out.iter().find(|e| e.0 == rtn).map_or_else(
-            || v.list(vec![v.list(Vec::new()), v.list(Vec::new())]),
-            |e| e.1,
-        );
-        out.retain(|e| e.0 != f);
-        out.push((
-            f,
-            page_out_value(v, a.key.piece, a.key.nth, given, ValueId::UNIT),
-        ));
-        Some(out)
+        Some(r.unwrap_or_default())
     }
 
     /// Page counters as relations: what the last finisher of the same
