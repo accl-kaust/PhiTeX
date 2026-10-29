@@ -39,13 +39,17 @@ the old one. So the layout stays as it is:
 <root>/tl2026/h/<hash>.pack               content-named, shared by the prefix's releases
 ```
 
+- **The hostname carries the public protocol**, counted from 1 at the
+  alpha: `v1.shelf.phitex.org` is index schema 4. The schemas before it
+  were never released.
 - **Schema 3** is project `shelf-phitex` at `shelf.phitex.org` (tl2026.5).
-  It stays as it is while shipped extensions read it.
+  Nothing released reads it. It stays up for development builds of the
+  extensions until they move, and PhiTeX drops schema 3 from `SCHEMAS`.
 - **Schema 4** is project `shelf-phitex-v4` (shelf-phitex-v4.pages.dev).
-  It gets the custom domain **`v4.shelf.phitex.org`**, which is the URL
+  It gets the custom domain **`v1.shelf.phitex.org`**, which is the URL
   PhiTeX builds in.
 - **A schema an older client can't read** gets the next project and
-  domain (`v5.shelf.phitex.org`). The old project stays.
+  domain (`v2.shelf.phitex.org`). The old project stays.
 - **`schema`** is in each release's json. PhiTeX lists the schemas it reads
   (`phitex_shelf::SCHEMAS`, now 3 and 4). A release whose schema a client
   can't read is skipped by that client, which says so and names the version
@@ -193,14 +197,14 @@ for each version tag.
 ## 9. Work, in order
 
 1. **CLI:**
-   - `shelf::DEFAULT_URL` (`https://v4.shelf.phitex.org/tl2026/`);
+   - `shelf::DEFAULT_URL` (`https://v1.shelf.phitex.org/tl2026/`);
    - `shelf-url` and `shelf-release` keys;
    - skip unreadable schemas with a message;
    - warn on unknown config keys;
    - the `phitex` version key;
    - version 0.1.0 and the `--version` lines.
 2. **Shelf:**
-   - add the custom domain `v4.shelf.phitex.org` to the Pages project `shelf-phitex-v4`;
+   - add the custom domain `v1.shelf.phitex.org` to the Pages project `shelf-phitex-v4`;
    - build tl2026.7 from the xetex-trees branch on mc, with TRACE and FONT_INDEX;
    - `release.py` writes `shelf.json`;
    - `deploy.sh` to `shelf-phitex-v4`.
