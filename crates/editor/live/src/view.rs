@@ -970,7 +970,7 @@ mod tests {
         let got: Arc<Mutex<Vec<(String, (usize, usize), (usize, usize))>>> = Arc::default();
         let g = got.clone();
         v.on_select(Box::new(move |f: &str, a, b| {
-            lock(&g).push((f.to_owned(), a, b))
+            lock(&g).push((f.to_owned(), a, b));
         }));
         let r: Value = serde_json::from_str(
             &v.answer(&json!({"id": 1, "op": "select", "file": "a.tex", "start": 8, "end": 13})),

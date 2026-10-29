@@ -208,8 +208,16 @@ impl Writer {
             })
             .collect();
         let mut pre = String::from("SyncTeX Version:1\n");
+        // (a file found relative to the job's directory as pdfTeX names
+        // it, `<dir>/./<name>`: TeX Live's synctex matches a name given
+        // as `doc.tex` against the part after the `/./`, and says "No
+        // tag for doc.tex" for `<dir>/doc.tex`)
         for (i, f) in files.iter().enumerate() {
-            let p = dir.join(f);
+            let p = if Path::new(f).is_absolute() {
+                Path::new(f).to_path_buf()
+            } else {
+                dir.join(".").join(f.strip_prefix("./").unwrap_or(f))
+            };
             let _ = writeln!(pre, "Input:{}:{}", i + 1, p.display());
         }
         pre.push_str("Output:pdf\nMagnification:1000\nUnit:1\nX Offset:0\nY Offset:0\nContent:\n");

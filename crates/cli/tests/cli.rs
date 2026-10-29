@@ -1712,6 +1712,115 @@ fn build_json_events() {
     assert!(dir.join("story.dvi").is_file());
 }
 
+/// `phitex build --synctex` writes `JOB.synctex.gz` that TeX Live's
+/// `synctex` tool reads as it reads pdflatex's (docs/alpha-checklist.md
+/// §5): for every line of text, `synctex view` finds it on the same page
+/// and baseline (within 1 bp) in both, and `synctex edit` at that place of
+/// our PDF gives the line back: a PDF viewer's jumps (Skim, Zathura,
+/// Okular, Sumatra) work both ways as with pdflatex.
+#[test]
+fn synctex_finds_what_pdflatexs_finds() {
+    let _one = one();
+    let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
+    let mut src = String::from("\\documentclass{article}\n\\begin{document}\n");
+    let words = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"];
+    let mut lines = Vec::new();
+    for (i, w) in words.iter().enumerate() {
+        if i == 3 {
+            src.push_str("\\newpage\n");
+        }
+        lines.push(src.lines().count() + 1);
+        src.push_str(w);
+        src.push_str(" is the word of this short paragraph.\n\n");
+    }
+    src.push_str("\\end{document}\n");
+    let ours = scratch("synctex-phitex");
+    let theirs = scratch("synctex-pdflatex");
+    for d in [&ours, &theirs] {
+        std::fs::write(d.join("doc.tex"), &src).expect("the document");
+    }
+    let out = command(bin, &ours)
+        .args(["build", "--synctex", "doc.tex"])
+        .output()
+        .expect("phitex runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(ours.join("doc.synctex.gz").is_file(), "no doc.synctex.gz");
+    let out = Command::new("pdflatex")
+        .args(["-synctex=1", "-interaction=nonstopmode", "doc.tex"])
+        .current_dir(&theirs)
+        .env("SOURCE_DATE_EPOCH", "0")
+        .env("FORCE_SOURCE_DATE", "1")
+        .output()
+        .expect("pdflatex (TeX Live) on the test machine");
+    assert!(
+        out.status.success(),
+        "pdflatex: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // (synctex's answer: its first record's fields, by name)
+    let ask = |dir: &Path, args: &[String]| -> std::collections::HashMap<String, String> {
+        let out = Command::new("synctex")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("synctex (TeX Live) on the test machine");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let mut f = std::collections::HashMap::new();
+        for l in text
+            .lines()
+            .skip_while(|l| !l.starts_with("SyncTeX result begin"))
+        {
+            if let Some((k, v)) = l.split_once(':')
+                && !f.contains_key(k)
+            {
+                f.insert(k.to_owned(), v.to_owned());
+            }
+        }
+        f
+    };
+    let num = |f: &std::collections::HashMap<String, String>, k: &str| -> f64 {
+        f.get(k)
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(f64::NAN)
+    };
+    for (w, line) in words.iter().zip(&lines) {
+        let view = vec![
+            "view".to_owned(),
+            "-i".into(),
+            format!("{line}:1:doc.tex"),
+            "-o".into(),
+            "doc.pdf".into(),
+        ];
+        let (a, b) = (ask(&ours, &view), ask(&theirs, &view));
+        assert_eq!(
+            a.get("Page"),
+            b.get("Page"),
+            "{w} (line {line}): the page, ours {a:?}, pdflatex's {b:?}"
+        );
+        assert!(
+            (num(&a, "y") - num(&b, "y")).abs() <= 1.0,
+            "{w} (line {line}): the baseline, ours {a:?}, pdflatex's {b:?}"
+        );
+        // (back: a point on the line's text, from pdflatex's box)
+        let at = format!(
+            "{}:{}:{}:doc.pdf",
+            b["Page"].trim(),
+            num(&b, "x") + 12.0,
+            num(&b, "y") - 3.0
+        );
+        let edit = ask(&ours, &["edit".to_owned(), "-o".into(), at.clone()]);
+        assert_eq!(
+            edit.get("Line").map(|l| l.trim().to_owned()),
+            Some(line.to_string()),
+            "{w}: synctex edit at {at} in PhiTeX's: {edit:?}"
+        );
+    }
+}
+
 /// `phitex build` runs LaTeX as latexmk runs pdflatex: from nothing, a
 /// one-page document without cross-references in one round (the `.aux`
 /// latexmk writes before its first run, `set_trivial_aux_fdb`), one with
