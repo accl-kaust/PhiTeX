@@ -35,6 +35,7 @@ var Viewer = class {
         frame = requestAnimationFrame(() => {
           frame = 0;
           this.measure();
+          for (const k of this.visible) if (this.slots[k]) this.snap(this.slots[k]);
         });
     }, { passive: true });
     let told = "";
@@ -348,6 +349,26 @@ var Viewer = class {
     c.style.width = "100%";
     c.style.height = "100%";
     if (s.el.firstChild !== c) s.el.replaceChildren(c);
+    this.snap(s);
+  }
+  /**
+   * A page drawn as a bitmap shown at its own pixels, on the device's grid:
+   * its box exactly its pixel count over the device ratio (the slot's box,
+   * rounded on its own, can be a pixel off) and moved by the fraction of a
+   * device pixel the slot's corner sits at, so the browser copies the
+   * pixels and never resamples them (resampled, the page looks blurry).
+   */
+  snap(s) {
+    const wrap = s.img?.canvas;
+    const c = wrap?.querySelector("canvas");
+    if (!wrap || !c || !c.width || !c.height) return;
+    const dpr = window.devicePixelRatio || 1;
+    wrap.style.width = `${c.width / dpr}px`;
+    wrap.style.height = `${c.height / dpr}px`;
+    const r = s.el.getBoundingClientRect();
+    const fx = r.left * dpr - Math.round(r.left * dpr);
+    const fy = r.top * dpr - Math.round(r.top * dpr);
+    wrap.style.transform = fx || fy ? `translate(${-fx / dpr}px, ${-fy / dpr}px)` : "";
   }
   /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */
   turn(n) {
@@ -1075,8 +1096,13 @@ button.btn:hover { background: var(--accent2); }
 /* (the engine's connection lost: the last pages kept, dimmed, still, with why) */
 .gone { position: sticky; top: -12px; z-index: 2; display: none; margin: -12px -12px 10px; padding: 8px 12px; text-align: left; font-size: 12px; font-weight: 600;
   background: var(--bg-danger-03, #fbeceb); color: var(--danger); border-bottom: 1px solid var(--divider); }
-.stage.offline .gone { display: block; }
+.stage.offline .gone { display: flex; align-items: baseline; gap: 8px; }
+.gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; font-size: 14px; line-height: 1; padding: 0 2px; }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
+/* (dismissed: the pages back to normal, the state still shown, small) */
+.offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600;
+  background: var(--light); color: var(--danger); border: 1px solid var(--danger); pointer-events: none; }
+.win.offline-quiet .offpill { display: block; }
 .approx { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px; background: #fff4d6; color: #5c4400; border-bottom: 1px solid #e8c766; }
 .win.docked .approx { margin: 0; top: 0; }
 .stage.fit { overflow-x: hidden; }
@@ -1333,7 +1359,8 @@ var Panel = class {
     </div>
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="keyhelp" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
-    <div class="stage" id="stage"><div class="gone" id="gone" role="alert"></div><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load">${stepsHtml(w.steps, ["now", "", ""])}<h3>${w.steps[0]}\u2026</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
+    <div class="offpill" id="offpill">\u25CF disconnected</div>
+    <div class="stage" id="stage"><div class="gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load">${stepsHtml(w.steps, ["now", "", ""])}<h3>${w.steps[0]}\u2026</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
   </div>
   <footer><span class="lat" id="lat" title="Click for details">\u2013</span><span class="grow"></span><span class="msg" id="msg">all local</span></footer>
 </div>`.replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "download" ? 16 : 18));
@@ -1392,6 +1419,8 @@ var Panel = class {
       this.sheet(false);
     });
     this.root.addEventListener("keydown", (e) => e.key === "Escape" && this.diagsOpen(false));
+    this.$("#gonex").onclick = () => this.dismissOffline();
+    addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("offline") && this.dismissOffline());
     window.addEventListener("keydown", (e) => {
       if (e.altKey && e.shiftKey && e.code === "KeyP") {
         e.preventDefault();
@@ -1866,9 +1895,25 @@ var Panel = class {
    * the last pages stay, dimmed and inert, under a banner saying so and why.
    */
   connection(up, why) {
-    this.$("#stage").classList.toggle("offline", !up);
-    if (!up) this.$("#gone").textContent = `Disconnected from the engine: the pages are the last ones built${why ? ` (${why})` : ""}.`;
+    const was = this.offline;
+    this.offline = !up;
+    if (up) {
+      this.$("#stage").classList.remove("offline");
+      this.win.classList.remove("offline-quiet");
+      return;
+    }
+    const text = `Disconnected from the engine: the pages are the last ones built${why ? ` (${why})` : ""}.`;
+    this.$("#gonewhy").textContent = text;
+    this.$("#offpill").title = text;
+    if (!was || !this.win.classList.contains("offline-quiet")) this.$("#stage").classList.add("offline");
   }
+  /** The disconnection's banner dismissed (✕ or Esc): the pages interactive again, a small pill saying so. */
+  dismissOffline() {
+    if (!this.offline) return;
+    this.$("#stage").classList.remove("offline");
+    this.win.classList.add("offline-quiet");
+  }
+  offline = false;
   /** Follow what the panel shows (a host toolbar's controls). */
   onState(cb) {
     this.listeners.push(cb);
@@ -2564,8 +2609,20 @@ function charOffset(s, byte) {
 
 // viewer/src/sync.ts
 function glyphs(json, path) {
+  if (!json?.n || !json.file || !json.start || !json.end || !json.synth || !json.x || !json.y) return [];
   const files = json.files.map(path);
-  return json.g.map(([x, y, f, start, end, synth]) => ({ x, y, file: f < 0 ? null : files[f] ?? null, start, end, synth: synth === 1 }));
+  const words2 = (b64) => {
+    const b = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    return new DataView(b.buffer);
+  };
+  const [file, start, end, synth, x, y] = [json.file, json.start, json.end, json.synth, json.x, json.y].map(words2);
+  const out = [];
+  for (let i = 0; i < json.n; i++) {
+    const f = file.getUint32(4 * i, true);
+    const s = 4 * (i >> 5) < synth.byteLength ? synth.getUint32(4 * (i >> 5), true) >>> (i & 31) & 1 : 0;
+    out.push({ x: x.getFloat32(4 * i, true), y: y.getFloat32(4 * i, true), file: f === 4294967295 ? null : files[f] ?? null, start: start.getUint32(4 * i, true), end: end.getUint32(4 * i, true), synth: s === 1 });
+  }
+  return out;
 }
 function nearest(gs, x, y) {
   let best = null, d = Infinity;
@@ -3357,7 +3414,7 @@ var PreviewSession = class {
     const have = this.glyphCache.get(key);
     if (have) return have;
     const r = await this.core.request({ op: "origins", page: k });
-    if (!r.ok || !r.json?.g) return [];
+    if (!r.ok || !r.json) return [];
     const path = (n) => {
       n = n.replace(/^\.\//, "");
       if (this.o.remote) return n;

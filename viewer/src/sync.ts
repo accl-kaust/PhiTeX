@@ -15,10 +15,39 @@ export interface Glyph {
   synth: boolean;
 }
 
-/** A page's glyphs from the core's `{files, g}`; `path` maps the job's file names to the project's. */
-export function glyphs(json: { files: string[]; g: number[][] }, path: (name: string) => string | null): Glyph[] {
+/**
+ * phitex-live's `origins` answer, the same from the watch and the wasm
+ * core: per glyph its file (an index into `files`, 2^32-1 none), its
+ * source byte range, its origin (f32 points), as base64 columns of
+ * little-endian words, and one synthesized bit a glyph.
+ */
+export interface Origins {
+  files: string[];
+  n: number;
+  file?: string;
+  start?: string;
+  end?: string;
+  synth?: string;
+  x?: string;
+  y?: string;
+}
+
+/** A page's glyphs from the core's `origins` answer; `path` maps the job's file names to the project's. */
+export function glyphs(json: Origins, path: (name: string) => string | null): Glyph[] {
+  if (!json?.n || !json.file || !json.start || !json.end || !json.synth || !json.x || !json.y) return [];
   const files = json.files.map(path);
-  return json.g.map(([x, y, f, start, end, synth]) => ({ x, y, file: f < 0 ? null : (files[f] ?? null), start, end, synth: synth === 1 }));
+  const words = (b64: string) => {
+    const b = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    return new DataView(b.buffer);
+  };
+  const [file, start, end, synth, x, y] = [json.file, json.start, json.end, json.synth, json.x, json.y].map(words);
+  const out: Glyph[] = [];
+  for (let i = 0; i < json.n; i++) {
+    const f = file.getUint32(4 * i, true);
+    const s = 4 * (i >> 5) < synth.byteLength ? (synth.getUint32(4 * (i >> 5), true) >>> (i & 31)) & 1 : 0;
+    out.push({ x: x.getFloat32(4 * i, true), y: y.getFloat32(4 * i, true), file: f === 0xffffffff ? null : (files[f] ?? null), start: start.getUint32(4 * i, true), end: end.getUint32(4 * i, true), synth: s === 1 });
+  }
+  return out;
 }
 
 /** The glyph with a source nearest (x, y): a line apart weighs more than a word apart. */

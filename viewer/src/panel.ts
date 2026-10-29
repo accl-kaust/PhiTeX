@@ -313,8 +313,13 @@ button.btn:hover { background: var(--accent2); }
 /* (the engine's connection lost: the last pages kept, dimmed, still, with why) */
 .gone { position: sticky; top: -12px; z-index: 2; display: none; margin: -12px -12px 10px; padding: 8px 12px; text-align: left; font-size: 12px; font-weight: 600;
   background: var(--bg-danger-03, #fbeceb); color: var(--danger); border-bottom: 1px solid var(--divider); }
-.stage.offline .gone { display: block; }
+.stage.offline .gone { display: flex; align-items: baseline; gap: 8px; }
+.gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; font-size: 14px; line-height: 1; padding: 0 2px; }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
+/* (dismissed: the pages back to normal, the state still shown, small) */
+.offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600;
+  background: var(--light); color: var(--danger); border: 1px solid var(--danger); pointer-events: none; }
+.win.offline-quiet .offpill { display: block; }
 .approx { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px; background: #fff4d6; color: #5c4400; border-bottom: 1px solid #e8c766; }
 .win.docked .approx { margin: 0; top: 0; }
 .stage.fit { overflow-x: hidden; }
@@ -575,7 +580,8 @@ export class Panel {
     </div>
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="keyhelp" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
-    <div class="stage" id="stage"><div class="gone" id="gone" role="alert"></div><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load">${stepsHtml(w.steps, ["now", "", ""])}<h3>${w.steps[0]}…</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
+    <div class="offpill" id="offpill">● disconnected</div>
+    <div class="stage" id="stage"><div class="gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load">${stepsHtml(w.steps, ["now", "", ""])}<h3>${w.steps[0]}…</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
   </div>
   <footer><span class="lat" id="lat" title="Click for details">–</span><span class="grow"></span><span class="msg" id="msg">all local</span></footer>
 </div>`).replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "download" ? 16 : 18));
@@ -637,6 +643,8 @@ export class Panel {
       this.sheet(false);
     });
     this.root.addEventListener("keydown", (e) => (e as KeyboardEvent).key === "Escape" && this.diagsOpen(false));
+    this.$("#gonex").onclick = () => this.dismissOffline();
+    addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("offline") && this.dismissOffline());
     window.addEventListener("keydown", (e) => {
       if (e.altKey && e.shiftKey && e.code === "KeyP") {
         e.preventDefault();
@@ -1192,9 +1200,28 @@ export class Panel {
    * the last pages stay, dimmed and inert, under a banner saying so and why.
    */
   connection(up: boolean, why?: string): void {
-    this.$("#stage").classList.toggle("offline", !up);
-    if (!up) this.$("#gone").textContent = `Disconnected from the engine: the pages are the last ones built${why ? ` (${why})` : ""}.`;
+    const was = this.offline;
+    this.offline = !up;
+    if (up) {
+      this.$("#stage").classList.remove("offline");
+      this.win.classList.remove("offline-quiet");
+      return;
+    }
+    const text = `Disconnected from the engine: the pages are the last ones built${why ? ` (${why})` : ""}.`;
+    this.$("#gonewhy").textContent = text;
+    this.$("#offpill").title = text;
+    // (dismissed once: it stays dismissed until the connection comes back)
+    if (!was || !this.win.classList.contains("offline-quiet")) this.$("#stage").classList.add("offline");
   }
+
+  /** The disconnection's banner dismissed (✕ or Esc): the pages interactive again, a small pill saying so. */
+  private dismissOffline(): void {
+    if (!this.offline) return;
+    this.$("#stage").classList.remove("offline");
+    this.win.classList.add("offline-quiet");
+  }
+
+  private offline = false;
 
   /** Follow what the panel shows (a host toolbar's controls). */
   onState(cb: (s: ViewState) => void): void {

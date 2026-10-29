@@ -57,6 +57,9 @@ export class Viewer {
         frame = requestAnimationFrame(() => {
           frame = 0;
           this.measure();
+          // (scrolled by whole CSS pixels, a fractional device ratio moves a
+          // page off the device's grid: snapped again)
+          for (const k of this.visible) if (this.slots[k]) this.snap(this.slots[k]);
         });
     }, { passive: true });
     // (text selected on the pages: its boxes, for the editor to select the source)
@@ -413,6 +416,27 @@ export class Viewer {
     c.style.width = "100%";
     c.style.height = "100%";
     if (s.el.firstChild !== c) s.el.replaceChildren(c);
+    this.snap(s);
+  }
+
+  /**
+   * A page drawn as a bitmap shown at its own pixels, on the device's grid:
+   * its box exactly its pixel count over the device ratio (the slot's box,
+   * rounded on its own, can be a pixel off) and moved by the fraction of a
+   * device pixel the slot's corner sits at, so the browser copies the
+   * pixels and never resamples them (resampled, the page looks blurry).
+   */
+  private snap(s: Slot): void {
+    const wrap = s.img?.canvas;
+    const c = wrap?.querySelector("canvas");
+    if (!wrap || !c || !c.width || !c.height) return;
+    const dpr = window.devicePixelRatio || 1;
+    wrap.style.width = `${c.width / dpr}px`;
+    wrap.style.height = `${c.height / dpr}px`;
+    const r = s.el.getBoundingClientRect();
+    const fx = r.left * dpr - Math.round(r.left * dpr);
+    const fy = r.top * dpr - Math.round(r.top * dpr);
+    wrap.style.transform = fx || fy ? `translate(${-fx / dpr}px, ${-fy / dpr}px)` : "";
   }
 
   /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */

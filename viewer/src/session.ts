@@ -900,7 +900,7 @@ export class PreviewSession {
     const have = this.glyphCache.get(key);
     if (have) return have;
     const r = await this.core.request({ op: "origins", page: k });
-    if (!r.ok || !r.json?.g) return [];
+    if (!r.ok || !r.json) return [];
     // (the job's names: "main" for main.tex, "ch/intro.tex", "article.cls")
     const path = (n: string) => {
       n = n.replace(/^\.\//, "");
