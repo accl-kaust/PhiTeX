@@ -1303,13 +1303,19 @@ fn watch_lsp_commands() {
         &mut to,
         &json!({"jsonrpc": "2.0", "id": conf["id"], "result": [{"threads": null, "main": null, "follow": "cursor", "files": null}]}),
     );
-    let ready = |m: &serde_json::Value| m["method"] == "phitex/status" && m["params"]["state"] == "ready";
+    let ready =
+        |m: &serde_json::Value| m["method"] == "phitex/status" && m["params"]["state"] == "ready";
     lsp_until(&rx, &mut seen, ready);
     let url = seen
         .iter()
         .find_map(|m| {
             let t = m["params"]["message"].as_str()?;
-            Some(t[t.find("http://")?..].split_whitespace().next()?.to_owned())
+            Some(
+                t[t.find("http://")?..]
+                    .split_whitespace()
+                    .next()?
+                    .to_owned(),
+            )
         })
         .expect("the viewer's address");
     // (the outline of a file not opened)
@@ -1339,14 +1345,26 @@ fn watch_lsp_commands() {
     let caches = &held_now["result"]["caches"];
     assert_eq!(caches[0]["scope"], "build", "{held_now}");
     assert_eq!(caches[1]["scope"], "packages", "{held_now}");
-    for k in ["location", "bytes", "entries", "last_used", "hits", "misses"] {
+    for k in [
+        "location",
+        "bytes",
+        "entries",
+        "last_used",
+        "hits",
+        "misses",
+    ] {
         assert!(caches[0].get(k).is_some(), "{k}: {held_now}");
     }
     let held = caches[0]["bytes"].as_u64().unwrap_or(0);
     exec(&mut to, 5, "phitex.clearCache", json!([{"scope": "build"}]));
     let cleared = lsp_until(&rx, &mut seen, |m| m["id"] == 5);
     assert_eq!(cleared["result"]["freed_bytes"], held, "{cleared}");
-    exec(&mut to, 6, "phitex.clearCache", json!([{"scope": "nothing"}]));
+    exec(
+        &mut to,
+        6,
+        "phitex.clearCache",
+        json!([{"scope": "nothing"}]),
+    );
     let bad = lsp_until(&rx, &mut seen, |m| m["id"] == 6);
     assert_eq!(bad["error"]["code"], -32603, "{bad}");
     // (a cold build, asked)
@@ -1384,7 +1402,10 @@ fn watch_lsp_commands() {
         if let Some(s) = child.try_wait().expect("the watch") {
             break s;
         }
-        assert!(Instant::now() < end, "the watch did not end after phitex.stop");
+        assert!(
+            Instant::now() < end,
+            "the watch did not end after phitex.stop"
+        );
         std::thread::sleep(Duration::from_millis(50));
     };
     assert!(status.success(), "the watch ended with {status}");
@@ -2610,5 +2631,196 @@ fn xelatex_watch_edit() {
         watched == cold_pdf,
         "the watch's PDF after the edit is not the cold build's: {}",
         first_difference(&watched, &cold_pdf)
+    );
+}
+
+/// A Shelf release made of TeX Live's TFM files the plain document
+/// names (one pack, its table, `release-tl2026.6.json` of schema 4),
+/// served over HTTP on 127.0.0.1 by a thread of the test's: the port,
+/// and how many requests it answered. `tamper`: the pack served differs
+/// from the table's by its last byte.
+#[allow(clippy::too_many_lines, reason = "a release made and served, in order")]
+fn shelf_server(text: &str, tamper: bool) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::collections::HashMap;
+    use std::io::Read as _;
+    let mut names: Vec<String> = text
+        .split("\\font\\")
+        .skip(1)
+        .filter_map(|r| {
+            let r = r.split_once('=')?.1;
+            let n: String = r.chars().take_while(char::is_ascii_alphanumeric).collect();
+            (!n.is_empty()).then_some(n)
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    let mut files = Vec::new();
+    for n in &names {
+        let out = Command::new("kpsewhich")
+            .arg(format!("{n}.tfm"))
+            .output()
+            .expect("kpsewhich (TeX Live) on the test machine");
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if !p.is_empty() {
+            files.push((
+                format!("fonts/tfm/public/cm/{n}.tfm"),
+                std::fs::read(&p).expect("a TFM"),
+            ));
+        }
+    }
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let pack = phitex_shelf::pack(&refs);
+    let index: String = files.iter().fold(String::new(), |mut s, (n, _)| {
+        let _ = writeln!(s, "{n}\tcm-1\t\t");
+        s
+    });
+    let table = format!(
+        "cm-1\t{}\t{}\n",
+        phitex_shelf::sha256_hex(&pack),
+        pack.len()
+    );
+    let release = serde_json::json!({
+        "schema": 4, "release": "tl2026.6", "index": "index-tl2026.6.tsv.gz",
+        "pack_table": "packs-tl2026.6.tsv.gz", "deps": ["pdftex", "xetex"],
+        "search": {"pdftex": {"tex": ["tex/latex", "tex/generic", "tex"], "tfm": ["fonts/tfm"]}},
+    });
+    let mut served = pack.clone();
+    if tamper {
+        *served.last_mut().expect("a pack") ^= 1;
+    }
+    let site: HashMap<String, Vec<u8>> = [
+        (
+            "release-tl2026.6.json".to_owned(),
+            release.to_string().into_bytes(),
+        ),
+        (
+            "index-tl2026.6.tsv.gz".to_owned(),
+            phitex_shelf::gzip_stored(index.as_bytes()),
+        ),
+        (
+            "packs-tl2026.6.tsv.gz".to_owned(),
+            phitex_shelf::gzip_stored(table.as_bytes()),
+        ),
+        ("h/cm-1.pack".to_owned(), served),
+    ]
+    .into();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let port = listener.local_addr().expect("its address").port();
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n = asked.clone();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut c) = conn else { continue };
+            let mut head = Vec::new();
+            let mut b = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).unwrap_or(0) == 1 {
+                head.push(b[0]);
+            }
+            let line = String::from_utf8_lossy(&head)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_owned();
+            let path = line.split(' ').nth(1).unwrap_or("");
+            n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = match path.strip_prefix("/tl2026/").and_then(|p| site.get(p)) {
+                Some(body) => c
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .and_then(|()| c.write_all(body)),
+                None => c.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                ),
+            };
+        }
+    });
+    (port, asked)
+}
+
+/// `phitex build --shelf`: TeX's files from Shelf (docs/spec-editor-protocol.md
+/// §5), its index and pack fetched over HTTP, checked against the pack
+/// table and kept in the package cache: the DVI is TeX Live's build's,
+/// byte for byte; a second build reads the cache only (the server
+/// asked nothing more); a pack that differs from the table is refused,
+/// the build failing and saying so.
+#[test]
+fn build_from_shelf() {
+    let _one = one();
+    let text = plain() + "Alpha {\\bf bravo} {\\it charlie} $x^2$.\\bye\n";
+    let run = |dir: &Path, args: &[&str], url: Option<u16>| {
+        let mut c = command(Path::new(env!("CARGO_BIN_EXE_phitex")), dir);
+        c.args(["build", "--ini", "--etex", "--output-format", "dvi"])
+            .args(args)
+            .arg("doc.tex")
+            .env("PHITEX_CACHE_DIR", dir.join("cache"))
+            .env_remove("PHITEX_SHELF_URL");
+        if let Some(p) = url {
+            c.env("PHITEX_SHELF_URL", format!("http://127.0.0.1:{p}/tl2026"));
+        }
+        c.output().expect("phitex runs")
+    };
+    let tl = scratch("shelf-texlive");
+    std::fs::write(tl.join("doc.tex"), &text).expect("the document");
+    let out = run(&tl, &[], None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let want = std::fs::read(tl.join("doc.dvi")).expect("TeX Live's DVI");
+    let dir = scratch("shelf-build");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the document");
+    let (port, asked) = shelf_server(&text, false);
+    let out = run(&dir, &["--shelf"], Some(port));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(dir.join("doc.dvi")).expect("Shelf's DVI"),
+        want,
+        "the DVI from Shelf's files is not TeX Live's"
+    );
+    let n = asked.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(n, 4, "release.json, the index, the pack table, one pack");
+    assert!(
+        dir.join("cache/shelf/tl2026.6/h/cm-1.pack").is_file(),
+        "the pack kept"
+    );
+    // (again, the cache's only: no server)
+    std::fs::remove_file(dir.join("doc.dvi")).expect("the DVI");
+    let out = run(&dir, &["--shelf"], None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(dir.join("doc.dvi")).expect("the DVI again"),
+        want
+    );
+    // (a pack that is not the table's: refused, never kept)
+    let bad = scratch("shelf-tampered");
+    std::fs::write(bad.join("doc.tex"), &text).expect("the document");
+    let (port, _) = shelf_server(&text, true);
+    let out = run(&bad, &["--shelf"], Some(port));
+    assert!(!out.status.success(), "a tampered pack built");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("SHA-256"),
+        "the refusal not said: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !bad.join("cache/shelf/tl2026.6/h/cm-1.pack").exists(),
+        "a tampered pack kept"
     );
 }

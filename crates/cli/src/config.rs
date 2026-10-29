@@ -40,6 +40,9 @@ pub struct Config {
     /// The cache's size limit in bytes (`cache-limit = "4GB"`; 0: no cache).
     #[serde(default, deserialize_with = "size")]
     pub cache_limit: Option<u64>,
+    /// Where TeX's files come from: `texlive` (kpathsea, the default) or
+    /// `shelf` (Shelf's packs, fetched and kept: `crate::shelf`).
+    pub files: Option<String>,
 }
 
 /// `copy-pdf`'s value.
@@ -156,6 +159,7 @@ impl Config {
             copy_pdf: self.copy_pdf.or(under.copy_pdf),
             synctex: self.synctex.or(under.synctex),
             cache_limit: self.cache_limit.or(under.cache_limit),
+            files: self.files.or(under.files),
         }
     }
 }
@@ -394,9 +398,14 @@ mod tests {
                 copy_pdf: None,
                 synctex: None,
                 cache_limit: None,
+                files: None,
             }
         );
         assert_eq!(parse("synctex = false").unwrap().synctex, Some(false));
+        assert_eq!(
+            parse("files = \"shelf\"").unwrap().files.as_deref(),
+            Some("shelf")
+        );
         assert_eq!(
             parse("cache-limit = \"500MB\"").unwrap().cache_limit,
             Some(500_000_000)

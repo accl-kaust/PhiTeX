@@ -842,7 +842,7 @@ impl Server {
             ),
             Trouble::Unreachable => (
                 2,
-                format!("PhiTeX: can't reach the package server: {message}"),
+                format!("PhiTeX: a package could not be had: {message}"),
                 vec![("Retry".to_owned(), Action::Build)],
             ),
         };

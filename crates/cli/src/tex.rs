@@ -62,6 +62,29 @@ pub fn fingerprint_file(p: &std::path::Path) -> Option<u64> {
     Some(h.0)
 }
 
+/// Where a run's TeX files come from (`files` in `phitex.toml`, the
+/// editor's setting, `--shelf`): one source a run, never one after the
+/// other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Files {
+    /// TeX Live, by kpathsea.
+    #[default]
+    TexLive,
+    /// Shelf's packs (`crate::shelf`).
+    Shelf,
+}
+
+impl Files {
+    /// `texlive` or `shelf`.
+    pub fn of(name: &str) -> Result<Files, String> {
+        match name {
+            "texlive" => Ok(Files::TexLive),
+            "shelf" => Ok(Files::Shelf),
+            n => Err(format!("files = \"{n}\": texlive or shelf")),
+        }
+    }
+}
+
 /// The cache directory: `PHITEX_CACHE_DIR`, else `$XDG_CACHE_HOME/phitex`,
 /// else `~/.cache/phitex`, else the temporary directory's.
 pub fn cache_dir() -> PathBuf {

@@ -251,11 +251,13 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         eprintln!("{progname}: {n}");
     }
     let status = std::sync::Arc::new(session::Status::default());
-    let mut s = Session::new(job, status, &mut |n: &str| eprintln!("{progname}: {n}"))
-        .unwrap_or_else(|e| {
-            eprintln!("{progname}: {e}");
-            std::process::exit(1);
-        });
+    let mut s = Session::new(job, crate::tex::Files::TexLive, status, &mut |n: &str| {
+        eprintln!("{progname}: {n}");
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("{progname}: {e}");
+        std::process::exit(1);
+    });
     crate::ui::capture_panics(false);
     let r = crate::ui::catch(|| s.build()).unwrap_or_else(|m| {
         eprintln!(

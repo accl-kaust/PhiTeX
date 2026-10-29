@@ -238,6 +238,11 @@ struct Opts {
     /// `synctex = true` asks for it)
     #[arg(long, global = true)]
     no_synctex: bool,
+    /// TeX's files from Shelf's packs (fetched once, kept in the cache's
+    /// `shelf/`; PHITEX_SHELF_URL the server) instead of TeX Live's
+    /// (`files = "shelf"` in `phitex.toml`)
+    #[arg(long, global = true)]
+    shelf: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -283,6 +288,9 @@ pub struct Options {
     pub copy_pdf: Option<config::CopyPdf>,
     pub synctex: Option<bool>,
     pub all: bool,
+    /// `--shelf`, or the editor's `files` setting (none: `phitex.toml`'s,
+    /// else TeX Live).
+    pub files: Option<tex::Files>,
 }
 
 impl Cli {
@@ -336,6 +344,7 @@ impl Cli {
             },
             synctex: o.no_synctex.then_some(false),
             all,
+            files: o.shelf.then_some(tex::Files::Shelf),
         }
     }
 }
@@ -366,6 +375,9 @@ pub struct Target {
     pub viewer: Option<String>,
     /// The cache's limit (`cache-limit`; none: the default).
     pub cache_limit: Option<u64>,
+    /// Where TeX's files come from (`--shelf`, `files`; TeX Live by
+    /// default).
+    pub files: tex::Files,
 }
 
 impl Target {
@@ -507,6 +519,11 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
         cache_limit: cfg.cache_limit,
+        files: match (o.files, &cfg.files) {
+            (Some(f), _) => f,
+            (None, Some(f)) => tex::Files::of(f)?,
+            (None, None) => tex::Files::TexLive,
+        },
     })
 }
 
@@ -705,7 +722,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     let status = Arc::new(Status::default());
     let spin = ui.spin(what(t, &job), status.clone());
     phitex_tex::timeline::lap("cli: the job, the spinner");
-    let mut s = match Session::new(job, status.clone(), &mut |n: &str| ui.note(n)) {
+    let mut s = match Session::new(job, t.files, status.clone(), &mut |n: &str| ui.note(n)) {
         Ok(s) => s,
         Err(e) => {
             spin.done();
@@ -713,6 +730,15 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
             return crate::EXIT_FAILED;
         }
     };
+    // (a package that could not be had, `--shelf`: said)
+    {
+        let ui = std::sync::Mutex::new(ui.clone());
+        s.status().meter().on_unreachable(Box::new(move |why| {
+            ui.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .warning(why);
+        }));
+    }
     let r = match crate::ui::catch(|| s.build()) {
         Ok(r) => r,
         Err(m) => {
@@ -911,6 +937,14 @@ pub fn main(args: &[String]) -> ! {
         // command line's and phitex.toml's)
         if let Some(n) = l.settings().threads {
             o.threads = Some(n);
+        }
+        if let Some(f) = l
+            .settings()
+            .files
+            .as_deref()
+            .and_then(|f| tex::Files::of(f).ok())
+        {
+            o.files = Some(f);
         }
         Some(l)
     } else {

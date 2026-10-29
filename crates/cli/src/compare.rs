@@ -164,6 +164,10 @@ impl Compare {
     /// # Errors
     ///
     /// A version not there, or the document's session failing to start.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the watch's session's parts, each its own"
+    )]
     pub fn start(
         src: &dyn Versions,
         rev: &str,
@@ -171,6 +175,7 @@ impl Compare {
         now: &dyn Files,
         main: &str,
         job: &Job,
+        files: crate::tex::Files,
         status: Arc<Status>,
     ) -> Result<Compare, String> {
         // (latexdiff's markup is LaTeX's: a plain document can't take it)
@@ -192,7 +197,7 @@ impl Compare {
         let mut j = job.clone();
         j.jobname = format!("{}-diff", job.jobname);
         // (the diff's .aux and .toc its own; the PDF as the document's)
-        let session = Session::new(j, status, &mut |_| {})?;
+        let session = Session::new(j, files, status, &mut |_| {})?;
         let short = |r: &str| r.chars().take(7).collect::<String>();
         let label = format!(
             "{} → {}",

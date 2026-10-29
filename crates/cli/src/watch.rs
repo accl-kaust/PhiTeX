@@ -563,6 +563,18 @@ fn reconfigured(
     if let Some(m) = &s.main {
         o2.file = Some(m.clone());
     }
+    if let Some(f) = &s.files {
+        match crate::tex::Files::of(f) {
+            Ok(f) => o2.files = Some(f),
+            Err(e) => {
+                if let Some(l) = lsp {
+                    l.server()
+                        .show_message(1, &format!("PhiTeX: the settings: {e}"));
+                }
+                return None;
+            }
+        }
+    }
     let same_main = |a: &str, b: &str| {
         let c = |f: &str| {
             Path::new(f)
@@ -584,7 +596,7 @@ fn reconfigured(
             return None;
         }
     };
-    if o2.threads == o.threads && same_main(&t2.file, &t.file) {
+    if o2.threads == o.threads && same_main(&t2.file, &t.file) && t2.files == t.files {
         return None;
     }
     match modern::job(&t2, &o2) {
@@ -643,13 +655,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     let status = Arc::new(Status::default());
     let what = modern::what(t, &job);
     let spin = ui.spin(what.clone(), status.clone());
-    let mut s = Session::new(job, status.clone(), &mut |n: &str| ui.note(n)).unwrap_or_else(|e| {
-        ui.error(&e);
-        if let Some(l) = &lsp {
-            l.refuse(&e);
-        }
-        std::process::exit(crate::EXIT_FAILED);
-    });
+    let mut s = Session::new(job, t.files, status.clone(), &mut |n: &str| ui.note(n))
+        .unwrap_or_else(|e| {
+            ui.error(&e);
+            if let Some(l) = &lsp {
+                l.refuse(&e);
+            }
+            std::process::exit(crate::EXIT_FAILED);
+        });
     spin.done();
     // (no log laid out after a build; the PDF file appended an update
     // section after each edit, the exact file written when idle, but
@@ -770,6 +783,20 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 }
             }));
         }
+    }
+    // (a package that could not be had, `--shelf`: said here and to the
+    // editor)
+    {
+        let ui = Mutex::new(ui.clone());
+        let server = lsp.as_ref().map(|l| l.server().clone());
+        status.meter().on_unreachable(Box::new(move |why| {
+            ui.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .warning(why);
+            if let Some(l) = &server {
+                l.trouble(phitex_live::lsp::Trouble::Unreachable, why);
+            }
+        }));
     }
     if let Some(l) = &lsp {
         let wake = Mutex::new(tx.clone());
@@ -1854,6 +1881,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 &now,
                                 &main_rel,
                                 &s.job,
+                                s.files(),
                                 Arc::new(Status::default()),
                             )
                         });

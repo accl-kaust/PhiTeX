@@ -22,6 +22,7 @@ use crate::tex;
 pub struct Session {
     live: phitex_live::session::Session,
     out: Arc<Out>,
+    files: tex::Files,
 }
 
 impl std::ops::Deref for Session {
@@ -38,12 +39,17 @@ impl std::ops::DerefMut for Session {
 }
 
 impl Session {
-    /// A session for `job`: the main file read.
+    /// A session for `job`, its TeX files from `files`: the main file
+    /// read.
     pub fn new(
         job: Job,
+        files: tex::Files,
         status: Arc<Status>,
         note: &mut dyn FnMut(&str),
     ) -> Result<Session, String> {
+        if files == tex::Files::Shelf {
+            return Session::on_shelf(job, status, note);
+        }
         // (the `ls-R` databases kept in the cache: read, not parsed, by
         // the next process while they are unchanged)
         phitex_kpse::set_db_cache(Some(tex::cache_dir().join("kpse")));
@@ -62,6 +68,42 @@ impl Session {
             (text, tree, format_tree)
         });
         let text = text?;
+        let (store, out) = Self::store_and_out(&job, note);
+        let host = Arc::new(Machine { tree, format_tree });
+        Ok(Session {
+            live: phitex_live::session::Session::new(job, text, host, store, out.clone(), status),
+            out,
+            files,
+        })
+    }
+
+    /// A session whose TeX files are Shelf's (and the project's own):
+    /// no kpathsea.
+    fn on_shelf(
+        job: Job,
+        status: Arc<Status>,
+        note: &mut dyn FnMut(&str),
+    ) -> Result<Session, String> {
+        if job.engine.xetex() {
+            return Err(
+                "files = \"shelf\" builds pdfTeX's and TeX's jobs: XeTeX's fonts by name are not on Shelf's index yet".to_owned(),
+            );
+        }
+        let text = std::fs::read(&job.path)
+            .map(|t| Arc::<str>::from(tex::chars_owned(t)))
+            .map_err(|e| format!("{}: {e}", job.path.display()))?;
+        let files = crate::shelf::files(job.engine.name, status.meter())?;
+        let (store, out) = Self::store_and_out(&job, note);
+        let host = Arc::new(crate::shelf::ShelfHost { files });
+        Ok(Session {
+            live: phitex_live::session::Session::new(job, text, host, store, out.clone(), status),
+            out,
+            files: tex::Files::Shelf,
+        })
+    }
+
+    /// The cache as the session's store, and its outputs' directory.
+    fn store_and_out(job: &Job, note: &mut dyn FnMut(&str)) -> (Option<Arc<dyn Store>>, Arc<Out>) {
         let cache = Cache::open(job.cache_limit).ok();
         phitex_tex::timeline::lap("session: the cache opened");
         if let Some(c) = &cache
@@ -81,11 +123,12 @@ impl Session {
             last_main: Mutex::new(None),
             updates: Mutex::new(None),
         });
-        let host = Arc::new(Machine { tree, format_tree });
-        Ok(Session {
-            live: phitex_live::session::Session::new(job, text, host, store, out.clone(), status),
-            out,
-        })
+        (store, out)
+    }
+
+    /// Where the session's TeX files come from.
+    pub fn files(&self) -> tex::Files {
+        self.files
     }
 
     /// The PDF file written as update sections (a watch's, but with

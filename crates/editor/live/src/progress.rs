@@ -131,9 +131,9 @@ impl Meter {
         lock(&self.unreachable).push(f);
     }
 
-    /// A package source cannot be reached: `why` (the host's files: a
-    /// Shelf fetch that failed), told to the listeners (the editor shows
-    /// it, `phitex_live::lsp::Trouble::Unreachable`).
+    /// A package could not be had: `why` (the host's files: a Shelf pack
+    /// unreachable, or refused by the pack table), told to the listeners
+    /// (the editor shows it, `phitex_live::lsp::Trouble::Unreachable`).
     pub fn unreachable(&self, why: &str) {
         for f in lock(&self.unreachable).iter() {
             f(why);

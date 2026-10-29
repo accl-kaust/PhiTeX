@@ -393,7 +393,8 @@ mod tests {
             dir: scratch("shelf"),
             limit: 1000,
         };
-        c.put(&c.dir.join("formats").join("f"), &[0; 10], &[]).unwrap();
+        c.put(&c.dir.join("formats").join("f"), &[0; 10], &[])
+            .unwrap();
         std::fs::create_dir_all(c.dir.join(SHELF).join("tl")).unwrap();
         std::fs::write(c.dir.join(SHELF).join("tl").join("p.pack"), [0; 7]).unwrap();
         let st = c.stats();

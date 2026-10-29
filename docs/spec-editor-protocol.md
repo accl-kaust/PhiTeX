@@ -172,7 +172,7 @@ the place on the pages and the viewer reveals it (`reveal`).
 |---|---|---|---|
 | the engine failed (a panic, `code: "engine"`) | 1 | `PhiTeX: the engine failed: …` | `Rebuild` → a cold build |
 | the format could not be built | 1 | `PhiTeX: the format did not build: …` | `Rebuild` → a cold build |
-| a package source is unreachable (Shelf, a fetch failed) | 2 | `PhiTeX: can't reach the package server: …` | `Retry` → a build |
+| a package could not be had (Shelf: unreachable, or refused by the pack table) | 2 | `PhiTeX: a package could not be had: FILE: why` | `Retry` → a build |
 | a setting needs a new session (§3.5) and it failed | 1 | `PhiTeX: …` | none |
 
   `showMessageRequest` where the client has it (it always does in LSP
@@ -244,11 +244,14 @@ stays the viewer's `outline` op: it has pages, not source places.)
  files: "texlive" | "shelf"}                // where TeX's files come from (§5)
 ```
 
-- Read from `initializationOptions` at the start, then
+- Read from `initializationOptions` at the start (a client sends its
+  settings there too, so the first build is already the right one), then
   `workspace/configuration` (after `initialized`, and at every
   `workspace/didChangeConfiguration`: its `settings.phitex` used when
   given, else asked again).
 - `follow` is the client's (the server keeps it, echoed nowhere).
+- `threads` null or 0 and `main` null in an answer mean not given: the
+  command line's or `phitex.toml`'s stays.
 - `threads`, `main`, `files`: a value that differs from the running
   session's starts a new session with it (natively the watch's session
   is made again in the same process, the viewer and its address kept;
@@ -270,7 +273,9 @@ stays the viewer's `outline` op: it has pages, not source places.)
   it moves the document to its session thread: `out` calls the import
   (from any thread), `commands` runs what the document cannot
   (`phitex.stop`, `phitex.clearCache`, `phitex.cacheStats`: the core's
-  store and its host; none: `-32601`). The editor's asks go to the
+  store and its host; none: `-32601`) and is told the settings when they
+  change, as `("phitex/configure", {threads, main, follow, files})` (a
+  new document where threads, main or files differ). The editor's asks go to the
   document's viewer as `ph_push` sent them; the document tells the server
   each build's start, its progress records and its end; `phitex.savePdf`
   is answered with the viewer's PDF (`{bytes, data}`). The server's
@@ -296,6 +301,13 @@ pub trait PackSource: Send + Sync {
 }
 ```
 
+- **API**: `Index::new(tsv, release_json)`, `.with_pack_table(tsv)`,
+  `.resolve(name, format, engine)`, `.packs(path, engine)`,
+  `.check(id, raw)`; `Files::new(index, source, engine)`, `.find(name)`
+  / `.locate(name)` (fetching), `.read(path)`, `.key(name)` (a content
+  key, nothing fetched), `.on_fetch(hook)` (`Fetch::Asked`, `Arrived`,
+  `Failed`); `PackSource::pack(id)`, `.packs(ids)` (a source that fetches
+  at once overrides it); `gunzip`, `unpack`, `engine`, `format_of`.
 - **The rule** (the frontends' `resolve.ts` and `core/src/shelf.rs`
   until they use this crate): a name with a `/` is a path (TeX Live's
   `/usr/share/texmf-dist/` dropped); else its basename's paths, the first
@@ -312,13 +324,17 @@ pub trait PackSource: Send + Sync {
   the run's TeX files are Shelf's and the project's own (its directory,
   first, as kpathsea's `.`), never TeX Live's; `files = "texlive"` (the
   default): kpathsea's, never Shelf's. No fallback from one to the other.
-- **Native source**: HTTPS (ureq, rustls) from
-  `https://shelf-phitex-v4.pages.dev/tl2026/` (`PHITEX_SHELF_URL`
-  overrides, for a mirror); cache `~/.cache/phitex/shelf/<release>/`
-  (`release.json`, the index, the pack table, `h/<pack>.pack`): the index
-  is fetched once per release, then everything is offline; a pack is
-  fetched once and kept. The release is the binary's (`tl2026.6`), so two
-  machines with the same PhiTeX build a document from the same files.
+- **Native source** (`crates/cli/src/shelf.rs`): HTTP(S) (ureq, rustls)
+  from `PHITEX_SHELF_URL` (the release's directory, `https://HOST/tl2026/`;
+  no host is the default until the user chooses one); cache
+  `~/.cache/phitex/shelf/<release>/` (`release-<release>.json`, the index,
+  the pack table, `h/<pack>.pack`): the index is fetched once per
+  release, then everything is offline; a pack is fetched once, checked,
+  and kept (one that differs from the table is never kept). The release
+  is the binary's (`tl2026.6`), so two machines with the same PhiTeX build
+  a document from the same files. A project's own files come first (its
+  directory, as kpathsea's `.`); a format is built from Shelf's files
+  only.
 - Fetch progress (§2) comes from `Files`, through its hook.
 - Not yet: XeTeX's fonts by name from Shelf (a font index over Shelf's
   fonts): an XeTeX job with `files = "shelf"` is refused at the start,
