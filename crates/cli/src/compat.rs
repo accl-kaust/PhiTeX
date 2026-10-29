@@ -131,7 +131,9 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         let v = || value.clone().unwrap_or_default();
         match name {
             "version" => {
-                let (first, rest) = crate::modern::version_text().split_once('\n').unwrap_or_default();
+                let (first, rest) = crate::modern::version_text()
+                    .split_once('\n')
+                    .unwrap_or_default();
                 println!("phitex {first} as {progname}\n{rest}");
                 std::process::exit(0);
             }
