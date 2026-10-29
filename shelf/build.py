@@ -115,6 +115,7 @@ LUATEX = ("tex/lualatex/", "tex/luatex/")
 SPLIT = 1 << 20  # gzipped bytes above which a package is cut
 BIN = 512 << 10  # about how big (gzipped) each part of a cut package is
 FONT_BIN = 4 << 20  # about how big (gzipped) a pack of OpenType/TrueType fonts is
+BIG = 20 * 10**6  # no pack over this, gzipped (Cloudflare Pages takes 25 MiB a file)
 CACHE = Path("cache")
 PDFTEX_MAP = "fonts/map/pdftex/updmap/pdftex.map"
 FONT_INDEX_PATH = "fonts/misc/partex/fontindex.pxfi"
@@ -336,6 +337,13 @@ def opentype(pkg: str, files: list[tuple[str, bytes]]) -> dict[str, list[tuple[s
     by family, neighbours merged up to FONT_BIN gzipped, a bigger file alone."""
     fam: dict[str, list] = defaultdict(list)
     for p, b in files:
+        # (a font that alone is over BIG gzipped can't be served: a pack
+        # holds whole files and Cloudflare Pages takes 25 MiB a file; left
+        # out, said, the release's index without it: openglyph's OpenGlyph,
+        # about 25 MiB, the one such file in TeX Live 2026)
+        if len(gzip.compress(b, 1)) > BIG:
+            print(f"  left out (over {BIG // 10**6} MB gzipped, too big to serve): {p}", flush=True)
+            continue
         fam[family(p)].append((p, b))
     out: dict[str, list] = {}
     cur, size, name = [], 0, None
@@ -657,7 +665,7 @@ def main() -> None:
           + ", ".join(f"{k} {s / 1e6:.1f} MB" for s, k in sizes[:5]), file=sys.stderr)
     if len(sizes) > 19_000:
         raise SystemExit(f"{len(sizes)} packs: over Cloudflare Pages' 20,000 files")
-    big = [k for s, k in sizes if s > 20 * 10**6]
+    big = [k for s, k in sizes if s > BIG]
     if big:
         raise SystemExit(f"packs over 20 MB (Cloudflare takes 25 MiB a file): {big}")
 
