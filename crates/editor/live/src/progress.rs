@@ -235,8 +235,9 @@ mod tests {
         m.page(5, 1);
         m.page(5, 2);
         m.page(5, 3);
-        assert_eq!(lock(&got).len(), 1);
-        assert_eq!((lock(&got)[0].pass, lock(&got)[0].pages), (1, 1));
+        let g = lock(&got).clone();
+        assert_eq!(g.len(), 1);
+        assert_eq!((g[0].pass, g[0].pages), (1, 1));
         m.page(6, 1);
         let g = lock(&got).clone();
         assert_eq!(g.len(), 2);
