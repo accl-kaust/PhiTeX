@@ -19,7 +19,7 @@
 import { Panel } from "../../../viewer/src/panel.ts";
 import { PreviewSession, type CoreEvent, type CoreRes, type CoreTransport, type EditorHost } from "../../../viewer/src/session.ts";
 import { composeLine, search, type Hit, type TextLine } from "../../../viewer/src/text.ts";
-import type { Link } from "../../../viewer/src/types.ts";
+import { Strips, type Frame, type StripSource } from "../../../viewer/src/strips.ts";
 import { DiffControls, LATEXDIFF_LOOK, type DiffRunner } from "../../../viewer/src/compare.ts";
 import type { DiffLook } from "../../../viewer/src/panel.ts";
 import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.ts";
@@ -164,116 +164,27 @@ class Pages implements CoreTransport {
  * only the bands whose keys are new, and the rest are the bitmaps kept,
  * at their places.
  */
-type Frame = {
-  pw: number;
-  ph: number;
-  w: number;
-  h: number;
-  bands: [string, number, number][];
-  text: TextLine[];
-  links: Link[];
-  drawn: number;
-  kept: number;
-  us: { open: number; probe: number; draw: number; all: number };
+/** The watch's strips over HTTP (`frame/K/S`, `strips/KEYS`). */
+const stripSource: StripSource = {
+  async frame(k, scale) {
+    const r = await fetch(new URL(`frame/${k}/${Math.round(scale * 1000)}`, location.href), { cache: "no-store" });
+    return r.ok ? ((await r.json()) as Frame) : null;
+  },
+  async strips(keys) {
+    const r = await fetch(new URL(`strips/${keys.join(",")}`, location.href), { cache: "no-store" });
+    return r.ok ? r.arrayBuffer() : null;
+  },
 };
 
-class Strips {
-  /** The bitmaps kept, by key (the oldest dropped past `max`). */
-  private kept = new Map<string, ImageBitmap>();
-  private max = 4000;
-  /** The last frame's numbers, shown in the corner. */
-  private chip = document.createElement("div");
+/** The last frame's numbers, in the corner. */
+const chip = document.createElement("div");
+chip.style.cssText =
+  "position:fixed;right:8px;bottom:8px;z-index:9;font:11px/1.3 ui-monospace,monospace;" +
+  "background:rgba(20,24,32,.82);color:#e8eef8;padding:4px 7px;border-radius:5px;pointer-events:none";
+chip.textContent = "strips";
+document.body.append(chip);
 
-  constructor() {
-    this.chip.style.cssText =
-      "position:fixed;right:8px;bottom:8px;z-index:9;font:11px/1.3 ui-monospace,monospace;" +
-      "background:rgba(20,24,32,.82);color:#e8eef8;padding:4px 7px;border-radius:5px;pointer-events:none";
-    this.chip.textContent = "strips";
-    document.body.append(this.chip);
-  }
-
-  /** Page `k` at `scale` pixels a point: its element (canvas and text), size and links. */
-  async page(k: number, scale: number): Promise<{ el: HTMLElement; w: number; h: number; links: Link[] } | null> {
-    const t0 = performance.now();
-    const r = await fetch(new URL(`frame/${k}/${Math.round(scale * 1000)}`, location.href), { cache: "no-store" });
-    if (!r.ok) return null;
-    const f = (await r.json()) as Frame;
-    const t1 = performance.now();
-    const want = [...new Set(f.bands.map((b) => b[0]).filter((key) => !this.kept.has(key)))];
-    if (want.length) await this.fetch(want);
-    const t2 = performance.now();
-    const c = document.createElement("canvas");
-    c.width = f.pw;
-    c.height = f.ph;
-    const g = c.getContext("2d")!;
-    g.fillStyle = "#fff";
-    g.fillRect(0, 0, f.pw, f.ph);
-    for (const [key, y] of f.bands) {
-      const b = this.kept.get(key);
-      if (b) g.drawImage(b, 0, y);
-    }
-    const t3 = performance.now();
-    this.chip.textContent =
-      `p${k + 1}: ${f.drawn} drawn, ${f.kept} kept · watch ${(f.us.all / 1000).toFixed(1)} ms ` +
-      `(probe ${(f.us.probe / 1000).toFixed(1)}, draw ${(f.us.draw / 1000).toFixed(1)}) · ` +
-      `fetch ${(t1 - t0).toFixed(1)}+${(t2 - t1).toFixed(1)} · compose ${(t3 - t2).toFixed(1)} ms`;
-    const el = document.createElement("div");
-    el.className = "phx-page";
-    el.append(c, textLayer(f.text.map(composeLine), f.w, f.h));
-    return { el, w: f.w, h: f.h, links: f.links };
-  }
-
-  /** The strips of `keys`, made bitmaps and kept. */
-  private async fetch(keys: string[]): Promise<void> {
-    const r = await fetch(new URL(`strips/${keys.join(",")}`, location.href), { cache: "no-store" });
-    if (!r.ok) return;
-    const buf = await r.arrayBuffer();
-    const dv = new DataView(buf);
-    let at = 0;
-    const made: Promise<void>[] = [];
-    for (const key of keys) {
-      if (at + 8 > buf.byteLength) break;
-      const w = dv.getUint32(at, true), h = dv.getUint32(at + 4, true);
-      at += 8;
-      if (w && h) {
-        const px = new Uint8ClampedArray(buf, at, w * h * 4);
-        made.push(
-          createImageBitmap(new ImageData(px, w, h)).then((b) => {
-            this.kept.set(key, b);
-          }),
-        );
-      }
-      at += w * h * 4;
-    }
-    await Promise.all(made);
-    for (const k of this.kept.keys()) {
-      if (this.kept.size <= this.max) break;
-      this.kept.get(k)?.close();
-      this.kept.delete(k);
-    }
-  }
-}
-
-const SVG = "http://www.w3.org/2000/svg";
-
-/** The page's text over its canvas, transparent, for selecting and copying. */
-function textLayer(lines: TextLine[], w: number, h: number): SVGElement {
-  const svg = document.createElementNS(SVG, "svg");
-  svg.setAttribute("class", "phx-text");
-  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
-  svg.setAttribute("preserveAspectRatio", "none");
-  for (const l of lines) {
-    const t = document.createElementNS(SVG, "text");
-    t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
-    t.setAttribute("y", String(l.y));
-    t.setAttribute("font-size", String(l.size));
-    t.textContent = l.text;
-    svg.append(t);
-  }
-  return svg;
-}
-
-const strips = new Strips();
+const strips = new Strips(stripSource, chip);
 const sock = new Socket();
 const pages = new Pages(sock);
 /** A place in a file (1-based line and column): the watch opens it in the editor (`--editor`). */

@@ -1635,11 +1635,11 @@ var Panel = class {
     queueMicrotask(() => this.stopped());
     const diags = s.diagnostics ?? [];
     const worst = diags[0]?.severity;
-    const chip = this.$("#chip");
+    const chip2 = this.$("#chip");
     const partial = !!s.pending || s.pages === 0;
-    chip.className = `chip ${worst === "error" ? "error" : partial || worst === "warning" ? "warning" : "ok"}`;
+    chip2.className = `chip ${worst === "error" ? "error" : partial || worst === "warning" ? "warning" : "ok"}`;
     this.$("#chiptext").textContent = `${s.pages} page${s.pages === 1 ? "" : "s"}${s.pending ? " \xB7 partial" : ""}`;
-    chip.title = (s.pending ? `${s.pending} parts not read (out of fuel or unsupported). ` : "") + (diags.length ? `${diags.length} diagnostic${diags.length === 1 ? "" : "s"}` : "No problems found") + (s.file ? ` \xB7 editing ${s.file}` : "");
+    chip2.title = (s.pending ? `${s.pending} parts not read (out of fuel or unsupported). ` : "") + (diags.length ? `${diags.length} diagnostic${diags.length === 1 ? "" : "s"}` : "No problems found") + (s.file ? ` \xB7 editing ${s.file}` : "");
     const list = this.$("#diags");
     list.innerHTML = "";
     for (const d of diags.slice(0, 50)) {
@@ -1848,15 +1848,15 @@ var Panel = class {
     cb(this.state());
   }
   state() {
-    const chip = this.$("#chip");
+    const chip2 = this.$("#chip");
     return {
       page: this.at,
       pages: this.lastStatus?.pages ?? 0,
       zoom: this.prefs.zoom,
       debug: this.debugOn,
-      level: ["error", "warning", "ok"].find((c) => chip.classList.contains(c)) ?? "ok",
+      level: ["error", "warning", "ok"].find((c) => chip2.classList.contains(c)) ?? "ok",
       chip: this.$("#chiptext").textContent ?? "",
-      chipTitle: chip.title,
+      chipTitle: chip2.title,
       speed: this.speed,
       sheet: this.win.classList.contains("sheet-open"),
       // (the badge counts what needs a look: info is listed, not counted)
@@ -2199,12 +2199,12 @@ var Panel = class {
   /** A repaint reached the screen, `ms` after its keystroke: the ⚡ chip says how fast. */
   painted(ms) {
     this.speed = { ms, at: performance.now() };
-    const chip = this.$("#speedchip");
-    chip.textContent = `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
-    chip.classList.toggle("slow", ms > 100);
-    chip.classList.remove("flash");
-    void chip.offsetWidth;
-    chip.classList.add("flash");
+    const chip2 = this.$("#speedchip");
+    chip2.textContent = `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+    chip2.classList.toggle("slow", ms > 100);
+    chip2.classList.remove("flash");
+    void chip2.offsetWidth;
+    chip2.classList.add("flash");
     this.emit();
   }
   /**
@@ -3778,6 +3778,91 @@ function search(pages2, q, max = 1e3) {
   return out;
 }
 
+// viewer/src/strips.ts
+var Strips = class {
+  /** The bitmaps kept, by key (the oldest dropped past `max`). */
+  kept = /* @__PURE__ */ new Map();
+  max = 4e3;
+  src;
+  /** Where the last frame's numbers are shown (none: not shown). */
+  chip;
+  constructor(src, chip2 = null) {
+    this.src = src;
+    this.chip = chip2;
+  }
+  /** Page `k` at `scale` pixels a point: its element (canvas and text), size and links. */
+  async page(k, scale) {
+    const t0 = performance.now();
+    const f = await this.src.frame(k, scale);
+    if (!f) return null;
+    const t1 = performance.now();
+    const want = [...new Set(f.bands.map((b) => b[0]).filter((key) => !this.kept.has(key)))];
+    if (want.length) await this.fetch(want);
+    const t2 = performance.now();
+    const c = document.createElement("canvas");
+    c.width = f.pw;
+    c.height = f.ph;
+    const g = c.getContext("2d");
+    g.fillStyle = "#fff";
+    g.fillRect(0, 0, f.pw, f.ph);
+    for (const [key, y] of f.bands) {
+      const b = this.kept.get(key);
+      if (b) g.drawImage(b, 0, y);
+    }
+    const t3 = performance.now();
+    if (this.chip)
+      this.chip.textContent = `p${k + 1}: ${f.drawn} drawn, ${f.kept} kept \xB7 watch ${(f.us.all / 1e3).toFixed(1)} ms (probe ${(f.us.probe / 1e3).toFixed(1)}, draw ${(f.us.draw / 1e3).toFixed(1)}) \xB7 fetch ${(t1 - t0).toFixed(1)}+${(t2 - t1).toFixed(1)} \xB7 compose ${(t3 - t2).toFixed(1)} ms`;
+    const el = document.createElement("div");
+    el.className = "phx-page";
+    el.append(c, textLayer(f.text.map(composeLine), f.w, f.h));
+    return { el, w: f.w, h: f.h, links: f.links };
+  }
+  /** The strips of `keys`, made bitmaps and kept. */
+  async fetch(keys) {
+    const buf = await this.src.strips(keys);
+    if (!buf) return;
+    const dv = new DataView(buf);
+    let at = 0;
+    const made = [];
+    for (const key of keys) {
+      if (at + 8 > buf.byteLength) break;
+      const w = dv.getUint32(at, true), h = dv.getUint32(at + 4, true);
+      at += 8;
+      if (w && h) {
+        const px = new Uint8ClampedArray(buf, at, w * h * 4);
+        made.push(
+          createImageBitmap(new ImageData(px, w, h)).then((b) => {
+            this.kept.set(key, b);
+          })
+        );
+      }
+      at += w * h * 4;
+    }
+    await Promise.all(made);
+    for (const k of this.kept.keys()) {
+      if (this.kept.size <= this.max) break;
+      this.kept.get(k)?.close();
+      this.kept.delete(k);
+    }
+  }
+};
+var SVG = "http://www.w3.org/2000/svg";
+function textLayer(lines, w, h) {
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("class", "phx-text");
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  for (const l of lines) {
+    const t = document.createElementNS(SVG, "text");
+    t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
+    t.setAttribute("y", String(l.y));
+    t.setAttribute("font-size", String(l.size));
+    t.textContent = l.text;
+    svg.append(t);
+  }
+  return svg;
+}
+
 // viewer/src/compare.ts
 var LATEXDIFF_LOOK = { markup: "underline", subtype: "safe", add_color: "#0000ff", del_color: "#ff0000" };
 var DiffControls = class {
@@ -4186,91 +4271,21 @@ var Pages = class {
     this.sock.onEvent(cb);
   }
 };
-var Strips = class {
-  /** The bitmaps kept, by key (the oldest dropped past `max`). */
-  kept = /* @__PURE__ */ new Map();
-  max = 4e3;
-  /** The last frame's numbers, shown in the corner. */
-  chip = document.createElement("div");
-  constructor() {
-    this.chip.style.cssText = "position:fixed;right:8px;bottom:8px;z-index:9;font:11px/1.3 ui-monospace,monospace;background:rgba(20,24,32,.82);color:#e8eef8;padding:4px 7px;border-radius:5px;pointer-events:none";
-    this.chip.textContent = "strips";
-    document.body.append(this.chip);
-  }
-  /** Page `k` at `scale` pixels a point: its element (canvas and text), size and links. */
-  async page(k, scale) {
-    const t0 = performance.now();
+var stripSource = {
+  async frame(k, scale) {
     const r = await fetch(new URL(`frame/${k}/${Math.round(scale * 1e3)}`, location.href), { cache: "no-store" });
-    if (!r.ok) return null;
-    const f = await r.json();
-    const t1 = performance.now();
-    const want = [...new Set(f.bands.map((b) => b[0]).filter((key) => !this.kept.has(key)))];
-    if (want.length) await this.fetch(want);
-    const t2 = performance.now();
-    const c = document.createElement("canvas");
-    c.width = f.pw;
-    c.height = f.ph;
-    const g = c.getContext("2d");
-    g.fillStyle = "#fff";
-    g.fillRect(0, 0, f.pw, f.ph);
-    for (const [key, y] of f.bands) {
-      const b = this.kept.get(key);
-      if (b) g.drawImage(b, 0, y);
-    }
-    const t3 = performance.now();
-    this.chip.textContent = `p${k + 1}: ${f.drawn} drawn, ${f.kept} kept \xB7 watch ${(f.us.all / 1e3).toFixed(1)} ms (probe ${(f.us.probe / 1e3).toFixed(1)}, draw ${(f.us.draw / 1e3).toFixed(1)}) \xB7 fetch ${(t1 - t0).toFixed(1)}+${(t2 - t1).toFixed(1)} \xB7 compose ${(t3 - t2).toFixed(1)} ms`;
-    const el = document.createElement("div");
-    el.className = "phx-page";
-    el.append(c, textLayer(f.text.map(composeLine), f.w, f.h));
-    return { el, w: f.w, h: f.h, links: f.links };
-  }
-  /** The strips of `keys`, made bitmaps and kept. */
-  async fetch(keys) {
+    return r.ok ? await r.json() : null;
+  },
+  async strips(keys) {
     const r = await fetch(new URL(`strips/${keys.join(",")}`, location.href), { cache: "no-store" });
-    if (!r.ok) return;
-    const buf = await r.arrayBuffer();
-    const dv = new DataView(buf);
-    let at = 0;
-    const made = [];
-    for (const key of keys) {
-      if (at + 8 > buf.byteLength) break;
-      const w = dv.getUint32(at, true), h = dv.getUint32(at + 4, true);
-      at += 8;
-      if (w && h) {
-        const px = new Uint8ClampedArray(buf, at, w * h * 4);
-        made.push(
-          createImageBitmap(new ImageData(px, w, h)).then((b) => {
-            this.kept.set(key, b);
-          })
-        );
-      }
-      at += w * h * 4;
-    }
-    await Promise.all(made);
-    for (const k of this.kept.keys()) {
-      if (this.kept.size <= this.max) break;
-      this.kept.get(k)?.close();
-      this.kept.delete(k);
-    }
+    return r.ok ? r.arrayBuffer() : null;
   }
 };
-var SVG = "http://www.w3.org/2000/svg";
-function textLayer(lines, w, h) {
-  const svg = document.createElementNS(SVG, "svg");
-  svg.setAttribute("class", "phx-text");
-  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
-  svg.setAttribute("preserveAspectRatio", "none");
-  for (const l of lines) {
-    const t = document.createElementNS(SVG, "text");
-    t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
-    t.setAttribute("y", String(l.y));
-    t.setAttribute("font-size", String(l.size));
-    t.textContent = l.text;
-    svg.append(t);
-  }
-  return svg;
-}
-var strips = new Strips();
+var chip = document.createElement("div");
+chip.style.cssText = "position:fixed;right:8px;bottom:8px;z-index:9;font:11px/1.3 ui-monospace,monospace;background:rgba(20,24,32,.82);color:#e8eef8;padding:4px 7px;border-radius:5px;pointer-events:none";
+chip.textContent = "strips";
+document.body.append(chip);
+var strips = new Strips(stripSource, chip);
 var sock = new Socket();
 var pages = new Pages(sock);
 var source = (file, line, col = 1) => void sock.request({ op: "source", file, line, col });
