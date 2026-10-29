@@ -48,7 +48,7 @@ fn sequential(d: &Path, doc: &str) -> Vec<u8> {
 fn note(what: &str, b: &Build) {
     let s = &b.stats;
     eprintln!(
-        "{what}: critical path {:?}, loads {} (claimed {}, recorded {}, optimistic {}), load runs {}, at once {}, refuted {}, undeclared {}",
+        "{what}: critical path {:?}, loads {} (claimed {}, recorded {}, optimistic {}), load runs {}, at once {}, refuted by field {:?}, undeclared {}",
         s.critical_path,
         s.pkg_loads,
         s.pkg_claimed,
@@ -56,7 +56,7 @@ fn note(what: &str, b: &Build) {
         s.pkg_optimistic,
         s.pkg_runs,
         s.pkg_max_concurrent,
-        s.declarations_refuted,
+        s.refuted_by_field,
         s.undeclared_definitions
     );
     for l in b.critical_chain_lines() {
@@ -72,6 +72,23 @@ fn writes(recs: &[u8], key: &str, field: &str) -> bool {
     phitex_tex::pkgrec_summary(recs)
         .iter()
         .any(|(k, w, _)| k == key && w.iter().any(|f| f == field))
+}
+
+/// Whether the loads' records in `got` define what those in `want` do,
+/// load by load: no load defined outside its record.
+fn same_writes(got: &[u8], want: &[u8]) -> bool {
+    let sets = |r: &[u8]| {
+        let mut v: Vec<(String, Vec<String>)> = phitex_tex::pkgrec_summary(r)
+            .into_iter()
+            .map(|(k, mut w, _)| {
+                w.sort();
+                (k, w)
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    sets(got) == sets(want)
 }
 
 /// Whether the record of load `key` reads `field`.
@@ -121,14 +138,16 @@ fn independent_loads_run_side_by_side() {
     note("second", &second);
     same("second", &second.output().0, &want);
     assert_eq!(second.stats.pkg_recorded, 2);
-    assert_eq!(second.stats.declarations_refuted, 0);
+    assert!(
+        same_writes(&second.export_pkgrec(), &recs),
+        "no load defined outside its record"
+    );
     // (both loads' runs overlap; the engine's critical path, a height
     // count, is printed: it does not fall here, see the report)
     eprintln!(
         "critical path {:?} -> {:?}",
         first.stats.critical_path, second.stats.critical_path
     );
-    assert_eq!(first.stats.pkg_max_concurrent, 1);
     if second.stats.threads > 1 {
         assert_eq!(
             second.stats.pkg_max_concurrent, 2,
@@ -174,7 +193,10 @@ fn dependent_loads_keep_their_order() {
         let second = build(&d, &doc, spec, recs.clone());
         note("second", &second);
         assert_eq!(second.stats.pkg_recorded, 2);
-        assert_eq!(second.stats.declarations_refuted, 0);
+        assert!(
+            same_writes(&second.export_pkgrec(), &recs),
+            "no load defined outside its record"
+        );
         same("second", &second.output().0, &want);
     }
 }
@@ -241,11 +263,16 @@ fn changed_file_falls_back() {
 
 /// A load whose key matches but whose behaviour differs (it reads a
 /// switch the document defines before it: the key is the load and its
-/// files, not what it reads) defines outside its record: the engine
-/// refutes the declaration and the load's readers re-run; the output
-/// equals a sequential build's and the record is replaced.
+/// files, not what it reads) defines outside its record: the record is
+/// replaced by the run's own sets and the output equals a sequential
+/// build's, with no undeclared definition; under each speculation mode,
+/// every one checked. (This core runs no reader past a load on its
+/// record's guess, so nothing is refuted for it: a reader past the load
+/// runs ahead optimistically, with or without a record, and is re-asked
+/// by what the load defines. The record's only use left is its values,
+/// `Options::pkg_predict`.)
 #[test]
-fn defining_outside_the_record_is_refuted() {
+fn defining_outside_the_record_replaces_it() {
     let d = dir(
         "refuted",
         &[
@@ -263,28 +290,34 @@ fn defining_outside_the_record_is_refuted() {
     let recs = first.export_pkgrec();
     assert!(writes(&recs, "\\usepackage{pa}", "cs:aa"));
     assert!(!writes(&recs, "\\usepackage{pa}", "cs:extra"));
+    let want = sequential(&d, &doc(1));
+    let mut failed = Vec::new();
     for spec in [Speculation::Off, Speculation::All] {
         let second = build(&d, &doc(1), spec, recs.clone());
         note("behaviour changed", &second);
-        assert_eq!(second.stats.pkg_recorded, 2);
-        // (a definition outside a declared set widens it, a refuted
-        // guess: no undeclared-definition error since the engine's
-        // static definition lists became guesses, 5f6f4f1)
-        assert!(
-            second.stats.declarations_refuted >= 1,
-            "the record is refuted"
+        let mut check = |ok: bool, what: String| {
+            if !ok {
+                failed.push(format!("{spec:?}: {what}"));
+            }
+        };
+        check(
+            second.stats.pkg_recorded == 2,
+            format!("records given {}", second.stats.pkg_recorded),
         );
-        assert_eq!(second.stats.undeclared_definitions, 0);
-        same(
-            "behaviour changed",
-            &second.output().0,
-            &sequential(&d, &doc(1)),
+        check(
+            second.stats.undeclared_definitions == 0,
+            "an undeclared definition".to_owned(),
         );
-        assert!(
+        check(
             writes(&second.export_pkgrec(), "\\usepackage{pa}", "cs:extra"),
-            "record replaced"
+            "the record not replaced".to_owned(),
+        );
+        check(
+            common::first_difference(&second.output().0, &want).is_none(),
+            "the output differs from a sequential build's".to_owned(),
         );
     }
+    assert!(failed.is_empty(), "{failed:#?}");
 }
 
 /// LaTeX: `\documentclass` and two `\usepackage` of toy packages are

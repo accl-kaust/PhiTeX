@@ -426,15 +426,15 @@ impl LoadHints {
     }
 
     /// The hash of file `name`'s text as the build's finder gives it
-    /// now: the id its text value has (as a run's `fread` records it), 0
-    /// when absent.
+    /// now: its text value's content digest (as a run's `fread` records
+    /// it, [`crate::val::digest`]), 0 when absent.
     fn hash_now(&self, v: &Values, name: &str) -> u64 {
         if let Some(&h) = self.now.locked().get(name) {
             return h;
         }
         let h = (self.finder)(name).map_or(0, |(_, bytes)| {
             let text: String = bytes.iter().map(|&b| char::from(b)).collect();
-            v.str(&text).raw()
+            crate::val::digest(v, v.str(&text))
         });
         self.now.locked().insert(name.to_owned(), h);
         h

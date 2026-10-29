@@ -2315,7 +2315,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(None);
         }
         self.muts += 1;
-        self.fread.push((key.to_owned(), x.raw()));
+        self.fread.push((key.to_owned(), crate::val::digest(v, x)));
         self.uread.push(key.to_owned());
         Ok(Some(x))
     }
@@ -2579,9 +2579,10 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
             }
         }
-        // (the text's hash: its value's id, a content hash, so a font's
-        // or map's bytes are not copied and hashed again at every read;
-        // a written file's, its units' order's)
+        // (the text's hash: its value's content digest, the same in a
+        // later build's store, memoized so a font's or map's bytes are
+        // not hashed again at every read; a written file's, its units'
+        // order's)
         if let Some(t) = x.and_then(|x| {
             let xs = crate::val::list_of(v, x);
             xs.get(1)
@@ -2590,7 +2591,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 .or_else(|| xs.get(2).copied())
         }) {
             self.muts += 1;
-            self.fread.push((key.to_owned(), t.raw()));
+            self.fread.push((key.to_owned(), crate::val::digest(v, t)));
         } else if (self.rec_load || self.doc) && !self.fmiss.iter().any(|n| n == key) {
             self.fmiss.push(key.to_owned());
         }

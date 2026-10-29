@@ -995,7 +995,7 @@ impl Session {
             if phitex_tex::PROFILE && std::env::var_os("PHITEX_PKG_STATS").is_some() {
                 let s = &b.stats;
                 eprintln!(
-                    "PKG loads {} claimed {} recorded {} optimistic {} runs {} at-once {} span {:.3} on-critical {} refuted {} undeclared {} critical-path {:?} threads {} engine-wall {:.3} speculations {} confirmations {} mispredictions {} predicted-confirmed {} predicted-refuted {}",
+                    "PKG loads {} claimed {} recorded {} optimistic {} runs {} at-once {} span {:.3} on-critical {} undeclared {} critical-path {:?} threads {} engine-wall {:.3} speculations {} confirmations {} mispredictions {} predicted-confirmed {} predicted-refuted {}",
                     s.pkg_loads,
                     s.pkg_claimed,
                     s.pkg_recorded,
@@ -1004,7 +1004,6 @@ impl Session {
                     s.pkg_max_concurrent,
                     s.pkg_wall.as_secs_f64(),
                     s.pkg_on_critical,
-                    s.declarations_refuted,
                     s.undeclared_definitions,
                     s.critical_path,
                     s.threads,

@@ -46,3 +46,12 @@ Intermittent, outside this list:
 - **The defuse review tests `a_next_past_many_holes_goes_on_from_each` and
   `next_readers_follow_their_stops_across_splits`.** RunawayNode on every
   run since at least 739a81d73 (76710). Those are mine to fix next.
+
+Found while fixing the pkgrec reds (2026-10-30):
+
+- **Load records let nothing run early on this core.** The mergeless core
+  runs a reader past a package load optimistically, with or without the
+  load's record, and re-asks it by what the load defines. So a record's
+  definition and read sets no longer change what runs when. Their only use
+  left is the values they carry, the predictions under
+  `Options::pkg_predict`. That is a parallelism question, not a defect.

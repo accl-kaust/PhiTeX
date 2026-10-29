@@ -714,6 +714,39 @@ fn encoded<K: std::hash::Hash + Eq>(
     x
 }
 
+/// The hash of `id`'s content ([`Values::digest`]), the same in every
+/// store: what a record compares across builds, a file's text in a
+/// package load's or a node's record ([`crate::pkgrec`]). An id is its
+/// store's own (two builds' equal texts have other ids), so its raw bits
+/// never match a later build's. Memoized per thread for the store's ids
+/// (an id collected is never handed out again), so a font's or a map's
+/// bytes read by many runs are hashed once.
+pub(crate) fn digest(v: &Values, id: ValueId) -> u64 {
+    thread_local! {
+        static MEMO: std::cell::RefCell<(u64, FxHashMap<ValueId, u64>)> =
+            std::cell::RefCell::new((u64::MAX, FxHashMap::default()));
+    }
+    if let Some(d) = MEMO.with(|m| {
+        let m = m.borrow();
+        if m.0 == v.instance() {
+            m.1.get(&id).copied()
+        } else {
+            None
+        }
+    }) {
+        return d;
+    }
+    let d = v.digest(id);
+    MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.0 != v.instance() || m.1.len() >= 1 << 12 {
+            *m = (v.instance(), FxHashMap::default());
+        }
+        m.1.insert(id, d);
+    });
+    d
+}
+
 /// The value of integer `i` (cached in a run).
 pub(crate) fn int_id(v: &Values, i: i64) -> ValueId {
     // (an integer of 60 bits is its id: no table, no cache)

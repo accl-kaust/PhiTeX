@@ -1799,9 +1799,6 @@ pub struct Stats {
     /// ran out of fuel.
     pub max_ready: usize,
     pub fuel_outs: u64,
-    /// Declared definition sets the engine refuted (a run defined
-    /// outside its node's hint): a package load's record among them.
-    pub declarations_refuted: u64,
     /// The document's package loads (`crate::pkgrec`), those given a
     /// record and those given the optimistic hint (since the build
     /// began), their finished runs (speculative ones included), the
