@@ -44,14 +44,20 @@ impl FontSource for HostFonts {
 /// `index` is not an index (`FontIndex::from_bytes`).
 pub fn xetex(read: ReadFont, find: FindFont, index: Option<&[u8]>) -> Result<XeTeX, String> {
     let font_index = match index {
-        Some(b) => Some(Arc::new(
+        Some(b) => Some(
             FontIndex::from_bytes(b).ok_or_else(|| "the font index is not one (PXFI, version 1 or 2)".to_owned())?,
-        )),
+        ),
         None => None,
     };
-    Ok(XeTeX {
+    Ok(xetex_of(read, find, font_index))
+}
+
+/// [`xetex`] with the index read already (a host that rewrote its paths:
+/// the CLI's Shelf names them under TeX Live's tree).
+pub fn xetex_of(read: ReadFont, find: FindFont, index: Option<FontIndex>) -> XeTeX {
+    XeTeX {
         fonts: Some(Arc::new(HostFonts { read, find })),
-        font_index,
+        font_index: index.map(Arc::new),
         pdf: None,
-    })
+    }
 }

@@ -406,7 +406,14 @@ impl Files {
     /// `name`'s texmf path (none: not Shelf's).
     #[must_use]
     pub fn path_of(&self, name: &str) -> Option<&str> {
-        self.index.resolve(name, format_of(name), self.engine)
+        self.path_in(name, format_of(name))
+    }
+
+    /// `name`'s texmf path in kpathsea format `format` (a caller that
+    /// knows it: dvipdfmx's `cmap`, `sfd`, `other text files`, ...).
+    #[must_use]
+    pub fn path_in(&self, name: &str, format: &str) -> Option<&str> {
+        self.index.resolve(name, format, self.engine)
     }
 
     /// Where file `name` is (`/usr/share/texmf-dist/<path>`), its pack
@@ -419,7 +426,12 @@ impl Files {
 
     /// [`Files::locate`] and the file's bytes.
     pub fn find(&self, name: &str) -> Option<(String, Arc<Vec<u8>>)> {
-        let rel = self.path_of(name)?.to_owned();
+        self.find_in(name, format_of(name))
+    }
+
+    /// [`Files::find`] in kpathsea format `format`.
+    pub fn find_in(&self, name: &str, format: &str) -> Option<(String, Arc<Vec<u8>>)> {
+        let rel = self.path_in(name, format)?.to_owned();
         let ids: Vec<String> = self
             .index
             .packs(&rel, self.engine)

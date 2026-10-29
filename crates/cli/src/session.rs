@@ -84,15 +84,14 @@ impl Session {
         status: Arc<Status>,
         note: &mut dyn FnMut(&str),
     ) -> Result<Session, String> {
-        if job.engine.xetex() {
-            return Err(
-                "files = \"shelf\" builds pdfTeX's and TeX's jobs: XeTeX's fonts by name are not on Shelf's index yet".to_owned(),
-            );
-        }
         let text = std::fs::read(&job.path)
             .map(|t| Arc::<str>::from(tex::chars_owned(t)))
             .map_err(|e| format!("{}: {e}", job.path.display()))?;
         let files = crate::shelf::files(job.engine.name, status.meter())?;
+        // (XeTeX's fonts by name: the release's font index, or why not)
+        if job.engine.xetex() {
+            crate::shelf::font_index(&files)?;
+        }
         let (store, out) = Self::store_and_out(&job, note);
         let host = Arc::new(crate::shelf::ShelfHost { files });
         Ok(Session {
@@ -510,6 +509,14 @@ pub struct UpdateFile {
     pub exact: bool,
     /// Its writes so far (a compaction of an older state is dropped).
     pub writes: u64,
+}
+
+impl UpdateFile {
+    /// Whether the file on disk is the exact one: written so, or with no
+    /// update sections at all (a DVI file, written whole each build).
+    pub fn is_exact(&self) -> bool {
+        self.exact || self.at.is_none()
+    }
 }
 
 /// The exact file of what `f` holds written over it, through a

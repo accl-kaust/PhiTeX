@@ -2634,15 +2634,9 @@ fn xelatex_watch_edit() {
     );
 }
 
-/// A Shelf release made of TeX Live's TFM files the plain document
-/// names (one pack, its table, `release-tl2026.6.json` of schema 4),
-/// served over HTTP on 127.0.0.1 by a thread of the test's: the port,
-/// and how many requests it answered. `tamper`: the pack served differs
-/// from the table's by its last byte.
-#[allow(clippy::too_many_lines, reason = "a release made and served, in order")]
-fn shelf_server(text: &str, tamper: bool) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-    use std::collections::HashMap;
-    use std::io::Read as _;
+/// The TFM files of TeX Live the plain document names, at their texmf
+/// paths.
+fn plain_tfms(text: &str) -> Vec<(String, Vec<u8>)> {
     let mut names: Vec<String> = text
         .split("\\font\\")
         .skip(1)
@@ -2668,6 +2662,21 @@ fn shelf_server(text: &str, tamper: bool) -> (u16, std::sync::Arc<std::sync::ato
             ));
         }
     }
+    files
+}
+
+/// A Shelf release of `files` (texmf path, bytes) in one pack, its table
+/// and `release-tl2026.6.json` of schema 4, served over HTTP on 127.0.0.1
+/// by a thread of the test's: the port, and how many requests it
+/// answered. `tamper`: the pack served differs from the table's by its
+/// last byte.
+#[allow(clippy::too_many_lines, reason = "a release made and served, in order")]
+fn shelf_server(
+    files: &[(String, Vec<u8>)],
+    tamper: bool,
+) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::collections::HashMap;
+    use std::io::Read as _;
     let refs: Vec<(&str, &[u8])> = files
         .iter()
         .map(|(n, b)| (n.as_str(), b.as_slice()))
@@ -2778,7 +2787,7 @@ fn build_from_shelf() {
     let want = std::fs::read(tl.join("doc.dvi")).expect("TeX Live's DVI");
     let dir = scratch("shelf-build");
     std::fs::write(dir.join("doc.tex"), &text).expect("the document");
-    let (port, asked) = shelf_server(&text, false);
+    let (port, asked) = shelf_server(&plain_tfms(&text), false);
     let out = run(&dir, &["--shelf"], Some(port));
     assert!(
         out.status.success(),
@@ -2811,7 +2820,7 @@ fn build_from_shelf() {
     // (a pack that is not the table's: refused, never kept)
     let bad = scratch("shelf-tampered");
     std::fs::write(bad.join("doc.tex"), &text).expect("the document");
-    let (port, _) = shelf_server(&text, true);
+    let (port, _) = shelf_server(&plain_tfms(&text), true);
     let out = run(&bad, &["--shelf"], Some(port));
     assert!(!out.status.success(), "a tampered pack built");
     assert!(
@@ -2823,4 +2832,127 @@ fn build_from_shelf() {
         !bad.join("cache/shelf/tl2026.6/h/cm-1.pack").exists(),
         "a tampered pack kept"
     );
+}
+
+/// XeTeX from Shelf (docs/spec-editor-protocol.md §5): a font by name
+/// found through the release's font index (`fonts/misc/partex/
+/// fontindex.pxfi`, its paths relative to the tree, as a release ships it),
+/// the face read from the release's pack, the XDV naming it under TeX
+/// Live's tree as xelatex's does; a release without a font index refuses
+/// an XeTeX job at the start, saying why.
+#[test]
+fn xetex_from_shelf() {
+    let _one = one();
+    let out = Command::new("kpsewhich")
+        .args(["-var-value", "TEXMFDIST"])
+        .output()
+        .expect("kpsewhich (TeX Live) on the test machine");
+    let dist = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let rel = "fonts/opentype/public/lm/lmroman10-regular.otf";
+    let face = std::fs::read(Path::new(&dist).join(rel)).expect("Latin Modern Roman");
+    let abs = format!("{dist}/{rel}");
+    let mut e = phitex_otf::index::FaceEntry::read(&abs, std::sync::Arc::from(face.clone()), 0);
+    e.fc_names = Some(phitex_otf::xetex::fontmgr::fc_names(&e));
+    let index = phitex_otf::index::FontIndex { entries: vec![e] }.relative_to(&dist);
+    let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=\"Latin Modern Roman\" at 10pt \\x \\setbox0\\hbox{Hi}\\shipout\\box0 \\end\n";
+    let run = |dir: &Path, port: u16| {
+        std::fs::write(dir.join("doc.tex"), text).expect("the document");
+        command(Path::new(env!("CARGO_BIN_EXE_phitex")), dir)
+            .args([
+                "build",
+                "--shelf",
+                "--ini",
+                "--engine",
+                "xetex",
+                "--output-format",
+                "xdv",
+                "doc.tex",
+            ])
+            .env("PHITEX_CACHE_DIR", dir.join("cache"))
+            .env(
+                "PHITEX_SHELF_URL",
+                format!("http://127.0.0.1:{port}/tl2026/"),
+            )
+            .output()
+            .expect("phitex runs")
+    };
+    let dir = scratch("shelf-xetex");
+    let (port, _) = shelf_server(
+        &[
+            (rel.to_owned(), face),
+            (
+                "fonts/misc/partex/fontindex.pxfi".to_owned(),
+                index.to_bytes(),
+            ),
+        ],
+        false,
+    );
+    let out = run(&dir, port);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let xdv = std::fs::read(dir.join("doc.xdv")).expect("the XDV");
+    let named = format!("/usr/share/texmf-dist/{rel}");
+    assert!(
+        xdv.windows(named.len()).any(|w| w == named.as_bytes()),
+        "the XDV names the face under TeX Live's tree"
+    );
+    // (no font index in the release: refused, said)
+    let none = scratch("shelf-xetex-none");
+    let (port, _) = shelf_server(&plain_tfms(&plain()), false);
+    let out = run(&none, port);
+    assert!(!out.status.success(), "built without a font index");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no font index"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `phitex watch`'s idle point says the file on disk is exact
+/// (`{"event": "written", "exact": true}`) whether or not it had to be
+/// compacted: a build whose output needs no compaction (a DVI file,
+/// written whole) still has it said, once, after the build, as a client
+/// waiting for the exact file expects (docs/spec-editor-protocol.md §2.1).
+#[test]
+fn watch_says_the_file_is_exact_with_nothing_to_compact() {
+    let _one = one();
+    let dir = scratch("watch-exact-said");
+    std::fs::write(dir.join("doc.tex"), plain() + "Alpha.\\bye\n").expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--json",
+            "--no-view",
+            "--idle",
+            "200",
+            "--ini",
+            "--etex",
+            "doc.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let written = until(&mut lines, "event", &"written".into(), &mut seen);
+    assert_eq!(written["exact"], true, "{written}");
+    assert_eq!(written["build"], 1, "{written}");
+    assert!(
+        written["output"]
+            .as_str()
+            .is_some_and(|o| o.ends_with("doc.dvi")),
+        "{written}"
+    );
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
 }

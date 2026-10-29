@@ -1034,12 +1034,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             }
         };
         drop(mine);
-        if let Some(u) = &s.updates() {
-            let exact = u.lock().unwrap_or_else(PoisonError::into_inner).exact;
-            idle_since.set((!exact || o.log).then(Instant::now));
-        } else if o.log {
-            idle_since.set(Some(Instant::now()));
-        }
+        // (an idle point after every build: the exact file written there
+        // when it is not, and said to be on disk either way)
+        idle_since.set(Some(Instant::now()));
         phitex_tex::timeline::lap("watch: files written (the PDF, the log, the aux files)");
         if phitex_tex::tex_time() {
             eprintln!(
@@ -1511,16 +1508,20 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     {
                         ui.error(&e);
                     }
-                    if let Some(u) = s.updates() {
-                        let tx = compacted.clone();
-                        let b = last.borrow().builds;
-                        std::thread::Builder::new()
-                            .name("phitex-watch-exact".into())
-                            .spawn(move || {
-                                let r = session::compact(&u);
-                                let _ = tx.send((Instant::now(), Event::Compacted(b, r)));
-                            })
-                            .expect("a thread");
+                    let b = last.borrow().builds;
+                    match s.updates() {
+                        Some(u) if !u.lock().unwrap_or_else(PoisonError::into_inner).is_exact() => {
+                            let tx = compacted.clone();
+                            std::thread::Builder::new()
+                                .name("phitex-watch-exact".into())
+                                .spawn(move || {
+                                    let r = session::compact(&u);
+                                    let _ = tx.send((Instant::now(), Event::Compacted(b, r)));
+                                })
+                                .expect("a thread");
+                        }
+                        // (exact already: said all the same)
+                        _ => held.push_back((Instant::now(), Event::Compacted(b, Ok(false)))),
                     }
                     continue;
                 }
@@ -1703,19 +1704,31 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 }
                 // (a build's end is taken by the loop that waits on it)
                 Event::Built => {}
-                Event::Compacted(_, Ok(false)) => {}
-                Event::Compacted(b, Ok(true)) => {
+                // (the file on disk is exact: written now (true), or
+                // already (false: nothing to compact, or a build since,
+                // which leaves it not exact and says nothing))
+                Event::Compacted(b, Ok(wrote)) => {
+                    let exact = s.updates().is_none_or(|u| {
+                        u.lock().unwrap_or_else(PoisonError::into_inner).is_exact()
+                    });
                     let out = last.borrow().good.clone();
-                    ui.event(&json!({
-                        "event": "written",
-                        "exact": true,
-                        "build": b,
-                        "output": out.as_ref().map(|p| p.display().to_string()),
-                    }));
-                    if let (Some(v), Some(p)) = (&view, &out)
-                        && let Ok(b) = std::fs::read(p)
-                    {
-                        v.pdf_replaced(Some(session::shared(&b)));
+                    if exact && b == last.borrow().builds && out.is_some() {
+                        ui.event(&json!({
+                            "event": "written",
+                            "exact": true,
+                            "build": b,
+                            "output": out.as_ref().map(|p| p.display().to_string()),
+                        }));
+                        if let Some(v) = &view {
+                            match &out {
+                                Some(p) if wrote => {
+                                    if let Ok(b) = std::fs::read(p) {
+                                        v.pdf_replaced(Some(session::shared(&b)));
+                                    }
+                                }
+                                _ => v.written_exact(),
+                            }
+                        }
                     }
                 }
                 Event::Compacted(_, Err(e)) => ui.error(&e),

@@ -107,6 +107,17 @@ Absent fields are left out (never `null`). Sent between `preparing
 {on: true}` and `preparing {on: false}`; `settled` still says a build is
 in.
 
+### 2.1b The exact file: `written`
+
+`{"event": "written", "exact": true}` (the viewer's; `phitex watch
+--json`'s adds `build` and `output`): the file on disk is the exact
+one. Said at every idle point after a build where it is exact, whether
+the watch had to write it there (a PDF kept as update sections while
+the editor types, compacted when idle) or it was exact already (a DVI
+file, `--exact`, a build that wrote it whole): a client waiting for the
+exact file never waits for an event that does not come. Not said when a
+build came meanwhile (its own idle point says it).
+
 ### 2.2 LSP `$/progress`
 
 Only where the client said `window.workDoneProgress`. A build's token is
@@ -336,6 +347,16 @@ pub trait PackSource: Send + Sync {
   directory, as kpathsea's `.`); a format is built from Shelf's files
   only.
 - Fetch progress (§2) comes from `Files`, through its hook.
-- Not yet: XeTeX's fonts by name from Shelf (a font index over Shelf's
-  fonts): an XeTeX job with `files = "shelf"` is refused at the start,
-  said so.
+- **XeTeX's fonts by name**: the release's font index,
+  `fonts/misc/partex/fontindex.pxfi` (a pack of its own: Shelf's
+  `build.py` `FONT_INDEX`), `phitex-otf`'s PXFI made where the release is
+  built, with fontconfig over the release's `fonts/opentype` and
+  `fonts/truetype` (its paths relative to the tree): the faces in
+  fontconfig's `FcFontList` order, which XeTeX's name matching follows,
+  so no fontconfig is needed where it is used. One a release, fetched and
+  kept with its packs (native: the package cache; wasm: the host's).
+  Its paths are named under TeX Live's tree (`/usr/share/texmf-dist/
+  fonts/...`, as xelatex's XDV names them), each face read from Shelf's
+  packs as it is found. A release without one: an XeTeX job with `files =
+  "shelf"` is refused at the start, said so (tl2026.6 has none: the next
+  release is to be made with `FONT_INDEX`).

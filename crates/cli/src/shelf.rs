@@ -18,6 +18,14 @@
 //!   Needed only while the index or a pack is not in the cache.
 //! - **Checked**: every pack against the release's pack table before it
 //!   is used or kept (`phitex_shelf::Index::check`).
+//! - **XeTeX's fonts by name** ([`ShelfHost::xetex`]): the release's
+//!   font index ([`FONT_INDEX`], `phitex-otf`'s PXFI, made where the
+//!   release is built, with fontconfig, whose list order XeTeX's name
+//!   matching follows: Shelf's `build.py` `FONT_INDEX`), its paths
+//!   relative to the tree named under TeX Live's (`/usr/share/texmf-dist/
+//!   fonts/...`, as xelatex's XDV names them), its faces read from Shelf's
+//!   packs as a name finds them. Fetched and kept with the release's
+//!   packs: one a release, no fontconfig here.
 //! - **Told**: each pack asked and in, the session's progress records
 //!   (`Meter::fetch`); a pack that could not be had (unreachable,
 //!   refused), the terminal's warning and the editor's message
@@ -33,6 +41,10 @@ use phitex_shelf::{Fetch, Files, Index, PackSource};
 use phitex_tex::{Finder, ToolFinder};
 
 use crate::cache::{Cache, SHELF, Stats};
+
+/// Where a release keeps its font index (Shelf's `build.py`
+/// `FONT_INDEX_PATH`, a pack of its own).
+pub const FONT_INDEX: &str = "fonts/misc/partex/fontindex.pxfi";
 
 /// The Shelf release this PhiTeX builds from (its index and packs): two
 /// machines with the same PhiTeX build a document from the same files.
@@ -254,6 +266,29 @@ fn project(name: &str) -> Option<PathBuf> {
     p.is_file().then(|| p.to_path_buf())
 }
 
+/// dvipdfmx's `format` as kpathsea names it (a release's `search` key;
+/// one it has no list for finds the name's smallest path).
+fn dpx_format(format: phitex_live::dvipdf::Format) -> &'static str {
+    use phitex_live::dvipdf::Format as F;
+    match format {
+        F::Fontmap => "map",
+        F::Type1 => "type1",
+        F::TrueType => "truetype",
+        F::OpenType => "opentype",
+        F::Enc => "enc",
+        F::Tfm => "tfm",
+        F::Vf => "vf",
+        F::Sfd => "sfd",
+        F::Ofm => "ofm",
+        F::Ovf => "ovf",
+        F::Cmap => "cmap",
+        F::Pict => "pict",
+        F::Tex => "tex",
+        F::ProgramText => "other text files",
+        F::ProgramBinary => "other binary files",
+    }
+}
+
 /// The suffix kpathsea adds in dvipdfmx's `format` to a name without one.
 fn dpx_suffix(format: phitex_live::dvipdf::Format) -> &'static str {
     use phitex_live::dvipdf::Format as F;
@@ -276,6 +311,39 @@ fn dpx_suffix(format: phitex_live::dvipdf::Format) -> &'static str {
 /// Shelf's, never TeX Live's.
 pub struct ShelfHost {
     pub files: Arc<Files>,
+}
+
+/// The release's font index from `files` ([`FONT_INDEX`]), its relative
+/// paths named under TeX Live's tree.
+///
+/// # Errors
+/// The release has none, or it is not one.
+pub fn font_index(files: &Files) -> Result<phitex_tex::FontIndex, String> {
+    let (_, b) = files.find(&format!("{}{FONT_INDEX}", phitex_shelf::TL)).ok_or_else(|| {
+        format!(
+            "Shelf's {} has no font index ({FONT_INDEX}): XeTeX's fonts by name need a release made with one",
+            files.index().release()
+        )
+    })?;
+    let mut ix = phitex_tex::FontIndex::from_bytes(&b)
+        .ok_or_else(|| format!("Shelf's {FONT_INDEX} is not a font index (PXFI)"))?;
+    for e in &mut ix.entries {
+        if !e.path.starts_with('/') {
+            e.path = Arc::from(format!("{}{}", phitex_shelf::TL, e.path));
+        }
+    }
+    Ok(ix)
+}
+
+/// kpathsea's suffix for XeTeX's font `format`, added to a name without
+/// one.
+fn font_suffix(format: phitex_tex::KpseFormat) -> &'static str {
+    match format {
+        phitex_tex::KpseFormat::OpenType => ".otf",
+        phitex_tex::KpseFormat::TrueType => ".ttf",
+        phitex_tex::KpseFormat::Type1 => ".pfb",
+        phitex_tex::KpseFormat::MiscFonts => "",
+    }
 }
 
 impl ShelfHost {
@@ -383,16 +451,57 @@ impl Host for ShelfHost {
                 } else {
                     format!("{n}{suffix}")
                 };
-                f1.locate(&n).map(String::into_bytes)
+                f1.find_in(&n, dpx_format(format))
+                    .map(|(p, _)| p.into_bytes())
             }),
             Box::new(move |path| {
                 let p = String::from_utf8_lossy(path).into_owned();
                 match f2.read(&p) {
                     Some(b) => Some(Arc::from(b.as_slice())),
+                    None if p.starts_with(phitex_shelf::TL) => {
+                        f2.find(&p).map(|(_, b)| Arc::from(b.as_slice()))
+                    }
                     None => std::fs::read(&p).ok().map(Arc::from),
                 }
             }),
         )))
+    }
+
+    /// XeTeX's fonts: the release's font index ([`font_index`]), the
+    /// faces and `[file]` names from Shelf's packs (the project's own
+    /// first), TECkit's mappings the same.
+    fn xetex(&self) -> Option<phitex_tex::XeTeX> {
+        let ix = font_index(&self.files).ok()?;
+        let (f1, f2) = (self.files.clone(), self.files.clone());
+        Some(phitex_live::xefonts::xetex_of(
+            Box::new(move |path| match f1.read(path) {
+                Some(b) => Some(Arc::from(b.as_slice())),
+                None if path.starts_with(phitex_shelf::TL) => {
+                    f1.find(path).map(|(_, b)| Arc::from(b.as_slice()))
+                }
+                None => std::fs::read(path).ok().map(Arc::from),
+            }),
+            Box::new(move |name, format| {
+                if let Some(p) = project(name) {
+                    return Some(p.to_string_lossy().into_owned());
+                }
+                let suffix = font_suffix(format);
+                let kind = match format {
+                    phitex_tex::KpseFormat::OpenType => "opentype",
+                    phitex_tex::KpseFormat::TrueType => "truetype",
+                    phitex_tex::KpseFormat::Type1 => "type1",
+                    phitex_tex::KpseFormat::MiscFonts => "misc fonts",
+                };
+                if !suffix.is_empty()
+                    && !name.contains('.')
+                    && let Some((p, _)) = f2.find_in(&format!("{name}{suffix}"), kind)
+                {
+                    return Some(p);
+                }
+                f2.find_in(name, kind).map(|(p, _)| p)
+            }),
+            Some(ix),
+        ))
     }
 
     fn failure_report(

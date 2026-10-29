@@ -538,6 +538,12 @@ impl Viewer {
         self.emit(&json!({"event": "preparing", "on": on}).to_string());
     }
 
+    /// The file on disk is exact already (nothing to write when idle):
+    /// the browsers told, as when it is written.
+    pub fn written_exact(&self) {
+        self.emit(&json!({"event": "written", "exact": true}).to_string());
+    }
+
     /// The PDF served replaced by the same pages' exact file (written
     /// when idle over the updated one), the browsers told.
     pub fn pdf_replaced(&self, pdf: Option<Arc<[u8]>>) {
