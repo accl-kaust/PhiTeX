@@ -67,7 +67,7 @@ cp -n "$w/shelf/cache/"*.tar.xz "$arch/" 2>/dev/null || true
 echo "fetched $(date +%T)"
 
 # (2) PhiTeX and the release's font index (fontconfig's order, in the box)
-box sh -c "cd $w/phitex && cargo build -q --offline --profile fastdev -p phitex-cli -p phitex-otf --example otf-index"
+box sh -c "cd $w/phitex && cargo build -q --offline --profile fastdev -p phitex-cli --bin phitex -p phitex-otf --example otf-index"
 cat > "$w/phitex/scripts/xetex/fonts.conf" <<CONF
 <?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
@@ -129,14 +129,14 @@ print(f"{name}: {len(rows)} paths in {len(packs)} packs, {size / 1e6:.0f} MB as 
 PY
 
 # (6) the documents, each from Shelf and from the tree
-mkdir -p "$w/docs" "$w/empty"
+mkdir -p "$w/docs" "$w/empty" "$w/runs"
 cp -a "$w/phitex/oracle/fixtures/xetex/docs/." "$w/docs/"
 cp "$w/phitex/oracle/fixtures/xetex/cjk/"*.tex "$w/docs/" 2>/dev/null || true
 printf '%s\n' '\font\lm="Latin Modern Roman" at 11pt \lm Hello, Ünïcödé — XeTeX. \font\hv="TeX Gyre Heros/B" at 11pt \hv Bold sans.' '\bye' > "$w/docs/plainxe.tex"
 printf '%s\n' 'Hello {\bf plain} {\it \TeX} $x^2+\sqrt{y}$ and $$\sum_{k=1}^n k = {n(n+1)\over 2}.$$' '\bye' > "$w/docs/plainpdf.tex"
 cat > "$w/check.sh" <<CHECK
 set -u
-cd $w/docs
+cd $w/runs
 export SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1
 python3 $w/shelf/serve.py --root $w/shelf/releases-v4 --port 8124 > $w/serve.log 2>&1 &
 sleep 1
