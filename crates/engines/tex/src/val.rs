@@ -1032,6 +1032,20 @@ fn clist_items(x: ValueId, v: &Values) -> ValueId {
     v.list(items)
 }
 
+/// What an insertion class's box register is to the page builder
+/// (§1008-§1009: `x` its binding `[level, box]`): whether the box is an
+/// hbox and its height plus depth, none where it is void. A pure
+/// projection for the engine: a box changed within that shape (a routine
+/// that rebuilt it from other text of the same size) leaves a reader of
+/// the class's parameters standing.
+pub(crate) fn box_shape_projection(x: ValueId, v: &Values) -> ValueId {
+    let b = v.with_list(x, |xs| xs.get(1).copied().filter(|&b| b != ValueId::UNIT)).flatten();
+    b.map_or(ValueId::UNIT, |b| {
+        let hd = crate::nodes::box_dim(v, b, 3) + crate::nodes::box_dim(v, b, 2);
+        v.list(vec![v.int(i64::from(crate::nodes::box_is_h(v, b))), v.int(i64::from(hd))])
+    })
+}
+
 /// The class of a meaning as a lookup that only stores its token needs
 /// it (spec-redesign §8, class reads; `\edef`'s expansion, §478): the
 /// command code of an unexpandable meaning, `\relax`'s for a

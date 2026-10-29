@@ -2717,6 +2717,7 @@ impl Graph {
         let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage(origins_on.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
+        let box_shape_proj = eng.register_projection(Arc::new(crate::val::box_shape_projection));
         let outer_proj = eng.register_projection(Arc::new(crate::val::outer_projection));
         let step_proj = eng.register_projection(Arc::new(crate::val::step_projection));
         let defined_proj = eng.register_projection(Arc::new(crate::val::defined_projection));
@@ -2761,6 +2762,7 @@ impl Graph {
             xe: Arc::default(),
             rel_keys: Arc::default(),
             class_proj,
+            box_shape_proj,
             outer_proj,
             step_proj,
             defined_proj,

@@ -119,6 +119,48 @@ fn an_edit_on_the_last_page_keeps_the_earlier_pages() {
     );
 }
 
+/// An insertion class's box whose contents a routine made and a later
+/// page's routine ships: the page builder reads the box as its shape
+/// (§1008-§1009, its height plus depth and whether it is an hbox), the
+/// routine that ships it reads it in full. An edit that changes what
+/// page 1's routine puts in the box, not its size ("bog" for "dog", the
+/// same width), moves no break and must still change page 2: the edit's
+/// pages are a cold build's of the edited text.
+#[test]
+fn a_class_box_a_later_routine_ships_follows_an_edit_of_its_contents() {
+    use std::fmt::Write as _;
+    let mut src = String::from(
+        "\\vsize=150pt \\maxdepth=2pt \\hsize=200pt \\parindent=0pt\n\
+         \\newinsert\\notes \\count\\notes=1000 \\dimen\\notes=\\maxdimen \\skip\\notes=12pt\n\
+         \\def\\word{bog}\n\
+         \\output={\\ifnum\\pageno=1 \\shipout\\box255 \\global\\setbox\\notes\\vbox{\\hbox{\\word}}\
+         \\else\\shipout\\vbox{\\ifvoid\\notes\\else\\box\\notes\\fi\\box255}\\fi\\advancepageno}\n",
+    );
+    for k in 0..12 {
+        let _ = writeln!(
+            src,
+            "Paragraph {k} has words enough to make two or three lines of text in a narrow column.\\insert\\notes{{\\hbox{{note {k}}}}}\\par"
+        );
+    }
+    src.push_str("\\bye\n");
+    let new = src.replacen("\\def\\word{bog}", "\\def\\word{dog}", 1);
+    let dir = common::fixtures().join("plain/vsize");
+    for threads in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(threads),
+            ..common::options("./cb.tex", "cb", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&common::plain()), &src);
+        let before = b.pages();
+        assert!(before.len() >= 3, "-j{threads}: {} pages", before.len());
+        b.edit(&new);
+        let cold = common::build(opts(), Some(&common::plain()), &new);
+        assert_eq!(cold.pages().len(), before.len(), "-j{threads}: the edit moved a break");
+        assert_ne!(cold.pages()[1], before[1], "-j{threads}: page 2 does not show the box");
+        assert_eq!(b.pages(), cold.pages(), "-j{threads}: edit != cold");
+    }
+}
+
 /// (measure) 400 paragraphs: the stats, and with `PHITEX_TEX_TIME` the
 /// page folds' cost (`pagefold:` lines) beside the runs' (`nodetime:`).
 #[test]

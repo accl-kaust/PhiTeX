@@ -537,11 +537,13 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn insert_class(&mut self, n: u16) -> R<InsertClass> {
-        let b = self.box_reg(i32::from(n))?;
+        // (its box as the builder sees it, its shape: not the box itself,
+        // which a routine before rebuilt from other text)
+        let b = self.box_shape(i32::from(n))?;
         let v = self.v;
         Ok(InsertClass {
-            box_height_plus_depth: b.map(|b| nodes::box_dim(v, b, 3) + nodes::box_dim(v, b, 2)),
-            box_is_hbox: b.is_some_and(|b| nodes::box_is_h(v, b)),
+            box_height_plus_depth: b.map(|b| b.1),
+            box_is_hbox: b.is_some_and(|b| b.0),
             count: self.reg_int(0, n)?,
             dimen: self.reg_int(1, n)?,
             skip: glue_of(v, self.reg(2, i32::from(n))?),

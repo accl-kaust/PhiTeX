@@ -199,6 +199,10 @@ pub(crate) struct Ops {
     /// registered with the engine): a lookup that only stores its token
     /// reads the name's class, not its meaning ([`Run::class_lookup`]).
     pub class_proj: phitex_defuse::ProjId,
+    /// The shape projection of box registers
+    /// ([`crate::val::box_shape_projection`]): the page builder's reads
+    /// of an insertion class's box ([`Run::box_shape`]).
+    pub box_shape_proj: phitex_defuse::ProjId,
     /// The outer projection of meanings ([`crate::val::outer_projection`]):
     /// a token only stepped over reads whether its meaning is `\outer`
     /// ([`Run::outer_lookup`]).
@@ -4016,6 +4020,30 @@ impl<'c, 'a> Run<'c, 'a> {
         e.has |= crate::state::M_STEP;
         e.step = k;
         Ok(Some(k))
+    }
+
+    /// Box register `n` as the page builder sees an insertion class's box
+    /// (§1008-§1009): whether it is an hbox and its height plus depth,
+    /// `None` where it is void, read through the engine's shape
+    /// projection ([`crate::val::box_shape_projection`]) where the run has
+    /// not bound it itself: a routine that rebuilt the box from other
+    /// text of the same shape leaves this run standing.
+    pub(crate) fn box_shape(&mut self, n: i32) -> R<Option<(bool, i32)>> {
+        let v = self.v;
+        let l = self.box_loc(i64::from(n));
+        if self.st.is_loaded(l) || self.lazy_pre(l) {
+            let b = self.box_reg(n)?;
+            return Ok(b.map(|b| (crate::nodes::box_is_h(v, b), crate::nodes::box_dim(v, b, 3) + crate::nodes::box_dim(v, b, 2))));
+        }
+        let f = self.loc_field(l);
+        let x = self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.box_shape_proj))?;
+        Ok(x.filter(|&x| x != ValueId::UNIT).and_then(|x| {
+            v.with_list(x, |xs| match xs {
+                [h, hd] => Some((int_of(v, *h) != 0, i32::try_from(int_of(v, *hd)).unwrap_or(0))),
+                _ => None,
+            })
+            .flatten()
+        }))
     }
 
     /// Whether `l` is a finisher's field given where the routine reads
