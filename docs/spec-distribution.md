@@ -21,58 +21,62 @@ that.
    sends package names (already said in the viewer). The update check is
    off until the user turns it on, and it sends one GET with no identifiers.
 
-## 2. The server (static files)
+## 2. The server: Shelf as it is hosted
 
-One root, `https://shelf.phitex.org/`: a Cloudflare R2 bucket on the phitex.org zone, cached by Cloudflare in front (free: 10 GB stored, 10M reads and 1M writes a month, no egress charge; cache hits are not R2 reads). R2 sets CORS, which the browser viewer's Shelf needs. Everything is static, so
-any file host or CDN works.
+Shelf is already hosted on Cloudflare Pages' free plan, from the
+shelf.PhiTeX.org repo (`deploy.sh`, `release.py`; its README has the
+layout, retention and the measured growth). It already follows §1: packs
+are named by their content, every release's index stays, CORS is open, and
+a schema an older client can't read gets a Pages project of its own beside
+the old one. So the layout stays as it is:
 
 ```
-/v1/shelf.json                      the only mutable file (short cache)
-/v1/news.json                       mutable, short cache (§4)
-/v1/packs/<sha256>.pack             content-named, shared by all releases
-/v1/releases/<release>/release.json immutable (schema, search, deps, notice)
-/v1/releases/<release>/index-<release>.tsv.gz
-/v1/releases/<release>/packs-<release>.tsv.gz
+<root>/shelf.json                         new: the TeX Live prefixes and each one's latest release (short cache)
+<root>/tl2026/release.json                the prefix's latest release (short cache)
+<root>/tl2026/release-<release>.json      immutable
+<root>/tl2026/index-<release>.tsv.gz      immutable
+<root>/tl2026/packs-<release>.tsv.gz      immutable (each pack's SHA-256 and size)
+<root>/tl2026/h/<hash>.pack               content-named, shared by the prefix's releases
 ```
 
-Binaries are GitHub release assets (free, no bandwidth limit, no CORS
-needed for curl): `<target>.tar.gz`, `SHA256SUMS`, `SHA256SUMS.minisig` per
-version tag. `phitex upgrade` and `https://phitex.org/install.sh` fetch them
-from there; install.sh is a static file of the site (PhiTeX.org repo,
-`public/install.sh`, deployed with it to Cloudflare Pages project
-`phitex-org`). Shelf's bucket is uploaded from mc, where `build.py` runs,
-with an R2 token scoped to that bucket alone. Storage budget: R2's 10 GB holds the current release (1.8 GB) and
-the shared packs of the releases in the support window (§6); a release
-re-uploads only its changed packs.
-
-`shelf.json`:
-
-```json
-{ "protocol": 1,
-  "releases": [ { "name": "tl2026.7", "schema": 4, "date": "2026-10-30" } ],
-  "latest": "tl2026.7" }
-```
-
-- **`/v1/`** is the protocol: the URL layout and the meaning of these files.
-  A change an older PhiTeX could misread goes to `/v2/`, with `/v1/` kept.
-- **`schema`** is a release index's format. PhiTeX lists the schemas it reads
+- **Schema 3** is project `shelf-phitex` at `shelf.phitex.org` (tl2026.5).
+  It stays as it is while shipped extensions read it.
+- **Schema 4** is project `shelf-phitex-v4` (shelf-phitex-v4.pages.dev).
+  It gets the custom domain **`v4.shelf.phitex.org`**, which is the URL
+  PhiTeX builds in.
+- **A schema an older client can't read** gets the next project and
+  domain (`v5.shelf.phitex.org`). The old project stays.
+- **`schema`** is in each release's json. PhiTeX lists the schemas it reads
   (`phitex_shelf::SCHEMAS`, now 3 and 4). A release whose schema a client
   can't read is skipped by that client, which says so and names the version
   that reads it.
-- **Packs are named by their SHA-256.** A new TeX Live release re-uploads
-  only changed packs (tl2026.7 kept 8365 and added 1396). Old releases cost
-  only their indexes.
-- Packs are never deleted while a release that lists them is served.
-  Retiring a release is a deliberate act, after its last PhiTeX is past
-  support (§6).
+- **Limits:**
+  - Pages' free plan serves 20,000 files a deployment, 25 MiB each.
+  - By the README's measurements, that holds tl2026 and tl2027, roughly to
+    spring 2028.
+  - After that the packs move to R2 at the same URLs (10 GB free, no
+    egress fees). Indexes and json stay on Pages.
+  - Volumes (packs appended to big files, read by Range) don't work:
+    Pages ignores Range (measured 2026-10-28).
+- **Retiring a release** is a deliberate act, after its last PhiTeX is past
+  support (§6). Until then, packs are never deleted while a kept index
+  names them.
+
+**news.json and install.sh** are static files of the site (PhiTeX.org repo,
+`public/`, deployed with it to the Pages project `phitex-org`):
+`https://phitex.org/news.json` and `https://phitex.org/install.sh`.
+
+**Binaries** are GitHub release assets (free, no bandwidth limit, no CORS
+needed for curl): `<target>.tar.gz`, `SHA256SUMS` and `SHA256SUMS.minisig`
+for each version tag.
 
 ## 3. Which release a PhiTeX reads
 
 - **By default it reads the release it was built with** (`shelf::RELEASE`).
   The same PhiTeX then gives the same bytes on every machine, which is what
   exact builds promise.
-- **`shelf-release = "latest"`** in `phitex.toml` follows `shelf.json`'s
-  `latest`, among the schemas it reads. A name such as `"tl2026.7"` pins that
+- **`shelf-release = "latest"`** in `phitex.toml` follows the prefix's
+  `release.json`, among the schemas it reads. A name such as `"tl2026.7"` pins that
   release. `PHITEX_SHELF_RELEASE` overrides both.
 - **The URL is built in** (`shelf::DEFAULT_URL`). `shelf-url` in
   `phitex.toml` and `PHITEX_SHELF_URL` override it, for a mirror or an
@@ -127,7 +131,7 @@ re-uploads only its changed packs.
 - **Never** under `CI`, with no TTY, under `phitex lsp`, or with
   `PHITEX_NO_UPDATE_CHECK=1`. The editor extension shows the same news
   through `phitex/status` (§7).
-- **The request** is one GET of `/v1/news.json` with
+- **The request** is one GET of `https://phitex.org/news.json` with
   `User-Agent: phitex/<version>`. No identifiers, no query string.
 
 ## 5. Configuration compatibility
@@ -189,16 +193,17 @@ re-uploads only its changed packs.
 ## 9. Work, in order
 
 1. **CLI:**
-   - `shelf::DEFAULT_URL` and the `/v1/` layout;
+   - `shelf::DEFAULT_URL` (`https://v4.shelf.phitex.org/tl2026/`);
    - `shelf-url` and `shelf-release` keys;
    - skip unreadable schemas with a message;
    - warn on unknown config keys;
    - the `phitex` version key;
    - version 0.1.0 and the `--version` lines.
-2. **Shelf `build.py`:**
-   - write the `/v1/` layout (`packs/<sha256>.pack` shared, `releases/<r>/`);
-   - update `shelf.json` (merge, never drop a release);
-   - TRACE and FONT_INDEX on.
+2. **Shelf:**
+   - add the custom domain `v4.shelf.phitex.org` to the Pages project `shelf-phitex-v4`;
+   - build tl2026.7 from the xetex-trees branch on mc, with TRACE and FONT_INDEX;
+   - `release.py` writes `shelf.json`;
+   - `deploy.sh` to `shelf-phitex-v4`.
 3. **`NEWS.md` → `news.json`** generator, the update check and `phitex
    upgrade`, and the release workflow (targets, `SHA256SUMS`, minisign).
 4. **`install.sh`.**
