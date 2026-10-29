@@ -78,9 +78,14 @@ built() { echo "build_s $(( $(date +%s) - t0 ))" >> "$r/times.txt"; }
 # their directories (gate-fast's table reads them).
 if [ "$shard" = all ]; then
   r0=$r w0=$w
-  # (the job's CPUs, one a line)
+  # (the job's CPUs, one a line, a core's hyperthreads side by side: a
+  # shard's share is whole cores, never the sibling of another's)
   cpus=$(taskset -pc $$ 2>/dev/null | sed 's/.*: //' | tr ',' '\n' |
-    awk -F- '{ if (NF == 2) { for (i = $1; i <= $2; i++) print i } else if ($1 != "") print $1 }')
+    awk -F- '{ if (NF == 2) { for (i = $1; i <= $2; i++) print i } else if ($1 != "") print $1 }' |
+    while read -r c; do
+      t=/sys/devices/system/cpu/cpu$c/topology
+      echo "$(cat $t/physical_package_id 2>/dev/null || echo 0) $(cat $t/core_id 2>/dev/null || echo "$c") $c"
+    done | sort -n -k1,1 -k2,2 -k3,3 | awk '{print $3}')
   next=0
   # (take N: the next N of them, comma-separated, in $set_)
   take() { set_=$(sed -n "$((next + 1)),$((next + $1))p" <<< "$cpus" | paste -sd,); next=$((next + $1)); }
