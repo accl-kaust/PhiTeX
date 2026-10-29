@@ -1599,6 +1599,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     // (the last first: a worker's deque gives the newest first, so its
     // placements run in their order, a child before the node after it)
+    // (the frontier this run moved, before its placements are queued: they
+    // are queued by where they stand against it, `sched::sched_key`)
+    if let Some(at) = frontier {
+        eng.frontier.store(at.map_or(0, |n| n.raw() + 1), Ordering::Release);
+    }
     for n in made.iter().rev() {
         enqueue(
             eng,
@@ -1612,10 +1617,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         );
         settle_predictions(eng, ww, n, &mut st);
     }
-    // (the frontier moved: after its placements stand, so a reader let
-    // go meets them)
-    if let Some(at) = frontier {
-        eng.frontier.store(at.map_or(0, |n| n.raw() + 1), Ordering::Release);
+    // (the frontier moved: its placements stand, so a reader let go meets
+    // them)
+    if frontier.is_some() {
         crate::sched::release_frontier(eng, ww);
     }
     if let Some(parent) = node.parent {
