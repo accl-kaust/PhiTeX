@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# (The CLI no longer embeds MuPDF: its viewer draws strips. Kept for the
+# frontends' hosts until their cores draw strips too; then deleted.)
 # Fetch MuPDF's WebAssembly build (mupdf on npm, AGPL-3.0-or-later) into
 # upstream/mupdf/dist/: the files the live viewer draws its pages with,
 # embedded in the phitex binary (crates/cli/src/view.rs). Pinned by version

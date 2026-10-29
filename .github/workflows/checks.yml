@@ -40,8 +40,6 @@ jobs:
       - run: PHITEX_BUNDLE_DIRECT=1 scripts/viewer-typecheck.sh
       # (untrusted text, a repository's or a document's, never reaches the DOM as markup)
       - run: PHITEX_BUNDLE_DIRECT=1 scripts/viewer-test.sh
-      # (MuPDF's WebAssembly build, embedded in the CLI: fetched pinned, not committed)
-      - run: scripts/fetch-mupdf.sh
       - run: cargo fmt --all --check
       # (the engine, crates/core/defuse, keeps its own lints)
       - run: cargo clippy --workspace --exclude phitex-defuse --all-targets -- -D warnings

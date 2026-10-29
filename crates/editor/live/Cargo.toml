@@ -9,6 +9,7 @@ description = "A live document: the session a watch keeps (one phitex-tex Build,
 [dependencies]
 phitex-tex = { path = "../../engines/tex" }
 phitex-pdf = { path = "../../output/pdf" }
+phitex-render = { path = "../../output/render" }
 phitex-bibtex = { path = "../../tools/bibtex" }
 phitex-codecs = { path = "../../codecs" }
 phitex-xdvipdfmx = { path = "../../output/xdvipdfmx" }

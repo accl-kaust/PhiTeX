@@ -142,6 +142,8 @@ impl AsRef<[u8]> for Bytes {
 struct Doc {
     bytes: Arc<[u8]>,
     pdf: Pdf,
+    /// Each page's text, by page (a frame's probe's, or the text's own).
+    texts: HashMap<usize, Vec<TextLine>>,
 }
 
 /// The strips of a viewer's pages, across builds.
@@ -612,6 +614,129 @@ fn unpremultiply(px: &mut [u8]) {
     }
 }
 
+/// Page `page` interpreted by the probe through `base` (to pixels, the
+/// page `pw` by `ph` of them): its drawings on the page, their boxes
+/// clipped to it, and its glyphs.
+fn probe(
+    page: &Page<'_>,
+    base: Affine,
+    pw: f64,
+    ph: f64,
+    boxes: &mut HashMap<u128, (Rect, u64)>,
+) -> (Vec<Item>, Vec<Ch>) {
+    let icache = InterpreterCache::new();
+    let mut probe = Probe {
+        items: Vec::new(),
+        around: 0,
+        saved: Vec::new(),
+        boxes,
+        chars: Vec::new(),
+    };
+    let mut ctx = Context::new(
+        base,
+        Rect::new(0.0, 0.0, pw, ph),
+        &icache,
+        page.xref(),
+        InterpreterSettings::default(),
+    );
+    interpret_page(page, &mut ctx, &mut probe);
+    let page_rect = Rect::new(0.0, 0.0, pw, ph);
+    let mut items: Vec<Item> = probe
+        .items
+        .into_iter()
+        .filter(|i| i.bbox.intersect(page_rect).area() > 0.0 || i.bbox.height() == 0.0)
+        .collect();
+    for i in &mut items {
+        i.bbox = i.bbox.intersect(page_rect.inflate(1.0, 1.0));
+    }
+    (items, probe.chars)
+}
+
+/// An entry of the PDF's outline: its title, its page (from 0) and place
+/// (points from the page's top), and its entries.
+#[derive(Clone, Debug, Default)]
+pub struct Entry {
+    pub title: String,
+    pub page: Option<usize>,
+    pub y: Option<f64>,
+    pub kids: Vec<Entry>,
+}
+
+/// A PDF text string: UTF-16BE after its byte order mark, else
+/// PDFDocEncoding (Latin-1 where TeX's bookmarks use it).
+fn text_string(b: &[u8]) -> String {
+    if let Some(u) = b.strip_prefix(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = u
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else if let Some(u) = b.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        String::from_utf8_lossy(u).into_owned()
+    } else {
+        b.iter().map(|&c| char::from(c)).collect()
+    }
+}
+
+/// The catalog's `/Outlines`: each entry's title and destination, its
+/// `/First` its entries, `/Next` the one after it.
+fn outline_of(pdf: &Pdf) -> Vec<Entry> {
+    fn level(pdf: &Pdf, pages: &[Page<'_>], first: Dict<'_>, budget: &mut usize) -> Vec<Entry> {
+        let mut out = Vec::new();
+        let mut cur = Some(first);
+        while let Some(d) = cur {
+            if *budget == 0 {
+                break;
+            }
+            *budget -= 1;
+            let title = d
+                .get::<Object<'_>>(b"Title")
+                .and_then(Object::into_string)
+                .map(|s| text_string(s.as_bytes()))
+                .unwrap_or_default();
+            let dest = |o: Object<'_>| -> Option<(usize, Option<f64>)> {
+                let arr = match o {
+                    Object::Array(a) => Some(a),
+                    Object::String(s) => named(pdf, s.as_bytes()),
+                    Object::Name(n) => named(pdf, n.as_str().as_bytes()),
+                    _ => None,
+                }?;
+                dest_of(pages, &arr)
+            };
+            let place = match d.get::<Dict<'_>>(b"A") {
+                Some(a) => a.get::<Object<'_>>(b"D").and_then(dest),
+                None => d.get::<Object<'_>>(b"Dest").and_then(dest),
+            };
+            let kids = d
+                .get::<Dict<'_>>(b"First")
+                .map(|f| level(pdf, pages, f, budget))
+                .unwrap_or_default();
+            out.push(Entry {
+                title,
+                page: place.map(|p| p.0),
+                y: place.and_then(|p| p.1),
+                kids,
+            });
+            cur = d.get::<Dict<'_>>(b"Next");
+        }
+        out
+    }
+    let xref = pdf.xref();
+    let Some(root) = xref.get::<Dict<'_>>(xref.root_id()) else {
+        return Vec::new();
+    };
+    let pages = pdf.pages();
+    let Some(first) = root
+        .get::<Dict<'_>>(b"Outlines")
+        .and_then(|o| o.get::<Dict<'_>>(b"First"))
+    else {
+        return Vec::new();
+    };
+    // (at most this many entries: a cycle of /Next ends there)
+    let mut budget = 100_000usize;
+    level(pdf, pages, first, &mut budget)
+}
+
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn micros(t: Instant) -> u64 {
     t.elapsed().as_micros() as u64
@@ -653,26 +778,65 @@ impl Renderer {
     )]
     pub fn frame(&mut self, pdf: &Arc<[u8]>, k: usize, scale: f32) -> Option<Frame> {
         let t0 = Instant::now();
-        if self
-            .doc
-            .as_ref()
-            .is_none_or(|d| !Arc::ptr_eq(&d.bytes, pdf))
-        {
-            let p = Pdf::new(Arc::new(Bytes(pdf.clone()))).ok()?;
-            self.doc = Some(Doc {
-                bytes: pdf.clone(),
-                pdf: p,
-            });
-        }
+        let mut doc = self.open(pdf)?;
         let open_us = micros(t0);
-        let doc = self.doc.take()?;
-        let out = self.frame_of(&doc.pdf, k, scale, open_us);
+        let out = self.frame_of(&mut doc, k, scale, open_us);
+        self.doc = Some(doc);
+        out
+    }
+
+    /// The document of `pdf`, taken out (put back by the caller): the one
+    /// open, or `pdf` opened now.
+    fn open(&mut self, pdf: &Arc<[u8]>) -> Option<Doc> {
+        match self.doc.take() {
+            Some(d) if Arc::ptr_eq(&d.bytes, pdf) => Some(d),
+            _ => Some(Doc {
+                bytes: pdf.clone(),
+                pdf: Pdf::new(Arc::new(Bytes(pdf.clone()))).ok()?,
+                texts: HashMap::new(),
+            }),
+        }
+    }
+
+    /// How many pages `pdf` has (`None`: it does not open).
+    pub fn pages(&mut self, pdf: &Arc<[u8]>) -> Option<usize> {
+        let doc = self.open(pdf)?;
+        let n = doc.pdf.pages().len();
+        self.doc = Some(doc);
+        Some(n)
+    }
+
+    /// Page `k`'s text, line by line (points from its top left).
+    pub fn text(&mut self, pdf: &Arc<[u8]>, k: usize) -> Option<Vec<TextLine>> {
+        let mut doc = self.open(pdf)?;
+        if !doc.texts.contains_key(&k) {
+            let pages = doc.pdf.pages();
+            if let Some(page) = pages.get(k) {
+                let base = page.initial_transform(true).to_kurbo();
+                let (w, h) = page.render_dimensions();
+                let (_, chars) = probe(page, base, f64::from(w), f64::from(h), &mut self.boxes);
+                let lines = lines_of(&chars, 1.0);
+                doc.texts.insert(k, lines);
+            }
+        }
+        let out = doc.texts.get(&k).cloned();
+        self.doc = Some(doc);
+        out
+    }
+
+    /// The PDF's outline (its bookmarks), its entries' pages and places.
+    pub fn outline(&mut self, pdf: &Arc<[u8]>) -> Vec<Entry> {
+        let Some(doc) = self.open(pdf) else {
+            return Vec::new();
+        };
+        let out = outline_of(&doc.pdf);
         self.doc = Some(doc);
         out
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn frame_of(&mut self, pdf: &Pdf, k: usize, scale: f32, open_us: u64) -> Option<Frame> {
+    fn frame_of(&mut self, doc: &mut Doc, k: usize, scale: f32, open_us: u64) -> Option<Frame> {
+        let pdf = &doc.pdf;
         let pages = pdf.pages();
         let page = pages.get(k)?;
         let (w, h) = page.render_dimensions();
@@ -684,34 +848,9 @@ impl Renderer {
 
         // (the probe: every drawing's box and identity, the text)
         let t1 = Instant::now();
-        let icache = InterpreterCache::new();
-        let mut probe = Probe {
-            items: Vec::new(),
-            around: 0,
-            saved: Vec::new(),
-            boxes: &mut self.boxes,
-            chars: Vec::new(),
-        };
-        {
-            let mut ctx = Context::new(
-                base,
-                Rect::new(0.0, 0.0, f64::from(pw), f64::from(ph)),
-                &icache,
-                page.xref(),
-                settings.clone(),
-            );
-            interpret_page(page, &mut ctx, &mut probe);
-        }
-        let page_rect = Rect::new(0.0, 0.0, f64::from(pw), f64::from(ph));
-        let mut items: Vec<Item> = probe
-            .items
-            .into_iter()
-            .filter(|i| i.bbox.intersect(page_rect).area() > 0.0 || i.bbox.height() == 0.0)
-            .collect();
-        for i in &mut items {
-            i.bbox = i.bbox.intersect(page_rect.inflate(1.0, 1.0));
-        }
-        let text = lines_of(&probe.chars, s);
+        let (items, chars) = probe(page, base, f64::from(pw), f64::from(ph), &mut self.boxes);
+        let text = lines_of(&chars, s);
+        doc.texts.insert(k, text.clone());
         let links = links_of(pdf, pages, page);
 
         // (the bands: drawings' extents merged where they come within GAP)

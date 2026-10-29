@@ -251,7 +251,7 @@ pub fn diagnostics(s: &Session, r: &Report, log: &str) -> Vec<Value> {
 /// the build keeps none, the first page whose text holds one of the
 /// words (`Build::page_of_text`, a DVI build's: a PDF build's pages leave
 /// the page loop as their writers' shapes, so there the browser looks for
-/// the words itself, MuPDF's text of the PDF).
+/// the words itself, the page's text as the strips read it).
 pub fn locate(
     s: &Session,
     file: &str,

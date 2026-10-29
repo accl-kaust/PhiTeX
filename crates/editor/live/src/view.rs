@@ -8,7 +8,10 @@
 //! - **Requests.** The Overleaf extension's core requests (`session.ts`'s
 //!   `CoreReq`) as JSON, `{"id":N,"op":…}`, answered `{"id":N,"ok":…,
 //!   "json":…}` ([`Viewer::answer`]). Ops: `open`, `status`, `pages`,
-//!   `diagnostics`, `console` (the messages so far), `rebuild`, `source` (a
+//!   `diagnostics`, `console` (the messages so far), `rebuild`, `frame`
+//!   (a page as strips, [`Viewer::frame`]; their pixels are
+//!   [`Viewer::strips`]), `text` (every page's, for finding), `outline`,
+//!   `source` (a
 //!   double-click's or an error's place: the host shows it,
 //!   [`Viewer::on_goto`]), and the editor's buffer: `set_file {file, text}`
 //!   and `edit {file, start, end, text}` (UTF-16 offsets) become the
@@ -31,10 +34,12 @@
 //!   "text":…,"texts":[…],"file":…,"line":L}`, the editor's cursor at line
 //!   `L` (from 1) of `file`; `texts` are the words around it as a page would
 //!   show them, longest first, and the build found `text`, one of them, on
-//!   page `K` (from 1); the viewer finds the words there in MuPDF's text
+//!   page `K` (from 1); the viewer finds the words there in the page's text
 //!   and marks them, with `K` null (no page found: a PDF build, whose page
 //!   text the engine does not read) the first of `texts` it finds, nearest
 //!   the place it last revealed).
+//!   The pages are drawn here, as strips (`phitex_render`): the viewer
+//!   loads no PDF.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -181,6 +186,9 @@ pub struct Viewer {
     emit: Mutex<Option<Box<dyn Fn(&str) + Send>>>,
     /// What every ask goes through before it is queued ([`Viewer::route_asks`]).
     route: Mutex<Option<Box<dyn Fn(Ask) -> Ask + Send>>>,
+    /// The pages drawn as strips, their text and the outline
+    /// (`phitex_render`, [`Viewer::frame`], [`Viewer::strips`]).
+    strips: Mutex<phitex_render::Renderer>,
 }
 
 /// The messages a viewer that joins is shown.
@@ -201,6 +209,7 @@ impl Default for Viewer {
             read: Mutex::new(None),
             emit: Mutex::new(None),
             route: Mutex::new(None),
+            strips: Mutex::new(phitex_render::Renderer::new()),
         }
     }
 }
@@ -225,6 +234,97 @@ impl Viewer {
     /// The project's files read by `read` (a `source` place's line).
     pub fn on_read(&self, read: Box<dyn Fn(&str) -> Option<Vec<u8>> + Send>) {
         *lock(&self.read) = Some(read);
+    }
+
+    /// Page `k` of the PDF shown ([`Viewer::pdf`]) at `scale` pixels a
+    /// point, as strips (`phitex_render`): its size in pixels and points,
+    /// its bands (each `[key, top, height]`, the key in hex), its text and
+    /// links (`viewer/src/types.ts`' `Link`), and what drawing it took
+    /// (`drawn` and `kept` bands, microseconds).
+    pub fn frame(&self, k: usize, scale: f32) -> Option<Value> {
+        use phitex_render::Target;
+        if !(0.05..=16.0).contains(&scale) {
+            return None;
+        }
+        let pdf = self.pdf()?;
+        let t = std::time::Instant::now();
+        let f = lock(&self.strips).frame(&pdf, k, scale)?;
+        let us = t.elapsed().as_micros();
+        let bands: Vec<Value> = f
+            .bands
+            .iter()
+            .map(|b| json!([format!("{:016x}", b.key), b.y, b.h]))
+            .collect();
+        let links: Vec<Value> = f
+            .links
+            .iter()
+            .map(|l| {
+                let [a, b, c, d] = l.rect;
+                match &l.target {
+                    Target::Uri(u) => json!([a, b, c, d, u]),
+                    Target::Page(p, y) => json!([a, b, c, d, p, y]),
+                }
+            })
+            .collect();
+        Some(json!({
+            "pw": f.pw, "ph": f.ph, "w": f.w, "h": f.h,
+            "bands": bands, "text": lines_json(&f.text), "links": links,
+            "drawn": f.drawn, "kept": f.kept,
+            "us": {"open": f.open_us, "probe": f.probe_us, "draw": f.draw_us, "all": us},
+        }))
+    }
+
+    /// The strips of `keys` (hex, comma-separated, as [`Viewer::frame`]
+    /// gives them): each one's width and height (`u32`, little-endian)
+    /// and its RGBA pixels, in the order asked; one unknown (dropped since
+    /// its frame) 0 by 0.
+    pub fn strips(&self, keys: &str) -> Vec<u8> {
+        let r = lock(&self.strips);
+        let mut out = Vec::new();
+        for key in keys.split(',').filter(|k| !k.is_empty()) {
+            match u64::from_str_radix(key, 16).ok().and_then(|k| r.strip(k)) {
+                Some(st) => {
+                    out.extend_from_slice(&st.w.to_le_bytes());
+                    out.extend_from_slice(&st.h.to_le_bytes());
+                    out.extend_from_slice(&st.rgba);
+                }
+                None => out.extend_from_slice(&[0; 8]),
+            }
+        }
+        out
+    }
+
+    /// Every page's text of the PDF shown, line by line (for finding).
+    fn text_json(&self) -> Value {
+        let Some(pdf) = self.pdf() else {
+            return json!([]);
+        };
+        let mut r = lock(&self.strips);
+        let n = r.pages(&pdf).unwrap_or(0);
+        Value::Array(
+            (0..n)
+                .map(|k| {
+                    r.text(&pdf, k)
+                        .map_or_else(|| json!([]), |t| lines_json(&t))
+                })
+                .collect(),
+        )
+    }
+
+    /// The outline of the PDF shown, as the viewer's entries
+    /// (`viewer/src/outline.ts`' `Entry`: title, page, place, entries).
+    fn outline_json(&self) -> Value {
+        fn conv(es: &[phitex_render::Entry]) -> Value {
+            Value::Array(
+                es.iter()
+                    .map(|e| json!({"t": e.title, "p": e.page, "y": e.y, "k": conv(&e.kids)}))
+                    .collect(),
+            )
+        }
+        let Some(pdf) = self.pdf() else {
+            return json!([]);
+        };
+        conv(&lock(&self.strips).outline(&pdf))
     }
 
     /// The PDF the viewer loads (`doc.pdf`): the diff's while its pages
@@ -453,6 +553,17 @@ impl Viewer {
     }
 }
 
+/// Lines of a page's text as the viewer takes them (`viewer/src/text.ts`'
+/// `TextLine`).
+fn lines_json(lines: &[phitex_render::TextLine]) -> Value {
+    Value::Array(
+        lines
+            .iter()
+            .map(|l| json!({"x": l.x, "y": l.y, "w": l.w, "size": l.size, "text": l.text, "xs": l.xs, "rs": l.rs}))
+            .collect(),
+    )
+}
+
 /// A number as an index or count (none if negative or not whole).
 fn index(v: &Value) -> Option<usize> {
     v.as_u64().and_then(|n| usize::try_from(n).ok())
@@ -496,7 +607,17 @@ impl Viewer {
                 }))
             }
             "pages" => ok(json!({"pages": hashes_json(&state().0)})),
-            "png" => fail("the pages are drawn in the browser (MuPDF), from doc.pdf"),
+            "png" => fail("the pages are drawn as strips: frame and strips"),
+            "frame" => {
+                #[allow(clippy::cast_possible_truncation, reason = "a scale: pixels a point")]
+                let scale = req.get("scale").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+                match s.frame(page.unwrap_or(0), scale) {
+                    Some(f) => ok(f),
+                    None => fail("no such page"),
+                }
+            }
+            "text" => ok(json!({"pages": s.text_json()})),
+            "outline" => ok(json!({"items": s.outline_json()})),
             "set_file" | "edit" => {
                 let file = text("file").unwrap_or_default();
                 let body = text("text").unwrap_or_default();
@@ -558,8 +679,6 @@ impl Viewer {
                 let c = lock(&s.console);
                 ok(json!({"items": c.0.iter().collect::<Vec<_>>(), "status": c.1}))
             }
-            // (the browser reads the outline from the PDF itself, with MuPDF)
-            "outline" => ok(json!({"items": []})),
             "diff" => ok(lock(&s.diff).state.clone()),
             "diff_log" => {
                 let skip = req.get("skip").and_then(index).unwrap_or(0);

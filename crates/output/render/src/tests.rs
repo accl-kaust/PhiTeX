@@ -204,3 +204,64 @@ fn links_are_read() {
         f.links[1]
     );
 }
+
+/// The outline's entries, nested, with their pages and places; a page's
+/// text by lines.
+#[test]
+fn outline_and_text_are_read() {
+    let content =
+        "BT /F1 12 Tf 72 700 Td (Hello outline) Tj ET\nBT /F1 12 Tf 72 680 Td (Second) Tj ET\n";
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 6 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_owned(),
+        format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        "<< /Type /Outlines /First 7 0 R /Last 8 0 R /Count 3 >>".to_owned(),
+        "<< /Title (Intro) /Parent 6 0 R /Next 8 0 R /First 9 0 R /Last 9 0 R /Dest [3 0 R /XYZ 0 700 null] >>".to_owned(),
+        "<< /Title <FEFF00C9007400E9> /Parent 6 0 R /Prev 7 0 R /A << /S /GoTo /D [3 0 R /FitH 500] >> >>".to_owned(),
+        "<< /Title (Inside) /Parent 7 0 R /Dest [3 0 R /XYZ 0 600 null] >>".to_owned(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut at = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        at.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for a in at {
+        out.extend_from_slice(format!("{a:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objs.len() + 1
+        )
+        .as_bytes(),
+    );
+    let doc: Arc<[u8]> = Arc::from(out);
+    let mut r = Renderer::new();
+    let o = r.outline(&doc);
+    assert_eq!(o.len(), 2, "{o:?}");
+    assert_eq!(
+        (o[0].title.as_str(), o[0].page, o[0].y),
+        ("Intro", Some(0), Some(92.0))
+    );
+    assert_eq!(o[0].kids.len(), 1);
+    assert_eq!(
+        (o[0].kids[0].title.as_str(), o[0].kids[0].y),
+        ("Inside", Some(192.0))
+    );
+    assert_eq!((o[1].title.as_str(), o[1].y), ("Été", Some(292.0)));
+    assert_eq!(r.pages(&doc), Some(1));
+    let t = r.text(&doc, 0).expect("the page's text");
+    let lines: Vec<&str> = t.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(lines, ["Hello outline", "Second"], "{t:?}");
+    assert!(
+        (t[0].y - 92.0).abs() < 0.01 && (t[0].size - 12.0).abs() < 0.01,
+        "{:?}",
+        t[0]
+    );
+    assert_eq!(t[0].xs.len(), "Hello outline".encode_utf16().count());
+}

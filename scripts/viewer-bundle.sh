@@ -4,9 +4,9 @@
 # css.ts; the Overleaf extension draws its pages with the same files, taken
 # from the PhiTeX commit it pins) and the CLI's host for it
 # (crates/cli/viewer/cli.ts), not minified. The bundle is committed (the
-# build needs no node); CI checks it is what these sources make. MuPDF,
-# which the page loads to draw the pages, is not bundled: see
-# scripts/fetch-mupdf.sh.
+# build needs no node); CI checks it is what these sources make. The pages
+# are drawn by the watch as strips (crates/output/render); the page loads
+# no PDF renderer.
 #
 #   scripts/viewer-bundle.sh            # make viewer.js
 #   scripts/viewer-bundle.sh --check    # fail if viewer.js is not what they make

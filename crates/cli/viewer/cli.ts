@@ -9,20 +9,20 @@
 // sync; reveal, an LSP editor's cursor, marked here). The page's keys, the contents beside the pages and the problems
 // are the panel's (PanelOptions.keys, .outline).
 //
-// The pages are drawn here, with MuPDF (viewer/src/mupdf.ts), from the
-// watch's doc.pdf: the `png` and `outline` requests are answered in the
-// page, the PDF loaded again after each build.
+// The pages are drawn by the watch as strips (crates/output/render): the
+// page keeps each band's bitmap by its key and composes the pages from
+// them (`Strips`); the page's text (finding) and the outline are the
+// watch's too. No PDF is loaded here.
 //
 // Bundled by scripts/viewer-bundle.sh into viewer.js.
 
 import { Panel } from "../../../viewer/src/panel.ts";
 import { PreviewSession, type CoreEvent, type CoreRes, type CoreTransport, type EditorHost } from "../../../viewer/src/session.ts";
-import { MupdfDoc, toCanvas, type Hit, type TextLine } from "../../../viewer/src/mupdf.ts";
+import { composeLine, search, type Hit, type TextLine } from "../../../viewer/src/text.ts";
 import type { Link } from "../../../viewer/src/types.ts";
 import { DiffControls, LATEXDIFF_LOOK, type DiffRunner } from "../../../viewer/src/compare.ts";
 import type { DiffLook } from "../../../viewer/src/panel.ts";
 import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.ts";
-import { Current } from "../../../viewer/src/current.ts";
 
 
 /** The watch's core, over a WebSocket: requests answered in order, events pushed; joined again when it drops. */
@@ -97,61 +97,34 @@ class Socket implements CoreTransport {
 }
 
 /**
- * The watch's core with the pages drawn here: `png` and `outline` answered
- * by MuPDF from doc.pdf (loaded again after each `settled`), the rest
- * asked of the watch.
+ * The watch's core, its pages drawn as strips (`Strips`): `png` answered
+ * from the bands the watch draws, the page's text and links with them;
+ * `outline` and every other request asked of the watch.
  */
 class Pages implements CoreTransport {
   private sock: Socket;
-  private mupdf: Promise<any> | null = null;
-  /** doc.pdf as the last build settled it (loaded again until its version is the latest). */
-  private doc = new Current<MupdfDoc>(() => this.load(), (d) => d.destroy());
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
   private change: { since: number; at: number } | null = null;
+  /** Every page's text, for finding (asked again after each build). */
+  private texts: Promise<TextLine[][]> | null = null;
 
   constructor(sock: Socket) {
     this.sock = sock;
     sock.onEvent((e) => {
       if (e.event !== "settled") return;
-      this.doc.moved();
+      this.texts = null;
       const since = (e as { since_ms?: number | null }).since_ms;
       this.change = typeof since === "number" ? { since, at: performance.now() } : null;
     });
   }
 
-  private open(): Promise<MupdfDoc | null> {
-    return this.doc.get();
-  }
-
-  /** doc.pdf as it is now, opened. */
-  private async load(): Promise<MupdfDoc | null> {
-    // (MuPDF's module, from the watch, its .wasm beside it)
-    this.mupdf ??= import(new URL("mupdf/mupdf.js", location.href).href);
-    const m = await this.mupdf;
-    const r = await fetch(new URL("doc.pdf", location.href), { cache: "no-store" });
-    if (!r.ok) return null;
-    return new MupdfDoc(m, new Uint8Array(await r.arrayBuffer()));
-  }
-
   async request(op: object): Promise<CoreRes> {
     const o = op as { op: string; page?: number };
-    if (o.op === "png" && STRIPS) {
+    if (o.op === "png") {
       const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint()).catch(() => null);
       if (!p) return { ok: false, json: { error: "no such page" } };
       this.painted();
       return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links };
-    }
-    if (o.op === "png") {
-      const d = await this.open().catch(() => null);
-      // (at the zoom shown, on this screen's pixels: the viewer asks again after a zoom in)
-      const drawn = d?.draw(o.page ?? 0, panel.pixelsPerPoint());
-      if (!drawn) return { ok: false, json: { error: "no such page" } };
-      this.painted();
-      return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h], links: drawn.links };
-    }
-    if (o.op === "outline") {
-      const d = await this.open().catch(() => null);
-      return { ok: true, json: { items: d?.outline() ?? [] } };
     }
     return this.sock.request(op);
   }
@@ -171,10 +144,12 @@ class Pages implements CoreTransport {
     });
   }
 
-  /** Where `q` is in the build's PDF (MuPDF's text, every page). */
+  /** Where `q` is in the build's pages (their text as the watch reads it). */
   async find(q: string): Promise<Hit[]> {
-    const d = await this.open().catch(() => null);
-    return d?.search(q) ?? [];
+    this.texts ??= this.sock.request({ op: "text" }).then((r) =>
+      r.ok ? ((r.json?.pages ?? []) as TextLine[][]).map((lines) => lines.map(composeLine)) : [],
+    );
+    return search(await this.texts, q);
   }
 
   onEvent(cb: (e: CoreEvent) => void): void {
@@ -187,10 +162,8 @@ class Pages implements CoreTransport {
  * docs/spec-display-list.md): a page is its bands, each a bitmap the
  * watch drew once and this page keeps by its key; a build's page draws
  * only the bands whose keys are new, and the rest are the bitmaps kept,
- * at their places. `?mupdf` in the address draws with MuPDF instead.
+ * at their places.
  */
-const STRIPS = !new URLSearchParams(location.search).has("mupdf");
-
 type Frame = {
   pw: number;
   ph: number;
@@ -246,7 +219,7 @@ class Strips {
       `fetch ${(t1 - t0).toFixed(1)}+${(t2 - t1).toFixed(1)} · compose ${(t3 - t2).toFixed(1)} ms`;
     const el = document.createElement("div");
     el.className = "phx-page";
-    el.append(c, textLayer(f.text, f.w, f.h));
+    el.append(c, textLayer(f.text.map(composeLine), f.w, f.h));
     return { el, w: f.w, h: f.h, links: f.links };
   }
 
@@ -283,7 +256,7 @@ class Strips {
 
 const SVG = "http://www.w3.org/2000/svg";
 
-/** The page's text over its canvas, transparent, for selecting and copying (as toCanvas's). */
+/** The page's text over its canvas, transparent, for selecting and copying. */
 function textLayer(lines: TextLine[], w: number, h: number): SVGElement {
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("class", "phx-text");

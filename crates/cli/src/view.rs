@@ -9,13 +9,15 @@
 //!   WebSocket). Every
 //!   path begins with a random token, so no other page in the browser can
 //!   read the document.
-//! - **Pages.** The build's PDF bytes (a DVI build's made a PDF by
-//!   dvipdfmx for the viewer: `dvipdf.rs`) at `doc.pdf`, and each page's
-//!   hash as the build gives it. The browser draws the pages itself with
-//!   MuPDF (`mupdf/`, its WebAssembly build as published, and
-//!   `viewer/src/mupdf.ts`). After a build, `{"event":"settled"}`: the
-//!   browser loads the new PDF and draws again the pages whose hashes
-//!   changed.
+//! - **Pages.** Drawn here as strips (`phitex_live::view`'s
+//!   [`Viewer::frame`], `phitex_render`): `frame/K/S` is page K (from 0)
+//!   at S thousandths of a pixel a point, its bands' keys and places, its
+//!   text and links; `strips/KEY,…` the pixels of the bands the browser
+//!   does not have. The browser keeps the bands it has by key and composes
+//!   each page from them. After a build, `{"event":"settled"}`: the
+//!   browser asks again for the pages whose hashes changed, and only their
+//!   new bands travel. `doc.pdf` is the build's PDF (a DVI build's made a
+//!   PDF by dvipdfmx: `dvipdf.rs`), for downloading.
 //! - **Protocol.** `phitex_live::view`'s requests and events, as JSON over
 //!   the WebSocket: each request answered on its socket, each event sent
 //!   to every browser. A `source` (a double-click's or an error's place)
@@ -37,27 +39,6 @@ use crate::ws;
 /// The viewer's page and its script (`scripts/viewer-bundle.sh`).
 const INDEX: &[u8] = include_bytes!("../viewer/index.html");
 const SCRIPT: &[u8] = include_bytes!("../viewer/viewer.js");
-
-/// MuPDF's WebAssembly build, as published (`mupdf` on npm, its `dist/`,
-/// fetched pinned into `upstream/mupdf/` by `scripts/fetch-mupdf.sh`): the
-/// browser draws the pages with it.
-const MUPDF: [(&str, &str, &[u8]); 3] = [
-    (
-        "mupdf.js",
-        "text/javascript; charset=utf-8",
-        include_bytes!("../../../upstream/mupdf/dist/mupdf.js"),
-    ),
-    (
-        "mupdf-wasm.js",
-        "text/javascript; charset=utf-8",
-        include_bytes!("../../../upstream/mupdf/dist/mupdf-wasm.js"),
-    ),
-    (
-        "mupdf-wasm.wasm",
-        "application/wasm",
-        include_bytes!("../../../upstream/mupdf/dist/mupdf-wasm.wasm"),
-    ),
-];
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -82,8 +63,6 @@ struct Shared {
     /// Told how many browsers are connected when that changes.
     on_clients: Mutex<Option<Box<dyn Fn(usize) + Send>>>,
     viewer: Arc<Viewer>,
-    /// The pages drawn as strips (`frame/`, `strips/`).
-    strips: Mutex<phitex_render::Renderer>,
 }
 
 /// The live viewer of a watch.
@@ -174,7 +153,6 @@ impl View {
             clients,
             on_clients: Mutex::new(None),
             viewer,
-            strips: Mutex::new(phitex_render::Renderer::new()),
         });
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
         let s = shared.clone();
@@ -280,14 +258,22 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
         // (a page as strips: `frame/K/S`, page K from 0 at S thousandths of
         // a pixel a point; `strips/KEY,KEY,...`, the strips' pixels)
         f if f.starts_with("frame/") => {
-            let body = frame_json(s, &f[6..]);
+            let body = f[6..].split_once('/').and_then(|(k, sc)| {
+                let scale = sc.parse::<f32>().ok()? / 1000.0;
+                s.viewer.frame(k.parse().ok()?, scale)
+            });
             let _ = match body {
-                Some(b) => ws::respond(&mut w, "200 OK", "application/json", b.as_bytes()),
+                Some(b) => ws::respond(
+                    &mut w,
+                    "200 OK",
+                    "application/json",
+                    b.to_string().as_bytes(),
+                ),
                 None => ws::respond(&mut w, "404 Not Found", "text/plain", b"no such page\n"),
             };
         }
         f if f.starts_with("strips/") => {
-            let body = strips_bytes(s, &f[7..]);
+            let body = s.viewer.strips(&f[7..]);
             let _ = ws::respond(&mut w, "200 OK", "application/octet-stream", &body);
         }
         "ws" if req.is_upgrade() => {
@@ -295,83 +281,10 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
                 socket(s, sock);
             }
         }
-        f if f.starts_with("mupdf/") => {
-            let _ = match MUPDF.iter().find(|(n, _, _)| *n == &f[6..]) {
-                Some((_, ctype, b)) => ws::respond(&mut w, "200 OK", ctype, b),
-                None => ws::respond(&mut w, "404 Not Found", "text/plain", b"not found\n"),
-            };
-        }
         _ => {
             let _ = ws::respond(&mut w, "404 Not Found", "text/plain", b"not found\n");
         }
     }
-}
-
-/// `frame/K/S`: page K of the build's PDF at S/1000 pixels a point, as
-/// strips (`phitex_render`): its size, its bands (each `[key, top,
-/// height]`, the key in hex), its text and links (as MuPDF's in
-/// `viewer/src/mupdf.ts`), and what drawing it took.
-fn frame_json(s: &Shared, rest: &str) -> Option<String> {
-    use phitex_render::Target;
-    let (k, sc) = rest.split_once('/')?;
-    let k: usize = k.parse().ok()?;
-    let scale = sc.parse::<f32>().ok()? / 1000.0;
-    if !(0.05..=16.0).contains(&scale) {
-        return None;
-    }
-    let pdf = s.viewer.pdf()?;
-    let t = std::time::Instant::now();
-    let f = lock(&s.strips).frame(&pdf, k, scale)?;
-    let us = t.elapsed().as_micros();
-    let bands: Vec<Value> = f
-        .bands
-        .iter()
-        .map(|b| serde_json::json!([format!("{:016x}", b.key), b.y, b.h]))
-        .collect();
-    let text: Vec<Value> = f
-        .text
-        .iter()
-        .map(|l| serde_json::json!({"x": l.x, "y": l.y, "w": l.w, "size": l.size, "text": l.text, "xs": l.xs, "rs": l.rs}))
-        .collect();
-    let links: Vec<Value> = f
-        .links
-        .iter()
-        .map(|l| {
-            let [a, b, c, d] = l.rect;
-            match &l.target {
-                Target::Uri(u) => serde_json::json!([a, b, c, d, u]),
-                Target::Page(p, y) => serde_json::json!([a, b, c, d, p, y]),
-            }
-        })
-        .collect();
-    Some(
-        serde_json::json!({
-            "pw": f.pw, "ph": f.ph, "w": f.w, "h": f.h,
-            "bands": bands, "text": text, "links": links,
-            "drawn": f.drawn, "kept": f.kept,
-            "us": {"open": f.open_us, "probe": f.probe_us, "draw": f.draw_us, "all": us},
-        })
-        .to_string(),
-    )
-}
-
-/// `strips/KEY,KEY,...`: each strip's width and height (u32,
-/// little-endian) and its RGBA pixels, in the order asked; one unknown
-/// (dropped since its frame) is 0 by 0.
-fn strips_bytes(s: &Shared, rest: &str) -> Vec<u8> {
-    let r = lock(&s.strips);
-    let mut out = Vec::new();
-    for key in rest.split(',').filter(|k| !k.is_empty()) {
-        match u64::from_str_radix(key, 16).ok().and_then(|k| r.strip(k)) {
-            Some(st) => {
-                out.extend_from_slice(&st.w.to_le_bytes());
-                out.extend_from_slice(&st.h.to_le_bytes());
-                out.extend_from_slice(&st.rgba);
-            }
-            None => out.extend_from_slice(&[0; 8]),
-        }
-    }
-    out
 }
 
 /// A WebSocket's requests, answered in order until it closes. Its reads

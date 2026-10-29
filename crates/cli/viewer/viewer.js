@@ -3697,7 +3697,7 @@ var PreviewSession = class {
   }
 };
 
-// viewer/src/mupdf.ts
+// viewer/src/text.ts
 function fold(c) {
   const f = c.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
   return f.length === 1 ? f : c.toLowerCase().length === 1 ? c.toLowerCase() : c;
@@ -3734,182 +3734,48 @@ function compose(cs) {
   }
   return out.filter((c) => c.c !== "");
 }
-var MupdfDoc = class {
-  m;
-  doc;
-  /** `m`: the `mupdf` module, loaded by the host. */
-  constructor(m, pdf) {
-    this.m = m;
-    this.doc = m.Document.openDocument(pdf, "application/pdf");
-  }
-  get pages() {
-    return this.doc.countPages();
-  }
-  /** Page `k` (from 0) drawn at `scale` pixels a point; null: no such page. */
-  draw(k, scale) {
-    if (k < 0 || k >= this.pages) return null;
-    const page = this.doc.loadPage(k);
-    try {
-      const [x0, y0, x1, y1] = page.getBounds();
-      const pix = page.toPixmap(this.m.Matrix.scale(scale, scale), this.m.ColorSpace.DeviceRGB, false, true);
-      try {
-        const pw = pix.getWidth(), ph = pix.getHeight(), stride = pix.getStride();
-        const rgb = pix.getPixels();
-        const rgba = new Uint8ClampedArray(pw * ph * 4);
-        for (let y = 0; y < ph; y++) {
-          let i = y * stride, o = y * pw * 4;
-          for (let x = 0; x < pw; x++, i += 3, o += 4) {
-            rgba[o] = rgb[i];
-            rgba[o + 1] = rgb[i + 1];
-            rgba[o + 2] = rgb[i + 2];
-            rgba[o + 3] = 255;
-          }
-        }
-        return { rgba, pw, ph, w: x1 - x0, h: y1 - y0, links: this.links(page, x0, y0), text: this.text(page, x0, y0) };
-      } finally {
-        pix.destroy();
+function composeLine(l) {
+  if (!l.xs || !l.rs) return l;
+  const units = Array.from({ length: l.text.length }, (_, i) => l.text[i]);
+  const cs = compose(units.map((c, i) => ({ c, x: l.xs[i] ?? l.x, r: l.rs[i] ?? l.x + l.w })));
+  const text = cs.map((c) => c.c).join("");
+  const xs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.x));
+  const rs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.r));
+  return { ...l, text, xs, rs };
+}
+function search(pages2, q, max = 1e3) {
+  const needle = Array.from(q.replace(/\s+/g, " ").trim(), fold).join("");
+  if (!needle) return [];
+  const out = [];
+  for (let k = 0; k < pages2.length && out.length < max; k++) {
+    const lines = pages2[k];
+    let hay = "";
+    const at = [];
+    const col = [];
+    lines.forEach((l, i) => {
+      if (i) hay += " ", at.push(-1), col.push(-1);
+      for (let j = 0; j < l.text.length; j++) hay += fold(l.text[j]), at.push(i), col.push(j);
+    });
+    for (let from2 = hay.indexOf(needle); from2 >= 0 && out.length < max; from2 = hay.indexOf(needle, from2 + needle.length)) {
+      const boxes2 = [];
+      let cur = -1, x = 0, r = 0;
+      const flush = () => {
+        if (cur < 0) return;
+        const l = lines[cur];
+        boxes2.push([x, l.y - l.size * 0.78, r - x, l.size * 1.02]);
+      };
+      for (let u = from2; u < from2 + needle.length; u++) {
+        const i = at[u];
+        if (i < 0) continue;
+        const l = lines[i], xl = l.xs?.[col[u]] ?? l.x, xr = l.rs?.[col[u]] ?? l.x + l.w;
+        if (i !== cur) flush(), cur = i, x = xl, r = xr;
+        else x = Math.min(x, xl), r = Math.max(r, xr);
       }
-    } finally {
-      page.destroy();
+      flush();
+      if (boxes2.length) out.push({ k, boxes: boxes2 });
     }
   }
-  /** A page's links, from its top left (`x0`, `y0`: its box's corner). */
-  links(page, x0, y0) {
-    const out = [];
-    for (const l of page.getLinks()) {
-      const [a, b, c, d] = l.getBounds();
-      if (l.isExternal()) out.push([a - x0, b - y0, c - x0, d - y0, l.getURI()]);
-      else {
-        const dest = this.doc.resolveLinkDestination(l);
-        if (dest.page >= 0) out.push([a - x0, b - y0, c - x0, d - y0, dest.page, Number.isFinite(dest.y) ? dest.y : null]);
-      }
-    }
-    return out;
-  }
-  /** A page's text, line by line (MuPDF's structured text), from its top left. */
-  text(page, x0, y0) {
-    const out = [];
-    let line = null;
-    let chars = [];
-    let right = 0;
-    const st = page.toStructuredText("preserve-whitespace");
-    try {
-      st.walk({
-        beginLine: (bbox) => {
-          line = null;
-          chars = [];
-          right = bbox[2] - x0;
-        },
-        onChar: (c, origin, _font, size, quad) => {
-          line ??= { x: origin[0] - x0, y: origin[1] - y0, w: 0, size, text: "" };
-          const x = Math.min(quad[0], quad[4]) - x0;
-          chars.push({ c, x, r: Math.max(quad[2], quad[6], x + x0) - x0 });
-        },
-        endLine: () => {
-          if (!line) return;
-          const cs = compose(chars);
-          const text = cs.map((c) => c.c).join("");
-          if (!text.trim()) return;
-          const xs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.x));
-          const rs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.r));
-          out.push({ ...line, text, xs, rs, w: Math.max(right - line.x, 0) });
-        }
-      });
-    } finally {
-      st.destroy();
-    }
-    return out;
-  }
-  /** Each page's text, kept for searching (this PDF's: it never changes). */
-  texts = /* @__PURE__ */ new Map();
-  textOf(k) {
-    let t = this.texts.get(k);
-    if (!t) {
-      const page = this.doc.loadPage(k);
-      try {
-        const [x0, y0] = page.getBounds();
-        t = this.text(page, x0, y0);
-      } finally {
-        page.destroy();
-      }
-      this.texts.set(k, t);
-    }
-    return t;
-  }
-  /**
-   * Where `q` is on the pages, in page order: accents and case ignored, a
-   * match running across a line break (the lines joined by a space) boxed
-   * on each line; at most `max` matches.
-   */
-  search(q, max = 1e3) {
-    const needle = Array.from(q.replace(/\s+/g, " ").trim(), fold).join("");
-    if (!needle) return [];
-    const out = [];
-    for (let k = 0; k < this.pages && out.length < max; k++) {
-      const lines = this.textOf(k);
-      let hay = "";
-      const at = [];
-      const col = [];
-      lines.forEach((l, i) => {
-        if (i) hay += " ", at.push(-1), col.push(-1);
-        for (let j = 0; j < l.text.length; j++) hay += fold(l.text[j]), at.push(i), col.push(j);
-      });
-      for (let from2 = hay.indexOf(needle); from2 >= 0 && out.length < max; from2 = hay.indexOf(needle, from2 + needle.length)) {
-        const boxes2 = [];
-        let cur = -1, x = 0, r = 0;
-        const flush = () => {
-          if (cur < 0) return;
-          const l = lines[cur];
-          boxes2.push([x, l.y - l.size * 0.78, r - x, l.size * 1.02]);
-        };
-        for (let u = from2; u < from2 + needle.length; u++) {
-          const i = at[u];
-          if (i < 0) continue;
-          const l = lines[i], xl = l.xs?.[col[u]] ?? l.x, xr = l.rs?.[col[u]] ?? l.x + l.w;
-          if (i !== cur) flush(), cur = i, x = xl, r = xr;
-          else x = Math.min(x, xl), r = Math.max(r, xr);
-        }
-        flush();
-        if (boxes2.length) out.push({ k, boxes: boxes2 });
-      }
-    }
-    return out;
-  }
-  /** The PDF's outline (its bookmarks) as the panel's entries. */
-  outline() {
-    const conv = (items) => (items ?? []).map((i) => ({ t: i.title ?? "", p: i.page ?? null, y: null, k: conv(i.down) }));
-    return conv(this.doc.loadOutline());
-  }
-  destroy() {
-    this.doc.destroy();
-  }
-};
-var SVG = "http://www.w3.org/2000/svg";
-function toCanvas(d) {
-  const el = document.createElement("div");
-  el.className = "phx-page";
-  const c = document.createElement("canvas");
-  c.width = d.pw;
-  c.height = d.ph;
-  c.getContext("2d").putImageData(new ImageData(d.rgba, d.pw, d.ph), 0, 0);
-  const svg = document.createElementNS(SVG, "svg");
-  svg.setAttribute("class", "phx-text");
-  svg.setAttribute("viewBox", `0 0 ${d.w} ${d.h}`);
-  svg.setAttribute("preserveAspectRatio", "none");
-  for (const l of d.text) {
-    const t = document.createElementNS(SVG, "text");
-    t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
-    t.setAttribute("y", String(l.y));
-    t.setAttribute("font-size", String(l.size));
-    if (!l.xs && l.w > 0) {
-      t.setAttribute("textLength", String(l.w));
-      t.setAttribute("lengthAdjust", "spacingAndGlyphs");
-    }
-    t.textContent = l.text;
-    svg.append(t);
-  }
-  el.append(c, svg);
-  return el;
+  return out;
 }
 
 // viewer/src/compare.ts
@@ -4205,47 +4071,6 @@ click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
   }
 };
 
-// viewer/src/current.ts
-var Current = class {
-  load;
-  drop;
-  /** The versions announced, and the one the value is of. */
-  version = 0;
-  valueVersion = -1;
-  value = null;
-  loading = null;
-  /** `load` makes the value as it is now (null: none); `drop` frees one replaced. */
-  constructor(load, drop = () => {
-  }) {
-    this.load = load;
-    this.drop = drop;
-  }
-  /** A new version is out (a `settled`): the next `get` loads it. */
-  moved() {
-    this.version++;
-  }
-  /** The value of the latest version, loaded until the one it is of is the latest (null: none). */
-  async get() {
-    for (; ; ) {
-      if (this.value !== null && this.valueVersion === this.version) return this.value;
-      if (!this.loading) {
-        const v = this.version;
-        this.loading = this.load().then((x2) => {
-          if (x2 !== null) {
-            if (this.value !== null && this.value !== x2) this.drop(this.value);
-            this.value = x2;
-            this.valueVersion = v;
-          }
-          return x2;
-        }).finally(() => this.loading = null);
-      }
-      const x = await this.loading;
-      if (x === null) return null;
-      if (this.valueVersion === this.version) return this.value;
-    }
-  }
-};
-
 // crates/cli/viewer/cli.ts
 var Socket = class {
   ws;
@@ -4313,49 +4138,26 @@ var Socket = class {
 };
 var Pages = class {
   sock;
-  mupdf = null;
-  /** doc.pdf as the last build settled it (loaded again until its version is the latest). */
-  doc = new Current(() => this.load(), (d) => d.destroy());
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
   change = null;
+  /** Every page's text, for finding (asked again after each build). */
+  texts = null;
   constructor(sock2) {
     this.sock = sock2;
     sock2.onEvent((e) => {
       if (e.event !== "settled") return;
-      this.doc.moved();
+      this.texts = null;
       const since = e.since_ms;
       this.change = typeof since === "number" ? { since, at: performance.now() } : null;
     });
   }
-  open() {
-    return this.doc.get();
-  }
-  /** doc.pdf as it is now, opened. */
-  async load() {
-    this.mupdf ??= import(new URL("mupdf/mupdf.js", location.href).href);
-    const m = await this.mupdf;
-    const r = await fetch(new URL("doc.pdf", location.href), { cache: "no-store" });
-    if (!r.ok) return null;
-    return new MupdfDoc(m, new Uint8Array(await r.arrayBuffer()));
-  }
   async request(op) {
     const o = op;
-    if (o.op === "png" && STRIPS) {
+    if (o.op === "png") {
       const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint()).catch(() => null);
       if (!p) return { ok: false, json: { error: "no such page" } };
       this.painted();
       return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links };
-    }
-    if (o.op === "png") {
-      const d = await this.open().catch(() => null);
-      const drawn = d?.draw(o.page ?? 0, panel.pixelsPerPoint());
-      if (!drawn) return { ok: false, json: { error: "no such page" } };
-      this.painted();
-      return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h], links: drawn.links };
-    }
-    if (o.op === "outline") {
-      const d = await this.open().catch(() => null);
-      return { ok: true, json: { items: d?.outline() ?? [] } };
     }
     return this.sock.request(op);
   }
@@ -4373,16 +4175,17 @@ var Pages = class {
       void this.sock.request({ op: "painted", ms });
     });
   }
-  /** Where `q` is in the build's PDF (MuPDF's text, every page). */
+  /** Where `q` is in the build's pages (their text as the watch reads it). */
   async find(q) {
-    const d = await this.open().catch(() => null);
-    return d?.search(q) ?? [];
+    this.texts ??= this.sock.request({ op: "text" }).then(
+      (r) => r.ok ? (r.json?.pages ?? []).map((lines) => lines.map(composeLine)) : []
+    );
+    return search(await this.texts, q);
   }
   onEvent(cb) {
     this.sock.onEvent(cb);
   }
 };
-var STRIPS = !new URLSearchParams(location.search).has("mupdf");
 var Strips = class {
   /** The bitmaps kept, by key (the oldest dropped past `max`). */
   kept = /* @__PURE__ */ new Map();
@@ -4418,7 +4221,7 @@ var Strips = class {
     this.chip.textContent = `p${k + 1}: ${f.drawn} drawn, ${f.kept} kept \xB7 watch ${(f.us.all / 1e3).toFixed(1)} ms (probe ${(f.us.probe / 1e3).toFixed(1)}, draw ${(f.us.draw / 1e3).toFixed(1)}) \xB7 fetch ${(t1 - t0).toFixed(1)}+${(t2 - t1).toFixed(1)} \xB7 compose ${(t3 - t2).toFixed(1)} ms`;
     const el = document.createElement("div");
     el.className = "phx-page";
-    el.append(c, textLayer(f.text, f.w, f.h));
+    el.append(c, textLayer(f.text.map(composeLine), f.w, f.h));
     return { el, w: f.w, h: f.h, links: f.links };
   }
   /** The strips of `keys`, made bitmaps and kept. */
@@ -4451,14 +4254,14 @@ var Strips = class {
     }
   }
 };
-var SVG2 = "http://www.w3.org/2000/svg";
+var SVG = "http://www.w3.org/2000/svg";
 function textLayer(lines, w, h) {
-  const svg = document.createElementNS(SVG2, "svg");
+  const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("class", "phx-text");
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg.setAttribute("preserveAspectRatio", "none");
   for (const l of lines) {
-    const t = document.createElementNS(SVG2, "text");
+    const t = document.createElementNS(SVG, "text");
     t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
     t.setAttribute("y", String(l.y));
     t.setAttribute("font-size", String(l.size));
