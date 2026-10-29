@@ -163,6 +163,15 @@ impl Document {
                     s.progress(p);
                 }
             }));
+            let l = lsp.clone();
+            session
+                .status()
+                .meter()
+                .on_unreachable(Box::new(move |why| {
+                    if let Some(s) = lock(&l).as_ref() {
+                        s.trouble(crate::lsp::Trouble::Unreachable, why);
+                    }
+                }));
         }
         Document {
             session,
@@ -266,6 +275,11 @@ impl Document {
                 }
                 Applied::Rebuild => {
                     why.push("asked in the viewer".to_owned());
+                    asked = true;
+                    again = true;
+                }
+                Applied::Cold => {
+                    why.push("asked: a cold build".to_owned());
                     asked = true;
                     again = true;
                 }
@@ -426,6 +440,24 @@ impl LspHost for DocumentHost {
                 None => Err("no PDF yet".to_owned()),
             }),
             _ => None,
+        }
+    }
+
+    fn read(&self, name: &str) -> Option<String> {
+        self.viewer
+            .file(name)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+
+    /// The settings changed: the host's (a new document where the
+    /// threads, the main file or the files' source differ), told as the
+    /// command `phitex/configure` with them.
+    fn configure(&self, s: &crate::lsp::Settings) {
+        if let Some(c) = &self.commands {
+            c(
+                "phitex/configure",
+                &json!({"threads": s.threads, "main": s.main, "follow": s.follow, "files": s.files}),
+            );
         }
     }
 

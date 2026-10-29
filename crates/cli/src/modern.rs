@@ -249,7 +249,7 @@ pub enum Command {
 
 /// The modern command line's options, as the rest of the program reads
 /// them.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Options {
     pub command: Option<Command>,
@@ -906,6 +906,11 @@ pub fn main(args: &[String]) -> ! {
         let l = crate::lsp::Lsp::begin(&mut o.file);
         if l.wants_main() {
             o.file = Some(l.main_from_open());
+        }
+        // (the editor's settings given with `initialize`: over the
+        // command line's and phitex.toml's)
+        if let Some(n) = l.settings().threads {
+            o.threads = Some(n);
         }
         Some(l)
     } else {

@@ -52,6 +52,25 @@ enum Event {
     /// The exact PDF file written over the updated one (when idle),
     /// that of build `.0`: whether it was, or why not.
     Compacted(usize, Result<bool, String>),
+    /// The editor's settings changed (`--lsp`): a new session where they
+    /// change the threads or the main file.
+    Configure(phitex_live::lsp::Settings),
+}
+
+/// What the watch keeps from one session to the next (the editor's
+/// settings changed: [`Event::Configure`]): the editor, the viewer and
+/// its address, the events, standard input's reader.
+struct Kept {
+    lsp: Option<Arc<Lsp>>,
+    tx: mpsc::Sender<(Instant, Event)>,
+    rx: Option<mpsc::Receiver<(Instant, Event)>>,
+    /// The viewer (none: `--no-view`), once the first session made it.
+    view: Option<View>,
+    view_made: bool,
+    building: Arc<AtomicBool>,
+    told: Arc<AtomicBool>,
+    /// Whether standard input is read (by the first session).
+    reading: bool,
 }
 
 /// The extensions of the files a change of rebuilds.
@@ -497,11 +516,93 @@ fn faster(cold: Duration, wall: Duration) -> Option<String> {
 }
 
 /// Watch target `t` (`lsp`: for the editor that initialized it, on
-/// standard input and output); never returns.
-#[allow(clippy::too_many_lines)]
+/// standard input and output); never returns. The editor's settings may
+/// start a new session ([`Event::Configure`]): the viewer, its address
+/// and the editor's connection are kept.
 pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
-    let st = ui.st;
+    let (tx, rx) = mpsc::channel::<(Instant, Event)>();
     let lsp = lsp.map(Arc::new);
+    if let Some(l) = &lsp {
+        let tx = Mutex::new(tx.clone());
+        l.on_configure(Box::new(move |s| {
+            let _ = tx
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .send((Instant::now(), Event::Configure(s)));
+        }));
+    }
+    let mut kept = Kept {
+        lsp,
+        tx,
+        rx: Some(rx),
+        view: None,
+        view_made: false,
+        building: Arc::default(),
+        told: Arc::default(),
+        reading: false,
+    };
+    let (mut t, mut o) = (t.clone(), o.clone());
+    loop {
+        (t, o) = session(&t, &o, ui, &mut kept);
+    }
+}
+
+/// The target and options of settings `s` over `t` and `o`, where they
+/// change the session (its threads, its main file), and its job can be
+/// made (else the editor is told why, and none).
+fn reconfigured(
+    t: &Target,
+    o: &Options,
+    s: &phitex_live::lsp::Settings,
+    lsp: Option<&Lsp>,
+) -> Option<(Target, Options)> {
+    let mut o2 = o.clone();
+    if let Some(n) = s.threads {
+        o2.threads = Some(n);
+    }
+    if let Some(m) = &s.main {
+        o2.file = Some(m.clone());
+    }
+    let same_main = |a: &str, b: &str| {
+        let c = |f: &str| {
+            Path::new(f)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(f))
+        };
+        c(a) == c(b)
+    };
+    let said = |e: &str| {
+        if let Some(l) = lsp {
+            l.server()
+                .show_message(1, &format!("PhiTeX: the settings: {e}"));
+        }
+    };
+    let t2 = match modern::resolve(&o2) {
+        Ok(t2) => t2,
+        Err(e) => {
+            said(&e);
+            return None;
+        }
+    };
+    if o2.threads == o.threads && same_main(&t2.file, &t.file) {
+        return None;
+    }
+    match modern::job(&t2, &o2) {
+        Ok(_) => Some((t2, o2)),
+        Err(e) => {
+            said(&e);
+            None
+        }
+    }
+}
+
+/// One session of the watch, on target `t`: its builds until the watch
+/// ends, or the editor's settings call for another (its target and
+/// options).
+#[allow(clippy::too_many_lines)]
+fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Options) {
+    let st = ui.st;
+    let lsp = kept.lsp.clone();
     let mut job = modern::job(t, o).unwrap_or_else(|e| {
         if let Some(l) = &lsp {
             l.refuse(&e);
@@ -571,7 +672,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         .to_string_lossy()
         .trim_start_matches("./")
         .to_owned();
-    let (tx, mut rx) = mpsc::channel::<(Instant, Event)>();
+    let tx = kept.tx.clone();
+    let mut rx = kept.rx.take().expect("the events, between sessions");
     // (a terminal editor, or an unknown one: the viewer shows the place
     // instead of opening it, said with -v only: the user chose the editor
     // and knows where it runs)
@@ -583,7 +685,10 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         }
         None
     });
-    let view = if o.view {
+    // (the viewer: made by the first session, kept by the others)
+    let view: Option<View> = if std::mem::replace(&mut kept.view_made, true) {
+        kept.view.take()
+    } else if o.view {
         match View::start(editor, o.port) {
             Ok(v) => {
                 // (the diff's picker: the project's git history)
@@ -689,9 +794,10 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         std::process::exit(crate::EXIT_FAILED);
     });
     let raw = lsp.is_none() && !ui.json && keys::raw();
-    let building = Arc::new(AtomicBool::new(false));
-    let told = Arc::new(AtomicBool::new(false));
-    {
+    let building = kept.building.clone();
+    let told = kept.told.clone();
+    // (standard input read by the first session's thread, for them all)
+    if !std::mem::replace(&mut kept.reading, true) {
         let tx = tx.clone();
         let here = Here {
             ui: ui.clone(),
@@ -956,6 +1062,17 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
             }
             if let Some(l) = &lsp {
                 l.built(&b);
+                // (what phitex.savePdf copies: the PDF file, else a DVI's
+                // PDF made for the viewer)
+                let pdf = match &written {
+                    Some(p) if p.extension().is_some_and(|e| e == "pdf") => {
+                        Some(crate::lsp::Pdf::File(p.clone()))
+                    }
+                    _ => last_pdf.clone().map(crate::lsp::Pdf::Bytes),
+                };
+                if pdf.is_some() {
+                    l.set_pdf(pdf);
+                }
             }
             status.set("");
             phitex_tex::timeline::lap("watch: the viewer's PDF and its diagnostics");
@@ -1406,8 +1523,15 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         let mut why = Vec::new();
         let mut again = false;
         let mut main_changed = false;
+        // (the editor's settings: another session, where they change it)
+        let mut next = None;
         for e in events {
             match e {
+                Event::Configure(c) => {
+                    if let Some(n) = reconfigured(t, o, &c, lsp.as_deref()) {
+                        next = Some(n);
+                    }
+                }
                 Event::Key(k) => match k {
                     Key::Quit => quit(ui, &mut s),
                     Key::Rebuild => {
@@ -1594,6 +1718,10 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                                 why.push("asked in the viewer".to_owned());
                                 again = true;
                             }
+                            Applied::Cold => {
+                                why.push("asked: a cold build".to_owned());
+                                again = true;
+                            }
                             Applied::Diff(a) => diff_asks.push(a),
                             Applied::Edited(file) => {
                                 why.push(format!("{file} (editor)"));
@@ -1604,6 +1732,20 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                     }
                 }
             }
+        }
+        if let Some(n) = next {
+            // (the records this session learned stored; the next one
+            // builds cold, on what the viewer and the editor still show)
+            s.flush_records();
+            if let Some(u) = &s.updates()
+                && let Err(e) = session::compact(u)
+            {
+                ui.error(&e);
+            }
+            ui.line(&st.dim("phitex watch: the editor's settings changed: a new session"));
+            kept.rx = Some(rx);
+            kept.view = view;
+            return n;
         }
         // (a change the last build took while it ran: built already)
         // (r, or Rebuild in the viewer: built again whatever)

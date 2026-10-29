@@ -20,7 +20,11 @@
 //!   handed to the server; what it asks of the watch ([`Ask`]) is queued
 //!   and the watch woken ([`Lsp::on_ask`], [`Lsp::take_asks`]).
 //! - **The host's commands**: `phitex.openViewer` (the browser opened on
-//!   the viewer).
+//!   the viewer), `phitex.stop` (the watch ends as `q` ends it),
+//!   `phitex.savePdf` (the last PDF copied), `phitex.clearCache` and
+//!   `phitex.cacheStats` (the build cache, `cache.rs`; the package cache,
+//!   Shelf's); the settings ([`Lsp::on_configure`]) a new session where
+//!   they change it.
 //! - **End.** `exit`, or the end of standard input, ends the watch as `q`
 //!   does.
 
@@ -28,7 +32,7 @@ use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use phitex_live::lsp::{LspHost, Server, path_of};
+use phitex_live::lsp::{LspHost, Server, Settings, path_of};
 use serde_json::{Value, json};
 
 use crate::view::{Ask, Built};
@@ -74,6 +78,15 @@ fn write(out: &Mutex<std::io::Stdout>, v: &Value) {
     let _ = o.flush();
 }
 
+/// The last build's PDF, as `phitex.savePdf` copies it.
+#[derive(Clone)]
+pub enum Pdf {
+    /// The output file.
+    File(PathBuf),
+    /// A DVI build's PDF made for the viewer.
+    Bytes(Arc<[u8]>),
+}
+
 /// The watch, as the server's host: its asks queued and the watch woken.
 struct Watch {
     asks: Mutex<Vec<Ask>>,
@@ -81,6 +94,87 @@ struct Watch {
     /// The watch's directory (where its file names start).
     root: Mutex<PathBuf>,
     viewer: Mutex<Option<String>>,
+    /// The watch's end (`exit`'s, `phitex.stop`'s).
+    quit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// The settings changed: the watch told.
+    configure: Mutex<Option<Box<dyn Fn(Settings) + Send>>>,
+    pdf: Mutex<Option<Pdf>>,
+}
+
+/// The caches as `phitex.cacheStats` gives them: the build cache's and
+/// the package cache's (docs/spec-editor-protocol.md §3.3).
+pub fn cache_stats() -> Value {
+    let dir = crate::tex::cache_dir();
+    let build = crate::cache::Cache {
+        dir: dir.clone(),
+        limit: 1,
+    }
+    .stats();
+    let (hits, misses) = crate::cache::Cache::hits();
+    let packages = crate::shelf::stats();
+    let one = |scope: &str, location: String, st: crate::cache::Stats, hits: u64, misses: u64| {
+        json!({
+            "scope": scope,
+            "location": location,
+            "bytes": st.bytes,
+            "entries": st.entries,
+            "last_used": st.last_used.map(crate::cache::iso8601),
+            "hits": hits,
+            "misses": misses,
+        })
+    };
+    json!({"caches": [
+        one("build", crate::cache::home_relative(&dir), build, hits, misses),
+        one(
+            "packages",
+            crate::cache::home_relative(&packages.0),
+            packages.1,
+            packages.2,
+            packages.3,
+        ),
+    ]})
+}
+
+/// `phitex.clearCache`'s `scope` (`build`, the default; `packages`;
+/// `all`) emptied: `{freed_bytes}`.
+pub fn clear_cache(scope: &str) -> Result<Value, String> {
+    let build = || {
+        crate::cache::Cache {
+            dir: crate::tex::cache_dir(),
+            limit: 1,
+        }
+        .clear_build()
+        .map_err(|e| format!("the build cache: {e}"))
+    };
+    let freed = match scope {
+        "build" => build()?,
+        "packages" => crate::shelf::clear()?,
+        "all" => build()? + crate::shelf::clear()?,
+        s => {
+            return Err(format!(
+                "phitex.clearCache: no scope {s:?} (build, packages, all)"
+            ));
+        }
+    };
+    Ok(json!({"freed_bytes": freed}))
+}
+
+impl Watch {
+    /// The last PDF copied to `arg`'s `path` (from the watch's
+    /// directory): `{path, bytes}`.
+    fn save_pdf(&self, arg: &Value) -> Result<Value, String> {
+        let Some(to) = arg["path"].as_str().filter(|p| !p.is_empty()) else {
+            return Err("phitex.savePdf: {path} where the PDF goes".to_owned());
+        };
+        let to = lock(&self.root).join(to);
+        let bytes: Vec<u8> = match lock(&self.pdf).clone() {
+            Some(Pdf::File(p)) => std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?,
+            Some(Pdf::Bytes(b)) => b.to_vec(),
+            None => return Err("no PDF yet (a DVI build's is made for the viewer only)".to_owned()),
+        };
+        std::fs::write(&to, &bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+        Ok(json!({"path": to.display().to_string(), "bytes": bytes.len()}))
+    }
 }
 
 impl LspHost for Watch {
@@ -91,14 +185,35 @@ impl LspHost for Watch {
         }
     }
 
-    fn command(&self, name: &str, _arg: &Value) -> Option<Result<Value, String>> {
-        match name {
-            "phitex.openViewer" => Some(match lock(&self.viewer).clone() {
+    fn command(&self, name: &str, arg: &Value) -> Option<Result<Value, String>> {
+        Some(match name {
+            "phitex.openViewer" => match lock(&self.viewer).clone() {
                 Some(url) if crate::view::open_browser(&url) => Ok(json!(url)),
                 Some(url) => Err(format!("could not start a browser: open {url}")),
                 None => Err("no viewer (--no-view)".to_owned()),
-            }),
-            _ => None,
+            },
+            "phitex.stop" => {
+                let quit = lock(&self.quit).clone();
+                if let Some(q) = quit {
+                    q();
+                }
+                Ok(Value::Null)
+            }
+            "phitex.savePdf" => self.save_pdf(arg),
+            "phitex.clearCache" => clear_cache(arg["scope"].as_str().unwrap_or("build")),
+            "phitex.cacheStats" => Ok(cache_stats()),
+            _ => return None,
+        })
+    }
+
+    fn read(&self, name: &str) -> Option<String> {
+        let b = std::fs::read(lock(&self.root).join(name)).ok()?;
+        Some(String::from_utf8_lossy(&b).into_owned())
+    }
+
+    fn configure(&self, s: &Settings) {
+        if let Some(f) = lock(&self.configure).as_ref() {
+            f(s.clone());
         }
     }
 
@@ -161,6 +276,9 @@ impl Lsp {
             wake: Mutex::new(None),
             root: Mutex::new(PathBuf::new()),
             viewer: Mutex::new(None),
+            quit: Mutex::new(None),
+            configure: Mutex::new(None),
+            pdf: Mutex::new(None),
         });
         let o = out.clone();
         let server = Arc::new(Server::new(
@@ -314,6 +432,21 @@ impl Lsp {
         *lock(&self.watch.wake) = Some(wake);
     }
 
+    /// Call `f` with the settings when the editor changes them.
+    pub fn on_configure(&self, f: Box<dyn Fn(Settings) + Send>) {
+        *lock(&self.watch.configure) = Some(f);
+    }
+
+    /// The settings the editor gave so far.
+    pub fn settings(&self) -> Settings {
+        self.server.settings()
+    }
+
+    /// The last build's PDF, for `phitex.savePdf`.
+    pub fn set_pdf(&self, pdf: Option<Pdf>) {
+        *lock(&self.watch.pdf) = pdf;
+    }
+
     /// What the editor asked for since last taken.
     pub fn take_asks(&self) -> Vec<Ask> {
         std::mem::take(&mut *lock(&self.watch.asks))
@@ -363,7 +496,9 @@ impl Lsp {
 
     /// Serve the editor's messages on a thread of their own; `quit` ends
     /// the watch (`exit`, or the end of standard input).
-    pub fn serve(&self, quit: Box<dyn Fn() + Send>) {
+    pub fn serve(&self, quit: Box<dyn Fn() + Send + Sync>) {
+        let quit: Arc<dyn Fn() + Send + Sync> = Arc::from(quit);
+        *lock(&self.watch.quit) = Some(quit.clone());
         let s = self.server.clone();
         let input = lock(&self.input).take();
         let pending = std::mem::take(&mut *lock(&self.pending));

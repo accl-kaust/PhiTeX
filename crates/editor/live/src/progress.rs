@@ -105,6 +105,8 @@ struct State {
 pub struct Meter {
     state: Mutex<State>,
     listeners: Mutex<Vec<Listener>>,
+    /// Told when a package source cannot be reached ([`Meter::unreachable`]).
+    unreachable: Mutex<Vec<Box<dyn Fn(&str) + Send + Sync>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -121,6 +123,20 @@ impl Meter {
     fn tell(&self, p: &Progress) {
         for f in lock(&self.listeners).iter() {
             f(p);
+        }
+    }
+
+    /// `f` told whenever a package source cannot be reached (why).
+    pub fn on_unreachable(&self, f: Box<dyn Fn(&str) + Send + Sync>) {
+        lock(&self.unreachable).push(f);
+    }
+
+    /// A package source cannot be reached: `why` (the host's files: a
+    /// Shelf fetch that failed), told to the listeners (the editor shows
+    /// it, `phitex_live::lsp::Trouble::Unreachable`).
+    pub fn unreachable(&self, why: &str) {
+        for f in lock(&self.unreachable).iter() {
+            f(why);
         }
     }
 

@@ -311,6 +311,9 @@ pub struct Report {
     pub internal: Option<String>,
     /// The errors and warnings at their places, by file then byte.
     pub diagnostics: Vec<phitex_tex::Diagnostic>,
+    /// The format could not be had (its ini file not found): the one
+    /// error says why.
+    pub format_failed: bool,
 }
 
 /// An engine's stop said in a sentence: what gave out, without its dump
@@ -692,6 +695,7 @@ impl Session {
             wall: t0.elapsed(),
             internal,
             diagnostics: Vec::new(),
+            format_failed: false,
         };
         let mut text = self.text_now();
         phitex_tex::timeline::lap("session: the text now (copied)");
@@ -878,7 +882,13 @@ impl Session {
         self.status.set_live(None);
         match ran {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => return fail(e, None),
+            // (the format's ini file not found: the one way here)
+            Ok(Err(e)) => {
+                return Report {
+                    format_failed: true,
+                    ..fail(e, None)
+                };
+            }
             Err(e) => {
                 self.build = None;
                 self.built_text = None;
@@ -1173,6 +1183,7 @@ impl Session {
             internal,
             diagnostics,
             warnings,
+            format_failed: false,
             notes: std::iter::once(format!(
                 "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds (runs by pass {:?}), realised cp {} nodes; guesses refuted: {} claims, {} effects, {} claim siblings, {} definitions; {} nodes placed, {} freed",
                 s.nodes_run,

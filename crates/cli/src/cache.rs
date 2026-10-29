@@ -7,10 +7,13 @@
 //! cache. A size limit holds it: after each write the entries used least
 //! recently (their files' times, set on each use) go until it fits, the
 //! ones a build is using kept. `phitex clean` empties the document's part,
-//! `phitex clean --all` all of it.
+//! `phitex clean --all` all of it. `shelf/` beside them is the package
+//! cache's (`phitex-shelf`'s packs, `files = "shelf"`): not this cache's
+//! to count, evict or clear but with `--all`.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use crate::tex;
@@ -22,6 +25,22 @@ pub const DEFAULT_LIMIT: u64 = 4_000_000_000;
 pub struct Cache {
     pub dir: PathBuf,
     pub limit: u64,
+}
+
+/// The cache's reads this process, found and not ([`Cache::get`]): the
+/// formats and the records.
+static HITS: AtomicU64 = AtomicU64::new(0);
+static MISSES: AtomicU64 = AtomicU64::new(0);
+
+/// The package cache's directory in the cache's (`phitex-shelf`'s).
+pub const SHELF: &str = "shelf";
+
+/// What a cache holds: its bytes, its files, its newest use.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub bytes: u64,
+    pub entries: u64,
+    pub last_used: Option<SystemTime>,
 }
 
 /// One file of the cache: its path, size and last use.
@@ -141,7 +160,11 @@ impl Cache {
         if self.limit == 0 {
             return None;
         }
-        let b = std::fs::read(path).ok()?;
+        let Ok(b) = std::fs::read(path) else {
+            MISSES.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        HITS.fetch_add(1, Ordering::Relaxed);
         if let Ok(f) = std::fs::File::options().write(true).open(path) {
             let _ = f.set_modified(SystemTime::now());
         }
@@ -170,6 +193,7 @@ impl Cache {
 
     fn entries(&self) -> Vec<Entry> {
         let mut out = Vec::new();
+        let packages = self.dir.join(SHELF);
         let mut todo = vec![self.dir.clone()];
         while let Some(d) = todo.pop() {
             let Ok(rd) = std::fs::read_dir(&d) else {
@@ -178,7 +202,10 @@ impl Cache {
             for e in rd.flatten() {
                 let Ok(m) = e.metadata() else { continue };
                 if m.is_dir() {
-                    todo.push(e.path());
+                    // (the package cache's: not this one's)
+                    if e.path() != packages {
+                        todo.push(e.path());
+                    }
                 } else {
                     out.push(Entry {
                         path: e.path(),
@@ -242,6 +269,46 @@ impl Cache {
         self.remove(&self.dir)
     }
 
+    /// The formats and the records emptied (the package cache kept); the
+    /// bytes freed.
+    pub fn clear_build(&self) -> io::Result<u64> {
+        let mut freed = 0;
+        let rd = match std::fs::read_dir(&self.dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        for e in rd.flatten() {
+            if e.file_name() == SHELF {
+                continue;
+            }
+            let p = e.path();
+            if p.is_dir() {
+                freed += self.remove(&p)?;
+            } else {
+                let n = e.metadata().map_or(0, |m| m.len());
+                std::fs::remove_file(&p)?;
+                freed += n;
+            }
+        }
+        Ok(freed)
+    }
+
+    /// What it holds, the package cache left out.
+    pub fn stats(&self) -> Stats {
+        let es = self.entries();
+        Stats {
+            bytes: es.iter().map(|e| e.size).sum(),
+            entries: es.len() as u64,
+            last_used: es.iter().map(|e| e.used).max(),
+        }
+    }
+
+    /// Its reads this process: found, not found.
+    pub fn hits() -> (u64, u64) {
+        (HITS.load(Ordering::Relaxed), MISSES.load(Ordering::Relaxed))
+    }
+
     /// The line after a build or a watch: what the cache holds (how to
     /// empty it is the caller's, [`Cache::EMPTY_IT`]); `None` when the
     /// cache is off.
@@ -269,6 +336,31 @@ pub fn home_relative(p: &Path) -> String {
     }
 }
 
+/// `t` in ISO 8601, UTC, to the second (`2026-10-29T14:03:11Z`).
+pub fn iso8601(t: SystemTime) -> String {
+    let secs = t
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    // (days since 1970-01-01 as a civil date: Howard Hinnant's
+    // `civil_from_days`)
+    let z = i64::try_from(days).unwrap_or(0) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem / 60 % 60,
+        rem % 60
+    )
+}
+
 /// Bytes for people: `0 B`, `12.3 MB`, `4.0 GB`.
 pub fn size(b: u64) -> String {
     bytesize::ByteSize::b(b).display().si().to_string()
@@ -283,6 +375,34 @@ mod tests {
             std::env::temp_dir().join(format!("phitex-cache-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    #[test]
+    fn iso_dates() {
+        let at = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(s);
+        assert_eq!(iso8601(at(0)), "1970-01-01T00:00:00Z");
+        assert_eq!(iso8601(at(951_782_400)), "2000-02-29T00:00:00Z");
+        assert_eq!(iso8601(at(1_793_286_191)), "2026-10-29T15:03:11Z");
+    }
+
+    /// The build cache's stats and clearing leave the package cache
+    /// (`shelf/`) alone.
+    #[test]
+    fn the_package_cache_is_not_the_build_caches() {
+        let c = Cache {
+            dir: scratch("shelf"),
+            limit: 1000,
+        };
+        c.put(&c.dir.join("formats").join("f"), &[0; 10], &[]).unwrap();
+        std::fs::create_dir_all(c.dir.join(SHELF).join("tl")).unwrap();
+        std::fs::write(c.dir.join(SHELF).join("tl").join("p.pack"), [0; 7]).unwrap();
+        let st = c.stats();
+        assert_eq!((st.bytes, st.entries), (10, 1));
+        assert!(st.last_used.is_some());
+        assert_eq!(c.clear_build().unwrap(), 10);
+        assert_eq!(c.stats().entries, 0);
+        assert!(c.dir.join(SHELF).join("tl").join("p.pack").exists());
+        let _ = c.clear_all();
     }
 
     #[test]

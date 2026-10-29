@@ -51,7 +51,15 @@ use crate::progress::{Phase, Progress};
 use crate::view::{Ask, Built};
 
 /// The commands the server runs (`workspace/executeCommand`).
-pub const COMMANDS: [&str; 3] = ["phitex.openViewer", "phitex.rebuild", "phitex.showOnPage"];
+pub const COMMANDS: [&str; 7] = [
+    "phitex.openViewer",
+    "phitex.rebuild",
+    "phitex.showOnPage",
+    "phitex.stop",
+    "phitex.savePdf",
+    "phitex.clearCache",
+    "phitex.cacheStats",
+];
 
 /// A build later than the first shows its progress once it has run this
 /// long (typing never flickers).
@@ -86,8 +94,83 @@ pub trait LspHost: Send + Sync {
         true
     }
 
+    /// The text of the project's file `name` (an outline asked of a file
+    /// the editor has not opened); none: not readable.
+    fn read(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    /// The settings changed ([`Settings`]: those the editor gave, the
+    /// rest none): the host applies them (a new session where the
+    /// threads, the main file or the files' source differ).
+    fn configure(&self, _s: &Settings) {}
+
     /// `phitex/status`'s engine: `native` or `wasm`.
     fn engine(&self) -> &'static str;
+}
+
+/// The editor's settings, section `phitex` (docs/spec-editor-protocol.md
+/// §3.5): none where it gave none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Settings {
+    /// The engine's threads (none, 0 or null: not given).
+    pub threads: Option<usize>,
+    /// The main file, from the root.
+    pub main: Option<String>,
+    /// When the client sends `phitex/cursor` (`cursor`, `selection`,
+    /// `dblclick`): the client's.
+    pub follow: Option<String>,
+    /// Where TeX's files come from: `texlive` or `shelf`.
+    pub files: Option<String>,
+}
+
+impl Settings {
+    /// The settings of `v` (`{threads, main, follow, files}`), values of
+    /// other types ignored.
+    pub fn of(v: &Value) -> Settings {
+        let text = |k: &str| v[k].as_str().filter(|t| !t.is_empty()).map(str::to_owned);
+        Settings {
+            threads: v["threads"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .filter(|&n| n > 0),
+            main: text("main"),
+            follow: text("follow")
+                .filter(|f| ["cursor", "selection", "dblclick"].contains(&f.as_str())),
+            files: text("files").filter(|f| f == "texlive" || f == "shelf"),
+        }
+    }
+
+    /// These settings with `newer`'s given ones over them.
+    pub fn with(&self, newer: &Settings) -> Settings {
+        Settings {
+            threads: newer.threads.or(self.threads),
+            main: newer.main.clone().or_else(|| self.main.clone()),
+            follow: newer.follow.clone().or_else(|| self.follow.clone()),
+            files: newer.files.clone().or_else(|| self.files.clone()),
+        }
+    }
+}
+
+/// What a button of a `window/showMessageRequest` does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    /// A build ([`Ask::Rebuild`]).
+    Build,
+    /// A cold build ([`Ask::Cold`]).
+    Cold,
+}
+
+/// What needs the user, said once until it changes
+/// ([`Server::trouble`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Trouble {
+    /// The engine failed (a panic, its stop).
+    Engine,
+    /// The format could not be had.
+    Format,
+    /// A package source cannot be reached (Shelf).
+    Unreachable,
 }
 
 /// `p` as a `file:` URI (its bytes past the unreserved ones and `/`
@@ -207,6 +290,16 @@ struct State {
     /// The last `phitex/status` state sent.
     state: &'static str,
     viewer: Option<String>,
+    /// Whether the client answers `workspace/configuration`.
+    configuration: bool,
+    /// The settings given (`initializationOptions`, then the client's).
+    settings: Settings,
+    /// The server's requests still unanswered that want their answer:
+    /// `workspace/configuration`'s (none) or a message's buttons.
+    pending: HashMap<String, Option<Vec<(String, Action)>>>,
+    /// What was last said of each trouble (said again only when it
+    /// changes).
+    said: HashMap<Trouble, String>,
 }
 
 /// The language server.
@@ -292,6 +385,10 @@ impl Server {
             show_document: caps["showDocument"]["support"].as_bool().unwrap_or(false),
             work_done: caps["workDoneProgress"].as_bool().unwrap_or(false),
         };
+        st.configuration = p["capabilities"]["workspace"]["configuration"]
+            .as_bool()
+            .unwrap_or(false);
+        st.settings = Settings::of(&p["initializationOptions"]);
         if let Some(r) = root {
             st.root = r;
         }
@@ -310,6 +407,7 @@ impl Server {
                     "positionEncoding": "utf-16",
                     "textDocumentSync": {"openClose": true, "change": 2, "save": {"includeText": false}},
                     "executeCommandProvider": {"commands": COMMANDS},
+                    "documentSymbolProvider": true,
                 },
                 "serverInfo": {"name": "phitex", "version": env!("CARGO_PKG_VERSION")},
             }),
@@ -571,13 +669,20 @@ impl Server {
             ..Facts::default()
         };
         let mut engine_failed = false;
+        let (mut engine, mut format) = (None, None);
         for d in &b.diagnostics {
             match d["severity"].as_str() {
                 Some("error") => facts.errors += 1,
                 Some("warning") => facts.warnings += 1,
                 _ => {}
             }
-            engine_failed |= d["code"] == "engine";
+            let message = d["message"].as_str().unwrap_or("").to_owned();
+            if d["code"] == "engine" {
+                engine_failed = true;
+                engine.get_or_insert(message);
+            } else if d["code"] == "format" {
+                format.get_or_insert(message);
+            }
             let file = d["file"].as_str().unwrap_or(&main);
             by.entry(self.uri(file))
                 .or_default()
@@ -630,6 +735,12 @@ impl Server {
         } else {
             "ready"
         });
+        for (t, m) in [(Trouble::Engine, engine), (Trouble::Format, format)] {
+            match m {
+                Some(m) => self.trouble(t, &m),
+                None => self.trouble_over(t),
+            }
+        }
     }
 
     /// The editor shows `file` (from the root) at `line` and character
@@ -658,6 +769,103 @@ impl Server {
         true
     }
 
+    /// The settings as given so far (`initializationOptions`, then the
+    /// client's).
+    pub fn settings(&self) -> Settings {
+        lock(&self.st).settings.clone()
+    }
+
+    /// `workspace/configuration` asked for section `phitex`, where the
+    /// client answers it.
+    fn ask_configuration(&self) {
+        if !lock(&self.st).configuration {
+            return;
+        }
+        let id = self.request(
+            "workspace/configuration",
+            json!({"items": [{"section": "phitex"}]}),
+        );
+        lock(&self.st).pending.insert(id, None);
+    }
+
+    /// The client's settings `given`, over those so far: the host told
+    /// when they changed.
+    fn configure(&self, given: &Settings) {
+        let now = {
+            let mut st = lock(&self.st);
+            let now = st.settings.with(given);
+            if now == st.settings {
+                return;
+            }
+            st.settings = now.clone();
+            now
+        };
+        self.host.configure(&now);
+    }
+
+    /// The client's answer `result` to our request `id`.
+    fn answered(&self, id: &str, result: &Value) {
+        let Some(what) = lock(&self.st).pending.remove(id) else {
+            return;
+        };
+        match what {
+            // (workspace/configuration's: one item, ours)
+            None => {
+                if result[0].is_object() {
+                    self.configure(&Settings::of(&result[0]));
+                }
+            }
+            Some(buttons) => {
+                let title = result["title"].as_str().unwrap_or("");
+                match buttons.iter().find(|(t, _)| t == title).map(|b| b.1) {
+                    Some(Action::Build) => self.host.ask(Ask::Rebuild),
+                    Some(Action::Cold) => self.host.ask(Ask::Cold),
+                    None => {}
+                }
+            }
+        }
+    }
+
+    /// `trouble` said to the user (`window/showMessageRequest`, with what
+    /// helps as its buttons), unless the same was said last.
+    pub fn trouble(&self, trouble: Trouble, message: &str) {
+        let (kind, text, buttons) = match trouble {
+            Trouble::Engine => (
+                1,
+                format!("PhiTeX: the engine failed: {message}"),
+                vec![("Rebuild".to_owned(), Action::Cold)],
+            ),
+            Trouble::Format => (
+                1,
+                format!("PhiTeX: the format did not build: {message}"),
+                vec![("Rebuild".to_owned(), Action::Cold)],
+            ),
+            Trouble::Unreachable => (
+                2,
+                format!("PhiTeX: can't reach the package server: {message}"),
+                vec![("Retry".to_owned(), Action::Build)],
+            ),
+        };
+        {
+            let mut st = lock(&self.st);
+            if st.said.get(&trouble) == Some(&text) {
+                return;
+            }
+            st.said.insert(trouble, text.clone());
+        }
+        let actions: Vec<Value> = buttons.iter().map(|(t, _)| json!({"title": t})).collect();
+        let id = self.request(
+            "window/showMessageRequest",
+            json!({"type": kind, "message": text, "actions": actions}),
+        );
+        lock(&self.st).pending.insert(id, Some(buttons));
+    }
+
+    /// `trouble` is over (a build went well): said again if it comes back.
+    fn trouble_over(&self, trouble: Trouble) {
+        lock(&self.st).said.remove(&trouble);
+    }
+
     /// One message from the editor handled; false: it said to end
     /// (`exit`).
     pub fn handle(&self, m: &Value) -> bool {
@@ -665,13 +873,40 @@ impl Server {
         let id = m.get("id");
         let p = &m["params"];
         match method {
-            // (a response to one of ours, or a notification of no interest)
-            ""
-            | "$/cancelRequest"
+            // (a response to one of ours)
+            "" => {
+                if let Some(id) = id.and_then(Value::as_str) {
+                    self.answered(id, &m["result"]);
+                }
+            }
+            // (notifications of no interest)
+            "$/cancelRequest"
             | "$/setTrace"
             | "textDocument/didSave"
-            | "workspace/didChangeConfiguration"
             | "workspace/didChangeWatchedFiles" => {}
+            "workspace/didChangeConfiguration" => {
+                let given = &p["settings"]["phitex"];
+                if given.is_object() {
+                    self.configure(&Settings::of(given));
+                } else {
+                    self.ask_configuration();
+                }
+            }
+            "textDocument/documentSymbol" => {
+                if let Some(id) = id {
+                    let text = p["textDocument"]["uri"]
+                        .as_str()
+                        .and_then(|u| self.name(u))
+                        .and_then(|f| {
+                            let open = lock(&self.st).docs.get(&f).cloned();
+                            open.or_else(|| self.host.read(&f))
+                        });
+                    match text {
+                        Some(t) => self.reply(id, Value::Array(outline(&t))),
+                        None => self.reply(id, Value::Null),
+                    }
+                }
+            }
             "initialize" => {
                 self.initialize(m);
                 self.answer_init();
@@ -681,6 +916,7 @@ impl Server {
                 if starting {
                     self.status("starting");
                 }
+                self.ask_configuration();
             }
             "exit" => return false,
             "shutdown" => {
@@ -770,8 +1006,15 @@ impl Server {
         let arg = &p["arguments"][0];
         match name {
             "phitex.rebuild" => {
-                self.host.ask(Ask::Rebuild);
+                self.host.ask(Ask::Cold);
                 self.reply(id, Value::Null);
+            }
+            // (said before the host ends: a client tells a stop from a
+            // crash by it)
+            "phitex.stop" => {
+                self.reply(id, Value::Null);
+                self.status("stopped");
+                self.host.command(name, arg);
             }
             "phitex.showOnPage" => match self.place(arg) {
                 Some((file, line, col)) => {
@@ -791,6 +1034,206 @@ impl Server {
             },
         }
     }
+}
+
+/// The sectioning commands, their levels and symbol kinds
+/// (`Namespace` 3 for parts and chapters, `Module` 2 below).
+const HEADINGS: [(&str, usize, u8); 7] = [
+    ("part", 0, 3),
+    ("chapter", 1, 3),
+    ("section", 2, 2),
+    ("subsection", 3, 2),
+    ("subsubsection", 4, 2),
+    ("paragraph", 5, 2),
+    ("subparagraph", 6, 2),
+];
+
+/// What the outline finds in a text: a heading (its level, kind, title)
+/// or a label, from byte `start` to `end` (the command and its argument).
+struct Found {
+    heading: Option<(usize, u8)>,
+    name: String,
+    start: usize,
+    end: usize,
+}
+
+/// The braced argument at byte `at` of `t` (spaces before it passed
+/// over): its text and the byte after it.
+fn braced(t: &[u8], mut at: usize) -> Option<(String, usize)> {
+    while at < t.len() && (t[at] == b' ' || t[at] == b'\t' || t[at] == b'\n') {
+        at += 1;
+    }
+    if t.get(at) != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let from = at + 1;
+    while at < t.len() {
+        match t[at] {
+            b'\\' => at += 1,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let inner = String::from_utf8_lossy(&t[from..at]);
+                    return Some((
+                        inner.split_whitespace().collect::<Vec<_>>().join(" "),
+                        at + 1,
+                    ));
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
+/// The bracketed optional argument at byte `at` of `t`, passed over: the
+/// byte after it (`at` if there is none).
+fn past_optional(t: &[u8], at: usize) -> usize {
+    if t.get(at) != Some(&b'[') {
+        return at;
+    }
+    let mut depth = 0usize;
+    let mut i = at;
+    while i < t.len() {
+        match t[i] {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            b'{' => {
+                if let Some((_, after)) = braced(t, i) {
+                    i = after;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    at
+}
+
+/// A text's headings and labels in order, its comments passed over.
+fn found(text: &str) -> Vec<Found> {
+    let t = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        match t[i] {
+            b'%' => {
+                while i < t.len() && t[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'\\' => {
+                let from = i;
+                let mut j = i + 1;
+                while j < t.len() && t[j].is_ascii_alphabetic() {
+                    j += 1;
+                }
+                let word = &text[i + 1..j];
+                if word.is_empty() {
+                    // (a control symbol: `\%`, `\\`: passed over whole)
+                    i = j + 1;
+                    continue;
+                }
+                let heading = HEADINGS.iter().find(|h| h.0 == word);
+                if heading.is_some() || word == "label" {
+                    let mut k = j;
+                    if heading.is_some() && t.get(k) == Some(&b'*') {
+                        k += 1;
+                    }
+                    let k = if heading.is_some() {
+                        past_optional(t, k)
+                    } else {
+                        k
+                    };
+                    if let Some((name, end)) = braced(t, k) {
+                        out.push(Found {
+                            heading: heading.map(|h| (h.1, h.2)),
+                            name: if name.is_empty() {
+                                format!("\\{word}")
+                            } else {
+                                name
+                            },
+                            start: from,
+                            end,
+                        });
+                        i = end;
+                        continue;
+                    }
+                }
+                i = j;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// A text's outline as LSP `DocumentSymbol`s (docs/spec-editor-protocol.md
+/// §3.4): its headings, each holding the headings below it and its
+/// labels, its range to the next heading of its level or above.
+pub fn outline(text: &str) -> Vec<Value> {
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(k, _)| k + 1))
+        .collect();
+    let pos = |b: usize| {
+        let line = starts.partition_point(|&s| s <= b) - 1;
+        let col: usize = text[starts[line]..b].encode_utf16().count();
+        json!({"line": line, "character": col})
+    };
+    let symbol = |f: &Found, end: usize| {
+        let kind = f.heading.map_or(14, |h| h.1);
+        json!({
+            "name": f.name,
+            "kind": kind,
+            "range": {"start": pos(f.start), "end": pos(end)},
+            "selectionRange": {"start": pos(f.start), "end": pos(f.end)},
+            "children": [],
+        })
+    };
+    // (the headings open, innermost last: each with its level and symbol)
+    let mut open: Vec<(usize, Value)> = Vec::new();
+    let mut top: Vec<Value> = Vec::new();
+    let close = |open: &mut Vec<(usize, Value)>, top: &mut Vec<Value>, end: usize| {
+        if let Some((_, mut v)) = open.pop() {
+            v["range"]["end"] = pos(end);
+            match open.last_mut() {
+                Some((_, parent)) => {
+                    if let Some(c) = parent["children"].as_array_mut() {
+                        c.push(v);
+                    }
+                }
+                None => top.push(v),
+            }
+        }
+    };
+    for f in found(text) {
+        let v = symbol(&f, f.end);
+        if let Some((level, _)) = f.heading {
+            while open.last().is_some_and(|o| o.0 >= level) {
+                close(&mut open, &mut top, f.start);
+            }
+            open.push((level, v));
+        } else if let Some((_, parent)) = open.last_mut() {
+            if let Some(c) = parent["children"].as_array_mut() {
+                c.push(v);
+            }
+        } else {
+            top.push(v);
+        }
+    }
+    while !open.is_empty() {
+        close(&mut open, &mut top, text.len());
+    }
+    top
 }
 
 /// A viewer problem (`watch::diagnostics`) as an LSP diagnostic: its
@@ -1061,6 +1504,242 @@ mod tests {
                 "textDocument/publishDiagnostics",
                 "phitex/status"
             ]
+        );
+    }
+
+    /// The outline of a text: parts, sections and below nested by level,
+    /// labels under their heading, starred and short-titled headings,
+    /// comments passed over, ranges to the next heading at or above the
+    /// level, positions in UTF-16.
+    #[test]
+    fn outline_nests_headings_and_labels() {
+        let t = "\\label{top}\n\\section{Intro}\\label{s:intro}\n% \\section{Gone}\n\\subsection*[short]{A {nested} title}\ntext 😀\n\\section{Two}\n\\paragraph{P}\n";
+        let o = outline(t);
+        let names = |v: &Value| v["name"].as_str().unwrap_or("").to_owned();
+        assert_eq!(
+            o.iter().map(names).collect::<Vec<_>>(),
+            ["top", "Intro", "Two"]
+        );
+        assert_eq!(o[0]["kind"], 14);
+        let intro = &o[1];
+        assert_eq!(intro["kind"], 2);
+        assert_eq!(
+            intro["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(names)
+                .collect::<Vec<_>>(),
+            ["s:intro", "A {nested} title"]
+        );
+        assert_eq!(intro["range"]["start"], json!({"line": 1, "character": 0}));
+        assert_eq!(intro["range"]["end"], json!({"line": 5, "character": 0}));
+        assert_eq!(
+            intro["selectionRange"]["end"],
+            json!({"line": 1, "character": 15})
+        );
+        let sub = &intro["children"][1];
+        assert_eq!(sub["range"]["end"], json!({"line": 5, "character": 0}));
+        let two = &o[2];
+        assert_eq!(two["children"][0]["name"], "P");
+        assert_eq!(two["range"]["end"], json!({"line": 7, "character": 0}));
+        assert_eq!(outline("no headings at all"), Vec::<Value>::new());
+    }
+
+    /// `textDocument/documentSymbol` answers the open buffer's outline
+    /// (the capability advertised).
+    #[test]
+    fn document_symbols_of_the_buffer() {
+        let (s, _, sent) = server();
+        init(&s, "file:///p", false);
+        assert_eq!(
+            lock(&sent)[0]["result"]["capabilities"]["documentSymbolProvider"],
+            true
+        );
+        s.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///p/a.tex", "text": "\\chapter{One}\n\\section{Sub}\n"}}}));
+        s.handle(&json!({"jsonrpc": "2.0", "id": 4, "method": "textDocument/documentSymbol", "params": {"textDocument": {"uri": "file:///p/a.tex"}}}));
+        let r = lock(&sent).last().unwrap().clone();
+        assert_eq!(r["id"], 4);
+        assert_eq!(r["result"][0]["name"], "One");
+        assert_eq!(r["result"][0]["kind"], 3);
+        assert_eq!(r["result"][0]["children"][0]["name"], "Sub");
+    }
+
+    /// A host that runs every command, keeping them, and its settings.
+    #[derive(Default)]
+    struct Runs {
+        asks: Mutex<Vec<Ask>>,
+        ran: Mutex<Vec<(String, Value)>>,
+        settings: Mutex<Vec<Settings>>,
+    }
+
+    impl LspHost for Runs {
+        fn ask(&self, a: Ask) {
+            lock(&self.asks).push(a);
+        }
+        fn command(&self, name: &str, arg: &Value) -> Option<Result<Value, String>> {
+            lock(&self.ran).push((name.to_owned(), arg.clone()));
+            match name {
+                "phitex.clearCache" => Some(Ok(json!({"freed_bytes": 12}))),
+                "phitex.stop" => Some(Ok(Value::Null)),
+                _ => None,
+            }
+        }
+        fn configure(&self, s: &Settings) {
+            lock(&self.settings).push(s.clone());
+        }
+        fn engine(&self) -> &'static str {
+            "native"
+        }
+    }
+
+    fn running() -> (Server, Arc<Runs>, Arc<Mutex<Vec<Value>>>) {
+        let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let s = sent.clone();
+        let host = Arc::new(Runs::default());
+        let server = Server::new(Box::new(move |v| lock(&s).push(v.clone())), host.clone());
+        (server, host, sent)
+    }
+
+    fn execute(s: &Server, id: u64, command: &str, args: Value) {
+        s.handle(
+            &json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand",
+            "params": {"command": command, "arguments": args}}),
+        );
+    }
+
+    /// The commands: every one advertised; rebuild a cold build; stop
+    /// answered and `stopped` said before the host ends; the host's
+    /// answered with its result; one it has not, `-32601`.
+    #[test]
+    fn commands() {
+        let (s, host, sent) = running();
+        init(&s, "file:///p", false);
+        let caps =
+            lock(&sent)[0]["result"]["capabilities"]["executeCommandProvider"]["commands"].clone();
+        for c in [
+            "phitex.stop",
+            "phitex.rebuild",
+            "phitex.savePdf",
+            "phitex.clearCache",
+            "phitex.cacheStats",
+            "phitex.openViewer",
+            "phitex.showOnPage",
+        ] {
+            assert!(caps.as_array().unwrap().contains(&json!(c)), "{c}: {caps}");
+        }
+        lock(&sent).clear();
+        execute(&s, 2, "phitex.rebuild", json!([]));
+        assert_eq!(*lock(&host.asks), [Ask::Cold]);
+        execute(&s, 3, "phitex.clearCache", json!([{"scope": "packages"}]));
+        assert_eq!(
+            lock(&sent).last().unwrap()["result"],
+            json!({"freed_bytes": 12})
+        );
+        assert_eq!(
+            lock(&host.ran)[0],
+            ("phitex.clearCache".to_owned(), json!({"scope": "packages"}))
+        );
+        execute(&s, 4, "phitex.cacheStats", json!([]));
+        assert_eq!(lock(&sent).last().unwrap()["error"]["code"], -32601);
+        lock(&sent).clear();
+        execute(&s, 5, "phitex.stop", json!([]));
+        let got = lock(&sent).clone();
+        assert_eq!(got[0]["id"], 5);
+        assert_eq!(got[1]["params"]["state"], "stopped");
+        assert_eq!(lock(&host.ran).last().unwrap().0, "phitex.stop");
+    }
+
+    /// The settings: `initializationOptions` first, the client's answer to
+    /// `workspace/configuration` over them (the host told what changed),
+    /// a change notification with settings applied at once, one without
+    /// asked again.
+    #[test]
+    fn settings_from_the_client() {
+        let (s, host, sent) = running();
+        s.handle(
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "rootUri": "file:///p",
+                "capabilities": {"workspace": {"configuration": true}},
+                "initializationOptions": {"main": "paper.tex", "threads": 4},
+            }}),
+        );
+        assert_eq!(s.settings().main.as_deref(), Some("paper.tex"));
+        assert_eq!(s.settings().threads, Some(4));
+        s.handle(&json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
+        let ask = lock(&sent)
+            .iter()
+            .find(|m| m["method"] == "workspace/configuration")
+            .cloned()
+            .expect("asked");
+        assert_eq!(ask["params"]["items"][0]["section"], "phitex");
+        s.handle(&json!({"jsonrpc": "2.0", "id": ask["id"], "result": [{"threads": null, "main": null, "follow": "selection", "files": "shelf"}]}));
+        let told = lock(&host.settings).clone();
+        assert_eq!(told.len(), 1);
+        assert_eq!(
+            told[0],
+            Settings {
+                threads: Some(4),
+                main: Some("paper.tex".into()),
+                follow: Some("selection".into()),
+                files: Some("shelf".into())
+            }
+        );
+        s.handle(&json!({"jsonrpc": "2.0", "method": "workspace/didChangeConfiguration", "params": {"settings": {"phitex": {"threads": 2}}}}));
+        assert_eq!(lock(&host.settings).last().unwrap().threads, Some(2));
+        // (the same again: nothing told)
+        s.handle(&json!({"jsonrpc": "2.0", "method": "workspace/didChangeConfiguration", "params": {"settings": {"phitex": {"threads": 2}}}}));
+        assert_eq!(lock(&host.settings).len(), 2);
+        lock(&sent).clear();
+        s.handle(&json!({"jsonrpc": "2.0", "method": "workspace/didChangeConfiguration", "params": {"settings": null}}));
+        assert_eq!(lock(&sent)[0]["method"], "workspace/configuration");
+    }
+
+    /// A trouble said once until it changes, with its buttons; the
+    /// button's answer acted on; an engine failure is one, and said again
+    /// after a good build.
+    #[test]
+    fn troubles_said_once_with_their_actions() {
+        let (s, host, sent) = running();
+        init(&s, "file:///p", false);
+        lock(&sent).clear();
+        s.trouble(Trouble::Unreachable, "dns");
+        s.trouble(Trouble::Unreachable, "dns");
+        let got = lock(&sent).clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["method"], "window/showMessageRequest");
+        assert_eq!(got[0]["params"]["type"], 2);
+        assert_eq!(got[0]["params"]["actions"], json!([{"title": "Retry"}]));
+        s.handle(&json!({"jsonrpc": "2.0", "id": got[0]["id"], "result": {"title": "Retry"}}));
+        assert_eq!(*lock(&host.asks), [Ask::Rebuild]);
+        let mut b = built(0, 1);
+        b.diagnostics = vec![
+            json!({"severity": "error", "code": "engine", "message": "it ran past its time limit"}),
+        ];
+        lock(&sent).clear();
+        s.building();
+        s.built(&b);
+        s.built(&b);
+        let asks: Vec<Value> = lock(&sent)
+            .iter()
+            .filter(|m| m["method"] == "window/showMessageRequest")
+            .cloned()
+            .collect();
+        assert_eq!(asks.len(), 1, "once");
+        assert_eq!(
+            asks[0]["params"]["message"],
+            "PhiTeX: the engine failed: it ran past its time limit"
+        );
+        s.handle(&json!({"jsonrpc": "2.0", "id": asks[0]["id"], "result": {"title": "Rebuild"}}));
+        assert_eq!(lock(&host.asks).last(), Some(&Ask::Cold));
+        s.built(&built(1, 0));
+        lock(&sent).clear();
+        s.built(&b);
+        assert!(
+            lock(&sent)
+                .iter()
+                .any(|m| m["method"] == "window/showMessageRequest"),
+            "said again"
         );
     }
 }

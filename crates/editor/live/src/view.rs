@@ -99,6 +99,9 @@ pub struct OriginsChanged {
 pub enum Ask {
     /// Build again (the console's Rebuild).
     Rebuild,
+    /// Build again from nothing: the session's build dropped, its format
+    /// kept (the editor's `phitex.rebuild`).
+    Cold,
     /// A change reached the screen this long after it was made.
     Painted(u64),
     /// File `file`'s text is the editor's buffer from now on.
@@ -235,6 +238,12 @@ impl Viewer {
     /// The project's files read by `read` (a `source` place's line).
     pub fn on_read(&self, read: Box<dyn Fn(&str) -> Option<Vec<u8>> + Send>) {
         *lock(&self.read) = Some(read);
+    }
+
+    /// The bytes of the project's file `name`, as the host's `read` gives
+    /// them (none: no such file, or no `read`).
+    pub fn file(&self, name: &str) -> Option<Vec<u8>> {
+        lock(&self.read).as_ref().and_then(|r| r(name))
     }
 
     /// Page `k` of the PDF shown ([`Viewer::pdf`]) at `scale` pixels a

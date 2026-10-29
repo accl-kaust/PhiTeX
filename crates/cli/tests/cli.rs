@@ -1235,6 +1235,161 @@ fn watch_lsp_progress() {
     assert!(status.success(), "the watch ended with {status}");
 }
 
+/// `phitex watch --lsp`'s editor features (docs/spec-editor-protocol.md
+/// §3): the commands advertised; the settings asked for after
+/// `initialized`; `documentSymbol` of a file not opened (read from
+/// disk); `savePdf` (a DVI build's PDF, made for the viewer);
+/// `cacheStats` and `clearCache`; `rebuild` a cold build; a settings
+/// change that changes the threads a new session, the viewer's address
+/// kept; `stop` said and the watch ended cleanly.
+#[test]
+#[allow(clippy::too_many_lines, reason = "one editor's session, in order")]
+fn watch_lsp_commands() {
+    use serde_json::json;
+    let _one = one();
+    let text = plain() + "Alpha.\\vfill\\eject Bravo.\\bye\n";
+    let dir = scratch("watch-lsp-commands");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the document");
+    std::fs::write(
+        dir.join("notes.tex"),
+        "\\section{One}\\label{s:one}\n\\subsection{Two}\n",
+    )
+    .expect("a file not built");
+    let root = dir.canonicalize().expect("the directory");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--lsp", "--ini", "--etex", "-j", "4", "doc.tex"])
+        .env("XDG_RUNTIME_DIR", &dir)
+        .env("PHITEX_CACHE_DIR", dir.join("cache"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut to = child.stdin.take().expect("its input");
+    let rx = lsp_messages(child.stdout.take().expect("its output"));
+    let mut seen = Vec::new();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null,
+            "rootUri": format!("file://{}", root.display()),
+            "capabilities": {"workspace": {"configuration": true}},
+        }}),
+    );
+    let init = lsp_until(&rx, &mut seen, |m| m["id"] == 1);
+    let caps = &init["result"]["capabilities"];
+    assert_eq!(caps["documentSymbolProvider"], true, "{init}");
+    for c in [
+        "phitex.stop",
+        "phitex.rebuild",
+        "phitex.savePdf",
+        "phitex.clearCache",
+        "phitex.cacheStats",
+    ] {
+        assert!(
+            caps["executeCommandProvider"]["commands"]
+                .as_array()
+                .is_some_and(|a| a.contains(&json!(c))),
+            "{c}: {init}"
+        );
+    }
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    );
+    let conf = lsp_until(&rx, &mut seen, |m| m["method"] == "workspace/configuration");
+    assert_eq!(conf["params"]["items"][0]["section"], "phitex", "{conf}");
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": conf["id"], "result": [{"threads": null, "main": null, "follow": "cursor", "files": null}]}),
+    );
+    let ready = |m: &serde_json::Value| m["method"] == "phitex/status" && m["params"]["state"] == "ready";
+    lsp_until(&rx, &mut seen, ready);
+    let url = seen
+        .iter()
+        .find_map(|m| {
+            let t = m["params"]["message"].as_str()?;
+            Some(t[t.find("http://")?..].split_whitespace().next()?.to_owned())
+        })
+        .expect("the viewer's address");
+    // (the outline of a file not opened)
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "textDocument/documentSymbol", "params": {
+            "textDocument": {"uri": format!("file://{}/notes.tex", root.display())}}}),
+    );
+    let sym = lsp_until(&rx, &mut seen, |m| m["id"] == 2);
+    assert_eq!(sym["result"][0]["name"], "One", "{sym}");
+    assert_eq!(sym["result"][0]["children"][0]["name"], "s:one", "{sym}");
+    assert_eq!(sym["result"][0]["children"][1]["name"], "Two", "{sym}");
+    let exec = |to: &mut std::process::ChildStdin, id: u64, c: &str, args: serde_json::Value| {
+        lsp_send(
+            to,
+            &json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand",
+                "params": {"command": c, "arguments": args}}),
+        );
+    };
+    exec(&mut to, 3, "phitex.savePdf", json!([{"path": "saved.pdf"}]));
+    let saved = lsp_until(&rx, &mut seen, |m| m["id"] == 3);
+    assert!(saved["result"]["bytes"].as_u64() > Some(0), "{saved}");
+    let pdf = std::fs::read(dir.join("saved.pdf")).expect("the PDF saved");
+    assert!(pdf.starts_with(b"%PDF-"), "a PDF");
+    exec(&mut to, 4, "phitex.cacheStats", json!([]));
+    let held_now = lsp_until(&rx, &mut seen, |m| m["id"] == 4);
+    let caches = &held_now["result"]["caches"];
+    assert_eq!(caches[0]["scope"], "build", "{held_now}");
+    assert_eq!(caches[1]["scope"], "packages", "{held_now}");
+    for k in ["location", "bytes", "entries", "last_used", "hits", "misses"] {
+        assert!(caches[0].get(k).is_some(), "{k}: {held_now}");
+    }
+    let held = caches[0]["bytes"].as_u64().unwrap_or(0);
+    exec(&mut to, 5, "phitex.clearCache", json!([{"scope": "build"}]));
+    let cleared = lsp_until(&rx, &mut seen, |m| m["id"] == 5);
+    assert_eq!(cleared["result"]["freed_bytes"], held, "{cleared}");
+    exec(&mut to, 6, "phitex.clearCache", json!([{"scope": "nothing"}]));
+    let bad = lsp_until(&rx, &mut seen, |m| m["id"] == 6);
+    assert_eq!(bad["error"]["code"], -32603, "{bad}");
+    // (a cold build, asked)
+    seen.clear();
+    exec(&mut to, 7, "phitex.rebuild", json!([]));
+    lsp_until(&rx, &mut seen, ready);
+    // (the threads changed: a new session, its build in, the viewer kept)
+    seen.clear();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "workspace/didChangeConfiguration", "params": {"settings": {"phitex": {"threads": 2}}}}),
+    );
+    lsp_until(&rx, &mut seen, |m| {
+        m["method"] == "window/logMessage"
+            && m["params"]["message"]
+                .as_str()
+                .is_some_and(|t| t.contains("a new session"))
+    });
+    let again = lsp_until(&rx, &mut seen, ready);
+    assert_eq!(again["params"]["pages"], 2, "{again}");
+    assert!(
+        !seen.iter().any(|m| m["params"]["message"]
+            .as_str()
+            .is_some_and(|t| t.contains("http://") && !t.contains(&url))),
+        "the viewer's address changed: {seen:?}"
+    );
+    // (stop: said, then the end)
+    exec(&mut to, 8, "phitex.stop", json!([]));
+    lsp_until(&rx, &mut seen, |m| m["id"] == 8);
+    lsp_until(&rx, &mut seen, |m| {
+        m["method"] == "phitex/status" && m["params"]["state"] == "stopped"
+    });
+    let end = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("the watch") {
+            break s;
+        }
+        assert!(Instant::now() < end, "the watch did not end after phitex.stop");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "the watch ended with {status}");
+}
+
 /// `phitex watch --lsp` started by an editor whose root is above the
 /// TeX project (a repository's): no file named, no `phitex.toml`, no
 /// `.tex` file at the root; `initialize` is answered all the same, and the

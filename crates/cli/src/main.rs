@@ -40,6 +40,7 @@ mod lsp;
 mod modern;
 mod problems;
 mod session;
+mod shelf;
 mod shell;
 mod tex;
 mod tools;

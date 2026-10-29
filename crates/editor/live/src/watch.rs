@@ -35,6 +35,9 @@ pub enum Applied {
     Edited(String),
     /// Build again (the viewer's Rebuild).
     Rebuild,
+    /// Build again from nothing ([`Ask::Cold`]): the session's build
+    /// dropped already.
+    Cold,
     /// A change reached the screen this long after it was made, in
     /// microseconds.
     Painted(u64),
@@ -103,6 +106,10 @@ impl Edits {
         let file = match a {
             Ask::Painted(us) => return Applied::Painted(us),
             Ask::Rebuild => return Applied::Rebuild,
+            Ask::Cold => {
+                s.forget_build();
+                return Applied::Cold;
+            }
             Ask::DiffStart { .. } | Ask::DiffShow(_) | Ask::DiffRestyle { .. } | Ask::DiffStop => {
                 return Applied::Diff(a);
             }
@@ -231,6 +238,10 @@ pub fn diagnostics(s: &Session, r: &Report, log: &str) -> Vec<Value> {
         .map(|e| match &r.internal {
             // (the engine's stop: its sentence, the dump under it)
             Some(d) => json!({"severity": "error", "code": "engine", "message": e, "detail": d}),
+            // (the format could not be had: the editor is told apart)
+            None if r.format_failed => {
+                json!({"severity": "error", "code": "format", "message": e})
+            }
             None => {
                 json!({"severity": "error", "code": "tex", "message": crate::problems::bare(e)})
             }
