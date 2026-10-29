@@ -37,8 +37,11 @@ any file host or CDN works.
 
 Binaries are GitHub release assets (free, no bandwidth limit, no CORS
 needed for curl): `<target>.tar.gz`, `SHA256SUMS`, `SHA256SUMS.minisig` per
-version tag. `https://phitex.org/install.sh` and `phitex upgrade` fetch them
-from there. Storage budget: R2's 10 GB holds the current release (1.8 GB) and
+version tag. `phitex upgrade` and `https://phitex.org/install.sh` fetch them
+from there; install.sh is a static file of the site (PhiTeX.org repo,
+`public/install.sh`, deployed with it to Cloudflare Pages project
+`phitex-org`). Shelf's bucket is uploaded from mc, where `build.py` runs,
+with an R2 token scoped to that bucket alone. Storage budget: R2's 10 GB holds the current release (1.8 GB) and
 the shared packs of the releases in the support window (§6); a release
 re-uploads only its changed packs.
 
