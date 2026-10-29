@@ -672,6 +672,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             p.state = r.state;
         }
     }
+    // (the fields a settling node defines: a reader of one past the
+    // layer's frontier waits for it, `Ctx::set_frontier`)
+    let settling = eng.op(node.op()).settles_at_quiet();
+    if settling {
+        for d in &p.defs {
+            eng.mark_settled(d.f);
+        }
+    }
+    let frontier = p.frontier;
     // (a run that went on from its last run's state rests on that run's
     // reads: kept, but those it read again)
     let own_reads = p.reads.len();
@@ -1602,6 +1611,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             },
         );
         settle_predictions(eng, ww, n, &mut st);
+    }
+    // (the frontier moved: after its placements stand, so a reader let
+    // go meets them)
+    if let Some(at) = frontier {
+        eng.frontier.store(at.map_or(0, |n| n.raw() + 1), Ordering::Release);
+        crate::sched::release_frontier(eng, ww);
     }
     if let Some(parent) = node.parent {
         let parent = eng.node(parent);
@@ -2686,7 +2701,11 @@ impl Predicted {
 pub(crate) fn predict(eng: &Engine, op: OpId, args: &[ValueId]) -> Predicted {
     let mut defs: Vec<DefRec> = Vec::new();
     if let Some(pd) = eng.op(op).predicted_defs(args, eng.values()) {
+        let settling = eng.op(op).settles_at_quiet();
         for (f, x) in pd {
+            if settling {
+                eng.mark_settled(f);
+            }
             defs.push(DefRec {
                 f,
                 loc: Locality::Local,

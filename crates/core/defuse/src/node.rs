@@ -535,4 +535,7 @@ pub(crate) struct Product {
     /// `Ctx::placed_output_wait`: the placements whose next commit
     /// re-asks the run, whatever their output.
     pub(crate) waits: Vec<usize>,
+    /// `Ctx::set_frontier`: the settling layer's frontier this run moves
+    /// (`Some(None)`: none, every reader free).
+    pub(crate) frontier: Option<Option<NodeId>>,
 }

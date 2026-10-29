@@ -85,6 +85,10 @@ pub(crate) struct Shared {
     /// settling node's prediction at depth 0), by that node: queued when
     /// it commits, or at the quiet point.
     pub(crate) waiting: Mx<crate::values::FxHashMap<NodeId, Vec<NodeId>>>,
+    /// Runs stopped at a read past the settling layer's frontier
+    /// (`Ctx::set_frontier`): queued as it passes them, or at the quiet
+    /// point.
+    pub(crate) frontier_waiting: Mx<Vec<NodeId>>,
     /// The roots the caller's edit source holds (`EditSource::roots`),
     /// given by the caller's worker as it comes to the barrier.
     extra_roots: Mx<Vec<crate::values::ValueId>>,
@@ -331,6 +335,7 @@ impl Pool {
             collect_wanted: AtomicBool::new(false),
             deferred: Mx::new(Vec::new()),
             waiting: Mx::new(crate::values::FxHashMap::default()),
+            frontier_waiting: Mx::new(Vec::new()),
             extra_roots: Mx::new(Vec::new()),
             panicked_roots: Mx::new(Vec::new()),
             collecting: AtomicBool::new(false),
@@ -894,6 +899,14 @@ fn run_worker(
                 .collect();
             // (and the runs that waited for a node that has not committed:
             // they go on, on its prediction)
+            // (and those at the frontier: the layer is quiet, nothing
+            // places a node before them now)
+            eng.frontier.store(0, Ordering::Release);
+            rel.extend(
+                std::mem::take(&mut *pool.shared.frontier_waiting.lock())
+                    .into_iter()
+                    .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty)),
+            );
             rel.extend(
                 std::mem::take(&mut *pool.shared.waiting.lock())
                     .into_values()
@@ -1393,6 +1406,11 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
                 why,
             })
         }
+        Ok(Err(_stop)) if cx.wait_frontier => {
+            drop(cx);
+            park_frontier(eng, pool, w, node);
+            Ok(())
+        }
         Ok(Err(_stop)) if cx.wait_on.is_some() => {
             let on = cx.wait_on.take();
             drop(cx);
@@ -1532,6 +1550,70 @@ fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<N
     m.entry(on).or_default().push(node.id);
     drop(m);
     pool.shared.done_one();
+}
+
+/// Whether `node` stands past the settling layer's frontier `fr` (its
+/// raw id plus one, `Engine::frontier`): after it, which stands.
+pub(crate) fn past_frontier(eng: &Engine, node: &Node, fr: u64) -> bool {
+    fr != 0
+        && eng
+            .placed_node(NodeId::from_raw(fr - 1))
+            .is_some_and(|x| x.state() != State::Gone && node.pos_hint() > x.pos_hint())
+}
+
+/// A run that stopped at a read past the frontier (`Ctx::read`): dirty,
+/// queued nowhere, listed in `Shared::frontier_waiting` unless the
+/// frontier passed it meanwhile or the run was re-asked (then queued).
+fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
+    let held = || past_frontier(eng, node, eng.frontier.load(Ordering::Acquire));
+    if node.state() != State::Running || !held() || !node.cas_state(State::Running, State::Dirty) {
+        end_run(eng, pool, w, node, State::Dirty);
+        return;
+    }
+    node.committing.store(false, Ordering::Release);
+    let mut m = pool.shared.frontier_waiting.lock();
+    // (checked again under the lock the frontier's move takes: no wake
+    // lost)
+    if !held() {
+        drop(m);
+        w.local.push(node.id);
+        w.shared.wake_one();
+        return;
+    }
+    m.push(node.id);
+    drop(m);
+    pool.shared.done_one();
+}
+
+/// The runs waiting at the frontier that it has passed queued again
+/// (`park_frontier`).
+pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
+    let Some(w) = w else { return };
+    let fr = eng.frontier.load(Ordering::Acquire);
+    let go: Vec<NodeId> = {
+        let mut m = w.shared.frontier_waiting.lock();
+        if m.is_empty() {
+            return;
+        }
+        let (go, keep): (Vec<NodeId>, Vec<NodeId>) =
+            m.iter().partition(|&&n| eng.placed_node(n).is_none_or(|x| !past_frontier(eng, &x, fr)));
+        *m = keep;
+        go
+    };
+    for n in go {
+        if let Some(x) = eng.placed_node(n).filter(|x| x.state() == State::Dirty) {
+            enqueue(
+                eng,
+                Some(w),
+                x,
+                Wake {
+                    by: None,
+                    cause: Cause::Structure,
+                    at_ns: eng.now_ns(),
+                },
+            );
+        }
+    }
 }
 
 /// The runs waiting for `n`'s commit queued again (`park_waiting`).

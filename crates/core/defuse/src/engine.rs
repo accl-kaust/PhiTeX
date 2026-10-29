@@ -148,6 +148,18 @@ pub struct Engine {
     /// Wakes held to the next quiet point (`sched::hold_wake`): a reader
     /// re-asked by a change a settling operation's node made.
     pub(crate) held: crate::lock::Mx<Vec<(NodeId, crate::node::Wake)>>,
+    /// The fields a settling operation's node defined or was predicted to
+    /// define (`Operation::settles_at_quiet`), as a bit set by hash
+    /// (`Engine::settle_marked`): a reader of one past the settling
+    /// layer's frontier waits for it (`Ctx::set_frontier`).
+    pub(crate) settle_marks: Box<[AtomicU64]>,
+    /// The settling layer's frontier (`Ctx::set_frontier`): the raw id
+    /// of the node past which it may yet place nodes, plus one; 0, none
+    /// (no reader waits).
+    pub(crate) frontier: AtomicU64,
+    /// (`PHITEX_TEX_TIME`) Reads by readers outside the settling layer of
+    /// a field it defines held past its frontier (`Ctx::set_frontier`).
+    pub(crate) frontier_held: AtomicU64,
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
     pub(crate) layout_gen: AtomicU64,
@@ -167,6 +179,16 @@ pub struct Engine {
 
 /// The buckets of [`Engine::field_epochs`].
 const EPOCH_BUCKETS: usize = 4096;
+
+/// The words of `Engine::settle_marks` (65 536 bits).
+const SETTLE_MARK_WORDS: usize = 1024;
+
+/// A field's bit in `Engine::settle_marks`.
+fn settle_bit(f: Field) -> (usize, u64) {
+    let h = f.0.raw().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 48;
+    #[allow(clippy::cast_possible_truncation, reason = "16 bits")]
+    ((h >> 6) as usize % SETTLE_MARK_WORDS, 1 << (h & 63))
+}
 
 impl Default for Engine {
     fn default() -> Self {
@@ -198,6 +220,27 @@ thread_local! {
 }
 
 impl Engine {
+    /// Marks `f` as defined by a settling operation's node
+    /// (`Engine::settle_marks`).
+    pub(crate) fn mark_settled(&self, f: Field) {
+        let (w, b) = settle_bit(f);
+        if self.settle_marks[w].load(Ordering::Relaxed) & b == 0 {
+            self.settle_marks[w].fetch_or(b, Ordering::Relaxed);
+        }
+    }
+
+    /// (`PHITEX_TEX_TIME`) `Engine::frontier_held`.
+    pub fn frontier_held(&self) -> u64 {
+        self.frontier_held.load(Ordering::Relaxed)
+    }
+
+    /// Whether `f` may be defined by a settling operation's node (a hash
+    /// that meets another field's says yes too).
+    pub(crate) fn settle_marked(&self, f: Field) -> bool {
+        let (w, b) = settle_bit(f);
+        self.settle_marks[w].load(Ordering::Relaxed) & b != 0
+    }
+
     /// A bracket changed: a new scope count.
     pub(crate) fn scope_changed(&self) {
         self.scope_gen.fetch_add(1, Ordering::AcqRel);
@@ -234,6 +277,9 @@ impl Engine {
             depth_field,
             has_finals: std::sync::atomic::AtomicBool::new(false),
             held: crate::lock::Mx::new(Vec::new()),
+            settle_marks: (0..SETTLE_MARK_WORDS).map(|_| AtomicU64::new(0)).collect(),
+            frontier: AtomicU64::new(0),
+            frontier_held: AtomicU64::new(0),
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
             busy: AtomicU64::new(0),

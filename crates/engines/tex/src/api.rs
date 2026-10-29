@@ -1870,6 +1870,9 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         .map(|(k, d, n)| format!("{k} {:.3} ms/{n}", d.as_secs_f64() * 1e3))
         .collect();
     eprintln!("acct: op time by kind: {}", kinds.join(", "));
+    {
+        eprintln!("acct: frontier: {} reads held past the page layer's frontier", eng.frontier_held());
+    }
     // (runs against live nodes per operation: where the runs beyond one a
     // node go)
     let nodes_by_op: std::collections::BTreeMap<&'static str, u64> = {

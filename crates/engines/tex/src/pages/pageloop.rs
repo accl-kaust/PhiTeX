@@ -671,6 +671,18 @@ impl Run<'_, '_> {
             ls.tail = Some(encode_tail(v, &st, &lc));
             self.emit_beyond(&mut ls, &old);
         }
+        // (the frontier: at a hole, the piece not in yet, past which a
+        // page may yet fire and its finisher stand before the text that
+        // reads what its routine defines; at the end, none. Waiting for
+        // a give-back it stays where the last hole put it: the rest
+        // moves it on)
+        if hole {
+            if let Some(at) = self.cx.stopped_at() {
+                self.cx.set_frontier(Some(at));
+            }
+        } else if lc.ended {
+            self.cx.set_frontier(None);
+        }
         // (waiting: the pages after the page waited at are a loop rest's,
         // its own node, so that this one's runs re-emit its pages alone,
         // never every page before; the rest keeps its key, the page's)

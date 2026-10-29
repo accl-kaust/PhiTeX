@@ -58,6 +58,9 @@ pub struct Ctx<'a> {
     /// The node whose commit the run stopped to wait for (`Ctx::read`
     /// on its prediction at depth 0).
     pub(crate) wait_on: Option<NodeId>,
+    /// The run stopped at a read past the settling layer's frontier
+    /// (`Ctx::set_frontier`): it runs again once the frontier passes it.
+    pub(crate) wait_frontier: bool,
     /// Its checks so far ([`Ctx::tick`]).
     ticks: u64,
 }
@@ -98,6 +101,7 @@ impl<'a> Ctx<'a> {
                 woken_at: None,
                 settle_now: false,
                 waits: Vec::new(),
+                frontier: None,
             },
             views: Vec::new(),
             ep: u64::MAX,
@@ -109,6 +113,7 @@ impl<'a> Ctx<'a> {
             last: me.run_record(),
             stuck: None,
             wait_on: None,
+            wait_frontier: false,
             ticks: 0,
         }
     }
@@ -229,6 +234,7 @@ impl<'a> Ctx<'a> {
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
         self.wait_for_settling(&r)?;
+        self.hold_at_frontier(f)?;
         self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
         let x = self.follow_aliases(r.value)?;
         self.seen.insert(f, x);
@@ -258,6 +264,38 @@ impl<'a> Ctx<'a> {
         }
         self.wait_on = Some(by);
         Err(stop())
+    }
+
+    /// A read of a field the settling layer defines
+    /// (`Operation::settles_at_quiet`; `Engine::settle_marks`) by a node
+    /// outside it that stands past the layer's frontier
+    /// (`Ctx::set_frontier`): the run
+    /// stops, and runs again once the frontier passes it. Past the
+    /// frontier the layer may yet place a node before the reader, whose
+    /// definition the read would meet (TeX's text after a page's break
+    /// reads what that page's routine defined): read now, the answer is
+    /// one the reader's run is thrown away for once that node comes.
+    fn hold_at_frontier(&mut self, f: Field) -> Result<(), Stop> {
+        use std::sync::atomic::Ordering::{Acquire, Relaxed};
+        let eng = self.eng;
+        let fr = eng.frontier.load(Acquire);
+        if fr == 0 || !eng.settle_marked(f) || eng.op(self.me.op()).settles_at_quiet() {
+            return Ok(());
+        }
+        if !crate::sched::past_frontier(eng, self.me, fr) {
+            return Ok(());
+        }
+        eng.frontier_held.fetch_add(1, Relaxed);
+        self.wait_frontier = true;
+        Err(stop())
+    }
+
+    /// The settling layer's frontier, from this run's commit: the node
+    /// past which it may yet place nodes (`None`: it places none, every
+    /// reader is free). A reader of a field the layer defines past it
+    /// waits for it to pass ([`Ctx::read`]).
+    pub fn set_frontier(&mut self, at: Option<NodeId>) {
+        self.product.frontier = Some(at);
     }
 
     /// `x` with each alias definition it is followed: a read of the
@@ -318,6 +356,7 @@ impl<'a> Ctx<'a> {
         };
         if let (Some(x), Anchor::Before(_) | Anchor::AfterOwn(_)) = (&r, &anchor) {
             self.wait_for_settling(x)?;
+            self.hold_at_frontier(f)?;
         }
         self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.and_then(|x| x.value));
         Ok(match r {
