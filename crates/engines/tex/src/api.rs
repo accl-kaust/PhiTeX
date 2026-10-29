@@ -1658,6 +1658,9 @@ pub struct Stats {
     pub wasted_by_op: Vec<(&'static str, u64)>,
     /// The profile units the page loop folded over all its runs.
     pub units_folded: u64,
+    /// The siblings the runs read on into (`Run::pull`), over all runs:
+    /// a run on a wrong guess that reads on counts what it took.
+    pub siblings_pulled: u64,
     /// The units of each accumulator the last evaluation ended with
     /// (`vprof`: the profiles the pieces contributed).
     pub units_now: Vec<(&'static str, u64)>,
@@ -2735,6 +2738,7 @@ impl Graph {
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             origins: origins_on,
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            siblings_pulled: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
             scope_learned: Arc::default(),
             watch: Arc::default(),
@@ -3554,6 +3558,7 @@ impl Graph {
             stats.values_bytes = self.eng.values().payload_bytes();
             stats.add(&r);
             stats.units_folded = self.ops.units_folded.load(std::sync::atomic::Ordering::Relaxed);
+            stats.siblings_pulled = self.ops.siblings_pulled.load(std::sync::atomic::Ordering::Relaxed);
             {
                 let v = self.eng.values();
                 let n = self.eng.acc_value(unit, v.field(crate::vprof::VPROF)).map_or(0, |x| v.seq_to_vec(x).len());

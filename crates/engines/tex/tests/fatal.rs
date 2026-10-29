@@ -141,3 +141,41 @@ fn a_finisher_reads_its_routine_only() {
         assert_eq!(b.nodes_held_by("finish"), 0, "-j{threads}: the document's nodes a finisher holds");
     }
 }
+
+/// A run reads on into the text after it only once every node before it
+/// has run: a prefix where one definer has committed and another has not
+/// is a state TeX never has. Here the first piece makes `\open` an
+/// `\iffalse`, a slow piece then makes `\close` a `\fi`, and a paragraph
+/// after both skips between them. Run while the slow piece loops, the
+/// paragraph met `\open` new and `\close` old, and its skip read on
+/// through every paragraph after it to the end (amsldoc at sixteen
+/// threads: imakeidx's `\@wrindex` committed, its `\index` not, and an
+/// `\item`'s piece skipped 735 siblings).
+#[test]
+fn a_read_on_waits_for_the_text_before_it() {
+    let mut src = String::from(
+        "\\let\\open\\relax \\let\\close\\relax\n\n\\def\\mkclose{\\let\\close\\fi}\\let\\open\\iffalse\n\n\
+         \\count1=0 \\loop\\advance\\count1 by1 \\ifnum\\count1<3000000 \\repeat\\mkclose\n\n\
+         Before \\open hidden \\close shown.\n\n",
+    );
+    for i in 0..60 {
+        let _ = write!(src, "Paragraph {i} after the skip, set as it is.\n\n");
+    }
+    src.push_str("\\bye\n");
+    let mut pdfs = Vec::new();
+    let mut pulled = Vec::new();
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("read-on-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let b = common::build(opts, Some(&common::plain()), &src);
+        assert!(!b.fatal(), "-j{threads}: the job ended");
+        eprintln!("-j{threads}: {} siblings read on into", b.stats.siblings_pulled);
+        pulled.push(b.stats.siblings_pulled);
+        pdfs.push(b.output().0);
+    }
+    assert!(pdfs[0] == pdfs[1], "-j1 and -j8 give the same output");
+    assert_eq!(pulled[1], pulled[0], "the siblings read on into at -j8, as at -j1");
+}

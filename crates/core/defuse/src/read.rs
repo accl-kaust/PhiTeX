@@ -665,7 +665,47 @@ pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, 
             let n = following(eng, me, *i)?;
             apply_path(eng, Some(text_value(eng, &n)), path)
         }
+        ReadKind::Hole => apply_path(eng, hole_value(eng, hole_before(eng, me)), path),
     }
+}
+
+/// The first text node (`Operation::text`) of `me`'s unit before it that
+/// has not committed (`Node::is_hole`); None when every one has. Each
+/// segment's count of such nodes passes over the segments without one.
+/// Not the unit's other nodes (what the client sets beside the text to
+/// work on it: its pages, finishers, writers, which may wait on text
+/// after `me`), nor another unit's (a file read back, made after a node
+/// of this one, is read at the end of the text it follows).
+pub(crate) fn hole_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let from = unit_start(eng, me);
+    // (none before the line's first segment: from it)
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            return None;
+        }
+        // (a unit made after one of my unit's nodes lies inside its range)
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            if inner.holes > 0 {
+                for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
+                    let n = eng.node(*id);
+                    if *id != me.id && n.unit == me.unit && n.is_hole() && eng.op(n.op()).text() {
+                        return Some(*id);
+                    }
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    None
+}
+
+/// [`hole_before`]'s answer as a read's value: the node's id.
+pub(crate) fn hole_value(eng: &Engine, h: Option<NodeId>) -> Option<ValueId> {
+    h.map(|h| eng.values().int(i64::from_ne_bytes(h.raw().to_ne_bytes())))
 }
 
 /// A segment-side reader record's current answer.

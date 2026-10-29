@@ -142,6 +142,7 @@ pub(crate) fn run_node(
                 Ok(()) => "ok",
                 Err(Halt::Stop(_)) => "stop",
                 Err(Halt::Starve) => "starve",
+                Err(Halt::Hole) => "hole",
                 Err(Halt::Fatal) => "fatal",
                 Err(Halt::Cut) => "cut",
                 Err(Halt::Recut(_)) => "recut",
@@ -157,6 +158,7 @@ pub(crate) fn run_node(
                 Ok(()) => "ok".to_owned(),
                 Err(Halt::Stop(_)) => format!("stop (node {})", r.cx.node().raw()),
                 Err(Halt::Starve) => "starve".to_owned(),
+                Err(Halt::Hole) => "hole".to_owned(),
                 Err(Halt::Fatal) => "fatal".to_owned(),
                 Err(Halt::Cut) => "cut".to_owned(),
                 Err(Halt::Recut(k)) => format!("recut at {k}"),
@@ -224,6 +226,10 @@ pub(crate) fn run_node(
             let u = ValueId::UNIT;
             Ok(r.stall("starve", u))
         }
+        // (a read-on waits for the text before it to have run: the run
+        // ends as a starved one does, nothing defined, and the node
+        // before it it met runs it again when it commits)
+        Err(Halt::Hole) => Ok(r.stall("hole", ValueId::UNIT)),
         // (§1335: the job ends there, its log written up to the error,
         // as pdfTeX's close_files_and_terminate leaves it)
         Err(Halt::Fatal) => {

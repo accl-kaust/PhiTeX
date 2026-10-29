@@ -685,6 +685,12 @@ impl Run<'_, '_> {
         }
         match self.cx.following(self.pulled) {
             Some((op, args)) if op == self.ops.exec => {
+                // (a read-on is serial, TeX's chain: it reads on a prefix
+                // every node of which has run, not a mix of the
+                // definitions some have made and others have not yet)
+                if self.cx.hole_before()?.is_some() {
+                    return Err(Halt::Hole);
+                }
                 let args = self.resolve_units(&args)?;
                 let segs = crate::run::decode_segs(self.v, &args);
                 // (where the sibling's text begins, unless its first
@@ -727,6 +733,7 @@ impl Run<'_, '_> {
                 }
                 self.muts += 1;
                 self.pulled += 1;
+                self.ops.siblings_pulled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.input.append_text(segs);
                 Ok(true)
             }

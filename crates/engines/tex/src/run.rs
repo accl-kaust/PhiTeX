@@ -40,6 +40,10 @@ pub(crate) enum Halt {
     /// again from its start and ends at `k`, its rest a resume after the
     /// pages firing there.
     Recut(u32),
+    /// The run would read on into the text after it (`Run::pull`) while
+    /// a node before it has not run yet: it waits for that node
+    /// (`Ctx::hole_before`), ending as a starved run does.
+    Hole,
 }
 
 impl From<Stop> for Halt {
@@ -163,6 +167,9 @@ pub(crate) struct Ops {
     /// The profile units the page loop folded over all its runs
     /// (`crate::pages::Run::fold_unit`; `Stats::units_folded`).
     pub units_folded: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The siblings runs read on into over all runs (`Run::pull`;
+    /// `Stats::siblings_pulled`).
+    pub siblings_pulled: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The integer registers named by `\countdef` so far, by name (a
     /// LaTeX counter X's register is `\c@X`'s): what a node's text steps
     /// is predicted on them ([`crate::hints::counter_rels`]); a name

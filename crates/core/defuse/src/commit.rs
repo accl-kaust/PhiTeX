@@ -537,6 +537,54 @@ fn file_stop(eng: &Engine, f: Field, k: RangeKey, r: &RangeReader) -> bool {
     true
 }
 
+/// Files a run that met `holes` before it (`Ctx::hole_before`) with each,
+/// to be run again when it commits, is taken, is removed or moves
+/// ([`wake_waiters`]); one that is no hole any more by then runs it again
+/// at once. Filed before it is looked at, as `stop_at`: a node that stops
+/// being a hole meanwhile has its waiters taken after.
+fn file_waits(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, serial: u32, holes: Vec<NodeId>, st: &mut CommitStats) {
+    for h in holes {
+        let hn = eng.node(h);
+        push_pruned(&mut hn.waiters.lock(), (node.id, serial), |x| live(eng, x.0, x.1));
+        if !hn.is_hole()
+            && crate::sched::mark_stale_now(
+                eng,
+                w,
+                node,
+                Wake {
+                    by: Some(h),
+                    cause: Cause::Structure,
+                    at_ns: eng.now_ns(),
+                },
+            )
+        {
+            st.woken += 1;
+        }
+    }
+}
+
+/// Runs the runs filed with `node` as the hole before them
+/// (`file_waits`) again: it has committed, been taken, removed or moved.
+fn wake_waiters(eng: &Engine, w: Option<&Worker>, node: &Node, st: &mut CommitStats) {
+    let ws = std::mem::take(&mut *node.waiters.lock());
+    for (id, serial) in ws {
+        if live(eng, id, serial)
+            && crate::sched::mark_stale_now(
+                eng,
+                w,
+                eng.node(id),
+                Wake {
+                    by: Some(node.id),
+                    cause: Cause::Structure,
+                    at_ns: eng.now_ns(),
+                },
+            )
+        {
+            st.woken += 1;
+        }
+    }
+}
+
 /// Files a range reader with the nodes its range starts after and ends
 /// at (`Node::bounded`), to be asked again when one is removed; false when
 /// one is gone already.
@@ -777,6 +825,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut wake: Vec<(NodeId, NodeId, Field)> = Vec::with_capacity(8);
     let mut later: Vec<(Field, Reader, NodeId)> = Vec::new();
     let mut holes: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
+    let mut waits: Vec<NodeId> = Vec::new();
     let mut unchecked: Vec<usize> = Vec::with_capacity(rec.reads.len());
     let mut refuted: Option<usize> = None;
     let mut ix = IndexOps::with_capacity(nd, nc, rec.reads.len());
@@ -861,6 +910,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 range_seen[i].push((r.path, r.seen));
             }
             ReadKind::Placed { .. } | ReadKind::Following { .. } => {}
+            ReadKind::Hole => {
+                if let Some(h) = r.seen.and_then(|x| eng.values().as_int(x)) {
+                    waits.push(NodeId::from_raw(u64::from_ne_bytes(h.to_ne_bytes())));
+                }
+            }
         }
     }
     for ((_, r), seen) in range_reads.iter_mut().zip(range_seen) {
@@ -1378,6 +1432,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
     }
     file_ranges(eng, ww, range_reads, node.id, &mut st);
+    file_waits(eng, ww, node, serial, waits, &mut st);
     if eng.op(node.op()).read_back() && !changed_defs.is_empty() {
         eng.has_finals.store(true, Ordering::Release);
         for &f in &changed_defs {
@@ -1584,7 +1639,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             by: start.or_else(|| first_of_unit(eng, node)).unwrap_or(node.id),
         },
         ReadKind::Placed { .. } => Cause::Output { of: node.id },
-        ReadKind::Following { .. } => Cause::Structure,
+        ReadKind::Following { .. } | ReadKind::Hole => Cause::Structure,
     };
     // (a read kept from the run its state came from no longer holds: the
     // run that resumed from that state rests on it. A range read names
@@ -2241,6 +2296,7 @@ fn walk_stopped(
     defined: &[(Field, u16)],
     st: &mut CommitStats,
 ) {
+    wake_waiters(eng, w, node, st);
     let fs = std::mem::take(&mut *node.stopped.lock());
     for (f, level) in fs {
         if !defined.iter().any(|&(g, k)| g == f && k <= level) {
@@ -3526,6 +3582,7 @@ fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, left: Left, st:
     }
     reask_stops(eng, w, left.stops, m.id, st);
     if left.hole {
+        wake_waiters(eng, w, m, st);
         let fs = std::mem::take(&mut *m.stopped.lock());
         for (f, level) in fs {
             reask_from(eng, w, f, left.pos, left.seg, None, Some(m.op()), level, st);

@@ -76,6 +76,10 @@ pub(crate) struct Node {
     /// walked from: walked on from it when it commits, is taken or is
     /// removed.
     pub(crate) stopped: Mx<Vec<(Field, u16)>>,
+    /// Runs that met it as the first node before them that has not
+    /// committed (`Ctx::hole_before`), with their serial then: asked
+    /// again when it commits, is taken, is removed or moves.
+    pub(crate) waiters: Mx<Vec<(NodeId, u32)>>,
     /// Range readers whose range starts or ends at it: asked again when
     /// it is removed (their bound gone, they answer none).
     pub(crate) bounded: Mx<Vec<(Field, RangeKey, RangeReader)>>,
@@ -206,6 +210,7 @@ impl Node {
             stale_wake: Mx::new(None),
             stale: AtomicBool::new(false),
             stopped: Mx::new(Vec::new()),
+            waiters: Mx::new(Vec::new()),
             bounded: Mx::new(Vec::new()),
             run_ns: AtomicU64::new(0),
             commit_ns: AtomicU64::new(0),
@@ -436,6 +441,9 @@ pub(crate) enum ReadKind {
     Following {
         i: usize,
     },
+    /// The first node before the reader on the line that has not
+    /// committed (`Ctx::hole_before`).
+    Hole,
 }
 
 /// One read: validated by recomputing its answer and comparing to `seen`.
@@ -454,7 +462,7 @@ impl ReadKind {
     pub(crate) fn field(&self) -> Option<Field> {
         match self {
             ReadKind::Field { f, .. } | ReadKind::Env { f } | ReadKind::Fold { f, .. } | ReadKind::Next { f, .. } => Some(*f),
-            ReadKind::Placed { .. } | ReadKind::Following { .. } => None,
+            ReadKind::Placed { .. } | ReadKind::Following { .. } | ReadKind::Hole => None,
         }
     }
 }

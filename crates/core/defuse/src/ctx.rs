@@ -662,6 +662,24 @@ impl<'a> Ctx<'a> {
         n.map(|n| (n.op(), n.args().to_vec()))
     }
 
+    /// The first node before me on the line that has not committed, or
+    /// None when every node before me has run and committed once.
+    /// A node found is recorded: the commit files me with it, and its
+    /// commit (or its being taken, removed or moved) runs me again. None
+    /// is not: a node placed before me later asks nothing of a run that
+    /// found the prefix whole. A run that reads
+    /// on into what follows it reads a prefix TeX has all of; before
+    /// that prefix has run, what the run read of it is a mix of the
+    /// definitions some of its nodes have made and others have not.
+    pub fn hole_before(&mut self) -> Result<Option<NodeId>, Stop> {
+        self.check()?;
+        let h = read::hole_before(self.eng, self.me);
+        if h.is_some() {
+            self.record(ReadKind::Hole, PathId::WHOLE, read::hole_value(self.eng, h));
+        }
+        Ok(h)
+    }
+
     /// Narrows what I may define, for prediction. Accepted, not used by
     /// this core.
     pub fn narrow(&mut self, _m: MayDefine) {}
@@ -782,7 +800,7 @@ impl<'a> Ctx<'a> {
         self.seen.remove(&f);
         self.product.reads.retain(|r| match &r.kind {
             ReadKind::Field { f: g, .. } | ReadKind::Env { f: g } | ReadKind::Fold { f: g, .. } | ReadKind::Next { f: g, .. } => *g != f,
-            ReadKind::Placed { .. } | ReadKind::Following { .. } => true,
+            ReadKind::Placed { .. } | ReadKind::Following { .. } | ReadKind::Hole => true,
         });
     }
 
