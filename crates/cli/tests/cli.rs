@@ -2301,8 +2301,8 @@ fn xelatex_watch_compacts_a_series() {
 
 /// `phitex watch --engine xelatex`, headless, on the fontspec document:
 /// the cold build writes a PDF; a word edited in the file is built as an
-/// edit, and the PDF it writes is `phitex build --engine xelatex`'s of
-/// the edited text.
+/// edit, and the PDF it writes when idle is `phitex build --engine
+/// xelatex`'s of the edited text.
 #[test]
 #[ignore = "heavy: the xelatex format; run on accl"]
 fn xelatex_watch_edit() {
@@ -2330,6 +2330,10 @@ fn xelatex_watch_edit() {
     std::fs::write(dir.join("fontspec.tex"), &edited).expect("the edit");
     let line = until(&mut lines, "build", &2.into(), &mut seen);
     eprintln!("{line}");
+    // (the edit is an update section of the file; the exact file is
+    // written over it once the watch is idle)
+    let written = until(&mut lines, "event", &"written".into(), &mut seen);
+    assert_eq!(written["exact"], true, "{written}");
     let watched = std::fs::read(dir.join("fontspec.pdf")).expect("the watch's PDF");
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
