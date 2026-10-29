@@ -5,7 +5,7 @@ inputs carried too), as a static site, so PhiTeX running in a browser (the
 Overleaf extension, VS Code) or a native `phitex` that opts in can load
 what a document uses without a TeX installation or a server process.
 
-    GET /tl2026/release.json                the current release (schema 4): its index, pack
+    GET /tl2026/release.json                the current release (schema 1): its index, pack
                                             table, the engines' search orders, the dependency
                                             columns and what traced them
     GET /tl2026/release-<release>.json      every release's release.json, kept
@@ -37,30 +37,30 @@ what a document uses without a TeX installation or a server process.
   permission.
 - **Static only**: no logs, accounts, or per-user state of its own.
 
-## Schema 4 beside schema 3
+## Protocols and hosts
 
-Schema 4 (the pack table, `traced_by`, every index kept) is a Cloudflare
-Pages project of its own, `shelf-phitex-v4` (shelf-phitex-v4.pages.dev;
-a custom domain such as v4.shelf.phitex.org when wanted), deployed beside
-the schema-3 site (project `shelf-phitex`: shelf-phitex.pages.dev,
-shelf.phitex.org, release tl2026.5), which stays as it is while shipped
-extensions read it. A separate project rather than a prefix in the old
-one: a Pages deployment replaces its project's whole site (a prefix would
-mean uploading the old files again with every new deploy, and a mistake
-would take them away), and each project has its own 20,000-file budget.
-`deploy.sh` deploys to `PROJECT` (default `shelf-phitex-v4`) and refuses
-`shelf-phitex`. A schema-4 release.json's `min_extension` is the first
-extension that reads schema 4; extensions reading schema 3 never see it.
+The public protocol is counted from 1 at PhiTeX's alpha, and the host
+names it: schema 1 is the Pages project `shelf-phitex-v1` at
+`v1.shelf.phitex.org`, the URL PhiTeX builds in. A schema older clients
+can't read gets the next project and host (`shelf-phitex-v2`,
+`v2.shelf.phitex.org`) beside it, never in its place. A separate project
+rather than a prefix: a Pages deployment replaces its project's whole
+site (a prefix would mean uploading the old files again with every new
+deploy, and a mistake would take them away), and each project has its own
+20,000-file budget. The development sites (`shelf-phitex` at
+`shelf.phitex.org`, schema 3, and `shelf-phitex-v4`, schema 4) were never
+released; `deploy.sh` deploys to `PROJECT` (default `shelf-phitex-v1`)
+and refuses them. PhiTeX's docs/spec-distribution.md has the rules.
 
 ## Build and deploy
 
     # the traces and the build: on the accl cluster (below); or here, with a built tracer
     scripts/sandbox --net env TRACE=trace/target/release/shelf-trace TRACE_FONT_INDEX=fontindex.pxfi \
         python3 build.py [tl2026]                              # → build/tl2026/, MANIFEST.tsv
-    scripts/sandbox python3 release.py tl2026 --min-extension 0.6.0   # → releases-v4/tl2026/
-    scripts/sandbox --net python3 serve.py --root releases-v4 # local, on :8124
+    scripts/sandbox python3 release.py tl2026 --min-extension 0.6.0   # → releases-v1/tl2026/
+    scripts/sandbox --net python3 serve.py --root releases-v1 # local, on :8124
     scripts/sandbox --net npx wrangler login                  # once (prints a URL to open)
-    scripts/sandbox --net ./deploy.sh                         # Pages project shelf-phitex-v4
+    scripts/sandbox --net ./deploy.sh                         # Pages project shelf-phitex-v1
 
 Heavy steps (build.py, release.py) run inside a memory cap:
 `systemd-run --user --scope -q --slice=partex.slice -p MemoryMax=16G -p MemorySwapMax=0 …`.

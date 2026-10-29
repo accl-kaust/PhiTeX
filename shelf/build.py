@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build Shelf (schema 4): TeX Live's files for the engines PhiTeX runs, in
+"""Build Shelf (schema 1): TeX Live's files for the engines PhiTeX runs, in
 packs, with an index from each file's texmf path to its pack.
 
     python3 build.py [LABEL]          # default tl2026; then release.py

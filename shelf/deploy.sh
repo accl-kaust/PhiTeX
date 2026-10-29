@@ -3,20 +3,21 @@
 #   scripts/sandbox --net npx wrangler login   # once
 #   scripts/sandbox --net ./deploy.sh
 #
-# Schema 4 is a Pages project of its own, PROJECT (default shelf-phitex-v4:
-# shelf-phitex-v4.pages.dev), beside the schema-3 site (project
-# shelf-phitex: shelf-phitex.pages.dev, shelf.phitex.org), which stays as
-# it is for the extensions that read it. A Pages deployment replaces its
-# project's whole site, so schema 4 deployed to shelf-phitex would take
-# their files away: this script refuses that project.
+# Each public protocol is a Pages project of its own with a host of its
+# own: schema 1 is PROJECT (default shelf-phitex-v1) at v1.shelf.phitex.org;
+# a schema older clients can't read gets the next (shelf-phitex-v2,
+# v2.shelf.phitex.org) beside it. The development sites (shelf-phitex at
+# shelf.phitex.org, shelf-phitex-v4) were never released. A Pages
+# deployment replaces its project's whole site, so this script refuses
+# those projects: a mistake would take their files away.
 set -euo pipefail
 cd "$(dirname "$0")"
 label="${LABEL:-tl2026}"
-project="${PROJECT:-shelf-phitex-v4}"
-# (RELEASES: the releases directory deployed, default releases-v4/)
-releases="${RELEASES:-releases-v4}"
-if [ "$project" = shelf-phitex ]; then
-  echo "shelf-phitex is the schema-3 site, kept as it is: schema 4 goes to its own project (PROJECT)" >&2
+project="${PROJECT:-shelf-phitex-v1}"
+# (RELEASES: the releases directory deployed, default releases-v1/)
+releases="${RELEASES:-releases-v1}"
+if [ "$project" = shelf-phitex ] || [ "$project" = shelf-phitex-v4 ]; then
+  echo "$project is a development site, kept as it is: schema 1 goes to shelf-phitex-v1 (PROJECT)" >&2
   exit 1
 fi
 # (BUILD=1: build again first, into build/, with TRACE and

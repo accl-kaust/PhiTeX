@@ -4,7 +4,7 @@
 # tl2026.6's), with the release's font index (FONT_INDEX, phitex-otf's
 # otf-index over the release's own OpenType/TrueType fonts, relative to
 # the tree), release.py on top of the releases made before (PRIOR, a copy
-# of releases-v4/: the new release is numbered after them), then
+# of releases-v1/: the new release is numbered after them), then
 # PhiTeX at COMMIT building documents twice: with --shelf from the new
 # release, served by serve.py on the node's loopback, and with kpathsea
 # over a texmf tree made of the same release's files: each pair's PDFs
@@ -27,7 +27,7 @@ sif=$HOME/shared-cache/phitex/${ACCL_IMAGE:-phitex-2026-09-25-tools}.sif
 w=/tmp/$USER-$SLURM_JOB_ID
 out=$HOME/code/flinner/shelf-runs/check-release-$SLURM_JOB_ID
 arch=$HOME/shared-cache/shelf/archives
-prior=${PRIOR:-$HOME/code/flinner/shelf-releases-v4}
+prior=${PRIOR:-$HOME/code/flinner/shelf-releases-v1}
 tlpdb=${TLPDB:-$HOME/code/flinner/shelf-runs/full-75761/texlive.tlpdb.xz}
 jobs=$((${SLURM_CPUS_ON_NODE:-8} - 2))
 mkdir -p "$w/shelf/cache" "$out" "$arch" "$w/noresolve" "$w/ftree" "$w/results"
@@ -86,17 +86,17 @@ box env TLPDB=cache/texlive.tlpdb.xz FONT_INDEX="$w/fontindex-rel.pxfi" PACK_JOB
   python3 build.py "$label" > "$w/results/build.log" 2>&1 || status=$?
 tail -15 "$w/results/build.log"
 [ "$status" = 0 ] || { echo "FAILED: build.py exit $status"; exit "$status"; }
-cp -a "$prior/." "$w/shelf/releases-v4/"
-before=$(ls "$w/shelf/releases-v4/$label/h" | wc -l)
-old=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['release'])" "$w/shelf/releases-v4/$label/release.json")
-box python3 release.py "$label" --releases releases-v4 2>&1 | tail -5
-new=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['release'])" "$w/shelf/releases-v4/$label/release.json")
-cp "$w/shelf/releases-v4/$label/release.json" "$w/results/"
-after=$(ls "$w/shelf/releases-v4/$label/h" | wc -l)
+cp -a "$prior/." "$w/shelf/releases-v1/"
+before=$(ls "$w/shelf/releases-v1/$label/h" | wc -l)
+old=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['release'])" "$w/shelf/releases-v1/$label/release.json")
+box python3 release.py "$label" --releases releases-v1 2>&1 | tail -5
+new=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['release'])" "$w/shelf/releases-v1/$label/release.json")
+cp "$w/shelf/releases-v1/$label/release.json" "$w/results/"
+after=$(ls "$w/shelf/releases-v1/$label/h" | wc -l)
 echo "release $new (after $old): $after pack files kept, $((after - before)) new" | tee "$w/results/summary.txt"
 
 # (5) a texmf tree of the release's files, with its ls-R
-box python3 - "$w/shelf/releases-v4/$label" "$new" "$w/tree/texmf-dist" <<'PY' | tee -a "$w/results/summary.txt"
+box python3 - "$w/shelf/releases-v1/$label" "$new" "$w/tree/texmf-dist" <<'PY' | tee -a "$w/results/summary.txt"
 import sys, os, gzip, struct
 rel, name, tree = sys.argv[1:]
 meta = __import__('json').load(open(f'{rel}/release-{name}.json'))
@@ -138,7 +138,7 @@ cat > "$w/check.sh" <<CHECK
 set -u
 cd $w/runs
 export SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1
-python3 $w/shelf/serve.py --root $w/shelf/releases-v4 --port 8124 > $w/serve.log 2>&1 &
+python3 $w/shelf/serve.py --root $w/shelf/releases-v1 --port 8124 > $w/serve.log 2>&1 &
 sleep 1
 bin=$w/phitex/target/fastdev/phitex
 one() { # ENGINE DOC

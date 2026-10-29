@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Make a Shelf release (schema 4) from a build: packs by content, an index
+"""Make a Shelf release (schema 1) from a build: packs by content, an index
 and a pack table for it, and release.json, the one file that changes; then
 drop the packs no kept release needs.
 
@@ -7,7 +7,7 @@ drop the packs no kept release needs.
                        [--notice TEXT]
 
 From build/<LABEL>/ (build.py's: packs/, index.tsv, meta.json) into
-<DIR>/<LABEL>/ (default releases-v4/, git-ignored, kept between builds):
+<DIR>/<LABEL>/ (default releases-v1/, git-ignored, kept between builds):
 
     <DIR>/<LABEL>/h/<pack>-<hash>.pack     every kept pack, named by its content
     <DIR>/<LABEL>/index-<release>.tsv.gz   path <TAB> pack <TAB> deps... (released pack names)
@@ -24,16 +24,18 @@ from a cache, a proxy or a mirror, is refused, never read).
 
 release.json, read by the extension at most once a day:
 
-    {"schema": 4, "release": "tl2026.6", "index": "index-tl2026.6.tsv.gz",
+    {"schema": 1, "release": "tl2026.6", "index": "index-tl2026.6.tsv.gz",
      "pack_table": "packs-tl2026.6.tsv.gz", "packs": 6950,
      "min_extension": "0.6.0", "notice": null,
      "deps": ["pdftex", "xetex"],
      "traced_by": {"pdftex": "phitex <commit> shelf-trace 1", "xetex": ...},
      "search": {"pdftex": {"tex": ["tex/latex", "tex/generic", "tex"], ...}, ...}}
 
-`schema` 4: schema 3's (the index by texmf path, a dependency column per
+`schema` 1: Shelf's public protocol, the N of vN.shelf.phitex.org,
+counted from 1 at PhiTeX's alpha (the development formats before it, 1 to
+4, were never released): the index by texmf path, a dependency column per
 engine named in `deps`, `search` the engines' search orders per kpathsea
-format: build.py's module doc) and the pack table, `pack_table`.
+format (build.py's module doc), and the pack table, `pack_table`.
 `traced_by`: per column, the engine and commit whose trace made it (null:
 an empty column). The columns are hints: a client that fetches only what
 its build asks for is still right, so a column traced by another engine
@@ -58,7 +60,7 @@ README's "Retention" has the numbers and the ways past the limit.
 import gzip, hashlib, json, sys
 from pathlib import Path
 
-SCHEMA = 4
+SCHEMA = 1
 LIMIT = 19_500
 WARN = 15_000
 
@@ -88,7 +90,7 @@ def main() -> None:
             del args[i : i + 2]
     label = args[0] if args else "tl2026"
     here = Path(__file__).parent
-    build, rel = here / "build" / label, here / opt.get("--releases", "releases-v4") / label
+    build, rel = here / "build" / label, here / opt.get("--releases", "releases-v1") / label
     if not (build / "index.tsv").exists():
         print(f"{label}: no build in build/{label}: the current release stands")
         return
@@ -128,7 +130,7 @@ def main() -> None:
         "search": meta["search"],
     }
     if not want["min_extension"]:
-        raise SystemExit("--min-extension X.Y.Z: the oldest extension that reads schema 4 (no release here to take it from)")
+        raise SystemExit("--min-extension X.Y.Z: the oldest extension that reads schema 1 (no release here to take it from)")
     if old and old.get("schema") == SCHEMA and (rel / old["index"]).exists() \
             and gzip.decompress((rel / old["index"]).read_bytes()) == body \
             and all(old.get(k) == v for k, v in want.items()):
