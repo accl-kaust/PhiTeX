@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhiTeX Logo Concepts</title>
+<style>
+/* CMU Serif from PhiTeX.org (OFL) */
+@font-face { font-family: "CMU Serif"; font-weight: 700; src: url("banner/fonts/cmu-serif-700-roman.woff2") format("woff2"); }
+@font-face { font-family: "Noto Sans"; font-weight: 400; src: url("banner/fonts/noto-sans-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Noto Sans"; font-weight: 700; src: url("banner/fonts/noto-sans-latin-700-normal.woff2") format("woff2"); }
+
+/* ACCL's palette (colours/accl-colours.css) */
+:root {
+  --navy: #1d3e72; --orange: #f58f2d; --gold: #f0b225; --lime: #d3c72a; --teal: #00a8a4;
+  --light: #f7f8fa; --dark: #12171f;
+  --ink: #1b222c; --muted: #495365; --rule: #e7e9ee;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #fff; color: var(--ink); font: 15px/1.5 "Noto Sans", system-ui, sans-serif; }
+main { max-width: 1240px; margin: 0 auto; padding: 32px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 17px; margin: 36px 0 2px; }
+p { margin: 0 0 12px; color: var(--muted); max-width: 820px; }
+code { font-size: 13px; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.panel { border-radius: 10px; padding: 28px 16px; display: flex; align-items: center; justify-content: center; min-height: 190px; overflow: hidden; }
+.panel.light { background: var(--light); border: 1px solid var(--rule); }
+.panel.dark { background: var(--navy); }   /* ACCL's colour-on-navy: white letters, the stripes in colour */
+.panel svg { max-width: 100%; height: auto; }
+.sizes { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+#loaders .panel { gap: 32px; flex-wrap: wrap; }
+button { font: inherit; padding: 4px 14px; border: 1px solid var(--rule); border-radius: 6px; background: #fff; cursor: pointer; }
+@media (max-width: 760px) { .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>PhiTeX logo: the woven ribbon</h1>
+  <p>ΦTeX in CMU Serif Bold. TeX is set exactly as TeX sets it (<code>T\kern-.1667em\lower.5ex\hbox{E}\kern-.125emX</code>), and the Φ is lowered by the same .5ex.
+  The stripes are ACCL's (8, 6.17, 4.33 and 2.5, gaps of 2.5, slant 54°), scaled so the orange is half the T's stem.
+  Where a stripe and a letter cross, the one underneath leaves ACCL's 2.5 gap.
+  Everything is generated from <code>WORD</code>, <code>STRIPE</code> and <code>STYLES</code> below; each style says, for every letter, what lies on top.</p>
+  <div id="styles"></div>
+</main>
+
+<script>
+const DEG = Math.PI / 180;
+const K = Math.tan(36 * DEG);          // a stripe leans to 54° from horizontal
+const S = 1 / Math.sin(54 * DEG);      // a slanted stripe's horizontal width per unit measured square
+const STRIPES = [[8, 'var(--orange)'], [6.17, 'var(--gold)'], [4.33, 'var(--lime)'], [2.5, 'var(--teal)']];
+const GAP = 2.5;
+
+// the word: caps CAP units tall, baseline at y = CAP; kerns in em as TeX's macros give them
+const CMU = "'CMU Serif'";
+const CAP = 64;
+const WORD = {
+  shift: { 'Φ': -0.5, T: 0, E: -0.5, X: 0 },   // ex, + up: the Φ lowered like TeX's E
+  kern: { T: 0, E: -0.1667, X: -0.125 },        // em, before each letter: TeX's own (the Φ's is measured, below)
+  clear: 0.04,                                   // em, the nearest the Φ may come to the T in any direction
+};
+const STRIPE = {
+  scale: 0.66,         // orange = half the T's stem
+  drop: -3.2,          // units the woven ribbon's level run sits below the word's middle: the E's middle arm inside the orange, the
+                       // orange's gap clear of the T's and X's feet, the teal's gap over the top of the Φ's bowl
+};
+let k, g, bandSq, bandW;
+function setScale(scale = STRIPE.scale) {
+  k = scale; g = GAP * scale;                                   // g: the gap, square to a stroke
+  bandSq = STRIPES.reduce((s, [w]) => s + w * k, 0) + 3 * g;    // the four stripes' width, square to them
+  bandW = bandSq * S;                                           // the same, measured level
+}
+setScale();
+
+// what lies on top where a stripe crosses a letter:
+//   'letter' the letter, 'stripes' the stripes, 'stem' the letter's stem (the rest under the stripes), 'rest' the reverse.
+// on: per letter, or a function (letter index, stripe index 0 orange .. 3 teal) for a weave that differs stripe by stripe.
+// cross (instead of on): woven crossing by crossing, from a table (CROSS, below).
+// The weave: where a letter lies on a stripe. One row per crossing: the letter, a box (x in em right of its origin;
+// y, if given, in em above its baseline, else full height), and the stripes (0 orange .. 3 teal) it lies on there.
+// Everywhere else the stripe lies on top. A box takes the letter's whole piece of ink inside that stripe and its gaps,
+// and its edges stay clear of ink there, so nothing is cut across a stroke. Plain weave: along a stripe the crossings
+// alternate, and neighbouring stripes do the opposite on the same stroke. Add ?boxes to the page's URL to see the boxes.
+const CROSS = [
+  // the Φ: up the slant across the bottom of the bowl's left and the stem, round the turn across the bowl's right. Where
+  // the bowl joins the stem a stripe meets both as one piece (the gold, low; the lime and the teal, at the top)
+  { at: 'Φ', x: [0.20, 0.34], y: [0.10, 0.30], over: [3] },   // bowl, left
+  { at: 'Φ', x: [0.29, 0.53], y: [0.08, 0.42], over: [1] },   // the bowl's left and the stem
+  { at: 'Φ', x: [0.366, 0.90], y: [0.10, 1], over: [2] },     // the stem and the bowl's top
+  { at: 'Φ', x: [0.53, 0.90], over: [0] },                    // bowl, right
+  { at: 'T', x: [0.25, 0.55], over: [1, 3] },     // stem
+  { at: 'E', x: [0.00, 0.60], over: [0, 2] },     // the orange: stem, middle arm and its serif (the arm lies on the orange)
+  { at: 'X', x: [0.00, 0.401], over: [1] },       // thin stroke
+  { at: 'X', x: [0.401, 0.90], over: [0, 2] },    // thick stroke
+  { at: 'X', x: [0.00, 0.90], over: [3] },        // the teal meets the X where its strokes cross: one crossing
+];
+// the chosen style. Earlier ones are kept in ARCHIVE (not drawn): move one into STYLES to see it again.
+const STYLES = [
+  { title: '7 · Woven, plain weave', text: 'Up through the Φ at 54°, then level through TeX, woven all the way: each stripe goes over a stroke, under the next, and does the opposite of its neighbours. Two layers of plain shapes, the stripes and then the letters with the stripes\' gaps cut out of them; the table CROSS says where a letter lies on a stripe instead. The level run sits where no stroke runs along a stripe: the E\'s middle arm lies inside the orange, the feet of the T and X clear its gap, and the top of the Φ\'s bowl lies inside the teal\'s.',
+    bands: 'ribbon', cross: CROSS },
+];
+// the Φ alone (favicon, app icon, the loader): the same Φ and ribbon, the ribbon ending past the bowl
+const MARK = { ...STYLES[0], only: ['Φ'] };
+
+const ARCHIVE = [
+  { title: 'The original weave, Φ lowered', text: 'Over the Φ\'s bowl, under its stem. TeX untouched.',
+    bands: 'phi', on: { 'Φ': 'stem' } },
+  { title: '3 · Ribbon', text: 'Up through the Φ at 54° (the original weave), then level through TeX: under the T, over the E, under the X.',
+    bands: 'ribbon', on: { 'Φ': 'stem', T: 'letter', E: 'stripes', X: 'letter' } },
+  { title: '4 · Ribbon, the other way round', text: 'Over the T, under the E, over the X.',
+    bands: 'ribbon', on: { 'Φ': 'stem', T: 'stripes', E: 'letter', X: 'stripes' } },
+];
+
+const ctx = document.createElement('canvas').getContext('2d');
+const metrics = (size, s) => { ctx.font = `700 ${size}px ${CMU}`; return ctx.measureText(s); };
+const SIZE = () => CAP / metrics(100, 'T').actualBoundingBoxAscent * 100;
+const f2 = v => +v.toFixed(2);
+let uid = 0;
+
+// a glyph's ink, row by row: runs of [x0, x1] relative to its origin, y relative to its baseline
+const RASTER = {};
+function raster(ch, size) {
+  const key = ch + size; if (RASTER[key]) return RASTER[key];
+  const z = 4, pad = 30, m = metrics(size, ch);
+  const W = Math.ceil((m.width + 2 * pad) * z), H = Math.ceil((size * 1.3 + 2 * pad) * z), base = pad + size;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d'); x.scale(z, z); x.font = `700 ${size}px ${CMU}`; x.fillText(ch, pad, base);
+  const px = x.getImageData(0, 0, W, H).data, rows = [];
+  for (let r = 0; r < H; r++) {
+    const runs = []; let start = -1;
+    for (let q = 0; q <= W; q++) {
+      const on = q < W && px[(r * W + q) * 4 + 3] > 100;
+      if (on && start < 0) start = q;
+      if (!on && start >= 0) { runs.push([start / z - pad, q / z - pad]); start = -1; }
+    }
+    if (runs.length) rows.push({ y: r / z - base, h: 1 / z, runs });
+  }
+  return (RASTER[key] = rows);
+}
+
+// a glyph's stem as one outline: in each row the stem's run, or a narrow single run (serifs) where there is one
+function stemPath(rows, ox, oy) {
+  const top = rows[0].y, bot = rows[rows.length - 1].y, mid = (top + bot) / 2;
+  const midRow = rows.reduce((a, r) => Math.abs(r.y - mid) < Math.abs(a.y - mid) ? r : a);
+  const all = rows.flatMap(r => r.runs), cx = (Math.min(...all.map(r => r[0])) + Math.max(...all.map(r => r[1]))) / 2;
+  const stem = midRow.runs.reduce((a, r) => Math.abs((r[0] + r[1]) / 2 - cx) < Math.abs((a[0] + a[1]) / 2 - cx) ? r : a);
+  const sw = stem[1] - stem[0];
+  const runs = rows.map(r => [r.y, r.h, r.runs.length === 1 && r.runs[0][1] - r.runs[0][0] < 3.2 * sw ? r.runs[0] : stem]);
+  const L = runs.flatMap(([y, h, [a]]) => [[ox + a, oy + y], [ox + a, oy + y + h]]);
+  const R = runs.flatMap(([y, h, [, b]]) => [[ox + b, oy + y], [ox + b, oy + y + h]]).reverse();
+  return { d: `M${[...L, ...R].map(p => p.map(f2).join(',')).join(' L')} Z`, cx: ox + (stem[0] + stem[1]) / 2 };
+}
+
+// lays out ΦTeX: each letter's character, origin, baseline and ink box
+let WORD_CACHE = null;
+function word() {
+  if (WORD_CACHE) return WORD_CACHE;
+  const size = SIZE(), ex = metrics(size, 'x').actualBoundingBoxAscent;
+  const out = [];
+  let x = 0;
+  for (const ch of ['Φ', 'T', 'E', 'X']) {
+    const m = metrics(size, ch);
+    x = out.length ? x + WORD.kern[ch] * size : m.actualBoundingBoxLeft;
+    const y = CAP - WORD.shift[ch] * ex;
+    out.push({ ch, x, y });
+    x += m.width;
+  }
+  // the Φ sits as close to the T as TeX's E does: the same gap side by side (TeX's T–E), and nowhere nearer than
+  // WORD.clear, so its top serif keeps clear of the T's arm. Walk the T in from the right; stop at the first touch.
+  const [P, T, E] = out, side = gapBetween(T, E, size), clear = WORD.clear * size;
+  const fits = d => { const t = { ...T, x: T.x + d }; return gapBetween(P, t, size) >= side && nearest(P, t, size) >= clear; };
+  let hi = 0.4 * size, lo = hi;
+  while (lo > -0.6 * size && fits(lo)) { hi = lo; lo -= 0.5; }
+  for (let i = 0; i < 12; i++) { const mid = (lo + hi) / 2; if (fits(mid)) hi = mid; else lo = mid; }
+  for (const l of out.slice(1)) l.x += hi;
+  for (const l of out) {
+    const m = metrics(size, l.ch);
+    Object.assign(l, { l: l.x - m.actualBoundingBoxLeft, r: l.x + m.actualBoundingBoxRight, t: l.y - m.actualBoundingBoxAscent, b: l.y + m.actualBoundingBoxDescent });
+  }
+  return (WORD_CACHE = { size, letters: out });
+}
+// the narrowest level gap from a's ink to b's ink, over the rows (quarter units) where both have ink
+function gapBetween(a, b, size) {
+  const right = new Map();
+  for (const r of raster(a.ch, size)) right.set(Math.round((a.y + r.y) * 4), a.x + r.runs[r.runs.length - 1][1]);
+  let gap = Infinity;
+  for (const r of raster(b.ch, size)) {
+    const ar = right.get(Math.round((b.y + r.y) * 4));
+    if (ar !== undefined) gap = Math.min(gap, b.x + r.runs[0][0] - ar);
+  }
+  return gap;
+}
+// the shortest distance between two letters' inks, from the edge cells of their rasters (half-unit grid)
+const EDGE = {};
+function edge(ch, size) {
+  const key = ch + size; if (EDGE[key]) return EDGE[key];
+  const cells = new Set();
+  for (const r of raster(ch, size)) for (const [a, b] of r.runs) for (let x = Math.ceil(a * 2); x <= Math.floor(b * 2); x++) cells.add(Math.round(r.y * 2) * 10000 + x);
+  const pts = [];
+  for (const c of cells) {
+    const y = Math.round(c / 10000), x = c - y * 10000;
+    if (![1, -1, 10000, -10000].every(d => cells.has(c + d))) pts.push([x / 2, y / 2]);
+  }
+  return (EDGE[key] = pts);
+}
+function nearest(a, b, size) {
+  const A = edge(a.ch, size), B = edge(b.ch, size);
+  let best = Infinity;
+  for (const [ax, ay] of A) {
+    const px = a.x + ax, py = a.y + ay;
+    for (const [bx, by] of B) {
+      const dx = b.x + bx - px, dy = b.y + by - py, d = dx * dx + dy * dy;
+      if (d < best) best = d;
+    }
+  }
+  return Math.sqrt(best);
+}
+
+// stripes are {c, d, w}: a centre line stroked w wide (butt ends), so a dilated copy is the same line stroked w + 2g.
+// A slanted band through (cx, cy), from y0 to y1, the orange on the right; ends cut level by the caller's clip.
+function slant(cx, cy, y0, y1) {
+  const u = [Math.cos(54 * DEG), -Math.sin(54 * DEG)], n = [-u[1], u[0]];   // up the slant; its right-hand normal
+  let o = bandSq / 2;
+  return STRIPES.map(([w, c]) => {
+    const off = o - w * k / 2; o -= w * k + g;
+    const px = cx + n[0] * off, py = cy + n[1] * off;
+    const at = y => px + (py - y) * K;
+    return { c, w: w * k, d: `M${f2(at(y1))},${f2(y1)} L${f2(at(y0))},${f2(y0)}`, clip: [y0, y1], box: [at(y1) - w * k * S, y0, at(y0) + w * k * S, y1] };
+  });
+}
+// a ribbon: up the slant through (cx, cy), turning (radius R at its centre line) to run level at yL until xEnd; the orange inside the turn
+function ribbon(cx, cy, yL, yStart, xEnd, R = bandSq / 2 + 4) {
+  const u = [Math.cos(54 * DEG), -Math.sin(54 * DEG)], n = [-u[1], u[0]];
+  // the turn's centre: R below the level line and R right of the rising line through (cx, cy)
+  const Fy = yL + R, Fx = cx + (R - (Fy - cy) * n[1]) / n[0];
+  let o = bandSq / 2;
+  return STRIPES.map(([w, c]) => {
+    const off = o - w * k / 2; o -= w * k + g;
+    const r = R - off;
+    const t1 = [Fx - n[0] * r, Fy - n[1] * r], t2 = [Fx, Fy - r];
+    const back = (yStart - t1[1]) / -u[1];               // back down the slant to yStart
+    const s = [t1[0] - u[0] * back, t1[1] - u[1] * back];
+    return { c, w: w * k, d: `M${f2(s[0])},${f2(s[1])} L${f2(t1[0])},${f2(t1[1])} A${f2(r)},${f2(r)} 0 0 1 ${f2(t2[0])},${f2(t2[1])} L${f2(xEnd)},${f2(t2[1])}`, clip: [-1000, yStart], box: [s[0] - w * k, yL - bandSq / 2, xEnd, yStart], ly: t2[1] };
+  });
+}
+function level(x0, x1, yc) {
+  let y = yc - bandSq / 2;
+  return STRIPES.map(([w, c]) => { const s = { c, w: w * k, d: `M${f2(x0)},${f2(y + w * k / 2)} H${f2(x1)}`, clip: [-1000, 1000], box: [x0, y, x1, y + w * k] }; y += w * k + g; return s; });
+}
+
+function render(style, fill) {
+  setScale(style.scale);
+  const w = word(), size = w.size, id = 'w' + (uid++), L = w.letters;
+  const st = `font: 700 ${size}px ${CMU}`;
+  const text = (l, extra = '', color = null) => `<text x="${f2(l.x)}" y="${f2(l.y)}" style="${st}${color ? '; fill:' + color : ''}" ${extra}>${l.ch}</text>`;
+  const stems = L.map(l => stemPath(raster(l.ch, size), l.x, l.y));
+  const shared = [Math.max(...L.map(l => l.t)), Math.min(...L.map(l => l.b))];   // the band every letter crosses
+
+  // the bands, each stripe tagged with the letters it may cross
+  let stripes = [];
+  const all = [0, 1, 2, 3];
+  if (style.bands === 'phi' || style.bands === 'each') {
+    const which = style.bands === 'phi' ? [0] : all;
+    for (const i of which) {
+      const l = L[i], cx = i < 2 ? stems[i].cx : (l.l + l.r) / 2, cy = (l.t + l.b) / 2;
+      stripes.push(...slant(cx, cy, l.t - 2, l.b + 2).map(s => ({ ...s, cross: [i] })));
+    }
+  } else if (style.bands === 'ribbon') {
+    // level through the word's middle; woven, at the height nearby where the strokes cross the stripes cleanly
+    const p = L[0], yL = (shared[0] + shared[1]) / 2 + 6;
+    const last = style.only ? L.filter(l => style.only.includes(l.ch)).pop() : L[3];
+    // the mark's ribbon ends at the bowl's edge: the stripes on top end with it, the ones beneath end under it
+    const make = y => ribbon(stems[0].cx, (p.t + p.b) / 2 + 6, y, p.b + 4, last.r + (style.only ? 0 : 6)).map(s => ({ ...s, cross: all }));
+    stripes = make(yL + (style.cross ? STRIPE.drop : 0));
+  } else {
+    stripes = level(L[0].l - 6, L[3].r + 6, (shared[0] + shared[1]) / 2).map(s => ({ ...s, cross: all }));
+  }
+
+  stripes.forEach((s, j) => s.k = j % STRIPES.length);
+  if (style.cross) {
+    const only = style.only || L.map(l => l.ch);
+    return layered({ ...w, letters: L.filter(l => only.includes(l.ch)) }, stripes, style.cross.filter(c => only.includes(c.at)), fill);
+  }
+  const onOf = (i, s) => typeof style.on === 'function' ? style.on(i, s.k) : (style.on[L[i].ch] || 'letter');
+  const BIG = 'x="-500" y="-500" width="2000" height="1500"';
+  let defs = '';
+  const clipOf = s => { const cid = id + 'k' + (uid++); defs += `<clipPath id="${cid}"><rect x="-500" y="${s.clip[0]}" width="2000" height="${s.clip[1] - s.clip[0]}"/></clipPath>`; return cid; };
+  stripes.forEach(s => s.cid = clipOf(s));
+  const line = (s, color, wd, extra = '') => `<path d="${s.d}" fill="none" stroke="${color}" stroke-width="${f2(wd)}" ${extra}/>`;
+  // the stem / not-stem masks of each letter
+  L.forEach((l, i) => {
+    defs += `<mask id="${id}ns${i}" maskUnits="userSpaceOnUse" ${BIG}><rect ${BIG} fill="#fff"/><path d="${stems[i].d}" fill="#000"/></mask>
+      <mask id="${id}nr${i}" maskUnits="userSpaceOnUse" ${BIG}><path d="${stems[i].d}" fill="#fff"/></mask>
+      <mask id="${id}rs${i}" maskUnits="userSpaceOnUse" ${BIG}><path d="${stems[i].d}" fill="#fff" stroke="#fff" stroke-width="${2 * g}"/></mask>`;
+  });
+  // each letter: cut by every stripe that lies on it (with its gap); 'stem' keeps the stem, 'rest' keeps the rest
+  let body = '';
+  L.forEach((l, i) => {
+    const cuts = stripes.filter(s => s.cross.includes(i) && onOf(i, s) !== 'letter');
+    if (!cuts.length) { body += text(l, '', fill); return; }
+    const keep = s => ({ stem: ` mask="url(#${id}ns${i})"`, rest: ` mask="url(#${id}nr${i})"` })[onOf(i, s)] || '';
+    defs += `<mask id="${id}l${i}" maskUnits="userSpaceOnUse" ${BIG}><rect ${BIG} fill="#fff"/>
+      ${cuts.map(s => `<g clip-path="url(#${s.cid})"${keep(s)}>${line(s, '#000', s.w + 2 * g, 'stroke-linecap="square"')}</g>`).join('')}</mask>`;
+    body += `<g mask="url(#${id}l${i})">${text(l, '', fill)}</g>`;
+  });
+  // each stripe: cut by every letter (or the letter's stem or rest) lying on it, with the gap
+  stripes.forEach((s, j) => {
+    const over = s.cross.filter(i => onOf(i, s) !== 'stripes');
+    if (!over.length) { body += `<g clip-path="url(#${s.cid})">${line(s, s.c, s.w)}</g>`; return; }
+    defs += `<mask id="${id}s${j}" maskUnits="userSpaceOnUse" ${BIG}><rect ${BIG} fill="#fff"/>
+      ${over.map(i => {
+        const part = ({ stem: ` mask="url(#${id}rs${i})"`, rest: ` mask="url(#${id}ns${i})"` })[onOf(i, s)] || '';
+        return `<g${part}>${text(L[i], `fill="#000" stroke="#000" stroke-width="${2 * g}" stroke-linejoin="round"`)}</g>`;
+      }).join('')}</mask>`;
+    body += `<g clip-path="url(#${s.cid})"><g mask="url(#${id}s${j})">${line(s, s.c, s.w)}</g></g>`;
+  });
+  // the box: the letters, and the stripes' ends
+  const x0 = Math.min(L[0].l, ...stripes.map(s => s.box[0])), x1 = Math.max(L[3].r, ...stripes.map(s => s.box[2]));
+  const y0 = Math.min(...L.map(l => l.t), ...stripes.map(s => s.box[1])), y1 = Math.max(...L.map(l => l.b), ...stripes.map(s => s.box[3]));
+  return { body: `<defs>${defs}</defs>${body}`, x0, x1, y0, y1 };
+}
+
+// ---- woven: two layers of plain shapes ----
+//   1. the stripes. Where a letter lies on a stripe, the stripe gives way by the gap g round the letter's own outline
+//      (the letter stroked 2g), inside that crossing's box only.
+//   2. the letters, on top. Each stripe's gap (its own path stroked w + 2g) is cut out of each letter, except inside
+//      that letter's crossings with that stripe, where it lies on the stripe.
+// Nothing is measured: the weave is the table CROSS (above). To animate a stripe, animate its path in both layers alike.
+//
+const BOXES = /boxes/.test(location.search);
+function layered(w, stripes, cross, fill) {
+  const id = 'v' + (uid++), BIG = 'x="-500" y="-500" width="2000" height="1500"', size = w.size;
+  const at = Object.fromEntries(w.letters.map(l => [l.ch, l]));
+  let defs = '';
+  const def = (tag, inner, attrs = '') => { const d = id + (uid++); defs += `<${tag} id="${d}" ${attrs}>${inner}</${tag}>`; return `url(#${d})`; };
+  const mask = (inner, bg = '#fff') => `mask="${def('mask', `<rect ${BIG} fill="${bg}"/>${inner}`, `maskUnits="userSpaceOnUse" ${BIG}`)}"`;
+  const rect = (c, extra) => { const l = at[c.at], [lo, hi] = c.y || [-10, 10];
+    return `<rect x="${f2(l.x + c.x[0] * size)}" y="${f2(l.y - hi * size)}" width="${f2((c.x[1] - c.x[0]) * size)}" height="${f2((hi - lo) * size)}" ${extra}/>`; };
+  const ends = stripes.map(s => def('clipPath', `<rect x="-500" y="${s.clip[0]}" width="2000" height="${s.clip[1] - s.clip[0]}"/>`));
+  // every path of stripe j (the stripe and its gaps) is class phx-sj and length 1, so one dash animation moves them alike
+  const line = (j, col, wd) => `<path class="phx-s${j}" pathLength="1" clip-path="${ends[j]}" d="${stripes[j].d}" fill="none" stroke="${col}" stroke-width="${f2(wd)}"/>`;
+  const text = (l, extra) => `<text x="${f2(l.x)}" y="${f2(l.y)}" style="font: 700 ${size}px ${CMU}" ${extra}>${l.ch}</text>`;
+  const on = j => cross.filter(c => c.over.includes(j));
+  // 1. the stripes, each cut round the letters lying on it
+  let body = stripes.map((s, j) => {
+    const cut = on(j).map(c => `<g clip-path="${def('clipPath', rect(c, ''))}">${text(at[c.at], `fill="#000" stroke="#000" stroke-width="${f2(2 * g)}" stroke-linejoin="miter" stroke-miterlimit="4"`)}</g>`).join('');
+    return cut ? `<g ${mask(cut)}>${line(j, s.c, s.w)}</g>` : line(j, s.c, s.w);
+  }).join('');
+  // 2. the letters, each with each stripe's gap cut out of it but in its own crossings with that stripe
+  body += w.letters.map(l => stripes.reduce((inner, s, j) => {
+    const keep = on(j).filter(c => c.at === l.ch).map(c => rect(c, 'fill="#000"')).join('');
+    const gap = keep ? `<g ${mask(keep)}>${line(j, '#000', s.w + 2 * g)}</g>` : line(j, '#000', s.w + 2 * g);
+    return `<g ${mask(gap)}>${inner}</g>`;
+  }, text(l, `fill="${fill}"`))).join('');
+  if (BOXES) body += cross.map(c => rect(c, `fill="none" stroke="#e0218a" stroke-width="0.4" stroke-dasharray="1.5 1"`)).join('');
+  const L = w.letters;
+  const x0 = Math.min(...L.map(l => l.l), ...stripes.map(s => s.box[0])), x1 = Math.max(...L.map(l => l.r), ...stripes.map(s => s.box[2]));
+  const y0 = Math.min(...L.map(l => l.t), ...stripes.map(s => s.box[1])), y1 = Math.max(...L.map(l => l.b), ...stripes.map(s => s.box[3]));
+  return { body: `<defs>${defs}</defs>${body}`, x0, y0, x1, y1 };
+}
+const logo = (style, fill, h) => svg(render(style, fill), h);
+const svg = (r, h, pad = 3) =>
+  `<svg viewBox="${f2(r.x0 - pad)} ${f2(r.y0 - pad)} ${f2(r.x1 - r.x0 + 2 * pad)} ${f2(r.y1 - r.y0 + 2 * pad)}" height="${h}" width="${f2(h * (r.x1 - r.x0 + 2 * pad) / (r.y1 - r.y0 + 2 * pad))}">${r.body}</svg>`;
+
+// The loading animation, in three acts on one logo <svg>:
+//   start   the stripes draw in from the bottom, orange first;
+//   steady  while the document loads, each stripe drains away through its far end and flows in again, one after another;
+//   end     done() runs each stripe on to whole from wherever it is, and the logo stands still.
+// A stripe and its gaps are the same path (class phx-sj, length 1): one dash animation moves the stripe and the gaps it
+// cuts in the letters alike. Under prefers-reduced-motion the logo stays still.
+const FLOW = { draw: 700, stagger: 110, rest: 250, cycle: 1600, settle: 450 };
+const OFF = 1.01;   // a dash offset that hides a stripe whole (dash 1, gap 2: no zero-length dash left at either end)
+function loader(el) {
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const paths = [0, 1, 2, 3].map(j => [...el.querySelectorAll('.phx-s' + j)]);
+  const all = (j, keys, opts) => paths[j].map(p => p.animate(keys, opts));
+  const ease = 'cubic-bezier(.45, 0, .55, 1)';
+  const loops = [];
+  if (!still) paths.forEach((ps, j) => {
+    for (const p of ps) p.style.strokeDasharray = '1 2';
+    all(j, [{ strokeDashoffset: OFF }, { strokeDashoffset: 0 }], { duration: FLOW.draw, delay: j * FLOW.stagger, easing: 'cubic-bezier(.2, .7, .3, 1)', fill: 'backwards' });
+    loops[j] = all(j, [{ strokeDashoffset: 0, easing: ease }, { strokeDashoffset: -OFF, offset: 0.5 }, { strokeDashoffset: OFF, offset: 0.5, easing: ease }, { strokeDashoffset: 0 }],
+      { duration: FLOW.cycle, delay: FLOW.draw + FLOW.rest + j * FLOW.stagger, iterations: Infinity });
+  });
+  return {
+    // runs each stripe on to whole; resolves when the logo stands still
+    done() {
+      if (still) return Promise.resolve();
+      return Promise.all(paths.map((ps, j) => {
+        const now = parseFloat(getComputedStyle(ps[0]).strokeDashoffset) || 0;   // where this stripe is in its flow
+        el.getAnimations({ subtree: true }).forEach(a => ps.includes(a.effect.target) && a.cancel());
+        const left = now < 0 ? [{ strokeDashoffset: now }, { strokeDashoffset: -OFF, offset: (OFF + now) / (2 * OFF + now) }, { strokeDashoffset: OFF, offset: (OFF + now) / (2 * OFF + now) }, { strokeDashoffset: 0 }]
+                             : [{ strokeDashoffset: now }, { strokeDashoffset: 0 }];   // draining: out and in once more; filling: on to whole
+        const time = FLOW.settle * (now < 0 ? 2 * OFF + now : Math.max(now, 0.3));
+        return Promise.all(all(j, left, { duration: time, delay: j * FLOW.stagger * 0.5, easing: 'cubic-bezier(.3, .6, .4, 1)', fill: 'forwards' }).map(a => a.finished))
+          .then(() => ps.forEach(p => { p.getAnimations().forEach(a => a.cancel()); p.style.strokeDasharray = ''; }));
+      }));
+    },
+  };
+}
+
+document.fonts.load(`700 20px ${CMU}`, 'ΦTEX').then(() => {
+  const sizes = (s, fill, hs) => `<div class="sizes">${hs.map(h => logo(s, fill, h)).join('')}</div>`;
+  const pair = (a, b) => `<div class="row"><div class="panel light">${a}</div><div class="panel dark">${b}</div></div>`;
+  document.getElementById('styles').innerHTML = STYLES.map(s =>
+    `<h2>${s.title}</h2><p>${s.text}</p>
+     ${pair(logo(s, 'var(--navy)', 220), logo(s, '#fff', 220))}
+     <h2>Smaller</h2><p>120, 64 and 40 px tall; the README banner shows it at about 64.</p>
+     ${pair(sizes(s, 'var(--navy)', [120, 64, 40]), sizes(s, '#fff', [120, 64, 40]))}`
+  ).join('') + `
+     <h2>The Φ alone</h2><p>For the favicon, the app icon and the loader: the same Φ and ribbon, the ribbon ending past the bowl. 220, 64, 32 and 16 px tall.</p>
+     ${pair(logo(MARK, 'var(--navy)', 220), logo(MARK, '#fff', 220))}
+     ${pair(sizes(MARK, 'var(--navy)', [64, 32, 16]), sizes(MARK, '#fff', [64, 32, 16]))}
+     <h2>Loading</h2><p>Start: the stripes draw in. Steady, while the document loads: each stripe drains away through its far end and flows in again, one after another. End, when it has loaded: each stripe runs on to whole and the logo stands still. Each stripe's gaps move with it. This demo loads for 4 s, rests 2 s, and starts again.</p>
+     <p><button id="again">Start</button> <button id="done">Done</button></p>
+     <div id="loaders">${pair(logo(MARK, 'var(--navy)', 160) + logo(STYLES[0], 'var(--navy)', 160), logo(MARK, '#fff', 160) + logo(STYLES[0], '#fff', 160))}</div>`;
+  const svgs = () => [...document.querySelectorAll('#loaders svg')];
+  let runs = [], timer = 0;
+  const finish = () => { clearTimeout(timer); const r = runs; runs = []; return Promise.all(r.map(l => l.done())); };
+  const start = () => { clearTimeout(timer); svgs().forEach(e => e.getAnimations({ subtree: true }).forEach(a => a.cancel())); runs = svgs().map(loader); timer = setTimeout(() => finish().then(() => { timer = setTimeout(start, 2000); }), 4000); };
+  document.getElementById('again').onclick = start;
+  document.getElementById('done').onclick = () => finish();
+  start();
+  // ?t=ms freezes the demo that long after its start (to check frames)
+  const t = +new URLSearchParams(location.search).get('t');
+  if (t) { clearTimeout(timer); document.getAnimations().forEach(a => { a.pause(); a.currentTime = t; }); }
+});
+</script>
+</body>
+</html>
