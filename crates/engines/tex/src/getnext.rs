@@ -275,18 +275,19 @@ impl Run<'_, '_> {
     /// Where a line is now, for a message that names it later: the
     /// line's own number where it has one, else this run's lines begun
     /// so far ([`Run::input_line_no`] reads the rest when needed).
-    pub(crate) fn line_mark(&self) -> (Option<i64>, i64, Option<phitex_defuse::ValueId>) {
+    pub(crate) fn line_mark(&self) -> crate::run::LineMark {
         match self.file_line_here() {
-            Some(crate::run::FileLine::Known(n)) => (Some(n), 0, None),
-            Some(crate::run::FileLine::Piece(name)) => (
+            Some(crate::run::FileLine::Known(n)) => (Some(n), 0, None, None),
+            Some(crate::run::FileLine::Piece(name, own)) => (
                 None,
                 self.doc_lines
                     .iter()
                     .find(|(n, _)| *n == name)
                     .map_or(0, |&(_, k)| k),
                 Some(name),
+                own,
             ),
-            None => (Some(0), 0, None),
+            None => (Some(0), 0, None, None),
         }
     }
 
@@ -346,9 +347,15 @@ impl Run<'_, '_> {
         // those it had begun when the skip began, wherever the input is
         // now, the end of all input included)
         let line = match self.skip_from {
-            (Some(n), _, _) => n,
-            (None, mine, Some(name)) => self.piece_lines_before(name)? + mine,
-            (None, mine, None) => {
+            (Some(n), _, _, _) => n,
+            (None, mine, Some(name), own) => match own {
+                Some(own) => match self.piece_line(own)? {
+                    Some(n) => n,
+                    None => self.piece_lines_before(name)? + mine,
+                },
+                None => self.piece_lines_before(name)? + mine,
+            },
+            (None, mine, None, _) => {
                 let now = self.line_mark().1;
                 i64::from(self.input_line_no()?) - (now - mine)
             }
@@ -692,7 +699,10 @@ impl Run<'_, '_> {
                     return Err(Halt::Hole);
                 }
                 let args = self.resolve_units(&args)?;
-                let segs = crate::run::decode_segs(self.v, &args);
+                let mut segs = crate::run::decode_segs(self.v, &args);
+                if let Some(n) = self.cx.followed(self.pulled) {
+                    crate::run::own_lines(&mut segs, n.raw());
+                }
                 // (where the sibling's text begins, unless its first
                 // segment continues the line before it)
                 let joins = self.input.text.len() > self.input.text_at

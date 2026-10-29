@@ -393,7 +393,8 @@ impl Operation for Exec {
                 r.rec_load = load && r.scope_kind()?.is_none();
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
                 let args = r.resolve_units(&args)?;
-                let fs = crate::run::decode_segs(r.v, &args);
+                let mut fs = crate::run::decode_segs(r.v, &args);
+                crate::run::own_lines(&mut fs, r.cx.node().raw());
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
                 crate::hints::count(r, if tokens { 4 } else { 5 });
                 if hint.cause.starts_with("region") {

@@ -444,6 +444,7 @@ impl FileRest {
             ends: true,
             origin: Some((self.name, at, ValueId::UNIT)),
             lineno: self.line,
+            owner: None,
             rescanned: false,
             chars: false,
         }
@@ -467,8 +468,10 @@ pub(crate) enum FileLine {
     /// The line's number is known here.
     Known(i64),
     /// A line of a document's piece in the file of this name: the lines
-    /// of the file begun before the node, and by it.
-    Piece(ValueId),
+    /// of the file before the text it is of, and its line there
+    /// ([`crate::input::Line::owner`]); without those, the lines of the
+    /// file begun before the node, and by it.
+    Piece(ValueId, Option<(u64, u32)>),
 }
 
 /// The engine reads that stopped a run, by the reader's kind and field
@@ -543,6 +546,10 @@ pub(crate) struct Run<'c, 'a> {
     /// number of their own, `Line::lineno`), by file name: the `lines`
     /// accumulator, contributed once at the end.
     pub doc_lines: Vec<(ValueId, i64)>,
+    /// The places of nodes' texts in their files the run read for its
+    /// lines ([`Run::piece_line`]): taken back with the lines' reads
+    /// ([`Run::settle_lines`]).
+    pub dline_reads: Vec<Field>,
     /// `mode = 0` (§1370): a `\write` (or a literal at `\shipout`)
     /// being expanded, which disables `\prevdepth`, `\spacefactor`,
     /// `\lastskip`, `\prevgraf`.
@@ -629,7 +636,7 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) expand_depth: u32,
     /// Where the conditional text being skipped began (§494's
     /// `skip_line`, [`Run::line_mark`]).
-    pub skip_from: (Option<i64>, i64, Option<ValueId>),
+    pub skip_from: LineMark,
     /// The locations a load's run first read from the engine while
     /// skipping (`PHITEX_PKG_TRACE`: which chaining reads are skips).
     pub skip_first: Vec<Loc>,
@@ -1006,6 +1013,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cs_cache: vec![(0, Tok::c(0)); CS_CACHE].into_boxed_slice(),
             lines_read: 0,
             doc_lines: Vec::new(),
+            dline_reads: Vec::new(),
             mode_zero: false,
             cmds: 0,
             exps: 0,
@@ -1033,7 +1041,7 @@ impl<'c, 'a> Run<'c, 'a> {
             uread: Vec::new(),
             in_skip: false,
             expand_depth: 0,
-            skip_from: (None, 0, None),
+            skip_from: (None, 0, None, None),
             skip_first: Vec::new(),
             defer_ok: false,
             defer_hit: None,
@@ -3248,6 +3256,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 ends: true,
                 origin: None,
                 lineno: 0,
+                owner: None,
                 rescanned: true,
                 chars: false,
             }));
@@ -4311,7 +4320,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // are read in: its line, or its name for a document's piece)
         let here = match self.file_line_here() {
             Some(FileLine::Known(n)) => vec![ValueId::UNIT, v.int(n)],
-            Some(FileLine::Piece(name)) => vec![name, v.int(-1)],
+            Some(FileLine::Piece(name, own)) => piece_here(v, name, own),
             None => Vec::new(),
         };
         let node = |toks: Vec<ValueId>| -> Vec<ValueId> {
@@ -5414,6 +5423,14 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
                     lineno: xs
                         .get(7)
                         .map_or(0, |&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
+                    // (`line_frame`'s: its node and line there)
+                    owner: match (xs.get(9), xs.get(10)) {
+                        (Some(&n), Some(&k)) => Some((
+                            u64::from_ne_bytes(int_of(v, n).to_ne_bytes()),
+                            u32::try_from(int_of(v, k)).unwrap_or(0),
+                        )),
+                        _ => None,
+                    },
                 }));
             }
             _ => {}
@@ -5603,7 +5620,50 @@ pub(crate) fn line_of(s: &Line) -> Option<FileLine> {
     if s.lineno > 0 {
         return Some(FileLine::Known(i64::from(s.lineno)));
     }
-    (!s.rescanned).then(|| FileLine::Piece(s.origin.map_or(ValueId::UNIT, |o| o.0)))
+    (!s.rescanned).then(|| FileLine::Piece(s.origin.map_or(ValueId::UNIT, |o| o.0), s.owner))
+}
+
+/// Where a line is, for a message that names it later
+/// ([`Run::line_mark`]): its number where the run knows it; else the
+/// lines of its file this run began so far, the file, and the line's
+/// node and place in that node's text where known.
+pub(crate) type LineMark = (Option<i64>, i64, Option<ValueId>, Option<(u64, u32)>);
+
+/// The environment's field of the lines of a document's file before
+/// node `n`'s text (`dline:<n>`): the client gives it for each node it
+/// cuts from a file whose text it holds (the document's), and moves it
+/// with the text; a run reads a line of that node's text from it and
+/// the line's place there ([`crate::input::Line::owner`]).
+pub(crate) fn dline_field(v: &Values, n: u64) -> Field {
+    v.field(&format!("dline:{n}"))
+}
+
+/// Node `owner`'s text's lines (`segs`, decoded from its arguments,
+/// none placed yet): each with that node and its line there, the lines
+/// begun up to it, this one with them ([`crate::input::Line::owner`]).
+pub(crate) fn own_lines(segs: &mut [Seg], owner: u64) {
+    let mut k: u32 = 0;
+    for s in segs {
+        if let Seg::Line(l) = s {
+            if l.starts {
+                k += 1;
+            }
+            if l.owner.is_none() && l.lineno == 0 && !l.rescanned && l.origin.is_some() {
+                l.owner = Some((owner, k));
+            }
+        }
+    }
+}
+
+/// A token frame's place in a document's piece ([`frame_line`]): the
+/// file's name, -1, and the node and line its line is of where known.
+pub(crate) fn piece_here(v: &Values, name: ValueId, own: Option<(u64, u32)>) -> Vec<ValueId> {
+    let mut x = vec![name, v.int(-1)];
+    if let Some((n, k)) = own {
+        x.push(v.int(i64::from_ne_bytes(n.to_ne_bytes())));
+        x.push(v.int(i64::from(k)));
+    }
+    x
 }
 
 /// Where the tokens of a token frame (`["t", toks, file, line]`,
@@ -5617,7 +5677,14 @@ pub(crate) fn frame_line(v: &Values, f: ValueId) -> Option<FileLine> {
     Some(if n >= 0 {
         FileLine::Known(n)
     } else {
-        FileLine::Piece(xs[2])
+        // (with its node and line, `piece_here`)
+        FileLine::Piece(
+            xs[2],
+            match (xs.get(4), xs.get(5)) {
+                (Some(&o), Some(&k)) => Some((u64::from_ne_bytes(int_of(v, o).to_ne_bytes()), u32::try_from(int_of(v, k)).unwrap_or(0))),
+                _ => None,
+            },
+        )
     })
 }
 

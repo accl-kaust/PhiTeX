@@ -346,6 +346,9 @@ struct Absorb<'a> {
     hints: Arc<crate::hints::Registry>,
     /// The nodes the texts applied replaced, inserted or removed.
     applied: usize,
+    /// The lines before each node's text as the environment has them
+    /// ([`dlines_of`]), moved with each text applied.
+    dlines: &'a mut FxHashMap<u64, i64>,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
@@ -466,6 +469,14 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             self.loads,
         );
         self.applied += n;
+        // (the lines before each node's text, where the text moved them:
+        // a run that reads a line of one reads them, `dline:<node>`)
+        if self.incr.is_some() {
+            let changes = dline_changes(eng.values(), self.dlines, dlines_of(self.text, self.nodes));
+            if !changes.is_empty() {
+                eng.update_environment(&changes);
+            }
+        }
         if n > 0 {
             self.unchanged = None;
             Some(version)
@@ -579,6 +590,49 @@ fn cut_text(
         }
         None => slice_keys(reg, v, text, None, file),
     }
+}
+
+/// The lines of `text` before each node's text (`nodes`, in the text's
+/// order): the line starts before its first byte, as the environment's
+/// `dline:<node>` ([`crate::run::dline_field`]) gives them to its runs.
+fn dlines_of(text: &str, nodes: &[(u64, NodeId, Src)]) -> Vec<(u64, i64)> {
+    let b = text.as_bytes();
+    let (mut at, mut nl) = (0usize, 0i64);
+    let mut out = Vec::with_capacity(nodes.len());
+    for (_, n, src) in nodes {
+        let Src::Doc(s, _) = *src;
+        // (the line starts before byte s: the text's start, and each line
+        // end before s - 1)
+        let end = s.saturating_sub(1).min(b.len());
+        if end > at {
+            nl += b[at..end].iter().fold(0, |n, &c| n + i64::from(c == b'\n'));
+            at = end;
+        }
+        out.push((n.raw(), nl + i64::from(s > 0)));
+    }
+    out
+}
+
+/// The environment's changes for the nodes' lines now (`dlines_of`)
+/// against those given before (`given`, brought up to date): a node's
+/// that moved or is new, and a node's gone (none).
+fn dline_changes(v: &Values, given: &mut FxHashMap<u64, i64>, now: Vec<(u64, i64)>) -> Vec<(Field, Option<ValueId>)> {
+    let mut out = Vec::new();
+    let mut seen: FxHashMap<u64, i64> = FxHashMap::default();
+    seen.reserve(now.len());
+    for (n, k) in now {
+        if given.get(&n) != Some(&k) {
+            out.push((crate::run::dline_field(v, n), Some(v.int(k))));
+        }
+        seen.insert(n, k);
+    }
+    for n in given.keys() {
+        if !seen.contains_key(n) {
+            out.push((crate::run::dline_field(v, *n), None));
+        }
+    }
+    *given = seen;
+    out
 }
 
 /// Where an edit puts the nodes it inserts ([`apply_slices`]).
@@ -5164,6 +5218,9 @@ pub struct Build {
     opts: Options,
     /// The nodes of the text, with their keys.
     nodes: Vec<(u64, NodeId, Src)>,
+    /// The lines of the text before each node's, as the environment
+    /// gives them (`dline:<node>`, [`dlines_of`]).
+    dlines: FxHashMap<u64, i64>,
     dvi: NodeId,
     /// The first node after the text's (the writer): new text nodes go
     /// before it, also when the text has none left.
@@ -5341,6 +5398,16 @@ impl Build {
         g.ops.pkg_loads.write().unwrap_or_else(std::sync::PoisonError::into_inner).clone_from(&g.loads);
         crate::timeline::lap("engine: the job's environment, the loads' records");
         let (nodes, incr) = g.push_document(unit, &text, defs, doc);
+        // (the lines before each node's text: a run reads a line of a
+        // node's text from them, `dline:<node>`)
+        let mut dlines = FxHashMap::default();
+        if doc {
+            let env: Vec<(Field, ValueId)> = dline_changes(g.eng.values(), &mut dlines, dlines_of(&as_file(&text), &nodes))
+                .into_iter()
+                .filter_map(|(f, x)| x.map(|x| (f, x)))
+                .collect();
+            g.eng.set_environment(env);
+        }
         // (the pages: the first page step, where the text ends: it folds
         // the pieces' profiles to its page's fire and places the page's
         // finisher and the next step, `crate::pages::Pages`; new text
@@ -5388,6 +5455,7 @@ impl Build {
             unit,
             opts,
             nodes,
+            dlines,
             dvi,
             end,
             prelude: cached,
@@ -5617,6 +5685,7 @@ impl Build {
             marks: self.g.marks.clone(),
             loads: loads.as_deref(),
             applied: 0,
+            dlines: &mut self.dlines,
         };
         let t_before = t_all.elapsed();
         crate::timeline::lap("engine: the edit's inputs");

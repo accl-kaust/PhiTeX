@@ -2548,6 +2548,9 @@ impl Run<'_, '_> {
         }
         LINES_TAKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.cx.unread(v.field("lines"));
+        for f in std::mem::take(&mut self.dline_reads) {
+            self.cx.unread(f);
+        }
     }
 
     /// The lines of the document file `name` the nodes before this one
@@ -2571,6 +2574,26 @@ impl Run<'_, '_> {
         Ok(x.map_or(0, |k| int_of(v, k)))
     }
 
+    /// The line of a document's piece's line `own` (its node and its line
+    /// in that node's text, [`crate::input::Line::owner`]): the lines of
+    /// its file before that node's text, as the client gives them where
+    /// it cut the text ([`crate::run::dline_field`], an environment read:
+    /// an edit above it re-asks only a run whose answer moves, and one
+    /// that read it into nothing that stands takes it back,
+    /// [`Run::settle_lines`]), and its line there. None where the client
+    /// gives none (a piece of a file read back): the fold then.
+    pub(crate) fn piece_line(&mut self, own: (u64, u32)) -> R<Option<i64>> {
+        let f = crate::run::dline_field(self.v, own.0);
+        let Some(x) = self.cx.env(f)? else {
+            return Ok(None);
+        };
+        if !self.dline_reads.contains(&f) {
+            self.dline_reads.push(f);
+        }
+        self.note_lines_read();
+        Ok(Some(int_of(self.v, x) + i64::from(own.1)))
+    }
+
     /// The input left as one source line, for `\inputlineno`.
     ///
     /// TeX's `line` (§304): the line of the innermost file read. A line
@@ -2580,14 +2603,32 @@ impl Run<'_, '_> {
     pub(crate) fn input_line_no(&mut self) -> R<i32> {
         let n = match self.file_line_here() {
             Some(crate::run::FileLine::Known(n)) => n,
-            Some(crate::run::FileLine::Piece(name)) => {
-                let before = self.piece_lines_before(name)?;
-                let mine = self
-                    .doc_lines
-                    .iter()
-                    .find(|(n, _)| *n == name)
-                    .map_or(0, |&(_, k)| k);
-                before + mine
+            Some(crate::run::FileLine::Piece(name, own)) => {
+                // (its line from where its node's text is: no fold of the
+                // lines the nodes before this one began)
+                if let Some(own) = own
+                    && let Some(n) = self.piece_line(own)?
+                {
+                    // (`PHITEX_LINES_CHECK`, observe: against the fold of
+                    // the lines the nodes before this one began, at one
+                    // thread the same)
+                    if crate::exec::obs_flag!("PHITEX_LINES_CHECK") {
+                        let before = self.piece_lines_before(name)?;
+                        let mine = self.doc_lines.iter().find(|(n, _)| *n == name).map_or(0, |&(_, k)| k);
+                        if before + mine != n {
+                            eprintln!("lines-check: node {} line {n} by its place, {} by the fold (owner {own:?})", self.cx.node().raw(), before + mine);
+                        }
+                    }
+                    n
+                } else {
+                    let before = self.piece_lines_before(name)?;
+                    let mine = self
+                        .doc_lines
+                        .iter()
+                        .find(|(n, _)| *n == name)
+                        .map_or(0, |&(_, k)| k);
+                    before + mine
+                }
             }
             None => 0,
         };

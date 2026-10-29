@@ -354,6 +354,14 @@ pub(crate) struct Line {
     /// file's; 0 for a document's piece, whose number is the lines of
     /// its file before the node ([`crate::run::Run::input_line_no`]).
     pub lineno: u32,
+    /// For a document's piece: the node whose text the line is of and the
+    /// lines that text begins up to it, this one with them (a line it
+    /// continues counted by the text before): its number is the lines of
+    /// its file before that node's text, which the client gives
+    /// ([`crate::run::dline_field`]), and these
+    /// ([`crate::run::Run::input_line_no`]); `None` where no node's
+    /// text holds it as the client cut it.
+    pub owner: Option<(u64, u32)>,
     /// Text read under the catcodes in force when it is read, which no
     /// analysis of a file saw: a pseudo file's lines (pdfTeX §1766) and
     /// a `\read` line (§483).
@@ -398,6 +406,7 @@ impl Line {
             ends: true,
             origin: None,
             lineno: 0,
+            owner: None,
             rescanned,
             chars: false,
         }

@@ -764,6 +764,13 @@ impl<'a> Ctx<'a> {
         n.map(|n| (n.op(), n.args().to_vec()))
     }
 
+    /// The node of the `i`-th claimed sibling, as the `following(i)`
+    /// just made found it (its read recorded there); None otherwise.
+    #[must_use]
+    pub fn followed(&self, i: usize) -> Option<NodeId> {
+        self.follow_at.filter(|x| x.0 == i).map(|x| x.1)
+    }
+
     /// The first node before me on the line that has not committed, or
     /// None when every node before me has run and committed once.
     /// A node found is recorded: the commit files me with it, and its

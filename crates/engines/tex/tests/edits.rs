@@ -880,3 +880,40 @@ fn blanks_at_line_ends_run_no_node() {
         );
     }
 }
+
+/// A line inserted at the top of a plain document whose paragraphs read
+/// `\inputlineno` into a group's definition that nothing reads (a weak
+/// read, taken back at the run's end) and one into the log (a strong
+/// one): the line numbers come from where each piece's text is, so the
+/// weak readers do not run again, the strong one does and logs the new
+/// number, and the output and log are a cold build's.
+#[test]
+fn a_line_inserted_at_the_top_reruns_no_weak_reader_of_the_line_number() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from("\\vsize=200pt \\hsize=150pt \\parindent=0pt\n");
+    for k in 0..12 {
+        let _ = writeln!(src, "{{\\edef\\where{{\\the\\inputlineno}}}}Paragraph {k} has a few words.\n");
+    }
+    src.push_str("\\message{[at \\the\\inputlineno]}Last words.\n\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./ln.tex", "ln", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = format!("\\relax\n{src}");
+    b.edit(&text);
+    for (n, op, why) in &b.stats.reruns {
+        eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+    }
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let (out, log) = b.output();
+    let (cold_out, cold_log) = cold.output();
+    assert!(common::first_difference(&out, &cold_out).is_none(), "the output is a cold build's");
+    assert!(log.contains("[at 27]") && cold_log.contains("[at 27]"), "the log has the new line: {}", common::log_excerpt(&log));
+    let weak = b
+        .stats
+        .reruns
+        .iter()
+        .filter(|(n, op, why)| *op == "exec" && !why.contains("Edited") && b.describe_node(*n).contains("\\where"))
+        .count();
+    assert_eq!(weak, 0, "no weak reader of the line runs again");
+}

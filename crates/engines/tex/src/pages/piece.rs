@@ -1116,12 +1116,18 @@ pub(crate) fn line_frame(v: &Values, s: &Line) -> Option<ValueId> {
         let at = at + s.loc.min(s.buf.len());
         xs.push(name);
         xs.push(v.int(i64::try_from(at).unwrap_or(0)));
-        if s.lineno > 0 || unit != ValueId::UNIT {
+        if s.lineno > 0 || unit != ValueId::UNIT || s.owner.is_some() {
             xs.push(v.int(i64::from(s.lineno)));
         }
         // (a unit's line: its place from the unit's start, the unit named)
-        if unit != ValueId::UNIT {
+        if unit != ValueId::UNIT || s.owner.is_some() {
             xs.push(unit);
+        }
+        // (a document piece's line: the node whose text it is, and its
+        // line there, `Line::owner`)
+        if let Some((n, k)) = s.owner {
+            xs.push(v.int(i64::from_ne_bytes(n.to_ne_bytes())));
+            xs.push(v.int(i64::from(k)));
         }
     }
     Some(v.list(xs))
@@ -1182,7 +1188,7 @@ impl Run<'_, '_> {
         let here_of = |c: Option<crate::run::FileLine>| -> Vec<ValueId> {
             match c {
                 Some(crate::run::FileLine::Known(n)) => vec![ValueId::UNIT, v.int(n)],
-                Some(crate::run::FileLine::Piece(name)) => vec![name, v.int(-1)],
+                Some(crate::run::FileLine::Piece(name, own)) => crate::run::piece_here(v, name, own),
                 None => Vec::new(),
             }
         };
