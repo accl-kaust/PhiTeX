@@ -58,6 +58,8 @@ pub(crate) struct CommitStats {
     pub(crate) predictions_confirmed: u64,
     pub(crate) shaped: u64,
     pub(crate) commit_ns: u64,
+    /// (`profile`) `commit_ns` on the thread's CPU (`lock::thread_cpu_ns`).
+    pub(crate) commit_cpu_ns: u64,
     pub(crate) reask_ns: u64,
 }
 
@@ -1110,6 +1112,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             continue;
         }
         let t_lock = Instant::now();
+        let cpu_lock = crate::lock::thread_cpu_ns();
         let pos = pos_in(&inner, node);
         // room for what is filed, made outside the lock
         if let Some(m) = room.as_mut() {
@@ -1559,6 +1562,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         std::mem::take(&mut ix).apply(eng, seg, &inner);
         lap.lap("index");
         st.commit_ns = ns(t_lock);
+        st.commit_cpu_ns = crate::lock::thread_cpu_ns().saturating_sub(cpu_lock);
         lap.report(node.id.0, st.commit_ns, rec.defs.len(), rec.reads.len());
         drop(inner);
         if !replaced.is_empty() {

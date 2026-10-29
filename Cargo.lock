@@ -2048,6 +2048,7 @@ name = "phitex-defuse"
 version = "0.0.0"
 dependencies = [
  "crossbeam-deque",
+ "libc",
  "serde",
  "serde_json",
 ]

@@ -206,6 +206,25 @@ pub fn site_lines() -> Vec<(String, u64)> {
     out
 }
 
+/// (`profile`) This thread's CPU time, nanoseconds
+/// (`CLOCK_THREAD_CPUTIME_ID`): what a commit spent on the CPU, apart
+/// from the time the thread was off it. 0 without `profile` or off unix.
+#[allow(unsafe_code)]
+pub(crate) fn thread_cpu_ns() -> u64 {
+    #[cfg(all(feature = "profile", unix))]
+    {
+        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: `t` is a valid, writable timespec for the call.
+        if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut t) } == 0 {
+            return u64::try_from(t.tv_sec)
+                .unwrap_or(0)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(u64::try_from(t.tv_nsec).unwrap_or(0));
+        }
+    }
+    0
+}
+
 /// Nanoseconds since `t`.
 pub(crate) fn ns(t: Instant) -> u64 {
     u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX)

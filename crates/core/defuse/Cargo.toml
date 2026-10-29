@@ -11,9 +11,12 @@ crossbeam-deque = "0.8"
 # Only with the `observe` feature.
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+# Only with the `profile` feature: a commit's time on its thread's CPU
+# (`Times::commit_max_cpu_ns`). Release builds have no dependency on it.
+libc = { version = "0.2", optional = true }
 
 [features]
 # Diagnostics compiled in: lock-wait and phase timers, the realised chain's
 # per-node times. Off by default; release builds compile every probe out.
-profile = []
+profile = ["dep:libc"]
 observe = ["dep:serde", "dep:serde_json"]

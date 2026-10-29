@@ -446,6 +446,11 @@ pub struct Times {
     /// In commits: the diff into the node's own segment.
     pub commit_ns: u64,
     pub commit_max_ns: u64,
+    /// (`profile`) The longest commit's time on its thread's CPU: its
+    /// wall time less what the thread spent off the CPU, preempted or
+    /// asleep outside the engine (the allocator, the kernel), which
+    /// `commit_max_ns` counts. 0 without `profile`.
+    pub commit_max_cpu_ns: u64,
     /// In the walks forward that re-ask readers.
     pub reask_ns: u64,
     /// Workers with nothing to run and nothing to steal.

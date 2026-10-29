@@ -201,6 +201,7 @@ pub(crate) struct Worker {
     pub(crate) wasted_ns: AtomicU64,
     pub(crate) commit_ns: AtomicU64,
     pub(crate) commit_max_ns: AtomicU64,
+    pub(crate) commit_max_cpu_ns: AtomicU64,
     /// The node of the longest commit (raw id).
     pub(crate) commit_max_node: AtomicU64,
     pub(crate) reask_ns: AtomicU64,
@@ -443,6 +444,7 @@ impl Pool {
                 wasted_ns: AtomicU64::new(0),
                 commit_ns: AtomicU64::new(0),
                 commit_max_ns: AtomicU64::new(0),
+                commit_max_cpu_ns: AtomicU64::new(0),
                 commit_max_node: AtomicU64::new(0),
                 reask_ns: AtomicU64::new(0),
                 idle_ns: AtomicU64::new(0),
@@ -1600,6 +1602,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             }
             Worker::add(&w.commits, 1);
             Worker::add(&w.commit_ns, st.commit_ns);
+            w.commit_max_cpu_ns.fetch_max(st.commit_cpu_ns, Ordering::Relaxed);
             if st.commit_ns > w.commit_max_ns.load(Ordering::Relaxed) {
                 w.commit_max_ns.store(st.commit_ns, Ordering::Relaxed);
                 w.commit_max_node.store(n.raw(), Ordering::Relaxed);
