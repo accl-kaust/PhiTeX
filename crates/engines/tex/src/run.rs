@@ -4283,8 +4283,9 @@ impl<'c, 'a> Run<'c, 'a> {
             } else if let Some(u) = units_frame(v, f) {
                 // (a file read as units, not read here: the one node its
                 // rest is reads it as a file, its units loaded when it
-                // reads a line, `Run::load_written`)
-                out.push(vec![v.list(vec![u]), v.int(0)]);
+                // reads a line, `Run::load_written`; a document's, as the
+                // run reading it was)
+                out.push(vec![v.list(vec![u]), v.int(kind)]);
             } else if f.has_lines() {
                 let fr = v.list(vec![
                     tag_f,
@@ -4292,7 +4293,13 @@ impl<'c, 'a> Run<'c, 'a> {
                     v.int(i64::try_from(f.off).unwrap_or(0)),
                     f.name,
                 ]);
-                out.push(vec![v.list(vec![fr]), v.int(0)]);
+                // (the rest of a file the run read inline, its own lines
+                // and not a document's regions: a document's as the run
+                // was, so what it puts on the main list goes to the
+                // pages; as a format's node, a `\special` after a
+                // document file it `\input` was lost and a letter there
+                // ended the build)
+                out.push(vec![v.list(vec![fr]), v.int(kind)]);
             }
         };
         for l in self.input.levels.iter().rev() {
