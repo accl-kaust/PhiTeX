@@ -258,9 +258,12 @@ struct Opts {
     copy_pdf: Option<String>,
     #[arg(long, global = true, hide = true)]
     no_copy_pdf: bool,
-    /// No <job>.synctex.gz (the default; a `phitex.toml`'s
-    /// `synctex = true` asks for it)
-    #[arg(long, global = true)]
+    /// Write <job>.synctex.gz, for a PDF viewer's jumps between source
+    /// and pages (`synctex = true` in `phitex.toml`)
+    #[arg(long, global = true, overrides_with = "no_synctex")]
+    synctex: bool,
+    /// No <job>.synctex.gz (the default)
+    #[arg(long, global = true, overrides_with = "synctex")]
     no_synctex: bool,
     /// TeX's files from Shelf's packs (fetched once, kept in the cache's
     /// `shelf/`; v1.shelf.phitex.org the server, PHITEX_SHELF_URL another) instead of TeX Live's
@@ -366,7 +369,11 @@ impl Cli {
                     }
                 })
             },
-            synctex: o.no_synctex.then_some(false),
+            synctex: if o.synctex {
+                Some(true)
+            } else {
+                o.no_synctex.then_some(false)
+            },
             all,
             files: o.shelf.then_some(tex::Files::Shelf),
         }

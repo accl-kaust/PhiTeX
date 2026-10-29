@@ -82,9 +82,15 @@ for each version tag.
 - **`shelf-release = "latest"`** in `phitex.toml` follows the prefix's
   `release.json`, among the schemas it reads. A name such as `"tl2026.7"` pins that
   release. `PHITEX_SHELF_RELEASE` overrides both.
-- **The URL is built in** (`shelf::DEFAULT_URL`). `shelf-url` in
-  `phitex.toml` and `PHITEX_SHELF_URL` override it, for a mirror or an
-  offline copy. Packs are checked by SHA-256 whatever the host.
+- **The URLs are built in** (`shelf::HOSTS`): the domain
+  (`v1.shelf.phitex.org`), then the same Pages project by Cloudflare's
+  name (`shelf-phitex-v1.pages.dev`). Some networks (KAUST's, other
+  universities') reset the TLS connection on phitex.org's names; a host
+  that cannot be reached is passed over for the next for the rest of the
+  process, and one that answers with anything, an error included, is the
+  answer. The editor extensions keep the same list. `shelf-url` in
+  `phitex.toml` and `PHITEX_SHELF_URL` replace the list, for a mirror or
+  an offline copy. Packs are checked by SHA-256 whatever the host.
 - **Caches are keyed by release and pack hash**, so two versions share one
   pack cache safely.
 
@@ -197,7 +203,7 @@ for each version tag.
 ## 9. Work, in order
 
 1. **CLI:**
-   - `shelf::DEFAULT_URL` (`https://v1.shelf.phitex.org/tl2026/`);
+   - `shelf::HOSTS` (`https://v1.shelf.phitex.org/tl2026/`, then `https://shelf-phitex-v1.pages.dev/tl2026/`);
    - `shelf-url` and `shelf-release` keys;
    - skip unreadable schemas with a message;
    - warn on unknown config keys;

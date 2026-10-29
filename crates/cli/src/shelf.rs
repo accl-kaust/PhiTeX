@@ -13,8 +13,10 @@
 //!   kpathsea's, never Shelf's. No fallback from one to the other.
 //! - **The release** is this PhiTeX's ([`RELEASE`]): two machines with
 //!   the same PhiTeX build a document from the same files.
-//! - **Where from**: [`DEFAULT_URL`], Shelf's public host for the protocol
-//!   this PhiTeX reads (`phitex_shelf::SCHEMAS`), or `PHITEX_SHELF_URL`
+//! - **Where from**: [`HOSTS`], Shelf's public host for the protocol
+//!   this PhiTeX reads (`phitex_shelf::SCHEMAS`) by its domain, then by
+//!   Cloudflare's name for it where a network refuses the domain, or
+//!   `PHITEX_SHELF_URL`
 //!   (the release's directory, as `https://HOST/tl2026/`: a mirror, a
 //!   release being made). Needed only while the index or a pack is not in
 //!   the cache.
@@ -104,37 +106,73 @@ pub fn clear() -> Result<u64, String> {
 }
 
 /// The release's directory on Shelf's public host (docs/spec-distribution.md
-/// §2): the host names the protocol, `v1` for schema 1.
-pub const DEFAULT_URL: &str = "https://v1.shelf.phitex.org/tl2026/";
+/// §2), the host naming the protocol, `v1` for schema 1: by its domain,
+/// then the same Pages project by Cloudflare's name, for networks that
+/// refuse phitex.org's names (some universities' filters reset the TLS
+/// connection on the name). The packs are checked by SHA-256 whichever
+/// answers.
+pub const HOSTS: [&str; 2] = [
+    "https://v1.shelf.phitex.org/tl2026/",
+    "https://shelf-phitex-v1.pages.dev/tl2026/",
+];
 
-/// The release's directory on the package server (`PHITEX_SHELF_URL`,
-/// else [`DEFAULT_URL`]), ending in `/`.
-fn base_url() -> String {
-    let u = std::env::var("PHITEX_SHELF_URL")
-        .ok()
-        .filter(|u| !u.trim().is_empty())
-        .map_or_else(|| DEFAULT_URL.to_owned(), |u| u.trim().to_owned());
-    if u.ends_with('/') { u } else { format!("{u}/") }
+/// The release's directories to ask, in order, each ending in `/`:
+/// `PHITEX_SHELF_URL` alone, else [`HOSTS`].
+fn base_urls() -> Vec<String> {
+    match std::env::var("PHITEX_SHELF_URL") {
+        Ok(u) if !u.trim().is_empty() => {
+            let u = u.trim();
+            vec![if u.ends_with('/') {
+                u.to_owned()
+            } else {
+                format!("{u}/")
+            }]
+        }
+        _ => HOSTS.iter().map(|&h| h.to_owned()).collect(),
+    }
 }
+
+/// The first of [`base_urls`] not known to be unreachable this process.
+static HOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_mins(2)))
+            .timeout_connect(Some(std::time::Duration::from_secs(10)))
             .http_status_as_error(true)
             .build()
             .new_agent()
     })
 }
 
-/// `name` of the release's directory on the server: its bytes.
+/// `name` of the release's directory on the server: its bytes. A host
+/// that cannot be reached (no connection, TLS refused) is passed over
+/// for the next for the rest of the process; one that answers, with
+/// anything, is the answer.
 fn get(name: &str) -> Result<Vec<u8>, String> {
-    let url = format!("{}{name}", base_url());
-    let mut r = agent()
-        .get(&url)
-        .call()
-        .map_err(|e| format!("{url}: {e}"))?;
+    use std::sync::atomic::Ordering;
+    let bases = base_urls();
+    let mut failed = Vec::new();
+    let (mut r, url) = loop {
+        let k = HOST.load(Ordering::Relaxed);
+        let Some(base) = bases.get(k) else {
+            return Err(format!(
+                "{name}: no Shelf host reached: {}",
+                failed.join("; ")
+            ));
+        };
+        let url = format!("{base}{name}");
+        match agent().get(&url).call() {
+            Ok(r) => break (r, url),
+            Err(e @ ureq::Error::StatusCode(_)) => return Err(format!("{url}: {e}")),
+            Err(e) => {
+                failed.push(format!("{url}: {e}"));
+                let _ = HOST.compare_exchange(k, k + 1, Ordering::Relaxed, Ordering::Relaxed);
+            }
+        }
+    };
     r.body_mut()
         .with_config()
         .limit(1 << 30)
