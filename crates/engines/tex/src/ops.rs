@@ -80,9 +80,13 @@ pub(crate) fn run_node(
     } else {
         None
     };
+    let t_new = std::time::Instant::now();
     let mut r = Run::new(cx, o);
+    let t_new = t_new.elapsed();
     let t_body = std::time::Instant::now();
     let mut res = body(&mut r);
+    let t_first = t_body.elapsed();
+    let recut = matches!(res, Err(Halt::Recut(_)));
     // (a second pass from the start, ending at the candidate the first
     // asked for: deterministic, one at most, `Halt::Recut`)
     if let Err(Halt::Recut(k)) = res {
@@ -112,6 +116,21 @@ pub(crate) fn run_node(
     }
     let t_body = t_body.elapsed();
     COMMANDS.fetch_add(r.cmds, std::sync::atomic::Ordering::Relaxed);
+    // (an edit's exec run of 2 ms or more: its input's size, its
+    // commands, its passes and where its time went)
+    if t_body.as_micros() >= 2000 && r.cx.op() == o.exec && crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        let text = r.cx.args().first().map(|&x| r.cx.values().render(x)).unwrap_or_default();
+        eprintln!(
+            "exec run: node {} input {} bytes, {} lines, {} blank lines; {} commands; set up {t_new:?}, first pass {t_first:?}{}, in all {t_body:?}; {:?}",
+            r.cx.node().raw(),
+            text.len(),
+            text.lines().count(),
+            text.lines().filter(|l| l.trim().is_empty()).count(),
+            r.cmds,
+            if recut { ", cut again (a second pass)" } else { "" },
+            text.chars().take(60).collect::<String>()
+        );
+    }
     let k = if r.cx.op() == o.exec {
         0
     } else if r.cx.op() == o.finish {
