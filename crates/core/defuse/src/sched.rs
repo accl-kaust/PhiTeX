@@ -46,8 +46,9 @@ pub(crate) struct Shared {
     /// Nodes run so far in the evaluation, and at each pass's start
     /// (`Report::pass_runs`).
     runs_now: AtomicU64,
-    stealers: Vec<Stealer<NodeId>>,
-    later_stealers: Vec<Stealer<NodeId>>,
+    /// Each worker's runnable nodes by place ([`Ready`]), indexed by the
+    /// worker's `ix`: its own taken first, a thief takes another's.
+    ready: Vec<Ready>,
     block_stealers: Vec<Stealer<(NodeId, u32)>>,
     /// One thief at a time per block: a steal takes an even run of nodes
     /// from its far end, whole.
@@ -182,12 +183,6 @@ pub(crate) struct WorkerLog {
 /// One worker's deques and counters (nanoseconds).
 pub(crate) struct Worker {
     pub(crate) ix: usize,
-    /// Nodes placed by its commits, and its runs to run again: next.
-    local: Deque<NodeId>,
-    /// Nodes its commits re-asked, in the order asked: after its placed
-    /// ones, so a reader of many (a fold over the whole unit) runs behind
-    /// the definers queued before it, not once per definer.
-    later: Deque<NodeId>,
     /// Its block of the nodes dirty before the evaluation, in order, each
     /// with the run it was put in by (a seed, a steal).
     block: Deque<(NodeId, u32)>,
@@ -235,6 +230,11 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
+    /// Its runnable nodes ([`Ready`]).
+    pub(crate) fn ready(&self) -> &Ready {
+        &self.shared.ready[self.ix]
+    }
+
     pub(crate) fn add(c: &AtomicU64, x: u64) {
         c.fetch_add(x, Ordering::Relaxed);
     }
@@ -261,6 +261,71 @@ impl Worker {
         for &n in nodes.iter().rev() {
             self.block.push((n, run));
         }
+    }
+}
+
+/// A worker's runnable nodes, the earliest by place first ([`sched_key`]),
+/// the first queued first among equals: on one thread TeX's own order (a
+/// predecessor before its reader, the page built after each piece and a
+/// routine run before the text after its page), on more the earliest work
+/// first, the critical path's.
+pub(crate) struct Ready {
+    heap: Mx<std::collections::BinaryHeap<std::cmp::Reverse<(u64, u64, u64)>>>,
+    seq: AtomicU64,
+    len: AtomicUsize,
+}
+
+impl Default for Ready {
+    fn default() -> Ready {
+        Ready {
+            heap: Mx::new(std::collections::BinaryHeap::new()),
+            seq: AtomicU64::new(0),
+            len: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Ready {
+    pub(crate) fn push(&self, eng: &Engine, n: &Node) {
+        let k = sched_key(eng, n);
+        let s = self.seq.fetch_add(1, Ordering::Relaxed);
+        self.heap.lock().push(std::cmp::Reverse((k, s, n.id.raw())));
+        self.len.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn pop(&self) -> Option<NodeId> {
+        let x = self.heap.lock().pop()?;
+        self.len.fetch_sub(1, Ordering::Relaxed);
+        Some(NodeId::from_raw(x.0.2))
+    }
+
+    /// The earliest node's key, if any.
+    fn first_key(&self) -> Option<u64> {
+        if self.len.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        self.heap.lock().peek().map(|x| x.0.0)
+    }
+
+    fn len(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
+    }
+}
+
+/// Where a node stands for the order it runs in: its label; a node of the
+/// settling layer past the layer's frontier (`Ctx::set_frontier`) at the
+/// frontier, where its work is (the page loop stands after the whole text
+/// and folds the piece at its hole, a rest folds from the page its loop
+/// node waited at).
+fn sched_key(eng: &Engine, n: &Node) -> u64 {
+    let p = n.pos_hint().0;
+    if !eng.op(n.op()).settles_at_quiet() {
+        return p;
+    }
+    let fr = eng.frontier.load(Ordering::Acquire);
+    match fr.checked_sub(1).and_then(|f| eng.placed_node(NodeId::from_raw(f))) {
+        Some(f) if f.state() != State::Gone => p.min(f.pos_hint().0),
+        _ => p,
     }
 }
 
@@ -309,18 +374,13 @@ impl Pool {
     /// A pool of `n` workers and their deques.
     pub(crate) fn new(n: usize, epoch: u64, limits: Limits) -> (Pool, Vec<Worker>) {
         let n = n.max(1);
-        let deques: Vec<Deque<NodeId>> = (0..n).map(|_| Deque::new_lifo()).collect();
         let blocks: Vec<Deque<(NodeId, u32)>> = (0..n).map(|_| Deque::new_lifo()).collect();
-        let laters: Vec<Deque<NodeId>> = (0..n).map(|_| Deque::new_fifo()).collect();
-        let stealers = deques.iter().map(Deque::stealer).collect();
-        let later_stealers = laters.iter().map(Deque::stealer).collect();
         let block_stealers = blocks.iter().map(Deque::stealer).collect();
         let shared = Arc::new(Shared {
             injector: Injector::new(),
             passes: AtomicU64::new(0),
             runs_now: AtomicU64::new(0),
-            stealers,
-            later_stealers,
+            ready: (0..n).map(|_| Ready::default()).collect(),
             block_stealers,
             block_busy: (0..n).map(|_| AtomicBool::new(false)).collect(),
             outstanding: AtomicUsize::new(0),
@@ -345,15 +405,11 @@ impl Pool {
             collect_gen: AtomicU64::new(0),
             collect_next: AtomicU64::new(limits.collect_at_bytes.unwrap_or(u64::MAX)),
         });
-        let workers = deques
+        let workers = blocks
             .into_iter()
-            .zip(blocks)
-            .zip(laters)
             .enumerate()
-            .map(|(ix, ((local, block), later))| Worker {
+            .map(|(ix, block)| Worker {
                 ix,
-                local,
-                later,
                 block,
                 block_runs: AtomicU32::new(0),
                 shared: shared.clone(),
@@ -457,10 +513,7 @@ impl Pool {
     fn leave_queued(&self, eng: &Engine, workers: &[Worker]) {
         let mut left = Vec::new();
         for w in workers {
-            while let Some(n) = w.local.pop() {
-                left.push(n);
-            }
-            while let Some(n) = w.later.pop() {
+            while let Some(n) = w.ready().pop() {
                 left.push(n);
             }
             while let Some((n, _)) = w.block.pop() {
@@ -509,52 +562,33 @@ impl Pool {
     }
 
     fn find_work(&self, eng: &Engine, w: &Worker) -> Option<NodeId> {
-        // (its placed nodes, then its re-asked ones; but the head of its
-        // block, a node dirty before the evaluation and not run yet, goes
-        // first where it stands before them on the line: a reader re-run
-        // behind a definer still to run reads what that definer will
-        // change, and runs again once it has. Taken the other way, the
-        // re-asks a block's definers make kept their owner from the next
-        // definer: amsldoc at -j8, its preamble's last block run after
-        // 2203 nodes in a quarter of the builds (365 in the rest), every
-        // piece of the document run on the preamble's state and again on
-        // the document's, 13-15 thousand runs against 4)
-        let mine = match w.local.pop() {
-            Some(n) => Some((n, true)),
-            None => w.later.pop().map(|n| (n, false)),
-        };
-        if let Some((n, placed)) = mine {
-            if let Some((b, run)) = w.block.pop() {
-                // (and a node of the settling layer before a block head
-                // past the layer's frontier, `Ctx::set_frontier`: the page
-                // loop stands after the whole text, and taken by its place
-                // it ran once every piece had, each piece past a page's
-                // break on the routine's state before that page, and again
-                // on each finisher before it as it came; TeX builds the
-                // page after each paragraph and runs a routine before the
-                // text after its page)
-                let bn = eng.node(b);
-                let layer_first = eng.op(eng.node(n).op()).settles_at_quiet()
-                    && past_frontier(eng, bn, eng.frontier.load(Ordering::Acquire));
-                if bn.pos_hint() < eng.node(n).pos_hint() && !layer_first {
-                    // (put back where a thief finds it: an idle
-                    // worker runs it meanwhile; held by this one alone,
-                    // the page loop, re-asked by every piece, waited for
-                    // this worker's whole block, para4000 at -j8 10x
-                    // slower)
-                    if placed {
-                        w.local.push(n);
-                    } else {
-                        self.shared.injector.push(n);
-                    }
+        // (its earliest runnable node by place ([`Ready`]), or the head of
+        // its block where that stands first: a node run before one ahead
+        // of it on the line reads what that one will change, and runs again
+        // once it has. Taken by its deques' order, a piece placed by the one
+        // before it ran ahead of the page loop the commit before re-asked,
+        // and a reader re-run behind a definer still to run: at one thread
+        // the page loop ran once the whole text had, each piece past a
+        // page's break on its routine's state before that page and again
+        // as each finisher came)
+        let me = w.ready();
+        match (me.first_key(), w.block.pop()) {
+            (Some(k), Some((b, run))) => {
+                if eng.node(b).pos_hint().0 < k {
                     return Some(b);
                 }
                 w.block.push((b, run));
+                if let Some(n) = me.pop() {
+                    return Some(n);
+                }
             }
-            return Some(n);
-        }
-        if let Some((n, _)) = w.block.pop() {
-            return Some(n);
+            (Some(_), None) => {
+                if let Some(n) = me.pop() {
+                    return Some(n);
+                }
+            }
+            (None, Some((b, _))) => return Some(b),
+            (None, None) => {}
         }
         loop {
             match self.shared.injector.steal() {
@@ -566,28 +600,9 @@ impl Pool {
         let n = self.n;
         for k in 1..n {
             let v = (w.ix + k) % n;
-            loop {
-                match self.shared.stealers[v].steal() {
-                    Steal::Success(x) => {
-                        Worker::add(&w.steals, 1);
-                        return Some(x);
-                    }
-                    Steal::Empty => break,
-                    Steal::Retry => {}
-                }
-            }
-        }
-        for k in 1..n {
-            let v = (w.ix + k) % n;
-            loop {
-                match self.shared.later_stealers[v].steal() {
-                    Steal::Success(x) => {
-                        Worker::add(&w.steals, 1);
-                        return Some(x);
-                    }
-                    Steal::Empty => break,
-                    Steal::Retry => {}
-                }
+            if let Some(x) = self.shared.ready[v].pop() {
+                Worker::add(&w.steals, 1);
+                return Some(x);
             }
         }
         for k in 1..n {
@@ -1036,19 +1051,14 @@ fn defer(eng: &Engine, sh: &Shared, n: NodeId) -> bool {
 /// Queues a node made dirty (a new node, a released sibling): on `w`'s
 /// deque, or the engine's pending list when no evaluation runs.
 pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) {
-    let created = matches!(wake.cause, Cause::Created { .. });
     *n.woke.lock() = Some(wake);
     match w {
         Some(w) if defer(eng, &w.shared, n.id) => {}
         Some(w) => {
             w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
-            if created {
-                w.local.push(n.id);
-            } else {
-                w.later.push(n.id);
-            }
+            w.ready().push(eng, n);
             let sh = &w.shared;
-            if sh.spawned.load(Ordering::Relaxed) < sh.n && w.local.len() >= 2 {
+            if sh.spawned.load(Ordering::Relaxed) < sh.n && w.ready().len() >= 2 {
                 sh.want_spawn.store(true, Ordering::SeqCst);
             }
             sh.wake_one();
@@ -1571,7 +1581,7 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
         }
         node.committing.store(false, Ordering::Release);
         if to == State::Dirty && !defer(eng, &pool.shared, node.id) {
-            w.local.push(node.id);
+            w.ready().push(eng, node);
             w.shared.wake_one();
         } else {
             pool.shared.done_one();
@@ -1609,7 +1619,7 @@ fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<N
     // (checked again under the lock its commit takes: no wake lost)
     if committed(on) {
         drop(m);
-        w.local.push(node.id);
+        w.ready().push(eng, node);
         w.shared.wake_one();
         return;
     }
@@ -1642,7 +1652,7 @@ fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
     // lost)
     if !held() {
         drop(m);
-        w.local.push(node.id);
+        w.ready().push(eng, node);
         w.shared.wake_one();
         return;
     }
