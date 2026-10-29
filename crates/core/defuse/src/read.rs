@@ -254,7 +254,10 @@ pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>) -> N
             let lo = lower.map_or(Unbounded, Excluded);
             let mut hit = None;
             for (p, id) in inner.nodes.range((lo, Unbounded)) {
-                if let Some(&x) = inner.contribs.get(&f).and_then(|m| m.get(p)) {
+                // (a node to run, again or for the first time: its
+                // contribution is not known, the one it made last may go)
+                let open = eng.node(*id).is_open();
+                if !open && let Some(&x) = inner.contribs.get(&f).and_then(|m| m.get(p)) {
                     hit = Some((
                         Next {
                             item: Some((*id, x)),
@@ -264,7 +267,7 @@ pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>) -> N
                     ));
                     break;
                 }
-                if eng.node(*id).is_hole() {
+                if open {
                     hit = Some((
                         Next {
                             item: None,

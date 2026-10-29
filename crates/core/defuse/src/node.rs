@@ -347,6 +347,19 @@ impl Node {
 
     /// Never committed and not taken or removed: its contributions are
     /// still to come.
+    /// To run, again or for the first time (a hole, or a node refuted
+    /// since its last commit), or running short of its commit's filing
+    /// (`committing`, set under the segment's lock the commit takes the
+    /// `next` readers stopped at it under): what it contributes is not
+    /// known.
+    pub(crate) fn is_open(&self) -> bool {
+        match self.state() {
+            State::Dirty => true,
+            State::Running | State::RunningDirty => self.is_hole() || !self.committing.load(Ordering::Acquire),
+            _ => false,
+        }
+    }
+
     pub(crate) fn is_hole(&self) -> bool {
         !self.committed() && matches!(self.state(), State::Dirty | State::Running | State::RunningDirty)
     }

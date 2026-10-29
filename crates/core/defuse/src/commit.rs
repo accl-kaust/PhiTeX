@@ -541,7 +541,7 @@ fn file_stop(eng: &Engine, f: Field, k: RangeKey, r: &RangeReader) -> bool {
     let Some((_, mut inner)) = own_write(eng, n) else {
         return false;
     };
-    if !n.is_hole() {
+    if !n.is_open() {
         return false;
     }
     push_pruned(&mut inner.stops, (f, k, r.clone()), |x| live(eng, x.2.node, x.2.serial));
@@ -1407,7 +1407,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 walk_here(eng, &mut inner, f, pos, node.id, &mut wake, &mut later, &mut st),
             ));
         }
-        if serial == 1 && !inner.stops.is_empty() {
+        // (a `next` reader stops at a node to run again as at a hole,
+        // `Node::is_open`: taken at every commit)
+        if !inner.stops.is_empty() {
             let (mine, rest) = std::mem::take(&mut inner.stops).into_iter().partition(|s| s.2.to == Some(node.id));
             inner.stops = rest;
             holes = mine;
