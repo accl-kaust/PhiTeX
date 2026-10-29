@@ -879,6 +879,23 @@ impl<'a> Ctx<'a> {
         self.eng.placed_node(n).filter(|x| x.state() != State::Gone).map(|x| x.op())
     }
 
+    /// Whether the node that placed me has nothing more to commit: clean
+    /// on a run of its own (`sched::settled_node`). A node it placed that
+    /// reads what that one read after it (a page's finisher, the page's
+    /// pieces as they are now) may meet them ahead of it: what its placer
+    /// made it from has moved, and its placer, re-asked, runs again and
+    /// places it anew or not at all.
+    pub fn placer_settled(&self) -> bool {
+        self.me.parent.is_none_or(|p| crate::sched::settled_node(self.eng, p))
+    }
+
+    /// Stops the run until the node that placed me commits again
+    /// ([`Ctx::placer_settled`] false): queued then, or at the quiet point.
+    pub fn wait_for_placer(&mut self) -> Stop {
+        self.wait_on = self.me.parent;
+        stop()
+    }
+
     /// Whether node `n` still stands (placed, not removed): a run about
     /// to place a node after `n` (`follow_after`) asks first. Not a read.
     pub fn alive(&self, n: NodeId) -> bool {

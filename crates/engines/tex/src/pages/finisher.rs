@@ -987,6 +987,19 @@ impl Run<'_, '_> {
             fire = ps.fold_items(v, &raw, &mut live)?;
             fired_at_end = i == fin.spans.len() && fire.as_ref().is_some_and(|f| f.rest.is_empty());
         }
+        // (the real nodes not where the profiles the loop folded put the
+        // page: its pieces moved since the loop node fired it, and that
+        // node, re-asked by them, is still to run: this run waits for its
+        // commit, which fires the page again or keeps it, and runs then.
+        // With the loop settled it is a defect of the page builder over
+        // the profiles)
+        let agrees = fire.as_ref().is_some_and(|f| fired_at_end && f.k == fin.k && f.best == fin.best as usize);
+        if !agrees && !self.cx.placer_settled() {
+            if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                eprintln!("finisher {} (page {} of its piece): ahead of its loop, waits for it", self.cx.node().raw(), fin.key.nth);
+            }
+            return Err(Halt::Stop(self.cx.wait_for_placer()));
+        }
         let Some(mut fire) = fire else {
             defect(self, "no page fires on the real nodes".to_owned());
             return Ok(None);
