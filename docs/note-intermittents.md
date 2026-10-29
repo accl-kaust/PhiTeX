@@ -139,7 +139,7 @@ Loop scripts live outside the repository, in `~/code/tmp/intermit-tools/`:
 
 ## 1. Stale reads at -j16: readers at their own position never re-asked after a scope change
 
-**Fixed (branch reds-s1, d2f7fceee).** The trace (accl 22185, `PHITEX_S1`,
+**One cause fixed (branch reds-s1, d2f7fceee); a second is open.** The trace (accl 22185, `PHITEX_S1`,
 debug branch s1dbg) followed one bad build of 240. Node 561 is an
 environment's `\begin`: it opens a scope and defines the scope kind
 inside it. Its readers 653-701 read it at depth 1. Then node 562's close
@@ -162,6 +162,9 @@ its stop by its answer.
 - Unit test `commit::tests::two_closes_filed_before_either_walk_reask_the_readers_after_both`:
   fails before (accl 22186), passes after (accl 22187).
 - Loop on dev: 4 of 160 builds had these stale reads (accl 22184).
+- Loop with the fix: 1 of 240 builds still has two of them, nodes 827
+  and 2294 (accl 22188). That is a second path, not found yet. It is
+  being traced on d2f7fceee plus the s1 trace (accl 22191).
 
 The 160-build loop (accl 22184) also showed reads that are not this
 cause:
