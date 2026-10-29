@@ -153,6 +153,12 @@ pub struct Engine {
     /// (`Engine::settle_marked`): a reader of one past the settling
     /// layer's frontier waits for it (`Ctx::set_frontier`).
     pub(crate) settle_marks: Box<[AtomicU64]>,
+    /// The same fields exactly, for a field whose bit is set: a bit is a
+    /// hash's, which another field's may share (amsldoc -j8: `\@@par`,
+    /// `\toks@` and `\check@nocorr@`, which no routine defines, read by
+    /// every paragraph, held past the frontier as if one did, 620 of the
+    /// 1000 reads held).
+    pub(crate) settle_exact: Lock<crate::FxHashSet<Field>>,
     /// The settling layer's frontier (`Ctx::set_frontier`): the raw id
     /// of the node past which it may yet place nodes, plus one; 0, none
     /// (no reader waits).
@@ -227,9 +233,13 @@ impl Engine {
     /// (`Engine::settle_marks`).
     pub(crate) fn mark_settled(&self, f: Field) {
         let (w, b) = settle_bit(f);
-        if self.settle_marks[w].load(Ordering::Relaxed) & b == 0 {
-            self.settle_marks[w].fetch_or(b, Ordering::Relaxed);
+        if self.settle_marks[w].load(Ordering::Relaxed) & b != 0 && self.settle_exact.read().contains(&f) {
+            return;
         }
+        // (the field first, then its bit: a reader that sees the bit finds
+        // the field)
+        self.settle_exact.write().insert(f);
+        self.settle_marks[w].fetch_or(b, Ordering::Release);
     }
 
     /// (`PHITEX_TEX_TIME`) `Engine::frontier_held`.
@@ -237,11 +247,11 @@ impl Engine {
         self.frontier_held.load(Ordering::Relaxed)
     }
 
-    /// Whether `f` may be defined by a settling operation's node (a hash
-    /// that meets another field's says yes too).
+    /// Whether `f` may be defined by a settling operation's node: its bit,
+    /// then, set, the field itself (another field's bit may be the same).
     pub(crate) fn settle_marked(&self, f: Field) -> bool {
         let (w, b) = settle_bit(f);
-        self.settle_marks[w].load(Ordering::Relaxed) & b != 0
+        self.settle_marks[w].load(Ordering::Acquire) & b != 0 && self.settle_exact.read().contains(&f)
     }
 
     /// A bracket changed: a new scope count.
@@ -282,6 +292,7 @@ impl Engine {
             has_finals: std::sync::atomic::AtomicBool::new(false),
             held: crate::lock::Mx::new(Vec::new()),
             settle_marks: (0..SETTLE_MARK_WORDS).map(|_| AtomicU64::new(0)).collect(),
+            settle_exact: Lock::new(crate::FxHashSet::default()),
             frontier: AtomicU64::new(0),
             frontier_by: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
