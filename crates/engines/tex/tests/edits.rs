@@ -831,3 +831,52 @@ fn moving_breaks_rescan_touched_pages_and_one() {
     assert!(pages <= 3, "{pages} page builder runs, bound 3");
     assert!(fins <= n + 1, "{fins} finisher runs, bound {}", n + 1);
 }
+
+/// Blanks typed at the ends of lines, and taken away again, run no node:
+/// TeX reads a line without them (web2c's `input_line`), and the
+/// document's canonical text leaves them out; the output is the cold
+/// build's of each text.
+#[test]
+fn blanks_at_line_ends_run_no_node() {
+    let fx = common::fixtures().join("plain");
+    let src = common::read(&fx.join("story.tex"));
+    let want = std::fs::read(fx.join("story.dvi")).expect("story.dvi");
+    let comment = common::dvi_comment(&want);
+    let prelude = common::plain();
+    let opts = || common::options("./story.tex", "story", &comment, &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let body = src.find("\\mark").unwrap_or(0);
+    let lines: Vec<&str> = src.split_inclusive('\n').collect();
+    // (one line's end, every line's end, a tab and spaces, and back)
+    let one: String = {
+        let mut at = 0;
+        let mut out = String::new();
+        let mut done = false;
+        for l in &lines {
+            at += l.len();
+            if !done && at > body + 200 && l.len() > 2 {
+                out.push_str(&l[..l.len() - 1]);
+                out.push_str("  \n");
+                done = true;
+            } else {
+                out.push_str(l);
+            }
+        }
+        out
+    };
+    let all: String = lines
+        .iter()
+        .map(|l| l.strip_suffix('\n').map_or_else(|| format!("{l} \t "), |b| format!("{b} \t \n")))
+        .collect();
+    let mut last = src.clone();
+    for (what, text) in [("one line", &one), ("every line", &all), ("none again", &src)] {
+        assert_ne!(*text, last, "{what}: no edit");
+        last.clone_from(text);
+        b.edit(text);
+        assert_eq!(b.stats.nodes_run, 0, "{what}: {} nodes run", b.stats.nodes_run);
+        assert!(
+            common::first_difference(&b.output().0, &want).is_none(),
+            "{what}: the output is not the cold build's"
+        );
+    }
+}

@@ -4434,18 +4434,15 @@ fn canonical_lines_splice(
     let old_lines = newlines(&o[ls..le_old]);
     // (those lines in the canonical text: the same lines, by number;
     // without comments it is the text itself)
-    let (first, cs, ce) = if marks.is_empty() {
-        (None, ls, le_old)
+    // (by number: a line's blanks at its end are not in the canonical
+    // text, nor a comment's text)
+    let first = newlines(&o[..ls]);
+    let cb = canon.as_bytes();
+    let cs = skip_lines(cb, 0, first);
+    let ce = if le_old == o.len() {
+        cb.len()
     } else {
-        let first = newlines(&o[..ls]);
-        let cb = canon.as_bytes();
-        let cs = skip_lines(cb, 0, first);
-        let ce = if le_old == o.len() {
-            cb.len()
-        } else {
-            skip_lines(cb, cs, old_lines)
-        };
-        (Some(first), cs, ce)
+        skip_lines(cb, cs, old_lines)
     };
     crate::timeline::note(
         &format!("canonical: the lines found ({} bytes)", le - ls),
@@ -4456,11 +4453,6 @@ fn canonical_lines_splice(
     let (mut mid, mut at) = (Vec::new(), Vec::new());
     canonical_lines(&new[ls..le], 0, &mut out, &mut mid, &mut at);
     // (the changed lines' marks numbered from their first line's)
-    let first = match first {
-        Some(f) => f,
-        None if mid.is_empty() => 0,
-        None => newlines(&o[..ls]),
-    };
     let lift = u32::try_from(first).unwrap_or(u32::MAX);
     for m in &mut mid {
         m.0 = m.0.saturating_add(lift);
@@ -4515,26 +4507,40 @@ fn canonical_lines(
     marks: &mut Vec<CommentMark>,
     at: &mut Vec<usize>,
 ) {
-    // (only a line with a `%` can change: the lines between two such
-    // lines are copied at once, their ends counted, eight bytes at a time)
+    // (only a line with a `%` or blanks at its end can change: the lines
+    // between two such lines are copied at once)
     let b = text.as_bytes();
-    let (mut done, mut n, mut from) = (0, first, 0);
-    while let Some(p) = text[from..].find('%').map(|k| from + k) {
-        let ls = text[done..p].rfind('\n').map_or(done, |k| done + k + 1);
-        n += newlines(&b[done..ls]);
-        out.push_str(&text[done..ls]);
-        let le = text[p..].find('\n').map_or(text.len(), |k| p + k);
-        canonical_line(&text[ls..le], n, out, marks, at);
-        if le < text.len() {
-            out.push('\n');
-            n += 1;
-            done = le + 1;
-        } else {
-            done = le;
+    let (mut copied, mut ls, mut n) = (0, 0, first);
+    while ls < b.len() {
+        let le = text[ls..].find('\n').map_or(b.len(), |k| ls + k);
+        let body = &text[ls..le];
+        if body.contains('%') || blanks_at_end(body).is_some() {
+            out.push_str(&text[copied..ls]);
+            canonical_line(body, n, out, marks, at);
+            copied = le;
         }
-        from = done;
+        n += 1;
+        ls = le + 1;
     }
-    out.push_str(&text[done..]);
+    out.push_str(&text[copied..]);
+}
+
+/// Where the blanks web2c's `input_line` drops from line `body` (its end
+/// not in it) begin and end, if it has any: the spaces and tabs before
+/// its carriage returns ([`crate::input::Line::of_str`] drops those, then
+/// the blanks). None where what is left would end in a carriage return
+/// (`Line::of_str` would drop that too, unlike the line's).
+fn blanks_at_end(body: &str) -> Option<(usize, usize)> {
+    let b = body.as_bytes();
+    let mut e = b.len();
+    while e > 0 && b[e - 1] == b'\r' {
+        e -= 1;
+    }
+    let mut f = e;
+    while f > 0 && matches!(b[f - 1], b' ' | b'\t') {
+        f -= 1;
+    }
+    (f < e && (f == 0 || b[f - 1] != b'\r')).then_some((f, e))
 }
 
 /// [`canonical_lines`] of one line `body` (its end not in it), line `n`
@@ -4579,7 +4585,15 @@ fn canonical_line(
                 c.to_owned(),
             ));
         }
-        _ => out.push_str(body),
+        // (TeX reads the line without its blanks at the end: a trailing
+        // space typed or taken away changes no node)
+        _ => match blanks_at_end(body) {
+            Some((f, e)) => {
+                out.push_str(&body[..f]);
+                out.push_str(&body[e..]);
+            }
+            None => out.push_str(body),
+        },
     }
 }
 
@@ -6764,6 +6778,20 @@ impl Build {
             &made
         };
         crate::timeline::note("diagnostics: the document's line starts", t_lines.elapsed());
+        // (an offset of the canonical text as the file's: the same line,
+        // the same column, at most its end; the canonical text has a
+        // comment's text and a line's blanks at its end left out)
+        let raw = (contiguous && self.canon).then_some(self.raw.as_deref()).flatten();
+        let raw_lines = raw.map(line_starts);
+        let to_raw = |o: usize| -> usize {
+            let (Some(raw), Some(r)) = (raw, raw_lines.as_ref()) else {
+                return o;
+            };
+            let l = doc_lines.partition_point(|&x| x <= o).saturating_sub(1);
+            let col = o - doc_lines.get(l).copied().unwrap_or(0);
+            let end = r.get(l + 1).map_or(raw.len(), |&x| x.saturating_sub(1));
+            (r.get(l).copied().unwrap_or(0) + col).min(end)
+        };
         // the node of the text a node is under, by its parents: the text's
         // nodes by id made only for a diagnostic placed by its node alone
         let mut top_map: Option<phitex_defuse::FxHashMap<u64, usize>> = None;
@@ -6940,6 +6968,7 @@ impl Build {
                 }
                 h
             });
+            let (start, at) = if file == docname { (to_raw(start), to_raw(at)) } else { (start, at) };
             out.push(Diagnostic {
                 file,
                 range: (start, at),
@@ -8214,6 +8243,42 @@ mod canonical_tests {
                 if let Some((ms, (a, b, c))) = canonical_splice(text, &mut canon, &marks, new, ends) {
                     assert_eq!((&canon, &ms), (&want.0, &want.1), "{text:?} -> {new:?}");
                     assert_eq!((&old_c[..a], &old_c[b..]), (&canon[..a], &canon[c..]), "{new:?}: the range");
+                }
+            }
+        }
+    }
+
+    /// A line's blanks at its end are not in the canonical text (TeX
+    /// reads the line without them), unless what is left would end in a
+    /// carriage return; spliced in place as made whole.
+    #[test]
+    fn blanks_at_line_ends_are_left_out() {
+        for (t, want) in [
+            ("a b  \nc\t\n", "a b\nc\n"),
+            ("a \r\nb", "a\r\nb"),
+            ("a\r \n", "a\r \n"),
+            ("   \n\t\n", "\n\n"),
+            ("x % c  \ny \\% \n", "x %\0"),
+            ("end ", "end"),
+        ] {
+            let (c, _) = canonical_text(t).unwrap();
+            assert!(c.starts_with(want), "{t:?}: {c:?}");
+            assert_eq!((c.clone(), canonical_text(t).unwrap().1), by_lines(t), "{t:?}");
+        }
+        let text = "a b\nc d % one\n\ne f\n";
+        for (i, ch) in text.char_indices() {
+            if ch != '\n' {
+                continue;
+            }
+            for blanks in [" ", "  \t"] {
+                let new = format!("{}{blanks}{}", &text[..i], &text[i..]);
+                let (old_c, marks) = canonical_text(text).unwrap();
+                assert_eq!(canonical_text(&new).unwrap().0, old_c, "{new:?}");
+                for ends in [None, Some(byte_ends(text.as_bytes(), new.as_bytes()))] {
+                    let mut canon = old_c.clone();
+                    if let Some((ms, _)) = canonical_splice(text, &mut canon, &marks, &new, ends) {
+                        assert_eq!((&canon, &ms), (&old_c, &marks), "{new:?}");
+                    }
                 }
             }
         }
