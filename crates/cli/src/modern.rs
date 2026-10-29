@@ -381,6 +381,8 @@ pub struct Target {
     /// Where TeX's files come from (`--shelf`, `files`; TeX Live by
     /// default).
     pub files: tex::Files,
+    /// What reading `phitex.toml` warned of (unknown keys).
+    pub warnings: Vec<String>,
 }
 
 impl Target {
@@ -532,6 +534,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
             (None, Some(f)) => tex::Files::of(f)?,
             (None, None) => tex::Files::TexLive,
         },
+        warnings: cfg.warnings,
     })
 }
 
@@ -977,6 +980,9 @@ pub fn main(args: &[String]) -> ! {
         }
         std::process::exit(crate::EXIT_FAILED);
     });
+    for w in &t.warnings {
+        ui.warning(w);
+    }
     phitex_tex::timeline::lap("cli: the arguments, the target (configuration read)");
     match command {
         Command::Build => std::process::exit(build(&t, &o, &ui)),

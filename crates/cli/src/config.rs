@@ -6,6 +6,12 @@
 //!
 //! Both files are TOML (`toml`, `serde`); the project's settings win key by
 //! key over the user's ([`Config::over`]).
+//!
+//! A `phitex.toml` is shared between people on different PhiTeX versions
+//! (docs/spec-distribution.md §5): a key this PhiTeX does not know is a
+//! warning, never an error (a newer PhiTeX's, or a typo: the nearest key
+//! named), and `phitex = ">=X.Y.Z"` states the oldest PhiTeX a project
+//! needs, an older one stopping with what it needs.
 
 use std::path::{Path, PathBuf};
 
@@ -43,7 +49,19 @@ pub struct Config {
     /// Where TeX's files come from: `texlive` (kpathsea, the default) or
     /// `shelf` (Shelf's packs, fetched and kept: `crate::shelf`).
     pub files: Option<String>,
+    /// The oldest PhiTeX the project needs (`phitex = ">=0.2"`): checked
+    /// when read.
+    pub phitex: Option<String>,
+    /// What reading the files warned of (unknown keys).
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
+
+/// The keys `phitex.toml` takes, with their aliases.
+const KEYS: &[&str] = &[
+    "main", "file", "engine", "program", "output-dir", "output-directory", "out-dir",
+    "shell-escape", "viewer", "editor", "copy-pdf", "synctex", "cache-limit", "files", "phitex",
+];
 
 /// `copy-pdf`'s value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,9 +115,80 @@ pub fn parse(text: &str) -> Result<Config, String> {
     parse_named(text, FILE)
 }
 
-/// Parse `text`, its errors naming it `name`.
+/// Parse `text`, its errors and warnings naming it `name`: a key not in
+/// [`KEYS`] is left out with a warning; `phitex`'s requirement checked.
 fn parse_named(text: &str, name: &str) -> Result<Config, String> {
-    toml::from_str(text).map_err(|e| format!("{name}: {}", e.to_string().trim_end()))
+    let said = |e: &dyn std::fmt::Display| format!("{name}: {}", e.to_string().trim_end());
+    let mut table: toml::Table = toml::from_str(text).map_err(|e| said(&e))?;
+    let unknown: Vec<String> = table
+        .keys()
+        .filter(|k| !KEYS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    let mut warnings = Vec::new();
+    for k in unknown {
+        table.remove(&k);
+        warnings.push(match nearest(&k) {
+            Some(n) => format!("{name}: unknown key `{k}` (did you mean `{n}`?), ignored"),
+            None => format!("{name}: unknown key `{k}` (a newer PhiTeX's?), ignored"),
+        });
+    }
+    let mut c: Config = table.try_into().map_err(|e| said(&e))?;
+    if let Some(req) = &c.phitex {
+        needs(req, env!("CARGO_PKG_VERSION")).map_err(|e| format!("{name}: {e}"))?;
+    }
+    c.warnings = warnings;
+    Ok(c)
+}
+
+/// The key of [`KEYS`] nearest `k` (two edits at most), if any.
+fn nearest(k: &str) -> Option<&'static str> {
+    let dist = |a: &str, b: &str| {
+        let b: Vec<char> = b.chars().collect();
+        let mut row: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.chars().enumerate() {
+            let mut prev = row[0];
+            row[0] = i + 1;
+            for (j, cb) in b.iter().enumerate() {
+                let here = row[j + 1];
+                row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(here + 1);
+                prev = here;
+            }
+        }
+        row[b.len()]
+    };
+    KEYS.iter()
+        .map(|&n| (dist(k, n), n))
+        .filter(|&(d, _)| d <= 2)
+        .min()
+        .map(|(_, n)| n)
+}
+
+/// Whether PhiTeX `have` meets the requirement `req` (`>=X`, `>=X.Y` or
+/// `>=X.Y.Z`): why not, if not.
+fn needs(req: &str, have: &str) -> Result<(), String> {
+    let nums = |s: &str| -> Option<Vec<u64>> {
+        let v: Option<Vec<u64>> = s.trim().split('.').map(|p| p.parse().ok()).collect();
+        v.filter(|v| (1..=3).contains(&v.len()))
+    };
+    let Some(want) = req.trim().strip_prefix(">=").and_then(nums) else {
+        return Err(format!(
+            "`phitex = \"{req}\"`: it takes \">=X.Y.Z\", the oldest PhiTeX the project needs"
+        ));
+    };
+    let have_v = nums(have.split(['-', '+']).next().unwrap_or(have)).unwrap_or_default();
+    let at = |v: &[u64], i: usize| v.get(i).copied().unwrap_or(0);
+    let older = (0..3)
+        .map(|i| at(&have_v, i).cmp(&at(&want, i)))
+        .find(|o| o.is_ne())
+        .is_some_and(std::cmp::Ordering::is_lt);
+    if older {
+        return Err(format!(
+            "this project needs PhiTeX {} (this is {have}): install a newer one",
+            req.trim()
+        ));
+    }
+    Ok(())
 }
 
 /// A size: bytes, or a number with a unit (`500MB`, `4 GB`, `2GiB`).
@@ -160,6 +249,8 @@ impl Config {
             synctex: self.synctex.or(under.synctex),
             cache_limit: self.cache_limit.or(under.cache_limit),
             files: self.files.or(under.files),
+            phitex: self.phitex.or(under.phitex),
+            warnings: [self.warnings, under.warnings].concat(),
         }
     }
 }
@@ -412,6 +503,8 @@ mod tests {
                 synctex: None,
                 cache_limit: None,
                 files: None,
+                phitex: None,
+                warnings: vec![],
             }
         );
         assert_eq!(parse("synctex = false").unwrap().synctex, Some(false));
@@ -445,8 +538,22 @@ mod tests {
             Some(CopyPdf::Dir("../pdfs".into()))
         );
         assert!(parse("copy-pdf = yes").is_err());
-        let e = parse("mian = \"x\"").unwrap_err();
-        assert!(e.starts_with("phitex.toml: ") && e.contains("mian"), "{e}");
+        // (a key this PhiTeX does not know: a warning, the nearest key
+        // named; the file read: docs/spec-distribution.md §5)
+        let c = parse("mian = \"x\"\nengine = \"tex\"").unwrap();
+        assert_eq!(c.engine.as_deref(), Some("tex"));
+        assert_eq!(c.warnings.len(), 1);
+        assert!(c.warnings[0].starts_with("phitex.toml: ") && c.warnings[0].contains("did you mean `main`"), "{:?}", c.warnings);
+        let c = parse("shelf-mirror-of-2030 = true").unwrap();
+        assert!(c.warnings[0].contains("a newer PhiTeX's"), "{:?}", c.warnings);
+        // (the oldest PhiTeX a project needs)
+        assert_eq!(needs(">=0.1", "0.1.0"), Ok(()));
+        assert_eq!(needs(">= 0.1.2", "0.2.0"), Ok(()));
+        assert!(needs(">=0.2", "0.1.9").unwrap_err().contains("needs PhiTeX >=0.2 (this is 0.1.9)"));
+        assert!(needs(">=1", "0.9.0-alpha").is_err());
+        assert!(needs("0.2", "0.1.0").unwrap_err().contains("takes"));
+        assert!(parse("phitex = \">=999\"").unwrap_err().contains("needs PhiTeX"));
+        assert!(parse("phitex = \">=0\"").is_ok());
         assert_eq!(
             parse("cache-limit = \"2GiB\"").unwrap().cache_limit,
             Some(2 << 30)
