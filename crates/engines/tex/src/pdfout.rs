@@ -2086,14 +2086,14 @@ pub(crate) fn whatsit(v: &Values, d: ValueId) -> Option<Whatsit> {
         "pdf:refxform" => Whatsit::RefXForm(usize::try_from(int(1)).unwrap_or(0)),
         "pdf:refximage" => Whatsit::RefXImage(usize::try_from(int(1)).unwrap_or(0)),
         "pdf:annot" => Whatsit::Annot {
-            objnum: usize::try_from(int(1)).unwrap_or(0),
+            objnum: int(1).cast_unsigned(),
             width: dim(int(2)),
             height: dim(int(3)),
             depth: dim(int(4)),
             data: text(5),
         },
         "pdf:startlink" => Whatsit::StartLink {
-            objnum: usize::try_from(int(1)).unwrap_or(0),
+            objnum: int(1).cast_unsigned(),
             width: dim(int(2)),
             height: dim(int(3)),
             depth: dim(int(4)),
@@ -3546,7 +3546,9 @@ struct LinkSnap {
 /// writer's number.
 /// A link's or an annotation's number only PDF bytes name
 /// ([`crate::pdfprim::REL`]) is always mapped: the link numbers its object.
-type Reloc = std::collections::BTreeMap<usize, usize>;
+/// Keyed by the number as read (a [`crate::pdfprim::REL`] identity has
+/// 41 bits and more: `u64` on every target, wasm32's `usize` included).
+type Reloc = std::collections::BTreeMap<u64, usize>;
 
 /// A form's whatsits (`data`, from the read-time ones `raw`) with the
 /// [`crate::pdfprim::REL`] numbers they name as TeX reads them: a form is
@@ -3577,8 +3579,8 @@ pub(crate) fn form_whatsit_nums(
             .map_or(0, |&x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()));
         // (as the page's writer numbers it: the pages before the node)
         let n = crate::pdfprim::rel_number(r, node, k, 0)?;
-        if let (Ok(t), Ok(n)) = (usize::try_from(t), usize::try_from(n)) {
-            map.insert(t, n);
+        if let Ok(n) = usize::try_from(n) {
+            map.insert(t.cast_unsigned(), n);
         }
     }
     if !map.is_empty() {
@@ -3593,7 +3595,8 @@ pub(crate) fn form_whatsit_nums(
 
 /// Whatsit `w` with its object numbers as the link numbered them.
 fn relocated(w: Whatsit, reloc: &Reloc) -> Whatsit {
-    let at = |n: usize| reloc.get(&n).copied().unwrap_or(n);
+    let at64 = |n: u64| reloc.get(&n).map_or(n, |&m| u64::try_from(m).unwrap_or(u64::MAX));
+    let at = |n: usize| u64::try_from(n).ok().and_then(|k| reloc.get(&k)).copied().unwrap_or(n);
     match w {
         Whatsit::StartLink {
             objnum,
@@ -3603,7 +3606,7 @@ fn relocated(w: Whatsit, reloc: &Reloc) -> Whatsit {
             attr,
             action,
         } => Whatsit::StartLink {
-            objnum: at(objnum),
+            objnum: at64(objnum),
             width,
             height,
             depth,
@@ -3617,7 +3620,7 @@ fn relocated(w: Whatsit, reloc: &Reloc) -> Whatsit {
             depth,
             data,
         } => Whatsit::Annot {
-            objnum: at(objnum),
+            objnum: at64(objnum),
             width,
             height,
             depth,
@@ -3632,10 +3635,10 @@ fn relocated(w: Whatsit, reloc: &Reloc) -> Whatsit {
 
 /// The object numbers whatsit `w` names (a link's, an annotation's, a
 /// reference's).
-fn what_objnum(w: &Whatsit) -> Option<usize> {
+fn what_objnum(w: &Whatsit) -> Option<u64> {
     match w {
         Whatsit::StartLink { objnum, .. } | Whatsit::Annot { objnum, .. } => Some(*objnum),
-        Whatsit::RefObj(n) | Whatsit::RefXForm(n) | Whatsit::RefXImage(n) => Some(*n),
+        Whatsit::RefObj(n) | Whatsit::RefXForm(n) | Whatsit::RefXImage(n) => u64::try_from(*n).ok(),
         _ => None,
     }
     .filter(|&n| !is_rel(n))
@@ -3643,12 +3646,12 @@ fn what_objnum(w: &Whatsit) -> Option<usize> {
 
 /// Whether object number `n` is a read-time one only PDF bytes name
 /// ([`crate::pdfprim::REL`]).
-fn is_rel(n: usize) -> bool {
-    i64::try_from(n).is_ok_and(|n| n & crate::pdfprim::REL != 0)
+fn is_rel(n: u64) -> bool {
+    n.cast_signed() & crate::pdfprim::REL != 0
 }
 
 /// The [`crate::pdfprim::REL`] numbers whatsit `w` names.
-fn rel_objnum(w: &Whatsit) -> Option<usize> {
+fn rel_objnum(w: &Whatsit) -> Option<u64> {
     match w {
         Whatsit::StartLink { objnum, .. } | Whatsit::Annot { objnum, .. } => Some(*objnum),
         _ => None,
@@ -3664,10 +3667,11 @@ fn rel_objnum(w: &Whatsit) -> Option<usize> {
 /// found scheduled where the line's is not, and the link shipped the
 /// page again); the link gives each name the number the line gives its
 /// object.
-fn apart_names(whats: &BTreeMap<u32, Whatsit>, floor: usize) -> (usize, Vec<(usize, usize)>) {
-    let named = whats.values().filter_map(what_objnum).max().unwrap_or(0);
+fn apart_names(whats: &BTreeMap<u32, Whatsit>, floor: usize) -> (usize, Vec<(usize, u64)>) {
+    // (a number TeX numbered is one of this file's: no REL bit)
+    let named = whats.values().filter_map(what_objnum).max().map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
     let from = named.max(floor);
-    let mut rel: Vec<usize> = whats.values().filter_map(rel_objnum).collect();
+    let mut rel: Vec<u64> = whats.values().filter_map(rel_objnum).collect();
     rel.sort_unstable();
     rel.dedup();
     let aliases = rel
@@ -4330,11 +4334,11 @@ fn link(
                         (*g)(&mut st, &mut forms, &src)
                     };
                     let rt = xs.get(3).map_or(0, |&n| int_of(v, n));
-                    if let (Ok(rt @ 1..), Some(&m)) = (usize::try_from(rt), out.nums.first())
+                    if let (rt @ 1.., Some(&m)) = (rt, out.nums.first())
                         && let Ok(m) = usize::try_from(m)
-                        && m != rt
+                        && i64::try_from(m).ok() != Some(rt)
                     {
-                        reloc.insert(rt, m);
+                        reloc.insert(rt.cast_unsigned(), m);
                     }
                     if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
                         eprintln!(

@@ -841,7 +841,7 @@ fn whatsit(d: &str, nums: &mut Nums) -> Option<Whatsit> {
     } else if let Some(r) = d.strip_prefix("\\pdfannot") {
         let ([width, height, depth], r) = rule_spec(r);
         Whatsit::Annot {
-            objnum: nums.annots.pop_front().unwrap(),
+            objnum: u64::try_from(nums.annots.pop_front().unwrap()).unwrap(),
             width,
             height,
             depth,
@@ -859,7 +859,7 @@ fn whatsit(d: &str, nums: &mut Nums) -> Option<Whatsit> {
         };
         let r = r.strip_prefix("action").unwrap();
         Whatsit::StartLink {
-            objnum: nums.links.pop_front().unwrap(),
+            objnum: u64::try_from(nums.links.pop_front().unwrap()).unwrap(),
             width,
             height,
             depth,

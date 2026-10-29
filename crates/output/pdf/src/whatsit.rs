@@ -127,8 +127,9 @@ pub enum Whatsit {
     RefXImage(usize),
     /// `\pdfannot`: its object number, width, height, depth and text.
     Annot {
-        /// `pdf_annot_objnum`.
-        objnum: usize,
+        /// `pdf_annot_objnum`: a number of this file, or the client's
+        /// read-time identity for one (64 bits on every target).
+        objnum: u64,
         /// Width.
         width: Scaled,
         /// Height.
@@ -140,8 +141,8 @@ pub enum Whatsit {
     },
     /// `\pdfstartlink`.
     StartLink {
-        /// `pdf_link_objnum`.
-        objnum: usize,
+        /// `pdf_link_objnum`: as [`Whatsit::Annot`]'s.
+        objnum: u64,
         /// Width.
         width: Scaled,
         /// Height.

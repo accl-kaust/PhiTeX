@@ -54,6 +54,29 @@ check_doc() {
   done
 }
 
+# check_ini NAME FIXTURE-DIR FILE ORACLE: an -ini job (`--ini`, no
+# format) at 4 and 1 threads, its PDF against the oracle.
+check_ini() {
+  local name=$1 src=$2 file=$3 oracle=$4
+  local dir=$repo/target/wasm-check/$name job=${file%.tex}
+  rm -rf "$dir" && mkdir -p "$dir"
+  cp "$src/$file" "$dir"/
+  for j in 4 1; do
+    rm -f "$dir/$job.pdf"
+    (cd "$dir" && run --ini --epoch 0 -j "$j" "$file") >"$dir/run-j$j.txt" 2>&1 || {
+      cat "$dir/run-j$j.txt"
+      echo "FAIL $name -j $j: phitex-wasm failed"
+      return 1
+    }
+    if cmp -s "$dir/$job.pdf" "$oracle"; then
+      echo "ok $name -j $j: byte-identical to pdfTeX's ($(stat -c %s "$oracle") bytes)"
+    else
+      echo "FAIL $name -j $j: $dir/$job.pdf differs from $oracle"
+      return 1
+    fi
+  done
+}
+
 case "${1:-check}" in
   build) build ;;
   run) shift; run "$@" ;;
@@ -62,6 +85,9 @@ case "${1:-check}" in
     fx=$repo/oracle/fixtures
     check_doc plain "$fx/plain/ini" doc.tex "$fx/plain/ini/doc-pdfetex.pdf" pdftex
     check_doc latex "$fx/latex/hello" hello.tex "$fx/latex/hello/hello.pdf" pdflatex
+    # (links: their object numbers are read-time identities past 32
+    # bits, which wasm32's usize does not hold)
+    check_ini linkbreak "$fx/pdf" linkbreak.tex "$fx/pdf/linkbreak.pdf"
     echo WASM_OK
     ;;
   *) echo "usage: $0 build|check|run [arguments]" >&2; exit 2 ;;
