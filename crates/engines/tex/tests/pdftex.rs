@@ -480,3 +480,23 @@ fn glyph_origins_plain() {
     let f = common::origin_failures(&b, &new2, "orig.tex");
     assert!(f.is_empty(), "origins after the edits:\n{}", f.join("\n"));
 }
+
+/// `\pdffilemoddate` of a file the job opened with `\openout` before
+/// it (TeX made it then, §1374): a date, the build's clock as the job's
+/// own log's is, not nothing. (Nothing: a document taking an `\openout`
+/// file's date apart character by character, `tests/e2e/xelatex-filemoddate.tex`,
+/// ended in 199 errors and no XDV where xelatex has none.)
+#[test]
+fn a_written_files_date_is_the_builds_clock() {
+    let dir = common::scratch("written-file-date");
+    let doc = "\\immediate\\openout1=w.txt \\immediate\\write1{x}\\immediate\\closeout1 \\immediate\\openout2=v \\message{[\\pdffilemoddate{w.txt}][\\pdffilemoddate{v}][\\pdffilemoddate{texput.log}][\\pdfcreationdate]}\\end\n";
+    let opts = common::options("./texput.tex", "texput", "", &dir);
+    let b = common::build(opts, Some(PRELUDE), doc);
+    let (_, log) = b.output();
+    let dates: Vec<&str> = log.split('[').skip(1).filter_map(|x| x.split(']').next()).take(4).collect();
+    assert_eq!(dates.len(), 4, "{log}");
+    assert!(dates[3].starts_with("D:") && dates[3].len() > 2, "{log}");
+    assert_eq!(dates[0], dates[3], "the written file's date:\n{log}");
+    assert_eq!(dates[1], dates[3], "the file opened as `v`, `v.tex`:\n{log}");
+    assert_eq!(dates[2], dates[3], "the log's date:\n{log}");
+}

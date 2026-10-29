@@ -644,14 +644,21 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             // PDF-BACKEND-GAP: the files the client supplies carry no
             // modification time; pdfTeX prints nothing for a file it
             // cannot stat. The job's own log exists from the job's start
-            // (TeX opens it before the first line): its date is the
-            // build's clock, as \pdfcreationdate's (hyperxmp's date
-            // under XeTeX, which has no \pdfcreationdate)
+            // (TeX opens it before the first line), and a file the job
+            // opened for writing before this point exists from then
+            // (§1374, its `\openout`): their date is the build's clock,
+            // as \pdfcreationdate's (hyperxmp's date under XeTeX, which
+            // has no \pdfcreationdate). (A written file's was nothing:
+            // `\filemoddate` of an `\openout` file taken apart
+            // character by character ended the document in 199 errors,
+            // probe-xelatex-filemoddate)
             let name = ext_string(r)?;
             let job = r
                 .get_loc(crate::fields::cell::JOBNAME)?
                 .map_or_else(|| "texput".to_owned(), |x| str_of(r.v, x));
-            if name == format!("{job}.log") {
+            let base = name.rsplit('/').next().unwrap_or(&name);
+            let key = if base.contains('.') { name.clone() } else { format!("{name}.tex") };
+            if name == format!("{job}.log") || r.get(&format!("wopen:{key}"))?.is_some() {
                 creation_date(r)?
             } else {
                 let _ = file_size(r, &name)?;
