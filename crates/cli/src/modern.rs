@@ -86,7 +86,7 @@ pub fn version_text() -> &'static str {
              Copyright 2026 Ammar Seliaman (https://github.com/Flinner, flinner <at> nand <dot> sh)\n\
              AGPL-3.0-only: free software, without any warranty. https://phitex.org\n\
              engine {:016x}, records {}, Shelf schema {} (release {}), editor protocol {}",
-            env!("CARGO_PKG_VERSION"),
+            crate::version(),
             phitex_tex::engine_id(),
             phitex_live::host::RECORDS_VERSION,
             phitex_shelf::SCHEMAS.map(|s| s.to_string()).join(", "),
@@ -101,7 +101,7 @@ pub fn version_text() -> &'static str {
 #[command(
     name = "phitex",
     bin_name = "phitex",
-    version = env!("CARGO_PKG_VERSION"),
+    version = crate::version(),
     long_version = version_text(),
     about = "PhiTeX: TeX documents as graph reduction",
     long_about = ABOUT,

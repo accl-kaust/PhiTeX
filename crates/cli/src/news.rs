@@ -54,7 +54,7 @@ fn seen_file() -> Option<PathBuf> {
 
 /// `phitex news`: this version's entry, whole.
 pub fn print() {
-    let v = env!("CARGO_PKG_VERSION");
+    let v = crate::version();
     match entry(CHANGELOG, v) {
         Some(e) => println!("phitex {v}\n\n{e}"),
         None => println!("phitex {v}: no news for this version"),
@@ -64,7 +64,7 @@ pub fn print() {
 /// The first run of this version in a terminal: its summary, once (not
 /// under CI, `PHITEX_NO_NEWS`, or for a version without an entry).
 pub fn once(ui: &Ui) {
-    let v = env!("CARGO_PKG_VERSION");
+    let v = crate::version();
     if !std::io::stderr().is_terminal()
         || std::env::var_os("CI").is_some()
         || std::env::var_os("PHITEX_NO_NEWS").is_some()

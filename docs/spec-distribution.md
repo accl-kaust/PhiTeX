@@ -116,12 +116,12 @@ for each version tag.
 
 ```json
 { "schema": 1,
-  "latest": "0.2.0",
+  "latest": "1.61",
   "entries": [
-    { "version": "0.2.0", "date": "2026-11-15", "kind": "release",
+    { "version": "1.61", "date": "2026-11-15", "kind": "release",
       "summary": "XeLaTeX edits in milliseconds", "url": "https://…/CHANGELOG.md#020" },
-    { "affects": "<0.1.3", "kind": "advisory",
-      "summary": "0.1.0-0.1.2 can write a wrong PDF after deleting a page; upgrade" } ] }
+    { "affects": "<1.618", "kind": "advisory",
+      "summary": "1.6 and 1.61 can write a wrong PDF after deleting a page; upgrade" } ] }
 ```
 
 - `kind` is `release` or `advisory`. An unknown kind is ignored.
@@ -135,8 +135,8 @@ for each version tag.
   default no, and remembers the answer.
 - **At most once a day**, in the background, never delaying a build. The
   result is cached in `~/.cache/phitex/news.json`.
-- **One line on stderr after a build:** `phitex 0.2.0 is out (you have
-  0.1.4): phitex upgrade`. An advisory for the running version is printed
+- **One line on stderr after a build:** `phitex 1.61 is out (you have
+  1.6): phitex upgrade`. An advisory for the running version is printed
   even if the release line was already shown.
 - **Never** under `CI`, with no TTY, under `phitex lsp`, or with
   `PHITEX_NO_UPDATE_CHECK=1`. The editor extension shows the same news
@@ -156,9 +156,9 @@ for each version tag.
   - A rename keeps the old name as an alias, as `file` and `program` already
     are.
   - A removed key becomes a warning that says what replaced it.
-- **`phitex = ">=0.2"`** is the one versioned key. A project states the
+- **`phitex = ">=1.61"`** is the one versioned key. A project states the
   oldest PhiTeX it needs, like Cargo's `rust-version`. An older PhiTeX stops
-  with `this project needs phitex >=0.2 (you have 0.1.4): phitex upgrade`.
+  with `this project needs phitex >=1.61 (you have 1.6): phitex upgrade`.
   This turns a confusing failure into an instruction.
 - **Values grow, never change.** An enum gains variants. An older PhiTeX
   rejects a variant it doesn't know with an error naming the key and the
@@ -166,8 +166,11 @@ for each version tag.
 
 ## 6. Versions and what is kept
 
-- **The CLI follows semver from 0.1.0.** Alpha is `0.1.x`.
-  `crates/cli/Cargo.toml` is `0.0.0` today.
+- **Versions converge to φ** (AGENTS.md): 1.6 is the alpha, then 1.61,
+  1.618, …, a digit a release, fixes included. `crates/cli/Cargo.toml`
+  carries it as `1.6.0`, `1.61.0`, …, so semver orders them (the minor
+  grows); it is named and tagged without the `.0` (`phitex 1.61`,
+  `v1.61`). `crates/cli/Cargo.toml` is `0.0.0` until the release.
 - **`phitex --version`** prints the version, commit, engine id,
   `RECORDS_VERSION`, Shelf protocol and schemas, and editor protocol.
 - **Caches** are already gated by engine id and `RECORDS_VERSION`. A cache
@@ -185,7 +188,7 @@ for each version tag.
   `serverInfo.version` and `capabilities.experimental.phitex.protocol`
   (an integer).
 - **The extension needs a minimum PhiTeX.** If `phitex lsp` is older, it
-  says `PhiTeX 0.1.4 is older than this extension needs (0.2): run phitex
+  says `PhiTeX 1.6 is older than this extension needs (1.61): run phitex
   upgrade`.
 - **Shelf's `min_extension`** (already in release.json) is read the same
   way.
@@ -208,7 +211,7 @@ for each version tag.
    - skip unreadable schemas with a message;
    - warn on unknown config keys;
    - the `phitex` version key;
-   - version 0.1.0 and the `--version` lines.
+   - version 1.6 (Cargo 1.6.0) and the `--version` lines.
 2. **Shelf:**
    - add the custom domain `v1.shelf.phitex.org` to the Pages project `shelf-phitex-v1` (made by the first deploy);
    - build tl2026.7 from the xetex-trees branch on mc, with TRACE and FONT_INDEX;

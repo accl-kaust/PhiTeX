@@ -29,7 +29,7 @@ pub fn report_file(
     s.push_str("PhiTeX failure report\n");
     s.push_str(&format!(
         "version: {} (binary {}, built at unix {built})\n",
-        env!("CARGO_PKG_VERSION"),
+        crate::version(),
         exe.map_or_else(String::new, |p| p.display().to_string())
     ));
     s.push_str(&format!("time: unix {secs}\n"));

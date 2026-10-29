@@ -17,9 +17,12 @@ crate's own docs say what it is; keep them current.
 - Private documents used for testing (for example a thesis) stay under
   `target/` or outside the repo, and are never committed.
 - Versions: like TeX's, whose version numbers converge to π, PhiTeX's
-  will converge to φ, the golden ratio (1.6, 1.61, 1.618, 1.6180, …).
-  Until the first such release, every crate stays at 0.0.x: don't bump
-  versions, tag releases or adopt another scheme.
+  converge to φ, the golden ratio. The alpha is 1.6; each release adds a
+  digit (1.61, 1.618, 1.6180, …), a fix included; no other scheme.
+  Only the CLI crate carries it (Cargo `1.6.0`, `1.61.0`, …: the minor
+  grows, so semver orders them; named and tagged without the `.0`:
+  `v1.6`); the other crates stay 0.0.x. Versions are bumped and tags
+  made only by a release (docs/ci.md).
 - `scripts/sandbox` shares one sccache cache among all worktrees (the
   server runs inside the sandbox). `PHITEX_NO_SCCACHE=1` turns it off.
 - The viewer lives here, in `viewer/src`; its pages are drawn as strips

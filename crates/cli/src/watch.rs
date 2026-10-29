@@ -634,7 +634,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         ui.line(&format!(
             "{} {}  {} → {}  {}",
             st.bold("PhiTeX"),
-            st.dim(env!("CARGO_PKG_VERSION")),
+            st.dim(crate::version()),
             st.bold(&t.file),
             st.bold(&format!("{}.{}", job.jobname, job.engine.output.ext())),
             st.dim(&format!(

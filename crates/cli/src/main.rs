@@ -53,6 +53,15 @@ mod xefonts;
 
 use phitex_live::warnings;
 
+/// This PhiTeX's version as it is named and tagged: Cargo's without a
+/// `.0` patch. The versions converge to φ (AGENTS.md): 1.6, the alpha,
+/// then 1.61, 1.618, …, a digit a release (Cargo 1.6.0, 1.61.0, …: the
+/// minor grows, so semver orders them).
+pub fn version() -> &'static str {
+    let v = env!("CARGO_PKG_VERSION");
+    v.strip_suffix(".0").unwrap_or(v)
+}
+
 #[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
