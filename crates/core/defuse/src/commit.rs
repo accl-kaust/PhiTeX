@@ -1038,11 +1038,6 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 }
                 Some(e) => {
                     if e.provisional {
-                        // (a settling node's prediction missed: no run
-                        // goes on on one until a speculating node says so)
-                        if eng.op(node.op()).settles_at_quiet() {
-                            eng.spec_depth.store(0, Ordering::Relaxed);
-                        }
                         st.predictions_refuted += 1;
                         *w.log.lock().pred_refuted_by_field.entry(d.f).or_default() += 1;
                         crate::obs::pred_miss(d.f, e.value == d.value);

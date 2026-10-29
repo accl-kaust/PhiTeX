@@ -161,10 +161,6 @@ pub(crate) struct Ops {
     pub fin_class: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, FinClass>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// The threads the evaluation runs on: the page loop speculates past
-    /// a routine's unknown give-back only with more than one
-    /// (`crate::pages::LoopState::depth`).
-    pub threads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// [`crate::Options::origins`]: the pages' writers keep their glyphs
     /// (`crate::origins`).
     pub origins: std::sync::Arc<std::sync::atomic::AtomicBool>,

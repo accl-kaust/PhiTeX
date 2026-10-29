@@ -237,14 +237,13 @@ impl<'a> Ctx<'a> {
 
     /// A definition reaching me that is a settling node's prediction
     /// (`Operation::settles_at_quiet`, filed before its first run), where
-    /// I am no settling node and the speculation depth is 0
-    /// (`Ctx::set_spec_depth`): the run stops, and runs again once that
+    /// I am no settling node: the run stops, and runs again once that
     /// node commits (or at the next quiet point), instead of going on on
     /// a guess the last ones missed. That node's reader as the page
     /// loop is its finisher's: TeX's own chain from a routine to the text
     /// after it.
     fn wait_for_settling(&mut self, r: &crate::read::Reaching) -> Result<(), Stop> {
-        if !r.provisional || self.eng.spec_depth.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        if !r.provisional {
             return Ok(());
         }
         let Some(by) = r.by else { return Ok(()) };
@@ -259,20 +258,6 @@ impl<'a> Ctx<'a> {
         }
         self.wait_on = Some(by);
         Err(stop())
-    }
-
-    /// How far runs go on the predictions of settling nodes
-    /// (`Operation::settles_at_quiet`): at 0 a reader of one waits for
-    /// its commit (`Ctx::read`); the client's speculating node sets it
-    /// (a page loop: 0 after a give-back it guessed wrong, more after
-    /// those it guessed right).
-    pub fn spec_depth(&self) -> u32 {
-        self.eng.spec_depth.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Sets [`Ctx::spec_depth`].
-    pub fn set_spec_depth(&self, d: u32) {
-        self.eng.spec_depth.store(d, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// `x` with each alias definition it is followed: a read of the

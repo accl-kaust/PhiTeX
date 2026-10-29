@@ -2734,7 +2734,6 @@ impl Graph {
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),
             fin_class: Arc::default(),
-            threads: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
             audit: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             origins: origins_on,
@@ -3375,7 +3374,6 @@ impl Graph {
                         }
                     });
                 }
-                self.ops.threads.store(n, std::sync::atomic::Ordering::Relaxed);
                 let r = self.eng.evaluate_absorbing(n, edits);
                 done.store(true, std::sync::atomic::Ordering::Relaxed);
                 r

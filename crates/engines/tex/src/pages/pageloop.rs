@@ -184,14 +184,6 @@ pub(crate) struct LoopState {
     /// and met a hole short of them dropped their finishers, and the next
     /// one made them anew, most of the finishers made in a cold build).
     pub beyond: Vec<Checkpoint>,
-    /// How many pages the fold fires past the last whose routine's
-    /// give-back is known (its finisher has run on the page as it is)
-    /// before it waits for that give-back ([`Run::must_wait`]): 0 on one
-    /// thread, where a page fired on a guess can only be fired again; on
-    /// more, doubled (from 1) after each give-back the guess got right,
-    /// 0 after a miss, as TCP's slow start. A miss re-fires every page
-    /// after it, and each re-fired page re-runs its finisher.
-    pub depth: u32,
     /// The pages fired before this loop node's first ([`RestStart::base`]):
     /// its checkpoint `i` is the document's page `base + i`.
     pub base: usize,
@@ -214,7 +206,7 @@ pub(crate) struct LoopState {
 }
 
 /// The tag of a parked [`LoopState`] of this version.
-const STATE_TAG: &str = "\u{1}pages-loop-8";
+const STATE_TAG: &str = "\u{1}pages-loop-9";
 
 /// The placement of checkpoint `i`'s finisher: after the rest, placement
 /// 0 ([`Run::page_loop`]).
@@ -252,26 +244,15 @@ fn rest_field(v: &Values, parent: NodeId) -> Field {
 
 /// Where a loop rest starts ([`REST_OF`]'s value): the page the loop
 /// node before it stopped at (its key, the state before its give-back,
-/// the page and the guess), the depth, the pages before, and per
+/// the page and the guess), the pages before, and per
 /// contributor the first key number no loop node before it has.
 pub(crate) struct RestStart {
     pub key: PageKey,
     pub state: ValueId,
     pub page: ValueId,
     pub guess: ValueId,
-    pub depth: u32,
     pub base: usize,
     pub floors: Vec<(NodeId, u32)>,
-    /// The pages of the loop node before it that it fired on a guessed
-    /// give-back, up to the page it stopped at (each page's key, the page
-    /// and the give-back folded): the rest goes on only once each one's
-    /// finisher has given back what was folded. One that gave back
-    /// another re-runs that node, which places the rest again from a
-    /// page fired on the true give-back; a rest that went on before that
-    /// built every page after it on the guess (at one thread, the whole
-    /// document's pages on a refuted guess before the node before it ran
-    /// again).
-    pub guessed: Vec<(PageKey, ValueId, ValueId)>,
 }
 
 impl RestStart {
@@ -287,21 +268,14 @@ impl RestStart {
             self.state,
             self.page,
             self.guess,
-            v.int(i64::from(self.depth)),
             v.int(i64::try_from(self.base).unwrap_or(0)),
             v.list(fl),
-            v.list(
-                self.guessed
-                    .iter()
-                    .map(|(k, page, gave)| v.list(vec![raw_value(v, Some(k.piece)), v.int(i64::from(k.nth)), *page, *gave]))
-                    .collect(),
-            ),
         ])
     }
 
     fn decode(v: &Values, x: ValueId) -> Option<RestStart> {
         let xs = list_of(v, x);
-        let [kp, kn, state, page, guess, depth, base, fl, gs] = xs[..] else { return None };
+        let [kp, kn, state, page, guess, base, fl] = xs[..] else { return None };
         let fl = list_of(v, fl);
         Some(RestStart {
             key: PageKey {
@@ -311,29 +285,12 @@ impl RestStart {
             state,
             page,
             guess,
-            depth: u32::try_from(int_of(v, depth)).ok()?,
             base: usize::try_from(int_of(v, base)).ok()?,
             floors: fl.chunks(2).filter_map(|c| Some((raw_node(v, c[0])?, u32::try_from(int_of(v, *c.get(1)?)).ok()?))).collect(),
-            guessed: list_of(v, gs)
-                .into_iter()
-                .filter_map(|g| match list_of(v, g)[..] {
-                    [p, n, page, gave] => Some((
-                        PageKey {
-                            piece: raw_node(v, p)?,
-                            nth: u32::try_from(int_of(v, n)).ok()?,
-                        },
-                        page,
-                        gave,
-                    )),
-                    _ => None,
-                })
-                .collect(),
         })
     }
 }
 
-/// The most pages the fold fires past an unknown give-back.
-const MAX_DEPTH: u32 = 64;
 
 /// A checkpoint the fold goes on from with its fire, its give-back still
 /// to fold ([`Run::fold_on`]).
@@ -382,7 +339,6 @@ impl LoopState {
             self.tail.unwrap_or(ValueId::UNIT),
             v.int(i64::from(self.ended)),
             v.list(cps(&self.beyond)),
-            v.int(i64::from(self.depth)),
             v.int(i64::try_from(self.base).unwrap_or(0)),
             self.rest_at.map_or(ValueId::UNIT, |k| v.list(vec![raw_value(v, Some(k.piece)), v.int(i64::from(k.nth))])),
             self.after.map_or(ValueId::UNIT, |(c, f)| v.list(vec![raw_value(v, Some(c)), raw_value(v, Some(f))])),
@@ -393,7 +349,7 @@ impl LoopState {
     /// the run starts from nothing).
     pub(crate) fn decode(v: &Values, x: ValueId) -> Option<LoopState> {
         let xs = list_of(v, x);
-        if xs.len() != 9 || !v.with_str(xs[0], |s| s == STATE_TAG).unwrap_or(false) {
+        if xs.len() != 8 || !v.with_str(xs[0], |s| s == STATE_TAG).unwrap_or(false) {
             return None;
         }
         let cps = |x: ValueId, at: usize| -> Option<Vec<Checkpoint>> {
@@ -427,9 +383,8 @@ impl LoopState {
             tail: some(xs[2]),
             ended: int_of(v, xs[3]) != 0,
             beyond,
-            depth: u32::try_from(int_of(v, xs[5])).unwrap_or(0),
-            base: usize::try_from(int_of(v, xs[6])).unwrap_or(0),
-            rest_at: match list_of(v, xs[7])[..] {
+            base: usize::try_from(int_of(v, xs[5])).unwrap_or(0),
+            rest_at: match list_of(v, xs[6])[..] {
                 [p, n] => Some(PageKey {
                     piece: raw_node(v, p)?,
                     nth: u32::try_from(int_of(v, n)).ok()?,
@@ -437,7 +392,7 @@ impl LoopState {
                 _ => None,
             },
             wait: None,
-            after: match list_of(v, xs[8])[..] {
+            after: match list_of(v, xs[7])[..] {
                 [c, f] => Some((raw_node(v, c)?, raw_node(v, f)?)),
                 _ => None,
             },
@@ -669,7 +624,7 @@ impl Run<'_, '_> {
             after: if rest.is_some() { old.after } else { None },
             ..LoopState::default()
         };
-        let (start, bound) = self.where_to_start(&old, &mut ls, rest.as_ref());
+        let (start, bound) = self.where_to_start(&old, &mut ls);
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             self.trace_start(&start, ls.checkpoints.len(), n_old);
         }
@@ -727,9 +682,6 @@ impl Run<'_, '_> {
             ls.rest_at = None;
         }
         ls.ended = lc.ended;
-        // (the text past a routine's prediction goes on on it as far as
-        // the loop does on its guesses, [`LoopState::depth`])
-        self.cx.set_spec_depth(ls.depth);
         if crate::exec::obs_flag!("PHITEX_KEY_TRACE") {
             let ks: Vec<String> = ls.checkpoints.iter().chain(&ls.beyond).map(|c| format!("{}:{}@{}", c.key.piece.raw(), c.key.nth, c.cursor.raw())).collect();
             eprintln!("pages-keys {}: {}", me.raw(), ks.join(" "));
@@ -790,21 +742,6 @@ impl Run<'_, '_> {
     fn rest_begins(&mut self, r: &RestStart, ls: &mut LoopState) -> R<Option<(ScanState, LoopCarry, FireNote, ValueId)>> {
         let v = self.v;
         let me = self.cx.node();
-        // (the pages before it fired on guesses: each one's give-back
-        // what was folded, else no page yet)
-        for (k, page, gave) in &r.guessed {
-            let out = self.cx.read_at(k.field(v, PAGE_OUT), At::End(self.cx.unit()))?;
-            let ok = match out {
-                phitex_defuse::FieldAt::Def(x, _) => page_out_parts(v, x).is_some_and(|o| o.1 == *page && o.0 == *gave),
-                _ => false,
-            };
-            if !ok {
-                if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-                    eprintln!("pages {}: rest waits for guessed page {}:{}", me.raw(), k.piece.raw(), k.nth);
-                }
-                return Ok(None);
-            }
-        }
         let (st, lc, p) = self.decode_state(r.state);
         let out = self.cx.read_at(r.key.field(v, PAGE_OUT), At::End(self.cx.unit()))?;
         let gave = match out {
@@ -848,17 +785,11 @@ impl Run<'_, '_> {
         }
         let mut floors: Vec<(NodeId, u32)> = floors.into_iter().collect();
         floors.sort_unstable_by_key(|e| e.0.raw());
-        let guessed: Vec<(PageKey, ValueId, ValueId)> = (0..i)
-            .filter(|&j| !self.give_back_known(ls, j))
-            .map(|j| (ls.checkpoints[j].key, ls.checkpoints[j].page, ls.checkpoints[j].gave))
-            .collect();
         let r = RestStart {
-            guessed,
             key: c.key,
             state: c.state,
             page: c.page,
             guess: c.guess,
-            depth: ls.depth,
             base: ls.base + i + 1,
             floors,
         };
@@ -868,7 +799,7 @@ impl Run<'_, '_> {
     /// [`Run::page_loop`]'s step 2: where the fold starts and how far it
     /// may stop early, the kept checkpoints emitted again on `ls` (their
     /// give-backs read again: one that moved is where it goes on from).
-    fn where_to_start(&mut self, old: &LoopState, ls: &mut LoopState, rest: Option<&RestStart>) -> (Start, Bound) {
+    fn where_to_start(&mut self, old: &LoopState, ls: &mut LoopState) -> (Start, Bound) {
         let v = self.v;
         let me = self.cx.node();
         let site = match self.cx.woken_by() {
@@ -898,30 +829,14 @@ impl Run<'_, '_> {
         let mut start = Start::Scratch;
         // (the kept checkpoints emitted again, their give-backs read
         // again: one that moved is where the fold goes on from)
-        let mut missed = false;
         for i in 0..limit {
             let gave = self.emit_kept(ls, &old.checkpoints[i]);
             if gave != old.checkpoints[i].gave {
                 start = Start::At(i);
                 bound = Bound::Page(i);
-                missed = true;
                 break;
             }
         }
-        // (the depth past an unknown give-back: doubled where a
-        // give-back came in as guessed, 0 where one missed; 0 on one
-        // thread, [`LoopState::depth`])
-        ls.depth = if self.ops.threads.load(std::sync::atomic::Ordering::Relaxed) <= 1 || missed {
-            0
-        } else if matches!(self.cx.woken_by(), Some(Cause::Output { .. })) {
-            (old.depth * 2).clamp(1, MAX_DEPTH)
-        } else if old.checkpoints.is_empty() && old.beyond.is_empty() && old.tail.is_none() {
-            // (the loop's first run: one page on a guess; a rest's, the
-            // depth of the loop node before it)
-            rest.map_or(1, |r| r.depth)
-        } else {
-            old.depth
-        };
         if matches!(start, Start::Scratch) {
             start = match tail_ok {
                 Some(t) => Start::Tail(t),
@@ -1049,8 +964,6 @@ impl Run<'_, '_> {
                     let gave = self.emit_kept(ls, &old.checkpoints[j]);
                     if gave != old.checkpoints[j].gave {
                         moved = Some(j);
-                        // (a give-back missed: no page past it on a guess)
-                        ls.depth = 0;
                         break;
                     }
                 }
@@ -1189,21 +1102,12 @@ impl Run<'_, '_> {
     }
 
     /// Whether the fold waits at checkpoint `i` (the last pushed) before
-    /// folding its routine's give-back: more than [`LoopState::depth`]
-    /// pages up to it have a give-back not known ([`Run::give_back_known`]).
+    /// folding its routine's give-back: one not known
+    /// ([`Run::give_back_known`]). The fold never goes on on a guessed
+    /// give-back: a page fired on one can only be fired again, every page
+    /// after it with it, and each of their routines run again.
     fn must_wait(&mut self, ls: &LoopState, i: usize) -> bool {
-        let depth = ls.depth as usize;
-        let mut unknown = 0;
-        for k in (0..=i).rev() {
-            if self.give_back_known(ls, k) {
-                return false;
-            }
-            unknown += 1;
-            if unknown > depth {
-                return true;
-            }
-        }
-        false
+        !self.give_back_known(ls, i)
     }
 
     /// Whether checkpoint `k`'s routine's give-back is known: its
