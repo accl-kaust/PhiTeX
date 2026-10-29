@@ -262,6 +262,17 @@ fn attached_end_skip(eng: &Engine, inner: &Inner, a: NodeId, from: NodeId, skip:
     last
 }
 
+/// `xs` in the order of their labels as each was read once: another
+/// segment's rebalance (`Order::rebalance`) may move a label while the
+/// sort runs, and a key read again under it, changed, broke the total
+/// order the sort relies on (a panic at the page loop's commit in Grail
+/// at sixteen threads, its rests relocated). A snapshot is what every
+/// caller wants: an order to place or run nodes in, each of which
+/// re-reads its own place under its segment's lock.
+pub(crate) fn sort_by_label(eng: &Engine, xs: &mut [NodeId]) {
+    xs.sort_by_cached_key(|&n| eng.node(n).pos_hint());
+}
+
 pub(crate) fn children_end(eng: &Engine, n: NodeId) -> (NodeId, Option<Pos>) {
     children_end_skip(eng, n, None)
 }
@@ -1136,10 +1147,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 .filter(|n| !kept.contains(&Some(*n)))
                 .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() != State::Gone && x.slot() == 2))
                 .collect();
-            // (each label read once: another segment's rebalance may move
-            // one while the sort runs, and a key that changes under it
-            // breaks the order the sort relies on, a panic)
-            v.sort_by_cached_key(|&n| eng.node(n).pos_hint());
+            sort_by_label(eng, &mut v);
             v.into()
         };
         // (a kept placement's subtree end found only where a placement
@@ -4227,6 +4235,44 @@ mod tests {
             cx.follow(self.0, vec![cx.values().int(9)]);
             Ok(ValueId::UNIT)
         }
+    }
+
+    /// A sort of nodes by label while another thread rebalances their
+    /// segments, relabelling them again and again: each label is read
+    /// once (`sort_by_label`), so the sort never meets a key that moved
+    /// under it, and every sort gives an order (a key read again in the
+    /// comparator broke the sort's total order: a panic at the page loop's
+    /// commit in Grail at -j16).
+    #[test]
+    fn a_sort_by_label_holds_while_rebalances_move_the_labels() {
+        let e = Arc::new(Engine::new());
+        let piece = e.register(Arc::new(Piece));
+        let u = e.new_unit();
+        let ids: Vec<NodeId> = (0..4000).map(|i| e.push(u, piece, vec![e.values().int(i)])).collect();
+        let stop = Arc::new(AtomicBool::new(false));
+        let mover = {
+            let (e, stop, ids) = (Arc::clone(&e), Arc::clone(&stop), ids.clone());
+            std::thread::spawn(move || {
+                let mut k = 0usize;
+                while !stop.load(Ordering::Acquire) {
+                    let seg = e.node(ids[k.wrapping_mul(7919) % ids.len()]).seg_hint();
+                    e.order.rebalance(&e, seg, 1 + k % 97);
+                    k += 1;
+                }
+                k
+            })
+        };
+        let t0 = std::time::Instant::now();
+        let mut sorts = 0;
+        while t0.elapsed() < Duration::from_secs(2) {
+            let mut xs = ids.clone();
+            xs.reverse();
+            super::sort_by_label(&e, &mut xs);
+            sorts += 1;
+        }
+        stop.store(true, Ordering::Release);
+        let moves = mover.join().expect("the rebalancing thread");
+        assert!(moves > 0 && sorts > 0, "{moves} rebalances during {sorts} sorts");
     }
 
     #[test]
