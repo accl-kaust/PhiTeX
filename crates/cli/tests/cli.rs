@@ -942,7 +942,8 @@ impl Viewer {
 /// makes an error is published at its line, the fix clears it and the
 /// pages change; a double-click in the viewer (its `source`) is
 /// `window/showDocument` at that line; `phitex/cursor` on a word of the
-/// second page makes the viewer reveal page 2; `shutdown` and `exit` end
+/// second page, with a selection, is the viewer's `follow` and `select`
+/// in bytes of the buffer; `shutdown` and `exit` end
 /// the watch with status 0. Nothing but LSP messages on standard output.
 #[test]
 #[allow(clippy::too_many_lines, reason = "one editor's session, in order")]
@@ -1097,23 +1098,40 @@ fn watch_lsp() {
         &mut to,
         &json!({"jsonrpc": "2.0", "id": show["id"], "result": {"success": true}}),
     );
-    // (the editor's cursor on a word of page 2: the viewer reveals it there)
+    // (the editor's cursor on a word of page 2, a selection with it: the
+    // viewer told their bytes in the buffer, the glyph origins' space, in
+    // the origins' name of the file)
     lsp_send(
         &mut to,
         &json!({"jsonrpc": "2.0", "method": "phitex/cursor", "params": {
             "textDocument": {"uri": uri}, "position": at(second, 7),
+            "range": {"start": at(second, 5), "end": at(second, 12)},
         }}),
     );
-    let shown = viewer.until(|v| v["event"] == "reveal");
-    assert_eq!(shown["page"], 2, "{shown}");
-    assert!(
-        shown["text"]
-            .as_str()
-            .is_some_and(|t| t.contains("foxtrot")),
-        "{shown}"
+    let start: usize = text.split_inclusive('\n').take(second).map(str::len).sum();
+    let follow = viewer.until(|v| v["event"] == "follow");
+    assert_eq!(
+        follow,
+        json!({"event": "follow", "file": "doc.tex", "at": start + 7,
+            "word": [start + 5, start + 12], "line": [start, start + "Xray foxtrot golf hotel.".len()]}),
+        "{follow}"
     );
-    assert_eq!(shown["texts"][0], "Xray foxtrot golf hotel.", "{shown}");
-    assert_eq!(shown["line"], second + 1, "{shown}");
+    let select = viewer.until(|v| v["event"] == "select");
+    assert_eq!(
+        select,
+        json!({"event": "select", "file": "doc.tex", "from": start + 5, "to": start + 12}),
+        "{select}"
+    );
+    // (the last build's origins, made at the watch's first idle point
+    // after it, before it took the cursor)
+    let o = viewer.ask(&json!({"id": 4, "op": "origins", "page": 1}));
+    assert!(
+        o["json"]["files"]
+            .as_array()
+            .is_some_and(|f| f.iter().any(|n| n == "doc.tex")),
+        "the origins name the file as the events do: {o}"
+    );
+    assert!(viewer.events.iter().all(|e| e["event"] != "reveal"));
     // (the end, as the editor ends it)
     lsp_send(
         &mut to,
