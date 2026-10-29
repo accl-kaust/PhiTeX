@@ -88,13 +88,15 @@ button.btn { color: var(--ink); background: none; border: 1px solid var(--ink); 
 button.btn:hover { background: var(--ink); color: var(--paper); }
 
 /* the problems' line and list: rules, not cards */
-.sum, .win.docked .sum, .win.docked.light .sum { background: var(--paper); color: var(--ink-2); border-bottom: 1px solid var(--rule); height: 24px; font: 11px var(--sans); }
+.errs, .win.docked .errs { background: var(--paper); border: 1px solid var(--ink); border-radius: 0; box-shadow: 0 2px 0 var(--rule); }
+.sum, .win.docked .sum, .win.docked.light .sum { background: var(--paper); color: var(--ink-2); min-height: 26px; font: 11px var(--sans); }
+.win.diags-open .sum { border-bottom: 1px solid var(--rule); }
 .sum:hover, .win.docked .sum:hover, .win.docked.light .sum:hover { background: var(--paper-2); }
 .sum .first, .win.docked .sum .first, .win.docked.light .sum .first { color: var(--ink); }
 .sum .n.error, .win.docked .sum .n.error, .win.docked.light .sum .n.error { color: var(--mark); }
 .sum .n.warning, .win.docked .sum .n.warning, .win.docked.light .sum .n.warning { color: var(--caution); }
 .sum .n.info, .win.docked .sum .n.info, .win.docked.light .sum .n.info { color: var(--ink-2); }
-.diags { background: var(--paper); border-bottom: 1px solid var(--ink); box-shadow: none; }
+.diags { background: var(--paper); box-shadow: none; }
 .diag { border-top: 1px solid var(--rule-2); font: 12px var(--sans); }
 .diag[data-line]:hover { background: var(--paper-2); }
 .diag.error .icon { color: var(--mark); } .diag.warning .icon { color: var(--caution); } .diag.info .icon { color: var(--ink-3); }

@@ -1558,6 +1558,7 @@ impl phitex_tex::ShellHook for Counting {
 /// the first listing edited (`minted.edit.tex`, latexmk run on it after
 /// the first in the same directory: `minted.edit.pdf`): equal again, the
 /// one listing highlighted again and no `batch`.
+#[allow(clippy::too_many_lines)]
 fn latexmk_minted(threads: usize) {
     let name = "minted";
     let fx = common::fixtures().join("latexmk");

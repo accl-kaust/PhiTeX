@@ -6295,6 +6295,7 @@ impl Build {
     /// the new slices as the document's nodes are ([`apply_slices`]); a
     /// node whose pieces are not the last cut's runs again. The pieces
     /// replaced, inserted or removed.
+    #[allow(clippy::too_many_lines)]
     fn stage_doc_file(&mut self, df: &Arc<std::sync::Mutex<DocFile>>, text: String) {
         let mut df = df.locked();
         if df.text == text {
@@ -7824,7 +7825,7 @@ impl Build {
             for n in list {
                 match n {
                     Node::Char { ch, .. } => {
-                        out.push(char::from_u32(u32::from(*ch)).unwrap_or('?'))
+                        out.push(char::from_u32(u32::from(*ch)).unwrap_or('?'));
                     }
                     Node::Lig(l) => out.extend(
                         l.original

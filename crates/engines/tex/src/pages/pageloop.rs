@@ -629,6 +629,7 @@ impl Run<'_, '_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn page_loop_r(&mut self) -> R<ValueId> {
         let v = self.v;
         let me = self.cx.node();

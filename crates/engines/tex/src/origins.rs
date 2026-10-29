@@ -1571,6 +1571,7 @@ impl State {
         u32::try_from(i).unwrap_or(u32::MAX)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn ctx<'a>(&self, inp: Input<'a>) -> Ctx<'a> {
         let doc = self.file_index(&inp.doc_name);
         let mut texts: Vec<Option<Arc<str>>> = Vec::new();

@@ -537,13 +537,15 @@ button.btn { color: var(--ink); background: none; border: 1px solid var(--ink); 
 button.btn:hover { background: var(--ink); color: var(--paper); }
 
 /* the problems' line and list: rules, not cards */
-.sum, .win.docked .sum, .win.docked.light .sum { background: var(--paper); color: var(--ink-2); border-bottom: 1px solid var(--rule); height: 24px; font: 11px var(--sans); }
+.errs, .win.docked .errs { background: var(--paper); border: 1px solid var(--ink); border-radius: 0; box-shadow: 0 2px 0 var(--rule); }
+.sum, .win.docked .sum, .win.docked.light .sum { background: var(--paper); color: var(--ink-2); min-height: 26px; font: 11px var(--sans); }
+.win.diags-open .sum { border-bottom: 1px solid var(--rule); }
 .sum:hover, .win.docked .sum:hover, .win.docked.light .sum:hover { background: var(--paper-2); }
 .sum .first, .win.docked .sum .first, .win.docked.light .sum .first { color: var(--ink); }
 .sum .n.error, .win.docked .sum .n.error, .win.docked.light .sum .n.error { color: var(--mark); }
 .sum .n.warning, .win.docked .sum .n.warning, .win.docked.light .sum .n.warning { color: var(--caution); }
 .sum .n.info, .win.docked .sum .n.info, .win.docked.light .sum .n.info { color: var(--ink-2); }
-.diags { background: var(--paper); border-bottom: 1px solid var(--ink); box-shadow: none; }
+.diags { background: var(--paper); box-shadow: none; }
 .diag { border-top: 1px solid var(--rule-2); font: 12px var(--sans); }
 .diag[data-line]:hover { background: var(--paper-2); }
 .diag.error .icon { color: var(--mark); } .diag.warning .icon { color: var(--caution); } .diag.info .icon { color: var(--ink-3); }
@@ -1082,13 +1084,23 @@ button.btn { font: inherit; font-size: 12px; font-weight: 600; color: #fff; back
   padding: 4px 12px 4px 8px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
 button.btn:hover { background: var(--accent2); }
 
-.sum { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px; font-size: 12px; color: var(--fg2); flex: none;
-  border-bottom: 1px solid var(--divider); cursor: pointer; white-space: nowrap; overflow: hidden; user-select: none; }
+/* the problems: a card floating over the pages' top right, never moving them; one line
+   (the counts, the first problem, its place, how many more), the list below it when opened */
+.errs { position: absolute; z-index: 5; top: 8px; right: 22px; width: min(460px, calc(100% - 44px)); max-height: calc(100% - 16px);
+  display: none; flex-direction: column; background: var(--light); color: var(--fg); border: 1px solid var(--divider);
+  border-radius: var(--r2); box-shadow: 0 6px 20px rgba(27,34,44,.3); overflow: hidden; }
+.errs.on { display: flex; }
+.sum { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 0 4px 0 10px; font-size: 12px; color: var(--fg2); flex: none;
+  cursor: pointer; white-space: nowrap; overflow: hidden; user-select: none; }
 .sum:hover { background: var(--light2); }
+.sum .where, .sum .more { flex: none; color: var(--fg2); }
+.sum .x { flex: none; width: 24px; height: 24px; border: 0; border-radius: 4px; background: none; color: inherit; font-size: 13px; cursor: pointer; }
+.sum .x:hover { background: var(--light3); }
+.win.diags-open .sum { border-bottom: 1px solid var(--divider); }
 .sum .n { display: inline-flex; align-items: center; gap: 2px; font-weight: 600; }
 .sum .n.error { color: var(--danger); } .sum .n.warning { color: var(--warn); } .sum .n.info { color: var(--info); }
-.sum .first { overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
-.sum .caret { margin-left: auto; transition: transform .15s; }
+.sum .first { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
+.sum .caret { flex: none; transition: transform .15s; }
 .win.diags-open .sum .caret { transform: rotate(90deg); }
 .body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 /* (the contents beside the pages: PanelOptions.outline) */
@@ -1101,10 +1113,9 @@ button.btn:hover { background: var(--accent2); }
 /* (a problem told whole, in the drawer: problems.ts's card, as a row) */
 .diags .phx-inline { margin: 0; padding: 0; border-radius: 0; border-top: 0; box-shadow: none; max-width: none; list-style: none; }
 .diags .phx-inline > li { border-bottom: 1px solid #2c2e33; }
-.diags { position: relative; flex: none; max-height: 40%; overflow: auto; background: var(--light);
-  border-bottom: 1px solid var(--divider); display: none; }
-/* (a build with no pages: the list may take the room the pages would) */
-.win.nopages.diags-open .diags { max-height: none; flex: 1 1 auto; }
+.diags { position: relative; flex: 0 1 auto; min-height: 0; max-height: min(60vh, 420px); overflow: auto; background: var(--light); display: none; }
+/* (a build with no pages: nothing to cover, the list as long as the room) */
+.win.nopages .diags { max-height: none; }
 .win.diags-open .diags { display: block; }
 .diag { display: flex; gap: 6px; align-items: flex-start; padding: 5px 10px; font-size: 12px; border-top: 1px solid var(--divider); }
 .diag:first-child { border-top: 0; }
@@ -1176,8 +1187,6 @@ footer .msg.err { color: var(--danger); }
 .win.docked.sheet-open > .bar label { justify-content: space-between; } .win.docked.sheet-open > .bar .grow { display: none; }
 .win.docked.sheet-open .details { display: block; }
 @keyframes sheet { from { opacity: 0; transform: translateY(-4px); } }
-.win.docked > .sum { display: none; }
-.win.docked .diags { max-height: 40%; }
 .pkgs { display: none; position: absolute; z-index: 4; left: 50%; transform: translateX(-50%); top: 10px; max-width: calc(100% - 24px); padding: 8px 12px; font-size: 13px; border-radius: 8px;
   background: var(--light); color: var(--fg); border: 1px solid var(--divider); border-left: 3px solid var(--accent); box-shadow: 0 4px 14px rgba(0,0,0,.28); }
 .pkgs.on { display: flex; gap: 8px; align-items: center; }
@@ -1374,8 +1383,6 @@ var Panel = class {
     <button class="btn" id="pdf" title="PhiTeX's PDF, made locally"><span class="icon">download</span>PDF</button>
     <div class="details" id="details"></div>
   </div>
-  <div class="sum" id="sum" role="button" aria-expanded="false" tabindex="0" title="Diagnostics (click to list)"></div>
-  <div class="diags" id="diags" role="list" aria-label="Diagnostics"></div>
   <div class="body">
     <div class="report" id="report" role="dialog" aria-label="Debug report">
       <b>Debug report</b>
@@ -1395,6 +1402,7 @@ var Panel = class {
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="keyhelp" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
     <div class="offpill" id="offpill">\u25CF disconnected</div>
+    <div class="errs" id="errs" role="region" aria-label="Problems"><div class="sum" id="sum" role="button" aria-expanded="false" tabindex="0" title="Problems (click to list them; \u2715 or Esc to dismiss)"></div><div class="diags" id="diags" role="list" aria-label="Problems"></div></div>
     <div class="stage" id="stage"><div class="gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load">${stepsHtml(w.steps, ["now", "", ""])}<h3>${w.steps[0]}\u2026</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
   </div>
   <footer><span class="lat" id="lat" title="Click for details">\u2013</span><span class="grow"></span><span class="msg" id="msg">all local</span></footer>
@@ -1447,13 +1455,13 @@ var Panel = class {
       if (d) ev.onGoto(d.dataset.file, Number(d.dataset.line));
     };
     const sum = this.$("#sum");
-    sum.onclick = () => this.diagnostics();
+    sum.onclick = (e) => e.target.closest(".x") ? this.dismissProblems() : this.diagnostics();
     sum.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), sum.click());
     this.$("#stage").addEventListener("pointerdown", () => {
       this.diagsOpen(false);
       this.sheet(false);
     });
-    this.root.addEventListener("keydown", (e) => e.key === "Escape" && this.diagsOpen(false));
+    this.root.addEventListener("keydown", (e) => e.key === "Escape" && this.escapeProblems());
     this.$("#gonex").onclick = () => this.dismissOffline();
     addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("offline") && this.dismissOffline());
     window.addEventListener("keydown", (e) => {
@@ -1774,15 +1782,23 @@ var Panel = class {
       list.append(b);
     }
     const sum = this.$("#sum");
-    sum.style.display = diags.length ? "" : "none";
-    if (!diags.length) this.diagsOpen(false);
     const count = (sev) => diags.filter((d) => d.severity === sev).length;
-    sum.innerHTML = ["error", "warning", "info"].filter((k) => count(k)).map((k) => `<span class="n ${k}">${icon(k, 14)}${count(k)}</span>`).join("") + `<span class="first"></span>${icon("chevron_right", 16).replace('class="icon"', 'class="icon caret"')}`;
-    if (diags[0]) sum.querySelector(".first").textContent = diags[0].message;
-    const errs = JSON.stringify(diags.filter((d) => d.problem && d.severity === "error").map((d) => [d.message, d.file, d.line]));
-    if (errs !== "[]" && errs !== this.errsClosed) this.diagsOpen(true);
-    this.win.classList.toggle("nopages", s.pages === 0 && !this.last);
-    if (errs === "[]") this.errsClosed = "";
+    sum.innerHTML = ["error", "warning", "info"].filter((k) => count(k)).map((k) => `<span class="n ${k}">${icon(k, 14)}${count(k)}</span>`).join("") + `<span class="first"></span><span class="where"></span><span class="more"></span>${icon("chevron_right", 16).replace('class="icon"', 'class="icon caret"')}<button type="button" class="x" title="Dismiss until the problems change (Esc)" aria-label="Dismiss">\u2715</button>`;
+    if (diags[0]) {
+      sum.querySelector(".first").textContent = diags[0].message;
+      sum.querySelector(".where").textContent = diags[0].file ? `${diags[0].file}${diags[0].line ? `:${diags[0].line}` : ""}` : "";
+      sum.querySelector(".more").textContent = diags.length > 1 ? `+${diags.length - 1} more` : "";
+    }
+    const nopages = s.pages === 0 && !this.last;
+    this.win.classList.toggle("nopages", nopages);
+    const key = this.problemsKey();
+    if (key !== this.shownKey) {
+      this.shownKey = key;
+      if (key !== this.dismissed) this.dismissed = "";
+      this.diagsOpen(nopages && count("error") > 0);
+    }
+    this.$("#errs").classList.toggle("on", diags.length > 0 && key !== this.dismissed);
+    if (!diags.length) this.diagsOpen(false);
     this.stale(s);
     queueMicrotask(() => this.emit());
   }
@@ -2090,9 +2106,8 @@ var Panel = class {
       "keydown",
       (e) => {
         if (e.ctrlKey || e.altKey || e.metaKey || e.target?.closest?.("input, textarea, select, [contenteditable=true]")) return;
-        const drawer = this.win.classList.contains("diags-open");
-        if (e.key === "Escape" && drawer) this.diagnostics(false);
-        else if (e.key === "e") this.diagnostics();
+        if (e.key === "Escape" && this.escapeProblems()) {
+        } else if (e.key === "e") this.diagnostics();
         else if (e.key === "t" && this.contents) this.side();
         else return;
         e.preventDefault();
@@ -2123,13 +2138,33 @@ var Panel = class {
       }
     });
   }
-  /** The errors last closed by hand (the drawer opens again when they change). */
-  errsClosed = "";
-  /** The diagnostics drawer. */
+  /** The problems the card was last dismissed on (shown again when they change), and those it shows. */
+  dismissed = "";
+  shownKey = "";
+  problemsKey() {
+    return JSON.stringify((this.lastStatus?.diagnostics ?? []).map((d) => [d.severity, d.message, d.file, d.line]));
+  }
+  /** The problems' list opened or closed (opening shows a dismissed card again). */
   diagnostics(on = !this.win.classList.contains("diags-open")) {
-    if (!on) this.errsClosed = JSON.stringify((this.lastStatus?.diagnostics ?? []).filter((d) => d.problem && d.severity === "error").map((d) => [d.message, d.file, d.line]));
+    if (on) {
+      this.dismissed = "";
+      this.$("#errs").classList.toggle("on", (this.lastStatus?.diagnostics ?? []).length > 0);
+    }
     this.diagsOpen(on);
     this.emit();
+  }
+  /** The card dismissed until the problems change (its ✕, or Esc with the list closed). */
+  dismissProblems() {
+    this.dismissed = this.problemsKey();
+    this.$("#errs").classList.remove("on");
+    this.diagsOpen(false);
+    this.emit();
+  }
+  /** Esc on the problems: the list closed, else the card dismissed; false when neither was there. */
+  escapeProblems() {
+    if (this.win.classList.contains("diags-open")) return this.diagnostics(false), true;
+    if (this.$("#errs").classList.contains("on")) return this.dismissProblems(), true;
+    return false;
   }
   prev() {
     this.viewer.goTo(this.at - 1);
@@ -2424,7 +2459,7 @@ var Panel = class {
     tick();
     this.warmTimer = setInterval(tick, 1e3);
   }
-  /** The diagnostics list: a drawer above the pages, pushing them down; it never covers them. */
+  /** The problems' list, below the card's line (the card floats over the pages, never moving them). */
   diagsOpen(on) {
     this.win.classList.toggle("diags-open", on);
     this.$("#sum").setAttribute("aria-expanded", String(on));
@@ -4463,11 +4498,14 @@ var stripSource = {
     return r.ok ? r.arrayBuffer() : null;
   }
 };
-var chip = document.createElement("div");
-chip.style.cssText = "position:fixed;right:8px;bottom:8px;z-index:9;font:11px/1.3 ui-monospace,monospace;background:rgba(20,24,32,.82);color:#e8eef8;padding:4px 7px;border-radius:5px;pointer-events:none";
-chip.textContent = "strips";
-document.body.append(chip);
-var strips = new Strips(stripSource, chip);
+var chip;
+if (location.hash === "#debug") {
+  chip = document.createElement("div");
+  chip.style.cssText = "position:fixed;right:8px;bottom:32px;z-index:16;font:11px/1.3 ui-monospace,monospace;background:rgba(20,24,32,.82);color:#e8eef8;padding:4px 7px;border-radius:5px;pointer-events:none";
+  chip.textContent = "strips";
+  document.body.append(chip);
+}
+var strips = new Strips(stripSource, chip ?? null);
 var sock = new Socket();
 var pages = new Pages(sock);
 var source = (file, line, col = 1) => void sock.request({ op: "source", file, line, col });

@@ -176,15 +176,18 @@ const stripSource: StripSource = {
   },
 };
 
-/** The last frame's numbers, in the corner. */
-const chip = document.createElement("div");
-chip.style.cssText =
-  "position:fixed;right:8px;bottom:8px;z-index:9;font:11px/1.3 ui-monospace,monospace;" +
-  "background:rgba(20,24,32,.82);color:#e8eef8;padding:4px 7px;border-radius:5px;pointer-events:none";
-chip.textContent = "strips";
-document.body.append(chip);
+/** The last frame's numbers, in the corner above the status bar: only with `#debug` in the address. */
+let chip: HTMLElement | undefined;
+if (location.hash === "#debug") {
+  chip = document.createElement("div");
+  chip.style.cssText =
+    "position:fixed;right:8px;bottom:32px;z-index:16;font:11px/1.3 ui-monospace,monospace;" +
+    "background:rgba(20,24,32,.82);color:#e8eef8;padding:4px 7px;border-radius:5px;pointer-events:none";
+  chip.textContent = "strips";
+  document.body.append(chip);
+}
 
-const strips = new Strips(stripSource, chip);
+const strips = new Strips(stripSource, chip ?? null);
 const sock = new Socket();
 const pages = new Pages(sock);
 /** A place in a file (1-based line and column): the watch opens it in the editor (`--editor`). */

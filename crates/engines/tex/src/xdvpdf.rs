@@ -448,6 +448,7 @@ struct Times {
 /// over one xdvipdfmx session, from the state the base kept before the
 /// first page that differs from its (the pages before it keep their
 /// bytes, a page whose bytes are the base's its chunk).
+#[allow(clippy::too_many_lines)]
 fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times), String> {
     let n = walks.len();
     let same = f.base.map_or(0, |b| {

@@ -183,26 +183,26 @@ impl Slot {
 
     pub(crate) fn mark_deleted(&mut self, v: bool) {
         if v {
-            self.flags |= DELETED
+            self.flags |= DELETED;
         } else {
-            self.flags &= !DELETED
+            self.flags &= !DELETED;
         }
     }
 
     pub(crate) fn mark_copied(&mut self, v: bool) {
         if v {
-            self.flags |= COPIED
+            self.flags |= COPIED;
         } else {
-            self.flags &= !COPIED
+            self.flags &= !COPIED;
         }
     }
 
     /// `markInsertBefore`.
     pub(crate) fn mark_insert_before(&mut self, v: bool) {
         if v {
-            self.flags &= !INSERTED
+            self.flags &= !INSERTED;
         } else {
-            self.flags |= INSERTED
+            self.flags |= INSERTED;
         }
     }
 

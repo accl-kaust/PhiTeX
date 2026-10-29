@@ -258,6 +258,7 @@ impl Run<'_, '_> {
     /// An edited node's run goes on from its last run's last checkpoint
     /// the edit left in place, if there is one: true then. Its input (the
     /// node's new text, appended) is set to the checkpoint's place.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn resume_edit(&mut self) -> R<bool> {
         if self.no_resume || self.cx.op() != self.ops.exec {
             return Ok(false);

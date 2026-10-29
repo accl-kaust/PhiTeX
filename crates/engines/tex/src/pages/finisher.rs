@@ -229,6 +229,7 @@ impl Operation for Finish {
 
 impl Run<'_, '_> {
     /// [`Finish::run`]'s steps 1–3, in its run's body ([`run_node`]).
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn finish_page(&mut self) -> R<()> {
         let v = self.v;
         let args = self.cx.args().to_vec();
@@ -1463,6 +1464,7 @@ impl Run<'_, '_> {
     }
     /// The definitions this finisher publishes, kept for the next one
     /// running the same routine ([`Finish::predicted_defs`]).
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn record_finisher_defs(&mut self, args: &[ValueId], gdefs: ValueId) {
         let v = self.v;
         let Some(&t) = args.get(9) else { return };

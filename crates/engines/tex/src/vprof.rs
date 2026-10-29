@@ -680,7 +680,7 @@ impl ScanState {
                 match p {
                     Some(q) => page_params = Some(*q),
                     None if page_params.is_none() && self.params.is_none() => {
-                        page_params = Some(rd.params())
+                        page_params = Some(rd.params());
                     }
                     None => {}
                 }

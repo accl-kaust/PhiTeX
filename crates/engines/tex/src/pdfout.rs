@@ -2847,6 +2847,7 @@ pub(crate) fn page_allocs(
 /// `crate::nodes::sealed_skeleton`). The state they act on (the link
 /// stack, the thread) runs on over the pages, so the fold of the line
 /// ([`fold_allocs`]) counts them.
+#[allow(clippy::too_many_lines)]
 fn mark_events(
     v: &Values,
     bx: &BoxNode,
