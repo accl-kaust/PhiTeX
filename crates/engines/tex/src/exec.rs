@@ -15,7 +15,6 @@ use phitex_defuse::FxHashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-
 /// Whether the environment variable `$name` is set, read once per
 /// process (a `getenv` takes the environment's lock and scans it; the
 /// debug switches are tested on every run). Unset, empty or "0" is off.
@@ -270,7 +269,9 @@ impl Busy {
     /// the progress the build watches now (`Ops::watch`, set before each
     /// evaluation with the text nodes' offsets).
     pub(crate) fn new(watch: &std::sync::RwLock<Option<Watch>>, op: u16, node: u64) -> Busy {
-        let g = watch.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let g = watch
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(w) = g.as_ref() else {
             return Busy(None);
         };
@@ -344,7 +345,11 @@ fn counters() -> &'static OpCounters {
 /// The counters since the last take, reset: the operations' run time and
 /// runs by node kind ([`KINDS`]), their summed run time, and the most
 /// that ran at once.
-pub(crate) fn take_counters() -> (Vec<(&'static str, std::time::Duration, u64)>, std::time::Duration, usize) {
+pub(crate) fn take_counters() -> (
+    Vec<(&'static str, std::time::Duration, u64)>,
+    std::time::Duration,
+    usize,
+) {
     let c = counters();
     let by = KINDS
         .iter()
@@ -389,8 +394,27 @@ pub(crate) fn threads(given: Option<usize>) -> usize {
                 .and_then(|s| s.parse().ok())
                 .filter(|&n| n > 0)
         })
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+        .unwrap_or_else(cpus)
     })
+}
+
+/// Every logical CPU this process may run on (`available_parallelism`);
+/// where the platform cannot say (WebAssembly's threads: the host knows,
+/// `navigator.hardwareConcurrency`, and must pass it), one, said once on
+/// stderr: a host that forgets runs the engine on one thread, and that is
+/// never silent.
+#[must_use]
+pub fn cpus() -> usize {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    std::thread::available_parallelism().map_or_else(
+        |e| {
+            SAID.call_once(|| {
+                eprintln!("phitex: the platform does not say how many CPUs there are ({e}): one thread; give the count (-j N, PHITEX_THREADS or the host's threads)");
+            });
+            1
+        },
+        usize::from,
+    )
 }
 
 /// Whether this target can run workers at all.

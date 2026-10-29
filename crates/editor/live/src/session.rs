@@ -544,7 +544,7 @@ pub fn threads(given: Option<usize>) -> usize {
                 .ok()
                 .filter(|&n| n > 0)
         })
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+        .unwrap_or_else(phitex_tex::exec_cpus)
 }
 
 impl Session {
@@ -1631,7 +1631,13 @@ impl Session {
         let mut files = Vec::new();
         let mut main = None;
         // (XeTeX's -no-pdf: the XDV file as `.xdv`)
-        let xdv = |e: &'static str| if e == "dvi" && self.job.engine.output == tex::Output::XdvFile { "xdv" } else { e };
+        let xdv = |e: &'static str| {
+            if e == "dvi" && self.job.engine.output == tex::Output::XdvFile {
+                "xdv"
+            } else {
+                e
+            }
+        };
         let ext = r
             .main_output()
             .map_or(self.job.engine.output.ext(), |(e, _)| xdv(e));

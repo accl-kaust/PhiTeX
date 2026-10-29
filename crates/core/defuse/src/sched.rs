@@ -173,7 +173,8 @@ pub(crate) struct WorkerLog {
     pub(crate) absorbed: Vec<(u64, u64)>,
     /// The reader records of earlier runs dropped at the passes' quiet
     /// points (`Engine::sweep_readers`; the caller's worker only).
-    pub(crate) swept: u64,    /// The collections this worker made, with the time each held the
+    pub(crate) swept: u64,
+    /// The collections this worker made, with the time each held the
     /// workers (ns).
     pub(crate) collections: Vec<(crate::Collected, u64)>,
 }
@@ -533,7 +534,8 @@ impl Pool {
                 // page after each paragraph and runs a routine before the
                 // text after its page)
                 let bn = eng.node(b);
-                let layer_first = eng.op(eng.node(n).op()).settles_at_quiet() && past_frontier(eng, bn, eng.frontier.load(Ordering::Acquire));
+                let layer_first = eng.op(eng.node(n).op()).settles_at_quiet()
+                    && past_frontier(eng, bn, eng.frontier.load(Ordering::Acquire));
                 if bn.pos_hint() < eng.node(n).pos_hint() && !layer_first {
                     // (put back where a thief finds it: an idle
                     // worker runs it meanwhile; held by this one alone,
@@ -595,7 +597,10 @@ impl Pool {
                 continue;
             }
             let busy = &self.shared.block_busy[v];
-            if busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            if busy
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
                 continue;
             }
             // half of what is left: thieves of one block work far apart
@@ -680,7 +685,9 @@ impl Pool {
             if sh.collect_gen.load(Ordering::SeqCst) != seen || sh.stop.load(Ordering::SeqCst) {
                 break;
             }
-            if sh.arrived.load(Ordering::SeqCst) >= sh.active.load(Ordering::SeqCst) && !sh.collecting.swap(true, Ordering::SeqCst) {
+            if sh.arrived.load(Ordering::SeqCst) >= sh.active.load(Ordering::SeqCst)
+                && !sh.collecting.swap(true, Ordering::SeqCst)
+            {
                 drop(g);
                 let t = Instant::now();
                 let mut extra = std::mem::take(&mut *sh.extra_roots.lock());
@@ -688,10 +695,14 @@ impl Pool {
                 let floor = self.limits.collect_at_bytes.unwrap_or(u64::MAX);
                 if let Some(c) = eng.collect_at_barrier(extra) {
                     let held = ns(t);
-                    sh.collect_next.store(floor.max(c.bytes_after.saturating_mul(2)), Ordering::SeqCst);
+                    sh.collect_next
+                        .store(floor.max(c.bytes_after.saturating_mul(2)), Ordering::SeqCst);
                     w.log.lock().collections.push((c, held));
                 } else {
-                    sh.collect_next.store(floor.max(eng.values().payload_bytes().saturating_mul(2)), Ordering::SeqCst);
+                    sh.collect_next.store(
+                        floor.max(eng.values().payload_bytes().saturating_mul(2)),
+                        Ordering::SeqCst,
+                    );
                 }
                 sh.arrived.store(0, Ordering::SeqCst);
                 sh.collect_wanted.store(false, Ordering::SeqCst);
@@ -700,7 +711,10 @@ impl Pool {
                 sh.wake_all();
                 return;
             }
-            g = cv.wait_timeout(g, Duration::from_millis(2)).unwrap_or_else(PoisonError::into_inner).0;
+            g = cv
+                .wait_timeout(g, Duration::from_millis(2))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
         drop(g);
         // (stopped before the collection: no longer waited for)
@@ -734,7 +748,10 @@ impl Pool {
                 self.fail(EvalError::Stuck {
                     node: None,
                     op: "",
-                    why: format!("every worker idle for {} s with {n} nodes outstanding: a wake was lost", (s / 6).as_secs()),
+                    why: format!(
+                        "every worker idle for {} s with {n} nodes outstanding: a wake was lost",
+                        (s / 6).as_secs()
+                    ),
                 });
                 break None;
             }
@@ -771,7 +788,10 @@ impl Pool {
             // (the timeout only guards a lost wakeup; a short one would
             // have idle workers preempting the busy ones every few
             // microseconds)
-            drop(cv.wait_timeout(g, Duration::from_millis(2)).unwrap_or_else(PoisonError::into_inner));
+            drop(
+                cv.wait_timeout(g, Duration::from_millis(2))
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
         };
         self.shared.idle.fetch_sub(1, Ordering::SeqCst);
         r
@@ -995,7 +1015,10 @@ fn absorb(eng: &Engine, pool: &Pool, w: &Worker, s: &mut dyn EditSource) -> bool
     eng.set_version(v);
     // (a new document: its loop-back takes passes of its own)
     eng.final_gen.fetch_add(1, Ordering::AcqRel);
-    w.log.lock().absorbed.push((v, pool.shared.runs_now.load(Ordering::SeqCst)));
+    w.log
+        .lock()
+        .absorbed
+        .push((v, pool.shared.runs_now.load(Ordering::SeqCst)));
     true
 }
 
@@ -1046,7 +1069,14 @@ pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
         // end, a TeX loop on a stale float state, and the quiet point the
         // wake is held for never comes while it runs)
         if n.state() == State::Running {
-            note_stale(n, Wake { by: wake.by, cause: wake.cause.clone(), at_ns: wake.at_ns });
+            note_stale(
+                n,
+                Wake {
+                    by: wake.by,
+                    cause: wake.cause.clone(),
+                    at_ns: wake.at_ns,
+                },
+            );
         }
         hold_wake(eng, w, n.id, wake);
         return false;
@@ -1172,7 +1202,10 @@ fn merge_woke(eng: &Engine, n: &Node, wake: Wake) {
         (_, Cause::Edited) | (None, _) => false,
         (Some(o), _) if matches!(o.cause, Cause::Edited | Cause::Created { .. }) => true,
         (Some(o), c) => {
-            let at = |s: Option<NodeId>| s.and_then(|s| eng.placed_node(s)).map_or(crate::order::Pos(0), |x| x.pos_hint());
+            let at = |s: Option<NodeId>| {
+                s.and_then(|s| eng.placed_node(s))
+                    .map_or(crate::order::Pos(0), |x| x.pos_hint())
+            };
             at(site(&o.cause)) <= at(site(c))
         }
     };
@@ -1192,7 +1225,12 @@ fn stall_dump(eng: &Engine, shared: &Shared, t_idle: Instant) {
     static DONE: AtomicBool = AtomicBool::new(false);
     static LAST_RUNS: AtomicU64 = AtomicU64::new(u64::MAX);
     static LAST_CHANGE_MS: AtomicU64 = AtomicU64::new(0);
-    let secs = *SECS.get_or_init(|| std::env::var("PHITEX_STALL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
+    let secs = *SECS.get_or_init(|| {
+        std::env::var("PHITEX_STALL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    });
     if secs == 0 || !crate::obs::enabled() || t_idle.elapsed().as_secs() < secs || DONE.load(Ordering::Relaxed) {
         return;
     }
@@ -1226,7 +1264,12 @@ fn stall_dump(eng: &Engine, shared: &Shared, t_idle: Instant) {
                 continue;
             }
             let op = eng.ops.get(n.op().0 as usize).map_or("?", |o| o.name());
-            out.push_str(&format!("  node {} {op} {st:?} pos {:?} committing {}\n", nid.raw(), pos.0, n.committing.load(Ordering::Acquire)));
+            out.push_str(&format!(
+                "  node {} {op} {st:?} pos {:?} committing {}\n",
+                nid.raw(),
+                pos.0,
+                n.committing.load(Ordering::Acquire)
+            ));
         }
     }
     eprint!("{out}");
@@ -1244,7 +1287,10 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
         return;
     }
     let field = match &wake.cause {
-        Cause::Rebind { field, .. } | Cause::Changed { field, .. } | Cause::Range { field, .. } | Cause::Environment { field } => Some(*field),
+        Cause::Rebind { field, .. }
+        | Cause::Changed { field, .. }
+        | Cause::Range { field, .. }
+        | Cause::Environment { field } => Some(*field),
         Cause::Output { .. } | Cause::Structure | Cause::Created { .. } | Cause::Edited => None,
     };
     if crate::obs::enabled() && wake_log() {
@@ -1383,7 +1429,11 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         // meanwhile, panicked on inputs no longer current: run again)
         Err(_)
             if node.state() != State::Running
-                || cx.product.reads.iter().any(|rd| !crate::read::holds(eng, node, rd, &mut crate::read::FoldMemo::new())) =>
+                || cx
+                    .product
+                    .reads
+                    .iter()
+                    .any(|rd| !crate::read::holds(eng, node, rd, &mut crate::read::FoldMemo::new())) =>
         {
             drop(cx);
             Worker::add(&w.stale_panics, 1);
@@ -1401,7 +1451,10 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             let reads = std::mem::take(&mut cx.product.reads);
             drop(cx);
             give_back(eng, node);
-            pool.shared.panicked_roots.lock().extend(reads.iter().filter_map(|r| r.seen));
+            pool.shared
+                .panicked_roots
+                .lock()
+                .extend(reads.iter().filter_map(|r| r.seen));
             w.log.lock().panicked.push((n, reads, op.name(), message));
             pool.shared.done_one();
             Ok(())
@@ -1439,7 +1492,10 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             // its barrier as their runs end)
             let sh = &pool.shared;
             let next = sh.collect_next.load(Ordering::Relaxed);
-            if next != u64::MAX && eng.values().payload_bytes() > next && !sh.collect_wanted.swap(true, Ordering::SeqCst) {
+            if next != u64::MAX
+                && eng.values().payload_bytes() > next
+                && !sh.collect_wanted.swap(true, Ordering::SeqCst)
+            {
                 sh.wake_all();
             }
             Worker::add(&w.commits, 1);
@@ -1605,8 +1661,9 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
         if m.is_empty() {
             return;
         }
-        let (go, keep): (Vec<NodeId>, Vec<NodeId>) =
-            m.iter().partition(|&&n| eng.placed_node(n).is_none_or(|x| !past_frontier(eng, &x, fr)));
+        let (go, keep): (Vec<NodeId>, Vec<NodeId>) = m
+            .iter()
+            .partition(|&&n| eng.placed_node(n).is_none_or(|x| !past_frontier(eng, x, fr)));
         *m = keep;
         go
     };
