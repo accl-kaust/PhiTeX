@@ -399,6 +399,7 @@ addEventListener("keydown", (e) => {
 let started = false;
 sock.onOpen = () => {
   panel.msg("connected to phitex watch");
+  panel.connection(true);
   if (started) return void session.resync();
   started = true;
   void session.start();
@@ -415,7 +416,11 @@ const unreached = async () => {
     );
   panel.error("phitex watch answers, but the browser refused the WebSocket to it (trying again): a browser add-on blocking connections to 127.0.0.1? Try a private window, or allow 127.0.0.1 in the add-on.");
 };
-sock.onClose = () => (started ? panel.msg("not connected to phitex watch (retrying)", true) : void unreached());
+sock.onClose = () => {
+  if (!started) return void unreached();
+  panel.msg("not connected to phitex watch (retrying)", true);
+  panel.connection(false, "phitex watch stopped or the connection was lost; reconnecting");
+};
 setTimeout(() => void unreached(), 3000);
 void sock.connect();
 

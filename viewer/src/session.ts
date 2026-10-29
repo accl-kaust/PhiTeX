@@ -191,6 +191,8 @@ export interface PreviewSink {
    */
   engine?(e: { engine: Engine; ready: boolean; needed?: Engine | null; approx?: boolean }): void;
   error(e: string): void;
+  /** The connection to the engine lost (with why) or back: the view dims its pages while it is lost. */
+  connection?(up: boolean, why?: string): void;
   check?(r: { ok: boolean; ms: number; mismatch?: string }): void;
   mains?(names: string[], main: string | null): void;
 }
@@ -374,8 +376,12 @@ export class PreviewSession {
           const why = res.error ?? "the core restarted";
           if (this.traps <= 1) {
             this.sink.error(`${why}; reopening`);
+            this.sink.connection?.(false, `${why}; reopening`);
             this.chain = this.chain.then(() => this.reopen());
-          } else this.sink.error(`${why}, again: the preview stops here (reload the page to retry)`);
+          } else {
+            this.sink.error(`${why}, again: the preview stops here (reload the page to retry)`);
+            this.sink.connection?.(false, `${why}, again: reload the page to retry`);
+          }
         }
         return res;
       },
@@ -393,6 +399,7 @@ export class PreviewSession {
     core.onLost?.(() => {
       this.opened = false;
       this.sink.error("core lost; reopening");
+      this.sink.connection?.(false, "the engine stopped; reopening");
       this.reopen();
     });
   }
@@ -506,6 +513,7 @@ export class PreviewSession {
     this.minted = Object.values(this.files).some(usesMinted);
     const r = await this.core.request({ op: "open", main: this.main, files: { ...this.pkgFiles, ...shims, ...this.files }, fuel: this.o.fuel, engine, workers: this.o.workers });
     if (!r.ok) return this.sink.error((typeof r.json?.error === "string" ? r.json.error : undefined) ?? r.error ?? "open failed");
+    this.sink.connection?.(true);
     // (streamed: the pages come as they are shipped, onStream; then its end,
     // with what a blocking open would have answered)
     if (r.json.building) {

@@ -283,8 +283,10 @@ button.btn:hover { background: var(--accent2); }
 /* (a problem told whole, in the drawer: problems.ts's card, as a row) */
 .diags .phx-inline { margin: 0; padding: 0; border-radius: 0; border-top: 0; box-shadow: none; max-width: none; list-style: none; }
 .diags .phx-inline li { border-bottom: 1px solid #2c2e33; }
-.diags { position: absolute; z-index: 2; left: 0; right: 0; top: 0; max-height: 50%; overflow: auto; background: var(--light);
-  border-bottom: 1px solid var(--divider); box-shadow: 0 6px 16px rgba(27,34,44,.18); display: none; }
+.diags { position: relative; flex: none; max-height: 40%; overflow: auto; background: var(--light);
+  border-bottom: 1px solid var(--divider); display: none; }
+/* (a build with no pages: the list may take the room the pages would) */
+.win.nopages.diags-open .diags { max-height: none; flex: 1 1 auto; }
 .win.diags-open .diags { display: block; }
 .diag { display: flex; gap: 6px; align-items: flex-start; padding: 5px 10px; font-size: 12px; border-top: 1px solid var(--divider); }
 .diag:first-child { border-top: 0; }
@@ -308,6 +310,11 @@ button.btn:hover { background: var(--accent2); }
 .banner { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px;
   background: var(--bg-warning-03, #fcf1e3); color: var(--warn); border-bottom: 1px solid var(--divider); }
 .stage.stale .banner { display: block; }
+/* (the engine's connection lost: the last pages kept, dimmed, still, with why) */
+.gone { position: sticky; top: -12px; z-index: 2; display: none; margin: -12px -12px 10px; padding: 8px 12px; text-align: left; font-size: 12px; font-weight: 600;
+  background: var(--bg-danger-03, #fbeceb); color: var(--danger); border-bottom: 1px solid var(--divider); }
+.stage.offline .gone { display: block; }
+.stage.offline .slot { opacity: .4; pointer-events: none; }
 .approx { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px; background: #fff4d6; color: #5c4400; border-bottom: 1px solid #e8c766; }
 .win.docked .approx { margin: 0; top: 0; }
 .stage.fit { overflow-x: hidden; }
@@ -347,7 +354,7 @@ footer .msg.err { color: var(--danger); }
 .win.docked.sheet-open .details { display: block; }
 @keyframes sheet { from { opacity: 0; transform: translateY(-4px); } }
 .win.docked > .sum { display: none; }
-.win.docked .diags { max-height: 60%; }
+.win.docked .diags { max-height: 40%; }
 .pkgs { display: none; position: absolute; z-index: 4; left: 50%; transform: translateX(-50%); top: 10px; max-width: calc(100% - 24px); padding: 8px 12px; font-size: 13px; border-radius: 8px;
   background: var(--light); color: var(--fg); border: 1px solid var(--divider); border-left: 3px solid var(--accent); box-shadow: 0 4px 14px rgba(0,0,0,.28); }
 .pkgs.on { display: flex; gap: 8px; align-items: center; }
@@ -549,8 +556,8 @@ export class Panel {
     <div class="details" id="details"></div>
   </div>
   <div class="sum" id="sum" role="button" aria-expanded="false" tabindex="0" title="Diagnostics (click to list)"></div>
+  <div class="diags" id="diags" role="list" aria-label="Diagnostics"></div>
   <div class="body">
-    <div class="diags" id="diags" role="list" aria-label="Diagnostics"></div>
     <div class="report" id="report" role="dialog" aria-label="Debug report">
       <b>Debug report</b>
       <p>Anonymized: no document text, nothing you typed, no file names (file1.tex, …), no project id. Read it before you send it.</p>
@@ -568,7 +575,7 @@ export class Panel {
     </div>
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="keyhelp" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
-    <div class="stage" id="stage"><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load">${stepsHtml(w.steps, ["now", "", ""])}<h3>${w.steps[0]}…</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
+    <div class="stage" id="stage"><div class="gone" id="gone" role="alert"></div><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load">${stepsHtml(w.steps, ["now", "", ""])}<h3>${w.steps[0]}…</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
   </div>
   <footer><span class="lat" id="lat" title="Click for details">–</span><span class="grow"></span><span class="msg" id="msg">all local</span></footer>
 </div>`).replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "download" ? 16 : 18));
@@ -997,6 +1004,7 @@ export class Panel {
     // when their errors change, unless these were closed by hand)
     const errs = JSON.stringify(diags.filter((d) => d.problem && d.severity === "error").map((d) => [d.message, d.file, d.line]));
     if (errs !== "[]" && errs !== this.errsClosed) this.diagsOpen(true);
+    this.win.classList.toggle("nopages", s.pages === 0 && !this.last);
     if (errs === "[]") this.errsClosed = "";
     this.stale(s);
     queueMicrotask(() => this.emit());
@@ -1176,6 +1184,16 @@ export class Panel {
     stage.classList.add("stale");
     const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
     this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
+  }
+
+  /**
+   * The connection to the engine lost (`up` false: the watch stopped or
+   * exited, the socket closed, the core trapped) or back: while it is lost
+   * the last pages stay, dimmed and inert, under a banner saying so and why.
+   */
+  connection(up: boolean, why?: string): void {
+    this.$("#stage").classList.toggle("offline", !up);
+    if (!up) this.$("#gone").textContent = `Disconnected from the engine: the pages are the last ones built${why ? ` (${why})` : ""}.`;
   }
 
   /** Follow what the panel shows (a host toolbar's controls). */
@@ -1690,7 +1708,7 @@ export class Panel {
     this.warmTimer = setInterval(tick, 1000);
   }
 
-  /** The diagnostics list: a drawer over the page, so it never takes the page's room. */
+  /** The diagnostics list: a drawer above the pages, pushing them down; it never covers them. */
   private diagsOpen(on: boolean): void {
     this.win.classList.toggle("diags-open", on);
     this.$("#sum").setAttribute("aria-expanded", String(on));
