@@ -2,13 +2,23 @@
 # gate. The CLI built for Linux (x86_64, aarch64; glibc 2.35, Ubuntu
 # 22.04's) and macOS (arm64, x86_64), each a tarball phitex-<arch>-<os>.tar.gz
 # (the names phitex.org/install.sh asks for), SHA256SUMS of them, signed
-# with minisign (the repository secret MINISIGN_SECRET_KEY, the key file's
-# text; MINISIGN_PASSWORD if it has one), and the GitHub release made with
-# all of them.
+# with minisign, GitHub's build provenance for each, and the GitHub release
+# made with all of them.
+#
+# Signing runs in the environment `release`: its secret MINISIGN_SECRET_KEY
+# (the key file's text; MINISIGN_PASSWORD if it has one) is given only to
+# a run from a v* tag, and only after the user approves that run.
+#
+# A dry run: a push to the branch release-dry (`git push github
+# dev:release-dry`), or by hand (`gh workflow run release.yml`, once the
+# workflow is on main): every step but the release, signed with a key made
+# for the run, not the release key.
 name: release
 on:
   push:
     tags: ["v*"]
+    branches: [release-dry]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -22,6 +32,7 @@ jobs:
         with:
           persist-credentials: false
       - name: the tag is on main, passed the gate, and is the CLI's version
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -32,6 +43,7 @@ jobs:
           [ "$gate" -gt 0 ] || { echo "no green gate on $sha"; exit 1; }
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)
           [ "$v" = "$tag" ] || { echo "the tag says $tag, crates/cli/Cargo.toml $v"; exit 1; }
+          grep -q "^## $tag " NEWS.md || { echo "NEWS.md has no '## $tag' entry"; exit 1; }
   build:
     needs: gated
     strategy:
@@ -60,11 +72,34 @@ jobs:
         with:
           name: phitex-${{ matrix.asset }}
           path: phitex-${{ matrix.asset }}.tar.gz
-  publish:
+  # (a dry run: the same sums and signing, with a key made here)
+  dry-run:
+    if: github.ref_type != 'tag'
     needs: build
     runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          cd dist
+          sha256sum phitex-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          minisign -G -W -p "$RUNNER_TEMP/dry.pub" -s "$RUNNER_TEMP/dry.key"
+          minisign -S -s "$RUNNER_TEMP/dry.key" -m SHA256SUMS -t "phitex dry run $GITHUB_SHA"
+          minisign -Vm SHA256SUMS -p "$RUNNER_TEMP/dry.pub"
+          ls -l
+  publish:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: release
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,11 +123,16 @@ jobs:
           printf '%s\n' "$PASS" | minisign -S -s "$RUNNER_TEMP/minisign.key" -m SHA256SUMS -t "phitex $GITHUB_REF_NAME"
           rm -f "$RUNNER_TEMP/minisign.key"
           minisign -Vm SHA256SUMS -p ../ci/minisign.pub
+      # (GitHub's record of which run built each tarball:
+      # `gh attestation verify phitex-….tar.gz -R accl-kaust/PhiTeX`)
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/phitex-*.tar.gz
       - name: the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # (NEWS.md's section for this version, if it has one)
-          awk -v v="## ${GITHUB_REF_NAME#v}" '$0 ~ "^## " {on = index($0, v) == 1; next} on' NEWS.md > notes.md 2>/dev/null || true
+          # (NEWS.md's section for this version)
+          awk -v v="## ${GITHUB_REF_NAME#v} " '/^## / {on = index($0, v) == 1; next} on' NEWS.md > notes.md
           [ -s notes.md ] || echo "PhiTeX $GITHUB_REF_NAME" > notes.md
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "PhiTeX $GITHUB_REF_NAME" --notes-file notes.md dist/*

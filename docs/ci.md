@@ -78,11 +78,19 @@ there is no override.
    carry a green `gate`. The release workflow checks this and stops
    otherwise.
 2. **`.github/workflows/release.yml`** builds the CLI for x86_64 and
-   aarch64 Linux and for macOS (arm64, x86_64), writes `SHA256SUMS`, signs
-   it with minisign (the secret key is the repository secret
-   `MINISIGN_SECRET_KEY`, added by the user; the public key is in the
-   repo), and makes the GitHub release with the tarballs, `SHA256SUMS` and
+   aarch64 Linux and for macOS (arm64, x86_64) and writes `SHA256SUMS`.
+   Its last job runs in the GitHub environment `release`, which:
+   - holds the secret key (`MINISIGN_SECRET_KEY`; the public key is
+     `ci/minisign.pub`, key D15F554581F5B4BF, also in install.sh);
+   - deploys only from `v*` tags;
+   - waits for the user's approval of the run.
+   It signs `SHA256SUMS`, adds GitHub's build provenance for each tarball
+   (`gh attestation verify phitex-….tar.gz -R accl-kaust/PhiTeX`), and makes
+   the GitHub release with the tarballs, `SHA256SUMS` and
    `SHA256SUMS.minisig`.
+   **A dry run** is a push to the branch `release-dry` (`git push github
+   dev:release-dry`): every step but the release, signed with a key made for
+   the run.
 3. **`NEWS.md`** gets the version's entry in the same pull request. The
    site (PhiTeX.org) regenerates `news.json` from it at its next deploy
    (docs/spec-distribution.md §4).
