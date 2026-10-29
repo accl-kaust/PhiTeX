@@ -1452,6 +1452,65 @@ pub(crate) fn fill_sealed(
     true
 }
 
+/// Value `x` with each sealed line in it ([`T_SEALED`], at any depth)
+/// given its glue setting and list: `line` gives a line's box as its
+/// piece made it. `None` where a line is not found. `memo` holds the
+/// values done (a page's boxes share their parts).
+pub(crate) fn unseal_value(
+    v: &Values,
+    x: ValueId,
+    line: &mut dyn FnMut(&Sealed) -> Option<ValueId>,
+    memo: &mut crate::FxHashMap<ValueId, ValueId>,
+) -> Option<ValueId> {
+    if let Some(&y) = memo.get(&x) {
+        return Some(y);
+    }
+    let Some(xs) = v.with_list(x, <[ValueId]>::to_vec) else {
+        return Some(x);
+    };
+    // (a node no box is in: as it is)
+    if matches!(
+        xs.first().and_then(|&t| v.as_int(t)),
+        Some(
+            T_CHAR
+                | T_LIG
+                | T_NATIVE
+                | T_KERN
+                | T_PENALTY
+                | T_MATH
+                | T_RULE
+                | T_MARK
+                | T_LANGUAGE
+                | T_WHATSIT
+        )
+    ) {
+        return Some(x);
+    }
+    let y = if xs.len() == 10
+        && v.as_int(xs[0]) == Some(T_BOX)
+        && let Some(s) = sealed_of(v, xs[9])
+    {
+        let real = line(&s)?;
+        let real = v
+            .with_list(real, |r| <[ValueId; 10]>::try_from(r).ok())
+            .flatten()?;
+        let mut ys = xs;
+        ys[6..10].copy_from_slice(&real[6..10]);
+        v.list(ys)
+    } else {
+        let mut changed = false;
+        let mut ys = Vec::with_capacity(xs.len());
+        for &e in &xs {
+            let f = unseal_value(v, e, line, memo)?;
+            changed |= f != e;
+            ys.push(f);
+        }
+        if changed { v.list(ys) } else { x }
+    };
+    memo.insert(x, y);
+    Some(y)
+}
+
 /// The boxes [`fill_sealed`] filled back as they were (`saved`, in its
 /// walk's order, taken from the back), so the box is the shape again.
 pub(crate) fn unfill_sealed(
@@ -1568,11 +1627,15 @@ fn native_walk(l: &[Node], out: &mut FontIds) -> bool {
 /// skeleton; one that reads its position at shipping
 /// ([`crate::pdfprim::reads_position_at_shipout`]) is not sealed, nor is
 /// one in a discretionary. An insertion, an adjustment, an unset box,
-/// a node not known: not sealed.
-fn line_shape(v: &Values, l: ValueId) -> Option<(ValueId, Option<ValueId>)> {
+/// a node not known: not sealed. With `dvi` (a DVI's or XeTeX's page,
+/// whose writer is the end node's), the skeleton holds only the
+/// whatsits the shipping itself acts on (`\write`, `\openout`,
+/// `\closeout`): a `\special` is the DVI writer's alone, read from the
+/// line there, so a link moving to the next line leaves the shapes.
+fn line_shape(v: &Values, l: ValueId, dvi: bool) -> Option<(ValueId, Option<ValueId>)> {
     let mut fonts = std::collections::BTreeSet::new();
     let mut skel = Vec::new();
-    if !line_walk(v, l, &mut fonts, Some(&mut skel)) {
+    if !line_walk(v, l, &mut fonts, Some(&mut skel), dvi) {
         return None;
     }
     let f = v.list(fonts.into_iter().map(|f| v.int(f)).collect());
@@ -1586,10 +1649,11 @@ fn line_walk(
     l: ValueId,
     fonts: &mut std::collections::BTreeSet<i64>,
     mut skel: Option<&mut Vec<ValueId>>,
+    dvi: bool,
 ) -> bool {
     v.with_list(l, |xs| {
         xs.iter()
-            .all(|&n| node_walk(v, n, fonts, skel.as_deref_mut()))
+            .all(|&n| node_walk(v, n, fonts, skel.as_deref_mut(), dvi))
     })
     .unwrap_or(false)
 }
@@ -1599,6 +1663,7 @@ fn node_walk(
     n: ValueId,
     fonts: &mut std::collections::BTreeSet<i64>,
     skel: Option<&mut Vec<ValueId>>,
+    dvi: bool,
 ) -> bool {
     v.with_list(n, |ys| {
         let t = ys.first().and_then(|&t| v.as_int(t)).unwrap_or(-1);
@@ -1608,10 +1673,15 @@ fn node_walk(
                 fonts.insert(v.as_int(at(1)).unwrap_or(0));
                 true
             }
+            // (XeTeX's native word or glyph: its font the third)
+            T_NATIVE => {
+                fonts.insert(v.as_int(at(2)).unwrap_or(0));
+                true
+            }
             T_BOX => match skel {
                 Some(sk) => {
                     let mut inner = Vec::new();
-                    if !line_walk(v, at(9), fonts, Some(&mut inner)) {
+                    if !line_walk(v, at(9), fonts, Some(&mut inner), dvi) {
                         return false;
                     }
                     if !inner.is_empty() {
@@ -1625,14 +1695,14 @@ fn node_walk(
                     }
                     true
                 }
-                None => line_walk(v, at(9), fonts, None),
+                None => line_walk(v, at(9), fonts, None, dvi),
             },
             T_DISC => {
-                line_walk(v, at(1), fonts, None)
-                    && line_walk(v, at(2), fonts, None)
-                    && line_walk(v, at(3), fonts, None)
+                line_walk(v, at(1), fonts, None, dvi)
+                    && line_walk(v, at(2), fonts, None, dvi)
+                    && line_walk(v, at(3), fonts, None, dvi)
             }
-            T_GLUE => at(3) == ValueId::UNIT || node_walk(v, at(3), fonts, None),
+            T_GLUE => at(3) == ValueId::UNIT || node_walk(v, at(3), fonts, None, dvi),
             T_WHATSIT => {
                 let Some(sk) = skel else { return false };
                 let kind = v
@@ -1642,7 +1712,9 @@ fn node_walk(
                 if crate::pdfprim::reads_position_at_shipout(&kind) {
                     return false;
                 }
-                sk.push(n);
+                if !dvi || matches!(kind.as_str(), "write" | "open" | "close") {
+                    sk.push(n);
+                }
                 true
             }
             T_MARK | T_RULE | T_LANGUAGE | T_MATH | T_KERN | T_PENALTY => true,
@@ -1667,6 +1739,7 @@ pub(crate) fn unit_shape(
     piece: i64,
     items: &[ValueId],
     known: &crate::FxHashMap<ValueId, ValueId>,
+    dvi: bool,
 ) -> Option<ValueId> {
     let mut changed = false;
     let out: Vec<ValueId> = items
@@ -1687,7 +1760,7 @@ pub(crate) fn unit_shape(
                     // (a line this run made: its fonts known from its nodes)
                     let (fonts, skel) = match known.get(&ys[1]) {
                         Some(&f) => (f, None),
-                        None => line_shape(v, bx[9])?,
+                        None => line_shape(v, bx[9], dvi)?,
                     };
                     let zero = v.int(0);
                     let mut b = bx;
@@ -1758,7 +1831,7 @@ mod tests {
         let pos = v.list(vec![v.int(T_WHATSIT), v.list(vec![v.str("pdf:savepos")])]);
         let placed = line(&v, vec![ch(3, 65), pos]);
         let none = crate::FxHashMap::default();
-        let shape = unit_shape(&v, 77, &[placed, plain], &none).expect("a line sealed");
+        let shape = unit_shape(&v, 77, &[placed, plain], &none, false).expect("a line sealed");
         let items = list_of(&v, shape);
         assert_eq!(items[0], placed);
         let b = list_of(&v, list_of(&v, items[1])[1]);
@@ -1777,7 +1850,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some(1), Some(3)]
         );
-        assert_eq!(unit_shape(&v, 77, &[placed], &none), None);
+        assert_eq!(unit_shape(&v, 77, &[placed], &none, false), None);
         let x = v.list(b.clone());
         let mut side = Side::default();
         let Some(Node::Box(d)) = decode(&v, x, &mut side) else {
@@ -1785,6 +1858,59 @@ mod tests {
         };
         assert!(lazy_list(&d, &side).is_some_and(|l| is_sealed(&v, l)));
         assert_eq!(encode_box(&v, &d, &side), x);
+    }
+
+    /// A DVI page's line (XeTeX's): its skeleton holds the `\write`
+    /// alone, not the `\special`s the end node's writer reads from the
+    /// line; a line with only `\special`s and native words has none, its
+    /// fonts the natives'; and `unseal_value` gives the page its lines
+    /// back as they were.
+    #[test]
+    fn a_dvi_line_keeps_its_writes_only() {
+        let v = Values::new();
+        let nat = |f: i64| {
+            v.list(vec![
+                v.int(T_NATIVE),
+                v.int(0),
+                v.int(f),
+                v.int(10),
+                v.int(7),
+                v.int(2),
+                v.str("ab"),
+                v.str(""),
+            ])
+        };
+        let what = |k: &str| v.list(vec![v.int(T_WHATSIT), v.list(vec![v.str(k), v.int(1)])]);
+        let a = line(&v, vec![nat(4), what("special"), what("write"), nat(5)]);
+        let b = line(&v, vec![what("special"), nat(4)]);
+        let none = crate::FxHashMap::default();
+        let shape = unit_shape(&v, 9, &[a, b], &none, true).expect("sealed");
+        let items = list_of(&v, shape);
+        let st =
+            |i: usize| sealed_of(&v, list_of(&v, list_of(&v, items[i])[1])[9]).expect("a stand-in");
+        let skel = list_of(&v, st(0).skel);
+        assert_eq!(skel, vec![what("write")]);
+        assert_eq!(st(1).skel, ValueId::UNIT);
+        assert_eq!(
+            list_of(&v, st(0).fonts)
+                .iter()
+                .map(|&f| v.as_int(f))
+                .collect::<Vec<_>>(),
+            [Some(4), Some(5)]
+        );
+        // (the page of both lines, filled from the unit's items)
+        let page = |xs: &[ValueId]| {
+            let ls: Vec<ValueId> = xs.iter().map(|&x| list_of(&v, x)[1]).collect();
+            let mut p = vec![v.int(0); 9];
+            p[0] = v.int(T_BOX);
+            p.push(v.list(ls));
+            v.list(p)
+        };
+        let raw = [a, b];
+        let mut line_of = |s: &Sealed| Some(list_of(&v, raw[s.k as usize])[1]);
+        let mut memo = crate::FxHashMap::default();
+        let filled = unseal_value(&v, page(&items), &mut line_of, &mut memo);
+        assert_eq!(filled, Some(page(&raw)));
     }
 
     /// A line with a `\write` and a link in a box in it is sealed with
@@ -1814,7 +1940,7 @@ mod tests {
         )[1];
         let ln = line(&v, vec![ch(3, 65), what("write"), inner, ch(3, 67)]);
         let none = crate::FxHashMap::default();
-        let shape = unit_shape(&v, 5, &[ln], &none).expect("sealed");
+        let shape = unit_shape(&v, 5, &[ln], &none, false).expect("sealed");
         let b = list_of(&v, list_of(&v, list_of(&v, shape)[0])[1]);
         let s = sealed_of(&v, b[9]).expect("a stand-in");
         assert_ne!(s.skel, ValueId::UNIT);

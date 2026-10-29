@@ -1325,10 +1325,11 @@ impl Run<'_, '_> {
         let pick = |r: &mut Self, list: phitex_defuse::View, p: i64| r.items_at(list, &named[&p]);
         let mut units: Vec<(i64, ValueId, Vec<ValueId>)> = Vec::new();
         let mut own = None;
-        // (a PDF page's lines read by their shape: their dimensions and
-        // fonts, not their characters, `crate::pages::seal`;
-        // `PHITEX_NO_SEAL=1` reads them whole)
-        let seal = !crate::exec::obs_flag!("PHITEX_NO_SEAL") && self.param("pdfoutput")? > 0;
+        // (a page's lines read by their shape: their dimensions and
+        // fonts, not their characters, `crate::pages::seal`, in every
+        // mode: a PDF page's writer fills them in, a DVI's or XeTeX's
+        // end node; `PHITEX_NO_SEAL=1` reads them whole)
+        let seal = !crate::exec::obs_flag!("PHITEX_NO_SEAL");
         // (the page parameters in force as the window's pieces come, from
         // those the page began with: a piece's `[tag]` marker is those and
         // what the text set since the page before fired,

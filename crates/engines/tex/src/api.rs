@@ -7941,8 +7941,11 @@ impl Build {
                     .collect()
             })
             .unwrap_or_default();
-        // (a PDF page's hash is its shape's: the link's identity of it
-        // too, its sealed lines in it, `crate::pdfout::SHOWN`)
+        // (a sealed page's hash is its shape's, which names its lines'
+        // pieces by their nodes: the link's identity of it is what it
+        // holds, its sealed lines filled in, `crate::pdfout::SHOWN`; a
+        // DVI's page's is its filled content's digest alone, the same in
+        // any build of the same text)
         let shown = self
             .g
             .eng
@@ -7950,8 +7953,13 @@ impl Build {
             .and_then(|x| v.seq_to_vec(x).first().map(|&l| list_of(v, l)))
             .unwrap_or_default();
         if shown.len() == out.len() {
+            let dvi = self.pdf_layout().is_none();
             for (h, s) in out.iter_mut().zip(shown) {
-                *h = phitex_defuse::hash_words(*h, &[v.digest(s)]);
+                *h = if dvi {
+                    phitex_defuse::hash_words(0x7061_6765, &[v.digest(s)])
+                } else {
+                    phitex_defuse::hash_words(*h, &[v.digest(s)])
+                };
             }
         }
         out

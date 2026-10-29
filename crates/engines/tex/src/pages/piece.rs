@@ -666,8 +666,10 @@ impl Run<'_, '_> {
         // (decoded here, beside the other pieces, not on the steps' chain)
         let _ = crate::vprof::decoded(v, vunit);
         self.contribute(crate::vprof::VPROF, v.seq_unit(vunit));
+        // (XeTeX's pages are DVI pages, their writer the end node's)
+        let dvi = self.ops.xe.get().is_some();
         let shape =
-            crate::nodes::unit_shape(v, pid, raw, &self.line_fonts).unwrap_or(ValueId::UNIT);
+            crate::nodes::unit_shape(v, pid, raw, &self.line_fonts, dvi).unwrap_or(ValueId::UNIT);
         let it = v.list(vec![
             v.int(pid),
             v.int(last.map_or(-1, i64::from)),

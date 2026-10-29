@@ -522,7 +522,22 @@ impl Run<'_, '_> {
         let fonts: Vec<ValueId> = ids.iter().map(|&f| v.int(i64::from(f))).collect();
         let cs = v.list(counts.iter().map(|&c| v.int(i64::from(c))).collect());
         let pdf = self.pdf_page_params(pos.pdf)?;
-        let page = v.list(vec![b, cs, v.list(fonts), pdf, v.list(pdf_data)]);
+        let mut parts = vec![b, cs, v.list(fonts), pdf, v.list(pdf_data)];
+        // (a DVI's or XeTeX's page with sealed lines: where their units
+        // are, for the end node that fills them in,
+        // [`crate::assemble::fill_sealed_pages`]; a PDF page's writer
+        // has them from this run)
+        if !pos.pdf
+            && side.lazy.iter().any(|&l| nodes::is_sealed(v, l))
+            && let Some((after, to, at)) = self.sealed.places()
+        {
+            let mut w = vec![v.int(after.unwrap_or(-1)), v.int(to)];
+            for (p, i) in at {
+                w.extend([v.int(p), v.int(i64::from(i))]);
+            }
+            parts.push(v.list(w));
+        }
+        let page = v.list(parts);
         let t_fonts = t0.elapsed();
         phitex_pdf::phase::add(3, t_p3);
         let t_p4 = std::time::Instant::now();

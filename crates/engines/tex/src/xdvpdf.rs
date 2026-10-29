@@ -1222,7 +1222,7 @@ fn diff(
     direct: ValueId,
 ) -> Result<(), Stop> {
     let v = cx.values();
-    let xdv = crate::assemble::dvi_file(cx, pages, xe, false)?;
+    let xdv = crate::assemble::dvi_file(cx, pages, None, xe, false)?;
     let xdv = crate::assemble::file_bytes_shared(v, xdv);
     let ours = crate::assemble::file_bytes_shared(v, direct);
     let port = Session::convert(options(p), (p.files)(), deflate(), &xdv);

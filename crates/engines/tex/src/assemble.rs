@@ -48,13 +48,14 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
             .unwrap_or_else(|| v.str("")))
     } else {
         let pages = v.seq_to_vec(cx.fold(v.field("pages"), None, None)?);
+        let (pages, ids) = fill_sealed_pages(cx, pages)?;
         n = pages.len();
         let origins = o.origins.load(std::sync::atomic::Ordering::Relaxed);
         // (XeTeX's PDF written from the pages, where the client asks for
         // it; else its XDV)
         match o.xe.get().and_then(|x| x.pdf.as_ref()) {
             Some(p) => crate::xdvpdf::file(cx, &pages, o.xe.get(), origins, p),
-            None => dvi_file(cx, &pages, o.xe.get(), origins),
+            None => dvi_file(cx, &pages, Some(&ids), o.xe.get(), origins),
         }
     };
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -66,6 +67,118 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
         );
     }
     r
+}
+
+/// The pages with their sealed lines filled in (`crate::pages::seal`):
+/// a DVI's or XeTeX's page leaves its finisher as its shape, with where
+/// its lines' units are (its sixth element, `[after, to, piece, place,
+/// …]`, `Run::ship_out`); each line is given its glue setting and list
+/// from its piece's [`crate::pages::PITEMS`] unit, read here (through
+/// paths: the units' pieces, then those pieces' items whole), so the
+/// finisher depends on the lines' shapes and this node on their
+/// characters. A page filled is the page an unsealed build ships
+/// (`PHITEX_NO_SEAL`), its first five elements.
+///
+/// Example: a page of lines A, B, C, a word edited in B keeping B's
+/// dimensions: the finisher stands, this node reads B's unit again and
+/// writes the page with the new B.
+#[allow(
+    clippy::assertions_on_constants,
+    reason = "a debug or observe build stops on the defect"
+)]
+fn fill_sealed_pages(
+    cx: &mut Ctx<'_>,
+    pages: Vec<ValueId>,
+) -> Result<(Vec<ValueId>, Vec<u64>), Stop> {
+    use phitex_defuse::Step;
+    let v = cx.values();
+    let node = crate::pages::node_of;
+    let mut out = Vec::with_capacity(pages.len());
+    let mut ids = Vec::with_capacity(pages.len());
+    for page in pages {
+        let xs = list_of(v, page);
+        let mut units: Vec<(i64, ValueId)> = Vec::new();
+        if let Some(&places) = xs.get(5) {
+            let w = list_of(v, places);
+            let at = |k: usize| w.get(k).map_or(-1, |&x| int_of(v, x));
+            let after = Some(at(0)).filter(|&a| a >= 0);
+            let view =
+                cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(at(1)))?;
+            for &[p, i] in w[2.min(w.len())..].as_chunks::<2>().0 {
+                let (p, i) = (int_of(v, p), int_of(v, i));
+                let Some(u) = cx.at(view, Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) else {
+                    continue;
+                };
+                if cx.get(u, Step::Index(0)).and_then(|x| v.as_int(x)) != Some(p) {
+                    continue;
+                }
+                if let Some(x) = cx.at(u, Step::Index(2)).map(|x| cx.whole(x)) {
+                    units.push((p, x));
+                }
+            }
+            units.sort_unstable_by_key(|e| e.0);
+        }
+        // (filled once per page and units, its identity with it: a page
+        // an edit left as it was is not walked again)
+        let key: Vec<u64> = [v.instance(), page.raw()]
+            .into_iter()
+            .chain(
+                units
+                    .iter()
+                    .flat_map(|&(p, u)| [p.cast_unsigned(), u.raw()]),
+            )
+            .collect();
+        if let Some(&(y, id)) = filled().locked().get(&key) {
+            out.push(y);
+            ids.push(id);
+            continue;
+        }
+        let y = if xs.len() > 5 {
+            let mut line = |s: &nodes::Sealed| -> Option<ValueId> {
+                let items = units.iter().find(|e| e.0 == s.piece)?.1;
+                let item = v
+                    .with_list(items, |xs| xs.get(s.k as usize).copied())
+                    .flatten()?;
+                v.with_list(item, |ys| ys.get(1).copied()).flatten()
+            };
+            let mut memo = phitex_defuse::FxHashMap::default();
+            if let Some(b) = nodes::unseal_value(v, xs[0], &mut line, &mut memo) {
+                let mut ys = xs[..5].to_vec();
+                ys[0] = b;
+                v.list(ys)
+            } else {
+                // (a line whose unit is not where the page names it: the
+                // finishers have all run, their windows' units are there)
+                let msg = "a sealed line's unit is not in its page's window";
+                assert!(!cfg!(any(debug_assertions, feature = "observe")), "{msg}");
+                page
+            }
+        } else {
+            page
+        };
+        // (its identity: what it holds, not its value's id in this store)
+        let id = v.digest(y);
+        {
+            let mut m = filled().locked();
+            // (the pages of builds gone: dropped wholesale past a bound)
+            if m.len() > 1 << 14 {
+                m.clear();
+            }
+            m.insert(key, (y, id));
+        }
+        out.push(y);
+        ids.push(id);
+    }
+    Ok((out, ids))
+}
+
+/// [`fill_sealed_pages`]' pages filled and their identities, by the
+/// values' instance, the page and its units (by piece).
+type Filled = std::sync::Mutex<phitex_defuse::FxHashMap<Vec<u64>, (ValueId, u64)>>;
+
+fn filled() -> &'static Filled {
+    static M: std::sync::OnceLock<Filled> = std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(phitex_defuse::FxHashMap::default()))
 }
 
 /// The exact PDF file the link made (`pdf:file`), read by the end node.
@@ -294,6 +407,7 @@ fn latin1(bytes: &[u8]) -> String {
 pub(crate) fn dvi_file(
     cx: &mut Ctx<'_>,
     pages: &[ValueId],
+    shown_ids: Option<&[u64]>,
     xe: Option<&crate::xetex::XeTeX>,
     origins: bool,
 ) -> Result<ValueId, Stop> {
@@ -354,6 +468,9 @@ pub(crate) fn dvi_file(
         before.push(own.iter().copied().filter(|f| seen.contains(f)).collect());
         seen.extend(own);
     }
+    // (a page's identity: what it holds, its sealed lines filled in
+    // ([`fill_sealed_pages`]), else its value)
+    let id_of = |i: usize| shown_ids.map_or_else(|| pages[i].raw(), |s| s[i]);
     let apart: Vec<Option<phitex_dvi::PageBytes>> = {
         let mut ex = crate::exec::Inner(crate::exec::threads(None));
         crate::exec::map_on(&mut ex, rest.len(), &|i| {
@@ -364,7 +481,7 @@ pub(crate) fn dvi_file(
                     wi.assume_defined(f, d.clone());
                 }
             }
-            dvi_page_kept(v, &mut wi, rest[i], &defs, xdv, origins)
+            dvi_page_kept(v, &mut wi, rest[i], id_of(start + i), &defs, xdv, origins)
         })
     };
     for (i, (&page, pb)) in rest.iter().zip(apart).enumerate() {
@@ -382,18 +499,21 @@ pub(crate) fn dvi_file(
     // values as the file shows them, `crate::origins`; the pages kept
     // from the last file whose glyphs were not are written for them)
     if origins {
-        for &page in &pages[..start] {
-            if !crate::origins::has(v.instance(), page.raw()) {
+        for (i, &page) in pages[..start].iter().enumerate() {
+            if !crate::origins::has(v.instance(), id_of(i)) {
                 page_defs(cx, page, xe, &mut defs)?;
                 let mut wi = new_writer(mag, &comment, xdv);
                 wi.set_font_numbers(nums.clone());
-                let _ = dvi_page_kept(v, &mut wi, page, &defs, xdv, true);
+                let _ = dvi_page_kept(v, &mut wi, page, id_of(i), &defs, xdv, true);
             }
         }
+    }
+    // (the pages' identities as the file shows them: a page's hash is
+    // its shape's where its lines are sealed, `crate::pages::seal`)
+    if shown_ids.is_some() || origins {
         let shown = v.list(
-            pages
-                .iter()
-                .map(|p| v.int(i64::from_ne_bytes(p.raw().to_ne_bytes())))
+            (0..pages.len())
+                .map(|i| v.int(i64::from_ne_bytes(id_of(i).to_ne_bytes())))
                 .collect(),
         );
         cx.contribute(v.field(crate::pdfout::SHOWN), v.seq_unit(shown));
@@ -509,6 +629,7 @@ fn dvi_page_kept(
     v: &Values,
     w: &mut phitex_dvi::DviWriter,
     page: ValueId,
+    id: u64,
     defs: &phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef>,
     xdv: bool,
     origins: bool,
@@ -530,7 +651,7 @@ fn dvi_page_kept(
     let made = w.ship_out_kept(&bx, counts, &fonts, &mut wh).ok();
     drop(w.set_tap(None));
     if let Some(g) = out.and_then(|o| o.locked().take()) {
-        crate::origins::keep(v.instance(), page.raw(), g);
+        crate::origins::keep(v.instance(), id, g);
     }
     made
 }
