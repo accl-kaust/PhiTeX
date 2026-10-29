@@ -109,6 +109,9 @@ if [ "$shard" = all ]; then
     cp -a "$r0/s-build/store/." "$w0/bin/"
     cp -a "$r0/s-build/store" "$r0/store"
   fi
+  # (the binaries as separate shards' jobs have them: each test binary
+  # also at $w/bin/NAME, as a store part copied in alone puts it)
+  for x in "$w0"/bin/tests/*; do [ -e "$x" ] && ln -sfn "$x" "$w0/bin/"; done
   for spec in "$@"; do
     IFS=: read -r name n rest <<< "$spec"
     IFS=, read -ra args <<< "$rest"
@@ -358,7 +361,10 @@ for l in open(sys.argv[1]):
   latex)
     k=$1 n=$2
     fetched
+    # (no test binary, or one that lists no test: red, never a pass of nothing)
+    [ -x "$w/bin/latex" ] || red "latex: no test binary at \$w/bin/latex"
     "$w/bin/latex" --list 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/all.txt"
+    [ -s "$w/all.txt" ] || red "latex: the test binary lists no test"
     "$w/bin/latex" --list --ignored 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/ign.txt"
     # (the order: GATE_LATEX_ORDER, names heaviest first, else by name;
     # the shards deal them out in turn)
