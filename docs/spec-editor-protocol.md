@@ -43,7 +43,9 @@ same records, so they cannot drift.
     `capabilities.window.workDoneProgress`,
     `capabilities.workspace.configuration`: what the server may ask.
   - `initializationOptions`: `{main?, threads?, follow?, files?}` (the
-    settings of §3.5, read before the first build; `main` as before).
+    settings of §3.5, read before the first build; `main` as before), and
+    `client: {name, version}`, the extension's own (informational: the
+    server needs nothing from it).
 - Answered with:
 
 ```json
@@ -52,9 +54,16 @@ same records, so they cannot drift.
    "textDocumentSync": {"openClose": true, "change": 2, "save": {"includeText": false}},
    "executeCommandProvider": {"commands": ["phitex.openViewer", "phitex.rebuild", "phitex.showOnPage",
        "phitex.stop", "phitex.savePdf", "phitex.clearCache", "phitex.cacheStats"]},
-   "documentSymbolProvider": true},
+   "documentSymbolProvider": true,
+   "experimental": {"phitex": {"protocol": 1}}},
  "serverInfo": {"name": "phitex", "version": "0.0.x"}}
 ```
+
+  `experimental.phitex.protocol` is this protocol's version (`lsp::PROTOCOL`),
+  raised when a message changes its meaning incompatibly; `serverInfo.version`
+  is PhiTeX's. An extension needing a newer one says so ("PhiTeX 0.1.4 is
+  older than this extension needs: update phitex"), as
+  docs/spec-distribution.md §7 has it.
 
   Natively the answer waits for the main file (as today: the watch's
   argument, `phitex.toml`, `initializationOptions.main`, the one `.tex`

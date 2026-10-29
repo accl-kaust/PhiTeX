@@ -53,6 +53,13 @@ use crate::progress::{Phase, Progress};
 use crate::view::{Ask, Built};
 
 /// The commands the server runs (`workspace/executeCommand`).
+/// The editor protocol's version (docs/spec-editor-protocol.md §1),
+/// answered in `initialize` as `capabilities.experimental.phitex.protocol`:
+/// raised when a message the editor sends or reads changes its meaning
+/// incompatibly, so an extension can tell an older or newer `phitex lsp`
+/// from the one it was written for and say so.
+pub const PROTOCOL: u64 = 1;
+
 pub const COMMANDS: [&str; 7] = [
     "phitex.openViewer",
     "phitex.rebuild",
@@ -461,6 +468,7 @@ impl Server {
                     "textDocumentSync": {"openClose": true, "change": 2, "save": {"includeText": false}},
                     "executeCommandProvider": {"commands": COMMANDS},
                     "documentSymbolProvider": true,
+                    "experimental": {"phitex": {"protocol": PROTOCOL}},
                 },
                 "serverInfo": {"name": "phitex", "version": env!("CARGO_PKG_VERSION")},
             }),
@@ -1674,6 +1682,10 @@ mod tests {
         assert_eq!(
             lock(&sent)[0]["result"]["capabilities"]["documentSymbolProvider"],
             true
+        );
+        assert_eq!(
+            lock(&sent)[0]["result"]["capabilities"]["experimental"]["phitex"]["protocol"],
+            PROTOCOL
         );
         s.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///p/a.tex", "text": "\\chapter{One}\n\\section{Sub}\n"}}}));
         s.handle(&json!({"jsonrpc": "2.0", "id": 4, "method": "textDocument/documentSymbol", "params": {"textDocument": {"uri": "file:///p/a.tex"}}}));
