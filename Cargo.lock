@@ -2051,6 +2051,7 @@ dependencies = [
 name = "phitex-dvi"
 version = "0.0.0"
 dependencies = [
+ "phitex-codecs",
  "phitex-pdf",
  "phitex-tfm",
  "phitex-typeset",

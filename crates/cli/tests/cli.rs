@@ -2201,6 +2201,104 @@ fn xelatex_fontspec() {
     );
 }
 
+/// `phitex watch --engine xelatex`, headless, on the fontspec document
+/// over a series of edits (words that change the glyphs the fonts embed,
+/// a page added and taken away again), each written as an update section
+/// of the PDF file (the idle time longer than the series): once the watch
+/// is idle, the exact file it writes over the updated one is
+/// `phitex build --engine xelatex`'s of the last text, byte for byte, and
+/// each section before it left a file that ends as a PDF file does.
+#[test]
+#[ignore = "heavy: the xelatex format; run on accl"]
+fn xelatex_watch_compacts_a_series() {
+    let _one = one();
+    let text = std::fs::read_to_string(xetex_docs().join("fontspec.tex")).expect("the document");
+    let dir = scratch("xelatex-compact");
+    std::fs::write(dir.join("fontspec.tex"), &text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--json",
+            "--no-view",
+            "--idle",
+            "20000",
+            "--engine",
+            "xelatex",
+            "-j",
+            "8",
+            "fontspec.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let pages = "\\newpage A page of its own, in Pagella: quick brown foxes jump.\n";
+    let edits: [&dyn Fn(&str) -> String; 7] = [
+        &|t| t.replacen("Pagella text", "Palatino words", 1),
+        &|t| t.replacen("\\end{document}", &format!("{pages}\\end{{document}}"), 1),
+        &|t| t.replacen("First item", "Erste Ítem", 1),
+        &|t| t.replacen("quick brown foxes", "lazy dogs sleep", 1),
+        &|t| t.replacen(pages, "", 1).replacen("lazy dogs sleep", "quick brown foxes", 1),
+        &|t| t.replacen("Second", "Zweite", 1),
+        &|t| t.replacen("Palatino words", "Pagella text", 1),
+    ];
+    let mut now = text.clone();
+    let mut sizes = Vec::new();
+    for (k, e) in edits.iter().enumerate() {
+        let next = e(&now);
+        assert_ne!(next, now, "edit {k} changed nothing");
+        now = next;
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(dir.join("fontspec.tex"), &now).expect("the edit");
+        let line = until(&mut lines, "build", &(k as u64 + 2).into(), &mut seen);
+        assert_eq!(line["ok"], true, "edit {k}: {line}");
+        let pdf = std::fs::read(dir.join("fontspec.pdf")).expect("the watch's PDF");
+        assert!(
+            pdf.starts_with(b"%PDF") && pdf.ends_with(b"%%EOF\n"),
+            "edit {k}: the file is not a PDF file"
+        );
+        sizes.push(pdf.len());
+    }
+    let written = until(&mut lines, "event", &"written".into(), &mut seen);
+    assert_eq!(written["exact"], true, "{written}");
+    let watched = std::fs::read(dir.join("fontspec.pdf")).expect("the watch's PDF");
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    let cold_dir = scratch("xelatex-compact-cold");
+    std::fs::write(cold_dir.join("fontspec.tex"), &now).expect("the edited document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
+        .args(["build", "--engine", "xelatex", "-j", "8", "fontspec.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "the cold build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cold_pdf = std::fs::read(cold_dir.join("fontspec.pdf")).expect("the cold PDF");
+    eprintln!(
+        "xelatex compaction: the file after each edit {sizes:?} bytes, the exact file {} bytes",
+        watched.len()
+    );
+    assert!(
+        sizes.windows(2).all(|w| w[0] < w[1]),
+        "an edit wrote the file whole, not an update section: {sizes:?}"
+    );
+    assert!(
+        watched == cold_pdf,
+        "the compacted PDF is not the cold build's: {}",
+        first_difference(&watched, &cold_pdf)
+    );
+}
+
 /// `phitex watch --engine xelatex`, headless, on the fontspec document:
 /// the cold build writes a PDF; a word edited in the file is built as an
 /// edit, and the PDF it writes is `phitex build --engine xelatex`'s of

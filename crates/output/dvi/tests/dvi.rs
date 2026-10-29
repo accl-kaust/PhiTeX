@@ -303,3 +303,125 @@ fn a_kept_page_defines_its_fonts_where_it_lands() {
     assert!(a.ship_kept(&second));
     assert_eq!(a.finish(), w.finish());
 }
+
+/// cmr10's metrics and Type 1 program, whatever the suffix asked: the
+/// files xdvipdfmx reads for the pages below.
+struct Cmr10Files;
+
+impl phitex_xdvipdfmx::io::Files for Cmr10Files {
+    fn find(&self, name: &[u8], f: phitex_xdvipdfmx::io::Format, _: &[u8]) -> Option<Vec<u8>> {
+        use phitex_xdvipdfmx::io::Format;
+        if !name.starts_with(b"cmr10") {
+            return None;
+        }
+        match f {
+            Format::Tfm => Some(b"cmr10.tfm".to_vec()),
+            Format::Type1 => Some(b"cmr10.pfb".to_vec()),
+            _ => None,
+        }
+    }
+    fn read(&self, path: &[u8]) -> Option<std::sync::Arc<[u8]>> {
+        let at = |p: &str| std::fs::read(format!("{}/{p}", env!("CARGO_MANIFEST_DIR"))).ok();
+        match path {
+            b"cmr10.tfm" => at("../../fonts/tfm/tests/fixtures/cmr10.tfm").map(std::sync::Arc::from),
+            b"cmr10.pfb" => at("../pdf/tests/fixtures/cmr10.pfb").map(std::sync::Arc::from),
+            _ => None,
+        }
+    }
+}
+
+/// Pages of lines, nested boxes (the empty ones only kerns: their
+/// `push` cancelled), rules and specials: the PDF xdvipdfmx makes of the
+/// XDV the writer writes, and the PDF its interpreter makes of the
+/// operations the same writer says without writing bytes, each for a
+/// buffer of `buf` bytes.
+fn xdv_and_ops(buf: usize) -> (Vec<u8>, Vec<u8>) {
+    use phitex_xdvipdfmx::api::{Options, Session};
+    let f = cmr10();
+    let tfm_path = format!(
+        "{}/../../fonts/tfm/tests/fixtures/cmr10.tfm",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let checksum = phitex_tfm::parse(&std::fs::read(tfm_path).unwrap())
+        .unwrap()
+        .checksum;
+    let def = font_def(&f, checksum);
+    let fonts = |_| def.clone();
+    let specials: Vec<Vec<u8>> = vec![
+        b"pdf:mapline cmr10 CMR10 <cmr10.pfb".to_vec(),
+        b"pdf:literal 0 0 1 rg".to_vec(),
+        b"pdf:dest (here) [@thispage /XYZ @xpos @ypos null]".to_vec(),
+    ];
+    let pages: Vec<BoxNode> = (0..9)
+        .map(|k| {
+            let mut p = page_of(&f, 4 + 3 * k, k);
+            let mut inner = hbox(&f, b"nested");
+            inner.list.push(Node::Box(Box::new(BoxNode {
+                kind: BoxKind::H,
+                width: PT,
+                list: vec![Node::Kern(PT, KernKind::Explicit)],
+                ..BoxNode::default()
+            })));
+            inner.list.push(Node::Whatsit(1 + u32::try_from(k % 2).unwrap(), None));
+            inner.list.push(Node::Rule(Rule {
+                width: 2 * PT,
+                height: RUNNING,
+                depth: RUNNING,
+            }));
+            p.list.insert(0, Node::Whatsit(0, None));
+            p.list.push(Node::Box(Box::new(inner)));
+            p.list.push(Node::Rule(Rule {
+                width: RUNNING,
+                height: PT / 2,
+                depth: 0,
+            }));
+            p
+        })
+        .collect();
+    let deflate = || -> phitex_xdvipdfmx::obj::Deflate {
+        Box::new(|l, d: &[u8]| phitex_codecs::deflate::compress(d, l))
+    };
+    let options = || Options {
+        pdf_filename: Some(b"pages.pdf".to_vec()),
+        source_date_epoch: Some(0),
+        ..Options::default()
+    };
+    let mut w = DviWriter::new_xdv_with(1000, " XeTeX output", buf, false);
+    let mut o = DviWriter::new_xdv_with(1000, " XeTeX output", buf, true);
+    let mut s = Session::direct(
+        options(),
+        std::sync::Arc::new(Cmr10Files),
+        deflate(),
+        1000,
+        b" XeTeX output",
+    )
+    .unwrap();
+    let mut direct = Vec::new();
+    for p in &pages {
+        let mut wh = |h: u32, _: bool| specials.get(h as usize).cloned();
+        w.ship_out(p, [0; 10], &fonts, &mut wh).unwrap();
+        o.ship_out(p, [0; 10], &fonts, &mut wh).unwrap();
+        direct.extend(s.page_ops(&o.take_ops()).unwrap().pdf);
+    }
+    direct.extend(s.finish().unwrap());
+    let xdv = w.finish();
+    let port = Session::convert(options(), std::sync::Arc::new(Cmr10Files), deflate(), &xdv).unwrap();
+    (port, direct)
+}
+
+#[test]
+fn xdv_ops_make_the_xdvs_pdf() {
+    // (the default buffer, and one so small that pushes are cancelled,
+    // or not, across its halves, and movements find their entries gone)
+    for buf in [phitex_dvi::DVI_BUF_SIZE, 64, 72] {
+        let (port, direct) = xdv_and_ops(buf);
+        assert!(port.starts_with(b"%PDF-"), "the port's PDF");
+        let at = port.iter().zip(&direct).take_while(|(a, b)| a == b).count();
+        assert!(
+            port == direct,
+            "buffer {buf}: the operations' PDF differs from the XDV's at byte {at} ({} and {} bytes)",
+            port.len(),
+            direct.len()
+        );
+    }
+}

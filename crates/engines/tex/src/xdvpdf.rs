@@ -236,6 +236,13 @@ pub(crate) fn file(
         date: p.date,
     };
     let ids: Vec<u64> = pages.iter().map(|x| x.raw()).collect();
+    // (the pages' fonts by id, read before the last link's state is taken:
+    // a read that stops the node leaves it in place)
+    let mut defs: phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef> =
+        phitex_defuse::FxHashMap::default();
+    for &page in pages {
+        crate::assemble::page_defs(cx, page, xe, &mut defs)?;
+    }
     let files = (p.files)();
     // (the last link's state, taken: a build linking meanwhile starts
     // its own)
@@ -315,12 +322,6 @@ pub(crate) fn file(
     w.set_font_numbers(nums.clone());
     let mut chunks: Vec<Arc<[u8]>> = old[..k.min(old.len())].to_vec();
     let t_start = t_start.elapsed();
-    // (the fonts of the pages walked, by id)
-    let mut defs: phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef> =
-        phitex_defuse::FxHashMap::default();
-    for &page in &pages[k..] {
-        crate::assemble::page_defs(cx, page, xe, &mut defs)?;
-    }
     let zero = std::time::Duration::ZERO;
     let (mut t_walk, mut t_page, mut t_snap) = (zero, zero, zero);
     let every = pages.len().div_ceil(SNAPS).max(1);

@@ -503,8 +503,17 @@ impl DviWriter {
     /// operations are the opcodes of the XDV it would write.
     #[must_use]
     pub fn new_xdv_ops(mag: i32, comment: &str) -> DviWriter {
-        let mut w = Self::make_with(mag, comment, DVI_BUF_SIZE, true, false);
-        w.ops = Some(Vec::new());
+        Self::new_xdv_with(mag, comment, DVI_BUF_SIZE, true)
+    }
+
+    /// XeTeX's writer with another `dvi_buf_size` (a multiple of 8):
+    /// [`DviWriter::new_xdv_ops`]'s if `ops`, else [`DviWriter::new_xdv`]'s.
+    #[must_use]
+    pub fn new_xdv_with(mag: i32, comment: &str, buf_size: usize, ops: bool) -> DviWriter {
+        let mut w = Self::make_with(mag, comment, buf_size, true, !ops);
+        if ops {
+            w.ops = Some(Vec::new());
+        }
         w
     }
 

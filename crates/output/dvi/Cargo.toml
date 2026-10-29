@@ -13,6 +13,7 @@ phitex-xdvipdfmx = { path = "../xdvipdfmx" }
 
 [dev-dependencies]
 phitex-tfm = { path = "../../fonts/tfm" }
+phitex-codecs = { path = "../../codecs" }
 
 [lints]
 workspace = true
