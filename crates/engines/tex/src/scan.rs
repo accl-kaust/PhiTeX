@@ -717,8 +717,8 @@ impl Run<'_, '_> {
     /// past sixteen in fields of their own (`famx:<size>:<n>`).
     pub(crate) fn fam_loc(&mut self, size: i32, n: i32) -> crate::state::Loc {
         if self.xe && n >= 16 {
-            let f = self.v.field(&format!("famx:{}:{n}", size / 16));
-            return self.loc_of(f);
+            let prefix = ["famx:0", "famx:1", "famx:2"][usize::try_from(size / 16).unwrap_or(0).min(2)];
+            return self.numbered_loc(prefix, n.into());
         }
         crate::fields::fam_slot(size, n)
     }

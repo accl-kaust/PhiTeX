@@ -1573,18 +1573,32 @@ fn reg_tag(c: u8) -> (&'static str, i32) {
 /// The field of the eqtb quantity at `(cmd, chr)` for the assignment
 /// commands (§1224, §1228): parameters by name, registers by number.
 pub(crate) fn quantity_field(c: u8, chr: i32) -> String {
-    let (base, reg) = match c {
-        cmd::ASSIGN_INT => (COUNT_BASE, "count"),
-        cmd::ASSIGN_DIMEN => (SCALED_BASE, "dimen"),
-        cmd::ASSIGN_GLUE => (SKIP_BASE, "skip"),
-        cmd::ASSIGN_MU_GLUE => (MU_SKIP_BASE, "muskip"),
-        _ => (TOKS_BASE, "toks"),
-    };
-    if chr >= base {
-        format!("{reg}:{}", chr - base)
-    } else {
-        format!("param:{}", prim_name(c, chr).unwrap_or("?"))
+    match quantity_register(c, chr) {
+        Some((reg, n)) => format!("{reg}:{n}"),
+        None => format!("param:{}", prim_name(c, chr).unwrap_or("?")),
     }
+}
+
+/// The registers' field prefixes (`count`, `dimen`, `skip`, `muskip`,
+/// `toks`), one string each: [`crate::state::State::numbered`] knows a
+/// prefix by its address.
+pub(crate) static REG_NAMES: [&str; 5] = ["count", "dimen", "skip", "muskip", "toks"];
+
+/// The code tables' field prefixes (`lc`, `uc`, `sf`, `mc`, `dc`), as
+/// [`REG_NAMES`].
+pub(crate) static CODE_NAMES: [&str; 5] = ["lc", "uc", "sf", "mc", "dc"];
+
+/// The register a quantity at `(cmd, chr)` is (its family's prefix and
+/// number), none for a parameter.
+pub(crate) fn quantity_register(c: u8, chr: i32) -> Option<(&'static str, i64)> {
+    let (base, reg) = match c {
+        cmd::ASSIGN_INT => (COUNT_BASE, 0),
+        cmd::ASSIGN_DIMEN => (SCALED_BASE, 1),
+        cmd::ASSIGN_GLUE => (SKIP_BASE, 2),
+        cmd::ASSIGN_MU_GLUE => (MU_SKIP_BASE, 3),
+        _ => (TOKS_BASE, 4),
+    };
+    (chr >= base).then(|| (REG_NAMES[reg], i64::from(chr - base)))
 }
 
 /// A glue value: `[width, stretch, stretch order, shrink, shrink order]`.

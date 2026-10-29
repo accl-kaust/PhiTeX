@@ -382,6 +382,9 @@ pub(crate) struct State {
     eq: Vec<Slot>,
     spill: Vec<Slot>,
     spill_ix: FxHashMap<Field, u32>,
+    /// The spill indices of the numbered fields ([`State::numbered`]), by
+    /// prefix (its address) and number.
+    numbered: FxHashMap<(usize, i64), u32>,
     touched: Vec<Loc>,
     metas: Vec<Meta>,
     /// The scope's definitions of locations the run's base level also
@@ -515,6 +518,7 @@ impl Clone for State {
             eq,
             spill: self.spill.clone(),
             spill_ix: self.spill_ix.clone(),
+            numbered: self.numbered.clone(),
             touched: self.touched.clone(),
             metas: {
                 let mut m = METAS_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
@@ -634,6 +638,7 @@ impl State {
             eq: POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default(),
             spill: Vec::new(),
             spill_ix: FxHashMap::default(),
+            numbered: FxHashMap::default(),
             touched: TOUCHED_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_else(|| Vec::with_capacity(256)),
             metas: METAS_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default(),
             scope_extra: Vec::new(),
@@ -727,6 +732,8 @@ impl State {
         for f in u.spill_added {
             self.spill_ix.remove(&f);
         }
+        let n = u32::try_from(spill).unwrap_or(u32::MAX);
+        self.numbered.retain(|_, i| *i < n);
         self.save = u.save;
         self.defined = u.defined;
         self.scope_extra = u.scope_extra;
@@ -944,10 +951,30 @@ impl State {
     /// the static cells keeps its location, and its slot its field.
     pub(crate) fn adopt_spill(&mut self, prev: &State) {
         self.spill_ix.clone_from(&prev.spill_ix);
+        self.numbered.clone_from(&prev.numbered);
         let fields: Vec<(Field, u32)> = self.spill_ix.iter().map(|(&f, &i)| (f, i)).collect();
         for (f, i) in fields {
             self.slot(SPILL | i).field = Some(f);
         }
+    }
+
+    /// The spill location of the numbered field `<prefix>:<n>` (a
+    /// register or a code past the fixed ones,
+    /// [`crate::fields::Fields::numbered`]), if it has one already: one
+    /// lookup, not the field's name made, interned and looked up.
+    #[inline]
+    pub(crate) fn numbered(&self, prefix: &'static str, n: i64) -> Option<Loc> {
+        self.numbered
+            .get(&(prefix.as_ptr() as usize, n))
+            .map(|&i| SPILL | i)
+    }
+
+    /// [`State::spill_loc`] of `f`, the numbered field `<prefix>:<n>`
+    /// ([`State::numbered`]).
+    pub(crate) fn add_numbered(&mut self, prefix: &'static str, n: i64, f: Field) -> Loc {
+        let l = self.spill_loc(f);
+        self.numbered.insert((prefix.as_ptr() as usize, n), l & !SPILL);
+        l
     }
 
     /// The spill location of field `f`.

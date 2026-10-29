@@ -1906,6 +1906,16 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn quantity(&self, c: u8, chr: i32) -> Field {
         match self.ops.fields.quantity_slot(c, chr) {
             Some(s) => self.ops.fields.slot_field(s),
+            None => self.quantity_unslotted(c, chr),
+        }
+    }
+
+    /// The field of a quantity with no fixed location: a register past
+    /// the fixed ones ([`Self::numbered_field`]), else a parameter by
+    /// name.
+    fn quantity_unslotted(&self, c: u8, chr: i32) -> Field {
+        match crate::val::quantity_register(c, chr) {
+            Some((reg, n)) => self.numbered_field(reg, n),
             None => self.v.field(&crate::val::quantity_field(c, chr)),
         }
     }
@@ -1914,6 +1924,8 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn quantity_loc(&mut self, c: u8, chr: i32) -> Loc {
         if let Some(s) = self.ops.fields.quantity_slot(c, chr) {
             Loc::try_from(s).unwrap_or(0)
+        } else if let Some((reg, n)) = crate::val::quantity_register(c, chr) {
+            self.numbered_loc(reg, n)
         } else {
             let f = self.v.field(&crate::val::quantity_field(c, chr));
             self.loc_of(f)
@@ -1933,14 +1945,35 @@ impl<'c, 'a> Run<'c, 'a> {
             .keyed(self.v, self.cx.values_epoch(), fam, key)
     }
 
-    /// The field of register `n` of kind `r` (as [`Self::reg`]).
-    pub(crate) fn reg_field(&self, r: usize, n: i32) -> Field {
-        match crate::fields::reg_slot(r, n) {
-            Some(s) => self.ops.fields.slot_field(s),
-            None => self.v.field(&format!(
-                "{}:{n}",
-                ["count", "dimen", "skip", "muskip", "toks"][r]
-            )),
+    /// The field `<prefix>:<n>` past a numbered family's fixed slots
+    /// ([`crate::fields::Fields::numbered`]).
+    pub(crate) fn numbered_field(&self, prefix: &'static str, n: i64) -> Field {
+        self.ops.fields.numbered(self.v, self.cx.values_epoch(), prefix, n)
+    }
+
+    /// The location of the numbered field `<prefix>:<n>` (a register or
+    /// a code past the fixed ones): the run's spill location for it.
+    pub(crate) fn numbered_loc(&mut self, prefix: &'static str, n: i64) -> Loc {
+        if let Some(l) = self.st.numbered(prefix, n) {
+            return l;
+        }
+        let f = self.numbered_field(prefix, n);
+        self.st.add_numbered(prefix, n, f)
+    }
+
+    /// The location of character `c`'s entry in code table `name`
+    /// (`cat`, `lc`, `uc`, `sf`, `mc`, `dc`).
+    pub(crate) fn code_loc(&mut self, name: &'static str, c: i32) -> Loc {
+        let u = c.cast_unsigned();
+        let table = crate::val::CODE_NAMES.iter().position(|&n| n == name);
+        let fixed = match table {
+            None => (u < 256).then(|| crate::fields::CAT0 + u as usize),
+            Some(t) => crate::fields::code_slot(t, u),
+        };
+        match (fixed, table) {
+            (Some(s), _) => Loc::try_from(s).unwrap_or(0),
+            (None, Some(t)) => self.numbered_loc(crate::val::CODE_NAMES[t], c.into()),
+            (None, None) => self.numbered_loc("cat", c.into()),
         }
     }
 
@@ -1949,8 +1982,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if let Some(s) = crate::fields::reg_slot(r, n) {
             Loc::try_from(s).unwrap_or(0)
         } else {
-            let f = self.reg_field(r, n);
-            self.loc_of(f)
+            self.numbered_loc(crate::val::REG_NAMES[r], n.into())
         }
     }
 
@@ -1986,9 +2018,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let l = if let Some(s) = crate::fields::code_slot(table, c) {
             Loc::try_from(s).unwrap_or(0)
         } else {
-            let name = ["lc", "uc", "sf", "mc", "dc"][table];
-            let f = self.v.field(&format!("{name}:{c}"));
-            self.loc_of(f)
+            self.numbered_loc(crate::val::CODE_NAMES[table], c.into())
         };
         if self.xe && c >= 256 {
             // (XeTeX's INITEX, xetex.web §232: `\sfcode` 1000, the math

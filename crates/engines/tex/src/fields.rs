@@ -688,6 +688,23 @@ impl Fields {
         fld
     }
 
+    /// The field `<prefix>:<n>` of a numbered family past its fixed
+    /// slots (a register or a code table's entry past 255, XeTeX's
+    /// families past 15), kept per thread as [`Self::get_at`] keeps
+    /// names: formatted and interned once an epoch, not at each use.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn numbered(&self, v: &Values, epoch: u64, prefix: &'static str, n: i64) -> Field {
+        if let Some(f) = with_names(v, epoch, |c| c.numbered.get(&(prefix, n)).copied()) {
+            return f;
+        }
+        let f = v.field(&format!("{prefix}:{n}"));
+        with_names(v, epoch, |c| {
+            bounded(&mut c.numbered);
+            c.numbered.insert((prefix, n), f);
+        });
+        f
+    }
+
     /// The field `<fam>:<key>`, kept per thread as [`Self::get_at`]
     /// keeps names (formatted and interned once an epoch).
     #[allow(clippy::unused_self)]
@@ -737,6 +754,9 @@ struct Named {
     keyed: [FxHashMap<Box<str>, Field>; FAMS],
     /// The fonts' cells' fields by font and cell ([`Fields::font_field`]).
     fonts: FxHashMap<(i64, i32), Field>,
+    /// The numbered fields past the fixed slots by prefix and number
+    /// ([`Fields::numbered`]).
+    numbered: FxHashMap<(&'static str, i64), Field>,
 }
 
 /// The field families keyed by a name (`<family>:<key>`): files, the

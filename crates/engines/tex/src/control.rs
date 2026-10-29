@@ -1003,25 +1003,15 @@ impl Run<'_, '_> {
                     // "Invalid code"
                     val = 0;
                 }
-                let (name, table) = match base {
-                    CAT_CODE_BASE => ("cat", None),
-                    crate::val::LC_CODE_BASE => ("lc", Some(0)),
-                    crate::val::UC_CODE_BASE => ("uc", Some(1)),
-                    SF_CODE_BASE => ("sf", Some(2)),
-                    MATH_CODE_BASE => ("mc", Some(3)),
-                    _ => ("dc", Some(4)),
+                let name = match base {
+                    CAT_CODE_BASE => "cat",
+                    crate::val::LC_CODE_BASE => "lc",
+                    crate::val::UC_CODE_BASE => "uc",
+                    SF_CODE_BASE => "sf",
+                    MATH_CODE_BASE => "mc",
+                    _ => "dc",
                 };
-                let c = u32::try_from(ch).unwrap_or(u32::MAX);
-                let fixed = match table {
-                    None => (c < 256).then(|| crate::fields::CAT0 + c as usize),
-                    Some(t) => crate::fields::code_slot(t, c),
-                };
-                let l = if let Some(s) = fixed {
-                    Loc::try_from(s).unwrap_or(0)
-                } else {
-                    let f = self.v.field(&format!("{name}:{ch}"));
-                    self.loc_of(f)
-                };
+                let l = self.code_loc(name, ch);
                 self.set_loc(l, Entry::int(val), global);
             }
             cmd::DEF_FAMILY => {

@@ -1065,25 +1065,7 @@ impl Run<'_, '_> {
         Ok(math_code(class, fam, ch))
     }
 
-    /// The location of character `c`'s entry in code table `name`.
-    fn code_loc(&mut self, name: &str, c: i32) -> crate::state::Loc {
-        let u = c.cast_unsigned();
-        let table = ["lc", "uc", "sf", "mc", "dc"]
-            .iter()
-            .position(|&n| n == name);
-        let fixed = match table {
-            None => (u < 256).then(|| crate::fields::CAT0 + u as usize),
-            Some(t) => crate::fields::code_slot(t, u),
-        };
-        if let Some(s) = fixed {
-            crate::state::Loc::try_from(s).unwrap_or(0)
-        } else {
-            let f = self.v.field(&format!("{name}:{c}"));
-            self.loc_of(f)
-        }
-    }
-
-    fn set_code(&mut self, name: &str, c: i32, x: i32, global: bool) {
+    fn set_code(&mut self, name: &'static str, c: i32, x: i32, global: bool) {
         let l = self.code_loc(name, c);
         self.set_loc(l, crate::state::Entry::int(x), global);
     }
