@@ -496,6 +496,22 @@ impl Viewer {
     }
 
     /// What the browsers asked for since last taken.
+    /// Whether an ask waits to be taken (an edit, a request of the
+    /// watch's): work nobody waits for is put off while one does.
+    pub fn has_asks(&self) -> bool {
+        !lock(&self.asks).is_empty()
+    }
+
+    /// The pages' origins, made after the build that changed them was
+    /// announced (off the typing path: when no ask waits, or when asked),
+    /// and the viewers told which pages' origins changed.
+    pub fn set_origins(&self, origins: Option<Origins>, changed: Option<OriginsChanged>) {
+        lock(&self.pages).origins = origins;
+        if let Some(c) = &changed {
+            self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
+        }
+    }
+
     pub fn take_asks(&self) -> Vec<Ask> {
         std::mem::take(&mut *lock(&self.asks))
     }
@@ -526,7 +542,11 @@ impl Viewer {
             .map(|(k, _)| k + 1)
             .collect();
         pages.pdf.clone_from(&b.pdf);
-        pages.origins.clone_from(&b.origins);
+        // (a build announced without origins keeps the last ones until
+        // they are made, `Viewer::set_origins`: never on the typing path)
+        if b.origins.is_some() {
+            pages.origins.clone_from(&b.origins);
+        }
         pages.history = b.history;
         pages.ms = b.ms;
         let n = b.hashes.len();

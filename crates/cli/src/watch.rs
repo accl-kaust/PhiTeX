@@ -560,6 +560,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
     // (since when the PDF file is not the exact one: written when the
     // editor has been idle for `o.idle`)
     let idle_since: std::cell::Cell<Option<Instant>> = std::cell::Cell::new(None);
+    // (the last build's origins still to be made: after it is announced,
+    // once no event waits; never on the typing path)
+    let origins_due = std::cell::Cell::new(false);
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let main_file = root.join(&s.job.path);
     let main_rel = s
@@ -923,10 +926,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
                 history: r.history(),
                 ms: r.wall.as_secs_f64() * 1e3,
                 since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
-                origins: s.origins(),
+                origins: None,
                 changed: None,
                 diagnostics: diagnostics(s, &r, &log),
             };
+            origins_due.set(true);
             if let Some(v) = &view {
                 v.built(&b);
                 v.building(false);
@@ -1315,6 +1319,19 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
     // with `--log`, the log written then; the records are stored as each
     // build settles)
     loop {
+        // (nothing waits: the last build's origins, made now)
+        if origins_due.get() && held.is_empty() {
+            match rx.try_recv() {
+                Ok(e) => held.push_back(e),
+                Err(mpsc::TryRecvError::Empty) => {
+                    origins_due.set(false);
+                    if let Some(v) = &view {
+                        v.set_origins(s.origins(), None);
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
         let wait = idle_since.get().map_or(Duration::from_secs(2), |t| {
             o.idle.saturating_sub(t.elapsed())
         });

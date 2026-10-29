@@ -42,6 +42,8 @@ pub struct Document {
     builds: usize,
     /// The last build's main output: its extension and bytes.
     output: Option<(&'static str, Arc<Vec<u8>>)>,
+    /// Whether the last build's origins are still to be made.
+    origins_due: bool,
 }
 
 /// The main file's buffer as the asks left it, each change of it sent to
@@ -151,6 +153,7 @@ impl Document {
             emit,
             builds: 0,
             output: None,
+            origins_due: false,
         }
     }
 
@@ -229,7 +232,23 @@ impl Document {
         if again {
             self.build(&why.join(", "), came);
         }
+        // (nothing waits: the origins the last build changed, made now)
+        if self.origins_due && !self.viewer.has_asks() {
+            self.origins_now();
+        }
         std::mem::take(&mut *lock(&self.events))
+    }
+
+    /// The pages' origins (glyph to source, SyncTeX's) of the last build,
+    /// made and given to the viewer; [`Document::step`] makes them once
+    /// no ask waits, a host that needs them at once (a double-click while
+    /// edits come) calls this.
+    pub fn origins_now(&mut self) {
+        self.origins_due = false;
+        let s = &self.session;
+        if let Some(o) = s.origins() {
+            self.viewer.set_origins(Some(o), s.origins_changed());
+        }
     }
 
     fn build(&mut self, why: &str, came: Instant) {
@@ -296,10 +315,13 @@ impl Document {
             history: r.history(),
             ms: r.wall.as_secs_f64() * 1e3,
             since_ms: Some(came.elapsed().as_secs_f64() * 1e3),
-            origins: s.origins(),
-            changed: s.origins_changed(),
+            // (the origins after the build is announced: never on the
+            // typing path, `Document::origins_now`)
+            origins: None,
+            changed: None,
             diagnostics: diagnostics(s, &r, &log),
         });
+        self.origins_due = true;
         v.building(false);
         // (the records the build changed, stored now: only when a load
         // changed them, compared with what is stored first; no idle timer)
