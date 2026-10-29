@@ -23,8 +23,9 @@
 # texmf paths); (2) without it, the tracer (trace/, cargo --offline on
 # PhiTeX's crate cache for its Cargo.lock, ~/shared-cache/phitex) and the
 # font index over that tree (phitex-otf's otf-index, its fonts.conf in the
-# job's scratch clone pointed at the tree); (3) without it, build.py with
-# TRACE (both engines). Everything runs in /tmp/$USER-$SLURM_JOB_ID; the
+# job's scratch clone pointed at the tree; once with absolute paths for the
+# tracer, once relative to the tree, served as the release's FONT_INDEX);
+# (3) without it, build.py with TRACE (both engines) and FONT_INDEX. Everything runs in /tmp/$USER-$SLURM_JOB_ID; the
 # results go to ~/code/flinner/shelf-runs/<mode>-<job>/: trace-*.json,
 # trace-*.log, logs/ (the TeX log of each job that made no page), texlive.tlpdb.xz, fontindex.pxfi, the tracer's Cargo.lock,
 # build.log and (full) build/ and MANIFEST.tsv.
@@ -93,13 +94,16 @@ cat > "$w/shelf/trace/phitex/scripts/xetex/fonts.conf" <<EOF
 </fontconfig>
 EOF
 box sh -c "cd trace/phitex && cargo run -q --offline -p phitex-otf --profile fastdev --example otf-index -- $w/fontindex.pxfi"
-cp "$w/fontindex.pxfi" "$w/results/"
+# (the release's own, served as FONT_INDEX: its paths relative to the tree)
+box sh -c "cd trace/phitex && cargo run -q --offline -p phitex-otf --profile fastdev --example otf-index -- $w/fontindex-rel.pxfi --relative $w/ftree"
+cp "$w/fontindex.pxfi" "$w/fontindex-rel.pxfi" "$w/results/"
 echo "tracer and font index $(date +%T)"
 
 # (3) the traces and the build
 names=${4:-${CHECK_NAMES:-amsmath.sty,hyperref.sty,tikz.sty,geometry.sty,graphicx.sty,biblatex.sty,beamer.cls,fontspec.sty,unicode-math.sty,polyglossia.sty,xeCJK.sty,ctex.sty}}
 status=0
 box env SHELF_TRACE_LOGS="$w/results/logs" TLPDB=cache/texlive.tlpdb.xz TRACE=trace/target/release/shelf-trace TRACE_FONT_INDEX="$w/fontindex.pxfi" \
+  FONT_INDEX="$w/fontindex-rel.pxfi" \
   TRACE_JOBS="$((jobs - 1))" PACK_JOBS="$jobs" $([ "$mode" = check ] && echo TRACE_NAMES="$names") \
   python3 build.py > "$w/results/build.log" 2>&1 || status=$?
 tail -40 "$w/results/build.log"

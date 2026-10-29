@@ -22,11 +22,15 @@ in the index and inside packs. The one file not from a package, pdftex.map,
 is made as updmap makes it (every package's Map and MixedMap files, in
 package order) at the path updmap gives it,
 fonts/map/pdftex/updmap/pdftex.map; the map files it is made from are not
-served.
+served (dvipdfmx's own, fonts/map/dvipdfmx/, are: its dvipdfmx.cfg names
+them). Beyond what TeX reads, what xdvipdfmx and XeTeX read is taken:
+dvipdfmx/ (dvipdfmx.cfg), fonts/cmap/ and fonts/sfd/ (CJK), and TECkit's
+compiled mappings (fonts/misc/xetex/fontmapping/, .tec).
 
 Search (release.json's `search`): for each engine (pdftex as pdflatex,
 xetex as xelatex, luatex as lualatex) and each kpathsea format (tex, tfm,
-vf, type1, enc, map, opentype, truetype, bst, bib, ist; lua for luatex),
+vf, type1, enc, map, opentype, truetype, bst, bib, ist, cmap, sfd, misc;
+lua for luatex),
 the ordered path prefixes, read from TeX Live's own texmf.cnf (the kpathsea
 package's web2c/texmf.cnf: TEXINPUTS.pdflatex, TEXINPUTS.xelatex,
 TFMFONTS, ...): its $TEXMF/... entries brace-expanded, with $progname and
@@ -100,9 +104,14 @@ TREES = [
     "tex/latex", "tex/generic", "tex/plain", "tex/xelatex", "tex/xetex", "tex/lualatex", "tex/luatex",
     "fonts/tfm", "fonts/vf", "fonts/type1", "fonts/enc", "fonts/map", "fonts/opentype", "fonts/truetype",
     "bibtex/bst", "bibtex/csf", "bibtex/bib", "makeindex",
+    # (what xdvipdfmx and XeTeX read beyond the fonts: dvipdfmx.cfg, the
+    # CJK CMaps and subfont definitions, dvipdfmx's own maps, TECkit's
+    # compiled mappings)
+    "dvipdfmx", "fonts/cmap", "fonts/sfd", "fonts/misc/xetex/fontmapping",
 ]
-# (not read by name: documents, images)
-SKIP = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".eps", ".ps", ".txt", ".md", ".html", ".log", ".zip", ".dvi"}
+# (not read by name: documents, images; .txt is: XeTeX's format reads
+# tex/generic/unicode-data/LineBreak.txt and its kin by name)
+SKIP = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".eps", ".ps", ".md", ".html", ".log", ".zip", ".dvi"}
 OPEN = ("fonts/opentype/", "fonts/truetype/")
 XETEX = ("tex/xelatex/", "tex/xetex/")
 LUATEX = ("tex/lualatex/", "tex/luatex/")
@@ -118,6 +127,7 @@ FORMATS = {
     "tex": "TEXINPUTS", "tfm": "TFMFONTS", "vf": "VFFONTS", "type1": "T1FONTS", "enc": "ENCFONTS",
     "map": "TEXFONTMAPS", "opentype": "OPENTYPEFONTS", "truetype": "TTFONTS",
     "bst": "BSTINPUTS", "bib": "BIBINPUTS", "ist": "INDEXSTYLE",
+    "cmap": "CMAPFONTS", "sfd": "SFDFONTS", "misc": "MISCFONTS",
 }
 DEPS = ["pdftex", "xetex"]  # (the index's dependency columns, in order)
 
@@ -131,7 +141,13 @@ def wanted(path: str) -> bool:
     if not any(path.startswith(t + "/") for t in TREES):
         return False
     if path.startswith("fonts/map/"):
-        return path.endswith(".map") and path.split("/")[2] in ("dvips", "pdftex")
+        return path.endswith(".map") and path.split("/")[2] in ("dvips", "pdftex", "dvipdfmx")
+    if path.startswith(("dvipdfmx/", "fonts/cmap/")):
+        return True
+    if path.startswith("fonts/sfd/"):
+        return path.endswith(".sfd")
+    if path.startswith("fonts/misc/xetex/fontmapping/"):
+        return path.endswith(".tec")
     if path.startswith(OPEN):
         return path.lower().endswith((".otf", ".ttf", ".ttc"))
     if path.startswith("fonts/"):
@@ -245,7 +261,8 @@ def kind(name: str) -> str:
     base = name.rsplit("/", 1)[-1]
     ext = base.rsplit(".", 1)[-1].lower() if "." in base else ""
     return {"tfm": "tfm", "vf": "vf", "pfb": "type1", "enc": "enc", "map": "map", "otf": "opentype",
-            "ttf": "truetype", "ttc": "truetype", "bst": "bst", "csf": "bst", "bib": "bib", "ist": "ist"}.get(ext, "tex")
+            "ttf": "truetype", "ttc": "truetype", "bst": "bst", "csf": "bst", "bib": "bib", "ist": "ist",
+            "sfd": "sfd", "tec": "misc"}.get(ext, "tex")
 
 
 def resolver(paths, order: dict[str, list[str]]):
@@ -520,7 +537,8 @@ def main() -> None:
 
     # pdftex.map, as updmap makes it: every package's Map and MixedMap
     # files, in package order (a font named twice: the first wins)
-    maps = {path.rsplit("/", 1)[1]: b for path, (_, b) in files.items() if path.startswith("fonts/map/")}
+    merged = ("fonts/map/dvips/", "fonts/map/pdftex/")
+    maps = {path.rsplit("/", 1)[1]: b for path, (_, b) in files.items() if path.startswith(merged)}
     seen, lines = set(), []
     # (updmap's default, pdftexDownloadBase14: the base 14 fonts embedded,
     # URW's, from pdftex_dl14.map, ahead of everything)
@@ -534,7 +552,8 @@ def main() -> None:
                 lines.append(line)
     pdftex_map = ("\n".join(lines) + "\n").encode("latin-1")
     print(f"pdftex.map: {len(lines)} fonts, {len(pdftex_map) / 1e6:.1f} MB", file=sys.stderr)
-    for path in [q for q in files if q.startswith("fonts/map/")]:
+    # (dvipdfmx's own maps, fonts/map/dvipdfmx/, stay: its dvipdfmx.cfg names them)
+    for path in [q for q in files if q.startswith(merged)]:
         del files[path]
     files[PDFTEX_MAP] = ({"name": "pdftex-map", "rev": "updmap"}, pdftex_map)
     if os.environ.get("FONT_INDEX"):
