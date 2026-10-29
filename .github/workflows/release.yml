@@ -1,0 +1,98 @@
+# A release (docs/ci.md): a tag vX.Y.Z on main whose commit passed the
+# gate. The CLI built for Linux (x86_64, aarch64; glibc 2.35, Ubuntu
+# 22.04's) and macOS (arm64, x86_64), each a tarball phitex-<arch>-<os>.tar.gz
+# (the names phitex.org/install.sh asks for), SHA256SUMS of them, signed
+# with minisign (the repository secret MINISIGN_SECRET_KEY, the key file's
+# text; MINISIGN_PASSWORD if it has one), and the GitHub release made with
+# all of them.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  gated:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: the tag is on main, passed the gate, and is the CLI's version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$GITHUB_SHA tag=${GITHUB_REF_NAME#v}
+          st=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" -q .status)
+          case $st in identical | behind) ;; *) echo "$GITHUB_REF_NAME is not on main ($st)"; exit 1 ;; esac
+          gate=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=gate" -q '[.check_runs[].conclusion] | map(select(. == "success")) | length')
+          [ "$gate" -gt 0 ] || { echo "no green gate on $sha"; exit 1; }
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)
+          [ "$v" = "$tag" ] || { echo "the tag says $tag, crates/cli/Cargo.toml $v"; exit 1; }
+  build:
+    needs: gated
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-22.04, asset: x86_64-linux }
+          - { os: ubuntu-22.04-arm, asset: aarch64-linux }
+          - { os: macos-15, asset: aarch64-macos }
+          - { os: macos-15-intel, asset: x86_64-macos }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # (.cargo/config.toml links Linux with clang and mold)
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang mold
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo build --release --locked -p phitex-cli
+      - run: |
+          ./target/release/phitex --version
+          tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C target/release phitex
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phitex-${{ matrix.asset }}
+          path: phitex-${{ matrix.asset }}.tar.gz
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS, signed
+        env:
+          KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          PASS: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          cd dist
+          sha256sum phitex-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          [ -n "$KEY" ] || { echo "no MINISIGN_SECRET_KEY: the release is not signed"; exit 1; }
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          umask 077
+          printf '%s\n' "$KEY" > "$RUNNER_TEMP/minisign.key"
+          printf '%s\n' "$PASS" | minisign -S -s "$RUNNER_TEMP/minisign.key" -m SHA256SUMS -t "phitex $GITHUB_REF_NAME"
+          rm -f "$RUNNER_TEMP/minisign.key"
+          minisign -Vm SHA256SUMS -p ../ci/minisign.pub
+      - name: the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # (NEWS.md's section for this version, if it has one)
+          awk -v v="## ${GITHUB_REF_NAME#v}" '$0 ~ "^## " {on = index($0, v) == 1; next} on' NEWS.md > notes.md 2>/dev/null || true
+          [ -s notes.md ] || echo "PhiTeX $GITHUB_REF_NAME" > notes.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "PhiTeX $GITHUB_REF_NAME" --notes-file notes.md dist/*
