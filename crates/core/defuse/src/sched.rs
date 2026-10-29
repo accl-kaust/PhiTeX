@@ -355,7 +355,7 @@ fn sched_key(eng: &Engine, n: &Node) -> u64 {
 /// halves of the rest before it works; each gives its worker to `back`
 /// when it is done.
 fn spawn_tree<'s, 'e: 's>(
-    s: &'s std::thread::Scope<'s, 'e>,
+    s: &'s crate::crew::Scope<'s, 'e>,
     eng: &'e Engine,
     pool: &'e Pool,
     back: &'e Mutex<Vec<Worker>>,
@@ -367,16 +367,13 @@ fn spawn_tree<'s, 'e: 's>(
     let w = ws.remove(0);
     pool.shared.spawned.fetch_add(1, Ordering::SeqCst);
     pool.shared.active.fetch_add(1, Ordering::SeqCst);
-    std::thread::Builder::new()
-        .stack_size(crate::WORKER_STACK)
-        .spawn_scoped(s, move || {
-            let right = ws.split_off(ws.len() / 2);
-            spawn_tree(s, eng, pool, back, ws);
-            spawn_tree(s, eng, pool, back, right);
-            run_worker(eng, pool, &w, None, None);
-            back.lock().unwrap_or_else(PoisonError::into_inner).push(w);
-        })
-        .expect("a worker thread");
+    s.spawn(move || {
+        let right = ws.split_off(ws.len() / 2);
+        spawn_tree(s, eng, pool, back, ws);
+        spawn_tree(s, eng, pool, back, right);
+        run_worker(eng, pool, &w, None, None);
+        back.lock().unwrap_or_else(PoisonError::into_inner).push(w);
+    });
 }
 
 /// Spins before parking.
@@ -479,8 +476,9 @@ impl Pool {
         (pool, workers)
     }
 
-    /// Runs until no node is dirty or running, on `n` scoped threads, the
-    /// caller's thread one of them; the caller's thread also asks `src`
+    /// Runs until no node is dirty or running, on `n` threads, the
+    /// caller's one of them and the others the crew's (`crate::crew`:
+    /// kept for the next evaluation, their clients' caches warm); the caller's thread also asks `src`
     /// for edits. The workers come back with their counts.
     pub(crate) fn run(
         &self,
@@ -505,7 +503,7 @@ impl Pool {
         let later: Vec<Worker> = rest.drain(active..).collect();
         let back: Mutex<Vec<Worker>> = Mutex::new(Vec::with_capacity(self.n));
         let spare = Mutex::new(later);
-        std::thread::scope(|s| {
+        crate::crew::scope(|s| {
             // (spawned as a tree, each thread starting two before it
             // works: no thread waits for the others' starts, the caller's
             // least of all)

@@ -736,7 +736,7 @@ impl Engine {
             }
             self.segs.set(sids[r].0 as usize, seg);
         };
-        std::thread::scope(|s| {
+        crate::crew::scope(|s| {
             let mut shares = shares.into_iter();
             let mine = shares.next().expect("a share");
             for share in shares {
@@ -1319,18 +1319,25 @@ impl Engine {
         if ENGINE_STACK.with(std::cell::Cell::get) {
             return self.evaluate_here(threads, src);
         }
-        std::thread::scope(|s| {
-            std::thread::Builder::new()
-                .name("defuse-eval".to_owned())
-                .stack_size(crate::WORKER_STACK)
-                .spawn_scoped(s, || {
-                    ENGINE_STACK.with(|f| f.set(true));
-                    self.evaluate_here(threads, src)
-                })
-                .expect("the evaluation's thread")
-                .join()
-                .unwrap_or_else(|p| std::panic::resume_unwind(p))
-        })
+        // (a thread of the crew's, `crate::crew`: the same one or another
+        // whose caches an earlier evaluation left warm, never a new one
+        // per evaluation; marked for the evaluation alone, its thread
+        // going on to other jobs after it)
+        let mut out = None;
+        crate::crew::scope(|s| {
+            s.spawn(|| {
+                struct Unmark;
+                impl Drop for Unmark {
+                    fn drop(&mut self) {
+                        ENGINE_STACK.with(|f| f.set(false));
+                    }
+                }
+                ENGINE_STACK.with(|f| f.set(true));
+                let _unmark = Unmark;
+                out = Some(self.evaluate_here(threads, src));
+            });
+        });
+        out.expect("the evaluation ended")
     }
 
     fn evaluate_here(

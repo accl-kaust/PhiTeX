@@ -62,6 +62,7 @@
 
 mod api;
 mod commit;
+mod crew;
 mod ctx;
 mod engine;
 mod index;
