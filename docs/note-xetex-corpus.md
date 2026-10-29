@@ -103,6 +103,18 @@ results:
 - One is missing: `probe-xelatex-filemoddate`, §2.3.
 - Error counts agree on 206 of 211 documents.
 
+Later sweep (mc 76397, dev 7934ed03a): **131 of 131** oracle XDVs
+byte-identical at -j1 and -j8, after the two fixes below; error counts
+agree on 207 of 211 (§3).
+
+- `fontspec-fontload-sizefeatures-1`: a plain-TeX bug, a line of
+  blanks after a line ending in `}` lost its `\par` (a slice began
+  mid-line and read the line end in state M; TeX is in state N there,
+  §347). Fixed in 7934ed03a (`slices_of`, hints.rs), test
+  `cuts::a_line_of_blanks_after_a_group_ends_the_paragraph` (fails mc
+  76395, passes 76396).
+- `probe-xelatex-filemoddate`: §2.3, fixed in a034d2f55.
+
 ### 2.2 ICU line breaks: a break before `〜` for `ja` (1 XDV, fixed here)
 
 `probe-xelatex-cjk`: xelatex keeps `バ〜！？` in one native word, ours
@@ -125,10 +137,12 @@ after (job 21929), at -j1 and -j8.
 under `--compat=xelatex` the run stops with `! Missing \endcsname
 inserted.` at line 15 (`\shape\logdate`), then 198 errors after it.
 xelatex has none. The document takes `\filemoddate{\jobname.log}` apart
-character by character. The first thing to check is what our
-`\filemoddate` of the job's own log gives in compat mode (§4: it is the
-build's clock, `D:20231114221320Z` under this SOURCE_DATE_EPOCH). Not
-investigated further.
+character by character. Cause: `\filemoddate` of a file the job had
+opened with `\openout` gave nothing. TeX creates the file at its
+`\openout` (§1374), so it has a date. Fixed in a034d2f55: such a file is
+dated by the build's clock, as the job's own log already was (its
+`wopen:` field). Test `pdftex::a_written_files_date_is_the_builds_clock`
+(fails mc 76376, passes 76377); the XDV matches xelatex's (mc 76377).
 
 ## 3. Logs: error counts (42 documents differ)
 
@@ -192,11 +206,11 @@ test: finisher runs within 2x the fires at -j1 and 3x at -j8. On
 
 ## 6. Open, in order of size
 
-1. §2.1 is fixed (6de5ca3b1). The sweep (mc 76355) confirms it: 129
-   of 131 XDVs are identical. The one left differing is
-   `fontspec-fontload-sizefeatures-1`, at byte 460.
-2. §3, `\showbox`/`\showlists` logging (36 documents' logs and exit
+All XDVs are identical (131 of 131, mc 76397); what is open is logs.
+
+1. §3, `\showbox`/`\showlists` logging (36 documents' logs and exit
    statuses).
-3. §2.3, `\filemoddate` of the job's log in compat mode.
-4. §3's single-document log differences.
-5. The paper's cost (§4, the docs agent's).
+2. §3's single-document log differences: error counts differ on
+   fontspec-script-lang-chinese, fontspec-script-lang-hebr,
+   probe-xelatex-lang and probe-xelatex-math-body.
+3. The paper's cost (§4, the docs agent's).
