@@ -3578,6 +3578,15 @@ impl<'c, 'a> Run<'c, 'a> {
     /// (§1298): an error, counted for the exit status, never towards
     /// the hundred (`decr(error_count)` outside `error_stop_mode`; a
     /// build runs as `nonstop_mode` does).
+    /// The `error` that ends `\\show`, `\\showthe`, `\\showtokens`,
+    /// `\\showgroups` and `\\showifs` (§1293's `common_ending`): no line
+    /// of its own (the shown text is the message), but the history is
+    /// `error_message_issued`, and pdfTeX exits 1.
+    pub(crate) fn show_ended(&mut self) {
+        let one = self.v.int(1);
+        self.contribute(LOG_ERRORS, one);
+    }
+
     pub(crate) fn log_ok(&mut self) -> R<()> {
         self.diag(true, "OK");
         let nl = i64::from(self.ipar(Par::newlinechar)?);

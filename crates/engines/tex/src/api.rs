@@ -6476,6 +6476,17 @@ impl Build {
             .unwrap_or_default()
     }
 
+    /// Whether TeX's history is `error_message_issued` or worse: an
+    /// error, or a `\\show` of any kind (§1293), was logged.
+    #[must_use]
+    pub fn errors_logged(&self) -> bool {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .acc_value(self.unit, v.field(crate::run::LOG_ERRORS))
+            .is_some_and(|x| int_of(v, x) > 0)
+    }
+
     /// The log's error lines (`! ...`), read without laying the log out:
     /// none unless the errors' count says there are some.
     #[must_use]

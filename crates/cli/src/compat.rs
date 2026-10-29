@@ -279,7 +279,8 @@ pub fn main(progname: &str, args: &[String]) -> ! {
     }
     s.flush_records();
     // web2c's `do_final_end`: exit status 1 for errors or worse.
-    std::process::exit(i32::from(!r.out.errors.is_empty()));
+    // (a `\\show` is an error with no line of its own, §1293)
+    std::process::exit(i32::from(!r.out.errors.is_empty() || r.out.history_error));
 }
 
 /// The main file TeX finds for `name`: `name.tex`, else `name` (here, as

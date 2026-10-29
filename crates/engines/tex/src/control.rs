@@ -1924,6 +1924,7 @@ impl Run<'_, '_> {
             }
         }
         s.push('.');
+        self.show_ended();
         self.log("show", &s)
     }
 

@@ -1425,6 +1425,7 @@ pub(crate) fn show(r: &mut Run<'_, '_>) -> R<()> {
             r.ck()?;
             r.show_toks_into(&mut s, &body)?;
             s.push('.');
+            r.show_ended();
             return r.log("show", &s);
         }
         4 => {
@@ -1466,6 +1467,7 @@ pub(crate) fn show(r: &mut Run<'_, '_>) -> R<()> {
             }
         }
     }
+    r.show_ended();
     r.log("diag", &s)
 }
 

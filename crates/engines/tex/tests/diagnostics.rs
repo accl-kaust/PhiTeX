@@ -314,3 +314,23 @@ fn an_extra_right_brace_is_reported() {
         );
     }
 }
+
+/// `\show`, `\showthe`, `\showtokens`, `\showgroups` and `\showifs` end
+/// in `error` (§1293's `common_ending`): no "! " line, but the history is
+/// `error_message_issued`, and pdftex exits 1 after each (TeX Live 2026,
+/// mc job 75789: `\show\par`, `\showthe\count0`).
+#[test]
+fn a_show_is_an_error_for_the_history() {
+    for (doc, logged) in [
+        ("\\show\\par\nx\\bye\n", true),
+        ("\\showthe\\count0\nx\\bye\n", true),
+        ("\\showtokens{a}\nx\\bye\n", true),
+        ("\\showgroups\nx\\bye\n", true),
+        ("\\showifs\nx\\bye\n", true),
+        ("x\\bye\n", false),
+    ] {
+        let b = build(doc, |o| o);
+        assert_eq!(b.errors_logged(), logged, "{doc:?}");
+        assert!(b.error_lines().is_empty(), "{doc:?}: no \"! \" line");
+    }
+}

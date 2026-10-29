@@ -269,6 +269,9 @@ pub struct Output {
     /// Each page's hash, first first.
     pub page_hashes: Vec<u64>,
     pub errors: Vec<String>,
+    /// TeX's history is `error_message_issued`: an error, or a `\\show`
+    /// of any kind, which is one without a line of its own (§1293).
+    pub history_error: bool,
     /// The terminal's and the log's text.
     pub log: String,
     /// The files TeX wrote.
@@ -364,7 +367,7 @@ impl Report {
 
     /// TeX's history: 0 spotless, 1 warnings, 2 errors.
     pub fn history(&self) -> i32 {
-        if !self.out.errors.is_empty() {
+        if !self.out.errors.is_empty() || self.out.history_error {
             2
         } else if self.warned() {
             1
@@ -1001,6 +1004,7 @@ impl Session {
         // evaluation error: the result is not the document's — then the
         // format's errors, then TeX's; a failure's first line, cut, as
         // its own error: it never hides behind TeX's)
+        let history_error = b.errors_logged();
         let errors: Vec<String> = diagnostics
             .iter()
             .filter(|d| {
@@ -1093,6 +1097,7 @@ impl Session {
                 pages_changed,
                 page_hashes: hashes,
                 errors,
+                history_error,
                 log,
                 layout,
             },
