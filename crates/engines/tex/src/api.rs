@@ -4411,8 +4411,18 @@ fn canonical_lines_splice(
         .iter()
         .rposition(|&c| c == b'\n')
         .map_or(0, |k| k + 1);
+    // (the end: a line's end in both texts. Where the changed bytes end
+    // after a newline in the new text only, the old line goes on into
+    // the suffix: an Enter typed inside a line, "a b" made "a\nb", ends
+    // the new range after the "a\n" it made while the old one, "a", ends
+    // mid-line; cut there, the old lines counted none, the canonical
+    // splice inserted "a\n" before the whole old line, and the document
+    // read that line's start twice, Grail's \ac{cgra} counted 4 times
+    // in a watch where a cold build counts 3)
     let q = n.len() - s;
-    let le = if q == n.len() || (q > 0 && n[q - 1] == b'\n') {
+    let q_old = o.len() - s;
+    let line_end = |b: &[u8], k: usize| k == 0 || k == b.len() || b[k - 1] == b'\n';
+    let le = if line_end(n, q) && line_end(o, q_old) {
         q
     } else {
         n[q..]
@@ -8176,6 +8186,37 @@ mod canonical_tests {
         }
         fill_ids(&mut out, &at, &marks, &collisions(&marks));
         (out, marks)
+    }
+
+    /// The canonical text spliced in place for an edit, a line split
+    /// (Enter) or two lines joined at every place of a text with
+    /// comments, is the whole new text's, and its range is where the
+    /// two canonical texts differ.
+    #[test]
+    fn a_line_split_or_joined_splices_the_canonical_text_as_made_whole() {
+        let text = "a b % one\n% two\nc d e\n\nf % three\ng h\n";
+        let mut edits: Vec<String> = Vec::new();
+        for (i, c) in text.char_indices() {
+            if c == ' ' {
+                edits.push(format!("{}\n{}", &text[..i], &text[i..]));
+                edits.push(format!("{}\n{}", &text[..i], &text[i + 1..]));
+            }
+            if c == '\n' && i + 1 < text.len() {
+                edits.push(format!("{}{}", &text[..i], &text[i + 1..]));
+                edits.push(format!("{} {}", &text[..i], &text[i + 1..]));
+            }
+        }
+        for new in &edits {
+            let (old_c, marks) = canonical_text(text).unwrap();
+            let want = canonical_text(new).unwrap();
+            for ends in [None, Some(byte_ends(text.as_bytes(), new.as_bytes()))] {
+                let mut canon = old_c.clone();
+                if let Some((ms, (a, b, c))) = canonical_splice(text, &mut canon, &marks, new, ends) {
+                    assert_eq!((&canon, &ms), (&want.0, &want.1), "{text:?} -> {new:?}");
+                    assert_eq!((&old_c[..a], &old_c[b..]), (&canon[..a], &canon[c..]), "{new:?}: the range");
+                }
+            }
+        }
     }
 
     #[test]
