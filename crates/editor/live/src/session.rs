@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use phitex_tex::{Build, Finder, Options};
 
-use crate::host::{Host, Key, Sink, Store};
+use crate::host::{Host, Key, Records, Sink, Store};
 use crate::tex::{self, Engine};
 
 /// What a session does now, for a terminal's spinner (`ui.rs`), and
@@ -422,7 +422,7 @@ pub struct Session {
     /// services it calls.
     host: Arc<dyn Host>,
     /// The bytes kept between sessions (none: nothing kept).
-    store: Option<Arc<dyn Store>>,
+    store: Option<Records>,
     /// Where the outputs go.
     sink: Arc<dyn Sink>,
     builds: usize,
@@ -578,7 +578,7 @@ impl Session {
             built_text: None,
             page_hashes: Vec::new(),
             host,
-            store,
+            store: store.map(Records::new),
             sink,
             builds: 0,
             stored: Mutex::new((None, None, None, None)),
@@ -593,6 +593,15 @@ impl Session {
             watching: false,
             synctex: Mutex::default(),
             lines: LineMarks::default(),
+        }
+    }
+
+    /// Its records read and written under stamp `stamp`
+    /// ([`Records::stamped`]: another engine's, in tests).
+    #[cfg(test)]
+    pub(crate) fn stamp_records(&mut self, stamp: u64) {
+        if let Some(r) = &mut self.store {
+            *r = r.restamped(stamp);
         }
     }
 
@@ -1387,31 +1396,16 @@ impl Session {
         let Some(c) = &self.store else {
             return Vec::new();
         };
-        let Some(b) = c.get(Key::Doc("wkeys")) else {
-            return Vec::new();
-        };
-        String::from_utf8_lossy(&b)
-            .lines()
-            .filter_map(|l| {
-                let mut xs = l.split('\0').map(str::to_owned);
-                Some((xs.next()?, xs.collect()))
-            })
-            .collect()
+        c.get(Key::Doc("wkeys"))
+            .map(|b| wkeys_of(&b))
+            .unwrap_or_default()
     }
 
     fn store_wkeys(&self, b: &Build) {
         let Some(c) = &self.store else {
             return;
         };
-        let mut out = String::new();
-        for (n, ks) in b.wkeys() {
-            out.push_str(&n);
-            for k in ks {
-                out.push('\0');
-                out.push_str(&k);
-            }
-            out.push('\n');
-        }
+        let out = wkeys_bytes(&b.wkeys());
         // (the bytes last stored here: the cache's file not read again
         // to see that nothing changed)
         let mut last = self.stored.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1446,10 +1440,13 @@ impl Session {
             Some(c) => c
                 .get(Key::Doc("wnames"))
                 .map(|b| {
-                    String::from_utf8_lossy(&b)
-                        .lines()
+                    wnames_of(&b)
+                        .into_iter()
                         .filter(|n| out_name_ok(n))
-                        .filter_map(|n| Some((n.to_owned(), read(n)?)))
+                        .filter_map(|n| {
+                            let t = read(&n)?;
+                            Some((n, t))
+                        })
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -1486,11 +1483,8 @@ impl Session {
         let Some(c) = &self.store else {
             return;
         };
-        let mut out = String::new();
-        for (n, _) in b.files() {
-            out.push_str(&n);
-            out.push('\n');
-        }
+        let names: Vec<String> = b.files().into_iter().map(|(n, _)| n).collect();
+        let out = wnames_bytes(&names);
         let mut last = self.stored.lock().unwrap_or_else(PoisonError::into_inner);
         if last.2.as_deref() == Some(out.as_bytes()) {
             return;
@@ -1931,9 +1925,73 @@ fn first_difference_line(a: &str, b: &str) -> Option<usize> {
     Some(n + 1)
 }
 
+/// The store's `wkeys` ([`Session::load_wkeys`]): one file per line, its
+/// name then its keys, separated by NUL. (Its encoding is
+/// [`crate::host::RECORDS_VERSION`]'s.)
+fn wkeys_bytes(sets: &[(String, Vec<String>)]) -> String {
+    let mut out = String::new();
+    for (n, ks) in sets {
+        out.push_str(n);
+        for k in ks {
+            out.push('\0');
+            out.push_str(k);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn wkeys_of(b: &[u8]) -> Vec<(String, Vec<String>)> {
+    String::from_utf8_lossy(b)
+        .lines()
+        .filter_map(|l| {
+            let mut xs = l.split('\0').map(str::to_owned);
+            Some((xs.next()?, xs.collect()))
+        })
+        .collect()
+}
+
+/// The store's `wnames` ([`Session::written_init`]): a name a line.
+/// (Its encoding is [`crate::host::RECORDS_VERSION`]'s.)
+fn wnames_bytes(names: &[String]) -> String {
+    let mut out = String::new();
+    for n in names {
+        out.push_str(n);
+        out.push('\n');
+    }
+    out
+}
+
+fn wnames_of(b: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(b)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The document's records' encodings as [`crate::host::RECORDS_VERSION`]
+    /// 1 has them: a change to them fails here, and is made with that
+    /// version bumped (and these bytes with it), so that a record of the
+    /// old encoding is not read as the new.
+    #[test]
+    fn records_encodings_are_locked() {
+        assert_eq!(crate::host::RECORDS_VERSION, 1);
+        let sets = vec![
+            ("doc.aux".to_owned(), vec!["r@a".to_owned(), "b".to_owned()]),
+            ("doc.toc".to_owned(), Vec::new()),
+        ];
+        let w = wkeys_bytes(&sets);
+        assert_eq!(w, "doc.aux\0r@a\0b\ndoc.toc\n");
+        assert_eq!(wkeys_of(w.as_bytes()), sets);
+        let names = vec!["doc.aux".to_owned(), "sub/c.aux".to_owned()];
+        let n = wnames_bytes(&names);
+        assert_eq!(n, "doc.aux\nsub/c.aux\n");
+        assert_eq!(wnames_of(n.as_bytes()), names);
+    }
 
     #[test]
     fn edit_lines() {

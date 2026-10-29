@@ -516,6 +516,81 @@ mod tests {
         }
     }
 
+    /// A store in memory.
+    #[derive(Default)]
+    struct Kept(Mutex<HashMap<String, Vec<u8>>>);
+
+    impl crate::host::Store for Kept {
+        fn get(&self, key: crate::host::Key<'_>) -> Option<Vec<u8>> {
+            lock(&self.0).get(&format!("{key:?}")).cloned()
+        }
+        fn put(&self, key: crate::host::Key<'_>, bytes: &[u8]) {
+            lock(&self.0).insert(format!("{key:?}"), bytes.to_vec());
+        }
+        fn format(&self, _name: &str) -> Option<([u8; 32], Vec<u8>)> {
+            None
+        }
+        fn put_format(&self, _name: &str, _key: &[u8; 32], _bytes: &[u8]) {}
+    }
+
+    /// A record is read only under the stamp it was stored with (the
+    /// engine's identity and the records' encodings): one another engine
+    /// stored, newer or older, or one stored before records were stamped,
+    /// is not read, and the session stores its own over it.
+    #[test]
+    fn records_of_another_engine_are_made_again() {
+        use crate::host::{Key, Records, Store};
+        let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\immediate\\openout1=doc.aux \\immediate\\write1{x}\\immediate\\closeout1 \\shipout\\hbox{}\\end\n";
+        let raw = Arc::new(Kept::default());
+        let build = |stamp: u64| {
+            let mut s = Session::new(
+                job(),
+                Arc::from(text),
+                Arc::new(Nothing),
+                Some(raw.clone() as Arc<dyn Store>),
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            );
+            s.stamp_records(stamp);
+            let mut d = Document::new(s, "doc.tex");
+            let ev = d.step();
+            assert!(ev.iter().any(|e| e["event"] == "build"), "{ev:?}");
+        };
+        build(1);
+        let stored = raw
+            .get(Key::Doc("wnames"))
+            .expect("the written names stored");
+        assert_eq!(
+            (&stored[..8], &stored[8..]),
+            (&1u64.to_le_bytes()[..], &b"doc.aux\n"[..])
+        );
+        let one = Records::stamped(raw.clone(), 1);
+        let two = Records::stamped(raw.clone(), 2);
+        assert_eq!(
+            one.get(Key::Doc("wnames")).as_deref(),
+            Some(&b"doc.aux\n"[..])
+        );
+        assert_eq!(
+            two.get(Key::Doc("wnames")),
+            None,
+            "another engine's record is not read"
+        );
+        build(2);
+        let stored = raw.get(Key::Doc("wnames")).expect("stored again");
+        assert_eq!(
+            (&stored[..8], &stored[8..]),
+            (&2u64.to_le_bytes()[..], &b"doc.aux\n"[..])
+        );
+        assert_eq!(
+            one.get(Key::Doc("wnames")),
+            None,
+            "and the older engine's no more"
+        );
+        // (a record from before the stamps: not read either)
+        raw.put(Key::Doc("wkeys"), b"doc.aux\0k\n");
+        assert_eq!(two.get(Key::Doc("wkeys")), None);
+    }
+
     fn pages(n: usize) -> String {
         let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 ".to_owned();
         for _ in 0..n {

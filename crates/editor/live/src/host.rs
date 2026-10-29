@@ -157,6 +157,77 @@ pub trait Store: Send + Sync {
     fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]);
 }
 
+/// The version of the encodings this crate gives the document's records
+/// (`wkeys`, `wnames`: [`crate::session`]'s); the engine's own records
+/// (`pkgrec`, `noderec`) are its, under [`phitex_tex::engine_id`]. Bumped
+/// with any change to those encodings (`records_encodings_are_locked`
+/// fails until it is).
+pub const RECORDS_VERSION: u64 = 1;
+
+/// The stamp every record is stored with: the engine's identity and
+/// [`RECORDS_VERSION`]. A record under another stamp (another engine,
+/// newer or older, or another encoding) is not read.
+#[must_use]
+pub fn records_stamp() -> u64 {
+    phitex_tex::engine_id() ^ RECORDS_VERSION.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
+
+/// The host's [`Store`] as the session reads and writes it: each record
+/// ([`Key`]) stored behind its stamp ([`records_stamp`], 8 bytes, little
+/// endian), and one under another stamp, or none, read as not there (the
+/// session makes it again, and stores it over the other). The only way
+/// the session reaches the store, so that no record goes unstamped; a
+/// format is the store's own, under the key the engine gave it.
+#[derive(Clone)]
+pub struct Records {
+    store: Arc<dyn Store>,
+    stamp: u64,
+}
+
+impl Records {
+    #[must_use]
+    pub fn new(store: Arc<dyn Store>) -> Records {
+        Records::stamped(store, records_stamp())
+    }
+
+    /// Records under stamp `stamp` (another engine's, in tests).
+    #[must_use]
+    pub fn stamped(store: Arc<dyn Store>, stamp: u64) -> Records {
+        Records { store, stamp }
+    }
+
+    /// The same store under stamp `stamp`.
+    #[must_use]
+    pub fn restamped(&self, stamp: u64) -> Records {
+        Records::stamped(self.store.clone(), stamp)
+    }
+
+    /// Record `key`, when it was stored under this stamp.
+    #[must_use]
+    pub fn get(&self, key: Key<'_>) -> Option<Vec<u8>> {
+        let b = self.store.get(key)?;
+        let (s, rest) = b.split_first_chunk::<8>()?;
+        (u64::from_le_bytes(*s) == self.stamp).then(|| rest.to_vec())
+    }
+
+    /// Record `key` stored as `bytes`, under this stamp.
+    pub fn put(&self, key: Key<'_>, bytes: &[u8]) {
+        let mut b = Vec::with_capacity(8 + bytes.len());
+        b.extend_from_slice(&self.stamp.to_le_bytes());
+        b.extend_from_slice(bytes);
+        self.store.put(key, &b);
+    }
+
+    #[must_use]
+    pub fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)> {
+        self.store.format(name)
+    }
+
+    pub fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]) {
+        self.store.put_format(name, key, bytes);
+    }
+}
+
 /// Where the session's outputs go (the CLI's output directory), by name
 /// in it. Each answers where the file is (a path, as the host names it).
 pub trait Sink: Send + Sync {
