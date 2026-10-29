@@ -109,9 +109,6 @@ TREES = [
     # compiled mappings)
     "dvipdfmx", "fonts/cmap", "fonts/sfd", "fonts/misc/xetex/fontmapping",
 ]
-# (not read by name: documents, images; .txt is: XeTeX's format reads
-# tex/generic/unicode-data/LineBreak.txt and its kin by name)
-SKIP = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".eps", ".ps", ".md", ".html", ".log", ".zip", ".dvi"}
 OPEN = ("fonts/opentype/", "fonts/truetype/")
 XETEX = ("tex/xelatex/", "tex/xetex/")
 LUATEX = ("tex/lualatex/", "tex/luatex/")
@@ -156,8 +153,11 @@ def wanted(path: str) -> bool:
         return path.endswith((".bst", ".csf", ".bib"))
     if path.startswith("makeindex/"):
         return path.endswith(".ist")
-    name = path.rsplit("/", 1)[1]
-    return "." not in name or Path(name).suffix.lower() not in SKIP
+    # (under tex/ every file is an input: a package reads it by name, an
+    # image as well as a macro file: mwe's example-image.png/.jpg/.pdf, a
+    # logo, LineBreak.txt; a package's documentation is under doc/, which
+    # is not in TREES)
+    return True
 
 
 def packages(db: str) -> tuple[list[dict], dict[str, dict]]:
