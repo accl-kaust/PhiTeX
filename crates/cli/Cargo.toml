@@ -25,6 +25,7 @@ phitex-kpse = { path = "../tools/kpse" }
 phitex-makeindex = { path = "../tools/makeindex" }
 phitex-tex = { path = "../engines/tex" }
 phitex-pdf = { path = "../output/pdf" }
+phitex-render = { path = "../output/render" }
 phitex-otf = { path = "../fonts/otf" }
 phitex-codecs = { path = "../codecs" }
 phitex-diff = { path = "../editor/diff" }

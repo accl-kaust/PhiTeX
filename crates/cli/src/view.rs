@@ -82,6 +82,8 @@ struct Shared {
     /// Told how many browsers are connected when that changes.
     on_clients: Mutex<Option<Box<dyn Fn(usize) + Send>>>,
     viewer: Arc<Viewer>,
+    /// The pages drawn as strips (`frame/`, `strips/`).
+    strips: Mutex<phitex_render::Renderer>,
 }
 
 /// The live viewer of a watch.
@@ -172,6 +174,7 @@ impl View {
             clients,
             on_clients: Mutex::new(None),
             viewer,
+            strips: Mutex::new(phitex_render::Renderer::new()),
         });
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
         let s = shared.clone();
@@ -274,6 +277,19 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
                 None => ws::respond(&mut w, "404 Not Found", "text/plain", b"no PDF yet\n"),
             };
         }
+        // (a page as strips: `frame/K/S`, page K from 0 at S thousandths of
+        // a pixel a point; `strips/KEY,KEY,...`, the strips' pixels)
+        f if f.starts_with("frame/") => {
+            let body = frame_json(s, &f[6..]);
+            let _ = match body {
+                Some(b) => ws::respond(&mut w, "200 OK", "application/json", b.as_bytes()),
+                None => ws::respond(&mut w, "404 Not Found", "text/plain", b"no such page\n"),
+            };
+        }
+        f if f.starts_with("strips/") => {
+            let body = strips_bytes(s, &f[7..]);
+            let _ = ws::respond(&mut w, "200 OK", "application/octet-stream", &body);
+        }
         "ws" if req.is_upgrade() => {
             if let Ok(sock) = ws::upgrade(r.into_inner(), &req) {
                 socket(s, sock);
@@ -289,6 +305,73 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
             let _ = ws::respond(&mut w, "404 Not Found", "text/plain", b"not found\n");
         }
     }
+}
+
+/// `frame/K/S`: page K of the build's PDF at S/1000 pixels a point, as
+/// strips (`phitex_render`): its size, its bands (each `[key, top,
+/// height]`, the key in hex), its text and links (as MuPDF's in
+/// `viewer/src/mupdf.ts`), and what drawing it took.
+fn frame_json(s: &Shared, rest: &str) -> Option<String> {
+    use phitex_render::Target;
+    let (k, sc) = rest.split_once('/')?;
+    let k: usize = k.parse().ok()?;
+    let scale = sc.parse::<f32>().ok()? / 1000.0;
+    if !(0.05..=16.0).contains(&scale) {
+        return None;
+    }
+    let pdf = s.viewer.pdf()?;
+    let t = std::time::Instant::now();
+    let f = lock(&s.strips).frame(&pdf, k, scale)?;
+    let us = t.elapsed().as_micros();
+    let bands: Vec<Value> = f
+        .bands
+        .iter()
+        .map(|b| serde_json::json!([format!("{:016x}", b.key), b.y, b.h]))
+        .collect();
+    let text: Vec<Value> = f
+        .text
+        .iter()
+        .map(|l| serde_json::json!({"x": l.x, "y": l.y, "w": l.w, "size": l.size, "text": l.text, "xs": l.xs, "rs": l.rs}))
+        .collect();
+    let links: Vec<Value> = f
+        .links
+        .iter()
+        .map(|l| {
+            let [a, b, c, d] = l.rect;
+            match &l.target {
+                Target::Uri(u) => serde_json::json!([a, b, c, d, u]),
+                Target::Page(p, y) => serde_json::json!([a, b, c, d, p, y]),
+            }
+        })
+        .collect();
+    Some(
+        serde_json::json!({
+            "pw": f.pw, "ph": f.ph, "w": f.w, "h": f.h,
+            "bands": bands, "text": text, "links": links,
+            "drawn": f.drawn, "kept": f.kept,
+            "us": {"open": f.open_us, "probe": f.probe_us, "draw": f.draw_us, "all": us},
+        })
+        .to_string(),
+    )
+}
+
+/// `strips/KEY,KEY,...`: each strip's width and height (u32,
+/// little-endian) and its RGBA pixels, in the order asked; one unknown
+/// (dropped since its frame) is 0 by 0.
+fn strips_bytes(s: &Shared, rest: &str) -> Vec<u8> {
+    let r = lock(&s.strips);
+    let mut out = Vec::new();
+    for key in rest.split(',').filter(|k| !k.is_empty()) {
+        match u64::from_str_radix(key, 16).ok().and_then(|k| r.strip(k)) {
+            Some(st) => {
+                out.extend_from_slice(&st.w.to_le_bytes());
+                out.extend_from_slice(&st.h.to_le_bytes());
+                out.extend_from_slice(&st.rgba);
+            }
+            None => out.extend_from_slice(&[0; 8]),
+        }
+    }
+    out
 }
 
 /// A WebSocket's requests, answered in order until it closes. Its reads

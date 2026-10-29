@@ -4340,19 +4340,17 @@ var Pages = class {
   }
   async request(op) {
     const o = op;
+    if (o.op === "png" && STRIPS) {
+      const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint()).catch(() => null);
+      if (!p) return { ok: false, json: { error: "no such page" } };
+      this.painted();
+      return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links };
+    }
     if (o.op === "png") {
       const d = await this.open().catch(() => null);
       const drawn = d?.draw(o.page ?? 0, panel.pixelsPerPoint());
       if (!drawn) return { ok: false, json: { error: "no such page" } };
-      const c = this.change;
-      if (c) {
-        this.change = null;
-        requestAnimationFrame(() => {
-          const ms = c.since + performance.now() - c.at;
-          panel.painted(ms);
-          void this.sock.request({ op: "painted", ms });
-        });
-      }
+      this.painted();
       return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h], links: drawn.links };
     }
     if (o.op === "outline") {
@@ -4360,6 +4358,20 @@ var Pages = class {
       return { ok: true, json: { items: d?.outline() ?? [] } };
     }
     return this.sock.request(op);
+  }
+  /**
+   * The first page drawn after a change: on the screen at the next frame;
+   * the ⚡ chip and the watch's status line say how long from the save.
+   */
+  painted() {
+    const c = this.change;
+    if (!c) return;
+    this.change = null;
+    requestAnimationFrame(() => {
+      const ms = c.since + performance.now() - c.at;
+      panel.painted(ms);
+      void this.sock.request({ op: "painted", ms });
+    });
   }
   /** Where `q` is in the build's PDF (MuPDF's text, every page). */
   async find(q) {
@@ -4370,6 +4382,92 @@ var Pages = class {
     this.sock.onEvent(cb);
   }
 };
+var STRIPS = !new URLSearchParams(location.search).has("mupdf");
+var Strips = class {
+  /** The bitmaps kept, by key (the oldest dropped past `max`). */
+  kept = /* @__PURE__ */ new Map();
+  max = 4e3;
+  /** The last frame's numbers, shown in the corner. */
+  chip = document.createElement("div");
+  constructor() {
+    this.chip.style.cssText = "position:fixed;right:8px;bottom:8px;z-index:9;font:11px/1.3 ui-monospace,monospace;background:rgba(20,24,32,.82);color:#e8eef8;padding:4px 7px;border-radius:5px;pointer-events:none";
+    this.chip.textContent = "strips";
+    document.body.append(this.chip);
+  }
+  /** Page `k` at `scale` pixels a point: its element (canvas and text), size and links. */
+  async page(k, scale) {
+    const t0 = performance.now();
+    const r = await fetch(new URL(`frame/${k}/${Math.round(scale * 1e3)}`, location.href), { cache: "no-store" });
+    if (!r.ok) return null;
+    const f = await r.json();
+    const t1 = performance.now();
+    const want = [...new Set(f.bands.map((b) => b[0]).filter((key) => !this.kept.has(key)))];
+    if (want.length) await this.fetch(want);
+    const t2 = performance.now();
+    const c = document.createElement("canvas");
+    c.width = f.pw;
+    c.height = f.ph;
+    const g = c.getContext("2d");
+    g.fillStyle = "#fff";
+    g.fillRect(0, 0, f.pw, f.ph);
+    for (const [key, y] of f.bands) {
+      const b = this.kept.get(key);
+      if (b) g.drawImage(b, 0, y);
+    }
+    const t3 = performance.now();
+    this.chip.textContent = `p${k + 1}: ${f.drawn} drawn, ${f.kept} kept \xB7 watch ${(f.us.all / 1e3).toFixed(1)} ms (probe ${(f.us.probe / 1e3).toFixed(1)}, draw ${(f.us.draw / 1e3).toFixed(1)}) \xB7 fetch ${(t1 - t0).toFixed(1)}+${(t2 - t1).toFixed(1)} \xB7 compose ${(t3 - t2).toFixed(1)} ms`;
+    const el = document.createElement("div");
+    el.className = "phx-page";
+    el.append(c, textLayer(f.text, f.w, f.h));
+    return { el, w: f.w, h: f.h, links: f.links };
+  }
+  /** The strips of `keys`, made bitmaps and kept. */
+  async fetch(keys) {
+    const r = await fetch(new URL(`strips/${keys.join(",")}`, location.href), { cache: "no-store" });
+    if (!r.ok) return;
+    const buf = await r.arrayBuffer();
+    const dv = new DataView(buf);
+    let at = 0;
+    const made = [];
+    for (const key of keys) {
+      if (at + 8 > buf.byteLength) break;
+      const w = dv.getUint32(at, true), h = dv.getUint32(at + 4, true);
+      at += 8;
+      if (w && h) {
+        const px = new Uint8ClampedArray(buf, at, w * h * 4);
+        made.push(
+          createImageBitmap(new ImageData(px, w, h)).then((b) => {
+            this.kept.set(key, b);
+          })
+        );
+      }
+      at += w * h * 4;
+    }
+    await Promise.all(made);
+    for (const k of this.kept.keys()) {
+      if (this.kept.size <= this.max) break;
+      this.kept.get(k)?.close();
+      this.kept.delete(k);
+    }
+  }
+};
+var SVG2 = "http://www.w3.org/2000/svg";
+function textLayer(lines, w, h) {
+  const svg = document.createElementNS(SVG2, "svg");
+  svg.setAttribute("class", "phx-text");
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  for (const l of lines) {
+    const t = document.createElementNS(SVG2, "text");
+    t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
+    t.setAttribute("y", String(l.y));
+    t.setAttribute("font-size", String(l.size));
+    t.textContent = l.text;
+    svg.append(t);
+  }
+  return svg;
+}
+var strips = new Strips();
 var sock = new Socket();
 var pages = new Pages(sock);
 var source = (file, line, col = 1) => void sock.request({ op: "source", file, line, col });
