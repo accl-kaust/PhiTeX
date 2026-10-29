@@ -751,6 +751,23 @@ impl Session {
                 let progress = Arc::new(phitex_tex::Progress::new(workers));
                 self.host.progress(&progress);
                 self.status.set_live(Some(live(progress.clone())));
+                let xetex = if xe {
+                    self.host.xetex().map(|x| phitex_tex::XeTeX {
+                        pdf: self.xdv_pdf(),
+                        ..x
+                    })
+                } else {
+                    None
+                };
+                phitex_tex::timeline::lap("session: XeTeX's fonts and PDF files");
+                let finder = self.finder();
+                let prelude_finder = Some(self.format_finder());
+                phitex_tex::timeline::lap("session: the finders");
+                let (content_key, tool_finder, bibtex) =
+                    (self.host.content_key(), self.host.tool_finder(), self.host.bibtex());
+                phitex_tex::timeline::lap("session: the content key, tools, bibtex");
+                let shell_hook = self.host.shell_hook(&self.job);
+                phitex_tex::timeline::lap("session: the shell hook");
                 let opts = Options {
                     name: self.printed_name(),
                     jobname: self.job.jobname.clone(),
@@ -762,19 +779,12 @@ impl Session {
                     // (XeTeX's native fonts: TeX Live's, by file and by
                     // name; its PDF written from the pages, as xelatex has
                     // xdvipdfmx make it, unless the XDV is the output)
-                    xetex: if xe {
-                        self.host.xetex().map(|x| phitex_tex::XeTeX {
-                            pdf: self.xdv_pdf(),
-                            ..x
-                        })
-                    } else {
-                        None
-                    },
-                    finder: self.finder(),
-                    prelude_finder: Some(self.format_finder()),
-                    content_key: self.host.content_key(),
-                    tool_finder: self.host.tool_finder(),
-                    bibtex: self.host.bibtex(),
+                    xetex,
+                    finder,
+                    prelude_finder,
+                    content_key,
+                    tool_finder,
+                    bibtex,
                     epoch: Some(self.job.pdf_date),
                     fixpoint: self.job.fixpoint,
                     prelude_jobname: self.job.engine.name.to_owned(),
@@ -786,7 +796,7 @@ impl Session {
                     shell_escape: if self.job.shell_escape { 1 } else { 2 },
                     // (the commands neither in process nor refused: run as
                     // processes, each in a scratch directory of its own)
-                    shell_hook: self.host.shell_hook(&self.job),
+                    shell_hook,
                     speculation: match self.job.spec.as_deref() {
                         Some("off") => phitex_tex::Speculation::Off,
                         Some("all") => phitex_tex::Speculation::All,

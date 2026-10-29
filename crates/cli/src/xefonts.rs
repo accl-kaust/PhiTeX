@@ -5,7 +5,10 @@
 //! fontconfig lists them, as XeTeX's `FcFontList` sees them (the faces
 //! `crates/fonts/otf/examples/otf-index.rs` indexes for the oracle).
 //! The index is made once per font list, kept in the cache by the list's
-//! hash; without `fc-list` there is none, and only `[file]` names load.
+//! hash and by the font directories' (their modification times, as
+//! fontconfig's cache checks them): while they are the same, a process
+//! reads the index without running `fc-list`. Without `fc-list` there is
+//! none, and only `[file]` names load.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -70,8 +73,11 @@ fn fc_list(conf: &Path) -> Option<String> {
     let fmt = format!(
         "%{{file}}\t%{{index}}\t%{{weight}}\t%{{width}}\t%{{slant}}\t%{{[]family{{%{{family}}{sep}}}}}\t%{{[]style{{%{{style}}{sep}}}}}\t%{{[]fullname{{%{{fullname}}{sep}}}}}\n"
     );
+    // (fontconfig takes `SOURCE_DATE_EPOCH` for its caches' time: set,
+    // it finds them stale and reads every font again, a second)
     let out = Command::new("fc-list")
         .env("FONTCONFIG_FILE", conf)
+        .env_remove("SOURCE_DATE_EPOCH")
         .arg("-f")
         .arg(fmt)
         .arg(":outline=true")
@@ -125,10 +131,20 @@ fn font_index(k: &mut phitex_kpse::Kpse) -> Option<FontIndex> {
     if std::fs::read_to_string(&conf).ok().as_deref() != Some(text.as_str()) {
         std::fs::write(&conf, &text).ok()?;
     }
+    // (the font directories as they are, with fontconfig's own: the
+    // index made of the list they gave, without listing them again)
+    let dirs = dirs_key(&[dist.join("fonts/opentype"), dist.join("fonts/truetype")]);
+    let by_dirs = cache.join(format!("xetex-fonts-dirs-{dirs:016x}.idx"));
+    if let Some(ix) = std::fs::read(&by_dirs).ok().and_then(|b| FontIndex::from_bytes(&b)) {
+        return Some(ix);
+    }
     let list = fc_list(&conf)?;
     let key = crate::tex::Fnv::new().add(list.as_bytes()).0;
     let path = cache.join(format!("xetex-fonts-{key:016x}.idx"));
-    if let Some(ix) = std::fs::read(&path).ok().and_then(|b| FontIndex::from_bytes(&b)) {
+    if let Some(b) = std::fs::read(&path).ok()
+        && let Some(ix) = FontIndex::from_bytes(&b)
+    {
+        put(&cache, &by_dirs, &b);
         return Some(ix);
     }
     let mut index = FontIndex::default();
@@ -149,9 +165,55 @@ fn font_index(k: &mut phitex_kpse::Kpse) -> Option<FontIndex> {
         e.fc_names = Some(fc_names(&e));
         index.entries.push(e);
     }
-    let tmp = cache.join(format!(".xetex-fonts-{key:016x}.idx.tmp"));
-    if std::fs::write(&tmp, index.to_bytes()).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    let b = index.to_bytes();
+    put(&cache, &path, &b);
+    put(&cache, &by_dirs, &b);
     Some(index)
+}
+
+/// `bytes` written at `path` in the cache, through a temporary file
+/// renamed.
+fn put(cache: &Path, path: &Path, bytes: &[u8]) {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = cache.join(format!(".{name}.tmp"));
+    if std::fs::write(&tmp, bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// A key of the font directories under `roots` as they are: each
+/// directory's path and modification time (a font added, removed or
+/// renamed changes its directory's, as fontconfig's cache sees it), and
+/// `fc-list`'s.
+fn dirs_key(roots: &[PathBuf]) -> u64 {
+    let mut h = crate::tex::Fnv::new();
+    let mut stack: Vec<PathBuf> = roots.to_vec();
+    let mut dirs = Vec::new();
+    while let Some(d) = stack.pop() {
+        let Ok(m) = std::fs::metadata(&d) else { continue };
+        let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+        dirs.push((d.clone(), t.map_or(0, |t| t.as_nanos())));
+        if let Ok(rd) = std::fs::read_dir(&d) {
+            for e in rd.flatten() {
+                if e.file_type().is_ok_and(|t| t.is_dir()) {
+                    stack.push(e.path());
+                }
+            }
+        }
+    }
+    dirs.sort();
+    for (d, t) in &dirs {
+        h = h.add(d.as_os_str().as_encoded_bytes()).add(&t.to_le_bytes());
+    }
+    let fc = std::env::var_os("PATH")
+        .and_then(|p| std::env::split_paths(&p).map(|d| d.join("fc-list")).find(|f| f.is_file()));
+    if let Some(f) = fc {
+        let t = std::fs::metadata(&f)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |t| t.as_nanos());
+        h = h.add(f.as_os_str().as_encoded_bytes()).add(&t.to_le_bytes());
+    }
+    h.0
 }
