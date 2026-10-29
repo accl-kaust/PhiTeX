@@ -663,12 +663,14 @@ pub struct Entry {
 }
 
 /// A PDF text string: UTF-16BE after its byte order mark, else
-/// PDFDocEncoding (Latin-1 where TeX's bookmarks use it).
+/// `PDFDocEncoding` (Latin-1 where TeX's bookmarks use it).
 fn text_string(b: &[u8]) -> String {
     if let Some(u) = b.strip_prefix(&[0xFE, 0xFF]) {
         let units: Vec<u16> = u
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
             .collect();
         String::from_utf16_lossy(&units)
     } else if let Some(u) = b.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
