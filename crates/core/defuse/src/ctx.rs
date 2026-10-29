@@ -891,6 +891,31 @@ impl<'a> Ctx<'a> {
         st
     }
 
+    /// What my last run stored with `park`, for a run of my edited text
+    /// (woken by [`Cause::Edited`]) that goes on from a point of the text
+    /// the edit left as it was: the client looks for that point, and takes
+    /// the state with [`Ctx::goes_on_from_edit`]. `None` for another
+    /// cause, a stale state ([`Ctx::resumed`]'s rule) or none stored.
+    pub fn parked_before_edit(&self) -> Option<ValueId> {
+        if !matches!(self.woken_by(), Some(Cause::Edited)) || self.me.state_stale.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        self.last.as_ref().and_then(|r| r.state)
+    }
+
+    /// Whether my last run stored a state with `park` (whatever woke me).
+    pub fn last_parked(&self) -> bool {
+        self.last.as_ref().is_some_and(|r| r.state.is_some())
+    }
+
+    /// The run goes on from the state [`Ctx::parked_before_edit`] gave:
+    /// its last run's reads are kept with this run's (those it reads
+    /// again replaced), as for [`Ctx::resumed`], so a change behind the
+    /// point it went on from still asks it again.
+    pub fn goes_on_from_edit(&self) {
+        self.product.resumed.set(true);
+    }
+
     /// Whether node `a` stands before node `b` on the line (both alive). A
     /// loop resumed after a contribution moved asks whether the mover lies
     /// behind its cursor (then it goes back to the checkpoint before it)

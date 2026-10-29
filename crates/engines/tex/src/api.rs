@@ -1594,8 +1594,8 @@ pub struct Stats {
     /// Attempts that resumed a stopped run at its blocked read, and that
     /// started over though one was kept (a read changed).
     pub resumed: u64,
-    /// Runs resumed at a mark of their last run, and runs cut off at one
-    /// (`phitex_defuse::Report::resumed_at_mark`, `cut_in_run`).
+    /// Runs of an edited node that went on from a checkpoint of their
+    /// last run (`crate::resume`); runs cut off at one.
     pub resumed_at_mark: u64,
     pub cut_in_run: u64,
     pub restarted: u64,
@@ -2824,6 +2824,7 @@ impl Graph {
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             origins: origins_on,
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            resumed_edits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             siblings_pulled: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
             scope_learned: Arc::default(),
@@ -3648,6 +3649,7 @@ impl Graph {
             stats.values_bytes = self.eng.values().payload_bytes();
             stats.add(&r);
             stats.units_folded = self.ops.units_folded.load(std::sync::atomic::Ordering::Relaxed);
+            stats.resumed_at_mark += self.ops.resumed_edits.swap(0, std::sync::atomic::Ordering::Relaxed);
             stats.siblings_pulled = self.ops.siblings_pulled.load(std::sync::atomic::Ordering::Relaxed);
             {
                 let v = self.eng.values();

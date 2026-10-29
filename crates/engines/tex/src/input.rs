@@ -423,6 +423,30 @@ pub(crate) enum Seg {
 }
 
 impl Seg {
+    /// Whether two segments are the same text, read alike: an edited
+    /// node's last text against its new one ([`crate::resume`]).
+    pub(crate) fn same(&self, o: &Seg) -> bool {
+        match (self, o) {
+            (Seg::Line(a), Seg::Line(b)) => {
+                a.buf == b.buf
+                    && (a.loc, a.state, a.endch, a.starts, a.ends, a.lineno, a.rescanned, a.chars)
+                        == (b.loc, b.state, b.endch, b.starts, b.ends, b.lineno, b.rescanned, b.chars)
+                    && a.origin == b.origin
+            }
+            (Seg::Toks(a), Seg::Toks(b)) => a == b,
+            (Seg::File(a), Seg::File(b)) => a.same(b),
+            _ => false,
+        }
+    }
+}
+
+/// A node's segments as a run's text holds them ([`Input::append_text`]
+/// on an empty text): a line segment continuing the one before joined to
+/// it.
+pub(crate) fn joined(segs: Vec<Seg>) -> Vec<Seg> {
+    let mut i = Input::new();
+    i.append_text(segs);
+    i.text
 }
 
 /// The input stack.

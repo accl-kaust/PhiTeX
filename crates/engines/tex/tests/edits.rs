@@ -917,3 +917,36 @@ fn a_line_inserted_at_the_top_reruns_no_weak_reader_of_the_line_number() {
         .count();
     assert_eq!(weak, 0, "no weak reader of the line runs again");
 }
+
+/// A long paragraph edited near its end: the first edit's run (from the
+/// start) takes checkpoints, the next ones go on from one; an edit at its
+/// start runs from the start (taking them again); each output is the
+/// cold build's of its text.
+#[test]
+fn an_edited_paragraph_goes_on_from_a_checkpoint() {
+    let fx = common::fixtures().join("plain");
+    let prelude = common::plain();
+    let opts = || common::options("./long.tex", "long", "", &fx);
+    // (each word followed by a command: commands, as a real paragraph's
+    // citations and acronyms make them)
+    let words: Vec<String> = (0..700).map(|k| format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17)).collect();
+    let par = |ws: &[String]| format!("\\hsize=300pt\n{}\n\n\\bye\n", ws.join(" "));
+    let mut ws = words.clone();
+    let mut b = common::build(opts(), Some(&prelude), &par(&ws));
+    for (k, at, resumes) in [(0, 650, false), (1, 680, true), (2, 3, false), (3, 690, true), (4, 695, true)] {
+        ws[at] = format!("edit{k}\\kern0pt");
+        let text = par(&ws);
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        assert!(
+            common::first_difference(&b.output().0, &cold.output().0).is_none(),
+            "edit {k} at word {at}: the output is not the cold build's"
+        );
+        assert_eq!(
+            b.stats.resumed_at_mark > 0,
+            resumes,
+            "edit {k} at word {at}: {} runs went on from a checkpoint",
+            b.stats.resumed_at_mark
+        );
+    }
+}

@@ -167,6 +167,9 @@ pub(crate) struct Ops {
     /// The profile units the page loop folded over all its runs
     /// (`crate::pages::Run::fold_unit`; `Stats::units_folded`).
     pub units_folded: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Runs of an edited node that went on from a checkpoint of their
+    /// last run (`crate::resume`; `Stats::resumed_at_mark`).
+    pub resumed_edits: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The siblings runs read on into over all runs (`Run::pull`;
     /// `Stats::siblings_pulled`).
     pub siblings_pulled: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -296,6 +299,18 @@ pub(crate) struct FileRest {
 }
 
 impl FileRest {
+    /// Whether two are the same file at the same place
+    /// ([`crate::input::Seg::same`]).
+    pub(crate) fn same(&self, o: &FileRest) -> bool {
+        (self.id, self.off, self.name, self.pos, self.line, self.sliceable, self.cut)
+            == (o.id, o.off, o.name, o.pos, o.line, o.sliceable, o.cut)
+            && match (&self.units, &o.units) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a[..] == b[..],
+                _ => false,
+            }
+    }
+
     pub(crate) fn new(v: &Values, id: ValueId, off: usize, name: ValueId) -> FileRest {
         let text = v.get(id);
         let (pos, line) = match &*text {
@@ -903,6 +918,15 @@ pub(crate) struct Run<'c, 'a> {
     pub fatal_logged: bool,
     /// The input as the command in progress began ([`Run::rewind`]).
     pub(crate) mark: crate::getnext::Mark,
+    /// (`profile`, `PHITEX_MACRO_PROF`) The macros the run expanded, by
+    /// name, and how often (printed for a run of 5 ms or more).
+    pub(crate) mprof: Option<crate::FxHashMap<Tok, u64>>,
+    /// An edited node's run: its checkpoints ([`crate::resume`]).
+    pub(crate) ck: Option<Box<crate::resume::Checkpoints>>,
+    /// The run goes on from no checkpoint (a check's run from the start).
+    pub(crate) no_resume: bool,
+    /// The command count the run went on from a checkpoint at.
+    pub(crate) resumed_at: Option<u64>,
     /// A halt raised on the token path ([`Run::raise`]), returned by the
     /// next `get_next` of the command in progress.
     pub(crate) halt: Option<Halt>,
@@ -1127,6 +1151,10 @@ impl<'c, 'a> Run<'c, 'a> {
             error_count: 0,
             fatal_logged: false,
             mark: crate::getnext::Mark::default(),
+            mprof: crate::exec::prof_flag!("PHITEX_MACRO_PROF").then(crate::FxHashMap::default),
+            ck: None,
+            no_resume: false,
+            resumed_at: None,
             halt: None,
             cand: 0,
             cand_marks: Vec::new(),
@@ -4546,6 +4574,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
+                if self.ck.is_some() {
+                    self.ck_maybe()?;
+                }
                 if self.claim_rest || self.closed_scope() {
                     // (a scope closed inside a level of the run's own:
                     // the rest runs outside it from a continuation)

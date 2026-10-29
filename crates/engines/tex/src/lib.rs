@@ -56,6 +56,7 @@ mod pkgrec;
 mod prims;
 mod print;
 mod prof;
+mod resume;
 mod run;
 mod scan;
 mod shell;

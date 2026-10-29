@@ -303,6 +303,9 @@ impl Run<'_, '_> {
             return self.overflow_raise("main memory size", crate::input::MAIN_MEMORY);
         }
         let name = self.cur.tok;
+        if let Some(p) = self.mprof.as_mut() {
+            *p.entry(name).or_default() += 1;
+        }
         let Some(m) = self.cur_macro() else {
             return;
         };

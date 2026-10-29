@@ -2426,6 +2426,317 @@ impl State {
 }
 
 
+/// A run's table at its base level, no group of its own open
+/// ([`State::base_of`]): what an edited node's run that goes on from a
+/// checkpoint takes up ([`crate::resume`]): what the run defined,
+/// stepped and read (a definition after a candidate notes the value the
+/// run read there).
+pub(crate) struct Base {
+    slots: Vec<BaseSlot>,
+    /// The candidates passed ([`State::mark_candidate`]): each one's clock
+    /// and the entries noted at it (`None`: not loaded).
+    cands: Vec<(u64, Vec<BaseCand>)>,
+    extra: Vec<(Loc, Option<ValueId>, Locality)>,
+    defined: Vec<Loc>,
+    font_slow: Vec<Loc>,
+    stamp: u64,
+    next_gid: u32,
+    pp_dirty: bool,
+}
+
+/// An entry noted at a candidate ([`Base`]): `None` not loaded.
+#[allow(clippy::option_option)]
+type BaseCand = (Loc, Option<Option<ValueId>>);
+
+struct BaseSlot {
+    loc: Loc,
+    cur: Option<ValueId>,
+    flags: u8,
+    map: Map,
+    mapped: u8,
+    base: Option<ValueId>,
+    lazy: Option<ValueId>,
+    sym: bool,
+    meta: Option<BaseMeta>,
+}
+
+#[allow(clippy::option_option)]
+struct BaseMeta {
+    eng: Option<Option<ValueId>>,
+    publ: Option<(Option<ValueId>, Locality)>,
+    ldef_stamp: u64,
+    ldef_local: bool,
+    ldef_gid: Option<u32>,
+}
+
+impl State {
+    /// The table at its base level ([`Base`]): each location the run
+    /// defined, stepped, holds a symbol or a value given in place of the
+    /// engine's at. None where a group of the run's own saved a value.
+    pub(crate) fn base_of(&self, v: &Values) -> Option<Base> {
+        if !self.save.is_empty() || !self.cont_locs.is_empty() || self.undo.is_some() {
+            return None;
+        }
+        let mut slots = Vec::new();
+        for &l in &self.touched {
+            let Some(s) = self.slot_ref(l) else { continue };
+            // (one the run only read stays as read: what it holds at a
+            // candidate is the value there, `State::at_candidates`)
+            if s.meta == 0 && s.mapped == MAP_NONE && !s.sym && s.lazy.is_none() && s.e.flags & (PRELOADED | LOADED) == 0 {
+                continue;
+            }
+            if s.save_gid != 0 {
+                return None;
+            }
+            let meta = usize::try_from(s.meta).ok().filter(|&m| m > 0).and_then(|m| self.metas.get(m - 1)).map(|m| BaseMeta {
+                eng: m.eng,
+                publ: m.publ.as_ref().map(|(e, l)| (self.encode(e, v), *l)),
+                ldef_stamp: m.ldef_stamp,
+                ldef_local: m.ldef_local,
+                ldef_gid: m.ldef_gid,
+            });
+            slots.push(BaseSlot {
+                loc: l,
+                cur: self.encode(&s.e, v),
+                flags: s.e.flags,
+                map: s.map,
+                mapped: s.mapped,
+                base: s.base,
+                lazy: s.lazy,
+                sym: s.sym,
+                meta,
+            });
+        }
+        let cands = self
+            .cands
+            .iter()
+            .map(|(st, xs)| {
+                (*st, xs.iter().map(|(l, e)| (*l, (e.flags & LOADED != 0).then(|| self.encode(e, v)))).collect())
+            })
+            .collect();
+        Some(Base {
+            slots,
+            cands,
+            extra: self.scope_extra.iter().map(|(l, e, at)| (*l, self.encode(e, v), *at)).collect(),
+            defined: self.defined.clone(),
+            font_slow: self.font_slow.iter().copied().collect(),
+            stamp: self.stamp,
+            next_gid: self.next_gid,
+            pp_dirty: self.pp_dirty,
+        })
+    }
+
+    /// Takes up `b` ([`State::base_of`]) in a table with no definition
+    /// of its own yet.
+    pub(crate) fn with_base(&mut self, v: &Values, b: Base) {
+        let ent = |x: Option<ValueId>, flags: u8| {
+            let mut e = Entry::raw_seen(v, x);
+            e.flags = (flags & (LOADED | PRELOADED)) | (e.flags & ALIAS) | if x.is_some() { HAS_ID } else { 0 };
+            e
+        };
+        for s in b.slots {
+            self.changing(s.loc);
+            let meta = s.meta.map(|m| {
+                self.metas.push(Meta {
+                    loc: s.loc,
+                    eng: m.eng,
+                    publ: m.publ.map(|(x, l)| (ent(x, LOADED), l)),
+                    ldef_stamp: m.ldef_stamp,
+                    ldef_local: m.ldef_local,
+                    ldef_gid: m.ldef_gid,
+                });
+                u32::try_from(self.metas.len()).unwrap_or(0)
+            });
+            let e = if s.cur.is_none() && s.flags & LOADED == 0 { UNLOADED } else { ent(s.cur, s.flags) };
+            let slot = self.slot(s.loc);
+            slot.e = e;
+            slot.map = s.map;
+            slot.mapped = s.mapped;
+            slot.base = s.base;
+            slot.lazy = s.lazy;
+            slot.sym = s.sym;
+            slot.meta = meta.unwrap_or(0);
+        }
+        for (l, x, at) in b.extra {
+            let e = ent(x, LOADED);
+            self.scope_extra.push((l, e, at));
+        }
+        for (st, xs) in b.cands {
+            let xs = xs.into_iter().map(|(l, x)| (l, x.map_or(UNLOADED, |x| ent(x, LOADED)))).collect();
+            self.cands.push((st, xs));
+        }
+        self.defined = b.defined;
+        self.font_slow.extend(b.font_slow);
+        self.stamp = b.stamp;
+        self.next_gid = b.next_gid;
+        self.pp_dirty = b.pp_dirty;
+        self.muts += 1;
+    }
+}
+
+impl Base {
+    /// As a value, each location as its field (`field`).
+    pub(crate) fn to_value(&self, v: &Values, field: &mut dyn FnMut(Loc) -> Field) -> ValueId {
+        let opt = |x: Option<ValueId>| v.list(x.into_iter().collect());
+        let at = |l: Locality| {
+            v.int(match l {
+                Locality::Local => 0,
+                Locality::Global => 1,
+                Locality::Scope => 2,
+                Locality::ScopeAt(k) => 3 + i64::from(k),
+            })
+        };
+        let u = |x: u64| v.int(i64::from_ne_bytes(x.to_ne_bytes()));
+        let slots = self
+            .slots
+            .iter()
+            .map(|s| {
+                let meta = s.meta.as_ref().map_or_else(
+                    || v.list(Vec::new()),
+                    |m| {
+                        v.list(vec![
+                            match m.eng {
+                                None => v.list(Vec::new()),
+                                Some(x) => v.list(vec![opt(x)]),
+                            },
+                            match m.publ {
+                                None => v.list(Vec::new()),
+                                Some((x, l)) => v.list(vec![opt(x), at(l)]),
+                            },
+                            u(m.ldef_stamp),
+                            v.int(i64::from(m.ldef_local)),
+                            v.int(m.ldef_gid.map_or(-1, i64::from)),
+                        ])
+                    },
+                );
+                v.list(vec![
+                    field(s.loc).0,
+                    opt(s.cur),
+                    v.int(i64::from(s.flags)),
+                    v.int(i64::from(s.map.keep)),
+                    v.int(i64::from(s.map.add)),
+                    v.int(i64::from(s.mapped)),
+                    opt(s.base),
+                    opt(s.lazy),
+                    v.int(i64::from(s.sym)),
+                    meta,
+                ])
+            })
+            .collect();
+        let extra = self.extra.iter().map(|&(l, x, a)| v.list(vec![field(l).0, opt(x), at(a)])).collect();
+        let cands = self
+            .cands
+            .iter()
+            .map(|(st, xs)| {
+                let xs = xs
+                    .iter()
+                    .map(|&(l, x)| match x {
+                        None => v.list(vec![field(l).0]),
+                        Some(x) => v.list(vec![field(l).0, opt(x)]),
+                    })
+                    .collect();
+                v.list(vec![u(*st), v.list(xs)])
+            })
+            .collect();
+        let defined = self.defined.iter().map(|&l| field(l).0).collect();
+        let font_slow = self.font_slow.iter().map(|&l| field(l).0).collect();
+        v.list(vec![
+            v.list(slots),
+            v.list(cands),
+            v.list(extra),
+            v.list(defined),
+            v.list(font_slow),
+            u(self.stamp),
+            v.int(i64::from(self.next_gid)),
+            v.int(i64::from(self.pp_dirty)),
+        ])
+    }
+
+    /// From [`Base::to_value`]'s value, each field's location (`loc`).
+    pub(crate) fn of_value(v: &Values, x: ValueId, loc: &mut dyn FnMut(Field) -> Loc) -> Option<Base> {
+        use crate::val::{int_of, list_of};
+        let xs = list_of(v, x);
+        let [slots, cands, extra, defined, font_slow, stamp, next_gid, pp_dirty] = xs[..] else {
+            return None;
+        };
+        let opt = |x: ValueId| list_of(v, x).first().copied();
+        let at = |x: ValueId| match int_of(v, x) {
+            0 => Locality::Local,
+            1 => Locality::Global,
+            2 => Locality::Scope,
+            k => Locality::ScopeAt(u8::try_from(k - 3).unwrap_or(0)),
+        };
+        let u = |x: ValueId| u64::from_ne_bytes(int_of(v, x).to_ne_bytes());
+        let mut out = Base {
+            slots: Vec::new(),
+            cands: Vec::new(),
+            extra: Vec::new(),
+            defined: Vec::new(),
+            font_slow: Vec::new(),
+            stamp: u(stamp),
+            next_gid: u32::try_from(int_of(v, next_gid)).unwrap_or(0),
+            pp_dirty: int_of(v, pp_dirty) != 0,
+        };
+        for s in list_of(v, slots) {
+            let ys = list_of(v, s);
+            let [f, cur, flags, keep, add, mapped, base, lazy, sym, meta] = ys[..] else {
+                return None;
+            };
+            let ms = list_of(v, meta);
+            let meta = match ms[..] {
+                [eng, publ, stamp, local, gid] => Some(BaseMeta {
+                    eng: list_of(v, eng).first().map(|&x| opt(x)),
+                    publ: match list_of(v, publ)[..] {
+                        [x, l] => Some((opt(x), at(l))),
+                        _ => None,
+                    },
+                    ldef_stamp: u(stamp),
+                    ldef_local: int_of(v, local) != 0,
+                    ldef_gid: u32::try_from(int_of(v, gid)).ok(),
+                }),
+                _ => None,
+            };
+            out.slots.push(BaseSlot {
+                loc: loc(Field(f)),
+                cur: opt(cur),
+                flags: u8::try_from(int_of(v, flags)).unwrap_or(0),
+                map: Map {
+                    keep: int_of(v, keep) != 0,
+                    add: i32::try_from(int_of(v, add)).unwrap_or(0),
+                },
+                mapped: u8::try_from(int_of(v, mapped)).unwrap_or(0),
+                base: opt(base),
+                lazy: opt(lazy),
+                sym: int_of(v, sym) != 0,
+                meta,
+            });
+        }
+        for c in list_of(v, cands) {
+            let [st, xs] = list_of(v, c)[..] else {
+                return None;
+            };
+            let mut ys = Vec::new();
+            for e in list_of(v, xs) {
+                match list_of(v, e)[..] {
+                    [f] => ys.push((loc(Field(f)), None)),
+                    [f, x] => ys.push((loc(Field(f)), Some(opt(x)))),
+                    _ => return None,
+                }
+            }
+            out.cands.push((u(st), ys));
+        }
+        for e in list_of(v, extra) {
+            if let [f, x, a] = list_of(v, e)[..] {
+                out.extra.push((loc(Field(f)), opt(x), at(a)));
+            }
+        }
+        out.defined = list_of(v, defined).into_iter().map(|f| loc(Field(f))).collect();
+        out.font_slow = list_of(v, font_slow).into_iter().map(|f| loc(Field(f))).collect();
+        Some(out)
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -116,6 +116,28 @@ pub(crate) fn run_node(
     }
     let t_body = t_body.elapsed();
     COMMANDS.fetch_add(r.cmds, std::sync::atomic::Ordering::Relaxed);
+    // (`PHITEX_MACRO_PROF`: a run of 5 ms or more, the macros it
+    // expanded most)
+    if t_body.as_micros() >= 5000
+        && let Some(p) = r.mprof.take()
+    {
+        let mut xs: Vec<(u64, crate::val::Tok)> = p.into_iter().map(|(t, n)| (n, t)).collect();
+        xs.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
+        let top: Vec<String> = xs
+            .iter()
+            .take(40)
+            .map(|&(n, t)| format!("{}:{n}", t.as_cs().map_or("?", |c| c.name())))
+            .collect();
+        eprintln!(
+            "macro prof: node {} {} {t_body:?}, {} commands, {} expansions of {} macros: {}",
+            r.cx.node().raw(),
+            r.op_name(),
+            r.cmds,
+            xs.iter().map(|x| x.0).sum::<u64>(),
+            xs.len(),
+            top.join(" ")
+        );
+    }
     // (an edit's exec run of 2 ms or more: its input's size, its
     // commands, its passes and where its time went)
     if t_body.as_micros() >= 2000 && r.cx.op() == o.exec && crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -198,6 +220,59 @@ pub(crate) fn run_node(
                 return Err(s);
             }
             r.settle_lines();
+            // (`PHITEX_RESUME_CHECK=1`: a run that went on from a
+            // checkpoint run again from its start, the two products
+            // compared; the full run's stands)
+            if r.resumed_at.is_some() && crate::resume::check() {
+                let resumed = r.product_signature();
+                let at = r.resumed_at.unwrap_or(0);
+                let node = r.cx.node().raw();
+                let cx = r.cx;
+                r = Run::new(cx, o);
+                r.no_resume = true;
+                let mut res = body(&mut r);
+                if let Err(Halt::Recut(k)) = res {
+                    let cx = r.cx;
+                    r = Run::new(cx, o);
+                    r.no_resume = true;
+                    r.stop_at = Some(k);
+                    res = body(&mut r);
+                }
+                if matches!(res, Ok(()) | Err(Halt::Cut)) {
+                    res = r.page_fold();
+                }
+                match res {
+                    Ok(()) | Err(Halt::Cut) => {}
+                    Err(Halt::Stop(s)) => return Err(s),
+                    Err(h) => {
+                        let how = match h {
+                            Halt::Starve => "starve",
+                            Halt::Hole => "hole",
+                            _ => "fatal",
+                        };
+                        eprintln!("resume check: node {node} went on at command {at}: DIFFERENT, the whole run ended otherwise ({how})");
+                        return Ok(r.stall(how, ValueId::UNIT));
+                    }
+                }
+                if r.cut.is_none() && r.close_cont.is_none() {
+                    r.end_open();
+                }
+                if let Err(Halt::Stop(s)) = r.prepare_publication() {
+                    return Err(s);
+                }
+                r.settle_lines();
+                let whole = r.product_signature();
+                if resumed == whole {
+                    eprintln!("resume check: node {node} went on at command {at} of {}: same", r.cmds);
+                } else {
+                    eprintln!(
+                        "resume check: node {node} went on at command {at} of {}: DIFFERENT {}",
+                        r.cmds,
+                        crate::resume::first_difference(&resumed, &whole)
+                    );
+                }
+            }
+            r.ck_park();
             // (observe, `PHITEX_MARK_TRACE=1`: a finisher's or exec run's
             // outputs, to compare a run resumed at a mark with a full one)
             if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
@@ -429,6 +504,13 @@ impl Operation for Exec {
                     r.engine_diag(&format!("hint regime violated: {m}"));
                     crate::hints::count(r, 2);
                     r.hint_void = true;
+                }
+                // (an edited node's run: on from its last run's last
+                // checkpoint the edit left in place, `crate::resume`;
+                // checkpoints taken as it goes)
+                if !load {
+                    r.resume_edit()?;
+                    r.ck_begin();
                 }
             }
             // the whole slice runs here: a paragraph region to its end,
