@@ -646,7 +646,19 @@ impl Run<'_, '_> {
             Start::Scratch if let Some(r) = &rest => {
                 let Some((st, lc, p, gave)) = self.rest_begins(r, &mut ls)? else {
                     self.cx.parked_on(r.key.field(v, PAGE_OUT));
-                    self.cx.park(ls.encode(v));
+                    // (a rest that had folded its pages waits for its
+                    // first page's give-back again, after an edit before
+                    // it: what it made stands until that comes, its pages,
+                    // their finishers, its own rest's start and its state;
+                    // taken back, every finisher and rest after it went
+                    // and was made anew with new nodes once the give-back
+                    // came, the same as before (Grail, a word typed on
+                    // page 1: 55 rests and 55 finishers placed anew))
+                    if old.checkpoints.is_empty() && old.tail.is_none() {
+                        self.cx.park(ls.encode(v));
+                    } else {
+                        self.cx.unchanged();
+                    }
                     return Ok(ValueId::UNIT);
                 };
                 first = Some((p, gave));
