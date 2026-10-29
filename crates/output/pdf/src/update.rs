@@ -33,6 +33,24 @@ pub struct Layout {
     bytes: Arc<PdfBytes>,
     tail: End,
     exact: Arc<OnceLock<Result<Arc<Vec<u8>>, PdfError>>>,
+    /// A live layout's exact file, another layout ([`Layout::live`]):
+    /// how to make it, and it once made.
+    exact_of: Option<ExactOf>,
+}
+
+/// How a live layout's exact layout is made ([`Layout::live`]).
+pub type MakeExact = Arc<dyn Fn() -> Result<Layout, PdfError> + Send + Sync>;
+
+#[derive(Clone)]
+struct ExactOf {
+    make: MakeExact,
+    made: Arc<OnceLock<Result<Layout, PdfError>>>,
+}
+
+impl std::fmt::Debug for ExactOf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ExactOf")
+    }
 }
 
 /// Where an object is in a layout.
@@ -57,7 +75,7 @@ pub struct Linked {
     /// a stream, the stream object itself, whose number is past `places`).
     pub xref: Arc<[u8]>,
     /// Each object's place, by number (0 the free head; the cross-reference
-    /// stream's own not among them).
+    /// stream's own free, or not among them where it is the last).
     pub places: Vec<Place>,
     /// Whether the file has object streams (and a cross-reference
     /// stream).
@@ -138,6 +156,7 @@ impl Layout {
             bytes: Arc::new(bytes),
             tail: End::Tail(tail),
             exact: Arc::default(),
+            exact_of: None,
         }
     }
 
@@ -149,6 +168,35 @@ impl Layout {
             bytes: Arc::new(bytes),
             tail: End::Linked(Arc::new(end)),
             exact: Arc::default(),
+            exact_of: None,
+        }
+    }
+
+    /// A live layout: `self`'s objects are what a watch appends as
+    /// update sections, numbered as the file on disk has them (a page
+    /// changed since the exact file written again with new objects past
+    /// its `/Size`, the rest kept), not as the exact file of the same
+    /// document numbers them; `make` makes that exact file's layout,
+    /// once, when [`Layout::exact`] or [`Layout::exact_layout`] is
+    /// first asked.
+    #[must_use]
+    pub fn live(mut self, make: MakeExact) -> Layout {
+        self.exact_of = Some(ExactOf {
+            make,
+            made: Arc::default(),
+        });
+        self
+    }
+
+    /// The layout of the exact file: this one, or a live layout's
+    /// ([`Layout::live`]).
+    ///
+    /// # Errors
+    /// The live layout's maker's.
+    pub fn exact_layout(&self) -> Result<Layout, PdfError> {
+        match &self.exact_of {
+            None => Ok(self.clone()),
+            Some(x) => x.made.get_or_init(|| (x.make)()).clone(),
         }
     }
 
@@ -157,6 +205,9 @@ impl Layout {
     /// # Errors
     /// As [`Tail::link`].
     pub fn exact(&self) -> Result<Arc<Vec<u8>>, PdfError> {
+        if self.exact_of.is_some() {
+            return self.exact_layout()?.exact();
+        }
         self.exact
             .get_or_init(|| self.tail.link(&self.bytes).map(Arc::new))
             .clone()
@@ -165,7 +216,10 @@ impl Layout {
     /// The exact file if made already.
     #[must_use]
     pub fn exact_made(&self) -> Option<Arc<Vec<u8>>> {
-        self.exact.get().and_then(|r| r.as_ref().ok().cloned())
+        match &self.exact_of {
+            Some(x) => x.made.get()?.as_ref().ok()?.exact_made(),
+            None => self.exact.get().and_then(|r| r.as_ref().ok().cloned()),
+        }
     }
 
     /// A hash of the file's bytes, from its chunks' (each chunk's hashed
@@ -360,9 +414,11 @@ pub struct Updater {
 
 impl Updater {
     /// The state after `layout`'s exact file (`exact`, its bytes) is
-    /// written.
+    /// written (a live layout's: the file holds its exact layout).
     #[must_use]
     pub fn after_exact(layout: Layout, exact: &[u8]) -> Updater {
+        // (a live layout's exact file is its exact layout's, made once)
+        let layout = layout.exact_layout().unwrap_or(layout);
         let xref = startxref(exact).unwrap_or(0);
         let last = layout.last();
         let size = if layout.streams() { last + 2 } else { last + 1 };

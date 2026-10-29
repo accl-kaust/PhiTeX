@@ -16,7 +16,8 @@
 //!   (`PHITEX_UPDATE_PAIRS=<dir>`: `<k>.update.pdf`, the file after edit
 //!   `k`, and `<k>.exact.pdf`, the file after the idle write that
 //!   followed it; `scripts/accl/gate-update.py`), each read back the same
-//!   way; every update file the one before it with bytes appended.
+//!   way; every update file the one before it with bytes appended
+//!   (`PHITEX_UPDATE_LIVE=1`: XeTeX's live files, [`same_pages_live`]).
 
 #![allow(
     clippy::unreadable_literal,
@@ -327,6 +328,9 @@ struct Reader<'a> {
     /// The object streams decoded: their data, `/First` and the
     /// objects' numbers and offsets.
     streams: RefCell<HashMap<usize, Rc<(Vec<u8>, usize, Vec<(usize, usize)>)>>>,
+    /// A live file's reading ([`same_pages_live`]): a font is its kind
+    /// and name.
+    live: bool,
 }
 
 fn decoded(d: &BTreeMap<Vec<u8>, Obj>, data: &[u8]) -> Vec<u8> {
@@ -442,6 +446,7 @@ impl<'a> Reader<'a> {
             sections,
             digests: RefCell::default(),
             streams: RefCell::default(),
+            live: false,
         }
     }
 
@@ -544,7 +549,11 @@ impl<'a> Reader<'a> {
     }
 
     fn feed_dict(&self, d: &BTreeMap<Vec<u8>, Obj>, h: &mut std::hash::DefaultHasher) {
+        let font = d.get(&b"Type"[..]) == Some(&Obj::Name(b"Font".to_vec()));
         for (k, v) in d {
+            if self.live && font && !matches!(&k[..], b"Type" | b"Subtype" | b"BaseFont") {
+                continue;
+            }
             if matches!(&k[..], b"Parent" | b"P" | b"Length" | b"Filter" | b"DecodeParms") {
                 continue;
             }
@@ -624,6 +633,103 @@ fn same_document(upd: &[u8], exact: &[u8], what: &str) {
         let b = e.trailer.get(key).map(|x| e.digest(x));
         assert_eq!(a, b, "{what}: the trailer's /{key}");
     }
+    assert_eq!(u.trailer.get("ID"), e.trailer.get("ID"), "{what}: /ID");
+}
+
+/// Where `a` (of reader `u`) and `b` (of `e`) first differ as
+/// [`Reader::digest`] sees them: the keys and indices down to it, and the
+/// two values there.
+fn first_difference(u: &Reader, a: &Obj, e: &Reader, b: &Obj, depth: usize) -> String {
+    let get = |r: &Reader, x: &Obj| match x {
+        Obj::Ref(n) => r.object(*n),
+        o => o.clone(),
+    };
+    let (x, y) = (get(u, a), get(e, b));
+    if depth > 24 {
+        return String::from(" (deep)");
+    }
+    let skip = |k: &[u8]| matches!(k, b"Parent" | b"P" | b"Length" | b"Filter" | b"DecodeParms");
+    match (&x, &y) {
+        (Obj::Array(p), Obj::Array(q)) if p.len() == q.len() => {
+            for (i, (c, d)) in p.iter().zip(q).enumerate() {
+                if u.digest(c) != e.digest(d) {
+                    return format!("[{i}]{}", first_difference(u, c, e, d, depth + 1));
+                }
+            }
+            String::from(" (arrays the same)")
+        }
+        (Obj::Dict(p) | Obj::Stream(p, _), Obj::Dict(q) | Obj::Stream(q, _)) => {
+            for k in p.keys().chain(q.keys()) {
+                if skip(k) {
+                    continue;
+                }
+                match (p.get(k), q.get(k)) {
+                    (Some(c), Some(d)) if u.digest(c) == e.digest(d) => {}
+                    (Some(c), Some(d)) => {
+                        return format!(
+                            "/{}{}",
+                            String::from_utf8_lossy(k),
+                            first_difference(u, c, e, d, depth + 1)
+                        );
+                    }
+                    (c, d) => {
+                        return format!("/{}: {c:?} against {d:?}", String::from_utf8_lossy(k));
+                    }
+                }
+            }
+            match (&x, &y) {
+                (Obj::Stream(p, s), Obj::Stream(q, t)) => {
+                    let (s, t) = (decoded(p, s), decoded(q, t));
+                    let at = s.iter().zip(&t).take_while(|(a, b)| a == b).count();
+                    format!(
+                        " (stream data: {} bytes against {}, from byte {at}: {:?} against {:?})",
+                        s.len(),
+                        t.len(),
+                        String::from_utf8_lossy(&s[at..s.len().min(at + 60)]),
+                        String::from_utf8_lossy(&t[at..t.len().min(at + 60)])
+                    )
+                }
+                _ => String::from(" (dictionaries the same)"),
+            }
+        }
+        _ => format!(": {:?} against {:?}", short(&x), short(&y)),
+    }
+}
+
+/// `x` printed, cut.
+fn short(x: &Obj) -> String {
+    let s = format!("{x:?}");
+    s.chars().take(160).collect()
+}
+
+/// A live file (XeTeX's watch: a changed page written again after the
+/// exact file's pages, the end written again, [`phitex_pdf::Layout::live`])
+/// read as the exact file of the same document: the same pages (their
+/// content streams' bytes, then all of each page, a font by its kind and
+/// name: a live file's subsets keep glyphs an edit took out), the same
+/// `/Info` and `/ID`. (Its catalog may keep a destination an edit took
+/// out.)
+fn same_pages_live(upd: &[u8], exact: &[u8], what: &str) {
+    let (mut u, mut e) = (Reader::new(upd), Reader::new(exact));
+    (u.live, e.live) = (true, true);
+    let (up, ep) = (u.pages(), e.pages());
+    assert_eq!(up.len(), ep.len(), "{what}: the pages");
+    for (k, (a, b)) in up.iter().zip(&ep).enumerate() {
+        assert!(
+            u.contents(a) == e.contents(b),
+            "{what}: page {}'s content stream differs",
+            k + 1
+        );
+        assert!(
+            u.digest(a) == e.digest(b),
+            "{what}: page {} differs at {}",
+            k + 1,
+            first_difference(&u, a, &e, b, 0)
+        );
+    }
+    let a = u.trailer.get("Info").map(|x| u.digest(x));
+    let b = e.trailer.get("Info").map(|x| e.digest(x));
+    assert_eq!(a, b, "{what}: the trailer's /Info");
     assert_eq!(u.trailer.get("ID"), e.trailer.get("ID"), "{what}: /ID");
 }
 
@@ -974,7 +1080,11 @@ fn harness_pairs() {
                 r.sections
             );
         }
-        same_document(&upd, &exact, &format!("edit {k}"));
+        if std::env::var_os("PHITEX_UPDATE_LIVE").is_some() {
+            same_pages_live(&upd, &exact, &format!("edit {k}"));
+        } else {
+            same_document(&upd, &exact, &format!("edit {k}"));
+        }
         checked += 1;
     }
     eprintln!("harness_pairs: {checked} edits' files read back as their exact files");

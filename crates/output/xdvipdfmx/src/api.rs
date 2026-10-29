@@ -96,6 +96,9 @@ pub struct Session {
     /// The next page's number (0-based).
     page_no: i32,
     page_count: i32,
+    /// Whether the document is open (its first page's specials read,
+    /// `pdf_open_document` done).
+    opened: bool,
     init_paper_width: f64,
     init_paper_height: f64,
 }
@@ -126,6 +129,7 @@ impl Session {
             argv,
             page_no: 0,
             page_count: 0,
+            opened: false,
             init_paper_width: 0.0,
             init_paper_height: 0.0,
         })
@@ -155,6 +159,7 @@ impl Session {
             argv,
             page_no: 0,
             page_count: 0,
+            opened: false,
             init_paper_width: 0.0,
             init_paper_height: 0.0,
         })
@@ -311,6 +316,7 @@ impl Session {
             ury: d.session.paper_height,
         };
         d.pdf_doc_set_mediabox(0, &mediabox)?;
+        self.opened = true;
         Ok(())
     }
 
@@ -331,9 +337,111 @@ impl Session {
         self.page_from(Some(ops))
     }
 
+    /// [`crate::direct::PageState`] between pages: what the next page
+    /// takes from the pages before it.
+    ///
+    /// # Errors
+    /// None in practice.
+    pub fn page_state(&self) -> Result<crate::direct::PageState> {
+        self.dpx.page_state()
+    }
+
+    /// The values a page is given ([`crate::direct::PageState`]) set as
+    /// `st` has them: a page written again ([`Session::reship`]) given
+    /// them as the page first was, the last page's set back after it.
+    pub fn set_page_state(&mut self, st: &crate::direct::PageState) {
+        self.dpx.set_page_state(st);
+    }
+
+    /// [`Session::page_state`] as the page of `ops` (the next) finds it:
+    /// the document opened first if it is the first page.
+    ///
+    /// # Errors
+    /// The first page's: its specials', `pdf_open_document`'s.
+    pub fn state_before(&mut self, ops: &[Op]) -> Result<crate::direct::PageState> {
+        if !self.opened {
+            self.open(Some(ops))?;
+        }
+        self.dpx.page_state()
+    }
+
+    /// What a page written again does with `special`
+    /// ([`crate::specials::Again`]).
+    ///
+    /// # Errors
+    /// The specials' parsers'.
+    pub fn again(&mut self, special: &[u8]) -> Result<crate::specials::Again> {
+        self.dpx.spc_again(special)
+    }
+
+    /// The label the next object would take (after [`Session::finish`]:
+    /// the file's `/Size`).
+    #[must_use]
+    pub fn next_label(&self) -> u32 {
+        self.dpx.o.next_label()
+    }
+
+    /// Whether a page of `ops` can be written again ([`Session::reship`]).
+    ///
+    /// # Errors
+    /// The specials' parsers'.
+    pub fn can_reship(&mut self, ops: &[Op]) -> Result<bool> {
+        self.dpx.can_reship(ops)
+    }
+
+    /// Page `k` (0-based, one of the pages done) written again as `ops`,
+    /// after the last page, into a file whose objects are numbered below
+    /// `size` (its `/Size`): the page keeps its page object, its new
+    /// objects are numbered from `size` on and written directly, a
+    /// destination it defines replaces the old one, and its specials
+    /// whose effect the document has already (an outline entry, the
+    /// document's information, a named object) are not done again
+    /// ([`crate::specials::Again`]); the end ([`Session::finish`]) numbers
+    /// its objects as before, past the labels the pages written again
+    /// took. The page is the one first written when its specials on the
+    /// document are the same and it is given what it was given then
+    /// ([`crate::direct::PageState`], [`Session::set_page_state`]): the
+    /// caller's to check.
+    ///
+    /// # Errors
+    /// A fatal error of xdvipdfmx's, a special that can't be done again.
+    pub fn reship(&mut self, k: usize, ops: &[Op], size: u32) -> Result<PageOut> {
+        let k32 = i32::try_from(k).unwrap_or(i32::MAX);
+        if k32 >= self.page_count {
+            crate::fatal!("page {} written again, of {}", k + 1, self.page_count);
+        }
+        let (count, no) = (self.page_count, self.page_no);
+        let d = &mut *self.dpx;
+        let entries = d.doc.pdoc.pages.num_entries;
+        d.o.live_begin(size);
+        // (the page's annotations and beads as the end would have written
+        // them: dropped, the page makes them again)
+        if let Some(e) = d.doc.pdoc.pages.entries.get_mut(k) {
+            let (a, b) = (e.annots.take(), e.beads.take());
+            d.o.release_opt(a)?;
+            d.o.release_opt(b)?;
+        }
+        d.doc.pdoc.pages.num_entries = k;
+        d.dvi.buffered_page = -1;
+        d.doc.reship = true;
+        self.page_count = k32;
+        self.page_no = k32;
+        let r = self.page_at(Some(ops), true);
+        let d = &mut *self.dpx;
+        d.o.live_end();
+        d.doc.reship = false;
+        d.doc.pdoc.pages.num_entries = entries;
+        self.page_count = count;
+        self.page_no = no;
+        r
+    }
+
     fn page_from(&mut self, ops: Option<&[Op]>) -> Result<PageOut> {
-        let first = self.page_no == 0;
-        if first {
+        self.page_at(ops, false)
+    }
+
+    fn page_at(&mut self, ops: Option<&[Op]>, again: bool) -> Result<PageOut> {
+        if !self.opened && !again {
             self.open(ops)?;
         }
         let d = &mut *self.dpx;
@@ -636,6 +744,7 @@ impl Session {
             argv: self.argv.clone(),
             page_no: self.page_no,
             page_count: self.page_count,
+            opened: self.opened,
             init_paper_width: self.init_paper_width,
             init_paper_height: self.init_paper_height,
         }

@@ -282,6 +282,10 @@ pub struct State {
     /// `bgcolor` (C initializes it to gray 1; `pdf_open_document` sets it
     /// to white with `pdf_doc_set_bgcolor(NULL)`).
     pub bgcolor: PdfColor,
+    /// A page written again ([`crate::api::Session::reship`]): its
+    /// destinations replace the ones it defined before, and its specials
+    /// whose effect the file has already are not done again.
+    pub reship: bool,
 }
 
 impl Dpx {
@@ -893,6 +897,9 @@ impl Dpx {
         let tree = self.doc.pdoc.names[i]
             .data
             .get_or_insert_with(crate::pdfnames::pdf_new_name_tree);
+        if self.doc.reship {
+            return self.o.pdf_names_replace_object(tree, key, value);
+        }
         self.o.pdf_names_add_object(tree, key, value)
     }
 

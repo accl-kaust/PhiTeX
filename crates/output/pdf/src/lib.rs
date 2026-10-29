@@ -88,7 +88,7 @@ pub mod enc;
 mod finish;
 pub use finish::{Chunk, PdfBytes, Tail, finish};
 mod update;
-pub use update::{Layout, Linked, Place, Section, Updater};
+pub use update::{Layout, Linked, MakeExact, Place, Section, Updater};
 mod encodings;
 mod epdffont;
 mod font;

@@ -178,6 +178,21 @@ pub struct PdfOut {
     /// ([`PdfOut::flush`]): where each object is, for a link that
     /// updates the file in place.
     pub xref_written: Option<XrefWritten>,
+    /// Pages written again into a file that has its objects already
+    /// ([`PdfOut::live_begin`]): the labels they took, which the rest
+    /// skips.
+    live: Option<LiveLabels>,
+}
+
+/// The labels of pages written again ([`PdfOut::live_begin`]): from
+/// `from` (the file's `/Size`) up to `high`; the labels the session
+/// would number from where it stood (`resume`) skip them.
+#[derive(Clone, Copy, Debug)]
+struct LiveLabels {
+    from: u32,
+    high: u32,
+    resume: u32,
+    objstm: bool,
 }
 
 /// The file's objects as its cross-reference section gives them, and
@@ -229,6 +244,7 @@ impl PdfOut {
             files: Vec::new(),
             trailer_pos: 0,
             xref_written: None,
+            live: None,
         }
     }
 
@@ -469,6 +485,46 @@ impl PdfOut {
         }
     }
 
+    /// Exchanges the values of `a` and `b` (each keeps its label, count
+    /// and flags): an object referred to already given another value.
+    pub fn swap_data(&mut self, a: Obj, b: Obj) {
+        let da = core::mem::replace(&mut self.slot_mut(a).data, Data::Free);
+        let db = core::mem::replace(&mut self.slot_mut(b).data, da);
+        self.slot_mut(a).data = db;
+    }
+
+    /// The label the next object would take.
+    #[must_use]
+    pub fn next_label(&self) -> u32 {
+        self.next_label
+    }
+
+    /// Pages are written again into a file whose objects are numbered
+    /// below `size` (its `/Size`): until [`PdfOut::live_end`], new
+    /// objects are numbered from `size` on (after those of earlier pages
+    /// written again) and written directly, not into object streams.
+    pub fn live_begin(&mut self, size: u32) {
+        let l = self.live.get_or_insert(LiveLabels {
+            from: size,
+            high: size,
+            resume: self.next_label,
+            objstm: self.use_objstm,
+        });
+        let high = l.high;
+        self.next_label = high.max(self.next_label);
+        self.use_objstm = false;
+    }
+
+    /// The end of a page written again ([`PdfOut::live_begin`]): the
+    /// session numbers on from where it stood, past the labels taken.
+    pub fn live_end(&mut self) {
+        if let Some(l) = self.live.as_mut() {
+            l.high = self.next_label;
+            self.next_label = l.resume;
+            self.use_objstm = l.objstm;
+        }
+    }
+
     /// `pdf_transfer_label`.
     pub fn transfer_label(&mut self, dst: Obj, src: Obj) {
         let (label, generation) = (self.slot(src).label, self.slot(src).generation);
@@ -483,6 +539,13 @@ impl PdfOut {
 
     fn label_obj(&mut self, o: Obj) -> Result<()> {
         if self.slot(o).label == 0 {
+            // (past the labels pages written again took)
+            if let Some(l) = self.live
+                && self.next_label == l.from
+                && l.high > l.from
+            {
+                self.next_label = l.high;
+            }
             if self.next_label == PDF_NUM_INDIRECT_MAX {
                 crate::fatal!("Number of indirect object has reached its maximum value!");
             }

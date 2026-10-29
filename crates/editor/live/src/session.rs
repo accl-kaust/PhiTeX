@@ -1294,6 +1294,7 @@ impl Session {
             name: format!("{}.pdf", self.job.jobname),
             date: self.job.pdf_date,
             files: self.host.xdv_files(&dir)?,
+            live: self.sink.updates(),
         })
     }
 

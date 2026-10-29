@@ -141,6 +141,32 @@ impl PdfOut {
             }
         }
     }
+    /// [`Self::pdf_names_add_object`] for a page written again: a name
+    /// it defined before takes the new value.
+    pub fn pdf_names_replace_object(
+        &mut self,
+        names: &mut NameTree,
+        key: &[u8],
+        object: Obj,
+    ) -> Result<i32> {
+        if key.is_empty() {
+            return Ok(-1);
+        }
+        let Some(value) = names.ht_lookup_table_mut(key) else {
+            return self.pdf_names_add_object(names, key, object);
+        };
+        match value.object {
+            // (the old object takes the new value: what refers to it, by
+            // its label or by a reference, refers to the new)
+            Some(old) => {
+                self.swap_data(old, object);
+                self.release(object)?;
+            }
+            None => value.object = Some(object),
+        }
+        Ok(0)
+    }
+
     /// `pdf_names_reserve`.
     pub fn pdf_names_reserve(&mut self, names: &mut NameTree, key: &[u8]) -> Result<Option<Obj>> {
         if key.is_empty() {

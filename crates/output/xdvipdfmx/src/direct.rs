@@ -6,7 +6,10 @@
 //! interpreter's own, so the PDF is the one the page's XDV would give.
 
 use crate::dvi::{FontDef, ScanSpecials};
+use crate::pdfcolor::PdfColor;
+use crate::pdfdev::PdfCoord;
 use crate::prelude::*;
+use crate::specials::Again;
 
 /// One operation of a page, as the XDV opcode that would carry it.
 ///
@@ -183,5 +186,184 @@ impl Dpx {
             }
         }
         self.do_eop()
+    }
+}
+
+/// What a page's interpretation takes from the pages before it, beyond
+/// the objects ([`Dpx::page_state`]): the values a page written again
+/// ([`crate::api::Session::reship`]) is given as the page first found
+/// them ([`Dpx::set_page_state`]): the colour stack, the scales and
+/// transforms' fixed points, the paper, the background; and what it must
+/// find as the last page left it: an annotation or link open across the
+/// page break, the `pdfcolorstack`s, the text strings' conversion, the
+/// resources and contents added to every page, the extended graphics
+/// states open. The page is the page first written when the first part
+/// is set as it was before it and comes out as it was after it, and the
+/// second is the same before it, after it and after the last page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageState {
+    given: Given,
+    fixed: Fixed,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Given {
+    colors: (i32, Vec<PdfColor>, Vec<PdfColor>),
+    scales: (Vec<PdfCoord>, i32, Vec<u8>),
+    coords: (Vec<PdfCoord>, Vec<PdfCoord>),
+    paper: [u64; 4],
+    landscape: i32,
+    background: PdfColor,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Fixed {
+    stacks: Vec<(i32, i32, Vec<Vec<u8>>)>,
+    /// The pending `pdf:bann`'s, the open annotation's (its box drawn
+    /// to, broken already), the pending `html:` anchor's.
+    pending: (bool, Option<(i32, i32)>, i32, bool),
+    tounicode: (i32, i32, Vec<Vec<u8>>),
+    page: (bool, usize, usize),
+    xgstates: usize,
+}
+
+impl PageState {
+    /// Whether the parts a page must find as the last page left them
+    /// are the same.
+    #[must_use]
+    pub fn same_fixed(&self, o: &PageState) -> bool {
+        self.fixed == o.fixed
+    }
+
+    /// The parts in which `self` and `o` differ, named.
+    #[must_use]
+    pub fn differs(&self, o: &PageState) -> String {
+        let (a, b) = (&self.given, &o.given);
+        let (x, y) = (&self.fixed, &o.fixed);
+        let mut out = Vec::new();
+        for (d, what) in [
+            (a.colors != b.colors, "colour stack"),
+            (a.scales != b.scales, "scales"),
+            (a.coords != b.coords, "transforms"),
+            (a.paper != b.paper || a.landscape != b.landscape, "paper"),
+            (a.background != b.background, "background"),
+            (x.stacks != y.stacks, "pdfcolorstack"),
+            (x.pending != y.pending, "annotation pending"),
+            (x.tounicode != y.tounicode, "tounicode"),
+            (x.page != y.page, "page resources or bop/eop"),
+            (x.xgstates != y.xgstates, "extended graphics states"),
+        ] {
+            if d {
+                out.push(what);
+            }
+        }
+        out.join(", ")
+    }
+}
+
+impl Dpx {
+    /// [`PageState`] now.
+    ///
+    /// # Errors
+    /// None in practice (the objects it reads are strings, names and
+    /// streams).
+    pub(crate) fn page_state(&self) -> Result<PageState> {
+        let cs = &self.color.color_stack;
+        let top = usize::try_from(cs.current).unwrap_or(0);
+        let upto = |v: &Vec<PdfColor>| v.iter().take(top + 1).cloned().collect::<Vec<_>>();
+        let mut stacks = Vec::new();
+        for st in &self.misc.stacks {
+            let mut items = Vec::new();
+            for &o in &st.stack.items {
+                items.push(self.o.string_value(o).map(<[u8]>::to_vec).unwrap_or_default());
+            }
+            stacks.push((st.page, st.direct, items));
+        }
+        let mut taint = Vec::new();
+        if let Some(t) = self.pdfm.cd.taintkeys {
+            for x in self.o.array_items(t)?.into_iter().flatten() {
+                taint.push(self.o.name_value(x).map(<[u8]>::to_vec).unwrap_or_default());
+            }
+        }
+        let len = |s: Option<Obj>| s.map_or(Ok(0), |s| self.o.stream_length(s));
+        let b = &self.doc.breaking_state;
+        let ss = &self.session;
+        Ok(PageState {
+            given: Given {
+                colors: (cs.current, upto(&cs.stroke), upto(&cs.fill)),
+                scales: (
+                    self.xtx.scale_factors.clone(),
+                    self.xtx.scale_factor_count,
+                    self.xtx.overlay_name.clone(),
+                ),
+                coords: (self.spc.coords.items.clone(), self.spc.pt_fixee.items.clone()),
+                paper: [
+                    ss.paper_width.to_bits(),
+                    ss.paper_height.to_bits(),
+                    ss.x_offset.to_bits(),
+                    ss.y_offset.to_bits(),
+                ],
+                landscape: ss.landscape_mode,
+                background: self.doc.bgcolor.clone(),
+            },
+            fixed: Fixed {
+                stacks,
+                pending: (
+                    self.pdfm.annot_dict.is_some(),
+                    b.annot_dict.map(|_| (b.dirty, b.broken)),
+                    self.html.pending_type,
+                    self.html.link_dict.is_some(),
+                ),
+                tounicode: (self.pdfm.cd.cmap_id, self.pdfm.cd.unescape_backslash, taint),
+                page: (
+                    self.pdfm.pageresources.is_some(),
+                    len(self.doc.pdoc.pages.bop)?,
+                    len(self.doc.pdoc.pages.eop)?,
+                ),
+                xgstates: self.draw.xgs_stack.items.len(),
+            },
+        })
+    }
+
+    /// The values of `st` a page is given ([`PageState`]) set.
+    pub(crate) fn set_page_state(&mut self, st: &PageState) {
+        let g = &st.given;
+        let cs = &mut self.color.color_stack;
+        cs.current = g.colors.0;
+        for (k, c) in g.colors.1.iter().enumerate() {
+            if let Some(x) = cs.stroke.get_mut(k) {
+                *x = c.clone();
+            }
+        }
+        for (k, c) in g.colors.2.iter().enumerate() {
+            if let Some(x) = cs.fill.get_mut(k) {
+                *x = c.clone();
+            }
+        }
+        self.xtx.scale_factors.clone_from(&g.scales.0);
+        self.xtx.scale_factor_count = g.scales.1;
+        self.xtx.overlay_name.clone_from(&g.scales.2);
+        self.spc.coords.items.clone_from(&g.coords.0);
+        self.spc.pt_fixee.items.clone_from(&g.coords.1);
+        let ss = &mut self.session;
+        ss.paper_width = f64::from_bits(g.paper[0]);
+        ss.paper_height = f64::from_bits(g.paper[1]);
+        ss.x_offset = f64::from_bits(g.paper[2]);
+        ss.y_offset = f64::from_bits(g.paper[3]);
+        ss.landscape_mode = g.landscape;
+        self.doc.bgcolor = g.background.clone();
+    }
+
+    /// Whether a page of `ops` can be written again ([`Again`]): none of
+    /// its specials is one that can't.
+    pub(crate) fn can_reship(&mut self, ops: &[Op]) -> Result<bool> {
+        for op in ops {
+            if let Op::Special(b) = op
+                && self.spc_again(b)? == Again::Never
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }

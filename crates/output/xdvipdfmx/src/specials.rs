@@ -684,6 +684,18 @@ impl Dpx {
             let found = (ks.check_func)(buffer);
             if found {
                 error = (ks.setup_func)(self, &mut special, &mut spe, &mut args)?;
+                // (a page written again: what the file has already is not
+                // done again)
+                if self.doc.reship && error == 0 {
+                    match again(ks.key, args.command, args.rest()) {
+                        Again::Do => {}
+                        Again::Skip => return Ok((0, 0, rect)),
+                        Again::Never => crate::fatal!(
+                            "a page written again has a special that can't be done again: {}",
+                            String::from_utf8_lossy(buffer)
+                        ),
+                    }
+                }
                 if error == 0 {
                     error = (special.exec)(self, &mut spe, &mut args)?;
                 }
@@ -700,6 +712,90 @@ impl Dpx {
         check_garbage(&mut args);
 
         Ok((error, is_drawable, rect))
+    }
+}
+
+/// What a page written again into a file that has its objects already
+/// ([`crate::api::Session::reship`]) does with one of its specials, the
+/// same as when the page was first written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Again {
+    /// Done again: its effect is on the page (or it replaces what it did,
+    /// a destination).
+    Do,
+    /// Not done again: its effect is on the document, which has it.
+    Skip,
+    /// The page can't be written again: its effect is on the document
+    /// and on the page together (a form, a bead, a named annotation),
+    /// or not known.
+    Never,
+}
+
+impl Dpx {
+    /// What a page written again does with special `buffer` ([`Again`]).
+    ///
+    /// # Errors
+    /// The specials' parsers' fatal errors.
+    pub fn spc_again(&mut self, buffer: &[u8]) -> Result<Again> {
+        let (mut special, mut spe, mut args) = init_special(self, buffer, 0.0, 0.0, 1.0);
+        for ks in &KNOWN_SPECIALS {
+            if (ks.check_func)(buffer) {
+                let e = (ks.setup_func)(self, &mut special, &mut spe, &mut args)?;
+                // (a special no handler takes: an error each time, nothing
+                // done)
+                return Ok(if e == 0 {
+                    again(ks.key, args.command, args.rest())
+                } else {
+                    Again::Do
+                });
+            }
+        }
+        Ok(Again::Do)
+    }
+}
+
+/// [`Again`] for the special of `key` (`pdf:`, `x:`, ...) and `command`,
+/// `rest` its arguments.
+fn again(key: &[u8], command: Option<&[u8]>, rest: &[u8]) -> Again {
+    let c = command.unwrap_or_default();
+    let named = rest.first() == Some(&b'@');
+    match key {
+        b"pdf:" => match c {
+            b"outline" | b"out" | b"docinfo" | b"docview" | b"names" | b"mapline"
+            | b"mapfile" | b"object" | b"obj" | b"stream" | b"fstream" | b"close" => Again::Skip,
+            b"put" => {
+                if rest.starts_with(b"@thispage") || rest.starts_with(b"@resources") {
+                    Again::Do
+                } else {
+                    Again::Skip
+                }
+            }
+            b"annotation" | b"annotate" | b"annot" | b"ann" | b"bannot" | b"beginann"
+            | b"bann" | b"image" | b"img" | b"epdf"
+                if named =>
+            {
+                Again::Never
+            }
+            b"article" | b"art" | b"bead" | b"thread" | b"bform" | b"beginxobj" | b"bxobj"
+            | b"eform" | b"endxobj" | b"exobj" | b"bop" | b"eop" | b"pageresources" => {
+                Again::Never
+            }
+            _ => Again::Do,
+        },
+        b"x:" => match c {
+            b"fontmapline" | b"fontmapfile" => Again::Skip,
+            b"initoverlay" | b"clipoverlay" => Again::Never,
+            _ => Again::Do,
+        },
+        // (`config`: read with the first page's specials, nothing done
+        // where the page is written; `catch_phantom`: the page's links)
+        b"color" | b"dvipdfmx:" => Again::Do,
+        b"compat" => match c {
+            b"pdffontattr" => Again::Skip,
+            b"postscriptbox" => Again::Never,
+            _ => Again::Do,
+        },
+        _ => Again::Never,
     }
 }
 
