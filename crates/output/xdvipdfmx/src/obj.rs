@@ -182,6 +182,57 @@ pub struct PdfOut {
     /// ([`PdfOut::live_begin`]): the labels they took, which the rest
     /// skips.
     live: Option<LiveLabels>,
+    /// The objects written since [`PdfOut::record_begin`], while
+    /// recording.
+    rec: Option<Vec<Wrote>>,
+    /// Releases inside a recorded one (an object stream's own, written
+    /// when full): not recorded apart.
+    rec_depth: u32,
+}
+
+/// An object written, as [`PdfOut::record_begin`] records it: what
+/// [`PdfOut::replay`] writes again, the same bytes in the same order,
+/// offsets from where the replay stands.
+#[derive(Clone)]
+enum Wrote {
+    /// Written directly: the label the session would give next before
+    /// it, the object's number and generation, its bytes (a deferred
+    /// stream's left out, as [`Pending`] keeps them), the streams
+    /// deferred in it (`at` and `pos` from the object's start) and the
+    /// line position after it.
+    Direct {
+        next: u32,
+        label: u32,
+        generation: u16,
+        bytes: Vec<u8>,
+        pending: Vec<Pending>,
+        line: usize,
+    },
+    /// Into the object stream: the label the session would give next
+    /// before it (the stream's own, if one is begun), the object's
+    /// number, its bytes there.
+    InStream { next: u32, label: u32, bytes: Vec<u8> },
+}
+
+/// The objects a stretch of the session wrote ([`PdfOut::record_end`]),
+/// to write again where the writer stands as it stood
+/// ([`PdfOut::writer_mark`]).
+#[derive(Clone)]
+pub struct Written {
+    wrote: Vec<Wrote>,
+    /// The label the session gives next after it.
+    next: u32,
+}
+
+/// What the objects a stretch writes depend on of the writer: the next
+/// label, the line position (the white space of what goes into an object
+/// stream follows the file's line) and the object stream begun, by
+/// number, and how many objects it has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriterMark {
+    next: u32,
+    line: usize,
+    objstm: Option<(u32, i32)>,
 }
 
 /// The labels of pages written again ([`PdfOut::live_begin`]): from
@@ -251,6 +302,8 @@ impl PdfOut {
             trailer_pos: 0,
             xref_written: None,
             live: None,
+            rec: None,
+            rec_depth: 0,
         }
     }
 
@@ -906,6 +959,9 @@ impl PdfOut {
         if label != 0 {
             self.mark_freed(label);
             if self.open {
+                let rec = self.rec.is_some() && self.rec_depth == 0;
+                let (at, pos, held, next) = (self.out.len(), self.file_position, self.pending.len(), self.next_label);
+                self.rec_depth += 1;
                 let flags = self.slot(o).flags;
                 if !self.use_objstm
                     || flags & OBJ_NO_OBJSTM != 0
@@ -913,22 +969,39 @@ impl PdfOut {
                     || self.slot(o).generation != 0
                 {
                     self.flush_obj(o)?;
+                    if rec {
+                        let pending = self.pending[held..]
+                            .iter()
+                            .map(|p| Pending {
+                                at: p.at - at,
+                                pos: p.pos - pos,
+                                ..p.clone()
+                            })
+                            .collect();
+                        let w = Wrote::Direct {
+                            next,
+                            label,
+                            generation: self.slot(o).generation,
+                            bytes: self.out[at..].to_vec(),
+                            pending,
+                            line: self.line_position,
+                        };
+                        self.rec.as_mut().expect("recording").push(w);
+                    }
                 } else {
-                    let objstm = if let Some(s) = self.current_objstm {
-                        s
-                    } else {
-                        let s = self.new_stream(STREAM_COMPRESS);
-                        self.stream_mut(s, 2411)?.objstm =
-                            Some(vec![0; 2 * OBJSTM_MAX_OBJS as usize + 2]);
-                        self.label_obj(s)?;
-                        self.current_objstm = Some(s);
-                        s
-                    };
-                    if self.add_objstm(objstm, o)? == OBJSTM_MAX_OBJS {
+                    let objstm = self.objstm()?;
+                    let len = self.stream_length(objstm)?;
+                    let n = self.add_objstm(objstm, o)?;
+                    if rec {
+                        let bytes = self.stream_data(objstm)?[len..].to_vec();
+                        self.rec.as_mut().expect("recording").push(Wrote::InStream { next, label, bytes });
+                    }
+                    if n == OBJSTM_MAX_OBJS {
                         self.release_objstm(objstm)?;
                         self.current_objstm = None;
                     }
                 }
+                self.rec_depth -= 1;
             }
         }
         let data = core::mem::replace(&mut self.slot_mut(o).data, Data::Free);
@@ -955,6 +1028,113 @@ impl PdfOut {
         if let Some(o) = o {
             self.release(o)?;
         }
+        Ok(())
+    }
+
+    /// The object stream objects go into, begun if none is.
+    fn objstm(&mut self) -> Result<Obj> {
+        if let Some(s) = self.current_objstm {
+            return Ok(s);
+        }
+        let s = self.new_stream(STREAM_COMPRESS);
+        self.stream_mut(s, 2411)?.objstm = Some(vec![0; 2 * OBJSTM_MAX_OBJS as usize + 2]);
+        self.label_obj(s)?;
+        self.current_objstm = Some(s);
+        Ok(s)
+    }
+
+    /// Where the writer stands, as what a stretch writes depends on it
+    /// ([`WriterMark`]).
+    #[must_use]
+    pub fn writer_mark(&self) -> WriterMark {
+        WriterMark {
+            next: self.next_label,
+            line: self.line_position,
+            objstm: self.current_objstm.map(|s| {
+                let n = match &self.slot(s).data {
+                    Data::Stream(st) => st.objstm.as_ref().map_or(0, |d| d[0]),
+                    _ => 0,
+                };
+                (self.slot(s).label, n)
+            }),
+        }
+    }
+
+    /// From now on, the objects written are recorded
+    /// ([`PdfOut::record_end`]).
+    pub fn record_begin(&mut self) {
+        self.rec = Some(Vec::new());
+        self.rec_depth = 0;
+    }
+
+    /// The objects written since [`PdfOut::record_begin`]; recording
+    /// ends.
+    pub fn record_end(&mut self) -> Written {
+        Written {
+            wrote: self.rec.take().unwrap_or_default(),
+            next: self.next_label,
+        }
+    }
+
+    /// What `w` recorded written again, from a writer that stands as the
+    /// recorded one stood ([`PdfOut::writer_mark`] the same): the same
+    /// objects, numbers and bytes, at offsets from here; the objects of
+    /// the arena the recorded stretch released are left as they are (the
+    /// caller writes nothing after but the cross-reference section).
+    pub fn replay(&mut self, w: &Written) -> Result<()> {
+        for x in &w.wrote {
+            match x {
+                Wrote::Direct {
+                    next,
+                    label,
+                    generation,
+                    bytes,
+                    pending,
+                    line,
+                } => {
+                    self.next_label = *next;
+                    self.mark_freed(*label);
+                    self.add_xref_entry(*label, 1, self.file_position as u32, *generation);
+                    let (at, pos) = (self.out.len(), self.file_position);
+                    self.pending.extend(pending.iter().map(|p| Pending {
+                        at: p.at + at,
+                        pos: p.pos + pos,
+                        ..p.clone()
+                    }));
+                    self.out.extend_from_slice(bytes);
+                    self.file_position += bytes.len();
+                    self.line_position = *line;
+                }
+                Wrote::InStream { next, label, bytes } => {
+                    self.next_label = *next;
+                    self.mark_freed(*label);
+                    let objstm = self.objstm()?;
+                    let len = self.stream_length(objstm)? as i32;
+                    let pos = {
+                        let data = self
+                            .stream_mut(objstm, 3158)?
+                            .objstm
+                            .as_mut()
+                            .expect("object stream");
+                        data[0] += 1;
+                        let pos = data[0] as usize;
+                        data[2 * pos] = *label as i32;
+                        data[2 * pos + 1] = len;
+                        pos as i32
+                    };
+                    let objstm_label = self.slot(objstm).label;
+                    self.add_xref_entry(*label, 2, objstm_label, (pos - 1) as u16);
+                    self.add_stream(objstm, bytes)?;
+                    if pos == OBJSTM_MAX_OBJS {
+                        self.rec_depth += 1;
+                        self.release_objstm(objstm)?;
+                        self.rec_depth -= 1;
+                        self.current_objstm = None;
+                    }
+                }
+            }
+        }
+        self.next_label = w.next;
         Ok(())
     }
 

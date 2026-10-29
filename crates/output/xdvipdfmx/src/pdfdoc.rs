@@ -1560,7 +1560,52 @@ impl Dpx {
 
     /// `pdf_close_document`.
     pub fn pdf_close_document(&mut self) -> Result<()> {
-        self.pdf_close_document_timed(&|| 0).map(|_| ())
+        self.pdf_close_document_timed(&|| 0, EndMode::Plain).map(|_| ())
+    }
+
+    /// What the end's fonts, colours and resources depend on that the
+    /// pages can change ([`EndKey`]).
+    fn end_key(&self) -> EndKey {
+        let label = |o: Option<crate::obj::Obj>| o.map_or(0, |o| self.o.label(o));
+        let used = |u: &Option<crate::pdffont::UsedChars>| u.as_ref().map(|u| u.to_vec());
+        let fonts = self
+            .font
+            .fonts
+            .iter()
+            .map(|f| FontKey {
+                names: [f.ident.clone(), f.filename.clone(), f.fontname.clone()],
+                ints: [
+                    f.font_id,
+                    f.subtype,
+                    f.encoding_id,
+                    f.flags,
+                    f.type0.descendant,
+                    f.type0.wmode,
+                    f.cid.need_vmetrics,
+                    i32::try_from(f.index).unwrap_or(-1),
+                ],
+                unique_id: f.unique_id,
+                labels: [label(f.reference), label(f.resource), label(f.descriptor)],
+                used: [used(&f.usedchars), used(&f.cid.usedchars_v)],
+                csi: f.cid.csi.clone(),
+            })
+            .collect();
+        let mut counts = alloc::vec![
+            self.font.fonts.len(),
+            usize::try_from(self.font.unique_tag_count).unwrap_or(0),
+            self.dev.pdev.fonts.len(),
+            self.encoding.encodings.len(),
+            self.cmap.cache.as_ref().map_or(0, Vec::len),
+            self.tfm.fms.len(),
+            self.ximage.ximages.len(),
+            self.color.cspc_cache.len(),
+        ];
+        counts.extend(self.resource.resources.iter().map(|r| r.resources.len()));
+        EndKey {
+            mark: self.o.writer_mark(),
+            fonts,
+            counts,
+        }
     }
 
     /// [`Self::pdf_close_document`], each step timed by `clock` (its
@@ -1571,6 +1616,7 @@ impl Dpx {
     pub fn pdf_close_document_timed(
         &mut self,
         clock: &dyn Fn() -> u64,
+        end: EndMode<'_>,
     ) -> Result<Vec<(&'static str, u64)>> {
         let mut out = Vec::new();
         let mut t = clock();
@@ -1594,11 +1640,32 @@ impl Dpx {
         self.pdf_doc_close_catalog()?;
         self.pdf_close_images()?;
         lap("catalog and images", &mut out);
-        self.pdf_close_fonts()?;
-        lap("fonts", &mut out);
-        self.pdf_close_colors()?;
-        self.pdf_close_resources()?;
-        lap("resources", &mut out);
+        match end {
+            EndMode::Replay(rec, done) if rec.key == self.end_key() => {
+                self.o.replay(&rec.written)?;
+                *done = true;
+                lap("fonts, colours and resources replayed", &mut out);
+            }
+            EndMode::Record(rec) => {
+                let key = self.end_key();
+                self.o.record_begin();
+                self.pdf_close_fonts()?;
+                self.pdf_close_colors()?;
+                self.pdf_close_resources()?;
+                *rec = Some(EndRec {
+                    key,
+                    written: self.o.record_end(),
+                });
+                lap("fonts, colours and resources", &mut out);
+            }
+            _ => {
+                self.pdf_close_fonts()?;
+                lap("fonts", &mut out);
+                self.pdf_close_colors()?;
+                self.pdf_close_resources()?;
+                lap("resources", &mut out);
+            }
+        }
         self.o.flush()?;
         lap("flush", &mut out);
         Ok(out)
@@ -2374,4 +2441,46 @@ fn strcmp_c(a: &[u8], b: &[u8]) -> i32 {
         core::cmp::Ordering::Equal => 0,
         core::cmp::Ordering::Greater => 1,
     }
+}
+
+/// What the end's fonts, colours and resources read that the pages can
+/// change: the writer's place ([`crate::obj::WriterMark`]), every font
+/// (its names, kind, flags, objects' numbers, the characters used) and
+/// how many encodings, CMaps, metrics, images, colour spaces and
+/// resources of each category there are (a page adds them, never
+/// changes one). Two sessions with the same key write the same objects
+/// there.
+#[derive(Clone, PartialEq)]
+pub struct EndKey {
+    mark: crate::obj::WriterMark,
+    fonts: Vec<FontKey>,
+    counts: Vec<usize>,
+}
+
+#[derive(Clone, PartialEq)]
+struct FontKey {
+    names: [Option<Vec<u8>>; 3],
+    ints: [i32; 8],
+    unique_id: [u8; 7],
+    labels: [u32; 3],
+    used: [Option<Vec<u8>>; 2],
+    csi: crate::pdffont::CidSysInfo,
+}
+
+/// The end's fonts, colours and resources as one session wrote them,
+/// and what they depended on: another session whose key is the same
+/// writes them again from it ([`EndMode::Replay`]).
+#[derive(Clone)]
+pub struct EndRec {
+    key: EndKey,
+    written: crate::obj::Written,
+}
+
+/// How [`Dpx::pdf_close_document_timed`] writes the fonts, colours and
+/// resources: as `pdf_close_document` does, recording them, or written
+/// again from a record if its key is the session's (the flag set then).
+pub enum EndMode<'a> {
+    Plain,
+    Record(&'a mut Option<EndRec>),
+    Replay(&'a EndRec, &'a mut bool),
 }

@@ -550,6 +550,43 @@ impl Session {
         &mut self,
         clock: &dyn Fn() -> u64,
     ) -> Result<(Vec<u8>, Vec<(&'static str, u64)>)> {
+        self.finish_with(clock, crate::pdfdoc::EndMode::Plain)
+    }
+
+    /// [`Session::finish`], the fonts', colours' and resources' objects
+    /// recorded: another session's [`Session::finish_replaying`] writes
+    /// them again from the record where it stands as this one stood.
+    ///
+    /// # Errors
+    /// As [`Session::finish`].
+    pub fn finish_recorded(&mut self) -> Result<(Vec<u8>, crate::pdfdoc::EndRec)> {
+        let mut rec = None;
+        let (bytes, _) = self.finish_with(&|| 0, crate::pdfdoc::EndMode::Record(&mut rec))?;
+        Ok((bytes, rec.expect("the end recorded")))
+    }
+
+    /// [`Session::finish_timed`], the fonts', colours' and resources'
+    /// objects written from `rec` if what they depend on is the same as
+    /// where it was recorded (the bytes as if made again); whether they
+    /// were.
+    ///
+    /// # Errors
+    /// As [`Session::finish`].
+    pub fn finish_replaying(
+        &mut self,
+        clock: &dyn Fn() -> u64,
+        rec: &crate::pdfdoc::EndRec,
+    ) -> Result<(Vec<u8>, Vec<(&'static str, u64)>, bool)> {
+        let mut done = false;
+        let (bytes, times) = self.finish_with(clock, crate::pdfdoc::EndMode::Replay(rec, &mut done))?;
+        Ok((bytes, times, done))
+    }
+
+    fn finish_with(
+        &mut self,
+        clock: &dyn Fn() -> u64,
+        end: crate::pdfdoc::EndMode<'_>,
+    ) -> Result<(Vec<u8>, Vec<(&'static str, u64)>)> {
         if self.page_count < 1 {
             crate::fatal!("No pages fall in range!");
         }
@@ -559,7 +596,7 @@ impl Session {
         d.o.defer_streams();
         let r = (|| {
             d.spc_exec_at_end_document()?;
-            let times = d.pdf_close_document_timed(clock)?;
+            let times = d.pdf_close_document_timed(clock, end)?;
             d.pdf_close_fontmaps();
             d.dvi_close();
             Ok(times)
@@ -906,6 +943,19 @@ mod tests {
     /// runs with `glyph_runs` as given; the end's streams compressed in a
     /// batch (backwards, as a parallel host may) if `batch`.
     fn cmr10_page(glyph_runs: bool, batch: bool) -> (Vec<u8>, Vec<GlyphRun>, usize) {
+        let (mut s, batched) = cmr10_session(glyph_runs, batch);
+        let page = s.page(&cmr10_shows(b"A")).unwrap_or_else(|e| panic!("page: {e}"));
+        let mut pdf = page.pdf;
+        pdf.extend(s.finish().unwrap_or_else(|e| panic!("finish: {e}")));
+        (
+            pdf,
+            page.glyph_runs,
+            batched.load(core::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// A page showing `chars` in cmr10.
+    fn cmr10_shows(chars: &[u8]) -> Vec<u8> {
         // (the map line first: the font embedded from its Type 1 file)
         let mut p = page(b"pdf:mapline cmr10 CMR10 <cmr10.pfb");
         p.pop();
@@ -915,7 +965,16 @@ mod tests {
         p.extend(655_360u32.to_be_bytes());
         p.extend([0, 5]);
         p.extend_from_slice(b"cmr10");
-        p.extend([crate::dvi::FNT_NUM_0, b'A', crate::dvi::EOP]);
+        p.push(crate::dvi::FNT_NUM_0);
+        p.extend_from_slice(chars);
+        p.push(crate::dvi::EOP);
+        p
+    }
+
+    /// A session that finds cmr10's files, the end's streams compressed
+    /// in a batch (backwards, as a parallel host may) if `batch`, and how
+    /// many streams the batches had.
+    fn cmr10_session(glyph_runs: bool, batch: bool) -> (Session, Arc<core::sync::atomic::AtomicUsize>) {
         /// cmr10's metrics and Type 1 program, whatever the suffix asked.
         struct Cmr10;
         impl Files for Cmr10 {
@@ -960,14 +1019,41 @@ mod tests {
                 out
             }));
         }
-        let page = s.page(&p).unwrap_or_else(|e| panic!("page: {e}"));
-        let mut pdf = page.pdf;
-        pdf.extend(s.finish().unwrap_or_else(|e| panic!("finish: {e}")));
-        (
-            pdf,
-            page.glyph_runs,
-            batched.load(core::sync::atomic::Ordering::Relaxed),
-        )
+        (s, batched)
+    }
+
+    /// The end's fonts, colours and resources written from another
+    /// session's record are the bytes the session writes itself, when the
+    /// pages left what they depend on the same; a page that used another
+    /// character writes them whole, as without a record.
+    #[test]
+    fn end_replayed_from_a_record() {
+        for batch in [false, true] {
+            let (mut s, _) = cmr10_session(false, batch);
+            s.page(&cmr10_shows(b"AB")).expect("page");
+            let post = s.snapshot();
+            let (whole, rec) = s.finish_recorded().expect("finish");
+            // (another session from the same pages: replayed, the same)
+            let mut t = post.snapshot();
+            let (again, _, replayed) = t.finish_replaying(&|| 0, &rec).expect("finish");
+            assert!(replayed, "batch {batch}: not replayed");
+            assert!(again == whole, "batch {batch}: the replayed end differs");
+            // (a page with a character the record's did not use: written whole)
+            let mut u = post.snapshot();
+            u.page(&cmr10_shows(b"C")).expect("page");
+            let mut v = u.snapshot();
+            let (got, _, replayed) = u.finish_replaying(&|| 0, &rec).expect("finish");
+            assert!(!replayed, "batch {batch}: replayed with another character used");
+            let want = v.finish().expect("finish");
+            assert!(got == want, "batch {batch}: the end written whole differs");
+            // (a page with the same characters: replayed, as written whole)
+            let mut u = post.snapshot();
+            u.page(&cmr10_shows(b"BA")).expect("page");
+            let mut v = u.snapshot();
+            let (got, _, replayed) = u.finish_replaying(&|| 0, &rec).expect("finish");
+            let want = v.finish().expect("finish");
+            assert!(!replayed || got == want, "batch {batch}: a page more, the replayed end differs");
+        }
     }
 
     #[test]

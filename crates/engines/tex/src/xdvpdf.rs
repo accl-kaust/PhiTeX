@@ -45,6 +45,7 @@ use phitex_defuse::{Ctx, Stop, ValueId, Values};
 use phitex_dvi::{DviWriter, Op};
 use phitex_xdvipdfmx::api::{Options as DpxOptions, Session};
 use phitex_xdvipdfmx::direct::PageState;
+use phitex_xdvipdfmx::pdfdoc::EndRec;
 use phitex_xdvipdfmx::io::{Files, Format};
 use phitex_xdvipdfmx::specials::Again;
 
@@ -239,6 +240,13 @@ fn neutral(ops: &[Op]) -> impl Iterator<Item = &Op> {
         .filter(|o| !matches!(o, Op::FontDef { .. } | Op::NativeFontDef { .. }))
 }
 
+/// Whether `PHITEX_XDV_REPLAY_CHECK` is set: a live link also writes
+/// its end whole and says whether the replayed one is the same.
+fn replay_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PHITEX_XDV_REPLAY_CHECK").is_some())
+}
+
 /// The exact file's link, a fold over one xdvipdfmx session: what the
 /// file holds and what a later link goes on from.
 struct Base {
@@ -262,6 +270,9 @@ struct Base {
     /// The file's `/Size`.
     size: u32,
     layout: phitex_pdf::Layout,
+    /// The end's fonts, colours and resources as written, for a live
+    /// file whose pages left them the same ([`Session::finish_replaying`]).
+    end: Arc<EndRec>,
 }
 
 /// The link's state between builds.
@@ -517,7 +528,7 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
     let post_writer = w.clone();
     t.snaps += t0.elapsed();
     let t0 = std::time::Instant::now();
-    let tail = s.finish().map_err(|e| fatal(&e))?;
+    let (tail, end) = s.finish_recorded().map_err(|e| fatal(&e))?;
     t.end = t0.elapsed();
     let layout = layout(&chunks, &tail, &s)
         .ok_or("xdvipdfmx: the file's cross-reference section was not written")?;
@@ -534,6 +545,7 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
             post_writer,
             size: s.next_label(),
             layout,
+            end: Arc::new(end),
         },
         t,
     ))
@@ -691,10 +703,27 @@ fn live(
     // (the end's streams: those compressed before taken at their level,
     // the others compressed fast; the exact file's are made at its own)
     s.compress_fast();
+    // (`PHITEX_XDV_REPLAY_CHECK`: the end also written whole, from a copy,
+    // and the two compared)
+    let mut twin = replay_check().then(|| s.snapshot());
     PACK_ANY.with(|c| c.set(true));
-    let r = s.finish_timed(&clock);
+    let r = s.finish_replaying(&clock, &b.end);
+    let whole = twin.as_mut().map(|x| x.finish_timed(&|| 0));
     PACK_ANY.with(|c| c.set(false));
-    let (tail, steps) = r.map_err(|e| fatal(&e))?;
+    let (tail, steps, replayed) = r.map_err(|e| fatal(&e))?;
+    if let Some(w) = whole {
+        let w = w.map_err(|e| fatal(&e))?.0;
+        let at = tail.iter().zip(&w).position(|(x, y)| x != y).or((tail.len() != w.len()).then(|| tail.len().min(w.len())));
+        eprintln!(
+            "xdv pdf: replay check: {} ({} bytes{})",
+            match at {
+                None => "same".to_owned(),
+                Some(k) => format!("DIFFERENT at byte {k} of the end"),
+            },
+            tail.len(),
+            if replayed { ", replayed" } else { ", written whole" }
+        );
+    }
     let t_end = t.elapsed();
     let steps: Vec<String> = steps.iter().map(|(w, us)| format!("{w} {us} µs")).collect();
     let mut chunks = b.chunks.clone();
