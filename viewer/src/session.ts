@@ -88,6 +88,17 @@ export interface CoreRes {
   error?: string;
 }
 
+/**
+ * The cursor at `pos` (UTF-16) in text `t`, as the glyph origins count:
+ * its byte, the word it is in or by (`wordNear`), and its line (bytes).
+ */
+function place(t: string, pos: number): { at: number; word: [number, number] | null; line: [number, number] } {
+  const at = byteOffset(t, pos);
+  const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
+  const line: [number, number] = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
+  return { at, word: wordNear(new TextEncoder().encode(t), at, line[0], line[1]), line };
+}
+
 /** A request, for the trace: its op and fields, texts by their length. */
 function traceReq(r: CoreReq): Record<string, unknown> {
   const o: Record<string, unknown> = {};
@@ -203,6 +214,11 @@ export interface PreviewSink {
   marks?(marks: { k: number; boxes: [number, number, number, number][] }[]): void;
   /** Highlight boxes on page `k` ([x, y top, w, h], PDF points), scrolled into view. */
   mark?(k: number, boxes: [number, number, number, number][], scroll?: boolean): void;
+  /**
+   * Collaborators' cursors on the pages, each its word's boxes in its hue
+   * (0-360) with its label; the whole set ([] clears). Never scrolls.
+   */
+  others?(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number }[]): void;
   /**
    * The engine the project runs with: `ready` false, ⚡ Instant can't run it
    * (yet); `needed` the engine a build error asked for, if any.
@@ -813,6 +829,7 @@ export class PreviewSession {
   /** The page in view (the one an edit paints first). */
   setPage(p: number): Promise<void> {
     this.page = Math.max(0, Math.min(p, Math.max(this.pages - 1, 0)));
+    void this.peerPages();
     return this.sink.layout ? Promise.resolve() : this.showPage();
   }
 
@@ -833,6 +850,9 @@ export class PreviewSession {
     this.setPages(this.hashes.length);
     // (no page shipped: the view keeps what it shows, dimmed; see the sink)
     if (this.hashes.length) this.sink.layout(this.hashes);
+    // (the collaborators on the new pages)
+    this.drawPeers();
+    void this.peerPages();
     // (the glyphs' sources of the pages around the one read, asked now, after
     // the build, so a double-click or a selection finds them ready)
     if (this.sink.goto && !this.noOriginsPrefetch) this.glyphsAll();
@@ -949,6 +969,8 @@ export class PreviewSession {
     // (old hashes' entries: dropped past a few hundred pages' worth)
     if (this.glyphCache.size > 4 * Math.max(this.hashes.length, 100)) this.glyphCache.clear();
     this.glyphCache.set(key, gs);
+    // (a collaborator on this page shown now)
+    if (this.peers.length) this.drawPeers();
     return gs;
   }
 
@@ -1029,11 +1051,73 @@ export class PreviewSession {
    */
   follow(file: string, pos: number): void {
     if (!this.opened || !(file in this.files) || !this.sink.mark) return;
-    const t = this.files[file];
-    const at = byteOffset(t, pos);
-    const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
-    const line: [number, number] = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
-    this.followBytes(file, at, wordNear(new TextEncoder().encode(t), at, line[0], line[1]), line);
+    const { at, word, line } = place(this.files[file], pos);
+    this.followBytes(file, at, word, line);
+  }
+
+  /**
+   * Collaborators' cursors (the host's, Overleaf's: never the user's own),
+   * each at `pos` (UTF-16) in `file`: the word there marked on its page,
+   * by follow's rule, in the collaborator's hue with their label, never
+   * scrolling, apart from the user's own mark. From the glyphs here; a
+   * cursor on a page without them is shown once they come (the pages
+   * around the one in view asked for). Each call is the whole set: []
+   * clears.
+   */
+  others(file: string, others: { label: string; hue: number; pos: number }[]): void {
+    this.peers = others.map((o) => ({ file, ...o }));
+    this.drawPeers();
+    void this.peerPages();
+  }
+  private peers: { file: string; label: string; hue: number; pos: number }[] = [];
+
+  /** The collaborators' marks, from the glyphs already here. */
+  private drawPeers(): void {
+    if (!this.sink.others || !this.opened) return;
+    const out: { k: number; boxes: [number, number, number, number][]; label: string; hue: number }[] = [];
+    for (const p of this.peers) {
+      const t = this.files[p.file];
+      if (t === undefined) continue;
+      const { at, word, line } = place(t, p.pos);
+      for (let k = 0; k < this.hashes.length; k++) {
+        const all = this.cached(k);
+        const hit = all ? this.wordOn(all, p.file, at, word, line) : [];
+        if (!all || !hit.length) continue;
+        out.push({ k, boxes: boxes(hit, all), label: p.label, hue: p.hue });
+        break;
+      }
+    }
+    this.sink.others(out);
+  }
+
+  /** The glyphs of the pages around the one in view asked for, then the collaborators drawn again. */
+  private async peerPages(): Promise<void> {
+    if (!this.peers.length || !this.sink.others) return;
+    const ks = [this.page, this.page + 1, this.page - 1].filter((k) => k >= 0 && k < this.hashes.length && !this.cached(k));
+    if (!ks.length) return;
+    await Promise.all(ks.map((k) => this.glyphsOf(k)));
+    this.drawPeers();
+  }
+
+  /**
+   * The glyphs to mark for a cursor at byte `at` of `file`, in word `w`
+   * (bytes, none: not in a word) of line `line` (bytes), among a page's
+   * glyphs `all` (none: not on that page): a word, never the whole line,
+   * while typing: the cursor's word, else, not typeset yet (just typed),
+   * the typeset word nearest it on its line, the glyph's own; the line
+   * only with no word near at all.
+   */
+  private wordOn(all: Glyph[], file: string, at: number, w: [number, number] | null, line: [number, number]): Glyph[] {
+    const onLine = from(all, file, line[0], line[1]);
+    if (!onLine.length) return [];
+    let word = w ? from(onLine, file, w[0], w[1]) : [];
+    if (!word.length) {
+      const g = glyphNear(onLine, at);
+      const t = this.files[file];
+      const gw = g && t !== undefined ? wordBytes(new TextEncoder().encode(t), g.start) : null;
+      word = gw ? from(onLine, file, gw[0], gw[1]) : g ? onLine.filter((x) => x.start === g.start) : [];
+    }
+    return word.length ? word : lineAt(onLine, at);
   }
 
   /**
@@ -1055,19 +1139,8 @@ export class PreviewSession {
     for (const k of order) {
       const all = this.cached(k);
       if (!all) continue;
-      const onLine = from(all, file, a, b);
-      if (!onLine.length) continue;
-      // (a word, never the whole line, while typing: the cursor's word,
-      // else, not typeset yet (just typed), the typeset word nearest it on
-      // its line, the glyph's own; the line only with no word near at all)
-      let word = w ? from(onLine, file, w[0], w[1]) : [];
-      if (!word.length) {
-        const g = glyphNear(onLine, at);
-        const t = this.files[file];
-        const gw = g && t !== undefined ? wordBytes(new TextEncoder().encode(t), g.start) : null;
-        word = gw ? from(onLine, file, gw[0], gw[1]) : g ? onLine.filter((x) => x.start === g.start) : [];
-      }
-      const hit = word.length ? word : lineAt(onLine, at);
+      const hit = this.wordOn(all, file, at, w, line);
+      if (!hit.length) continue;
       this.followWant = "";
       this.sink.mark(k, boxes(hit, all), scroll);
       return;
@@ -1247,6 +1320,7 @@ export class PreviewSession {
         this.hashes = hs;
         this.setPages(hs.length);
         this.sink.layout?.(hs);
+        this.drawPeers();
         return;
       }
       case "progress":

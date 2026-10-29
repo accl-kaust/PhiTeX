@@ -194,6 +194,36 @@ export class Viewer {
     if (first && !seen) this.scroller.scrollTo({ top: first.offsetTop + first.parentElement!.offsetTop - this.scroller.clientHeight / 3, behavior: "auto" });
   }
 
+  /**
+   * Collaborators' cursors: each its word's `boxes` on page `k` tinted in
+   * its `hue`, its `label` above the first box; the whole set, the last
+   * one's replaced. Never scrolls, never asks for a page: a page not drawn
+   * yet shows them when it is (paint keeps them).
+   */
+  others(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number }[]): void {
+    for (const m of this.root.querySelectorAll(".peer")) m.remove();
+    const { w, h } = this.size;
+    const at = (m: HTMLElement, x: number, y: number) => Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%` });
+    for (const { k, boxes, label, hue } of marks) {
+      const s = this.slots[k];
+      if (!s || !boxes.length) continue;
+      for (const [x, y, bw, bh] of boxes) {
+        const m = document.createElement("div");
+        m.className = "peer";
+        m.style.setProperty("--hue", String(hue));
+        at(m, x, y);
+        Object.assign(m.style, { width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        s.el.append(m);
+      }
+      const tag = document.createElement("div");
+      tag.className = "peer peer-tag";
+      tag.style.setProperty("--hue", String(hue));
+      tag.textContent = label;
+      at(tag, boxes[0][0], boxes[0][1]);
+      s.el.append(tag);
+    }
+  }
+
   /** Highlight `boxes` ([x, y top, w, h], PDF points) on page `k`, scrolled into view, for a moment. */
   mark(k: number, boxes: [number, number, number, number][], scroll = true): void {
     const s = this.slots[k];
@@ -442,7 +472,7 @@ export class Viewer {
   private paint(s: Slot): void {
     if (!s.img) return;
     // (a highlight outlives the page drawn under it: put back after)
-    const marks = [...s.el.querySelectorAll(".mark")];
+    const marks = [...s.el.querySelectorAll(".mark, .peer")];
     this.draw(s);
     for (const m of marks) if (!m.isConnected) s.el.append(m);
   }

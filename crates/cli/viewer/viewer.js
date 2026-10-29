@@ -156,6 +156,35 @@ var Viewer = class {
     }
     if (first && !seen) this.scroller.scrollTo({ top: first.offsetTop + first.parentElement.offsetTop - this.scroller.clientHeight / 3, behavior: "auto" });
   }
+  /**
+   * Collaborators' cursors: each its word's `boxes` on page `k` tinted in
+   * its `hue`, its `label` above the first box; the whole set, the last
+   * one's replaced. Never scrolls, never asks for a page: a page not drawn
+   * yet shows them when it is (paint keeps them).
+   */
+  others(marks) {
+    for (const m of this.root.querySelectorAll(".peer")) m.remove();
+    const { w, h } = this.size;
+    const at = (m, x, y) => Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%` });
+    for (const { k, boxes: boxes2, label, hue } of marks) {
+      const s = this.slots[k];
+      if (!s || !boxes2.length) continue;
+      for (const [x, y, bw, bh] of boxes2) {
+        const m = document.createElement("div");
+        m.className = "peer";
+        m.style.setProperty("--hue", String(hue));
+        at(m, x, y);
+        Object.assign(m.style, { width: `${bw / w * 100}%`, height: `${bh / h * 100}%` });
+        s.el.append(m);
+      }
+      const tag = document.createElement("div");
+      tag.className = "peer peer-tag";
+      tag.style.setProperty("--hue", String(hue));
+      tag.textContent = label;
+      at(tag, boxes2[0][0], boxes2[0][1]);
+      s.el.append(tag);
+    }
+  }
   /** Highlight `boxes` ([x, y top, w, h], PDF points) on page `k`, scrolled into view, for a moment. */
   mark(k, boxes2, scroll = true) {
     const s = this.slots[k];
@@ -373,7 +402,7 @@ var Viewer = class {
   }
   paint(s) {
     if (!s.img) return;
-    const marks = [...s.el.querySelectorAll(".mark")];
+    const marks = [...s.el.querySelectorAll(".mark, .peer")];
     this.draw(s);
     for (const m of marks) if (!m.isConnected) s.el.append(m);
   }
@@ -708,8 +737,8 @@ var Outline = class {
   /** Folded parts, by their titles' path: kept when a build changes the outline. */
   folded = /* @__PURE__ */ new Set();
   place;
-  constructor(root, place2) {
-    this.place = place2;
+  constructor(root, place3) {
+    this.place = place3;
     this.el = document.createElement("nav");
     this.el.className = "phx-outline";
     this.el.setAttribute("aria-label", "Contents");
@@ -1317,6 +1346,10 @@ footer .msg.err { color: var(--danger); }
 @keyframes phitex-mark-in { from { opacity: 0; transform: scale(1.15); } }
 .slot .mark.fade { opacity: 0; transition: opacity 1.2s; }
 .slot .mark.sel { transition: none; animation: none; }
+.slot .peer { position: absolute; pointer-events: none; border-radius: 2px; background: hsl(var(--hue) 70% 50% / .22);
+  box-shadow: inset 0 -1.5px 0 hsl(var(--hue) 70% 45%); }
+.slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 4px; border-radius: 3px 3px 3px 0;
+  background: hsl(var(--hue) 70% 42%); box-shadow: none; color: #fff; font: 600 10px/14px system-ui, sans-serif; white-space: nowrap; z-index: 2; }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; box-shadow: none !important; border-radius: 0 !important; }
 .win.docked .slot { box-shadow: rgba(35,40,47,.05) 0 5px 5px, rgba(35,40,47,.03) 0 3px 14px, rgba(35,40,47,.08) 0 8px 10px; }
 .win.docked.pdf-dark .slot { filter: invert(95%) hue-rotate(180deg) brightness(90%) contrast(90%); box-shadow: none; }
@@ -2548,6 +2581,10 @@ var Panel = class {
   marks(marks) {
     this.viewer.marks(marks);
   }
+  /** Collaborators' cursors on the pages ([] clears). */
+  others(marks) {
+    this.viewer.others(marks);
+  }
   /** The debug report, shown whole before it is copied or emailed. */
   async report() {
     const text = await this.ev.onReport?.() ?? "";
@@ -2927,6 +2964,12 @@ var preambleOf = (t) => {
 };
 var usesMinted = (t) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
 var WATCH = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
+function place2(t, pos) {
+  const at = byteOffset(t, pos);
+  const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
+  const line = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
+  return { at, word: wordNear(new TextEncoder().encode(t), at, line[0], line[1]), line };
+}
 function traceReq(r) {
   const o = {};
   for (const [k, v] of Object.entries(r)) {
@@ -3442,6 +3485,7 @@ var PreviewSession = class {
   /** The page in view (the one an edit paints first). */
   setPage(p) {
     this.page = Math.max(0, Math.min(p, Math.max(this.pages - 1, 0)));
+    void this.peerPages();
     return this.sink.layout ? Promise.resolve() : this.showPage();
   }
   /** The pages' hashes, as the core has them now. */
@@ -3459,6 +3503,8 @@ var PreviewSession = class {
     this.tr("layout", { pages: this.hashes.length });
     this.setPages(this.hashes.length);
     if (this.hashes.length) this.sink.layout(this.hashes);
+    this.drawPeers();
+    void this.peerPages();
     if (this.sink.goto && !this.noOriginsPrefetch) this.glyphsAll();
   }
   /** Everything again, for a view that just joined (a detached PDF tab). */
@@ -3554,6 +3600,7 @@ var PreviewSession = class {
     if (!gs.length) return gs;
     if (this.glyphCache.size > 4 * Math.max(this.hashes.length, 100)) this.glyphCache.clear();
     this.glyphCache.set(key, gs);
+    if (this.peers.length) this.drawPeers();
     return gs;
   }
   /** A double-click at (x, y) on page `k` (PDF points from its top left): the editor to its source. */
@@ -3627,11 +3674,69 @@ var PreviewSession = class {
    */
   follow(file, pos) {
     if (!this.opened || !(file in this.files) || !this.sink.mark) return;
-    const t = this.files[file];
-    const at = byteOffset(t, pos);
-    const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
-    const line = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
-    this.followBytes(file, at, wordNear(new TextEncoder().encode(t), at, line[0], line[1]), line);
+    const { at, word, line } = place2(this.files[file], pos);
+    this.followBytes(file, at, word, line);
+  }
+  /**
+   * Collaborators' cursors (the host's, Overleaf's: never the user's own),
+   * each at `pos` (UTF-16) in `file`: the word there marked on its page,
+   * by follow's rule, in the collaborator's hue with their label, never
+   * scrolling, apart from the user's own mark. From the glyphs here; a
+   * cursor on a page without them is shown once they come (the pages
+   * around the one in view asked for). Each call is the whole set: []
+   * clears.
+   */
+  others(file, others) {
+    this.peers = others.map((o) => ({ file, ...o }));
+    this.drawPeers();
+    void this.peerPages();
+  }
+  peers = [];
+  /** The collaborators' marks, from the glyphs already here. */
+  drawPeers() {
+    if (!this.sink.others || !this.opened) return;
+    const out = [];
+    for (const p of this.peers) {
+      const t = this.files[p.file];
+      if (t === void 0) continue;
+      const { at, word, line } = place2(t, p.pos);
+      for (let k = 0; k < this.hashes.length; k++) {
+        const all = this.cached(k);
+        const hit = all ? this.wordOn(all, p.file, at, word, line) : [];
+        if (!all || !hit.length) continue;
+        out.push({ k, boxes: boxes(hit, all), label: p.label, hue: p.hue });
+        break;
+      }
+    }
+    this.sink.others(out);
+  }
+  /** The glyphs of the pages around the one in view asked for, then the collaborators drawn again. */
+  async peerPages() {
+    if (!this.peers.length || !this.sink.others) return;
+    const ks = [this.page, this.page + 1, this.page - 1].filter((k) => k >= 0 && k < this.hashes.length && !this.cached(k));
+    if (!ks.length) return;
+    await Promise.all(ks.map((k) => this.glyphsOf(k)));
+    this.drawPeers();
+  }
+  /**
+   * The glyphs to mark for a cursor at byte `at` of `file`, in word `w`
+   * (bytes, none: not in a word) of line `line` (bytes), among a page's
+   * glyphs `all` (none: not on that page): a word, never the whole line,
+   * while typing: the cursor's word, else, not typeset yet (just typed),
+   * the typeset word nearest it on its line, the glyph's own; the line
+   * only with no word near at all.
+   */
+  wordOn(all, file, at, w, line) {
+    const onLine = from(all, file, line[0], line[1]);
+    if (!onLine.length) return [];
+    let word = w ? from(onLine, file, w[0], w[1]) : [];
+    if (!word.length) {
+      const g = glyphNear(onLine, at);
+      const t = this.files[file];
+      const gw = g && t !== void 0 ? wordBytes(new TextEncoder().encode(t), g.start) : null;
+      word = gw ? from(onLine, file, gw[0], gw[1]) : g ? onLine.filter((x) => x.start === g.start) : [];
+    }
+    return word.length ? word : lineAt(onLine, at);
   }
   /**
    * The cursor at byte `at` of `file`'s text (the glyph origins' offsets),
@@ -3652,16 +3757,8 @@ var PreviewSession = class {
     for (const k of order) {
       const all = this.cached(k);
       if (!all) continue;
-      const onLine = from(all, file, a, b);
-      if (!onLine.length) continue;
-      let word = w ? from(onLine, file, w[0], w[1]) : [];
-      if (!word.length) {
-        const g = glyphNear(onLine, at);
-        const t = this.files[file];
-        const gw = g && t !== void 0 ? wordBytes(new TextEncoder().encode(t), g.start) : null;
-        word = gw ? from(onLine, file, gw[0], gw[1]) : g ? onLine.filter((x) => x.start === g.start) : [];
-      }
-      const hit = word.length ? word : lineAt(onLine, at);
+      const hit = this.wordOn(all, file, at, w, line);
+      if (!hit.length) continue;
       this.followWant = "";
       this.sink.mark(k, boxes(hit, all), scroll);
       return;
@@ -3816,6 +3913,7 @@ var PreviewSession = class {
         this.hashes = hs;
         this.setPages(hs.length);
         this.sink.layout?.(hs);
+        this.drawPeers();
         return;
       }
       case "progress":

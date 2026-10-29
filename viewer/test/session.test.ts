@@ -40,3 +40,43 @@ test("a change whose length is not the session's asks the editor for its text ag
   change("main.tex", [{ from: 23, to: 23, text: "." }], 24);
   assert.deepEqual(asked, ["main.tex"]);
 });
+
+// Collaborators' cursors (Overleaf's): each the word at its place marked on
+// the page whose glyphs are here, in its hue with its label, never through
+// the user's own (scrolling) mark; a page whose glyphs come later shows it
+// then; [] clears.
+test("collaborators' cursors mark their words on the pages, apart from the user's", () => {
+  let open!: (f: string, t: string) => void;
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: (cb) => (open = cb), onChanges: () => undefined };
+  const core = { request: async () => ({ ok: false }) };
+  const shown: unknown[][] = [];
+  const marked: number[] = [];
+  const sink = new Proxy(
+    { others: (m: unknown[]) => shown.push(m), mark: (k: number) => marked.push(k) },
+    { get: (t, p) => (t as Record<string | symbol, unknown>)[p] ?? (() => undefined) },
+  );
+  const s = new PreviewSession(host, core as never, sink as never, { schedule: () => undefined });
+  open("main.tex", "hello world\nsecond line\n");
+  const w = s as unknown as { opened: boolean; hashes: string[]; glyphCache: Map<string, unknown[]>; drawPeers(): void };
+  w.opened = true;
+  w.hashes = ["a", "b"];
+  // (page 1 has "world" at bytes 6..11, a glyph a byte, 6 pt apart)
+  const g = (i: number) => ({ x: 72 + 6 * i, y: 100, file: "main.tex", start: i, end: i + 1, synth: false });
+  w.glyphCache.set("1:b", [6, 7, 8, 9, 10].map(g));
+  s.others("main.tex", [
+    { label: "Ann", hue: 200, pos: 8 },
+    { label: "Bo", hue: 20, pos: 15 },
+  ]);
+  const last = () => shown[shown.length - 1] as { k: number; boxes: number[][]; label: string; hue: number }[];
+  // (Ann in "world" on page 1; Bo's line not on a page here: not shown)
+  assert.deepEqual(last().map((m) => [m.k, m.label, m.hue]), [[1, "Ann", 200]]);
+  assert.ok(last()[0].boxes.length > 0);
+  // (Bo's page's glyphs come: Bo shown too)
+  w.glyphCache.set("0:a", [12, 13, 14, 15, 16, 17].map(g));
+  w.drawPeers();
+  assert.deepEqual(last().map((m) => [m.k, m.label]), [[1, "Ann"], [0, "Bo"]]);
+  // (never the user's own mark, which scrolls)
+  assert.deepEqual(marked, []);
+  s.others("main.tex", []);
+  assert.deepEqual(last(), []);
+});
