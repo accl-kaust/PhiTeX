@@ -111,9 +111,8 @@ oracle checks.
 
 ### 0.4 The rest, in order
 
-- The intermittents below: §1 (stale reads at `Me`, branch
-  intermit-scope b503f662), §2 (the placement orphan), §3 (core.rs
-  counters).
+- The intermittents below: §1 (fixed, reds-s1), §2 (fixed, 9a5506ecd),
+  §3 (core.rs counters: not reproduced under load, 96 of 96).
 - Run-137 cut mode: 858 of 863 uncut, so the indentation is wrong at
   -j16. Main asked for the cause with a test that fails before the fix.
 - Closed: Shelf's input-stack overflow. It is no PhiTeX difference:
@@ -140,54 +139,44 @@ Loop scripts live outside the repository, in `~/code/tmp/intermit-tools/`:
 
 ## 1. Stale reads at -j16: readers at their own position never re-asked after a scope change
 
-amsldoc `--exact-pdf -j16` with `PHITEX_CHECK_READS=1` (observe CLI).
-On dev ae946367 + 0ccf5e9b (5163f523), 4 of 60 builds ended with stale
-reads; md5 and exit were right every time (accl 21908, kept runs in
-`im-ams16st-174226/docs/bad*` on acclhead1). Before 7ffbf9b1 the count
-was 25 of 100 (a5cdfa90, accl 21848), one of them exit 1 with wrong md5
-ba0244c0. After it, 15 of 100 (11d80b11, accl 21849). The -j8 loops
-showed none.
+**Fixed (branch reds-s1, d2f7fceee).** The trace (accl 22185, `PHITEX_S1`,
+debug branch s1dbg) followed one bad build of 240. Node 561 is an
+environment's `\begin`: it opens a scope and defines the scope kind
+inside it. Its readers 653-701 read it at depth 1. Then node 562's close
+was filed (scope epoch 520), and node 643's close was filed (epoch 521)
+before 562's walk ran. Each walk reckons where the depths agree again on
+the brackets as they are now:
 
-Every remaining stale read has the same shape: an exec or resume node's
-read at its own position (`Anchor::Me`) saw a value and now finds none:
+- 562's walk stopped at 643's close, because past it the depths agree.
+- 643's walk stopped at itself, because 562's close had already brought
+  its depth to 0.
 
-    node 858 (exec) read Field { f: Field(ValueId(9223373136366428494)), at: Me } path 0 saw [14, 1, 0, 1, 1, ()] but now none
-    node 1424 (exec) read Field { f: ...733254, at: Me } saw ["macro", 0, [], ["\if@newlist", ...]] but now ["ma...
-    node 3769 (resume) reads ...428494, ...403689, ...403736 saw [0, 0, 0, 0, 0] but now none
+So no walk reached the readers after both closes. A reader's answer
+rests on the brackets as they were when it read, not as they are now.
 
-"Now none" at the node's own position means the definition it read is
-no longer visible there. Either it was removed, or a scope close was
-filed between the definer and the reader. Bracket changes re-ask in
-`commit::file_effect` -> `reask_after_effect_at`, which walks the
-segments after the change and collects their readers after the lock.
-A run that began before the change is covered by `scope_gen` in its
-commit's check. Which path lost the wake is not found yet.
+The fix: each node keeps the epoch its last bracket change made
+(`Node::bracket_gen`; `Engine::scope_changed` returns it). A walk that
+finds the epoch has moved since its own change re-asks every reader past
+its stop by its answer.
 
-This is the likely cause of the stray diagnostic ("\begin{error} on
-input line 2365 ended by \end{document}", exit 1 with right bytes, the
-reds agent's amsldoc -j16 run 194, accl 21198). A text piece that keeps
-a stale `\@currenvir` reports exactly that.
+- Unit test `commit::tests::two_closes_filed_before_either_walk_reask_the_readers_after_both`:
+  fails before (accl 22186), passes after (accl 22187).
+- Loop on dev: 4 of 160 builds had these stale reads (accl 22184).
 
-Next step: b503f662 (branch intermit-scope, on 77d3ec47) makes
-`check_invariants` name the field and, for a read that now finds
-nothing, give the definition the close hides (node, label, depth) and
-the reader's depth. Its mc build was submitted (mc job 75723). Then:
+The 160-build loop (accl 22184) also showed reads that are not this
+cause:
 
-1. Run `loopmc ams16 b503f662... latex/amsmath amsldoc.tex 16 100
-   PHITEX_CHECK_READS=1` with `WANT_MD5=861b74bd6b22fb11405533e21c65fe02`
-   and `BINV=` (the observe CLI). Read the field and the hidden definer.
-2. Trace that field with a `PHITEX_TRACE_FIELDS` probe: the tr- lines of
-   9dbab443 and 490dfe1f on branch intermit-probe (on a5cdfa90), extended to
-   `reask_after_effect_at`.
+- pitems folds by finisher and pdfpage nodes (2 builds; the page loop).
+- A wstreams fold by a toolnode (1 build).
+- One build that exited 0 with 44 pages and no PDF: its Report's PDF
+  was empty, and a finisher's pitems read had moved.
 
 ## 2. A placement orphan at -j16
 
-Seen once in the same 60 builds (bad22): `check_reads: node 6535 is on
-the line, its placer 5977 holding it no more`. A node is still placed
-after its placer's record dropped it. This is claim or placement code
-(`commit::retract_products`, `relocate`, `claim_walk`), the reds
-agent's area. Reproduce with the same loop and grep for "holding it no
-more".
+**Fixed (9a5506ecd).** In relocate's place-gone path, the mover's record
+was cleared before its placements were looked up, so they were found
+empty and left on the line. Test:
+`commit::tests::a_node_relocated_to_a_place_gone_takes_its_placements_with_it`.
 
 ## 3. defuse tests/core.rs bounds that depend on machine load
 

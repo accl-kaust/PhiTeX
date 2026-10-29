@@ -94,7 +94,14 @@ Against TeX Live, byte for byte (accl 22181, 22183):
 - the latex cut-downs oc1-oc10;
 - fs5 and fs6, under both xelatex (XDV) and latex (DVI).
 
-The 46 corpus XDVs themselves need a fresh sweep (§6).
+The fresh sweep on dev b75e6558b (mc 76355, 2026-10-29) has these
+results:
+
+- 129 of the 131 oracle XDVs are byte-identical at both -j1 and -j8.
+  Before the fix it was 83.
+- One differs: `fontspec-fontload-sizefeatures-1`, at byte 460.
+- One is missing: `probe-xelatex-filemoddate`, §2.3.
+- Error counts agree on 206 of 211 documents.
 
 ### 2.2 ICU line breaks: a break before `〜` for `ja` (1 XDV, fixed here)
 
@@ -185,8 +192,9 @@ test: finisher runs within 2x the fires at -j1 and 3x at -j8. On
 
 ## 6. Open, in order of size
 
-1. §2.1 is fixed (6de5ca3b1). The corpus sweep has to be rerun to
-   confirm the 46 XDVs.
+1. §2.1 is fixed (6de5ca3b1). The sweep (mc 76355) confirms it: 129
+   of 131 XDVs are identical. The one left differing is
+   `fontspec-fontload-sizefeatures-1`, at byte 460.
 2. §3, `\showbox`/`\showlists` logging (36 documents' logs and exit
    statuses).
 3. §2.3, `\filemoddate` of the job's log in compat mode.
