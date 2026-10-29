@@ -61,6 +61,8 @@ pub struct Ctx<'a> {
     /// The run stopped at a read past the settling layer's frontier
     /// (`Ctx::set_frontier`): it runs again once the frontier passes it.
     pub(crate) wait_frontier: bool,
+    /// `Ctx::goes_on`: the run goes on from where its last run stopped.
+    pub(crate) goes_on: bool,
     /// Its checks so far ([`Ctx::tick`]).
     ticks: u64,
 }
@@ -102,6 +104,7 @@ impl<'a> Ctx<'a> {
                 settle_now: false,
                 waits: Vec::new(),
                 frontier: None,
+                parked_on: None,
             },
             views: Vec::new(),
             ep: u64::MAX,
@@ -114,6 +117,7 @@ impl<'a> Ctx<'a> {
             stuck: None,
             wait_on: None,
             wait_frontier: false,
+            goes_on: false,
             ticks: 0,
         }
     }
@@ -847,6 +851,21 @@ impl<'a> Ctx<'a> {
     /// The state is a value of mine, no read: nothing re-asks me for it.
     pub fn park(&mut self, state: ValueId) {
         self.product.state = Some(state);
+    }
+
+    /// The run stops for the answer to `f` it has not got (a search that
+    /// met a contributor not in yet, a definition not made yet): the run
+    /// woken by that answer and going on from here (`Ctx::goes_on`) is a
+    /// resumption, not a refuted run ([`crate::Report::resumed`]).
+    pub fn parked_on(&mut self, f: Field) {
+        self.product.parked_on = Some(f);
+    }
+
+    /// The run goes on from where my last run stopped and does none of
+    /// that run's work again: woken by the answer it parked on
+    /// (`Ctx::parked_on`), it is a resumption.
+    pub fn goes_on(&mut self) {
+        self.goes_on = true;
     }
 
     /// What my last run stored with `park`, if it did; `None` on a first

@@ -192,6 +192,8 @@ pub(crate) struct Worker {
     pub(crate) runs: AtomicU64,
     pub(crate) nodes_run: AtomicU64,
     pub(crate) refuted_nodes: AtomicU64,
+    pub(crate) resumed: AtomicU64,
+    pub(crate) parks: AtomicU64,
     /// Runs that panicked on inputs that moved during the run.
     pub(crate) stale_panics: AtomicU64,
     /// Runs stopped at a check because a read moved while they ran
@@ -269,8 +271,12 @@ impl Worker {
 /// predecessor before its reader, the page built after each piece and a
 /// routine run before the text after its page), on more the earliest work
 /// first, the critical path's.
+/// A queued node's order: its place (`sched_key`), text after the settling
+/// layer at one place, the order it was queued in, its raw id.
+type ReadyKey = (u64, bool, u64, u64);
+
 pub(crate) struct Ready {
-    heap: Mx<std::collections::BinaryHeap<std::cmp::Reverse<(u64, u64, u64)>>>,
+    heap: Mx<std::collections::BinaryHeap<std::cmp::Reverse<ReadyKey>>>,
     seq: AtomicU64,
     len: AtomicUsize,
 }
@@ -288,15 +294,18 @@ impl Default for Ready {
 impl Ready {
     pub(crate) fn push(&self, eng: &Engine, n: &Node) {
         let k = sched_key(eng, n);
+        // (at one place the settling layer first: TeX builds the page
+        // after the paragraph that ends there, before the text after it)
+        let text = !eng.op(n.op()).settles_at_quiet();
         let s = self.seq.fetch_add(1, Ordering::Relaxed);
-        self.heap.lock().push(std::cmp::Reverse((k, s, n.id.raw())));
+        self.heap.lock().push(std::cmp::Reverse((k, text, s, n.id.raw())));
         self.len.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn pop(&self) -> Option<NodeId> {
         let x = self.heap.lock().pop()?;
         self.len.fetch_sub(1, Ordering::Relaxed);
-        Some(NodeId::from_raw(x.0.2))
+        Some(NodeId::from_raw(x.0.3))
     }
 
     /// The earliest node's key, if any.
@@ -416,6 +425,8 @@ impl Pool {
                 runs: AtomicU64::new(0),
                 nodes_run: AtomicU64::new(0),
                 refuted_nodes: AtomicU64::new(0),
+                resumed: AtomicU64::new(0),
+                parks: AtomicU64::new(0),
                 stopped_stale: AtomicU64::new(0),
                 stale_panics: AtomicU64::new(0),
                 op_ns: AtomicU64::new(0),
@@ -1333,8 +1344,11 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
         // (one line a wake, tab-separated for the attribution table: the
         // woken run's op, the field, the cause's kind, the site's op, the
         // time of the run it refutes)
+        let fr = eng.frontier.load(Ordering::Acquire);
+        let fr_pos = fr.checked_sub(1).and_then(|f| eng.placed_node(NodeId::from_raw(f))).map(|f| f.pos_hint().0);
+        let marked = field.is_some_and(|f| eng.settle_marked(f));
         eprintln!(
-            "wake: node {} op {:?} pos {:?} field {name} {:?}{site_pos}\twake\t{}\t{}\t{name}\t{kind}\t{site_op}\t{}",
+            "wake: node {} op {:?} pos {:?} field {name} {:?}{site_pos} frontier-pos {fr_pos:?} marked {marked}\twake\t{}\t{}\t{name}\t{kind}\t{site_op}\t{}",
             n.id.raw(),
             n.op(),
             n.pos_hint(),
@@ -1393,14 +1407,11 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     let first = node.run_epoch.swap(pool.epoch, Ordering::AcqRel) != pool.epoch;
     if first {
         node.runs.store(0, Ordering::Relaxed);
+        node.reruns.store(0, Ordering::Relaxed);
         Worker::add(&w.nodes_run, 1);
-    } else {
-        Worker::add(&w.wasted_ns, node.run_ns.load(Ordering::Relaxed));
     }
+    let last_ns = node.run_ns.load(Ordering::Relaxed);
     let runs = node.runs.fetch_add(1, Ordering::Relaxed) + 1;
-    if runs == 2 {
-        Worker::add(&w.refuted_nodes, 1);
-    }
     let op = eng.op(node.op()).clone();
     if runs > pool.limits.runs_per_node {
         give_back(eng, node);
@@ -1436,6 +1447,26 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             Err(_) => "panicked".to_owned(),
         };
         eprintln!("run: node {} ({}) at {}: {how}", n.raw(), op.name(), node.pos_hint().0);
+    }
+    // (a resumption: the run woken by the answer its node's last run
+    // parked on, going on from there; else the last run's work, if any,
+    // was thrown away)
+    let resumption = matches!(r, Ok(Ok(_))) && cx.goes_on && {
+        let f = match &cx.woke {
+            Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => Some(*field),
+            _ => None,
+        };
+        f.is_some() && *node.parked_on.lock() == f
+    };
+    if resumption {
+        Worker::add(&w.resumed, 1);
+    } else {
+        if !first {
+            Worker::add(&w.wasted_ns, last_ns);
+        }
+        if node.reruns.fetch_add(1, Ordering::Relaxed) + 1 == 2 {
+            Worker::add(&w.refuted_nodes, 1);
+        }
     }
     // (a re-ask kept for this run's checks is its commit's now)
     if node.stale.swap(false, Ordering::AcqRel) {
@@ -1516,6 +1547,10 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         }
         Ok(Ok(out)) => {
             let product = cx.into_product(out);
+            if product.parked_on.is_some() {
+                Worker::add(&w.parks, 1);
+            }
+            *node.parked_on.lock() = product.parked_on;
             let st = commit(eng, w, node, product);
             // (the store past the collection's mark: the workers called to
             // its barrier as their runs end)

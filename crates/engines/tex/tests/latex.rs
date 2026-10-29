@@ -715,6 +715,55 @@ fn latex_twocol_floats_runs() {
     assert!(bad.is_empty(), "{name}: {bad:?}");
 }
 
+/// At one thread every node runs in TeX's order, the page built after each
+/// paragraph and a routine run before the text after its page, so no run
+/// is thrown away: no node is refuted, and every run past a node's first
+/// is a resumption (`Stats::runs` equals `Stats::nodes_run` plus
+/// `Stats::resumptions`): a page loop node parked on a contributor not in
+/// yet, or a give-back or a start not made yet, woken by it and going on
+/// from where it stopped, none of its work done again, as TeX's builder
+/// goes on after each paragraph; each resumption pairs with a park
+/// (`Stats::resumptions` at most `Stats::parks`). A second run of a node at
+/// -j1 that is not one is a run on a guess where waiting for the node
+/// before it gave the true value: a false dependency. On floats2col (194
+/// routine fires, floats and marginpars handing `\@freelist` back to the
+/// text), marginpars28 and tikz; the PDF is pdfTeX's.
+#[test]
+fn at_one_thread_no_run_is_refuted() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let mut bad = Vec::new();
+    for name in ["floats2col", "marginpars28", "tikz"] {
+        let src = common::read(&dir.join(format!("{name}.tex")));
+        let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf"))).expect("the oracle");
+        let opts = Options {
+            threads: Some(1),
+            ..pdf_opts(name, &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let (pdf, _) = b.output();
+        let s = &b.stats;
+        eprintln!(
+            "{name} -j 1: {} runs of {} nodes run, {} refuted, {} resumed of {} parks, by op {:?}",
+            s.runs, s.nodes_run, s.refuted_nodes, s.resumptions, s.parks, s.runs_by_op
+        );
+        if let Some(d) = common::first_difference(&pdf, &want) {
+            bad.push(format!("{name}: pdf {d}"));
+        }
+        if s.refuted_nodes != 0 || s.runs != s.nodes_run + s.resumptions || s.resumptions > s.parks {
+            bad.push(format!(
+                "{name}: {} runs of {} nodes, {} refuted, {} resumed of {} parks ({} thrown away)",
+                s.runs,
+                s.nodes_run,
+                s.refuted_nodes,
+                s.resumptions,
+                s.parks,
+                s.runs.saturating_sub(s.nodes_run + s.resumptions)
+            ));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:?}");
+}
+
 /// The page layer's work, by the engine's counters, on floats2col (the
 /// document of [`latex_twocol_floats_runs`]: twocolumn, 194 routine
 /// fires, floats and marginpars whose routines hand back `\@freelist`,

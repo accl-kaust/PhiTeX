@@ -56,6 +56,11 @@ pub(crate) struct Node {
     /// they count in.
     pub(crate) runs: AtomicU32,
     pub(crate) run_epoch: AtomicU64,
+    /// Its runs in this evaluation that were not resumptions
+    /// (`Report::resumed`): a second one is a refuted node.
+    pub(crate) reruns: AtomicU32,
+    /// The field its last commit's run parked on (`Ctx::parked_on`).
+    pub(crate) parked_on: Mx<Option<Field>>,
     /// Bumped at each commit; a reader record carrying an older serial is
     /// stale and dropped when met, so a commit never visits other segments
     /// to retract its node's old reads. Zero: never committed.
@@ -210,6 +215,8 @@ impl Node {
             committing: AtomicBool::new(false),
             runs: AtomicU32::new(0),
             run_epoch: AtomicU64::new(0),
+            reruns: AtomicU32::new(0),
+            parked_on: Mx::new(None),
             serial: AtomicU32::new(0),
             last: Mx::new(None),
             woke: Mx::new(None),
@@ -527,6 +534,8 @@ pub(crate) struct Product {
     pub(crate) unchanged: bool,
     /// `Ctx::park`: the state the next run resumes from.
     pub(crate) state: Option<ValueId>,
+    /// `Ctx::parked_on`: the field whose answer the run stopped for.
+    pub(crate) parked_on: Option<Field>,
     /// The run took its last run's state (`Ctx::resumed`): that run's
     /// reads stand with this one's.
     pub(crate) resumed: std::cell::Cell<bool>,

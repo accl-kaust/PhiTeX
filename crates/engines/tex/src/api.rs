@@ -1481,6 +1481,12 @@ pub struct Stats {
     /// The engine's counters, summed over the evaluations.
     pub nodes_run: u64,
     pub runs: u64,
+    /// Nodes run again other than by resumptions, the resumptions (runs
+    /// going on from where their node parked, woken by what it parked
+    /// on) and the parks (`phitex_defuse::Report`'s).
+    pub refuted_nodes: u64,
+    pub resumptions: u64,
+    pub parks: u64,
     pub cutoffs: u64,
     pub created: u64,
     pub freed: u64,
@@ -1861,8 +1867,8 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
     #[allow(clippy::cast_precision_loss)]
     let rpn = r.runs as f64 / live as f64;
     eprintln!(
-        "acct: {} runs, {} nodes run, {} live nodes, {rpn:.2} runs/node, {} refuted, {} relations resolved, {} shaped, {} steals, {} segments, {} passes",
-        r.runs, r.nodes_run, live, r.refuted_nodes, r.relative_resolved, r.shaped, r.steals, r.segments, r.passes
+        "acct: {} runs, {} nodes run, {} live nodes, {rpn:.2} runs/node, {} refuted, {} resumed of {} parks, {} relations resolved, {} shaped, {} steals, {} segments, {} passes",
+        r.runs, r.nodes_run, live, r.refuted_nodes, r.resumed, r.parks, r.relative_resolved, r.shaped, r.steals, r.segments, r.passes
     );
     let kinds: Vec<String> = by_kind
         .iter()
@@ -2297,6 +2303,9 @@ impl Stats {
         );
         self.nodes_run += r.nodes_run;
         self.runs += r.runs;
+        self.refuted_nodes += r.refuted_nodes;
+        self.resumptions += r.resumed;
+        self.parks += r.parks;
         self.rounds += 1;
         // (the passes the files read back took: one, and each rerun a
         // node took on them)
@@ -5310,11 +5319,11 @@ impl Build {
         // the pieces' profiles to its page's fire and places the page's
         // finisher and the next step, `crate::pages::Pages`; new text
         // pieces go before the mark it follows. It is placed by a node
-        // where the text begins, right after the text's first piece,
-        // which the caller's thread runs before the others start (the
-        // state it sets, read by every piece after it, in before any of
-        // them runs): the steps run beside the text, not after the last
-        // block of it; on one thread so TeX's own order holds, a page's
+        // where the text begins, right before the text's first piece (not
+        // after it: the pieces split off that piece stand before its next
+        // sibling, and the page loop started only after them, the text
+        // there reading what the first page's routine had not yet left):
+        // the steps run beside the text, not after the last block of it; on one thread so TeX's own order holds, a page's
         // routine before the text after it, which reads what the routine
         // left (LaTeX's `\@freelist` after a marginpar: run after the
         // text, each routine ran all the text after it again))
@@ -5322,8 +5331,8 @@ impl Build {
         match nodes.first() {
             Some(&(_, first, _)) => {
                 let v = g.eng.values();
-                let args = crate::pages::kick_args(v, steps);
-                g.eng.insert_after(first, g.ops.kick, args);
+                let args = crate::pages::kick_args(v, steps, first);
+                g.eng.insert_before(first, g.ops.kick, args);
             }
             _ => {
                 g.eng.push(unit, g.ops.pages, Vec::new());

@@ -473,7 +473,14 @@ pub struct Report {
     pub first_runs: u64,
     /// The summed run time of every run that was not its node's last.
     pub wasted_ns: u64,
+    /// Nodes run again other than by resumptions: each a refuted node.
     pub refuted_nodes: u64,
+    /// Runs that went on from where their node's last run parked
+    /// (`Ctx::parked_on`, `Ctx::goes_on`), woken by the answer it parked
+    /// on: TeX's page builder going on after each paragraph, not a rerun.
+    pub resumed: u64,
+    /// Commits of runs that parked on an answer not in yet.
+    pub parks: u64,
     /// Runs stopped at a check (`Ctx::tick`) because a read moved while
     /// they ran: run again on what it moved to.
     pub stopped_stale: u64,

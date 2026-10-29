@@ -427,17 +427,17 @@ pub(crate) fn raw_node(v: &Values, x: ValueId) -> Option<NodeId> {
 const KICK: &str = "\u{1}kick";
 
 /// The arguments of the node that places the page builder's node after
-/// `mark` (where the text ends): `[tag, mark]`. Pushed where the text
-/// begins, it runs with the first block, so the loop starts beside the
-/// text instead of after it.
-pub(crate) fn kick_args(v: &Values, mark: NodeId) -> Vec<ValueId> {
-    vec![v.str(KICK), raw_value(v, Some(mark))]
+/// `mark` (where the text ends): `[tag, mark, first]`. Pushed where the
+/// text begins, before its first piece `first`, it runs with the first
+/// block, so the loop starts beside the text instead of after it.
+pub(crate) fn kick_args(v: &Values, mark: NodeId, first: NodeId) -> Vec<ValueId> {
+    vec![v.str(KICK), raw_value(v, Some(mark)), raw_value(v, Some(first))]
 }
 
 /// The mark a kick's arguments name.
-pub(crate) fn kick_of(v: &Values, args: &[ValueId]) -> Option<NodeId> {
+pub(crate) fn kick_of(v: &Values, args: &[ValueId]) -> Option<(NodeId, Option<NodeId>)> {
     match args {
-        [t, m] if v.with_str(*t, |s| s == KICK).unwrap_or(false) => raw_node(v, *m),
+        [t, m, f] if v.with_str(*t, |s| s == KICK).unwrap_or(false) => raw_node(v, *m).map(|m| (m, raw_node(v, *f))),
         _ => None,
     }
 }
@@ -470,13 +470,13 @@ impl Operation for Kick {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        if let Some(at) = kick_of(cx.values(), cx.args()) {
+        if let Some((at, first)) = kick_of(cx.values(), cx.args()) {
             cx.follow_after(at, ops(&self.0).pages, Vec::new());
             // (the page layer's frontier, until the loop's first run sets
-            // its own: here, after the text's first piece, so the loop runs
-            // before the text after it, as TeX builds the page after each
-            // paragraph, not once the whole text has run)
-            cx.set_frontier(Some(cx.node()));
+            // its own: the text's first piece, so the loop runs before the
+            // text after it, as TeX builds the page after each paragraph,
+            // not once the whole text has run)
+            cx.set_frontier(first);
         }
         Ok(ValueId::UNIT)
     }
@@ -540,6 +540,16 @@ enum Start {
     Done,
 }
 
+/// [`Run::rest_start`]: where a run begins.
+enum RestBegin {
+    /// The loop's first node, not a rest.
+    Loop,
+    /// A rest, at its start.
+    At(RestStart),
+    /// A rest whose start is not defined yet.
+    NotYet,
+}
+
 /// Where the run may stop early on a page it fires again as it was: past
 /// the change that asked for it.
 #[derive(Clone, Copy)]
@@ -591,17 +601,10 @@ impl Run<'_, '_> {
     fn page_loop_r(&mut self) -> R<ValueId> {
         let v = self.v;
         let me = self.cx.node();
-        // (a loop rest: where it starts, as the loop node before it
-        // defined it; none yet, nothing to fold)
-        let rest = match rest_of(v, self.cx.args()) {
-            Some(parent) => match self.cx.read_at(rest_field(v, parent), At::End(self.cx.unit()))? {
-                phitex_defuse::FieldAt::Def(x, _) => match RestStart::decode(v, x) {
-                    Some(r) => Some(r),
-                    None => return Ok(ValueId::UNIT),
-                },
-                _ => return Ok(ValueId::UNIT),
-            },
-            None => None,
+        let rest = match self.rest_start()? {
+            RestBegin::Loop => None,
+            RestBegin::At(r) => Some(r),
+            RestBegin::NotYet => return Ok(ValueId::UNIT),
         };
         // (its rest, placement 0, first: a child, right after this node
         // whatever its pages; placed after them, it stood after the last
@@ -630,6 +633,9 @@ impl Run<'_, '_> {
             ..LoopState::default()
         };
         let (start, bound) = self.where_to_start(&old, &mut ls);
+        if matches!(start, Start::Tail(_)) || self.parked_first(rest.as_ref(), &old) {
+            self.cx.goes_on();
+        }
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             self.trace_start(&start, ls.checkpoints.len(), n_old);
         }
@@ -639,6 +645,7 @@ impl Run<'_, '_> {
         let (mut st, mut lc, mut pending) = match start {
             Start::Scratch if let Some(r) = &rest => {
                 let Some((st, lc, p, gave)) = self.rest_begins(r, &mut ls)? else {
+                    self.cx.parked_on(r.key.field(v, PAGE_OUT));
                     self.cx.park(ls.encode(v));
                     return Ok(ValueId::UNIT);
                 };
@@ -673,6 +680,7 @@ impl Run<'_, '_> {
         // would run again on each finisher before them that changes,
         // the page they have not had folded again
         if hole {
+            self.cx.parked_on(v.field(crate::vprof::VPROF));
             ls.tail = Some(encode_tail(v, &st, &lc));
             self.emit_beyond(&mut ls, &old);
         }
@@ -727,6 +735,43 @@ impl Run<'_, '_> {
         } else if lc.ended {
             self.cx.set_frontier(None);
         }
+    }
+
+    /// A loop rest's start, as the loop node before it defined it; none
+    /// yet, nothing to fold: parked on it.
+    fn rest_start(&mut self) -> R<RestBegin> {
+        let v = self.v;
+        let Some(parent) = rest_of(v, self.cx.args()) else {
+            return Ok(RestBegin::Loop);
+        };
+        let f = rest_field(v, parent);
+        match self.cx.read_at(f, At::End(self.cx.unit()))? {
+            phitex_defuse::FieldAt::Def(x, _) if let Some(r) = RestStart::decode(v, x) => Ok(RestBegin::At(r)),
+            _ => {
+                self.cx.parked_on(f);
+                Ok(RestBegin::NotYet)
+            }
+        }
+    }
+
+    /// Whether this run goes on from where the last stopped with none of
+    /// its work done again ([`phitex_defuse::Ctx::goes_on`]) other than
+    /// from its tail: a rest whose last run parked at its first reads, its
+    /// start or its first page's give-back, before any fold, woken by that
+    /// answer.
+    fn parked_first(&self, rest: Option<&RestStart>, old: &LoopState) -> bool {
+        let v = self.v;
+        rest.is_some_and(|r| {
+            let woke = match self.cx.woken_by() {
+                Some(Cause::Changed { field, .. }) => Some(field),
+                _ => None,
+            };
+            let begins = rest_of(v, self.cx.args()).map(|p| rest_field(v, p));
+            old.checkpoints.is_empty()
+                && old.beyond.is_empty()
+                && old.tail.is_none()
+                && woke.is_some_and(|f| Some(f) == begins || f == r.key.field(v, PAGE_OUT))
+        })
     }
 
     /// (`PHITEX_SCAN_TRACE`) Where a run starts.
