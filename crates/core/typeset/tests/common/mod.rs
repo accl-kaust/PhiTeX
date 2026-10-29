@@ -342,7 +342,10 @@ pub fn parse_list(lines: &[&str], prefix: &str) -> Vec<Node> {
             while i < lines.len() && lines[i].starts_with(&inner) {
                 i += 1;
             }
-            Node::Box(Box::new(parse_box_header(body, parse_list(&lines[start..i], &inner))))
+            Node::Box(Box::new(parse_box_header(
+                body,
+                parse_list(&lines[start..i], &inner),
+            )))
         } else if let Some(rest) = body.strip_prefix("\\rule(") {
             let (hd, w) = rest.split_once(")x").unwrap();
             let (h, d) = hd.split_once('+').unwrap();

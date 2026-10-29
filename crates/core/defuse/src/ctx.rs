@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{Cause, At, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Step, Stop};
+use crate::api::{At, Cause, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Step, Stop};
 use crate::engine::Engine;
 use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, ReadRec, RunRecord, State};
 use crate::order::Pos;
@@ -163,7 +163,12 @@ impl<'a> Ctx<'a> {
 
     fn record(&mut self, kind: ReadKind, path: PathId, seen: Option<ValueId>) {
         let epoch = if kind.field().is_some() { self.ep } else { u64::MAX };
-        self.product.reads.push(ReadRec { kind, path, seen, epoch });
+        self.product.reads.push(ReadRec {
+            kind,
+            path,
+            seen,
+            epoch,
+        });
     }
 
     /// Loads `f`'s change count before a read of it ([`ReadRec::epoch`]).
@@ -257,7 +262,11 @@ impl<'a> Ctx<'a> {
             return Ok(());
         }
         let Some(by) = r.by else { return Ok(()) };
-        let settles = |n: NodeId| self.eng.placed_node(n).is_some_and(|x| self.eng.op(x.op()).settles_at_quiet());
+        let settles = |n: NodeId| {
+            self.eng
+                .placed_node(n)
+                .is_some_and(|x| self.eng.op(x.op()).settles_at_quiet())
+        };
         if by == self.me.id || !settles(by) || self.eng.op(self.me.op()).settles_at_quiet() {
             return Ok(());
         }
@@ -327,7 +336,12 @@ impl<'a> Ctx<'a> {
     /// register, docs/spec-state-model.md §2.2).
     pub fn define_alias(&mut self, f: Field, g: Field, at: NodeId, loc: Locality) {
         let x = read::alias_value(self.values(), g, at);
-        self.product.defs.push(DefRec { f, loc, value: x, rel: None });
+        self.product.defs.push(DefRec {
+            f,
+            loc,
+            value: x,
+            rel: None,
+        });
     }
 
     /// The definition of `f` reaching another position; an alias
@@ -355,14 +369,23 @@ impl<'a> Ctx<'a> {
             At::Final => (Anchor::Final, Some(crate::read::final_read(self.eng, f))),
             At::End(u) => (
                 Anchor::End(u),
-                Some(read::reaching_visible(self.eng, f, Pos(self.eng.unit(u).end.0 - 1), true)),
+                Some(read::reaching_visible(
+                    self.eng,
+                    f,
+                    Pos(self.eng.unit(u).end.0 - 1),
+                    true,
+                )),
             ),
         };
         if let (Some(x), Anchor::Before(_) | Anchor::AfterOwn(_)) = (&r, &anchor) {
             self.wait_for_settling(x)?;
             self.hold_at_frontier(f)?;
         }
-        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.and_then(|x| x.value));
+        self.record(
+            ReadKind::Field { f, at: anchor },
+            PathId::WHOLE,
+            r.and_then(|x| x.value),
+        );
         Ok(match r {
             None => FieldAt::Gone,
             Some(x) => match x.value {
@@ -461,7 +484,13 @@ impl<'a> Ctx<'a> {
     }
 
     /// The fold's value; None where a bound is gone.
-    fn fold_value(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, incl: bool) -> Result<Option<ValueId>, Stop> {
+    fn fold_value(
+        &mut self,
+        f: Field,
+        from: Option<NodeId>,
+        to: Option<NodeId>,
+        incl: bool,
+    ) -> Result<Option<ValueId>, Stop> {
         self.check()?;
         self.before_read(f);
         let Some(fp) = self.bound(from) else {
@@ -487,7 +516,16 @@ impl<'a> Ctx<'a> {
     /// where `from` or `to` is gone.
     pub fn fold(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<ValueId, Stop> {
         let x = self.fold_value(f, from, to, false)?;
-        self.record(ReadKind::Fold { f, from, to, incl: false }, PathId::WHOLE, x);
+        self.record(
+            ReadKind::Fold {
+                f,
+                from,
+                to,
+                incl: false,
+            },
+            PathId::WHOLE,
+            x,
+        );
         Ok(x.unwrap_or_else(|| self.empty(f)))
     }
 
@@ -495,15 +533,39 @@ impl<'a> Ctx<'a> {
     /// unit's start) up to and with `to`'s own.
     pub fn fold_through(&mut self, f: Field, from: Option<NodeId>, to: NodeId) -> Result<ValueId, Stop> {
         let x = self.fold_value(f, from, Some(to), true)?;
-        self.record(ReadKind::Fold { f, from, to: Some(to), incl: true }, PathId::WHOLE, x);
+        self.record(
+            ReadKind::Fold {
+                f,
+                from,
+                to: Some(to),
+                incl: true,
+            },
+            PathId::WHOLE,
+            x,
+        );
         Ok(x.unwrap_or_else(|| self.empty(f)))
     }
 
     /// `fold` through a path.
-    pub fn fold_path(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, p: PathId) -> Result<Option<ValueId>, Stop> {
+    pub fn fold_path(
+        &mut self,
+        f: Field,
+        from: Option<NodeId>,
+        to: Option<NodeId>,
+        p: PathId,
+    ) -> Result<Option<ValueId>, Stop> {
         let x = self.fold_value(f, from, to, false)?;
         let y = x.and_then(|x| read::apply_path(self.eng, Some(x), p));
-        self.record(ReadKind::Fold { f, from, to, incl: false }, p, y);
+        self.record(
+            ReadKind::Fold {
+                f,
+                from,
+                to,
+                incl: false,
+            },
+            p,
+            y,
+        );
         Ok(y)
     }
 
@@ -534,7 +596,12 @@ impl<'a> Ctx<'a> {
     pub fn view(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<View, Stop> {
         let x = self.fold_value(f, from, to, false)?;
         self.views.push(ViewRec {
-            kind: ReadKind::Fold { f, from, to, incl: false },
+            kind: ReadKind::Fold {
+                f,
+                from,
+                to,
+                incl: false,
+            },
             path: PathId::WHOLE,
             value: x,
             epoch: self.ep,
@@ -546,7 +613,12 @@ impl<'a> Ctx<'a> {
     pub fn view_through(&mut self, f: Field, from: Option<NodeId>, to: NodeId) -> Result<View, Stop> {
         let x = self.fold_value(f, from, Some(to), true)?;
         self.views.push(ViewRec {
-            kind: ReadKind::Fold { f, from, to: Some(to), incl: true },
+            kind: ReadKind::Fold {
+                f,
+                from,
+                to: Some(to),
+                incl: true,
+            },
             path: PathId::WHOLE,
             value: x,
             epoch: self.ep,
@@ -583,7 +655,12 @@ impl<'a> Ctx<'a> {
         self.ep = epoch;
         self.record(kind.clone(), present, seen);
         x?;
-        self.views.push(ViewRec { kind, path, value: x, epoch });
+        self.views.push(ViewRec {
+            kind,
+            path,
+            value: x,
+            epoch,
+        });
         Some(View(u32::try_from(self.views.len() - 1).unwrap_or(u32::MAX)))
     }
 
@@ -604,7 +681,9 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn has(&mut self, v: View, k: ValueId) -> bool {
-        self.get(v, Step::Has(k)).and_then(|x| self.eng.values().as_bool(x)).unwrap_or(false)
+        self.get(v, Step::Has(k))
+            .and_then(|x| self.eng.values().as_bool(x))
+            .unwrap_or(false)
     }
 
     /// The whole value under the view, recorded as a read of all of it.
@@ -646,7 +725,10 @@ impl<'a> Ctx<'a> {
     ///
     /// Where `j` is not a placement this run made before.
     pub fn follow_after_placed(&mut self, j: usize, op: OpId, args: Vec<ValueId>) -> usize {
-        assert!(j < self.product.placements.len(), "follow_after_placed({j}): no such placement before");
+        assert!(
+            j < self.product.placements.len(),
+            "follow_after_placed({j}): no such placement before"
+        );
         self.product.placements.push(Placement::FollowAfterPlaced(j, op, args));
         self.product.placements.len() - 1
     }
@@ -656,7 +738,9 @@ impl<'a> Ctx<'a> {
         let c = self.last.as_ref().and_then(|r| r.placed.get(i).copied());
         let out = c.and_then(|c| {
             let n = self.eng.node(c);
-            (n.state() != State::Gone).then(|| n.run_record().map(|r| r.output)).flatten()
+            (n.state() != State::Gone)
+                .then(|| n.run_record().map(|r| r.output))
+                .flatten()
         });
         self.record(ReadKind::Placed { i, guess: false }, PathId::WHOLE, out);
         out
@@ -709,7 +793,9 @@ impl<'a> Ctx<'a> {
             let (op, args) = p.key();
             let c = *self.placed_keys.as_ref()?.get(&(op, Arc::from(args)))?;
             let n = self.eng.node(c);
-            (n.state() != State::Gone).then(|| n.run_record().map(|r| r.output)).flatten()
+            (n.state() != State::Gone)
+                .then(|| n.run_record().map(|r| r.output))
+                .flatten()
         })
     }
 
@@ -881,7 +967,9 @@ impl<'a> Ctx<'a> {
     /// reads are kept with this run's (the ones it reads again replaced),
     /// so a change behind where it resumes still asks it again.
     pub fn resumed(&self) -> Option<ValueId> {
-        if matches!(self.woken_by(), Some(Cause::Edited)) || self.me.state_stale.load(std::sync::atomic::Ordering::Acquire) {
+        if matches!(self.woken_by(), Some(Cause::Edited))
+            || self.me.state_stale.load(std::sync::atomic::Ordering::Acquire)
+        {
             return None;
         }
         let st = self.last.as_ref().and_then(|r| r.state);
@@ -897,7 +985,9 @@ impl<'a> Ctx<'a> {
     /// the state with [`Ctx::goes_on_from_edit`]. `None` for another
     /// cause, a stale state ([`Ctx::resumed`]'s rule) or none stored.
     pub fn parked_before_edit(&self) -> Option<ValueId> {
-        if !matches!(self.woken_by(), Some(Cause::Edited)) || self.me.state_stale.load(std::sync::atomic::Ordering::Acquire) {
+        if !matches!(self.woken_by(), Some(Cause::Edited))
+            || self.me.state_stale.load(std::sync::atomic::Ordering::Acquire)
+        {
             return None;
         }
         self.last.as_ref().and_then(|r| r.state)
@@ -927,7 +1017,10 @@ impl<'a> Ctx<'a> {
     /// Node `n`'s operation, where it stands (placed, not removed). Not a
     /// read.
     pub fn op_of(&self, n: NodeId) -> Option<OpId> {
-        self.eng.placed_node(n).filter(|x| x.state() != State::Gone).map(|x| x.op())
+        self.eng
+            .placed_node(n)
+            .filter(|x| x.state() != State::Gone)
+            .map(|x| x.op())
     }
 
     /// Whether the node that placed me has nothing more to commit: clean
@@ -965,7 +1058,10 @@ impl<'a> Ctx<'a> {
     pub fn unread(&mut self, f: Field) {
         self.seen.remove(&f);
         self.product.reads.retain(|r| match &r.kind {
-            ReadKind::Field { f: g, .. } | ReadKind::Env { f: g } | ReadKind::Fold { f: g, .. } | ReadKind::Next { f: g, .. } => *g != f,
+            ReadKind::Field { f: g, .. }
+            | ReadKind::Env { f: g }
+            | ReadKind::Fold { f: g, .. }
+            | ReadKind::Next { f: g, .. } => *g != f,
             ReadKind::Placed { .. } | ReadKind::Following { .. } | ReadKind::Hole => true,
         });
     }
@@ -1006,8 +1102,8 @@ impl<'a> Ctx<'a> {
         use std::sync::atomic::Ordering;
         self.me.stale.store(false, Ordering::Release);
         let wake = self.me.stale_wake.lock().take();
-        let scope_moved = read::scoped(self.eng)
-            && self.eng.scope_gen.load(Ordering::Acquire) != self.product.scope_gen;
+        let scope_moved =
+            read::scoped(self.eng) && self.eng.scope_gen.load(Ordering::Acquire) != self.product.scope_gen;
         let mut memo = crate::read::FoldMemo::new();
         let moved = self.product.reads.iter().any(|rd| {
             if matches!(rd.kind, ReadKind::Following { .. }) {
@@ -1057,5 +1153,4 @@ impl<'a> Ctx<'a> {
     pub fn elapsed(&self) -> Option<std::time::Duration> {
         self.worker.map(|w| w.shared.t0.elapsed())
     }
-
 }

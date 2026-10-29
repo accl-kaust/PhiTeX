@@ -192,10 +192,20 @@ fn a_file_whose_lines_build_on_each_other_is_read_in_order() {
         let opts = phitex_tex::Options {
             fixpoint: true,
             threads: Some(threads),
-            ..common::options("./headcount.tex", "headcount", &common::dvi_comment(&want), &fx)
+            ..common::options(
+                "./headcount.tex",
+                "headcount",
+                &common::dvi_comment(&want),
+                &fx,
+            )
         };
         let b = common::build(opts, Some(&common::plain()), &src);
         let (dvi, log) = b.output();
-        assert_eq!(common::first_difference(&dvi, &want), None, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
+        assert_eq!(
+            common::first_difference(&dvi, &want),
+            None,
+            "-j{threads}: DVI differs; log tail:\n{}",
+            common::log_excerpt(&log)
+        );
     }
 }

@@ -122,7 +122,10 @@ impl Files for XdvFiles {
         {
             let p = self.dir.join(rel);
             if p.is_file() {
-                return Some(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::as_bytes(p.as_os_str()).to_vec());
+                return Some(
+                    <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::as_bytes(p.as_os_str())
+                        .to_vec(),
+                );
             }
         }
         let mut d = self.dpx.lock().unwrap_or_else(PoisonError::into_inner);
@@ -132,7 +135,9 @@ impl Files for XdvFiles {
     fn read(&self, path: &[u8]) -> Option<Arc<[u8]>> {
         // (the document's own files read again each time: they change
         // between a watch's builds)
-        let p = std::path::Path::new(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path));
+        let p = std::path::Path::new(
+            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path),
+        );
         if p.is_relative() || p.starts_with(&self.dir) {
             return std::fs::read(self.dir.join(p)).ok().map(Arc::from);
         }

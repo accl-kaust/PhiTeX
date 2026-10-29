@@ -208,7 +208,8 @@ impl Arena {
             if p == 0 {
                 return None;
             }
-            sb.get(b0 + usize::from(p) - 1).map(|&(lo, hi)| t0 + lo as usize..t0 + hi as usize)
+            sb.get(b0 + usize::from(p) - 1)
+                .map(|&(lo, hi)| t0 + lo as usize..t0 + hi as usize)
         };
         let n: usize = segs
             .iter()
@@ -429,8 +430,25 @@ impl Seg {
         match (self, o) {
             (Seg::Line(a), Seg::Line(b)) => {
                 a.buf == b.buf
-                    && (a.loc, a.state, a.endch, a.starts, a.ends, a.lineno, a.rescanned, a.chars)
-                        == (b.loc, b.state, b.endch, b.starts, b.ends, b.lineno, b.rescanned, b.chars)
+                    && (
+                        a.loc,
+                        a.state,
+                        a.endch,
+                        a.starts,
+                        a.ends,
+                        a.lineno,
+                        a.rescanned,
+                        a.chars,
+                    ) == (
+                        b.loc,
+                        b.state,
+                        b.endch,
+                        b.starts,
+                        b.ends,
+                        b.lineno,
+                        b.rescanned,
+                        b.chars,
+                    )
                     && a.origin == b.origin
             }
             (Seg::Toks(a), Seg::Toks(b)) => a == b,
@@ -847,7 +865,6 @@ impl Input {
         into.arena = self.arena.mark();
     }
 
-
     /// Copies what the token-list levels still hold (each from its
     /// origin, for a step back, §325) into a fresh arena and drops the
     /// rest: lists read to their end, finished macro calls, bodies cached
@@ -880,7 +897,6 @@ impl Input {
         self.compact_at = (fresh.len() * 4).max(ARENA_COMPACT);
         self.arena = fresh;
     }
-
 }
 
 /// Where the input stood when a command began ([`Input::snapshot`]).

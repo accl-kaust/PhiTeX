@@ -53,7 +53,10 @@ pub(crate) fn made_field(v: &Values, name: &str) -> Field {
 /// writes, each with its run's arguments: an output whose first claiming
 /// tool with a written input reads `input` (BibTeX's `.bbl` from the
 /// `.aux`, biber's from the `.bcf`, makeindex's `.ind` from the `.idx`).
-pub(crate) fn made_from(cx: &mut Ctx<'_>, input: &str) -> Result<Vec<(String, Vec<ValueId>)>, Stop> {
+pub(crate) fn made_from(
+    cx: &mut Ctx<'_>,
+    input: &str,
+) -> Result<Vec<(String, Vec<ValueId>)>, Stop> {
     let v = cx.values();
     let base = input.rsplit_once('.').map_or(input, |(b, _)| b);
     let mut out = Vec::new();

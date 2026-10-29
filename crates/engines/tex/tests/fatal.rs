@@ -15,11 +15,17 @@ use phitex_tex::Options;
 fn doc(n: usize) -> String {
     let mut s = String::new();
     for i in 0..2 {
-        let _ = write!(s, "Paragraph {i} before the error, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches.\n\n");
+        let _ = write!(
+            s,
+            "Paragraph {i} before the error, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches.\n\n"
+        );
     }
     s.push_str("\\batchmode\\read16 to\\x\n\n");
     for i in 0..n {
-        let _ = write!(s, "Paragraph {i} after the error, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, which pdfTeX never reads.\n\n");
+        let _ = write!(
+            s,
+            "Paragraph {i} after the error, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, which pdfTeX never reads.\n\n"
+        );
     }
     s.push_str("\\bye\n");
     s
@@ -39,9 +45,17 @@ fn build(threads: usize) -> phitex_tex::Build {
 #[test]
 fn a_fatal_error_ends_the_job_on_one_thread() {
     let b = build(1);
-    assert!(b.fatal(), "the job ended on the fatal error: {:?}", b.stats.runs_by_op);
+    assert!(
+        b.fatal(),
+        "the job ended on the fatal error: {:?}",
+        b.stats.runs_by_op
+    );
     let exec = common::runs_of(&b, "exec");
-    assert!(exec <= 4, "the pieces before the error and the error's, no more: {exec} exec runs, {:?}", b.stats.runs_by_op);
+    assert!(
+        exec <= 4,
+        "the pieces before the error and the error's, no more: {exec} exec runs, {:?}",
+        b.stats.runs_by_op
+    );
 }
 
 /// Eight threads: pieces that had started before the fatal run committed
@@ -51,8 +65,17 @@ fn a_fatal_error_ends_the_job_on_eight_threads() {
     let b = build(8);
     assert!(b.fatal(), "{:?}", b.stats.runs_by_op);
     let (exec, live) = (common::runs_of(&b, "exec"), b.nodes_by_op("exec") as u64);
-    assert!(exec < live / 2, "at most the pieces that had started: {exec} runs of {live} pieces, {:?}", b.stats.runs_by_op);
-    assert_eq!(common::runs_of(&b, "finish"), 0, "no page is finished after a fatal error: {:?}", b.stats.runs_by_op);
+    assert!(
+        exec < live / 2,
+        "at most the pieces that had started: {exec} runs of {live} pieces, {:?}",
+        b.stats.runs_by_op
+    );
+    assert_eq!(
+        common::runs_of(&b, "finish"),
+        0,
+        "no page is finished after a fatal error: {:?}",
+        b.stats.runs_by_op
+    );
 }
 
 /// The paragraphs after the error in an included file, placed by the
@@ -64,7 +87,10 @@ fn a_fatal_error_ends_the_job_before_an_included_file() {
         let dir = common::scratch(&format!("fatal-input-{threads}"));
         let mut body = String::new();
         for i in 0..300 {
-            let _ = write!(body, "Paragraph {i} of the included file, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, which pdfTeX never reads.\n\n");
+            let _ = write!(
+                body,
+                "Paragraph {i} of the included file, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, which pdfTeX never reads.\n\n"
+            );
         }
         std::fs::write(dir.join("body.tex"), body).unwrap();
         let src = "Paragraph before the error, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches.\n\n\\batchmode\\read16 to\\x\n\n\\input body\n\n\\bye\n";
@@ -77,8 +103,17 @@ fn a_fatal_error_ends_the_job_before_an_included_file() {
         // (whether the file's pieces were staged before the error or the
         // file was never read: nothing after the error runs)
         let exec = common::runs_of(&b, "exec");
-        assert!(exec <= 6, "-j{threads}: the pieces before the error and the error's, no more: {exec} exec runs, {:?}", b.stats.runs_by_op);
-        assert_eq!(common::runs_of(&b, "finish"), 0, "-j{threads}: {:?}", b.stats.runs_by_op);
+        assert!(
+            exec <= 6,
+            "-j{threads}: the pieces before the error and the error's, no more: {exec} exec runs, {:?}",
+            b.stats.runs_by_op
+        );
+        assert_eq!(
+            common::runs_of(&b, "finish"),
+            0,
+            "-j{threads}: {:?}",
+            b.stats.runs_by_op
+        );
     }
 }
 
@@ -93,7 +128,10 @@ fn a_fatal_error_ends_the_job_before_an_included_file() {
 /// 21617), the same two lines in the log and no output file.
 #[test]
 fn the_input_ending_inside_a_skipped_else_ends_the_job() {
-    let cases = [("\\iftrue x\\else y\n", 1), ("\\def\\x{\\iftrue a\\else b}\n\\x\nc\n", 2)];
+    let cases = [
+        ("\\iftrue x\\else y\n", 1),
+        ("\\def\\x{\\iftrue a\\else b}\n\\x\nc\n", 2),
+    ];
     for (k, (src, line)) in cases.into_iter().enumerate() {
         for threads in [1, 8] {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -110,8 +148,14 @@ fn the_input_ending_inside_a_skipped_else_ends_the_job() {
                 .recv_timeout(std::time::Duration::from_secs(120))
                 .unwrap_or_else(|_| panic!("case {k} -j{threads}: the build did not end in 120 s"));
             let want = format!("! Incomplete \\iftrue; all text was ignored after line {line}.");
-            assert!(log.contains(&want), "case {k} -j{threads}: {want:?} not in the log:\n{log}");
-            assert!(fatal && log.contains("*** (job aborted, no legal \\end found)"), "case {k} -j{threads}: the job is aborted:\n{log}");
+            assert!(
+                log.contains(&want),
+                "case {k} -j{threads}: {want:?} not in the log:\n{log}"
+            );
+            assert!(
+                fatal && log.contains("*** (job aborted, no legal \\end found)"),
+                "case {k} -j{threads}: the job is aborted:\n{log}"
+            );
         }
     }
 }
@@ -138,7 +182,11 @@ fn a_finisher_reads_its_routine_only() {
             ..common::options("./d.tex", "d", "", &dir)
         };
         let b = common::build(opts, Some(&common::plain()), &src);
-        assert_eq!(b.nodes_held_by("finish"), 0, "-j{threads}: the document's nodes a finisher holds");
+        assert_eq!(
+            b.nodes_held_by("finish"),
+            0,
+            "-j{threads}: the document's nodes a finisher holds"
+        );
     }
 }
 
@@ -172,10 +220,16 @@ fn a_read_on_waits_for_the_text_before_it() {
         };
         let b = common::build(opts, Some(&common::plain()), &src);
         assert!(!b.fatal(), "-j{threads}: the job ended");
-        eprintln!("-j{threads}: {} siblings read on into", b.stats.siblings_pulled);
+        eprintln!(
+            "-j{threads}: {} siblings read on into",
+            b.stats.siblings_pulled
+        );
         pulled.push(b.stats.siblings_pulled);
         pdfs.push(b.output().0);
     }
     assert!(pdfs[0] == pdfs[1], "-j1 and -j8 give the same output");
-    assert_eq!(pulled[1], pulled[0], "the siblings read on into at -j8, as at -j1");
+    assert_eq!(
+        pulled[1], pulled[0],
+        "the siblings read on into at -j8, as at -j1"
+    );
 }

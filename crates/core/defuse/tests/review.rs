@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use phitex_defuse::{Ctx, EditSource, Engine, Field, Limits, Monoid, NodeId, OpId, Operation, Stop, SumMonoid, UnitId, ValueId, Values};
+use phitex_defuse::{
+    Ctx, EditSource, Engine, Field, Limits, Monoid, NodeId, OpId, Operation, Stop, SumMonoid, UnitId, ValueId, Values,
+};
 
 /// `[f, x]`: contributes x to f.
 struct Contrib;

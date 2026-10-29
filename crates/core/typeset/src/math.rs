@@ -9,12 +9,13 @@ use std::collections::VecDeque;
 
 use crate::arith::{Scaled, half, nx_plus_y, x_over_n, xn_over_d};
 use crate::fonts::{CharInfo, CharTag, FontId, Fonts, Left, LigKern, LigOp};
-use crate::glue::{Glue, Order};
-use crate::linebreak::INF_PENALTY;
 use crate::fonts::{GlyphPart, NativeMath};
 use crate::glue::GlueSign;
+use crate::glue::{Glue, Order};
+use crate::linebreak::INF_PENALTY;
 use crate::node::{
-    BoxKind, BoxNode, GlueKind, GlueNode, Glyph, KernKind, List, Native, NativeKind, Node, RUNNING, Rule,
+    BoxKind, BoxNode, GlueKind, GlueNode, Glyph, KernKind, List, Native, NativeKind, Node, RUNNING,
+    Rule,
 };
 use crate::pack::{NATURAL, PackParams, Spec, hpack, vpack};
 
@@ -562,7 +563,9 @@ impl Ctx<'_> {
                 native: true,
             };
         }
-        let i = u16::try_from(c).ok().and_then(|c| self.fonts.char_info(f, c));
+        let i = u16::try_from(c)
+            .ok()
+            .and_then(|c| self.fonts.char_info(f, c));
         if i.is_none() {
             self.diags.push(MathDiag::MissingChar { font: f, ch: c });
             *a = Field::Empty;
@@ -597,7 +600,13 @@ impl Ctx<'_> {
     /// XeTeX's `build_opentype_assembly`: a box at least `s` high (wide
     /// if `horiz`) of the parts `a` of font `f`, as few copies of the
     /// extenders as do, their overlaps glue that stretches.
-    fn opentype_assembly(nm: &dyn NativeMath, f: FontId, a: &[GlyphPart], s: Scaled, horiz: bool) -> BoxNode {
+    fn opentype_assembly(
+        nm: &dyn NativeMath,
+        f: FontId,
+        a: &[GlyphPart],
+        s: Scaled,
+        horiz: bool,
+    ) -> BoxNode {
         let mut b = BoxNode {
             kind: if horiz { BoxKind::H } else { BoxKind::V },
             ..BoxNode::default()
@@ -914,7 +923,11 @@ impl Ctx<'_> {
         let t = self.default_rule_thickness();
         let x = self.clean_box(&q.nucleus, self.cur_style);
         let xh = x.height;
-        let mut y = Self::vpack_nat(vec![Node::Box(Box::new(x)), new_kern(3 * t), fraction_rule(t)]);
+        let mut y = Self::vpack_nat(vec![
+            Node::Box(Box::new(x)),
+            new_kern(3 * t),
+            fraction_rule(t),
+        ]);
         let delta = y.height + y.depth + t;
         y.height = xh;
         y.depth = delta - y.height;
@@ -968,7 +981,8 @@ impl Ctx<'_> {
         y.shift = -(x.height + clr);
         let yh = y.height;
         let over = Self::overbar(x, clr, yh);
-        q.nucleus = Field::SubBox(self.hpack_nat(vec![Node::Box(Box::new(y)), Node::Box(Box::new(over))]));
+        q.nucleus =
+            Field::SubBox(self.hpack_nat(vec![Node::Box(Box::new(y)), Node::Box(Box::new(over))]));
     }
 
     /// XeTeX's `compute_ot_math_accent_pos`: the top accent attachment of
@@ -1050,7 +1064,10 @@ impl Ctx<'_> {
             if bottom {
                 0
             } else {
-                h.min(self.nm(Some(f)).map_or(0, |nm| nm.constant(ACCENT_BASE_HEIGHT)))
+                h.min(
+                    self.nm(Some(f))
+                        .map_or(0, |nm| nm.constant(ACCENT_BASE_HEIGHT)),
+                )
             }
         } else {
             h.min(self.fonts.param(f, 5))
@@ -1070,7 +1087,11 @@ impl Ctx<'_> {
             delta = delta + x.height - h;
             h = x.height;
         }
-        let native = if tfm_i.is_none() { self.nm(Some(f)) } else { None };
+        let native = if tfm_i.is_none() {
+            self.nm(Some(f))
+        } else {
+            None
+        };
         let mut y = if let Some(nm) = native {
             // the accent as a glyph, larger as the accentee is wider
             let g0 = nm.char_glyph(c);
@@ -1087,7 +1108,9 @@ impl Ctx<'_> {
                     // (XeTeX loops for ever on a variant of no width)
                     if w2 < 0 || w2 >= w || w2 == 0 {
                         if w2 < 0 {
-                            assembly = nm.assembly(g0, true).map(|a| Self::opentype_assembly(nm, f, &a, w, true));
+                            assembly = nm
+                                .assembly(g0, true)
+                                .map(|a| Self::opentype_assembly(nm, f, &a, w, true));
                         }
                         break;
                     }
@@ -1140,7 +1163,11 @@ impl Ctx<'_> {
             y.shift = -(xh - y.height);
             y
         } else {
-            let mut yv = Self::vpack_nat(vec![Node::Box(Box::new(y)), new_kern(-delta), Node::Box(Box::new(x))]);
+            let mut yv = Self::vpack_nat(vec![
+                Node::Box(Box::new(y)),
+                new_kern(-delta),
+                Node::Box(Box::new(x)),
+            ]);
             if yv.height < h {
                 // §739
                 yv.list.insert(0, new_kern(h - yv.height));
@@ -1329,7 +1356,9 @@ impl Ctx<'_> {
                         n += 1;
                         if h2 < 0 || h2 >= h1 {
                             if h2 < 0 {
-                                assembly = nm.assembly(c, false).map(|a| Self::opentype_assembly(nm, f, &a, h1, false));
+                                assembly = nm
+                                    .assembly(c, false)
+                                    .map(|a| Self::opentype_assembly(nm, f, &a, h1, false));
                             }
                             break;
                         }
@@ -1530,7 +1559,13 @@ impl Ctx<'_> {
     /// XeTeX §806: the OpenType math kern between the nucleus `p` (if it
     /// starts with a glyph) and a script's glyph, shifted by `shift`;
     /// appended to `p` unless zero.
-    fn attach_ot_kern(&self, p: &mut List, script: Option<(FontId, u16)>, sup: bool, shift: Scaled) -> Scaled {
+    fn attach_ot_kern(
+        &self,
+        p: &mut List,
+        script: Option<(FontId, u16)>,
+        sup: bool,
+        shift: Scaled,
+    ) -> Scaled {
         let Some(g) = glyph_of(p.first()) else {
             return 0;
         };
@@ -1552,14 +1587,15 @@ impl Ctx<'_> {
     /// `hlist`.
     #[allow(clippy::too_many_lines)]
     fn make_scripts(&mut self, q: &mut Noad, hlist: &mut List, delta: Scaled) {
-        let (mut shift_up, mut shift_down) =
-            if matches!(hlist.first(), Some(Node::Char { .. })) || glyph_of(hlist.first()).is_some() {
-                (0, 0)
-            } else {
-                let z = self.hpack_nat(hlist.clone());
-                let t = if self.cur_style < Style::SCRIPT { 1 } else { 2 };
-                (z.height - self.mathsy(18, t), z.depth + self.mathsy(19, t))
-            };
+        let (mut shift_up, mut shift_down) = if matches!(hlist.first(), Some(Node::Char { .. }))
+            || glyph_of(hlist.first()).is_some()
+        {
+            (0, 0)
+        } else {
+            let z = self.hpack_nat(hlist.clone());
+            let t = if self.cur_style < Style::SCRIPT { 1 } else { 2 };
+            (z.height - self.mathsy(18, t), z.depth + self.mathsy(19, t))
+        };
         let s = self.cur_size;
         let x = if q.supscr == Field::Empty {
             // §757
@@ -1645,7 +1681,11 @@ impl Ctx<'_> {
                 // (the superscript `delta` to the right of the subscript)
                 x.shift = sup_kern + delta - sub_kern;
                 let k = (shift_up - x.depth) - (y.height - shift_down);
-                let mut v = Self::vpack_nat(vec![Node::Box(Box::new(x)), new_kern(k), Node::Box(Box::new(y))]);
+                let mut v = Self::vpack_nat(vec![
+                    Node::Box(Box::new(x)),
+                    new_kern(k),
+                    Node::Box(Box::new(y)),
+                ]);
                 v.shift = shift_down;
                 v
             }
@@ -1672,7 +1712,11 @@ impl Ctx<'_> {
         if delta < delta2 {
             delta = delta2;
         }
-        vec![Node::Box(Box::new(self.var_delimiter(d, self.cur_size, delta)))]
+        vec![Node::Box(Box::new(self.var_delimiter(
+            d,
+            self.cur_size,
+            delta,
+        )))]
     }
 
     /// `mlist_to_hlist` (§726).

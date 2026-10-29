@@ -55,14 +55,25 @@ fn a_node_a_client_places_beside_a_placement_is_its_placer_s() {
     // the client inserts the piece for 2 after the one for 1, then the
     // placer's text says so and it runs again
     let n = e.insert_placed(kids[0], true, lo, vec![v.int(2)]);
-    assert_eq!(e.children(p), vec![kids[0], n, kids[1]], "listed among its placer's placements");
+    assert_eq!(
+        e.children(p),
+        vec![kids[0], n, kids[1]],
+        "listed among its placer's placements"
+    );
     e.replace(p, po, vec![v.int(1), v.int(2), v.int(3)]);
     let r = e.evaluate(2).unwrap();
-    assert_eq!(e.children(p), vec![kids[0], n, kids[1]], "the placer's run keeps it: {r:?}");
+    assert_eq!(
+        e.children(p),
+        vec![kids[0], n, kids[1]],
+        "the placer's run keeps it: {r:?}"
+    );
     assert_eq!(Report::by_op(&r.placed_by_op, "leaf"), 0, "no second node: {r:?}");
     let order = e.order(u);
     let at = |x| order.iter().position(|&m| m == x).unwrap();
-    assert!(at(kids[0]) < at(n) && at(n) < at(kids[1]) && at(kids[1]) < at(after), "{order:?}");
+    assert!(
+        at(kids[0]) < at(n) && at(n) < at(kids[1]) && at(kids[1]) < at(after),
+        "{order:?}"
+    );
     assert_eq!(e.output(n).and_then(|x| v.as_int(x)), Some(2));
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
     // one before the first, as the client does where none precedes

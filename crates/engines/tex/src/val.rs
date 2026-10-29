@@ -1039,10 +1039,15 @@ fn clist_items(x: ValueId, v: &Values) -> ValueId {
 /// that rebuilt it from other text of the same size) leaves a reader of
 /// the class's parameters standing.
 pub(crate) fn box_shape_projection(x: ValueId, v: &Values) -> ValueId {
-    let b = v.with_list(x, |xs| xs.get(1).copied().filter(|&b| b != ValueId::UNIT)).flatten();
+    let b = v
+        .with_list(x, |xs| xs.get(1).copied().filter(|&b| b != ValueId::UNIT))
+        .flatten();
     b.map_or(ValueId::UNIT, |b| {
         let hd = crate::nodes::box_dim(v, b, 3) + crate::nodes::box_dim(v, b, 2);
-        v.list(vec![v.int(i64::from(crate::nodes::box_is_h(v, b))), v.int(i64::from(hd))])
+        v.list(vec![
+            v.int(i64::from(crate::nodes::box_is_h(v, b))),
+            v.int(i64::from(hd)),
+        ])
     })
 }
 
@@ -1382,9 +1387,10 @@ impl Mean {
             Mean::Undefined => (cmd::UNDEFINED_CS, 0),
             Mean::Font(f) => (cmd::SET_FONT, i32::try_from(*f).unwrap_or(0)),
             Mean::CharDef(n) => (cmd::CHAR_GIVEN, i32::try_from(*n).unwrap_or(0)),
-            Mean::MathCharDef(n) if *n >= crate::xetex::U_MATH => {
-                (cmd::MATH_GIVEN, u32::try_from(*n & 0xFFFF_FFFF).unwrap_or(0).cast_signed())
-            }
+            Mean::MathCharDef(n) if *n >= crate::xetex::U_MATH => (
+                cmd::MATH_GIVEN,
+                u32::try_from(*n & 0xFFFF_FFFF).unwrap_or(0).cast_signed(),
+            ),
             Mean::MathCharDef(n) => (cmd::MATH_GIVEN, i32::try_from(*n).unwrap_or(0)),
             Mean::NotExpanded => (cmd::RELAX, NO_EXPAND_FLAG),
         }
@@ -1906,7 +1912,6 @@ impl<T: Clone> CatMemo<T> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1933,7 +1938,9 @@ mod tests {
     #[test]
     fn cat_walks_are_the_folds_elements() {
         let v = Values::new();
-        let mut segs: Vec<Vec<i64>> = (0..200).map(|k| (0..(k % 5)).map(|j| k * 10 + j).collect()).collect();
+        let mut segs: Vec<Vec<i64>> = (0..200)
+            .map(|k| (0..(k % 5)).map(|j| k * 10 + j).collect())
+            .collect();
         let mut memo: CatMemo<i64> = CatMemo::default();
         let step = |segs: &Vec<Vec<i64>>, memo: &mut CatMemo<i64>| {
             let x = fold(&v, segs);

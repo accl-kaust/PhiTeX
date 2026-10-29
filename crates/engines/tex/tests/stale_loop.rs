@@ -36,9 +36,17 @@ fn a_loop_on_a_value_the_output_routine_defines_ends() {
         let b = common::build(opts, Some(&common::plain()), SRC);
         let took = t.elapsed();
         let (dvi, log) = b.output();
-        let stuck: Vec<String> = b.diagnostics().into_iter().map(|d| d.message).filter(|m| m.contains("stuck:")).collect();
+        let stuck: Vec<String> = b
+            .diagnostics()
+            .into_iter()
+            .map(|d| d.message)
+            .filter(|m| m.contains("stuck:"))
+            .collect();
         assert!(stuck.is_empty(), "-j{threads}: {stuck:?} after {took:?}");
-        assert!(log.contains("loop done: page 3, turns 0"), "-j{threads}: {log}");
+        assert!(
+            log.contains("loop done: page 3, turns 0"),
+            "-j{threads}: {log}"
+        );
         assert!(!dvi.is_empty(), "-j{threads}: no output");
         assert!(took < Duration::from_secs(30), "-j{threads}: {took:?}");
     }

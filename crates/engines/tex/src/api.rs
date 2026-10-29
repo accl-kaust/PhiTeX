@@ -473,7 +473,8 @@ impl phitex_defuse::EditSource for Absorb<'_> {
         // (the lines before each node's text, where the text moved them:
         // a run that reads a line of one reads them, `dline:<node>`)
         if self.incr.is_some() {
-            let changes = dline_changes(eng.values(), self.dlines, dlines_of(self.text, self.nodes));
+            let changes =
+                dline_changes(eng.values(), self.dlines, dlines_of(self.text, self.nodes));
             if !changes.is_empty() {
                 eng.update_environment(&changes);
             }
@@ -523,7 +524,11 @@ fn slice_same(old: &(u64, NodeId, Src), new: &(u64, DocNode), texts: (&str, &str
     }
 }
 
-fn common_ends(old: &[(u64, NodeId, Src)], new: &[(u64, DocNode)], same: &dyn Fn(usize, usize) -> bool) -> (usize, usize) {
+fn common_ends(
+    old: &[(u64, NodeId, Src)],
+    new: &[(u64, DocNode)],
+    same: &dyn Fn(usize, usize) -> bool,
+) -> (usize, usize) {
     let mut a = 0;
     while a < old.len() && a < new.len() && same(a, a) {
         a += 1;
@@ -617,7 +622,11 @@ fn dlines_of(text: &str, nodes: &[(u64, NodeId, Src)]) -> Vec<(u64, i64)> {
 /// The environment's changes for the nodes' lines now (`dlines_of`)
 /// against those given before (`given`, brought up to date): a node's
 /// that moved or is new, and a node's gone (none).
-fn dline_changes(v: &Values, given: &mut FxHashMap<u64, i64>, now: Vec<(u64, i64)>) -> Vec<(Field, Option<ValueId>)> {
+fn dline_changes(
+    v: &Values,
+    given: &mut FxHashMap<u64, i64>,
+    now: Vec<(u64, i64)>,
+) -> Vec<(Field, Option<ValueId>)> {
     let mut out = Vec::new();
     let mut seen: FxHashMap<u64, i64> = FxHashMap::default();
     seen.reserve(now.len());
@@ -769,9 +778,18 @@ fn apply_text(
     let t_hints = t_all.elapsed();
     let incr = incr.as_deref();
     let old_len = nodes_now.len();
-    let args_of = |eng: &Engine, k: usize| node_args(eng.values(), &text, incr, &new[k].1, loads, None);
+    let args_of =
+        |eng: &Engine, k: usize| node_args(eng.values(), &text, incr, &new[k].1, loads, None);
     let t_diff = t_all.elapsed();
-    let Some(d) = apply_slices(eng, exec, Placing::Top(end), nodes_now, &new, (&old_text, &text), &args_of) else {
+    let Some(d) = apply_slices(
+        eng,
+        exec,
+        Placing::Top(end),
+        nodes_now,
+        &new,
+        (&old_text, &text),
+        &args_of,
+    ) else {
         return 0;
     };
     if d.changed() == 0 {
@@ -951,8 +969,14 @@ pub fn file_stat_key(path: &str) -> Vec<u8> {
     {
         use std::os::unix::fs::MetadataExt;
         if let Ok(m) = std::fs::metadata(path) {
-            let ns = u64::try_from(m.mtime()).unwrap_or(0).wrapping_mul(1_000_000_000).wrapping_add(u64::try_from(m.mtime_nsec()).unwrap_or(0));
-            return [m.len(), ns, m.ino()].iter().flat_map(|x| x.to_le_bytes()).collect();
+            let ns = u64::try_from(m.mtime())
+                .unwrap_or(0)
+                .wrapping_mul(1_000_000_000)
+                .wrapping_add(u64::try_from(m.mtime_nsec()).unwrap_or(0));
+            return [m.len(), ns, m.ino()]
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect();
         }
     }
     let _ = path;
@@ -962,7 +986,11 @@ pub fn file_stat_key(path: &str) -> Vec<u8> {
 /// File `n`'s path and content key, `found` its finder's file: the
 /// host's ([`Options::content_key`]), else the finder's path and its
 /// stat ([`file_stat_key`]); an empty key: none.
-fn located_key(keys: Option<&ContentKey>, n: &str, found: Option<&(String, Vec<u8>)>) -> (String, Vec<u8>) {
+fn located_key(
+    keys: Option<&ContentKey>,
+    n: &str,
+    found: Option<&(String, Vec<u8>)>,
+) -> (String, Vec<u8>) {
     match keys {
         Some(k) => k(n).unwrap_or_default(),
         None => found.map_or_else(Default::default, |(p, _)| (p.clone(), file_stat_key(p))),
@@ -973,7 +1001,14 @@ fn located_key(keys: Option<&ContentKey>, n: &str, found: Option<&(String, Vec<u
 /// located with the same path and key, without the finder (no bytes
 /// read: a session start reads and hashes none of the files the prelude
 /// read), else, the finder's file, its stat or its digest the same.
-fn read_holds(finder: &Finder, keys: Option<&ContentKey>, n: &str, h: &[u8; 32], path: &str, key: &[u8]) -> bool {
+fn read_holds(
+    finder: &Finder,
+    keys: Option<&ContentKey>,
+    n: &str,
+    h: &[u8; 32],
+    path: &str,
+    key: &[u8],
+) -> bool {
     if !key.is_empty()
         && let Some(k) = keys
         && k(n).is_some_and(|(p, x)| p == path && x == key)
@@ -1093,9 +1128,7 @@ fn page_tag(v: &Values, e: ValueId) -> Option<(PageOf, Option<(i64, i64)>)> {
         [j, _, p, k] => Some((*j, Some((*p, *k)))),
         _ => None,
     };
-    let (j, pk) = v
-        .with_list(e, ids)
-        .unwrap_or_else(|| ids(&list_of(v, e)))?;
+    let (j, pk) = v.with_list(e, ids).unwrap_or_else(|| ids(&list_of(v, e)))?;
     Some((
         page_of(v, j)?,
         match pk {
@@ -1145,7 +1178,9 @@ pub(crate) fn doc_order(v: &Values, entries: &[ValueId]) -> Vec<ValueId> {
             }
         }
         run.sort_by_key(|&e| {
-            page_tag(v, e).map_or((0, 0), |((p, n), _)| (pieces.iter().position(|&q| q == p).unwrap_or(0), n))
+            page_tag(v, e).map_or((0, 0), |((p, n), _)| {
+                (pieces.iter().position(|&q| q == p).unwrap_or(0), n)
+            })
         });
         es.extend(run);
     }
@@ -1810,7 +1845,14 @@ fn cause_parts(c: &phitex_defuse::Cause) -> (&'static str, Option<Field>) {
     use phitex_defuse::Cause as C;
     match c {
         C::Rebind { field, .. } => ("Rebind", Some(*field)),
-        C::Changed { field, site } => (if site.is_some() { "Changed" } else { "ChangedStart" }, Some(*field)),
+        C::Changed { field, site } => (
+            if site.is_some() {
+                "Changed"
+            } else {
+                "ChangedStart"
+            },
+            Some(*field),
+        ),
         C::Range { field, .. } => ("Range", Some(*field)),
         C::Output { .. } => ("Output", None),
         C::Environment { field } => ("Environment", Some(*field)),
@@ -1824,7 +1866,8 @@ fn cause_parts(c: &phitex_defuse::Cause) -> (&'static str, Option<Field>) {
 /// made it: its operation, the cause's kind and field.
 fn print_rerun_classes(eng: &Engine, r: &Report) {
     let v = eng.values();
-    let mut by: std::collections::BTreeMap<(String, &'static str, String), u64> = std::collections::BTreeMap::new();
+    let mut by: std::collections::BTreeMap<(String, &'static str, String), u64> =
+        std::collections::BTreeMap::new();
     for (n, c) in &r.rerun_causes {
         let op = eng.node_info(*n).map_or("gone", |i| i.op).to_owned();
         let (kind, field) = cause_parts(c);
@@ -1845,13 +1888,26 @@ fn print_rerun_classes(eng: &Engine, r: &Report) {
 /// by the woken node's operation), the nodes its placements made and
 /// the nodes of the operation relocated. The ideal row is nodes == runs,
 /// 0 wasted, made == nodes, 0 moved.
-fn print_ledger(eng: &Engine, r: &Report, nodes_by_op: &std::collections::BTreeMap<&'static str, u64>) {
+fn print_ledger(
+    eng: &Engine,
+    r: &Report,
+    nodes_by_op: &std::collections::BTreeMap<&'static str, u64>,
+) {
     let v = eng.values();
-    let mut refuted: std::collections::BTreeMap<&'static str, std::collections::BTreeMap<String, u64>> = std::collections::BTreeMap::new();
+    let mut refuted: std::collections::BTreeMap<
+        &'static str,
+        std::collections::BTreeMap<String, u64>,
+    > = std::collections::BTreeMap::new();
     for (n, c) in &r.rerun_causes {
         let Some(f) = cause_parts(c).1 else { continue };
-        let Some(op) = eng.node_info(*n).map(|i| i.op) else { continue };
-        *refuted.entry(op).or_default().entry(field_name(v, f)).or_default() += 1;
+        let Some(op) = eng.node_info(*n).map(|i| i.op) else {
+            continue;
+        };
+        *refuted
+            .entry(op)
+            .or_default()
+            .entry(field_name(v, f))
+            .or_default() += 1;
     }
     let by = |list: &[(&'static str, u64)], op: &str| Report::by_op(list, op);
     let mut ops: Vec<&'static str> = nodes_by_op.keys().copied().collect();
@@ -1862,7 +1918,10 @@ fn print_ledger(eng: &Engine, r: &Report, nodes_by_op: &std::collections::BTreeM
     }
     eprintln!("acct: ledger (op: nodes runs wasted | refuted by field, top three | placed moved)");
     for op in ops {
-        let mut top: Vec<(String, u64)> = refuted.get(op).map(|m| m.iter().map(|(f, n)| (f.clone(), *n)).collect()).unwrap_or_default();
+        let mut top: Vec<(String, u64)> = refuted
+            .get(op)
+            .map(|m| m.iter().map(|(f, n)| (f.clone(), *n)).collect())
+            .unwrap_or_default();
         top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         top.truncate(3);
         let top: Vec<String> = top.iter().map(|(f, n)| format!("{f} {n}")).collect();
@@ -1871,12 +1930,23 @@ fn print_ledger(eng: &Engine, r: &Report, nodes_by_op: &std::collections::BTreeM
             nodes_by_op.get(op).copied().unwrap_or(0),
             by(&r.runs_by_op, op),
             by(&r.wasted_by_op, op),
-            if top.is_empty() { "-".to_owned() } else { top.join(", ") },
+            if top.is_empty() {
+                "-".to_owned()
+            } else {
+                top.join(", ")
+            },
             by(&r.placed_by_op, op),
             by(&r.placements_moved_by_op, op)
         );
     }
-    eprintln!("acct: ledger all: {} {} {} | placed {} moved {}", eng.live_nodes(), r.runs, r.runs_wasted, r.placed_by_op.iter().map(|x| x.1).sum::<u64>(), r.placements_moved);
+    eprintln!(
+        "acct: ledger all: {} {} {} | placed {} moved {}",
+        eng.live_nodes(),
+        r.runs,
+        r.runs_wasted,
+        r.placed_by_op.iter().map(|x| x.1).sum::<u64>(),
+        r.placements_moved
+    );
 }
 
 /// The cold accounting of an evaluation (spec-final §1), with
@@ -1885,7 +1955,13 @@ fn print_ledger(eng: &Engine, r: &Report, nodes_by_op: &std::collections::BTreeM
 /// time and the kinds on the engine's critical chain, and the
 /// environment pushes.
 #[allow(clippy::too_many_lines)]
-fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'static str, std::time::Duration, u64)], env_calls: u64) {
+fn print_accounting(
+    eng: &Engine,
+    r: &Report,
+    threads: usize,
+    by_kind: &[(&'static str, std::time::Duration, u64)],
+    env_calls: u64,
+) {
     #[allow(clippy::cast_precision_loss)]
     let ms = |ns: u64| ns as f64 / 1e6;
     let t = &r.times;
@@ -1909,9 +1985,19 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
             .filter(|s| s.1 > 0)
             .map(|(f, w)| format!("{f} {:.3}", ms(*w)))
             .collect();
-        eprintln!("acct: lock wait by the file taking it (ms, the process so far): {}", sites.join(", "));
-        let lines: Vec<String> = phitex_defuse::obs::lock_lines().iter().take(12).map(|(l, w)| format!("{l} {:.3}", ms(*w))).collect();
-        eprintln!("acct: lock wait by line (ms, the process so far): {}", lines.join(", "));
+        eprintln!(
+            "acct: lock wait by the file taking it (ms, the process so far): {}",
+            sites.join(", ")
+        );
+        let lines: Vec<String> = phitex_defuse::obs::lock_lines()
+            .iter()
+            .take(12)
+            .map(|(l, w)| format!("{l} {:.3}", ms(*w)))
+            .collect();
+        eprintln!(
+            "acct: lock wait by line (ms, the process so far): {}",
+            lines.join(", ")
+        );
     }
     if let Some(n) = r.commit_max_node {
         let i = eng.node_info(n);
@@ -1935,7 +2021,17 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
     let rpn = r.runs as f64 / live as f64;
     eprintln!(
         "acct: {} runs, {} nodes run, {} live nodes, {rpn:.2} runs/node, {} refuted, {} resumed of {} parks, {} relations resolved, {} shaped, {} steals, {} segments, {} passes",
-        r.runs, r.nodes_run, live, r.refuted_nodes, r.resumed, r.parks, r.relative_resolved, r.shaped, r.steals, r.segments, r.passes
+        r.runs,
+        r.nodes_run,
+        live,
+        r.refuted_nodes,
+        r.resumed,
+        r.parks,
+        r.relative_resolved,
+        r.shaped,
+        r.steals,
+        r.segments,
+        r.passes
     );
     let kinds: Vec<String> = by_kind
         .iter()
@@ -1944,12 +2040,16 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         .collect();
     eprintln!("acct: op time by kind: {}", kinds.join(", "));
     {
-        eprintln!("acct: frontier: {} reads held past the page layer's frontier", eng.frontier_held());
+        eprintln!(
+            "acct: frontier: {} reads held past the page layer's frontier",
+            eng.frontier_held()
+        );
     }
     // (runs against live nodes per operation: where the runs beyond one a
     // node go)
     let nodes_by_op: std::collections::BTreeMap<&'static str, u64> = {
-        let mut nodes: std::collections::BTreeMap<&'static str, u64> = std::collections::BTreeMap::new();
+        let mut nodes: std::collections::BTreeMap<&'static str, u64> =
+            std::collections::BTreeMap::new();
         let (mut found, mut i, target) = (0usize, 0u64, eng.live_nodes());
         while found < target && i < 1 << 32 {
             if let Some(info) = eng.node_info(phitex_defuse::NodeId::from_raw(i)) {
@@ -1988,13 +2088,23 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
                 )
             })
             .collect();
-        eprintln!("acct: collections {}: {}; reader records swept {}", cs.len(), cs.join(", "), r.readers_swept);
+        eprintln!(
+            "acct: collections {}: {}; reader records swept {}",
+            cs.len(),
+            cs.join(", "),
+            r.readers_swept
+        );
     }
     let commits: Vec<String> = r
         .commit_by_op
         .iter()
         .take(8)
-        .map(|(o, t, k)| format!("{o} {:.3} ms/{k} reads", std::time::Duration::from_nanos(*t).as_secs_f64() * 1e3))
+        .map(|(o, t, k)| {
+            format!(
+                "{o} {:.3} ms/{k} reads",
+                std::time::Duration::from_nanos(*t).as_secs_f64() * 1e3
+            )
+        })
         .collect();
     eprintln!(
         "acct: commits by op (whole time, reads filed): {}; placed by op {:?}; moved {}; held wakes {} deferred, {} fired, {} passes",
@@ -2006,7 +2116,9 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         r.held_passes,
     );
     if r.held_unsettled {
-        eprintln!("acct: held wakes dropped past the settle_passes limit: the layout did not settle");
+        eprintln!(
+            "acct: held wakes dropped past the settle_passes limit: the layout did not settle"
+        );
     }
     let mut by_field: Vec<(String, u64)> = r
         .refuted_by_field
@@ -2015,13 +2127,17 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         .collect();
     by_field.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     by_field.truncate(20);
-    eprintln!("acct: {} nodes refuted; refuted by field {by_field:?}", r.refuted_nodes);
+    eprintln!(
+        "acct: {} nodes refuted; refuted by field {by_field:?}",
+        r.refuted_nodes
+    );
     print_ledger(eng, r, &nodes_by_op);
     if crate::exec::prof_flag!("PHITEX_RUN_AUDIT") {
         print_rerun_classes(eng, r);
     }
     // (the kinds on the engine's critical chain, and why each link waited)
-    let mut on_chain: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
+    let mut on_chain: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
     let chain = eng.critical_chain();
     let mut links: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut first = Vec::new();
@@ -2037,7 +2153,8 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
     // (`PHITEX_CHAIN_ALL=1`, profile: every link of the chain, its field
     // by name, and its run, commit, re-ask and gap before it)
     if crate::exec::prof_flag!("PHITEX_CHAIN_ALL") {
-        let times: FxHashMap<phitex_defuse::NodeId, [u64; 4]> = eng.critical_chain_times().into_iter().collect();
+        let times: FxHashMap<phitex_defuse::NodeId, [u64; 4]> =
+            eng.critical_chain_times().into_iter().collect();
         let v = eng.values();
         for (n, c) in &chain {
             let op = eng.node_info(*n).map_or("?", |i| i.op);
@@ -2054,7 +2171,11 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
             );
         }
     }
-    eprintln!("acct: critical chain {} links by kind and cause {links:?}; first: {}", chain.len(), first.join(" "));
+    eprintln!(
+        "acct: critical chain {} links by kind and cause {links:?}; first: {}",
+        chain.len(),
+        first.join(" ")
+    );
     eprintln!(
         "acct: critical path {} nodes, {:.3} ms; chain kinds {on_chain:?}; env calls {env_calls}",
         r.realised_critical_path,
@@ -2069,7 +2190,11 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
             .take(12)
             .map(|(at, n, d)| format!("{at} {:.3} ms/{n}", d.as_secs_f64() * 1e3))
             .collect();
-        eprintln!("acct: client lock waits {:.3} ms in all; by site: {}", all.as_secs_f64() * 1e3, top.join(", "));
+        eprintln!(
+            "acct: client lock waits {:.3} ms in all; by site: {}",
+            all.as_secs_f64() * 1e3,
+            top.join(", ")
+        );
     }
     let ld = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed);
     eprintln!(
@@ -2101,7 +2226,10 @@ fn print_accounting(eng: &Engine, r: &Report, threads: usize, by_kind: &[(&'stat
         })
         .collect();
     eprintln!("acct: longest runs: {longest:?}");
-    eprintln!("acct: stops by reader and field (top 15): {:?}", crate::run::take_stops(eng.values(), 15));
+    eprintln!(
+        "acct: stops by reader and field (top 15): {:?}",
+        crate::run::take_stops(eng.values(), 15)
+    );
 }
 
 /// An evaluation's counters (`PHITEX_TEX_TIME`).
@@ -2126,7 +2254,10 @@ fn print_round(t: std::time::Duration, r: &Report) {
         "lines: {} runs' reads of the lines before them taken back",
         crate::control::LINES_TAKEN.load(std::sync::atomic::Ordering::Relaxed)
     );
-    eprintln!("stopped: {} runs stopped at a check on a read that moved while they ran", r.stopped_stale);
+    eprintln!(
+        "stopped: {} runs stopped at a check on a read that moved while they ran",
+        r.stopped_stale
+    );
     let mut longest: Vec<(phitex_defuse::NodeId, std::time::Duration)> = r.run_times.clone();
     longest.sort_by_key(|x| std::cmp::Reverse(x.1));
     eprintln!(
@@ -2134,7 +2265,11 @@ fn print_round(t: std::time::Duration, r: &Report) {
         r.rerun_causes.len(),
         r.realised_critical_path,
         r.realised_critical_time,
-        longest.iter().take(5).map(|&(n, t)| (n.raw(), t)).collect::<Vec<_>>()
+        longest
+            .iter()
+            .take(5)
+            .map(|&(n, t)| (n.raw(), t))
+            .collect::<Vec<_>>()
     );
     eprintln!(
         "round: {t:?}, {} nodes run, {} runs, {} first runs, {} commits, {} edits, by op {:?}",
@@ -2142,7 +2277,11 @@ fn print_round(t: std::time::Duration, r: &Report) {
     );
     eprintln!(
         "round predictions: {} confirmed, {} refuted; {} relations resolved, {} shaped; {} refuted nodes",
-        r.predictions_confirmed, r.predictions_refuted, r.relative_resolved, r.shaped, r.refuted_nodes
+        r.predictions_confirmed,
+        r.predictions_refuted,
+        r.relative_resolved,
+        r.shaped,
+        r.refuted_nodes
     );
 }
 
@@ -2169,25 +2308,37 @@ impl RunReport {
     /// The nodes of operation `op` its placements made.
     #[must_use]
     pub fn placements_made(&self, op: &str) -> usize {
-        self.placed_by_op.iter().find(|x| x.0 == op).map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
+        self.placed_by_op
+            .iter()
+            .find(|x| x.0 == op)
+            .map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
     }
 
     /// The nodes of operation `op` relocated.
     #[must_use]
     pub fn placements_moved_of(&self, op: &str) -> usize {
-        self.placements_moved_by_op.iter().find(|x| x.0 == op).map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
+        self.placements_moved_by_op
+            .iter()
+            .find(|x| x.0 == op)
+            .map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
     }
 
     /// The wasted runs of operation `op`.
     #[must_use]
     pub fn runs_wasted_of(&self, op: &str) -> usize {
-        self.wasted_by_op.iter().find(|x| x.0 == op).map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
+        self.wasted_by_op
+            .iter()
+            .find(|x| x.0 == op)
+            .map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
     }
 
     /// The runs of operation `op`.
     #[must_use]
     pub fn runs_of(&self, op: &str) -> usize {
-        self.runs_by_op.iter().find(|x| x.0 == op).map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
+        self.runs_by_op
+            .iter()
+            .find(|x| x.0 == op)
+            .map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
     }
 }
 
@@ -2195,7 +2346,10 @@ impl Stats {
     /// The nodes of operation `op` the placements made over the build.
     #[must_use]
     pub fn placements_of(&self, op: &str) -> usize {
-        self.placed_by_op.iter().find(|x| x.0 == op).map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
+        self.placed_by_op
+            .iter()
+            .find(|x| x.0 == op)
+            .map_or(0, |x| usize::try_from(x.1).unwrap_or(usize::MAX))
     }
 
     /// The profile units the page loop (`op`, "pages") folded over all
@@ -2208,14 +2362,21 @@ impl Stats {
     /// The units accumulator `field` holds at the build's end.
     #[must_use]
     pub fn units_contributed(&self, field: &str) -> u64 {
-        self.units_now.iter().find(|x| x.0 == field).map_or(0, |x| x.1)
+        self.units_now
+            .iter()
+            .find(|x| x.0 == field)
+            .map_or(0, |x| x.1)
     }
 
     /// The relations (`Ctx::define_rel`) on `field` the live nodes of
     /// operation `op` filed at their last runs (tests/state.rs).
     #[must_use]
     pub fn relations_by_op(&self, op: &str, field: &str) -> u64 {
-        self.relations.iter().filter(|r| r.0 == op && r.1 == field).map(|r| r.2).sum()
+        self.relations
+            .iter()
+            .filter(|r| r.0 == op && r.1 == field)
+            .map(|r| r.2)
+            .sum()
     }
 
     /// The readers of operation `op` re-asked through field `name`, or a
@@ -2224,7 +2385,10 @@ impl Stats {
     pub fn refuted_by_op(&self, op: &str, name: &str) -> usize {
         self.refuted_by_op_field
             .iter()
-            .filter(|e| e.0 == op && (e.1 == name || e.1.strip_prefix(name).is_some_and(|r| r.starts_with(':'))))
+            .filter(|e| {
+                e.0 == op
+                    && (e.1 == name || e.1.strip_prefix(name).is_some_and(|r| r.starts_with(':')))
+            })
             .map(|e| usize::try_from(e.2).unwrap_or(usize::MAX))
             .sum()
     }
@@ -2233,7 +2397,11 @@ impl Stats {
     /// over the build.
     #[must_use]
     pub fn predictions_refuted_by(&self, name: &str) -> u64 {
-        self.predictions_refuted_by_field.iter().filter(|e| e.0 == name).map(|e| e.1).sum()
+        self.predictions_refuted_by_field
+            .iter()
+            .filter(|e| e.0 == name)
+            .map(|e| e.1)
+            .sum()
     }
 
     /// The readers re-asked through field `name`, or a field of its
@@ -2249,7 +2417,14 @@ impl Stats {
 
     /// One evaluation's wall time on `threads` threads, and the
     /// operations' counters since the last ([`crate::exec::take_counters`]).
-    fn add_exec(&mut self, threads: usize, wall: std::time::Duration, by_kind: &[(&'static str, std::time::Duration, u64)], busy: std::time::Duration, peak: usize) {
+    fn add_exec(
+        &mut self,
+        threads: usize,
+        wall: std::time::Duration,
+        by_kind: &[(&'static str, std::time::Duration, u64)],
+        busy: std::time::Duration,
+        peak: usize,
+    ) {
         self.wall += wall;
         self.threads = threads;
         self.busy += busy;
@@ -2310,9 +2485,15 @@ impl Stats {
         let v = eng.values();
         for (n, c) in &r.rerun_causes {
             let Some(f) = cause_parts(c).1 else { continue };
-            let Some(op) = eng.node_info(*n).map(|i| i.op) else { continue };
+            let Some(op) = eng.node_info(*n).map(|i| i.op) else {
+                continue;
+            };
             let name = field_name(v, f);
-            match self.refuted_by_op_field.iter_mut().find(|e| e.0 == op && e.1 == name) {
+            match self
+                .refuted_by_op_field
+                .iter_mut()
+                .find(|e| e.0 == op && e.1 == name)
+            {
                 Some(e) => e.2 += 1,
                 None => self.refuted_by_op_field.push((op, name, 1)),
             }
@@ -2328,7 +2509,11 @@ impl Stats {
             .sort_by_key(|e| std::cmp::Reverse(e.1));
         for &(f, n) in &r.predictions_refuted_by_field {
             let name = field_name(v, f);
-            match self.predictions_refuted_by_field.iter_mut().find(|e| e.0 == name) {
+            match self
+                .predictions_refuted_by_field
+                .iter_mut()
+                .find(|e| e.0 == name)
+            {
                 Some(e) => e.1 += n,
                 None => self.predictions_refuted_by_field.push((name, n)),
             }
@@ -2342,7 +2527,10 @@ impl Stats {
         for (n, c) in &r.rerun_causes {
             let op = eng.node_info(*n).map_or("?", |i| i.op);
             let (kind, f) = cause_parts(c);
-            let mut why = f.map_or_else(|| kind.to_owned(), |f| format!("{kind} {}", field_name(v, f)));
+            let mut why = f.map_or_else(
+                || kind.to_owned(),
+                |f| format!("{kind} {}", field_name(v, f)),
+            );
             if crate::exec::prof_flag!("PHITEX_RUN_LOG") {
                 why = format!("{why} #r{}", self.rounds);
             }
@@ -2352,7 +2540,9 @@ impl Stats {
             let log = std::mem::take(&mut *crate::ops::RUN_LOG.locked());
             let round = self.rounds;
             for (n, resumed, spec, how) in log {
-                let op = eng.node_info(phitex_defuse::NodeId::from_raw(n)).map_or("?", |i| i.op);
+                let op = eng
+                    .node_info(phitex_defuse::NodeId::from_raw(n))
+                    .map_or("?", |i| i.op);
                 self.run_log.push((n, op, resumed, spec, how, round));
             }
         }
@@ -2406,7 +2596,10 @@ impl Stats {
             }
         };
         merge(&mut self.placements_moved_by_op, &r.placements_moved_by_op);
-        merge(&mut self.last.placements_moved_by_op, &r.placements_moved_by_op);
+        merge(
+            &mut self.last.placements_moved_by_op,
+            &r.placements_moved_by_op,
+        );
         merge(&mut self.wasted_by_op, &r.wasted_by_op);
         merge(&mut self.last.wasted_by_op, &r.wasted_by_op);
         for &(k, n) in &r.placed_by_op {
@@ -2655,7 +2848,10 @@ fn kept_args(
         a += 1;
     }
     let mut b = 0;
-    while b < old.len() - a && b < new.len() - a && old[old.len() - 1 - b].0 == new[new.len() - 1 - b].0 {
+    while b < old.len() - a
+        && b < new.len() - a
+        && old[old.len() - 1 - b].0 == new[new.len() - 1 - b].0
+    {
         b += 1;
     }
     (0..new.len())
@@ -2684,7 +2880,8 @@ fn pieces_of(eng: &Engine, r: NodeId, name: ValueId) -> Vec<NodeId> {
                     && i.args.first().is_some_and(|&fs| {
                         list_of(v, fs).first().is_some_and(|&f| {
                             let xs = list_of(v, f);
-                            xs.first().is_some_and(|&t| str_of(v, t) == "s") && xs.get(5) == Some(&name)
+                            xs.first().is_some_and(|&t| str_of(v, t) == "s")
+                                && xs.get(5) == Some(&name)
                         })
                     })
             })
@@ -2722,22 +2919,26 @@ fn piece_shift(eng: &Engine, shifts: &FxHashMap<u64, (ValueId, i64)>, n: NodeId)
     }
 }
 
-
-
 impl Graph {
     #[allow(clippy::too_many_lines)]
-    fn new(time: Option<std::time::Duration>, threads: Option<usize>, stuck_after: Option<std::time::Duration>, memory_limit: Option<u64>) -> Graph {
+    fn new(
+        time: Option<std::time::Duration>,
+        threads: Option<usize>,
+        stuck_after: Option<std::time::Duration>,
+        memory_limit: Option<u64>,
+    ) -> Graph {
         let eng = Engine::new();
         // (`PHITEX_COLLECT_MB`: the value store collected when its payload
         // passes it, `phitex_defuse::Limits::collect_at_bytes`; default
         // 1024, 0 never: without a collection every rerun's values stay
         // for the session, an 18-page paper reached 40 GB resident in a
         // watch session)
-        let collect_at_bytes = match crate::exec::env_str!("PHITEX_COLLECT_MB").and_then(|x| x.parse::<u64>().ok()) {
-            Some(0) => None,
-            Some(mb) => Some(mb << 20),
-            None => Some(1u64 << 30),
-        };
+        let collect_at_bytes =
+            match crate::exec::env_str!("PHITEX_COLLECT_MB").and_then(|x| x.parse::<u64>().ok()) {
+                Some(0) => None,
+                Some(mb) => Some(mb << 20),
+                None => Some(1u64 << 30),
+            };
         // (`PHITEX_RUNS_PER_NODE`: a node run more often in one evaluation
         // ends it with `EvalError::RunawayNode`, naming the node: a run
         // that never settles found, not waited for)
@@ -2750,13 +2951,19 @@ impl Graph {
         // workers idle a sixth of it with work left; `PHITEX_STUCK_SECS`,
         // 0 never. A run past half the machine's memory, or three
         // quarters of its cgroup's limit, is stuck too; `PHITEX_STUCK_MB`)
-        let stall = match (stuck_after, crate::exec::env_str!("PHITEX_STUCK_SECS").and_then(|x| x.parse::<u64>().ok())) {
+        let stall = match (
+            stuck_after,
+            crate::exec::env_str!("PHITEX_STUCK_SECS").and_then(|x| x.parse::<u64>().ok()),
+        ) {
             (Some(d), _) => Some(d),
             (None, Some(0)) => None,
             (None, Some(s)) => Some(std::time::Duration::from_secs(s)),
             (None, None) => Some(std::time::Duration::from_secs(300)),
         };
-        let memory_bytes = match (memory_limit, crate::exec::env_str!("PHITEX_STUCK_MB").and_then(|x| x.parse::<u64>().ok())) {
+        let memory_bytes = match (
+            memory_limit,
+            crate::exec::env_str!("PHITEX_STUCK_MB").and_then(|x| x.parse::<u64>().ok()),
+        ) {
             (Some(b), _) => Some(b),
             (None, Some(0)) => None,
             (None, Some(mb)) => Some(mb << 20),
@@ -2900,7 +3107,11 @@ impl Graph {
         // (a runaway node's last causes, their fields named)
         if let E::RunawayNode { node, .. } = e {
             let r = self.eng.debug_reads(*node);
-            let _ = write!(out, "\n  its reads now: {}", r.lines().take(20).collect::<Vec<_>>().join("; "));
+            let _ = write!(
+                out,
+                "\n  its reads now: {}",
+                r.lines().take(20).collect::<Vec<_>>().join("; ")
+            );
         }
         for id in ids {
             let what = self.eng.node_info(id).map_or_else(
@@ -3139,7 +3350,10 @@ impl Graph {
     /// build: `\@input` of it read empty lines for ever).
     fn drop_cut(&mut self, name: &str) {
         let v = self.eng.values();
-        for g in [v.field(&format!("dfile:{name}")), v.field(&format!("fsize:{name}"))] {
+        for g in [
+            v.field(&format!("dfile:{name}")),
+            v.field(&format!("fsize:{name}")),
+        ] {
             self.files.retain(|&(h, _)| h != g);
             if !self.absent.contains(&g) {
                 self.absent.push(g);
@@ -3254,7 +3468,8 @@ impl Graph {
     fn shell_absorb(&mut self, unit: UnitId, fixpoint: bool) -> Vec<String> {
         let v = self.eng.values();
         let outs = self.eng.acc_value(unit, v.field(crate::shell::OUTS));
-        let mut last: std::collections::BTreeMap<String, Option<String>> = std::collections::BTreeMap::new();
+        let mut last: std::collections::BTreeMap<String, Option<String>> =
+            std::collections::BTreeMap::new();
         for e in outs.map(|o| v.seq_to_vec(o)).unwrap_or_default() {
             let [n, x] = list_of(v, e)[..] else { continue };
             last.insert(str_of(v, n), list_of(v, x).get(1).map(|&t| str_of(v, t)));
@@ -3277,7 +3492,13 @@ impl Graph {
             }
             if self.shell_store.get(&n) != Some(&t) {
                 if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
-                    eprintln!("shell store: {n} {}", t.as_ref().map_or_else(|| "removed".to_owned(), |t| format!("{} chars", t.chars().count())));
+                    eprintln!(
+                        "shell store: {n} {}",
+                        t.as_ref().map_or_else(
+                            || "removed".to_owned(),
+                            |t| format!("{} chars", t.chars().count())
+                        )
+                    );
                 }
                 self.shell_store.insert(n.clone(), t);
                 changed.push(n);
@@ -3361,14 +3582,20 @@ impl Graph {
                 // otherwise: its readers read the text,
                 // `crate::ops::WSAME`)
                 env.push((crate::tools::text_field(v, n), t));
-                env.push((crate::tools::size_field(v, n), crate::tools::size_value(v, t)));
+                env.push((
+                    crate::tools::size_field(v, n),
+                    crate::tools::size_value(v, t),
+                ));
                 env.push((v.field(&format!("{}:{n}", crate::ops::WSAME)), v.bool(true)));
             }
             // (a key set guessed for a file written before, until its node
             // defines the file's)
             for (n, ks) in &self.wkeys_guess {
                 if self.written.contains(n) {
-                    env.push((v.field(&format!("wkeys:{n}")), v.list(ks.iter().map(|k| v.str(k)).collect())));
+                    env.push((
+                        v.field(&format!("wkeys:{n}")),
+                        v.list(ks.iter().map(|k| v.str(k)).collect()),
+                    ));
                 }
             }
         } else {
@@ -3419,13 +3646,21 @@ impl Graph {
                 // (what the build holds outside the engine: roots of a
                 // collection in the evaluation, `crate::collect`)
                 let mut held: Vec<ValueId> = Vec::new();
-                for (f, x) in self.start_env.iter().chain(self.env_pushed.iter().map(|(f, x)| (f, x))).chain(self.job.iter().map(|(f, x)| (f, x))).chain(self.files.iter().map(|(f, x)| (f, x))) {
+                for (f, x) in self
+                    .start_env
+                    .iter()
+                    .chain(self.env_pushed.iter().map(|(f, x)| (f, x)))
+                    .chain(self.job.iter().map(|(f, x)| (f, x)))
+                    .chain(self.files.iter().map(|(f, x)| (f, x)))
+                {
                     held.extend([f.0, *x]);
                 }
                 if let Some((x, _)) = &*self.opened_memo.locked() {
                     held.extend(*x);
                 }
-                *o.held.write().unwrap_or_else(std::sync::PoisonError::into_inner) = held;
+                *o.held
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = held;
             }
             let t0 = std::time::Instant::now();
             // (every evaluation on the pool: it starts no thread for a
@@ -3438,7 +3673,9 @@ impl Graph {
             // (`PHITEX_MEM_LOG=secs`, profile: every `secs` seconds of the
             // evaluation, the resident memory, the value store and the live
             // nodes)
-            let mem_log = crate::exec::env_str!("PHITEX_MEM_LOG").and_then(|x| x.parse::<f64>().ok()).filter(|_| cfg!(feature = "profile"));
+            let mem_log = crate::exec::env_str!("PHITEX_MEM_LOG")
+                .and_then(|x| x.parse::<f64>().ok())
+                .filter(|_| cfg!(feature = "profile"));
             let done = std::sync::atomic::AtomicBool::new(false);
             let res = std::thread::scope(|sc| {
                 if let Some(secs) = mem_log {
@@ -3566,7 +3803,9 @@ impl Graph {
                 }
                 eprintln!("rerun_check: {} differ", lines.len());
             }
-            if crate::exec::obs_flag!("PHITEX_CHECK_READS") || crate::exec::obs_flag!("PHITEX_CHECK_INVARIANTS") {
+            if crate::exec::obs_flag!("PHITEX_CHECK_READS")
+                || crate::exec::obs_flag!("PHITEX_CHECK_INVARIANTS")
+            {
                 // (debug: every committed node's reads and relations checked
                 // again after this evaluation; `PHITEX_CHECK_READS=fail`: a
                 // stale one fails, the tests' setting)
@@ -3575,7 +3814,11 @@ impl Graph {
                 for l in &lines {
                     eprintln!("check_reads: {l}");
                 }
-                eprintln!("check_reads: {} stale (checked in {:?})", lines.len(), tc.elapsed());
+                eprintln!(
+                    "check_reads: {} stale (checked in {:?})",
+                    lines.len(),
+                    tc.elapsed()
+                );
                 assert!(
                     lines.is_empty() || crate::exec::obs_str!("PHITEX_CHECK_READS") != Some("fail"),
                     "{} committed reads no longer hold",
@@ -3586,7 +3829,8 @@ impl Graph {
             if crate::exec::prof_flag!("PHITEX_ROUND_ACCT") {
                 // (the edit's cost: its runs, the nodes run, the runs by
                 // operation, where the time went)
-                let mut ops: Vec<(&str, u64)> = r.runs_by_op.iter().copied().filter(|x| x.1 > 0).collect();
+                let mut ops: Vec<(&str, u64)> =
+                    r.runs_by_op.iter().copied().filter(|x| x.1 > 0).collect();
                 ops.sort_unstable();
                 let ms = |x: u64| std::time::Duration::from_nanos(x).as_secs_f64() * 1e3;
                 eprintln!(
@@ -3632,7 +3876,8 @@ impl Graph {
                     let mut by = FxHashMap::<String, usize>::default();
                     for (node, c) in &r.rerun_causes {
                         let (k, f) = cause_parts(c);
-                        let name = f.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f));
+                        let name =
+                            f.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f));
                         if crate::exec::obs_flag!("PHITEX_RERUN_OPS") {
                             let d: String = describe(&self.eng, *node).chars().take(60).collect();
                             eprintln!("rerunop: {} [{d}] {k} {name}", node.raw());
@@ -3648,12 +3893,24 @@ impl Graph {
             crate::timeline::lap("engine: the accounting printed (PHITEX_TEX_TIME only)");
             stats.values_bytes = self.eng.values().payload_bytes();
             stats.add(&r);
-            stats.units_folded = self.ops.units_folded.load(std::sync::atomic::Ordering::Relaxed);
-            stats.resumed_at_mark += self.ops.resumed_edits.swap(0, std::sync::atomic::Ordering::Relaxed);
-            stats.siblings_pulled = self.ops.siblings_pulled.load(std::sync::atomic::Ordering::Relaxed);
+            stats.units_folded = self
+                .ops
+                .units_folded
+                .load(std::sync::atomic::Ordering::Relaxed);
+            stats.resumed_at_mark += self
+                .ops
+                .resumed_edits
+                .swap(0, std::sync::atomic::Ordering::Relaxed);
+            stats.siblings_pulled = self
+                .ops
+                .siblings_pulled
+                .load(std::sync::atomic::Ordering::Relaxed);
             {
                 let v = self.eng.values();
-                let n = self.eng.acc_value(unit, v.field(crate::vprof::VPROF)).map_or(0, |x| v.seq_to_vec(x).len());
+                let n = self
+                    .eng
+                    .acc_value(unit, v.field(crate::vprof::VPROF))
+                    .map_or(0, |x| v.seq_to_vec(x).len());
                 stats.units_now = vec![(crate::vprof::VPROF, u64::try_from(n).unwrap_or(0))];
             }
             stats.env_calls = self.env_calls;
@@ -3865,7 +4122,14 @@ impl Graph {
         // a format's text is one node: a sequential run over the whole
         // file, its `\input`s inline; what it may define is unknowable
         // from its parts, so anything (it runs once, serially, cached)
-        let nodes = cut_text(&self.ops.hints, self.eng.values(), text, None, incr.as_deref_mut(), None);
+        let nodes = cut_text(
+            &self.ops.hints,
+            self.eng.values(),
+            text,
+            None,
+            incr.as_deref_mut(),
+            None,
+        );
         let incr = incr.as_deref();
         let t1 = t0.elapsed();
         crate::timeline::lap("push: the nodes' slices and keys");
@@ -3992,10 +4256,15 @@ pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<Strin
             defined.len() - 1
         };
         if let Some(&reads) = xs.get(3)
-            && let Some(&r) = list_of(v, reads).iter().find(|&&r| v.with_str(r, |s| defined[k].1.contains(s)).unwrap_or(false))
+            && let Some(&r) = list_of(v, reads)
+                .iter()
+                .find(|&&r| v.with_str(r, |s| defined[k].1.contains(s)).unwrap_or(false))
         {
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
-                eprintln!("aux-trace: {name} read back as text: a line reads {}, which a line before it defines", str_of(v, r));
+                eprintln!(
+                    "aux-trace: {name} read back as text: a line reads {}, which a line before it defines",
+                    str_of(v, r)
+                );
             }
             out.push(name);
             continue;
@@ -4036,7 +4305,6 @@ fn register_doc(reg: &crate::hints::Registry, v: &Values, inc: &Incr) {
     }
 }
 
-
 /// A document node's text: a slice of the document (its bytes).
 enum DocNode {
     Doc(usize, usize),
@@ -4072,7 +4340,10 @@ fn chunk_slices(text: &str, c: &crate::incr::Chunk, out: &mut Vec<(u64, usize, u
 /// slices and the next chunk's (whose first slice's key reads the
 /// byte before it) made again, those after moved.
 fn doc_nodes(text: &str, inc: &Incr) -> Vec<(u64, DocNode)> {
-    let mut g = inc.slices.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut g = inc
+        .slices
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let n = inc.chunks.len();
     let patched = match (g.as_mut(), inc.one) {
         (Some(m), Some(_)) if m.edits == inc.edits => true,
@@ -4122,9 +4393,15 @@ fn doc_nodes(text: &str, inc: &Incr) -> Vec<(u64, DocNode)> {
         for c in &inc.chunks {
             chunk_slices(text, c, &mut all);
         }
-        assert!(all == m.out, "slice check: the slices made from the last ones are not those made anew");
+        assert!(
+            all == m.out,
+            "slice check: the slices made from the last ones are not those made anew"
+        );
     }
-    m.out.iter().map(|&(k, s, e)| (k, DocNode::Doc(s, e))).collect()
+    m.out
+        .iter()
+        .map(|&(k, s, e)| (k, DocNode::Doc(s, e)))
+        .collect()
 }
 
 /// A document node's arguments: its text with its origin, and its hint;
@@ -4154,7 +4431,9 @@ fn node_args(
             let own = crate::hints::slice_hint_of(&c.th, at);
             let slice = &text[s..e];
             let rec = loads
-                .filter(|_| crate::pkgrec::unbounded(&own) || crate::pkgrec::load_key(slice).is_some())
+                .filter(|_| {
+                    crate::pkgrec::unbounded(&own) || crate::pkgrec::load_key(slice).is_some()
+                })
                 .and_then(|l| l.hint_for(v, slice));
             a.push(v.str(rec.as_deref().unwrap_or(&*own)));
             a
@@ -4206,7 +4485,6 @@ pub(crate) const DOC_MARKS: &str = "doc:mark:";
 /// so a run reads its comment by the id in its own line, not by where
 /// the line is in the file.
 pub(crate) type CommentMark = (u32, u64, String);
-
 
 /// The hash of a comment line's text before its `%`.
 fn prefix_hash(prefix: &str) -> u64 {
@@ -4345,7 +4623,9 @@ pub(crate) fn canonical_text(text: &str) -> Option<(String, Vec<CommentMark>)> {
 fn ids_hold(marks: &[CommentMark]) -> bool {
     let collide = collisions(marks);
     let mut by: FxHashMap<u64, &str> = FxHashMap::default();
-    marks.iter().all(|(_, h, c)| *by.entry(mark_id(*h, c, collide.contains(h))).or_insert(c) == c.as_str())
+    marks
+        .iter()
+        .all(|(_, h, c)| *by.entry(mark_id(*h, c, collide.contains(h))).or_insert(c) == c.as_str())
 }
 
 /// Whether `text` has what [`canonical_text`] cannot stand for (a NUL,
@@ -4775,7 +5055,10 @@ static FORMAT_CHECK: Mutex<Option<std::thread::JoinHandle<bool>>> = Mutex::new(N
 /// Whether the format read from the cache, if one was, still has every
 /// file it read as the finder gives it now.
 fn format_holds() -> bool {
-    FORMAT_CHECK.locked().take().is_none_or(|h| h.join().unwrap_or(false))
+    FORMAT_CHECK
+        .locked()
+        .take()
+        .is_none_or(|h| h.join().unwrap_or(false))
 }
 
 fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cached>, Vec<String>> {
@@ -4783,7 +5066,12 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
     let candidates: Vec<Arc<Cached>> = env_cache()
         .locked()
         .get(&key)
-        .map(|cs| cs.iter().filter(|c| c.text_digest == *digest).cloned().collect())
+        .map(|cs| {
+            cs.iter()
+                .filter(|c| c.text_digest == *digest)
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
     let t0 = std::time::Instant::now();
     let given = opts
@@ -4811,7 +5099,10 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
         let (finder, cc, keys) = (finder.clone(), c.clone(), opts.content_key.clone());
         let h = crate::exec::thread(move || {
             let t1 = std::time::Instant::now();
-            let fresh = cc.reads.iter().all(|(n, h, p, key)| read_holds(&finder, keys.as_ref(), n, h, p, key));
+            let fresh = cc
+                .reads
+                .iter()
+                .all(|(n, h, p, key)| read_holds(&finder, keys.as_ref(), n, h, p, key));
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 eprintln!(
                     "format check: {} files found and hashed in {:?} ({}, beside the start)",
@@ -4829,9 +5120,7 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
     for c in candidates {
         let t1 = std::time::Instant::now();
         // (the files found, read and hashed on the pool)
-        let mut ex = crate::exec::Coarse(crate::exec::threads(
-            opts.threads,
-        ));
+        let mut ex = crate::exec::Coarse(crate::exec::threads(opts.threads));
         let fresh = crate::exec::map_on(&mut ex, c.reads.len(), &|k| {
             let (n, h, p, key) = &c.reads[k];
             read_holds(finder, opts.content_key.as_ref(), n, h, p, key)
@@ -4866,7 +5155,11 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
 #[allow(clippy::too_many_lines)]
 fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     // (a XeTeX format is another format: its INITEX is XeTeX's)
-    let tag: u64 = if opts.xetex.is_some() { 0x58_6554_6558 } else { 7 };
+    let tag: u64 = if opts.xetex.is_some() {
+        0x58_6554_6558
+    } else {
+        7
+    };
     let src = prelude.map_or_else(Vec::new, |p| {
         let mut b = p.as_bytes().to_vec();
         b.push(0);
@@ -4902,7 +5195,12 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let t_check = t_start.elapsed();
     let m_check = mem_mb();
     let finder = opts.prelude_finder();
-    let mut g = Graph::new(opts.time_limit, opts.threads, opts.stuck_after, opts.memory_limit);
+    let mut g = Graph::new(
+        opts.time_limit,
+        opts.threads,
+        opts.stuck_after,
+        opts.memory_limit,
+    );
     if let Some(x) = &opts.xetex {
         let _ = g.ops.xe.set(x.clone());
     }
@@ -5324,7 +5622,12 @@ impl Build {
                 t1.checked_sub(t_env).unwrap_or_default()
             );
         }
-        let mut g = Graph::new(opts.time_limit, opts.threads, opts.stuck_after, opts.memory_limit);
+        let mut g = Graph::new(
+            opts.time_limit,
+            opts.threads,
+            opts.stuck_after,
+            opts.memory_limit,
+        );
         if let Some(x) = &opts.xetex {
             let _ = g.ops.xe.set(x.clone());
         }
@@ -5347,7 +5650,7 @@ impl Build {
         }
         g.shell_cap = opts.shell_passes;
         g.tool_finder.clone_from(&opts.tool_finder);
-            if let Some(p) = &opts.progress {
+        if let Some(p) = &opts.progress {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
         }
         let unit = g.eng.new_unit();
@@ -5384,7 +5687,10 @@ impl Build {
         crate::timeline::lap("engine: the environment pushed");
         // (the values the job made of the format's nodes: each once)
         let made = Arc::new(env.made());
-        *g.ops.fmt_made.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(made.clone());
+        *g.ops
+            .fmt_made
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(made.clone());
         job_env(&mut g, unit, &env, &made, &opts);
         // (the writers' start, with the format's glyph table, made now
         // beside the job: `crate::pdfout::warm_g2u`)
@@ -5419,17 +5725,25 @@ impl Build {
             predict,
         )));
         // (the loads' predictions, asked by the engine per load node)
-        g.ops.pkg_loads.write().unwrap_or_else(std::sync::PoisonError::into_inner).clone_from(&g.loads);
+        g.ops
+            .pkg_loads
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone_from(&g.loads);
         crate::timeline::lap("engine: the job's environment, the loads' records");
         let (nodes, incr) = g.push_document(unit, &text, defs, doc);
         // (the lines before each node's text: a run reads a line of a
         // node's text from them, `dline:<node>`)
         let mut dlines = FxHashMap::default();
         if doc {
-            let env: Vec<(Field, ValueId)> = dline_changes(g.eng.values(), &mut dlines, dlines_of(&as_file(&text), &nodes))
-                .into_iter()
-                .filter_map(|(f, x)| x.map(|x| (f, x)))
-                .collect();
+            let env: Vec<(Field, ValueId)> = dline_changes(
+                g.eng.values(),
+                &mut dlines,
+                dlines_of(&as_file(&text), &nodes),
+            )
+            .into_iter()
+            .filter_map(|(f, x)| x.map(|x| (f, x)))
+            .collect();
             g.eng.set_environment(env);
         }
         // (the pages: the first page step, where the text ends: it folds
@@ -5470,7 +5784,14 @@ impl Build {
         // (a format whose files changed since it was cached: built again)
         if !format_holds() {
             crate::timeline::lap("engine: the cached format stale");
-            return Build::with(Options { prelude_bytes: None, ..opts }, prelude, document);
+            return Build::with(
+                Options {
+                    prelude_bytes: None,
+                    ..opts
+                },
+                prelude,
+                document,
+            );
         }
         crate::timeline::lap("engine: the format's check taken");
         let edits = opts.edits.clone().unwrap_or_default();
@@ -5633,9 +5954,10 @@ impl Build {
     fn merge_load_records(&mut self) {
         // (the records of the nodes whose run was recorded in it: the
         // others' are merged already)
-        let mut ran: phitex_defuse::FxHashSet<u64> = std::mem::take(&mut *self.g.ops.rec_ran.locked())
-            .into_iter()
-            .collect();
+        let mut ran: phitex_defuse::FxHashSet<u64> =
+            std::mem::take(&mut *self.g.ops.rec_ran.locked())
+                .into_iter()
+                .collect();
         ran.extend(self.g.ops.pkg_log.locked().iter().map(|r| r.0));
         self.loads_ran = !ran.is_empty();
         if self.loads_ran
@@ -5687,7 +6009,12 @@ impl Build {
         let t_all = std::time::Instant::now();
         self.progress_offsets();
         self.g.watch.progress.begin();
-        *self.g.ops.watch.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(self.g.watch.clone());
+        *self
+            .g
+            .ops
+            .watch
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(self.g.watch.clone());
         crate::timeline::lap("engine: the nodes' offsets (progress)");
         let mut stats = Stats::default();
         self.g.queries.clear();
@@ -5823,7 +6150,8 @@ impl Build {
             .find(|&&(g, _)| g == d)
             .and_then(|&(_, x)| list_of(v, x).first().map(|&p| str_of(v, p)));
         // (a file the job writes is never cut, [`Graph::drop_cut`])
-        let cut = (cut_path.is_some() || self.g.absent.contains(&d)) && !self.g.written.iter().any(|w| w == name);
+        let cut = (cut_path.is_some() || self.g.absent.contains(&d))
+            && !self.g.written.iter().any(|w| w == name);
         let k = if let Some(k) = self.g.files.iter().position(|(g, _)| *g == f) {
             Some(k)
         } else if self.g.absent.contains(&f) {
@@ -5979,7 +6307,14 @@ impl Build {
         let pv = self.g.eng.values().str(&df.path);
         let new = {
             let DocFile { text, incr, .. } = &mut *df;
-            cut_text(&self.g.ops.hints, self.g.eng.values(), text, Some(range), Some(incr), Some(pv))
+            cut_text(
+                &self.g.ops.hints,
+                self.g.eng.values(),
+                text,
+                Some(range),
+                Some(incr),
+                Some(pv),
+            )
         };
         crate::timeline::lap("stage: the file cut again");
         let loads = self.g.loads.clone();
@@ -5989,7 +6324,8 @@ impl Build {
         let mut kept = Vec::with_capacity(readers.len());
         let mut shifts = std::mem::take(&mut df.shifts);
         let mut placed = std::mem::take(&mut df.placed);
-        let delta = i64::try_from(df.text.len()).unwrap_or(0) - i64::try_from(range.1 + s).unwrap_or(0);
+        let delta =
+            i64::try_from(df.text.len()).unwrap_or(0) - i64::try_from(range.1 + s).unwrap_or(0);
         for r in readers {
             if !self.g.eng.is_live(r) {
                 continue;
@@ -6016,9 +6352,24 @@ impl Build {
                 .map(|((k, d), &id)| (*k, id, Src::of(d)))
                 .collect();
             let args_of = |eng: &Engine, k: usize| {
-                node_args(eng.values(), &df.text, Some(&df.incr), &new[k].1, loads.as_deref(), Some(pv))
+                node_args(
+                    eng.values(),
+                    &df.text,
+                    Some(&df.incr),
+                    &new[k].1,
+                    loads.as_deref(),
+                    Some(pv),
+                )
             };
-            match apply_slices(&self.g.eng, exec, Placing::Placed, &mut nodes, &new, (&old_text, &df.text), &args_of) {
+            match apply_slices(
+                &self.g.eng,
+                exec,
+                Placing::Placed,
+                &mut nodes,
+                &new,
+                (&old_text, &df.text),
+                &args_of,
+            ) {
                 Some(a) => {
                     // (each piece's move since it was made: a kept one's
                     // text, and the places in it, as when it was made; those
@@ -6031,7 +6382,12 @@ impl Build {
                         } else if i >= mid.end && delta != 0 {
                             let e = match shifts.get(&id.raw()) {
                                 Some(&(fs, d)) => Some((fs, d + delta)),
-                                None => self.g.eng.node_info(*id).and_then(|x| x.args.first().copied()).map(|fs| (fs, delta)),
+                                None => self
+                                    .g
+                                    .eng
+                                    .node_info(*id)
+                                    .and_then(|x| x.args.first().copied())
+                                    .map(|fs| (fs, delta)),
                             };
                             if let Some(e) = e {
                                 shifts.insert(id.raw(), e);
@@ -6092,7 +6448,11 @@ impl Build {
             spans: self.spans_named(),
             doc_name: self.opts.name.trim_start_matches("./").to_owned(),
             doc_text: &self.text,
-            doc_raw: if self.canon { self.raw.as_deref() } else { None },
+            doc_raw: if self.canon {
+                self.raw.as_deref()
+            } else {
+                None
+            },
         }
     }
 
@@ -6104,7 +6464,9 @@ impl Build {
     /// [`Build::node_spans`] with each file's name, and the index of the
     /// document node each node is under (its place in the document).
     #[allow(clippy::type_complexity)]
-    pub(crate) fn spans_named(&self) -> Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)> {
+    pub(crate) fn spans_named(
+        &self,
+    ) -> Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)> {
         let mut out: Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)> = self
             .nodes
             .iter()
@@ -6124,11 +6486,22 @@ impl Build {
             .docs
             .locked()
             .values()
-            .flat_map(|d| d.locked().shifts.iter().map(|(&k, &x)| (k, x)).collect::<Vec<_>>())
+            .flat_map(|d| {
+                d.locked()
+                    .shifts
+                    .iter()
+                    .map(|(&k, &x)| (k, x))
+                    .collect::<Vec<_>>()
+            })
             .collect();
         let mut texts: FxHashMap<String, Option<Arc<str>>> = FxHashMap::default();
         let mut seen: phitex_defuse::FxHashSet<u64> = phitex_defuse::FxHashSet::default();
-        let mut stack: Vec<(NodeId, i64, usize)> = self.nodes.iter().enumerate().map(|(k, (_, n, _))| (*n, 0, k)).collect();
+        let mut stack: Vec<(NodeId, i64, usize)> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(k, (_, n, _))| (*n, 0, k))
+            .collect();
         while let Some((x, sh, top)) = stack.pop() {
             if !seen.insert(x.raw()) {
                 continue;
@@ -6410,7 +6783,11 @@ impl Build {
             // (where a load ran in this evaluation: an edit's that ran
             // none compares nothing, every record not decoded again)
             let ran = !self.g.ops.pkg_log.locked().is_empty();
-            let predicted = if ran { l.predicted.locked().clone() } else { FxHashMap::default() };
+            let predicted = if ran {
+                l.predicted.locked().clone()
+            } else {
+                FxHashMap::default()
+            };
             if !predicted.is_empty() {
                 let fresh: FxHashMap<String, crate::pkgrec::Rec> = self
                     .fresh_records(|_, k| predicted.contains_key(k))
@@ -6557,7 +6934,9 @@ impl Build {
             .shell_store
             .iter()
             .map(|(n, t)| {
-                let b = t.as_ref().map(|t| t.chars().map(|c| u8::try_from(c).unwrap_or(b'?')).collect());
+                let b = t
+                    .as_ref()
+                    .map(|t| t.chars().map(|c| u8::try_from(c).unwrap_or(b'?')).collect());
                 (n.clone(), b)
             })
             .collect()
@@ -6676,7 +7055,9 @@ impl Build {
     /// time (the command and memory bounds stay).
     pub fn set_stuck_after(&self, d: Option<std::time::Duration>) {
         let l = self.g.eng.limits();
-        self.g.eng.set_limits(phitex_defuse::Limits { stall: d, ..l });
+        self.g
+            .eng
+            .set_limits(phitex_defuse::Limits { stall: d, ..l });
     }
 
     /// Whether the job ended on a fatal error (§93, `history =
@@ -6700,7 +7081,9 @@ impl Build {
     /// ([`crate::assemble::END_FILE`]).
     fn end_file(&self) -> Option<ValueId> {
         let v = self.g.eng.values();
-        self.g.eng.def_value(self.dvi, v.field(crate::assemble::END_FILE))
+        self.g
+            .eng
+            .def_value(self.dvi, v.field(crate::assemble::END_FILE))
     }
 
     /// The output file (DVI or PDF) and the log.
@@ -6884,7 +7267,9 @@ impl Build {
         // (an offset of the canonical text as the file's: the same line,
         // the same column, at most its end; the canonical text has a
         // comment's text and a line's blanks at its end left out)
-        let raw = (contiguous && self.canon).then_some(self.raw.as_deref()).flatten();
+        let raw = (contiguous && self.canon)
+            .then_some(self.raw.as_deref())
+            .flatten();
         let raw_lines = raw.map(line_starts);
         let to_raw = |o: usize| -> usize {
             let (Some(raw), Some(r)) = (raw, raw_lines.as_ref()) else {
@@ -6942,7 +7327,13 @@ impl Build {
             .docs
             .locked()
             .values()
-            .flat_map(|d| d.locked().shifts.iter().map(|(&k, &x)| (k, x)).collect::<Vec<_>>())
+            .flat_map(|d| {
+                d.locked()
+                    .shifts
+                    .iter()
+                    .map(|(&k, &x)| (k, x))
+                    .collect::<Vec<_>>()
+            })
             .collect();
         for e in entries {
             let xs = list_of(v, e);
@@ -7002,7 +7393,8 @@ impl Build {
                 // (a cut file's line: the place its piece was made at,
                 // moved as far as an edit of the file moved the piece,
                 // [`DocFile::shifts`])
-                let node = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int(4).to_ne_bytes()));
+                let node =
+                    phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int(4).to_ne_bytes()));
                 let shift = piece_shift(&self.g.eng, &doc_shifts, node);
                 let at = usize::try_from(int(3) + shift).unwrap_or(0) + loc;
                 (name, &*file_text, at)
@@ -7071,7 +7463,11 @@ impl Build {
                 }
                 h
             });
-            let (start, at) = if file == docname { (to_raw(start), to_raw(at)) } else { (start, at) };
+            let (start, at) = if file == docname {
+                (to_raw(start), to_raw(at))
+            } else {
+                (start, at)
+            };
             out.push(Diagnostic {
                 file,
                 range: (start, at),
@@ -7102,7 +7498,13 @@ impl Build {
                 help: None,
             });
         }
-        for m in self.prelude.errors.iter().chain(&self.g.eval_errors).chain(&self.g.no_fixpoint) {
+        for m in self
+            .prelude
+            .errors
+            .iter()
+            .chain(&self.g.eval_errors)
+            .chain(&self.g.no_fixpoint)
+        {
             out.push(Diagnostic {
                 file: docname.clone(),
                 range: (0, 0),
@@ -7133,7 +7535,12 @@ impl Build {
             help: None,
         };
         let mut out: Vec<Diagnostic> = self.prelude.diags.clone();
-        out.extend(self.g.eval_warnings.iter().map(|m| at(Severity::Warning, m)));
+        out.extend(
+            self.g
+                .eval_warnings
+                .iter()
+                .map(|m| at(Severity::Warning, m)),
+        );
         out.extend(
             self.prelude
                 .errors
@@ -7172,7 +7579,9 @@ impl Build {
                     Cause::Output { of } => format!("Output of [{}]", d(Some(of))),
                     Cause::Environment { field } => format!("Environment {}", field_name(v, field)),
                     Cause::Structure => "Structure".to_owned(),
-                    Cause::Range { field, by } => format!("Range {} by [{}]", field_name(v, field), d(Some(by))),
+                    Cause::Range { field, by } => {
+                        format!("Range {} by [{}]", field_name(v, field), d(Some(by)))
+                    }
                     Cause::Created { by } => format!("Created by [{}]", d(by)),
                     Cause::Edited => "Edited".to_owned(),
                 };
@@ -7384,7 +7793,10 @@ impl Build {
     #[must_use]
     pub fn nodes_by_op(&self, op: &str) -> usize {
         let e = &self.g.eng;
-        e.order(self.unit).into_iter().filter(|&n| e.node_info(n).is_some_and(|i| i.op == op)).count()
+        e.order(self.unit)
+            .into_iter()
+            .filter(|&n| e.node_info(n).is_some_and(|i| i.op == op))
+            .count()
     }
 
     /// The live nodes a claim of a node of operation `op` holds.
@@ -7411,8 +7823,14 @@ impl Build {
             use phitex_typeset::node::Node;
             for n in list {
                 match n {
-                    Node::Char { ch, .. } => out.push(char::from_u32(u32::from(*ch)).unwrap_or('?')),
-                    Node::Lig(l) => out.extend(l.original.iter().map(|&c| char::from_u32(u32::from(c)).unwrap_or('?'))),
+                    Node::Char { ch, .. } => {
+                        out.push(char::from_u32(u32::from(*ch)).unwrap_or('?'))
+                    }
+                    Node::Lig(l) => out.extend(
+                        l.original
+                            .iter()
+                            .map(|&c| char::from_u32(u32::from(c)).unwrap_or('?')),
+                    ),
                     Node::Box(b) => {
                         text(&b.list, out);
                         out.push(' ');
@@ -7423,13 +7841,20 @@ impl Build {
             }
         }
         let v = self.g.eng.values();
-        let pages = self.g.eng.acc_value(self.unit, v.field("pages")).map(|x| v.seq_to_vec(x)).unwrap_or_default();
+        let pages = self
+            .g
+            .eng
+            .acc_value(self.unit, v.field("pages"))
+            .map(|x| v.seq_to_vec(x))
+            .unwrap_or_default();
         pages
             .iter()
             .position(|&p| {
                 let b = list_of(v, p).first().copied().unwrap_or(ValueId::UNIT);
                 let mut t = String::new();
-                if let Some(phitex_typeset::node::Node::Box(bx)) = crate::nodes::decode(v, b, &mut crate::nodes::Side::default()) {
+                if let Some(phitex_typeset::node::Node::Box(bx)) =
+                    crate::nodes::decode(v, b, &mut crate::nodes::Side::default())
+                {
                     text(&bx.list, &mut t);
                 }
                 t.contains(s)
@@ -7476,7 +7901,10 @@ impl Build {
         } else {
             let f = v.field("pagehash");
             self.g.eng.acc_value(self.unit, f).map(|x| {
-                let r = self.g.eng.acc_value(self.unit, v.field(crate::pdfout::SHOWN));
+                let r = self
+                    .g
+                    .eng
+                    .acc_value(self.unit, v.field(crate::pdfout::SHOWN));
                 v.list(vec![x, r.unwrap_or(ValueId::UNIT)])
             })
         };
@@ -7566,8 +7994,17 @@ impl Build {
             if x.op != op || !self.g.eng.is_live(NodeId::from_raw(node)) {
                 continue;
             }
-            n += x.reads.iter().filter(|r| r.0.starts_with(prefix)).map(|r| u64::from(r.1)).sum::<u64>();
-            n += x.other_reads.iter().filter(|&&f| field_name(v, f).starts_with(prefix)).count() as u64;
+            n += x
+                .reads
+                .iter()
+                .filter(|r| r.0.starts_with(prefix))
+                .map(|r| u64::from(r.1))
+                .sum::<u64>();
+            n += x
+                .other_reads
+                .iter()
+                .filter(|&&f| field_name(v, f).starts_with(prefix))
+                .count() as u64;
         }
         n
     }
@@ -7663,7 +8100,11 @@ fn dump_chain(eng: &Engine, r: &Report, path: &str) {
         .map(|(n, d)| (n.raw(), d.as_nanos()))
         .collect();
     // (the chain's run, commit, re-ask and gap before each, ns; its heights)
-    let at: Vec<[u64; 4]> = eng.critical_chain_times().into_iter().map(|(_, t)| t).collect();
+    let at: Vec<[u64; 4]> = eng
+        .critical_chain_times()
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect();
     let chain = eng.critical_chain_heights();
     let mut s = format!(
         "# eval {} {} {}\n",
@@ -7775,7 +8216,13 @@ fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
 
 /// The job's environment: the format's parameters, the job name, the
 /// PDF options and the date (§241), set on `unit` before the first line.
-fn job_env(g: &mut Graph, unit: UnitId, env: &Env, made: &Arc<crate::fmtenv::Made>, opts: &Options) {
+fn job_env(
+    g: &mut Graph,
+    unit: UnitId,
+    env: &Env,
+    made: &Arc<crate::fmtenv::Made>,
+    opts: &Options,
+) {
     // (the format's bindings the environment's base: each made when a
     // run first reads it, a value two bindings share made once; one no
     // run reads is never made, nor its name)
@@ -7783,7 +8230,8 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, made: &Arc<crate::fmtenv::Mad
         let (fmt, made) = (Arc::clone(env), Arc::clone(made));
         let base: EnvBase = Arc::new(move |v, f| fmt.get_field(v, f, &made));
         g.env_base = Some(Arc::clone(&base));
-        g.eng.set_env_provider(Box::new(move |v, f| base(v, f).map(Some)));
+        g.eng
+            .set_env_provider(Box::new(move |v, f| base(v, f).map(Some)));
     }
     let v = g.eng.values();
     let mut sets = vec![
@@ -7803,8 +8251,12 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, made: &Arc<crate::fmtenv::Mad
     }
     if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
         // (the check reads the format's bindings too: all of them made)
-        g.start_env
-            .extend(env.bindings(v, made, 0..env.len()).iter().chain(&sets).copied());
+        g.start_env.extend(
+            env.bindings(v, made, 0..env.len())
+                .iter()
+                .chain(&sets)
+                .copied(),
+        );
     }
     // (spec-final §4.5: the job's bindings go with the environment, one
     // push for all of them, made again only where an entry changed; the
@@ -8094,7 +8546,14 @@ fn node_dump(eng: &Engine, path: &str, root: &phitex_defuse::NodeInfo) {
             dig(a).hash(&mut h);
         }
         let o = eng.output(n).map_or(0, dig);
-        let head: String = i.args.first().map(|&a| v.render(a)).unwrap_or_default().chars().take(60).collect();
+        let head: String = i
+            .args
+            .first()
+            .map(|&a| v.render(a))
+            .unwrap_or_default()
+            .chars()
+            .take(60)
+            .collect();
         let _ = write!(
             out,
             "{} {} {:?} parent {:?} claimer {:?} args {:016x} out {o:016x} {head}",
@@ -8108,14 +8567,24 @@ fn node_dump(eng: &Engine, path: &str, root: &phitex_defuse::NodeInfo) {
         // (a page's finisher: what it gave back; `PHITEX_NODE_DUMP_READS`
         // names nodes whose reads follow)
         if i.op == "finish" {
-            let r: String = eng.output(n).map(|x| v.render(x)).unwrap_or_default().chars().take(300).collect();
+            let r: String = eng
+                .output(n)
+                .map(|x| v.render(x))
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect();
             let _ = write!(out, " | {r}");
         }
         out.push('\n');
         // (`PHITEX_NODE_DUMP_DEFS=1`: each node's definitions, a digest
         // of each value)
         if crate::exec::obs_flag!("PHITEX_NODE_DUMP_DEFS") {
-            let mut ds: Vec<(String, u64)> = eng.defs_of(n).into_iter().map(|(f, x)| (v.render(f.0), dig(x))).collect();
+            let mut ds: Vec<(String, u64)> = eng
+                .defs_of(n)
+                .into_iter()
+                .map(|(f, x)| (v.render(f.0), dig(x)))
+                .collect();
             ds.sort();
             for (f, d) in ds {
                 let _ = writeln!(out, "  def {f} {d:016x}");
@@ -8123,7 +8592,13 @@ fn node_dump(eng: &Engine, path: &str, root: &phitex_defuse::NodeInfo) {
             let mut cs: Vec<(String, u64, String)> = eng
                 .contribs_of(n)
                 .into_iter()
-                .map(|(f, x)| (v.render(f.0), dig(x), v.render(x).chars().take(200).collect()))
+                .map(|(f, x)| {
+                    (
+                        v.render(f.0),
+                        dig(x),
+                        v.render(x).chars().take(200).collect(),
+                    )
+                })
                 .collect();
             cs.sort();
             for (f, d, t) in cs {
@@ -8137,9 +8612,11 @@ fn node_dump(eng: &Engine, path: &str, root: &phitex_defuse::NodeInfo) {
             }
             h.finish()
         });
-        if crate::exec::obs_str!("PHITEX_NODE_DUMP_READS")
-            .is_some_and(|l| l == "all" || l.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(n.raw()) || x.trim() == argd))
-        {
+        if crate::exec::obs_str!("PHITEX_NODE_DUMP_READS").is_some_and(|l| {
+            l == "all"
+                || l.split(',')
+                    .any(|x| x.trim().parse::<u64>().ok() == Some(n.raw()) || x.trim() == argd)
+        }) {
             let _ = writeln!(out, "    node {}", eng.debug_node(n));
             for l in eng.debug_reads(n).lines() {
                 let _ = writeln!(out, "    read {}", l.replace("}, ", "},\n    read "));
@@ -8165,7 +8642,10 @@ fn debug_nodes(eng: &Engine, when: &str) {
     // (`PHITEX_ORDER_AROUND=a,b`: the unit's nodes in text order from
     // node `a` to node `b`, each as the engine has it)
     if let Some(ab) = crate::exec::obs_str!("PHITEX_ORDER_AROUND") {
-        let ids: Vec<u64> = ab.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        let ids: Vec<u64> = ab
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
         if let [a, b] = ids[..]
             && let Some(i) = eng.node_info(phitex_defuse::NodeId::from_raw(a))
         {
@@ -8228,24 +8708,85 @@ mod prelude_tests {
         // (natively, no host key: the finder's file and its stat)
         let (p, st) = located_key(None, "a.tex", f.as_ref());
         assert_eq!((p.as_str(), st.len()), (path.as_str(), 24));
-        assert!(read_holds(&finder, None, "a.tex", &[1; 32], &path, &st), "the stat holds");
-        assert!(read_holds(&finder, None, "a.tex", &h, &path, &[]), "the digest holds");
+        assert!(
+            read_holds(&finder, None, "a.tex", &[1; 32], &path, &st),
+            "the stat holds"
+        );
+        assert!(
+            read_holds(&finder, None, "a.tex", &h, &path, &[]),
+            "the digest holds"
+        );
         assert!(!read_holds(&finder, None, "a.tex", &[1; 32], &path, &[]));
-        assert!(!read_holds(&finder, None, "a.tex", &[1; 32], "/elsewhere/a.tex", &st), "another path: the digest");
+        assert!(
+            !read_holds(&finder, None, "a.tex", &[1; 32], "/elsewhere/a.tex", &st),
+            "another path: the digest"
+        );
         // (a host's located key: the same path and key, no finder)
-        let key = |p: String, k: &'static [u8]| -> ContentKey { Arc::new(move |_: &str| Some((p.clone(), k.to_vec()))) };
+        let key = |p: String, k: &'static [u8]| -> ContentKey {
+            Arc::new(move |_: &str| Some((p.clone(), k.to_vec())))
+        };
         let n0 = calls.load(Ordering::SeqCst);
-        assert!(read_holds(&finder, Some(&key(path.clone(), b"pack:1")), "a.tex", &[1; 32], &path, b"pack:1"), "the same key");
+        assert!(
+            read_holds(
+                &finder,
+                Some(&key(path.clone(), b"pack:1")),
+                "a.tex",
+                &[1; 32],
+                &path,
+                b"pack:1"
+            ),
+            "the same key"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), n0, "the finder not called");
-        assert!(!read_holds(&finder, Some(&key(path.clone(), b"pack:2")), "a.tex", &[1; 32], &path, b"pack:1"), "another key: read and hashed");
-        assert!(read_holds(&finder, Some(&key(path.clone(), b"pack:2")), "a.tex", &h, &path, b"pack:1"), "another key, the same bytes");
-        assert!(!read_holds(&finder, Some(&key("/b/a.tex".into(), b"pack:1")), "a.tex", &[1; 32], &path, b"pack:1"), "another path: read and hashed");
-        assert_eq!(calls.load(Ordering::SeqCst), n0 + 3, "the finder called for each change");
+        assert!(
+            !read_holds(
+                &finder,
+                Some(&key(path.clone(), b"pack:2")),
+                "a.tex",
+                &[1; 32],
+                &path,
+                b"pack:1"
+            ),
+            "another key: read and hashed"
+        );
+        assert!(
+            read_holds(
+                &finder,
+                Some(&key(path.clone(), b"pack:2")),
+                "a.tex",
+                &h,
+                &path,
+                b"pack:1"
+            ),
+            "another key, the same bytes"
+        );
+        assert!(
+            !read_holds(
+                &finder,
+                Some(&key("/b/a.tex".into(), b"pack:1")),
+                "a.tex",
+                &[1; 32],
+                &path,
+                b"pack:1"
+            ),
+            "another path: read and hashed"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            n0 + 3,
+            "the finder called for each change"
+        );
         let none: ContentKey = Arc::new(|_: &str| None);
-        assert!(!read_holds(&finder, Some(&none), "a.tex", &[1; 32], &path, b"pack:1"), "no key now: the digest");
+        assert!(
+            !read_holds(&finder, Some(&none), "a.tex", &[1; 32], &path, b"pack:1"),
+            "no key now: the digest"
+        );
         // (natively, other bytes: another stat and digest)
         std::fs::write(&path, b"\\relax\\relax").unwrap();
-        assert!(!read_holds(&finder, None, "a.tex", &h, &path, &st), "another length, other bytes");
+        assert!(
+            !read_holds(&finder, None, "a.tex", &h, &path, &st),
+            "another length, other bytes"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -8257,10 +8798,18 @@ mod prelude_tests {
             key: [3; 32],
             text_key: 5,
             text_digest: [7; 32],
-            reads: vec![("a.tex".to_owned(), [9; 32], "/a.tex".to_owned(), vec![1, 2, 3])],
+            reads: vec![(
+                "a.tex".to_owned(),
+                [9; 32],
+                "/a.tex".to_owned(),
+                vec![1, 2, 3],
+            )],
             env: {
                 let v = Values::new();
-                Arc::new(crate::fmtenv::FormatEnv::of(&v, &[("x".to_owned(), v.int(1))]))
+                Arc::new(crate::fmtenv::FormatEnv::of(
+                    &v,
+                    &[("x".to_owned(), v.int(1))],
+                ))
             },
             errors: Vec::new(),
             diags: Vec::new(),
@@ -8287,8 +8836,16 @@ mod canonical_tests {
     fn a_slice_whose_key_meets_another_text_is_replaced() {
         let (old_t, new_t) = ("a\nb\nc\n", "a\nx\nc\n");
         let n = |k: u64| NodeId::from_raw(k);
-        let old = vec![(1, n(1), Src::Doc(0, 2)), (5, n(2), Src::Doc(2, 4)), (3, n(3), Src::Doc(4, 6))];
-        let new = vec![(1, DocNode::Doc(0, 2)), (5, DocNode::Doc(2, 4)), (3, DocNode::Doc(4, 6))];
+        let old = vec![
+            (1, n(1), Src::Doc(0, 2)),
+            (5, n(2), Src::Doc(2, 4)),
+            (3, n(3), Src::Doc(4, 6)),
+        ];
+        let new = vec![
+            (1, DocNode::Doc(0, 2)),
+            (5, DocNode::Doc(2, 4)),
+            (3, DocNode::Doc(4, 6)),
+        ];
         let same = |i: usize, j: usize| slice_same(&old[i], &new[j], (old_t, new_t));
         assert!(same(0, 0) && !same(1, 1) && same(2, 2));
         assert_eq!(common_ends(&old, &new, &same), (1, 1));
@@ -8303,9 +8860,17 @@ mod canonical_tests {
     fn comments_whose_ids_meet_are_not_marked() {
         let k = prefix_hash("x ");
         let met = mark_id(k, "b", true);
-        let marks: Vec<CommentMark> = vec![(1, met, "a".to_owned()), (2, k, "b".to_owned()), (3, k, "c".to_owned())];
+        let marks: Vec<CommentMark> = vec![
+            (1, met, "a".to_owned()),
+            (2, k, "b".to_owned()),
+            (3, k, "c".to_owned()),
+        ];
         assert!(!ids_hold(&marks));
-        let apart: Vec<CommentMark> = vec![(1, met ^ 1, "a".to_owned()), (2, k, "b".to_owned()), (3, k, "c".to_owned())];
+        let apart: Vec<CommentMark> = vec![
+            (1, met ^ 1, "a".to_owned()),
+            (2, k, "b".to_owned()),
+            (3, k, "c".to_owned()),
+        ];
         assert!(ids_hold(&apart));
         // (one comment twice under one id: the same text, one mark)
         assert!(ids_hold(&[(1, k, "a".to_owned()), (2, k, "a".to_owned())]));
@@ -8350,9 +8915,14 @@ mod canonical_tests {
             let want = canonical_text(new).unwrap();
             for ends in [None, Some(byte_ends(text.as_bytes(), new.as_bytes()))] {
                 let mut canon = old_c.clone();
-                if let Some((ms, (a, b, c))) = canonical_splice(text, &mut canon, &marks, new, ends) {
+                if let Some((ms, (a, b, c))) = canonical_splice(text, &mut canon, &marks, new, ends)
+                {
                     assert_eq!((&canon, &ms), (&want.0, &want.1), "{text:?} -> {new:?}");
-                    assert_eq!((&old_c[..a], &old_c[b..]), (&canon[..a], &canon[c..]), "{new:?}: the range");
+                    assert_eq!(
+                        (&old_c[..a], &old_c[b..]),
+                        (&canon[..a], &canon[c..]),
+                        "{new:?}: the range"
+                    );
                 }
             }
         }
@@ -8373,7 +8943,11 @@ mod canonical_tests {
         ] {
             let (c, _) = canonical_text(t).unwrap();
             assert!(c.starts_with(want), "{t:?}: {c:?}");
-            assert_eq!((c.clone(), canonical_text(t).unwrap().1), by_lines(t), "{t:?}");
+            assert_eq!(
+                (c.clone(), canonical_text(t).unwrap().1),
+                by_lines(t),
+                "{t:?}"
+            );
         }
         let text = "a b\nc d % one\n\ne f\n";
         for (i, ch) in text.char_indices() {
@@ -8455,7 +9029,10 @@ fn cgroup_memory_max() -> Option<u64> {
     let mut dir = std::path::PathBuf::from("/sys/fs/cgroup");
     dir.push(path.trim_start_matches('/'));
     let mut least: Option<u64> = None;
-    for d in dir.ancestors().take_while(|d| d.starts_with("/sys/fs/cgroup")) {
+    for d in dir
+        .ancestors()
+        .take_while(|d| d.starts_with("/sys/fs/cgroup"))
+    {
         if let Some(m) = std::fs::read_to_string(d.join("memory.max"))
             .ok()
             .and_then(|x| x.trim().parse::<u64>().ok())

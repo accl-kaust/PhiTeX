@@ -45,7 +45,11 @@ pub fn char_pw(fonts: &dyn Fonts, n: Option<&Node>, left: bool) -> (Scaled, Opti
     // XeTeX: a native word's first or last glyph, a glyph node's glyph
     // (its codes are by glyph)
     if let Some(Node::Native(w)) = n {
-        let g = if left { w.glyphs.first() } else { w.glyphs.last() };
+        let g = if left {
+            w.glyphs.first()
+        } else {
+            w.glyphs.last()
+        };
         return match g {
             Some(g) => (pw_of(fonts, w.font, g.gid, left), Some((w.font, g.gid))),
             None => (0, None),

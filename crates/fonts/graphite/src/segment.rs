@@ -157,7 +157,11 @@ impl Slot {
 
     /// `glyph()`: the real glyph of a pseudo glyph.
     pub(crate) fn glyph(&self) -> u16 {
-        if self.realglyphid != 0 { self.realglyphid } else { self.glyphid }
+        if self.realglyphid != 0 {
+            self.realglyphid
+        } else {
+            self.glyphid
+        }
     }
 
     pub(crate) fn is_base(&self) -> bool {
@@ -178,16 +182,28 @@ impl Slot {
     }
 
     pub(crate) fn mark_deleted(&mut self, v: bool) {
-        if v { self.flags |= DELETED } else { self.flags &= !DELETED }
+        if v {
+            self.flags |= DELETED
+        } else {
+            self.flags &= !DELETED
+        }
     }
 
     pub(crate) fn mark_copied(&mut self, v: bool) {
-        if v { self.flags |= COPIED } else { self.flags &= !COPIED }
+        if v {
+            self.flags |= COPIED
+        } else {
+            self.flags &= !COPIED
+        }
     }
 
     /// `markInsertBefore`.
     pub(crate) fn mark_insert_before(&mut self, v: bool) {
-        if v { self.flags &= !INSERTED } else { self.flags |= INSERTED }
+        if v {
+            self.flags &= !INSERTED
+        } else {
+            self.flags |= INSERTED
+        }
     }
 
     /// `origin(pos)`.
@@ -217,7 +233,15 @@ pub(crate) struct CharInfo {
 
 impl Default for CharInfo {
     fn default() -> CharInfo {
-        CharInfo { char: 0, before: -1, after: -1, base: 0, feature_id: 0, break_weight: 0, flags: 0 }
+        CharInfo {
+            char: 0,
+            before: -1,
+            after: -1,
+            base: 0,
+            feature_id: 0,
+            break_weight: 0,
+            flags: 0,
+        }
     }
 }
 
@@ -346,7 +370,11 @@ impl<'a> Segment<'a> {
             let base = self.slots.len() as u32;
             for i in 0..self.buf_size as u32 {
                 let mut sl = Slot::new(((base + i) as usize * num_user) as u32);
-                sl.next = if i + 1 < self.buf_size as u32 { base + i + 1 } else { NIL };
+                sl.next = if i + 1 < self.buf_size as u32 {
+                    base + i + 1
+                } else {
+                    NIL
+                };
                 self.slots.push(sl);
             }
             self.user_attrs.resize(self.slots.len() * num_user, 0);
@@ -405,7 +433,11 @@ impl<'a> Segment<'a> {
             let size = self.just_size();
             let base = self.just_next.len() as u32;
             for i in 0..self.buf_size as u32 {
-                self.just_next.push(if i + 1 < self.buf_size as u32 { base + i + 1 } else { NIL });
+                self.just_next.push(if i + 1 < self.buf_size as u32 {
+                    base + i + 1
+                } else {
+                    NIL
+                });
             }
             self.justs.resize(self.just_next.len() * size, 0);
             self.free_justs = if self.buf_size > 0 { base } else { NIL };
@@ -429,7 +461,14 @@ impl<'a> Segment<'a> {
     }
 
     /// `appendSlot(id, cid, gid, iFeats, coffset)`.
-    pub(crate) fn append_slot(&mut self, id: usize, cid: i32, gid: u16, ifeats: i32, coffset: usize) {
+    pub(crate) fn append_slot(
+        &mut self,
+        id: usize,
+        cid: i32,
+        gid: u16,
+        ifeats: i32,
+        coffset: usize,
+    ) {
         let a = self.new_slot();
         if a == NIL {
             return;
@@ -459,7 +498,11 @@ impl<'a> Segment<'a> {
             && self.silf.a_pass_bits != 0
         {
             let ab = u16::from(self.silf.a_pass_bits);
-            let hi = if self.silf.num_passes > 16 { i32::from(g.attrs.get(ab + 1)) << 16 } else { 0 };
+            let hi = if self.silf.num_passes > 16 {
+                i32::from(g.attrs.get(ab + 1)) << 16
+            } else {
+                0
+            };
             self.pass_bits &= (i32::from(g.attrs.get(ab)) | hi) as u8;
         }
     }
@@ -624,7 +667,9 @@ impl<'a> Segment<'a> {
 
     /// `collisionInfo(s)`: the slot's collision record (by its index).
     pub(crate) fn collision(&self, s: u32) -> Option<&SlotCollision> {
-        self.collisions.as_ref().and_then(|c| c.get(self.s(s).index as usize))
+        self.collisions
+            .as_ref()
+            .and_then(|c| c.get(self.s(s).index as usize))
     }
 
     pub(crate) fn collision_mut(&mut self, s: u32) -> Option<&mut SlotCollision> {
@@ -685,7 +730,17 @@ impl<'a> Segment<'a> {
         }
         let mut bbox = self.face.glyphs.glyph(g).bbox;
         let mut cluster_min = 0.0f32;
-        let res = self.finalise_slot(s, None, Position::default(), &mut bbox, attr_level, &mut cluster_min, rtl, false, 0);
+        let res = self.finalise_slot(
+            s,
+            None,
+            Position::default(),
+            &mut bbox,
+            attr_level,
+            &mut cluster_min,
+            rtl,
+            false,
+            0,
+        );
         match metric {
             m::LSB | m::BB_LEFT => bbox.bl.x as i32,
             m::RSB => (res.x - bbox.tr.x) as i32,
@@ -719,7 +774,10 @@ impl<'a> Segment<'a> {
             return Position::default();
         }
         let mut scale = font.map_or(1.0, |f| f.scale);
-        let mut shift = Position::new(sl.shift.x * (i32::from(rtl) * -2 + 1) as f32 + sl.just, sl.shift.y);
+        let mut shift = Position::new(
+            sl.shift.x * (i32::from(rtl) * -2 + 1) as f32 + sl.just,
+            sl.shift.y,
+        );
         let mut t_advance = sl.advance.x + sl.just;
         if is_final && let Some(coll) = self.collision(s) {
             let collshift = coll.offset;
@@ -746,7 +804,11 @@ impl<'a> Segment<'a> {
             *cluster_min = position.x;
         } else {
             position += (sl.attach - sl.with) * scale;
-            let t_adv = if sl.advance.x >= 0.5 { position.x + t_advance - shift.x } else { 0.0 };
+            let t_adv = if sl.advance.x >= 0.5 {
+                position.x + t_advance - shift.x
+            } else {
+                0.0
+            };
             res = Position::new(t_adv, 0.0);
             if (sl.advance.x >= 0.5 || position.x < 0.0) && position.x < *cluster_min {
                 *cluster_min = position.x;
@@ -759,14 +821,34 @@ impl<'a> Segment<'a> {
         }
         let c = sl.child;
         if c != NIL && c != s && self.s(c).parent == s {
-            let t = self.finalise_slot(c, font, position, bbox, attr_level, cluster_min, rtl, is_final, depth + 1);
+            let t = self.finalise_slot(
+                c,
+                font,
+                position,
+                bbox,
+                attr_level,
+                cluster_min,
+                rtl,
+                is_final,
+                depth + 1,
+            );
             if (sl.parent == NIL || sl.advance.x >= 0.5) && t.x > res.x {
                 res = t;
             }
         }
         let sib = sl.sibling;
         if sl.parent != NIL && sib != NIL && sib != s && self.s(sib).parent == sl.parent {
-            let t = self.finalise_slot(sib, font, base, bbox, attr_level, cluster_min, rtl, is_final, depth + 1);
+            let t = self.finalise_slot(
+                sib,
+                font,
+                base,
+                bbox,
+                attr_level,
+                cluster_min,
+                rtl,
+                is_final,
+                depth + 1,
+            );
             if t.x > res.x {
                 res = t;
             }
@@ -785,7 +867,14 @@ impl<'a> Segment<'a> {
     }
 
     /// `positionSlots(font, iStart, iEnd, isRtl, isFinal)`.
-    pub(crate) fn position_slots(&mut self, font: Option<&Font>, start: u32, end: u32, is_rtl: bool, is_final: bool) -> Position {
+    pub(crate) fn position_slots(
+        &mut self,
+        font: Option<&Font>,
+        start: u32,
+        end: u32,
+        is_rtl: bool,
+        is_final: bool,
+    ) -> Position {
         let mut currpos = Position::default();
         let mut cluster_min;
         let mut bbox = Rect::default();
@@ -810,7 +899,17 @@ impl<'a> Segment<'a> {
             while s != NIL && s != stop {
                 if self.s(s).is_base() {
                     cluster_min = currpos.x;
-                    currpos = self.finalise_slot(s, font, currpos, &mut bbox, 0, &mut cluster_min, is_rtl, is_final, 0);
+                    currpos = self.finalise_slot(
+                        s,
+                        font,
+                        currpos,
+                        &mut bbox,
+                        0,
+                        &mut cluster_min,
+                        is_rtl,
+                        is_final,
+                        0,
+                    );
                 }
                 s = self.s(s).prev;
             }
@@ -820,7 +919,17 @@ impl<'a> Segment<'a> {
             while s != NIL && s != stop {
                 if self.s(s).is_base() {
                     cluster_min = currpos.x;
-                    currpos = self.finalise_slot(s, font, currpos, &mut bbox, 0, &mut cluster_min, is_rtl, is_final, 0);
+                    currpos = self.finalise_slot(
+                        s,
+                        font,
+                        currpos,
+                        &mut bbox,
+                        0,
+                        &mut cluster_min,
+                        is_rtl,
+                        is_final,
+                        0,
+                    );
                 }
                 s = self.s(s).next;
             }
@@ -1012,7 +1121,19 @@ impl<'a> Segment<'a> {
     /// `isWhitespace(cid)`.
     pub(crate) fn is_whitespace(cid: i32) -> bool {
         (0x0009..=0x000D).contains(&cid)
-            || matches!(cid, 0x0020 | 0x0085 | 0x00A0 | 0x1680 | 0x180E | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000)
+            || matches!(
+                cid,
+                0x0020
+                    | 0x0085
+                    | 0x00A0
+                    | 0x1680
+                    | 0x180E
+                    | 0x2028
+                    | 0x2029
+                    | 0x202F
+                    | 0x205F
+                    | 0x3000
+            )
             || (0x2000..=0x200A).contains(&cid)
     }
 
@@ -1025,7 +1146,10 @@ impl<'a> Segment<'a> {
         let j = self.s(s).justs;
         if j != NIL {
             let size = self.just_size();
-            return i32::from(self.justs[j as usize * size + usize::from(level) * NUMJUSTPARAMS + usize::from(sub)]);
+            return i32::from(
+                self.justs
+                    [j as usize * size + usize::from(level) * NUMJUSTPARAMS + usize::from(sub)],
+            );
         }
         if level >= nj {
             return 0;
@@ -1273,7 +1397,11 @@ impl<'a> Segment<'a> {
             self.sm(n).prev = e;
             self.sm(e).before = self.s(n).before;
             let ep = self.s(e).prev;
-            self.sm(e).after = if ep != NIL { self.s(ep).after } else { self.s(n).before };
+            self.sm(e).after = if ep != NIL {
+                self.s(ep).after
+            } else {
+                self.s(n).before
+            };
         } else {
             let n = self.last;
             self.sm(e).prev = n;

@@ -8,8 +8,7 @@ use crate::exec::LockWait as _;
 use std::sync::{Arc, OnceLock};
 
 use phitex_defuse::{
-    Ctx, Effect, Field, FxHashMap, Locality, MayDefine, Operation, Stop, ValueId,
-    Values,
+    Ctx, Effect, Field, FxHashMap, Locality, MayDefine, Operation, Stop, ValueId, Values,
 };
 
 use crate::run::{Halt, Ops, R, Run};
@@ -140,8 +139,15 @@ pub(crate) fn run_node(
     }
     // (an edit's exec run of 2 ms or more: its input's size, its
     // commands, its passes and where its time went)
-    if t_body.as_micros() >= 2000 && r.cx.op() == o.exec && crate::exec::prof_flag!("PHITEX_TEX_TIME") {
-        let text = r.cx.args().first().map(|&x| r.cx.values().render(x)).unwrap_or_default();
+    if t_body.as_micros() >= 2000
+        && r.cx.op() == o.exec
+        && crate::exec::prof_flag!("PHITEX_TEX_TIME")
+    {
+        let text =
+            r.cx.args()
+                .first()
+                .map(|&x| r.cx.values().render(x))
+                .unwrap_or_default();
         eprintln!(
             "exec run: node {} input {} bytes, {} lines, {} blank lines; {} commands; set up {t_new:?}, first pass {t_first:?}{}, in all {t_body:?}; {:?}",
             r.cx.node().raw(),
@@ -149,7 +155,11 @@ pub(crate) fn run_node(
             text.lines().count(),
             text.lines().filter(|l| l.trim().is_empty()).count(),
             r.cmds,
-            if recut { ", cut again (a second pass)" } else { "" },
+            if recut {
+                ", cut again (a second pass)"
+            } else {
+                ""
+            },
             text.chars().take(60).collect::<String>()
         );
     }
@@ -250,7 +260,9 @@ pub(crate) fn run_node(
                             Halt::Hole => "hole",
                             _ => "fatal",
                         };
-                        eprintln!("resume check: node {node} went on at command {at}: DIFFERENT, the whole run ended otherwise ({how})");
+                        eprintln!(
+                            "resume check: node {node} went on at command {at}: DIFFERENT, the whole run ended otherwise ({how})"
+                        );
                         return Ok(r.stall(how, ValueId::UNIT));
                     }
                 }
@@ -263,7 +275,10 @@ pub(crate) fn run_node(
                 r.settle_lines();
                 let whole = r.product_signature();
                 if resumed == whole {
-                    eprintln!("resume check: node {node} went on at command {at} of {}: same", r.cmds);
+                    eprintln!(
+                        "resume check: node {node} went on at command {at} of {}: same",
+                        r.cmds
+                    );
                 } else {
                     eprintln!(
                         "resume check: node {node} went on at command {at} of {}: DIFFERENT {}",
@@ -289,7 +304,13 @@ pub(crate) fn run_node(
                     .iter()
                     .map(|(f, x)| format!("{}+={}", crate::val::field_name(v, *f), x.raw()))
                     .collect();
-                let kids: Vec<String> = r.kids.iter().map(|(o, a)| format!("{o:?}{:?}", a.iter().map(|x| x.raw()).collect::<Vec<_>>())).collect();
+                let kids: Vec<String> = r
+                    .kids
+                    .iter()
+                    .map(|(o, a)| {
+                        format!("{o:?}{:?}", a.iter().map(|x| x.raw()).collect::<Vec<_>>())
+                    })
+                    .collect();
                 eprintln!(
                     "mark-trace: node {node} effect {:?} pub {pubd:?} contribs {contribs:?} kids {kids:?}",
                     r.effect
@@ -360,7 +381,11 @@ pub(crate) fn run_node(
 /// The scope shape of a piece's text (an exec node's frames) or of a
 /// continuation's rest inside the groups it carries open (a resume's,
 /// `[cont, ..]`, the continuation `[frames, levels, ..]`).
-pub(crate) fn scope_shape_of(v: &Values, args: &[ValueId], resume: bool) -> crate::hints::ScopeShape {
+pub(crate) fn scope_shape_of(
+    v: &Values,
+    args: &[ValueId],
+    resume: bool,
+) -> crate::hints::ScopeShape {
     let Some(&a0) = args.first() else {
         return crate::hints::ScopeShape::Unknown;
     };
@@ -384,13 +409,21 @@ pub(crate) fn scope_shape_of(v: &Values, args: &[ValueId], resume: bool) -> crat
 /// where they do not say.
 pub(crate) fn predicted_effect(o: &Ops, v: &Values, args: &[ValueId], resume: bool) -> Effect {
     let shape = scope_shape_of(v, args, resume);
-    if matches!(shape, crate::hints::ScopeShape::Balanced | crate::hints::ScopeShape::Unknown) {
+    if matches!(
+        shape,
+        crate::hints::ScopeShape::Balanced | crate::hints::ScopeShape::Unknown
+    ) {
         return Effect::Pending;
     }
-    let m = o.scope_learned.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let m = o
+        .scope_learned
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let e = crate::hints::predicted_brackets(&shape, &m).map_or(Effect::Pending, Effect::Scope);
     if crate::exec::prof_flag!("PHITEX_SKIND_LOG") {
-        let text: String = args.first().map_or_else(String::new, |&a| v.render(a).chars().take(100).collect());
+        let text: String = args
+            .first()
+            .map_or_else(String::new, |&a| v.render(a).chars().take(100).collect());
         eprintln!("skindpred: {shape:?} {e:?} {text}");
     }
     e
@@ -432,7 +465,11 @@ impl Operation for Exec {
         if !crate::pkgrec::is_recorded(reg(&self.0), v, args) {
             return crate::hints::const_defs(v, args);
         }
-        let loads = ops(&self.0).pkg_loads.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()?;
+        let loads = ops(&self.0)
+            .pkg_loads
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
         if !loads.predict {
             return None;
         }
@@ -877,7 +914,11 @@ type WrittenDefs = Vec<(String, ValueId)>;
 /// `wsize:`), its read-back's keys and definitions (`wkeys:`, `wdef:`)
 /// or its units and order (`wfile:`, `wunit:`), and for a file whose
 /// text the client gave, whether it is written as given (`wsame:`).
-fn file_node(cx: &mut Ctx<'_>, name: &str, defs_lock: &std::sync::Mutex<crate::hints::Defs>) -> Result<ValueId, Stop> {
+fn file_node(
+    cx: &mut Ctx<'_>,
+    name: &str,
+    defs_lock: &std::sync::Mutex<crate::hints::Defs>,
+) -> Result<ValueId, Stop> {
     let v = cx.values();
     let k = v.field(&format!("wkeys:{name}"));
     let wt = crate::tools::text_field(v, name);
@@ -897,12 +938,18 @@ fn file_node(cx: &mut Ctx<'_>, name: &str, defs_lock: &std::sync::Mutex<crate::h
         return keep_file(cx, name);
     }
     if let Some(seed) = seed_text(cx, name)? {
-        let same = text.as_deref().is_some_and(|t| v.with_str(seed, |s| s == t).unwrap_or(false));
+        let same = text
+            .as_deref()
+            .is_some_and(|t| v.with_str(seed, |s| s == t).unwrap_or(false));
         define_traced(cx, v.field(&format!("{WSAME}:{name}")), v.bool(same));
     }
     let tv = text.as_deref().map_or(ValueId::UNIT, |t| v.str(t));
     define_traced(cx, wt, tv);
-    define_traced(cx, crate::tools::size_field(v, name), crate::tools::size_value(v, tv));
+    define_traced(
+        cx,
+        crate::tools::size_field(v, name),
+        crate::tools::size_value(v, tv),
+    );
     // (read back per field while every line written to it only defines;
     // as its text once one does more, `wkeys:` then marked so)
     if as_text {
@@ -926,7 +973,10 @@ fn file_node(cx: &mut Ctx<'_>, name: &str, defs_lock: &std::sync::Mutex<crate::h
                     .first()
                     .map(|&x| crate::val::show_def(v, x))
                     .unwrap_or_default();
-                eprintln!("aux-trace: define {name} {f} = {shown} (id {:?})", val.raw());
+                eprintln!(
+                    "aux-trace: define {name} {f} = {shown} (id {:?})",
+                    val.raw()
+                );
             }
         }
         if trace {
@@ -1104,9 +1154,11 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
         return (ends.clone(), *sl);
     }
     let last = LAST.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
-    let before = last.locked().get(name).cloned().filter(|(_, (d, _, _))| {
-        d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
-    });
+    let before = last
+        .locked()
+        .get(name)
+        .cloned()
+        .filter(|(_, (d, _, _))| d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs)));
     let cut = |t: &str| -> Vec<usize> {
         let h = crate::hints::text_hints(t, phitex_source::pass::FileKind::Document, defs);
         h.slices.iter().map(|&(_, e)| e).collect()
@@ -1133,7 +1185,11 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
         if whole.last() != Some(&text.len()) {
             whole.push(text.len());
         }
-        eprintln!("units-check: {name}: {} units, the same as the whole text's: {}", ends.len(), whole == ends);
+        eprintln!(
+            "units-check: {name}: {} units, the same as the whole text's: {}",
+            ends.len(),
+            whole == ends
+        );
     }
     // (the job's own text: what kind of file it is comes from its text)
     let sliceable = crate::inputs::document_text(text);
@@ -1143,9 +1199,15 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
         m.clear();
     }
     let t: Arc<str> = Arc::from(text);
-    m.insert(key, (t.clone(), (Arc::downgrade(defs), ends.clone(), sliceable)));
+    m.insert(
+        key,
+        (t.clone(), (Arc::downgrade(defs), ends.clone(), sliceable)),
+    );
     drop(m);
-    last.locked().insert(name.to_owned(), (t, (Arc::downgrade(defs), ends.clone(), sliceable)));
+    last.locked().insert(
+        name.to_owned(),
+        (t, (Arc::downgrade(defs), ends.clone(), sliceable)),
+    );
     (ends, sliceable)
 }
 
@@ -1156,11 +1218,22 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
 /// it, `\section` taking its arguments), and the text between cut again
 /// by `cut`, at a unit's start, as a text of its own. The cuts only
 /// decide how the file is read back in pieces, never what is read.
-fn units_again(old: &str, old_ends: &[usize], text: &str, cut: impl Fn(&str) -> Vec<usize>) -> Vec<usize> {
+fn units_again(
+    old: &str,
+    old_ends: &[usize],
+    text: &str,
+    cut: impl Fn(&str) -> Vec<usize>,
+) -> Vec<usize> {
     let (o, n) = (old.as_bytes(), text.as_bytes());
     let pre = o.iter().zip(n).take_while(|(a, b)| a == b).count();
     let max_suf = o.len().min(n.len()) - pre;
-    let suf = o.iter().rev().zip(n.iter().rev()).take(max_suf).take_while(|(a, b)| a == b).count();
+    let suf = o
+        .iter()
+        .rev()
+        .zip(n.iter().rev())
+        .take(max_suf)
+        .take_while(|(a, b)| a == b)
+        .count();
     if pre == o.len() && pre == n.len() {
         return old_ends.to_vec();
     }
@@ -1184,7 +1257,11 @@ fn units_again(old: &str, old_ends: &[usize], text: &str, cut: impl Fn(&str) -> 
     let o_end = o.len() - suf;
     let shift = |e: usize| e + n.len() - o.len();
     let starts: Vec<usize> = std::iter::once(0).chain(old_ends.iter().copied()).collect();
-    let right: Vec<usize> = starts.iter().copied().filter(|&s| s >= o_end && s < o.len()).collect();
+    let right: Vec<usize> = starts
+        .iter()
+        .copied()
+        .filter(|&s| s >= o_end && s < o.len())
+        .collect();
     let r_from = right.iter().copied().skip(1).find(|&s| at_line(o, s));
     let r_at = r_from.map_or(n.len(), shift);
     if r_at < l_at {

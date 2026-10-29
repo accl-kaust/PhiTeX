@@ -37,7 +37,9 @@ impl Operation for Parks {
         let v = cx.values();
         let t = v.as_int(cx.read(v.field("t"))?.unwrap_or(v.int(0))).unwrap_or(0);
         if let Some(st) = cx.resumed() {
-            let n = v.with_list(st, <[ValueId]>::len).map_or(-1, |n| i64::try_from(n).unwrap());
+            let n = v
+                .with_list(st, <[ValueId]>::len)
+                .map_or(-1, |n| i64::try_from(n).unwrap());
             cx.park(st);
             return Ok(v.int(n));
         }
@@ -80,7 +82,11 @@ fn a_parked_state_survives_a_collection() {
     e.collect();
     e.replace(t, def_t, vec![v.int(1)]);
     e.evaluate(1).unwrap();
-    assert_eq!(e.output(p).and_then(|x| v.as_int(x)), Some(3), "the state resumed is the list parked");
+    assert_eq!(
+        e.output(p).and_then(|x| v.as_int(x)),
+        Some(3),
+        "the state resumed is the list parked"
+    );
 }
 
 /// `[salt]`: reads "t"; outputs a list made of its salt and t (a page).
@@ -170,7 +176,10 @@ impl Operation for Len {
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
-        Ok(v.int(v.with_list(cx.args()[0], <[ValueId]>::len).map_or(-1, |n| i64::try_from(n).unwrap())))
+        Ok(v.int(
+            v.with_list(cx.args()[0], <[ValueId]>::len)
+                .map_or(-1, |n| i64::try_from(n).unwrap()),
+        ))
     }
 }
 
@@ -183,11 +192,20 @@ fn what_an_edit_source_holds_survives_a_collection_during_the_evaluation() {
     let v = e.values();
     let junk = e.register(Arc::new(Junk));
     let len = e.register(Arc::new(Len));
-    e.set_limits(Limits { collect_at_bytes: Some(1), ..Limits::default() });
+    e.set_limits(Limits {
+        collect_at_bytes: Some(1),
+        ..Limits::default()
+    });
     let u = e.new_unit();
     let n = e.push(u, len, vec![v.int(0)]);
     let held = made(v, 5, 99);
-    let mut src = LaterEdit { held, k: 0, node: n, junk, len };
+    let mut src = LaterEdit {
+        held,
+        k: 0,
+        node: n,
+        junk,
+        len,
+    };
     let rep = e.evaluate_absorbing(2, &mut src).unwrap();
     assert!(!rep.collections.is_empty(), "collected during the evaluation: {rep:?}");
     assert_eq!(e.output(n).and_then(|x| v.as_int(x)), Some(5), "{rep:?}");

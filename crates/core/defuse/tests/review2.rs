@@ -130,7 +130,10 @@ fn a_kept_placement_in_another_segment_is_not_stranded_by_nodes_after_it() {
     let kids = e.children(p);
     assert_eq!(kids.len(), 2);
     let order = e.order(u);
-    assert!(pos(&order, a) + 1 == pos(&order, kids[0]) && pos(&order, kids[0]) + 1 == pos(&order, kids[1]), "{order:?}");
+    assert!(
+        pos(&order, a) + 1 == pos(&order, kids[0]) && pos(&order, kids[0]) + 1 == pos(&order, kids[1]),
+        "{order:?}"
+    );
     e.replace(t, def_t, vec![v.int(1)]);
     let r = e.evaluate(2).unwrap();
     assert_eq!(e.children(p), kids, "the placer ran again and placed the same: {r:?}");
@@ -180,7 +183,10 @@ fn a_continuation_stands_where_it_would_in_one_segment() {
     // depended on how it was cut into segments.
     let one = continuation_after_lines(3);
     let many = continuation_after_lines(300);
-    assert_eq!(one, many, "the same order in one segment ({one}) and across many ({many})");
+    assert_eq!(
+        one, many,
+        "the same order in one segment ({one}) and across many ({many})"
+    );
 }
 
 /// Sums, and panics while its flag is up: a client's fold that breaks
@@ -273,10 +279,18 @@ fn a_commit_a_panic_cut_short_is_finished_by_the_next_evaluation() {
     broken.store(false, std::sync::atomic::Ordering::Relaxed);
     let r = e.evaluate(1).unwrap();
     assert!(e.check_invariants().is_empty(), "{:?} {r:?}", e.check_invariants());
-    assert_eq!(e.output(f).and_then(|x| v.as_int(x)), Some(6), "the fold has the new contribution");
+    assert_eq!(
+        e.output(f).and_then(|x| v.as_int(x)),
+        Some(6),
+        "the fold has the new contribution"
+    );
     let k = e.children(a);
     assert_eq!(k.len(), 1);
-    assert_eq!(e.output(k[0]).and_then(|x| v.as_int(x)), Some(5), "the child placed ran");
+    assert_eq!(
+        e.output(k[0]).and_then(|x| v.as_int(x)),
+        Some(5),
+        "the child placed ran"
+    );
 }
 
 /// `[s]`: folds s, then panics: an operation broken on its input.
@@ -355,10 +369,12 @@ impl Operation for Ref {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        Ok(match cx.read_at(phitex_defuse::Field(cx.args()[0]), phitex_defuse::At::Final)? {
-            phitex_defuse::FieldAt::Def(x, _) => x,
-            phitex_defuse::FieldAt::Unset | phitex_defuse::FieldAt::Gone => ValueId::UNIT,
-        })
+        Ok(
+            match cx.read_at(phitex_defuse::Field(cx.args()[0]), phitex_defuse::At::Final)? {
+                phitex_defuse::FieldAt::Def(x, _) => x,
+                phitex_defuse::FieldAt::Unset | phitex_defuse::FieldAt::Gone => ValueId::UNIT,
+            },
+        )
     }
 }
 
@@ -400,7 +416,13 @@ fn edits_taken_during_an_evaluation_each_get_their_own_loop_back_passes() {
     let u = e.new_unit();
     let r = e.push(u, rf, vec![f.0]);
     let l = e.push(u, label, vec![f.0, v.int(0)]);
-    let mut src = Typing { label: l, op: label, f, k: 0, n: 15 };
+    let mut src = Typing {
+        label: l,
+        op: label,
+        f,
+        k: 0,
+        n: 15,
+    };
     let rep = e.evaluate_absorbing(2, &mut src).unwrap();
     assert_eq!(rep.version, 15);
     assert!(rep.capped.is_empty(), "nothing is capped: {:?}", rep.capped);
@@ -441,7 +463,11 @@ fn an_edit_taken_at_the_last_quiet_point_is_published_before_the_evaluation_ends
     let mut src = DeleteLabel(l, false);
     let rep = e.evaluate_absorbing(1, &mut src).unwrap();
     assert_eq!(rep.version, 1);
-    assert_eq!(e.output(r), Some(ValueId::UNIT), "the reference reads no label: {rep:?}");
+    assert_eq!(
+        e.output(r),
+        Some(ValueId::UNIT),
+        "the reference reads no label: {rep:?}"
+    );
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
 
@@ -573,13 +599,24 @@ fn a_node_settled_at_a_version_has_that_version_s_output() {
         e.replace(f, busy, vec![v.int(3)]);
     }
     e.replace(m, rd, vec![v.int(1)]);
-    let mut src = EditDef { def: d, op: def, g, done: false, seen: Vec::new() };
+    let mut src = EditDef {
+        def: d,
+        op: def,
+        g,
+        done: false,
+        seen: Vec::new(),
+    };
     let rep = e.evaluate_absorbing(2, &mut src).unwrap();
     assert_eq!(e.output(m).and_then(|x| v.as_int(x)), Some(2), "{rep:?}");
     assert!(!src.seen.is_empty());
     for s in &src.seen {
         if s.version == 1 {
-            assert_eq!(v.as_int(s.output), Some(2), "settled at version 1 with the old output: {:?} {rep:?}", src.seen);
+            assert_eq!(
+                v.as_int(s.output),
+                Some(2),
+                "settled at version 1 with the old output: {:?} {rep:?}",
+                src.seen
+            );
         }
     }
 }

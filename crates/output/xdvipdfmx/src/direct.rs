@@ -275,7 +275,12 @@ impl Dpx {
         for st in &self.misc.stacks {
             let mut items = Vec::new();
             for &o in &st.stack.items {
-                items.push(self.o.string_value(o).map(<[u8]>::to_vec).unwrap_or_default());
+                items.push(
+                    self.o
+                        .string_value(o)
+                        .map(<[u8]>::to_vec)
+                        .unwrap_or_default(),
+                );
             }
             stacks.push((st.page, st.direct, items));
         }
@@ -296,7 +301,10 @@ impl Dpx {
                     self.xtx.scale_factor_count,
                     self.xtx.overlay_name.clone(),
                 ),
-                coords: (self.spc.coords.items.clone(), self.spc.pt_fixee.items.clone()),
+                coords: (
+                    self.spc.coords.items.clone(),
+                    self.spc.pt_fixee.items.clone(),
+                ),
                 paper: [
                     ss.paper_width.to_bits(),
                     ss.paper_height.to_bits(),

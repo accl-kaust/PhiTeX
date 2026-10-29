@@ -298,7 +298,11 @@ fn a_local_definition_dies_at_its_close() {
     let after = e.push(u, o.get, vec![x]);
     e.evaluate(2).unwrap();
     assert_eq!(int(&e, inside), 2);
-    assert_eq!(int(&e, after), 1, "the definition inside the scope does not reach past its close");
+    assert_eq!(
+        int(&e, after),
+        1,
+        "the definition inside the scope does not reach past its close"
+    );
     assert!(e.check_invariants().is_empty());
 }
 
@@ -323,7 +327,11 @@ fn a_closing_nodes_local_definition_dies_with_the_scope_it_closes() {
     for threads in [1, 4] {
         e.evaluate(threads).unwrap();
         assert_eq!(int(&e, inside), 2);
-        assert_eq!(int(&e, after_x), 1, "the closing node's local definition does not reach past its close");
+        assert_eq!(
+            int(&e, after_x),
+            1,
+            "the closing node's local definition does not reach past its close"
+        );
         assert_eq!(int(&e, after_y), 4, "its global definition stands");
         assert_eq!(int(&e, dep), 0);
     }
@@ -417,7 +425,11 @@ fn a_node_defining_a_field_in_each_scope_it_opens() {
     assert_eq!((int(&e, d2), int(&e, d1), int(&e, d0)), (4, 3, 2));
     e.replace(fr, o.def_frames, vec![x, v.int(2), v.int(6), v.int(4)]);
     e.evaluate(2).unwrap();
-    assert_eq!((int(&e, d2), int(&e, d1), int(&e, d0)), (4, 6, 2), "a change of one part re-asks the readers that see it");
+    assert_eq!(
+        (int(&e, d2), int(&e, d1), int(&e, d0)),
+        (4, 6, 2),
+        "a change of one part re-asks the readers that see it"
+    );
     let bad = e.check_invariants();
     assert!(bad.is_empty(), "{bad:?}");
 }
@@ -433,7 +445,11 @@ fn closes_before_a_node_apply_to_its_reads() {
     e.push(u, o.def, vec![x, v.int(2)]);
     let g = e.push(u, o.close_then_get, vec![x]);
     e.evaluate(2).unwrap();
-    assert_eq!(int(&e, g), 1, "a node that begins by closing the scope reads the outer value");
+    assert_eq!(
+        int(&e, g),
+        1,
+        "a node that begins by closing the scope reads the outer value"
+    );
 }
 
 #[test]
@@ -456,7 +472,10 @@ fn an_edit_of_a_bracket_reasks_the_readers_after_it() {
     let r = e.evaluate(2).unwrap();
     assert_eq!(int(&e, gx), 2, "with the close gone the inner definition reaches on");
     assert_eq!(int(&e, gy), 7);
-    assert_eq!(r.nodes_run, 2, "the edited node and the one reader whose answer moved: {r:?}");
+    assert_eq!(
+        r.nodes_run, 2,
+        "the edited node and the one reader whose answer moved: {r:?}"
+    );
 
     e.replace(close, o.close, vec![]);
     e.evaluate(2).unwrap();

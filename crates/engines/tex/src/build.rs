@@ -208,7 +208,14 @@ impl Run<'_, '_> {
         }
         self.effect = crate::run::CLOSE;
         if crate::exec::obs_flag!("PHITEX_CLOSE_TRACE") {
-            eprintln!("close-trace: node {} closes its scope, nest {:?}", self.cx.node().raw(), self.nest.iter().map(|l| (l.mode, l.group, l.owns)).collect::<Vec<_>>());
+            eprintln!(
+                "close-trace: node {} closes its scope, nest {:?}",
+                self.cx.node().raw(),
+                self.nest
+                    .iter()
+                    .map(|l| (l.mode, l.group, l.owns))
+                    .collect::<Vec<_>>()
+            );
         }
         self.unsave_extras(md)?;
         self.kind_outer(md)
@@ -317,8 +324,11 @@ impl Run<'_, '_> {
         }
         // the scope opens after the run's entry: its base-level
         // definitions outside it, the group's and its kind inside
-        self.cx
-            .define_with(v.field(crate::run::SCOPE_KIND), kind, phitex_defuse::Locality::Scope);
+        self.cx.define_with(
+            v.field(crate::run::SCOPE_KIND),
+            kind,
+            phitex_defuse::Locality::Scope,
+        );
         self.effect = Effect::Scope(phitex_defuse::Brackets {
             closes: 0,
             opens: 1,
@@ -608,7 +618,10 @@ impl Run<'_, '_> {
             // (a count that is a lower bound, `MainTail::since_at_least`:
             // the deletion may reach past the last item)
             let last = if kind_only && !deletes {
-                self.cx.read_path(v.field(MAIN_LAST), phitex_defuse::PathId::of_proj(self.ops.tail_proj))?
+                self.cx.read_path(
+                    v.field(MAIN_LAST),
+                    phitex_defuse::PathId::of_proj(self.ops.tail_proj),
+                )?
             } else {
                 self.eng_read(v.field(MAIN_LAST))?
             };
@@ -969,7 +982,10 @@ impl Run<'_, '_> {
     }
 
     /// The view of fonts `ids` ([`Self::add_font_metrics`] each).
-    pub(crate) fn view_of(&mut self, ids: std::collections::BTreeSet<u32>) -> R<crate::fonts::View> {
+    pub(crate) fn view_of(
+        &mut self,
+        ids: std::collections::BTreeSet<u32>,
+    ) -> R<crate::fonts::View> {
         let mut view = crate::fonts::View::default();
         for f in ids {
             self.add_font_metrics(&mut view, f)?;
@@ -1070,7 +1086,12 @@ impl Run<'_, '_> {
         // (a native font's codes are by glyph, past 255)
         let codes = |r: &mut Self, m: i32, d: i32| -> R<Box<[i32]>> {
             let t = crate::pdfprim::code_table(r, m, fi)?;
-            let n = t.iter().map(|x| usize::from(x.0) + 1).max().unwrap_or(0).max(256);
+            let n = t
+                .iter()
+                .map(|x| usize::from(x.0) + 1)
+                .max()
+                .unwrap_or(0)
+                .max(256);
             let mut a = vec![d; n].into_boxed_slice();
             for (c, n) in t {
                 if let Some(x) = a.get_mut(usize::from(c)) {
@@ -1123,7 +1144,12 @@ impl Run<'_, '_> {
     /// [`Self::add_font_metrics`] with `\\fontdimen`s `ks` read (the
     /// others 0, their number the font's): a view whose reader asks
     /// only those of the font.
-    pub(crate) fn add_font_dimens(&mut self, view: &mut crate::fonts::View, f: u32, ks: &[i32]) -> R<()> {
+    pub(crate) fn add_font_dimens(
+        &mut self,
+        view: &mut crate::fonts::View,
+        f: u32,
+        ks: &[i32],
+    ) -> R<()> {
         if view.fonts.contains_key(f) || f == 0 {
             return Ok(());
         }
@@ -1295,7 +1321,10 @@ impl Run<'_, '_> {
         let (adjust_spacing, protrude_chars) = if self.xe {
             (0, self.param("XeTeXprotrudechars")?)
         } else {
-            (self.param("pdfadjustspacing")?, self.param("pdfprotrudechars")?)
+            (
+                self.param("pdfadjustspacing")?,
+                self.param("pdfprotrudechars")?,
+            )
         };
         view.xe = self.xe;
         if adjust_spacing > 0 || protrude_chars > 0 {
@@ -1442,7 +1471,10 @@ impl Run<'_, '_> {
                 let f = {
                     // (one value a set of fonts: the lines share few)
                     let ids = ids.as_slice();
-                    let k = phitex_defuse::hash_words(0, &ids.iter().map(|&f| u64::from(f)).collect::<Vec<_>>());
+                    let k = phitex_defuse::hash_words(
+                        0,
+                        &ids.iter().map(|&f| u64::from(f)).collect::<Vec<_>>(),
+                    );
                     match self.font_sets.get(&k) {
                         Some((s, x)) if s.as_slice() == ids => *x,
                         _ => {
@@ -1544,7 +1576,11 @@ impl Run<'_, '_> {
                 }
                 let pattern = xs.get(1).is_some_and(|&k| crate::val::str_of(v, k) == "p");
                 let ws = xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default();
-                words.push((lang, pattern, ws.iter().map(|&w| crate::val::str_of(v, w)).collect()));
+                words.push((
+                    lang,
+                    pattern,
+                    ws.iter().map(|&w| crate::val::str_of(v, w)).collect(),
+                ));
             }
         }
         Ok(once
@@ -1931,7 +1967,10 @@ impl Run<'_, '_> {
         }
         // (a finisher's sealed line opened: its own list, read now; the
         // lines in an opened box stay sealed, `crate::pages::seal`)
-        let b = if list_of(v, b).get(9).is_some_and(|&l| nodes::is_sealed(v, l)) {
+        let b = if list_of(v, b)
+            .get(9)
+            .is_some_and(|&l| nodes::is_sealed(v, l))
+        {
             self.unseal(b)
         } else {
             b
@@ -2498,21 +2537,23 @@ impl Run<'_, '_> {
                         // `goto big_switch`)
                         let ins = ic && {
                             self.ic_prev = crate::xetex::CLASS_BOUNDARY;
-                            let i = self.ic_check(ch.cast_unsigned(), self.cur.cmd == cmd::LETTER)?;
+                            let i =
+                                self.ic_check(ch.cast_unsigned(), self.cur.cmd == cmd::LETTER)?;
                             if i {
                                 self.adjust_sf(md, ch.cast_unsigned(), &mut sf)?;
                             }
                             i
                         };
-                        let next = !ins && self.main_loop(
-                            md,
-                            f,
-                            &view,
-                            u32::try_from(ch).unwrap_or(0),
-                            &mut sf,
-                            &mut out,
-                            &mut cancel_boundary,
-                        )?;
+                        let next = !ins
+                            && self.main_loop(
+                                md,
+                                f,
+                                &view,
+                                u32::try_from(ch).unwrap_or(0),
+                                &mut sf,
+                                &mut out,
+                                &mut cancel_boundary,
+                            )?;
                         if next {
                             continue;
                         }
@@ -2752,7 +2793,12 @@ impl Run<'_, '_> {
 
     /// A character run's nodes and transitions (each transition before
     /// `out[k]`) put on list `lid`, `out` emptied.
-    pub(crate) fn flush_chars(&mut self, lid: i64, out: &mut Vec<crate::nest::Item>, raws: Vec<(usize, ValueId)>) {
+    pub(crate) fn flush_chars(
+        &mut self,
+        lid: i64,
+        out: &mut Vec<crate::nest::Item>,
+        raws: Vec<(usize, ValueId)>,
+    ) {
         let v = self.v;
         let mut raws = raws.into_iter().peekable();
         if let Some(l) = self.level_of(lid) {
@@ -2959,8 +3005,7 @@ impl Run<'_, '_> {
         let chars = &loaded.at.chars;
         // (whether the list ends with the hyphen character: a
         // discretionary is §1035's to insert)
-        let mut after_hyphen =
-            matches!(out.last(), Some(crate::nest::Item::N(Node::Char { ch, .. })) if i32::from(*ch) == hyphen_char);
+        let mut after_hyphen = matches!(out.last(), Some(crate::nest::Item::N(Node::Char { ch, .. })) if i32::from(*ch) == hyphen_char);
         loop {
             let Some(cl) = *cur_l else { return Ok(()) };
             if after_hyphen {
@@ -3189,7 +3234,15 @@ impl Run<'_, '_> {
                     // to wrap up, §1036's move; the first that is not
                     // plain is left to them)
                     if lig_stack.is_empty() && !lig_present && !ins_disc && !ic {
-                        self.plain_letters(md, f, view, (hyphen_char, false_bchar), sf, out, (&mut cur_l, &mut cur_q))?;
+                        self.plain_letters(
+                            md,
+                            f,
+                            view,
+                            (hyphen_char, false_bchar),
+                            sf,
+                            out,
+                            (&mut cur_l, &mut cur_q),
+                        )?;
                     }
                     // §1038; at the end of the node's text the next token
                     // is not a character (characters are one node)
@@ -3325,7 +3378,10 @@ impl Run<'_, '_> {
                             &mut ins_disc,
                             lig_stack.is_empty(),
                         );
-                        out.push(crate::nest::Item::N(Node::Kern(loaded.at.char_kern(step), KernKind::Normal)));
+                        out.push(crate::nest::Item::N(Node::Kern(
+                            loaded.at.char_kern(step),
+                            KernKind::Normal,
+                        )));
                         at = L::Move;
                         continue;
                     }
@@ -3658,7 +3714,13 @@ pub(crate) fn _unused(_: ValueId) -> Option<Glue> {
 /// kerns by 0 (a kern node all the same), which the main loop takes.
 fn word_kerns(loaded: &crate::fonts::Loaded, hyphen: i32, w: &[u8], k: &mut [i32]) -> bool {
     for (j, &c) in w.iter().enumerate() {
-        if i32::from(c) == hyphen || loaded.at.chars.get(usize::from(c)).is_none_or(Option::is_none) {
+        if i32::from(c) == hyphen
+            || loaded
+                .at
+                .chars
+                .get(usize::from(c))
+                .is_none_or(Option::is_none)
+        {
             return false;
         }
         k[j] = 0;
@@ -3876,7 +3938,11 @@ impl FoldOut for TailOut {
         }
     }
     fn delete_last(&mut self, v: &Values) {
-        if let Some(i) = self.0.iter().rposition(|x| x.as_ref().is_ok_and(|&x| !is_marker(v, x)) || x.is_err()) {
+        if let Some(i) = self
+            .0
+            .iter()
+            .rposition(|x| x.as_ref().is_ok_and(|&x| !is_marker(v, x)) || x.is_err())
+        {
             drop(self.0.remove(i));
         }
     }
@@ -3972,7 +4038,11 @@ pub(crate) fn fold_entries(
         ];
         words.extend(block.iter().map(|x| x.raw()));
         let key = phitex_defuse::hash_words(13, &words);
-        let hit = block_cache().locked().get(&key).filter(|m| *m.words == words[..]).cloned();
+        let hit = block_cache()
+            .locked()
+            .get(&key)
+            .filter(|m| *m.words == words[..])
+            .cloned();
         if let Some(m) = hit {
             out.extend(m.out.iter().map(|x| match x {
                 Ok(id) => *id,

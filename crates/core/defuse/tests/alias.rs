@@ -66,9 +66,13 @@ fn a_change_of_the_source_asks_the_reader_of_the_copy_and_never_the_copier() {
     let e = Engine::new();
     let v = e.values();
     let def = e.register(Arc::new(Def));
-    let cp = Arc::new(Copier { runs: AtomicU64::new(0) });
+    let cp = Arc::new(Copier {
+        runs: AtomicU64::new(0),
+    });
     let copier = e.register(cp.clone());
-    let rd = Arc::new(Reader { runs: AtomicU64::new(0) });
+    let rd = Arc::new(Reader {
+        runs: AtomicU64::new(0),
+    });
     let reader = e.register(rd.clone());
     let (f, g) = (v.field("count:0"), v.field("count:9"));
     let u = e.new_unit();
@@ -83,8 +87,16 @@ fn a_change_of_the_source_asks_the_reader_of_the_copy_and_never_the_copier() {
     e.replace(d, def, vec![f.0, v.int(4)]);
     let rep = e.evaluate(4).unwrap();
     assert_eq!(e.output(r).and_then(|y| v.as_int(y)), Some(4), "{rep:?}");
-    assert_eq!(cp.runs.load(Ordering::SeqCst), c0, "the copier is not asked again: {rep:?}");
-    assert_eq!(rd.runs.load(Ordering::SeqCst), r0 + 1, "the reader is asked once: {rep:?}");
+    assert_eq!(
+        cp.runs.load(Ordering::SeqCst),
+        c0,
+        "the copier is not asked again: {rep:?}"
+    );
+    assert_eq!(
+        rd.runs.load(Ordering::SeqCst),
+        r0 + 1,
+        "the reader is asked once: {rep:?}"
+    );
     assert!(e.check_invariants().is_empty());
 }
 
@@ -94,8 +106,12 @@ fn an_alias_of_an_alias_is_followed() {
     let e = Engine::new();
     let v = e.values();
     let def = e.register(Arc::new(Def));
-    let copier = e.register(Arc::new(Copier { runs: AtomicU64::new(0) }));
-    let reader = e.register(Arc::new(Reader { runs: AtomicU64::new(0) }));
+    let copier = e.register(Arc::new(Copier {
+        runs: AtomicU64::new(0),
+    }));
+    let reader = e.register(Arc::new(Reader {
+        runs: AtomicU64::new(0),
+    }));
     let (f, g, h) = (v.field("count:0"), v.field("count:9"), v.field("count:8"));
     let u = e.new_unit();
     e.push(u, def, vec![f.0, v.int(7)]);

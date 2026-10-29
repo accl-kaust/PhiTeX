@@ -94,13 +94,27 @@ struct Ops {
 
 fn setup() -> Ops {
     let e = Engine::new();
-    let def = Arc::new(Def { runs: AtomicU64::new(0) });
-    let page = Arc::new(Page { runs: AtomicU64::new(0) });
-    let reader = Arc::new(Reader { runs: AtomicU64::new(0) });
+    let def = Arc::new(Def {
+        runs: AtomicU64::new(0),
+    });
+    let page = Arc::new(Page {
+        runs: AtomicU64::new(0),
+    });
+    let reader = Arc::new(Reader {
+        runs: AtomicU64::new(0),
+    });
     let def_op = e.register(def.clone());
     let page_op = e.register(page.clone());
     let reader_op = e.register(reader.clone());
-    Ops { e, def, page, reader, def_op, page_op, reader_op }
+    Ops {
+        e,
+        def,
+        page,
+        reader,
+        def_op,
+        page_op,
+        reader_op,
+    }
 }
 
 fn int(e: &Engine, n: phitex_defuse::NodeId) -> Option<i64> {
@@ -128,8 +142,16 @@ fn text_readers_of_a_page_value_run_once_at_the_quiet_point() {
     e.replace(p1, o.page_op, vec![pn.0, v.int(5), ValueId::UNIT]);
     let rep = e.evaluate(1).unwrap();
     assert_eq!((int(e, t1), int(e, t2)), (Some(5), Some(6)), "{rep:?}");
-    assert_eq!(o.page.runs.load(Ordering::SeqCst), pr + 2, "P1 edited, P2 re-asked at once: {rep:?}");
-    assert_eq!(o.reader.runs.load(Ordering::SeqCst), rr + 2, "T1 and T2 once each: {rep:?}");
+    assert_eq!(
+        o.page.runs.load(Ordering::SeqCst),
+        pr + 2,
+        "P1 edited, P2 re-asked at once: {rep:?}"
+    );
+    assert_eq!(
+        o.reader.runs.load(Ordering::SeqCst),
+        rr + 2,
+        "T1 and T2 once each: {rep:?}"
+    );
     assert_eq!(rep.held_deferred, 2, "{rep:?}");
     assert_eq!(rep.held_fired, 2, "{rep:?}");
     assert_eq!(rep.held_passes, 1, "{rep:?}");
@@ -158,7 +180,11 @@ fn a_held_reader_that_read_the_final_value_meanwhile_is_not_run_again() {
     e.replace(an, o.def_op, vec![a.0, v.int(2)]);
     let rep = e.evaluate(1).unwrap();
     assert_eq!(int(e, t), Some(2), "{rep:?}");
-    assert_eq!(o.reader.runs.load(Ordering::SeqCst), rr + 1, "T ran once, on the final values: {rep:?}");
+    assert_eq!(
+        o.reader.runs.load(Ordering::SeqCst),
+        rr + 1,
+        "T ran once, on the final values: {rep:?}"
+    );
     assert_eq!(rep.held_deferred, 1, "{rep:?}");
     assert_eq!(rep.held_fired, 0, "the held wake found the read holding: {rep:?}");
     assert_eq!(rep.held_passes, 0, "{rep:?}");
@@ -213,8 +239,16 @@ fn held_wakes_are_never_lost_on_many_workers() {
         }
         let rep = e.evaluate(4).unwrap();
         for (i, &t) in ts.iter().enumerate() {
-            assert_eq!(int(e, t), Some(round * 100 + i as i64), "round {round} reader {i}: {rep:?}");
+            assert_eq!(
+                int(e, t),
+                Some(round * 100 + i as i64),
+                "round {round} reader {i}: {rep:?}"
+            );
         }
-        assert!(e.check_invariants().is_empty(), "round {round}: {:?}", e.check_invariants());
+        assert!(
+            e.check_invariants().is_empty(),
+            "round {round}: {:?}",
+            e.check_invariants()
+        );
     }
 }

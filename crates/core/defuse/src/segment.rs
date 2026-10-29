@@ -559,7 +559,11 @@ impl Def {
 
     /// The definition as one value: a multi one's innermost part.
     pub(crate) fn plain(&self, v: &crate::values::Values) -> Def {
-        if self.multi { self.parts(v).pop().unwrap_or(*self) } else { *self }
+        if self.multi {
+            self.parts(v).pop().unwrap_or(*self)
+        } else {
+            *self
+        }
     }
 }
 
@@ -623,7 +627,11 @@ pub(crate) fn reduce(eng: &Engine, mono: &dyn crate::api::Monoid, xs: Vec<ValueI
         let mut next = Vec::with_capacity(xs.len().div_ceil(2));
         let mut it = xs.chunks(2);
         for pair in &mut it {
-            next.push(if pair.len() == 2 { mono.combine(v, pair[0], pair[1]) } else { pair[0] });
+            next.push(if pair.len() == 2 {
+                mono.combine(v, pair[0], pair[1])
+            } else {
+                pair[0]
+            });
         }
         xs = next;
     }
@@ -670,13 +678,22 @@ impl Segment {
     /// The last definition of `f` before `p` (at `p` too when `inclusive`).
     pub(crate) fn reaching(inner: &Inner, f: Field, p: Pos, inclusive: bool) -> Option<(Pos, &Def)> {
         let m = inner.defs.get(&f)?;
-        let r = if inclusive { m.range(..=p).next_back() } else { m.range(..p).next_back() };
+        let r = if inclusive {
+            m.range(..=p).next_back()
+        } else {
+            m.range(..p).next_back()
+        };
         r.map(|(p, d)| (*p, d))
     }
 
     /// The first definition of `f` after `p`.
     pub(crate) fn next_def(inner: &Inner, f: Field, p: Pos) -> Option<(Pos, &Def)> {
-        inner.defs.get(&f)?.range((Excluded(p), Unbounded)).next().map(|(p, d)| (*p, d))
+        inner
+            .defs
+            .get(&f)?
+            .range((Excluded(p), Unbounded))
+            .next()
+            .map(|(p, d)| (*p, d))
     }
 
     /// A label strictly after `after` and before the next node (or `hi`);
@@ -693,7 +710,11 @@ impl Segment {
     /// A label strictly before `before` and after the previous node (or
     /// `lo`); None when that gap is closed.
     pub(crate) fn gap_before(&self, inner: &Inner, before: Pos) -> Option<Pos> {
-        let prev = inner.nodes.range(..before).next_back().map_or(self.lo.0.saturating_sub(1), |(p, _)| p.0);
+        let prev = inner
+            .nodes
+            .range(..before)
+            .next_back()
+            .map_or(self.lo.0.saturating_sub(1), |(p, _)| p.0);
         (before.0 - prev >= 2).then(|| Pos(prev + (before.0 - prev) / 2))
     }
 
@@ -704,7 +725,11 @@ impl Segment {
         let t_held = std::time::Instant::now();
         let n = inner.nodes.len() as u64;
         let width = inner.hi.0 - self.lo.0;
-        assert!(width > n + 1, "segment {:?} out of labels: {n} nodes in {width}", self.id);
+        assert!(
+            width > n + 1,
+            "segment {:?} out of labels: {n} nodes in {width}",
+            self.id
+        );
         let step = width / (n + 1);
         let old: Vec<(Pos, NodeId)> = inner.nodes.iter().map(|(p, n)| (*p, *n)).collect();
         let mut map: FxHashMap<Pos, Pos> = FxHashMap::default();
@@ -762,7 +787,12 @@ impl Segment {
         right: bool,
     ) -> bool {
         let moved = |p: Pos| if right { p >= cut } else { p < cut };
-        let nodes: Vec<(Pos, NodeId)> = inner.nodes.iter().filter(|(p, _)| moved(**p)).map(|(p, n)| (*p, *n)).collect();
+        let nodes: Vec<(Pos, NodeId)> = inner
+            .nodes
+            .iter()
+            .filter(|(p, _)| moved(**p))
+            .map(|(p, n)| (*p, *n))
+            .collect();
         for (p, _) in &nodes {
             inner.nodes.remove(p);
         }
@@ -782,7 +812,14 @@ impl Segment {
                 inner.defs.remove(&f);
             }
             let old = ti.defs.remove(&f).unwrap_or_default();
-            ti.defs.insert(f, if right { PosMap::concat(part, old) } else { PosMap::concat(old, part) });
+            ti.defs.insert(
+                f,
+                if right {
+                    PosMap::concat(part, old)
+                } else {
+                    PosMap::concat(old, part)
+                },
+            );
         }
         let keys: Vec<Field> = inner.contribs.keys().copied().collect();
         for f in keys {
@@ -793,7 +830,14 @@ impl Segment {
             }
             inner.resum(eng, f);
             let old = ti.contribs.remove(&f).unwrap_or_default();
-            ti.contribs.insert(f, if right { PosMap::concat(part, old) } else { PosMap::concat(old, part) });
+            ti.contribs.insert(
+                f,
+                if right {
+                    PosMap::concat(part, old)
+                } else {
+                    PosMap::concat(old, part)
+                },
+            );
             ti.resum(eng, f);
         }
         let mine: FxHashMap<NodeId, ()> = nodes.iter().map(|(_, n)| (*n, ())).collect();
@@ -822,10 +866,18 @@ impl Segment {
             }
         }
         inner.by_op.retain(|_, v| !v.is_empty());
-        let br = if right { inner.brackets.split_off(&cut) } else { inner.brackets.split_lower(&cut) };
+        let br = if right {
+            inner.brackets.split_off(&cut)
+        } else {
+            inner.brackets.split_lower(&cut)
+        };
         let brackets_moved = !br.is_empty();
         let old = std::mem::take(&mut ti.brackets);
-        ti.brackets = if right { PosMap::concat(br, old) } else { PosMap::concat(old, br) };
+        ti.brackets = if right {
+            PosMap::concat(br, old)
+        } else {
+            PosMap::concat(old, br)
+        };
         inner.sum_depth();
         ti.sum_depth();
         inner.holes = inner.nodes.values().filter(|n| eng.node(**n).is_hole()).count();
@@ -914,8 +966,7 @@ impl Segment {
         let mut readers: FxHashMap<Field, Vec<Reader>> = FxHashMap::default();
         let mut gone_readers = Vec::new();
         for (f, v) in &mut inner.readers {
-            let (up, down): (Vec<Reader>, Vec<Reader>) =
-                v.drain(..).partition(|r| eng.node(r.anchor).pos_hint() >= at);
+            let (up, down): (Vec<Reader>, Vec<Reader>) = v.drain(..).partition(|r| eng.node(r.anchor).pos_hint() >= at);
             *v = down;
             if !up.is_empty() {
                 readers.insert(*f, up);

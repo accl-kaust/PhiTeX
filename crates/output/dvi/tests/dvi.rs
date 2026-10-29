@@ -323,7 +323,9 @@ impl phitex_xdvipdfmx::io::Files for Cmr10Files {
     fn read(&self, path: &[u8]) -> Option<std::sync::Arc<[u8]>> {
         let at = |p: &str| std::fs::read(format!("{}/{p}", env!("CARGO_MANIFEST_DIR"))).ok();
         match path {
-            b"cmr10.tfm" => at("../../fonts/tfm/tests/fixtures/cmr10.tfm").map(std::sync::Arc::from),
+            b"cmr10.tfm" => {
+                at("../../fonts/tfm/tests/fixtures/cmr10.tfm").map(std::sync::Arc::from)
+            }
             b"cmr10.pfb" => at("../pdf/tests/fixtures/cmr10.pfb").map(std::sync::Arc::from),
             _ => None,
         }
@@ -362,7 +364,9 @@ fn xdv_and_ops(buf: usize) -> (Vec<u8>, Vec<u8>) {
                 list: vec![Node::Kern(PT, KernKind::Explicit)],
                 ..BoxNode::default()
             })));
-            inner.list.push(Node::Whatsit(1 + u32::try_from(k % 2).unwrap(), None));
+            inner
+                .list
+                .push(Node::Whatsit(1 + u32::try_from(k % 2).unwrap(), None));
             inner.list.push(Node::Rule(Rule {
                 width: 2 * PT,
                 height: RUNNING,
@@ -405,7 +409,8 @@ fn xdv_and_ops(buf: usize) -> (Vec<u8>, Vec<u8>) {
     }
     direct.extend(s.finish().unwrap());
     let xdv = w.finish();
-    let port = Session::convert(options(), std::sync::Arc::new(Cmr10Files), deflate(), &xdv).unwrap();
+    let port =
+        Session::convert(options(), std::sync::Arc::new(Cmr10Files), deflate(), &xdv).unwrap();
     (port, direct)
 }
 

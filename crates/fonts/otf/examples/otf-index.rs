@@ -100,8 +100,14 @@ fn fc_list(conf: &str) -> Vec<FcFace> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let out_path = args.get(1).expect("usage: otf-index OUT [--check-fc] [--relative ROOT]");
-    let relative = args.iter().position(|a| a == "--relative").and_then(|i| args.get(i + 1)).cloned();
+    let out_path = args
+        .get(1)
+        .expect("usage: otf-index OUT [--check-fc] [--relative ROOT]");
+    let relative = args
+        .iter()
+        .position(|a| a == "--relative")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
     let check = args.iter().any(|a| a == "--check-fc");
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let conf = root.join("scripts/xetex/fonts.conf");

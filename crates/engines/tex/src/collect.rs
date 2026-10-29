@@ -66,8 +66,17 @@ pub(crate) fn roots(o: &Ops, eng: &Engine, keep: &mut dyn FnMut(ValueId)) {
     for f in o.docs.locked().values() {
         f.locked().roots(keep);
     }
-    if let Some(m) = o.fmt_made.read().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+    if let Some(m) = o
+        .fmt_made
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+    {
         m.roots(keep);
     }
-    o.held.read().unwrap_or_else(std::sync::PoisonError::into_inner).iter().for_each(|&x| keep(x));
+    o.held
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .for_each(|&x| keep(x));
 }

@@ -166,7 +166,9 @@ fn sort_dest_names(v: &mut [(Vec<u8>, usize)], l: isize, r: isize) {
 }
 
 fn concat(to: &mut Option<crate::digest::Toks>, s: &[u8]) {
-    to.get_or_insert_with(Default::default).0.extend_from_slice(s);
+    to.get_or_insert_with(Default::default)
+        .0
+        .extend_from_slice(s);
 }
 
 impl PdfState {
@@ -240,7 +242,10 @@ impl PdfState {
         // an object of this file is an error, never an index. (A run fed
         // another mode's handles, before the engine runs it again with
         // its own, meets this too.)
-        let Some(objnum) = usize::try_from(objnum).ok().filter(|&n| n != 0 && n <= self.sys_obj_ptr()) else {
+        let Some(objnum) = usize::try_from(objnum)
+            .ok()
+            .filter(|&n| n != 0 && n <= self.sys_obj_ptr())
+        else {
             self.fail(pdf_error("ext1", "invalid object number being reused"));
             return;
         };
@@ -283,7 +288,10 @@ impl PdfState {
         // (pdfTeX numbers a link with `pdf_new_objnum`: a number that is
         // not an object of this file comes from another mode's handles,
         // a run the engine repeats with its own)
-        let Some(objnum) = usize::try_from(objnum).ok().filter(|&n| n != 0 && n <= self.sys_obj_ptr()) else {
+        let Some(objnum) = usize::try_from(objnum)
+            .ok()
+            .filter(|&n| n != 0 && n <= self.sys_obj_ptr())
+        else {
             self.fail(pdf_error("ext1", "invalid object number being reused"));
             return;
         };

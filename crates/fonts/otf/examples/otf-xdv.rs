@@ -42,9 +42,9 @@
     clippy::case_sensitive_file_extension_comparisons
 )]
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::cell::RefCell;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
@@ -131,7 +131,11 @@ fn xdv_words(d: &[u8]) -> (BTreeMap<u32, Def>, Vec<Word>) {
     let s = |p: usize, n: usize| -> i64 {
         let v = u(p, n);
         let bits = 8 * n as u32;
-        if v >= 1 << (bits - 1) { v - (1 << bits) } else { v }
+        if v >= 1 << (bits - 1) {
+            v - (1 << bits)
+        } else {
+            v
+        }
     };
     while p < d.len() {
         let op = d[p];
@@ -181,11 +185,18 @@ fn xdv_words(d: &[u8]) -> (BTreeMap<u32, Def>, Vec<Word>) {
                 let flags = u(p, 2) as u16;
                 p += 2;
                 let l = u(p, 1) as usize;
-                let Some(path) = d.get(p + 1..p + 1 + l) else { break };
+                let Some(path) = d.get(p + 1..p + 1 + l) else {
+                    break;
+                };
                 let path = String::from_utf8_lossy(path).into_owned();
                 let index = u(p + 1 + l, 4) as u32;
                 p += 1 + l + 4;
-                let mut def = Def { size, path, index, ..Def::default() };
+                let mut def = Def {
+                    size,
+                    path,
+                    index,
+                    ..Def::default()
+                };
                 if flags & 0x0200 != 0 {
                     def.rgba = Some(u(p, 4) as u32);
                     p += 4;
@@ -225,7 +236,13 @@ fn xdv_words(d: &[u8]) -> (BTreeMap<u32, Def>, Vec<Word>) {
                 if p > d.len() {
                     break;
                 }
-                words.push(Word { page, font, text, width, glyphs });
+                words.push(Word {
+                    page,
+                    font,
+                    text,
+                    width,
+                    glyphs,
+                });
             }
             // (an unknown op: an XDV cut short; what was read is kept)
             _ => break,
@@ -314,13 +331,23 @@ fn same(def: &Def, f: &XeTeXFont) -> bool {
 /// A font request loaded (a function of its own: `callgrind
 /// --toggle-collect='*load_font*'` counts the loads alone).
 #[inline(never)]
-fn load_font(mgr: &mut FontManager, src: &Src, spec: &str, size: i32) -> (Option<XeTeXFont>, Vec<xetex::Diagnostic>) {
+fn load_font(
+    mgr: &mut FontManager,
+    src: &Src,
+    spec: &str,
+    size: i32,
+) -> (Option<XeTeXFont>, Vec<xetex::Diagnostic>) {
     xetex::find_native_font(mgr, src, spec, size, 0)
 }
 
 /// A word laid out (`--toggle-collect='*shape_word*'`).
 #[inline(never)]
-fn shape_word(f: &mut XeTeXFont, shaper: &mut Shaper, text: &[u16], ls: i32) -> xetex::NativeLayout {
+fn shape_word(
+    f: &mut XeTeXFont,
+    shaper: &mut Shaper,
+    text: &[u16],
+    ls: i32,
+) -> xetex::NativeLayout {
     f.layout_word(shaper, text, ls)
 }
 
@@ -354,22 +381,31 @@ fn check(mgr: &mut FontManager, src: &Src, xdv: &Path, t: &mut Tally, max_ex: us
             (None, true, _) => {
                 t.fonts_unloaded += 1;
                 if t.examples.len() < max_ex {
-                    t.examples.push(format!("{doc}: font \"{spec}\": XeTeX {path}, ours none"));
+                    t.examples
+                        .push(format!("{doc}: font \"{spec}\": XeTeX {path}, ours none"));
                 }
             }
             (Some(f), _, true) => {
                 t.fonts_extra += 1;
                 if t.examples.len() < max_ex {
-                    t.examples.push(format!("{doc}: font \"{spec}\": XeTeX {path}, ours {}", f.path));
+                    t.examples.push(format!(
+                        "{doc}: font \"{spec}\": XeTeX {path}, ours {}",
+                        f.path
+                    ));
                 }
             }
             (Some(f), true, _) => {
                 // (XeTeX prints the path, with `:INDEX` for a face of a collection)
-                let ours = if f.index == 0 { f.path.to_string() } else { format!("{}:{}", f.path, f.index) };
+                let ours = if f.index == 0 {
+                    f.path.to_string()
+                } else {
+                    format!("{}:{}", f.path, f.index)
+                };
                 if ours != path && *f.path != *path {
                     t.fonts_bad += 1;
                     if t.examples.len() < max_ex {
-                        t.examples.push(format!("{doc}: font \"{spec}\": XeTeX {path}, ours {ours}"));
+                        t.examples
+                            .push(format!("{doc}: font \"{spec}\": XeTeX {path}, ours {ours}"));
                     }
                 }
             }
@@ -405,7 +441,9 @@ fn check(mgr: &mut FontManager, src: &Src, xdv: &Path, t: &mut Tally, max_ex: us
             t.words_no_font += 1;
             continue;
         };
-        let cands: Vec<usize> = (0..fonts.len()).filter(|&i| same(def, &fonts[i].1)).collect();
+        let cands: Vec<usize> = (0..fonts.len())
+            .filter(|&i| same(def, &fonts[i].1))
+            .collect();
         if cands.is_empty() {
             t.words_no_font += 1;
             if t.examples.len() < max_ex {
@@ -426,7 +464,13 @@ fn check(mgr: &mut FontManager, src: &Src, xdv: &Path, t: &mut Tally, max_ex: us
             let l = shape_word(f, &mut shaper, text, ls);
             t.shape_ns += t0.elapsed().as_nanos();
             t.layouts += 1;
-            let got = (l.width, l.glyphs.iter().map(|g| (g.x, g.y, g.gid)).collect::<Vec<_>>());
+            let got = (
+                l.width,
+                l.glyphs
+                    .iter()
+                    .map(|g| (g.x, g.y, g.gid))
+                    .collect::<Vec<_>>(),
+            );
             if got == want {
                 ok = true;
             } else if first.is_none() {
@@ -443,7 +487,13 @@ fn check(mgr: &mut FontManager, src: &Src, xdv: &Path, t: &mut Tally, max_ex: us
             f.last_script = None;
             let ls = f.letter_space;
             let l = f.layout_word(&mut shaper, text, ls);
-            (l.width, l.glyphs.iter().map(|g| (g.x, g.y, g.gid)).collect::<Vec<_>>()) == want
+            (
+                l.width,
+                l.glyphs
+                    .iter()
+                    .map(|g| (g.x, g.y, g.gid))
+                    .collect::<Vec<_>>(),
+            ) == want
         });
         if fresh {
             t.words_ok_fresh += 1;
@@ -453,7 +503,12 @@ fn check(mgr: &mut FontManager, src: &Src, xdv: &Path, t: &mut Tally, max_ex: us
         let (spec, got) = first.expect("a candidate");
         *t.bad_by_font.entry(spec.clone()).or_default() += 1;
         if t.examples.len() < max_ex {
-            let k = want.1.iter().zip(&got.1).position(|(a, b)| a != b).unwrap_or(want.1.len().min(got.1.len()));
+            let k = want
+                .1
+                .iter()
+                .zip(&got.1)
+                .position(|(a, b)| a != b)
+                .unwrap_or(want.1.len().min(got.1.len()));
             t.examples.push(format!(
                 "{doc} p{}: \"{spec}\" ({} candidates) \"{}\": width {} ours {}; {} glyphs ours {}; glyph {k}: oracle {:?} ours {:?}",
                 w.page,
@@ -481,8 +536,15 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(40);
     let memo = !args.iter().any(|a| a == "--no-memo");
-    let out = Command::new("find").arg(&dir).args(["-name", "*.xdv"]).output().expect("find");
-    let mut xdvs: Vec<PathBuf> = String::from_utf8_lossy(&out.stdout).lines().map(PathBuf::from).collect();
+    let out = Command::new("find")
+        .arg(&dir)
+        .args(["-name", "*.xdv"])
+        .output()
+        .expect("find");
+    let mut xdvs: Vec<PathBuf> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(PathBuf::from)
+        .collect();
     xdvs.sort();
     let index = Arc::new(index);
     let src = Src::new();
@@ -535,7 +597,13 @@ fn main() {
     }
     println!(
         "fonts: {} requests: {} resolved to another file, {} native in XeTeX not loaded by us, {} loaded by us where XeTeX has none, {} name lookups checked through the XDV; XDV native fonts {}, {} with no request of ours loading them",
-        t.fonts, t.fonts_bad, t.fonts_unloaded, t.fonts_extra, t.fonts_unverified, t.defs, t.defs_unmatched
+        t.fonts,
+        t.fonts_bad,
+        t.fonts_unloaded,
+        t.fonts_extra,
+        t.fonts_unverified,
+        t.defs,
+        t.defs_unmatched
     );
     println!(
         "words: {} ({} XDVs), {} identical, {} only from a fresh state, {} differ, {} without a traced font; {} glyph runs without text not checked",

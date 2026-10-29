@@ -21,7 +21,10 @@ fn an_edit_that_grows_runs_on_the_pool() {
     let doc = |x: &str| {
         let mut s = format!("\\def\\x{{{x}}}\n\n");
         for i in 0..300 {
-            let _ = write!(s, "Paragraph {i} says \\x\\ and goes on long enough to make a line or two in the plain format's ten point roman.\n\n");
+            let _ = write!(
+                s,
+                "Paragraph {i} says \\x\\ and goes on long enough to make a line or two in the plain format's ten point roman.\n\n"
+            );
         }
         s.push_str("\\bye\n");
         s
@@ -31,6 +34,14 @@ fn an_edit_that_grows_runs_on_the_pool() {
     assert!(!cold.is_empty(), "the cold build made output");
     b.edit(&doc("another word"));
     let s = &b.stats;
-    assert!(s.nodes_run >= 300, "the edit reran every paragraph: {} nodes run", s.nodes_run);
-    assert_eq!(s.threads, 8, "an edit of a few nodes that grew to {} ran on {} thread(s)", s.nodes_run, s.threads);
+    assert!(
+        s.nodes_run >= 300,
+        "the edit reran every paragraph: {} nodes run",
+        s.nodes_run
+    );
+    assert_eq!(
+        s.threads, 8,
+        "an edit of a few nodes that grew to {} ran on {} thread(s)",
+        s.nodes_run, s.threads
+    );
 }

@@ -168,12 +168,19 @@ pub(crate) struct Node {
 /// An effect as 32 bits: closes, opens, `before`, and whether pending.
 pub(crate) fn pack_effect(e: Effect) -> u32 {
     let b = e.brackets();
-    u32::from(b.closes) | (u32::from(b.opens) << 8) | (u32::from(b.before) << 16) | (u32::from(e == Effect::Pending) << 17)
+    u32::from(b.closes)
+        | (u32::from(b.opens) << 8)
+        | (u32::from(b.before) << 16)
+        | (u32::from(e == Effect::Pending) << 17)
 }
 
 /// The brackets of a packed effect, and whether it is pending.
 pub(crate) fn unpack_effect(x: u32) -> (Brackets, bool) {
-    let b = Brackets { closes: (x & 0xff) as u8, opens: ((x >> 8) & 0xff) as u8, before: x & (1 << 16) != 0 };
+    let b = Brackets {
+        closes: (x & 0xff) as u8,
+        opens: ((x >> 8) & 0xff) as u8,
+        before: x & (1 << 16) != 0,
+    };
     (b, x & (1 << 17) != 0)
 }
 
@@ -264,7 +271,10 @@ impl Node {
 
     /// The node whose claim holds it.
     pub(crate) fn claimer(&self) -> Option<NodeId> {
-        self.claimer.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw)
+        self.claimer
+            .load(Ordering::Acquire)
+            .checked_sub(1)
+            .map(NodeId::from_raw)
     }
 
     /// Whether a claim of a node before `me` (at `at`) holds it: one
@@ -492,7 +502,9 @@ impl ReadKind {
     /// The field it reads, if one.
     pub(crate) fn field(&self) -> Option<Field> {
         match self {
-            ReadKind::Field { f, .. } | ReadKind::Env { f } | ReadKind::Fold { f, .. } | ReadKind::Next { f, .. } => Some(*f),
+            ReadKind::Field { f, .. } | ReadKind::Env { f } | ReadKind::Fold { f, .. } | ReadKind::Next { f, .. } => {
+                Some(*f)
+            }
             ReadKind::Placed { .. } | ReadKind::Following { .. } | ReadKind::Hole => None,
         }
     }

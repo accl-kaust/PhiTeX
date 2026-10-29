@@ -98,8 +98,14 @@ impl Face {
         let silf = table(get, ttf::SILF, 0x0005_0000)?;
         // readGlyphs
         let t = |tag| table(get, tag, 0xffff_ffff);
-        let (head, hhea, hmtx, glyf, loca, maxp) =
-            (t(ttf::HEAD), t(ttf::HHEA), t(ttf::HMTX), t(ttf::GLYF), t(ttf::LOCA), t(ttf::MAXP));
+        let (head, hhea, hmtx, glyf, loca, maxp) = (
+            t(ttf::HEAD),
+            t(ttf::HHEA),
+            t(ttf::HMTX),
+            t(ttf::GLYF),
+            t(ttf::LOCA),
+            t(ttf::MAXP),
+        );
         let glat = table(get, ttf::GLAT, 0x0003_0000);
         let gloc = t(ttf::GLOC);
         let glyphs = GlyphCache::new(&GlyphTables {
@@ -120,9 +126,18 @@ impl Face {
         // readFeatures
         let sill = SillMap::read(t(ttf::FEAT).as_deref(), t(ttf::SILL).as_deref())?;
         // readGraphite
-        let load = FaceLoad { glyphs, num_features: sill.feats.len() as u16 };
+        let load = FaceLoad {
+            glyphs,
+            num_features: sill.feats.len() as u16,
+        };
         let silfs = read_graphite(&silf, &load)?;
-        Some(Face { glyphs: load.glyphs, cmap, sill, silfs, names })
+        Some(Face {
+            glyphs: load.glyphs,
+            cmap,
+            sill,
+            silfs,
+            names,
+        })
     }
 
     /// `getGlyphMetric(gid, metric)`.
@@ -163,13 +178,21 @@ impl Face {
     /// `gr_face_n_fref(face)`: the features not hidden.
     #[must_use]
     pub fn n_fref(&self) -> u16 {
-        self.sill.feats.iter().filter(|f| f.flags() & HIDDEN == 0).count() as u16
+        self.sill
+            .feats
+            .iter()
+            .filter(|f| f.flags() & HIDDEN == 0)
+            .count() as u16
     }
 
     /// `gr_face_fref(face, i)`: the `i`th feature not hidden.
     #[must_use]
     pub fn fref(&self, i: u16) -> Option<&FeatureRef> {
-        self.sill.feats.iter().filter(|f| f.flags() & HIDDEN == 0).nth(usize::from(i))
+        self.sill
+            .feats
+            .iter()
+            .filter(|f| f.flags() & HIDDEN == 0)
+            .nth(usize::from(i))
     }
 
     /// `gr_face_n_languages`.
@@ -211,7 +234,12 @@ impl Face {
 
     /// `gr_fref_value_label(fref, setting, &langId, gr_utf8, &len)`.
     #[must_use]
-    pub fn fref_value_label(&self, f: &FeatureRef, setting: u16, lang: u16) -> Option<(String, u16)> {
+    pub fn fref_value_label(
+        &self,
+        f: &FeatureRef,
+        setting: u16,
+        lang: u16,
+    ) -> Option<(String, u16)> {
         let &(_, label) = f.settings.get(usize::from(setting))?;
         self.names.as_ref()?.get_name(lang, label)
     }
@@ -219,7 +247,13 @@ impl Face {
     /// `gr_make_seg(font, face, script, feats, gr_utf32, chars, n, dir)`:
     /// `None` where graphite2 returns no segment.
     #[must_use]
-    pub fn make_seg(&self, font: Option<&Font>, feats: Option<&Features>, chars: &[u32], dir: i32) -> Option<Segment<'_>> {
+    pub fn make_seg(
+        &self,
+        font: Option<&Font>,
+        feats: Option<&Features>,
+        chars: &[u32],
+        dir: i32,
+    ) -> Option<Segment<'_>> {
         let tmp;
         let feats = match feats {
             Some(f) => f,
@@ -319,7 +353,11 @@ fn read_graphite(d: &[u8], face: &FaceLoad) -> Option<Vec<Silf>> {
     for i in 0..n {
         let offset = u32_at(d, p) as usize;
         p += 4;
-        let next = if i == n - 1 { d.len() } else { u32_at(d, p) as usize };
+        let next = if i == n - 1 {
+            d.len()
+        } else {
+            u32_at(d, p) as usize
+        };
         if next > d.len() || offset >= next {
             return None;
         }

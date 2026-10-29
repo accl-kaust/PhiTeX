@@ -35,7 +35,11 @@ impl Operation for Begin {
         let (f, k) = (Field(cx.args()[0]), cx.args()[1]);
         spin(us_of(cx.values(), cx.args()[2]));
         cx.define_with(f, k, Locality::Scope);
-        cx.set_effect(Effect::Scope(Brackets { closes: 0, opens: 1, before: false }));
+        cx.set_effect(Effect::Scope(Brackets {
+            closes: 0,
+            opens: 1,
+            before: false,
+        }));
         Ok(k)
     }
 }
@@ -57,7 +61,11 @@ impl Operation for End {
         let f = Field(cx.args()[0]);
         spin(us_of(cx.values(), cx.args()[1]));
         let x = cx.read(f)?.unwrap_or(ValueId::UNIT);
-        cx.set_effect(Effect::Scope(Brackets { closes: 1, opens: 0, before: false }));
+        cx.set_effect(Effect::Scope(Brackets {
+            closes: 1,
+            opens: 0,
+            before: false,
+        }));
         Ok(x)
     }
 }
@@ -147,14 +155,25 @@ fn outputs(seed: u64, n: usize, threads: usize) -> Vec<Option<i64>> {
 #[test]
 fn environments_end_where_they_begin_at_every_thread_count() {
     let threads = std::thread::available_parallelism().map_or(1, usize::from).clamp(2, 16);
-    let rounds: u64 = std::env::var("SCOPE_RACE_ROUNDS").ok().and_then(|x| x.parse().ok()).unwrap_or(40);
+    let rounds: u64 = std::env::var("SCOPE_RACE_ROUNDS")
+        .ok()
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(40);
     for seed in 1..=rounds {
-        let n = std::env::var("SCOPE_RACE_N").ok().and_then(|x| x.parse().ok()).unwrap_or(300);
+        let n = std::env::var("SCOPE_RACE_N")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(300);
         let want = outputs(seed, n, 1);
         for t in [threads, 4] {
             let got = outputs(seed, n, t);
             let first = want.iter().zip(&got).position(|(a, b)| a != b);
-            assert!(first.is_none(), "seed {seed} at {t} threads: node {first:?} gives {:?}, one thread {:?}", first.map(|i| got[i]), first.map(|i| want[i]));
+            assert!(
+                first.is_none(),
+                "seed {seed} at {t} threads: node {first:?} gives {:?}, one thread {:?}",
+                first.map(|i| got[i]),
+                first.map(|i| want[i])
+            );
         }
     }
 }

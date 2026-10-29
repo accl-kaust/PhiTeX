@@ -256,7 +256,11 @@ fn a_loopback_reader_runs_again_once_the_line_is_quiet() {
     e.push(u, o.slow_def, vec![fv, v.int(2), v.int(40)]);
     let rep = e.evaluate(threads).unwrap();
     assert_eq!(e.output(r), Some(v.int(2)));
-    assert!(o.final_runs.load(Ordering::Relaxed) <= 2, "{} runs: {rep:?}", o.final_runs.load(Ordering::Relaxed));
+    assert!(
+        o.final_runs.load(Ordering::Relaxed) <= 2,
+        "{} runs: {rep:?}",
+        o.final_runs.load(Ordering::Relaxed)
+    );
     assert!(rep.capped.is_empty());
     assert!(e.check_invariants().is_empty());
 }
@@ -297,7 +301,10 @@ fn a_panic_on_a_value_about_to_move_is_run_again_and_one_on_settled_values_fails
         let w = e.push(u, o.def, vec![fv, v.int(1)]);
         let r2 = e.push(u, pu, vec![fv]);
         let err = e.evaluate(j).unwrap_err();
-        assert!(matches!(err, phitex_defuse::EvalError::OpPanicked { node, .. } if node == r2), "-j{j}: {err:?}");
+        assert!(
+            matches!(err, phitex_defuse::EvalError::OpPanicked { node, .. } if node == r2),
+            "-j{j}: {err:?}"
+        );
         e.remove(w);
         e.evaluate(j).unwrap();
         assert_eq!(e.output(r2), Some(v.int(2)), "-j{j}");
@@ -478,7 +485,11 @@ fn a_continuation_made_anew_stays_after_what_was_placed_after_its_node() {
     e.push(u, after, vec![v.int(x.raw() as i64)]);
     e.evaluate(1).unwrap();
     let texts = |e: &Engine| -> Vec<ValueId> {
-        e.order(u).into_iter().filter(|&n| e.node_info(n).is_some_and(|i| i.op == "text")).map(|n| e.node_info(n).unwrap().args[0]).collect()
+        e.order(u)
+            .into_iter()
+            .filter(|&n| e.node_info(n).is_some_and(|i| i.op == "text"))
+            .map(|n| e.node_info(n).unwrap().args[0])
+            .collect()
     };
     assert_eq!(texts(&e), vec![v.int(0), v.str("a"), v.int(0)]);
     e.replace(s, o.def, vec![f, v.int(2)]);

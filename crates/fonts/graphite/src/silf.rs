@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use crate::be::{u16_at, u32_at, u8_at};
+use crate::be::{u8_at, u16_at, u32_at};
 use crate::code::PassType;
 use crate::face::FaceLoad;
 use crate::machine::{MStatus, Machine};
@@ -101,7 +101,12 @@ impl Silf {
         }
         let mut justs = Vec::with_capacity(usize::from(num_justs));
         for _ in 0..num_justs {
-            justs.push((u8_at(d, p), u8_at(d, p + 1), u8_at(d, p + 2), u8_at(d, p + 3)));
+            justs.push((
+                u8_at(d, p),
+                u8_at(d, p + 1),
+                u8_at(d, p + 2),
+                u8_at(d, p + 3),
+            ));
             p += 8;
         }
         if p + 2 + 8 >= l {
@@ -243,10 +248,24 @@ impl Silf {
         }
         // readClassOffsets<T>: offsets of `T`, `T` arithmetic (a 16-bit
         // difference is an `int`, a 32-bit one wraps)
-        let peek = |o: usize| if w == 4 { u32_at(d, o) } else { u32::from(u16_at(d, o)) };
-        let cls_off: u32 = if w == 4 { (4 + 4 * (nc + 1)) as u32 } else { u32::from((4 + 2 * (nc + 1)) as u16) };
+        let peek = |o: usize| {
+            if w == 4 {
+                u32_at(d, o)
+            } else {
+                u32::from(u16_at(d, o))
+            }
+        };
+        let cls_off: u32 = if w == 4 {
+            (4 + 4 * (nc + 1)) as u32
+        } else {
+            u32::from((4 + 2 * (nc + 1)) as u16)
+        };
         let half = |v: u32| -> u32 {
-            if w == 4 { v.wrapping_sub(cls_off) / 2 } else { ((v as i32 - cls_off as i32) / 2) as u32 }
+            if w == 4 {
+                v.wrapping_sub(cls_off) / 2
+            } else {
+                ((v as i32 - cls_off as i32) / 2) as u32
+            }
         };
         let max_off = half(peek(p + w * nc));
         if peek(p) != cls_off || max_off as usize > data_len.wrapping_sub(cls_off as usize) / 2 {
@@ -261,7 +280,9 @@ impl Silf {
                 return ERROROFFSET;
             }
         }
-        if (max_off as i32) < i32::from(self.n_linear) + (i32::from(self.n_class) - i32::from(self.n_linear)) * 6 {
+        if (max_off as i32)
+            < i32::from(self.n_linear) + (i32::from(self.n_class) - i32::from(self.n_linear)) * 6
+        {
             return ERROROFFSET;
         }
         for i in 0..usize::from(self.n_linear) {
@@ -269,7 +290,9 @@ impl Silf {
                 return ERROROFFSET;
             }
         }
-        self.class_data = (0..max_off as usize).map(|k| u16_at(d, p + 2 * k)).collect();
+        self.class_data = (0..max_off as usize)
+            .map(|k| u16_at(d, p + 2 * k))
+            .collect();
         for i in usize::from(self.n_linear)..nc {
             let o = self.class_offsets[i] as usize;
             if o + 4 > max_off as usize {
@@ -344,7 +367,11 @@ impl Silf {
                 return cd((index + loc) as usize);
             }
         } else {
-            let end = self.class_offsets.get(usize::from(cid) + 1).copied().unwrap_or(0);
+            let end = self
+                .class_offsets
+                .get(usize::from(cid) + 1)
+                .copied()
+                .unwrap_or(0);
             let mut i = loc + 4;
             while i < end {
                 if u32::from(cd(i as usize + 1)) == index {
@@ -357,7 +384,13 @@ impl Silf {
     }
 
     /// `runGraphite(seg, firstPass, lastPass, dobidi)`.
-    pub(crate) fn run_graphite(&self, seg: &mut Segment, first_pass: u8, last_pass: u8, dobidi: bool) -> bool {
+    pub(crate) fn run_graphite(
+        &self,
+        seg: &mut Segment,
+        first_pass: u8,
+        last_pass: u8,
+        dobidi: bool,
+    ) -> bool {
         let max_size = seg.slot_count() * MAX_SEG_GROWTH_FACTOR;
         let mut map = SlotMap::new(self.dir, max_size);
         let mut m = Machine::new();
@@ -390,13 +423,16 @@ impl Silf {
                 continue;
             }
             let pass = &self.passes[i];
-            let reverse = lbidi == 0xFF && seg.currdir() != ((self.dir & 1 != 0) ^ pass.is_reverse_dir);
+            let reverse =
+                lbidi == 0xFF && seg.currdir() != ((self.dir & 1 != 0) ^ pass.is_reverse_dir);
             if (i >= 32 || u32::from(seg.pass_bits) & (1u32 << i) == 0 || pass.num_coll_runs != 0)
                 && !pass.run_graphite(&mut m, seg, &mut map, reverse)
             {
                 return false;
             }
-            if m.status != MStatus::Finished || (seg.slot_count() != 0 && seg.slot_count() > max_size) {
+            if m.status != MStatus::Finished
+                || (seg.slot_count() != 0 && seg.slot_count() > max_size)
+            {
                 return false;
             }
             i += 1;

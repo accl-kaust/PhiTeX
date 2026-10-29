@@ -11,7 +11,10 @@ use std::fmt::Write as _;
 use phitex_tex::Options;
 
 fn runs_of_report(r: &phitex_tex::Report, op: &str) -> u64 {
-    r.runs_by_op.iter().find(|(o, _)| *o == op).map_or(0, |(_, n)| *n)
+    r.runs_by_op
+        .iter()
+        .find(|(o, _)| *o == op)
+        .map_or(0, |(_, n)| *n)
 }
 
 /// `n` paragraphs long enough to fill several pages, with `mid` inserted
@@ -24,7 +27,10 @@ fn doc(n: usize, k: usize, mid: &str) -> String {
             s.push_str("\n\n");
         }
         let sentence = "long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, so that pages fill as the text goes on and on.";
-        let _ = write!(s, "Paragraph {i} of the document, {sentence} Again, {sentence} Once more, {sentence}\n\n");
+        let _ = write!(
+            s,
+            "Paragraph {i} of the document, {sentence} Again, {sentence} Once more, {sentence}\n\n"
+        );
     }
     s.push_str("\\closeout1\n\\bye\n");
     s
@@ -40,7 +46,12 @@ fn cold(name: &str, src: &str, threads: usize) -> (Vec<u8>, String) {
     };
     let b = common::build(opts, Some(&common::plain()), src);
     let (dvi, _) = b.output();
-    let out = b.writes().into_iter().filter(|(k, _)| *k == 1).map(|(_, t)| t).collect::<String>();
+    let out = b
+        .writes()
+        .into_iter()
+        .filter(|(k, _)| *k == 1)
+        .map(|(_, t)| t)
+        .collect::<String>();
     (dvi, out)
 }
 
@@ -61,16 +72,40 @@ fn a_deferred_write_of_the_page_number_is_resolved_at_shipout_without_a_read_in_
         let mut b = common::build(opts, Some(&common::plain()), &src);
         let (want_dvi, want_out) = cold("write", &src, 1);
         assert_eq!(b.output().0, want_dvi, "-j{threads}: cold at one thread");
-        assert!(want_out.contains("page=") && !want_out.contains("page=1."), "-j{threads}: the write names its page: {want_out:?}");
-        assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "-j{threads}: no paragraph read the page number: {:?}", b.stats.refuted_by_field);
+        assert!(
+            want_out.contains("page=") && !want_out.contains("page=1."),
+            "-j{threads}: the write names its page: {want_out:?}"
+        );
+        assert_eq!(
+            b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"),
+            0,
+            "-j{threads}: no paragraph read the page number: {:?}",
+            b.stats.refuted_by_field
+        );
         // a paragraph inserted at the front: every page break moves
         let edited = doc(121, 60, mid).replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines, so the marked paragraph moves.\n\nParagraph 0 of", 1);
         common::rebuild(&mut b, &edited);
         let (want_dvi, want_out) = cold("write-edited", &edited, 1);
-        assert_eq!(b.output().0, want_dvi, "-j{threads}: the edited document equals its cold build");
-        let got_out = b.writes().into_iter().filter(|(k, _)| *k == 1).map(|(_, t)| t).collect::<String>();
-        assert_eq!(got_out, want_out, "-j{threads}: the written page number followed the page");
-        assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "-j{threads}: still no read of the page number by a paragraph");
+        assert_eq!(
+            b.output().0,
+            want_dvi,
+            "-j{threads}: the edited document equals its cold build"
+        );
+        let got_out = b
+            .writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect::<String>();
+        assert_eq!(
+            got_out, want_out,
+            "-j{threads}: the written page number followed the page"
+        );
+        assert_eq!(
+            b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"),
+            0,
+            "-j{threads}: still no read of the page number by a paragraph"
+        );
     }
 }
 
@@ -86,11 +121,21 @@ fn a_page_number_in_a_macro_never_expanded_is_no_read() {
     };
     let mut b = common::build(opts, Some(&common::plain()), &src);
     assert_eq!(b.output().0, cold("macro", &src, 1).0);
-    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "{:?}", b.stats.refuted_by_field);
+    assert_eq!(
+        b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"),
+        0,
+        "{:?}",
+        b.stats.refuted_by_field
+    );
     let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 0 of", 1);
     let r = common::rebuild(&mut b, &edited);
     assert_eq!(b.output().0, cold("macro-edited", &edited, 1).0);
-    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
+    assert_eq!(
+        b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"),
+        0,
+        "after the edit: {r:?} {:?}",
+        b.stats.refuted_by_field
+    );
 }
 
 /// A conditional on the page number needs the digits: the paragraph
@@ -108,8 +153,15 @@ fn a_conditional_on_the_page_number_forces_the_read() {
     assert_eq!(b.output().0, cold("cond", &src, 1).0);
     let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines, enough to move the marked paragraph to the next page.\n\nParagraph 0 of", 1);
     let r = common::rebuild(&mut b, &edited);
-    assert_eq!(b.output().0, cold("cond-edited", &edited, 1).0, "the odd/even word follows the page");
-    assert!(runs_of_report(&r, "exec") + runs_of_report(&r, "resume") >= 2, "the conditional's paragraph ran again when its page moved: {r:?}");
+    assert_eq!(
+        b.output().0,
+        cold("cond-edited", &edited, 1).0,
+        "the odd/even word follows the page"
+    );
+    assert!(
+        runs_of_report(&r, "exec") + runs_of_report(&r, "resume") >= 2,
+        "the conditional's paragraph ran again when its page moved: {r:?}"
+    );
 }
 
 /// cleveref's probe: save the page number, set it to 1, format it,
@@ -126,13 +178,31 @@ fn a_save_and_restore_of_the_page_number_is_neither_a_read_nor_a_definition() {
         ..common::options("./d.tex", "d", "", &dir)
     };
     let mut b = common::build(opts, Some(&common::plain()), &src);
-    assert_eq!(b.output().0, cold("restore", &src, 1).0, "page numbers after the probe are TeX's");
-    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "{:?}", b.stats.refuted_by_field);
-    assert_eq!(b.definitions_by_op("exec", "count:0") + b.definitions_by_op("resume", "count:0"), 0, "no paragraph defined the page number");
+    assert_eq!(
+        b.output().0,
+        cold("restore", &src, 1).0,
+        "page numbers after the probe are TeX's"
+    );
+    assert_eq!(
+        b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"),
+        0,
+        "{:?}",
+        b.stats.refuted_by_field
+    );
+    assert_eq!(
+        b.definitions_by_op("exec", "count:0") + b.definitions_by_op("resume", "count:0"),
+        0,
+        "no paragraph defined the page number"
+    );
     let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 0 of", 1);
     let r = common::rebuild(&mut b, &edited);
     assert_eq!(b.output().0, cold("restore-edited", &edited, 1).0);
-    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
+    assert_eq!(
+        b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"),
+        0,
+        "after the edit: {r:?} {:?}",
+        b.stats.refuted_by_field
+    );
 }
 
 /// The page number copied into another register (`\global\count9=\the
@@ -151,16 +221,35 @@ fn a_page_number_copied_into_another_register_is_an_alias() {
     let mut b = common::build(opts, Some(&common::plain()), &src);
     let (want_dvi, want_out) = cold("alias", &src, 1);
     assert_eq!(b.output().0, want_dvi);
-    let got = |b: &phitex_tex::Build| b.writes().into_iter().filter(|(k, _)| *k == 1).map(|(_, t)| t).collect::<String>();
-    assert!(want_out.contains("copy=") && !want_out.contains("copy=1."), "{want_out:?}");
+    let got = |b: &phitex_tex::Build| {
+        b.writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect::<String>()
+    };
+    assert!(
+        want_out.contains("copy=") && !want_out.contains("copy=1."),
+        "{want_out:?}"
+    );
     assert_eq!(got(&b), want_out);
-    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "{:?}", b.stats.refuted_by_field);
+    assert_eq!(
+        b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"),
+        0,
+        "{:?}",
+        b.stats.refuted_by_field
+    );
     let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 0 of", 1);
     let r = common::rebuild(&mut b, &edited);
     let (want_dvi, want_out) = cold("alias-edited", &edited, 1);
     assert_eq!(b.output().0, want_dvi);
     assert_eq!(got(&b), want_out, "the copy followed the page");
-    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
+    assert_eq!(
+        b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"),
+        0,
+        "after the edit: {r:?} {:?}",
+        b.stats.refuted_by_field
+    );
 }
 
 /// A `\mark` holding the page number is resolved by the finisher that
@@ -168,7 +257,10 @@ fn a_page_number_copied_into_another_register_is_an_alias() {
 #[test]
 fn a_mark_with_the_page_number_is_resolved_by_the_finisher() {
     let mid = "\\mark{\\number\\count0}Paragraph that marks its page number for the headline.";
-    let src = format!("\\headline={{\\hfil\\topmark\\hfil}}\n{}", doc(120, 60, mid));
+    let src = format!(
+        "\\headline={{\\hfil\\topmark\\hfil}}\n{}",
+        doc(120, 60, mid)
+    );
     let dir = common::scratch("defer-mark");
     let opts = Options {
         threads: Some(8),
@@ -176,11 +268,25 @@ fn a_mark_with_the_page_number_is_resolved_by_the_finisher() {
     };
     let mut b = common::build(opts, Some(&common::plain()), &src);
     assert_eq!(b.output().0, cold("mark", &src, 1).0);
-    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "{:?}", b.stats.refuted_by_field);
+    assert_eq!(
+        b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"),
+        0,
+        "{:?}",
+        b.stats.refuted_by_field
+    );
     let edited = src.replacen("Paragraph 0 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 0 of", 1);
     let r = common::rebuild(&mut b, &edited);
-    assert_eq!(b.output().0, cold("mark-edited", &edited, 1).0, "the headline follows the page");
-    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "after the edit: {r:?} {:?}", b.stats.refuted_by_field);
+    assert_eq!(
+        b.output().0,
+        cold("mark-edited", &edited, 1).0,
+        "the headline follows the page"
+    );
+    assert_eq!(
+        b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"),
+        0,
+        "after the edit: {r:?} {:?}",
+        b.stats.refuted_by_field
+    );
 }
 
 /// The fixture `oracle/fixtures/dvi/defer.tex` (every shape above in one
@@ -198,6 +304,11 @@ fn the_defer_fixture_is_byte_identical_to_pdftex() {
         };
         let b = common::build(opts, Some(&common::plain()), &src);
         let (dvi, log) = b.output();
-        assert_eq!(dvi, want, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
+        assert_eq!(
+            dvi,
+            want,
+            "-j{threads}: DVI differs; log tail:\n{}",
+            common::log_excerpt(&log)
+        );
     }
 }

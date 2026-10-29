@@ -173,14 +173,16 @@ fn placements_after_a_node_before_the_placer_stand_when_the_placer_runs_again() 
     // (both stand before the placer, after `a`)
     let order = e.order(u);
     let at = |n| order.iter().position(|&x| x == n).unwrap();
-    assert!(at(a) < at(kids[0]) && at(kids[0]) < at(kids[1]) && at(kids[1]) < at(p), "{order:?}");
+    assert!(
+        at(a) < at(kids[0]) && at(kids[0]) < at(kids[1]) && at(kids[1]) < at(p),
+        "{order:?}"
+    );
     e.replace(t, def_t, vec![v.int(1)]);
     let r = e.evaluate(2).unwrap();
     assert_eq!(e.children(p), kids, "the placer ran again and placed the same: {r:?}");
     assert_eq!(Report::by_op(&r.runs_by_op, "def"), 0, "nothing made anew runs: {r:?}");
     assert!(e.check_invariants().is_empty());
 }
-
 
 /// `[a, b]`: reads "t"; places a `Def` of 7 after node `a` (`t` = 0) or
 /// `b` (else) and its children, then a `Def` of 8 after that one.
@@ -229,7 +231,9 @@ fn a_placement_following_a_moved_one_moves_with_it() {
     let order = e.order(u);
     let pos = |o: &Vec<phitex_defuse::NodeId>, n| o.iter().position(|&m| m == n).unwrap();
     assert!(
-        pos(&order, b) + 1 == pos(&order, kids[0]) && pos(&order, kids[0]) + 1 == pos(&order, kids[1]) && pos(&order, kids[1]) < pos(&order, p),
+        pos(&order, b) + 1 == pos(&order, kids[0])
+            && pos(&order, kids[0]) + 1 == pos(&order, kids[1])
+            && pos(&order, kids[1]) < pos(&order, p),
         "{order:?}"
     );
     // (the first placement moves back after `a`: the second goes with it)
@@ -239,12 +243,13 @@ fn a_placement_following_a_moved_one_moves_with_it() {
     assert_eq!(kids.len(), 2, "{r:?}");
     let order = e.order(u);
     assert!(
-        pos(&order, a) + 1 == pos(&order, kids[0]) && pos(&order, kids[0]) + 1 == pos(&order, kids[1]) && pos(&order, kids[1]) < pos(&order, x),
+        pos(&order, a) + 1 == pos(&order, kids[0])
+            && pos(&order, kids[0]) + 1 == pos(&order, kids[1])
+            && pos(&order, kids[1]) < pos(&order, x),
         "the second placement stands right after the first, after a: {order:?}"
     );
     assert!(e.check_invariants().is_empty());
 }
-
 
 /// `[a]`: reads "t"; places a `Def` of 7 after node `a` and its
 /// children, then a `Def` of 8 after that one (a page step's finisher
@@ -309,7 +314,10 @@ fn a_continuation_goes_after_what_others_placed_after_the_node() {
     assert_eq!(kids.len(), 2);
     let order = e.order(u);
     let pos = |o: &Vec<phitex_defuse::NodeId>, n| o.iter().position(|&m| m == n).unwrap();
-    assert!(pos(&order, a) + 1 == pos(&order, kids[0]) && pos(&order, kids[0]) + 1 == pos(&order, kids[1]), "{order:?}");
+    assert!(
+        pos(&order, a) + 1 == pos(&order, kids[0]) && pos(&order, kids[0]) + 1 == pos(&order, kids[1]),
+        "{order:?}"
+    );
     // (`a` now places its continuation: after the two, before `x`)
     e.replace(t, def_t, vec![v.int(1)]);
     let r = e.evaluate(2).unwrap();
@@ -323,7 +331,6 @@ fn a_continuation_goes_after_what_others_placed_after_the_node() {
     assert_eq!(e.children(p), kids, "the step's placements stand: {r:?}");
     assert!(e.check_invariants().is_empty());
 }
-
 
 /// `[ms]`: works `ms` milliseconds, then defines "c" as a relation +1 on
 /// the value reaching it; predicts that relation (`Operation::predicted_rels`).
@@ -387,6 +394,10 @@ fn a_predicted_relation_stands_until_the_run_confirms_it() {
     let r = e.push(u, rd, vec![]);
     let rep = e.evaluate(4).unwrap();
     assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(2), "{rep:?}");
-    assert_eq!(reader.0.load(Ordering::Relaxed), 1, "the reader ran once, on the predicted value: {rep:?}");
+    assert_eq!(
+        reader.0.load(Ordering::Relaxed),
+        1,
+        "the reader ran once, on the predicted value: {rep:?}"
+    );
     assert!(e.check_invariants().is_empty());
 }

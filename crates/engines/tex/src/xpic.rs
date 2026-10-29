@@ -217,7 +217,8 @@ impl Run<'_, '_> {
                     self.get_x_token();
                     self.ck()?;
                     let c = self.cur.tok.chr();
-                    if self.cur.is_cs() || self.cur.tok.cat() != Some(12) || !(48..=57).contains(&c) {
+                    if self.cur.is_cs() || self.cur.tok.cat() != Some(12) || !(48..=57).contains(&c)
+                    {
                         break;
                     }
                     if digits.len() < 17 {
@@ -247,9 +248,18 @@ impl Run<'_, '_> {
         };
         let v = self.v;
         let xs = crate::val::list_of(v, x);
-        let printed = xs.first().map(|&t| crate::val::str_of(v, t)).unwrap_or_default();
-        let text = xs.get(1).map(|&t| crate::val::str_of(v, t)).unwrap_or_default();
-        let bytes: Vec<u8> = text.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?')).collect();
+        let printed = xs
+            .first()
+            .map(|&t| crate::val::str_of(v, t))
+            .unwrap_or_default();
+        let text = xs
+            .get(1)
+            .map(|&t| crate::val::str_of(v, t))
+            .unwrap_or_default();
+        let bytes: Vec<u8> = text
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
+            .collect();
         Ok(Some((printed, Arc::from(bytes))))
     }
 
@@ -370,7 +380,10 @@ impl Run<'_, '_> {
         let neg = |v: f64| f64::from(c_int(v).wrapping_neg().wrapping_mul(72)) / 72.27;
         t.concat(&Transform::translation(neg(xmin), neg(ymin)));
         let Some(path) = pic_path else {
-            return self.log("error", &format!("Unable to load picture or PDF file '{name}'"));
+            return self.log(
+                "error",
+                &format!("Unable to load picture or PDF file '{name}'"),
+            );
         };
         // (`pic_page` is a quarterword: 16 bits, signed)
         #[allow(clippy::cast_possible_truncation, reason = "a quarterword")]
@@ -986,7 +999,7 @@ fn pp_get_box(doc: &Doc, d: &Dict, name: &[u8]) -> Option<[f64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn fixed_conversions() {
         assert_eq!(d2fix(-0.5), -32767); // truncated toward zero

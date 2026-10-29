@@ -15,11 +15,10 @@
 //! different shapes are one value, two different ones never are, so a
 //! reader's `seen` compares by id.
 
-use std::hash::{BuildHasherDefault, Hasher};
 use std::cell::Cell;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
-
 
 use crate::lock::Lock;
 use crate::table::Table;
@@ -176,7 +175,10 @@ struct Slot {
 impl Slot {
     fn new(v: Value) -> Slot {
         let list = matches!(v, Value::List(_));
-        Slot { ptr: AtomicPtr::new(Arc::into_raw(Arc::new(v)).cast_mut()), list }
+        Slot {
+            ptr: AtomicPtr::new(Arc::into_raw(Arc::new(v)).cast_mut()),
+            list,
+        }
     }
 }
 
@@ -359,7 +361,11 @@ impl Values {
 
     /// The index in `plain` of plain value `id`'s payload.
     fn plain_index(&self, id: ValueId) -> usize {
-        id.payload().checked_sub(self.base).filter(|&i| i < PLAIN_SPAN).and_then(|i| usize::try_from(i).ok()).unwrap_or(usize::MAX)
+        id.payload()
+            .checked_sub(self.base)
+            .filter(|&i| i < PLAIN_SPAN)
+            .and_then(|i| usize::try_from(i).ok())
+            .unwrap_or(usize::MAX)
     }
 
     /// The id of `v`, made if new.
@@ -437,7 +443,12 @@ impl Values {
     fn with_plain<R>(&self, id: ValueId, f: impl FnOnce(Option<&Value>) -> R) -> R {
         let i = self.plain_index(id);
         #[cfg(feature = "observe")]
-        assert!(self.plain.get(i).is_none_or(|s| !s.ptr.load(Ordering::Relaxed).is_null()), "value {id:?} used after its collection");
+        assert!(
+            self.plain
+                .get(i)
+                .is_none_or(|s| !s.ptr.load(Ordering::Relaxed).is_null()),
+            "value {id:?} used after its collection"
+        );
         self.at(i, f)
     }
 
@@ -498,7 +509,9 @@ impl Values {
                 continue;
             }
             if self.counting.load(Ordering::Relaxed) {
-                self.bytes[shard_of(h) % BYTE_SHARDS].0.fetch_add(Self::weight(&v), Ordering::Relaxed);
+                self.bytes[shard_of(h) % BYTE_SHARDS]
+                    .0
+                    .fetch_add(Self::weight(&v), Ordering::Relaxed);
             }
             let i = self.plain.push(Slot::new(v));
             let id = ValueId::make(tag, self.base + i as u64);
@@ -519,7 +532,11 @@ impl Values {
                 bytes += usize::try_from(w).unwrap_or(0);
             }
         }
-        let seqs = self.seqs.iter().map(|s| s.0.read().values().filter(|x| matches!(x, SeqSlot::Node(_))).count()).sum();
+        let seqs = self
+            .seqs
+            .iter()
+            .map(|s| s.0.read().values().filter(|x| matches!(x, SeqSlot::Node(_))).count())
+            .sum();
         (count, bytes, seqs)
     }
 
@@ -915,7 +932,9 @@ impl Values {
                         std::collections::hash_map::Entry::Vacant(e) => {
                             e.insert(SeqSlot::Node(r));
                             if self.counting.load(Ordering::Relaxed) {
-                                self.bytes[shard_of(p) % BYTE_SHARDS].0.fetch_add(Self::ROPE_BYTES, Ordering::Relaxed);
+                                self.bytes[shard_of(p) % BYTE_SHARDS]
+                                    .0
+                                    .fetch_add(Self::ROPE_BYTES, Ordering::Relaxed);
                             }
                             if k > 0 {
                                 self.probed.fetch_add(1, Ordering::Relaxed);
@@ -1357,10 +1376,22 @@ mod tests {
     #[test]
     fn mulmod_is_the_remainder() {
         let p = u128::from(super::P);
-        let mut xs = vec![0, 1, 2, super::P - 1, super::P, super::P - 2, 1 << 60, (1 << 61) - 1, super::B];
+        let mut xs = vec![
+            0,
+            1,
+            2,
+            super::P - 1,
+            super::P,
+            super::P - 2,
+            1 << 60,
+            (1 << 61) - 1,
+            super::B,
+        ];
         let mut h = 0x9e37_79b9_7f4a_7c15_u64;
         for _ in 0..2000 {
-            h = h.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            h = h
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             xs.push(h >> 3);
         }
         for &a in &xs {
@@ -1388,7 +1419,9 @@ mod tests {
         }
         assert_eq!(v.seq_to_vec(shapes[0]), xs);
         let hc = v.rope(shapes[0]).map(|r| (r.len, r.hc));
-        let want = xs.iter().fold(0, |h, &x| super::addmod(super::mulmod(h, super::B), super::elem_hash(x)));
+        let want = xs.iter().fold(0, |h, &x| {
+            super::addmod(super::mulmod(h, super::B), super::elem_hash(x))
+        });
         assert_eq!(hc, Some((201, want)));
         assert_eq!(v.seq_probed(), 0);
     }
@@ -1407,7 +1440,10 @@ mod tests {
             }
         }
         let left = xs.iter().fold(ValueId::NIL, |s, &x| v.seq_concat(s, v.seq_unit(x)));
-        let right = xs.iter().rev().fold(ValueId::NIL, |s, &x| v.seq_concat(v.seq_unit(x), s));
+        let right = xs
+            .iter()
+            .rev()
+            .fold(ValueId::NIL, |s, &x| v.seq_concat(v.seq_unit(x), s));
         let t = xs.len() / 3;
         let thirds = {
             let (a, b, c) = (halves(v, &xs[..t]), halves(v, &xs[t..t + 1]), halves(v, &xs[t + 1..]));
@@ -1444,7 +1480,9 @@ mod tests {
         // (permutations of 40 elements over 6 values, each in four shapes)
         let mut seen: Vec<(Vec<ValueId>, ValueId)> = Vec::new();
         for k in 0..8u64 {
-            let ys: Vec<ValueId> = (0..40u64).map(|i| xs[usize::try_from((i * (k + 1) + k * k) % 6).unwrap()]).collect();
+            let ys: Vec<ValueId> = (0..40u64)
+                .map(|i| xs[usize::try_from((i * (k + 1) + k * k) % 6).unwrap()])
+                .collect();
             let sh = shapes(&v, &ys);
             for &s in &sh[1..] {
                 assert_eq!(s, sh[0], "permutation {k}: one id whatever the shape");

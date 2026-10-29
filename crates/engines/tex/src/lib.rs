@@ -44,10 +44,11 @@ mod input;
 mod inputs;
 mod log;
 mod math;
+mod native;
 mod nest;
 mod nodes;
-mod origins;
 mod ops;
+mod origins;
 mod pages;
 mod parbreak;
 mod pdfout;
@@ -66,22 +67,22 @@ pub mod timeline;
 mod tools;
 mod val;
 mod vprof;
-mod xetex;
-mod native;
 mod xdvpdf;
+mod xetex;
 mod xpic;
 
 pub use api::{
-    Build, ContentKey, Diagnostic, EditSender, Finder, Hint, Options, PageSettled, RunReport as Report, Severity,
-    Speculation, Stats, ToolFinder, ToolSearch, byte_ends, engine_id, file_stat_key,
+    Build, ContentKey, Diagnostic, EditSender, Finder, Hint, Options, PageSettled,
+    RunReport as Report, Severity, Speculation, Stats, ToolFinder, ToolSearch, byte_ends,
+    engine_id, file_stat_key,
 };
-pub use shell::{ShellHook, ShellRan, TEXLIVE_COMMANDS, texlive_commands};
 pub use exec::{Progress, SpawnWorker, cpus as exec_cpus, set_spawn_worker};
-pub use phitex_otf::{FontSource, KpseFormat};
+pub use origins::{OriginsSnapshot, PageOrigins};
 pub use phitex_otf::index::FontIndex;
+pub use phitex_otf::{FontSource, KpseFormat};
+pub use shell::{ShellHook, ShellRan, TEXLIVE_COMMANDS, texlive_commands};
 pub use xdvpdf::XdvPdf;
 pub use xetex::{FontFiles, XeTeX};
-pub use origins::{OriginsSnapshot, PageOrigins};
 
 /// Whether this build has the timing and counter lines (`profile`).
 pub const PROFILE: bool = cfg!(feature = "profile");

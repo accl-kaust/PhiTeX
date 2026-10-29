@@ -57,7 +57,6 @@ impl AlignColumn {
     }
 }
 
-
 /// Packages an entry (§796): `hpack` natural for `\halign` (its
 /// adjustments are returned), `vpackage` natural with depth limit 0 for
 /// `\valign`; the width (or height) is recorded in `column` for an entry

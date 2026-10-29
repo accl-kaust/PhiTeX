@@ -72,12 +72,28 @@ impl Rect {
     pub fn widen(&self, o: &Rect) -> Rect {
         Rect::new(
             Position::new(
-                if self.bl.x > o.bl.x { o.bl.x } else { self.bl.x },
-                if self.bl.y > o.bl.y { o.bl.y } else { self.bl.y },
+                if self.bl.x > o.bl.x {
+                    o.bl.x
+                } else {
+                    self.bl.x
+                },
+                if self.bl.y > o.bl.y {
+                    o.bl.y
+                } else {
+                    self.bl.y
+                },
             ),
             Position::new(
-                if self.tr.x > o.tr.x { self.tr.x } else { o.tr.x },
-                if self.tr.y > o.tr.y { self.tr.y } else { o.tr.y },
+                if self.tr.x > o.tr.x {
+                    self.tr.x
+                } else {
+                    o.tr.x
+                },
+                if self.tr.y > o.tr.y {
+                    self.tr.y
+                } else {
+                    o.tr.y
+                },
             ),
         )
     }

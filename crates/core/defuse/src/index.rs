@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::api::UnitId;
 use crate::engine::EnvReader;
 use crate::lock::Lock;
-use crate::read::Reaching;
 use crate::order::{Pos, SegId};
+use crate::read::Reaching;
 use crate::segment::{RangeReader, Reader, push_pruned};
 use crate::values::{Field, FxHashMap, ValueId, hash_words};
 
@@ -137,7 +137,12 @@ impl FieldIndex {
 
     /// The segments with `f` whose start is in `[from, to)`, in order.
     pub(crate) fn between(&self, f: Field, from: Pos, to: Pos) -> Vec<SegId> {
-        self.shards[shard(f)].0.read().get(&f).map(|s| s.between(from, to)).unwrap_or_default()
+        self.shards[shard(f)]
+            .0
+            .read()
+            .get(&f)
+            .map(|s| s.between(from, to))
+            .unwrap_or_default()
     }
 
     pub(crate) fn has(&self, f: Field) -> bool {
@@ -261,7 +266,13 @@ impl Ranges {
     }
 
     fn is_empty(&self) -> bool {
-        self.len == 0 && self.finals.is_empty() && self.envs.is_empty() && self.ends_of.is_empty() && self.published.is_none() && !self.dirty && !self.pending
+        self.len == 0
+            && self.finals.is_empty()
+            && self.envs.is_empty()
+            && self.ends_of.is_empty()
+            && self.published.is_none()
+            && !self.dirty
+            && !self.pending
     }
 
     /// Drops the dead once as many have been filed as the list held.
@@ -291,12 +302,22 @@ impl Ranges {
 
 impl RangeIndex {
     pub(crate) fn new() -> RangeIndex {
-        RangeIndex { shards: (0..RANGE_SHARDS).map(|_| RangeShard(Lock::new(FxHashMap::default()))).collect(), seq: AtomicU64::new(0) }
+        RangeIndex {
+            shards: (0..RANGE_SHARDS)
+                .map(|_| RangeShard(Lock::new(FxHashMap::default())))
+                .collect(),
+            seq: AtomicU64::new(0),
+        }
     }
 
     /// Files readers of `f` over the intervals `[lo, hi)`, one lock for
     /// all; the dead are dropped on the way now and then.
-    pub(crate) fn insert(&self, f: Field, rs: Vec<(Pos, Pos, RangeReader)>, live: impl Fn(&RangeReader) -> bool) -> Vec<RangeKey> {
+    pub(crate) fn insert(
+        &self,
+        f: Field,
+        rs: Vec<(Pos, Pos, RangeReader)>,
+        live: impl Fn(&RangeReader) -> bool,
+    ) -> Vec<RangeKey> {
         let seq = self.seq.fetch_add(rs.len() as u64, Ordering::Relaxed);
         let keys: Vec<RangeKey> = (0..rs.len()).map(|i| RangeKey { seq: seq + i as u64 }).collect();
         let mut w = self.shards[range_shard(f)].0.write();
@@ -340,7 +361,11 @@ impl RangeIndex {
     }
 
     pub(crate) fn has(&self, f: Field, k: RangeKey) -> bool {
-        self.shards[range_shard(f)].0.read().get(&f).is_some_and(|m| m.at.contains_key(&k.seq))
+        self.shards[range_shard(f)]
+            .0
+            .read()
+            .get(&f)
+            .is_some_and(|m| m.at.contains_key(&k.seq))
     }
 
     /// Every interval starting inside `(lo, hi)` starts at `lo` instead,
@@ -352,7 +377,10 @@ impl RangeIndex {
             let mut w = sh.0.write();
             for m in w.values_mut() {
                 let hit: Vec<(u64, Pos, Pos)> =
-                    m.at.iter().filter(|(_, (a, b))| inside(*a) || inside(*b)).map(|(s, (a, b))| (*s, *a, *b)).collect();
+                    m.at.iter()
+                        .filter(|(_, (a, b))| inside(*a) || inside(*b))
+                        .map(|(s, (a, b))| (*s, *a, *b))
+                        .collect();
                 for (seq, a, b) in hit {
                     let r = m.take(seq).expect("a filing it holds");
                     m.insert(seq, if inside(a) { lo } else { a }, if inside(b) { hi } else { b }, r);
@@ -373,8 +401,16 @@ impl RangeIndex {
         };
         let mut out = Vec::new();
         for ((class, by_lo), (_, by_hi)) in m.classes.iter().zip(&m.ends) {
-            let floor = if *class >= 64 { 0 } else { at.0.saturating_sub(1 << class) };
-            let ceil = if *class >= 64 { u64::MAX } else { at.0.saturating_add(1 << class) };
+            let floor = if *class >= 64 {
+                0
+            } else {
+                at.0.saturating_sub(1 << class)
+            };
+            let ceil = if *class >= 64 {
+                u64::MAX
+            } else {
+                at.0.saturating_add(1 << class)
+            };
             let mut a = by_lo.range((Pos(floor), 0)..(at, 0));
             let mut b = by_hi.range((Pos(at.0.saturating_add(1)), 0)..=(Pos(ceil), u64::MAX));
             let (mut ra, mut rb) = (Vec::new(), Vec::new());
@@ -522,7 +558,12 @@ impl RangeIndex {
 
     /// The `At::Final` readers of `f` that still stand.
     pub(crate) fn finals(&self, f: Field, live: impl Fn(&Reader) -> bool) -> Vec<Reader> {
-        self.shards[range_shard(f)].0.read().get(&f).map(|m| m.finals.iter().filter(|r| live(r)).cloned().collect()).unwrap_or_default()
+        self.shards[range_shard(f)]
+            .0
+            .read()
+            .get(&f)
+            .map(|m| m.finals.iter().filter(|r| live(r)).cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Files an `At::End(u)` reader of `f`, the dead dropped when the
@@ -538,7 +579,13 @@ impl RangeIndex {
             .0
             .read()
             .get(&f)
-            .map(|m| m.ends_of.iter().filter(|(v, r)| *v == u && live(r)).map(|(_, r)| r.clone()).collect())
+            .map(|m| {
+                m.ends_of
+                    .iter()
+                    .filter(|(v, r)| *v == u && live(r))
+                    .map(|(_, r)| r.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

@@ -345,7 +345,9 @@ impl Shaper {
         }
         b.set_direction(HrDirection::LeftToRight);
         b.guess_segment_properties();
-        let s = b.script().map(|s| u32::from_be_bytes(s.tag().to_be_bytes()));
+        let s = b
+            .script()
+            .map(|s| u32::from_be_bytes(s.tag().to_be_bytes()));
         self.buffer = Some(b);
         s
     }

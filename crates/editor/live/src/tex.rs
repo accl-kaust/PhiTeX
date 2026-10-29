@@ -137,7 +137,10 @@ impl Engine {
             return Ok(self);
         }
         if self.output == Output::Xdv && out == Output::XdvFile {
-            return Ok(Engine { output: out, ..self });
+            return Ok(Engine {
+                output: out,
+                ..self
+            });
         }
         match (self.name, out) {
             ("latex", Output::Pdf) => engine("pdflatex"),

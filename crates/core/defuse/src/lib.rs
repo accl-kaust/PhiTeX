@@ -76,13 +76,13 @@ mod table;
 mod values;
 
 pub use api::{
-    At, Brackets, Cause, EditSource, Effect, EnvProvider, EvalError, FieldAt, Limits, Locality,
-    MayDefine, Monoid, NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, PathId, ProjId, Projection, Report,
-    SeqMonoid, Settled, Step, Stop, SumMonoid, Times, UnitId,
+    At, Brackets, Cause, EditSource, Effect, EnvProvider, EvalError, FieldAt, Limits, Locality, MayDefine, Monoid,
+    NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, PathId, ProjId, Projection, Report, SeqMonoid, Settled,
+    Step, Stop, SumMonoid, Times, UnitId,
 };
 pub use ctx::{Ctx, View};
-pub use read::{alias_of, alias_value};
 pub use engine::Engine;
+pub use read::{alias_of, alias_value};
 
 /// The stack of every thread a run is made on (the evaluation's own and
 /// the pool's): runs nest as deep as their client allows, and TeX allows
@@ -91,4 +91,6 @@ pub use engine::Engine;
 /// job 21489; `\number` 336, conditionals 456): 10 MB, with room for
 /// the run below them.
 pub const WORKER_STACK: usize = 16 << 20;
-pub use values::{Collected, Field, FxHashMap, FxHashSet, FxHasher, SeqNode, Value, ValueId, Values, hash_bytes, hash_words};
+pub use values::{
+    Collected, Field, FxHashMap, FxHashSet, FxHasher, SeqNode, Value, ValueId, Values, hash_bytes, hash_words,
+};

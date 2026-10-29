@@ -158,7 +158,8 @@ pub(crate) struct Ops {
     /// With them, the page's index among the pages the loop fired (its
     /// checkpoint's): the page number a finisher's prediction carries
     /// its templates to ([`crate::pages::FinDefs::predict`]).
-    pub fin_class: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, FinClass>>>,
+    pub fin_class:
+        std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, FinClass>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// [`crate::Options::origins`]: the pages' writers keep their glyphs
@@ -178,7 +179,8 @@ pub(crate) struct Ops {
     /// is predicted on them ([`crate::hints::counter_rels`]); a name
     /// defined again, or not yet, is a wrong or a missing guess, never
     /// a wrong value.
-    pub counters: std::sync::Arc<std::sync::RwLock<crate::FxHashMap<&'static str, phitex_defuse::Field>>>,
+    pub counters:
+        std::sync::Arc<std::sync::RwLock<crate::FxHashMap<&'static str, phitex_defuse::Field>>>,
     /// What the last run of a text of each scope shape left
     /// ([`crate::hints::ScopeShape`], by the opener's or closer's name):
     /// whether an opener was left to the engine as a scope, whether a
@@ -302,8 +304,15 @@ impl FileRest {
     /// Whether two are the same file at the same place
     /// ([`crate::input::Seg::same`]).
     pub(crate) fn same(&self, o: &FileRest) -> bool {
-        (self.id, self.off, self.name, self.pos, self.line, self.sliceable, self.cut)
-            == (o.id, o.off, o.name, o.pos, o.line, o.sliceable, o.cut)
+        (
+            self.id,
+            self.off,
+            self.name,
+            self.pos,
+            self.line,
+            self.sliceable,
+            self.cut,
+        ) == (o.id, o.off, o.name, o.pos, o.line, o.sliceable, o.cut)
             && match (&self.units, &o.units) {
                 (None, None) => true,
                 (Some(a), Some(b)) => a[..] == b[..],
@@ -421,7 +430,6 @@ impl FileRest {
     pub(crate) fn set_pos_chars(&mut self, p: usize) {
         self.pos = p;
     }
-
 
     /// The next line as a segment not yet reached (what a top-level
     /// node's arguments for it decode to, without a value or a string per
@@ -948,7 +956,11 @@ pub(crate) struct Run<'c, 'a> {
     /// ([`Run::prepare_publication`]), with the table's state then and
     /// the locations it restored.
     #[allow(clippy::type_complexity)]
-    pub(crate) pubs: Option<(((usize, usize, usize, u64), u64), Vec<(Field, crate::state::Pub, Locality)>, Vec<Loc>)>,
+    pub(crate) pubs: Option<(
+        ((usize, usize, usize, u64), u64),
+        Vec<(Field, crate::state::Pub, Locality)>,
+        Vec<Loc>,
+    )>,
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
     /// While a builder folds (the loop, a finisher's replay, the text's
@@ -1233,7 +1245,10 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some((g, node)) = self.st.alias_at(loc, self.v) else {
             return Ok(());
         };
-        let s = crate::defer::Sym { loc: self.loc_of(g), node };
+        let s = crate::defer::Sym {
+            loc: self.loc_of(g),
+            node,
+        };
         let x = match self.op_name() {
             "exec" | "resume" => crate::defer::force(self, s)?,
             _ => crate::defer::resolve(self, s)?,
@@ -1344,7 +1359,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 note_stop(self.op_name(), g);
             }
             match r? {
-                phitex_defuse::FieldAt::Def(x, by) if g == f || by == Some(at) => return Ok(Some(x)),
+                phitex_defuse::FieldAt::Def(x, by) if g == f || by == Some(at) => {
+                    return Ok(Some(x));
+                }
                 phitex_defuse::FieldAt::Unset if g == f => return Ok(Some(ValueId::UNIT)),
                 phitex_defuse::FieldAt::Gone => return Ok(None),
                 _ => {}
@@ -1385,12 +1402,6 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-
-
-
-
-
-
     /// What the run publishes ([`crate::state::State::publication`]),
     /// made before it finishes with the reads the rule takes: whether the
     /// run stands outside every scope of the document (the scope kind
@@ -1399,7 +1410,8 @@ impl<'c, 'a> Run<'c, 'a> {
     /// continuation carried that it publishes again (rule 2: one equal to
     /// it is none). A stop here runs the node again from its start.
     pub(crate) fn prepare_publication(&mut self) -> R<()> {
-        let top = self.rec_load || (self.st.has_global_restore(self.v) && self.scope_kind()?.is_none());
+        let top =
+            self.rec_load || (self.st.has_global_restore(self.v) && self.scope_kind()?.is_none());
         let (pubs, restored) = self.st.publication(self.v, top);
         let mut out = Vec::with_capacity(pubs.len());
         for p in pubs {
@@ -1433,7 +1445,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let top = self.rec_load || matches!(self.scope_kind_memo, Some(None));
         let (pubs, _) = self.st.publication(self.v, top);
-        pubs.into_iter().map(|p| (self.loc_field(p.loc), p.what, p.at)).collect()
+        pubs.into_iter()
+            .map(|p| (self.loc_field(p.loc), p.what, p.at))
+            .collect()
     }
 
     /// The values the run publishes (its relations left out).
@@ -1535,7 +1549,6 @@ impl<'c, 'a> Run<'c, 'a> {
             && (global || self.innermost_group().is_none())
     }
 
-
     /// An integer register's engine value as first loaded
     /// ([`Run::reg_loaded_base`]).
     /// Kept for the registers a restore can name: `\count0`–`\count255`
@@ -1545,7 +1558,9 @@ impl<'c, 'a> Run<'c, 'a> {
             || self.defer_regs.as_ref().is_some_and(|r| r.contains(&loc))
         {
             let v = self.v;
-            self.reg_loaded_base.entry(loc).or_insert_with(|| crate::val::i32_of(v, x));
+            self.reg_loaded_base
+                .entry(loc)
+                .or_insert_with(|| crate::val::i32_of(v, x));
         }
     }
 
@@ -1739,7 +1754,8 @@ impl<'c, 'a> Run<'c, 'a> {
             if c.0 != v.instance() || c.1 != epoch {
                 *c = (v.instance(), epoch, vec![None; 255]);
             }
-            *c.2[n.min(254)].get_or_insert_with(|| self.ops.fields.get_at(v, epoch, &format!("tbox:{n}")))
+            *c.2[n.min(254)]
+                .get_or_insert_with(|| self.ops.fields.get_at(v, epoch, &format!("tbox:{n}")))
         });
         self.loc_of(f)
     }
@@ -1984,7 +2000,9 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The field `<prefix>:<n>` past a numbered family's fixed slots
     /// ([`crate::fields::Fields::numbered`]).
     pub(crate) fn numbered_field(&self, prefix: &'static str, n: i64) -> Field {
-        self.ops.fields.numbered(self.v, self.cx.values_epoch(), prefix, n)
+        self.ops
+            .fields
+            .numbered(self.v, self.cx.values_epoch(), prefix, n)
     }
 
     /// The location of the numbered field `<prefix>:<n>` (a register or
@@ -2178,7 +2196,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// ([`Run::seed_written`]), as a run reads it before any value.
     pub(crate) fn lb_known(&mut self, key: &str, f: Field) -> R<bool> {
         let v = self.v;
-        if self.lb(v.field(&format!("{}:{key}", crate::ops::WSAME)))?.and_then(|x| v.as_bool(x)) == Some(true) {
+        if self
+            .lb(v.field(&format!("{}:{key}", crate::ops::WSAME)))?
+            .and_then(|x| v.as_bool(x))
+            == Some(true)
+        {
             return Ok(false);
         }
         Ok(self.lb(f)?.is_some())
@@ -2429,11 +2451,13 @@ impl<'c, 'a> Run<'c, 'a> {
             let reread = self.seed_reread(key)?;
             let sd = self.seeded(key).expect("seeded");
             let path = v.str(&format!("./{key}"));
-            return Ok(Some(Some(if sd.keys == crate::api::text_mark(v) || reread {
-                v.list(vec![path, sd.text])
-            } else {
-                v.list(vec![path, v.str("")])
-            })));
+            return Ok(Some(Some(
+                if sd.keys == crate::api::text_mark(v) || reread {
+                    v.list(vec![path, sd.text])
+                } else {
+                    v.list(vec![path, v.str("")])
+                },
+            )));
         }
         // (looked up where it is not read back, an `\\openin` say: its
         // text, the client's, the round's whole text of the file,
@@ -2963,7 +2987,10 @@ impl<'c, 'a> Run<'c, 'a> {
                     let xs = list_of(v, x);
                     eprintln!(
                         "keys-read: {id} = {} node {}",
-                        xs.first().map_or_else(|| "(none: its initial value)".to_owned(), |&d| crate::val::show_def(v, d)),
+                        xs.first().map_or_else(
+                            || "(none: its initial value)".to_owned(),
+                            |&d| crate::val::show_def(v, d)
+                        ),
                         self.cx.node().raw()
                     );
                 }
@@ -3158,7 +3185,9 @@ impl<'c, 'a> Run<'c, 'a> {
     /// made the second time), as [`Run::note_read_back`] makes a file
     /// read back from what the job wrote.
     fn seed_reread(&mut self, key: &str) -> R<bool> {
-        Ok(self.seeded(key).is_some_and(|s| s.keys != crate::api::text_mark(self.v))
+        Ok(self
+            .seeded(key)
+            .is_some_and(|s| s.keys != crate::api::text_mark(self.v))
             && self.get(&format!("wread:{key}"))?.is_some()
             && self.get(&format!("wopen:{key}"))?.is_none())
     }
@@ -3239,7 +3268,10 @@ impl<'c, 'a> Run<'c, 'a> {
     /// definitions are restored): what it writes to other files (LaTeX's
     /// `\@writefile{toc}{...}`) is written where the run reads the text
     /// back, as `\enddocument` does.
-    #[allow(clippy::too_many_lines, reason = "one scratch interpretation: its save, run and restore read as one")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scratch interpretation: its save, run and restore read as one"
+    )]
     pub(crate) fn interpret_line(&mut self, line: &str) -> R<Option<ValueId>> {
         let v = self.v;
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
@@ -3567,8 +3599,6 @@ impl<'c, 'a> Run<'c, 'a> {
         self.set_loc(l, Entry::raw(Some(val)), global);
     }
 
-
-
     /// The fields the run defines: those whose value at its end differs
     /// from the one it loaded, or that it never loaded (a local
     /// assignment that ends where it began defines nothing, as LaTeX's
@@ -3576,7 +3606,6 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn def_fields(&mut self) -> Vec<Field> {
         self.publication().into_iter().map(|d| d.0).collect()
     }
-
 
     /// A page node whose declared contributions are all it contributes
     /// ([`crate::pages::PageNode::contribs_complete`]) contributes to no
@@ -3668,7 +3697,9 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn log_ok(&mut self) -> R<()> {
         self.diag(true, "OK");
         let nl = i64::from(self.ipar(Par::newlinechar)?);
-        let e = self.v.list(vec![self.v.str("error"), self.v.str("OK"), self.v.int(nl)]);
+        let e = self
+            .v
+            .list(vec![self.v.str("error"), self.v.str("OK"), self.v.int(nl)]);
         let s = self.v.seq_unit(e);
         self.contribute("log", s);
         let one = self.v.int(1);
@@ -3902,7 +3933,9 @@ impl<'c, 'a> Run<'c, 'a> {
         // has read and decoded: one slot access)
         if !self.bare
             && let Some(i) = tok.cs_index()
-            && let Some((c, h)) = self.st.cmd_chr_fast(Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(Loc::MAX))
+            && let Some((c, h)) = self
+                .st
+                .cmd_chr_fast(Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(Loc::MAX))
         {
             self.cur = Cur {
                 tok,
@@ -3985,10 +4018,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a marker of the input's own, a file's end, is never stepped
         // over by its meaning's class: read in full)
-        if self.outer_reads
-            && !tok.is_internal_cs()
-            && self.outer_lookup(tok)? == Some(false)
-        {
+        if self.outer_reads && !tok.is_internal_cs() && self.outer_lookup(tok)? == Some(false) {
             // (not outer: get_next checks nothing of it, §336, and the
             // caller keeps its token only)
             self.cur = Cur {
@@ -4048,7 +4078,10 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(Some(m.class));
         }
         let f = self.loc_field(l);
-        let Some(x) = self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.class_proj))? else {
+        let Some(x) = self
+            .cx
+            .read_path(f, phitex_defuse::PathId::of_proj(self.ops.class_proj))?
+        else {
             return Ok(None);
         };
         let Ok(c) = u8::try_from(int_of(self.v, x)) else {
@@ -4079,7 +4112,10 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(Some(m.step));
         }
         let f = self.loc_field(l);
-        let Some(x) = self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.step_proj))? else {
+        let Some(x) = self
+            .cx
+            .read_path(f, phitex_defuse::PathId::of_proj(self.ops.step_proj))?
+        else {
             return Ok(None);
         };
         let k = int_of(self.v, x);
@@ -4100,13 +4136,23 @@ impl<'c, 'a> Run<'c, 'a> {
         let l = self.box_loc(i64::from(n));
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             let b = self.box_reg(n)?;
-            return Ok(b.map(|b| (crate::nodes::box_is_h(v, b), crate::nodes::box_dim(v, b, 3) + crate::nodes::box_dim(v, b, 2))));
+            return Ok(b.map(|b| {
+                (
+                    crate::nodes::box_is_h(v, b),
+                    crate::nodes::box_dim(v, b, 3) + crate::nodes::box_dim(v, b, 2),
+                )
+            }));
         }
         let f = self.loc_field(l);
-        let x = self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.box_shape_proj))?;
+        let x = self
+            .cx
+            .read_path(f, phitex_defuse::PathId::of_proj(self.ops.box_shape_proj))?;
         Ok(x.filter(|&x| x != ValueId::UNIT).and_then(|x| {
             v.with_list(x, |xs| match xs {
-                [h, hd] => Some((int_of(v, *h) != 0, i32::try_from(int_of(v, *hd)).unwrap_or(0))),
+                [h, hd] => Some((
+                    int_of(v, *h) != 0,
+                    i32::try_from(int_of(v, *hd)).unwrap_or(0),
+                )),
                 _ => None,
             })
             .flatten()
@@ -4195,11 +4241,18 @@ impl<'c, 'a> Run<'c, 'a> {
             phitex_defuse::Step::Proj(self.ops.clist_proj),
             phitex_defuse::Step::Has(v.str(crate::val::CLIST_NOT)),
         ]);
-        if self.cx.read_path(f, not)?.is_none_or(|x| x != v.bool(false)) {
+        if self
+            .cx
+            .read_path(f, not)?
+            .is_none_or(|x| x != v.bool(false))
+        {
             return Ok(None);
         }
         let key = crate::val::toks_value(v, item);
-        let has = self.cx.path(&[phitex_defuse::Step::Proj(self.ops.clist_proj), phitex_defuse::Step::Has(key)]);
+        let has = self.cx.path(&[
+            phitex_defuse::Step::Proj(self.ops.clist_proj),
+            phitex_defuse::Step::Has(key),
+        ]);
         Ok(self.cx.read_path(f, has)?.map(|x| x == v.bool(true)))
     }
 
@@ -4219,7 +4272,10 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(Some(d));
         }
         let f = self.loc_field(l);
-        let d = match self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.defined_proj))? {
+        let d = match self
+            .cx
+            .read_path(f, phitex_defuse::PathId::of_proj(self.ops.defined_proj))?
+        {
             Some(x) => int_of(self.v, x) != 0,
             None => return Ok(None),
         };
@@ -4244,7 +4300,10 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(Some(o));
         }
         let f = self.loc_field(l);
-        let Some(x) = self.cx.read_path(f, phitex_defuse::PathId::of_proj(self.ops.outer_proj))? else {
+        let Some(x) = self
+            .cx
+            .read_path(f, phitex_defuse::PathId::of_proj(self.ops.outer_proj))?
+        else {
             return Ok(None);
         };
         let o = int_of(self.v, x) != 0;
@@ -4465,7 +4524,12 @@ impl<'c, 'a> Run<'c, 'a> {
         if f.lazy()
             && let Some(key) = f.cut
         {
-            let loads = self.ops.pkg_loads.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            let loads = self
+                .ops
+                .pkg_loads
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             return crate::api::doc_file_pieces(
                 v,
                 &self.ops.docs,
@@ -4491,7 +4555,12 @@ impl<'c, 'a> Run<'c, 'a> {
         crate::hints::register_text(&self.ops.hints, f.name, &t);
         // (a region whose text cannot bound what it defines: its
         // record's hint, keyed by its text, `crate::pkgrec`)
-        let loads = self.ops.pkg_loads.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let loads = self
+            .ops
+            .pkg_loads
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let mut out = Vec::new();
         for &(s, e) in &t.slices {
             if e <= f.off {
@@ -4531,8 +4600,17 @@ impl<'c, 'a> Run<'c, 'a> {
         let k = r?;
         if crate::exec::prof_flag!("PHITEX_SKIND_LOG") {
             let v = self.v;
-            let text: String = self.cx.args().first().map_or_else(String::new, |&a| v.render(a).chars().take(100).collect());
-            eprintln!("skindlog: {} {} op {} {text}", self.cx.node().raw(), k.map_or_else(|| "none".to_owned(), |x| v.render(x)), self.op_name());
+            let text: String = self
+                .cx
+                .args()
+                .first()
+                .map_or_else(String::new, |&a| v.render(a).chars().take(100).collect());
+            eprintln!(
+                "skindlog: {} {} op {} {text}",
+                self.cx.node().raw(),
+                k.map_or_else(|| "none".to_owned(), |x| v.render(x)),
+                self.op_name()
+            );
         }
         self.scope_kind_memo = Some(k);
         Ok(k)
@@ -4583,7 +4661,11 @@ impl<'c, 'a> Run<'c, 'a> {
                     if self.closed_scope() && !self.claim_rest && !self.nest.is_empty() {
                         let (c, _) = self.cont_encode_as(true)?;
                         if crate::exec::obs_flag!("PHITEX_CLOSE_TRACE") {
-                            eprintln!("close-trace: node {} ends at the close, its rest a resume: {}", self.cx.node().raw(), self.v.render(c).chars().take(300).collect::<String>());
+                            eprintln!(
+                                "close-trace: node {} ends at the close, its rest a resume: {}",
+                                self.cx.node().raw(),
+                                self.v.render(c).chars().take(300).collect::<String>()
+                            );
                         }
                         self.close_cont = Some(c);
                     }
@@ -4968,7 +5050,10 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let contribs_trace: Vec<String> = if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
             let v = self.v;
-            self.contribs.iter().map(|(f, x)| format!("{}+={}", crate::val::field_name(v, *f), x.raw())).collect()
+            self.contribs
+                .iter()
+                .map(|(f, x)| format!("{}+={}", crate::val::field_name(v, *f), x.raw()))
+                .collect()
         } else {
             Vec::new()
         };
@@ -5085,14 +5170,31 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.effect != Effect::None || op == self.ops.exec || op == self.ops.resume {
             self.cx.set_effect(self.effect);
         }
-        if crate::exec::prof_flag!("PHITEX_SKIND_LOG") && self.cut.is_some() && (op == self.ops.exec || op == self.ops.resume) {
-            let shape = crate::ops::scope_shape_of(self.v, &self.text_arg().into_iter().collect::<Vec<_>>(), op == self.ops.resume);
-            eprintln!("skindcut: {} op {} effect {:?} shape {shape:?}", self.cx.node().raw(), self.op_name(), self.effect);
+        if crate::exec::prof_flag!("PHITEX_SKIND_LOG")
+            && self.cut.is_some()
+            && (op == self.ops.exec || op == self.ops.resume)
+        {
+            let shape = crate::ops::scope_shape_of(
+                self.v,
+                &self.text_arg().into_iter().collect::<Vec<_>>(),
+                op == self.ops.resume,
+            );
+            eprintln!(
+                "skindcut: {} op {} effect {:?} shape {shape:?}",
+                self.cx.node().raw(),
+                self.op_name(),
+                self.effect
+            );
         }
         // (a run cut at a candidate, or one that ended the job, ran not
         // to its text's end: its brackets say nothing of its shape's)
-        if (op == self.ops.exec || op == self.ops.resume) && self.cut.is_none() && !self.claim_rest {
-            let shape = crate::ops::scope_shape_of(self.v, &self.text_arg().into_iter().collect::<Vec<_>>(), op == self.ops.resume);
+        if (op == self.ops.exec || op == self.ops.resume) && self.cut.is_none() && !self.claim_rest
+        {
+            let shape = crate::ops::scope_shape_of(
+                self.v,
+                &self.text_arg().into_iter().collect::<Vec<_>>(),
+                op == self.ops.resume,
+            );
             let opened = match self.effect {
                 Effect::Scope(b) if b.closes == 0 => usize::from(b.opens),
                 _ => 0,
@@ -5100,7 +5202,11 @@ impl<'c, 'a> Run<'c, 'a> {
             let learn: Vec<(String, bool)> = match shape {
                 // (a closer that ran inside a scope: one that found none
                 // open, its opener not yet run, says nothing)
-                crate::hints::ScopeShape::Close(c) if matches!(self.scope_kind_memo, Some(Some(_))) => vec![(c, self.effect == CLOSE)],
+                crate::hints::ScopeShape::Close(c)
+                    if matches!(self.scope_kind_memo, Some(Some(_))) =>
+                {
+                    vec![(c, self.effect == CLOSE)]
+                }
                 crate::hints::ScopeShape::Open(os) => {
                     let ok = opened == os.len();
                     os.into_iter().map(|o| (o, ok)).collect()
@@ -5108,19 +5214,43 @@ impl<'c, 'a> Run<'c, 'a> {
                 _ => Vec::new(),
             };
             if crate::exec::prof_flag!("PHITEX_SKIND_LOG") && !learn.is_empty() {
-                let m = self.ops.scope_learned.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-                let was: Vec<(String, Option<bool>)> = learn.iter().map(|(k, _)| (k.clone(), m.get(k).copied())).collect();
+                let m = self
+                    .ops
+                    .scope_learned
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let was: Vec<(String, Option<bool>)> = learn
+                    .iter()
+                    .map(|(k, _)| (k.clone(), m.get(k).copied()))
+                    .collect();
                 let v = self.v;
                 let carried: Vec<i64> = if op == self.ops.resume {
                     let c = list_of(v, self.text_arg().unwrap_or(ValueId::UNIT));
-                    c.get(1).map(|&l| list_of(v, l).iter().map(|&e| list_of(v, e).get(1).map_or(-1, |&g| int_of(v, g))).collect()).unwrap_or_default()
+                    c.get(1)
+                        .map(|&l| {
+                            list_of(v, l)
+                                .iter()
+                                .map(|&e| list_of(v, e).get(1).map_or(-1, |&g| int_of(v, g)))
+                                .collect()
+                        })
+                        .unwrap_or_default()
                 } else {
                     Vec::new()
                 };
-                eprintln!("skindlearn: {} op {} effect {:?} learned before {was:?} carried {carried:?} pulled {}", self.cx.node().raw(), self.op_name(), self.effect, self.pulled);
+                eprintln!(
+                    "skindlearn: {} op {} effect {:?} learned before {was:?} carried {carried:?} pulled {}",
+                    self.cx.node().raw(),
+                    self.op_name(),
+                    self.effect,
+                    self.pulled
+                );
             }
             if !learn.is_empty() {
-                let mut m = self.ops.scope_learned.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut m = self
+                    .ops
+                    .scope_learned
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 for (k, ok) in learn {
                     if m.get(&k) != Some(&ok) {
                         m.insert(k, ok);
@@ -5131,27 +5261,48 @@ impl<'c, 'a> Run<'c, 'a> {
         // (`PHITEX_SKIND_LOG`: the brackets a run sets, and its text)
         if crate::exec::prof_flag!("PHITEX_SKIND_LOG") && self.effect != Effect::None {
             let v = self.v;
-            let text = self.cx.args().first().map_or_else(String::new, |&a| v.render(a).chars().take(160).collect());
-            eprintln!("skindeff: {} op {} {:?} {text}", self.cx.node().raw(), self.op_name(), self.effect);
+            let text = self
+                .cx
+                .args()
+                .first()
+                .map_or_else(String::new, |&a| v.render(a).chars().take(160).collect());
+            eprintln!(
+                "skindeff: {} op {} {:?} {text}",
+                self.cx.node().raw(),
+                self.op_name(),
+                self.effect
+            );
         }
         // (a finisher's output: what its routine gave back, which the
         // next page step reads, `crate::pages::PAGE_OUT`)
-        let out = self.fin.as_ref().and_then(|c| c.rtn).unwrap_or(ValueId::UNIT);
+        let out = self
+            .fin
+            .as_ref()
+            .and_then(|c| c.rtn)
+            .unwrap_or(ValueId::UNIT);
         if op == self.ops.finish
             && let Some(key) = self.fin_page().map(|f| f.key)
             && self.fin.as_ref().is_some_and(|c| c.rtn.is_some())
         {
             let v = self.v;
-            let page = self.fin.as_ref().and_then(|c| c.page_x).unwrap_or(ValueId::UNIT);
+            let page = self
+                .fin
+                .as_ref()
+                .and_then(|c| c.page_x)
+                .unwrap_or(ValueId::UNIT);
             let x = crate::pages::page_out_value(v, key.piece, key.nth, out, page);
-            self.cx.define_with(key.field(v, crate::pages::PAGE_OUT), x, Locality::Global);
-            self.cx.contribute(v.field(crate::pages::FIN_DONE), v.int(1));
+            self.cx
+                .define_with(key.field(v, crate::pages::PAGE_OUT), x, Locality::Global);
+            self.cx
+                .contribute(v.field(crate::pages::FIN_DONE), v.int(1));
         }
         // (a finisher's output: its give-back with the page it ran on,
         // by which the loop knows a give-back made on the page as it is
         // from one a run on another left, [`crate::pages::fin_output`])
         let out = match self.fin.as_ref() {
-            Some(c) if op == self.ops.finish && out != ValueId::UNIT => crate::pages::fin_output(self.v, out, c.page_x.unwrap_or(ValueId::UNIT)),
+            Some(c) if op == self.ops.finish && out != ValueId::UNIT => {
+                crate::pages::fin_output(self.v, out, c.page_x.unwrap_or(ValueId::UNIT))
+            }
             _ => out,
         };
         if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
@@ -5175,7 +5326,10 @@ impl<'c, 'a> Run<'c, 'a> {
     fn audit(&mut self, publication: &[(Field, crate::state::Pub, Locality)]) {
         let mut a = NodeAudit {
             op: self.op_name(),
-            defs: publication.iter().map(|&(f, w, _)| (f, matches!(w, crate::state::Pub::Rel(_)))).collect(),
+            defs: publication
+                .iter()
+                .map(|&(f, w, _)| (f, matches!(w, crate::state::Pub::Rel(_))))
+                .collect(),
             ..NodeAudit::default()
         };
         for l in self.st.used_locs() {
@@ -5207,7 +5361,8 @@ impl<'c, 'a> Run<'c, 'a> {
             // the link after the text are not text and stay: a count that
             // took them left no PDF, and one that stopped at the first
             // sibling of another text operation left the rest to run on)
-            while matches!(self.cx.following(n), Some((op, _)) if op == self.ops.exec || op == self.ops.resume || op == self.ops.put) {
+            while matches!(self.cx.following(n), Some((op, _)) if op == self.ops.exec || op == self.ops.resume || op == self.ops.put)
+            {
                 n += 1;
             }
         }
@@ -5267,7 +5422,10 @@ impl<'c, 'a> Run<'c, 'a> {
             .collect();
         // (a field the load put back as it found it is no read of its
         // predecessor's either: only the net effect is recorded)
-        let restored: Vec<Loc> = self.pubs.as_ref().map_or_else(|| self.st.publication(v, true).1, |p| p.2.clone());
+        let restored: Vec<Loc> = self
+            .pubs
+            .as_ref()
+            .map_or_else(|| self.st.publication(v, true).1, |p| p.2.clone());
         let reads: Vec<String> = self
             .st
             .used_locs()
@@ -5576,7 +5734,6 @@ pub(crate) const SCAN_DEFINING: u8 = 2;
 pub(crate) const SCAN_MATCHING: u8 = 3;
 pub(crate) const SCAN_ABSORBING: u8 = 5;
 impl Run<'_, '_> {
-
     pub(crate) fn file_line_here(&self) -> Option<FileLine> {
         for l in self.input.levels.iter().rev() {
             match l.kind {
@@ -5712,7 +5869,10 @@ pub(crate) fn frame_line(v: &Values, f: ValueId) -> Option<FileLine> {
         FileLine::Piece(
             xs[2],
             match (xs.get(4), xs.get(5)) {
-                (Some(&o), Some(&k)) => Some((u64::from_ne_bytes(int_of(v, o).to_ne_bytes()), u32::try_from(int_of(v, k)).unwrap_or(0))),
+                (Some(&o), Some(&k)) => Some((
+                    u64::from_ne_bytes(int_of(v, o).to_ne_bytes()),
+                    u32::try_from(int_of(v, k)).unwrap_or(0),
+                )),
                 _ => None,
             },
         )

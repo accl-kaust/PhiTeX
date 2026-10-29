@@ -27,7 +27,9 @@ impl NameTable {
     pub(crate) fn new(d: &[u8]) -> Option<NameTable> {
         let length = d.len();
         let count = usize::from(u16_at(d, 2));
-        if !(length > 18 && length > 18usize.wrapping_add(12usize.wrapping_mul(count.wrapping_sub(1)))) {
+        if !(length > 18
+            && length > 18usize.wrapping_add(12usize.wrapping_mul(count.wrapping_sub(1))))
+        {
             return None;
         }
         let offset = usize::from(u16_at(d, 4));
@@ -109,9 +111,14 @@ impl NameTable {
         if off + len > usize::from(self.name_data_len) {
             return None;
         }
-        let units: Vec<u16> = (0..len >> 1).map(|k| u16_at(&self.data, self.name_data + off + 2 * k)).collect();
+        let units: Vec<u16> = (0..len >> 1)
+            .map(|k| u16_at(&self.data, self.name_data + off + 2 * k))
+            .collect();
         // (utf16::validate: the last unit is not a lead surrogate)
-        if units.last().is_some_and(|&u| (0xD800..=0xDBFF).contains(&u)) {
+        if units
+            .last()
+            .is_some_and(|&u| (0xD800..=0xDBFF).contains(&u))
+        {
             return None;
         }
         Some((String::from_utf16_lossy(&units), lang))

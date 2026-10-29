@@ -56,10 +56,7 @@ pub(crate) fn check_table(t: Tag, d: &[u8]) -> bool {
                 && i16_at(d, 52) == 0
                 && matches!(i16_at(d, 50), 0 | 1)
         }
-        POST => {
-            n >= SIZEOF_POST
-                && matches!(u32_at(d, 0), 0x10000 | 0x20000 | 0x30000 | 0x28000)
-        }
+        POST => n >= SIZEOF_POST && matches!(u32_at(d, 0), 0x10000 | 0x20000 | 0x30000 | 0x28000),
         HHEA => n >= SIZEOF_HHEA && u32_at(d, 0) == ONE_FIX && i16_at(d, 32) == 0,
         MAXP => n >= SIZEOF_MAXP && u32_at(d, 0) == ONE_FIX,
         // (a version 0 to 4 table too short for its version passes: the
@@ -89,13 +86,19 @@ pub(crate) fn hor_metrics(gid: u16, hmtx: &[u8], hhea: &[u8]) -> Option<(i32, u3
         if (g + 1) * 4 > hmtx.len() {
             return None;
         }
-        Some((i32::from(i16_at(hmtx, g * 4 + 2)), u32::from(u16_at(hmtx, g * 4))))
+        Some((
+            i32::from(i16_at(hmtx, g * 4 + 2)),
+            u32::from(u16_at(hmtx, g * 4)),
+        ))
     } else {
         let lsb_off = 4 * n_long + 2 * (g - n_long);
         if lsb_off >= hmtx.len().wrapping_sub(2) || n_long == 0 {
             return None;
         }
-        Some((i32::from(i16_at(hmtx, lsb_off)), u32::from(u16_at(hmtx, (n_long - 1) * 4))))
+        Some((
+            i32::from(i16_at(hmtx, lsb_off)),
+            u32::from(u16_at(hmtx, (n_long - 1) * 4)),
+        ))
     }
 }
 
@@ -109,7 +112,9 @@ pub(crate) fn find_cmap_subtable(cmap: &[u8], platform: u16, encoding: i32) -> O
     }
     for i in 0..n {
         let e = 4 + 8 * i;
-        if u16_at(cmap, e) == platform && (encoding == -1 || i32::from(u16_at(cmap, e + 2)) == encoding) {
+        if u16_at(cmap, e) == platform
+            && (encoding == -1 || i32::from(u16_at(cmap, e + 2)) == encoding)
+        {
             let offset = u32_at(cmap, e + 4) as usize;
             if length != 0 {
                 if offset > length.wrapping_sub(2) {
@@ -219,7 +224,11 @@ pub(crate) fn cmap_subtable4_lookup(cmap: &[u8], st: usize, uid: u32, range_key:
             return 0;
         }
         let g = u16_at(cmap, st + 2 * offset);
-        return if g != 0 { g.wrapping_add(id_delta as u16) } else { 0 };
+        return if g != 0 {
+            g.wrapping_add(id_delta as u16)
+        } else {
+            0
+        };
     }
     0
 }
@@ -254,7 +263,11 @@ pub(crate) fn cmap_subtable4_next(cmap: &[u8], st: usize, uid: u32, key: &mut i3
         return prev + 1;
     }
     *key = i + 1;
-    if i + 1 >= n_range { 0xFFFF } else { u32::from(u16_at(cmap, start + 2 * (i + 1) as usize)) }
+    if i + 1 >= n_range {
+        0xFFFF
+    } else {
+        u32::from(u16_at(cmap, start + 2 * (i + 1) as usize))
+    }
 }
 
 /// `CheckCmapSubtable12`.
@@ -272,7 +285,8 @@ pub(crate) fn check_cmap_subtable12(cmap: &[u8], st: Option<usize>) -> bool {
         return false;
     }
     let num_groups = u32_at(cmap, st + 12) as usize;
-    !(num_groups > 0x1000_0000 || length != SIZEOF_CMAP12 + num_groups.wrapping_sub(1).wrapping_mul(12))
+    !(num_groups > 0x1000_0000
+        || length != SIZEOF_CMAP12 + num_groups.wrapping_sub(1).wrapping_mul(12))
 }
 
 /// `CmapSubtable12Lookup`.
@@ -320,7 +334,11 @@ pub(crate) fn cmap_subtable12_next(cmap: &[u8], st: usize, uid: u32, key: &mut i
         return prev.wrapping_add(1);
     }
     *key = i + 1;
-    if i + 1 >= n_range { 0x10FFFF } else { grp(i + 1, 0) }
+    if i + 1 >= n_range {
+        0x10FFFF
+    } else {
+        grp(i + 1, 0)
+    }
 }
 
 /// `LocaLookup`: the glyph's offset in `glyf`, `usize::MAX` for an empty

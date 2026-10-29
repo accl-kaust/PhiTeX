@@ -460,7 +460,10 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         // packages of those beside them: a file that inputs a LaTeX
         // document is one, a second edition's main file setting a switch
         // before its first's; a thesis class may load fontspec)
-        let dir = Path::new(&file).parent().unwrap_or(Path::new("")).to_path_buf();
+        let dir = Path::new(&file)
+            .parent()
+            .unwrap_or(Path::new(""))
+            .to_path_buf();
         let at = |name: &str| dir.join(name).to_string_lossy().into_owned();
         let main = read(&file, true)?;
         let mut texts: Vec<String> = config::braced_inputs(&main)
@@ -478,7 +481,9 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
                 texts.push(String::from_utf8_lossy(&t).into_owned());
             }
         }
-        let latex = texts.iter().any(|t| config::default_engine(t) == "pdflatex");
+        let latex = texts
+            .iter()
+            .any(|t| config::default_engine(t) == "pdflatex");
         let native = texts.iter().find_map(|t| config::native_engine(t));
         match native {
             Some((n, why)) => {

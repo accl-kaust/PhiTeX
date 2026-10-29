@@ -1327,7 +1327,9 @@ fn stall_dump(eng: &Engine, shared: &Shared, t_idle: Instant) {
 /// the node, its operation and place, and how it ended.
 fn run_log() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| crate::obs::enabled() && std::env::var_os("PHITEX_RUN_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
+    *F.get_or_init(|| {
+        crate::obs::enabled() && std::env::var_os("PHITEX_RUN_LOG").is_some_and(|v| !v.is_empty() && v != "0")
+    })
 }
 
 fn wake_log() -> bool {
@@ -1370,7 +1372,10 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
         // woken run's op, the field, the cause's kind, the site's op, the
         // time of the run it refutes)
         let fr = eng.frontier.load(Ordering::Acquire);
-        let fr_pos = fr.checked_sub(1).and_then(|f| eng.placed_node(NodeId::from_raw(f))).map(|f| f.pos_hint().0);
+        let fr_pos = fr
+            .checked_sub(1)
+            .and_then(|f| eng.placed_node(NodeId::from_raw(f)))
+            .map(|f| f.pos_hint().0);
         let marked = field.is_some_and(|f| eng.settle_marked(f));
         eprintln!(
             "wake: node {} op {:?} pos {:?} field {name} {:?}{site_pos} frontier-pos {fr_pos:?} marked {marked}\twake\t{}\t{}\t{name}\t{kind}\t{site_op}\t{}",
@@ -1478,7 +1483,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // was thrown away)
     let resumption = matches!(r, Ok(Ok(_))) && cx.goes_on && {
         let f = match &cx.woke {
-            Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => Some(*field),
+            Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => {
+                Some(*field)
+            }
             _ => None,
         };
         f.is_some() && *node.parked_on.lock() == f

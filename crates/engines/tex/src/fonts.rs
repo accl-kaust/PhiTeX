@@ -509,7 +509,12 @@ impl Fonts for View {
             kind: phitex_typeset::node::NativeKind::Word,
             ..like.clone()
         };
-        Some(crate::native::reshape(nf, &word, &units, self.glyph_metrics))
+        Some(crate::native::reshape(
+            nf,
+            &word,
+            &units,
+            self.glyph_metrics,
+        ))
     }
 
     fn whd_table(&self, font: FontId) -> Option<&[(i32, i32, i32)]> {
@@ -608,7 +613,11 @@ impl Fonts for View {
 
     fn math_family(&self, fam: u8, size: usize) -> Option<Option<FontId>> {
         let k = usize::from(fam).checked_sub(16)?;
-        Some(self.xfams.get(k).and_then(|r| r.get(size).copied().flatten()))
+        Some(
+            self.xfams
+                .get(k)
+                .and_then(|r| r.get(size).copied().flatten()),
+        )
     }
 
     fn math_cur_f(&self) -> Option<FontId> {
@@ -616,8 +625,10 @@ impl Fonts for View {
     }
 
     fn set_math_cur_f(&self, f: Option<FontId>) {
-        self.math_cur_f
-            .store(f.map_or(-1, i64::from), std::sync::atomic::Ordering::Relaxed);
+        self.math_cur_f.store(
+            f.map_or(-1, i64::from),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     fn expansion(&self, font: FontId) -> Option<phitex_typeset::fonts::Expansion> {
@@ -722,7 +733,10 @@ const KEY_SPAN: u32 = 0x5FFF_FFFE;
 /// link's `/F` names, `\pdffontname`).
 pub(crate) fn key_of(name: &str, size: i32, salt: u32) -> u32 {
     let h = phitex_defuse::hash_bytes(
-        phitex_defuse::hash_words(0x666f_6e74_6b65_7900, &[u64::from(size.cast_unsigned()), u64::from(salt)]),
+        phitex_defuse::hash_words(
+            0x666f_6e74_6b65_7900,
+            &[u64::from(size.cast_unsigned()), u64::from(salt)],
+        ),
         name.as_bytes(),
     );
     1 + u32::try_from(h % u64::from(KEY_SPAN)).unwrap_or(0)
@@ -743,7 +757,9 @@ pub(crate) fn pick_key<E>(
         let k = key_of(name, size, salt);
         if other(k)? == Some(true) {
             if crate::exec::obs_flag!("PHITEX_FONT_TRACE") {
-                eprintln!("font-trace: key {k} of {name} at {size}sp is another font's: salted ({salt})");
+                eprintln!(
+                    "font-trace: key {k} of {name} at {size}sp is another font's: salted ({salt})"
+                );
             }
             salt += 1;
             continue;

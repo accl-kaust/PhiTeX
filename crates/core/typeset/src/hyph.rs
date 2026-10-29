@@ -425,7 +425,10 @@ impl Hyphenator for TexHyphenator<'_> {
                 // (XeTeX: a native word with a letter is the word, `ha`
                 // itself; one without, and a glyph, a whatsit passed)
                 Node::Native(w) if w.kind != NativeKind::Glyph => {
-                    if let Some(c) = usvs(&w.text).map(|(c, _)| c).find(|&c| lc_of(self.lc_code, c) != 0) {
+                    if let Some(c) = usvs(&w.text)
+                        .map(|(c, _)| c)
+                        .find(|&c| lc_of(self.lc_code, c) != 0)
+                    {
                         if lc_of(self.lc_code, c) == c || self.uc_hyph > 0 {
                             return self.hyphenate_native(list, s, lang, fonts);
                         }
@@ -719,7 +722,10 @@ fn usvs(text: &[u16]) -> impl Iterator<Item = (u32, usize)> + '_ {
             && (0xDC00..0xE000).contains(&l)
         {
             i += 1;
-            return Some((0x1_0000 + (u - 0xD800) * 0x400 + (u32::from(l) - 0xDC00), at));
+            return Some((
+                0x1_0000 + (u - 0xD800) * 0x400 + (u32::from(l) - 0xDC00),
+                at,
+            ));
         }
         Some((u, at))
     })
@@ -827,7 +833,9 @@ impl TexHyphenator<'_> {
                     hc.push(h);
                 } else {
                     let h = u32::from(h);
-                    hc.push(u16::try_from((h.saturating_sub(0x1_0000)) / 0x400 + 0xD800).unwrap_or(0));
+                    hc.push(
+                        u16::try_from((h.saturating_sub(0x1_0000)) / 0x400 + 0xD800).unwrap_or(0),
+                    );
                     hc.push(u16::try_from(h % 0x400 + 0xDC00).unwrap_or(0));
                     l += 1;
                 }
@@ -851,7 +859,9 @@ impl TexHyphenator<'_> {
             for j in l_hyf..=hn - r_hyf {
                 if hyf[j] & 1 != 0 {
                     out.push(Node::Native(Box::new(shape(&word[passed..j])?)));
-                    let pre = fonts.native_char(w, hyf_char).map(|n| Node::Native(Box::new(n)));
+                    let pre = fonts
+                        .native_char(w, hyf_char)
+                        .map(|n| Node::Native(Box::new(n)));
                     out.push(Node::Disc(Box::new(Disc {
                         pre: pre.into_iter().collect(),
                         post: Vec::new(),

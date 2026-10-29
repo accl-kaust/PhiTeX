@@ -657,7 +657,11 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                 .get_loc(crate::fields::cell::JOBNAME)?
                 .map_or_else(|| "texput".to_owned(), |x| str_of(r.v, x));
             let base = name.rsplit('/').next().unwrap_or(&name);
-            let key = if base.contains('.') { name.clone() } else { format!("{name}.tex") };
+            let key = if base.contains('.') {
+                name.clone()
+            } else {
+                format!("{name}.tex")
+            };
             if name == format!("{job}.log") || r.get(&format!("wopen:{key}"))?.is_some() {
                 creation_date(r)?
             } else {
@@ -978,10 +982,10 @@ pub(crate) fn rt_before(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
         r.cint(crate::fields::cell::PDF_OBJNUM)? - r.rt_cells
     } else {
         let field = r.loc_field(crate::fields::cell::PDF_OBJNUM);
-        match r
-            .cx
-            .read_at(field, phitex_defuse::At::Before(phitex_defuse::NodeId::from_raw(at)))?
-        {
+        match r.cx.read_at(
+            field,
+            phitex_defuse::At::Before(phitex_defuse::NodeId::from_raw(at)),
+        )? {
             phitex_defuse::FieldAt::Def(x, _) => v.as_int(x).unwrap_or(0),
             _ => 0,
         }
@@ -1039,7 +1043,9 @@ fn alloc_rel(r: &mut Run<'_, '_>) -> R<(i64, i64)> {
     let t = {
         let mut m = crate::exec::LockWait::locked(&*r.ops.rel_keys);
         loop {
-            let t = i64::from_ne_bytes((key & (u64::MAX >> 1) & !(REL.cast_unsigned())).to_ne_bytes()) | REL;
+            let t =
+                i64::from_ne_bytes((key & (u64::MAX >> 1) & !(REL.cast_unsigned())).to_ne_bytes())
+                    | REL;
             match m.get(&t) {
                 Some(&o) if o != (me, occ) => key = phitex_defuse::hash_words(key, &[1]),
                 Some(_) => break t,

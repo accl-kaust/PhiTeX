@@ -54,7 +54,9 @@ fn a_global_definition_outside_every_scope_confirms_its_prediction() {
     let e = Engine::new();
     let v = e.values();
     let def = e.register(Arc::new(GlobalDef));
-    let rd = Arc::new(Reader { runs: AtomicU64::new(0) });
+    let rd = Arc::new(Reader {
+        runs: AtomicU64::new(0),
+    });
     let reader = e.register(rd.clone());
     let f = v.field("count:0");
     let u = e.new_unit();

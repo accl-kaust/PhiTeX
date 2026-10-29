@@ -247,16 +247,46 @@ impl Run<'_, '_> {
     #[cold]
     pub(crate) fn overflow_raise(&mut self, what: &str, n: usize) {
         if crate::exec::obs_flag!("PHITEX_OVERFLOW_TRACE") {
-            let a: String = self.cx.args().first().map(|&x| self.v.render(x)).unwrap_or_default().chars().take(300).collect();
-            let lv: Vec<(u8, u32, u32, u32)> = self.input.levels.iter().rev().take(6).map(|l| (l.kind, l.c, l.a, l.b)).collect();
+            let a: String = self
+                .cx
+                .args()
+                .first()
+                .map(|&x| self.v.render(x))
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect();
+            let lv: Vec<(u8, u32, u32, u32)> = self
+                .input
+                .levels
+                .iter()
+                .rev()
+                .take(6)
+                .map(|l| (l.kind, l.c, l.a, l.b))
+                .collect();
             let mut top = Vec::new();
             for (k, c, _, b) in lv {
-                let toks: Vec<Tok> = if k == crate::input::kind::TOKS && c < b { self.input.arena.get(crate::input::Range { start: c, end: b.min(c + 12) }).to_vec() } else { Vec::new() };
+                let toks: Vec<Tok> = if k == crate::input::kind::TOKS && c < b {
+                    self.input
+                        .arena
+                        .get(crate::input::Range {
+                            start: c,
+                            end: b.min(c + 12),
+                        })
+                        .to_vec()
+                } else {
+                    Vec::new()
+                };
                 let mut t = String::new();
                 let _ = self.show_toks_into(&mut t, &toks);
                 top.push(t);
             }
-            eprintln!("overflow: node {} {what}: levels {} arena {} text {a} top {top:?}", self.cx.node().raw(), self.input.levels.len(), self.input.arena.len());
+            eprintln!(
+                "overflow: node {} {what}: levels {} arena {} text {a} top {top:?}",
+                self.cx.node().raw(),
+                self.input.levels.len(),
+                self.input.arena.len()
+            );
         }
         if let Err(h) = self.fatal::<()>(&format!("TeX capacity exceeded, sorry [{what}={n}]")) {
             self.raise(h);
@@ -368,17 +398,27 @@ impl Run<'_, '_> {
         ];
         static CLIST: std::sync::OnceLock<Tok> = std::sync::OnceLock::new();
         if name != *CLIST.get_or_init(|| Tok::cs("MT@in@clist"))
-            || !m.body.iter().filter_map(|t| t.as_cs().map(crate::val::CsId::name)).eq(BODY)
+            || !m
+                .body
+                .iter()
+                .filter_map(|t| t.as_cs().map(crate::val::CsId::name))
+                .eq(BODY)
         {
             return false;
         }
-        let (Some(item), Some(list)) = (self.input.arena.scratch_arg(base, 0), self.input.arena.scratch_arg(base, 1)) else {
+        let (Some(item), Some(list)) = (
+            self.input.arena.scratch_arg(base, 0),
+            self.input.arena.scratch_arg(base, 1),
+        ) else {
             return false;
         };
         let (item, list) = (item.to_vec(), list.to_vec());
         let plain = |t: &Tok| match t.as_cs() {
             Some(c) => !matches!(c.name(), "@empty" | "@nnil"),
-            None => !matches!(t.cat(), Some(1 | 2)) && (t.cat() != Some(12) || t.chr() != u32::from(b',')),
+            None => {
+                !matches!(t.cat(), Some(1 | 2))
+                    && (t.cat() != Some(12) || t.chr() != u32::from(b','))
+            }
         };
         if item.is_empty() || !item.iter().all(plain) || list.len() != 1 || !list[0].is_cs() {
             return false;
@@ -416,8 +456,16 @@ impl Run<'_, '_> {
                 _ => {}
             }
         }
-        let want = if has { "MT@inlist@true" } else { "MT@inlist@false" };
-        let (Some(close), Some(&sw)) = (close, toks.iter().find(|t| t.as_cs().is_some_and(|c| c.name() == want))) else {
+        let want = if has {
+            "MT@inlist@true"
+        } else {
+            "MT@inlist@false"
+        };
+        let (Some(close), Some(&sw)) = (
+            close,
+            toks.iter()
+                .find(|t| t.as_cs().is_some_and(|c| c.name() == want)),
+        ) else {
             return false;
         };
         toks.truncate(close + 1);
@@ -498,7 +546,10 @@ impl Run<'_, '_> {
                                 None => format!("chr {:#x} cat {}", t.chr(), t.raw() >> 21),
                             };
                             let want: Vec<String> = p.iter().take(8).map(show).collect();
-                            eprintln!("match-trace: {msg}: got {} at {r}, params {want:?}", show(&tok));
+                            eprintln!(
+                                "match-trace: {msg}: got {} at {r}, params {want:?}",
+                                show(&tok)
+                            );
                         }
                         self.lift(|r| r.log("error", &msg));
                         return false;
@@ -785,7 +836,12 @@ impl Run<'_, '_> {
         }
         // (bodies holding deferred reads' symbols: equal where TeX's
         // digits are, docs/spec-deferred-reads.md §2)
-        let syms = |m: &Macro| m.params.iter().chain(m.body.iter()).any(|&t| crate::defer::is_sym(t));
+        let syms = |m: &Macro| {
+            m.params
+                .iter()
+                .chain(m.body.iter())
+                .any(|&t| crate::defer::is_sym(t))
+        };
         if !syms(&a) && !syms(&b) {
             return Ok(false);
         }
@@ -835,7 +891,11 @@ impl Run<'_, '_> {
         // `\else` or `\or` there is extra; that is known where the run
         // read the conditionals the nodes before it left, a document's
         // node, [`Run::load_cond_stack`]; another takes them as open)
-        let outside = if self.cond_loaded { NORMAL_LIMIT } else { OUTSIDE_LIMIT };
+        let outside = if self.cond_loaded {
+            NORMAL_LIMIT
+        } else {
+            OUTSIDE_LIMIT
+        };
         let limit = self.conds.last().copied().unwrap_or(outside);
         if self.cur.chr > i32::from(limit) {
             if limit == IF_CODE {

@@ -65,10 +65,21 @@ fn a_placement_whose_output_is_the_guess_reasks_nobody() {
         let n = e.push(u, op, vec![v.int(10), v.int(20), v.int(10)]);
         let r = e.evaluate(threads).unwrap();
         assert_eq!(e.output(n).and_then(|x| v.as_int(x)), Some(30), "-j{threads}: {r:?}");
-        assert_eq!(p.runs.load(Ordering::Relaxed), 2, "-j{threads}: the first run on the guesses, one more woken by the leaf that gave 20: {r:?}");
-        assert!(r.commit_by_op.iter().any(|c| c.0 == "placer" && c.2 == 4), "two commits of two placed reads each: {:?}", r.commit_by_op);
+        assert_eq!(
+            p.runs.load(Ordering::Relaxed),
+            2,
+            "-j{threads}: the first run on the guesses, one more woken by the leaf that gave 20: {r:?}"
+        );
+        assert!(
+            r.commit_by_op.iter().any(|c| c.0 == "placer" && c.2 == 4),
+            "two commits of two placed reads each: {:?}",
+            r.commit_by_op
+        );
         let cause = p.cause.lock().unwrap().clone();
-        assert!(matches!(cause, Some(Cause::Output { .. })), "-j{threads}: woken by the second leaf's output: {cause:?}");
+        assert!(
+            matches!(cause, Some(Cause::Output { .. })),
+            "-j{threads}: woken by the second leaf's output: {cause:?}"
+        );
         assert!(e.check_invariants().is_empty());
     }
 }
@@ -127,7 +138,9 @@ fn placements_after_a_placement_stand_in_order() {
     let e = Engine::new();
     let v = e.values();
     let leaf = e.register(Arc::new(Leaf));
-    let c = Arc::new(Chain { leaf: std::sync::OnceLock::new() });
+    let c = Arc::new(Chain {
+        leaf: std::sync::OnceLock::new(),
+    });
     c.leaf.set(leaf).unwrap();
     let op = e.register(c);
     let u = e.new_unit();
@@ -135,13 +148,30 @@ fn placements_after_a_placement_stand_in_order() {
     let b = e.push(u, leaf, vec![v.int(-2)]);
     let ch = e.push(u, op, vec![v.int(i64::try_from(a.raw()).unwrap()), v.int(3), v.int(1)]);
     let r = e.evaluate(2).unwrap();
-    assert!(r.placed_by_op.contains(&("leaf", 3)), "three placements made: {:?}", r.placed_by_op);
-    let outs = |e: &Engine| -> Vec<i64> { e.order(u).into_iter().filter_map(|n| e.output(n).and_then(|x| v.as_int(x))).collect() };
-    assert_eq!(outs(&e), vec![-1, 100, 101, 102, -2], "after the anchor, in the placer's order");
+    assert!(
+        r.placed_by_op.contains(&("leaf", 3)),
+        "three placements made: {:?}",
+        r.placed_by_op
+    );
+    let outs = |e: &Engine| -> Vec<i64> {
+        e.order(u)
+            .into_iter()
+            .filter_map(|n| e.output(n).and_then(|x| v.as_int(x)))
+            .collect()
+    };
+    assert_eq!(
+        outs(&e),
+        vec![-1, 100, 101, 102, -2],
+        "after the anchor, in the placer's order"
+    );
     // (the middle one made anew: the others kept, the order the same)
     e.replace(ch, op, vec![v.int(i64::try_from(a.raw()).unwrap()), v.int(4), v.int(1)]);
     let r = e.evaluate(2).unwrap();
-    assert!(r.placed_by_op.contains(&("leaf", 1)), "one placement made, three kept: {:?}", r.placed_by_op);
+    assert!(
+        r.placed_by_op.contains(&("leaf", 1)),
+        "one placement made, three kept: {:?}",
+        r.placed_by_op
+    );
     assert_eq!(outs(&e), vec![-1, 100, 101, 102, 103, -2]);
     let _ = b;
     assert!(e.check_invariants().is_empty());

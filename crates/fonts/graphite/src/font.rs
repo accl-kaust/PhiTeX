@@ -27,15 +27,25 @@ impl Font {
     /// `gr_make_font_with_advance_fn`: `advance(gid)` the hinted advance
     /// of each glyph.
     #[must_use]
-    pub fn with_advances(ppm: f32, face: &Face, advance: Option<&dyn Fn(u16) -> f32>) -> Option<Font> {
+    pub fn with_advances(
+        ppm: f32,
+        face: &Face,
+        advance: Option<&dyn Fn(u16) -> f32>,
+    ) -> Option<Font> {
         if ppm <= 0.0 {
             return None;
         }
         let scale = ppm / f32::from(face.glyphs.units_per_em());
         let n = face.glyphs.num_glyphs();
         let hinted = advance.map(|f| (0..n).map(f).collect());
-        let unhinted = (0..n).map(|g| face.glyphs.glyph(g).advance.x * scale).collect();
-        Some(Font { scale, hinted, unhinted })
+        let unhinted = (0..n)
+            .map(|g| face.glyphs.glyph(g).advance.x * scale)
+            .collect();
+        Some(Font {
+            scale,
+            hinted,
+            unhinted,
+        })
     }
 
     pub(crate) fn is_hinted(&self) -> bool {

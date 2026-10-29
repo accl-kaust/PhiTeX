@@ -100,7 +100,10 @@ pub(crate) fn unit(v: &Values, piece: i64, ints: &[i64], marks: Vec<ValueId>) ->
 
 /// A unit's marks ([`unit`]).
 pub(crate) fn unit_marks(v: &Values, x: ValueId) -> Vec<ValueId> {
-    list_of(v, x).get(2).map(|&m| list_of(v, m)).unwrap_or_default()
+    list_of(v, x)
+        .get(2)
+        .map(|&m| list_of(v, m))
+        .unwrap_or_default()
 }
 
 /// A unit's piece and profile.
@@ -131,23 +134,32 @@ type DecodedShard = std::sync::Mutex<phitex_defuse::FxHashMap<(u64, u64), std::s
 /// At a collection ([`crate::collect`]): the decoded profiles dropped.
 pub(crate) fn clear_decoded() {
     for sh in decoded_shards() {
-        sh.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        sh.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 }
 
 fn decoded_shards() -> &'static [DecodedShard] {
     static S: std::sync::OnceLock<Vec<DecodedShard>> = std::sync::OnceLock::new();
-    S.get_or_init(|| (0..DECODED_SHARDS).map(|_| std::sync::Mutex::default()).collect())
+    S.get_or_init(|| {
+        (0..DECODED_SHARDS)
+            .map(|_| std::sync::Mutex::default())
+            .collect()
+    })
 }
 
 /// Unit `x` decoded once per value, shared by every step that folds it.
 pub(crate) fn decoded(v: &Values, x: ValueId) -> std::sync::Arc<Decoded> {
     fn any(xs: &[PItem], f: &dyn Fn(&PItem) -> bool) -> bool {
-        xs.iter().any(|x| f(x) || matches!(x, PItem::End(ys) if any(ys, f)))
+        xs.iter()
+            .any(|x| f(x) || matches!(x, PItem::End(ys) if any(ys, f)))
     }
     use crate::exec::LockWait as _;
     let key = (v.epoch(), x.raw());
-    let sh = &decoded_shards()[usize::try_from(phitex_defuse::hash_words(key.0, &[key.1]) >> 58).unwrap_or(0) % DECODED_SHARDS];
+    let sh = &decoded_shards()[usize::try_from(phitex_defuse::hash_words(key.0, &[key.1]) >> 58)
+        .unwrap_or(0)
+        % DECODED_SHARDS];
     if let Some(d) = sh.locked().get(&key) {
         return d.clone();
     }
@@ -156,7 +168,9 @@ pub(crate) fn decoded(v: &Values, x: ValueId) -> std::sync::Arc<Decoded> {
     let d = std::sync::Arc::new(Decoded {
         pid,
         marks: any(&items, &|x| matches!(x, PItem::Node(Node::Mark(_)))),
-        unresolved: any(&items, &|x| matches!(x, PItem::Params(None) | PItem::InsParams(_, None))),
+        unresolved: any(&items, &|x| {
+            matches!(x, PItem::Params(None) | PItem::InsParams(_, None))
+        }),
         items: std::sync::Arc::new(items),
     });
     let mut g = sh.locked();
@@ -188,11 +202,17 @@ fn push_item(
         }
         nodes::T_VBOX => {
             let ys: [ValueId; 5] = v
-                .with_list(x, |xs| std::array::from_fn(|k| xs.get(k).copied().unwrap_or(ValueId::UNIT)))
+                .with_list(x, |xs| {
+                    std::array::from_fn(|k| xs.get(k).copied().unwrap_or(ValueId::UNIT))
+                })
                 .unwrap_or([ValueId::UNIT; 5]);
             let b = ys[1];
             if ilp.is_none() || *ilp_ids != [ys[2], ys[3], ys[4]] {
-                let p = (glue_of(v, Some(ys[2])), glue_of(v, Some(ys[3])), i32_at(v, x, 4));
+                let p = (
+                    glue_of(v, Some(ys[2])),
+                    glue_of(v, Some(ys[3])),
+                    i32_at(v, x, 4),
+                );
                 *ilp_ids = [ys[2], ys[3], ys[4]];
                 if *ilp != Some(p) {
                     out.push(P_ILP);
@@ -659,7 +679,9 @@ impl ScanState {
                 // page's, docs/spec-settle.md §2.1)
                 match p {
                     Some(q) => page_params = Some(*q),
-                    None if page_params.is_none() && self.params.is_none() => page_params = Some(rd.params()),
+                    None if page_params.is_none() && self.params.is_none() => {
+                        page_params = Some(rd.params())
+                    }
                     None => {}
                 }
                 false

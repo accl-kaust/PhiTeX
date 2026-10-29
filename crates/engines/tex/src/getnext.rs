@@ -481,7 +481,10 @@ impl Run<'_, '_> {
                 }
                 continue;
             }
-            if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND && self.cur.cmd != cmd::SYM {
+            if self.cur.cmd >= cmd::END_TEMPLATE
+                && self.cur.cmd != cmd::DONT_EXPAND
+                && self.cur.cmd != cmd::SYM
+            {
                 return;
             }
             let nr = std::mem::replace(&mut self.num_reads, false);
@@ -516,7 +519,10 @@ impl Run<'_, '_> {
                 }
                 continue;
             }
-            if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND && self.cur.cmd != cmd::SYM {
+            if self.cur.cmd >= cmd::END_TEMPLATE
+                && self.cur.cmd != cmd::DONT_EXPAND
+                && self.cur.cmd != cmd::SYM
+            {
                 return Ok(());
             }
             let nr = std::mem::replace(&mut self.num_reads, false);
@@ -738,12 +744,19 @@ impl Run<'_, '_> {
                         self.pulled,
                         self.conds,
                         self.in_skip,
-                        args.first().map(|&x| self.v.render(x)).unwrap_or_default().chars().take(80).collect::<String>()
+                        args.first()
+                            .map(|&x| self.v.render(x))
+                            .unwrap_or_default()
+                            .chars()
+                            .take(80)
+                            .collect::<String>()
                     );
                 }
                 self.muts += 1;
                 self.pulled += 1;
-                self.ops.siblings_pulled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.ops
+                    .siblings_pulled
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.input.append_text(segs);
                 Ok(true)
             }
@@ -1244,7 +1257,9 @@ impl Run<'_, '_> {
                     _ => return Ok(false),
                 }
             }
-            let Some(_) = end.filter(|_| !cut) else { continue };
+            let Some(_) = end.filter(|_| !cut) else {
+                continue;
+            };
             let e = self.endlinechar()?;
             let Ok(e) = u32::try_from(e) else { continue };
             if e > 255 {
@@ -1325,7 +1340,8 @@ impl Run<'_, '_> {
         // ends itself early or reads its own line numbers is read inline)
         let name = crate::val::str_of(self.v, f.name);
         !crate::inputs::distribution_file(&name)
-            && phitex_source::pass::FileKind::from_path(&name) == phitex_source::pass::FileKind::Document
+            && phitex_source::pass::FileKind::from_path(&name)
+                == phitex_source::pass::FileKind::Document
             && crate::hints::document_text_of(self.v, f.id)
     }
 
@@ -1941,7 +1957,6 @@ impl Run<'_, '_> {
         m.no_pull = self.no_pull;
         self.mark = m;
     }
-
 }
 
 /// The command in progress (`Run::begin_command`): the input levels as

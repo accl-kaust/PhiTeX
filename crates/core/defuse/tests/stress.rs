@@ -96,7 +96,11 @@ fn one_node_placing_ten_thousand_children_fits() {
         let g = e.push(u, get, vec![v.field("c9999").0]);
         let t = Instant::now();
         e.evaluate(n).unwrap();
-        assert!(t.elapsed() < Duration::from_secs(10), "{:?} at {n} threads", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "{:?} at {n} threads",
+            t.elapsed()
+        );
         assert_eq!(e.children(fl).len(), 10000);
         assert_eq!(int(&e, g), 9999);
         let order = e.order(u);
@@ -125,7 +129,10 @@ fn a_read_of_an_unchanged_field_is_cheap() {
     e.evaluate(1).unwrap();
     let per = t.elapsed() / 2_000_000;
     assert_eq!(int(&e, r), 1);
-    assert!(per < Duration::from_nanos(150), "a read of an unchanged field costs {per:?}; a hundred nanoseconds is the bar");
+    assert!(
+        per < Duration::from_nanos(150),
+        "a read of an unchanged field costs {per:?}; a hundred nanoseconds is the bar"
+    );
 }
 
 /// `[n]`: places the chain's next step `[n - 1]` after itself while `n >
@@ -239,11 +246,18 @@ fn long_chains_among_many_pushed_pieces_fit() {
         let x = v.field("x");
         let ids = e.push_many(u, def, (0..4000).map(|i| vec![x.0, v.int(i)]).collect(), 4);
         let n = 10_000;
-        let heads: Vec<NodeId> = [100, 101, 1999, 3998].iter().map(|&i| e.insert_after(ids[i], chain, vec![v.int(n)])).collect();
+        let heads: Vec<NodeId> = [100, 101, 1999, 3998]
+            .iter()
+            .map(|&i| e.insert_after(ids[i], chain, vec![v.int(n)]))
+            .collect();
         let total = e.push(u, fold, vec![s.0]);
         let t = Instant::now();
         e.evaluate(threads).unwrap();
-        assert!(t.elapsed() < Duration::from_secs(30), "{:?} at {threads} threads", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "{:?} at {threads} threads",
+            t.elapsed()
+        );
         let order = e.order(u);
         for (&h, &i) in heads.iter().zip(&[100usize, 101, 1999, 3998]) {
             let at = order.iter().position(|&x| x == h).unwrap();

@@ -42,7 +42,14 @@ fn mask_over_val(mut v: u32) -> u32 {
 }
 
 impl FeatureRef {
-    fn new(bits_offset: &mut u16, max_val: u32, id: u32, name_id: u16, flags: u16, settings: Vec<(i16, u16)>) -> Self {
+    fn new(
+        bits_offset: &mut u16,
+        max_val: u32,
+        id: u32,
+        name_id: u16,
+        flags: u16,
+        settings: Vec<(i16, u16)>,
+    ) -> Self {
         let mut mask = mask_over_val(max_val);
         let need_bits = mask.count_ones() as u16;
         let index = bits_offset.wrapping_add(need_bits) / 32;
@@ -52,7 +59,16 @@ impl FeatureRef {
         let bits = (*bits_offset % 32) as u8;
         *bits_offset = bits_offset.wrapping_add(need_bits);
         mask <<= bits;
-        FeatureRef { settings, mask, max: max_val, id, name_id, flags, bits, index: index as u8 }
+        FeatureRef {
+            settings,
+            mask,
+            max: max_val,
+            id,
+            name_id,
+            flags,
+            bits,
+            index: index as u8,
+        }
     }
 
     /// `applyValToFeature`.
@@ -167,9 +183,13 @@ impl SillMap {
                 (Vec::new(), 0xffff_ffff, 0)
             };
             defs.push(def);
-            self.feats.push(FeatureRef::new(&mut bits, max_val, label, ui_name, flags, settings));
+            self.feats.push(FeatureRef::new(
+                &mut bits, max_val, label, ui_name, flags, settings,
+            ));
         }
-        self.default = Features { vals: alloc::vec![0; usize::from(bits / 32) + 1] };
+        self.default = Features {
+            vals: alloc::vec![0; usize::from(bits / 32) + 1],
+        };
         for (f, &def) in self.feats.iter().zip(&defs) {
             f.apply(u32::from(def), &mut self.default);
         }
@@ -218,7 +238,10 @@ impl SillMap {
 
     /// `findFeatureRef(name)`.
     pub(crate) fn find(&self, id: u32) -> Option<&FeatureRef> {
-        self.named.iter().map(|&i| &self.feats[i]).find(|f| f.id == id)
+        self.named
+            .iter()
+            .map(|&i| &self.feats[i])
+            .find(|f| f.id == id)
     }
 
     /// `cloneFeatures(langname)`.

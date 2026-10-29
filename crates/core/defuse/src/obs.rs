@@ -121,7 +121,11 @@ pub fn flush_pred_misses(v: &crate::Values) {
     let total: u64 = m.iter().map(|e| e.2).sum();
     eprintln!("pred-misses: {total} refuted predictions by field");
     for (f, same, n) in m.iter().take(40) {
-        eprintln!("pred-miss: {n} {} {}", v.render(f.0), if *same { "depth" } else { "value" });
+        eprintln!(
+            "pred-miss: {n} {} {}",
+            v.render(f.0),
+            if *same { "depth" } else { "value" }
+        );
     }
 }
 
@@ -179,7 +183,10 @@ impl Laps {
         #[cfg(feature = "profile")]
         {
             let now = std::time::Instant::now();
-            self.parts.push((name, u64::try_from(now.duration_since(self.t).as_nanos()).unwrap_or(u64::MAX)));
+            self.parts.push((
+                name,
+                u64::try_from(now.duration_since(self.t).as_nanos()).unwrap_or(u64::MAX),
+            ));
             self.t = now;
         }
     }
@@ -188,8 +195,16 @@ impl Laps {
     pub(crate) fn report(&self, node: u64, ns: u64, defs: usize, reads: usize) {
         #[cfg(feature = "profile")]
         if ns > 1_000_000 {
-            let parts: Vec<String> = self.parts.iter().map(|(n, t)| format!("{n} {:.3}", *t as f64 / 1e6)).collect();
-            eprintln!("commit-laps: node {node} {:.3} ms ({defs} defs, {reads} reads): {}", ns as f64 / 1e6, parts.join(", "));
+            let parts: Vec<String> = self
+                .parts
+                .iter()
+                .map(|(n, t)| format!("{n} {:.3}", *t as f64 / 1e6))
+                .collect();
+            eprintln!(
+                "commit-laps: node {node} {:.3} ms ({defs} defs, {reads} reads): {}",
+                ns as f64 / 1e6,
+                parts.join(", ")
+            );
         }
     }
 }
@@ -207,7 +222,6 @@ pub(crate) fn long_hold(what: &str, n: usize, t: std::time::Instant) {
     }
 }
 
-
 /// (`PHITEX_LINE_DUMP=<n>`, profile, with `PHITEX_WAKE_LOG`) Every `n`
 /// wakes, the line: each live node in position order with its position,
 /// id, operation, state, arguments, and its definitions of the fields
@@ -217,7 +231,10 @@ pub(crate) fn maybe_dump_line(eng: &crate::engine::Engine) {
     static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     static COUNT: AtomicU64 = AtomicU64::new(0);
     let every = *EVERY.get_or_init(|| {
-        std::env::var("PHITEX_LINE_DUMP").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+        std::env::var("PHITEX_LINE_DUMP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
     });
     if every == 0 {
         return;

@@ -210,7 +210,9 @@ fn rec_of(v: &Values, x: ValueId, tags: &[ValueId; 3]) -> Rec {
         return Rec::Page(k);
     }
     v.with_list(x, |xs| match *xs {
-        [k, _, s] | [k, _, s, _] if k == tags[0] => Rec::Cmd(u64::from_ne_bytes(int_of(v, s).to_ne_bytes())),
+        [k, _, s] | [k, _, s, _] if k == tags[0] => {
+            Rec::Cmd(u64::from_ne_bytes(int_of(v, s).to_ne_bytes()))
+        }
         [k, p, c] if k == tags[1] => Rec::Cand(int_of(v, p), int_of(v, c)),
         [k, _, _, f] if k == tags[2] => Rec::FontLoad(int_of(v, f)),
         _ => Rec::Other,
@@ -223,7 +225,9 @@ fn rec_of(v: &Values, x: ValueId, tags: &[ValueId; 3]) -> Rec {
 pub(crate) fn recs(v: &Values, xs: &[ValueId]) -> Vec<Rec> {
     type Memo = (u64, FxHashMap<ValueId, Rec>);
     static M: OnceLock<Mutex<Memo>> = OnceLock::new();
-    let mut g = M.get_or_init(|| Mutex::new((0, FxHashMap::default()))).locked();
+    let mut g = M
+        .get_or_init(|| Mutex::new((0, FxHashMap::default())))
+        .locked();
     if g.0 != v.epoch() {
         g.1.clear();
         g.0 = v.epoch();
@@ -339,10 +343,14 @@ pub(crate) fn note_read_time(r: &mut Run<'_, '_>, n: i64) {
     let (f, cmd) = (v.field(XPAGES), v.str("cmd"));
     let s = v.int(i64::from_ne_bytes(serial.to_ne_bytes()));
     let at = r.contribs.iter().rposition(|&(g, x)| {
-        g == f && v.with_list(x, |xs| matches!(*xs, [k, _, t] if k == cmd && t == s)).unwrap_or(false)
+        g == f
+            && v.with_list(x, |xs| matches!(*xs, [k, _, t] if k == cmd && t == s))
+                .unwrap_or(false)
     });
     if let Some(i) = at {
-        let key = v.with_list(r.contribs[i].1, |xs| xs[1]).unwrap_or(ValueId::UNIT);
+        let key = v
+            .with_list(r.contribs[i].1, |xs| xs[1])
+            .unwrap_or(ValueId::UNIT);
         r.contribs[i].1 = v.list(vec![cmd, key, s, v.int(n)]);
     }
 }
@@ -424,7 +432,11 @@ type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
 struct PageBox {
     bx: BoxNode,
     filled: Option<Lines>,
-    saved: Vec<(usize, phitex_typeset::glue::GlueSet, phitex_typeset::node::List)>,
+    saved: Vec<(
+        usize,
+        phitex_typeset::glue::GlueSet,
+        phitex_typeset::node::List,
+    )>,
 }
 
 impl PageBox {
@@ -462,7 +474,10 @@ type Lines = Arc<[(i64, ValueId)]>;
 /// [`Lines`] of page `pc` (`units`, by piece); `None` where one is not
 /// found.
 fn lines_key(pc: &PagePiece, units: &FxHashMap<i64, ValueId>) -> Option<Lines> {
-    pc.pieces.iter().map(|&p| Some((p, *units.get(&p)?))).collect()
+    pc.pieces
+        .iter()
+        .map(|&p| Some((p, *units.get(&p)?)))
+        .collect()
 }
 
 /// A page's identity in the link (`Linked::shown`): its record `x` in
@@ -470,7 +485,12 @@ fn lines_key(pc: &PagePiece, units: &FxHashMap<i64, ValueId>) -> Option<Lines> {
 /// kept by, `crate::origins`).
 pub(crate) fn shown_id(x: u64, h: Option<&Lines>) -> u64 {
     match h {
-        Some(h) => phitex_defuse::hash_words(x, &h.iter().flat_map(|&(p, u)| [p.cast_unsigned(), u.raw()]).collect::<Vec<u64>>()),
+        Some(h) => phitex_defuse::hash_words(
+            x,
+            &h.iter()
+                .flat_map(|&(p, u)| [p.cast_unsigned(), u.raw()])
+                .collect::<Vec<u64>>(),
+        ),
         None => x,
     }
 }
@@ -496,7 +516,15 @@ fn with_page_box<T>(
     // decoded again, `crate::nodes::take_made`)
     let take = crate::nodes::TAKE_MADE.with(|c| c.replace(true));
     let mut saved = Vec::new();
-    let ok = crate::nodes::fill_sealed(v, &mut g.bx.list, &pc.lazy, &pc.bases, line, &mut 0, &mut saved);
+    let ok = crate::nodes::fill_sealed(
+        v,
+        &mut g.bx.list,
+        &pc.lazy,
+        &pc.bases,
+        line,
+        &mut 0,
+        &mut saved,
+    );
     crate::nodes::TAKE_MADE.with(|c| c.set(take));
     g.saved = saved;
     if !ok {
@@ -539,8 +567,7 @@ fn record_of(
         made
     };
     m.get_or_init(|| {
-        with_page_box(v, pc, h, line, tapped)
-            .unwrap_or_else(|| tapped(&pc.bx.locked().bx))
+        with_page_box(v, pc, h, line, tapped).unwrap_or_else(|| tapped(&pc.bx.locked().bx))
     });
     // (its record made before without them: written again for them)
     if let Some(id) = glyphs
@@ -583,7 +610,10 @@ pub(crate) fn doc_op(r: &mut Run<'_, '_>, kind: &str, args: &[ValueId]) -> R<boo
             r.cx.node().raw(),
             r.cx.op(),
             r.cx.is_speculative(),
-            args.iter().map(|&a| v.render(a).chars().take(300).collect::<String>()).collect::<Vec<_>>().join(" | ")
+            args.iter()
+                .map(|&a| v.render(a).chars().take(300).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(" | ")
         );
     }
     // (the writer's parameters where it runs: one that writes now, an
@@ -1036,7 +1066,10 @@ fn base_fold(v: &Values, b: &BaseIn, params: &[ValueId], wparams: WParams) -> Fo
     for s in b.stacks.map(|x| list_of(v, x)).unwrap_or_default() {
         let xs = list_of(v, s);
         let num = |k: usize| xs.get(k).map_or(0, |&x| int_of(v, x));
-        let text = xs.get(2).map(|&t| bytes_of(&str_of(v, t))).unwrap_or_default();
+        let text = xs
+            .get(2)
+            .map(|&t| bytes_of(&str_of(v, t)))
+            .unwrap_or_default();
         let _ = st.colorstack_init(num(0) != 0, num(1) == 2, &text);
     }
     if !b.first {
@@ -1306,7 +1339,10 @@ impl Fonts {
                 })
             })
             && self.files.len() == o.files.len()
-            && self.files.iter().all(|(n, b)| blob(Some(b), o.files.get(n)))
+            && self
+                .files
+                .iter()
+                .all(|(n, b)| blob(Some(b), o.files.get(n)))
     }
 }
 
@@ -1759,7 +1795,10 @@ fn map_line_files(r: &mut Run<'_, '_>, out: &mut Fonts) -> R<()> {
             out.vfs.len(),
             maps_cell
                 .iter()
-                .map(|&e| list_of(v, e).iter().map(|&y| v.render(y).chars().take(40).collect::<String>()).collect::<Vec<_>>())
+                .map(|&e| list_of(v, e)
+                    .iter()
+                    .map(|&y| v.render(y).chars().take(40).collect::<String>())
+                    .collect::<Vec<_>>())
                 .collect::<Vec<_>>()
         );
     }
@@ -1956,7 +1995,11 @@ pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn F
     m.retain(|k, pc| pc.inst != inst || live.contains(k));
     for pc in m.values().filter(|pc| pc.inst == inst) {
         pc.params.iter().chain(&pc.lazy).for_each(|&x| keep(x));
-        pc.base_in.g2u.into_iter().chain(pc.base_in.stacks).for_each(&mut *keep);
+        pc.base_in
+            .g2u
+            .into_iter()
+            .chain(pc.base_in.stacks)
+            .for_each(&mut *keep);
     }
     let mut rs = records().locked();
     rs.retain(|(k, _), _| m.contains_key(k));
@@ -2011,7 +2054,6 @@ pub(crate) fn prune_cmds(v: &Values, line: &[ValueId], cmds: &CmdMemo) {
         m.retain(|s, _| keep.contains(s));
     }
 }
-
 
 fn param(v: &Values, xs: &[ValueId], k: usize) -> i32 {
     xs.get(k)
@@ -2394,7 +2436,10 @@ fn ship_apart(
     if let Some((after, to, at)) = &pc.places {
         words.push(after.map_or(u64::MAX, i64::cast_unsigned));
         words.push(to.cast_unsigned());
-        words.extend(at.iter().flat_map(|&(p, i)| [p.cast_unsigned(), u64::from(i)]));
+        words.extend(
+            at.iter()
+                .flat_map(|&(p, i)| [p.cast_unsigned(), u64::from(i)]),
+        );
     }
     words.extend(pc.wparams.iter().map(|&m| u64::from(m.cast_unsigned())));
     let key = phitex_defuse::hash_words(0x7067_7069_6563_6531, &words).max(1);
@@ -2443,7 +2488,12 @@ fn keep_piece(pc: PagePiece, mut key: u64) -> u64 {
 /// [`Linked::errors`]).
 /// With `tap`, also the page's glyphs as its writer shows them
 /// (`crate::origins::Recorder`).
-fn write_page_with(v: &Values, pc: &PagePiece, bx: &BoxNode, tap: bool) -> (Made, Option<crate::origins::PageGlyphs>) {
+fn write_page_with(
+    v: &Values,
+    pc: &PagePiece,
+    bx: &BoxNode,
+    tap: bool,
+) -> (Made, Option<crate::origins::PageGlyphs>) {
     let Fold { mut st, forms } = base_fold(v, &pc.base_in, &pc.params, pc.wparams);
     let out = tap.then(|| {
         let (r, out) = crate::origins::Recorder::new();
@@ -2504,7 +2554,12 @@ impl phitex_defuse::Operation for PdfPage {
     fn final_only(&self) -> bool {
         true
     }
-    fn contributes(&self, _: &[ValueId], v: &phitex_defuse::Values, f: phitex_defuse::Field) -> bool {
+    fn contributes(
+        &self,
+        _: &[ValueId],
+        v: &phitex_defuse::Values,
+        f: phitex_defuse::Field,
+    ) -> bool {
         !crate::pages::from_pieces(v, f)
     }
     fn run(&self, cx: &mut phitex_defuse::Ctx<'_>) -> Result<ValueId, phitex_defuse::Stop> {
@@ -2520,7 +2575,9 @@ impl phitex_defuse::Operation for PdfPage {
         };
         // (its own key only: a shipout of the same run elsewhere in the
         // list changing leaves it standing)
-        let p = cx.path(&[phitex_defuse::Step::Index(u32::try_from(i).unwrap_or(u32::MAX))]);
+        let p = cx.path(&[phitex_defuse::Step::Index(
+            u32::try_from(i).unwrap_or(u32::MAX),
+        )]);
         let Some((kx, k)) = cx
             .read_path(v.field(PAGE_KEYS), p)?
             .and_then(|x| Some((x, v.as_int(x)?)))
@@ -2572,7 +2629,9 @@ fn sealed_units(
     let node = crate::pages::node_of;
     let w = cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(*to))?;
     for &(p, i) in at.iter().filter(|x| want.binary_search(&x.0).is_ok()) {
-        let Some(u) = cx.at(w, Step::Index(i)) else { continue };
+        let Some(u) = cx.at(w, Step::Index(i)) else {
+            continue;
+        };
         if cx.get(u, Step::Index(0)).and_then(|x| v.as_int(x)) != Some(p) {
             continue;
         }
@@ -2585,9 +2644,15 @@ fn sealed_units(
 
 /// Sealed line `s`'s box as its piece made it, from `units` (its
 /// piece's items, by piece).
-fn line_of(v: &Values, units: &FxHashMap<i64, ValueId>, s: &crate::nodes::Sealed) -> Option<ValueId> {
+fn line_of(
+    v: &Values,
+    units: &FxHashMap<i64, ValueId>,
+    s: &crate::nodes::Sealed,
+) -> Option<ValueId> {
     let items = *units.get(&s.piece)?;
-    let item = v.with_list(items, |xs| xs.get(s.k as usize).copied()).flatten()?;
+    let item = v
+        .with_list(items, |xs| xs.get(s.k as usize).copied())
+        .flatten()?;
     v.with_list(item, |ys| ys.get(1).copied()).flatten()
 }
 
@@ -2735,7 +2800,9 @@ pub(crate) fn page_allocs(
         .as_ref()
         .and_then(|c| c.brk)
         .filter(|b| b.2)
-        .map_or(ValueId::UNIT, |(pid, k, _)| v.list(vec![v.int(pid), v.int(k)]));
+        .map_or(ValueId::UNIT, |(pid, k, _)| {
+            v.list(vec![v.int(pid), v.int(k)])
+        });
     let e = v.list(vec![
         v.int(fixed),
         v.list(names),
@@ -2780,7 +2847,12 @@ pub(crate) fn page_allocs(
 /// `crate::nodes::sealed_skeleton`). The state they act on (the link
 /// stack, the thread) runs on over the pages, so the fold of the line
 /// ([`fold_allocs`]) counts them.
-fn mark_events(v: &Values, bx: &BoxNode, resolved: &FxHashMap<u32, ValueId>, side: &Side) -> ValueId {
+fn mark_events(
+    v: &Values,
+    bx: &BoxNode,
+    resolved: &FxHashMap<u32, ValueId>,
+    side: &Side,
+) -> ValueId {
     struct Walk<'a> {
         v: &'a Values,
         resolved: &'a FxHashMap<u32, ValueId>,
@@ -2868,7 +2940,10 @@ fn mark_events(v: &Values, bx: &BoxNode, resolved: &FxHashMap<u32, ValueId>, sid
             self.cur_s += 1;
             let vertical = b.kind == BoxKind::V;
             self.count(if vertical { 4 } else { 0 }, self.cur_s);
-            self.nodes(crate::nodes::sealed_skeleton(b, self.side).unwrap_or(&b.list), vertical);
+            self.nodes(
+                crate::nodes::sealed_skeleton(b, self.side).unwrap_or(&b.list),
+                vertical,
+            );
             self.cur_s -= 1;
         }
     }
@@ -3365,7 +3440,10 @@ pub(crate) fn page_offset_at(r: &mut Run<'_, '_>, at: u64, c: i64) -> R<i64> {
     let me = i64::from_ne_bytes(at.to_ne_bytes());
     let after = r.cx.fold(v.field(ALLOCS), Some(to), None)?;
     for u in v.seq_to_vec(after) {
-        let brk = list_of(v, u).get(12).map(|&b| list_of(v, b)).unwrap_or_default();
+        let brk = list_of(v, u)
+            .get(12)
+            .map(|&b| list_of(v, b))
+            .unwrap_or_default();
         if let [pid, k] = brk[..]
             && int_of(v, pid) == me
             && int_of(v, k) < c
@@ -3375,10 +3453,15 @@ pub(crate) fn page_offset_at(r: &mut Run<'_, '_>, at: u64, c: i64) -> R<i64> {
     }
     let f = fold_allocs(v, range);
     let mut there = |name: &str| -> R<Option<ValueId>> {
-        Ok(match r.cx.read_at(v.field(name), phitex_defuse::At::AfterOwn(to))? {
-            phitex_defuse::FieldAt::Def(x, _) => Some(x),
-            _ => None,
-        })
+        Ok(
+            match r
+                .cx
+                .read_at(v.field(name), phitex_defuse::At::AfterOwn(to))?
+            {
+                phitex_defuse::FieldAt::Def(x, _) => Some(x),
+                _ => None,
+            },
+        )
     };
     let (fonts, dests) = (there(RT_FONTS)?, there(RT_DESTS)?);
     Ok(f.objects + rt_new(v, &f, fonts, dests))
@@ -3595,8 +3678,18 @@ pub(crate) fn form_whatsit_nums(
 
 /// Whatsit `w` with its object numbers as the link numbered them.
 fn relocated(w: Whatsit, reloc: &Reloc) -> Whatsit {
-    let at64 = |n: u64| reloc.get(&n).map_or(n, |&m| u64::try_from(m).unwrap_or(u64::MAX));
-    let at = |n: usize| u64::try_from(n).ok().and_then(|k| reloc.get(&k)).copied().unwrap_or(n);
+    let at64 = |n: u64| {
+        reloc
+            .get(&n)
+            .map_or(n, |&m| u64::try_from(m).unwrap_or(u64::MAX))
+    };
+    let at = |n: usize| {
+        u64::try_from(n)
+            .ok()
+            .and_then(|k| reloc.get(&k))
+            .copied()
+            .unwrap_or(n)
+    };
     match w {
         Whatsit::StartLink {
             objnum,
@@ -3669,7 +3762,11 @@ fn rel_objnum(w: &Whatsit) -> Option<u64> {
 /// object.
 fn apart_names(whats: &BTreeMap<u32, Whatsit>, floor: usize) -> (usize, Vec<(usize, u64)>) {
     // (a number TeX numbered is one of this file's: no REL bit)
-    let named = whats.values().filter_map(what_objnum).max().map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
+    let named = whats
+        .values()
+        .filter_map(what_objnum)
+        .max()
+        .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
     let from = named.max(floor);
     let mut rel: Vec<u64> = whats.values().filter_map(rel_objnum).collect();
     rel.sort_unstable();
@@ -3723,7 +3820,10 @@ fn line_cache(
                 .iter()
                 .map(|pc| pc.as_ref().and_then(|pc| lines_key(pc, units)))
                 .collect();
-            assert!(all == c.hashes, "link check: the pages' lines taken again are not all of them");
+            assert!(
+                all == c.hashes,
+                "link check: the pages' lines taken again are not all of them"
+            );
         }
         return c;
     }
@@ -4100,7 +4200,11 @@ fn link(
     // (a page by its key and its sealed lines: a word edited in one of
     // its lines changes those, not the key)
     let mut line = |s: &crate::nodes::Sealed| line_of(v, units, s);
-    let ids: Vec<(u64, Option<Lines>)> = xpages.iter().zip(&hashes).map(|(x, h)| (x.raw(), h.clone())).collect();
+    let ids: Vec<(u64, Option<Lines>)> = xpages
+        .iter()
+        .zip(&hashes)
+        .map(|(x, h)| (x.raw(), h.clone()))
+        .collect();
     // (a viewer's identity of each page: a hash, which only says what a
     // viewer shows again)
     let shown: Vec<u64> = rs
@@ -4110,7 +4214,13 @@ fn link(
         .map(|(_, (x, h))| shown_id(*x, h.as_ref()))
         .collect();
     // (what the writer starts from: the same for the copy to stand)
-    let head: LinkHead = (v.epoch(), f.g2u.map_or(0, ValueId::raw), f.date.clone(), f.jobname.clone(), f.seed.clone());
+    let head: LinkHead = (
+        v.epoch(),
+        f.g2u.map_or(0, ValueId::raw),
+        f.date.clone(),
+        f.jobname.clone(),
+        f.seed.clone(),
+    );
     let mut chunks_of: Vec<Vec<phitex_pdf::Chunk>> = Vec::with_capacity(xpages.len());
     let mut snaps: Vec<LinkSnap> = Vec::new();
     let mut start = 0usize;
@@ -4254,7 +4364,14 @@ fn link(
             let Some(h) = hashes.get(i).cloned().flatten() else {
                 return none;
             };
-            let made = record_of(v, u64::from_ne_bytes(v.as_int(x).unwrap_or(0).to_ne_bytes()), pc, &h, &mut line, None);
+            let made = record_of(
+                v,
+                u64::from_ne_bytes(v.as_int(x).unwrap_or(0).to_ne_bytes()),
+                pc,
+                &h,
+                &mut line,
+                None,
+            );
             let empty = (phitex_pdf::PageRecord::default(), BTreeSet::new(), 0);
             let made = made.get().unwrap_or(&empty);
             let rec = &made.0;
@@ -4293,7 +4410,9 @@ fn link(
                 let mut wh = |h: u32, _leaders: bool| {
                     page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &reloc))
                 };
-                if let Some(Err(e)) = with_page_box(v, pc, &h, &mut line, |bx| st.ship_out_with(bx, &src, &mut wh)) {
+                if let Some(Err(e)) = with_page_box(v, pc, &h, &mut line, |bx| {
+                    st.ship_out_with(bx, &src, &mut wh)
+                }) {
                     errors.push((format!("pdfTeX error: {e}"), pc.node));
                 }
                 shipped += 1;
@@ -4397,7 +4516,11 @@ fn link(
         .collect();
     let done: Vec<phitex_pdf::Chunk> = {
         // (an edit's page or two: here, no threads started for them)
-        let n = if jobs.len() > 2 { crate::exec::threads(None) } else { 1 };
+        let n = if jobs.len() > 2 {
+            crate::exec::threads(None)
+        } else {
+            1
+        };
         let mut ex = crate::exec::Inner(n);
         crate::exec::map_on(&mut ex, jobs.len(), &|j| {
             let (i, k) = jobs[j];
@@ -4600,10 +4723,12 @@ mod tests {
     fn commands_whose_serials_meet_stay_apart() {
         let memo = CmdMemo::default();
         let cmd = |input: u64, n: i64| Cmd {
-            f: Mutex::new(Box::new(move |_: &mut PdfState, _: &mut Forms, _: &dyn FontSource| CmdOut {
-                nums: vec![n],
-                err: None,
-            })),
+            f: Mutex::new(Box::new(
+                move |_: &mut PdfState, _: &mut Forms, _: &dyn FontSource| CmdOut {
+                    nums: vec![n],
+                    err: None,
+                },
+            )),
             fonts: Fonts::default(),
             wparams: [0; 5],
             words: vec![1, 1, input].into(),

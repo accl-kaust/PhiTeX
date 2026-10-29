@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::api::{
-    Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState,
-    OpId, Operation, PathId, ProjId, Projection, Report, SeqMonoid, Settled, Step, UnitId,
+    Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState, OpId, Operation, PathId,
+    ProjId, Projection, Report, SeqMonoid, Settled, Step, UnitId,
 };
 use crate::commit::{self, CommitStats, Predicted, own_write, place_after, settle_predictions, unfile};
 use crate::index::{FieldIndex, RangeIndex};
@@ -343,7 +343,9 @@ impl Engine {
     }
 
     pub(crate) fn node(&self, id: NodeId) -> &Arc<Node> {
-        self.nodes.get(usize::try_from(id.raw()).unwrap_or(usize::MAX)).expect("a node of this engine")
+        self.nodes
+            .get(usize::try_from(id.raw()).unwrap_or(usize::MAX))
+            .expect("a node of this engine")
     }
 
     /// A node, None while it is not on the line yet: a commit's record
@@ -401,7 +403,12 @@ impl Engine {
         if !m.by_prefix.is_empty()
             && let Some(x) = self
                 .values
-                .with_str(f.0, |s| m.by_prefix.iter().find(|(p, _)| s.starts_with(p.as_str())).map(|x| x.1.clone()))
+                .with_str(f.0, |s| {
+                    m.by_prefix
+                        .iter()
+                        .find(|(p, _)| s.starts_with(p.as_str()))
+                        .map(|x| x.1.clone())
+                })
                 .flatten()
         {
             return x;
@@ -474,7 +481,11 @@ impl Engine {
         if self.marked_n.load(Ordering::Relaxed) == 0 || !self.marked.read().contains(&node.id) {
             return;
         }
-        self.settled.lock().push(Settled { node: node.id, version, output });
+        self.settled.lock().push(Settled {
+            node: node.id,
+            version,
+            output,
+        });
     }
 
     /// The marked nodes settled since the last take, at a quiet point:
@@ -489,7 +500,13 @@ impl Engine {
             .iter()
             .rev()
             .filter(|s| seen.insert(s.node))
-            .filter_map(|s| self.output(s.node).map(|output| Settled { node: s.node, version, output }))
+            .filter_map(|s| {
+                self.output(s.node).map(|output| Settled {
+                    node: s.node,
+                    version,
+                    output,
+                })
+            })
             .collect();
         out.reverse();
         out
@@ -533,7 +550,8 @@ impl Engine {
             },
         );
         let sid = SegId(u32::try_from(self.segs.reserve()).expect("segment ids"));
-        self.segs.set(sid.0 as usize, Arc::new(Segment::new(sid, id, start, end)));
+        self.segs
+            .set(sid.0 as usize, Arc::new(Segment::new(sid, id, start, end)));
         self.order.insert(start, sid);
         id
     }
@@ -719,7 +737,8 @@ impl Engine {
             }
             mine.into_iter().for_each(|(r, xs)| made(r, xs));
         });
-        self.order.insert_many((0..runs).map(|r| (label(r * PUSH_RUN), sids[r])).collect());
+        self.order
+            .insert_many((0..runs).map(|r| (label(r * PUSH_RUN), sids[r])).collect());
         old.inner.write().hi = p0;
         u.last.store(label(n - 1).0, Ordering::Release);
         self.stats.nodes_made.fetch_add(n as u64, Ordering::Relaxed);
@@ -840,8 +859,15 @@ impl Engine {
     /// `insert_after`, `insert_before`.
     pub fn insert_placed(&self, beside: NodeId, after: bool, op: OpId, args: Vec<ValueId>) -> NodeId {
         let near = self.node(beside);
-        let Some(placer) = near.parent.filter(|&p| self.node(p).run_record().is_some_and(|r| r.placed.contains(&beside))) else {
-            return if after { self.insert_after(beside, op, args) } else { self.insert_before(beside, op, args) };
+        let Some(placer) = near
+            .parent
+            .filter(|&p| self.node(p).run_record().is_some_and(|r| r.placed.contains(&beside)))
+        else {
+            return if after {
+                self.insert_after(beside, op, args)
+            } else {
+                self.insert_before(beside, op, args)
+            };
         };
         let id = NodeId::from_raw(self.nodes.reserve() as u64);
         let (n, pred) = commit::built(self, near.unit, Some(placer), op, args.clone(), id);
@@ -852,7 +878,10 @@ impl Engine {
             return self.insert_after(placer, op, args);
         };
         commit::edit_placed(self, placer, |v| {
-            let i = v.iter().position(|&x| x == beside).map_or(v.len(), |i| i + usize::from(after));
+            let i = v
+                .iter()
+                .position(|&x| x == beside)
+                .map_or(v.len(), |i| i + usize::from(after));
             v.insert(i, id);
         });
         self.inserted(&n, near)
@@ -1043,7 +1072,12 @@ impl Engine {
             if inner.nodes.get(&p) != Some(&n) {
                 continue;
             }
-            return inner.defs.get(&f).and_then(|m| m.get(&p)).filter(|d| d.by == n).map(|d| d.plain(&self.values).value);
+            return inner
+                .defs
+                .get(&f)
+                .and_then(|m| m.get(&p))
+                .filter(|d| d.by == n)
+                .map(|d| d.plain(&self.values).value);
         }
     }
 
@@ -1060,7 +1094,13 @@ impl Engine {
             if inner.nodes.get(&p) != Some(&n) {
                 continue;
             }
-            return inner.defs.get(&f).and_then(|m| m.get(&p)).filter(|d| d.by == n).map(|d| d.parts(&self.values).iter().map(|x| x.value).collect()).unwrap_or_default();
+            return inner
+                .defs
+                .get(&f)
+                .and_then(|m| m.get(&p))
+                .filter(|d| d.by == n)
+                .map(|d| d.parts(&self.values).iter().map(|x| x.value).collect())
+                .unwrap_or_default();
         }
     }
 
@@ -1071,13 +1111,25 @@ impl Engine {
         };
         r.defs
             .iter()
-            .map(|d| (d.f, if d.rel.is_some() { self.def_value(n, d.f).unwrap_or(d.value) } else { d.value }))
+            .map(|d| {
+                (
+                    d.f,
+                    if d.rel.is_some() {
+                        self.def_value(n, d.f).unwrap_or(d.value)
+                    } else {
+                        d.value
+                    },
+                )
+            })
             .collect()
     }
 
     /// What `n`'s last run contributed, by field.
     pub fn contribs_of(&self, n: NodeId) -> Vec<(Field, ValueId)> {
-        self.node(n).run_record().map(|r| r.contribs.clone()).unwrap_or_default()
+        self.node(n)
+            .run_record()
+            .map(|r| r.contribs.clone())
+            .unwrap_or_default()
     }
 
     /// The fold over all of `unit`'s contributions to `f`.
@@ -1173,7 +1225,9 @@ impl Engine {
                 }
             }
             if !stands.is_empty() {
-                self.ranges.add_envs(*f, std::mem::take(&mut stands), |r| crate::segment::live(self, r.node, r.serial));
+                self.ranges.add_envs(*f, std::mem::take(&mut stands), |r| {
+                    crate::segment::live(self, r.node, r.serial)
+                });
             }
             if let Some(first) = self.order.first() {
                 commit::reask_from(self, None, *f, Pos(0), first, None, None, 0, &mut st);
@@ -1238,7 +1292,11 @@ impl Engine {
         })
     }
 
-    fn evaluate_here(&self, threads: usize, mut src: Option<&mut (dyn EditSource + Send)>) -> Result<Report, EvalError> {
+    fn evaluate_here(
+        &self,
+        threads: usize,
+        mut src: Option<&mut (dyn EditSource + Send)>,
+    ) -> Result<Report, EvalError> {
         let t0 = Instant::now();
         if self.busy.fetch_add(1, Ordering::SeqCst) & COLLECTING != 0 {
             self.busy.fetch_sub(1, Ordering::SeqCst);
@@ -1272,23 +1330,25 @@ impl Engine {
             let workers = pool.run(self, workers, src.as_mut().map(|s| -> &mut dyn EditSource { &mut **s }))?;
             // a run that panicked: a failure if what it read still holds
             // now the line is quiet, else run again with the rest pending
-            let panicked: Vec<_> = workers.iter().flat_map(|w| std::mem::take(&mut w.log.lock().panicked)).collect();
+            let panicked: Vec<_> = workers
+                .iter()
+                .flat_map(|w| std::mem::take(&mut w.log.lock().panicked))
+                .collect();
             all.extend(workers);
             if panicked.is_empty() {
                 break;
             }
-            if let Some((node, _, op, message)) = panicked
-                .iter()
-                .find(|(x, reads, _, _)| {
-                    // (a read that panics when answered again, a client's
-                    // fold broken since: not one that holds, so the node runs
-                    // again and its run says)
-                    reads.iter().all(|rd| {
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read::holds(self, self.node(*x), rd, &mut read::FoldMemo::new())))
-                            .unwrap_or(false)
-                    })
+            if let Some((node, _, op, message)) = panicked.iter().find(|(x, reads, _, _)| {
+                // (a read that panics when answered again, a client's
+                // fold broken since: not one that holds, so the node runs
+                // again and its run says)
+                reads.iter().all(|rd| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        read::holds(self, self.node(*x), rd, &mut read::FoldMemo::new())
+                    }))
+                    .unwrap_or(false)
                 })
-            {
+            }) {
                 return Err(EvalError::OpPanicked {
                     node: *node,
                     op,
@@ -1297,10 +1357,17 @@ impl Engine {
             }
         }
         let workers = all;
-        let swept = self.sweep_readers() as u64 + workers.iter().map(|w| std::mem::take(&mut w.log.lock().swept)).sum::<u64>();
+        let swept = self.sweep_readers() as u64
+            + workers
+                .iter()
+                .map(|w| std::mem::take(&mut w.log.lock().swept))
+                .sum::<u64>();
         let mut rep = Report {
             readers_swept: swept,
-            collections: workers.iter().flat_map(|w| std::mem::take(&mut w.log.lock().collections)).collect(),
+            collections: workers
+                .iter()
+                .flat_map(|w| std::mem::take(&mut w.log.lock().collections))
+                .collect(),
             ..Report::default()
         };
         let mut by_op: FxHashMap<OpId, u64> = FxHashMap::default();
@@ -1325,11 +1392,15 @@ impl Engine {
             rep.relative_resolved += load(&w.relative_resolved);
             rep.shaped += load(&w.shaped);
             rep.commits += load(&w.commits);
-            rep.final_reruns = rep.final_reruns.max(u32::try_from(load(&w.final_max)).unwrap_or(u32::MAX));
+            rep.final_reruns = rep
+                .final_reruns
+                .max(u32::try_from(load(&w.final_max)).unwrap_or(u32::MAX));
             rep.steals += load(&w.steals);
             rep.held_deferred += load(&w.held_deferred);
             rep.held_fired += load(&w.held_fired);
-            rep.held_passes = rep.held_passes.max(u32::try_from(load(&w.held_passes)).unwrap_or(u32::MAX));
+            rep.held_passes = rep
+                .held_passes
+                .max(u32::try_from(load(&w.held_passes)).unwrap_or(u32::MAX));
             rep.held_unsettled |= load(&w.held_unsettled) > 0;
             rep.times.op_ns += load(&w.op_ns);
             rep.times.wasted_ns += load(&w.wasted_ns);
@@ -1372,8 +1443,14 @@ impl Engine {
             rep.run_times.append(&mut log.run_times);
         }
         rep.passes = rep.final_reruns + 1;
-        rep.absorbed = workers.iter().flat_map(|w| std::mem::take(&mut w.log.lock().absorbed)).collect();
-        let starts: Vec<u64> = workers.iter().flat_map(|w| std::mem::take(&mut w.log.lock().pass_starts)).collect();
+        rep.absorbed = workers
+            .iter()
+            .flat_map(|w| std::mem::take(&mut w.log.lock().absorbed))
+            .collect();
+        let starts: Vec<u64> = workers
+            .iter()
+            .flat_map(|w| std::mem::take(&mut w.log.lock().pass_starts))
+            .collect();
         let mut at = 0;
         for s in starts.into_iter().chain([rep.runs]) {
             rep.pass_runs.push(s.saturating_sub(at));
@@ -1387,11 +1464,15 @@ impl Engine {
         rep.placed_by_op = placed.into_iter().map(|(op, k)| (self.op(op).name(), k)).collect();
         rep.placed_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         rep.placements_moved_by_op = moved.into_iter().map(|(op, k)| (self.op(op).name(), k)).collect();
-        rep.placements_moved_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        rep.placements_moved_by_op
+            .sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         rep.wasted_by_op = wasted.into_iter().map(|(op, k)| (self.op(op).name(), k)).collect();
         rep.wasted_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         rep.runs_wasted = rep.wasted_by_op.iter().map(|x| x.1).sum();
-        rep.commit_by_op = commit_by.into_iter().map(|(op, (t, k))| (self.op(op).name(), t, k)).collect();
+        rep.commit_by_op = commit_by
+            .into_iter()
+            .map(|(op, (t, k))| (self.op(op).name(), t, k))
+            .collect();
         rep.commit_by_op.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         rep.refuted_by_field = rbf.into_iter().collect();
         rep.predictions_refuted_by_field = pbf.into_iter().collect();
@@ -1451,8 +1532,10 @@ impl Engine {
                         continue;
                     };
                     let moved = r.reads.iter().any(|rd| {
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| answer(self, node, &rd.kind, rd.path) != rd.seen))
-                            .unwrap_or(true)
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            answer(self, node, &rd.kind, rd.path) != rd.seen
+                        }))
+                        .unwrap_or(true)
                     });
                     if moved {
                         mark_dirty(self, None, node, wake());
@@ -1517,7 +1600,14 @@ impl Engine {
     /// steps, the memo of applications, and the fields named anywhere.
     pub(crate) fn roots(&self, keep: &mut dyn FnMut(ValueId)) {
         let step = |s: &Step, keep: &mut dyn FnMut(ValueId)| match *s {
-            Step::Key(x) | Step::Has(x) | Step::Eq(x) | Step::Cmp(x) | Step::Indices(x) | Step::Keys(x) | Step::Rank(x) | Step::Ranks(x) => keep(x),
+            Step::Key(x)
+            | Step::Has(x)
+            | Step::Eq(x)
+            | Step::Cmp(x)
+            | Step::Indices(x)
+            | Step::Keys(x)
+            | Step::Rank(x)
+            | Step::Ranks(x) => keep(x),
             _ => {}
         };
         for i in 0..self.nodes.len() {
@@ -1606,7 +1696,9 @@ impl Engine {
     /// (`Limits::collect_at_bytes`): its tasks read lists unpinned.
     pub fn collect(&self) -> Collected {
         assert!(
-            self.busy.compare_exchange(0, COLLECTING, Ordering::SeqCst, Ordering::SeqCst).is_ok(),
+            self.busy
+                .compare_exchange(0, COLLECTING, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok(),
             "Engine::collect during an evaluation: a collection runs between evaluations or at an evaluation's barrier (Limits::collect_at_bytes)"
         );
         let _busy = Unbusy(&self.busy, COLLECTING);
@@ -1617,7 +1709,9 @@ impl Engine {
     /// evaluation is the only one running (None: another began meanwhile,
     /// whose tasks the barrier does not stop).
     pub(crate) fn collect_at_barrier(&self, extra: Vec<ValueId>) -> Option<Collected> {
-        self.busy.compare_exchange(1, 1 | COLLECTING, Ordering::SeqCst, Ordering::SeqCst).ok()?;
+        self.busy
+            .compare_exchange(1, 1 | COLLECTING, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()?;
         let _busy = Unbusy(&self.busy, COLLECTING);
         Some(self.collect_with(extra))
     }
@@ -1676,7 +1770,9 @@ impl Engine {
                 !rs.is_empty()
             });
             let n = inner.stops.len();
-            inner.stops.retain(|(_, _, r)| crate::segment::live(self, r.node, r.serial));
+            inner
+                .stops
+                .retain(|(_, _, r)| crate::segment::live(self, r.node, r.serial));
             dropped += n - inner.stops.len();
         }
         self.swept_left.store(left as u64, Ordering::Relaxed);
@@ -1691,7 +1787,10 @@ impl Engine {
             fields += inner.readers.len();
             for rs in inner.readers.values() {
                 filed += rs.len();
-                standing += rs.iter().filter(|r| crate::segment::live(self, r.node, r.serial)).count();
+                standing += rs
+                    .iter()
+                    .filter(|r| crate::segment::live(self, r.node, r.serial))
+                    .count();
             }
         }
         (filed, standing, fields)
@@ -1777,10 +1876,15 @@ impl Engine {
             let show = |x: Option<ValueId>| x.map_or("none".to_owned(), |x| v.render(x));
             // (a field read: its name and the node whose definition reaches)
             let site = match &rd.kind {
-                crate::node::ReadKind::Field { f, at: crate::node::Anchor::Me } => format!(
+                crate::node::ReadKind::Field {
+                    f,
+                    at: crate::node::Anchor::Me,
+                } => format!(
                     " [{} by {:?}]",
                     v.render(f.0),
-                    read::reaching_at(self, *f, n, false).and_then(|r| r.by).map(NodeId::raw)
+                    read::reaching_at(self, *f, n, false)
+                        .and_then(|r| r.by)
+                        .map(NodeId::raw)
                 ),
                 _ => String::new(),
             };
@@ -1865,18 +1969,34 @@ impl Engine {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.run(&mut cx)));
             let name = op.name();
             let Ok(Ok(x)) = r else {
-                out.push(format!("node {} ({name}) stops or panics when run again", node.id.raw()));
+                out.push(format!(
+                    "node {} ({name}) stops or panics when run again",
+                    node.id.raw()
+                ));
                 continue;
             };
             let p = cx.into_product(x);
             let mut why = Vec::new();
             if p.output != rec.output {
-                why.push(format!("output {} was {}", v.render(p.output).chars().take(200).collect::<String>(), v.render(rec.output).chars().take(200).collect::<String>()));
+                why.push(format!(
+                    "output {} was {}",
+                    v.render(p.output).chars().take(200).collect::<String>(),
+                    v.render(rec.output).chars().take(200).collect::<String>()
+                ));
             }
             let defs = commit::dedup_defs(p.defs);
             for d in &defs {
-                if d.rel.is_none() && !rec.defs.iter().any(|e| e.f == d.f && e.loc == d.loc && e.value == d.value) {
-                    why.push(format!("defines {} = {}", v.render(d.f.0), v.render(d.value).chars().take(200).collect::<String>()));
+                if d.rel.is_none()
+                    && !rec
+                        .defs
+                        .iter()
+                        .any(|e| e.f == d.f && e.loc == d.loc && e.value == d.value)
+                {
+                    why.push(format!(
+                        "defines {} = {}",
+                        v.render(d.f.0),
+                        v.render(d.value).chars().take(200).collect::<String>()
+                    ));
                 }
             }
             for e in &rec.defs {
@@ -1887,12 +2007,32 @@ impl Engine {
             let cs = commit::combine_dups(self, p.contribs);
             for (f, x) in &cs {
                 if !rec.contribs.iter().any(|(g, y)| g == f && y == x) {
-                    let was = rec.contribs.iter().find(|(g, _)| g == f).map_or("none".to_owned(), |(_, y)| v.render(*y).chars().take(300).collect());
-                    why.push(format!("contributes {} {} was {was}", v.render(f.0), v.render(*x).chars().take(300).collect::<String>()));
+                    let was = rec
+                        .contribs
+                        .iter()
+                        .find(|(g, _)| g == f)
+                        .map_or("none".to_owned(), |(_, y)| v.render(*y).chars().take(300).collect());
+                    why.push(format!(
+                        "contributes {} {} was {was}",
+                        v.render(f.0),
+                        v.render(*x).chars().take(300).collect::<String>()
+                    ));
                 }
             }
-            let placed: Vec<(OpId, Vec<ValueId>)> = rec.placed.iter().filter_map(|&c| self.placed_node(c)).map(|c| (c.op(), c.args().to_vec())).collect();
-            let now: Vec<(OpId, Vec<ValueId>)> = p.placements.iter().map(|x| { let (o, a) = x.key(); (o, a.to_vec()) }).collect();
+            let placed: Vec<(OpId, Vec<ValueId>)> = rec
+                .placed
+                .iter()
+                .filter_map(|&c| self.placed_node(c))
+                .map(|c| (c.op(), c.args().to_vec()))
+                .collect();
+            let now: Vec<(OpId, Vec<ValueId>)> = p
+                .placements
+                .iter()
+                .map(|x| {
+                    let (o, a) = x.key();
+                    (o, a.to_vec())
+                })
+                .collect();
             if placed != now {
                 why.push(format!("places {} nodes, recorded {}", now.len(), placed.len()));
             }
@@ -1919,12 +2059,20 @@ impl Engine {
             let inner = s.inner.read();
             for (f, m) in &inner.defs {
                 if !m.is_empty() && !self.defs.holds(*f, s.lo, s.id) {
-                    out.push(format!("segment {} holds definitions of {} the index lacks", sid.0, v.render(f.0)));
+                    out.push(format!(
+                        "segment {} holds definitions of {} the index lacks",
+                        sid.0,
+                        v.render(f.0)
+                    ));
                 }
             }
             for (f, m) in &inner.contribs {
                 if !m.is_empty() && !self.contribs.holds(*f, s.lo, s.id) {
-                    out.push(format!("segment {} holds contributions to {} the index lacks", sid.0, v.render(f.0)));
+                    out.push(format!(
+                        "segment {} holds contributions to {} the index lacks",
+                        sid.0,
+                        v.render(f.0)
+                    ));
                 }
             }
         }
@@ -1940,10 +2088,19 @@ impl Engine {
                 && let Some(p) = node.parent
                 && !held
                     .entry(p)
-                    .or_insert_with(|| self.node(p).record().map(|r| r.placed.iter().copied().collect()).unwrap_or_default())
+                    .or_insert_with(|| {
+                        self.node(p)
+                            .record()
+                            .map(|r| r.placed.iter().copied().collect())
+                            .unwrap_or_default()
+                    })
                     .contains(&n)
             {
-                out.push(format!("node {} is on the line, its placer {} holding it no more", n.raw(), p.raw()));
+                out.push(format!(
+                    "node {} is on the line, its placer {} holding it no more",
+                    n.raw(),
+                    p.raw()
+                ));
             }
             // (a node taken is held by a claimer on the line that is not
             // taken itself: a node removed or taken claims nothing)
@@ -1973,7 +2130,10 @@ impl Engine {
                 let now = answer(self, node, &rd.kind, rd.path);
                 if now != rd.seen {
                     let site = match &rd.kind {
-                        crate::node::ReadKind::Field { f, at: crate::node::Anchor::Me } => read::reaching_at(self, *f, n, false)
+                        crate::node::ReadKind::Field {
+                            f,
+                            at: crate::node::Anchor::Me,
+                        } => read::reaching_at(self, *f, n, false)
                             .and_then(|r| r.by)
                             .map_or(String::new(), |b| {
                                 let bn = self.node(b);
@@ -2098,7 +2258,11 @@ impl Engine {
             .into_iter()
             .map(|(n, _)| {
                 let node = self.node(n);
-                (n, node.run_ns.load(Ordering::Relaxed), self.op(node.op()).name().to_owned())
+                (
+                    n,
+                    node.run_ns.load(Ordering::Relaxed),
+                    self.op(node.op()).name().to_owned(),
+                )
             })
             .collect()
     }

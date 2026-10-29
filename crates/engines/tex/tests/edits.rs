@@ -546,7 +546,10 @@ fn one_word_edit_reruns_little() {
             "runs by op at {t} threads"
         );
         assert_eq!(st.runs, st.nodes_run, "a node ran twice at {t} threads");
-        assert_eq!(st.mispredictions, 0, "speculative runs dropped at {t} threads");
+        assert_eq!(
+            st.mispredictions, 0,
+            "speculative runs dropped at {t} threads"
+        );
     }
 }
 
@@ -701,7 +704,10 @@ fn a_link_removed_reruns_its_piece_and_page_only() {
     );
     assert_ne!(text, src);
     b.edit(&text);
-    eprintln!("link removed: runs by op {:?} ({n} pages)", b.stats.runs_by_op);
+    eprintln!(
+        "link removed: runs by op {:?} ({n} pages)",
+        b.stats.runs_by_op
+    );
     for (n, op, why) in &b.stats.reruns {
         eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
     }
@@ -714,7 +720,10 @@ fn a_link_removed_reruns_its_piece_and_page_only() {
     // piece's profile by range and runs again, its output unchanged. A
     // finisher reading only the part of a straddling piece it uses, its
     // range up to the candidate, would run once: an edits-phase item)
-    assert!(common::runs_of(&b, "finish") <= 2, "only the finishers of the pages it is on");
+    assert!(
+        common::runs_of(&b, "finish") <= 2,
+        "only the finishers of the pages it is on"
+    );
     // (the edited piece's own continuation, where a page fires inside
     // it, and no other)
     assert!(common::runs_of(&b, "resume") <= 1, "no later continuation");
@@ -723,7 +732,10 @@ fn a_link_removed_reruns_its_piece_and_page_only() {
     // is found scheduled there where the line's is not)
     for (what, x) in [("edit", &b), ("cold", &cold)] {
         let (placed, shipped) = x.link_pages();
-        assert_eq!(shipped, 0, "{what}: pages shipped again by the link ({placed} placed)");
+        assert_eq!(
+            shipped, 0,
+            "{what}: pages shipped again by the link ({placed} placed)"
+        );
     }
 }
 
@@ -866,14 +878,25 @@ fn blanks_at_line_ends_run_no_node() {
     };
     let all: String = lines
         .iter()
-        .map(|l| l.strip_suffix('\n').map_or_else(|| format!("{l} \t "), |b| format!("{b} \t \n")))
+        .map(|l| {
+            l.strip_suffix('\n')
+                .map_or_else(|| format!("{l} \t "), |b| format!("{b} \t \n"))
+        })
         .collect();
     let mut last = src.clone();
-    for (what, text) in [("one line", &one), ("every line", &all), ("none again", &src)] {
+    for (what, text) in [
+        ("one line", &one),
+        ("every line", &all),
+        ("none again", &src),
+    ] {
         assert_ne!(*text, last, "{what}: no edit");
         last.clone_from(text);
         b.edit(text);
-        assert_eq!(b.stats.nodes_run, 0, "{what}: {} nodes run", b.stats.nodes_run);
+        assert_eq!(
+            b.stats.nodes_run, 0,
+            "{what}: {} nodes run",
+            b.stats.nodes_run
+        );
         assert!(
             common::first_difference(&b.output().0, &want).is_none(),
             "{what}: the output is not the cold build's"
@@ -893,7 +916,10 @@ fn a_line_inserted_at_the_top_reruns_no_weak_reader_of_the_line_number() {
     let fx = common::fixtures().join("dvi");
     let mut src = String::from("\\vsize=200pt \\hsize=150pt \\parindent=0pt\n");
     for k in 0..12 {
-        let _ = writeln!(src, "{{\\edef\\where{{\\the\\inputlineno}}}}Paragraph {k} has a few words.\n");
+        let _ = writeln!(
+            src,
+            "{{\\edef\\where{{\\the\\inputlineno}}}}Paragraph {k} has a few words.\n"
+        );
     }
     src.push_str("\\message{[at \\the\\inputlineno]}Last words.\n\\bye\n");
     let prelude = common::plain();
@@ -907,13 +933,22 @@ fn a_line_inserted_at_the_top_reruns_no_weak_reader_of_the_line_number() {
     let cold = common::build(opts(), Some(&prelude), &text);
     let (out, log) = b.output();
     let (cold_out, cold_log) = cold.output();
-    assert!(common::first_difference(&out, &cold_out).is_none(), "the output is a cold build's");
-    assert!(log.contains("[at 27]") && cold_log.contains("[at 27]"), "the log has the new line: {}", common::log_excerpt(&log));
+    assert!(
+        common::first_difference(&out, &cold_out).is_none(),
+        "the output is a cold build's"
+    );
+    assert!(
+        log.contains("[at 27]") && cold_log.contains("[at 27]"),
+        "the log has the new line: {}",
+        common::log_excerpt(&log)
+    );
     let weak = b
         .stats
         .reruns
         .iter()
-        .filter(|(n, op, why)| *op == "exec" && !why.contains("Edited") && b.describe_node(*n).contains("\\where"))
+        .filter(|(n, op, why)| {
+            *op == "exec" && !why.contains("Edited") && b.describe_node(*n).contains("\\where")
+        })
         .count();
     assert_eq!(weak, 0, "no weak reader of the line runs again");
 }
@@ -929,11 +964,19 @@ fn an_edited_paragraph_goes_on_from_a_checkpoint() {
     let opts = || common::options("./long.tex", "long", "", &fx);
     // (each word followed by a command: commands, as a real paragraph's
     // citations and acronyms make them)
-    let words: Vec<String> = (0..700).map(|k| format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17)).collect();
+    let words: Vec<String> = (0..700)
+        .map(|k| format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17))
+        .collect();
     let par = |ws: &[String]| format!("\\hsize=300pt\n{}\n\n\\bye\n", ws.join(" "));
     let mut ws = words.clone();
     let mut b = common::build(opts(), Some(&prelude), &par(&ws));
-    for (k, at, resumes) in [(0, 650, false), (1, 680, true), (2, 3, false), (3, 690, true), (4, 695, true)] {
+    for (k, at, resumes) in [
+        (0, 650, false),
+        (1, 680, true),
+        (2, 3, false),
+        (3, 690, true),
+        (4, 695, true),
+    ] {
         ws[at] = format!("edit{k}\\kern0pt");
         let text = par(&ws);
         b.edit(&text);

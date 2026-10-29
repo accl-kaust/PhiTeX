@@ -181,7 +181,13 @@ impl GlyphTap for Recorder {
     /// A native word's glyphs: the first carries the word's text (as a
     /// ligature its characters), the others are its node's further
     /// codes.
-    fn native(&mut self, _font: FontId, text: &[u16], glyphs: &[(Scaled, Scaled, Scaled)], size: Scaled) {
+    fn native(
+        &mut self,
+        _font: FontId,
+        text: &[u16],
+        glyphs: &[(Scaled, Scaled, Scaled)],
+        size: Scaled,
+    ) {
         // (a glyph with no text, `\XeTeXglyph`, a math font's: a glyph
         // no character reads as)
         if text.is_empty() {
@@ -208,7 +214,11 @@ impl GlyphTap for Recorder {
                 kind: GLYPH,
                 first: i == 0,
                 ch: text[0],
-                lig_n: if i == 0 { u16::try_from(text.len()).unwrap_or(u16::MAX) } else { 0 },
+                lig_n: if i == 0 {
+                    u16::try_from(text.len()).unwrap_or(u16::MAX)
+                } else {
+                    0
+                },
                 lig: at,
                 h,
                 v,
@@ -706,7 +716,12 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
     // footnotes, captions, a title; a later pass again while it matches
     // runs, the page's order no longer theirs: a footnote after the
     // text that follows its mark)
-    let mut passes: Vec<usize> = order.first().into_iter().copied().chain(order.iter().copied()).collect();
+    let mut passes: Vec<usize> = order
+        .first()
+        .into_iter()
+        .copied()
+        .chain(order.iter().copied())
+        .collect();
     let mut round = 0;
     while round < passes.len() {
         let ci = passes[round];
@@ -1565,8 +1580,20 @@ impl State {
         let mut order: Vec<usize> = (0..inp.spans.len()).collect();
         order.sort_by(|&i, &j| {
             let (x, y) = (&inp.spans[i], &inp.spans[j]);
-            (x.4, x.1.is_some(), x.1.as_ref().map(|f| f.0.as_str()), x.2, std::cmp::Reverse(x.3))
-                .cmp(&(y.4, y.1.is_some(), y.1.as_ref().map(|f| f.0.as_str()), y.2, std::cmp::Reverse(y.3)))
+            (
+                x.4,
+                x.1.is_some(),
+                x.1.as_ref().map(|f| f.0.as_str()),
+                x.2,
+                std::cmp::Reverse(x.3),
+            )
+                .cmp(&(
+                    y.4,
+                    y.1.is_some(),
+                    y.1.as_ref().map(|f| f.0.as_str()),
+                    y.2,
+                    std::cmp::Reverse(y.3),
+                ))
         });
         let mut nodes: Vec<Node> = Vec::new();
         let memo = self.scans.locked();
@@ -1658,7 +1685,9 @@ impl State {
     fn matched(&self, cx: &Ctx<'_>, id: u64, g: &PageGlyphs) -> Arc<Matched> {
         let kept = self.matches.locked().get(&id).cloned();
         if let Some(m) = kept
-            && m.nodes.iter().all(|&(raw, h)| cx.spans.get(&raw).is_some_and(|sp| sp.hash == h))
+            && m.nodes
+                .iter()
+                .all(|&(raw, h)| cx.spans.get(&raw).is_some_and(|sp| sp.hash == h))
         {
             return m;
         }
@@ -1775,7 +1804,11 @@ fn answer(
         |h, n| match n {
             Some((sp, doc)) => hash_words(
                 h,
-                &[u64::from(sp.file), u64::from(cx.place(sp.file, *doc, sp.s)), u64::from(cx.place(sp.file, *doc, sp.s + sp.len))],
+                &[
+                    u64::from(sp.file),
+                    u64::from(cx.place(sp.file, *doc, sp.s)),
+                    u64::from(cx.place(sp.file, *doc, sp.s + sp.len)),
+                ],
             ),
             None => hash_words(h, &[u64::MAX]),
         },
@@ -1888,11 +1921,18 @@ impl crate::Build {
         let t2 = t0.elapsed();
         let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
         let get = || pdf.get_or_init(|| self.origins_pdf()).clone();
-        let pages = (0..cx.inp.shown.len()).map(|k| answer(st, &cx, k, &get)).collect();
+        let pages = (0..cx.inp.shown.len())
+            .map(|k| answer(st, &cx, k, &get))
+            .collect();
         let t3 = t0.elapsed();
         let files = st.files.locked().clone();
         let texts = (0..files.len())
-            .map(|i| cx.texts.get(i).and_then(Option::as_ref).map(|t| file_bytes(t)))
+            .map(|i| {
+                cx.texts
+                    .get(i)
+                    .and_then(Option::as_ref)
+                    .map(|t| file_bytes(t))
+            })
             .collect();
         if crate::exec::env_flag!("PHITEX_ORIGINS_TIME") {
             eprintln!(
@@ -1904,7 +1944,11 @@ impl crate::Build {
                 t0.elapsed().saturating_sub(t3)
             );
         }
-        OriginsSnapshot { pages, files, texts }
+        OriginsSnapshot {
+            pages,
+            files,
+            texts,
+        }
     }
 
     /// The files origins name, by their index in [`PageOrigins::file`]:

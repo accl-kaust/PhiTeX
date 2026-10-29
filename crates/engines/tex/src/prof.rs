@@ -127,7 +127,14 @@ pub(crate) mod caches {
     pub(crate) const ENC_RESET: usize = 8;
     const N: usize = 9;
     const NAMES: [&str; N] = [
-        "decoded", "leaf", "dec.char", "encoded", "enc.tok", "enc.char", "enc.macro", "cs.local",
+        "decoded",
+        "leaf",
+        "dec.char",
+        "encoded",
+        "enc.tok",
+        "enc.char",
+        "enc.macro",
+        "cs.local",
         "enc.reset",
     ];
 
@@ -147,7 +154,9 @@ pub(crate) mod caches {
     }
 
     fn add_total(c: Counts) {
-        let mut t = TOTAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut t = TOTAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (a, b) in t.iter_mut().zip(c) {
             for (x, y) in a.iter_mut().zip(b) {
                 *x += y;
@@ -208,7 +217,9 @@ pub(crate) mod caches {
         }
         flush();
         let t = std::mem::replace(
-            &mut *TOTAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            &mut *TOTAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             [[0; 3]; N],
         );
         let parts: Vec<String> = NAMES
@@ -303,7 +314,9 @@ pub(crate) mod pages {
             return;
         }
         let torn = TORNS.swap(0, Relaxed);
-        eprintln!("pagesprof: {attempts} attempts, {units} units, {torn} torn; ms total, µs per unit:");
+        eprintln!(
+            "pagesprof: {attempts} attempts, {units} units, {torn} torn; ms total, µs per unit:"
+        );
         for (k, name) in NAMES.iter().enumerate() {
             let ns = NS[k].swap(0, Relaxed);
             #[allow(clippy::cast_precision_loss)]

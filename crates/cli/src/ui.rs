@@ -540,24 +540,26 @@ impl Ui {
         lock(&self.bottom).keys = Some(keys);
         if self.st.tty && !self.json && !WATCHING.swap(true, Ordering::SeqCst) {
             let bottom = self.bottom.clone();
-            let _ = std::thread::Builder::new().name("phitex-resize".into()).spawn(move || {
-                let mut was = crate::keys::width();
-                loop {
-                    std::thread::sleep(Duration::from_millis(250));
-                    let now = crate::keys::width();
-                    if now == was {
-                        continue;
+            let _ = std::thread::Builder::new()
+                .name("phitex-resize".into())
+                .spawn(move || {
+                    let mut was = crate::keys::width();
+                    loop {
+                        std::thread::sleep(Duration::from_millis(250));
+                        let now = crate::keys::width();
+                        if now == was {
+                            continue;
+                        }
+                        was = now;
+                        let mut b = lock(&bottom);
+                        if b.gone {
+                            return;
+                        }
+                        if b.drawn > 0 {
+                            redraw(&mut std::io::stderr().lock(), &mut b);
+                        }
                     }
-                    was = now;
-                    let mut b = lock(&bottom);
-                    if b.gone {
-                        return;
-                    }
-                    if b.drawn > 0 {
-                        redraw(&mut std::io::stderr().lock(), &mut b);
-                    }
-                }
-            });
+                });
         }
     }
 
@@ -761,8 +763,17 @@ mod tests {
         b.erase(&mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "\r\x1b[1A\x1b[J");
         assert_eq!(b.drawn, 0);
-        let st = Style { color: false, tty: false };
-        let l = idle_line(st, "amsldoc.tex · build 1 · 44 pages", Some(true), "h: keys", 30);
+        let st = Style {
+            color: false,
+            tty: false,
+        };
+        let l = idle_line(
+            st,
+            "amsldoc.tex · build 1 · 44 pages",
+            Some(true),
+            "h: keys",
+            30,
+        );
         assert!(width(&l) <= 30, "{l}");
     }
 }

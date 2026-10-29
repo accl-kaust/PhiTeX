@@ -165,7 +165,10 @@ fn a_final_read_sees_the_last_definition() {
     e.push(u, o.label, vec![x, v.int(7)]);
     let rep = e.evaluate(1).unwrap();
     assert_eq!(int(&e, r), 7, "the last definition, not the first");
-    assert!(o.ref_runs.0.load(Ordering::Relaxed) <= 2, "once on nothing, once on the value");
+    assert!(
+        o.ref_runs.0.load(Ordering::Relaxed) <= 2,
+        "once on nothing, once on the value"
+    );
     assert!(rep.capped.is_empty());
     assert!(e.check_invariants().is_empty());
 }
@@ -201,7 +204,11 @@ fn a_predicted_label_runs_its_reader_once() {
     e.push(u, o.predicted_label, vec![x, v.int(7)]);
     let rep = e.evaluate(1).unwrap();
     assert_eq!(int(&e, r), 7);
-    assert_eq!(o.ref_runs.0.load(Ordering::Relaxed), 1, "the prediction was right: no rerun");
+    assert_eq!(
+        o.ref_runs.0.load(Ordering::Relaxed),
+        1,
+        "the prediction was right: no rerun"
+    );
     assert!(rep.predictions_confirmed >= 1);
 }
 
@@ -244,7 +251,10 @@ fn a_loop_that_never_settles_is_capped() {
     assert!(t.elapsed() < std::time::Duration::from_secs(5));
     assert_eq!(rep.capped, vec![r], "the reference is the capped reader: {rep:?}");
     assert!(Report::by_op(&rep.runs_by_op, "ref_flip") <= 8, "{rep:?}");
-    assert!(e.output(r).is_some() && e.output(l).is_some(), "both keep their last answer");
+    assert!(
+        e.output(r).is_some() && e.output(l).is_some(),
+        "both keep their last answer"
+    );
 }
 
 #[test]

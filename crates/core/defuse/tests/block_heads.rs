@@ -78,6 +78,10 @@ fn a_blocks_definers_run_before_the_readers_they_re_ask() {
             runs <= bound,
             "-j{threads}: {runs} reader runs for {READERS} readers (at most {bound}): the readers ran between the definers: {rep:?}"
         );
-        assert!(e.check_invariants().is_empty(), "-j{threads}: {:?}", e.check_invariants());
+        assert!(
+            e.check_invariants().is_empty(),
+            "-j{threads}: {:?}",
+            e.check_invariants()
+        );
     }
 }

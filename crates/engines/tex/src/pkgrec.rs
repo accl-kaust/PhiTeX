@@ -106,7 +106,10 @@ pub(crate) fn node_key(text: &str) -> String {
 
 /// A document node's key from its text as run.
 fn text_key(t: &str) -> String {
-    format!("n:{:016x}", phitex_defuse::hash_bytes(0x6e6f_6465, t.as_bytes()))
+    format!(
+        "n:{:016x}",
+        phitex_defuse::hash_bytes(0x6e6f_6465, t.as_bytes())
+    )
 }
 
 /// Whether `key` is a document node's ([`node_key`]), not a load's.
@@ -134,7 +137,11 @@ fn args_text(v: &Values, args: &[ValueId]) -> Option<String> {
 
 /// The record key of a node from its arguments: a document slice's
 /// [`node_key`].
-pub(crate) fn args_key(_reg: &crate::hints::Registry, v: &Values, args: &[ValueId]) -> Option<String> {
+pub(crate) fn args_key(
+    _reg: &crate::hints::Registry,
+    v: &Values,
+    args: &[ValueId],
+) -> Option<String> {
     args_text(v, args).map(|t| node_key(&t))
 }
 
@@ -146,10 +153,7 @@ pub(crate) fn is_recorded(reg: &crate::hints::Registry, v: &Values, args: &[Valu
     if is_load(v, args) {
         return true;
     }
-    if args
-        .get(1)
-        .is_none_or(|&t| !matches!(int_of(v, t), 2 | 3))
-    {
+    if args.get(1).is_none_or(|&t| !matches!(int_of(v, t), 2 | 3)) {
         return false;
     }
     let Some(&fr) = args.first() else {

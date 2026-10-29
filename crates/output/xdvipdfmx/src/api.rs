@@ -578,7 +578,8 @@ impl Session {
         rec: &crate::pdfdoc::EndRec,
     ) -> Result<(Vec<u8>, Vec<(&'static str, u64)>, bool)> {
         let mut done = false;
-        let (bytes, times) = self.finish_with(clock, crate::pdfdoc::EndMode::Replay(rec, &mut done))?;
+        let (bytes, times) =
+            self.finish_with(clock, crate::pdfdoc::EndMode::Replay(rec, &mut done))?;
         Ok((bytes, times, done))
     }
 
@@ -944,7 +945,9 @@ mod tests {
     /// batch (backwards, as a parallel host may) if `batch`.
     fn cmr10_page(glyph_runs: bool, batch: bool) -> (Vec<u8>, Vec<GlyphRun>, usize) {
         let (mut s, batched) = cmr10_session(glyph_runs, batch);
-        let page = s.page(&cmr10_shows(b"A")).unwrap_or_else(|e| panic!("page: {e}"));
+        let page = s
+            .page(&cmr10_shows(b"A"))
+            .unwrap_or_else(|e| panic!("page: {e}"));
         let mut pdf = page.pdf;
         pdf.extend(s.finish().unwrap_or_else(|e| panic!("finish: {e}")));
         (
@@ -974,7 +977,10 @@ mod tests {
     /// A session that finds cmr10's files, the end's streams compressed
     /// in a batch (backwards, as a parallel host may) if `batch`, and how
     /// many streams the batches had.
-    fn cmr10_session(glyph_runs: bool, batch: bool) -> (Session, Arc<core::sync::atomic::AtomicUsize>) {
+    fn cmr10_session(
+        glyph_runs: bool,
+        batch: bool,
+    ) -> (Session, Arc<core::sync::atomic::AtomicUsize>) {
         /// cmr10's metrics and Type 1 program, whatever the suffix asked.
         struct Cmr10;
         impl Files for Cmr10 {
@@ -1043,7 +1049,10 @@ mod tests {
             u.page(&cmr10_shows(b"C")).expect("page");
             let mut v = u.snapshot();
             let (got, _, replayed) = u.finish_replaying(&|| 0, &rec).expect("finish");
-            assert!(!replayed, "batch {batch}: replayed with another character used");
+            assert!(
+                !replayed,
+                "batch {batch}: replayed with another character used"
+            );
             let want = v.finish().expect("finish");
             assert!(got == want, "batch {batch}: the end written whole differs");
             // (a page with the same characters: replayed, as written whole)
@@ -1052,7 +1061,10 @@ mod tests {
             let mut v = u.snapshot();
             let (got, _, replayed) = u.finish_replaying(&|| 0, &rec).expect("finish");
             let want = v.finish().expect("finish");
-            assert!(!replayed || got == want, "batch {batch}: a page more, the replayed end differs");
+            assert!(
+                !replayed || got == want,
+                "batch {batch}: a page more, the replayed end differs"
+            );
         }
     }
 

@@ -717,7 +717,8 @@ impl Run<'_, '_> {
     /// past sixteen in fields of their own (`famx:<size>:<n>`).
     pub(crate) fn fam_loc(&mut self, size: i32, n: i32) -> crate::state::Loc {
         if self.xe && n >= 16 {
-            let prefix = ["famx:0", "famx:1", "famx:2"][usize::try_from(size / 16).unwrap_or(0).min(2)];
+            let prefix =
+                ["famx:0", "famx:1", "famx:2"][usize::try_from(size / 16).unwrap_or(0).min(2)];
             return self.numbered_loc(prefix, n.into());
         }
         crate::fields::fam_slot(size, n)
@@ -744,7 +745,9 @@ impl Run<'_, '_> {
         let count = self.font_int(f, crate::fields::FontCell::Fdn)?;
         if n > count {
             // (§578: only the font loaded last, `font_ptr`, grows)
-            let last = self.get("fontlast")?.map_or(0, |x| crate::val::int_of(self.v, x));
+            let last = self
+                .get("fontlast")?
+                .map_or(0, |x| crate::val::int_of(self.v, x));
             if f != last || f == 0 {
                 return Ok(None);
             }
@@ -797,7 +800,10 @@ impl Run<'_, '_> {
                     } else {
                         m
                     };
-                    let x = if self.xe && c == cmd::ASSIGN_TOKS && loc == crate::xetex::INTER_CHAR_LOC {
+                    let x = if self.xe
+                        && c == cmd::ASSIGN_TOKS
+                        && loc == crate::xetex::INTER_CHAR_LOC
+                    {
                         let f = self.ic_field()?;
                         self.read_f(f)?
                     } else {
@@ -1081,7 +1087,10 @@ impl Run<'_, '_> {
                 self.ck()?;
                 // (§120: the list fills TeX's main memory)
                 if body.len() >= crate::input::MAIN_MEMORY {
-                    return self.fatal(&format!("TeX capacity exceeded, sorry [main memory size={}]", crate::input::MAIN_MEMORY));
+                    return self.fatal(&format!(
+                        "TeX capacity exceeded, sorry [main memory size={}]",
+                        crate::input::MAIN_MEMORY
+                    ));
                 }
             } else {
                 // (§473: no meaning is needed here except a control

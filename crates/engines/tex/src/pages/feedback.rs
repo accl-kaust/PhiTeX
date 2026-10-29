@@ -15,8 +15,8 @@
 use std::fmt::Write as _;
 
 use super::{
-    Contents, FoldState, IGNORE_DEPTH, Locality, MAX_DIMEN, R, Run, RunReaching, ValueId, Values, glue_of,
-    glue_value, int_of, list_of, node_of, nodes, params_of, some,
+    Contents, FoldState, IGNORE_DEPTH, Locality, MAX_DIMEN, R, Run, RunReaching, ValueId, Values,
+    glue_of, glue_value, int_of, list_of, node_of, nodes, params_of, some,
 };
 
 /// The named cases of a lower layer reading a higher one's result.
@@ -117,7 +117,8 @@ impl Feedback {
 }
 
 /// The misses per case ([`Feedback::missed`]).
-static MISSES: [std::sync::atomic::AtomicU64; 9] = [const { std::sync::atomic::AtomicU64::new(0) }; 9];
+static MISSES: [std::sync::atomic::AtomicU64; 9] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 9];
 
 /// The page a piece is on, where it begins: defined by the finisher of
 /// the page before (`SPEC.md` §3.2 "where the next page begins"), read
@@ -175,8 +176,12 @@ impl Run<'_, '_> {
             }
             Ok(r.eng_read(f)?)
         };
-        let a = part(self, PAGE_START_ANCHOR)?.map(|x| list_of(v, x)).unwrap_or_default();
-        let fold = part(self, PAGE_START_FOLD)?.map(|x| list_of(v, x)).unwrap_or_default();
+        let a = part(self, PAGE_START_ANCHOR)?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
+        let fold = part(self, PAGE_START_FOLD)?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
         let params = part(self, PAGE_START_PARAMS)?.and_then(some);
         let head = part(self, PAGE_START_HEAD)?;
         let n = |xs: &[ValueId], i: usize| xs.get(i).map_or(-1, |&x| int_of(v, x));
@@ -192,8 +197,15 @@ impl Run<'_, '_> {
                 crate::build::IGNORE_DEPTH_STATE
             },
             params,
-            prof: head.map(|x| list_of(v, x).into_iter().map(|y| int_of(v, y)).collect()).unwrap_or_default(),
-            tail: (n(&a, 1) >= 0).then(|| ((n(&a, 2) != -1).then(|| node_of(n(&a, 2))), u32::try_from(n(&a, 1)).unwrap_or(0))),
+            prof: head
+                .map(|x| list_of(v, x).into_iter().map(|y| int_of(v, y)).collect())
+                .unwrap_or_default(),
+            tail: (n(&a, 1) >= 0).then(|| {
+                (
+                    (n(&a, 2) != -1).then(|| node_of(n(&a, 2))),
+                    u32::try_from(n(&a, 1)).unwrap_or(0),
+                )
+            }),
         })
     }
 
@@ -231,12 +243,25 @@ impl Run<'_, '_> {
         mat.extend(xs.get(4).map(|&x| list_of(v, x)).unwrap_or_default());
         self.resolve_page_params(&mut mat, true)?;
         let anchor = c.brk.map_or(-1, |b| b.0);
-        let (k, after) = if xs.len() > 7 && n(6) >= 0 { (n(6), n(7)) } else { (-1, -1) };
+        let (k, after) = if xs.len() > 7 && n(6) >= 0 {
+            (n(6), n(7))
+        } else {
+            (-1, -1)
+        };
         let defs = [
-            (PAGE_START_ANCHOR, v.list(vec![v.int(anchor), v.int(k), v.int(after)])),
-            (PAGE_START_FOLD, v.list(vec![v.int(n(0)), v.int(n(1)), v.int(n(2))])),
+            (
+                PAGE_START_ANCHOR,
+                v.list(vec![v.int(anchor), v.int(k), v.int(after)]),
+            ),
+            (
+                PAGE_START_FOLD,
+                v.list(vec![v.int(n(0)), v.int(n(1)), v.int(n(2))]),
+            ),
             (PAGE_START_PARAMS, params.unwrap_or(ValueId::UNIT)),
-            (PAGE_START_HEAD, crate::vprof::value(v, &crate::vprof::encode(v, &mat))),
+            (
+                PAGE_START_HEAD,
+                crate::vprof::value(v, &crate::vprof::encode(v, &mat)),
+            ),
         ];
         for (name, x) in defs {
             self.cx.define_with(v.field(name), x, Locality::Global);
@@ -320,7 +345,13 @@ impl Run<'_, '_> {
     /// and what the text set since the page before fired in piece
     /// `since` ([`Run::text_params_since`]); a marker with values sets
     /// `cur`.
-    fn text_resolve(&mut self, pid: i64, since: i64, cur: &mut Option<crate::pages::PageParams>, items: &mut [crate::vprof::PItem]) -> R<()> {
+    fn text_resolve(
+        &mut self,
+        pid: i64,
+        since: i64,
+        cur: &mut Option<crate::pages::PageParams>,
+        items: &mut [crate::vprof::PItem],
+    ) -> R<()> {
         use crate::vprof::PItem;
         for x in items.iter_mut() {
             match x {
@@ -397,7 +428,9 @@ impl Run<'_, '_> {
         // (a `[tag]` marker on a later page: the parameters in force and
         // what the text set since the page before fired, as the builder
         // reads it, docs/spec-settle.md §2.1)
-        let since = s.anchor.map_or(-1, |a| i64::from_ne_bytes(a.raw().to_ne_bytes()));
+        let since = s
+            .anchor
+            .map_or(-1, |a| i64::from_ne_bytes(a.raw().to_ne_bytes()));
         let mut cur = st.params;
         let mut items = vec![crate::vprof::decode(&s.prof)];
         self.text_resolve(-1, since, &mut cur, &mut items[0])?;

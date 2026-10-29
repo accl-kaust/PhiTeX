@@ -255,8 +255,15 @@ const NATIVE_COMMANDS: [(&str, &str); 6] = [
 /// The tests a document makes of its engine: one that has them runs under
 /// pdfTeX too, on its own branch.
 const ENGINE_TESTS: [&str; 9] = [
-    "\\ifxetex", "\\ifXeTeX", "\\ifluatex", "\\ifLuaTeX", "\\iftutex", "\\ifPDFTeX",
-    "\\ifpdftex", "\\ifxetexorluatex", "\\sys_if_engine",
+    "\\ifxetex",
+    "\\ifXeTeX",
+    "\\ifluatex",
+    "\\ifLuaTeX",
+    "\\iftutex",
+    "\\ifPDFTeX",
+    "\\ifpdftex",
+    "\\ifxetexorluatex",
+    "\\sys_if_engine",
 ];
 
 /// The engine `text` needs beyond pdfTeX, `xetex` or `luatex`, and why
@@ -326,9 +333,8 @@ fn uncommented(text: &str) -> String {
 /// Whether `text` has the control sequence `cmd` (not a longer name it
 /// begins).
 fn has_command(text: &str, cmd: &str) -> bool {
-    text.match_indices(cmd).any(|(i, _)| {
-        !text[i + cmd.len()..].starts_with(|c: char| c.is_ascii_alphabetic())
-    })
+    text.match_indices(cmd)
+        .any(|(i, _)| !text[i + cmd.len()..].starts_with(|c: char| c.is_ascii_alphabetic()))
 }
 
 /// The classes and packages `text` loads by name (`\documentclass`,
@@ -337,7 +343,12 @@ fn has_command(text: &str, cmd: &str) -> bool {
 #[must_use]
 pub fn packages(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    for cmd in ["\\documentclass", "\\LoadClass", "\\usepackage", "\\RequirePackage"] {
+    for cmd in [
+        "\\documentclass",
+        "\\LoadClass",
+        "\\usepackage",
+        "\\RequirePackage",
+    ] {
         for (i, _) in text.match_indices(cmd) {
             let mut rest = text[i + cmd.len()..].trim_start();
             if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
@@ -347,7 +358,9 @@ pub fn packages(text: &str) -> Vec<&str> {
                 let Some(j) = r.find(']') else { continue };
                 rest = r[j + 1..].trim_start();
             }
-            let Some(r) = rest.strip_prefix('{') else { continue };
+            let Some(r) = rest.strip_prefix('{') else {
+                continue;
+            };
             let Some(j) = r.find('}') else { continue };
             out.extend(r[..j].split(',').map(str::trim).filter(|n| !n.is_empty()));
         }
@@ -497,6 +510,9 @@ mod tests {
         assert_eq!(e("\\directluax"), None);
         assert_eq!(native_program("xetex", true), "xelatex");
         assert_eq!(native_program("luatex", false), "luatex");
-        assert_eq!(packages("\\documentclass[11pt]{mythesis}\\usepackage{a,b}"), vec!["mythesis", "a", "b"]);
+        assert_eq!(
+            packages("\\documentclass[11pt]{mythesis}\\usepackage{a,b}"),
+            vec!["mythesis", "a", "b"]
+        );
     }
 }

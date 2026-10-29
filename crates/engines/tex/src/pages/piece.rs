@@ -18,7 +18,12 @@
 //!   piece's later definitions stand over the routine's
 //!   ([`Run::give_way`]).
 
-use super::{Run, R, group, Halt, Par, nodes, list_of, int_of, ValueId, Field, str_of, InsertClass, glue_value, glue_of, PITEMS, Locality, Loc, BEFORE_PIECE, PAGE_FIELDS, MayDefine, Values, Line, Operation, toks_value, Seg, ContSlot, some, ContSaved, State, ContState, GDef, replaced, FoldState, IGNORE_DEPTH, toks_of, Shared, Effect, Ctx, Stop, ops, run_node};
+use super::{
+    BEFORE_PIECE, ContSaved, ContSlot, ContState, Ctx, Effect, Field, FoldState, GDef, Halt,
+    IGNORE_DEPTH, InsertClass, Line, Loc, Locality, MayDefine, Operation, PAGE_FIELDS, PITEMS, Par,
+    R, Run, Seg, Shared, State, Stop, ValueId, Values, glue_of, glue_value, group, int_of, list_of,
+    nodes, ops, replaced, run_node, some, str_of, toks_of, toks_value,
+};
 
 /// What a run had done when it passed a candidate: at its end, a page
 /// finishing at its last candidate finishes at the end of the piece iff
@@ -26,7 +31,10 @@ use super::{Run, R, group, Halt, Par, nodes, list_of, int_of, ValueId, Field, st
 /// finishing at an earlier one takes what the run defined after it
 /// (`stamp`, `gids`: [`State::defined_since_in_order`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools, reason = "a candidate's four independent facts")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a candidate's four independent facts"
+)]
 pub(crate) struct CandMark {
     pub k: u32,
     pub stamp: u64,
@@ -130,7 +138,8 @@ impl Run<'_, '_> {
         // and an empty line's `\par` in vertical mode, §1070)
         let open_cut = self.open_span() && self.cuttable_open();
         let cuttable = fresh
-            && ((can && !self.rest_blank()?) || ((restartable || open_cut) && self.stop_at == Some(k)));
+            && ((can && !self.rest_blank()?)
+                || ((restartable || open_cut) && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,
             stamp: self.st.stamp(),
@@ -657,7 +666,8 @@ impl Run<'_, '_> {
         // (decoded here, beside the other pieces, not on the steps' chain)
         let _ = crate::vprof::decoded(v, vunit);
         self.contribute(crate::vprof::VPROF, v.seq_unit(vunit));
-        let shape = crate::nodes::unit_shape(v, pid, raw, &self.line_fonts).unwrap_or(ValueId::UNIT);
+        let shape =
+            crate::nodes::unit_shape(v, pid, raw, &self.line_fonts).unwrap_or(ValueId::UNIT);
         let it = v.list(vec![
             v.int(pid),
             v.int(last.map_or(-1, i64::from)),
@@ -1034,11 +1044,18 @@ impl Run<'_, '_> {
         // the piece's and the candidate's, a change of the piece's state
         // at the cut a definition that changed, which reruns the rest in
         // place, docs/spec-continuations.md §2.2)
-        self.cx.define_with(cont_field(v, pid, k), v.list(vec![cont, v.int(rest)]), Locality::Global);
+        self.cx.define_with(
+            cont_field(v, pid, k),
+            v.list(vec![cont, v.int(rest)]),
+            Locality::Global,
+        );
         if let Some(t) = self.tool_cut {
             self.cx.follow(self.ops.toolnode, list_of(v, t));
         }
-        self.cx.follow(self.ops.resume, vec![v.int(flags), pid, v.int(i64::from(k))]);
+        self.cx.follow(
+            self.ops.resume,
+            vec![v.int(flags), pid, v.int(i64::from(k))],
+        );
         Ok(())
     }
 
@@ -1188,7 +1205,9 @@ impl Run<'_, '_> {
         let here_of = |c: Option<crate::run::FileLine>| -> Vec<ValueId> {
             match c {
                 Some(crate::run::FileLine::Known(n)) => vec![ValueId::UNIT, v.int(n)],
-                Some(crate::run::FileLine::Piece(name, own)) => crate::run::piece_here(v, name, own),
+                Some(crate::run::FileLine::Piece(name, own)) => {
+                    crate::run::piece_here(v, name, own)
+                }
                 None => Vec::new(),
             }
         };
@@ -1302,14 +1321,16 @@ impl Run<'_, '_> {
             if x == 0 {
                 0
             } else {
-                u64::try_from(stamps.partition_point(|&y| y < x)).unwrap_or(0) + u64::from(stamps[0] != 0)
+                u64::try_from(stamps.partition_point(|&y| y < x)).unwrap_or(0)
+                    + u64::from(stamps[0] != 0)
             }
         };
         let gid_of = |x: u32| -> u32 {
             if x == 0 {
                 0
             } else {
-                u32::try_from(gids.partition_point(|&y| y < x)).unwrap_or(0) + u32::from(gids[0] != 0)
+                u32::try_from(gids.partition_point(|&y| y < x)).unwrap_or(0)
+                    + u32::from(gids[0] != 0)
             }
         };
         let nest: Vec<ValueId> = self
@@ -1333,9 +1354,21 @@ impl Run<'_, '_> {
                     v.int(l.prev_graf),
                     v.list(l.extra.clone()),
                     v.int(i64::from(if closed { 0 } else { gid_of(l.gid) })),
-                    v.int(if closed { 0 } else { i64::try_from(l.save_base).unwrap_or(0) }),
-                    v.int(if closed { 0 } else { i64::try_from(l.def_base).unwrap_or(0) }),
-                    v.int(if closed { 0 } else { i64::from_ne_bytes(st_of(l.open_stamp).to_ne_bytes()) }),
+                    v.int(if closed {
+                        0
+                    } else {
+                        i64::try_from(l.save_base).unwrap_or(0)
+                    }),
+                    v.int(if closed {
+                        0
+                    } else {
+                        i64::try_from(l.def_base).unwrap_or(0)
+                    }),
+                    v.int(if closed {
+                        0
+                    } else {
+                        i64::from_ne_bytes(st_of(l.open_stamp).to_ne_bytes())
+                    }),
                     toks_value(v, &l.ag),
                 ])
             })
@@ -1372,7 +1405,11 @@ impl Run<'_, '_> {
                 locals.push(v.list(vec![f.0, opt_val(s.cur), after]));
             }
             let (stamp, local, gid) = s.ldef.map_or((-1, 0, None), |(st, l, g)| {
-                (i64::from_ne_bytes(st_of(st).to_ne_bytes()), i64::from(l), g.map(gid_of))
+                (
+                    i64::from_ne_bytes(st_of(st).to_ne_bytes()),
+                    i64::from(l),
+                    g.map(gid_of),
+                )
             });
             slots.push(v.list(vec![
                 f.0,
@@ -1544,13 +1581,16 @@ impl Run<'_, '_> {
         }
         // (the locations above were computed in the run's first state:
         // a field past the static cells has its location there, kept)
-        let mut ns = State::from_cont(v, ContState {
-            slots,
-            save,
-            defined,
-            stamp: u(sa(3)),
-            next_gid: u32::try_from(int_of(v, sa(4))).unwrap_or(0),
-        });
+        let mut ns = State::from_cont(
+            v,
+            ContState {
+                slots,
+                save,
+                defined,
+                stamp: u(sa(3)),
+                next_gid: u32::try_from(int_of(v, sa(4))).unwrap_or(0),
+            },
+        );
         ns.adopt_spill(&self.st);
         self.st = ns;
         if let Some(name) = crate::exec::obs_str!("PHITEX_CONT_SHOW") {
@@ -1680,8 +1720,15 @@ impl Run<'_, '_> {
         let v = self.v;
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
-        self.cx.define_with(cont_field(v, pid, CLOSE_K), v.list(vec![c, v.int(-1)]), Locality::Global);
-        self.cx.follow(self.ops.resume, vec![v.int(flags), pid, v.int(i64::from(CLOSE_K))]);
+        self.cx.define_with(
+            cont_field(v, pid, CLOSE_K),
+            v.list(vec![c, v.int(-1)]),
+            Locality::Global,
+        );
+        self.cx.follow(
+            self.ops.resume,
+            vec![v.int(flags), pid, v.int(i64::from(CLOSE_K))],
+        );
     }
 }
 
@@ -1742,7 +1789,10 @@ impl Operation for Resume {
             let xs = list_of(v, c);
             let cont = xs.first().copied().unwrap_or(ValueId::UNIT);
             r.cont_val = Some(cont);
-            r.cont_guess = xs.get(1).and_then(|&g| v.as_int(g)).and_then(|n| usize::try_from(n).ok());
+            r.cont_guess = xs
+                .get(1)
+                .and_then(|&g| v.as_int(g))
+                .and_then(|n| usize::try_from(n).ok());
             text = cont;
             r.cont_load(cont, a(1))?;
             r.run_all()
@@ -1797,7 +1847,11 @@ fn kv_kind(v: &Values, kv: ValueId) -> i64 {
 /// index (the third part, without values): each `(field, standing,
 /// kind, stretch)`, the stretch's number in the check data; and the
 /// candidates' cut flags' list.
-pub(crate) fn names_index_at(v: &Values, index: ValueId, k: u32) -> Vec<(ValueId, ValueId, i64, usize)> {
+pub(crate) fn names_index_at(
+    v: &Values,
+    index: ValueId,
+    k: u32,
+) -> Vec<(ValueId, ValueId, i64, usize)> {
     let k = i64::from(k);
     list_of(v, index)
         .as_chunks::<5>()

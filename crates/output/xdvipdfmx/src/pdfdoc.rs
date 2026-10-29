@@ -1560,7 +1560,8 @@ impl Dpx {
 
     /// `pdf_close_document`.
     pub fn pdf_close_document(&mut self) -> Result<()> {
-        self.pdf_close_document_timed(&|| 0, EndMode::Plain).map(|_| ())
+        self.pdf_close_document_timed(&|| 0, EndMode::Plain)
+            .map(|_| ())
     }
 
     /// What the end's fonts, colours and resources depend on that the

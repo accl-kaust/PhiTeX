@@ -6,7 +6,13 @@
 /// command, the document's name (not its text), the build, the engine's
 /// whole account (`internal`) and the errors shown. In the cache's
 /// `reports` directory; its path, or none where it could not be written.
-pub fn report_file(file: &str, why: &str, threads: usize, internal: &str, errors: &[String]) -> Option<std::path::PathBuf> {
+pub fn report_file(
+    file: &str,
+    why: &str,
+    threads: usize,
+    internal: &str,
+    errors: &[String],
+) -> Option<std::path::PathBuf> {
     let dir = crate::tex::cache_dir().join("reports");
     std::fs::create_dir_all(&dir).ok()?;
     let secs = std::time::SystemTime::now()
@@ -21,9 +27,16 @@ pub fn report_file(file: &str, why: &str, threads: usize, internal: &str, errors
         .map_or(0, |d| d.as_secs());
     let mut s = String::new();
     s.push_str("PhiTeX failure report\n");
-    s.push_str(&format!("version: {} (binary {}, built at unix {built})\n", env!("CARGO_PKG_VERSION"), exe.map_or_else(String::new, |p| p.display().to_string())));
+    s.push_str(&format!(
+        "version: {} (binary {}, built at unix {built})\n",
+        env!("CARGO_PKG_VERSION"),
+        exe.map_or_else(String::new, |p| p.display().to_string())
+    ));
     s.push_str(&format!("time: unix {secs}\n"));
-    s.push_str(&format!("command: {}\n", std::env::args().collect::<Vec<_>>().join(" ")));
+    s.push_str(&format!(
+        "command: {}\n",
+        std::env::args().collect::<Vec<_>>().join(" ")
+    ));
     s.push_str(&format!("document: {file}\n"));
     s.push_str(&format!("build: {why}, {threads} threads\n"));
     s.push_str("errors shown:\n");

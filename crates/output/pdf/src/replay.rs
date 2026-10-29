@@ -178,7 +178,11 @@ impl PdfState {
                 &stacks,
                 // (the last form shipped: a page's walk reads it not,
                 // and leaves it, `ship`)
-                (self.vf_cur_s, self.cur_s, if bare { 0 } else { self.cur_form }),
+                (
+                    self.vf_cur_s,
+                    self.cur_s,
+                    if bare { 0 } else { self.cur_form }
+                ),
             )
         )
     }
@@ -551,7 +555,11 @@ impl PdfState {
         // or after another form: the same bytes, its own entries put on
         // those, below, the form kept)
         let mut under = None;
-        if pre != rec.pre && !rec.below && known.is_none() && self.pre_key_with(true) == rec.pre_bare {
+        if pre != rec.pre
+            && !rec.below
+            && known.is_none()
+            && self.pre_key_with(true) == rec.pre_bare
+        {
             under = Some((self.stacks.page_stacks(), self.cur_form));
         } else if pre != rec.pre {
             let at = pre

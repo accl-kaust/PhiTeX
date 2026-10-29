@@ -560,7 +560,11 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             let f = r.scan_font_ident()?;
             if let Some(nf) = r.native_font(f)?.filter(|nf| is_gr(nf)) {
                 let a1 = r.scan_int()?;
-                let a2 = if c == cv::SELECTOR_NAME { r.scan_int()? } else { 0 };
+                let a2 = if c == cv::SELECTOR_NAME {
+                    r.scan_int()?
+                } else {
+                    0
+                };
                 let what = if c == cv::FEATURE_NAME {
                     phitex_otf::xetex::what::FEATURE_NAME
                 } else {
@@ -598,7 +602,9 @@ fn is_gr(nf: &crate::native::NativeFont) -> bool {
 /// <font>; not ...".
 fn font_error(r: &mut Run<'_, '_>, c: u8, code: i32, f: i64, what: &str) -> R<()> {
     let info = r.font_get(f, crate::fields::FontCell::Info)?;
-    let name = crate::fonts::info(r.v, info).map(|i| i.name).unwrap_or_default();
+    let name = crate::fonts::info(r.v, info)
+        .map(|i| i.name)
+        .unwrap_or_default();
     let p = prim_name(c, code);
     r.log("error", &format!("Cannot use \\{p} with {name}; {what}"))
 }
@@ -627,7 +633,11 @@ pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
                 .filter(|nf| is_gr(nf))
                 .map_or(0, |nf| nf.font.ot_font_get(what))
         }
-        li::VARIATION | li::VARIATION_MIN | li::VARIATION_MAX | li::VARIATION_DEFAULT | li::COUNT_VARIATIONS => {
+        li::VARIATION
+        | li::VARIATION_MIN
+        | li::VARIATION_MAX
+        | li::VARIATION_DEFAULT
+        | li::COUNT_VARIATIONS => {
             r.scan_font_ident()?;
             0
         }
@@ -776,9 +786,15 @@ pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
                 let fu = u32::try_from(f).unwrap_or(0);
                 r.add_font(&mut view, fu)?;
                 // (the null font: `font_bc` 1, `font_ec` 0)
-                view.fonts.get(fu).map_or(i32::from(m == li::FIRST_CHAR), |(l, _)| {
-                    i32::from(if m == li::FIRST_CHAR { l.tfm.bc } else { l.tfm.ec })
-                })
+                view.fonts
+                    .get(fu)
+                    .map_or(i32::from(m == li::FIRST_CHAR), |(l, _)| {
+                        i32::from(if m == li::FIRST_CHAR {
+                            l.tfm.bc
+                        } else {
+                            l.tfm.ec
+                        })
+                    })
             }
         }
         _ => {
@@ -804,7 +820,11 @@ pub(crate) fn native_char_dim(r: &mut Run<'_, '_>, f: i64, c: i32, m: i32) -> R<
             let x_height = r.font_dimen(f, 5)?;
             let cap = r.font_dimen(f, 8)?;
             let (h, d) = nf.font.char_height_depth(c, quad, x_height, cap);
-            if m == crate::etex::li::FONT_CHAR_HT { h } else { d }
+            if m == crate::etex::li::FONT_CHAR_HT {
+                h
+            } else {
+                d
+            }
         }
     }))
 }
@@ -834,7 +854,11 @@ fn xetex_glyph(r: &mut Run<'_, '_>, md: &crate::build::Mode) -> R<()> {
                 g = 0;
             }
             let n = r.native_glyph(&nf, f, u16::try_from(g).unwrap_or(0))?;
-            let x = crate::nodes::encode(r.v, &phitex_typeset::node::Node::Native(Box::new(n)), &crate::nodes::Side::default());
+            let x = crate::nodes::encode(
+                r.v,
+                &phitex_typeset::node::Node::Native(Box::new(n)),
+                &crate::nodes::Side::default(),
+            );
             r.append(md.lid, x);
         }
     }
@@ -924,7 +948,9 @@ pub(crate) fn line_breaks(loc: &str, text: &[u16]) -> Vec<usize> {
         "zh" => Some(&zh),
         _ => None,
     };
-    LineSegmenter::new_dictionary(options).segment_utf16(text).collect()
+    LineSegmenter::new_dictionary(options)
+        .segment_utf16(text)
+        .collect()
 }
 
 impl Run<'_, '_> {
@@ -1247,7 +1273,9 @@ impl Run<'_, '_> {
                 0
             };
         }
-        Ok(self.v.field(&format!("ict:{}", k[0] * CHAR_CLASS_LIMIT + k[1])))
+        Ok(self
+            .v
+            .field(&format!("ict:{}", k[0] * CHAR_CLASS_LIMIT + k[1])))
     }
 
     /// The tokens between classes `a` and `b`, where there are any.

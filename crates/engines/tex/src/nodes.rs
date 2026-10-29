@@ -8,7 +8,7 @@
 use phitex_defuse::{Value, ValueId, Values};
 use phitex_typeset::glue::{Glue, GlueSet, GlueSign};
 use phitex_typeset::node::{
-    BoxKind, BoxNode, Disc, Glyph, GlueKind, GlueNode, Insert, KernKind, Ligature, List, MathKind,
+    BoxKind, BoxNode, Disc, GlueKind, GlueNode, Glyph, Insert, KernKind, Ligature, List, MathKind,
     Native, NativeKind, Node, Rule, Unset,
 };
 
@@ -209,7 +209,11 @@ const OWN_SPEC: i64 = 1 << 16;
 /// ordinary glue of its own spec.
 fn glue_code(g: &GlueNode) -> i64 {
     let k = glue_kind_code(g.kind);
-    if g.own_spec && g.kind == GlueKind::Normal { k | OWN_SPEC } else { k }
+    if g.own_spec && g.kind == GlueKind::Normal {
+        k | OWN_SPEC
+    } else {
+        k
+    }
 }
 
 /// Whether a glue node's kind code says its spec is its own.
@@ -327,7 +331,11 @@ pub(crate) fn encode_box_with(v: &Values, b: &BoxNode, list: ValueId) -> ValueId
 #[inline]
 fn char_value(v: &Values, font: u32, ch: u16) -> ValueId {
     crate::val::char_node_id(v, font, ch, || {
-        v.list(vec![i(v, T_CHAR), i(v, i64::from(font)), i(v, i64::from(ch))])
+        v.list(vec![
+            i(v, T_CHAR),
+            i(v, i64::from(font)),
+            i(v, i64::from(ch)),
+        ])
     })
 }
 
@@ -515,7 +523,10 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
         // (its whatsits where the line is, in walk order: what the
         // shipping of the page does with them needs their data and
         // their order only, [`line_shape`])
-        if let Some(sk) = sealed_of(v, l).map(|s| s.skel).filter(|&x| x != ValueId::UNIT) {
+        if let Some(sk) = sealed_of(v, l)
+            .map(|s| s.skel)
+            .filter(|&x| x != ValueId::UNIT)
+        {
             let base = side.whats.len();
             let list = decode_list(v, sk, side);
             let n = side.whats.len() - base;
@@ -821,7 +832,9 @@ pub(crate) fn encode_line(
                     }
                 }
             }
-            Node::Penalty(_) | Node::Rule(_) | Node::Math(..) | Node::Language { .. } => encode(v, n, side),
+            Node::Penalty(_) | Node::Rule(_) | Node::Math(..) | Node::Language { .. } => {
+                encode(v, n, side)
+            }
             _ => {
                 plain = plain && native_walk(std::slice::from_ref(n), &mut fonts);
                 encode(v, n, side)
@@ -1085,7 +1098,11 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
         T_KERN => Node::Kern(g(1), kern_kind(xs.get(2).map_or(0, |&y| int_of(v, y)))),
         T_PENALTY => Node::Penalty(g(1)),
         T_NATIVE => {
-            let s = |k: usize| xs.get(k).map(|&y| crate::val::str_of(v, y)).unwrap_or_default();
+            let s = |k: usize| {
+                xs.get(k)
+                    .map(|&y| crate::val::str_of(v, y))
+                    .unwrap_or_default()
+            };
             Node::Native(Box::new(native_of_bytes(
                 match g(1) {
                     1 => NativeKind::WordText,
@@ -1120,7 +1137,12 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
 /// big-endian.
 fn native_bytes(n: &Native) -> (String, String) {
     let ch = |b: u8| char::from(b);
-    let text = n.text.iter().flat_map(|u| u.to_be_bytes()).map(ch).collect();
+    let text = n
+        .text
+        .iter()
+        .flat_map(|u| u.to_be_bytes())
+        .map(ch)
+        .collect();
     let glyphs = n
         .glyphs
         .iter()
@@ -1138,8 +1160,14 @@ fn native_bytes(n: &Native) -> (String, String) {
 
 /// [`native_bytes`] read back.
 fn native_of_bytes(kind: NativeKind, font: u32, whd: [i32; 3], text: &str, glyphs: &str) -> Native {
-    let tb: Vec<u8> = text.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(0)).collect();
-    let gb: Vec<u8> = glyphs.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(0)).collect();
+    let tb: Vec<u8> = text
+        .chars()
+        .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
+        .collect();
+    let gb: Vec<u8> = glyphs
+        .chars()
+        .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
+        .collect();
     let be4 = |b: &[u8]| i32::from_be_bytes([b[0], b[1], b[2], b[3]]);
     Native {
         kind,
@@ -1147,7 +1175,12 @@ fn native_of_bytes(kind: NativeKind, font: u32, whd: [i32; 3], text: &str, glyph
         width: whd[0],
         height: whd[1],
         depth: whd[2],
-        text: tb.as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes(*b)).collect(),
+        text: tb
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_be_bytes(*b))
+            .collect(),
         glyphs: gb
             .as_chunks::<10>()
             .0
@@ -1259,8 +1292,10 @@ pub(crate) fn int_field(v: &Values, x: ValueId, k: usize) -> i32 {
 
 /// Whether list value `l` is a sealed line's stand-in ([`T_SEALED`]).
 pub(crate) fn is_sealed(v: &Values, l: ValueId) -> bool {
-    v.with_list(l, |ys| matches!(ys.len(), 5 | 6) && v.as_int(ys[0]) == Some(T_SEALED))
-        .unwrap_or(false)
+    v.with_list(l, |ys| {
+        matches!(ys.len(), 5 | 6) && v.as_int(ys[0]) == Some(T_SEALED)
+    })
+    .unwrap_or(false)
 }
 
 /// The skeleton of shallow box `b`, a sealed line's, as the decoding
@@ -1369,18 +1404,24 @@ pub(crate) fn fill_sealed(
                 let stand_in = match b.list.as_slice() {
                     [Node::Whatsit(k, None)] if *k >= LAZY => {
                         let k = *k - LAZY;
-                        lazy.get(k as usize).and_then(|&l| sealed_of(v, l)).map(|s| (k, s))
+                        lazy.get(k as usize)
+                            .and_then(|&l| sealed_of(v, l))
+                            .map(|s| (k, s))
                     }
                     _ => None,
                 };
                 match stand_in {
                     Some((k, s)) => {
                         let Some(x) = line(&s) else { return false };
-                        let Some(xs) = v.with_list(x, |xs| <[ValueId; 10]>::try_from(xs).ok()).flatten() else {
+                        let Some(xs) = v
+                            .with_list(x, |xs| <[ValueId; 10]>::try_from(xs).ok())
+                            .flatten()
+                        else {
                             return false;
                         };
                         let mut side = Side::default();
-                        let mut list = take_made(xs[9], &mut side).unwrap_or_else(|| decode_list(v, xs[9], &mut side));
+                        let mut list = take_made(xs[9], &mut side)
+                            .unwrap_or_else(|| decode_list(v, xs[9], &mut side));
                         // (its whatsits numbered where its skeleton's
                         // decoding numbered them on the page's table)
                         let (base, n) = bases
@@ -1413,7 +1454,11 @@ pub(crate) fn fill_sealed(
 
 /// The boxes [`fill_sealed`] filled back as they were (`saved`, in its
 /// walk's order, taken from the back), so the box is the shape again.
-pub(crate) fn unfill_sealed(list: &mut [Node], seen: &mut usize, saved: &mut std::collections::VecDeque<(usize, GlueSet, List)>) {
+pub(crate) fn unfill_sealed(
+    list: &mut [Node],
+    seen: &mut usize,
+    saved: &mut std::collections::VecDeque<(usize, GlueSet, List)>,
+) {
     for n in list.iter_mut() {
         match n {
             Node::Box(b) => {
@@ -1465,7 +1510,11 @@ impl FontIds {
     }
 
     pub(crate) fn as_slice(&self) -> &[u32] {
-        if self.more.is_empty() { &self.few[..self.n] } else { &self.more }
+        if self.more.is_empty() {
+            &self.few[..self.n]
+        } else {
+            &self.more
+        }
     }
 }
 
@@ -1492,9 +1541,15 @@ fn native_walk(l: &[Node], out: &mut FontIds) -> bool {
             true
         }
         Node::Box(b) => native_walk(&b.list, out),
-        Node::Disc(d) => native_walk(&d.pre, out) && native_walk(&d.post, out) && native_walk(&d.replace, out),
+        Node::Disc(d) => {
+            native_walk(&d.pre, out) && native_walk(&d.post, out) && native_walk(&d.replace, out)
+        }
         Node::Glue(g) => g.leader.is_none(),
-        Node::Rule(_) | Node::Language { .. } | Node::Math(..) | Node::Kern(..) | Node::Penalty(_) => true,
+        Node::Rule(_)
+        | Node::Language { .. }
+        | Node::Math(..)
+        | Node::Kern(..)
+        | Node::Penalty(_) => true,
         _ => false,
     })
 }
@@ -1623,7 +1678,9 @@ pub(crate) fn unit_shape(
                     if ys.len() != 5 || v.as_int(ys[0]) != Some(T_VBOX) {
                         return None;
                     }
-                    let bx = v.with_list(ys[1], |xs| <[ValueId; 10]>::try_from(xs).ok()).flatten()?;
+                    let bx = v
+                        .with_list(ys[1], |xs| <[ValueId; 10]>::try_from(xs).ok())
+                        .flatten()?;
                     if v.as_int(bx[0]) != Some(T_BOX) {
                         return None;
                     }
@@ -1680,7 +1737,13 @@ mod tests {
             v.int(5),
             v.list(list),
         ]);
-        v.list(vec![v.int(T_VBOX), b, ValueId::UNIT, ValueId::UNIT, v.int(0)])
+        v.list(vec![
+            v.int(T_VBOX),
+            b,
+            ValueId::UNIT,
+            ValueId::UNIT,
+            v.int(0),
+        ])
     }
 
     /// A line of characters is sealed (its glue setting zero, its list a
@@ -1703,12 +1766,23 @@ mod tests {
         assert_eq!(b[..6], real[..6]);
         assert_eq!(v.as_int(b[8]), Some(0));
         let s = sealed_of(&v, b[9]).expect("a stand-in");
-        assert_eq!((s.piece, s.k, s.head, s.skel), (77, 1, head_hash(&real[..6]), ValueId::UNIT));
-        assert_eq!(list_of(&v, s.fonts).iter().map(|&f| v.as_int(f)).collect::<Vec<_>>(), [Some(1), Some(3)]);
+        assert_eq!(
+            (s.piece, s.k, s.head, s.skel),
+            (77, 1, head_hash(&real[..6]), ValueId::UNIT)
+        );
+        assert_eq!(
+            list_of(&v, s.fonts)
+                .iter()
+                .map(|&f| v.as_int(f))
+                .collect::<Vec<_>>(),
+            [Some(1), Some(3)]
+        );
         assert_eq!(unit_shape(&v, 77, &[placed], &none), None);
         let x = v.list(b.clone());
         let mut side = Side::default();
-        let Some(Node::Box(d)) = decode(&v, x, &mut side) else { panic!("a box") };
+        let Some(Node::Box(d)) = decode(&v, x, &mut side) else {
+            panic!("a box")
+        };
         assert!(lazy_list(&d, &side).is_some_and(|l| is_sealed(&v, l)));
         assert_eq!(encode_box(&v, &d, &side), x);
     }
@@ -1731,35 +1805,69 @@ mod tests {
         let v = Values::new();
         let ch = |f: i64, c: i64| v.list(vec![v.int(T_CHAR), v.int(f), v.int(c)]);
         let what = |k: &str| v.list(vec![v.int(T_WHATSIT), v.list(vec![v.str(k), v.int(1)])]);
-        let inner = list_of(&v, line(&v, vec![what("pdf:startlink"), ch(2, 66), what("pdf:endlink")]))[1];
+        let inner = list_of(
+            &v,
+            line(
+                &v,
+                vec![what("pdf:startlink"), ch(2, 66), what("pdf:endlink")],
+            ),
+        )[1];
         let ln = line(&v, vec![ch(3, 65), what("write"), inner, ch(3, 67)]);
         let none = crate::FxHashMap::default();
         let shape = unit_shape(&v, 5, &[ln], &none).expect("sealed");
         let b = list_of(&v, list_of(&v, list_of(&v, shape)[0])[1]);
         let s = sealed_of(&v, b[9]).expect("a stand-in");
         assert_ne!(s.skel, ValueId::UNIT);
-        assert_eq!(list_of(&v, s.fonts).iter().map(|&f| v.as_int(f)).collect::<Vec<_>>(), [Some(2), Some(3)]);
+        assert_eq!(
+            list_of(&v, s.fonts)
+                .iter()
+                .map(|&f| v.as_int(f))
+                .collect::<Vec<_>>(),
+            [Some(2), Some(3)]
+        );
         // a page: a whatsit, then the line
         let page = v.list(vec![
-            v.int(T_BOX), v.int(1), v.int(0), v.int(0), v.int(0), v.int(0), v.int(0), v.int(0), v.int(0),
+            v.int(T_BOX),
+            v.int(1),
+            v.int(0),
+            v.int(0),
+            v.int(0),
+            v.int(0),
+            v.int(0),
+            v.int(0),
+            v.int(0),
             v.list(vec![what("open"), v.list(b.clone())]),
         ]);
         let mut side = Side::default();
-        let Some(Node::Box(mut pg)) = decode(&v, page, &mut side) else { panic!("a box") };
+        let Some(Node::Box(mut pg)) = decode(&v, page, &mut side) else {
+            panic!("a box")
+        };
         let kinds: Vec<String> = side
             .whats
             .iter()
             .map(|&w| crate::val::str_of(&v, list_of(&v, w)[0]))
             .collect();
         assert_eq!(kinds, ["open", "write", "pdf:startlink", "pdf:endlink"]);
-        let Node::Box(l) = &pg.list[1] else { panic!("the line") };
+        let Node::Box(l) = &pg.list[1] else {
+            panic!("the line")
+        };
         assert_eq!(sealed_skeleton(l, &side).map(<[Node]>::len), Some(2));
         let bases = sealed_bases(&side);
         assert_eq!(bases, [(0, 1, 3)]);
         let real = list_of(&v, ln)[1];
         let mut saved = Vec::new();
-        assert!(fill_sealed(&v, &mut pg.list, &side.lazy, &bases, &mut |_| Some(real), &mut 0, &mut saved));
-        let Node::Box(l) = &pg.list[1] else { panic!("the line") };
+        assert!(fill_sealed(
+            &v,
+            &mut pg.list,
+            &side.lazy,
+            &bases,
+            &mut |_| Some(real),
+            &mut 0,
+            &mut saved
+        ));
+        let Node::Box(l) = &pg.list[1] else {
+            panic!("the line")
+        };
         let mut hs = Vec::new();
         handles(&l.list, &mut hs);
         assert_eq!(hs, [1, 2, 3]);

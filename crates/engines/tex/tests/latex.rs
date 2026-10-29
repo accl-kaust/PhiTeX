@@ -645,7 +645,8 @@ fn latex_marginpars_settle() {
     let dir = common::fixtures().join("latex/pdfdocs");
     for name in ["marginpars20", "marginpars28"] {
         let src = common::read(&dir.join(format!("{name}.tex")));
-        let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf"))).expect("the oracle");
+        let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+            .expect("the oracle");
         for threads in [1, 8] {
             let opts = Options {
                 threads: Some(threads),
@@ -685,7 +686,8 @@ fn latex_twocol_floats_runs() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let name = "floats2col";
     let src = common::read(&dir.join(format!("{name}.tex")));
-    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf"))).expect("the oracle");
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
     let mut bad = Vec::new();
     for (threads, bound) in [(1u64, 2u64), (8, 3)] {
         let opts = Options {
@@ -697,7 +699,13 @@ fn latex_twocol_floats_runs() {
         let wall = t0.elapsed();
         let (pdf, _) = b.output();
         let fires = b.live_by_op().get("finish").copied().unwrap_or(0);
-        let by = |op: &str| b.stats.runs_by_op.iter().find(|x| x.0 == op).map_or(0, |x| x.1);
+        let by = |op: &str| {
+            b.stats
+                .runs_by_op
+                .iter()
+                .find(|x| x.0 == op)
+                .map_or(0, |x| x.1)
+        };
         eprintln!(
             "{name} -j {threads}: {fires} fires, {} finisher runs, {} page loop runs, {} pages, wall {wall:?}\n  {}",
             by("finish"),
@@ -709,7 +717,10 @@ fn latex_twocol_floats_runs() {
             bad.push(format!("-j {threads}: pdf {d}"));
         }
         if by("finish") > bound * fires {
-            bad.push(format!("-j {threads}: {} finisher runs for {fires} fires (bound {bound}x)", by("finish")));
+            bad.push(format!(
+                "-j {threads}: {} finisher runs for {fires} fires (bound {bound}x)",
+                by("finish")
+            ));
         }
     }
     assert!(bad.is_empty(), "{name}: {bad:?}");
@@ -734,7 +745,8 @@ fn at_one_thread_no_run_is_refuted() {
     let mut bad = Vec::new();
     for name in ["floats2col", "marginpars28", "tikz"] {
         let src = common::read(&dir.join(format!("{name}.tex")));
-        let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf"))).expect("the oracle");
+        let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+            .expect("the oracle");
         let opts = Options {
             threads: Some(1),
             ..pdf_opts(name, &dir)
@@ -749,7 +761,8 @@ fn at_one_thread_no_run_is_refuted() {
         if let Some(d) = common::first_difference(&pdf, &want) {
             bad.push(format!("{name}: pdf {d}"));
         }
-        if s.refuted_nodes != 0 || s.runs != s.nodes_run + s.resumptions || s.resumptions > s.parks {
+        if s.refuted_nodes != 0 || s.runs != s.nodes_run + s.resumptions || s.resumptions > s.parks
+        {
             bad.push(format!(
                 "{name}: {} runs of {} nodes, {} refuted, {} resumed of {} parks ({} thrown away)",
                 s.runs,
@@ -778,7 +791,8 @@ fn floats2col_routines_run_once_per_fire() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let name = "floats2col";
     let src = common::read(&dir.join(format!("{name}.tex")));
-    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf"))).expect("the oracle");
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
     let mut bad = Vec::new();
     for threads in [1u64, 8] {
         let opts = Options {
@@ -788,14 +802,25 @@ fn floats2col_routines_run_once_per_fire() {
         let b = common::build(opts, Some(&prelude(true)), &src);
         let (pdf, _) = b.output();
         let fires = b.live_by_op().get("finish").copied().unwrap_or(0);
-        let runs = b.stats.runs_by_op.iter().find(|x| x.0 == "finish").map_or(0, |x| x.1);
+        let runs = b
+            .stats
+            .runs_by_op
+            .iter()
+            .find(|x| x.0 == "finish")
+            .map_or(0, |x| x.1);
         eprintln!("{name} -j {threads}: {fires} fires, {runs} finisher runs");
         if let Some(d) = common::first_difference(&pdf, &want) {
             bad.push(format!("-j {threads}: pdf {d}"));
         }
-        let ok = if threads == 1 { runs == fires } else { runs * 10 <= fires * 11 };
+        let ok = if threads == 1 {
+            runs == fires
+        } else {
+            runs * 10 <= fires * 11
+        };
         if !ok {
-            bad.push(format!("-j {threads}: {runs} finisher runs for {fires} fires"));
+            bad.push(format!(
+                "-j {threads}: {runs} finisher runs for {fires} fires"
+            ));
         }
     }
     assert!(bad.is_empty(), "{name}: {bad:?}");
@@ -1252,7 +1277,6 @@ fn latexmk_corpus_center_edit() {
     }
 }
 
-
 // (a group-local binding around a read-back file, its close after the
 // file's units: restored there, and a written file's lines in TeX's
 // order; then the tools a read runs)
@@ -1542,7 +1566,10 @@ fn latexmk_minted(threads: usize) {
         .join(format!("{name}-j{threads}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
-    for e in std::fs::read_dir(fx.join(name)).expect("the sources").flatten() {
+    for e in std::fs::read_dir(fx.join(name))
+        .expect("the sources")
+        .flatten()
+    {
         std::fs::copy(e.path(), dir.join(e.file_name())).expect("a source");
     }
     let path = std::env::var("PATH").unwrap_or_default();
@@ -1586,7 +1613,10 @@ fn latexmk_minted(threads: usize) {
     if let Some(d) = common::first_difference(&b.output().0, &want) {
         panic!("{name} -j {threads}: {d}");
     }
-    assert_eq!(b.stats.shell_passes, 1, "{name} -j {threads}: evaluations again for the commands' files");
+    assert_eq!(
+        b.stats.shell_passes, 1,
+        "{name} -j {threads}: evaluations again for the commands' files"
+    );
     // (the first listing edited)
     let new = common::read(&fx.join(format!("{name}.edit.tex")));
     b.edit(&new);
@@ -1674,14 +1704,25 @@ fn latex_glyph_origins() {
     let f = common::origin_failures(&b, &src, "envs.tex");
     assert!(f.is_empty(), "origins:\n{}", f.join("\n"));
     let b8 = build(&src, 8);
-    assert_eq!(b8.all_page_origins(), b.all_page_origins(), "-j8's origins are -j1's");
+    assert_eq!(
+        b8.all_page_origins(),
+        b.all_page_origins(),
+        "-j8's origins are -j1's"
+    );
     let _ = b.origins_changed();
     let new = quack(&src, "Item 3 of the list: the quick ");
     b.edit(&new);
     let (changed, _) = b.origins_changed();
-    eprintln!("envs: origins changed on pages {changed:?} of {}", b.pages().len());
+    eprintln!(
+        "envs: origins changed on pages {changed:?} of {}",
+        b.pages().len()
+    );
     let cold = build(&new, 1);
-    assert_eq!(b.all_page_origins(), cold.all_page_origins(), "the edit's origins are a cold build's");
+    assert_eq!(
+        b.all_page_origins(),
+        cold.all_page_origins(),
+        "the edit's origins are a cold build's"
+    );
     let f = common::origin_failures(&b, &new, "envs.tex");
     assert!(f.is_empty(), "origins after the edit:\n{}", f.join("\n"));
 }
@@ -1698,7 +1739,11 @@ fn latex_aux_on_disk_outside_a_fixpoint() {
     let art = "\\documentclass{article}\n\\begin{document}\n\\section{Origins}\nOrigins tell a viewer where each glyph of a page came from in the source,\nso that a double click finds the word.\n\n\\section{Lines}\nA second paragraph, with \\emph{emphasis} and a footnote\\footnote{The\nfootnote's text.} in it, ends here.\n\\end{document}\n";
     let aux = "\\relax \n\\@writefile{toc}{\\contentsline {section}{\\numberline {1}Origins}{1}{}\\protected@file@percent }\n\\gdef \\@abspage@last{1}\n";
     let mut pages = Vec::new();
-    for (name, aux) in [("none", None), ("relax", Some("\\relax \n")), ("full", Some(aux))] {
+    for (name, aux) in [
+        ("none", None),
+        ("relax", Some("\\relax \n")),
+        ("full", Some(aux)),
+    ] {
         let dir = common::scratch(&format!("aux-on-disk-{name}"));
         std::fs::write(dir.join("art.tex"), art).unwrap();
         if let Some(a) = aux {
@@ -1711,8 +1756,17 @@ fn latex_aux_on_disk_outside_a_fixpoint() {
             ..pdf_opts("art", &dir)
         };
         let b = common::build(opts, Some(&prelude(true)), art);
-        let stuck: Vec<String> = b.diagnostics().into_iter().map(|d| d.message).filter(|m| m.contains("stuck") || m.contains("deadline")).collect();
-        assert!(stuck.is_empty(), "{name}: the build ends, not stuck, after {:?}: {stuck:?}", t.elapsed());
+        let stuck: Vec<String> = b
+            .diagnostics()
+            .into_iter()
+            .map(|d| d.message)
+            .filter(|m| m.contains("stuck") || m.contains("deadline"))
+            .collect();
+        assert!(
+            stuck.is_empty(),
+            "{name}: the build ends, not stuck, after {:?}: {stuck:?}",
+            t.elapsed()
+        );
         if let Ok(out) = std::env::var("PHITEX_TEST_OUT") {
             let (pdf, log) = b.output();
             let _ = std::fs::write(format!("{out}/aux-{name}.pdf"), pdf);
@@ -1725,6 +1779,9 @@ fn latex_aux_on_disk_outside_a_fixpoint() {
         if let Some(d) = common::first_difference(pdf, &pages[0].1.0) {
             panic!("{name}: the PDF differs from the one built without the .aux: {d}");
         }
-        assert_eq!(log, &pages[0].1.1, "{name}: the log is the one built without the .aux");
+        assert_eq!(
+            log, &pages[0].1.1,
+            "{name}: the log is the one built without the .aux"
+        );
     }
 }

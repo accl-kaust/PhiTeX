@@ -58,7 +58,14 @@ impl Run<'_, '_> {
     /// Piece `piece`'s unit read by its shape, at place `i` of the window
     /// after `after` to `to`: `items` the view of its items, for its
     /// sealed lines.
-    pub(crate) fn seal_unit(&mut self, piece: i64, items: View, i: u32, after: Option<i64>, to: i64) {
+    pub(crate) fn seal_unit(
+        &mut self,
+        piece: i64,
+        items: View,
+        i: u32,
+        after: Option<i64>,
+        to: i64,
+    ) {
         self.sealed.units.insert(piece, (items, i));
         self.sealed.window = Some((after, to));
     }

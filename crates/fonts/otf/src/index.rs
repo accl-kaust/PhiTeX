@@ -429,9 +429,7 @@ impl FontIndex {
             let fc_names = if flags & HAS_FC_NAMES != 0 {
                 let mut list = || -> Option<Vec<String>> {
                     let n = r.u16()? as usize;
-                    (0..n)
-                        .map(|_| String::from_utf8(r.bytes()?).ok())
-                        .collect()
+                    (0..n).map(|_| String::from_utf8(r.bytes()?).ok()).collect()
                 };
                 Some(FcNames {
                     family: list()?,

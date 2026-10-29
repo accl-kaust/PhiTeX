@@ -229,7 +229,6 @@ fn find<'v, T: PartialEq>(
     }
 }
 
-
 std::thread_local! {
     /// The names looked up on this thread while [`with_reads`] runs.
     static READS: std::cell::RefCell<Option<ReadSet>> = const { std::cell::RefCell::new(None) };
@@ -363,7 +362,8 @@ impl Definitions {
         match name {
             READ_ACTIVE => self.active.hash(&mut h),
             READ_ORDER => {
-                let mut o: Vec<(u32, u32)> = self.order.iter().flatten().map(|(&a, &b)| (a, b)).collect();
+                let mut o: Vec<(u32, u32)> =
+                    self.order.iter().flatten().map(|(&a, &b)| (a, b)).collect();
                 o.sort_unstable();
                 (self.order.is_some(), o).hash(&mut h);
             }

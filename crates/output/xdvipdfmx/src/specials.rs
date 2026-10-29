@@ -793,9 +793,7 @@ fn again(key: &[u8], command: Option<&[u8]>, rest: &[u8]) -> Again {
             // object given the new value)
             b"image" | b"img" | b"epdf" if named => Again::Never,
             b"article" | b"art" | b"bead" | b"thread" | b"bform" | b"beginxobj" | b"bxobj"
-            | b"eform" | b"endxobj" | b"exobj" | b"bop" | b"eop" | b"pageresources" => {
-                Again::Never
-            }
+            | b"eform" | b"endxobj" | b"exobj" | b"bop" | b"eop" | b"pageresources" => Again::Never,
             _ => Again::Do,
         },
         b"x:" => match c {

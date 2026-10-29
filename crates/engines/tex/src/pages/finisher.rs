@@ -52,7 +52,10 @@ pub(crate) struct FinishArgs {
 
 impl FinishArgs {
     pub(crate) fn encode(&self, v: &Values) -> Vec<ValueId> {
-        vec![raw_value(v, Some(self.key.piece)), v.int(i64::from(self.key.nth))]
+        vec![
+            raw_value(v, Some(self.key.piece)),
+            v.int(i64::from(self.key.nth)),
+        ]
     }
 
     pub(crate) fn decode(v: &Values, args: &[ValueId]) -> Option<FinishArgs> {
@@ -79,7 +82,10 @@ pub(crate) fn fin_class_of(o: &crate::run::Ops, v: &Values, args: &[ValueId]) ->
 /// The page's index among the pages the loop fired, as it last fired the
 /// page of a finisher with arguments `args` (`Ops::fin_class`).
 pub(crate) fn fin_index_of(o: &crate::run::Ops, v: &Values, args: &[ValueId]) -> Option<i64> {
-    o.fin_class.locked().get(&fin_page_key(v, args)).map(|x| x.2)
+    o.fin_class
+        .locked()
+        .get(&fin_page_key(v, args))
+        .map(|x| x.2)
 }
 
 pub(crate) struct Finish(pub Shared);
@@ -144,7 +150,11 @@ impl Operation for Finish {
     /// back.
     fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         let r = self.predicted_defs_(args, v);
-        let c = if r.is_some() { &FIN_PREDICTED } else { &FIN_UNPREDICTED };
+        let c = if r.is_some() {
+            &FIN_PREDICTED
+        } else {
+            &FIN_UNPREDICTED
+        };
         c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut out = r.unwrap_or_default();
         let Some(a) = FinishArgs::decode(v, args) else {
@@ -152,12 +162,15 @@ impl Operation for Finish {
         };
         let f = a.key.field(v, PAGE_OUT);
         let rtn = v.field(RTN);
-        let given = out
-            .iter()
-            .find(|e| e.0 == rtn)
-            .map_or_else(|| v.list(vec![v.list(Vec::new()), v.list(Vec::new())]), |e| e.1);
+        let given = out.iter().find(|e| e.0 == rtn).map_or_else(
+            || v.list(vec![v.list(Vec::new()), v.list(Vec::new())]),
+            |e| e.1,
+        );
         out.retain(|e| e.0 != f);
-        out.push((f, page_out_value(v, a.key.piece, a.key.nth, given, ValueId::UNIT)));
+        out.push((
+            f,
+            page_out_value(v, a.key.piece, a.key.nth, given, ValueId::UNIT),
+        ));
         Some(out)
     }
 
@@ -195,13 +208,19 @@ impl Operation for Finish {
         let t_fin = std::time::Instant::now();
         let _ = phitex_pdf::phase::take();
         let o = ops(&self.0);
-        #[allow(clippy::redundant_closure_for_method_calls, reason = "the method is not general enough over the run's lifetimes")]
+        #[allow(
+            clippy::redundant_closure_for_method_calls,
+            reason = "the method is not general enough over the run's lifetimes"
+        )]
         let out = run_node(cx, o, |r| r.finish_page());
         if phitex_pdf::phase::on() {
             phitex_pdf::phase::add(0, t_fin);
             let a = phitex_pdf::phase::take();
             #[allow(clippy::cast_precision_loss)]
-            let us: Vec<String> = a.iter().map(|&n| format!("{:.1}", n as f64 / 1000.0)).collect();
+            let us: Vec<String> = a
+                .iter()
+                .map(|&n| format!("{:.1}", n as f64 / 1000.0))
+                .collect();
             crate::exec::later(format!("finphase: {}", us.join(" ")));
         }
         out
@@ -217,7 +236,10 @@ impl Run<'_, '_> {
         // 1. its page, the loop's definition read at the unit's end
         let mut page_x = None;
         let page = match key {
-            Some(k) => match self.cx.read_at(k.field(v, PAGE_OF), At::End(self.cx.unit()))? {
+            Some(k) => match self
+                .cx
+                .read_at(k.field(v, PAGE_OF), At::End(self.cx.unit()))?
+            {
                 phitex_defuse::FieldAt::Def(x, _) => {
                     page_x = Some(x);
                     Page::decode(v, x).filter(|p| p.key == k)
@@ -229,7 +251,12 @@ impl Run<'_, '_> {
         let nth = page.as_ref().map_or(0, |p| i64::from(p.nth));
         // (the progress shown: the page the build has reached)
         if let Some(p) = page.as_ref().filter(|p| p.normal > 0)
-            && let Some(w) = self.ops.watch.read().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
+            && let Some(w) = self
+                .ops
+                .watch
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
         {
             w.progress.note_page(u64::try_from(p.normal).unwrap_or(0));
         }
@@ -273,7 +300,10 @@ impl Run<'_, '_> {
         // taking boxes from \@freelist and giving them back at -10002):
         // what the routine defines re-asks the text at once,
         // docs/spec-settle.md §2)
-        if page.as_ref().is_some_and(|p| p.output_penalty <= FORCED_SPECIAL) {
+        if page
+            .as_ref()
+            .is_some_and(|p| p.output_penalty <= FORCED_SPECIAL)
+        {
             self.cx.settle_now();
         }
         // 3. the routine on its page
@@ -328,7 +358,11 @@ impl Run<'_, '_> {
         // (no `vprof` nor `pitems`, not even empty: the operation declares
         // it contributes to neither, and a contribution the loop's next
         // read met re-asked it at every finisher's first commit)
-        let args = self.fin.as_ref().map(|c| c.args.clone()).unwrap_or_default();
+        let args = self
+            .fin
+            .as_ref()
+            .map(|c| c.args.clone())
+            .unwrap_or_default();
         self.give_way(&args)?;
         let g = self.contribute_global_defs();
         self.record_finisher_defs(&args, g);
@@ -338,9 +372,11 @@ impl Run<'_, '_> {
 
 /// Finishers created with a prediction of their definitions, and
 /// without (reported with `PHITEX_TEX_TIME`).
-pub(crate) static FIN_PREDICTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static FIN_PREDICTED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
-pub(crate) static FIN_UNPREDICTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static FIN_UNPREDICTED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// A page's last finisher run in [`FinDefs::pages`]: its checkpoint
 /// index, its definitions, the page number it read.
@@ -385,7 +421,11 @@ pub(crate) struct FinDefs {
 impl FinDefs {
     /// Every value it holds, for a collection ([`crate::collect`]).
     pub(crate) fn roots(&self, keep: &mut dyn FnMut(ValueId)) {
-        let defs = self.prev.iter().chain(&self.last).chain(self.pages.values().flat_map(|p| &p.1));
+        let defs = self
+            .prev
+            .iter()
+            .chain(&self.last)
+            .chain(self.pages.values().flat_map(|p| &p.1));
         for &(f, x) in defs {
             keep(f.0);
             keep(x);
@@ -449,30 +489,49 @@ impl FinDefs {
     /// counter) carried on to page `j` (spec-predicted-breaks §3).
     /// (`j`: the ordinary pages fired up to the page, where known; a page
     /// counter is carried on to it only then.)
-    pub(crate) fn predict(&self, v: &Values, j: Option<i64>, page: Option<i64>) -> Vec<(Field, ValueId)> {
+    pub(crate) fn predict(
+        &self,
+        v: &Values,
+        j: Option<i64>,
+        page: Option<i64>,
+    ) -> Vec<(Field, ValueId)> {
         // (the page number of page `j`: the last run's, stepped as its
         // relation on `\count0` steps it per page; a macro holding the
         // last run's page number is predicted with this one in its place,
         // spec-state-model §2.4)
         let c0 = v.field("count:0");
-        let step = self.rels.as_ref().and_then(|rs| rs.iter().find(|r| r.0 == c0).map(|r| r.1));
+        let step = self
+            .rels
+            .as_ref()
+            .and_then(|rs| rs.iter().find(|r| r.0 == c0).map(|r| r.1));
         // (only where the last two runs agree on it, their page numbers
         // one step a page apart: a run on an early guess read another)
         let agree = match (self.prev_pno, self.last_pno, step) {
-            (Some(a), Some(b), Some(c)) => c.checked_mul(self.last_j - self.prev_j).is_some_and(|d| a.checked_add(d) == Some(b)),
+            (Some(a), Some(b), Some(c)) => c
+                .checked_mul(self.last_j - self.prev_j)
+                .is_some_and(|d| a.checked_add(d) == Some(b)),
             _ => false,
         };
         let pno = match (self.last_pno, page, step) {
-            (Some(p), Some(j), Some(c)) if agree => c.checked_mul(j - self.last_j).and_then(|d| p.checked_add(d)),
+            (Some(p), Some(j), Some(c)) if agree => c
+                .checked_mul(j - self.last_j)
+                .and_then(|d| p.checked_add(d)),
             _ => None,
         };
         let template = |f: Field, x: ValueId| -> ValueId {
             match (self.last_pno, pno) {
-                (Some(p), Some(q)) if p != q && v.with_str(f.0, |s| s.starts_with("cs:")).unwrap_or(false) => substitute_page(v, x, p, q).unwrap_or(x),
+                (Some(p), Some(q))
+                    if p != q && v.with_str(f.0, |s| s.starts_with("cs:")).unwrap_or(false) =>
+                {
+                    substitute_page(v, x, p, q).unwrap_or(x)
+                }
                 _ => x,
             }
         };
-        self.predict_values(v, j).into_iter().map(|(f, x)| (f, template(f, x))).collect()
+        self.predict_values(v, j)
+            .into_iter()
+            .map(|(f, x)| (f, template(f, x)))
+            .collect()
     }
 
     /// [`FinDefs::predict`] before its templates.
@@ -540,9 +599,15 @@ pub(crate) fn substitute_page(v: &Values, x: ValueId, from: i64, to: i64) -> Opt
     let Mean::Macro(m) = Mean::decode(v, Some(x)) else {
         return None;
     };
-    let digits = |n: i64| -> Vec<Tok> { n.to_string().chars().map(|c| Tok::ch(12, u32::from(c))).collect() };
+    let digits = |n: i64| -> Vec<Tok> {
+        n.to_string()
+            .chars()
+            .map(|c| Tok::ch(12, u32::from(c)))
+            .collect()
+    };
     let (fd, td) = (digits(from), digits(to));
-    let is_digit = |t: &Tok| !t.is_cs_or_active() && t.cat() == Some(12) && (48..=57).contains(&t.chr());
+    let is_digit =
+        |t: &Tok| !t.is_cs_or_active() && t.cat() == Some(12) && (48..=57).contains(&t.chr());
     let b = &m.body;
     let mut out: Vec<Tok> = Vec::with_capacity(b.len() + 2);
     let mut hit = false;
@@ -560,7 +625,14 @@ pub(crate) fn substitute_page(v: &Values, x: ValueId, from: i64, to: i64) -> Opt
             i += 1;
         }
     }
-    hit.then(|| Mean::Macro(std::rc::Rc::new(Macro::new(m.flags, m.params.clone(), std::rc::Rc::from(out)))).encode(v))
+    hit.then(|| {
+        Mean::Macro(std::rc::Rc::new(Macro::new(
+            m.flags,
+            m.params.clone(),
+            std::rc::Rc::from(out),
+        )))
+        .encode(v)
+    })
 }
 
 /// A page's place among the pages a routine ran on ([`FinDefs::pages`]):
@@ -571,7 +643,12 @@ pub(crate) type FinPageKey = (i64, i64);
 
 /// [`FinPageKey`] of a finisher with arguments `args` ([`FinishArgs`]).
 pub(crate) fn fin_page_key(v: &Values, args: &[ValueId]) -> FinPageKey {
-    FinishArgs::decode(v, args).map_or((-1, 0), |a| (i64::from_ne_bytes(a.key.piece.raw().to_ne_bytes()), i64::from(a.key.nth)))
+    FinishArgs::decode(v, args).map_or((-1, 0), |a| {
+        (
+            i64::from_ne_bytes(a.key.piece.raw().to_ne_bytes()),
+            i64::from(a.key.nth),
+        )
+    })
 }
 
 /// Whether a finisher's definition `x` of field `name`, which the run
@@ -642,12 +719,18 @@ pub(crate) const FORCED_SPECIAL: i32 = -10001;
 
 /// [`fin_key`] of routine `t` on a page of class `pen`.
 pub(crate) fn fin_key_class(t: ValueId, pen: i32) -> u64 {
-    t.raw() ^ u64::from(pen.cast_unsigned()).rotate_left(32).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    t.raw()
+        ^ u64::from(pen.cast_unsigned())
+            .rotate_left(32)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
-
 impl Finish {
-    pub(crate) fn predicted_rels_of(o: &crate::run::Ops, args: &[ValueId], v: &Values) -> Option<Vec<(Field, i64)>> {
+    pub(crate) fn predicted_rels_of(
+        o: &crate::run::Ops,
+        args: &[ValueId],
+        v: &Values,
+    ) -> Option<Vec<(Field, i64)>> {
         if !o.fin_predict.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
@@ -672,7 +755,11 @@ impl Finish {
     /// the main list ([`RTN`]): the last run's value, or nothing given
     /// back (the routine that ships its page, §1026). (The page builder
     /// guesses the same for itself, [`Run::guess_give_back`].)
-    pub(crate) fn predicted_defs_(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+    pub(crate) fn predicted_defs_(
+        &self,
+        args: &[ValueId],
+        v: &Values,
+    ) -> Option<Vec<(Field, ValueId)>> {
         if !ops(&self.0)
             .fin_predict
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -694,7 +781,13 @@ impl Finish {
             .map(|d| d.at(idx));
         let d = d.as_ref();
         let mut out = d
-            .map(|d| if false { d.stable(v) } else { d.predict(v, j, page) })
+            .map(|d| {
+                if false {
+                    d.stable(v)
+                } else {
+                    d.predict(v, j, page)
+                }
+            })
             .unwrap_or_default();
         out.retain(|e| !transient(v, e.0));
         // (`PHITEX_PRED_SHOW=1`, observe: whether a finisher's
@@ -720,7 +813,6 @@ impl Finish {
         }
         Some(out)
     }
-
 }
 impl Run<'_, '_> {
     /// `SPEC.md` §3.1: a page's items from its [`Page`] alone, then
@@ -761,7 +853,15 @@ impl Run<'_, '_> {
         // builder has them where the page began, the routine before's
         // give-back among them: a class's marker in the window is those
         // with what the text set since, [`Run::insert_class_at`])
-        self.ins_fold = (fin.prev_fire.0 >= 0).then(|| (fin.prev_fire.0, fin.ins.iter().map(|&m| crate::pages::class_of(self.v, m)).collect()));
+        self.ins_fold = (fin.prev_fire.0 >= 0).then(|| {
+            (
+                fin.prev_fire.0,
+                fin.ins
+                    .iter()
+                    .map(|&m| crate::pages::class_of(self.v, m))
+                    .collect(),
+            )
+        });
         // (the window's units, by piece: their items with the markers
         // resolved where each piece is)
         // (the window read through paths, [`Run::window_units`]: each
@@ -770,9 +870,9 @@ impl Run<'_, '_> {
         // the page does not name changing (its items, its check) leaves
         // this finisher standing)
         let (pids, units, own_view) = self.window_units(fin, pid)?;
-        let names_own = fin.spans.iter().any(|s| {
-            matches!(s.src, Src::Piece { piece, .. } | Src::Held { piece, .. } if piece == pid)
-        });
+        let names_own = fin.spans.iter().any(
+            |s| matches!(s.src, Src::Piece { piece, .. } | Src::Held { piece, .. } if piece == pid),
+        );
         if names_own && !pids.contains(&pid) {
             // (the piece stands after this finisher in the view, placed
             // again, the page builder to place the finisher after it
@@ -788,7 +888,11 @@ impl Run<'_, '_> {
             // the new version places this finisher again; no page made
             // on it, the mismatch no defect)
             if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-                eprintln!("finisher {} (page {} of its piece): stale placement", self.cx.node().raw(), fin.key.nth);
+                eprintln!(
+                    "finisher {} (page {} of its piece): stale placement",
+                    self.cx.node().raw(),
+                    fin.key.nth
+                );
             }
             return Ok(None);
         }
@@ -804,7 +908,10 @@ impl Run<'_, '_> {
                 pids
             );
         }
-        Ok(Some(Assembled { units, own: own_view }))
+        Ok(Some(Assembled {
+            units,
+            own: own_view,
+        }))
     }
 
     /// The page's fire on the real nodes ([`Run::assemble_page`]'s
@@ -865,7 +972,9 @@ impl Run<'_, '_> {
                     let raw = &unit_of(piece)?.2;
                     match crate::pages::end_sub_of(item) {
                         None => raw.get(item as usize).copied(),
-                        Some((e, s)) => list_of(v, *raw.get(e as usize)?).get(1 + s as usize).copied(),
+                        Some((e, s)) => list_of(v, *raw.get(e as usize)?)
+                            .get(1 + s as usize)
+                            .copied(),
                     }
                 }
                 Src::Rtn { page, item } => rtn_items(page).get(item as usize).copied(),
@@ -881,7 +990,8 @@ impl Run<'_, '_> {
                     };
                     // (§1021: the rest of a split, its top pruned)
                     let tail = ins.list.split_off((from as usize).min(ins.list.len()));
-                    let (rem, _) = phitex_typeset::page::prune_page_top(tail, ins.split_top_skip, false);
+                    let (rem, _) =
+                        phitex_typeset::page::prune_page_top(tail, ins.split_top_skip, false);
                     let b = phitex_typeset::pack::vpack(
                         rem.clone(),
                         Spec::Additional(0),
@@ -916,7 +1026,8 @@ impl Run<'_, '_> {
                 self.cx.node().raw(),
                 fin.key.piece.raw(),
                 fin.key.nth,
-                fin.params.map_or_else(|| "none".to_owned(), |m| v.render(m)),
+                fin.params
+                    .map_or_else(|| "none".to_owned(), |m| v.render(m)),
                 fin.post,
                 fin.spans.len()
             );
@@ -940,7 +1051,11 @@ impl Run<'_, '_> {
                         // placement is stale, the builder places this
                         // finisher again on the new version)
                         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-                            eprintln!("finisher {} (page {} of its piece): no item for {src:?}: stale placement", self.cx.node().raw(), fin.key.nth);
+                            eprintln!(
+                                "finisher {} (page {} of its piece): no item for {src:?}: stale placement",
+                                self.cx.node().raw(),
+                                fin.key.nth
+                            );
                         }
                         return Ok(None);
                     };
@@ -959,7 +1074,10 @@ impl Run<'_, '_> {
                 }
             }
             ps.pending.extend(fin.post_markers.iter().copied());
-            let bp = v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(i64::from(fin.post_k))]);
+            let bp = v.list(vec![
+                v.int(nodes::T_BUILD_PAGE),
+                v.int(i64::from(fin.post_k)),
+            ]);
             let mut live = |c: u16| self.insert_class_at(c, at);
             fire = ps.fold_items(v, &[bp], &mut live)?;
             fired_at_end = post == fin.spans.len();
@@ -973,7 +1091,11 @@ impl Run<'_, '_> {
             for src in crate::pages::span_srcs(&s) {
                 let Some(x) = item(src) else {
                     if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-                        eprintln!("finisher {} (page {} of its piece): no item for {src:?}: stale placement", self.cx.node().raw(), fin.key.nth);
+                        eprintln!(
+                            "finisher {} (page {} of its piece): no item for {src:?}: stale placement",
+                            self.cx.node().raw(),
+                            fin.key.nth
+                        );
                     }
                     return Ok(None);
                 };
@@ -993,10 +1115,16 @@ impl Run<'_, '_> {
         // commit, which fires the page again or keeps it, and runs then.
         // With the loop settled it is a defect of the page builder over
         // the profiles)
-        let agrees = fire.as_ref().is_some_and(|f| fired_at_end && f.k == fin.k && f.best == fin.best as usize);
+        let agrees = fire
+            .as_ref()
+            .is_some_and(|f| fired_at_end && f.k == fin.k && f.best == fin.best as usize);
         if !agrees && !self.cx.placer_settled() {
             if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-                eprintln!("finisher {} (page {} of its piece): ahead of its loop, waits for it", self.cx.node().raw(), fin.key.nth);
+                eprintln!(
+                    "finisher {} (page {} of its piece): ahead of its loop, waits for it",
+                    self.cx.node().raw(),
+                    fin.key.nth
+                );
             }
             return Err(Halt::Stop(self.cx.wait_for_placer()));
         }
@@ -1032,7 +1160,9 @@ impl Run<'_, '_> {
                 .map(|u| {
                     let k = i64::from(fin.k);
                     u.2.iter()
-                        .position(|&x| nodes::tag(v, x) == nodes::T_BUILD_PAGE && int_at(v, x, 1) == k)
+                        .position(|&x| {
+                            nodes::tag(v, x) == nodes::T_BUILD_PAGE && int_at(v, x, 1) == k
+                        })
                         .map_or_else(Vec::new, |p| u.2[p + 1..].to_vec())
                 })
                 .unwrap_or_default()
@@ -1085,7 +1215,13 @@ impl Run<'_, '_> {
                     v.render(reads).chars().take(4000).collect::<String>()
                 );
             }
-            args.extend([v.list(rest.clone()), v.int(pid), v.int(i64::from(fire.k)), reads, defs_k]);
+            args.extend([
+                v.list(rest.clone()),
+                v.int(pid),
+                v.int(i64::from(fire.k)),
+                reads,
+                defs_k,
+            ]);
         }
         if crate::exec::prof_flag!("PHITEX_FIN_ITEMS") {
             eprintln!(
@@ -1126,7 +1262,9 @@ impl Run<'_, '_> {
         }
         let w = self.view_through(PITEMS, fin.after, fin.at)?;
         for &(p, ver) in &fin.vers {
-            let Some(i) = pids.iter().position(|&q| q == p) else { continue };
+            let Some(i) = pids.iter().position(|&q| q == p) else {
+                continue;
+            };
             let same = self
                 .cx
                 .at(w, Step::Index(u32::try_from(i).unwrap_or(u32::MAX)))
@@ -1151,12 +1289,19 @@ impl Run<'_, '_> {
         &mut self,
         fin: &Page,
         pid: i64,
-    ) -> R<(Vec<i64>, Vec<(i64, ValueId, Vec<ValueId>)>, Option<(phitex_defuse::View, u32)>)> {
+    ) -> R<(
+        Vec<i64>,
+        Vec<(i64, ValueId, Vec<ValueId>)>,
+        Option<(phitex_defuse::View, u32)>,
+    )> {
         use phitex_defuse::Step;
         let v = self.v;
         if cfg!(feature = "observe") {
             let k = PageNode::of(self.ops, v, self.cx.op(), self.cx.args());
-            assert!(k.is_some_and(|k| k.folds().contains(&PITEMS)), "a window of {PITEMS} outside a finisher");
+            assert!(
+                k.is_some_and(|k| k.folds().contains(&PITEMS)),
+                "a window of {PITEMS} outside a finisher"
+            );
         }
         let w = self.view_through(PITEMS, fin.after, fin.at)?;
         // (each unit's piece, read as that alone)
@@ -1209,13 +1354,16 @@ impl Run<'_, '_> {
             // (a PDF page's unit read by its shape, its items' view kept
             // for its sealed lines, `crate::pages::seal`)
             let shape = if seal {
-                self.cx.at(u, Step::Index(7)).filter(|&w| self.cx.get(w, Step::Eq(ValueId::UNIT)) == Some(v.bool(false)))
+                self.cx
+                    .at(u, Step::Index(7))
+                    .filter(|&w| self.cx.get(w, Step::Eq(ValueId::UNIT)) == Some(v.bool(false)))
             } else {
                 None
             };
             let mut raw = match self.cx.at(u, Step::Index(2)) {
                 Some(x) if let Some(sh) = shape => {
-                    let raw_id = |n: phitex_defuse::NodeId| i64::from_ne_bytes(n.raw().to_ne_bytes());
+                    let raw_id =
+                        |n: phitex_defuse::NodeId| i64::from_ne_bytes(n.raw().to_ne_bytes());
                     let place = u32::try_from(i).unwrap_or(u32::MAX);
                     self.seal_unit(p, x, place, fin.after.map(raw_id), raw_id(fin.at));
                     if whole(p) {
@@ -1258,7 +1406,11 @@ impl Run<'_, '_> {
             let shape = if p == pid {
                 own = Some((u, ui));
                 let k = i64::from(fin.k);
-                let at_last = self.cx.at(u, Step::Index(1)).and_then(|w| self.cx.get(w, Step::Eq(v.int(k)))) == Some(v.bool(true));
+                let at_last = self
+                    .cx
+                    .at(u, Step::Index(1))
+                    .and_then(|w| self.cx.get(w, Step::Eq(v.int(k))))
+                    == Some(v.bool(true));
                 v.list(vec![v.int(p), v.int(if at_last { k } else { -2 })])
             } else {
                 ValueId::UNIT
@@ -1287,7 +1439,8 @@ impl Run<'_, '_> {
                 t0 == page.hint,
                 pen0,
                 rels.iter().find(|r| r.0 == f).map(|r| r.1),
-                Finish::predicted_rels_of(self.ops, &fa, v).and_then(|rs| rs.iter().find(|r| r.0 == f).map(|r| r.1))
+                Finish::predicted_rels_of(self.ops, &fa, v)
+                    .and_then(|rs| rs.iter().find(|r| r.0 == f).map(|r| r.1))
             );
         }
     }
@@ -1345,7 +1498,10 @@ impl Run<'_, '_> {
         let own = self.cx.args().to_vec();
         let j = fin_index_of(self.ops, v, &own).unwrap_or(0);
         let c0 = self.reg_loc(0, 0);
-        let pno = self.st.engine_value(c0).map(|x| i64::from(crate::val::i32_of(v, x)));
+        let pno = self
+            .st
+            .engine_value(c0)
+            .map(|x| i64::from(crate::val::i32_of(v, x)));
         // (`PHITEX_FIN_FIELD=name`: what each finisher's run left of that
         // field, for the predictions)
         if let Some(name) = crate::exec::obs_str!("PHITEX_FIN_FIELD") {
@@ -1359,11 +1515,18 @@ impl Run<'_, '_> {
                 )
             );
         }
-        let Some(page) = self.fin_page().cloned() else { return };
+        let Some(page) = self.fin_page().cloned() else {
+            return;
+        };
         self.trace_fin_rel(&page, &rels);
         let mut m = self.ops.fin_defs.locked();
-        let idx = (i64::from_ne_bytes(page.key.piece.raw().to_ne_bytes()), i64::from(page.key.nth));
-        let e = m.entry(fin_key_class(t, pen_class(page.output_penalty))).or_default();
+        let idx = (
+            i64::from_ne_bytes(page.key.piece.raw().to_ne_bytes()),
+            i64::from(page.key.nth),
+        );
+        let e = m
+            .entry(fin_key_class(t, pen_class(page.output_penalty)))
+            .or_default();
         e.gdefs = Some(gdefs);
         e.rels = Some(rels);
         for &(f, x) in &out {
@@ -1397,7 +1560,11 @@ impl Run<'_, '_> {
                         e.prev_j,
                         r(x),
                         got.map_or_else(|| "nothing".to_owned(), r),
-                        if prev == e.last.iter().find(|d| d.0 == f).map(|d| d.1) { "equal" } else { "differ" }
+                        if prev == e.last.iter().find(|d| d.0 == f).map(|d| d.1) {
+                            "equal"
+                        } else {
+                            "differ"
+                        }
                     );
                 }
             }
@@ -1436,7 +1603,10 @@ fn named_items(fin: &Page) -> phitex_defuse::FxHashMap<i64, Vec<u32>> {
     for s in &fin.spans {
         for src in crate::pages::span_srcs(s) {
             let (piece, ix) = match src {
-                Src::Piece { piece, item } => (piece, crate::pages::end_sub_of(item).map_or(item, |(e, _)| e)),
+                Src::Piece { piece, item } => (
+                    piece,
+                    crate::pages::end_sub_of(item).map_or(item, |(e, _)| e),
+                ),
                 Src::Held { piece, item, .. } => (piece, item),
                 Src::Rtn { .. } => continue,
             };

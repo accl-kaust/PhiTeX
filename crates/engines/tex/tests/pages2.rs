@@ -13,7 +13,11 @@ use phitex_tex::Options;
 
 /// The runs of an operation in a build.
 fn runs_of(b: &phitex_tex::Build, op: &str) -> u64 {
-    b.stats.runs_by_op.iter().find(|(o, _)| *o == op).map_or(0, |(_, n)| *n)
+    b.stats
+        .runs_by_op
+        .iter()
+        .find(|(o, _)| *o == op)
+        .map_or(0, |(_, n)| *n)
 }
 
 /// The live nodes of an operation.
@@ -26,7 +30,10 @@ fn nodes_of(b: &phitex_tex::Build, op: &str) -> usize {
 fn paragraphs(n: usize) -> String {
     let mut s = String::new();
     for i in 0..n {
-        let _ = write!(s, "Paragraph {i} of the document, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, so that pages fill.\n\n");
+        let _ = write!(
+            s,
+            "Paragraph {i} of the document, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches, so that pages fill.\n\n"
+        );
     }
     s.push_str("\\bye\n");
     s
@@ -47,10 +54,27 @@ fn one_loop_node_and_one_finisher_per_page() {
         let b = common::build(opts, Some(&common::plain()), &src);
         let pages = b.pages().len();
         assert!(pages >= 3, "a document of several pages: {pages}");
-        assert_eq!(nodes_of(&b, "pages"), 1, "-j{threads}: one page-builder node");
-        assert_eq!(nodes_of(&b, "finish"), pages, "-j{threads}: one finisher per page shipped");
-        assert_eq!(b.stats.placements_of("finish"), pages, "-j{threads}: every finisher placed once, none made anew: {:?}", b.stats.runs_by_op);
-        assert!(runs_of(&b, "finish") <= 2 * pages as u64, "-j{threads}: a finisher runs on its prediction and at most once more: {:?}", b.stats.runs_by_op);
+        assert_eq!(
+            nodes_of(&b, "pages"),
+            1,
+            "-j{threads}: one page-builder node"
+        );
+        assert_eq!(
+            nodes_of(&b, "finish"),
+            pages,
+            "-j{threads}: one finisher per page shipped"
+        );
+        assert_eq!(
+            b.stats.placements_of("finish"),
+            pages,
+            "-j{threads}: every finisher placed once, none made anew: {:?}",
+            b.stats.runs_by_op
+        );
+        assert!(
+            runs_of(&b, "finish") <= 2 * pages as u64,
+            "-j{threads}: a finisher runs on its prediction and at most once more: {:?}",
+            b.stats.runs_by_op
+        );
     }
 }
 
@@ -70,8 +94,16 @@ fn the_loop_parks_at_holes_and_resumes() {
     let b = common::build(opts, Some(&common::plain()), &src);
     let pages = b.pages().len() as u64;
     let loop_runs = runs_of(&b, "pages");
-    assert!(loop_runs <= pages + 2, "the loop ran {loop_runs} times for {pages} pages: it parks and resumes, it does not restart ({:?})", b.stats.runs_by_op);
-    assert_eq!(b.stats.units_folded("pages"), b.stats.units_contributed("vprof"), "every profile unit folded exactly once over all runs of the loop");
+    assert!(
+        loop_runs <= pages + 2,
+        "the loop ran {loop_runs} times for {pages} pages: it parks and resumes, it does not restart ({:?})",
+        b.stats.runs_by_op
+    );
+    assert_eq!(
+        b.stats.units_folded("pages"),
+        b.stats.units_contributed("vprof"),
+        "every profile unit folded exactly once over all runs of the loop"
+    );
 }
 
 /// A one-word edit that moves no page break: the edited piece, its
@@ -91,14 +123,36 @@ fn a_word_edit_reruns_the_piece_its_finisher_and_the_writers() {
     let before = b.pages().clone();
     let edited = src.replacen("Paragraph 60 of", "Paragraph 60 OF", 1);
     let r = common::rebuild(&mut b, &edited);
-    assert_eq!(runs_of_report(&r, "exec") + runs_of_report(&r, "resume"), 1, "one piece: {r:?}");
-    assert_eq!(runs_of_report(&r, "finish"), 1, "one finisher, the edited piece's page: {r:?}");
-    assert!(runs_of_report(&r, "pages") <= 1, "the loop at most once, from its checkpoint (none where the edited paragraph's profile is unchanged: exact reads wake nobody): {r:?}");
-    assert_eq!(r.placements_made("finish"), 0, "no finisher made anew: {r:?}");
+    assert_eq!(
+        runs_of_report(&r, "exec") + runs_of_report(&r, "resume"),
+        1,
+        "one piece: {r:?}"
+    );
+    assert_eq!(
+        runs_of_report(&r, "finish"),
+        1,
+        "one finisher, the edited piece's page: {r:?}"
+    );
+    assert!(
+        runs_of_report(&r, "pages") <= 1,
+        "the loop at most once, from its checkpoint (none where the edited paragraph's profile is unchanged: exact reads wake nobody): {r:?}"
+    );
+    assert_eq!(
+        r.placements_made("finish"),
+        0,
+        "no finisher made anew: {r:?}"
+    );
     assert!(r.runs <= 5, "piece, finisher, loop, link, end: {r:?}");
     let after = b.pages();
     assert_eq!(before.len(), after.len());
-    assert!(before.iter().zip(after.iter()).enumerate().all(|(i, (x, y))| x == y || i == page_of_paragraph(&b, 60)), "only the edited page's bytes moved");
+    assert!(
+        before
+            .iter()
+            .zip(after.iter())
+            .enumerate()
+            .all(|(i, (x, y))| x == y || i == page_of_paragraph(&b, 60)),
+        "only the edited page's bytes moved"
+    );
 }
 
 /// A paragraph inserted at the front moves every page break: every page
@@ -120,8 +174,14 @@ fn a_paragraph_insert_refires_the_pages_after_it_once() {
     let edited = src.replacen("Paragraph 1 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 1 of", 1);
     let r = common::rebuild(&mut b, &edited);
     assert_eq!(runs_of_report(&r, "pages"), 1, "the loop once: {r:?}");
-    assert!(runs_of_report(&r, "finish") <= pages + 1, "each finisher at most once: {r:?}");
-    assert!(r.placements_made("finish") <= 1, "at most the one new page's finisher made anew; the others are kept by key: {r:?}");
+    assert!(
+        runs_of_report(&r, "finish") <= pages + 1,
+        "each finisher at most once: {r:?}"
+    );
+    assert!(
+        r.placements_made("finish") <= 1,
+        "at most the one new page's finisher made anew; the others are kept by key: {r:?}"
+    );
 }
 
 /// `\pagegoal` and `\pagetotal` read in the text answer as TeX's (the
@@ -134,11 +194,25 @@ fn page_dimensions_read_in_text_are_exact_and_fine() {
         let dir = common::fixtures().join("dvi");
         let src = common::read(&dir.join(format!("{name}.tex")));
         let want = std::fs::read(dir.join(format!("{name}.dvi"))).expect("the oracle");
-        let opts = common::options(&format!("./{name}.tex"), name, &common::dvi_comment(&want), &dir);
+        let opts = common::options(
+            &format!("./{name}.tex"),
+            name,
+            &common::dvi_comment(&want),
+            &dir,
+        );
         let b = common::build(opts, None, &src);
         let (dvi, log) = b.output();
-        assert_eq!(dvi, want, "{name}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
-        assert!(b.stats.refuted_by("pages:start") <= b.pages().len(), "{name}: a reader of the page is re-asked at most once per page: {:?}", b.stats.refuted_by_field);
+        assert_eq!(
+            dvi,
+            want,
+            "{name}: DVI differs; log tail:\n{}",
+            common::log_excerpt(&log)
+        );
+        assert!(
+            b.stats.refuted_by("pages:start") <= b.pages().len(),
+            "{name}: a reader of the page is re-asked at most once per page: {:?}",
+            b.stats.refuted_by_field
+        );
     }
 }
 
@@ -147,7 +221,22 @@ fn page_dimensions_read_in_text_are_exact_and_fine() {
 /// names; byte-identical.
 #[test]
 fn page_fixtures_are_byte_identical() {
-    for name in ["pagegoal", "pagequant", "inserts", "outinserts", "vsplit", "outmarks", "outpen", "outroutine", "outsame", "endmid", "ship", "writes", "vsizeout", "errors100"] {
+    for name in [
+        "pagegoal",
+        "pagequant",
+        "inserts",
+        "outinserts",
+        "vsplit",
+        "outmarks",
+        "outpen",
+        "outroutine",
+        "outsame",
+        "endmid",
+        "ship",
+        "writes",
+        "vsizeout",
+        "errors100",
+    ] {
         let dir = common::fixtures().join("dvi");
         let tex = dir.join(format!("{name}.tex"));
         if !tex.is_file() {
@@ -155,15 +244,28 @@ fn page_fixtures_are_byte_identical() {
         }
         let src = common::read(&tex);
         let want = std::fs::read(dir.join(format!("{name}.dvi"))).expect("the oracle");
-        let opts = common::options(&format!("./{name}.tex"), name, &common::dvi_comment(&want), &dir);
+        let opts = common::options(
+            &format!("./{name}.tex"),
+            name,
+            &common::dvi_comment(&want),
+            &dir,
+        );
         let b = common::build(opts, None, &src);
         let (dvi, log) = b.output();
-        assert_eq!(dvi, want, "{name}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
+        assert_eq!(
+            dvi,
+            want,
+            "{name}: DVI differs; log tail:\n{}",
+            common::log_excerpt(&log)
+        );
     }
 }
 
 fn runs_of_report(r: &phitex_tex::Report, op: &str) -> u64 {
-    r.runs_by_op.iter().find(|(o, _)| *o == op).map_or(0, |(_, n)| *n)
+    r.runs_by_op
+        .iter()
+        .find(|(o, _)| *o == op)
+        .map_or(0, |(_, n)| *n)
 }
 
 fn page_of_paragraph(b: &phitex_tex::Build, i: usize) -> usize {

@@ -45,7 +45,8 @@ impl FontSource for HostFonts {
 pub fn xetex(read: ReadFont, find: FindFont, index: Option<&[u8]>) -> Result<XeTeX, String> {
     let font_index = match index {
         Some(b) => Some(
-            FontIndex::from_bytes(b).ok_or_else(|| "the font index is not one (PXFI, version 1 or 2)".to_owned())?,
+            FontIndex::from_bytes(b)
+                .ok_or_else(|| "the font index is not one (PXFI, version 1 or 2)".to_owned())?,
         ),
         None => None,
     };

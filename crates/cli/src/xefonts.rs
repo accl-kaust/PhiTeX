@@ -82,7 +82,14 @@ fn fc_list(conf: &Path) -> Option<String> {
         .arg(fmt)
         .arg(":outline=true")
         .args([
-            "family", "style", "file", "index", "fullname", "weight", "width", "slant",
+            "family",
+            "style",
+            "file",
+            "index",
+            "fullname",
+            "weight",
+            "width",
+            "slant",
             "fontformat",
         ])
         .output()
@@ -99,7 +106,11 @@ fn faces(text: &str) -> Vec<FcFace> {
             if f.len() < 8 {
                 return None;
             }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "fontconfig's small numbers")]
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "fontconfig's small numbers"
+            )]
             let num = |s: &str| s.parse::<f64>().map_or(0, |v| v as u16);
             let empty = |s: &str| s.split('\u{1f}').all(str::is_empty);
             Some(FcFace {
@@ -135,7 +146,10 @@ fn font_index(k: &mut phitex_kpse::Kpse) -> Option<FontIndex> {
     // index made of the list they gave, without listing them again)
     let dirs = dirs_key(&[dist.join("fonts/opentype"), dist.join("fonts/truetype")]);
     let by_dirs = cache.join(format!("xetex-fonts-dirs-{dirs:016x}.idx"));
-    if let Some(ix) = std::fs::read(&by_dirs).ok().and_then(|b| FontIndex::from_bytes(&b)) {
+    if let Some(ix) = std::fs::read(&by_dirs)
+        .ok()
+        .and_then(|b| FontIndex::from_bytes(&b))
+    {
         return Some(ix);
     }
     let list = fc_list(&conf)?;
@@ -174,7 +188,10 @@ fn font_index(k: &mut phitex_kpse::Kpse) -> Option<FontIndex> {
 /// `bytes` written at `path` in the cache, through a temporary file
 /// renamed.
 fn put(cache: &Path, path: &Path, bytes: &[u8]) {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let tmp = cache.join(format!(".{name}.tmp"));
     if std::fs::write(&tmp, bytes).is_ok() {
         let _ = std::fs::rename(&tmp, path);
@@ -190,8 +207,13 @@ fn dirs_key(roots: &[PathBuf]) -> u64 {
     let mut stack: Vec<PathBuf> = roots.to_vec();
     let mut dirs = Vec::new();
     while let Some(d) = stack.pop() {
-        let Ok(m) = std::fs::metadata(&d) else { continue };
-        let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+        let Ok(m) = std::fs::metadata(&d) else {
+            continue;
+        };
+        let t = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
         dirs.push((d.clone(), t.map_or(0, |t| t.as_nanos())));
         if let Ok(rd) = std::fs::read_dir(&d) {
             for e in rd.flatten() {
@@ -203,17 +225,24 @@ fn dirs_key(roots: &[PathBuf]) -> u64 {
     }
     dirs.sort();
     for (d, t) in &dirs {
-        h = h.add(d.as_os_str().as_encoded_bytes()).add(&t.to_le_bytes());
+        h = h
+            .add(d.as_os_str().as_encoded_bytes())
+            .add(&t.to_le_bytes());
     }
-    let fc = std::env::var_os("PATH")
-        .and_then(|p| std::env::split_paths(&p).map(|d| d.join("fc-list")).find(|f| f.is_file()));
+    let fc = std::env::var_os("PATH").and_then(|p| {
+        std::env::split_paths(&p)
+            .map(|d| d.join("fc-list"))
+            .find(|f| f.is_file())
+    });
     if let Some(f) = fc {
         let t = std::fs::metadata(&f)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |t| t.as_nanos());
-        h = h.add(f.as_os_str().as_encoded_bytes()).add(&t.to_le_bytes());
+        h = h
+            .add(f.as_os_str().as_encoded_bytes())
+            .add(&t.to_le_bytes());
     }
     h.0
 }

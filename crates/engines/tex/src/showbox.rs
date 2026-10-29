@@ -246,7 +246,11 @@ impl Run<'_, '_> {
             }
             Node::Mark(k) => {
                 // §196, e-TeX's class
-                let p = side.marks.get(*k as usize).copied().unwrap_or(ValueId::UNIT);
+                let p = side
+                    .marks
+                    .get(*k as usize)
+                    .copied()
+                    .unwrap_or(ValueId::UNIT);
                 let xs = list_of(self.v, p);
                 sh.esc("mark");
                 let toks = if xs.len() == 3 && int_of(self.v, xs[0]) == -1 {
@@ -291,7 +295,11 @@ impl Run<'_, '_> {
                 self.node_list_display(sh, &d.post, side, '|')?;
             }
             Node::Whatsit(k, _) => {
-                let w = side.whats.get(*k as usize).copied().unwrap_or(ValueId::UNIT);
+                let w = side
+                    .whats
+                    .get(*k as usize)
+                    .copied()
+                    .unwrap_or(ValueId::UNIT);
                 self.display_whatsit(sh, w)?;
             }
             Node::Language { lang, lhm, rhm } => {
@@ -366,7 +374,11 @@ impl Run<'_, '_> {
                     }
                     if g.kind != GlueKind::CondMath {
                         sh.push(" ");
-                        print_spec(sh.line(), &g.spec, if g.kind == GlueKind::Mu { "mu" } else { "" });
+                        print_spec(
+                            sh.line(),
+                            &g.spec,
+                            if g.kind == GlueKind::Mu { "mu" } else { "" },
+                        );
                     }
                 }
             },
@@ -380,7 +392,11 @@ impl Run<'_, '_> {
                 KernKind::Margin { left, .. } => {
                     sh.esc("kern");
                     sh.scaled(*w);
-                    sh.push(if *left { " (left margin)" } else { " (right margin)" });
+                    sh.push(if *left {
+                        " (left margin)"
+                    } else {
+                        " (right margin)"
+                    });
                 }
                 _ => {
                     sh.esc("kern");

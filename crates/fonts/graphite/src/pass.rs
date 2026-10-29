@@ -8,11 +8,11 @@
 
 use alloc::vec::Vec;
 
-use crate::be::{u16_at, u32_at, u8_at};
+use crate::be::{u8_at, u16_at, u32_at};
 use crate::code::{Code, Limits, PassType};
 use crate::collider::{
-    COLL_END, COLL_FIX, COLL_ISCOL, COLL_ISSPACE, COLL_KERN, COLL_KNOWN, COLL_START, COLL_TEMPLOCK, KernCollider,
-    ShiftCollider,
+    COLL_END, COLL_FIX, COLL_ISCOL, COLL_ISSPACE, COLL_KERN, COLL_KNOWN, COLL_START, COLL_TEMPLOCK,
+    KernCollider, ShiftCollider,
 };
 use crate::face::FaceLoad;
 use crate::intervals::{gmax, gmin};
@@ -59,14 +59,23 @@ impl Pass {
     /// `readPass(pass_start, pass_length, subtable_base, face, pt)`: `d`
     /// is the pass, `base` its offset in the `Silf` subtable.
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn read(d: &[u8], base: usize, face: &FaceLoad, silf: &Silf, pt: PassType) -> Option<Pass> {
+    pub(crate) fn read(
+        d: &[u8],
+        base: usize,
+        face: &FaceLoad,
+        silf: &Silf,
+        pt: PassType,
+    ) -> Option<Pass> {
         let end = d.len();
         if end < 40 {
             return None;
         }
         let flags = d[0];
         if flags & 0x1f != 0
-            && (pt < PassType::Positioning || silf.a_collision == 0 || !face.glyphs.has_boxes() || silf.flags & 0x20 == 0)
+            && (pt < PassType::Positioning
+                || silf.a_collision == 0
+                || !face.glyphs.has_boxes()
+                || silf.flags & 0x20 == 0)
         {
             return None;
         }
@@ -192,7 +201,12 @@ impl Pass {
         };
         if pass_constraint_len != 0 {
             let l = lim(u8_at(d, precontext), u16_at(d, sort_keys));
-            let c = Code::load(true, d.get(pc_code..pc_code + pass_constraint_len)?, &l, PassType::Unknown);
+            let c = Code::load(
+                true,
+                d.get(pc_code..pc_code + pass_constraint_len)?,
+                &l,
+                PassType::Unknown,
+            );
             if !c.present || c.status != crate::code::Status::Loaded {
                 return None;
             }
@@ -238,7 +252,12 @@ impl Pass {
                 {
                     return None;
                 }
-                rules[n - 1] = Some(Rule { constraint, action, sort, pre_context: pre });
+                rules[n - 1] = Some(Rule {
+                    constraint,
+                    action,
+                    sort,
+                    pre_context: pre,
+                });
                 ac_end = ac_begin;
                 rc_end = rc_begin;
             }
@@ -322,7 +341,13 @@ impl Pass {
     }
 
     /// `runGraphite(m, fsm, reverse)`.
-    pub(crate) fn run_graphite(&self, m: &mut Machine, seg: &mut Segment, smap: &mut SlotMap, reverse: bool) -> bool {
+    pub(crate) fn run_graphite(
+        &self,
+        m: &mut Machine,
+        seg: &mut Segment,
+        smap: &mut SlotMap,
+        reverse: bool,
+    ) -> bool {
         let mut s = seg.first;
         if s == NIL || !self.test_pass_constraint(m, seg, smap) {
             return true;
@@ -341,10 +366,12 @@ impl Pass {
                 if m.status != MStatus::Finished {
                     return false;
                 }
-                if s != NIL && (s == smap.highwater() || smap.highpassed() || {
-                    lc -= 1;
-                    lc == 0
-                }) {
+                if s != NIL
+                    && (s == smap.highwater() || smap.highpassed() || {
+                        lc -= 1;
+                        lc == 0
+                    })
+                {
                     if lc == 0 {
                         s = smap.highwater();
                     }
@@ -393,15 +420,19 @@ impl Pass {
         if smap.context() < u16::from(self.min_pre_ctxt) {
             return false;
         }
-        let mut state = self.start_states[usize::from(self.max_pre_ctxt) - usize::from(smap.context())];
+        let mut state =
+            self.start_states[usize::from(self.max_pre_ctxt) - usize::from(smap.context())];
         let mut free_slots = MAX_SLOTS as u8;
         loop {
             smap.push_slot(slot);
             let gid = seg.s(slot).glyphid;
-            if gid >= self.num_glyphs || self.cols[usize::from(gid)] == 0xffff || {
-                free_slots -= 1;
-                free_slots == 0
-            } || state >= self.num_transition
+            if gid >= self.num_glyphs
+                || self.cols[usize::from(gid)] == 0xffff
+                || {
+                    free_slots -= 1;
+                    free_slots == 0
+                }
+                || state >= self.num_transition
             {
                 return free_slots != 0;
             }
@@ -421,11 +452,20 @@ impl Pass {
     }
 
     /// `findNDoRule(slot, m, fsm)`.
-    fn find_n_do_rule(&self, slot: &mut u32, m: &mut Machine, seg: &mut Segment, smap: &mut SlotMap, rules: &mut Rules) {
+    fn find_n_do_rule(
+        &self,
+        slot: &mut u32,
+        m: &mut Machine,
+        seg: &mut Segment,
+        smap: &mut SlotMap,
+        rules: &mut Rules,
+    ) {
         if self.run_fsm(seg, smap, rules, *slot) {
             let list: Vec<u16> = rules.as_slice().to_vec();
             let mut k = 0;
-            while k < list.len() && !self.test_constraint(&self.rules[usize::from(list[k])], m, seg, smap) {
+            while k < list.len()
+                && !self.test_constraint(&self.rules[usize::from(list[k])], m, seg, smap)
+            {
                 k += 1;
                 if m.status != MStatus::Finished {
                     return;
@@ -461,10 +501,18 @@ impl Pass {
     }
 
     /// `testConstraint(r, m)`.
-    fn test_constraint(&self, r: &Rule, m: &mut Machine, seg: &mut Segment, smap: &mut SlotMap) -> bool {
+    fn test_constraint(
+        &self,
+        r: &Rule,
+        m: &mut Machine,
+        seg: &mut Segment,
+        smap: &mut SlotMap,
+    ) -> bool {
         let curr_context = i32::from(smap.context());
         let pre = i32::from(r.pre_context);
-        if (i32::from(r.sort) + curr_context - pre) as u32 > smap.size() as u32 || curr_context - pre < 0 {
+        if (i32::from(r.sort) + curr_context - pre) as u32 > smap.size() as u32
+            || curr_context - pre < 0
+        {
             return false;
         }
         let mut map = (1 + curr_context - pre) as usize;
@@ -489,7 +537,13 @@ impl Pass {
     }
 
     /// `doAction(codeptr, slot_out, m)`.
-    fn do_action(code: &Code, slot_out: &mut u32, m: &mut Machine, seg: &mut Segment, smap: &mut SlotMap) -> i32 {
+    fn do_action(
+        code: &Code,
+        slot_out: &mut u32,
+        m: &mut Machine,
+        seg: &mut Segment,
+        smap: &mut SlotMap,
+    ) -> i32 {
         if !code.is_some() {
             return 0;
         }
@@ -564,7 +618,16 @@ impl Pass {
             while s != NIL {
                 let f = Self::cflags(seg, s);
                 if f & (COLL_FIX | COLL_KERN) == COLL_FIX
-                    && !self.resolve_collisions(seg, s, start, &mut coll, false, dir, &mut moved, &mut has_collisions)
+                    && !self.resolve_collisions(
+                        seg,
+                        s,
+                        start,
+                        &mut coll,
+                        false,
+                        dir,
+                        &mut moved,
+                        &mut has_collisions,
+                    )
                 {
                     return false;
                 }
@@ -579,13 +642,26 @@ impl Pass {
                 if has_collisions || moved {
                     if has_collisions {
                         has_collisions = false;
-                        let lend = if end != NIL { seg.s(end).prev } else { seg.last };
+                        let lend = if end != NIL {
+                            seg.s(end).prev
+                        } else {
+                            seg.last
+                        };
                         let lstart = seg.s(start).prev;
                         let mut s = lend;
                         while s != lstart {
                             let f = Self::cflags(seg, s);
                             if f & (COLL_FIX | COLL_KERN | COLL_ISCOL) == (COLL_FIX | COLL_ISCOL) {
-                                if !self.resolve_collisions(seg, s, lend, &mut coll, true, dir, &mut moved, &mut has_collisions) {
+                                if !self.resolve_collisions(
+                                    seg,
+                                    s,
+                                    lend,
+                                    &mut coll,
+                                    true,
+                                    dir,
+                                    &mut moved,
+                                    &mut has_collisions,
+                                ) {
                                     return false;
                                 }
                                 if let Some(c) = seg.collision_mut(s) {
@@ -601,7 +677,16 @@ impl Pass {
                         while s != end {
                             let f = Self::cflags(seg, s);
                             if f & (COLL_FIX | COLL_TEMPLOCK | COLL_KERN) == COLL_FIX
-                                && !self.resolve_collisions(seg, s, start, &mut coll, false, dir, &mut moved, &mut has_collisions)
+                                && !self.resolve_collisions(
+                                    seg,
+                                    s,
+                                    start,
+                                    &mut coll,
+                                    false,
+                                    dir,
+                                    &mut moved,
+                                    &mut has_collisions,
+                                )
                             {
                                 return false;
                             } else if Self::cflags(seg, s) & COLL_TEMPLOCK != 0
@@ -735,7 +820,16 @@ impl Pass {
                     || c_nbor.flags & COLL_FIX == 0
                     || (c_nbor.flags & COLL_KERN != 0 && !same_cluster)
                     || c_nbor.flags & COLL_ISCOL != 0)
-                && !coll.merge_slot(seg, nbor, &c_nbor, c_nbor.shift, !ignore_for_kern, same_cluster, &mut collides, false)
+                && !coll.merge_slot(
+                    seg,
+                    nbor,
+                    &c_nbor,
+                    c_nbor.shift,
+                    !ignore_for_kern,
+                    same_cluster,
+                    &mut collides,
+                    false,
+                )
             {
                 return false;
             } else if nbor == slot_fix {
@@ -744,10 +838,16 @@ impl Pass {
             if nbor != start && c_nbor.flags & (if is_rev { COLL_START } else { COLL_END }) != 0 {
                 break;
             }
-            nbor = if is_rev { seg.s(nbor).prev } else { seg.s(nbor).next };
+            nbor = if is_rev {
+                seg.s(nbor).prev
+            } else {
+                seg.s(nbor).next
+            };
         }
         let mut is_col = false;
-        let cur_shift = seg.collision(slot_fix).map_or(Position::default(), |c| c.shift);
+        let cur_shift = seg
+            .collision(slot_fix)
+            .map_or(Position::default(), |c| c.shift);
         if collides || cur_shift.x != 0.0 || cur_shift.y != 0.0 {
             let shift = coll.resolve(&mut is_col);
             if shift.x.abs() < 1e38 && shift.y.abs() < 1e38 {
@@ -763,7 +863,17 @@ impl Pass {
                     let mut bbox = Rect::default();
                     let here = seg.s(slot_fix).position + shift;
                     let mut cluster_min = here.x;
-                    seg.finalise_slot(child, None, here, &mut bbox, 0, &mut cluster_min, rtl, false, 0);
+                    seg.finalise_slot(
+                        child,
+                        None,
+                        here,
+                        &mut bbox,
+                        0,
+                        &mut cluster_min,
+                        rtl,
+                        false,
+                        0,
+                    );
                 }
             }
         }
@@ -779,7 +889,14 @@ impl Pass {
     }
 
     /// `resolveKern(seg, slotFix, start, dir, ymin, ymax)`.
-    fn resolve_kern(&self, seg: &mut Segment, slot_fix: u32, dir: i32, ymin: &mut f32, ymax: &mut f32) -> f32 {
+    fn resolve_kern(
+        &self,
+        seg: &mut Segment,
+        slot_fix: u32,
+        dir: i32,
+        ymin: &mut f32,
+        ymax: &mut f32,
+    ) -> f32 {
         let mut curr_space = 0.0f32;
         let mut collides = false;
         let mut space_count: u32 = 0;
@@ -854,7 +971,9 @@ impl Pass {
         if collides {
             let mv = coll.resolve(dir);
             coll.shift(mv, dir);
-            let cur_shift = seg.collision(slot_fix).map_or(Position::default(), |c| c.shift);
+            let cur_shift = seg
+                .collision(slot_fix)
+                .map_or(Position::default(), |c| c.shift);
             let delta = seg.s(slot_fix).advance + mv - cur_shift;
             seg.sm(slot_fix).advance = delta;
             if let Some(c) = seg.collision_mut(slot_fix) {

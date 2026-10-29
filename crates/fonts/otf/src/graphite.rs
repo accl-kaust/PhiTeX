@@ -43,7 +43,10 @@ fn horizontal_rtl(script: Option<Tag>) -> Option<bool> {
     if crate::xetex::script_is_rtl(s) {
         return Some(true);
     }
-    if [b"Hung", b"Ital", b"Runr", b"Tfng"].iter().any(|t| crate::tag(t) == s) {
+    if [b"Hung", b"Ital", b"Runr", b"Tfng"]
+        .iter()
+        .any(|t| crate::tag(t) == s)
+    {
         return None;
     }
     Some(false)
@@ -156,12 +159,22 @@ pub fn shape(
     while i < end {
         let u = u32::from(text[i]);
         let cl = i as u32;
-        if (0xD800..0xDC00).contains(&u) && i + 1 < end && (0xDC00..0xE000).contains(&u32::from(text[i + 1])) {
+        if (0xD800..0xDC00).contains(&u)
+            && i + 1 < end
+            && (0xDC00..0xE000).contains(&u32::from(text[i + 1]))
+        {
             let l = u32::from(text[i + 1]);
             info.push((0x10000 + ((u - 0xD800) << 10) + (l - 0xDC00), cl));
             i += 2;
         } else {
-            info.push((if (0xD800..0xE000).contains(&u) { 0xFFFD } else { u }, cl));
+            info.push((
+                if (0xD800..0xE000).contains(&u) {
+                    0xFFFD
+                } else {
+                    u
+                },
+                cl,
+            ));
             i += 1;
         }
     }
@@ -201,7 +214,10 @@ pub fn shape(
     clusters[0].cluster = info[0].1;
     // (the font's scale is its units per em: `hb_font_set_scale(upem,
     // upem)`)
-    let (x_scale, y_scale) = (i32::from(face.units_per_em()), i32::from(face.units_per_em()));
+    let (x_scale, y_scale) = (
+        i32::from(face.units_per_em()),
+        i32::from(face.units_per_em()),
+    );
     let upem = f32::from(face.units_per_em());
     let xscale = x_scale as f32 / upem;
     let mut yscale = y_scale as f32 / upem;
@@ -219,7 +235,10 @@ pub fn shape(
             return None;
         }
         let (before, after) = (before as u32, after as u32);
-        glyphs.push((u32::from(seg.slot_gid(is)), info[before as usize].1.min(info[after as usize].1)));
+        glyphs.push((
+            u32::from(seg.slot_gid(is)),
+            info[before as usize].1.min(info[after as usize].1),
+        ));
         while clusters[ci].base_char > before && ci != 0 {
             let c = clusters[ci];
             let p = &mut clusters[ci - 1];
@@ -247,7 +266,9 @@ pub fn shape(
                 curradv = curradv.saturating_sub(c.advance);
             } else {
                 let origin_x = clamp(f64::from(ox));
-                clusters[ci].advance = clusters[ci].advance.saturating_add(origin_x.saturating_sub(curradv));
+                clusters[ci].advance = clusters[ci]
+                    .advance
+                    .saturating_add(origin_x.saturating_sub(curradv));
                 curradv = origin_x;
             }
             clusters[ci + 1] = c;
@@ -261,8 +282,10 @@ pub fn shape(
     if backward {
         clusters[ci].advance = clusters[ci].advance.saturating_add(curradv);
     } else {
-        clusters[ci].advance =
-            clamp(f64::from(clusters[ci].advance) + f64::from(seg.advance_x() * xscale) - f64::from(curradv));
+        clusters[ci].advance = clamp(
+            f64::from(clusters[ci].advance) + f64::from(seg.advance_x() * xscale)
+                - f64::from(curradv),
+        );
     }
     ci += 1;
     // the glyphs, each with its graphite cluster's advance and index
@@ -278,7 +301,11 @@ pub fn shape(
         }
     }
     for c in &clusters[..ci] {
-        merge_clusters(&mut out, c.base_glyph as usize, (c.base_glyph + c.num_glyphs) as usize);
+        merge_clusters(
+            &mut out,
+            c.base_glyph as usize,
+            (c.base_glyph + c.num_glyphs) as usize,
+        );
     }
     // positions: (x_advance, y_advance, x_offset, y_offset)
     let mut pos: Vec<(i32, i32, i32, i32)> = alloc::vec![(0, 0, 0, 0); glyph_count];
@@ -314,7 +341,10 @@ pub fn shape(
             p.1 = clamp(f64::from(seg.slot_advance_y(is, None) * yscale));
             curradvy = curradvy.saturating_sub(p.1);
             p.2 = clamp(
-                f64::from(seg.slot_origin_x(is) * xscale) - f64::from(var1[k]) - f64::from(curradvx) + f64::from(p.0),
+                f64::from(seg.slot_origin_x(is) * xscale)
+                    - f64::from(var1[k])
+                    - f64::from(curradvx)
+                    + f64::from(p.0),
             );
             p.3 = clamp(f64::from(seg.slot_origin_y(is) * yscale) - f64::from(curradvy));
         }

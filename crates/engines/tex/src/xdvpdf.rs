@@ -45,8 +45,8 @@ use phitex_defuse::{Ctx, Stop, ValueId, Values};
 use phitex_dvi::{DviWriter, Op};
 use phitex_xdvipdfmx::api::{Options as DpxOptions, Session};
 use phitex_xdvipdfmx::direct::PageState;
-use phitex_xdvipdfmx::pdfdoc::EndRec;
 use phitex_xdvipdfmx::io::{Files, Format};
+use phitex_xdvipdfmx::pdfdoc::EndRec;
 use phitex_xdvipdfmx::specials::Again;
 
 use crate::exec::LockWait as _;
@@ -360,7 +360,9 @@ fn packed_get(level: i32, data: &[u8]) -> Option<Vec<u8>> {
     let mut p = packed().locked();
     let link = p.link;
     let v = p.map.get_mut(&h)?;
-    let e = v.iter_mut().find(|e| (any || e.0 == level) && *e.1 == *data)?;
+    let e = v
+        .iter_mut()
+        .find(|e| (any || e.0 == level) && *e.1 == *data)?;
     e.3 = link;
     let out = e.2.to_vec();
     p.found.0 += 1;
@@ -476,14 +478,25 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
     };
     let (mut snaps, mut ops, mut docs, mut states, mut chunks, old) = match f.base {
         Some(b) => (
-            b.snaps.iter().filter(|x| x.0 < k).map(|x| (x.0, x.1.snapshot(), x.2.clone())).collect(),
+            b.snaps
+                .iter()
+                .filter(|x| x.0 < k)
+                .map(|x| (x.0, x.1.snapshot(), x.2.clone()))
+                .collect(),
             b.ops[..k].to_vec(),
             b.docs[..k].to_vec(),
             b.states[..k].to_vec(),
             b.chunks[..k].to_vec(),
             &b.chunks[..],
         ),
-        None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), &[][..]),
+        None => (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            &[][..],
+        ),
     };
     let every = n.div_ceil(SNAPS).max(1);
     for (i, p) in walks.iter().enumerate().skip(k) {
@@ -565,17 +578,25 @@ impl Docs {
         let mut d = Docs::default();
         for o in ops.unwrap_or_default() {
             let Op::Special(x) = o else { continue };
-            let bound = [&b"@thispage"[..], b"@prevpage", b"@nextpage", b"@xpos", b"@ypos", b"@page"]
-                .iter()
-                .any(|k| x.windows(k.len()).any(|w| w == *k))
-                .then_some(page);
+            let bound = [
+                &b"@thispage"[..],
+                b"@prevpage",
+                b"@nextpage",
+                b"@xpos",
+                b"@ypos",
+                b"@page",
+            ]
+            .iter()
+            .any(|k| x.windows(k.len()).any(|w| w == *k))
+            .then_some(page);
             match s.again(x) {
                 Ok(Again::Do) => {}
                 Ok(Again::Skip) => d.skip.push((bound, x.clone())),
                 Ok(Again::Outline) => d.outline.push((bound, x.clone())),
                 Ok(Again::Never) | Err(_) => {
-                    d.never
-                        .get_or_insert_with(|| String::from_utf8_lossy(&x[..x.len().min(48)]).into_owned());
+                    d.never.get_or_insert_with(|| {
+                        String::from_utf8_lossy(&x[..x.len().min(48)]).into_owned()
+                    });
                 }
             }
         }
@@ -630,7 +651,10 @@ fn live(
         }
         let d = Docs::of(Some(&ops), i, &mut s);
         if let Some(x) = &d.never {
-            return Err(format!("page {} has a special that can't be done again: {x}", i + 1));
+            return Err(format!(
+                "page {} has a special that can't be done again: {x}",
+                i + 1
+            ));
         }
         docs.push(Arc::new(d));
         again.push((i, ops));
@@ -640,7 +664,9 @@ fn live(
         return Ok((0, b.layout.clone(), String::new()));
     }
     let seq = |ds: &[Arc<Docs>], f: fn(&Docs) -> &Vec<DocSpecial>| {
-        ds.iter().flat_map(|d| f(d).iter().cloned()).collect::<Vec<_>>()
+        ds.iter()
+            .flat_map(|d| f(d).iter().cloned())
+            .collect::<Vec<_>>()
     };
     if seq(&docs, |d| &d.skip) != seq(&b.docs, |d| &d.skip) {
         return Err("the document's specials on the document changed".to_owned());
@@ -662,25 +688,39 @@ fn live(
             _ => b.states[i.min(bn)].clone(),
         };
         if !given.same_fixed(last) {
-            return Err(format!("page {} found another state than the last page left: {}", i + 1, given.differs(last)));
+            return Err(format!(
+                "page {} found another state than the last page left: {}",
+                i + 1,
+                given.differs(last)
+            ));
         }
         s.set_page_state(&given);
         chunk.extend(s.reship(i, ops, b.size).map_err(|e| fatal(&e))?.pdf);
         let now = s.page_state().map_err(|e| fatal(&e))?;
         if !now.same_fixed(last) {
-            return Err(format!("page {} left another state than the last page: {}", i + 1, now.differs(last)));
+            return Err(format!(
+                "page {} left another state than the last page: {}",
+                i + 1,
+                now.differs(last)
+            ));
         }
         // (the page after it, kept, found what it left)
         let next_kept = i + 1 < n && again.get(k + 1).is_none_or(|x| x.0 != i + 1);
         if next_kept && (i + 1 >= bn || now != b.states[i + 1]) {
-            return Err(format!("page {} left another state than page {} found", i + 1, i + 2));
+            return Err(format!(
+                "page {} left another state than page {} found",
+                i + 1,
+                i + 2
+            ));
         }
         left = Some((i, now));
     }
     // (the document's last page kept: what it left the end's)
     let last_kept = again.last().is_none_or(|x| x.0 + 1 != n);
     if last_kept && n < bn && !b.states[n].same_fixed(last) {
-        return Err(format!("page {n}, now the last, left another state than the last page"));
+        return Err(format!(
+            "page {n}, now the last, left another state than the last page"
+        ));
     }
     s.set_page_state(last);
     if n < bn {
@@ -709,7 +749,11 @@ fn live(
     let (tail, steps, replayed) = r.map_err(|e| fatal(&e))?;
     if let Some(w) = whole {
         let w = w.map_err(|e| fatal(&e))?.0;
-        let at = tail.iter().zip(&w).position(|(x, y)| x != y).or((tail.len() != w.len()).then(|| tail.len().min(w.len())));
+        let at = tail
+            .iter()
+            .zip(&w)
+            .position(|(x, y)| x != y)
+            .or((tail.len() != w.len()).then(|| tail.len().min(w.len())));
         eprintln!(
             "xdv pdf: replay check: {} ({} bytes{})",
             match at {
@@ -717,7 +761,11 @@ fn live(
                 Some(k) => format!("DIFFERENT at byte {k} of the end"),
             },
             tail.len(),
-            if replayed { ", replayed" } else { ", written whole" }
+            if replayed {
+                ", replayed"
+            } else {
+                ", written whole"
+            }
         );
     }
     let t_end = t.elapsed();
@@ -735,8 +783,16 @@ fn live(
         found.1,
         made.0,
         made.1,
-        if n == bn { String::new() } else { format!(", {bn} pages now {n}") },
-        if outline_again { ", the outline made anew" } else { "" }
+        if n == bn {
+            String::new()
+        } else {
+            format!(", {bn} pages now {n}")
+        },
+        if outline_again {
+            ", the outline made anew"
+        } else {
+            ""
+        }
     );
     layout(&chunks, &tail, &s)
         .map(|l| (again.len(), l, times))
@@ -791,7 +847,8 @@ pub(crate) fn file(
             return Some(m);
         }
         let h = &m.head;
-        if (h.mag, &h.comment, &h.name, h.date) != (head.mag, &head.comment, &head.name, head.date) {
+        if (h.mag, &h.comment, &h.name, h.date) != (head.mag, &head.comment, &head.name, head.date)
+        {
             return None;
         }
         m.head = head.clone();
@@ -889,16 +946,7 @@ pub(crate) fn file(
         }
         if let Ok((k, l, times)) = r {
             let make = exact_maker(
-                p,
-                &head,
-                &start,
-                b,
-                &log,
-                &ids,
-                &walks,
-                &defs,
-                &nums,
-                &comment,
+                p, &head, &start, b, &log, &ids, &walks, &defs, &nums, &comment,
             );
             let l = if k == 0 { l } else { l.live(make) };
             let x = crate::assemble::layout_value(v, l.clone());
@@ -986,9 +1034,20 @@ fn exact_maker(
     nums: &Arc<std::collections::BTreeMap<u32, u32>>,
     comment: &str,
 ) -> phitex_pdf::MakeExact {
-    let (p, head, start, b, log) = (p.clone(), head.clone(), start.clone(), b.clone(), log.clone());
-    let (ids, walks, defs, nums, comment) =
-        (ids.to_vec(), walks.to_vec(), defs.clone(), nums.clone(), comment.to_owned());
+    let (p, head, start, b, log) = (
+        p.clone(),
+        head.clone(),
+        start.clone(),
+        b.clone(),
+        log.clone(),
+    );
+    let (ids, walks, defs, nums, comment) = (
+        ids.to_vec(),
+        walks.to_vec(),
+        defs.clone(),
+        nums.clone(),
+        comment.to_owned(),
+    );
     Arc::new(move || {
         let logged: Arc<dyn Files> = Arc::new(Logged {
             files: (p.files)(),

@@ -399,7 +399,11 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
             // pdfTeX §1762
             let f = r.scan_font_ident()?;
             let c = r.scan_char_num()?;
-            match if r.xe { crate::xetex::native_has_char(r, f, c)? } else { None } {
+            match if r.xe {
+                crate::xetex::native_has_char(r, f, c)?
+            } else {
+                None
+            } {
                 Some(b) => b,
                 None => char_dims(r, f, c)?.is_some(),
             }
@@ -1197,11 +1201,7 @@ fn command_mine(r: &mut Run<'_, '_>, md: &Mode) -> R<bool> {
                 // pdfTeX §1130: TeX--XeT's math nodes
                 if r.param("TeXXeTstate")? > 0 {
                     let v = r.v;
-                    let node = v.list(vec![
-                        v.int(nodes::T_MATH),
-                        v.int(i64::from(chr)),
-                        v.int(0),
-                    ]);
+                    let node = v.list(vec![v.int(nodes::T_MATH), v.int(i64::from(chr)), v.int(0)]);
                     r.append(md.lid, node);
                 }
             } else {

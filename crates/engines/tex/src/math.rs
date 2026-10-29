@@ -477,7 +477,11 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let (class, fam, ch) = self.xe_math_field(c)?;
-        let t = if class == 7 { ORD } else { ORD + i64::from(class) };
+        let t = if class == 7 {
+            ORD
+        } else {
+            ORD + i64::from(class)
+        };
         let v = self.v;
         let e = empty(v);
         let n = noad(v, t, 0, 0, math_char(v, fam, ch), e, e);
@@ -617,7 +621,9 @@ impl Run<'_, '_> {
                     }
                     c
                 }
-                cmd::MATH_CHAR_NUM | cmd::MATH_GIVEN | cmd::DELIM_NUM => self.xe_math_char_code()?,
+                cmd::MATH_CHAR_NUM | cmd::MATH_GIVEN | cmd::DELIM_NUM => {
+                    self.xe_math_char_code()?
+                }
                 _ => {
                     self.back_cur();
                     self.scan_left_brace()?;
@@ -1316,7 +1322,10 @@ impl Run<'_, '_> {
                 d = 0;
                 ab.into_iter().chain([r, Node::Box(Box::new(b))]).collect()
             } else {
-                std::iter::once(Node::Box(Box::new(b))).chain([r]).chain(ab).collect()
+                std::iter::once(Node::Box(Box::new(b)))
+                    .chain([r])
+                    .chain(ab)
+                    .collect()
             };
             let view2 = self.font_view(&list)?;
             b = phitex_typeset::pack::hpack(list, Spec::Additional(0), &view2, &pp, false).node;
@@ -1436,7 +1445,11 @@ impl Run<'_, '_> {
         // (the last formula's fonts while no font cell changed since)
         let g = self.st.font_gen();
         let fonts = match &self.math_memo {
-            Some(m) if m.0 == g && m.1 == fam_fnt && m.2.0.xfams == xfams && self.interp.is_none() => m.2.clone(),
+            Some(m)
+                if m.0 == g && m.1 == fam_fnt && m.2.0.xfams == xfams && self.interp.is_none() =>
+            {
+                m.2.clone()
+            }
             _ => {
                 let f = Rc::new(self.math_fonts(&fam_fnt, &xfams)?);
                 if self.interp.is_none() {
@@ -1480,7 +1493,8 @@ impl Run<'_, '_> {
         let curf = if self.xe {
             let v = self.v;
             let x = self.get("mathcurf")?.map_or(-1, |x| int_of(v, x));
-            view.math_cur_f.store(x, std::sync::atomic::Ordering::Relaxed);
+            view.math_cur_f
+                .store(x, std::sync::atomic::Ordering::Relaxed);
             Some(x)
         } else {
             None
@@ -1538,7 +1552,11 @@ impl Run<'_, '_> {
         // (the symbol and extension families' fonts with all their
         // `\fontdimen`s, §700–§701; another family's with those math
         // reads of any font, the space and the x-height, §738, §752)
-        let full: Vec<u32> = fam_fnt.iter().flat_map(|row| [row[2], row[3]]).flatten().collect();
+        let full: Vec<u32> = fam_fnt
+            .iter()
+            .flat_map(|row| [row[2], row[3]])
+            .flatten()
+            .collect();
         for row in fam_fnt {
             for &f in row.iter().flatten() {
                 if view.fonts.contains_key(f) {
@@ -1594,4 +1612,8 @@ fn box_fonts(ml: &[phitex_typeset::math::MItem], out: &mut Vec<u32>) {
 
 /// [`Run::math_memo`]: the fonts' generation, the families' fonts, and
 /// those fonts decoded with their `\skewchar`s.
-pub(crate) type MathMemo = (u64, [[Option<u32>; 16]; 3], Rc<(crate::fonts::View, crate::FxHashMap<u32, i32>)>);
+pub(crate) type MathMemo = (
+    u64,
+    [[Option<u32>; 16]; 3],
+    Rc<(crate::fonts::View, crate::FxHashMap<u32, i32>)>,
+);

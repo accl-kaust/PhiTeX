@@ -464,7 +464,11 @@ impl<'a> Reader<'a> {
             Entry::In(s, idx) => {
                 let st = self.stream(s);
                 let (data, first, pairs) = &*st;
-                assert!(idx < pairs.len(), "object {n}: index {idx} of {} in stream {s}", pairs.len());
+                assert!(
+                    idx < pairs.len(),
+                    "object {n}: index {idx} of {} in stream {s}",
+                    pairs.len()
+                );
                 assert_eq!(pairs[idx].0, n, "stream {s}'s object {idx} is not {n}");
                 let mut lx = Lexer {
                     b: data,
@@ -554,7 +558,10 @@ impl<'a> Reader<'a> {
             if self.live && font && !matches!(&k[..], b"Type" | b"Subtype" | b"BaseFont") {
                 continue;
             }
-            if matches!(&k[..], b"Parent" | b"P" | b"Length" | b"Filter" | b"DecodeParms") {
+            if matches!(
+                &k[..],
+                b"Parent" | b"P" | b"Length" | b"Filter" | b"DecodeParms"
+            ) {
                 continue;
             }
             k.hash(h);
@@ -1070,7 +1077,10 @@ fn harness_pairs() {
                     && let Some(&Entry::At(off)) = r.xref.get(n)
                     && off >= b.len()
                 {
-                    let end = upd[off..].windows(6).position(|w| w == b"endobj").map_or(0, |e| e + 7);
+                    let end = upd[off..]
+                        .windows(6)
+                        .position(|w| w == b"endobj")
+                        .map_or(0, |e| e + 7);
                     contents += end;
                 }
             }

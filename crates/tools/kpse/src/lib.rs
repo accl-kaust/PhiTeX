@@ -499,7 +499,9 @@ impl Db {
         self.index[from..]
             .iter()
             .take_while(move |e| e.0 == h)
-            .filter(move |e| self.text.get(e.1 as usize..(e.1 + e.2) as usize) == Some(name.as_slice()))
+            .filter(move |e| {
+                self.text.get(e.1 as usize..(e.1 + e.2) as usize) == Some(name.as_slice())
+            })
             .map(|e| self.dirs[e.3 as usize].as_slice())
     }
 
@@ -621,10 +623,12 @@ impl Db {
         }
         let mut index = Vec::with_capacity(count);
         for entry in raw.as_chunks::<20>().0 {
-            let word = |a: usize| u32::from_le_bytes([entry[a], entry[a + 1], entry[a + 2], entry[a + 3]]);
+            let word =
+                |a: usize| u32::from_le_bytes([entry[a], entry[a + 1], entry[a + 2], entry[a + 3]]);
             let hash = u64::from(word(0)) | (u64::from(word(4)) << 32);
             let (off, len, dir) = (word(8), word(12), word(16));
-            if (off as usize).checked_add(len as usize)? > text.len() || dir as usize >= dirs.len() {
+            if (off as usize).checked_add(len as usize)? > text.len() || dir as usize >= dirs.len()
+            {
                 return None;
             }
             index.push((hash, off, len, dir));
@@ -632,7 +636,12 @@ impl Db {
         if !index.is_sorted_by_key(|e| e.0) {
             return None;
         }
-        Some(Db { dirs, text, index, roots })
+        Some(Db {
+            dirs,
+            text,
+            index,
+            roots,
+        })
     }
 }
 
@@ -669,13 +678,18 @@ static DB_CACHE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex
 /// a database kept there while its files have the length and time they
 /// had, instead of parsing them.
 pub fn set_db_cache(dir: Option<std::path::PathBuf>) {
-    *DB_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
+    *DB_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
 }
 
 /// The file a database of the `ls-R` files `key` is kept in: one per set
 /// of files, rewritten when one changes.
 fn db_cache_file(key: &[(Bytes, u64, u128)]) -> Option<std::path::PathBuf> {
-    let dir = DB_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()?;
+    let dir = DB_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()?;
     let mut names = Vec::new();
     for (f, _, _) in key {
         names.extend_from_slice(f);
@@ -1105,7 +1119,8 @@ impl Kpse {
             && std::fs::create_dir_all(dir).is_ok()
         {
             let tmp = p.with_extension(format!("tmp{}", std::process::id()));
-            if std::fs::write(&tmp, db.to_bytes(&key)).is_ok() && std::fs::rename(&tmp, &p).is_err() {
+            if std::fs::write(&tmp, db.to_bytes(&key)).is_ok() && std::fs::rename(&tmp, &p).is_err()
+            {
                 let _ = std::fs::remove_file(&tmp);
             }
         }

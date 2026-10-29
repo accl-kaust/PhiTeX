@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use crate::be::{u16_at, u32_at, u8_at};
+use crate::be::{u8_at, u16_at, u32_at};
 use crate::position::{Position, Rect};
 use crate::sparse::Sparse;
 use crate::ttf;
@@ -76,7 +76,10 @@ pub(crate) struct GlyphCache {
     upem: u16,
 }
 
-const EMPTY_RECT: Rect = Rect { bl: Position { x: 0.0, y: 0.0 }, tr: Position { x: 0.0, y: 0.0 } };
+const EMPTY_RECT: Rect = Rect {
+    bl: Position { x: 0.0, y: 0.0 },
+    tr: Position { x: 0.0, y: 0.0 },
+};
 
 /// The tables `GlyphCache::Loader` reads.
 pub(crate) struct GlyphTables<'a> {
@@ -129,8 +132,14 @@ impl<'a> Loader<'a> {
         let flags = u16_at(gloc, 4);
         let num_attrs = u16_at(gloc, 6);
         let long_fmt = flags & 1 != 0;
-        let ids = if flags & 2 != 0 { 2 * usize::from(num_attrs) } else { 0 };
-        let tmp = (gloc.len().wrapping_sub(8).wrapping_sub(ids) / if long_fmt { 4 } else { 2 }) as isize - 1;
+        let ids = if flags & 2 != 0 {
+            2 * usize::from(num_attrs)
+        } else {
+            0
+        };
+        let tmp = (gloc.len().wrapping_sub(8).wrapping_sub(ids) / if long_fmt { 4 } else { 2 })
+            as isize
+            - 1;
         if version >= 0x0002_0000
             || tmp < 0
             || tmp > 65535
@@ -170,9 +179,15 @@ impl<'a> Loader<'a> {
     fn gloc_range(&self, gid: u16) -> (usize, usize) {
         let g = usize::from(gid);
         if self.long_fmt {
-            (u32_at(self.gloc, 8 + 4 * g) as usize, u32_at(self.gloc, 8 + 4 * g + 4) as usize)
+            (
+                u32_at(self.gloc, 8 + 4 * g) as usize,
+                u32_at(self.gloc, 8 + 4 * g + 4) as usize,
+            )
         } else {
-            (usize::from(u16_at(self.gloc, 8 + 2 * g)), usize::from(u16_at(self.gloc, 8 + 2 * g + 2)))
+            (
+                usize::from(u16_at(self.gloc, 8 + 2 * g)),
+                usize::from(u16_at(self.gloc, 8 + 2 * g + 2)),
+            )
         }
     }
 
@@ -265,7 +280,13 @@ impl<'a> Loader<'a> {
             Position::new(bbox.tr.x + bbox.tr.y, bbox.tr.x - bbox.bl.y),
         );
         let rd = |b: &Rect, p: usize| {
-            readbox(b, u8_at(glat, p), u8_at(glat, p + 2), u8_at(glat, p + 1), u8_at(glat, p + 3))
+            readbox(
+                b,
+                u8_at(glat, p),
+                u8_at(glat, p + 2),
+                u8_at(glat, p + 1),
+                u8_at(glat, p + 3),
+            )
         };
         out.slant = rd(&diamax, p);
         p += 4;
@@ -285,7 +306,13 @@ impl<'a> Loader<'a> {
 /// `W` bytes a key and a count): from `start` while the next value's
 /// offset is before `end - 1`.
 fn glat_pairs(glat: &[u8], start: usize, end: usize, w: usize) -> Vec<(u16, u16)> {
-    let peek_w = |o: usize| if w == 1 { u32::from(u8_at(glat, o)) } else { u32::from(u16_at(glat, o)) };
+    let peek_w = |o: usize| {
+        if w == 1 {
+            u32::from(u8_at(glat, o))
+        } else {
+            u32::from(u16_at(glat, o))
+        }
+    };
     // (two bytes a value at least: the pairs' bound)
     let mut out = Vec::with_capacity(end.saturating_sub(start) / 2);
     let mut e = start;
@@ -310,16 +337,30 @@ fn scale_to(t: u8, zmin: f32, zmax: f32) -> f32 {
 
 fn readbox(b: &Rect, zxmin: u8, zymin: u8, zxmax: u8, zymax: u8) -> Rect {
     Rect::new(
-        Position::new(scale_to(zxmin, b.bl.x, b.tr.x), scale_to(zymin, b.bl.y, b.tr.y)),
-        Position::new(scale_to(zxmax, b.bl.x, b.tr.x), scale_to(zymax, b.bl.y, b.tr.y)),
+        Position::new(
+            scale_to(zxmin, b.bl.x, b.tr.x),
+            scale_to(zymin, b.bl.y, b.tr.y),
+        ),
+        Position::new(
+            scale_to(zxmax, b.bl.x, b.tr.x),
+            scale_to(zymax, b.bl.y, b.tr.y),
+        ),
     )
 }
 
 impl GlyphCache {
     /// `GlyphCache(face, gr_face_preloadGlyphs)`.
     pub(crate) fn new(t: &GlyphTables) -> GlyphCache {
-        let empty = GlyphCache { glyphs: Vec::new(), boxes: None, num_glyphs: 0, num_attrs: 0, upem: 0 };
-        let Some(ld) = Loader::new(t) else { return empty };
+        let empty = GlyphCache {
+            glyphs: Vec::new(),
+            boxes: None,
+            num_glyphs: 0,
+            num_attrs: 0,
+            upem: 0,
+        };
+        let Some(ld) = Loader::new(t) else {
+            return empty;
+        };
         let n = ld.num_glyphs();
         if n == 0 {
             return empty;
@@ -411,11 +452,13 @@ impl GlyphCache {
 
     /// `getSubBoundingBBox`.
     pub(crate) fn sub_bbox(&self, gid: u16, i: u8) -> Rect {
-        self.gbox(gid).map_or(EMPTY_RECT, |b| b.subs[2 * usize::from(i)])
+        self.gbox(gid)
+            .map_or(EMPTY_RECT, |b| b.subs[2 * usize::from(i)])
     }
 
     /// `getSubBoundingSlantBox`.
     pub(crate) fn sub_slant(&self, gid: u16, i: u8) -> Rect {
-        self.gbox(gid).map_or(EMPTY_RECT, |b| b.subs[2 * usize::from(i) + 1])
+        self.gbox(gid)
+            .map_or(EMPTY_RECT, |b| b.subs[2 * usize::from(i) + 1])
     }
 }

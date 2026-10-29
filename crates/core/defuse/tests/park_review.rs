@@ -148,7 +148,14 @@ impl Operation for Walk {
         let decode = |st: ValueId| {
             let parts = v.with_list(st, <[ValueId]>::to_vec).unwrap_or_default();
             let c = v.as_int(parts[0]).unwrap_or(-1);
-            (if c < 0 { None } else { Some(NodeId::from_raw(c.unsigned_abs())) }, v.as_int(parts[1]).unwrap_or(0))
+            (
+                if c < 0 {
+                    None
+                } else {
+                    Some(NodeId::from_raw(c.unsigned_abs()))
+                },
+                v.as_int(parts[1]).unwrap_or(0),
+            )
         };
         if let (Some(_), Some(Cause::Range { by, .. })) = (cx.resumed(), cx.woken_by()) {
             self.0.offered.lock().unwrap().push(by.raw());
@@ -169,7 +176,10 @@ impl Operation for Walk {
         if self.0.loop_waits.load(Ordering::Acquire) {
             spin_until(&self.0.contrib_done, 30);
         }
-        cx.park(v.list(vec![v.int(cur.map_or(-1, |n| i64::try_from(n.raw()).unwrap())), v.int(sum)]));
+        cx.park(v.list(vec![
+            v.int(cur.map_or(-1, |n| i64::try_from(n.raw()).unwrap())),
+            v.int(sum),
+        ]));
         Ok(v.int(sum))
     }
 
@@ -214,7 +224,20 @@ fn doc() -> Doc {
     let l = e.push(u, walk, vec![s.0, v.int(1)]);
     e.evaluate(2).unwrap();
     assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(3));
-    Doc { e, g, s, walk, contrib, contrib_place, quiet, t, d0, c1, c2, l }
+    Doc {
+        e,
+        g,
+        s,
+        walk,
+        contrib,
+        contrib_place,
+        quiet,
+        t,
+        d0,
+        c1,
+        c2,
+        l,
+    }
 }
 
 fn out(d: &Doc) -> Option<i64> {
@@ -352,7 +375,11 @@ fn a_kept_range_read_refuted_at_the_commit_keeps_the_state_and_names_its_start()
     let r = e.evaluate(2).unwrap();
     assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(109), "{r:?}");
     let offered = g.offered.lock().unwrap().clone();
-    assert!(offered.contains(&p.raw()), "a run offered the state with the placer as the site: {offered:?} (placer {}) {r:?}", p.raw());
+    assert!(
+        offered.contains(&p.raw()),
+        "a run offered the state with the placer as the site: {offered:?} (placer {}) {r:?}",
+        p.raw()
+    );
     assert!(e.check_invariants().is_empty());
 }
 
@@ -410,13 +437,24 @@ fn a_kept_read_from_a_node_gone_is_not_kept() {
     let c = e.children(p);
     assert_eq!(c.len(), 1, "the placer's contributor");
     let from_c = format!("after: Some({:?})", c[0]);
-    assert!(e.debug_reads(l).contains(&from_c), "the walk read from it: {}", e.debug_reads(l));
+    assert!(
+        e.debug_reads(l).contains(&from_c),
+        "the walk read from it: {}",
+        e.debug_reads(l)
+    );
     e.replace(t, def_t, vec![v.int(1)]);
     let r = e.evaluate(2).unwrap();
     assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(4), "{r:?}");
     let walks = r.runs_by_op.iter().find(|x| x.0 == "walk").map_or(0, |x| x.1);
-    assert!(walks <= 2, "the walk runs for the edit and for the read from the placer, not again for the read from the node gone: {r:?}");
-    assert!(!e.debug_reads(l).contains(&from_c), "no read from the node gone: {}", e.debug_reads(l));
+    assert!(
+        walks <= 2,
+        "the walk runs for the edit and for the read from the placer, not again for the read from the node gone: {r:?}"
+    );
+    assert!(
+        !e.debug_reads(l).contains(&from_c),
+        "no read from the node gone: {}",
+        e.debug_reads(l)
+    );
     assert!(e.check_invariants().is_empty());
 }
 
@@ -444,7 +482,14 @@ impl Operation for AnchorWalk {
         let (mut cur, mut sum) = state.map_or((None, 0), |st| {
             let parts = v.with_list(st, <[ValueId]>::to_vec).unwrap_or_default();
             let c = v.as_int(parts[0]).unwrap_or(-1);
-            (if c < 0 { None } else { Some(NodeId::from_raw(c.unsigned_abs())) }, v.as_int(parts[1]).unwrap_or(0))
+            (
+                if c < 0 {
+                    None
+                } else {
+                    Some(NodeId::from_raw(c.unsigned_abs()))
+                },
+                v.as_int(parts[1]).unwrap_or(0),
+            )
         });
         if state.is_none() && cx.alive(a) {
             let _ = cx.read_at(v.field("t"), phitex_defuse::At::Before(a))?;
@@ -459,7 +504,10 @@ impl Operation for AnchorWalk {
             sum += v.as_int(x).unwrap_or(0);
             cur = Some(n);
         }
-        cx.park(v.list(vec![v.int(cur.map_or(-1, |n| i64::try_from(n.raw()).unwrap())), v.int(sum)]));
+        cx.park(v.list(vec![
+            v.int(cur.map_or(-1, |n| i64::try_from(n.raw()).unwrap())),
+            v.int(sum),
+        ]));
         Ok(v.int(sum))
     }
 
@@ -500,7 +548,9 @@ fn a_kept_read_at_a_node_gone_wakes_a_parking_run_once_with_its_site() {
     assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(103), "{r:?}");
     let causes = walk.0.lock().unwrap().clone();
     assert!(
-        causes.iter().any(|c| matches!(c, Some(Cause::Changed { site: Some(n), .. }) if *n == a)),
+        causes
+            .iter()
+            .any(|c| matches!(c, Some(Cause::Changed { site: Some(n), .. }) if *n == a)),
         "woken where the node stood: {causes:?}"
     );
     assert!(causes.len() <= 3, "{causes:?}");
@@ -582,7 +632,9 @@ fn a_read_at_a_node_refuted_at_the_commit_names_the_node_to_a_parking_run() {
     assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(3), "{r:?}");
     let causes = walk.0.lock().unwrap().clone();
     assert!(
-        !causes.iter().any(|c| matches!(c, Some(Cause::Changed { site: None, .. }))),
+        !causes
+            .iter()
+            .any(|c| matches!(c, Some(Cause::Changed { site: None, .. }))),
         "a site for every changed read: {causes:?}"
     );
     assert!(e.check_invariants().is_empty());

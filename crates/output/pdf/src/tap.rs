@@ -43,7 +43,13 @@ pub trait GlyphTap: Send + Sync {
     /// each glyph's position (sp from the page's top left) and advance;
     /// the PDF made from the file (xdvipdfmx) shows one code a glyph.
     /// Untold, its codes are none.
-    fn native(&mut self, font: FontId, text: &[u16], glyphs: &[(Scaled, Scaled, Scaled)], size: Scaled) {
+    fn native(
+        &mut self,
+        font: FontId,
+        text: &[u16],
+        glyphs: &[(Scaled, Scaled, Scaled)],
+        size: Scaled,
+    ) {
         let _ = (font, text, size);
         self.none(glyphs.len());
     }

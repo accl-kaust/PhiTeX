@@ -476,7 +476,10 @@ fn expl3_setter(name: &str) -> Option<bool> {
     // (what follows the module, borrowed: no pieces split and joined)
     let verb2 = base.split_once('_').map_or("", |x| x.1);
     // (`s` is `v` or starts with `v_`)
-    let is = |s: &str, v: &str| s.strip_prefix(v).is_some_and(|r| r.is_empty() || r.starts_with('_'));
+    let is = |s: &str, v: &str| {
+        s.strip_prefix(v)
+            .is_some_and(|r| r.is_empty() || r.starts_with('_'))
+    };
     let local = [
         "set",
         "put_left",
@@ -502,12 +505,7 @@ fn expl3_setter(name: &str) -> Option<bool> {
     if base.starts_with("__") || base.starts_with("@@") {
         return None;
     }
-    if global_only
-        .iter()
-        .any(|v| is(verb2, v))
-        || verb == "new"
-        || verb == "const"
-    {
+    if global_only.iter().any(|v| is(verb2, v)) || verb == "new" || verb == "const" {
         return Some(true);
     }
     for v in local {
@@ -1773,7 +1771,8 @@ impl<'a> Closure<'a> {
         names.dedup();
         let names = std::sync::Arc::new(names);
         if !cut && !self.document_defines(&names) {
-            self.prelude.keep_closure(name.to_owned(), s.clone(), names.clone());
+            self.prelude
+                .keep_closure(name.to_owned(), s.clone(), names.clone());
         }
         self.frame.0.extend(names.iter().cloned());
         self.frame.1 |= cut;

@@ -58,7 +58,13 @@ pub(crate) fn env_value(eng: &Engine, f: Field) -> Option<ValueId> {
     if let Some(x) = eng.env.values.read().get(&f) {
         return *x;
     }
-    let x = eng.env.provider.read().as_ref().and_then(|p| p(eng.values(), f)).flatten();
+    let x = eng
+        .env
+        .provider
+        .read()
+        .as_ref()
+        .and_then(|p| p(eng.values(), f))
+        .flatten();
     eng.env.values.write().entry(f).or_insert(x);
     x
 }
@@ -145,7 +151,14 @@ pub(crate) fn reaching_at(eng: &Engine, f: Field, anchor: NodeId, inclusive: boo
 /// lock: the contributions are copied out under the read lock, and a whole
 /// segment's sum is kept after (a short write lock) unless one of its sums
 /// was dropped meanwhile.
-fn segment_part(eng: &Engine, mono: &dyn crate::api::Monoid, seg: &Segment, f: Field, from: Option<Pos>, to: Option<Pos>) -> ValueId {
+fn segment_part(
+    eng: &Engine,
+    mono: &dyn crate::api::Monoid,
+    seg: &Segment,
+    f: Field,
+    from: Option<Pos>,
+    to: Option<Pos>,
+) -> ValueId {
     let (xs, whole) = {
         let inner = seg.inner.read();
         let covers = from.is_none_or(|p| p < seg.lo) && to.is_none_or(|p| p >= inner.hi);
@@ -179,7 +192,14 @@ fn segment_part(eng: &Engine, mono: &dyn crate::api::Monoid, seg: &Segment, f: F
 /// two ends, the segment sums between, combined in order.
 /// (`PHITEX_FOLD_TRACE=1`) A fold read whose `from` stands at or after its
 /// end, the empty range: the reader, its bounds' nodes and labels.
-pub(crate) fn trace_inverted(eng: &Engine, at: &str, me: &Node, f: Field, from: (Option<NodeId>, Pos), to: (Option<NodeId>, Pos)) {
+pub(crate) fn trace_inverted(
+    eng: &Engine,
+    at: &str,
+    me: &Node,
+    f: Field,
+    from: (Option<NodeId>, Pos),
+    to: (Option<NodeId>, Pos),
+) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if from.1 < to.1 || !*ON.get_or_init(|| std::env::var_os("PHITEX_FOLD_TRACE").is_some()) {
         return;
@@ -311,7 +331,8 @@ pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>) -> N
 /// A `next` as a value: `[node, value]`.
 pub(crate) fn next_value(eng: &Engine, n: &Next) -> Option<ValueId> {
     let v = eng.values();
-    n.item.map(|(id, x)| v.list(vec![v.int(i64::try_from(id.raw()).unwrap_or(0)), x]))
+    n.item
+        .map(|(id, x)| v.list(vec![v.int(i64::try_from(id.raw()).unwrap_or(0)), x]))
 }
 
 pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId> {
@@ -344,7 +365,10 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
             let x = v?;
             vals.with_list(x, |xs| {
                 xs.iter()
-                    .find_map(|&e| vals.with_list(e, |kv| (kv.first() == Some(&k)).then(|| kv.get(1).copied())).flatten())
+                    .find_map(|&e| {
+                        vals.with_list(e, |kv| (kv.first() == Some(&k)).then(|| kv.get(1).copied()))
+                            .flatten()
+                    })
                     .flatten()
             })
             .flatten()
@@ -533,7 +557,12 @@ pub(crate) struct SiblingParents {
 
 impl SiblingParents {
     pub(crate) fn of(me: &Node) -> SiblingParents {
-        SiblingParents { me: me.id, at: me.pos_hint(), parent: me.parent, above: None }
+        SiblingParents {
+            me: me.id,
+            at: me.pos_hint(),
+            parent: me.parent,
+            above: None,
+        }
     }
 
     fn has(&mut self, eng: &Engine, p: Option<NodeId>) -> bool {
@@ -561,7 +590,10 @@ impl SiblingParents {
 
     /// Whether `n` is a sibling a claim of `me` may take.
     pub(crate) fn takes(&mut self, eng: &Engine, n: &Node) -> bool {
-        n.state() != State::Gone && eng.op(n.op()).sibling() && !n.held_before(eng, self.me, self.at) && self.has(eng, n.parent)
+        n.state() != State::Gone
+            && eng.op(n.op()).sibling()
+            && !n.held_before(eng, self.me, self.at)
+            && self.has(eng, n.parent)
     }
 }
 
@@ -612,7 +644,13 @@ pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &m
 }
 
 /// [`answer`], its folds from `memo`.
-pub(crate) fn answer_in(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, memo: &mut FoldMemo) -> Option<ValueId> {
+pub(crate) fn answer_in(
+    eng: &Engine,
+    me: &Node,
+    kind: &ReadKind,
+    path: PathId,
+    memo: &mut FoldMemo,
+) -> Option<ValueId> {
     match kind {
         ReadKind::Field { f, at } => {
             if *f == eng.depth_field {
@@ -815,7 +853,8 @@ pub(crate) fn final_read(eng: &Engine, f: Field) -> Reaching {
         eng.has_finals.store(true, Ordering::Release);
     }
     let live = last_definition(eng, f);
-    eng.ranges.publish_first(f, if live.provisional { live } else { env_reaching(eng, f) })
+    eng.ranges
+        .publish_first(f, if live.provisional { live } else { env_reaching(eng, f) })
 }
 
 /// The last definition of `f` on the whole line, else the
@@ -994,7 +1033,14 @@ pub(crate) fn visible(target: &[u64], lv: (usize, u64)) -> bool {
 /// `incl`; None: all of them), in order, with its scope; `start`: the
 /// scopes open at the segment's start.
 /// A multi definition gives each of its parts, outermost first.
-pub(crate) fn levels(v: &Values, inner: &Inner, f: Field, start: &[u64], limit: Option<Pos>, incl: bool) -> Vec<(Pos, Def, (usize, u64))> {
+pub(crate) fn levels(
+    v: &Values,
+    inner: &Inner,
+    f: Field,
+    start: &[u64],
+    limit: Option<Pos>,
+    incl: bool,
+) -> Vec<(Pos, Def, (usize, u64))> {
     let Some(m) = inner.defs.get(&f) else {
         return Vec::new();
     };
@@ -1030,7 +1076,11 @@ pub(crate) fn levels(v: &Values, inner: &Inner, f: Field, start: &[u64], limit: 
         // definition in a scope the node opens is in it, after the closes)
         let lv = |p: &Def| {
             let after = own.is_some_and(|x| x.1.before || (p.depth > 0 && x.1.opens > 0));
-            let c = if after { closed.as_deref().unwrap_or(&chain) } else { &chain };
+            let c = if after {
+                closed.as_deref().unwrap_or(&chain)
+            } else {
+                &chain
+            };
             level(p, c, own)
         };
         if d.multi {
@@ -1183,7 +1233,11 @@ pub fn alias_of(v: &Values, x: ValueId) -> Option<(Field, NodeId)> {
 /// [`alias_of`].
 #[must_use]
 pub fn alias_value(v: &Values, g: Field, at: NodeId) -> ValueId {
-    v.list(vec![v.str(ALIAS), g.0, v.int(i64::from_ne_bytes(at.raw().to_ne_bytes()))])
+    v.list(vec![
+        v.str(ALIAS),
+        g.0,
+        v.int(i64::from_ne_bytes(at.raw().to_ne_bytes())),
+    ])
 }
 
 /// `x` with its alias definitions followed (`Ctx::define_alias`), as a

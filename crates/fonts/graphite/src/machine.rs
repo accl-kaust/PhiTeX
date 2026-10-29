@@ -40,12 +40,19 @@ struct Regs {
 
 impl Machine {
     pub(crate) fn new() -> Machine {
-        Machine { stack: [0; STACK_LEN], status: MStatus::Finished }
+        Machine {
+            stack: [0; STACK_LEN],
+            status: MStatus::Finished,
+        }
     }
 
     #[inline]
     fn rd(&self, i: isize) -> i32 {
-        if (0..STACK_LEN as isize).contains(&i) { self.stack[i as usize] } else { 0 }
+        if (0..STACK_LEN as isize).contains(&i) {
+            self.stack[i as usize]
+        } else {
+            0
+        }
     }
 
     #[inline]
@@ -57,7 +64,13 @@ impl Machine {
 
     /// `Machine::Code::run(m, map)`: `map` is an index into the slot map
     /// array (`m_slot_map`), moved as the program moves it.
-    pub(crate) fn run_code(&mut self, code: &Code, seg: &mut Segment, smap: &mut SlotMap, map: &mut usize) -> i32 {
+    pub(crate) fn run_code(
+        &mut self,
+        code: &Code,
+        seg: &mut Segment,
+        smap: &mut SlotMap,
+        map: &mut usize,
+    ) -> i32 {
         let k = i32::from(code.max_ref) + i32::from(smap.context());
         if smap.size() <= k as usize || smap.get(k) == NIL {
             self.status = MStatus::SlotOffsetOutBounds;
@@ -94,13 +107,23 @@ impl Machine {
 
     /// `direct_run`: the stack pointer at the end.
     #[allow(clippy::too_many_lines)]
-    fn direct_run(&mut self, code: &Code, seg: &mut Segment, smap: &mut SlotMap, map0: &mut usize) -> isize {
+    fn direct_run(
+        &mut self,
+        code: &Code,
+        seg: &mut Segment,
+        smap: &mut SlotMap,
+        map0: &mut usize,
+    ) -> isize {
         let instrs = &code.instrs;
         let data = &code.data;
         let mut ip: usize = 0;
         let mut dp: usize = 0;
         let sb = STACK_GUARD;
-        let mut r = Regs { sp: sb, is: smap.slot_map[*map0], map: *map0 };
+        let mut r = Regs {
+            sp: sb,
+            is: smap.slot_map[*map0],
+            map: *map0,
+        };
         let mapb = 1 + usize::from(smap.context());
         let dir = smap.dir();
         let mut flags: u8 = 0;
@@ -193,7 +216,15 @@ impl Machine {
                     push!(i32::from_be_bytes([d(dp), d(dp + 1), d(dp + 2), d(dp + 3)]));
                     dp += 4;
                 }
-                op::ADD | op::SUB | op::MUL | op::AND | op::OR | op::EQUAL | op::NOT_EQ | op::BITOR | op::BITAND => {
+                op::ADD
+                | op::SUB
+                | op::MUL
+                | op::AND
+                | op::OR
+                | op::EQUAL
+                | op::NOT_EQ
+                | op::BITOR
+                | op::BITAND => {
                     let a = pop!() as u32;
                     let t = top!() as u32;
                     let v = match o {
@@ -437,7 +468,11 @@ impl Machine {
                     let val = pop!() as u32;
                     positioned!(slat);
                     let res = seg.get_attr(r.is, slat, 0) as u32;
-                    let v = if o == op::ATTR_ADD { val.wrapping_add(res) } else { res.wrapping_sub(val) };
+                    let v = if o == op::ATTR_ADD {
+                        val.wrapping_add(res)
+                    } else {
+                        res.wrapping_sub(val)
+                    };
                     seg.set_attr(r.is, slat, 0, v as i16, smap);
                 }
                 op::ATTR_SET_SLOT => {
@@ -451,7 +486,8 @@ impl Machine {
                     let slat = d(dp);
                     let idx = d(dp + 1);
                     dp += 2;
-                    let val = pop!().wrapping_add((r.map as i32 - 1) * i32::from(slat == attr::ATT_TO));
+                    let val =
+                        pop!().wrapping_add((r.map as i32 - 1) * i32::from(slat == attr::ATT_TO));
                     seg.set_attr(r.is, slat, idx, val as i16, smap);
                 }
                 op::PUSH_SLOT_ATTR => {
@@ -536,7 +572,11 @@ impl Machine {
                     let val = pop!() as u32;
                     positioned!(slat);
                     let res = seg.get_attr(r.is, slat, idx) as u32;
-                    let v = if o == op::IATTR_ADD { val.wrapping_add(res) } else { res.wrapping_sub(val) };
+                    let v = if o == op::IATTR_ADD {
+                        val.wrapping_add(res)
+                    } else {
+                        res.wrapping_sub(val)
+                    };
                     seg.set_attr(r.is, slat, idx, v as i16, smap);
                 }
                 op::PUSH_PROC_STATE => {
@@ -620,4 +660,3 @@ impl Machine {
         r.sp
     }
 }
-

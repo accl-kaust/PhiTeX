@@ -249,13 +249,7 @@ impl Run<'_, '_> {
     /// that made the binding saved what it hid, and the definition is
     /// that group's, so the closes of the groups opened since keep it.
     /// `base` is the depth of level 0.
-    pub(crate) fn modify_at(
-        &mut self,
-        loc: crate::state::Loc,
-        val: ValueId,
-        lvl: i64,
-        base: i64,
-    ) {
+    pub(crate) fn modify_at(&mut self, loc: crate::state::Loc, val: ValueId, lvl: i64, base: i64) {
         self.muts += 1;
         // a binding made at or below the run's base level (outside every
         // group of the run) changes there: the run's definition at its
@@ -263,11 +257,7 @@ impl Run<'_, '_> {
         // at level one it is retained as a global one is (§283); else
         // the binding is a group's of this run
         let at_base = lvl <= base;
-        self.st.modify(
-            loc,
-            crate::state::Entry::raw(Some(val)),
-            at_base,
-            lvl == 0,
-        );
+        self.st
+            .modify(loc, crate::state::Entry::raw(Some(val)), at_base, lvl == 0);
     }
 }

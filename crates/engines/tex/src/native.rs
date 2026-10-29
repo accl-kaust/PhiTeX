@@ -278,7 +278,14 @@ impl Run<'_, '_> {
             }
         }
         let glyph_metrics = self.param("XeTeXuseglyphmetrics")? > 0;
-        Ok(word_of(nf, u32::try_from(f).unwrap_or(0), text, kind, &layout, glyph_metrics))
+        Ok(word_of(
+            nf,
+            u32::try_from(f).unwrap_or(0),
+            text,
+            kind,
+            &layout,
+            glyph_metrics,
+        ))
     }
 
     /// The kind of a word made now (`\\XeTeXgenerateactualtext`).
@@ -303,7 +310,10 @@ impl Run<'_, '_> {
             while i < mapped.len() {
                 let u = u32::from(mapped[i]);
                 let (ch, n) = if (0xD800..0xDC00).contains(&u) && i + 1 < mapped.len() {
-                    ((u - 0xD800) * 1024 + u32::from(mapped[i + 1]) - 0xDC00 + 0x1_0000, 2)
+                    (
+                        (u - 0xD800) * 1024 + u32::from(mapped[i + 1]) - 0xDC00 + 0x1_0000,
+                        2,
+                    )
                 } else {
                     (u, 1)
                 };
@@ -396,7 +406,12 @@ impl Run<'_, '_> {
         self.font_set(f, crate::fields::FontCell::Info, info, true);
         for (k, p) in nf.params.iter().enumerate() {
             let k = i32::try_from(k + 1).unwrap_or(0);
-            self.font_set(f, crate::fields::FontCell::Fd(k), v.int(i64::from(*p)), true);
+            self.font_set(
+                f,
+                crate::fields::FontCell::Fd(k),
+                v.int(i64::from(*p)),
+                true,
+            );
         }
         self.font_set(
             f,
@@ -497,7 +512,12 @@ fn native_of(v: &Values, it: &crate::nest::Item) -> Option<Native> {
 impl Run<'_, '_> {
     /// [`crate::run::Run::char_run`] in native font `f`: words and the
     /// spaces between them (xetex.web §1034's native part, §1041–§1044).
-    pub(crate) fn native_char_run(&mut self, md: &crate::build::Mode, f: u32, nf: &Arc<NativeFont>) -> R<()> {
+    pub(crate) fn native_char_run(
+        &mut self,
+        md: &crate::build::Mode,
+        f: u32,
+        nf: &Arc<NativeFont>,
+    ) -> R<()> {
         use crate::build::SF_UNREAD;
         use crate::val::cmd;
         let v = self.v;
@@ -520,7 +540,8 @@ impl Run<'_, '_> {
                         sf = SF_UNREAD;
                     }
                     self.flush_chars(md.lid, &mut out, std::mem::take(&mut raws));
-                    let next = self.native_collect(md, i64::from(f), nf, ch.cast_unsigned(), &mut sf)?;
+                    let next =
+                        self.native_collect(md, i64::from(f), nf, ch.cast_unsigned(), &mut sf)?;
                     if next {
                         continue;
                     }
@@ -533,7 +554,14 @@ impl Run<'_, '_> {
                 cmd::SPACER | cmd::EX_SPACE => {
                     // (`othercases`: `check_for_post_char_toks(big_switch)`)
                     if !self.ic_post()? {
-                        self.char_space(f, self.cur.cmd == cmd::EX_SPACE, &mut sf, &mut out, &mut raws, &mut space)?;
+                        self.char_space(
+                            f,
+                            self.cur.cmd == cmd::EX_SPACE,
+                            &mut sf,
+                            &mut out,
+                            &mut raws,
+                            &mut space,
+                        )?;
                     }
                 }
                 _ => {
@@ -638,7 +666,10 @@ impl Run<'_, '_> {
                 break false;
             }
             if self.next_ck()? {
-                if !matches!(self.cur.cmd, cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN) {
+                if !matches!(
+                    self.cur.cmd,
+                    cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN
+                ) {
                     // (the space factor as XeTeX's `adjust_space_factor`
                     // left it, for what the expansion reads: acmart's
                     // `\@addpunct` after a run-in head ending in `.`)
@@ -770,7 +801,14 @@ impl Run<'_, '_> {
 
     /// `do_locale_linebreaks`: `text` as words on list `lid` (one word
     /// without a `\XeTeXlinebreaklocale`).
-    fn locale_words(&mut self, lid: i64, f: i64, nf: &Arc<NativeFont>, text: &[u16], kind: NativeKind) -> R<()> {
+    fn locale_words(
+        &mut self,
+        lid: i64,
+        f: i64,
+        nf: &Arc<NativeFont>,
+        text: &[u16],
+        kind: NativeKind,
+    ) -> R<()> {
         let v = self.v;
         let loc = self
             .get(crate::xetex::LINEBREAK_LOCALE_FIELD)?
@@ -798,7 +836,10 @@ impl Run<'_, '_> {
                     self.append_node(lid, Node::Penalty(pen));
                 }
                 if use_skip {
-                    self.append_node(lid, Node::param_glue(crate::xetex::LINEBREAK_SKIP_CODE, skip));
+                    self.append_node(
+                        lid,
+                        Node::param_glue(crate::xetex::LINEBREAK_SKIP_CODE, skip),
+                    );
                 }
             }
             let w = self.native_word(f, nf, &text[prev..offs], kind)?;
@@ -823,7 +864,10 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let tail = n - 1;
-        let Some(pp) = (0..tail).rev().find(|&k| native_of(v, &l.list[k]).is_some_and(|w| w.kind != NativeKind::Glyph)) else {
+        let Some(pp) = (0..tail)
+            .rev()
+            .find(|&k| native_of(v, &l.list[k]).is_some_and(|w| w.kind != NativeKind::Glyph))
+        else {
             return Ok(());
         };
         let Some(first) = native_of(v, &l.list[pp]) else {
@@ -839,7 +883,10 @@ impl Run<'_, '_> {
         let is_glue = match &l.list[p] {
             crate::nest::Item::N(n) => matches!(n, Node::Glue(_)),
             crate::nest::Item::V(x) => {
-                matches!(crate::nodes::tag(v, *x), crate::nodes::T_GLUE | crate::nodes::T_SPACE)
+                matches!(
+                    crate::nodes::tag(v, *x),
+                    crate::nodes::T_GLUE | crate::nodes::T_SPACE
+                )
             }
         };
         if !is_glue {
@@ -907,7 +954,8 @@ impl phitex_typeset::fonts::NativeMath for NativeFont {
         }
         let (layout, _) = SHAPER.with(|sh| {
             let mut sh = sh.borrow_mut();
-            self.font.layout(&mut sh, &units, false, self.font.letter_space)
+            self.font
+                .layout(&mut sh, &units, false, self.font.letter_space)
         });
         layout.glyphs.first().map_or(0, |g| g.gid)
     }
@@ -950,7 +998,13 @@ impl phitex_typeset::fonts::NativeMath for NativeFont {
         self.font.ot_math_accent_pos(u32::from(g))
     }
 
-    fn math_kern(&self, g: u16, script: (&dyn phitex_typeset::fonts::NativeMath, u16), sup: bool, shift: i32) -> i32 {
+    fn math_kern(
+        &self,
+        g: u16,
+        script: (&dyn phitex_typeset::fonts::NativeMath, u16),
+        sup: bool,
+        shift: i32,
+    ) -> i32 {
         let Some(sf) = script.0.as_any().downcast_ref::<NativeFont>() else {
             return 0;
         };
@@ -959,7 +1013,8 @@ impl phitex_typeset::fonts::NativeMath for NativeFont {
         } else {
             phitex_otf::xetex::ScriptKind::Sub
         };
-        self.font.ot_math_kern(u32::from(g), &sf.font, u32::from(script.1), kind, shift)
+        self.font
+            .ot_math_kern(u32::from(g), &sf.font, u32::from(script.1), kind, shift)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

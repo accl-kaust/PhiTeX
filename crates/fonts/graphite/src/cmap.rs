@@ -88,7 +88,14 @@ impl Cmap {
             );
         }
         if let Some(st) = bmp {
-            cache_subtable(&mut blocks, cmap, st, 0xFFFF, ttf::cmap_subtable4_next, ttf::cmap_subtable4_lookup);
+            cache_subtable(
+                &mut blocks,
+                cmap,
+                st,
+                0xFFFF,
+                ttf::cmap_subtable4_next,
+                ttf::cmap_subtable4_lookup,
+            );
         }
         Some(Cmap { bmp_only, blocks })
     }

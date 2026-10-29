@@ -228,7 +228,11 @@ impl Frame {
 /// has fixed.
 enum Lr {
     N(Node),
-    Edge { dir: u8, width: Scaled, dist: Scaled },
+    Edge {
+        dir: u8,
+        width: Scaled,
+        dist: Scaled,
+    },
     Fixed(GlueNode),
 }
 
@@ -1122,7 +1126,10 @@ impl DviWriter {
         // (e-TeX: a list without text direction nodes, outside
         // right-to-left text, comes out as TeX's)
         if self.cur_dir == 0
-            && !b.list.iter().any(|n| matches!(n, Node::Math(k, _) if k.is_lr()))
+            && !b
+                .list
+                .iter()
+                .any(|n| matches!(n, Node::Math(k, _) if k.is_lr()))
         {
             self.hlist_nodes(&b.list, &mut fr, fonts, wh);
         } else {
@@ -1321,7 +1328,8 @@ impl DviWriter {
                     }
                 };
                 self.cur_h += rule_wd;
-                if matches!(node, Node::Kern(..)) && (rule_wd == 0 || (l.is_empty() && t.is_none())) {
+                if matches!(node, Node::Kern(..)) && (rule_wd == 0 || (l.is_empty() && t.is_none()))
+                {
                     continue;
                 }
                 l.push_front(Lr::N(node));

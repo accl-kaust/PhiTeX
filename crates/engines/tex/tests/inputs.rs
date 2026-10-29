@@ -141,10 +141,18 @@ fn a_file_read_inline_goes_on_after_the_document_file_it_inputs() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("inline-after-input");
     let _ = std::fs::create_dir_all(&dir);
     std::fs::write(dir.join("in1.tex"), "\\relax\n").unwrap();
-    std::fs::write(dir.join("q.tex"), "\\input in1\n\\special{AAA}x\n\\endinput\nNEVER\n").unwrap();
+    std::fs::write(
+        dir.join("q.tex"),
+        "\\input in1\n\\special{AAA}x\n\\endinput\nNEVER\n",
+    )
+    .unwrap();
     let opts = || common::options("./inline.tex", "inline", "", &dir);
     let b = common::build(opts(), Some(&common::plain()), "\\input q\nhello\\bye\n");
-    let want = common::build(opts(), Some(&common::plain()), "\\relax\n\\special{AAA}x\nhello\\bye\n");
+    let want = common::build(
+        opts(),
+        Some(&common::plain()),
+        "\\relax\n\\special{AAA}x\nhello\\bye\n",
+    );
     assert!(
         !b.output().0.is_empty() && b.output().0.windows(3).any(|w| w == b"AAA"),
         "no DVI file, or no special in it:\n{}",
@@ -195,7 +203,10 @@ fn a_distribution_file_is_not_cut_into_pieces() {
         std::fs::create_dir_all(dir.join("texmf/tex/generic")).unwrap();
         let mut table = String::new();
         for i in 0..300 {
-            let _ = write!(table, "Line {i} of the table, long enough to look like a paragraph of text when set in the plain format's ten point roman over a text width of six and a half inches.\n\n");
+            let _ = write!(
+                table,
+                "Line {i} of the table, long enough to look like a paragraph of text when set in the plain format's ten point roman over a text width of six and a half inches.\n\n"
+            );
         }
         std::fs::write(dir.join("texmf/tex/generic/table.tex"), &table).unwrap();
         std::fs::write(dir.join("body.tex"), &table).unwrap();

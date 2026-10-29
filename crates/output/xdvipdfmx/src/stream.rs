@@ -201,7 +201,14 @@ impl MemFile {
             }
             None => {
                 p += lim;
-                (lim, if lim == 0 { 0 } else { i32::from(rest[lim - 1]) })
+                (
+                    lim,
+                    if lim == 0 {
+                        0
+                    } else {
+                        i32::from(rest[lim - 1])
+                    },
+                )
             }
         };
         buf[..n].copy_from_slice(&rest[..n]);

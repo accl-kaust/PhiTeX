@@ -29,7 +29,8 @@ fn tables(data: &[u8]) -> HashMap<u32, Vec<u8>> {
         }
         let (tag, off, len) = (be(e), be(e + 8) as usize, be(e + 12) as usize);
         if off + len <= data.len() {
-            out.entry(tag).or_insert_with(|| data[off..off + len].to_vec());
+            out.entry(tag)
+                .or_insert_with(|| data[off..off + len].to_vec());
         }
     }
     out

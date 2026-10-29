@@ -148,7 +148,8 @@ pub trait NativeMath {
     fn accent_pos(&self, g: u16) -> Scaled;
     /// `get_ot_math_kern(f, g, sf, sg, cmd, shift)` with `script` the
     /// script's font and glyph (`sup`: `sup_cmd`).
-    fn math_kern(&self, g: u16, script: (&dyn NativeMath, u16), sup: bool, shift: Scaled) -> Scaled;
+    fn math_kern(&self, g: u16, script: (&dyn NativeMath, u16), sup: bool, shift: Scaled)
+    -> Scaled;
     /// The implementation, for [`NativeMath::math_kern`]'s other font.
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -191,7 +192,11 @@ pub trait Fonts {
     /// XeTeX's `set_native_metrics` on a word of `like`'s font and kind
     /// whose text is `text` (the words of a run merged in a box), where
     /// the fonts can shape; `None` where they cannot.
-    fn shape_native(&self, like: &crate::node::Native, text: &[u16]) -> Option<crate::node::Native> {
+    fn shape_native(
+        &self,
+        like: &crate::node::Native,
+        text: &[u16],
+    ) -> Option<crate::node::Native> {
         let _ = (like, text);
         None
     }

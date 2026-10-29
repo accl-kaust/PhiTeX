@@ -89,14 +89,31 @@ impl Operation for Reader {
     }
 }
 
-fn setup() -> (Engine, Arc<Placer>, Arc<Mark>, Arc<Reader>, phitex_defuse::OpId, phitex_defuse::OpId, phitex_defuse::OpId, phitex_defuse::OpId) {
+fn setup() -> (
+    Engine,
+    Arc<Placer>,
+    Arc<Mark>,
+    Arc<Reader>,
+    phitex_defuse::OpId,
+    phitex_defuse::OpId,
+    phitex_defuse::OpId,
+    phitex_defuse::OpId,
+) {
     let e = Engine::new();
     let def = e.register(Arc::new(Def));
-    let mk = Arc::new(Mark { runs: AtomicU64::new(0), def: std::sync::Mutex::new(Some(def)) });
+    let mk = Arc::new(Mark {
+        runs: AtomicU64::new(0),
+        def: std::sync::Mutex::new(Some(def)),
+    });
     let mark = e.register(mk.clone());
-    let pl = Arc::new(Placer { runs: AtomicU64::new(0), mark: std::sync::Mutex::new(Some(mark)) });
+    let pl = Arc::new(Placer {
+        runs: AtomicU64::new(0),
+        mark: std::sync::Mutex::new(Some(mark)),
+    });
     let placer = e.register(pl.clone());
-    let rd = Arc::new(Reader { runs: AtomicU64::new(0) });
+    let rd = Arc::new(Reader {
+        runs: AtomicU64::new(0),
+    });
     let reader = e.register(rd.clone());
     (e, pl, mk, rd, def, mark, placer, reader)
 }
@@ -127,11 +144,18 @@ fn a_moved_placement_keeps_its_node_and_its_placements() {
     let x2 = e.placed_by(p);
     assert_eq!(x2, x1, "the same node, relocated: {rep:?}");
     assert_eq!(e.placed_by(x2[0]), child1, "its own placement follows it: {rep:?}");
-    assert_eq!(mk.runs.load(Ordering::SeqCst), mk_runs + 1, "X ran once more at its new place: {rep:?}");
+    assert_eq!(
+        mk.runs.load(Ordering::SeqCst),
+        mk_runs + 1,
+        "X ran once more at its new place: {rep:?}"
+    );
     assert!(e.before(b, x2[0]), "X stands after B now");
     assert_eq!(rep.placements_moved, 1, "{rep:?}");
     assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(7), "{rep:?}");
-    assert!(rd.runs.load(Ordering::SeqCst) <= rd_runs + 1, "the reader re-asked at most once: {rep:?}");
+    assert!(
+        rd.runs.load(Ordering::SeqCst) <= rd_runs + 1,
+        "the reader re-asked at most once: {rep:?}"
+    );
     assert_eq!(pl.runs.load(Ordering::SeqCst), 2);
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }

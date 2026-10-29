@@ -221,7 +221,11 @@ fn a_panicked_runs_reads_are_kept_for_the_judgment_at_the_end() {
     }
     let r = e.evaluate(1);
     assert!(matches!(r, Err(phitex_defuse::EvalError::OpPanicked { .. })), "{r:?}");
-    assert_eq!(runs.load(Ordering::SeqCst), 1, "run again on an answer the collection freed");
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "run again on an answer the collection freed"
+    );
 }
 
 /// `[]`: says it runs, then holds until `go` (or a second).

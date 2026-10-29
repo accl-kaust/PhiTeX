@@ -199,7 +199,10 @@ fn a_reader_re_asked_while_it_spins_is_stopped_at_its_next_check() {
         // (the edit comes at its 70th check; its own next look is the
         // 128th)
         let k = spin.checks.load(Ordering::SeqCst);
-        assert!(k < 100, "the re-ask waited for the run's own look: stopped at check {k}, {took:?} (tries {tried})");
+        assert!(
+            k < 100,
+            "the re-ask waited for the run's own look: stopped at check {k}, {took:?} (tries {tried})"
+        );
         break;
     }
 }

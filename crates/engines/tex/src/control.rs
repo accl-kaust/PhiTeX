@@ -77,7 +77,10 @@ impl Run<'_, '_> {
                 self.cmd_trace();
             }
             if self.cur.cmd > cmd::MAX_COMMAND {
-                if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND && self.cur.cmd != cmd::SYM {
+                if self.cur.cmd >= cmd::END_TEMPLATE
+                    && self.cur.cmd != cmd::DONT_EXPAND
+                    && self.cur.cmd != cmd::SYM
+                {
                     return Ok(());
                 }
                 self.expand();
@@ -202,9 +205,15 @@ impl Run<'_, '_> {
             // (the build's time limit, `Options::time_limit`: the
             // scheduler checks it between runs, a run that never ends
             // checks it here)
-            Some(format!("the build passed its time limit of {} s", t.as_secs()))
+            Some(format!(
+                "the build passed its time limit of {} s",
+                t.as_secs()
+            ))
         } else if lim.stall.is_some_and(|s| since >= s) {
-            Some(format!("it read no new line of its input for {} s", since.as_secs()))
+            Some(format!(
+                "it read no new line of its input for {} s",
+                since.as_secs()
+            ))
         } else if still >= 20_000_000 {
             Some(format!(
                 "it ran {} million commands without an assignment or a new line of input, an endless loop",
@@ -227,7 +236,9 @@ impl Run<'_, '_> {
         match why {
             Some(why) => {
                 let at = self.where_now();
-                Err(crate::run::Halt::Stop(self.cx.stuck(format!("{why}; at {at}"))))
+                Err(crate::run::Halt::Stop(
+                    self.cx.stuck(format!("{why}; at {at}")),
+                ))
             }
             None => Ok(()),
         }
@@ -248,7 +259,11 @@ impl Run<'_, '_> {
                 let s = &self.input.lines[l.a as usize];
                 s.origin.map(|(name, pos, _)| {
                     let name = crate::val::str_of(self.v, name);
-                    let name = if name.starts_with('\u{10FFFE}') { "the main file".to_owned() } else { name };
+                    let name = if name.starts_with('\u{10FFFE}') {
+                        "the main file".to_owned()
+                    } else {
+                        name
+                    };
                     if s.lineno > 0 {
                         format!("{name}:{}", s.lineno)
                     } else {
@@ -438,7 +453,10 @@ impl Run<'_, '_> {
         // `check_for_post_char_toks(big_switch)`)
         if self.xe
             && self.ic_prev != crate::xetex::CLASS_BOUNDARY
-            && !matches!(c, cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN | cmd::CHAR_NUM | cmd::NO_BOUNDARY)
+            && !matches!(
+                c,
+                cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN | cmd::CHAR_NUM | cmd::NO_BOUNDARY
+            )
             && self.ic_post()?
         {
             return Ok(());
@@ -828,7 +846,10 @@ impl Run<'_, '_> {
     /// the rest in [`Run::prefixed_rest`].
     pub(crate) fn prefixed_command(&mut self) -> R<()> {
         let c = self.cur.cmd;
-        if matches!(c, cmd::DEF | cmd::LET | cmd::REGISTER | cmd::ADVANCE | cmd::ASSIGN_INT) {
+        if matches!(
+            c,
+            cmd::DEF | cmd::LET | cmd::REGISTER | cmd::ADVANCE | cmd::ASSIGN_INT
+        ) {
             let gd = self.ipar(Par::globaldefs)?;
             let global = gd > 0;
             match c {
@@ -901,8 +922,13 @@ impl Run<'_, '_> {
                         match n {
                             2 => {
                                 if let Some(c) = p.as_cs() {
-                                    let f = self.quantity(cmd::ASSIGN_INT, crate::val::COUNT_BASE + r);
-                                    self.ops.counters.write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(c.name(), f);
+                                    let f =
+                                        self.quantity(cmd::ASSIGN_INT, crate::val::COUNT_BASE + r);
+                                    self.ops
+                                        .counters
+                                        .write()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .insert(c.name(), f);
                                 }
                                 Mean::Reg(cmd::ASSIGN_INT, crate::val::COUNT_BASE + r)
                             }
@@ -932,7 +958,10 @@ impl Run<'_, '_> {
                     self.cur.chr
                 };
                 // (XeTeX's `\XeTeXinterchartoks` names its pair of classes)
-                let field = if self.xe && self.cur.cmd == cmd::ASSIGN_TOKS && loc == crate::xetex::INTER_CHAR_LOC {
+                let field = if self.xe
+                    && self.cur.cmd == cmd::ASSIGN_TOKS
+                    && loc == crate::xetex::INTER_CHAR_LOC
+                {
                     self.ic_field()?
                 } else {
                     self.quantity(cmd::ASSIGN_TOKS, loc)
@@ -949,7 +978,10 @@ impl Run<'_, '_> {
                         src = Some(self.cur.chr);
                     }
                     if let Some(s) = src {
-                        let x = if self.xe && self.cur.cmd == cmd::ASSIGN_TOKS && s == crate::xetex::INTER_CHAR_LOC {
+                        let x = if self.xe
+                            && self.cur.cmd == cmd::ASSIGN_TOKS
+                            && s == crate::xetex::INTER_CHAR_LOC
+                        {
                             let f = self.ic_field()?;
                             self.read_f(f)?
                         } else {
@@ -1025,7 +1057,9 @@ impl Run<'_, '_> {
                 // (XeTeX: the highest family past sixteen ever set, which
                 // math looks at up to)
                 if self.xe && n >= 16 {
-                    let top = self.get("famxmax")?.map_or(15, |x| crate::val::int_of(v, x));
+                    let top = self
+                        .get("famxmax")?
+                        .map_or(15, |x| crate::val::int_of(v, x));
                     if i64::from(n) > top {
                         self.set("famxmax", v.int(i64::from(n)), true);
                     }
@@ -1199,8 +1233,7 @@ impl Run<'_, '_> {
         self.toks_buf = body;
         self.ck()?;
         let m = Mean::Macro(Rc::new(Macro::new(
-            u8::try_from(a % 4).unwrap_or(0)
-                | if protected { crate::etex::PROTECTED } else { 0 },
+            u8::try_from(a % 4).unwrap_or(0) | if protected { crate::etex::PROTECTED } else { 0 },
             params,
             rc,
         )));
@@ -1271,7 +1304,9 @@ impl Run<'_, '_> {
             && !(self.cur.cmd == cmd::RELAX && self.cur.chr == crate::val::NO_EXPAND_FLAG)
             && let Some(i) = self.cur.tok.cs_index()
             && !self.cur.tok.is_frozen_cs()
-            && let Some(e) = self.st.meaning_entry(crate::state::Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(u32::MAX))
+            && let Some(e) = self.st.meaning_entry(
+                crate::state::Loc::try_from(crate::fields::MEAN_BASE + i).unwrap_or(u32::MAX),
+            )
             && let Some(l) = self.mean_loc(p)
         {
             self.set_loc(l, e, global);
@@ -2195,7 +2230,11 @@ impl Run<'_, '_> {
     fn shell_command(&mut self, cmd: &str) -> R<()> {
         let restricted = self.int32("shellescape")? == 2;
         let (allowed, hook) = {
-            let o = self.ops.tool_opts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let o = self
+                .ops
+                .tool_opts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             (o.shell_commands.clone(), o.shell_hook.is_some())
         };
         let quoted = match crate::shell::runsystem(cmd, restricted, &allowed) {
@@ -2310,7 +2349,12 @@ impl Run<'_, '_> {
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!("aux-trace: {name} ends inside a command: {errs:?}");
         }
-        self.contribute_stream(v.list(vec![v.str(&name), v.str(""), v.list(ds), self.interp_reads]));
+        self.contribute_stream(v.list(vec![
+            v.str(&name),
+            v.str(""),
+            v.list(ds),
+            self.interp_reads,
+        ]));
         Ok(())
     }
 
@@ -2486,11 +2530,23 @@ impl Run<'_, '_> {
                         .take(3)
                         .filter(|l| l.kind == crate::input::kind::TOKS)
                         .map(|l| {
-                            let toks: Vec<String> = self.input.arena.get(l.rest()).iter().take(6).map(|t| self.v.render(t.encode(self.v))).collect();
+                            let toks: Vec<String> = self
+                                .input
+                                .arena
+                                .get(l.rest())
+                                .iter()
+                                .take(6)
+                                .map(|t| self.v.render(t.encode(self.v)))
+                                .collect();
                             toks.join(" ")
                         })
                         .collect();
-                    eprintln!("lines-strong: node {} sink {:?} | {}", self.cx.node().raw(), self.lt.sink, ctx.join(" | "));
+                    eprintln!(
+                        "lines-strong: node {} sink {:?} | {}",
+                        self.cx.node().raw(),
+                        self.lt.sink,
+                        ctx.join(" | ")
+                    );
                 }
                 self.lt.strong = true;
             }
@@ -2522,10 +2578,17 @@ impl Run<'_, '_> {
     pub(crate) fn settle_lines(&mut self) {
         // (`PHITEX_LINES_TRACE=1`, observe: each piece that read them, and
         // why its reads stand)
-        let trace = crate::exec::obs_flag!("PHITEX_LINES_TRACE") && (self.lt.weak || self.lt.strong);
+        let trace =
+            crate::exec::obs_flag!("PHITEX_LINES_TRACE") && (self.lt.weak || self.lt.strong);
         if trace {
             let v = self.v;
-            let tf: Vec<phitex_defuse::Field> = self.st.tainted().to_vec().into_iter().map(|l| self.loc_field(l)).collect();
+            let tf: Vec<phitex_defuse::Field> = self
+                .st
+                .tainted()
+                .to_vec()
+                .into_iter()
+                .map(|l| self.loc_field(l))
+                .collect();
             let pubd = self.publication();
             let tainted: Vec<String> = tf.iter().map(|&f| crate::val::field_name(v, f)).collect();
             eprintln!(
@@ -2541,7 +2604,13 @@ impl Run<'_, '_> {
         }
         let v = self.v;
         if !self.st.tainted().is_empty() {
-            let tf: Vec<phitex_defuse::Field> = self.st.tainted().to_vec().into_iter().map(|l| self.loc_field(l)).collect();
+            let tf: Vec<phitex_defuse::Field> = self
+                .st
+                .tainted()
+                .to_vec()
+                .into_iter()
+                .map(|l| self.loc_field(l))
+                .collect();
             if self.publication().iter().any(|d| tf.contains(&d.0)) {
                 return;
             }
@@ -2614,9 +2683,17 @@ impl Run<'_, '_> {
                     // thread the same)
                     if crate::exec::obs_flag!("PHITEX_LINES_CHECK") {
                         let before = self.piece_lines_before(name)?;
-                        let mine = self.doc_lines.iter().find(|(n, _)| *n == name).map_or(0, |&(_, k)| k);
+                        let mine = self
+                            .doc_lines
+                            .iter()
+                            .find(|(n, _)| *n == name)
+                            .map_or(0, |&(_, k)| k);
                         if before + mine != n {
-                            eprintln!("lines-check: node {} line {n} by its place, {} by the fold (owner {own:?})", self.cx.node().raw(), before + mine);
+                            eprintln!(
+                                "lines-check: node {} line {n} by its place, {} by the fold (owner {own:?})",
+                                self.cx.node().raw(),
+                                before + mine
+                            );
                         }
                     }
                     n

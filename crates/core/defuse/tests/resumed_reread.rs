@@ -97,7 +97,9 @@ impl Operation for Folder {
             return Ok(ValueId::UNIT);
         };
         let bx = v.as_int(bx).unwrap_or(0);
-        let cx_ = cx.next_contribution(s, Some(b))?.map_or(0, |(_, x)| v.as_int(x).unwrap_or(0));
+        let cx_ = cx
+            .next_contribution(s, Some(b))?
+            .map_or(0, |(_, x)| v.as_int(x).unwrap_or(0));
         let st = state.unwrap_or(10 * bx);
         cx.park(v.list(vec![v.int(i64::try_from(b.raw()).unwrap()), v.int(st)]));
         Ok(v.int(st + bx + cx_))
@@ -159,7 +161,10 @@ fn a_resumed_run_that_reads_again_a_moved_answer_is_refuted() {
     e.replace(d, def, vec![t.0, v.int(2)]);
     e.replace(c, contrib, vec![s.0, v.int(200), v.int(0)]);
     let r = e.evaluate(2).unwrap();
-    assert!(!g.folder_waits.load(Ordering::Acquire), "the folder resumed on the state built on b = 1: {r:?}");
+    assert!(
+        !g.folder_waits.load(Ordering::Acquire),
+        "the folder resumed on the state built on b = 1: {r:?}"
+    );
     assert_eq!(e.output(n).and_then(|x| v.as_int(x)), Some(222), "{r:?}");
     assert!(e.check_invariants().is_empty());
 }

@@ -290,7 +290,13 @@ impl Incr {
             th: &old_th,
             edit: (a - start, b - start, c - start),
         };
-        let (th, keys, reads) = analyse_reusing(t, &defs, Some(own), begins.as_ref(), Some((&reuse, &old_reads)));
+        let (th, keys, reads) = analyse_reusing(
+            t,
+            &defs,
+            Some(own),
+            begins.as_ref(),
+            Some((&reuse, &old_reads)),
+        );
         let e = &mut self.cache[k];
         e.units = new_units;
         e.len = new_len;
@@ -717,12 +723,18 @@ fn analyse_reusing(
     reuse: Option<(&crate::hints::Reuse<'_>, &Reads)>,
 ) -> (Arc<TextHints>, Arc<[u64]>, Reads) {
     let (th, mut names) = match reuse {
-        Some((r, _)) => crate::hints::text_hints_reads_reusing(t, FileKind::Document, defs, own, start, r),
+        Some((r, _)) => {
+            crate::hints::text_hints_reads_reusing(t, FileKind::Document, defs, own, start, r)
+        }
         None => crate::hints::text_hints_reads(t, FileKind::Document, defs, own, start),
     };
     if let Some((_, old)) = reuse {
         let mut seen: phitex_defuse::FxHashSet<&str> = names.iter().map(String::as_str).collect();
-        let more: Vec<String> = old.iter().filter(|(n, _, _)| seen.insert(n.as_str())).map(|(n, _, _)| n.clone()).collect();
+        let more: Vec<String> = old
+            .iter()
+            .filter(|(n, _, _)| seen.insert(n.as_str()))
+            .map(|(n, _, _)| n.clone())
+            .collect();
         names.extend(more);
     }
     let reads: Reads = names

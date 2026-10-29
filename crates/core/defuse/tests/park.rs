@@ -73,7 +73,14 @@ impl Operation for Loop {
                 self.resumed.fetch_add(1, Ordering::Relaxed);
                 let parts = v.with_list(st, <[ValueId]>::to_vec).unwrap_or_default();
                 let c = v.as_int(parts[0]).unwrap_or(-1);
-                (if c < 0 { None } else { Some(NodeId::from_raw(c.unsigned_abs())) }, v.as_int(parts[1]).unwrap_or(0))
+                (
+                    if c < 0 {
+                        None
+                    } else {
+                        Some(NodeId::from_raw(c.unsigned_abs()))
+                    },
+                    v.as_int(parts[1]).unwrap_or(0),
+                )
             }
             None => (None, 0),
         };
@@ -82,7 +89,10 @@ impl Operation for Loop {
             sum += v.as_int(x).unwrap_or(0);
             cur = Some(n);
         }
-        let state = v.list(vec![v.int(cur.map_or(-1, |n| i64::try_from(n.raw()).unwrap())), v.int(sum)]);
+        let state = v.list(vec![
+            v.int(cur.map_or(-1, |n| i64::try_from(n.raw()).unwrap())),
+            v.int(sum),
+        ]);
         if cx.stopped_at().is_some() {
             // (a hole: what is folded so far stands, the rest when it fills)
             cx.park(state);
@@ -125,8 +135,17 @@ fn a_parked_loop_goes_on_from_its_state_when_the_hole_fills() {
     let l = e.push(u, op, vec![s.0]);
     let r = e.evaluate(4).unwrap();
     assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(6), "{r:?}");
-    assert_eq!(lp.folded.load(Ordering::Relaxed), 3, "each item folded once over all runs: {r:?}");
-    assert!(lp.runs.load(Ordering::Relaxed) >= 2 && lp.resumed.load(Ordering::Relaxed) >= 1, "the loop parked at the hole and resumed: runs {} resumed {} {r:?}", lp.runs.load(Ordering::Relaxed), lp.resumed.load(Ordering::Relaxed));
+    assert_eq!(
+        lp.folded.load(Ordering::Relaxed),
+        3,
+        "each item folded once over all runs: {r:?}"
+    );
+    assert!(
+        lp.runs.load(Ordering::Relaxed) >= 2 && lp.resumed.load(Ordering::Relaxed) >= 1,
+        "the loop parked at the hole and resumed: runs {} resumed {} {r:?}",
+        lp.runs.load(Ordering::Relaxed),
+        lp.resumed.load(Ordering::Relaxed)
+    );
     assert!(e.check_invariants().is_empty());
 }
 
@@ -151,7 +170,10 @@ fn a_rerun_knows_the_contribution_that_moved() {
     let r = e.evaluate(2).unwrap();
     assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(24), "{r:?}");
     let cause = lp.cause.lock().unwrap().clone();
-    assert!(matches!(cause, Some(Cause::Range { field, .. }) if field == s), "the loop's last run was woken by the fold over s: {cause:?}");
+    assert!(
+        matches!(cause, Some(Cause::Range { field, .. }) if field == s),
+        "the loop's last run was woken by the fold over s: {cause:?}"
+    );
     assert!(e.check_invariants().is_empty());
 }
 
@@ -172,6 +194,10 @@ fn an_edit_of_the_node_drops_its_parked_state() {
     let before = lp.resumed.load(Ordering::Relaxed);
     e.replace(l, op, vec![s.0, v.int(1)]);
     let r = e.evaluate(2).unwrap();
-    assert_eq!(lp.resumed.load(Ordering::Relaxed), before, "a replaced node resumes from nothing: {r:?}");
+    assert_eq!(
+        lp.resumed.load(Ordering::Relaxed),
+        before,
+        "a replaced node resumes from nothing: {r:?}"
+    );
     assert!(e.check_invariants().is_empty());
 }

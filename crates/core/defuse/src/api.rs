@@ -627,14 +627,28 @@ impl Default for Limits {
 
 #[derive(Debug)]
 pub enum EvalError {
-    RunawayNode { node: NodeId, op: &'static str, runs: u32 },
-    OpPanicked { node: NodeId, op: &'static str, message: String },
-    TotalRuns { runs: u64 },
+    RunawayNode {
+        node: NodeId,
+        op: &'static str,
+        runs: u32,
+    },
+    OpPanicked {
+        node: NodeId,
+        op: &'static str,
+        message: String,
+    },
+    TotalRuns {
+        runs: u64,
+    },
     Deadline,
     /// The build stopped making progress (`Limits::stall`): a run that
     /// said so (`Ctx::stuck`, its node and why), or the workers idle with
     /// work outstanding (no node).
-    Stuck { node: Option<NodeId>, op: &'static str, why: String },
+    Stuck {
+        node: Option<NodeId>,
+        op: &'static str,
+        why: String,
+    },
 }
 
 impl std::fmt::Display for EvalError {
@@ -678,4 +692,3 @@ impl EditSource for NoEdits {
         None
     }
 }
-

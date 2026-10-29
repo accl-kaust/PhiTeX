@@ -131,7 +131,13 @@ fn cmap_name(tfm: &[u8], enc: Option<&[u8]>) -> (Vec<u8>, Option<Vec<u8>>) {
 /// [`crate::digest::TMap::content_key`]): the end of the file is written
 /// again after any change that reaches it, its fonts' `CMap`s with it,
 /// most of them made from the same glyph names as the last time.
-fn cmap_memo(names: &GlyphNames, tfm: &[u8], name: &[u8], tree: &Tree, tree_key: (u128, usize)) -> Vec<u8> {
+fn cmap_memo(
+    names: &GlyphNames,
+    tfm: &[u8],
+    name: &[u8],
+    tree: &Tree,
+    tree_key: (u128, usize),
+) -> Vec<u8> {
     use std::hash::{Hash, Hasher};
     use std::sync::{Mutex, OnceLock, PoisonError};
     type Memo = Mutex<std::collections::HashMap<(u64, u64, usize), std::sync::Arc<[u8]>>>;
@@ -144,7 +150,11 @@ fn cmap_memo(names: &GlyphNames, tfm: &[u8], name: &[u8], tree: &Tree, tree_key:
     };
     let key = (h(0), h(0x9e37_79b9_7f4a_7c15), names.len());
     let memo = MEMO.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    if let Some(t) = memo.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+    if let Some(t) = memo
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
         return t.to_vec();
     }
     let t = cmap(names, tfm, name, tree);

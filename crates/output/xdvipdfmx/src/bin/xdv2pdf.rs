@@ -161,7 +161,9 @@ fn main() {
         }
     }
     let Some(input) = input else {
-        eprintln!("usage: xdv2pdf [-o NAME.pdf] [--dvi NAME.xdv] [--repeat N] [--threads N] FILE.xdv > OUT.pdf");
+        eprintln!(
+            "usage: xdv2pdf [-o NAME.pdf] [--dvi NAME.xdv] [--repeat N] [--threads N] FILE.xdv > OUT.pdf"
+        );
         std::process::exit(2);
     };
     let pdf =

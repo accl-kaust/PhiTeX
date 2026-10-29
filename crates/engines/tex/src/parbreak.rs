@@ -39,7 +39,10 @@ use crate::run::{R, Run};
 /// What line breaking reads where a paragraph ends, captured by the
 /// piece ending it: the [`Break`] node's argument, so the node reads
 /// nothing of the text.
-#[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
+#[expect(
+    dead_code,
+    reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)"
+)]
 #[derive(Clone, Debug)]
 pub(crate) struct BreakIn {
     /// The paragraph's horizontal list, encoded.
@@ -61,7 +64,10 @@ pub(crate) struct BreakIn {
     pub interline: [ValueId; 3],
 }
 
-#[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
+#[expect(
+    dead_code,
+    reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)"
+)]
 impl BreakIn {
     /// The node's arguments.
     pub(crate) fn args(&self, v: &Values) -> Vec<ValueId> {
@@ -140,7 +146,10 @@ impl Run<'_, '_> {
     /// [`Break`] node (the module's doc): on the main vertical list, in
     /// a piece that ends at this paragraph's end, not before a display.
     /// None yet: every paragraph is broken in its piece.
-    #[expect(clippy::unused_self, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
+    #[expect(
+        clippy::unused_self,
+        reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)"
+    )]
     pub(crate) fn break_as_node(&mut self, md: &Mode) -> bool {
         let _ = md;
         false

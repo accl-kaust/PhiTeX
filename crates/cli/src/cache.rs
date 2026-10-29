@@ -317,7 +317,14 @@ impl Cache {
         if self.limit == 0 {
             return (format!("cache: off (cache-limit = 0) · {dir}"), false);
         }
-        (format!("cache: {} of {} in {dir}", size(self.usage()), size(self.limit)), true)
+        (
+            format!(
+                "cache: {} of {} in {dir}",
+                size(self.usage()),
+                size(self.limit)
+            ),
+            true,
+        )
     }
 
     /// The command that empties the whole cache, as the summary names it:

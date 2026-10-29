@@ -609,7 +609,12 @@ fn read_feature_number(o: &[u8]) -> Option<(Tag, i32)> {
 /// option (`s[b..e]`), by the face's English labels (each a prefix
 /// match). Without `=`, the setting's name runs past the option to the
 /// end of the string, as the C reads it.
-fn find_graphite_feature(gr: &phitex_graphite::Face, s: &[u8], b: usize, e: usize) -> Option<(Tag, i32)> {
+fn find_graphite_feature(
+    gr: &phitex_graphite::Face,
+    s: &[u8],
+    b: usize,
+    e: usize,
+) -> Option<(Tag, i32)> {
     let mut b = b;
     while matches!(s.get(b), Some(b' ' | b'\t')) {
         b += 1;
@@ -626,7 +631,11 @@ fn find_graphite_feature(gr: &phitex_graphite::Face, s: &[u8], b: usize, e: usiz
     if cp == e {
         return None;
     }
-    let name = if cp < e { &s[cp..e] } else { s.get(cp..).unwrap_or(&[]) };
+    let name = if cp < e {
+        &s[cp..e]
+    } else {
+        s.get(cp..).unwrap_or(&[])
+    };
     let v = crate::graphite::setting_named(gr, f, name)?;
     Some((f, v))
 }
@@ -734,10 +743,17 @@ fn load_ot_font(
             }
             if ok.is_none()
                 && req_engine == b'G'
-                && let Some((t, v)) = read_feature_number(&s[cp1..cp2])
-                    .or_else(|| face.graphite().and_then(|gr| find_graphite_feature(gr, s, cp1, cp2)))
+                && let Some((t, v)) = read_feature_number(&s[cp1..cp2]).or_else(|| {
+                    face.graphite()
+                        .and_then(|gr| find_graphite_feature(gr, s, cp1, cp2))
+                })
             {
-                features.push(Feature { tag: t, value: v as u32, start: 0, end: u32::MAX });
+                features.push(Feature {
+                    tag: t,
+                    value: v as u32,
+                    start: 0,
+                    end: u32::MAX,
+                });
                 ok = Some(true);
             }
             if ok.is_none() {
@@ -800,7 +816,9 @@ fn load_ot_font(
     // an OpenType language tag)
     let lang_tag = tag_from_str(language.as_deref().unwrap_or(b""));
     let language = if req_engine == b'G' {
-        language.as_deref().and_then(crate::graphite::language_from_string)
+        language
+            .as_deref()
+            .and_then(crate::graphite::language_from_string)
     } else {
         ot_tag_to_language(lang_tag)
     };
@@ -1686,9 +1704,13 @@ impl XeTeXFont {
             // the font's language
             what::IS_DEFAULT_SELECTOR => {
                 let def = self.face.graphite().map_or(0, |gr| {
-                    let lang = self.language.as_deref().map_or(0, |l| tag_from_str(l.as_bytes()));
+                    let lang = self
+                        .language
+                        .as_deref()
+                        .map_or(0, |l| tag_from_str(l.as_bytes()));
                     let feats = gr.featureval_for_lang(lang);
-                    gr.find_fref(p1 as u32).map_or(0, |f| u32::from(f.feature_value(&feats)))
+                    gr.find_fref(p1 as u32)
+                        .map_or(0, |f| u32::from(f.feature_value(&feats)))
                 });
                 i32::from(def == p2 as u32)
             }

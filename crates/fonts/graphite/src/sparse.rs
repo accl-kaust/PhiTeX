@@ -32,7 +32,11 @@ impl Sparse {
             }
             count += 1;
             if i64::from(k) <= lastkey {
-                return Sparse { chunks: Vec::new(), values: Vec::new(), valid: false };
+                return Sparse {
+                    chunks: Vec::new(),
+                    values: Vec::new(),
+                    valid: false,
+                };
             }
             lastkey = i64::from(k);
             let c = u32::from(k) / CHUNK;
@@ -41,7 +45,11 @@ impl Sparse {
             }
         }
         if nchunks == 0 {
-            return Sparse { chunks: Vec::new(), values: Vec::new(), valid: true };
+            return Sparse {
+                chunks: Vec::new(),
+                values: Vec::new(),
+                valid: true,
+            };
         }
         let mut chunks = alloc::vec![(0u64, 0u16); nchunks as usize];
         let mut values = Vec::with_capacity(count);
@@ -58,7 +66,11 @@ impl Sparse {
             chunks[ci].0 |= 1u64 << (CHUNK - 1 - u32::from(k) % CHUNK);
             values.push(v);
         }
-        Sparse { chunks, values, valid: true }
+        Sparse {
+            chunks,
+            values,
+            valid: true,
+        }
     }
 
     pub(crate) fn is_valid(&self) -> bool {

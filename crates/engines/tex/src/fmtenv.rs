@@ -48,7 +48,10 @@ impl Made {
     /// The values made so far, for a collection ([`crate::collect`]):
     /// each is handed out again by its node.
     pub(crate) fn roots(&self, keep: &mut dyn FnMut(ValueId)) {
-        self.0.iter().filter_map(OnceLock::get).for_each(|&x| keep(x));
+        self.0
+            .iter()
+            .filter_map(OnceLock::get)
+            .for_each(|&x| keep(x));
     }
 }
 
@@ -90,7 +93,12 @@ impl FormatEnv {
     }
 
     /// The bindings as (field, value) in `v`, by field id.
-    pub(crate) fn bindings(&self, v: &Values, made: &Made, range: std::ops::Range<usize>) -> Vec<(Field, ValueId)> {
+    pub(crate) fn bindings(
+        &self,
+        v: &Values,
+        made: &Made,
+        range: std::ops::Range<usize>,
+    ) -> Vec<(Field, ValueId)> {
         self.binds[range]
             .iter()
             .map(|&(_, n, k)| (Field(self.value(v, n, made)), self.value(v, k, made)))
@@ -115,7 +123,11 @@ impl FormatEnv {
     fn find(&self, name: &str) -> Option<u32> {
         let f = name_key(name);
         let i = self.binds.partition_point(|b| b.0 < f);
-        self.binds[i..].iter().take_while(|b| b.0 == f).find(|b| self.str_at(b.1) == Some(name)).map(|b| b.2)
+        self.binds[i..]
+            .iter()
+            .take_while(|b| b.0 == f)
+            .find(|b| self.str_at(b.1) == Some(name))
+            .map(|b| b.2)
     }
 
     /// The names bound, in the bindings' order.
@@ -219,7 +231,10 @@ impl FormatEnv {
         for _ in 0..n {
             let f = u64_at(rest, 0)?;
             let (nm, k) = (u32_at(rest, 8)?, u32_at(rest, 12)?);
-            if nm as usize >= count || k as usize >= count || binds.last().is_some_and(|l: &(u64, u32, u32)| l.0 > f) {
+            if nm as usize >= count
+                || k as usize >= count
+                || binds.last().is_some_and(|l: &(u64, u32, u32)| l.0 > f)
+            {
                 return None;
             }
             binds.push((f, nm, k));
@@ -228,7 +243,11 @@ impl FormatEnv {
         // (a name's node a string: its bytes are read as UTF-8 when a
         // job makes it, [`FormatEnv::value`], not all of them here)
         let env = FormatEnv { nodes, offs, binds };
-        if env.binds.iter().any(|&(_, n, _)| env.nodes[env.offs[n as usize] as usize] != STR) {
+        if env
+            .binds
+            .iter()
+            .any(|&(_, n, _)| env.nodes[env.offs[n as usize] as usize] != STR)
+        {
             return None;
         }
         Some((env, rest))
@@ -263,7 +282,10 @@ impl Writer {
             Value::Bool(b) => (BOOL, vec![u8::from(*b)]),
             Value::Int(i) => (INT, i.to_le_bytes().to_vec()),
             Value::Str(s) => {
-                let mut b = u32::try_from(s.len()).unwrap_or(u32::MAX).to_le_bytes().to_vec();
+                let mut b = u32::try_from(s.len())
+                    .unwrap_or(u32::MAX)
+                    .to_le_bytes()
+                    .to_vec();
                 b.extend_from_slice(s.as_bytes());
                 (STR, b)
             }
@@ -289,7 +311,10 @@ impl Writer {
 }
 
 fn list_body(ks: &[u32]) -> Vec<u8> {
-    let mut b = u32::try_from(ks.len()).unwrap_or(u32::MAX).to_le_bytes().to_vec();
+    let mut b = u32::try_from(ks.len())
+        .unwrap_or(u32::MAX)
+        .to_le_bytes()
+        .to_vec();
     for k in ks {
         b.extend_from_slice(&k.to_le_bytes());
     }
@@ -308,7 +333,13 @@ mod tests {
     #[test]
     fn a_format_env_reads_back_what_it_wrote() {
         let v = Values::new();
-        let t = v.list(vec![v.int(-3), v.str("x"), v.list(vec![v.str("x")]), ValueId::UNIT, ValueId::NIL]);
+        let t = v.list(vec![
+            v.int(-3),
+            v.str("x"),
+            v.list(vec![v.str("x")]),
+            ValueId::UNIT,
+            ValueId::NIL,
+        ]);
         let s = v.seq_concat(v.seq_unit(v.int(1)), v.seq_unit(t));
         let env = vec![
             ("cs:a".to_owned(), t),
@@ -330,7 +361,10 @@ mod tests {
         let w = Values::new();
         let m = g.made();
         assert_eq!(g.get(&w, "cs:a", &m), Some(v.bool(true)));
-        assert_eq!(g.get(&w, "cs:b", &m).map(|x| w.render(x)), Some(v.render(s)));
+        assert_eq!(
+            g.get(&w, "cs:b", &m).map(|x| w.render(x)),
+            Some(v.render(s))
+        );
         assert_eq!(g.get(&w, "cs:c", &m), None);
         let mut names: Vec<&str> = g.names().collect();
         names.sort_unstable();
@@ -342,16 +376,29 @@ mod tests {
         // collision forced, every name under one key)
         ONE_KEY.with(|k| k.set(true));
         assert_eq!(name_key("cs:fp_set:Nn"), name_key("cs:fp_sub:Nn"));
-        let pair = vec![("cs:fp_set:Nn".to_owned(), v.str("set")), ("cs:fp_sub:Nn".to_owned(), v.str("sub"))];
+        let pair = vec![
+            ("cs:fp_set:Nn".to_owned(), v.str("set")),
+            ("cs:fp_sub:Nn".to_owned(), v.str("sub")),
+        ];
         let p = FormatEnv::of(&v, &pair);
         assert_eq!(p.len(), 2);
         let mut pb = Vec::new();
         p.write(&mut pb);
         let (q, _) = FormatEnv::read(&pb).expect("read back");
         let qm = q.made();
-        assert_eq!(q.get(&w, "cs:fp_set:Nn", &qm).map(|x| w.render(x)), Some(v.render(v.str("set"))));
-        assert_eq!(q.get(&w, "cs:fp_sub:Nn", &qm).map(|x| w.render(x)), Some(v.render(v.str("sub"))));
-        assert_eq!(q.get_field(&w, w.field("cs:fp_sub:Nn"), &qm).map(|x| w.render(x)), Some(v.render(v.str("sub"))));
+        assert_eq!(
+            q.get(&w, "cs:fp_set:Nn", &qm).map(|x| w.render(x)),
+            Some(v.render(v.str("set")))
+        );
+        assert_eq!(
+            q.get(&w, "cs:fp_sub:Nn", &qm).map(|x| w.render(x)),
+            Some(v.render(v.str("sub")))
+        );
+        assert_eq!(
+            q.get_field(&w, w.field("cs:fp_sub:Nn"), &qm)
+                .map(|x| w.render(x)),
+            Some(v.render(v.str("sub")))
+        );
         ONE_KEY.with(|k| k.set(false));
         // (a table cut short is refused)
         let mut bad = b.clone();

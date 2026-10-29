@@ -698,7 +698,6 @@ impl Hint {
             guess: None,
         }
     }
-
 }
 
 /// `x` in decimal, as `{x}` formats it.
@@ -1446,7 +1445,11 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
             while ls > 0 && matches!(b[ls - 1], b' ' | b'\t') {
                 ls -= 1;
             }
-            starts.push(if ls == 0 || b[ls - 1] == b'\n' { ls } else { a.start });
+            starts.push(if ls == 0 || b[ls - 1] == b'\n' {
+                ls
+            } else {
+                a.start
+            });
         }
         prev_char = ch;
         k += 1;
@@ -3368,10 +3371,10 @@ fn atom_hints(
             };
             if let Some(j) = j
                 && old.sigs.get(j) == Some(&sig)
-                && old
-                    .starts
-                    .get(j)
-                    .is_some_and(|&s| (s as usize).checked_add_signed(if at.start < lo { 0 } else { shift }) == Some(at.start))
+                && old.starts.get(j).is_some_and(|&s| {
+                    (s as usize).checked_add_signed(if at.start < lo { 0 } else { shift })
+                        == Some(at.start)
+                })
                 && let Some(h) = old.hints[j].clone()
             {
                 hints.push(Some(h));
@@ -3422,12 +3425,28 @@ fn atom_hints(
 fn atom_sig(an: &Analysis<'_>, a: usize, prim_op: bool) -> u64 {
     let at = &an.p.atoms[a];
     let mut h = phitex_defuse::FxHasher::default();
-    (std::mem::discriminant(&at.kind), at.end - at.start, an.claimed(a), prim_op, an.depth(a), an.in_align.has(a), an.after_global(a)).hash(&mut h);
-    (at.mate != usize::MAX).then(|| at.mate.wrapping_sub(a)).hash(&mut h);
+    (
+        std::mem::discriminant(&at.kind),
+        at.end - at.start,
+        an.claimed(a),
+        prim_op,
+        an.depth(a),
+        an.in_align.has(a),
+        an.after_global(a),
+    )
+        .hash(&mut h);
+    (at.mate != usize::MAX)
+        .then(|| at.mate.wrapping_sub(a))
+        .hash(&mut h);
     an.reg_hash.get(an.reg(a)).hash(&mut h);
-    an.item_of.get(&a).map(|&i| an.p.items[i].end.wrapping_sub(a)).hash(&mut h);
+    an.item_of
+        .get(&a)
+        .map(|&i| an.p.items[i].end.wrapping_sub(a))
+        .hash(&mut h);
     // (the atom before it: a command's hint reads its neighbour's)
-    an.prev(a).map(|p| (std::mem::discriminant(&an.p.atoms[p].kind), an.claimed(p))).hash(&mut h);
+    an.prev(a)
+        .map(|p| (std::mem::discriminant(&an.p.atoms[p].kind), an.claimed(p)))
+        .hash(&mut h);
     h.finish()
 }
 
@@ -3502,9 +3521,14 @@ fn analyse_reusing(
             .iter()
             .zip(&fresh)
             .zip(skip.iter().zip(&fskip))
-            .filter(|((x, y), (s, t))| x.as_ref().map(|h| h.encode()) != y.as_ref().map(|h| h.encode()) || s != t)
+            .filter(|((x, y), (s, t))| {
+                x.as_ref().map(|h| h.encode()) != y.as_ref().map(|h| h.encode()) || s != t
+            })
             .count();
-        eprintln!("hints reuse check: {kept} of {} kept, {bad} differ", fresh.len());
+        eprintln!(
+            "hints reuse check: {kept} of {} kept, {bad} differ",
+            fresh.len()
+        );
     }
     let mut t = TextHints {
         slices,
@@ -3830,7 +3854,10 @@ type Cache<K> = Mutex<FxHashMap<K, Arc<TextHints>>>;
 /// kept with its entry and compared whole on a hit of its hash.
 #[allow(clippy::type_complexity)]
 type TextsCache = Mutex<
-    FxHashMap<(u64, u8, usize, Option<pass::Start>), (std::sync::Weak<pass::Definitions>, Arc<str>, Arc<TextHints>)>,
+    FxHashMap<
+        (u64, u8, usize, Option<pass::Start>),
+        (std::sync::Weak<pass::Definitions>, Arc<str>, Arc<TextHints>),
+    >,
 >;
 
 fn texts() -> &'static TextsCache {
@@ -3844,7 +3871,11 @@ pub(crate) struct Shards<V>(Box<[Mutex<FxHashMap<u64, V>>]>);
 
 impl<V> Default for Shards<V> {
     fn default() -> Self {
-        Shards((0..SHARDS).map(|_| Mutex::new(FxHashMap::default())).collect())
+        Shards(
+            (0..SHARDS)
+                .map(|_| Mutex::new(FxHashMap::default()))
+                .collect(),
+        )
     }
 }
 
@@ -3869,7 +3900,10 @@ impl<V> Shards<V> {
 
     /// Everything in it, taken out.
     fn take_all(&self) -> Vec<FxHashMap<u64, V>> {
-        self.0.iter().map(|s| std::mem::take(&mut *s.locked())).collect()
+        self.0
+            .iter()
+            .map(|s| std::mem::take(&mut *s.locked()))
+            .collect()
     }
 }
 
@@ -4055,7 +4089,12 @@ pub(crate) fn text_hints_with(
 ) -> Arc<TextHints> {
     let named = kind;
     let kind = kind_of(text, kind);
-    let key = (hash_str(text), kind as u8, Arc::as_ptr(defs) as usize, start.copied());
+    let key = (
+        hash_str(text),
+        kind as u8,
+        Arc::as_ptr(defs) as usize,
+        start.copied(),
+    );
     if let Some((d, x, t)) = texts().locked().get(&key)
         && **x == *text
         && d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
@@ -4086,7 +4125,8 @@ pub(crate) fn text_hints_reads_reusing(
     let named = kind;
     let kind = kind_of(text, kind);
     let own = own.unwrap_or_else(|| own_definitions_from(text, named, start).0);
-    let (t, looked) = pass::with_reads(|| analyse_reusing(text, kind, defs, own, start, Some(reuse)));
+    let (t, looked) =
+        pass::with_reads(|| analyse_reusing(text, kind, defs, own, start, Some(reuse)));
     (Arc::new(t), looked)
 }
 
@@ -4482,7 +4522,9 @@ fn take_prepared<T>(
     if p.is_empty() {
         return None;
     }
-    p.get_mut(&k).filter(|(a, _)| **a == *args).and_then(|(_, p)| f(p))
+    p.get_mut(&k)
+        .filter(|(a, _)| **a == *args)
+        .and_then(|(_, p)| f(p))
 }
 
 /// The push the answers were [`prepare`]d for is done: those it did not
@@ -4597,9 +4639,9 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
                 let at = usize::try_from(int_of(v, o)).unwrap_or(0);
                 let t = reg.by_name.locked().get(&name.raw()).cloned();
                 // (the chunk holding the line: its analysis, from its start)
-                let c = t.as_deref().and_then(|cs| {
-                    cs[..cs.partition_point(|c| c.0 <= at)].last().cloned()
-                });
+                let c = t
+                    .as_deref()
+                    .and_then(|cs| cs[..cs.partition_point(|c| c.0 <= at)].last().cloned());
                 return match c {
                     Some((s, t)) => t.at_until(at - s, at - s + text.len()),
                     None => Hint::any("file not analysed yet", &text),
@@ -4785,22 +4827,55 @@ pub(crate) fn const_defs(v: &Values, args: &[ValueId]) -> Option<Vec<(Field, Val
         return None;
     }
     let found = const_assignments(&text);
-    (!found.is_empty()).then(|| found.into_iter().map(|(n, x)| (v.field(&n), crate::val::int_id(v, x))).collect())
+    (!found.is_empty()).then(|| {
+        found
+            .into_iter()
+            .map(|(n, x)| (v.field(&n), crate::val::int_id(v, x)))
+            .collect()
+    })
 }
 
 /// Whether `name` is an integer parameter (`assign_int`, cmd 73).
 fn int_param(name: &str) -> bool {
     static S: OnceLock<phitex_defuse::FxHashSet<&'static str>> = OnceLock::new();
-    S.get_or_init(|| crate::prims::PRIMS.iter().filter(|p| p.1 == 73).map(|p| p.0).collect())
-        .contains(name)
+    S.get_or_init(|| {
+        crate::prims::PRIMS
+            .iter()
+            .filter(|p| p.1 == 73)
+            .map(|p| p.0)
+            .collect()
+    })
+    .contains(name)
 }
 
 /// [`const_defs`]'s scan: `(field name, value)`, the last of each field.
 fn const_assignments(text: &str) -> Vec<(String, i64)> {
     const BANNED: [&str; 25] = [
-        "else", "fi", "or", "unless", "def", "edef", "gdef", "xdef", "let", "futurelet", "newcommand",
-        "renewcommand", "providecommand", "csname", "expandafter", "afterassignment", "loop", "begingroup",
-        "endgroup", "bgroup", "egroup", "aftergroup", "NewDocumentCommand", "begin", "end",
+        "else",
+        "fi",
+        "or",
+        "unless",
+        "def",
+        "edef",
+        "gdef",
+        "xdef",
+        "let",
+        "futurelet",
+        "newcommand",
+        "renewcommand",
+        "providecommand",
+        "csname",
+        "expandafter",
+        "afterassignment",
+        "loop",
+        "begingroup",
+        "endgroup",
+        "bgroup",
+        "egroup",
+        "aftergroup",
+        "NewDocumentCommand",
+        "begin",
+        "end",
     ];
     let mut out: Vec<(String, i64)> = Vec::new();
     // (the text's control words: a conditional (`\\if…`) or one of these
@@ -4809,7 +4884,10 @@ fn const_assignments(text: &str) -> Vec<(String, i64)> {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'\\' {
-            let e = b[i + 1..].iter().position(|c| !c.is_ascii_alphabetic()).map_or(b.len(), |k| i + 1 + k);
+            let e = b[i + 1..]
+                .iter()
+                .position(|c| !c.is_ascii_alphabetic())
+                .map_or(b.len(), |k| i + 1 + k);
             let w = &text[i + 1..e];
             if w.starts_with("if") || BANNED.contains(&w) {
                 return out;
@@ -4826,7 +4904,10 @@ fn const_assignments(text: &str) -> Vec<(String, i64)> {
         let line = strip_comment(raw);
         let t = line.trim_start();
         let t = t.strip_prefix("\\global").map_or(t, str::trim_start);
-        if depth == 0 && prev_ok && let Some((name, x, stop)) = const_assignment(t) {
+        if depth == 0
+            && prev_ok
+            && let Some((name, x, stop)) = const_assignment(t)
+        {
             match out.iter_mut().find(|e| e.0 == name) {
                 Some(e) => e.1 = x,
                 None => out.push((name, x)),
@@ -4886,7 +4967,9 @@ fn strip_comment(line: &str) -> &str {
 /// its field, value, and whether it changes a catcode.
 fn const_assignment(t: &str) -> Option<(String, i64, bool)> {
     let t = t.strip_prefix('\\')?;
-    let e = t.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(t.len());
+    let e = t
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(t.len());
     let (name, rest) = t.split_at(e);
     let (field, rest, stop) = match name {
         "catcode" | "lccode" | "uccode" | "sfcode" | "mathcode" | "delcode" => {
@@ -4944,7 +5027,12 @@ fn tex_number(s: &str) -> Option<(i64, &str)> {
             return None;
         }
         // (a dimension's or a real's continuation: no integer)
-        if r[e..].starts_with(['.', ',']) || r[e..].chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        if r[e..].starts_with(['.', ','])
+            || r[e..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+        {
             return None;
         }
         (r[..e].parse::<i64>().ok()?, &r[e..])
@@ -4996,7 +5084,8 @@ fn counter_steps(text: &str) -> Vec<(String, i64)> {
             };
             if let Some(d) = d
                 && !x.is_empty()
-                && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '@' || c == '*')
+                && x.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '@' || c == '*')
             {
                 out.push((x.to_owned(), d));
             }
@@ -5044,7 +5133,9 @@ pub(crate) fn scope_shape(v: &Values, fr: ValueId, carried: usize) -> ScopeShape
         };
         match str_of(v, t0).as_str() {
             "s" => {
-                let Some(&t) = xs.get(1) else { return ScopeShape::Unknown };
+                let Some(&t) = xs.get(1) else {
+                    return ScopeShape::Unknown;
+                };
                 st.text(&str_of(v, t));
             }
             "f" => {
@@ -5113,7 +5204,11 @@ pub(crate) fn scope_shape(v: &Values, fr: ValueId, carried: usize) -> ScopeShape
         return ScopeShape::Close(c);
     }
     let open: Vec<String> = st.open.into_iter().skip(carried).collect();
-    if open.is_empty() { ScopeShape::Balanced } else { ScopeShape::Open(open) }
+    if open.is_empty() {
+        ScopeShape::Balanced
+    } else {
+        ScopeShape::Open(open)
+    }
 }
 
 /// [`scope_shape`]'s scan: the openers still open (a carried group's
@@ -5142,7 +5237,10 @@ impl ShapeScan {
         while i < b.len() && self.close.is_none() {
             match b[i] {
                 b'%' => {
-                    i = b[i..].iter().position(|&c| c == b'\n').map_or(b.len(), |k| i + k);
+                    i = b[i..]
+                        .iter()
+                        .position(|&c| c == b'\n')
+                        .map_or(b.len(), |k| i + k);
                 }
                 b'{' => {
                     self.event(true, "{");
@@ -5154,7 +5252,10 @@ impl ShapeScan {
                 }
                 b'\\' => {
                     let s = i + 1;
-                    let e = b[s..].iter().position(|c| !c.is_ascii_alphabetic()).map_or(b.len(), |k| s + k);
+                    let e = b[s..]
+                        .iter()
+                        .position(|c| !c.is_ascii_alphabetic())
+                        .map_or(b.len(), |k| s + k);
                     if e == s {
                         // (a control symbol: `\{`, `\%`, `\\`)
                         i = s + 1;
@@ -5164,7 +5265,9 @@ impl ShapeScan {
                     match &text[s..e] {
                         n @ ("begin" | "end") => {
                             let rest = &text[e..];
-                            let Some((env, after)) = braced(rest) else { continue };
+                            let Some((env, after)) = braced(rest) else {
+                                continue;
+                            };
                             i = text.len() - after.len();
                             self.event(n == "begin", &cat(&[n, ":", env]));
                         }
@@ -5186,19 +5289,24 @@ impl ShapeScan {
 /// its opener's run takes); openers are left open only where runs left
 /// each as a scope (one that opens a box, or collects its body, the run
 /// reads on: no bracket). Else unknown until the run (`Pending`).
-pub(crate) fn predicted_brackets(shape: &ScopeShape, learned: &FxHashMap<String, bool>) -> Option<phitex_defuse::Brackets> {
+pub(crate) fn predicted_brackets(
+    shape: &ScopeShape,
+    learned: &FxHashMap<String, bool>,
+) -> Option<phitex_defuse::Brackets> {
     match shape {
-        ScopeShape::Close(c) => (learned.get(c) != Some(&false)).then_some(phitex_defuse::Brackets {
-            closes: 1,
-            opens: 0,
-            before: false,
-        }),
-        ScopeShape::Open(os) => (os.len() < usize::from(u8::MAX - 2) && os.iter().all(|o| learned.get(o) == Some(&true))).then(|| {
-            phitex_defuse::Brackets {
-                closes: 0,
-                opens: u8::try_from(os.len()).unwrap_or(0),
+        ScopeShape::Close(c) => {
+            (learned.get(c) != Some(&false)).then_some(phitex_defuse::Brackets {
+                closes: 1,
+                opens: 0,
                 before: false,
-            }
+            })
+        }
+        ScopeShape::Open(os) => (os.len() < usize::from(u8::MAX - 2)
+            && os.iter().all(|o| learned.get(o) == Some(&true)))
+        .then(|| phitex_defuse::Brackets {
+            closes: 0,
+            opens: u8::try_from(os.len()).unwrap_or(0),
+            before: false,
         }),
         ScopeShape::Balanced | ScopeShape::Unknown => None,
     }
@@ -5417,7 +5525,12 @@ pub(crate) fn record_hint(
             reads: reads.to_vec(),
             ..Bound::default()
         }),
-        cause: if node { NODE_RECORD_CAUSE } else { RECORD_CAUSE }.to_owned(),
+        cause: if node {
+            NODE_RECORD_CAUSE
+        } else {
+            RECORD_CAUSE
+        }
+        .to_owned(),
         excerpt: String::new(),
         guess: None,
     }
@@ -5834,7 +5947,12 @@ mod tests {
         let t = "\\refstepcounter{exercise}x \\stepcounter {page}\n\\addtocounter{x@y}{-3}\\addtocounter{z}{\\n}% \\stepcounter{c}\n\\%\\stepcounter{d}";
         assert_eq!(
             counter_steps(t),
-            vec![("exercise".to_owned(), 1), ("page".to_owned(), 1), ("x@y".to_owned(), -3), ("d".to_owned(), 1)]
+            vec![
+                ("exercise".to_owned(), 1),
+                ("page".to_owned(), 1),
+                ("x@y".to_owned(), -3),
+                ("d".to_owned(), 1)
+            ]
         );
     }
 
@@ -5850,7 +5968,10 @@ mod tests {
                 ("cat:64".to_owned(), 11),
             ]
         );
-        assert_eq!(const_assignments("\\ifx\\a\\b\n\\tolerance=1\n\\fi"), Vec::new());
+        assert_eq!(
+            const_assignments("\\ifx\\a\\b\n\\tolerance=1\n\\fi"),
+            Vec::new()
+        );
     }
 
     #[test]
@@ -5865,22 +5986,52 @@ mod tests {
                 return ScopeShape::Close(c);
             }
             let o: Vec<String> = st.open.into_iter().skip(carried).collect();
-            if o.is_empty() { ScopeShape::Balanced } else { ScopeShape::Open(o) }
+            if o.is_empty() {
+                ScopeShape::Balanced
+            } else {
+                ScopeShape::Open(o)
+            }
         };
-        assert_eq!(shape("\\begin{center}\n", 0), ScopeShape::Open(vec!["begin:center".into()]));
-        assert_eq!(shape("x \\end{center} \\begin{itemize}", 0), ScopeShape::Close("end:center".into()));
-        assert_eq!(shape("\\begin{a}{x}\\end{a} \\{ % \\endgroup\n", 0), ScopeShape::Balanced);
+        assert_eq!(
+            shape("\\begin{center}\n", 0),
+            ScopeShape::Open(vec!["begin:center".into()])
+        );
+        assert_eq!(
+            shape("x \\end{center} \\begin{itemize}", 0),
+            ScopeShape::Close("end:center".into())
+        );
+        assert_eq!(
+            shape("\\begin{a}{x}\\end{a} \\{ % \\endgroup\n", 0),
+            ScopeShape::Balanced
+        );
         assert_eq!(shape("\\end{document}", 0), ScopeShape::Balanced);
         assert_eq!(shape("\\endgroup\\egroup", 2), ScopeShape::Balanced);
-        assert_eq!(shape("\\endgroup\\egroup", 1), ScopeShape::Close("egroup".into()));
+        assert_eq!(
+            shape("\\endgroup\\egroup", 1),
+            ScopeShape::Close("egroup".into())
+        );
         let mut learned = FxHashMap::default();
         let open = ScopeShape::Open(vec!["begin:center".into()]);
-        assert_eq!(predicted_brackets(&open, &learned), None, "an opener no run left as a scope yet");
+        assert_eq!(
+            predicted_brackets(&open, &learned),
+            None,
+            "an opener no run left as a scope yet"
+        );
         learned.insert("begin:center".to_owned(), true);
-        assert_eq!(predicted_brackets(&open, &learned).map(|b| b.opens), Some(1));
+        assert_eq!(
+            predicted_brackets(&open, &learned).map(|b| b.opens),
+            Some(1)
+        );
         let close = ScopeShape::Close("end:align".into());
-        assert_eq!(predicted_brackets(&close, &learned).map(|b| b.closes), Some(1));
+        assert_eq!(
+            predicted_brackets(&close, &learned).map(|b| b.closes),
+            Some(1)
+        );
         learned.insert("end:align".to_owned(), false);
-        assert_eq!(predicted_brackets(&close, &learned), None, "a closer its opener's run takes");
+        assert_eq!(
+            predicted_brackets(&close, &learned),
+            None,
+            "a closer its opener's run takes"
+        );
     }
 }

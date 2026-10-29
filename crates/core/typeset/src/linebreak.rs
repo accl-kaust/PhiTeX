@@ -760,7 +760,11 @@ impl Breaker<'_> {
                     // asks `char_pw` of its `lig_char`, no char node)
                     use crate::microtype::{pw_of, subst_font};
                     for (f, c, lig) in [edges.0, edges.1].into_iter().flatten() {
-                        let own = if lig { 0 } else { pw_of(self.fonts, f, c, true) };
+                        let own = if lig {
+                            0
+                        } else {
+                            pw_of(self.fonts, f, c, true)
+                        };
                         let k = subst_font(self.fonts, f, c, 1000);
                         if k != f {
                             mks += own - pw_of(self.fonts, k, c, true);

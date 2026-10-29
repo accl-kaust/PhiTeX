@@ -64,7 +64,9 @@ impl Run<'_, '_> {
     pub(crate) fn ck_begin(&mut self) {
         // (an edited node's run, or a run of a node whose last run took
         // them: they stay for its next edit)
-        if self.cx.op() != self.ops.exec || !(matches!(self.cx.woken_by(), Some(Cause::Edited)) || self.cx.last_parked()) {
+        if self.cx.op() != self.ops.exec
+            || !(matches!(self.cx.woken_by(), Some(Cause::Edited)) || self.cx.last_parked())
+        {
             return;
         }
         let taken = self.ck.take().map(|c| c.taken).unwrap_or_default();
@@ -90,8 +92,15 @@ impl Run<'_, '_> {
                     "ck: node {} at command {}: none here (levels {:?}, nest {:?}, pulled {}, kids {}, lig {}, chars {:?}, conds {})",
                     self.cx.node().raw(),
                     self.cmds,
-                    self.input.levels.iter().map(|l| (l.kind, l.ty, l.b.saturating_sub(l.a))).collect::<Vec<_>>(),
-                    self.nest.iter().map(|l| (l.mode, l.group)).collect::<Vec<_>>(),
+                    self.input
+                        .levels
+                        .iter()
+                        .map(|l| (l.kind, l.ty, l.b.saturating_sub(l.a)))
+                        .collect::<Vec<_>>(),
+                    self.nest
+                        .iter()
+                        .map(|l| (l.mode, l.group))
+                        .collect::<Vec<_>>(),
                     self.pulled,
                     self.kids.len(),
                     self.lig_buf.len(),
@@ -144,8 +153,13 @@ impl Run<'_, '_> {
         if line.origin != seg.origin
             || line.buf.len() < seg.buf.len()
             || line.buf[..seg.buf.len()] != seg.buf[..]
-            || (line.starts, line.ends, line.rescanned, line.chars, line.lineno)
-                != (seg.starts, seg.ends, seg.rescanned, seg.chars, seg.lineno)
+            || (
+                line.starts,
+                line.ends,
+                line.rescanned,
+                line.chars,
+                line.lineno,
+            ) != (seg.starts, seg.ends, seg.rescanned, seg.chars, seg.lineno)
         {
             return None;
         }
@@ -176,8 +190,18 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let int = |x: i64| v.int(x);
-        let contribs = v.list(self.contribs.iter().map(|&(f, x)| v.list(vec![f.0, x])).collect());
-        let lines = v.list(self.doc_lines.iter().map(|&(n, k)| v.list(vec![n, v.int(k)])).collect());
+        let contribs = v.list(
+            self.contribs
+                .iter()
+                .map(|&(f, x)| v.list(vec![f.0, x]))
+                .collect(),
+        );
+        let lines = v.list(
+            self.doc_lines
+                .iter()
+                .map(|&(n, k)| v.list(vec![n, v.int(k)]))
+                .collect(),
+        );
         let fread = v.list(
             self.fread
                 .iter()
@@ -240,7 +264,11 @@ impl Run<'_, '_> {
         }
         let Some(p) = self.cx.parked_before_edit() else {
             if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
-                eprintln!("ck: node {} woken by {:?}: no checkpoints", self.cx.node().raw(), self.cx.woken_by());
+                eprintln!(
+                    "ck: node {} woken by {:?}: no checkpoints",
+                    self.cx.node().raw(),
+                    self.cx.woken_by()
+                );
             }
             return Ok(false);
         };
@@ -256,7 +284,11 @@ impl Run<'_, '_> {
         }
         let old_segs = crate::input::joined(crate::run::decode_segs(v, &old_args));
         let new_segs = self.input.text.clone();
-        let shared = old_segs.iter().zip(&new_segs).take_while(|(a, b)| a.same(b)).count();
+        let shared = old_segs
+            .iter()
+            .zip(&new_segs)
+            .take_while(|(a, b)| a.same(b))
+            .count();
         let mut found = None;
         for (k, &ck) in cks.iter().enumerate().rev() {
             let c = list_of(v, ck);
@@ -270,14 +302,30 @@ impl Run<'_, '_> {
             if li > shared {
                 continue;
             }
-            let (Some(Seg::Line(a)), Some(Seg::Line(b))) = (old_segs.get(li), new_segs.get(li)) else {
+            let (Some(Seg::Line(a)), Some(Seg::Line(b))) = (old_segs.get(li), new_segs.get(li))
+            else {
                 continue;
             };
             if loc > a.buf.len()
                 || loc > b.buf.len()
                 || a.buf[..loc] != b.buf[..loc]
-                || (a.origin, a.starts, a.state, a.endch, a.rescanned, a.chars, a.lineno)
-                    != (b.origin, b.starts, b.state, b.endch, b.rescanned, b.chars, b.lineno)
+                || (
+                    a.origin,
+                    a.starts,
+                    a.state,
+                    a.endch,
+                    a.rescanned,
+                    a.chars,
+                    a.lineno,
+                ) != (
+                    b.origin,
+                    b.starts,
+                    b.state,
+                    b.endch,
+                    b.rescanned,
+                    b.chars,
+                    b.lineno,
+                )
                 || (a.ends != b.ends && loc >= a.buf.len().min(b.buf.len()))
             {
                 continue;
@@ -303,17 +351,26 @@ impl Run<'_, '_> {
         line.loc = loc;
         line.state = u8::try_from(int_of(v, c[2])).unwrap_or(line.state);
         line.endch = int_of(v, c[3]);
-        line.buf.extend(list_of(v, c[4]).iter().map(|&x| u32::try_from(int_of(v, x)).unwrap_or(0)));
+        line.buf.extend(
+            list_of(v, c[4])
+                .iter()
+                .map(|&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
+        );
         self.input = crate::input::Input::new();
         self.input.text = new_segs;
         self.input.text_at = li + 1;
         self.input.push_line(line);
         self.cont_lines.clear();
         self.ck_restore(&c);
-        self.cand_marks = list_of(v, c[12]).iter().filter_map(|&m| cand_of(v, m)).collect();
+        self.cand_marks = list_of(v, c[12])
+            .iter()
+            .filter_map(|&m| cand_of(v, m))
+            .collect();
         self.muts += 1;
         self.resumed_at = Some(self.cmds);
-        self.ops.resumed_edits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.ops
+            .resumed_edits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.cx.goes_on_from_edit();
         // (the checkpoints up to this one stand for the next run)
         let conds0 = self.conds.clone();
@@ -352,7 +409,18 @@ impl Run<'_, '_> {
             })
             .collect();
         let m: Vec<i64> = list_of(v, c[10]).iter().map(|&x| int_of(v, x)).collect();
-        if let [rt_made, rt_cells, rt_rels, pdf_occ, errors, cand, pdf_cmd, lines_read, exps] = m[..] {
+        if let [
+            rt_made,
+            rt_cells,
+            rt_rels,
+            pdf_occ,
+            errors,
+            cand,
+            pdf_cmd,
+            lines_read,
+            exps,
+        ] = m[..]
+        {
             self.rt_made = rt_made;
             self.rt_cells = rt_cells;
             self.rt_rels = rt_rels;
@@ -386,8 +454,16 @@ impl Run<'_, '_> {
             .iter()
             .map(|(o, a)| format!("{o:?}{:?}", a.iter().map(|x| x.raw()).collect::<Vec<_>>()))
             .collect();
-        let lines: Vec<String> = self.doc_lines.iter().map(|(n, k)| format!("{}:{k}", n.raw())).collect();
-        let left: Vec<Vec<u64>> = self.leftover().iter().map(|a| a.iter().map(|x| x.raw()).collect()).collect();
+        let lines: Vec<String> = self
+            .doc_lines
+            .iter()
+            .map(|(n, k)| format!("{}:{k}", n.raw()))
+            .collect();
+        let left: Vec<Vec<u64>> = self
+            .leftover()
+            .iter()
+            .map(|a| a.iter().map(|x| x.raw()).collect())
+            .collect();
         format!(
             "pub {pubd:?}\ncontribs {contribs:?}\nkids {kids:?}\nlines {lines:?}\nfread {:?}\neffect {:?}\nconds {:?}\nleft {left:?}\nerrors {}",
             self.fread, self.effect, self.conds, self.error_count
@@ -407,7 +483,12 @@ pub(crate) fn first_difference(a: &str, b: &str) -> String {
             let k = x.bytes().zip(y.bytes()).take_while(|(p, q)| p == q).count();
             let lo = k.saturating_sub(30);
             let cut = |s: &str| s.get(lo..(k + 200).min(s.len())).unwrap_or("").to_owned();
-            return format!("at {:?}: resumed …{}… whole …{}…", &x[..x.find(' ').unwrap_or(0)], cut(x), cut(y));
+            return format!(
+                "at {:?}: resumed …{}… whole …{}…",
+                &x[..x.find(' ').unwrap_or(0)],
+                cut(x),
+                cut(y)
+            );
         }
     }
     "in the number of lines".to_owned()
@@ -429,14 +510,33 @@ fn cand_value(v: &phitex_defuse::Values, m: &crate::pages::CandMark) -> ValueId 
         z(m.sig.2),
         u(m.sig.3),
         z(m.nest),
-        v.int(i64::from(m.cuttable) | i64::from(m.fresh) << 1 | i64::from(m.restartable) << 2 | i64::from(m.open_cut) << 3),
+        v.int(
+            i64::from(m.cuttable)
+                | i64::from(m.fresh) << 1
+                | i64::from(m.restartable) << 2
+                | i64::from(m.open_cut) << 3,
+        ),
     ])
 }
 
 /// [`cand_value`]'s mark.
 fn cand_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::pages::CandMark> {
     let n: Vec<i64> = list_of(v, x).iter().map(|&y| int_of(v, y)).collect();
-    let [k, stamp, gids, contribs, kids, lines, s0, s1, s2, s3, nest, b] = n[..] else {
+    let [
+        k,
+        stamp,
+        gids,
+        contribs,
+        kids,
+        lines,
+        s0,
+        s1,
+        s2,
+        s3,
+        nest,
+        b,
+    ] = n[..]
+    else {
         return None;
     };
     let u = |x: i64| u64::from_ne_bytes(x.to_ne_bytes());

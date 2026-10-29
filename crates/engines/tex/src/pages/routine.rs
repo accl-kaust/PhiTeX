@@ -13,8 +13,8 @@
 //! finisher's (`finisher.rs`).
 
 use super::{
-    BEFORE_PIECE, Field, GDEFS, List, Locality, Mode, Node, PITEMS, PackParams, Page, Par, R, Run, Side, Spec, ValueId,
-    Values, group, int_of, list_of, nodes, some, str_of, toks_of,
+    BEFORE_PIECE, Field, GDEFS, List, Locality, Mode, Node, PITEMS, PackParams, Page, Par, R, Run,
+    Side, Spec, ValueId, Values, group, int_of, list_of, nodes, some, str_of, toks_of,
 };
 
 /// A routine's give-back as [`RTN`] holds it: `[markers, list]`, and
@@ -152,7 +152,11 @@ impl Run<'_, '_> {
         // placements move (LaTeX's `\box\footins`, emptied by every
         // routine that ships a page with footnotes))
         if let Some(p) = c.page.as_ref() {
-            for n in p.classes.iter().copied().chain(p.ins.iter().filter_map(|&m| u16::try_from(crate::val::int_at(v, m, 1)).ok())) {
+            for n in p.classes.iter().copied().chain(
+                p.ins
+                    .iter()
+                    .filter_map(|&m| u16::try_from(crate::val::int_at(v, m, 1)).ok()),
+            ) {
                 if !ns.contains(&n) {
                     ns.push(n);
                 }
@@ -610,7 +614,11 @@ pub(crate) fn fin_at(page: Option<&Page>) -> (i64, i64) {
     page.map_or((-2, i64::MAX), |f| {
         (
             i64::from_ne_bytes(f.at.raw().to_ne_bytes()),
-            if f.in_material { i64::MAX } else { i64::from(f.k) },
+            if f.in_material {
+                i64::MAX
+            } else {
+                i64::from(f.k)
+            },
         )
     })
 }
@@ -679,7 +687,11 @@ impl Run<'_, '_> {
             let names = |x: ValueId| {
                 list_of(v, x)
                     .iter()
-                    .filter_map(|&e| list_of(v, e).first().map(|&f| crate::val::field_name(v, Field(f))))
+                    .filter_map(|&e| {
+                        list_of(v, e)
+                            .first()
+                            .map(|&f| crate::val::field_name(v, Field(f)))
+                    })
                     .filter(|n| n.starts_with("param:"))
                     .collect::<Vec<_>>()
                     .join(",")
@@ -688,7 +700,11 @@ impl Run<'_, '_> {
                 "page-trace: finisher {} preloads locals [{}] names [{}]",
                 self.cx.node().raw(),
                 names(a(3)),
-                if args.len() >= 9 { names(a(8)) } else { String::new() }
+                if args.len() >= 9 {
+                    names(a(8))
+                } else {
+                    String::new()
+                }
             );
         }
         // (the routines of the pages firing in the piece before this one,
@@ -821,19 +837,30 @@ impl Run<'_, '_> {
         let mut fs = Vec::new();
         let mut afters = Vec::new();
         for i in 0..n {
-            let Some(e) = self.cx.at(l, Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) else {
+            let Some(e) = self
+                .cx
+                .at(l, Step::Index(u32::try_from(i).unwrap_or(u32::MAX)))
+            else {
                 continue;
             };
             fs.push(self.cx.get(e, Step::Index(0)).unwrap_or(ValueId::UNIT));
             afters.push(self.cx.get(e, Step::Index(2)).unwrap_or_else(|| v.int(-1)));
         }
         let tag = v.str(LAZY);
-        fs
-            .iter()
+        fs.iter()
             .enumerate()
             .map(|(j, &f)| {
-                let lazy = v.list(vec![tag, v.int(i64::from(ui)), v.int(5), v.int(i64::try_from(j).unwrap_or(0))]);
-                v.list(vec![f, lazy, afters.get(j).copied().unwrap_or_else(|| v.int(-1))])
+                let lazy = v.list(vec![
+                    tag,
+                    v.int(i64::from(ui)),
+                    v.int(5),
+                    v.int(i64::try_from(j).unwrap_or(0)),
+                ]);
+                v.list(vec![
+                    f,
+                    lazy,
+                    afters.get(j).copied().unwrap_or_else(|| v.int(-1)),
+                ])
             })
             .collect()
     }
@@ -842,7 +869,11 @@ impl Run<'_, '_> {
     /// ([`super::piece::names_index_at`]): each `[field, standing, value]`, a
     /// value a lazy tag where the piece had one; and whether the run
     /// could end there.
-    pub(crate) fn lazy_names_at(&mut self, own: Option<(phitex_defuse::View, u32)>, k: u32) -> (ValueId, bool) {
+    pub(crate) fn lazy_names_at(
+        &mut self,
+        own: Option<(phitex_defuse::View, u32)>,
+        k: u32,
+    ) -> (ValueId, bool) {
         use phitex_defuse::Step;
         let v = self.v;
         let Some((u, ui)) = own else {
@@ -885,14 +916,20 @@ impl Run<'_, '_> {
         let v = self.v;
         let part = list_of(v, x).get(2).map_or(0, |&p| int_of(v, p));
         let y = self.fin_lazy_value(x)?;
-        Ok(if part == 5 { some(y) } else { list_of(v, y).first().copied() })
+        Ok(if part == 5 {
+            some(y)
+        } else {
+            list_of(v, y).first().copied()
+        })
     }
 
     /// Whether `x` is a value a finisher reads only where it uses it.
     pub(crate) fn is_lazy(&self, x: ValueId) -> bool {
         let v = self.v;
-        v.with_list(x, |xs| xs.len() == 4 && v.with_str(xs[0], |s| s == LAZY).unwrap_or(false))
-            .unwrap_or(false)
+        v.with_list(x, |xs| {
+            xs.len() == 4 && v.with_str(xs[0], |s| s == LAZY).unwrap_or(false)
+        })
+        .unwrap_or(false)
     }
 
     /// The value lazy tag `x` stands for ([`Run::lazy_locals`],
@@ -902,7 +939,8 @@ impl Run<'_, '_> {
         use phitex_defuse::Step;
         let v = self.v;
         let xs = list_of(v, x);
-        let n = |i: usize| u32::try_from(xs.get(i).map_or(0, |&y| int_of(v, y))).unwrap_or(u32::MAX);
+        let n =
+            |i: usize| u32::try_from(xs.get(i).map_or(0, |&y| int_of(v, y))).unwrap_or(u32::MAX);
         let Some((after, piece)) = self.fin_page().map(|f| (f.after, f.at)) else {
             return Ok(ValueId::UNIT);
         };

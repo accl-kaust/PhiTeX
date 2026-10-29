@@ -529,7 +529,14 @@ pub fn origin_failures(b: &Build, src: &str, file: &str) -> Vec<String> {
 /// character node made: its font size not 0) has an origin, its source
 /// bytes or a call's range synthesized.
 #[allow(dead_code, clippy::many_single_char_names, clippy::needless_range_loop)]
-pub fn origin_failures_in(b: &Build, pdf: &[u8], src: &str, file: &str, chars: bool, words: bool) -> Vec<String> {
+pub fn origin_failures_in(
+    b: &Build,
+    pdf: &[u8],
+    src: &str,
+    file: &str,
+    chars: bool,
+    words: bool,
+) -> Vec<String> {
     use std::sync::Arc;
     let mut fails = Vec::new();
     let pdf: Arc<[u8]> = Arc::from(pdf);
@@ -544,7 +551,9 @@ pub fn origin_failures_in(b: &Build, pdf: &[u8], src: &str, file: &str, chars: b
     // as a document's bytes are given, has one a character)
     let latin = src.chars().all(|c| u32::from(c) <= 0xFF);
     let bytes: Vec<u8> = if latin {
-        src.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(0)).collect()
+        src.chars()
+            .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
+            .collect()
     } else {
         src.as_bytes().to_vec()
     };
@@ -563,14 +572,30 @@ pub fn origin_failures_in(b: &Build, pdf: &[u8], src: &str, file: &str, chars: b
             fails.push(format!("page {}: no origins", k + 1));
             continue;
         };
-        let codes = doc.page(k + 1).map(|pg| phitex_codecs::pdftext::page_codes(&doc, &pg)).unwrap_or_default();
+        let codes = doc
+            .page(k + 1)
+            .map(|pg| phitex_codecs::pdftext::page_codes(&doc, &pg))
+            .unwrap_or_default();
         if codes.len() != p.len() {
-            fails.push(format!("page {}: {} origins for {} codes", k + 1, p.len(), codes.len()));
+            fails.push(format!(
+                "page {}: {} origins for {} codes",
+                k + 1,
+                p.len(),
+                codes.len()
+            ));
             continue;
         }
-        let none: Vec<usize> = (0..p.len()).filter(|&i| p.size[i] > 0.0 && p.file[i] == u32::MAX).collect();
+        let none: Vec<usize> = (0..p.len())
+            .filter(|&i| p.size[i] > 0.0 && p.file[i] == u32::MAX)
+            .collect();
         if !none.is_empty() {
-            fails.push(format!("page {}: {} glyphs of {} with no origin (codes {:?})", k + 1, none.len(), p.len(), &none[..none.len().min(24)]));
+            fails.push(format!(
+                "page {}: {} glyphs of {} with no origin (codes {:?})",
+                k + 1,
+                none.len(),
+                p.len(),
+                &none[..none.len().min(24)]
+            ));
         }
         for i in 0..p.len() {
             if p.file[i] != f || p.is_synth(i) {
@@ -581,7 +606,12 @@ pub fn origin_failures_in(b: &Build, pdf: &[u8], src: &str, file: &str, chars: b
                 covered[s..e].iter_mut().for_each(|c| *c = true);
             }
             let c = codes[i].code;
-            if chars && e == s + 1 && c < 128 && bytes.get(s).is_some_and(u8::is_ascii_alphanumeric) && u32::from(bytes[s]) != c {
+            if chars
+                && e == s + 1
+                && c < 128
+                && bytes.get(s).is_some_and(u8::is_ascii_alphanumeric)
+                && u32::from(bytes[s]) != c
+            {
                 fails.push(format!(
                     "page {}: code {i} {:?} placed at byte {s} {:?}",
                     k + 1,
@@ -592,8 +622,13 @@ pub fn origin_failures_in(b: &Build, pdf: &[u8], src: &str, file: &str, chars: b
         }
     }
     for (at, w) in origin_words(src).into_iter().filter(|_| words) {
-        if !covered[byte_at[at]..byte_at[at + w.len()]].iter().all(|&c| c) {
-            fails.push(format!("word {w:?} at byte {at}: not every byte shown by a glyph from it"));
+        if !covered[byte_at[at]..byte_at[at + w.len()]]
+            .iter()
+            .all(|&c| c)
+        {
+            fails.push(format!(
+                "word {w:?} at byte {at}: not every byte shown by a glyph from it"
+            ));
         }
     }
     fails
@@ -608,7 +643,11 @@ pub fn rss_bytes() -> u64 {
         .and_then(|t| {
             t.lines()
                 .find_map(|l| l.strip_prefix("VmRSS:"))
-                .and_then(|v| v.split_whitespace().next().and_then(|n| n.parse::<u64>().ok()))
+                .and_then(|v| {
+                    v.split_whitespace()
+                        .next()
+                        .and_then(|n| n.parse::<u64>().ok())
+                })
         })
         .map_or(0, |kb| kb << 10)
 }

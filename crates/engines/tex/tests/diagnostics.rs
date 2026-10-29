@@ -222,13 +222,23 @@ fn a_diagnostic_after_a_deletion_before_it_is_where_its_text_now_is() {
 fn an_input_file_ending_inside_a_skipped_else() {
     for threads in [1, 8] {
         let doc = "\\input skipend\nafter \\fi text\n\\bye\n";
-        let b = build(doc, |o| Options { threads: Some(threads), ..o });
+        let b = build(doc, |o| Options {
+            threads: Some(threads),
+            ..o
+        });
         let ds = b.diagnostics();
         show(&ds);
-        let errs: Vec<(&str, usize)> = ds.iter().filter(|d| d.severity == Severity::Error).map(|d| (d.message.as_str(), d.line)).collect();
+        let errs: Vec<(&str, usize)> = ds
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| (d.message.as_str(), d.line))
+            .collect();
         assert_eq!(
             errs,
-            vec![("Incomplete \\iftrue; all text was ignored after line 1", 1), ("Extra \\fi", 2)],
+            vec![
+                ("Incomplete \\iftrue; all text was ignored after line 1", 1),
+                ("Extra \\fi", 2)
+            ],
             "-j{threads}"
         );
     }
@@ -242,12 +252,24 @@ fn an_input_file_ending_inside_a_skipped_else() {
 #[test]
 fn an_extra_else_or_or_is_reported() {
     for threads in [1, 8] {
-        let doc = "\\iftrue a\\fi\\else b \\iftrue c\\or d\\fi\n\\iffalse e\\or f\\else g\\fi\n\\bye\n";
-        let b = build(doc, |o| Options { threads: Some(threads), ..o });
+        let doc =
+            "\\iftrue a\\fi\\else b \\iftrue c\\or d\\fi\n\\iffalse e\\or f\\else g\\fi\n\\bye\n";
+        let b = build(doc, |o| Options {
+            threads: Some(threads),
+            ..o
+        });
         let ds = b.diagnostics();
         show(&ds);
-        let errs: Vec<(&str, usize)> = ds.iter().filter(|d| d.severity == Severity::Error).map(|d| (d.message.as_str(), d.line)).collect();
-        assert_eq!(errs, vec![("Extra \\else", 1), ("Extra \\or", 1), ("Extra \\or", 2)], "-j{threads}");
+        let errs: Vec<(&str, usize)> = ds
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| (d.message.as_str(), d.line))
+            .collect();
+        assert_eq!(
+            errs,
+            vec![("Extra \\else", 1), ("Extra \\or", 1), ("Extra \\or", 2)],
+            "-j{threads}"
+        );
     }
 }
 
@@ -286,13 +308,22 @@ fn showbox_displays_the_box_and_says_ok() {
 ..\\penalty 10000\n..\\glue(\\parfillskip) 0.0 plus 1.0fil\n..\\glue(\\rightskip) 0.0\n\n! OK.\n",
     ];
     for threads in [1, 8] {
-        let b = build(doc, |o| Options { threads: Some(threads), ..o });
+        let b = build(doc, |o| Options {
+            threads: Some(threads),
+            ..o
+        });
         let (_, log) = b.output();
         for w in want {
-            assert!(log.contains(w), "-j{threads}: the log has\n{w}\nlog:\n{log}");
+            assert!(
+                log.contains(w),
+                "-j{threads}: the log has\n{w}\nlog:\n{log}"
+            );
         }
         let oks = b.error_lines().iter().filter(|l| *l == "! OK.").count();
-        assert_eq!(oks, 6, "-j{threads}: an error for each \\showbox and the \\showlists");
+        assert_eq!(
+            oks, 6,
+            "-j{threads}: an error for each \\showbox and the \\showlists"
+        );
     }
 }
 
@@ -303,13 +334,24 @@ fn showbox_displays_the_box_and_says_ok() {
 fn an_extra_right_brace_is_reported() {
     for threads in [1, 8] {
         let doc = "x}\n\\begingroup } \\endgroup\n$x}$\n\\bye\n";
-        let b = build(doc, |o| Options { threads: Some(threads), ..o });
+        let b = build(doc, |o| Options {
+            threads: Some(threads),
+            ..o
+        });
         let ds = b.diagnostics();
         show(&ds);
-        let errs: Vec<(&str, usize)> = ds.iter().filter(|d| d.severity == Severity::Error).map(|d| (d.message.as_str(), d.line)).collect();
+        let errs: Vec<(&str, usize)> = ds
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| (d.message.as_str(), d.line))
+            .collect();
         assert_eq!(
             errs,
-            vec![("Too many }'s", 1), ("Extra }, or forgotten \\endgroup", 2), ("Extra }, or forgotten $", 3)],
+            vec![
+                ("Too many }'s", 1),
+                ("Extra }, or forgotten \\endgroup", 2),
+                ("Extra }, or forgotten $", 3)
+            ],
             "-j{threads}"
         );
     }

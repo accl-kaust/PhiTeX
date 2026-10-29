@@ -15,7 +15,7 @@ use std::path::Path;
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use phitex_tex::{FontIndex, FontSource, Finder, KpseFormat, Options, XeTeX};
+use phitex_tex::{Finder, FontIndex, FontSource, KpseFormat, Options, XeTeX};
 
 /// The font files as XeTeX finds them: kpathsea as `xetex`, and the
 /// bytes of a path.
@@ -332,7 +332,12 @@ fn xelatex_docs() {
                 xetex: Some(xetex()),
                 prelude_jobname: "xelatex".to_owned(),
                 finder: xelatex_finder(vec![dir.clone()]),
-                ..common::options(&format!("./{name}.tex"), name, &common::dvi_comment(&want), dir)
+                ..common::options(
+                    &format!("./{name}.tex"),
+                    name,
+                    &common::dvi_comment(&want),
+                    dir,
+                )
             };
             let b = common::build(opts, Some("\\input xelatex.ini\n"), &src);
             let (xdv, log) = b.output();
@@ -347,10 +352,27 @@ fn xelatex_docs() {
                         .diagnostics()
                         .iter()
                         .take(12)
-                        .map(|d| format!("  {}:{} {}", d.file, d.line, d.message.chars().take(300).collect::<String>()))
+                        .map(|d| {
+                            format!(
+                                "  {}:{} {}",
+                                d.file,
+                                d.line,
+                                d.message.chars().take(300).collect::<String>()
+                            )
+                        })
                         .collect();
-                    let tail: String = log.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect();
-                    eprintln!("{name} -j{threads}: FAIL {d}\n{}\n--- log tail ---\n{tail}", diags.join("\n"));
+                    let tail: String = log
+                        .chars()
+                        .rev()
+                        .take(1500)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    eprintln!(
+                        "{name} -j{threads}: FAIL {d}\n{}\n--- log tail ---\n{tail}",
+                        diags.join("\n")
+                    );
                     failed.push(format!("{name} -j{threads}"));
                 }
             }
@@ -393,7 +415,9 @@ fn xelatex_glyph_origins() {
     names.sort();
     for (name, dir) in &names {
         let want = std::fs::read(x.join(format!("oracle/docs/{name}.xdv"))).expect("the oracle");
-        let pdf = Arc::new(std::fs::read(x.join(format!("oracle/docs/{name}.pdf"))).expect("the oracle's PDF"));
+        let pdf = Arc::new(
+            std::fs::read(x.join(format!("oracle/docs/{name}.pdf"))).expect("the oracle's PDF"),
+        );
         let src = common::read(&dir.join(format!("{name}.tex")));
         let build = |threads: usize| {
             let opts = Options {
@@ -403,7 +427,12 @@ fn xelatex_glyph_origins() {
                 origins: true,
                 prelude_jobname: "xelatex".to_owned(),
                 finder: xelatex_finder(vec![dir.clone()]),
-                ..common::options(&format!("./{name}.tex"), name, &common::dvi_comment(&want), dir)
+                ..common::options(
+                    &format!("./{name}.tex"),
+                    name,
+                    &common::dvi_comment(&want),
+                    dir,
+                )
             };
             let b = common::build(opts, Some("\\input xelatex.ini\n"), &src);
             b.set_origins_pdf(pdf.clone());
@@ -472,7 +501,12 @@ fn xelatex_document() {
             prelude_jobname: "xelatex".to_owned(),
             finder: xelatex_finder(vec![dir.clone()]),
             shell_hook: shell_hook(&dir),
-            ..common::options(&format!("./{name}.tex"), &name, &common::dvi_comment(&want), &dir)
+            ..common::options(
+                &format!("./{name}.tex"),
+                &name,
+                &common::dvi_comment(&want),
+                &dir,
+            )
         };
         let b = common::build(opts, Some("\\input xelatex.ini\n"), &src);
         let (xdv, log) = b.output();
@@ -484,14 +518,33 @@ fn xelatex_document() {
             .diagnostics()
             .iter()
             .take(20)
-            .map(|d| format!("  {}:{} {}", d.file, d.line, d.message.chars().take(300).collect::<String>()))
+            .map(|d| {
+                format!(
+                    "  {}:{} {}",
+                    d.file,
+                    d.line,
+                    d.message.chars().take(300).collect::<String>()
+                )
+            })
             .collect();
         match common::first_difference(&xdv, &want) {
-            None => eprintln!("ok {name} -j{threads}: {} bytes, {:?}", xdv.len(), t0.elapsed()),
-            Some(d) => eprintln!("{name} -j{threads}: FAIL {d} ({:?})\n{}", t0.elapsed(), diags.join("\n")),
+            None => eprintln!(
+                "ok {name} -j{threads}: {} bytes, {:?}",
+                xdv.len(),
+                t0.elapsed()
+            ),
+            Some(d) => eprintln!(
+                "{name} -j{threads}: FAIL {d} ({:?})\n{}",
+                t0.elapsed(),
+                diags.join("\n")
+            ),
         }
         if b.stats.shell_passes > 0 {
-            eprintln!("{name} -j{threads}: {} evaluations again for the commands' files, {} of them", b.stats.shell_passes, b.shell_files().len());
+            eprintln!(
+                "{name} -j{threads}: {} evaluations again for the commands' files, {} of them",
+                b.stats.shell_passes,
+                b.shell_files().len()
+            );
         }
     }
 }

@@ -351,9 +351,9 @@ pub(crate) fn loop_item(lc: &LoopCarry, src: Src) -> Option<crate::vprof::PItem>
     // fired: it goes back to the contributions so)
     if lc.inf.contains(&src) {
         return match loop_item_raw(lc, src)? {
-            PItem::Node(Node::Penalty(_)) => {
-                Some(PItem::Node(Node::Penalty(phitex_typeset::linebreak::INF_PENALTY)))
-            }
+            PItem::Node(Node::Penalty(_)) => Some(PItem::Node(Node::Penalty(
+                phitex_typeset::linebreak::INF_PENALTY,
+            ))),
             x => Some(x),
         };
     }
@@ -367,7 +367,10 @@ pub(crate) fn loop_item_raw(lc: &LoopCarry, src: Src) -> Option<crate::vprof::PI
         Src::Piece { piece, item } => {
             let u = lc.units.iter().rev().find(|u| u.pid == piece)?;
             match end_sub_of(item) {
-                None => u.items.get(item as usize).map(|x| u.res.of(x).unwrap_or_else(|| x.clone())),
+                None => u
+                    .items
+                    .get(item as usize)
+                    .map(|x| u.res.of(x).unwrap_or_else(|| x.clone())),
                 Some((e, s)) => match u.items.get(e as usize)? {
                     PItem::End(ys) => ys.get(s as usize).cloned(),
                     _ => None,
@@ -384,7 +387,12 @@ pub(crate) fn loop_item_raw(lc: &LoopCarry, src: Src) -> Option<crate::vprof::PI
 
 /// [`crate::vprof::ScanState`]'s fold of one item with its source
 /// (§679's interline glue, deletions, markers), into `lc.pend`.
-pub(crate) fn fold_item_t(st: &mut crate::vprof::ScanState, lc: &mut LoopCarry, x: &crate::vprof::PItem, s: SrcRef) {
+pub(crate) fn fold_item_t(
+    st: &mut crate::vprof::ScanState,
+    lc: &mut LoopCarry,
+    x: &crate::vprof::PItem,
+    s: SrcRef,
+) {
     use crate::vprof::PItem;
     let st = &mut st.fold;
     let out = &mut lc.pend;
@@ -549,9 +557,18 @@ pub(crate) fn build_t(
         };
         let before = st.pb.page.len();
         if crate::exec::obs_str!("PHITEX_PAGE_DUMP").is_some_and(|d| d == st.j.to_string()) {
-            eprintln!("dump loop page {}: {} from {:?}", st.j, node_short(&p), s.src);
+            eprintln!(
+                "dump loop page {}: {} from {:?}",
+                st.j,
+                node_short(&p),
+                s.src
+            );
         }
-        let ins_n = if let Node::Ins(i) = &p { Some(i.number) } else { None };
+        let ins_n = if let Node::Ins(i) = &p {
+            Some(i.number)
+        } else {
+            None
+        };
         let out = {
             let mut class = |n: u16| {
                 classes
@@ -566,7 +583,10 @@ pub(crate) fn build_t(
                 let after = st.pb.page.len();
                 if after == before + 2 {
                     // (`\topskip`'s glue before the first box, §1001)
-                    lc.page_src.push(SrcRef { src: None, fold: s.fold });
+                    lc.page_src.push(SrcRef {
+                        src: None,
+                        fold: s.fold,
+                    });
                     lc.page_ins.push(None);
                 }
                 if after > before {
@@ -599,7 +619,10 @@ pub(crate) fn build_t(
                 }
                 let mut carried: Vec<SrcRef> = srcs.get(f.best..).unwrap_or_default().to_vec();
                 if topskip {
-                    carried.push(SrcRef { src: None, fold: s.fold });
+                    carried.push(SrcRef {
+                        src: None,
+                        fold: s.fold,
+                    });
                 }
                 carried.push(s);
                 carried.extend(queue.drain(..).map(|(_, s)| s));
@@ -637,14 +660,18 @@ pub(crate) fn build_t(
     None
 }
 
-
 /// The sources of the insertions a fire holds over (§1020–§1022), in
 /// order: each insertion before the best break whose class has no best
 /// insertion or comes after it, all of them where `\holdinginserts` is
 /// positive, and the rest of the one split where a rest is left. `None`
 /// where one cannot be named by a piece's item ([`Src::Held`]): a defect,
 /// said by the caller.
-pub(crate) fn held_srcs(f: &Fired, page_src: &[SrcRef], page_ins: &[Option<u16>], holding: bool) -> Option<Vec<Src>> {
+pub(crate) fn held_srcs(
+    f: &Fired,
+    page_src: &[SrcRef],
+    page_ins: &[Option<u16>],
+    holding: bool,
+) -> Option<Vec<Src>> {
     if f.held_inserts.is_empty() {
         return Some(Vec::new());
     }
@@ -687,7 +714,14 @@ pub(crate) fn held_srcs(f: &Fired, page_src: &[SrcRef], page_ins: &[Option<u16>]
             }
         }
         if wait {
-            out.push((Src::Held { piece, item, from: at }, !maybe));
+            out.push((
+                Src::Held {
+                    piece,
+                    item,
+                    from: at,
+                },
+                !maybe,
+            ));
         }
     }
     let sure = out.iter().filter(|x| x.1).count();
@@ -736,8 +770,14 @@ pub(crate) fn spans_of(srcs: &[Src]) -> Vec<Span> {
 /// The sources a span names, in order.
 pub(crate) fn span_srcs(s: &Span) -> impl Iterator<Item = Src> + '_ {
     (0..s.len).map(move |d| match s.src {
-        Src::Piece { piece, item } => Src::Piece { piece, item: item + d },
-        Src::Rtn { page, item } => Src::Rtn { page, item: item + d },
+        Src::Piece { piece, item } => Src::Piece {
+            piece,
+            item: item + d,
+        },
+        Src::Rtn { page, item } => Src::Rtn {
+            page,
+            item: item + d,
+        },
         h @ Src::Held { .. } => h,
     })
 }
@@ -757,7 +797,11 @@ pub(crate) fn params_marker(v: &Values, p: &PageParams) -> ValueId {
 /// the unit's marks ([`crate::vprof::unit_marks`]), an item's index into
 /// them becomes the index of the mark pushed on `table` (a mark the
 /// profile names none of, `u32::MAX`, stays).
-pub(crate) fn remap_marks(items: &mut [crate::vprof::PItem], ms: &[ValueId], table: &mut Vec<ValueId>) {
+pub(crate) fn remap_marks(
+    items: &mut [crate::vprof::PItem],
+    ms: &[ValueId],
+    table: &mut Vec<ValueId>,
+) {
     use crate::vprof::PItem;
     for x in items {
         match x {
@@ -779,7 +823,12 @@ pub(crate) fn remap_marks(items: &mut [crate::vprof::PItem], ms: &[ValueId], tab
 /// The marks in force after a page (§1012–§1014): `before`'s
 /// (`[[class, mark]…]`, unit for none), each class's last mark on the
 /// page (`page`, ids in `table`) in its place.
-pub(crate) fn bot_marks_after(v: &Values, before: ValueId, page: &[u32], table: &[ValueId]) -> ValueId {
+pub(crate) fn bot_marks_after(
+    v: &Values,
+    before: ValueId,
+    page: &[u32],
+    table: &[ValueId],
+) -> ValueId {
     if page.is_empty() {
         return before;
     }
@@ -795,7 +844,9 @@ pub(crate) fn bot_marks_after(v: &Values, before: ValueId, page: &[u32], table: 
             .collect()
     };
     for &k in page {
-        let Some(&m) = table.get(k as usize) else { continue };
+        let Some(&m) = table.get(k as usize) else {
+            continue;
+        };
         let (c, text) = crate::etex::mark_class(v, m);
         let c = i64::from(c);
         match cur.iter_mut().find(|e| e.0 == c) {
@@ -804,7 +855,11 @@ pub(crate) fn bot_marks_after(v: &Values, before: ValueId, page: &[u32], table: 
         }
     }
     cur.sort_by_key(|e| e.0);
-    v.list(cur.into_iter().map(|(c, m)| v.list(vec![v.int(c), m])).collect())
+    v.list(
+        cur.into_iter()
+            .map(|(c, m)| v.list(vec![v.int(c), m]))
+            .collect(),
+    )
 }
 
 /// (`observe`) Page `j`'s guess depends on the pages before it alone
@@ -819,7 +874,9 @@ static GUESS_SEEN: std::sync::Mutex<GuessSeen> = std::sync::Mutex::new(None);
 /// At a collection ([`crate::collect`]): the guesses [`guess_check`] saw
 /// dropped (a guess made again after it may have another id).
 pub(crate) fn clear_guess_seen() {
-    *GUESS_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *GUESS_SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
 pub(crate) fn guess_check(node: u64, j: i64, how: impl std::hash::Hash, guess: ValueId) {
@@ -828,8 +885,13 @@ pub(crate) fn guess_check(node: u64, j: i64, how: impl std::hash::Hash, guess: V
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(&how, &mut h);
     let key = (node, j, h.finish());
-    let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let prev = *seen.get_or_insert_with(Default::default).entry(key).or_insert(guess);
+    let mut seen = SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let prev = *seen
+        .get_or_insert_with(Default::default)
+        .entry(key)
+        .or_insert(guess);
     assert!(
         prev == guess,
         "page {}: its routine's guess changed with nothing before it changed (its own output read back?)",
@@ -875,12 +937,7 @@ pub(crate) fn step_rtn(v: &Values, x: ValueId) -> Option<ValueId> {
     }
     let mut list = list_of(v, *xs.get(1)?);
     list.push(*list.last()?);
-    Some(rtn_value(
-        v,
-        xs[0],
-        v.list(list),
-        dead + 1,
-    ))
+    Some(rtn_value(v, xs[0], v.list(list), dead + 1))
 }
 
 impl Run<'_, '_> {
@@ -940,7 +997,11 @@ impl Run<'_, '_> {
 
     /// A routine's material as profile items (§1026: its markers, then
     /// its list), its marks given ids in the loop's table.
-    pub(crate) fn rtn_items(&mut self, lc: &mut LoopCarry, rtn_value: ValueId) -> Vec<crate::vprof::PItem> {
+    pub(crate) fn rtn_items(
+        &mut self,
+        lc: &mut LoopCarry,
+        rtn_value: ValueId,
+    ) -> Vec<crate::vprof::PItem> {
         let v = self.v;
         let rs = list_of(v, rtn_value);
         let mut raw = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
@@ -957,7 +1018,12 @@ impl Run<'_, '_> {
     /// contributions pending put on the page, as they reach it at `at`,
     /// where no marker names them (§1008 reads them at the `build_page`
     /// call); memoised for the unit's owner in `lc.own`.
-    pub(crate) fn unit_classes(&mut self, lc: &mut LoopCarry, items: &[crate::vprof::PItem], at: phitex_defuse::NodeId) -> R<Vec<(u16, InsertClass)>> {
+    pub(crate) fn unit_classes(
+        &mut self,
+        lc: &mut LoopCarry,
+        items: &[crate::vprof::PItem],
+        at: phitex_defuse::NodeId,
+    ) -> R<Vec<(u16, InsertClass)>> {
         use crate::prof::pages as pp;
         let t = pp::start();
         let mut ns: Vec<u16> = Vec::new();
@@ -985,7 +1051,6 @@ impl Run<'_, '_> {
         pp::add(pp::CLASSES, t);
         Ok(classes)
     }
-
 
     /// The output routine's hint (as [`Run::output_hint`]) where piece
     /// `at` ends: the routine of a page firing there.
@@ -1061,7 +1126,10 @@ impl Run<'_, '_> {
                     all = all.min(i);
                 }
             }
-            assert_eq!(keep, all, "the page's input names an older piece after a newer one");
+            assert_eq!(
+                keep, all,
+                "the page's input names an older piece after a newer one"
+            );
         }
         if keep > 0 {
             lc.units.drain(..keep);
@@ -1077,8 +1145,16 @@ impl Run<'_, '_> {
                 Src::Rtn { .. } => None,
             };
             keep.extend(lc.srcs.iter().filter_map(piece));
-            keep.extend(lc.pend.iter().filter_map(|p| p.1.src.as_ref().and_then(piece)));
-            keep.extend(lc.page_src.iter().filter_map(|p| p.src.as_ref().and_then(piece)));
+            keep.extend(
+                lc.pend
+                    .iter()
+                    .filter_map(|p| p.1.src.as_ref().and_then(piece)),
+            );
+            keep.extend(
+                lc.page_src
+                    .iter()
+                    .filter_map(|p| p.src.as_ref().and_then(piece)),
+            );
             keep.extend(lc.held_nodes.iter().filter_map(|h| piece(&h.0)));
             lc.order.retain(|p, _| keep.contains(p));
             lc.prev.retain(|p, _| keep.contains(p));
@@ -1381,7 +1457,9 @@ impl PageState {
                         |c| c.1,
                     )
                 };
-                if crate::exec::obs_str!("PHITEX_PAGE_DUMP").is_some_and(|d| d == self.j.to_string()) {
+                if crate::exec::obs_str!("PHITEX_PAGE_DUMP")
+                    .is_some_and(|d| d == self.j.to_string())
+                {
                     eprintln!("dump fin page {}: {}", self.j, node_short(&p));
                 }
                 self.pb.contribute(p, next.as_ref(), &params, &mut class)
@@ -1574,9 +1652,16 @@ impl Run<'_, '_> {
     /// `base` none: no routine gave the class back; then its registers
     /// are the text's or the environment's (void, zero) as they reach
     /// `at`, any finisher's passed over.
-    pub(crate) fn insert_class_since(&mut self, n: u16, at: phitex_defuse::NodeId, since: i64, base: Option<InsertClass>) -> R<InsertClass> {
+    pub(crate) fn insert_class_since(
+        &mut self,
+        n: u16,
+        at: phitex_defuse::NodeId,
+        since: i64,
+        base: Option<InsertClass>,
+    ) -> R<InsertClass> {
         let v = self.v;
-        let after = (since >= 0).then(|| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(since.to_ne_bytes())));
+        let after = (since >= 0)
+            .then(|| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(since.to_ne_bytes())));
         let fin = self.ops.finish;
         // (the box as the text set it, `tbox:` ([`Run::tbox_loc`]): its
         // own field no finisher defines, so a finisher the loop moves
@@ -1600,7 +1685,8 @@ impl Run<'_, '_> {
             let x = match self.field_at(f, at, false)? {
                 phitex_defuse::FieldAt::Def(x, Some(d))
                     if self.cx.op_of(d).is_some_and(|o| o != fin)
-                        && after.is_none_or(|s| s != d && self.cx.alive(s) && self.cx.before(s, d)) =>
+                        && after
+                            .is_none_or(|s| s != d && self.cx.alive(s) && self.cx.before(s, d)) =>
                 {
                     x
                 }
@@ -1609,8 +1695,12 @@ impl Run<'_, '_> {
             };
             match i {
                 0 => {
-                    let b = list_of(v, x).get(1).copied().filter(|&b| b != ValueId::UNIT);
-                    c.box_height_plus_depth = b.map(|b| nodes::box_dim(v, b, 3) + nodes::box_dim(v, b, 2));
+                    let b = list_of(v, x)
+                        .get(1)
+                        .copied()
+                        .filter(|&b| b != ValueId::UNIT);
+                    c.box_height_plus_depth =
+                        b.map(|b| nodes::box_dim(v, b, 3) + nodes::box_dim(v, b, 2));
                     c.box_is_hbox = b.is_some_and(|b| nodes::box_is_h(v, b));
                 }
                 1 => c.count = crate::val::i32_of(v, Some(x)),
@@ -1683,13 +1773,17 @@ impl Run<'_, '_> {
     /// give-back (docs/spec-settle.md §2.1).
     pub(crate) fn text_params_since(&mut self, pid: i64, since: i64) -> R<Vec<(usize, ValueId)>> {
         let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
-        let after = (since >= 0).then(|| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(since.to_ne_bytes())));
+        let after = (since >= 0)
+            .then(|| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(since.to_ne_bytes())));
         let mut out = Vec::new();
         for (i, p) in crate::pages::PAGE_PARAMS.into_iter().enumerate() {
             let t = self.tpp_loc(p as crate::state::Loc);
             let f = self.loc_field(t);
-            if let phitex_defuse::FieldAt::Def(x, Some(d)) = self.cx.read_at(f, phitex_defuse::At::AfterOwn(at))?
-                && after.is_none_or(|s| s != d && self.cx.alive(s) && self.cx.alive(d) && self.cx.before(s, d))
+            if let phitex_defuse::FieldAt::Def(x, Some(d)) =
+                self.cx.read_at(f, phitex_defuse::At::AfterOwn(at))?
+                && after.is_none_or(|s| {
+                    s != d && self.cx.alive(s) && self.cx.alive(d) && self.cx.before(s, d)
+                })
             {
                 out.push((i, x));
             }
@@ -1706,7 +1800,12 @@ impl Run<'_, '_> {
     /// marker is then those, with what the text set since that fire
     /// ([`Run::text_params_since`]), or left `[tag]` (no change) where
     /// it set nothing; none: read where the piece is (the first page).
-    pub(crate) fn resolve_params_of(&mut self, pid: i64, raw: &mut [ValueId], text: Option<(i64, &mut Option<PageParams>)>) -> R<()> {
+    pub(crate) fn resolve_params_of(
+        &mut self,
+        pid: i64,
+        raw: &mut [ValueId],
+        text: Option<(i64, &mut Option<PageParams>)>,
+    ) -> R<()> {
         let reaching = text.is_none();
         let mut text = text;
         let v = self.v;
@@ -1715,7 +1814,10 @@ impl Run<'_, '_> {
         for x in raw.iter_mut() {
             // (a class's registers given in full, past the first page: the
             // builder's from here on, [`Run::ins_fold`])
-            if text.is_some() && nodes::tag(v, *x) == nodes::T_INS_PARAMS && list_of(v, *x).len() > 2 {
+            if text.is_some()
+                && nodes::tag(v, *x) == nodes::T_INS_PARAMS
+                && list_of(v, *x).len() > 2
+            {
                 let (n, c) = class_of(v, *x);
                 if let Some(f) = self.ins_fold.as_mut() {
                     crate::vprof::note_class(&mut f.1, n, c);
@@ -1790,14 +1892,17 @@ impl Run<'_, '_> {
         for x in items.iter_mut() {
             if let crate::vprof::PItem::InsParams(n, c @ None) = x {
                 let n = *n;
-                *c = Some(if let Some(&(_, k)) = own.classes.iter().find(|k| k.0 == n) {
-                    k
-                } else {
-                    let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
-                    let k = self.insert_class_at(n, at)?;
-                    own.classes.push((n, k));
-                    k
-                });
+                *c = Some(
+                    if let Some(&(_, k)) = own.classes.iter().find(|k| k.0 == n) {
+                        k
+                    } else {
+                        let at =
+                            phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
+                        let k = self.insert_class_at(n, at)?;
+                        own.classes.push((n, k));
+                        k
+                    },
+                );
             }
         }
         Ok(())
@@ -1860,7 +1965,13 @@ impl crate::vprof::Reaching for RunReaching<'_, '_, '_> {
 pub(crate) fn page_vers(lc: &LoopCarry, pieces: &[i64]) -> Vec<(i64, ValueId)> {
     let mut out: Vec<(i64, ValueId)> = pieces
         .iter()
-        .filter_map(|&p| lc.units.iter().rev().find(|u| u.pid == p).map(|u| (p, u.src)))
+        .filter_map(|&p| {
+            lc.units
+                .iter()
+                .rev()
+                .find(|u| u.pid == p)
+                .map(|u| (p, u.src))
+        })
         .collect();
     out.sort_unstable_by_key(|e| e.0);
     out

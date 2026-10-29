@@ -121,7 +121,12 @@ struct BB {
 
 impl BB {
     fn of(r: Rect) -> BB {
-        BB { xi: r.bl.x, yi: r.bl.y, xa: r.tr.x, ya: r.tr.y }
+        BB {
+            xi: r.bl.x,
+            yi: r.bl.y,
+            xa: r.tr.x,
+            ya: r.tr.y,
+        }
     }
 }
 
@@ -135,7 +140,12 @@ struct SB {
 
 impl SB {
     fn of(r: Rect) -> SB {
-        SB { si: r.bl.x, di: r.bl.y, sa: r.tr.x, da: r.tr.y }
+        SB {
+            si: r.bl.x,
+            di: r.bl.y,
+            sa: r.tr.x,
+            da: r.tr.y,
+        }
     }
 }
 
@@ -153,7 +163,10 @@ fn sdm(vi: f32, va: f32, mx: f32, my: f32, greater: bool) -> f32 {
 
 impl ShiftCollider {
     pub(crate) fn new() -> ShiftCollider {
-        ShiftCollider { target: NIL, ..ShiftCollider::default() }
+        ShiftCollider {
+            target: NIL,
+            ..ShiftCollider::default()
+        }
     }
 
     /// `initSlot`.
@@ -234,7 +247,18 @@ impl ShiftCollider {
 
     /// `addBox_slope`.
     #[allow(clippy::too_many_arguments)]
-    fn add_box_slope(&mut self, isx: bool, bx: &Rect, bb: BB, sb: SB, org: Position, weight: f32, m: f32, minright: bool, axis: usize) {
+    fn add_box_slope(
+        &mut self,
+        isx: bool,
+        bx: &Rect,
+        bb: BB,
+        sb: SB,
+        org: Position,
+        weight: f32,
+        m: f32,
+        minright: bool,
+        axis: usize,
+    ) {
         match axis {
             0 => {
                 if bx.bl.y < org.y + bb.ya && bx.tr.y > org.y + bb.yi && bx.width() > 0.0 {
@@ -263,7 +287,9 @@ impl ShiftCollider {
                             0.0,
                             0.0,
                             org.y,
-                            m * (a * a + sqr((if minright { bx.tr.y } else { bx.bl.y }) - 0.5 * (bb.yi + bb.ya))),
+                            m * (a * a
+                                + sqr((if minright { bx.tr.y } else { bx.bl.y })
+                                    - 0.5 * (bb.yi + bb.ya))),
                             false,
                         );
                     }
@@ -283,7 +309,9 @@ impl ShiftCollider {
                             0.0,
                             0.0,
                             org.x,
-                            m * (a * a + sqr((if minright { bx.tr.x } else { bx.bl.x }) - 0.5 * (bb.xi + bb.xa))),
+                            m * (a * a
+                                + sqr((if minright { bx.tr.x } else { bx.bl.x })
+                                    - 0.5 * (bb.xi + bb.xa))),
                             false,
                         );
                     } else {
@@ -303,7 +331,9 @@ impl ShiftCollider {
                 }
             }
             2 => {
-                if bx.bl.x - bx.tr.y < org.x - org.y + sb.da && bx.tr.x - bx.bl.y > org.x - org.y + sb.di {
+                if bx.bl.x - bx.tr.y < org.x - org.y + sb.da
+                    && bx.tr.x - bx.bl.y > org.x - org.y + sb.di
+                {
                     let d = org.x - org.y + 0.5 * (sb.di + sb.da);
                     let c = 0.5 * (sb.si + sb.sa);
                     let smax = gmin(2.0 * bx.tr.x - d, 2.0 * bx.tr.y + d);
@@ -317,11 +347,24 @@ impl ShiftCollider {
                     } else {
                         2.0 * (if minright { bx.tr.y } else { bx.bl.y }) + a
                     };
-                    self.ranges[2].weighted(true, smin - c, smax - c, weight / 2.0, a, m / 2.0, si, 0.0, 0.0, isx);
+                    self.ranges[2].weighted(
+                        true,
+                        smin - c,
+                        smax - c,
+                        weight / 2.0,
+                        a,
+                        m / 2.0,
+                        si,
+                        0.0,
+                        0.0,
+                        isx,
+                    );
                 }
             }
             3 => {
-                if bx.bl.x + bx.bl.y < org.x + org.y + sb.sa && bx.tr.x + bx.tr.y > org.x + org.y + sb.si {
+                if bx.bl.x + bx.bl.y < org.x + org.y + sb.sa
+                    && bx.tr.x + bx.tr.y > org.x + org.y + sb.si
+                {
                     let s = org.x + org.y + 0.5 * (sb.si + sb.sa);
                     let c = 0.5 * (sb.di + sb.da);
                     let dmax = gmin(2.0 * bx.tr.x - s, s - 2.0 * bx.bl.y);
@@ -335,7 +378,18 @@ impl ShiftCollider {
                     } else {
                         2.0 * (if minright { bx.tr.y } else { bx.bl.y }) + a
                     };
-                    self.ranges[3].weighted(true, dmin - c, dmax - c, weight / 2.0, a, m / 2.0, di, 0.0, 0.0, !isx);
+                    self.ranges[3].weighted(
+                        true,
+                        dmin - c,
+                        dmax - c,
+                        weight / 2.0,
+                        a,
+                        m / 2.0,
+                        di,
+                        0.0,
+                        0.0,
+                        !isx,
+                    );
                 }
             }
             _ => {}
@@ -419,13 +473,16 @@ impl ShiftCollider {
             let same_class = self.seq_prox_class == 0 && cslot.seq_class == self.seq_class;
             if same_cluster
                 && self.seq_class != 0
-                && (same_class || (self.seq_prox_class != 0 && cslot.seq_class == self.seq_prox_class))
+                && (same_class
+                    || (self.seq_prox_class != 0 && cslot.seq_class == self.seq_prox_class))
             {
                 order_flags = i32::from(self.seq_order);
             }
             if order_flags != 0
-                || (sx + bb.xa + self.margin >= self.limit.bl.x && sx + bb.xi - self.margin <= self.limit.tr.x)
-                || (sy + bb.ya + self.margin >= self.limit.bl.y && sy + bb.yi - self.margin <= self.limit.tr.y)
+                || (sx + bb.xa + self.margin >= self.limit.bl.x
+                    && sx + bb.xi - self.margin <= self.limit.tr.x)
+                || (sy + bb.ya + self.margin >= self.limit.bl.y
+                    && sy + bb.yi - self.margin <= self.limit.tr.y)
             {
                 let tx = self.curr_offset.x + self.curr_shift.x;
                 let ty = self.curr_offset.y + self.curr_shift.y;
@@ -449,8 +506,14 @@ impl ShiftCollider {
                     let co = self.curr_offset;
                     match i {
                         0 => {
-                            vmin = gmax(gmax(bb.xi - tbb.xa + sx, sb.di - tsb.da + ty + sd), sb.si - tsb.sa - ty + ss);
-                            vmax = gmin(gmin(bb.xa - tbb.xi + sx, sb.da - tsb.di + ty + sd), sb.sa - tsb.si - ty + ss);
+                            vmin = gmax(
+                                gmax(bb.xi - tbb.xa + sx, sb.di - tsb.da + ty + sd),
+                                sb.si - tsb.sa - ty + ss,
+                            );
+                            vmax = gmin(
+                                gmin(bb.xa - tbb.xi + sx, sb.da - tsb.di + ty + sd),
+                                sb.sa - tsb.si - ty + ss,
+                            );
                             otmin = tbb.yi + ty;
                             otmax = tbb.ya + ty;
                             omin = bb.yi + sy;
@@ -461,8 +524,14 @@ impl ShiftCollider {
                             lmargin = self.margin;
                         }
                         1 => {
-                            vmin = gmax(gmax(bb.yi - tbb.ya + sy, tsb.di - sb.da + tx - sd), sb.si - tsb.sa - tx + ss);
-                            vmax = gmin(gmin(bb.ya - tbb.yi + sy, tsb.da - sb.di + tx - sd), sb.sa - tsb.si - tx + ss);
+                            vmin = gmax(
+                                gmax(bb.yi - tbb.ya + sy, tsb.di - sb.da + tx - sd),
+                                sb.si - tsb.sa - tx + ss,
+                            );
+                            vmax = gmin(
+                                gmin(bb.ya - tbb.yi + sy, tsb.da - sb.di + tx - sd),
+                                sb.sa - tsb.si - tx + ss,
+                            );
                             otmin = tbb.xi + tx;
                             otmax = tbb.xa + tx;
                             omin = bb.xi + sx;
@@ -515,16 +584,52 @@ impl ShiftCollider {
                         let xpinf = l.tr.x + co.x + tbb.xa;
                         let ypinf = l.tr.y + co.y + tbb.ya;
                         let yminf = l.bl.y + co.y + tbb.yi;
-                        let r = |a: f32, b: f32, c: f32, d: f32| Rect::new(Position::new(a, b), Position::new(c, d));
+                        let r = |a: f32, b: f32, c: f32, d: f32| {
+                            Rect::new(Position::new(a, b), Position::new(c, d))
+                        };
                         match order_flags {
                             SEQ_ORDER_RIGHTUP => {
-                                let r1x = f32::from(cslot.seq_above_xoff) + 0.5 * (bb.xi + bb.xa) + sx;
-                                let r3x = f32::from(cslot.seq_below_xlim) + bb.xa + sx + 0.5 * (tbb.xa - tbb.xi);
+                                let r1x =
+                                    f32::from(cslot.seq_above_xoff) + 0.5 * (bb.xi + bb.xa) + sx;
+                                let r3x = f32::from(cslot.seq_below_xlim)
+                                    + bb.xa
+                                    + sx
+                                    + 0.5 * (tbb.xa - tbb.xi);
                                 let r2y = 0.5 * (bb.yi + bb.ya) + sy;
-                                self.add_box_slope(true, &r(xminf, r2y, r1x, ypinf), tbb, tsb, org, 0.0, seq_above_wt, true, i);
+                                self.add_box_slope(
+                                    true,
+                                    &r(xminf, r2y, r1x, ypinf),
+                                    tbb,
+                                    tsb,
+                                    org,
+                                    0.0,
+                                    seq_above_wt,
+                                    true,
+                                    i,
+                                );
                                 self.remove_box(&r(xminf, yminf, r3x, r2y), tbb, tsb, org, i);
-                                self.add_box_slope(true, &r(r3x, yminf, xpinf, r2y - valign_ht), tbb, tsb, org, seq_below_wt, 0.0, true, i);
-                                self.add_box_slope(false, &r(sx + bb.xi, r2y, xpinf, r2y + valign_ht), tbb, tsb, org, 0.0, seq_valign_wt, true, i);
+                                self.add_box_slope(
+                                    true,
+                                    &r(r3x, yminf, xpinf, r2y - valign_ht),
+                                    tbb,
+                                    tsb,
+                                    org,
+                                    seq_below_wt,
+                                    0.0,
+                                    true,
+                                    i,
+                                );
+                                self.add_box_slope(
+                                    false,
+                                    &r(sx + bb.xi, r2y, xpinf, r2y + valign_ht),
+                                    tbb,
+                                    tsb,
+                                    org,
+                                    0.0,
+                                    seq_valign_wt,
+                                    true,
+                                    i,
+                                );
                                 self.add_box_slope(
                                     false,
                                     &r(sx + bb.xi, r2y - valign_ht, xpinf, r2y),
@@ -538,13 +643,45 @@ impl ShiftCollider {
                                 );
                             }
                             SEQ_ORDER_LEFTDOWN => {
-                                let r1x = 0.5 * (bb.xi + bb.xa) + f32::from(cslot.seq_above_xoff) + sx;
-                                let r3x = bb.xi - f32::from(cslot.seq_below_xlim) + sx - 0.5 * (tbb.xa - tbb.xi);
+                                let r1x =
+                                    0.5 * (bb.xi + bb.xa) + f32::from(cslot.seq_above_xoff) + sx;
+                                let r3x = bb.xi - f32::from(cslot.seq_below_xlim) + sx
+                                    - 0.5 * (tbb.xa - tbb.xi);
                                 let r2y = 0.5 * (bb.yi + bb.ya) + sy;
-                                self.add_box_slope(true, &r(r1x, yminf, xpinf, r2y), tbb, tsb, org, 0.0, seq_above_wt, false, i);
+                                self.add_box_slope(
+                                    true,
+                                    &r(r1x, yminf, xpinf, r2y),
+                                    tbb,
+                                    tsb,
+                                    org,
+                                    0.0,
+                                    seq_above_wt,
+                                    false,
+                                    i,
+                                );
                                 self.remove_box(&r(r3x, r2y, xpinf, ypinf), tbb, tsb, org, i);
-                                self.add_box_slope(true, &r(xminf, r2y - valign_ht, r3x, ypinf), tbb, tsb, org, seq_below_wt, 0.0, false, i);
-                                self.add_box_slope(false, &r(xminf, r2y, sx + bb.xa, r2y + valign_ht), tbb, tsb, org, 0.0, seq_valign_wt, true, i);
+                                self.add_box_slope(
+                                    true,
+                                    &r(xminf, r2y - valign_ht, r3x, ypinf),
+                                    tbb,
+                                    tsb,
+                                    org,
+                                    seq_below_wt,
+                                    0.0,
+                                    false,
+                                    i,
+                                );
+                                self.add_box_slope(
+                                    false,
+                                    &r(xminf, r2y, sx + bb.xa, r2y + valign_ht),
+                                    tbb,
+                                    tsb,
+                                    org,
+                                    0.0,
+                                    seq_valign_wt,
+                                    true,
+                                    i,
+                                );
                                 self.add_box_slope(
                                     false,
                                     &r(xminf, r2y - valign_ht, sx + bb.xa, r2y),
@@ -558,14 +695,31 @@ impl ShiftCollider {
                                 );
                             }
                             SEQ_ORDER_NOABOVE => {
-                                self.remove_box(&r(bb.xi - tbb.xa + sx, sy + bb.ya, bb.xa - tbb.xi + sx, ypinf), tbb, tsb, org, i);
+                                self.remove_box(
+                                    &r(bb.xi - tbb.xa + sx, sy + bb.ya, bb.xa - tbb.xi + sx, ypinf),
+                                    tbb,
+                                    tsb,
+                                    org,
+                                    i,
+                                );
                             }
                             SEQ_ORDER_NOBELOW => {
-                                self.remove_box(&r(bb.xi - tbb.xa + sx, yminf, bb.xa - tbb.xi + sx, sy + bb.yi), tbb, tsb, org, i);
+                                self.remove_box(
+                                    &r(bb.xi - tbb.xa + sx, yminf, bb.xa - tbb.xi + sx, sy + bb.yi),
+                                    tbb,
+                                    tsb,
+                                    org,
+                                    i,
+                                );
                             }
                             SEQ_ORDER_NOLEFT => {
                                 self.remove_box(
-                                    &r(xminf, bb.yi - tbb.ya + sy, bb.xi - tbb.xa + sx, bb.ya - tbb.yi + sy),
+                                    &r(
+                                        xminf,
+                                        bb.yi - tbb.ya + sy,
+                                        bb.xi - tbb.xa + sx,
+                                        bb.ya - tbb.yi + sy,
+                                    ),
                                     tbb,
                                     tsb,
                                     org,
@@ -574,7 +728,12 @@ impl ShiftCollider {
                             }
                             SEQ_ORDER_NORIGHT => {
                                 self.remove_box(
-                                    &r(bb.xa - tbb.xi + sx, bb.yi - tbb.ya + sy, xpinf, bb.ya - tbb.yi + sy),
+                                    &r(
+                                        bb.xa - tbb.xi + sx,
+                                        bb.yi - tbb.ya + sy,
+                                        xpinf,
+                                        bb.ya - tbb.yi + sy,
+                                    ),
                                     tbb,
                                     tsb,
                                     org,
@@ -584,7 +743,11 @@ impl ShiftCollider {
                             _ => {}
                         }
                     }
-                    if vmax < cmin - lmargin || vmin > cmax + lmargin || omax < otmin - lmargin || omin > otmax + lmargin {
+                    if vmax < cmin - lmargin
+                        || vmin > cmax + lmargin
+                        || omax < otmin - lmargin
+                        || omin > otmax + lmargin
+                    {
                         continue;
                     }
                     let numsub = gc.num_sub_bounds(gid);
@@ -597,24 +760,42 @@ impl ShiftCollider {
                             let (vmin, vmax, omin, omax);
                             match i {
                                 0 => {
-                                    vmin = gmax(gmax(sbb.xi - tbb.xa + sx, ssb.di - tsb.da + sd + ty), ssb.si - tsb.sa + ss - ty);
-                                    vmax = gmin(gmin(sbb.xa - tbb.xi + sx, ssb.da - tsb.di + sd + ty), ssb.sa - tsb.si + ss - ty);
+                                    vmin = gmax(
+                                        gmax(sbb.xi - tbb.xa + sx, ssb.di - tsb.da + sd + ty),
+                                        ssb.si - tsb.sa + ss - ty,
+                                    );
+                                    vmax = gmin(
+                                        gmin(sbb.xa - tbb.xi + sx, ssb.da - tsb.di + sd + ty),
+                                        ssb.sa - tsb.si + ss - ty,
+                                    );
                                     omin = sbb.yi + sy;
                                     omax = sbb.ya + sy;
                                 }
                                 1 => {
-                                    vmin = gmax(gmax(sbb.yi - tbb.ya + sy, tsb.di - ssb.da - sd + tx), ssb.si - tsb.sa + ss - tx);
-                                    vmax = gmin(gmin(sbb.ya - tbb.yi + sy, tsb.da - ssb.di - sd + tx), ssb.sa - tsb.si + ss - tx);
+                                    vmin = gmax(
+                                        gmax(sbb.yi - tbb.ya + sy, tsb.di - ssb.da - sd + tx),
+                                        ssb.si - tsb.sa + ss - tx,
+                                    );
+                                    vmax = gmin(
+                                        gmin(sbb.ya - tbb.yi + sy, tsb.da - ssb.di - sd + tx),
+                                        ssb.sa - tsb.si + ss - tx,
+                                    );
                                     omin = sbb.xi + sx;
                                     omax = sbb.xa + sx;
                                 }
                                 2 => {
                                     vmin = gmax(
-                                        gmax(ssb.si - tsb.sa + ss, 2.0 * (sbb.yi - tbb.ya + sy) + td),
+                                        gmax(
+                                            ssb.si - tsb.sa + ss,
+                                            2.0 * (sbb.yi - tbb.ya + sy) + td,
+                                        ),
                                         2.0 * (sbb.xi - tbb.xa + sx) - td,
                                     );
                                     vmax = gmin(
-                                        gmin(ssb.sa - tsb.si + ss, 2.0 * (sbb.ya - tbb.yi + sy) + td),
+                                        gmin(
+                                            ssb.sa - tsb.si + ss,
+                                            2.0 * (sbb.ya - tbb.yi + sy) + td,
+                                        ),
                                         2.0 * (sbb.xa - tbb.xi + sx) - td,
                                     );
                                     omin = ssb.di + sd;
@@ -622,11 +803,17 @@ impl ShiftCollider {
                                 }
                                 _ => {
                                     vmin = gmax(
-                                        gmax(ssb.di - tsb.da + sd, 2.0 * (sbb.xi - tbb.xa + sx) - ts),
+                                        gmax(
+                                            ssb.di - tsb.da + sd,
+                                            2.0 * (sbb.xi - tbb.xa + sx) - ts,
+                                        ),
                                         -2.0 * (sbb.ya - tbb.yi + sy) + ts,
                                     );
                                     vmax = gmin(
-                                        gmin(ssb.da - tsb.di + sd, 2.0 * (sbb.xa - tbb.xi + sx) - ts),
+                                        gmin(
+                                            ssb.da - tsb.di + sd,
+                                            2.0 * (sbb.xa - tbb.xi + sx) - ts,
+                                        ),
                                         -2.0 * (sbb.yi - tbb.ya + sy) + ts,
                                     );
                                     omin = ssb.si + ss;
@@ -664,7 +851,16 @@ impl ShiftCollider {
             let org = seg.s(slot).position + cslot.excl_offset;
             seg.sm(excl).set_origin(org);
             let info = SlotCollision::from_slot(seg, excl).unwrap_or_default();
-            res &= self.merge_slot(seg, excl, &info, curr_shift, is_after, same_cluster, &mut is_col, true);
+            res &= self.merge_slot(
+                seg,
+                excl,
+                &info,
+                curr_shift,
+                is_after,
+                same_cluster,
+                &mut is_col,
+                true,
+            );
             seg.free_slot(excl);
         }
         *has_col |= is_col;
@@ -673,12 +869,44 @@ impl ShiftCollider {
 
     /// The weighting (or exclusion) of an overlap along axis `i`.
     #[allow(clippy::too_many_arguments)]
-    fn weigh(&mut self, i: i32, vmin: f32, vmax: f32, omin: f32, omax: f32, otmin: f32, otmax: f32, lmargin: f32) {
+    fn weigh(
+        &mut self,
+        i: i32,
+        vmin: f32,
+        vmax: f32,
+        omin: f32,
+        omax: f32,
+        otmin: f32,
+        otmax: f32,
+        lmargin: f32,
+    ) {
         let r = &mut self.ranges[i as usize];
         if omin > otmax {
-            r.weighted_axis(i, vmin - lmargin, vmax + lmargin, 0.0, 0.0, 0.0, 0.0, 0.0, sqr(lmargin - omin + otmax) * self.margin_wt, false);
+            r.weighted_axis(
+                i,
+                vmin - lmargin,
+                vmax + lmargin,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                sqr(lmargin - omin + otmax) * self.margin_wt,
+                false,
+            );
         } else if omax < otmin {
-            r.weighted_axis(i, vmin - lmargin, vmax + lmargin, 0.0, 0.0, 0.0, 0.0, 0.0, sqr(lmargin - otmin + omax) * self.margin_wt, false);
+            r.weighted_axis(
+                i,
+                vmin - lmargin,
+                vmax + lmargin,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                sqr(lmargin - otmin + omax) * self.margin_wt,
+                false,
+            );
         } else {
             r.exclude_with_margins(vmin, vmax, i);
         }
@@ -704,8 +932,14 @@ impl ShiftCollider {
                 let testp = match i {
                     0 => Position::new(best_pos, cs.y),
                     1 => Position::new(cs.x, best_pos),
-                    2 => Position::new(0.5 * (cs.x - cs.y + best_pos), 0.5 * (cs.y - cs.x + best_pos)),
-                    _ => Position::new(0.5 * (cs.x + cs.y + best_pos), 0.5 * (cs.x + cs.y - best_pos)),
+                    2 => Position::new(
+                        0.5 * (cs.x - cs.y + best_pos),
+                        0.5 * (cs.y - cs.x + best_pos),
+                    ),
+                    _ => Position::new(
+                        0.5 * (cs.x + cs.y + best_pos),
+                        0.5 * (cs.x + cs.y - best_pos),
+                    ),
                 };
                 if best_cost < total_cost - 0.01 {
                     total_cost = best_cost;
@@ -742,7 +976,15 @@ fn localmin(al: f32, au: f32, bl: f32, bu: f32, x: f32) -> f32 {
 }
 
 /// `get_edge`: the glyph's edge at height `y`, slant boxes included.
-fn get_edge(seg: &Segment, s: u32, shift: Position, y: f32, width: f32, margin: f32, is_right: bool) -> f32 {
+fn get_edge(
+    seg: &Segment,
+    s: u32,
+    shift: Position,
+    y: f32,
+    width: f32,
+    margin: f32,
+    is_right: bool,
+) -> f32 {
     let gc = &seg.face.glyphs;
     let gid = seg.s(s).glyphid;
     let o = seg.s(s).position;
@@ -762,7 +1004,13 @@ fn get_edge(seg: &Segment, s: u32, shift: Position, y: f32, width: f32, margin: 
                 if x > res {
                     let td = sx - sy + ssb.da + margin + y;
                     let ts = sx + sy + ssb.sa + margin - y;
-                    x = localmax(td - width / 2.0, td + width / 2.0, ts - width / 2.0, ts + width / 2.0, x);
+                    x = localmax(
+                        td - width / 2.0,
+                        td + width / 2.0,
+                        ts - width / 2.0,
+                        ts + width / 2.0,
+                        x,
+                    );
                     if x > res {
                         res = x;
                     }
@@ -772,7 +1020,13 @@ fn get_edge(seg: &Segment, s: u32, shift: Position, y: f32, width: f32, margin: 
                 if x < res {
                     let td = sx - sy + ssb.di - margin + y;
                     let ts = sx + sy + ssb.si - margin - y;
-                    x = localmin(td - width / 2.0, td + width / 2.0, ts - width / 2.0, ts + width / 2.0, x);
+                    x = localmin(
+                        td - width / 2.0,
+                        td + width / 2.0,
+                        ts - width / 2.0,
+                        ts + width / 2.0,
+                        x,
+                    );
                     if x < res {
                         res = x;
                     }
@@ -936,7 +1190,14 @@ impl KernCollider {
     }
 
     /// `mergeSlot`.
-    pub(crate) fn merge_slot(&mut self, seg: &Segment, slot: u32, curr_shift: Position, curr_space: f32, dir: i32) -> bool {
+    pub(crate) fn merge_slot(
+        &mut self,
+        seg: &Segment,
+        slot: u32,
+        curr_shift: Position,
+        curr_space: f32,
+        dir: i32,
+    ) -> bool {
         let rtl = (dir & 1) * 2 - 1;
         let gid = seg.s(slot).glyphid;
         if !seg.face.glyphs.check(gid) {
@@ -951,8 +1212,11 @@ impl KernCollider {
             return false;
         }
         let sy = o.y + curr_shift.y;
-        let smin = 1i32.max(((bb.bl.y + (1.0 - self.miny + sy)) / self.slice_width + 1.0) as i32) - 1;
-        let smax = (self.edges.len() as i32 - 2).min(((bb.tr.y + (1.0 - self.miny + sy)) / self.slice_width + 1.0) as i32) + 1;
+        let smin =
+            1i32.max(((bb.bl.y + (1.0 - self.miny + sy)) / self.slice_width + 1.0) as i32) - 1;
+        let smax = (self.edges.len() as i32 - 2)
+            .min(((bb.tr.y + (1.0 - self.miny + sy)) / self.slice_width + 1.0) as i32)
+            + 1;
         if smin > smax {
             return false;
         }
@@ -965,7 +1229,8 @@ impl KernCollider {
             }
             if !self.hit || x > here - self.mingap - curr_space {
                 let y = self.miny - 1.0 + (i as f32 + 0.5) * self.slice_width;
-                let m = get_edge(seg, slot, curr_shift, y, self.slice_width, 0.0, rtl > 0) * rtlf + 2.0 * curr_space;
+                let m = get_edge(seg, slot, curr_shift, y, self.slice_width, 0.0, rtl > 0) * rtlf
+                    + 2.0 * curr_space;
                 if m < -8e37 {
                     continue;
                 }
@@ -980,7 +1245,10 @@ impl KernCollider {
             }
         }
         if nooverlap {
-            self.mingap = gmax(self.mingap, self.xbound - rtlf * (curr_space + self.margin + x));
+            self.mingap = gmax(
+                self.mingap,
+                self.xbound - rtlf * (curr_space + self.margin + x),
+            );
         }
         if collides && !nooverlap {
             self.hit = true;
@@ -991,7 +1259,10 @@ impl KernCollider {
     /// `resolve`.
     pub(crate) fn resolve(&self, dir: i32) -> Position {
         let needed = (1 - 2 * (dir & 1)) as f32 * self.mingap;
-        let result = gmin(self.limit.tr.x - self.offset_prev.x, gmax(needed, self.limit.bl.x - self.offset_prev.x));
+        let result = gmin(
+            self.limit.tr.x - self.offset_prev.x,
+            gmax(needed, self.limit.bl.x - self.offset_prev.x),
+        );
         Position::new(result, 0.0)
     }
 

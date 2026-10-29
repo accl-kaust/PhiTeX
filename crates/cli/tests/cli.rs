@@ -1927,7 +1927,10 @@ fn watch_save_by_rename_builds_the_new_text() {
     std::fs::remove_file(&backup).expect("the backup removed");
     let ev = until(&mut lines, "build", &2.into(), &mut seen);
     assert_eq!(ev["ok"], true, "{ev}");
-    assert_eq!(ev["absorbed"], 0, "the build began before the save ended: {ev}");
+    assert_eq!(
+        ev["absorbed"], 0,
+        "the build began before the save ended: {ev}"
+    );
     assert_eq!(ev["edit"], format!("story.tex:{line}"), "{ev}");
     std::thread::sleep(Duration::from_millis(700));
     if let Some(mut i) = child.stdin.take() {
@@ -1957,9 +1960,17 @@ fn lualatex_refused() {
     .expect("the document");
     let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
     for (args, file, says) in [
-        (&["build", "--engine", "lualatex", "a.tex"][..], "a.pdf", "not supported"),
+        (
+            &["build", "--engine", "lualatex", "a.tex"][..],
+            "a.pdf",
+            "not supported",
+        ),
         (&["build", "b.tex"][..], "b.pdf", "not supported"),
-        (&["build", "c.tex"][..], "c.pdf", "needs lualatex (it loads luacode)"),
+        (
+            &["build", "c.tex"][..],
+            "c.pdf",
+            "needs lualatex (it loads luacode)",
+        ),
     ] {
         let out = command(bin, &dir).args(args).output().expect("phitex runs");
         let errs = String::from_utf8_lossy(&out.stderr);
@@ -2484,7 +2495,8 @@ fn xelatex_fontspec() {
     );
     let log = chars(&std::fs::read(dir.join("fontspec.log")).unwrap_or_default());
     assert!(out.status.success(), "fontspec: phitex failed:\n{log}");
-    let want = std::fs::read(fixtures().join("xetex/oracle/docs/fontspec.pdf")).expect("the oracle");
+    let want =
+        std::fs::read(fixtures().join("xetex/oracle/docs/fontspec.pdf")).expect("the oracle");
     let got = std::fs::read(dir.join("fontspec.pdf")).unwrap_or_default();
     assert!(
         got == want,
@@ -2537,7 +2549,10 @@ fn xelatex_watch_compacts_a_series() {
         &|t| t.replacen("\\end{document}", &format!("{pages}\\end{{document}}"), 1),
         &|t| t.replacen("First item", "Erste Ítem", 1),
         &|t| t.replacen("quick brown foxes", "lazy dogs sleep", 1),
-        &|t| t.replacen(pages, "", 1).replacen("lazy dogs sleep", "quick brown foxes", 1),
+        &|t| {
+            t.replacen(pages, "", 1)
+                .replacen("lazy dogs sleep", "quick brown foxes", 1)
+        },
         &|t| t.replacen("Second", "Zweite", 1),
         &|t| t.replacen("Palatino words", "Pagella text", 1),
     ];
@@ -2604,7 +2619,16 @@ fn xelatex_watch_edit() {
     let dir = scratch("xelatex-watch");
     std::fs::write(dir.join("fontspec.tex"), &text).expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--json", "--no-view", "--engine", "xelatex", "-j", "8", "fontspec.tex"])
+        .args([
+            "watch",
+            "--json",
+            "--no-view",
+            "--engine",
+            "xelatex",
+            "-j",
+            "8",
+            "fontspec.tex",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -2616,7 +2640,10 @@ fn xelatex_watch_edit() {
     let cold = until(&mut lines, "build", &1.into(), &mut seen);
     eprintln!("{cold}");
     let first = std::fs::read(dir.join("fontspec.pdf")).expect("the watch's first PDF");
-    assert!(first.starts_with(b"%PDF"), "the watch's first PDF is not a PDF");
+    assert!(
+        first.starts_with(b"%PDF"),
+        "the watch's first PDF is not a PDF"
+    );
     let edited = text.replacen("Pagella text", "Palatino words", 1);
     assert_ne!(edited, text);
     std::thread::sleep(Duration::from_millis(50));

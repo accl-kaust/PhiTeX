@@ -10,7 +10,10 @@ use std::fmt::Write as _;
 use phitex_tex::Options;
 
 fn runs_of_report(r: &phitex_tex::Report, op: &str) -> u64 {
-    r.runs_by_op.iter().find(|(o, _)| *o == op).map_or(0, |(_, n)| *n)
+    r.runs_by_op
+        .iter()
+        .find(|(o, _)| *o == op)
+        .map_or(0, |(_, n)| *n)
 }
 
 /// `n` paragraphs of four to five lines, with `mid` as a paragraph of
@@ -23,7 +26,10 @@ fn doc(n: usize, k: usize, mid: &str) -> String {
             s.push_str("\n\n");
         }
         for _ in 0..3 {
-            let _ = write!(s, "Paragraph {i} of the document, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches. ");
+            let _ = write!(
+                s,
+                "Paragraph {i} of the document, long enough to make a few lines when set in the plain format's ten point roman over a text width of six and a half inches. "
+            );
         }
         s.push_str("\n\n");
     }
@@ -42,7 +48,11 @@ fn build8(name: &str, src: &str) -> phitex_tex::Build {
 
 fn cold(name: &str, src: &str) -> Vec<u8> {
     let dir = common::scratch(&format!("state-{name}-cold"));
-    let b = common::build(common::options("./d.tex", "d", "", &dir), Some(&common::plain()), src);
+    let b = common::build(
+        common::options("./d.tex", "d", "", &dir),
+        Some(&common::plain()),
+        src,
+    );
     b.output().0
 }
 
@@ -55,22 +65,42 @@ fn a_catcode_change_re_asks_only_the_readers_of_that_catcode() {
     let src = doc(120, 40, mid).replacen("Paragraph 80 of", "\\a@b\\ Paragraph 80 of", 1);
     let mut b = build8("cat", &src);
     assert_eq!(b.output().0, cold("cat", &src));
-    assert_eq!(b.stats.refuted_by("cattab"), 0, "no table field is read: {:?}", b.stats.refuted_by_field);
+    assert_eq!(
+        b.stats.refuted_by("cattab"),
+        0,
+        "no table field is read: {:?}",
+        b.stats.refuted_by_field
+    );
     let edited = src.replacen("\\catcode`\\@=11 ", "\\catcode`\\@=11 \\catcode`\\_=11 ", 1);
     let r = common::rebuild(&mut b, &edited);
     assert_eq!(b.output().0, cold("cat-edited", &edited));
-    assert!(runs_of_report(&r, "exec") + runs_of_report(&r, "resume") <= 2, "the setter alone, no reader of `_`: {r:?}");
+    assert!(
+        runs_of_report(&r, "exec") + runs_of_report(&r, "resume") <= 2,
+        "the setter alone, no reader of `_`: {r:?}"
+    );
 }
 
 /// The output routine sets a parameter to the value it already had
 /// (`\parskip` as plain's `\output` leaves it): no reader is re-asked.
 #[test]
 fn a_parameter_set_by_the_output_routine_to_its_old_value_re_asks_nobody() {
-    let src = format!("\\output={{\\parskip=0pt plus 1pt\\global\\setbox255=\\box255 \\shipout\\box255 \\advancepageno}}\n{}", doc(120, 60, "A paragraph in the middle."));
+    let src = format!(
+        "\\output={{\\parskip=0pt plus 1pt\\global\\setbox255=\\box255 \\shipout\\box255 \\advancepageno}}\n{}",
+        doc(120, 60, "A paragraph in the middle.")
+    );
     let b = build8("parset", &src);
     assert_eq!(b.output().0, cold("parset", &src));
-    assert_eq!(b.stats.refuted_by("param:parskip"), 0, "{:?}", b.stats.refuted_by_field);
-    assert_eq!(b.definitions_by_op("finish", "param:parskip"), 0, "an equal write is no definition");
+    assert_eq!(
+        b.stats.refuted_by("param:parskip"),
+        0,
+        "{:?}",
+        b.stats.refuted_by_field
+    );
+    assert_eq!(
+        b.definitions_by_op("finish", "param:parskip"),
+        0,
+        "an equal write is no definition"
+    );
 }
 
 /// A global restore of a value the run read publishes nothing, and so
@@ -81,8 +111,16 @@ fn a_global_restore_of_a_read_value_publishes_nothing() {
     let src = doc(120, 60, mid);
     let b = build8("restore", &src);
     assert_eq!(b.output().0, cold("restore", &src));
-    assert_eq!(b.definitions_by_op("exec", "count:0") + b.definitions_by_op("resume", "count:0"), 0);
-    assert_eq!(b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"), 0, "{:?}", b.stats.refuted_by_field);
+    assert_eq!(
+        b.definitions_by_op("exec", "count:0") + b.definitions_by_op("resume", "count:0"),
+        0
+    );
+    assert_eq!(
+        b.stats.refuted_by_op("exec", "count:0") + b.stats.refuted_by_op("resume", "count:0"),
+        0,
+        "{:?}",
+        b.stats.refuted_by_field
+    );
 }
 
 /// A local write inside a group the run closes publishes nothing; a
@@ -90,7 +128,11 @@ fn a_global_restore_of_a_read_value_publishes_nothing() {
 #[test]
 fn a_local_write_in_a_closed_group_publishes_nothing() {
     let mid = "{\\count5=7 \\def\\tmp{seven}Paragraph with a group that sets a register and a macro locally.}";
-    let src = doc(120, 60, mid).replacen("Paragraph 100 of", "Register five is \\number\\count5. Paragraph 100 of", 1);
+    let src = doc(120, 60, mid).replacen(
+        "Paragraph 100 of",
+        "Register five is \\number\\count5. Paragraph 100 of",
+        1,
+    );
     let b = build8("closed", &src);
     assert_eq!(b.output().0, cold("closed", &src));
     assert_eq!(b.definitions_by_op("exec", "count:5"), 0);
@@ -102,25 +144,56 @@ fn a_local_write_in_a_closed_group_publishes_nothing() {
 /// paragraphs inside the group only.
 #[test]
 fn a_local_write_in_a_group_left_open_publishes_at_its_depth() {
-    let src = doc(120, 40, "\\begingroup\\count5=7 Paragraph that opens a group and sets register five in it.")
-        .replacen("Paragraph 60 of", "Inside the group register five is \\number\\count5. Paragraph 60 of", 1)
-        .replacen("Paragraph 80 of", "\\endgroup Paragraph 80 of", 1)
-        .replacen("Paragraph 100 of", "Outside the group register five is \\number\\count5. Paragraph 100 of", 1);
+    let src = doc(
+        120,
+        40,
+        "\\begingroup\\count5=7 Paragraph that opens a group and sets register five in it.",
+    )
+    .replacen(
+        "Paragraph 60 of",
+        "Inside the group register five is \\number\\count5. Paragraph 60 of",
+        1,
+    )
+    .replacen("Paragraph 80 of", "\\endgroup Paragraph 80 of", 1)
+    .replacen(
+        "Paragraph 100 of",
+        "Outside the group register five is \\number\\count5. Paragraph 100 of",
+        1,
+    );
     let b = build8("open", &src);
     assert_eq!(b.output().0, cold("open", &src));
-    assert_eq!(b.definitions_by_op("exec", "count:5"), 1, "one definition, local to the open group");
+    assert_eq!(
+        b.definitions_by_op("exec", "count:5"),
+        1,
+        "one definition, local to the open group"
+    );
 }
 
 /// `\advance` of a register the paragraph never reads is a relation:
 /// the next reader gets it without the paragraph defining a value.
 #[test]
 fn a_counter_step_without_a_read_is_a_relation() {
-    let src = doc(120, 40, "\\global\\advance\\count7 by 1 Paragraph that steps register seven.")
-        .replacen("Paragraph 80 of", "Register seven is \\number\\count7. Paragraph 80 of", 1);
+    let src = doc(
+        120,
+        40,
+        "\\global\\advance\\count7 by 1 Paragraph that steps register seven.",
+    )
+    .replacen(
+        "Paragraph 80 of",
+        "Register seven is \\number\\count7. Paragraph 80 of",
+        1,
+    );
     let b = build8("rel", &src);
     assert_eq!(b.output().0, cold("rel", &src));
-    assert_eq!(b.definitions_by_op("exec", "count:7"), 0, "a relation, not a value");
-    assert!(b.stats.relations_by_op("exec", "count:7") >= 1, "the step is filed as a relation");
+    assert_eq!(
+        b.definitions_by_op("exec", "count:7"),
+        0,
+        "a relation, not a value"
+    );
+    assert!(
+        b.stats.relations_by_op("exec", "count:7") >= 1,
+        "the step is filed as a relation"
+    );
 }
 
 /// A macro a finisher defines with the page number in it (a running
@@ -129,10 +202,21 @@ fn a_counter_step_without_a_read_is_a_relation() {
 /// confirmed.
 #[test]
 fn a_page_dependent_macro_is_predicted_from_the_page_number() {
-    let src = format!("\\output={{\\xdef\\lastfolio{{page \\number\\count0}}\\global\\setbox255=\\box255 \\shipout\\box255 \\advancepageno}}\n{}", doc(160, 80, "The last folio was \\lastfolio. A paragraph in the middle."));
+    let src = format!(
+        "\\output={{\\xdef\\lastfolio{{page \\number\\count0}}\\global\\setbox255=\\box255 \\shipout\\box255 \\advancepageno}}\n{}",
+        doc(
+            160,
+            80,
+            "The last folio was \\lastfolio. A paragraph in the middle."
+        )
+    );
     let b = build8("template", &src);
     assert_eq!(b.output().0, cold("template", &src));
-    assert!(b.stats.predictions_refuted_by("cs:lastfolio") <= b.pages().len() as u64, "a miss at most once per page, not once per macro: {:?}", b.stats.predictions_refuted_by_field);
+    assert!(
+        b.stats.predictions_refuted_by("cs:lastfolio") <= b.pages().len() as u64,
+        "a miss at most once per page, not once per macro: {:?}",
+        b.stats.predictions_refuted_by_field
+    );
 }
 
 /// A paragraph that uses three catcodes and two parameters records
@@ -143,7 +227,10 @@ fn a_run_records_a_read_only_of_the_items_it_used() {
     let b = build8("used", &src);
     assert_eq!(b.output().0, cold("used", &src));
     let reads = b.reads_by_op("exec", "cat:");
-    assert!(reads > 0 && reads < 40 * 20, "per item used, not per table: {reads}");
+    assert!(
+        reads > 0 && reads < 40 * 20,
+        "per item used, not per table: {reads}"
+    );
     assert_eq!(b.reads_by_op("exec", "cattab"), 0);
 }
 
@@ -169,10 +256,20 @@ fn the_state_fixtures_are_byte_identical() {
     for (name, plain) in set {
         let want = std::fs::read(dir.join(format!("{name}.dvi"))).expect("the oracle");
         let src = common::read(&dir.join(format!("{name}.tex")));
-        let opts = common::options(&format!("./{name}.tex"), name, &common::dvi_comment(&want), &dir);
+        let opts = common::options(
+            &format!("./{name}.tex"),
+            name,
+            &common::dvi_comment(&want),
+            &dir,
+        );
         let prelude = plain.then(common::plain);
         let b = common::build(opts, prelude.as_deref(), &src);
         let (dvi, log) = b.output();
-        assert_eq!(dvi, want, "{name}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
+        assert_eq!(
+            dvi,
+            want,
+            "{name}: DVI differs; log tail:\n{}",
+            common::log_excerpt(&log)
+        );
     }
 }

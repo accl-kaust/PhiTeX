@@ -46,7 +46,10 @@ impl Map {
     pub(crate) const ID: Map = Map { keep: true, add: 0 };
     #[allow(dead_code)]
     pub(crate) fn set(c: i32) -> Map {
-        Map { keep: false, add: c }
+        Map {
+            keep: false,
+            add: c,
+        }
     }
     pub(crate) fn add(c: i32) -> Map {
         Map { keep: true, add: c }
@@ -54,10 +57,21 @@ impl Map {
     /// This map, then `next`.
     #[must_use]
     pub(crate) fn then(self, next: Map) -> Map {
-        if next.keep { Map { keep: self.keep, add: self.add.wrapping_add(next.add) } } else { next }
+        if next.keep {
+            Map {
+                keep: self.keep,
+                add: self.add.wrapping_add(next.add),
+            }
+        } else {
+            next
+        }
     }
     pub(crate) fn apply(self, x: i32) -> i32 {
-        if self.keep { x.wrapping_add(self.add) } else { self.add }
+        if self.keep {
+            x.wrapping_add(self.add)
+        } else {
+            self.add
+        }
     }
 }
 
@@ -130,7 +144,9 @@ impl Family {
     /// The family a location belongs to; `None` for a state cell with a
     /// fixed name and for the spill.
     pub(crate) fn of(loc: Loc) -> Option<Family> {
-        use crate::fields::{BOX0, CAT0, CODE0, FAM0, FONT0, MEAN_ACTIVE, MEAN_BASE, REG0, STATIC0};
+        use crate::fields::{
+            BOX0, CAT0, CODE0, FAM0, FONT0, MEAN_ACTIVE, MEAN_BASE, REG0, STATIC0,
+        };
         let l = loc as usize;
         if loc & SPILL != 0 {
             return None;
@@ -140,7 +156,13 @@ impl Family {
         } else if l < REG0 {
             Family::Cat
         } else if l < CODE0 {
-            [Family::Count, Family::Dimen, Family::Skip, Family::MuSkip, Family::Toks][(l - REG0) / 256]
+            [
+                Family::Count,
+                Family::Dimen,
+                Family::Skip,
+                Family::MuSkip,
+                Family::Toks,
+            ][(l - REG0) / 256]
         } else if l < BOX0 {
             [Family::Lc, Family::Uc, Family::Sf, Family::Mc, Family::Dc][(l - CODE0) / 256]
         } else if l < FAM0 {
@@ -521,7 +543,9 @@ impl Clone for State {
             numbered: self.numbered.clone(),
             touched: self.touched.clone(),
             metas: {
-                let mut m = METAS_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
+                let mut m = METAS_POOL
+                    .with(|p| p.borrow_mut().pop())
+                    .unwrap_or_default();
                 m.extend_from_slice(&self.metas);
                 m
             },
@@ -639,8 +663,12 @@ impl State {
             spill: Vec::new(),
             spill_ix: FxHashMap::default(),
             numbered: FxHashMap::default(),
-            touched: TOUCHED_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_else(|| Vec::with_capacity(256)),
-            metas: METAS_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default(),
+            touched: TOUCHED_POOL
+                .with(|p| p.borrow_mut().pop())
+                .unwrap_or_else(|| Vec::with_capacity(256)),
+            metas: METAS_POOL
+                .with(|p| p.borrow_mut().pop())
+                .unwrap_or_default(),
             scope_extra: Vec::new(),
             save: Vec::new(),
             defined: Vec::new(),
@@ -900,7 +928,8 @@ impl State {
     #[inline]
     fn changing(&mut self, loc: Loc) {
         self.any_gen = new_cat_gen();
-        if (loc as usize).wrapping_sub(crate::fields::FONT0) < crate::fields::FONTS * crate::fields::FONT_W
+        if (loc as usize).wrapping_sub(crate::fields::FONT0)
+            < crate::fields::FONTS * crate::fields::FONT_W
             || (!self.font_slow.is_empty() && self.font_slow.contains(&loc))
         {
             self.font_gen = self.any_gen;
@@ -973,7 +1002,8 @@ impl State {
     /// ([`State::numbered`]).
     pub(crate) fn add_numbered(&mut self, prefix: &'static str, n: i64, f: Field) -> Loc {
         let l = self.spill_loc(f);
-        self.numbered.insert((prefix.as_ptr() as usize, n), l & !SPILL);
+        self.numbered
+            .insert((prefix.as_ptr() as usize, n), l & !SPILL);
         l
     }
 
@@ -1021,7 +1051,10 @@ impl State {
     /// not loaded (0).
     #[inline]
     pub(crate) fn load_state(&self, loc: Loc) -> u8 {
-        match self.slot_ref(loc).map_or(0, |s| s.e.flags & (LOADED | ALIAS)) {
+        match self
+            .slot_ref(loc)
+            .map_or(0, |s| s.e.flags & (LOADED | ALIAS))
+        {
             0 | ALIAS => 0,
             LOADED => 1,
             _ => 2,
@@ -1076,7 +1109,13 @@ impl State {
     /// a write of the run, its read the value read. Caller: `Run::load`,
     /// after its own sources (a finisher's preloaded state, a
     /// job-written line's state at its read-back point).
-    pub(crate) fn get(&mut self, cx: &mut Ctx<'_>, v: &Values, loc: Loc, f: Field) -> Result<(), phitex_defuse::Stop> {
+    pub(crate) fn get(
+        &mut self,
+        cx: &mut Ctx<'_>,
+        v: &Values,
+        loc: Loc,
+        f: Field,
+    ) -> Result<(), phitex_defuse::Stop> {
         let x = cx.read(f)?;
         self.load_read(v, loc, x);
         Ok(())
@@ -1098,7 +1137,6 @@ impl State {
         e.flags = LOADED;
         s.e = e;
     }
-
 
     /// The run's definitions of `loc` taken back: made at the base level
     /// (no group of the run saved or bound it; the caller knows no
@@ -1171,7 +1209,9 @@ impl State {
     /// `defer::deferrable` said the register is a page-layer one.
     pub(crate) fn symbol(&mut self, loc: Loc, node: phitex_defuse::NodeId) -> Option<Sym> {
         let s = self.slot_ref(loc);
-        if s.is_some_and(|s| s.e.flags & LOADED != 0 || s.meta != 0 || s.mapped != MAP_NONE || s.lazy.is_some()) {
+        if s.is_some_and(|s| {
+            s.e.flags & LOADED != 0 || s.meta != 0 || s.mapped != MAP_NONE || s.lazy.is_some()
+        }) {
             return None;
         }
         self.slot(loc).sym = true;
@@ -1484,7 +1524,12 @@ impl State {
     /// definitions begin, and its stamp.
     pub(crate) fn open(&mut self) -> (u32, usize, usize, u64) {
         self.next_gid += 1;
-        (self.next_gid, self.save.len(), self.defined.len(), self.stamp)
+        (
+            self.next_gid,
+            self.save.len(),
+            self.defined.len(),
+            self.stamp,
+        )
     }
 
     /// The meta of `loc`, made on its first definition: what the run
@@ -1583,14 +1628,21 @@ impl State {
     pub(crate) fn add(&mut self, v: &Values, loc: Loc, c: i32, global: bool) -> bool {
         let g = if global { MAP_GLOBAL } else { MAP_LOCAL };
         if self.slot_ref(loc).is_some_and(|s| {
-            s.e.flags & PRELOADED != 0 || s.meta != 0 || s.lazy.is_some() || (s.mapped != MAP_NONE && s.mapped != g)
+            s.e.flags & PRELOADED != 0
+                || s.meta != 0
+                || s.lazy.is_some()
+                || (s.mapped != MAP_NONE && s.mapped != g)
         }) {
             return false;
         }
         self.changing(loc);
         self.muts += 1;
         let loaded = self.is_loaded(loc);
-        let cur = if loaded { Some(self.int_of(loc, v)) } else { None };
+        let cur = if loaded {
+            Some(self.int_of(loc, v))
+        } else {
+            None
+        };
         let s = self.slot(loc);
         if loaded && s.mapped == MAP_NONE {
             s.base = s.e.id;
@@ -1628,7 +1680,8 @@ impl State {
     /// Whether the run holds steps of register `loc` that change it
     /// ([`State::add`]).
     pub(crate) fn has_map(&self, loc: Loc) -> bool {
-        self.slot_ref(loc).is_some_and(|s| s.mapped != MAP_NONE && s.map != Map::ID)
+        self.slot_ref(loc)
+            .is_some_and(|s| s.mapped != MAP_NONE && s.map != Map::ID)
     }
 
     /// Whether a page parameter changed since the last call
@@ -1672,7 +1725,11 @@ impl State {
             m.ldef_gid = Some(save_gid);
         }
         if base {
-            let l = if global { Locality::Global } else { Locality::Local };
+            let l = if global {
+                Locality::Global
+            } else {
+                Locality::Local
+            };
             m.publ = Some((val, l));
         }
     }
@@ -1680,7 +1737,12 @@ impl State {
     /// The locations a close of the groups down to `save_base` restores
     /// ([`State::close`]).
     pub(crate) fn saved_locs(&self, save_base: usize) -> Vec<Loc> {
-        self.save.get(save_base..).unwrap_or_default().iter().map(|s| s.loc).collect()
+        self.save
+            .get(save_base..)
+            .unwrap_or_default()
+            .iter()
+            .map(|s| s.loc)
+            .collect()
     }
 
     /// Closes a group whose saves and definitions began at `save_base`
@@ -1716,7 +1778,10 @@ impl State {
             slot.save_gid = s.gid;
             slot.save_stamp = s.stamp;
             let meta = slot.meta;
-            if let Some(m) = usize::try_from(meta).ok().filter(|&m| m > 0 && m <= self.metas.len()) {
+            if let Some(m) = usize::try_from(meta)
+                .ok()
+                .filter(|&m| m > 0 && m <= self.metas.len())
+            {
                 let m = self.meta_mut(m - 1);
                 (m.ldef_stamp, m.ldef_local, m.ldef_gid) = s.ldef;
             }
@@ -1745,7 +1810,12 @@ impl State {
     /// The number of the definitions at the base level, saves and
     /// definitions in groups, and the clock (what a command changed).
     pub(crate) fn sig(&self) -> (usize, usize, usize, u64) {
-        (self.metas.len(), self.save.len(), self.defined.len(), self.stamp)
+        (
+            self.metas.len(),
+            self.save.len(),
+            self.defined.len(),
+            self.stamp,
+        )
     }
 
     /// The clock.
@@ -1784,12 +1854,16 @@ impl State {
     /// name's number in the process's interner, which numbers names in
     /// the order the threads first meet them.
     pub(crate) fn used_locs(&self) -> Vec<Loc> {
-        let mut out: Vec<Loc> = self.metas.iter().filter(|m| m.eng.is_some()).map(|m| m.loc).collect();
+        let mut out: Vec<Loc> = self
+            .metas
+            .iter()
+            .filter(|m| m.eng.is_some())
+            .map(|m| m.loc)
+            .collect();
         for &l in &self.touched {
-            if self
-                .slot_ref(l)
-                .is_some_and(|s| s.meta == 0 && s.e.flags & LOADED != 0 && s.e.flags & PRELOADED == 0)
-            {
+            if self.slot_ref(l).is_some_and(|s| {
+                s.meta == 0 && s.e.flags & LOADED != 0 && s.e.flags & PRELOADED == 0
+            }) {
                 out.push(l);
             }
         }
@@ -1824,7 +1898,12 @@ impl State {
     /// value in force and the locality of the latest one. A local one
     /// made in a group opened after `gids` is left out: that group has
     /// ended (§282). In the order of the latest definitions.
-    pub(crate) fn defined_since_in_order(&mut self, v: &Values, since: u64, gids: u32) -> Vec<(Loc, Option<ValueId>, Locality)> {
+    pub(crate) fn defined_since_in_order(
+        &mut self,
+        v: &Values,
+        since: u64,
+        gids: u32,
+    ) -> Vec<(Loc, Option<ValueId>, Locality)> {
         let mut hits: Vec<(Loc, bool, u64)> = self
             .metas
             .iter()
@@ -1836,7 +1915,15 @@ impl State {
         hits.into_iter()
             .map(|(loc, local, _)| {
                 let x = self.id_of(loc, v);
-                (loc, x, if local { Locality::Local } else { Locality::Global })
+                (
+                    loc,
+                    x,
+                    if local {
+                        Locality::Local
+                    } else {
+                        Locality::Global
+                    },
+                )
             })
             .collect()
     }
@@ -1853,7 +1940,8 @@ impl State {
     fn base_value(&self, m: &Meta, v: &Values, top: bool) -> Option<(ValueId, Locality)> {
         let (val, l) = m.publ.as_ref()?;
         let x = self.encode(val, v)?;
-        if ((top || *l != Locality::Global) && m.eng == Some(Some(x))) || unchanged_transient(m, x) {
+        if ((top || *l != Locality::Global) && m.eng == Some(Some(x))) || unchanged_transient(m, x)
+        {
             return None;
         }
         Some((x, *l))
@@ -1883,18 +1971,29 @@ impl State {
         let mut restored = Vec::new();
         for m in &self.metas {
             if let Some((val, _)) = &m.publ
-                && m.eng.is_some_and(|e| e.is_some() && self.encode(val, v) == e)
+                && m.eng
+                    .is_some_and(|e| e.is_some() && self.encode(val, v) == e)
             {
                 restored.push(m.loc);
             }
             if let Some((x, l)) = self.base_value(m, v, top) {
                 let carried = l == Locality::Local && self.cont_locs.contains(&m.loc);
-                out.push(Published { loc: m.loc, what: Pub::Value(x), at: l, carried });
+                out.push(Published {
+                    loc: m.loc,
+                    what: Pub::Value(x),
+                    at: l,
+                    carried,
+                });
             }
         }
         for (loc, val, l) in &self.scope_extra {
             if let Some(x) = self.encode(val, v) {
-                out.push(Published { loc: *loc, what: Pub::Value(x), at: *l, carried: false });
+                out.push(Published {
+                    loc: *loc,
+                    what: Pub::Value(x),
+                    at: *l,
+                    carried: false,
+                });
             }
         }
         for &l in &self.touched {
@@ -1906,9 +2005,22 @@ impl State {
                 restored.push(l);
                 continue;
             }
-            let at = if s.mapped == MAP_GLOBAL { Locality::Global } else { Locality::Local };
-            let what = if s.map.keep { Pub::Rel(i64::from(s.map.add)) } else { Pub::Value(crate::val::int_id(v, i64::from(s.map.add))) };
-            out.push(Published { loc: l, what, at, carried: false });
+            let at = if s.mapped == MAP_GLOBAL {
+                Locality::Global
+            } else {
+                Locality::Local
+            };
+            let what = if s.map.keep {
+                Pub::Rel(i64::from(s.map.add))
+            } else {
+                Pub::Value(crate::val::int_id(v, i64::from(s.map.add)))
+            };
+            out.push(Published {
+                loc: l,
+                what,
+                at,
+                carried: false,
+            });
         }
         (out, restored)
     }
@@ -1938,7 +2050,12 @@ impl State {
     /// definitions began at `def_base` (opened at `open_stamp`), each
     /// location whose latest definition is a local one made since, with
     /// its value.
-    fn group_locals(&self, v: &Values, def_base: usize, open_stamp: u64) -> Vec<(usize, Option<ValueId>)> {
+    fn group_locals(
+        &self,
+        v: &Values,
+        def_base: usize,
+        open_stamp: u64,
+    ) -> Vec<(usize, Option<ValueId>)> {
         let mut out = Vec::new();
         for &loc in &self.defined[def_base.min(self.defined.len())..] {
             let Some(s) = self.slot_ref(loc) else {
@@ -1964,7 +2081,14 @@ impl State {
     /// group's local of the value the base level publishes is that
     /// definition seen inside; of another value, a second entry of the
     /// field, the scope's ([`State::scope_extra`]).
-    pub(crate) fn abandon_to_scope(&mut self, v: &Values, save_base: usize, def_base: usize, open_stamp: u64, top: bool) {
+    pub(crate) fn abandon_to_scope(
+        &mut self,
+        v: &Values,
+        save_base: usize,
+        def_base: usize,
+        open_stamp: u64,
+        top: bool,
+    ) {
         self.muts += 1;
         for (mi, x) in self.group_locals(v, def_base, open_stamp) {
             let Some(x) = x else { continue };
@@ -2021,7 +2145,9 @@ impl State {
         let mut out: Vec<(Loc, Entry, Locality)> = Vec::new();
         for (k, &(_, db, open_stamp)) in levels.iter().enumerate() {
             let next = levels.get(k + 1);
-            let de = next.map_or(self.defined.len(), |l| l.1).min(self.defined.len());
+            let de = next
+                .map_or(self.defined.len(), |l| l.1)
+                .min(self.defined.len());
             let se = next.map_or(self.save.len(), |l| l.0).min(self.save.len());
             let mut seen = phitex_defuse::FxHashSet::default();
             for i in db.min(de)..de {
@@ -2032,17 +2158,26 @@ impl State {
                 let Some(s) = self.slot_ref(loc) else {
                     continue;
                 };
-                let inner = self.save[se..].iter().find(|x| x.loc == loc && s.ginert <= x.at);
+                let inner = self.save[se..]
+                    .iter()
+                    .find(|x| x.loc == loc && s.ginert <= x.at);
                 let (val, ldef) = if let Some(x) = inner {
                     (x.prev, x.ldef)
                 } else {
-                    let Some(m) = (s.meta as usize).checked_sub(1).and_then(|mi| self.metas.get(mi)) else {
+                    let Some(m) = (s.meta as usize)
+                        .checked_sub(1)
+                        .and_then(|mi| self.metas.get(mi))
+                    else {
                         continue;
                     };
                     (s.e, (m.ldef_stamp, m.ldef_local, m.ldef_gid))
                 };
                 if ldef.1 && ldef.0 > open_stamp {
-                    out.push((loc, val, Locality::ScopeAt(u8::try_from(k).unwrap_or(u8::MAX - 2))));
+                    out.push((
+                        loc,
+                        val,
+                        Locality::ScopeAt(u8::try_from(k).unwrap_or(u8::MAX - 2)),
+                    ));
                 }
             }
         }
@@ -2072,7 +2207,10 @@ impl State {
         let Some(s) = self.slot_ref(loc) else {
             return "no slot".to_owned();
         };
-        let m = usize::try_from(s.meta).ok().filter(|&m| m > 0).and_then(|m| self.metas.get(m - 1));
+        let m = usize::try_from(s.meta)
+            .ok()
+            .filter(|&m| m > 0)
+            .and_then(|m| self.metas.get(m - 1));
         format!(
             "{:?} touched {} in-touched-list {} save_gid {} ginert {} ldef {:?} defined-list {} map {:?}/{}",
             self.held(loc),
@@ -2092,7 +2230,14 @@ impl State {
     pub(crate) fn debug_slot(&self, loc: Loc) -> String {
         self.slot_ref(loc).map_or_else(
             || "none".to_owned(),
-            |s| format!("absent {} id {:?} flags {:#x}", s.e.kind == K_ABSENT, s.e.id, s.e.flags),
+            |s| {
+                format!(
+                    "absent {} id {:?} flags {:#x}",
+                    s.e.kind == K_ABSENT,
+                    s.e.id,
+                    s.e.flags
+                )
+            },
         )
     }
 
@@ -2100,7 +2245,9 @@ impl State {
     pub(crate) fn debug_entry(&self, e: &Entry, v: &Values) -> String {
         match e.kind {
             K_INT => e.chr.to_string(),
-            _ => self.encode(e, v).map_or_else(|| "absent".to_owned(), |x| v.render(x)),
+            _ => self
+                .encode(e, v)
+                .map_or_else(|| "absent".to_owned(), |x| v.render(x)),
         }
     }
 }
@@ -2207,7 +2354,6 @@ impl Memos {
         let m = self.get(loc);
         (m.has & b != 0).then_some(m.val & b != 0)
     }
-
 }
 
 /// An entry as a definition stores it: loaded, its engine value and
@@ -2362,7 +2508,11 @@ impl State {
         // resolved where the resume uses it)
         let ent = |x: Option<ValueId>, loaded: bool| {
             let mut e = Entry::raw_seen(v, x);
-            e.flags = if loaded { LOADED | HAS_ID | (e.flags & ALIAS) } else { 0 };
+            e.flags = if loaded {
+                LOADED | HAS_ID | (e.flags & ALIAS)
+            } else {
+                0
+            };
             e
         };
         for s in c.slots {
@@ -2425,7 +2575,6 @@ impl State {
     }
 }
 
-
 /// A run's table at its base level, no group of its own open
 /// ([`State::base_of`]): what an edited node's run that goes on from a
 /// checkpoint takes up ([`crate::resume`]): what the run defined,
@@ -2482,19 +2631,28 @@ impl State {
             let Some(s) = self.slot_ref(l) else { continue };
             // (one the run only read stays as read: what it holds at a
             // candidate is the value there, `State::at_candidates`)
-            if s.meta == 0 && s.mapped == MAP_NONE && !s.sym && s.lazy.is_none() && s.e.flags & (PRELOADED | LOADED) == 0 {
+            if s.meta == 0
+                && s.mapped == MAP_NONE
+                && !s.sym
+                && s.lazy.is_none()
+                && s.e.flags & (PRELOADED | LOADED) == 0
+            {
                 continue;
             }
             if s.save_gid != 0 {
                 return None;
             }
-            let meta = usize::try_from(s.meta).ok().filter(|&m| m > 0).and_then(|m| self.metas.get(m - 1)).map(|m| BaseMeta {
-                eng: m.eng,
-                publ: m.publ.as_ref().map(|(e, l)| (self.encode(e, v), *l)),
-                ldef_stamp: m.ldef_stamp,
-                ldef_local: m.ldef_local,
-                ldef_gid: m.ldef_gid,
-            });
+            let meta = usize::try_from(s.meta)
+                .ok()
+                .filter(|&m| m > 0)
+                .and_then(|m| self.metas.get(m - 1))
+                .map(|m| BaseMeta {
+                    eng: m.eng,
+                    publ: m.publ.as_ref().map(|(e, l)| (self.encode(e, v), *l)),
+                    ldef_stamp: m.ldef_stamp,
+                    ldef_local: m.ldef_local,
+                    ldef_gid: m.ldef_gid,
+                });
             slots.push(BaseSlot {
                 loc: l,
                 cur: self.encode(&s.e, v),
@@ -2511,13 +2669,22 @@ impl State {
             .cands
             .iter()
             .map(|(st, xs)| {
-                (*st, xs.iter().map(|(l, e)| (*l, (e.flags & LOADED != 0).then(|| self.encode(e, v)))).collect())
+                (
+                    *st,
+                    xs.iter()
+                        .map(|(l, e)| (*l, (e.flags & LOADED != 0).then(|| self.encode(e, v))))
+                        .collect(),
+                )
             })
             .collect();
         Some(Base {
             slots,
             cands,
-            extra: self.scope_extra.iter().map(|(l, e, at)| (*l, self.encode(e, v), *at)).collect(),
+            extra: self
+                .scope_extra
+                .iter()
+                .map(|(l, e, at)| (*l, self.encode(e, v), *at))
+                .collect(),
             defined: self.defined.clone(),
             font_slow: self.font_slow.iter().copied().collect(),
             stamp: self.stamp,
@@ -2531,7 +2698,9 @@ impl State {
     pub(crate) fn with_base(&mut self, v: &Values, b: Base) {
         let ent = |x: Option<ValueId>, flags: u8| {
             let mut e = Entry::raw_seen(v, x);
-            e.flags = (flags & (LOADED | PRELOADED)) | (e.flags & ALIAS) | if x.is_some() { HAS_ID } else { 0 };
+            e.flags = (flags & (LOADED | PRELOADED))
+                | (e.flags & ALIAS)
+                | if x.is_some() { HAS_ID } else { 0 };
             e
         };
         for s in b.slots {
@@ -2547,7 +2716,11 @@ impl State {
                 });
                 u32::try_from(self.metas.len()).unwrap_or(0)
             });
-            let e = if s.cur.is_none() && s.flags & LOADED == 0 { UNLOADED } else { ent(s.cur, s.flags) };
+            let e = if s.cur.is_none() && s.flags & LOADED == 0 {
+                UNLOADED
+            } else {
+                ent(s.cur, s.flags)
+            };
             let slot = self.slot(s.loc);
             slot.e = e;
             slot.map = s.map;
@@ -2562,7 +2735,10 @@ impl State {
             self.scope_extra.push((l, e, at));
         }
         for (st, xs) in b.cands {
-            let xs = xs.into_iter().map(|(l, x)| (l, x.map_or(UNLOADED, |x| ent(x, LOADED)))).collect();
+            let xs = xs
+                .into_iter()
+                .map(|(l, x)| (l, x.map_or(UNLOADED, |x| ent(x, LOADED))))
+                .collect();
             self.cands.push((st, xs));
         }
         self.defined = b.defined;
@@ -2623,7 +2799,11 @@ impl Base {
                 ])
             })
             .collect();
-        let extra = self.extra.iter().map(|&(l, x, a)| v.list(vec![field(l).0, opt(x), at(a)])).collect();
+        let extra = self
+            .extra
+            .iter()
+            .map(|&(l, x, a)| v.list(vec![field(l).0, opt(x), at(a)]))
+            .collect();
         let cands = self
             .cands
             .iter()
@@ -2653,10 +2833,24 @@ impl Base {
     }
 
     /// From [`Base::to_value`]'s value, each field's location (`loc`).
-    pub(crate) fn of_value(v: &Values, x: ValueId, loc: &mut dyn FnMut(Field) -> Loc) -> Option<Base> {
+    pub(crate) fn of_value(
+        v: &Values,
+        x: ValueId,
+        loc: &mut dyn FnMut(Field) -> Loc,
+    ) -> Option<Base> {
         use crate::val::{int_of, list_of};
         let xs = list_of(v, x);
-        let [slots, cands, extra, defined, font_slow, stamp, next_gid, pp_dirty] = xs[..] else {
+        let [
+            slots,
+            cands,
+            extra,
+            defined,
+            font_slow,
+            stamp,
+            next_gid,
+            pp_dirty,
+        ] = xs[..]
+        else {
             return None;
         };
         let opt = |x: ValueId| list_of(v, x).first().copied();
@@ -2730,12 +2924,17 @@ impl Base {
                 out.extra.push((loc(Field(f)), opt(x), at(a)));
             }
         }
-        out.defined = list_of(v, defined).into_iter().map(|f| loc(Field(f))).collect();
-        out.font_slow = list_of(v, font_slow).into_iter().map(|f| loc(Field(f))).collect();
+        out.defined = list_of(v, defined)
+            .into_iter()
+            .map(|f| loc(Field(f)))
+            .collect();
+        out.font_slow = list_of(v, font_slow)
+            .into_iter()
+            .map(|f| loc(Field(f)))
+            .collect();
         Some(out)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2802,14 +3001,20 @@ mod tests {
         assert!(st.add(&v, 12, 2, true));
         assert!(!st.add(&v, 12, 1, false), "a local step after a global one");
         let p = st.publication(&v, true).0;
-        assert!(p.iter().any(|p| p.loc == 12 && p.what == Pub::Rel(3) && p.at == Locality::Global));
+        assert!(
+            p.iter()
+                .any(|p| p.loc == 12 && p.what == Pub::Rel(3) && p.at == Locality::Global)
+        );
         st.load_read(&v, 12, Some(v.int(5)));
         assert_eq!(st.int_of(12, &v), 8);
         assert_eq!(st.engine_value(12), Some(Some(v.int(5))));
         let p = st.publication(&v, true).0;
         assert!(p.iter().any(|p| p.loc == 12 && p.what == Pub::Rel(3)));
         st.set(12, Entry::int(5), true, None);
-        assert!(st.publication(&v, true).0.iter().all(|p| p.loc != 12), "set back to what it read");
+        assert!(
+            st.publication(&v, true).0.iter().all(|p| p.loc != 12),
+            "set back to what it read"
+        );
         assert!(st.add(&v, 13, 2, false));
         st.restore(13);
         let (p, _) = st.publication(&v, true);

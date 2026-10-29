@@ -803,8 +803,11 @@ impl Session {
                 let finder = self.finder();
                 let prelude_finder = Some(self.format_finder());
                 phitex_tex::timeline::lap("session: the finders");
-                let (content_key, tool_finder, bibtex) =
-                    (self.host.content_key(), self.host.tool_finder(), self.host.bibtex());
+                let (content_key, tool_finder, bibtex) = (
+                    self.host.content_key(),
+                    self.host.tool_finder(),
+                    self.host.bibtex(),
+                );
                 phitex_tex::timeline::lap("session: the content key, tools, bibtex");
                 let shell_hook = self.host.shell_hook(&self.job);
                 phitex_tex::timeline::lap("session: the shell hook");

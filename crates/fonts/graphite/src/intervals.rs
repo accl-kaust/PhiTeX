@@ -30,18 +30,45 @@ pub(crate) struct Exclusion {
 
 impl Exclusion {
     fn new(x: f32, xm: f32, smi: f32, smxi: f32, c: f32) -> Exclusion {
-        Exclusion { x, xm, c, sm: smi, smx: smxi, open: false }
+        Exclusion {
+            x,
+            xm,
+            c,
+            sm: smi,
+            smx: smxi,
+            open: false,
+        }
     }
 
     /// `weighted<XY>`.
     #[allow(clippy::too_many_arguments)]
-    fn weighted_xy(xmin: f32, xmax: f32, f: f32, a0: f32, m: f32, xi: f32, _ai: f32, c: f32, _nega: bool) -> Exclusion {
+    fn weighted_xy(
+        xmin: f32,
+        xmax: f32,
+        f: f32,
+        a0: f32,
+        m: f32,
+        xi: f32,
+        _ai: f32,
+        c: f32,
+        _nega: bool,
+    ) -> Exclusion {
         Exclusion::new(xmin, xmax, m + f, m * xi, m * xi * xi + f * a0 * a0 + c)
     }
 
     /// `weighted<SD>`.
     #[allow(clippy::too_many_arguments)]
-    fn weighted_sd(xmin: f32, xmax: f32, f: f32, a0: f32, m: f32, xi: f32, ai: f32, c: f32, nega: bool) -> Exclusion {
+    fn weighted_sd(
+        xmin: f32,
+        xmax: f32,
+        f: f32,
+        a0: f32,
+        m: f32,
+        xi: f32,
+        ai: f32,
+        c: f32,
+        nega: bool,
+    ) -> Exclusion {
         let xia = if nega { xi - ai } else { xi + ai };
         Exclusion::new(
             xmin,
@@ -125,7 +152,15 @@ pub(crate) struct Zones {
 
 impl Zones {
     /// `initialise<XY>` (`sd` false) or `initialise<SD>`.
-    pub(crate) fn initialise(&mut self, sd: bool, xmin: f32, xmax: f32, margin_len: f32, margin_weight: f32, a0: f32) {
+    pub(crate) fn initialise(
+        &mut self,
+        sd: bool,
+        xmin: f32,
+        xmax: f32,
+        margin_len: f32,
+        margin_weight: f32,
+        a0: f32,
+    ) {
         self.margin_len = margin_len;
         self.margin_weight = margin_weight;
         self.pos = xmin;
@@ -147,21 +182,53 @@ impl Zones {
 
     /// `weightedAxis(axis, ...)`.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn weighted_axis(&mut self, axis: i32, xmin: f32, xmax: f32, f: f32, a0: f32, m: f32, xi: f32, ai: f32, c: f32, nega: bool) {
+    pub(crate) fn weighted_axis(
+        &mut self,
+        axis: i32,
+        xmin: f32,
+        xmax: f32,
+        f: f32,
+        a0: f32,
+        m: f32,
+        xi: f32,
+        ai: f32,
+        c: f32,
+        nega: bool,
+    ) {
         if axis < 2 {
-            self.insert(Exclusion::weighted_xy(xmin, xmax, f, a0, m, xi, ai, c, nega));
+            self.insert(Exclusion::weighted_xy(
+                xmin, xmax, f, a0, m, xi, ai, c, nega,
+            ));
         } else {
-            self.insert(Exclusion::weighted_sd(xmin, xmax, f, a0, m, xi, ai, c, nega));
+            self.insert(Exclusion::weighted_sd(
+                xmin, xmax, f, a0, m, xi, ai, c, nega,
+            ));
         }
     }
 
     /// `weighted<XY>` (`sd` false) or `weighted<SD>`.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn weighted(&mut self, sd: bool, xmin: f32, xmax: f32, f: f32, a0: f32, m: f32, xi: f32, ai: f32, c: f32, nega: bool) {
+    pub(crate) fn weighted(
+        &mut self,
+        sd: bool,
+        xmin: f32,
+        xmax: f32,
+        f: f32,
+        a0: f32,
+        m: f32,
+        xi: f32,
+        ai: f32,
+        c: f32,
+        nega: bool,
+    ) {
         if sd {
-            self.insert(Exclusion::weighted_sd(xmin, xmax, f, a0, m, xi, ai, c, nega));
+            self.insert(Exclusion::weighted_sd(
+                xmin, xmax, f, a0, m, xi, ai, c, nega,
+            ));
         } else {
-            self.insert(Exclusion::weighted_xy(xmin, xmax, f, a0, m, xi, ai, c, nega));
+            self.insert(Exclusion::weighted_xy(
+                xmin, xmax, f, a0, m, xi, ai, c, nega,
+            ));
         }
     }
 
@@ -169,8 +236,30 @@ impl Zones {
     pub(crate) fn exclude_with_margins(&mut self, xmin: f32, xmax: f32, axis: i32) {
         self.remove(xmin, xmax);
         let (ml, mw) = (self.margin_len, self.margin_weight);
-        self.weighted_axis(axis, xmin - ml, xmin, 0.0, 0.0, mw, xmin - ml, 0.0, 0.0, false);
-        self.weighted_axis(axis, xmax, xmax + ml, 0.0, 0.0, mw, xmax + ml, 0.0, 0.0, false);
+        self.weighted_axis(
+            axis,
+            xmin - ml,
+            xmin,
+            0.0,
+            0.0,
+            mw,
+            xmin - ml,
+            0.0,
+            0.0,
+            false,
+        );
+        self.weighted_axis(
+            axis,
+            xmax,
+            xmax + ml,
+            0.0,
+            0.0,
+            mw,
+            xmax + ml,
+            0.0,
+            0.0,
+            false,
+        );
     }
 
     fn insert(&mut self, mut e: Exclusion) {

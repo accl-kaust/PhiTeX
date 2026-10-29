@@ -235,10 +235,9 @@ impl Layout {
     #[must_use]
     pub fn same_chunks(&self, o: &Layout) -> bool {
         self.count() == o.count()
-            && self
-                .chunks()
-                .zip(o.chunks())
-                .all(|(a, b)| (Arc::ptr_eq(&a.bytes, &b.bytes) || a.bytes == b.bytes) && a.objs == b.objs)
+            && self.chunks().zip(o.chunks()).all(|(a, b)| {
+                (Arc::ptr_eq(&a.bytes, &b.bytes) || a.bytes == b.bytes) && a.objs == b.objs
+            })
     }
 
     /// The bytes before the cross-reference section.
@@ -373,7 +372,11 @@ fn chunks_hash<'a>(chunks: impl Iterator<Item = &'a Chunk>) -> u64 {
     let mut kept = Vec::with_capacity(n);
     let mut words = Vec::with_capacity(8 * n);
     for (i, c) in chunks.iter().enumerate() {
-        let same = |j: usize| m.get(j).filter(|e| Arc::ptr_eq(&e.0, &c.bytes)).map(|e| e.1);
+        let same = |j: usize| {
+            m.get(j)
+                .filter(|e| Arc::ptr_eq(&e.0, &c.bytes))
+                .map(|e| e.1)
+        };
         let h = same(i)
             .or_else(|| (k + i).checked_sub(n).and_then(same))
             .unwrap_or_else(|| crate::finish::hash64(&c.bytes));
@@ -518,11 +521,19 @@ impl Updater {
             }
         }
         // an object stream written again, or one no longer
-        restream(old, new, &olds, &news, &streams, &mut rows, &mut |b: &[u8]| {
-            let r = at(&body);
-            body.extend_from_slice(b);
-            r
-        });
+        restream(
+            old,
+            new,
+            &olds,
+            &news,
+            &streams,
+            &mut rows,
+            &mut |b: &[u8]| {
+                let r = at(&body);
+                body.extend_from_slice(b);
+                r
+            },
+        );
         // the objects past the new layout's last
         for n in new.last() + 1..=old.last() {
             if old.place(n) != Place::Free {

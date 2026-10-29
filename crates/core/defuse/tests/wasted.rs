@@ -55,7 +55,10 @@ fn a_rerun_with_identical_outputs_counts_as_wasted() {
     // x changes: the copy is re-asked, runs again, and defines y := 5 as before
     e.replace(x, def, vec![v.field("x").0, v.int(2)]);
     let rep = e.evaluate(2).unwrap();
-    assert_eq!(rep.runs_wasted, 1, "the copy's rerun left every output as it was: {rep:?}");
+    assert_eq!(
+        rep.runs_wasted, 1,
+        "the copy's rerun left every output as it was: {rep:?}"
+    );
     assert_eq!(rep.wasted_by_op, vec![("copy", 1)], "{rep:?}");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }

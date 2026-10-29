@@ -146,7 +146,8 @@ impl Order {
                 (segs[a..=b].iter().map(|x| x.1).collect::<Vec<SegId>>(), at_lo, at_hi)
             };
             let win: Vec<std::sync::Arc<crate::segment::Segment>> = ids.iter().map(|&x| eng.seg(x).clone()).collect();
-            let mut gs: Vec<crate::lock::WriteGuard<'_, crate::segment::Inner>> = win.iter().map(|x| x.inner.write()).collect();
+            let mut gs: Vec<crate::lock::WriteGuard<'_, crate::segment::Inner>> =
+                win.iter().map(|x| x.inner.write()).collect();
             let t_held = std::time::Instant::now();
             // (a split or an absorption among them meanwhile: the list again)
             if (1..win.len()).any(|k| gs[k - 1].hi != win[k].lo) {
@@ -223,7 +224,12 @@ impl Order {
             let mut m = FxHashMap::default();
             // (an entry made ready for a commit and not filled holds nothing)
             m.extend(g.defs.iter().filter(|x| !x.1.is_empty()).map(|(f, _)| ((*f, 0u8), ())));
-            m.extend(g.contribs.iter().filter(|x| !x.1.is_empty()).map(|(f, _)| ((*f, 1u8), ())));
+            m.extend(
+                g.contribs
+                    .iter()
+                    .filter(|x| !x.1.is_empty())
+                    .map(|(f, _)| ((*f, 1u8), ())),
+            );
             m.extend(g.readers.keys().map(|f| ((*f, 2u8), ())));
             m
         };
@@ -250,7 +256,11 @@ impl Order {
         let widths: Vec<u64> = (0..k)
             .map(|i| {
                 let w = gs[i].hi.0 - win[i].lo.0;
-                if i == asking { w.saturating_sub(need(0).saturating_mul(more)) } else { w }
+                if i == asking {
+                    w.saturating_sub(need(0).saturating_mul(more))
+                } else {
+                    w
+                }
             })
             .collect();
         let total: u64 = widths.iter().sum::<u64>().max(1);
@@ -268,12 +278,17 @@ impl Order {
                 }
             }
             if left == before {
-                let i = (0..k).filter(|&i| live[i]).max_by_key(|&i| gs[i].hi.0 - win[i].lo.0).expect("a window");
+                let i = (0..k)
+                    .filter(|&i| live[i])
+                    .max_by_key(|&i| gs[i].hi.0 - win[i].lo.0)
+                    .expect("a window");
                 want[i] += left;
                 left = 0;
             }
         }
-        let counts = |gs: &[crate::lock::WriteGuard<'_, crate::segment::Inner>]| -> Vec<u64> { gs.iter().map(|g| g.nodes.len() as u64).collect() };
+        let counts = |gs: &[crate::lock::WriteGuard<'_, crate::segment::Inner>]| -> Vec<u64> {
+            gs.iter().map(|g| g.nodes.len() as u64).collect()
+        };
         // rightward: every prefix down to its share or below
         let (mut have, mut aim) = (0u64, 0u64);
         for i in 0..k.saturating_sub(1) {

@@ -88,7 +88,11 @@ fn a_fold_and_a_next_taken_back_are_not_asked_again() {
     assert_eq!(unread.0.load(Ordering::Relaxed), 1);
     e.replace(c, contrib, vec![s.0, v.int(2)]);
     let r = e.evaluate(2).unwrap();
-    assert_eq!(Report::by_op(&r.runs_by_op, "unread"), 0, "its reads of s were taken back: {r:?}");
+    assert_eq!(
+        Report::by_op(&r.runs_by_op, "unread"),
+        0,
+        "its reads of s were taken back: {r:?}"
+    );
     assert_eq!(unread.0.load(Ordering::Relaxed), 1);
     assert!(e.check_invariants().is_empty());
 }
@@ -208,7 +212,11 @@ fn a_node_taken_while_its_run_claims_gives_back_what_it_took() {
         }
         assert_eq!(e.node_info(a).map(|i| i.state), Some(phitex_defuse::NodeState::Inert));
         for s in sibs {
-            assert_eq!(e.node_info(s).map(|i| i.state), Some(phitex_defuse::NodeState::Done), "{s:?} is held by a node taken");
+            assert_eq!(
+                e.node_info(s).map(|i| i.state),
+                Some(phitex_defuse::NodeState::Done),
+                "{s:?} is held by a node taken"
+            );
         }
         assert!(e.check_invariants().is_empty());
     }
@@ -229,7 +237,9 @@ impl Operation for ViewTo {
         let v = cx.values();
         let to = phitex_defuse::NodeId::from_raw(v.as_int(cx.args()[1]).unwrap_or(0).unsigned_abs());
         let w = cx.view_through(Field(cx.args()[0]), None, to)?;
-        Ok(cx.at(w, phitex_defuse::Step::Index(0)).map_or(ValueId::UNIT, |x| cx.whole(x)))
+        Ok(cx
+            .at(w, phitex_defuse::Step::Index(0))
+            .map_or(ValueId::UNIT, |x| cx.whole(x)))
     }
 }
 
@@ -247,7 +257,10 @@ fn a_view_whose_bound_is_removed_runs_once_more_and_settles() {
     e.evaluate(2).unwrap();
     assert_eq!(view.0.load(Ordering::Relaxed), 1);
     e.remove(c);
-    e.set_limits(phitex_defuse::Limits { runs_per_node: 50, ..Default::default() });
+    e.set_limits(phitex_defuse::Limits {
+        runs_per_node: 50,
+        ..Default::default()
+    });
     let r = e.evaluate(2);
     assert!(r.is_ok(), "the reader ran on for ever: {r:?}");
     assert_eq!(view.0.load(Ordering::Relaxed), 2, "once more, on the bound gone");
@@ -324,7 +337,10 @@ fn reader_records_of_earlier_runs_are_swept_at_quiet_points() {
             sweeps += 1;
             assert_eq!(filed, standing, "after the sweep of evaluation {i}");
         }
-        assert!(filed <= standing + (1 << 16) + 2 * 3001, "{filed} filed for {standing} standing");
+        assert!(
+            filed <= standing + (1 << 16) + 2 * 3001,
+            "{filed} filed for {standing} standing"
+        );
     }
     assert!(sweeps >= 2, "{sweeps} sweeps");
     assert!(e.check_invariants().is_empty());
@@ -362,8 +378,20 @@ fn strings_hashed_a_word_at_a_time_intern_by_their_content() {
     // and the same with zero bytes after it hash alike and intern apart)
     let e = Engine::new();
     let v = e.values();
-    let mut texts: Vec<String> = (0..=24).map(|n| "abcdefghijklmnopqrstuvwxyz"[..n].to_string()).collect();
-    texts.extend(["abc\0", "abc\0\0\0\0\0", "abcdefgh\0", "abcdefghabcdefgh", "abcdefgiabcdefgh", "abcdefghabcdefgi"].map(String::from));
+    let mut texts: Vec<String> = (0..=24)
+        .map(|n| "abcdefghijklmnopqrstuvwxyz"[..n].to_string())
+        .collect();
+    texts.extend(
+        [
+            "abc\0",
+            "abc\0\0\0\0\0",
+            "abcdefgh\0",
+            "abcdefghabcdefgh",
+            "abcdefgiabcdefgh",
+            "abcdefghabcdefgi",
+        ]
+        .map(String::from),
+    );
     let ids: Vec<ValueId> = texts.iter().map(|t| v.str(t)).collect();
     for (i, t) in texts.iter().enumerate() {
         assert_eq!(v.as_str(ids[i]).as_deref(), Some(t.as_str()));
@@ -373,7 +401,11 @@ fn strings_hashed_a_word_at_a_time_intern_by_their_content() {
         }
     }
     let h = |s: &str| phitex_defuse::hash_bytes(7, s.as_bytes());
-    assert_ne!(h("abcdefghabcdefgh"), h("abcdefghabcdefgi"), "a byte of the second word");
+    assert_ne!(
+        h("abcdefghabcdefgh"),
+        h("abcdefghabcdefgi"),
+        "a byte of the second word"
+    );
     assert_ne!(h("abcdefgh"), h("abcdefghabcdefgh"), "a second word");
 }
 
@@ -397,9 +429,18 @@ fn fingerprints_keep_structured_near_inputs_apart() {
                 let mut t = *b"cs:fp_s_?:Nn";
                 t[7] = hi;
                 t[8] = lo;
-                assert!(seen.insert(hash_bytes(seed, &t)), "seed {seed}: bytes {hi} {lo} collide");
-                let w = [0x5f70_665f_3a73_63u64 | (u64::from(hi) << 56), 0x6e4e_3a00 | u64::from(lo)];
-                assert!(words.insert(hash_words(seed, &w)), "seed {seed}: words {hi} {lo} collide");
+                assert!(
+                    seen.insert(hash_bytes(seed, &t)),
+                    "seed {seed}: bytes {hi} {lo} collide"
+                );
+                let w = [
+                    0x5f70_665f_3a73_63u64 | (u64::from(hi) << 56),
+                    0x6e4e_3a00 | u64::from(lo),
+                ];
+                assert!(
+                    words.insert(hash_words(seed, &w)),
+                    "seed {seed}: words {hi} {lo} collide"
+                );
             }
         }
         assert_ne!(hash_bytes(seed, b"ab"), hash_bytes(seed, b"ab\0"));

@@ -63,7 +63,11 @@ pub(crate) fn deferrable(r: &mut Run<'_, '_>, loc: Loc) -> bool {
         let v = r.v;
         let mut locs = Vec::new();
         for f in fs {
-            if v.with_str(f.0, |n| n.strip_prefix("count:").is_some_and(|k| k.parse::<i32>().is_ok())) == Some(true) {
+            if v.with_str(f.0, |n| {
+                n.strip_prefix("count:")
+                    .is_some_and(|k| k.parse::<i32>().is_ok())
+            }) == Some(true)
+            {
                 locs.push(r.loc_of(f));
             }
         }
@@ -177,7 +181,12 @@ pub(crate) fn resolve(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<i32> {
 /// finisher's run outside shipout where the engine's answer is absent.
 /// A bug of the implementation, never of a document.
 pub(crate) fn leaked(r: &Run<'_, '_>, s: Sym) -> ! {
-    panic!("defer: symbol of register {:?} by node {} reached op {}", s.loc, s.node.raw(), r.op_name())
+    panic!(
+        "defer: symbol of register {:?} by node {} reached op {}",
+        s.loc,
+        s.node.raw(),
+        r.op_name()
+    )
 }
 
 /// `\count<n>=` (or `\c@page=` through `\setcounter`) whose operand's
@@ -214,7 +223,10 @@ pub(crate) fn try_symbolic(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate
         if c == cmd::ASSIGN_INT {
             let l = r.quantity_loc(cmd::ASSIGN_INT, r.cur.chr);
             if let Some((g, node)) = r.st.alias_at(l, r.v) {
-                let s = Sym { loc: r.loc_of(g), node };
+                let s = Sym {
+                    loc: r.loc_of(g),
+                    node,
+                };
                 if symbolic(r, loc, s, global) {
                     return Ok(true);
                 }
@@ -259,7 +271,10 @@ pub(crate) fn try_symbolic(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate
 /// Register `loc` set to symbol `s`: a restore where `s` is this
 /// piece's own symbol of `loc`, else an alias.
 fn symbolic(r: &mut Run<'_, '_>, loc: Loc, s: Sym, global: bool) -> bool {
-    if s == (Sym { loc, node: r.cx.node() }) {
+    if s == (Sym {
+        loc,
+        node: r.cx.node(),
+    }) {
         return restore_reaching(r, loc, global);
     }
     alias(r, loc, s, global)

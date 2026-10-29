@@ -207,7 +207,12 @@ impl Page {
             v.int(i64::from(self.k)),
             v.int(i64::from(self.in_material)),
             self.after.map_or_else(|| v.int(-1), raw),
-            v.list(self.spans.iter().flat_map(|s| span_ints(v, s.src, s.len)).collect()),
+            v.list(
+                self.spans
+                    .iter()
+                    .flat_map(|s| span_ints(v, s.src, s.len))
+                    .collect(),
+            ),
             v.list(self.rtns.iter().flat_map(|&(j, x)| [v.int(j), x]).collect()),
             v.int(i64::from(self.fold.sf)),
             v.int(i64::from(self.fold.pd)),
@@ -224,7 +229,12 @@ impl Page {
             v.int(i64::from(self.post_k)),
             v.int(self.prev_fire.0),
             v.int(self.prev_fire.1),
-            v.list(self.inf.iter().flat_map(|&src| span_ints(v, src, 1)).collect()),
+            v.list(
+                self.inf
+                    .iter()
+                    .flat_map(|&src| span_ints(v, src, 1))
+                    .collect(),
+            ),
             v.list(self.vers.iter().flat_map(|&(p, x)| [v.int(p), x]).collect()),
             self.hint,
             v.int(self.normal),
@@ -254,12 +264,25 @@ impl Page {
             normal: n(24),
             special: n(25) != 0,
             hint: p[23],
-            classes: ints(26).into_iter().filter_map(|x| u16::try_from(int_of(v, x)).ok()).collect(),
+            classes: ints(26)
+                .into_iter()
+                .filter_map(|x| u16::try_from(int_of(v, x)).ok())
+                .collect(),
             k: u32::try_from(n(1)).unwrap_or(0),
             in_material: n(2) != 0,
             after: (n(3) != -1).then(|| node_of(n(3))),
-            spans: ints(4).as_chunks::<5>().0.iter().filter_map(|c| span_of_ints(v, c)).collect(),
-            rtns: ints(5).as_chunks::<2>().0.iter().map(|c| (int_of(v, c[0]), c[1])).collect(),
+            spans: ints(4)
+                .as_chunks::<5>()
+                .0
+                .iter()
+                .filter_map(|c| span_of_ints(v, c))
+                .collect(),
+            rtns: ints(5)
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| (int_of(v, c[0]), c[1]))
+                .collect(),
             fold: FoldState {
                 sf: i32::try_from(n(6)).unwrap_or(1000),
                 pd: i32::try_from(n(7)).unwrap_or(IGNORE_DEPTH),
@@ -275,8 +298,18 @@ impl Page {
             post_markers: ints(17),
             post_k: u32::try_from(n(18)).unwrap_or(0),
             prev_fire: (n(19), n(20)),
-            inf: ints(21).as_chunks::<5>().0.iter().filter_map(|c| span_of_ints(v, c).map(|s| s.src)).collect(),
-            vers: ints(22).as_chunks::<2>().0.iter().map(|c| (int_of(v, c[0]), c[1])).collect(),
+            inf: ints(21)
+                .as_chunks::<5>()
+                .0
+                .iter()
+                .filter_map(|c| span_of_ints(v, c).map(|s| s.src))
+                .collect(),
+            vers: ints(22)
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| (int_of(v, c[0]), c[1]))
+                .collect(),
             ins: ints(29),
         })
     }
@@ -290,7 +323,13 @@ fn span_ints(v: &Values, src: Src, len: u32) -> [ValueId; 5] {
         Src::Rtn { page, item } => (1, page, i64::from(item), 0),
         Src::Held { piece, item, from } => (2, piece, i64::from(item), i64::from(from)),
     };
-    [v.int(t), v.int(a), v.int(b), v.int(c), v.int(i64::from(len))]
+    [
+        v.int(t),
+        v.int(a),
+        v.int(b),
+        v.int(c),
+        v.int(i64::from(len)),
+    ]
 }
 
 /// [`span_ints`]' span.
@@ -298,9 +337,19 @@ fn span_of_ints(v: &Values, c: &[ValueId]) -> Option<Span> {
     let n = |i: usize| c.get(i).map_or(0, |&y| int_of(v, y));
     let u = |i: usize| u32::try_from(n(i)).unwrap_or(0);
     let src = match n(0) {
-        0 => Src::Piece { piece: n(1), item: u(2) },
-        1 => Src::Rtn { page: n(1), item: u(2) },
-        2 => Src::Held { piece: n(1), item: u(2), from: u(3) },
+        0 => Src::Piece {
+            piece: n(1),
+            item: u(2),
+        },
+        1 => Src::Rtn {
+            page: n(1),
+            item: u(2),
+        },
+        2 => Src::Held {
+            piece: n(1),
+            item: u(2),
+            from: u(3),
+        },
         _ => return None,
     };
     Some(Span { src, len: u(4) })
@@ -437,7 +486,6 @@ impl PageNode {
     pub(crate) const fn contribs_complete(self) -> bool {
         !self.runs_text()
     }
-
 }
 
 impl Run<'_, '_> {
@@ -537,8 +585,19 @@ pub(crate) fn fin_output_parts(v: &Values, x: ValueId) -> Option<(ValueId, Value
 /// `[piece, nth, give-back, page]`: the page its finisher ran on (its
 /// [`PAGE_OF`] value; unit in a prediction), by which a loop rest knows a
 /// give-back made on the page it starts after ([`page_out_parts`]).
-pub(crate) fn page_out_value(v: &Values, piece: phitex_defuse::NodeId, nth: u32, out: ValueId, page: ValueId) -> ValueId {
-    v.list(vec![v.int(i64::from_ne_bytes(piece.raw().to_ne_bytes())), v.int(i64::from(nth)), out, page])
+pub(crate) fn page_out_value(
+    v: &Values,
+    piece: phitex_defuse::NodeId,
+    nth: u32,
+    out: ValueId,
+    page: ValueId,
+) -> ValueId {
+    v.list(vec![
+        v.int(i64::from_ne_bytes(piece.raw().to_ne_bytes())),
+        v.int(i64::from(nth)),
+        out,
+        page,
+    ])
 }
 
 /// [`page_out_value`]'s give-back and page.

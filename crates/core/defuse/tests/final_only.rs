@@ -67,7 +67,10 @@ fn build(fin: bool) -> (u64, Option<i64>) {
     let e = Engine::new();
     let v = e.values();
     let c = e.register(Arc::new(SlowContrib));
-    let w = Arc::new(Writer { runs: AtomicU64::new(0), fin });
+    let w = Arc::new(Writer {
+        runs: AtomicU64::new(0),
+        fin,
+    });
     let wop = e.register(w.clone());
     let u = e.new_unit();
     e.push(u, c, vec![v.int(1), v.int(0)]);
@@ -85,7 +88,10 @@ fn build(fin: bool) -> (u64, Option<i64>) {
 fn a_final_only_node_runs_once_the_line_is_quiet() {
     let (runs, out) = build(false);
     assert_eq!(out, Some(5));
-    assert!(runs >= 2, "an ordinary writer ran before the slow contribution was in, then again: {runs}");
+    assert!(
+        runs >= 2,
+        "an ordinary writer ran before the slow contribution was in, then again: {runs}"
+    );
     let (runs, out) = build(true);
     assert_eq!(out, Some(5));
     assert_eq!(runs, 1, "a final-only writer runs once, when the line is quiet");

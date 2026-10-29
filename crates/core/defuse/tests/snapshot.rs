@@ -68,7 +68,9 @@ fn a_snapshot_is_no_read_and_a_used_item_is() {
     let e = Engine::new();
     let v = e.values();
     let def = e.register(Arc::new(Def));
-    let us = Arc::new(User { runs: AtomicU64::new(0) });
+    let us = Arc::new(User {
+        runs: AtomicU64::new(0),
+    });
     let user = e.register(us.clone());
     let fam = v.field("cat:");
     let (a, b, c) = (v.field("cat:65"), v.field("cat:66"), v.field("cat:67"));
@@ -83,7 +85,11 @@ fn a_snapshot_is_no_read_and_a_used_item_is() {
     // the unused item changes: no re-ask
     e.replace(nc, def, vec![c.0, v.int(99)]);
     let r = e.evaluate(4).unwrap();
-    assert_eq!(us.runs.load(Ordering::SeqCst), runs0, "a change of an item the user did not use re-asks it not: {r:?}");
+    assert_eq!(
+        us.runs.load(Ordering::SeqCst),
+        runs0,
+        "a change of an item the user did not use re-asks it not: {r:?}"
+    );
     // a used item changes: one re-ask, the new sum
     e.replace(na, def, vec![a.0, v.int(21)]);
     let r = e.evaluate(4).unwrap();
@@ -100,7 +106,9 @@ fn a_snapshot_folds_what_reaches_the_reader_and_is_shared_by_content() {
     let e = Engine::new();
     let v = e.values();
     let def = e.register(Arc::new(Def));
-    let us = Arc::new(User { runs: AtomicU64::new(0) });
+    let us = Arc::new(User {
+        runs: AtomicU64::new(0),
+    });
     let user = e.register(us.clone());
     let fam = v.field("cat:");
     let (a, b) = (v.field("cat:65"), v.field("cat:66"));
@@ -113,6 +121,10 @@ fn a_snapshot_folds_what_reaches_the_reader_and_is_shared_by_content() {
     let r = e.evaluate(4).unwrap();
     assert_eq!(e.output(x1).and_then(|y| v.as_int(y)), Some(1), "{r:?}");
     assert_eq!(e.output(x2).and_then(|y| v.as_int(y)), Some(1), "{r:?}");
-    assert_eq!(e.output(x3).and_then(|y| v.as_int(y)), Some(3), "b is defined only after x1 and x2: {r:?}");
+    assert_eq!(
+        e.output(x3).and_then(|y| v.as_int(y)),
+        Some(3),
+        "b is defined only after x1 and x2: {r:?}"
+    );
     assert!(e.check_invariants().is_empty());
 }

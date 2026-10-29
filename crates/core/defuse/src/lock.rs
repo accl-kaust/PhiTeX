@@ -146,7 +146,10 @@ fn timed<G>(g: G, t: Instant) -> G {
     // thread's next take)
     if cfg!(feature = "profile") {
         let f = std::panic::Location::caller().file();
-        let i = SITE_FILES.iter().position(|s| f.ends_with(s)).unwrap_or(SITE_FILES.len());
+        let i = SITE_FILES
+            .iter()
+            .position(|s| f.ends_with(s))
+            .unwrap_or(SITE_FILES.len());
         SITE_WAITS[i].fetch_add(w, std::sync::atomic::Ordering::Relaxed);
         let line = std::panic::Location::caller().line();
         site_line_add((i as u64) << 32 | u64::from(line), w);
@@ -156,8 +159,12 @@ fn timed<G>(g: G, t: Instant) -> G {
 
 /// (`profile`) The lock waits by the file and line that took the lock:
 /// open addressing over atomics, the key `file index << 32 | line`.
-static SITE_LINES: [(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64); 512] =
-    [const { (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)) }; 512];
+static SITE_LINES: [(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64); 512] = [const {
+    (
+        std::sync::atomic::AtomicU64::new(0),
+        std::sync::atomic::AtomicU64::new(0),
+    )
+}; 512];
 
 fn site_line_add(key: u64, w: u64) {
     use std::sync::atomic::Ordering::Relaxed;
@@ -220,7 +227,16 @@ pub(crate) fn take_wait() -> (u64, u64) {
 /// (`profile`) The files whose lock waits are summed apart, by the file
 /// that took the lock; the rest in one more.
 pub(crate) const SITE_FILES: [&str; 10] = [
-    "segment.rs", "read.rs", "commit.rs", "index.rs", "values.rs", "engine.rs", "sched.rs", "node.rs", "ctx.rs", "table.rs",
+    "segment.rs",
+    "read.rs",
+    "commit.rs",
+    "index.rs",
+    "values.rs",
+    "engine.rs",
+    "sched.rs",
+    "node.rs",
+    "ctx.rs",
+    "table.rs",
 ];
 
 /// (`profile`) The lock waits by [`SITE_FILES`], nanoseconds.

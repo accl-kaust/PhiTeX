@@ -159,8 +159,16 @@ fn a_class_box_a_later_routine_ships_follows_an_edit_of_its_contents() {
         assert!(before.len() >= 3, "-j{threads}: {} pages", before.len());
         b.edit(&new);
         let cold = common::build(opts(), Some(&common::plain()), &new);
-        assert_eq!(cold.pages().len(), before.len(), "-j{threads}: the edit moved a break");
-        assert_ne!(cold.pages()[1], before[1], "-j{threads}: page 2 does not show the box");
+        assert_eq!(
+            cold.pages().len(),
+            before.len(),
+            "-j{threads}: the edit moved a break"
+        );
+        assert_ne!(
+            cold.pages()[1],
+            before[1],
+            "-j{threads}: page 2 does not show the box"
+        );
         assert_eq!(b.pages(), cold.pages(), "-j{threads}: edit != cold");
     }
 }
@@ -360,12 +368,25 @@ fn a_loop_waiting_for_the_page_to_fill_ends() {
     for threads in [1, 8] {
         let opts = phitex_tex::Options {
             threads: Some(threads),
-            ..common::options("./pagewait.tex", "pagewait", &common::dvi_comment(&want), &dir)
+            ..common::options(
+                "./pagewait.tex",
+                "pagewait",
+                &common::dvi_comment(&want),
+                &dir,
+            )
         };
         let b = common::build(opts, Some(&common::plain()), &src);
         let (dvi, log) = b.output();
-        assert_eq!(dvi, want, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
-        assert!(log.contains("[n=20]"), "-j{threads}: the loop ends at the twentieth rule");
+        assert_eq!(
+            dvi,
+            want,
+            "-j{threads}: DVI differs; log tail:\n{}",
+            common::log_excerpt(&log)
+        );
+        assert!(
+            log.contains("[n=20]"),
+            "-j{threads}: the loop ends at the twentieth rule"
+        );
     }
 }
 
@@ -393,11 +414,21 @@ fn a_loop_waiting_for_the_page_to_fill_ends() {
 /// after a paragraph (`Stats::resumptions`, as
 /// `latex::at_one_thread_no_run_is_refuted` counts them).
 fn fold_order_runs(s: &phitex_tex::Stats, fires: u64) {
-    let by = |v: &[(&'static str, u64)]| v.iter().find(|(o, _)| *o == "pages").map_or(0, |(_, n)| *n);
+    let by =
+        |v: &[(&'static str, u64)]| v.iter().find(|(o, _)| *o == "pages").map_or(0, |(_, n)| *n);
     let (runs, nodes) = (by(&s.runs_by_op), by(&s.placed_by_op));
     let fresh = runs.saturating_sub(s.resumptions);
-    assert_eq!(fresh, nodes, "{runs} loop runs, {} resumptions, {nodes} loop nodes: a node ran twice: {:?}", s.resumptions, s.runs_by_op);
-    assert_eq!(nodes, fires + 2, "{nodes} loop nodes for {fires} fires: {:?}", s.placed_by_op);
+    assert_eq!(
+        fresh, nodes,
+        "{runs} loop runs, {} resumptions, {nodes} loop nodes: a node ran twice: {:?}",
+        s.resumptions, s.runs_by_op
+    );
+    assert_eq!(
+        nodes,
+        fires + 2,
+        "{nodes} loop nodes for {fires} fires: {:?}",
+        s.placed_by_op
+    );
 }
 
 #[test]
@@ -408,13 +439,31 @@ fn a_routines_insertion_box_reaches_the_builder_in_fold_order() {
     for threads in [1, 8] {
         let opts = phitex_tex::Options {
             threads: Some(threads),
-            ..common::options("./footins.tex", "footins", &common::dvi_comment(&want), &dir)
+            ..common::options(
+                "./footins.tex",
+                "footins",
+                &common::dvi_comment(&want),
+                &dir,
+            )
         };
         let b = common::build(opts, Some(&common::plain()), &src);
         let (dvi, log) = b.output();
-        let loops = b.stats.runs_by_op.iter().find(|(o, _)| *o == "pages").map_or(0, |(_, n)| *n);
-        eprintln!("-j{threads}: loop runs {loops}, runs by op {:?}", b.stats.runs_by_op);
-        assert_eq!(dvi, want, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
+        let loops = b
+            .stats
+            .runs_by_op
+            .iter()
+            .find(|(o, _)| *o == "pages")
+            .map_or(0, |(_, n)| *n);
+        eprintln!(
+            "-j{threads}: loop runs {loops}, runs by op {:?}",
+            b.stats.runs_by_op
+        );
+        assert_eq!(
+            dvi,
+            want,
+            "-j{threads}: DVI differs; log tail:\n{}",
+            common::log_excerpt(&log)
+        );
         if threads == 1 {
             fold_order_runs(&b.stats, 20);
         }
@@ -440,11 +489,21 @@ fn a_routines_vsize_reaches_the_builder_in_fold_order() {
     for threads in [1, 8] {
         let opts = phitex_tex::Options {
             threads: Some(threads),
-            ..common::options("./vsizeroutine.tex", "vsizeroutine", &common::dvi_comment(&want), &dir)
+            ..common::options(
+                "./vsizeroutine.tex",
+                "vsizeroutine",
+                &common::dvi_comment(&want),
+                &dir,
+            )
         };
         let b = common::build(opts, Some(&common::plain()), &src);
         let (dvi, log) = b.output();
-        assert_eq!(dvi, want, "-j{threads}: DVI differs; log tail:\n{}", common::log_excerpt(&log));
+        assert_eq!(
+            dvi,
+            want,
+            "-j{threads}: DVI differs; log tail:\n{}",
+            common::log_excerpt(&log)
+        );
         if threads == 1 {
             fold_order_runs(&b.stats, 88);
         }

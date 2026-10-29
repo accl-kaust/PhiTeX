@@ -138,7 +138,11 @@ pub(crate) struct Rules {
 
 impl Rules {
     pub(crate) fn new() -> Rules {
-        Rules { buf: [0; MAX_RULES * 2], begin: 0, end: 0 }
+        Rules {
+            buf: [0; MAX_RULES * 2],
+            begin: 0,
+            end: 0,
+        }
     }
 
     pub(crate) fn clear(&mut self) {

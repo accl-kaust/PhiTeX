@@ -390,7 +390,12 @@ pub(crate) fn dvi_file(
                 let _ = dvi_page_kept(v, &mut wi, page, &defs, xdv, true);
             }
         }
-        let shown = v.list(pages.iter().map(|p| v.int(i64::from_ne_bytes(p.raw().to_ne_bytes()))).collect());
+        let shown = v.list(
+            pages
+                .iter()
+                .map(|p| v.int(i64::from_ne_bytes(p.raw().to_ne_bytes())))
+                .collect(),
+        );
         cx.contribute(v.field(crate::pdfout::SHOWN), v.seq_unit(shown));
     }
     let bytes = w.finish();
@@ -632,7 +637,9 @@ pub(crate) fn special_of(v: &Values, whats: &[ValueId], h: u32, xdv: bool) -> Op
     let kind = ys.first().map(|&k| str_of(v, k));
     // (XeTeX's picture: `pic_out`'s special, made with the node)
     if xdv && kind.as_deref() == Some("xpic") {
-        return Some(bytes_of(&ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default()));
+        return Some(bytes_of(
+            &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
+        ));
     }
     if kind.as_deref() == Some("special") {
         let s = ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default();
@@ -866,7 +873,12 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     );
     // (each page's identity, for a viewer: `crate::api::Build::pages`)
     // (one list, made once: not a sequence grown page by page)
-    let shown = v.list(l.shown.iter().map(|&h| v.int(i64::from_ne_bytes(h.to_ne_bytes()))).collect());
+    let shown = v.list(
+        l.shown
+            .iter()
+            .map(|&h| v.int(i64::from_ne_bytes(h.to_ne_bytes())))
+            .collect(),
+    );
     cx.contribute(v.field(crate::pdfout::SHOWN), v.seq_unit(shown));
     let x = match l.layout {
         Some(lay) => {

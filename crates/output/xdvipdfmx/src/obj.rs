@@ -211,7 +211,11 @@ enum Wrote {
     /// Into the object stream: the label the session would give next
     /// before it (the stream's own, if one is begun), the object's
     /// number, its bytes there.
-    InStream { next: u32, label: u32, bytes: Vec<u8> },
+    InStream {
+        next: u32,
+        label: u32,
+        bytes: Vec<u8>,
+    },
 }
 
 /// The objects a stretch of the session wrote ([`PdfOut::record_end`]),
@@ -960,7 +964,12 @@ impl PdfOut {
             self.mark_freed(label);
             if self.open {
                 let rec = self.rec.is_some() && self.rec_depth == 0;
-                let (at, pos, held, next) = (self.out.len(), self.file_position, self.pending.len(), self.next_label);
+                let (at, pos, held, next) = (
+                    self.out.len(),
+                    self.file_position,
+                    self.pending.len(),
+                    self.next_label,
+                );
                 self.rec_depth += 1;
                 let flags = self.slot(o).flags;
                 if !self.use_objstm
@@ -994,7 +1003,11 @@ impl PdfOut {
                     let n = self.add_objstm(objstm, o)?;
                     if rec {
                         let bytes = self.stream_data(objstm)?[len..].to_vec();
-                        self.rec.as_mut().expect("recording").push(Wrote::InStream { next, label, bytes });
+                        self.rec.as_mut().expect("recording").push(Wrote::InStream {
+                            next,
+                            label,
+                            bytes,
+                        });
                     }
                     if n == OBJSTM_MAX_OBJS {
                         self.release_objstm(objstm)?;

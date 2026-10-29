@@ -1037,7 +1037,10 @@ impl Job {
             }
         }
         let mut fonts = Vec::new();
-        walk(std::slice::from_ref(&Node::Box(Box::new(b.clone()))), &mut fonts);
+        walk(
+            std::slice::from_ref(&Node::Box(Box::new(b.clone()))),
+            &mut fonts,
+        );
         for f in fonts {
             self.do_vf(f);
         }
@@ -2245,7 +2248,13 @@ fn font_alone(
         ..PackParams::default()
     };
     let b = hpack(list, Spec::Additional(0), &src, &params, false).node;
-    let page = vpackage(vec![Node::Box(Box::new(b))], Spec::Additional(0), 0, &params).node;
+    let page = vpackage(
+        vec![Node::Box(Box::new(b))],
+        Spec::Additional(0),
+        0,
+        &params,
+    )
+    .node;
     w.ship_out_with(&page, &src, &mut |_, _| None).ok()?;
     let pdf: std::sync::Arc<[u8]> = w.finish().ok()?.into();
     let doc = phitex_codecs::pdfread::Doc::open(&pdf).ok()?;

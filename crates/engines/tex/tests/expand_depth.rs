@@ -27,9 +27,29 @@ fn build(name: &str, threads: usize, src: &str) -> phitex_tex::Build {
 fn the_deepest_legal_nesting_runs_on_every_thread() {
     let n = 9990;
     for (name, src, want) in [
-        ("number", format!("\\message{{[{}0]}}\n\\bye\n", "\\number".repeat(n)), "[0]"),
-        ("expanded", format!("\\message{{[{}x{}]}}\n\\bye\n", "\\expanded{".repeat(n), "}".repeat(n)), "[x]"),
-        ("numexpr", format!("\\message{{[\\number{}1{}]}}\n\\bye\n", "\\numexpr".repeat(n), "\\relax".repeat(n)), "[1]"),
+        (
+            "number",
+            format!("\\message{{[{}0]}}\n\\bye\n", "\\number".repeat(n)),
+            "[0]",
+        ),
+        (
+            "expanded",
+            format!(
+                "\\message{{[{}x{}]}}\n\\bye\n",
+                "\\expanded{".repeat(n),
+                "}".repeat(n)
+            ),
+            "[x]",
+        ),
+        (
+            "numexpr",
+            format!(
+                "\\message{{[\\number{}1{}]}}\n\\bye\n",
+                "\\numexpr".repeat(n),
+                "\\relax".repeat(n)
+            ),
+            "[1]",
+        ),
     ] {
         for threads in [1, 8] {
             let b = build(name, threads, &src);
@@ -45,7 +65,11 @@ fn the_deepest_legal_nesting_runs_on_every_thread() {
 #[test]
 fn an_endless_nesting_ends_at_the_expansion_depth() {
     for threads in [1, 8] {
-        let b = build("over", threads, "\\def\\a{\\number\\a}\\message{[\\a]}\n\\bye\n");
+        let b = build(
+            "over",
+            threads,
+            "\\def\\a{\\number\\a}\\message{[\\a]}\n\\bye\n",
+        );
         let (_, log) = b.output();
         assert!(b.fatal(), "-j{threads}: {:?}", b.diagnostics());
         assert!(
@@ -54,4 +78,3 @@ fn an_endless_nesting_ends_at_the_expansion_depth() {
         );
     }
 }
-

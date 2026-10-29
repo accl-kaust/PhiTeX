@@ -91,74 +91,74 @@ const VARARGS: u8 = 0xff;
 /// `opcode_table`: (parameter bytes, implemented in actions, implemented
 /// in constraints).
 const TABLE: [(u8, bool, bool); 68] = [
-    (0, true, true),      // NOP
-    (1, true, true),      // PUSH_BYTE
-    (1, true, true),      // PUSH_BYTE_U
-    (2, true, true),      // PUSH_SHORT
-    (2, true, true),      // PUSH_SHORT_U
-    (4, true, true),      // PUSH_LONG
-    (0, true, true),      // ADD
-    (0, true, true),      // SUB
-    (0, true, true),      // MUL
-    (0, true, true),      // DIV
-    (0, true, true),      // MIN
-    (0, true, true),      // MAX
-    (0, true, true),      // NEG
-    (0, true, true),      // TRUNC8
-    (0, true, true),      // TRUNC16
-    (0, true, true),      // COND
-    (0, true, true),      // AND
-    (0, true, true),      // OR
-    (0, true, true),      // NOT
-    (0, true, true),      // EQUAL
-    (0, true, true),      // NOT_EQ
-    (0, true, true),      // LESS
-    (0, true, true),      // GTR
-    (0, true, true),      // LESS_EQ
-    (0, true, true),      // GTR_EQ
-    (0, true, false),     // NEXT
-    (1, false, false),    // NEXT_N
-    (0, true, false),     // COPY_NEXT
-    (1, true, false),     // PUT_GLYPH_8BIT_OBS
-    (3, true, false),     // PUT_SUBS_8BIT_OBS
-    (1, true, false),     // PUT_COPY
-    (0, true, false),     // INSERT
-    (0, true, false),     // DELETE
+    (0, true, true),        // NOP
+    (1, true, true),        // PUSH_BYTE
+    (1, true, true),        // PUSH_BYTE_U
+    (2, true, true),        // PUSH_SHORT
+    (2, true, true),        // PUSH_SHORT_U
+    (4, true, true),        // PUSH_LONG
+    (0, true, true),        // ADD
+    (0, true, true),        // SUB
+    (0, true, true),        // MUL
+    (0, true, true),        // DIV
+    (0, true, true),        // MIN
+    (0, true, true),        // MAX
+    (0, true, true),        // NEG
+    (0, true, true),        // TRUNC8
+    (0, true, true),        // TRUNC16
+    (0, true, true),        // COND
+    (0, true, true),        // AND
+    (0, true, true),        // OR
+    (0, true, true),        // NOT
+    (0, true, true),        // EQUAL
+    (0, true, true),        // NOT_EQ
+    (0, true, true),        // LESS
+    (0, true, true),        // GTR
+    (0, true, true),        // LESS_EQ
+    (0, true, true),        // GTR_EQ
+    (0, true, false),       // NEXT
+    (1, false, false),      // NEXT_N
+    (0, true, false),       // COPY_NEXT
+    (1, true, false),       // PUT_GLYPH_8BIT_OBS
+    (3, true, false),       // PUT_SUBS_8BIT_OBS
+    (1, true, false),       // PUT_COPY
+    (0, true, false),       // INSERT
+    (0, true, false),       // DELETE
     (VARARGS, true, false), // ASSOC
-    (2, false, true),     // CNTXT_ITEM
-    (1, true, false),     // ATTR_SET
-    (1, true, false),     // ATTR_ADD
-    (1, true, false),     // ATTR_SUB
-    (1, true, false),     // ATTR_SET_SLOT
-    (2, true, false),     // IATTR_SET_SLOT
-    (2, true, true),      // PUSH_SLOT_ATTR
-    (2, true, true),      // PUSH_GLYPH_ATTR_OBS
-    (3, true, true),      // PUSH_GLYPH_METRIC
-    (2, true, true),      // PUSH_FEAT
-    (2, true, true),      // PUSH_ATT_TO_GATTR_OBS
-    (3, true, true),      // PUSH_ATT_TO_GLYPH_METRIC
-    (3, true, true),      // PUSH_ISLOT_ATTR
-    (3, false, false),    // PUSH_IGLYPH_ATTR
-    (0, true, true),      // POP_RET
-    (0, true, true),      // RET_ZERO
-    (0, true, true),      // RET_TRUE
-    (2, true, false),     // IATTR_SET
-    (2, true, false),     // IATTR_ADD
-    (2, true, false),     // IATTR_SUB
-    (1, true, true),      // PUSH_PROC_STATE
-    (0, true, true),      // PUSH_VERSION
-    (5, true, false),     // PUT_SUBS
-    (0, false, false),    // PUT_SUBS2
-    (0, false, false),    // PUT_SUBS3
-    (2, true, false),     // PUT_GLYPH
-    (3, true, true),      // PUSH_GLYPH_ATTR
-    (3, true, true),      // PUSH_ATT_TO_GLYPH_ATTR
-    (0, true, true),      // BITOR
-    (0, true, true),      // BITAND
-    (0, true, true),      // BITNOT
-    (4, true, true),      // BITSET
-    (2, true, false),     // SET_FEAT
-    (0, true, false),     // TEMP_COPY
+    (2, false, true),       // CNTXT_ITEM
+    (1, true, false),       // ATTR_SET
+    (1, true, false),       // ATTR_ADD
+    (1, true, false),       // ATTR_SUB
+    (1, true, false),       // ATTR_SET_SLOT
+    (2, true, false),       // IATTR_SET_SLOT
+    (2, true, true),        // PUSH_SLOT_ATTR
+    (2, true, true),        // PUSH_GLYPH_ATTR_OBS
+    (3, true, true),        // PUSH_GLYPH_METRIC
+    (2, true, true),        // PUSH_FEAT
+    (2, true, true),        // PUSH_ATT_TO_GATTR_OBS
+    (3, true, true),        // PUSH_ATT_TO_GLYPH_METRIC
+    (3, true, true),        // PUSH_ISLOT_ATTR
+    (3, false, false),      // PUSH_IGLYPH_ATTR
+    (0, true, true),        // POP_RET
+    (0, true, true),        // RET_ZERO
+    (0, true, true),        // RET_TRUE
+    (2, true, false),       // IATTR_SET
+    (2, true, false),       // IATTR_ADD
+    (2, true, false),       // IATTR_SUB
+    (1, true, true),        // PUSH_PROC_STATE
+    (0, true, true),        // PUSH_VERSION
+    (5, true, false),       // PUT_SUBS
+    (0, false, false),      // PUT_SUBS2
+    (0, false, false),      // PUT_SUBS3
+    (2, true, false),       // PUT_GLYPH
+    (3, true, true),        // PUSH_GLYPH_ATTR
+    (3, true, true),        // PUSH_ATT_TO_GLYPH_ATTR
+    (0, true, true),        // BITOR
+    (0, true, true),        // BITAND
+    (0, true, true),        // BITNOT
+    (4, true, true),        // BITSET
+    (2, true, false),       // SET_FEAT
+    (0, true, false),       // TEMP_COPY
 ];
 
 fn implemented(o: u8, constraint: bool) -> bool {
@@ -335,7 +335,11 @@ impl Decoder<'_> {
             self.failure(Status::ArgumentsExhausted);
             return false;
         }
-        let param_sz = if psz == VARARGS { usize::from(self.b(bc)) + 1 } else { usize::from(psz) };
+        let param_sz = if psz == VARARGS {
+            usize::from(self.b(bc)) + 1
+        } else {
+            usize::from(psz)
+        };
         if bc - 1 + param_sz >= self.end {
             self.failure(Status::ArgumentsExhausted);
             return false;
@@ -452,7 +456,10 @@ impl Decoder<'_> {
                 self.test_context();
             }
             op::CNTXT_ITEM => {
-                self.valid_upto(self.lim.rule_length, (i32::from(self.lim.pre_context) + i32::from(b0 as i8)) as u16);
+                self.valid_upto(
+                    self.lim.rule_length,
+                    (i32::from(self.lim.pre_context) + i32::from(b0 as i8)) as u16,
+                );
                 if bc + 2 + usize::from(b1) >= self.end {
                     self.failure(Status::JumpPastEnd);
                 }
@@ -618,7 +625,11 @@ impl Decoder<'_> {
                 let r = self.slotref as usize;
                 let cr = (self.code.instrs.len() + 1) as u8;
                 if let Some(c) = self.contexts.get_mut(r) {
-                    *c = Context { changed: false, referenced: false, code_ref: cr };
+                    *c = Context {
+                        changed: false,
+                        referenced: false,
+                        code_ref: cr,
+                    };
                 }
             }
             op::INSERT => {
@@ -665,7 +676,11 @@ impl Decoder<'_> {
             return false;
         }
         let psz = TABLE[usize::from(o)].0;
-        let param_sz = if psz == VARARGS { usize::from(self.b(*bc)) + 1 } else { usize::from(psz) };
+        let param_sz = if psz == VARARGS {
+            usize::from(self.b(*bc)) + 1
+        } else {
+            usize::from(psz)
+        };
         self.code.instrs.push(o);
         if param_sz != 0 {
             for i in 0..param_sz {
@@ -747,7 +762,10 @@ impl Code {
     /// `Code(is_constraint, bytecode_begin, bytecode_end, pre_context,
     /// rule_length, silf, face, pt)`.
     pub(crate) fn load(constraint: bool, bytecode: &[u8], lim: &Limits, pt: PassType) -> Code {
-        let mut code = Code { constraint, ..Code::default() };
+        let mut code = Code {
+            constraint,
+            ..Code::default()
+        };
         if bytecode.is_empty() {
             return code;
         }
@@ -763,7 +781,11 @@ impl Code {
                 bytecode,
                 end: bytecode.len(),
                 lim,
-                out_index: if constraint { 0 } else { i32::from(lim.pre_context) },
+                out_index: if constraint {
+                    0
+                } else {
+                    i32::from(lim.pre_context)
+                },
                 out_length: if constraint { 1 } else { lim.rule_length },
                 passtype: pt,
                 stack_depth: 0,
@@ -792,7 +814,10 @@ impl Code {
         }
         if code.instrs.is_empty() {
             // (an empty program: `Code()`)
-            return Code { constraint: false, ..Code::default() };
+            return Code {
+                constraint: false,
+                ..Code::default()
+            };
         }
         code.max_ref = max_ref;
         code.instrs.push(op::RET_ZERO);

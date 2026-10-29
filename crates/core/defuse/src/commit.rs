@@ -36,12 +36,14 @@ use std::time::Instant;
 
 use crate::api::{Brackets, Cause, Effect, Locality, NodeId, OpId, PathId, UnitId};
 use crate::engine::Engine;
+use crate::index::RangeKey;
 use crate::lock::ns;
-use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, RunRecord, State, Wake, pack_effect, unpack_effect};
+use crate::node::{
+    Anchor, DefRec, Node, Placement, Product, ReadKind, RunRecord, State, Wake, pack_effect, unpack_effect,
+};
 use crate::order::{Pos, SegId};
 use crate::read::{self, Reaching, next_contribution, reaching_at, reader_answer, through};
 use crate::sched::{Worker, allow_final_rerun, enqueue, mark_dirty, mark_stale};
-use crate::index::RangeKey;
 use crate::segment::{Def, GLOBAL, Inner, Made, PosMap, RangeReader, Reader, Segment, live, push_pruned};
 use crate::values::{Field, FxHashMap, FxHashSet, ValueId, Values};
 
@@ -74,7 +76,10 @@ impl CommitStats {
 
 /// The node's segment, write-locked, with the node still in it; None when
 /// the node is gone.
-pub(crate) fn own_write<'a>(eng: &'a Engine, node: &Node) -> Option<(&'a Arc<Segment>, crate::lock::WriteGuard<'a, Inner>)> {
+pub(crate) fn own_write<'a>(
+    eng: &'a Engine,
+    node: &Node,
+) -> Option<(&'a Arc<Segment>, crate::lock::WriteGuard<'a, Inner>)> {
     loop {
         if node.state() == State::Gone {
             return None;
@@ -225,11 +230,23 @@ fn foreign_between(eng: &Engine, by: NodeId, lo: Pos, hi: Pos) -> Vec<NodeId> {
 /// slots moved back and nodes of later slots came between, it is made
 /// anew where it belongs.
 #[allow(clippy::too_many_arguments)]
-fn stranded(eng: &Engine, inner: &Inner, others: &[NodeId], by: NodeId, a: NodeId, s: u8, floor: Pos, kpos: Pos) -> bool {
+fn stranded(
+    eng: &Engine,
+    inner: &Inner,
+    others: &[NodeId],
+    by: NodeId,
+    a: NodeId,
+    s: u8,
+    floor: Pos,
+    kpos: Pos,
+) -> bool {
     if kpos <= floor {
         return false;
     }
-    inner.nodes.range((Excluded(floor), Excluded(kpos))).any(|(_, &x)| strands(eng, x, by, a, s))
+    inner
+        .nodes
+        .range((Excluded(floor), Excluded(kpos)))
+        .any(|(_, &x)| strands(eng, x, by, a, s))
         || others.iter().any(|&x| {
             let p = eng.node(x).pos_hint();
             p > floor && p < kpos && strands(eng, x, by, a, s)
@@ -367,7 +384,13 @@ fn filed_defs(v: &Values, defs: &[DefRec], b: &Brackets) -> Vec<Filed> {
     ps.into_iter()
         .map(|(f, rel, mut xs)| {
             if let [(depth, value)] = xs[..] {
-                return Filed { f, depth, value, rel, multi: false };
+                return Filed {
+                    f,
+                    depth,
+                    value,
+                    rel,
+                    multi: false,
+                };
             }
             xs.sort_by_key(|x| outer(x.0));
             Filed {
@@ -553,7 +576,14 @@ fn file_stop(eng: &Engine, f: Field, k: RangeKey, r: &RangeReader) -> bool {
 /// ([`wake_waiters`]); one that is no hole any more by then runs it again
 /// at once. Filed before it is looked at, as `stop_at`: a node that stops
 /// being a hole meanwhile has its waiters taken after.
-fn file_waits(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, serial: u32, holes: Vec<NodeId>, st: &mut CommitStats) {
+fn file_waits(
+    eng: &Engine,
+    w: Option<&Worker>,
+    node: &Arc<Node>,
+    serial: u32,
+    holes: Vec<NodeId>,
+    st: &mut CommitStats,
+) {
     for h in holes {
         let hn = eng.node(h);
         push_pruned(&mut hn.waiters.lock(), (node.id, serial), |x| live(eng, x.0, x.1));
@@ -621,7 +651,9 @@ fn file_bounds(eng: &Engine, f: Field, k: RangeKey, r: &RangeReader) -> bool {
             continue;
         }
         let n = eng.node(b);
-        push_pruned(&mut n.bounded.lock(), (f, k, r.clone()), |x| live(eng, x.2.node, x.2.serial));
+        push_pruned(&mut n.bounded.lock(), (f, k, r.clone()), |x| {
+            live(eng, x.2.node, x.2.serial)
+        });
         if n.state() == State::Gone {
             ok = false;
         }
@@ -706,7 +738,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     if p.resumed.get()
         && let Some(r) = node.run_record()
     {
-        let again: FxHashMap<(ReadKind, PathId), Option<ValueId>> = p.reads.iter().map(|x| ((x.kind.clone(), x.path), x.seen)).collect();
+        let again: FxHashMap<(ReadKind, PathId), Option<ValueId>> =
+            p.reads.iter().map(|x| ((x.kind.clone(), x.path), x.seen)).collect();
         // (a kept read of the line this run read again and found moved: a
         // range or a read at a node, which is what a state folded along
         // the line rests on; the state it resumed from was built on the
@@ -720,7 +753,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 && seen != x.seen
                 && matches!(
                     x.kind,
-                    ReadKind::Fold { .. } | ReadKind::Next { .. } | ReadKind::Field { at: Anchor::Before(_) | Anchor::AfterOwn(_), .. }
+                    ReadKind::Fold { .. }
+                        | ReadKind::Next { .. }
+                        | ReadKind::Field {
+                            at: Anchor::Before(_) | Anchor::AfterOwn(_),
+                            ..
+                        }
                 )
                 && !(matches!(x.kind, ReadKind::Next { .. }) && x.seen.is_none())
             {
@@ -735,11 +773,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let is_gone = |n: NodeId| eng.placed_node(n).is_none_or(|n| n.state() == State::Gone);
         let gone = |x: &crate::node::ReadRec| match x.kind {
             ReadKind::Next { after: Some(n), .. } => is_gone(n),
-            ReadKind::Field { at: Anchor::Before(n) | Anchor::AfterOwn(n), .. } => is_gone(n),
+            ReadKind::Field {
+                at: Anchor::Before(n) | Anchor::AfterOwn(n),
+                ..
+            } => is_gone(n),
             _ => false,
         };
         for x in &r.reads {
-            if let ReadKind::Field { f, at: Anchor::Before(n) | Anchor::AfterOwn(n) } = x.kind
+            if let ReadKind::Field {
+                f,
+                at: Anchor::Before(n) | Anchor::AfterOwn(n),
+            } = x.kind
                 && x.seen.is_some()
                 && is_gone(n)
                 && !again.contains_key(&(x.kind.clone(), x.path))
@@ -755,7 +799,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         p.reads.extend(
             r.reads
                 .iter()
-                .filter(|x| !again.contains_key(&(x.kind.clone(), x.path)) && !gone(x) && !matches!(x.kind, ReadKind::Placed { .. }))
+                .filter(|x| {
+                    !again.contains_key(&(x.kind.clone(), x.path))
+                        && !gone(x)
+                        && !matches!(x.kind, ReadKind::Placed { .. })
+                })
                 .cloned(),
         );
     }
@@ -812,7 +860,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 _ => merged.push((a, b)),
             }
         }
-        merged.into_iter().flat_map(|(a, b)| foreign_between(eng, node.id, a, b)).collect()
+        merged
+            .into_iter()
+            .flat_map(|(a, b)| foreign_between(eng, node.id, a, b))
+            .collect()
     };
     // everything a placement needs but its label, made before the lock
     let mut fresh: Vec<Option<(Arc<Node>, Predicted)>> = p
@@ -857,7 +908,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         },
         placed: Vec::with_capacity(p.placements.len()),
         claim: p.claim,
-        effect: if brackets == Brackets::default() { Effect::None } else { Effect::Scope(brackets) },
+        effect: if brackets == Brackets::default() {
+            Effect::None
+        } else {
+            Effect::Scope(brackets)
+        },
         provisional: false,
         state: p.state,
         waits: std::mem::take(&mut p.waits).into_boxed_slice(),
@@ -865,7 +920,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut spare_readers: Vec<Reader> = Vec::with_capacity(4);
     let fields_of = |r: &Option<Arc<RunRecord>>| -> (Vec<Field>, Vec<Field>) {
         r.as_ref().map_or_else(Default::default, |r| {
-            (r.defs.iter().map(|d| d.f).collect(), r.contribs.iter().map(|c| c.0).collect())
+            (
+                r.defs.iter().map(|d| d.f).collect(),
+                r.contribs.iter().map(|c| c.0).collect(),
+            )
         })
     };
     let (mut old_fields, mut old_contribs) = fields_of(&last);
@@ -983,7 +1041,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 // range filed past what it read; amsldoc -j16 ended with 0
                 // pages, the loop's rest on "none after 72" with node 75's
                 // contribution filed, 10 builds in 600 on one loaded node)
-                if refuted.is_none() && read::apply_path(eng, next_answers.get(&i).copied().flatten(), r.path) != r.seen {
+                if refuted.is_none() && read::apply_path(eng, next_answers.get(&i).copied().flatten(), r.path) != r.seen
+                {
                     refuted = Some(ri);
                 }
             }
@@ -1048,7 +1107,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         if tries < crate::order::ROOM_TRIES && !seg.has_room(&inner, fresh.iter().filter(|x| x.is_some()).count()) {
             drop(inner);
             tries += 1;
-            eng.order.rebalance(eng, seg.id, fresh.iter().filter(|x| x.is_some()).count());
+            eng.order
+                .rebalance(eng, seg.id, fresh.iter().filter(|x| x.is_some()).count());
             continue;
         }
         let t_lock = Instant::now();
@@ -1080,8 +1140,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             match m.get_mut(&pos) {
                 Some(e)
                     if e.value == d.value
-                        && (e.depth == depth
-                            || (e.provisional && at_top && e.depth == 0 && depth == GLOBAL)) =>
+                        && (e.depth == depth || (e.provisional && at_top && e.depth == 0 && depth == GLOBAL)) =>
                 {
                     if e.provisional {
                         st.predictions_confirmed += 1;
@@ -1196,7 +1255,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 .iter()
                 .copied()
                 .filter(|n| !kept.contains(&Some(*n)))
-                .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() != State::Gone && x.slot() == 2))
+                .filter(|&n| {
+                    eng.placed_node(n)
+                        .is_some_and(|x| x.state() != State::Gone && x.slot() == 2)
+                })
                 .collect();
             sort_by_label(eng, &mut v);
             v.into()
@@ -1226,7 +1288,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 after = subtree_end(eng, k);
                 labelled = after;
             }
-            let after_pos = if moving.contains(&labelled) { Pos(0) } else { eng.node(labelled).pos_hint() };
+            let after_pos = if moving.contains(&labelled) {
+                Pos(0)
+            } else {
+                eng.node(labelled).pos_hint()
+            };
             // (after a placement of this run: after the node it stands
             // for; one made by this commit is placed after it, not kept
             // where it stood before that node was)
@@ -1273,7 +1339,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                         let q = prev.expect("a placement before, placed elsewhere");
                         let f = eng
                             .placed_node(q)
-                            .filter(|qn| qn.state() != State::Gone && qn.pos_hint() != Pos(0) && !moving.contains(&qn.id))
+                            .filter(|qn| {
+                                qn.state() != State::Gone && qn.pos_hint() != Pos(0) && !moving.contains(&qn.id)
+                            })
                             .map_or(floor, |qn| eng.node(subtree_end(eng, qn.id)).pos_hint());
                         (q, 1, f)
                     }
@@ -1336,7 +1404,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 }
             };
             let id = n.id;
-            n.follows.store(!matches!(what, Placement::Child(..)), Ordering::Release);
+            n.follows
+                .store(!matches!(what, Placement::Child(..)), Ordering::Release);
             placed.push(id);
             let at = match what {
                 Placement::FollowAfter(at, _, _) => Some(*at),
@@ -1354,7 +1423,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             n.slot.store(slot, Ordering::Release);
             prev = Some(id);
             let before = if matches!(what, Placement::Follow(..)) && !elsewhere {
-                while old_follows.front().is_some_and(|&b| eng.node(b).pos_hint() <= after_pos) {
+                while old_follows
+                    .front()
+                    .is_some_and(|&b| eng.node(b).pos_hint() <= after_pos)
+                {
                     old_follows.pop_front();
                 }
                 old_follows.pop_front()
@@ -1378,11 +1450,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 && !Segment::needs_split(&inner)
                 && eng.node(after).seg_hint() == seg.id
                 && inner.nodes.get(&eng.node(after).pos_hint()) == Some(&after)
-                && before.is_none_or(|b| eng.node(b).seg_hint() == seg.id && inner.nodes.get(&eng.node(b).pos_hint()) == Some(&b));
+                && before.is_none_or(|b| {
+                    eng.node(b).seg_hint() == seg.id && inner.nodes.get(&eng.node(b).pos_hint()) == Some(&b)
+                });
             if in_here {
                 // (a continuation goes after what others placed after this
                 // node and its children, and what follows those)
-                let after = if slot == 2 && before.is_none() { attached_end(eng, &inner, node.id, after) } else { after };
+                let after = if slot == 2 && before.is_none() {
+                    attached_end(eng, &inner, node.id, after)
+                } else {
+                    after
+                };
                 let pred = pred.expect("a node made anew");
                 made.push(match before {
                     Some(b) => place_before(eng, seg, &mut inner, b, n, pred),
@@ -1442,7 +1520,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // (a `next` reader stops at a node to run again as at a hole,
         // `Node::is_open`: taken at every commit)
         if !inner.stops.is_empty() {
-            let (mine, rest) = std::mem::take(&mut inner.stops).into_iter().partition(|s| s.2.to == Some(node.id));
+            let (mine, rest) = std::mem::take(&mut inner.stops)
+                .into_iter()
+                .partition(|s| s.2.to == Some(node.id));
             inner.stops = rest;
             holes = mine;
         }
@@ -1538,7 +1618,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             if node.state() == State::Gone || !node.record().is_some_and(|r| Arc::ptr_eq(&r, &rec)) {
                 continue;
             }
-            let to = if matches!(p.placements[i], Placement::FollowAfter(..) | Placement::FollowAfterPlaced(..)) {
+            let to = if matches!(
+                p.placements[i],
+                Placement::FollowAfter(..) | Placement::FollowAfterPlaced(..)
+            ) {
                 Target::AfterChildren(at)
             } else if let Some(b) = before {
                 Target::Before(b, at)
@@ -1551,7 +1634,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             }
             continue;
         };
-        let n = if matches!(p.placements[i], Placement::FollowAfter(..) | Placement::FollowAfterPlaced(..)) {
+        let n = if matches!(
+            p.placements[i],
+            Placement::FollowAfter(..) | Placement::FollowAfterPlaced(..)
+        ) {
             place_after_children(eng, at, n, pred)
         } else if let Some(b) = before {
             place_before_node(eng, b, at, n, pred)
@@ -1726,7 +1812,13 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // that node, which the next run goes back before; else no site)
     let parks = p.state.is_some();
     let cause_of = |kind: &ReadKind| match kind {
-        ReadKind::Field { f, at: Anchor::Before(n) | Anchor::AfterOwn(n) } if parks => Cause::Changed { field: *f, site: Some(*n) },
+        ReadKind::Field {
+            f,
+            at: Anchor::Before(n) | Anchor::AfterOwn(n),
+        } if parks => Cause::Changed {
+            field: *f,
+            site: Some(*n),
+        },
         ReadKind::Field { f, .. } => Cause::Changed { field: *f, site: None },
         ReadKind::Env { f } => Cause::Environment { field: *f },
         ReadKind::Fold { f, from: start, .. } | ReadKind::Next { f, after: start } => Cause::Range {
@@ -1754,7 +1846,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let range = |k: &ReadKind| match k {
             ReadKind::Fold { from: Some(n), .. }
             | ReadKind::Next { after: Some(n), .. }
-            | ReadKind::Field { at: Anchor::Before(n) | Anchor::AfterOwn(n), .. } => p.woken_at != Some(*n),
+            | ReadKind::Field {
+                at: Anchor::Before(n) | Anchor::AfterOwn(n),
+                ..
+            } => p.woken_at != Some(*n),
             _ => false,
         };
         causes.push(cause_of(&rec.reads[i].kind));
@@ -1771,7 +1866,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 // moved)
                 let moved = match r.kind {
                     ReadKind::Following { .. } => true,
-                    _ if !scope_moved && !matches!(r.kind, ReadKind::Next { .. }) && r.kind.field().is_some_and(|f| eng.field_epoch(f) == r.epoch) => false,
+                    _ if !scope_moved
+                        && !matches!(r.kind, ReadKind::Next { .. })
+                        && r.kind.field().is_some_and(|f| eng.field_epoch(f) == r.epoch) =>
+                    {
+                        false
+                    }
                     _ => !read::holds(eng, node, r, &mut memo),
                 };
                 if !moved {
@@ -1801,7 +1901,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 }
             }
             ReadKind::Fold { from: Some(n), .. }
-            | ReadKind::Field { at: Anchor::Before(n) | Anchor::AfterOwn(n), .. } => {
+            | ReadKind::Field {
+                at: Anchor::Before(n) | Anchor::AfterOwn(n),
+                ..
+            } => {
                 if p.woken_at != Some(*n) {
                     causes.push(cause_of(k));
                 }
@@ -1820,7 +1923,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // a run after. For any other, the structure moved)
     if p.state.is_some() {
         for (f, n) in anchor_gone {
-            causes.push(Cause::Changed { field: f, site: Some(n) });
+            causes.push(Cause::Changed {
+                field: f,
+                site: Some(n),
+            });
         }
     } else if causes.is_empty() && !anchor_gone.is_empty() {
         causes.push(Cause::Structure);
@@ -1841,7 +1947,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 Cause::Changed { field, .. } => Cause::Changed { field, site: Some(by) },
                 c => c,
             };
-            crate::sched::hold_wake(eng, ww, node.id, Wake { by: Some(by), cause, at_ns: eng.now_ns() });
+            crate::sched::hold_wake(
+                eng,
+                ww,
+                node.id,
+                Wake {
+                    by: Some(by),
+                    cause,
+                    at_ns: eng.now_ns(),
+                },
+            );
             continue;
         }
         mark_dirty(
@@ -2133,7 +2248,14 @@ pub(crate) fn def_level(eng: &Engine, f: Field, by: NodeId) -> u16 {
 /// the deeper ones before it, which the walk passes: a reader past their
 /// scope's close sees the walked one again.
 #[allow(clippy::type_complexity)]
-fn next_hiding(v: &Values, inner: &Inner, f: Field, start: &[u64], from: Pos, level: u16) -> (Option<(Pos, Def, u16)>, Vec<(Pos, Def)>) {
+fn next_hiding(
+    v: &Values,
+    inner: &Inner,
+    f: Field,
+    start: &[u64],
+    from: Pos,
+    level: u16,
+) -> (Option<(Pos, Def, u16)>, Vec<(Pos, Def)>) {
     let mut deeper = Vec::new();
     for (q, d, lv) in read::levels(v, inner, f, start, None, false) {
         if q <= from {
@@ -2341,7 +2463,10 @@ pub(crate) fn publish_finals(eng: &Engine, w: &Worker) -> (usize, bool) {
             }
             let wake = Wake {
                 by: last.by,
-                cause: Cause::Changed { field: *f, site: last.by },
+                cause: Cause::Changed {
+                    field: *f,
+                    site: last.by,
+                },
                 at_ns: eng.now_ns(),
             };
             // (a quiet point's own wake, never held: holding it would leave
@@ -2432,7 +2557,10 @@ fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<
     }
     let now = read::reaching_visible(eng, f, Pos(eng.unit(u).end.0 - 1), true);
     let cause = match by {
-        Some(b) => Cause::Changed { field: f, site: Some(b) },
+        Some(b) => Cause::Changed {
+            field: f,
+            site: Some(b),
+        },
         None => Cause::Environment { field: f },
     };
     for r in rs {
@@ -2458,7 +2586,10 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
         return;
     }
     let cause = match by {
-        Some(b) => Cause::Changed { field: f, site: Some(b) },
+        Some(b) => Cause::Changed {
+            field: f,
+            site: Some(b),
+        },
         None => Cause::Environment { field: f },
     };
     if reader_answer(eng, f, r) != r.seen
@@ -2552,7 +2683,15 @@ fn reask_range(
                     // that never came)
                     if let Some(to) = r.to
                         && eng.frontier_by.load(Ordering::Acquire) == r.node.raw() + 1
-                        && eng.frontier.compare_exchange(to.raw() + 1, n.stop.map_or(0, |s| s.raw() + 1), Ordering::AcqRel, Ordering::Acquire).is_ok()
+                        && eng
+                            .frontier
+                            .compare_exchange(
+                                to.raw() + 1,
+                                n.stop.map_or(0, |s| s.raw() + 1),
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
                     {
                         crate::sched::release_frontier(eng, w);
                     }
@@ -2599,7 +2738,9 @@ fn take_stops(inner: &mut Inner, node: NodeId) -> Vec<(Field, RangeKey, RangeRea
     if inner.stops.is_empty() {
         return Vec::new();
     }
-    let (mine, rest) = std::mem::take(&mut inner.stops).into_iter().partition(|s| s.2.to == Some(node));
+    let (mine, rest) = std::mem::take(&mut inner.stops)
+        .into_iter()
+        .partition(|s| s.2.to == Some(node));
     inner.stops = rest;
     mine
 }
@@ -2607,7 +2748,13 @@ fn take_stops(inner: &mut Inner, node: NodeId) -> Vec<(Field, RangeKey, RangeRea
 /// Re-asks the `next` readers whose search stopped at `by`: it has
 /// committed, been taken or removed, so the first contribution after their
 /// start may now be known.
-fn reask_stops(eng: &Engine, w: Option<&Worker>, stops: Vec<(Field, RangeKey, RangeReader)>, by: NodeId, st: &mut CommitStats) {
+fn reask_stops(
+    eng: &Engine,
+    w: Option<&Worker>,
+    stops: Vec<(Field, RangeKey, RangeReader)>,
+    by: NodeId,
+    st: &mut CommitStats,
+) {
     let mut memo = read::FoldMemo::new();
     for (f, k, r) in stops {
         reask_range(eng, w, f, k, &r, by, st, &mut memo);
@@ -2817,7 +2964,11 @@ pub(crate) fn built(
 pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, node: &Arc<Node>, pred: Predicted) {
     let v = eng.values();
     let pos = node.pos_hint();
-    let Predicted { mut defs, shapes, effect } = pred;
+    let Predicted {
+        mut defs,
+        shapes,
+        effect,
+    } = pred;
     // (its brackets before it runs: readers after it see the depth it
     // makes; `settle_predictions` re-asks them)
     if effect != Effect::Pending {
@@ -2957,7 +3108,12 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
         }
     }
     lap.lap("defs");
-    lap.report(node.id.0, u64::try_from(t_held.elapsed().as_nanos()).unwrap_or(0), inner.stops.len(), inner.readers.len());
+    lap.report(
+        node.id.0,
+        u64::try_from(t_held.elapsed().as_nanos()).unwrap_or(0),
+        inner.stops.len(),
+        inner.readers.len(),
+    );
     *node.last.lock() = None;
     for &f in changed_defs.iter().chain(&changed_contribs) {
         eng.bump(f);
@@ -3053,7 +3209,11 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     *walk |= leave;
     // (a node removed or taken claims nothing: a run of it still going
     // when it was gives back what it held instead of taking siblings)
-    let want = if *walk || matches!(me.state(), State::Gone | State::Inert | State::RunningInert) { 0 } else { want };
+    let want = if *walk || matches!(me.state(), State::Gone | State::Inert | State::RunningInert) {
+        0
+    } else {
+        want
+    };
     let all = me.claim_all.load(Ordering::Acquire) && want > 0;
     let mut cur = Some(me.seg_hint());
     let mut lower = Some(me.pos_hint());
@@ -3065,7 +3225,11 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     let mut taken_holes: Vec<Arc<Node>> = Vec::new();
     let mut stops: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
     // (what it held before, up to there; what it holds now, to here)
-    let old_end = me.claim_end.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw);
+    let old_end = me
+        .claim_end
+        .load(Ordering::Acquire)
+        .checked_sub(1)
+        .map(NodeId::from_raw);
     #[cfg(test)]
     tests::paused(me.id, want);
     if want == 0 && old_end.is_none() {
@@ -3185,7 +3349,8 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
         lower = None;
         cur = eng.order.next(sid, seg.lo);
     }
-    me.claim_end.store(new_end.map_or(0, |n| n.raw() + 1), Ordering::Release);
+    me.claim_end
+        .store(new_end.map_or(0, |n| n.raw() + 1), Ordering::Release);
     drop(walk);
     #[cfg(test)]
     tests::paused_after(me.id);
@@ -3263,7 +3428,9 @@ fn wake_puller(eng: &Engine, w: Option<&Worker>, s: &Node, except: NodeId) {
             found
         };
         if let Some(x) = found {
-            let pulled = x.record().is_some_and(|r| r.reads.iter().any(|rd| matches!(rd.kind, ReadKind::Following { .. })));
+            let pulled = x
+                .record()
+                .is_some_and(|r| r.reads.iter().any(|rd| matches!(rd.kind, ReadKind::Following { .. })));
             if pulled {
                 mark_stale(
                     eng,
@@ -3342,7 +3509,13 @@ type Deferred = (usize, NodeId, Option<NodeId>, Arc<Node>, Option<Predicted>);
 /// placements and what stands under it (`attached_end`: the nodes others
 /// placed after it), before the next of its placer's; or (`after`
 /// false) right before it. None when `beside` is gone.
-pub(crate) fn place_beside(eng: &Engine, beside: NodeId, after: bool, node: Arc<Node>, pred: Predicted) -> Option<Arc<Node>> {
+pub(crate) fn place_beside(
+    eng: &Engine,
+    beside: NodeId,
+    after: bool,
+    node: Arc<Node>,
+    pred: Predicted,
+) -> Option<Arc<Node>> {
     let start = if after { subtree_end(eng, beside) } else { beside };
     let sn = eng.node(start);
     let mut tries = 0;
@@ -3396,12 +3569,20 @@ pub(crate) fn edit_placed(eng: &Engine, placer: NodeId, f: impl FnOnce(&mut Vec<
 }
 
 /// `place`, before `before` (a node of the segment) instead of after one.
-fn place_before(eng: &Engine, seg: &Segment, inner: &mut Inner, before: NodeId, node: Arc<Node>, pred: Predicted) -> Arc<Node> {
+fn place_before(
+    eng: &Engine,
+    seg: &Segment,
+    inner: &mut Inner,
+    before: NodeId,
+    node: Arc<Node>,
+    pred: Predicted,
+) -> Arc<Node> {
     let p = match seg.gap_before(inner, eng.node(before).pos_hint()) {
         Some(p) => p,
         None => {
             seg.relabel(inner, eng);
-            seg.gap_before(inner, eng.node(before).pos_hint()).expect("a gap after a relabel")
+            seg.gap_before(inner, eng.node(before).pos_hint())
+                .expect("a gap after a relabel")
         }
     };
     node.seg.store(seg.id.0, Ordering::Release);
@@ -3552,7 +3733,14 @@ struct Left {
 /// sibling that would stand before it gives its claim back first: its run
 /// takes it again from the new place. False when it stayed (its place
 /// gone with its placer, or the place inside its own subtree).
-pub(crate) fn relocate(eng: &Engine, w: Option<&Worker>, placer: NodeId, k: &Arc<Node>, to: Target, st: &mut CommitStats) -> bool {
+pub(crate) fn relocate(
+    eng: &Engine,
+    w: Option<&Worker>,
+    placer: NodeId,
+    k: &Arc<Node>,
+    to: Target,
+    st: &mut CommitStats,
+) -> bool {
     // its subtree, as it stands
     let mut sub: Vec<NodeId> = Vec::new();
     let mut skip: FxHashSet<NodeId> = FxHashSet::default();
@@ -3587,7 +3775,11 @@ pub(crate) fn relocate(eng: &Engine, w: Option<&Worker>, placer: NodeId, k: &Arc
     }
     let lim = before.map_or_else(|| eng.node(end).pos_hint(), |b| eng.node(b).pos_hint());
     let mut movers: Vec<Arc<Node>> = vec![k.clone()];
-    let mut rest: Vec<Arc<Node>> = sub.iter().map(|&c| eng.node(c).clone()).filter(|c| c.pos_hint() < lim).collect();
+    let mut rest: Vec<Arc<Node>> = sub
+        .iter()
+        .map(|&c| eng.node(c).clone())
+        .filter(|c| c.pos_hint() < lim)
+        .collect();
     // (each label read once, as above: a rebalance elsewhere may move one
     // during the sort)
     rest.sort_by_cached_key(|c| c.pos_hint());
@@ -3610,8 +3802,20 @@ pub(crate) fn relocate(eng: &Engine, w: Option<&Worker>, placer: NodeId, k: &Arc
             continue;
         };
         hi = hi.max(left.pos);
-        let parent = if first && m.slot() == 2 && before.is_none() { m.parent } else { None };
-        let place = land(eng, &m, prev, if first { before } else { None }, parent, &skip, left.hole);
+        let parent = if first && m.slot() == 2 && before.is_none() {
+            m.parent
+        } else {
+            None
+        };
+        let place = land(
+            eng,
+            &m,
+            prev,
+            if first { before } else { None },
+            parent,
+            &skip,
+            left.hole,
+        );
         let Some((npos, nseg, defs, b)) = place else {
             // (its place gone with its placer: it goes with it, its old
             // place's readers asked again, and its placements with it,
@@ -3666,7 +3870,8 @@ pub(crate) fn relocate(eng: &Engine, w: Option<&Worker>, placer: NodeId, k: &Arc
     }
     // (range readers bounded by a node that moved now reach anywhere
     // between its two labels)
-    eng.ranges.widen_over(Pos(lo.0.saturating_sub(1)), Pos(hi.0.saturating_add(1)));
+    eng.ranges
+        .widen_over(Pos(lo.0.saturating_sub(1)), Pos(hi.0.saturating_add(1)));
     // each runs again where it stands (the last first: a worker's deque
     // gives the newest first)
     for m in landed.iter().rev() {
@@ -3875,7 +4080,8 @@ fn land(
                 Some(p) => p,
                 None => {
                     seg.relabel(&mut inner, eng);
-                    seg.gap_before(&inner, eng.node(bf).pos_hint()).expect("a gap after a relabel")
+                    seg.gap_before(&inner, eng.node(bf).pos_hint())
+                        .expect("a gap after a relabel")
                 }
             },
             None => {
@@ -4019,7 +4225,13 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
 /// by a claim) and, when they changed, re-asks every reader after it
 /// whose answer moved: a bracket decides which definitions reach
 /// everything after it.
-pub(crate) fn file_effect(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, b: Option<Brackets>, st: &mut CommitStats) {
+pub(crate) fn file_effect(
+    eng: &Engine,
+    w: Option<&Worker>,
+    node: &Arc<Node>,
+    b: Option<Brackets>,
+    st: &mut CommitStats,
+) {
     // (`Some`: a node taken, its brackets none; `None`: its own, free)
     let taken = b.is_some();
     let b = match b {
@@ -4091,7 +4303,11 @@ fn reask_after_effect_at(
     let (mut a, mut b) = (co + i64::from(old.opens), cn + i64::from(new.opens));
     // (the scopes both sides share: the common ones under the node's
     // closes, and its opens as well where those agree)
-    let mut p = if co == cn { co + i64::from(old.opens.min(new.opens)) } else { co.min(cn) };
+    let mut p = if co == cn {
+        co + i64::from(old.opens.min(new.opens))
+    } else {
+        co.min(cn)
+    };
     let mut readers: Vec<(Field, Reader)> = Vec::new();
     let mut fields: Vec<Field> = Vec::new();
     let mut end: Option<(SegId, Pos)> = None;
@@ -4218,9 +4434,9 @@ mod tests {
     use std::time::Duration;
 
     use crate::api::{NodeId, NodeState, Operation, Stop};
-    use crate::values::ValueId;
     use crate::ctx::Ctx;
     use crate::engine::Engine;
+    use crate::values::ValueId;
 
     /// The node whose walk with `want` 0 pauses after reading
     /// `claim_end` (raw id + 1; 0: none), and the barrier it waits at
@@ -4406,17 +4622,30 @@ mod tests {
         e.push(u, placer, vec![]);
         let t = e.push(u, piece, vec![v.int(1)]);
         e.evaluate(1).unwrap();
-        let r = e.order(u).into_iter().find(|&n| e.node_info(n).is_some_and(|i| i.op == "piece" && i.parent.is_some())).unwrap();
+        let r = e
+            .order(u)
+            .into_iter()
+            .find(|&n| e.node_info(n).is_some_and(|i| i.op == "piece" && i.parent.is_some()))
+            .unwrap();
         e.replace(d, def, vec![f.0, v.int(1)]);
         e.evaluate(1).unwrap();
         for n in [t, r] {
-            assert_eq!(e.node_info(n).unwrap().claimer, Some(c), "taken by the claim of the rest");
+            assert_eq!(
+                e.node_info(n).unwrap().claimer,
+                Some(c),
+                "taken by the claim of the rest"
+            );
         }
         e.replace(d, def, vec![f.0, v.int(0)]);
         e.evaluate(1).unwrap();
         for n in [t, r] {
             let i = e.node_info(n).unwrap();
-            assert_eq!((i.state, i.claimer.map(|x| x.raw())), (NodeState::Done, None), "node {}", n.raw());
+            assert_eq!(
+                (i.state, i.claimer.map(|x| x.raw())),
+                (NodeState::Done, None),
+                "node {}",
+                n.raw()
+            );
         }
         assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
     }
@@ -4479,7 +4708,11 @@ mod tests {
         assert!(moved, "the relabel moved T0 below the label C had ({c_at:?})");
         for (k, &t) in ts.iter().enumerate() {
             let i = e.node_info(t).unwrap();
-            assert!(i.state != NodeState::Inert && i.claimer.is_none(), "T{k} still held by {:?}", i.claimer.map(|n| n.raw()));
+            assert!(
+                i.state != NodeState::Inert && i.claimer.is_none(),
+                "T{k} still held by {:?}",
+                i.claimer.map(|n| n.raw())
+            );
         }
     }
 
@@ -4530,16 +4763,29 @@ mod tests {
         e.push(u, text, vec![v.int(2)]);
         let p = e.push(u, place_kid, vec![]);
         e.evaluate(1).unwrap();
-        let of = |name: &str| e.order(u).into_iter().find(|&n| e.node_info(n).is_some_and(|i| i.op == name)).unwrap();
+        let of = |name: &str| {
+            e.order(u)
+                .into_iter()
+                .find(|&n| e.node_info(n).is_some_and(|i| i.op == name))
+                .unwrap()
+        };
         let k = of("kid");
-        let l = e.order(u).into_iter().find(|&n| e.node_info(n).is_some_and(|i| i.parent == Some(k))).unwrap();
+        let l = e
+            .order(u)
+            .into_iter()
+            .find(|&n| e.node_info(n).is_some_and(|i| i.parent == Some(k)))
+            .unwrap();
         e.remove(a);
         let mut st = super::CommitStats::default();
         let moved = super::relocate(&e, None, p, e.node(k), super::Target::After(a), &mut st);
         assert!(!moved, "K had nowhere to go");
         assert_eq!(e.node(k).state(), crate::node::State::Gone);
         assert_eq!(e.node(l).state(), crate::node::State::Gone, "K's child L");
-        let bad: Vec<String> = e.check_invariants().into_iter().filter(|m| m.contains("holding it no more")).collect();
+        let bad: Vec<String> = e
+            .check_invariants()
+            .into_iter()
+            .filter(|m| m.contains("holding it no more"))
+            .collect();
         assert!(bad.is_empty(), "{bad:?}");
     }
 
@@ -4552,7 +4798,11 @@ mod tests {
         }
 
         fn effect(&self, _: &[ValueId], _: &crate::values::Values) -> crate::api::Effect {
-            crate::api::Effect::Scope(crate::api::Brackets { closes: 0, opens: 1, before: false })
+            crate::api::Effect::Scope(crate::api::Brackets {
+                closes: 0,
+                opens: 1,
+                before: false,
+            })
         }
 
         fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
@@ -4598,7 +4848,11 @@ mod tests {
         let r = e.push(u, reads, vec![f]);
         e.evaluate(1).unwrap();
         assert_eq!(e.output(r).and_then(|o| v.as_int(o)), Some(7));
-        let close = crate::api::Brackets { closes: 1, opens: 0, before: false };
+        let close = crate::api::Brackets {
+            closes: 1,
+            opens: 0,
+            before: false,
+        };
         let file = |n: NodeId| {
             let node = e.node(n);
             let (_, mut inner) = super::own_write(&e, node).expect("on the line");
@@ -4608,7 +4862,11 @@ mod tests {
         let mut st = super::CommitStats::default();
         super::reask_after_effect(&e, None, e.node(x), e.node(x).pos_hint(), ox, close, &mut st);
         super::reask_after_effect(&e, None, e.node(y), e.node(y).pos_hint(), oy, close, &mut st);
-        assert_ne!(e.node(r).state(), crate::node::State::Clean, "R kept f, which both closes hide from it");
+        assert_ne!(
+            e.node(r).state(),
+            crate::node::State::Clean,
+            "R kept f, which both closes hide from it"
+        );
     }
 
     #[test]
@@ -4654,7 +4912,11 @@ mod tests {
         assert!(moved, "the relabel moved T0 below the label C had ({c_at:?})");
         for (k, &t) in ts.iter().enumerate() {
             let i = e.node_info(t).unwrap();
-            assert!(i.state != NodeState::Inert && i.claimer.is_none(), "T{k} still held by {:?}", i.claimer.map(|n| n.raw()));
+            assert!(
+                i.state != NodeState::Inert && i.claimer.is_none(),
+                "T{k} still held by {:?}",
+                i.claimer.map(|n| n.raw())
+            );
         }
         assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
     }
@@ -4739,7 +5001,11 @@ mod tests {
         super::release_claimed(&e, None, e.node(c));
         for (k, &t) in ts.iter().enumerate() {
             let i = e.node_info(t).unwrap();
-            assert!(i.state != NodeState::Inert && i.claimer.is_none(), "T{k} still held by {:?}", i.claimer.map(|n| n.raw()));
+            assert!(
+                i.state != NodeState::Inert && i.claimer.is_none(),
+                "T{k} still held by {:?}",
+                i.claimer.map(|n| n.raw())
+            );
         }
     }
 }

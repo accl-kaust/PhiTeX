@@ -27,7 +27,15 @@ struct JustifyTotal {
 impl Segment<'_> {
     /// `Segment::justify(pSlot, font, width, flags, pFirst, pLast)`.
     #[allow(clippy::too_many_lines)]
-    pub fn justify(&mut self, p_slot: u32, font: Option<&Font>, width: f32, jflags: u32, p_first: u32, p_last: u32) -> f32 {
+    pub fn justify(
+        &mut self,
+        p_slot: u32,
+        font: Option<&Font>,
+        width: f32,
+        jflags: u32,
+        p_first: u32,
+        p_last: u32,
+    ) -> f32 {
         let mut end = self.last;
         let mut curr_width = 0.0f32;
         let scale = font.map_or(1.0, |f| f.scale);
@@ -96,7 +104,8 @@ impl Segment<'_> {
             }
             num_levels += 1;
         }
-        let mut stats: Vec<JustifyTotal> = alloc::vec![JustifyTotal::default(); num_levels as usize];
+        let mut stats: Vec<JustifyTotal> =
+            alloc::vec![JustifyTotal::default(); num_levels as usize];
         let mut s = p_first;
         while s != NIL && s != end {
             let w = self.s(s).position.x / scale + self.s(s).advance.x - base;
