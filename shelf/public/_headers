@@ -7,3 +7,8 @@
 
 /tl2026/*
   Cache-Control: public, max-age=31536000, immutable
+
+# (the one file that changes: the current release, read again within minutes)
+/tl2026/release.json
+  ! Cache-Control
+  Cache-Control: public, max-age=300

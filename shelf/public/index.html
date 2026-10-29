@@ -1,15 +1,50 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Shelf — PhiTeX</title>
+<title>Shelf · PhiTeX</title>
 <style>
-  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fff; --mute: #666; }
-  @media (prefers-color-scheme: dark) { :root { --fg: #eee; --bg: #161616; --mute: #999; } }
-  body { font: 16px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg); max-width: 40rem; margin: 3rem auto; padding: 0 16px; }
-  code { font-size: .9em; } p.m { color: var(--mute); }
+  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fff; --mute: #666; --rule: #ddd; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #eee; --bg: #161616; --mute: #999; --rule: #333; } }
+  body { font: 16px/1.55 system-ui, sans-serif; color: var(--fg); background: var(--bg); max-width: 42rem; margin: 3rem auto; padding: 0 16px; }
+  h1 { margin-bottom: .2rem; } h2 { font-size: 1.05rem; margin-top: 2rem; }
+  a { color: inherit; } code { font-size: .88em; } p.m, .m { color: var(--mute); }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  td { padding: .35rem .5rem .35rem 0; border-top: 1px solid var(--rule); vertical-align: top; }
+  td:first-child { white-space: nowrap; }
+  .wrap { overflow-x: auto; }
 </style>
 <h1>Shelf</h1>
-<p>TeX Live's LaTeX packages, one file per URL, for <a href="https://phitex.org">PhiTeX</a>'s in-browser builds.</p>
-<p><code>GET /tl2026/&lt;name&gt;</code> — a file as TeX would find it by name (<code>/tl2026/graphicx.sty</code>).<br>
-<code>GET /tl2026/names.txt</code> — every name served, one per line.</p>
-<p class="m">Files are TeX Live 2026's, unmodified, each under its own license (mostly the LaTeX Project Public License); see each file's header. No logs of who asks for what are kept beyond the host's defaults.</p>
+<p class="m">TeX Live's files, packed for <a href="https://phitex.org">PhiTeX</a>.</p>
+
+<p>When PhiTeX builds a document without a TeX installation (in the browser, or <code>phitex build --shelf</code>), it fetches the files the document reads from here, once, and keeps them. A typical paper needs a few dozen packs, not the whole of TeX Live.</p>
+
+<p id="now" class="m">Current release: see <a href="/tl2026/release.json"><code>/tl2026/release.json</code></a>.</p>
+
+<h2>What is here</h2>
+<div class="wrap"><table>
+  <tr><td><code>/tl2026/release.json</code></td><td>The current release of TeX Live 2026: its index, its pack table, the engines' search paths.</td></tr>
+  <tr><td><code>/tl2026/release-&lt;r&gt;.json</code></td><td>Every release's description, kept for ever.</td></tr>
+  <tr><td><code>/tl2026/index-&lt;r&gt;.tsv.gz</code></td><td>Each file's path, its pack, and the packs loading it reads (per engine).</td></tr>
+  <tr><td><code>/tl2026/packs-&lt;r&gt;.tsv.gz</code></td><td>Each pack's SHA-256 and size. Clients check every pack against it.</td></tr>
+  <tr><td><code>/tl2026/h/&lt;pack&gt;.pack</code></td><td>The packs: gzip, named by their content, never changed.</td></tr>
+</table></div>
+
+<h2>Versions</h2>
+<p>This host serves Shelf's protocol <b>v1</b> (<code>"schema": 1</code>). A format older PhiTeX versions could not read would get a host of its own, <code>v2.shelf.phitex.org</code>, beside this one. What is published here never changes, and stays while a supported PhiTeX reads it.</p>
+
+<h2>How it is made</h2>
+<p>From TeX Live's own package archives, unmodified, grouped by package. Which packs each LaTeX package and class pulls in is found by running PhiTeX's engines on it; <code>traced_by</code> in a release names the engine version. The design is in PhiTeX's <a href="https://github.com/accl-kaust/PhiTeX/blob/dev/docs/spec-distribution.md">docs/spec-distribution.md</a>.</p>
+
+<h2>Privacy</h2>
+<p>Clients ask for packs by name only: never your files, your text or an identifier. Shelf is static files on Cloudflare Pages and keeps no logs of its own; Cloudflare sees your IP address and the URL, as for any website.</p>
+
+<p class="m" style="margin-top:2.5rem">PhiTeX: <a href="https://phitex.org">phitex.org</a> · <a href="https://github.com/accl-kaust/PhiTeX">source</a>. The files are TeX Live 2026's, each under its own license (mostly the LaTeX Project Public License): see each file's header.</p>
+
+<script>
+  // (the current release, from its own file: the page stays right without it)
+  fetch("/tl2026/release.json", { cache: "no-cache" }).then((r) => r.ok ? r.json() : null).then((j) => {
+    if (!j || !j.release) return;
+    const el = document.getElementById("now");
+    el.textContent = `Current release: ${j.release}, ${Number(j.packs).toLocaleString("en")} packs.`;
+  }).catch(() => {});
+</script>
