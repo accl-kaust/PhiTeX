@@ -1706,7 +1706,14 @@ fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<N
     node.committing.store(false, Ordering::Release);
     let Some(on) = on else { return };
     let mut m = pool.shared.waiting.lock();
-    // (checked again under the lock its commit takes: no wake lost)
+    // (marked awaited before `on`'s commit is checked again, under the
+    // lock its commit takes once it finds the mark: either the check
+    // sees the commit or the commit sees the mark, no wake lost,
+    // `release_waiting`)
+    if let Some(x) = eng.placed_node(on) {
+        x.awaited.store(true, Ordering::SeqCst);
+    }
+    std::sync::atomic::fence(Ordering::SeqCst);
     if committed(on) {
         drop(m);
         w.ready().push(eng, node);
@@ -1786,7 +1793,21 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
 /// The runs waiting for `n`'s commit queued again (`park_waiting`).
 pub(crate) fn release_waiting(eng: &Engine, w: Option<&Worker>, n: NodeId) {
     let Some(w) = w else { return };
-    let ws = w.shared.waiting.lock().remove(&n);
+    // (no run marked it awaited: no lock, which every commit of every
+    // worker took (at 32 threads half their time waiting on it, defuse's
+    // `commits_do_not_wait_on_each_other`). The commit is visible before
+    // the mark is read, and a run that parks marks before it checks the
+    // commit, both past a fence: one of the two sees the other)
+    std::sync::atomic::fence(Ordering::SeqCst);
+    let Some(node) = eng.placed_node(n) else { return };
+    if !node.awaited.load(Ordering::SeqCst) {
+        return;
+    }
+    let ws = {
+        let mut m = w.shared.waiting.lock();
+        node.awaited.store(false, Ordering::SeqCst);
+        m.remove(&n)
+    };
     for m in ws.into_iter().flatten() {
         if let Some(x) = eng.placed_node(m).filter(|x| x.state() == State::Dirty) {
             enqueue(

@@ -99,6 +99,11 @@ pub(crate) struct Node {
     /// the limit the node is capped.
     pub(crate) final_reruns: AtomicU32,
     pub(crate) final_epoch: AtomicU64,
+    /// Runs wait for this node's commit (`Shared::waiting` has an entry
+    /// for it): set under that lock by the run that parks, cleared under
+    /// it by the commit that releases them; a commit that finds it unset
+    /// takes no lock (`sched::release_waiting`).
+    pub(crate) awaited: AtomicBool,
     /// The node whose claim took it (raw id + 1; 0: none), set and
     /// cleared under its segment's write lock (`commit::apply_claim`): a
     /// claim passes over a sibling another claimer holds, and gives back
@@ -197,6 +202,7 @@ impl Node {
         Node {
             final_reruns: AtomicU32::new(0),
             final_epoch: AtomicU64::new(0),
+            awaited: AtomicBool::new(false),
             claimer: AtomicU64::new(0),
             claim_end: AtomicU64::new(0),
             claim_mx: Mx::new(false),
