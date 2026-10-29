@@ -162,9 +162,43 @@ its stop by its answer.
 - Unit test `commit::tests::two_closes_filed_before_either_walk_reask_the_readers_after_both`:
   fails before (accl 22186), passes after (accl 22187).
 - Loop on dev: 4 of 160 builds had these stale reads (accl 22184).
-- Loop with the fix: 1 of 240 builds still has two of them, nodes 827
-  and 2294 (accl 22188). That is a second path, not found yet. It is
-  being traced on d2f7fceee plus the s1 trace (accl 22191).
+- Loop with the fix: 1 of 240 builds still had two of them, nodes 827
+  and 2294 (accl 22188). With the trace, 1 of 480 had eight, nodes 827,
+  842, 843, 845, 857, 858 and others (accl 22191, bad-367.log in
+  `phitex-runs/cmd-22191` on acclhead1). That is a second path.
+
+**The second path (open; state at the reds agent's stop, 2026-10-29).**
+
+- The trace branch is reds-s1dbg: d2f7fceee plus the `PHITEX_S1`
+  traces. The traces cover bracket filings, the bracket walks
+  (`reask by`, with their skind readers), every `reask_reader` of skind
+  with its answer, and commits of skind readers. Its last commit adds
+  the `reask_from` trace (definition walks: from where, which readers,
+  the next hiding definition, the hole it stopped at).
+- In bad-367, reader 827 (pos 17593053216768) committed serial 7 at
+  scope epoch 314 at depth 1, seeing [14, 1, 0, 1, 1, ()]. It was last
+  re-asked at #35594, by 2051, with the same answer. 2051 is a new node
+  whose static opens were filed at #34415. After that no bracket change
+  at or before 827 was filed, yet at the end its answer is none.
+- So the answer moved through a definition, not a bracket. The leading
+  hypothesis: a definition walk of skind (`reask_from`, after a
+  definer's def changed or went, e.g. 2051's first run at #35840, or a
+  `\begin` such as 805 rerunning) stopped before 827 and never went on.
+  It may have stopped at a hole of the same operation (`first_hole`, then
+  `stop_at`), and that stop was never taken up when the hole committed,
+  was taken or was removed. Or `next_hiding` stopped at a definition
+  that then went.
+- Next step: read accl 22192. It runs 600 builds at -j16 on reds-s1dbg
+  with the reask_from trace, and its bad logs are in
+  `phitex-runs/cmd-22192`. For the stale reader, find the last
+  `reask_from` whose region should have covered it, and where that walk
+  stopped (next, or hole). Then follow that stop to the hole's commit or
+  removal (`take_stops` in retract, `inner.stops` in commit).
+
+To run it: `.reds/amss1.sh N P J` in the reds worktree builds the
+observe CLI and runs N amsldoc builds at -j J, P at once, with
+`PHITEX_CHECK_READS=1 PHITEX_S1=1`. The bad builds' logs are kept. Grep
+"but now" for the stale reads, then grep `^s1 ` for the reader's node.
 
 The 160-build loop (accl 22184) also showed reads that are not this
 cause:
