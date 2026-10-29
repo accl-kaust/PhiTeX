@@ -71,7 +71,8 @@ built() { echo "build_s $(( $(date +%s) - t0 ))" >> "$r/times.txt"; }
 # (mc: 16, a gate of separate shards 12 of them). The build first unless
 # the binaries came in ($w/bin/cli/phitex), on every CPU of the job; its
 # store into $w/bin and $r/store (job.sbatch publishes it, ACCL_STORE_OUT).
-# Then every shard at once, each as its own job would run it: its own
+# Then the shards, the checks all at once and then the timed ones alone
+# (ams, amsedit, editkinds, para), each as its own job would run it: its own
 # results ($r/s-NAME, its log there), workspace ($w/s-NAME, the job's
 # entries linked in but the cache) and CPUs (the job's dealt out in the
 # order named, CPUS each). Always exits 0: the shards' verdicts are in
@@ -95,6 +96,7 @@ if [ "$shard" = all ]; then
     shift 2
     take "$n"
     mkdir -p "$r0/s-$name" "$w0/s-$name"
+    echo "$set_" > "$r0/s-$name/cpus"
     for x in "$w0"/*; do
       case ${x##*/} in s-* | cache) ;; *) ln -sfn "$x" "$w0/s-$name/" ;; esac
     done
@@ -117,12 +119,21 @@ if [ "$shard" = all ]; then
   # (the binaries as separate shards' jobs have them: each test binary
   # also at $w/bin/NAME, as a store part copied in alone puts it)
   for x in "$w0"/bin/tests/*; do [ -e "$x" ] && ln -sfn "$x" "$w0/bin/"; done
-  for spec in "$@"; do
-    IFS=: read -r name n rest <<< "$spec"
-    IFS=, read -ra args <<< "$rest"
-    one "$name" "$n" "${args[@]}" &
+  # (two phases: the checks first, all at once; then the timed shards,
+  # alone on the job's cores, each its own share: timed beside a
+  # valgrind run and three test shards, amsldoc's -j8 cold build took
+  # 5.5 s and its watch build 25.6 s, against 3.0 s in their own jobs)
+  for phase in checks timed; do
+    next=0
+    for spec in "$@"; do
+      IFS=: read -r name n rest <<< "$spec"
+      IFS=, read -ra args <<< "$rest"
+      case ${args[0]} in ams | amsedit | editkinds | para) p=timed ;; *) p=checks ;; esac
+      [ "$p" = "$phase" ] || continue
+      one "$name" "$n" "${args[@]}" &
+    done
+    wait
   done
-  wait
   st=green
   for d in "$r0"/s-*/; do [ "$(cat "$d/status" 2>/dev/null)" = green ] || st=red; done
   echo $st > "$r0/status"
