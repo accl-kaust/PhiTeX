@@ -115,6 +115,15 @@ impl<T> Mx<T> {
         let g = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         timed(g, t)
     }
+
+    /// A guard if it is free now, never waited for.
+    pub(crate) fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        match self.0.try_lock() {
+            Ok(g) => Some(g),
+            Err(TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
 }
 
 /// Tries before a refused guard blocks: every hold in the table is short,

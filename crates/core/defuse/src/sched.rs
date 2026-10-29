@@ -303,7 +303,24 @@ impl Ready {
     }
 
     pub(crate) fn pop(&self) -> Option<NodeId> {
+        if self.len.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
         let x = self.heap.lock().pop()?;
+        self.len.fetch_sub(1, Ordering::Relaxed);
+        Some(NodeId::from_raw(x.0.3))
+    }
+
+    /// A thief's `pop`: none where the heap is empty or its owner (or
+    /// another thief) holds it, never waited for (every idle worker
+    /// locking every other's heap in turn made the heaps' locks the
+    /// engine's: 5.3% of worker time at 32 threads,
+    /// `commits_do_not_wait_on_each_other`).
+    fn steal(&self) -> Option<NodeId> {
+        if self.len.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        let x = self.heap.try_lock()?.pop()?;
         self.len.fetch_sub(1, Ordering::Relaxed);
         Some(NodeId::from_raw(x.0.3))
     }
@@ -609,6 +626,14 @@ impl Pool {
             }
         }
         let n = self.n;
+        for k in 1..n {
+            let v = (w.ix + k) % n;
+            if let Some(x) = self.shared.ready[v].steal() {
+                Worker::add(&w.steals, 1);
+                return Some(x);
+            }
+        }
+        // (one held meanwhile, not empty: waited for, no work left behind)
         for k in 1..n {
             let v = (w.ix + k) % n;
             if let Some(x) = self.shared.ready[v].pop() {
