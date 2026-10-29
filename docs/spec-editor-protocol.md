@@ -201,6 +201,13 @@ cursor goes the same path, from bytes it makes itself):
 Page to source stays `window/showDocument`: a double-click on the page
 (or an error's place) opens the place in the editor, selected, the focus
 taken (`Server::show`); it is the inverse search every LSP editor has.
+Text selected on the pages is selected in the editor the same way, the
+focus left on the preview: the viewer's `select` op `{file, start, end}`
+(bytes of the file, from the selected glyphs' origins) gives the host the
+start's and end's lines and columns (`Viewer::on_select`), and the
+server sends `window/showDocument` with that `selection` range and
+`takeFocus: false` (`Server::select`). An editor's showDocument handler
+reveals the range without moving the focus.
 
 ### 3.2 Diagnostics and messages
 
