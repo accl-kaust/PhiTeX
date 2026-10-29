@@ -156,7 +156,7 @@ one() { # ENGINE DOC
   fi
   echo "\$e \$d: \$r"
 }
-for d in fontspec.tex lang.tex umath.tex pics.tex xecjk.tex ctex.tex; do [ -f "\$d" ] && one xelatex "\$d"; done
+for d in fontspec.tex lang.tex umath.tex pics.tex xecjk.tex ctex.tex; do [ -f "$w/docs/\$d" ] && one xelatex "\$d"; done
 one xetex plainxe.tex
 one pdftex plainpdf.tex
 CHECK
