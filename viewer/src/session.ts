@@ -648,7 +648,7 @@ export class PreviewSession {
   private pkgFiles: Record<string, string> = {};
   /** Every package name asked for once: not asked again. */
   private asked = new Set<string>();
-  private pkg: PackageState = { loading: [], unavailable: [], source: "none", done: [], building: false };
+  private pkg: PackageState = { loading: [], unavailable: [], source: "", done: [], building: false };
   private get source(): PackageSource {
     return this.o.packages ?? noPackages;
   }

@@ -835,7 +835,7 @@ export class Panel {
     if (p) {
       const names = p.names.slice(0, 3).join(", ") + (p.names.length > 3 ? ` and ${p.names.length - 3} more` : "");
       el.innerHTML = `${icon("download", 16)}<span></span><span class="mini"><i style="width:${p.pct}%"></i></span>`;
-      el.querySelector("span")!.textContent = `Fetching ${names} from ${p.source} (${p.done} of ${p.total})…`;
+      el.querySelector("span")!.textContent = `Fetching ${names}${known(p.source) ? ` from ${p.source}` : ""} (${p.done} of ${p.total})…`;
     } else if (prep) {
       // (a build waiting behind it is part of the same wait)
       const s = (performance.now() - this.prepSince) / 1000;
@@ -1156,7 +1156,7 @@ export class Panel {
         names.append(c);
       }
       empty.querySelector(".note")!.textContent =
-        `From ${p.source} (fetched once, then kept in ${this.words.keptIn}). Only package names leave it, never your project's files.`;
+        `Downloaded${known(p.source) ? ` from ${p.source}` : ""} once, then kept in ${this.words.keptIn}. Only package names are sent, never your files.`;
       return;
     }
     this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source } : undefined;
@@ -1886,4 +1886,9 @@ function foldedDetail(text: string, label: string): HTMLElement {
   pre.textContent = text;
   d.append(sum, pre);
   return d;
+}
+
+/** A package source worth naming: not empty, nor a placeholder. */
+function known(source: string | undefined): boolean {
+  return !!source && source !== "none";
 }

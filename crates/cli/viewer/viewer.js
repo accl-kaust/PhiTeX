@@ -1586,7 +1586,7 @@ var Panel = class {
     if (p) {
       const names = p.names.slice(0, 3).join(", ") + (p.names.length > 3 ? ` and ${p.names.length - 3} more` : "");
       el.innerHTML = `${icon("download", 16)}<span></span><span class="mini"><i style="width:${p.pct}%"></i></span>`;
-      el.querySelector("span").textContent = `Fetching ${names} from ${p.source} (${p.done} of ${p.total})\u2026`;
+      el.querySelector("span").textContent = `Fetching ${names}${known(p.source) ? ` from ${p.source}` : ""} (${p.done} of ${p.total})\u2026`;
     } else if (prep) {
       const s = (performance.now() - this.prepSince) / 1e3;
       el.innerHTML = `${icon("sync", 16)}<span></span><span class="mini busy"><i></i></span>`;
@@ -1854,7 +1854,7 @@ var Panel = class {
         c.textContent = n;
         names.append(c);
       }
-      empty.querySelector(".note").textContent = `From ${p.source} (fetched once, then kept in ${this.words.keptIn}). Only package names leave it, never your project's files.`;
+      empty.querySelector(".note").textContent = `Downloaded${known(p.source) ? ` from ${p.source}` : ""} once, then kept in ${this.words.keptIn}. Only package names are sent, never your files.`;
       return;
     }
     this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source } : void 0;
@@ -2508,6 +2508,9 @@ function foldedDetail(text, label) {
   pre.textContent = text;
   d.append(sum, pre);
   return d;
+}
+function known(source2) {
+  return !!source2 && source2 !== "none";
 }
 
 // viewer/src/edits.ts
@@ -3197,7 +3200,7 @@ var PreviewSession = class {
   pkgFiles = {};
   /** Every package name asked for once: not asked again. */
   asked = /* @__PURE__ */ new Set();
-  pkg = { loading: [], unavailable: [], source: "none", done: [], building: false };
+  pkg = { loading: [], unavailable: [], source: "", done: [], building: false };
   get source() {
     return this.o.packages ?? noPackages;
   }
