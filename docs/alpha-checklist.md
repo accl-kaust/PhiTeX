@@ -1,6 +1,7 @@
 # Alpha: the dev → main checklist
 
-`main` gets the alpha (plain TeX and LaTeX, `CHANGELOG.md`) only when
+`main` gets the alpha (plain TeX, LaTeX and XeLaTeX, `CHANGELOG.md`;
+XeLaTeX by the user's decision of 2026-10-29) only when
 every box below is checked for one dev commit, and only after **the user
 confirms**. Nobody else pushes `main`. Run each step on the same commit:
 the one that will become `main`.
@@ -156,6 +157,29 @@ with the pinned toolchain:
 | `scripts/wasm.sh check` | not run: under bubblewrap Node's WASI refuses a preopened root directory (`UVWASI_EACCES`), and the cluster's image has no Node | |
 | no `claude.ai` in files | none | 400c72ef |
 | no `claude.ai` in commit messages since `main` | **five** (`Claude-Session:` trailers on 43dd8b7a, 3dbb4614, b9e0a985, 49ba2d93, 4f6e007d, 2026-10-11) | |
+
+## 4b. XeLaTeX (in the alpha, the user's decision of 2026-10-29)
+
+XeTeX mode writes its PDF directly from the shipped pages (no xdvipdfmx
+pass on the build path, issue #2); a watch appends update sections and
+writes the exact file when idle, as pdfTeX mode does. On `$D`:
+
+- [ ] **The corpus** (`scripts/xetex/sweep.sh`, the 211 documents of
+      `crates/output/xdvipdfmx/tools/corpus.sh`), at `-j 1` and `-j 8`:
+      for every document xelatex writes an XDV for, our XDV equals
+      xelatex's, our PDF equals xelatex's (`xdvipdfmx -q -E` of its XDV),
+      and the direct PDF equals the port's PDF of the same build's XDV.
+      Last: 131 of 131 on all three (mc 76440, 2026-10-29).
+- [ ] **The user's paper** (Grail, 18 pages): cold at `-j 1`, `-j 8`,
+      `-j 16` gives one md5, equal to xelatex's apart from the documented
+      difference of note-xetex-corpus §4.
+- [ ] **Edits on Grail** (`phitex watch`, `-j 16`, release build): the
+      same bars as §4. One letter, a line re-break (Enter inside a
+      paragraph) and a trailing space each ≤ 16 ms; a word ≤ 50 ms; each
+      edit's PDF after compaction equals a cold build of the edited file.
+- [ ] **A watch's update sections** read back as the idle exact file
+      (`gate-update`, `PHITEX_UPDATE_LIVE=1`), and every idle write
+      equals the cold build's md5.
 
 ## 5. SyncTeX (in the alpha, the user's decision of 2026-10-21)
 
