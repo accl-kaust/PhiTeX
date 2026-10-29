@@ -104,27 +104,10 @@ A wrong output at -j1 is not a race. Next step:
 
 ### 0.3 The 46 XeTeX page-one `\special`s (note-xetex-corpus.md §2.1)
 
-**State.**
-
-- Plain probes match pdftex's DVI: a `\special` before the first box,
-  with `\write`, `\message`, a kern or a penalty after it
-  (`.reds/specials.sh`).
-- fs5 and fs6 differ under pdflatex's DVI path too, not only under
-  XeTeX. fs5 is `regression-test.tex` plus `\geometry`. fs6 is
-  `\START\OMIT` before the first word.
-- The lost specials are issued in vertical mode by
-  `regression-test.tex` lines 215-300, before `\documentclass` (mc
-  75769 printed them).
-
-**Next step.**
-
-1. Cut fs6 down: drop `regression-test.tex` and keep its two `\special`s,
-   then `\OMIT`'s `\typeout`, then `\documentclass`.
-2. Compare `pdftex -output-format=dvi` with `phitex --compat=pdftex
-   -output-format=dvi`.
-3. Then follow the whatsits through the page builder's first page
-   (§1000: a whatsit on an empty page is kept, not discarded) in
-   `pages/`.
+Fixed (6de5ca3b1). The rest of a file read inline, after a document
+file that it inputs, ran as a format's node, so what it put on the
+main list was lost. note-xetex-corpus.md §2.1 has the cut-down and the
+oracle checks.
 
 ### 0.4 The rest, in order
 

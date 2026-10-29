@@ -56,13 +56,45 @@ form):
 - Differs, `fs6`: the same document with `\START\OMIT` before the word.
   `\OMIT` writes to the log only.
 
-So the specials are lost when something else stands on the page
-before the first box (geometry's settings at `\begin{document}`,
-`\OMIT`'s `\typeout`), not because they come before `\documentclass`.
-The page builder's handling of whatsits that come before the page's
-first box is where to look. This is pdfTeX's path too; it shows under
-XeTeX because only `regression-test.tex`'s XeTeX branch writes
-`\special`s.
+**Cause (found 2026-10-29, fixed in 6de5ca3b1).** The page builder
+was not the cause. `regression-test.tex` is a distribution file, so the
+run reads it inline, as one load. It does
+`\input{regression-test.cfg}`, and the `.cfg` in the job's directory
+is a document file cut into regions. A document run stops at a
+document file and leaves the rest of its input as child nodes
+(`Run::leftover`). The rest of the file it was reading inline became a
+node of kind 0, a format's node. That node ran lines 215-302, and
+whatever it put on the main list never reached the pages. The three
+specials were dropped, and a letter in that rest ended the build with
+no DVI at all. The same happens to any file read inline (one with
+`\endinput`, `\inputlineno` or `\everyeof`) that inputs a document
+file and then contributes to the main list. The fix gives the rest, and
+a written file's units read the same way, the run's own kind, as its
+line frames already had (`crates/engines/tex/src/run.rs`, `file_left`).
+
+How it was cut down (mc 76025-76195, accl 22174-22178):
+
+- The trigger is `\input{regression-test.cfg}` inside an `\input`
+  file that is read inline, followed by the specials. It does not need
+  open conditionals, `\documentclass` or `\OMIT`.
+- In plain TeX: `q.tex` is `\input in1` / `\special{AAA}` /
+  `\endinput`, where `in1.tex` is `\relax`, and the document is
+  `\input q` / `hello\bye`. pdftex keeps the special and ours lost it.
+  8 of 9 variants differed. The one that matched was
+  `\csname endinput\endcsname`, which is not seen in the text, so that
+  file is cut into regions as usual.
+
+Test: `inputs::a_file_read_inline_goes_on_after_the_document_file_it_inputs`.
+It fails on dev before the fix (accl 22182) and passes with it (accl
+22181).
+
+Against TeX Live, byte for byte (accl 22181, 22183):
+
+- plain v1-v9 (pdftex DVI);
+- the latex cut-downs oc1-oc10;
+- fs5 and fs6, under both xelatex (XDV) and latex (DVI).
+
+The 46 corpus XDVs themselves need a fresh sweep (§6).
 
 ### 2.2 ICU line breaks: a break before `〜` for `ja` (1 XDV, fixed here)
 
@@ -153,8 +185,8 @@ test: finisher runs within 2x the fires at -j1 and 3x at -j8. On
 
 ## 6. Open, in order of size
 
-1. §2.1, page-one whatsits before the first box (46 of the 47
-   differing XDVs).
+1. §2.1 is fixed (6de5ca3b1). The corpus sweep has to be rerun to
+   confirm the 46 XDVs.
 2. §3, `\showbox`/`\showlists` logging (36 documents' logs and exit
    statuses).
 3. §2.3, `\filemoddate` of the job's log in compat mode.
