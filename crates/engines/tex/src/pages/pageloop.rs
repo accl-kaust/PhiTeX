@@ -329,6 +329,14 @@ impl RestStart {
 /// The most pages the fold fires past an unknown give-back.
 const MAX_DEPTH: u32 = 64;
 
+/// A checkpoint the fold goes on from with its fire, its give-back still
+/// to fold ([`Run::fold_on`]).
+type Pending = Option<(usize, FireNote)>;
+
+/// A loop rest's first give-back with the fire it follows
+/// ([`Run::rest_begins`]).
+type FirstGiveBack = (FireNote, ValueId);
+
 /// How a run's fold ([`Run::fold_on`]) ends.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Fold {
@@ -650,59 +658,17 @@ impl Run<'_, '_> {
         };
         let (start, bound) = self.where_to_start(&old, &mut ls, rest.as_ref());
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-            let how = match start {
-                Start::Scratch => "scratch".to_owned(),
-                Start::Tail(_) => "tail".to_owned(),
-                Start::At(i) => format!("checkpoint {i}"),
-                Start::Done => "nowhere (kept whole)".to_owned(),
-            };
-            eprintln!(
-                "pages {}: run from {how} ({} checkpoints kept of {n_old}, woken by {:?})",
-                me.raw(),
-                ls.checkpoints.len(),
-                self.cx.woken_by()
-            );
+            self.trace_start(&start, ls.checkpoints.len(), n_old);
         }
         // 3. the fold (a rest's from its page's give-back: the
         // finisher's, made on that page, else it waits for it)
         let mut first = None;
         let (mut st, mut lc, mut pending) = match start {
             Start::Scratch if let Some(r) = &rest => {
-                // (the pages before it fired on guesses: each one's
-                // give-back what was folded, else no page yet)
-                for (k, page, gave) in &r.guessed {
-                    let out = self.cx.read_at(k.field(v, PAGE_OUT), At::End(self.cx.unit()))?;
-                    let ok = match out {
-                        phitex_defuse::FieldAt::Def(x, _) => page_out_parts(v, x).is_some_and(|o| o.1 == *page && o.0 == *gave),
-                        _ => false,
-                    };
-                    if !ok {
-                        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-                            eprintln!("pages {}: rest waits for guessed page {}:{}", me.raw(), k.piece.raw(), k.nth);
-                        }
-                        self.cx.park(ls.encode(v));
-                        return Ok(ValueId::UNIT);
-                    }
-                }
-                let (st, lc, p) = self.decode_state(r.state);
-                let out = self.cx.read_at(r.key.field(v, PAGE_OUT), At::End(self.cx.unit()))?;
-                let gave = match out {
-                    phitex_defuse::FieldAt::Def(x, fin) => page_out_parts(v, x).filter(|o| o.1 == r.page).map(|o| {
-                        ls.after = fin.map(|f| (p.node, f));
-                        o.0
-                    }),
-                    _ => None,
-                };
-                let Some(gave) = gave else {
-                    if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-                        eprintln!("pages {}: rest waits for page {}:{}'s give-back", me.raw(), r.key.piece.raw(), r.key.nth);
-                    }
+                let Some((st, lc, p, gave)) = self.rest_begins(r, &mut ls)? else {
                     self.cx.park(ls.encode(v));
                     return Ok(ValueId::UNIT);
                 };
-                if gave != r.guess {
-                    Feedback::RoutineGivesBack.missed();
-                }
                 first = Some((p, gave));
                 (st, lc, None)
             }
@@ -724,19 +690,7 @@ impl Run<'_, '_> {
         let fold = if lc.ended { Fold::End } else { self.fold_on(&mut st, &mut lc, (&mut pending, first), &mut ls, &old, bound)? };
         let hole = fold == Fold::Hole;
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-            eprintln!(
-                "pages {}: run ends {} ({} checkpoints, cursor {:?}, stopped at {:?})",
-                me.raw(),
-                match fold {
-                    Fold::Hole => "at a hole",
-                    Fold::Wait => "waiting for a give-back",
-                    Fold::End if lc.ended => "with the job",
-                    Fold::End => "neither ended nor at a hole",
-                },
-                ls.checkpoints.len(),
-                lc.cur.map(NodeId::raw),
-                self.cx.stopped_at().map(NodeId::raw)
-            );
+            self.trace_end(fold, &ls, &lc);
         }
         // 4. a hole: the tail, and the pages a run before fired past it
         // placed again as they were. Waiting for a give-back: no tail
@@ -755,37 +709,7 @@ impl Run<'_, '_> {
         if fold == Fold::Wait
             && let Some(i) = ls.wait
         {
-            let c = ls.checkpoints[i].clone();
-            ls.rest_at = Some(c.key);
-            // (every key number this node and those before it have taken,
-            // per contributor: its own pages', and its fresh keys' next)
-            let mut floors = self.loop_keys.floors.clone();
-            for (&n, &k) in &self.loop_keys.next {
-                let e = floors.entry(n).or_default();
-                *e = (*e).max(k);
-            }
-            for p in &ls.checkpoints {
-                let e = floors.entry(p.key.piece).or_default();
-                *e = (*e).max(p.key.nth.saturating_add(1));
-            }
-            let mut floors: Vec<(NodeId, u32)> = floors.into_iter().collect();
-            floors.sort_unstable_by_key(|e| e.0.raw());
-            let guessed: Vec<(PageKey, ValueId, ValueId)> = (0..i)
-                .filter(|&j| !self.give_back_known(&ls, j))
-                .map(|j| (ls.checkpoints[j].key, ls.checkpoints[j].page, ls.checkpoints[j].gave))
-                .collect();
-            let r = RestStart {
-                guessed,
-                key: c.key,
-                state: c.state,
-                page: c.page,
-                guess: c.guess,
-                depth: ls.depth,
-                base: ls.base + i + 1,
-                floors,
-            };
-            self.cx.define_with(rest_field(v, me), r.encode(v), Locality::Global);
-            self.cx.follow_after(me, self.ops.pages, rest_args(v, me));
+            self.place_rest(&mut ls, i);
         } else {
             ls.rest_at = None;
         }
@@ -812,6 +736,121 @@ impl Run<'_, '_> {
         // 6. parked
         self.cx.park(ls.encode(v));
         Ok(ValueId::UNIT)
+    }
+
+    /// (`PHITEX_SCAN_TRACE`) Where a run starts.
+    fn trace_start(&self, start: &Start, kept: usize, n_old: usize) {
+        let how = match start {
+            Start::Scratch => "scratch".to_owned(),
+            Start::Tail(_) => "tail".to_owned(),
+            Start::At(i) => format!("checkpoint {i}"),
+            Start::Done => "nowhere (kept whole)".to_owned(),
+        };
+        eprintln!(
+            "pages {}: run from {how} ({kept} checkpoints kept of {n_old}, woken by {:?})",
+            self.cx.node().raw(),
+            self.cx.woken_by()
+        );
+    }
+
+    /// (`PHITEX_SCAN_TRACE`) How a run's fold ends.
+    fn trace_end(&self, fold: Fold, ls: &LoopState, lc: &LoopCarry) {
+        eprintln!(
+            "pages {}: run ends {} ({} checkpoints, cursor {:?}, stopped at {:?})",
+            self.cx.node().raw(),
+            match fold {
+                Fold::Hole => "at a hole",
+                Fold::Wait => "waiting for a give-back",
+                Fold::End if lc.ended => "with the job",
+                Fold::End => "neither ended nor at a hole",
+            },
+            ls.checkpoints.len(),
+            lc.cur.map(NodeId::raw),
+            self.cx.stopped_at().map(NodeId::raw)
+        );
+    }
+
+    /// A loop rest's start ([`Start::Scratch`] of one): the state the loop
+    /// node before it stopped at and the give-back of that page, its
+    /// finisher's made on that page; `None` while that one, or one of the
+    /// pages before it fired on a guess, is not in as folded.
+    fn rest_begins(&mut self, r: &RestStart, ls: &mut LoopState) -> R<Option<(ScanState, LoopCarry, FireNote, ValueId)>> {
+        let v = self.v;
+        let me = self.cx.node();
+        // (the pages before it fired on guesses: each one's give-back
+        // what was folded, else no page yet)
+        for (k, page, gave) in &r.guessed {
+            let out = self.cx.read_at(k.field(v, PAGE_OUT), At::End(self.cx.unit()))?;
+            let ok = match out {
+                phitex_defuse::FieldAt::Def(x, _) => page_out_parts(v, x).is_some_and(|o| o.1 == *page && o.0 == *gave),
+                _ => false,
+            };
+            if !ok {
+                if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                    eprintln!("pages {}: rest waits for guessed page {}:{}", me.raw(), k.piece.raw(), k.nth);
+                }
+                return Ok(None);
+            }
+        }
+        let (st, lc, p) = self.decode_state(r.state);
+        let out = self.cx.read_at(r.key.field(v, PAGE_OUT), At::End(self.cx.unit()))?;
+        let gave = match out {
+            phitex_defuse::FieldAt::Def(x, fin) => page_out_parts(v, x).filter(|o| o.1 == r.page).map(|o| {
+                ls.after = fin.map(|f| (p.node, f));
+                o.0
+            }),
+            _ => None,
+        };
+        let Some(gave) = gave else {
+            if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                eprintln!("pages {}: rest waits for page {}:{}'s give-back", me.raw(), r.key.piece.raw(), r.key.nth);
+            }
+            return Ok(None);
+        };
+        if gave != r.guess {
+            Feedback::RoutineGivesBack.missed();
+        }
+        Ok(Some((st, lc, p, gave)))
+    }
+
+    /// The fold waits at checkpoint `i` for its give-back
+    /// ([`Fold::Wait`]): the pages after it are a loop rest's, its own
+    /// node, so that this one's runs re-emit its pages alone, never every
+    /// page before; the rest keeps its key, the page's.
+    fn place_rest(&mut self, ls: &mut LoopState, i: usize) {
+        let v = self.v;
+        let me = self.cx.node();
+        let c = ls.checkpoints[i].clone();
+        ls.rest_at = Some(c.key);
+        // (every key number this node and those before it have taken,
+        // per contributor: its own pages', and its fresh keys' next)
+        let mut floors = self.loop_keys.floors.clone();
+        for (&n, &k) in &self.loop_keys.next {
+            let e = floors.entry(n).or_default();
+            *e = (*e).max(k);
+        }
+        for p in &ls.checkpoints {
+            let e = floors.entry(p.key.piece).or_default();
+            *e = (*e).max(p.key.nth.saturating_add(1));
+        }
+        let mut floors: Vec<(NodeId, u32)> = floors.into_iter().collect();
+        floors.sort_unstable_by_key(|e| e.0.raw());
+        let guessed: Vec<(PageKey, ValueId, ValueId)> = (0..i)
+            .filter(|&j| !self.give_back_known(ls, j))
+            .map(|j| (ls.checkpoints[j].key, ls.checkpoints[j].page, ls.checkpoints[j].gave))
+            .collect();
+        let r = RestStart {
+            guessed,
+            key: c.key,
+            state: c.state,
+            page: c.page,
+            guess: c.guess,
+            depth: ls.depth,
+            base: ls.base + i + 1,
+            floors,
+        };
+        self.cx.define_with(rest_field(v, me), r.encode(v), Locality::Global);
+        self.cx.follow_after(me, self.ops.pages, rest_args(v, me));
     }
 
     /// [`Run::page_loop`]'s step 2: where the fold starts and how far it
@@ -971,7 +1010,7 @@ impl Run<'_, '_> {
         &mut self,
         st: &mut ScanState,
         lc: &mut LoopCarry,
-        (pending, mut first): (&mut Option<(usize, FireNote)>, Option<(FireNote, ValueId)>),
+        (pending, mut first): (&mut Pending, Option<FirstGiveBack>),
         ls: &mut LoopState,
         old: &LoopState,
         mut bound: Bound,
