@@ -50,13 +50,22 @@ pub const FONT_INDEX: &str = "fonts/misc/partex/fontindex.pxfi";
 /// machines with the same PhiTeX build a document from the same files.
 pub const RELEASE: &str = "tl2026.6";
 
+/// The release built from: [`RELEASE`], or `PHITEX_SHELF_RELEASE` (a
+/// release being made, checked before it is this binary's).
+pub fn release() -> String {
+    std::env::var("PHITEX_SHELF_RELEASE")
+        .ok()
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| RELEASE.to_owned())
+}
+
 /// The packs read from the cache this process, and those fetched.
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 
 /// The package cache's directory: `<cache>/shelf/<release>/`.
 pub fn dir() -> PathBuf {
-    crate::tex::cache_dir().join(SHELF).join(RELEASE)
+    crate::tex::cache_dir().join(SHELF).join(release())
 }
 
 /// Where the package cache is, what it holds, and its packs found and
@@ -165,13 +174,14 @@ pub fn index() -> Result<Arc<Index>, String> {
     static INDEX: OnceLock<Result<Arc<Index>, String>> = OnceLock::new();
     INDEX
         .get_or_init(|| {
-            let meta = cached(&format!("release-{RELEASE}.json"))?;
+            let rel = release();
+            let meta = cached(&format!("release-{rel}.json"))?;
             let meta: serde_json::Value = serde_json::from_slice(&meta)
-                .map_err(|e| format!("Shelf's release-{RELEASE}.json: {e}"))?;
+                .map_err(|e| format!("Shelf's release-{rel}.json: {e}"))?;
             let schema = meta["schema"].as_u64().unwrap_or(0);
             if !phitex_shelf::SCHEMAS.contains(&schema) {
                 return Err(format!(
-                    "Shelf's {RELEASE} is schema {schema}: this PhiTeX reads 3 and 4"
+                    "Shelf's {rel} is schema {schema}: this PhiTeX reads 3 and 4"
                 ));
             }
             let text = |name: &str| -> Result<String, String> {
@@ -490,7 +500,7 @@ impl Host for ShelfHost {
                     phitex_tex::KpseFormat::OpenType => "opentype",
                     phitex_tex::KpseFormat::TrueType => "truetype",
                     phitex_tex::KpseFormat::Type1 => "type1",
-                    phitex_tex::KpseFormat::MiscFonts => "misc fonts",
+                    phitex_tex::KpseFormat::MiscFonts => "misc",
                 };
                 if !suffix.is_empty()
                     && !name.contains('.')
