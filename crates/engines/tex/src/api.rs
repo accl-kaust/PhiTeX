@@ -205,8 +205,9 @@ pub struct Options {
     pub shell_hook: Option<Arc<dyn crate::shell::ShellHook>>,
     /// The most evaluations a build makes again because the files its
     /// commands made changed (as `latexmk` runs `pdflatex` again while
-    /// they do, its `max_repeat`): past them the output is the last
-    /// one's, with a warning.
+    /// they do; default [`LATEXMK_MAX_REPEAT`] runs in all): past them
+    /// the output is the last one's, and the build fails as latexmk's
+    /// does ([`Build::no_fixpoint`]).
     pub shell_passes: usize,
     /// Where a tool's support files come from (bibliography styles and
     /// databases, index styles: [`ToolSearch`]); `None` asks
@@ -813,7 +814,7 @@ impl Default for Options {
             shell_escape: 2,
             shell_commands: crate::shell::texlive_commands(),
             shell_hook: None,
-            shell_passes: 5,
+            shell_passes: LATEXMK_MAX_REPEAT as usize - 1,
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
@@ -1362,6 +1363,18 @@ impl Rd<'_> {
 // (9: the files a prelude read and its text by their SHA-256, each file
 // with its path and content key)
 pub const PRELUDE_LAYOUT: u32 = 9;
+
+/// latexmk's `max_repeat`: the most runs of pdflatex it makes while the
+/// files a document reads back change. Past them it stops with "Maximum
+/// runs of pdflatex reached without getting stable files" and fails
+/// ("'pdflatex' needed too many passes", exit 12), the last run's PDF
+/// left in place (latexmk 4.87 on an `.aux` file that never settles, mc 76769).
+/// A build here makes the same runs (the first evaluation's, and the
+/// passes of the readers of a file read back, `Limits::final_reruns`,
+/// or the evaluations made again for `\write18`'s files,
+/// [`Options::shell_passes`]) and fails the same way
+/// ([`Build::no_fixpoint`]).
+pub const LATEXMK_MAX_REPEAT: u32 = 5;
 
 /// The exported prelude's magic, before the layout and the engine's
 /// identity.
@@ -2431,9 +2444,13 @@ struct Graph {
     start_env: FxHashMap<Field, ValueId>,
     /// The evaluation errors met (the engine's), as messages.
     eval_errors: Vec<String>,
-    /// The warnings an evaluation ended with (the read-back files still
-    /// changing at the round cap), as messages.
+    /// The warnings an evaluation ended with (the page layout not
+    /// settled at `Limits::settle_passes`), as messages.
     eval_warnings: Vec<String>,
+    /// The files read back, or those `\write18`'s commands made, still
+    /// changing after [`LATEXMK_MAX_REPEAT`] runs: the build fails, as
+    /// latexmk's does, its output the last run's ([`Build::no_fixpoint`]).
+    no_fixpoint: Vec<String>,
     /// [`Options::tool_finder`].
     tool_finder: Option<ToolFinder>,
     /// The files `\write18`'s commands made, as the last evaluation
@@ -2751,6 +2768,8 @@ impl Graph {
             runs_per_node,
             stall,
             memory_bytes,
+            // (latexmk's runs: the first pass and four more)
+            final_reruns: LATEXMK_MAX_REPEAT - 1,
             ..phitex_defuse::Limits::default()
         });
         let shared: Shared = Arc::new(OnceLock::new());
@@ -2852,9 +2871,10 @@ impl Graph {
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
             eval_errors: Vec::new(),
             eval_warnings: Vec::new(),
+            no_fixpoint: Vec::new(),
             tool_finder: None,
             shell_store: std::collections::BTreeMap::new(),
-            shell_cap: 5,
+            shell_cap: LATEXMK_MAX_REPEAT as usize - 1,
             provided: Arc::default(),
             loads: None,
             env_base: None,
@@ -3490,18 +3510,20 @@ impl Graph {
             };
             t_eval += t0.elapsed();
             self.eval_warnings.clear();
-            // (a reader of a file read back still moving at the cap: the
-            // output is its last run's, as latexmk's is after its last
-            // run, and LaTeX's warning says so)
-            // (as latexmk past its maximum runs: reported, the output of
-            // the last pass kept and written; an error here would keep the
-            // PDF from being written)
+            self.no_fixpoint.clear();
+            // (the page layout not settled: the output is the last
+            // pass's, a warning)
             if r.held_unsettled {
                 self.eval_warnings.push(format!(
                     "the page layout did not settle after {} passes (the maximum, as latexmk's): the output is the last pass's",
                     self.eng.limits().settle_passes
                 ));
             }
+            // (a reader of a file read back still moving at the cap,
+            // latexmk's maximum runs: the build fails as latexmk's does,
+            // the output its last run's, kept and written; the document's
+            // failure, not the engine's, so not `eval_errors`, which
+            // ends the build without output)
             if !r.capped.is_empty() {
                 let v = self.eng.values();
                 let mut moving: Vec<String> = r
@@ -3513,8 +3535,8 @@ impl Graph {
                     .collect();
                 moving.sort_unstable();
                 moving.dedup();
-                self.eval_warnings.push(format!(
-                    "Label(s) may have changed: the files read back still changed after {} rounds; still changing: {}",
+                self.no_fixpoint.push(format!(
+                    "no fixpoint after {} rounds, latexmk's maximum (its \"Maximum runs of pdflatex reached without getting stable files\"): the output is the last round's; still changing: {}",
                     self.eng.limits().final_reruns + 1,
                     moving.join(", ")
                 ));
@@ -3777,8 +3799,8 @@ impl Graph {
                     asked = true;
                     ask_why("the files the commands made changed");
                 } else {
-                    self.eval_warnings.push(format!(
-                        "the files \\write18's commands make still changed after {} runs (the maximum, as latexmk's): the output is the last run's",
+                    self.no_fixpoint.push(format!(
+                        "no fixpoint after {} runs, latexmk's maximum (its \"Maximum runs of pdflatex reached without getting stable files\"): the files \\write18's commands make still changed; the output is the last run's",
                         self.shell_cap + 1
                     ));
                 }
@@ -6177,6 +6199,16 @@ impl Build {
         self.prelude.errors.is_empty() && self.prelude.diags.is_empty()
     }
 
+    /// The document's files read back still changing after
+    /// [`LATEXMK_MAX_REPEAT`] runs, as messages (among
+    /// [`Build::diagnostics`]' errors at no place): the build failed as
+    /// latexmk's does, the document's failure and not the engine's, its
+    /// output the last run's.
+    #[must_use]
+    pub fn no_fixpoint(&self) -> &[String] {
+        &self.g.no_fixpoint
+    }
+
     /// The engine's own diagnostics (an undeclared definition, a hint's
     /// regime violated), counted apart from TeX's errors: they are not in
     /// the log, and decide neither the output nor the history.
@@ -7068,7 +7100,7 @@ impl Build {
                 help: None,
             });
         }
-        for m in self.prelude.errors.iter().chain(&self.g.eval_errors) {
+        for m in self.prelude.errors.iter().chain(&self.g.eval_errors).chain(&self.g.no_fixpoint) {
             out.push(Diagnostic {
                 file: docname.clone(),
                 range: (0, 0),
@@ -7100,7 +7132,14 @@ impl Build {
         };
         let mut out: Vec<Diagnostic> = self.prelude.diags.clone();
         out.extend(self.g.eval_warnings.iter().map(|m| at(Severity::Warning, m)));
-        out.extend(self.prelude.errors.iter().chain(&self.g.eval_errors).map(|m| at(Severity::Error, m)));
+        out.extend(
+            self.prelude
+                .errors
+                .iter()
+                .chain(&self.g.eval_errors)
+                .chain(&self.g.no_fixpoint)
+                .map(|m| at(Severity::Error, m)),
+        );
         out
     }
 

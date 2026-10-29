@@ -160,9 +160,10 @@ pub fn explain(m: &str) -> String {
     crate::session::engine_stop(m)
 }
 
-/// The engine's warning that the round cap was reached (`… still
-/// changed after N rounds …; still changing: f, g`), for the terminal;
-/// any other warning as it is.
+/// The engine's message that the round cap, latexmk's maximum runs, was
+/// reached (`… after N rounds …; still changing: f, g`: an error, the
+/// build failed as latexmk's, `Build::no_fixpoint`), for the terminal;
+/// any other message (a warning) as it is.
 #[must_use]
 pub fn warning(m: &str) -> String {
     let Some((head, moving)) = m.split_once("still changing: ") else {

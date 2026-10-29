@@ -301,8 +301,7 @@ pub struct Report {
     pub edit_line: Option<usize>,
     pub runs: Vec<RunInfo>,
     /// The engine's warnings at no place, said for a reader
-    /// ([`crate::failure::warning`]): the files read back still changing
-    /// at the round cap, latexmk's `max_repeat`.
+    /// ([`crate::failure::warning`]): the page layout not settled.
     pub warnings: Vec<String>,
     pub notes: Vec<String>,
     pub wall: Duration,
@@ -1037,8 +1036,8 @@ impl Session {
         } else {
             b.diagnostics()
         };
-        // (the engine's warnings at no place: the read-back files still
-        // changing at the round limit; the front ends print them)
+        // (the engine's warnings at no place: the page layout not
+        // settled; the front ends print them)
         let warnings: Vec<String> = diagnostics
             .iter()
             .filter(|d| {
@@ -1049,16 +1048,20 @@ impl Session {
             .map(|d| crate::failure::warning(&d.message))
             .collect();
         lap(&mut phases, "diagnostics");
-        // (and the evaluation's own errors — no fixpoint, a stop — which
-        // the log does not have: errors at no place, without context,
-        // each said as a sentence, `crate::failure`; their whole text is
-        // the report's `internal`, for -v)
+        // (and the evaluation's own errors — a stop — which the log does
+        // not have: errors at no place, without context, each said as a
+        // sentence, `crate::failure`; their whole text is the report's
+        // `internal`, for -v. The files read back still changing at
+        // latexmk's maximum runs are the document's failure, not the
+        // engine's: an error, the output written, no report)
+        let no_fixpoint = b.no_fixpoint();
         let failures: Vec<&str> = diagnostics
             .iter()
             .filter(|d| {
                 d.severity == phitex_tex::Severity::Error
                     && d.range == (0, 0)
                     && d.context.is_empty()
+                    && !no_fixpoint.contains(&d.message)
             })
             .map(|d| d.message.as_str())
             .collect();
@@ -1081,7 +1084,11 @@ impl Session {
                 if phitex_tex::OBSERVE && std::env::var_os("PHITEX_EVAL_DUMP").is_some() {
                     eprintln!("eval-dump: {}", d.message);
                 }
-                crate::failure::explain(&d.message)
+                if no_fixpoint.contains(&d.message) {
+                    crate::failure::warning(&d.message)
+                } else {
+                    crate::failure::explain(&d.message)
+                }
             })
             .chain(
                 b.prelude_diagnostics()

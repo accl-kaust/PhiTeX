@@ -33,9 +33,9 @@ PhiTeX: TeX documents as graph reduction
 
 A document is built to its fixpoint as latexmk builds it with pdflatex:
 the files it writes and reads back go round until they settle (at most
-5 rounds, latexmk's limit, then the last round's output and a warning),
-BibTeX, biber and makeindex run in process when the document reads what
-they make. Under `watch` it is kept up to date as its files and the
+5 rounds, latexmk's limit; past them the build fails as latexmk's does,
+the last round's output kept), BibTeX, biber and makeindex run in
+process when the document reads what they make. Under `watch` it is kept up to date as its files and the
 editor's buffers change, each build byte-identical to a cold one, the
 pages live in the browser. It never stops for input, and never runs an
 external TeX, BibTeX or \\write18 command.
