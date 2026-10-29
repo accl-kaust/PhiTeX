@@ -132,6 +132,12 @@ pub struct Engine {
     /// committed after them, the node gone), since the last sweep; and
     /// the records the last sweep left ([`Engine::sweep_readers`]).
     pub(crate) stale_reads: AtomicU64,
+    /// Predictions a commit replaced with another value or depth: the
+    /// node, the field, the predicted value and depth. Judged when the
+    /// evaluation ends against what the node finally defines there
+    /// (`Engine::judge_predictions`): a run that read stale inputs and is
+    /// run again is a rerun, not a wrong prediction.
+    pub(crate) pred_pending: Mx<Vec<(NodeId, Field, ValueId, u16)>>,
     pub(crate) swept_left: AtomicU64,
     /// Counts the changes of any node's brackets: a chain of open scopes
     /// cached at an older count is stale (`read::chain_start`), and a run
@@ -285,6 +291,7 @@ impl Engine {
         Engine {
             field_epochs: (0..EPOCH_BUCKETS).map(|_| AtomicU64::new(0)).collect(),
             stale_reads: AtomicU64::new(0),
+            pred_pending: Mx::new(Vec::new()),
             swept_left: AtomicU64::new(0),
             scope_gen: AtomicU64::new(1),
             bracket_nodes: AtomicUsize::new(0),
@@ -1157,6 +1164,40 @@ impl Engine {
         self.field_epochs[Self::epoch_bucket(f)].fetch_add(1, Ordering::SeqCst);
     }
 
+    /// The predictions commits replaced ([`Engine::pred_pending`]),
+    /// judged now the evaluation is quiet: confirmed where the node's
+    /// last commit defines the field at its place with the predicted
+    /// value and depth (a global definition of a node outside every
+    /// scope standing for depth 0, as a commit confirms one), else
+    /// refuted, by field. A node gone is neither.
+    fn judge_predictions(&self, rep: &mut Report, by_field: &mut FxHashMap<Field, u64>) {
+        let pending = std::mem::take(&mut *self.pred_pending.lock());
+        for (n, f, value, depth) in pending {
+            let Some(node) = self.placed_node(n).filter(|x| x.state() != State::Gone) else {
+                continue;
+            };
+            let seg = self.seg(node.seg_hint());
+            let inner = seg.inner.read();
+            let now = inner
+                .defs
+                .get(&f)
+                .and_then(|m| m.get(&node.pos_hint()))
+                .map(|d| (d.value, d.depth));
+            drop(inner);
+            let at_top = || crate::read::depth_of(self, n) == Some(0);
+            let right = now.is_some_and(|(x, d)| {
+                x == value && (d == depth || (depth == 0 && d == crate::segment::GLOBAL && at_top()))
+            });
+            if right {
+                rep.predictions_confirmed += 1;
+            } else {
+                rep.predictions_refuted += 1;
+                *by_field.entry(f).or_default() += 1;
+                crate::obs::pred_miss(f, now.is_some_and(|(x, _)| x == value));
+            }
+        }
+    }
+
     /// The fold of contributions to `f` (default: `SeqMonoid`).
     pub fn declare_accumulator(&self, f: Field, m: Arc<dyn Monoid>) {
         self.monoids.write().by_field.insert(f, m);
@@ -1377,6 +1418,7 @@ impl Engine {
         let mut commit_by: FxHashMap<OpId, (u64, u64)> = FxHashMap::default();
         let mut rbf: FxHashMap<Field, u64> = FxHashMap::default();
         let mut pbf: FxHashMap<Field, u64> = FxHashMap::default();
+        self.judge_predictions(&mut rep, &mut pbf);
         let load = |c: &AtomicU64| c.load(Ordering::Relaxed);
         for w in &workers {
             rep.nodes_run += load(&w.nodes_run);
@@ -1388,7 +1430,6 @@ impl Engine {
             rep.stopped_stale += load(&w.stopped_stale);
             rep.wasted_ns += load(&w.wasted_ns);
             rep.predictions_confirmed += load(&w.predictions_confirmed);
-            rep.predictions_refuted += load(&w.predictions_refuted);
             rep.relative_resolved += load(&w.relative_resolved);
             rep.shaped += load(&w.shaped);
             rep.commits += load(&w.commits);
@@ -1436,9 +1477,6 @@ impl Engine {
             rep.capped.append(&mut log.capped);
             for (f, k) in log.refuted_by_field.drain() {
                 *rbf.entry(f).or_default() += k;
-            }
-            for (f, k) in log.pred_refuted_by_field.drain() {
-                *pbf.entry(f).or_default() += k;
             }
             rep.run_times.append(&mut log.run_times);
         }
@@ -1599,6 +1637,10 @@ impl Engine {
     /// range, final and environment readers, the environment, the paths'
     /// steps, the memo of applications, and the fields named anywhere.
     pub(crate) fn roots(&self, keep: &mut dyn FnMut(ValueId)) {
+        for &(_, f, x, _) in self.pred_pending.lock().iter() {
+            keep(f.0);
+            keep(x);
+        }
         let step = |s: &Step, keep: &mut dyn FnMut(ValueId)| match *s {
             Step::Key(x)
             | Step::Has(x)

@@ -56,7 +56,6 @@ pub(crate) struct CommitStats {
     pub(crate) woken: u64,
     pub(crate) relative_resolved: u64,
     pub(crate) predictions_confirmed: u64,
-    pub(crate) predictions_refuted: u64,
     pub(crate) shaped: u64,
     pub(crate) commit_ns: u64,
     pub(crate) reask_ns: u64,
@@ -67,7 +66,6 @@ impl CommitStats {
         self.woken += o.woken;
         self.relative_resolved += o.relative_resolved;
         self.predictions_confirmed += o.predictions_confirmed;
-        self.predictions_refuted += o.predictions_refuted;
         self.shaped += o.shaped;
         self.commit_ns += o.commit_ns;
         self.reask_ns += o.reask_ns;
@@ -1133,6 +1131,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // brackets, then definitions at their depths
         bracket_change = file_brackets(eng, &mut inner, node, pos, brackets);
         let contribs = &rec.contribs;
+        // (predictions this commit replaced, handed on once the segment's
+        // lock is let go)
+        let mut replaced: Vec<(NodeId, Field, ValueId, u16)> = Vec::new();
         for d in &filed {
             let depth = d.depth;
             let m = inner.defs.entry(d.f).or_default();
@@ -1152,10 +1153,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     e.multi = d.multi;
                 }
                 Some(e) => {
+                    // (judged when the evaluation ends, against what the
+                    // node then defines here: a run on stale inputs run
+                    // again is a rerun, its prediction right if its last
+                    // run agrees, `Engine::judge_predictions`)
                     if e.provisional {
-                        st.predictions_refuted += 1;
-                        *w.log.lock().pred_refuted_by_field.entry(d.f).or_default() += 1;
-                        crate::obs::pred_miss(d.f, e.value == d.value);
+                        replaced.push((node.id, d.f, e.value, e.depth));
                     }
                     *e = Def {
                         depth,
@@ -1558,6 +1561,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         st.commit_ns = ns(t_lock);
         lap.report(node.id.0, st.commit_ns, rec.defs.len(), rec.reads.len());
         drop(inner);
+        if !replaced.is_empty() {
+            eng.pred_pending.lock().append(&mut replaced);
+        }
         drop(old);
         break (seg.id, seg.lo, old_output, rec, pos, removed);
     };

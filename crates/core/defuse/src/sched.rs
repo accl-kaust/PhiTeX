@@ -157,8 +157,6 @@ pub(crate) struct WorkerLog {
     pub(crate) commit_by_op: FxHashMap<OpId, (u64, u64)>,
     pub(crate) causes: Vec<(NodeId, Cause)>,
     pub(crate) refuted_by_field: FxHashMap<Field, u64>,
-    /// The commits' refuted predictions by field ([`crate::Report::predictions_refuted_by_field`]).
-    pub(crate) pred_refuted_by_field: FxHashMap<Field, u64>,
     pub(crate) run_times: Vec<(NodeId, Duration)>,
     /// Loop-back readers past `Limits::final_reruns` (`allow_final_rerun`).
     pub(crate) capped: Vec<NodeId>,
@@ -220,7 +218,6 @@ pub(crate) struct Worker {
     pub(crate) woken: AtomicU64,
     pub(crate) relative_resolved: AtomicU64,
     pub(crate) predictions_confirmed: AtomicU64,
-    pub(crate) predictions_refuted: AtomicU64,
     pub(crate) shaped: AtomicU64,
     pub(crate) commits: AtomicU64,
     /// The most `At::Final` reruns of one node it allowed.
@@ -250,7 +247,6 @@ impl Worker {
         Worker::add(&self.woken, st.woken);
         Worker::add(&self.relative_resolved, st.relative_resolved);
         Worker::add(&self.predictions_confirmed, st.predictions_confirmed);
-        Worker::add(&self.predictions_refuted, st.predictions_refuted);
         Worker::add(&self.shaped, st.shaped);
     }
 
@@ -463,7 +459,6 @@ impl Pool {
                 woken: AtomicU64::new(0),
                 relative_resolved: AtomicU64::new(0),
                 predictions_confirmed: AtomicU64::new(0),
-                predictions_refuted: AtomicU64::new(0),
                 shaped: AtomicU64::new(0),
                 commits: AtomicU64::new(0),
                 final_max: AtomicU64::new(0),
