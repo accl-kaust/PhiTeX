@@ -524,7 +524,17 @@ impl Pool {
         };
         if let Some((n, placed)) = mine {
             if let Some((b, run)) = w.block.pop() {
-                if eng.node(b).pos_hint() < eng.node(n).pos_hint() {
+                // (and a node of the settling layer before a block head
+                // past the layer's frontier, `Ctx::set_frontier`: the page
+                // loop stands after the whole text, and taken by its place
+                // it ran once every piece had, each piece past a page's
+                // break on the routine's state before that page, and again
+                // on each finisher before it as it came; TeX builds the
+                // page after each paragraph and runs a routine before the
+                // text after its page)
+                let bn = eng.node(b);
+                let layer_first = eng.op(eng.node(n).op()).settles_at_quiet() && past_frontier(eng, bn, eng.frontier.load(Ordering::Acquire));
+                if bn.pos_hint() < eng.node(n).pos_hint() && !layer_first {
                     // (put back where a thief finds it: an idle
                     // worker runs it meanwhile; held by this one alone,
                     // the page loop, re-asked by every piece, waited for

@@ -472,6 +472,11 @@ impl Operation for Kick {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         if let Some(at) = kick_of(cx.values(), cx.args()) {
             cx.follow_after(at, ops(&self.0).pages, Vec::new());
+            // (the page layer's frontier, until the loop's first run sets
+            // its own: here, after the text's first piece, so the loop runs
+            // before the text after it, as TeX builds the page after each
+            // paragraph, not once the whole text has run)
+            cx.set_frontier(Some(cx.node()));
         }
         Ok(ValueId::UNIT)
     }
@@ -671,18 +676,7 @@ impl Run<'_, '_> {
             ls.tail = Some(encode_tail(v, &st, &lc));
             self.emit_beyond(&mut ls, &old);
         }
-        // (the frontier: at a hole, the piece not in yet, past which a
-        // page may yet fire and its finisher stand before the text that
-        // reads what its routine defines; at the end, none. Waiting for
-        // a give-back it stays where the last hole put it: the rest
-        // moves it on)
-        if hole {
-            if let Some(at) = self.cx.stopped_at() {
-                self.cx.set_frontier(Some(at));
-            }
-        } else if lc.ended {
-            self.cx.set_frontier(None);
-        }
+        self.publish_frontier(fold, &ls, &lc);
         // (waiting: the pages after the page waited at are a loop rest's,
         // its own node, so that this one's runs re-emit its pages alone,
         // never every page before; the rest keeps its key, the page's)
@@ -713,6 +707,26 @@ impl Run<'_, '_> {
         // 6. parked
         self.cx.park(ls.encode(v));
         Ok(ValueId::UNIT)
+    }
+
+    /// The page layer's frontier from this run ([`phitex_defuse::Ctx::set_frontier`]).
+    fn publish_frontier(&mut self, fold: Fold, ls: &LoopState, lc: &LoopCarry) {
+        // (the frontier: at a hole, the piece not in yet, past which a
+        // page may yet fire and its finisher stand before the text that
+        // reads what its routine defines; waiting for a give-back, the
+        // piece the page fired in, its routine's finisher after it and
+        // before the text after it; at the end, none)
+        if fold == Fold::Hole {
+            if let Some(at) = self.cx.stopped_at() {
+                self.cx.set_frontier(Some(at));
+            }
+        } else if fold == Fold::Wait
+            && let Some(i) = ls.wait
+        {
+            self.cx.set_frontier(Some(ls.checkpoints[i].cursor));
+        } else if lc.ended {
+            self.cx.set_frontier(None);
+        }
     }
 
     /// (`PHITEX_SCAN_TRACE`) Where a run starts.
