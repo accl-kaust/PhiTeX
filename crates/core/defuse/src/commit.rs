@@ -1602,6 +1602,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (the frontier this run moved, before its placements are queued: they
     // are queued by where they stand against it, `sched::sched_key`)
     if let Some(at) = frontier {
+        eng.frontier_by.store(node.id.raw() + 1, Ordering::Release);
         eng.frontier.store(at.map_or(0, |n| n.raw() + 1), Ordering::Release);
     }
     for n in made.iter().rev() {
@@ -2496,6 +2497,16 @@ fn reask_range(
                     again.to = n.stop;
                     again.hole = n.item.is_none() && n.stop.is_some();
                     file_ranges(eng, w, vec![(f, again)], by, st);
+                    // (the frontier its reader set at that stop moves on with
+                    // it: the reader is not re-asked, its answer stands, and
+                    // a reader held at the frontier waited for a run of it
+                    // that never came)
+                    if let Some(to) = r.to
+                        && eng.frontier_by.load(Ordering::Acquire) == r.node.raw() + 1
+                        && eng.frontier.compare_exchange(to.raw() + 1, n.stop.map_or(0, |s| s.raw() + 1), Ordering::AcqRel, Ordering::Acquire).is_ok()
+                    {
+                        crate::sched::release_frontier(eng, w);
+                    }
                 }
                 return;
             }

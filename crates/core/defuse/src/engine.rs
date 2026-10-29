@@ -157,6 +157,9 @@ pub struct Engine {
     /// of the node past which it may yet place nodes, plus one; 0, none
     /// (no reader waits).
     pub(crate) frontier: AtomicU64,
+    /// The node that set the frontier, its raw id plus one: a stop of its
+    /// that moves on moves the frontier with it (`commit::reask_range`).
+    pub(crate) frontier_by: AtomicU64,
     /// (`PHITEX_TEX_TIME`) Reads by readers outside the settling layer of
     /// a field it defines held past its frontier (`Ctx::set_frontier`).
     pub(crate) frontier_held: AtomicU64,
@@ -280,6 +283,7 @@ impl Engine {
             held: crate::lock::Mx::new(Vec::new()),
             settle_marks: (0..SETTLE_MARK_WORDS).map(|_| AtomicU64::new(0)).collect(),
             frontier: AtomicU64::new(0),
+            frontier_by: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
