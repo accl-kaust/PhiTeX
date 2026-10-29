@@ -4,6 +4,8 @@
 # $r the results directory, $w the workspace. gate-fast passes this
 # file's text to `bash -c` (the commit under test need not have it).
 #
+#   gate-shard.sh all SPEC...           the whole gate in one job (below:
+#                                       mc caps a user's submitted jobs)
 #   gate-shard.sh build                 the commit's binaries, once: phitex-tex's
 #                                       test binaries (fastdev) and the release
 #                                       CLI, built side by side, left in
@@ -64,6 +66,60 @@ echo "$shard $*" > "$r/shard.txt"
 status=green
 red() { echo "$1" >> "$r/red.txt"; status=red; }
 built() { echo "build_s $(( $(date +%s) - t0 ))" >> "$r/times.txt"; }
+# all NAME:CPUS:SHARD[,ARG...] ...: the whole gate in this one job, as
+# gate-fast submits it where the cluster caps a user's submitted jobs
+# (mc: 16, a gate of separate shards 12 of them). The build first unless
+# the binaries came in ($w/bin/cli/phitex), on every CPU of the job; its
+# store into $w/bin and $r/store (job.sbatch publishes it, ACCL_STORE_OUT).
+# Then every shard at once, each as its own job would run it: its own
+# results ($r/s-NAME, its log there), workspace ($w/s-NAME, the job's
+# entries linked in but the cache) and CPUs (the job's dealt out in the
+# order named, CPUS each). Always exits 0: the shards' verdicts are in
+# their directories (gate-fast's table reads them).
+if [ "$shard" = all ]; then
+  r0=$r w0=$w
+  # (the job's CPUs, one a line)
+  cpus=$(taskset -pc $$ 2>/dev/null | sed 's/.*: //' | tr ',' '\n' |
+    awk -F- '{ if (NF == 2) { for (i = $1; i <= $2; i++) print i } else if ($1 != "") print $1 }')
+  next=0
+  # (take N: the next N of them, comma-separated, in $set_)
+  take() { set_=$(sed -n "$((next + 1)),$((next + $1))p" <<< "$cpus" | paste -sd,); next=$((next + $1)); }
+  # (one NAME CPUS SHARD ARGS...: a shard in its own results, workspace and CPUs)
+  one() {
+    local name=$1 n=$2 x
+    shift 2
+    take "$n"
+    mkdir -p "$r0/s-$name" "$w0/s-$name"
+    for x in "$w0"/*; do
+      case ${x##*/} in s-* | cache) ;; *) ln -sfn "$x" "$w0/s-$name/" ;; esac
+    done
+    (
+      export r=$r0/s-$name w=$w0/s-$name
+      if [ -n "$set_" ] && command -v taskset > /dev/null; then taskset -c "$set_" bash "$0" "$@"; else bash "$0" "$@"; fi
+    ) > "$r0/s-$name/log" 2>&1
+  }
+  if [ ! -x "$w0/bin/cli/phitex" ]; then
+    one build "$(wc -l <<< "$cpus")" build
+    next=0
+    if [ "$(cat "$r0/s-build/status" 2>/dev/null)" != green ] || [ ! -d "$r0/s-build/store" ]; then
+      echo red > "$r0/status"
+      exit 0
+    fi
+    mkdir -p "$w0/bin"
+    cp -a "$r0/s-build/store/." "$w0/bin/"
+    cp -a "$r0/s-build/store" "$r0/store"
+  fi
+  for spec in "$@"; do
+    IFS=: read -r name n rest <<< "$spec"
+    IFS=, read -ra args <<< "$rest"
+    one "$name" "$n" "${args[@]}" &
+  done
+  wait
+  st=green
+  for d in "$r0"/s-*/; do [ "$(cat "$d/status" 2>/dev/null)" = green ] || st=red; done
+  echo $st > "$r0/status"
+  exit 0
+fi
 T="cargo test --profile fastdev -p phitex-tex --features profile,observe"
 # the test targets the shards run (the build shard builds them)
 SUITES="pdftex edits pages page_steps plain etex hints inputs"

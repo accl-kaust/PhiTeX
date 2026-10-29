@@ -26,11 +26,11 @@ export CLUSTER=${CLUSTER:-accl}
 case $CLUSTER in
   accl)
     H=acclhead1 remote=accl part="-p build --qos=build4" light="-p light"
-    ws_node=acclnode01 gate_x=--exclude=harrier perf_node=acclnode04 gate_ctl=566fb842
+    ws_node=acclnode01 gate_x=--exclude=harrier perf_node=acclnode04 gate_ctl=566fb842 gate_one=0
     runs=$HOME/code/flinner/phitex-runs ;;
   mc)
     H=mcmgt01 remote=mc part="-p mc -C cpu_amd_epyc_9754" light="-p mc -C cpu_amd_epyc_9754"
-    ws_node=mcnode42 gate_x= perf_node= gate_ctl=
+    ws_node=mcnode42 gate_x= perf_node= gate_ctl= gate_one=1
     runs=$HOME/code/flinner/phitex-runs/mc ;;
   *) echo "CLUSTER=$CLUSTER: accl or mc" >&2; exit 2 ;;
 esac

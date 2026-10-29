@@ -43,6 +43,11 @@
 # --exclude=harrier (harrier's /tmp is filled by other users past job.sbatch's
 # 20 GB check), and GATE_SBATCH= gives none.
 #
+# GATE_ONE=1 (the default on mc, which caps a user's submitted jobs at
+# 16) submits the whole gate as one job (one_job, gate-shard.sh all):
+# the build, then every shard at once on its own share of the job's CPUs;
+# `wait` takes its one id.
+#
 # CLUSTER=mc gates on the mc cluster instead (cluster.sh; the accl driver
 # it calls reads the same setting): the same shards on mcnode42/44, the
 # epoch oracle and gate-bin stores under mc's home, GATE_SBATCH none by
@@ -175,6 +180,10 @@ submit() {
   stage
   # (GATE_ONLY="lint ams": those shards only)
   on() { [ -z "${GATE_ONLY:-}" ] || [[ " $GATE_ONLY " == *" $1 "* ]]; }
+  if [ "${GATE_ONE:-$gate_one}" = 1 ]; then
+    one_job
+    return
+  fi
   ids=()
   # (the build first: everything but lint waits on it)
   build_first
@@ -211,6 +220,43 @@ submit() {
   mkdir -p "$runs"
   echo "$c ${ids[*]}" >> "$runs/gate-fast.ids"
   echo "${ids[*]}"
+}
+
+# The whole gate as one job (GATE_ONE=1, the default on mc, which caps a
+# user's submitted jobs at 16: a gate of separate shards takes 12): the
+# build (unless the commit's binaries are in its store: copied in) and
+# then every shard at once inside it, each on its own share of the job's
+# CPUs (gate-shard.sh all). Its id is the gate's; `wait` reads the
+# shards' directories under its results.
+one_job() {
+  local st specs=() k cpus=0 in="" spec
+  st=$(store "$c")
+  if $SSH $H "test -x $st/cli/phitex && test -x $st/cli/prof/phitex && test -x $st/cli/rel/phitex && test -x $st/tests/latex" 2>/dev/null; then
+    echo "gate-fast: binaries of $c already built ($st)" >&2
+    in=",ACCL_STORE_IN=$st/tests:$st/cli"
+  fi
+  # (NAME:CPUS:SHARD[,ARG...], the CPUs each as its own job asks)
+  if on lint; then specs+=("lint:8:lint"); fi
+  if on suites; then specs+=("suites:8:suites"); fi
+  if on latex; then
+    for ((k = 0; k < n; k++)); do specs+=("latex$k:10:latex,$k,$n"); done
+  fi
+  if on ams; then
+    specs+=("ams:18:ams,$want${GATE_CONTROL-$gate_ctl:+,${GATE_CONTROL-$gate_ctl}}" "amsedit8:10:amsedit,8" "amsedit16:18:amsedit,16")
+  fi
+  if on editkinds; then specs+=("editkinds:10:editkinds"); fi
+  if on para; then specs+=("para:32:para,${GATE_PARA_MD5:-4146793290dc0ea887d79a1d2d1b4c89}"); fi
+  if on cg; then specs+=("cg:2:cg"); fi
+  for spec in "${specs[@]}"; do
+    k=${spec#*:}
+    cpus=$((cpus + ${k%%:*}))
+  done
+  [ "$cpus" -ge 16 ] || cpus=16
+  id=$(sub "-c $cpus --mem=${GATE_ONE_MEM:-200G} -t ${GATE_ONE_TIME:-01:40:00} -J gf-all --export=ALL,ACCL_ROOT=$ROOT,ACCL_STORE_OUT=$st$in" all "${specs[@]}")
+  echo "gate-fast: commit $c, oracle md5 $want, one job ($cpus CPUs)" >&2
+  mkdir -p "$runs"
+  echo "$c $id" >> "$runs/gate-fast.ids"
+  echo "$id"
 }
 
 # the 50-edit histories (a measurement, not the gate)
@@ -271,20 +317,32 @@ wait_all() {
 
 table() {
   set +e
+  # (each job's results; a one-job gate's are its shards' directories,
+  # each a row under the job's id)
+  local x s i
+  local -a dirs=() jobs=()
+  for x in "$@"; do
+    if compgen -G "$runs/cmd-$x/s-*/shard.txt" > /dev/null; then
+      for s in "$runs/cmd-$x"/s-*/; do dirs+=("${s%/}"); jobs+=("$x"); done
+    else
+      dirs+=("$runs/cmd-$x"); jobs+=("$x")
+    fi
+  done
   # (the edit histories ran in their own shards: the ams shard's §0 table
   # made again with them)
-  local x amsd=""
-  for x in "$@"; do grep -q '^ams ' "$runs/cmd-$x/shard.txt" 2>/dev/null && amsd=$runs/cmd-$x; done
+  local amsd=""
+  for x in "${dirs[@]}"; do grep -q '^ams ' "$x/shard.txt" 2>/dev/null && amsd=$x; done
   if [ -n "$amsd" ]; then
-    for x in "$@"; do grep -q '^amsedit ' "$runs/cmd-$x/shard.txt" 2>/dev/null && cp "$runs/cmd-$x"/edits-j*.json "$amsd/" 2>/dev/null; done
+    for x in "${dirs[@]}"; do grep -q '^amsedit ' "$x/shard.txt" 2>/dev/null && cp "$x"/edits-j*.json "$amsd/" 2>/dev/null; done
     python3 -I "$here/gate-acct.py" table ams "$amsd" > "$amsd/table.txt" 2>&1
   fi
   local j d st sh status build wall el sub0 end first="" last="" reds=0
   local -A S=() E=() U=() N=()
   while IFS='|' read -r j st el sub0 end; do S[$j]=${st%% *}; E[$j]=$el; U[$j]=$sub0; N[$j]=$end; done < <(acct State,Elapsed,Submit,End "$@")
   printf '%-8s %-10s %-10s %-6s %7s %7s  %s\n' job shard state gate build_s wall_s red
-  for j in "$@"; do
-    d=$runs/cmd-$j
+  for i in "${!dirs[@]}"; do
+    d=${dirs[$i]}
+    j=${jobs[$i]}
     st=${S[$j]:-}
     el=$(secs "${E[$j]:-}")
     sub0=${U[$j]:-}
@@ -300,27 +358,26 @@ table() {
   done
   echo
   echo "red (failures first):"
-  for j in "$@"; do
-    d=$runs/cmd-$j
+  for i in "${!dirs[@]}"; do
+    d=${dirs[$i]}
+    j=${jobs[$i]}
     if [ -s "$d/red.txt" ]; then sed "s/^/  [$(cut -d' ' -f1 "$d/shard.txt")] /" "$d/red.txt"; fi
     [ -f "$d/status" ] || echo "  [$j] no result: $(tail -3 "$runs/phitex-$j.out" 2>/dev/null | tr '\n' ' ')"
   done
   # (a test that timed out: its threads' backtraces, the frames in
   # this tree's code first)
-  for j in "$@"; do
-    for g in "$runs/cmd-$j"/*/*.gdb; do
+  for d in "${dirs[@]}"; do
+    for g in "$d"/*/*.gdb; do
       [ -f "$g" ] || continue
-      echo "  backtraces of $(basename "$g" .gdb) (cmd-$j/$(basename "$(dirname "$g")")):"
+      echo "  backtraces of $(basename "$g" .gdb) (${d##*/}/$(basename "$(dirname "$g")")):"
       grep -E '^Thread |^#[0-9]+ ' "$g" | grep -E '^Thread |phitex|defuse' | head -80 | cut -c1-200 | sed 's/^/    /'
     done
   done
-  for j in "$@"; do
-    d=$runs/cmd-$j
+  for d in "${dirs[@]}"; do
     if [ -s "$d/known-red.txt" ]; then sed "s/^/  [known red, corpus fixture] /" "$d/known-red.txt"; fi
   done
   echo
-  for j in "$@"; do
-    d=$runs/cmd-$j
+  for d in "${dirs[@]}"; do
     if [ -f "$d/ams.txt" ]; then echo "amsldoc:"; sed 's/^/  /' "$d/ams.txt"; fi
     if [ -f "$d/para.txt" ]; then echo "para4000:"; sed 's/^/  /' "$d/para.txt"; fi
     if [ -f "$d/editkinds.txt" ]; then echo "amsldoc edit kinds (one watch session per -j; ms save to build event, ! over target, not red):"; sed 's/^/  /' "$d/editkinds.txt"; fi
@@ -332,8 +389,8 @@ table() {
   done
   echo
   echo "slowest tests (s):"
-  for j in "$@"; do cat "$runs/cmd-$j/test-walls.txt" 2>/dev/null; done | sort -k2 -rn | head -8 | sed 's/^/  /'
-  for j in "$@"; do [ -f "$runs/cmd-$j/suite-walls.txt" ] && { echo "suite walls (s):"; sort -k2 -rn "$runs/cmd-$j/suite-walls.txt" | tr '\n' ' ' | sed 's/^/  /'; echo; }; done
+  for d in "${dirs[@]}"; do cat "$d/test-walls.txt" 2>/dev/null; done | sort -k2 -rn | head -8 | sed 's/^/  /'
+  for d in "${dirs[@]}"; do [ -f "$d/suite-walls.txt" ] && { echo "suite walls (s):"; sort -k2 -rn "$d/suite-walls.txt" | tr '\n' ' ' | sed 's/^/  /'; echo; }; done
   echo
   local a b
   a=$(date -d "$first" +%s 2>/dev/null || echo 0)
