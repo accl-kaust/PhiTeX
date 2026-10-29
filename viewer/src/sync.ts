@@ -92,6 +92,31 @@ export function lineAt(hits: Glyph[], at: number): Glyph[] {
   return best ? hits.filter((g) => Math.abs(g.y - best!.y) < 0.5) : [];
 }
 
+/**
+ * The word the cursor at byte `at` follows, on the line [lo, hi) of `text`
+ * (bytes): the one it is in, else, in spaces, the word before it on the
+ * line, else the one after; null on a line with no word. The server's
+ * `word_near` (phitex-live lsp.rs) takes the same.
+ */
+export function wordNear(text: Uint8Array, at: number, lo: number, hi: number): [number, number] | null {
+  const here = wordBytes(text, at);
+  if (here) return here;
+  const w = (c: number) => c >= 0x80 || (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 39 || c === 45;
+  for (let i = Math.min(at, text.length) - 1; i >= lo; i--) if (w(text[i])) return wordBytes(text, i);
+  for (let i = at; i < Math.min(hi, text.length); i++) if (w(text[i])) return wordBytes(text, i);
+  return null;
+}
+
+/** Of `hits` (one source line's glyphs), the glyph nearest byte `at`: the last at or before it, else the first after. */
+export function glyphNear(hits: Glyph[], at: number): Glyph | null {
+  let before: Glyph | null = null, after: Glyph | null = null;
+  for (const g of hits) {
+    if (g.start <= at) { if (!before || g.start > before.start) before = g; }
+    else if (!after || g.start < after.start) after = g;
+  }
+  return before ?? after;
+}
+
 /** The source word around byte `at` of `text` ([lo, hi) in bytes): letters, digits, a command's name; null in spaces. */
 export function wordBytes(text: Uint8Array, at: number): [number, number] | null {
   const w = (c: number) => c >= 0x80 || (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 39 || c === 45;

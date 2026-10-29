@@ -494,6 +494,12 @@ impl Lsp {
         self.server.show(file, line, col)
     }
 
+    /// The editor selects `file` from `from` to `to` (line, character,
+    /// from 1), a selection made on the pages: whether the client can.
+    pub fn select(&self, file: &str, from: (usize, usize), to: (usize, usize)) -> bool {
+        self.server.select(file, from, to)
+    }
+
     /// Serve the editor's messages on a thread of their own; `quit` ends
     /// the watch (`exit`, or the end of standard input).
     pub fn serve(&self, quit: Box<dyn Fn() + Send + Sync>) {

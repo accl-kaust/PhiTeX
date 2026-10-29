@@ -174,6 +174,9 @@ struct Pages {
 }
 
 /// A viewer's state and its requests' answers.
+/// [`Viewer::on_select`]'s: file, the start's and the end's (line, column), from 1.
+pub type SelectFn = Box<dyn Fn(&str, (usize, usize), (usize, usize)) + Send>;
+
 pub struct Viewer {
     pages: Mutex<Pages>,
     diagnostics: Mutex<Value>,
@@ -189,6 +192,9 @@ pub struct Viewer {
     /// Shows a source place (file, line, column from 1, and the place as
     /// `FILE:LINE:COL`): the host's editor.
     goto: Mutex<Option<Box<dyn Fn(&str, usize, usize, &str) + Send>>>,
+    /// A selection on the pages, selected in the editor: file, its start's
+    /// and its end's line and column (from 1).
+    select: Mutex<Option<SelectFn>>,
     /// The bytes of a file of the project, by its name.
     read: Mutex<Option<Box<dyn Fn(&str) -> Option<Vec<u8>> + Send>>>,
     /// Where the events go (every viewer).
@@ -215,6 +221,7 @@ impl Default for Viewer {
             diff: Mutex::new(Diff::default()),
             log: Mutex::new(None),
             goto: Mutex::new(None),
+            select: Mutex::new(None),
             read: Mutex::new(None),
             emit: Mutex::new(None),
             route: Mutex::new(None),
@@ -238,6 +245,12 @@ impl Viewer {
     /// A `source` place shown by `goto(file, line, col, place)`.
     pub fn on_goto(&self, goto: Box<dyn Fn(&str, usize, usize, &str) + Send>) {
         *lock(&self.goto) = Some(goto);
+    }
+
+    /// A selection on the pages (the `select` op: bytes of a file) given
+    /// to `select` as lines and columns, for the editor to select.
+    pub fn on_select(&self, select: SelectFn) {
+        *lock(&self.select) = Some(select);
     }
 
     /// The project's files read by `read` (a `source` place's line).
@@ -746,6 +759,15 @@ impl Viewer {
                     Err(e) => fail(e),
                 }
             }
+            "select" => {
+                let file = text("file").unwrap_or_default();
+                let start = req.get("start").and_then(index).unwrap_or(0);
+                let end = req.get("end").and_then(index).unwrap_or(start);
+                match s.to_select(&file, start, end.max(start)) {
+                    Ok(place) => ok(json!({"place": place})),
+                    Err(e) => fail(e),
+                }
+            }
             "diagnostics" => ok(json!({"items": lock(&s.diagnostics).clone()})),
             "painted" => {
                 // (in microseconds: Ask stays Eq)
@@ -845,6 +867,23 @@ impl Viewer {
         }
         Ok(place)
     }
+
+    /// A selection on the pages, bytes `start`..`end` of `file`: given to
+    /// [`Viewer::on_select`]'s host as lines and columns. The place,
+    /// `FILE:LINE:COL-LINE:COL`.
+    fn to_select(&self, file: &str, start: usize, end: usize) -> Result<String, &'static str> {
+        if file.is_empty() || file.starts_with('/') || file.contains("..") {
+            return Err("not a file of the project");
+        }
+        let Some(text) = lock(&self.read).as_ref().and_then(|r| r(file)) else {
+            return Err("no such file");
+        };
+        let (a, b) = (line_col(&text, start), line_col(&text, end));
+        if let Some(f) = lock(&self.select).as_ref() {
+            f(file, a, b);
+        }
+        Ok(format!("{file}:{}:{}-{}:{}", a.0, a.1, b.0, b.1))
+    }
 }
 
 /// Page `k`'s characters with their sources (the module's `origins`):
@@ -917,6 +956,36 @@ mod tests {
         assert_eq!(line_col(t, 0), (1, 1));
         assert_eq!(line_col(t, 3), (2, 1));
         assert_eq!(line_col(t, 6), (2, 3));
+    }
+
+    /// A selection on the pages (the `select` op, bytes) reaches the host
+    /// as lines and columns, for the editor to select; a name outside the
+    /// project is refused.
+    #[test]
+    fn select_op() {
+        let v = Viewer::default();
+        v.on_read(Box::new(|f: &str| {
+            (f == "a.tex").then(|| "one\ntwo three\n".as_bytes().to_vec())
+        }));
+        let got: Arc<Mutex<Vec<(String, (usize, usize), (usize, usize))>>> = Arc::default();
+        let g = got.clone();
+        v.on_select(Box::new(move |f: &str, a, b| {
+            lock(&g).push((f.to_owned(), a, b))
+        }));
+        let r: Value = serde_json::from_str(
+            &v.answer(&json!({"id": 1, "op": "select", "file": "a.tex", "start": 8, "end": 13})),
+        )
+        .unwrap();
+        assert_eq!(r["json"]["place"], "a.tex:2:5-2:10", "{r}");
+        assert_eq!(
+            lock(&got).clone(),
+            vec![("a.tex".to_owned(), (2, 5), (2, 10))]
+        );
+        let r: Value = serde_json::from_str(
+            &v.answer(&json!({"id": 2, "op": "select", "file": "../x.tex", "start": 0, "end": 1})),
+        )
+        .unwrap();
+        assert_eq!(r["ok"], false);
     }
 
     #[test]

@@ -56,6 +56,9 @@ impl Client {
 
 /// A source place's showing by an LSP editor: whether it did.
 type Goto = Box<dyn Fn(&str, usize, usize) -> bool + Send>;
+/// Selects a selection made on the pages (file, start and end line and
+/// column, from 1) in the editor: whether it did.
+type Select = Box<dyn Fn(&str, (usize, usize), (usize, usize)) -> bool + Send>;
 
 struct Shared {
     token: String,
@@ -72,6 +75,8 @@ pub struct View {
     /// Shows a source place (file, line, column from 1) in the editor
     /// instead of the `--editor` command, when it says it did.
     lsp: Arc<Mutex<Option<Goto>>>,
+    /// Selects a selection on the pages in the editor (LSP).
+    lsp_select: Arc<Mutex<Option<Select>>>,
 }
 
 impl std::ops::Deref for View {
@@ -148,6 +153,20 @@ impl View {
                 },
             ));
         }
+        let lsp_select: Arc<Mutex<Option<Select>>> = Arc::default();
+        {
+            let lsp_select = lsp_select.clone();
+            viewer.on_select(Box::new(move |file: &str, a, b| {
+                let place = format!("{file}:{}:{}-{}:{}", a.0, a.1, b.0, b.1);
+                if lock(&lsp_select).as_ref().is_some_and(|f| f(file, a, b)) {
+                    eprintln!("selection: {place} (selected in the editor)");
+                } else {
+                    eprintln!(
+                        "selection: {place} (an editor speaking LSP to the watch selects it)"
+                    );
+                }
+            }));
+        }
         let shared = Arc::new(Shared {
             token: token(),
             clients,
@@ -168,7 +187,12 @@ impl View {
                         .spawn(move || serve(&s, conn));
                 }
             })?;
-        Ok(View { shared, url, lsp })
+        Ok(View {
+            shared,
+            url,
+            lsp,
+            lsp_select,
+        })
     }
 
     /// The viewer's state, shared (the session's progress records reach
@@ -198,6 +222,12 @@ impl View {
     /// `--editor` command.
     pub fn on_source(&self, goto: Goto) {
         *lock(&self.lsp) = Some(goto);
+    }
+
+    /// A selection on the pages selected by `select(file, from, to)` (an
+    /// editor that speaks LSP to the watch) where it returns true.
+    pub fn on_select_source(&self, select: Select) {
+        *lock(&self.lsp_select) = Some(select);
     }
 }
 

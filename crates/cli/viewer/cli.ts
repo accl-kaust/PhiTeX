@@ -262,7 +262,10 @@ const host: EditorHost = { loadProject: async () => ({}), onOpen() {}, onChanges
 // (byte offsets of the file on disk: the watch reads it to find the line)
 const session = new PreviewSession(host, pages, panel, {
   checkEveryMs: 0,
-  remote: { source: (file, start, end) => void sock.request({ op: "source", file, start, end }) },
+  remote: {
+    source: (file, start, end) => void sock.request({ op: "source", file, start, end }),
+    select: (file, start, end) => void sock.request({ op: "select", file, start, end }),
+  },
 });
 
 // ---- The diff against a past version (the watch's diff ops, view.rs) ----

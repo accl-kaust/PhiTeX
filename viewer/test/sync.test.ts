@@ -2,7 +2,7 @@
 // core alike): base64 columns of little-endian words, decoded by sync.ts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { from, glyphs } from "../src/sync.ts";
+import { from, glyphNear, glyphs, wordNear } from "../src/sync.ts";
 
 const b64 = (words: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(words)));
 const u32 = (xs: number[]) => b64(new Uint32Array(xs).buffer);
@@ -31,4 +31,24 @@ test("origins' columns decode to glyphs, a file of none and a synthesized one ke
 
 test("a page with no glyphs, or an answer with none, gives none", () => {
   assert.deepEqual(glyphs({ files: [], n: 0 }, (n) => n), []);
+});
+
+test("the follow's word: the cursor's, else in spaces the one before on its line, else after; never across lines", () => {
+  const t = (s: string) => new TextEncoder().encode(s);
+  assert.deepEqual(wordNear(t("one two"), 5, 0, 7), [4, 7]);
+  // (after a space typed at the end of a line: the word before it)
+  assert.deepEqual(wordNear(t("one two \nx"), 8, 0, 8), [4, 7]);
+  // (spaces at a line's start: the word after it)
+  assert.deepEqual(wordNear(t("a\n  bc"), 3, 2, 6), [4, 6]);
+  assert.equal(wordNear(t("a\n   "), 3, 2, 5), null);
+});
+
+test("the glyph nearest the cursor on its line: the last at or before it, else the first after", () => {
+  const g = (start: number) => ({ file: "a.tex", start, end: start + 1, synth: false, x: start, y: 10 });
+  const hits = [g(0), g(1), g(4), g(5)];
+  // (a word just typed at 8, its glyphs not built yet: the typeset one before it)
+  assert.equal(glyphNear(hits as never, 8)?.start, 5);
+  assert.equal(glyphNear(hits as never, 3)?.start, 1);
+  assert.equal(glyphNear([g(4)] as never, 1)?.start, 4);
+  assert.equal(glyphNear([], 1), null);
 });

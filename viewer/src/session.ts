@@ -20,7 +20,7 @@ const preambleOf = (t: string | undefined) => {
   return end < 0 ? (t ?? "") : t!.slice(0, end);
 };
 const usesMinted = (t: string) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
-import { boxes, from, glyphs, lineAt, nearest, wordBytes, type Glyph } from "./sync.ts";
+import { boxes, from, glyphNear, glyphs, lineAt, nearest, wordBytes, wordNear, type Glyph } from "./sync.ts";
 import { diagnose, type Diagnostic, type TexError } from "./diagnostics.ts";
 import { DELIVERED, isPackageFile, referenced, noPackages, type PackageSource, type PackageState } from "./packages.ts";
 import { asDiagnostic, type Problem } from "./problems.ts";
@@ -234,9 +234,11 @@ export interface Options {
   /**
    * The host builds from disk (`phitex watch`): no project sent, no edits;
    * the pages, problems and outline as its events tell; a double-click's
-   * source opened by it (`source`, bytes of the file as it is on disk).
+   * source opened by it (`source`, bytes of the file as it is on disk), and
+   * a selection on the pages selected in the editor by it (`select`, the
+   * same bytes; the editor's focus left where it is).
    */
-  remote?: { source(file: string, start: number, end: number): void };
+  remote?: { source(file: string, start: number, end: number): void; select?(file: string, start: number, end: number): void };
   /** Schedules a flush (default: the next task). */
   schedule?: (f: () => void) => void;
   now?: () => number;
@@ -1012,6 +1014,8 @@ export class PreviewSession {
     this.tr("select→source", { pages: sel.map((s) => s.k), file: best?.[0], glyphs: best?.[1].n ?? 0 });
     if (!best) return;
     const [file, { lo, hi }] = best;
+    // (the host has the files: it selects them, as it opens a double-click's)
+    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
     const t = this.files[file];
     if (t === undefined) return;
     this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
@@ -1029,7 +1033,7 @@ export class PreviewSession {
     const at = byteOffset(t, pos);
     const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
     const line: [number, number] = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
-    this.followBytes(file, at, wordBytes(new TextEncoder().encode(t), at), line);
+    this.followBytes(file, at, wordNear(new TextEncoder().encode(t), at, line[0], line[1]), line);
   }
 
   /**
@@ -1053,7 +1057,16 @@ export class PreviewSession {
       if (!all) continue;
       const onLine = from(all, file, a, b);
       if (!onLine.length) continue;
-      const word = w ? from(onLine, file, w[0], w[1]) : [];
+      // (a word, never the whole line, while typing: the cursor's word,
+      // else, not typeset yet (just typed), the typeset word nearest it on
+      // its line, the glyph's own; the line only with no word near at all)
+      let word = w ? from(onLine, file, w[0], w[1]) : [];
+      if (!word.length) {
+        const g = glyphNear(onLine, at);
+        const t = this.files[file];
+        const gw = g && t !== undefined ? wordBytes(new TextEncoder().encode(t), g.start) : null;
+        word = gw ? from(onLine, file, gw[0], gw[1]) : g ? onLine.filter((x) => x.start === g.start) : [];
+      }
       const hit = word.length ? word : lineAt(onLine, at);
       this.followWant = "";
       this.sink.mark(k, boxes(hit, all), scroll);

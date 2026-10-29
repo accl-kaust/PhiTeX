@@ -2747,6 +2747,23 @@ function lineAt(hits, at) {
   for (const g of hits) if (!best || Math.abs(g.start - at) < Math.abs(best.start - at)) best = g;
   return best ? hits.filter((g) => Math.abs(g.y - best.y) < 0.5) : [];
 }
+function wordNear(text, at, lo, hi) {
+  const here = wordBytes(text, at);
+  if (here) return here;
+  const w = (c) => c >= 128 || c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c === 39 || c === 45;
+  for (let i = Math.min(at, text.length) - 1; i >= lo; i--) if (w(text[i])) return wordBytes(text, i);
+  for (let i = at; i < Math.min(hi, text.length); i++) if (w(text[i])) return wordBytes(text, i);
+  return null;
+}
+function glyphNear(hits, at) {
+  let before = null, after = null;
+  for (const g of hits) {
+    if (g.start <= at) {
+      if (!before || g.start > before.start) before = g;
+    } else if (!after || g.start < after.start) after = g;
+  }
+  return before ?? after;
+}
 function wordBytes(text, at) {
   const w = (c) => c >= 128 || c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c === 39 || c === 45;
   let lo = at, hi = at;
@@ -3597,6 +3614,7 @@ var PreviewSession = class {
     this.tr("select\u2192source", { pages: sel.map((s) => s.k), file: best?.[0], glyphs: best?.[1].n ?? 0 });
     if (!best) return;
     const [file, { lo, hi }] = best;
+    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
     const t = this.files[file];
     if (t === void 0) return;
     this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
@@ -3613,7 +3631,7 @@ var PreviewSession = class {
     const at = byteOffset(t, pos);
     const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
     const line = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
-    this.followBytes(file, at, wordBytes(new TextEncoder().encode(t), at), line);
+    this.followBytes(file, at, wordNear(new TextEncoder().encode(t), at, line[0], line[1]), line);
   }
   /**
    * The cursor at byte `at` of `file`'s text (the glyph origins' offsets),
@@ -3636,7 +3654,13 @@ var PreviewSession = class {
       if (!all) continue;
       const onLine = from(all, file, a, b);
       if (!onLine.length) continue;
-      const word = w ? from(onLine, file, w[0], w[1]) : [];
+      let word = w ? from(onLine, file, w[0], w[1]) : [];
+      if (!word.length) {
+        const g = glyphNear(onLine, at);
+        const t = this.files[file];
+        const gw = g && t !== void 0 ? wordBytes(new TextEncoder().encode(t), g.start) : null;
+        word = gw ? from(onLine, file, gw[0], gw[1]) : g ? onLine.filter((x) => x.start === g.start) : [];
+      }
       const hit = word.length ? word : lineAt(onLine, at);
       this.followWant = "";
       this.sink.mark(k, boxes(hit, all), scroll);
@@ -4609,7 +4633,10 @@ var host = { loadProject: async () => ({}), onOpen() {
 } };
 var session = new PreviewSession(host, pages, panel, {
   checkEveryMs: 0,
-  remote: { source: (file, start, end) => void sock.request({ op: "source", file, start, end }) }
+  remote: {
+    source: (file, start, end) => void sock.request({ op: "source", file, start, end }),
+    select: (file, start, end) => void sock.request({ op: "select", file, start, end })
+  }
 });
 var diffState = {};
 var diffWait;

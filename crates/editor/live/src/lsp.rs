@@ -154,6 +154,26 @@ fn word_at(text: &[u8], at: usize) -> Option<(usize, usize)> {
     (lo < hi).then_some((lo, hi))
 }
 
+/// The word the cursor at byte `at` of `text` follows (bytes): the one it
+/// is in, else, in spaces, the word before it on the same line `line`,
+/// else the one after; none on a line with no word. The viewer's
+/// `wordNear` takes the same: the follow marks a word, never the whole
+/// line, while typing (it flipped between the word and the line at each
+/// space).
+fn word_near(text: &[u8], at: usize, line: (usize, usize)) -> Option<(usize, usize)> {
+    let w = |c: u8| c >= 0x80 || c.is_ascii_alphanumeric() || c == b'\'' || c == b'-';
+    if let Some(r) = word_at(text, at) {
+        return Some(r);
+    }
+    let at = at.min(text.len());
+    if let Some(i) = (line.0..at).rev().find(|&i| w(text[i])) {
+        return word_at(text, i);
+    }
+    (at..line.1.min(text.len()))
+        .find(|&i| w(text[i]))
+        .and_then(|i| word_at(text, i))
+}
+
 /// The line of byte `at` of `text`, without its end (bytes).
 fn line_at(text: &str, at: usize) -> (usize, usize) {
     let b = text.as_bytes();
@@ -601,9 +621,10 @@ impl Server {
             r => Some((byte_at(&text, &r["start"])?, byte_at(&text, &r["end"])?)),
         }
         .map(|(a, b)| (a.min(b), a.max(b)));
+        let line = line_at(&text, at);
         Some(Ask::Cursor {
-            word: word_at(text.as_bytes(), at),
-            line: line_at(&text, at),
+            word: word_near(text.as_bytes(), at, line),
+            line,
             file,
             at,
             select,
@@ -837,26 +858,49 @@ impl Server {
     /// `col` (from 1), the place selected and the focus taken: whether
     /// the client can.
     pub fn show(&self, file: &str, line: usize, col: usize) -> bool {
-        let line0 = line.saturating_sub(1);
-        // (characters as UTF-16 units, where the editor's buffer is known)
-        let mut ch = col.saturating_sub(1);
-        {
-            let st = lock(&self.st);
-            if !st.caps.show_document {
-                return false;
-            }
-            if let Some(d) = st.docs.get(file)
-                && let Some(l) = d.lines().nth(line0)
-            {
-                ch = l.chars().take(ch).map(char::len_utf16).sum();
-            }
-        }
-        let at = json!({"line": line0, "character": ch});
+        let Some(at) = self.position(file, line, col) else {
+            return false;
+        };
         self.request(
             "window/showDocument",
             json!({"uri": self.uri(file), "takeFocus": true, "selection": {"start": at, "end": at}}),
         );
         true
+    }
+
+    /// The editor selects `file` from `from` to `to` (line, character,
+    /// from 1), a selection made on the pages: shown, the focus left where
+    /// it is (on the preview). Whether the client can.
+    pub fn select(&self, file: &str, from: (usize, usize), to: (usize, usize)) -> bool {
+        let (Some(a), Some(b)) = (
+            self.position(file, from.0, from.1),
+            self.position(file, to.0, to.1),
+        ) else {
+            return false;
+        };
+        self.request(
+            "window/showDocument",
+            json!({"uri": self.uri(file), "takeFocus": false, "selection": {"start": a, "end": b}}),
+        );
+        true
+    }
+
+    /// `file`'s `line` and character `col` (from 1) as an LSP position
+    /// (from 0, UTF-16 units where the editor's buffer is known); none
+    /// when the client cannot show documents.
+    fn position(&self, file: &str, line: usize, col: usize) -> Option<Value> {
+        let line0 = line.saturating_sub(1);
+        let mut ch = col.saturating_sub(1);
+        let st = lock(&self.st);
+        if !st.caps.show_document {
+            return None;
+        }
+        if let Some(d) = st.docs.get(file)
+            && let Some(l) = d.lines().nth(line0)
+        {
+            ch = l.chars().take(ch).map(char::len_utf16).sum();
+        }
+        Some(json!({"line": line0, "character": ch}))
     }
 
     /// The settings as given so far (`initializationOptions`, then the
@@ -1487,6 +1531,11 @@ mod tests {
         assert_eq!(word_at(t.as_bytes(), 7), Some((6, 12)));
         assert_eq!(word_at(t.as_bytes(), 5), Some((0, 5)));
         assert_eq!(word_at(b"a  b", 2), None);
+        // (in spaces: the word before on the line, else the one after; never across lines)
+        assert_eq!(word_near(b"a  b", 2, (0, 4)), Some((0, 1)));
+        assert_eq!(word_near(b"  ab\ncd", 1, (0, 4)), Some((2, 4)));
+        assert_eq!(word_near(b"ab\n  cd", 3, (3, 7)), Some((5, 7)));
+        assert_eq!(word_near(b"ab\n   ", 4, (3, 6)), None);
         assert_eq!(line_at(t, 16), (13, 19));
         let (s, host, _) = server();
         init(&s, "file:///p", false);

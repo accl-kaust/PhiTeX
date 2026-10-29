@@ -736,8 +736,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 if let Some(l) = &lsp {
                     l.viewer(v.url());
                     // (a double-click's place shown by the editor itself)
+                    let l2 = l.clone();
+                    v.on_source(Box::new(move |f, line, col| l2.show(f, line, col)));
+                    // (a selection on the pages selected in the editor, its focus kept)
                     let l = l.clone();
-                    v.on_source(Box::new(move |f, line, col| l.show(f, line, col)));
+                    v.on_select_source(Box::new(move |f, a, b| l.select(f, a, b)));
                 }
                 ui.event(&json!({"event": "viewer", "url": v.url()}));
                 if o.open && t.viewer.is_none() && !view::open_browser(v.url()) {
