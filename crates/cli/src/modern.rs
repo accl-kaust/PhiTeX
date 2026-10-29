@@ -77,11 +77,32 @@ fn after_help() -> String {
     )
 }
 
+/// `phitex --version`'s text (after `phitex `): the version, its author,
+/// the license, and what other versions it works with (docs/spec-distribution.md §6).
+pub fn version_text() -> &'static str {
+    static TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "{}\n\
+             Copyright 2026 Ammar Seliaman (https://github.com/Flinner, flinner <at> nand <dot> sh)\n\
+             AGPL-3.0-only: free software, without any warranty. https://phitex.org\n\
+             engine {:016x}, records {}, Shelf schema {} (release {}), editor protocol {}",
+            env!("CARGO_PKG_VERSION"),
+            phitex_tex::engine_id(),
+            phitex_live::host::RECORDS_VERSION,
+            phitex_shelf::SCHEMAS.map(|s| s.to_string()).join(", "),
+            crate::shelf::RELEASE,
+            phitex_live::lsp::PROTOCOL,
+        )
+    });
+    &TEXT
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "phitex",
     bin_name = "phitex",
     version = env!("CARGO_PKG_VERSION"),
+    long_version = version_text(),
     about = "PhiTeX: TeX documents as graph reduction",
     long_about = ABOUT,
     after_help = after_help(),

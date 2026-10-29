@@ -183,7 +183,7 @@ impl Index {
         Ok(self)
     }
 
-    /// The release (`tl2026.6`).
+    /// The release (`tl2026.7`).
     #[must_use]
     pub fn release(&self) -> &str {
         &self.release

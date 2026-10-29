@@ -2711,7 +2711,7 @@ fn plain_tfms(text: &str) -> Vec<(String, Vec<u8>)> {
 }
 
 /// A Shelf release of `files` (texmf path, bytes) in one pack, its table
-/// and `release-tl2026.6.json` of schema 1, served over HTTP on 127.0.0.1
+/// and `release-tl2026.7.json` of schema 1, served over HTTP on 127.0.0.1
 /// by a thread of the test's: the port, and how many requests it
 /// answered. `tamper`: the pack served differs from the table's by its
 /// last byte.
@@ -2737,8 +2737,8 @@ fn shelf_server(
         pack.len()
     );
     let release = serde_json::json!({
-        "schema": 1, "release": "tl2026.6", "index": "index-tl2026.6.tsv.gz",
-        "pack_table": "packs-tl2026.6.tsv.gz", "deps": ["pdftex", "xetex"],
+        "schema": 1, "release": "tl2026.7", "index": "index-tl2026.7.tsv.gz",
+        "pack_table": "packs-tl2026.7.tsv.gz", "deps": ["pdftex", "xetex"],
         "search": {"pdftex": {"tex": ["tex/latex", "tex/generic", "tex"], "tfm": ["fonts/tfm"]}},
     });
     let mut served = pack.clone();
@@ -2747,15 +2747,15 @@ fn shelf_server(
     }
     let site: HashMap<String, Vec<u8>> = [
         (
-            "release-tl2026.6.json".to_owned(),
+            "release-tl2026.7.json".to_owned(),
             release.to_string().into_bytes(),
         ),
         (
-            "index-tl2026.6.tsv.gz".to_owned(),
+            "index-tl2026.7.tsv.gz".to_owned(),
             phitex_shelf::gzip_stored(index.as_bytes()),
         ),
         (
-            "packs-tl2026.6.tsv.gz".to_owned(),
+            "packs-tl2026.7.tsv.gz".to_owned(),
             phitex_shelf::gzip_stored(table.as_bytes()),
         ),
         ("h/cm-1.pack".to_owned(), served),
@@ -2847,7 +2847,7 @@ fn build_from_shelf() {
     let n = asked.load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(n, 4, "release.json, the index, the pack table, one pack");
     assert!(
-        dir.join("cache/shelf/tl2026.6/h/cm-1.pack").is_file(),
+        dir.join("cache/shelf/tl2026.7/h/cm-1.pack").is_file(),
         "the pack kept"
     );
     // (again, the cache's only: no server)
@@ -2874,7 +2874,7 @@ fn build_from_shelf() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !bad.join("cache/shelf/tl2026.6/h/cm-1.pack").exists(),
+        !bad.join("cache/shelf/tl2026.7/h/cm-1.pack").exists(),
         "a tampered pack kept"
     );
 }
