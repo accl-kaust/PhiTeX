@@ -366,6 +366,10 @@ pub(crate) struct RunRecord {
     /// state at the point it stopped, read back by `Ctx::resumed`. Not a
     /// read: no record, no re-ask. A root at a collection.
     pub(crate) state: Option<ValueId>,
+    /// The placements (indices into `placed`) whose next commit re-asks
+    /// the node, whatever their output (`Ctx::placed_output_wait`). Not
+    /// reads: nothing checks them, no run keeps them.
+    pub(crate) waits: Box<[usize]>,
 }
 
 impl RunRecord {
@@ -381,6 +385,7 @@ impl RunRecord {
             state: None,
             effect: Effect::None,
             provisional: true,
+            waits: Box::default(),
         }
     }
 }
@@ -527,4 +532,7 @@ pub(crate) struct Product {
     /// `Ctx::settle_now`: its definitions reach readers outside the
     /// settling layer at once.
     pub(crate) settle_now: bool,
+    /// `Ctx::placed_output_wait`: the placements whose next commit
+    /// re-asks the run, whatever their output.
+    pub(crate) waits: Vec<usize>,
 }

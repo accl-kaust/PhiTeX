@@ -81,6 +81,10 @@ pub(crate) struct Shared {
     /// Dirty nodes of `Operation::final_only` operations, uncounted, run
     /// when the line is next quiet.
     deferred: Mx<Vec<NodeId>>,
+    /// Runs stopped waiting for a node's commit (`Ctx::read` on a
+    /// settling node's prediction at depth 0), by that node: queued when
+    /// it commits, or at the quiet point.
+    pub(crate) waiting: Mx<crate::values::FxHashMap<NodeId, Vec<NodeId>>>,
     /// The roots the caller's edit source holds (`EditSource::roots`),
     /// given by the caller's worker as it comes to the barrier.
     extra_roots: Mx<Vec<crate::values::ValueId>>,
@@ -326,6 +330,7 @@ impl Pool {
             t0: Instant::now(),
             collect_wanted: AtomicBool::new(false),
             deferred: Mx::new(Vec::new()),
+            waiting: Mx::new(crate::values::FxHashMap::default()),
             extra_roots: Mx::new(Vec::new()),
             panicked_roots: Mx::new(Vec::new()),
             collecting: AtomicBool::new(false),
@@ -883,10 +888,18 @@ fn run_worker(
                     continue;
                 }
             }
-            let rel: Vec<NodeId> = std::mem::take(&mut *pool.shared.deferred.lock())
+            let mut rel: Vec<NodeId> = std::mem::take(&mut *pool.shared.deferred.lock())
                 .into_iter()
                 .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty))
                 .collect();
+            // (and the runs that waited for a node that has not committed:
+            // they go on, on its prediction)
+            rel.extend(
+                std::mem::take(&mut *pool.shared.waiting.lock())
+                    .into_values()
+                    .flatten()
+                    .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty)),
+            );
             if !rel.is_empty() {
                 w.seed(&rel);
                 pool.shared.wake_all();
@@ -1380,6 +1393,12 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
                 why,
             })
         }
+        Ok(Err(_stop)) if cx.wait_on.is_some() => {
+            let on = cx.wait_on.take();
+            drop(cx);
+            park_waiting(eng, pool, w, node, on);
+            Ok(())
+        }
         Ok(Err(_stop)) => {
             drop(cx);
             end_run(eng, pool, w, node, State::Dirty);
@@ -1474,6 +1493,64 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
             pool.shared.done_one();
         }
         return to == State::Clean;
+    }
+}
+
+/// Whether node `n` has nothing more to commit that a run waiting for it
+/// (`park_waiting`) could meet: gone or taken by a claim, or clean on a
+/// run of its own. One dirty or running commits again (a node relocated
+/// runs again where it stands, its record a run's, and a reader that
+/// took that record for its commit was queued again at once, ahead of
+/// it on one thread, and ran again for ever).
+pub(crate) fn settled_node(eng: &Engine, n: NodeId) -> bool {
+    eng.placed_node(n).is_none_or(|x| match x.state() {
+        State::Gone | State::Inert => true,
+        State::Clean => x.run_record().is_some_and(|r| !r.provisional),
+        _ => false,
+    })
+}
+
+/// A run that stopped to wait for node `on`'s commit (`Ctx::read`):
+/// dirty, queued nowhere, listed under `on` (`Shared::waiting`) unless
+/// `on` has committed meanwhile or the run was re-asked (then queued).
+fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<NodeId>) {
+    let committed = |n: NodeId| settled_node(eng, n);
+    if node.state() != State::Running || on.is_none_or(committed) || !node.cas_state(State::Running, State::Dirty) {
+        end_run(eng, pool, w, node, State::Dirty);
+        return;
+    }
+    node.committing.store(false, Ordering::Release);
+    let Some(on) = on else { return };
+    let mut m = pool.shared.waiting.lock();
+    // (checked again under the lock its commit takes: no wake lost)
+    if committed(on) {
+        drop(m);
+        w.local.push(node.id);
+        w.shared.wake_one();
+        return;
+    }
+    m.entry(on).or_default().push(node.id);
+    drop(m);
+    pool.shared.done_one();
+}
+
+/// The runs waiting for `n`'s commit queued again (`park_waiting`).
+pub(crate) fn release_waiting(eng: &Engine, w: Option<&Worker>, n: NodeId) {
+    let Some(w) = w else { return };
+    let ws = w.shared.waiting.lock().remove(&n);
+    for m in ws.into_iter().flatten() {
+        if let Some(x) = eng.placed_node(m).filter(|x| x.state() == State::Dirty) {
+            enqueue(
+                eng,
+                Some(w),
+                x,
+                Wake {
+                    by: Some(n),
+                    cause: Cause::Output { of: n },
+                    at_ns: eng.now_ns(),
+                },
+            );
+        }
     }
 }
 

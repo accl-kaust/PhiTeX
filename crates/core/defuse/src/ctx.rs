@@ -55,6 +55,9 @@ pub struct Ctx<'a> {
     placed_keys: Option<PlacedKeys>,
     /// Why the run said it is stuck (`Ctx::stuck`).
     pub(crate) stuck: Option<String>,
+    /// The node whose commit the run stopped to wait for (`Ctx::read`
+    /// on its prediction at depth 0).
+    pub(crate) wait_on: Option<NodeId>,
     /// Its checks so far ([`Ctx::tick`]).
     ticks: u64,
 }
@@ -94,6 +97,7 @@ impl<'a> Ctx<'a> {
                 resumed: std::cell::Cell::new(false),
                 woken_at: None,
                 settle_now: false,
+                waits: Vec::new(),
             },
             views: Vec::new(),
             ep: u64::MAX,
@@ -104,6 +108,7 @@ impl<'a> Ctx<'a> {
             placed_keys: None,
             last: me.run_record(),
             stuck: None,
+            wait_on: None,
             ticks: 0,
         }
     }
@@ -223,10 +228,51 @@ impl<'a> Ctx<'a> {
         }
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.wait_for_settling(&r)?;
         self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
         let x = self.follow_aliases(r.value)?;
         self.seen.insert(f, x);
         Ok(x)
+    }
+
+    /// A definition reaching me that is a settling node's prediction
+    /// (`Operation::settles_at_quiet`, filed before its first run), where
+    /// I am no settling node and the speculation depth is 0
+    /// (`Ctx::set_spec_depth`): the run stops, and runs again once that
+    /// node commits (or at the next quiet point), instead of going on on
+    /// a guess the last ones missed. That node's reader as the page
+    /// loop is its finisher's: TeX's own chain from a routine to the text
+    /// after it.
+    fn wait_for_settling(&mut self, r: &crate::read::Reaching) -> Result<(), Stop> {
+        if !r.provisional || self.eng.spec_depth.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            return Ok(());
+        }
+        let Some(by) = r.by else { return Ok(()) };
+        let settles = |n: NodeId| self.eng.placed_node(n).is_some_and(|x| self.eng.op(x.op()).settles_at_quiet());
+        if by == self.me.id || !settles(by) || self.eng.op(self.me.op()).settles_at_quiet() {
+            return Ok(());
+        }
+        // (a prediction left by a node clean on a run of its own: no
+        // commit of it is coming to wait for)
+        if crate::sched::settled_node(self.eng, by) {
+            return Ok(());
+        }
+        self.wait_on = Some(by);
+        Err(stop())
+    }
+
+    /// How far runs go on the predictions of settling nodes
+    /// (`Operation::settles_at_quiet`): at 0 a reader of one waits for
+    /// its commit (`Ctx::read`); the client's speculating node sets it
+    /// (a page loop: 0 after a give-back it guessed wrong, more after
+    /// those it guessed right).
+    pub fn spec_depth(&self) -> u32 {
+        self.eng.spec_depth.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Sets [`Ctx::spec_depth`].
+    pub fn set_spec_depth(&self, d: u32) {
+        self.eng.spec_depth.store(d, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// `x` with each alias definition it is followed: a read of the
@@ -285,6 +331,9 @@ impl<'a> Ctx<'a> {
                 Some(read::reaching_visible(self.eng, f, Pos(self.eng.unit(u).end.0 - 1), true)),
             ),
         };
+        if let (Some(x), Anchor::Before(_) | Anchor::AfterOwn(_)) = (&r, &anchor) {
+            self.wait_for_settling(x)?;
+        }
         self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.and_then(|x| x.value));
         Ok(match r {
             None => FieldAt::Gone,
@@ -591,6 +640,34 @@ impl<'a> Ctx<'a> {
     /// is the guess re-asks me for nothing, and one that differs re-asks
     /// me (a loop folding a child's result goes on on its guess).
     pub fn placed_output_or(&mut self, i: usize, guess: ValueId) -> ValueId {
+        let out = self.placed_child_output(i);
+        let x = out.unwrap_or(guess);
+        self.record(ReadKind::Placed { i, guess: true }, PathId::WHOLE, Some(x));
+        x
+    }
+
+    /// The output of the node my `i`-th placement of this run stands for
+    /// (`Ctx::placed_output_or`'s), if it has run: not recorded, a peek.
+    /// A run that stops for a placement's output reads it with
+    /// [`Ctx::placed_output_wait`], or nothing wakes it when it comes.
+    pub fn placed_output_peek(&mut self, i: usize) -> Option<ValueId> {
+        self.placed_child_output(i)
+    }
+
+    /// The node my `i`-th placement of this run stands for re-asks me at
+    /// its next commit, whatever its output (a loop that stops for a
+    /// child's result, not going on on a guess of it, nor on the output
+    /// of a run before that child was re-asked). Not a read: nothing
+    /// refutes the run by it, and no later run keeps it.
+    pub fn placed_output_wait(&mut self, i: usize) {
+        if !self.product.waits.contains(&i) {
+            self.product.waits.push(i);
+        }
+    }
+
+    /// The output of the node my `i`-th placement of this run stands for
+    /// (my last run's of the same operation and arguments), if it has run.
+    fn placed_child_output(&mut self, i: usize) -> Option<ValueId> {
         if self.placed_keys.is_none() {
             let mut m: FxHashMap<(OpId, Arc<[ValueId]>), NodeId> = FxHashMap::default();
             for &c in self.last.as_ref().map_or(&[][..], |r| &r.placed[..]) {
@@ -600,15 +677,12 @@ impl<'a> Ctx<'a> {
             }
             self.placed_keys = Some(m);
         }
-        let out = self.product.placements.get(i).and_then(|p| {
+        self.product.placements.get(i).and_then(|p| {
             let (op, args) = p.key();
             let c = *self.placed_keys.as_ref()?.get(&(op, Arc::from(args)))?;
             let n = self.eng.node(c);
             (n.state() != State::Gone).then(|| n.run_record().map(|r| r.output)).flatten()
-        });
-        let x = out.unwrap_or(guess);
-        self.record(ReadKind::Placed { i, guess: true }, PathId::WHOLE, Some(x));
-        x
+        })
     }
 
     /// `op` on `args` inline: the output. It reads at my position and its

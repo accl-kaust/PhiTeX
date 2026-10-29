@@ -520,8 +520,33 @@ pub(crate) fn all_finished(cx: &mut phitex_defuse::Ctx<'_>) -> Result<bool, phit
 }
 
 /// [`PAGE_OUT`]'s value.
-pub(crate) fn page_out_value(v: &Values, piece: phitex_defuse::NodeId, nth: u32, out: ValueId) -> ValueId {
-    v.list(vec![v.int(i64::from_ne_bytes(piece.raw().to_ne_bytes())), v.int(i64::from(nth)), out])
+/// A finisher's output: its routine's give-back `rtn` and the page it
+/// ran on (`page`, its [`PAGE_OF`] value), `[rtn, page]`.
+pub(crate) fn fin_output(v: &Values, rtn: ValueId, page: ValueId) -> ValueId {
+    v.list(vec![rtn, page])
+}
+
+/// [`fin_output`]'s parts; none for a finisher's nothing (unit).
+pub(crate) fn fin_output_parts(v: &Values, x: ValueId) -> Option<(ValueId, ValueId)> {
+    match list_of(v, x)[..] {
+        [r, p] => Some((r, p)),
+        _ => None,
+    }
+}
+
+/// `[piece, nth, give-back, page]`: the page its finisher ran on (its
+/// [`PAGE_OF`] value; unit in a prediction), by which a loop rest knows a
+/// give-back made on the page it starts after ([`page_out_parts`]).
+pub(crate) fn page_out_value(v: &Values, piece: phitex_defuse::NodeId, nth: u32, out: ValueId, page: ValueId) -> ValueId {
+    v.list(vec![v.int(i64::from_ne_bytes(piece.raw().to_ne_bytes())), v.int(i64::from(nth)), out, page])
+}
+
+/// [`page_out_value`]'s give-back and page.
+pub(crate) fn page_out_parts(v: &Values, x: ValueId) -> Option<(ValueId, ValueId)> {
+    match list_of(v, x)[..] {
+        [_, _, o, p] => Some((o, p)),
+        _ => None,
+    }
 }
 
 /// A location's value at a candidate in a piece's check data

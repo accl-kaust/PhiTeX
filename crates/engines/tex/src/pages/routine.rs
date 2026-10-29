@@ -71,6 +71,9 @@ pub(crate) struct FinCtx {
     /// Its page as the loop defined it ([`super::PAGE_OF`]), none where
     /// the loop has not fired it.
     pub page: Option<Page>,
+    /// Its page's value as read (the [`super::PAGE_OF`] definition):
+    /// with its give-back, its output ([`super::fin_output`]).
+    pub page_x: Option<ValueId>,
     /// Its page's break in its piece (`[piece, candidate]`) and whether
     /// the piece goes on after it (the break is inside it).
     pub brk: Option<(i64, i64, bool)>,

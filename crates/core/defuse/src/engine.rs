@@ -148,6 +148,10 @@ pub struct Engine {
     /// Wakes held to the next quiet point (`sched::hold_wake`): a reader
     /// re-asked by a change a settling operation's node made.
     pub(crate) held: crate::lock::Mx<Vec<(NodeId, crate::node::Wake)>>,
+    /// How far a run may go on a settling node's prediction
+    /// (`Ctx::spec_depth`): 0, a reader of one waits for that node's
+    /// commit (`Ctx::read`); set by the client's speculating node.
+    pub(crate) spec_depth: std::sync::atomic::AtomicU32,
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
     pub(crate) layout_gen: AtomicU64,
@@ -234,6 +238,7 @@ impl Engine {
             depth_field,
             has_finals: std::sync::atomic::AtomicBool::new(false),
             held: crate::lock::Mx::new(Vec::new()),
+            spec_depth: std::sync::atomic::AtomicU32::new(0),
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
             busy: AtomicU64::new(0),

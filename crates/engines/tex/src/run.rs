@@ -161,6 +161,10 @@ pub(crate) struct Ops {
     pub fin_class: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, FinClass>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The threads the evaluation runs on: the page loop speculates past
+    /// a routine's unknown give-back only with more than one
+    /// (`crate::pages::LoopState::depth`).
+    pub threads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// [`crate::Options::origins`]: the pages' writers keep their glyphs
     /// (`crate::origins`).
     pub origins: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -5037,10 +5041,18 @@ impl<'c, 'a> Run<'c, 'a> {
             && self.fin.as_ref().is_some_and(|c| c.rtn.is_some())
         {
             let v = self.v;
-            let x = crate::pages::page_out_value(v, key.piece, key.nth, out);
+            let page = self.fin.as_ref().and_then(|c| c.page_x).unwrap_or(ValueId::UNIT);
+            let x = crate::pages::page_out_value(v, key.piece, key.nth, out, page);
             self.cx.define_with(key.field(v, crate::pages::PAGE_OUT), x, Locality::Global);
             self.cx.contribute(v.field(crate::pages::FIN_DONE), v.int(1));
         }
+        // (a finisher's output: its give-back with the page it ran on,
+        // by which the loop knows a give-back made on the page as it is
+        // from one a run on another left, [`crate::pages::fin_output`])
+        let out = match self.fin.as_ref() {
+            Some(c) if op == self.ops.finish && out != ValueId::UNIT => crate::pages::fin_output(self.v, out, c.page_x.unwrap_or(ValueId::UNIT)),
+            _ => out,
+        };
         if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
             let v = self.v;
             let mut pubd: Vec<String> = published_trace

@@ -157,7 +157,7 @@ impl Operation for Finish {
             .find(|e| e.0 == rtn)
             .map_or_else(|| v.list(vec![v.list(Vec::new()), v.list(Vec::new())]), |e| e.1);
         out.retain(|e| e.0 != f);
-        out.push((f, page_out_value(v, a.key.piece, a.key.nth, given)));
+        out.push((f, page_out_value(v, a.key.piece, a.key.nth, given, ValueId::UNIT)));
         Some(out)
     }
 
@@ -215,9 +215,13 @@ impl Run<'_, '_> {
         let args = self.cx.args().to_vec();
         let key = FinishArgs::decode(v, &args).map(|a| a.key);
         // 1. its page, the loop's definition read at the unit's end
+        let mut page_x = None;
         let page = match key {
             Some(k) => match self.cx.read_at(k.field(v, PAGE_OF), At::End(self.cx.unit()))? {
-                phitex_defuse::FieldAt::Def(x, _) => Page::decode(v, x).filter(|p| p.key == k),
+                phitex_defuse::FieldAt::Def(x, _) => {
+                    page_x = Some(x);
+                    Page::decode(v, x).filter(|p| p.key == k)
+                }
                 _ => None,
             },
             None => None,
@@ -258,6 +262,7 @@ impl Run<'_, '_> {
                 rtn: None,
                 args: Vec::new(),
                 page,
+                page_x,
                 brk: None,
             });
             return Ok(());
@@ -282,6 +287,7 @@ impl Run<'_, '_> {
             rtn: None,
             args: fargs.clone(),
             page,
+            page_x,
             brk,
         });
         self.preload_candidate(&fargs)?;

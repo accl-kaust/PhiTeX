@@ -712,7 +712,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 gone_kept.push((f, n));
             }
         }
-        p.reads.extend(r.reads.iter().filter(|x| !again.contains_key(&(x.kind.clone(), x.path)) && !gone(x)).cloned());
+        // (nor a placement's output: a run that parks reads the outputs
+        // its state rests on again each run, as it places them; one it
+        // did not reach this run, past where it stopped, its state does
+        // not rest on, and kept it would refute the state when that
+        // placement runs)
+        p.reads.extend(
+            r.reads
+                .iter()
+                .filter(|x| !again.contains_key(&(x.kind.clone(), x.path)) && !gone(x) && !matches!(x.kind, ReadKind::Placed { .. }))
+                .cloned(),
+        );
     }
     for d in &mut p.defs {
         if let Some(c) = d.rel {
@@ -797,6 +807,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         effect: if brackets == Brackets::default() { Effect::None } else { Effect::Scope(brackets) },
         provisional: false,
         state: p.state,
+        waits: std::mem::take(&mut p.waits).into_boxed_slice(),
     });
     let mut spare_readers: Vec<Reader> = Vec::with_capacity(4);
     let fields_of = |r: &Option<Arc<RunRecord>>| -> (Vec<Field>, Vec<Field>) {
@@ -1016,6 +1027,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 }
                 Some(e) => {
                     if e.provisional {
+                        // (a settling node's prediction missed: no run
+                        // goes on on one until a speculating node says so)
+                        if eng.op(node.op()).settles_at_quiet() {
+                            eng.spec_depth.store(0, Ordering::Relaxed);
+                        }
                         st.predictions_refuted += 1;
                         *w.log.lock().pred_refuted_by_field.entry(d.f).or_default() += 1;
                         crate::obs::pred_miss(d.f, e.value == d.value);
@@ -1581,11 +1597,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         );
         settle_predictions(eng, ww, n, &mut st);
     }
-    if old_output != Some(p.output)
-        && let Some(parent) = node.parent
-    {
-        reask_parent(eng, ww, eng.node(parent), node.id, &mut st);
+    if let Some(parent) = node.parent {
+        let parent = eng.node(parent);
+        if old_output != Some(p.output) {
+            reask_parent(eng, ww, parent, node.id, &mut st);
+        }
+        wake_waiting(eng, ww, parent, node.id, &mut st);
     }
+    // (the runs that stopped for this node's commit, `Ctx::read`)
+    crate::sched::release_waiting(eng, ww, node.id);
     // its relations from their input now: one that changed before they were
     // filed was computed from the older
     for &(f, c) in &rels {
@@ -1924,6 +1944,28 @@ pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: i64) -> bool {
         if rel_value_at(eng, f, by, c) == nv {
             return changed;
         }
+    }
+}
+
+/// Re-asks a parent that waits for this placement's commit
+/// (`Ctx::placed_output_wait`), whatever its output.
+fn wake_waiting(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: NodeId, st: &mut CommitStats) {
+    let Some(r) = parent.run_record() else {
+        return;
+    };
+    if r.waits.iter().any(|&j| r.placed.get(j) == Some(&child))
+        && mark_stale(
+            eng,
+            w,
+            parent,
+            Wake {
+                by: Some(child),
+                cause: Cause::Output { of: child },
+                at_ns: eng.now_ns(),
+            },
+        )
+    {
+        st.woken += 1;
     }
 }
 
@@ -3260,6 +3302,7 @@ pub(crate) fn edit_placed(eng: &Engine, placer: NodeId, f: impl FnOnce(&mut Vec<
         effect: r.effect,
         provisional: r.provisional,
         state: r.state,
+        waits: r.waits.clone(),
     }));
 }
 
