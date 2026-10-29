@@ -576,21 +576,36 @@ fn file_waits(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, serial: u32, h
 
 /// Runs the runs filed with `node` as the hole before them
 /// (`file_waits`) again: it has committed, been taken, removed or moved.
+/// One with another node before it not in yet is filed with that one
+/// instead, not run: its read-on waits for the whole prefix, and run at
+/// each hole that fills it did its work up to the read-on again for each
+/// (floats2col -j8: 85 nodes woken up to 46 times each, 793 ms of runs
+/// thrown away).
 fn wake_waiters(eng: &Engine, w: Option<&Worker>, node: &Node, st: &mut CommitStats) {
     let ws = std::mem::take(&mut *node.waiters.lock());
     for (id, serial) in ws {
-        if live(eng, id, serial)
-            && crate::sched::mark_stale_now(
-                eng,
-                w,
-                eng.node(id),
-                Wake {
-                    by: Some(node.id),
-                    cause: Cause::Structure,
-                    at_ns: eng.now_ns(),
-                },
-            )
-        {
+        if !live(eng, id, serial) {
+            continue;
+        }
+        if let Some(h) = read::hole_before(eng, eng.node(id)).filter(|&h| h != node.id) {
+            let hn = eng.node(h);
+            push_pruned(&mut hn.waiters.lock(), (id, serial), |x| live(eng, x.0, x.1));
+            // (filed before it is looked at: one in since takes its
+            // waiters after, or is seen here)
+            if hn.is_hole() {
+                continue;
+            }
+        }
+        if crate::sched::mark_stale_now(
+            eng,
+            w,
+            eng.node(id),
+            Wake {
+                by: Some(node.id),
+                cause: Cause::Structure,
+                at_ns: eng.now_ns(),
+            },
+        ) {
             st.woken += 1;
         }
     }
