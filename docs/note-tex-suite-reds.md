@@ -55,3 +55,11 @@ Found while fixing the pkgrec reds (2026-10-30):
   definition and read sets no longer change what runs when. Their only use
   left is the values they carry, the predictions under
   `Options::pkg_predict`. That is a parallelism question, not a defect.
+- **Small documents may not spread across workers.** Whether a small
+  document's independent loads overlap in time is up to the scheduler.
+  A worker's block is stolen from only with `BLOCK_MIN` (96) nodes left,
+  so a document of a few dozen nodes can stay on one worker:
+  `independent_loads_run_side_by_side` saw its two loads one after the
+  other in 1 of 60 builds (mc 76835). The test now asserts the loads'
+  independence instead of their overlap. Whether blocks below
+  `BLOCK_MIN` should spread is a scheduling question.

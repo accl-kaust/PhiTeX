@@ -142,16 +142,46 @@ fn independent_loads_run_side_by_side() {
         same_writes(&second.export_pkgrec(), &recs),
         "no load defined outside its record"
     );
-    // (both loads' runs overlap; the engine's critical path, a height
-    // count, is printed: it does not fall here, see the report)
+    // (the two loads are independent: neither is run again, a park
+    // woken or a read re-asked, for a field the other defines; whether
+    // their runs overlap in time is the scheduler's, not the record's)
     eprintln!(
         "critical path {:?} -> {:?}",
         first.stats.critical_path, second.stats.critical_path
     );
-    if second.stats.threads > 1 {
-        assert_eq!(
-            second.stats.pkg_max_concurrent, 2,
-            "the loads ran side by side"
+    let load_of = |name: &str| -> Vec<u64> {
+        second
+            .node_spans()
+            .into_iter()
+            .filter(|(_, file, a, b)| {
+                file.is_none() && doc.get(*a..*b).is_some_and(|t| t.contains(name))
+            })
+            .map(|x| x.0)
+            .collect()
+    };
+    for (me, other) in [("pa", "pb"), ("pb", "pa")] {
+        let nodes = load_of(&format!("\\usepackage{{{me}}}"));
+        assert_eq!(nodes.len(), 1, "{me}'s load: {nodes:?}");
+        let theirs: Vec<String> = phitex_tex::pkgrec_summary(&recs)
+            .into_iter()
+            .filter(|(k, _, _)| k.contains(&format!("{{{other}}}")))
+            .flat_map(|(_, w, _)| w)
+            .collect();
+        let by_other: Vec<&(u64, &str, String)> = second
+            .stats
+            .reruns
+            .iter()
+            .filter(|r| {
+                nodes.contains(&r.0)
+                    && r.2
+                        .rsplit(' ')
+                        .next()
+                        .is_some_and(|f| theirs.iter().any(|t| t == f))
+            })
+            .collect();
+        assert!(
+            by_other.is_empty(),
+            "{me}'s load ran again for what {other} defines: {by_other:?}"
         );
     }
     // a new document loading the same packages: the records are the
