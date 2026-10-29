@@ -282,7 +282,7 @@ button.btn:hover { background: var(--accent2); }
 .keyhelp kbd { font: 11px ui-monospace, monospace; background: rgb(255 255 255 / 12%); border-radius: 4px; padding: 1px 5px; }
 /* (a problem told whole, in the drawer: problems.ts's card, as a row) */
 .diags .phx-inline { margin: 0; padding: 0; border-radius: 0; border-top: 0; box-shadow: none; max-width: none; list-style: none; }
-.diags .phx-inline li { border-bottom: 1px solid #2c2e33; }
+.diags .phx-inline > li { border-bottom: 1px solid #2c2e33; }
 .diags { position: relative; flex: none; max-height: 40%; overflow: auto; background: var(--light);
   border-bottom: 1px solid var(--divider); display: none; }
 /* (a build with no pages: the list may take the room the pages would) */
@@ -689,6 +689,15 @@ export class Panel {
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
     });
+  }
+
+  /**
+   * The place on the pages for the source (Overleaf's ← arrow), as
+   * `toSource` takes it: the last single click or selection on the pages
+   * while still in view, else the top of the view; null with no page shown.
+   */
+  spot(): { k: number; x: number; y: number } | null {
+    return this.viewer.spot();
   }
 
   /**
@@ -1219,6 +1228,9 @@ export class Panel {
     if (!this.offline) return;
     this.$("#stage").classList.remove("offline");
     this.win.classList.add("offline-quiet");
+    // (clear of the pages' scrollbar, whatever its width)
+    const v = this.$("#viewer");
+    this.$("#offpill").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth) + 8}px`;
   }
 
   private offline = false;

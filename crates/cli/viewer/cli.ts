@@ -398,6 +398,10 @@ sock.onClose = () => {
   if (!started) return void unreached();
   panel.msg("not connected to phitex watch (retrying)", true);
   panel.connection(false, "phitex watch stopped or the connection was lost; reconnecting");
+  // (the watch's last status line, its viewer count with it, no longer holds)
+  status = { kind: "status", text: "not connected to phitex watch" };
+  busy = "";
+  showBar();
 };
 setTimeout(() => void unreached(), 3000);
 void sock.connect();

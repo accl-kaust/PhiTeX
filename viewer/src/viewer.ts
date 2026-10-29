@@ -43,6 +43,8 @@ export class Viewer {
   private root: HTMLElement;
   private scroller: HTMLElement;
   private host: ViewerHost;
+  /** The last single click or selection on the pages (PDF points from its page's top left). */
+  private picked: { k: number; x: number; y: number } | null = null;
 
   constructor(root: HTMLElement, scroller: HTMLElement, host: ViewerHost) {
     this.root = root;
@@ -84,6 +86,8 @@ export class Viewer {
         }
         if (!out.size) return;
         const sel2 = [...out].map(([k, rects]) => ({ k, rects }));
+        const [x, y, w, h] = sel2[0].rects[0];
+        this.picked = { k: sel2[0].k, x: x + w / 2, y: y + h / 2 };
         // (as the drag goes: told again only when it changed)
         const key = JSON.stringify(sel2);
         if (key === told) return;
@@ -115,7 +119,16 @@ export class Viewer {
     // mailto only, a PDF's javascript: and the like never followed)
     root.addEventListener("click", (e) => {
       const hit = this.linkAt(e);
-      if (!hit) return;
+      if (!hit) {
+        // (a single click on a page: the place spot() gives; a drag's
+        // selection sets it after, from what it selected)
+        const el = (e.target as Element).closest<HTMLElement>(".slot");
+        if (el && e.detail === 1) {
+          const r = el.getBoundingClientRect();
+          this.picked = { k: Number(el.dataset.k), x: ((e.clientX - r.left) / r.width) * this.size.w, y: ((e.clientY - r.top) / r.height) * this.size.h };
+        }
+        return;
+      }
       e.preventDefault();
       const to = hit[4];
       if (typeof to === "string") {
@@ -260,6 +273,32 @@ export class Viewer {
     const v = this.scroller;
     if (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40) v.scrollTo({ top: top - v.clientHeight / 2 });
     if (left < v.scrollLeft || left > v.scrollLeft + v.clientWidth - 40) v.scrollTo({ left: left - v.clientWidth / 3 });
+  }
+
+  /**
+   * The place on the pages to find in the source (Overleaf's ← arrow), in
+   * PDF points from its page's top left: the last single click or
+   * selection while it is still in view, else the top of the view (the
+   * first page in view, the middle of its part in view, just below the
+   * view's top edge); null with no page in view.
+   */
+  spot(): { k: number; x: number; y: number } | null {
+    const v = this.scroller.getBoundingClientRect();
+    const p = this.picked;
+    if (p && this.slots[p.k]) {
+      const b = this.slots[p.k].el.getBoundingClientRect();
+      const top = b.top + (p.y / this.size.h) * b.height;
+      if (top >= v.top && top <= v.bottom) return { ...p };
+    }
+    for (const s of this.slots) {
+      const b = s.el.getBoundingClientRect();
+      if (b.bottom <= v.top || b.top >= v.bottom || !b.width || !b.height) continue;
+      const mid = (Math.max(b.left, v.left) + Math.min(b.right, v.right)) / 2;
+      // (12 pt below the edge: onto a line, not above the first)
+      const y = ((Math.max(b.top, v.top) - b.top) / b.height) * this.size.h + 12;
+      return { k: Number(s.el.dataset.k), x: ((mid - b.left) / b.width) * this.size.w, y: Math.min(y, this.size.h) };
+    }
+    return null;
   }
 
   get pages(): number {

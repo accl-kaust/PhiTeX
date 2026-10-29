@@ -24,6 +24,8 @@ var Viewer = class {
   root;
   scroller;
   host;
+  /** The last single click or selection on the pages (PDF points from its page's top left). */
+  picked = null;
   constructor(root, scroller, host2) {
     this.root = root;
     this.scroller = scroller;
@@ -58,6 +60,8 @@ var Viewer = class {
       }
       if (!out.size) return;
       const sel2 = [...out].map(([k, rects]) => ({ k, rects }));
+      const [x, y, w, h] = sel2[0].rects[0];
+      this.picked = { k: sel2[0].k, x: x + w / 2, y: y + h / 2 };
       const key = JSON.stringify(sel2);
       if (key === told) return;
       told = key;
@@ -83,7 +87,14 @@ var Viewer = class {
     });
     root.addEventListener("click", (e) => {
       const hit = this.linkAt(e);
-      if (!hit) return;
+      if (!hit) {
+        const el = e.target.closest(".slot");
+        if (el && e.detail === 1) {
+          const r = el.getBoundingClientRect();
+          this.picked = { k: Number(el.dataset.k), x: (e.clientX - r.left) / r.width * this.size.w, y: (e.clientY - r.top) / r.height * this.size.h };
+        }
+        return;
+      }
       e.preventDefault();
       const to = hit[4];
       if (typeof to === "string") {
@@ -215,6 +226,30 @@ var Viewer = class {
     const v = this.scroller;
     if (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40) v.scrollTo({ top: top - v.clientHeight / 2 });
     if (left < v.scrollLeft || left > v.scrollLeft + v.clientWidth - 40) v.scrollTo({ left: left - v.clientWidth / 3 });
+  }
+  /**
+   * The place on the pages to find in the source (Overleaf's ← arrow), in
+   * PDF points from its page's top left: the last single click or
+   * selection while it is still in view, else the top of the view (the
+   * first page in view, the middle of its part in view, just below the
+   * view's top edge); null with no page in view.
+   */
+  spot() {
+    const v = this.scroller.getBoundingClientRect();
+    const p = this.picked;
+    if (p && this.slots[p.k]) {
+      const b = this.slots[p.k].el.getBoundingClientRect();
+      const top = b.top + p.y / this.size.h * b.height;
+      if (top >= v.top && top <= v.bottom) return { ...p };
+    }
+    for (const s of this.slots) {
+      const b = s.el.getBoundingClientRect();
+      if (b.bottom <= v.top || b.top >= v.bottom || !b.width || !b.height) continue;
+      const mid = (Math.max(b.left, v.left) + Math.min(b.right, v.right)) / 2;
+      const y = (Math.max(b.top, v.top) - b.top) / b.height * this.size.h + 12;
+      return { k: Number(s.el.dataset.k), x: (mid - b.left) / b.width * this.size.w, y: Math.min(y, this.size.h) };
+    }
+    return null;
   }
   get pages() {
     return this.slots.length;
@@ -626,7 +661,7 @@ function item(p) {
   const inc = p.included.length ? `<div class="phx-inc">included from ${p.included.map((i) => place(i.file, i.line, 1)).join(", ")}</div>` : "";
   const box = p.box ? `<pre class="phx-excerpt">${esc(p.box.excerpt)}</pre>` : "";
   const list = (cls, xs) => xs.length ? `<ul class="${cls}">${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "";
-  return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help, ...p.suggestions])}</li>`;
+  return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help.length ? [p.help.join(" ").replace(/\s+/g, " ").trim()] : [], ...p.suggestions])}</li>`;
 }
 var PROBLEMS_CSS = `
 .phx-problems { position: fixed; inset: 0; z-index: 10; background: rgb(18 18 18 / 55%); overflow: auto; padding: 48px 16px; }
@@ -1065,7 +1100,7 @@ button.btn:hover { background: var(--accent2); }
 .keyhelp kbd { font: 11px ui-monospace, monospace; background: rgb(255 255 255 / 12%); border-radius: 4px; padding: 1px 5px; }
 /* (a problem told whole, in the drawer: problems.ts's card, as a row) */
 .diags .phx-inline { margin: 0; padding: 0; border-radius: 0; border-top: 0; box-shadow: none; max-width: none; list-style: none; }
-.diags .phx-inline li { border-bottom: 1px solid #2c2e33; }
+.diags .phx-inline > li { border-bottom: 1px solid #2c2e33; }
 .diags { position: relative; flex: none; max-height: 40%; overflow: auto; background: var(--light);
   border-bottom: 1px solid var(--divider); display: none; }
 /* (a build with no pages: the list may take the room the pages would) */
@@ -1462,6 +1497,14 @@ var Panel = class {
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
     });
+  }
+  /**
+   * The place on the pages for the source (Overleaf's ← arrow), as
+   * `toSource` takes it: the last single click or selection on the pages
+   * while still in view, else the top of the view; null with no page shown.
+   */
+  spot() {
+    return this.viewer.spot();
   }
   /**
    * Dock into `pane` (after `after`, filling the rest of it), or float
@@ -1912,6 +1955,8 @@ var Panel = class {
     if (!this.offline) return;
     this.$("#stage").classList.remove("offline");
     this.win.classList.add("offline-quiet");
+    const v = this.$("#viewer");
+    this.$("#offpill").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth) + 8}px`;
   }
   offline = false;
   /** Follow what the panel shows (a host toolbar's controls). */
@@ -4615,6 +4660,9 @@ sock.onClose = () => {
   if (!started) return void unreached();
   panel.msg("not connected to phitex watch (retrying)", true);
   panel.connection(false, "phitex watch stopped or the connection was lost; reconnecting");
+  status = { kind: "status", text: "not connected to phitex watch" };
+  busy = "";
+  showBar();
 };
 setTimeout(() => void unreached(), 3e3);
 void sock.connect();
