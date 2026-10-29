@@ -1005,6 +1005,7 @@ var OVERLEAF_WORDS = {
       <a id="license" target="_blank" rel="noopener">full license</a>), provided as is, without any warranty.
       To turn it off: <code>chrome://extensions</code>.</div>`,
   preparing: "Getting ready for instant edits\u2026 {s} s (pages still scroll)",
+  updating: "Updating the other pages\u2026",
   license: "LICENSE.txt",
   realPdf: "Overleaf's PDF is the real one.",
   stopped: "Open \u24D8 diagnostics for the details. Overleaf's PDF is one click away (PDF).",
@@ -1605,9 +1606,12 @@ var Panel = class {
   buildSince = 0;
   actTick;
   prepSince = 0;
-  /** The core readying its next rebuild: past 400 ms the strip says so, not "Typesetting". */
+  /** A build has ended with pages: a later one's strip is the quiet "updating", never "getting ready". */
+  built = false;
+  /** A build of the core's (`on`) or its end: past 400 ms the strip says so. */
   preparing(on) {
     if (!this.words.preparing) return;
+    if (!on && (this.last || this.viewer.pages > 0)) this.built = true;
     this.prepSince = on ? this.prepSince || performance.now() : 0;
     this.activity();
   }
@@ -1619,6 +1623,7 @@ var Panel = class {
     this.activity();
   }
   busy(on) {
+    if (!on && (this.last || this.viewer.pages > 0)) this.built = true;
     this.$("#chip").classList.toggle("busy", on);
     this.buildSince = on ? this.buildSince || performance.now() : 0;
     this.activity();
@@ -1638,6 +1643,9 @@ var Panel = class {
       const names = p.names.slice(0, 3).join(", ") + (p.names.length > 3 ? ` and ${p.names.length - 3} more` : "");
       el.innerHTML = `${icon("download", 16)}<span></span><span class="mini"><i style="width:${p.pct}%"></i></span>`;
       el.querySelector("span").textContent = `Fetching ${names}${known(p.source) ? ` from ${p.source}` : ""} (${p.done} of ${p.total})\u2026`;
+    } else if (this.built) {
+      el.innerHTML = `${icon("sync", 16)}<span></span>`;
+      el.querySelector("span").textContent = this.words.updating ?? "Updating the other pages\u2026";
     } else if (prep) {
       const s = (performance.now() - this.prepSince) / 1e3;
       el.innerHTML = `${icon("sync", 16)}<span></span><span class="mini busy"><i></i></span>`;
@@ -3013,7 +3021,7 @@ var PreviewSession = class {
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
       if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e);
-      if (e.event === "preparing") return this.sink.preparing?.(e.on);
+      if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);
       if (e.event === "switched") {
         this.tr("core: the SSA worker took over", {});
         this.glyphCache.clear();
@@ -3504,6 +3512,7 @@ var PreviewSession = class {
       return n in this.files ? n : n + ".tex" in this.files ? n + ".tex" : null;
     };
     const gs = glyphs(r.json, path);
+    if (!gs.length) return gs;
     if (this.glyphCache.size > 4 * Math.max(this.hashes.length, 100)) this.glyphCache.clear();
     this.glyphCache.set(key, gs);
     return gs;

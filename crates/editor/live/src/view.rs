@@ -28,7 +28,7 @@
 //!   the host tells it (`{pages, edits}`: the pages whose origins changed,
 //!   from 0, and the edits since the last as `[file, at, delta]`, the
 //!   viewer shifting the offsets it keeps, [`OriginsChanged`]),
-//!   `preparing`, `progress` (the build's progress record:
+//!   `building` (a build began or ended), `progress` (the build's progress record:
 //!   docs/spec-editor-protocol.md §2.1, [`crate::progress`]), `diagnostics`,
 //!   `console` (each message the host shows, and its status line), `diff`,
 //!   `written`, and `reveal` (forward search: `{"event":"reveal","page":K,
@@ -544,7 +544,7 @@ impl Viewer {
     /// A build began (`true`) or ended.
     pub fn building(&self, on: bool) {
         self.building.store(on, Ordering::Relaxed);
-        self.emit(&json!({"event": "preparing", "on": on}).to_string());
+        self.emit(&json!({"event": "building", "on": on}).to_string());
     }
 
     /// The file on disk is exact already (nothing to write when idle):
@@ -726,11 +726,14 @@ impl Viewer {
                     "stats": {"rebuilt": 0, "reused": 0, "passes": 1},
                 }))
             }
-            "origins" => ok(origins(
+            "origins" => match origins(
                 s,
                 page.unwrap_or(0),
                 req.get("files_from").and_then(index).unwrap_or(0),
-            )),
+            ) {
+                Ok(v) => ok(v),
+                Err(e) => fail(&e),
+            },
             "source" => {
                 let file = text("file").unwrap_or_default();
                 let at = req
@@ -846,19 +849,24 @@ impl Viewer {
 
 /// Page `k`'s characters with their sources (the module's `origins`):
 /// none where the build kept none.
-fn origins(s: &Viewer, k: usize, files_from: usize) -> Value {
+fn origins(s: &Viewer, k: usize, files_from: usize) -> Result<Value, String> {
     let p = lock(&s.pages);
     match &p.origins {
         Some(o) => origins_json(o, k, files_from),
-        None => json!({"files": [], "files_from": files_from, "n": 0}),
+        None => Err("the pages' origins are not made yet".into()),
     }
 }
 
-/// [`origins`]'s answer from the pages' origins `o`.
-fn origins_json(o: &Origins, k: usize, files_from: usize) -> Value {
+/// [`origins`]'s answer from the pages' origins `o`: page `k`'s, or not
+/// made yet (a page still streaming, or past the pages there are). Never
+/// an empty answer for a page whose origins are to come: a viewer keeps an
+/// answer by the page's hash, and an empty one would stay (the frontends'
+/// follow drew nothing on two pages answered while the first build
+/// streamed).
+fn origins_json(o: &Origins, k: usize, files_from: usize) -> Result<Value, String> {
     let files: Vec<&String> = o.files.iter().skip(files_from).collect();
     let Some(Some(g)) = o.pages.get(k) else {
-        return json!({"files": files, "files_from": files_from, "n": 0});
+        return Err(format!("page {k}'s origins are not made yet"));
     };
     let words = |xs: &mut dyn Iterator<Item = u32>| {
         let mut b = Vec::new();
@@ -867,7 +875,7 @@ fn origins_json(o: &Origins, k: usize, files_from: usize) -> Value {
         }
         base64(&b)
     };
-    json!({
+    Ok(json!({
         "files": files,
         "files_from": files_from,
         "n": g.len(),
@@ -877,7 +885,7 @@ fn origins_json(o: &Origins, k: usize, files_from: usize) -> Value {
         "synth": words(&mut g.synth.iter().copied()),
         "x": words(&mut g.x.iter().map(|x| x.to_bits())),
         "y": words(&mut g.y.iter().map(|y| y.to_bits())),
-    })
+    }))
 }
 
 /// `b` in base64 (RFC 4648, padded).
@@ -938,12 +946,13 @@ mod tests {
             files: vec!["a.tex".into(), "b.tex".into()],
             pages: vec![Some(Arc::new(g))],
         };
-        let v = origins_json(&o, 0, 1);
+        let v = origins_json(&o, 0, 1).unwrap();
         assert_eq!(v["n"], 2);
         assert_eq!(v["files"], json!(["b.tex"]));
         assert_eq!(v["file"], base64(&[1, 0, 0, 0, 255, 255, 255, 255]));
         assert_eq!(v["start"], base64(&[5, 0, 0, 0, 0, 0, 0, 0]));
-        assert_eq!(origins_json(&o, 3, 0)["n"], 0);
+        // (a page whose origins are not made: not ready, never an empty answer)
+        assert!(origins_json(&o, 3, 0).is_err());
     }
 
     #[test]

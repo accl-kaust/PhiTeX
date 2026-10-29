@@ -59,8 +59,21 @@ pub struct Config {
 
 /// The keys `phitex.toml` takes, with their aliases.
 const KEYS: &[&str] = &[
-    "main", "file", "engine", "program", "output-dir", "output-directory", "out-dir",
-    "shell-escape", "viewer", "editor", "copy-pdf", "synctex", "cache-limit", "files", "phitex",
+    "main",
+    "file",
+    "engine",
+    "program",
+    "output-dir",
+    "output-directory",
+    "out-dir",
+    "shell-escape",
+    "viewer",
+    "editor",
+    "copy-pdf",
+    "synctex",
+    "cache-limit",
+    "files",
+    "phitex",
 ];
 
 /// `copy-pdf`'s value.
@@ -151,7 +164,9 @@ fn nearest(k: &str) -> Option<&'static str> {
             row[0] = i + 1;
             for (j, cb) in b.iter().enumerate() {
                 let here = row[j + 1];
-                row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(here + 1);
+                row[j + 1] = (prev + usize::from(ca != *cb))
+                    .min(row[j] + 1)
+                    .min(here + 1);
                 prev = here;
             }
         }
@@ -543,16 +558,33 @@ mod tests {
         let c = parse("mian = \"x\"\nengine = \"tex\"").unwrap();
         assert_eq!(c.engine.as_deref(), Some("tex"));
         assert_eq!(c.warnings.len(), 1);
-        assert!(c.warnings[0].starts_with("phitex.toml: ") && c.warnings[0].contains("did you mean `main`"), "{:?}", c.warnings);
+        assert!(
+            c.warnings[0].starts_with("phitex.toml: ")
+                && c.warnings[0].contains("did you mean `main`"),
+            "{:?}",
+            c.warnings
+        );
         let c = parse("shelf-mirror-of-2030 = true").unwrap();
-        assert!(c.warnings[0].contains("a newer PhiTeX's"), "{:?}", c.warnings);
+        assert!(
+            c.warnings[0].contains("a newer PhiTeX's"),
+            "{:?}",
+            c.warnings
+        );
         // (the oldest PhiTeX a project needs)
         assert_eq!(needs(">=0.1", "0.1.0"), Ok(()));
         assert_eq!(needs(">= 0.1.2", "0.2.0"), Ok(()));
-        assert!(needs(">=0.2", "0.1.9").unwrap_err().contains("needs PhiTeX >=0.2 (this is 0.1.9)"));
+        assert!(
+            needs(">=0.2", "0.1.9")
+                .unwrap_err()
+                .contains("needs PhiTeX >=0.2 (this is 0.1.9)")
+        );
         assert!(needs(">=1", "0.9.0-alpha").is_err());
         assert!(needs("0.2", "0.1.0").unwrap_err().contains("takes"));
-        assert!(parse("phitex = \">=999\"").unwrap_err().contains("needs PhiTeX"));
+        assert!(
+            parse("phitex = \">=999\"")
+                .unwrap_err()
+                .contains("needs PhiTeX")
+        );
         assert!(parse("phitex = \">=0\"").is_ok());
         assert_eq!(
             parse("cache-limit = \"2GiB\"").unwrap().cache_limit,

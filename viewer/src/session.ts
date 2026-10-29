@@ -142,7 +142,7 @@ export type CursorEvent =
   | { event: "follow"; file: string; at: number; word: [number, number] | null; line: [number, number] }
   | { event: "select"; file: string; from: number; to: number };
 
-export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | { event: "preparing"; on: boolean } | { event: "settled" } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
+export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | { event: "building"; on: boolean } | { event: "preparing"; on: boolean } | { event: "settled" } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
 
 export interface CoreTransport {
   request(req: CoreReq): Promise<CoreRes>;
@@ -337,7 +337,8 @@ export class PreviewSession {
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
       if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e as WatchEvent);
-      if (e.event === "preparing") return this.sink.preparing?.(e.on);
+      // (a build of the core's began or ended; `preparing`, older cores' name for it)
+      if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);
       // (references settled after one-trip keystrokes: the pages that changed drawn again)
       // (the two-worker start: the SSA worker took over; its glyphs' sources are its own)
       if (e.event === "switched") {
@@ -909,6 +910,9 @@ export class PreviewSession {
       return n in this.files ? n : n + ".tex" in this.files ? n + ".tex" : null;
     };
     const gs = glyphs(r.json, path);
+    // (an empty answer is not kept: a page asked before its origins came
+    // must be asked again, not stay empty under its hash)
+    if (!gs.length) return gs;
     // (old hashes' entries: dropped past a few hundred pages' worth)
     if (this.glyphCache.size > 4 * Math.max(this.hashes.length, 100)) this.glyphCache.clear();
     this.glyphCache.set(key, gs);

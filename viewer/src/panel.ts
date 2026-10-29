@@ -112,8 +112,10 @@ export interface PanelWords {
   /** The line under the page, and what it opens. */
   byline: string;
   about: string;
-  /** The strip while the core readies its next rebuild (`{s}`: the seconds so far); empty: no strip for builds at all (the host shows them). */
+  /** The strip while the first build runs past 400 ms (`{s}`: the seconds so far); empty: no strip for builds at all (the host shows them). */
   preparing: string;
+  /** The strip, quieter, while a later build runs on past 400 ms (an edit's page already shown: the rest of the document settling). */
+  updating?: string;
   /** Where the full license is. */
   license: string;
   /** Where the real PDF is, after a stop, an approximation or an engine not yet run. */
@@ -139,6 +141,7 @@ const OVERLEAF_WORDS: PanelWords = {
       <a id="license" target="_blank" rel="noopener">full license</a>), provided as is, without any warranty.
       To turn it off: <code>chrome://extensions</code>.</div>`,
   preparing: "Getting ready for instant edits… {s} s (pages still scroll)",
+  updating: "Updating the other pages…",
   license: "LICENSE.txt",
   realPdf: "Overleaf's PDF is the real one.",
   stopped: "Open ⓘ diagnostics for the details. Overleaf's PDF is one click away (PDF).",
@@ -812,10 +815,13 @@ export class Panel {
   private actTick: ReturnType<typeof setInterval> | undefined;
 
   private prepSince = 0;
-  /** The core readying its next rebuild: past 400 ms the strip says so, not "Typesetting". */
+  /** A build has ended with pages: a later one's strip is the quiet "updating", never "getting ready". */
+  private built = false;
+  /** A build of the core's (`on`) or its end: past 400 ms the strip says so. */
   preparing(on: boolean): void {
     // (a host that shows its builds itself, the CLI's status bar: no strip)
     if (!this.words.preparing) return;
+    if (!on && (this.last || this.viewer.pages > 0)) this.built = true;
     this.prepSince = on ? this.prepSince || performance.now() : 0;
     this.activity();
   }
@@ -829,6 +835,7 @@ export class Panel {
   }
 
   busy(on: boolean): void {
+    if (!on && (this.last || this.viewer.pages > 0)) this.built = true;
     this.$("#chip").classList.toggle("busy", on);
     this.buildSince = on ? this.buildSince || performance.now() : 0;
     this.activity();
@@ -851,6 +858,10 @@ export class Panel {
       const names = p.names.slice(0, 3).join(", ") + (p.names.length > 3 ? ` and ${p.names.length - 3} more` : "");
       el.innerHTML = `${icon("download", 16)}<span></span><span class="mini"><i style="width:${p.pct}%"></i></span>`;
       el.querySelector("span")!.textContent = `Fetching ${names}${known(p.source) ? ` from ${p.source}` : ""} (${p.done} of ${p.total})…`;
+    } else if (this.built) {
+      // (an edit's page is on screen already: the rest settling, said quietly, no clock)
+      el.innerHTML = `${icon("sync", 16)}<span></span>`;
+      el.querySelector("span")!.textContent = this.words.updating ?? "Updating the other pages…";
     } else if (prep) {
       // (a build waiting behind it is part of the same wait)
       const s = (performance.now() - this.prepSince) / 1000;
