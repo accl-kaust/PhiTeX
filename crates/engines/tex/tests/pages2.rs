@@ -39,9 +39,12 @@ fn paragraphs(n: usize) -> String {
     s
 }
 
-/// One page-builder node, and exactly one finisher per page shipped, at
-/// one and eight threads: no chain of page nodes, no finisher made anew
-/// for a page that did not move.
+/// The page loop's nodes since cf684671c (a node per stretch of pages,
+/// `pages::fold_order_runs`): the main node, a rest per routine fire (one
+/// per page here), and the last rest, which finds no start and stays
+/// parked; and exactly one finisher per page shipped, at one and eight
+/// threads: no loop node and no finisher made anew for a page that did
+/// not move.
 #[test]
 fn one_loop_node_and_one_finisher_per_page() {
     let dir = common::scratch("pages2-one");
@@ -56,8 +59,15 @@ fn one_loop_node_and_one_finisher_per_page() {
         assert!(pages >= 3, "a document of several pages: {pages}");
         assert_eq!(
             nodes_of(&b, "pages"),
-            1,
-            "-j{threads}: one page-builder node"
+            pages + 2,
+            "-j{threads}: a loop node per page fire, the main node and the last rest: {:?}",
+            b.stats.placed_by_op
+        );
+        assert_eq!(
+            b.stats.placements_of("pages"),
+            pages + 2,
+            "-j{threads}: every loop node placed once, none made anew: {:?}",
+            b.stats.placed_by_op
         );
         assert_eq!(
             nodes_of(&b, "finish"),
@@ -79,10 +89,11 @@ fn one_loop_node_and_one_finisher_per_page() {
 }
 
 /// The loop meets holes (pieces not yet committed at eight threads) and
-/// parks: its runs are bounded by the holes it met plus the give-backs
-/// it folded, never by the pages; and it never folds a contributor twice
-/// from the same checkpoint (the engine's `park` test shape, on the
-/// document).
+/// parks: every run of a loop node after its first goes on from where it
+/// parked (`Stats::resumptions`), none starts its stretch of pages again,
+/// and no loop node is made anew (the main node, a rest per page and the
+/// last rest, `pages::fold_order_runs`); and it never folds a
+/// contributor twice (the engine's `park` test shape, on the document).
 #[test]
 fn the_loop_parks_at_holes_and_resumes() {
     let dir = common::scratch("pages2-park");
@@ -94,9 +105,22 @@ fn the_loop_parks_at_holes_and_resumes() {
     let b = common::build(opts, Some(&common::plain()), &src);
     let pages = b.pages().len() as u64;
     let loop_runs = runs_of(&b, "pages");
-    assert!(
-        loop_runs <= pages + 2,
-        "the loop ran {loop_runs} times for {pages} pages: it parks and resumes, it does not restart ({:?})",
+    let nodes = b.stats.placements_of("pages") as u64;
+    eprintln!(
+        "loop runs {loop_runs}, resumptions {}, loop nodes {nodes}, pages {pages}: {:?}",
+        b.stats.resumptions, b.stats.runs_by_op
+    );
+    assert_eq!(
+        nodes,
+        pages + 2,
+        "loop nodes for {pages} pages: none made anew ({:?})",
+        b.stats.placed_by_op
+    );
+    assert_eq!(
+        loop_runs - b.stats.resumptions,
+        nodes,
+        "the loop ran {loop_runs} times, {} of them resumptions, in {nodes} nodes: it parks and resumes, it does not restart ({:?})",
+        b.stats.resumptions,
         b.stats.runs_by_op
     );
     assert_eq!(
@@ -159,8 +183,11 @@ fn a_word_edit_reruns_the_piece_its_finisher_and_the_writers() {
 /// from the first is fired again, but a finisher whose page content is
 /// unchanged in value is not re-asked (the loop's early stop never
 /// triggers here, so this measures the fire-again cost alone): the
-/// finishers run at most once each, the loop once, and no page's key
-/// below the inserted piece changes (keys are `(piece, nth)`).
+/// finishers run at most once each, each loop node (the main node and
+/// its rests, `pages::fold_order_runs`) once from its start, its other
+/// runs going on from where it parked, at most the new page's rest made
+/// anew, and no page's key below the inserted piece changes (keys are
+/// `(piece, nth)`).
 #[test]
 fn a_paragraph_insert_refires_the_pages_after_it_once() {
     let dir = common::scratch("pages2-insert");
@@ -173,7 +200,23 @@ fn a_paragraph_insert_refires_the_pages_after_it_once() {
     let pages = b.pages().len() as u64;
     let edited = src.replacen("Paragraph 1 of", "An inserted paragraph that shifts every page break below it by a few lines.\n\nParagraph 1 of", 1);
     let r = common::rebuild(&mut b, &edited);
-    assert_eq!(runs_of_report(&r, "pages"), 1, "the loop once: {r:?}");
+    // (the build's stats are the edit's)
+    let fresh = runs_of_report(&r, "pages").saturating_sub(b.stats.resumptions);
+    eprintln!(
+        "edit: loop runs {}, resumptions {}, loop nodes {}: {r:?}",
+        runs_of_report(&r, "pages"),
+        b.stats.resumptions,
+        nodes_of(&b, "pages")
+    );
+    assert!(
+        fresh <= nodes_of(&b, "pages") as u64,
+        "each loop node once from its start: {fresh} of {} nodes: {r:?}",
+        nodes_of(&b, "pages")
+    );
+    assert!(
+        r.placements_made("pages") <= 1,
+        "at most the new page's rest made anew: {r:?}"
+    );
     assert!(
         runs_of_report(&r, "finish") <= pages + 1,
         "each finisher at most once: {r:?}"
