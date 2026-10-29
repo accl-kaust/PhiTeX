@@ -516,6 +516,47 @@ mod tests {
         }
     }
 
+    /// An editor's cursor and selection over the language server
+    /// (`phitex/cursor` with a range) reach the viewer as bytes of the
+    /// buffer, the glyph origins' space: `follow` (the cursor, its word,
+    /// its line) and `select`.
+    #[test]
+    fn the_cursor_and_selection_reach_the_viewer_in_bytes() {
+        let mut d = Document::new(session(&pages(1), Arc::new(Memory::default())), "doc.tex");
+        let server = d.lsp(Box::new(|_| {}), None);
+        server.handle(
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "rootUri": "file:///p", "capabilities": {}}}),
+        );
+        server.handle(&json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
+        let text = format!("% caf\u{e9} au lait\n{}", pages(1));
+        server.handle(
+            &json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": "file:///p/doc.tex", "text": text}}}),
+        );
+        d.step();
+        server.handle(
+            &json!({"jsonrpc": "2.0", "method": "phitex/cursor", "params": {
+            "textDocument": {"uri": "file:///p/doc.tex"},
+            "position": {"line": 0, "character": 6},
+            "range": {"start": {"line": 0, "character": 2}, "end": {"line": 0, "character": 6}}}}),
+        );
+        let ev = d.step();
+        let follow = ev.iter().find(|e| e["event"] == "follow").expect("follow");
+        assert_eq!(
+            follow,
+            &json!({"event": "follow", "file": "doc.tex", "at": 7, "word": [2, 7], "line": [0, 15]}),
+            "{ev:?}"
+        );
+        let select = ev.iter().find(|e| e["event"] == "select").expect("select");
+        assert_eq!(
+            select,
+            &json!({"event": "select", "file": "doc.tex", "from": 2, "to": 7}),
+            "{ev:?}"
+        );
+        assert!(!ev.iter().any(|e| e["event"] == "reveal"), "{ev:?}");
+    }
+
     /// A store in memory.
     #[derive(Default)]
     struct Kept(Mutex<HashMap<String, Vec<u8>>>);

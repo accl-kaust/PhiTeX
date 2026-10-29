@@ -2870,6 +2870,8 @@ var PreviewSession = class {
   constructor(host2, core, sink, opts = {}) {
     this.host = host2;
     core.onEvent?.((e) => {
+      if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
+      if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
       if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e);
       if (e.event === "preparing") return this.sink.preparing?.(e.on);
       if (e.event === "switched") {
@@ -3382,16 +3384,25 @@ var PreviewSession = class {
    */
   async selectSource(file, from2, to) {
     if (!this.opened || !(file in this.files)) return;
-    if (from2 === to) return this.sink.marks?.([]);
     const t = this.files[file];
-    const [a, b] = [byteOffset(t, from2), byteOffset(t, to)];
+    return this.selectBytes(file, byteOffset(t, from2), byteOffset(t, to));
+  }
+  /**
+   * Bytes [a, b) of `file`'s text selected (the glyph origins' offsets):
+   * the glyphs that came from them, on every page, highlighted (an empty
+   * selection clears them). [`selectSource`]'s, and an LSP editor's
+   * (`{event: "select"}`).
+   */
+  async selectBytes(file, a, b) {
+    if (!this.opened) return;
+    if (a === b) return this.sink.marks?.([]);
     const out = [];
     for (let k = 0; k < Math.max(this.hashes.length, this.pages); k++) {
       const all = this.cached(k) ?? await this.glyphsOf(k);
       const hit = all.filter((g) => g.file === file && !g.synth && g.start < b && g.end > a);
       if (hit.length) out.push({ k, boxes: boxes(hit, all) });
     }
-    this.tr("select\u2192page", { file, from: from2, to, pages: out.map((m) => m.k) });
+    this.tr("select\u2192page", { file, a, b, pages: out.map((m) => m.k) });
     this.sink.marks?.(out);
   }
   /**
@@ -3428,14 +3439,25 @@ var PreviewSession = class {
   follow(file, pos) {
     if (!this.opened || !(file in this.files) || !this.sink.mark) return;
     const t = this.files[file];
-    const bytes = new TextEncoder().encode(t);
     const at = byteOffset(t, pos);
     const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
-    const [a, b] = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
-    const line = `${file}:${lo}`;
-    const scroll = line !== this.followLine;
-    this.followLine = line;
-    const w = wordBytes(bytes, at);
+    const line = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
+    this.followBytes(file, at, wordBytes(new TextEncoder().encode(t), at), line);
+  }
+  /**
+   * The cursor at byte `at` of `file`'s text (the glyph origins' offsets),
+   * in word `w` (bytes, none: not in a word) of line `line` (bytes): the
+   * word highlighted on the page, else the line's glyphs nearest it, from
+   * the glyphs already here (a page not yet here asked for, then shown if
+   * the cursor is still there); scrolled to only when the cursor changed
+   * line. [`follow`]'s, and an LSP editor's (`{event: "follow"}`).
+   */
+  followBytes(file, at, w, line) {
+    if (!this.opened || !this.sink.mark) return;
+    const [a, b] = line;
+    const key = `${file}:${a}`;
+    const scroll = key !== this.followLine;
+    this.followLine = key;
     const n = Math.max(this.hashes.length, this.pages, 1);
     const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
     for (const k of order) {
@@ -3449,7 +3471,7 @@ var PreviewSession = class {
       this.sink.mark(k, boxes(hit, all), scroll);
       return;
     }
-    const want = `${file}:${pos}`;
+    const want = `${file}:${at}`;
     this.followWant = want;
     void (async () => {
       for (const k of order) {
@@ -3459,7 +3481,7 @@ var PreviewSession = class {
         if (from(all, file, a, b).length) {
           if (this.followWant === want) {
             this.followLine = "";
-            this.follow(file, pos);
+            this.followBytes(file, at, w, line);
           }
           return;
         }
@@ -4450,22 +4472,6 @@ var gotoChange = async (k) => {
   lastAt = { k, page: hits[at].k };
   panel.reveal(hits.slice(at, at + 1));
 };
-var revealed = 0;
-sock.onEvent(async (e) => {
-  if (e.event !== "reveal") return;
-  const k = typeof e.page === "number" ? e.page - 1 : -1;
-  for (const q of e.texts ?? [e.text]) {
-    const hits = q ? await pages.find(q) : [];
-    const near = (a, h) => Math.abs(h.k - revealed) < Math.abs(a.k - revealed) ? h : a;
-    const hit = k >= 0 ? hits.find((h) => h.k === k) : hits.length ? hits.reduce(near) : void 0;
-    if (!hit) continue;
-    revealed = hit.k;
-    return panel.reveal([hit]);
-  }
-  if (k < 0) return;
-  revealed = k;
-  panel.reveal([{ k, boxes: [[0, 0, 0, 0]] }]);
-});
 var runner = {
   async start(v, say, count) {
     counted = count;

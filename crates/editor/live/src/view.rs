@@ -138,12 +138,17 @@ pub enum Ask {
     Closed {
         file: String,
     },
-    /// The editor's cursor is at `line` and UTF-16 column `col` (from 0)
-    /// of `file`: shown on the pages.
+    /// The editor's cursor at byte `at` of `file`'s text (the glyph
+    /// origins' offsets), in word `word` (bytes; none: not in a word) of
+    /// line `line` (bytes, without its end), and its selection `select`
+    /// (bytes; none: the editor sent no range, empty: none selected):
+    /// shown on the pages ([`Viewer::follow`], [`Viewer::select`]).
     Cursor {
         file: String,
-        line: usize,
-        col: usize,
+        at: usize,
+        word: Option<(usize, usize)>,
+        line: (usize, usize),
+        select: Option<(usize, usize)>,
     },
 }
 
@@ -420,25 +425,29 @@ impl Viewer {
         })
     }
 
-    /// The editor's cursor, at `line` (from 1) of `file`, shown on the
-    /// page the build `found` with the words it found there (none: the
-    /// browser looks for `texts`, the words around the cursor, longest
-    /// first).
-    pub fn reveal(
+    /// The editor's cursor at byte `at` of `file`'s text, in word `word`
+    /// of line `line` (bytes, as [`Ask::Cursor`]): the browsers show it
+    /// from the pages' glyph origins (`{event: "follow"}`, the session's
+    /// `followBytes`).
+    pub fn follow(
         &self,
-        found: Option<(usize, String)>,
-        texts: &[String],
         file: &str,
-        line: usize,
+        at: usize,
+        word: Option<(usize, usize)>,
+        line: (usize, usize),
     ) {
-        let (page, text) = match found {
-            Some((k, t)) => (Some(k), t),
-            None => (None, texts.first().cloned().unwrap_or_default()),
-        };
+        let word = word.map(|(a, b)| json!([a, b]));
         self.emit(
-            &json!({"event": "reveal", "page": page, "text": text, "texts": texts, "file": file, "line": line})
+            &json!({"event": "follow", "file": file, "at": at, "word": word, "line": [line.0, line.1]})
                 .to_string(),
         );
+    }
+
+    /// The editor's selection, bytes `from..to` of `file`'s text (empty:
+    /// none): the browsers mark its glyphs on every page (`{event:
+    /// "select"}`, the session's `selectBytes`).
+    pub fn select(&self, file: &str, from: usize, to: usize) {
+        self.emit(&json!({"event": "select", "file": file, "from": from, "to": to}).to_string());
     }
 
     /// The history the diff's picker lists, from `log(skip, limit)`.

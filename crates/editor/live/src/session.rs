@@ -1273,17 +1273,6 @@ impl Session {
         self.host.read(Path::new(&n))
     }
 
-    /// The first page (from 0) with a glyph from bytes `lo..hi` of file
-    /// `file` (the build's glyph origins, where it keeps them).
-    pub fn origin_page(&self, file: &str, lo: usize, hi: usize) -> Option<usize> {
-        let b = self
-            .build
-            .as_ref()
-            .filter(|_| self.job.origins || self.job.synctex)?;
-        let (lo, hi) = (u32::try_from(lo).ok()?, u32::try_from(hi).ok()?);
-        b.glyphs_of(file, lo, hi).first().map(|&(k, _)| k)
-    }
-
     /// The pages' glyph origins and the files they name, where the build
     /// keeps them (the viewer's `origins`).
     pub fn origins(&self) -> Option<crate::view::Origins> {
@@ -1310,16 +1299,6 @@ impl Session {
             .filter(|_| self.job.origins || self.job.synctex)?;
         let (pages, edits) = b.origins_changed();
         Some(crate::view::OriginsChanged { pages, edits })
-    }
-
-    /// The index of the first page of the last build whose text holds
-    /// `s` ([`phitex_tex::Build::page_of_text`]; none: no build, no such
-    /// page).
-    pub fn page_of_text(&self, s: &str) -> Option<usize> {
-        self.build
-            .as_ref()
-            .map(|b| b.page_of_text(s))
-            .filter(|&k| k != usize::MAX)
     }
 
     /// The main text with the editor's buffer for it, if there is one.

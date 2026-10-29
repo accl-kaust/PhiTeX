@@ -6,7 +6,7 @@
 // extension's session asks its core (CoreReq ops: pages, status, origins;
 // and the watch's own: diagnostics, source), and shows
 // what the watch tells (page, progress, diagnostics, settled, superseded,
-// sync; reveal, an LSP editor's cursor, marked here). The page's keys, the contents beside the pages and the problems
+// sync; follow and select, an LSP editor's cursor and selection in bytes, shown by the session). The page's keys, the contents beside the pages and the problems
 // are the panel's (PanelOptions.keys, .outline).
 //
 // The pages are drawn by the watch as strips (crates/output/render): the
@@ -308,28 +308,6 @@ const gotoChange = async (k: number) => {
   lastAt = { k, page: hits[at].k };
   panel.reveal(hits.slice(at, at + 1));
 };
-
-// (forward search, `phitex watch --lsp`: the editor's cursor as the watch
-// placed it, the words around it (`texts`, longest first) found in MuPDF's
-// text on its page `page` (from 1) and marked; with no page (a PDF build:
-// the engine reads no page text there), the first words found, nearest the
-// place last revealed; else the page brought into view)
-let revealed = 0;
-sock.onEvent(async (e: any) => {
-  if (e.event !== "reveal") return;
-  const k = typeof e.page === "number" ? e.page - 1 : -1;
-  for (const q of (e.texts ?? [e.text]) as string[]) {
-    const hits = q ? await pages.find(q) : [];
-    const near = (a: Hit, h: Hit) => (Math.abs(h.k - revealed) < Math.abs(a.k - revealed) ? h : a);
-    const hit = k >= 0 ? hits.find((h) => h.k === k) : hits.length ? hits.reduce(near) : undefined;
-    if (!hit) continue;
-    revealed = hit.k;
-    return panel.reveal([hit]);
-  }
-  if (k < 0) return;
-  revealed = k;
-  panel.reveal([{ k, boxes: [[0, 0, 0, 0]] }]);
-});
 
 const runner: DiffRunner<Pair> = {
   async start(v, say, count) {

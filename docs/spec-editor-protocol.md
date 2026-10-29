@@ -166,9 +166,32 @@ viewer's `set_file`, `edit`, and `closed` (the file as on disk again).
 While open the buffer owns the file (natively the disk's changes of it
 are not read until it is closed). `didSave` brings nothing.
 
-The cursor: notification `phitex/cursor {textDocument: {uri}, position}`
-(the client sends it as `follow` says, §3.5, debounced): the build finds
-the place on the pages and the viewer reveals it (`reveal`).
+The cursor: notification `phitex/cursor {textDocument: {uri}, position,
+range?}` (the client sends it as `follow` says, §3.5); a selection is the
+cursor with its `range` (either way round), and a `range` with nothing in
+it clears the selection shown. No round trip and no build: the server
+takes the place in bytes of the file's text (the buffer it holds, else
+the file's), the space the pages' glyph origins are in, and the viewer
+shows it from the origins it has, every host the same way (Overleaf's own
+cursor goes the same path, from bytes it makes itself):
+
+```json
+{"event": "follow", "file": "ch/intro.tex", "at": 812, "word": [808, 815], "line": [790, 842]}
+{"event": "select", "file": "ch/intro.tex", "from": 790, "to": 815}
+```
+
+- `file`: the project's name of the file, as the origins name it.
+- `at`: the cursor's byte; `word`: the word it is in (letters, digits,
+  `'`, `-`, any character past ASCII; `null`: none), `line`: its line
+  without its end. The viewer marks the word's glyphs, else the line's
+  nearest `at`, on the page in view first, and scrolls only when the line
+  changed.
+- `select` (with a `range` only): the glyphs from `from..to` marked on
+  every page; `from == to` clears them.
+
+Page to source stays `window/showDocument`: a double-click on the page
+(or an error's place) opens the place in the editor, selected, the focus
+taken (`Server::show`); it is the inverse search every LSP editor has.
 
 ### 3.2 Diagnostics and messages
 
@@ -194,7 +217,7 @@ the place on the pages and the viewer reveals it (`reveal`).
 | command | arguments | result |
 |---|---|---|
 | `phitex.openViewer` | none | the viewer's URL (native: a browser opened) |
-| `phitex.showOnPage` | `[{textDocument: {uri}, position}]` | `null` (as `phitex/cursor`) |
+| `phitex.showOnPage` | `[{textDocument: {uri}, position, range?}]` | `null` (as `phitex/cursor`: `follow`, and `select` with a range) |
 | `phitex.rebuild` | none | `null`; a **cold** build: the session's build dropped, the format kept |
 | `phitex.stop` | none | `null`; then `phitex/status {state: "stopped"}` and the server ends cleanly (native: exit 0) |
 | `phitex.savePdf` | `[{path}]` | `{path, bytes}`: the last build's PDF written to `path` (absolute, or relative to the root). Wasm (no file system): `[{}]` answers `{bytes, data}`, `data` the PDF in base64, which the client writes |

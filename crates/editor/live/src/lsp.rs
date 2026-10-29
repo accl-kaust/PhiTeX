@@ -33,9 +33,11 @@
 //! - **Inverse search.** A source place (a double-click, an error's) is
 //!   `window/showDocument`, the place selected and the focus taken
 //!   ([`Server::show`]).
-//! - **Forward search.** `phitex/cursor {textDocument: {uri}, position}`
-//!   or the command `phitex.showOnPage` with the same argument is
-//!   [`Ask::Cursor`].
+//! - **Forward search.** `phitex/cursor {textDocument: {uri}, position,
+//!   range?}` (a selection is the cursor with its range) or the command
+//!   `phitex.showOnPage` is [`Ask::Cursor`], in bytes of the file's text
+//!   (the buffer held here, else the file's), the glyph origins' space:
+//!   the viewer shows it from the origins.
 //! - **End.** `shutdown` answered; `exit` ends ([`Server::handle`]'s
 //!   false).
 
@@ -107,6 +109,57 @@ pub trait LspHost: Send + Sync {
 
     /// `phitex/status`'s engine: `native` or `wasm`.
     fn engine(&self) -> &'static str;
+}
+
+/// The byte of `text` at LSP position `p` (`{line, character}`, UTF-16
+/// from 0): a column past its line's end is its end, a line past the
+/// text's the text's end.
+fn byte_at(text: &str, p: &Value) -> Option<usize> {
+    let n = |v: &Value| v.as_u64().and_then(|n| usize::try_from(n).ok());
+    let (line, col) = (n(&p["line"])?, n(&p["character"])?);
+    let start: usize = text.split_inclusive('\n').take(line).map(str::len).sum();
+    let src = text[start..].split('\n').next().unwrap_or("");
+    let mut units = 0;
+    Some(
+        start
+            + src
+                .char_indices()
+                .find(|&(_, c)| {
+                    units += c.len_utf16();
+                    units > col
+                })
+                .map_or(src.len(), |(i, _)| i),
+    )
+}
+
+/// The word around byte `at` of `text` (bytes; none: not in one), as the
+/// viewer's `wordBytes` takes it: letters, digits, `'`, `-` and every
+/// byte of a character past ASCII.
+fn word_at(text: &[u8], at: usize) -> Option<(usize, usize)> {
+    let w = |c: u8| c >= 0x80 || c.is_ascii_alphanumeric() || c == b'\'' || c == b'-';
+    let (mut lo, mut hi) = (at.min(text.len()), at.min(text.len()));
+    while lo > 0 && w(text[lo - 1]) {
+        lo -= 1;
+    }
+    while hi < text.len() && w(text[hi]) {
+        hi += 1;
+    }
+    (lo < hi).then_some((lo, hi))
+}
+
+/// The line of byte `at` of `text`, without its end (bytes).
+fn line_at(text: &str, at: usize) -> (usize, usize) {
+    let b = text.as_bytes();
+    let at = at.min(b.len());
+    let lo = b[..at]
+        .iter()
+        .rposition(|&c| c == b'\n')
+        .map_or(0, |i| i + 1);
+    let hi = b[at..]
+        .iter()
+        .position(|&c| c == b'\n')
+        .map_or(b.len(), |i| at + i);
+    (lo, hi)
 }
 
 /// The editor's settings, section `phitex` (docs/spec-editor-protocol.md
@@ -523,12 +576,30 @@ impl Server {
 
     /// The `{textDocument, position}` of `params` as the watch's file,
     /// line and UTF-16 column.
-    fn place(&self, params: &Value) -> Option<(String, usize, usize)> {
+    /// The cursor `{textDocument, position, range?}` of `params` as
+    /// [`Ask::Cursor`]: its bytes in the file's text, the buffer held
+    /// here (else the file's, the host's), which the glyph origins' offsets
+    /// are in.
+    fn cursor(&self, params: &Value) -> Option<Ask> {
         let file = self.name(params["textDocument"]["uri"].as_str()?)?;
-        let n = |v: &Value| v.as_u64().and_then(|n| usize::try_from(n).ok());
-        let line = n(&params["position"]["line"])?;
-        let col = n(&params["position"]["character"])?;
-        Some((file, line, col))
+        let text = lock(&self.st)
+            .docs
+            .get(&file)
+            .cloned()
+            .or_else(|| self.host.read(&file))?;
+        let at = byte_at(&text, &params["position"])?;
+        let select = match &params["range"] {
+            Value::Null => None,
+            r => Some((byte_at(&text, &r["start"])?, byte_at(&text, &r["end"])?)),
+        }
+        .map(|(a, b)| (a.min(b), a.max(b)));
+        Some(Ask::Cursor {
+            word: word_at(text.as_bytes(), at),
+            line: line_at(&text, at),
+            file,
+            at,
+            select,
+        })
     }
 
     /// `phitex/status` with `state` and the last build's facts.
@@ -990,8 +1061,8 @@ impl Server {
                 }
             }
             "phitex/cursor" => {
-                if let Some((file, line, col)) = self.place(p) {
-                    self.host.ask(Ask::Cursor { file, line, col });
+                if let Some(a) = self.cursor(p) {
+                    self.host.ask(a);
                 }
             }
             "workspace/executeCommand" => {
@@ -1024,9 +1095,9 @@ impl Server {
                 self.status("stopped");
                 self.host.command(name, arg);
             }
-            "phitex.showOnPage" => match self.place(arg) {
-                Some((file, line, col)) => {
-                    self.host.ask(Ask::Cursor { file, line, col });
+            "phitex.showOnPage" => match self.cursor(arg) {
+                Some(a) => {
+                    self.host.ask(a);
                     self.reply(id, Value::Null);
                 }
                 None => self.fail(
@@ -1377,8 +1448,10 @@ mod tests {
                 },
                 Ask::Cursor {
                     file: "ch 1.tex".into(),
-                    line: 1,
-                    col: 1
+                    at: 4,
+                    word: Some((3, 5)),
+                    line: (3, 5),
+                    select: None,
                 },
             ]
         );
@@ -1387,6 +1460,44 @@ mod tests {
         assert_eq!(
             lock(&sent).last().unwrap()["params"]["uri"],
             "overleaf://p1/ch%201.tex"
+        );
+    }
+
+    /// The cursor's and the selection's places in bytes of the buffer
+    /// (UTF-16 columns past a character outside ASCII, a selection made
+    /// backwards, a column past its line's end).
+    #[test]
+    fn cursor_places_in_bytes() {
+        let t = "\u{e9}t\u{e9} d'or-x\n\u{1f600}ab\n";
+        let pos = |line: u64, character: u64| json!({"line": line, "character": character});
+        assert_eq!(byte_at(t, &pos(0, 0)), Some(0));
+        assert_eq!(byte_at(t, &pos(0, 2)), Some(3));
+        assert_eq!(byte_at(t, &pos(0, 99)), Some(12));
+        assert_eq!(byte_at(t, &pos(1, 2)), Some(17));
+        assert_eq!(byte_at(t, &pos(9, 0)), Some(t.len()));
+        assert_eq!(word_at(t.as_bytes(), 3), Some((0, 5)));
+        assert_eq!(word_at(t.as_bytes(), 7), Some((6, 12)));
+        assert_eq!(word_at(t.as_bytes(), 5), Some((0, 5)));
+        assert_eq!(word_at(b"a  b", 2), None);
+        assert_eq!(line_at(t, 16), (13, 19));
+        let (s, host, _) = server();
+        init(&s, "file:///p", false);
+        s.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///p/a.tex", "text": t}}}));
+        lock(&host.0).clear();
+        s.handle(
+            &json!({"jsonrpc": "2.0", "method": "phitex/cursor", "params": {
+            "textDocument": {"uri": "file:///p/a.tex"}, "position": pos(1, 3),
+            "range": {"start": pos(1, 3), "end": pos(0, 4)}}}),
+        );
+        assert_eq!(
+            *lock(&host.0),
+            [Ask::Cursor {
+                file: "a.tex".into(),
+                at: 18,
+                word: Some((13, 19)),
+                line: (13, 19),
+                select: Some((6, 18)),
+            }]
         );
     }
 
