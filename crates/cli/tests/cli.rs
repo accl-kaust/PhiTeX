@@ -2684,7 +2684,7 @@ fn plain_tfms(text: &str) -> Vec<(String, Vec<u8>)> {
 }
 
 /// A Shelf release of `files` (texmf path, bytes) in one pack, its table
-/// and `release-tl2026.6.json` of schema 4, served over HTTP on 127.0.0.1
+/// and `release-tl2026.6.json` of schema 1, served over HTTP on 127.0.0.1
 /// by a thread of the test's: the port, and how many requests it
 /// answered. `tamper`: the pack served differs from the table's by its
 /// last byte.
@@ -2710,7 +2710,7 @@ fn shelf_server(
         pack.len()
     );
     let release = serde_json::json!({
-        "schema": 4, "release": "tl2026.6", "index": "index-tl2026.6.tsv.gz",
+        "schema": 1, "release": "tl2026.6", "index": "index-tl2026.6.tsv.gz",
         "pack_table": "packs-tl2026.6.tsv.gz", "deps": ["pdftex", "xetex"],
         "search": {"pdftex": {"tex": ["tex/latex", "tex/generic", "tex"], "tfm": ["fonts/tfm"]}},
     });

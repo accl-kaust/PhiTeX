@@ -40,12 +40,12 @@ the old one. So the layout stays as it is:
 ```
 
 - **The hostname carries the public protocol**, counted from 1 at the
-  alpha: `v1.shelf.phitex.org` is index schema 4. The schemas before it
+  alpha: `v1.shelf.phitex.org` serves index schema 1. The schemas before it (1 to 4 of development)
   were never released.
 - **Schema 3** is project `shelf-phitex` at `shelf.phitex.org` (tl2026.5).
   Nothing released reads it. It stays up for development builds of the
   extensions until they move, and PhiTeX drops schema 3 from `SCHEMAS`.
-- **Schema 4** is project `shelf-phitex-v4` (shelf-phitex-v4.pages.dev).
+- **Schema 1** (the development schema 4, renumbered) is project `shelf-phitex-v1`. The development projects `shelf-phitex` and `shelf-phitex-v4` were never released.
   It gets the custom domain **`v1.shelf.phitex.org`**, which is the URL
   PhiTeX builds in.
 - **A schema an older client can't read** gets the next project and
@@ -204,10 +204,10 @@ for each version tag.
    - the `phitex` version key;
    - version 0.1.0 and the `--version` lines.
 2. **Shelf:**
-   - add the custom domain `v1.shelf.phitex.org` to the Pages project `shelf-phitex-v4`;
+   - add the custom domain `v1.shelf.phitex.org` to the Pages project `shelf-phitex-v1` (made by the first deploy);
    - build tl2026.7 from the xetex-trees branch on mc, with TRACE and FONT_INDEX;
    - `release.py` writes `shelf.json`;
-   - `deploy.sh` to `shelf-phitex-v4`.
+   - `deploy.sh` to `shelf-phitex-v1`.
 3. **`NEWS.md` → `news.json`** generator, the update check and `phitex
    upgrade`, and the release workflow (targets, `SHA256SUMS`, minisign).
 4. **`install.sh`.**

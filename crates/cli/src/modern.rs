@@ -54,7 +54,7 @@ fn after_help() -> String {
   {l}phitex build paper.tex{l:#}              the PDF beside it, pdflatex for LaTeX
   {l}phitex watch -o out paper.tex{l:#}       rebuild on each change, the viewer in the browser
   {l}phitex watch --lsp{l:#}                  the same for an editor's LSP client (its buffers, problems, cursor)
-  {l}phitex build --shelf paper.tex{l:#}      TeX's files from Shelf's packs, not TeX Live (PHITEX_SHELF_URL)
+  {l}phitex build --shelf paper.tex{l:#}      TeX's files from Shelf's packs, not TeX Live (v1.shelf.phitex.org)
   {l}phitex build --json paper.tex{l:#}       the build's events as JSON lines
   {l}phitex clean paper.tex{l:#}              remove its outputs and its part of the cache
   {l}phitex clean --all{l:#}                  remove the whole cache, every document's
@@ -242,7 +242,7 @@ struct Opts {
     #[arg(long, global = true)]
     no_synctex: bool,
     /// TeX's files from Shelf's packs (fetched once, kept in the cache's
-    /// `shelf/`; PHITEX_SHELF_URL the server) instead of TeX Live's
+    /// `shelf/`; v1.shelf.phitex.org the server, PHITEX_SHELF_URL another) instead of TeX Live's
     /// (`files = "shelf"` in `phitex.toml`)
     #[arg(long, global = true)]
     shelf: bool,

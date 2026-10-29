@@ -43,8 +43,10 @@ use serde_json::Value;
 /// files are named under it.
 pub const TL: &str = "/usr/share/texmf-dist/";
 
-/// The schemas this crate reads.
-pub const SCHEMAS: [u64; 2] = [3, 4];
+/// The schemas this crate reads: Shelf's public protocol, the `N` of
+/// `vN.shelf.phitex.org`, counted from 1 at the alpha (the formats before
+/// it, 1 to 4 of development, were never released).
+pub const SCHEMAS: [u64; 1] = [1];
 
 /// A pack's SHA-256 and size, as the pack table has them.
 type Sum = ([u8; 32], u64);
@@ -63,7 +65,7 @@ pub struct Index {
     /// Engine to kpathsea format to path prefixes, in search order.
     search: HashMap<String, HashMap<String, Vec<String>>>,
     engines: Vec<String>,
-    /// The pack table (schema 4): each pack's SHA-256 and size.
+    /// The pack table: each pack's SHA-256 and size.
     table: Option<HashMap<Box<str>, Sum>>,
     release: String,
 }
@@ -157,7 +159,7 @@ impl Index {
         }
     }
 
-    /// The index with schema 4's pack table (its TSV, gunzipped: `pack
+    /// The index with its pack table (its TSV, gunzipped: `pack
     /// TAB sha256 TAB bytes`): every pack checked against it.
     ///
     /// # Errors
@@ -235,13 +237,13 @@ impl Index {
     }
 
     /// Whether pack `id`'s bytes as served (`raw`) are the pack table's
-    /// (schema 3: no table, every pack taken).
+    /// (no table: none taken).
     ///
     /// # Errors
     /// Why not: another size, another digest, a pack the table lacks.
     pub fn check(&self, id: &str, raw: &[u8]) -> Result<(), String> {
         let Some(t) = &self.table else {
-            return Ok(());
+            return Err(format!("pack {id}: the release has no pack table"));
         };
         let Some((sum, bytes)) = t.get(id) else {
             return Err(format!("pack {id} is not in the release's pack table"));
@@ -693,8 +695,8 @@ mod tests {
         assert!(ix.check("p-1", &raw[1..]).unwrap_err().contains("bytes"));
         assert!(ix.check("p-2", &raw).is_err());
         assert!(index().with_pack_table("p\tnot-hex\t1\n").is_err());
-        // (schema 3: no table, taken)
-        assert_eq!(index().check("p-2", &raw), Ok(()));
+        // (no table: refused)
+        assert!(index().check("p-2", &raw).is_err());
         assert_eq!(gunzip(b"not gzip"), None);
     }
 

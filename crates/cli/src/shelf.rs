@@ -13,9 +13,11 @@
 //!   kpathsea's, never Shelf's. No fallback from one to the other.
 //! - **The release** is this PhiTeX's ([`RELEASE`]): two machines with
 //!   the same PhiTeX build a document from the same files.
-//! - **Where from**: `PHITEX_SHELF_URL` (the release's directory, as
-//!   `https://HOST/tl2026/`): no host is the default until one is chosen.
-//!   Needed only while the index or a pack is not in the cache.
+//! - **Where from**: [`DEFAULT_URL`], Shelf's public host for the protocol
+//!   this PhiTeX reads (`phitex_shelf::SCHEMAS`), or `PHITEX_SHELF_URL`
+//!   (the release's directory, as `https://HOST/tl2026/`: a mirror, a
+//!   release being made). Needed only while the index or a pack is not in
+//!   the cache.
 //! - **Checked**: every pack against the release's pack table before it
 //!   is used or kept (`phitex_shelf::Index::check`).
 //! - **XeTeX's fonts by name** ([`ShelfHost::xetex`]): the release's
@@ -101,14 +103,18 @@ pub fn clear() -> Result<u64, String> {
     }
 }
 
+/// The release's directory on Shelf's public host (docs/spec-distribution.md
+/// §2): the host names the protocol, `v1` for schema 1.
+pub const DEFAULT_URL: &str = "https://v1.shelf.phitex.org/tl2026/";
+
 /// The release's directory on the package server (`PHITEX_SHELF_URL`,
-/// ending in `/`), if one is set.
-fn base_url() -> Option<String> {
+/// else [`DEFAULT_URL`]), ending in `/`.
+fn base_url() -> String {
     let u = std::env::var("PHITEX_SHELF_URL")
         .ok()
-        .filter(|u| !u.trim().is_empty())?;
-    let u = u.trim().to_owned();
-    Some(if u.ends_with('/') { u } else { format!("{u}/") })
+        .filter(|u| !u.trim().is_empty())
+        .map_or_else(|| DEFAULT_URL.to_owned(), |u| u.trim().to_owned());
+    if u.ends_with('/') { u } else { format!("{u}/") }
 }
 
 fn agent() -> &'static ureq::Agent {
@@ -124,13 +130,7 @@ fn agent() -> &'static ureq::Agent {
 
 /// `name` of the release's directory on the server: its bytes.
 fn get(name: &str) -> Result<Vec<u8>, String> {
-    let Some(base) = base_url() else {
-        return Err(format!(
-            "{name} is not in the package cache ({}), and no package server is set (PHITEX_SHELF_URL)",
-            crate::cache::home_relative(&dir())
-        ));
-    };
-    let url = format!("{base}{name}");
+    let url = format!("{}{name}", base_url());
     let mut r = agent()
         .get(&url)
         .call()
@@ -168,7 +168,7 @@ fn cached(name: &str) -> Result<Vec<u8>, String> {
     Ok(b)
 }
 
-/// The release's index (with its pack table, schema 4): read once a
+/// The release's index (with its pack table): read once a
 /// process, from the package cache (fetched once a release).
 pub fn index() -> Result<Arc<Index>, String> {
     static INDEX: OnceLock<Result<Arc<Index>, String>> = OnceLock::new();
@@ -181,7 +181,7 @@ pub fn index() -> Result<Arc<Index>, String> {
             let schema = meta["schema"].as_u64().unwrap_or(0);
             if !phitex_shelf::SCHEMAS.contains(&schema) {
                 return Err(format!(
-                    "Shelf's {rel} is schema {schema}: this PhiTeX reads 3 and 4"
+                    "Shelf's {rel} is schema {schema}: this PhiTeX reads schema 1 (v1.shelf.phitex.org)"
                 ));
             }
             let text = |name: &str| -> Result<String, String> {
@@ -193,10 +193,10 @@ pub fn index() -> Result<Arc<Index>, String> {
             let index_name = meta["index"]
                 .as_str()
                 .ok_or("Shelf's release.json names no index")?;
-            let mut ix = Index::new(&text(index_name)?, &meta);
-            if let Some(t) = meta["pack_table"].as_str() {
-                ix = ix.with_pack_table(&text(t)?)?;
-            }
+            let table = meta["pack_table"]
+                .as_str()
+                .ok_or("Shelf's release.json names no pack table")?;
+            let ix = Index::new(&text(index_name)?, &meta).with_pack_table(&text(table)?)?;
             Ok(Arc::new(ix))
         })
         .clone()
