@@ -715,6 +715,43 @@ fn latex_twocol_floats_runs() {
     assert!(bad.is_empty(), "{name}: {bad:?}");
 }
 
+/// The page layer's work, by the engine's counters, on floats2col (the
+/// document of [`latex_twocol_floats_runs`]: twocolumn, 194 routine
+/// fires, floats and marginpars whose routines hand back `\@freelist`,
+/// `\@currlist`, `\@colroom` and the column flag to the text after them).
+/// At one thread the work runs in TeX's order, so each page's routine
+/// runs once: a second run of a finisher is a false dependency. At eight
+/// threads the text that reads what a routine hands back waits for the
+/// page fold to pass it, so the routines run at most 1.1 times the fires.
+/// The PDF is pdfTeX's at both.
+#[test]
+fn floats2col_routines_run_once_per_fire() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "floats2col";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf"))).expect("the oracle");
+    let mut bad = Vec::new();
+    for threads in [1u64, 8] {
+        let opts = Options {
+            threads: Some(usize::try_from(threads).unwrap_or(1)),
+            ..pdf_opts(name, &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let (pdf, _) = b.output();
+        let fires = b.live_by_op().get("finish").copied().unwrap_or(0);
+        let runs = b.stats.runs_by_op.iter().find(|x| x.0 == "finish").map_or(0, |x| x.1);
+        eprintln!("{name} -j {threads}: {fires} fires, {runs} finisher runs");
+        if let Some(d) = common::first_difference(&pdf, &want) {
+            bad.push(format!("-j {threads}: pdf {d}"));
+        }
+        let ok = if threads == 1 { runs == fires } else { runs * 10 <= fires * 11 };
+        if !ok {
+            bad.push(format!("-j {threads}: {runs} finisher runs for {fires} fires"));
+        }
+    }
+    assert!(bad.is_empty(), "{name}: {bad:?}");
+}
+
 /// `pdflatex` on an article with an abstract, two sections, itemize,
 /// enumerate, a theorem and a proof (amsthm), a figure with a caption
 /// and a quotation (`pdfdocs/envs.tex`, 4 pages): every paragraph end
