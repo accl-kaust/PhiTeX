@@ -591,10 +591,12 @@ mod tests {
         assert_eq!(two.get(Key::Doc("wkeys")), None);
     }
 
+    /// `n` pages, each fired by the page builder (the progress counts
+    /// the pages its finishers reach, `phitex_tex::Progress::on_page`).
     fn pages(n: usize) -> String {
-        let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 ".to_owned();
+        let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} ".to_owned();
         for _ in 0..n {
-            t.push_str("\\shipout\\hbox{}");
+            t.push_str("\\hbox{}\\penalty-10000 ");
         }
         t.push_str("\\end\n");
         t

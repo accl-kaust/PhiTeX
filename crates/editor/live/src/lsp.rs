@@ -565,7 +565,18 @@ impl Server {
             first
         };
         if first {
+            self.starting();
             self.begin_progress("Starting");
+        }
+    }
+
+    /// `phitex/status {state: "starting"}`, the first status, sent once:
+    /// at `initialized` or at the first build's start, whichever comes
+    /// first (the watch may begin its first build before the client says
+    /// `initialized`); never after another state.
+    fn starting(&self) {
+        if lock(&self.st).state.is_empty() {
+            self.status("starting");
         }
     }
 
@@ -912,10 +923,7 @@ impl Server {
                 self.answer_init();
             }
             "initialized" => {
-                let starting = lock(&self.st).builds == 0;
-                if starting {
-                    self.status("starting");
-                }
+                self.starting();
                 self.ask_configuration();
             }
             "exit" => return false,
