@@ -216,6 +216,12 @@ pub(crate) struct LoopState {
 /// The tag of a parked [`LoopState`] of this version.
 const STATE_TAG: &str = "\u{1}pages-loop-8";
 
+/// The placement of checkpoint `i`'s finisher: after the rest, placement
+/// 0 ([`Run::page_loop`]).
+const fn fin_placement(i: usize) -> usize {
+    i + 1
+}
+
 /// The tag of a loop rest's arguments ([`rest_args`]).
 const REST_TAG: &str = "\u{1}pages-rest";
 
@@ -637,6 +643,13 @@ impl Run<'_, '_> {
             },
             None => None,
         };
+        // (its rest, placement 0, first: a child, right after this node
+        // whatever its pages; placed after them, it stood after the last
+        // finisher and moved with it, and a node that moves runs again with
+        // its subtree, every rest and finisher after it. It folds the pages
+        // after the one this node stops at, where it stops ([`REST_OF`]),
+        // else nothing)
+        self.cx.child(self.ops.pages, rest_args(v, me));
         // 1. the parked state
         let old = self.cx.resumed().and_then(|x| LoopState::decode(v, x)).unwrap_or_default();
         self.loop_keys = LoopKeys::of(&old);
@@ -850,7 +863,6 @@ impl Run<'_, '_> {
             floors,
         };
         self.cx.define_with(rest_field(v, me), r.encode(v), Locality::Global);
-        self.cx.follow_after(me, self.ops.pages, rest_args(v, me));
     }
 
     /// [`Run::page_loop`]'s step 2: where the fold starts and how far it
@@ -975,7 +987,7 @@ impl Run<'_, '_> {
         self.cx.define_with(key.field(v, PAGE_OF), x, Locality::Global);
         let args = list_of(v, args);
         let at = match prev {
-            Some(p) if p == cursor && i > 0 => self.cx.follow_after_placed(i - 1, self.ops.finish, args),
+            Some(p) if p == cursor && i > 0 => self.cx.follow_after_placed(fin_placement(i - 1), self.ops.finish, args),
             None if let Some((c, fin)) = after
                 && c == cursor
                 && self.cx.alive(fin) =>
@@ -984,7 +996,7 @@ impl Run<'_, '_> {
             }
             _ => self.cx.follow_after(cursor, self.ops.finish, args),
         };
-        debug_assert_eq!(at, i, "checkpoint i is placement i");
+        debug_assert_eq!(at, fin_placement(i), "checkpoint i's finisher is placement i + 1");
     }
 
     /// §1026's give-back of page `i`'s routine as the loop folds it: the
@@ -996,7 +1008,7 @@ impl Run<'_, '_> {
     /// nothing.
     pub(crate) fn give_back(&mut self, i: usize, guess: ValueId, page: ValueId) -> ValueId {
         let v = self.v;
-        let x = self.cx.placed_output_or(i, fin_output(v, guess, page));
+        let x = self.cx.placed_output_or(fin_placement(i), fin_output(v, guess, page));
         fin_output_parts(v, x).map_or(guess, |(r, _)| r)
     }
 
@@ -1202,7 +1214,7 @@ impl Run<'_, '_> {
         let v = self.v;
         let page = ls.checkpoints[k].page;
         self.cx
-            .placed_output_peek(k)
+            .placed_output_peek(fin_placement(k))
             .and_then(|x| fin_output_parts(v, x))
             .is_some_and(|(_, p)| p == page)
     }
