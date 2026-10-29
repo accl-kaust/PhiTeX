@@ -60,8 +60,12 @@ use hayro::{RenderCache, RenderSettings, render_into};
 const GAP: f64 = 4.0;
 
 /// The strips kept for the viewer, at most this many bytes of pixels
-/// (the oldest dropped first).
+/// (the oldest dropped first): 256 MiB natively; 64 MiB in WebAssembly,
+/// whose 4 GiB memory the engine's threads share.
+#[cfg(not(target_family = "wasm"))]
 const KEEP_BYTES: usize = 256 << 20;
+#[cfg(target_family = "wasm")]
+const KEEP_BYTES: usize = 64 << 20;
 
 /// A band's bitmap: `w` by `h` pixels, RGBA (not premultiplied), clear
 /// where the band draws nothing.
