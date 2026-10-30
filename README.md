@@ -148,17 +148,25 @@ Checked on every change: amsldoc, the LaTeX manual, byte-identical to pdflatex a
   <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/how-dark.png"><img src="assets/readme/how.png" alt="An edit, the paragraphs it reaches, the pages that move" width="100%"></picture>
 </p>
 
-A TeX compiler reads your document from the top, every time. PhiTeX
-instead keeps the whole build as a graph: each paragraph, each page, each
-macro definition and every place it is used. An edit changes one node, and
-only what depends on it is rebuilt: the paragraph, the pages it moved, the
-references that changed. Everything else is reused, and the work that
-remains is spread over your cores.
+A TeX compiler reads your document from the top, every time. PhiTeX cuts
+it at every paragraph end, and each piece (a paragraph, a display, a table,
+a picture) is a node that runs TeX on its own text, all at once on your
+cores. An edit runs again only the piece you changed, and the pieces after
+it that read something whose value changed; a page that comes out the same
+is kept. What the document writes and reads back (`.aux`, `.toc`, `.bbl`,
+`.ind`) is tracked entry by entry, with BibTeX, biber and makeindex inside
+the build, so references settle in one build, as latexmk would settle them.
 
-Underneath, it is a TeX engine in Rust that compiles a document by graph
-reduction of pending thunks: macros are functions, the PDF is the root,
-and the files a job writes and reads back are a loop reduced to a fixed
-point. A cold build is an edit from nothing.
+For engineers: PhiTeX is a TeX engine in Rust on an incremental, parallel
+def-use graph. Each node records what it reads (macro and register
+definitions, counters, fonts, by name and position) and what it defines.
+Nodes run speculatively in parallel on predicted inputs; when a definition
+commits, only the nodes that read a changed value rerun. Commits are
+partitioned by position range, with no global lock and no merge step, so
+the only serial work is TeX's true dependency chain. Line breaking, page
+breaking, the output routines and the PDF writer are layers on that graph,
+and a cold build is an edit from nothing: one code path, compared byte for
+byte with pdfTeX 1.40.29 at every thread count.
 
 ## Status
 
