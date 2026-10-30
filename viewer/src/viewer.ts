@@ -430,6 +430,7 @@ export class Viewer {
   redraw(sizesOnly = false): void {
     if (sizesOnly) {
       for (const s of this.slots) this.sizeSlot(s);
+      for (const k of this.visible) if (this.slots[k]) this.snap(this.slots[k]);
       return;
     }
     const at = this.slots[this.current];
@@ -453,6 +454,35 @@ export class Viewer {
       this.asked.clear();
       this.wantVisible();
     }
+  }
+
+  /**
+   * The place on the pages under (`x`, `y`) (client pixels): the page there,
+   * or the nearest one above or below, and the fraction across it (outside
+   * 0..1 in the gap beside it). For [`keepAt`], around a zoom.
+   */
+  pointAt(x: number, y: number): { k: number; fx: number; fy: number } | null {
+    let best: { k: number; fx: number; fy: number } | null = null;
+    let far = Infinity;
+    for (const s of this.slots) {
+      const r = s.el.getBoundingClientRect();
+      const d = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+      if (d < far && r.width && r.height) {
+        far = d;
+        best = { k: Number(s.el.dataset.k), fx: (x - r.left) / r.width, fy: (y - r.top) / r.height };
+      }
+      if (d === 0) break;
+    }
+    return best;
+  }
+
+  /** Scrolled so the place `at` ([`pointAt`]'s) is under (`x`, `y`) again, the pages' sizes changed. */
+  keepAt(at: { k: number; fx: number; fy: number }, x: number, y: number): void {
+    const s = this.slots[at.k];
+    if (!s) return;
+    const r = s.el.getBoundingClientRect();
+    this.scroller.scrollLeft += r.left + at.fx * r.width - x;
+    this.scroller.scrollTop += r.top + at.fy * r.height - y;
   }
 
   /** Scroll page `k` into view, as Overleaf's page buttons do. */
@@ -500,9 +530,16 @@ export class Viewer {
     const c = wrap?.querySelector("canvas");
     if (!wrap || !c || !c.width || !c.height) return;
     const dpr = window.devicePixelRatio || 1;
+    const r = s.el.getBoundingClientRect();
+    // (a bitmap of another size than its page's box, a zoom's until the page
+    // is drawn again: stretched to the box, so the page and the marks on it,
+    // placed in fractions of the box, stay together; never overflowing it)
+    if (Math.abs(c.width - r.width * dpr) > 1.5 || Math.abs(c.height - r.height * dpr) > 1.5) {
+      Object.assign(wrap.style, { width: "100%", height: "100%", transform: "" });
+      return;
+    }
     wrap.style.width = `${c.width / dpr}px`;
     wrap.style.height = `${c.height / dpr}px`;
-    const r = s.el.getBoundingClientRect();
     const fx = r.left * dpr - Math.round(r.left * dpr);
     const fy = r.top * dpr - Math.round(r.top * dpr);
     wrap.style.transform = fx || fy ? `translate(${-fx / dpr}px, ${-fy / dpr}px)` : "";

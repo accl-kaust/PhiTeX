@@ -1530,12 +1530,15 @@ export class Panel {
     const old = this.scale();
     const next = Math.min(8, Math.max(0.25, old * f));
     if (Math.abs(next - old) < 1e-4) return;
-    const cx = stage.scrollLeft + px, cy = stage.scrollTop + py;
+    // (the place on its page under the pointer kept under it: by the page,
+    // not by the scroll offsets, which the gaps between pages and the
+    // centring do not scale with)
+    const r = stage.getBoundingClientRect();
+    const at = this.viewer.pointAt(r.left + px, r.top + py);
     this.prefs.zoom = String(Number(next.toFixed(4)));
     this.$("#stage").classList.remove("fit");
     this.viewer.redraw(true);
-    stage.scrollLeft = (cx * next) / old - px;
-    stage.scrollTop = (cy * next) / old - py;
+    if (at) this.viewer.keepAt(at, r.left + px, r.top + py);
     this.zoomShown();
     clearTimeout(this.pinchEnd);
     this.pinchEnd = setTimeout(() => {
@@ -1620,8 +1623,12 @@ export class Panel {
         if (!e.ctrlKey) return;
         e.preventDefault();
         const r = stage.getBoundingClientRect();
-        const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
-        this.zoomAt(Math.exp(-Math.max(-60, Math.min(60, d)) * 0.004), e.clientX - r.left, e.clientY - r.top);
+        // (a mouse wheel's notch, lines or a whole step of pixels: one step
+        // of 10%, as pdf.js's; a trackpad's pinch, small pixel deltas: in
+        // proportion, as it goes)
+        const notch = e.deltaMode !== 0 || Math.abs(e.deltaY) >= 50;
+        const f = notch ? (e.deltaY < 0 ? 1.1 : 1 / 1.1) : Math.exp(-e.deltaY / 100);
+        this.zoomAt(f, e.clientX - r.left, e.clientY - r.top);
       },
       { passive: false },
     );

@@ -366,6 +366,7 @@ var Viewer = class {
   redraw(sizesOnly = false) {
     if (sizesOnly) {
       for (const s of this.slots) this.sizeSlot(s);
+      for (const k of this.visible) if (this.slots[k]) this.snap(this.slots[k]);
       return;
     }
     const at = this.slots[this.current];
@@ -387,6 +388,33 @@ var Viewer = class {
       this.asked.clear();
       this.wantVisible();
     }
+  }
+  /**
+   * The place on the pages under (`x`, `y`) (client pixels): the page there,
+   * or the nearest one above or below, and the fraction across it (outside
+   * 0..1 in the gap beside it). For [`keepAt`], around a zoom.
+   */
+  pointAt(x, y) {
+    let best = null;
+    let far = Infinity;
+    for (const s of this.slots) {
+      const r = s.el.getBoundingClientRect();
+      const d = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+      if (d < far && r.width && r.height) {
+        far = d;
+        best = { k: Number(s.el.dataset.k), fx: (x - r.left) / r.width, fy: (y - r.top) / r.height };
+      }
+      if (d === 0) break;
+    }
+    return best;
+  }
+  /** Scrolled so the place `at` ([`pointAt`]'s) is under (`x`, `y`) again, the pages' sizes changed. */
+  keepAt(at, x, y) {
+    const s = this.slots[at.k];
+    if (!s) return;
+    const r = s.el.getBoundingClientRect();
+    this.scroller.scrollLeft += r.left + at.fx * r.width - x;
+    this.scroller.scrollTop += r.top + at.fy * r.height - y;
   }
   /** Scroll page `k` into view, as Overleaf's page buttons do. */
   goTo(k) {
@@ -427,9 +455,13 @@ var Viewer = class {
     const c = wrap?.querySelector("canvas");
     if (!wrap || !c || !c.width || !c.height) return;
     const dpr = window.devicePixelRatio || 1;
+    const r = s.el.getBoundingClientRect();
+    if (Math.abs(c.width - r.width * dpr) > 1.5 || Math.abs(c.height - r.height * dpr) > 1.5) {
+      Object.assign(wrap.style, { width: "100%", height: "100%", transform: "" });
+      return;
+    }
     wrap.style.width = `${c.width / dpr}px`;
     wrap.style.height = `${c.height / dpr}px`;
-    const r = s.el.getBoundingClientRect();
     const fx = r.left * dpr - Math.round(r.left * dpr);
     const fy = r.top * dpr - Math.round(r.top * dpr);
     wrap.style.transform = fx || fy ? `translate(${-fx / dpr}px, ${-fy / dpr}px)` : "";
@@ -2250,12 +2282,12 @@ var Panel = class {
     const old = this.scale();
     const next = Math.min(8, Math.max(0.25, old * f));
     if (Math.abs(next - old) < 1e-4) return;
-    const cx = stage.scrollLeft + px, cy = stage.scrollTop + py;
+    const r = stage.getBoundingClientRect();
+    const at = this.viewer.pointAt(r.left + px, r.top + py);
     this.prefs.zoom = String(Number(next.toFixed(4)));
     this.$("#stage").classList.remove("fit");
     this.viewer.redraw(true);
-    stage.scrollLeft = cx * next / old - px;
-    stage.scrollTop = cy * next / old - py;
+    if (at) this.viewer.keepAt(at, r.left + px, r.top + py);
     this.zoomShown();
     clearTimeout(this.pinchEnd);
     this.pinchEnd = setTimeout(() => {
@@ -2331,8 +2363,9 @@ var Panel = class {
         if (!e.ctrlKey) return;
         e.preventDefault();
         const r = stage.getBoundingClientRect();
-        const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
-        this.zoomAt(Math.exp(-Math.max(-60, Math.min(60, d)) * 4e-3), e.clientX - r.left, e.clientY - r.top);
+        const notch = e.deltaMode !== 0 || Math.abs(e.deltaY) >= 50;
+        const f = notch ? e.deltaY < 0 ? 1.1 : 1 / 1.1 : Math.exp(-e.deltaY / 100);
+        this.zoomAt(f, e.clientX - r.left, e.clientY - r.top);
       },
       { passive: false }
     );
