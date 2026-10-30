@@ -60,5 +60,6 @@ pub fn xetex_of(read: ReadFont, find: FindFont, index: Option<FontIndex>) -> XeT
         fonts: Some(Arc::new(HostFonts { read, find })),
         font_index: index.map(Arc::new),
         pdf: None,
+        ..XeTeX::default()
     }
 }

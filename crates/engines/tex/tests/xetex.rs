@@ -57,6 +57,7 @@ fn xetex() -> XeTeX {
             fonts: Some(Arc::new(Kpse(Mutex::new(kpse)))),
             font_index: index,
             pdf: None,
+            ..XeTeX::default()
         }
     })
     .clone()
@@ -546,5 +547,95 @@ fn xelatex_document() {
                 b.shell_files().len()
             );
         }
+    }
+}
+
+/// XeTeX's font files as a host gives them before and after its fonts
+/// have come (a browser's core fetching a pack): none while `open` is
+/// false, else TeX Live's through kpathsea.
+struct Gated {
+    open: bool,
+    kpse: Kpse,
+}
+
+impl FontSource for Gated {
+    fn read(&self, path: &str) -> Option<Arc<[u8]>> {
+        self.open.then(|| self.kpse.read(path)).flatten()
+    }
+
+    fn find_file(&self, name: &str, format: KpseFormat) -> Option<String> {
+        self.open
+            .then(|| self.kpse.find_file(name, format))
+            .flatten()
+    }
+}
+
+/// A build's native fonts are its own XeTeX's (`NativeFonts`): a build
+/// whose font files and index give no Latin Modern (a host before its
+/// fonts came), dropped, then a build with new files and an index that
+/// give it, made right after (so allocated where the first one's were,
+/// as a long-running core allocates them: the first `xelatex` session
+/// after a `pdflatex` one in the browser never shipped a page). The
+/// second build finds both fonts, by file and by name, and its XDV is the
+/// one a build with those files gives first.
+#[test]
+fn a_dropped_builds_fonts_are_not_a_later_ones() {
+    let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=\"[lmroman10-regular.otf]\" at 10pt \\font\\y=\"Latin Modern Roman\" at 12pt \\setbox0\\hbox{\\x Hi \\y there}\\shipout\\box0 \\end\n";
+    let kpse = || {
+        let path = std::env::var("PATH").unwrap_or_default();
+        let dir = std::env::split_paths(&path).find(|d| d.join("tex").is_file());
+        Kpse(Mutex::new(
+            dir.map(|d| phitex_kpse::Kpse::new(&d, "xetex", "xetex")),
+        ))
+    };
+    let face = kpse()
+        .find_file("lmroman10-regular.otf", KpseFormat::OpenType)
+        .expect("TeX Live's Latin Modern Roman");
+    let data: Arc<[u8]> = Arc::from(std::fs::read(&face).expect("its bytes"));
+    let index = || {
+        let mut e = phitex_otf::index::FaceEntry::read(&face, data.clone(), 0);
+        e.fc_names = Some(phitex_otf::xetex::fontmgr::fc_names(&e));
+        FontIndex { entries: vec![e] }
+    };
+    let xe = |open: bool| XeTeX {
+        fonts: Some(Arc::new(Gated { open, kpse: kpse() })),
+        font_index: Some(Arc::new(if open { index() } else { FontIndex::default() })),
+        ..XeTeX::default()
+    };
+    let dir = common::fixtures().join("xetex");
+    let build = |xe: &XeTeX| {
+        let opts = Options {
+            epoch: Some(0),
+            threads: Some(1),
+            xetex: Some(xe.clone()),
+            ..common::options("./fonts.tex", "fonts", "", &dir)
+        };
+        common::build(opts, None, text)
+    };
+    let first = xe(true);
+    let want = build(&first).output().0;
+    drop(first);
+    for round in 0..3 {
+        let none = xe(false);
+        let at = Arc::as_ptr(none.fonts.as_ref().expect("files")).cast::<u8>() as usize;
+        let b = build(&none);
+        let (_, log) = b.output();
+        assert!(
+            log.contains("not loadable"),
+            "round {round}: without the files the fonts are not found:\n{log}"
+        );
+        drop(b);
+        drop(none);
+        let fonts = xe(true);
+        let again = Arc::as_ptr(fonts.fonts.as_ref().expect("files")).cast::<u8>() as usize;
+        let (xdv, log) = build(&fonts).output();
+        eprintln!(
+            "round {round}: the second build's files {} the first's address",
+            if at == again { "at" } else { "not at" }
+        );
+        assert!(
+            common::first_difference(&xdv, &want).is_none(),
+            "round {round}: the build with the files gives the XDV a first build with them gives:\n{log}"
+        );
     }
 }

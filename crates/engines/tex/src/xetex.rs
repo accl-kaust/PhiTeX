@@ -28,6 +28,11 @@ pub struct XeTeX {
     /// The PDF written from the pages, as `xelatex` makes it (`crate::xdvpdf`);
     /// none: the XDV file (`xelatex -no-pdf`).
     pub pdf: Option<crate::xdvpdf::XdvPdf>,
+    /// The native fonts loaded through these font files and this index
+    /// ([`crate::native::NativeFonts`]): made with them, shared by the
+    /// clones; a host that makes new font files makes a new one
+    /// (`..XeTeX::default()`).
+    pub native: Arc<crate::native::NativeFonts>,
 }
 
 /// [`XeTeX::fonts`].

@@ -1,7 +1,8 @@
 //! XeTeX's native fonts and words (docs/spec-xetex.md §3 "font loading",
 //! §4): fonts found through `phitex-otf` (by name in the build's font
-//! index, or `[file]` through its font files), loaded once per process
-//! for a lookup, their words shaped where a run makes them.
+//! index, or `[file]` through its font files), loaded once per XeTeX
+//! (its font files and index, [`NativeFonts`]) for a lookup, their words
+//! shaped where a run makes them.
 //!
 //! A native font is a font like a TFM one to the rest of the engine: its
 //! `fontinfo:` value (whose file is `[NATIVE, spec, size asked]`, so a
@@ -15,7 +16,7 @@
 //! strong character, spec §4.1): the field `fontdir:<f>`, read once a
 //! run and written only where a word changes it.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use phitex_defuse::{FxHashMap, ValueId, Values};
 use phitex_otf::xetex::XeTeXFont;
@@ -44,20 +45,24 @@ pub(crate) struct NativeFont {
     pub def: Vec<u8>,
 }
 
-type Loads = Mutex<FxHashMap<(usize, String, i32), Option<Arc<NativeFont>>>>;
+/// [`NativeFonts`]' loads: a specification and the size asked, and what
+/// they found.
+type Loads = FxHashMap<(String, i32), Option<Arc<NativeFont>>>;
 
-/// The fonts loaded in this process, by the build's font source, the
-/// specification and the size asked.
-fn loads() -> &'static Loads {
-    static L: OnceLock<Loads> = OnceLock::new();
-    L.get_or_init(Default::default)
-}
-
-/// The font managers (XeTeX's name lookup over an index), one per index.
-fn managers() -> &'static Mutex<Vec<(usize, phitex_otf::xetex::fontmgr::FontManager)>> {
-    static M: OnceLock<Mutex<Vec<(usize, phitex_otf::xetex::fontmgr::FontManager)>>> =
-        OnceLock::new();
-    M.get_or_init(Default::default)
+/// The native fonts loaded through one [`XeTeX`]'s font files and index
+/// ([`find`]): by the specification and the size asked, and the name
+/// lookup over its index, made once. A font found, or not, is the
+/// answer of that XeTeX's files, so the table is its own and goes with
+/// it ([`XeTeX::native`], shared by its clones). A process-wide table
+/// keyed by the files' and index's addresses gave a later build whose
+/// files were allocated where a dropped build's had been that build's
+/// answers: in a long-running process (a browser's core, a pdfLaTeX
+/// session then an XeLaTeX one), the misses of a build made before its
+/// fonts' files had come, for ever.
+#[derive(Default)]
+pub struct NativeFonts {
+    loads: Mutex<Loads>,
+    manager: Mutex<Option<phitex_otf::xetex::fontmgr::FontManager>>,
 }
 
 thread_local! {
@@ -81,16 +86,12 @@ impl phitex_otf::FontSource for NoFiles {
 /// `find_native_font(spec, s)` and `load_native_font`'s measures: the
 /// font `spec` names at `s` (`s < 0`: scaled), loaded once per process.
 pub(crate) fn find(xe: &XeTeX, spec: &str, s: i32) -> Option<Arc<NativeFont>> {
-    let src_key = xe
-        .fonts
-        .as_ref()
-        .map_or(0, |f| Arc::as_ptr(f).cast::<u8>() as usize);
-    let key = (src_key, spec.to_owned(), s);
-    if let Some(x) = loads().locked().get(&key) {
+    let key = (spec.to_owned(), s);
+    if let Some(x) = xe.native.loads.locked().get(&key) {
         return x.clone();
     }
     let x = load(xe, spec, s).map(Arc::new);
-    loads().locked().insert(key, x.clone());
+    xe.native.loads.locked().insert(key, x.clone());
     x
 }
 
@@ -100,17 +101,12 @@ fn load(xe: &XeTeX, spec: &str, s: i32) -> Option<NativeFont> {
         Some(f) => f.as_ref(),
         None => &no,
     };
-    let index = xe.font_index.clone().unwrap_or_default();
-    let ikey = Arc::as_ptr(&index) as usize;
     let (found, _diags) = {
-        let mut ms = managers().locked();
-        let k = if let Some(k) = ms.iter().position(|m| m.0 == ikey) {
-            k
-        } else {
-            ms.push((ikey, phitex_otf::xetex::fontmgr::FontManager::new(index)));
-            ms.len() - 1
-        };
-        phitex_otf::xetex::find_native_font(&mut ms[k].1, src, spec, s, 0)
+        let mut m = xe.native.manager.locked();
+        let m = m.get_or_insert_with(|| {
+            phitex_otf::xetex::fontmgr::FontManager::new(xe.font_index.clone().unwrap_or_default())
+        });
+        phitex_otf::xetex::find_native_font(m, src, spec, s, 0)
     };
     let mut font = found?;
     let size = if s >= 0 {

@@ -77,6 +77,7 @@ pub use api::{
     engine_id, file_stat_key,
 };
 pub use exec::{Progress, SpawnWorker, cpus as exec_cpus, set_spawn_worker};
+pub use native::NativeFonts;
 pub use origins::{OriginsSnapshot, PageOrigins};
 pub use phitex_otf::index::FontIndex;
 pub use phitex_otf::{FontSource, KpseFormat};
