@@ -58,10 +58,13 @@ export class Viewer {
       if (!frame)
         frame = requestAnimationFrame(() => {
           frame = 0;
-          this.measure();
+          // (every box read first, then written: a write between reads
+          // makes the browser lay the page out again at the next read, once
+          // a page a frame)
+          const boxes = this.measure();
           // (scrolled by whole CSS pixels, a fractional device ratio moves a
-          // page off the device's grid: snapped again)
-          for (const k of this.visible) if (this.slots[k]) this.snap(this.slots[k]);
+          // page off the device's grid: snapped again, those on screen)
+          for (const [k, r] of boxes) if (this.slots[k]) this.snap(this.slots[k], r);
         });
     }, { passive: true });
     // (text selected on the pages: its boxes, for the editor to select the source)
@@ -525,24 +528,31 @@ export class Viewer {
    * device pixel the slot's corner sits at, so the browser copies the
    * pixels and never resamples them (resampled, the page looks blurry).
    */
-  private snap(s: Slot): void {
+  private snap(s: Slot, box?: DOMRect): void {
     const wrap = s.img?.canvas;
     const c = wrap?.querySelector("canvas");
     if (!wrap || !c || !c.width || !c.height) return;
     const dpr = window.devicePixelRatio || 1;
-    const r = s.el.getBoundingClientRect();
+    const r = box ?? s.el.getBoundingClientRect();
     // (a bitmap of another size than its page's box, a zoom's until the page
     // is drawn again: stretched to the box, so the page and the marks on it,
     // placed in fractions of the box, stay together; never overflowing it)
+    // (each written only when it changes: an unchanged write still costs
+    // the next frame its layout)
+    const set = (k: "width" | "height" | "transform", v: string) => {
+      if (wrap.style[k] !== v) wrap.style[k] = v;
+    };
     if (Math.abs(c.width - r.width * dpr) > 1.5 || Math.abs(c.height - r.height * dpr) > 1.5) {
-      Object.assign(wrap.style, { width: "100%", height: "100%", transform: "" });
+      set("width", "100%");
+      set("height", "100%");
+      set("transform", "");
       return;
     }
-    wrap.style.width = `${c.width / dpr}px`;
-    wrap.style.height = `${c.height / dpr}px`;
+    set("width", `${c.width / dpr}px`);
+    set("height", `${c.height / dpr}px`);
     const fx = r.left * dpr - Math.round(r.left * dpr);
     const fy = r.top * dpr - Math.round(r.top * dpr);
-    wrap.style.transform = fx || fy ? `translate(${-fx / dpr}px, ${-fy / dpr}px)` : "";
+    set("transform", fx || fy ? `translate(${-fx / dpr}px, ${-fy / dpr}px)` : "");
   }
 
   /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */
@@ -572,14 +582,20 @@ export class Viewer {
     this.wantVisible();
   }
 
-  /** The page most on screen, measured now (the observer only reports crossings of its thresholds, in a root grown by its margin). */
-  private measure(): void {
+  /**
+   * The page most on screen, measured now (the observer only reports
+   * crossings of its thresholds, in a root grown by its margin); the boxes
+   * of the pages on screen, read in one go, for the caller to write after.
+   */
+  private measure(): Map<number, DOMRect> {
     const v = this.scroller.getBoundingClientRect();
     let best = this.current, most = 0;
+    const onScreen = new Map<number, DOMRect>();
     for (const k of this.visible) {
       const b = this.slots[k]?.el.getBoundingClientRect();
       if (!b) continue;
       const on = Math.min(b.bottom, v.bottom) - Math.max(b.top, v.top);
+      if (on > 0) onScreen.set(k, b);
       if (on > most) {
         most = on;
         best = k;
@@ -589,6 +605,7 @@ export class Viewer {
       this.current = best;
       this.host.inView(best);
     }
+    return onScreen;
   }
 
   /** Ask for each visible page not drawn at its hash (once per hash). */
