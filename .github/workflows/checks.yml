@@ -51,9 +51,8 @@ jobs:
       # linted here; its documents need TeX Live: `scripts/wasm.sh check`)
       - run: rustup target add wasm32-wasip1-threads
       - run: cargo clippy --target wasm32-wasip1-threads -p phitex-wasm -- -D warnings
-      # (without TeX Live: the tests that compare with it skip themselves;
-      # the CLI's integration tests, crates/cli/tests, run the binary on
-      # TeX Live and are the gate's cli shard, so only the CLI's unit
-      # tests run here)
-      - run: cargo test --workspace --exclude phitex-cli --no-fail-fast --quiet
-      - run: cargo test -p phitex-cli --bins --no-fail-fast --quiet
+      # (the unit tests, which need no TeX Live: every crate's but
+      # phitex-live's, which read TeX Live's files. The integration tests,
+      # most of which build documents on TeX Live, and phitex-live's unit
+      # tests run in the gate's tests shard, in the CI image)
+      - run: cargo test --workspace --exclude phitex-live --lib --bins --no-fail-fast --quiet

@@ -58,9 +58,10 @@ jobs:
           - { name: latex-1, args: "latex 1 4" }
           - { name: latex-2, args: "latex 2 4" }
           - { name: latex-3, args: "latex 3 4" }
-          # (the CLI's integration tests, crates/cli/tests: they need TeX
-          # Live, so they run here and not in checks.yml)
-          - { name: cli, args: "cli" }
+          # (every other test binary: each crate's integration tests, the
+          # CLI's on TeX Live among them, and phitex-live's unit tests;
+          # checks.yml runs the unit tests only, without TeX Live)
+          - { name: tests, args: "tests" }
           # (amsldoc --exact-pdf at -j1, 8 and 16 against TeX Live's
           # build at SOURCE_DATE_EPOCH 1700000000 in this image)
           - { name: ams, args: "ams 98c96e004c1c82db1e3d562cf0181a3e" }

@@ -15,9 +15,12 @@
 #                                       phitex-live checked for wasm32-wasip1-threads
 #   gate-shard.sh suites                the local suites of phitex-tex
 #   gate-shard.sh latex K N             the latex target's tests, shard K of N
-#   gate-shard.sh cli                   the CLI's integration tests (crates/cli/tests),
-#                                       which run the users' CLI on TeX Live: one
-#                                       test a process, one at a time
+#   gate-shard.sh tests                 every other test binary of the workspace
+#                                       (each crate's integration tests, the CLI's
+#                                       on TeX Live among them, and phitex-live's
+#                                       unit tests, which read TeX Live), each
+#                                       test its own process; the CLI's one at a
+#                                       time
 #   gate-shard.sh ams ORACLE_MD5 CTL    amsldoc --exact-pdf at -j 1, 8 and 16;
 #                                       cold watch timing at -j 1/8/16, the
 #                                       head beside control CTL's recorded
@@ -324,17 +327,17 @@ case $shard in
     for s in latex $SUITES; do a+=(--test "$s"); done
     # (and the PDF writer's update test, which reads back a watch's
     # update files: the para and big shards run it on theirs)
-    ( { $T "${a[@]}" --no-run --message-format=json-render-diagnostics && { [ ! -f crates/output/pdf/tests/update.rs ] || cargo test --profile fastdev -p phitex-pdf --test update --no-run --message-format=json-render-diagnostics; }; } > "$r/build-tests.json" 2> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
+    # (then, with the same features, every other crate's integration tests
+    # and phitex-live's unit tests: the tests shard's, build-wtests.json)
+    W="cargo test --profile fastdev --features phitex-tex/profile,phitex-tex/observe --no-run --message-format=json-render-diagnostics"
+    ( { $T "${a[@]}" --no-run --message-format=json-render-diagnostics && { [ ! -f crates/output/pdf/tests/update.rs ] || cargo test --profile fastdev -p phitex-pdf --test update --no-run --message-format=json-render-diagnostics; }; } > "$r/build-tests.json" 2> "$r/build-tests.txt" &&
+      { $W --workspace --test '*' && $W -p phitex-live --lib; } > "$r/build-wtests.json" 2>> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
     # (three CLIs: the checks' (profile and observe: CHECK_READS, the
     # recordings, amsldoc), the timings' (profile: the acct lines without
     # the engine's recorder) and the users' (no feature))
     ( CARGO_TARGET_DIR=$PWD/target-cli cargo build -q --release -p phitex-cli --features phitex-tex/profile,phitex-tex/observe > "$r/build.txt" 2>&1; echo "EXIT $?" >> "$r/build.txt" ) &
     ( CARGO_TARGET_DIR=$PWD/target-cli-prof cargo build -q --release -p phitex-cli --features phitex-tex/profile > "$r/build-prof.txt" 2>&1; echo "EXIT $?" >> "$r/build-prof.txt" ) &
-    # (and, on the users' CLI, the CLI's integration tests: they run the
-    # binary at the path cargo compiled into them, the cli shard puts it
-    # back there)
-    ( { CARGO_TARGET_DIR=$PWD/target-cli-rel cargo build -q --release -p phitex-cli &&
-      CARGO_TARGET_DIR=$PWD/target-cli-rel cargo test --release -p phitex-cli --test '*' --no-run --message-format=json-render-diagnostics > "$r/build-clitests.json"; } > "$r/build-rel.txt" 2>&1; echo "EXIT $?" >> "$r/build-rel.txt" ) &
+    ( CARGO_TARGET_DIR=$PWD/target-cli-rel cargo build -q --release -p phitex-cli > "$r/build-rel.txt" 2>&1; echo "EXIT $?" >> "$r/build-rel.txt" ) &
     wait
     built
     cache_off
@@ -343,7 +346,7 @@ case $shard in
     grep -q '^EXIT 0$' "$r/build-prof.txt" || red "build (cli, profile): $(grep -m1 '^error' "$r/build-prof.txt")"
     grep -q '^EXIT 0$' "$r/build-rel.txt" || red "build (cli, release): $(grep -m1 '^error' "$r/build-rel.txt")"
     if [ $status = green ]; then
-      mkdir -p "$r/store.tmp/tests" "$r/store.tmp/cli" "$r/store.tmp/clitests"
+      mkdir -p "$r/store.tmp/tests" "$r/store.tmp/cli" "$r/store.tmp/wtests/bin"
       python3 -I -c '
 import json, os, shutil, sys
 for l in open(sys.argv[1]):
@@ -353,10 +356,15 @@ for l in open(sys.argv[1]):
         continue
     if m.get("reason") == "compiler-artifact" and m.get("executable") and "test" in m["target"]["kind"]:
         shutil.copy2(m["executable"], os.path.join(sys.argv[2], m["target"]["name"]))' "$r/build-tests.json" "$r/store.tmp/tests"
-      # (the CLI's integration tests, and the path of the binary they run:
-      # phitex.path)
+      # (the tests shard's binaries, PKG--TARGET, listed with their crates'
+      # directories in list.txt (phitex-tex's suites and latex left out:
+      # their shards run them); the programs they run, where cargo built
+      # them (CARGO_BIN_EXE_*, compiled in), in bin/ and bins.txt)
       python3 -I -c '
 import json, os, shutil, sys
+skip = set(sys.argv[3].split())
+root = os.getcwd()
+lst, bins = [], []
 for l in open(sys.argv[1]):
     try:
         m = json.loads(l)
@@ -364,11 +372,22 @@ for l in open(sys.argv[1]):
         continue
     if m.get("reason") != "compiler-artifact" or not m.get("executable"):
         continue
-    if "test" in m["target"]["kind"]:
-        shutil.copy2(m["executable"], os.path.join(sys.argv[2], m["target"]["name"]))
-    elif m["target"]["name"] == "phitex":
-        open(os.path.join(sys.argv[2], "phitex.path"), "w").write(m["executable"] + "\n")' "$r/build-clitests.json" "$r/store.tmp/clitests"
-      [ -s "$r/store.tmp/clitests/phitex.path" ] && [ -x "$r/store.tmp/clitests/cli" ] || red "build (cli tests): no test binaries or no path of the CLI they run"
+    t = m["target"]
+    # (a path package id: ...#NAME@VERSION, or ...DIR#VERSION when NAME is DIR)
+    tail = m["package_id"].split("#")[-1]
+    pkg = tail.split("@")[0] if "@" in tail else m["package_id"].split("#")[0].rstrip("/").rsplit("/", 1)[-1]
+    if m["profile"]["test"]:
+        if pkg == "phitex-tex" and t["name"] in skip:
+            continue
+        f = pkg + "--" + t["name"]
+        shutil.copy2(m["executable"], os.path.join(sys.argv[2], f))
+        lst.append(f + "\t" + pkg + "\t" + os.path.relpath(os.path.dirname(m["manifest_path"]), root))
+    elif "bin" in t["kind"]:
+        shutil.copy2(m["executable"], os.path.join(sys.argv[2], "bin", t["name"]))
+        bins.append(t["name"] + "\t" + m["executable"])
+open(os.path.join(sys.argv[2], "list.txt"), "w").write("".join(x + "\n" for x in sorted(set(lst))))
+open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in sorted(set(bins))))' "$r/build-wtests.json" "$r/store.tmp/wtests" "latex $SUITES"
+      [ -s "$r/store.tmp/wtests/list.txt" ] || red "build (tests): no test binary for the tests shard"
       cp target-cli/release/phitex "$r/store.tmp/cli/phitex"
       # (each under the name `phitex`: the CLI is a TeX-compatible
       # command line under any other name)
@@ -379,7 +398,7 @@ for l in open(sys.argv[1]):
       ls -la "$r/store.tmp/tests" "$r/store.tmp/cli" > "$r/store.txt"
       mv "$r/store.tmp" "$r/store"
     fi
-    rm -f "$r/build-tests.json" "$r/build-clitests.json"
+    rm -f "$r/build-tests.json" "$r/build-wtests.json"
     ;;
   suites)
     fetched
@@ -399,31 +418,37 @@ for l in open(sys.argv[1]):
     grep -q . "$r/red.txt" && status=red
     for s in $SUITES; do walls "$r/t-$s" "$s::"; done > "$r/suite-test-walls.txt"
     ;;
-  cli)
-    # (the CLI's integration tests on the users' CLI, the build shard's:
-    # the binary put back where cargo built it, the path compiled into the
-    # tests, beside the target's tmp directory they use. One at a time:
-    # they share that directory, its format cache and program links, and
-    # one format build holds about 4 GB. Every test of every binary, the
-    # ignored ones not)
+  tests)
+    # (the build shard's other test binaries, wtests/list.txt: the
+    # programs they run put back where cargo built them, beside the
+    # target's tmp directory; each binary's tests but the ignored, each its
+    # own process from its crate's directory. Two lanes at once: the CLI's
+    # tests one at a time (they share that tmp directory, its format cache
+    # and program links, and one format build holds about 4 GB), the rest
+    # GATE_TEST_PAR at a time)
     fetched
-    d=$w/bin/clitests
-    if [ ! -s "$d/phitex.path" ]; then
-      red "cli: no test binaries at \$w/bin/clitests"
+    d=$w/bin/wtests
+    if [ ! -s "$d/list.txt" ]; then
+      red "tests: no test binaries at \$w/bin/wtests"
     else
-      p=$(cat "$d/phitex.path")
-      mkdir -p "$(dirname "$p")" "$(dirname "$(dirname "$p")")/tmp"
-      cp "$w/bin/cli/rel/phitex" "$p"
-      for b in "$d"/*; do
-        t=${b##*/}
-        [ "$t" != phitex.path ] && [ -x "$b" ] || continue
-        "$b" --list 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/all-$t.txt"
-        "$b" --list --ignored 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/ign-$t.txt"
-        comm -23 "$w/all-$t.txt" "$w/ign-$t.txt" > "$w/run-$t.txt"
-        RT_DIR=crates/cli GATE_TEST_PAR=1 GATE_TEST_TIMEOUT=${GATE_CLI_TIMEOUT:-900} runtests "$b" "$t::" "$w/run-$t.txt" "$r/t-$t"
-        walls "$r/t-$t" "$t::"
-      done > "$r/test-walls.txt"
-      [ -s "$w/all-cli.txt" ] || red "cli: the cli test binary lists no test"
+      while IFS=$'\t' read -r b p; do
+        mkdir -p "$(dirname "$p")" "$(dirname "$(dirname "$p")")/tmp"
+        cp "$d/bin/$b" "$p"
+      done < "$d/bins.txt"
+      lane() {
+        local f pkg dir
+        while IFS=$'\t' read -r f pkg dir; do
+          "$d/$f" --list 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/all-$f.txt"
+          "$d/$f" --list --ignored 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/ign-$f.txt"
+          comm -23 "$w/all-$f.txt" "$w/ign-$f.txt" > "$w/run-$f.txt"
+          RT_DIR=$dir runtests "$d/$f" "$f::" "$w/run-$f.txt" "$r/t-$f"
+          walls "$r/t-$f" "$f::" >> "$r/test-walls.txt"
+        done
+      }
+      ( GATE_TEST_PAR=1 GATE_TEST_TIMEOUT=${GATE_CLI_TIMEOUT:-900} lane < <(awk -F'\t' '$2 == "phitex-cli"' "$d/list.txt") ) &
+      ( lane < <(awk -F'\t' '$2 != "phitex-cli"' "$d/list.txt") ) &
+      wait
+      grep -q . "$r/red.txt" && status=red
     fi
     ;;
   latex)
