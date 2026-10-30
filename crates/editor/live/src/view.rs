@@ -87,18 +87,27 @@ impl Built {
     /// `passes` (latexmk's runs of LaTeX), `ran` (the steps run) and `kept`
     /// (those kept from the last build), `threads`, `fetched` (the packages'
     /// packs fetched in it).
-    pub fn parts_of(s: &crate::session::Session, r: &crate::session::Report) -> serde_json::Map<String, Value> {
+    pub fn parts_of(
+        s: &crate::session::Session,
+        r: &crate::session::Report,
+    ) -> serde_json::Map<String, Value> {
         let (ran, passes) = r
             .runs
             .iter()
             .fold((0, 0), |(a, b), x| (a + x.commands_run, b + x.rounds));
         let live = r.runs.last().map_or(0, |x| x.live as u64);
         let mut m = serde_json::Map::new();
-        m.insert("cold".into(), json!(r.runs.first().is_some_and(|x| x.why == "cold")));
+        m.insert(
+            "cold".into(),
+            json!(r.runs.first().is_some_and(|x| x.why == "cold")),
+        );
         m.insert("passes".into(), json!(passes.max(1)));
         m.insert("ran".into(), json!(ran));
         m.insert("kept".into(), json!(live.saturating_sub(ran)));
-        m.insert("threads".into(), json!(r.runs.last().map_or(0, |x| x.threads)));
+        m.insert(
+            "threads".into(),
+            json!(r.runs.last().map_or(0, |x| x.threads)),
+        );
         m.insert("fetched".into(), json!(s.status().meter().fetched()));
         m
     }

@@ -231,7 +231,8 @@ impl Progress {
 
     /// The format is being made (`ready` false) or is ready.
     pub(crate) fn note_format(&self, ready: bool) {
-        self.format.store(if ready { 2 } else { 1 }, Ordering::Relaxed);
+        self.format
+            .store(if ready { 2 } else { 1 }, Ordering::Relaxed);
         if let Some(h) = self.on_format.get() {
             (h.0)(ready);
         }
