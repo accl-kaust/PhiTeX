@@ -344,7 +344,7 @@ export class Panel {
     <button type="button" class="ib wide" id="b-compare" title="Compare with an earlier version (latexdiff)" aria-label="Compare"><span class="icon">compare</span></button>
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
-    <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span class="icon">expand_more</span></button>
+    <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
     <button type="button" class="ib probs" id="b-probs" aria-haspopup="dialog" aria-expanded="false" title="Problems" hidden><span id="psev"></span><span id="pcount"></span></button>
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
     <span class="progress" id="prog"></span>
@@ -1559,6 +1559,8 @@ export class Panel {
     const z = this.zoomNow ?? this.prefs.zoom;
     const named = ZOOMS.find(([v]) => v === z);
     this.$("#zl").textContent = named ? named[1] : `${Math.round(Number(z) * 100)}%`;
+    // (the short form a narrow bar shows)
+    this.$("#zs").textContent = z === "fit" ? "Fit" : z === "page" ? "Page" : `${Math.round(Number(z) * 100)}%`;
     this.root.querySelectorAll<HTMLElement>("#m-zoom [data-zoom]").forEach((b) => {
       const on = b.dataset.zoom === z;
       b.setAttribute("aria-checked", String(on));
@@ -2085,6 +2087,8 @@ export class Panel {
     const pg = this.$<HTMLInputElement>("#pgin");
     if (this.root.activeElement !== pg) pg.value = n ? String(k + 1) : "–";
     this.$("#pgn").textContent = String(n);
+    // (as wide as the count's digits, the most it can say)
+    pg.style.width = `${String(n || 1).length + 1.6}ch`;
     queueMicrotask(() => this.emit());
   }
 

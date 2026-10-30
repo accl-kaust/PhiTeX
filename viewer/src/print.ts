@@ -103,12 +103,16 @@ header:active { cursor: grabbing; }
 .status { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 6px; min-width: 0;
   border-radius: var(--ph-radius); color: var(--ph-fg2); cursor: pointer; white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }
 .status:hover, .status[aria-expanded="true"] { background: var(--ph-hover); color: var(--ph-fg); }
-.status b { font-weight: 400; color: var(--ph-fg); overflow: hidden; text-overflow: ellipsis; }
+/* (squeezed: its detail goes first, then its words end in an ellipsis; the leading word kept) */
+.status b { flex: 0 1 auto; min-width: 4.5ch; font-weight: 400; color: var(--ph-fg); overflow: hidden; text-overflow: ellipsis; }
+#stmore { flex: 0 1000 auto; min-width: 0; overflow: hidden; }
+.bar > .status { min-width: calc(4.5ch + 12px); }
 .status.err b { color: var(--ph-danger); }
 .pageno { display: inline-flex; align-items: center; gap: 4px; color: var(--ph-fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.pageno input { width: 2.8em; height: 22px; padding: 0; text-align: center; font: inherit; color: var(--ph-fg); background: transparent;
+.pageno input { width: 3ch; height: 22px; box-sizing: content-box; padding: 0 2px; padding: 0; text-align: center; font: inherit; color: var(--ph-fg); background: transparent;
   border: 1px solid var(--ph-border); border-radius: var(--ph-radius); }
 .zoomb { padding: 0 2px 0 8px; }
+#zs { display: none; }
 .probs { font-weight: 600; font-variant-numeric: tabular-nums; }
 .probs.error { color: var(--ph-danger); } .probs.warning { color: var(--ph-warning); }
 .progress { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; opacity: 0; transition: opacity .2s; pointer-events: none; }
@@ -121,10 +125,25 @@ header:active { cursor: grabbing; }
 .find input:focus { border-color: var(--ph-link); }
 #findn { color: var(--ph-fg2); min-width: 48px; font-variant-numeric: tabular-nums; }
 #findn.none { color: var(--ph-danger); }
+/* narrower: what gives way, in order: the zoom's long label, find's box, then (560) the buttons the ⋯ menu also has, then the page box beside an open find */
+.bar > :not(.status):not(.grow) { flex: none; }
+.bar > .grow { flex: 1 1 0; min-width: 0; }
+@container (max-width: 820px) { #zl { display: none; } #zs { display: inline; } }
+@container (max-width: 760px) {
+  /* (find open: Compare and Download step aside, to the ⋯ menu, which has them) */
+  .bar:has(.find:not([hidden])) :is(#b-compare, #pdf) { display: none; }
+  .bar:has(.find:not([hidden])) #x-compare.narrow:not([hidden]) { display: flex !important; }
+}
+@container (max-width: 700px) { .find input { width: 110px; } #findn { min-width: 0; } }
 @container (max-width: 560px) {
   .wide { display: none !important; }
-  .find input { width: 110px; }
 }
+@container (max-width: 460px) {
+  .bar:has(.find:not([hidden])) .pageno { display: none; }
+  .find input { width: 90px; }
+  .bar { gap: 2px; }
+}
+@container (max-width: 360px) { .find input { width: 72px; } .bar { padding: 0 4px; } }
 @container (min-width: 561px) { .narrow { display: none !important; } }
 
 /* menus and popovers: plain lists in the host's menu colour */
