@@ -2998,6 +2998,7 @@ var Panel = class {
     const box = this.$("#logview"), pre = this.$("#logtext");
     pre.textContent = "Reading the log\u2026";
     box.hidden = false;
+    box.querySelector("[data-close]")?.focus();
     const text = await this.ev.onLog?.().catch((e) => `Couldn't read the log: ${e instanceof Error ? e.message : String(e)}`);
     pre.textContent = text ?? "No log yet: the first build hasn't finished.";
   }

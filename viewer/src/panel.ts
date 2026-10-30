@@ -1942,6 +1942,8 @@ export class Panel {
     const box = this.$("#logview"), pre = this.$("#logtext");
     pre.textContent = "Reading the log…";
     box.hidden = false;
+    // (the focus in the dialog: Esc reaches the panel's keys and closes it, the menu that opened it being gone)
+    box.querySelector<HTMLElement>("[data-close]")?.focus();
     const text = await this.ev.onLog?.().catch((e: unknown) => `Couldn't read the log: ${e instanceof Error ? e.message : String(e)}`);
     pre.textContent = text ?? "No log yet: the first build hasn't finished.";
   }
