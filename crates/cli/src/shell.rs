@@ -55,7 +55,11 @@ impl ProcessHook {
 static CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Whether reading a file moves its access time here (not `noatime`):
-/// probed once, on a file of the process's own.
+/// probed once, on a file of the process's own, read as this process
+/// reads and as a command reads it (`cat` copying it: coreutils copies
+/// with `copy_file_range`, which leaves the access time alone on some
+/// file systems, overlayfs among them, so a command's reads there are
+/// not seen and the files it read would be taken for unread).
 fn atime_moves() -> bool {
     static MOVES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *MOVES.get_or_init(|| {
@@ -66,7 +70,18 @@ fn atime_moves() -> bool {
             std::fs::write(&p, b"probe")?;
             unread(&p)?;
             let _ = std::fs::read(&p)?;
-            Ok(was_read(&p))
+            if !was_read(&p) {
+                return Ok(false);
+            }
+            unread(&p)?;
+            let copied = std::process::Command::new("/bin/sh")
+                .args(["-c", "cat probe > copy"])
+                .current_dir(&d)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?;
+            Ok(copied.success() && was_read(&p))
         })()
         .unwrap_or(false);
         let _ = std::fs::remove_dir_all(&d);
