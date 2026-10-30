@@ -731,6 +731,7 @@ impl Server {
                         (t > 0).then(|| d * 100 / t),
                     )
                 }
+                Phase::Format => ("Making the format, once per PhiTeX update".to_owned(), None),
                 Phase::Typesetting => {
                     let message = if p.pass > 1 {
                         format!("Typesetting page {} (pass {})", p.pages.max(1), p.pass)

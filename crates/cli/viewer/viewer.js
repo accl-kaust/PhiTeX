@@ -1452,6 +1452,7 @@ function opening(box, fill, bg) {
 
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
+var MAKING = "Making the format, once per PhiTeX update";
 var OVERLEAF_WORDS = {
   badge: "Unofficial \xB7 experimental",
   badgeTitle: "An unofficial extension, not part of Overleaf. PhiTeX runs LaTeX (pdfTeX) in your browser; Overleaf's PDF is the real one.",
@@ -1895,9 +1896,12 @@ var Panel = class {
   }
   /** A streamed open's pages so far (before the first: the sheet's step; after: the status's page). */
   streamed;
+  /** The engine makes the format (not cached: once per PhiTeX update), before the document. */
+  making = false;
   streaming(s) {
     this.streamed = s ? s.pages : void 0;
-    if (s && this.firstPending()) this.step(this.words.steps[2], void 0, `Page ${s.pages + 1}`);
+    this.making = s?.phase === "format";
+    if (s && this.firstPending()) this.step(this.words.steps[2], void 0, this.making ? MAKING : `Page ${s.pages + 1}`);
     this.activity();
   }
   busy(on) {
@@ -1923,7 +1927,7 @@ var Panel = class {
     if (this.ownBar) return;
     if (long && this.words.preparing) {
       const s = (now - (this.buildSince || this.prepSince)) / 1e3 | 0;
-      const what = this.built ? this.words.updating ?? "Updating the other pages\u2026" : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Typesetting\u2026";
+      const what = this.making ? `${MAKING}\u2026` : this.built ? this.words.updating ?? "Updating the other pages\u2026" : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Typesetting\u2026";
       this.toast("build", { title: what, detail: s >= 2 ? `${s} s` : "", pct: null, icon: "refresh" });
     } else if (this.toastKind === "build") this.toast("build", null);
   }
@@ -1938,7 +1942,7 @@ var Panel = class {
     else if (this.pkgNow) t = "Fetching packages\u2026", m = `${this.pkgNow.done} of ${this.pkgNow.total}`;
     else if (running) {
       const s = (now - (this.buildSince || this.prepSince)) / 1e3;
-      t = this.built ? "Building\u2026" : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Building\u2026";
+      t = this.making ? `${MAKING}\u2026` : this.built ? "Building\u2026" : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Building\u2026";
       m = s >= 1 ? `${s < 10 ? s.toFixed(1) : Math.round(s)} s` : "";
     } else if (this.warm) t = "Preparing instant typing\u2026", m = `${Math.round((Date.now() - this.warm.since) / 1e3)} s`;
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet", err = !!errs;

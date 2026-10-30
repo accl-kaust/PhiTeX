@@ -301,7 +301,11 @@ fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -
         let at = match (page, live.pages_before) {
             // (no piece has started: the format and the preamble load,
             // which are not counted as the document's runs)
-            (0, _) if total == 0 => "loading the format and the preamble".to_owned(),
+            (0, _) if p.format() == Some(false) => {
+                "making the format (once per PhiTeX update)".to_owned()
+            }
+            (0, _) if p.format().is_none() => "loading the format".to_owned(),
+            (0, _) if total == 0 => "loading the preamble".to_owned(),
             (0, _) => "before the first page".to_owned(),
             (n, 0) => format!("page {n}"),
             (n, m) => format!("page {n} of {m}"),

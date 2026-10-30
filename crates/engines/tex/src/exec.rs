@@ -164,6 +164,19 @@ pub struct Progress {
     /// The evaluations begun (the first 1).
     evaluations: AtomicU64,
     on_page: OnceLock<PageHook>,
+    /// The format: 0 not yet known, 1 being made, 2 ready
+    /// ([`Progress::format`]).
+    format: AtomicU64,
+    on_format: OnceLock<FormatHook>,
+}
+
+/// What is told of the format ([`Progress::on_format`]).
+pub struct FormatHook(Box<dyn Fn(bool) + Send + Sync>);
+
+impl std::fmt::Debug for FormatHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FormatHook")
+    }
 }
 
 /// What is told of a new page: the evaluation (as
@@ -192,6 +205,35 @@ impl Progress {
             page: AtomicU64::new(0),
             evaluations: AtomicU64::new(0),
             on_page: OnceLock::new(),
+            format: AtomicU64::new(0),
+            on_format: OnceLock::new(),
+        }
+    }
+
+    /// `hook(ready)` called on the building thread when the format is
+    /// found not cached and is being made (false), and when it is ready,
+    /// made or read (true), before the document's first evaluation (once
+    /// per progress: whether it was set).
+    pub fn on_format(&self, hook: Box<dyn Fn(bool) + Send + Sync>) -> bool {
+        self.on_format.set(FormatHook(hook)).is_ok()
+    }
+
+    /// The format: `None` not yet known, `Some(false)` being made,
+    /// `Some(true)` ready.
+    #[must_use]
+    pub fn format(&self) -> Option<bool> {
+        match self.format.load(Ordering::Relaxed) {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
+
+    /// The format is being made (`ready` false) or is ready.
+    pub(crate) fn note_format(&self, ready: bool) {
+        self.format.store(if ready { 2 } else { 1 }, Ordering::Relaxed);
+        if let Some(h) = self.on_format.get() {
+            (h.0)(ready);
         }
     }
 

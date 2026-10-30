@@ -26,6 +26,8 @@ import { opening, type Opening } from "./opening.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
+/** What the status says while the engine makes the format (not cached: once per PhiTeX update). */
+const MAKING = "Making the format, once per PhiTeX update";
 
 /** The diff bar's state (Panel.diffBar). */
 export interface DiffBar {
@@ -679,9 +681,12 @@ export class Panel {
 
   /** A streamed open's pages so far (before the first: the sheet's step; after: the status's page). */
   private streamed: number | undefined;
+  /** The engine makes the format (not cached: once per PhiTeX update), before the document. */
+  private making = false;
   streaming(s: { pages: number; phase: string } | null): void {
     this.streamed = s ? s.pages : undefined;
-    if (s && this.firstPending()) this.step(this.words.steps[2], undefined, `Page ${s.pages + 1}`);
+    this.making = s?.phase === "format";
+    if (s && this.firstPending()) this.step(this.words.steps[2], undefined, this.making ? MAKING : `Page ${s.pages + 1}`);
     this.activity();
   }
 
@@ -711,7 +716,7 @@ export class Panel {
     if (this.ownBar) return;
     if (long && this.words.preparing) {
       const s = ((now - (this.buildSince || this.prepSince)) / 1000) | 0;
-      const what = this.built ? (this.words.updating ?? "Updating the other pages…") : this.streamed ? `Typesetting page ${this.streamed + 1}…` : "Typesetting…";
+      const what = this.making ? `${MAKING}…` : this.built ? (this.words.updating ?? "Updating the other pages…") : this.streamed ? `Typesetting page ${this.streamed + 1}…` : "Typesetting…";
       this.toast("build", { title: what, detail: s >= 2 ? `${s} s` : "", pct: null, icon: "refresh" });
     } else if (this.toastKind === "build") this.toast("build", null);
   }
@@ -727,7 +732,7 @@ export class Panel {
     else if (this.pkgNow) (t = "Fetching packages…"), (m = `${this.pkgNow.done} of ${this.pkgNow.total}`);
     else if (running) {
       const s = (now - (this.buildSince || this.prepSince)) / 1000;
-      t = this.built ? "Building…" : this.streamed ? `Typesetting page ${this.streamed + 1}…` : "Building…";
+      t = this.making ? `${MAKING}…` : this.built ? "Building…" : this.streamed ? `Typesetting page ${this.streamed + 1}…` : "Building…";
       m = s >= 1 ? `${s < 10 ? s.toFixed(1) : Math.round(s)} s` : "";
     } else if (this.warm) (t = "Preparing instant typing…"), (m = `${Math.round((Date.now() - this.warm.since) / 1000)} s`);
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) (t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet"), (err = !!errs);

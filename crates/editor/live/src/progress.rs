@@ -26,6 +26,9 @@ pub const THROTTLE: Duration = Duration::from_millis(100);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Fetching,
+    /// The format made (not cached: once per PhiTeX update), before the
+    /// document.
+    Format,
     Typesetting,
 }
 
@@ -33,6 +36,7 @@ impl Phase {
     pub fn name(self) -> &'static str {
         match self {
             Phase::Fetching => "fetching",
+            Phase::Format => "format",
             Phase::Typesetting => "typesetting",
         }
     }
@@ -97,6 +101,8 @@ struct State {
     told: Option<Instant>,
     done: u64,
     total: u64,
+    /// The format is being made ([`Meter::format`]).
+    making: bool,
 }
 
 /// The session's progress: the records made and given to every
@@ -148,6 +154,33 @@ impl Meter {
             base: evaluations,
             ..State::default()
         };
+    }
+
+    /// The format is being made (`ready` false: told), or is ready (told
+    /// as typesetting from no page, if its making was told).
+    pub fn format(&self, ready: bool) {
+        let mut s = lock(&self.state);
+        let phase = if ready {
+            if !s.making {
+                return;
+            }
+            s.making = false;
+            Phase::Typesetting
+        } else {
+            s.making = true;
+            Phase::Format
+        };
+        let p = Progress {
+            phase,
+            pass: s.pass.max(1),
+            pages: 0,
+            name: None,
+            pack: None,
+            done: None,
+            total: None,
+        };
+        drop(s);
+        self.tell(&p);
     }
 
     /// The engine's page hook for `progress` ([`phitex_tex::Progress::on_page`]):
@@ -248,6 +281,27 @@ mod tests {
         assert_eq!(
             lock(&got).last().unwrap().event(),
             json!({"event": "progress", "phase": "typesetting", "pass": 2, "pages": 2})
+        );
+    }
+
+    /// A format made is told as such, and its end as typesetting from no
+    /// page; a format read from the cache tells nothing.
+    #[test]
+    fn a_format_made_is_told_until_ready() {
+        let m = Meter::default();
+        let got = collect(&m);
+        m.build_begins(0);
+        m.format(true);
+        assert!(lock(&got).is_empty());
+        m.format(false);
+        m.format(true);
+        let g: Vec<Value> = lock(&got).iter().map(Progress::event).collect();
+        assert_eq!(
+            g,
+            [
+                json!({"event": "progress", "phase": "format", "pass": 1, "pages": 0}),
+                json!({"event": "progress", "phase": "typesetting", "pass": 1, "pages": 0})
+            ]
         );
     }
 

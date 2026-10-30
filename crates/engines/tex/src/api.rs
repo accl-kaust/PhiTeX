@@ -5189,6 +5189,10 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         }
         Err(known) => known,
     };
+    // (made here: the host says so while it is, `Progress::on_format`)
+    if let Some(p) = &opts.progress {
+        p.note_format(false);
+    }
     let t_check = t_start.elapsed();
     let m_check = mem_mb();
     let finder = opts.prelude_finder();
@@ -5607,6 +5611,9 @@ impl Build {
     pub fn with(opts: Options, prelude: Option<&str>, document: &str) -> Build {
         let t0 = std::time::Instant::now();
         let cached = prelude_env(prelude, &opts);
+        if let Some(p) = &opts.progress {
+            p.note_format(true);
+        }
         let t_env = t0.elapsed();
         crate::timeline::lap("engine: the format loaded (its environment)");
         let env = cached.env.clone();

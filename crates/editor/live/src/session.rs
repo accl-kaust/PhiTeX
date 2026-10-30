@@ -92,6 +92,14 @@ impl Status {
         }
     }
 
+    /// The phase running named `phase` from now on, its time kept.
+    pub fn relabel(&self, phase: impl Into<String>) {
+        let mut p = self.now.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((name, _)) = &mut p.current {
+            *name = phase.into();
+        }
+    }
+
     pub fn phase(&self) -> String {
         self.now
             .lock()
@@ -765,6 +773,9 @@ impl Session {
                 b.absorb_pending();
                 phitex_tex::timeline::lap("engine: the rest of the edit");
             } else {
+                // (the format phase lasts until the engine has it, read
+                // from the cache or made: the engine says when,
+                // `Progress::on_format`, and the document's phase begins)
                 self.status.set("format");
                 let (prelude, cached) = self.prelude()?;
                 phitex_tex::timeline::lap("session: the format found, read from the cache");
@@ -772,23 +783,23 @@ impl Session {
                 // until the kernel is fast, so a longer time limit for it;
                 // none would leave a stuck evaluation running for ever)
                 let first = prelude.is_some() && cached.is_none();
-                // (the format is built in the same evaluation as the
-                // document, so this phase's time is both; it is built again
-                // whenever the engine's sources changed, its cache key)
-                self.status.set(if first {
-                    format!(
-                        "engine · {} format rebuilt (once per PhiTeX update)",
-                        self.job.engine.name
-                    )
-                } else {
-                    "engine".to_owned()
-                });
                 let workers = threads(self.job.threads);
                 let xe = self.job.engine.xetex();
                 let progress = Arc::new(phitex_tex::Progress::new(workers));
                 // (its pages the session's progress records)
                 self.status.meter().build_begins(0);
                 self.status.meter().watch(&progress);
+                {
+                    let (status, made) = (self.status.clone(), format!("{} format, made", self.job.engine.name));
+                    progress.on_format(Box::new(move |ready| {
+                        if ready {
+                            status.set("engine");
+                        } else {
+                            status.relabel(made.as_str());
+                        }
+                        status.meter().format(ready);
+                    }));
+                }
                 self.host.progress(&progress);
                 self.status.set_live(Some(live(progress.clone())));
                 let xetex = if xe {
