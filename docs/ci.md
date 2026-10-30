@@ -33,7 +33,7 @@ no merge waits on them.
 
 | shard | what |
 |---|---|
-| build | the release CLI and the workspace's test binaries, passed to the other shards as an artifact |
+| build | the release CLI and phitex-tex's test binaries, passed to the other shards as an artifact; build-tests, a job beside it, the tests shard's binaries |
 | suites | phitex-tex's pdftex, edits, pages, plain, etex, hints and inputs suites |
 | latex 1..4 | the latex target's tests, dealt out |
 | tests | every other test binary: each crate's integration tests (the CLI's, on TeX Live, one at a time) and phitex-live's unit tests |

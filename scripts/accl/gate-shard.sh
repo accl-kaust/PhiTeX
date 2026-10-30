@@ -320,34 +320,49 @@ case $shard in
     cache_off
     ;;
   build)
-    # (the test binaries and the CLI in their own target directories,
-    # side by side: one cargo would hold the other's lock)
+    # build [PARTS]: main (the CLIs and phitex-tex's suites and latex
+    # test binaries), tests (the tests shard's binaries), both unless
+    # named: GitHub builds them in two jobs at once
+    parts=" ${*:-main tests} "
+    # (each in its own target directory, side by side: one cargo would
+    # hold the other's lock)
     cache_on
-    a=()
-    for s in latex $SUITES; do a+=(--test "$s"); done
-    # (and the PDF writer's update test, which reads back a watch's
-    # update files: the para and big shards run it on theirs)
-    # (then, with the same features, every other crate's integration tests
-    # and phitex-live's unit tests: the tests shard's, build-wtests.json)
-    W="cargo test --profile fastdev --features phitex-tex/profile,phitex-tex/observe --no-run --message-format=json-render-diagnostics"
-    ( { $T "${a[@]}" --no-run --message-format=json-render-diagnostics && { [ ! -f crates/output/pdf/tests/update.rs ] || cargo test --profile fastdev -p phitex-pdf --test update --no-run --message-format=json-render-diagnostics; }; } > "$r/build-tests.json" 2> "$r/build-tests.txt" &&
-      { $W --workspace --test '*' && $W -p phitex-live --lib; } > "$r/build-wtests.json" 2>> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
-    # (three CLIs: the checks' (profile and observe: CHECK_READS, the
-    # recordings, amsldoc), the timings' (profile: the acct lines without
-    # the engine's recorder) and the users' (no feature))
-    ( CARGO_TARGET_DIR=$PWD/target-cli cargo build -q --release -p phitex-cli --features phitex-tex/profile,phitex-tex/observe > "$r/build.txt" 2>&1; echo "EXIT $?" >> "$r/build.txt" ) &
-    ( CARGO_TARGET_DIR=$PWD/target-cli-prof cargo build -q --release -p phitex-cli --features phitex-tex/profile > "$r/build-prof.txt" 2>&1; echo "EXIT $?" >> "$r/build-prof.txt" ) &
-    ( CARGO_TARGET_DIR=$PWD/target-cli-rel cargo build -q --release -p phitex-cli > "$r/build-rel.txt" 2>&1; echo "EXIT $?" >> "$r/build-rel.txt" ) &
+    if [[ $parts == *" main "* ]]; then
+      a=()
+      for s in latex $SUITES; do a+=(--test "$s"); done
+      # (and the PDF writer's update test, which reads back a watch's
+      # update files: the para and big shards run it on theirs)
+      ( { $T "${a[@]}" --no-run --message-format=json-render-diagnostics && { [ ! -f crates/output/pdf/tests/update.rs ] || cargo test --profile fastdev -p phitex-pdf --test update --no-run --message-format=json-render-diagnostics; }; } > "$r/build-tests.json" 2> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
+      # (three CLIs: the checks' (profile and observe: CHECK_READS, the
+      # recordings, amsldoc), the timings' (profile: the acct lines without
+      # the engine's recorder) and the users' (no feature))
+      ( CARGO_TARGET_DIR=$PWD/target-cli cargo build -q --release -p phitex-cli --features phitex-tex/profile,phitex-tex/observe > "$r/build.txt" 2>&1; echo "EXIT $?" >> "$r/build.txt" ) &
+      ( CARGO_TARGET_DIR=$PWD/target-cli-prof cargo build -q --release -p phitex-cli --features phitex-tex/profile > "$r/build-prof.txt" 2>&1; echo "EXIT $?" >> "$r/build-prof.txt" ) &
+      ( CARGO_TARGET_DIR=$PWD/target-cli-rel cargo build -q --release -p phitex-cli > "$r/build-rel.txt" 2>&1; echo "EXIT $?" >> "$r/build-rel.txt" ) &
+    fi
+    if [[ $parts == *" tests "* ]]; then
+      # (every crate's integration tests and phitex-live's unit tests, as
+      # `cargo test` builds them: no feature)
+      W="cargo test --profile fastdev --no-run --message-format=json-render-diagnostics"
+      ( { CARGO_TARGET_DIR=$PWD/target-wtests $W --workspace --test '*' && CARGO_TARGET_DIR=$PWD/target-wtests $W -p phitex-live --lib; } > "$r/build-wtests.json" 2> "$r/build-wtests.txt"; echo "EXIT $?" >> "$r/build-wtests.txt" ) &
+    fi
     wait
     built
     cache_off
-    grep -q '^EXIT 0$' "$r/build-tests.txt" || red "build (tests): $(grep -m1 '^error' "$r/build-tests.txt")"
-    grep -q '^EXIT 0$' "$r/build.txt" || red "build (cli): $(grep -m1 '^error' "$r/build.txt")"
-    grep -q '^EXIT 0$' "$r/build-prof.txt" || red "build (cli, profile): $(grep -m1 '^error' "$r/build-prof.txt")"
-    grep -q '^EXIT 0$' "$r/build-rel.txt" || red "build (cli, release): $(grep -m1 '^error' "$r/build-rel.txt")"
+    if [[ $parts == *" main "* ]]; then
+      grep -q '^EXIT 0$' "$r/build-tests.txt" || red "build (tests): $(grep -m1 '^error' "$r/build-tests.txt")"
+      grep -q '^EXIT 0$' "$r/build.txt" || red "build (cli): $(grep -m1 '^error' "$r/build.txt")"
+      grep -q '^EXIT 0$' "$r/build-prof.txt" || red "build (cli, profile): $(grep -m1 '^error' "$r/build-prof.txt")"
+      grep -q '^EXIT 0$' "$r/build-rel.txt" || red "build (cli, release): $(grep -m1 '^error' "$r/build-rel.txt")"
+    fi
+    if [[ $parts == *" tests "* ]]; then
+      grep -q '^EXIT 0$' "$r/build-wtests.txt" || red "build (the tests shard's): $(grep -m1 '^error' "$r/build-wtests.txt")"
+    fi
     if [ $status = green ]; then
-      mkdir -p "$r/store.tmp/tests" "$r/store.tmp/cli" "$r/store.tmp/wtests/bin"
-      python3 -I -c '
+      mkdir -p "$r/store.tmp"
+      if [[ $parts == *" main "* ]]; then
+        mkdir -p "$r/store.tmp/tests" "$r/store.tmp/cli"
+        python3 -I -c '
 import json, os, shutil, sys
 for l in open(sys.argv[1]):
     try:
@@ -356,11 +371,17 @@ for l in open(sys.argv[1]):
         continue
     if m.get("reason") == "compiler-artifact" and m.get("executable") and "test" in m["target"]["kind"]:
         shutil.copy2(m["executable"], os.path.join(sys.argv[2], m["target"]["name"]))' "$r/build-tests.json" "$r/store.tmp/tests"
-      # (the tests shard's binaries, PKG--TARGET, listed with their crates'
-      # directories in list.txt (phitex-tex's suites and latex left out:
-      # their shards run them); the programs they run, where cargo built
-      # them (CARGO_BIN_EXE_*, compiled in), in bin/ and bins.txt)
-      python3 -I -c '
+        cp target-cli/release/phitex "$r/store.tmp/cli/phitex"
+        # (each under the name `phitex`: the CLI is a TeX-compatible
+        # command line under any other name)
+        mkdir -p "$r/store.tmp/cli/prof" "$r/store.tmp/cli/rel"
+        cp target-cli-prof/release/phitex "$r/store.tmp/cli/prof/phitex"
+        cp target-cli-rel/release/phitex "$r/store.tmp/cli/rel/phitex"
+        sed -n 's/^build_s //p' "$r/times.txt" | tee "$r/store.tmp/tests/build_s" > "$r/store.tmp/cli/build_s"
+      fi
+      if [[ $parts == *" tests "* ]]; then
+        mkdir -p "$r/store.tmp/wtests/bin"
+        python3 -I -c '
 import json, os, shutil, sys
 skip = set(sys.argv[3].split())
 root = os.getcwd()
@@ -387,16 +408,10 @@ for l in open(sys.argv[1]):
         bins.append(t["name"] + "\t" + m["executable"])
 open(os.path.join(sys.argv[2], "list.txt"), "w").write("".join(x + "\n" for x in sorted(set(lst))))
 open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in sorted(set(bins))))' "$r/build-wtests.json" "$r/store.tmp/wtests" "latex $SUITES"
-      [ -s "$r/store.tmp/wtests/list.txt" ] || red "build (tests): no test binary for the tests shard"
-      cp target-cli/release/phitex "$r/store.tmp/cli/phitex"
-      # (each under the name `phitex`: the CLI is a TeX-compatible
-      # command line under any other name)
-      mkdir -p "$r/store.tmp/cli/prof" "$r/store.tmp/cli/rel"
-      cp target-cli-prof/release/phitex "$r/store.tmp/cli/prof/phitex"
-      cp target-cli-rel/release/phitex "$r/store.tmp/cli/rel/phitex"
-      sed -n 's/^build_s //p' "$r/times.txt" | tee "$r/store.tmp/tests/build_s" > "$r/store.tmp/cli/build_s"
-      ls -la "$r/store.tmp/tests" "$r/store.tmp/cli" > "$r/store.txt"
-      mv "$r/store.tmp" "$r/store"
+        [ -s "$r/store.tmp/wtests/list.txt" ] || red "build (the tests shard's): no test binary"
+      fi
+      ls -laR "$r/store.tmp" > "$r/store.txt"
+      [ $status = green ] && mv "$r/store.tmp" "$r/store"
     fi
     rm -f "$r/build-tests.json" "$r/build-wtests.json"
     ;;
