@@ -61,7 +61,7 @@ export interface ViewState {
   chip: string;
   chipTitle: string;
   /** The last repaint's keystroke→page time, and when it was (for a flourish). */
-  speed?: { ms: number; at: number };
+  speed?: { ms: number; at: number; first?: boolean };
   sheet: boolean;
   /** Diagnostics: how many, and the worst severity (or ""). */
   diagCount: number;
@@ -189,6 +189,8 @@ export interface PanelOptions {
   outline?: boolean;
   /** The pages' keys (keys.ts: PDF viewers' and vim's, `?` lists them), and `e` for the problems; where the page owns the keyboard (the CLI's), not under an editor. */
   keys?: boolean;
+  /** The feature tips shown by themselves on a first visit (default true; false: only What's new shows them, a demo's first visitors seeing no "New"). */
+  tips?: boolean;
   /** Docked where the host has no toolbar of its own (the CLI's page, VS Code's webview): the panel's header and footer shown. */
   header?: boolean;
   /** The panel's footer (false: the host has its own status bar, the CLI's). */
@@ -273,7 +275,7 @@ export class Panel {
   private url: string | null = null;
   private lastStatus: Status | null = null;
   private listeners: ((s: ViewState) => void)[] = [];
-  private speed?: { ms: number; at: number };
+  private speed?: { ms: number; at: number; first?: boolean };
   private debugOn = false;
   private ev!: PanelEvents;
   /** A page that came while text in the shown one was selected: shown once the selection ends. */
@@ -730,6 +732,7 @@ export class Panel {
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) (t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet"), (err = !!errs);
     else if (!this.last && this.viewer.pages === 0) t = this.stepNow || "Opening…";
     else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (err = true);
+    else if (this.speed?.first) (t = "First build"), (m = `${(this.speed.ms / 1000).toFixed(this.speed.ms < 10000 ? 1 : 0)} s`);
     else (t = "Built"), (m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "");
     text.textContent = t;
     more.textContent = m ? `· ${m}` : "";
@@ -1329,7 +1332,11 @@ export class Panel {
   }
 
   /** The contents and the keys, as the host asked (PanelOptions). */
+  /** The tips shown by themselves (PanelOptions.tips). */
+  private autoTips = true;
+
   private extras(opts: PanelOptions): void {
+    this.autoTips = opts.tips !== false;
     if (opts.header) this.win.classList.add("own-header");
     this.findAndZoom(!!opts.keys);
     if (opts.outline) {
@@ -1642,12 +1649,16 @@ export class Panel {
     this.emit();
   }
 
+  /** Repaints so far: the first is the first build's. */
+  private paints = 0;
+
   /** Kept for hosts that call it: the speed is the bar's status now. */
   speedChip(_on: boolean): void {}
 
   /** A repaint reached the screen, `ms` after its keystroke: the status says how fast. */
   painted(ms: number): void {
-    this.speed = { ms, at: performance.now() };
+    // (the first paint is the first build's: downloads, the format, the whole document; the status says so, not "Built · 14906 ms")
+    this.speed = { ms, at: performance.now(), first: this.paints++ === 0 };
     this.renderStatus();
     this.emit();
   }
@@ -1698,7 +1709,7 @@ export class Panel {
 
   /** The tips not seen yet (`all`: every one, What's new), from the first. */
   private tips(all: boolean): void {
-    if (!this.ownBar || this.prefs.collapsed) return;
+    if (!this.ownBar || this.prefs.collapsed || (!all && !this.autoTips)) return;
     let seen: string[] = [];
     try {
       seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
@@ -1878,7 +1889,7 @@ export class Panel {
       .join("");
     const ms = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
     el.innerHTML =
-      `<h3>${ms ? `Keystroke to page: ${ms}` : "The last build"}</h3>` +
+      `<h3>${this.speed?.first ? `The first build: ${(this.speed.ms / 1000).toFixed(1)} s` : ms ? `Keystroke to page: ${ms}` : "The last build"}</h3>` +
       (rows ? `<table>${rows}</table>` : "") +
       `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
     el.querySelector(".foot")!.textContent = this.lat?.summary ?? "No build yet.";

@@ -1943,6 +1943,7 @@ var Panel = class {
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet", err = !!errs;
     else if (!this.last && this.viewer.pages === 0) t = this.stepNow || "Opening\u2026";
     else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, err = true;
+    else if (this.speed?.first) t = "First build", m = `${(this.speed.ms / 1e3).toFixed(this.speed.ms < 1e4 ? 1 : 0)} s`;
     else t = "Built", m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
     text.textContent = t;
     more.textContent = m ? `\xB7 ${m}` : "";
@@ -2465,7 +2466,10 @@ var Panel = class {
     return b;
   }
   /** The contents and the keys, as the host asked (PanelOptions). */
+  /** The tips shown by themselves (PanelOptions.tips). */
+  autoTips = true;
   extras(opts) {
+    this.autoTips = opts.tips !== false;
     if (opts.header) this.win.classList.add("own-header");
     this.findAndZoom(!!opts.keys);
     if (opts.outline) {
@@ -2744,12 +2748,14 @@ var Panel = class {
     this.$("#sheet").hidden = !(on && !!this.docked);
     this.emit();
   }
+  /** Repaints so far: the first is the first build's. */
+  paints = 0;
   /** Kept for hosts that call it: the speed is the bar's status now. */
   speedChip(_on) {
   }
   /** A repaint reached the screen, `ms` after its keystroke: the status says how fast. */
   painted(ms) {
-    this.speed = { ms, at: performance.now() };
+    this.speed = { ms, at: performance.now(), first: this.paints++ === 0 };
     this.renderStatus();
     this.emit();
   }
@@ -2790,7 +2796,7 @@ var Panel = class {
   tipList = [];
   /** The tips not seen yet (`all`: every one, What's new), from the first. */
   tips(all) {
-    if (!this.ownBar || this.prefs.collapsed) return;
+    if (!this.ownBar || this.prefs.collapsed || !all && !this.autoTips) return;
     let seen = [];
     try {
       seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
@@ -2945,7 +2951,7 @@ var Panel = class {
     const el = this.$("#m-time");
     const rows = this.timingParts().map(([k, v]) => `<tr><td>${esc3(k)}</td><td>${esc3(v)}</td></tr>`).join("");
     const ms = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
-    el.innerHTML = `<h3>${ms ? `Keystroke to page: ${ms}` : "The last build"}</h3>` + (rows ? `<table>${rows}</table>` : "") + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+    el.innerHTML = `<h3>${this.speed?.first ? `The first build: ${(this.speed.ms / 1e3).toFixed(1)} s` : ms ? `Keystroke to page: ${ms}` : "The last build"}</h3>` + (rows ? `<table>${rows}</table>` : "") + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
     el.querySelector(".foot").textContent = this.lat?.summary ?? "No build yet.";
     el.querySelector(".msg").textContent = this.msgText;
   }
