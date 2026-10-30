@@ -106,6 +106,12 @@ impl Edits {
         let file = match a {
             Ask::Painted(us) => return Applied::Painted(us),
             Ask::Rebuild => return Applied::Rebuild,
+            Ask::Transcript => {
+                if let Some(v) = viewer {
+                    v.set_transcript(&s.transcript());
+                }
+                return Applied::Nothing;
+            }
             Ask::Cold => {
                 s.forget_build();
                 return Applied::Cold;

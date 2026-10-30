@@ -888,7 +888,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     phitex_tex::timeline::lap("cli: the cache's summary");
     if let Some(full) = o.report {
         let mut a = crate::report::Report::new(t, o, full);
-        a.build(&s, &r, "cold");
+        a.build(&s, &r, "cold", &r.log_text());
         match a.write(&s, t) {
             Ok(p) => ui.line(&format!(
                 "report: {} · file an issue: {}",

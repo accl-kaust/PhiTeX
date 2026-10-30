@@ -88,8 +88,9 @@ impl Report {
         }
     }
 
-    /// Build `r` of session `s` (`why`: cold, an edit's place) added.
-    pub fn build(&mut self, s: &Session, r: &BuildReport, why: &str) {
+    /// Build `r` of session `s` (`why`: cold, an edit's place; `log`: its
+    /// transcript) added.
+    pub fn build(&mut self, s: &Session, r: &BuildReport, why: &str, log: &str) {
         let mut b = String::new();
         let _ = writeln!(
             b,
@@ -112,9 +113,8 @@ impl Report {
             let first = e.lines().next().unwrap_or_default();
             let _ = writeln!(b, "  error: {first}");
         }
-        let log = r.log_text();
         // (by class and count: the names they cite are the document's)
-        for (class, n, _) in crate::warnings::summarize(&log) {
+        for (class, n, _) in crate::warnings::summarize(log) {
             let _ = writeln!(b, "  warnings: {n} × {class:?}");
         }
         for w in &r.warnings {
@@ -123,7 +123,7 @@ impl Report {
         if let Some(i) = &r.internal {
             let _ = writeln!(b, "  engine's account:\n    {}", i.replace('\n', "\n    "));
         }
-        let read = texlive_files(&log);
+        let read = texlive_files(log);
         if !read.is_empty() {
             let _ = writeln!(b, "  TeX Live files read: {}", read.join(" "));
         }
@@ -131,7 +131,7 @@ impl Report {
             let _ = writeln!(b, "--- {}.log ---\n{log}", s.job.jobname);
         }
         self.builds.push(b);
-        self.log = Some(log);
+        self.log = Some(log.to_owned());
     }
 
     /// Written to `<job>.phitex-report.txt` in the outputs' directory (the

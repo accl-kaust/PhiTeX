@@ -1762,6 +1762,17 @@ impl Session {
         Ok(Written { main, files })
     }
 
+    /// The build's transcript as it is now, the job's `.log` (laid out
+    /// here when a watch's builds skipped it: the viewer's "View log",
+    /// `--report`).
+    #[must_use]
+    pub fn transcript(&self) -> String {
+        self.build
+            .as_ref()
+            .map(|b| b.output_shared().1)
+            .unwrap_or_default()
+    }
+
     /// `JOB.log` written from the build as it is now (a watch's `--log`,
     /// when idle).
     ///

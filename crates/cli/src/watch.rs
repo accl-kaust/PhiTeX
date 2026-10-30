@@ -1086,7 +1086,6 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             };
             origins_due.set(true);
             if let Some(v) = &view {
-                v.set_transcript(&r.log_text());
                 v.built(&b);
                 v.building(false);
             }
@@ -1411,7 +1410,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             eprintln!("watch phases: report {:?}", trep.elapsed());
         }
         if let Some(a) = account.as_mut() {
-            a.build(s, &r, why);
+            // (a watch's builds lay no log out: made here, for the report)
+            a.build(s, &r, why, &s.transcript());
             match a.write(s, t) {
                 Ok(p) if builds == 1 => ui.line(&format!(
                     "report: {} (written again after each build) · file an issue: {}",

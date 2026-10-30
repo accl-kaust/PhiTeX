@@ -1188,9 +1188,19 @@ export class PreviewSession {
   /** The last build's transcript, the job's `.log` (the viewer's "View log"; none: the core has none yet). */
   async log(): Promise<string | null> {
     if (!this.opened) return null;
-    const r = await this.core.request({ op: "log" });
-    const t = r.ok ? r.json?.text : undefined;
-    return typeof t === "string" && t ? t : null;
+    // (made only when asked: the first answer may be "pending", the core's
+    // owner laying it out; asked again until it is there)
+    for (let i = 0; i < 50; i++) {
+      const r = await this.core.request({ op: "log" });
+      if (!r.ok) return null;
+      if (r.json?.pending) {
+        await new Promise((go) => setTimeout(go, 100));
+        continue;
+      }
+      const t = r.json?.text;
+      return typeof t === "string" && t ? t : null;
+    }
+    return null;
   }
 
   /** The place `pos` (UTF-16) in `file`: its line's glyphs highlighted on the page (the page in view first). */

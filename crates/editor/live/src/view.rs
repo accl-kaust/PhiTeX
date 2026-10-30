@@ -99,6 +99,9 @@ pub struct OriginsChanged {
 pub enum Ask {
     /// Build again (the console's Rebuild).
     Rebuild,
+    /// The last build's transcript wanted (the `log` op): made by the
+    /// session's owner and given back with [`Viewer::set_transcript`].
+    Transcript,
     /// Build again from nothing: the session's build dropped, its format
     /// kept (the editor's `phitex.rebuild`).
     Cold,
@@ -188,8 +191,11 @@ pub struct Viewer {
     console: Mutex<(std::collections::VecDeque<Value>, Value)>,
     diff: Mutex<Diff>,
     /// The last build's transcript, the job's `.log` (the `log` op: the
-    /// viewer's "View log"; empty until the host gives one).
-    transcript: Mutex<Arc<str>>,
+    /// viewer's "View log"), and the build it is of ([`Viewer::built`]'s
+    /// count): made only when asked, never on the typing path.
+    transcript: Mutex<(Arc<str>, u64)>,
+    /// The builds announced ([`Viewer::built`]).
+    builds: std::sync::atomic::AtomicU64,
     /// The commits of the project's history (the diff's picker).
     log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
     /// Shows a source place (file, line, column from 1, and the place as
@@ -222,7 +228,8 @@ impl Default for Viewer {
             building: AtomicBool::new(false),
             console: Mutex::new((std::collections::VecDeque::new(), Value::Null)),
             diff: Mutex::new(Diff::default()),
-            transcript: Mutex::new(Arc::from("")),
+            transcript: Mutex::new((Arc::from(""), u64::MAX)),
+            builds: std::sync::atomic::AtomicU64::new(0),
             log: Mutex::new(None),
             goto: Mutex::new(None),
             select: Mutex::new(None),
@@ -468,9 +475,11 @@ impl Viewer {
     }
 
     /// The history the diff's picker lists, from `log(skip, limit)`.
-    /// The last build's transcript (its `.log`), for the `log` op.
+    /// The last build's transcript (its `.log`), for the `log` op: the
+    /// answer to [`Ask::Transcript`].
     pub fn set_transcript(&self, text: &str) {
-        *lock(&self.transcript) = Arc::from(text);
+        let n = self.builds.load(Ordering::Relaxed);
+        *lock(&self.transcript) = (Arc::from(text), n);
     }
 
     pub fn on_log(&self, log: Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>) {
@@ -586,6 +595,7 @@ impl Viewer {
     /// (they draw the pages that changed). The pages (from 1) whose hashes
     /// changed, and how many there are.
     pub fn built(&self, b: &Built) -> (Vec<usize>, usize) {
+        self.builds.fetch_add(1, Ordering::Relaxed);
         let mut pages = lock(&self.pages);
         let changed: Vec<usize> = b
             .hashes
@@ -721,7 +731,17 @@ impl Viewer {
             }
             "text" => ok(json!({"pages": s.text_json()})),
             "outline" => ok(json!({"items": s.outline_json()})),
-            "log" => ok(json!({"text": &*lock(&s.transcript).clone()})),
+            // (the transcript of the last build if it is made, else asked
+            // for: the viewer asks again)
+            "log" => {
+                let (text, of) = lock(&s.transcript).clone();
+                if of == s.builds.load(Ordering::Relaxed) {
+                    ok(json!({"text": &*text}))
+                } else {
+                    s.ask(Ask::Transcript);
+                    ok(json!({"pending": true}))
+                }
+            }
             "set_file" | "edit" => {
                 let file = text("file").unwrap_or_default();
                 let body = text("text").unwrap_or_default();
@@ -971,6 +991,36 @@ mod tests {
     /// A selection on the pages (the `select` op, bytes) reaches the host
     /// as lines and columns, for the editor to select; a name outside the
     /// project is refused.
+    #[test]
+    fn log_op_is_made_when_asked() {
+        let v = Viewer::default();
+        let ask = |id: u64| -> Value {
+            serde_json::from_str(&v.answer(&json!({"id": id, "op": "log"}))).unwrap()
+        };
+        // (none made yet: asked of the session's owner, the viewer told to wait)
+        assert_eq!(ask(1)["json"]["pending"], true);
+        assert_eq!(v.take_asks(), vec![Ask::Transcript]);
+        v.set_transcript("This is pdfTeX\nOutput written on doc.pdf (1 page, 9 bytes).\n");
+        assert!(
+            ask(2)["json"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Output written")
+        );
+        // (a build since: the transcript is the last build's, asked again)
+        v.built(&Built {
+            pdf: None,
+            hashes: Vec::new(),
+            history: 0,
+            ms: 0.0,
+            diagnostics: Vec::new(),
+            since_ms: None,
+            origins: None,
+            changed: None,
+        });
+        assert_eq!(ask(3)["json"]["pending"], true);
+    }
+
     #[test]
     fn select_op() {
         let v = Viewer::default();
