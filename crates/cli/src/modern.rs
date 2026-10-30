@@ -307,6 +307,11 @@ struct Opts {
         hide_short_help = true
     )]
     synctex: bool,
+    /// Write <job>.phitex-report.txt beside the outputs, for a bug report
+    /// (no text of the document; `--report=full` adds the .log and the
+    /// project's sources)
+    #[arg(long, value_name = "full", num_args = 0..=1, require_equals = true, default_missing_value = "", value_parser = ["", "full"], global = true, hide_short_help = true)]
+    report: Option<String>,
     /// No <job>.synctex.gz (the default)
     #[arg(
         long,
@@ -379,6 +384,8 @@ pub struct Options {
     pub files: Option<tex::Files>,
     /// `config`'s key and value.
     pub set: Option<(String, String)>,
+    /// `--report` (true: `=full`).
+    pub report: Option<bool>,
 }
 
 impl Cli {
@@ -445,6 +452,7 @@ impl Cli {
             all,
             files: o.shelf.then_some(tex::Files::Shelf),
             set,
+            report: o.report.map(|v| v == "full"),
         }
     }
 }
@@ -878,6 +886,18 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     phitex_tex::timeline::lap("cli: the records stored");
     cache_summary(t, ui);
     phitex_tex::timeline::lap("cli: the cache's summary");
+    if let Some(full) = o.report {
+        let mut a = crate::report::Report::new(t, o, full);
+        a.build(&s, &r, "cold");
+        match a.write(&s, t) {
+            Ok(p) => ui.line(&format!(
+                "report: {} · file an issue: {}",
+                p.display(),
+                crate::report::ISSUES
+            )),
+            Err(e) => ui.warning(&format!("the report: {e}")),
+        }
+    }
     if !o.lsp && !o.json && !o.quiet {
         crate::upgrade::check(ui);
     }

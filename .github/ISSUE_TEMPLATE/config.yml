@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security problem
+    url: https://github.com/accl-kaust/PhiTeX/blob/main/CONTRIBUTING.md#reporting-a-problem
+    about: A document that escapes the sandbox or reads files it should not. Report it privately, as CONTRIBUTING.md says, not in an issue.

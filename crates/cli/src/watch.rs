@@ -908,6 +908,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (the editor's buffers, as Unicode text, by file name)
     let mut edits = Edits::new(&main_rel, &main_file);
     let mut builds = 0usize;
+    // (`--report`: the session's account, written again after each build)
+    let mut account = o.report.map(|full| crate::report::Report::new(t, o, full));
     // (the last output written without errors, and its PDF for the viewer)
     let mut last_pdf = None;
     let mut last_hashes: Vec<u64> = Vec::new();
@@ -1407,6 +1409,18 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         );
         if phitex_tex::tex_time() {
             eprintln!("watch phases: report {:?}", trep.elapsed());
+        }
+        if let Some(a) = account.as_mut() {
+            a.build(s, &r, why);
+            match a.write(s, t) {
+                Ok(p) if builds == 1 => ui.line(&format!(
+                    "report: {} (written again after each build) · file an issue: {}",
+                    p.display(),
+                    crate::report::ISSUES
+                )),
+                Ok(_) => {}
+                Err(e) => ui.warning(&format!("the report: {e}")),
+            }
         }
         // (the status line: the build's facts, without the colours)
         let mut brief = vec![format!("build {builds}")];

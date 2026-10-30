@@ -2147,6 +2147,48 @@ fn unknown_option_is_named() {
     assert!(err.contains("--frob") && !err.contains("compat"), "{err}");
 }
 
+/// `--report` writes `<job>.phitex-report.txt` beside the outputs: the
+/// build and its problems by file and line, and no text of the document
+/// (TeX's context lines quote it, the warnings' names cite it); `=full`
+/// adds the log and the sources the job read.
+#[test]
+fn report_has_no_document_text() {
+    let dir = scratch("report");
+    std::fs::write(
+        dir.join("doc.tex"),
+        "\\documentclass{article}\n\\begin{document}\nSecretWords \\ref{secretlabel} \\undefinedmacro.\n\\end{document}\n",
+    )
+    .unwrap();
+    let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
+    let out = command(bin, &dir)
+        .args(["build", "--report", "doc.tex"])
+        .output()
+        .expect("phitex runs");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("doc.phitex-report.txt"));
+    let r = std::fs::read_to_string(dir.join("doc.phitex-report.txt")).expect("the report");
+    assert!(
+        r.contains("build 1")
+            && r.contains("doc.tex:3")
+            && r.contains("Undefined control sequence"),
+        "{r}"
+    );
+    for secret in ["SecretWords", "secretlabel", "undefinedmacro"] {
+        assert!(
+            !r.contains(secret),
+            "the report quotes the document ({secret}):\n{r}"
+        );
+    }
+    command(bin, &dir)
+        .args(["build", "--report=full", "doc.tex"])
+        .output()
+        .expect("phitex runs");
+    let r = std::fs::read_to_string(dir.join("doc.phitex-report.txt")).expect("the report");
+    assert!(
+        r.contains("--- doc.log ---") && r.contains("SecretWords"),
+        "{r}"
+    );
+}
+
 /// `--help` is short (the commands, the common options, where the rest
 /// are: the user, 2026-10-30) and `--help-all` sectioned with every option
 /// (commands, options, examples), both plain off a terminal.

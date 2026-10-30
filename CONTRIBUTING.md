@@ -5,13 +5,20 @@ send is a document it gets wrong.
 
 ## Reporting a problem
 
-- **A PDF that differs from pdflatex's is a bug.** Open an issue with the
-  smallest `.tex` file that shows it, the command you ran, and
-  `phitex --version`. Say which TeX Live you compared with.
-- **A crash or an engine failure:** add the failure report phitex prints
-  (it names its file) or the output of the command with `-v`.
-- **Slow builds or edits:** the document (or a public one that behaves
-  the same), the thread count, the machine, and the times you saw.
+- **Run the command again with `--report`** (`phitex build --report
+  paper.tex`, or `phitex watch --report`). It writes
+  `paper.phitex-report.txt` beside your PDF: PhiTeX's version, your
+  machine and settings, each build's time and problems, and the packages
+  loaded, with no text of your document. `--report=full` adds the `.log`
+  and your sources, if you can share them. Attach it to the issue; the
+  [issue templates](https://github.com/accl-kaust/PhiTeX/issues/new/choose)
+  ask for it.
+- **A PDF that differs from pdflatex's is a bug.** Add the smallest `.tex`
+  file that shows it, and say which TeX Live you compared with.
+- **A crash or an engine failure:** phitex also prints the path of a
+  failure report in its cache; attach that too.
+- **Slow builds or edits:** a public document that behaves the same, if
+  you have one.
 - Private documents: don't attach them. Cut them down to a part you can
   share.
 - **Security problems** (a document that escapes the sandbox, runs a
