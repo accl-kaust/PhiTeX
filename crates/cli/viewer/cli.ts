@@ -222,6 +222,7 @@ const panel = new Panel(
     onRebuild: () => void sock.request({ op: "rebuild" }),
     onCompare: () => openPick(),
     onLog: (): Promise<string | null> => session.log(),
+    onBoxes: (file, start, end): Promise<{ k: number; boxes: [number, number, number, number][] }[]> => session.boxesOf(file, start, end),
     onClearCache: () => void clearCache(),
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),

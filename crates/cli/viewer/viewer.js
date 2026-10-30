@@ -764,6 +764,10 @@ header:active { cursor: grabbing; }
 .slot .mark.sel { transition: none; }
 .slot .mark.fnd { background: rgb(255 214 0 / 40%); box-shadow: none; transition: none; }
 .slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); box-shadow: 0 0 0 1px rgb(150 100 0 / 90%); }
+.slot .culprit { position: absolute; pointer-events: none; }
+/* (a problem's culprit: a wavy line along its glyphs' foot, as an editor underlines one; no fill, the text stays readable) */
+.slot .culprit::after { content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 3px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23d93025' stroke-width='1'/%3E%3C/svg%3E") repeat-x left bottom / 6px 3px; }
+.slot .culprit.warning::after { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23c77700' stroke-width='1'/%3E%3C/svg%3E"); }
 .slot .peer { position: absolute; pointer-events: none; border-radius: 2px; background: hsl(var(--hue) 70% 50% / 22%); box-shadow: inset 0 -1.5px 0 hsl(var(--hue) 70% 45%); }
 .slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 5px; border-radius: 3px 3px 3px 0; background: hsl(var(--hue) 70% 42%);
   box-shadow: none; color: #fff; font: 600 11px/16px var(--ph-font); white-space: nowrap; z-index: 2; }
@@ -2039,10 +2043,21 @@ var Panel = class {
   }
   /** The level and line a host's toolbar shows (ViewState's chip). */
   chip = { level: "ok", text: "starting\u2026", title: "Status" };
+  /** The problems' culprits underlined on the pages: the latest status's, a later one replacing an earlier still being looked up. */
+  culpritsSeq = 0;
+  async underline(diags) {
+    if (!this.ev.onBoxes) return;
+    const seq = ++this.culpritsSeq;
+    const want = diags.map((d) => d.problem).filter((p) => !!p?.file && !!p.range && p.severity !== "note").map((p) => ({ file: p.file, range: p.range, severity: p.severity === "warning" ? "warning" : "error" })).sort((a, b) => a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1).slice(0, 20);
+    const found = await Promise.all(want.map((w) => this.ev.onBoxes(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity })), () => [])));
+    if (seq !== this.culpritsSeq) return;
+    this.viewer.culprits(found.flat());
+  }
   status(s) {
     this.lastStatus = s;
     queueMicrotask(() => this.stopped());
     const diags = s.diagnostics ?? [];
+    void this.underline(diags);
     const worst = diags[0]?.severity;
     const partial = !!s.pending || s.pages === 0;
     this.chip = {
@@ -5178,6 +5193,7 @@ var panel = new Panel(
     onRebuild: () => void sock.request({ op: "rebuild" }),
     onCompare: () => openPick(),
     onLog: () => session.log(),
+    onBoxes: (file, start, end) => session.boxesOf(file, start, end),
     onClearCache: () => void clearCache(),
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),

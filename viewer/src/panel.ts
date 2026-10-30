@@ -92,6 +92,8 @@ export interface PanelEvents {
   onCompare?(): void;
   /** Clear the packages and formats kept (the host's cache): absent, not offered. */
   onClearCache?(): void;
+  /** The boxes of [start, end) (bytes) of `file` on the pages (the session's boxesOf): a problem's culprit, underlined. */
+  onBoxes?(file: string, start: number, end: number): Promise<{ k: number; boxes: [number, number, number, number][] }[]>;
   /** The last build's log (the job's .log), or null: absent, no "View log". */
   onLog?(): Promise<string | null>;
   onGoto(file: string, line: number): void;
@@ -845,10 +847,28 @@ export class Panel {
   /** The level and line a host's toolbar shows (ViewState's chip). */
   private chip = { level: "ok", text: "starting…", title: "Status" };
 
+  /** The problems' culprits underlined on the pages: the latest status's, a later one replacing an earlier still being looked up. */
+  private culpritsSeq = 0;
+  private async underline(diags: { problem?: { severity: string; file: string | null; range?: [number, number] } }[]): Promise<void> {
+    if (!this.ev.onBoxes) return;
+    const seq = ++this.culpritsSeq;
+    const want = diags
+      .map((d) => d.problem)
+      .filter((p): p is { severity: string; file: string; range: [number, number] } => !!p?.file && !!p.range && p.severity !== "note")
+      .map((p) => ({ file: p.file, range: p.range, severity: p.severity === "warning" ? ("warning" as const) : ("error" as const) }))
+      .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1))
+      .slice(0, 20);
+    const found = await Promise.all(want.map((w) => this.ev.onBoxes!(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity })), () => [])));
+    // (a newer status came while these were looked up: its own call draws them)
+    if (seq !== this.culpritsSeq) return;
+    this.viewer.culprits(found.flat());
+  }
+
   status(s: Status): void {
     this.lastStatus = s;
     queueMicrotask(() => this.stopped());
     const diags = s.diagnostics ?? [];
+    void this.underline(diags);
     const worst = diags[0]?.severity;
     const partial = !!s.pending || s.pages === 0;
     this.chip = {
