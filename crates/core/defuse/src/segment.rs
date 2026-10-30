@@ -7,7 +7,7 @@
 
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::api::{Brackets, NodeId, OpId, PathId, UnitId};
 use crate::engine::Engine;
@@ -27,6 +27,20 @@ pub(crate) struct Segment {
     /// and the scope count they were found at (`Engine::scope_gen`): apart
     /// from `inner`, so a read of them never waits for a commit.
     pub(crate) chain: crate::lock::Mx<Option<(u64, Arc<[u64]>)>>,
+    /// Counts its moves of labels, bumped as each begins and ends
+    /// ([`Segment::moving`]: a relabel, a split, a rebalance through it),
+    /// under its write lock: a read that met it checks it did not move
+    /// meanwhile (`read::on_one_layout`).
+    pub(crate) moved: AtomicU64,
+}
+
+/// A move of a segment's labels in progress ([`Segment::moving`]).
+pub(crate) struct Moving<'a>(&'a Segment);
+
+impl Drop for Moving<'_> {
+    fn drop(&mut self) {
+        self.0.moved.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 pub(crate) struct Inner {
@@ -1075,6 +1089,7 @@ impl Segment {
             unit,
             lo,
             chain: crate::lock::Mx::new(None),
+            moved: AtomicU64::new(0),
             inner: Lock::new(Inner {
                 brackets: PosMap::Zero,
                 depth_net: 0,
@@ -1138,11 +1153,18 @@ impl Segment {
 
     /// Spreads its nodes' labels evenly over `[lo, hi)`, moving each node's
     /// `pos` and re-keying `nodes`, `defs` and `contribs`. Under the write
-    /// lock, a move ([`Engine::moving`]): a read holding labels from before
+    /// lock, a move ([`Segment::moving`]): a read holding labels from before
     /// it (a fold's bounds, `Ctx::fold_value`) is computed again
     /// (`read::on_one_layout`).
+    /// Marks a move of its labels until the guard drops, under its write
+    /// lock (`Segment::moved`).
+    pub(crate) fn moving(&self) -> Moving<'_> {
+        self.moved.fetch_add(1, Ordering::AcqRel);
+        Moving(self)
+    }
+
     pub(crate) fn relabel(&self, inner: &mut Inner, eng: &Engine) {
-        let _moving = eng.moving();
+        let _moving = self.moving();
         let t_held = std::time::Instant::now();
         let n = inner.nodes.len() as u64;
         let width = inner.hi.0 - self.lo.0;
@@ -1320,7 +1342,7 @@ impl Segment {
     /// of the labels instead of half of them at every split.
     pub(crate) fn split(&self, inner: &mut Inner, eng: &Engine, new_id: SegId) -> Arc<Segment> {
         // (a move: the lower half relabelled, the upper moved out)
-        let _moving = eng.moving();
+        let _moving = self.moving();
         let k = inner.nodes.len() / 2;
         let mid = *inner.nodes.keys().nth(k).expect("a segment to split has nodes");
         let step = ((mid.0 - self.lo.0) / (k as u64 + 1)).min(crate::order::GAP);
@@ -1358,7 +1380,7 @@ impl Segment {
     /// `split`, at label `at`: the new segment is `[at, hi)`.
     pub(crate) fn split_at(&self, inner: &mut Inner, eng: &Engine, at: Pos, new_id: SegId) -> Arc<Segment> {
         // (a move: the nodes at and after `at` change segment)
-        let _moving = eng.moving();
+        let _moving = self.moving();
         let hi = inner.hi;
         inner.hi = at;
         let nodes = inner.nodes.split_off(&at);
@@ -1427,6 +1449,7 @@ impl Segment {
             unit: self.unit,
             lo: at,
             chain: crate::lock::Mx::new(None),
+            moved: AtomicU64::new(0),
             inner: Lock::new(Inner {
                 brackets,
                 depth_net: 0,

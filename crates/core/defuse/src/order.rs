@@ -180,8 +180,9 @@ impl Order {
             }
             let asking = ids.iter().position(|&x| x == seg).expect("the asking segment");
             {
-                // (a move: under the window's locks, ended before them)
-                let _moving = eng.moving();
+                // (a move of every segment of the window: under their
+                // locks, ended before them)
+                let _moving: Vec<_> = win.iter().map(|x| x.moving()).collect();
                 self.spread(eng, &win, &mut gs, n, asking, more);
             }
             let hi = gs[gs.len() - 1].hi;

@@ -73,7 +73,7 @@ pub(crate) fn env_value(eng: &Engine, f: Field) -> Option<ValueId> {
 /// starting at `lo`, else the environment.
 fn before_segment(eng: &Engine, f: Field, lo: Pos) -> Reaching {
     let mut lo = lo;
-    while let Some(s) = eng.defs.last_before(f, lo) {
+    while let Some(s) = last_def_before(eng, f, lo) {
         let seg = eng.seg(s);
         {
             let inner = seg.inner.read();
@@ -114,32 +114,122 @@ pub(crate) fn reaching(eng: &Engine, f: Field, at: Pos, inclusive: bool) -> Reac
 
 /// `reaching` at a node's label, read under its segment's lock, under
 /// scopes ([`reaching_visible`]); None when the node is gone.
-/// `f` computed on one layout of the line's labels: begun with no move of
-/// labels in progress, and computed again while one began meanwhile
-/// ([`Engine::moving`]: a relabel, a split, a rebalance). A read that
-/// takes labels (a fold's bounds, a search's start) and then looks
-/// between them in segments locked one at a time would otherwise answer
-/// for a range the line never had: the labels taken before a relabel,
-/// the segments looked into after it (issue #5: a finisher read its
-/// page's window across a relabel as empty, filed that, and shipped no
-/// page). Waits only for a move, which waits for nothing.
+/// What a read on one layout met ([`on_one_layout`]): a segment, with its
+/// count of moves then ([`Segment::moved`]); a field index's answer, which
+/// segments before a label define a field or which between two labels
+/// contribute to it (the answer's hash).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Met {
+    Seg(SegId, u64),
+    LastDef(Field, Pos, Option<SegId>),
+    Contributors(Field, Pos, Pos, u64),
+}
+
+thread_local! {
+    /// What the reads on one layout running on this thread met, innermost
+    /// last ([`on_one_layout`]).
+    static MET: std::cell::RefCell<Vec<Met>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many reads on one layout are running on this thread.
+    static WATCHING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// (tests) The reads on one layout computed again on this thread.
+    static RETRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Segment `s` met (`Engine::seg`), noted while a read on one layout runs.
+#[inline]
+pub(crate) fn met(s: &Segment) {
+    if WATCHING.get() != 0 {
+        let e = s.moved.load(Ordering::Acquire);
+        MET.with_borrow_mut(|m| m.push(Met::Seg(s.id, e)));
+    }
+}
+
+/// The last segment before `lo` defining `f` (the field index), noted
+/// while a read on one layout runs.
+fn last_def_before(eng: &Engine, f: Field, lo: Pos) -> Option<SegId> {
+    let s = eng.defs.last_before(f, lo);
+    if WATCHING.get() != 0 {
+        MET.with_borrow_mut(|m| m.push(Met::LastDef(f, lo, s)));
+    }
+    s
+}
+
+/// The segments in `[from, to)` contributing to `f` (the field index),
+/// noted while a read on one layout runs.
+fn contributors(eng: &Engine, f: Field, from: Pos, to: Pos) -> Vec<SegId> {
+    let ss = eng.contribs.between(f, from, to);
+    if WATCHING.get() != 0 {
+        let h = segs_hash(&ss);
+        MET.with_borrow_mut(|m| m.push(Met::Contributors(f, from, to, h)));
+    }
+    ss
+}
+
+fn segs_hash(ss: &[SegId]) -> u64 {
+    ss.iter()
+        .fold(crate::values::hash_words(0, &[ss.len() as u64]), |h, s| {
+            crate::values::hash_words(h, &[u64::from(s.0)])
+        })
+}
+
+/// Whether what a read met has not moved since: the segment's count is
+/// the same, the index answers the same. (A move between segments the
+/// index names alike moves a segment the read met, or meets one after
+/// it, whose index answer the move had already changed when it was let
+/// go.)
+fn stands(eng: &Engine, m: &Met) -> bool {
+    match *m {
+        Met::Seg(id, e) => eng.seg_unmet(id).moved.load(Ordering::Acquire) == e,
+        Met::LastDef(f, lo, s) => eng.defs.last_before(f, lo) == s,
+        Met::Contributors(f, from, to, h) => segs_hash(&eng.contribs.between(f, from, to)) == h,
+    }
+}
+
+/// (tests) The reads on one layout computed again on this thread so far.
+#[cfg(test)]
+pub(crate) fn retries() -> u64 {
+    RETRIES.get()
+}
+
+/// Ends a read's watch however it ends.
+struct Watch;
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        WATCHING.set(WATCHING.get() - 1);
+    }
+}
+
+/// `f` computed on one layout of the line's labels: what it met (each
+/// segment it took labels from or looked into, each field index it asked
+/// which segments hold a field) did not move while it ran, else it is
+/// computed again. A read that takes labels (a fold's bounds, a search's
+/// start) and then looks between them in segments locked one at a time
+/// would otherwise answer for a range the line never had: the labels taken
+/// before a relabel, the segments looked into after it (issue #5: a
+/// finisher read its page's window across a relabel as empty, filed that,
+/// and shipped no page). A move bumps only the counts of the segments it
+/// moves (under their locks): a read meeting none of them, whose index
+/// answers stand, is never computed again, and nothing waits.
 pub(crate) fn on_one_layout<T>(eng: &Engine, mut f: impl FnMut() -> T) -> T {
-    let mut spins = 0u32;
     loop {
-        let g = eng.label_gen.load(Ordering::SeqCst);
-        if eng.moves.load(Ordering::SeqCst) != 0 {
-            spins += 1;
-            if spins.is_multiple_of(64) {
-                std::thread::yield_now();
-            } else {
-                std::hint::spin_loop();
+        let start = MET.with_borrow(Vec::len);
+        WATCHING.set(WATCHING.get() + 1);
+        let x = {
+            let _w = Watch;
+            f()
+        };
+        let ok = MET.with_borrow(|m| m[start..].iter().all(|x| stands(eng, x)));
+        if ok {
+            // (an outer read checks what this one met too)
+            if WATCHING.get() == 0 {
+                MET.with_borrow_mut(Vec::clear);
             }
-            continue;
-        }
-        let x = f();
-        if eng.label_gen.load(Ordering::SeqCst) == g {
             return x;
         }
+        MET.with_borrow_mut(|m| m.truncate(start));
+        RETRIES.set(RETRIES.get() + 1);
+        std::hint::spin_loop();
     }
 }
 
@@ -274,7 +364,7 @@ pub(crate) fn fold(eng: &Engine, f: Field, from: Option<Pos>, to: Option<Pos>) -
         None => Pos(0),
     };
     let end = ts.as_ref().map_or(Pos(u64::MAX), |s| s.lo);
-    for sid in eng.contribs.between(f, start, end) {
+    for sid in contributors(eng, f, start, end) {
         let s = eng.seg(sid);
         let x = segment_part(eng, &*mono, s, f, None, None);
         acc = mono.combine(v, acc, x);
@@ -656,19 +746,27 @@ pub(crate) fn answer(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId) -> 
 }
 
 /// The folds one pass of answers computed, by range: a node's reads
-/// through many paths of one range fold it once.
-/// Keyed by the layout too (`Engine::label_gen`): a range's labels name
-/// other nodes after a move.
-pub(crate) type FoldMemo = Vec<((Field, Pos, Pos, u64), ValueId)>;
+/// through many paths of one range fold it once. Each with what it met
+/// ([`on_one_layout`]): a range's labels name other nodes once one of
+/// those moved.
+pub(crate) type FoldMemo = Vec<((Field, Pos, Pos), ValueId, Box<[Met]>)>;
 
-/// `fold`, from `memo` where this pass computed it on this layout.
+/// `fold`, from `memo` where this pass computed it and nothing it met
+/// moved since; what that met is met again by the read asking.
 pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut FoldMemo) -> ValueId {
-    let key = (f, from, to, eng.label_gen.load(Ordering::SeqCst));
-    if let Some(e) = memo.iter().find(|e| e.0 == key) {
+    if WATCHING.get() == 0 {
+        return fold(eng, f, Some(from), Some(to));
+    }
+    let key = (f, from, to);
+    if let Some(e) = memo.iter().find(|e| e.0 == key && e.2.iter().all(|m| stands(eng, m))) {
+        MET.with_borrow_mut(|m| m.extend_from_slice(&e.2));
         return e.1;
     }
+    let start = MET.with_borrow(Vec::len);
     let x = fold(eng, f, Some(from), Some(to));
-    memo.push((key, x));
+    let seen: Box<[Met]> = MET.with_borrow(|m| m[start..].into());
+    memo.retain(|e| e.0 != key);
+    memo.push((key, x, seen));
     x
 }
 
@@ -917,7 +1015,7 @@ pub(crate) fn final_read(eng: &Engine, f: Field) -> Reaching {
 /// the back of the document left.
 pub(crate) fn last_definition(eng: &Engine, f: Field) -> Reaching {
     let mut lo = Pos(u64::MAX);
-    while let Some(s) = eng.defs.last_before(f, lo) {
+    while let Some(s) = last_def_before(eng, f, lo) {
         let seg = eng.seg(s);
         if let Some((_, d)) = seg.inner.read().defs.get(&f).and_then(|m| m.iter().next_back()) {
             return Reaching::of(&d.plain(&eng.values));
@@ -1157,7 +1255,7 @@ fn last_visible(ls: &[(Pos, Def, (usize, u64))], target: &[u64]) -> Option<Def> 
 /// field index, the last one visible to `target`; else the environment.
 fn visible_before(eng: &Engine, f: Field, target: &[u64], lo: Pos) -> Reaching {
     let mut lo = lo;
-    while let Some(s) = eng.defs.last_before(f, lo) {
+    while let Some(s) = last_def_before(eng, f, lo) {
         let seg = eng.seg(s);
         let start = chain_start(eng, seg);
         {
@@ -1346,27 +1444,23 @@ mod tests {
         }
     }
 
-    /// A fold read takes its bounds' labels and then folds the segments
-    /// between them, each under its own lock, as a run's read does
-    /// (`Ctx::fold_value`) and a commit's check of it (`answer`): while
-    /// another thread rebalances the segments and fills gaps in them,
-    /// relabelling and moving nodes, every answer is the fold of the range as the
-    /// line has it, never one over labels a move took away (issue #5: a
-    /// finisher read its page's window empty across a relabel, the read
-    /// filed as it was, and the page never shipped: objstm a page short in
-    /// 7 of 1800 runs at 64 threads).
-    #[test]
-    fn a_fold_read_while_labels_move_answers_the_range_the_line_has() {
+    /// The answers of fold reads over ranges of unit `reads` while another
+    /// thread moves the labels of unit `moved` for 2 s (rebalancing its
+    /// segments and filling gaps in them, relabelling and moving nodes
+    /// between segments): how many reads, how many wrong, how many moves,
+    /// and how many reads were computed again (`on_one_layout`).
+    fn reads_while_moving(both_units: bool) -> (u64, u64, usize, u64) {
         let e = Arc::new(Engine::new());
         let f = e.values().field("acc");
         let op = e.register(Arc::new(Contrib(f)));
         let idle = e.register(Arc::new(Idle));
-        let u = e.new_unit();
-        let ids: Vec<NodeId> = (0..4000).map(|i| e.push(u, op, vec![e.values().int(i)])).collect();
+        let (u, w) = (e.new_unit(), e.new_unit());
+        let ids: Vec<NodeId> = (0..3000).map(|i| e.push(u, op, vec![e.values().int(i)])).collect();
+        let others: Vec<NodeId> = (0..3000).map(|i| e.push(w, op, vec![e.values().int(i)])).collect();
         e.evaluate(1).expect("the contributions filed");
         let ranges: Vec<(NodeId, NodeId)> = (0..64)
             .map(|k| {
-                let a = (k * 61) % 3900;
+                let a = (k * 61) % 2900;
                 (ids[a], ids[a + 1 + (k * 13) % 90])
             })
             .collect();
@@ -1383,7 +1477,8 @@ mod tests {
             .collect();
         let stop = Arc::new(AtomicBool::new(false));
         let mover = {
-            let (e, stop, ids) = (Arc::clone(&e), Arc::clone(&stop), ids.clone());
+            let (e, stop) = (Arc::clone(&e), Arc::clone(&stop));
+            let ids = if both_units { ids.clone() } else { others.clone() };
             std::thread::spawn(move || {
                 let mut k = 0usize;
                 while !stop.load(Ordering::Acquire) {
@@ -1405,6 +1500,7 @@ mod tests {
                 k
             })
         };
+        let retries0 = super::retries();
         let t0 = Instant::now();
         let (mut reads, mut wrong) = (0u64, 0u64);
         while t0.elapsed() < Duration::from_secs(2) {
@@ -1417,7 +1513,41 @@ mod tests {
         }
         stop.store(true, Ordering::Release);
         let moves = mover.join().expect("the moving thread");
+        (reads, wrong, moves, super::retries() - retries0)
+    }
+
+    /// A fold read takes its bounds' labels and then folds the segments
+    /// between them, each under its own lock, as a run's read does
+    /// (`Ctx::fold_value`) and a commit's check of it (`answer`): while
+    /// another thread rebalances the segments and fills gaps in them,
+    /// relabelling and moving nodes, every answer is the fold of the range
+    /// as the line has it, never one over labels a move took away (issue
+    /// #5: a finisher read its page's window empty across a relabel, the
+    /// read filed as it was, and the page never shipped: objstm a page
+    /// short in 7 of 1800 runs at 64 threads).
+    #[test]
+    fn a_fold_read_while_labels_move_answers_the_range_the_line_has() {
+        let (reads, wrong, moves, retries) = reads_while_moving(true);
         assert!(moves > 0, "no move during {reads} reads");
-        assert_eq!(wrong, 0, "{wrong} of {reads} fold reads wrong during {moves} moves");
+        assert_eq!(
+            wrong, 0,
+            "{wrong} of {reads} fold reads wrong during {moves} moves ({retries} computed again)"
+        );
+    }
+
+    /// Moves in another unit's segments touch nothing a fold read in
+    /// this unit met: no read is computed again (a move bumps only the
+    /// segments it moves, `Segment::moving`; the field index's answer for
+    /// the read's range stands though the other unit contributes to the
+    /// same field).
+    #[test]
+    fn a_fold_read_is_not_computed_again_for_moves_outside_what_it_met() {
+        let (reads, wrong, moves, retries) = reads_while_moving(false);
+        assert!(moves > 0, "no move during {reads} reads");
+        assert_eq!(wrong, 0, "{wrong} of {reads} fold reads wrong");
+        assert_eq!(
+            retries, 0,
+            "{retries} of {reads} fold reads computed again for {moves} moves elsewhere"
+        );
     }
 }

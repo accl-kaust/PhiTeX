@@ -178,12 +178,6 @@ pub struct Engine {
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
     pub(crate) layout_gen: AtomicU64,
-    /// The moves of labels in progress, and a count bumped as each begins
-    /// and ends (`Engine::moving`: a relabel, a split, a rebalance): a
-    /// read that takes labels and then looks between them is computed on
-    /// one layout of the line (`read::on_one_layout`).
-    pub(crate) moves: AtomicU64,
-    pub(crate) label_gen: AtomicU64,
     /// A panic outside a run cut a commit or a walk short
     /// (`sched::work_caught`): the next evaluation checks the line first
     /// (`Engine::repair_line`).
@@ -240,29 +234,7 @@ thread_local! {
     static ENGINE_STACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// A move of labels in progress ([`Engine::moving`]), ended when dropped.
-pub(crate) struct Moving<'a>(&'a Engine);
-
-impl Drop for Moving<'_> {
-    fn drop(&mut self) {
-        self.0.label_gen.fetch_add(1, Ordering::SeqCst);
-        self.0.moves.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
 impl Engine {
-    /// Marks a move of labels (a node's label or segment changing:
-    /// `Segment::relabel`, `Segment::split_at`, `Order::rebalance`) until
-    /// the guard drops. Taken with the moved segments' write locks held
-    /// and dropped before they are let go, and nothing waited for under
-    /// it: a read waiting for it to end (`read::on_one_layout`) waits for
-    /// work that waits for nothing.
-    pub(crate) fn moving(&self) -> Moving<'_> {
-        self.moves.fetch_add(1, Ordering::SeqCst);
-        self.label_gen.fetch_add(1, Ordering::SeqCst);
-        Moving(self)
-    }
-
     /// Marks `f` as defined by a settling operation's node
     /// (`Engine::settle_marks`).
     pub(crate) fn mark_settled(&self, f: Field) {
@@ -332,8 +304,6 @@ impl Engine {
             frontier_by: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
             layout_gen: AtomicU64::new(0),
-            moves: AtomicU64::new(0),
-            label_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
             busy: AtomicU64::new(0),
             final_gen: AtomicU64::new(0),
@@ -392,7 +362,15 @@ impl Engine {
         self.nodes.get(usize::try_from(id.raw()).unwrap_or(usize::MAX))
     }
 
+    /// Segment `id`; met by a read on one layout (`read::on_one_layout`).
     pub(crate) fn seg(&self, id: SegId) -> &Arc<Segment> {
+        let s = self.seg_unmet(id);
+        read::met(s);
+        s
+    }
+
+    /// Segment `id`, not met by the read on one layout asking.
+    pub(crate) fn seg_unmet(&self, id: SegId) -> &Arc<Segment> {
         loop {
             if let Some(s) = self.segs.get(id.0 as usize) {
                 return s;
