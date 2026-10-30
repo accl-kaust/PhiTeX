@@ -162,19 +162,8 @@ point. A cold build is an edit from nothing.
 
 ## Status
 
-PhiTeX is in **alpha**.
-
-- **Works:** plain TeX, pdfLaTeX, XeLaTeX and LuaLaTeX, byte-identical;
-  BibTeX, biber, makeindex; `phitex watch` and the editors above; Shelf;
-  the same engine in WebAssembly with threads; `.synctex.gz`.
-<!-- TODO(claim): XeLaTeX byte-identical across the corpus; LuaLaTeX at all · Phi -->
-- **Coming:** packages that run external programs, such as
-  `minted`, on the command line.
-  <!-- TODO(claim): minted unverified natively (works in the Overleaf extension) · Phi -->
-
-What does not work yet, and why, is in [`CHANGELOG.md`](CHANGELOG.md). The
-release bars and their measured values are in
-[`docs/alpha-checklist.md`](docs/alpha-checklist.md).
+PhiTeX is in **alpha**: expect updates often. What changed, and what does
+not work yet, is in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Build from source
 
