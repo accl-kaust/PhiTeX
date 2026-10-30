@@ -2026,6 +2026,14 @@ var Panel = class {
     this.sheetUp();
     this.win.classList.toggle("reopening", !!this.anim);
   }
+  /**
+   * Another document opens in this panel (a host's project switched): the
+   * opening plays over the last one's pages until the new first page, as a
+   * cold build's does; no "last complete render" meanwhile.
+   */
+  opening() {
+    this.again();
+  }
   /** A rebuild's opening is up (firstPending, whatever pages are here). */
   reopen = false;
   /**
