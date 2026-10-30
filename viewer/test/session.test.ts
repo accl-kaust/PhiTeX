@@ -143,3 +143,24 @@ test("the host's pack events are the packages fetched", () => {
   assert.equal(last.bytes, 3000);
   assert.deepEqual(last.failed?.map((f) => f.name), ["amsmath-1"]);
 });
+
+// A core that queues an edit (phitex-live's view: the build comes later,
+// with `settled`): the keystroke is timed then, with that build's own time
+// and parts, never the last build's (a reopen's 7.8 s said as a letter's).
+test("a queued keystroke is timed by its own build", () => {
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: () => undefined, onChanges: () => undefined };
+  const said: string[] = [];
+  const sink = new Proxy({ latency: (s: string, d?: string) => said.push(`${s}\n${d}`) }, { get: (t, p) => (t as Record<string | symbol, unknown>)[p] ?? (() => undefined) });
+  const s = new PreviewSession(host, { request: async () => ({ ok: false }) } as never, sink as never, { schedule: () => undefined });
+  const w = s as unknown as { queued: { t0: number; tSend: number; tBack: number } | null; queuedLatency(e: unknown): void; now(): number };
+  // (no keystroke queued: a reopen's settled says nothing)
+  w.queuedLatency({ event: "settled", ms: 7847, ran: 0, kept: 0 });
+  assert.deepEqual(said, []);
+  const t = w.now();
+  w.queued = { t0: t - 5, tSend: t - 4, tBack: t - 3 };
+  w.queuedLatency({ event: "settled", ms: 2.5, ran: 3, kept: 97, passes: 1 });
+  assert.equal(said.length, 1);
+  assert.match(said[0], /build 2\.5 ms/);
+  assert.match(said[0], /rebuilt +3 of 100 steps, 1 pass/);
+  assert.equal(w.queued, null);
+});

@@ -3906,7 +3906,7 @@ var PreviewSession = class {
         return;
       }
       if (e.event === "settled") {
-        if (this.opened && !this.busy) this.chain = this.chain.then(() => this.layout()).then(() => this.statusSoon());
+        if (this.opened && !this.busy) this.chain = this.chain.then(() => this.layout()).then(() => this.queuedLatency(e)).then(() => this.statusSoon());
         return;
       }
       if (e.event === "pack") return this.onPack(e);
@@ -4855,6 +4855,26 @@ var PreviewSession = class {
       if (hit.length) return this.sink.mark?.(k, boxes(hit, all), true);
     }
   }
+  /** The last keystroke a core queued (its build said by `settled`): when it was typed, sent, answered. */
+  queued = null;
+  /** A queued keystroke's build in and drawn: its time from the keystroke, and the build's own, said. */
+  queuedLatency(e) {
+    const q = this.queued;
+    if (!q || e.ms === void 0) return;
+    this.queued = null;
+    const e2e = this.now() - q.t0;
+    this.sink.painted?.(e2e);
+    const ran = e.ran ?? 0, kept = e.kept ?? 0, passes = e.passes ?? 1;
+    this.sink.latency(
+      `${e2e.toFixed(0)} ms keystroke\u2192page \xB7 build ${e.ms.toFixed(1)} ms \xB7 ${this.keystrokes} edits \u2192 ${this.builds} builds`,
+      [
+        `build            ${e.ms.toFixed(2)} ms (in the core: the edit's steps, every page, the .aux/.bbl loops)`,
+        `keystroke\u2192page   ${e2e.toFixed(1)} ms = queued ${(q.tSend - q.t0).toFixed(1)} + round trip ${(q.tBack - q.tSend).toFixed(1)} + build and paint ${(this.now() - q.tBack).toFixed(1)}`,
+        `rebuilt          ${ran} of ${ran + kept} steps, ${passes} pass${passes === 1 ? "" : "es"}`,
+        `batching         ${this.keystrokes} edits \u2192 ${this.builds} builds (one in flight; the rest merged)`
+      ].join("\n")
+    );
+  }
   statusSoon() {
     if (this.statusTimer) return;
     this.statusTimer = setTimeout(async () => {
@@ -4908,6 +4928,11 @@ var PreviewSession = class {
       if (!last) continue;
       const tBack = this.now();
       const j = r.json;
+      if (j.queued) {
+        this.queued = { t0, tSend, tBack };
+        this.setPages(j.pages);
+        continue;
+      }
       this.setPages(j.pages);
       this.noteError(j);
       this.status(this.pending);

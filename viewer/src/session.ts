@@ -148,7 +148,7 @@ export type WatchEvent =
   | { event: "page"; k: number; hash: string; pages?: number }
   | { event: "progress"; pass?: number; pages?: number; phase?: string; ms?: number; name?: string; pack?: string; done?: number; total?: number }
   | { event: "diagnostics"; items: Problem[] }
-  | { event: "settled"; settling?: boolean; pass?: number }
+  | { event: "settled"; settling?: boolean; pass?: number; ms?: number; since_ms?: number | null; cold?: boolean; passes?: number; ran?: number; kept?: number; threads?: number; fetched?: number }
   | { event: "superseded" }
   | { event: "sync"; file: string; lo: number; hi: number; at: number; page?: number; y?: number };
 
@@ -166,7 +166,7 @@ export type CursorEvent =
 /** A Shelf pack the host fetches for a core that fetches its own (asked or prefetched, once per id), with its size once in. */
 export type PackEvent = { event: "pack"; id: string; state: "fetching" | "done" | "failed"; bytes?: number };
 
-export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | PackEvent | { event: "building"; on: boolean } | { event: "preparing"; on: boolean } | { event: "settled" } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
+export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | PackEvent | { event: "building"; on: boolean } | { event: "preparing"; on: boolean } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
 /** A collaborator's mark: its page, its glyphs' boxes, their label and hue. */
 type Peer = { k: number; boxes: [number, number, number, number][]; label: string; hue: number };
 
@@ -405,7 +405,7 @@ export class PreviewSession {
         return;
       }
       if (e.event === "settled") {
-        if (this.opened && !this.busy) this.chain = this.chain.then(() => this.layout()).then(() => this.statusSoon());
+        if (this.opened && !this.busy) this.chain = this.chain.then(() => this.layout()).then(() => this.queuedLatency(e)).then(() => this.statusSoon());
         return;
       }
       if (e.event === "pack") return this.onPack(e);
@@ -1499,6 +1499,28 @@ export class PreviewSession {
     }
   }
 
+  /** The last keystroke a core queued (its build said by `settled`): when it was typed, sent, answered. */
+  private queued: { t0: number; tSend: number; tBack: number } | null = null;
+
+  /** A queued keystroke's build in and drawn: its time from the keystroke, and the build's own, said. */
+  private queuedLatency(e: Extract<WatchEvent, { event: "settled" }>): void {
+    const q = this.queued;
+    if (!q || e.ms === undefined) return;
+    this.queued = null;
+    const e2e = this.now() - q.t0;
+    this.sink.painted?.(e2e);
+    const ran = e.ran ?? 0, kept = e.kept ?? 0, passes = e.passes ?? 1;
+    this.sink.latency(
+      `${e2e.toFixed(0)} ms keystroke→page · build ${e.ms.toFixed(1)} ms · ${this.keystrokes} edits → ${this.builds} builds`,
+      [
+        `build            ${e.ms.toFixed(2)} ms (in the core: the edit's steps, every page, the .aux/.bbl loops)`,
+        `keystroke→page   ${e2e.toFixed(1)} ms = queued ${(q.tSend - q.t0).toFixed(1)} + round trip ${(q.tBack - q.tSend).toFixed(1)} + build and paint ${(this.now() - q.tBack).toFixed(1)}`,
+        `rebuilt          ${ran} of ${ran + kept} steps, ${passes} pass${passes === 1 ? "" : "es"}`,
+        `batching         ${this.keystrokes} edits → ${this.builds} builds (one in flight; the rest merged)`,
+      ].join("\n"),
+    );
+  }
+
   private statusSoon(): void {
     if (this.statusTimer) return;
     this.statusTimer = setTimeout(async () => {
@@ -1560,6 +1582,13 @@ export class PreviewSession {
       if (!last) continue;
       const tBack = this.now();
       const j = r.json;
+      // (a core that queues the edit and says its build with `settled`:
+      // timed then, from this keystroke)
+      if (j.queued) {
+        this.queued = { t0, tSend, tBack };
+        this.setPages(j.pages);
+        continue;
+      }
       this.setPages(j.pages);
       this.noteError(j);
       this.status(this.pending);

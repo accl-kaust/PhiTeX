@@ -818,17 +818,17 @@ impl Viewer {
                     }
                 };
                 s.ask(a);
-                // (answered with the last build's pages; the edit's build
-                // pushes `settled` when it is in)
-                let (hs, history, ms) = state();
+                // (answered at once with the last build's pages, the edit
+                // queued: its build's time and parts come with `settled`
+                // when it is in; the last build's were said as this
+                // keystroke's, a reopen's 7.8 s as a letter's)
+                let (hs, history, _) = state();
                 ok(json!({
                     "ok": true,
+                    "queued": true,
                     "pages": hs.len(),
                     "history": history,
                     "painted_hash": null,
-                    "paint_ms": ms,
-                    "total_ms": ms,
-                    "stats": {"rebuilt": 0, "reused": 0, "passes": 1},
                 }))
             }
             "origins" => match origins(
