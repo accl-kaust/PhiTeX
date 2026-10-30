@@ -1194,13 +1194,15 @@ export class Panel {
       }
       requestAnimationFrame(follow);
     };
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return this.stopSheet();
     requestAnimationFrame(() => {
       follow();
       el.classList.add("in");
-      setTimeout(() => {
-        void this.anim?.done().then(() => this.stopSheet());
-      }, matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 300);
     });
+    // (the dive at once, whatever the opening's act; gone 650 ms on, and at most 900 ms on
+    // even where frames stall, a tab in the background: never left over the pages)
+    void this.anim.done().then(() => this.stopSheet());
+    setTimeout(() => this.stopSheet(), 900);
   }
 
   /** The sheet gone (played out, or a card in its place). */

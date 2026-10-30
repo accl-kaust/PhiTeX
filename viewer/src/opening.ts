@@ -5,9 +5,10 @@
 //           X out behind it, the view widening; the byline lands under it;
 //   steady  while the document loads, each stripe drains through its far end
 //           and flows in again, one after another;
-//   end     done(): the stripes run on to whole, then the view dives into the
+//   end     done(): at once, from wherever the view is, it dives into the
 //           white of the Φ's left counter, a hole onto the page beneath, until
-//           the page is all that is left.
+//           the page is all that is left (the stripes running on to whole
+//           meanwhile); 650 ms in all.
 // The art is opening-art.ts's (made once from the logo page: no font is
 // needed for the letters). Under prefers-reduced-motion the logo stands still.
 
@@ -23,7 +24,8 @@ const ease2 = (u: number) => ((u = clamp01(u)), u < 0.5 ? 2 * u * u : 1 - (-2 * 
 
 /** A dash offset that hides a stripe whole (dash 1, gap 2: no zero-length dash left at either end). */
 const OFF = 1.01;
-const OPEN = { draw: 700, stagger: 110, sweep: 1000, rest: 300, cycle: 1600, settle: 500, dive: 1100, fade: 250, into: [0.3, 0.42], deep: 5 };
+// (the end is bounded: the dive starts the moment the page is in, whatever the act, and the sheet is gone 650 ms later)
+const OPEN = { draw: 700, stagger: 110, sweep: 1000, rest: 300, cycle: 1600, settle: 500, dive: 470, fade: 180, into: [0.3, 0.42], deep: 5 };
 /** The Φ's left counter (CMU Serif Bold, font units, y up): the hole the view dives into. */
 const PHI_COUNTER = "M228 344Q228 316 233 294Q238 272 252.5 249Q267 226 298 210.5Q329 195 375 190V495Q288 485 258 444Q228 403 228 344Z";
 const BY = { h: 18, faint: "#8d96a5", kaust: "#80715e" };
@@ -137,7 +139,7 @@ function byline(svg: SVGSVGElement, word: Box) {
 }
 
 export interface Opening {
-  /** The document is in: settle, dive into the page, resolve once only the page is left (the logo gone). */
+  /** The document is in: dive into the page at once, resolve once only the page is left (the logo gone, 650 ms on). */
   done(): Promise<void>;
   /** Gone at once. */
   stop(): void;
@@ -197,6 +199,12 @@ export function opening(box: HTMLElement, fill: string, bg: string): Opening {
     const v = u % 1;
     return v < 0.5 ? -OFF * easeIO(v * 2) : OFF * (1 - easeIO(v * 2 - 1));
   };
+  /** The view at time t before any dive: the Φ, then widening to the word. */
+  const cam = (t: number): Cam => {
+    const cm = fit(MARK, 0.45, 0.3), cw = fit(word, 0.84, 0.4);
+    const k0 = easeIO((t - T1 - 200) / (0.75 * OPEN.sweep));
+    return t < T1 + 200 ? cm : { cx: cm.cx + (cw.cx - cm.cx) * k0, cy: cm.cy + (cw.cy - cm.cy) * k0, s: cm.s + (cw.s - cm.s) * k0 };
+  };
   const frame = (t: number) => {
     if (still) t = doneAt === null ? T3 : Math.max(t, (settled ??= doneAt) + OPEN.dive);
     let head = phi.r;
@@ -215,12 +223,11 @@ export function opening(box: HTMLElement, fill: string, bg: string): Opening {
     // (T, E and X each fade in whole as the ribbon's head passes into them)
     rest.forEach(([g, l]) => (g.style.opacity = t < T3 ? String(f2(clamp01((head - Math.max(l.l, phi.r)) / (0.3 * (l.r - l.l))))) : "1"));
     // (the camera: the Φ, then the word, then the dive about P, kept in place while the view closes in)
-    const cm = fit(MARK, 0.45, 0.3), cw = fit(word, 0.84, 0.4);
-    const k0 = easeIO((t - T1 - 200) / (0.75 * OPEN.sweep));
-    let c: Cam = t < T1 + 200 ? cm : { cx: cm.cx + (cw.cx - cm.cx) * k0, cy: cm.cy + (cw.cy - cm.cy) * k0, s: cm.s + (cw.s - cm.s) * k0 };
-    if (doneAt !== null && t >= (settled ??= doneAt + OPEN.settle + 2 * OPEN.stagger)) {
-      const u = Math.min(1, (t - settled) / OPEN.dive), s = cw.s * Math.exp(Math.log(deep() / cw.s) * u ** 2.2), k = (s - deep()) / (cw.s - deep());
-      c = { cx: P.x + (cw.cx - P.x) * k, cy: P.y + (cw.cy - P.y) * k, s };
+    let c = cam(t);
+    if (doneAt !== null && t >= (settled ??= doneAt)) {
+      // (from the view as it was when the page came, the Φ alone or the whole word)
+      const b = cam(settled), u = Math.min(1, (t - settled) / OPEN.dive), s = b.s * Math.exp(Math.log(deep() / b.s) * u ** 2.2), k = (s - deep()) / (b.s - deep());
+      c = { cx: P.x + (b.cx - P.x) * k, cy: P.y + (b.cy - P.y) * k, s };
       hole.setAttribute("opacity", String(f2(Math.min(1, u * 4))));
       el.style.opacity = String(1 - Math.max(0, (t - settled - OPEN.dive) / OPEN.fade));
       if (t >= settled + OPEN.dive + OPEN.fade) end = true;
@@ -236,7 +243,7 @@ export function opening(box: HTMLElement, fill: string, bg: string): Opening {
   raf = requestAnimationFrame(tick);
   return {
     done() {
-      doneAt ??= Math.max(performance.now() - t0, T3);
+      doneAt ??= performance.now() - t0;
       return new Promise((ok) => (finish = ok));
     },
     stop() {
