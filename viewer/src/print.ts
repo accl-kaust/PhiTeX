@@ -226,6 +226,8 @@ header:active { cursor: grabbing; }
 .win.docked .stage { overflow-y: scroll; }
 .win.docked .viewer { min-height: 100%; }
 .stage.fit { overflow-x: hidden; }
+/* (a rebuild's opening up: the last build's pages hidden under it until the dive) */
+.win.reopening .viewer { visibility: hidden; }
 /* (the first page's sheet up: the stage holds still under it, its width kept, so nothing scrolls behind the sheet) */
 .win.sheet-up .stage, .win.docked.sheet-up .stage { overflow: hidden; scrollbar-gutter: stable; }
 .slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }

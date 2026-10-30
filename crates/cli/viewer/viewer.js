@@ -765,6 +765,8 @@ header:active { cursor: grabbing; }
 .win.docked .stage { overflow-y: scroll; }
 .win.docked .viewer { min-height: 100%; }
 .stage.fit { overflow-x: hidden; }
+/* (a rebuild's opening up: the last build's pages hidden under it until the dive) */
+.win.reopening .viewer { visibility: hidden; }
 /* (the first page's sheet up: the stage holds still under it, its width kept, so nothing scrolls behind the sheet) */
 .win.sheet-up .stage, .win.docked.sheet-up .stage { overflow: hidden; scrollbar-gutter: stable; }
 .slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
@@ -1805,7 +1807,7 @@ var Panel = class {
     });
     this.$("#go").onclick = () => this.rebuild();
     this.$("#r-rebuild").onclick = () => (this.menu(null), this.rebuild());
-    this.$("#r-clean").onclick = () => (this.menu(null), ev.onClean());
+    this.$("#r-clean").onclick = () => (this.menu(null), this.clean());
     this.$("#r-compare").onclick = this.$("#b-compare").onclick = this.$("#x-compare").onclick = () => (this.menu(null), ev.onCompare?.());
     this.$("#r-cache").onclick = () => (this.menu(null), ev.onClearCache?.());
     this.$("#pdf").onclick = this.$("#x-pdf").onclick = () => (this.menu(null), ev.onPdf());
@@ -1949,8 +1951,22 @@ var Panel = class {
   }
   /** Rebuild: the host's (the files as they are), or its reload. */
   rebuild() {
+    this.again();
     (this.ev.onRebuild ?? this.ev.onReload).call(this.ev);
   }
+  /**
+   * A build asked for from the start (Rebuild, Clean rebuild): the opening
+   * plays again over the pages, its steps on the sheet, until the new
+   * build's first page (no "last complete render" meanwhile).
+   */
+  again() {
+    this.reopen = true;
+    this.opened = false;
+    this.sheetUp();
+    this.win.classList.toggle("reopening", !!this.anim);
+  }
+  /** A rebuild's opening is up (firstPending, whatever pages are here). */
+  reopen = false;
   /**
   * The place on the pages for the source (Overleaf's ← arrow), as
   * `toSource` takes it: the last single click or selection on the pages
@@ -2418,7 +2434,7 @@ var Panel = class {
   zoomNow = null;
   /** Before any page and no card: the sheet is (or now goes) up. */
   firstPending() {
-    return !this.last && this.viewer.pages === 0 && this.$("#empty").hidden === true;
+    return this.reopen || !this.last && this.viewer.pages === 0 && this.$("#empty").hidden === true;
   }
   /** The sheet's step: what, how far (undefined: not known), and the detail; the sheet put up first if it isn't. */
   step(what, pct, detail = "") {
@@ -2467,6 +2483,7 @@ var Panel = class {
     if (!this.anim || this.ending) return;
     if (performance.now() - this.animSince < 400) return this.stopSheet();
     this.ending = true;
+    this.win.classList.remove("reopening");
     const el = this.$("#opening");
     const follow = () => {
       if (!this.ending) return;
@@ -2491,6 +2508,8 @@ var Panel = class {
     this.anim?.stop();
     this.anim = null;
     this.ending = false;
+    this.reopen = false;
+    this.win.classList.remove("reopening");
     this.$("#opening").hidden = true;
     this.win.classList.remove("sheet-up");
     if (was) {
@@ -2542,6 +2561,7 @@ var Panel = class {
    */
   stale(s) {
     const stage = this.$("#stage");
+    if (this.reopen) return void (clearTimeout(this.staleTimer), this.staleSince = 0, stage.classList.remove("stale"));
     const gone = (s.pages === 0 || this.at >= s.pages) && !!this.last;
     clearTimeout(this.staleTimer);
     if (!gone) {
@@ -2780,6 +2800,7 @@ var Panel = class {
     this.viewer.goTo(this.at + 1);
   }
   clean() {
+    this.again();
     this.ev.onClean();
   }
   pdf() {

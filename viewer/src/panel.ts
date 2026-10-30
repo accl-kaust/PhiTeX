@@ -436,7 +436,7 @@ export class Panel {
     });
     this.$("#go").onclick = () => this.rebuild();
     this.$("#r-rebuild").onclick = () => (this.menu(null), this.rebuild());
-    this.$("#r-clean").onclick = () => (this.menu(null), ev.onClean());
+    this.$("#r-clean").onclick = () => (this.menu(null), this.clean());
     this.$("#r-compare").onclick = this.$("#b-compare").onclick = this.$("#x-compare").onclick = () => (this.menu(null), ev.onCompare?.());
     this.$("#r-cache").onclick = () => (this.menu(null), ev.onClearCache?.());
     this.$("#pdf").onclick = this.$("#x-pdf").onclick = () => (this.menu(null), ev.onPdf());
@@ -589,8 +589,25 @@ export class Panel {
 
   /** Rebuild: the host's (the files as they are), or its reload. */
   private rebuild(): void {
+    this.again();
     (this.ev.onRebuild ?? this.ev.onReload).call(this.ev);
   }
+
+  /**
+   * A build asked for from the start (Rebuild, Clean rebuild): the opening
+   * plays again over the pages, its steps on the sheet, until the new
+   * build's first page (no "last complete render" meanwhile).
+   */
+  private again(): void {
+    this.reopen = true;
+    this.opened = false;
+    this.sheetUp();
+    // (the last build's pages hidden under it until the dive: the new page shows through the hole)
+    this.win.classList.toggle("reopening", !!this.anim);
+  }
+
+  /** A rebuild's opening is up (firstPending, whatever pages are here). */
+  private reopen = false;
 
     /**
    * The place on the pages for the source (Overleaf's ← arrow), as
@@ -1130,7 +1147,7 @@ export class Panel {
 
   /** Before any page and no card: the sheet is (or now goes) up. */
   private firstPending(): boolean {
-    return !this.last && this.viewer.pages === 0 && this.$("#empty").hidden === true;
+    return this.reopen || (!this.last && this.viewer.pages === 0 && this.$("#empty").hidden === true);
   }
 
   /** The sheet's step: what, how far (undefined: not known), and the detail; the sheet put up first if it isn't. */
@@ -1185,6 +1202,7 @@ export class Panel {
     if (!this.anim || this.ending) return;
     if (performance.now() - this.animSince < 400) return this.stopSheet();
     this.ending = true;
+    this.win.classList.remove("reopening");
     const el = this.$("#opening");
     // (each frame until it is gone: the page moves under it when the contents' column comes in meanwhile, the first outline)
     const follow = () => {
@@ -1213,6 +1231,8 @@ export class Panel {
     this.anim?.stop();
     this.anim = null;
     this.ending = false;
+    this.reopen = false;
+    this.win.classList.remove("reopening");
     this.$("#opening").hidden = true;
     this.win.classList.remove("sheet-up");
     if (was) {
@@ -1271,6 +1291,8 @@ export class Panel {
    */
   private stale(s: Status): void {
     const stage = this.$("#stage");
+    // (a rebuild's opening is up: its sheet says what happens, not the last render's banner)
+    if (this.reopen) return void (clearTimeout(this.staleTimer), (this.staleSince = 0), stage.classList.remove("stale"));
     const gone = (s.pages === 0 || this.at >= s.pages) && !!this.last;
     clearTimeout(this.staleTimer);
     if (!gone) {
@@ -1542,6 +1564,7 @@ export class Panel {
     this.viewer.goTo(this.at + 1);
   }
   clean(): void {
+    this.again();
     this.ev.onClean();
   }
 
