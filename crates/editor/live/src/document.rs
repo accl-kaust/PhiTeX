@@ -390,6 +390,9 @@ impl Document {
             changed: None,
             diagnostics: diagnostics(s, &r, &log),
         };
+        // (the job's .log, for the viewer's "View log": every host running
+        // a Document gets it)
+        v.set_transcript(&r.log_text());
         v.built(&built);
         if let Some(l) = &lsp {
             l.built(&built);
