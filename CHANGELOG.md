@@ -74,9 +74,9 @@ and XeLaTeX, built by graph reduction, with exact output.
   the XeTeX corpus (mc 76440). The same engine runs in the browser and
   the editors' WebAssembly engine, its fonts from Shelf.
 - **SyncTeX.** `--synctex` writes `JOB.synctex.gz`, which TeX Live's
-  `synctex` tool reads as it reads pdflatex's. In the live viewer a
-  double-click on a word opens its place in the editor, and the editor's
-  cursor and selection are highlighted on the page.
+  `synctex` tool reads. In the live viewer a double-click on a word opens
+  its place in the editor, and the editor's cursor and selection are
+  highlighted on the page. Its places are approximate (below).
 - **pdflatex's command line.** Under an engine's name, or with
   `--compat=NAME`, `phitex` takes web2c's options and makes one run, so
   latexmk, editors and scripts can call it as pdflatex.
@@ -144,18 +144,28 @@ and XeLaTeX, built by graph reduction, with exact output.
   changes. The finisher's check of such a page also misses reads a
   resumed piece took from its continuation (they are preloaded, so
   `read_values` skips them).
-- **Speed:** the alpha's bar is exactness. A cold build is not yet
-  faster than pdflatex (amsldoc: 5.4 s at 8 threads against pdfTeX's
-  3.0 s a run; para4000: 2.3 s against 0.73 s), and the edit bar is not
-  met (amsldoc at 8 threads: one letter 22 ms and a line re-break 27 ms
-  against 16 ms; a heading 127 ms, a label 574 ms and a preamble
-  definition 82 ms against 50 ms). The numbers, their jobs and commits
-  are in `docs/alpha-checklist.md`.
-- **Scaling:** a LaTeX document's nodes still form long chains. The
-  census bar (a cold critical path of at most 6 nodes) is not met: the
-  path is 83 nodes on a 30-paragraph article and 138 on the
-  environments article, the same on every run (a scaling fact, not a
-  schedule's), so the census tests are ignored until it is.
+- **SyncTeX's places** (the user's decision of 2026-10-30: recorded,
+  not gated, for 1.61): a glyph's source is found by matching its words
+  to the text, so text a macro makes is credited to the macro's
+  definition, where pdflatex names the line that used it. Against
+  pdflatex's file, TeX Live's `synctex` gives the same place for 55% of
+  the lines of amsldoc and the LaTeX suite's documents (forward) and 29%
+  of the points on their pages (reverse); text typed in the document
+  itself is mostly right (accl 22194).
+- **Speed** (the user's decision of 2026-10-29: recorded, not gated;
+  release build, accl 22194 on acclnode01, 48 CPUs, medians of 3):
+  a cold build is not yet faster than pdflatex. amsldoc takes 2.46 s at
+  1 thread and 2.95 s at 8, against latexmk's three pdflatex runs at
+  2.17 s; para4000 takes 2.13 s at 1 thread and 1.01 s at 8, against
+  pdfTeX's 0.65 s. Edits on amsldoc at 8 threads: one letter 9.7 ms and
+  a line re-break 15.2 ms (bar 16 ms); a preamble definition 37 ms, a
+  heading 78 ms and a label 328 ms (bar 50 ms); a page added 585 ms. A
+  first build, the LaTeX format made, takes 9.2 s and 1.6 GB against
+  `pdftex -ini` and pdflatex's 6.2 s and 64 MB.
+- **Scaling:** amsldoc is slower at 8 threads than at 1 and slower
+  again at 16 (3.20 s); para4000 is 2.1 times faster at 8 threads than
+  at 1, and no faster at 16 or 32. Speculative runs are wasted: amsldoc
+  runs each node 4.5 times on average at 8 threads.
 - **Font expansion:** micro-typography's `\pdfadjustspacing` and
   `\pdffontexpand` are stored but not applied: pdfLaTeX breaks the
   paragraph with expanded fonts (and writes the scale), PhiTeX with the

@@ -15,6 +15,11 @@ the one that will become `main`.
   measured and recorded, not gated. XeLaTeX's edit speed (§4b) is
   deferred too (the user, 2026-10-30): recorded, not gated, for 1.61;
   each edit's PDF equalling a cold build stays a gate.
+- **SyncTeX's agreement with pdflatex's file** (§5) is deferred too (the
+  user, 2026-10-30): recorded (55% of lines forward, 29% of points
+  reverse on amsldoc and the latex suite, accl 22194), not gated, for
+  1.61. The SyncTeX file's bytes equal from run to run, and the PDF's
+  unchanged with it on, stay gates.
 - **The intermittents** of issue #3 (linkloop's object number, the
   paragraph printed twice once in 600, the rare stale folds, the
   load-dependent lock-wait test, the absorb test's timing) are waived
