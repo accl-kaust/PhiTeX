@@ -7150,8 +7150,12 @@ impl Build {
             "No pages of output.".to_owned()
         } else {
             // §642 (pdfTeX §794): the file's name, its pages and bytes
+            // (XeTeX's pages not made a PDF: its XDV, as `xelatex
+            // -no-pdf` names it)
             let ext = if dvi.starts_with(b"%PDF") {
                 "pdf"
+            } else if self.opts.xetex.is_some() {
+                "xdv"
             } else {
                 "dvi"
             };
