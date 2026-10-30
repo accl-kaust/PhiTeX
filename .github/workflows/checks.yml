@@ -1,6 +1,6 @@
 # Cheap checks on GitHub's runners (docs/ci.md): formatting, clippy, the
-# wasm32 build of the pure crates, the unit tests. Everything that needs TeX Live or the manual corpus runs on the
-# accl cluster (scripts/accl/accl ci). No secrets, read-only token, and no
+# wasm32 build of the pure crates, the unit tests. Everything that needs TeX
+# Live or the manual corpus runs in the gate (gate.yml, in the CI image). No secrets, read-only token, and no
 # pull_request_target: a pull request's code never runs with privileges.
 name: checks
 on:
@@ -51,5 +51,9 @@ jobs:
       # linted here; its documents need TeX Live: `scripts/wasm.sh check`)
       - run: rustup target add wasm32-wasip1-threads
       - run: cargo clippy --target wasm32-wasip1-threads -p phitex-wasm -- -D warnings
-      # (without TeX Live: the tests that compare with it skip themselves)
-      - run: cargo test --workspace --quiet
+      # (without TeX Live: the tests that compare with it skip themselves;
+      # the CLI's integration tests, crates/cli/tests, run the binary on
+      # TeX Live and are the gate's cli shard, so only the CLI's unit
+      # tests run here)
+      - run: cargo test --workspace --exclude phitex-cli --no-fail-fast --quiet
+      - run: cargo test -p phitex-cli --bins --no-fail-fast --quiet

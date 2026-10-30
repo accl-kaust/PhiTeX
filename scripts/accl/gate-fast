@@ -23,7 +23,8 @@
 # (Slurm dependency, cancelled if it fails), on its binaries: suites
 # (phitex-tex's pdftex edits pages plain etex hints inputs);
 # latex 0..N-1 (the latex target's non-ignored tests dealt out,
-# GATE_LATEX_SHARDS, default 3); ams (amsldoc --exact-pdf at -j 1, 8, 16,
+# GATE_LATEX_SHARDS, default 3); cli (the CLI's integration tests,
+# crates/cli/tests, on the users' CLI and TeX Live); ams (amsldoc --exact-pdf at -j 1, 8, 16,
 # md5 against the epoch oracle on acclhead1, the round counters with
 # PHITEX_TEX_TIME=1; then the cold watch build at -j 1/8/16 timed by op
 # class beside the control GATE_CONTROL's recorded timings, default
@@ -141,7 +142,7 @@ build_first() {
   local st b prev state
   st=$(store "$c")
   dep=""
-  if $SSH $H "test -x $st/cli/phitex && test -x $st/cli/prof/phitex && test -x $st/cli/rel/phitex && test -x $st/tests/latex" 2>/dev/null; then
+  if $SSH $H "test -x $st/cli/phitex && test -x $st/cli/prof/phitex && test -x $st/cli/rel/phitex && test -x $st/tests/latex && test -x $st/clitests/cli" 2>/dev/null; then
     echo "gate-fast: binaries of $c already built ($st)" >&2
     return
   fi
@@ -195,6 +196,7 @@ submit() {
       ids+=("$(sub "-c 10 --mem=24G -t 00:20:00 -J gf-latex$k $(on_bins "$T")" latex "$k" "$n")")
     done
   fi
+  if on cli; then ids+=("$(sub "-c 8 --mem=24G -t 01:30:00 -J gf-cli $(on_bins "clitests cli")" cli)"); fi
   # (the timing control: its timings as `gate-fast control` recorded
   # them, never built per gate; GATE_CONTROL= none)
   if on ams; then
@@ -231,9 +233,9 @@ submit() {
 one_job() {
   local st specs=() k cpus=0 in="" spec ctl
   st=$(store "$c")
-  if $SSH $H "test -x $st/cli/phitex && test -x $st/cli/prof/phitex && test -x $st/cli/rel/phitex && test -x $st/tests/latex" 2>/dev/null; then
+  if $SSH $H "test -x $st/cli/phitex && test -x $st/cli/prof/phitex && test -x $st/cli/rel/phitex && test -x $st/tests/latex && test -x $st/clitests/cli" 2>/dev/null; then
     echo "gate-fast: binaries of $c already built ($st)" >&2
-    in=",ACCL_STORE_IN=$st/tests:$st/cli"
+    in=",ACCL_STORE_IN=$st/tests:$st/cli:$st/clitests"
   fi
   # (NAME:CPUS:SHARD[,ARG...], the CPUs each as its own job asks)
   if on lint; then specs+=("lint:8:lint"); fi
@@ -241,6 +243,7 @@ one_job() {
   if on latex; then
     for ((k = 0; k < n; k++)); do specs+=("latex$k:10:latex,$k,$n"); done
   fi
+  if on cli; then specs+=("cli:8:cli"); fi
   if on ams; then
     ctl=${GATE_CONTROL-$gate_ctl}
     specs+=("ams:18:ams,$want${ctl:+,$ctl}" "amsedit8:10:amsedit,8" "amsedit16:18:amsedit,16")

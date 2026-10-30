@@ -13,7 +13,7 @@ no merge waits on them.
 
 | lane | workflow | runs on | what |
 |---|---|---|---|
-| checks | `checks.yml` | every push to dev and main, every pull request | fmt, clippy -D warnings, the wasm builds, the viewer's bundle, types and tests, the unit tests that need no TeX Live |
+| checks | `checks.yml` | every push to dev and main, every pull request | fmt, clippy -D warnings, the wasm builds, the viewer's bundle, types and tests, the tests that need no TeX Live (not the CLI's integration tests: the gate's cli shard) |
 | gate | `gate.yml` | every pull request to main, and by hand | the shards below, in the CI image, a job each |
 | image | `ci-image.yml` | by hand, when the image changes | builds the CI image and pushes it to GHCR |
 | release | `release.yml` | a tag `v1.6`, `v1.61`, … on main | binaries, `SHA256SUMS`, the minisign signature, the GitHub release |
@@ -33,9 +33,10 @@ no merge waits on them.
 
 | shard | what |
 |---|---|
-| build | the release CLI and phitex-tex's test binaries, passed to the other shards as an artifact |
+| build | the release CLI, phitex-tex's test binaries and the CLI's integration tests, passed to the other shards as an artifact |
 | suites | phitex-tex's pdftex, edits, pages, plain, etex, hints and inputs suites |
 | latex 1..4 | the latex target's tests, dealt out |
+| cli | the CLI's integration tests (crates/cli/tests: builds, watch, LSP, Shelf, SyncTeX against pdflatex's) on the release CLI, one at a time |
 | ams | amsldoc `--exact-pdf` at -j1, -j4 and -j16, md5 against the oracle; its edit histories at -j4 |
 | xetex | the XeTeX corpus, and Grail's cold build byte-identical |
 | corpus 1..8 | the manual corpus, byte-identical against TeX Live (the `-doc` image) |
