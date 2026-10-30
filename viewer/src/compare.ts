@@ -78,7 +78,7 @@ export interface CompareHost<V> {
   /** The editor at [from, to) of `file` (UTF-16), the focus kept on the page. */
   goto(file: string, from: number, to: number): void;
   save(bytes: BlobPart, type: string, name: string): void;
-  msg(text: string): void;
+  msg(text: string, err?: boolean, shown?: boolean): void;
   /** The marked-up document's session's options (the editor's). */
   options: Partial<Options>;
   /** The diff's look as kept (any part not kept: LATEXDIFF_LOOK's), and keeping it. */
@@ -221,7 +221,7 @@ export class Compare<V> implements DiffRunner<V> {
     if (w === "tex") return this.h.save(this.c.d.tex, "application/x-tex", `${this.base()}-diff.tex`);
     const pdf = await this.c.session.pdf();
     if (pdf?.length) this.h.save(pdf as BlobPart, "application/pdf", `${this.base()}-diff.pdf`);
-    else this.h.msg("No diff PDF yet: the marked-up document's build stopped (see ⓘ diagnostics).");
+    else this.h.msg("No diff PDF yet: the marked-up document's build stopped (see ⓘ diagnostics).", false, true);
   }
 
   stop(): void {

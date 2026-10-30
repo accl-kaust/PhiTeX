@@ -195,11 +195,11 @@ const pages = new Pages(sock);
 async function clearCache(): Promise<void> {
   const mb = (b: number) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
   const now = await sock.request({ op: "cache" });
-  if (!now.ok) return void panel.msg(`cache: ${now.error ?? "not available"}`, true);
+  if (!now.ok) return void panel.msg(`Couldn't clear the cache: ${now.error ?? "not available"}`, true, true);
   const bytes = Number(now.json?.bytes ?? 0);
   if (!confirm(`Clear PhiTeX's cache (${mb(bytes)} in ${now.json?.dir ?? "its cache folder"})? Packages and formats are fetched again when a build needs them.`)) return;
   const r = await sock.request({ op: "cache", clear: true });
-  panel.msg(r.ok ? `cache cleared: ${mb(Number(r.json?.freed ?? 0))} freed` : `cache: ${r.error ?? "not cleared"}`, !r.ok);
+  panel.msg(r.ok ? `Cache cleared: ${mb(Number(r.json?.freed ?? 0))} freed` : `Couldn't clear the cache: ${r.error ?? "not cleared"}`, !r.ok, true);
 }
 
 const source = (file: string, line: number, col = 1) => void sock.request({ op: "source", file, line, col });
@@ -327,7 +327,7 @@ const gotoChange = async (k: number) => {
   const q = words(c.new_text || "") || words(c.old_text || "");
   if (!q) return;
   const hits = await pages.find(q);
-  if (!hits.length) return void panel.msg(`change ${k}: not found on the pages`);
+  if (!hits.length) return void panel.msg(`Change ${k} isn't on the pages`, false, true);
   const from = k > lastAt.k ? lastAt.page : 0;
   const at = Math.max(0, hits.findIndex((h) => h.k >= from));
   lastAt = { k, page: hits[at].k };

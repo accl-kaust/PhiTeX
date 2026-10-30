@@ -1185,12 +1185,15 @@ export class Panel {
     }
     clearTimeout(this.toastTimer);
     this.toastKind = kind;
-    el.className = `toast${t.err ? " err" : ""}`;
+    el.className = `toast ${kind}${t.err ? " err" : ""}`;
     el.hidden = false;
     el.innerHTML = `<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>` + (t.pct === null ? "" : `<div class="track"><i style="width:${t.pct}%"></i></div>`);
     el.querySelector(".t span")!.textContent = t.title;
     el.querySelector(".d")!.textContent = t.detail ?? "";
     if (t.ms) this.toastTimer = setTimeout(() => this.toast(kind, null), t.ms);
+    // (an error stays until clicked away)
+    el.title = t.err && !t.ms ? "Click to dismiss" : "";
+    el.onclick = t.err && !t.ms ? () => this.toast(kind, null) : null;
   }
 
     /** Keep the last good page when a build ships nothing (or not this page): dimmed, with why. */
@@ -1686,7 +1689,7 @@ export class Panel {
     this.$("#dbg").querySelector(".check")!.textContent = this.debugOn ? "✓" : "";
     this.$<HTMLInputElement>("#dbg2").checked = this.debugOn;
     this.ev.onDebug?.(this.debugOn);
-    this.msg(this.debugOn ? "Debug check on" : "Debug check off");
+    this.msg(this.debugOn ? "Debug check on" : "Debug check off", false, true);
     this.emit();
   }
 
@@ -1947,10 +1950,16 @@ export class Panel {
   private msgText = "";
   private msgErr = false;
 
-  msg(t: string, err = false): void {
+  /**
+   * The status's message (in its popover); `shown`: the answer to something
+   * the user did (Clear cache, a toggle), so a note in the corner says it
+   * too, for a few seconds, or until clicked away if it is an error.
+   */
+  msg(t: string, err = false, shown = false): void {
     this.msgText = t;
     this.msgErr = err;
     if (!this.$("#m-time").hidden) this.timing();
+    if (shown) this.toast("msg", { title: t, pct: null, icon: err ? "warning" : "info", err, ms: err ? undefined : 4000 });
   }
 
   error(t: string): void {

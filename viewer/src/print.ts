@@ -282,6 +282,8 @@ header:active { cursor: grabbing; }
 .toast.out { opacity: 0; transform: translateY(6px); }
 .toast .t { display: flex; align-items: center; gap: 8px; font-weight: 600; min-width: 0; }
 .toast .t span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast.msg .t { align-items: flex-start; } .toast.msg .t span { white-space: normal; overflow-wrap: anywhere; }
+.toast.msg .t .icon { margin-top: 2px; }
 .toast .d { color: var(--ph-fg2); font-size: 12px; overflow-wrap: anywhere; }
 .toast.err { border-left: 3px solid var(--ph-danger); }
 .toast .track { position: relative; height: 3px; margin-top: 2px; border-radius: 2px; overflow: hidden; background: var(--ph-border); }
