@@ -159,12 +159,20 @@ header:active { cursor: grabbing; }
 .radios { display: flex; gap: 4px; padding: 2px 14px 6px 42px; }
 .radios button { all: unset; padding: 2px 10px; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); font-size: 12px; cursor: pointer; }
 .radios button[aria-pressed="true"] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg); }
-.timing { width: 380px; padding: 10px 14px 12px; font-variant-numeric: tabular-nums; }
-.timing h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
-.timing table { width: 100%; border-collapse: collapse; }
-.timing td { padding: 3px 0; vertical-align: top; }
-.timing td:first-child { color: var(--ph-fg2); padding-right: 12px; }
-.timing td:last-child { text-align: right; }
+.timing { width: 340px; padding: 12px 14px; font-variant-numeric: tabular-nums; }
+.timing .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 8px; }
+.timing .head span { color: var(--ph-fg2); }
+.timing .head b { font-size: 20px; font-weight: 600; }
+.timing .row { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; padding: 7px 0; border-top: 1px solid var(--ph-border); }
+.timing .row .k { color: var(--ph-fg2); }
+.timing .row .v { font-weight: 600; text-align: right; }
+.timing .row .note { grid-column: 1 / -1; font-size: 11px; line-height: 1.35; color: var(--ph-fg2); }
+.timing .row .tbar { grid-column: 1 / -1; display: flex; gap: 2px; height: 6px; margin-top: 2px; }
+.timing .row .tbar i { min-width: 3px; border-radius: 2px; }
+.timing .row .legend { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 11px; color: var(--ph-fg2); }
+.timing .row .legend span { display: inline-flex; align-items: center; gap: 4px; }
+.timing .row .legend i { width: 8px; height: 8px; border-radius: 2px; }
+.timing .c0 { background: var(--ph-progress); } .timing .c1 { background: var(--ph-accent); } .timing .c2 { background: var(--ph-fg2); } .timing .c3 { background: var(--ph-border); }
 .timing .foot { margin-top: 8px; color: var(--ph-fg2); font-size: 12px; overflow-wrap: anywhere; }
 .timing .foot.err { color: var(--ph-danger); }
 

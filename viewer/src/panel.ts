@@ -260,6 +260,44 @@ const icon = (name: string, size = 18) =>
 const ZOOMS: [string, string][] = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
 
 /** A page's lines in a tip's demo, as wide as given (%). */
+/** Bytes fetched so far, as the sheet says them (" · 3.8 MB"; nothing before any). */
+const mb = (b?: number) => (b ? ` · ${b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`}` : "");
+
+/** A duration as it reads best: 0.7 ms, 42 ms, 2.6 s, 14 s. */
+const dur = (ms: number) => (ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
+
+/** The session's names for a build's parts, as the popover says them. */
+const PART_NAMES: Record<string, string> = {
+  "first paint": "First page painted",
+  "fixed point": "All pages settled",
+  "keystroke→page": "Keystroke to page",
+  rebuilt: "Rebuilt",
+  batching: "Edits batched",
+};
+
+/**
+ * One of the session's timing lines ("first paint  7847.00 ms (in the core: …)",
+ * "keystroke→page  2.7 ms = queued 1.4 + round trip 1.0 + paint 0.7"): its
+ * label, its value said evenly, the sum's parts (a bar), the parenthesis a note.
+ */
+function part(key: string, raw: string): { key: string; label: string; value: string; ms?: number; split?: [string, number][]; note?: string } {
+  const label = PART_NAMES[key] ?? key.charAt(0).toUpperCase() + key.slice(1);
+  const paren = /\s*\(([^)]*)\)\s*$/.exec(raw);
+  let rest = paren ? raw.slice(0, paren.index) : raw;
+  const note = paren?.[1];
+  const num = /^([\d.]+)\s*(ms|s)\b\s*/.exec(rest);
+  if (!num) return { key, label, value: rest.trim(), note };
+  const ms = Number(num[1]) * (num[2] === "s" ? 1000 : 1);
+  rest = rest.slice(num[0].length).trim();
+  let split: [string, number][] | undefined;
+  if (rest.startsWith("=")) {
+    split = [...rest.slice(1).matchAll(/([a-z][a-z ]*?)\s+([\d.]+)/gi)].map((m): [string, number] => [m[1].trim(), Number(m[2])]);
+    rest = "";
+  }
+  const extra = rest.replace(/^·\s*/, "");
+  return { key, label, value: dur(ms), ms, split, note: [note, extra].filter(Boolean).join(" · ") || undefined };
+}
+
 const lines = (...w: number[]) => w.map((x) => `<i style="width:${x}%"></i>`).join("");
 
 /**
@@ -1113,13 +1151,13 @@ export class Panel {
         // (done: the build's own state says the rest. Files not found are optional ones LaTeX
         // only checks for (amsart.cfg, …): the problems list them, and an error says when one was needed)
         this.pkgBusy = false;
-        if (!this.stopped()) this.step(this.words.steps[2], undefined, `with ${done} package file${done === 1 ? "" : "s"}`);
+        if (!this.stopped()) this.step(this.words.steps[2], undefined, `with ${done} package file${done === 1 ? "" : "s"}${mb(p.bytes)}`);
         return;
       }
       this.pkgBusy = true;
       if (p.loading.length) {
         const name = p.loading[0];
-        this.step(this.words.steps[1], pct, `${name} · ${done} of ${total}${p.unavailable.length ? ` · ${p.unavailable.length} not found` : ""}`);
+        this.step(this.words.steps[1], pct, `${name} · ${done} of ${total}${mb(p.bytes)}${p.unavailable.length ? ` · ${p.unavailable.length} not found` : ""}`);
       } else this.step(this.words.steps[2], undefined, `with ${done} package file${done === 1 ? "" : "s"}; a build may ask for more`);
       return;
     }
@@ -1868,9 +1906,14 @@ export class Panel {
   private tipAt = -1;
   private tipList: typeof TIPS = [];
 
-  /** The tips not seen yet (`all`: every one, What's new), from the first. */
-  private tips(all: boolean): void {
-    if (!this.ownBar || this.prefs.collapsed || (!all && !this.autoTips)) return;
+  /** The tips not seen yet, now, where the host keeps them from showing by themselves (PanelOptions.tips false: after its own). */
+  tour(): void {
+    this.tips(false, true);
+  }
+
+  /** The tips not seen yet (`all`: every one, What's new), from the first; `asked`: the host's tour(). */
+  private tips(all: boolean, asked = false): void {
+    if (!this.ownBar || this.prefs.collapsed || (!all && !asked && !this.autoTips)) return;
     let seen: string[] = [];
     try {
       seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
@@ -2046,15 +2089,25 @@ export class Panel {
   /** The timing popover: the last build's line, its parts as the session lists them, the last message. */
   private timing(): void {
     const el = this.$("#m-time");
-    const rows = this.timingParts()
-      .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`)
+    const parts = this.timingParts().map(([k, v]) => part(k, v));
+    // (the headline: a first build's time, else keystroke to page as the session measured it, else the host's paint)
+    const e2e = parts.find((p) => p.key === "keystroke→page")?.ms ?? this.speed?.ms;
+    const head = this.speed?.first ? ["First build", this.speed.ms] : e2e !== undefined ? ["Keystroke to page", e2e] : null;
+    const rows = parts
+      .map((p) => {
+        const bar = p.split?.length
+          ? `<div class="tbar">${p.split.map(([n, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
+            `<div class="legend">${p.split.map(([n, ms], i) => `<span><i class="c${i}"></i>${esc(n)} ${esc(dur(ms))}</span>`).join("")}</div>`
+          : "";
+        return `<div class="row"><span class="k">${esc(p.label)}</span><span class="v">${esc(p.value)}</span>${bar}${p.note ? `<span class="note">${esc(p.note)}</span>` : ""}</div>`;
+      })
       .join("");
-    const ms = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
     el.innerHTML =
-      `<h3>${this.speed?.first ? `The first build: ${(this.speed.ms / 1000).toFixed(1)} s` : ms ? `Keystroke to page: ${ms}` : "The last build"}</h3>` +
-      (rows ? `<table>${rows}</table>` : "") +
+      (head ? `<div class="head"><span>${esc(String(head[0]))}</span><b>${esc(dur(head[1] as number))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) +
+      rows +
       `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
-    el.querySelector(".foot")!.textContent = this.lat?.summary ?? "No build yet.";
+    // (the summary line only when there are no parts to say it)
+    el.querySelector(".foot")!.textContent = parts.length ? "" : (this.lat?.summary ?? "");
     el.querySelector(".msg")!.textContent = this.msgText;
   }
 

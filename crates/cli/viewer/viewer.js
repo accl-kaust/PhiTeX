@@ -698,12 +698,20 @@ header:active { cursor: grabbing; }
 .radios { display: flex; gap: 4px; padding: 2px 14px 6px 42px; }
 .radios button { all: unset; padding: 2px 10px; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); font-size: 12px; cursor: pointer; }
 .radios button[aria-pressed="true"] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg); }
-.timing { width: 380px; padding: 10px 14px 12px; font-variant-numeric: tabular-nums; }
-.timing h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
-.timing table { width: 100%; border-collapse: collapse; }
-.timing td { padding: 3px 0; vertical-align: top; }
-.timing td:first-child { color: var(--ph-fg2); padding-right: 12px; }
-.timing td:last-child { text-align: right; }
+.timing { width: 340px; padding: 12px 14px; font-variant-numeric: tabular-nums; }
+.timing .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 8px; }
+.timing .head span { color: var(--ph-fg2); }
+.timing .head b { font-size: 20px; font-weight: 600; }
+.timing .row { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; padding: 7px 0; border-top: 1px solid var(--ph-border); }
+.timing .row .k { color: var(--ph-fg2); }
+.timing .row .v { font-weight: 600; text-align: right; }
+.timing .row .note { grid-column: 1 / -1; font-size: 11px; line-height: 1.35; color: var(--ph-fg2); }
+.timing .row .tbar { grid-column: 1 / -1; display: flex; gap: 2px; height: 6px; margin-top: 2px; }
+.timing .row .tbar i { min-width: 3px; border-radius: 2px; }
+.timing .row .legend { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 11px; color: var(--ph-fg2); }
+.timing .row .legend span { display: inline-flex; align-items: center; gap: 4px; }
+.timing .row .legend i { width: 8px; height: 8px; border-radius: 2px; }
+.timing .c0 { background: var(--ph-progress); } .timing .c1 { background: var(--ph-accent); } .timing .c2 { background: var(--ph-fg2); } .timing .c3 { background: var(--ph-border); }
 .timing .foot { margin-top: 8px; color: var(--ph-fg2); font-size: 12px; overflow-wrap: anywhere; }
 .timing .foot.err { color: var(--ph-danger); }
 
@@ -1515,9 +1523,9 @@ function opening(box, fill, bg) {
   tmp.innerHTML = art(MARK, fill, `${tag}m`);
   const S = [0, 1, 2, 3].map((j) => {
     const ps = [...el.querySelectorAll(`.phx-s${j}`)];
-    const full = ps[0].getTotalLength(), part = tmp.querySelector(`.phx-s${j}`).getTotalLength();
+    const full = ps[0].getTotalLength(), part2 = tmp.querySelector(`.phx-s${j}`).getTotalLength();
     ps.forEach((p) => p.style.strokeDasharray = "1 2");
-    return { ps, full, f: part / full };
+    return { ps, full, f: part2 / full };
   });
   tmp.remove();
   const W = () => box.clientWidth || 1, H = () => box.clientHeight || 1;
@@ -1651,6 +1659,32 @@ var PATHS = {
 };
 var icon = (name, size = 18) => `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
 var ZOOMS = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
+var mb = (b) => b ? ` \xB7 ${b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`}` : "";
+var dur = (ms) => ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
+var PART_NAMES = {
+  "first paint": "First page painted",
+  "fixed point": "All pages settled",
+  "keystroke\u2192page": "Keystroke to page",
+  rebuilt: "Rebuilt",
+  batching: "Edits batched"
+};
+function part(key, raw) {
+  const label = PART_NAMES[key] ?? key.charAt(0).toUpperCase() + key.slice(1);
+  const paren = /\s*\(([^)]*)\)\s*$/.exec(raw);
+  let rest = paren ? raw.slice(0, paren.index) : raw;
+  const note = paren?.[1];
+  const num = /^([\d.]+)\s*(ms|s)\b\s*/.exec(rest);
+  if (!num) return { key, label, value: rest.trim(), note };
+  const ms = Number(num[1]) * (num[2] === "s" ? 1e3 : 1);
+  rest = rest.slice(num[0].length).trim();
+  let split;
+  if (rest.startsWith("=")) {
+    split = [...rest.slice(1).matchAll(/([a-z][a-z ]*?)\s+([\d.]+)/gi)].map((m) => [m[1].trim(), Number(m[2])]);
+    rest = "";
+  }
+  const extra = rest.replace(/^·\s*/, "");
+  return { key, label, value: dur(ms), ms, split, note: [note, extra].filter(Boolean).join(" \xB7 ") || void 0 };
+}
 var lines = (...w) => w.map((x) => `<i style="width:${x}%"></i>`).join("");
 var TIPS = [
   {
@@ -2425,13 +2459,13 @@ var Panel = class {
     if (!this.last) {
       if (!p.loading.length && !p.building) {
         this.pkgBusy = false;
-        if (!this.stopped()) this.step(this.words.steps[2], void 0, `with ${done} package file${done === 1 ? "" : "s"}`);
+        if (!this.stopped()) this.step(this.words.steps[2], void 0, `with ${done} package file${done === 1 ? "" : "s"}${mb(p.bytes)}`);
         return;
       }
       this.pkgBusy = true;
       if (p.loading.length) {
         const name = p.loading[0];
-        this.step(this.words.steps[1], pct, `${name} \xB7 ${done} of ${total}${p.unavailable.length ? ` \xB7 ${p.unavailable.length} not found` : ""}`);
+        this.step(this.words.steps[1], pct, `${name} \xB7 ${done} of ${total}${mb(p.bytes)}${p.unavailable.length ? ` \xB7 ${p.unavailable.length} not found` : ""}`);
       } else this.step(this.words.steps[2], void 0, `with ${done} package file${done === 1 ? "" : "s"}; a build may ask for more`);
       return;
     }
@@ -3084,9 +3118,13 @@ var Panel = class {
   // ---- Feature tips, each once (own-bar hosts; Overleaf's toolbar has the extension's) ----
   tipAt = -1;
   tipList = [];
-  /** The tips not seen yet (`all`: every one, What's new), from the first. */
-  tips(all) {
-    if (!this.ownBar || this.prefs.collapsed || !all && !this.autoTips) return;
+  /** The tips not seen yet, now, where the host keeps them from showing by themselves (PanelOptions.tips false: after its own). */
+  tour() {
+    this.tips(false, true);
+  }
+  /** The tips not seen yet (`all`: every one, What's new), from the first; `asked`: the host's tour(). */
+  tips(all, asked = false) {
+    if (!this.ownBar || this.prefs.collapsed || !all && !asked && !this.autoTips) return;
     let seen = [];
     try {
       seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
@@ -3239,10 +3277,15 @@ var Panel = class {
   /** The timing popover: the last build's line, its parts as the session lists them, the last message. */
   timing() {
     const el = this.$("#m-time");
-    const rows = this.timingParts().map(([k, v]) => `<tr><td>${esc3(k)}</td><td>${esc3(v)}</td></tr>`).join("");
-    const ms = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
-    el.innerHTML = `<h3>${this.speed?.first ? `The first build: ${(this.speed.ms / 1e3).toFixed(1)} s` : ms ? `Keystroke to page: ${ms}` : "The last build"}</h3>` + (rows ? `<table>${rows}</table>` : "") + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
-    el.querySelector(".foot").textContent = this.lat?.summary ?? "No build yet.";
+    const parts = this.timingParts().map(([k, v]) => part(k, v));
+    const e2e = parts.find((p) => p.key === "keystroke\u2192page")?.ms ?? this.speed?.ms;
+    const head = this.speed?.first ? ["First build", this.speed.ms] : e2e !== void 0 ? ["Keystroke to page", e2e] : null;
+    const rows = parts.map((p) => {
+      const bar2 = p.split?.length ? `<div class="tbar">${p.split.map(([n, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${p.split.map(([n, ms], i) => `<span><i class="c${i}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div>` : "";
+      return `<div class="row"><span class="k">${esc3(p.label)}</span><span class="v">${esc3(p.value)}</span>${bar2}${p.note ? `<span class="note">${esc3(p.note)}</span>` : ""}</div>`;
+    }).join("");
+    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + rows + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+    el.querySelector(".foot").textContent = parts.length ? "" : this.lat?.summary ?? "";
     el.querySelector(".msg").textContent = this.msgText;
   }
   /** The last message (connected, files read, a debug check's result), shown in the timing popover. */
@@ -5449,19 +5492,19 @@ var Socket = class {
     this.events.push(cb);
   }
 };
-var dur = (ms) => ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
+var dur2 = (ms) => ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
 function timing(s) {
   const ms = s.ms ?? 0;
   const parts = [
-    [s.cold ? "first build" : "build", `${dur(ms)}${s.cold ? " (the format, the packages, the whole document)" : ""}`],
-    ["save to build", typeof s.since_ms === "number" ? dur(s.since_ms) : null],
+    [s.cold ? "first build" : "build", `${dur2(ms)}${s.cold ? " (the format, the packages, the whole document)" : ""}`],
+    ["save to build", typeof s.since_ms === "number" ? dur2(s.since_ms) : null],
     ["LaTeX runs", s.passes === void 0 ? null : String(s.passes)],
     ["steps", s.ran === void 0 ? null : `${s.ran} run, ${s.kept ?? 0} kept from the last build`],
     ["packages fetched", s.fetched ? String(s.fetched) : null],
     ["threads", s.threads === void 0 ? null : String(s.threads)]
   ];
   return [
-    s.cold ? `First build in ${dur(ms)}` : `Built in ${dur(ms)}`,
+    s.cold ? `First build in ${dur2(ms)}` : `Built in ${dur2(ms)}`,
     parts.filter((p) => p[1] !== null).map(([k, v]) => `${k.padEnd(17)}  ${v}`).join("\n")
   ];
 }
@@ -5538,13 +5581,13 @@ var strips = new Strips(stripSource, chip ?? null);
 var sock = new Socket();
 var pages = new Pages(sock);
 async function clearCache() {
-  const mb = (b) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
+  const mb2 = (b) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
   const now = await sock.request({ op: "cache" });
   if (!now.ok) return void panel.msg(`Couldn't clear the cache: ${now.error ?? "not available"}`, true, true);
   const bytes = Number(now.json?.bytes ?? 0);
-  if (!confirm(`Clear PhiTeX's cache (${mb(bytes)} in ${now.json?.dir ?? "its cache folder"})? Packages and formats are fetched again when a build needs them.`)) return;
+  if (!confirm(`Clear PhiTeX's cache (${mb2(bytes)} in ${now.json?.dir ?? "its cache folder"})? Packages and formats are fetched again when a build needs them.`)) return;
   const r = await sock.request({ op: "cache", clear: true });
-  panel.msg(r.ok ? `Cache cleared: ${mb(Number(r.json?.freed ?? 0))} freed` : `Couldn't clear the cache: ${r.error ?? "not cleared"}`, !r.ok, true);
+  panel.msg(r.ok ? `Cache cleared: ${mb2(Number(r.json?.freed ?? 0))} freed` : `Couldn't clear the cache: ${r.error ?? "not cleared"}`, !r.ok, true);
 }
 var source = (file, line, col = 1) => void sock.request({ op: "source", file, line, col });
 var panel = new Panel(
