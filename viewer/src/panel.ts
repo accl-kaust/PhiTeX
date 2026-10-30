@@ -1254,6 +1254,18 @@ export class Panel {
   outline(items: Entry[]): void {
     this.contents?.set(items);
     this.contents?.at(this.at);
+    this.noOutline(!items.length);
+  }
+
+  /** No outline (none yet, or a PDF without one): the column hidden, the menu's Contents saying so. */
+  private noOutline(none: boolean): void {
+    const was = this.win.classList.contains("side-empty");
+    this.win.classList.toggle("side-empty", none);
+    // (the column came or went: a fitted page takes the width it leaves)
+    if (was !== none && this.win.classList.contains("side-on") && this.prefs.zoom === "fit") this.redraw();
+    const label = this.$("#x-contents").querySelector("span:not(.sub)");
+    if (label) label.textContent = none ? "Contents (none)" : "Contents";
+    this.$("#x-contents").title = none ? "This PDF has no outline: hyperref makes one from the sections" : "";
   }
 
   /** The contents shown or hidden (remembered on this machine). */
@@ -1296,6 +1308,8 @@ export class Panel {
         /* (shown) */
       }
       this.win.classList.toggle("side-on", on);
+      // (no outline until one arrives: no empty column while the first build runs)
+      this.noOutline(true);
     }
     if (!opts.keys) return;
     const help = this.$("#keyhelp");

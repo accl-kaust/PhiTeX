@@ -719,6 +719,7 @@ header:active { cursor: grabbing; }
 .win.has-side .body { flex-direction: row; }
 .side { display: none; flex: none; width: 240px; overflow: auto; background: var(--ph-bar); border-right: 1px solid var(--ph-border); color: var(--ph-fg); }
 .win.side-on .side { display: block; }
+.win.side-on.side-empty .side { display: none; }
 @container (max-width: 560px) { .win.side-on .side { position: absolute; inset: 0 auto 0 0; z-index: 5; box-shadow: 4px 0 16px rgb(0 0 0 / 20%); } }
 .stage { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--ph-stage); text-align: center; overscroll-behavior: contain; will-change: scroll-position; }
 .win.docked .stage { overflow-y: scroll; }
@@ -2386,6 +2387,16 @@ var Panel = class {
   outline(items) {
     this.contents?.set(items);
     this.contents?.at(this.at);
+    this.noOutline(!items.length);
+  }
+  /** No outline (none yet, or a PDF without one): the column hidden, the menu's Contents saying so. */
+  noOutline(none) {
+    const was = this.win.classList.contains("side-empty");
+    this.win.classList.toggle("side-empty", none);
+    if (was !== none && this.win.classList.contains("side-on") && this.prefs.zoom === "fit") this.redraw();
+    const label = this.$("#x-contents").querySelector("span:not(.sub)");
+    if (label) label.textContent = none ? "Contents (none)" : "Contents";
+    this.$("#x-contents").title = none ? "This PDF has no outline: hyperref makes one from the sections" : "";
   }
   /** The contents shown or hidden (remembered on this machine). */
   side(on = !this.win.classList.contains("side-on")) {
@@ -2422,6 +2433,7 @@ var Panel = class {
       } catch {
       }
       this.win.classList.toggle("side-on", on);
+      this.noOutline(true);
     }
     if (!opts.keys) return;
     const help = this.$("#keyhelp");
