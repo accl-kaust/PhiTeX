@@ -120,3 +120,26 @@ test("a range's boxes on the pages", async () => {
   assert.equal(near.length, 1);
   assert.deepEqual(near[0].boxes, (await s.boxesOf("main.tex", 12, 14))[0].boxes);
 });
+
+// A core that fetches its own packs (Shelf, through the host): the host's
+// pack events are the panel's package state, loading then done with their
+// bytes, or failed (it said "0 package files" all through the downloads).
+test("the host's pack events are the packages fetched", () => {
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: () => undefined, onChanges: () => undefined };
+  let emit!: (e: unknown) => void;
+  const core = { request: async () => ({ ok: false }), onEvent: (cb: (e: unknown) => void) => (emit = cb) };
+  const told: { loading: string[]; done?: string[]; failed?: { name: string }[]; bytes?: number }[] = [];
+  const sink = new Proxy({ packages: (p: (typeof told)[number]) => told.push(p) }, { get: (t, p) => (t as Record<string | symbol, unknown>)[p] ?? (() => undefined) });
+  new PreviewSession(host, core as never, sink as never, { schedule: () => undefined });
+  emit({ event: "pack", id: "latex-1", state: "fetching" });
+  emit({ event: "pack", id: "amsmath-1", state: "fetching" });
+  assert.deepEqual(told.at(-1)!.loading, ["latex-1", "amsmath-1"]);
+  emit({ event: "pack", id: "latex-1", state: "done", bytes: 3000 });
+  emit({ event: "pack", id: "amsmath-1", state: "failed" });
+  emit({ event: "pack", id: "latex-1", state: "done", bytes: 3000 });
+  const last = told.at(-1)!;
+  assert.deepEqual(last.loading, []);
+  assert.deepEqual(last.done, ["latex-1"]);
+  assert.equal(last.bytes, 3000);
+  assert.deepEqual(last.failed?.map((f) => f.name), ["amsmath-1"]);
+});

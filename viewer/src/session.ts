@@ -163,7 +163,10 @@ export type CursorEvent =
   | { event: "follow"; file: string; at: number; word: [number, number] | null; line: [number, number] }
   | { event: "select"; file: string; from: number; to: number };
 
-export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | { event: "building"; on: boolean } | { event: "preparing"; on: boolean } | { event: "settled" } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
+/** A Shelf pack the host fetches for a core that fetches its own (asked or prefetched, once per id), with its size once in. */
+export type PackEvent = { event: "pack"; id: string; state: "fetching" | "done" | "failed"; bytes?: number };
+
+export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | PackEvent | { event: "building"; on: boolean } | { event: "preparing"; on: boolean } | { event: "settled" } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
 /** A collaborator's mark: its page, its glyphs' boxes, their label and hue. */
 type Peer = { k: number; boxes: [number, number, number, number][]; label: string; hue: number };
 
@@ -354,6 +357,24 @@ export class PreviewSession {
     this.tellPackages();
   }
 
+  /**
+   * A pack the host fetches for the core (a core that fetches its own: the
+   * panel had said "0 package files" all through a cold build's downloads):
+   * loading while it comes, then done with its bytes counted, or failed.
+   */
+  private onPack(e: PackEvent): void {
+    this.tr("package: host fetches for the core", { id: e.id, state: e.state, bytes: e.bytes });
+    this.pkg.source = this.source.label || "Shelf";
+    const p = this.pkg;
+    p.loading = p.loading.filter((n) => n !== e.id);
+    if (e.state === "fetching") {
+      if (!p.done?.includes(e.id)) p.loading = [...p.loading, e.id];
+    } else if (e.state === "done") {
+      if (!p.done?.includes(e.id)) ((p.done = [...(p.done ?? []), e.id]), (p.bytes = (p.bytes ?? 0) + (e.bytes ?? 0)));
+    } else p.failed = [...(p.failed ?? []).filter((f) => f.name !== e.id), { name: e.id, error: "could not be fetched" }];
+    this.tellPackages();
+  }
+
   /** Core requests sent and not answered yet; of them, ones that may build. */
   inflight = 0;
   private building = 0;
@@ -387,6 +408,7 @@ export class PreviewSession {
         if (this.opened && !this.busy) this.chain = this.chain.then(() => this.layout()).then(() => this.statusSoon());
         return;
       }
+      if (e.event === "pack") return this.onPack(e);
       if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e as StreamEvent);
     });
     this.core = {
