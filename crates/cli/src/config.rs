@@ -52,6 +52,9 @@ pub struct Config {
     /// The oldest PhiTeX the project needs (`phitex = ">=0.2"`): checked
     /// when read.
     pub phitex: Option<String>,
+    /// The opt-in update check (`crate::upgrade::check`), read from the
+    /// user's file only: a project's never turns it on.
+    pub update_check: Option<bool>,
     /// What reading the files warned of (unknown keys).
     #[serde(skip)]
     pub warnings: Vec<String>,
@@ -74,6 +77,7 @@ const KEYS: &[&str] = &[
     "cache-limit",
     "files",
     "phitex",
+    "update-check",
 ];
 
 /// `copy-pdf`'s value.
@@ -265,6 +269,7 @@ impl Config {
             cache_limit: self.cache_limit.or(under.cache_limit),
             files: self.files.or(under.files),
             phitex: self.phitex.or(under.phitex),
+            update_check: self.update_check.or(under.update_check),
             warnings: [self.warnings, under.warnings].concat(),
         }
     }
@@ -519,6 +524,7 @@ mod tests {
                 cache_limit: None,
                 files: None,
                 phitex: None,
+                update_check: None,
                 warnings: vec![],
             }
         );

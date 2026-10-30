@@ -135,6 +135,13 @@ enum Sub {
     },
     /// What is new in this version (CHANGELOG.md's entry)
     News,
+    /// Install the latest release, signature checked (an install made by
+    /// phitex.org/install.sh)
+    Upgrade {
+        /// Only say whether there is one
+        #[arg(long)]
+        check: bool,
+    },
     /// Remove the files a build writes
     Clean {
         /// The whole cache, every document's (no file needed)
@@ -280,6 +287,7 @@ pub enum Command {
     Watch,
     Clean,
     News,
+    Upgrade { check: bool },
 }
 
 /// The modern command line's options, as the rest of the program reads
@@ -330,6 +338,7 @@ impl Cli {
             Some(Sub::Watch { file }) => (Some(Command::Watch), file, false),
             Some(Sub::Clean { all, file }) => (Some(Command::Clean), file, all),
             Some(Sub::News) => (Some(Command::News), None, false),
+            Some(Sub::Upgrade { check }) => (Some(Command::Upgrade { check }), None, false),
             None => (None, None, false),
         };
         let o = self.opts;
@@ -969,8 +978,12 @@ pub fn main(args: &[String]) -> ! {
         crate::news::print();
         std::process::exit(0);
     }
+    if let Command::Upgrade { check } = command {
+        std::process::exit(crate::upgrade::upgrade(&ui, check));
+    }
     if !o.lsp && !o.json && !o.quiet {
         crate::news::once(&ui);
+        crate::upgrade::check(&ui);
     }
     // (an editor's language server: its `initialize` first, which says
     // where the watch runs and may name the main file)
@@ -1028,7 +1041,7 @@ pub fn main(args: &[String]) -> ! {
         Command::Clean => std::process::exit(clean(&t, &ui)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
         // (answered before the target)
-        Command::News => unreachable!(),
+        Command::News | Command::Upgrade { .. } => unreachable!(),
     }
 }
 

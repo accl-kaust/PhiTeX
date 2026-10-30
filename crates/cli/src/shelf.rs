@@ -135,7 +135,7 @@ fn base_urls() -> Vec<String> {
 /// The first of [`base_urls`] not known to be unreachable this process.
 static HOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-fn agent() -> &'static ureq::Agent {
+pub(crate) fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::Agent::config_builder()

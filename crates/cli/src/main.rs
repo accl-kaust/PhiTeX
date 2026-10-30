@@ -46,6 +46,7 @@ mod shell;
 mod tex;
 mod tools;
 mod ui;
+mod upgrade;
 mod view;
 mod watch;
 mod ws;

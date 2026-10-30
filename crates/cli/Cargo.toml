@@ -40,6 +40,9 @@ bytesize = "=2.7.0"
 jiff = "=0.2.38"
 # (Shelf's packs over HTTPS, `files = "shelf"`: approved 2026-10-29)
 ureq = { version = "=3.5.0", default-features = false, features = ["rustls"] }
+# (phitex upgrade: a release's SHA256SUMS signature against ci/minisign.pub;
+# minisign's author's verify-only crate, no dependencies: approved 2026-10-30)
+minisign-verify = "=0.3.0"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

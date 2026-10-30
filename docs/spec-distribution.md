@@ -130,18 +130,21 @@ for each version tag.
 
 **The update check:**
 - **Off by default.** It is turned on with `update-check = true` in the
-  *user's* `phitex.toml` (never a project's), or `phitex config
-  update-check on`. The first interactive `phitex watch` asks once, by
-  default no, and remembers the answer.
-- **At most once a day**, in the background, never delaying a build. The
-  result is cached in `~/.cache/phitex/news.json`.
-- **One line on stderr after a build:** `phitex 1.61 is out (you have
-  1.6): phitex upgrade`. An advisory for the running version is printed
-  even if the release line was already shown.
+  *user's* `phitex.toml` (`~/.config/phitex/`), never a project's
+  (`crates/cli/src/upgrade.rs`).
+- **At most once a day**, in the background, never delaying a build: the
+  fetch the run starts is what the next run reads. The result is kept in
+  the cache directory's `news.json`.
+- **One line on stderr as a build or watch starts**, from what was kept:
+  `phitex 1.61 is out (you have 1.6): phitex upgrade`. An advisory for
+  the running version is printed even if the release line was already
+  shown.
 - **Never** under `CI`, with no TTY, under `phitex lsp`, or with
   `PHITEX_NO_UPDATE_CHECK=1`. The editor extension shows the same news
   through `phitex/status` (§7).
-- **The request** is one GET of `https://phitex.org/news.json` with
+- **The request** is one GET of `https://phitex.org/news.json` (then
+  `https://phitex-org.pages.dev/news.json` where phitex.org is not
+  reached) with
   `User-Agent: phitex/<version>`. No identifiers, no query string.
 
 ## 5. Configuration compatibility
