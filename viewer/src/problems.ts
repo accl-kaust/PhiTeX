@@ -16,6 +16,8 @@ export interface Problem {
   file: string | null;
   line: number | null;
   col: number | null;
+  /** The culprit's bytes in `file` (the engine's problems): its boxes on the pages, PreviewSession.boxesOf. */
+  range?: [number, number];
   /** The line as far as TeX read it and after, the culprit at [start, start+len) (characters). */
   excerpt: { text: string; start: number; len: number } | null;
   /** The macros it happened in, innermost first. */

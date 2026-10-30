@@ -234,6 +234,9 @@ pub fn diagnostics(s: &Session, r: &Report, log: &str) -> Vec<Value> {
                     "suggestions": [],
                     "file": p.file,
                     "line": d.line,
+                    // (the culprit's bytes in its file: the viewer's
+                    // underline on the pages, `boxesOf`)
+                    "range": [d.range.0, d.range.1],
                     "col": excerpt.as_ref().map(|_| chars(p.start) + 1),
                     "excerpt": excerpt,
                     "context": [],
