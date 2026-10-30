@@ -121,10 +121,12 @@ and XeLaTeX, built by graph reduction, with exact output.
 - **LuaLaTeX** (`luatex`, `lualatex`): rejected with an error.
 - **XeLaTeX's edit speed** (the user's decision of 2026-10-30: recorded,
   not gated, for 1.61): on a two-column paper with line numbers (the
-  user's, 18 pages, 16 threads) a letter takes 29-66 ms and a line
-  break about 65 ms against the 16 ms bar; a space is 4-5 ms. Such
-  layouts take every line apart on each page, so a letter rebuilds its
-  page. Each edit's PDF equals a cold build of the edited file.
+  user's, 18 pages, 16 threads, release build, medians of 20) a space
+  takes 4.3 ms, a letter 37 ms and a line break 68 ms against the 16 ms
+  bar, and a word 56 ms against 50 ms. Such layouts take every line
+  apart on each page, so a letter rebuilds its page. Each edit's PDF
+  equals a cold build of the edited file (80 of 80, mc 77010). Its cold
+  build takes 41 s at 16 threads against latexmk -xelatex's 37 s.
 - **XeLaTeX's first build in the browser** makes the format there (a
   minute or more) until the web build ships it prebuilt, as it does
   pdfLaTeX's.
