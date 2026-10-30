@@ -364,11 +364,15 @@ document.head.append(Object.assign(document.createElement("style"), {
 @media (prefers-color-scheme: dark) {
   #phx-pick, #phx-bar, #phx-con { --bg: #1b212b; --fg: #e7e9ee; --fg2: #98a1b0; --line: #262d38; --hover: #222935; --danger: #f0786d; --warning: #e5a54b; --accent: #8fb3ec; color-scheme: dark; }
 }
-#phx-pick { position: fixed; z-index: 20; top: 44px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; overflow: auto;
+#phx-pick { position: fixed; z-index: 20; top: 44px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; display: flex; flex-direction: column; overflow: hidden;
   background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgb(0 0 0 / 25%); }
-#phx-pick header { display: flex; align-items: baseline; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); }
-#phx-pick header small { color: var(--fg2); font-size: 12px; }
-#phx-pick header button { margin-left: auto; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+#phx-pick[hidden] { display: none; }
+/* (the title and Close on one line, the hint under them; the commits scroll in their own box below, never under the header) */
+#phx-pick header { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 10px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--bg); }
+#phx-pick header b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#phx-pick header small { grid-column: 1 / -1; color: var(--fg2); font-size: 12px; }
+#phx-pick .phx-commits { flex: 1; min-height: 0; }
+#phx-pick header button { grid-row: 1; grid-column: 2; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
 #phx-pick header button:hover { background: var(--hover); }`,
 }));
 let pick: HTMLElement | undefined;
