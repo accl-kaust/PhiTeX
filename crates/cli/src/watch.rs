@@ -704,6 +704,23 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     } else if o.view {
         match View::start(editor, o.port) {
             Ok(v) => {
+                // (the viewer's Clear cache: its size, emptied as
+                // `phitex clean --all` empties it)
+                let limit = t.cache_limit;
+                v.on_cache(Box::new(move |clear| {
+                    let c = crate::cache::Cache::open(limit)?;
+                    let freed = if clear {
+                        c.clear_all().map_err(|e| format!("the cache: {e}"))?
+                    } else {
+                        0
+                    };
+                    Ok(serde_json::json!({
+                        "bytes": c.usage(),
+                        "limit": c.limit,
+                        "dir": crate::cache::home_relative(&c.dir),
+                        "freed": freed,
+                    }))
+                }));
                 // (the diff's picker: the project's git history)
                 let here = root.clone();
                 v.on_log(Box::new(move |skip, limit| {

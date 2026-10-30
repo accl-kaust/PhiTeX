@@ -51,6 +51,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The cache's account, emptied first when asked ([`Viewer::on_cache`]).
+pub type CacheFn = Box<dyn Fn(bool) -> Result<Value, String> + Send>;
+
 /// What a build left, for the viewer.
 pub struct Built {
     /// The PDF to show (none: no pages, or a DVI that dvipdfmx refused).
@@ -196,6 +199,9 @@ pub struct Viewer {
     transcript: Mutex<(Arc<str>, u64)>,
     /// The builds announced ([`Viewer::built`]).
     builds: std::sync::atomic::AtomicU64,
+    /// The cache's size and limit, emptied when asked (the `cache` op:
+    /// the viewer's Clear cache; the host's).
+    cache: Mutex<Option<CacheFn>>,
     /// The commits of the project's history (the diff's picker).
     log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
     /// Shows a source place (file, line, column from 1, and the place as
@@ -230,6 +236,7 @@ impl Default for Viewer {
             diff: Mutex::new(Diff::default()),
             transcript: Mutex::new((Arc::from(""), u64::MAX)),
             builds: std::sync::atomic::AtomicU64::new(0),
+            cache: Mutex::new(None),
             log: Mutex::new(None),
             goto: Mutex::new(None),
             select: Mutex::new(None),
@@ -480,6 +487,12 @@ impl Viewer {
     pub fn set_transcript(&self, text: &str) {
         let n = self.builds.load(Ordering::Relaxed);
         *lock(&self.transcript) = (Arc::from(text), n);
+    }
+
+    /// The cache's account for the `cache` op (`true`: emptied first):
+    /// `{bytes, limit, dir, freed}`.
+    pub fn on_cache(&self, cache: CacheFn) {
+        *lock(&self.cache) = Some(cache);
     }
 
     pub fn on_log(&self, log: Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>) {
@@ -815,6 +828,14 @@ impl Viewer {
                 let c = lock(&s.console);
                 ok(json!({"items": c.0.iter().collect::<Vec<_>>(), "status": c.1}))
             }
+            "cache" => {
+                let clear = req.get("clear").and_then(Value::as_bool).unwrap_or(false);
+                match lock(&s.cache).as_ref().map(|f| f(clear)) {
+                    Some(Ok(v)) => ok(v),
+                    Some(Err(e)) => fail(&e),
+                    None => fail("no cache here"),
+                }
+            }
             "diff" => ok(lock(&s.diff).state.clone()),
             "diff_log" => {
                 let skip = req.get("skip").and_then(index).unwrap_or(0);
@@ -991,6 +1012,21 @@ mod tests {
     /// A selection on the pages (the `select` op, bytes) reaches the host
     /// as lines and columns, for the editor to select; a name outside the
     /// project is refused.
+    #[test]
+    fn cache_op_is_the_hosts() {
+        let v = Viewer::default();
+        let ask = |clear: bool| -> Value {
+            serde_json::from_str(&v.answer(&json!({"id": 1, "op": "cache", "clear": clear})))
+                .unwrap()
+        };
+        assert_eq!(ask(false)["ok"], false, "no cache: refused");
+        v.on_cache(Box::new(|clear| {
+            Ok(json!({"bytes": if clear { 0 } else { 42 }, "freed": if clear { 42 } else { 0 }}))
+        }));
+        assert_eq!(ask(false)["json"]["bytes"], 42);
+        assert_eq!(ask(true)["json"]["freed"], 42);
+    }
+
     #[test]
     fn log_op_is_made_when_asked() {
         let v = Viewer::default();

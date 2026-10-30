@@ -1203,6 +1203,26 @@ export class PreviewSession {
     return null;
   }
 
+  /**
+   * The boxes of [`start`, `end`) (bytes, as a problem's range) of `file` on
+   * the pages: the culprit under a problem's wavy underline. From the pages'
+   * glyphs, the page in view first and the rest asked for as needed; [] where
+   * none of it is typeset.
+   */
+  async boxesOf(file: string, start: number, end: number): Promise<{ k: number; boxes: [number, number, number, number][] }[]> {
+    if (!this.opened) return [];
+    const n = Math.max(this.hashes.length, this.pages, 1);
+    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
+    const out: { k: number; boxes: [number, number, number, number][] }[] = [];
+    for (const k of order) {
+      if (k >= this.hashes.length) continue;
+      const all = this.cached(k) ?? (await this.glyphsOf(k));
+      const hit = from(all, file, start, Math.max(end, start + 1));
+      if (hit.length) out.push({ k, boxes: boxes(hit, all) });
+    }
+    return out.sort((x, y) => x.k - y.k);
+  }
+
   /** The place `pos` (UTF-16) in `file`: its line's glyphs highlighted on the page (the page in view first). */
   async toPage(file: string, pos: number): Promise<void> {
     if (!this.opened || !(file in this.files)) return;

@@ -80,3 +80,24 @@ test("collaborators' cursors mark their words on the pages, apart from the user'
   s.others("main.tex", []);
   assert.deepEqual(last(), []);
 });
+
+// A problem's culprit on the pages (the wavy underline): its bytes' glyphs,
+// on every page that typesets them.
+test("a range's boxes on the pages", async () => {
+  let open!: (f: string, t: string) => void;
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: (cb) => (open = cb), onChanges: () => undefined };
+  const core = { request: async () => ({ ok: false }) };
+  const sink = new Proxy({}, { get: () => () => undefined });
+  const s = new PreviewSession(host, core as never, sink as never, { schedule: () => undefined });
+  open("main.tex", "hello \\oops world\n");
+  const w = s as unknown as { opened: boolean; hashes: string[]; glyphCache: Map<string, unknown[]> };
+  w.opened = true;
+  w.hashes = ["a"];
+  const g = (i: number) => ({ x: 72 + 6 * i, y: 100, file: "main.tex", start: i, end: i + 1, synth: false });
+  w.glyphCache.set("0:a", [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 12, 13].map(g));
+  const got = await s.boxesOf("main.tex", 6, 11);
+  assert.equal(got.length, 1);
+  assert.equal(got[0].k, 0);
+  assert.ok(got[0].boxes.length > 0);
+  assert.deepEqual(await s.boxesOf("other.tex", 0, 3), []);
+});
