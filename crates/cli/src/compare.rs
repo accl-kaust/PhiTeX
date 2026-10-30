@@ -148,6 +148,9 @@ pub struct Compare {
     pub pdf: Option<Arc<[u8]>>,
     pub hashes: Vec<u64>,
     pub report: Option<Report>,
+    /// The diff's pages' glyph origins, mapped to the user's files through
+    /// the diff's map (follow, selection, a double-click on its pages).
+    pub origins: Option<phitex_live::view::Origins>,
     /// The diff's own outputs written (`JOB-diff.*`), for the watcher.
     pub wrote: Vec<(PathBuf, u64)>,
 }
@@ -216,6 +219,7 @@ impl Compare {
             pdf: None,
             hashes: Vec::new(),
             report: None,
+            origins: None,
             wrote: Vec::new(),
         };
         let new = match to {
@@ -274,6 +278,58 @@ impl Compare {
             self.hashes.clone_from(&r.out.page_hashes);
         }
         self.report = Some(r);
+        self.origins = self.session.origins().map(|o| self.mapped(&o));
+    }
+
+    /// The diff build's origins `o` with each glyph of the marked-up text
+    /// at its place in the user's files (`DiffOut::source`: a run copied as
+    /// it is exactly, a change's markup at the change's place); the glyphs
+    /// of other files (a class, a package) kept; the head's, from no file.
+    fn mapped(&self, o: &phitex_live::view::Origins) -> phitex_live::view::Origins {
+        let d = self.live.out();
+        let main = self.session.job.path.file_name();
+        let is_main = |f: &str| Path::new(f).file_name() == main;
+        let mut files: Vec<String> = d.files.clone();
+        let mut index: Vec<u32> = Vec::with_capacity(o.files.len());
+        for f in &o.files {
+            if is_main(f) {
+                index.push(u32::MAX);
+            } else {
+                index.push(u32::try_from(files.len()).unwrap_or(u32::MAX));
+                files.push(f.clone());
+            }
+        }
+        let place = |out: u32| -> Option<(u32, u32)> {
+            let (f, at) = d.source(out as usize)?;
+            let k = d.files.iter().position(|x| x == f)?;
+            Some((u32::try_from(k).ok()?, u32::try_from(at).ok()?))
+        };
+        let pages = o
+            .pages
+            .iter()
+            .map(|p| {
+                p.as_ref().map(|p| {
+                    let mut q = (**p).clone();
+                    for i in 0..q.file.len() {
+                        match index.get(q.file[i] as usize) {
+                            Some(&u32::MAX) => match place(q.start[i]) {
+                                Some((k, a)) => {
+                                    let b = place(q.end[i].saturating_sub(1))
+                                        .filter(|&(k2, b)| k2 == k && b >= a)
+                                        .map_or(a + 1, |(_, b)| b + 1);
+                                    (q.file[i], q.start[i], q.end[i]) = (k, a, b);
+                                }
+                                None => q.file[i] = u32::MAX,
+                            },
+                            Some(&k) => q.file[i] = k,
+                            None => {}
+                        }
+                    }
+                    Arc::new(q)
+                })
+            })
+            .collect();
+        phitex_live::view::Origins { files, pages }
     }
 
     /// The marked-up document's errors, each as a compiler's report.

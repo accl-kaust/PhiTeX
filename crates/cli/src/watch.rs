@@ -237,7 +237,13 @@ fn diff_told(ui: &Ui, v: &View, ours: &Ours, c: Option<&crate::compare::Compare>
     let state = c.state(false);
     let n = state["changes"].as_array().map_or(0, Vec::len);
     let errors = state["errors"].as_u64().unwrap_or(0);
-    v.diff(state, c.pdf.clone(), c.hashes.clone(), c.tex.clone());
+    v.diff(
+        state,
+        c.pdf.clone(),
+        c.hashes.clone(),
+        c.tex.clone(),
+        c.origins.clone(),
+    );
     let st = ui.st;
     let mut line = format!(
         "diff {}: {n} change{}",

@@ -167,6 +167,9 @@ struct Diff {
     pdf: Option<Arc<[u8]>>,
     hashes: Vec<u64>,
     tex: Option<String>,
+    /// Its pages' glyph origins, in the user's files (the host maps them
+    /// through the diff's map): served while the diff is shown.
+    origins: Option<Origins>,
 }
 
 /// The pages of the last build.
@@ -501,12 +504,20 @@ impl Viewer {
 
     /// The diff is (still) under way: its state, PDF, pages and text; the
     /// browsers told, and given its pages if they are the ones shown.
-    pub fn diff(&self, state: Value, pdf: Option<Arc<[u8]>>, hashes: Vec<u64>, tex: String) {
+    pub fn diff(
+        &self,
+        state: Value,
+        pdf: Option<Arc<[u8]>>,
+        hashes: Vec<u64>,
+        tex: String,
+        origins: Option<Origins>,
+    ) {
         let mut d = lock(&self.diff);
         let redraw = d.shown && (d.hashes != hashes || d.pdf.is_none());
         d.pdf = pdf;
         d.hashes = hashes;
         d.tex = Some(tex);
+        d.origins = origins;
         d.state = state;
         let shown = d.shown;
         if let Some(o) = d.state.as_object_mut() {
@@ -940,6 +951,16 @@ impl Viewer {
 /// Page `k`'s characters with their sources (the module's `origins`):
 /// none where the build kept none.
 fn origins(s: &Viewer, k: usize, files_from: usize) -> Result<Value, String> {
+    // (the diff's pages while it is shown: their glyphs in the user's files)
+    {
+        let d = lock(&s.diff);
+        if d.shown {
+            return match &d.origins {
+                Some(o) => origins_json(o, k, files_from),
+                None => Err("the diff's origins are not made yet".into()),
+            };
+        }
+    }
     let p = lock(&s.pages);
     match &p.origins {
         Some(o) => origins_json(o, k, files_from),
