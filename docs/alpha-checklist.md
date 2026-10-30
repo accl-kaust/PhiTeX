@@ -12,8 +12,9 @@ the one that will become `main`.
 
 - **Speed:** the user is satisfied with today's speed for the alpha on
   plain TeX and LaTeX. §3's scaling bars and §4's amsldoc edit bars are
-  measured and recorded, not gated. XeLaTeX's edit speed (§4b) still
-  has to improve before the alpha.
+  measured and recorded, not gated. XeLaTeX's edit speed (§4b) is
+  deferred too (the user, 2026-10-30): recorded, not gated, for 1.61;
+  each edit's PDF equalling a cold build stays a gate.
 - **The intermittents** of issue #3 (linkloop's object number, the
   paragraph printed twice once in 600, the rare stale folds, the
   load-dependent lock-wait test, the absorb test's timing) are waived
