@@ -77,6 +77,20 @@ test("collaborators' cursors mark their words on the pages, apart from the user'
   assert.deepEqual(last().map((m) => [m.k, m.label]), [[1, "Ann"], [0, "Bo"]]);
   // (never the user's own mark, which scrolls)
   assert.deepEqual(marked, []);
+  // (a build makes page 1 again: its new hash's glyphs not here yet, Ann
+  // keeps her mark, no blink; they come and she is drawn from them)
+  const before = last()[0];
+  w.hashes = ["a", "c"];
+  w.drawPeers();
+  assert.deepEqual(last().map((m) => [m.k, m.label]), [[1, "Ann"], [0, "Bo"]]);
+  assert.deepEqual(last()[0], before);
+  w.glyphCache.set("1:c", [6, 7, 8, 9, 10].map((i) => ({ ...g(i), x: 80 + 6 * i })));
+  w.drawPeers();
+  assert.notDeepEqual(last()[0].boxes, before.boxes);
+  // (her page here and her word not on it: dropped)
+  w.glyphCache.set("1:c", [18, 19].map(g));
+  w.drawPeers();
+  assert.deepEqual(last().map((m) => m.label), ["Bo"]);
   s.others("main.tex", []);
   assert.deepEqual(last(), []);
 });

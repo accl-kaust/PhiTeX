@@ -164,6 +164,8 @@ export type CursorEvent =
   | { event: "select"; file: string; from: number; to: number };
 
 export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | { event: "building"; on: boolean } | { event: "preparing"; on: boolean } | { event: "settled" } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
+/** A collaborator's mark: its page, its glyphs' boxes, their label and hue. */
+type Peer = { k: number; boxes: [number, number, number, number][]; label: string; hue: number };
 
 export interface CoreTransport {
   request(req: CoreReq): Promise<CoreRes>;
@@ -1092,29 +1094,47 @@ export class PreviewSession {
   }
   private peers: { file: string; label: string; hue: number; pos: number }[] = [];
 
-  /** The collaborators' marks, from the glyphs already here. */
+  /**
+   * The collaborators' marks, from the glyphs already here. A collaborator
+   * not found whose last mark is on a page made again, its glyphs not here
+   * yet (a build: the page's new hash), keeps that mark until they come
+   * ([`peerPages`] asks for them): dropped and drawn again a round trip
+   * later, it blinked at every build.
+   */
   private drawPeers(): void {
     if (!this.sink.others || !this.opened) return;
-    const out: { k: number; boxes: [number, number, number, number][]; label: string; hue: number }[] = [];
+    const out: Peer[] = [];
+    const drawn = new Map<string, Peer>();
     for (const p of this.peers) {
       const t = this.files[p.file];
       if (t === undefined) continue;
+      const id = `${p.label}\u0000${p.hue}`;
       const { at, word, line } = place(t, p.pos);
+      let e: Peer | undefined;
       for (let k = 0; k < this.hashes.length; k++) {
         const all = this.cached(k);
         const hit = all ? this.wordOn(all, p.file, at, word, line) : [];
         if (!all || !hit.length) continue;
-        out.push({ k, boxes: boxes(hit, all), label: p.label, hue: p.hue });
+        e = { k, boxes: boxes(hit, all), label: p.label, hue: p.hue };
         break;
       }
+      const was = this.peersDrawn.get(id);
+      if (!e && was && was.k < this.hashes.length && !this.cached(was.k)) e = was;
+      if (!e) continue;
+      out.push(e);
+      drawn.set(id, e);
     }
+    this.peersDrawn = drawn;
     this.sink.others(out);
   }
+  /** The collaborators' marks last drawn, by label and hue. */
+  private peersDrawn = new Map<string, Peer>();
 
-  /** The glyphs of the pages around the one in view asked for, then the collaborators drawn again. */
+  /** The glyphs of the pages around the one in view, and of those a collaborator's kept mark is on, asked for, then the collaborators drawn again. */
   private async peerPages(): Promise<void> {
     if (!this.peers.length || !this.sink.others) return;
-    const ks = [this.page, this.page + 1, this.page - 1].filter((k) => k >= 0 && k < this.hashes.length && !this.cached(k));
+    const near = [this.page, this.page + 1, this.page - 1, ...[...this.peersDrawn.values()].map((e) => e.k)];
+    const ks = [...new Set(near)].filter((k) => k >= 0 && k < this.hashes.length && !this.cached(k));
     if (!ks.length) return;
     await Promise.all(ks.map((k) => this.glyphsOf(k)));
     this.drawPeers();
@@ -1407,6 +1427,7 @@ export class PreviewSession {
         this.setPages(hs.length);
         this.sink.layout?.(hs);
         this.drawPeers();
+        void this.peerPages();
         return;
       }
       case "progress":
