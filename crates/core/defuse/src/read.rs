@@ -435,6 +435,18 @@ pub(crate) fn apply_path(eng: &Engine, v: Option<ValueId>, p: PathId) -> Option<
     cur
 }
 
+/// Whether path `p` runs the client's code (a projection's step): a
+/// commit applies it after its segment's lock, never under it, where a
+/// projection's allocations would take the allocator's lock while the
+/// other threads wait for the segment.
+pub(crate) fn client_path(eng: &Engine, p: PathId) -> bool {
+    p != PathId::WHOLE
+        && p != SITE
+        && eng
+            .path_steps(p)
+            .is_some_and(|s| s.iter().any(|x| matches!(x, Step::Proj(_))))
+}
+
 /// `Reaching` through a path, `SITE` giving the defining node.
 pub(crate) fn through(eng: &Engine, r: Reaching, p: PathId) -> Option<ValueId> {
     if p == SITE {

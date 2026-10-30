@@ -1607,6 +1607,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         for (i, r) in rec.reads.iter().enumerate() {
             if let ReadKind::Field { f, at: Anchor::Me } = r.kind
                 && plain
+                && !read::client_path(eng, r.path)
                 && let Some((_, d)) = Segment::reaching(&inner, f, pos, false)
             {
                 if refuted.is_none() && through(eng, Reaching::of(&d.plain(&eng.values)), r.path) != r.seen {
@@ -2134,13 +2135,15 @@ fn walk_here(
                 let here = (inner.nodes.get(&ap) == Some(&r.anchor))
                     .then(|| Segment::reaching(inner, f, ap, r.inclusive))
                     .flatten();
+                // (one read through the client's projection: asked again
+                // after the lock, `read::client_path`)
                 match here {
-                    Some((_, d)) => {
+                    Some((_, d)) if !read::client_path(eng, r.path) => {
                         if through(eng, Reaching::of(&d.plain(&eng.values)), r.path) != r.seen {
                             wake.push((r.node, by, f));
                         }
                     }
-                    None => later.push((f, r.clone(), by)),
+                    _ => later.push((f, r.clone(), by)),
                 }
             }
         }
