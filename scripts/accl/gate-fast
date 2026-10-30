@@ -379,7 +379,7 @@ table() {
     done
   done
   for d in "${dirs[@]}"; do
-    if [ -s "$d/known-red.txt" ]; then sed "s/^/  [known red, corpus fixture] /" "$d/known-red.txt"; fi
+    if [ -s "$d/known-red.txt" ]; then sed "s/^/  [known red, $(cut -d' ' -f1 "$d/shard.txt" 2>/dev/null)] /" "$d/known-red.txt"; fi
   done
   echo
   for d in "${dirs[@]}"; do

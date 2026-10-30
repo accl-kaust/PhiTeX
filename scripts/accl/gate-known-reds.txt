@@ -1,0 +1,6 @@
+# The tests shard's known reds (gate-shard.sh tests): a test named here
+# that fails is reported apart (known-red.txt), not red. Only the
+# intermittents of issue #3, waived for the alpha by the user's decision
+# of 2026-10-29 (docs/alpha-checklist.md §0), each by its exact name as
+# the shard names it (PACKAGE--TARGET::TEST), a tab, and its cause.
+phitex-cli--cli::watch_absorbs_an_edit_during_the_cold_build	issue #3 item 6: the cold build ends (about 205 ms) before the test's writer first writes (300 ms), so it absorbs nothing; the test's timing assumption, not the watch
