@@ -89,7 +89,7 @@ header:active { cursor: grabbing; }
 .win.docked:not(.own-header) > .bar { display: none; }
 .ib { all: unset; box-sizing: border-box; height: 26px; min-width: 26px; padding: 0 5px; display: inline-flex; align-items: center; justify-content: center;
   gap: 4px; border-radius: var(--ph-radius); cursor: pointer; color: var(--ph-fg2); white-space: nowrap; }
-.ib:hover, .ib[aria-expanded="true"] { background: var(--ph-hover); color: var(--ph-fg); }
+.ib:hover, .ib[aria-expanded="true"], .ib[aria-pressed="true"] { background: var(--ph-hover); color: var(--ph-fg); }
 .ib:disabled { opacity: .4; cursor: default; }
 .ib:focus-visible { outline: 2px solid var(--ph-link); }
 .split { display: inline-flex; height: 24px; flex: none; border-radius: var(--ph-pill); overflow: hidden; background: var(--ph-accent); color: var(--ph-accent-fg); }

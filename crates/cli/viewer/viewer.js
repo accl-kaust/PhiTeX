@@ -627,7 +627,7 @@ header:active { cursor: grabbing; }
 .win.docked:not(.own-header) > .bar { display: none; }
 .ib { all: unset; box-sizing: border-box; height: 26px; min-width: 26px; padding: 0 5px; display: inline-flex; align-items: center; justify-content: center;
   gap: 4px; border-radius: var(--ph-radius); cursor: pointer; color: var(--ph-fg2); white-space: nowrap; }
-.ib:hover, .ib[aria-expanded="true"] { background: var(--ph-hover); color: var(--ph-fg); }
+.ib:hover, .ib[aria-expanded="true"], .ib[aria-pressed="true"] { background: var(--ph-hover); color: var(--ph-fg); }
 .ib:disabled { opacity: .4; cursor: default; }
 .ib:focus-visible { outline: 2px solid var(--ph-link); }
 .split { display: inline-flex; height: 24px; flex: none; border-radius: var(--ph-pill); overflow: hidden; background: var(--ph-accent); color: var(--ph-accent-fg); }
@@ -1550,6 +1550,7 @@ var Panel = class {
 <div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
+    <button type="button" class="ib" id="b-side" title="Contents (t)" aria-label="Contents" aria-pressed="false"><span class="icon">toc</span></button>
     <span class="split" id="split"><button type="button" class="go" id="go" title="Build again with the files as they are (builds run by themselves as you type)"><span class="icon">refresh</span><span class="wide">Rebuild</span></button><button type="button" class="more" id="b-rec" aria-haspopup="menu" aria-expanded="false" title="More ways to build" aria-label="More ways to build"><span class="icon">expand_more</span></button></span>
     <button type="button" class="status" id="st" aria-haspopup="dialog" aria-expanded="false" title="The last build's times"><b id="sttext">Starting\u2026</b><span id="stmore"></span></button>
     <span class="grow"></span>
@@ -1624,7 +1625,7 @@ var Panel = class {
     offer(".if-compare, #b-compare, #x-compare", !!ev.onCompare);
     offer(".if-cache", !!ev.onClearCache);
     offer("#x-log", !!ev.onLog);
-    offer("#x-contents", !!opts.outline);
+    offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
     offer("#b-find, #x-find", !!ev.onFind);
     offer("#dbg, #dbglabel", !!ev.onDebug);
@@ -1650,7 +1651,7 @@ var Panel = class {
     this.$("#r-cache").onclick = () => (this.menu(null), ev.onClearCache?.());
     this.$("#pdf").onclick = this.$("#x-pdf").onclick = () => (this.menu(null), ev.onPdf());
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
-    this.$("#x-contents").onclick = () => (this.menu(null), this.side());
+    this.$("#x-contents").onclick = this.$("#b-side").onclick = () => (this.menu(null), this.side());
     this.$("#x-find").onclick = this.$("#b-find").onclick = () => (this.menu(null), this.find(true));
     this.$("#x-tips").onclick = () => (this.menu(null), this.tips(true));
     this.$("#x-keys").onclick = () => {
@@ -1943,7 +1944,7 @@ var Panel = class {
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet", err = !!errs;
     else if (!this.last && this.viewer.pages === 0) t = this.stepNow || "Opening\u2026";
     else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, err = true;
-    else if (this.speed?.first) t = "First build", m = `${(this.speed.ms / 1e3).toFixed(this.speed.ms < 1e4 ? 1 : 0)} s`;
+    else if (this.speed?.first) t = "First build", m = this.speed.ms < 1e3 ? `${Math.round(this.speed.ms)} ms` : `${(this.speed.ms / 1e3).toFixed(this.speed.ms < 1e4 ? 1 : 0)} s`;
     else t = "Built", m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
     text.textContent = t;
     more.textContent = m ? `\xB7 ${m}` : "";
@@ -2253,12 +2254,17 @@ var Panel = class {
     if (performance.now() - this.animSince < 400) return this.stopSheet();
     this.ending = true;
     const el = this.$("#opening");
-    requestAnimationFrame(() => {
+    const follow = () => {
+      if (!this.ending) return;
       const slot = this.$("#viewer").querySelector(".slot");
       if (slot) {
         const r = slot.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
         Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${r.top - b.top}px`, width: `${r.width}px`, height: `${r.height}px` });
       }
+      requestAnimationFrame(follow);
+    };
+    requestAnimationFrame(() => {
+      follow();
       el.classList.add("in");
       setTimeout(() => {
         void this.anim?.done().then(() => this.stopSheet());
@@ -2446,13 +2452,18 @@ var Panel = class {
   /** The contents shown or hidden (remembered on this machine). */
   side(on = !this.win.classList.contains("side-on")) {
     if (!this.contents) return;
-    this.win.classList.toggle("side-on", on);
+    this.sideOn(on);
     if (on) this.ev.onContents?.();
     try {
       localStorage.setItem("phitex.side", on ? "1" : "0");
     } catch {
     }
     if (this.prefs.zoom === "fit") this.redraw();
+  }
+  /** The column's class and the bar's button pressed with it. */
+  sideOn(on) {
+    this.win.classList.toggle("side-on", on);
+    this.$("#b-side").setAttribute("aria-pressed", String(on));
   }
   /** A button of the host's in the bar, before find (the CLI's own). */
   headerButton(label, title, onclick) {
@@ -2480,7 +2491,7 @@ var Panel = class {
         on = localStorage.getItem("phitex.side") !== "0";
       } catch {
       }
-      this.win.classList.toggle("side-on", on);
+      this.sideOn(on);
       this.noOutline(true);
     }
     if (!opts.keys) return;

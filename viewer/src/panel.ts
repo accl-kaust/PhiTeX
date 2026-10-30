@@ -303,6 +303,7 @@ export class Panel {
 <div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
+    <button type="button" class="ib" id="b-side" title="Contents (t)" aria-label="Contents" aria-pressed="false"><span class="icon">toc</span></button>
     <span class="split" id="split"><button type="button" class="go" id="go" title="Build again with the files as they are (builds run by themselves as you type)"><span class="icon">refresh</span><span class="wide">Rebuild</span></button><button type="button" class="more" id="b-rec" aria-haspopup="menu" aria-expanded="false" title="More ways to build" aria-label="More ways to build"><span class="icon">expand_more</span></button></span>
     <button type="button" class="status" id="st" aria-haspopup="dialog" aria-expanded="false" title="The last build's times"><b id="sttext">Starting…</b><span id="stmore"></span></button>
     <span class="grow"></span>
@@ -379,7 +380,7 @@ export class Panel {
     offer(".if-compare, #b-compare, #x-compare", !!ev.onCompare);
     offer(".if-cache", !!ev.onClearCache);
     offer("#x-log", !!ev.onLog);
-    offer("#x-contents", !!opts.outline);
+    offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
     offer("#b-find, #x-find", !!ev.onFind);
     offer("#dbg, #dbglabel", !!ev.onDebug);
@@ -406,7 +407,7 @@ export class Panel {
     this.$("#r-cache").onclick = () => (this.menu(null), ev.onClearCache?.());
     this.$("#pdf").onclick = this.$("#x-pdf").onclick = () => (this.menu(null), ev.onPdf());
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
-    this.$("#x-contents").onclick = () => (this.menu(null), this.side());
+    this.$("#x-contents").onclick = this.$("#b-side").onclick = () => (this.menu(null), this.side());
     this.$("#x-find").onclick = this.$("#b-find").onclick = () => (this.menu(null), this.find(true));
     this.$("#x-tips").onclick = () => (this.menu(null), this.tips(true));
     this.$("#x-keys").onclick = () => {
@@ -732,7 +733,7 @@ export class Panel {
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) (t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet"), (err = !!errs);
     else if (!this.last && this.viewer.pages === 0) t = this.stepNow || "Opening…";
     else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (err = true);
-    else if (this.speed?.first) (t = "First build"), (m = `${(this.speed.ms / 1000).toFixed(this.speed.ms < 10000 ? 1 : 0)} s`);
+    else if (this.speed?.first) (t = "First build"), (m = this.speed.ms < 1000 ? `${Math.round(this.speed.ms)} ms` : `${(this.speed.ms / 1000).toFixed(this.speed.ms < 10000 ? 1 : 0)} s`);
     else (t = "Built"), (m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "");
     text.textContent = t;
     more.textContent = m ? `· ${m}` : "";
@@ -1090,12 +1091,18 @@ export class Panel {
     if (performance.now() - this.animSince < 400) return this.stopSheet();
     this.ending = true;
     const el = this.$("#opening");
-    requestAnimationFrame(() => {
+    // (each frame until it is gone: the page moves under it when the contents' column comes in meanwhile, the first outline)
+    const follow = () => {
+      if (!this.ending) return;
       const slot = this.$("#viewer").querySelector<HTMLElement>(".slot");
       if (slot) {
         const r = slot.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
         Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${r.top - b.top}px`, width: `${r.width}px`, height: `${r.height}px` });
       }
+      requestAnimationFrame(follow);
+    };
+    requestAnimationFrame(() => {
+      follow();
       el.classList.add("in");
       setTimeout(() => {
         void this.anim?.done().then(() => this.stopSheet());
@@ -1308,7 +1315,7 @@ export class Panel {
   /** The contents shown or hidden (remembered on this machine). */
   side(on = !this.win.classList.contains("side-on")): void {
     if (!this.contents) return;
-    this.win.classList.toggle("side-on", on);
+    this.sideOn(on);
     // (the outline is asked for only while it is shown: opened, now)
     if (on) this.ev.onContents?.();
     try {
@@ -1317,6 +1324,12 @@ export class Panel {
       /* (no storage: not remembered) */
     }
     if (this.prefs.zoom === "fit") this.redraw();
+  }
+
+  /** The column's class and the bar's button pressed with it. */
+  private sideOn(on: boolean): void {
+    this.win.classList.toggle("side-on", on);
+    this.$("#b-side").setAttribute("aria-pressed", String(on));
   }
 
   /** A button of the host's in the bar, before find (the CLI's own). */
@@ -1348,7 +1361,7 @@ export class Panel {
       } catch {
         /* (shown) */
       }
-      this.win.classList.toggle("side-on", on);
+      this.sideOn(on);
       // (no outline until one arrives: no empty column while the first build runs)
       this.noOutline(true);
     }
