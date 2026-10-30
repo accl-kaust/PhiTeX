@@ -686,23 +686,35 @@ fn file_bounds(eng: &Engine, f: Field, k: RangeKey, r: &RangeReader) -> bool {
     ok
 }
 
-/// Whether a range reader's range covers `at`.
-fn covers(eng: &Engine, r: &RangeReader, at: Pos) -> bool {
-    let me = eng.node(r.node);
-    let from = match r.from {
-        Some(n) => eng.node(n).pos_hint(),
-        None => read::unit_start(eng, me),
-    };
-    if at <= from {
-        return false;
-    }
-    match r.to {
-        Some(n) => {
-            let t = eng.node(n).pos_hint();
-            if r.next || r.incl { at <= t } else { at < t }
+/// Whether a range reader's range covers `by`'s label (`at` where `by`
+/// is off the line, or where `fixed`: its old label, `relocate`), on one
+/// layout (`read::on_one_layout`): the labels of
+/// `by` and of the range's ends taken under their segments' locks, and
+/// taken again if one of those segments moved meanwhile. (Labels taken
+/// one by one without a lock, a relabel between them compared an old
+/// label with a new one: a contribution before a reader's end taken for
+/// one after it, the reader never re-asked; linkif's \pdflastlink read
+/// with no page's objects before it, issue #5.)
+fn covers(eng: &Engine, r: &RangeReader, by: NodeId, at: Pos, fixed: bool) -> bool {
+    let label = |n: NodeId| read::pos_of(eng, n).unwrap_or_else(|| eng.node(n).pos_hint());
+    read::on_one_layout(eng, || {
+        let at = if fixed { at } else { read::pos_of(eng, by).unwrap_or(at) };
+        let me = eng.node(r.node);
+        let from = match r.from {
+            Some(n) => label(n),
+            None => read::unit_start(eng, me),
+        };
+        if at <= from {
+            return false;
         }
-        None => r.next || at < me.pos_hint(),
-    }
+        match r.to {
+            Some(n) => {
+                let t = label(n);
+                if r.next || r.incl { at <= t } else { at < t }
+            }
+            None => r.next || at < label(r.node),
+        }
+    })
 }
 
 /// The node's label under `inner` if it is there, else its last known.
@@ -1058,8 +1070,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     // (the bound's label and the search from it on one
                     // layout, `read::on_one_layout`)
                     let n = read::on_one_layout(eng, || {
+                        // (the bound's label taken under its segment's
+                        // lock, the segment met; a bound gone: its last)
                         let from = match after {
-                            Some(n) => Some(eng.node(*n).pos_hint()),
+                            Some(n) => Some(read::pos_of(eng, *n).unwrap_or_else(|| eng.node(*n).pos_hint())),
                             None => Some(read::unit_start(eng, node)),
                         };
                         next_contribution(eng, *f, from)
@@ -2710,16 +2724,23 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
 /// label (its last where it is gone).
 pub(crate) fn reask_ranges(eng: &Engine, w: Option<&Worker>, f: Field, at: Pos, by: NodeId, st: &mut CommitStats) {
     let at = read::pos_of(eng, by).unwrap_or(at);
-    reask_ranges_at(eng, w, f, at, by, st);
+    reask_ranges_in(eng, w, f, at, by, false, st);
 }
 
 /// `reask_ranges` at label `at` whatever `by`'s label is now (its old
 /// one, `relocate`).
 fn reask_ranges_at(eng: &Engine, w: Option<&Worker>, f: Field, at: Pos, by: NodeId, st: &mut CommitStats) {
+    reask_ranges_in(eng, w, f, at, by, true, st);
+}
+
+/// The range readers holding `at` (the index's spans are segments',
+/// which a relabel keeps) whose range covers `by` ([`covers`]),
+/// re-asked.
+fn reask_ranges_in(eng: &Engine, w: Option<&Worker>, f: Field, at: Pos, by: NodeId, fixed: bool, st: &mut CommitStats) {
     let readers = eng.ranges.holding(f, at);
     let mut memo = read::FoldMemo::new();
     for (k, r) in readers {
-        if covers(eng, &r, at) {
+        if covers(eng, &r, by, at, fixed) {
             reask_range(eng, w, f, k, &r, by, st, &mut memo);
         }
     }
@@ -5143,5 +5164,86 @@ mod tests {
                 i.claimer.map(|n| n.raw())
             );
         }
+    }
+
+    /// A contribution's walk asks each range reader filed at its label
+    /// whether the reader's range covers it (`covers`), comparing its
+    /// label with the range's ends: while another thread fills a gap of
+    /// their segment and relabels it again and again, a contribution
+    /// before a reader's end is always found inside its range (labels
+    /// compared across a relabel took one before a reader for one after
+    /// it, and the reader was never re-asked: linkif's \pdflastlink read
+    /// with no page's objects before it, linkobj, read_time_numbers in
+    /// 1 of 10 suite runs on 8 CPUs, issue #5).
+    #[test]
+    fn a_contribution_before_a_readers_end_is_covered_while_labels_move() {
+        use crate::node::ReadKind;
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let e = Arc::new(Engine::new());
+        let text = e.register(Arc::new(Piece));
+        let u = e.new_unit();
+        let ids: Vec<NodeId> = (0..200).map(|i| e.push(u, text, vec![e.values().int(i)])).collect();
+        e.evaluate(1).expect("evaluated");
+        // (readers of the whole range up to themselves, each just after a
+        // contributor, as the pieces after a page's finisher)
+        let readers: Vec<super::RangeReader> = (0..10)
+            .map(|m| ids[141 + 2 * m])
+            .map(|n| super::RangeReader {
+                node: n,
+                serial: e.node(n).serial.load(Ordering::Acquire),
+                from: None,
+                to: None,
+                next: false,
+                incl: false,
+                hole: false,
+                seen: Arc::from([]),
+            })
+            .collect();
+        let stop = Arc::new(AtomicBool::new(false));
+        let mover = {
+            let (e, stop, ids) = (Arc::clone(&e), Arc::clone(&stop), ids.clone());
+            std::thread::spawn(move || {
+                let mut k = 0usize;
+                while !stop.load(Ordering::Acquire) {
+                    // (before the readers: their labels and the
+                    // contributors' move with each relabel)
+                    let at = ids[k.wrapping_mul(7919) % 150];
+                    let put: Vec<NodeId> = (0..24)
+                        .map(|_| e.insert_after(at, text, vec![e.values().int(-1)]))
+                        .collect();
+                    for n in put {
+                        e.remove(n);
+                    }
+                    k += 1;
+                }
+                k
+            })
+        };
+        let t0 = std::time::Instant::now();
+        let (mut asks, mut missed) = (0u64, 0u64);
+        let mut k = 0usize;
+        while t0.elapsed() < Duration::from_secs(2) {
+            // (as `reask_ranges_in` asks: the contributor's label, then for
+            // each reader filed there whether its range covers it, a
+            // re-ask's work between one and the next)
+            let m = k % 10;
+            k += 1;
+            let by = ids[140 + 2 * m];
+            let at = crate::read::pos_of(&e, by).expect("on the line");
+            for r in &readers[m..] {
+                asks += 1;
+                if !super::covers(&e, r, by, at, false) {
+                    missed += 1;
+                }
+                let _ = crate::read::answer(&e, e.node(r.node), &ReadKind::Hole, crate::api::PathId::WHOLE);
+            }
+        }
+        stop.store(true, Ordering::Release);
+        let moves = mover.join().expect("the moving thread");
+        assert!(moves > 0, "no move during {asks} asks");
+        assert_eq!(
+            missed, 0,
+            "{missed} of {asks} contributions before a reader missed during {moves} gap fills"
+        );
     }
 }
