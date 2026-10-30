@@ -206,6 +206,8 @@ header:active { cursor: grabbing; }
 .win.docked .stage { overflow-y: scroll; }
 .win.docked .viewer { min-height: 100%; }
 .stage.fit { overflow-x: hidden; }
+/* (the first page's sheet up: the stage holds still under it, its width kept, so nothing scrolls behind the sheet) */
+.win.sheet-up .stage, .win.docked.sheet-up .stage { overflow: hidden; scrollbar-gutter: stable; }
 .slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }

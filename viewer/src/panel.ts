@@ -1022,6 +1022,7 @@ export class Panel {
     const el = this.$("#opening");
     el.hidden = false;
     el.classList.remove("in");
+    this.win.classList.add("sheet-up");
     // (the opening's zoom: the whole page, unless the user chose one)
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
     this.fitSheet();
@@ -1074,6 +1075,7 @@ export class Panel {
     this.anim = null;
     this.ending = false;
     this.$("#opening").hidden = true;
+    this.win.classList.remove("sheet-up");
     if (was) {
       this.opened = true;
       this.stepNow = "";
