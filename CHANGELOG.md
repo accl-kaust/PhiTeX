@@ -7,11 +7,12 @@ run of that version, `phitex news` prints the whole entry, and the
 GitHub release's notes are the entry. The entries before 1.6 name
 milestones, not versions.
 
-## Alpha: plain TeX and LaTeX
+## Alpha: plain TeX, LaTeX and XeLaTeX
 
 The first build of PhiTeX meant for use: pdfTeX's plain TeX and LaTeX,
-built by graph reduction, with exact output. `docs/alpha-checklist.md`
-lists what has to be green before it reaches `main`.
+and XeLaTeX, built by graph reduction, with exact output.
+`docs/alpha-checklist.md` lists what has to be green before it reaches
+`main`.
 
 ### What works
 
@@ -65,6 +66,17 @@ lists what has to be green before it reaches `main`.
   Live needed. A plain pdfTeX document from the tl2026.6 release is
   byte-identical to the one from TeX Live; XeTeX's fonts by name come
   from the release's font index.
+- **XeLaTeX.** `xelatex` and `xetex`: OpenType and TrueType fonts by
+  name or file (fontspec, polyglossia, unicode-math), shaped by
+  HarfBuzz's Rust port, right-to-left scripts included. The PDF is
+  written from the pages directly, with no xdvipdfmx pass, and equals
+  xelatex's (its XDV through `xdvipdfmx -q -E`): 131 of 131 documents of
+  the XeTeX corpus (mc 76440). The same engine runs in the browser and
+  the editors' WebAssembly engine, its fonts from Shelf.
+- **SyncTeX.** `--synctex` writes `JOB.synctex.gz`, which TeX Live's
+  `synctex` tool reads as it reads pdflatex's. In the live viewer a
+  double-click on a word opens its place in the editor, and the editor's
+  cursor and selection are highlighted on the page.
 - **pdflatex's command line.** Under an engine's name, or with
   `--compat=NAME`, `phitex` takes web2c's options and makes one run, so
   latexmk, editors and scripts can call it as pdflatex.
@@ -85,33 +97,37 @@ lists what has to be green before it reaches `main`.
 - `-j` defaults to every logical CPU. `--help` describes the rounds, the
   tools, shell escape and the exit statuses.
 - `--shell-escape` sets `\pdfshellescape` to 1, as pdflatex does.
-  Without it, TeX Live's restricted mode (2) applies. No external program
-  runs in either mode.
+  Without it, TeX Live's restricted mode (2) applies. BibTeX, biber and
+  makeindex run in process; another allowed command runs as a process in
+  a scratch directory holding only the files PhiTeX hands it.
 - `--exact-pdf` is accepted and hidden: the PDF is always exact.
-- `--shelf` (or `files = "shelf"`): TeX's files from Shelf, from
-  `PHITEX_SHELF_URL`, kept in the cache; `phitex clean --all` empties
-  it with the rest.
-- SyncTeX is off by default (`--no-synctex` is the default) until PhiTeX
-  writes it. Before, every build printed a note that it was not written.
+- `--shelf` (or `files = "shelf"`): TeX's files from Shelf
+  (v1.shelf.phitex.org, else shelf-phitex-v1.pages.dev where a network
+  blocks the first; `PHITEX_SHELF_URL` for a mirror), kept in the cache;
+  `phitex clean --all` empties it with the rest.
+- `--synctex` (or `synctex = true`) writes the SyncTeX file; off by
+  default.
+- `--help` shows the common commands, `--help-all` every option.
+- `--report` writes `JOB.phitex-report.txt` for a bug report, with no
+  text of the document (`--report=full` adds the log and the sources).
+- `phitex news` prints this file's entry for the running version, said
+  once on its first run. The update check is off until the user sets
+  `update-check` (`phitex config update-check on`); every run says so
+  until then. `phitex upgrade` installs a newer release, its signature
+  (minisign) and checksum verified.
 
 ### Known not to work
 
-- **XeLaTeX and LuaLaTeX** (`xetex`, `xelatex`, `luatex`, `lualatex`):
-  rejected with an error.
-- **SyncTeX:** not written, and the live viewer has no links between
-  source and page yet (a double-click on a page opens nothing).
-- **Shelf's server:** no hosted server is the default yet (the user's
-  choice): `--shelf` needs `PHITEX_SHELF_URL` until the index and the
-  packs a document needs are in the cache. XeTeX over Shelf needs a
-  release made with its font index (`FONT_INDEX`) and with xdvipdfmx's
-  and TECkit's trees (`dvipdfmx/`, `fonts/misc/xetex/fontmapping`,
-  `fonts/cmap`, `fonts/sfd`); tl2026.6 has neither, so an XeTeX job with
-  `--shelf` is refused there, and its PDF version follows xdvipdfmx's
-  defaults instead of `dvipdfmx.cfg`'s.
-- **External programs:** `\write18` runs only bibtex, makeindex and,
-  with `--shell-escape`, biber, all in process. Every other command is
-  refused, so packages that run programs (minted, or xindy- and
-  Perl-based index and glossary tools) do not work.
+- **LuaLaTeX** (`luatex`, `lualatex`): rejected with an error.
+- **XeLaTeX's edit speed** (the user's decision of 2026-10-30: recorded,
+  not gated, for 1.61): on a two-column paper with line numbers (the
+  user's, 18 pages, 16 threads) a letter takes 29-66 ms and a line
+  break about 65 ms against the 16 ms bar; a space is 4-5 ms. Such
+  layouts take every line apart on each page, so a letter rebuilds its
+  page. Each edit's PDF equals a cold build of the edited file.
+- **XeLaTeX's first build in the browser** makes the format there (a
+  minute or more) until the web build ships it prebuilt, as it does
+  pdfLaTeX's.
 - **Interaction:** a build never stops for input. `-interaction` is
   accepted and checked, but every job runs to its end as in batch mode.
   A first line of TeX commands on the command line (`pdflatex
