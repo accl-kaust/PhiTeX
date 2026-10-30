@@ -227,6 +227,27 @@ export class Viewer {
     }
   }
 
+  /**
+   * Problems' culprits on the pages (the wavy underline): each box a
+   * `.culprit` of its severity, in fractions of its page's box; the whole
+   * set, the last one's replaced ([] clears). Never scrolls, never asks
+   * for a page: a page not drawn yet shows them when it is (paint keeps them).
+   */
+  culprits(marks: { k: number; boxes: [number, number, number, number][]; severity: "error" | "warning" }[]): void {
+    for (const m of this.root.querySelectorAll(".culprit")) m.remove();
+    const { w, h } = this.size;
+    for (const { k, boxes, severity } of marks) {
+      const s = this.slots[k];
+      if (!s) continue;
+      for (const [x, y, bw, bh] of boxes) {
+        const m = document.createElement("div");
+        m.className = `culprit ${severity}`;
+        Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        s.el.append(m);
+      }
+    }
+  }
+
   /** Highlight `boxes` ([x, y top, w, h], PDF points) on page `k`, scrolled into view, for a moment. */
   mark(k: number, boxes: [number, number, number, number][], scroll = true): void {
     const s = this.slots[k];
@@ -505,7 +526,7 @@ export class Viewer {
   private paint(s: Slot): void {
     if (!s.img) return;
     // (a highlight outlives the page drawn under it: put back after)
-    const marks = [...s.el.querySelectorAll(".mark, .peer")];
+    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit")];
     this.draw(s);
     for (const m of marks) if (!m.isConnected) s.el.append(m);
   }
