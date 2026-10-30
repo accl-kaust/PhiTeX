@@ -101,6 +101,31 @@ class Socket implements CoreTransport {
  * from the bands the watch draws, the page's text and links with them;
  * `outline` and every other request asked of the watch.
  */
+/** The watch's `settled` event: the build's time and parts (a failed build: since_ms, ms and history only). */
+type Settled = { since_ms?: number | null; ms?: number; history?: number; cold?: boolean; passes?: number; ran?: number; kept?: number; threads?: number; fetched?: number };
+
+const dur = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
+
+/** The timing popover's line and parts for a build (panel.latency: one part a line, its name and value two spaces apart). */
+function timing(s: Settled): [string, string] {
+  const ms = s.ms ?? 0;
+  const parts: [string, string | null][] = [
+    [s.cold ? "first build" : "build", `${dur(ms)}${s.cold ? " (the format, the packages, the whole document)" : ""}`],
+    ["save to build", typeof s.since_ms === "number" ? dur(s.since_ms) : null],
+    ["LaTeX runs", s.passes === undefined ? null : String(s.passes)],
+    ["steps", s.ran === undefined ? null : `${s.ran} run, ${s.kept ?? 0} kept from the last build`],
+    ["packages fetched", s.fetched ? String(s.fetched) : null],
+    ["threads", s.threads === undefined ? null : String(s.threads)],
+  ];
+  return [
+    s.cold ? `First build in ${dur(ms)}` : `Built in ${dur(ms)}`,
+    parts
+      .filter((p): p is [string, string] => p[1] !== null)
+      .map(([k, v]) => `${k.padEnd(17)}  ${v}`)
+      .join("\n"),
+  ];
+}
+
 class Pages implements CoreTransport {
   private sock: Socket;
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
@@ -113,8 +138,11 @@ class Pages implements CoreTransport {
     sock.onEvent((e) => {
       if (e.event !== "settled") return;
       this.texts = null;
-      const since = (e as { since_ms?: number | null }).since_ms;
-      this.change = typeof since === "number" ? { since, at: performance.now() } : null;
+      const s = e as Settled;
+      // (a cold build has no save before it: its first page is timed from the build's start, "First build · 14.9 s")
+      const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
+      this.change = since === null ? null : { since, at: performance.now() };
+      if (typeof s.ms === "number") panel.latency(...timing(s));
     });
   }
 

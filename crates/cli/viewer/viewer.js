@@ -5383,6 +5383,22 @@ var Socket = class {
     this.events.push(cb);
   }
 };
+var dur = (ms) => ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
+function timing(s) {
+  const ms = s.ms ?? 0;
+  const parts = [
+    [s.cold ? "first build" : "build", `${dur(ms)}${s.cold ? " (the format, the packages, the whole document)" : ""}`],
+    ["save to build", typeof s.since_ms === "number" ? dur(s.since_ms) : null],
+    ["LaTeX runs", s.passes === void 0 ? null : String(s.passes)],
+    ["steps", s.ran === void 0 ? null : `${s.ran} run, ${s.kept ?? 0} kept from the last build`],
+    ["packages fetched", s.fetched ? String(s.fetched) : null],
+    ["threads", s.threads === void 0 ? null : String(s.threads)]
+  ];
+  return [
+    s.cold ? `First build in ${dur(ms)}` : `Built in ${dur(ms)}`,
+    parts.filter((p) => p[1] !== null).map(([k, v]) => `${k.padEnd(17)}  ${v}`).join("\n")
+  ];
+}
 var Pages = class {
   sock;
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
@@ -5394,8 +5410,10 @@ var Pages = class {
     sock2.onEvent((e) => {
       if (e.event !== "settled") return;
       this.texts = null;
-      const since = e.since_ms;
-      this.change = typeof since === "number" ? { since, at: performance.now() } : null;
+      const s = e;
+      const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
+      this.change = since === null ? null : { since, at: performance.now() };
+      if (typeof s.ms === "number") panel.latency(...timing(s));
     });
   }
   async request(op) {
