@@ -12,7 +12,6 @@
   <a href="https://phitex.org"><b>phitex.org</b></a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#works-where-you-write">Editors</a> ·
-  <a href="#fast-measured">Numbers</a> ·
   <a href="#how-it-works">How it works</a>
 </p>
 
@@ -70,7 +69,7 @@ Paragraphs, pages and the PDF are built in parallel on every core, identical at 
 </td>
 </tr>
 </table>
-<!-- TODO(number): the tiles' figures (5 ms, the hash) come from assets/readme-art.html's FIG; set them from the perf run, then scripts/readme-art.sh -->
+<!-- TODO(number): the tiles' figures (5 ms, the hash) come from assets/readme-art.html's FIG; set them from a measured run, then scripts/readme-art.sh -->
 
 Plus: one build does what latexmk does, with BibTeX, biber and makeindex
 inside it; errors point at the line; and with `--synctex`, SyncTeX works
@@ -141,24 +140,6 @@ full rebuild would make.
 
 Checked on every change: amsldoc, the LaTeX manual, byte-identical to pdflatex at 1, 8 and 16 threads.
 <!-- TODO(number): the corpus size and pass rate for the wider claim · Phi -->
-
-## Fast, measured
-
-<a href="https://phitex.org/perf/">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://phitex.org/perf/readme-dark.svg">
-    <img alt="PhiTeX against pdflatex: cold builds, word edits and thread scaling, measured on the latest main" src="https://phitex.org/perf/readme.svg" width="100%">
-  </picture>
-</a>
-<!-- TODO(visual): perf chart, URLs final; first publish pending (mc poller, ~half a day) · Phi -->
-
-Measured on every merge to `main` and published at
-[phitex.org/perf](https://phitex.org/perf/): cold builds against pdflatex,
-a word edit from save to the page on screen, and scaling from 1 to 16
-threads, on TeX Live's own documentation (from a short paper to the
-600-page `memman`). Each number is the median of 5 runs on one dedicated
-machine, and "byte-identical" is shown only where that run checked it
-against pdflatex.
 
 ## How it works
 
