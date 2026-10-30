@@ -1084,6 +1084,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             };
             origins_due.set(true);
             if let Some(v) = &view {
+                v.set_transcript(&r.log_text());
                 v.built(&b);
                 v.building(false);
             }

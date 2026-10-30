@@ -187,6 +187,9 @@ pub struct Viewer {
     /// line: what a viewer that joins shows first.
     console: Mutex<(std::collections::VecDeque<Value>, Value)>,
     diff: Mutex<Diff>,
+    /// The last build's transcript, the job's `.log` (the `log` op: the
+    /// viewer's "View log"; empty until the host gives one).
+    transcript: Mutex<Arc<str>>,
     /// The commits of the project's history (the diff's picker).
     log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
     /// Shows a source place (file, line, column from 1, and the place as
@@ -219,6 +222,7 @@ impl Default for Viewer {
             building: AtomicBool::new(false),
             console: Mutex::new((std::collections::VecDeque::new(), Value::Null)),
             diff: Mutex::new(Diff::default()),
+            transcript: Mutex::new(Arc::from("")),
             log: Mutex::new(None),
             goto: Mutex::new(None),
             select: Mutex::new(None),
@@ -464,6 +468,11 @@ impl Viewer {
     }
 
     /// The history the diff's picker lists, from `log(skip, limit)`.
+    /// The last build's transcript (its `.log`), for the `log` op.
+    pub fn set_transcript(&self, text: &str) {
+        *lock(&self.transcript) = Arc::from(text);
+    }
+
     pub fn on_log(&self, log: Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>) {
         *lock(&self.log) = Some(log);
     }
@@ -712,6 +721,7 @@ impl Viewer {
             }
             "text" => ok(json!({"pages": s.text_json()})),
             "outline" => ok(json!({"items": s.outline_json()})),
+            "log" => ok(json!({"text": &*lock(&s.transcript).clone()})),
             "set_file" | "edit" => {
                 let file = text("file").unwrap_or_default();
                 let body = text("text").unwrap_or_default();

@@ -36,8 +36,8 @@ var Viewer = class {
       if (!frame)
         frame = requestAnimationFrame(() => {
           frame = 0;
-          this.measure();
-          for (const k of this.visible) if (this.slots[k]) this.snap(this.slots[k]);
+          const boxes2 = this.measure();
+          for (const [k, r] of boxes2) if (this.slots[k]) this.snap(this.slots[k], r);
         });
     }, { passive: true });
     let told = "";
@@ -450,21 +450,26 @@ var Viewer = class {
    * device pixel the slot's corner sits at, so the browser copies the
    * pixels and never resamples them (resampled, the page looks blurry).
    */
-  snap(s) {
+  snap(s, box) {
     const wrap = s.img?.canvas;
     const c = wrap?.querySelector("canvas");
     if (!wrap || !c || !c.width || !c.height) return;
     const dpr = window.devicePixelRatio || 1;
-    const r = s.el.getBoundingClientRect();
+    const r = box ?? s.el.getBoundingClientRect();
+    const set = (k, v) => {
+      if (wrap.style[k] !== v) wrap.style[k] = v;
+    };
     if (Math.abs(c.width - r.width * dpr) > 1.5 || Math.abs(c.height - r.height * dpr) > 1.5) {
-      Object.assign(wrap.style, { width: "100%", height: "100%", transform: "" });
+      set("width", "100%");
+      set("height", "100%");
+      set("transform", "");
       return;
     }
-    wrap.style.width = `${c.width / dpr}px`;
-    wrap.style.height = `${c.height / dpr}px`;
+    set("width", `${c.width / dpr}px`);
+    set("height", `${c.height / dpr}px`);
     const fx = r.left * dpr - Math.round(r.left * dpr);
     const fy = r.top * dpr - Math.round(r.top * dpr);
-    wrap.style.transform = fx || fy ? `translate(${-fx / dpr}px, ${-fy / dpr}px)` : "";
+    set("transform", fx || fy ? `translate(${-fx / dpr}px, ${-fy / dpr}px)` : "");
   }
   /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */
   turn(n) {
@@ -489,14 +494,20 @@ var Viewer = class {
     this.measure();
     this.wantVisible();
   }
-  /** The page most on screen, measured now (the observer only reports crossings of its thresholds, in a root grown by its margin). */
+  /**
+   * The page most on screen, measured now (the observer only reports
+   * crossings of its thresholds, in a root grown by its margin); the boxes
+   * of the pages on screen, read in one go, for the caller to write after.
+   */
   measure() {
     const v = this.scroller.getBoundingClientRect();
     let best = this.current, most = 0;
+    const onScreen = /* @__PURE__ */ new Map();
     for (const k of this.visible) {
       const b = this.slots[k]?.el.getBoundingClientRect();
       if (!b) continue;
       const on = Math.min(b.bottom, v.bottom) - Math.max(b.top, v.top);
+      if (on > 0) onScreen.set(k, b);
       if (on > most) {
         most = on;
         best = k;
@@ -506,6 +517,7 @@ var Viewer = class {
       this.current = best;
       this.host.inView(best);
     }
+    return onScreen;
   }
   /** Ask for each visible page not drawn at its hash (once per hash). */
   wantVisible() {
@@ -3838,6 +3850,13 @@ var PreviewSession = class {
   }
   followLine = "";
   followWant = "";
+  /** The last build's transcript, the job's `.log` (the viewer's "View log"; none: the core has none yet). */
+  async log() {
+    if (!this.opened) return null;
+    const r = await this.core.request({ op: "log" });
+    const t = r.ok ? r.json?.text : void 0;
+    return typeof t === "string" && t ? t : null;
+  }
   /** The place `pos` (UTF-16) in `file`: its line's glyphs highlighted on the page (the page in view first). */
   async toPage(file, pos) {
     if (!this.opened || !(file in this.files)) return;

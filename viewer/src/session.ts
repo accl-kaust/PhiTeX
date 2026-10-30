@@ -1167,6 +1167,14 @@ export class PreviewSession {
   private followLine = "";
   private followWant = "";
 
+  /** The last build's transcript, the job's `.log` (the viewer's "View log"; none: the core has none yet). */
+  async log(): Promise<string | null> {
+    if (!this.opened) return null;
+    const r = await this.core.request({ op: "log" });
+    const t = r.ok ? r.json?.text : undefined;
+    return typeof t === "string" && t ? t : null;
+  }
+
   /** The place `pos` (UTF-16) in `file`: its line's glyphs highlighted on the page (the page in view first). */
   async toPage(file: string, pos: number): Promise<void> {
     if (!this.opened || !(file in this.files)) return;
