@@ -191,6 +191,17 @@ const strips = new Strips(stripSource, chip ?? null);
 const sock = new Socket();
 const pages = new Pages(sock);
 /** A place in a file (1-based line and column): the watch opens it in the editor (`--editor`). */
+/** The watch's cache (TeX Live's packs, the formats): its size asked first, emptied on a yes, as `phitex clean --all`. */
+async function clearCache(): Promise<void> {
+  const mb = (b: number) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
+  const now = await sock.request({ op: "cache" });
+  if (!now.ok) return void panel.msg(`cache: ${now.error ?? "not available"}`, true);
+  const bytes = Number(now.json?.bytes ?? 0);
+  if (!confirm(`Clear PhiTeX's cache (${mb(bytes)} in ${now.json?.dir ?? "its cache folder"})? Packages and formats are fetched again when a build needs them.`)) return;
+  const r = await sock.request({ op: "cache", clear: true });
+  panel.msg(r.ok ? `cache cleared: ${mb(Number(r.json?.freed ?? 0))} freed` : `cache: ${r.error ?? "not cleared"}`, !r.ok);
+}
+
 const source = (file: string, line: number, col = 1) => void sock.request({ op: "source", file, line, col });
 
 const panel = new Panel(
@@ -211,6 +222,7 @@ const panel = new Panel(
     onRebuild: () => void sock.request({ op: "rebuild" }),
     onCompare: () => openPick(),
     onLog: (): Promise<string | null> => session.log(),
+    onClearCache: () => void clearCache(),
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),

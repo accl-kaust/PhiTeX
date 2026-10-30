@@ -68,6 +68,10 @@ export interface ViewState {
   diagWorst: string;
   /** The zoom as a percentage (fit: what fitting the width comes to), as Overleaf's viewer shows it. */
   percent: number;
+  /** The build's status as the bar says it: "Built", "· 42 ms", an error, a build running. */
+  status: { text: string; more: string; err: boolean; busy: boolean };
+  /** The timing popover's content: the last build's summary, its parts [what, how long], the last message. */
+  timing: { summary: string; parts: [string, string][]; message: string };
 }
 
 export interface PanelEvents {
@@ -727,10 +731,18 @@ export class Panel {
     else (t = "Built"), (m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "");
     text.textContent = t;
     more.textContent = m ? `· ${m}` : "";
+    const was = this.statusNow;
+    if (was.text !== t || was.more !== m || was.err !== err || was.busy !== running) {
+      this.statusNow = { text: t, more: m, err, busy: running };
+      queueMicrotask(() => this.emit());
+    }
     st.classList.toggle("err", err);
     this.$("#prog").classList.toggle("on", running || (!this.last && this.viewer.pages === 0 && !this.offline && this.$("#empty").hidden === true));
     this.$("#split").classList.toggle("busy", running);
   }
+
+  /** The status as last said (ViewState.status: a host's toolbar shows it). */
+  private statusNow: ViewState["status"] = { text: "", more: "", err: false, busy: false };
 
   /** Packages still on their way before the first page, so a stop reads as one only once they are in. */
   private pkgBusy = false;
@@ -1202,6 +1214,8 @@ export class Panel {
       diagCount: this.lastStatus?.diagnostics?.filter((d) => d.severity !== "info").length ?? 0,
       diagWorst: this.lastStatus?.diagnostics?.[0]?.severity ?? "",
       percent: Math.round(this.scale() * 100),
+      status: { ...this.statusNow },
+      timing: { summary: this.lat?.summary ?? "", parts: this.timingParts(), message: this.msgText },
     };
   }
 
@@ -1827,14 +1841,20 @@ export class Panel {
     if (!this.$("#m-time").hidden) this.timing();
   }
 
-  /** The timing popover: the last build's line, its parts as the session lists them, the last message. */
-  private timing(): void {
-    const el = this.$("#m-time");
-    const rows = (this.lat?.details ?? "")
+  /** The last build's parts as the session lists them: [what, how long]. */
+  private timingParts(): [string, string][] {
+    return (this.lat?.details ?? "")
       .split("\n")
       .filter(Boolean)
       .map((l) => l.trim().split(/\s{2,}/))
-      .map(([k, ...v]) => `<tr><td>${esc(k)}</td><td>${esc(v.join(" "))}</td></tr>`)
+      .map(([k, ...v]): [string, string] => [k ?? "", v.join(" ")]);
+  }
+
+  /** The timing popover: the last build's line, its parts as the session lists them, the last message. */
+  private timing(): void {
+    const el = this.$("#m-time");
+    const rows = this.timingParts()
+      .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`)
       .join("");
     const ms = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
     el.innerHTML =

@@ -1922,10 +1922,17 @@ var Panel = class {
     else t = "Built", m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
     text.textContent = t;
     more.textContent = m ? `\xB7 ${m}` : "";
+    const was = this.statusNow;
+    if (was.text !== t || was.more !== m || was.err !== err || was.busy !== running) {
+      this.statusNow = { text: t, more: m, err, busy: running };
+      queueMicrotask(() => this.emit());
+    }
     st.classList.toggle("err", err);
     this.$("#prog").classList.toggle("on", running || !this.last && this.viewer.pages === 0 && !this.offline && this.$("#empty").hidden === true);
     this.$("#split").classList.toggle("busy", running);
   }
+  /** The status as last said (ViewState.status: a host's toolbar shows it). */
+  statusNow = { text: "", more: "", err: false, busy: false };
   /** Packages still on their way before the first page, so a stop reads as one only once they are in. */
   pkgBusy = false;
   /**
@@ -2342,7 +2349,9 @@ var Panel = class {
       // (the badge counts what needs a look: info is listed, not counted)
       diagCount: this.lastStatus?.diagnostics?.filter((d) => d.severity !== "info").length ?? 0,
       diagWorst: this.lastStatus?.diagnostics?.[0]?.severity ?? "",
-      percent: Math.round(this.scale() * 100)
+      percent: Math.round(this.scale() * 100),
+      status: { ...this.statusNow },
+      timing: { summary: this.lat?.summary ?? "", parts: this.timingParts(), message: this.msgText }
     };
   }
   emit() {
@@ -2892,10 +2901,14 @@ var Panel = class {
     this.$("#details").textContent = details ?? summary;
     if (!this.$("#m-time").hidden) this.timing();
   }
+  /** The last build's parts as the session lists them: [what, how long]. */
+  timingParts() {
+    return (this.lat?.details ?? "").split("\n").filter(Boolean).map((l) => l.trim().split(/\s{2,}/)).map(([k, ...v]) => [k ?? "", v.join(" ")]);
+  }
   /** The timing popover: the last build's line, its parts as the session lists them, the last message. */
   timing() {
     const el = this.$("#m-time");
-    const rows = (this.lat?.details ?? "").split("\n").filter(Boolean).map((l) => l.trim().split(/\s{2,}/)).map(([k, ...v]) => `<tr><td>${esc3(k)}</td><td>${esc3(v.join(" "))}</td></tr>`).join("");
+    const rows = this.timingParts().map(([k, v]) => `<tr><td>${esc3(k)}</td><td>${esc3(v)}</td></tr>`).join("");
     const ms = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
     el.innerHTML = `<h3>${ms ? `Keystroke to page: ${ms}` : "The last build"}</h3>` + (rows ? `<table>${rows}</table>` : "") + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
     el.querySelector(".foot").textContent = this.lat?.summary ?? "No build yet.";
@@ -5115,6 +5128,15 @@ if (location.hash === "#debug") {
 var strips = new Strips(stripSource, chip ?? null);
 var sock = new Socket();
 var pages = new Pages(sock);
+async function clearCache() {
+  const mb = (b) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
+  const now = await sock.request({ op: "cache" });
+  if (!now.ok) return void panel.msg(`cache: ${now.error ?? "not available"}`, true);
+  const bytes = Number(now.json?.bytes ?? 0);
+  if (!confirm(`Clear PhiTeX's cache (${mb(bytes)} in ${now.json?.dir ?? "its cache folder"})? Packages and formats are fetched again when a build needs them.`)) return;
+  const r = await sock.request({ op: "cache", clear: true });
+  panel.msg(r.ok ? `cache cleared: ${mb(Number(r.json?.freed ?? 0))} freed` : `cache: ${r.error ?? "not cleared"}`, !r.ok);
+}
 var source = (file, line, col = 1) => void sock.request({ op: "source", file, line, col });
 var panel = new Panel(
   {
@@ -5136,6 +5158,7 @@ var panel = new Panel(
     onRebuild: () => void sock.request({ op: "rebuild" }),
     onCompare: () => openPick(),
     onLog: () => session.log(),
+    onClearCache: () => void clearCache(),
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),
