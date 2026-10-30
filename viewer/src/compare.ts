@@ -8,8 +8,8 @@
 // history, history.ts; a git revision) and how a file is saved are the
 // host's (CompareHost); the version picker's DOM too (overleaf/src/diffui.ts).
 
-import type { DiffChange, DiffMarkup, DiffSubtype } from "./diff.ts";
-import { charOffset } from "./edits.ts";
+import { diffPlace, diffSource, type DiffMarkup, type DiffOut, type DiffSubtype } from "./diff.ts";
+import { byteOffset, charOffset } from "./edits.ts";
 import { PreviewSession, type CoreTransport, type EditorHost, type Options, type PreviewSink } from "./session.ts";
 import type { DiffBar, DiffBarActions, DiffLook } from "./panel.ts";
 
@@ -86,13 +86,13 @@ export interface CompareHost<V> {
   saveLook(l: DiffLook): void;
 }
 
-type DiffJson = { tex: string; changes: DiffChange[] };
+type DiffJson = DiffOut;
 
 /** A compare: the runner the diff bar drives, and which session the panel shows. */
 export class Compare<V> implements DiffRunner<V> {
   /** Which the panel shows: the diff (the marked-up document's pages) or the current version. */
   showing: "diff" | "current" = "current";
-  private c: { session: PreviewSession; transport: CoreTransport & { close(): void }; base: Record<string, string>; tex: string; changes: DiffChange[] } | undefined;
+  private c: { session: PreviewSession; transport: CoreTransport & { close(): void }; base: Record<string, string>; d: DiffOut } | undefined;
   private h: CompareHost<V>;
   private counted: ((n: number) => void) | undefined;
   private looks: DiffLook | undefined;
@@ -112,8 +112,7 @@ export class Compare<V> implements DiffRunner<V> {
     const c = this.c;
     const d = c && (await this.diffOf(c.base).catch(() => null));
     if (!d || this.c !== c) return;
-    c.tex = d.tex;
-    c.changes = d.changes;
+    c.d = d;
     c.session.sync("diff.tex", d.tex);
     this.counted?.(d.changes.length);
   }
@@ -158,12 +157,44 @@ export class Compare<V> implements DiffRunner<V> {
     const d = await this.diffOf(old);
     this.stop();
     const t = await this.h.connect();
-    const s = new PreviewSession(new DiffHost({ "diff.tex": d.tex }), t, this.h.sink(() => this.showing === "diff"), this.h.options);
-    this.c = { session: s, transport: t, base: old, tex: d.tex, changes: d.changes };
+    // (a jump to source from the diff's pages, a double-click or a
+    // selection, is at the marked-up text: taken to the user's file
+    // through the diff's map, before the host's gate drops it)
+    const sink = this.h.sink(() => this.showing === "diff");
+    const mapped = new Proxy(sink, {
+      get: (o, k, r) => (k === "goto" ? (_f: string, from: number, to: number) => this.toSource(from, to) : Reflect.get(o, k, r)),
+    });
+    const s = new PreviewSession(new DiffHost({ "diff.tex": d.tex }), t, mapped, this.h.options);
+    this.c = { session: s, transport: t, base: old, d };
     this.showing = "diff";
     say("Typesetting the diff…");
     await s.start();
     return { changes: d.changes.length };
+  }
+
+  /** [from, to) of the marked-up text (UTF-16): the editor at its source in the user's file. */
+  private toSource(from: number, to: number): void {
+    const d = this.c?.d;
+    if (!d) return;
+    const a = diffSource(d, byteOffset(d.tex, from));
+    const b = diffSource(d, byteOffset(d.tex, Math.max(from, to - 1)));
+    if (!a) return;
+    const t = this.h.session().text(a.file);
+    if (t === undefined) return;
+    const end = b && b.file === a.file && b.at >= a.at ? b.at + (to > from ? 1 : 0) : a.at;
+    this.h.goto(a.file, charOffset(t, a.at), charOffset(t, end));
+  }
+
+  /**
+   * The editor's cursor at `pos` (UTF-16) in `file`: on the pages shown,
+   * the diff's (through its map) or the current version's.
+   */
+  follow(file: string, pos: number): void {
+    const c = this.c, session = this.h.session();
+    if (this.showing !== "diff" || !c) return session.follow(file, pos);
+    const t = session.text(file);
+    const out = t === undefined ? null : diffPlace(c.d, file, byteOffset(t, pos));
+    if (out !== null) c.session.follow("diff.tex", charOffset(c.d.tex, out));
   }
 
   show(w: "diff" | "current"): void {
@@ -172,7 +203,7 @@ export class Compare<V> implements DiffRunner<V> {
   }
 
   goto(k: number): void {
-    const c = this.c?.changes[k - 1];
+    const c = this.c?.d.changes[k - 1];
     if (!c || !this.c) return;
     // (the editor at the change, in its file; the page at it, in the diff or the current version)
     const session = this.h.session();
@@ -182,12 +213,12 @@ export class Compare<V> implements DiffRunner<V> {
       this.h.goto(c.new.file, from, to);
       if (this.showing === "current") void session.toPage(c.new.file, from);
     }
-    if (this.showing === "diff") void this.c.session.toPage("diff.tex", charOffset(this.c.tex, c.out[0]));
+    if (this.showing === "diff") void this.c.session.toPage("diff.tex", charOffset(this.c.d.tex, c.out[0]));
   }
 
   async download(w: "pdf" | "tex"): Promise<void> {
     if (!this.c) return;
-    if (w === "tex") return this.h.save(this.c.tex, "application/x-tex", `${this.base()}-diff.tex`);
+    if (w === "tex") return this.h.save(this.c.d.tex, "application/x-tex", `${this.base()}-diff.tex`);
     const pdf = await this.c.session.pdf();
     if (pdf?.length) this.h.save(pdf as BlobPart, "application/pdf", `${this.base()}-diff.pdf`);
     else this.h.msg("No diff PDF yet: the marked-up document's build stopped (see ⓘ diagnostics).");
