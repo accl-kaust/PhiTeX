@@ -434,7 +434,7 @@ fn fingerprints_keep_structured_near_inputs_apart() {
                     "seed {seed}: bytes {hi} {lo} collide"
                 );
                 let w = [
-                    0x5f70_665f_3a73_63u64 | (u64::from(hi) << 56),
+                    0x005f_7066_5f3a_7363_u64 | (u64::from(hi) << 56),
                     0x6e4e_3a00 | u64::from(lo),
                 ];
                 assert!(

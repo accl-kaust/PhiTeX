@@ -89,7 +89,9 @@ impl Operation for Reader {
     }
 }
 
-fn setup() -> (
+/// The engine, the placer, mark and reader operations, and the ids of
+/// def, mark, placer and reader.
+type Setup = (
     Engine,
     Arc<Placer>,
     Arc<Mark>,
@@ -98,7 +100,9 @@ fn setup() -> (
     phitex_defuse::OpId,
     phitex_defuse::OpId,
     phitex_defuse::OpId,
-) {
+);
+
+fn setup() -> Setup {
     let e = Engine::new();
     let def = e.register(Arc::new(Def));
     let mk = Arc::new(Mark {
