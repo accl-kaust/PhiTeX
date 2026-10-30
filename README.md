@@ -6,6 +6,7 @@
   <b>A fast, modern TeX compiler.</b><br>
   Your PDF rebuilt as you type, exactly as {pdf,Xe,Lua}LaTeX makes it,<br>
   in the editor you already use.
+  <!-- TODO(claim): LuaLaTeX is post-alpha; the tagline and the banner GIF's subtitle name it ahead (the user's choice, so the GIF need not change) · Phi -->
 </p>
 
 <p align="center">
