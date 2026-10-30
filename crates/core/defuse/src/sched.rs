@@ -202,6 +202,8 @@ pub(crate) struct Worker {
     pub(crate) commit_ns: AtomicU64,
     pub(crate) commit_max_ns: AtomicU64,
     pub(crate) commit_max_cpu_ns: AtomicU64,
+    pub(crate) commit_allocs: AtomicU64,
+    pub(crate) commit_frees: AtomicU64,
     /// The node of the longest commit (raw id).
     pub(crate) commit_max_node: AtomicU64,
     pub(crate) reask_ns: AtomicU64,
@@ -445,6 +447,8 @@ impl Pool {
                 commit_ns: AtomicU64::new(0),
                 commit_max_ns: AtomicU64::new(0),
                 commit_max_cpu_ns: AtomicU64::new(0),
+                commit_allocs: AtomicU64::new(0),
+                commit_frees: AtomicU64::new(0),
                 commit_max_node: AtomicU64::new(0),
                 reask_ns: AtomicU64::new(0),
                 idle_ns: AtomicU64::new(0),
@@ -1327,7 +1331,7 @@ fn run_log() -> bool {
     })
 }
 
-fn wake_log() -> bool {
+pub(crate) fn wake_log() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var_os("PHITEX_WAKE_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
 }
@@ -1603,6 +1607,8 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             Worker::add(&w.commits, 1);
             Worker::add(&w.commit_ns, st.commit_ns);
             w.commit_max_cpu_ns.fetch_max(st.commit_cpu_ns, Ordering::Relaxed);
+            Worker::add(&w.commit_allocs, st.commit_allocs);
+            Worker::add(&w.commit_frees, st.commit_frees);
             if st.commit_ns > w.commit_max_ns.load(Ordering::Relaxed) {
                 w.commit_max_ns.store(st.commit_ns, Ordering::Relaxed);
                 w.commit_max_node.store(n.raw(), Ordering::Relaxed);

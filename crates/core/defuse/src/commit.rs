@@ -60,6 +60,10 @@ pub(crate) struct CommitStats {
     pub(crate) commit_ns: u64,
     /// (`profile`) `commit_ns` on the thread's CPU (`lock::thread_cpu_ns`).
     pub(crate) commit_cpu_ns: u64,
+    /// (`profile`, `obs::CountingAlloc`) What the commit allocated and
+    /// freed under its segment's lock.
+    pub(crate) commit_allocs: u64,
+    pub(crate) commit_frees: u64,
     pub(crate) reask_ns: u64,
 }
 
@@ -102,11 +106,30 @@ pub(crate) fn subtree_end(eng: &Engine, n: NodeId) -> NodeId {
     subtree_end_skip(eng, n, None)
 }
 
+thread_local! {
+    /// `subtree_end`'s list of nodes to visit, kept by the thread: walked
+    /// under a commit's lock, where nothing is allocated (room for
+    /// `TODO_ROOM` made before it, `todo_room`; grown past that only by a
+    /// subtree wider than any the thread met).
+    static TODO: std::cell::Cell<Vec<NodeId>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
+const TODO_ROOM: usize = 256;
+
+/// `TODO`'s room, before a commit's lock.
+fn todo_room() {
+    let mut v = TODO.take();
+    v.reserve(TODO_ROOM.saturating_sub(v.len()));
+    TODO.set(v);
+}
+
 /// `subtree_end` passing over the nodes of `skip` and theirs: a node
 /// being relocated and its subtree (`relocate`).
 fn subtree_end_skip(eng: &Engine, n: NodeId, skip: Option<&FxHashSet<NodeId>>) -> NodeId {
     let (mut best, mut best_pos) = (n, eng.node(n).pos_hint());
-    let mut todo = vec![n];
+    let mut todo = TODO.take();
+    todo.clear();
+    todo.push(n);
     while let Some(x) = todo.pop() {
         let Some(r) = eng.node(x).run_record() else {
             continue;
@@ -125,6 +148,7 @@ fn subtree_end_skip(eng: &Engine, n: NodeId, skip: Option<&FxHashSet<NodeId>>) -
             todo.push(c);
         }
     }
+    TODO.set(todo);
     best
 }
 
@@ -179,7 +203,7 @@ fn strands(eng: &Engine, x: NodeId, by: NodeId, a: NodeId, s: u8) -> bool {
     }
     let t = slot_under(eng, x, a);
     let bad = !matches!(t, Some(t) if t <= s);
-    if bad && crate::obs::enabled() && std::env::var_os("PHITEX_WAKE_LOG").is_some() {
+    if bad && crate::obs::enabled() && crate::sched::wake_log() {
         eprintln!(
             "stranded: anchor {} slot {s}: node {} (op {:?}, anchor {:?} slot {}, under {t:?}) between",
             a.raw(),
@@ -451,25 +475,26 @@ impl IndexOps {
     /// what the segment holds now (a placement this commit made may have
     /// filed a prediction of a field the commit's own run stopped
     /// defining).
-    fn apply(self, eng: &Engine, seg: &Segment, inner: &Inner) {
-        for f in self.defs_add {
+    /// Its lists are emptied, not freed: that is after the lock.
+    fn apply(&mut self, eng: &Engine, seg: &Segment, inner: &Inner) {
+        for f in self.defs_add.drain(..) {
             eng.defs.add(f, seg.lo, seg.id);
             eng.bump(f);
         }
-        for f in self.contribs_add {
+        for f in self.contribs_add.drain(..) {
             eng.contribs.add(f, seg.lo, seg.id);
             eng.bump(f);
         }
-        for f in self.readers_add {
+        for f in self.readers_add.drain(..) {
             eng.readers.add(f, seg.lo, seg.id);
         }
-        for f in self.defs_remove {
+        for f in self.defs_remove.drain(..) {
             if inner.defs.get(&f).is_none_or(PosMap::is_empty) {
                 eng.defs.remove(f, seg.lo, seg.id);
             }
             eng.bump(f);
         }
-        for f in self.contribs_remove {
+        for f in self.contribs_remove.drain(..) {
             if inner.contribs.get(&f).is_none_or(PosMap::is_empty) {
                 eng.contribs.remove(f, seg.lo, seg.id);
             }
@@ -906,7 +931,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             r.shrink_to_fit();
             r
         },
-        placed: Vec::with_capacity(p.placements.len()),
+        // (`placed`, swapped in under the lock)
+        placed: Vec::new(),
         claim: p.claim,
         effect: if brackets == Brackets::default() {
             Effect::None
@@ -932,11 +958,31 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut changed_defs: Vec<Field> = Vec::with_capacity(nd);
     let mut changed_contribs: Vec<Field> = Vec::with_capacity(nc);
     let mut rels: Vec<(Field, i64)> = Vec::with_capacity(rec.defs.len());
-    let mut placed: Vec<NodeId> = Vec::with_capacity(p.placements.len());
+    let mut placed: Vec<NodeId> = Vec::with_capacity(p.placements.len().max(old_placed.len()));
     let mut made: Vec<Arc<Node>> = Vec::with_capacity(p.placements.len());
-    let mut deferred: Vec<Deferred> = Vec::new();
+    // (the scratch of the filing under the lock, each as long as it can
+    // grow there: nothing is allocated under it)
+    let np = p.placements.len();
+    let mut deferred: Vec<Deferred> = Vec::with_capacity(np);
+    let mut replaced: Vec<(NodeId, Field, ValueId, u16)> = Vec::with_capacity(filed.len());
+    let mut removed_kept: Vec<NodeId> = Vec::with_capacity(np);
+    // (with their labels as each was read once, and their order before:
+    // `sort_by_label`'s, sorted in place)
+    let mut old_follows: Vec<(Pos, usize, NodeId)> = Vec::with_capacity(old_placed.len());
+    let mut waiting: Vec<usize> = Vec::with_capacity(np);
+    let mut made_now: Vec<bool> = Vec::with_capacity(np);
+    let mut moving: Vec<NodeId> = Vec::with_capacity(np);
+    let mut removed: Vec<NodeId> = Vec::with_capacity(old_placed.len() + np);
+    // (the runs of the fields the filing empties, freed after the lock)
+    let mut gone_runs: (
+        Vec<crate::segment::PosMap<crate::segment::Def>>,
+        Vec<crate::segment::PosMap<ValueId>>,
+    ) = (
+        Vec::with_capacity(old_fields.len()),
+        Vec::with_capacity(old_contribs.len() + rec.contribs.len()),
+    );
     let mut here_reads: Vec<(Field, Reader)> = Vec::with_capacity(rec.reads.len());
-    let mut other_reads: Vec<(Field, Reader, Anchor)> = Vec::new();
+    let mut other_reads: Vec<(Field, Reader, Anchor)> = Vec::with_capacity(rec.reads.len());
     let mut final_reads: Vec<(Field, Reader)> = Vec::new();
     let mut range_reads: Vec<(Field, RangeReader)> = Vec::new();
     let mut range_seen: Vec<Vec<(PathId, Option<ValueId>)>> = Vec::new();
@@ -1072,6 +1118,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let new_fields: FxHashSet<Field> = rec.defs.iter().map(|d| d.f).collect();
     let new_contribs: FxHashSet<Field> = rec.contribs.iter().map(|c| c.0).collect();
     let mut tries = 0;
+    todo_room();
+    // (what the lock finds the filing would grow: its lists' room made here)
+    let mut g = crate::segment::Grow::with_capacity(
+        rec.defs.len(),
+        rec.contribs.len(),
+        read_fields.len(),
+        fresh.iter().flatten().map(|(_, p)| p.fields().count()).sum(),
+        fresh.len(),
+        here_reads.len(),
+    );
     let (seg_id, seg_lo, old_output, rec, seg_pos, removed) = loop {
         let Some((seg, mut inner)) = own_write(eng, node) else {
             return st;
@@ -1094,6 +1150,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 drop(now);
                 drop(inner);
                 (old_fields, old_contribs) = fields_of(&last);
+                gone_runs.0.reserve(old_fields.len());
+                gone_runs.1.reserve(old_contribs.len() + rec.contribs.len());
                 continue;
             }
         }
@@ -1113,21 +1171,38 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         let t_lock = Instant::now();
         let cpu_lock = crate::lock::thread_cpu_ns();
+        let section = crate::obs::Section::enter();
         let pos = pos_in(&inner, node);
         // room for what is filed, made outside the lock
         if let Some(m) = room.as_mut() {
-            m.install(&mut inner);
+            m.install(eng, &mut inner);
         }
-        let g = inner.grow_for(
+        inner.grow_for(
+            &mut g,
             eng,
             pos,
             rec.defs.iter().map(|d| d.f),
             rec.contribs.iter().map(|c| c.0),
             &read_fields,
+            fresh.iter().flatten().flat_map(|(_, p)| p.fields()),
+            usize::from(brackets.closes > 0 || brackets.opens > 0)
+                + fresh.iter().flatten().filter(|(_, p)| p.brackets()).count(),
+            old_fields.iter().copied(),
+            [holes.capacity(), wake.capacity().min(later.capacity())],
+            fresh.iter().flatten().map(|(n, _)| n.op()),
+            here_reads
+                .iter()
+                .filter(|(_, r)| r.anchor != node.id)
+                .map(|(f, r)| (r.anchor, *f)),
         );
         if !g.is_empty() {
+            drop(section);
             drop(inner);
             room = Some(g.make());
+            let [h, w] = g.scratch();
+            holes.reserve(h.saturating_sub(holes.len()));
+            wake.reserve(w.saturating_sub(wake.len()));
+            later.reserve(w.saturating_sub(later.len()));
             continue;
         }
         let mut lap = crate::obs::Laps::new(t_lock);
@@ -1136,7 +1211,6 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let contribs = &rec.contribs;
         // (predictions this commit replaced, handed on once the segment's
         // lock is let go)
-        let mut replaced: Vec<(NodeId, Field, ValueId, u16)> = Vec::new();
         for d in &filed {
             let depth = d.depth;
             let m = inner.defs.entry(d.f).or_default();
@@ -1205,7 +1279,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 m.remove(&pos);
                 changed_defs.push(f);
                 if m.is_empty() {
-                    inner.defs.remove(&f);
+                    // (its run freed after the lock)
+                    gone_runs.0.extend(inner.defs.remove(&f));
                     ix.defs_remove.push(f);
                 }
             }
@@ -1241,7 +1316,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         changed_contribs.sort_unstable();
         changed_contribs.dedup();
         for &f in &changed_contribs {
-            inner.resum(eng, f);
+            gone_runs.1.extend(inner.resum_keep(eng, f));
             eng.bump(f);
         }
         for &f in &changed_defs {
@@ -1251,13 +1326,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // placements
         let mut after = node.id;
         let mut in_seg = true;
-        let mut removed_kept: Vec<NodeId> = Vec::new();
         // (a continuation made anew takes the place of the one it
         // replaces: what others placed after this node's children since,
         // before that one, stays before it, as a page fired in this node
-        // does)
-        let mut old_follows: std::collections::VecDeque<NodeId> = {
-            let mut v: Vec<NodeId> = old_placed
+        // does; in the order of their labels, taken from the front)
+        old_follows.extend(
+            old_placed
                 .iter()
                 .copied()
                 .filter(|n| !kept.contains(&Some(*n)))
@@ -1265,10 +1339,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     eng.placed_node(n)
                         .is_some_and(|x| x.state() != State::Gone && x.slot() == 2)
                 })
-                .collect();
-            sort_by_label(eng, &mut v);
-            v.into()
-        };
+                .enumerate()
+                .map(|(i, n)| (eng.node(n).pos_hint(), i, n)),
+        );
+        old_follows.sort_unstable();
+        let mut follows_at = 0;
         // (a kept placement's subtree end found only where a placement
         // follows it: the last one's subtree may be a whole chain)
         let mut kept_end: Option<NodeId> = None;
@@ -1276,19 +1351,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // off to after the lock has none yet, and goes before the next
         // placement kept, `waiting`, so that one still stands after it)
         let mut labelled = node.id;
-        let mut waiting: Vec<usize> = Vec::new();
         // (whether the last placement went after another node than this
         // one: one following it goes after it there, not before a
         // continuation of this node's that it replaces)
         let mut elsewhere = false;
         // (the placement before, where it stands: a kept one follows it)
         let mut prev: Option<NodeId> = None;
-        // (whether each placement is a node made by this commit)
-        let mut made_now: Vec<bool> = Vec::with_capacity(p.placements.len());
-        // (the placements relocated by this commit: put off to after the
-        // lock as one made anew is, they stand nowhere yet for the checks
-        // of those after them)
-        let mut moving: Vec<NodeId> = Vec::new();
+        // (`made_now`: whether each placement is a node made by this
+        // commit; `moving`: the placements relocated by this commit, put
+        // off to after the lock as one made anew is, standing nowhere yet
+        // for the checks of those after them)
         for (i, what) in p.placements.iter().enumerate() {
             if let Some(k) = kept_end.take() {
                 after = subtree_end(eng, k);
@@ -1430,12 +1502,13 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             prev = Some(id);
             let before = if matches!(what, Placement::Follow(..)) && !elsewhere {
                 while old_follows
-                    .front()
-                    .is_some_and(|&b| eng.node(b).pos_hint() <= after_pos)
+                    .get(follows_at)
+                    .is_some_and(|&(_, _, b)| eng.node(b).pos_hint() <= after_pos)
                 {
-                    old_follows.pop_front();
+                    follows_at += 1;
                 }
-                old_follows.pop_front()
+                follows_at += 1;
+                old_follows.get(follows_at - 1).map(|x| x.2)
             } else {
                 None
             };
@@ -1495,8 +1568,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         if keep_placed {
             placed.clone_from(&old_placed);
         }
-        let mut removed: Vec<NodeId> = old_placed.iter().copied().filter(|n| !placed.contains(n)).collect();
-        removed.extend(removed_kept);
+        removed.extend(old_placed.iter().copied().filter(|n| !placed.contains(n)));
+        removed.append(&mut removed_kept);
         // (a placement that relabelled the segment moved this node's label)
         let pos = pos_in(&inner, node);
         lap.lap("placements");
@@ -1525,13 +1598,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         // (a `next` reader stops at a node to run again as at a hole,
         // `Node::is_open`: taken at every commit)
-        if !inner.stops.is_empty() {
-            let (mine, rest) = std::mem::take(&mut inner.stops)
-                .into_iter()
-                .partition(|s| s.2.to == Some(node.id));
-            inner.stops = rest;
-            holes = mine;
-        }
+        // (into room made before the lock, `Grow::scratch`)
+        holes.extend(inner.stops.extract_if(.., |s| s.2.to == Some(node.id)));
         lap.lap("walks");
         // the run's own reads at its position, answered again (under
         // scopes after the lock: an answer may lie past a close)
@@ -1551,7 +1619,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         if serial == 1 {
             inner.holes = inner.holes.saturating_sub(1);
         }
-        Arc::get_mut(&mut rec).expect("the record is not shared yet").placed = std::mem::take(&mut placed);
+        std::mem::swap(
+            &mut Arc::get_mut(&mut rec).expect("the record is not shared yet").placed,
+            &mut placed,
+        );
         let old = node.last.lock().replace(rec.clone());
         node.serial.store(serial, Ordering::Release);
         if let Some(o) = &old {
@@ -1559,12 +1630,18 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         let old_output = last.as_ref().filter(|r| !r.provisional).map(|r| r.output);
         lap.lap("checks");
-        std::mem::take(&mut ix).apply(eng, seg, &inner);
+        ix.apply(eng, seg, &inner);
+        // (the room reserved in the field indexes and not added into)
+        eng.defs.release();
+        eng.contribs.release();
+        eng.readers.release();
         lap.lap("index");
         st.commit_ns = ns(t_lock);
         st.commit_cpu_ns = crate::lock::thread_cpu_ns().saturating_sub(cpu_lock);
-        lap.report(node.id.0, st.commit_ns, rec.defs.len(), rec.reads.len());
+        drop(section);
         drop(inner);
+        (st.commit_allocs, st.commit_frees) = crate::obs::section_take();
+        lap.report(node.id.0, st.commit_ns, rec.defs.len(), rec.reads.len());
         if !replaced.is_empty() {
             eng.pred_pending.lock().append(&mut replaced);
         }
@@ -2896,13 +2973,32 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
 /// operation's `predicted_defs`, and the relations its operation is known
 /// to make (valued under the lock, `file_predicted`).
 pub(crate) struct Predicted {
-    defs: Vec<DefRec>,
-    shapes: Vec<(Field, i64)>,
+    /// The node's provisional record, made with its prediction (none
+    /// without one): its definitions, those predicted a value first, then
+    /// from `shaped` on the shapes, whose values are found when it is filed
+    /// (`file_predicted`): nothing is made under the segment's lock.
+    rec: Option<Arc<RunRecord>>,
+    shaped: usize,
     /// Its operation's static effect, filed with the node.
     effect: Effect,
 }
 
 impl Predicted {
+    fn defs(&self) -> &[DefRec] {
+        self.rec.as_ref().map_or(&[], |r| &r.defs)
+    }
+
+    /// The fields it is predicted to define.
+    pub(crate) fn fields(&self) -> impl Iterator<Item = Field> + '_ {
+        self.defs().iter().map(|d| d.f)
+    }
+
+    /// Whether filing it files brackets.
+    pub(crate) fn brackets(&self) -> bool {
+        let b = self.effect.brackets();
+        self.effect != Effect::Pending && (b.closes > 0 || b.opens > 0)
+    }
+
     /// `defs`, those of a node this one replaces, for the fields its
     /// operation predicts no value for: a relation with the value it gave
     /// there (a shape's value is computed from the input in the node's
@@ -2910,11 +3006,22 @@ impl Predicted {
     /// true input, `settle_predictions`).
     fn inherit(&mut self, defs: &[DefRec]) {
         for d in defs {
-            if self.defs.iter().any(|x| x.f == d.f) {
+            if self.defs()[..self.shaped].iter().any(|x| x.f == d.f) {
                 continue;
             }
-            self.shapes.retain(|x| x.0 != d.f);
-            self.defs.push(*d);
+            let rec = Arc::get_mut(
+                self.rec
+                    .get_or_insert_with(|| Arc::new(RunRecord::provisional(Vec::new()))),
+            )
+            .expect("a prediction not filed yet");
+            let shaped = self.shaped;
+            let mut i = 0;
+            rec.defs.retain(|x| {
+                i += 1;
+                i <= shaped || x.f != d.f
+            });
+            rec.defs.insert(shaped, *d);
+            self.shaped += 1;
         }
     }
 }
@@ -2949,7 +3056,18 @@ pub(crate) fn predict(eng: &Engine, op: OpId, args: &[ValueId]) -> Predicted {
     };
     shapes.extend(learned);
     let effect = eng.op(op).effect(args, eng.values());
-    Predicted { defs, shapes, effect }
+    let shaped = defs.len();
+    defs.extend(shapes.into_iter().map(|(f, c)| DefRec {
+        f,
+        loc: Locality::Local,
+        value: ValueId::UNIT,
+        rel: Some(c),
+    }));
+    Predicted {
+        rec: (!defs.is_empty()).then(|| Arc::new(RunRecord::provisional(defs))),
+        shaped,
+        effect,
+    }
 }
 
 /// A node not yet on the line, and its predictions: all a placement needs
@@ -2974,32 +3092,24 @@ pub(crate) fn built(
 pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, node: &Arc<Node>, pred: Predicted) {
     let v = eng.values();
     let pos = node.pos_hint();
-    let Predicted {
-        mut defs,
-        shapes,
-        effect,
-    } = pred;
+    let Predicted { rec, shaped, effect } = pred;
     // (its brackets before it runs: readers after it see the depth it
     // makes; `settle_predictions` re-asks them)
     if effect != Effect::Pending {
         file_brackets(eng, inner, node, pos, effect.brackets());
     }
-    for (f, c) in shapes {
-        let input = Segment::reaching(inner, f, pos, false)
-            .map(|(_, d)| d.value)
-            .or_else(|| read::env_value(eng, f));
-        let val = v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c));
-        defs.push(DefRec {
-            f,
-            loc: Locality::Local,
-            value: val,
-            rel: Some(c),
-        });
-    }
-    if defs.is_empty() {
+    let Some(mut rec) = rec else {
         return;
+    };
+    let r = Arc::get_mut(&mut rec).expect("a prediction not filed yet");
+    for d in &mut r.defs[shaped..] {
+        let c = d.rel.unwrap_or(0);
+        let input = Segment::reaching(inner, d.f, pos, false)
+            .map(|(_, d)| d.value)
+            .or_else(|| read::env_value(eng, d.f));
+        d.value = v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c));
     }
-    for d in &defs {
+    for d in &rec.defs {
         let m = inner.defs.entry(d.f).or_default();
         let first = m.is_empty();
         m.insert(
@@ -3018,7 +3128,7 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
         }
         eng.bump(d.f);
     }
-    *node.last.lock() = Some(Arc::new(RunRecord::provisional(defs)));
+    *node.last.lock() = Some(rec);
 }
 
 /// Takes a node's definitions and contributions out of its segment (under
@@ -3494,7 +3604,7 @@ pub(crate) fn place(
 /// (`PHITEX_WAKE_LOG`, profile) A placement: the node, its placer, anchor
 /// and slot, its label, and the node it went after or before.
 fn log_placed(eng: &Engine, node: &Node, how: &str, rel: NodeId) {
-    if crate::obs::enabled() && std::env::var_os("PHITEX_WAKE_LOG").is_some() {
+    if crate::obs::enabled() && crate::sched::wake_log() {
         eprintln!(
             "placed: node {} op {:?} parent {:?} anchor {:?} slot {} at {:?} {how} {} (at {:?})",
             node.id.raw(),
@@ -3901,7 +4011,7 @@ pub(crate) fn relocate(
             mark_dirty(eng, w, m, wake);
         }
     }
-    if crate::obs::enabled() && std::env::var_os("PHITEX_WAKE_LOG").is_some() {
+    if crate::obs::enabled() && crate::sched::wake_log() {
         eprintln!(
             "relocated: node {} op {:?} by {} with {} of its subtree, after {} (at {:?})",
             k.id.raw(),

@@ -5,7 +5,7 @@
 //! definition of `f` and leaves it at its last one's removal; both are rare,
 //! so the index is read-mostly, sharded by field.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::api::UnitId;
@@ -24,62 +24,30 @@ const SHARDS: usize = 1 << 14;
 const RANGE_SHARDS: usize = 1 << 12;
 
 #[repr(align(64))]
-struct Shard(Lock<FxHashMap<Field, Segs>>);
+struct Shard(Lock<Entries>);
 
-/// The segments of one field: most fields live in one segment, and that
-/// one costs no allocation under the shard's lock.
-enum Segs {
-    One(Pos, SegId),
-    Many(BTreeSet<(Pos, SegId)>),
+/// A shard's (field, segment start, segment) triples in order: a field's
+/// segments are a run of them. Room for `reserved` more is kept: a
+/// commit reserves what its filing may add under its segment's lock
+/// (`FieldIndex::reserve`), and that adds into room made before it, so
+/// nothing is allocated where other threads wait; a removal frees
+/// nothing.
+#[derive(Default)]
+struct Entries {
+    v: Vec<(Field, Pos, SegId)>,
+    reserved: usize,
 }
 
-impl Segs {
-    fn insert(&mut self, lo: Pos, s: SegId) {
-        match self {
-            Segs::One(p, q) if (*p, *q) == (lo, s) => {}
-            Segs::One(p, q) => {
-                let mut set = BTreeSet::new();
-                set.insert((*p, *q));
-                set.insert((lo, s));
-                *self = Segs::Many(set);
-            }
-            Segs::Many(set) => {
-                set.insert((lo, s));
-            }
-        }
+impl Entries {
+    /// The run of `f`'s entries.
+    fn of(&self, f: Field) -> &[(Field, Pos, SegId)] {
+        let a = self.v.partition_point(|e| e.0 < f);
+        let b = a + self.v[a..].partition_point(|e| e.0 == f);
+        &self.v[a..b]
     }
 
-    /// Whether it is empty after the removal.
-    fn remove(&mut self, lo: Pos, s: SegId) -> bool {
-        match self {
-            Segs::One(p, q) => (*p, *q) == (lo, s),
-            Segs::Many(set) => {
-                set.remove(&(lo, s));
-                set.is_empty()
-            }
-        }
-    }
-
-    fn last_before(&self, lo: Pos) -> Option<SegId> {
-        match self {
-            Segs::One(p, q) => (*p < lo).then_some(*q),
-            Segs::Many(set) => set.range(..(lo, SegId(0))).next_back().map(|x| x.1),
-        }
-    }
-
-    fn first_at_or_after(&self, lo: Pos) -> Option<(Pos, SegId)> {
-        match self {
-            Segs::One(p, q) => (*p >= lo).then_some((*p, *q)),
-            Segs::Many(set) => set.range((lo, SegId(0))..).next().copied(),
-        }
-    }
-
-    fn between(&self, from: Pos, to: Pos) -> Vec<SegId> {
-        match self {
-            Segs::One(p, q) => (*p >= from && *p < to).then_some(*q).into_iter().collect(),
-            Segs::Many(_) if from >= to => Vec::new(),
-            Segs::Many(set) => set.range((from, SegId(0))..(to, SegId(0))).map(|x| x.1).collect(),
-        }
+    fn free(&self) -> usize {
+        self.v.capacity() - self.v.len()
     }
 }
 
@@ -98,63 +66,206 @@ fn range_shard(f: Field) -> usize {
     shard(f) & (RANGE_SHARDS - 1)
 }
 
+/// A commit's room in a field index's shard (`FieldIndex::reserve`):
+/// the index (its address), the shard, and how many adds it still covers.
+#[derive(Clone, Copy, Debug)]
+struct Reserved {
+    ix: usize,
+    shard: u32,
+    left: u32,
+}
+
+thread_local! {
+    /// The room this thread's commit holds, under its segment's lock
+    /// (`FieldIndex::reserve`): kept by the thread, its own room grown
+    /// before the lock (`FieldIndex::prepare`).
+    static HELD: std::cell::RefCell<Vec<Reserved>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A shard without room for a commit's adds: the room to make
+/// (`FieldIndex::make_room`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Room {
+    shard: u32,
+    cap: usize,
+}
+
+/// The room made for a shard, outside every lock (`FieldIndex::make_room`).
+pub(crate) struct MadeRoom {
+    shard: u32,
+    v: Vec<(Field, Pos, SegId)>,
+}
+
 impl FieldIndex {
     pub(crate) fn new() -> FieldIndex {
         FieldIndex {
-            shards: (0..SHARDS).map(|_| Shard(Lock::new(FxHashMap::default()))).collect(),
+            shards: (0..SHARDS).map(|_| Shard(Lock::new(Entries::default()))).collect(),
         }
     }
 
+    fn addr(&self) -> usize {
+        std::ptr::from_ref(self) as usize
+    }
+
+    /// Adds `s` to `f`'s segments: into room this thread's commit
+    /// reserved in its shard (`reserve`), else growing the shard if it
+    /// must (a split, a rebalance, a placement outside a commit's lock),
+    /// leaving the room others reserved.
     pub(crate) fn add(&self, f: Field, lo: Pos, s: SegId) {
-        let mut w = self.shards[shard(f)].0.write();
-        match w.get_mut(&f) {
-            Some(segs) => segs.insert(lo, s),
-            None => {
-                w.insert(f, Segs::One(lo, s));
+        let sh = shard(f);
+        let me = self.addr();
+        HELD.with(|h| {
+            let mut h = h.borrow_mut();
+            let held = h
+                .iter_mut()
+                .find(|x| x.ix == me && x.shard as usize == sh && x.left > 0);
+            let mut w = self.shards[sh].0.write();
+            let Err(i) = w.v.binary_search(&(f, lo, s)) else {
+                return;
+            };
+            match held {
+                Some(x) => {
+                    x.left -= 1;
+                    w.reserved -= 1;
+                }
+                None => {
+                    if w.free() <= w.reserved {
+                        let more = w.reserved + 1;
+                        w.v.reserve(more);
+                    }
+                }
             }
+            w.v.insert(i, (f, lo, s));
+        });
+    }
+
+    /// Room in this thread's list of reservations for a commit of `n`
+    /// fields, made before its lock (kept by the thread: grown seldom).
+    pub(crate) fn prepare(n: usize) {
+        HELD.with(|h| {
+            let mut h = h.borrow_mut();
+            let more = (3 * n).saturating_sub(h.capacity() - h.len());
+            h.reserve(more);
+        });
+    }
+
+    /// Reserves room for one add in each of the shards `fs` (a shard as
+    /// many times as adds to it), each under its lock, held by this
+    /// thread until `release`d; the shards without room go to `need`,
+    /// none reserved in them. Under a segment's lock, as an add is;
+    /// allocates nothing where `need` and the thread's list have room
+    /// (`prepare`).
+    pub(crate) fn reserve(&self, fs: &mut [usize], need: &mut Vec<Room>) {
+        fs.sort_unstable();
+        let me = self.addr();
+        HELD.with(|h| {
+            let mut h = h.borrow_mut();
+            let mut i = 0;
+            while i < fs.len() {
+                let sh = fs[i];
+                let k = fs[i..].iter().take_while(|&&x| x == sh).count();
+                i += k;
+                let mut w = self.shards[sh].0.write();
+                let shard = u32::try_from(sh).unwrap_or(u32::MAX);
+                if w.free() >= w.reserved + k {
+                    w.reserved += k;
+                    h.push(Reserved {
+                        ix: me,
+                        shard,
+                        left: u32::try_from(k).unwrap_or(u32::MAX),
+                    });
+                } else {
+                    need.push(Room {
+                        shard,
+                        cap: (w.v.len() + w.reserved + k).max(w.v.capacity() * 2).max(4),
+                    });
+                }
+            }
+        });
+    }
+
+    /// The room this thread holds in this index and did not add into,
+    /// given back.
+    pub(crate) fn release(&self) {
+        let me = self.addr();
+        HELD.with(|h| {
+            h.borrow_mut().retain(|r| {
+                if r.ix != me {
+                    return true;
+                }
+                if r.left > 0 {
+                    self.shards[r.shard as usize].0.write().reserved -= r.left as usize;
+                }
+                false
+            });
+        });
+    }
+
+    /// The shard of `f`, for `reserve`.
+    pub(crate) fn shard_of(f: Field) -> usize {
+        shard(f)
+    }
+
+    /// The room `n` names, made under no lock.
+    pub(crate) fn make_room(n: &Room) -> MadeRoom {
+        MadeRoom {
+            shard: n.shard,
+            v: Vec::with_capacity(n.cap),
+        }
+    }
+
+    /// Moves the shard's entries into the room made, if it is more; the
+    /// entries' old room is left in `m`, to be freed after the lock.
+    pub(crate) fn install(&self, m: &mut MadeRoom) {
+        let mut w = self.shards[m.shard as usize].0.write();
+        if m.v.capacity() > w.v.capacity() && m.v.capacity() >= w.v.len() {
+            m.v.extend_from_slice(&w.v);
+            std::mem::swap(&mut w.v, &mut m.v);
+            m.v.clear();
         }
     }
 
     pub(crate) fn remove(&self, f: Field, lo: Pos, s: SegId) {
         let mut w = self.shards[shard(f)].0.write();
-        if let Some(segs) = w.get_mut(&f)
-            && segs.remove(lo, s)
-        {
-            w.remove(&f);
+        if let Ok(i) = w.v.binary_search(&(f, lo, s)) {
+            w.v.remove(i);
         }
     }
 
     /// The last segment strictly before the one starting at `lo` with `f`.
     pub(crate) fn last_before(&self, f: Field, lo: Pos) -> Option<SegId> {
-        self.shards[shard(f)].0.read().get(&f)?.last_before(lo)
+        let r = self.shards[shard(f)].0.read();
+        let xs = r.of(f);
+        xs[..xs.partition_point(|e| e.1 < lo)].last().map(|e| e.2)
     }
 
     /// The first segment at or after the one starting at `lo` with `f`, and
     /// its start.
     pub(crate) fn first_at_or_after(&self, f: Field, lo: Pos) -> Option<(Pos, SegId)> {
-        self.shards[shard(f)].0.read().get(&f)?.first_at_or_after(lo)
+        let r = self.shards[shard(f)].0.read();
+        let xs = r.of(f);
+        xs.get(xs.partition_point(|e| e.1 < lo)).map(|e| (e.1, e.2))
     }
 
     /// The segments with `f` whose start is in `[from, to)`, in order.
     pub(crate) fn between(&self, f: Field, from: Pos, to: Pos) -> Vec<SegId> {
-        self.shards[shard(f)]
-            .0
-            .read()
-            .get(&f)
-            .map(|s| s.between(from, to))
-            .unwrap_or_default()
+        if from >= to {
+            return Vec::new();
+        }
+        let r = self.shards[shard(f)].0.read();
+        let xs = r.of(f);
+        let a = xs.partition_point(|e| e.1 < from);
+        let b = xs.partition_point(|e| e.1 < to);
+        xs[a..b].iter().map(|e| e.2).collect()
     }
 
     pub(crate) fn has(&self, f: Field) -> bool {
-        self.shards[shard(f)].0.read().contains_key(&f)
+        !self.shards[shard(f)].0.read().of(f).is_empty()
     }
 
     /// Whether segment `s`, starting at `lo`, is filed under `f`.
     pub(crate) fn holds(&self, f: Field, lo: Pos, s: SegId) -> bool {
-        self.shards[shard(f)].0.read().get(&f).is_some_and(|x| match x {
-            Segs::One(p, q) => (*p, *q) == (lo, s),
-            Segs::Many(set) => set.contains(&(lo, s)),
-        })
+        self.shards[shard(f)].0.read().v.binary_search(&(f, lo, s)).is_ok()
     }
 }
 

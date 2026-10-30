@@ -1454,6 +1454,8 @@ impl Engine {
             rep.times.wasted_ns += load(&w.wasted_ns);
             rep.times.commit_ns += load(&w.commit_ns);
             rep.times.commit_max_cpu_ns = rep.times.commit_max_cpu_ns.max(load(&w.commit_max_cpu_ns));
+            rep.times.commit_allocs += load(&w.commit_allocs);
+            rep.times.commit_frees += load(&w.commit_frees);
             if load(&w.commit_max_ns) > rep.times.commit_max_ns {
                 rep.times.commit_max_ns = load(&w.commit_max_ns);
                 rep.commit_max_node = Some(NodeId(load(&w.commit_max_node)));

@@ -1341,3 +1341,74 @@ fn an_environment_reader_outlives_a_change_that_leaves_it() {
     assert_eq!(e.output(r), Some(v.int(5)), "the reader of the environment ran again");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+#[cfg(feature = "profile")]
+#[global_allocator]
+static ALLOC: phitex_defuse::obs::CountingAlloc<std::alloc::System> =
+    phitex_defuse::obs::CountingAlloc(std::alloc::System);
+
+#[test]
+fn a_commit_allocates_nothing_under_its_lock() {
+    // The allocator's own locks (glibc's arenas) are never taken where
+    // other threads wait for a segment: what a commit files is made
+    // before the lock, its scratch kept by its thread.
+    if !cfg!(feature = "profile") {
+        return;
+    }
+    let (e, o) = engine();
+    let v = e.values();
+    let u = e.new_unit();
+    for i in 0..4000 {
+        let x = f(v, &format!("x{i}"));
+        e.push(u, o.def, vec![x, v.int(i)]);
+        e.push(u, o.get, vec![x]);
+    }
+    let r = e.evaluate(4).unwrap();
+    assert!(phitex_defuse::obs::counting_allocs());
+    assert_eq!(
+        (r.times.commit_allocs, r.times.commit_frees),
+        (0, 0),
+        "allocations and frees under a commit's lock over {} commits",
+        r.commits
+    );
+}
+
+#[test]
+fn a_commit_that_places_and_contributes_allocates_nothing_under_its_lock() {
+    // Placements, contributions and folds, reads at other nodes, and an
+    // edit that makes placements anew and takes others back: nothing
+    // under a commit's lock either.
+    if !cfg!(feature = "profile") {
+        return;
+    }
+    let (e, o) = engine();
+    let v = e.values();
+    let s = f(v, "s");
+    e.declare_accumulator(Field(s), Arc::new(phitex_defuse::SumMonoid));
+    let u = e.new_unit();
+    let mut spawns = Vec::new();
+    for i in 0..400 {
+        spawns.push(e.push(u, o.spawn, vec![v.int(4), v.int(i)]));
+        e.push(u, o.contrib, vec![s, v.int(i)]);
+        e.push(u, o.fold, vec![s]);
+        let x = f(v, &format!("child{}", i % 4));
+        e.push(u, o.get, vec![x]);
+        let d = e.push(u, o.def, vec![x, v.int(i)]);
+        e.push(u, o.get_before, vec![x, v.int(i64::try_from(d.raw()).unwrap())]);
+    }
+    let cold = e.evaluate(4).unwrap();
+    for (i, &n) in spawns.iter().enumerate().step_by(7) {
+        e.replace(n, o.spawn, vec![v.int(2 + (i % 2) as i64 * 4), v.int(i as i64)]);
+    }
+    let edit = e.evaluate(4).unwrap();
+    assert!(phitex_defuse::obs::counting_allocs());
+    for (what, r) in [("cold", &cold), ("edit", &edit)] {
+        assert_eq!(
+            (r.times.commit_allocs, r.times.commit_frees),
+            (0, 0),
+            "{what}: allocations and frees under a commit's lock over {} commits",
+            r.commits
+        );
+    }
+    assert!(e.check_invariants().is_empty());
+}

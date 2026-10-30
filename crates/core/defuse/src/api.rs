@@ -451,6 +451,11 @@ pub struct Times {
     /// asleep outside the engine (the allocator, the kernel), which
     /// `commit_max_ns` counts. 0 without `profile`.
     pub commit_max_cpu_ns: u64,
+    /// (`profile`, with `obs::CountingAlloc` the binary's allocator) The
+    /// allocations and frees in commits under their segment's lock: 0
+    /// each (the allocator's locks are not taken where others wait).
+    pub commit_allocs: u64,
+    pub commit_frees: u64,
     /// In the walks forward that re-ask readers.
     pub reask_ns: u64,
     /// Workers with nothing to run and nothing to steal.

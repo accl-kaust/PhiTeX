@@ -9,9 +9,15 @@ mod common;
 
 // the CLI's allocator: with the system's, concurrent page steps
 // contend in it and the measures do not show the binary's scaling
-#[cfg(not(target_family = "wasm"))]
+// (with `profile`, counting what commits allocate under their segment's
+// lock: `Times::commit_allocs`)
+#[cfg(all(not(target_family = "wasm"), not(feature = "profile")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+#[cfg(all(not(target_family = "wasm"), feature = "profile"))]
+#[global_allocator]
+static GLOBAL: phitex_defuse::obs::CountingAlloc<tikv_jemallocator::Jemalloc> =
+    phitex_defuse::obs::CountingAlloc(tikv_jemallocator::Jemalloc);
 
 #[test]
 #[ignore = "profiling run"]
@@ -253,4 +259,61 @@ fn editpath_hello() {
         common::build(opts(), Some("\\input pdflatex.ini\n"), &e1)
     });
     assert!(b.is_pdf());
+}
+
+/// A LaTeX document named by `PHITEX_PROFILE_LATEX` (a path), built with
+/// `pdflatex.ini`'s format cached at `PHITEX_EP_FMT` (written when
+/// missing, that build not timed), at `PHITEX_THREADS` threads: its time,
+/// and with `profile` and `PHITEX_ALLOC_ALL` the allocations and frees of
+/// the whole build.
+#[test]
+#[ignore = "a measure: a LaTeX document given by path"]
+fn profile_latex_doc() {
+    let (Some(path), Some(fmt)) = (
+        std::env::var_os("PHITEX_PROFILE_LATEX"),
+        std::env::var_os("PHITEX_EP_FMT"),
+    ) else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let fmt = std::path::PathBuf::from(fmt);
+    let dir = path.parent().expect("a directory").to_path_buf();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("doc")
+        .to_owned();
+    let src = common::read(&path);
+    let opts = || phitex_tex::Options {
+        epoch: Some(0),
+        time_limit: None,
+        prelude_jobname: "pdflatex".to_owned(),
+        prelude_bytes: std::fs::read(&fmt).ok(),
+        ..common::options(&format!("./{stem}.tex"), &stem, "", &dir)
+    };
+    if !fmt.exists() {
+        let b = common::build(opts(), Some("\\input pdflatex.ini\n"), &src);
+        if let Some(bytes) = b.export_prelude() {
+            let _ = std::fs::create_dir_all(fmt.parent().expect("a directory"));
+            let _ = std::fs::write(&fmt, &bytes);
+        }
+    }
+    let a0 = phitex_defuse::obs::all_allocs();
+    let t0 = std::time::Instant::now();
+    let b = common::build(opts(), Some("\\input pdflatex.ini\n"), &src);
+    let t = t0.elapsed();
+    let a1 = phitex_defuse::obs::all_allocs();
+    let (ca, cf) = b.stats.round_times.iter().fold((0, 0), |(a, f), x| {
+        (a + x.commit_allocs, f + x.commit_frees)
+    });
+    eprintln!(
+        "== LATEX {stem}: {t:?}, {} pages, {} nodes run, {} runs, busy {:?}, wasted {:?}, allocations {} frees {} (whole build), under commits' locks {ca} and {cf}",
+        b.pages().len(),
+        b.stats.nodes_run,
+        b.stats.runs,
+        b.stats.engine_busy,
+        b.stats.engine_wasted,
+        a1.0 - a0.0,
+        a1.1 - a0.1
+    );
 }

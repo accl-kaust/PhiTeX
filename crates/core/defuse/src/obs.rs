@@ -163,9 +163,17 @@ pub fn lock_lines() -> Vec<(String, u64)> {
 pub(crate) struct Laps {
     #[cfg(feature = "profile")]
     t: std::time::Instant,
+    /// (in place: a lap is taken under the segment's lock, where nothing
+    /// is allocated)
     #[cfg(feature = "profile")]
-    parts: Vec<(&'static str, u64)>,
+    parts: [(&'static str, u64); LAPS],
+    #[cfg(feature = "profile")]
+    n: usize,
 }
+
+/// The laps a commit takes.
+#[cfg(feature = "profile")]
+const LAPS: usize = 8;
 
 impl Laps {
     #[allow(unused_variables)]
@@ -174,7 +182,9 @@ impl Laps {
             #[cfg(feature = "profile")]
             t,
             #[cfg(feature = "profile")]
-            parts: Vec::new(),
+            parts: [("", 0); LAPS],
+            #[cfg(feature = "profile")]
+            n: 0,
         }
     }
 
@@ -183,10 +193,13 @@ impl Laps {
         #[cfg(feature = "profile")]
         {
             let now = std::time::Instant::now();
-            self.parts.push((
-                name,
-                u64::try_from(now.duration_since(self.t).as_nanos()).unwrap_or(u64::MAX),
-            ));
+            if let Some(p) = self.parts.get_mut(self.n) {
+                *p = (
+                    name,
+                    u64::try_from(now.duration_since(self.t).as_nanos()).unwrap_or(u64::MAX),
+                );
+                self.n += 1;
+            }
             self.t = now;
         }
     }
@@ -195,8 +208,7 @@ impl Laps {
     pub(crate) fn report(&self, node: u64, ns: u64, defs: usize, reads: usize) {
         #[cfg(feature = "profile")]
         if ns > 1_000_000 {
-            let parts: Vec<String> = self
-                .parts
+            let parts: Vec<String> = self.parts[..self.n]
                 .iter()
                 .map(|(n, t)| format!("{n} {:.3}", *t as f64 / 1e6))
                 .collect();
@@ -287,4 +299,185 @@ pub(crate) fn maybe_dump_line(eng: &crate::engine::Engine) {
         }
     }
     eprint!("{out}");
+}
+
+/// (`profile`) A binary's global allocator that counts what a commit
+/// allocates and frees under its segment's lock (`Section`): `A`'s
+/// (the system's, `CountingAlloc(std::alloc::System)`, or the CLI's
+/// jemalloc), counting on the threads in a section. A test binary
+/// installs it (`#[global_allocator]`); [`crate::Times::commit_allocs`]
+/// is 0 in one that does not ([`counting_allocs`]). With
+/// `PHITEX_ALLOC_TRACE=n` set, one in every `n` counted (1 if not a
+/// number) prints its backtrace to stderr.
+#[cfg(feature = "profile")]
+pub struct CountingAlloc<A>(pub A);
+
+#[cfg(feature = "profile")]
+mod counting {
+    use std::alloc::{GlobalAlloc, Layout};
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+
+    thread_local! {
+        /// In a section, and not in a trace of one.
+        static IN: Cell<bool> = const { Cell::new(false) };
+        static ALLOCS: Cell<u64> = const { Cell::new(0) };
+        static FREES: Cell<u64> = const { Cell::new(0) };
+        /// In a trace of any allocation (`PHITEX_ALLOC_ALL`).
+        static TRACING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// `PHITEX_ALLOC_ALL=n`: one in every `n` allocations anywhere prints
+    /// its backtrace (`any-alloc:`); 0 off. Read at the first commit.
+    static ALL: AtomicU64 = AtomicU64::new(0);
+    /// Every allocation and free since, with `ALL` on.
+    pub(super) static ALL_SEEN: AtomicU64 = AtomicU64::new(0);
+    pub(super) static ALL_FREES: AtomicU64 = AtomicU64::new(0);
+
+    /// Whether the binary's allocator is [`super::CountingAlloc`].
+    pub(super) static INSTALLED: AtomicBool = AtomicBool::new(false);
+    /// `PHITEX_ALLOC_TRACE`: 0 unread, 1 off, 2 on.
+    static TRACE: AtomicU8 = AtomicU8::new(0);
+    /// Its period, and those counted so far.
+    static PERIOD: AtomicU64 = AtomicU64::new(1);
+    static SEEN: AtomicU64 = AtomicU64::new(0);
+
+    fn note(c: &'static std::thread::LocalKey<Cell<u64>>, what: &str) {
+        if !INSTALLED.load(Ordering::Relaxed) {
+            INSTALLED.store(true, Ordering::Relaxed);
+        }
+        let all = ALL.load(Ordering::Relaxed);
+        if all > 0 && !TRACING.try_with(Cell::get).unwrap_or(true) {
+            if what == "free" {
+                ALL_FREES.fetch_add(1, Ordering::Relaxed);
+            } else if ALL_SEEN.fetch_add(1, Ordering::Relaxed).is_multiple_of(all) {
+                TRACING.with(|t| t.set(true));
+                eprintln!("any-alloc: {what} at\n{}", std::backtrace::Backtrace::force_capture());
+                TRACING.with(|t| t.set(false));
+            }
+        }
+        if IN.try_with(Cell::get).unwrap_or(false) {
+            let _ = c.try_with(|c| c.set(c.get() + 1));
+            if TRACE.load(Ordering::Relaxed) == 2
+                && SEEN
+                    .fetch_add(1, Ordering::Relaxed)
+                    .is_multiple_of(PERIOD.load(Ordering::Relaxed))
+            {
+                IN.with(|i| i.set(false));
+                eprintln!(
+                    "commit-alloc: {what} under a commit's lock at\n{}",
+                    std::backtrace::Backtrace::force_capture()
+                );
+                IN.with(|i| i.set(true));
+            }
+        }
+    }
+
+    #[allow(unsafe_code)]
+    // SAFETY: every call goes to `System` with the caller's arguments.
+    unsafe impl<A: GlobalAlloc> GlobalAlloc for super::CountingAlloc<A> {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            note(&ALLOCS, "alloc");
+            // SAFETY: the caller's contract, passed on.
+            unsafe { self.0.alloc(l) }
+        }
+
+        unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+            note(&ALLOCS, "alloc");
+            // SAFETY: the caller's contract, passed on.
+            unsafe { self.0.alloc_zeroed(l) }
+        }
+
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+            note(&ALLOCS, "realloc");
+            // SAFETY: the caller's contract, passed on.
+            unsafe { self.0.realloc(p, l, new) }
+        }
+
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            note(&FREES, "free");
+            // SAFETY: the caller's contract, passed on.
+            unsafe { self.0.dealloc(p, l) }
+        }
+    }
+
+    /// Enters a section; `PHITEX_ALLOC_TRACE` read once, before.
+    pub(super) fn enter() {
+        if TRACE.load(Ordering::Relaxed) == 0 {
+            let on = std::env::var("PHITEX_ALLOC_TRACE").ok();
+            if let Some(n) = on.as_deref().and_then(|x| x.parse::<u64>().ok()) {
+                PERIOD.store(n.max(1), Ordering::Relaxed);
+            }
+            TRACE.store(if on.is_some() { 2 } else { 1 }, Ordering::Relaxed);
+            let all = std::env::var("PHITEX_ALLOC_ALL")
+                .ok()
+                .and_then(|x| x.parse::<u64>().ok());
+            ALL.store(all.unwrap_or(0), Ordering::Relaxed);
+        }
+        IN.with(|i| i.set(true));
+    }
+
+    /// Out of the section; what it counted stays for `take`.
+    pub(super) fn out() {
+        let _ = IN.try_with(|i| i.set(false));
+    }
+
+    /// What the sections allocated and freed since the last take.
+    pub(super) fn take() -> (u64, u64) {
+        (ALLOCS.with(|c| c.replace(0)), FREES.with(|c| c.replace(0)))
+    }
+}
+
+/// (`profile`) A commit's section under its segment's lock, until it is
+/// dropped: what it allocates and frees there is counted by
+/// [`CountingAlloc`], if the binary installs it, and taken by
+/// [`section_take`]. Nothing without `profile`.
+pub(crate) struct Section;
+
+impl Section {
+    pub(crate) fn enter() -> Section {
+        #[cfg(feature = "profile")]
+        counting::enter();
+        Section
+    }
+}
+
+impl Drop for Section {
+    fn drop(&mut self) {
+        #[cfg(feature = "profile")]
+        counting::out();
+    }
+}
+
+/// (allocations, frees) of this thread's sections since the last take
+/// (a commit's tries that let the lock go and took it again included);
+/// (0, 0) without `profile`.
+pub(crate) fn section_take() -> (u64, u64) {
+    #[cfg(feature = "profile")]
+    return counting::take();
+    #[cfg(not(feature = "profile"))]
+    (0, 0)
+}
+
+/// (`profile`, `PHITEX_ALLOC_ALL`) The allocations and frees anywhere
+/// since the first commit: (0, 0) unless on.
+#[must_use]
+pub fn all_allocs() -> (u64, u64) {
+    #[cfg(feature = "profile")]
+    return (
+        counting::ALL_SEEN.load(std::sync::atomic::Ordering::Relaxed),
+        counting::ALL_FREES.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    #[cfg(not(feature = "profile"))]
+    (0, 0)
+}
+
+/// (`profile`) Whether the binary's allocator counts a commit's
+/// allocations ([`CountingAlloc`]): known after a commit.
+#[must_use]
+pub fn counting_allocs() -> bool {
+    #[cfg(feature = "profile")]
+    return counting::INSTALLED.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(feature = "profile"))]
+    false
 }

@@ -5,7 +5,6 @@
 //! earlier segment that last defines `f`). A commit locks the committing
 //! node's segment for one diff. Nothing ever holds two segments.
 
-use std::collections::BTreeMap;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -33,7 +32,7 @@ pub(crate) struct Segment {
 pub(crate) struct Inner {
     /// One past its last label.
     pub(crate) hi: Pos,
-    pub(crate) nodes: BTreeMap<Pos, NodeId>,
+    pub(crate) nodes: Nodes,
     /// Definitions by field, in position order. A relation's value is kept
     /// materialised and recomputed in place when its input changes.
     pub(crate) defs: FxHashMap<Field, PosMap<Def>>,
@@ -259,13 +258,14 @@ impl<V> PosMap<V> {
     }
 
     /// Labels moved in order (a relabel).
-    fn rekey(&mut self, map: &FxHashMap<Pos, Pos>) {
+    /// Each label `p` becomes `to(p)` (an order-keeping map).
+    fn rekey(&mut self, to: impl Fn(Pos) -> Pos) {
         match self {
             PosMap::Zero => {}
-            PosMap::One(q, _) => *q = map.get(q).copied().unwrap_or(*q),
+            PosMap::One(q, _) => *q = to(*q),
             PosMap::Many(m) => {
                 for x in m.iter_mut() {
-                    x.0 = map.get(&x.0).copied().unwrap_or(x.0);
+                    x.0 = to(x.0);
                 }
             }
         }
@@ -276,8 +276,8 @@ impl<V> PosMap<V> {
     fn regrow(&mut self, mut run: Vec<(Pos, V)>) -> Vec<(Pos, V)> {
         match std::mem::take(self) {
             PosMap::Zero => {
-                *self = PosMap::Zero;
-                run
+                *self = PosMap::Many(run);
+                Vec::new()
             }
             PosMap::One(q, v) => {
                 run.push((q, v));
@@ -290,6 +290,133 @@ impl<V> PosMap<V> {
                 old
             }
         }
+    }
+}
+
+/// A segment's nodes by label, in order: a run with room for a segment's
+/// worth of them (`SEG_CAP` twice over: a split comes at `SEG_CAP`), so a
+/// placement under the segment's lock allocates nothing (a tree map made a
+/// node for one insert in six); `Grow` makes more room before the lock for
+/// a commit that places past it.
+#[derive(Default, Clone, Debug)]
+pub(crate) struct Nodes(Vec<(Pos, NodeId)>);
+
+impl Nodes {
+    pub(crate) fn new() -> Nodes {
+        Nodes(Vec::with_capacity(2 * SEG_CAP))
+    }
+
+    fn find(&self, p: Pos) -> Result<usize, usize> {
+        self.0.binary_search_by(|x| x.0.cmp(&p))
+    }
+
+    pub(crate) fn get(&self, p: &Pos) -> Option<&NodeId> {
+        self.find(*p).ok().map(|i| &self.0[i].1)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Room for `k` more without growing.
+    pub(crate) fn has_room(&self, k: usize) -> bool {
+        self.0.capacity() - self.0.len() >= k
+    }
+
+    pub(crate) fn insert(&mut self, p: Pos, n: NodeId) -> Option<NodeId> {
+        match self.find(p) {
+            Ok(i) => Some(std::mem::replace(&mut self.0[i].1, n)),
+            Err(i) => {
+                self.0.insert(i, (p, n));
+                None
+            }
+        }
+    }
+
+    pub(crate) fn remove(&mut self, p: &Pos) -> Option<NodeId> {
+        self.find(*p).ok().map(|i| self.0.remove(i).1)
+    }
+
+    fn bound_start(&self, b: std::ops::Bound<&Pos>) -> usize {
+        match b {
+            Unbounded => 0,
+            Included(p) => self.0.partition_point(|x| x.0 < *p),
+            Excluded(p) => self.0.partition_point(|x| x.0 <= *p),
+        }
+    }
+
+    fn bound_end(&self, b: std::ops::Bound<&Pos>) -> usize {
+        match b {
+            Unbounded => self.0.len(),
+            Included(p) => self.0.partition_point(|x| x.0 <= *p),
+            Excluded(p) => self.0.partition_point(|x| x.0 < *p),
+        }
+    }
+
+    pub(crate) fn range<R: std::ops::RangeBounds<Pos>>(
+        &self,
+        r: R,
+    ) -> impl DoubleEndedIterator<Item = (&Pos, &NodeId)> + '_ {
+        let a = self.bound_start(r.start_bound());
+        let b = self.bound_end(r.end_bound()).max(a);
+        self.0[a..b].iter().map(|(p, n)| (p, n))
+    }
+
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = (&Pos, &NodeId)> + '_ {
+        self.0.iter().map(|(p, n)| (p, n))
+    }
+
+    pub(crate) fn keys(&self) -> impl DoubleEndedIterator<Item = &Pos> + '_ {
+        self.0.iter().map(|(p, _)| p)
+    }
+
+    pub(crate) fn values(&self) -> impl DoubleEndedIterator<Item = &NodeId> + '_ {
+        self.0.iter().map(|(_, n)| n)
+    }
+
+    /// The nodes at and after `p`, taken out (a split's upper part), in
+    /// a run of their own with a segment's room.
+    pub(crate) fn split_off(&mut self, p: &Pos) -> Nodes {
+        let i = self.0.partition_point(|x| x.0 < *p);
+        let mut v = Vec::with_capacity((2 * SEG_CAP).max(self.0.len() - i));
+        v.extend_from_slice(&self.0[i..]);
+        self.0.truncate(i);
+        Nodes(v)
+    }
+
+    /// Grows the run to `cap` (`Grow`'s room, made before the lock).
+    pub(crate) fn regrow(&mut self, mut v: Vec<(Pos, NodeId)>) -> Vec<(Pos, NodeId)> {
+        if v.capacity() > self.0.capacity() {
+            v.extend_from_slice(&self.0);
+            std::mem::swap(&mut self.0, &mut v);
+            v.clear();
+        }
+        v
+    }
+}
+
+impl<'a> IntoIterator for &'a Nodes {
+    type Item = (&'a Pos, &'a NodeId);
+    type IntoIter = std::iter::Map<std::slice::Iter<'a, (Pos, NodeId)>, fn(&'a (Pos, NodeId)) -> (&'a Pos, &'a NodeId)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().map(|(p, n)| (p, n))
+    }
+}
+
+impl Extend<(Pos, NodeId)> for Nodes {
+    fn extend<I: IntoIterator<Item = (Pos, NodeId)>>(&mut self, it: I) {
+        for (p, n) in it {
+            self.insert(p, n);
+        }
+    }
+}
+
+impl FromIterator<(Pos, NodeId)> for Nodes {
+    fn from_iter<I: IntoIterator<Item = (Pos, NodeId)>>(it: I) -> Nodes {
+        let mut n = Nodes::new();
+        n.extend(it);
+        n
     }
 }
 
@@ -322,10 +449,38 @@ pub(crate) struct Grow {
     def_runs: Vec<(Field, usize)>,
     contrib_runs: Vec<(Field, usize)>,
     reader_lists: Vec<(Field, usize)>,
+    /// The fields predicted by the placements a commit makes, in order.
+    preds: Vec<Field>,
+    /// The brackets' run's new room.
+    brackets: usize,
+    /// The nodes' run's new room (`Nodes`).
+    nodes: usize,
+    /// The operations of the placements a commit makes, in order, the
+    /// room their lists need (`Inner::by_op`), and its map's.
+    ops: Vec<OpId>,
+    op_lists: Vec<(OpId, usize)>,
+    by_op: usize,
+    /// The nodes whose lists of fields read at them (`Node::anchored`)
+    /// need room, and how much.
+    anchored: Vec<(NodeId, usize)>,
+    /// The room the commit's own lists need, where theirs is less: for the
+    /// `next` readers stopped in the segment, and for the readers its
+    /// walks may wake (`commit::walk_here`).
+    scratch: [usize; 2],
+    /// The field indexes' (definitions, contributions, readers) shards a
+    /// filing may add to (`FieldIndex::reserve`), and those without room.
+    ix_shards: [Vec<usize>; 3],
+    ix_need: [Vec<crate::index::Room>; 3],
 }
 
 #[derive(Default)]
 pub(crate) struct Made {
+    ix_rooms: [Vec<crate::index::MadeRoom>; 3],
+    by_op: Option<FxHashMap<OpId, Vec<NodeId>>>,
+    op_lists: Vec<(OpId, Vec<NodeId>)>,
+    anchored: Vec<(NodeId, Vec<Field>)>,
+    brackets: Vec<(Pos, (NodeId, Brackets))>,
+    nodes: Vec<(Pos, NodeId)>,
     defs: Option<FxHashMap<Field, PosMap<Def>>>,
     contribs: Option<FxHashMap<Field, PosMap<ValueId>>>,
     readers: Option<FxHashMap<Field, Vec<Reader>>>,
@@ -362,18 +517,101 @@ const DUMMY_READER: Reader = Reader {
 };
 
 impl Grow {
+    /// Room for what a commit of so many definitions, contributions and
+    /// fields read could find to grow: none of it grown under the lock.
+    /// (`preds`: the fields the commit's new placements are predicted to
+    /// define, each as often)
+    pub(crate) fn with_capacity(
+        defs: usize,
+        contribs: usize,
+        reads: usize,
+        preds: usize,
+        placed: usize,
+        anchored: usize,
+    ) -> Grow {
+        let n = defs + contribs + reads + preds;
+        crate::index::FieldIndex::prepare(n);
+        Grow {
+            def_runs: Vec::with_capacity(defs + preds),
+            contrib_runs: Vec::with_capacity(contribs),
+            reader_lists: Vec::with_capacity(reads),
+            preds: Vec::with_capacity(preds),
+            ops: Vec::with_capacity(placed),
+            op_lists: Vec::with_capacity(placed),
+            anchored: Vec::with_capacity(anchored),
+            ix_shards: [
+                Vec::with_capacity(defs + preds),
+                Vec::with_capacity(contribs),
+                Vec::with_capacity(reads),
+            ],
+            ix_need: [
+                Vec::with_capacity(defs + preds),
+                Vec::with_capacity(contribs),
+                Vec::with_capacity(reads),
+            ],
+            ..Grow::default()
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.defs == 0
+            && self.nodes == 0
+            && self.by_op == 0
+            && self.op_lists.is_empty()
+            && self.anchored.is_empty()
+            && self.brackets == 0
+            && self.scratch == [0, 0]
             && self.contribs == 0
             && self.readers == 0
             && self.def_runs.is_empty()
             && self.contrib_runs.is_empty()
             && self.reader_lists.is_empty()
+            && self.ix_need.iter().all(Vec::is_empty)
+    }
+
+    /// The room the commit's own lists need (`Inner::grow_for`'s `has`).
+    pub(crate) fn scratch(&self) -> [usize; 2] {
+        self.scratch
+    }
+
+    fn clear(&mut self) {
+        (self.defs, self.contribs, self.readers, self.brackets) = (0, 0, 0, 0);
+        self.scratch = [0, 0];
+        self.by_op = 0;
+        self.nodes = 0;
+        self.ops.clear();
+        self.op_lists.clear();
+        self.anchored.clear();
+        self.def_runs.clear();
+        self.contrib_runs.clear();
+        self.reader_lists.clear();
+        self.preds.clear();
+        for v in &mut self.ix_shards {
+            v.clear();
+        }
+        for v in &mut self.ix_need {
+            v.clear();
+        }
     }
 
     /// Makes what it names, outside any lock.
     pub(crate) fn make(&self) -> Made {
         Made {
+            ix_rooms: [0, 1, 2].map(|i| {
+                self.ix_need[i]
+                    .iter()
+                    .map(crate::index::FieldIndex::make_room)
+                    .collect()
+            }),
+            brackets: touched(self.brackets, (Pos(0), (NodeId(0), Brackets::default()))),
+            nodes: touched(self.nodes, (Pos(0), NodeId(0))),
+            by_op: (self.by_op > 0).then(|| {
+                let mut m = FxHashMap::default();
+                m.reserve(self.by_op);
+                m
+            }),
+            op_lists: self.op_lists.iter().map(|&(o, n)| (o, Vec::with_capacity(n))).collect(),
+            anchored: self.anchored.iter().map(|&(a, n)| (a, Vec::with_capacity(n))).collect(),
             defs: (self.defs > 0).then(|| touched_map(self.defs)),
             contribs: (self.contribs > 0).then(|| touched_map(self.contribs)),
             readers: (self.readers > 0).then(|| touched_map(self.readers)),
@@ -399,32 +637,65 @@ impl Grow {
 impl Made {
     /// Moves the segment's containers into the bigger ones made; what they
     /// replaced is kept here, to be freed after the lock.
-    pub(crate) fn install(&mut self, inner: &mut Inner) {
-        if let Some(mut m) = self.defs.take()
+    pub(crate) fn install(&mut self, eng: &Engine, inner: &mut Inner) {
+        for (ix, rooms) in [&eng.defs, &eng.contribs, &eng.readers]
+            .into_iter()
+            .zip(&mut self.ix_rooms)
+        {
+            for m in rooms {
+                ix.install(m);
+            }
+        }
+        if let Some(m) = self.by_op.as_mut()
+            && m.capacity() > inner.by_op.capacity()
+        {
+            m.extend(inner.by_op.drain());
+            std::mem::swap(&mut inner.by_op, m);
+        }
+        for (a, list) in &mut self.anchored {
+            let mut v = eng.node(*a).anchored.lock();
+            if list.capacity() > v.len() {
+                list.append(&mut v);
+                std::mem::swap(&mut *v, list);
+            }
+        }
+        for (o, list) in &mut self.op_lists {
+            let v = inner.by_op.entry(*o).or_default();
+            if list.capacity() > v.len() {
+                list.append(v);
+                std::mem::swap(v, list);
+            }
+        }
+        self.nodes = inner.nodes.regrow(std::mem::take(&mut self.nodes));
+        if self.brackets.capacity() > inner.brackets.len() {
+            self.brackets = inner.brackets.regrow(std::mem::take(&mut self.brackets));
+        }
+        // (one made too small meanwhile is kept too, freed after the lock)
+        if let Some(m) = self.defs.as_mut()
             && m.capacity() > inner.defs.capacity()
         {
             m.extend(inner.defs.drain());
-            std::mem::swap(&mut inner.defs, &mut m);
-            self.defs = Some(m);
+            std::mem::swap(&mut inner.defs, m);
         }
-        if let Some(mut m) = self.contribs.take()
+        // (one made too small meanwhile is kept too, freed after the lock)
+        if let Some(m) = self.contribs.as_mut()
             && m.capacity() > inner.contribs.capacity()
         {
             m.extend(inner.contribs.drain());
-            std::mem::swap(&mut inner.contribs, &mut m);
-            self.contribs = Some(m);
+            std::mem::swap(&mut inner.contribs, m);
         }
-        if let Some(mut m) = self.readers.take()
+        // (one made too small meanwhile is kept too, freed after the lock)
+        if let Some(m) = self.readers.as_mut()
             && m.capacity() > inner.readers.capacity()
         {
             m.extend(inner.readers.drain());
-            std::mem::swap(&mut inner.readers, &mut m);
-            self.readers = Some(m);
+            std::mem::swap(&mut inner.readers, m);
         }
         for (f, run) in &mut self.def_runs {
-            if let Some(pm) = inner.defs.get_mut(f)
-                && run.capacity() > pm.len()
-            {
+            // (a field new here: its run in place, empty, for the
+            // definitions about to be filed)
+            let pm = inner.defs.entry(*f).or_default();
+            if run.capacity() > pm.len() {
                 *run = pm.regrow(std::mem::take(run));
             }
         }
@@ -454,15 +725,93 @@ impl Made {
 impl Inner {
     /// What filing these definitions and contributions at `pos`, and
     /// readers of these fields (each so many times), would grow.
+    /// `g` is cleared first; its lists' room is the caller's
+    /// (`Grow::with_capacity`).
     pub(crate) fn grow_for(
         &mut self,
+        g: &mut Grow,
         eng: &Engine,
         pos: Pos,
-        defs: impl Iterator<Item = Field>,
+        defs: impl Iterator<Item = Field> + Clone,
         contribs: impl Iterator<Item = Field>,
         reads: &[(Field, usize)],
-    ) -> Grow {
-        let mut g = Grow::default();
+        preds: impl Iterator<Item = Field>,
+        brackets: usize,
+        old: impl Iterator<Item = Field> + Clone,
+        has: [usize; 2],
+        ops: impl Iterator<Item = OpId>,
+        anchored: impl Iterator<Item = (NodeId, Field)>,
+    ) {
+        use crate::index::FieldIndex;
+        g.clear();
+        // (the fields read at other nodes, each listed there once)
+        // (`g.anchored` first counts each node's fields new to it, then
+        // keeps those without room for them)
+        for (a, f) in anchored {
+            if !eng.node(a).anchored.lock().contains(&f) {
+                match g.anchored.iter_mut().find(|x| x.0 == a) {
+                    Some(x) => x.1 += 1,
+                    None => g.anchored.push((a, 1)),
+                }
+            }
+        }
+        g.anchored.retain_mut(|(a, k)| {
+            let v = eng.node(*a).anchored.lock();
+            if v.capacity() - v.len() >= *k {
+                return false;
+            }
+            *k = ((v.len() + *k) * 2).max(4);
+            true
+        });
+        // (the lists of nodes by operation its placements join, and the
+        // segment's run of them)
+        g.ops.extend(ops);
+        if !self.nodes.has_room(g.ops.len()) {
+            g.nodes = (self.nodes.len() + g.ops.len()) * 2;
+        }
+        g.ops.sort_unstable_by_key(|o| o.0);
+        let (mut i, mut new) = (0, 0);
+        while i < g.ops.len() {
+            let o = g.ops[i];
+            let k = g.ops[i..].iter().take_while(|&&x| x == o).count();
+            i += k;
+            match self.by_op.get(&o) {
+                None => {
+                    new += 1;
+                    g.op_lists.push((o, k.max(4)));
+                }
+                Some(v) if v.capacity() - v.len() < k => g.op_lists.push((o, ((v.len() + k) * 2).max(4))),
+                Some(_) => {}
+            }
+        }
+        if new > 0 && self.by_op.capacity() - self.by_op.len() < new {
+            g.by_op = ((self.by_op.len() + new) * 2).max(8);
+        }
+        // (the commit's lists: its `next` readers stopped here, and the
+        // readers of the fields it defines or defined, each of which a walk
+        // may wake once)
+        let woken: usize = defs
+            .clone()
+            .chain(old)
+            .map(|f| self.readers.get(&f).map_or(0, Vec::len))
+            .sum::<usize>()
+            // (and its own, filed before the walks)
+            + reads.iter().map(|x| x.1).sum::<usize>();
+        let need = [self.stops.len(), woken];
+        for i in 0..2 {
+            if has[i] < need[i] {
+                g.scratch[i] = need[i] * 2;
+            }
+        }
+        // (brackets filed at as many new labels)
+        let free = match &self.brackets {
+            PosMap::Zero => 1,
+            PosMap::One(..) => 0,
+            PosMap::Many(m) => m.capacity() - m.len(),
+        };
+        if free < brackets {
+            g.brackets = ((self.brackets.len() + brackets) * 2).max(4);
+        }
         let mut new = 0;
         for f in defs {
             match self.defs.get(&f) {
@@ -470,6 +819,40 @@ impl Inner {
                 Some(pm) => {
                     if pm.full_for(pos) {
                         g.def_runs.push((f, (pm.len() * 2).max(4)));
+                    }
+                }
+            }
+            if self.defs.get(&f).is_none_or(PosMap::is_empty) {
+                g.ix_shards[0].push(FieldIndex::shard_of(f));
+            }
+        }
+        // (the predictions of its placements, each at a label of its own)
+        g.preds.extend(preds);
+        g.preds.sort_unstable();
+        let mut i = 0;
+        while i < g.preds.len() {
+            let f = g.preds[i];
+            let k = g.preds[i..].iter().take_while(|&&x| x == f).count();
+            i += k;
+            match self.defs.get(&f) {
+                None => {
+                    new += 1;
+                    if k > 1 {
+                        g.def_runs.push((f, k.max(4)));
+                    }
+                    g.ix_shards[0].push(FieldIndex::shard_of(f));
+                }
+                Some(pm) => {
+                    let room = match pm {
+                        PosMap::Zero => 1,
+                        PosMap::One(..) => 0,
+                        PosMap::Many(m) => m.capacity() - m.len(),
+                    };
+                    if room < k {
+                        g.def_runs.push((f, ((pm.len() + k) * 2).max(4)));
+                    }
+                    if pm.is_empty() {
+                        g.ix_shards[0].push(FieldIndex::shard_of(f));
                     }
                 }
             }
@@ -485,6 +868,9 @@ impl Inner {
                     }
                 }
             }
+            if self.contribs.get(&f).is_none_or(PosMap::is_empty) {
+                g.ix_shards[1].push(FieldIndex::shard_of(f));
+            }
         }
         g.contribs = map_room(&self.contribs, new);
         let mut new = 0;
@@ -497,8 +883,12 @@ impl Inner {
             let Some(v) = self.readers.get_mut(&f) else {
                 new += 1;
                 g.reader_lists.push((f, k.max(4)));
+                g.ix_shards[2].push(FieldIndex::shard_of(f));
                 continue;
             };
+            if v.is_empty() {
+                g.ix_shards[2].push(FieldIndex::shard_of(f));
+            }
             if v.capacity() - v.len() < k {
                 v.retain(|r| live(eng, r.node, r.serial));
                 if v.len() + k > v.capacity() / 2 {
@@ -507,7 +897,19 @@ impl Inner {
             }
         }
         g.readers = map_room(&self.readers, new);
-        g
+        // (room in the field indexes last, held from here to the filing's
+        // end: none while the segment's own is still to be made)
+        if g.is_empty() {
+            let ixs = [&eng.defs, &eng.contribs, &eng.readers];
+            for (i, ix) in ixs.iter().enumerate() {
+                ix.reserve(&mut g.ix_shards[i], &mut g.ix_need[i]);
+            }
+            if !g.is_empty() {
+                for ix in ixs {
+                    ix.release();
+                }
+            }
+        }
     }
 }
 
@@ -557,13 +959,22 @@ impl Def {
         .unwrap_or_else(|| vec![*self])
     }
 
-    /// The definition as one value: a multi one's innermost part.
+    /// The definition as one value: a multi one's innermost part (its
+    /// last pair; nothing allocated, under a segment's lock).
     pub(crate) fn plain(&self, v: &crate::values::Values) -> Def {
-        if self.multi {
-            self.parts(v).pop().unwrap_or(*self)
-        } else {
-            *self
+        if !self.multi {
+            return *self;
         }
+        v.with_list(self.value, |xs| {
+            xs.as_chunks::<2>().0.last().map(|c| Def {
+                depth: u16::try_from(v.as_int(c[0]).unwrap_or(0)).unwrap_or(GLOBAL),
+                value: c[1],
+                multi: false,
+                ..*self
+            })
+        })
+        .flatten()
+        .unwrap_or(*self)
     }
 }
 
@@ -641,12 +1052,19 @@ pub(crate) fn reduce(eng: &Engine, mono: &dyn crate::api::Monoid, xs: Vec<ValueI
 impl Inner {
     /// Its sum of `f` is stale: dropped, computed again at the next fold
     /// (`read::segment_part`); an empty field is dropped.
-    pub(crate) fn resum(&mut self, _eng: &Engine, f: Field) {
+    pub(crate) fn resum(&mut self, eng: &Engine, f: Field) {
+        drop(self.resum_keep(eng, f));
+    }
+
+    /// `resum`, the empty field's run given back (to be freed after a
+    /// commit's lock).
+    pub(crate) fn resum_keep(&mut self, _eng: &Engine, f: Field) -> Option<PosMap<ValueId>> {
         self.sums.remove(&f);
         self.sums_gen += 1;
         if self.contribs.get(&f).is_some_and(PosMap::is_empty) {
-            self.contribs.remove(&f);
+            return self.contribs.remove(&f);
         }
+        None
     }
 }
 
@@ -662,7 +1080,7 @@ impl Segment {
                 depth_net: 0,
                 depth_min: 0,
                 hi,
-                nodes: BTreeMap::new(),
+                nodes: Nodes::new(),
                 defs: FxHashMap::default(),
                 readers: FxHashMap::default(),
                 contribs: FxHashMap::default(),
@@ -731,23 +1149,24 @@ impl Segment {
             self.id
         );
         let step = width / (n + 1);
-        let old: Vec<(Pos, NodeId)> = inner.nodes.iter().map(|(p, n)| (*p, *n)).collect();
-        let mut map: FxHashMap<Pos, Pos> = FxHashMap::default();
-        let mut nodes = BTreeMap::new();
-        for (i, (p, id)) in old.iter().enumerate() {
-            let np = Pos(self.lo.0 + (i as u64 + 1) * step);
-            map.insert(*p, np);
-            nodes.insert(np, *id);
-            eng.node(*id).pos.store(np.0, Ordering::Release);
-        }
-        inner.nodes = nodes;
+        // (the `i`th node's new label; a label of no node stays. The
+        // maps first, found by the old labels, then the nodes, in place:
+        // nothing allocated under the lock)
+        let lo = self.lo.0;
+        let nodes = &inner.nodes;
+        let to = |p: Pos| nodes.find(p).map_or(p, |i| Pos(lo + (i as u64 + 1) * step));
         for m in inner.defs.values_mut() {
-            m.rekey(&map);
+            m.rekey(to);
         }
         for m in inner.contribs.values_mut() {
-            m.rekey(&map);
+            m.rekey(to);
         }
-        inner.brackets.rekey(&map);
+        inner.brackets.rekey(to);
+        for (i, (p, id)) in inner.nodes.0.iter_mut().enumerate() {
+            let np = Pos(lo + (i as u64 + 1) * step);
+            *p = np;
+            eng.node(*id).pos.store(np.0, Ordering::Release);
+        }
         crate::obs::long_hold("relabel", inner.nodes.len(), t_held);
     }
 
@@ -919,13 +1338,14 @@ impl Segment {
             }
         }
         if !map.is_empty() {
+            let to = |p: Pos| map.get(&p).copied().unwrap_or(p);
             for m in inner.defs.values_mut() {
-                m.rekey(&map);
+                m.rekey(to);
             }
             for m in inner.contribs.values_mut() {
-                m.rekey(&map);
+                m.rekey(to);
             }
-            inner.brackets.rekey(&map);
+            inner.brackets.rekey(to);
         }
         self.split_at(inner, eng, Pos(self.lo.0 + (k as u64 + 1) * step), new_id)
     }

@@ -28,10 +28,13 @@ impl<T> Table<T> {
     }
 
     /// The next index, its slot still empty: an id can be made before its
-    /// entry is built. `set` fills it, exactly once.
+    /// entry is built. `set` fills it, exactly once, into a chunk made
+    /// here: a slot set under a lock (a placement under its segment's)
+    /// allocates nothing.
     pub(crate) fn reserve(&self) -> usize {
         let i = self.next.fetch_add(1, Ordering::AcqRel);
         assert!(i < CHUNK * CHUNKS, "table full");
+        self.chunk(i);
         i
     }
 
@@ -39,12 +42,21 @@ impl<T> Table<T> {
     pub(crate) fn reserve_n(&self, n: usize) -> usize {
         let i = self.next.fetch_add(n, Ordering::AcqRel);
         assert!(i + n <= CHUNK * CHUNKS, "table full");
+        for c in (i >> CHUNK_BITS)..=((i + n.max(1) - 1) >> CHUNK_BITS) {
+            self.chunk(c << CHUNK_BITS);
+        }
         i
     }
 
+    fn chunk(&self, i: usize) -> &Chunk<T> {
+        self.chunks[i >> CHUNK_BITS].get_or_init(|| (0..CHUNK).map(|_| OnceLock::new()).collect())
+    }
+
     pub(crate) fn set(&self, i: usize, x: T) {
-        let chunk = self.chunks[i >> CHUNK_BITS].get_or_init(|| (0..CHUNK).map(|_| OnceLock::new()).collect());
-        assert!(chunk[i & (CHUNK - 1)].set(x).is_ok(), "table slot {i} set twice");
+        assert!(
+            self.chunk(i)[i & (CHUNK - 1)].set(x).is_ok(),
+            "table slot {i} set twice"
+        );
     }
 
     pub(crate) fn push(&self, x: T) -> usize {
