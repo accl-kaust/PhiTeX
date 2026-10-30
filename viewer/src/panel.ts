@@ -645,6 +645,9 @@ export class Panel {
    */
   private again(): void {
     this.reopen = true;
+    // (the new build's packages counted from none: the sheet says its own, not the last document's)
+    this.loadPct = 0;
+    this.loadDone = -1;
     this.opened = false;
     this.sheetUp();
     // (the last build's pages hidden under it until the dive: the new page shows through the hole)
@@ -1154,8 +1157,8 @@ export class Panel {
     if (done !== this.loadDone) this.loadDone = done;
     // (never backwards: a build asking for more grows the total)
     const pct = (this.loadPct = Math.max(this.loadPct, total ? Math.round((100 * done) / total) : 100));
-    // (before the first page: the sheet's step)
-    if (!this.last) {
+    // (before the first page, or a rebuild's or another document's opening: the sheet's step)
+    if (this.firstPending()) {
       if (!p.loading.length && !p.building) {
         // (done: the build's own state says the rest. Files not found are optional ones LaTeX
         // only checks for (amsart.cfg, …): the problems list them, and an error says when one was needed)

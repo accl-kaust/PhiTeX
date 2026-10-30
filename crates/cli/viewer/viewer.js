@@ -2022,6 +2022,8 @@ var Panel = class {
    */
   again() {
     this.reopen = true;
+    this.loadPct = 0;
+    this.loadDone = -1;
     this.opened = false;
     this.sheetUp();
     this.win.classList.toggle("reopening", !!this.anim);
@@ -2464,7 +2466,7 @@ var Panel = class {
     const total = done + p.loading.length;
     if (done !== this.loadDone) this.loadDone = done;
     const pct = this.loadPct = Math.max(this.loadPct, total ? Math.round(100 * done / total) : 100);
-    if (!this.last) {
+    if (this.firstPending()) {
       if (!p.loading.length && !p.building) {
         this.pkgBusy = false;
         if (!this.stopped()) this.step(this.words.steps[2], void 0, `with ${done} package file${done === 1 ? "" : "s"}${mb(p.bytes)}`);
