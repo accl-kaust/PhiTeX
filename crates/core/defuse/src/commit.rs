@@ -1824,15 +1824,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             *log.placed_by_op.entry(n.op()).or_default() += 1;
         }
     }
-    // (the last first: a worker's deque gives the newest first, so its
-    // placements run in their order, a child before the node after it)
+    // (queued in their order: the ready heap takes the first queued first
+    // among equal keys (`sched::Ready`), so its placements run in their
+    // order, a child before the node after it, where `sched::sched_key`
+    // ties them (the settling layer's, keyed at the frontier))
     // (the frontier this run moved, before its placements are queued: they
     // are queued by where they stand against it, `sched::sched_key`)
     if let Some(at) = frontier {
         eng.frontier_by.store(node.id.raw() + 1, Ordering::Release);
         eng.frontier.store(at.map_or(0, |n| n.raw() + 1), Ordering::Release);
     }
-    for n in made.iter().rev() {
+    for n in &made {
         enqueue(
             eng,
             ww,
@@ -4006,9 +4008,9 @@ pub(crate) fn relocate(
     // between its two labels)
     eng.ranges
         .widen_over(Pos(lo.0.saturating_sub(1)), Pos(hi.0.saturating_add(1)));
-    // each runs again where it stands (the last first: a worker's deque
-    // gives the newest first)
-    for m in landed.iter().rev() {
+    // each runs again where it stands, in their order (the ready heap
+    // takes the first queued first among equal keys, `sched::Ready`)
+    for m in &landed {
         m.moved.store(true, Ordering::Release);
         // (a parked state rests on reads at the old place)
         if m.record().is_some_and(|r| r.state.is_some()) {
