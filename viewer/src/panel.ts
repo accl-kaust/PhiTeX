@@ -648,6 +648,8 @@ export class Panel {
     // (the new build's packages counted from none: the sheet says its own, not the last document's)
     this.loadPct = 0;
     this.loadDone = -1;
+    // (its first page is a first build's, "First build · 5.4 s", not a keystroke's)
+    this.paints = 0;
     this.opened = false;
     this.sheetUp();
     // (the last build's pages hidden under it until the dive: the new page shows through the hole)

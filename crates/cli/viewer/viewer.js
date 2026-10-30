@@ -2024,6 +2024,7 @@ var Panel = class {
     this.reopen = true;
     this.loadPct = 0;
     this.loadDone = -1;
+    this.paints = 0;
     this.opened = false;
     this.sheetUp();
     this.win.classList.toggle("reopening", !!this.anim);
