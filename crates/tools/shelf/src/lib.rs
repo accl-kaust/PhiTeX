@@ -25,8 +25,10 @@
 //!   bytes) × n`, little-endian.
 //! - **The files a build reads** ([`Files`]): a name resolved by the
 //!   index, its pack and the packs its loading reads asked of the host's
-//!   [`PackSource`] (once each, by whichever thread needs one first; the
-//!   others wait), every file of each kept by path; Shelf's files named
+//!   [`PackSource`] (once each, by whichever thread, and for whichever
+//!   engine, needs one first: an engine's files over another's packs,
+//!   [`Files::for_engine`]; the others wait), every file of each kept by
+//!   path; Shelf's files named
 //!   `/usr/share/texmf-dist/<path>` to the engine. A name the index lacks
 //!   is absent at once and never leaves the machine. Each pack asked, in,
 //!   or failed is told ([`Files::on_fetch`]: the session's progress).
@@ -358,14 +360,22 @@ struct State {
 
 type Hook = Box<dyn Fn(&Fetch<'_>) + Send + Sync>;
 
-/// The files a build reads from Shelf, for one engine.
-pub struct Files {
-    index: Arc<Index>,
+/// The packs in from a source and their files: one for every engine's
+/// [`Files`] over that source ([`Files::for_engine`]). A pack's files are
+/// the same whichever engine's search found it, so each pack is asked
+/// of the source once, whatever engine asks.
+struct Packs {
     source: Arc<dyn PackSource>,
-    engine: &'static str,
     state: Mutex<State>,
     answered: Condvar,
     hook: Mutex<Option<Hook>>,
+}
+
+/// The files a build reads from Shelf, for one engine.
+pub struct Files {
+    index: Arc<Index>,
+    engine: &'static str,
+    packs: Arc<Packs>,
 }
 
 impl Files {
@@ -375,11 +385,30 @@ impl Files {
     pub fn new(index: Arc<Index>, source: Arc<dyn PackSource>, engine: &'static str) -> Files {
         Files {
             index,
-            source,
             engine,
-            state: Mutex::default(),
-            answered: Condvar::new(),
-            hook: Mutex::new(None),
+            packs: Arc::new(Packs {
+                source,
+                state: Mutex::default(),
+                answered: Condvar::new(),
+                hook: Mutex::new(None),
+            }),
+        }
+    }
+
+    /// The same release's files for `engine`, over the same packs: a pack
+    /// either has asked for is asked of the source once for both, and
+    /// told to the same hook. A host's files for its engines are made
+    /// this way: a source that gives each pack once (the frontends' wasm
+    /// core's host) never answers a second ask, and an engine's own
+    /// [`Files::new`] over it would wait for ever on a pack another
+    /// engine's took (an XeLaTeX session after a pdfLaTeX one, on the
+    /// packs both read).
+    #[must_use]
+    pub fn for_engine(&self, engine: &'static str) -> Files {
+        Files {
+            index: self.index.clone(),
+            engine,
+            packs: self.packs.clone(),
         }
     }
 
@@ -390,19 +419,19 @@ impl Files {
     }
 
     /// Each pack asked, in, or failed told to `hook` (on the thread that
-    /// fetches it).
+    /// fetches it), for every engine's files over these packs.
     pub fn on_fetch(&self, hook: Hook) {
-        *lock(&self.hook) = Some(hook);
+        *lock(&self.packs.hook) = Some(hook);
     }
 
     fn tell(&self, f: &Fetch<'_>) {
-        if let Some(h) = lock(&self.hook).as_ref() {
+        if let Some(h) = lock(&self.packs.hook).as_ref() {
             h(f);
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        lock(&self.state)
+        lock(&self.packs.state)
     }
 
     /// `name`'s texmf path (none: not Shelf's).
@@ -422,11 +451,13 @@ impl Files {
     /// and the packs its loading reads fetched (once: waiting for another
     /// thread's fetch of the same); none: the index lacks it, or its pack
     /// could not be had.
+    #[must_use]
     pub fn locate(&self, name: &str) -> Option<String> {
         self.find(name).map(|(p, _)| p)
     }
 
     /// [`Files::locate`] and the file's bytes.
+    #[must_use]
     pub fn find(&self, name: &str) -> Option<(String, Arc<Vec<u8>>)> {
         self.find_in(name, format_of(name))
     }
@@ -459,7 +490,7 @@ impl Files {
             for id in &mine {
                 self.tell(&Fetch::Asked { name, pack: id });
             }
-            let got = self.source.packs(&mine);
+            let got = self.packs.source.packs(&mine);
             for (id, raw) in mine.iter().zip(got) {
                 let files = raw.and_then(|raw| {
                     self.index.check(id, &raw)?;
@@ -477,7 +508,7 @@ impl Files {
                     }
                     s.packs.insert((*id).to_owned(), Pack::Done);
                 }
-                self.answered.notify_all();
+                self.packs.answered.notify_all();
                 match &done {
                     Ok(()) => self.tell(&Fetch::Arrived { name, pack: id }),
                     Err(why) => self.tell(&Fetch::Failed {
@@ -497,6 +528,7 @@ impl Files {
                 return None;
             }
             s = self
+                .packs
                 .answered
                 .wait(s)
                 .unwrap_or_else(PoisonError::into_inner);
@@ -809,5 +841,101 @@ mod tests {
         let (k, key) = files.key("article.cls").unwrap();
         assert_eq!(k, "/usr/share/texmf-dist/tex/latex/base/article.cls");
         assert_eq!(key, b"base-1\0tex/latex/base/article.cls");
+    }
+
+    /// Packs given once each, as the frontends' wasm core's host gives
+    /// them (a second ask of one is never answered there; refused here,
+    /// so a test fails rather than waits).
+    struct GivenOnce(Mutex<HashMap<String, Vec<u8>>>);
+
+    impl PackSource for GivenOnce {
+        fn pack(&self, id: &str) -> Result<Vec<u8>, String> {
+            lock(&self.0)
+                .remove(id)
+                .ok_or_else(|| format!("pack {id} asked again"))
+        }
+    }
+
+    /// One host's files for two engines ask each pack once: the second
+    /// engine finds the files of the packs the first took (each by its
+    /// own search order) and asks only for its own. Each engine's own
+    /// `Files::new` over the source (the wasm core's files before) asks
+    /// again for a pack the other took, and a host that gives each once
+    /// never answers: in the browser, an XeLaTeX session after a pdfLaTeX
+    /// one (or the other way round) waited for ever on `iftex`'s pack.
+    #[test]
+    fn engines_ask_each_pack_once() {
+        let packs = [
+            (
+                "amsmath-1",
+                pack(&[("tex/latex/amsmath/amsmath.sty", b"\\amsmath")]),
+            ),
+            (
+                "base-1",
+                pack(&[("tex/latex/base/article.cls", b"\\article")]),
+            ),
+            (
+                "xu-1",
+                pack(&[("tex/xelatex/xunicode/xunicode.sty", b"\\xe")]),
+            ),
+            (
+                "xu-2",
+                pack(&[("tex/latex/xunicode/xunicode.sty", b"\\pdf")]),
+            ),
+        ];
+        let table = packs.iter().fold(String::new(), |mut t, (id, b)| {
+            use std::fmt::Write as _;
+            let _ = writeln!(t, "{id}\t{}\t{}", sha256_hex(b), b.len());
+            t
+        });
+        let tsv = "tex/latex/amsmath/amsmath.sty\tamsmath-1\tbase-1\tbase-1\n\
+                   tex/latex/base/article.cls\tbase-1\t\t\n\
+                   tex/xelatex/xunicode/xunicode.sty\txu-1\t\t\n\
+                   tex/latex/xunicode/xunicode.sty\txu-2\t\t\n";
+        let ix = Arc::new(Index::new(tsv, &release()).with_pack_table(&table).unwrap());
+        let source = || {
+            Arc::new(GivenOnce(Mutex::new(
+                packs
+                    .iter()
+                    .map(|(id, b)| ((*id).to_owned(), b.clone()))
+                    .collect(),
+            )))
+        };
+        let src = source();
+        let pdf = Files::new(ix.clone(), src.clone(), "pdftex");
+        let found = |f: &Files, n: &str| f.find(n).map(|(p, b)| (p, b.to_vec()));
+        let am = Some((
+            format!("{TL}tex/latex/amsmath/amsmath.sty"),
+            b"\\amsmath".to_vec(),
+        ));
+        assert_eq!(found(&pdf, "amsmath.sty"), am);
+        let xe = pdf.for_engine("xetex");
+        assert_eq!(found(&xe, "amsmath.sty"), am, "the pdfTeX build's packs");
+        assert_eq!(
+            xe.locate("article.cls"),
+            Some(format!("{TL}tex/latex/base/article.cls"))
+        );
+        // (each engine's own file by its own search, its pack asked once)
+        assert_eq!(
+            found(&xe, "xunicode.sty"),
+            Some((
+                format!("{TL}tex/xelatex/xunicode/xunicode.sty"),
+                b"\\xe".to_vec()
+            ))
+        );
+        assert_eq!(
+            found(&pdf, "xunicode.sty"),
+            Some((
+                format!("{TL}tex/latex/xunicode/xunicode.sty"),
+                b"\\pdf".to_vec()
+            ))
+        );
+        assert!(lock(&src.0).is_empty(), "every pack given");
+        // (an engine's files of their own over the same host: the pack
+        // the other took asked again, never given)
+        let src = source();
+        let pdf = Files::new(ix.clone(), src.clone(), "pdftex");
+        assert_eq!(found(&pdf, "amsmath.sty"), am);
+        assert_eq!(found(&Files::new(ix, src, "xetex"), "amsmath.sty"), None);
     }
 }
