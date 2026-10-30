@@ -13,6 +13,7 @@
 // dimmed, with why; problems jump to their line.
 
 import type { PageImage, Status } from "./session.ts";
+import type { Diagnostic } from "./diagnostics.ts";
 import type { PackageState } from "./packages.ts";
 import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
 import { Viewer } from "./viewer.ts";
@@ -366,6 +367,7 @@ export class Panel {
       <hr>
       <div class="mi"><span class="icon">dark</span>Dark PDF</div>
       <div class="radios" id="darkpdf" role="group" aria-label="Dark PDF"><button type="button" data-dark="off">Off</button><button type="button" data-dark="on">On</button><button type="button" data-dark="theme">Match theme</button></div>
+      <button type="button" role="menuitemcheckbox" id="x-culprits" aria-checked="true"><span class="check">✓</span><span>Underline problems<span class="desc">A wavy line under what each error and warning is about</span></span></button>
       <button type="button" role="menuitemcheckbox" id="dbg" aria-checked="false"><span class="check"></span><span>Debug check<span class="desc">Compare with a fresh build every 5 s</span></span></button>
       <hr>
       ${item("x-tips", "tips", "What's new")}
@@ -377,7 +379,7 @@ export class Panel {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div>
+    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -415,6 +417,7 @@ export class Panel {
     offer("#x-keys", !!opts.keys);
     offer("#b-find, #x-find", !!ev.onFind);
     offer("#dbg, #dbglabel", !!ev.onDebug);
+    offer("#x-culprits", !!ev.onBoxes);
     offer("#tour", !!ev.onTour);
     offer("#news", !!ev.onNews);
     // (the menus: one open at a time, closed by a click elsewhere or Esc)
@@ -469,6 +472,15 @@ export class Panel {
     };
     pg.onblur = () => this.nav();
     this.$("#dbg").onclick = () => this.toggleDebug();
+    this.$("#x-culprits").onclick = () => this.culpritsShown(!this.culpritsOn);
+    try {
+      this.culpritsOn = localStorage.getItem("phitex.culprits") !== "0";
+    } catch {
+      /* (shown) */
+    }
+    this.culpritsShown(this.culpritsOn, false);
+    this.$("#stage").addEventListener("pointermove", (e) => this.culpritAt(e), { passive: true });
+    this.$("#stage").addEventListener("pointerleave", () => (this.$("#ctip").hidden = true));
     this.$("#dbg2").onchange = () => this.toggleDebug();
     this.$("#reload").onclick = () => (this.sheet(false), ev.onReload());
     const license = this.$("#license") as HTMLAnchorElement | null;
@@ -887,19 +899,66 @@ export class Panel {
 
   /** The problems' culprits underlined on the pages: the latest status's, a later one replacing an earlier still being looked up. */
   private culpritsSeq = 0;
-  private async underline(diags: { problem?: { severity: string; file: string | null; range?: [number, number] } }[]): Promise<void> {
+  /** Whether they are (the ⋯ menu's Underline problems, remembered on this machine); the last status's problems, and those drawn (by data-i). */
+  private culpritsOn = true;
+  private culpritDiags: Diagnostic[] = [];
+  private culpritsDrawn: { severity: "error" | "warning"; message: string }[] = [];
+  private async underline(diags: Diagnostic[]): Promise<void> {
     if (!this.ev.onBoxes) return;
+    this.culpritDiags = diags;
     const seq = ++this.culpritsSeq;
+    if (!this.culpritsOn) return void (this.viewer.culprits([]), (this.$("#ctip").hidden = true));
     const want = diags
-      .map((d) => d.problem)
-      .filter((p): p is { severity: string; file: string; range: [number, number] } => !!p?.file && !!p.range && p.severity !== "note")
-      .map((p) => ({ file: p.file, range: p.range, severity: p.severity === "warning" ? ("warning" as const) : ("error" as const) }))
+      .filter((d): d is Diagnostic & { problem: { severity: string; file: string; range: [number, number] } } => !!d.problem?.file && !!d.problem.range && d.problem.severity !== "note")
+      .map((d) => ({ file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? ("warning" as const) : ("error" as const), message: d.message }))
       .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1))
       .slice(0, 20);
-    const found = await Promise.all(want.map((w) => this.ev.onBoxes!(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity })), () => [])));
+    const found = await Promise.all(want.map((w, i) => this.ev.onBoxes!(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i })), () => [])));
     // (a newer status came while these were looked up: its own call draws them)
     if (seq !== this.culpritsSeq) return;
+    this.culpritsDrawn = want;
     this.viewer.culprits(found.flat());
+  }
+
+  /** The underlines on or off (`keep`: remembered). */
+  private culpritsShown(on: boolean, keep = true): void {
+    this.culpritsOn = on;
+    const b = this.$("#x-culprits");
+    b.setAttribute("aria-checked", String(on));
+    b.querySelector(".check")!.textContent = on ? "✓" : "";
+    if (keep) {
+      try {
+        localStorage.setItem("phitex.culprits", on ? "1" : "0");
+      } catch {
+        /* (not remembered) */
+      }
+      void this.underline(this.culpritDiags);
+    }
+  }
+
+  /** The pointer over an underline: its problem's message, under it. */
+  private culpritAt(e: PointerEvent): void {
+    const tip = this.$("#ctip");
+    if (!this.culpritsDrawn.length || e.buttons) return void (tip.hidden = true);
+    // (a few pixels round the line: it is thin)
+    const hit = [...this.root.querySelectorAll<HTMLElement>(".slot .culprit")].find((m) => {
+      const r = m.getBoundingClientRect();
+      return e.clientX >= r.left - 2 && e.clientX <= r.right + 2 && e.clientY >= r.top - 2 && e.clientY <= r.bottom + 5;
+    });
+    const p = hit && this.culpritsDrawn[Number(hit.dataset.i)];
+    if (!hit || !p) return void (tip.hidden = true);
+    if (tip.hidden || tip.dataset.i !== hit.dataset.i) {
+      tip.dataset.i = hit.dataset.i;
+      tip.className = `ctip ${p.severity}`;
+      tip.innerHTML = `${icon(p.severity, 14)}<span></span>`;
+      tip.querySelector("span")!.textContent = p.message;
+      tip.hidden = false;
+    }
+    const body = this.$(".body").getBoundingClientRect(), r = hit.getBoundingClientRect();
+    const left = Math.max(8, Math.min(body.width - tip.offsetWidth - 8, e.clientX - body.left - 12));
+    const below = r.bottom - body.top + 8;
+    tip.style.left = `${left}px`;
+    tip.style.top = `${below + tip.offsetHeight > body.height - 8 ? r.top - body.top - tip.offsetHeight - 6 : below}px`;
   }
 
   status(s: Status): void {
