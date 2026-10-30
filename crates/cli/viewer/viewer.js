@@ -2113,6 +2113,10 @@ var Panel = class {
   }
   /** The contents beside the pages (PanelOptions.outline). */
   contents;
+  /** Whether the contents are shown: the session asks for the outline after a build only then. */
+  outlineWanted() {
+    return !!this.contents && this.win.classList.contains("side-on");
+  }
   /** The document's outline (its PDF's bookmarks), from the host after each build. */
   outline(items) {
     this.contents?.set(items);
@@ -2122,6 +2126,7 @@ var Panel = class {
   side(on = !this.win.classList.contains("side-on")) {
     if (!this.contents) return;
     this.win.classList.toggle("side-on", on);
+    if (on) this.ev.onContents?.();
     try {
       localStorage.setItem("phitex.side", on ? "1" : "0");
     } catch {
@@ -3653,10 +3658,19 @@ var PreviewSession = class {
     })();
   }
   glyphGen = 0;
-  async glyphsOf(k) {
+  glyphsOf(k) {
     const key = `${k}:${this.hashes[k] ?? ""}`;
     const have = this.glyphCache.get(key);
-    if (have) return have;
+    if (have) return Promise.resolve(have);
+    let p = this.glyphsAsked.get(key);
+    if (!p) {
+      p = this.glyphsFetch(k, key).finally(() => this.glyphsAsked.delete(key));
+      this.glyphsAsked.set(key, p);
+    }
+    return p;
+  }
+  glyphsAsked = /* @__PURE__ */ new Map();
+  async glyphsFetch(k, key) {
     const r = await this.core.request({ op: "origins", page: k });
     if (!r.ok || !r.json) return [];
     const path = (n) => {
@@ -3973,8 +3987,15 @@ var PreviewSession = class {
     const r = await this.core.request({ op: "diagnostics" });
     if (r.ok) this.onWatch({ event: "diagnostics", items: r.json?.items ?? [] });
   }
-  async watchOutline() {
+  /** The document's outline asked for now and given to the view (it shows the contents). */
+  async outline() {
     if (!this.sink.outline) return;
+    const r = await this.core.request({ op: "outline" });
+    if (r.ok) this.sink.outline(r.json?.items ?? []);
+  }
+  /** After a build: the outline, only while the view shows it (else asked when it does). */
+  async watchOutline() {
+    if (!this.sink.outline || this.sink.outlineWanted?.() === false) return;
     const r = await this.core.request({ op: "outline" });
     if (r.ok) this.sink.outline(r.json?.items ?? []);
   }
@@ -4755,6 +4776,7 @@ var panel = new Panel(
     onClean: () => void session.resync(),
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
+    onContents: () => void session.outline(),
     onFind: (q) => pages.find(q)
   },
   // (the panel's settings: this browser's)

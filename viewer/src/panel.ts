@@ -94,6 +94,8 @@ export interface PanelEvents {
   onTour?(): void;
   /** "What's new" (settings). */
   onNews?(): void;
+  /** The contents beside the pages opened: the outline wanted now (the host's session's `outline()`). */
+  onContents?(): void;
   /** A link to a web address on a page (absent: opened in a new tab). */
   onLink?(uri: string): void;
   /** Where `q` is on the pages (the host's MuPDF searches them all): absent, no find field. */
@@ -1329,6 +1331,11 @@ export class Panel {
   /** The contents beside the pages (PanelOptions.outline). */
   private contents?: Outline;
 
+  /** Whether the contents are shown: the session asks for the outline after a build only then. */
+  outlineWanted(): boolean {
+    return !!this.contents && this.win.classList.contains("side-on");
+  }
+
   /** The document's outline (its PDF's bookmarks), from the host after each build. */
   outline(items: Entry[]): void {
     this.contents?.set(items);
@@ -1339,6 +1346,8 @@ export class Panel {
   side(on = !this.win.classList.contains("side-on")): void {
     if (!this.contents) return;
     this.win.classList.toggle("side-on", on);
+    // (the outline is asked for only while it is shown: opened, now)
+    if (on) this.ev.onContents?.();
     try {
       localStorage.setItem("phitex.side", on ? "1" : "0");
     } catch {

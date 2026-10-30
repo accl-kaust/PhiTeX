@@ -209,6 +209,7 @@ const panel = new Panel(
     onClean: () => void session.resync(),
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
+    onContents: () => void session.outline(),
     onFind: (q) => pages.find(q),
   },
   // (the panel's settings: this browser's)

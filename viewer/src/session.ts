@@ -212,6 +212,12 @@ export interface PreviewSink {
   goto?(file: string, from: number, to: number, focus?: boolean): void;
   /** The editor's selection, highlighted on its pages until it changes ([] clears). */
   marks?(marks: { k: number; boxes: [number, number, number, number][] }[]): void;
+  /**
+   * Whether the document's outline is shown (the contents beside the
+   * pages): none, or false, it is not asked for after each build; the view
+   * asks for it with [`PreviewSession.outline`] when it shows it.
+   */
+  outlineWanted?(): boolean;
   /** Highlight boxes on page `k` ([x, y top, w, h], PDF points), scrolled into view. */
   mark?(k: number, boxes: [number, number, number, number][], scroll?: boolean): void;
   /**
@@ -948,11 +954,23 @@ export class PreviewSession {
   }
   private glyphGen = 0;
 
-  private async glyphsOf(k: number): Promise<Glyph[]> {
+  private glyphsOf(k: number): Promise<Glyph[]> {
     // (by the page's hash: an unchanged page keeps its glyphs, mapped through edits)
     const key = `${k}:${this.hashes[k] ?? ""}`;
     const have = this.glyphCache.get(key);
-    if (have) return have;
+    if (have) return Promise.resolve(have);
+    // (asked once while it is asked: the prefetch, a follow and the
+    // collaborators all ask for a page an edit changed, at once)
+    let p = this.glyphsAsked.get(key);
+    if (!p) {
+      p = this.glyphsFetch(k, key).finally(() => this.glyphsAsked.delete(key));
+      this.glyphsAsked.set(key, p);
+    }
+    return p;
+  }
+  private glyphsAsked = new Map<string, Promise<Glyph[]>>();
+
+  private async glyphsFetch(k: number, key: string): Promise<Glyph[]> {
     const r = await this.core.request({ op: "origins", page: k });
     if (!r.ok || !r.json) return [];
     // (the job's names: "main" for main.tex, "ch/intro.tex", "article.cls")
@@ -1310,8 +1328,16 @@ export class PreviewSession {
     if (r.ok) this.onWatch({ event: "diagnostics", items: (r.json?.items ?? []) as Problem[] });
   }
 
-  private async watchOutline(): Promise<void> {
+  /** The document's outline asked for now and given to the view (it shows the contents). */
+  async outline(): Promise<void> {
     if (!this.sink.outline) return;
+    const r = await this.core.request({ op: "outline" } as never);
+    if (r.ok) this.sink.outline((r.json?.items ?? []) as Entry[]);
+  }
+
+  /** After a build: the outline, only while the view shows it (else asked when it does). */
+  private async watchOutline(): Promise<void> {
+    if (!this.sink.outline || this.sink.outlineWanted?.() === false) return;
     const r = await this.core.request({ op: "outline" } as never);
     if (r.ok) this.sink.outline((r.json?.items ?? []) as Entry[]);
   }
