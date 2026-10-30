@@ -76,6 +76,10 @@ pub struct Em<'a> {
     /// A line end is owed before the next text (a comment was written
     /// last): unless that text begins with one.
     pub nl: bool,
+    /// The runs of `out` copied from the new text as they are: (where in
+    /// `out`, length, where in `new`), in order, for the map back to the
+    /// user's files ([`crate::DiffOut::map`]).
+    pub spans: Vec<(usize, usize, usize)>,
 }
 
 impl<'a> Em<'a> {
@@ -90,6 +94,7 @@ impl<'a> Em<'a> {
             changes: Vec::new(),
             section: None,
             nl: false,
+            spans: Vec::new(),
         }
     }
 
@@ -102,6 +107,16 @@ impl<'a> Em<'a> {
             self.out.push('\n');
         }
         self.nl = false;
+        // (a slice of the new text, written as it is: where it came from;
+        // markup and words gathered into a buffer are not)
+        let (here, new) = (s.as_ptr() as usize, self.new.as_ptr() as usize);
+        if here >= new && here + s.len() <= new + self.new.len() {
+            let (at, from) = (self.out.len(), here - new);
+            match self.spans.last_mut() {
+                Some((o, len, f)) if *o + *len == at && *f + *len == from => *len += s.len(),
+                _ => self.spans.push((at, s.len(), from)),
+            }
+        }
         self.out.push_str(s);
     }
 

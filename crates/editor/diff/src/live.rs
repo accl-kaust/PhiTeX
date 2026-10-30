@@ -28,7 +28,9 @@
 use crate::emit::{self, Em};
 use crate::myers::patience as lcs;
 use crate::tok::{self, Kind, SECTIONS, Tok};
-use crate::{Baseline, Body, Change, ChangeKind, DiffOut, Flat, Loc, Signatures, find_body, loads};
+use crate::{
+    Baseline, Body, Change, ChangeKind, DiffOut, Flat, Loc, Signatures, find_body, loads, map_runs,
+};
 use phitex_source::{SyntaxKind, Tree};
 use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -123,6 +125,9 @@ struct Run {
     nl: bool,
     section: Option<String>,
     changes: Vec<RunChange>,
+    /// The runs of `out` that are the new text as it is (`Em::spans`,
+    /// from the run's text's start).
+    spans: Vec<(usize, usize, usize)>,
 }
 
 struct RunChange {
@@ -145,10 +150,7 @@ impl Live {
         Live {
             base,
             side: None,
-            out: DiffOut {
-                tex: String::new(),
-                changes: Vec::new(),
-            },
+            out: DiffOut::default(),
             stats: Stats::default(),
         }
     }
@@ -612,6 +614,7 @@ impl Side {
             nl,
             section,
             changes,
+            spans: em.spans,
         }
     }
 
@@ -625,6 +628,8 @@ impl Side {
         let mut section: Option<String> = None;
         let mut pos = self.body.start;
         let mut c = 0;
+        // (the runs of `tex` that are the new text as it is, for the map)
+        let mut spans: Vec<(usize, usize, usize)> = Vec::new();
         let put = |tex: &mut String, s: &str, nl: &mut bool| -> bool {
             if s.is_empty() {
                 return false;
@@ -644,6 +649,7 @@ impl Side {
                 None => {
                     for ch in chunks {
                         put(&mut tex, &ch.text, &mut nl);
+                        spans.push((tex.len() - ch.text.len(), ch.text.len(), pos));
                         if ch.section.is_some() {
                             section.clone_from(&ch.section);
                         }
@@ -657,6 +663,7 @@ impl Side {
                     if !run.out.is_empty() {
                         nl = run.nl;
                     }
+                    spans.extend(run.spans.iter().map(|&(o, l, f)| (at + o, l, pos + f)));
                     for rc in &run.changes {
                         let r = &rc.raw;
                         let new = (pos + r.new.0, pos + r.new.1);
@@ -682,11 +689,18 @@ impl Side {
                 }
             }
         }
-        put(&mut tex, &self.flat.text[self.body.end..], &mut nl);
+        let tail = &self.flat.text[self.body.end..];
+        put(&mut tex, tail, &mut nl);
+        spans.push((tex.len() - tail.len(), tail.len(), self.body.end));
         if nl {
             tex.push('\n');
         }
-        DiffOut { tex, changes }
+        DiffOut {
+            tex,
+            changes,
+            files: self.flat.files.clone(),
+            map: map_runs(&spans, &self.flat),
+        }
     }
 }
 

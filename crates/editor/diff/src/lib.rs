@@ -385,12 +385,81 @@ pub struct Change {
     pub out: std::ops::Range<usize>,
 }
 
-/// The diff: the marked-up, flattened document, and the changes, in
-/// document order.
-#[derive(Clone, Debug)]
+/// The diff: the marked-up, flattened document, the changes, in document
+/// order, and the map from the document back to the user's files.
+#[derive(Clone, Debug, Default)]
 pub struct DiffOut {
     pub tex: String,
     pub changes: Vec<Change>,
+    /// The new version's files, the main one first ([`MapRun::file`]).
+    pub files: Vec<String>,
+    /// The runs of `tex` that are the new version's text as it is, in
+    /// order: what a place on the diff's pages is in the user's files
+    /// ([`DiffOut::source`]).
+    pub map: Vec<MapRun>,
+}
+
+/// A run of the diff's text that is the new version's: `len` bytes at
+/// `out` in it are those at `src` in file `file` ([`DiffOut::files`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MapRun {
+    pub out: usize,
+    pub len: usize,
+    pub file: usize,
+    pub src: usize,
+}
+
+impl DiffOut {
+    /// Where offset `out` of the diff's text is in the user's files (the
+    /// viewer's follow, selection and double-click on the diff's pages):
+    /// in a run copied as it is, its place there; in a change's markup
+    /// (added text, a deleted passage), where the change is in the new
+    /// version; elsewhere (latexdiff's own markup), the end of the run
+    /// before it. None before the first run (the preamble's head).
+    #[must_use]
+    pub fn source(&self, out: usize) -> Option<(&str, usize)> {
+        let i = self.map.partition_point(|r| r.out <= out);
+        if let Some(r) = i.checked_sub(1).map(|i| &self.map[i])
+            && out < r.out + r.len
+        {
+            return Some((self.files.get(r.file)?.as_str(), r.src + (out - r.out)));
+        }
+        if let Some(c) = self.changes.iter().find(|c| c.out.contains(&out)) {
+            return Some((c.new.file.as_str(), c.new.start));
+        }
+        let r = &self.map[i.checked_sub(1)?];
+        Some((self.files.get(r.file)?.as_str(), r.src + r.len))
+    }
+}
+
+/// `spans` (where in the diff's text, length, where in `flat`'s text) as
+/// runs of the user's files, split where `flat`'s files change.
+pub(crate) fn map_runs(spans: &[(usize, usize, usize)], flat: &Flat) -> Vec<MapRun> {
+    let mut out = Vec::new();
+    for &(o, len, f) in spans {
+        let mut done = 0;
+        while done < len {
+            let i = flat.segs.partition_point(|s| s.flat <= f + done);
+            let Some(s) = i.checked_sub(1).map(|i| &flat.segs[i]) else {
+                break;
+            };
+            let off = f + done - s.flat;
+            if off >= s.len {
+                // (bytes between runs, from no file)
+                done += 1;
+                continue;
+            }
+            let n = (s.len - off).min(len - done);
+            out.push(MapRun {
+                out: o + done,
+                len: n,
+                file: s.file,
+                src: s.src + off,
+            });
+            done += n;
+        }
+    }
+    out
 }
 
 /// Why a diff failed.
@@ -563,6 +632,7 @@ impl Baseline {
         em.out.push_str(&self.head(new, nb));
         em.body(&old_toks, &new_toks, ob.end, nb.end);
         em.push(&new.text[nb.end..]);
+        let spans = std::mem::take(&mut em.spans);
         let (tex, raw) = em.finish();
         let changes = raw
             .iter()
@@ -577,7 +647,12 @@ impl Baseline {
                 )
             })
             .collect();
-        DiffOut { tex, changes }
+        DiffOut {
+            tex,
+            changes,
+            files: new.files.clone(),
+            map: map_runs(&spans, new),
+        }
     }
 
     /// The signature table for a new version whose preamble is `preamble`:
@@ -978,6 +1053,42 @@ mod tests {
         let s = d.tex.find("\\begin{document}\n").unwrap() + 17;
         let e = d.tex.rfind("\\end{document}").unwrap();
         &d.tex[s..e]
+    }
+
+    /// The diff's text back to the user's files (the viewer's follow,
+    /// selection and double-click on the diff's pages): unchanged text to
+    /// its very place, in an `\input` file too; added text to its
+    /// change's place; the live diff's map the one-shot diff's.
+    #[test]
+    fn the_diff_maps_back_to_the_files() {
+        let main = |body: &str| {
+            format!(
+                "\\documentclass{{article}}\n\\begin{{document}}\n{body}\n\n\\input{{ch}}\n\\end{{document}}\n"
+            )
+        };
+        let mut o = BTreeMap::new();
+        o.insert("main.tex".to_owned(), main("Hello world."));
+        o.insert("ch.tex".to_owned(), "Chapter text here.\n".to_owned());
+        let mut n = o.clone();
+        n.insert("main.tex".to_owned(), main("Hello brave world."));
+        let d = diff(&o, &n, "main.tex", &Options::default()).unwrap();
+        let at = |needle: &str| d.tex.find(needle).unwrap();
+        let new_main = &n["main.tex"];
+        assert_eq!(
+            d.source(at("world")),
+            Some(("main.tex", new_main.find("world").unwrap()))
+        );
+        assert_eq!(d.source(at("text here")), Some(("ch.tex", 8)));
+        assert_eq!(
+            d.source(at("brave")),
+            Some(("main.tex", new_main.find("brave").unwrap()))
+        );
+        let mut live = live::Live::new(Baseline::new(&o, "main.tex", &Options::default()).unwrap());
+        let l = live.update(&flatten::flatten(&n, "main.tex").unwrap());
+        assert_eq!(l.tex, d.tex);
+        for needle in ["world", "text here", "brave", "Hello"] {
+            assert_eq!(l.source(at(needle)), d.source(at(needle)), "{needle}");
+        }
     }
 
     #[test]
