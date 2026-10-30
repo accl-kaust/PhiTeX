@@ -2147,17 +2147,34 @@ fn unknown_option_is_named() {
     assert!(err.contains("--frob") && !err.contains("compat"), "{err}");
 }
 
-/// `--help` is sectioned (commands, options, examples) and plain off a
-/// terminal.
+/// `--help` is short (the commands, the common options, where the rest
+/// are: the user, 2026-10-30) and `--help-all` sectioned with every option
+/// (commands, options, examples), both plain off a terminal.
 #[test]
 fn help_is_sectioned() {
     let dir = scratch("help");
-    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .arg("--help")
-        .output()
-        .expect("phitex runs");
-    assert!(out.status.success());
-    let text = String::from_utf8_lossy(&out.stdout);
+    let help = |flag: &str| {
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .arg(flag)
+            .output()
+            .expect("phitex runs");
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let short = help("--help");
+    assert!(
+        short.lines().count() <= 35 && short.contains("--help-all") && short.contains("--jobs"),
+        "--help is not the short help:\n{short}"
+    );
+    assert!(
+        !short.contains("--no-view"),
+        "--help lists every option:\n{short}"
+    );
+    assert!(
+        !short.contains('\x1b'),
+        "escape sequences off a terminal:\n{short}"
+    );
+    let text = help("--help-all");
     for section in [
         "Commands:",
         "Options:",

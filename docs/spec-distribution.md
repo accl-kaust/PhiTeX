@@ -110,7 +110,6 @@ for each version tag.
   binary. It replaces the binary atomically (write beside it, then rename).
 - It runs only for the `script` method. Otherwise it prints the command for
   the method that installed it (`cargo install …`, the package manager).
-- `phitex upgrade --check` reports without installing.
 
 **`news.json`** is written from `CHANGELOG.md` in the repo at each release (an entry is a `## <version> (<date>)` heading; its first paragraph is the summary). The binary also carries its own version's entry: the first run of a version in a terminal says the summary once (`$XDG_STATE_HOME/phitex/news` keeps the last version shown), and `phitex news` prints the whole entry:
 
@@ -129,16 +128,29 @@ for each version tag.
   names, and it is shown even when the version is otherwise current.
 
 **The update check:**
-- **Off by default.** It is turned on with `update-check = true` in the
-  *user's* `phitex.toml` (`~/.config/phitex/`), never a project's
+- **The user chooses** (the user, 2026-10-30): `update-check = true` or
+  `false` in the *user's* `phitex.toml` (`~/.config/phitex/`), never a
+  project's; `phitex config update-check on|off` writes it. Until it is
+  set, every build (after its result) and every watch (as it starts) says
+  one dim line: `update checks are not set: phitex config update-check on
+  (off: never ask again)`. No request is made until it is on
   (`crates/cli/src/upgrade.rs`).
 - **At most once a day**, in the background, never delaying a build: the
   fetch the run starts is what the next run reads. The result is kept in
   the cache directory's `news.json`.
-- **One line on stderr as a build or watch starts**, from what was kept:
-  `phitex 1.61 is out (you have 1.6): phitex upgrade`. An advisory for
-  the running version is printed even if the release line was already
-  shown.
+- **On stderr after a build's result, or as a watch starts**, from what
+  was kept: each release after the running one with its summary (what
+  the update brings), the advisories for the running version, and the
+  command:
+  ```
+  phitex 1.618 is out (you have 1.6):
+    1.618   SyncTeX for XeLaTeX.
+    1.61    Collaborators' cursors.
+    ⚠ 1.6 can write a wrong PDF.
+  update: phitex upgrade
+  ```
+  The fetch starts as the run starts, so a short build reads it on its
+  next run.
 - **Never** under `CI`, with no TTY, under `phitex lsp`, or with
   `PHITEX_NO_UPDATE_CHECK=1`. The editor extension shows the same news
   through `phitex/status` (§7).

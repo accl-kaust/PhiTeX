@@ -185,8 +185,8 @@ fn replace(exe: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::rename(&new, exe).map_err(|e| format!("{}: {e}", exe.display()))
 }
 
-/// `phitex upgrade [--check]`: the exit status.
-pub fn upgrade(ui: &Ui, check: bool) -> i32 {
+/// `phitex upgrade`: the exit status.
+pub fn upgrade(ui: &Ui) -> i32 {
     let have = crate::version();
     let v = match latest() {
         Ok(v) => v,
@@ -197,12 +197,6 @@ pub fn upgrade(ui: &Ui, check: bool) -> i32 {
     };
     if !later(&v, have) {
         ui.line(&format!("phitex {have} is the latest release"));
-        return 0;
-    }
-    if check {
-        ui.line(&format!(
-            "phitex {v} is out (you have {have}): phitex upgrade"
-        ));
         return 0;
     }
     let exe = std::env::current_exe().ok();
@@ -231,75 +225,145 @@ pub fn upgrade(ui: &Ui, check: bool) -> i32 {
     }
 }
 
-/// The update check (opt-in): what the last fetch of `news.json` says for
-/// this version, and a fetch in the background when that is a day old.
-pub fn check(ui: &Ui) {
+/// The update check here.
+#[derive(PartialEq, Eq)]
+enum Setting {
+    /// Not a terminal, CI, or `PHITEX_NO_UPDATE_CHECK`: never a word.
+    Mute,
+    /// The user's `update-check` not set yet.
+    Unset,
+    Off,
+    On,
+}
+
+/// The update check here: muted off a terminal, under CI or
+/// `PHITEX_NO_UPDATE_CHECK`, else as the user's `update-check` says.
+fn setting() -> Setting {
     use std::io::IsTerminal as _;
-    let on = crate::config::user()
-        .ok()
-        .and_then(|c| c.update_check)
-        .unwrap_or(false);
-    if !on
-        || !std::io::stderr().is_terminal()
+    if !std::io::stderr().is_terminal()
         || std::env::var_os("CI").is_some()
         || std::env::var_os("PHITEX_NO_UPDATE_CHECK").is_some()
     {
+        return Setting::Mute;
+    }
+    match crate::config::user().ok().and_then(|c| c.update_check) {
+        None => Setting::Unset,
+        Some(false) => Setting::Off,
+        Some(true) => Setting::On,
+    }
+}
+
+fn kept() -> PathBuf {
+    crate::tex::cache_dir().join("news.json")
+}
+
+/// The update check's fetch, as a run starts: `news.json` fetched in the
+/// background when the kept one is a day old and the check is on (the
+/// run never waits for it; [`check`] reads what is kept when it speaks).
+pub fn begin() {
+    if setting() != Setting::On {
         return;
     }
-    let kept = crate::tex::cache_dir().join("news.json");
+    let kept = kept();
     let age = std::fs::metadata(&kept)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| SystemTime::now().duration_since(t).ok());
-    if let Ok(b) = std::fs::read(&kept)
-        && let Ok(n) = serde_json::from_slice::<Value>(&b)
-    {
-        for l in said(&n, crate::version()) {
-            ui.warning(&l);
-        }
+    if age.is_some_and(|a| a < Duration::from_hours(24)) {
+        return;
     }
-    if age.is_none_or(|a| a > Duration::from_hours(24)) {
-        // (the next run says what this fetch finds; a process that ends
-        // first leaves the kept file as it was)
-        std::thread::spawn(move || {
-            for u in NEWS {
-                if let Ok(b) = get(u)
-                    && serde_json::from_slice::<Value>(&b).is_ok()
+    std::thread::spawn(move || {
+        for u in NEWS {
+            if let Ok(b) = get(u)
+                && serde_json::from_slice::<Value>(&b).is_ok()
+            {
+                let tmp = kept.with_extension(format!("{}.tmp", std::process::id()));
+                if std::fs::create_dir_all(kept.parent().unwrap_or(Path::new(".")))
+                    .and_then(|()| std::fs::write(&tmp, &b))
+                    .and_then(|()| std::fs::rename(&tmp, &kept))
+                    .is_err()
                 {
-                    let tmp = kept.with_extension(format!("{}.tmp", std::process::id()));
-                    if std::fs::create_dir_all(kept.parent().unwrap_or(Path::new(".")))
-                        .and_then(|()| std::fs::write(&tmp, &b))
-                        .and_then(|()| std::fs::rename(&tmp, &kept))
-                        .is_err()
-                    {
-                        let _ = std::fs::remove_file(&tmp);
-                    }
-                    return;
+                    let _ = std::fs::remove_file(&tmp);
+                }
+                return;
+            }
+        }
+    });
+}
+
+/// The update check speaking (after a build's result, as a watch
+/// starts): with `update-check` not set, a line asking for it, every run;
+/// on, what the kept `news.json` says for this version.
+pub fn check(ui: &Ui) {
+    let st = ui.st;
+    match setting() {
+        Setting::Mute | Setting::Off => {}
+        Setting::Unset => ui.line(&format!(
+            "{} {} {}",
+            st.dim("update checks are not set:"),
+            st.cyan("phitex config update-check on"),
+            st.dim("(off: never ask again)")
+        )),
+        Setting::On => {
+            let Some(n) = std::fs::read(kept())
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            else {
+                return;
+            };
+            let by_script = install_record().is_some_and(|r| r["method"] == "script");
+            for (k, l) in said(&n, crate::version(), by_script).iter().enumerate() {
+                if k == 0 {
+                    ui.line(&st.yellow(l));
+                } else {
+                    ui.line(l);
                 }
             }
-        });
+        }
     }
 }
 
-/// What news `n` says to version `v`: a newer release, the advisories
-/// for `v`.
-fn said(n: &Value, v: &str) -> Vec<String> {
-    let mut out = Vec::new();
+/// What news `n` says to version `v`: the releases after it, each with
+/// its summary, the advisories for `v`, and how to update (`phitex
+/// upgrade` for an install.sh install); nothing when `v` is the latest
+/// and no advisory names it.
+fn said(n: &Value, v: &str, by_script: bool) -> Vec<String> {
     if n["schema"] != 1 {
-        return out;
+        return Vec::new();
     }
-    if let Some(l) = n["latest"].as_str()
-        && later(l, v)
-    {
-        out.push(format!("phitex {l} is out (you have {v}): phitex upgrade"));
+    let entries = n["entries"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let newer = entries
+        .iter()
+        .filter(|e| e["kind"] == "release")
+        .filter_map(|e| Some((e["version"].as_str()?, e["summary"].as_str().unwrap_or(""))))
+        .filter(|(r, _)| later(r, v))
+        .map(|(r, s)| format!("  {r:<7} {s}"));
+    let advisories: Vec<String> = entries
+        .iter()
+        .filter(|e| e["kind"] == "advisory")
+        .filter_map(|e| Some((e["affects"].as_str()?, e["summary"].as_str()?)))
+        .filter(|(r, _)| affects(r, v))
+        .map(|(_, s)| format!("  ⚠ {s}"))
+        .collect();
+    let latest = n["latest"].as_str().filter(|l| later(l, v));
+    if latest.is_none() && advisories.is_empty() {
+        return Vec::new();
     }
-    for e in n["entries"].as_array().into_iter().flatten() {
-        if e["kind"] == "advisory"
-            && let (Some(r), Some(s)) = (e["affects"].as_str(), e["summary"].as_str())
-            && affects(r, v)
-        {
-            out.push(format!("advisory for phitex {v}: {s}"));
-        }
+    let mut out = vec![match latest {
+        Some(l) => format!("phitex {l} is out (you have {v}):"),
+        None => format!("an advisory for phitex {v}:"),
+    }];
+    out.extend(newer);
+    out.extend(advisories);
+    if latest.is_some() {
+        out.push(if by_script {
+            "update: phitex upgrade".to_owned()
+        } else {
+            "update: the way you installed phitex (curl -fsSL https://phitex.org/install.sh | sh for the script's)".to_owned()
+        });
     }
     out
 }
@@ -324,13 +388,28 @@ mod tests {
     #[test]
     fn news_said() {
         let n = serde_json::json!({"schema": 1, "latest": "1.618", "entries": [
-            {"kind": "release", "version": "1.618", "summary": "x"},
-            {"kind": "advisory", "affects": "<1.618", "summary": "upgrade: a wrong PDF"},
+            {"kind": "release", "version": "1.618", "summary": "SyncTeX for XeLaTeX."},
+            {"kind": "release", "version": "1.61", "summary": "Collaborators' cursors."},
+            {"kind": "advisory", "affects": "<1.61", "summary": "1.6 can write a wrong PDF."},
             {"kind": "notice", "summary": "ignored"}]});
-        assert_eq!(said(&n, "1.61").len(), 2);
-        assert_eq!(said(&n, "1.618"), Vec::<String>::new());
         assert_eq!(
-            said(&serde_json::json!({"schema": 2, "latest": "9.9"}), "1.6"),
+            said(&n, "1.6", true),
+            [
+                "phitex 1.618 is out (you have 1.6):",
+                "  1.618   SyncTeX for XeLaTeX.",
+                "  1.61    Collaborators' cursors.",
+                "  ⚠ 1.6 can write a wrong PDF.",
+                "update: phitex upgrade"
+            ]
+        );
+        assert_eq!(said(&n, "1.61", true).len(), 3);
+        assert_eq!(said(&n, "1.618", true), Vec::<String>::new());
+        assert_eq!(
+            said(
+                &serde_json::json!({"schema": 2, "latest": "9.9"}),
+                "1.6",
+                true
+            ),
             Vec::<String>::new()
         );
     }

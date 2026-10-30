@@ -44,8 +44,18 @@ Exit status, as pdflatex's: 0 built without errors (warnings allowed),
 1 anything else (TeX's errors, a usage, configuration or file error, or
 PhiTeX itself failing; standard error says which).";
 
-/// The sections after the options (styled as clap's headers; the escapes
-/// are stripped when colour is off).
+/// `--help`'s last lines: where the settings are, and `--help-all`.
+fn short_after_help() -> String {
+    let l = STYLES.get_literal();
+    format!(
+        "Settings: phitex.toml (the project's), ~/.config/phitex/phitex.toml (yours):
+  {l}phitex config KEY VALUE{l:#}, e.g. {l}phitex config update-check on{l:#}
+Every option: {l}phitex --help-all{l:#} · https://phitex.org"
+    )
+}
+
+/// `--help-all`'s sections after the options (styled as clap's headers;
+/// the escapes are stripped when colour is off).
 fn after_help() -> String {
     let h = STYLES.get_header();
     let l = STYLES.get_literal();
@@ -65,6 +75,7 @@ fn after_help() -> String {
       copy-pdf = true   (or a directory, relative to phitex.toml's)
       synctex = false   shell-escape = true   editor = \"code\"   viewer = \"zathura\"
       cache-limit = \"4GB\"   (0: no cache; or PHITEX_CACHE_LIMIT)
+      update-check = true   (yours only: a daily check for a newer release)
       files = \"shelf\"   (TeX's files from Shelf's packs, kept in the cache's shelf/;
                           \"texlive\", kpathsea's, the default; one source a run)
   ~/.config/phitex/phitex.toml holds your own defaults; a project's
@@ -103,9 +114,11 @@ pub fn version_text() -> &'static str {
     bin_name = "phitex",
     version = crate::version(),
     long_version = version_text(),
-    about = "PhiTeX: TeX documents as graph reduction",
+    about = "PhiTeX: LaTeX that updates as you type",
     long_about = ABOUT,
-    after_help = after_help(),
+    after_help = short_after_help(),
+    after_long_help = after_help(),
+    disable_help_flag = true,
     styles = STYLES,
     color = ColorChoice::Auto,
     arg_required_else_help = true,
@@ -120,29 +133,39 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Sub {
-    /// Build the document to its fixpoint (BibTeX, biber and makeindex in
-    /// process)
+    /// Build the PDF (its reruns, BibTeX, biber and makeindex included)
+    ///
+    /// The document is built to its fixpoint as latexmk builds it, the
+    /// tools run in process.
     Build {
         #[arg(value_name = "FILE")]
         file: Option<String>,
     },
+    /// Rebuild on every change, the pages live in the browser
+    ///
     /// Build, then rebuild whenever an input changes (an edit of the
-    /// graph), the pages live in the browser; keys on standard input:
-    /// r rebuild, q quit (with --lsp: an editor's language client there)
+    /// graph); keys on standard input: r rebuild, q quit (with --lsp: an
+    /// editor's language client there).
     Watch {
         #[arg(value_name = "FILE")]
         file: Option<String>,
     },
-    /// What is new in this version (CHANGELOG.md's entry)
+    /// What is new in this version
     News,
-    /// Install the latest release, signature checked (an install made by
-    /// phitex.org/install.sh)
-    Upgrade {
-        /// Only say whether there is one
-        #[arg(long)]
-        check: bool,
+    /// Install the latest release
+    ///
+    /// Its signature checked, for an install made by phitex.org/install.sh.
+    Upgrade,
+    /// Change one of your settings (phitex config update-check on)
+    ///
+    /// Written into ~/.config/phitex/phitex.toml, its other lines kept.
+    Config {
+        #[arg(value_name = "KEY")]
+        key: String,
+        #[arg(value_name = "VALUE")]
+        value: String,
     },
-    /// Remove the files a build writes
+    /// Remove a build's files (--all: the whole cache)
     Clean {
         /// The whole cache, every document's (no file needed)
         #[arg(long)]
@@ -166,19 +189,23 @@ struct Opts {
         global = true
     )]
     output_dir: Option<String>,
+    /// pdflatex (default), xelatex, latex, pdftex, …
+    ///
     /// pdflatex (default for LaTeX), latex, xelatex, pdftex (default
     /// otherwise), xetex, etex, tex (lualatex is not supported yet)
     #[arg(long, alias = "program", value_name = "NAME", global = true)]
     engine: Option<String>,
     /// dvi or pdf (xdv: XeTeX's XDV file, not made a PDF)
-    #[arg(long, value_name = "FORMAT", value_parser = ["dvi", "pdf", "xdv"], global = true)]
+    #[arg(long, value_name = "FORMAT", value_parser = ["dvi", "pdf", "xdv"], global = true, hide_short_help = true)]
     output_format: Option<String>,
     /// The file is the whole job: no format (TeX's -ini)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide_short_help = true)]
     ini: bool,
     /// With --ini: e-TeX's extended mode
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide_short_help = true)]
     etex: bool,
+    /// Threads (default: every core); the output is the same at any count
+    ///
     /// The engine's threads (default: PHITEX_THREADS, else every logical
     /// CPU, hyperthreads included); the output is the same at any count
     #[arg(
@@ -192,7 +219,7 @@ struct Opts {
     /// watch: every edit writes the exact PDF file too (else an edit
     /// appends an update section to it, and the exact file is written
     /// once the editor is idle)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide_short_help = true)]
     exact: bool,
     /// (the same as --exact)
     #[arg(long = "exact-pdf", global = true, hide = true)]
@@ -200,7 +227,7 @@ struct Opts {
     /// Whether the engine runs steps ahead of their inputs: on those an
     /// earlier run predicts (the default), never, or on any (not usable
     /// yet). The output is the same either way.
-    #[arg(long = "spec", value_name = "WHEN", value_parser = ["off", "predicted", "all"], global = true)]
+    #[arg(long = "spec", value_name = "WHEN", value_parser = ["off", "predicted", "all"], global = true, hide_short_help = true)]
     spec: Option<String>,
     /// A long piece's readers do not wait for it on the fields an earlier
     /// build learned it defines last before them (they do by default: kept
@@ -211,8 +238,10 @@ struct Opts {
     /// per document in the cache). The output is the same either way.
     #[arg(long = "node-records", global = true, hide = true)]
     node_records: bool,
+    /// More: each run, the engine's counts, the cache (-vv: more still)
+    ///
     /// Each run, each warning's first lines, an engine failure's whole
-    /// message (-vv: more)
+    /// message, the engine's counts and tables, the cache's use (-vv: more)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
     /// Only problems and the result
@@ -220,65 +249,83 @@ struct Opts {
     quiet: bool,
     /// The build's events on standard output, one JSON object a line
     /// (nothing else is printed)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide_short_help = true)]
     json: bool,
     /// \pdfshellescape 1 instead of TeX Live's restricted default (where
     /// \write18 may name bibtex and makeindex): biber is allowed too. The
     /// tools run in process; no other command runs either way
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide_short_help = true)]
     shell_escape: bool,
+    /// watch: open the viewer
+    ///
     /// watch: open the viewer in the browser (or start phitex.toml's
     /// `viewer`, zathura or the like, on the output)
     #[arg(long, global = true)]
     open: bool,
     /// watch: no live viewer
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide_short_help = true)]
     no_view: bool,
     /// watch: the diagnostics at their places after every edit too (the
     /// viewer asks for them; else an edit reports the engine's own only)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide_short_help = true)]
     diagnostics: bool,
     /// watch: the time without an edit after which the exact PDF file is
     /// written over the updated one (default 300)
-    #[arg(long, value_name = "MS", global = true)]
+    #[arg(long, value_name = "MS", global = true, hide_short_help = true)]
     idle: Option<u64>,
     /// watch: also write the .log file, each time the watch goes idle
     /// (beside the exact PDF). Without it a watch writes no .log; build
     /// always writes one
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide_short_help = true)]
     log: bool,
     /// watch: be an editor's language server on standard input and
     /// output (LSP): its unsaved buffers built as you type, the problems
     /// shown in it, a double-click on a page opening it there, its cursor
     /// shown on the page (`phitex/cursor`); nothing else on standard output
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide_short_help = true)]
     lsp: bool,
     /// watch: the viewer's port (default: a free one)
-    #[arg(long, value_name = "N", global = true)]
+    #[arg(long, value_name = "N", global = true, hide_short_help = true)]
     port: Option<u16>,
     /// watch: where a double-click on a page opens its source (code,
     /// emacsclient, nvim, … or a command with {file} {line} {col}; else
     /// PHITEX_EDITOR, VISUAL, EDITOR)
-    #[arg(long, value_name = "CMD", global = true)]
+    #[arg(long, value_name = "CMD", global = true, hide_short_help = true)]
     editor: Option<String>,
     /// Copy the PDF after each successful build into DIR (default: where
     /// phitex was run)
-    #[arg(long, value_name = "DIR", num_args = 0..=1, require_equals = true, default_missing_value = "", global = true)]
+    #[arg(long, value_name = "DIR", num_args = 0..=1, require_equals = true, default_missing_value = "", global = true, hide_short_help = true)]
     copy_pdf: Option<String>,
     #[arg(long, global = true, hide = true)]
     no_copy_pdf: bool,
     /// Write <job>.synctex.gz, for a PDF viewer's jumps between source
     /// and pages (`synctex = true` in `phitex.toml`)
-    #[arg(long, global = true, overrides_with = "no_synctex")]
+    #[arg(
+        long,
+        global = true,
+        overrides_with = "no_synctex",
+        hide_short_help = true
+    )]
     synctex: bool,
     /// No <job>.synctex.gz (the default)
-    #[arg(long, global = true, overrides_with = "synctex")]
+    #[arg(
+        long,
+        global = true,
+        overrides_with = "synctex",
+        hide_short_help = true
+    )]
     no_synctex: bool,
     /// TeX's files from Shelf's packs (fetched once, kept in the cache's
     /// `shelf/`; v1.shelf.phitex.org the server, PHITEX_SHELF_URL another) instead of TeX Live's
     /// (`files = "shelf"` in `phitex.toml`)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide_short_help = true)]
     shelf: bool,
+    /// Print help (--help-all: every option)
+    #[arg(short = 'h', long = "help", action = clap::ArgAction::HelpShort, global = true)]
+    help: Option<bool>,
+    /// Print every option, with the details
+    #[arg(long = "help-all", action = clap::ArgAction::HelpLong, global = true, hide_short_help = true)]
+    help_all: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,7 +334,8 @@ pub enum Command {
     Watch,
     Clean,
     News,
-    Upgrade { check: bool },
+    Upgrade,
+    Config,
 }
 
 /// The modern command line's options, as the rest of the program reads
@@ -329,16 +377,23 @@ pub struct Options {
     /// `--shelf`, or the editor's `files` setting (none: `phitex.toml`'s,
     /// else TeX Live).
     pub files: Option<tex::Files>,
+    /// `config`'s key and value.
+    pub set: Option<(String, String)>,
 }
 
 impl Cli {
     fn into_options(self) -> Options {
+        let set = match &self.command {
+            Some(Sub::Config { key, value }) => Some((key.clone(), value.clone())),
+            _ => None,
+        };
         let (command, file, all) = match self.command {
             Some(Sub::Build { file }) => (Some(Command::Build), file, false),
             Some(Sub::Watch { file }) => (Some(Command::Watch), file, false),
             Some(Sub::Clean { all, file }) => (Some(Command::Clean), file, all),
             Some(Sub::News) => (Some(Command::News), None, false),
-            Some(Sub::Upgrade { check }) => (Some(Command::Upgrade { check }), None, false),
+            Some(Sub::Upgrade) => (Some(Command::Upgrade), None, false),
+            Some(Sub::Config { .. }) => (Some(Command::Config), None, false),
             None => (None, None, false),
         };
         let o = self.opts;
@@ -389,6 +444,7 @@ impl Cli {
             },
             all,
             files: o.shelf.then_some(tex::Files::Shelf),
+            set,
         }
     }
 }
@@ -654,7 +710,8 @@ pub fn report(
             )));
         }
     }
-    if !o.quiet {
+    // (the engine's counts and tables: -v)
+    if o.verbose > 0 || ui.verbose > 0 {
         for n in &r.notes {
             ui.line(&st.dim(&format!("  {n}")));
         }
@@ -821,6 +878,9 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     phitex_tex::timeline::lap("cli: the records stored");
     cache_summary(t, ui);
     phitex_tex::timeline::lap("cli: the cache's summary");
+    if !o.lsp && !o.json && !o.quiet {
+        crate::upgrade::check(ui);
+    }
     let code = i32::from(!r.out.errors.is_empty());
     // (the process exits next: the session's engine and tables, hundreds
     // of megabytes, are left to it instead of freed one by one)
@@ -860,12 +920,13 @@ const CLEAN: &[&str] = &[
     "thm",
 ];
 
-/// The cache's line (dim, not with `-q`) and `cache` event: after a
-/// build, and when a watch ends.
+/// The cache's line (dim; with -v, or the cache past 80% of its limit)
+/// and `cache` event: after a build, and when a watch ends.
 pub fn cache_summary(t: &Target, ui: &Ui) {
     match crate::cache::Cache::open(t.cache_limit) {
         Ok(c) => {
-            if !ui.quiet {
+            let full = c.limit > 0 && c.usage() > c.limit / 5 * 4;
+            if !ui.quiet && (ui.verbose > 0 || full) {
                 let (text, on) = c.summary();
                 let st = ui.st;
                 if on {
@@ -978,12 +1039,27 @@ pub fn main(args: &[String]) -> ! {
         crate::news::print();
         std::process::exit(0);
     }
-    if let Command::Upgrade { check } = command {
-        std::process::exit(crate::upgrade::upgrade(&ui, check));
+    if command == Command::Config {
+        let (k, v) = o.set.clone().unwrap_or_default();
+        match crate::config::set_user(&k, &v) {
+            Ok(p) => ui.line(&format!("{k} = {v} in {}", crate::cache::home_relative(&p))),
+            Err(e) => {
+                ui.error(&e);
+                std::process::exit(crate::EXIT_FAILED);
+            }
+        }
+        std::process::exit(0);
+    }
+    if command == Command::Upgrade {
+        std::process::exit(crate::upgrade::upgrade(&ui));
     }
     if !o.lsp && !o.json && !o.quiet {
         crate::news::once(&ui);
-        crate::upgrade::check(&ui);
+        crate::upgrade::begin();
+        // (a build's after its result: `build`)
+        if command == Command::Watch {
+            crate::upgrade::check(&ui);
+        }
     }
     // (an editor's language server: its `initialize` first, which says
     // where the watch runs and may name the main file)
@@ -1041,7 +1117,7 @@ pub fn main(args: &[String]) -> ! {
         Command::Clean => std::process::exit(clean(&t, &ui)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
         // (answered before the target)
-        Command::News | Command::Upgrade { .. } => unreachable!(),
+        Command::News | Command::Upgrade | Command::Config => unreachable!(),
     }
 }
 

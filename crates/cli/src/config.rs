@@ -234,6 +234,72 @@ pub fn user_file() -> Option<PathBuf> {
     Some(base.join("phitex").join(FILE))
 }
 
+/// `text` (a `phitex.toml`) with `key` set to `value`: its line
+/// replaced where it has one at the top level, else added; the rest, its
+/// comments, kept. `on`/`off` and `true`/`false` are booleans, a number a
+/// number, anything else a string. Checked by reading it back.
+fn with_key(text: &str, key: &str, value: &str) -> Result<String, String> {
+    if !KEYS.contains(&key) {
+        return Err(match nearest(key) {
+            Some(n) => format!("no setting '{key}': did you mean '{n}'?"),
+            None => format!("no setting '{key}' (phitex --help-all lists them)"),
+        });
+    }
+    let v = match value {
+        "on" | "true" => "true".to_owned(),
+        "off" | "false" => "false".to_owned(),
+        _ if value.parse::<i64>().is_ok() => value.to_owned(),
+        _ => format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")),
+    };
+    let line = format!("{key} = {v}");
+    let mut out = Vec::new();
+    let mut done = false;
+    let mut top = true;
+    for l in text.lines() {
+        let t = l.trim_start();
+        if t.starts_with('[') {
+            if !done {
+                out.push(line.clone());
+                done = true;
+            }
+            top = false;
+        }
+        let named = t
+            .split_once('=')
+            .is_some_and(|(k, _)| k.trim().trim_matches('"') == key);
+        if top && named {
+            if !done {
+                out.push(line.clone());
+                done = true;
+            }
+        } else {
+            out.push(l.to_owned());
+        }
+    }
+    if !done {
+        out.push(line);
+    }
+    let text = out.join("\n") + "\n";
+    parse_named(&text, "phitex.toml").map_err(|e| format!("{key} = {value}: {e}"))?;
+    Ok(text)
+}
+
+/// `phitex config KEY VALUE`: the user's `phitex.toml` with it set (made
+/// if need be); where it was written.
+pub fn set_user(key: &str, value: &str) -> Result<PathBuf, String> {
+    if key == "main" || key == "file" {
+        return Err("`main` belongs in a project's phitex.toml, not yours".to_owned());
+    }
+    let p = user_file().ok_or("no home directory for ~/.config/phitex/phitex.toml")?;
+    let old = std::fs::read_to_string(&p).unwrap_or_default();
+    let new = with_key(&old, key, value)?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    std::fs::write(&p, new).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(p)
+}
+
 /// The user's settings (none there: the defaults). They name no main
 /// file: that is the project's.
 pub fn user() -> Result<Config, String> {
@@ -501,6 +567,29 @@ pub fn braced_inputs(text: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_key_set_in_place() {
+        let old = "# mine\nupdate-check = false # was off\nviewer = \"zathura\"\n";
+        assert_eq!(
+            with_key(old, "update-check", "on").unwrap(),
+            "# mine\nupdate-check = true\nviewer = \"zathura\"\n"
+        );
+        assert_eq!(
+            with_key("", "update-check", "off").unwrap(),
+            "update-check = false\n"
+        );
+        assert_eq!(
+            with_key("", "viewer", "my \"pdf\"").unwrap(),
+            "viewer = \"my \\\"pdf\\\"\"\n"
+        );
+        assert!(
+            with_key("", "update-chek", "on")
+                .unwrap_err()
+                .contains("update-check")
+        );
+        assert!(with_key("", "synctex", "maybe").is_err());
+    }
+
     use super::*;
 
     #[test]
