@@ -617,7 +617,8 @@ export class Panel {
       // (the pane's own background, as its PDF viewer shows it)
       if (this.win.style.getPropertyValue("--pane") !== cs.backgroundColor) this.win.style.setProperty("--pane", cs.backgroundColor);
       this.win.classList.toggle("pdf-dark", pane.classList.contains("pdf-dark-mode"));
-      this.win.classList.toggle("light", document.body.dataset.theme === "light");
+      // (Overleaf's theme, from its body; a host that says its own, theme(), keeps it)
+      if (this.pageTheme === undefined) this.win.classList.toggle("light", document.body.dataset.theme === "light");
       this.applyDark();
       if (h.top !== `${top}px` || h.position !== "absolute") Object.assign(h, { position: "absolute", left: "0", right: "0", bottom: "0", top: `${top}px`, zIndex: "12", flexDirection: "column" });
     }
@@ -1804,11 +1805,27 @@ export class Panel {
     this.applyDark();
   }
 
-  /** Whether the host's theme is dark: Overleaf's (dock() says), VS Code's (its body's class), the system's. */
+  /** The host page's own theme (theme()): undefined, never said. */
+  private pageTheme: "dark" | "light" | null | undefined = undefined;
+
+  /**
+   * The host page's theme: "dark" or "light" as its own toggle says, null
+   * to follow the system (prefers-color-scheme). For hosts whose page has a
+   * toggle of its own (the web frontend); Overleaf's comes from dock(), VS
+   * Code's from its body.
+   */
+  theme(t: "dark" | "light" | null): void {
+    this.pageTheme = t;
+    this.win.classList.toggle("dark", t === "dark");
+    this.win.classList.toggle("light", t === "light");
+    this.applyDark();
+  }
+
+  /** Whether the host's theme is dark: Overleaf's (dock() says), VS Code's (its body's class), the page's (theme()), the system's. */
   private hostDark(): boolean {
     if (this.kind === "overleaf") return !this.win.classList.contains("light");
     if (this.kind === "vscode") return !/\bvscode-light\b/.test(document.body.className);
-    return this.darkQuery.matches;
+    return this.pageTheme ? this.pageTheme === "dark" : this.darkQuery.matches;
   }
 
   private applyDark(): void {

@@ -194,12 +194,13 @@ var Viewer = class {
   culprits(marks) {
     for (const m of this.root.querySelectorAll(".culprit")) m.remove();
     const { w, h } = this.size;
-    for (const { k, boxes: boxes2, severity } of marks) {
+    for (const { k, boxes: boxes2, severity, i } of marks) {
       const s = this.slots[k];
       if (!s) continue;
       for (const [x, y, bw, bh] of boxes2) {
         const m = document.createElement("div");
         m.className = `culprit ${severity}`;
+        if (i !== void 0) m.dataset.i = String(i);
         Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%`, width: `${bw / w * 100}%`, height: `${bh / h * 100}%` });
         s.el.append(m);
       }
@@ -641,12 +642,16 @@ header:active { cursor: grabbing; }
 .status { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 6px; min-width: 0;
   border-radius: var(--ph-radius); color: var(--ph-fg2); cursor: pointer; white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }
 .status:hover, .status[aria-expanded="true"] { background: var(--ph-hover); color: var(--ph-fg); }
-.status b { font-weight: 400; color: var(--ph-fg); overflow: hidden; text-overflow: ellipsis; }
+/* (squeezed: its detail goes first, then its words end in an ellipsis; the leading word kept) */
+.status b { flex: 0 1 auto; min-width: 4.5ch; font-weight: 400; color: var(--ph-fg); overflow: hidden; text-overflow: ellipsis; }
+#stmore { flex: 0 1000 auto; min-width: 0; overflow: hidden; }
+.bar > .status { min-width: calc(4.5ch + 12px); }
 .status.err b { color: var(--ph-danger); }
 .pageno { display: inline-flex; align-items: center; gap: 4px; color: var(--ph-fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.pageno input { width: 2.8em; height: 22px; padding: 0; text-align: center; font: inherit; color: var(--ph-fg); background: transparent;
+.pageno input { width: 3ch; height: 22px; box-sizing: content-box; padding: 0 2px; padding: 0; text-align: center; font: inherit; color: var(--ph-fg); background: transparent;
   border: 1px solid var(--ph-border); border-radius: var(--ph-radius); }
 .zoomb { padding: 0 2px 0 8px; }
+#zs { display: none; }
 .probs { font-weight: 600; font-variant-numeric: tabular-nums; }
 .probs.error { color: var(--ph-danger); } .probs.warning { color: var(--ph-warning); }
 .progress { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; opacity: 0; transition: opacity .2s; pointer-events: none; }
@@ -659,10 +664,25 @@ header:active { cursor: grabbing; }
 .find input:focus { border-color: var(--ph-link); }
 #findn { color: var(--ph-fg2); min-width: 48px; font-variant-numeric: tabular-nums; }
 #findn.none { color: var(--ph-danger); }
+/* narrower: what gives way, in order: the zoom's long label, find's box, then (560) the buttons the \u22EF menu also has, then the page box beside an open find */
+.bar > :not(.status):not(.grow) { flex: none; }
+.bar > .grow { flex: 1 1 0; min-width: 0; }
+@container (max-width: 820px) { #zl { display: none; } #zs { display: inline; } }
+@container (max-width: 760px) {
+  /* (find open: Compare and Download step aside, to the \u22EF menu, which has them) */
+  .bar:has(.find:not([hidden])) :is(#b-compare, #pdf) { display: none; }
+  .bar:has(.find:not([hidden])) #x-compare.narrow:not([hidden]) { display: flex !important; }
+}
+@container (max-width: 700px) { .find input { width: 110px; } #findn { min-width: 0; } }
 @container (max-width: 560px) {
   .wide { display: none !important; }
-  .find input { width: 110px; }
 }
+@container (max-width: 460px) {
+  .bar:has(.find:not([hidden])) .pageno { display: none; }
+  .find input { width: 90px; }
+  .bar { gap: 2px; }
+}
+@container (max-width: 360px) { .find input { width: 72px; } .bar { padding: 0 4px; } }
 @container (min-width: 561px) { .narrow { display: none !important; } }
 
 /* menus and popovers: plain lists in the host's menu colour */
@@ -765,6 +785,12 @@ header:active { cursor: grabbing; }
 .slot .mark.fnd { background: rgb(255 214 0 / 40%); box-shadow: none; transition: none; }
 .slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); box-shadow: 0 0 0 1px rgb(150 100 0 / 90%); }
 .slot .culprit { position: absolute; pointer-events: none; }
+/* (a culprit hovered: its problem's message, a small tooltip under the line) */
+.ctip { position: absolute; z-index: 8; max-width: min(420px, calc(100% - 16px)); display: flex; gap: 6px; align-items: flex-start; padding: 5px 9px;
+  background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius);
+  box-shadow: 0 3px 12px rgb(0 0 0 / 25%); font-size: 12px; line-height: 1.35; pointer-events: none; overflow-wrap: anywhere; }
+.ctip .icon { margin-top: 1px; }
+.ctip.error .icon { color: var(--ph-danger); } .ctip.warning .icon { color: var(--ph-warning); }
 /* (a problem's culprit: a wavy line along its glyphs' foot, as an editor underlines one; no fill, the text stays readable) */
 .slot .culprit::after { content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 3px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23d93025' stroke-width='1'/%3E%3C/svg%3E") repeat-x left bottom / 6px 3px; }
 .slot .culprit.warning::after { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23c77700' stroke-width='1'/%3E%3C/svg%3E"); }
@@ -820,6 +846,8 @@ header:active { cursor: grabbing; }
 .toast.out { opacity: 0; transform: translateY(6px); }
 .toast .t { display: flex; align-items: center; gap: 8px; font-weight: 600; min-width: 0; }
 .toast .t span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast.msg .t { align-items: flex-start; } .toast.msg .t span { white-space: normal; overflow-wrap: anywhere; }
+.toast.msg .t .icon { margin-top: 2px; }
 .toast .d { color: var(--ph-fg2); font-size: 12px; overflow-wrap: anywhere; }
 .toast.err { border-left: 3px solid var(--ph-danger); }
 .toast .track { position: relative; height: 3px; margin-top: 2px; border-radius: 2px; overflow: hidden; background: var(--ph-border); }
@@ -1349,7 +1377,7 @@ var easeOutExpo = (u) => u >= 1 ? 1 : 1 - 2 ** (-10 * Math.max(0, u));
 var easeBack = (u, k) => (u = clamp01(u) - 1, 1 + (k + 1) * u * u * u + k * u * u);
 var ease2 = (u) => (u = clamp01(u), u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2);
 var OFF = 1.01;
-var OPEN = { draw: 700, stagger: 110, sweep: 1e3, rest: 300, cycle: 1600, settle: 500, dive: 1100, fade: 250, into: [0.3, 0.42], deep: 5 };
+var OPEN = { draw: 700, stagger: 110, sweep: 1e3, rest: 300, cycle: 1600, settle: 500, dive: 470, fade: 180, into: [0.3, 0.42], deep: 5 };
 var PHI_COUNTER = "M228 344Q228 316 233 294Q238 272 252.5 249Q267 226 298 210.5Q329 195 375 190V495Q288 485 258 444Q228 403 228 344Z";
 var BY = { h: 18, faint: "#8d96a5", kaust: "#80715e" };
 var SANS = `"Noto Sans", system-ui, sans-serif`;
@@ -1492,6 +1520,11 @@ function opening(box, fill, bg) {
     const v = u % 1;
     return v < 0.5 ? -OFF * easeIO(v * 2) : OFF * (1 - easeIO(v * 2 - 1));
   };
+  const cam = (t) => {
+    const cm = fit(MARK, 0.45, 0.3), cw = fit(word, 0.84, 0.4);
+    const k0 = easeIO((t - T1 - 200) / (0.75 * OPEN.sweep));
+    return t < T1 + 200 ? cm : { cx: cm.cx + (cw.cx - cm.cx) * k0, cy: cm.cy + (cw.cy - cm.cy) * k0, s: cm.s + (cw.s - cm.s) * k0 };
+  };
   const frame = (t) => {
     if (still) t = doneAt === null ? T3 : Math.max(t, (settled ??= doneAt) + OPEN.dive);
     let head = phi.r;
@@ -1508,12 +1541,10 @@ function opening(box, fill, bg) {
       if (o >= 0 && o < 1) head = Math.max(head, st.ps[0].getPointAtLength((1 - o) * st.full).x);
     });
     rest.forEach(([g, l]) => g.style.opacity = t < T3 ? String(f2(clamp01((head - Math.max(l.l, phi.r)) / (0.3 * (l.r - l.l))))) : "1");
-    const cm = fit(MARK, 0.45, 0.3), cw = fit(word, 0.84, 0.4);
-    const k0 = easeIO((t - T1 - 200) / (0.75 * OPEN.sweep));
-    let c = t < T1 + 200 ? cm : { cx: cm.cx + (cw.cx - cm.cx) * k0, cy: cm.cy + (cw.cy - cm.cy) * k0, s: cm.s + (cw.s - cm.s) * k0 };
-    if (doneAt !== null && t >= (settled ??= doneAt + OPEN.settle + 2 * OPEN.stagger)) {
-      const u = Math.min(1, (t - settled) / OPEN.dive), s = cw.s * Math.exp(Math.log(deep() / cw.s) * u ** 2.2), k = (s - deep()) / (cw.s - deep());
-      c = { cx: P.x + (cw.cx - P.x) * k, cy: P.y + (cw.cy - P.y) * k, s };
+    let c = cam(t);
+    if (doneAt !== null && t >= (settled ??= doneAt)) {
+      const b = cam(settled), u = Math.min(1, (t - settled) / OPEN.dive), s = b.s * Math.exp(Math.log(deep() / b.s) * u ** 2.2), k = (s - deep()) / (b.s - deep());
+      c = { cx: P.x + (b.cx - P.x) * k, cy: P.y + (b.cy - P.y) * k, s };
       hole.setAttribute("opacity", String(f2(Math.min(1, u * 4))));
       el.style.opacity = String(1 - Math.max(0, (t - settled - OPEN.dive) / OPEN.fade));
       if (t >= settled + OPEN.dive + OPEN.fade) end = true;
@@ -1529,7 +1560,7 @@ function opening(box, fill, bg) {
   raf = requestAnimationFrame(tick);
   return {
     done() {
-      doneAt ??= Math.max(performance.now() - t0, T3);
+      doneAt ??= performance.now() - t0;
       return new Promise((ok) => finish = ok);
     },
     stop() {
@@ -1685,7 +1716,7 @@ var Panel = class {
     <button type="button" class="ib wide" id="b-compare" title="Compare with an earlier version (latexdiff)" aria-label="Compare"><span class="icon">compare</span></button>
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="\u2013" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
-    <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span class="icon">expand_more</span></button>
+    <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
     <button type="button" class="ib probs" id="b-probs" aria-haspopup="dialog" aria-expanded="false" title="Problems" hidden><span id="psev"></span><span id="pcount"></span></button>
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
     <span class="progress" id="prog"></span>
@@ -1708,6 +1739,7 @@ var Panel = class {
       <hr>
       <div class="mi"><span class="icon">dark</span>Dark PDF</div>
       <div class="radios" id="darkpdf" role="group" aria-label="Dark PDF"><button type="button" data-dark="off">Off</button><button type="button" data-dark="on">On</button><button type="button" data-dark="theme">Match theme</button></div>
+      <button type="button" role="menuitemcheckbox" id="x-culprits" aria-checked="true"><span class="check">\u2713</span><span>Underline problems<span class="desc">A wavy line under what each error and warning is about</span></span></button>
       <button type="button" role="menuitemcheckbox" id="dbg" aria-checked="false"><span class="check"></span><span>Debug check<span class="desc">Compare with a fresh build every 5 s</span></span></button>
       <hr>
       ${item2("x-tips", "tips", "What's new")}
@@ -1719,7 +1751,7 @@ var Panel = class {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div>
+    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -1755,6 +1787,7 @@ var Panel = class {
     offer("#x-keys", !!opts.keys);
     offer("#b-find, #x-find", !!ev.onFind);
     offer("#dbg, #dbglabel", !!ev.onDebug);
+    offer("#x-culprits", !!ev.onBoxes);
     offer("#tour", !!ev.onTour);
     offer("#news", !!ev.onNews);
     const menus = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
@@ -1808,6 +1841,14 @@ var Panel = class {
     };
     pg.onblur = () => this.nav();
     this.$("#dbg").onclick = () => this.toggleDebug();
+    this.$("#x-culprits").onclick = () => this.culpritsShown(!this.culpritsOn);
+    try {
+      this.culpritsOn = localStorage.getItem("phitex.culprits") !== "0";
+    } catch {
+    }
+    this.culpritsShown(this.culpritsOn, false);
+    this.$("#stage").addEventListener("pointermove", (e) => this.culpritAt(e), { passive: true });
+    this.$("#stage").addEventListener("pointerleave", () => this.$("#ctip").hidden = true);
     this.$("#dbg2").onchange = () => this.toggleDebug();
     this.$("#reload").onclick = () => (this.sheet(false), ev.onReload());
     const license = this.$("#license");
@@ -1930,7 +1971,7 @@ var Panel = class {
       if (cs.position === "static") pane2.style.position = "relative";
       if (this.win.style.getPropertyValue("--pane") !== cs.backgroundColor) this.win.style.setProperty("--pane", cs.backgroundColor);
       this.win.classList.toggle("pdf-dark", pane2.classList.contains("pdf-dark-mode"));
-      this.win.classList.toggle("light", document.body.dataset.theme === "light");
+      if (this.pageTheme === void 0) this.win.classList.toggle("light", document.body.dataset.theme === "light");
       this.applyDark();
       if (h.top !== `${top}px` || h.position !== "absolute") Object.assign(h, { position: "absolute", left: "0", right: "0", bottom: "0", top: `${top}px`, zIndex: "12", flexDirection: "column" });
     }
@@ -2176,13 +2217,57 @@ var Panel = class {
   chip = { level: "ok", text: "starting\u2026", title: "Status" };
   /** The problems' culprits underlined on the pages: the latest status's, a later one replacing an earlier still being looked up. */
   culpritsSeq = 0;
+  /** Whether they are (the ⋯ menu's Underline problems, remembered on this machine); the last status's problems, and those drawn (by data-i). */
+  culpritsOn = true;
+  culpritDiags = [];
+  culpritsDrawn = [];
   async underline(diags) {
     if (!this.ev.onBoxes) return;
+    this.culpritDiags = diags;
     const seq = ++this.culpritsSeq;
-    const want = diags.map((d) => d.problem).filter((p) => !!p?.file && !!p.range && p.severity !== "note").map((p) => ({ file: p.file, range: p.range, severity: p.severity === "warning" ? "warning" : "error" })).sort((a, b) => a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1).slice(0, 20);
-    const found = await Promise.all(want.map((w) => this.ev.onBoxes(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity })), () => [])));
+    if (!this.culpritsOn) return void (this.viewer.culprits([]), this.$("#ctip").hidden = true);
+    const want = diags.filter((d) => !!d.problem?.file && !!d.problem.range && d.problem.severity !== "note").map((d) => ({ file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? "warning" : "error", message: d.message })).sort((a, b) => a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1).slice(0, 20);
+    const found = await Promise.all(want.map((w, i) => this.ev.onBoxes(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i })), () => [])));
     if (seq !== this.culpritsSeq) return;
+    this.culpritsDrawn = want;
     this.viewer.culprits(found.flat());
+  }
+  /** The underlines on or off (`keep`: remembered). */
+  culpritsShown(on, keep = true) {
+    this.culpritsOn = on;
+    const b = this.$("#x-culprits");
+    b.setAttribute("aria-checked", String(on));
+    b.querySelector(".check").textContent = on ? "\u2713" : "";
+    if (keep) {
+      try {
+        localStorage.setItem("phitex.culprits", on ? "1" : "0");
+      } catch {
+      }
+      void this.underline(this.culpritDiags);
+    }
+  }
+  /** The pointer over an underline: its problem's message, under it. */
+  culpritAt(e) {
+    const tip = this.$("#ctip");
+    if (!this.culpritsDrawn.length || e.buttons) return void (tip.hidden = true);
+    const hit = [...this.root.querySelectorAll(".slot .culprit")].find((m) => {
+      const r2 = m.getBoundingClientRect();
+      return e.clientX >= r2.left - 2 && e.clientX <= r2.right + 2 && e.clientY >= r2.top - 2 && e.clientY <= r2.bottom + 5;
+    });
+    const p = hit && this.culpritsDrawn[Number(hit.dataset.i)];
+    if (!hit || !p) return void (tip.hidden = true);
+    if (tip.hidden || tip.dataset.i !== hit.dataset.i) {
+      tip.dataset.i = hit.dataset.i;
+      tip.className = `ctip ${p.severity}`;
+      tip.innerHTML = `${icon(p.severity, 14)}<span></span>`;
+      tip.querySelector("span").textContent = p.message;
+      tip.hidden = false;
+    }
+    const body = this.$(".body").getBoundingClientRect(), r = hit.getBoundingClientRect();
+    const left = Math.max(8, Math.min(body.width - tip.offsetWidth - 8, e.clientX - body.left - 12));
+    const below = r.bottom - body.top + 8;
+    tip.style.left = `${left}px`;
+    tip.style.top = `${below + tip.offsetHeight > body.height - 8 ? r.top - body.top - tip.offsetHeight - 6 : below}px`;
   }
   status(s) {
     this.lastStatus = s;
@@ -2392,13 +2477,13 @@ var Panel = class {
       }
       requestAnimationFrame(follow);
     };
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return this.stopSheet();
     requestAnimationFrame(() => {
       follow();
       el.classList.add("in");
-      setTimeout(() => {
-        void this.anim?.done().then(() => this.stopSheet());
-      }, matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 300);
     });
+    void this.anim.done().then(() => this.stopSheet());
+    setTimeout(() => this.stopSheet(), 900);
   }
   /** The sheet gone (played out, or a card in its place). */
   stopSheet() {
@@ -2437,12 +2522,14 @@ var Panel = class {
     }
     clearTimeout(this.toastTimer);
     this.toastKind = kind;
-    el.className = `toast${t.err ? " err" : ""}`;
+    el.className = `toast ${kind}${t.err ? " err" : ""}`;
     el.hidden = false;
     el.innerHTML = `<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>` + (t.pct === null ? "" : `<div class="track"><i style="width:${t.pct}%"></i></div>`);
     el.querySelector(".t span").textContent = t.title;
     el.querySelector(".d").textContent = t.detail ?? "";
     if (t.ms) this.toastTimer = setTimeout(() => this.toast(kind, null), t.ms);
+    el.title = t.err && !t.ms ? "Click to dismiss" : "";
+    el.onclick = t.err && !t.ms ? () => this.toast(kind, null) : null;
   }
   /** Keep the last good page when a build ships nothing (or not this page): dimmed, with why. */
   /** When the page first went missing (a build that shipped none); its dimming waits. */
@@ -2711,6 +2798,7 @@ var Panel = class {
     const z = this.zoomNow ?? this.prefs.zoom;
     const named = ZOOMS.find(([v]) => v === z);
     this.$("#zl").textContent = named ? named[1] : `${Math.round(Number(z) * 100)}%`;
+    this.$("#zs").textContent = z === "fit" ? "Fit" : z === "page" ? "Page" : `${Math.round(Number(z) * 100)}%`;
     this.root.querySelectorAll("#m-zoom [data-zoom]").forEach((b) => {
       const on = b.dataset.zoom === z;
       b.setAttribute("aria-checked", String(on));
@@ -2880,7 +2968,7 @@ var Panel = class {
     this.$("#dbg").querySelector(".check").textContent = this.debugOn ? "\u2713" : "";
     this.$("#dbg2").checked = this.debugOn;
     this.ev.onDebug?.(this.debugOn);
-    this.msg(this.debugOn ? "Debug check on" : "Debug check off");
+    this.msg(this.debugOn ? "Debug check on" : "Debug check off", false, true);
     this.emit();
   }
   /** The settings (docked under a host's toolbar: the main file, the debug check, reload, the latency's details). */
@@ -2922,11 +3010,25 @@ var Panel = class {
     this.darkQuery.onchange = () => this.applyDark();
     this.applyDark();
   }
-  /** Whether the host's theme is dark: Overleaf's (dock() says), VS Code's (its body's class), the system's. */
+  /** The host page's own theme (theme()): undefined, never said. */
+  pageTheme = void 0;
+  /**
+   * The host page's theme: "dark" or "light" as its own toggle says, null
+   * to follow the system (prefers-color-scheme). For hosts whose page has a
+   * toggle of its own (the web frontend); Overleaf's comes from dock(), VS
+   * Code's from its body.
+   */
+  theme(t) {
+    this.pageTheme = t;
+    this.win.classList.toggle("dark", t === "dark");
+    this.win.classList.toggle("light", t === "light");
+    this.applyDark();
+  }
+  /** Whether the host's theme is dark: Overleaf's (dock() says), VS Code's (its body's class), the page's (theme()), the system's. */
   hostDark() {
     if (this.kind === "overleaf") return !this.win.classList.contains("light");
     if (this.kind === "vscode") return !/\bvscode-light\b/.test(document.body.className);
-    return this.darkQuery.matches;
+    return this.pageTheme ? this.pageTheme === "dark" : this.darkQuery.matches;
   }
   applyDark() {
     this.win.classList.toggle("dark-pdf", this.dark === "on" || this.dark === "theme" && this.hostDark());
@@ -3098,10 +3200,16 @@ var Panel = class {
   /** The last message (connected, files read, a debug check's result), shown in the timing popover. */
   msgText = "";
   msgErr = false;
-  msg(t, err = false) {
+  /**
+   * The status's message (in its popover); `shown`: the answer to something
+   * the user did (Clear cache, a toggle), so a note in the corner says it
+   * too, for a few seconds, or until clicked away if it is an error.
+   */
+  msg(t, err = false, shown = false) {
     this.msgText = t;
     this.msgErr = err;
     if (!this.$("#m-time").hidden) this.timing();
+    if (shown) this.toast("msg", { title: t, pct: null, icon: err ? "warning" : "info", err, ms: err ? void 0 : 4e3 });
   }
   error(t) {
     this.msg(t, true);
@@ -3158,6 +3266,7 @@ var Panel = class {
     const pg = this.$("#pgin");
     if (this.root.activeElement !== pg) pg.value = n ? String(k + 1) : "\u2013";
     this.$("#pgn").textContent = String(n);
+    pg.style.width = `${String(n || 1).length + 1.6}ch`;
     queueMicrotask(() => this.emit());
   }
   /** The pages there are, by hash (the viewer draws the changed ones it shows). */
@@ -5347,11 +5456,11 @@ var pages = new Pages(sock);
 async function clearCache() {
   const mb = (b) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
   const now = await sock.request({ op: "cache" });
-  if (!now.ok) return void panel.msg(`cache: ${now.error ?? "not available"}`, true);
+  if (!now.ok) return void panel.msg(`Couldn't clear the cache: ${now.error ?? "not available"}`, true, true);
   const bytes = Number(now.json?.bytes ?? 0);
   if (!confirm(`Clear PhiTeX's cache (${mb(bytes)} in ${now.json?.dir ?? "its cache folder"})? Packages and formats are fetched again when a build needs them.`)) return;
   const r = await sock.request({ op: "cache", clear: true });
-  panel.msg(r.ok ? `cache cleared: ${mb(Number(r.json?.freed ?? 0))} freed` : `cache: ${r.error ?? "not cleared"}`, !r.ok);
+  panel.msg(r.ok ? `Cache cleared: ${mb(Number(r.json?.freed ?? 0))} freed` : `Couldn't clear the cache: ${r.error ?? "not cleared"}`, !r.ok, true);
 }
 var source = (file, line, col = 1) => void sock.request({ op: "source", file, line, col });
 var panel = new Panel(
@@ -5465,7 +5574,7 @@ var gotoChange = async (k) => {
   const q = words(c.new_text || "") || words(c.old_text || "");
   if (!q) return;
   const hits = await pages.find(q);
-  if (!hits.length) return void panel.msg(`change ${k}: not found on the pages`);
+  if (!hits.length) return void panel.msg(`Change ${k} isn't on the pages`, false, true);
   const from2 = k > lastAt.k ? lastAt.page : 0;
   const at = Math.max(0, hits.findIndex((h) => h.k >= from2));
   lastAt = { k, page: hits[at].k };
@@ -5499,11 +5608,15 @@ document.head.append(Object.assign(document.createElement("style"), {
 @media (prefers-color-scheme: dark) {
   #phx-pick, #phx-bar, #phx-con { --bg: #1b212b; --fg: #e7e9ee; --fg2: #98a1b0; --line: #262d38; --hover: #222935; --danger: #f0786d; --warning: #e5a54b; --accent: #8fb3ec; color-scheme: dark; }
 }
-#phx-pick { position: fixed; z-index: 20; top: 44px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; overflow: auto;
+#phx-pick { position: fixed; z-index: 20; top: 44px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; display: flex; flex-direction: column; overflow: hidden;
   background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgb(0 0 0 / 25%); }
-#phx-pick header { display: flex; align-items: baseline; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); }
-#phx-pick header small { color: var(--fg2); font-size: 12px; }
-#phx-pick header button { margin-left: auto; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+#phx-pick[hidden] { display: none; }
+/* (the title and Close on one line, the hint under them; the commits scroll in their own box below, never under the header) */
+#phx-pick header { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 10px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--bg); }
+#phx-pick header b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#phx-pick header small { grid-column: 1 / -1; color: var(--fg2); font-size: 12px; }
+#phx-pick .phx-commits { flex: 1; min-height: 0; }
+#phx-pick header button { grid-row: 1; grid-column: 2; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
 #phx-pick header button:hover { background: var(--hover); }`
 }));
 var pick;
