@@ -257,12 +257,41 @@ const icon = (name: string, size = 18) =>
 /** The zooms the menu offers: fit the width, the whole page, then percentages. */
 const ZOOMS: [string, string][] = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
 
-/** Feature tips, each shown once (own-bar hosts): the control it points at, its words, new or not. */
-const TIPS: { id: string; at: string; title: string; text: string; fresh?: boolean }[] = [
-  { id: "compare", at: "#b-compare", title: "Compare versions", text: "See what changed since an earlier version, marked as latexdiff marks it: additions in blue, deletions struck out.", fresh: true },
-  { id: "timing", at: "#st", title: "How long it took", text: "Click the status for the last build's times and how long a keystroke takes to reach the page." },
-  { id: "rebuild", at: "#b-rec", title: "Clean rebuild", text: "Builds run by themselves as you type. Start over from a clean slate here, or clear what PhiTeX keeps." },
-  { id: "more", at: "#b-more", title: "Dark PDF and more", text: "The pages in dark mode, the log, the contents and the keys are in this menu." },
+/** A page's lines in a tip's demo, as wide as given (%). */
+const lines = (...w: number[]) => w.map((x) => `<i style="width:${x}%"></i>`).join("");
+
+/**
+ * Feature tips, each shown once (own-bar hosts): the control it points at,
+ * its words, new or not, and a small looping demo of it (CSS only: .tip .demo
+ * in print.ts; still, at its end state, with reduced motion).
+ */
+const TIPS: { id: string; at: string; title: string; text: string; demo: string; fresh?: boolean }[] = [
+  {
+    id: "compare", at: "#b-compare", title: "Compare versions", fresh: true,
+    text: "See what changed since an earlier version, marked as latexdiff marks it: additions in blue, deletions struck out.",
+    // (a sentence changes, then the change marked, then the navigator; Overleaf's compare tip had it first)
+    demo: `<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">‹ 1 / 1 ›</span></div>`,
+  },
+  {
+    id: "timing", at: "#st", title: "How long it took",
+    text: "Click the status for the last build's times and how long a keystroke takes to reach the page.",
+    demo: `<div class="demo tim" aria-hidden="true"><div class="mbar"><span class="mst">Built · 42 ms</span></div><div class="mpop"><b>Keystroke to page</b><p><span>edit</span><i style="--w:30%"></i><em>11 ms</em></p><p><span>typeset</span><i style="--w:55%"></i><em>25 ms</em></p><p><span>paint</span><i style="--w:18%"></i><em>6 ms</em></p></div></div>`,
+  },
+  {
+    id: "rebuild", at: "#b-rec", title: "Clean rebuild",
+    text: "Builds run by themselves as you type. Start over from a clean slate here, or clear what PhiTeX keeps.",
+    demo: `<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon("refresh", 12)}Rebuild</span><span class="dd">${icon("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`,
+  },
+  {
+    id: "more", at: "#b-more", title: "Dark PDF and more",
+    text: "The pages in dark mode, the log, the contents and the keys are in this menu.",
+    demo: `<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon("dark", 11)}Dark PDF<b>✓</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`,
+  },
+  {
+    id: "contents", at: "#b-side", title: "Contents", fresh: true,
+    text: "The document's sections beside the pages: click one to go there. This button (or t) shows or hides them.",
+    demo: `<div class="demo toc" aria-hidden="true"><div class="col"><span>1 Introduction</span><span>2 Method</span><span>3 Results</span><i class="at"></i></div><div class="pg"><div class="roll">${lines(45, 95, 90, 70)}<s></s>${lines(40, 92, 85, 60)}<s></s>${lines(42, 90, 94, 75)}</div></div></div>`,
+  },
 ];
 
 export class Panel {
@@ -1734,7 +1763,7 @@ export class Panel {
     } catch {
       /* (none seen) */
     }
-    const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare));
+    const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents));
     this.tipList = all ? offered : offered.filter((t) => !seen.includes(t.id));
     this.tip(0);
   }
@@ -1757,7 +1786,7 @@ export class Panel {
     if (!target || !target.offsetParent) target = this.$("#b-more");
     target.classList.add("ringed");
     el.innerHTML =
-      `<h4>${t.fresh ? '<span class="new">New</span>' : ""}${esc(t.title)}</h4><p>${esc(t.text)}</p>` +
+      `<h4>${t.fresh ? '<span class="new">New</span>' : ""}${esc(t.title)}</h4>${t.demo}<p>${esc(t.text)}</p>` +
       `<div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`;
     el.hidden = false;
     const bar = this.$(".bar").getBoundingClientRect(), r = target.getBoundingClientRect(), w = el.offsetWidth;

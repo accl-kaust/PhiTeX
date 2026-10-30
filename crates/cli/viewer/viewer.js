@@ -841,6 +841,90 @@ header:active { cursor: grabbing; }
 .tip .acts .primary { padding: 3px 12px; border-radius: var(--ph-pill); background: var(--ph-accent); color: var(--ph-accent-fg); font-weight: 600; }
 .ringed { box-shadow: 0 0 0 2px var(--ph-accent); }
 
+/* a tip's demo: a little stage looping what the feature does (4 s; the compare's 6 s), in the host's colours; a page is paper */
+.tip .demo { position: relative; height: 84px; margin: 8px 0 10px; overflow: hidden; border-radius: var(--ph-radius);
+  background: var(--ph-stage); border: 1px solid var(--ph-border); font: 10px/1.3 var(--ph-font); color: var(--ph-fg); }
+.tip .demo .mbar { position: absolute; inset: 0 0 auto; height: 20px; display: flex; align-items: center; gap: 4px; padding: 0 6px;
+  background: var(--ph-bar); border-bottom: 1px solid var(--ph-border); }
+.tip .demo .pg { position: absolute; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 25%); padding: 6px 7px; overflow: hidden; }
+.tip .demo .pg i { display: block; height: 3px; margin: 0 0 4px; border-radius: 1px; background: #c3c8d0; }
+.tip .demo .mmenu { position: absolute; display: flex; flex-direction: column; padding: 3px; opacity: 0; z-index: 1;
+  background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 3px 10px rgb(0 0 0 / 25%); }
+.tip .demo .mmenu span { display: flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 2px; white-space: nowrap; }
+.tip .demo .mmenu b { margin-left: auto; padding-left: 6px; }
+
+/* compare: "good" struck out, "excellent" added, then the navigator */
+.tip .demo.cmp { height: auto; padding: 10px 12px 30px; background: #fff; color: #1b222c; font: 13px/1.5 "Noto Serif", Georgia, serif; }
+.tip .cmp .del { animation: phx-del 6s ease-in-out infinite; }
+.tip .cmp .add { display: inline-block; max-width: 0; overflow: hidden; vertical-align: bottom; white-space: nowrap; color: #1d4ed8;
+  text-decoration: underline wavy #1d4ed8; text-underline-offset: 3px; animation: phx-add 6s ease-in-out infinite; }
+.tip .cmp .tag { position: absolute; right: 8px; bottom: 7px; padding: 3px 8px; border-radius: 9px; font: 600 11px/1 var(--ph-font);
+  color: #fff; background: rgb(27 34 44 / 88%); opacity: 0; animation: phx-tag 6s ease-in-out infinite; }
+.tip .cmp .ver { position: absolute; left: 12px; right: 76px; bottom: 9px; height: 12px; font: 11px/12px var(--ph-font); color: #6b7280; }
+.tip .cmp .ver i { position: absolute; left: 0; font-style: normal; white-space: nowrap; }
+.tip .cmp .v0 { animation: phx-v0 6s steps(1) infinite; }
+.tip .cmp .v1 { opacity: 0; animation: phx-v1 6s steps(1) infinite; }
+@keyframes phx-del { 0%, 30% { color: #1b222c; text-decoration: none; } 40%, 92% { color: #b91c1c; text-decoration: line-through 2px #b91c1c; } 100% { color: #1b222c; } }
+@keyframes phx-add { 0%, 45% { max-width: 0; } 60%, 92% { max-width: 6em; } 100% { max-width: 0; } }
+@keyframes phx-tag { 0%, 62% { opacity: 0; transform: translateY(6px); } 70%, 92% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+@keyframes phx-v0 { 0% { opacity: 1; } 31% { opacity: 0; } }
+@keyframes phx-v1 { 0% { opacity: 0; } 31% { opacity: 1; } }
+
+/* timing: the status clicked, its times drop down, each bar filling */
+.tip .tim .mst { padding: 1px 6px; border-radius: var(--ph-radius); font-weight: 600; animation: phx-press 4s infinite; }
+.tip .tim .mpop { position: absolute; left: 6px; top: 24px; width: 75%; padding: 3px 7px 4px; line-height: 12px; opacity: 0; animation: phx-drop 4s ease-out infinite;
+  background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 3px 10px rgb(0 0 0 / 25%); }
+.tip .tim .mpop b { display: block; margin-bottom: 2px; font-weight: 600; }
+.tip .tim .mpop p { display: grid; grid-template-columns: 40px 1fr 34px; align-items: center; gap: 5px; margin: 0; color: var(--ph-fg2); }
+.tip .tim .mpop i { height: 4px; width: 0; border-radius: 2px; background: var(--ph-progress); animation: phx-fill 4s ease-out infinite; }
+.tip .tim .mpop em { text-align: right; font-style: normal; font-variant-numeric: tabular-nums; white-space: nowrap; }
+@keyframes phx-press { 0%, 12% { background: none; } 18%, 85% { background: var(--ph-hover); } 100% { background: none; } }
+@keyframes phx-drop { 0%, 18% { opacity: 0; transform: translateY(-4px); } 28%, 88% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+@keyframes phx-fill { 0%, 28% { width: 0; } 50%, 88% { width: var(--w); } 100% { width: var(--w); } }
+
+/* rebuild: the menu opens, Clean rebuild chosen, the page typeset afresh */
+.tip .reb .msplit { display: flex; border-radius: var(--ph-pill); overflow: hidden; color: var(--ph-accent-fg); background: var(--ph-accent); font-weight: 600; }
+.tip .reb .msplit > span { display: flex; align-items: center; gap: 2px; padding: 1px 5px; }
+.tip .reb .dd { border-left: 1px solid rgb(255 255 255 / 30%); animation: phx-press-on 4s infinite; }
+.tip .reb .go .icon { animation: phx-turn 4s linear infinite; }
+.tip .reb .mmenu { left: 6px; top: 24px; animation: phx-menu 4s infinite; }
+.tip .reb .mmenu .pick { animation: phx-pick 4s infinite; }
+.tip .reb .pg { right: 14px; top: 26px; width: 34%; height: 70px; }
+.tip .reb .pg i { animation: phx-retype 4s infinite; transform-origin: left; }
+.tip .reb .pg i:nth-child(2) { animation-delay: .08s; } .tip .reb .pg i:nth-child(3) { animation-delay: .16s; }
+.tip .reb .pg i:nth-child(4) { animation-delay: .24s; } .tip .reb .pg i:nth-child(5) { animation-delay: .32s; } .tip .reb .pg i:nth-child(6) { animation-delay: .4s; }
+@keyframes phx-press-on { 0%, 10% { background: none; } 15%, 45% { background: var(--ph-accent-hover); } 50% { background: none; } }
+@keyframes phx-menu { 0%, 14% { opacity: 0; transform: translateY(-3px); } 20%, 46% { opacity: 1; transform: none; } 52%, 100% { opacity: 0; } }
+@keyframes phx-pick { 0%, 30% { background: none; } 36%, 52% { background: var(--ph-hover); } }
+@keyframes phx-turn { 0%, 50% { transform: none; } 75%, 100% { transform: rotate(360deg); } }
+@keyframes phx-retype { 0%, 52% { transform: none; } 56% { transform: scaleX(0); } 64%, 100% { transform: none; } }
+
+/* dark PDF: the \u22EF menu, Dark PDF ticked, the page goes soft dark (a grey page, off-white ink; never black) */
+.tip .drk .mbar { justify-content: flex-end; }
+.tip .drk .dots { display: flex; padding: 1px 3px; border-radius: var(--ph-radius); animation: phx-press-on2 4s infinite; }
+.tip .drk .mmenu { right: 6px; top: 24px; animation: phx-menu 4s infinite; }
+.tip .drk .mmenu .pick { animation: phx-pick 4s infinite; }
+.tip .drk .mmenu b { opacity: 0; animation: phx-tick 4s steps(1) infinite; }
+.tip .drk .pg { left: 14px; top: 26px; width: 38%; height: 70px; animation: phx-dark 4s infinite; }
+.tip .drk .pg i { animation: phx-ink 4s infinite; }
+@keyframes phx-press-on2 { 0%, 10% { background: none; } 15%, 45% { background: var(--ph-hover); } 50% { background: none; } }
+@keyframes phx-tick { 0%, 38% { opacity: 0; } 40%, 100% { opacity: 1; } }
+@keyframes phx-dark { 0%, 46% { background: #fff; } 56%, 92% { background: ${DARK_PAGE}; } 100% { background: #fff; } }
+@keyframes phx-ink { 0%, 46% { background: #c3c8d0; } 56%, 92% { background: #a9aeb6; } 100% { background: #c3c8d0; } }
+
+/* contents: the column beside the page, the section at following the page as it scrolls */
+.tip .toc .col { position: absolute; inset: 0 auto 0 0; width: 44%; padding: 6px 0; background: var(--ph-bar); border-right: 1px solid var(--ph-border);
+  animation: phx-col 4s ease-out infinite; }
+.tip .toc .col span { position: relative; z-index: 1; display: block; height: 18px; padding: 0 8px; line-height: 18px; white-space: nowrap; }
+.tip .toc .col .at { position: absolute; left: 4px; right: 4px; top: 6px; height: 18px; border-radius: 2px; background: var(--ph-hover);
+  box-shadow: inset 2px 0 var(--ph-accent); animation: phx-at 4s infinite; }
+.tip .toc .pg { left: 50%; right: 10%; top: 8px; bottom: -40px; padding-top: 0; }
+.tip .toc .roll { padding-top: 6px; animation: phx-roll 4s infinite; }
+.tip .toc .roll s { display: block; height: 6px; }
+@keyframes phx-col { 0% { transform: translateX(-100%); } 12%, 100% { transform: none; } }
+@keyframes phx-at { 0%, 30% { transform: none; } 38%, 62% { transform: translateY(18px); } 70%, 100% { transform: translateY(36px); } }
+@keyframes phx-roll { 0%, 30% { transform: none; } 38%, 62% { transform: translateY(-28px); } 70%, 100% { transform: translateY(-56px); } }
+
 /* dialogs over the pages: the keys, the log, the debug report, about */
 .dialog { position: absolute; z-index: 25; inset: 12px; display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; text-align: left;
   background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 30%); }
@@ -881,6 +965,12 @@ header:active { cursor: grabbing; }
 @media (prefers-reduced-motion: reduce) {
   .progress::after, .split.busy .go .icon, .steps .track.unknown i, .toast .track.unknown i, .diffbar .busy::before { animation: none; }
   .opening, .toast { transition: none; }
+  /* (the demos still, at what they show: the change marked, the times, Dark PDF on, the contents) */
+  .tip .demo, .tip .demo * { animation: none !important; }
+  .tip .cmp .del { color: #b91c1c; text-decoration: line-through 2px #b91c1c; } .tip .cmp .add { max-width: 6em; }
+  .tip .cmp .tag, .tip .cmp .v1, .tip .tim .mpop { opacity: 1; } .tip .cmp .v0 { opacity: 0; } .tip .tim .mpop i { width: var(--w); }
+  .tip .reb .mmenu, .tip .drk .mmenu, .tip .drk .mmenu b { opacity: 1; } .tip .reb .pick, .tip .drk .pick { background: var(--ph-hover); }
+  .tip .drk .pg { background: ${DARK_PAGE}; } .tip .drk .pg i { background: #a9aeb6; }
 }
 `;
 
@@ -1509,11 +1599,46 @@ var PATHS = {
 };
 var icon = (name, size = 18) => `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
 var ZOOMS = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
+var lines = (...w) => w.map((x) => `<i style="width:${x}%"></i>`).join("");
 var TIPS = [
-  { id: "compare", at: "#b-compare", title: "Compare versions", text: "See what changed since an earlier version, marked as latexdiff marks it: additions in blue, deletions struck out.", fresh: true },
-  { id: "timing", at: "#st", title: "How long it took", text: "Click the status for the last build's times and how long a keystroke takes to reach the page." },
-  { id: "rebuild", at: "#b-rec", title: "Clean rebuild", text: "Builds run by themselves as you type. Start over from a clean slate here, or clear what PhiTeX keeps." },
-  { id: "more", at: "#b-more", title: "Dark PDF and more", text: "The pages in dark mode, the log, the contents and the keys are in this menu." }
+  {
+    id: "compare",
+    at: "#b-compare",
+    title: "Compare versions",
+    fresh: true,
+    text: "See what changed since an earlier version, marked as latexdiff marks it: additions in blue, deletions struck out.",
+    // (a sentence changes, then the change marked, then the navigator; Overleaf's compare tip had it first)
+    demo: `<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">\u2039 1 / 1 \u203A</span></div>`
+  },
+  {
+    id: "timing",
+    at: "#st",
+    title: "How long it took",
+    text: "Click the status for the last build's times and how long a keystroke takes to reach the page.",
+    demo: `<div class="demo tim" aria-hidden="true"><div class="mbar"><span class="mst">Built \xB7 42 ms</span></div><div class="mpop"><b>Keystroke to page</b><p><span>edit</span><i style="--w:30%"></i><em>11 ms</em></p><p><span>typeset</span><i style="--w:55%"></i><em>25 ms</em></p><p><span>paint</span><i style="--w:18%"></i><em>6 ms</em></p></div></div>`
+  },
+  {
+    id: "rebuild",
+    at: "#b-rec",
+    title: "Clean rebuild",
+    text: "Builds run by themselves as you type. Start over from a clean slate here, or clear what PhiTeX keeps.",
+    demo: `<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon("refresh", 12)}Rebuild</span><span class="dd">${icon("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`
+  },
+  {
+    id: "more",
+    at: "#b-more",
+    title: "Dark PDF and more",
+    text: "The pages in dark mode, the log, the contents and the keys are in this menu.",
+    demo: `<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon("dark", 11)}Dark PDF<b>\u2713</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`
+  },
+  {
+    id: "contents",
+    at: "#b-side",
+    title: "Contents",
+    fresh: true,
+    text: "The document's sections beside the pages: click one to go there. This button (or t) shows or hides them.",
+    demo: `<div class="demo toc" aria-hidden="true"><div class="col"><span>1 Introduction</span><span>2 Method</span><span>3 Results</span><i class="at"></i></div><div class="pg"><div class="roll">${lines(45, 95, 90, 70)}<s></s>${lines(40, 92, 85, 60)}<s></s>${lines(42, 90, 94, 75)}</div></div></div>`
+  }
 ];
 var Panel = class {
   root;
@@ -2817,7 +2942,7 @@ var Panel = class {
       seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
     } catch {
     }
-    const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare));
+    const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents));
     this.tipList = all ? offered : offered.filter((t) => !seen.includes(t.id));
     this.tip(0);
   }
@@ -2836,7 +2961,7 @@ var Panel = class {
     let target = this.$(t.at);
     if (!target || !target.offsetParent) target = this.$("#b-more");
     target.classList.add("ringed");
-    el.innerHTML = `<h4>${t.fresh ? '<span class="new">New</span>' : ""}${esc3(t.title)}</h4><p>${esc3(t.text)}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`;
+    el.innerHTML = `<h4>${t.fresh ? '<span class="new">New</span>' : ""}${esc3(t.title)}</h4>${t.demo}<p>${esc3(t.text)}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`;
     el.hidden = false;
     const bar2 = this.$(".bar").getBoundingClientRect(), r = target.getBoundingClientRect(), w = el.offsetWidth;
     const cx = r.left + r.width / 2 - bar2.left, left = Math.max(8, Math.min(bar2.width - w - 8, cx - w / 2));
@@ -3245,13 +3370,13 @@ function boxes(gs, all) {
     const n = all[i + 1];
     next.set(all[i], n && Math.abs(n.y - all[i].y) < 0.5 && n.x > all[i].x && n.x - all[i].x < 15 ? n.x - all[i].x : 5);
   }
-  const lines = /* @__PURE__ */ new Map();
+  const lines2 = /* @__PURE__ */ new Map();
   for (const g of gs) {
     const k = Math.round(g.y * 2) / 2;
-    const r = lines.get(k), e = g.x + (next.get(g) ?? 5);
-    lines.set(k, r ? [Math.min(r[0], g.x), Math.max(r[1], e)] : [g.x, e]);
+    const r = lines2.get(k), e = g.x + (next.get(g) ?? 5);
+    lines2.set(k, r ? [Math.min(r[0], g.x), Math.max(r[1], e)] : [g.x, e]);
   }
-  return [...lines].map(([y, [a, b]]) => [a - 1, y - 8, b - a + 2, 11]);
+  return [...lines2].map(([y, [a, b]]) => [a - 1, y - 8, b - a + 2, 11]);
 }
 function lineAt(hits, at) {
   let best = null;
@@ -4658,11 +4783,11 @@ function search(pages2, q, max = 1e3) {
   if (!needle) return [];
   const out = [];
   for (let k = 0; k < pages2.length && out.length < max; k++) {
-    const lines = pages2[k];
+    const lines2 = pages2[k];
     let hay = "";
     const at = [];
     const col = [];
-    lines.forEach((l, i) => {
+    lines2.forEach((l, i) => {
       if (i) hay += " ", at.push(-1), col.push(-1);
       for (let j = 0; j < l.text.length; j++) hay += fold(l.text[j]), at.push(i), col.push(j);
     });
@@ -4671,13 +4796,13 @@ function search(pages2, q, max = 1e3) {
       let cur = -1, x = 0, r = 0;
       const flush = () => {
         if (cur < 0) return;
-        const l = lines[cur];
+        const l = lines2[cur];
         boxes2.push([x, l.y - l.size * 0.78, r - x, l.size * 1.02]);
       };
       for (let u = from2; u < from2 + needle.length; u++) {
         const i = at[u];
         if (i < 0) continue;
-        const l = lines[i], xl = l.xs?.[col[u]] ?? l.x, xr = l.rs?.[col[u]] ?? l.x + l.w;
+        const l = lines2[i], xl = l.xs?.[col[u]] ?? l.x, xr = l.rs?.[col[u]] ?? l.x + l.w;
         if (i !== cur) flush(), cur = i, x = xl, r = xr;
         else x = Math.min(x, xl), r = Math.max(r, xr);
       }
@@ -4775,12 +4900,12 @@ var Strips = class {
   }
 };
 var SVG = "http://www.w3.org/2000/svg";
-function textLayer(lines, w, h) {
+function textLayer(lines2, w, h) {
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("class", "phx-text");
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg.setAttribute("preserveAspectRatio", "none");
-  for (const l of lines) {
+  for (const l of lines2) {
     const t = document.createElementNS(SVG, "text");
     t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
     t.setAttribute("y", String(l.y));
@@ -5065,7 +5190,7 @@ var Commits = class {
     const ti = this.to ? this.find(this.to) : -1;
     const tree = this.from !== null && !this.to;
     const top = `<div class="row${tree ? " to" : ""}" title="Shift-click: diff the working tree"><svg width="${W}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? '<span class="end">TO</span>' : ""}<i>the working tree</i></span></div>`;
-    const lines = this.commits.map((c, i) => {
+    const lines2 = this.commits.map((c, i) => {
       const r = rows[i];
       const col = COLORS[r.lane % COLORS.length];
       const svg = r.down.map(([a, b]) => `<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
@@ -5080,7 +5205,7 @@ click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
       return `<div class="row${cls}" data-i="${i}" title="${esc4(title)}"><svg width="${W}" height="${ROW}">${svg.join("")}</svg><span class="txt">${end}<span class="sha">${esc4(c.short)}</span>${pills}${c.parents.length > 1 ? "<i>merge:</i> " : ""}${esc4(c.subject)}<span class="who">${esc4(c.author)}, ${ago(c.time)}</span></span></div>`;
     });
     const more = this.more ? `<div class="note"><button type="button" data-more>${this.loading ? "reading\u2026" : "more\u2026"}</button></div>` : "";
-    return top + lines.join("") + more;
+    return top + lines2.join("") + more;
   }
 };
 
@@ -5191,7 +5316,7 @@ var Pages = class {
   /** Where `q` is in the build's pages (their text as the watch reads it). */
   async find(q) {
     this.texts ??= this.sock.request({ op: "text" }).then(
-      (r) => r.ok ? (r.json?.pages ?? []).map((lines) => lines.map(composeLine)) : []
+      (r) => r.ok ? (r.json?.pages ?? []).map((lines2) => lines2.map(composeLine)) : []
     );
     return search(await this.texts, q);
   }
