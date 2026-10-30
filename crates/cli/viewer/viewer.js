@@ -533,173 +533,328 @@ var Viewer = class {
 };
 
 // viewer/src/print.ts
-var TOKENS = `
-  --paper: #f1f1ef; --paper-2: #e6e6e3; --sheet: #ffffff;
-  --ink: #141414; --ink-2: #4a4a48; --ink-3: #8a8a86;
-  --rule: #c9c9c5; --rule-2: #dededa;
-  --mark: #d71920; --caution: #8a5a00;
-  --sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --serif: "Latin Modern Roman", "CMU Serif", "Computer Modern", Georgia, serif;
+var OVERLEAF = `
+  --ph-bar: var(--toolbar-alt-bg-color, #2f3a4c); --ph-fg: var(--content-primary-dark, #f4f5f6); --ph-fg2: var(--neutral-40, #afb5c0);
+  --ph-border: var(--neutral-70, #495365); --ph-hover: var(--toolbar-btn-hover-bg-color, #495365);
+  --ph-stage: var(--pane, var(--pdf-bg, #2f3a4c)); --ph-menu: var(--bg-dark-primary, #1b222c);
+  --ph-accent: var(--bg-accent-01, #098842); --ph-accent-hover: var(--bg-accent-02, #1e6b41); --ph-accent-fg: #fff;
+  --ph-danger: var(--content-danger-dark, #e36d66); --ph-warning: var(--content-warning-dark, #de8014); --ph-info: var(--content-info-dark, #97b6e5);
+  --ph-link: var(--link-ui-dark, #97b6e5); --ph-progress: var(--bg-accent-01, #098842);
+  --ph-radius: var(--border-radius-base, 4px); --ph-pill: var(--border-radius-full, 9999px);
+  --ph-font: var(--font-sans, "Noto Sans", system-ui, sans-serif); --ph-size: 13px; --ph-bar-h: 32px;
 `;
-var TOKENS_DARK = `
-  --paper: #121212; --paper-2: #1c1c1c; --sheet: #ffffff;
-  --ink: #e8e8e4; --ink-2: #a9a9a4; --ink-3: #6e6e6a;
-  --rule: #3a3a38; --rule-2: #2a2a28;
-  --mark: #ff4a3d; --caution: #d9a441;
+var OVERLEAF_LIGHT = `
+  --ph-bar: var(--toolbar-alt-bg-color, #fff); --ph-fg: var(--content-primary, #1b222c); --ph-fg2: var(--content-secondary, #495365);
+  --ph-border: var(--border-divider, #e7e9ee); --ph-hover: var(--toolbar-btn-hover-bg-color, #f4f5f6);
+  --ph-stage: var(--pane, var(--pdf-bg, #f4f5f6)); --ph-menu: var(--bg-light-primary, #fff);
+  --ph-danger: var(--content-danger, #b83a33); --ph-warning: var(--content-warning, #8f5514); --ph-info: var(--content-info, #366cbf);
+  --ph-link: var(--link-ui, #366cbf);
 `;
-var CROP = `
-.slot::after { content: ""; position: absolute; inset: -14px; pointer-events: none;
-  --c: var(--ink-3, #8a8a86);
-  background:
-    linear-gradient(var(--c), var(--c)) left 14px top 0 / 1px 10px,
-    linear-gradient(var(--c), var(--c)) left 0 top 14px / 10px 1px,
-    linear-gradient(var(--c), var(--c)) right 14px top 0 / 1px 10px,
-    linear-gradient(var(--c), var(--c)) right 0 top 14px / 10px 1px,
-    linear-gradient(var(--c), var(--c)) left 14px bottom 0 / 1px 10px,
-    linear-gradient(var(--c), var(--c)) left 0 bottom 14px / 10px 1px,
-    linear-gradient(var(--c), var(--c)) right 14px bottom 0 / 1px 10px,
-    linear-gradient(var(--c), var(--c)) right 0 bottom 14px / 10px 1px;
-  background-repeat: no-repeat; }
+var VSCODE = `
+  --ph-bar: var(--vscode-editorGroupHeader-tabsBackground, #181818); --ph-fg: var(--vscode-foreground, #cccccc);
+  --ph-fg2: var(--vscode-descriptionForeground, #9d9d9d); --ph-border: var(--vscode-panel-border, #2b2b2b);
+  --ph-hover: var(--vscode-toolbar-hoverBackground, rgb(90 93 94 / 31%)); --ph-stage: var(--vscode-editor-background, #1f1f1f);
+  --ph-menu: var(--vscode-menu-background, #1f1f1f); --ph-accent: var(--vscode-button-background, #0078d4);
+  --ph-accent-hover: var(--vscode-button-hoverBackground, #026ec1); --ph-accent-fg: var(--vscode-button-foreground, #fff);
+  --ph-danger: var(--vscode-errorForeground, #f85149); --ph-warning: var(--vscode-editorWarning-foreground, #cca700);
+  --ph-info: var(--vscode-editorInfo-foreground, #3794ff); --ph-link: var(--vscode-textLink-foreground, #4daafc);
+  --ph-progress: var(--vscode-progressBar-background, #0078d4);
+  --ph-radius: 2px; --ph-pill: 2px; --ph-font: var(--vscode-font-family, system-ui, sans-serif); --ph-size: var(--vscode-font-size, 13px); --ph-bar-h: 35px;
 `;
-var PAGE_CSS = CROP;
+var WATCH = `
+  --ph-bar: #ffffff; --ph-fg: #1b222c; --ph-fg2: #5d6778; --ph-border: #e3e6ec; --ph-hover: #eef1f6; --ph-stage: #eceef2;
+  --ph-menu: #ffffff; --ph-accent: #1d3e72; --ph-accent-hover: #16325d; --ph-accent-fg: #fff;
+  --ph-danger: #c23a2f; --ph-warning: #a3620a; --ph-info: #1d3e72; --ph-link: #1d3e72; --ph-progress: #f58f2d;
+  --ph-radius: 6px; --ph-pill: 9999px; --ph-font: "Noto Sans", system-ui, sans-serif; --ph-size: 13px; --ph-bar-h: 40px;
+`;
+var WATCH_DARK = `
+  --ph-bar: #161b23; --ph-fg: #e7e9ee; --ph-fg2: #98a1b0; --ph-border: #262d38; --ph-hover: #222935; --ph-stage: #0f1319;
+  --ph-menu: #1b212b; --ph-accent: #2c5aa0; --ph-accent-hover: #3567b3; --ph-danger: #f0786d; --ph-warning: #e5a54b;
+  --ph-info: #8fb3ec; --ph-link: #8fb3ec;
+`;
+var DARK_PAGE = "#2c2e33";
+var DARK_PDF_FILTER = "invert(1) hue-rotate(180deg) contrast(.7) brightness(1.04)";
+var PAGE_CSS = "";
 var PRINT_CSS = `
-.win { ${TOKENS} }
-@media (prefers-color-scheme: dark) { .win:not(.light) { ${TOKENS_DARK} color-scheme: dark; } }
-.win.dark { ${TOKENS_DARK} color-scheme: dark; }
-.pkgs .icon { color: var(--ink-2); }
+:host { all: initial; }
+* { box-sizing: border-box; }
+.win { ${OVERLEAF} }
+.win.light { ${OVERLEAF_LIGHT} }
+.win.vscode { ${VSCODE} }
+.win.watch { ${WATCH} }
+@media (prefers-color-scheme: dark) { .win.watch:not(.light) { ${WATCH_DARK} color-scheme: dark; } }
+.win.watch.dark { ${WATCH_DARK} color-scheme: dark; }
 
-.win, .win.docked { background: var(--paper); color: var(--ink); border: 1px solid var(--rule); border-radius: 0; box-shadow: none;
-  font: 12px/1.45 var(--sans); font-variant-numeric: tabular-nums; }
-.win.docked { border: 0; }
-.win *:focus-visible { outline: 1px solid var(--mark); outline-offset: 1px; }
+.win { position: fixed; z-index: 2147483000; display: flex; flex-direction: column; container-type: inline-size;
+  min-width: 300px; min-height: 180px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); resize: both; overflow: hidden;
+  background: var(--ph-stage); color: var(--ph-fg); font: var(--ph-size)/1.4 var(--ph-font);
+  border: 1px solid var(--ph-border); border-radius: calc(var(--ph-radius) * 2); box-shadow: 0 8px 28px rgb(0 0 0 / 30%); }
+.win button { font: inherit; color: inherit; }
+.win :focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+.icon { display: block; flex: none; }
+.grow { flex: 1; min-width: 4px; }
+[hidden] { display: none !important; }
 
-/* header: one thin bar, ink on paper, a hairline under it */
-header, .win.docked header { height: 30px; padding: 0 6px 0 10px; gap: 6px; background: var(--paper); color: var(--ink);
-  border-bottom: 1px solid var(--rule); }
-.title { font: 600 11px var(--sans); letter-spacing: .08em; text-transform: uppercase; margin: 0 8px 0 0; }
-.badge, .win.docked .badge { background: none; color: var(--ink-3); border-radius: 0; padding: 0; font: 400 11px var(--sans); font-variant: small-caps; letter-spacing: .04em; }
-header > .icon:first-child { display: none; }
-.chip, .win.docked .chip { background: none; border-radius: 0; padding: 0 6px; height: 30px; gap: 6px; font: 11px var(--mono); color: var(--ink-2);
-  border-left: 1px solid var(--rule-2); border-right: 1px solid var(--rule-2); }
-.dot { width: 6px; height: 6px; border-radius: 0; background: var(--ink-3); }
-.chip.ok .dot { background: var(--ink); } .chip.warning .dot { background: var(--caution); } .chip.error .dot { background: var(--mark); }
-.chip.busy .dot { animation: phx-blink .8s steps(2) infinite; }
-@keyframes phx-blink { 50% { opacity: 0; } }
-button.ib { border-radius: 0; width: 26px; height: 26px; color: var(--ink-2); }
-header button.ib:hover, .bar button.ib:hover, .win.docked header button.ib:hover { background: var(--paper-2); color: var(--ink); }
-button.ib[aria-pressed=true], .win.docked header button.ib[aria-pressed=true] { background: none; color: var(--mark); }
-button.ib.txt { width: auto; padding: 0 8px; font: 10px var(--sans); letter-spacing: .1em; text-transform: uppercase; }
-.win.no-footer > footer, .win.docked.own-header.no-footer > footer { display: none; }
-.find { display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; }
-.find[hidden] { display: none; }
-.find input { width: 180px; height: 20px; padding: 0 6px; font: 11px var(--mono); color: var(--ink); background: var(--sheet); border: 1px solid var(--ink);
-  border-radius: 0; outline: none; }
-.find input::placeholder { color: var(--ink-3); font-family: var(--sans); letter-spacing: .04em; }
-#findn { font: 11px var(--mono); color: var(--ink-2); min-width: 52px; }
-#findn.none { color: var(--mark); }
-.slot .mark.fnd { background: rgb(255 214 0 / 40%); outline: 0; transition: none; }
-.slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); outline: 1px solid #141414; }
-.speedchip:empty { display: none !important; }
-.pno { font: 11px var(--mono); color: var(--ink-2); min-width: 48px; }
-.bar { background: var(--paper); color: var(--ink-2); border-bottom: 1px solid var(--rule); padding: 4px 10px; }
-.bar label { font: 11px var(--sans); font-variant: small-caps; letter-spacing: .04em; }
-select { font: 11px var(--mono); color: var(--ink); background: var(--paper); border: 1px solid var(--rule); border-radius: 0; padding: 1px 4px; }
-button.btn { color: var(--ink); background: none; border: 1px solid var(--ink); border-radius: 0; padding: 2px 10px 2px 6px; font: 600 11px var(--sans);
-  letter-spacing: .04em; text-transform: uppercase; }
-button.btn:hover { background: var(--ink); color: var(--paper); }
+/* the floating window's handle (docked: none) */
+header { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 4px 0 12px; flex: none; cursor: grab; user-select: none;
+  background: var(--ph-bar); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); font-weight: 600; }
+header:active { cursor: grabbing; }
+.win.docked > header { display: none; }
 
-/* the problems' line and list: rules, not cards */
-.errs, .win.docked .errs { background: var(--paper); border: 1px solid var(--ink); border-radius: 0; box-shadow: 0 2px 0 var(--rule); }
-.sum, .win.docked .sum, .win.docked.light .sum { background: var(--paper); color: var(--ink-2); min-height: 26px; font: 11px var(--sans); }
-.win.diags-open .sum { border-bottom: 1px solid var(--rule); }
-.sum:hover, .win.docked .sum:hover, .win.docked.light .sum:hover { background: var(--paper-2); }
-.sum .first, .win.docked .sum .first, .win.docked.light .sum .first { color: var(--ink); }
-.sum .n.error, .win.docked .sum .n.error, .win.docked.light .sum .n.error { color: var(--mark); }
-.sum .n.warning, .win.docked .sum .n.warning, .win.docked.light .sum .n.warning { color: var(--caution); }
-.sum .n.info, .win.docked .sum .n.info, .win.docked.light .sum .n.info { color: var(--ink-2); }
-.diags { background: var(--paper); box-shadow: none; }
-.diag { border-top: 1px solid var(--rule-2); font: 12px var(--sans); }
-.diag[data-line]:hover { background: var(--paper-2); }
-.diag.error .icon { color: var(--mark); } .diag.warning .icon { color: var(--caution); } .diag.info .icon { color: var(--ink-3); }
-.diag .where { font: 11px var(--mono); color: var(--ink-3); }
-.diag .detail, .folded .detail { font: 11px/1.4 var(--mono); background: none; border-left: 1px solid var(--rule); border-radius: 0; padding: 2px 8px; }
+/* the bar: Rebuild and the status on the left; find, compare, download, the page, zoom, problems, the menu on the right */
+.bar { position: relative; flex: none; height: var(--ph-bar-h); display: flex; align-items: center; gap: 4px; padding: 0 6px;
+  background: var(--ph-bar); border-bottom: 1px solid var(--ph-border); color: var(--ph-fg); }
+.win.docked:not(.own-header) > .bar { display: none; }
+.ib { all: unset; box-sizing: border-box; height: 26px; min-width: 26px; padding: 0 5px; display: inline-flex; align-items: center; justify-content: center;
+  gap: 4px; border-radius: var(--ph-radius); cursor: pointer; color: var(--ph-fg2); white-space: nowrap; }
+.ib:hover, .ib[aria-expanded="true"] { background: var(--ph-hover); color: var(--ph-fg); }
+.ib:disabled { opacity: .4; cursor: default; }
+.ib:focus-visible { outline: 2px solid var(--ph-link); }
+.split { display: inline-flex; height: 24px; flex: none; border-radius: var(--ph-pill); overflow: hidden; background: var(--ph-accent); color: var(--ph-accent-fg); }
+.split button { all: unset; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; font-weight: 600; }
+.split button:hover, .split button[aria-expanded="true"] { background: var(--ph-accent-hover); }
+.split button:focus-visible { outline: 2px solid var(--ph-fg); outline-offset: -2px; }
+.split .go { padding: 0 10px 0 8px; }
+.split .more { padding: 0 4px; border-left: 1px solid rgb(255 255 255 / 25%); }
+.split.busy .go .icon { animation: phx-spin 1s linear infinite; }
+@keyframes phx-spin { to { transform: rotate(360deg); } }
+.status { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 6px; min-width: 0;
+  border-radius: var(--ph-radius); color: var(--ph-fg2); cursor: pointer; white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }
+.status:hover, .status[aria-expanded="true"] { background: var(--ph-hover); color: var(--ph-fg); }
+.status b { font-weight: 400; color: var(--ph-fg); overflow: hidden; text-overflow: ellipsis; }
+.status.err b { color: var(--ph-danger); }
+.pageno { display: inline-flex; align-items: center; gap: 4px; color: var(--ph-fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pageno input { width: 2.8em; height: 22px; padding: 0; text-align: center; font: inherit; color: var(--ph-fg); background: transparent;
+  border: 1px solid var(--ph-border); border-radius: var(--ph-radius); }
+.zoomb { padding: 0 2px 0 8px; }
+.probs { font-weight: 600; font-variant-numeric: tabular-nums; }
+.probs.error { color: var(--ph-danger); } .probs.warning { color: var(--ph-warning); }
+.progress { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.progress.on { opacity: 1; }
+.progress::after { content: ""; position: absolute; top: 0; bottom: 0; width: 30%; background: var(--ph-progress); animation: phx-carriage 1.2s ease-in-out infinite; }
+@keyframes phx-carriage { from { left: -30%; } to { left: 100%; } }
+.find { display: inline-flex; align-items: center; gap: 6px; }
+.find input { width: 170px; height: 24px; padding: 0 8px; font: inherit; color: var(--ph-fg); background: var(--ph-menu);
+  border: 1px solid var(--ph-border); border-radius: var(--ph-radius); outline: none; }
+.find input:focus { border-color: var(--ph-link); }
+#findn { color: var(--ph-fg2); min-width: 48px; font-variant-numeric: tabular-nums; }
+#findn.none { color: var(--ph-danger); }
+@container (max-width: 560px) {
+  .wide { display: none !important; }
+  .find input { width: 110px; }
+}
+@container (min-width: 561px) { .narrow { display: none !important; } }
 
-/* the stage: pages on paper, crop marks for a frame, no shadows */
-.stage, .win.docked .stage { background: var(--paper-2); padding: 24px; }
-.slot, .stage .slot, .win.docked .slot, .win.docked .stage .slot { margin: 28px auto; background: var(--sheet); box-shadow: none; border-radius: 0; }
-.win.docked.pdf-dark .slot { box-shadow: none; }
-.stage.stale .slot { opacity: .5; filter: grayscale(1); }
-.banner, .approx { background: var(--paper); color: var(--caution); border-bottom: 1px solid var(--rule); font: 11px var(--sans); }
-.slot .mark { border-radius: 0; background: rgb(255 214 0 / 45%); box-shadow: none; outline: 1px solid rgb(180 140 0 / 70%); animation: none; }
+/* menus and popovers: plain lists in the host's menu colour */
+.menu { position: absolute; z-index: 20; min-width: 230px; max-width: calc(100% - 12px); padding: 4px 0; text-align: left;
+  background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 4px 16px rgb(0 0 0 / 22%); }
+.menu > button, .menu .mi { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 14px; cursor: pointer; }
+.menu > button:hover, .menu > button:focus-visible { background: var(--ph-hover); }
+.menu .mi { cursor: default; }
+.menu .sub { margin-left: auto; padding-left: 12px; color: var(--ph-fg2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.menu .desc { display: block; color: var(--ph-fg2); font-size: 12px; }
+.menu hr { border: 0; border-top: 1px solid var(--ph-border); margin: 4px 0; }
+.menu .check { width: 18px; flex: none; display: inline-flex; justify-content: center; color: var(--ph-link); }
+.radios { display: flex; gap: 4px; padding: 2px 14px 6px 42px; }
+.radios button { all: unset; padding: 2px 10px; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); font-size: 12px; cursor: pointer; }
+.radios button[aria-pressed="true"] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg); }
+.timing { width: 380px; padding: 10px 14px 12px; font-variant-numeric: tabular-nums; }
+.timing h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.timing table { width: 100%; border-collapse: collapse; }
+.timing td { padding: 3px 0; vertical-align: top; }
+.timing td:first-child { color: var(--ph-fg2); padding-right: 12px; }
+.timing td:last-child { text-align: right; }
+.timing .foot { margin-top: 8px; color: var(--ph-fg2); font-size: 12px; overflow-wrap: anywhere; }
+.timing .foot.err { color: var(--ph-danger); }
 
-/* the loading card: a blank proof with crop marks, its steps in small caps, a rule filling */
-.empty, .win.docked .empty, .win.docked.light .empty { color: var(--ink-2); padding: 48px 12px; font: 12px var(--sans); }
-.load, .win.docked .load, .win.docked.light .load, .win:not(.docked) .load { max-width: 340px; color: var(--ink-2); position: relative; padding: 22px 24px;
-  background: var(--sheet); color: #4a4a48; }
-.load::after { content: ""; position: absolute; inset: -14px; pointer-events: none; --c: var(--ink-3);
-  background:
-    linear-gradient(var(--c), var(--c)) left 14px top 0 / 1px 10px, linear-gradient(var(--c), var(--c)) left 0 top 14px / 10px 1px,
-    linear-gradient(var(--c), var(--c)) right 14px top 0 / 1px 10px, linear-gradient(var(--c), var(--c)) right 0 top 14px / 10px 1px,
-    linear-gradient(var(--c), var(--c)) left 14px bottom 0 / 1px 10px, linear-gradient(var(--c), var(--c)) left 0 bottom 14px / 10px 1px,
-    linear-gradient(var(--c), var(--c)) right 14px bottom 0 / 1px 10px, linear-gradient(var(--c), var(--c)) right 0 bottom 14px / 10px 1px;
-  background-repeat: no-repeat; }
-.load h3 { font: 400 17px/1.3 var(--serif); color: #141414; margin: 0 0 14px; }
-.load .steps { gap: 0; margin: 0 0 16px; font: 10px var(--sans); letter-spacing: .1em; text-transform: uppercase; color: #8a8a86; }
-.load .steps span { opacity: 1; gap: 0; }
-.load .steps span::before { display: none; }
-.load .steps span.ok { color: #4a4a48; }
-.load .steps span.now { color: #d71920; font-weight: 600; }
-.load .steps i { flex: 1; min-width: 12px; margin: 0 8px; height: 1px; background: #c9c9c5; opacity: 1; }
-.load .bar, .load .bar.busy { height: 1px; border-radius: 0; background: #dededa; }
-.load .bar i { background: #141414; border-radius: 0; transition: width .15s linear; }
-.load .bar:not(.busy) i { background-image: none; animation: none; }
-.load .bar.busy i { width: 20% !important; animation: phx-carriage 1.4s linear infinite; }
-@keyframes phx-carriage { from { transform: translateX(-100%); } to { transform: translateX(500%); } }
-.load .alive { font: 11px var(--mono); color: #4a4a48; margin-top: 10px; }
-.load .alive::before { display: none; }
-.load .count { font: 11px var(--mono); }
-.load .names span { border-radius: 0; background: none; border: 1px solid #dededa; font: 10px var(--mono); color: #4a4a48; }
-.load .names span.ok { color: #141414; }
-.load .names span.ing { animation: none; border-color: #d71920; }
-.load .note { font: 11px var(--sans); color: #8a8a86; }
-.load .btns .btn, .report .btn, .diags .reportbtn { border-radius: 0; border: 1px solid currentColor; font: 600 11px var(--sans); text-transform: uppercase; letter-spacing: .04em; }
+/* problems: Overleaf's log entries, in a popover under the bar */
+.logs { right: 6px; top: 4px; width: min(460px, calc(100% - 12px)); max-height: calc(100% - 8px); overflow: auto; padding: 0; }
+.logs > header { all: unset; display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 14px; position: sticky; top: 0; z-index: 1;
+  background: var(--ph-menu); border-bottom: 1px solid var(--ph-border); font-weight: 600; }
+.diag { display: block; padding: 9px 14px 10px; border-left: 3px solid var(--sev, var(--ph-fg2)); border-bottom: 1px solid var(--ph-border); }
+.diag[data-line] { cursor: pointer; } .diag[data-line]:hover { background: var(--ph-hover); }
+.diag.error { --sev: var(--ph-danger); } .diag.warning { --sev: var(--ph-warning); } .diag.info { --sev: var(--ph-info); }
+.diag .where { float: right; margin-left: 10px; color: var(--ph-link); font-size: 12px; }
+.diag .text { font-weight: 600; overflow-wrap: anywhere; }
+.diag .detail, .folded .detail { margin: 6px 0 0; padding: 0; font: 12px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; color: var(--ph-fg2);
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em; overflow: auto; font-weight: 400; }
+.folded { margin-top: 6px; font-size: 12px; font-weight: 400; }
+.folded summary { cursor: pointer; color: var(--ph-fg2); }
+.diags .phx-inline { margin: 0; padding: 0; list-style: none; }
+.reportbtn { all: unset; margin: 8px 14px; color: var(--ph-link); cursor: pointer; }
+.reportbtn:hover { text-decoration: underline; }
 
-/* overlays: flat sheets with a rule, no blur, no shadow */
-.pkgs, .warmup, .diffbar, .diffset, .keyhelp, .about, .report, .win.docked.sheet-open > .bar {
-  border-radius: 0 !important; box-shadow: none !important; backdrop-filter: none !important;
-  background: var(--paper) !important; color: var(--ink) !important; border: 1px solid var(--ink) !important; font-family: var(--sans); }
-.pkgs { border-left: 2px solid var(--mark) !important; }
-.pkgs .mini, .pkgs .mini i { border-radius: 0; height: 1px; } .pkgs .mini i { background: var(--ink); }
-.warmup .dot, .diffbar .busy::before { border-radius: 0; width: 6px; height: 6px; background: var(--mark); animation: phx-blink .8s steps(2) infinite; }
-.warmup.ready { background: var(--paper) !important; color: var(--ink) !important; }
-.warmup .slow { color: var(--caution); }
-.diffbar button, .diffset button { border-radius: 0; color: var(--ink); }
-.diffbar button:hover:not(:disabled), .diffset button:hover { background: var(--paper-2); }
-.diffbar button.cur, .diffset button[aria-pressed=true] { background: var(--ink); color: var(--paper); }
-.diffbar .sep { background: var(--rule); }
-.diffset h4 { color: var(--ink-3); }
-.diffset .sample { border-radius: 0; font-family: var(--serif); }
-.diffset .pair i { border-radius: 0; }
-.keyhelp kbd { font: 11px var(--mono); background: none; border: 1px solid var(--rule); border-radius: 0; }
-.about a { color: var(--mark); }
-.about .about-foot { color: var(--ink-3); }
+/* the diff against a version: a strip under the bar */
+.diffbar { display: none; flex: none; align-items: center; gap: 4px; padding: 3px 6px 3px 12px; flex-wrap: wrap;
+  background: var(--ph-bar); border-bottom: 1px solid var(--ph-border); font-variant-numeric: tabular-nums; }
+.diffbar.on { display: flex; }
+.diffbar .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diffbar .what small { color: var(--ph-fg2); font-size: inherit; }
+.diffbar .n { white-space: nowrap; padding: 0 4px; color: var(--ph-fg2); }
+.diffbar .busy::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--ph-progress);
+  animation: phx-pulse .6s ease-in-out infinite alternate; }
+@keyframes phx-pulse { from { opacity: .4; } }
+.diffbar button { all: unset; cursor: pointer; padding: 2px 8px; border-radius: var(--ph-radius); color: var(--ph-fg2); white-space: nowrap; }
+.diffbar button:hover:not(:disabled) { background: var(--ph-hover); color: var(--ph-fg); }
+.diffbar button:disabled { opacity: .4; cursor: default; }
+.diffbar button.cur { background: var(--ph-hover); color: var(--ph-fg); }
+.diffbar .sep { width: 1px; align-self: stretch; margin: 2px; background: var(--ph-border); }
+.diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; padding: 12px; font-size: 12px; }
+.diffset.on { display: block; }
+.diffset h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ph-fg2); }
+.diffset h4:not(:first-child) { margin-top: 12px; }
+.diffset .opts { display: flex; flex-wrap: wrap; gap: 4px; }
+.diffset button { all: unset; cursor: pointer; padding: 3px 9px; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); }
+.diffset button:hover { background: var(--ph-hover); }
+.diffset button[aria-pressed=true] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg); }
+.diffset .pair { display: inline-flex; align-items: center; gap: 6px; }
+.diffset .pair i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; }
+.diffset .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+.diffset input[type=color] { width: 30px; height: 22px; padding: 0; border: 0; background: none; cursor: pointer; }
+.diffset .sample { margin-top: 10px; padding: 6px 8px; border-radius: var(--ph-radius); background: #fff; color: #1b222c; font: 13px/1.4 Georgia, serif; }
+.diffset .foot { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; color: var(--ph-fg2); }
 
-/* the time to the screen and who made this: set like a folio, not pills */
-.speedchip, .win.docked .speedchip { height: auto; padding: 2px 6px; border-radius: 0; background: var(--paper); color: var(--ink);
-  border: 1px solid var(--rule); box-shadow: none; font: 11px var(--mono); }
-.speedchip.slow { color: var(--caution); background: var(--paper); }
-.speedchip.flash { animation: phx-tick .4s linear; }
-@keyframes phx-tick { from { border-color: var(--mark); } }
-.win.docked .byline, .win.docked.light .byline { border-radius: 0; background: var(--paper); color: var(--ink-3); backdrop-filter: none;
-  font: 10px/20px var(--sans); height: 20px; letter-spacing: .1em; text-transform: uppercase; border: 1px solid var(--rule-2); }
-.win.docked .byline:hover { color: var(--ink); background: var(--paper); }
+/* the pages */
+.body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.win.has-side .body { flex-direction: row; }
+.side { display: none; flex: none; width: 240px; overflow: auto; background: var(--ph-bar); border-right: 1px solid var(--ph-border); color: var(--ph-fg); }
+.win.side-on .side { display: block; }
+@container (max-width: 560px) { .win.side-on .side { position: absolute; inset: 0 auto 0 0; z-index: 5; box-shadow: 4px 0 16px rgb(0 0 0 / 20%); } }
+.stage { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--ph-stage); text-align: center; overscroll-behavior: contain; will-change: scroll-position; }
+.win.docked .stage { overflow-y: scroll; }
+.win.docked .viewer { min-height: 100%; }
+.stage.fit { overflow-x: hidden; }
+.slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+.slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
+.win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
+.win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
+.phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
+.phx-page canvas { display: block; width: 100%; height: 100%; }
+.phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
+.phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
+.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: rgb(0 100 255 / 25%); }
+.stage.stale .slot { opacity: .45; filter: grayscale(1); }
+.stage.offline .slot { opacity: .4; pointer-events: none; }
+.slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: rgb(255 214 0 / 45%); mix-blend-mode: multiply;
+  box-shadow: 0 0 0 1px rgb(232 172 0 / 80%); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
+.slot .mark.fade { opacity: 0; transition: opacity 1.2s; }
+.slot .mark.sel { transition: none; }
+.slot .mark.fnd { background: rgb(255 214 0 / 40%); box-shadow: none; transition: none; }
+.slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); box-shadow: 0 0 0 1px rgb(150 100 0 / 90%); }
+.slot .peer { position: absolute; pointer-events: none; border-radius: 2px; background: hsl(var(--hue) 70% 50% / 22%); box-shadow: inset 0 -1.5px 0 hsl(var(--hue) 70% 45%); }
+.slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 5px; border-radius: 3px 3px 3px 0; background: hsl(var(--hue) 70% 42%);
+  box-shadow: none; color: #fff; font: 600 11px/16px var(--ph-font); white-space: nowrap; z-index: 2; }
 
-footer { background: var(--paper); color: var(--ink-3); border-top: 1px solid var(--rule); font: 11px var(--mono); height: 22px; }
-footer .msg.err { color: var(--mark); }
-.details { font: 11px var(--mono); color: var(--ink-2); border-top: 1px solid var(--rule); }
-.side { background: var(--paper); color: var(--ink); border-right: 1px solid var(--rule); }
-.win.collapsed, .win.collapsed header { border-radius: 0; }
+/* strips over the pages: plain, in the host's colours */
+.strip { position: sticky; top: 0; z-index: 2; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
+  background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
+.stage.stale .banner, .approx.on { display: block; }
+.gone { --sev: var(--ph-danger); font-weight: 600; }
+.stage.offline .gone { display: flex; align-items: baseline; gap: 8px; }
+.gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; padding: 0 2px; }
+.offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 1px 8px; border-radius: var(--ph-pill); font-size: 12px;
+  background: var(--ph-menu); color: var(--ph-danger); border: 1px solid var(--ph-border); pointer-events: none; }
+.win.offline-quiet .offpill { display: block; }
+
+/* before any page: the first page's sheet, the opening playing on it, the step under it */
+.opening { position: absolute; z-index: 3; pointer-events: none; left: 0; top: 0; width: 0; height: 0;
+  transition: left .3s ease, top .3s ease, width .3s ease, height .3s ease; }
+.opening .sheet { position: absolute; inset: 0; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+.opening.in .sheet { background: none; box-shadow: none; }
+.win.dark-pdf .opening .sheet, .win.docked.pdf-dark .opening .sheet { background: ${DARK_PAGE}; }
+.win.dark-pdf .opening.in .sheet, .win.docked.pdf-dark .opening.in .sheet { background: none; }
+.opening .phx-open { position: absolute; inset: 0; width: 100%; height: 100%; }
+.steps { position: absolute; left: 10%; right: 10%; bottom: 13%; text-align: center; color: #5d6778; font: 400 13px/1.4 var(--ph-font);
+  font-variant-numeric: tabular-nums; transition: opacity .3s; }
+.steps .what { color: #1b222c; }
+.steps .detail { min-height: 1.4em; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.steps .track { position: relative; height: 3px; width: min(100%, 280px); margin: 8px auto; border-radius: 2px; overflow: hidden; background: #e7e9ee; }
+.steps .track i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: #f58f2d; transition: width .3s; }
+.steps .track.unknown i { width: 30% !important; animation: phx-slide 1.2s ease-in-out infinite; }
+@keyframes phx-slide { from { left: -30%; } to { left: 100%; } }
+.win.dark-pdf .steps, .win.docked.pdf-dark .steps { color: #a3a9b4; }
+.win.dark-pdf .steps .what, .win.docked.pdf-dark .steps .what { color: #e4e6ea; }
+.win.dark-pdf .steps .track, .win.docked.pdf-dark .steps .track { background: #3d4047; }
+.opening.in .steps { opacity: 0; }
+/* a card in place of the pages (a build that stopped, an engine to choose): plain */
+.empty { padding: 40px 16px; color: var(--ph-fg2); }
+.card { max-width: 420px; margin: 0 auto; padding: 16px 18px; text-align: left; background: var(--ph-menu); color: var(--ph-fg);
+  border: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-danger)); border-radius: var(--ph-radius); }
+.card h3 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+.card .count { overflow-wrap: anywhere; }
+.card .note { margin-top: 8px; color: var(--ph-fg2); font-size: 12px; }
+.card .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.card .btn { all: unset; cursor: pointer; padding: 3px 12px; border-radius: var(--ph-pill); background: var(--ph-accent); color: var(--ph-accent-fg); font-weight: 600; }
+
+/* a small notification in the corner: a package fetched, the rest of a build, a message */
+.toast { position: absolute; right: 12px; bottom: 12px; z-index: 7; width: min(320px, calc(100% - 24px)); display: grid; gap: 4px; padding: 10px 12px;
+  background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 4px 16px rgb(0 0 0 / 22%);
+  font-variant-numeric: tabular-nums; text-align: left; transition: opacity .3s, transform .3s; }
+.toast.out { opacity: 0; transform: translateY(6px); }
+.toast .t { display: flex; align-items: center; gap: 8px; font-weight: 600; min-width: 0; }
+.toast .t span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast .d { color: var(--ph-fg2); font-size: 12px; overflow-wrap: anywhere; }
+.toast.err { border-left: 3px solid var(--ph-danger); }
+.toast .track { position: relative; height: 3px; margin-top: 2px; border-radius: 2px; overflow: hidden; background: var(--ph-border); }
+.toast .track i { position: absolute; inset: 0 auto 0 0; background: var(--ph-progress); transition: width .25s; }
+.toast .track.unknown i { width: 30% !important; animation: phx-slide 1.2s ease-in-out infinite; }
+
+/* feature tips: a popover with an arrow at the control it is about */
+.tip { position: absolute; z-index: 30; width: 270px; max-width: calc(100% - 16px); padding: 12px 14px 10px; text-align: left;
+  background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: calc(var(--ph-radius) + 2px); box-shadow: 0 6px 20px rgb(0 0 0 / 25%); }
+.tip::before { content: ""; position: absolute; top: -6px; left: var(--ax, 50%); width: 10px; height: 10px; margin-left: -5px; transform: rotate(45deg);
+  background: var(--ph-menu); border-left: 1px solid var(--ph-border); border-top: 1px solid var(--ph-border); }
+.tip .new { display: inline-block; margin-right: 6px; padding: 0 7px; border-radius: var(--ph-pill); font-size: 11px; font-weight: 600; vertical-align: 1px;
+  background: var(--ph-accent); color: var(--ph-accent-fg); }
+.tip h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+.tip p { margin: 0 0 10px; color: var(--ph-fg2); }
+.tip .acts { display: flex; align-items: center; gap: 8px; }
+.tip .acts .n { flex: 1; color: var(--ph-fg2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.tip .acts button { all: unset; cursor: pointer; padding: 3px 4px; color: var(--ph-link); }
+.tip .acts .primary { padding: 3px 12px; border-radius: var(--ph-pill); background: var(--ph-accent); color: var(--ph-accent-fg); font-weight: 600; }
+.ringed { box-shadow: 0 0 0 2px var(--ph-accent); }
+
+/* dialogs over the pages: the keys, the log, the debug report, about */
+.dialog { position: absolute; z-index: 25; inset: 12px; display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; text-align: left;
+  background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 30%); }
+.dialog > header { all: unset; display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.dialog p { margin: 0; color: var(--ph-fg2); }
+.dialog textarea, .dialog pre { flex: 1; min-height: 120px; margin: 0; overflow: auto; font: 12px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre;
+  color: var(--ph-fg); background: var(--ph-stage); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 8px; resize: none; }
+.dialog .btns { display: flex; gap: 8px; justify-content: flex-end; }
+.dialog .btn { all: unset; cursor: pointer; padding: 3px 12px; border-radius: var(--ph-pill); border: 1px solid var(--ph-border); }
+.dialog .btn:hover { background: var(--ph-hover); }
+.dialog.small { inset: auto 12px 12px auto; width: min(340px, calc(100% - 24px)); }
+.keys { inset: 12px 12px auto auto; width: min(420px, calc(100% - 24px)); max-height: calc(100% - 24px); overflow: auto; }
+.keys table { border-collapse: collapse; }
+.keys td { padding: 2px 12px 2px 0; vertical-align: top; }
+.keys kbd { font: 12px ui-monospace, monospace; padding: 0 5px; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); white-space: nowrap; }
+.about a { color: var(--ph-link); }
+.about .about-foot { margin-top: 8px; color: var(--ph-fg2); }
+/* who made this, in Overleaf's pane (it looks native on purpose; it must never pass for Overleaf's) */
+.byline { all: unset; display: none; position: absolute; left: 12px; bottom: 10px; z-index: 3; max-width: calc(100% - 24px); padding: 1px 8px;
+  border-radius: var(--ph-pill); font-size: 11px; color: var(--ph-fg2); background: var(--ph-menu); border: 1px solid var(--ph-border);
+  cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.byline:hover { color: var(--ph-fg); }
+.win.docked:not(.own-header) .byline { display: block; }
+/* Overleaf's own settings, docked: the main file, the debug check, the latency's details */
+.sheet-pop { right: 8px; top: 6px; width: min(340px, calc(100% - 16px)); padding: 12px; display: grid; gap: 8px; }
+.sheet-pop label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.sheet-pop select { font: inherit; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 2px 4px; max-width: 180px; }
+.sheet-pop .links { display: flex; flex-wrap: wrap; gap: 12px; }
+.sheet-pop .links button { all: unset; cursor: pointer; color: var(--ph-link); }
+.details { margin: 0; font: 11px/1.4 ui-monospace, monospace; color: var(--ph-fg2); white-space: pre-wrap; }
+
+/* docked: the panel fills the host's pane under its toolbar */
+.win.docked { position: relative; left: auto !important; top: auto !important; width: 100% !important; height: 100% !important; max-width: none; max-height: none;
+  min-width: 0; min-height: 0; resize: none; border: 0; border-radius: 0; box-shadow: none; }
+.win.collapsed { resize: none; min-height: 0; min-width: 0; border-radius: var(--ph-pill); }
+.win.collapsed > :not(header) { display: none; }
+.win.collapsed header { border-bottom: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .progress::after, .split.busy .go .icon, .steps .track.unknown i, .toast .track.unknown i, .diffbar .busy::before { animation: none; }
+  .opening, .toast { transition: none; }
+}
 `;
 
 // viewer/src/css.ts
@@ -739,36 +894,32 @@ function item(p) {
   return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help.length ? [p.help.join(" ").replace(/\s+/g, " ").trim()] : [], ...p.suggestions])}</li>`;
 }
 var PROBLEMS_CSS = `
-.phx-problems { position: fixed; inset: 0; z-index: 10; background: rgb(18 18 18 / 55%); overflow: auto; padding: 48px 16px; }
-.phx-card { max-width: 900px; margin: 0 auto; background: #fff; color: #141414; border-radius: 0; border-left: 2px solid #d71920;
-  box-shadow: none; font: 13px/1.5 "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
-.phx-card header { display: flex; align-items: baseline; gap: 10px; padding: 14px 20px 10px; border-bottom: 1px solid #141414; font-size: 13px; }
-.phx-card header b { color: #141414; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; font-size: 11px; }
-.phx-close { margin-left: auto; background: none; color: #4a4a48; border: 1px solid #c9c9c5; border-radius: 0; padding: 1px 8px;
-  font: 11px "IBM Plex Mono", ui-monospace, monospace; cursor: pointer; }
-.phx-close:hover { border-color: #141414; color: #141414; }
+.phx-problems { position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / 45%); overflow: auto; padding: 48px 16px; }
+.phx-card { max-width: 900px; margin: 0 auto; background: var(--ph-menu, #fff); color: var(--ph-fg, #1b222c); border-radius: var(--ph-radius, 4px);
+  font: 13px/1.45 var(--ph-font, "Noto Sans", system-ui, sans-serif); }
+.phx-card header { display: flex; align-items: baseline; gap: 10px; padding: 12px 16px 10px; border-bottom: 1px solid var(--ph-border, #e7e9ee); font-weight: 600; }
+.phx-close { margin-left: auto; background: none; color: var(--ph-fg2, #495365); border: 1px solid var(--ph-border, #e7e9ee); border-radius: var(--ph-radius, 4px);
+  padding: 1px 8px; font: inherit; font-size: 12px; cursor: pointer; }
 .phx-card ol { list-style: none; margin: 0; padding: 0; }
-.phx-card li { padding: 14px 20px; border-bottom: 1px solid #dededa; }
-.phx-msg { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; font-size: 14px; }
-.phx-sev { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-weight: 600; padding: 0; border-radius: 0; background: none; }
-.phx-error .phx-sev { color: #d71920; }
-.phx-warning .phx-sev { color: #8a5a00; }
-.phx-note .phx-sev { color: #8a8a86; }
-.phx-code { color: #8a8a86; font: 11px "IBM Plex Mono", ui-monospace, monospace; }
-.phx-where { margin-top: 2px; font: 11px "IBM Plex Mono", ui-monospace, monospace; color: #4a4a48; }
-.phx-place { color: #141414; text-decoration: underline; text-decoration-color: #c9c9c5; text-underline-offset: 2px; }
-.phx-place:hover { text-decoration-color: #d71920; }
-.phx-excerpt, .phx-ctx pre { margin: 10px 0 0; padding: 6px 0 6px 12px; background: none; border-left: 1px solid #c9c9c5; border-radius: 0; overflow-x: auto;
-  font: 12px/1.5 "IBM Plex Mono", ui-monospace, monospace; white-space: pre; color: #141414; }
-.phx-excerpt mark, .phx-ctx mark { background: none; color: #d71920; text-decoration: underline 1.5px #d71920; text-underline-offset: 3px; }
-.phx-ln { color: #8a8a86; }
-.phx-notes, .phx-help { margin: 8px 0 0; padding-left: 16px; color: #4a4a48; }
-.phx-help li::marker { content: "\u2192 "; color: #d71920; }
-.phx-ctx { margin-top: 8px; color: #4a4a48; }
+.phx-card li { padding: 9px 14px 10px; border-bottom: 1px solid var(--ph-border, #e7e9ee); border-left: 3px solid var(--sev, var(--ph-fg2, #495365)); }
+.phx-card li.phx-error { --sev: var(--ph-danger, #b83a33); }
+.phx-card li.phx-warning { --sev: var(--ph-warning, #8f5514); }
+.phx-card li.phx-note { --sev: var(--ph-info, #366cbf); }
+.phx-msg { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-weight: 600; }
+.phx-sev { display: none; }
+.phx-code { color: var(--ph-fg2, #495365); font: 400 12px ui-monospace, monospace; }
+.phx-where { margin-top: 2px; font-size: 12px; }
+.phx-place { color: var(--ph-link, #366cbf); text-decoration: none; }
+.phx-place:hover { text-decoration: underline; }
+.phx-excerpt, .phx-ctx pre { margin: 6px 0 0; padding: 0; overflow-x: auto; font: 12px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre;
+  color: var(--ph-fg2, #495365); background: none; }
+.phx-excerpt mark, .phx-ctx mark { background: none; color: var(--sev, var(--ph-danger, #b83a33)); text-decoration: underline wavy; text-underline-offset: 3px; }
+.phx-ln { opacity: .6; }
+.phx-notes, .phx-help { margin: 6px 0 0; padding-left: 16px; color: var(--ph-fg2, #495365); }
+.phx-ctx { margin-top: 6px; color: var(--ph-fg2, #495365); }
 .phx-ctx summary { cursor: pointer; }
-.phx-ctx code { color: #141414; }
-.phx-inc { margin-top: 6px; color: #8a8a86; font-size: 12px; }
-.phx-card footer { padding: 10px 20px; color: #8a8a86; font-size: 11px; }
+.phx-inc { margin-top: 6px; color: var(--ph-fg2, #495365); font-size: 12px; }
+.phx-card footer { padding: 10px 16px; color: var(--ph-fg2, #495365); font-size: 12px; }
 `;
 
 // viewer/src/outline.ts
@@ -847,21 +998,21 @@ var Outline = class {
   }
 };
 var OUTLINE_CSS = `
-.phx-outline { overflow: auto; font: 13px/1.35 system-ui, sans-serif; color: var(--ink, #333); padding: 8px 0 24px; }
+.phx-outline { overflow: auto; font: inherit; color: var(--ph-fg, #333); padding: 6px 0 24px; text-align: left; }
 .phx-outline ul { list-style: none; margin: 0; padding: 0; }
 .phx-outline li.folded > ul { display: none; }
-.phx-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 10px 3px calc(10px + var(--d) * 14px); border-radius: 4px; margin: 0 6px; }
-.phx-row:hover { background: rgba(127, 127, 127, 0.12); }
-.phx-row.here { background: rgba(62, 99, 221, 0.14); }
-.phx-row.here .phx-t { color: #3e63dd; font-weight: 600; }
+.phx-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 10px 3px calc(10px + var(--d) * 14px); border-radius: var(--ph-radius, 4px); margin: 0 6px; }
+.phx-row:hover { background: var(--ph-hover, rgb(127 127 127 / 12%)); }
+.phx-row.here { box-shadow: inset 2px 0 var(--ph-accent, #3e63dd); background: var(--ph-hover, rgb(62 99 221 / 14%)); }
+.phx-row.here .phx-t { font-weight: 600; }
 .phx-t { flex: 1; min-width: 0; color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 li.parent > .phx-row > .phx-t { font-weight: 500; }
-.phx-p { color: var(--dim, #777); font-size: 11px; font-variant-numeric: tabular-nums; }
-.phx-fold, .phx-dot { flex: none; width: 10px; text-align: center; color: var(--dim, #777); cursor: pointer; user-select: none; }
+.phx-p { color: var(--ph-fg2, #777); font-size: 12px; font-variant-numeric: tabular-nums; }
+.phx-fold, .phx-dot { flex: none; width: 10px; text-align: center; color: var(--ph-fg2, #777); cursor: pointer; user-select: none; }
 .phx-fold::before { content: "\u25BE"; }
 li.folded > .phx-row .phx-fold::before { content: "\u25B8"; }
 .phx-dot { cursor: default; }
-.phx-none { color: var(--dim, #777); padding: 8px 16px; margin: 0; }
+.phx-none { color: var(--ph-fg2, #777); padding: 8px 16px; margin: 0; }
 `;
 
 // viewer/src/keys.ts
@@ -1015,8 +1166,8 @@ function anonymizer(paths) {
     if (stem.length >= 4 && stem !== base) pairs.push([stem, alias.replace(/\.[A-Za-z0-9]+$/, "")]);
   });
   pairs.sort((a, b) => b[0].length - a[0].length);
-  const esc4 = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = pairs.length ? new RegExp(pairs.map(([p]) => `(?<![A-Za-z0-9_])${esc4(p)}(?![A-Za-z0-9_])`).join("|"), "g") : null;
+  const esc5 = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = pairs.length ? new RegExp(pairs.map(([p]) => `(?<![A-Za-z0-9_])${esc5(p)}(?![A-Za-z0-9_])`).join("|"), "g") : null;
   const map = new Map(pairs);
   return (s) => (re ? s.replace(re, (m) => map.get(m) ?? m) : s).replace(/`[^'\n]{1,80}'/g, "`\u2026'").replace(/\/home\/[^/\s]+\//g, "~/").replace(/\/Users\/[^/\s]+\//g, "~/");
 }
@@ -1065,6 +1216,213 @@ function report(r) {
   ].join("\n");
 }
 
+// viewer/src/opening-art.ts
+var WORD = { "size": 95.52238805970148, "letters": [{ "ch": "\u03A6", "x": -7, "y": 85, "l": 0, "r": 71, "t": 20, "b": 85 }, { "ch": "T", "x": 55.514207299075906, "y": 64, "l": 59.514207299075906, "r": 128.5142072990759, "t": 0, "b": 64 }, { "ch": "E", "x": 116.0032076069846, "y": 85, "l": 119.0032076069846, "r": 186.0032076069846, "t": 20, "b": 85 }, { "ch": "X", "x": 176.1772889823344, "y": 64, "l": 179.1772889823344, "r": 256.1772889823344, "t": -1, "b": 65 }] };
+var WOVEN = { "body": `<defs><clipPath id="\xA70" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA71" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA72" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA73" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA74" ><rect x="43.63" y="-870.22" width="35.34" height="1910.45" /></clipPath><clipPath id="\xA75" ><rect x="116" y="-870.22" width="57.31" height="1910.45" /></clipPath><clipPath id="\xA76" ><rect x="214.48" y="-891.22" width="47.67" height="1910.45" /></clipPath><mask id="\xA77" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA74)"><text x="-7" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">\u03A6</text></g><g clip-path="url(#\xA75)"><text x="116" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">E</text></g><g clip-path="url(#\xA76)"><text x="176.18" y="64" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">X</text></g></mask><clipPath id="\xA78" ><rect x="20.7" y="44.88" width="22.93" height="32.48" /></clipPath><clipPath id="\xA79" ><rect x="79.39" y="-891.22" width="28.66" height="1910.45" /></clipPath><clipPath id="\xA710" ><rect x="176.18" y="-891.22" width="38.3" height="1910.45" /></clipPath><mask id="\xA711" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA78)"><text x="-7" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">\u03A6</text></g><g clip-path="url(#\xA79)"><text x="55.51" y="64" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">T</text></g><g clip-path="url(#\xA710)"><text x="176.18" y="64" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">X</text></g></mask><clipPath id="\xA712" ><rect x="27.96" y="-10.52" width="51.01" height="85.97" /></clipPath><clipPath id="\xA713" ><rect x="116" y="-870.22" width="57.31" height="1910.45" /></clipPath><clipPath id="\xA714" ><rect x="214.48" y="-891.22" width="47.67" height="1910.45" /></clipPath><mask id="\xA715" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA712)"><text x="-7" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">\u03A6</text></g><g clip-path="url(#\xA713)"><text x="116" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">E</text></g><g clip-path="url(#\xA714)"><text x="176.18" y="64" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">X</text></g></mask><clipPath id="\xA716" ><rect x="12.1" y="56.34" width="13.37" height="19.1" /></clipPath><clipPath id="\xA717" ><rect x="79.39" y="-891.22" width="28.66" height="1910.45" /></clipPath><clipPath id="\xA718" ><rect x="176.18" y="-891.22" width="85.97" height="1910.45" /></clipPath><mask id="\xA719" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA716)"><text x="-7" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">\u03A6</text></g><g clip-path="url(#\xA717)"><text x="55.51" y="64" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">T</text></g><g clip-path="url(#\xA718)"><text x="176.18" y="64" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">X</text></g></mask><mask id="\xA720" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="43.63" y="-870.22" width="35.34" height="1910.45" fill="#000"/></mask><mask id="\xA721" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA720)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L262.18,51.56" fill="none" stroke="#000" stroke-width="8.58"/></g></mask><mask id="\xA722" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="20.7" y="44.88" width="22.93" height="32.48" fill="#000"/></mask><mask id="\xA723" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA722)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L262.18,45.24" fill="none" stroke="#000" stroke-width="7.37"/></g></mask><mask id="\xA724" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="27.96" y="-10.52" width="51.01" height="85.97" fill="#000"/></mask><mask id="\xA725" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA724)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L262.18,40.12" fill="none" stroke="#000" stroke-width="6.16"/></g></mask><mask id="\xA726" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="12.1" y="56.34" width="13.37" height="19.1" fill="#000"/></mask><mask id="\xA727" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA726)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L262.18,36.22" fill="none" stroke="#000" stroke-width="4.95"/></g></mask><mask id="\xA728" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L262.18,51.56" fill="none" stroke="#000" stroke-width="8.58"/></mask><mask id="\xA729" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="79.39" y="-891.22" width="28.66" height="1910.45" fill="#000"/></mask><mask id="\xA730" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA729)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L262.18,45.24" fill="none" stroke="#000" stroke-width="7.37"/></g></mask><mask id="\xA731" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L262.18,40.12" fill="none" stroke="#000" stroke-width="6.16"/></mask><mask id="\xA732" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="79.39" y="-891.22" width="28.66" height="1910.45" fill="#000"/></mask><mask id="\xA733" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA732)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L262.18,36.22" fill="none" stroke="#000" stroke-width="4.95"/></g></mask><mask id="\xA734" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="116" y="-870.22" width="57.31" height="1910.45" fill="#000"/></mask><mask id="\xA735" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA734)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L262.18,51.56" fill="none" stroke="#000" stroke-width="8.58"/></g></mask><mask id="\xA736" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L262.18,45.24" fill="none" stroke="#000" stroke-width="7.37"/></mask><mask id="\xA737" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="116" y="-870.22" width="57.31" height="1910.45" fill="#000"/></mask><mask id="\xA738" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA737)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L262.18,40.12" fill="none" stroke="#000" stroke-width="6.16"/></g></mask><mask id="\xA739" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L262.18,36.22" fill="none" stroke="#000" stroke-width="4.95"/></mask><mask id="\xA740" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="214.48" y="-891.22" width="47.67" height="1910.45" fill="#000"/></mask><mask id="\xA741" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA740)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L262.18,51.56" fill="none" stroke="#000" stroke-width="8.58"/></g></mask><mask id="\xA742" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="176.18" y="-891.22" width="38.3" height="1910.45" fill="#000"/></mask><mask id="\xA743" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA742)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L262.18,45.24" fill="none" stroke="#000" stroke-width="7.37"/></g></mask><mask id="\xA744" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="214.48" y="-891.22" width="47.67" height="1910.45" fill="#000"/></mask><mask id="\xA745" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA744)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L262.18,40.12" fill="none" stroke="#000" stroke-width="6.16"/></g></mask><mask id="\xA746" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="176.18" y="-891.22" width="85.97" height="1910.45" fill="#000"/></mask><mask id="\xA747" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA746)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L262.18,36.22" fill="none" stroke="#000" stroke-width="4.95"/></g></mask></defs><g mask="url(#\xA77)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L262.18,51.56" fill="none" stroke="#f58f2d" stroke-width="5.28"/></g><g mask="url(#\xA711)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L262.18,45.24" fill="none" stroke="#f0b225" stroke-width="4.07"/></g><g mask="url(#\xA715)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L262.18,40.12" fill="none" stroke="#d3c72a" stroke-width="2.86"/></g><g mask="url(#\xA719)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L262.18,36.22" fill="none" stroke="#00a8a4" stroke-width="1.65"/></g><g class="phx-l" data-ch="\u03A6"><g mask="url(#\xA727)"><g mask="url(#\xA725)"><g mask="url(#\xA723)"><g mask="url(#\xA721)"><text x="-7" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#FILL">\u03A6</text></g></g></g></g></g><g class="phx-l" data-ch="T"><g mask="url(#\xA733)"><g mask="url(#\xA731)"><g mask="url(#\xA730)"><g mask="url(#\xA728)"><text x="55.51" y="64" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#FILL">T</text></g></g></g></g></g><g class="phx-l" data-ch="E"><g mask="url(#\xA739)"><g mask="url(#\xA738)"><g mask="url(#\xA736)"><g mask="url(#\xA735)"><text x="116" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#FILL">E</text></g></g></g></g></g><g class="phx-l" data-ch="X"><g mask="url(#\xA747)"><g mask="url(#\xA745)"><g mask="url(#\xA743)"><g mask="url(#\xA741)"><text x="176.18" y="64" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#FILL">X</text></g></g></g></g></g>`, "x0": 0, "y0": -1, "x1": 262.1772889823344, "y1": 89 };
+var MARK = { "body": `<defs><clipPath id="\xA70" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA71" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA72" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA73" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA74" ><rect x="43.63" y="-870.22" width="35.34" height="1910.45" /></clipPath><mask id="\xA75" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA74)"><text x="-7" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">\u03A6</text></g></mask><clipPath id="\xA76" ><rect x="20.7" y="44.88" width="22.93" height="32.48" /></clipPath><mask id="\xA77" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA76)"><text x="-7" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">\u03A6</text></g></mask><clipPath id="\xA78" ><rect x="27.96" y="-10.52" width="51.01" height="85.97" /></clipPath><mask id="\xA79" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA78)"><text x="-7" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">\u03A6</text></g></mask><clipPath id="\xA710" ><rect x="12.1" y="56.34" width="13.37" height="19.1" /></clipPath><mask id="\xA711" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA710)"><text x="-7" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#000" stroke="#000" stroke-width="3.3" stroke-linejoin="miter" stroke-miterlimit="4">\u03A6</text></g></mask><mask id="\xA712" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="43.63" y="-870.22" width="35.34" height="1910.45" fill="#000"/></mask><mask id="\xA713" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA712)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L71,51.56" fill="none" stroke="#000" stroke-width="8.58"/></g></mask><mask id="\xA714" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="20.7" y="44.88" width="22.93" height="32.48" fill="#000"/></mask><mask id="\xA715" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA714)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L71,45.24" fill="none" stroke="#000" stroke-width="7.37"/></g></mask><mask id="\xA716" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="27.96" y="-10.52" width="51.01" height="85.97" fill="#000"/></mask><mask id="\xA717" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA716)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L71,40.12" fill="none" stroke="#000" stroke-width="6.16"/></g></mask><mask id="\xA718" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="12.1" y="56.34" width="13.37" height="19.1" fill="#000"/></mask><mask id="\xA719" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA718)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L71,36.22" fill="none" stroke="#000" stroke-width="4.95"/></g></mask></defs><g mask="url(#\xA75)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L71,51.56" fill="none" stroke="#f58f2d" stroke-width="5.28"/></g><g mask="url(#\xA77)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L71,45.24" fill="none" stroke="#f0b225" stroke-width="4.07"/></g><g mask="url(#\xA79)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L71,40.12" fill="none" stroke="#d3c72a" stroke-width="2.86"/></g><g mask="url(#\xA711)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L71,36.22" fill="none" stroke="#00a8a4" stroke-width="1.65"/></g><g class="phx-l" data-ch="\u03A6"><g mask="url(#\xA719)"><g mask="url(#\xA717)"><g mask="url(#\xA715)"><g mask="url(#\xA713)"><text x="-7" y="85" style="font: 700 95.52238805970148px 'CMU Serif'" fill="#FILL">\u03A6</text></g></g></g></g></g>`, "x0": 0, "y0": 20, "x1": 71, "y1": 89 };
+var LOCKUP = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="3.000 2.300 555.496 94.984" role="img" aria-label="ACCL \u2013 Accelerated Connected Computing Lab" xmlns:c2pa="http://c2pa.org/manifest"><title>ACCL \u2013 Accelerated Connected Computing Lab</title><path fill="#1D3E72" fill-rule="evenodd" d="M97.00,3.00 L83.49,3.00 L34.66,70.21 L53.25,70.21 L81.96,30.70 L81.96,97.00 L97.00,97.00 Z"></path><path fill="#1D3E72" fill-rule="evenodd" d="M46.17,80.08 L33.88,97.00 L74.15,97.00 L79.61,89.48 L67.32,89.48 L79.61,72.56 L70.31,72.56 L58.02,89.48 L48.64,89.48 L55.47,80.08 L61.95,80.08 L67.41,72.56 L32.96,72.56 L15.20,97.00 L30.97,97.00 L36.44,89.48 L29.96,89.48 L36.79,80.08 Z"></path><path fill="#F58F2D" fill-rule="evenodd" d="M80.59,3.00 L71.29,3.00 L3.00,97.00 L12.30,97.00 Z"></path><path fill="#F0B225" fill-rule="evenodd" d="M68.39,3.00 L61.23,3.00 L3.00,83.14 L3.00,93.00 Z"></path><path fill="#D3C72A" fill-rule="evenodd" d="M58.32,3.00 L53.29,3.00 L3.00,72.21 L3.00,79.14 Z"></path><path fill="#00A8A4" fill-rule="evenodd" d="M50.38,3.00 L47.48,3.00 L3.00,64.22 L3.00,68.21 Z"></path><path fill="#1D3E72" d="M127.75767441860464 63.859534883720926Q117.8767441860465 63.859534883720926 113.19860465116278 61.10511627906976Q108.52046511627906 58.3506976744186 106.99023255813952 52.05488372093023Q105.46 45.75906976744186 105.46 33.08Q105.46 20.57581395348837 107.03395348837208 14.236279069767441Q108.60790697674418 7.8967441860465115 113.28604651162789 5.098604651162791Q117.96418604651161 2.300465116279071 127.75767441860464 2.300465116279071Q131.16790697674418 2.300465116279071 134.7967441860465 2.7376744186046515Q138.42558139534881 3.1748837209302323 140.78651162790698 3.8744186046511615V14.367441860465114Q133.35395348837207 13.580465116279072 130.90558139534883 13.580465116279072Q124.95953488372092 13.580465116279072 122.72976744186045 14.760930232558142Q120.49999999999999 15.941395348837212 119.88790697674418 19.570232558139534Q119.27581395348835 23.199069767441856 119.27581395348835 33.08Q119.27581395348835 42.96093023255814 119.88790697674418 46.58976744186047Q120.49999999999999 50.21860465116279 122.72976744186045 51.39906976744186Q124.95953488372092 52.579534883720925 130.90558139534883 52.579534883720925Q135.97720930232558 52.579534883720925 141.04883720930232 51.79255813953488V62.37302325581395Q138.60046511627905 62.985116279069764 134.84046511627906 63.42232558139534Q131.08046511627907 63.859534883720926 127.75767441860464 63.859534883720926Z M170.60418604651161 63.859534883720926Q160.72325581395347 63.859534883720926 156.04511627906976 61.10511627906976Q151.36697674418602 58.3506976744186 149.83674418604647 52.05488372093023Q148.30651162790696 45.75906976744186 148.30651162790696 33.08Q148.30651162790696 20.57581395348837 149.88046511627905 14.236279069767441Q151.45441860465115 7.8967441860465115 156.13255813953486 5.098604651162791Q160.81069767441858 2.300465116279071 170.60418604651161 2.300465116279071Q174.01441860465113 2.300465116279071 177.64325581395346 2.7376744186046515Q181.2720930232558 3.1748837209302323 183.63302325581392 3.8744186046511615V14.367441860465114Q176.20046511627905 13.580465116279072 173.75209302325578 13.580465116279072Q167.80604651162787 13.580465116279072 165.5762790697674 14.760930232558142Q163.34651162790695 15.941395348837212 162.73441860465113 19.570232558139534Q162.12232558139533 23.199069767441856 162.12232558139533 33.08Q162.12232558139533 42.96093023255814 162.73441860465113 46.58976744186047Q163.34651162790695 50.21860465116279 165.5762790697674 51.39906976744186Q167.80604651162787 52.579534883720925 173.75209302325578 52.579534883720925Q178.82372093023253 52.579534883720925 183.89534883720927 51.79255813953488V62.37302325581395Q181.44697674418603 62.985116279069764 177.68697674418604 63.42232558139534Q173.92697674418602 63.859534883720926 170.60418604651161 63.859534883720926Z M192.6395348837209 63.16V3.0H228.84046511627903V14.280000000000001H206.19302325581393V27.133953488372093H225.60511627906973V38.41395348837209H206.19302325581393V51.879999999999995H228.84046511627903V63.16Z M238.45906976744186 63.16V3.0H252.0125581395349V51.44279069767442H271.9493023255814V63.16Z M279.206976744186 63.16V3.0H315.4079069767442V14.280000000000001H292.7604651162791V27.133953488372093H312.1725581395349V38.41395348837209H292.7604651162791V51.879999999999995H315.4079069767442V63.16Z M354.3195348837209 63.16 347.3241860465116 42.08651162790697H338.58V63.16H325.0265116279069V3.0H349.77255813953485Q357.2051162790697 3.0 360.9651162790697 5.229767441860464Q364.7251162790697 7.459534883720927 365.9930232558139 11.569302325581393Q367.2609302325581 15.67906976744186 367.2609302325581 22.499534883720926Q367.2609302325581 28.882790697674416 365.86186046511625 33.38604651162791Q364.4627906976744 37.8893023255814 360.17813953488366 39.987906976744185L368.57255813953486 63.16ZM353.53255813953484 22.586976744186046Q353.53255813953484 18.652093023255816 353.0516279069767 17.03441860465116Q352.57069767441857 15.416744186046508 350.95302325581395 14.848372093023254Q349.33534883720927 14.280000000000001 345.48790697674417 14.280000000000001H338.58V30.89395348837209H345.400465116279Q349.24790697674416 30.89395348837209 350.86558139534884 30.281860465116278Q352.48325581395346 29.669767441860465 353.00790697674415 28.052093023255814Q353.53255813953484 26.434418604651164 353.53255813953484 22.586976744186046Z M409.2330232558139 63.16 406.17255813953483 51.09302325581395H388.4218604651162L385.5362790697674 63.16H371.89534883720927L387.9846511627906 3.0H407.046976744186L423.0488372093023 63.16ZM397.5158139534883 15.241860465116275H396.9911627906976L391.1325581395348 39.900465116279065H403.4618604651162Z M435.7279069767441 63.16V14.717209302325578H421.56232558139527V3.0H463.62186046511624V14.717209302325578H449.3688372093023V63.16Z M470.35488372093016 63.16V3.0H506.5558139534883V14.280000000000001H483.9083720930232V27.133953488372093H503.320465116279V38.41395348837209H483.9083720930232V51.879999999999995H506.5558139534883V63.16Z M516.1744186046511 3.0H535.0618604651163Q546.4293023255814 3.0 551.2823255813953 5.623255813953488Q556.1353488372092 8.246511627906976 557.3158139534883 14.01767441860465Q558.4962790697674 19.788837209302322 558.4962790697674 33.08Q558.4962790697674 46.37116279069767 557.3158139534883 52.14232558139534Q556.1353488372092 57.91348837209302 551.2823255813953 60.536744186046505Q546.4293023255814 63.16 535.0618604651163 63.16H516.1744186046511ZM534.7120930232558 51.879999999999995Q540.133488372093 51.879999999999995 541.9697674418604 51.005581395348834Q543.8060465116279 50.13116279069767 544.286976744186 46.67720930232558Q544.7679069767441 43.223255813953486 544.7679069767441 33.08Q544.7679069767441 22.93674418604651 544.2432558139535 19.482790697674417Q543.7186046511628 16.028837209302324 541.9260465116279 15.154418604651163Q540.133488372093 14.280000000000001 534.7120930232558 14.280000000000001H529.7279069767442V51.879999999999995Z"></path><path fill="#1D3E72" d="M114.30529069767441 97.28418604651162Q110.36220930232557 97.28418604651162 108.53276162790696 96.21848837209302Q106.70331395348836 95.15279069767442 106.08165697674417 92.59511627906977Q105.46 90.03744186046512 105.46 84.78Q105.46 79.52255813953488 106.08165697674417 76.98264534883721Q106.70331395348836 74.44273255813954 108.55052325581394 73.35927325581395Q110.39773255813952 72.27581395348837 114.30529069767441 72.27581395348837Q115.65517441860464 72.27581395348837 117.07610465116278 72.45343023255813Q118.49703488372091 72.6310465116279 119.3495930232558 72.87970930232558V76.50308139534883Q116.64982558139533 76.18337209302325 115.33546511627907 76.18337209302325Q112.67122093023255 76.18337209302325 111.6410465116279 76.69845930232557Q110.61087209302325 77.2135465116279 110.30892441860465 78.86537790697673Q110.00697674418603 80.51720930232558 110.00697674418603 84.78Q110.00697674418603 89.04279069767442 110.30892441860465 90.69462209302326Q110.61087209302325 92.34645348837209 111.6410465116279 92.86154069767443Q112.67122093023255 93.37662790697675 115.33546511627907 93.37662790697675Q117.39581395348836 93.37662790697675 119.45616279069766 93.05691860465116V96.71581395348838Q118.49703488372091 96.96447674418604 117.04058139534882 97.12433139534883Q115.58412790697673 97.28418604651162 114.30529069767441 97.28418604651162Z M124.0164297040169 84.78Q124.0164297040169 79.2028488372093 124.49599365750527 76.78726744186046Q124.97555761099363 74.37168604651163 126.82276691331921 73.32374999999999Q128.6699762156448 72.27581395348837 132.96829016913318 72.27581395348837Q137.26660412262154 72.27581395348837 139.1315750528541 73.32374999999999Q140.99654598308666 74.37168604651163 141.47610993657503 76.78726744186046Q141.9556738900634 79.2028488372093 141.9556738900634 84.78Q141.9556738900634 90.3571511627907 141.47610993657503 92.77273255813954Q140.99654598308666 95.18831395348838 139.1315750528541 96.23625Q137.26660412262154 97.28418604651162 132.96829016913318 97.28418604651162Q128.6699762156448 97.28418604651162 126.82276691331921 96.23625Q124.97555761099363 95.18831395348838 124.49599365750527 92.77273255813954Q124.0164297040169 90.3571511627907 124.0164297040169 84.78ZM137.40869714587737 84.78Q137.40869714587737 80.2685465116279 137.17779598308667 78.65223837209302Q136.94689482029597 77.03593023255814 136.11209830866807 76.6096511627907Q135.27730179704014 76.18337209302325 132.96829016913318 76.18337209302325Q130.6592785412262 76.18337209302325 129.84224365750526 76.6096511627907Q129.02520877378433 77.03593023255814 128.79430761099366 78.63447674418605Q128.56340644820295 80.23302325581395 128.56340644820295 84.78Q128.56340644820295 89.32697674418604 128.79430761099366 90.92552325581394Q129.02520877378433 92.52406976744186 129.84224365750526 92.9503488372093Q130.6592785412262 93.37662790697675 132.96829016913318 93.37662790697675Q135.27730179704014 93.37662790697675 136.11209830866807 92.9503488372093Q136.94689482029597 92.52406976744186 137.17779598308667 90.90776162790698Q137.40869714587737 89.2914534883721 137.40869714587737 84.78Z M160.58315010570823 97.0 152.1286152219873 81.54738372093023H151.98652219873148V97.0H147.6171617336152V72.56H152.23518498942917L160.37001057082452 87.2311046511628H160.51210359408032V72.56H164.88146405919662V97.0Z M184.11283562367862 97.0 175.6583007399577 81.54738372093023H175.51620771670187V97.0H171.1468472515856V72.56H175.76487050739956L183.8996960887949 87.2311046511628H184.0417891120507V72.56H188.411149577167V97.0Z M194.71205602536995 97.0V72.56H208.99240486257926V76.46755813953489H199.22350951374204V82.68412790697674H207.642521141649V86.62720930232558H199.22350951374204V93.09244186046512H208.99240486257926V97.0Z M222.6111020084566 97.28418604651162Q218.66802061310779 97.28418604651162 216.83857293868917 96.21848837209302Q215.00912526427055 95.15279069767442 214.38746828752636 92.59511627906977Q213.7658113107822 90.03744186046512 213.7658113107822 84.78Q213.7658113107822 79.52255813953488 214.38746828752636 76.98264534883721Q215.00912526427055 74.44273255813954 216.85633456659616 73.35927325581395Q218.70354386892174 72.27581395348837 222.6111020084566 72.27581395348837Q223.96098572938683 72.27581395348837 225.38191596194497 72.45343023255813Q226.80284619450313 72.6310465116279 227.655404334038 72.87970930232558V76.50308139534883Q224.95563689217755 76.18337209302325 223.64127642706126 76.18337209302325Q220.97703224101474 76.18337209302325 219.9468578224101 76.69845930232557Q218.91668340380545 77.2135465116279 218.61473572938684 78.86537790697673Q218.31278805496825 80.51720930232558 218.31278805496825 84.78Q218.31278805496825 89.04279069767442 218.61473572938684 90.69462209302326Q218.91668340380545 92.34645348837209 219.9468578224101 92.86154069767443Q220.97703224101474 93.37662790697675 223.64127642706126 93.37662790697675Q225.70162526427058 93.37662790697675 227.76197410147986 93.05691860465116V96.71581395348838Q226.80284619450313 96.96447674418604 225.34639270613104 97.12433139534883Q223.88993921775895 97.28418604651162 222.6111020084566 97.28418604651162Z M237.04683403805493 97.0V76.6096511627907H230.97235729386887V72.56H247.63276427061308V76.6096511627907H241.55828752642702V97.0Z M251.97989164904854 97.0V72.56H266.2602404862578V76.46755813953489H256.49134513742064V82.68412790697674H264.9103567653276V86.62720930232558H256.49134513742064V93.09244186046512H266.2602404862578V97.0Z M271.67306553911203 72.56H279.02637949260037Q283.5378329809725 72.56 285.438327167019 73.57241279069768Q287.3388213530655 74.58482558139535 287.81838530655386 76.91159883720931Q288.29794926004223 79.23837209302326 288.29794926004223 84.78Q288.29794926004223 90.32162790697674 287.81838530655386 92.64840116279069Q287.3388213530655 94.97517441860465 285.438327167019 95.98758720930232Q283.5378329809725 97.0 279.02637949260037 97.0H271.67306553911203ZM278.81323995771663 93.09244186046512Q281.40643763213524 93.09244186046512 282.3122806553911 92.70168604651163Q283.21812367864686 92.31093023255814 283.4845480972515 90.74790697674419Q283.7509725158562 89.18488372093023 283.7509725158562 84.78Q283.7509725158562 80.37511627906977 283.4845480972515 78.81209302325581Q283.21812367864686 77.24906976744185 282.3122806553911 76.85831395348836Q281.40643763213524 76.46755813953489 278.81323995771663 76.46755813953489H276.1845190274841V93.09244186046512Z  M311.09493657505277 97.28418604651162Q307.15185517970394 97.28418604651162 305.32240750528536 96.21848837209302Q303.4929598308667 95.15279069767442 302.8713028541225 92.59511627906977Q302.2496458773783 90.03744186046512 302.2496458773783 84.78Q302.2496458773783 79.52255813953488 302.8713028541225 76.98264534883721Q303.4929598308667 74.44273255813954 305.34016913319226 73.35927325581395Q307.18737843551787 72.27581395348837 311.09493657505277 72.27581395348837Q312.444820295983 72.27581395348837 313.8657505285411 72.45343023255813Q315.28668076109926 72.6310465116279 316.13923890063415 72.87970930232558V76.50308139534883Q313.4394714587737 76.18337209302325 312.1251109936574 76.18337209302325Q309.4608668076109 76.18337209302325 308.43069238900625 76.69845930232557Q307.4005179704016 77.2135465116279 307.098570295983 78.86537790697673Q306.7966226215644 80.51720930232558 306.7966226215644 84.78Q306.7966226215644 89.04279069767442 307.098570295983 90.69462209302326Q307.4005179704016 92.34645348837209 308.43069238900625 92.86154069767443Q309.4608668076109 93.37662790697675 312.1251109936574 93.37662790697675Q314.1854598308667 93.37662790697675 316.24580866807605 93.05691860465116V96.71581395348838Q315.28668076109926 96.96447674418604 313.83022727272714 97.12433139534883Q312.3737737843551 97.28418604651162 311.09493657505277 97.28418604651162Z M320.80607558139525 84.78Q320.80607558139525 79.2028488372093 321.28563953488367 76.78726744186046Q321.76520348837204 74.37168604651163 323.6124127906976 73.32374999999999Q325.4596220930232 72.27581395348837 329.75793604651153 72.27581395348837Q334.0562499999999 72.27581395348837 335.9212209302325 73.32374999999999Q337.78619186046507 74.37168604651163 338.26575581395343 76.78726744186046Q338.7453197674418 79.2028488372093 338.7453197674418 84.78Q338.7453197674418 90.3571511627907 338.26575581395343 92.77273255813954Q337.78619186046507 95.18831395348838 335.9212209302325 96.23625Q334.0562499999999 97.28418604651162 329.75793604651153 97.28418604651162Q325.4596220930232 97.28418604651162 323.6124127906976 96.23625Q321.76520348837204 95.18831395348838 321.28563953488367 92.77273255813954Q320.80607558139525 90.3571511627907 320.80607558139525 84.78ZM334.19834302325575 84.78Q334.19834302325575 80.2685465116279 333.96744186046504 78.65223837209302Q333.73654069767434 77.03593023255814 332.90174418604647 76.6096511627907Q332.06694767441854 76.18337209302325 329.75793604651153 76.18337209302325Q327.4489244186046 76.18337209302325 326.6318895348836 76.6096511627907Q325.8148546511627 77.03593023255814 325.583953488372 78.63447674418605Q325.3530523255813 80.23302325581395 325.3530523255813 84.78Q325.3530523255813 89.32697674418604 325.583953488372 90.92552325581394Q325.8148546511627 92.52406976744186 326.6318895348836 92.9503488372093Q327.4489244186046 93.37662790697675 329.75793604651153 93.37662790697675Q332.06694767441854 93.37662790697675 332.90174418604647 92.9503488372093Q333.73654069767434 92.52406976744186 333.96744186046504 90.90776162790698Q334.19834302325575 89.2914534883721 334.19834302325575 84.78Z M363.37622621564475 97.0V79.13180232558139H363.19860993657494L357.8701215644819 97.0H354.17570295983074L348.8827378435517 79.13180232558139H348.70512156448194V97.0H344.40680761099355V72.56H350.97860993657497L356.02291226215635 89.61116279069768H356.2360517970401L361.2803541226215 72.56H367.745586680761V97.0Z M374.08201638477794 72.56H383.60224894291747Q386.3730628964058 72.56 387.8472780126849 73.50136627906977Q389.321493128964 74.44273255813954 389.83658033826634 76.16561046511629Q390.35166754756864 77.88848837209302 390.35166754756864 80.6593023255814Q390.35166754756864 83.32354651162791 389.85434196617325 85.04642441860466Q389.3570163847779 86.76930232558139 387.8650396405919 87.78171511627906Q386.3730628964058 88.79412790697674 383.53120243128956 88.79412790697674H378.59346987315V97.0H374.08201638477794ZM382.0392256871035 84.88656976744186Q383.81538847780115 84.88656976744186 384.57913847780117 84.5490988372093Q385.3428884778012 84.21162790697674 385.5737896405919 83.37683139534883Q385.8046908033826 82.54203488372093 385.8046908033826 80.6593023255814Q385.8046908033826 78.77656976744186 385.5737896405919 77.94177325581396Q385.3428884778012 77.10697674418604 384.5969001057082 76.78726744186046Q383.85091173361513 76.46755813953489 382.1102721987314 76.46755813953489H378.59346987315V84.88656976744186Z M411.9986205073995 72.56V86.16540697674418Q411.9986205073995 90.99656976744185 411.4657716701902 93.21677325581395Q410.93292283298086 95.43697674418604 409.19228329809715 96.36058139534883Q407.45164376321344 97.28418604651162 403.57960887949247 97.28418604651162Q399.70757399577155 97.28418604651162 397.9491728329808 96.36058139534883Q396.19077167019014 95.43697674418604 395.65792283298083 93.19901162790697Q395.1250739957716 90.96104651162791 395.1250739957716 86.16540697674418V72.56H399.6720507399576V87.58633720930233Q399.6720507399576 90.39267441860466 399.8851902748413 91.49389534883721Q400.09832980972504 92.59511627906977 400.86207980972506 92.98587209302326Q401.6258298097251 93.37662790697675 403.57960887949247 93.37662790697675Q405.5333879492599 93.37662790697675 406.29713794925993 92.98587209302326Q407.06088794925995 92.59511627906977 407.2562658562367 91.51165697674418Q407.45164376321344 90.4281976744186 407.45164376321344 87.58633720930233V72.56Z M422.20708509513736 97.0V76.6096511627907H416.1326083509513V72.56H432.79301532769546V76.6096511627907H426.7185385835094V97.0Z M437.14014270613103 97.0V72.56H441.687119450317V97.0Z M460.954014270613 97.0 452.4994793868921 81.54738372093023H452.3573863636363V97.0H447.98802589852V72.56H452.60604915433396L460.7408747357293 87.2311046511628H460.8829677589851V72.56H465.2523282241014V97.0Z M479.6525369978858 86.9113953488372V83.11040697674419H487.39660676532765V96.5381976744186Q485.8691067653277 96.85790697674419 483.8442811839323 97.07104651162791Q481.81945560253695 97.28418604651162 480.22090909090906 97.28418604651162Q476.27782769556023 97.28418604651162 474.3240486257928 96.25401162790698Q472.37026955602533 95.22383720930233 471.64204281183925 92.63063953488373Q470.9138160676532 90.03744186046512 470.9138160676532 84.78Q470.9138160676532 79.59360465116279 471.65980443974627 76.98264534883721Q472.40579281183926 74.37168604651163 474.39509513742064 73.32374999999999Q476.3843974630021 72.27581395348837 480.3630021141649 72.27581395348837Q481.99707188160676 72.27581395348837 483.96861257928117 72.48895348837209Q485.9401532769556 72.70209302325581 487.2900369978858 73.02180232558139V76.68069767441861Q483.73771141649047 76.18337209302325 481.99707188160676 76.18337209302325Q478.7999788583509 76.18337209302325 477.5744265327695 76.6096511627907Q476.34887420718815 77.03593023255814 475.9048335095137 78.7410465116279Q475.46079281183927 80.44616279069767 475.46079281183927 84.78Q475.46079281183927 88.75860465116278 475.78050211416485 90.49924418604651Q476.1002114164904 92.23988372093024 477.09486257928114 92.86154069767443Q478.08951374207186 93.4831976744186 480.3274788583509 93.4831976744186Q481.85497885835093 93.4831976744186 483.0272463002114 93.30558139534884V86.9113953488372Z "></path><path fill="#F58F2D" d="M502.84028012684985 97.0V72.56H505.6821405919661V94.4068023255814H515.3444661733615V97.0Z M534.6468842494714 97.0 532.4799656448203 90.32162790697674H523.2439191331923L521.1125237843552 97.0H518.2351400634249L526.0502563424947 72.56H529.7801982029598L537.5953144820296 97.0ZM527.9685121564481 75.68604651162791H527.7908958773784L523.9543842494714 87.79947674418605H531.7339772727272Z M542.723953488372 72.56H552.2086627906976Q555.4412790697673 72.56 556.8444476744185 74.12302325581396Q558.2476162790697 75.68604651162791 558.2476162790697 78.67Q558.2476162790697 81.15662790697674 557.3417732558139 82.57755813953489Q556.4359302325581 83.99848837209302 554.4111046511628 84.42476744186047V84.56686046511628Q556.7556395348837 85.02866279069767 557.6259593023256 86.53840116279069Q558.4962790697674 88.04813953488372 558.4962790697674 90.57029069767442Q558.4962790697674 93.55424418604652 557.1108720930232 95.27712209302325Q555.725465116279 97.0 552.0665697674418 97.0H542.723953488372ZM555.4057558139534 79.23837209302326Q555.4057558139534 77.6753488372093 555.0682848837209 76.78726744186046Q554.7308139534883 75.89918604651163 553.8604941860465 75.49066860465116Q552.9901744186046 75.0821511627907 551.3916279069767 75.0821511627907H545.5658139534884V83.35906976744187H551.3916279069767Q553.416453488372 83.35906976744187 554.4111046511628 82.36441860465116Q555.4057558139534 81.36976744186046 555.4057558139534 79.23837209302326ZM555.6188953488372 90.21505813953489Q555.6188953488372 87.835 554.7130523255814 86.85811046511628Q553.8072093023255 85.88122093023256 551.5337209302326 85.88122093023256H545.5658139534884V94.51337209302325H551.5337209302326Q553.8782558139534 94.51337209302325 554.7485755813952 93.5542441860465Q555.6188953488372 92.59511627906977 555.6188953488372 90.21505813953489Z"></path></svg>';
+var SEEDS = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="22.23 15.5 58.14 55.96" role="img" aria-label="KAUST"><g id="seeds"><path fill="#f09021" d="M60.56,49.15c.87-1.19,1.3-2.73,1.3-4.62,0-1.14-.16-2.14-.43-3.03-.98.94-1.61,2.1-1.61,3.51,0,1.15.24,2.62.75,4.14Z"></path><path fill="#f09021" d="M71.49,38.22c.3,1.66.45,3.34.45,4.98,0,6.18-1.2,10.6-3.04,13.76.31.03.62.06.95.06,8.65,0,10.52-8.05,10.52-11.55,0-5.6-5.73-7.1-8.88-7.25Z"></path><path fill="#f09021" d="M62.79,44.53c0,2.35-.66,4.2-1.87,5.6.33.81.74,1.61,1.22,2.37,1.7-1.95,2.56-4.75,2.56-8.41,0-1.54-.25-2.97-.71-4.28-.65.3-1.26.65-1.8,1.05.37,1.06.6,2.27.6,3.68Z"></path><path fill="#f09021" d="M65.79,44.08c0,4.42-1.2,7.37-3,9.32.46.58.97,1.12,1.54,1.6,1.91-2.4,3.18-6,3.18-11.37,0-1.64-.22-3.29-.64-4.86-.62.16-1.25.36-1.87.59.5,1.45.79,3.02.79,4.71Z"></path><path fill="#f09021" d="M68.87,43.64c0,5.74-1.4,9.58-3.43,12.16.57.34,1.19.62,1.86.83,1.88-3,3.08-7.31,3.08-13.43,0-.86-.07-2.73-.49-4.94-.53.04-1.11.12-1.71.23.46,1.68.7,3.43.7,5.15Z"></path><path fill="#efb51d" d="M51.58,30.65c4.8,0,8.75,1.82,11.27,4.86.53-.71.96-1.48,1.32-2.23-2.28-2.86-5.77-4.77-10.6-4.77-2.54,0-7.24.61-11.38,2.18.07.5.24,1,.49,1.49,2.94-1.06,6.25-1.53,8.9-1.53Z"></path><path fill="#efb51d" d="M65.45,26.99c-.33-4.34-2.63-11.49-10.61-11.49-6.17,0-9.89,5.83-11.59,10.24,4.7-1.47,9.52-2.06,12.33-2.06,4.18,0,7.41,1.28,9.87,3.31Z"></path><path fill="#efb51d" d="M44.69,34.61c1.45-.33,3.1-.51,4.91-.51,2.7,0,7.83.48,10.83,3.74.63-.42,1.2-.91,1.7-1.45-2.31-2.9-6.02-4.65-10.54-4.65-2.48,0-5.57.42-8.32,1.36.39.53.87,1.04,1.42,1.52Z"></path><path fill="#efb51d" d="M59.57,38.34c-2.8-2.88-7.48-3.31-9.96-3.31-1.45,0-2.78.12-3.97.34,3.06,2.26,7.45,3.8,10.29,3.8,1.39,0,2.6-.32,3.64-.83Z"></path><path fill="#efb51d" d="M53.58,27.15c4.98,0,8.66,1.93,11.17,4.79.41-1.14.64-2.17.72-2.91-2.19-2.22-5.33-3.79-9.88-3.79-2.81,0-8.08.68-12.95,2.36-.18.61-.3,1.14-.38,1.6,4.02-1.45,8.44-2.05,11.33-2.05Z"></path><path fill="#cccd2b" d="M32.77,39.19c0-3.61,2.3-6.24,5.46-8.12-.46-.3-.95-.55-1.45-.72-2.97,1.94-5.05,4.51-5.05,7.85,0,2.97,1.1,6.79,3.07,10.54.33-.03.64-.09.94-.18-1.9-3.33-2.97-6.73-2.97-9.36Z"></path><path fill="#cccd2b" d="M35.35,40.19c0-3.12,2.01-5.35,4.8-6.88-.23-.49-.5-.94-.82-1.3-2.98,1.65-5.19,3.98-5.19,7.18,0,2.46,1,5.65,2.78,8.76.29-.21.57-.45.81-.73-1.52-2.5-2.38-5.05-2.38-7.03Z"></path><path fill="#cccd2b" d="M34.71,29.92c-.4-.04-.77-.05-1.11-.05-3.62,0-11.37,2.99-11.37,8.5,0,5.91,6.57,9.56,10.85,10.27-1.86-3.74-2.9-7.5-2.9-10.45,0-3.46,1.82-6.18,4.53-8.27Z"></path><path fill="#cccd2b" d="M37.81,41.19c0-2.07,1.08-3.79,3-5.02-.04-.69-.14-1.31-.29-1.86-2.39,1.34-4.08,3.26-4.08,5.88,0,1.74.7,3.94,1.97,6.14.25-.38.46-.8.67-1.23-.81-1.41-1.27-2.79-1.27-3.92Z"></path><path fill="#cccd2b" d="M38.74,41.19c0,.83.28,1.82.78,2.85.94-2.55,1.27-5.44,1.33-6.77-1.35,1.02-2.1,2.35-2.1,3.92Z"></path><path fill="#00a6aa" d="M52.58,53.09c-4.28,0-7.93-1.88-10.53-4.29-.48.19-.96.41-1.43.64,2.99,3.49,7.4,6.35,12.65,6.35,2.54,0,4.65-.45,6.34-1.33-.34-.93-.79-1.73-1.34-2.43-1.53.68-3.42,1.05-5.7,1.05Z"></path><path fill="#00a6aa" d="M35.62,52.96c-1.83,1.82-3.02,3.92-3.02,5.97,0,8.02,12.48,12.53,17.32,12.53,5.73,0,8.41-3.63,9.57-7.48-1.73.43-3.41.58-4.88.58-7.99,0-14.66-5.3-18.99-11.6Z"></path><path fill="#00a6aa" d="M47.98,47.54c-1.61,0-3.32.34-4.98.91,2.42,2.1,5.72,3.71,9.58,3.71,2.03,0,3.69-.31,5.06-.86-3.02-3.14-7.79-3.76-9.66-3.76Z"></path><path fill="#00a6aa" d="M53.27,56.89c-5.66,0-10.4-3.14-13.58-6.94-.37.2-.72.41-1.08.63,3.52,4.79,8.89,8.8,15.33,8.8,2.08,0,4.3-.32,6.32-1.23-.02-.96-.13-1.83-.33-2.62-2.08,1.02-4.46,1.37-6.67,1.37Z"></path><path fill="#00a6aa" d="M53.95,60.75c-6.9,0-12.65-4.31-16.41-9.43-.28.21-.53.42-.79.64,4.06,5.98,10.33,11.04,17.87,11.04,1.73,0,3.54-.21,5.29-.74.18-.91.28-1.81.33-2.64-2.2.87-4.45,1.12-6.29,1.12Z"></path></g></svg>';
+
+// viewer/src/opening.ts
+var NS = "http://www.w3.org/2000/svg";
+var f2 = (v) => +v.toFixed(2);
+var clamp01 = (u) => Math.min(1, Math.max(0, u));
+var easeIO = (u) => (u = clamp01(u), u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
+var easeOutExpo = (u) => u >= 1 ? 1 : 1 - 2 ** (-10 * Math.max(0, u));
+var easeBack = (u, k) => (u = clamp01(u) - 1, 1 + (k + 1) * u * u * u + k * u * u);
+var ease2 = (u) => (u = clamp01(u), u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2);
+var OFF = 1.01;
+var OPEN = { draw: 700, stagger: 110, sweep: 1e3, rest: 300, cycle: 1600, settle: 500, dive: 1100, fade: 250, into: [0.3, 0.42], deep: 5 };
+var PHI_COUNTER = "M228 344Q228 316 233 294Q238 272 252.5 249Q267 226 298 210.5Q329 195 375 190V495Q288 485 258 444Q228 403 228 344Z";
+var BY = { h: 18, faint: "#8d96a5", kaust: "#80715e" };
+var SANS = `"Noto Sans", system-ui, sans-serif`;
+var uid = 0;
+var art = (a, fill, tag) => a.body.replace(/§/g, `phx${tag}-`).replace(/#FILL/g, fill);
+var svgOf = (markup) => {
+  const t = document.createElement("template");
+  t.innerHTML = markup;
+  return t.content.firstElementChild;
+};
+function byline(svg, word) {
+  const h = BY.h;
+  const ctx = document.createElement("canvas").getContext("2d");
+  const sans = (px, wt) => (ctx.font = `${wt} ${px}px ${SANS}`, (s) => ctx.measureText(s).width);
+  const byW = sans(0.55 * h, 400)("by"), kW = sans(0.72 * h, 700);
+  const letters = [..."KAUST"], track = 0.05 * 0.72 * h, adv = letters.map((c) => kW(c) + track);
+  const lockup = svgOf(LOCKUP), seeds = svgOf(SEEDS);
+  const vb = lockup.viewBox.baseVal, lw = h * vb.width / vb.height, sv = seeds.viewBox.baseVal, sh = 1.1 * h, sw = sh * sv.width / sv.height;
+  const gap = 0.45 * h, sep = 0.9 * h;
+  const width = byW + gap + lw + sep * 2 + sw + gap * 0.6 + adv.reduce((a, b) => a + b, 0);
+  const x0 = (word.x0 + word.x1) / 2 - width / 2, top = word.y1 + 0.9 * h, mid = top + h / 2;
+  const g = document.createElementNS(NS, "g"), wid = `phx-by${uid++}`;
+  svg.append(g);
+  let x = x0;
+  g.insertAdjacentHTML("beforeend", `<text x="${f2(x)}" y="${f2(mid + 0.19 * h)}" fill="${BY.faint}" style="font: 400 ${f2(0.55 * h)}px ${SANS}">by</text>`);
+  const byT = g.lastElementChild;
+  x += byW + gap;
+  for (const [k, v] of [["x", x], ["y", top], ["width", lw], ["height", h]]) lockup.setAttribute(k, String(f2(v)));
+  g.append(lockup);
+  x += lw + sep;
+  g.insertAdjacentHTML("beforeend", `<rect x="${f2(x)}" y="${f2(top)}" width="${f2(0.1 * h)}" height="${f2(h)}" fill="${BY.faint}"/>`);
+  const rule = g.lastElementChild;
+  x += sep;
+  for (const [k, v] of [["x", x], ["y", mid - sh / 2], ["width", sw], ["height", sh]]) seeds.setAttribute(k, String(f2(v)));
+  g.append(seeds);
+  x += sw + gap * 0.6;
+  const ks = letters.map((c, i) => {
+    g.insertAdjacentHTML("beforeend", `<text x="${f2(x)}" y="${f2(mid + 0.26 * h)}" fill="${BY.kaust}" style="font: 700 ${f2(0.72 * h)}px ${SANS}">${c}</text>`);
+    x += adv[i];
+    return g.lastElementChild;
+  });
+  const paths = [...lockup.querySelectorAll("path")], A = paths.slice(0, 2), stripes = paths.slice(2, 6), words2 = paths.slice(6);
+  const up = [77.59, -94], n = Math.hypot(up[0], up[1]), D = 150, from2 = [-up[0] / n * D, -up[1] / n * D];
+  const trails = stripes.map(
+    (s) => [0.4, 0.22, 0.1].map((op) => {
+      const c = s.cloneNode();
+      c.dataset.op = String(op);
+      s.before(c);
+      return c;
+    })
+  );
+  const outline = A.map((a) => {
+    const c = a.cloneNode();
+    for (const [k, v] of [["fill", "none"], ["stroke", "#1D3E72"], ["stroke-width", "1.1"], ["stroke-linejoin", "round"], ["pathLength", "1"], ["stroke-dasharray", "1 2"]]) c.setAttribute(k, v);
+    a.after(c);
+    return c;
+  });
+  const wg = document.createElementNS(NS, "g");
+  words2[0]?.before(wg);
+  words2.forEach((w) => wg.append(w));
+  lockup.insertAdjacentHTML("afterbegin", `<defs><clipPath id="${wid}"><rect x="97.5" y="-50" width="1000" height="200"/></clipPath></defs>`);
+  const clipped = document.createElementNS(NS, "g");
+  wg.before(clipped);
+  clipped.append(wg);
+  clipped.setAttribute("clip-path", `url(#${wid})`);
+  const at = (e, dx, dy) => e.setAttribute("transform", `translate(${f2(dx)} ${f2(dy)})`);
+  return {
+    x0,
+    x1: x0 + width,
+    y1: top + h,
+    frame(t) {
+      byT.setAttribute("opacity", String(f2(clamp01(t / 300))));
+      stripes.forEach((s, i) => {
+        const t0 = 50 + i * 70, k = easeBack((t - t0) / 950, 1.15);
+        at(s, from2[0] * (1 - k), from2[1] * (1 - k));
+        s.setAttribute("opacity", t < t0 ? "0" : "1");
+        trails[i].forEach((c, j) => {
+          const tj = t0 + (j + 1) * 40, kj = easeOutExpo((t - tj) / 900);
+          at(c, from2[0] * (1 - kj), from2[1] * (1 - kj));
+          c.setAttribute("opacity", t < tj ? "0" : String(f2(Number(c.dataset.op) * (1 - clamp01((t - tj - 350) / 300)))));
+        });
+      });
+      outline.forEach((o) => {
+        o.setAttribute("stroke-dashoffset", String(f2(1 - ease2((t - 300) / 750))));
+        o.setAttribute("opacity", String(f2(t < 300 ? 0 : 1 - clamp01((t - 1050) / 300))));
+      });
+      A.forEach((a) => a.setAttribute("opacity", String(f2(clamp01((t - 850) / 350)))));
+      words2.forEach((w, i) => at(w, -470 * (1 - easeOutExpo((t - 800 - i * 45) / 1100)), 0));
+      rule.setAttribute("opacity", t < 900 ? "0" : "1");
+      rule.setAttribute("transform", `translate(0 ${f2(mid)}) scale(1 ${f2(ease2((t - 900) / 300))}) translate(0 ${f2(-mid)})`);
+      const sk = easeBack((t - 1e3) / 550, 2.6), cx = Number(seeds.getAttribute("x")) + sw / 2, by = mid + sh / 2;
+      seeds.setAttribute("opacity", String(f2(clamp01((t - 1e3) / 200))));
+      seeds.setAttribute("transform", `translate(${f2(cx)} ${f2(by + 0.5 * h * (1 - sk))}) scale(${f2(0.2 + 0.8 * sk)}) translate(${f2(-cx)} ${f2(-by)})`);
+      ks.forEach((k, i) => k.setAttribute("opacity", t >= 1150 + i * 60 ? "1" : "0"));
+    }
+  };
+}
+function opening(box, fill, bg) {
+  const tag = String(uid++);
+  const w = WORD, size = w.size, phi = w.letters[0];
+  box.insertAdjacentHTML(
+    "beforeend",
+    `<svg class="phx-open" preserveAspectRatio="none" aria-hidden="true">
+    <defs><mask id="phx-hole${tag}" maskUnits="userSpaceOnUse" x="-1e5" y="-1e5" width="2e5" height="2e5"><rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="#fff"/>
+      <path class="phx-hole" d="${PHI_COUNTER}" fill="#000" opacity="0" transform="translate(${f2(phi.x)} ${f2(phi.y)}) scale(${size / 1e3} ${-size / 1e3})"/></mask></defs>
+    <rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="${bg}" mask="url(#phx-hole${tag})"/>${art(WOVEN, fill, tag)}</svg>`
+  );
+  const el = box.lastElementChild, hole = el.querySelector(".phx-hole");
+  const by = byline(el, WOVEN);
+  const word = { x0: Math.min(WOVEN.x0, by.x0), y0: WOVEN.y0, x1: Math.max(WOVEN.x1, by.x1), y1: by.y1 };
+  const rest = [...el.querySelectorAll(".phx-l")].filter((g) => g.dataset.ch !== "\u03A6").map((g) => [g, w.letters.find((l) => l.ch === g.dataset.ch)]);
+  const tmp = document.createElementNS(NS, "svg");
+  tmp.style.cssText = "position:absolute;width:0;height:0;visibility:hidden";
+  document.body.append(tmp);
+  tmp.innerHTML = art(MARK, fill, `${tag}m`);
+  const S = [0, 1, 2, 3].map((j) => {
+    const ps = [...el.querySelectorAll(`.phx-s${j}`)];
+    const full = ps[0].getTotalLength(), part = tmp.querySelector(`.phx-s${j}`).getTotalLength();
+    ps.forEach((p) => p.style.strokeDasharray = "1 2");
+    return { ps, full, f: part / full };
+  });
+  tmp.remove();
+  const W = () => box.clientWidth || 1, H = () => box.clientHeight || 1;
+  const fit = (r, fw, fh) => ({
+    cx: (r.x0 + r.x1) / 2,
+    cy: (r.y0 + r.y1) / 2,
+    s: Math.max((r.x1 - r.x0) / (fw * W()), (r.y1 - r.y0) / (fh * H()))
+  });
+  const P = { x: phi.x + OPEN.into[0] * size, y: phi.y - OPEN.into[1] * size };
+  const deep = () => OPEN.deep / W();
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const T1 = OPEN.draw + 3 * OPEN.stagger, T2 = T1 + 200 + OPEN.sweep + 1.5 * OPEN.stagger, T3 = T2 + OPEN.rest;
+  let doneAt = null, settled = null, end = false, raf = 0;
+  let finish = () => {
+  };
+  const t0 = performance.now();
+  const flow = (j, t) => {
+    const u = (t - T3 - j * OPEN.stagger) / OPEN.cycle;
+    if (u < 0) return 0;
+    const v = u % 1;
+    return v < 0.5 ? -OFF * easeIO(v * 2) : OFF * (1 - easeIO(v * 2 - 1));
+  };
+  const frame = (t) => {
+    if (still) t = doneAt === null ? T3 : Math.max(t, (settled ??= doneAt) + OPEN.dive);
+    let head = phi.r;
+    S.forEach((st, j) => {
+      let o;
+      if (t < T1 + 200) o = OFF - (OFF - (1 - st.f)) * easeIO((t - j * OPEN.stagger) / OPEN.draw);
+      else if (t < T3) o = (1 - st.f) * (1 - easeIO((t - T1 - 200 - j * OPEN.stagger / 2) / OPEN.sweep));
+      else if (doneAt === null || t < doneAt) o = flow(j, t);
+      else {
+        const o0 = flow(j, doneAt), u = easeIO((t - doneAt - j * OPEN.stagger / 2) / OPEN.settle);
+        o = o0 <= 0 ? u < 0.5 ? o0 + (-OFF - o0) * u * 2 : OFF * (2 - u * 2) : o0 * (1 - u);
+      }
+      st.ps.forEach((p) => p.style.strokeDashoffset = String(o));
+      if (o >= 0 && o < 1) head = Math.max(head, st.ps[0].getPointAtLength((1 - o) * st.full).x);
+    });
+    rest.forEach(([g, l]) => g.style.opacity = t < T3 ? String(f2(clamp01((head - Math.max(l.l, phi.r)) / (0.3 * (l.r - l.l))))) : "1");
+    const cm = fit(MARK, 0.45, 0.3), cw = fit(word, 0.84, 0.4);
+    const k0 = easeIO((t - T1 - 200) / (0.75 * OPEN.sweep));
+    let c = t < T1 + 200 ? cm : { cx: cm.cx + (cw.cx - cm.cx) * k0, cy: cm.cy + (cw.cy - cm.cy) * k0, s: cm.s + (cw.s - cm.s) * k0 };
+    if (doneAt !== null && t >= (settled ??= doneAt + OPEN.settle + 2 * OPEN.stagger)) {
+      const u = Math.min(1, (t - settled) / OPEN.dive), s = cw.s * Math.exp(Math.log(deep() / cw.s) * u ** 2.2), k = (s - deep()) / (cw.s - deep());
+      c = { cx: P.x + (cw.cx - P.x) * k, cy: P.y + (cw.cy - P.y) * k, s };
+      hole.setAttribute("opacity", String(f2(Math.min(1, u * 4))));
+      el.style.opacity = String(1 - Math.max(0, (t - settled - OPEN.dive) / OPEN.fade));
+      if (t >= settled + OPEN.dive + OPEN.fade) end = true;
+    }
+    by.frame(still ? 1e9 : t - (T2 - 300));
+    el.setAttribute("viewBox", [c.cx - W() * c.s / 2, c.cy - H() * c.s / 2, W() * c.s, H() * c.s].map(f2).join(" "));
+  };
+  const tick = () => {
+    frame(performance.now() - t0);
+    if (end) return void (el.remove(), finish());
+    raf = requestAnimationFrame(tick);
+  };
+  raf = requestAnimationFrame(tick);
+  return {
+    done() {
+      doneAt ??= Math.max(performance.now() - t0, T3);
+      return new Promise((ok) => finish = ok);
+    },
+    stop() {
+      cancelAnimationFrame(raf);
+      el.remove();
+      finish();
+    }
+  };
+}
+
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
 var OVERLEAF_WORDS = {
@@ -1086,7 +1444,7 @@ var OVERLEAF_WORDS = {
   openFailed: "Overleaf's PDF is one click away. Reload the tab to try again.",
   reading: "Your project's files stay in this browser: read from Overleaf, typeset here.",
   keptIn: "this browser",
-  steps: ["Project", "Packages", "Typesetting"]
+  steps: ["Reading the project", "Fetching packages", "Typesetting"]
 };
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
@@ -1096,6 +1454,7 @@ function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.floor(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
 }
+var esc3 = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 var PATHS = {
   preview: "M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
   chevron_left: "M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z",
@@ -1107,306 +1466,27 @@ var PATHS = {
   download: "M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z",
   error: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z",
   warning: "M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z",
-  info: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
+  info: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z",
+  refresh: "M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z",
+  expand_more: "M16.59 8.59 12 13.17 7.41 8.59 6 10l6 6 6-6z",
+  more_horiz: "M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z",
+  search: "M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
+  compare: "M9.01 14H2v2h7.01v3L13 15l-3.99-4v3zm5.98-1v-3H22V8h-7.01V5L11 9l3.99 4z",
+  close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+  log: "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z",
+  toc: "M3 9h14V7H3v2zm0 4h14v-2H3v2zm0 4h14v-2H3v2zm16 0h2v-2h-2v2zm0-10v2h2V7h-2zm0 6h2v-2h-2v2z",
+  dark: "M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
+  keyboard: "M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z",
+  tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"
 };
 var icon = (name, size = 18) => `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
-var stepsHtml = (names, state) => `<div class="steps">${names.map((n, k) => `<span class="${state[k]}">${n}</span>`).join("<i></i>")}</div>`;
-var CSS = `
-:host { all: initial; }
-* { box-sizing: border-box; }
-.win {
-  --dark: var(--bg-dark-primary, #1b222c); --dark2: var(--bg-dark-secondary, #2f3a4c); --dark3: var(--bg-dark-tertiary, #495365);
-  --light: var(--bg-light-primary, #fff); --light2: var(--bg-light-secondary, #f4f5f6); --light3: var(--bg-light-tertiary, #e7e9ee);
-  --accent: var(--bg-accent-01, #098842); --accent2: var(--bg-accent-02, #1e6b41);
-  --fg: var(--content-primary, #1b222c); --fg2: var(--content-secondary, #495365); --fg-dark: var(--content-primary-dark, #f4f5f6);
-  --fg2-dark: var(--content-placeholder-dark, #8d96a5);
-  --danger: var(--content-danger, #b83a33); --warn: var(--content-warning, #8f5514); --info: var(--content-info, #366cbf);
-  --ok-dark: var(--content-positive-dark, #53b57f); --warn-dark: var(--content-warning-dark, #de8014); --danger-dark: var(--content-danger-dark, #e36d66);
-  --divider: var(--border-divider, #e7e9ee); --r: var(--border-radius-base, 4px); --r2: var(--border-radius-medium, 8px);
-  position: fixed; z-index: 2147483000; display: flex; flex-direction: column;
-  min-width: 300px; min-height: 180px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px);
-  resize: both; overflow: hidden;
-  background: var(--light); color: var(--fg); border: 1px solid var(--dark3); border-radius: var(--r2);
-  box-shadow: 0 8px 28px rgba(27,34,44,.35);
-  font: 13px/1.4 "Noto Sans", system-ui, sans-serif;
-}
-.icon { display: block; flex: none; }
-header { display: flex; align-items: center; gap: 2px; height: 40px; padding: 0 6px 0 10px; background: var(--dark); color: var(--fg-dark);
-  cursor: grab; user-select: none; flex: none; }
-header:active { cursor: grabbing; }
-.title { font-weight: 600; font-size: 14px; margin: 0 6px 0 4px; white-space: nowrap; }
-.badge { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 9999px; background: var(--dark2); color: var(--fg2-dark); white-space: nowrap; }
-.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 2px 8px; border-radius: 9999px; background: var(--dark2);
-  white-space: nowrap; cursor: pointer; margin-right: 4px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg2-dark); }
-.chip.ok .dot { background: var(--ok-dark); } .chip.warning .dot { background: var(--warn-dark); } .chip.error .dot { background: var(--danger-dark); }
-.chip.busy .dot { animation: pulse 1s infinite; } @keyframes pulse { 50% { opacity: .3; } }
-.grow { flex: 1; }
-.group { display: inline-flex; align-items: center; }
-button.ib { all: unset; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: var(--r); color: inherit; cursor: pointer; }
-header button.ib:hover { background: var(--dark2); } .bar button.ib:hover { background: var(--light3); }
-button.ib:focus-visible { outline: 2px solid var(--info); }
-button.ib[aria-pressed=true] { background: var(--dark3); }
-button.ib:disabled { opacity: .35; cursor: default; }
-.pno { font-size: 12px; min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
-.bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--light2); border-bottom: 1px solid var(--divider);
-  color: var(--fg2); flex: none; flex-wrap: wrap; }
-.bar label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
-select { font: inherit; font-size: 12px; color: var(--fg); background: var(--light); border: 1px solid var(--border-primary, #677283);
-  border-radius: var(--r); padding: 2px 4px; max-width: 140px; }
-button.btn { font: inherit; font-size: 12px; font-weight: 600; color: #fff; background: var(--accent); border: 0; border-radius: 9999px;
-  padding: 4px 12px 4px 8px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
-button.btn:hover { background: var(--accent2); }
-
-/* the problems: a card floating over the pages' top right, never moving them; one line
-   (the counts, the first problem, its place, how many more), the list below it when opened */
-.errs { position: absolute; z-index: 5; top: 8px; right: 22px; width: min(460px, calc(100% - 44px)); max-height: calc(100% - 16px);
-  display: none; flex-direction: column; background: var(--light); color: var(--fg); border: 1px solid var(--divider);
-  border-radius: var(--r2); box-shadow: 0 6px 20px rgba(27,34,44,.3); overflow: hidden; }
-.errs.on { display: flex; }
-.sum { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 0 4px 0 10px; font-size: 12px; color: var(--fg2); flex: none;
-  cursor: pointer; white-space: nowrap; overflow: hidden; user-select: none; }
-.sum:hover { background: var(--light2); }
-.sum .where, .sum .more { flex: none; color: var(--fg2); }
-.sum .x { flex: none; width: 24px; height: 24px; border: 0; border-radius: 4px; background: none; color: inherit; font-size: 13px; cursor: pointer; }
-.sum .x:hover { background: var(--light3); }
-.win.diags-open .sum { border-bottom: 1px solid var(--divider); }
-.sum .n { display: inline-flex; align-items: center; gap: 2px; font-weight: 600; }
-.sum .n.error { color: var(--danger); } .sum .n.warning { color: var(--warn); } .sum .n.info { color: var(--info); }
-.sum .first { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
-.sum .caret { flex: none; transition: transform .15s; }
-.win.diags-open .sum .caret { transform: rotate(90deg); }
-.body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-/* (the contents beside the pages: PanelOptions.outline) */
-.win.has-side .body { flex-direction: row; }
-.side { display: none; flex: none; width: 240px; overflow: auto; background: var(--light); border-right: 1px solid var(--light3); color: var(--fg); }
-.win.side-on .side { display: block; }
-.keyhelp { position: absolute; z-index: 6; top: 12px; right: 12px; padding: 10px 14px; border-radius: 10px; background: rgb(27 34 44 / 96%); color: #fff; font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
-.keyhelp td { padding: 1px 8px 1px 0; vertical-align: top; }
-.keyhelp kbd { font: 11px ui-monospace, monospace; background: rgb(255 255 255 / 12%); border-radius: 4px; padding: 1px 5px; }
-/* (a problem told whole, in the drawer: problems.ts's card, as a row) */
-.diags .phx-inline { margin: 0; padding: 0; border-radius: 0; border-top: 0; box-shadow: none; max-width: none; list-style: none; }
-.diags .phx-inline > li { border-bottom: 1px solid #2c2e33; }
-.diags { position: relative; flex: 0 1 auto; min-height: 0; max-height: min(60vh, 420px); overflow: auto; background: var(--light); display: none; }
-/* (a build with no pages: nothing to cover, the list as long as the room) */
-.win.nopages .diags { max-height: none; }
-.win.diags-open .diags { display: block; }
-.diag { display: flex; gap: 6px; align-items: flex-start; padding: 5px 10px; font-size: 12px; border-top: 1px solid var(--divider); }
-.diag:first-child { border-top: 0; }
-.diag[data-line] { cursor: pointer; } .diag[data-line]:hover { background: var(--light2); }
-.diag .icon { margin-top: 1px; }
-.folded { margin-top: 6px; text-align: left; font-size: 11px; }
-.folded summary { cursor: pointer; color: var(--fg2); }
-.diag .detail, .folded .detail { margin: 4px 0 0; padding: 4px 6px; font: 11px/1.35 "DM Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--divider); border-radius: 4px; max-height: 12em; overflow: auto; }
-.diag.error .icon { color: var(--danger); } .diag.warning .icon { color: var(--warn); } .diag.info .icon { color: var(--info); }
-.diag .where { color: var(--fg2); white-space: nowrap; margin-left: auto; padding-left: 8px; font-family: "DM Mono", monospace; font-size: 11px; }
-.stage { position: relative; flex: 1; overflow: auto; background: var(--light3); padding: 12px; text-align: center; min-height: 0; }
-.stage .slot { background: #fff; box-shadow: 0 1px 3px rgba(27,34,44,.25); border-radius: 2px; }
-.stage img { max-width: 100%; }
-/* a page: MuPDF's canvas, and its text over it, transparent (selected, copied, found) */
-.phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
-.phx-page canvas { display: block; width: 100%; height: 100%; }
-.phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
-.phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
-.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: rgb(0 100 255 / 25%); }
-.stage.stale .slot canvas { opacity: .45; filter: grayscale(1); }
-.banner { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px;
-  background: var(--bg-warning-03, #fcf1e3); color: var(--warn); border-bottom: 1px solid var(--divider); }
-.stage.stale .banner { display: block; }
-/* (the engine's connection lost: the last pages kept, dimmed, still, with why) */
-.gone { position: sticky; top: -12px; z-index: 2; display: none; margin: -12px -12px 10px; padding: 8px 12px; text-align: left; font-size: 12px; font-weight: 600;
-  background: var(--bg-danger-03, #fbeceb); color: var(--danger); border-bottom: 1px solid var(--divider); }
-.stage.offline .gone { display: flex; align-items: baseline; gap: 8px; }
-.gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; font-size: 14px; line-height: 1; padding: 0 2px; }
-.stage.offline .slot { opacity: .4; pointer-events: none; }
-/* (dismissed: the pages back to normal, the state still shown, small) */
-.offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600;
-  background: var(--light); color: var(--danger); border: 1px solid var(--danger); pointer-events: none; }
-.win.offline-quiet .offpill { display: block; }
-.approx { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px; background: #fff4d6; color: #5c4400; border-bottom: 1px solid #e8c766; }
-.win.docked .approx { margin: 0; top: 0; }
-.stage.fit { overflow-x: hidden; }
-.empty { color: var(--fg2); padding: 40px 12px; font-size: 13px; }
-footer { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 10px; background: var(--light2); border-top: 1px solid var(--divider);
-  color: var(--fg2); font-size: 11px; font-variant-numeric: tabular-nums; flex: none; white-space: nowrap; overflow: hidden; }
-footer .lat { cursor: pointer; overflow: hidden; text-overflow: ellipsis; }
-footer .msg { overflow: hidden; text-overflow: ellipsis; }
-footer .msg.err { color: var(--danger); }
-.details { display: none; flex-basis: 100%; padding: 6px 0 0; font-size: 11px; color: var(--fg2); border-top: 1px solid var(--divider);
-  white-space: pre-wrap; text-align: left; font-family: "DM Mono", monospace; }
-.win.details-open .details { display: block; }
-/* docked: the preview fills the host's pane, in place of its PDF viewer */
-.win.docked { position: relative; left: auto !important; top: auto !important; width: 100% !important; height: 100% !important;
-  max-width: none; max-height: none; min-width: 0; min-height: 0; resize: none; border: 0; border-radius: 0; box-shadow: none; }
-.win.docked header { height: 34px; background: var(--light2); color: var(--fg); border-bottom: 1px solid var(--divider); cursor: default; }
-.win.docked header button.ib:hover { background: var(--light3); } .win.docked header button.ib[aria-pressed=true] { background: var(--light3); }
-.win.docked .chip { background: var(--light3); }
-.win.docked .badge { background: var(--light3); color: var(--fg2); }
-.win.docked .hide-docked { display: none; }
-.win:not(.docked) .show-docked { display: none; }
-.win.docked { background: var(--pdf-bg, var(--pane, #2f3a4c)); border: 0; }
-/* Overleaf's "dark mode PDF preview" (.pdf-dark-mode on the pane): its own filter, no shadow */
-.win.docked.pdf-dark .stage .slot canvas { filter: invert(95%) hue-rotate(180deg) brightness(90%) contrast(90%); box-shadow: none; }
-.win.docked.light .sum { background: var(--light2); color: var(--fg2); border-bottom-color: var(--divider); }
-.win.docked.light .sum:hover { background: var(--light3); } .win.docked.light .sum .first { color: var(--fg); }
-.win.docked.light .sum .n.error { color: var(--danger); } .win.docked.light .sum .n.warning { color: var(--warn); } .win.docked.light .sum .n.info { color: var(--info); }
-.win.docked.light .empty { color: var(--fg2); }
-.win.docked > header, .win.docked > footer { display: none; }
-/* (a host with no toolbar of its own: the panel's header and footer kept, PanelOptions.header) */
-.win.docked.own-header > header, .win.docked.own-header > footer { display: flex; }
-.win.docked > .bar { display: none; }
-.win.docked.sheet-open > .bar { display: flex; position: absolute; z-index: 4; top: 6px; right: 8px; width: min(340px, calc(100% - 16px));
-  flex-direction: column; align-items: stretch; gap: 8px; padding: 12px; border-radius: var(--r2); border: 1px solid var(--divider);
-  background: var(--light); box-shadow: 0 8px 24px rgba(27,34,44,.3); animation: sheet .14s ease-out; }
-.win.docked.sheet-open > .bar label { justify-content: space-between; } .win.docked.sheet-open > .bar .grow { display: none; }
-.win.docked.sheet-open .details { display: block; }
-@keyframes sheet { from { opacity: 0; transform: translateY(-4px); } }
-.pkgs { display: none; position: absolute; z-index: 4; left: 50%; transform: translateX(-50%); top: 10px; max-width: calc(100% - 24px); padding: 8px 12px; font-size: 13px; border-radius: 8px;
-  background: var(--light); color: var(--fg); border: 1px solid var(--divider); border-left: 3px solid var(--accent); box-shadow: 0 4px 14px rgba(0,0,0,.28); }
-.pkgs.on { display: flex; gap: 8px; align-items: center; }
-.pkgs > span:not(.mini) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pkgs .mini.busy i { width: 35% !important; animation: phx-busy 1.1s ease-in-out infinite; }
-.pkgs .icon { color: var(--info); }
-/* the loading card: packages downloading, then the first build */
-.load { max-width: 360px; margin: 0 auto; text-align: left; color: var(--fg2-dark); }
-.win.docked.light .load, .win:not(.docked) .load { color: var(--fg2); }
-.load h3 { margin: 0 0 10px; font: 600 14px "Noto Sans", system-ui, sans-serif; color: inherit; }
-.load .bar { display: block; height: 6px; padding: 0; border: 0; border-radius: 9999px; background: rgb(127 127 127 / 25%); overflow: hidden; }
-.load .bar i { display: block; height: 100%; background: var(--accent); border-radius: inherit; transition: width .25s ease; }
-.load .bar.busy i { width: 35% !important; animation: phx-busy 1.1s ease-in-out infinite; }
-@keyframes phx-busy { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
-.load .count { margin: 8px 0 10px; font-size: 12px; font-variant-numeric: tabular-nums; }
-.load .names { display: flex; flex-wrap: wrap; gap: 4px; min-height: 22px; }
-.load .names span { font: 11px "DM Mono", monospace; padding: 1px 6px; border-radius: 4px; background: rgb(127 127 127 / 18%); }
-.load .names span.ing { animation: phx-pulse 1s ease-in-out infinite alternate; }
-.load .names span.ok { color: var(--accent); }
-@keyframes phx-pulse { from { opacity: .45; } to { opacity: 1; } }
-.load .note { margin-top: 12px; font-size: 11px; opacity: .8; }
-.load .steps { display: flex; gap: 6px; margin: 0 0 12px; font-size: 11px; }
-.load .steps span { display: flex; align-items: center; gap: 4px; opacity: .5; }
-.load .steps span::before { content: ""; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid currentColor; box-sizing: border-box; }
-.load .steps span.now { opacity: 1; font-weight: 600; }
-.load .steps span.now::before { background: var(--accent); border-color: var(--accent); animation: phx-pulse .8s ease-in-out infinite alternate; }
-.load .steps span.ok { opacity: .8; }
-.load .steps span.ok::before { background: currentColor; }
-.load .steps i { flex: 1; align-self: center; height: 1px; background: currentColor; opacity: .25; font-style: normal; }
-.load .bar:not(.busy) i { background-image: linear-gradient(110deg, transparent 30%, rgb(255 255 255 / 35%) 50%, transparent 70%); background-size: 200% 100%; animation: phx-shine 1.4s linear infinite; }
-@keyframes phx-shine { from { background-position: 150% 0; } to { background-position: -50% 0; } }
-.load .alive { margin-top: 8px; font-size: 12px; display: flex; gap: 6px; align-items: center; }
-.load .alive::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: phx-pulse .6s ease-in-out infinite alternate; }
-@media (prefers-reduced-motion: reduce) { .load .bar i, .load .steps span.now::before, .load .alive::before { animation: none !important; } }
-.pkgs .mini { flex: none; width: 80px; height: 4px; border-radius: 9999px; background: rgb(127 127 127 / 25%); overflow: hidden; }
-.pkgs .mini i { display: block; height: 100%; background: var(--accent); }
-.speedchip { display: none; position: absolute; right: 16px; bottom: 14px; z-index: 3; pointer-events: none; white-space: nowrap;
-  height: 24px; padding: 0 10px; border-radius: 9999px; align-items: center; gap: 4px; font-size: 12px; font-weight: 600;
-  font-variant-numeric: tabular-nums; color: #fff; background: var(--accent); box-shadow: 0 4px 12px rgba(0,0,0,.3); opacity: 0; }
-.win.docked .speedchip { display: inline-flex; }
-.win.docked.nospeed .speedchip { display: none; }
-/* who made this, always said (it looks native on purpose; it must never pass for Overleaf's) */
-.byline { display: none; position: absolute; left: 14px; bottom: 14px; z-index: 3; all: unset; }
-.win.docked .byline { display: inline-block; position: absolute; left: 14px; bottom: 14px; z-index: 3; height: 22px; padding: 0 9px;
-  max-width: calc(100% - 160px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; box-sizing: border-box; /* clear of the \u26A1 chip, now always on */
-  border-radius: 9999px; font: 600 11px/22px "Noto Sans", system-ui, sans-serif; color: var(--fg2-dark); background: rgb(27 34 44 / 55%);
-  backdrop-filter: blur(4px); cursor: pointer; }
-.win.docked .byline:hover { color: var(--fg-dark); background: rgb(27 34 44 / 80%); }
-.win.docked.light .byline { color: var(--fg2); background: rgb(255 255 255 / 75%); }
-.about { display: none; position: absolute; left: 14px; bottom: 44px; z-index: 4; width: min(320px, calc(100% - 28px)); padding: 12px;
-  border-radius: var(--r2); background: var(--dark); color: var(--fg-dark); font-size: 12px; line-height: 1.5; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
-.about.open { display: block; }
-.about .about-foot { margin-top: 8px; color: var(--fg2-dark); }
-.about code { font-size: 11px; }
-.about a { color: var(--ok-dark); }
-.speedchip.slow { background: var(--bg-warning-01, #8f5514); }
-/* the chip: always there (the setting on), its number updated in place, a brief flash on each repaint */
-.speedchip { opacity: 1; transition: background-color .4s; }
-.speedchip.flash { animation: chipflash .5s ease-out; }
-@keyframes chipflash { 0% { filter: brightness(1.45); } 100% { filter: none; } }
-@media (prefers-reduced-motion: reduce) { .speedchip.flash { animation: none; } }
-/* startup: the first paint is in, the SSA program (instant typing) still coming */
-.warmup { display: none; position: absolute; left: 12px; right: 12px; margin: 0 auto; width: fit-content; top: 10px; z-index: 3; pointer-events: none;
-  min-height: 24px; box-sizing: border-box; padding: 4px 12px; border-radius: 12px; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; line-height: 16px; text-align: center;
-  font-variant-numeric: tabular-nums; color: #fff; background: rgb(27 34 44 / 82%); box-shadow: 0 4px 12px rgba(0,0,0,.3); backdrop-filter: blur(4px); }
-.warmup.on { display: inline-flex; }
-/* a diff shown: what against, the changes, and its controls (a pill over the page, above the warmup) */
-.diffbar { display: none; position: absolute; left: 12px; right: 12px; margin: 0 auto; width: fit-content; max-width: calc(100% - 24px); top: 10px; z-index: 4;
-  box-sizing: border-box; padding: 3px 4px 3px 12px; border-radius: 14px; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; line-height: 16px;
-  font-variant-numeric: tabular-nums; color: #fff; background: rgb(27 34 44 / 88%); box-shadow: 0 4px 12px rgba(0,0,0,.3); backdrop-filter: blur(4px); }
-.diffbar.on { display: inline-flex; }
-.diffbar.on ~ .warmup, .diffbar.on ~ .pkgs { top: 46px; }
-.diffbar .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.diffbar .what small { font-weight: 400; opacity: .75; }
-.diffbar .n { white-space: nowrap; padding: 0 4px; }
-.diffbar .busy::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--accent); animation: phx-pulse .6s ease-in-out infinite alternate; }
-.diffbar button { all: unset; cursor: pointer; padding: 2px 7px; border-radius: 10px; color: #fff; white-space: nowrap; }
-.diffbar button:hover:not(:disabled) { background: rgb(255 255 255 / 16%); }
-.diffbar button:disabled { opacity: .4; cursor: default; }
-.diffbar button.cur { background: rgb(255 255 255 / 22%); }
-.diffset { display: none; position: absolute; top: 44px; left: 50%; transform: translateX(-50%); z-index: 5; width: 300px; max-width: calc(100% - 24px);
-  box-sizing: border-box; padding: 12px; border-radius: 12px; font-size: 12px; color: #fff; background: rgb(27 34 44 / 96%); box-shadow: 0 8px 24px rgba(0,0,0,.4); }
-.diffset.on { display: block; }
-.diffset h4 { margin: 0 0 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: rgb(255 255 255 / 60%); }
-.diffset h4:not(:first-child) { margin-top: 12px; }
-.diffset .opts { display: flex; flex-wrap: wrap; gap: 4px; }
-.diffset button { all: unset; cursor: pointer; padding: 3px 9px; border-radius: 10px; background: rgb(255 255 255 / 10%); color: #fff; }
-.diffset button:hover { background: rgb(255 255 255 / 18%); }
-.diffset button[aria-pressed=true] { background: var(--accent); }
-.diffset .pair { display: flex; align-items: center; gap: 6px; padding: 3px 6px 3px 3px; }
-.diffset .pair i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 30%); }
-.diffset .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
-.diffset input[type=color] { width: 30px; height: 22px; padding: 0; border: 0; background: none; cursor: pointer; }
-.diffset .sample { margin-top: 10px; padding: 6px 8px; border-radius: 6px; background: #fff; color: #1b222c; font: 13px/1.4 "Noto Serif", serif; }
-.diffset .foot { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; }
-.diffset .foot small { opacity: .6; }
-.diffbar .sep { width: 1px; align-self: stretch; margin: 2px 2px; background: rgb(255 255 255 / 25%); }
-.pkgs.on ~ .warmup { top: 56px; } /* below the strip, both said */
-.warmup .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: phx-pulse .6s ease-in-out infinite alternate; }
-.warmup .slow { color: #ffd27a; font-weight: 500; }
-.warmup.ready { background: var(--accent); }
-.warmup.ready .dot { display: none; }
-@media (prefers-reduced-motion: reduce) { .warmup .dot { animation: none; } }
-.win.docked .sum { background: var(--dark2); color: var(--fg2-dark); border-bottom: 1px solid var(--dark); height: 26px; }
-.win.docked .sum:hover { background: var(--dark3); }
-.win.docked .sum .first { color: var(--fg-dark); }
-.win.docked .sum .n.error { color: var(--danger-dark); } .win.docked .sum .n.warning { color: var(--warn-dark); } .win.docked .sum .n.info { color: #97b6e5; }
-/* as Overleaf's viewer: the scrollbar always there, pages 12 px apart and centered, and the
-   viewer min-height 100% with the first page's margin collapsing through it (so it scrolls by 12 px, as native) */
-.win.docked .viewer { min-height: 100%; }
-.win.docked .stage { background: transparent; padding: 0; overflow-y: scroll; overflow-x: auto; }
-.stage { overscroll-behavior: contain; will-change: scroll-position; }
-/* (the slots' own rules, the raster's among them: the renderer's VIEWER_CSS, before these) */
-.slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgba(27,34,44,.25); }
-.load .btns { display: flex; gap: 8px; justify-content: center; margin-top: 10px; }
-.load .btns .btn { cursor: pointer; padding: 4px 12px; border-radius: 9999px; border: 1px solid currentColor; background: none; color: inherit; font: inherit; font-weight: 600; }
-.report { display: none; position: absolute; inset: 12px; z-index: 6; padding: 12px; flex-direction: column; gap: 6px; background: var(--bg, #fff); color: var(--fg, #1b222c); border-radius: 8px; box-shadow: 0 4px 24px rgba(0,0,0,.35); font-size: 12px; }
-.report.on { display: flex; }
-.report p { margin: 0; opacity: .8; }
-.report textarea { flex: 1; min-height: 160px; font: 11px/1.35 ui-monospace, monospace; white-space: pre; resize: none; }
-.report .btns { display: flex; gap: 8px; justify-content: flex-end; }
-.report .btn, .diags .reportbtn { cursor: pointer; padding: 3px 12px; border-radius: 9999px; border: 1px solid currentColor; background: none; color: inherit; font: inherit; font-weight: 600; }
-.diags .reportbtn { margin: 6px 8px; }
-.slot .mark { position: absolute; background: rgba(255, 221, 0, .55); mix-blend-mode: multiply; border-radius: 3px; pointer-events: none;
-  box-shadow: 0 0 0 1.5px rgba(232, 172, 0, .9), 0 0 10px 1px rgba(255, 200, 0, .55);
-  transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; animation: phitex-mark-in .18s ease-out; }
-@keyframes phitex-mark-in { from { opacity: 0; transform: scale(1.15); } }
-.slot .mark.fade { opacity: 0; transition: opacity 1.2s; }
-.slot .mark.sel { transition: none; animation: none; }
-.slot .peer { position: absolute; pointer-events: none; border-radius: 2px; background: hsl(var(--hue) 70% 50% / .22);
-  box-shadow: inset 0 -1.5px 0 hsl(var(--hue) 70% 45%); }
-.slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 4px; border-radius: 3px 3px 3px 0;
-  background: hsl(var(--hue) 70% 42%); box-shadow: none; color: #fff; font: 600 10px/14px system-ui, sans-serif; white-space: nowrap; z-index: 2; }
-.slot canvas { display: block; width: 100%; height: 100%; margin: 0; box-shadow: none !important; border-radius: 0 !important; }
-.win.docked .slot { box-shadow: rgba(35,40,47,.05) 0 5px 5px, rgba(35,40,47,.03) 0 3px 14px, rgba(35,40,47,.08) 0 8px 10px; }
-.win.docked.pdf-dark .slot { filter: invert(95%) hue-rotate(180deg) brightness(90%) contrast(90%); box-shadow: none; }
-.stage.stale .slot { opacity: .45; filter: grayscale(1); }
-.win.docked .stage .slot { border-radius: 0;
-  box-shadow: rgba(35,40,47,.05) 0 5px 5px, rgba(35,40,47,.03) 0 3px 14px, rgba(35,40,47,.08) 0 8px 10px; }
-.win.docked .banner { margin: 0; top: 0; }
-.win.docked .empty { color: var(--fg2-dark); }
-.win.collapsed { resize: none; min-height: 0; min-width: 0; border-radius: 9999px; }
-.win.collapsed > :not(header) { display: none; }
-.win.collapsed header { border-radius: 9999px; padding-right: 4px; }
-.win.collapsed .hide-collapsed { display: none; }
-`;
+var ZOOMS = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
+var TIPS = [
+  { id: "compare", at: "#b-compare", title: "Compare versions", text: "See what changed since an earlier version, marked as latexdiff marks it: additions in blue, deletions struck out.", fresh: true },
+  { id: "timing", at: "#st", title: "How long it took", text: "Click the status for the last build's times and how long a keystroke takes to reach the page." },
+  { id: "rebuild", at: "#b-rec", title: "Clean rebuild", text: "Builds run by themselves as you type. Start over from a clean slate here, or clear what PhiTeX keeps." },
+  { id: "more", at: "#b-more", title: "Dark PDF and more", text: "The pages in dark mode, the log, the contents and the keys are in this menu." }
+];
 var Panel = class {
   root;
   host;
@@ -1424,88 +1504,160 @@ var Panel = class {
   ev;
   /** A page that came while text in the shown one was selected: shown once the selection ends. */
   viewer;
+  /** The host's look, and whether the panel has a bar of its own (VS Code, the watch, floating). */
+  kind;
+  ownBar;
   $ = (sel) => this.root.querySelector(sel);
   words;
   constructor(ev, store, opts = {}) {
     this.store = store;
     this.ev = ev;
     const w = this.words = { ...OVERLEAF_WORDS, ...opts.words };
+    const vscode = /\bvscode-/.test(document.body?.className ?? "");
+    this.kind = opts.host ?? (vscode ? "vscode" : "overleaf");
+    this.ownBar = !!opts.header;
     const host2 = document.createElement("phitex-preview");
     this.root = host2.attachShadow({ mode: "open" });
-    this.root.innerHTML = `<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${CSS}${PRINT_CSS}</style>
-<div class="win" role="dialog" aria-label="PhiTeX preview">
-  <header>
-    <span class="icon" aria-hidden="true">preview</span>
-    <span class="title">PhiTeX</span>
-    <span class="badge hide-collapsed" title="${w.badgeTitle}">${w.badge}</span>
+    const item2 = (id, name, label, sub = "", cls = "") => `<button type="button" role="menuitem" id="${id}"${cls ? ` class="${cls}"` : ""}>${name ? `<span class="icon">${name}</span>` : '<span class="check"></span>'}<span>${label}</span>${sub ? `<span class="sub">${sub}</span>` : ""}</button>`;
+    this.root.innerHTML = `<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${PRINT_CSS}</style>
+<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
+  <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
+  <div class="bar" role="toolbar" aria-label="PhiTeX">
+    <span class="split" id="split"><button type="button" class="go" id="go" title="Build again with the files as they are (builds run by themselves as you type)"><span class="icon">refresh</span><span class="wide">Rebuild</span></button><button type="button" class="more" id="b-rec" aria-haspopup="menu" aria-expanded="false" title="More ways to build" aria-label="More ways to build"><span class="icon">expand_more</span></button></span>
+    <button type="button" class="status" id="st" aria-haspopup="dialog" aria-expanded="false" title="The last build's times"><b id="sttext">Starting\u2026</b><span id="stmore"></span></button>
     <span class="grow"></span>
     <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
-    <span class="chip" id="chip" title="Status"><span class="dot"></span><span id="chiptext">starting\u2026</span></span>
-    <span class="group hide-collapsed">
-      <button class="ib" id="prev" title="Previous page" aria-label="Previous page"><span class="icon">chevron_left</span></button>
-      <span class="pno" id="pno">\u2013</span>
-      <button class="ib" id="next" title="Next page" aria-label="Next page"><span class="icon">chevron_right</span></button>
-      <button class="ib" id="dbg" title="Debug: check against a fresh build every 5 s" aria-pressed="false"><span class="icon">bug_report</span></button>
-    </span>
-    <button class="ib hide-docked" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button>
-  </header>
-  <div class="bar">
-    <label>Main <select id="main" title="The file PhiTeX typesets"></select></label>
-    <label>Zoom <select id="zoom"><option value="fit">Fit</option><option value="0.75">75%</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option></select></label>
-
-    <span class="grow"></span>
-    <label class="show-docked" title="Check against a fresh build every 5 s"><input type="checkbox" id="dbg2"> Debug check</label>
-    <button class="ib show-docked" id="tour" title="Take the tour" aria-label="Take the tour" style="width:auto;padding:0 6px;font-size:12px;color:var(--info)">Take the tour</button>
-    <button class="ib show-docked" id="news" title="What's new" aria-label="What's new" style="width:auto;padding:0 6px;font-size:12px;color:var(--info)">What's new</button>
-    <button class="ib" id="reload" title="Fetch the project's files again" aria-label="Reload files"><span class="icon">sync</span></button>
-    <button class="btn" id="pdf" title="PhiTeX's PDF, made locally"><span class="icon">download</span>PDF</button>
-    <div class="details" id="details"></div>
+    <button type="button" class="ib wide" id="b-find" title="Find in the pages (Ctrl+F)" aria-label="Find"><span class="icon">search</span></button>
+    <button type="button" class="ib wide" id="b-compare" title="Compare with an earlier version (latexdiff)" aria-label="Compare"><span class="icon">compare</span></button>
+    <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
+    <span class="pageno"><input id="pgin" value="\u2013" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
+    <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span class="icon">expand_more</span></button>
+    <button type="button" class="ib probs" id="b-probs" aria-haspopup="dialog" aria-expanded="false" title="Problems" hidden><span id="psev"></span><span id="pcount"></span></button>
+    <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
+    <span class="progress" id="prog"></span>
+    <div class="menu" id="m-rec" role="menu" hidden style="left:6px;top:calc(100% + 4px)">
+      ${item2("r-rebuild", "", "Rebuild")}
+      <button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
+      <hr class="if-compare"><button type="button" role="menuitem" id="r-compare" class="if-compare"><span class="check"></span><span>Compare with an earlier version\u2026<span class="desc">latexdiff against a saved version</span></span></button>
+      <hr class="if-cache"><button type="button" role="menuitem" id="r-cache" class="if-cache"><span class="check"></span><span>Clear cache\u2026<span class="desc">The packages and formats PhiTeX keeps</span></span></button>
+    </div>
+    <div class="menu timing" id="m-time" role="dialog" aria-label="Timing" hidden style="left:6px;top:calc(100% + 4px)"></div>
+    <div class="menu" id="m-zoom" role="menu" hidden style="right:60px;top:calc(100% + 4px);min-width:170px">
+      ${ZOOMS.map(([z, t], i) => `${i === 2 ? "<hr>" : ""}<button type="button" role="menuitemradio" data-zoom="${z}"><span class="check"></span>${t}</button>`).join("")}
+    </div>
+    <div class="menu" id="m-more" role="menu" hidden style="right:6px;top:calc(100% + 4px);min-width:250px">
+      ${item2("x-pdf", "download", "Download PDF")}
+      ${item2("x-log", "log", "View log")}
+      ${item2("x-contents", "toc", "Contents", "t")}
+      ${item2("x-find", "search", "Find", "Ctrl+F", "narrow")}
+      ${item2("x-compare", "compare", "Compare\u2026", "", "narrow")}
+      <hr>
+      <div class="mi"><span class="icon">dark</span>Dark PDF</div>
+      <div class="radios" id="darkpdf" role="group" aria-label="Dark PDF"><button type="button" data-dark="off">Off</button><button type="button" data-dark="on">On</button><button type="button" data-dark="theme">Match theme</button></div>
+      <button type="button" role="menuitemcheckbox" id="dbg" aria-checked="false"><span class="check"></span><span>Debug check<span class="desc">Compare with a fresh build every 5 s</span></span></button>
+      <hr>
+      ${item2("x-tips", "tips", "What's new")}
+      ${item2("x-keys", "keyboard", "Keyboard shortcuts", "?")}
+      ${item2("x-about", "info", "About PhiTeX")}
+    </div>
+    <div class="tip" id="tip" role="dialog" aria-live="polite" hidden></div>
   </div>
+  <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
-    <div class="report" id="report" role="dialog" aria-label="Debug report">
-      <b>Debug report</b>
+    <nav class="side" id="side" aria-label="Contents"></nav>
+    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div>
+    <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div></div></div>
+    <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
+    <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
+    <div class="menu sheet-pop" id="sheet" role="dialog" aria-label="PhiTeX settings" hidden>
+      <label>Main file <select id="main" title="The file PhiTeX typesets"></select></label>
+      <label id="dbglabel">Debug check <input type="checkbox" id="dbg2"></label>
+      <div class="links"><button type="button" id="reload">Reload the files</button><button type="button" id="tour">Take the tour</button><button type="button" id="news">What's new</button></div>
+      <pre class="details" id="details"></pre>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <div class="dialog keys" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
+    <div class="dialog small about" id="about" role="dialog" aria-label="About the PhiTeX preview" hidden><header>About PhiTeX<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><div>${w.about}</div></div>
+    <div class="dialog" id="logview" role="dialog" aria-label="The build's log" hidden><header>The last build's log<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><pre id="logtext"></pre></div>
+    <div class="dialog" id="report" role="dialog" aria-label="Debug report" hidden>
+      <header>Debug report</header>
       <p>Anonymized: no document text, nothing you typed, no file names (file1.tex, \u2026), no project id. Read it before you send it.</p>
       <textarea id="reporttext" readonly spellcheck="false"></textarea>
-      <div class="btns"><button class="btn" id="reportcopy">Copy</button><button class="btn" id="reportmail">Email</button><button class="btn" id="reportclose">Close</button></div>
+      <div class="btns"><button type="button" class="btn" id="reportcopy">Copy</button><button type="button" class="btn" id="reportmail">Email</button><button type="button" class="btn" id="reportclose">Close</button></div>
     </div>
-    <div class="speedchip" id="speedchip" aria-live="off" title="From the keystroke to the page on screen"></div>
-    <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
-    <div class="diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
-    <div class="pkgs" id="pkgs" role="status" aria-live="polite"></div>
-    <div class="warmup" id="warmup" role="status" aria-live="polite"></div>
-    <button class="byline" id="byline" title="About this preview">${w.byline}</button>
-    <div class="about" id="about" role="dialog" aria-label="About the PhiTeX preview">
-      ${w.about}
-    </div>
-    <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="keyhelp" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
-    <div class="offpill" id="offpill">\u25CF disconnected</div>
-    <div class="errs" id="errs" role="region" aria-label="Problems"><div class="sum" id="sum" role="button" aria-expanded="false" tabindex="0" title="Problems (click to list them; \u2715 or Esc to dismiss)"></div><div class="diags" id="diags" role="list" aria-label="Problems"></div></div>
-    <div class="stage" id="stage"><div class="gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load">${stepsHtml(w.steps, ["now", "", ""])}<h3>${w.steps[0]}\u2026</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
+    <div class="offpill" id="offpill">Disconnected</div>
+    <button type="button" class="byline" id="byline" title="About this preview">${w.byline}</button>
   </div>
-  <footer><span class="lat" id="lat" title="Click for details">\u2013</span><span class="grow"></span><span class="msg" id="msg">all local</span></footer>
-</div>`.replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "download" ? 16 : 18));
+</div>`.replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "expand_more" || n === "refresh" ? 16 : 18));
     this.host = host2;
     host2.style.display = "none";
     (document.body ?? document.documentElement).append(host2);
     this.win = this.$(".win");
-    this.$("#prev").onclick = () => this.prev();
-    this.$("#next").onclick = () => this.next();
-    this.$("#pdf").onclick = () => ev.onPdf();
-    this.$("#reload").onclick = () => ev.onReload();
-    const dbg = this.$("#dbg");
-    dbg.onclick = () => this.toggleDebug();
+    const offer = (sel, on) => this.root.querySelectorAll(sel).forEach((e) => e.hidden = !on);
+    offer(".if-compare, #b-compare, #x-compare", !!ev.onCompare);
+    offer(".if-cache", !!ev.onClearCache);
+    offer("#x-log", !!ev.onLog);
+    offer("#x-contents", !!opts.outline);
+    offer("#x-keys", !!opts.keys);
+    offer("#b-find, #x-find", !!ev.onFind);
+    offer("#dbg, #dbglabel", !!ev.onDebug);
+    offer("#tour", !!ev.onTour);
+    offer("#news", !!ev.onNews);
+    const menus = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
+    this.menus = menus;
+    for (const [b, m] of menus)
+      this.$(b).addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (m === "#logs") return this.diagnostics();
+        this.menu(m);
+      });
+    this.root.addEventListener("click", (e) => {
+      const t = e.target;
+      if (t.closest("[data-close]")) t.closest(".dialog").hidden = true;
+      if (!t.closest(".menu, .tip")) this.menu(null);
+    });
+    this.$("#go").onclick = () => this.rebuild();
+    this.$("#r-rebuild").onclick = () => (this.menu(null), this.rebuild());
+    this.$("#r-clean").onclick = () => (this.menu(null), ev.onClean());
+    this.$("#r-compare").onclick = this.$("#b-compare").onclick = this.$("#x-compare").onclick = () => (this.menu(null), ev.onCompare?.());
+    this.$("#r-cache").onclick = () => (this.menu(null), ev.onClearCache?.());
+    this.$("#pdf").onclick = this.$("#x-pdf").onclick = () => (this.menu(null), ev.onPdf());
+    this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
+    this.$("#x-contents").onclick = () => (this.menu(null), this.side());
+    this.$("#x-find").onclick = this.$("#b-find").onclick = () => (this.menu(null), this.find(true));
+    this.$("#x-tips").onclick = () => (this.menu(null), this.tips(true));
+    this.$("#x-keys").onclick = () => {
+      this.menu(null);
+      this.$("#keyhelp").hidden = false;
+    };
+    this.$("#x-about").onclick = this.$("#byline").onclick = (e) => {
+      e.stopPropagation();
+      this.menu(null);
+      this.$("#about").hidden = !this.$("#about").hidden;
+    };
+    this.$("#m-zoom").onclick = (e) => {
+      const z = e.target.closest("[data-zoom]")?.dataset.zoom;
+      if (z) this.menu(null), this.zoomTo(z);
+    };
+    this.$("#darkpdf").onclick = (e) => {
+      const d = e.target.closest("[data-dark]")?.dataset.dark;
+      if (d) this.darkPdf(d);
+    };
+    this.$("#logsx").onclick = () => this.diagnostics(false);
+    const pg = this.$("#pgin");
+    pg.onfocus = () => pg.select();
+    pg.onkeydown = (e) => {
+      if (e.key !== "Enter") return;
+      const k = Number(pg.value) - 1;
+      if (Number.isInteger(k) && k >= 0 && k < this.viewer.pages) this.viewer.goTo(k);
+      pg.blur();
+    };
+    pg.onblur = () => this.nav();
+    this.$("#dbg").onclick = () => this.toggleDebug();
     this.$("#dbg2").onchange = () => this.toggleDebug();
+    this.$("#reload").onclick = () => (this.sheet(false), ev.onReload());
     const license = this.$("#license");
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
-    if (!ev.onTour) this.$("#tour").style.display = "none";
-    if (!ev.onDebug) for (const id of ["#dbg", "#dbg2"]) (this.$(id).closest("label") ?? this.$(id)).style.display = "none";
-    if (!ev.onNews) this.$("#news").style.display = "none";
-    this.$("#byline").onclick = (e) => {
-      e.stopPropagation();
-      this.$("#about").classList.toggle("open");
-    };
-    this.$("#stage").addEventListener("pointerdown", () => this.$("#about").classList.remove("open"));
     this.$("#news").onclick = () => {
       this.sheet(false);
       ev.onNews?.();
@@ -1515,14 +1667,7 @@ var Panel = class {
       ev.onTour?.();
     };
     this.$("#main").onchange = (e) => ev.onMain(e.target.value);
-    this.$("#zoom").onchange = (e) => this.zoomTo(e.target.value);
     this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
-    this.$("#chip").onclick = () => this.prefs.collapsed && this.collapse(false);
-    this.$("#lat").onclick = () => {
-      this.prefs.details = !this.prefs.details;
-      this.win.classList.toggle("details-open", this.prefs.details);
-      this.save();
-    };
     this.$("#diags").onclick = (e) => {
       const at = e.target.closest(".phx-place[data-file]");
       if (at) {
@@ -1532,14 +1677,19 @@ var Panel = class {
       const d = e.target.closest(".diag[data-line]");
       if (d) ev.onGoto(d.dataset.file, Number(d.dataset.line));
     };
-    const sum = this.$("#sum");
-    sum.onclick = (e) => e.target.closest(".x") ? this.dismissProblems() : this.diagnostics();
-    sum.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), sum.click());
     this.$("#stage").addEventListener("pointerdown", () => {
-      this.diagsOpen(false);
+      this.menu(null);
+      this.diagnostics(false);
       this.sheet(false);
+      this.$("#about").hidden = true;
     });
-    this.root.addEventListener("keydown", (e) => e.key === "Escape" && this.escapeProblems());
+    this.root.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      const open = this.root.querySelector(".dialog:not([hidden])");
+      if (open) open.hidden = true;
+      else if (this.menus.some(([, m]) => !this.$(m).hidden)) this.menu(null);
+      else this.escapeProblems();
+    });
     this.$("#gonex").onclick = () => this.dismissOffline();
     addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("offline") && this.dismissOffline());
     window.addEventListener("keydown", (e) => {
@@ -1548,6 +1698,7 @@ var Panel = class {
         if (!ev.onShortcut?.()) this.collapse(!this.prefs.collapsed);
       }
     });
+    this.$("#stage").addEventListener("wheel", (e) => e.ctrlKey && this.ownZoom(), { capture: true, passive: true });
     this.drag();
     this.viewer = new Viewer(this.$("#viewer"), this.$("#stage"), {
       need: (k) => ev.onNeed?.(k),
@@ -1564,9 +1715,11 @@ var Panel = class {
       link: ev.onLink ? (u) => ev.onLink(u) : void 0
     });
     this.extras(opts);
+    this.darkPdf(this.darkPref(), false);
     window.addEventListener("resize", () => this.place());
     new ResizeObserver(() => {
-      if (this.docked) return this.prefs.zoom === "fit" ? this.redraw() : void 0;
+      this.fitSheet();
+      if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : void 0;
       if (this.prefs.collapsed) return;
       const r = this.win.getBoundingClientRect();
       if (r.width < 100 || r.height < 100) return;
@@ -1578,17 +1731,36 @@ var Panel = class {
       }
     }).observe(this.win);
     this.place();
+    this.zoomShown();
+    this.renderStatus();
     store?.load().then((p) => {
       this.prefs = { ...DEFAULTS, ...p };
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
     });
   }
+  /** The menus and popovers by their buttons. */
+  menus = [];
+  /** Open the menu `m` (closing the others; open already: closed), or close all (null). */
+  menu(m) {
+    for (const [b, el] of this.menus) {
+      const on = el === m && this.$(el).hidden;
+      if (el === "#logs") continue;
+      this.$(el).hidden = !on;
+      this.$(b).setAttribute("aria-expanded", String(on));
+      if (on && el === "#m-time") this.timing();
+    }
+    if (m !== "#logs" && m !== null) this.diagnostics(false);
+  }
+  /** Rebuild: the host's (the files as they are), or its reload. */
+  rebuild() {
+    (this.ev.onRebuild ?? this.ev.onReload).call(this.ev);
+  }
   /**
-   * The place on the pages for the source (Overleaf's ← arrow), as
-   * `toSource` takes it: the last single click or selection on the pages
-   * while still in view, else the top of the view; null with no page shown.
-   */
+  * The place on the pages for the source (Overleaf's ← arrow), as
+  * `toSource` takes it: the last single click or selection on the pages
+  * while still in view, else the top of the view; null with no page shown.
+  */
   spot() {
     return this.viewer.spot();
   }
@@ -1605,6 +1777,7 @@ var Panel = class {
       if (this.win.style.getPropertyValue("--pane") !== cs.backgroundColor) this.win.style.setProperty("--pane", cs.backgroundColor);
       this.win.classList.toggle("pdf-dark", pane2.classList.contains("pdf-dark-mode"));
       this.win.classList.toggle("light", document.body.dataset.theme === "light");
+      this.applyDark();
       if (h.top !== `${top}px` || h.position !== "absolute") Object.assign(h, { position: "absolute", left: "0", right: "0", bottom: "0", top: `${top}px`, zIndex: "12", flexDirection: "column" });
     }
     if (pane2 === this.docked && this.host.isConnected) return;
@@ -1631,6 +1804,7 @@ var Panel = class {
     this.wasShown = on;
     this.host.style.display = display;
     if (on && !was) this.redraw();
+    if (on && !this.last) this.step(this.stepNow || this.words.steps[0], void 0, "");
   }
   wasShown;
   save() {
@@ -1642,8 +1816,7 @@ var Panel = class {
     const x = p.x ?? window.innerWidth - p.w - 16, y = p.y ?? window.innerHeight - p.h - 16;
     s.left = `${Math.max(0, Math.min(x, window.innerWidth - 120))}px`;
     s.top = `${Math.max(0, Math.min(y, window.innerHeight - 40))}px`;
-    this.$("#zoom").value = p.zoom;
-    this.win.classList.toggle("details-open", p.details);
+    this.zoomShown();
     this.collapse(p.collapsed, false);
   }
   collapse(on, save2 = true) {
@@ -1678,67 +1851,83 @@ var Panel = class {
       );
     };
   }
-  /** What the strip over the page says: packages on their way, or a build that is taking a while. */
+  /** Packages on their way after the first page, and a build running on: said in the bar, or in the corner. */
   pkgNow;
   buildSince = 0;
   actTick;
   prepSince = 0;
-  /** A build has ended with pages: a later one's strip is the quiet "updating", never "getting ready". */
+  /** A build has ended with pages: a later one is the quiet "updating", never "getting ready". */
   built = false;
-  /** A build of the core's (`on`) or its end: past 400 ms the strip says so. */
+  /** A build of the core's (`on`) or its end: past 400 ms the status says so. */
   preparing(on) {
     if (!this.words.preparing) return;
     if (!on && (this.last || this.viewer.pages > 0)) this.built = true;
     this.prepSince = on ? this.prepSince || performance.now() : 0;
     this.activity();
   }
-  /** A build started (`on`) or ended: past 400 ms the strip says so, with its time. */
-  /** A streamed open's pages so far (the strip: which page it is on). */
+  /** A streamed open's pages so far (before the first: the sheet's step; after: the status's page). */
   streamed;
   streaming(s) {
     this.streamed = s ? s.pages : void 0;
+    if (s && this.firstPending()) this.step(this.words.steps[2], void 0, `Page ${s.pages + 1}`);
     this.activity();
   }
   busy(on) {
     if (!on && (this.last || this.viewer.pages > 0)) this.built = true;
-    this.$("#chip").classList.toggle("busy", on);
     this.buildSince = on ? this.buildSince || performance.now() : 0;
     this.activity();
   }
-  /** The strip over the page: never silent while the writer waits. */
+  /** The bar's status, the progress line, and in a host without the bar the corner's note: never silent while the writer waits. */
   activity() {
-    const el = this.$("#pkgs");
     const p = this.pkgNow;
-    const prep = this.prepSince && performance.now() - this.prepSince > 400;
-    const long = !!this.words.preparing && (this.buildSince && performance.now() - this.buildSince > 400 || prep);
-    const on = (!!this.last || this.viewer.pages > 0) && (!!p || !!long);
-    el.classList.toggle("on", on);
-    if (on || this.buildSince || this.prepSince) this.actTick ??= setInterval(() => this.activity(), 250);
+    const now = performance.now();
+    const prep = !!this.prepSince && now - this.prepSince > 400;
+    const long = !!this.buildSince && now - this.buildSince > 400 || prep;
+    if (long || this.buildSince || this.prepSince || p) this.actTick ??= setInterval(() => this.activity(), 250);
     else clearInterval(this.actTick), this.actTick = void 0;
-    if (!on) return;
+    this.renderStatus();
+    if (!this.last && this.viewer.pages === 0) return;
     if (p) {
       const names = p.names.slice(0, 3).join(", ") + (p.names.length > 3 ? ` and ${p.names.length - 3} more` : "");
-      el.innerHTML = `${icon("download", 16)}<span></span><span class="mini"><i style="width:${p.pct}%"></i></span>`;
-      el.querySelector("span").textContent = `Fetching ${names}${known(p.source) ? ` from ${p.source}` : ""} (${p.done} of ${p.total})\u2026`;
-    } else if (this.built) {
-      el.innerHTML = `${icon("sync", 16)}<span></span>`;
-      el.querySelector("span").textContent = this.words.updating ?? "Updating the other pages\u2026";
-    } else if (prep) {
-      const s = (performance.now() - this.prepSince) / 1e3;
-      el.innerHTML = `${icon("sync", 16)}<span></span><span class="mini busy"><i></i></span>`;
-      el.querySelector("span").textContent = this.words.preparing.replace("{s}", s < 10 ? s.toFixed(1) : String(Math.round(s)));
-    } else {
-      const s = (performance.now() - this.buildSince) / 1e3;
-      el.innerHTML = `${icon("sync", 16)}<span></span><span class="mini busy"><i></i></span>`;
-      const page = this.streamed ? ` page ${this.streamed + 1}` : "";
-      el.querySelector("span").textContent = `Typesetting\u2026${page} ${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
+      return this.toast("pkgs", { title: `Fetching ${names}`, detail: `${p.done} of ${p.total} files${known(p.source) ? ` \xB7 from ${p.source}` : ""}`, pct: p.pct, icon: "download" });
     }
+    if (this.toastKind === "pkgs") this.toast("pkgs", null);
+    if (this.ownBar) return;
+    if (long && this.words.preparing) {
+      const s = (now - (this.buildSince || this.prepSince)) / 1e3 | 0;
+      const what = this.built ? this.words.updating ?? "Updating the other pages\u2026" : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Typesetting\u2026";
+      this.toast("build", { title: what, detail: s >= 2 ? `${s} s` : "", pct: null, icon: "refresh" });
+    } else if (this.toastKind === "build") this.toast("build", null);
   }
-  /** Packages still on their way (the loading card's), so a stop reads as one only once they are in. */
+  /** The bar's status: what is running, or how the last build went and how fast. */
+  renderStatus() {
+    const st = this.$("#st"), text = this.$("#sttext"), more = this.$("#stmore");
+    const now = performance.now();
+    const running = !!this.buildSince && now - this.buildSince > 400 || !!this.prepSince && now - this.prepSince > 400 || !!this.pkgNow;
+    const errs = this.lastStatus?.diagnostics?.filter((d) => d.severity === "error").length ?? 0;
+    let t, m = "", err = false;
+    if (this.offline) t = "Disconnected", err = true;
+    else if (this.pkgNow) t = "Fetching packages\u2026", m = `${this.pkgNow.done} of ${this.pkgNow.total}`;
+    else if (running) {
+      const s = (now - (this.buildSince || this.prepSince)) / 1e3;
+      t = this.built ? "Building\u2026" : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Building\u2026";
+      m = s >= 1 ? `${s < 10 ? s.toFixed(1) : Math.round(s)} s` : "";
+    } else if (this.warm) t = "Preparing instant typing\u2026", m = `${Math.round((Date.now() - this.warm.since) / 1e3)} s`;
+    else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet", err = !!errs;
+    else if (!this.last && this.viewer.pages === 0) t = this.stepNow || "Opening\u2026";
+    else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, err = true;
+    else t = "Built", m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
+    text.textContent = t;
+    more.textContent = m ? `\xB7 ${m}` : "";
+    st.classList.toggle("err", err);
+    this.$("#prog").classList.toggle("on", running || !this.last && this.viewer.pages === 0 && !this.offline && this.$("#empty").hidden);
+    this.$("#split").classList.toggle("busy", running);
+  }
+  /** Packages still on their way before the first page, so a stop reads as one only once they are in. */
   pkgBusy = false;
   /**
    * Before any page: a build that stopped at an error says so, in place of
-   * "Typesetting…" (a stopped job's PDF is unfinished: no page to draw).
+   * the sheet (a stopped job's PDF is unfinished: no page to draw).
    */
   stopped() {
     if (this.engineNow && !this.engineNow.ready) return this.engineCard(this.engineNow.engine, null);
@@ -1747,23 +1936,29 @@ var Panel = class {
     if (!e) return false;
     const needed = errorNeeds(e.message);
     if (needed) return this.engineCard(needed, e.message);
-    const empty = this.$("#empty");
-    empty.innerHTML = `<div class="load"><h3></h3><div class="count"></div><div class="note"></div></div>`;
+    const card = this.card();
     if (e.code === "engine") {
-      empty.querySelector("h3").textContent = "PhiTeX's engine stopped";
-      empty.querySelector(".count").textContent = e.message;
-      empty.querySelector(".note").textContent = "Your document is probably fine. Save again to retry.";
-      if (e.detail) empty.querySelector(".load").append(foldedDetail(e.detail, "Engine details"));
-      this.reportLink(empty.querySelector(".load"));
-      empty.style.display = "";
+      card.querySelector("h3").textContent = "PhiTeX's engine stopped";
+      card.querySelector(".count").textContent = e.message;
+      card.querySelector(".note").textContent = "Your document is probably fine. Save again to retry.";
+      if (e.detail) card.append(foldedDetail(e.detail, "Engine details"));
+      this.reportLink(card);
       return true;
     }
-    empty.querySelector("h3").textContent = "The build stopped before a page could be shown";
-    empty.querySelector(".count").textContent = e.message + (e.file && e.line ? ` (${e.file}:${e.line})` : "");
-    empty.querySelector(".note").textContent = this.words.stopped;
-    this.reportLink(empty.querySelector(".load"));
-    empty.style.display = "";
+    card.querySelector("h3").textContent = "The build stopped before a page could be shown";
+    card.querySelector(".count").textContent = e.message + (e.file && e.line ? ` (${e.file}:${e.line})` : "");
+    card.querySelector(".note").textContent = this.words.stopped;
+    this.reportLink(card);
     return true;
+  }
+  /** The card in place of the pages (the sheet gone): its heading, its line, its note. */
+  card() {
+    this.stopSheet();
+    const empty = this.$("#empty");
+    empty.innerHTML = `<div class="card"><h3></h3><div class="count"></div><div class="note"></div></div>`;
+    empty.hidden = false;
+    queueMicrotask(() => this.renderStatus());
+    return empty.querySelector(".card");
   }
   /** "Copy debug info" under a card, if reports are wired. */
   reportLink(card) {
@@ -1771,7 +1966,6 @@ var Panel = class {
     const b = document.createElement("button");
     b.className = "reportbtn";
     b.textContent = "Copy debug info\u2026";
-    b.style.cssText = "margin-top:10px;cursor:pointer;padding:3px 12px;border-radius:9999px;border:1px solid currentColor;background:none;color:inherit;font:inherit;font-weight:600";
     b.onclick = () => void this.report();
     card.append(b);
   }
@@ -1783,23 +1977,25 @@ var Panel = class {
     this.engineNow = e;
     this.approx = !!e.approx;
     const a = this.$("#approx");
-    a.style.display = this.approx ? "block" : "none";
+    a.classList.toggle("on", this.approx);
     a.textContent = `Approximate: needs ${ENGINES[e.engine].label}, shown with pdfLaTeX (fonts substituted, breaks may differ). ${this.words.realPdf}`;
     if (!e.ready) this.stopped();
-    else if (this.$("#empty").querySelector(".engine")) this.$("#empty").style.display = "none";
+    else if (this.$("#empty").querySelector(".engine")) this.$("#empty").hidden = true;
   }
   /**
    * The project needs `want` (its preamble, or `error`, a build that
    * stopped, says so): which engine to run it with, as buttons.
    */
   engineCard(want, error) {
-    const empty = this.$("#empty");
     const ready = ENGINES[want].ready;
-    empty.innerHTML = `<div class="load engine"><h3></h3><div class="count"></div><div class="note"></div><div class="btns"></div></div>`;
-    empty.querySelector("h3").textContent = error ? `This project needs ${want === "lualatex" ? "LuaLaTeX" : "XeLaTeX or LuaLaTeX"}` : `This project runs with ${ENGINES[want].label}`;
-    empty.querySelector(".count").textContent = error ?? "Its preamble loads a package that pdfLaTeX can't run (fontspec, unicode-math, polyglossia, \u2026), or the engine was chosen for it.";
-    empty.querySelector(".note").textContent = ready ? `Run it with ${ENGINES[want].label}?` : `\u26A1 Instant doesn't run ${ENGINES[want].label} yet: only pdfLaTeX. ${this.words.notReady}, or try pdfLaTeX if the project can do without those packages.`;
-    const btns = empty.querySelector(".btns");
+    const card = this.card();
+    card.classList.add("engine");
+    card.style.setProperty("--sev", "var(--ph-info)");
+    card.insertAdjacentHTML("beforeend", `<div class="btns"></div>`);
+    card.querySelector("h3").textContent = error ? `This project needs ${want === "lualatex" ? "LuaLaTeX" : "XeLaTeX or LuaLaTeX"}` : `This project runs with ${ENGINES[want].label}`;
+    card.querySelector(".count").textContent = error ?? "Its preamble loads a package that pdfLaTeX can't run (fontspec, unicode-math, polyglossia, \u2026), or the engine was chosen for it.";
+    card.querySelector(".note").textContent = ready ? `Run it with ${ENGINES[want].label}?` : `\u26A1 Instant doesn't run ${ENGINES[want].label} yet: only pdfLaTeX. ${this.words.notReady}, or try pdfLaTeX if the project can do without those packages.`;
+    const btns = card.querySelector(".btns");
     const offer = this.engineNow?.engine === want ? ["pdflatex"] : want === "xelatex" ? ["xelatex", "lualatex"] : [want];
     for (const e of offer) {
       const b = document.createElement("button");
@@ -1809,19 +2005,21 @@ var Panel = class {
       b.onclick = () => this.ev.onEngine?.(e);
       btns.append(b);
     }
-    empty.style.display = "";
     return true;
   }
+  /** The level and line a host's toolbar shows (ViewState's chip). */
+  chip = { level: "ok", text: "starting\u2026", title: "Status" };
   status(s) {
     this.lastStatus = s;
     queueMicrotask(() => this.stopped());
     const diags = s.diagnostics ?? [];
     const worst = diags[0]?.severity;
-    const chip2 = this.$("#chip");
     const partial = !!s.pending || s.pages === 0;
-    chip2.className = `chip ${worst === "error" ? "error" : partial || worst === "warning" ? "warning" : "ok"}`;
-    this.$("#chiptext").textContent = `${s.pages} page${s.pages === 1 ? "" : "s"}${s.pending ? " \xB7 partial" : ""}`;
-    chip2.title = (s.pending ? `${s.pending} parts not read (out of fuel or unsupported). ` : "") + (diags.length ? `${diags.length} diagnostic${diags.length === 1 ? "" : "s"}` : "No problems found") + (s.file ? ` \xB7 editing ${s.file}` : "");
+    this.chip = {
+      level: worst === "error" ? "error" : partial || worst === "warning" ? "warning" : "ok",
+      text: `${s.pages} page${s.pages === 1 ? "" : "s"}${s.pending ? " \xB7 partial" : ""}`,
+      title: (s.pending ? `${s.pending} parts not read (out of fuel or unsupported). ` : "") + (diags.length ? `${diags.length} diagnostic${diags.length === 1 ? "" : "s"}` : "No problems found") + (s.file ? ` \xB7 editing ${s.file}` : "")
+    };
     const list = this.$("#diags");
     list.innerHTML = "";
     for (const d of diags.slice(0, 50)) {
@@ -1841,16 +2039,16 @@ var Panel = class {
         row.dataset.line = String(d.line);
         row.title = `Go to ${d.file}:${d.line}`;
       }
-      row.innerHTML = `${icon(d.severity, 16)}<span class="text"></span><span class="where"></span>`;
+      row.innerHTML = `<span class="where"></span><div class="text"></div>`;
       row.querySelector(".text").textContent = d.message;
-      if (d.detail && d.code === "engine") row.querySelector(".text").append(foldedDetail(d.detail, "Engine details"));
+      if (d.detail && d.code === "engine") row.append(foldedDetail(d.detail, "Engine details"));
       else if (d.detail) {
         const pre = document.createElement("pre");
         pre.className = "detail";
         pre.textContent = d.detail;
-        row.querySelector(".text").append(pre);
+        row.append(pre);
       }
-      row.querySelector(".where").textContent = d.file ? `${d.file}${d.line ? `:${d.line}` : ""}` : "";
+      row.querySelector(".where").textContent = d.file ? `${d.file}${d.line ? `, line ${d.line}` : ""}` : "";
       list.append(row);
     }
     if (diags.length > 50) {
@@ -1866,58 +2064,32 @@ var Panel = class {
       b.onclick = (e) => (e.stopPropagation(), void this.report());
       list.append(b);
     }
-    const sum = this.$("#sum");
     const count = (sev) => diags.filter((d) => d.severity === sev).length;
-    sum.innerHTML = ["error", "warning", "info"].filter((k) => count(k)).map((k) => `<span class="n ${k}">${icon(k, 14)}${count(k)}</span>`).join("") + `<span class="first"></span><span class="where"></span><span class="more"></span>${icon("chevron_right", 16).replace('class="icon"', 'class="icon caret"')}<button type="button" class="x" title="Dismiss until the problems change (Esc)" aria-label="Dismiss">\u2715</button>`;
-    if (diags[0]) {
-      sum.querySelector(".first").textContent = diags[0].message;
-      sum.querySelector(".where").textContent = diags[0].file ? `${diags[0].file}${diags[0].line ? `:${diags[0].line}` : ""}` : "";
-      sum.querySelector(".more").textContent = diags.length > 1 ? `+${diags.length - 1} more` : "";
-    }
+    const errors = count("error"), warnings = count("warning");
+    const pb = this.$("#b-probs");
+    pb.hidden = !errors && !warnings;
+    pb.className = `ib probs ${errors ? "error" : "warning"}`;
+    pb.title = `${errors} error${errors === 1 ? "" : "s"}, ${warnings} warning${warnings === 1 ? "" : "s"}`;
+    this.$("#psev").innerHTML = icon(errors ? "error" : "warning", 16);
+    this.$("#pcount").textContent = String(errors || warnings);
+    this.$("#logshead").textContent = diags.length ? [errors && `${errors} error${errors === 1 ? "" : "s"}`, warnings && `${warnings} warning${warnings === 1 ? "" : "s"}`].filter(Boolean).join(", ") || "Notes" : "No problems";
     const nopages = s.pages === 0 && !this.last;
-    this.win.classList.toggle("nopages", nopages);
     const key = this.problemsKey();
     if (key !== this.shownKey) {
       this.shownKey = key;
-      if (key !== this.dismissed) this.dismissed = "";
-      this.diagsOpen(nopages && count("error") > 0);
+      this.diagnostics(nopages && errors > 0 && key !== this.dismissed);
     }
-    this.$("#errs").classList.toggle("on", diags.length > 0 && key !== this.dismissed);
-    if (!diags.length) this.diagsOpen(false);
+    if (!diags.length) this.diagnostics(false);
     this.stale(s);
+    this.renderStatus();
     queueMicrotask(() => this.emit());
   }
-  /**
-   * Packages downloading: said plainly, so a slow first build reads as the
-   * download's (TeX Live's files, not the project's, not Overleaf's).
-   */
-  /** The loading card's clock: when loading began, the last file that arrived, its ticker. */
-  loadT0 = 0;
-  loadLast = 0;
-  loadDone = -1;
-  loadTick;
-  loadPct = 0;
-  /** The card's live line: time so far and the last arrival, so a long fetch reads as working, not stuck. */
-  alive() {
-    const el = this.$("#empty").querySelector(".alive");
-    if (!el || this.last) {
-      clearInterval(this.loadTick);
-      this.loadTick = void 0;
-      return;
-    }
-    const now = performance.now(), s = Math.round((now - this.loadT0) / 1e3), quiet = (now - this.loadLast) / 1e3;
-    const fetching = el.dataset.phase === "fetch";
-    if (el.dataset.phase === "read") {
-      el.textContent = `Reading \xB7 ${s} s`;
-      return;
-    }
-    el.textContent = fetching ? quiet < 4 ? `Still fetching \xB7 ${s} s \xB7 files arriving` : `Still fetching \xB7 ${s} s \xB7 a large package (TikZ, fonts) is on its way` : `${this.words.steps[2]} \xB7 ${s} s`;
-    if (s >= 20 && fetching) el.textContent += " \xB7 only the first time: next visits reuse them";
-  }
-  /** The reading step's last state, and when its card last changed (redrawn at most every 50 ms). */
+  /** The reading step's last state, and when the sheet last changed (redrawn at most every 50 ms). */
   readNow;
   readDrawn = 0;
   readTimer;
+  loadDone = -1;
+  loadPct = 0;
   /**
    * Reading the project, before the packages: what is happening (the
    * download from Overleaf, each file unpacked, each figure handed to the
@@ -1926,7 +2098,6 @@ var Panel = class {
   reading(r) {
     if (this.last || this.pkgBusy || this.loadDone >= 0) return;
     this.readNow = r;
-    this.loadT0 ||= performance.now();
     const wait = 50 - (performance.now() - this.readDrawn);
     if (wait > 0) {
       this.readTimer ??= setTimeout(() => (this.readTimer = void 0, this.drawReading()), wait);
@@ -1938,71 +2109,157 @@ var Panel = class {
     const r = this.readNow;
     if (!r || this.last || this.pkgBusy || this.loadDone >= 0) return;
     this.readDrawn = performance.now();
-    const empty = this.$("#empty");
-    let card = empty.querySelector(".load.reading");
-    if (!card) {
-      empty.innerHTML = `<div class="load reading">${stepsHtml(this.words.steps, ["now", "", ""])}<h3></h3><div class="bar busy"><i></i></div><div class="alive" data-phase="read"></div><div class="count"></div><div class="names"></div><div class="note">${this.words.reading}</div></div>`;
-      card = empty.querySelector(".load.reading");
-    }
-    card.querySelector("h3").textContent = r.h;
     const pct = r.pct ?? (r.total ? Math.round(100 * (r.done ?? 0) / r.total) : void 0);
-    const bar2 = card.querySelector(".bar");
-    bar2.classList.toggle("busy", pct === void 0);
-    bar2.querySelector("i").style.width = pct === void 0 ? "" : `${pct}%`;
-    card.querySelector(".count").textContent = r.total ? `${r.done ?? 0} of ${r.total}` : "";
-    const names = card.querySelector(".names");
-    names.innerHTML = "";
-    if (r.detail) {
-      const c = document.createElement("span");
-      c.className = "ing";
-      c.textContent = r.detail;
-      names.append(c);
-    }
-    this.alive();
-    this.loadTick ??= setInterval(() => this.alive(), 1e3);
+    const count = r.total ? `${r.done ?? 0} of ${r.total}` : "";
+    this.step(r.h, pct, [r.detail, count].filter(Boolean).join(" \xB7 "));
   }
   packages(p) {
     const done = p.done?.length ?? 0;
     const total = done + p.loading.length;
-    const now = performance.now();
-    if (!this.loadT0) this.loadT0 = now;
-    if (done !== this.loadDone) {
-      this.loadDone = done;
-      this.loadLast = now;
-    }
+    if (done !== this.loadDone) this.loadDone = done;
     const pct = this.loadPct = Math.max(this.loadPct, total ? Math.round(100 * done / total) : 100);
     if (!this.last) {
-      const empty = this.$("#empty");
       if (!p.loading.length && !p.building) {
         this.pkgBusy = false;
-        if (!this.stopped()) {
-          empty.innerHTML = `<div class="load">${stepsHtml(this.words.steps, ["ok", "ok", "now"])}<h3>${this.words.steps[2]}\u2026</h3><div class="bar busy"><i></i></div><div class="alive" data-phase="tex"></div></div>`;
-          this.loadT0 ||= performance.now();
-          this.alive();
-          this.loadTick ??= setInterval(() => this.alive(), 1e3);
-        }
+        if (!this.stopped()) this.step(this.words.steps[2], void 0, `with ${done} package file${done === 1 ? "" : "s"}`);
         return;
       }
-      const recent = [...(p.done ?? []).slice(-10).map((n) => [n, "ok"]), ...p.loading.slice(0, 8).map((n) => [n, "ing"])];
-      const fetch2 = p.loading.length > 0;
       this.pkgBusy = true;
-      empty.innerHTML = `<div class="load">${stepsHtml(this.words.steps, ["ok", fetch2 ? "now" : "ok", fetch2 ? "" : "now"])}<h3></h3><div class="bar${fetch2 ? "" : " busy"}"><i style="width:${pct}%"></i></div><div class="alive" data-phase="${fetch2 ? "fetch" : "tex"}"></div><div class="count"></div><div class="names"></div><div class="note"></div></div>`;
-      this.alive();
-      this.loadTick ??= setInterval(() => this.alive(), 1e3);
-      empty.querySelector("h3").textContent = p.loading.length ? "Fetching LaTeX packages\u2026" : "Typesetting\u2026";
-      empty.querySelector(".count").textContent = p.loading.length ? `${done} of ${total} files${p.unavailable.length ? ` \xB7 ${p.unavailable.length} not found` : ""}` : `with ${done} package file${done === 1 ? "" : "s"}; a build may ask for more`;
-      const names = empty.querySelector(".names");
-      for (const [n, k] of recent) {
-        const c = document.createElement("span");
-        c.className = k;
-        c.textContent = n;
-        names.append(c);
-      }
-      empty.querySelector(".note").textContent = `Downloaded${known(p.source) ? ` from ${p.source}` : ""} once, then kept in ${this.words.keptIn}. Only package names are sent, never your files.`;
+      if (p.loading.length) {
+        const name = p.loading[0];
+        this.step(this.words.steps[1], pct, `${name} \xB7 ${done} of ${total}${p.unavailable.length ? ` \xB7 ${p.unavailable.length} not found` : ""}`);
+      } else this.step(this.words.steps[2], void 0, `with ${done} package file${done === 1 ? "" : "s"}; a build may ask for more`);
       return;
     }
-    this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source } : void 0;
+    this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source, failed: p.failed ?? [] } : void 0;
+    if (p.failed?.length && !p.loading.length) {
+      const f = p.failed[0];
+      this.toast("pkgs", { title: `Couldn't fetch ${f.name}`, detail: `${f.error}. Asked again at the next build.`, pct: null, icon: "warning", err: true });
+    }
     this.activity();
+  }
+  /**
+   * The first page's step `k` (0, 1, 2 of the words' steps), saying `text`
+   * (the host's own phases: the CLI's build); nothing once a page is shown.
+   */
+  loadStep(k, text) {
+    if (this.last) return;
+    this.step(this.words.steps[k] ?? "", void 0, text);
+  }
+  // ---- The first page's sheet: the opening playing on it, the step under it ----
+  /** The opening on the sheet (null: none playing), and whether it has played out once. */
+  anim = null;
+  opened = false;
+  ending = false;
+  /** The step the sheet says now (the status says it too). */
+  stepNow = "";
+  /** The zoom the opening set (the whole page, so the page that arrives keeps the sheet's height), until the user zooms. */
+  zoomNow = null;
+  /** Before any page and no card: the sheet is (or now goes) up. */
+  firstPending() {
+    return !this.last && this.viewer.pages === 0 && this.$("#empty").hidden;
+  }
+  /** The sheet's step: what, how far (undefined: not known), and the detail; the sheet put up first if it isn't. */
+  step(what, pct, detail = "") {
+    if (!this.firstPending()) return;
+    this.sheetUp();
+    const el = this.$("#opening");
+    this.stepNow = what;
+    el.querySelector(".what").textContent = what;
+    el.querySelector(".detail").textContent = detail;
+    const track = el.querySelector(".track");
+    track.classList.toggle("unknown", pct === void 0);
+    track.querySelector("i").style.width = pct === void 0 ? "" : `${pct}%`;
+    this.renderStatus();
+  }
+  /** The sheet up, the opening playing on it (once per panel: a later rebuild has pages). */
+  sheetUp() {
+    if (this.opened || this.anim || !this.wasShown) return;
+    const el = this.$("#opening");
+    el.hidden = false;
+    el.classList.remove("in");
+    if (this.prefs.zoom === "fit") this.zoomNow = "page";
+    this.fitSheet();
+    const dark = this.win.classList.contains("dark-pdf") || this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark");
+    this.anim = opening(el.querySelector(".sheet"), dark ? "#e4e6ea" : "#1d3e72", dark ? "#2c2e33" : "#ffffff");
+    this.animSince = performance.now();
+  }
+  /** When the opening began: a page there within 400 ms (a project already built) is shown at once, no opening. */
+  animSince = 0;
+  /** The sheet as the first page will be: an A4 page, whole in the stage, where the viewer puts page 1. */
+  fitSheet() {
+    const el = this.$("#opening");
+    if (el.hidden || this.ending) return;
+    const st = this.$("#stage");
+    const room = { w: st.clientWidth - 24, h: st.clientHeight - 24 };
+    let h = room.h, w = h * 210 / 297;
+    if (w > room.w) w = room.w, h = w * 297 / 210;
+    Object.assign(el.style, { left: `${st.offsetLeft + (st.clientWidth - w) / 2}px`, top: `${st.offsetTop + 12}px`, width: `${w}px`, height: `${h}px` });
+  }
+  /**
+   * The first page is in: the sheet eases to the page's box (its height
+   * kept, the zoom being the whole page: only its width changes), the logo
+   * settles and dives into the page beneath, and the sheet is gone.
+   */
+  sheetDown() {
+    if (!this.anim || this.ending) return;
+    if (performance.now() - this.animSince < 400) return this.stopSheet();
+    this.ending = true;
+    const el = this.$("#opening");
+    requestAnimationFrame(() => {
+      const slot = this.$("#viewer").querySelector(".slot");
+      if (slot) {
+        const r = slot.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
+        Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${r.top - b.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+      }
+      el.classList.add("in");
+      setTimeout(() => {
+        void this.anim?.done().then(() => this.stopSheet());
+      }, matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 300);
+    });
+  }
+  /** The sheet gone (played out, or a card in its place). */
+  stopSheet() {
+    const was = !!this.anim;
+    this.anim?.stop();
+    this.anim = null;
+    this.ending = false;
+    this.$("#opening").hidden = true;
+    if (was) {
+      this.opened = true;
+      this.stepNow = "";
+      this.renderStatus();
+      setTimeout(() => this.tips(false), 600);
+    }
+  }
+  /** The zoom the user has from here: the opening's whole page made theirs (a gesture starts from it), the sheet's ease stopped. */
+  ownZoom() {
+    if (!this.zoomNow) return;
+    this.prefs.zoom = this.zoomNow;
+    this.zoomNow = null;
+  }
+  // ---- The corner's note ----
+  toastKind = "";
+  toastTimer;
+  /** A note in the corner, of `kind` (a later one replaces it), or that kind's gone (null). */
+  toast(kind, t) {
+    const el = this.$("#toast");
+    if (!t) {
+      if (this.toastKind !== kind) return;
+      this.toastKind = "";
+      el.classList.add("out");
+      clearTimeout(this.toastTimer);
+      this.toastTimer = setTimeout(() => !this.toastKind && (el.hidden = true), 300);
+      return;
+    }
+    clearTimeout(this.toastTimer);
+    this.toastKind = kind;
+    el.className = `toast${t.err ? " err" : ""}`;
+    el.hidden = false;
+    el.innerHTML = `<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>` + (t.pct === null ? "" : `<div class="track"><i style="width:${t.pct}%"></i></div>`);
+    el.querySelector(".t span").textContent = t.title;
+    el.querySelector(".d").textContent = t.detail ?? "";
+    if (t.ms) this.toastTimer = setTimeout(() => this.toast(kind, null), t.ms);
   }
   /** Keep the last good page when a build ships nothing (or not this page): dimmed, with why. */
   /** When the page first went missing (a build that shipped none); its dimming waits. */
@@ -2041,6 +2298,7 @@ var Panel = class {
   connection(up, why) {
     const was = this.offline;
     this.offline = !up;
+    this.renderStatus();
     if (up) {
       this.$("#stage").classList.remove("offline");
       this.win.classList.remove("offline-quiet");
@@ -2066,17 +2324,16 @@ var Panel = class {
     cb(this.state());
   }
   state() {
-    const chip2 = this.$("#chip");
     return {
       page: this.at,
       pages: this.lastStatus?.pages ?? 0,
-      zoom: this.prefs.zoom,
+      zoom: this.zoomNow ?? this.prefs.zoom,
       debug: this.debugOn,
-      level: ["error", "warning", "ok"].find((c) => chip2.classList.contains(c)) ?? "ok",
-      chip: this.$("#chiptext").textContent ?? "",
-      chipTitle: chip2.title,
+      level: this.chip.level,
+      chip: this.chip.text,
+      chipTitle: this.chip.title,
       speed: this.speed,
-      sheet: this.win.classList.contains("sheet-open"),
+      sheet: !this.$("#sheet").hidden,
       // (the badge counts what needs a look: info is listed, not counted)
       diagCount: this.lastStatus?.diagnostics?.filter((d) => d.severity !== "info").length ?? 0,
       diagWorst: this.lastStatus?.diagnostics?.[0]?.severity ?? "",
@@ -2090,16 +2347,20 @@ var Panel = class {
   /**
    * The zoom, 1 being 100% (a PDF point at 96/72 CSS pixels). Fit is the
    * page's width, as Overleaf's viewer fits it: (clientWidth − 40) / the
-   * page's width, 40 being its scrollbar's padding.
+   * page's width, 40 being its scrollbar's padding; the whole page, its
+   * height in the stage's (12 px above and below) too.
    */
   /** Device pixels per PDF point at the current zoom: the size pages are drawn at. */
   pixelsPerPoint() {
     return 96 / 72 * this.scale() * (window.devicePixelRatio || 1);
   }
   scale() {
-    if (this.prefs.zoom !== "fit") return Number(this.prefs.zoom);
-    const pageW = (this.last?.w ?? 612) * (96 / 72);
-    return Math.max(this.$("#stage").clientWidth - 80, 200) / pageW;
+    const z = this.zoomNow ?? this.prefs.zoom;
+    if (z !== "fit" && z !== "page") return Number(z);
+    const st = this.$("#stage");
+    const width = Math.max(st.clientWidth - 40, 200) / ((this.last?.w ?? 595) * (96 / 72));
+    if (z === "fit") return width;
+    return Math.min(width, Math.max(st.clientHeight - 24, 100) / ((this.last?.h ?? 842) * (96 / 72)));
   }
   goPage(k) {
     this.viewer.goTo(k);
@@ -2133,54 +2394,24 @@ var Panel = class {
     }
     if (this.prefs.zoom === "fit") this.redraw();
   }
-  /** A button of the host's in the header, before the page controls (the CLI's Compare). */
-  /**
-   * The loading card at step `k` (0, 1, 2 of the words' steps), saying
-   * `text` (the host's own phases: the CLI's build); nothing once a page
-   * is shown.
-   */
-  loadStep(k, text) {
-    if (this.last) return;
-    clearInterval(this.loadTick);
-    this.loadTick = void 0;
-    const empty = this.$("#empty");
-    let card = empty.querySelector(".load");
-    if (!card || card.querySelector(".engine")) {
-      empty.innerHTML = `<div class="load">${stepsHtml(this.words.steps, ["", "", ""])}<h3></h3><div class="bar busy"><i></i></div><div class="alive"></div></div>`;
-      empty.style.display = "";
-      card = empty.querySelector(".load");
-    }
-    card.querySelectorAll(".steps span").forEach((s, i) => s.className = i < k ? "ok" : i === k ? "now" : "");
-    card.querySelector("h3").textContent = `${this.words.steps[k]}\u2026`;
-    let alive = card.querySelector(".alive");
-    if (!alive) card.append(alive = Object.assign(document.createElement("div"), { className: "alive" }));
-    alive.textContent = text;
-    delete alive.dataset.phase;
-  }
+  /** A button of the host's in the bar, before find (the CLI's own). */
   headerButton(label, title, onclick) {
     const b = document.createElement("button");
-    b.className = "ib txt";
+    b.type = "button";
+    b.className = "ib wide";
     b.title = title;
     b.textContent = label;
     b.onclick = () => onclick(b);
-    this.$("header .grow").after(b);
+    this.$("#b-find").before(b);
     return b;
   }
   /** The contents and the keys, as the host asked (PanelOptions). */
   extras(opts) {
     if (opts.header) this.win.classList.add("own-header");
-    if (opts.footer === false) this.win.classList.add("no-footer");
     this.findAndZoom(!!opts.keys);
     if (opts.outline) {
       this.win.classList.add("has-side");
       this.contents = new Outline(this.$("#side"), { goToPlace: (k, top) => this.viewer.goToPlace(k, top) });
-      const b = document.createElement("button");
-      b.className = "ib";
-      b.title = "Contents (t)";
-      b.setAttribute("aria-label", "Contents");
-      b.textContent = "\u2630";
-      b.onclick = () => this.side();
-      this.$("header .title").before(b);
       let on = true;
       try {
         on = localStorage.getItem("phitex.side") !== "0";
@@ -2191,7 +2422,7 @@ var Panel = class {
     if (!opts.keys) return;
     const help = this.$("#keyhelp");
     const extra = [["e", "the build's errors and warnings"], ...opts.outline ? [["t", "the contents beside the pages"]] : []];
-    help.innerHTML = `<b>Keys</b><table>${[...KEYS, ...extra].map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
+    help.innerHTML = `<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
     addEventListener(
       "keydown",
       (e) => {
@@ -2228,33 +2459,28 @@ var Panel = class {
       }
     });
   }
-  /** The problems the card was last dismissed on (shown again when they change), and those it shows. */
+  /** The problems last closed by hand (not opened by themselves again until they change), and those listed. */
   dismissed = "";
   shownKey = "";
   problemsKey() {
     return JSON.stringify((this.lastStatus?.diagnostics ?? []).map((d) => [d.severity, d.message, d.file, d.line]));
   }
-  /** The problems' list opened or closed (opening shows a dismissed card again). */
-  diagnostics(on = !this.win.classList.contains("diags-open")) {
-    if (on) {
-      this.dismissed = "";
-      this.$("#errs").classList.toggle("on", (this.lastStatus?.diagnostics ?? []).length > 0);
-    }
-    this.diagsOpen(on);
-    this.emit();
+  /** The problems' list opened or closed. */
+  diagnostics(on = this.$("#logs").hidden) {
+    const was = !this.$("#logs").hidden;
+    if (on && !(this.lastStatus?.diagnostics ?? []).length && !was) on = false;
+    if (on) this.menu(null);
+    this.$("#logs").hidden = !on;
+    this.$("#b-probs").setAttribute("aria-expanded", String(on));
+    this.win.classList.toggle("diags-open", on);
+    if (was && !on) this.dismissed = this.problemsKey();
+    if (was !== on) this.emit();
   }
-  /** The card dismissed until the problems change (its ✕, or Esc with the list closed). */
-  dismissProblems() {
-    this.dismissed = this.problemsKey();
-    this.$("#errs").classList.remove("on");
-    this.diagsOpen(false);
-    this.emit();
-  }
-  /** Esc on the problems: the list closed, else the card dismissed; false when neither was there. */
+  /** Esc on the problems: the list closed; false when it wasn't open. */
   escapeProblems() {
-    if (this.win.classList.contains("diags-open")) return this.diagnostics(false), true;
-    if (this.$("#errs").classList.contains("on")) return this.dismissProblems(), true;
-    return false;
+    if (this.$("#logs").hidden) return false;
+    this.diagnostics(false);
+    return true;
   }
   prev() {
     this.viewer.goTo(this.at - 1);
@@ -2269,30 +2495,29 @@ var Panel = class {
     this.ev.onPdf();
   }
   zoomTo(z) {
+    this.zoomNow = null;
     this.prefs.zoom = z;
     this.zoomShown();
     this.save();
     this.redraw();
     this.emit();
   }
-  /** The zoom menu at the zoom now: a zoom not on it (a pinch's) as its own entry. */
+  /** The zoom menu at the zoom now: a zoom not on it (a pinch's) by its percentage. */
   zoomShown() {
-    const sel = this.$("#zoom");
-    const z = this.prefs.zoom;
-    let own = sel.querySelector("option.own");
-    if ([...sel.options].some((o) => o.value === z && !o.classList.contains("own"))) own?.remove();
-    else {
-      own ??= sel.appendChild(Object.assign(document.createElement("option"), { className: "own" }));
-      own.value = z;
-      own.textContent = `${Math.round(Number(z) * 100)}%`;
-    }
-    sel.value = z;
+    const z = this.zoomNow ?? this.prefs.zoom;
+    const named = ZOOMS.find(([v]) => v === z);
+    this.$("#zl").textContent = named ? named[1] : `${Math.round(Number(z) * 100)}%`;
+    this.root.querySelectorAll("#m-zoom [data-zoom]").forEach((b) => {
+      const on = b.dataset.zoom === z;
+      b.setAttribute("aria-checked", String(on));
+      b.querySelector(".check").textContent = on ? "\u2713" : "";
+    });
   }
   /**
-   * A zoom gesture under way (Ctrl+wheel, a pinch): the zoom it started
-   * at, the factor so far, the place under the pointer when it began
-   * (client pixels, and on its page), and when it ends.
-   */
+  * A zoom gesture under way (Ctrl+wheel, a pinch): the zoom it started
+  * at, the factor so far, the place under the pointer when it began
+  * (client pixels, and on its page), and when it ends.
+  */
   gesture;
   /**
    * Zoom by `f` keeping the point (`px`, `py`, from the stage's top left)
@@ -2447,37 +2672,106 @@ var Panel = class {
   }
   toggleDebug() {
     this.debugOn = !this.debugOn;
-    this.$("#dbg").setAttribute("aria-pressed", String(this.debugOn));
+    this.$("#dbg").setAttribute("aria-checked", String(this.debugOn));
+    this.$("#dbg").querySelector(".check").textContent = this.debugOn ? "\u2713" : "";
     this.$("#dbg2").checked = this.debugOn;
     this.ev.onDebug?.(this.debugOn);
-    this.msg(this.debugOn ? "debug check on" : "debug check off");
+    this.msg(this.debugOn ? "Debug check on" : "Debug check off");
     this.emit();
   }
-  /** The settings sheet (docked: main file, view, reload, the latency details). */
-  sheet(on = !this.win.classList.contains("sheet-open")) {
-    this.win.classList.toggle("sheet-open", on && !!this.docked);
+  /** The settings (docked under a host's toolbar: the main file, the debug check, reload, the latency's details). */
+  sheet(on = this.$("#sheet").hidden) {
+    this.$("#sheet").hidden = !(on && !!this.docked);
     this.emit();
   }
-  /** The ⚡ chip shown or not (the popup's setting). */
-  speedChip(on) {
-    this.win.classList.toggle("nospeed", !on);
+  /** Kept for hosts that call it: the speed is the bar's status now. */
+  speedChip(_on) {
   }
-  /** A repaint reached the screen, `ms` after its keystroke: the ⚡ chip says how fast. */
+  /** A repaint reached the screen, `ms` after its keystroke: the status says how fast. */
   painted(ms) {
     this.speed = { ms, at: performance.now() };
-    const chip2 = this.$("#speedchip");
-    chip2.textContent = `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
-    chip2.classList.toggle("slow", ms > 100);
-    chip2.classList.remove("flash");
-    void chip2.offsetWidth;
-    chip2.classList.add("flash");
+    this.renderStatus();
     this.emit();
   }
+  // ---- Dark PDF: the user's choice, Off by default (a static filter: it inverts figures too) ----
+  darkPref() {
+    try {
+      const d = localStorage.getItem("phitex.darkpdf");
+      return d === "on" || d === "theme" ? d : "off";
+    } catch {
+      return "off";
+    }
+  }
+  dark = "off";
+  darkQuery = matchMedia("(prefers-color-scheme: dark)");
+  /** Dark pages off, on, or as the host's theme is; remembered on this machine. */
+  darkPdf(d, save2 = true) {
+    this.dark = d;
+    if (save2)
+      try {
+        localStorage.setItem("phitex.darkpdf", d);
+      } catch {
+      }
+    this.root.querySelectorAll("#darkpdf [data-dark]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.dark === d)));
+    this.darkQuery.onchange = () => this.applyDark();
+    this.applyDark();
+  }
+  /** Whether the host's theme is dark: Overleaf's (dock() says), VS Code's (its body's class), the system's. */
+  hostDark() {
+    if (this.kind === "overleaf") return !this.win.classList.contains("light");
+    if (this.kind === "vscode") return !/\bvscode-light\b/.test(document.body.className);
+    return this.darkQuery.matches;
+  }
+  applyDark() {
+    this.win.classList.toggle("dark-pdf", this.dark === "on" || this.dark === "theme" && this.hostDark());
+  }
+  // ---- Feature tips, each once (own-bar hosts; Overleaf's toolbar has the extension's) ----
+  tipAt = -1;
+  tipList = [];
+  /** The tips not seen yet (`all`: every one, What's new), from the first. */
+  tips(all) {
+    if (!this.ownBar || this.prefs.collapsed) return;
+    let seen = [];
+    try {
+      seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
+    } catch {
+    }
+    const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare));
+    this.tipList = all ? offered : offered.filter((t) => !seen.includes(t.id));
+    this.tip(0);
+  }
+  tip(i) {
+    const el = this.$("#tip");
+    this.root.querySelectorAll(".ringed").forEach((e) => e.classList.remove("ringed"));
+    this.tipAt = i;
+    const t = this.tipList[i];
+    if (!t) return void (el.hidden = true);
+    try {
+      const seen = new Set(JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]"));
+      seen.add(t.id);
+      localStorage.setItem("phitex.tips.seen", JSON.stringify([...seen]));
+    } catch {
+    }
+    let target = this.$(t.at);
+    if (!target || !target.offsetParent) target = this.$("#b-more");
+    target.classList.add("ringed");
+    el.innerHTML = `<h4>${t.fresh ? '<span class="new">New</span>' : ""}${esc3(t.title)}</h4><p>${esc3(t.text)}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`;
+    el.hidden = false;
+    const bar2 = this.$(".bar").getBoundingClientRect(), r = target.getBoundingClientRect(), w = el.offsetWidth;
+    const cx = r.left + r.width / 2 - bar2.left, left = Math.max(8, Math.min(bar2.width - w - 8, cx - w / 2));
+    Object.assign(el.style, { left: `${left}px`, top: `${r.bottom - bar2.top + 9}px` });
+    el.style.setProperty("--ax", `${cx - left}px`);
+    el.onclick = (e) => {
+      e.stopPropagation();
+      const a = e.target.closest("[data-t]")?.dataset.t;
+      if (a) this.tip(a === "next" ? i + 1 : -1);
+    };
+  }
   /**
-   * The diff's bar over the page (null: none): against which version, the
-   * changes and the one at, and its controls. `showing` "diff" or "current":
-   * which of the two the page is (toggled with "d").
-   */
+  * The diff's bar over the page (null: none): against which version, the
+  * changes and the one at, and its controls. `showing` "diff" or "current":
+  * which of the two the page is (toggled with "d").
+  */
   diffBar(d, on) {
     const el = this.$("#diffbar");
     if (!d) {
@@ -2485,9 +2779,9 @@ var Panel = class {
       el.innerHTML = "";
       return;
     }
-    const esc4 = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
-    const n = d.busy ? `<span class="n busy">${esc4(d.busy)}</span>` : `<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
-    el.innerHTML = `<span class="what" title="${esc4(d.title)}">Diff vs ${esc4(d.title)} <small>${esc4(d.when)}</small></span><button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>\u2039</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>\u203A</button><span class="sep"></span><button data-a="toggle" class="${d.showing === "current" ? "cur" : ""}" title="Show the ${d.showing === "diff" ? "current version" : "diff"} (D)">${d.showing === "diff" ? "Current" : "Diff"}</button><button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>\u2B07 PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>\u2B07 .tex</button><button data-a="settings" title="Diff style: colors, markup" aria-label="Diff style">\u2699</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">\u2715</button>`;
+    const esc5 = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+    const n = d.busy ? `<span class="n busy">${esc5(d.busy)}</span>` : `<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
+    el.innerHTML = `<span class="what" title="${esc5(d.title)}">Diff vs ${esc5(d.title)} <small>${esc5(d.when)}</small></span><button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>\u2039</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>\u203A</button><span class="sep"></span><button data-a="toggle" class="${d.showing === "current" ? "cur" : ""}" title="Show the ${d.showing === "diff" ? "current version" : "diff"} (D)">${d.showing === "diff" ? "Current" : "Diff"}</button><button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>\u2B07 PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>\u2B07 .tex</button><button data-a="settings" title="Diff style: colors, markup" aria-label="Diff style">\u2699</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">\u2715</button>`;
     el.className = "diffbar on";
     el.onclick = (e) => {
       const a = e.target.closest("button[data-a]")?.dataset.a;
@@ -2553,65 +2847,74 @@ var Panel = class {
       if (i.dataset.c) set({ [i.dataset.c]: i.value });
     };
   }
+  /** Between the first paint and instant typing (since when); the status says so, or the corner where there is no bar. */
+  warm = null;
   warmTimer;
-  /** Startup: the first paint is in, instant typing still being prepared (a pill over the page, the time going); then "ready", briefly. */
+  /** Startup: the first paint is in, instant typing still being prepared (the time going); then "ready", briefly. */
   warmup(w) {
-    const el = this.$("#warmup");
     clearInterval(this.warmTimer);
     if (w.state === "ready") {
-      el.className = "warmup on ready";
-      el.innerHTML = `<span class="dot"></span>Instant typing ready`;
-      this.warmTimer = setTimeout(() => el.className = "warmup", 2500);
+      this.warm = null;
+      this.renderStatus();
+      if (!this.ownBar) this.toast("warm", { title: "Instant typing ready", pct: null, ms: 2500 });
       return;
     }
-    const since = w.since ?? Date.now();
+    this.warm = { since: w.since ?? Date.now() };
     const tick = () => {
-      const s = Math.round((Date.now() - since) / 1e3);
-      el.innerHTML = `<span class="dot"></span><span>Preview ready \xB7 preparing instant typing\u2026 ${s} s${w.slow ? ` <span class="slow">\xB7 edits slower until ready</span>` : ""}</span>`;
+      this.renderStatus();
+      if (this.ownBar || !this.warm) return;
+      const s = Math.round((Date.now() - this.warm.since) / 1e3);
+      this.toast("warm", { title: "Preparing instant typing\u2026", detail: `${s} s${w.slow ? " \xB7 edits are slower until it is ready" : ""}`, pct: null });
     };
-    el.className = "warmup on";
     tick();
     this.warmTimer = setInterval(tick, 1e3);
   }
-  /** The problems' list, below the card's line (the card floats over the pages, never moving them). */
-  diagsOpen(on) {
-    this.win.classList.toggle("diags-open", on);
-    this.$("#sum").setAttribute("aria-expanded", String(on));
-  }
+  /** The last build's numbers, as the session says them: a line, and the lines behind it. */
+  lat = null;
   latency(summary, details) {
-    this.$("#lat").textContent = summary;
-    if (details) this.$("#details").textContent = details;
+    this.lat = { summary, details: details ?? this.lat?.details };
+    this.$("#details").textContent = details ?? summary;
+    if (!this.$("#m-time").hidden) this.timing();
   }
+  /** The timing popover: the last build's line, its parts as the session lists them, the last message. */
+  timing() {
+    const el = this.$("#m-time");
+    const rows = (this.lat?.details ?? "").split("\n").filter(Boolean).map((l) => l.trim().split(/\s{2,}/)).map(([k, ...v]) => `<tr><td>${esc3(k)}</td><td>${esc3(v.join(" "))}</td></tr>`).join("");
+    const ms = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
+    el.innerHTML = `<h3>${ms ? `Keystroke to page: ${ms}` : "The last build"}</h3>` + (rows ? `<table>${rows}</table>` : "") + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+    el.querySelector(".foot").textContent = this.lat?.summary ?? "No build yet.";
+    el.querySelector(".msg").textContent = this.msgText;
+  }
+  /** The last message (connected, files read, a debug check's result), shown in the timing popover. */
+  msgText = "";
+  msgErr = false;
   msg(t, err = false) {
-    const m = this.$("#msg");
-    m.textContent = t;
-    m.className = `msg${err ? " err" : ""}`;
-    m.title = t;
-    m.onclick = null;
-    m.style.cursor = "";
+    this.msgText = t;
+    this.msgErr = err;
+    if (!this.$("#m-time").hidden) this.timing();
   }
   error(t) {
     this.msg(t, true);
     if (!this.last && !this.pkgBusy) {
-      clearInterval(this.loadTick);
-      this.loadTick = void 0;
-      const empty = this.$("#empty");
-      empty.innerHTML = `<div class="load"><h3>Couldn't open the project</h3><div class="count"></div><div class="note"></div></div>`;
-      empty.querySelector(".note").textContent = this.words.openFailed;
-      empty.querySelector(".count").textContent = t;
+      const card = this.card();
+      card.querySelector("h3").textContent = "Couldn't open the project";
+      card.querySelector(".note").textContent = this.words.openFailed;
+      card.querySelector(".count").textContent = t;
       if (this.ev.onReport) {
         const b = document.createElement("button");
         b.className = "reportbtn";
         b.textContent = "Report a problem\u2026";
         b.onclick = () => void this.report();
-        empty.querySelector(".load").append(b);
+        card.append(b);
       }
+      return;
     }
+    this.toast("msg", { title: "Something went wrong", detail: t, pct: null, icon: "error", err: true, ms: 8e3 });
     if (this.ev.onReport) {
-      const m = this.$("#msg");
-      m.title = `${t} \u2014 click for a debug report to send`;
-      m.style.cursor = "pointer";
-      m.onclick = () => void this.report();
+      const el = this.$("#toast");
+      el.style.cursor = "pointer";
+      el.title = "Click for a debug report to send";
+      el.onclick = () => (el.onclick = null, el.style.cursor = "", el.title = "", void this.report());
     }
   }
   check(r) {
@@ -2626,24 +2929,33 @@ var Panel = class {
     s.innerHTML = "";
     for (const n of names) s.append(new Option(n, n, n === main, n === main));
   }
+  /** The last build's log (the host's), in a dialog over the pages. */
+  async showLog() {
+    const box = this.$("#logview"), pre = this.$("#logtext");
+    pre.textContent = "Reading the log\u2026";
+    box.hidden = false;
+    const text = await this.ev.onLog?.().catch((e) => `Couldn't read the log: ${e instanceof Error ? e.message : String(e)}`);
+    pre.textContent = text ?? "No log yet: the first build hasn't finished.";
+  }
   redraw() {
     this.viewer?.redraw();
   }
-  /** ⌃ ⌄ and the page number, for the page in view. */
+  /** The page box, for the page in view. */
   nav() {
     const n = this.viewer.pages;
     const k = this.at;
-    this.$("#pno").textContent = n ? `${k + 1} / ${n}` : "\u2013 / 0";
-    this.$("#prev").disabled = k <= 0;
-    this.$("#next").disabled = k >= n - 1;
+    const pg = this.$("#pgin");
+    if (this.root.activeElement !== pg) pg.value = n ? String(k + 1) : "\u2013";
+    this.$("#pgn").textContent = String(n);
     queueMicrotask(() => this.emit());
   }
   /** The pages there are, by hash (the viewer draws the changed ones it shows). */
   layout(hashes) {
-    this.$("#empty").style.display = "none";
+    this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
     this.viewer.layout(hashes);
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
+    if (hashes.length) this.sheetDown();
     this.nav();
   }
   /** The editor to a page's source (a double-click on it). */
@@ -2663,16 +2975,16 @@ var Panel = class {
     const text = await this.ev.onReport?.() ?? "";
     const box = this.$("#report");
     this.$("#reporttext").value = text;
-    box.classList.add("on");
+    box.hidden = false;
     const copy = () => navigator.clipboard.writeText(text).catch(() => this.$("#reporttext").select());
     this.$("#reportcopy").onclick = () => void copy().then(() => this.$("#reportcopy").textContent = "Copied \u2713");
     const mail = this.$("#reportmail");
-    mail.style.display = REPORT_TO ? "" : "none";
+    mail.hidden = !REPORT_TO;
     mail.onclick = () => void copy().then(() => {
       const body = "Please paste the debug report here (it is on your clipboard), and say what you were doing:\n\n";
       window.open(`mailto:${REPORT_TO}?subject=${encodeURIComponent("PhiTeX Instant debug report")}&body=${encodeURIComponent(body)}`);
     });
-    this.$("#reportclose").onclick = () => box.classList.remove("on");
+    this.$("#reportclose").onclick = () => box.hidden = true;
   }
   /** Highlight `boxes` on page `k` (the source the editor is at). */
   mark(k, boxes2, scroll = true) {
@@ -2680,19 +2992,22 @@ var Panel = class {
   }
   page(img, k, n, hash) {
     if (!img) {
-      if (!this.last) {
-        this.$("#empty").textContent = n ? "This page is empty." : "No page shipped yet.";
-        this.$("#empty").style.display = "";
+      if (!this.last && !this.anim) {
+        const empty = this.$("#empty");
+        empty.textContent = n ? "This page is empty." : "No page shipped yet.";
+        empty.hidden = false;
       }
       if (this.lastStatus) this.stale({ ...this.lastStatus, pages: n });
       return;
     }
     this.last = img;
-    this.$("#empty").style.display = "none";
+    this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
-    this.$("#stage").classList.toggle("fit", this.prefs.zoom === "fit");
+    this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => i === k && hash || `?${i}`));
     this.viewer.set(k, img, hash ?? null);
+    this.sheetDown();
+    this.renderStatus();
     this.nav();
   }
 };
@@ -3036,7 +3351,7 @@ var preambleOf = (t) => {
   return end < 0 ? t ?? "" : t.slice(0, end);
 };
 var usesMinted = (t) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
-var WATCH = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
+var WATCH2 = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
 function place2(t, pos) {
   const at = byteOffset(t, pos);
   const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
@@ -3153,7 +3468,7 @@ var PreviewSession = class {
     core.onEvent?.((e) => {
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
-      if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e);
+      if (this.o.remote && "event" in e && WATCH2.has(e.event)) return this.onWatch(e);
       if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);
       if (e.event === "switched") {
         this.tr("core: the SSA worker took over", {});
@@ -4484,7 +4799,7 @@ function ago(t, now = Date.now() / 1e3) {
     }
   return "just now";
 }
-var esc3 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+var esc4 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 var ROW = 24;
 var LANE = 12;
 var COLORS = ["#3e63dd", "#e5484d", "#30a46c", "#f5a524", "#8e4ec6", "#12a594", "#d6409f", "#978365"];
@@ -4602,7 +4917,7 @@ var Commits = class {
     this.el.scrollTop = scroll;
   }
   html() {
-    if (this.error) return `<div class="note err">${esc3(this.error)}</div>`;
+    if (this.error) return `<div class="note err">${esc4(this.error)}</div>`;
     if (!this.commits.length) return `<div class="note">${this.loading ? "reading the history\u2026" : "no commits"}</div>`;
     const { rows, width } = layout(this.commits);
     const W = (width + 1) * LANE;
@@ -4616,14 +4931,14 @@ var Commits = class {
       const col = COLORS[r.lane % COLORS.length];
       const svg = r.down.map(([a, b]) => `<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
       svg.push(c.parents.length > 1 ? `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
-      const pills = c.refs.map((f) => `<span class="pill ${KINDS.has(f.kind) ? f.kind : "branch"}">${esc3(f.name)}</span>`).join("");
+      const pills = c.refs.map((f) => `<span class="pill ${KINDS.has(f.kind) ? f.kind : "branch"}">${esc4(f.name)}</span>`).join("");
       const lo = this.to ? ti : -1;
       const cls = i === fi ? " from" : i === ti ? " to" : fi >= 0 && i > lo && i < fi ? " inrange" : "";
       const end = i === fi ? '<span class="end">FROM</span>' : i === ti ? '<span class="end">TO</span>' : "";
       const title = `${c.subject}
 ${c.author}, ${new Date(c.time * 1e3).toLocaleString()}
 click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
-      return `<div class="row${cls}" data-i="${i}" title="${esc3(title)}"><svg width="${W}" height="${ROW}">${svg.join("")}</svg><span class="txt">${end}<span class="sha">${esc3(c.short)}</span>${pills}${c.parents.length > 1 ? "<i>merge:</i> " : ""}${esc3(c.subject)}<span class="who">${esc3(c.author)}, ${ago(c.time)}</span></span></div>`;
+      return `<div class="row${cls}" data-i="${i}" title="${esc4(title)}"><svg width="${W}" height="${ROW}">${svg.join("")}</svg><span class="txt">${end}<span class="sha">${esc4(c.short)}</span>${pills}${c.parents.length > 1 ? "<i>merge:</i> " : ""}${esc4(c.subject)}<span class="who">${esc4(c.author)}, ${ago(c.time)}</span></span></div>`;
     });
     const more = this.more ? `<div class="note"><button type="button" data-more>${this.loading ? "reading\u2026" : "more\u2026"}</button></div>` : "";
     return top + lines.join("") + more;
@@ -4782,6 +5097,10 @@ var panel = new Panel(
     },
     onReload: () => void session.resync(),
     onClean: () => void session.resync(),
+    // (the watch builds again from the files on disk, as `r` in its terminal)
+    onRebuild: () => void sock.request({ op: "rebuild" }),
+    onCompare: () => openPick(),
+    onLog: () => session.log(),
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),
@@ -4804,6 +5123,7 @@ var panel = new Panel(
     }
   },
   {
+    host: "watch",
     outline: true,
     keys: true,
     header: true,
@@ -4821,7 +5141,7 @@ var panel = new Panel(
       preparing: "",
       stopped: "The build stopped: its problems are listed above (e).",
       notReady: "This engine does not run here yet.",
-      steps: ["Connected", "Format", "Building"],
+      steps: ["Connecting to phitex watch", "Preparing the format", "Typesetting"],
       realPdf: ""
     }
   }
@@ -4899,25 +5219,29 @@ var controls = new DiffControls(panel, runner);
 addEventListener("keydown", (e) => controls.key(e));
 document.head.append(Object.assign(document.createElement("style"), {
   textContent: COMMITS_CSS + `
-#phx-pick { position: fixed; z-index: 20; top: 36px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; overflow: auto;
-  background: #f1f1ef; color: #141414; border: 1px solid #141414; border-radius: 0; box-shadow: none; font: 12px "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
-#phx-pick header { display: flex; align-items: baseline; gap: 10px; padding: 8px 12px; border-bottom: 1px solid #c9c9c5; }
-#phx-pick header b { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
-#phx-pick header small { color: #8a8a86; }
-#phx-pick header button { margin-left: auto; border: 1px solid #c9c9c5; background: none; border-radius: 0; padding: 0 8px; cursor: pointer; font: 11px ui-monospace, monospace; }
-@media (prefers-color-scheme: dark) { #phx-pick { background: #121212; color: #e8e8e4; border-color: #e8e8e4; } #phx-pick header { border-color: #3a3a38; } #phx-pick header button { border-color: #3a3a38; color: #e8e8e4; } }`
+#phx-pick, #phx-bar, #phx-con { --bg: #ffffff; --fg: #1b222c; --fg2: #5d6778; --line: #e3e6ec; --hover: #eef1f6; --danger: #c23a2f; --warning: #a3620a; --accent: #1d3e72;
+  font: 13px/1.4 "Noto Sans", system-ui, sans-serif; }
+@media (prefers-color-scheme: dark) {
+  #phx-pick, #phx-bar, #phx-con { --bg: #1b212b; --fg: #e7e9ee; --fg2: #98a1b0; --line: #262d38; --hover: #222935; --danger: #f0786d; --warning: #e5a54b; --accent: #8fb3ec; color-scheme: dark; }
+}
+#phx-pick { position: fixed; z-index: 20; top: 44px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; overflow: auto;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgb(0 0 0 / 25%); }
+#phx-pick header { display: flex; align-items: baseline; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); }
+#phx-pick header small { color: var(--fg2); font-size: 12px; }
+#phx-pick header button { margin-left: auto; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+#phx-pick header button:hover { background: var(--hover); }`
 }));
 var pick;
 var graph;
 var closePick = () => {
   if (pick) pick.hidden = true;
 };
-panel.headerButton("Compare", "Compare with a past version: the commit graph (click From, shift-click To, double-click a commit against its parent)", () => {
+function openPick() {
   if (pick && !pick.hidden) return closePick();
   if (!pick) {
     pick = document.createElement("div");
     pick.id = "phx-pick";
-    pick.innerHTML = `<header><b>Compare</b><small>click: from \xB7 shift-click: to (else the files as they are) \xB7 double-click: a commit's own changes</small><button type="button">Esc</button></header>`;
+    pick.innerHTML = `<header><b>Compare with an earlier version</b><small>Click: from \xB7 Shift+click: to (else the files as they are) \xB7 Double-click: a commit's own changes</small><button type="button">Close</button></header>`;
     pick.querySelector("button").onclick = closePick;
     document.body.append(pick);
     graph = new Commits(pick, {
@@ -4934,7 +5258,7 @@ panel.headerButton("Compare", "Compare with a past version: the commit graph (cl
     void graph.load();
   }
   pick.hidden = false;
-});
+}
 addEventListener("keydown", (e) => {
   if (e.key === "Escape" && pick && !pick.hidden) closePick(), e.stopImmediatePropagation();
 }, { capture: true });
@@ -4967,42 +5291,38 @@ setTimeout(() => void unreached(), 3e3);
 void sock.connect();
 document.head.append(Object.assign(document.createElement("style"), {
   textContent: `
-#phx-bar, #phx-con { --paper: #f1f1ef; --paper-2: #e6e6e3; --ink: #141414; --ink-2: #4a4a48; --ink-3: #8a8a86; --rule: #c9c9c5; --mark: #d71920; --caution: #8a5a00;
-  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
 #phx-bar { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; z-index: 15; display: flex; align-items: center; gap: 10px;
-  padding: 0 10px; font: 11px var(--mono); font-variant-numeric: tabular-nums; background: var(--paper); color: var(--ink-2); border-top: 1px solid var(--rule);
+  padding: 0 10px; font-size: 12px; font-variant-numeric: tabular-nums; background: var(--bg); color: var(--fg2); border-top: 1px solid var(--line);
   cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
-#phx-bar .dot { width: 6px; height: 6px; background: var(--ink-3); flex: none; }
-#phx-bar .dot.ok { background: var(--ink); } #phx-bar .dot.bad { background: var(--mark); }
-#phx-bar .dot.busy { background: var(--mark); animation: phx-blink .8s steps(2) infinite; }
-@keyframes phx-blink { 50% { opacity: 0; } }
+#phx-bar:hover { color: var(--fg); }
+#phx-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg2); flex: none; }
+#phx-bar .dot.ok { background: #2e9d63; } #phx-bar .dot.bad { background: var(--danger); }
+#phx-bar .dot.busy { background: #f58f2d; animation: phx-pulse .8s ease-in-out infinite alternate; }
+@keyframes phx-pulse { from { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { #phx-bar .dot.busy { animation: none; } }
 #phx-bar .text { overflow: hidden; text-overflow: ellipsis; flex: 1; }
-#phx-bar .new { flex: none; padding: 0; color: var(--mark); }
-#phx-bar .new.warn { color: var(--caution); }
-#phx-bar .hint { flex: none; color: var(--ink-3); font-family: var(--sans); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
-#phx-bar:hover .hint { color: var(--ink); }
+#phx-bar .new { flex: none; color: var(--danger); font-weight: 600; }
+#phx-bar .new.warn { color: var(--warning); }
+#phx-bar .hint { flex: none; color: var(--fg2); }
 #phx-con { position: fixed; left: 0; right: 0; bottom: 24px; height: 38vh; z-index: 15; display: flex; flex-direction: column;
-  background: var(--paper); color: var(--ink); border-top: 1px solid var(--ink); }
+  background: var(--bg); color: var(--fg); border-top: 1px solid var(--line); box-shadow: 0 -4px 16px rgb(0 0 0 / 12%); }
 #phx-con[hidden] { display: none; }
-#phx-con header { display: flex; align-items: baseline; gap: 10px; padding: 5px 10px; font: 11px var(--sans); border-bottom: 1px solid var(--rule); }
-#phx-con header b { font-weight: 600; letter-spacing: .1em; text-transform: uppercase; font-size: 10px; }
-#phx-con header small { color: var(--ink-3); }
-#phx-con header button { border: 1px solid var(--rule); background: none; color: var(--ink-2); border-radius: 0; padding: 0 8px; cursor: pointer;
-  font: 10px var(--sans); letter-spacing: .08em; text-transform: uppercase; }
-#phx-con header button:hover { border-color: var(--ink); color: var(--ink); }
+#phx-con header { display: flex; align-items: baseline; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+#phx-con header b { font-weight: 600; }
+#phx-con header small { color: var(--fg2); }
+#phx-con header button { border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+#phx-con header button:hover { background: var(--hover); }
 #phx-con header button:first-of-type { margin-left: auto; }
-#phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 8px 10px; font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; }
-#phx-con .error { color: var(--mark); } #phx-con .warning { color: var(--caution); } #phx-con .note, #phx-con .dim { color: var(--ink-3); }
-#phx-con .ok { color: var(--ink); } #phx-con .busy { color: var(--ink-2); }
-@media (prefers-color-scheme: dark) {
-  #phx-bar, #phx-con { --paper: #121212; --paper-2: #1c1c1c; --ink: #e8e8e4; --ink-2: #a9a9a4; --ink-3: #6e6e6a; --rule: #3a3a38; --mark: #ff4a3d; --caution: #d9a441; }
+#phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 8px 10px; font: 12px/1.5 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre-wrap; word-break: break-word; }
+#phx-con .error { color: var(--danger); } #phx-con .warning { color: var(--warning); } #phx-con .note, #phx-con .dim { color: var(--fg2); }
+#phx-con .ok { color: var(--fg); } #phx-con .busy { color: var(--fg2); }
 }`
 }));
 pane.style.bottom = "24px";
 var bar = document.createElement("div");
 bar.id = "phx-bar";
 bar.title = "phitex watch's status: click (or `) for everything it printed";
-bar.innerHTML = `<span class="dot"></span><span class="text">phitex watch</span><span class="new" hidden></span><span class="hint">\` Terminal</span>`;
+bar.innerHTML = `<span class="dot"></span><span class="text">phitex watch</span><span class="new" hidden></span><span class="hint">Terminal (\`)</span>`;
 var con = document.createElement("div");
 con.id = "phx-con";
 con.hidden = true;

@@ -207,6 +207,10 @@ const panel = new Panel(
     onMain: () => {},
     onReload: () => void session.resync(),
     onClean: () => void session.resync(),
+    // (the watch builds again from the files on disk, as `r` in its terminal)
+    onRebuild: () => void sock.request({ op: "rebuild" }),
+    onCompare: () => openPick(),
+    onLog: (): Promise<string | null> => session.log(),
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),
@@ -230,6 +234,7 @@ const panel = new Panel(
     },
   },
   {
+    host: "watch",
     outline: true,
     keys: true,
     header: true,
@@ -247,7 +252,7 @@ const panel = new Panel(
       preparing: "",
       stopped: "The build stopped: its problems are listed above (e).",
       notReady: "This engine does not run here yet.",
-      steps: ["Connected", "Format", "Building"],
+      steps: ["Connecting to phitex watch", "Preparing the format", "Typesetting"],
       realPdf: "",
     },
   },
@@ -341,25 +346,30 @@ addEventListener("keydown", (e) => controls.key(e));
 // (the versions to compare: a commit graph in a popover under the header's Compare)
 document.head.append(Object.assign(document.createElement("style"), {
   textContent: COMMITS_CSS + `
-#phx-pick { position: fixed; z-index: 20; top: 36px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; overflow: auto;
-  background: #f1f1ef; color: #141414; border: 1px solid #141414; border-radius: 0; box-shadow: none; font: 12px "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
-#phx-pick header { display: flex; align-items: baseline; gap: 10px; padding: 8px 12px; border-bottom: 1px solid #c9c9c5; }
-#phx-pick header b { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
-#phx-pick header small { color: #8a8a86; }
-#phx-pick header button { margin-left: auto; border: 1px solid #c9c9c5; background: none; border-radius: 0; padding: 0 8px; cursor: pointer; font: 11px ui-monospace, monospace; }
-@media (prefers-color-scheme: dark) { #phx-pick { background: #121212; color: #e8e8e4; border-color: #e8e8e4; } #phx-pick header { border-color: #3a3a38; } #phx-pick header button { border-color: #3a3a38; color: #e8e8e4; } }`,
+#phx-pick, #phx-bar, #phx-con { --bg: #ffffff; --fg: #1b222c; --fg2: #5d6778; --line: #e3e6ec; --hover: #eef1f6; --danger: #c23a2f; --warning: #a3620a; --accent: #1d3e72;
+  font: 13px/1.4 "Noto Sans", system-ui, sans-serif; }
+@media (prefers-color-scheme: dark) {
+  #phx-pick, #phx-bar, #phx-con { --bg: #1b212b; --fg: #e7e9ee; --fg2: #98a1b0; --line: #262d38; --hover: #222935; --danger: #f0786d; --warning: #e5a54b; --accent: #8fb3ec; color-scheme: dark; }
+}
+#phx-pick { position: fixed; z-index: 20; top: 44px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; overflow: auto;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgb(0 0 0 / 25%); }
+#phx-pick header { display: flex; align-items: baseline; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); }
+#phx-pick header small { color: var(--fg2); font-size: 12px; }
+#phx-pick header button { margin-left: auto; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+#phx-pick header button:hover { background: var(--hover); }`,
 }));
 let pick: HTMLElement | undefined;
 let graph: Commits | undefined;
 const closePick = () => {
   if (pick) pick.hidden = true;
 };
-panel.headerButton("Compare", "Compare with a past version: the commit graph (click From, shift-click To, double-click a commit against its parent)", () => {
+/** Compare (the panel's menu, its icon): the commit graph, or why there is none (not a git repository). */
+function openPick(): void {
   if (pick && !pick.hidden) return closePick();
   if (!pick) {
     pick = document.createElement("div");
     pick.id = "phx-pick";
-    pick.innerHTML = `<header><b>Compare</b><small>click: from · shift-click: to (else the files as they are) · double-click: a commit's own changes</small><button type="button">Esc</button></header>`;
+    pick.innerHTML = `<header><b>Compare with an earlier version</b><small>Click: from · Shift+click: to (else the files as they are) · Double-click: a commit's own changes</small><button type="button">Close</button></header>`;
     pick.querySelector("button")!.onclick = closePick;
     document.body.append(pick);
     graph = new Commits(pick, {
@@ -376,7 +386,7 @@ panel.headerButton("Compare", "Compare with a past version: the commit graph (cl
     void graph.load();
   }
   pick.hidden = false;
-});
+}
 addEventListener("keydown", (e) => {
   if (e.key === "Escape" && pick && !pick.hidden) (closePick(), e.stopImmediatePropagation());
 }, { capture: true });
@@ -424,35 +434,31 @@ type Said = { kind: string; text?: string; ok?: boolean | null; event?: unknown 
 
 document.head.append(Object.assign(document.createElement("style"), {
   textContent: `
-#phx-bar, #phx-con { --paper: #f1f1ef; --paper-2: #e6e6e3; --ink: #141414; --ink-2: #4a4a48; --ink-3: #8a8a86; --rule: #c9c9c5; --mark: #d71920; --caution: #8a5a00;
-  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
 #phx-bar { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; z-index: 15; display: flex; align-items: center; gap: 10px;
-  padding: 0 10px; font: 11px var(--mono); font-variant-numeric: tabular-nums; background: var(--paper); color: var(--ink-2); border-top: 1px solid var(--rule);
+  padding: 0 10px; font-size: 12px; font-variant-numeric: tabular-nums; background: var(--bg); color: var(--fg2); border-top: 1px solid var(--line);
   cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
-#phx-bar .dot { width: 6px; height: 6px; background: var(--ink-3); flex: none; }
-#phx-bar .dot.ok { background: var(--ink); } #phx-bar .dot.bad { background: var(--mark); }
-#phx-bar .dot.busy { background: var(--mark); animation: phx-blink .8s steps(2) infinite; }
-@keyframes phx-blink { 50% { opacity: 0; } }
+#phx-bar:hover { color: var(--fg); }
+#phx-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg2); flex: none; }
+#phx-bar .dot.ok { background: #2e9d63; } #phx-bar .dot.bad { background: var(--danger); }
+#phx-bar .dot.busy { background: #f58f2d; animation: phx-pulse .8s ease-in-out infinite alternate; }
+@keyframes phx-pulse { from { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { #phx-bar .dot.busy { animation: none; } }
 #phx-bar .text { overflow: hidden; text-overflow: ellipsis; flex: 1; }
-#phx-bar .new { flex: none; padding: 0; color: var(--mark); }
-#phx-bar .new.warn { color: var(--caution); }
-#phx-bar .hint { flex: none; color: var(--ink-3); font-family: var(--sans); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
-#phx-bar:hover .hint { color: var(--ink); }
+#phx-bar .new { flex: none; color: var(--danger); font-weight: 600; }
+#phx-bar .new.warn { color: var(--warning); }
+#phx-bar .hint { flex: none; color: var(--fg2); }
 #phx-con { position: fixed; left: 0; right: 0; bottom: 24px; height: 38vh; z-index: 15; display: flex; flex-direction: column;
-  background: var(--paper); color: var(--ink); border-top: 1px solid var(--ink); }
+  background: var(--bg); color: var(--fg); border-top: 1px solid var(--line); box-shadow: 0 -4px 16px rgb(0 0 0 / 12%); }
 #phx-con[hidden] { display: none; }
-#phx-con header { display: flex; align-items: baseline; gap: 10px; padding: 5px 10px; font: 11px var(--sans); border-bottom: 1px solid var(--rule); }
-#phx-con header b { font-weight: 600; letter-spacing: .1em; text-transform: uppercase; font-size: 10px; }
-#phx-con header small { color: var(--ink-3); }
-#phx-con header button { border: 1px solid var(--rule); background: none; color: var(--ink-2); border-radius: 0; padding: 0 8px; cursor: pointer;
-  font: 10px var(--sans); letter-spacing: .08em; text-transform: uppercase; }
-#phx-con header button:hover { border-color: var(--ink); color: var(--ink); }
+#phx-con header { display: flex; align-items: baseline; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+#phx-con header b { font-weight: 600; }
+#phx-con header small { color: var(--fg2); }
+#phx-con header button { border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+#phx-con header button:hover { background: var(--hover); }
 #phx-con header button:first-of-type { margin-left: auto; }
-#phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 8px 10px; font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; }
-#phx-con .error { color: var(--mark); } #phx-con .warning { color: var(--caution); } #phx-con .note, #phx-con .dim { color: var(--ink-3); }
-#phx-con .ok { color: var(--ink); } #phx-con .busy { color: var(--ink-2); }
-@media (prefers-color-scheme: dark) {
-  #phx-bar, #phx-con { --paper: #121212; --paper-2: #1c1c1c; --ink: #e8e8e4; --ink-2: #a9a9a4; --ink-3: #6e6e6a; --rule: #3a3a38; --mark: #ff4a3d; --caution: #d9a441; }
+#phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 8px 10px; font: 12px/1.5 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre-wrap; word-break: break-word; }
+#phx-con .error { color: var(--danger); } #phx-con .warning { color: var(--warning); } #phx-con .note, #phx-con .dim { color: var(--fg2); }
+#phx-con .ok { color: var(--fg); } #phx-con .busy { color: var(--fg2); }
 }`,
 }));
 // (the pages above the bar)
@@ -460,7 +466,7 @@ pane.style.bottom = "24px";
 const bar = document.createElement("div");
 bar.id = "phx-bar";
 bar.title = "phitex watch's status: click (or `) for everything it printed";
-bar.innerHTML = `<span class="dot"></span><span class="text">phitex watch</span><span class="new" hidden></span><span class="hint">\` Terminal</span>`;
+bar.innerHTML = `<span class="dot"></span><span class="text">phitex watch</span><span class="new" hidden></span><span class="hint">Terminal (\`)</span>`;
 const con = document.createElement("div");
 con.id = "phx-con";
 con.hidden = true;
