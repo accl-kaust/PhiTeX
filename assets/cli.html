@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhiTeX Banner</title>
+<!--
+  PhiTeX animated banner. One clock drives everything: render(t) draws the
+  banner at story time t (seconds, 0..DURATION), so a renderer can step it
+  frame by frame. The numbers live in CONFIG, the beats in TIMELINE.
+
+  Story, left to right: `phitex watch paper.tex` builds the paper cold on every
+  core (its live tree as phitex prints it, the logo's ribbon flowing) and the
+  page appears; a word in it changes, and only its paragraph runs again, in
+  milliseconds; the PDF is byte for byte pdflatex's. Then the
+  terminal and the page clear, so the last frame equals the first and it loops.
+
+  URL parameters:
+    ?theme=light|dark   force a theme (default: the system's)
+    ?t=3.2              freeze at one time
+    ?render=1           no controls, no autoplay (for frame capture)
+
+  Fonts and logos are local (banner/, logo/), so it renders offline:
+  CMU Serif, Noto Sans and DM Mono from PhiTeX.org (OFL, banner/fonts);
+  the ACCL lockup and KAUST's seeds from github.com/accl-kaust/logo;
+  the PhiTeX logo from logo-concepts.html ?export.
+-->
+<style>
+@font-face { font-family: "CMU Serif"; font-weight: 700; src: url("banner/fonts/cmu-serif-700-roman.woff2") format("woff2"); }
+@font-face { font-family: "CMU Serif"; font-weight: 400; src: url("banner/fonts/cmu-serif-500-roman.woff2") format("woff2"); }
+@font-face { font-family: "CMU Serif"; font-weight: 400; font-style: italic; src: url("banner/fonts/cmu-serif-500-italic.woff2") format("woff2"); }
+@font-face { font-family: "Noto Sans"; font-weight: 400; src: url("banner/fonts/noto-sans-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Noto Sans"; font-weight: 600; src: url("banner/fonts/noto-sans-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Noto Sans"; font-weight: 700; src: url("banner/fonts/noto-sans-latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "DM Mono"; font-weight: 400; src: url("banner/fonts/dm-mono-latin-400-normal.woff2") format("woff2"); }
+
+:root {
+  --sans: "Noto Sans", system-ui, sans-serif;
+  --serif: "CMU Serif", "Latin Modern Roman", Georgia, serif;
+  --mono: "DM Mono", ui-monospace, Menlo, monospace;
+  --bg: #ffffff;               /* GitHub's page, light */
+  --bg-glow: rgba(54, 108, 191, .10);
+  --ink: #1b222c;
+  --muted: #495365;
+  --faint: #8d96a5;
+  --rule: #e7e9ee;
+  --accent: #366cbf;
+  --accent-soft: rgba(54, 108, 191, .10);
+  --green: #1e6b41;
+  --amber: #e09a00;
+  --card: #ffffff;
+  --card-edge: #e7e9ee;
+  --card-shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 10px 28px rgb(16 24 40 / 8%);
+  --page: #ffffff;
+  --page-edge: #d0d5dd;
+  --cell-done: rgba(27, 34, 44, .50);
+  --dot: rgba(27, 34, 44, .07);
+  --kaust: #80715e;               /* KAUST's lettering colour */
+  --viewer-bg: #e7e9ee;
+  --term-bg: #12171f;
+  --term-bar: #1b222c;
+  --term-edge: transparent;
+  --term-ink: #e8ebf0;
+  --term-dim: #8d96a5;
+  --term-blue: #6fa3ec;
+  --term-green: #53b57f;
+  --term-amber: #f2b83b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1117;             /* GitHub's page, dark */
+    --bg-glow: rgba(101, 151, 224, .14);
+    --ink: #ffffff;
+    --muted: #d0d5dd;
+    --faint: #8d96a5;
+    --rule: #2f3a4c;
+    --accent: #6597e0;
+    --accent-soft: rgba(101, 151, 224, .14);
+    --green: #53b57f;
+    --amber: #f2b83b;
+    --card: #1b222c;
+    --card-edge: #2f3a4c;
+    --card-shadow: 0 1px 3px rgb(0 0 0 / 40%), 0 10px 30px rgb(0 0 0 / 35%);
+    --page: #252e3c;
+    --page-edge: #3a4659;
+    --cell-done: rgba(255, 255, 255, .55);
+    --dot: rgba(255, 255, 255, .05);
+    --kaust: #ffffff;
+    --viewer-bg: #1b222c;
+    --term-bg: #0b0f15;
+    --term-bar: #141a23;
+    --term-edge: rgba(255, 255, 255, .09);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1117;
+  --bg-glow: rgba(101, 151, 224, .14);
+  --ink: #ffffff;
+  --muted: #d0d5dd;
+  --faint: #8d96a5;
+  --rule: #2f3a4c;
+  --accent: #6597e0;
+  --accent-soft: rgba(101, 151, 224, .14);
+  --green: #53b57f;
+  --amber: #f2b83b;
+  --card: #1b222c;
+  --card-edge: #2f3a4c;
+  --card-shadow: 0 1px 3px rgb(0 0 0 / 40%), 0 10px 30px rgb(0 0 0 / 35%);
+  --page: #252e3c;
+  --page-edge: #3a4659;
+  --cell-done: rgba(255, 255, 255, .55);
+  --dot: rgba(255, 255, 255, .05);
+  --kaust: #ffffff;
+  --viewer-bg: #1b222c;
+  --term-bg: #0b0f15;
+  --term-bar: #141a23;
+  --term-edge: rgba(255, 255, 255, .09);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: var(--bg); color: var(--ink); }
+body { font-family: var(--sans); overflow: hidden; -webkit-font-smoothing: antialiased; }
+
+#viewport { position: relative; transform-origin: 0 0; }
+#stage {
+  position: relative; width: 1600px; height: 600px; overflow: hidden;
+  background: var(--bg);
+}
+/* the glow and the dots fade out well before the edges: the GIF's border is GitHub's own page colour, so it has no edge */
+#stage::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    radial-gradient(700px 460px at 460px 300px, var(--bg-glow), transparent 70%),
+    radial-gradient(640px 460px at 1260px 300px, var(--bg-glow), transparent 70%),
+    radial-gradient(var(--dot) 1px, transparent 1.2px) 0 0 / 22px 22px;
+  -webkit-mask-image: radial-gradient(closest-side, #000 60%, transparent);
+}
+/* over everything: the last pixels at each edge are exactly the page colour, whatever runs into them (a shadow, the page) */
+#stage::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 50;
+  background: linear-gradient(transparent calc(100% - 36px), var(--bg));
+  box-shadow: inset 0 0 0 3px var(--bg);
+}
+.abs { position: absolute; }
+#stage .dark { display: none; }
+:root[data-theme="dark"] #stage .light { display: none; }
+:root[data-theme="dark"] #stage .dark { display: block; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) #stage .light { display: none; }
+  :root:not([data-theme="light"]) #stage .dark { display: block; }
+}
+
+/* ── left: the logo, the byline, what it is ──────────────── */
+/* the logo (logo/phitex-logo*.svg, made by logo-concepts.html ?export): ΦTeX woven with ACCL's stripes */
+#logo { left: 58px; top: 70px; }
+#logo svg { display: block; height: 178px; width: auto; }
+#byline { left: 72px; top: 272px; display: flex; align-items: center; gap: 10px; height: 36px; }
+#byline .by { font-size: 18px; color: var(--faint); margin-right: 4px; }
+#byline img { height: 34px; display: block; }
+#byline img.seeds { height: 38px; margin: -2px 0; }  /* round, so a touch taller to look as tall as the lockup's A */
+#byline .name { font-size: 25px; font-weight: 700; letter-spacing: .05em; line-height: 1; }
+#byline .kaust { color: var(--kaust); }
+#byline .sep { width: 1.5px; height: 34px; background: var(--faint); margin: 0 14px; }
+#tagline { left: 68px; top: 334px; font-size: 40px; font-weight: 700; letter-spacing: -.8px; }
+#tagline .hl { color: var(--accent); }
+#subtitle { left: 70px; top: 392px; width: 600px; font-size: 17.5px; line-height: 1.45; color: var(--muted); }
+
+/* ── middle: the terminal ────────────────────────────────── */
+#term {
+  left: 40px; top: 40px; width: 800px; height: 520px; border-radius: 14px; overflow: hidden;
+  background: var(--term-bg); color: var(--term-ink);
+  box-shadow: inset 0 0 0 1px var(--term-edge), 0 2px 4px rgba(0,0,0,.08), 0 24px 60px rgba(8, 18, 40, .28);
+  font-family: var(--mono); font-size: 15px;
+}
+#term .bar { height: 42px; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: var(--term-bar); color: var(--term-dim); font-size: 15px; }
+#term .bar i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+#term .bar span { margin-left: 10px; }
+#tbody { padding: 22px 22px 0; white-space: pre; line-height: 27px; }
+#tbody .idle { display: flex; justify-content: space-between; }
+.t-dim { color: var(--term-dim); }
+.t-blue { color: var(--term-blue); }
+.t-green { color: var(--term-green); }
+.t-amber { color: var(--term-amber); }
+.t-cyan { color: #56c2d6; }
+.t-b { font-weight: 700; color: #fff; }
+.cursor { display: inline-block; width: 10px; height: 20px; vertical-align: -4px; background: var(--term-ink); }
+
+/* ── right: the PDF's first page ─────────────────────────── */
+#pdf { left: 860px; top: 40px; width: 700px; height: 520px; border-radius: 14px; overflow: hidden; background: var(--viewer-bg);
+       box-shadow: 0 0 0 1px var(--card-edge), var(--card-shadow); }
+#pdf .chrome { height: 42px; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: var(--card); border-bottom: 1px solid var(--card-edge); }
+#pdf .chrome i { width: 12px; height: 12px; border-radius: 50%; display: block; background: var(--rule); }
+#pdf .url { margin-left: 14px; flex: 1; height: 26px; border-radius: 13px; background: var(--viewer-bg); display: flex; align-items: center; padding: 0 14px;
+            font: 13px var(--mono); color: var(--muted); }
+#sheet { position: absolute; left: 81px; top: 58px; transform: scale(2.05); transform-origin: 0 0; }   /* the page zoomed in, its top as the viewer opens it */
+#vbar { position: absolute; left: 0; right: 0; bottom: 0; height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px;
+        font: 12.5px var(--mono); color: var(--muted); background: var(--card); border-top: 1px solid var(--card-edge); white-space: nowrap; overflow: hidden; }
+#vbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: none; }
+#pdflabel { display: none; justify-content: space-between; font-size: 11.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); height: 24px; }
+#pdflabel b { font-weight: 600; letter-spacing: .02em; text-transform: none; }
+#page {
+  position: relative; width: 262px; height: 504px; background: #fff; border-radius: 2px 2px 0 0; overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(16,24,40,.08), 0 2px 4px rgba(16,24,40,.06), 0 18px 44px rgba(16,24,40,.16);
+  padding: 28px 22px 0; font-family: var(--serif); color: #111; font-size: 7.3px; line-height: 9.3px; text-align: justify; hyphens: auto;
+  -webkit-mask-image: linear-gradient(#000 88%, transparent);   /* the page goes on below: the viewer is scrolled to its top */
+}
+#page h1 { font-size: 13.6px; line-height: 16px; font-weight: 400; text-align: center; white-space: nowrap; margin: 6px 0 10px; }
+#page .au { text-align: center; font-size: 9px; line-height: 11px; margin-bottom: 14px; word-spacing: 2px; }
+#page .tex-e { position: relative; top: .22em; margin: 0 -.12em; font-size: 1em; }
+#page .eq { position: relative; display: flex; align-items: center; justify-content: center; gap: 2px; margin: 7px 0 8px; font-size: 7.6px; }
+#page .frac { display: inline-flex; flex-direction: column; align-items: center; line-height: 1.2; }
+#page .frac > span + span { border-top: .5px solid #111; padding: 0 2px; }
+#page .frac.small { font-size: .85em; } #page .frac.tiny { font-size: .75em; }
+#page .sum { font-size: 1.25em; } #page sup { font-size: .7em; vertical-align: .6em; }
+#page .paren { font-size: 2.3em; font-weight: 300; line-height: 1; transform: scaleX(.6); }
+#page .eq .no { position: absolute; right: 0; }
+#page .fig { display: flex; justify-content: center; margin: 6px 0 3px; }
+#page .cap { text-align: center; margin: 0 0 6px; }
+#page .abs-t { font-weight: 700; text-align: center; font-size: 7.6px; margin-bottom: 3px; }
+#page .abstract { margin: 0 14px 10px; }
+#page h2 { font-size: 9.4px; font-weight: 700; margin: 11px 0 4px; text-align: left; }
+#page p + p { text-indent: 1.4em; }
+#page .para { border-radius: 2px; box-shadow: 0 0 0 3px rgba(242,184,59,var(--dirty,0)); background: rgba(242,184,59,calc(var(--dirty,0) * .12)); }
+#page .w { border-radius: 1.5px; background: rgba(54,108,191,var(--hl,0)); box-shadow: 0 0 0 1.5px rgba(54,108,191,var(--hl,0)); }
+#page .folio { position: absolute; left: 0; right: 0; bottom: 18px; text-align: center; }
+#veil { position: absolute; inset: 0; background: #fff; }   /* covers the page until it is built, top down */
+
+/* ── controls (preview only) ─────────────────────────────── */
+#controls {
+  position: fixed; left: 0; right: 0; bottom: 0; height: 52px; display: flex; align-items: center; gap: 12px;
+  padding: 0 16px; background: color-mix(in srgb, var(--bg) 88%, transparent); border-top: 1px solid var(--rule);
+  font-size: 13px; color: var(--muted); backdrop-filter: blur(6px);
+}
+#controls button {
+  font: inherit; font-weight: 600; color: var(--ink); background: var(--card); border: 1px solid var(--card-edge);
+  border-radius: 8px; padding: 6px 12px; cursor: pointer;
+}
+#controls input[type=range] { flex: 1; accent-color: var(--accent); }
+#clock { width: 92px; font-variant-numeric: tabular-nums; text-align: right; }
+body.render #controls { display: none; }
+</style>
+</head>
+<body>
+<div id="viewport">
+<div id="stage">
+
+  <div id="term" class="abs">
+    <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span data-k="termTitle"></span></div>
+    <div id="tbody"></div>
+  </div>
+
+  <div id="pdf" class="abs">
+    <div class="chrome"><i></i><i></i><i></i><span class="url">127.0.0.1:37765</span></div>
+    <div id="sheet">
+    <div id="pdflabel"><span data-k="pdfName"></span><b data-k="pdfState"></b></div>
+    <div id="page">
+      <h1 id="edited">Typesetting at the Speed of <span class="w" id="word">Thought</span></h1>
+      <div class="au">Ammar Seliaman &emsp;&emsp; Suhaib Fahmy</div>
+      <div class="abs-t">Abstract</div>
+      <div class="abstract">We show that a T<span class="tex-e">E</span>X engine can follow a writer keystroke by keystroke. The page is typeset again after every edit, in milliseconds, for papers and for books.</div>
+      <h2>1&nbsp;&nbsp;&nbsp;Introduction</h2>
+      <p>Every writer knows the rhythm: change a word, press Recompile, wait, look, and change the next word. The wait is short, but it is paid thousands of times, and each payment breaks the thought being written.</p>
+      <div class="eq"><span class="frac"><span>&Phi; &minus; <i>&omega;</i></span><span><span class="sum">&sum;</span><sup><i>N</i>&minus;1</sup> <i>paths</i></span></span><span class="paren">(</span><span class="frac small"><span><span class="frac tiny"><span>1</span><span>2</span></span></span><span>2</span></span><span class="paren">)</span><span class="no">(1)</span></div>
+      <div class="fig"><svg viewBox="-36 -36 72 72" width="72" height="72"><path transform="rotate(-51.43)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-102.86)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-154.29)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-205.71)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-257.14)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-308.57)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-360.00)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><line x1="0" y1="0" x2="27.9" y2="-16.1" stroke="#3333ff" stroke-width=".8"/><circle cx="27.9" cy="-16.1" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="16.1" y2="-27.9" stroke="#3333ff" stroke-width=".8"/><circle cx="16.1" cy="-27.9" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="0.0" y2="-32.2" stroke="#3333ff" stroke-width=".8"/><circle cx="0.0" cy="-32.2" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-16.1" y2="-27.9" stroke="#3333ff" stroke-width=".8"/><circle cx="-16.1" cy="-27.9" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-27.9" y2="-16.1" stroke="#3333ff" stroke-width=".8"/><circle cx="-27.9" cy="-16.1" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-32.2" y2="-0.0" stroke="#3333ff" stroke-width=".8"/><circle cx="-32.2" cy="-0.0" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-27.9" y2="16.1" stroke="#3333ff" stroke-width=".8"/><circle cx="-27.9" cy="16.1" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-16.1" y2="27.9" stroke="#3333ff" stroke-width=".8"/><circle cx="-16.1" cy="27.9" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-0.0" y2="32.2" stroke="#3333ff" stroke-width=".8"/><circle cx="-0.0" cy="32.2" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="16.1" y2="27.9" stroke="#3333ff" stroke-width=".8"/><circle cx="16.1" cy="27.9" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="27.9" y2="16.1" stroke="#3333ff" stroke-width=".8"/><circle cx="27.9" cy="16.1" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="32.2" y2="0.0" stroke="#3333ff" stroke-width=".8"/><circle cx="32.2" cy="0.0" r="1.9" fill="#ff0000"/></svg></div>
+      <div class="cap">Figure 1: A figure redrawn on every keystroke.</div>
+      <p>This paper asks what a typesetting system would look like if the page were simply always correct. Not eventually, not after a build, but on the next frame after every keystroke. Section 2 describes the method and Section 3 the results [1].</p>
+      <div class="folio">1</div>
+      <div id="veil"></div>
+    </div>
+    </div>
+    <div id="vbar"><span class="dot"></span><span id="vtext"></span></div>
+  </div>
+
+</div>
+</div>
+
+<div id="controls">
+  <button id="play">Pause</button>
+  <input id="scrub" type="range" min="0" step="0.01">
+  <span id="clock"></span>
+  <button id="theme">Theme</button>
+</div>
+<script>
+// ── numbers: one place, everything derived from them ──────────────────────
+// Before publishing, every number here must come from a real run (a real paper, its cold build, the word edit, and
+// the PDF's sha256 beside pdflatex's); these are illustrative.
+const CONFIG = {
+  version: '0.1.0',
+  dir: '~/paper',
+  file: 'paper.tex',
+  engine: 'pdflatex',             // the engine the PDF is byte-identical to
+  threads: 16,
+  pages: 10,
+  coldS: 1.60,                    // the cold build, seconds
+  editMs: 9.8,                    // the word edit, rebuilt
+  line: 5,                        // the edited line of paper.tex: the title
+  word: ['Thought', 'Typing'],    // the title's last word, before and after the edit
+  sha256: null,                   // the PDF's sha256 after the edit (both engines'); illustrative until a real run
+  seed: 7,
+};
+
+// ── story beats, seconds ───────────────────────────────────────────────────
+const TIMELINE = {
+  type: [0.25, 0.85],             // `phitex watch paper.tex` typed
+  header: 1.0,
+  build: [1.15, 2.05],            // the cold build, every lane busy (its 1.60 s, sped up)
+  ribbon: [1.1, 2.3],             // the logo's ribbon drains and flows in again meanwhile
+  page: [2.0, 2.35],              // the page appears, top down
+  edit: 2.9,                      // the word changes in paper.tex: its paragraph goes stale
+  rebuilt: 3.25,                  // ... and is built again, on one lane
+  same: 3.85,                     // byte-identical to pdflatex
+  hash: [3.95, 4.45],             // the sha256, resolving
+  clear: [5.8, 6.3],              // the terminal and the page clear: the last frame is the first
+  duration: 6.4,
+};
+const C = CONFIG, T = TIMELINE, D = T.duration;
+const PDF = C.file.replace(/\.tex$/, '.pdf');
+
+// ── helpers ────────────────────────────────────────────────────────────────
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lin = (t, [a, b]) => clamp((t - a) / (b - a));
+const ease = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+function mulberry(seed) {
+  return () => {
+    seed = seed + 0x6D2B79F5 | 0;
+    let x = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    x = x + Math.imul(x ^ x >>> 7, 61 | x) ^ x;
+    return ((x ^ x >>> 14) >>> 0) / 4294967296;
+  };
+}
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+const sp = (cls, s) => `<span class="${cls}">${s}</span>`;
+const pad = (s, n) => String(s).padEnd(n);
+const fmtS = s => s < 1 ? `${(s * 1000).toFixed(1)} ms` : `${s.toFixed(2)} s`;
+const R = mulberry(C.seed);
+const HASH = C.sha256 || Array.from({ length: 64 }, () => '0123456789abcdef'[Math.floor(R() * 16)]).join('');
+
+// ── DOM ────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const setK = (k, html) => document.querySelectorAll(`[data-k="${k}"]`).forEach(e => { if (e.innerHTML !== html) e.innerHTML = html; });
+const setH = (el, html) => { if (el.innerHTML !== html) el.innerHTML = html; };
+const params = new URLSearchParams(location.search);
+setK('termTitle', `${C.dir} — phitex watch`);
+setK('pdfName', PDF);
+
+// ── the terminal, as `phitex watch` prints it on a terminal (crates/cli/src/watch.rs and ui.rs): its banner and the
+// viewer's line; while a build runs, the spinner and its live tree (the phases, the page reached, what the workers run,
+// alike ones counted together); each build's line; and under them the dim status line with the keys
+const LIVE = {                    // the cold build's live tree and the edit's figures, illustrative
+  format: 12.0, cores: 15.6, mem: '412 MB', running: 14,
+  rows: [['text', 'paper.tex:142', 9], ['text', 'paper.tex:118', 3], ['box', 'paper.tex:88', 1], ['page', 'the output routine', 1]],
+  nodes: 560, parallel: 12.4, editNodes: 9, screenMs: 21.4,
+};
+const TICKS = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+const COLS = 84;                  // the terminal's width, in columns
+const cursor = t => Math.floor(t * 2.2) % 2 ? '' : '<span class="cursor"></span>';
+const ms = s => s >= 1 ? `${s.toFixed(2)} s` : `${(s * 1000).toFixed(1)} ms`;
+const rpad = (s, n) => String(s).padStart(n);
+const vis = h => h.replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&amp;/g, '&').length;
+const padH = (h, n) => h + ' '.repeat(Math.max(0, n - vis(h)));            // padded to a visible width
+const Dm = s => sp('t-dim', s), B = s => sp('t-b', s), G = s => sp('t-green', s), CY = s => sp('t-cyan', s);
+function idle(text, ok) {
+  // (as ui.rs's idle_line: the keys at the right end when there is room, else the text alone, cut only if it is wider)
+  const keys = 'h: keys', room = COLS - 2, fits = text.length + 3 + keys.length <= room;
+  const shown = fits || text.length <= room ? text : text.slice(0, room - 1) + '…';
+  return `<div class="idle"><span>${ok ? G('●') : Dm('●')} ${Dm(esc(shown))}</span>${fits ? Dm(keys) : ''}</div>`;
+}
+function spinner(t, what, elapsed, tree) {
+  const tick = TICKS[Math.floor(t * 12.5) % TICKS.length];
+  return [`${CY(tick)} ${padH(esc(what), COLS - 11)}${B(rpad(elapsed.toFixed(1) + ' s', 9))}`, ...(tree ? tree(tick) : [])].join('\n');
+}
+function buildLine(n, place, facts, wall, tail) {
+  return `${G('✓')} ${rpad(n, 2)}  ${padH(CY(esc(place)), 10)}  ${padH(facts.join(Dm(' · ')), 26)}  ${padH(B(rpad(ms(wall), 9)), 9)}  ${tail}`.trimEnd();
+}
+function terminal(t) {
+  const cmd = `phitex watch ${C.file}`, n = Math.round(lin(t, T.type) * cmd.length);
+  const rows = [`${G('$')} ${cmd.slice(0, n)}${t < T.header ? cursor(t) : ''}`];
+  if (t < T.header) return rows.join('\n');
+  rows.push(`${B('PhiTeX')} ${Dm(C.version)}  ${B(C.file)} → ${B(PDF)}  ${Dm(`${C.engine} · ${C.threads} threads`)}`,
+            `${Dm('viewer')}  ${CY('http://127.0.0.1:37765/')}  ${Dm('(o opens it)')}`);
+  const what = `${C.engine} ${C.file}`;
+  if (t < T.build[1]) {                                  // the cold build: the tree once it has run a while
+    const u = lin(t, T.build), el = u * C.coldS;
+    rows.push(spinner(t, `${what}: build 1 (cold)`, el, el < .3 ? null : tick => [
+      `  ${Dm('├─')} ${G('✓')} ${padH('format', 14)} ${Dm(rpad(ms(LIVE.format / 1000), 9))}`,
+      `  ${Dm('└─')} ${CY(tick)} ${padH('engine', 14)} ${rpad(ms(el - LIVE.format / 1000), 9)}${Dm(`   ${LIVE.cores.toFixed(1)} cores busy · ${LIVE.mem}`)}`,
+      `       ${B('page ' + Math.max(1, Math.min(C.pages, Math.ceil(u * C.pages))))} ${Dm(`· ${LIVE.running} running · ${C.threads - LIVE.running} idle`)}`,
+      ...LIVE.rows.map(([k, at, x], j) => `       ${Dm(j + 1 === LIVE.rows.length ? '└─' : '├─')} ${padH(k, 6)} ${at}${x > 1 ? Dm(' ×' + x) : ''}`),
+    ]));
+    return rows.join('\n');
+  }
+  rows.push(buildLine(1, 'cold', [`${C.pages} pages`, `${LIVE.nodes} nodes`], C.coldS, CY(LIVE.parallel.toFixed(1) + '× parallel')));
+  if (t >= T.edit && t < T.rebuilt) {                    // the edit's build: its spinner a moment (slowed, to be seen)
+    rows.push(spinner(t, `${what}: build 2 (${C.file})`, 0));
+    return rows.join('\n');
+  }
+  const edited = t >= T.rebuilt;
+  if (edited) rows.push(buildLine(2, `${C.file}:${C.line}`, ['page 1', `${LIVE.editNodes}/${LIVE.nodes} nodes`], C.editMs / 1000,
+    G(Math.round(C.coldS * 1000 / C.editMs) + '× faster')));
+  rows.push(idle(edited ? `${C.file} · build 2 · ${C.pages} pages · ${ms(C.editMs / 1000)} · ⚡ ${ms(LIVE.screenMs / 1000)} to the screen · 1 viewer`
+                        : `${C.file} · build 1 · ${C.pages} pages · ${ms(C.coldS)} · 1 viewer`, true));
+  return rows.join('\n');
+}
+
+// ── render(t): the one entry point ─────────────────────────────────────────
+function render(t) {
+  t = ((t % D) + D) % D;
+  const out = 1 - ease(lin(t, T.clear));              // the clear at the loop's end
+  setH($('tbody'), terminal(t));
+  $('tbody').style.opacity = out;
+  // the page: built top down after the cold build; the edited word, its paragraph stale, then built again
+  const shown = ease(lin(t, T.page));
+  $('veil').style.clipPath = `inset(${(shown * 100).toFixed(1)}% 0 0 0)`;
+  $('veil').style.opacity = t >= T.clear[0] ? 1 - out : 1;
+  if (t >= T.clear[0]) $('veil').style.clipPath = 'none';
+  const edited = t >= T.rebuilt;
+  setH($('word'), C.word[edited ? 1 : 0]);
+  $('edited').style.setProperty('--dirty', t >= T.edit && t < T.rebuilt ? 1 : clamp(1 - (t - T.rebuilt) / .25) * (t >= T.rebuilt ? 1 : 0));
+  $('word').style.setProperty('--hl', edited ? (.28 * clamp(1 - (t - T.rebuilt - .9) / .6)).toFixed(3) : 0);
+  // the viewer's own status line, along its bottom
+  $('vtext').textContent = t < T.page[0] ? 'building…' : t >= T.edit && t < T.rebuilt ? `${C.engine} ${C.file}: build 2…`
+    : edited ? `${C.file} · build 2 · ${C.pages} pages · ${ms(C.editMs / 1000)} · ⚡ ${ms(LIVE.screenMs / 1000)} to the screen`
+    : `${C.file} · build 1 · ${C.pages} pages · ${ms(C.coldS)}`;
+  $('vbar').style.opacity = out;
+  setK('pdfState', t < T.page[0] || t >= T.clear[0] + .25 ? '' : t >= T.edit && t < T.rebuilt ? '<span style="color:var(--amber)">building</span>'
+    : t >= T.same ? '<span style="color:var(--green)">✓ same bytes as ' + C.engine + '</span>' : 'page 1 of ' + C.pages);
+}
+window.render = render;
+
+// ── preview: fit, play, scrub ──────────────────────────────────────────────
+const renderMode = params.has('render');
+// ?embed: playing, without the controls, fitted to the frame's width (the README preview shows it in an iframe)
+const embed = params.has('embed');
+if (renderMode || embed) document.body.classList.add('render');
+if (params.get('theme')) document.documentElement.dataset.theme = params.get('theme');
+function fit() {
+  const s = renderMode ? 1 : embed ? innerWidth / 1600 : Math.min(innerWidth / 1600, (innerHeight - 52) / 600);
+  $('viewport').style.transform = `scale(${s})`;
+  if (!renderMode && !embed) $('viewport').style.marginTop = `${Math.max(0, (innerHeight - 52 - 600 * s) / 2)}px`;
+}
+addEventListener('resize', fit);
+let playing = !renderMode && !params.has('t'), t0 = performance.now(), cur = Number(params.get('t')) || 0;
+const scrub = $('scrub'); scrub.max = D;
+function frame(now) {
+  if (playing) cur = ((now - t0) / 1000) % D;
+  render(cur);
+  scrub.value = cur; $('clock').textContent = `${cur.toFixed(2)} / ${D.toFixed(1)} s`;
+  requestAnimationFrame(frame);
+}
+$('play').onclick = () => { playing = !playing; t0 = performance.now() - cur * 1000; $('play').textContent = playing ? 'Pause' : 'Play'; };
+scrub.oninput = () => { cur = Number(scrub.value); playing = false; $('play').textContent = 'Play'; };
+$('theme').onclick = () => {
+  const dark = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() !== '#f7f8fa';
+  document.documentElement.dataset.theme = dark ? 'light' : 'dark';
+};
+addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); $('play').click(); } });
+window.bannerReady = document.fonts.ready.then(() => {
+  fit();
+  if (renderMode) render(cur); else requestAnimationFrame(frame);
+});
+</script>
+</body>
+</html>

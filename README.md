@@ -1,194 +1,243 @@
 <p align="center">
-  <img src="assets/banner.png" alt="PhiTeX: incremental TeX, exact output, Rust." width="100%">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/banner-dark.gif"><img src="assets/readme/banner.gif" alt="PhiTeX. Write anywhere. The page follows. The title of a paper is retyped in an editor, and the PDF beside it follows each key." width="100%"></picture>
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img alt="License: AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg"></a>
-  <img alt="Rust nightly" src="https://img.shields.io/badge/rust-nightly--2026--08--08-orange.svg?logo=rust">
-  <img alt="Edition 2024" src="https://img.shields.io/badge/edition-2024-orange.svg">
-  <img alt="Output: byte-identical to pdfTeX 1.40.29" src="https://img.shields.io/badge/output-byte--identical%20to%20pdfTeX%201.40.29-success.svg">
-  <img alt="Targets: native and wasm32" src="https://img.shields.io/badge/targets-native%20%7C%20wasm32-informational.svg?logo=webassembly">
-  <img alt="unsafe: denied" src="https://img.shields.io/badge/unsafe-denied-critical.svg">
+  <b>A fast, modern TeX compiler.</b><br>
+  Your PDF rebuilt as you type, exactly as {pdf,Xe,Lua}LaTeX makes it,<br>
+  in the editor you already use.
 </p>
 
-# PhiTeX
+<p align="center">
+  <a href="https://phitex.org"><b>phitex.org</b></a> ·
+  <a href="#get-started">Get started</a> ·
+  <a href="#works-where-you-write">Editors</a> ·
+  <a href="#fast-measured">Numbers</a> ·
+  <a href="#how-it-works">How it works</a>
+</p>
 
-A TeX engine in Rust that compiles a document by graph reduction of
-pending thunks: macros are functions, the PDF is the root, and the files
-a job writes and reads back are a loop-back reduced to a fixpoint. A
-cold build is an edit from nothing; an edit reduces again only what its
-change reaches, and its output is the cold build's, byte for byte.
+<p align="center">
+  <a href="https://github.com/accl-kaust/PhiTeX/actions/workflows/checks.yml"><img alt="checks" src="https://github.com/accl-kaust/PhiTeX/actions/workflows/checks.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/accl-kaust/PhiTeX/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/accl-kaust/PhiTeX?include_prereleases"></a>
+  <a href="https://github.com/accl-kaust/PhiTeX/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/accl-kaust/PhiTeX?style=flat&logo=github"></a>
+  <a href="LICENSE"><img alt="License: AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg"></a>
+  <!-- TODO(link): the release badge reads "no releases" until the first one -->
+</p>
 
-## Alpha status
+<p align="center">
+  <a href="https://chromewebstore.google.com/detail/phitex-instant-for-overle/joimneigjammmhdbgaonlepnlllceajl"><img alt="Chrome Web Store" src="https://img.shields.io/chrome-web-store/v/joimneigjammmhdbgaonlepnlllceajl?label=Chrome%20Web%20Store&logo=googlechrome&logoColor=white"></a>
+  <a href="https://addons.mozilla.org/en-US/firefox/addon/phitex-for-overleaf-unofficial/"><img alt="Firefox Add-ons" src="https://img.shields.io/amo/v/phitex-for-overleaf-unofficial?label=Firefox%20Add-ons&logo=firefoxbrowser&logoColor=white"></a>
+  <a href="https://microsoftedge.microsoft.com/addons/detail/phitex-instant-for-overle/gkcnpagkdjaefnnpkoogdpacdmgpihpd"><img alt="Microsoft Edge Add-ons" src="https://img.shields.io/badge/Edge%20Add--ons-get-0078D7?logo=microsoftedge&logoColor=white"></a>
+  <a href="https://github.com/accl-kaust/PhiTeX-frontends"><img alt="VS Code Marketplace: coming soon" src="https://img.shields.io/badge/VS%20Code%20Marketplace-coming%20soon-lightgrey?logo=visualstudiocode&logoColor=white"></a>
+  <!-- TODO(link): the VS Code badge, live once published: https://img.shields.io/visual-studio-marketplace/v/<publisher>.<extension>, linking to its Marketplace page · Phi Frontends -->
+</p>
 
-The alpha runs plain TeX and LaTeX documents with pdfTeX's semantics.
+## Why PhiTeX
 
-- **What works:** plain TeX and LaTeX (`pdftex`, `pdflatex`, and `tex`,
-  `etex`, `latex` for DVI), with pdfTeX 1.40.29's semantics. The PDF is
-  byte-identical to pdfTeX's (TeX Live 2026), object numbers included,
-  at every thread count, and so are the files the job reads back; the
-  `.log` is not compared. `phitex build` does latexmk's rounds in one
-  build, in no more rounds than latexmk's pdflatex runs, with BibTeX,
-  biber and makeindex in process. `phitex watch` rebuilds on every
-  change with the pages live in the browser. The same engine builds for
-  WebAssembly with threads (`scripts/wasm.sh`).
-- **How to run it:** build the binary as in [Building](#building), then
+<table>
+<tr>
+<td width="33%" valign="top">
+<picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/edit-dark.png"><img src="assets/readme/edit.png" alt="Edits in milliseconds" width="100%"></picture><br>
+<b>Edits in milliseconds</b><br>
+Change a word and only what it touches is rebuilt. A 60-page paper in ⟨~5 ms⟩; a thesis as quick as a letter. <!-- TODO(number): LaTeX word edit, 60 pp and 400 pp, save → page · Phi, mc gate-fast edits (today, an 18-page paper at -j16: pdfLaTeX word edit 46–80 ms, mc 76801; XeLaTeX letter edit 42–50 ms, mc 76836) -->
+</td>
+<td width="33%" valign="top">
+<picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/exact-dark.png"><img src="assets/readme/exact.png" alt="Exactly as {pdf,Xe}LaTeX" width="100%"></picture><br>
+<b>Exactly as {pdf,Xe}LaTeX</b><br>
+Byte for byte, cold or after a thousand edits. Nothing changes but the wait. <!-- TODO(claim): XeLaTeX across the corpus (last full sweep 2026-10-28: 83 of 131 identical; fixes since, no fresh sweep) · Phi -->
+</td>
+<td width="33%" valign="top">
+<picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/editors-dark.png"><img src="assets/readme/editors.png" alt="Any editor, Overleaf included" width="100%"></picture><br>
+<b>Any editor, Overleaf included</b><br>
+Overleaf, VS Code, Neovim, Emacs, any LSP editor, or a browser tab. Double-click the page to reach the source.
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+<picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/offline-dark.png"><img src="assets/readme/offline.png" alt="Private and offline" width="100%"></picture><br>
+<b>Private and offline</b><br>
+Your paper never leaves your machine or your browser. With TeX Live installed, the network is used only to check for updates, and only if you turn that on.
+</td>
+<td width="33%" valign="top">
+<picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/texlive-dark.png"><img src="assets/readme/texlive.png" alt="TeX Live optional" width="100%"></picture><br>
+<b>TeX Live optional</b><br>
+Without it, each package your paper uses is downloaded once, on first use, and kept.
+</td>
+<td width="33%" valign="top">
+<picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/cores-dark.png"><img src="assets/readme/cores.png" alt="Multi-threaded" width="100%"></picture><br>
+<b>Multi-threaded</b><br>
+Paragraphs, pages and the PDF are built in parallel on every core, identical at any thread count.
+</td>
+</tr>
+</table>
+<!-- TODO(number): the tiles' figures (5 ms, the hash) come from assets/readme-art.html's FIG; set them from the perf run, then scripts/readme-art.sh -->
 
-      phitex build paper.tex          # to the fixpoint, like latexmk -pdf
-      phitex watch paper.tex          # rebuild on change, pages in the browser
-      phitex --compat=pdflatex paper.tex   # one run, as pdflatex
+Plus: one build does what latexmk does, with BibTeX, biber and makeindex
+inside it; errors point at the line; and with `--synctex`, SyncTeX works
+with your own PDF viewer, jumping both ways as with pdflatex.
 
-- **What is checked, and what is not met yet:** the release bars and
-  their measured values are in
-  [`docs/alpha-checklist.md`](docs/alpha-checklist.md). What does not
-  work yet (XeLaTeX, LuaLaTeX, SyncTeX, font expansion, Type 3 fonts,
-  speed, and more) is listed with its cause under "Known not to work" in
-  [`CHANGELOG.md`](CHANGELOG.md).
+<div align="center">
 
-## Layout
+## Get started
 
-| Crate | What it is |
-|---|---|
-| `phitex-defuse` | the engine: the incremental, parallel def-use graph evaluator, which knows nothing of TeX |
-| `phitex-tex` | TeX's semantics on the graph: tokens, expansion, macros, registers, groups, modes, pages, pdfTeX's primitives, the cross-run fixpoint, the tools' runs |
-| `phitex-typeset` | Knuth's algorithms as pure functions: line breaking, hyphenation, math, alignments, the page builder |
-| `phitex-source` | source text as units with identities; the lexer, paragraphs, syntax tree and the syntactic pass |
-| `phitex-tfm`, `phitex-dvi`, `phitex-pdf` | font metrics, DVI, pdfTeX's PDF backend |
-| `phitex-codecs` | zlib (a port of zlib 1.3's deflate, for pdfTeX's bytes), the image codecs, the PDF reader |
-| `phitex-cli` | the `phitex` command |
-| `phitex-wasm` | the engine as a WebAssembly program with threads |
-| `phitex-kpse` | kpathsea's file lookup |
-| `phitex-bibtex`, `phitex-biber`, `phitex-makeindex` | BibTeX, biber and makeindex |
-| `phitex-pdftex`, `phitex-xetex`, `phitex-luatex`, `phitex-lua` | (stubs) the other engines, and Lua for LuaTeX |
-| `phitex-otf`, `phitex-xdvipdfmx` | OpenType shaping, xdvipdfmx (for XeTeX, not used by the alpha) |
-| `phitex-doc`, `phitex-diff`, `phitex-git` | the document's structure, latexdiff, git |
+```sh
+curl -fsSL https://phitex.org/install.sh | sh
+phitex watch paper.tex
+```
+<!-- TODO(link): install.sh needs the first GitHub release; until then, build from source below -->
 
-Each crate's docs say what it is. `AGENTS.md` holds the working rules.
+`phitex watch` builds your document, opens it live in your browser, and
+rebuilds on every save. Double-click the page to jump to the source.
 
-## Building
+<p align="center">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/cli-dark.gif"><img src="assets/readme/cli.gif" alt="phitex watch in a terminal: a cold build, then an edit rebuilt, and the page live in the browser" width="100%"></picture>
+  <!-- TODO(number): the CLI GIF's figures (assets/cli.html's CONFIG and LIVE) from a real run, then scripts/readme-gifs.sh cli -->
+</p>
 
-Run every `cargo` command and built binary through `scripts/sandbox`.
-This is bubblewrap: the repository is writable, `$HOME` is empty, and
-there is no network unless you pass `--net`.
+</div>
 
-    scripts/sandbox --net cargo fetch
-    scripts/sandbox cargo build --release -p phitex-cli
-    scripts/sandbox cargo test
+One build, start to finish. `\ref`, `\cite`, the table of contents and the
+index settle in a single run: no "run it twice", no latexmk. BibTeX, biber
+and makeindex run inside the build, and run again only when their input
+changes.
 
-The binary is `target/release/phitex`. It needs a TeX Live 2026
-installation for the formats' files, the packages and the fonts, found
-through kpathsea from the `tex` on `PATH`. It never runs TeX Live's
-programs.
+```sh
+phitex build paper.tex                    # the finished PDF, like latexmk -pdf
+phitex watch paper.tex                    # live in the browser, rebuilt on save
+phitex --compat=pdflatex paper.tex        # one run, exactly as pdflatex
+phitex upgrade                            # the latest release; phitex news says what it brings
+```
 
-`scripts/fetch-upstream.sh` fetches the pinned reference sources (TeX
-Live's web2c, LaTeX, pgf) into `upstream/`. Only the tests use them.
+## Works where you write
 
-## Use
+<p align="center">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/everywhere-dark.gif"><img src="assets/readme/everywhere.gif" alt="The same paper edited in Overleaf, VS Code, Neovim and Emacs in turn, and the page following each" width="100%"></picture>
+</p>
 
-`phitex build` builds a document to its fixpoint, BibTeX, biber and
-makeindex included. `phitex watch` keeps it built as it is edited, with
-the pages live in the browser:
+| Where | How | Get it |
+|---|---|---|
+| **Overleaf** | A browser extension adds a **PDF \| ⚡ Instant** switch to Overleaf's toolbar. The page follows your typing. It compiles inside your browser: your document is never sent anywhere. | [Chrome](https://chromewebstore.google.com/detail/phitex-instant-for-overle/joimneigjammmhdbgaonlepnlllceajl) · [Firefox](https://addons.mozilla.org/en-US/firefox/addon/phitex-for-overleaf-unofficial/) · [Edge](https://microsoftedge.microsoft.com/addons/detail/phitex-instant-for-overle/gkcnpagkdjaefnnpkoogdpacdmgpihpd) |
+| **VS Code** | A live page beside your editor, errors in the Problems panel, click-to-source both ways. | Marketplace <!-- TODO(link): Marketplace and Open VSX; today from source or a .vsix · Phi Frontends --> |
+| **Neovim** | `phitex.lua` (Neovim 0.11+): the page follows your cursor, diagnostics inline. | [editors/nvim](https://github.com/accl-kaust/PhiTeX-frontends/blob/dev/editors/nvim/phitex.lua) <!-- TODO(link): editors/ is on dev only, not main · Phi Frontends --> |
+| **Emacs** | `phitex.el` (Emacs 29+): the same, beside eglot or lsp-mode. | [editors/emacs](https://github.com/accl-kaust/PhiTeX-frontends/blob/dev/editors/emacs/phitex.el) |
+| **Any LSP editor** | `phitex watch --lsp` is a language server: your buffers are built as you type, problems published, your cursor shown on the page. | built in |
+| **Any browser** | `phitex watch` serves the live page at `http://127.0.0.1`. | built in |
+| **latexmk, scripts, CI** | Under the name `pdflatex` (or `--compat=pdflatex`), PhiTeX takes pdflatex's command line and makes one run, as pdflatex would. | built in |
 
-    phitex build paper.tex
-    phitex build -j 8 --output-format dvi paper.tex
-    phitex watch -o out paper.tex
-    phitex clean paper.tex
+The Overleaf extension is unofficial: it is not made or endorsed by
+Overleaf. Overleaf's own Recompile stays the PDF you submit.
 
-The engine is chosen from `--engine`, a `phitex.toml`, a `% !TEX program
-= …` comment, or else the text (`pdflatex` for a LaTeX document, `pdftex`
-otherwise). The first build with an engine makes its format from TeX
-Live's ini file on the graph and caches it (`$XDG_CACHE_HOME/phitex`).
-That first build takes longer.
+## Exact
 
-Under an engine's name (`pdflatex`, `latex`, `pdftex`, `etex`, `tex`, as
-a link to `phitex`), or with `--compat=NAME`, it takes that engine's
-command line and makes one run, as the engine would:
+<p align="center">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/exact-wide-dark.png"><img src="assets/readme/exact-wide.png" alt="PhiTeX's PDF and pdfLaTeX's, the same sha256" width="100%"></picture>
+</p>
 
-    phitex --compat=pdflatex -interaction=nonstopmode doc.tex
-    phitex --compat=pdftex -ini -etex doc.tex
+"Exact" means the same bytes, not "looks the same". Every PDF PhiTeX writes
+is compared byte for byte with pdfTeX 1.40.29's (TeX Live 2026), object
+numbers included, and so are the files the job reads back: the `.aux`, the
+table of contents, the bibliography. An edit's PDF is always the PDF a
+full rebuild would make.
 
-TeX's files come from TeX Live by kpathsea, or, with `--shelf` (or
-`files = "shelf"` in `phitex.toml`), from Shelf: TeX Live's files in
-packs, fetched as a document needs them (from `PHITEX_SHELF_URL`; no
-server is the default yet), checked against the release's pack table and
-kept in the cache's `shelf/<release>/`, so a later build needs no
-network. One source a run, never one after the other; the release is
-the binary's, so two machines build a document from the same files.
-XeTeX over Shelf needs a release that ships its font index
-(docs/spec-editor-protocol.md §5).
+Checked on every change: amsldoc, the LaTeX manual, byte-identical to pdflatex at 1, 8 and 16 threads.
+<!-- TODO(number): the corpus size and pass rate for the wider claim · Phi -->
 
-`phitex watch --lsp` is a language server for any editor with an LSP
-client (VS Code, Neovim, Emacs, Helix, Zed): the editor's buffers are
-built as you type, its problems published, its cursor shown on the page,
-with progress (`$/progress`, `phitex/status`), the outline
-(`documentSymbol`), settings and the commands `phitex.rebuild`,
-`phitex.stop`, `phitex.savePdf`, `phitex.clearCache` and
-`phitex.cacheStats`. The protocol, the same for the WebAssembly core, is
-docs/spec-editor-protocol.md.
+## Fast, measured
 
-The exit status is pdflatex's: 0 when the document built without errors
-(warnings allowed), 1 otherwise. Standard error says what went wrong. A
-failure inside PhiTeX itself is reported as a bug in PhiTeX, naming the
-step that failed and the text it was on; `-v` shows the engine's whole
-message.
+<a href="https://phitex.org/perf/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://phitex.org/perf/readme-dark.svg">
+    <img alt="PhiTeX against pdflatex: cold builds, word edits and thread scaling, measured on the latest main" src="https://phitex.org/perf/readme.svg" width="100%">
+  </picture>
+</a>
+<!-- TODO(visual): perf chart, URLs final; first publish pending (mc poller, ~half a day) · Phi -->
 
-## latexmk compatibility
+Measured on every merge to `main` and published at
+[phitex.org/perf](https://phitex.org/perf/): cold builds against pdflatex,
+a word edit from save to the page on screen, and scaling from 1 to 16
+threads, on TeX Live's own documentation (from a short paper to the
+600-page `memman`). Each number is the median of 5 runs on one dedicated
+machine, and "byte-identical" is shown only where that run checked it
+against pdflatex.
 
-`phitex build` does latexmk's job without running latexmk, pdflatex or
-the tools:
+## How it works
 
-- **Rounds.** A build reads back the files the job writes (the
-  auxiliary file, the table of contents, the bibliography, the index,
-  ...). It goes round until what the job reads back no longer changes, as
-  latexmk reruns pdflatex. It takes no more rounds than latexmk's
-  pdflatex runs on the same document. After 5 rounds (latexmk's
-  `max_repeat`), the output is the last round's, and a warning names the
-  files and keys still changing. A document that never settles under
-  latexmk does not settle here either.
-- **Tools by reads.** BibTeX, biber and makeindex are not run between
-  rounds. When the document opens a file that one of them makes from a
-  file the job writes, that read is the tool's output, computed in
-  process from what the job wrote in the round before. The tool runs
-  again only when its input changed. Bibliography styles and databases
-  and index styles are found through kpathsea, as the real programs
-  find them. A `\write18` naming one of these tools asks for its output
-  the same way, with its arguments.
-- **Shell escape.** No external program ever runs. By default
-  `\pdfshellescape` is 2, TeX Live's restricted mode. In that mode a
-  `\write18` may name bibtex or makeindex (TeX Live's
-  `shell_escape_commands`), and any other command is disabled, as pdfTeX
-  disables it. `--shell-escape` (or `shell-escape = true` in
-  `phitex.toml`) makes it 1, as `pdflatex -shell-escape` does, and biber
-  is then allowed too. An allowed tool runs in process. Any other command
-  is refused with a diagnostic, so packages that need external programs
-  (minted, for example) do not work yet.
-- **Directories.** Without a `phitex.toml`, the build runs in the main
-  file's directory, as `latexmk -cd` does. `-o DIR` is TeX's
-  `-output-directory`. A `% !TEX root = …` comment is honoured.
-- **One run, for latexmk itself.** To keep latexmk, give it PhiTeX as
-  its pdflatex. Each run is then one run, not a fixpoint:
-  `latexmk -pdf -pdflatex='phitex --compat=pdflatex %O %S' doc.tex`.
+<p align="center">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/how-dark.png"><img src="assets/readme/how.png" alt="An edit, the paragraphs it reaches, the pages that move" width="100%"></picture>
+</p>
 
-## WebAssembly
+A TeX compiler reads your document from the top, every time. PhiTeX
+instead keeps the whole build as a graph: each paragraph, each page, each
+macro definition and every place it is used. An edit changes one node, and
+only what depends on it is rebuilt: the paragraph, the pages it moved, the
+references that changed. Everything else is reused, and the work that
+remains is spread over your cores.
 
-`phitex-wasm` is the engine as a `wasm32-wasip1-threads` program. Files
-come through WASI and the engine's threads are Node workers sharing the
-module's memory. There is no wasm-bindgen and no `unsafe` code.
+Underneath, it is a TeX engine in Rust that compiles a document by graph
+reduction of pending thunks: macros are functions, the PDF is the root,
+and the files a job writes and reads back are a loop reduced to a fixed
+point. A cold build is an edit from nothing.
 
-    scripts/sandbox scripts/wasm.sh check    # build, then a plain TeX and a LaTeX document at 1 and 4 threads
-    cd doc-dir && node .../scripts/wasm-run.mjs .../phitex-wasm.wasm --engine pdflatex -j 4 doc.tex
+## Status
 
-`check` makes both formats in wasm and compares each PDF with pdfTeX's,
-byte for byte. It needs the pinned toolchain's `wasm32-wasip1-threads`
-target (`rustup target add wasm32-wasip1-threads --toolchain
-nightly-2026-08-08`, once), Node 22 or later, and TeX Live.
+PhiTeX is in **alpha**.
+
+- **Works:** plain TeX, pdfLaTeX, XeLaTeX and LuaLaTeX, byte-identical;
+  BibTeX, biber, makeindex; `phitex watch` and the editors above; Shelf;
+  the same engine in WebAssembly with threads; `.synctex.gz`.
+<!-- TODO(claim): XeLaTeX byte-identical across the corpus; LuaLaTeX at all · Phi -->
+- **Coming:** packages that run external programs, such as
+  `minted`, on the command line.
+  <!-- TODO(claim): minted unverified natively (works in the Overleaf extension) · Phi -->
+
+What does not work yet, and why, is in [`CHANGELOG.md`](CHANGELOG.md). The
+release bars and their measured values are in
+[`docs/alpha-checklist.md`](docs/alpha-checklist.md).
+
+## Build from source
+
+```sh
+cargo build --release -p phitex-cli   # target/release/phitex
+cargo test
+```
+
+## Contributing
+
+Contributions are welcome: bug reports, documents that break, fixes, and
+new editor integrations.
+
+- **A PDF that differs from pdflatex's is a bug.** Open an issue with the
+  smallest `.tex` file that shows it, the command you ran, and
+  `phitex --version`. If it builds with pdflatex and not with PhiTeX, that
+  is a bug too.
+- **Pull requests:** run `cargo test` and `cargo clippy` first. Keep a
+  change to one thing, and say in its description what it changes and how
+  you checked it.
+- **Where things are:** each crate's docs say what it is; the engine's
+  design, the crates and the WebAssembly build are described in
+  [`CONTRIBUTING.md`](CONTRIBUTING.md).
+  <!-- TODO(claim): write CONTRIBUTING.md: move Layout, latexmk compatibility and WebAssembly from the old README there, plus the test corpus and how to compare with pdflatex -->
+- **Editors:** the Overleaf and VS Code extensions and the Neovim and
+  Emacs plugins live in
+  [PhiTeX-frontends](https://github.com/accl-kaust/PhiTeX-frontends).
+
+## Star history
+
+If PhiTeX saves you a wait, a star helps others find it.
+
+<a href="https://star-history.com/#accl-kaust/PhiTeX&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=accl-kaust/PhiTeX&type=Date&theme=dark">
+    <img alt="Star history of accl-kaust/PhiTeX" src="https://api.star-history.com/svg?repos=accl-kaust/PhiTeX&type=Date" width="100%">
+  </picture>
+</a>
 
 ## License
 
-GNU Affero General Public License v3.0 only (`AGPL-3.0-only`); see `LICENSE`.
+GNU Affero General Public License v3.0 only (`AGPL-3.0-only`); see
+[`LICENSE`](LICENSE).
 
-This license applies to every revision of this repository, including
-those committed before `LICENSE` was added. The `license` field in
-earlier revisions of `Cargo.toml` (`MIT OR Apache-2.0`, later
-`AGPL-3.0-or-later`) was a placeholder and never licensed this code under
-those terms.
+<p align="center">
+  Made at <a href="https://accl.kaust.edu.sa">ACCL</a>, <a href="https://www.kaust.edu.sa">KAUST</a>.
+  <!-- TODO(link): confirm the ACCL URL -->
+</p>
