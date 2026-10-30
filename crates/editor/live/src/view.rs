@@ -773,7 +773,11 @@ impl Viewer {
                     "engine": "phitex",
                     "fetches": true,
                     "missing": [],
-                    "pending": u8::from(s.building.load(Ordering::Relaxed)),
+                    // (the parts not read for want of fuel or support: none,
+                    // the engine reads every part; a build running is said
+                    // by the `building` event, never here, where the
+                    // viewer read it as a part out of fuel)
+                    "pending": 0,
                     "undefined_names": [],
                 }))
             }
