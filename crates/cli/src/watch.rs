@@ -1015,6 +1015,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     diagnostics: vec![
                         json!({"severity": "error", "code": "engine", "message": first}),
                     ],
+                    parts: serde_json::Map::new(),
                 };
                 if let Some(v) = &view {
                     v.built(&b);
@@ -1106,6 +1107,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 origins: None,
                 changed: None,
                 diagnostics: diagnostics(s, &r, &log),
+                parts: Built::parts_of(s, &r),
             };
             origins_due.set(true);
             if let Some(v) = &view {

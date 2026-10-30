@@ -520,11 +520,14 @@ const said = (s: Said, live: boolean) => {
   if (s.kind === "busy") {
     busy = s.text ?? "";
     // (before the first page: the card's steps follow the build's phases,
-    // `pdftex d.tex: build 1 (cold) · engine · 4.7 s · …`)
+    // `xelatex d.tex: build 1 (cold) · typesetting · 4.7 s · …`, said for
+    // the writer: what is made and for how long, not the engine's cores)
     const parts = busy.split(" · ");
     if (parts.length >= 3) {
-      const phase = parts[1];
-      panel.loadStep(phase === "format" ? 1 : 2, `${phase} · ${parts.slice(2).join(" · ")}`);
+      const [phase, time] = [parts[1], parts[2]];
+      if (phase.startsWith("making")) panel.loadStep(1, `Making the format, once per PhiTeX update · ${time}`);
+      else if (phase === "format") panel.loadStep(1, `Loading the format · ${time}`);
+      else panel.loadStep(2, `Preparing the live preview · ${time}`);
     }
     return void showBar();
   }

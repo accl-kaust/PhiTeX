@@ -2405,7 +2405,7 @@ var Panel = class {
    */
   loadStep(k, text) {
     if (this.last) return;
-    this.step(this.words.steps[k] ?? "", void 0, text);
+    this.step(this.words.steps[k] ?? "", void 0, k === 2 && this.streamed !== void 0 && !this.making ? `Page ${this.streamed + 1} \xB7 ${text}` : text);
   }
   // ---- The first page's sheet: the opening playing on it, the step under it ----
   /** The opening on the sheet (null: none playing), and whether it has played out once. */
@@ -5746,8 +5746,10 @@ var said = (s, live) => {
     busy = s.text ?? "";
     const parts = busy.split(" \xB7 ");
     if (parts.length >= 3) {
-      const phase = parts[1];
-      panel.loadStep(phase === "format" ? 1 : 2, `${phase} \xB7 ${parts.slice(2).join(" \xB7 ")}`);
+      const [phase, time] = [parts[1], parts[2]];
+      if (phase.startsWith("making")) panel.loadStep(1, `Making the format, once per PhiTeX update \xB7 ${time}`);
+      else if (phase === "format") panel.loadStep(1, `Loading the format \xB7 ${time}`);
+      else panel.loadStep(2, `Preparing the live preview \xB7 ${time}`);
     }
     return void showBar();
   }

@@ -1583,6 +1583,7 @@ mod tests {
             since_ms: None,
             origins: None,
             changed: None,
+            parts: serde_json::Map::new(),
         }
     }
 

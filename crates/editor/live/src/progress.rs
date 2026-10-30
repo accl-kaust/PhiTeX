@@ -223,6 +223,11 @@ impl Meter {
         });
     }
 
+    /// The packs fetched so far in this build.
+    pub fn fetched(&self) -> u64 {
+        lock(&self.state).done
+    }
+
     /// Pack `pack` is asked for, for file `name` (`arrived`: false), or
     /// is in (true; it could not be had counts as in): told, with the
     /// packs done and asked so far in this build.

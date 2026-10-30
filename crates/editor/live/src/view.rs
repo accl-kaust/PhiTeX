@@ -76,6 +76,32 @@ pub struct Built {
     /// that keeps the origins it asked for (none: not told; the event
     /// `origins`).
     pub changed: Option<OriginsChanged>,
+    /// The build's parts for a timing popover, merged into the `settled`
+    /// event (`Built::parts_of`; empty: none, a failed build).
+    pub parts: serde_json::Map<String, Value>,
+}
+
+impl Built {
+    /// The parts of session `s`'s build `r`: `cold` (the first build, or
+    /// one from nothing: the format, the packages, the whole document),
+    /// `passes` (latexmk's runs of LaTeX), `ran` (the steps run) and `kept`
+    /// (those kept from the last build), `threads`, `fetched` (the packages'
+    /// packs fetched in it).
+    pub fn parts_of(s: &crate::session::Session, r: &crate::session::Report) -> serde_json::Map<String, Value> {
+        let (ran, passes) = r
+            .runs
+            .iter()
+            .fold((0, 0), |(a, b), x| (a + x.commands_run, b + x.rounds));
+        let live = r.runs.last().map_or(0, |x| x.live as u64);
+        let mut m = serde_json::Map::new();
+        m.insert("cold".into(), json!(r.runs.first().is_some_and(|x| x.why == "cold")));
+        m.insert("passes".into(), json!(passes.max(1)));
+        m.insert("ran".into(), json!(ran));
+        m.insert("kept".into(), json!(live.saturating_sub(ran)));
+        m.insert("threads".into(), json!(r.runs.last().map_or(0, |x| x.threads)));
+        m.insert("fetched".into(), json!(s.status().meter().fetched()));
+        m
+    }
 }
 
 /// The pages' glyph origins (`phitex_tex::Build::all_page_origins`) and
@@ -645,7 +671,15 @@ impl Viewer {
         if let Some(c) = &b.changed {
             self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
         }
-        self.emit(&json!({"event": "settled", "since_ms": b.since_ms}).to_string());
+        // (the build's time and parts: a timing popover's, the first build's
+        // too, which has no change to time from)
+        let mut e = serde_json::Map::new();
+        e.insert("event".into(), json!("settled"));
+        e.insert("since_ms".into(), json!(b.since_ms));
+        e.insert("ms".into(), json!(b.ms));
+        e.insert("history".into(), json!(b.history));
+        e.extend(b.parts.clone());
+        self.emit(&Value::Object(e).to_string());
         (changed, n)
     }
 }
@@ -1074,6 +1108,7 @@ mod tests {
             since_ms: None,
             origins: None,
             changed: None,
+            parts: serde_json::Map::new(),
         });
         assert_eq!(ask(3)["json"]["pending"], true);
     }

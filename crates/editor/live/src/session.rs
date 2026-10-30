@@ -756,7 +756,7 @@ impl Session {
                 let progress = b.progress();
                 self.status.meter().build_begins(progress.evaluation());
                 self.status.set_live(Some(live(progress)));
-                self.status.set("engine");
+                self.status.set("typesetting");
                 // (evaluated with the text, one evaluation: its stats
                 // count the nodes the files' change ran)
                 for name in &reread {
@@ -790,12 +790,18 @@ impl Session {
                 self.status.meter().build_begins(0);
                 self.status.meter().watch(&progress);
                 {
-                    let (status, made) = (self.status.clone(), format!("{} format, made", self.job.engine.name));
+                    let (status, name) = (self.status.clone(), self.job.engine.name);
+                    let making = std::sync::atomic::AtomicBool::new(false);
                     progress.on_format(Box::new(move |ready| {
+                        use std::sync::atomic::Ordering::Relaxed;
                         if ready {
-                            status.set("engine");
+                            if making.load(Relaxed) {
+                                status.relabel(format!("made {name} format"));
+                            }
+                            status.set("typesetting");
                         } else {
-                            status.relabel(made.as_str());
+                            making.store(true, Relaxed);
+                            status.relabel(format!("making {name} format"));
                         }
                         status.meter().format(ready);
                     }));
@@ -810,6 +816,15 @@ impl Session {
                 } else {
                     None
                 };
+                // (an XeTeX job on a host with no XeTeX fonts would run as
+                // pdfTeX: its format made by pdfTeX's rules, fontspec
+                // refusing it; said instead)
+                if xe && xetex.is_none() {
+                    return Err(format!(
+                        "{} needs XeTeX's fonts, and this host gives none (Host::xetex)",
+                        self.job.engine.name
+                    ));
+                }
                 phitex_tex::timeline::lap("session: XeTeX's fonts and PDF files");
                 let finder = self.finder();
                 let prelude_finder = Some(self.format_finder());

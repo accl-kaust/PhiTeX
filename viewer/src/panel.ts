@@ -1113,7 +1113,8 @@ export class Panel {
    */
   loadStep(k: number, text: string): void {
     if (this.last) return;
-    this.step(this.words.steps[k] ?? "", undefined, text);
+    // (pages shipped while it runs: the page reached said first)
+    this.step(this.words.steps[k] ?? "", undefined, k === 2 && this.streamed !== undefined && !this.making ? `Page ${this.streamed + 1} · ${text}` : text);
   }
 
   // ---- The first page's sheet: the opening playing on it, the step under it ----

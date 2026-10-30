@@ -337,6 +337,7 @@ impl Document {
                     diagnostics: vec![
                         json!({"severity": "error", "code": "engine", "message": first}),
                     ],
+                    parts: serde_json::Map::new(),
                 };
                 v.built(&failed);
                 if let Some(l) = &lsp {
@@ -389,6 +390,7 @@ impl Document {
             origins: None,
             changed: None,
             diagnostics: diagnostics(s, &r, &log),
+            parts: Built::parts_of(s, &r),
         };
         v.built(&built);
         if let Some(l) = &lsp {
