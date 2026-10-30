@@ -369,12 +369,9 @@ impl<'a> Ctx<'a> {
             At::Final => (Anchor::Final, Some(crate::read::final_read(self.eng, f))),
             At::End(u) => (
                 Anchor::End(u),
-                Some(read::reaching_visible(
-                    self.eng,
-                    f,
-                    Pos(self.eng.unit(u).end.0 - 1),
-                    true,
-                )),
+                Some(read::on_one_layout(self.eng, || {
+                    read::reaching_visible(self.eng, f, Pos(self.eng.unit(u).end.0 - 1), true)
+                })),
             ),
         };
         if let (Some(x), Anchor::Before(_) | Anchor::AfterOwn(_)) = (&r, &anchor) {
@@ -493,17 +490,20 @@ impl<'a> Ctx<'a> {
     ) -> Result<Option<ValueId>, Stop> {
         self.check()?;
         self.before_read(f);
-        let Some(fp) = self.bound(from) else {
-            return Ok(None);
-        };
-        let tp = match to {
-            Some(n) => pos_of(self.eng, n),
-            None => Some(pos_of(self.eng, self.me.id).ok_or_else(stop)?),
-        };
-        if let Some(tp) = tp {
-            read::trace_inverted(self.eng, "run", self.me, f, (from, fp), (to, read::end_of(tp, incl)));
-        }
-        Ok(tp.map(|tp| read::fold(self.eng, f, Some(fp), Some(read::end_of(tp, incl)))))
+        // (the bounds' labels and the fold between them on one layout)
+        read::on_one_layout(self.eng, || {
+            let Some(fp) = self.bound(from) else {
+                return Ok(None);
+            };
+            let tp = match to {
+                Some(n) => pos_of(self.eng, n),
+                None => Some(pos_of(self.eng, self.me.id).ok_or_else(stop)?),
+            };
+            if let Some(tp) = tp {
+                read::trace_inverted(self.eng, "run", self.me, f, (from, fp), (to, read::end_of(tp, incl)));
+            }
+            Ok(tp.map(|tp| read::fold(self.eng, f, Some(fp), Some(read::end_of(tp, incl)))))
+        })
     }
 
     /// The monoid's empty value: a fold whose bound is gone.
@@ -575,11 +575,14 @@ impl<'a> Ctx<'a> {
     pub fn next_contribution(&mut self, f: Field, after: Option<NodeId>) -> Result<Option<(NodeId, ValueId)>, Stop> {
         self.check()?;
         self.before_read(f);
-        let Some(ap) = self.bound(after) else {
+        // (the bound's label and the search from it on one layout)
+        let Some(n) = read::on_one_layout(self.eng, || {
+            self.bound(after)
+                .map(|ap| read::next_contribution(self.eng, f, Some(ap)))
+        }) else {
             self.record(ReadKind::Next { f, after }, PathId::WHOLE, None);
             return Ok(None);
         };
-        let n = read::next_contribution(self.eng, f, Some(ap));
         self.record(ReadKind::Next { f, after }, PathId::WHOLE, next_value(self.eng, &n));
         self.stop_at = if n.item.is_none() { n.stop } else { None };
         Ok(n.item)
@@ -868,7 +871,7 @@ impl<'a> Ctx<'a> {
     /// definitions some of its nodes have made and others have not.
     pub fn hole_before(&mut self) -> Result<Option<NodeId>, Stop> {
         self.check()?;
-        let h = read::hole_before(self.eng, self.me);
+        let h = read::on_one_layout(self.eng, || read::hole_before(self.eng, self.me));
         if h.is_some() {
             self.record(ReadKind::Hole, PathId::WHOLE, read::hole_value(self.eng, h));
         }
@@ -893,7 +896,7 @@ impl<'a> Ctx<'a> {
         self.check()?;
         let f = self.eng.depth_field;
         self.before_read(f);
-        let d = read::depth_of(self.eng, self.me.id).ok_or_else(stop)?;
+        let d = read::on_one_layout(self.eng, || read::depth_of(self.eng, self.me.id)).ok_or_else(stop)?;
         let x = self.eng.values().int(i64::from(d));
         self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, Some(x));
         Ok(d)

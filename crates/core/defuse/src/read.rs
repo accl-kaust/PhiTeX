@@ -114,6 +114,35 @@ pub(crate) fn reaching(eng: &Engine, f: Field, at: Pos, inclusive: bool) -> Reac
 
 /// `reaching` at a node's label, read under its segment's lock, under
 /// scopes ([`reaching_visible`]); None when the node is gone.
+/// `f` computed on one layout of the line's labels: begun with no move of
+/// labels in progress, and computed again while one began meanwhile
+/// ([`Engine::moving`]: a relabel, a split, a rebalance). A read that
+/// takes labels (a fold's bounds, a search's start) and then looks
+/// between them in segments locked one at a time would otherwise answer
+/// for a range the line never had: the labels taken before a relabel,
+/// the segments looked into after it (issue #5: a finisher read its
+/// page's window across a relabel as empty, filed that, and shipped no
+/// page). Waits only for a move, which waits for nothing.
+pub(crate) fn on_one_layout<T>(eng: &Engine, mut f: impl FnMut() -> T) -> T {
+    let mut spins = 0u32;
+    loop {
+        let g = eng.label_gen.load(Ordering::SeqCst);
+        if eng.moves.load(Ordering::SeqCst) != 0 {
+            spins += 1;
+            if spins.is_multiple_of(64) {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
+            continue;
+        }
+        let x = f();
+        if eng.label_gen.load(Ordering::SeqCst) == g {
+            return x;
+        }
+    }
+}
+
 pub(crate) fn reaching_at(eng: &Engine, f: Field, anchor: NodeId, inclusive: bool) -> Option<Reaching> {
     if scoped(eng) {
         return reaching_at_visible(eng, f, anchor, inclusive);
@@ -628,15 +657,18 @@ pub(crate) fn answer(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId) -> 
 
 /// The folds one pass of answers computed, by range: a node's reads
 /// through many paths of one range fold it once.
-pub(crate) type FoldMemo = Vec<((Field, Pos, Pos), ValueId)>;
+/// Keyed by the layout too (`Engine::label_gen`): a range's labels name
+/// other nodes after a move.
+pub(crate) type FoldMemo = Vec<((Field, Pos, Pos, u64), ValueId)>;
 
-/// `fold`, from `memo` where this pass computed it.
+/// `fold`, from `memo` where this pass computed it on this layout.
 pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut FoldMemo) -> ValueId {
-    if let Some(e) = memo.iter().find(|e| e.0 == (f, from, to)) {
+    let key = (f, from, to, eng.label_gen.load(Ordering::SeqCst));
+    if let Some(e) = memo.iter().find(|e| e.0 == key) {
         return e.1;
     }
     let x = fold(eng, f, Some(from), Some(to));
-    memo.push(((f, from, to), x));
+    memo.push((key, x));
     x
 }
 
@@ -655,7 +687,7 @@ pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &m
     answer_in(eng, me, &rd.kind, rd.path, memo) == rd.seen
 }
 
-/// [`answer`], its folds from `memo`.
+/// [`answer`], its folds from `memo`, on one layout ([`on_one_layout`]).
 pub(crate) fn answer_in(
     eng: &Engine,
     me: &Node,
@@ -663,6 +695,10 @@ pub(crate) fn answer_in(
     path: PathId,
     memo: &mut FoldMemo,
 ) -> Option<ValueId> {
+    on_one_layout(eng, || answer_on_layout(eng, me, kind, path, memo))
+}
+
+fn answer_on_layout(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, memo: &mut FoldMemo) -> Option<ValueId> {
     match kind {
         ReadKind::Field { f, at } => {
             if *f == eng.depth_field {
@@ -789,12 +825,14 @@ pub(crate) fn hole_value(eng: &Engine, h: Option<NodeId>) -> Option<ValueId> {
 
 /// A segment-side reader record's current answer.
 pub(crate) fn reader_answer(eng: &Engine, f: Field, r: &Reader) -> Option<ValueId> {
-    if f == eng.depth_field {
-        let d = depth_of(eng, r.anchor)?;
-        return apply_path(eng, Some(eng.values().int(i64::from(d))), r.path);
-    }
-    let rc = reaching_at(eng, f, r.anchor, r.inclusive)?;
-    through(eng, rc, r.path)
+    on_one_layout(eng, || {
+        if f == eng.depth_field {
+            let d = depth_of(eng, r.anchor)?;
+            return apply_path(eng, Some(eng.values().int(i64::from(d))), r.path);
+        }
+        let rc = reaching_at(eng, f, r.anchor, r.inclusive)?;
+        through(eng, rc, r.path)
+    })
 }
 
 /// Whether a range reader record's every path still gives what it saw, its
@@ -807,6 +845,10 @@ pub(crate) fn range_stands(eng: &Engine, f: Field, r: &RangeReader, memo: &mut F
 /// A range reader's value before its paths (None where an end is gone:
 /// every path gives none).
 fn range_value_in(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) -> Option<Option<ValueId>> {
+    on_one_layout(eng, || range_value_on_layout(eng, f, r, memo))
+}
+
+fn range_value_on_layout(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) -> Option<Option<ValueId>> {
     let me = eng.node(r.node);
     // (a bound gone: no value, as the run had it (`Ctx::fold_value`,
     // `Ctx::next_contribution`): a reader filed over a removed bound
@@ -1263,4 +1305,119 @@ pub(crate) fn through_aliases(eng: &Engine, mut x: Option<ValueId>) -> Option<Va
         x = reaching_at(eng, g, at, false).and_then(|r| r.value);
     }
     x
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use crate::api::{NodeId, Operation, PathId, Stop};
+    use crate::ctx::Ctx;
+    use crate::engine::Engine;
+    use crate::node::ReadKind;
+    use crate::values::{Field, ValueId};
+
+    /// `[x]`: contributes x to the field `acc`.
+    struct Contrib(Field);
+
+    impl Operation for Contrib {
+        fn name(&self) -> &'static str {
+            "contrib"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            cx.contribute(self.0, cx.args()[0]);
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// `[]`: nothing.
+    struct Idle;
+
+    impl Operation for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(&self, _: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// A fold read takes its bounds' labels and then folds the segments
+    /// between them, each under its own lock, as a run's read does
+    /// (`Ctx::fold_value`) and a commit's check of it (`answer`): while
+    /// another thread rebalances the segments and fills gaps in them,
+    /// relabelling and moving nodes, every answer is the fold of the range as the
+    /// line has it, never one over labels a move took away (issue #5: a
+    /// finisher read its page's window empty across a relabel, the read
+    /// filed as it was, and the page never shipped: objstm a page short in
+    /// 7 of 1800 runs at 64 threads).
+    #[test]
+    fn a_fold_read_while_labels_move_answers_the_range_the_line_has() {
+        let e = Arc::new(Engine::new());
+        let f = e.values().field("acc");
+        let op = e.register(Arc::new(Contrib(f)));
+        let idle = e.register(Arc::new(Idle));
+        let u = e.new_unit();
+        let ids: Vec<NodeId> = (0..4000).map(|i| e.push(u, op, vec![e.values().int(i)])).collect();
+        e.evaluate(1).expect("the contributions filed");
+        let ranges: Vec<(NodeId, NodeId)> = (0..64)
+            .map(|k| {
+                let a = (k * 61) % 3900;
+                (ids[a], ids[a + 1 + (k * 13) % 90])
+            })
+            .collect();
+        let kind = |(a, b): (NodeId, NodeId)| ReadKind::Fold {
+            f,
+            from: Some(a),
+            to: Some(b),
+            incl: true,
+        };
+        let me = Arc::clone(e.node(ids[0]));
+        let truth: Vec<Option<ValueId>> = ranges
+            .iter()
+            .map(|&r| super::answer(&e, &me, &kind(r), PathId::WHOLE))
+            .collect();
+        let stop = Arc::new(AtomicBool::new(false));
+        let mover = {
+            let (e, stop, ids) = (Arc::clone(&e), Arc::clone(&stop), ids.clone());
+            std::thread::spawn(move || {
+                let mut k = 0usize;
+                while !stop.load(Ordering::Acquire) {
+                    let s = e.seg(e.node(ids[k.wrapping_mul(7919) % ids.len()]).seg_hint());
+                    if k.is_multiple_of(2) {
+                        e.order.rebalance(&e, s.id, 1 + k % 97);
+                    } else {
+                        // (nodes put in one gap until it closes, the
+                        // segment relabelled for the next, then taken out:
+                        // the next relabel spreads the labels otherwise)
+                        let at = ids[k.wrapping_mul(104_729) % ids.len()];
+                        let put: Vec<NodeId> = (0..24).map(|_| e.insert_after(at, idle, Vec::new())).collect();
+                        for n in put {
+                            e.remove(n);
+                        }
+                    }
+                    k += 1;
+                }
+                k
+            })
+        };
+        let t0 = Instant::now();
+        let (mut reads, mut wrong) = (0u64, 0u64);
+        while t0.elapsed() < Duration::from_secs(2) {
+            for (r, want) in ranges.iter().zip(&truth) {
+                reads += 1;
+                if super::answer(&e, &me, &kind(*r), PathId::WHOLE) != *want {
+                    wrong += 1;
+                }
+            }
+        }
+        stop.store(true, Ordering::Release);
+        let moves = mover.join().expect("the moving thread");
+        assert!(moves > 0, "no move during {reads} reads");
+        assert_eq!(wrong, 0, "{wrong} of {reads} fold reads wrong during {moves} moves");
+    }
 }

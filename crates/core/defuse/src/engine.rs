@@ -178,6 +178,12 @@ pub struct Engine {
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
     pub(crate) layout_gen: AtomicU64,
+    /// The moves of labels in progress, and a count bumped as each begins
+    /// and ends (`Engine::moving`: a relabel, a split, a rebalance): a
+    /// read that takes labels and then looks between them is computed on
+    /// one layout of the line (`read::on_one_layout`).
+    pub(crate) moves: AtomicU64,
+    pub(crate) label_gen: AtomicU64,
     /// A panic outside a run cut a commit or a walk short
     /// (`sched::work_caught`): the next evaluation checks the line first
     /// (`Engine::repair_line`).
@@ -234,7 +240,29 @@ thread_local! {
     static ENGINE_STACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// A move of labels in progress ([`Engine::moving`]), ended when dropped.
+pub(crate) struct Moving<'a>(&'a Engine);
+
+impl Drop for Moving<'_> {
+    fn drop(&mut self) {
+        self.0.label_gen.fetch_add(1, Ordering::SeqCst);
+        self.0.moves.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl Engine {
+    /// Marks a move of labels (a node's label or segment changing:
+    /// `Segment::relabel`, `Segment::split_at`, `Order::rebalance`) until
+    /// the guard drops. Taken with the moved segments' write locks held
+    /// and dropped before they are let go, and nothing waited for under
+    /// it: a read waiting for it to end (`read::on_one_layout`) waits for
+    /// work that waits for nothing.
+    pub(crate) fn moving(&self) -> Moving<'_> {
+        self.moves.fetch_add(1, Ordering::SeqCst);
+        self.label_gen.fetch_add(1, Ordering::SeqCst);
+        Moving(self)
+    }
+
     /// Marks `f` as defined by a settling operation's node
     /// (`Engine::settle_marks`).
     pub(crate) fn mark_settled(&self, f: Field) {
@@ -304,6 +332,8 @@ impl Engine {
             frontier_by: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
             layout_gen: AtomicU64::new(0),
+            moves: AtomicU64::new(0),
+            label_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
             busy: AtomicU64::new(0),
             final_gen: AtomicU64::new(0),
@@ -1405,6 +1435,11 @@ impl Engine {
             }
         }
         let workers = all;
+        if stale_audit_on() {
+            for line in self.stale_audit() {
+                eprintln!("defuse stale-audit: {line}");
+            }
+        }
         let swept = self.sweep_readers() as u64
             + workers
                 .iter()
@@ -1916,6 +1951,31 @@ impl Engine {
         std::mem::take(&mut *self.settled.lock())
     }
 
+    /// The nodes the line holds as done whose run read what no longer
+    /// reaches them, with their reads: a re-ask lost. Asked with the line
+    /// quiet (`PHITEX_STALE_AUDIT`, `profile`), where every done node's
+    /// reads hold.
+    pub fn stale_audit(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for i in 0..self.nodes.len() {
+            let Some(node) = self.nodes.get(i) else { continue };
+            if node.state() != State::Clean {
+                continue;
+            }
+            let Some(r) = node.run_record() else { continue };
+            let mut memo = read::FoldMemo::new();
+            if r.reads.iter().all(|rd| read::holds(self, node, rd, &mut memo)) {
+                continue;
+            }
+            out.push(format!(
+                "STALE {}{}",
+                self.debug_node(node.id),
+                self.debug_reads(node.id)
+            ));
+        }
+        out
+    }
+
     pub fn debug_reads(&self, n: NodeId) -> String {
         let node = self.node(n);
         let Some(r) = node.run_record() else {
@@ -2327,4 +2387,12 @@ impl Engine {
     pub fn depth_at(&self, n: NodeId) -> Option<u32> {
         read::depth_of(self, n)
     }
+}
+
+/// `PHITEX_STALE_AUDIT` (`profile`): [`Engine::stale_audit`] after every
+/// evaluation, printed.
+fn stale_audit_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    crate::obs::enabled()
+        && *ON.get_or_init(|| std::env::var_os("PHITEX_STALE_AUDIT").is_some_and(|v| !v.is_empty() && v != "0"))
 }

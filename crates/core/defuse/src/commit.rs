@@ -642,7 +642,7 @@ fn wake_waiters(eng: &Engine, w: Option<&Worker>, node: &Node, st: &mut CommitSt
         if !live(eng, id, serial) {
             continue;
         }
-        if let Some(h) = read::hole_before(eng, eng.node(id)).filter(|&h| h != node.id) {
+        if let Some(h) = read::on_one_layout(eng, || read::hole_before(eng, eng.node(id))).filter(|&h| h != node.id) {
             let hn = eng.node(h);
             push_pruned(&mut hn.waiters.lock(), (id, serial), |x| live(eng, x.0, x.1));
             // (filed before it is looked at: one in since takes its
@@ -1054,12 +1054,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 range_seen[i].push((r.path, r.seen));
             }
             ReadKind::Next { f, after } => {
-                let from = match after {
-                    Some(n) => Some(eng.node(*n).pos_hint()),
-                    None => Some(read::unit_start(eng, node)),
-                };
                 let i = *range_at.entry((*f, *after, None, true, false)).or_insert_with(|| {
-                    let n = next_contribution(eng, *f, from);
+                    // (the bound's label and the search from it on one
+                    // layout, `read::on_one_layout`)
+                    let n = read::on_one_layout(eng, || {
+                        let from = match after {
+                            Some(n) => Some(eng.node(*n).pos_hint()),
+                            None => Some(read::unit_start(eng, node)),
+                        };
+                        next_contribution(eng, *f, from)
+                    });
                     next_answers.insert(range_reads.len(), read::next_value(eng, &n));
                     range_reads.push((
                         *f,
@@ -1983,7 +1987,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     for k in &replaced_moved {
         match k {
             ReadKind::Next { f, after: Some(n) } => {
-                let answer = read::pos_of(eng, *n).and_then(|at| read::next_contribution(eng, *f, Some(at)).stop);
+                let answer = read::on_one_layout(eng, || {
+                    read::pos_of(eng, *n).and_then(|at| read::next_contribution(eng, *f, Some(at)).stop)
+                });
                 if p.woken_at != Some(*n) && (answer.is_none() || p.woken_at != answer) {
                     causes.push(cause_of(k));
                 }
@@ -2645,7 +2651,7 @@ fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<
     if rs.is_empty() {
         return;
     }
-    let now = read::reaching_visible(eng, f, Pos(eng.unit(u).end.0 - 1), true);
+    let now = read::on_one_layout(eng, || read::reaching_visible(eng, f, Pos(eng.unit(u).end.0 - 1), true));
     let cause = match by {
         Some(b) => Cause::Changed {
             field: f,
@@ -2741,17 +2747,19 @@ fn reask_range(
             return;
         }
         let me = eng.node(r.node);
-        let from = match r.from {
-            Some(n) => read::pos_of(eng, n),
-            None => Some(read::unit_start(eng, me)),
-        };
-        // (asked because the node its search stopped at committed or
-        // went: the search goes on from that node, not from its start;
-        // a contribution made before it since asks again in full)
-        let resume = (r.hole && r.to == Some(by))
-            .then(|| read::pos_of(eng, by).map_or(eng.node(by).pos_hint(), |p| Pos(p.0 - 1)))
-            .filter(|p| from.is_some_and(|f| *p > f));
-        if let Some(from) = from {
+        // (the labels and the searches from them on one layout,
+        // `read::on_one_layout`)
+        let found = read::on_one_layout(eng, || {
+            let from = match r.from {
+                Some(n) => read::pos_of(eng, n),
+                None => Some(read::unit_start(eng, me)),
+            }?;
+            // (asked because the node its search stopped at committed or
+            // went: the search goes on from that node, not from its start;
+            // a contribution made before it since asks again in full)
+            let resume = (r.hole && r.to == Some(by))
+                .then(|| read::pos_of(eng, by).map_or(eng.node(by).pos_hint(), |p| Pos(p.0 - 1)))
+                .filter(|p| *p > from);
             let mut n = read::next_contribution(eng, f, Some(resume.unwrap_or(from)));
             let mut v = read::next_value(eng, &n);
             // (a node placed since before the one it stopped at, a
@@ -2761,6 +2769,9 @@ fn reask_range(
                 n = read::next_contribution(eng, f, Some(from));
                 v = read::next_value(eng, &n);
             }
+            Some((n, v))
+        });
+        if let Some((n, v)) = found {
             if r.seen.iter().all(|&(p, s)| read::apply_path(eng, v, p) == s) {
                 if n.stop != r.to && eng.ranges.remove(f, k) {
                     let mut again = r.clone();

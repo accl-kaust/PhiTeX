@@ -1138,8 +1138,11 @@ impl Segment {
 
     /// Spreads its nodes' labels evenly over `[lo, hi)`, moving each node's
     /// `pos` and re-keying `nodes`, `defs` and `contribs`. Under the write
-    /// lock; nothing outside holds a label.
+    /// lock, a move ([`Engine::moving`]): a read holding labels from before
+    /// it (a fold's bounds, `Ctx::fold_value`) is computed again
+    /// (`read::on_one_layout`).
     pub(crate) fn relabel(&self, inner: &mut Inner, eng: &Engine) {
+        let _moving = eng.moving();
         let t_held = std::time::Instant::now();
         let n = inner.nodes.len() as u64;
         let width = inner.hi.0 - self.lo.0;
@@ -1316,6 +1319,8 @@ impl Segment {
     /// the unit's last nodes, fill the upper half, which keeps the rest
     /// of the labels instead of half of them at every split.
     pub(crate) fn split(&self, inner: &mut Inner, eng: &Engine, new_id: SegId) -> Arc<Segment> {
+        // (a move: the lower half relabelled, the upper moved out)
+        let _moving = eng.moving();
         let k = inner.nodes.len() / 2;
         let mid = *inner.nodes.keys().nth(k).expect("a segment to split has nodes");
         let step = ((mid.0 - self.lo.0) / (k as u64 + 1)).min(crate::order::GAP);
@@ -1352,6 +1357,8 @@ impl Segment {
 
     /// `split`, at label `at`: the new segment is `[at, hi)`.
     pub(crate) fn split_at(&self, inner: &mut Inner, eng: &Engine, at: Pos, new_id: SegId) -> Arc<Segment> {
+        // (a move: the nodes at and after `at` change segment)
+        let _moving = eng.moving();
         let hi = inner.hi;
         inner.hi = at;
         let nodes = inner.nodes.split_off(&at);

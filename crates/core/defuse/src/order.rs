@@ -179,7 +179,11 @@ impl Order {
                 continue;
             }
             let asking = ids.iter().position(|&x| x == seg).expect("the asking segment");
-            self.spread(eng, &win, &mut gs, n, asking, more);
+            {
+                // (a move: under the window's locks, ended before them)
+                let _moving = eng.moving();
+                self.spread(eng, &win, &mut gs, n, asking, more);
+            }
             let hi = gs[gs.len() - 1].hi;
             drop(gs);
             crate::obs::long_hold("rebalance", win.len(), t_held);
