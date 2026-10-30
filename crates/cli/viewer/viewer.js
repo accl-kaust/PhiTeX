@@ -3416,6 +3416,7 @@ var preambleOf = (t) => {
 };
 var usesMinted = (t) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
 var WATCH2 = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
+var NEAR_CULPRIT = 64;
 function place2(t, pos) {
   const at = byteOffset(t, pos);
   const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
@@ -4266,14 +4267,28 @@ var PreviewSession = class {
    */
   async boxesOf(file, start, end) {
     if (!this.opened) return [];
+    file = file.replace(/^\.\//, "");
     const n = Math.max(this.hashes.length, this.pages, 1);
     const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
     const out = [];
+    let near = null;
     for (const k of order) {
       if (k >= this.hashes.length) continue;
       const all = this.cached(k) ?? await this.glyphsOf(k);
       const hit = from(all, file, start, Math.max(end, start + 1));
       if (hit.length) out.push({ k, boxes: boxes(hit, all) });
+      for (const g of all) {
+        if (g.file !== file || g.synth) continue;
+        const d = g.start >= end ? g.start - end : start - g.end;
+        if (d >= 0 && (!near || d < near.d)) near = { k, g, d, all };
+      }
+    }
+    if (!out.length && near && near.d <= NEAR_CULPRIT) {
+      const mine = near.all.filter((x) => x.file === file && !x.synth).sort((x, y) => x.start - y.start);
+      let i = mine.indexOf(near.g), j = i;
+      while (i > 0 && mine[i - 1].end >= mine[i].start) i--;
+      while (j + 1 < mine.length && mine[j].end >= mine[j + 1].start) j++;
+      out.push({ k: near.k, boxes: boxes(mine.slice(i, j + 1), near.all) });
     }
     return out.sort((x, y) => x.k - y.k);
   }

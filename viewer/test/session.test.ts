@@ -100,4 +100,9 @@ test("a range's boxes on the pages", async () => {
   assert.equal(got[0].k, 0);
   assert.ok(got[0].boxes.length > 0);
   assert.deepEqual(await s.boxesOf("other.tex", 0, 3), []);
+  // (as TeX names it, "./main.tex"; a culprit not typeset, an undefined
+  // command's name at 14..20: the typeset word nearest it, bytes 12..13)
+  const near = await s.boxesOf("./main.tex", 14, 20);
+  assert.equal(near.length, 1);
+  assert.deepEqual(near[0].boxes, (await s.boxesOf("main.tex", 12, 14))[0].boxes);
 });

@@ -88,6 +88,9 @@ export interface CoreRes {
   error?: string;
 }
 
+/** How far (bytes) a problem's culprit may be from the typeset word underlined for it, when it is not typeset itself. */
+const NEAR_CULPRIT = 64;
+
 /**
  * The cursor at `pos` (UTF-16) in text `t`, as the glyph origins count:
  * its byte, the word it is in or by (`wordNear`), and its line (bytes).
@@ -1211,17 +1214,36 @@ export class PreviewSession {
    */
   async boxesOf(file: string, start: number, end: number): Promise<{ k: number; boxes: [number, number, number, number][] }[]> {
     if (!this.opened) return [];
+    // (a problem names its file as TeX opened it: "./main.tex" is main.tex)
+    file = file.replace(/^\.\//, "");
     const n = Math.max(this.hashes.length, this.pages, 1);
     const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
     const out: { k: number; boxes: [number, number, number, number][] }[] = [];
+    // (the nearest typeset glyph to it, for a culprit that is not typeset:
+    // an undefined command's name, a missing brace)
+    let near: { k: number; g: Glyph; d: number; all: Glyph[] } | null = null;
     for (const k of order) {
       if (k >= this.hashes.length) continue;
       const all = this.cached(k) ?? (await this.glyphsOf(k));
       const hit = from(all, file, start, Math.max(end, start + 1));
       if (hit.length) out.push({ k, boxes: boxes(hit, all) });
+      for (const g of all) {
+        if (g.file !== file || g.synth) continue;
+        const d = g.start >= end ? g.start - end : start - g.end;
+        if (d >= 0 && (!near || d < near.d)) near = { k, g, d, all };
+      }
+    }
+    if (!out.length && near && near.d <= NEAR_CULPRIT) {
+      // (its word: the glyphs next to it with no gap between their bytes)
+      const mine = near.all.filter((x) => x.file === file && !x.synth).sort((x, y) => x.start - y.start);
+      let i = mine.indexOf(near.g), j = i;
+      while (i > 0 && mine[i - 1].end >= mine[i].start) i--;
+      while (j + 1 < mine.length && mine[j].end >= mine[j + 1].start) j++;
+      out.push({ k: near.k, boxes: boxes(mine.slice(i, j + 1), near.all) });
     }
     return out.sort((x, y) => x.k - y.k);
   }
+
 
   /** The place `pos` (UTF-16) in `file`: its line's glyphs highlighted on the page (the page in view first). */
   async toPage(file: string, pos: number): Promise<void> {
