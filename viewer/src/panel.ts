@@ -728,7 +728,7 @@ export class Panel {
     text.textContent = t;
     more.textContent = m ? `· ${m}` : "";
     st.classList.toggle("err", err);
-    this.$("#prog").classList.toggle("on", running || (!this.last && this.viewer.pages === 0 && !this.offline && this.$("#empty").hidden));
+    this.$("#prog").classList.toggle("on", running || (!this.last && this.viewer.pages === 0 && !this.offline && this.$("#empty").hidden === true));
     this.$("#split").classList.toggle("busy", running);
   }
 
@@ -999,7 +999,7 @@ export class Panel {
 
   /** Before any page and no card: the sheet is (or now goes) up. */
   private firstPending(): boolean {
-    return !this.last && this.viewer.pages === 0 && this.$("#empty").hidden;
+    return !this.last && this.viewer.pages === 0 && this.$("#empty").hidden === true;
   }
 
   /** The sheet's step: what, how far (undefined: not known), and the detail; the sheet put up first if it isn't. */
@@ -1349,7 +1349,7 @@ export class Panel {
   }
 
   /** The problems' list opened or closed. */
-  diagnostics(on = this.$("#logs").hidden): void {
+  diagnostics(on = this.$("#logs").hidden === true): void {
     const was = !this.$("#logs").hidden;
     if (on && !(this.lastStatus?.diagnostics ?? []).length && !was) on = false;
     if (on) this.menu(null);

@@ -1922,7 +1922,7 @@ var Panel = class {
     text.textContent = t;
     more.textContent = m ? `\xB7 ${m}` : "";
     st.classList.toggle("err", err);
-    this.$("#prog").classList.toggle("on", running || !this.last && this.viewer.pages === 0 && !this.offline && this.$("#empty").hidden);
+    this.$("#prog").classList.toggle("on", running || !this.last && this.viewer.pages === 0 && !this.offline && this.$("#empty").hidden === true);
     this.$("#split").classList.toggle("busy", running);
   }
   /** Packages still on their way before the first page, so a stop reads as one only once they are in. */
@@ -2159,7 +2159,7 @@ var Panel = class {
   zoomNow = null;
   /** Before any page and no card: the sheet is (or now goes) up. */
   firstPending() {
-    return !this.last && this.viewer.pages === 0 && this.$("#empty").hidden;
+    return !this.last && this.viewer.pages === 0 && this.$("#empty").hidden === true;
   }
   /** The sheet's step: what, how far (undefined: not known), and the detail; the sheet put up first if it isn't. */
   step(what, pct, detail = "") {
@@ -2470,7 +2470,7 @@ var Panel = class {
     return JSON.stringify((this.lastStatus?.diagnostics ?? []).map((d) => [d.severity, d.message, d.file, d.line]));
   }
   /** The problems' list opened or closed. */
-  diagnostics(on = this.$("#logs").hidden) {
+  diagnostics(on = this.$("#logs").hidden === true) {
     const was = !this.$("#logs").hidden;
     if (on && !(this.lastStatus?.diagnostics ?? []).length && !was) on = false;
     if (on) this.menu(null);
