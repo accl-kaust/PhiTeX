@@ -104,19 +104,19 @@ export class Outline {
 
 /** The sidebar's CSS, in the host's tokens where it has them (--ink, --dim, --bar). */
 export const OUTLINE_CSS = `
-.phx-outline { overflow: auto; font: 13px/1.35 system-ui, sans-serif; color: var(--ink, #333); padding: 8px 0 24px; }
+.phx-outline { overflow: auto; font: inherit; color: var(--ph-fg, #333); padding: 6px 0 24px; text-align: left; }
 .phx-outline ul { list-style: none; margin: 0; padding: 0; }
 .phx-outline li.folded > ul { display: none; }
-.phx-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 10px 3px calc(10px + var(--d) * 14px); border-radius: 4px; margin: 0 6px; }
-.phx-row:hover { background: rgba(127, 127, 127, 0.12); }
-.phx-row.here { background: rgba(62, 99, 221, 0.14); }
-.phx-row.here .phx-t { color: #3e63dd; font-weight: 600; }
+.phx-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 10px 3px calc(10px + var(--d) * 14px); border-radius: var(--ph-radius, 4px); margin: 0 6px; }
+.phx-row:hover { background: var(--ph-hover, rgb(127 127 127 / 12%)); }
+.phx-row.here { box-shadow: inset 2px 0 var(--ph-accent, #3e63dd); background: var(--ph-hover, rgb(62 99 221 / 14%)); }
+.phx-row.here .phx-t { font-weight: 600; }
 .phx-t { flex: 1; min-width: 0; color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 li.parent > .phx-row > .phx-t { font-weight: 500; }
-.phx-p { color: var(--dim, #777); font-size: 11px; font-variant-numeric: tabular-nums; }
-.phx-fold, .phx-dot { flex: none; width: 10px; text-align: center; color: var(--dim, #777); cursor: pointer; user-select: none; }
+.phx-p { color: var(--ph-fg2, #777); font-size: 12px; font-variant-numeric: tabular-nums; }
+.phx-fold, .phx-dot { flex: none; width: 10px; text-align: center; color: var(--ph-fg2, #777); cursor: pointer; user-select: none; }
 .phx-fold::before { content: "▾"; }
 li.folded > .phx-row .phx-fold::before { content: "▸"; }
 .phx-dot { cursor: default; }
-.phx-none { color: var(--dim, #777); padding: 8px 16px; margin: 0; }
+.phx-none { color: var(--ph-fg2, #777); padding: 8px 16px; margin: 0; }
 `;

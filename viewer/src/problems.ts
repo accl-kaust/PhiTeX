@@ -149,36 +149,32 @@ function item(p: Problem): string {
   return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...(p.help.length ? [p.help.join(" ").replace(/\s+/g, " ").trim()] : []), ...p.suggestions])}</li>`;
 }
 
-/** The panel's CSS, in the host's tokens where it has them (fallbacks otherwise). */
+/** The problems' CSS, in the panel's tokens (print.ts), with fallbacks for a page without them (the modal Problems). */
 export const PROBLEMS_CSS = `
-.phx-problems { position: fixed; inset: 0; z-index: 10; background: rgb(18 18 18 / 55%); overflow: auto; padding: 48px 16px; }
-.phx-card { max-width: 900px; margin: 0 auto; background: #fff; color: #141414; border-radius: 0; border-left: 2px solid #d71920;
-  box-shadow: none; font: 13px/1.5 "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
-.phx-card header { display: flex; align-items: baseline; gap: 10px; padding: 14px 20px 10px; border-bottom: 1px solid #141414; font-size: 13px; }
-.phx-card header b { color: #141414; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; font-size: 11px; }
-.phx-close { margin-left: auto; background: none; color: #4a4a48; border: 1px solid #c9c9c5; border-radius: 0; padding: 1px 8px;
-  font: 11px "IBM Plex Mono", ui-monospace, monospace; cursor: pointer; }
-.phx-close:hover { border-color: #141414; color: #141414; }
+.phx-problems { position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / 45%); overflow: auto; padding: 48px 16px; }
+.phx-card { max-width: 900px; margin: 0 auto; background: var(--ph-menu, #fff); color: var(--ph-fg, #1b222c); border-radius: var(--ph-radius, 4px);
+  font: 13px/1.45 var(--ph-font, "Noto Sans", system-ui, sans-serif); }
+.phx-card header { display: flex; align-items: baseline; gap: 10px; padding: 12px 16px 10px; border-bottom: 1px solid var(--ph-border, #e7e9ee); font-weight: 600; }
+.phx-close { margin-left: auto; background: none; color: var(--ph-fg2, #495365); border: 1px solid var(--ph-border, #e7e9ee); border-radius: var(--ph-radius, 4px);
+  padding: 1px 8px; font: inherit; font-size: 12px; cursor: pointer; }
 .phx-card ol { list-style: none; margin: 0; padding: 0; }
-.phx-card li { padding: 14px 20px; border-bottom: 1px solid #dededa; }
-.phx-msg { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; font-size: 14px; }
-.phx-sev { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-weight: 600; padding: 0; border-radius: 0; background: none; }
-.phx-error .phx-sev { color: #d71920; }
-.phx-warning .phx-sev { color: #8a5a00; }
-.phx-note .phx-sev { color: #8a8a86; }
-.phx-code { color: #8a8a86; font: 11px "IBM Plex Mono", ui-monospace, monospace; }
-.phx-where { margin-top: 2px; font: 11px "IBM Plex Mono", ui-monospace, monospace; color: #4a4a48; }
-.phx-place { color: #141414; text-decoration: underline; text-decoration-color: #c9c9c5; text-underline-offset: 2px; }
-.phx-place:hover { text-decoration-color: #d71920; }
-.phx-excerpt, .phx-ctx pre { margin: 10px 0 0; padding: 6px 0 6px 12px; background: none; border-left: 1px solid #c9c9c5; border-radius: 0; overflow-x: auto;
-  font: 12px/1.5 "IBM Plex Mono", ui-monospace, monospace; white-space: pre; color: #141414; }
-.phx-excerpt mark, .phx-ctx mark { background: none; color: #d71920; text-decoration: underline 1.5px #d71920; text-underline-offset: 3px; }
-.phx-ln { color: #8a8a86; }
-.phx-notes, .phx-help { margin: 8px 0 0; padding-left: 16px; color: #4a4a48; }
-.phx-help li::marker { content: "→ "; color: #d71920; }
-.phx-ctx { margin-top: 8px; color: #4a4a48; }
+.phx-card li { padding: 9px 14px 10px; border-bottom: 1px solid var(--ph-border, #e7e9ee); border-left: 3px solid var(--sev, var(--ph-fg2, #495365)); }
+.phx-card li.phx-error { --sev: var(--ph-danger, #b83a33); }
+.phx-card li.phx-warning { --sev: var(--ph-warning, #8f5514); }
+.phx-card li.phx-note { --sev: var(--ph-info, #366cbf); }
+.phx-msg { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-weight: 600; }
+.phx-sev { display: none; }
+.phx-code { color: var(--ph-fg2, #495365); font: 400 12px ui-monospace, monospace; }
+.phx-where { margin-top: 2px; font-size: 12px; }
+.phx-place { color: var(--ph-link, #366cbf); text-decoration: none; }
+.phx-place:hover { text-decoration: underline; }
+.phx-excerpt, .phx-ctx pre { margin: 6px 0 0; padding: 0; overflow-x: auto; font: 12px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre;
+  color: var(--ph-fg2, #495365); background: none; }
+.phx-excerpt mark, .phx-ctx mark { background: none; color: var(--sev, var(--ph-danger, #b83a33)); text-decoration: underline wavy; text-underline-offset: 3px; }
+.phx-ln { opacity: .6; }
+.phx-notes, .phx-help { margin: 6px 0 0; padding-left: 16px; color: var(--ph-fg2, #495365); }
+.phx-ctx { margin-top: 6px; color: var(--ph-fg2, #495365); }
 .phx-ctx summary { cursor: pointer; }
-.phx-ctx code { color: #141414; }
-.phx-inc { margin-top: 6px; color: #8a8a86; font-size: 12px; }
-.phx-card footer { padding: 10px 20px; color: #8a8a86; font-size: 11px; }
+.phx-inc { margin-top: 6px; color: var(--ph-fg2, #495365); font-size: 12px; }
+.phx-card footer { padding: 10px 16px; color: var(--ph-fg2, #495365); font-size: 12px; }
 `;

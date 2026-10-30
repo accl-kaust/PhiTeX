@@ -1,61 +1,74 @@
 # The viewer's style
 
-One look in every host (`phitex watch`, Overleaf, VS Code): a proof
-sheet's, not an app's. PhiTeX is a typesetting tool; its viewer takes its
-look from print: paper, ink, the proofreader's red, rules and crop marks.
-The sheet is `src/print.ts`; it comes last and is the only place colours
-are chosen.
+The panel looks native to the host it is in: in Overleaf it is part of
+Overleaf's PDF pane, in VS Code part of VS Code, and in `phitex watch`,
+which has no host, it has a look of its own that sits well beside an
+editor. The sheet is `src/print.ts`, the only place colours are chosen.
 
 ## Tokens
 
-| Token | Light | Dark | For |
+Every rule reads `--ph-*` tokens; each host maps them once, and every
+token has a fallback (a variable a host renames leaves a look, not a hole).
+
+| Token | Overleaf | VS Code | The watch |
 |---|---|---|---|
-| `--paper` | `#f1f1ef` | `#121212` | the window, bars |
-| `--paper-2` | `#e6e6e3` | `#1c1c1c` | the stage under the pages, hover |
-| `--sheet` | `#ffffff` | `#ffffff` | a page, the loading proof |
-| `--ink` | `#141414` | `#e8e8e4` | text, the ok mark |
-| `--ink-2` | `#4a4a48` | `#a9a9a4` | secondary text |
-| `--ink-3` | `#8a8a86` | `#6e6e6a` | captions, crop marks |
-| `--rule` | `#c9c9c5` | `#3a3a38` | hairlines |
-| `--mark` | `#d71920` | `#ff4a3d` | the proofreader's marks: errors, the step running, focus |
-| `--caution` | `#8a5a00` | `#d9a441` | warnings |
+| `--ph-bar` | `--toolbar-alt-bg-color` | `--vscode-editorGroupHeader-tabsBackground` | white / `#161b23` |
+| `--ph-stage` | the pane's background, `--pdf-bg` | `--vscode-editor-background` | `#eceef2` / `#0f1319` |
+| `--ph-fg`, `--ph-fg2` | `--content-primary(-dark)`, `--content-secondary` | `--vscode-foreground`, `--vscode-descriptionForeground` | ink, slate |
+| `--ph-border`, `--ph-hover`, `--ph-menu` | dividers, its toolbar's hover, its menus | `--vscode-panel-border`, `--vscode-toolbar-hoverBackground`, `--vscode-menu-background` | |
+| `--ph-accent` | its green (`--bg-accent-01`) | `--vscode-button-background` | the logo's navy `#1d3e72` |
+| `--ph-progress` | its green | `--vscode-progressBar-background` | the logo's orange `#f58f2d` |
+| `--ph-danger`, `--ph-warning`, `--ph-info`, `--ph-link` | its content colours | VS Code's | |
+| `--ph-font`, `--ph-radius`, `--ph-pill` | Noto Sans, its radii | `--vscode-font-family`, 2 px | Noto Sans, 6 px, round |
 
-Neutral greys, never warm cream or blue-grey. `--mark` is the only accent,
-and it marks; it never decorates.
+Overleaf's light theme is `.win.light` (dock() reads `body[data-theme]`);
+VS Code's variables change with its theme; the watch follows the system.
 
-## Type
+## The bar
 
-- Chrome: IBM Plex Sans (then Helvetica), 11–12 px. Labels in small caps
-  or spaced capitals at 10–11 px.
-- Numbers, times, paths, the console: IBM Plex Mono, tabular figures, so
-  nothing jitters as it counts.
-- One serif: Latin Modern (then CMU, Georgia) for a document's title or
-  the loading proof's heading.
+One bar (VS Code, the watch; in Overleaf the extension puts its controls
+in Overleaf's own toolbar): **Rebuild** and its menu (Clean rebuild,
+Compare with an earlier version, Clear cache), the build's status (its
+times a click away), then find, compare, download, the page, zoom, the
+problems' count (only when there are some) and a menu for the rest (the
+log, the contents, dark PDF, the debug check, what's new, the keys,
+about). Narrow (560 px): Rebuild, the page and the menu.
 
-## Shapes and marks
+Builds run by themselves as the writer types; the words never suggest
+otherwise ("Rebuild", not "Recompile").
 
-- Square corners (0, at most 2 px); hairline rules (1 px) instead of
-  shadows; overlays are flat sheets with a 1 px ink rule.
-- Pages sit on `--paper-2` with crop marks at their corners, no shadow.
-- Errors: a red rule, a straight red underline under the culprit, the
-  severity in spaced capitals. No pills, no icons in circles.
-- Progress: a 1 px rule; the carriage runs while the length is unknown.
-- Status: a 6 px square, ink when ok, red on an error, blinking (steps,
-  not fading) while busy.
+## Loading
+
+Before the first page, the first page's sheet (A4, whole in the view)
+plays the opening (opening.ts: the logo, assets/logo-concepts.html's
+"Opening a document"), and under it the step: what, a thin bar (its
+length when the host knows it), the detail (the file, the package, `n of
+m`, as the host counts them; never invented). When the first page comes,
+the zoom stays whole-page and only the sheet's width eases to the page's
+shape; then the logo dives into the page. A page there at once (a project
+built before) is shown at once. A package fetched later, a build that
+runs on: a small note in the corner, never over the page.
+
+## Shapes and words
+
+- The host's font and size; sentence case; numbers in tabular figures;
+  monospace only for source lines, logs and keys.
+- The host's radii; menus and popovers are the host's menu colour with a
+  soft shadow; the pages sit on the stage with a faint shadow.
+- Problems are Overleaf's log entries: a coloured left edge (error,
+  warning, info), the message, its place as a link, the source line.
+- Feature tips point at a control with an arrow, once each; "What's new"
+  shows them again.
+- Dark PDF is the user's choice, Off by default (the filter inverts
+  figures too): a grey page (`#2c2e33`) and soft ink, never black.
+- Terse, plain words: "Built · 42 ms", "Fetching amsmath.sty · 3 of 9".
 
 ## Motion
 
-Only where it means something: the progress rule, a number counting. Linear, 150 ms to 1.6 s; no springs, bounces, glows,
-scale or blur. `prefers-reduced-motion` stops all of it.
+The progress line, the opening, the sheet's ease, a note sliding in.
+`prefers-reduced-motion` stops all of it (the steps are still said).
 
-## Words
+## Not here
 
-Terse and factual, as the terminal says it: "Undefined control
-sequence, line 22", "Building · 4 s". No "Oops", no exclamation marks.
-
-## Banned
-
-Gradients (other than the 1 px lines that draw crop marks), `box-shadow`,
-`backdrop-filter`, `border-radius` over 2 px, pills, emoji (no ⚡, ✨),
-violet or indigo, glows, glassmorphism, cards inside cards, a centred
-icon over a heading over a muted sentence.
+Small caps, crop marks, badges, step trackers, glows, gradients, emoji in
+the chrome, a second sheet overriding the first.
