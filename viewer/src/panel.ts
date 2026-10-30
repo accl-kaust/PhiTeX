@@ -1518,34 +1518,59 @@ export class Panel {
     sel.value = z;
   }
 
-  private pinchEnd: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * A zoom gesture under way (Ctrl+wheel, a pinch): the zoom it started
+   * at, the factor so far, the place under the pointer when it began
+   * (client pixels, and on its page), and when it ends.
+   */
+  private gesture:
+    | { from: number; f: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; end?: ReturnType<typeof setTimeout> }
+    | undefined;
 
   /**
    * Zoom by `f` keeping the point (`px`, `py`, from the stage's top left)
-   * where it is: the boxes at once, the pages drawn sharp again once the
-   * gesture rests.
+   * where it is, as pdf.js's and hayro's viewers do: while the gesture goes
+   * on, the pages as they are scaled by one transform around the pointer
+   * (no layout, no drawing: the pages, their marks and their text scale
+   * together); once it rests (250 ms, longer than a wheel's notches are
+   * apart), the zoom set once, the place kept under the pointer by its
+   * page, and the pages drawn once at it.
    */
   private zoomAt(f: number, px: number, py: number): void {
-    const stage = this.$("#stage");
-    const old = this.scale();
-    const next = Math.min(8, Math.max(0.25, old * f));
-    if (Math.abs(next - old) < 1e-4) return;
-    // (the place on its page under the pointer kept under it: by the page,
-    // not by the scroll offsets, which the gaps between pages and the
-    // centring do not scale with)
+    const stage = this.$("#stage"), view = this.$("#viewer");
     const r = stage.getBoundingClientRect();
-    const at = this.viewer.pointAt(r.left + px, r.top + py);
-    this.prefs.zoom = String(Number(next.toFixed(4)));
+    let g = this.gesture;
+    if (!g) {
+      const x = r.left + px, y = r.top + py;
+      const v = view.getBoundingClientRect();
+      view.style.transformOrigin = `${x - v.left}px ${y - v.top}px`;
+      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y) };
+    }
+    g.f = Math.min(8, Math.max(0.25, g.from * g.f * f)) / g.from;
+    view.style.transform = `scale(${g.f})`;
+    view.style.willChange = "transform";
+    // (the zoom itself set once it rests: a page drawn meanwhile is sized
+    // at the zoom the transform scales)
+    clearTimeout(g.end);
+    g.end = setTimeout(() => this.zoomEnd(), 250);
+  }
+
+  /** The zoom gesture rested: the pages at the zoom, the place under the pointer kept, drawn once. */
+  private zoomEnd(): void {
+    const g = this.gesture;
+    if (!g) return;
+    this.gesture = undefined;
+    const view = this.$("#viewer");
+    view.style.transform = "";
+    view.style.willChange = "";
+    this.prefs.zoom = String(Number((g.from * g.f).toFixed(4)));
+    this.zoomShown();
     this.$("#stage").classList.remove("fit");
     this.viewer.redraw(true);
-    if (at) this.viewer.keepAt(at, r.left + px, r.top + py);
-    this.zoomShown();
-    clearTimeout(this.pinchEnd);
-    this.pinchEnd = setTimeout(() => {
-      this.save();
-      this.viewer.redraw();
-      this.emit();
-    }, 150);
+    if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
+    this.viewer.redraw();
+    this.save();
+    this.emit();
   }
 
   /** The find field's matches, the one shown, and the search asked last. */
