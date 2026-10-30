@@ -900,6 +900,23 @@ header:active { cursor: grabbing; }
 @keyframes phx-v0 { 0% { opacity: 1; } 31% { opacity: 0; } }
 @keyframes phx-v1 { 0% { opacity: 0; } 31% { opacity: 1; } }
 
+/* live: a heading typed in the editor, the page's heading following it, letter by letter, and how long that took */
+.tip .live .ed { position: absolute; left: 6px; top: 8px; bottom: 8px; width: 50%; padding: 6px 7px; background: var(--ph-menu); border: 1px solid var(--ph-border);
+  border-radius: var(--ph-radius); font: 10px/14px ui-monospace, "DejaVu Sans Mono", monospace; white-space: nowrap; overflow: hidden; }
+.tip .live .ed .k { color: var(--ph-link); }
+.tip .live .ed i { display: block; height: 3px; margin: 7px 0 0; border-radius: 1px; background: var(--ph-border); }
+.tip .live .ty { display: inline-block; vertical-align: bottom; overflow: hidden; white-space: nowrap; max-width: 0; animation: phx-type 5s steps(7, end) infinite; }
+.tip .live .ed .ty { --to: 7ch; }
+.tip .live .car { display: inline-block; width: 1px; height: 11px; vertical-align: -1px; background: var(--ph-fg); animation: phx-caret 1s steps(1) infinite; }
+.tip .live .pg { right: 8px; top: 8px; width: 38%; bottom: -8px; }
+.tip .live .pg b { display: block; margin: 2px 0 6px; font: 700 10px/1.2 "Noto Serif", Georgia, serif; color: #1b222c; white-space: nowrap; }
+.tip .live .pg .ty { --to: 4.4em; animation-delay: .12s; }
+.tip .live .ms { position: absolute; right: 10px; bottom: 6px; display: flex; align-items: center; gap: 2px; padding: 1px 6px; border-radius: 9px;
+  font: 600 10px/14px var(--ph-font); color: #fff; background: rgb(27 34 44 / 85%); opacity: 0; animation: phx-ms 5s infinite; }
+@keyframes phx-type { 0%, 10% { max-width: 0; } 50%, 88% { max-width: var(--to); } 100% { max-width: 0; } }
+@keyframes phx-caret { 50% { opacity: 0; } }
+@keyframes phx-ms { 0%, 14% { opacity: 0; } 20%, 86% { opacity: 1; } 94%, 100% { opacity: 0; } }
+
 /* timing: the status clicked, its times drop down, each bar filling */
 .tip .tim .mst { padding: 1px 6px; border-radius: var(--ph-radius); font-weight: 600; animation: phx-press 4s infinite; }
 .tip .tim .mpop { position: absolute; left: 6px; top: 24px; width: 75%; padding: 3px 7px 4px; line-height: 12px; opacity: 0; animation: phx-drop 4s ease-out infinite;
@@ -997,6 +1014,7 @@ header:active { cursor: grabbing; }
   .opening, .toast { transition: none; }
   /* (the demos still, at what they show: the change marked, the times, Dark PDF on, the contents) */
   .tip .demo, .tip .demo * { animation: none !important; }
+  .tip .live .ty { max-width: none; } .tip .live .ms { opacity: 1; }
   .tip .cmp .del { color: #b91c1c; text-decoration: line-through 2px #b91c1c; } .tip .cmp .add { max-width: 6em; }
   .tip .cmp .tag, .tip .cmp .v1, .tip .tim .mpop { opacity: 1; } .tip .cmp .v0 { opacity: 0; } .tip .tim .mpop i { width: var(--w); }
   .tip .reb .mmenu, .tip .drk .mmenu, .tip .drk .mmenu b { opacity: 1; } .tip .reb .pick, .tip .drk .pick { background: var(--ph-hover); }
@@ -1628,12 +1646,21 @@ var PATHS = {
   toc: "M3 9h14V7H3v2zm0 4h14v-2H3v2zm0 4h14v-2H3v2zm16 0h2v-2h-2v2zm0-10v2h2V7h-2zm0 6h2v-2h-2v2z",
   dark: "M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
   keyboard: "M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z",
+  bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"
 };
 var icon = (name, size = 18) => `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
 var ZOOMS = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
 var lines = (...w) => w.map((x) => `<i style="width:${x}%"></i>`).join("");
 var TIPS = [
+  {
+    id: "live",
+    at: "#st",
+    title: "Typeset as you type",
+    text: "No compile button: change the source and only what you touched is typeset again. The page follows in milliseconds.",
+    // (a heading typed in the editor, the page's heading following it letter by letter, the time it took)
+    demo: `<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`
+  },
   {
     id: "compare",
     at: "#b-compare",
@@ -3065,7 +3092,7 @@ var Panel = class {
       seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
     } catch {
     }
-    const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents));
+    const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
     this.tipList = all ? offered : offered.filter((t) => !seen.includes(t.id));
     this.tip(0);
   }

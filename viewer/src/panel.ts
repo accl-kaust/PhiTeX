@@ -250,6 +250,7 @@ const PATHS: Record<string, string> = {
   toc: "M3 9h14V7H3v2zm0 4h14v-2H3v2zm0 4h14v-2H3v2zm16 0h2v-2h-2v2zm0-10v2h2V7h-2zm0 6h2v-2h-2v2z",
   dark: "M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
   keyboard: "M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z",
+  bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z",
 };
 const icon = (name: string, size = 18) =>
@@ -267,6 +268,12 @@ const lines = (...w: number[]) => w.map((x) => `<i style="width:${x}%"></i>`).jo
  * in print.ts; still, at its end state, with reduced motion).
  */
 const TIPS: { id: string; at: string; title: string; text: string; demo: string; fresh?: boolean }[] = [
+  {
+    id: "live", at: "#st", title: "Typeset as you type",
+    text: "No compile button: change the source and only what you touched is typeset again. The page follows in milliseconds.",
+    // (a heading typed in the editor, the page's heading following it letter by letter, the time it took)
+    demo: `<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`,
+  },
   {
     id: "compare", at: "#b-compare", title: "Compare versions", fresh: true,
     text: "See what changed since an earlier version, marked as latexdiff marks it: additions in blue, deletions struck out.",
@@ -1870,7 +1877,8 @@ export class Panel {
     } catch {
       /* (none seen) */
     }
-    const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents));
+    // (Overleaf's welcome callout says "as you type" already: not twice)
+    const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
     this.tipList = all ? offered : offered.filter((t) => !seen.includes(t.id));
     this.tip(0);
   }

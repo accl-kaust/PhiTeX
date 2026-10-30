@@ -361,6 +361,23 @@ header:active { cursor: grabbing; }
 @keyframes phx-v0 { 0% { opacity: 1; } 31% { opacity: 0; } }
 @keyframes phx-v1 { 0% { opacity: 0; } 31% { opacity: 1; } }
 
+/* live: a heading typed in the editor, the page's heading following it, letter by letter, and how long that took */
+.tip .live .ed { position: absolute; left: 6px; top: 8px; bottom: 8px; width: 50%; padding: 6px 7px; background: var(--ph-menu); border: 1px solid var(--ph-border);
+  border-radius: var(--ph-radius); font: 10px/14px ui-monospace, "DejaVu Sans Mono", monospace; white-space: nowrap; overflow: hidden; }
+.tip .live .ed .k { color: var(--ph-link); }
+.tip .live .ed i { display: block; height: 3px; margin: 7px 0 0; border-radius: 1px; background: var(--ph-border); }
+.tip .live .ty { display: inline-block; vertical-align: bottom; overflow: hidden; white-space: nowrap; max-width: 0; animation: phx-type 5s steps(7, end) infinite; }
+.tip .live .ed .ty { --to: 7ch; }
+.tip .live .car { display: inline-block; width: 1px; height: 11px; vertical-align: -1px; background: var(--ph-fg); animation: phx-caret 1s steps(1) infinite; }
+.tip .live .pg { right: 8px; top: 8px; width: 38%; bottom: -8px; }
+.tip .live .pg b { display: block; margin: 2px 0 6px; font: 700 10px/1.2 "Noto Serif", Georgia, serif; color: #1b222c; white-space: nowrap; }
+.tip .live .pg .ty { --to: 4.4em; animation-delay: .12s; }
+.tip .live .ms { position: absolute; right: 10px; bottom: 6px; display: flex; align-items: center; gap: 2px; padding: 1px 6px; border-radius: 9px;
+  font: 600 10px/14px var(--ph-font); color: #fff; background: rgb(27 34 44 / 85%); opacity: 0; animation: phx-ms 5s infinite; }
+@keyframes phx-type { 0%, 10% { max-width: 0; } 50%, 88% { max-width: var(--to); } 100% { max-width: 0; } }
+@keyframes phx-caret { 50% { opacity: 0; } }
+@keyframes phx-ms { 0%, 14% { opacity: 0; } 20%, 86% { opacity: 1; } 94%, 100% { opacity: 0; } }
+
 /* timing: the status clicked, its times drop down, each bar filling */
 .tip .tim .mst { padding: 1px 6px; border-radius: var(--ph-radius); font-weight: 600; animation: phx-press 4s infinite; }
 .tip .tim .mpop { position: absolute; left: 6px; top: 24px; width: 75%; padding: 3px 7px 4px; line-height: 12px; opacity: 0; animation: phx-drop 4s ease-out infinite;
@@ -458,6 +475,7 @@ header:active { cursor: grabbing; }
   .opening, .toast { transition: none; }
   /* (the demos still, at what they show: the change marked, the times, Dark PDF on, the contents) */
   .tip .demo, .tip .demo * { animation: none !important; }
+  .tip .live .ty { max-width: none; } .tip .live .ms { opacity: 1; }
   .tip .cmp .del { color: #b91c1c; text-decoration: line-through 2px #b91c1c; } .tip .cmp .add { max-width: 6em; }
   .tip .cmp .tag, .tip .cmp .v1, .tip .tim .mpop { opacity: 1; } .tip .cmp .v0 { opacity: 0; } .tip .tim .mpop i { width: var(--w); }
   .tip .reb .mmenu, .tip .drk .mmenu, .tip .drk .mmenu b { opacity: 1; } .tip .reb .pick, .tip .drk .pick { background: var(--ph-hover); }
