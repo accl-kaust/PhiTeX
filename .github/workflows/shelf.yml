@@ -1,0 +1,101 @@
+# Shelf's release (shelf/README.md), by hand: Actions → shelf → Run
+# workflow. `release` makes the next release in the CI image
+# (shelf/scripts/release.sh: TeX Live's archives, the dependency traces,
+# release.py after what the host serves) and checks it against TeX
+# Live's own engines (shelf/scripts/check.sh); red stops here. `deploy`
+# (the input `deploy`, environment shelf) uploads the site to the Pages
+# project shelf-phitex-v1 (v1.shelf.phitex.org; the releases it served
+# kept, as a deployment replaces the whole site), then opens a pull
+# request to dev setting crates/cli/src/shelf.rs's RELEASE to the new
+# release: a PhiTeX builds from the release it names, so Shelf is
+# deployed first and PhiTeX names it after.
+name: shelf
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "deploy the release after a green check"
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  packages: read
+concurrency:
+  group: shelf
+  cancel-in-progress: false
+env:
+  IMAGE: ghcr.io/accl-kaust/phitex-ci:2026-09-25
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    outputs:
+      release: ${{ steps.made.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE"
+      - run: docker run --rm -v "$PWD:/src" -w /src -e CARGO_BUILD_JOBS=4 "$IMAGE" bash -c 'shelf/scripts/release.sh; st=$?; chmod -R a+rX out shelf/public; exit $st'
+      - id: made
+        run: echo "release=$(cat out/shelf-results/release.txt)" >> "$GITHUB_OUTPUT"
+      # (a tar: an artifact's zip drops nothing here, but one file uploads faster than 15,000)
+      - if: steps.made.outputs.release != ''
+        run: tar -C shelf -cf site.tar public
+      - if: steps.made.outputs.release != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: shelf-site
+          path: site.tar
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shelf-results
+          path: out/shelf-results
+          retention-days: 30
+
+  deploy:
+    needs: release
+    if: inputs.deploy && needs.release.outputs.release != ''
+    runs-on: ubuntu-24.04
+    environment: shelf
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: shelf-site
+      - run: mkdir site && tar -C site -xf site.tar
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.149.0"
+          command: pages deploy site/public --project-name shelf-phitex-v1 --branch main
+      - name: served
+        run: |
+          r=${{ needs.release.outputs.release }}
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            got=$(curl -fsS https://v1.shelf.phitex.org/tl2026/release.json | python3 -c 'import json,sys;print(json.load(sys.stdin)["release"])') && [ "$got" = "$r" ] && break
+            sleep 30
+          done
+          [ "$got" = "$r" ] || { echo "v1.shelf.phitex.org serves $got, not $r"; exit 1; }
+          echo "v1.shelf.phitex.org serves $r"
+      - name: PhiTeX names it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          r=${{ needs.release.outputs.release }}
+          git switch -c "shelf-$r"
+          sed -i "s/^pub const RELEASE: &str = \"[^\"]*\";/pub const RELEASE: \&str = \"$r\";/" crates/cli/src/shelf.rs
+          git diff --quiet && { echo "crates/cli/src/shelf.rs already names $r"; exit 0; }
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \
+            commit -qam "shelf: PhiTeX builds from Shelf $r (deployed to v1.shelf.phitex.org by the shelf workflow, checked against TeX Live's engines)"
+          git push -q origin "shelf-$r"
+          gh pr create --base dev --head "shelf-$r" --title "shelf: PhiTeX builds from $r" \
+            --body "Shelf $r is deployed to v1.shelf.phitex.org (workflow run ${{ github.run_id }}). This sets crates/cli/src/shelf.rs's RELEASE to it."
