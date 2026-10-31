@@ -2,7 +2,7 @@
 //! operations. Every test here passes before any client code is touched.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use phitex_defuse::{
@@ -59,9 +59,44 @@ impl Operation for Adv {
     }
 }
 
+/// An operation's runs in flight at once, counted by the runs themselves
+/// (no clock): how many now, and the most at once since [`Flight::reset`].
+#[derive(Default)]
+struct Flight {
+    now: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl Flight {
+    fn reset(&self) {
+        self.now.store(0, Ordering::SeqCst);
+        self.peak.store(0, Ordering::SeqCst);
+    }
+
+    /// A run begins; in flight until the guard goes.
+    fn enter(&self) -> InFlight<'_> {
+        let n = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(n, Ordering::SeqCst);
+        InFlight(self)
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+}
+
+struct InFlight<'a>(&'a Flight);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.now.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// `[f, ms]`: reads f, works `ms` milliseconds, then f := f + 1 as a
-/// relation; outputs what it read. A page-like routine.
-struct Routine(AtomicU64);
+/// relation; outputs what it read. A page-like routine; its runs counted,
+/// and their flight.
+struct Routine(AtomicU64, Flight);
 
 impl Operation for Routine {
     fn name(&self) -> &'static str {
@@ -69,6 +104,7 @@ impl Operation for Routine {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _flying = self.1.enter();
         let f = Field(cx.args()[0]);
         let ms = cx.values().as_int(cx.args()[1]).unwrap() as u64;
         let x = cx.read(f)?.unwrap_or(ValueId::UNIT);
@@ -127,8 +163,9 @@ impl Operation for Spawn {
     }
 }
 
-/// `[us]`: spins `us` microseconds.
-struct Work;
+/// `[us]`: spins `us` microseconds; its runs' flight counted.
+#[derive(Default)]
+struct Work(Flight);
 
 impl Operation for Work {
     fn name(&self) -> &'static str {
@@ -136,6 +173,7 @@ impl Operation for Work {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _flying = self.0.enter();
         let us = cx.values().as_int(cx.args()[0]).unwrap() as u64;
         spin(Duration::from_micros(us));
         Ok(ValueId::UNIT)
@@ -216,12 +254,14 @@ struct Ops {
     idx: OpId,
     get_before: OpId,
     routine_runs: Arc<Routine>,
+    work_runs: Arc<Work>,
 }
 
 fn engine() -> (Engine, Ops) {
     let e = Engine::new();
     let def = e.register(Arc::new(Def));
-    let routine_runs = Arc::new(Routine(AtomicU64::new(0)));
+    let routine_runs = Arc::new(Routine(AtomicU64::new(0), Flight::default()));
+    let work_runs = Arc::new(Work::default());
     let ops = Ops {
         def,
         get: e.register(Arc::new(Get)),
@@ -230,11 +270,12 @@ fn engine() -> (Engine, Ops) {
         contrib: e.register(Arc::new(Contrib)),
         fold: e.register(Arc::new(FoldR)),
         spawn: e.register(Arc::new(Spawn(def))),
-        work: e.register(Arc::new(Work)),
+        work: e.register(work_runs.clone()),
         claimer: e.register(Arc::new(Claimer)),
         idx: e.register(Arc::new(Idx)),
         get_before: e.register(Arc::new(GetBefore)),
         routine_runs,
+        work_runs,
     };
     (e, ops)
 }
@@ -315,9 +356,13 @@ fn a_learned_shape_runs_the_chain_side_by_side() {
     let u = e.new_unit();
     e.push(u, o.def, vec![c, zero]);
     let rs: Vec<NodeId> = (0..200).map(|_| e.push(u, o.routine, vec![c, ms])).collect();
+    o.routine_runs.1.reset();
     let t = Instant::now();
     let r = e.evaluate(8).unwrap();
     let wall = t.elapsed();
+    let peak = o.routine_runs.1.peak();
+    // (the time measured, not asserted: a loaded machine's)
+    eprintln!("200 routines of 2 ms on 8 workers: {wall:?}, at most {peak} at once");
     for (i, n) in rs.iter().enumerate() {
         assert_eq!(int(&e, *n), i as i64, "routine {i} reads the count before it");
     }
@@ -327,9 +372,11 @@ fn a_learned_shape_runs_the_chain_side_by_side() {
         "each routine runs at most twice (predicted, then confirmed): {runs}"
     );
     assert!(r.shaped >= 190, "pending routines were given the relation: {r:?}");
+    // (side by side: the routines in flight together, counted by them;
+    // a chain run in turn has one at a time)
     assert!(
-        !timing() || wall < Duration::from_millis(150),
-        "200 x 2 ms serial is 400 ms, twice over 8 threads is 100 ms: {wall:?}"
+        peak >= 4,
+        "the routines ran side by side, at least half the 8 workers at once: at most {peak} did"
     );
     assert!(e.check_invariants().is_empty());
 }
@@ -382,7 +429,9 @@ fn scales_with_threads() {
     if threads() < 8 {
         return;
     }
-    let wall = |n: usize| {
+    // (each count's wall time, measured not asserted, and the most work
+    // runs in flight at once, counted by the runs)
+    let run = |n: usize| {
         let (e, o) = engine();
         let v = e.values();
         let us = v.int(100);
@@ -390,18 +439,26 @@ fn scales_with_threads() {
         for _ in 0..8000 {
             e.push(u, o.work, vec![us]);
         }
+        o.work_runs.0.reset();
         let t = Instant::now();
-        e.evaluate(n).unwrap();
-        t.elapsed()
+        let r = e.evaluate(n).unwrap();
+        let wall = t.elapsed();
+        let peak = o.work_runs.0.peak();
+        eprintln!("8000 x 100 us on {n} workers: {wall:?}, at most {peak} at once");
+        assert_eq!(r.runs, 8000, "each once: {r:?}");
+        // (independent: none woken by another's commit)
+        assert_eq!(r.realised_critical_path, 1, "no work waited on another: {r:?}");
+        peak
     };
-    let (t1, t8) = (wall(1), wall(8));
+    assert_eq!(run(1), 1, "one worker runs one at a time");
+    let p8 = run(8);
     assert!(
-        t8 * 5 < t1,
-        "8 threads at least five times as fast as 1 on independent work: {t1:?} vs {t8:?}"
+        p8 >= 5,
+        "8 workers run independent work at least five at once (five times as fast as one): at most {p8} did"
     );
     if threads() >= 32 {
-        let t32 = wall(32);
-        assert!(t32 < t8, "32 threads faster than 8: {t8:?} vs {t32:?}");
+        let p32 = run(32);
+        assert!(p32 > 8, "32 workers run more at once than 8 can: at most {p32} did");
     }
 }
 
@@ -592,31 +649,45 @@ fn a_refuted_run_stops_early_and_runs_again() {
 
 #[test]
 fn a_commit_walks_only_to_the_next_definition() {
-    let (e, o) = engine();
-    let v = e.values();
-    let x = f(v, "x");
-    let u = e.new_unit();
-    let mut defs = Vec::new();
-    for i in 0..10000 {
-        defs.push(e.push(u, o.def, vec![x, v.int(i)]));
-        for _ in 0..9 {
-            e.push(u, o.get, vec![x]);
+    // (a line of `groups` definitions of x, each with nine readers after
+    // it; the one in the middle changed: what its commit walked)
+    let walk = |groups: i64| {
+        let (e, o) = engine();
+        let v = e.values();
+        let x = f(v, "x");
+        let u = e.new_unit();
+        let mut defs = Vec::new();
+        for i in 0..groups {
+            defs.push(e.push(u, o.def, vec![x, v.int(i)]));
+            for _ in 0..9 {
+                e.push(u, o.get, vec![x]);
+            }
         }
-    }
-    e.evaluate(4).unwrap();
-    e.replace(defs[5000], o.def, vec![x, v.int(-1)]);
-    let t = Instant::now();
-    let r = e.evaluate(4).unwrap();
+        e.evaluate(4).unwrap();
+        e.replace(defs[5000], o.def, vec![x, v.int(-1)]);
+        let t = Instant::now();
+        let r = e.evaluate(4).unwrap();
+        // (the time measured, not asserted: a loaded machine's)
+        eprintln!(
+            "ten nodes among {}: {:?}, {} reader records walked",
+            groups * 10,
+            t.elapsed(),
+            r.walked
+        );
+        assert_eq!(
+            r.nodes_run, 10,
+            "the definer and its nine readers up to the next definition: {r:?}"
+        );
+        assert!(e.check_invariants().is_empty());
+        r.walked
+    };
+    let (a, b) = (walk(10_000), walk(20_000));
+    assert!(a >= 9, "the walk looked at the nine readers it re-asked: {a}");
     assert_eq!(
-        r.nodes_run, 10,
-        "the definer and its nine readers up to the next definition: {r:?}"
+        a, b,
+        "the walk goes to the next definition, whatever follows it: {a} reader records among \
+         100000 nodes, {b} among 200000"
     );
-    assert!(
-        !timing() || t.elapsed() < Duration::from_millis(2),
-        "ten nodes among 100000 in {:?}",
-        t.elapsed()
-    );
-    assert!(e.check_invariants().is_empty());
 }
 
 #[test]

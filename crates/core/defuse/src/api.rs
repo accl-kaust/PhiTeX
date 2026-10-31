@@ -513,6 +513,11 @@ pub struct Report {
     pub predictions_refuted_by_field: Vec<(Field, u64)>,
     /// Relative definitions recomputed from their input without a run.
     pub relative_resolved: u64,
+    /// The reader records the walks forward from changed definitions
+    /// looked at (each segment's readers of the field they passed
+    /// through, up to the next definition): a walk's work, which grows
+    /// with the readers between two definitions, never with the line.
+    pub walked: u64,
     /// Nodes given a relation ahead of their run from their operation's
     /// shape (`commit::learn_shape`).
     pub shaped: u64,
