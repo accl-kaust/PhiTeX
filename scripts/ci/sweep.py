@@ -235,7 +235,8 @@ def run_one(c, j, args):
         if r["exit"] != 0:
             res["error"] = first_error(text, logb)
     elif res["status"] == "differs":
-        d = pdfdiff.diff(opdf, pdf)
+        (WORK / "tmp").mkdir(parents=True, exist_ok=True)
+        d = pdfdiff.diff(opdf, pdf, WORK / "tmp")
         res["diff"] = d
         res.update(text_diff(opdf, pdf))
         res["note"] = (f"exit {r['exit']}: " if r["exit"] else "") + (d.get("summary") or f"bytes differ at {d.get('byte')}")

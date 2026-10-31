@@ -106,14 +106,16 @@ def first_page(qa, qb):
     return None, len(pa), len(pb)
 
 
-def diff(a, b):
+def diff(a, b, tmp=None):
+    """Where A and B first differ; their QDF forms written under `tmp`
+    (a directory with room: a container's /tmp may be small)."""
     a, b = Path(a), Path(b)
     da, db = a.read_bytes(), b.read_bytes()
     if da == db:
         return {"same": True}
     res = {"same": False, "sizes": [len(da), len(db)]}
     res["byte"] = next((i for i, (x, y) in enumerate(zip(da, db)) if x != y), min(len(da), len(db)))
-    with tempfile.TemporaryDirectory() as t:
+    with tempfile.TemporaryDirectory(dir=tmp) as t:
         try:
             qa, qb = qdf(a, Path(t) / "a.qdf"), qdf(b, Path(t) / "b.qdf")
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
