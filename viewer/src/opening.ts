@@ -253,3 +253,54 @@ export function opening(box: HTMLElement, fill: string, bg: string): Opening {
     },
   };
 }
+
+/**
+ * The opening as a Windows 98 setup dialog (the loading animation's
+ * "retro" choice): a grey bevelled window on the teal desktop, its title
+ * bar navy, a page flying from one folder to the other, and the blocky
+ * progress bar marching on until the document is in. CSS only.
+ */
+export function retro(box: HTMLElement): Opening {
+  box.insertAdjacentHTML(
+    "beforeend",
+    `<div class="phx-retro" aria-hidden="true"><style>
+.phx-retro{position:absolute;inset:0;background:#008080;display:flex;align-items:center;justify-content:center;font:11px/1.3 "MS Sans Serif",Tahoma,"Segoe UI",sans-serif;color:#000;transition:opacity .3s}
+.phx-retro.out{opacity:0}
+#opening:has(.phx-retro) .what,#opening:has(.phx-retro) .detail{color:#fff}
+.phx-retro .w{width:min(300px,86%);background:#c0c0c0;border:2px solid;border-color:#fff #000 #000 #fff;box-shadow:inset -1px -1px #808080,inset 1px 1px #dfdfdf;padding:3px}
+.phx-retro .t{display:flex;align-items:center;gap:2px;height:18px;padding:0 3px;color:#fff;font-weight:bold;background:linear-gradient(90deg,#000080,#1084d0)}
+.phx-retro .t span{flex:1}
+.phx-retro .t i{font-style:normal;width:16px;height:14px;line-height:12px;text-align:center;color:#000;background:#c0c0c0;border:1px solid;border-color:#fff #000 #000 #fff;font-size:10px}
+.phx-retro .b{padding:12px 10px 10px}
+.phx-retro .fly{position:relative;height:40px;margin-bottom:10px}
+.phx-retro .fold{position:absolute;top:10px;width:30px;height:22px;background:#e8d36a;border:1px solid #806000}
+.phx-retro .fold::before{content:"";position:absolute;left:-1px;top:-6px;width:12px;height:5px;background:#e8d36a;border:1px solid #806000;border-bottom:none}
+.phx-retro .f1{left:8%}.phx-retro .f2{right:8%}
+.phx-retro .pg{position:absolute;top:4px;left:12%;width:14px;height:18px;background:#fff;border:1px solid #000;animation:phx-fly 1.6s linear infinite}
+.phx-retro .pg::after{content:"";position:absolute;left:2px;right:2px;top:4px;height:8px;background:repeating-linear-gradient(#000 0 1px,transparent 1px 3px)}
+@keyframes phx-fly{0%{transform:translate(0,8px) rotate(-20deg)}50%{transform:translate(calc(min(300px,86vw)*.33),-6px) rotate(0)}100%{transform:translate(calc(min(300px,86vw)*.66),8px) rotate(20deg)}}
+.phx-retro p{margin:0 0 8px}
+.phx-retro .bar{height:16px;border:1px solid;border-color:#808080 #fff #fff #808080;padding:2px;overflow:hidden;position:relative}
+.phx-retro .bar span{position:absolute;top:2px;bottom:2px;left:2px;width:100%;background:repeating-linear-gradient(90deg,#000080 0 8px,transparent 8px 10px);animation:phx-march 2.4s steps(24) infinite}
+@keyframes phx-march{0%{transform:translateX(-100%)}100%{transform:translateX(0)}}
+@media (prefers-reduced-motion:reduce){.phx-retro .pg,.phx-retro .bar span{animation:none}.phx-retro .bar span{transform:translateX(-40%)}}
+</style><div class="w"><div class="t"><span>PhiTeX Setup</span><i>_</i><i>□</i><i>×</i></div><div class="b"><div class="fly"><div class="fold f1"></div><div class="pg"></div><div class="fold f2"></div></div><p>Typesetting your document…</p><div class="bar"><span></span></div></div></div></div>`,
+  );
+  const el = box.lastElementChild as HTMLElement;
+  let gone = false;
+  const stop = () => void ((gone = true), el.remove());
+  return {
+    done: () =>
+      new Promise((r) => {
+        if (gone) return r();
+        el.classList.add("out");
+        setTimeout(() => (stop(), r()), 300);
+      }),
+    stop,
+  };
+}
+
+/** No opening (the loading animation's "off"): the sheet says its steps, nothing plays. */
+export function still(): Opening {
+  return { done: () => Promise.resolve(), stop() {} };
+}

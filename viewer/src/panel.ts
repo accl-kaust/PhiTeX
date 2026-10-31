@@ -23,7 +23,7 @@ import { PROBLEMS_CSS, problemHtml } from "./problems.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys } from "./keys.ts";
 import { REPORT_TO } from "./report.ts";
-import { opening, type Opening } from "./opening.ts";
+import { opening, retro, still, type Opening } from "./opening.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -412,6 +412,8 @@ export class Panel {
       <hr>
       <div class="mi"><span class="icon">dark</span>Dark PDF</div>
       <div class="radios" id="darkpdf" role="group" aria-label="Dark PDF"><button type="button" data-dark="off">Off</button><button type="button" data-dark="on">On</button><button type="button" data-dark="theme">Match theme</button></div>
+      <div class="mi"><span class="icon">tips</span>Loading animation</div>
+      <div class="radios" id="openlook" role="group" aria-label="Loading animation"><button type="button" data-look="phitex">PhiTeX</button><button type="button" data-look="retro">Windows 98</button><button type="button" data-look="off">Off</button></div>
       <button type="button" role="menuitemcheckbox" id="x-culprits" aria-checked="true"><span class="check">✓</span><span>Underline problems<span class="desc">A wavy line under what each error and warning is about</span></span></button>
       <button type="button" role="menuitemcheckbox" id="dbg" aria-checked="false"><span class="check"></span><span>Debug check<span class="desc">Compare with a fresh build every 5 s</span></span></button>
       <hr>
@@ -506,6 +508,11 @@ export class Panel {
       const d = (e.target as HTMLElement).closest<HTMLElement>("[data-dark]")?.dataset.dark;
       if (d) this.darkPdf(d as DarkPdf);
     };
+    this.$("#openlook").onclick = (e) => {
+      const l = (e.target as HTMLElement).closest<HTMLElement>("[data-look]")?.dataset.look;
+      if (l) this.openingLook(l as OpeningLook);
+    };
+    this.openingLook(this.openingLook());
     this.$("#logsx").onclick = () => this.diagnostics(false);
     const pg = this.$<HTMLInputElement>("#pgin");
     pg.onfocus = () => pg.select();
@@ -1259,7 +1266,8 @@ export class Panel {
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
     this.fitSheet();
     const dark = this.win.classList.contains("dark-pdf") || (this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark"));
-    this.anim = opening(el.querySelector<HTMLElement>(".sheet")!, dark ? "#e4e6ea" : "#1d3e72", dark ? "#2c2e33" : "#ffffff");
+    const sheet = el.querySelector<HTMLElement>(".sheet")!, look = this.openingLook();
+    this.anim = look === "off" ? still() : look === "retro" ? retro(sheet) : opening(sheet, dark ? "#e4e6ea" : "#1d3e72", dark ? "#2c2e33" : "#ffffff");
     this.animSince = performance.now();
   }
 
@@ -1916,6 +1924,20 @@ export class Panel {
     this.applyDark();
   }
 
+  /** The loading animation chosen (`set`: chosen now, kept in this browser), as it is. */
+  private openingLook(set?: OpeningLook): OpeningLook {
+    let l: OpeningLook = "phitex";
+    try {
+      if (set) localStorage.setItem("phitex.opening", set);
+      const v = localStorage.getItem("phitex.opening");
+      if (v === "retro" || v === "off") l = v;
+    } catch {
+      l = set ?? "phitex";
+    }
+    this.root.querySelectorAll<HTMLElement>("#openlook [data-look]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.look === l)));
+    return l;
+  }
+
   /** The host page's own theme (theme()): undefined, never said. */
   private pageTheme: "dark" | "light" | null | undefined = undefined;
 
@@ -2327,6 +2349,9 @@ export class Panel {
 }
 
 type DarkPdf = "off" | "on" | "theme";
+
+/** The loading animation: PhiTeX's opening, a Windows 98 setup dialog, or none. */
+type OpeningLook = "phitex" | "retro" | "off";
 
 /** A long detail (an engine's dump) folded under `label`, opened on a click. */
 function foldedDetail(text: string, label: string): HTMLElement {
