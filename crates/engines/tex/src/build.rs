@@ -3996,7 +3996,7 @@ impl Run<'_, '_> {
             v.int(i64::from(r.page.badness)),
             true,
         );
-        self.box_report(false, r.page.report, false);
+        self.box_report(false, r.page.report, 0, &r.page.node, &side)?;
         crate::etex::split_marks(self, &r.marks, &side)?;
         let rest = r.rest.map(|rb| nodes::encode_box(v, &rb, &side));
         self.modify_box_reg(n, rest)?;
