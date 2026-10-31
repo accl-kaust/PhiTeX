@@ -29,6 +29,8 @@ jobs:
       - run: scripts/ci/free-disk.sh
       - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - run: docker pull -q "$IMAGE"
+      # (the compiler cache, on GitHub's cache: only what changed compiles)
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - run: scripts/ci/gate-gh.sh build main
       # (a tar: an artifact's zip drops the executable bits)
       - run: tar -C out/r/store -cf store.tar .
@@ -94,6 +96,8 @@ jobs:
       - run: scripts/ci/free-disk.sh
       - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - run: docker pull -q "$IMAGE"
+      # (the compiler cache, on GitHub's cache: only what changed compiles)
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - run: scripts/ci/gate-gh.sh build tests
       - run: tar -C out/r/store -cf store.tar .
       - uses: actions/upload-artifact@v4

@@ -10,7 +10,15 @@
 set -u
 if [ "${1:-}" != --inside ]; then
   mkdir -p out
-  exec docker run --rm -v "$PWD:/src" -w /src -e IMAGE="$IMAGE" -e GATE_TEST_TIMEOUT -e GATE_TEST_PAR \
+  # (the compiler cache: sccache-action's static binary on GitHub's
+  # cache service, given to the shard as PHITEX_SCCACHE, as the clusters
+  # give theirs; none when the job did not set it up)
+  cache=()
+  if [ -n "${SCCACHE_PATH:-}" ]; then
+    cache=(-v "$SCCACHE_PATH:/usr/local/bin/sccache:ro" -e PHITEX_SCCACHE=/usr/local/bin/sccache
+      -e SCCACHE_GHA_ENABLED=true -e ACTIONS_RESULTS_URL -e ACTIONS_RUNTIME_TOKEN -e ACTIONS_CACHE_URL -e ACTIONS_CACHE_SERVICE_V2)
+  fi
+  exec docker run --rm -v "$PWD:/src" -w /src -e IMAGE="$IMAGE" -e GATE_TEST_TIMEOUT -e GATE_TEST_PAR "${cache[@]}" \
     "$IMAGE" bash scripts/ci/gate-gh.sh --inside "$@"
 fi
 shift
