@@ -67,19 +67,39 @@ fn range_shard(f: Field) -> usize {
 }
 
 /// A commit's room in a field index's shard (`FieldIndex::reserve`):
-/// the index (its address), the shard, and how many adds it still covers.
+/// the shard, and how many adds it still covers.
 #[derive(Clone, Copy, Debug)]
 struct Reserved {
-    ix: usize,
     shard: u32,
     left: u32,
+}
+
+/// The room a thread's commit holds: per index (its address), a run of
+/// [`Reserved`] in `v` sorted by shard (`reserve` takes the shards in
+/// order), so that an add finds its shard's room by a binary search, not
+/// a walk over every shard the commit touched (a package's commit of
+/// thousands of definitions walked thousands of entries per add).
+struct Held {
+    /// `(index, start, end)`: the index's run `v[start..end]`.
+    runs: Vec<(usize, usize, usize)>,
+    v: Vec<Reserved>,
+}
+
+impl Held {
+    /// The run of index `ix`.
+    fn run(&mut self, ix: usize) -> Option<&mut [Reserved]> {
+        let &(_, a, b) = self.runs.iter().find(|r| r.0 == ix)?;
+        Some(&mut self.v[a..b])
+    }
 }
 
 thread_local! {
     /// The room this thread's commit holds, under its segment's lock
     /// (`FieldIndex::reserve`): kept by the thread, its own room grown
     /// before the lock (`FieldIndex::prepare`).
-    static HELD: std::cell::RefCell<Vec<Reserved>> = const { std::cell::RefCell::new(Vec::new()) };
+    static HELD: std::cell::RefCell<Held> = const {
+        std::cell::RefCell::new(Held { runs: Vec::new(), v: Vec::new() })
+    };
 }
 
 /// A shard without room for a commit's adds: the room to make
@@ -116,9 +136,10 @@ impl FieldIndex {
         let me = self.addr();
         HELD.with(|h| {
             let mut h = h.borrow_mut();
-            let held = h
-                .iter_mut()
-                .find(|x| x.ix == me && x.shard as usize == sh && x.left > 0);
+            let held = h.run(me).and_then(|r| {
+                let i = r.binary_search_by_key(&sh, |x| x.shard as usize).ok()?;
+                Some(&mut r[i]).filter(|x| x.left > 0)
+            });
             let mut w = self.shards[sh].0.write();
             let Err(i) = w.v.binary_search(&(f, lo, s)) else {
                 return;
@@ -144,8 +165,10 @@ impl FieldIndex {
     pub(crate) fn prepare(n: usize) {
         HELD.with(|h| {
             let mut h = h.borrow_mut();
-            let more = (3 * n).saturating_sub(h.capacity() - h.len());
-            h.reserve(more);
+            let more = (3 * n).saturating_sub(h.v.capacity() - h.v.len());
+            h.v.reserve(more);
+            let more = 3usize.saturating_sub(h.runs.capacity() - h.runs.len());
+            h.runs.reserve(more);
         });
     }
 
@@ -160,6 +183,10 @@ impl FieldIndex {
         let me = self.addr();
         HELD.with(|h| {
             let mut h = h.borrow_mut();
+            // (a commit reserves once per index and releases at its end;
+            // a run left by a commit that did not end is given back)
+            self.give_back(&mut h);
+            let start = h.v.len();
             let mut i = 0;
             while i < fs.len() {
                 let sh = fs[i];
@@ -169,8 +196,7 @@ impl FieldIndex {
                 let shard = u32::try_from(sh).unwrap_or(u32::MAX);
                 if w.free() >= w.reserved + k {
                     w.reserved += k;
-                    h.push(Reserved {
-                        ix: me,
+                    h.v.push(Reserved {
                         shard,
                         left: u32::try_from(k).unwrap_or(u32::MAX),
                     });
@@ -181,24 +207,39 @@ impl FieldIndex {
                     });
                 }
             }
+            if h.v.len() > start {
+                let end = h.v.len();
+                h.runs.push((me, start, end));
+            }
         });
     }
 
     /// The room this thread holds in this index and did not add into,
     /// given back.
     pub(crate) fn release(&self) {
+        HELD.with(|h| self.give_back(&mut h.borrow_mut()));
+    }
+
+    /// This index's run in `h`, its room not added into given back to
+    /// the shards, and the run removed.
+    fn give_back(&self, h: &mut Held) {
         let me = self.addr();
-        HELD.with(|h| {
-            h.borrow_mut().retain(|r| {
-                if r.ix != me {
-                    return true;
-                }
-                if r.left > 0 {
-                    self.shards[r.shard as usize].0.write().reserved -= r.left as usize;
-                }
-                false
-            });
-        });
+        let Some(k) = h.runs.iter().position(|r| r.0 == me) else {
+            return;
+        };
+        let (_, a, b) = h.runs.remove(k);
+        for r in &h.v[a..b] {
+            if r.left > 0 {
+                self.shards[r.shard as usize].0.write().reserved -= r.left as usize;
+            }
+        }
+        h.v.drain(a..b);
+        for r in &mut h.runs {
+            if r.1 >= b {
+                r.1 -= b - a;
+                r.2 -= b - a;
+            }
+        }
     }
 
     /// The shard of `f`, for `reserve`.
