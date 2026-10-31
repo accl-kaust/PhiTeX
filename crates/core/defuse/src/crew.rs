@@ -23,6 +23,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
+/// Whether this target runs threads (WebAssembly without atomics,
+/// wasm32-wasip1, does not).
+const THREADED: bool = !cfg!(all(target_arch = "wasm32", not(target_feature = "atomics")));
+
 /// The threads and the jobs not yet taken.
 struct Crew {
     st: Mutex<Waiting>,
@@ -54,6 +58,14 @@ impl Crew {
     /// `job` on a thread at once: an idle one (more idle than jobs
     /// waiting), else a new one it starts on.
     fn submit(&'static self, job: Job) {
+        // (a target without threads, WebAssembly without atomics: the job
+        // run in place, on the caller's stack, its main stack as large as
+        // a worker's: `crates/wasm/build.rs`; only what needs no second
+        // thread comes here, the pool at one worker)
+        if !THREADED {
+            job();
+            return;
+        }
         let mut st = lock(&self.st);
         if st.idle > st.jobs.len() {
             st.jobs.push_back(job);
