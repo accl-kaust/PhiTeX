@@ -127,6 +127,17 @@ and XeLaTeX, built by graph reduction, with exact output.
   apart on each page, so a letter rebuilds its page. Each edit's PDF
   equals a cold build of the edited file (80 of 80, mc 77010). Its cold
   build takes 41 s at 16 threads against latexmk -xelatex's 37 s.
+- **Tests recorded red for 1.61** (the user's decision of 2026-10-31):
+  tests that ran in no CI until the alpha's gate ran every test binary,
+  red before the alpha's work as well (mc 77044). The engine core's
+  review harness ends in a runaway node in two tests
+  (`next_readers_follow_their_stops_across_splits`,
+  `a_next_past_many_holes_goes_on_from_each`); five count runs, the
+  speed that is recorded, not gated (`chain::chains`,
+  `chain::census_plain`, `cuts`'s moved fire, `fatal`'s read-on,
+  `pages2`'s word edit); two need a font the CI image lacks
+  (`xetex::ini_features`, `ini_bidi`). `scripts/accl/gate-known-reds.txt`
+  names each with its cause.
 - **XeLaTeX's first build in the browser** makes the format there (a
   minute or more) until the web build ships it prebuilt, as it does
   pdfLaTeX's.

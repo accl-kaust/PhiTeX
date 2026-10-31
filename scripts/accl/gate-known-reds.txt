@@ -1,6 +1,18 @@
 # The tests shard's known reds (gate-shard.sh tests): a test named here
-# that fails is reported apart (known-red.txt), not red. Only the
-# intermittents of issue #3, waived for the alpha by the user's decision
-# of 2026-10-29 (docs/alpha-checklist.md §0), each by its exact name as
-# the shard names it (PACKAGE--TARGET::TEST), a tab, and its cause.
+# that fails is reported apart (known-red.txt), not red. Only reds the
+# user waived for the alpha (docs/alpha-checklist.md §0): the
+# intermittents of issue #3 (2026-10-29), and the reds of the tests that
+# ran in no CI before the tests shard, found red before the alpha's work
+# (768878f5a, mc 77044) and recorded for 1.61 (2026-10-31); each by its
+# exact name as the shard names it (PACKAGE--TARGET::TEST), a tab, and
+# its cause. CHANGELOG.md's "Known not to work" lists them too.
 phitex-cli--cli::watch_absorbs_an_edit_during_the_cold_build	issue #3 item 6: the cold build ends (about 205 ms) before the test's writer first writes (300 ms), so it absorbs nothing; the test's timing assumption, not the watch
+phitex-defuse--review::next_readers_follow_their_stops_across_splits	1.61: the engine core's review harness ends in RunawayNode (mc 77042), red before the alpha (768878f5a, 77044); a next reader across a split's stops
+phitex-defuse--review::a_next_past_many_holes_goes_on_from_each	1.61: RunawayNode { node 0, op "first" } in the review harness, red before the alpha (77044)
+phitex-tex--chain::chains	1.61, speed (recorded, not gated: the user's 2026-10-29 decision): runs per node above the 1.1 bar (display: 21 runs for 15 nodes), red before the alpha (77044)
+phitex-tex--chain::census_plain	1.61, speed: runs per node and critical-path bars, red before the alpha (77044)
+phitex-tex--cuts::a_moved_page_fire_relocates_the_rest_and_keeps_the_finisher	1.61, speed: 14 wasted runs where the test allows none, red before the alpha (77044)
+phitex-tex--fatal::a_read_on_waits_for_the_text_before_it	1.61, speed: at -j8, 64 siblings read on where -j1 reads 3 (speculation), red before the alpha (77044)
+phitex-tex--pages2::a_word_edit_reruns_the_piece_its_finisher_and_the_writers	1.61: a word edit reruns 0 finishers where the test expects 1 (the run accounting; each edit's PDF equals a cold build in the gate's edit histories), red before the alpha (77044)
+phitex-tex--xetex::ini_features	the CI image has not the test's font (Amiri: "Font not loadable"), red before the alpha (77044); the image gets the font after the alpha
+phitex-tex--xetex::ini_bidi	the CI image has not the test's font (Amiri), as ini_features
