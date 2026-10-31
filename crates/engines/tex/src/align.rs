@@ -86,6 +86,8 @@ fn tab_glue(g: Glue) -> Node {
     })
 }
 
+crate::expand::cs_once!(uend_tok, "\u{10FFFE}uend");
+
 impl Run<'_, '_> {
     // ---------------------------------------------------- align_state
 
@@ -111,6 +113,37 @@ impl Run<'_, '_> {
     pub(crate) fn align_u_end(&mut self) {
         if self.align_open() && self.astate() > 500_000 {
             self.set_astate(0);
+        }
+    }
+
+    /// §325 and §390's `while (state=token_list) and (loc=null) and
+    /// (token_type<>v_template) do end_token_list`: the token lists on
+    /// top read to their end are popped, a u template among them
+    /// (`end_token_list` of a `u_template`, §324: `align_state` becomes
+    /// 0 there). A u template's end is its marker token here, the only
+    /// token left of a template read to its end: taken now, not where a
+    /// later read would reach it. siunitx's S column reads the template's
+    /// last token as a macro's delimiter (`\__siunitx_table_collect_begin:w
+    /// #1 \ignorespaces`), and its cell then counts braces from 0: its
+    /// `\if_false: { \fi:` lets `\cs_set_protected:Npn \cr` read `\cr`
+    /// without ending the entry.
+    pub(crate) fn end_spent_lists(&mut self) {
+        loop {
+            self.input.pop_spent();
+            let u = uend_tok();
+            let Some(l) = self.input.levels.last_mut() else {
+                return;
+            };
+            if l.kind == crate::input::kind::TOKS
+                && l.a < l.b
+                && l.a + 1 == l.b
+                && self.input.arena.at(l.a) == u
+            {
+                l.a += 1;
+                self.align_u_end();
+            } else {
+                return;
+            }
         }
     }
 
@@ -378,7 +411,7 @@ impl Run<'_, '_> {
         self.back_cur();
         let pre = self.preamble(asid)?;
         let mut u = pre.cols.get(col).map(|c| c.0.clone()).unwrap_or_default();
-        u.push(Tok::cs("\u{10FFFE}uend"));
+        u.push(uend_tok());
         self.push_toks(u);
         Ok(false)
     }

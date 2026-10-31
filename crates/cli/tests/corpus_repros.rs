@@ -168,6 +168,10 @@ repro!(
     "research corpus (thuthesis, ctex): kpathsea's READABLE is a name readable and not a directory, so \\IfFileExists{/dev/null} is true on Unix (\\pdffilesize/\\filesize, expl3's file test); PhiTeX's kpse asked for a regular file, and thuthesis took the Windows fontset (SimSun, not loadable)"
 );
 repro!(
+    siunitx_s_column,
+    "research corpus (jmlr pmlr-sample, chem-common): siunitx's S column reads its u template's last token as a macro's delimiter; §390 pops the spent template there (align_state 0, §324), but PhiTeX's u-template end marker was reached only later, so the cell's \\if_false: { \\fi: left align_state at 1000001 and the \\cr ending the row was not an entry's end (Extra alignment tab)"
+);
+repro!(
     pdftexbanner_producer,
     "research corpus (acmart): hyperxmp makes /Producer of \\pdftexbanner, pdfTeX's pdftex_banner with TeX Live's and kpathsea's versions; PhiTeX's lacked ' (TeX Live 2026/Arch Linux) kpathsea version 6.4.2'"
 );

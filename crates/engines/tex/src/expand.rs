@@ -42,6 +42,7 @@ macro_rules! cs_once {
         }
     };
 }
+pub(crate) use cs_once;
 cs_once!(par_tok, "par");
 cs_once!(relax_tok, "\u{10FFFE}relax");
 cs_once!(frozen_fi_tok, "\u{10FFFE}fi");
@@ -343,6 +344,11 @@ impl Run<'_, '_> {
             // no arguments: the body is read in place (§390); a body
             // already in the arena is pushed by its range
             let r = self.body_range(&m.body);
+            // §390: the lists read to their end popped (a u template's
+            // end with them, §324)
+            if self.aopen != 0 {
+                self.end_spent_lists();
+            }
             self.push_range(r, crate::input::ty::MACRO);
             return;
         }
@@ -359,7 +365,12 @@ impl Run<'_, '_> {
         }
         if ok && self.halt.is_none() {
             // §400: the body with its arguments substituted, written
-            // straight into the arena as the macro's level
+            // straight into the arena as the macro's level (§390: the
+            // lists read to their end popped first, a u template's end
+            // with them, §324)
+            if self.aopen != 0 {
+                self.end_spent_lists();
+            }
             self.input.pop_spent();
             let range = self.input.arena.expand_body(&m.body, &m.segs, base);
             self.push_range(range, crate::input::ty::MACRO);
@@ -470,6 +481,9 @@ impl Run<'_, '_> {
         };
         toks.truncate(close + 1);
         toks.push(sw);
+        if self.aopen != 0 {
+            self.end_spent_lists();
+        }
         self.input.pop_spent();
         let r = self.input.arena.alloc(&toks);
         self.push_range(r, crate::input::ty::MACRO);

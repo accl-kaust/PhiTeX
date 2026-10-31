@@ -174,7 +174,7 @@ impl Run<'_, '_> {
                         crate::etex::end_of_file(self, n.name())?;
                         continue;
                     }
-                    if n.name() == "\u{10FFFE}uend" {
+                    if t == crate::align::uend_tok() {
                         // §324: the end of a u template
                         self.align_u_end();
                         continue;
@@ -671,6 +671,11 @@ impl Run<'_, '_> {
     /// `back_input` (§325).
     #[inline]
     pub(crate) fn back_input(&mut self, t: Tok) {
+        // §325: the lists read to their end popped first (a u template's
+        // end sets `align_state` to 0, before the brace below counts)
+        if self.aopen != 0 {
+            self.end_spent_lists();
+        }
         // §325: a brace put back is counted again when read
         if self.aopen != 0
             && let Some(s) = self.astate
