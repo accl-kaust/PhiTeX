@@ -26,11 +26,16 @@ fn build(name: &str) -> (Vec<u8>, String) {
     build_j(name, 1)
 }
 
+/// Where [`build_j`] builds `NAME.tex` at `threads` threads.
+fn scratch(name: &str, threads: usize) -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("corpus-repros")
+        .join(format!("{name}-j{threads}"))
+}
+
 /// [`build`] at `threads` threads.
 fn build_j(name: &str, threads: usize) -> (Vec<u8>, String) {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join("corpus-repros")
-        .join(format!("{name}-j{threads}"));
+    let dir = scratch(name, threads);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let tex = format!("{name}.tex");
@@ -81,9 +86,7 @@ fn check(name: &str) {
 /// fixpoint) and the build gives no error.
 fn check_aux(name: &str) {
     let (_, term) = build(name);
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join("corpus-repros")
-        .join(name);
+    let dir = scratch(name, 1);
     let got = std::fs::read(dir.join(format!("{name}.aux"))).unwrap_or_default();
     let want = std::fs::read(fixtures().join(format!("{name}.aux"))).expect("the oracle");
     let errors: Vec<&str> = term
