@@ -174,6 +174,15 @@ pub struct Options {
     /// them is the last. A file not listed starts absent. The engine
     /// reads no file of its own.
     pub written_init: Vec<(String, String)>,
+    /// What the tools made in an earlier build of the document (the
+    /// `.bbl` biber or BibTeX made, makeindex's `.ind`;
+    /// [`Build::export_made`], `fixpoint` only): the first round reads
+    /// each where TeX opens it, as TeX's next run reads the `.bbl` the
+    /// tool left after the last one, so a round whose tool makes it again
+    /// as it was read is the last. Empty: none, the first round finds no
+    /// tool's output (BibTeX's and biber's "no .bbl"), as pdflatex's
+    /// first run in an empty directory.
+    pub made_init: Vec<u8>,
     /// The package loads' records ([`Build::export_pkgrec`]): kept
     /// machine-wide beside the format, keyed by the load and the files
     /// it read, never by the document, so a new document's first build
@@ -833,6 +842,7 @@ impl Default for Options {
             fixpoint: false,
             wkeys: Vec::new(),
             written_init: Vec::new(),
+            made_init: Vec::new(),
             pkgrec: Vec::new(),
             noderec: Vec::new(),
             node_records: true,
@@ -915,6 +925,45 @@ pub(crate) fn tree_from_bytes(v: &Values, b: &[u8]) -> Option<ValueId> {
     let mut r = Rd(b);
     let t = r.tree()?;
     r.0.is_empty().then(|| import(v, &t))
+}
+
+/// [`Build::export_made`]'s bytes: per output, its name's length and
+/// name, its value's length and [`tree_bytes`], the lengths as `u32`
+/// little-endian.
+fn made_bytes(v: &Values, made: &[(String, ValueId)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (n, x) in made {
+        let t = tree_bytes(v, *x);
+        for part in [n.as_bytes(), &t] {
+            out.extend_from_slice(&u32::try_from(part.len()).unwrap_or(u32::MAX).to_le_bytes());
+            out.extend_from_slice(part);
+        }
+    }
+    out
+}
+
+/// The outputs [`made_bytes`] wrote, in `v`; none from bytes it did not
+/// write (another version's: no guess, as before any build).
+fn made_entries(v: &Values, b: &[u8]) -> Vec<(String, ValueId)> {
+    fn part<'a>(b: &mut &'a [u8]) -> Option<&'a [u8]> {
+        let (len, rest) = b.split_first_chunk::<4>()?;
+        let len = usize::try_from(u32::from_le_bytes(*len)).ok()?;
+        let (x, rest) = (rest.get(..len)?, rest.get(len..)?);
+        *b = rest;
+        Some(x)
+    }
+    let mut b = b;
+    let mut out = Vec::new();
+    while !b.is_empty() {
+        let Some((n, t)) = part(&mut b).zip(part(&mut b)) else {
+            return Vec::new();
+        };
+        let (Ok(n), Some(x)) = (std::str::from_utf8(n), tree_from_bytes(v, t)) else {
+            return Vec::new();
+        };
+        out.push((n.to_owned(), x));
+    }
+    out
 }
 
 type Env = Arc<crate::fmtenv::FormatEnv>;
@@ -2700,6 +2749,9 @@ struct Graph {
     /// began ([`Options::written_init`]): their loop-backs are declared by
     /// the run that reads them back first (`crate::run::Run::seed_written`).
     seeds: Vec<(String, String)>,
+    /// What the tools made in the build the client's [`Options::made_init`]
+    /// came from: round one's guesses of their outputs.
+    made_seeds: Vec<u8>,
     /// The files the last evaluation's runs opened for writing: their
     /// nodes are placed from the streams (`ops::Files`), so `loopfiles`
     /// lists only the files written before and not opened now.
@@ -3086,6 +3138,7 @@ impl Graph {
             absent: Vec::new(),
             written: Vec::new(),
             seeds: Vec::new(),
+            made_seeds: Vec::new(),
             threads: crate::exec::threads(threads),
             marks: Marks::default(),
             opened_memo: std::sync::Mutex::new(None),
@@ -3402,6 +3455,7 @@ impl Graph {
     fn guesses(&mut self, opts: &Options) {
         if opts.fixpoint {
             self.seeds.clone_from(&opts.written_init);
+            self.made_seeds.clone_from(&opts.made_init);
         }
         // (a file read back from its text needs no guess of its keys)
         self.wkeys_guess = opts
@@ -3602,6 +3656,12 @@ impl Graph {
                     crate::tools::size_value(v, t),
                 ));
                 env.push((v.field(&format!("{}:{n}", crate::ops::WSAME)), v.bool(true)));
+            }
+            // (what the tools made last, read where TeX opens it until the
+            // files' nodes define what they make of this round's files:
+            // `crate::tools::made_field`)
+            for (n, x) in made_entries(v, &self.made_seeds) {
+                env.push((crate::tools::made_field(v, &n), x));
             }
             // (a key set guessed for a file written before, until its node
             // defines the file's)
@@ -6975,6 +7035,30 @@ impl Build {
             .eng
             .acc_value(self.unit, v.field("streams"))
             .map(ValueId::raw)
+    }
+
+    /// What the tools made of the files the job wrote, as the last
+    /// evaluation left it (the `.bbl`, the `.ind`): [`Options::made_init`]
+    /// for a later session of the same document.
+    #[must_use]
+    pub fn export_made(&self) -> Vec<u8> {
+        let v = self.g.eng.values();
+        let mut made: Vec<(String, ValueId)> = Vec::new();
+        for (input, _) in self.files() {
+            for o in crate::tools::made_names(&input) {
+                if made.iter().any(|(n, _)| *n == o) {
+                    continue;
+                }
+                let defs = self.g.eng.defined_by_live(crate::tools::made_field(v, &o));
+                if let Some(&(_, x)) = defs.first()
+                    && defs.len() == 1
+                    && x != ValueId::UNIT
+                {
+                    made.push((o, x));
+                }
+            }
+        }
+        made_bytes(v, &made)
     }
 
     /// The key sets of the read-back files that only define,

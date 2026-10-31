@@ -142,7 +142,7 @@ pub trait Host: Send + Sync {
 /// What the session keeps between sessions, by key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key<'a> {
-    /// The document's own: `wkeys`, `wnames`, `noderec`.
+    /// The document's own: `wkeys`, `wnames`, `noderec`, `toolmade`.
     Doc(&'a str),
     /// One beside format `name`: `(name, "pkgrec")`.
     Format(&'a str, &'a str),

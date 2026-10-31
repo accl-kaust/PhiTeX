@@ -1415,6 +1415,53 @@ fn rebuild_reads_the_written_files_back_in_round_one() {
     }
 }
 
+/// A rebuild given, beside the files the job wrote, what the tools made
+/// of them in the earlier build (`Options::made_init`, the `.bbl` and the
+/// `.ind` as TeX's next run finds them) reads those in round one too: a
+/// document with a bibliography and an index that comes out as it was
+/// read takes one round, as latexmk runs pdflatex once on it, not the
+/// three of a first build (the citation written, the tool's output read,
+/// the `.aux` that output changes), and the output is the cold build's.
+/// At 1 and 8 threads.
+#[test]
+fn rebuild_reads_the_tools_outputs_back_in_round_one() {
+    let fx = common::fixtures().join("latexmk");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("rebuild-made");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    std::fs::copy(fx.join("bibtex/refs.bib"), dir.join("refs.bib")).expect("the database");
+    let src = "\\documentclass{article}\n\\usepackage{makeidx}\n\\makeindex\n\
+               \\begin{document}\nKnuth~\\cite{knuth84}.\nA word\\index{word}.\n\
+               \\bibliographystyle{plain}\n\\bibliography{refs}\n\\printindex\n\\end{document}\n";
+    std::fs::write(dir.join("rm.tex"), src).expect("the document");
+    for threads in [1, 8] {
+        let opts = |init: Vec<(String, String)>, made: Vec<u8>| Options {
+            fixpoint: true,
+            threads: Some(threads),
+            written_init: init,
+            made_init: made,
+            tool_finder: Some(common::tool_finder(&dir)),
+            ..pdf_opts("rm", &dir)
+        };
+        let cold = common::build(opts(Vec::new(), Vec::new()), Some(&prelude(true)), src);
+        let (files, made) = (cold.files(), cold.export_made());
+        assert!(
+            !made.is_empty(),
+            "-j {threads}: the tools made the .bbl and the .ind"
+        );
+        let b = common::build(opts(files.clone(), made), Some(&prelude(true)), src);
+        eprintln!(
+            "-j {threads}: cold {} rounds, rebuilt {} rounds",
+            cold.stats.loop_rounds, b.stats.loop_rounds
+        );
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("-j {threads}: the rebuild's output is not the cold build's: {d}");
+        }
+        assert_eq!(b.files(), files, "-j {threads}: the files written");
+        assert_eq!(b.stats.loop_rounds, 1, "-j {threads}: the rebuild's rounds");
+    }
+}
+
 /// What BibTeX and makeindex say reaches the build's diagnostics as
 /// warnings, at the line that reads their output: a `\cite` key the
 /// database lacks (BibTeX's `Warning--I didn't find a database entry`)

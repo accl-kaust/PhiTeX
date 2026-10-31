@@ -453,6 +453,9 @@ pub struct Session {
         Option<Vec<u8>>,
         Option<Vec<u8>>,
     )>,
+    /// What the tools made, as last stored in the cache
+    /// ([`Session::store_made`]).
+    made_stored: Mutex<Option<Vec<u8>>>,
     /// What the written keys and names last stored were made from
     /// ([`Build::wkeys_source`]): the same, nothing to make or store.
     wkeys_from: Mutex<Option<u64>>,
@@ -598,6 +601,7 @@ impl Session {
             sink,
             builds: 0,
             stored: Mutex::new((None, None, None, None)),
+            made_stored: Mutex::new(None),
             wkeys_from: Mutex::new(None),
             status,
             buffers: Arc::default(),
@@ -884,6 +888,7 @@ impl Session {
                     },
                     wkeys: self.load_wkeys(),
                     written_init: self.written_init(),
+                    made_init: self.made_init(),
                     // (the package loads' records: machine-wide, beside the
                     // format, from every document built with it)
                     pkgrec: self
@@ -1008,6 +1013,9 @@ impl Session {
                 self.store_wkeys(b);
                 self.store_wnames(b);
             }
+            // (what the tools made follows their other inputs too, a
+            // `.bib`: stored whether or not the written files changed)
+            self.store_made(b);
             lap(&mut phases, "written keys");
             // (no load ran: its records are as last stored; else stored
             // when the build settles, [`Session::flush_records`])
@@ -1520,6 +1528,37 @@ impl Session {
             out.push((aux, text));
         }
         out
+    }
+
+    /// What the tools made in the document's last build
+    /// ([`Options::made_init`], a fixpoint's): the store's `toolmade`,
+    /// as TeX's next run finds the `.bbl` the tool left.
+    fn made_init(&self) -> Vec<u8> {
+        if !self.job.fixpoint {
+            return Vec::new();
+        }
+        self.store
+            .as_ref()
+            .and_then(|c| c.get(Key::Doc("toolmade")))
+            .unwrap_or_default()
+    }
+
+    fn store_made(&self, b: &Build) {
+        let Some(c) = &self.store else {
+            return;
+        };
+        let out = b.export_made();
+        let mut last = self
+            .made_stored
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if last.as_deref() == Some(out.as_slice()) {
+            return;
+        }
+        if c.get(Key::Doc("toolmade")).as_deref() != Some(out.as_slice()) {
+            c.put(Key::Doc("toolmade"), &out);
+        }
+        *last = Some(out);
     }
 
     fn store_wnames(&self, b: &Build) {

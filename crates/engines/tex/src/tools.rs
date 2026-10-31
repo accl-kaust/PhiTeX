@@ -60,12 +60,8 @@ pub(crate) fn made_from(
     input: &str,
 ) -> Result<Vec<(String, Vec<ValueId>)>, Stop> {
     let v = cx.values();
-    let base = input.rsplit_once('.').map_or(input, |(b, _)| b);
     let mut out = Vec::new();
-    for o in [format!("{base}.bbl"), format!("{base}.ind")] {
-        if !claims(&o).iter().any(|(_, i)| i == input) {
-            continue;
-        }
+    for o in made_names(input) {
         if let Some(args) = run_args(cx, &o)?
             && args.get(2).is_some_and(|&i| str_of(v, i) == input)
         {
@@ -73,6 +69,16 @@ pub(crate) fn made_from(
         }
     }
     Ok(out)
+}
+
+/// The names a tool may make by default from `input`, a file the job
+/// writes ([`made_from`] without the job's arguments).
+pub(crate) fn made_names(input: &str) -> Vec<String> {
+    let base = input.rsplit_once('.').map_or(input, |(b, _)| b);
+    [format!("{base}.bbl"), format!("{base}.ind")]
+        .into_iter()
+        .filter(|o| claims(o).iter().any(|(_, i)| i == input))
+        .collect()
 }
 
 /// The loop-back of a file the job writes, its whole text as the job
