@@ -75,7 +75,7 @@ there is no override.
 
 ## Releasing
 
-1. **Tag `v<version>` on main**: `v1.6` (the alpha), its updates
+1. **Tag `v<version>` on main**: `v1.0` (the first release), its updates
    `v1.6.1`, `v1.6.2`, …, then the milestones `v1.61`, `v1.618`, … (a
    digit a milestone: AGENTS.md). The tag's commit must
    carry a green `gate`. The release workflow checks this and stops
@@ -104,8 +104,9 @@ there is no override.
    (`shelf/scripts/accl-*.sbatch`). A PhiTeX release names the Shelf
    release it builds from (`shelf::RELEASE`), so Shelf is deployed before
    the PhiTeX that names it.
-5. **1.0** (2026-10-31) is not a milestone: a release made to try
-   `phitex upgrade` end to end before 1.6.
+5. **1.0** is the first release: the alpha's milestones moved to it
+   (the user, 2026-10-31), every known issue fixed but the `.log`'s
+   exactness, SyncTeX's places, speed, LuaLaTeX and interaction.
 
 ## Nightly
 
