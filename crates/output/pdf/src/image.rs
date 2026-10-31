@@ -1333,7 +1333,7 @@ impl PdfState {
             match v {
                 Obj::Ref(r) => {
                     if !c.objs.iter().any(|o| o.r == *r)
-                        && let Some(rep) = self.replacement(c.doc, *r, c.src)?
+                        && let Some(rep) = self.replacement(c.doc, *r, c.src)
                     {
                         // copyFont, replacing the font
                         let (key, fd_objnum) = self.epdf_fd(&rep);

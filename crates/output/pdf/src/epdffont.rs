@@ -12,7 +12,7 @@ use phitex_codecs::pdfread::{Dict, Doc, Obj, Ref};
 
 use crate::encodings::{MAC_EXPERT, MAC_ROMAN, STANDARD, WIN_ANSI};
 use crate::map::MapEntry;
-use crate::{FontSource, PdfError, PdfState};
+use crate::{FontSource, PdfState};
 
 /// An encoding: 256 glyph names, `None` for none.
 pub(crate) type Names = Vec<Option<Vec<u8>>>;
@@ -247,23 +247,25 @@ fn fofi_type1c_encoding(f: &[u8]) -> Option<Names> {
             let mut enc: Names = vec![None; 256];
             let fmt = u8_at(o)?;
             let mut q = o + 1;
-            if fmt & 0x7f == 0 {
+            // (the format, its high bit saying supplements follow)
+            let format = fmt & 0x7f;
+            if format == 0 {
                 let n_codes = (1 + u8_at(q)?).min(n_glyphs);
                 q += 1;
-                for i in 1..n_codes.min(charset.len()) {
+                for &sid in charset.iter().take(n_codes).skip(1) {
                     let c = u8_at(q)?;
                     q += 1;
-                    enc[c] = string(charset[i]);
+                    enc[c] = string(sid);
                 }
-            } else if fmt & 0x7f == 1 {
+            } else if format == 1 {
                 let n_ranges = u8_at(q)?;
                 q += 1;
                 let mut n_codes = 1;
                 for _ in 0..n_ranges {
-                    let mut c = u8_at(q)?;
+                    let first = u8_at(q)?;
                     let left = u8_at(q + 1)?;
                     q += 2;
-                    for _ in 0..=left {
+                    for c in first..=first + left {
                         if n_codes >= n_glyphs {
                             break;
                         }
@@ -273,7 +275,6 @@ fn fofi_type1c_encoding(f: &[u8]) -> Option<Names> {
                             enc[c] = string(sid);
                         }
                         n_codes += 1;
-                        c += 1;
                     }
                 }
             }
@@ -608,25 +609,25 @@ impl PdfState {
         doc: &Doc,
         r: Ref,
         src: &dyn FontSource,
-    ) -> Result<Option<Replacement>, PdfError> {
+    ) -> Option<Replacement> {
         if self.fixed_inclusion_copy_font != 0 {
-            return Ok(None);
+            return None;
         }
         let Obj::Dict(font) = doc.fetch(r) else {
-            return Ok(None);
+            return None;
         };
         if doc.lookup(&font, b"Subtype").as_name() != Some(b"Type1") {
-            return Ok(None);
+            return None;
         }
         let Some(base) = doc.lookup(&font, b"BaseFont").as_name().map(<[u8]>::to_vec) else {
-            return Ok(None);
+            return None;
         };
         let Some(Obj::Ref(desc_ref)) = font.get(b"FontDescriptor") else {
-            return Ok(None);
+            return None;
         };
         let desc_ref = *desc_ref;
         let Obj::Dict(desc) = doc.fetch(desc_ref) else {
-            return Ok(None);
+            return None;
         };
         let file1 = match doc.lookup(&desc, b"FontFile") {
             Obj::Stream(s) => Some(doc.decode(&s)),
@@ -639,13 +640,13 @@ impl PdfState {
                 Obj::Stream(s) if doc.lookup(&s.dict, b"Subtype").as_name() == Some(b"Type1C") => {
                     Some(doc.decode(&s))
                 }
-                _ => return Ok(None),
+                _ => return None,
             }
         } else {
             None
         };
         let Some((fm, file)) = self.lookup_fontmap(&base, src) else {
-            return Ok(None);
+            return None;
         };
         let stemv = zround(doc.lookup(&desc, b"StemV").as_num().unwrap_or(0.0));
         let charset = match doc.lookup(&desc, b"CharSet") {
@@ -653,14 +654,14 @@ impl PdfState {
             _ => None,
         };
         let names = char_names(doc, &font, file1.as_deref(), cff.as_deref());
-        Ok(Some(Replacement {
+        Some(Replacement {
             fm,
             stemv,
             charset,
             desc_ref,
             names,
             file,
-        }))
+        })
     }
 
     /// `epdf_create_fontdescriptor`, `epdf_mark_glyphs` and
