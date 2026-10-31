@@ -5,10 +5,12 @@
 % (\filemoddate: there is no \pdfcreationdate), which SOURCE_DATE_EPOCH
 % does not fix, so TeX Live's own xelatex never settles on one PDF (each
 % pass's differs). They are pinned here to SOURCE_DATE_EPOCH
-% (1758800000, 2025-09-25T11:33:20Z); the sample itself is unchanged.
+% (1758800000, 2025-09-25T11:33:20Z) here, early enough: hyperxmp writes
+% its packet at the last shipout. The sample itself is unchanged.
 \AtBeginDocument{\hypersetup{%
   pdfcreationdate={D:20250925113320Z},
   pdfmoddate={D:20250925113320Z},
-  pdfmetadatetime={2025-09-25T11:33:20Z},
+  pdfdate={D:20250925113320Z},
+  pdfmetadate={D:20250925113320Z},
   pdfinstanceid={uuid:00000000-0000-4000-8000-000000000000}}}
 \input{sample-sigplan}
