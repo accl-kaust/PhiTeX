@@ -2141,6 +2141,9 @@ version = "0.0.0"
 [[package]]
 name = "phitex-mf"
 version = "0.0.0"
+dependencies = [
+ "phitex-gftopk",
+]
 
 [[package]]
 name = "phitex-otf"

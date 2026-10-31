@@ -11,12 +11,18 @@
 #           and gftopk's PK, list.txt (name mag dpi and the md5 and size of
 #           each), and src/ every file mf read (mf -recorder), so that the
 #           tests can run without TeX Live.
+#   mfbase/ the sources of TeX Live's mf.base (fmtutil.cnf: mf-nowin -ini
+#           -jobname=mf -translate-file=cp227.tcx mf.ini): mf.ini, cp227.tcx,
+#           plain.mf, modes.mf, and TeX Live's mf.log, mktexpk, mktextfm
+# (tests/fonts.rs: PHITEX_MF_ORACLE=<that mf directory>)
 set -eu
 root=$PWD
 out=${r:?}/mf
 T=$root/upstream/texlive-source/texk/web2c/triptrap
 export SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1
-mkdir -p "$out/trap" "$out/fonts/src"
+mkdir -p "$out/trap" "$out/fonts/src" "$out/mfbase"
+cp "$(kpsewhich -format=mf mf.ini)" "$(kpsewhich -format=web2c cp227.tcx)" "$(kpsewhich plain.mf)" "$(kpsewhich modes.mf)" "$out/mfbase/"
+cp "$(find /var/lib/texmf -name mf.log | head -1)" "$(command -v mktexpk)" "$(command -v mktextfm)" "$out/mfbase/" || true
 { mf --version | head -1; gftopk --version | head -1; tftopl --version | head -1; } > "$out/versions.txt"
 
 # --- trap

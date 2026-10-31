@@ -330,11 +330,25 @@ impl Mf {
         Ok(())
     }
 
+    /// `get_job_name` (lib/texmfmp.c): the `-jobname` given, else `name`.
+    fn get_job_name(&mut self, name: StrNumber) -> R<StrNumber> {
+        match self.cfg.job_name.clone() {
+            Some(j) => {
+                self.str_room(j.len() as i32)?;
+                for c in j.bytes() {
+                    self.append_char(c);
+                }
+                self.make_string()
+            }
+            None => Ok(name),
+        }
+    }
+
     // §788 (mf.ch)
     pub(crate) fn open_log_file(&mut self) -> R {
         let old_setting = self.selector;
         if self.job_name == 0 {
-            self.job_name = self.pstr("mfput");
+            self.job_name = self.get_job_name(self.pstr("mfput"))?;
         }
         self.pack_job_name(self.pstr(".log"));
         self.log_file = Vec::new();
@@ -431,7 +445,7 @@ impl Mf {
         self.set_name(n);
         self.str_ref[self.cur_name as usize] = MAX_STR_REF as u8;
         if self.job_name == 0 {
-            self.job_name = self.cur_name;
+            self.job_name = self.get_job_name(self.cur_name)?;
             self.open_log_file()?;
         }
         if self.term_offset + self.length(self.name()) > self.max_print_line - 2 {

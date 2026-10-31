@@ -74,6 +74,7 @@ mod input;
 mod linear;
 mod macros;
 mod memory;
+pub mod mktex;
 mod moves;
 mod octants;
 mod ops;
@@ -183,6 +184,8 @@ pub struct Config {
     /// The base's name without `.base` (`dump_name`: the program's name,
     /// or the `&name` on the command line).
     pub dump_name: String,
+    /// `-jobname` (`c_job_name`), if given.
+    pub job_name: Option<String>,
     /// The command line after the options (`topenin`'s arguments).
     pub command_line: Vec<Vec<u8>>,
     /// What the terminal types: web2c's stdin.
@@ -216,6 +219,7 @@ impl Default for Config {
         Config {
             ini: false,
             dump_name: "mf".into(),
+            job_name: None,
             command_line: Vec::new(),
             terminal_input: Vec::new(),
             main_memory: 5_000_000,

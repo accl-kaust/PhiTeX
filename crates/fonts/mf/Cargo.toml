@@ -7,6 +7,7 @@ publish = false
 description = "METAFONT, ported from mf.web with web2c's mf.ch"
 
 [dependencies]
+phitex-gftopk = { path = "../gftopk" }
 
 [lints]
 workspace = true
