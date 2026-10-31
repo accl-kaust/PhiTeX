@@ -1410,6 +1410,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// continuation carried that it publishes again (rule 2: one equal to
     /// it is none). A stop here runs the node again from its start.
     pub(crate) fn prepare_publication(&mut self) -> R<()> {
+        // (a page parameter this run set and no item of it carried: its
+        // marker at the run's end, its reads the run's)
+        if self.st.take_page_params() {
+            self.put_page_params()?;
+        }
         let top =
             self.rec_load || (self.st.has_global_restore(self.v) && self.scope_kind()?.is_none());
         let (pubs, restored) = self.st.publication(self.v, top);
@@ -2711,19 +2716,23 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// The page parameters in force, as a `T_PAGE_PARAMS` marker on the
-    /// main list (page.rs `breaks`, §980).
-    pub(crate) fn put_page_params(&mut self) {
+    /// main list (page.rs `breaks`, §980). Reading them may stop the run
+    /// (a value not known yet): the stop is the caller's, never a marker
+    /// of zeros committed without the read that would run it again (an
+    /// amsbook title page's `\topskip`, its pages at -j4 a page longer).
+    pub(crate) fn put_page_params(&mut self) -> R<()> {
         let v = self.v;
-        let marker = self.page_params_marker().unwrap_or_else(|_| {
-            v.list(vec![
-                v.int(crate::nodes::T_PAGE_PARAMS),
-                v.int(0),
-                v.int(0),
-                crate::val::glue_value(v, &phitex_typeset::glue::Glue::ZERO),
-                v.int(0),
-            ])
-        });
+        let marker = self.page_params_marker()?;
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), marker])));
+        Ok(())
+    }
+
+    /// [`Run::put_page_params`] where a command adds an item and cannot
+    /// return a halt: raised, the command loop takes it.
+    pub(crate) fn put_page_params_or_raise(&mut self) {
+        if let Err(h) = self.put_page_params() {
+            self.raise(h);
+        }
     }
 
     /// The page parameters in force (§980), as a `T_PAGE_PARAMS` marker:
@@ -4859,10 +4868,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 .slot_field(crate::fields::cell::LINES as usize);
             self.contribs.push((f, m));
         }
-        // a page parameter this run set and no item of it carried
-        if self.st.take_page_params() {
-            self.put_page_params();
-        }
+        // (a page parameter this run set and no item of it carried: put
+        // where the publication is prepared, [`Run::prepare_publication`],
+        // whose stop runs the node again)
         let op = self.cx.op();
         let t_pub = std::time::Instant::now();
         let mut publication = self.publication();

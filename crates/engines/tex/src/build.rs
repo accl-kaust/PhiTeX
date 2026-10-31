@@ -481,7 +481,7 @@ impl Run<'_, '_> {
         }
         if lid == 0 {
             if self.st.take_page_params() {
-                self.put_page_params();
+                self.put_page_params_or_raise();
             }
             for &x in &nodes {
                 if nodes::tag(v, x) == nodes::T_INS {
@@ -509,7 +509,7 @@ impl Run<'_, '_> {
             // (the page parameters as they stand when the item arrives,
             // §987: for the breaker)
             if self.st.take_page_params() {
-                self.put_page_params();
+                self.put_page_params_or_raise();
             }
             // (an insertion's class: its registers are read at the next
             // candidate, §1008, `Run::finish_candidate`)

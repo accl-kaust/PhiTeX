@@ -23,15 +23,27 @@ fn cache() -> PathBuf {
 /// `NAME.tex` built in a fresh directory: its PDF (empty: none) and the
 /// terminal's output.
 fn build(name: &str) -> (Vec<u8>, String) {
+    build_j(name, 1)
+}
+
+/// [`build`] at `threads` threads.
+fn build_j(name: &str, threads: usize) -> (Vec<u8>, String) {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("corpus-repros")
-        .join(name);
+        .join(format!("{name}-j{threads}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let tex = format!("{name}.tex");
     std::fs::copy(fixtures().join(&tex), dir.join(&tex)).expect("the repro");
     let out = Command::new(env!("CARGO_BIN_EXE_phitex"))
-        .args(["build", "-v", "--exact-pdf", "-j", "1", &tex])
+        .args([
+            "build",
+            "-v",
+            "--exact-pdf",
+            "-j",
+            &threads.to_string(),
+            &tex,
+        ])
         .current_dir(&dir)
         .env("PHITEX_CACHE_DIR", cache())
         .env("SOURCE_DATE_EPOCH", "1758800000")
@@ -191,3 +203,26 @@ repro!(
     microtype_options,
     "microtype with every option under pdfLaTeX: expansion, protrusion, tracking (\\textls, \\letterspacefont), kerning (\\pdfprependkern, \\pdfappendkern: French punctuation, auto kerns in the main loop) and spacing (\\pdfadjustinterwordglue, \\knbscode...), in two columns"
 );
+
+/// The research corpus's amsbook at -j4 (2 pages more than -j1 in about
+/// half the builds): the piece that ends a title page whose `\topskip`
+/// `\@maketitle` set in a group puts the page parameters on the main
+/// list at its end; reading them stopped the run there and a marker of
+/// zeros was committed without the read that would run it again
+/// (`Run::put_page_params`). Built eight times at four threads, each
+/// time pdflatex's PDF.
+#[test]
+fn amsbook_title_threads() {
+    let name = "amsbook_title_threads";
+    let want = std::fs::read(fixtures().join(format!("{name}.pdf"))).expect("the oracle");
+    for k in 0..8 {
+        let (got, term) = build_j(name, 4);
+        assert!(
+            got == want,
+            "{name} -j4, build {k}: the PDF differs from pdflatex's ({} vs {} bytes): {}",
+            got.len(),
+            want.len(),
+            term.lines().last().unwrap_or("")
+        );
+    }
+}

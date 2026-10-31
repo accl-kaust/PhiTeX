@@ -379,7 +379,7 @@ impl Run<'_, '_> {
         let mut left = md.extra.first().map(|&x| list_of(v, x)).unwrap_or_default();
         self.close_group(md)?;
         if self.st.take_page_params() {
-            self.put_page_params();
+            self.put_page_params()?;
         }
         if self.box_reg(255)?.is_some() {
             // §1028

@@ -199,7 +199,7 @@ impl Run<'_, '_> {
                     self.ipar(Par::vsize)?
                 );
             }
-            self.put_page_params();
+            self.put_page_params()?;
         } else if k == 0 && !self.own_page_params_put() {
             // (the parameters reaching the piece, unless an item of it
             // already noted the ones it set, `Run::append`: that marker
