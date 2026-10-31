@@ -291,6 +291,26 @@ impl Run<'_, '_> {
         }
     }
 
+    /// The number of the line `m` marked ([`Run::line_mark`]), read only
+    /// now that a message names it: a piece's line from its file's lines
+    /// the nodes before it began and those it had begun at the mark.
+    pub(crate) fn line_of_mark(&mut self, m: crate::run::LineMark) -> R<i64> {
+        Ok(match m {
+            (Some(n), _, _, _) => n,
+            (None, mine, Some(name), own) => match own {
+                Some(own) => match self.piece_line(own)? {
+                    Some(n) => n,
+                    None => self.piece_lines_before(name)? + mine,
+                },
+                None => self.piece_lines_before(name)? + mine,
+            },
+            (None, mine, None, _) => {
+                let now = self.line_mark().1;
+                i64::from(self.input_line_no()?) - (now - mine)
+            }
+        })
+    }
+
     /// §336 `check_outer_validity`: an `\outer` macro (`cur`) met while
     /// a token list is being scanned or conditional text skipped. It is
     /// backed up to be read again and a space read in its place; a list
@@ -343,23 +363,9 @@ impl Run<'_, '_> {
             .iter()
             .find(|&&(_, c, h)| c == cmd::IF_TEST && h == code)
             .map_or("if", |&(n, _, _)| n);
-        // (a piece's line: its file's lines the nodes before it began and
-        // those it had begun when the skip began, wherever the input is
-        // now, the end of all input included)
-        let line = match self.skip_from {
-            (Some(n), _, _, _) => n,
-            (None, mine, Some(name), own) => match own {
-                Some(own) => match self.piece_line(own)? {
-                    Some(n) => n,
-                    None => self.piece_lines_before(name)? + mine,
-                },
-                None => self.piece_lines_before(name)? + mine,
-            },
-            (None, mine, None, _) => {
-                let now = self.line_mark().1;
-                i64::from(self.input_line_no()?) - (now - mine)
-            }
-        };
+        // (where the skip began, wherever the input is now, the end of all
+        // input included)
+        let line = self.line_of_mark(self.skip_from)?;
         let msg = format!("Incomplete \\{name}; all text was ignored after line {line}");
         self.outer_error(msg)?;
         self.push_toks([crate::expand::frozen_fi_tok()]);

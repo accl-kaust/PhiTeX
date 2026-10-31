@@ -130,11 +130,13 @@ fn the_loop_parks_at_holes_and_resumes() {
     );
 }
 
-/// A one-word edit that moves no page break: the edited piece, its
-/// page's finisher, the link and the end run; the loop resumes from the
-/// checkpoint before the piece and stops at the first page whose
-/// content agrees, so no other finisher runs and none is made anew
-/// (the user's bar: a one-letter edit is four runs).
+/// A one-word edit that moves no page break: the edited piece and the
+/// writers. Its page's finisher reads the piece's lines sealed, by their
+/// shape (`pages/seal.rs`): a word that keeps its line's dimensions
+/// changes the page writer's input, not the finisher's, so no finisher
+/// runs and none is made anew; the loop runs at most once, from the
+/// checkpoint before the piece (the user's bar: a one-letter edit is
+/// four runs).
 #[test]
 fn a_word_edit_reruns_the_piece_its_finisher_and_the_writers() {
     let dir = common::scratch("pages2-word");
@@ -154,8 +156,8 @@ fn a_word_edit_reruns_the_piece_its_finisher_and_the_writers() {
     );
     assert_eq!(
         runs_of_report(&r, "finish"),
-        1,
-        "one finisher, the edited piece's page: {r:?}"
+        0,
+        "no finisher: the edited piece's lines are sealed on its page: {r:?}"
     );
     assert!(
         runs_of_report(&r, "pages") <= 1,

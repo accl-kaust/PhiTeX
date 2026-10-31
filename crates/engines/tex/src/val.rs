@@ -1212,6 +1212,25 @@ pub(crate) fn tail_projection(x: ValueId, v: &Values) -> ValueId {
     }
 }
 
+/// Whether the main list's last item ([`crate::build::MAIN_LAST`]) is a
+/// penalty of `eject_penalty` or less (§1005), a page made to fire: `1`,
+/// else `0`. A pure projection for the engine: a piece's start that asks
+/// whether the pieces before left a page pending reads that alone, so a
+/// last line box in place of none, or another line box, leaves it
+/// standing.
+pub(crate) fn forced_projection(x: ValueId, v: &Values) -> ValueId {
+    let forced = v
+        .with_list(x, |xs| {
+            xs.first()
+                .is_some_and(|&t| int_of(v, t) == crate::nodes::T_PENALTY)
+                && xs.get(1).is_some_and(|&p| {
+                    int_of(v, p) <= i64::from(phitex_typeset::linebreak::EJECT_PENALTY)
+                })
+        })
+        .unwrap_or(false);
+    v.int(i64::from(forced))
+}
+
 /// [`step_projection`]'s class of a meaning that opens a conditional.
 pub(crate) const STEP_IF: i64 = 1;
 /// [`step_projection`]'s class of an `\outer` macro.

@@ -55,8 +55,11 @@ pub(crate) struct Level {
     /// `\prevgraf` of the vertical list this level builds.
     pub prev_graf: i64,
     /// `mode_line` (§213): the input line this level began on (a
-    /// paragraph's, its box reports' `pack_begin_line`, §816).
-    pub mode_line: i64,
+    /// paragraph's, its box reports' `pack_begin_line`, §816), marked
+    /// ([`Run::line_mark`](crate::run::Run::line_mark)): its number is
+    /// read only by a report that names it, so a paragraph whose lines
+    /// make no report does not depend on the lines before it.
+    pub mode_line: Option<crate::run::LineMark>,
     /// Where it began, for its box reports' diagnostics.
     pub mode_place: Option<crate::run::DiagPlace>,
     /// What the opener recorded for the closer (a box's context and
@@ -146,7 +149,7 @@ impl Level {
             par: None,
             clang: 0,
             prev_graf: 0,
-            mode_line: 0,
+            mode_line: None,
             mode_place: None,
             extra,
             gid: 0,

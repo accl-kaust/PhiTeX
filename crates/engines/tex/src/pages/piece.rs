@@ -201,24 +201,19 @@ impl Run<'_, '_> {
     /// pending on the main list: their last item a penalty of
     /// `eject_penalty` or less contributed after the page builder's last
     /// call (§1005; an `\unvbox`'s, which calls no `build_page`, §1110),
-    /// so this run's first candidate fires it. Read as the main list's
-    /// tail projection ([`crate::val::tail_projection`]: a penalty whole,
-    /// a box as its kind) and the count since that call.
+    /// so this run's first candidate fires it. Read as that answer alone
+    /// ([`crate::val::forced_projection`], compared with 1: none defined
+    /// yet and a line box answer alike, so a piece run before the pieces
+    /// ahead of it committed stands once they leave a box) and the count
+    /// since that call.
     fn forced_pending_before(&mut self) -> R<bool> {
         use crate::build::{MAIN_LAST, MAIN_SINCE};
+        use phitex_defuse::Step;
         let v = self.v;
-        let last = self.cx.read_path(
-            v.field(MAIN_LAST),
-            phitex_defuse::PathId::of_proj(self.ops.tail_proj),
-        )?;
-        let Some(last) = last.filter(|&x| x != ValueId::UNIT) else {
-            return Ok(false);
-        };
-        if nodes::tag(v, last) != nodes::T_PENALTY
-            || list_of(v, last)
-                .get(1)
-                .is_none_or(|&p| int_of(v, p) > i64::from(phitex_typeset::linebreak::EJECT_PENALTY))
-        {
+        let p = self
+            .cx
+            .path(&[Step::Proj(self.ops.forced_proj), Step::Eq(v.int(1))]);
+        if self.cx.read_path(v.field(MAIN_LAST), p)? != Some(v.bool(true)) {
             return Ok(false);
         }
         let since = self.eng_read(v.field(MAIN_SINCE))?;

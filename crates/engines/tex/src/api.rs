@@ -3096,6 +3096,7 @@ impl Graph {
         let step_proj = eng.register_projection(Arc::new(crate::val::step_projection));
         let defined_proj = eng.register_projection(Arc::new(crate::val::defined_projection));
         let tail_proj = eng.register_projection(Arc::new(crate::val::tail_projection));
+        let forced_proj = eng.register_projection(Arc::new(crate::val::forced_projection));
         let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
         let clist_proj = eng.register_projection(Arc::new(crate::val::clist_projection));
         let ops = Ops {
@@ -3142,6 +3143,7 @@ impl Graph {
             step_proj,
             defined_proj,
             tail_proj,
+            forced_proj,
             num_proj,
             clist_proj,
         };
@@ -8046,10 +8048,35 @@ impl Build {
             .acc_value(self.unit, v.field("pages"))
             .map(|x| v.seq_to_vec(x))
             .unwrap_or_default();
+        // (a page's sealed lines, `crate::pages::seal`, filled from their
+        // pieces' units as the page's writer fills them: each piece's
+        // last unit's items)
+        let mut units: crate::FxHashMap<i64, ValueId> = crate::FxHashMap::default();
+        if let Some(s) = self
+            .g
+            .eng
+            .acc_value(self.unit, v.field(crate::pages::PITEMS))
+        {
+            for u in v.seq_to_vec(s) {
+                let xs = list_of(v, u);
+                if let (Some(&p), Some(&items)) = (xs.first(), xs.get(2)) {
+                    units.insert(int_of(v, p), items);
+                }
+            }
+        }
+        let mut line = |s: &crate::nodes::Sealed| -> Option<ValueId> {
+            let items = *units.get(&s.piece)?;
+            let item = v
+                .with_list(items, |xs| xs.get(s.k as usize).copied())
+                .flatten()?;
+            v.with_list(item, |ys| ys.get(1).copied()).flatten()
+        };
+        let mut memo = crate::FxHashMap::default();
         pages
             .iter()
             .position(|&p| {
                 let b = list_of(v, p).first().copied().unwrap_or(ValueId::UNIT);
+                let b = crate::nodes::unseal_value(v, b, &mut line, &mut memo).unwrap_or(b);
                 let mut t = String::new();
                 if let Some(phitex_typeset::node::Node::Box(bx)) =
                     crate::nodes::decode(v, b, &mut crate::nodes::Side::default())

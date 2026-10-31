@@ -5,6 +5,34 @@ suite tests stay red by decision. Their cause is the loop's wake
 scheduling, not a defect to patch. Numbers are from reds3 (ddd8f49d,
 accl job 20712).
 
+## Resolved (2026-11-01)
+
+Both tests below, and pages2's paragraph insert and word edit, pass at
+every thread count (each 10 of 10 on mc, -j1, -j4, -j8 and the node's
+16). The causes were not the wakes' scheduling as guessed below:
+
+- **The loop's resumption.** A loop run parked at a hole after the
+  contributor it folded last read `next` after that contributor and
+  stopped at the hole. When the hole's node committed before the loop's
+  run did, the commit's check named the read's start as the change
+  (`Cause::Range { by }` = the contributor folded last), so the run
+  after went back to its last checkpoint, or the start, instead of on
+  from its tail. A `next` that answered none names now the contribution
+  or stop it answers (`commit.rs`, `cause_of_read`): nothing between its
+  start and the hole contributed.
+- **vsize's `exec` reruns.** A piece's start asks whether the pieces
+  before it left a page made to fire (`forced_pending_before`); it read
+  the main list's last item by its kind, and a piece run before those
+  pieces committed read none where they left a line box: run again,
+  every page's first piece at 16 threads. It reads that answer alone
+  now (`val::forced_projection`).
+- **The insert's 120 piece runs.** Every paragraph read its first
+  line's number at its start (`mode_line`, for its box reports), so an
+  insert above moved every later paragraph's read. The line is marked
+  and read only by a report that names it (`Run::line_of_mark`).
+
+The sections below are the record before.
+
 ## pages2 `the_loop_parks_at_holes_and_resumes`
 
 The bound is loop runs at most pages + 2, at eight threads, over 120

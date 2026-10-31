@@ -225,6 +225,10 @@ pub(crate) struct Ops {
     /// ([`crate::val::tail_projection`]): a reader of its kind reads that,
     /// not the item ([`Run::list_last_kind`]).
     pub tail_proj: phitex_defuse::ProjId,
+    /// Whether the main list's last item is a penalty that forces a page
+    /// ([`crate::val::forced_projection`]): a piece's start asks only that
+    /// (`Run::forced_pending_before`).
+    pub forced_proj: phitex_defuse::ProjId,
     /// The number projection of meanings ([`crate::val::num_projection`]):
     /// `\ifnum` comparing a macro's number reads the comparison's outcome
     /// ([`Run::num_order`]).
@@ -643,8 +647,9 @@ pub(crate) struct Run<'c, 'a> {
     /// The `(language, packed hyphen minima)` of the paragraph being
     /// broken (`end_graf` pops its level before `line_break`, §1096).
     /// The `mode_line` of the paragraph `end_graf` just popped, its box
-    /// reports' `pack_begin_line` (§815).
-    pub last_par_line: i64,
+    /// reports' `pack_begin_line` (§815), marked (None: the paragraph
+    /// began in another node's run).
+    pub last_par_line: Option<LineMark>,
     /// And where it began ([`Run::diag_place`] at `new_graf`): its box
     /// reports' place.
     pub last_par_place: Option<DiagPlace>,
@@ -1085,7 +1090,7 @@ impl<'c, 'a> Run<'c, 'a> {
             nest: Vec::new(),
             next_lid: 0,
             last_par: (0, 0),
-            last_par_line: 0,
+            last_par_line: None,
             last_par_place: None,
             doc: false,
             fread: Vec::new(),

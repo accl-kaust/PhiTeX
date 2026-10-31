@@ -143,10 +143,9 @@ and XeLaTeX, built by graph reduction, with exact output.
   red before the alpha's work as well (mc 77044). The engine core's
   review harness ends in a runaway node in two tests
   (`next_readers_follow_their_stops_across_splits`,
-  `a_next_past_many_holes_goes_on_from_each`); five count runs, the
+  `a_next_past_many_holes_goes_on_from_each`); four count runs, the
   speed that is recorded, not gated (`chain::chains`,
-  `chain::census_plain`, `cuts`'s moved fire, `fatal`'s read-on,
-  `pages2`'s word edit); two need a font the CI image lacks
+  `chain::census_plain`, `cuts`'s moved fire, `fatal`'s read-on); two need a font the CI image lacks
   (`xetex::ini_features`, `ini_bidi`). `scripts/accl/gate-known-reds.txt`
   names each with its cause.
 - **XeLaTeX's first build in the browser** makes the format there (a

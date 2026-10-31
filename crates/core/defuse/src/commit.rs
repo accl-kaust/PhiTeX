@@ -1941,6 +1941,22 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         ReadKind::Placed { .. } => Cause::Output { of: node.id },
         ReadKind::Following { .. } | ReadKind::Hole => Cause::Structure,
     };
+    // (a `next` after `n` that answered none, stopped at a node not
+    // committed then: no node between `n` and that stop contributed, so
+    // the change lies at the contribution or stop it answers now, which
+    // is where the next run goes back before, not `n`: a loop parked at
+    // a hole the node after `n` filled goes on from where it parked, as
+    // when that node's own commit wakes it)
+    let cause_of_read = |r: &crate::node::ReadRec| match r.kind {
+        ReadKind::Next { f, after: Some(n) } if r.seen.is_none() => {
+            let now = read::on_one_layout(eng, || {
+                read::pos_of(eng, n).map(|at| read::next_contribution(eng, f, Some(at), node.id))
+            });
+            let by = now.and_then(|x| x.item.map(|(id, _)| id).or(x.stop)).unwrap_or(n);
+            Cause::Range { field: f, by }
+        }
+        _ => cause_of(&r.kind),
+    };
     // (a read kept from the run its state came from no longer holds: the
     // run that resumed from that state rests on it. A range read names
     // where the change may lie, and the next run, offered the state, goes
@@ -1965,7 +1981,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             } => p.woken_at != Some(*n),
             _ => false,
         };
-        causes.push(cause_of(&rec.reads[i].kind));
+        causes.push(cause_of_read(&rec.reads[i]));
         if i >= own_reads {
             stale = !range(&rec.reads[i].kind);
             let mut memo = read::FoldMemo::new();
@@ -1991,7 +2007,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     continue;
                 }
                 if range(&r.kind) {
-                    causes.push(cause_of(&r.kind));
+                    causes.push(cause_of_read(r));
                 } else {
                     stale = true;
                 }

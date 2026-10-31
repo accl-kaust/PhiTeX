@@ -47,6 +47,15 @@ pub(crate) struct Mode {
     pub vm: i32,
 }
 
+/// Where a box reported by [`Run::box_report`] began: no paragraph's
+/// line, or a paragraph's (`pack_begin_line`, §815) as marked at its
+/// start (None: begun in another node's run, the line where it ends).
+#[derive(Clone, Copy)]
+enum Begin {
+    No,
+    Par(Option<crate::run::LineMark>),
+}
+
 /// A box under construction (`scan_spec` §645 and the context, §1083).
 pub(crate) fn null_box(v: &phitex_defuse::Values, w: i32) -> ValueId {
     let b = BoxNode {
@@ -875,11 +884,12 @@ impl Run<'_, '_> {
         let packed = (lhm * 64 + rhm) * 65536 + lang;
         // the paragraph: a level of the nest (§1091 `push_nest`)
         let lid = self.push_list(102, 0, Vec::new());
-        let line = i64::from(self.input_line_no()?);
+        // (the line marked, its number read only by a box report)
+        let line = self.line_mark();
         let place = self.diag_place();
         if let Some(l) = self.top_mut() {
             l.par = Some((lang, packed));
-            l.mode_line = line;
+            l.mode_line = Some(line);
             l.mode_place = Some(place);
             l.clang = lang;
         }
@@ -1503,10 +1513,7 @@ impl Run<'_, '_> {
         let mut memo = nodes::LineMemo::default();
         // (`pack_begin_line`, §815: the paragraph's first line, kept as
         // its level was popped; one begun in another node's run, this one)
-        let begin = match self.last_par_line {
-            l if l > 0 => l,
-            _ => i64::from(self.input_line_no()?),
-        };
+        let begin = Begin::Par(self.last_par_line);
         for (k, mut line) in para.lines.into_iter().enumerate() {
             self.box_report(true, line.packed.report, begin, &line.packed.node, &side)?;
             let (list, seen, line_fonts) =
@@ -2306,7 +2313,7 @@ impl Run<'_, '_> {
                     true,
                 );
                 let h = md.group == group::HBOX || adjusted;
-                self.box_report(h, packed.report, 0, &packed.node, &side)?;
+                self.box_report(h, packed.report, Begin::No, &packed.node, &side)?;
                 // packaging without adjustments keeps the list as it was:
                 // its value is the items' (encoded once, when appended)
                 let b = if !adjusted && packed.node.list.len() == kept.len() {
@@ -3774,12 +3781,27 @@ impl Run<'_, '_> {
         &mut self,
         h: bool,
         r: Option<phitex_typeset::pack::Report>,
-        begin: i64,
+        begin: Begin,
         b: &BoxNode,
         side: &Side,
     ) -> R<()> {
         use phitex_typeset::pack::Report;
         let Some(r) = r else { return Ok(()) };
+        // (the paragraph's first line: read here, where a report names it)
+        let begin = match begin {
+            Begin::No => 0,
+            Begin::Par(m) => {
+                let l = match m {
+                    Some(m) => self.line_of_mark(m)?,
+                    None => 0,
+                };
+                if l > 0 {
+                    l
+                } else {
+                    i64::from(self.input_line_no()?)
+                }
+            }
+        };
         let what = if h { "\\hbox" } else { "\\vbox" };
         let head = match r {
             Report::Underfull(b) => format!("Underfull {what} (badness {b}"),
@@ -4034,7 +4056,7 @@ impl Run<'_, '_> {
             v.int(i64::from(r.page.badness)),
             true,
         );
-        self.box_report(false, r.page.report, 0, &r.page.node, &side)?;
+        self.box_report(false, r.page.report, Begin::No, &r.page.node, &side)?;
         crate::etex::split_marks(self, &r.marks, &side)?;
         let rest = r.rest.map(|rb| nodes::encode_box(v, &rb, &side));
         self.modify_box_reg(n, rest)?;
