@@ -167,3 +167,7 @@ repro!(
     devnull_exists,
     "research corpus (thuthesis, ctex): kpathsea's READABLE is a name readable and not a directory, so \\IfFileExists{/dev/null} is true on Unix (\\pdffilesize/\\filesize, expl3's file test); PhiTeX's kpse asked for a regular file, and thuthesis took the Windows fontset (SimSun, not loadable)"
 );
+repro!(
+    pdftexbanner_producer,
+    "research corpus (acmart): hyperxmp makes /Producer of \\pdftexbanner, pdfTeX's pdftex_banner with TeX Live's and kpathsea's versions; PhiTeX's lacked ' (TeX Live 2026/Arch Linux) kpathsea version 6.4.2'"
+);

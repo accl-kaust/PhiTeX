@@ -490,7 +490,10 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
     let v = r.v;
     let out: String = match c {
         cv::PDFTEX_REVISION => "29".to_owned(),
-        cv::PDFTEX_BANNER => "This is pdfTeX, Version 3.141592653-2.6-1.40.29".to_owned(),
+        // (`pdftex_banner`, the string the PDF's `/PTEX.FullBanner` holds:
+        // the version, TeX Live's and kpathsea's; hyperxmp makes the
+        // `/Producer` of it, acmart's)
+        cv::PDFTEX_BANNER => crate::pdfout::BANNER.to_owned(),
         cv::FONT_NAME | cv::FONT_OBJNUM => {
             let f = r.scan_font_ident()?;
             let (name, obj) = font_num(r, f)?;

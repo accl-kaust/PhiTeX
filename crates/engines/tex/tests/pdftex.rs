@@ -54,6 +54,20 @@ fn font_not_loadable_messages() {
     assert_eq!(errs(&log), errs(&want));
 }
 
+/// `\pdftexbanner` is pdfTeX's `pdftex_banner`, TeX Live's and
+/// kpathsea's versions included, as the oracle's `/PTEX.FullBanner`
+/// shows it: hyperxmp makes acmart's `/Producer` of it.
+#[test]
+fn banner() {
+    let dir = common::fixtures().join("pdf");
+    let doc = format!("{PRELUDE}\\message{{[\\pdftexbanner]}}\\end\n");
+    let opts = common::options("./core.tex", "texput", "", &dir);
+    let b = common::build(opts, None, &doc);
+    let (_, log) = b.output();
+    let want = "[This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) kpathsea version 6.4.2]";
+    assert!(log.replace('\n', "").contains(want), "{log}");
+}
+
 #[test]
 fn random() {
     log_gate("pdfrandom").unwrap_or_else(|e| panic!("{e}"));
