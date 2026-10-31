@@ -690,7 +690,20 @@ impl Run<'_, '_> {
                     // and was made anew with new nodes once the give-back
                     // came, the same as before (Grail, a word typed on
                     // page 1: 55 rests and 55 finishers placed anew))
-                    if old.checkpoints.is_empty() && old.tail.is_none() {
+                    // (but not pages whose keys the loop nodes before it
+                    // now fire, its start moved past them: kept, its
+                    // definition of such a page stood after theirs, read
+                    // at the line's end by that page's own finisher, which
+                    // found its placement stale and gave nothing back, the
+                    // give-back this rest waits for: no pass finished every
+                    // page, and the file was empty (revtex4-2's apssamp))
+                    let taken = |c: &Checkpoint| {
+                        r.floors
+                            .iter()
+                            .any(|&(n, f)| n == c.key.piece && c.key.nth < f)
+                    };
+                    let overlaps = old.checkpoints.iter().chain(&old.beyond).any(taken);
+                    if (old.checkpoints.is_empty() && old.tail.is_none()) || overlaps {
                         self.cx.park(ls.encode(v));
                     } else {
                         self.cx.unchanged();
