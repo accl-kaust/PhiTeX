@@ -1560,7 +1560,93 @@ impl DefSet {
 
 /// A call's set in [`Closure`]'s memo: the set, the names looked up for
 /// it, whether a recursion cut it short.
-type Memo = (std::sync::Arc<DefSet>, std::sync::Arc<Vec<String>>, bool);
+type Memo = (std::sync::Arc<DefSet>, std::sync::Arc<Names>, bool);
+
+/// The names a call's set looked up ([`Closure`]): those it looked up
+/// itself and its callees' sets' names, shared, not copied (a callee's
+/// names are every name under it: copied into each caller's list, sorted
+/// there and copied on, they made the closure of a text that defines
+/// what it calls quadratic in its call graph, a class file kept in the
+/// document's directory 8 s of a build); listed whole only where asked
+/// ([`Names::flat`]).
+pub(crate) struct Names {
+    own: Vec<String>,
+    kids: Vec<std::sync::Arc<Names>>,
+    /// Whether the document defines any of them.
+    doc: bool,
+    flat: std::sync::OnceLock<std::sync::Arc<Vec<String>>>,
+}
+
+impl Names {
+    /// A list the prelude's cache kept, whole: names the document does
+    /// not define.
+    fn kept(flat: std::sync::Arc<Vec<String>>) -> std::sync::Arc<Names> {
+        std::sync::Arc::new(Names {
+            own: Vec::new(),
+            kids: Vec::new(),
+            doc: false,
+            flat: std::sync::OnceLock::from(flat),
+        })
+    }
+
+    /// Every name, sorted, each once (made once).
+    fn flat(&self) -> std::sync::Arc<Vec<String>> {
+        self.flat
+            .get_or_init(|| {
+                let mut v = self.own.clone();
+                for k in &self.kids {
+                    v.extend(k.flat().iter().cloned());
+                }
+                v.sort_unstable();
+                v.dedup();
+                std::sync::Arc::new(v)
+            })
+            .clone()
+    }
+
+    /// Whether any of them is one of `busy`.
+    fn meets(&self, busy: &HashSet<String>) -> bool {
+        if busy.is_empty() {
+            return false;
+        }
+        let flat = self.flat();
+        busy.iter().any(|b| flat.binary_search(b).is_ok())
+    }
+}
+
+/// The names the call being computed looked up so far ([`Closure`]'s
+/// frame): its own, its callees' sets' names, and whether a recursion
+/// cut it short.
+#[derive(Default)]
+struct Frame {
+    own: Vec<String>,
+    kids: Vec<std::sync::Arc<Names>>,
+    cut: bool,
+}
+
+/// The sets of calls made under the same definitions, by name
+/// ([`Closure`]'s `pure`), shared by every call, at the top and inside
+/// another, each top call's fresh closure included: one per analysis of
+/// a text ([`Definitions::call_defines_in`]).
+///
+/// - `uncut`: the sets no recursion cut short, a function of the name
+///   and the definitions alone, as the prelude's cache keeps them
+///   ([`Definitions::closures`]).
+/// - `tops`: the whole sets of top calls ([`Closure::call_top`]), each
+///   everything its name may define. Taken for a call inside another
+///   too: what the walk there would have cut short at a call under way
+///   is reached from that call anyway, where its effects are being
+///   collected (a path through a recursion adds nothing the path without
+///   it does not: a group around a call only drops its local
+///   definitions), so the top call's set comes out the same. Without
+///   them each top call walked its name's recursion afresh: a class file
+///   kept in the document's directory, whose macros call each other,
+///   280 000 sets made for 4 000 names, 5 s of a build.
+#[derive(Default)]
+pub struct ClosureMemo {
+    uncut: HashMap<String, (std::sync::Arc<DefSet>, std::sync::Arc<Names>)>,
+    tops: HashMap<String, (std::sync::Arc<DefSet>, std::sync::Arc<Names>)>,
+}
 
 /// Where the closure looks names up: the document's definitions, then
 /// the kernel's.
@@ -1578,7 +1664,10 @@ pub(crate) struct Closure<'a> {
     busy: HashSet<String>,
     /// The call being computed: the names looked up so far, whether a
     /// recursion cut it short.
-    frame: (Vec<String>, bool),
+    frame: Frame,
+    /// The sets no recursion cut short ([`ClosureMemo`]): passed to each
+    /// top call's fresh closure and back.
+    pure: ClosureMemo,
 }
 
 impl<'a> Closure<'a> {
@@ -1589,8 +1678,27 @@ impl<'a> Closure<'a> {
             memo: HashMap::default(),
             tops: HashMap::default(),
             busy: HashSet::default(),
-            frame: (Vec::new(), false),
+            frame: Frame::default(),
+            pure: ClosureMemo::default(),
         }
+    }
+
+    /// [`Closure::new`] with the sets `pure` holds, computed under the
+    /// same definitions ([`Closure::into_pure`] gives them back).
+    pub(crate) fn with_pure(
+        document: &'a Definitions,
+        prelude: &'a Definitions,
+        pure: ClosureMemo,
+    ) -> Closure<'a> {
+        Closure {
+            pure,
+            ..Closure::new(document, prelude)
+        }
+    }
+
+    /// The sets no recursion cut short, those given and those computed.
+    pub(crate) fn into_pure(self) -> ClosureMemo {
+        self.pure
     }
 
     /// Whether the document defines any of `names` (a set the prelude's
@@ -1613,6 +1721,22 @@ impl<'a> Closure<'a> {
     /// name read again.
     fn document_defines_kept(&self, names: &[String]) -> bool {
         !self.document.holds_no_name() && self.document_defines_(names)
+    }
+
+    /// A finished call's names: its own (sorted, each once) and its
+    /// callees', with whether the document defines any of them.
+    fn names_of(&self, frame: Frame) -> std::sync::Arc<Names> {
+        let Frame { mut own, kids, .. } = frame;
+        own.sort_unstable();
+        own.dedup();
+        // (a callee's own were asked when it was made)
+        let doc = self.document_defines(&own) || kids.iter().any(|k| k.doc);
+        std::sync::Arc::new(Names {
+            own,
+            kids,
+            doc,
+            flat: std::sync::OnceLock::new(),
+        })
     }
 
     fn document_defines_(&self, names: &[String]) -> bool {
@@ -1653,7 +1777,7 @@ impl<'a> Closure<'a> {
 
     /// What assigning the quantity `name` defines.
     pub(crate) fn assigned(&mut self, name: &str) -> DefSet {
-        self.frame.0.push(name.to_owned());
+        self.frame.own.push(name.to_owned());
         let mut s = DefSet::default();
         if let Some(Entry::Quantity(_, None)) = table().commands.get(name) {
             s.names.insert(param(name), false);
@@ -1718,6 +1842,9 @@ impl<'a> Closure<'a> {
     /// read: what a recursion cut short inside another call is not
     /// this call's set).
     fn call_top(&mut self, name: &str) -> std::sync::Arc<DefSet> {
+        if let Some((s, _)) = self.pure.tops.get(name) {
+            return s.clone();
+        }
         let key = format!("\u{1}{name}");
         let cached = self.prelude.closure(&key);
         // (the names a top call looked up are no other call's: no frame
@@ -1727,15 +1854,22 @@ impl<'a> Closure<'a> {
         {
             return s;
         }
-        let mut fresh = Closure::new(self.document, self.prelude);
+        // (the sets no recursion cut short go with it and come back:
+        // computed once for all the top calls, which share most of what
+        // they call; without them a text that defines what it calls,
+        // which the prelude's cache does not keep, walked every top
+        // call's whole closure afresh: a class file kept in the
+        // document's directory, 8 s of a build)
+        let mut fresh =
+            Closure::with_pure(self.document, self.prelude, std::mem::take(&mut self.pure));
         let s = fresh.call_inner(name);
-        let (mut names, _) = std::mem::take(&mut fresh.frame);
-        names.sort_unstable();
-        names.dedup();
-        let names = std::sync::Arc::new(names);
-        if !self.document_defines(&names) {
-            self.prelude.keep_closure(key, s.clone(), names);
+        self.pure = std::mem::take(&mut fresh.pure);
+        let frame = std::mem::take(&mut fresh.frame);
+        let names = self.names_of(frame);
+        if !names.doc {
+            self.prelude.keep_closure(key, s.clone(), names.flat());
         }
+        self.pure.tops.insert(name.to_owned(), (s.clone(), names));
         s
     }
 
@@ -1744,38 +1878,66 @@ impl<'a> Closure<'a> {
     fn call_inner(&mut self, name: &str) -> std::sync::Arc<DefSet> {
         if let Some((s, names, cut)) = self.memo.get(name) {
             let s = s.clone();
-            self.frame.0.extend(names.iter().cloned());
-            self.frame.1 |= *cut;
+            self.frame.kids.push(names.clone());
+            self.frame.cut |= *cut;
             return s;
         }
         if self.busy.contains(name) {
             // (a recursion: its effects are those being collected)
-            self.frame.1 = true;
+            self.frame.cut = true;
             return std::sync::Arc::default();
+        }
+        // (one no recursion cut short, computed under these definitions,
+        // whose names none of the calls under way looked up: what the
+        // prelude's cache below gives)
+        if let Some((s, names)) = self.pure.tops.get(name) {
+            let (s, names) = (s.clone(), names.clone());
+            self.frame.kids.push(names.clone());
+            self.memo.insert(name.to_owned(), (s.clone(), names, false));
+            return s;
+        }
+        if let Some((s, names)) = self.pure.uncut.get(name)
+            && !names.meets(&self.busy)
+        {
+            let (s, names) = (s.clone(), names.clone());
+            self.frame.kids.push(names.clone());
+            self.memo.insert(name.to_owned(), (s.clone(), names, false));
+            return s;
         }
         let cached = self.prelude.closure(name);
         if let Some((s, names)) = cached
             && !names.iter().any(|n| self.busy.contains(n))
             && !self.document_defines_kept(&names)
         {
-            self.frame.0.extend(names.iter().cloned());
+            let names = Names::kept(names);
+            self.frame.kids.push(names.clone());
             self.memo.insert(name.to_owned(), (s.clone(), names, false));
             return s;
         }
         self.busy.insert(name.to_owned());
-        let outer = std::mem::replace(&mut self.frame, (vec![name.to_owned()], false));
+        let outer = std::mem::replace(
+            &mut self.frame,
+            Frame {
+                own: vec![name.to_owned()],
+                ..Frame::default()
+            },
+        );
         let s = std::sync::Arc::new(self.compute(name));
-        let (mut names, cut) = std::mem::replace(&mut self.frame, outer);
+        let frame = std::mem::replace(&mut self.frame, outer);
         self.busy.remove(name);
-        names.sort_unstable();
-        names.dedup();
-        let names = std::sync::Arc::new(names);
-        if !cut && !self.document_defines(&names) {
+        let cut = frame.cut;
+        let names = self.names_of(frame);
+        if !cut && !names.doc {
             self.prelude
-                .keep_closure(name.to_owned(), s.clone(), names.clone());
+                .keep_closure(name.to_owned(), s.clone(), names.flat());
         }
-        self.frame.0.extend(names.iter().cloned());
-        self.frame.1 |= cut;
+        if !cut {
+            self.pure
+                .uncut
+                .insert(name.to_owned(), (s.clone(), names.clone()));
+        }
+        self.frame.kids.push(names.clone());
+        self.frame.cut |= cut;
         self.memo.insert(name.to_owned(), (s.clone(), names, cut));
         s
     }

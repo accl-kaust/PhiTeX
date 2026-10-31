@@ -48,8 +48,8 @@ use crate::syntax::Catcodes;
 pub use atoms::{Atom, AtomKind};
 pub use defs::{Arg, DOC_FILES, Definitions, Lit, OUTPUT, Shape, with_reads};
 pub use hints::{
-    Assumption, Claim, Def, DefSet, Effect, Hints, Implicit, Mark, MayDefine, MeaningShape,
-    ScopeHint, ScopeKind,
+    Assumption, Claim, ClosureMemo, Def, DefSet, Effect, Hints, Implicit, Mark, MayDefine,
+    MeaningShape, ScopeHint, ScopeKind,
 };
 pub use lex::{Hazard, Start, TokKind, Token};
 pub use report::Stats;

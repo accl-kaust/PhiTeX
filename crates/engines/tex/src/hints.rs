@@ -1885,6 +1885,9 @@ struct Analysis<'t> {
     /// The control sequences' and braces' atoms, in order.
     structural: Vec<u32>,
     memo: std::cell::RefCell<FxHashMap<String, Arc<DefSet>>>,
+    /// The calls' sets no recursion cut short, shared by every
+    /// [`Analysis::defset`] of the analysis (`ClosureMemo`).
+    closures: std::cell::RefCell<phitex_source::pass::ClosureMemo>,
     /// The heads each pair of call lists adds
     /// ([`Analysis::calls_state_split`]), by the lists' hash, with the
     /// lists.
@@ -2114,6 +2117,7 @@ impl Analysis<'_> {
             sig,
             structural,
             memo: std::cell::RefCell::new(FxHashMap::default()),
+            closures: std::cell::RefCell::default(),
             split_memo: std::cell::RefCell::new(FxHashMap::default()),
             parts_memo: std::cell::RefCell::new(FxHashMap::default()),
             visiting: std::cell::RefCell::new(Vec::new()),
@@ -2196,7 +2200,9 @@ impl Analysis<'_> {
         if let Some(d) = self.memo.borrow().get(name) {
             return d.clone();
         }
-        let d = self.defs.call_defines(&self.prelude, name);
+        let d = self
+            .defs
+            .call_defines_in(&self.prelude, name, &mut self.closures.borrow_mut());
         self.memo.borrow_mut().insert(name.to_owned(), d.clone());
         d
     }

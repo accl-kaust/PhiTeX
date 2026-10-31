@@ -612,6 +612,22 @@ impl Definitions {
         Closure::new(self, prelude).call(name)
     }
 
+    /// [`Definitions::call_defines`] sharing with the calls before it the
+    /// sets `memo` holds, computed under the same definitions (one memo
+    /// per analysis of a text).
+    #[must_use]
+    pub fn call_defines_in(
+        &self,
+        prelude: &Definitions,
+        name: &str,
+        memo: &mut crate::pass::hints::ClosureMemo,
+    ) -> std::sync::Arc<DefSet> {
+        let mut c = Closure::with_pure(self, prelude, std::mem::take(memo));
+        let s = c.call(name);
+        *memo = c.into_pure();
+        s
+    }
+
     /// Whether the document defines `name` anywhere.
     pub(crate) fn defines(&self, name: &str) -> bool {
         read(name);

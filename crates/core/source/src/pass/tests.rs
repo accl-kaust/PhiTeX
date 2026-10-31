@@ -1379,3 +1379,49 @@ fn a_macro_ending_with_par_ends_the_paragraph() {
         .count();
     assert_eq!(n, 14);
 }
+
+/// What calling a macro may define is the same set whether it is
+/// computed alone ([`Definitions::call_defines`], a fresh walk) or with
+/// the sets of the calls an analysis made before it
+/// ([`Definitions::call_defines_in`], `ClosureMemo`), in either order:
+/// macros of the document that call each other in a recursion, inside
+/// groups and outside, a global definition reached through a group.
+#[test]
+fn shared_closure_sets_are_the_fresh_ones() {
+    let text = "\\def\\a{\\def\\x{}\\b\\begingroup\\c\\endgroup}\n\
+                \\def\\b{\\a\\gdef\\y{}\\d}\n\
+                \\def\\c{\\def\\z{}\\global\\def\\w{}\\b\\e}\n\
+                \\def\\d{{\\c}\\def\\v{}}\n\
+                \\def\\e{\\d\\count0=1 }\n\
+                \\def\\f{\\e\\a}\n";
+    let mut doc = Definitions::new();
+    doc.harvest(text, FileKind::Package, 0);
+    let prelude = Definitions::new();
+    let norm = |s: &DefSet| {
+        let sorted = |v: &Vec<String>| {
+            let mut v = v.clone();
+            v.sort();
+            v
+        };
+        (
+            s.names.clone(),
+            s.prefixes.clone(),
+            sorted(&s.unbounded),
+            sorted(&s.relied),
+            sorted(&s.calls),
+            sorted(&s.outer_calls),
+        )
+    };
+    let names = ["a", "b", "c", "d", "e", "f"];
+    for order in [
+        names.to_vec(),
+        names.iter().rev().copied().collect::<Vec<_>>(),
+    ] {
+        let mut memo = ClosureMemo::default();
+        for n in order {
+            let fresh = doc.call_defines(&prelude, n);
+            let shared = doc.call_defines_in(&prelude, n, &mut memo);
+            assert_eq!(norm(&shared), norm(&fresh), "\\{n}");
+        }
+    }
+}
