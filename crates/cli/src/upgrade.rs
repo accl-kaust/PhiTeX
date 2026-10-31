@@ -56,7 +56,12 @@ fn later(a: &str, b: &str) -> bool {
         let v = v.trim_start_matches('v');
         let (n, pre) = v.split_once('-').map_or((v, None), |(n, p)| (n, Some(p)));
         let nums = n.split('.').map(|p| p.parse().unwrap_or(0)).collect();
-        let built = pre.map(|p| p.rsplit('.').next().and_then(|t| t.parse().ok()).unwrap_or(0));
+        let built = pre.map(|p| {
+            p.rsplit('.')
+                .next()
+                .and_then(|t| t.parse().ok())
+                .unwrap_or(0)
+        });
         (nums, built)
     };
     let ((a, pa), (b, pb)) = (parts(a), parts(b));
@@ -268,7 +273,14 @@ pub fn upgrade(ui: &Ui) -> i32 {
     };
     let v = r.version.clone();
     if !later(&v, have) {
-        ui.line(&format!("phitex {have} is the latest {}", if r.tag == "nightly" { "nightly" } else { "release" }));
+        ui.line(&format!(
+            "phitex {have} is the latest {}",
+            if r.tag == "nightly" {
+                "nightly"
+            } else {
+                "release"
+            }
+        ));
         return 0;
     }
     let exe = std::env::current_exe().ok();

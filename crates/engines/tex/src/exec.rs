@@ -113,7 +113,8 @@ pub fn set_spawn_worker(f: SpawnWorker) {
 /// (`wasm32-wasip1`, the single-threaded core a browser without shared
 /// memory between threads runs, Firefox's extensions) has none, and
 /// everything runs on the one thread there is.
-pub(crate) const THREADED: bool = !cfg!(all(target_arch = "wasm32", not(target_feature = "atomics")));
+pub(crate) const THREADED: bool =
+    !cfg!(all(target_arch = "wasm32", not(target_feature = "atomics")));
 
 /// A thread of the engine's own beside the evaluation, with the workers'
 /// stack ([`phitex_defuse::WORKER_STACK`]), not std's default; on a

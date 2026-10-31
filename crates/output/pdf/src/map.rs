@@ -368,6 +368,9 @@ pub fn parse_map_ps(bytes: &[u8]) -> BTreeMap<(Vec<u8>, i32, i32), MapEntry> {
     ps
 }
 
+/// A map's lines by their first field: each line's start and end.
+type Lines = std::collections::HashMap<Box<[u8]>, Vec<(usize, usize)>>;
+
 /// A map file read on demand (`fm_read_info` as [`parse_map`] reads it,
 /// a line parsed when its TFM name is asked for): the lines by their
 /// first field, the first valid entry of a name kept (`FM_DUPIGNORE`).
@@ -380,7 +383,7 @@ pub struct MapIndex {
     /// not one a name (a document with expanded or virtual fonts asks
     /// for hundreds of names the map lacks, each a pass over its 46 000
     /// lines: 13% of a paper's warm build).
-    lines: std::sync::OnceLock<std::collections::HashMap<Box<[u8]>, Vec<(usize, usize)>>>,
+    lines: std::sync::OnceLock<Lines>,
 }
 
 impl MapIndex {
@@ -397,11 +400,10 @@ impl MapIndex {
 
     /// [`MapIndex::lines`]: every line not blank and not a comment, by
     /// its first field (up to a blank, `<` or `"`).
-    fn lines(&self) -> &std::collections::HashMap<Box<[u8]>, Vec<(usize, usize)>> {
+    fn lines(&self) -> &Lines {
         self.lines.get_or_init(|| {
             let b = &self.bytes[..];
-            let mut m: std::collections::HashMap<Box<[u8]>, Vec<(usize, usize)>> =
-                std::collections::HashMap::new();
+            let mut m: Lines = std::collections::HashMap::new();
             let mut pos = 0;
             while pos < b.len() {
                 let end = b[pos..]

@@ -140,7 +140,11 @@ fn lines_are_bands_and_compose_to_the_page() {
 /// page's frame; its strips the window's width, kept apart from the
 /// whole page's.
 #[test]
-#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
 fn a_window_is_that_part_of_the_page() {
     let doc = pdf(&THREE);
     let mut r = Renderer::new();
@@ -160,7 +164,11 @@ fn a_window_is_that_part_of_the_page() {
     for b in &g.bands {
         let st = r.strip(b.key).expect("kept");
         assert_eq!(st.w as usize, ww);
-        assert!(b.y >= wy as i32 && b.y + st.h as i32 <= (wy as usize + wh) as i32, "{b:?} in {:?}", g.win);
+        assert!(
+            b.y >= wy as i32 && b.y + st.h as i32 <= (wy as usize + wh) as i32,
+            "{b:?} in {:?}",
+            g.win
+        );
         for row in 0..st.h as usize {
             let y = (b.y - wy as i32) as usize + row;
             for x in 0..ww {
@@ -168,7 +176,10 @@ fn a_window_is_that_part_of_the_page() {
                 let a = u32::from(p[3]);
                 let o = &mut part[(y * ww + x) * 3..][..3];
                 for c in 0..3 {
-                    o[c] = u8::try_from((u32::from(p[c]) * a + u32::from(o[c]) * (255 - a) + 127) / 255).unwrap();
+                    o[c] = u8::try_from(
+                        (u32::from(p[c]) * a + u32::from(o[c]) * (255 - a) + 127) / 255,
+                    )
+                    .unwrap();
                 }
             }
         }

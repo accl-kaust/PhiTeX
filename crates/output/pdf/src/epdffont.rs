@@ -619,7 +619,10 @@ impl PdfState {
         if doc.lookup(&font, b"Subtype").as_name() != Some(b"Type1") {
             return None;
         }
-        let base = doc.lookup(&font, b"BaseFont").as_name().map(<[u8]>::to_vec)?;
+        let base = doc
+            .lookup(&font, b"BaseFont")
+            .as_name()
+            .map(<[u8]>::to_vec)?;
         let Some(Obj::Ref(desc_ref)) = font.get(b"FontDescriptor") else {
             return None;
         };

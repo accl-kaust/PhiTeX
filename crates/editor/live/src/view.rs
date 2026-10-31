@@ -400,7 +400,13 @@ impl Viewer {
     }
 
     /// [`Viewer::frame_with`] of [`Viewer::frame_in`]'s part of the page.
-    pub fn frame_with_in(&self, k: usize, scale: f32, have: &str, win: Option<[f32; 4]>) -> Option<Vec<u8>> {
+    pub fn frame_with_in(
+        &self,
+        k: usize,
+        scale: f32,
+        have: &str,
+        win: Option<[f32; 4]>,
+    ) -> Option<Vec<u8>> {
         let mut f = self.frame_in(k, scale, win)?;
         let have: std::collections::HashSet<&str> =
             have.split(',').filter(|s| !s.is_empty()).collect();

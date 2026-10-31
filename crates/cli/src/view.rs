@@ -297,11 +297,17 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
         // strips' pixels)
         f if f.starts_with("frame/") => {
             let body = f[6..].split_once('/').and_then(|(k, rest)| {
-                let (sc, win) = rest.split_once('/').map_or((rest, None), |(a, b)| (a, Some(b)));
+                let (sc, win) = rest
+                    .split_once('/')
+                    .map_or((rest, None), |(a, b)| (a, Some(b)));
                 let scale = sc.parse::<f32>().ok()? / 1000.0;
                 let win = match win {
                     Some(w) => {
-                        let v: Vec<f32> = w.split(',').map(str::parse).collect::<Result<_, _>>().ok()?;
+                        let v: Vec<f32> = w
+                            .split(',')
+                            .map(str::parse)
+                            .collect::<Result<_, _>>()
+                            .ok()?;
                         Some(<[f32; 4]>::try_from(v).ok()?)
                     }
                     None => None,

@@ -865,7 +865,11 @@ impl Renderer {
         out
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap
+    )]
     fn frame_of(
         &mut self,
         doc: &mut Doc,

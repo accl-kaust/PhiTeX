@@ -630,10 +630,12 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     // (TeX Live asked for, none here: said, with the way to Shelf; never
     // a switch to it on our own, one source a run)
     if files == tex::Files::TexLive && !tex::has_texlive() {
-        return Err("no TeX Live found on this machine (kpathsea finds no texmf.cnf); \
+        return Err(
+            "no TeX Live found on this machine (kpathsea finds no texmf.cnf); \
              PhiTeX can fetch TeX's files from Shelf instead: phitex config files shelf \
              (or --shelf for this run)"
-            .to_owned());
+                .to_owned(),
+        );
     }
     Ok(Target {
         file,

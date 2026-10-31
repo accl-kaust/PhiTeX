@@ -20,7 +20,8 @@ fn main() {
         // grows as it needs. Its main stack a worker's, 16 MiB
         // (phitex_defuse::WORKER_STACK): the evaluation runs on it, not
         // on a worker of its own)
-        let atomics = std::env::var("CARGO_CFG_TARGET_FEATURE").is_ok_and(|f| f.split(',').any(|x| x == "atomics"));
+        let atomics = std::env::var("CARGO_CFG_TARGET_FEATURE")
+            .is_ok_and(|f| f.split(',').any(|x| x == "atomics"));
         let stack = if atomics { 8 << 20 } else { 16 << 20 };
         println!("cargo:rustc-link-arg-bins=-zstack-size={stack}");
         if atomics {

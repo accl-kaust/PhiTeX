@@ -466,7 +466,8 @@ impl Host for ShelfHost {
                     // (Ghostscript's fonts by their file names, where
                     // Shelf serves them)
                     phitex_tex::ToolSearch::GsFont => {
-                        return gs_font_path(name).and_then(|p| ShelfHost { files: f.clone() }.find(&p));
+                        return gs_font_path(name)
+                            .and_then(|p| ShelfHost { files: f.clone() }.find(&p));
                     }
                 };
                 let name = if name.ends_with(ext) {
