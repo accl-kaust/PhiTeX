@@ -2277,6 +2277,15 @@ impl Run<'_, '_> {
                     "wlog",
                     &format!("runsystem({cmd})...disabled (restricted)."),
                 )?;
+                // (the log as pdfTeX's; the editor told plainly: the
+                // document builds on without what the command would make)
+                let name = cmd.split_whitespace().next().unwrap_or_default();
+                self.diag(
+                    true,
+                    &format!(
+                        "\\write18{{{cmd}}}: `{name}' needs shell escape, so it was not run and the document is built without what it makes; to run it, build with the command-line phitex --shell-escape (never in the browser)"
+                    ),
+                );
                 return Ok(());
             }
             crate::shell::Decision::Any(c) | crate::shell::Decision::Allowed(c) => c,
@@ -2294,8 +2303,8 @@ impl Run<'_, '_> {
         let Some(tool) = crate::tools::Tool::of_name(&name) else {
             if !hook {
                 self.diag(
-                    false,
-                    &format!("\\write18{{{cmd}}}: `{name}' has no in-process version here and the client runs no commands; not run"),
+                    true,
+                    &format!("\\write18{{{cmd}}}: `{name}' is a program, and this build runs none (the browser and the editors' built-in engine never run programs), so it was not run and the document is built without what it makes; to run it, build with the command-line phitex --shell-escape"),
                 );
                 return Ok(());
             }
