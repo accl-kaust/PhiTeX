@@ -168,5 +168,6 @@ give-back; the second made a finisher wait for the text it woke, which
 ran on the stale value and again on the fresh. Ordering runs cannot fix
 what is a question of when values become visible; the engine does not
 record an edge's direction, and both guesses were wrong on most edges.
-Kept from those attempts: `Worker::seed` counts before pushing, and the
-core tests' wall-clock bounds skip with `PHITEX_SKIP_TIMING`.
+Kept from those attempts: `Worker::seed` counts before pushing. (The
+core tests' wall-clock bounds, once skipped with `PHITEX_SKIP_TIMING`,
+are counts now: their times are printed, never asserted.)

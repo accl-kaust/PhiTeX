@@ -518,6 +518,14 @@ pub struct Report {
     /// through, up to the next definition): a walk's work, which grows
     /// with the readers between two definitions, never with the line.
     pub walked: u64,
+    /// The nodes the line's searches stepped over (a `next` contribution
+    /// past the nodes not yet run, the claimed siblings followed), this
+    /// evaluation's and the edits' before it: a search that goes on from
+    /// where it stopped steps over each node about once.
+    pub scanned: u64,
+    /// The most commits under way at once: more than one where commits
+    /// do not wait on each other (no lock of all the line's).
+    pub commits_at_once: u64,
     /// Nodes given a relation ahead of their run from their operation's
     /// shape (`commit::learn_shape`).
     pub shaped: u64,

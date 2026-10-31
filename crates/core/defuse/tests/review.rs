@@ -154,23 +154,38 @@ fn a_next_past_many_holes_goes_on_from_each() {
     // The first contribution searched from the start stops at each node
     // not yet run; each that commits with nothing moves the search on
     // from itself, not from the start again.
-    let e = Engine::new();
-    let first = e.register(Arc::new(First));
-    let quiet = e.register(Arc::new(Quiet));
-    let c = e.register(Arc::new(Contrib));
-    let v = e.values();
-    let s = v.field("s");
-    let u = e.new_unit();
-    let r = e.push(u, first, vec![s.0]);
-    for _ in 0..20_000 {
-        e.push(u, quiet, vec![]);
-    }
-    e.push(u, c, vec![s.0, v.int(7)]);
-    let t = Instant::now();
-    e.evaluate(1).unwrap();
-    assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
-    assert_eq!(int(&e, r), 7);
-    assert!(e.check_invariants().is_empty());
+    let search = |holes: usize| {
+        let e = Engine::new();
+        let first = e.register(Arc::new(First));
+        let quiet = e.register(Arc::new(Quiet));
+        let c = e.register(Arc::new(Contrib));
+        let v = e.values();
+        let s = v.field("s");
+        let u = e.new_unit();
+        let r = e.push(u, first, vec![s.0]);
+        for _ in 0..holes {
+            e.push(u, quiet, vec![]);
+        }
+        e.push(u, c, vec![s.0, v.int(7)]);
+        let t = Instant::now();
+        let rep = e.evaluate(1).unwrap();
+        // (the time measured, not asserted: a loaded machine's)
+        eprintln!(
+            "a next past {holes} holes: {:?}, {} nodes scanned",
+            t.elapsed(),
+            rep.scanned
+        );
+        assert_eq!(int(&e, r), 7);
+        assert!(e.check_invariants().is_empty());
+        rep.scanned
+    };
+    let (a, b) = (search(20_000), search(40_000));
+    // (going on from each hole scans each node a few times: twice the
+    // holes, twice the scan; from the start each time, four times)
+    assert!(
+        a >= 20_000 && b <= 2 * a + 2 * 64,
+        "the search goes on from each hole: {a} nodes scanned past 20000, {b} past 40000"
+    );
 }
 
 #[test]

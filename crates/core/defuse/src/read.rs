@@ -392,7 +392,9 @@ pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>) -> N
             let inner = seg.inner.read();
             let lo = lower.map_or(Unbounded, Excluded);
             let mut hit = None;
+            let mut stepped = 0;
             for (p, id) in inner.nodes.range((lo, Unbounded)) {
+                stepped += 1;
                 // (a node to run, again or for the first time: its
                 // contribution is not known, the one it made last may go)
                 let open = eng.node(*id).is_open();
@@ -417,6 +419,7 @@ pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>) -> N
                     break;
                 }
             }
+            eng.scanned.fetch_add(stepped, Ordering::Relaxed);
             hit
         };
         match found {
@@ -653,7 +656,9 @@ fn following_from(
             }
             let lo = lower.map_or(Unbounded, Excluded);
             let mut hit = None;
+            let mut stepped = 0;
             for (_, id) in inner.nodes.range((lo, Unbounded)) {
+                stepped += 1;
                 let n = eng.node(*id);
                 if !ps.takes(eng, n) {
                     continue;
@@ -664,6 +669,7 @@ fn following_from(
                 }
                 *k += 1;
             }
+            eng.scanned.fetch_add(stepped, Ordering::Relaxed);
             hit
         };
         if hit.is_some() {

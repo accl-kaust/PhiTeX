@@ -123,6 +123,14 @@ pub struct Engine {
     pub(crate) t0: Instant,
     /// The last node to commit in the last evaluation.
     pub(crate) last_commit: AtomicU64,
+    /// The nodes the line's searches stepped over (`read::next_contribution`,
+    /// `read::following_on`) since the last evaluation's report took them
+    /// ([`Report::scanned`]).
+    pub(crate) scanned: AtomicU64,
+    /// Commits under way now, and the most at once in this evaluation
+    /// ([`Report::commits_at_once`]).
+    pub(crate) committing: AtomicU64,
+    pub(crate) commit_peak: AtomicU64,
     /// The last evaluation's report, for the chain queries.
     pub(crate) last_report: Mx<Option<Report>>,
     /// A change count per field bucket ([`Engine::field_epoch`]): a run's
@@ -341,6 +349,9 @@ impl Engine {
             epoch: AtomicU64::new(0),
             t0: Instant::now(),
             last_commit: AtomicU64::new(u64::MAX),
+            scanned: AtomicU64::new(0),
+            committing: AtomicU64::new(0),
+            commit_peak: AtomicU64::new(0),
             last_report: Mx::new(None),
         }
     }
@@ -1425,6 +1436,8 @@ impl Engine {
                 .sum::<u64>();
         let mut rep = Report {
             readers_swept: swept,
+            scanned: self.scanned.swap(0, Ordering::Relaxed),
+            commits_at_once: self.commit_peak.swap(0, Ordering::Relaxed),
             collections: workers
                 .iter()
                 .flat_map(|w| std::mem::take(&mut w.log.lock().collections))

@@ -9,12 +9,6 @@ use phitex_defuse::{
     At, Ctx, Engine, Field, FieldAt, Limits, NodeId, NodeState, OpId, Operation, Report, Step, Stop, ValueId, Values,
 };
 
-/// Whether the wall-clock bounds are checked: not with `PHITEX_SKIP_TIMING`
-/// set (a loaded machine; the counts are checked always).
-fn timing() -> bool {
-    std::env::var_os("PHITEX_SKIP_TIMING").is_none()
-}
-
 /// `[f, v]`: defines f = v; outputs v.
 struct Def;
 
@@ -397,29 +391,25 @@ fn commits_do_not_wait_on_each_other() {
     }
     let r = e.evaluate(n).unwrap();
     assert_eq!(r.runs, (n * 2000) as u64);
-    let busy = r.times.wall_ns * n as u64;
-    assert!(
-        r.times.lock_wait_ns * 20 <= busy,
-        "lock wait {} ns over {} worker-ns: more than 5%: {:?}",
-        r.times.lock_wait_ns,
-        busy,
-        r.times
-    );
     assert!(r.commits >= r.runs);
-    let avg_commit_ns = r.times.commit_ns / r.commits;
-    assert!(
-        !timing() || avg_commit_ns <= 20_000,
-        "a commit is a few microseconds, not {avg_commit_ns} ns: {:?}",
-        r.times
+    // (the times measured, not asserted: a loaded machine's; a commit's
+    // wall time counts its thread's time off the CPU, `profile` its CPU)
+    eprintln!(
+        "{} commits on {n} workers, at most {} at once: {} ns a commit, the longest {} ns ({} ns on the CPU), lock waits {} ns of {} worker-ns",
+        r.commits,
+        r.commits_at_once,
+        r.times.commit_ns / r.commits,
+        r.times.commit_max_ns,
+        r.times.commit_max_cpu_ns,
+        r.times.lock_wait_ns,
+        r.times.wall_ns * n as u64
     );
-    // (on the CPU: a commit's wall time counts the time its thread was
-    // off the CPU, preempted or asleep outside the engine, 1 to 3 ms at
-    // times on a loaded machine with 0.03 to 0.09 ms of it on the CPU,
-    // mc 76840/76841; measured with `profile` alone)
+    // (no commit waits for another to end: several under way at once,
+    // counted by the engine; one lock of the line's would make it one)
     assert!(
-        !timing() || !cfg!(feature = "profile") || r.times.commit_max_cpu_ns < 1_000_000,
-        "no commit takes a millisecond: {:?}",
-        r.times
+        r.commits_at_once >= 2,
+        "commits under way side by side: at most {} were",
+        r.commits_at_once
     );
     assert!(e.check_invariants().is_empty());
 }
@@ -540,27 +530,41 @@ fn placements_are_kept_when_unchanged() {
 
 #[test]
 fn an_edit_costs_what_changed() {
-    let (e, o) = engine();
-    let v = e.values();
-    let u = e.new_unit();
-    let mut defs = Vec::new();
-    for i in 0..10000 {
-        let x = f(v, &format!("x{i}"));
-        defs.push(e.push(u, o.def, vec![x, v.int(i)]));
-        e.push(u, o.get, vec![x]);
-    }
-    e.evaluate(4).unwrap();
-    let x = f(v, "x5000");
-    e.replace(defs[5000], o.def, vec![x, v.int(-5000)]);
-    let t = Instant::now();
-    let r = e.evaluate(4).unwrap();
-    assert_eq!(r.nodes_run, 2, "{r:?}");
-    assert!(
-        !timing() || t.elapsed() < Duration::from_millis(5),
-        "an edit of two nodes among 20000 in {:?}",
-        t.elapsed()
+    // (`pairs` definitions of fields of their own, each read once; the one
+    // in the middle changed: what the edit ran, walked and scanned)
+    let edit = |pairs: i64| {
+        let (e, o) = engine();
+        let v = e.values();
+        let u = e.new_unit();
+        let mut defs = Vec::new();
+        for i in 0..pairs {
+            let x = f(v, &format!("x{i}"));
+            defs.push(e.push(u, o.def, vec![x, v.int(i)]));
+            e.push(u, o.get, vec![x]);
+        }
+        e.evaluate(4).unwrap();
+        let x = f(v, "x5000");
+        e.replace(defs[5000], o.def, vec![x, v.int(-5000)]);
+        let t = Instant::now();
+        let r = e.evaluate(4).unwrap();
+        // (the time measured, not asserted: a loaded machine's)
+        eprintln!(
+            "an edit of two nodes among {}: {:?}, {} walked, {} scanned",
+            2 * pairs,
+            t.elapsed(),
+            r.walked,
+            r.scanned
+        );
+        assert_eq!(r.nodes_run, 2, "{r:?}");
+        assert!(e.check_invariants().is_empty());
+        (r.walked, r.scanned)
+    };
+    let (a, b) = (edit(10_000), edit(20_000));
+    assert_eq!(
+        a, b,
+        "an edit's work (records walked, nodes scanned) is what changed, whatever follows it: \
+         {a:?} among 20000 nodes, {b:?} among 40000"
     );
-    assert!(e.check_invariants().is_empty());
 }
 
 #[test]
@@ -723,10 +727,14 @@ fn an_insert_shifts_a_counter_chain_side_by_side() {
     let before = o.routine_runs.0.load(Ordering::Relaxed);
     assert!(before <= 2000, "{before}");
 
+    o.routine_runs.1.reset();
     let t = Instant::now();
     e.insert_after(rs[499], o.routine, vec![c, ms]);
     let r = e.evaluate(8).unwrap();
     let wall = t.elapsed();
+    let peak = o.routine_runs.1.peak();
+    // (the time measured, not asserted: a loaded machine's)
+    eprintln!("500 routines of 1 ms again on 8 workers: {wall:?}, at most {peak} at once");
     for (i, n) in rs.iter().enumerate() {
         let want = if i < 500 { i } else { i + 1 };
         assert_eq!(int(&e, *n), want as i64, "routine {i} after the insert");
@@ -740,9 +748,11 @@ fn an_insert_shifts_a_counter_chain_side_by_side() {
         r.relative_resolved >= 500,
         "the shifted relations are recomputed in place: {r:?}"
     );
+    // (side by side: the routines in flight together, counted by them; a
+    // chain run in turn has one at a time)
     assert!(
-        !timing() || wall < Duration::from_millis(250),
-        "500 x 1 ms side by side on 8 is about 63 ms, serial is 500 ms: {wall:?}"
+        peak >= 4,
+        "the shifted routines ran side by side, at least half the 8 workers at once: at most {peak} did"
     );
     assert!(e.check_invariants().is_empty());
 }
@@ -1269,21 +1279,27 @@ fn a_claim_reads_its_siblings_in_one_pass() {
     // A claimer that reads the siblings it takes one after another, as a
     // run pulling lines does: each read goes on from the one before, not
     // from the claimer, and its commit checks them the same way.
-    let (e, o) = engine();
-    let v = e.values();
-    let u = e.new_unit();
-    let n = 4000;
-    let cl = e.push(u, o.claimer, vec![v.int(n)]);
-    for i in 0..n {
-        e.push(u, o.get, vec![v.int(i)]);
-    }
-    let t = Instant::now();
-    e.evaluate(1).unwrap();
-    let wall = t.elapsed();
-    assert_eq!(e.claimed(cl).len(), n as usize);
+    let claim = |n: i64| {
+        let (e, o) = engine();
+        let v = e.values();
+        let u = e.new_unit();
+        let cl = e.push(u, o.claimer, vec![v.int(n)]);
+        for i in 0..n {
+            e.push(u, o.get, vec![v.int(i)]);
+        }
+        let t = Instant::now();
+        let r = e.evaluate(1).unwrap();
+        // (the time measured, not asserted: a loaded machine's)
+        eprintln!("a claim of {n} read in {:?}, {} nodes scanned", t.elapsed(), r.scanned);
+        assert_eq!(e.claimed(cl).len(), n as usize);
+        r.scanned
+    };
+    let (a, b) = (claim(4000), claim(8000));
+    // (one pass scans each sibling a few times: twice the siblings, twice
+    // the scan; a read from the claimer each would be four times)
     assert!(
-        !timing() || wall < Duration::from_millis(80),
-        "a claim of {n} read in {wall:?}: one pass is about 15 ms, one per sibling about 250"
+        a >= 4000 && b <= 2 * a + 2 * 64,
+        "the claimed siblings read in one pass: {a} nodes scanned for 4000, {b} for 8000"
     );
 }
 

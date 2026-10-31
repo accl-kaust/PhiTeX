@@ -1596,7 +1596,11 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
                 Worker::add(&w.parks, 1);
             }
             *node.parked_on.lock() = product.parked_on;
+            // (commits under way at once, `Report::commits_at_once`)
+            let at_once = eng.committing.fetch_add(1, Ordering::Relaxed) + 1;
+            eng.commit_peak.fetch_max(at_once, Ordering::Relaxed);
             let st = commit(eng, w, node, product);
+            eng.committing.fetch_sub(1, Ordering::Relaxed);
             // (the store past the collection's mark: the workers called to
             // its barrier as their runs end)
             let sh = &pool.shared;
