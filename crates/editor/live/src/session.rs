@@ -1172,6 +1172,19 @@ impl Session {
         // xdvipdfmx make it: an XDV here is one no host's files could make
         // a PDF of)
         let mut errors = errors;
+        // (pages shipped and no output file, and nothing said why: the
+        // pages' writers ran on a pass whose pages had not all finished,
+        // the engine's failure; never a build that finished)
+        if errors.is_empty()
+            && pages > 0
+            && layout.is_none()
+            && pdf_bytes.is_empty()
+            && dvi_bytes.is_empty()
+        {
+            errors.push(format!(
+                "PhiTeX made no output file for the {pages} pages shipped: the pages' writers ran before every page had finished (a bug in PhiTeX)"
+            ));
+        }
         if self.job.engine.output == tex::Output::Xdv && !dvi_bytes.is_empty() {
             errors.push("no xdvipdfmx here: XeTeX's XDV is not made a PDF".to_owned());
         }
