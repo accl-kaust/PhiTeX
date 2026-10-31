@@ -1021,7 +1021,12 @@ pub(crate) struct Run<'c, 'a> {
     /// The fonts of the lines this run made (by their box values), from
     /// their nodes; `None` for a line not sealed
     /// ([`crate::nodes::unit_shape`]).
-    pub(crate) line_fonts: crate::FxHashMap<ValueId, ValueId>,
+    /// With the paths of their virtual fonts' characters (`UNIT` for
+    /// none, [`crate::vfreach`]).
+    pub(crate) line_fonts: crate::FxHashMap<ValueId, (ValueId, ValueId)>,
+    /// The fonts and characters the reach of virtual fonts looked up
+    /// ([`crate::vfreach`]).
+    pub(crate) vf_cache: crate::vfreach::VfCache,
     /// The font sets of those lines, each as one value.
     pub(crate) font_sets: crate::FxHashMap<u64, (Vec<u32>, ValueId)>,
     /// The main loop's `lig_stack`, kept between words (§1034).
@@ -1208,6 +1213,7 @@ impl<'c, 'a> Run<'c, 'a> {
             fin_box: None,
             sealed: crate::pages::Sealing::default(),
             line_fonts: crate::FxHashMap::default(),
+            vf_cache: crate::vfreach::VfCache::default(),
             font_sets: crate::FxHashMap::default(),
             lig_buf: Vec::new(),
             reach_reads: 0,

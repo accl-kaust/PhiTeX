@@ -1,0 +1,22 @@
+% A page's font objects are its real fonts' (pdf_init_font, one per TFM
+% name), a virtual font's characters reaching them through its packets:
+% newtx's ntxsy and ntxsy7 are virtual fonts over txsys, one object
+% (asmeconf: a \pdfobj after the pages numbered one too high). Their
+% characters in a paragraph's lines (sealed: the stand-ins name the real
+% fonts), in a box on the vertical list, and in a line that reads its
+% position at shipping (not sealed).
+\documentclass{article}
+\usepackage{newtxtext,newtxmath}
+\begin{document}
+A line with $a\le b^{\le}$ in a paragraph, and $\sum_{i\in I} x_i$.
+
+\hbox{$c\ge d_{\ge}$ in a box}
+
+\newpage
+Here\pdfsavepos{} $e\ne f^{\ne}$ and $g\subset h_{\subset}$.
+
+\newpage
+\immediate\pdfobj{(after the pages)}\edef\o{\the\pdflastobj}
+\pdfcatalog{/PhiTeXCheck \o\space 0 R}
+Object \o.
+\end{document}

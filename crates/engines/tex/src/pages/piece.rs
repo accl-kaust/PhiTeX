@@ -688,11 +688,31 @@ impl Run<'_, '_> {
         reads: ValueId,
         defs: ValueId,
         locals: Vec<ValueId>,
-    ) {
+    ) -> R<()> {
         let v = self.v;
+        let pid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        // (XeTeX's pages are DVI pages, their writer the end node's)
+        let dvi = self.ops.xe.get().is_some();
+        // (its lines' shape first: the reach of their virtual fonts'
+        // characters reads fonts, [`crate::vfreach`])
+        let known = std::mem::take(&mut self.line_fonts);
+        let mut halt = None;
+        let shape = crate::nodes::unit_shape(v, pid, raw, &known, dvi, &mut |l, f| match self
+            .vf_reach_list(l, f)
+        {
+            Ok(x) => x,
+            Err(e) => {
+                halt.get_or_insert(e);
+                ValueId::UNIT
+            }
+        })
+        .unwrap_or(ValueId::UNIT);
+        self.line_fonts = known;
+        if let Some(e) = halt {
+            return Err(e);
+        }
         let (ints, marks) = crate::vprof::encode_marks(v, raw);
         crate::vprof::count_unit(&ints);
-        let pid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
         // (its vertical profile's unit, the version a page builder folds,
         // in its items' unit too: a finisher placed on another version
         // knows its placement stale, [`Run::finisher_args`])
@@ -700,10 +720,6 @@ impl Run<'_, '_> {
         // (decoded here, beside the other pieces, not on the steps' chain)
         let _ = crate::vprof::decoded(v, vunit);
         self.contribute(crate::vprof::VPROF, v.seq_unit(vunit));
-        // (XeTeX's pages are DVI pages, their writer the end node's)
-        let dvi = self.ops.xe.get().is_some();
-        let shape =
-            crate::nodes::unit_shape(v, pid, raw, &self.line_fonts, dvi).unwrap_or(ValueId::UNIT);
         let it = v.list(vec![
             v.int(pid),
             v.int(last.map_or(-1, i64::from)),
@@ -720,6 +736,7 @@ impl Run<'_, '_> {
         ]);
         self.contribute(PITEMS, v.seq_unit(it));
         self.contribute(crate::pages::LINK_ITEMS, it);
+        Ok(())
     }
 
     /// What the piece leaves the next one of the main list
@@ -1017,7 +1034,7 @@ impl Run<'_, '_> {
         // piece with a footnote does not wait for the routine before it
         // that empties the class's box)
         self.pin_reaching_page_params(&mut raw)?;
-        self.contribute_units(&raw, last, reads, defs, Vec::new());
+        self.contribute_units(&raw, last, reads, defs, Vec::new())?;
         Ok(())
     }
 
@@ -1058,7 +1075,7 @@ impl Run<'_, '_> {
         let (reads, defs) = self.check_data(Some(k));
         self.pin_reaching_page_params(&mut raw)?;
         let (cont, locals) = self.cont_encode()?;
-        self.contribute_units(&raw, Some(k), reads, defs, locals);
+        self.contribute_units(&raw, Some(k), reads, defs, locals)?;
         let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         // (the siblings the rest of the piece will take where the piece's

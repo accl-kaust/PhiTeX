@@ -61,7 +61,11 @@ pub(crate) const T_PD: i64 = 94;
 /// A sealed line's list as a unit's shape has it ([`unit_shape`]):
 /// `[tag, piece, k, fonts, head]`, the piece and the index of the line's
 /// item in its items, its characters' fonts (sorted ids), its head's
-/// hash ([`head_hash`]). Decoded, its box stays shallow ([`decode_box`]);
+/// hash ([`head_hash`]); then its skeleton where it has one (else
+/// `UNIT` where more follows), then the paths of its virtual fonts'
+/// characters to the real fonts they are written in where it has some
+/// ([`crate::vfreach`]: the page's font objects, `pdf_init_font`, are
+/// the real fonts'). Decoded, its box stays shallow ([`decode_box`]);
 /// a finisher puts the line's list in its place where a value leaves
 /// its run (`crate::pages::seal`).
 pub(crate) const T_SEALED: i64 = 84;
@@ -1295,7 +1299,7 @@ pub(crate) fn int_field(v: &Values, x: ValueId, k: usize) -> i32 {
 /// Whether list value `l` is a sealed line's stand-in ([`T_SEALED`]).
 pub(crate) fn is_sealed(v: &Values, l: ValueId) -> bool {
     v.with_list(l, |ys| {
-        matches!(ys.len(), 5 | 6) && v.as_int(ys[0]) == Some(T_SEALED)
+        matches!(ys.len(), 5..=7) && v.as_int(ys[0]) == Some(T_SEALED)
     })
     .unwrap_or(false)
 }
@@ -1359,17 +1363,21 @@ pub(crate) struct Sealed {
     /// Its skeleton ([`line_shape`]), or `UNIT`: the boxes on the way
     /// to its whatsits and the whatsits, in walk order.
     pub skel: ValueId,
+    /// The paths of its virtual fonts' characters to the real fonts
+    /// they are written in ([`crate::vfreach::paths_value`]), or `UNIT`.
+    pub reached: ValueId,
 }
 
 /// The stand-in `l` read, if it is one.
 pub(crate) fn sealed_of(v: &Values, l: ValueId) -> Option<Sealed> {
     v.with_list(l, |ys| {
-        (matches!(ys.len(), 5 | 6) && v.as_int(ys[0]) == Some(T_SEALED)).then(|| Sealed {
+        (matches!(ys.len(), 5..=7) && v.as_int(ys[0]) == Some(T_SEALED)).then(|| Sealed {
             piece: v.as_int(ys[1]).unwrap_or(0),
             k: u32::try_from(v.as_int(ys[2]).unwrap_or(0)).unwrap_or(0),
             fonts: ys[3],
             head: v.as_int(ys[4]).unwrap_or(0),
             skel: ys.get(5).copied().unwrap_or(ValueId::UNIT),
+            reached: ys.get(6).copied().unwrap_or(ValueId::UNIT),
         })
     })
     .flatten()
@@ -1731,8 +1739,10 @@ fn node_walk(
 /// item appends whose list a page's writer need not look into
 /// ([`line_shape`]) with its glue setting zero and a stand-in for its
 /// list ([`T_SEALED`]: the piece, the item's index, the fonts, the
-/// head's hash, and the skeleton of its whatsits where it has some);
-/// the rest as they are. A finisher reading the shape depends on the
+/// head's hash, the skeleton of its whatsits where it has some, the
+/// paths of its virtual fonts' characters where it has some: `reach`
+/// of its list and fonts, for a line not in `known`); the rest as they
+/// are. A finisher reading the shape depends on the
 /// lines' dimensions, fonts and whatsits, not on their characters:
 /// the page's writer reads those (`crate::pages::seal`). `None` where
 /// no item is sealed (the shape is the items).
@@ -1740,8 +1750,9 @@ pub(crate) fn unit_shape(
     v: &Values,
     piece: i64,
     items: &[ValueId],
-    known: &crate::FxHashMap<ValueId, ValueId>,
+    known: &crate::FxHashMap<ValueId, (ValueId, ValueId)>,
     dvi: bool,
+    reach: &mut dyn FnMut(ValueId, ValueId) -> ValueId,
 ) -> Option<ValueId> {
     let mut changed = false;
     let out: Vec<ValueId> = items
@@ -1760,9 +1771,13 @@ pub(crate) fn unit_shape(
                         return None;
                     }
                     // (a line this run made: its fonts known from its nodes)
-                    let (fonts, skel) = match known.get(&ys[1]) {
-                        Some(&f) => (f, None),
-                        None => line_shape(v, bx[9], dvi)?,
+                    // (and the real fonts its virtual fonts' characters
+                    // reach, [`crate::vfreach`])
+                    let (fonts, skel, reached) = if let Some(&(f, r)) = known.get(&ys[1]) {
+                        (f, None, r)
+                    } else {
+                        let (f, sk) = line_shape(v, bx[9], dvi)?;
+                        (f, sk, reach(bx[9], f))
                     };
                     let zero = v.int(0);
                     let mut b = bx;
@@ -1777,8 +1792,16 @@ pub(crate) fn unit_shape(
                         fonts,
                         v.int(head),
                         skel.unwrap_or(ValueId::UNIT),
+                        reached,
                     ];
-                    b[9] = v.list_from(&st[..if skel.is_some() { 6 } else { 5 }]);
+                    let n = if reached != ValueId::UNIT {
+                        7
+                    } else if skel.is_some() {
+                        6
+                    } else {
+                        5
+                    };
+                    b[9] = v.list_from(&st[..n]);
                     let y = [ys[0], v.list_from(&b), ys[2], ys[3], ys[4]];
                     Some(v.list_from(&y))
                 })
@@ -1851,7 +1874,10 @@ mod tests {
         let pos = v.list(vec![v.int(T_WHATSIT), v.list(vec![v.str("pdf:savepos")])]);
         let placed = line(&v, vec![ch(3, 65), pos]);
         let none = crate::FxHashMap::default();
-        let shape = unit_shape(&v, 77, &[placed, plain], &none, false).expect("a line sealed");
+        let shape = unit_shape(&v, 77, &[placed, plain], &none, false, &mut |_, _| {
+            ValueId::UNIT
+        })
+        .expect("a line sealed");
         let items = list_of(&v, shape);
         assert_eq!(items[0], placed);
         let b = list_of(&v, list_of(&v, items[1])[1]);
@@ -1870,7 +1896,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some(1), Some(3)]
         );
-        assert_eq!(unit_shape(&v, 77, &[placed], &none, false), None);
+        assert_eq!(
+            unit_shape(&v, 77, &[placed], &none, false, &mut |_, _| ValueId::UNIT),
+            None
+        );
         let x = v.list(b.clone());
         let mut side = Side::default();
         let Some(Node::Box(d)) = decode(&v, x, &mut side) else {
@@ -1904,7 +1933,8 @@ mod tests {
         let a = line(&v, vec![nat(4), what("special"), what("write"), nat(5)]);
         let b = line(&v, vec![what("special"), nat(4)]);
         let none = crate::FxHashMap::default();
-        let shape = unit_shape(&v, 9, &[a, b], &none, true).expect("sealed");
+        let shape =
+            unit_shape(&v, 9, &[a, b], &none, true, &mut |_, _| ValueId::UNIT).expect("sealed");
         let items = list_of(&v, shape);
         let st =
             |i: usize| sealed_of(&v, list_of(&v, list_of(&v, items[i])[1])[9]).expect("a stand-in");
@@ -1960,7 +1990,8 @@ mod tests {
         )[1];
         let ln = line(&v, vec![ch(3, 65), what("write"), inner, ch(3, 67)]);
         let none = crate::FxHashMap::default();
-        let shape = unit_shape(&v, 5, &[ln], &none, false).expect("sealed");
+        let shape =
+            unit_shape(&v, 5, &[ln], &none, false, &mut |_, _| ValueId::UNIT).expect("sealed");
         let b = list_of(&v, list_of(&v, list_of(&v, shape)[0])[1]);
         let s = sealed_of(&v, b[9]).expect("a stand-in");
         assert_ne!(s.skel, ValueId::UNIT);

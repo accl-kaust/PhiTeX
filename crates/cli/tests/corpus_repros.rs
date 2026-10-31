@@ -285,6 +285,32 @@ repro!(
     "\\pdfthread in a paragraph: the command's kind was read after its specification was scanned, and \\pdfthread was taken for \\pdfstartthread ('\\pdfstartthread ended up in hlist')"
 );
 
+/// The objects of a page's fonts are its real fonts' (pdfTeX's
+/// `pdf_init_font`, one per TFM name), a virtual font's characters
+/// reaching them through its packets: newtx's `ntxsy` and `ntxsy7`,
+/// virtual fonts over `txsys`, make one object, and a `\pdfobj` after
+/// the pages is numbered after it; their characters in a paragraph's
+/// lines (sealed: their stand-ins name the real fonts the characters
+/// reach, `crate::vfreach`), in a box on the vertical list and in a line
+/// that reads its position at shipping (not sealed). The read-time
+/// count named the virtual fonts (asmeconf, a number one too high). At
+/// -j1 and -j4 (oracle: pdflatex, mc 77635, the same in the CI image, mc 77658).
+#[test]
+fn vf_objects_by_real_font() {
+    let name = "vf_objects_by_real_font";
+    let want = std::fs::read(fixtures().join(format!("{name}.pdf"))).expect("the oracle");
+    for j in [1, 4] {
+        let (got, term) = build_j(name, j);
+        assert!(
+            got == want,
+            "{name} -j{j}: the PDF differs from pdflatex's ({} vs {} bytes): {}",
+            got.len(),
+            want.len(),
+            term.lines().last().unwrap_or("")
+        );
+    }
+}
+
 /// The research corpus's amsbook at -j4 (2 pages more than -j1 in about
 /// half the builds): the piece that ends a title page whose `\topskip`
 /// `\@maketitle` set in a group puts the page parameters on the main

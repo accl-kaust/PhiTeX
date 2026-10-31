@@ -66,6 +66,7 @@ mod state;
 pub mod timeline;
 mod tools;
 mod val;
+mod vfreach;
 mod vprof;
 mod xdvpdf;
 mod xetex;

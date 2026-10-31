@@ -40,7 +40,7 @@ use phitex_pdf::{
 };
 use phitex_tfm::ScaledFont;
 use phitex_typeset::fonts::FontId;
-use phitex_typeset::node::BoxNode;
+use phitex_typeset::node::{BoxNode, Node};
 
 use crate::fonts::bytes_of;
 use crate::nodes::Side;
@@ -2333,7 +2333,7 @@ pub(crate) fn ship(
         r.param("pdfthreadmargin")?,
     ];
     let marks = mark_events(v, &bx, &resolved, side);
-    page_allocs(r, ids, &fonts, &side.whats, marks)?;
+    page_allocs(r, ids, &bx, &side.lazy, &fonts, &side.whats, marks)?;
     ship_apart(r, page, &p, bx, side, &resolved, fonts, margins)
 }
 
@@ -2757,12 +2757,86 @@ fn shipout_fonts(v: &Values, fonts: &Fonts) -> Vec<ValueId> {
     out
 }
 
+/// The real fonts the characters of virtual fonts in `list` are
+/// written in (`do_vf_packet`, as [`crate::vfreach`] reaches them),
+/// into `out`: the list as shipping walks it (a discretionary's
+/// replacement, leaders' box).
+fn vf_written(list: &[Node], fonts: &Fonts, out: &mut BTreeSet<FontId>) {
+    for n in list {
+        match n {
+            Node::Char { font, ch } if fonts.vfs.contains_key(font) => {
+                vf_char_written(*font, *ch, fonts, 0, out);
+            }
+            Node::Lig(l) if fonts.vfs.contains_key(&l.font) => {
+                vf_char_written(l.font, l.ch, fonts, 0, out);
+            }
+            Node::Box(b) => vf_written(&b.list, fonts, out),
+            Node::Disc(d) => vf_written(&d.replace, fonts, out),
+            Node::Glue(g) => {
+                if let Some(l) = &g.leader {
+                    vf_written(std::slice::from_ref(&**l), fonts, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether font `g` has character `c` (`do_char`'s check).
+fn has_char(fonts: &Fonts, g: FontId, c: u16) -> bool {
+    fonts.by_id.contains_key(&g)
+        && u8::try_from(c)
+            .is_ok_and(|c| phitex_pdf::FontSource::metrics(fonts, g).char(c).is_some())
+}
+
+/// [`vf_written`] of character `c` of virtual font `f`, `depth` packets
+/// in.
+fn vf_char_written(f: FontId, c: u16, fonts: &Fonts, depth: usize, out: &mut BTreeSet<FontId>) {
+    let Some(vf) = fonts.vfs.get(&f) else {
+        return;
+    };
+    if depth >= crate::vfreach::VF_MAX_RECURSION {
+        return;
+    }
+    let Some(p) = u8::try_from(c).ok().and_then(|c| vf.packets.get(&c)) else {
+        return;
+    };
+    let nums: Vec<u32> = vf.fonts.iter().map(|x| x.0).collect();
+    for (k, ch) in crate::vfreach::packet_chars(p, &nums) {
+        let Some(&(_, g)) = vf.fonts.iter().find(|x| x.0 == k) else {
+            continue;
+        };
+        if !has_char(fonts, g, ch) {
+            continue;
+        }
+        if fonts.vfs.contains_key(&g) {
+            vf_char_written(g, ch, fonts, depth + 1, out);
+        } else {
+            out.insert(g);
+        }
+    }
+}
+
+/// The font path `p` names in `fonts` ([`crate::vfreach`]: a font, then
+/// the local font numbers of the packets on the way), a real one.
+fn resolve_path(fonts: &Fonts, p: &[u32]) -> Option<FontId> {
+    let (&f, rest) = p.split_first()?;
+    let mut g = FontId::from(f);
+    for &k in rest {
+        g = fonts.vfs.get(&g)?.fonts.iter().find(|x| x.0 == k)?.1;
+    }
+    (fonts.by_id.contains_key(&g) && !fonts.vfs.contains_key(&g)).then_some(g)
+}
+
 /// The page's allocations ([`ALLOCS`]), from the write side: its box's
 /// fonts (`fonts`, the writer's view), its whatsits and the parameters
 /// in force.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn page_allocs(
     r: &mut Run<'_, '_>,
     ids: &[u32],
+    bx: &BoxNode,
+    lazy: &[ValueId],
     fonts: &Fonts,
     side_whats: &[ValueId],
     marks: ValueId,
@@ -2771,15 +2845,40 @@ pub(crate) fn page_allocs(
     // (its object unless a reference or a link's action made it first:
     // the fold knows the page's number, [`RT_PAGES`])
     let fixed = 3;
-    let mut names: Vec<ValueId> = Vec::new();
+    // (the real fonts its characters are written in, an object each
+    // where none of its name was made before: its fonts that are not
+    // virtual, and the real fonts its virtual fonts' characters reach
+    // through their packets, [`crate::vfreach`]: in its lines that are
+    // not sealed by walking them, in its sealed lines by their
+    // stand-ins' paths)
+    let mut real: BTreeSet<FontId> = BTreeSet::new();
+    let mut any_vf = false;
     for &f in ids {
         let id = FontId::from(f);
-        if fonts.by_id.contains_key(&id) {
-            names.push(v.str(&String::from_utf8_lossy(phitex_pdf::FontSource::name(
-                fonts, id,
-            ))));
+        if fonts.vfs.contains_key(&id) {
+            any_vf = true;
+        } else if fonts.by_id.contains_key(&id) {
+            real.insert(id);
         }
     }
+    if any_vf {
+        vf_written(&bx.list, fonts, &mut real);
+        for s in lazy.iter().filter_map(|&l| crate::nodes::sealed_of(v, l)) {
+            for p in crate::vfreach::paths_of_value(v, s.reached) {
+                if let Some(g) = resolve_path(fonts, &p) {
+                    real.insert(g);
+                }
+            }
+        }
+    }
+    let names: Vec<ValueId> = real
+        .into_iter()
+        .map(|id| {
+            v.str(&String::from_utf8_lossy(phitex_pdf::FontSource::name(
+                fonts, id,
+            )))
+        })
+        .collect();
     let mut dests: Vec<ValueId> = Vec::new();
     let mut annots = 0i64;
     // (the images the page shows: each written after the page by the

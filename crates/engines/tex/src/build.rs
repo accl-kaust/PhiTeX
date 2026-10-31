@@ -1540,7 +1540,10 @@ impl Run<'_, '_> {
                         }
                     }
                 };
-                self.line_fonts.insert(b, f);
+                // (the real fonts its virtual fonts' characters reach,
+                // [`crate::vfreach`])
+                let reach = self.vf_reach_nodes(&line.packed.node.list, ids.as_slice())?;
+                self.line_fonts.insert(b, (f, reach));
             }
             out.push(v.list(vec![tv, b, bs, ls, lsl]));
             for a in &line.packed.adjustments {
