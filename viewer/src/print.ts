@@ -7,14 +7,14 @@
 // Every token has a fallback, so a variable a host renames leaves a look,
 // not a hole.
 
-/** Overleaf, dark (its default): its PDF toolbar's, its menus', its green. */
+/** Overleaf, dark (its default): its PDF toolbar's, its menus'; the accent PhiTeX's blue (the logo's), not Overleaf's green. */
 const OVERLEAF = `
   --ph-bar: var(--toolbar-alt-bg-color, #2f3a4c); --ph-fg: var(--content-primary-dark, #f4f5f6); --ph-fg2: var(--neutral-40, #afb5c0);
   --ph-border: var(--neutral-70, #495365); --ph-hover: var(--toolbar-btn-hover-bg-color, #495365);
   --ph-stage: var(--pane, var(--pdf-bg, #2f3a4c)); --ph-menu: var(--bg-dark-primary, #1b222c);
-  --ph-accent: var(--bg-accent-01, #098842); --ph-accent-hover: var(--bg-accent-02, #1e6b41); --ph-accent-fg: #fff;
+  --ph-accent: #2c5aa0; --ph-accent-hover: #3567b3; --ph-accent-fg: #fff;
   --ph-danger: var(--content-danger-dark, #e36d66); --ph-warning: var(--content-warning-dark, #de8014); --ph-info: var(--content-info-dark, #97b6e5);
-  --ph-link: var(--link-ui-dark, #97b6e5); --ph-progress: var(--bg-accent-01, #098842);
+  --ph-link: var(--link-ui-dark, #97b6e5); --ph-progress: #f58f2d;
   --ph-radius: var(--border-radius-base, 4px); --ph-pill: var(--border-radius-full, 9999px);
   --ph-font: var(--font-sans, "Noto Sans", system-ui, sans-serif); --ph-size: 13px; --ph-bar-h: 32px;
 `;
@@ -23,7 +23,7 @@ const OVERLEAF_LIGHT = `
   --ph-border: var(--border-divider, #e7e9ee); --ph-hover: var(--toolbar-btn-hover-bg-color, #f4f5f6);
   --ph-stage: var(--pane, var(--pdf-bg, #f4f5f6)); --ph-menu: var(--bg-light-primary, #fff);
   --ph-danger: var(--content-danger, #b83a33); --ph-warning: var(--content-warning, #8f5514); --ph-info: var(--content-info, #366cbf);
-  --ph-link: var(--link-ui, #366cbf);
+  --ph-link: var(--link-ui, #366cbf); --ph-accent: #1d3e72; --ph-accent-hover: #16325d;
 `;
 /** VS Code: the webview's theme variables (they change with the theme). */
 const VSCODE = `

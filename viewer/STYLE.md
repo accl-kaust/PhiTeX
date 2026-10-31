@@ -16,8 +16,8 @@ token has a fallback (a variable a host renames leaves a look, not a hole).
 | `--ph-stage` | the pane's background, `--pdf-bg` | `--vscode-editor-background` | `#eceef2` / `#0f1319` |
 | `--ph-fg`, `--ph-fg2` | `--content-primary(-dark)`, `--content-secondary` | `--vscode-foreground`, `--vscode-descriptionForeground` | ink, slate |
 | `--ph-border`, `--ph-hover`, `--ph-menu` | dividers, its toolbar's hover, its menus | `--vscode-panel-border`, `--vscode-toolbar-hoverBackground`, `--vscode-menu-background` | |
-| `--ph-accent` | its green (`--bg-accent-01`) | `--vscode-button-background` | the logo's navy `#1d3e72` |
-| `--ph-progress` | its green | `--vscode-progressBar-background` | the logo's orange `#f58f2d` |
+| `--ph-accent` | PhiTeX's blue: `#2c5aa0` dark, the logo's navy `#1d3e72` light | `--vscode-button-background` | the logo's navy `#1d3e72` |
+| `--ph-progress` | the logo's orange `#f58f2d` | `--vscode-progressBar-background` | the logo's orange `#f58f2d` |
 | `--ph-danger`, `--ph-warning`, `--ph-info`, `--ph-link` | its content colours | VS Code's | |
 | `--ph-font`, `--ph-radius`, `--ph-pill` | Noto Sans, its radii | `--vscode-font-family`, 2 px | Noto Sans, 6 px, round |
 
