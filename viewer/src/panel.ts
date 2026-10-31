@@ -488,7 +488,7 @@ export class Panel {
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
     this.$("#x-contents").onclick = this.$("#b-side").onclick = () => (this.menu(null), this.side());
     this.$("#x-find").onclick = this.$("#b-find").onclick = () => (this.menu(null), this.find(true));
-    this.$("#x-tips").onclick = () => (this.menu(null), this.tips(true));
+    this.$("#x-tips").onclick = () => (this.menu(null), this.tips("fresh"));
     this.$("#x-keys").onclick = () => {
       this.menu(null);
       this.$("#keyhelp").hidden = false;
@@ -1315,7 +1315,7 @@ export class Panel {
       this.opened = true;
       this.stepNow = "";
       this.renderStatus();
-      setTimeout(() => this.tips(false), 600);
+      setTimeout(() => this.tips("unseen"), 600);
     }
   }
 
@@ -1937,14 +1937,22 @@ export class Panel {
   private tipAt = -1;
   private tipList: typeof TIPS = [];
 
-  /** The tips not seen yet, now, where the host keeps them from showing by themselves (PanelOptions.tips false: after its own). */
-  tour(): void {
-    this.tips(false, true);
+  /**
+   * The tips now: those not seen yet, where the host keeps them from showing
+   * by themselves (PanelOptions.tips false: after its own); `all`, the tour
+   * itself, every tip from the first (a host's own "Take the tour").
+   */
+  tour(all = false): void {
+    this.tips(all ? "all" : "unseen", true);
   }
 
-  /** The tips not seen yet (`all`: every one, What's new), from the first; `asked`: the host's tour(). */
-  private tips(all: boolean, asked = false): void {
-    if (!this.ownBar || this.prefs.collapsed || (!all && !asked && !this.autoTips)) return;
+  /**
+   * The tips, from the first: those not seen yet (a first visit), the new
+   * features' (What's new: `fresh`), or every one (the tour); `asked`: the
+   * host's tour().
+   */
+  private tips(which: "unseen" | "fresh" | "all", asked = false): void {
+    if (!this.ownBar || this.prefs.collapsed || (which === "unseen" && !asked && !this.autoTips)) return;
     let seen: string[] = [];
     try {
       seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
@@ -1953,8 +1961,19 @@ export class Panel {
     }
     // (Overleaf's welcome callout says "as you type" already: not twice)
     const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
-    this.tipList = all ? offered : offered.filter((t) => !seen.includes(t.id));
+    this.tipList = which === "all" ? offered : which === "fresh" ? offered.filter((t) => t.fresh) : offered.filter((t) => !seen.includes(t.id));
     this.tip(0);
+  }
+
+  /** Tips seen: not offered by themselves again (What's new and the tour still show them). */
+  private seen(ids: string[]): void {
+    try {
+      const seen = new Set<string>(JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]"));
+      for (const id of ids) seen.add(id);
+      localStorage.setItem("phitex.tips.seen", JSON.stringify([...seen]));
+    } catch {
+      /* (shown again next time) */
+    }
   }
 
   private tip(i: number): void {
@@ -1963,13 +1982,7 @@ export class Panel {
     this.tipAt = i;
     const t = this.tipList[i];
     if (!t) return void (el.hidden = true);
-    try {
-      const seen = new Set<string>(JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]"));
-      seen.add(t.id);
-      localStorage.setItem("phitex.tips.seen", JSON.stringify([...seen]));
-    } catch {
-      /* (shown again next time) */
-    }
+    this.seen([t.id]);
     let target = this.$(t.at);
     // (a control hidden at this width: the menu that holds it)
     if (!target || !target.offsetParent) target = this.$("#b-more");
@@ -1985,6 +1998,8 @@ export class Panel {
     el.onclick = (e) => {
       e.stopPropagation();
       const a = (e.target as HTMLElement).closest<HTMLElement>("[data-t]")?.dataset.t;
+      // (Skip ends the tour: every card of it seen, so none comes back unasked)
+      if (a === "skip") this.seen(this.tipList.map((t) => t.id));
       if (a) this.tip(a === "next" ? i + 1 : -1);
     };
   }
