@@ -128,6 +128,10 @@ pub struct Frame {
     pub links: Vec<Link>,
     pub drawn: usize,
     pub kept: usize,
+    /// The part of the page drawn ([`Renderer::frame_in`]'s window), in
+    /// pixels: left, top, width, height; the whole page by default. Each
+    /// band's strip is the window's width, from its left.
+    pub win: [u32; 4],
     pub open_us: u64,
     pub probe_us: u64,
     pub draw_us: u64,
@@ -785,10 +789,25 @@ impl Renderer {
         clippy::too_many_lines
     )]
     pub fn frame(&mut self, pdf: &Arc<[u8]>, k: usize, scale: f32) -> Option<Frame> {
+        self.frame_in(pdf, k, scale, None)
+    }
+
+    /// [`Renderer::frame`], only the part of the page in `win` (fractions
+    /// of its width and height: left, top, right, bottom) drawn: the bands
+    /// it crosses, each cut to it. A zoomed-in viewer's (a whole page at
+    /// 800% is 86 million pixels, which no browser's memory holds; the
+    /// part on screen is a few).
+    pub fn frame_in(
+        &mut self,
+        pdf: &Arc<[u8]>,
+        k: usize,
+        scale: f32,
+        win: Option<[f32; 4]>,
+    ) -> Option<Frame> {
         let t0 = Instant::now();
         let mut doc = self.open(pdf)?;
         let open_us = micros(t0);
-        let out = self.frame_of(&mut doc, k, scale, open_us);
+        let out = self.frame_of(&mut doc, k, scale, win, open_us);
         self.doc = Some(doc);
         out
     }
@@ -846,8 +865,15 @@ impl Renderer {
         out
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn frame_of(&mut self, doc: &mut Doc, k: usize, scale: f32, open_us: u64) -> Option<Frame> {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+    fn frame_of(
+        &mut self,
+        doc: &mut Doc,
+        k: usize,
+        scale: f32,
+        win: Option<[f32; 4]>,
+        open_us: u64,
+    ) -> Option<Frame> {
         let pdf = &doc.pdf;
         let pages = pdf.pages();
         let page = pages.get(k)?;
@@ -857,6 +883,16 @@ impl Renderer {
         let ph = (f64::from(h) * s).ceil().max(1.0) as u32;
         let base = Affine::scale(s) * page.initial_transform(true).to_kurbo();
         let settings = InterpreterSettings::default();
+        // (the window in pixels, at least one pixel of the page)
+        let [wx, wy, ww, wh] = win.map_or([0, 0, pw, ph], |[x0, y0, x1, y1]| {
+            let at = |f: f32, n: u32, up: bool| {
+                let p = f64::from(f.clamp(0.0, 1.0)) * f64::from(n);
+                (if up { p.ceil() } else { p.floor() }) as u32
+            };
+            let (x0, y0) = (at(x0, pw, false).min(pw - 1), at(y0, ph, false).min(ph - 1));
+            let (x1, y1) = (at(x1, pw, true).max(x0 + 1), at(y1, ph, true).max(y0 + 1));
+            [x0, y0, x1.min(pw) - x0, y1.min(ph) - y0]
+        });
 
         // (the probe: every drawing's box and identity, the text)
         let t1 = Instant::now();
@@ -895,16 +931,28 @@ impl Renderer {
             (it.id, q(it.ax), q(it.ay - top)).hash(&mut keys[b]);
         }
         let t2 = Instant::now();
+        // (cut to the window's rows, a band's key also its cut: its rows
+        // from its own top and the window's columns)
+        let (wtop, wbottom) = (wy as i32, (wy + wh) as i32);
         let bands: Vec<Band> = spans
             .iter()
             .enumerate()
-            .map(|(b, &(y0, y1))| {
-                let top = y0 - 1.0;
-                Band {
-                    key: keys[b].finish(),
-                    y: top.round() as i32,
-                    h: ((y1 + 1.0) - top).ceil().max(1.0) as u32,
+            .filter_map(|(b, &(y0, y1))| {
+                let top = (y0 - 1.0).round() as i32;
+                let bottom = top + ((y1 + 1.0) - (y0 - 1.0)).ceil().max(1.0) as i32;
+                let (from, to) = (top.max(wtop), bottom.min(wbottom));
+                if from >= to {
+                    return None;
                 }
+                let mut key = keys[b].clone();
+                if win.is_some() {
+                    (wx, ww, from - top, to - from).hash(&mut key);
+                }
+                Some(Band {
+                    key: key.finish(),
+                    y: from,
+                    h: (to - from) as u32,
+                })
             })
             .collect();
         let fresh: Vec<bool> = bands
@@ -913,7 +961,7 @@ impl Renderer {
             .collect();
         let drawn = fresh.iter().filter(|f| **f).count();
         let kept = bands.len() - drawn;
-        self.draw(page, base, &settings, &bands, &fresh, pw, ph)?;
+        self.draw(page, base, &settings, &bands, &fresh, [wx, ww], ph)?;
         Some(Frame {
             pw,
             ph,
@@ -924,6 +972,7 @@ impl Renderer {
             links,
             drawn,
             kept,
+            win: [wx, wy, ww, wh],
             open_us,
             probe_us,
             draw_us: micros(t2),
@@ -942,7 +991,7 @@ impl Renderer {
         settings: &InterpreterSettings,
         bands: &[Band],
         fresh: &[bool],
-        pw: u32,
+        [wx, pw]: [u32; 2],
         ph: u32,
     ) -> Option<()> {
         let cache = RenderCache::new();
@@ -972,7 +1021,7 @@ impl Renderer {
                 settings,
                 &RenderSettings::default(),
                 &mut ctx,
-                Affine::translate((0.0, -f64::from(top))) * base,
+                Affine::translate((-f64::from(wx), -f64::from(top))) * base,
             );
             ctx.flush();
             let mut pix = Pixmap::new(sw, sh);

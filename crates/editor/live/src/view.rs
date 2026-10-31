@@ -326,13 +326,23 @@ impl Viewer {
     /// links (`viewer/src/types.ts`' `Link`), and what drawing it took
     /// (`drawn` and `kept` bands, microseconds).
     pub fn frame(&self, k: usize, scale: f32) -> Option<Value> {
+        self.frame_in(k, scale, None)
+    }
+
+    /// [`Viewer::frame`], only the part of the page in `win` drawn
+    /// (fractions of its width and height: left, top, right, bottom;
+    /// `phitex_render::Renderer::frame_in`): its `win` the part drawn in
+    /// pixels (left, top, width, height), each band's strip that wide,
+    /// from its left. A zoomed-in viewer's, past the pixels a whole page
+    /// can take.
+    pub fn frame_in(&self, k: usize, scale: f32, win: Option<[f32; 4]>) -> Option<Value> {
         use phitex_render::Target;
         if !(0.05..=16.0).contains(&scale) {
             return None;
         }
         let pdf = self.pdf()?;
         let t = std::time::Instant::now();
-        let f = lock(&self.strips).frame(&pdf, k, scale)?;
+        let f = lock(&self.strips).frame_in(&pdf, k, scale, win)?;
         let us = t.elapsed().as_micros();
         let bands: Vec<Value> = f
             .bands
@@ -353,7 +363,7 @@ impl Viewer {
         Some(json!({
             "pw": f.pw, "ph": f.ph, "w": f.w, "h": f.h,
             "bands": bands, "text": lines_json(&f.text), "links": links,
-            "drawn": f.drawn, "kept": f.kept,
+            "drawn": f.drawn, "kept": f.kept, "win": f.win,
             "us": {"open": f.open_us, "probe": f.probe_us, "draw": f.draw_us, "all": us},
         }))
     }
@@ -386,7 +396,12 @@ impl Viewer {
     /// keys whose strips follow), then those strips as [`Viewer::strips`]
     /// gives them.
     pub fn frame_with(&self, k: usize, scale: f32, have: &str) -> Option<Vec<u8>> {
-        let mut f = self.frame(k, scale)?;
+        self.frame_with_in(k, scale, have, None)
+    }
+
+    /// [`Viewer::frame_with`] of [`Viewer::frame_in`]'s part of the page.
+    pub fn frame_with_in(&self, k: usize, scale: f32, have: &str, win: Option<[f32; 4]>) -> Option<Vec<u8>> {
+        let mut f = self.frame_in(k, scale, win)?;
         let have: std::collections::HashSet<&str> =
             have.split(',').filter(|s| !s.is_empty()).collect();
         let mut sent: Vec<String> = Vec::new();
@@ -745,6 +760,19 @@ fn lines_json(lines: &[phitex_render::TextLine]) -> Value {
 }
 
 /// A number as an index or count (none if negative or not whole).
+/// A request's `win`: the part of a page to draw, fractions of its width
+/// and height (left, top, right, bottom); none, or not four numbers, the
+/// whole page.
+#[allow(clippy::cast_possible_truncation, reason = "fractions of a page")]
+fn win_of(req: &Value) -> Option<[f32; 4]> {
+    let w = req.get("win")?.as_array()?;
+    let f = |i: usize| w.get(i)?.as_f64().map(|x| x as f32);
+    if w.len() != 4 {
+        return None;
+    }
+    Some([f(0)?, f(1)?, f(2)?, f(3)?])
+}
+
 fn index(v: &Value) -> Option<usize> {
     v.as_u64().and_then(|n| usize::try_from(n).ok())
 }
@@ -795,7 +823,7 @@ impl Viewer {
             "frame" => {
                 #[allow(clippy::cast_possible_truncation, reason = "a scale: pixels a point")]
                 let scale = req.get("scale").and_then(Value::as_f64).unwrap_or(1.0) as f32;
-                match s.frame(page.unwrap_or(0), scale) {
+                match s.frame_in(page.unwrap_or(0), scale, win_of(req)) {
                     Some(f) => ok(f),
                     None => fail("no such page"),
                 }

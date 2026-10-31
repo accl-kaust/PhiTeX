@@ -135,6 +135,58 @@ fn lines_are_bands_and_compose_to_the_page() {
     );
 }
 
+/// A window's frame (a zoomed-in viewer's): only the bands it crosses,
+/// each cut to it, composed the same pixels as that part of the whole
+/// page's frame; its strips the window's width, kept apart from the
+/// whole page's.
+#[test]
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+fn a_window_is_that_part_of_the_page() {
+    let doc = pdf(&THREE);
+    let mut r = Renderer::new();
+    let f = r.frame(&doc, 0, 2.0).unwrap();
+    let full = compose(&r, &f);
+    // (from the middle of the first line's band to below the rule, the
+    // left half less a bit)
+    let win = [0.1, 0.12, 0.45, 0.4];
+    let g = r.frame_in(&doc, 0, 2.0, Some(win)).unwrap();
+    let [wx, wy, ww, wh] = g.win;
+    assert_eq!((g.pw, g.ph), (f.pw, f.ph));
+    assert!(ww < f.pw && wh < f.ph && wx > 0 && wy > 0, "{:?}", g.win);
+    assert!(!g.bands.is_empty() && g.bands.len() <= f.bands.len());
+    assert_eq!(g.drawn, g.bands.len(), "a window's strips are its own");
+    let (ww, wh) = (ww as usize, wh as usize);
+    let mut part = vec![255u8; ww * wh * 3];
+    for b in &g.bands {
+        let st = r.strip(b.key).expect("kept");
+        assert_eq!(st.w as usize, ww);
+        assert!(b.y >= wy as i32 && b.y + st.h as i32 <= (wy as usize + wh) as i32, "{b:?} in {:?}", g.win);
+        for row in 0..st.h as usize {
+            let y = (b.y - wy as i32) as usize + row;
+            for x in 0..ww {
+                let p = &st.rgba[(row * ww + x) * 4..][..4];
+                let a = u32::from(p[3]);
+                let o = &mut part[(y * ww + x) * 3..][..3];
+                for c in 0..3 {
+                    o[c] = u8::try_from((u32::from(p[c]) * a + u32::from(o[c]) * (255 - a) + 127) / 255).unwrap();
+                }
+            }
+        }
+    }
+    let pw = f.pw as usize;
+    let mut differ = 0;
+    for y in 0..wh {
+        let from = ((wy as usize + y) * pw + wx as usize) * 3;
+        if part[y * ww * 3..][..ww * 3] != full[from..][..ww * 3] {
+            differ += 1;
+        }
+    }
+    assert_eq!(differ, 0, "rows of the window unlike the page's");
+    // (the same window again: drawn not again)
+    let again = r.frame_in(&doc, 0, 2.0, Some(win)).unwrap();
+    assert_eq!((again.drawn, again.kept), (0, g.bands.len()));
+}
+
 /// A line added above: the lines below are the same strips at new
 /// places, drawn not again; a changed line is drawn again alone.
 #[test]

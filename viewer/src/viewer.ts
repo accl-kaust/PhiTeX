@@ -62,9 +62,23 @@ export class Viewer {
           // makes the browser lay the page out again at the next read, once
           // a page a frame)
           const boxes = this.measure();
+          const v = scroller.getBoundingClientRect();
           // (scrolled by whole CSS pixels, a fractional device ratio moves a
           // page off the device's grid: snapped again, those on screen)
           for (const [k, r] of boxes) if (this.slots[k]) this.snap(this.slots[k], r);
+          // (a page zoomed in drawn sharp only around the part that was in
+          // view, `data-win`: asked again once the view leaves that part)
+          for (const [k, r] of boxes) {
+            const s = this.slots[k];
+            const win = s?.img?.canvas.dataset.win?.split(",").map(Number);
+            const now = win && part(r, v);
+            if (!now || (now[0] >= win[0] - 1e-3 && now[1] >= win[1] - 1e-3 && now[2] <= win[2] + 1e-3 && now[3] <= win[3] + 1e-3)) continue;
+            const key = `${k}:${s.hash}`;
+            if (this.asked.has(key)) continue;
+            this.asked.add(key);
+            s.drawn = null;
+            this.host.need(k);
+          }
         });
     }, { passive: true });
     // (text selected on the pages: its boxes, for the editor to select the source)
@@ -511,6 +525,16 @@ export class Viewer {
     this.scroller.scrollTop += r.top + at.fy * r.height - y;
   }
 
+  /**
+   * The part of page `k` on screen: fractions of its width and height
+   * (left, top, right, bottom); null if none of it is. What a zoomed-in
+   * page is drawn sharp around (`Strips.page`'s `view`).
+   */
+  view(k: number): [number, number, number, number] | null {
+    const s = this.slots[k];
+    return s ? part(s.el.getBoundingClientRect(), this.scroller.getBoundingClientRect()) : null;
+  }
+
   /** Scroll page `k` into view, as Overleaf's page buttons do. */
   goTo(k: number): void {
     const s = this.slots[Math.max(0, Math.min(k, this.slots.length - 1))];
@@ -642,4 +666,12 @@ export class Viewer {
       this.host.need(k);
     }
   }
+}
+
+/** The part of box `r` inside `v`: fractions of `r` (left, top, right, bottom); null if none. */
+function part(r: DOMRect, v: DOMRect): [number, number, number, number] | null {
+  if (!r.width || !r.height || r.right <= v.left || r.left >= v.right || r.bottom <= v.top || r.top >= v.bottom) return null;
+  const fx = (x: number) => Math.min(1, Math.max(0, (x - r.left) / r.width));
+  const fy = (y: number) => Math.min(1, Math.max(0, (y - r.top) / r.height));
+  return [fx(v.left), fy(v.top), fx(v.right), fy(v.bottom)];
 }

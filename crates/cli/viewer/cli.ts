@@ -149,7 +149,7 @@ class Pages implements CoreTransport {
   async request(op: object): Promise<CoreRes> {
     const o = op as { op: string; page?: number };
     if (o.op === "png") {
-      const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint()).catch(() => null);
+      const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint(), panel.pageView(o.page ?? 0)).catch(() => null);
       if (!p) return { ok: false, json: { error: "no such page" } };
       this.painted();
       return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links };
@@ -192,10 +192,11 @@ class Pages implements CoreTransport {
  * only the bands whose keys are new, and the rest are the bitmaps kept,
  * at their places.
  */
-/** The watch's strips over HTTP (`frame/K/S`, `strips/KEYS`). */
+/** The watch's strips over HTTP (`frame/K/S`, `frame/K/S/L,T,R,B` for a part of the page, `strips/KEYS`). */
 const stripSource: StripSource = {
-  async frame(k, scale) {
-    const r = await fetch(new URL(`frame/${k}/${Math.round(scale * 1000)}`, location.href), { cache: "no-store" });
+  async frame(k, scale, win) {
+    const part = win ? `/${win.map((x) => x.toFixed(5)).join(",")}` : "";
+    const r = await fetch(new URL(`frame/${k}/${Math.round(scale * 1000)}${part}`, location.href), { cache: "no-store" });
     return r.ok ? ((await r.json()) as Frame) : null;
   },
   async strips(keys) {

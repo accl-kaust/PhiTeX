@@ -292,11 +292,21 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
             };
         }
         // (a page as strips: `frame/K/S`, page K from 0 at S thousandths of
-        // a pixel a point; `strips/KEY,KEY,...`, the strips' pixels)
+        // a pixel a point, `frame/K/S/L,T,R,B` only that part of it drawn
+        // (fractions of its width and height); `strips/KEY,KEY,...`, the
+        // strips' pixels)
         f if f.starts_with("frame/") => {
-            let body = f[6..].split_once('/').and_then(|(k, sc)| {
+            let body = f[6..].split_once('/').and_then(|(k, rest)| {
+                let (sc, win) = rest.split_once('/').map_or((rest, None), |(a, b)| (a, Some(b)));
                 let scale = sc.parse::<f32>().ok()? / 1000.0;
-                s.viewer.frame(k.parse().ok()?, scale)
+                let win = match win {
+                    Some(w) => {
+                        let v: Vec<f32> = w.split(',').map(str::parse).collect::<Result<_, _>>().ok()?;
+                        Some(<[f32; 4]>::try_from(v).ok()?)
+                    }
+                    None => None,
+                };
+                s.viewer.frame_in(k.parse().ok()?, scale, win)
             });
             let _ = match body {
                 Some(b) => ws::respond(

@@ -1480,6 +1480,11 @@ export class Panel {
    * height in the stage's (12 px above and below) too.
    */
     /** Device pixels per PDF point at the current zoom: the size pages are drawn at. */
+  /** The part of page `k` on screen (the viewer's `view`): what a zoomed-in page is drawn sharp around. */
+  pageView(k: number): [number, number, number, number] | null {
+    return this.viewer?.view(k) ?? null;
+  }
+
   pixelsPerPoint(): number {
     return (96 / 72) * this.scale() * (window.devicePixelRatio || 1);
   }
