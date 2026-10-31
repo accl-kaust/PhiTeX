@@ -592,7 +592,7 @@ impl Device {
                     if segs > 0 {
                         self.put(&format!("{} n\n", if l.rule <= 0 { "W" } else { "W*" }));
                     }
-                    e = l.next.clone();
+                    e.clone_from(&l.next);
                 }
             }
         }

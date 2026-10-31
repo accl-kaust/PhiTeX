@@ -386,6 +386,7 @@ impl Operation for ToolRun {
     fn name(&self) -> &'static str {
         "tool"
     }
+    #[allow(clippy::too_many_lines)]
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();

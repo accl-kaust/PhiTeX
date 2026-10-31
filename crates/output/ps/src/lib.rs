@@ -82,7 +82,6 @@
     clippy::only_used_in_recursion,
     clippy::redundant_guards,
     clippy::needless_lifetimes,
-    clippy::chunks_exact_with_const_size,
     clippy::verbose_bit_mask,
     clippy::needless_late_init,
     clippy::manual_unwrap_or,

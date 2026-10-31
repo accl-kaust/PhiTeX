@@ -22,13 +22,14 @@ impl phitex_ps::Resources for Dir {
 }
 
 fn fonts() -> Option<PathBuf> {
-    let d = std::env::var_os("PHITEX_GS_FONTS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/share/ghostscript/Resource/Font"));
+    let d = std::env::var_os("PHITEX_GS_FONTS").map_or_else(
+        || PathBuf::from("/usr/share/ghostscript/Resource/Font"),
+        PathBuf::from,
+    );
     d.join("NimbusRoman-Regular").is_file().then_some(d)
 }
 
-/// The file with `/ID [...]` and the DocumentID's uuid blanked.
+/// The file with `/ID [...]` and the `DocumentID`'s uuid blanked.
 fn norm(d: &[u8]) -> Vec<u8> {
     let mut d = d.to_vec();
     if let Some(i) = find(&d, b"/ID [")
