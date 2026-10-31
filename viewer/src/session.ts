@@ -424,7 +424,11 @@ export class PreviewSession {
         // (the glyphs' sources: an edit maps them, as an editor maps positions;
         // a file set whole or a new session asks them again)
         if (r.op === "open" || r.op === "set_file") this.glyphCache.clear();
-        if (r.op === "edit") this.mapGlyphs(r.file, r.start, r.end, new TextEncoder().encode(r.text).length);
+        if (r.op === "edit") {
+          const len = new TextEncoder().encode(r.text).length;
+          this.mapCulprits(r.file, r.start, r.end, len);
+          this.mapGlyphs(r.file, r.start, r.end, len);
+        }
         const res = await core.request(r).finally(() => {
           this.inflight--;
           if (builds && --this.building === 0) this.sink.busy?.(false);
@@ -964,6 +968,35 @@ export class PreviewSession {
     }
   }
 
+  /**
+   * boxesOf's answers, by page (its glyph list: a page changed has a new
+   * one) and range (`file\0start\0end`): the range's boxes there and the
+   * page's glyph nearest it. Mapped through edits as the glyphs are, so a
+   * build's problems are looked up only on the pages it changed.
+   */
+  private culprits = new Map<Glyph[], Map<string, { boxes: [number, number, number, number][] | null; g: Glyph | null; d: number }>>();
+  /** The culprits' answers moved with an edit (before the glyphs are): one the edit touches, between its range and its nearest glyph, dropped. */
+  private mapCulprits(file: string, start: number, end: number, len: number): void {
+    const live = new Set(this.glyphCache.values());
+    for (const [all, memo] of this.culprits) {
+      if (!live.has(all)) {
+        this.culprits.delete(all);
+        continue;
+      }
+      const moved: [string, NonNullable<ReturnType<typeof memo.get>>][] = [];
+      for (const [id, m] of memo) {
+        const [f, a, b] = id.split("\0");
+        if (f !== file) continue;
+        const lo = Math.min(+a, m.g?.start ?? +a), hi = Math.max(+b, m.g?.end ?? +b);
+        if (start > hi) continue;
+        memo.delete(id);
+        // (before it all: moved by what the edit added)
+        if (end < lo) moved.push([`${f}\0${+a + len - (end - start)}\0${+b + len - (end - start)}`, m]);
+      }
+      for (const [id, m] of moved) memo.set(id, m);
+    }
+  }
+
   /** Page `k`'s glyphs if they are here, at once (no request, no waiting on a build). */
   private cached(k: number): Glyph[] | undefined {
     return this.glyphCache.get(`${k}:${this.hashes[k] ?? ""}`);
@@ -1269,13 +1302,25 @@ export class PreviewSession {
     for (const k of order) {
       if (k >= this.hashes.length) continue;
       const all = this.cached(k) ?? (await this.glyphsOf(k));
-      const hit = from(all, file, start, Math.max(end, start + 1));
-      if (hit.length) out.push({ k, boxes: boxes(hit, all) });
-      for (const g of all) {
-        if (g.file !== file || g.synth) continue;
-        const d = g.start >= end ? g.start - end : start - g.end;
-        if (d >= 0 && (!near || d < near.d)) near = { k, g, d, all };
+      // (a page looked up for this range before, unchanged since: as it was)
+      const memo = this.culprits.get(all) ?? this.culprits.set(all, new Map()).get(all)!;
+      const id = `${file}\0${start}\0${end}`;
+      let m = memo.get(id);
+      if (!m) {
+        // (its glyphs and the nearest, in one pass over the page's)
+        const hi = Math.max(end, start + 1), hit: Glyph[] = [];
+        m = { boxes: null, g: null, d: Infinity };
+        for (const g of all) {
+          if (g.file !== file || g.synth) continue;
+          if (g.start < hi && g.end > start) hit.push(g);
+          const d = g.start >= end ? g.start - end : start - g.end;
+          if (d >= 0 && d < m.d) (m.g = g), (m.d = d);
+        }
+        if (hit.length) m.boxes = boxes(hit, all);
+        memo.set(id, m);
       }
+      if (m.boxes) out.push({ k, boxes: m.boxes });
+      if (m.g && (!near || m.d < near.d)) near = { k, g: m.g, d: m.d, all };
     }
     if (!out.length && near && near.d <= NEAR_CULPRIT) {
       // (its word: the glyphs next to it with no gap between their bytes)

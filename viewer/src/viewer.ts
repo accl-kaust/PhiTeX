@@ -442,12 +442,18 @@ export class Viewer {
     this.paintFrame = 0;
     const t0 = performance.now();
     const order = [...this.toPaint].sort((a, b) => Number(this.visible.has(Number(b.el.dataset.k))) - Number(this.visible.has(Number(a.el.dataset.k))));
+    const painted: Slot[] = [];
     for (const s of order) {
       // (8 ms a frame at most, at least one page)
       if (performance.now() - t0 > 8) break;
       this.toPaint.delete(s);
       this.paint(s);
+      painted.push(s);
     }
+    // (every page written first, then their boxes read, then snapped: a
+    // read after each page's writes laid the view out again for each)
+    const boxes = painted.map((s) => s.el.getBoundingClientRect());
+    painted.forEach((s, i) => this.snap(s, boxes[i]));
     if (this.toPaint.size) this.paintFrame = requestAnimationFrame(() => this.paintSome());
   }
 
@@ -557,6 +563,7 @@ export class Viewer {
     for (const m of marks) if (!m.isConnected) s.el.append(m);
   }
 
+  /** The page's bitmap put in its slot (snapped by paintSome, once every page's writes are done). */
   private draw(s: Slot): void {
     if (!s.img) return;
     this.sizeSlot(s);
@@ -565,7 +572,6 @@ export class Viewer {
     c.style.width = "100%";
     c.style.height = "100%";
     if (s.el.firstChild !== c) s.el.replaceChildren(c);
-    this.snap(s);
   }
 
   /**

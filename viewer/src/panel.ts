@@ -596,6 +596,11 @@ export class Panel {
     this.darkPdf(this.darkPref(), false);
     // (keep it on screen when the window shrinks)
     window.addEventListener("resize", () => this.place());
+    // (the stage's size as last laid out, for scale(): read when it changes,
+    // not on every call, where after a page's writes it laid the view out
+    // again; observed before the window's, whose redraw reads it)
+    const stage = this.$("#stage");
+    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight })).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : undefined;
@@ -998,16 +1003,24 @@ export class Panel {
   private culpritsOn = true;
   private culpritDiags: Diagnostic[] = [];
   private culpritsDrawn: { severity: "error" | "warning"; message: string }[] = [];
+  /** What the underlines drawn (or being looked up) are of: the problems and the pages' hashes. A build's every status repeats them. */
+  private culpritsOf = "";
+  /** The pages' hashes as last laid out. */
+  private pageHashes: string[] = [];
   private async underline(diags: Diagnostic[]): Promise<void> {
     if (!this.ev.onBoxes) return;
     this.culpritDiags = diags;
-    const seq = ++this.culpritsSeq;
-    if (!this.culpritsOn) return void (this.viewer.culprits([]), (this.$("#ctip").hidden = true));
+    if (!this.culpritsOn) return void (++this.culpritsSeq, (this.culpritsOf = ""), this.viewer.culprits([]), (this.$("#ctip").hidden = true));
     const want = diags
       .filter((d): d is Diagnostic & { problem: { severity: string; file: string; range: [number, number] } } => !!d.problem?.file && !!d.problem.range && d.problem.severity !== "note")
       .map((d) => ({ file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? ("warning" as const) : ("error" as const), message: d.message }))
       .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1))
       .slice(0, 20);
+    // (the same problems on the same pages: the same boxes, drawn already)
+    const of = JSON.stringify([want, this.pageHashes]);
+    if (of === this.culpritsOf) return;
+    this.culpritsOf = of;
+    const seq = ++this.culpritsSeq;
     const found = await Promise.all(want.map((w, i) => this.ev.onBoxes!(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i })), () => [])));
     // (a newer status came while these were looked up: its own call draws them)
     if (seq !== this.culpritsSeq) return;
@@ -1483,13 +1496,15 @@ export class Panel {
     return (96 / 72) * this.scale() * (window.devicePixelRatio || 1);
   }
 
+  /** The stage's client size, kept by its ResizeObserver (null until it is first laid out). */
+  private stageSize: { w: number; h: number } | null = null;
   private scale(): number {
     const z = this.zoomNow ?? this.prefs.zoom;
     if (z !== "fit" && z !== "page") return Number(z);
-    const st = this.$("#stage");
-    const width = Math.max(st.clientWidth - 40, 200) / ((this.last?.w ?? 595) * (96 / 72));
+    const st = (this.stageSize ??= { w: this.$("#stage").clientWidth, h: this.$("#stage").clientHeight });
+    const width = Math.max(st.w - 40, 200) / ((this.last?.w ?? 595) * (96 / 72));
     if (z === "fit") return width;
-    return Math.min(width, Math.max(st.clientHeight - 24, 100) / ((this.last?.h ?? 842) * (96 / 72)));
+    return Math.min(width, Math.max(st.h - 24, 100) / ((this.last?.h ?? 842) * (96 / 72)));
   }
 
     goPage(k: number): void {
@@ -2308,6 +2323,7 @@ export class Panel {
 
   /** The pages there are, by hash (the viewer draws the changed ones it shows). */
   layout(hashes: string[]): void {
+    this.pageHashes = hashes;
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
     this.viewer.layout(hashes);

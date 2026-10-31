@@ -68,14 +68,24 @@ export function from(gs: Glyph[], file: string, lo: number, hi: number): Glyph[]
   return gs.filter((g) => g.file === file && !g.synth && g.start < hi && g.end > lo);
 }
 
-/** Glyphs as boxes to highlight, a box a run on one baseline: [x, y top, w, h] in points. */
-export function boxes(gs: Glyph[], all: Glyph[]): [number, number, number, number][] {
+/** A page's glyphs' widths, by its glyph list: their places never change (an edit maps only their sources), so worked out once a page. */
+const widthsOf = new WeakMap<Glyph[], Map<Glyph, number>>();
+function widths(all: Glyph[]): Map<Glyph, number> {
+  let next = widthsOf.get(all);
+  if (next) return next;
   // (a glyph's width: to the next glyph on its baseline, else 5 pt)
-  const next = new Map<Glyph, number>();
+  next = new Map<Glyph, number>();
   for (let i = 0; i < all.length; i++) {
     const n = all[i + 1];
     next.set(all[i], n && Math.abs(n.y - all[i].y) < 0.5 && n.x > all[i].x && n.x - all[i].x < 15 ? n.x - all[i].x : 5);
   }
+  widthsOf.set(all, next);
+  return next;
+}
+
+/** Glyphs as boxes to highlight, a box a run on one baseline: [x, y top, w, h] in points. */
+export function boxes(gs: Glyph[], all: Glyph[]): [number, number, number, number][] {
+  const next = widths(all);
   const lines = new Map<number, [number, number]>();
   for (const g of gs) {
     const k = Math.round(g.y * 2) / 2;
