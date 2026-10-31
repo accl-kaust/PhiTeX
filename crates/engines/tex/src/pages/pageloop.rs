@@ -194,6 +194,12 @@ pub(crate) struct LoopState {
     /// it ([`Fold::Wait`]): a run that fires that page again stops there
     /// again, its rest kept, whatever its give-back.
     pub rest_at: Option<PageKey>,
+    /// The start this node defined for its rest ([`REST_OF`], a
+    /// [`RestStart`]'s value) with [`LoopState::rest_at`]: a run that
+    /// parks at a hole short of that page defines it again as it was,
+    /// as it places the pages past the hole again ([`LoopState::beyond`]),
+    /// so the rest keeps its pages until the fold reaches that page.
+    pub rest_def: Option<ValueId>,
     /// (this run) The checkpoint the fold stops at to wait for its
     /// give-back ([`Run::checkpoint`]); not kept.
     pub wait: Option<usize>,
@@ -209,7 +215,7 @@ pub(crate) struct LoopState {
 }
 
 /// The tag of a parked [`LoopState`] of this version.
-const STATE_TAG: &str = "\u{1}pages-loop-9";
+const STATE_TAG: &str = "\u{1}pages-loop-10";
 
 /// The placement of checkpoint `i`'s finisher: after the rest, placement
 /// 0 ([`Run::page_loop`]).
@@ -358,6 +364,7 @@ impl LoopState {
             self.after.map_or(ValueId::UNIT, |(c, f)| {
                 v.list(vec![raw_value(v, Some(c)), raw_value(v, Some(f))])
             }),
+            self.rest_def.unwrap_or(ValueId::UNIT),
         ])
     }
 
@@ -365,7 +372,7 @@ impl LoopState {
     /// the run starts from nothing).
     pub(crate) fn decode(v: &Values, x: ValueId) -> Option<LoopState> {
         let xs = list_of(v, x);
-        if xs.len() != 8 || !v.with_str(xs[0], |s| s == STATE_TAG).unwrap_or(false) {
+        if xs.len() != 9 || !v.with_str(xs[0], |s| s == STATE_TAG).unwrap_or(false) {
             return None;
         }
         let cps = |x: ValueId, at: usize| -> Option<Vec<Checkpoint>> {
@@ -417,6 +424,7 @@ impl LoopState {
                 [c, f] => Some((raw_node(v, c)?, raw_node(v, f)?)),
                 _ => None,
             },
+            rest_def: some(xs[8]),
         })
     }
 
@@ -665,6 +673,7 @@ impl Run<'_, '_> {
         let mut ls = LoopState {
             base: rest.as_ref().map_or(0, |r| r.base),
             rest_at: old.rest_at,
+            rest_def: old.rest_def,
             after: if rest.is_some() { old.after } else { None },
             ..LoopState::default()
         };
@@ -764,8 +773,22 @@ impl Run<'_, '_> {
             && let Some(i) = ls.wait
         {
             self.place_rest(&mut ls, i);
+        } else if hole
+            && let (Some(k), Some(r)) = (old.rest_at, old.rest_def)
+            && ls.beyond.iter().any(|c| c.key == k)
+        {
+            // (parked at a hole short of the page its rest starts after,
+            // that page placed again past the hole as it was: the rest's
+            // start defined again as it was, so the rest keeps its pages
+            // and finishers until the fold reaches that page; undefined,
+            // the rest took them all back and made them anew once the
+            // hole filled, a run of every loop rest from its start)
+            ls.rest_at = Some(k);
+            ls.rest_def = Some(r);
+            self.cx.define_with(rest_field(v, me), r, Locality::Global);
         } else {
             ls.rest_at = None;
+            ls.rest_def = None;
         }
         ls.ended = lc.ended;
         if crate::exec::obs_flag!("PHITEX_KEY_TRACE") {
@@ -967,8 +990,9 @@ impl Run<'_, '_> {
             base: ls.base + i + 1,
             floors,
         };
-        self.cx
-            .define_with(rest_field(v, me), r.encode(v), Locality::Global);
+        let x = r.encode(v);
+        ls.rest_def = Some(x);
+        self.cx.define_with(rest_field(v, me), x, Locality::Global);
     }
 
     /// [`Run::page_loop`]'s step 2: where the fold starts and how far it
