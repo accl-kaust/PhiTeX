@@ -7060,9 +7060,9 @@ impl Build {
                 let k = xs.first().copied();
                 let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
                 if k == Some(fail) || k == Some(driver) {
-                    // (`pdftex_fail`'s line, or xdvipdfmx's, as the log
-                    // has it)
-                    vec![text]
+                    // (`pdftex_fail`'s line, or xdvipdfmx's fatal one, its
+                    // warnings before it left, as the log has it)
+                    vec![text.rsplit('\n').next().unwrap_or_default().to_owned()]
                 } else if k == Some(error) || k == Some(errmsg) {
                     vec![format!("! {text}.")]
                 } else {
@@ -7535,15 +7535,22 @@ impl Build {
             .unwrap_or_default()
         {
             let xs = list_of(v, x);
-            // (xdvipdfmx's fatal error: XeTeX's words after it its help)
+            // (xdvipdfmx's fatal error, its last line: the warnings before
+            // it and XeTeX's words after it its help)
+            let all = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
+            let (before, text) = all.rsplit_once('\n').unwrap_or(("", &all));
             let help = match xs.first() {
                 Some(&k) if k == fail => FAIL_END.to_owned(),
                 Some(&k) if k == driver => {
-                    crate::log::driver_end(&format!("{}.pdf", self.opts.jobname))
+                    let end = crate::log::driver_end(&format!("{}.pdf", self.opts.jobname));
+                    if before.is_empty() {
+                        end
+                    } else {
+                        format!("{before}\n{end}")
+                    }
                 }
                 _ => continue,
             };
-            let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
             let end = doc.trim_end_matches(['\n', '\r']).len();
             let at = to_raw(end);
             out.push(Diagnostic {
@@ -7551,7 +7558,7 @@ impl Build {
                 range: (at, at),
                 line: doc_lines.partition_point(|&k| k <= end).max(1),
                 severity: Severity::Error,
-                message: text.strip_prefix('!').unwrap_or(&text).to_owned(),
+                message: text.strip_prefix('!').unwrap_or(text).to_owned(),
                 context: String::new(),
                 help: Some(help),
             });

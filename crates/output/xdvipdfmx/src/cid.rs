@@ -618,6 +618,7 @@ impl Dpx {
                     "String can't be converted to REGISTRY-ORDERING-SUPPLEMENT: {}",
                     String::from_utf8_lossy(charcoll)
                 ),
+                warnings: alloc::vec::Vec::new(),
             };
             // Full REGISTRY-ORDERING-SUPPLEMENT
             let Some(p0) = charcoll.iter().position(|&c| c == b'-') else {

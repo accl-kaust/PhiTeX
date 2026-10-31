@@ -88,6 +88,7 @@ macro_rules! fatal {
     ($($t:tt)*) => {
         return ::core::result::Result::Err($crate::ctx::Fatal {
             message: ::alloc::format!($($t)*),
+            warnings: ::alloc::vec::Vec::new(),
         })
     };
 }
@@ -107,15 +108,24 @@ macro_rules! some {
 /// What `ERROR` prints its message after (its `exit` follows).
 pub const FATAL: &str = "xdvipdfmx:fatal: ";
 
+/// What `WARN` prints its message after.
+pub const WARNING: &str = "xdvipdfmx:warning: ";
+
 /// A fatal error (`ERROR`): the run stopped. `message` is what C prints
-/// after [`FATAL`]; displayed, it is the whole line.
+/// after [`FATAL`], `warnings` what the `WARN`s just before it said (after
+/// [`WARNING`]), the error's own account; displayed, the warnings' lines
+/// then the error's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fatal {
     pub message: alloc::string::String,
+    pub warnings: alloc::vec::Vec<alloc::string::String>,
 }
 
 impl core::fmt::Display for Fatal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for w in &self.warnings {
+            writeln!(f, "{WARNING}{w}")?;
+        }
         write!(f, "{FATAL}{}", self.message)
     }
 }

@@ -1026,10 +1026,68 @@ impl Dpx {
         };
         let font_id = self.pdf_dev_locate_font(&name, ptsize)?;
         if font_id < 0 {
-            crate::fatal!(
-                "Cannot proceed without .vf or \"physical\" font for PDF output... ({})",
-                alloc::string::String::from_utf8_lossy(tfm_name)
-            );
+            // (`dvi_locate_font`'s `WARN`s, then its `ERROR`)
+            let s = |b: &[u8]| alloc::string::String::from_utf8_lossy(b).into_owned();
+            let tfm = s(tfm_name);
+            let mut w = alloc::vec![alloc::format!(
+                "Could not locate a virtual/physical font for TFM \"{tfm}\"."
+            )];
+            match &mrec {
+                Some(m) if m.map_name.is_some() => {
+                    let map = s(m.map_name.as_deref().unwrap_or_default());
+                    w.push(alloc::format!(
+                        ">> This font is mapped to an intermediate 16-bit font \"{map}\" with SFD charmap=<{},{}>,",
+                        s(m.charmap.sfd_name.as_deref().unwrap_or(b"(null)")),
+                        s(m.charmap.subfont_id.as_deref().unwrap_or(b"(null)"))
+                    ));
+                    match self.pdf_lookup_fontmap_record(m.map_name.as_deref().unwrap_or_default())
+                    {
+                        None => w.push(alloc::format!(
+                            ">> but I couldn't find font mapping for \"{map}\"."
+                        )),
+                        Some(m1) => {
+                            let font = s(m1.font_name.as_deref().unwrap_or_default());
+                            w.push(alloc::format!(
+                                ">> and then mapped to a physical font \"{font}\" by fontmap."
+                            ));
+                            w.push(alloc::format!(
+                                ">> Please check if kpathsea library can find this font: {font}"
+                            ));
+                        }
+                    }
+                }
+                Some(m) => {
+                    let font = s(m.font_name.as_deref().unwrap_or_default());
+                    if font
+                        .rsplit_once('.')
+                        .is_some_and(|(_, x)| x.eq_ignore_ascii_case("pfa"))
+                    {
+                        w.push(alloc::format!(
+                            "This font is mapped to a physical font \"{font}\"."
+                        ));
+                        return Err(crate::ctx::Fatal {
+                            message: "Sorry, pfa format not supported; please convert the font to pfb, e.g., with t1binary.".into(),
+                            warnings: w,
+                        });
+                    }
+                    w.push(alloc::format!(
+                        ">> This font is mapped to a physical font \"{font}\"."
+                    ));
+                    w.push(alloc::format!(
+                        ">> Please check if kpathsea library can find this font: {font}"
+                    ));
+                }
+                None => {
+                    w.push(">> There are no valid font mapping entry for this font.".into());
+                    w.push(alloc::format!(
+                        ">> Font file name \"{tfm}\" was assumed but failed to locate that font."
+                    ));
+                }
+            }
+            return Err(crate::ctx::Fatal {
+                message: "Cannot proceed without .vf or \"physical\" font for PDF output...".into(),
+                warnings: w,
+            });
         }
         let mut padbytes = [0u8; 4];
         let mut is_unicode = 0;
