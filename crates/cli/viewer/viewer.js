@@ -37,7 +37,19 @@ var Viewer = class {
         frame = requestAnimationFrame(() => {
           frame = 0;
           const boxes2 = this.measure();
+          const v = scroller.getBoundingClientRect();
           for (const [k, r] of boxes2) if (this.slots[k]) this.snap(this.slots[k], r);
+          for (const [k, r] of boxes2) {
+            const s = this.slots[k];
+            const win = s?.img?.canvas.dataset.win?.split(",").map(Number);
+            const now = win && part(r, v);
+            if (!now || now[0] >= win[0] - 1e-3 && now[1] >= win[1] - 1e-3 && now[2] <= win[2] + 1e-3 && now[3] <= win[3] + 1e-3) continue;
+            const key = `${k}:${s.hash}`;
+            if (this.asked.has(key)) continue;
+            this.asked.add(key);
+            s.drawn = null;
+            this.host.need(k);
+          }
         });
     }, { passive: true });
     let told = "";
@@ -362,11 +374,15 @@ var Viewer = class {
     this.paintFrame = 0;
     const t0 = performance.now();
     const order = [...this.toPaint].sort((a, b) => Number(this.visible.has(Number(b.el.dataset.k))) - Number(this.visible.has(Number(a.el.dataset.k))));
+    const painted = [];
     for (const s of order) {
       if (performance.now() - t0 > 8) break;
       this.toPaint.delete(s);
       this.paint(s);
+      painted.push(s);
     }
+    const boxes2 = painted.map((s) => s.el.getBoundingClientRect());
+    painted.forEach((s, i) => this.snap(s, boxes2[i]));
     if (this.toPaint.size) this.paintFrame = requestAnimationFrame(() => this.paintSome());
   }
   /** The format changed: every page is to be drawn again (as it comes into view). */
@@ -437,6 +453,15 @@ var Viewer = class {
     this.scroller.scrollLeft += r.left + at.fx * r.width - x;
     this.scroller.scrollTop += r.top + at.fy * r.height - y;
   }
+  /**
+   * The part of page `k` on screen: fractions of its width and height
+   * (left, top, right, bottom); null if none of it is. What a zoomed-in
+   * page is drawn sharp around (`Strips.page`'s `view`).
+   */
+  view(k) {
+    const s = this.slots[k];
+    return s ? part(s.el.getBoundingClientRect(), this.scroller.getBoundingClientRect()) : null;
+  }
   /** Scroll page `k` into view, as Overleaf's page buttons do. */
   goTo(k) {
     const s = this.slots[Math.max(0, Math.min(k, this.slots.length - 1))];
@@ -455,6 +480,7 @@ var Viewer = class {
     this.draw(s);
     for (const m of marks) if (!m.isConnected) s.el.append(m);
   }
+  /** The page's bitmap put in its slot (snapped by paintSome, once every page's writes are done). */
   draw(s) {
     if (!s.img) return;
     this.sizeSlot(s);
@@ -462,7 +488,6 @@ var Viewer = class {
     c.style.width = "100%";
     c.style.height = "100%";
     if (s.el.firstChild !== c) s.el.replaceChildren(c);
-    this.snap(s);
   }
   /**
    * A page drawn as a bitmap shown at its own pixels, on the device's grid:
@@ -552,15 +577,21 @@ var Viewer = class {
     }
   }
 };
+function part(r, v) {
+  if (!r.width || !r.height || r.right <= v.left || r.left >= v.right || r.bottom <= v.top || r.top >= v.bottom) return null;
+  const fx = (x) => Math.min(1, Math.max(0, (x - r.left) / r.width));
+  const fy = (y) => Math.min(1, Math.max(0, (y - r.top) / r.height));
+  return [fx(v.left), fy(v.top), fx(v.right), fy(v.bottom)];
+}
 
 // viewer/src/print.ts
 var OVERLEAF = `
   --ph-bar: var(--toolbar-alt-bg-color, #2f3a4c); --ph-fg: var(--content-primary-dark, #f4f5f6); --ph-fg2: var(--neutral-40, #afb5c0);
   --ph-border: var(--neutral-70, #495365); --ph-hover: var(--toolbar-btn-hover-bg-color, #495365);
   --ph-stage: var(--pane, var(--pdf-bg, #2f3a4c)); --ph-menu: var(--bg-dark-primary, #1b222c);
-  --ph-accent: var(--bg-accent-01, #098842); --ph-accent-hover: var(--bg-accent-02, #1e6b41); --ph-accent-fg: #fff;
+  --ph-accent: #2c5aa0; --ph-accent-hover: #3567b3; --ph-accent-fg: #fff;
   --ph-danger: var(--content-danger-dark, #e36d66); --ph-warning: var(--content-warning-dark, #de8014); --ph-info: var(--content-info-dark, #97b6e5);
-  --ph-link: var(--link-ui-dark, #97b6e5); --ph-progress: var(--bg-accent-01, #098842);
+  --ph-link: var(--link-ui-dark, #97b6e5); --ph-progress: #f58f2d;
   --ph-radius: var(--border-radius-base, 4px); --ph-pill: var(--border-radius-full, 9999px);
   --ph-font: var(--font-sans, "Noto Sans", system-ui, sans-serif); --ph-size: 13px; --ph-bar-h: 32px;
 `;
@@ -569,7 +600,7 @@ var OVERLEAF_LIGHT = `
   --ph-border: var(--border-divider, #e7e9ee); --ph-hover: var(--toolbar-btn-hover-bg-color, #f4f5f6);
   --ph-stage: var(--pane, var(--pdf-bg, #f4f5f6)); --ph-menu: var(--bg-light-primary, #fff);
   --ph-danger: var(--content-danger, #b83a33); --ph-warning: var(--content-warning, #8f5514); --ph-info: var(--content-info, #366cbf);
-  --ph-link: var(--link-ui, #366cbf);
+  --ph-link: var(--link-ui, #366cbf); --ph-accent: #1d3e72; --ph-accent-hover: #16325d;
 `;
 var VSCODE = `
   --ph-bar: var(--vscode-editorGroupHeader-tabsBackground, #181818); --ph-fg: var(--vscode-foreground, #cccccc);
@@ -890,6 +921,18 @@ header:active { cursor: grabbing; }
   background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 3px 10px rgb(0 0 0 / 25%); }
 .tip .demo .mmenu span { display: flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 2px; white-space: nowrap; }
 .tip .demo .mmenu b { margin-left: auto; padding-left: 6px; }
+
+/* the \u26A1 chip: each repaint's keystroke-to-screen time over the pages' corner, the strips' numbers under it */
+.speedchip { position: absolute; right: 12px; bottom: 12px; z-index: 3; pointer-events: none; display: flex; flex-direction: column; align-items: flex-end;
+  gap: 2px; max-width: calc(100% - 24px); padding: 4px 9px; border-radius: 8px; color: #fff; background: rgb(20 24 32 / 82%);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 25%); font: 700 12px/1.3 var(--ph-font); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.speedchip[hidden], .win.nospeed .speedchip { display: none; }
+.speedchip.slow b { color: #ffb366; }
+.speedchip span { overflow: hidden; text-overflow: ellipsis; max-width: 100%; font: 400 11px/1.3 ui-monospace, monospace; opacity: .85; }
+.speedchip span:empty { display: none; }
+.speedchip.flash { animation: phx-chipflash .5s ease-out; }
+@keyframes phx-chipflash { 0% { filter: brightness(1.6); } 100% { filter: none; } }
+@media (prefers-reduced-motion: reduce) { .speedchip.flash { animation: none; } }
 
 /* compare: "good" struck out, "excellent" added, then the navigator */
 .tip .demo.cmp { height: auto; padding: 10px 12px 30px; background: #fff; color: #1b222c; font: 13px/1.5 "Noto Serif", Georgia, serif; }
@@ -1523,9 +1566,9 @@ function opening(box, fill, bg) {
   tmp.innerHTML = art(MARK, fill, `${tag}m`);
   const S = [0, 1, 2, 3].map((j) => {
     const ps = [...el.querySelectorAll(`.phx-s${j}`)];
-    const full = ps[0].getTotalLength(), part2 = tmp.querySelector(`.phx-s${j}`).getTotalLength();
+    const full = ps[0].getTotalLength(), part3 = tmp.querySelector(`.phx-s${j}`).getTotalLength();
     ps.forEach((p) => p.style.strokeDasharray = "1 2");
-    return { ps, full, f: part2 / full };
+    return { ps, full, f: part3 / full };
   });
   tmp.remove();
   const W = () => box.clientWidth || 1, H = () => box.clientHeight || 1;
@@ -1536,7 +1579,7 @@ function opening(box, fill, bg) {
   });
   const P = { x: phi.x + OPEN.into[0] * size, y: phi.y - OPEN.into[1] * size };
   const deep = () => OPEN.deep / W();
-  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const still2 = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const T1 = OPEN.draw + 3 * OPEN.stagger, T2 = T1 + 200 + OPEN.sweep + 1.5 * OPEN.stagger, T3 = T2 + OPEN.rest;
   let doneAt = null, settled = null, end = false, raf = 0;
   let finish = () => {
@@ -1554,7 +1597,7 @@ function opening(box, fill, bg) {
     return t < T1 + 200 ? cm : { cx: cm.cx + (cw.cx - cm.cx) * k0, cy: cm.cy + (cw.cy - cm.cy) * k0, s: cm.s + (cw.s - cm.s) * k0 };
   };
   const frame = (t) => {
-    if (still) t = doneAt === null ? T3 : Math.max(t, (settled ??= doneAt) + OPEN.dive);
+    if (still2) t = doneAt === null ? T3 : Math.max(t, (settled ??= doneAt) + OPEN.dive);
     let head = phi.r;
     S.forEach((st, j) => {
       let o;
@@ -1577,7 +1620,7 @@ function opening(box, fill, bg) {
       el.style.opacity = String(1 - Math.max(0, (t - settled - OPEN.dive) / OPEN.fade));
       if (t >= settled + OPEN.dive + OPEN.fade) end = true;
     }
-    by.frame(still ? 1e9 : t - (T2 - 300));
+    by.frame(still2 ? 1e9 : t - (T2 - 300));
     el.setAttribute("viewBox", [c.cx - W() * c.s / 2, c.cy - H() * c.s / 2, W() * c.s, H() * c.s].map(f2).join(" "));
   };
   const tick = () => {
@@ -1598,6 +1641,48 @@ function opening(box, fill, bg) {
     }
   };
 }
+function retro(box) {
+  box.insertAdjacentHTML(
+    "beforeend",
+    `<div class="phx-retro" aria-hidden="true"><style>
+.phx-retro{position:absolute;inset:0;background:#008080;display:flex;align-items:center;justify-content:center;font:11px/1.3 "MS Sans Serif",Tahoma,"Segoe UI",sans-serif;color:#000;transition:opacity .3s}
+.phx-retro.out{opacity:0}
+#opening:has(.phx-retro) .what,#opening:has(.phx-retro) .detail{color:#fff}
+.phx-retro .w{width:min(300px,86%);background:#c0c0c0;border:2px solid;border-color:#fff #000 #000 #fff;box-shadow:inset -1px -1px #808080,inset 1px 1px #dfdfdf;padding:3px}
+.phx-retro .t{display:flex;align-items:center;gap:2px;height:18px;padding:0 3px;color:#fff;font-weight:bold;background:linear-gradient(90deg,#000080,#1084d0)}
+.phx-retro .t span{flex:1}
+.phx-retro .t i{font-style:normal;width:16px;height:14px;line-height:12px;text-align:center;color:#000;background:#c0c0c0;border:1px solid;border-color:#fff #000 #000 #fff;font-size:10px}
+.phx-retro .b{padding:12px 10px 10px}
+.phx-retro .fly{position:relative;height:40px;margin-bottom:10px}
+.phx-retro .fold{position:absolute;top:10px;width:30px;height:22px;background:#e8d36a;border:1px solid #806000}
+.phx-retro .fold::before{content:"";position:absolute;left:-1px;top:-6px;width:12px;height:5px;background:#e8d36a;border:1px solid #806000;border-bottom:none}
+.phx-retro .f1{left:8%}.phx-retro .f2{right:8%}
+.phx-retro .pg{position:absolute;top:4px;left:12%;width:14px;height:18px;background:#fff;border:1px solid #000;animation:phx-fly 1.6s linear infinite}
+.phx-retro .pg::after{content:"";position:absolute;left:2px;right:2px;top:4px;height:8px;background:repeating-linear-gradient(#000 0 1px,transparent 1px 3px)}
+@keyframes phx-fly{0%{transform:translate(0,8px) rotate(-20deg)}50%{transform:translate(calc(min(300px,86vw)*.33),-6px) rotate(0)}100%{transform:translate(calc(min(300px,86vw)*.66),8px) rotate(20deg)}}
+.phx-retro p{margin:0 0 8px}
+.phx-retro .bar{height:16px;border:1px solid;border-color:#808080 #fff #fff #808080;padding:2px;overflow:hidden;position:relative}
+.phx-retro .bar span{position:absolute;top:2px;bottom:2px;left:2px;width:100%;background:repeating-linear-gradient(90deg,#000080 0 8px,transparent 8px 10px);animation:phx-march 2.4s steps(24) infinite}
+@keyframes phx-march{0%{transform:translateX(-100%)}100%{transform:translateX(0)}}
+@media (prefers-reduced-motion:reduce){.phx-retro .pg,.phx-retro .bar span{animation:none}.phx-retro .bar span{transform:translateX(-40%)}}
+</style><div class="w"><div class="t"><span>PhiTeX Setup</span><i>_</i><i>\u25A1</i><i>\xD7</i></div><div class="b"><div class="fly"><div class="fold f1"></div><div class="pg"></div><div class="fold f2"></div></div><p>Typesetting your document\u2026</p><div class="bar"><span></span></div></div></div></div>`
+  );
+  const el = box.lastElementChild;
+  let gone = false;
+  const stop = () => void (gone = true, el.remove());
+  return {
+    done: () => new Promise((r) => {
+      if (gone) return r();
+      el.classList.add("out");
+      setTimeout(() => (stop(), r()), 300);
+    }),
+    stop
+  };
+}
+function still() {
+  return { done: () => Promise.resolve(), stop() {
+  } };
+}
 
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
@@ -1613,7 +1698,6 @@ var OVERLEAF_WORDS = {
       <a id="license" target="_blank" rel="noopener">full license</a>), provided as is, without any warranty.
       To turn it off: <code>chrome://extensions</code>.</div>`,
   preparing: "Getting ready for instant edits\u2026 {s} s (pages still scroll)",
-  updating: "Updating the other pages\u2026",
   license: "LICENSE.txt",
   realPdf: "Overleaf's PDF is the real one.",
   stopped: "Open \u24D8 diagnostics for the details. Overleaf's PDF is one click away (PDF).",
@@ -1668,7 +1752,7 @@ var PART_NAMES = {
   rebuilt: "Rebuilt",
   batching: "Edits batched"
 };
-function part(key, raw) {
+function part2(key, raw) {
   const label = PART_NAMES[key] ?? key.charAt(0).toUpperCase() + key.slice(1);
   const paren = /\s*\(([^)]*)\)\s*$/.exec(raw);
   let rest = paren ? raw.slice(0, paren.index) : raw;
@@ -1802,6 +1886,8 @@ var Panel = class {
       <hr>
       <div class="mi"><span class="icon">dark</span>Dark PDF</div>
       <div class="radios" id="darkpdf" role="group" aria-label="Dark PDF"><button type="button" data-dark="off">Off</button><button type="button" data-dark="on">On</button><button type="button" data-dark="theme">Match theme</button></div>
+      <div class="mi"><span class="icon">tips</span>Loading animation</div>
+      <div class="radios" id="openlook" role="group" aria-label="Loading animation"><button type="button" data-look="phitex">PhiTeX</button><button type="button" data-look="retro">Windows 98</button><button type="button" data-look="off">Off</button></div>
       <button type="button" role="menuitemcheckbox" id="x-culprits" aria-checked="true"><span class="check">\u2713</span><span>Underline problems<span class="desc">A wavy line under what each error and warning is about</span></span></button>
       <button type="button" role="menuitemcheckbox" id="dbg" aria-checked="false"><span class="check"></span><span>Debug check<span class="desc">Compare with a fresh build every 5 s</span></span></button>
       <hr>
@@ -1814,7 +1900,7 @@ var Panel = class {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div>
+    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div class="speedchip" id="speedchip" hidden aria-live="off" title="From the keystroke to the page on screen; under it, the last page's strips: drawn and kept, the core's watch (probe, draw), fetch and compose"><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -1875,7 +1961,7 @@ var Panel = class {
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
     this.$("#x-contents").onclick = this.$("#b-side").onclick = () => (this.menu(null), this.side());
     this.$("#x-find").onclick = this.$("#b-find").onclick = () => (this.menu(null), this.find(true));
-    this.$("#x-tips").onclick = () => (this.menu(null), this.tips(true));
+    this.$("#x-tips").onclick = () => (this.menu(null), this.tips("fresh"));
     this.$("#x-keys").onclick = () => {
       this.menu(null);
       this.$("#keyhelp").hidden = false;
@@ -1893,6 +1979,11 @@ var Panel = class {
       const d = e.target.closest("[data-dark]")?.dataset.dark;
       if (d) this.darkPdf(d);
     };
+    this.$("#openlook").onclick = (e) => {
+      const l = e.target.closest("[data-look]")?.dataset.look;
+      if (l) this.openingLook(l);
+    };
+    this.openingLook(this.openingLook());
     this.$("#logsx").onclick = () => this.diagnostics(false);
     const pg = this.$("#pgin");
     pg.onfocus = () => pg.select();
@@ -1975,6 +2066,8 @@ var Panel = class {
     this.extras(opts);
     this.darkPdf(this.darkPref(), false);
     window.addEventListener("resize", () => this.place());
+    const stage = this.$("#stage");
+    new ResizeObserver(() => this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : void 0;
@@ -2021,7 +2114,9 @@ var Panel = class {
    * build's first page (no "last complete render" meanwhile).
    */
   again() {
+    if (this.ending) this.stopSheet();
     this.reopen = true;
+    this.typesetting = false;
     this.loadPct = 0;
     this.loadDone = -1;
     this.paints = 0;
@@ -2031,11 +2126,22 @@ var Panel = class {
   }
   /**
    * Another document opens in this panel (a host's project switched): the
-   * opening plays over the last one's pages until the new first page, as a
-   * cold build's does; no "last complete render" meanwhile.
+   * opening plays until the new first page, as a cold build's does. Nothing
+   * of the last document stays: its pages, its status and its timing are
+   * not this one's (never "last complete render" of another document).
    */
   opening() {
+    this.last = null;
+    this.lastStatus = null;
+    this.speed = void 0;
+    this.at = 0;
+    clearTimeout(this.staleTimer);
+    this.staleSince = 0;
+    this.$("#stage").classList.remove("stale");
+    this.viewer.layout([]);
     this.again();
+    this.renderStatus();
+    this.nav();
   }
   /** A rebuild's opening is up (firstPending, whatever pages are here). */
   reopen = false;
@@ -2139,12 +2245,9 @@ var Panel = class {
   buildSince = 0;
   actTick;
   prepSince = 0;
-  /** A build has ended with pages: a later one is the quiet "updating", never "getting ready". */
-  built = false;
   /** A build of the core's (`on`) or its end: past 400 ms the status says so. */
   preparing(on) {
     if (!this.words.preparing) return;
-    if (!on && (this.last || this.viewer.pages > 0)) this.built = true;
     this.prepSince = on ? this.prepSince || performance.now() : 0;
     this.activity();
   }
@@ -2155,11 +2258,10 @@ var Panel = class {
   streaming(s) {
     this.streamed = s ? s.pages : void 0;
     this.making = s?.phase === "format";
-    if (s && this.firstPending()) this.step(this.words.steps[2], void 0, this.making ? MAKING : `Page ${s.pages + 1}`);
+    if (s && this.firstPending()) this.typesetting = true, this.step(this.words.steps[2], void 0, this.making ? MAKING : `Page ${s.pages + 1}`);
     this.activity();
   }
   busy(on) {
-    if (!on && (this.last || this.viewer.pages > 0)) this.built = true;
     this.buildSince = on ? this.buildSince || performance.now() : 0;
     this.activity();
   }
@@ -2181,7 +2283,7 @@ var Panel = class {
     if (this.ownBar) return;
     if (long && this.words.preparing) {
       const s = (now - (this.buildSince || this.prepSince)) / 1e3 | 0;
-      const what = this.making ? `${MAKING}\u2026` : this.built ? this.words.updating ?? "Updating the other pages\u2026" : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Typesetting\u2026";
+      const what = this.making ? `${MAKING}\u2026` : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Typesetting\u2026";
       this.toast("build", { title: what, detail: s >= 2 ? `${s} s` : "", pct: null, icon: "refresh" });
     } else if (this.toastKind === "build") this.toast("build", null);
   }
@@ -2193,14 +2295,15 @@ var Panel = class {
     const errs = this.lastStatus?.diagnostics?.filter((d) => d.severity === "error").length ?? 0;
     let t, m = "", err = false;
     if (this.offline) t = "Disconnected", err = true;
+    else if (this.firstPending() && this.stepNow) t = this.stepNow;
     else if (this.pkgNow) t = "Fetching packages\u2026", m = `${this.pkgNow.done} of ${this.pkgNow.total}`;
     else if (running) {
       const s = (now - (this.buildSince || this.prepSince)) / 1e3;
-      t = this.making ? `${MAKING}\u2026` : this.built ? "Building\u2026" : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Building\u2026";
+      t = this.making ? `${MAKING}\u2026` : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Typesetting\u2026";
       m = s >= 1 ? `${s < 10 ? s.toFixed(1) : Math.round(s)} s` : "";
     } else if (this.warm) t = "Preparing instant typing\u2026", m = `${Math.round((Date.now() - this.warm.since) / 1e3)} s`;
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet", err = !!errs;
-    else if (!this.last && this.viewer.pages === 0) t = this.stepNow || "Opening\u2026";
+    else if (this.reopen || !this.last && this.viewer.pages === 0) t = this.stepNow || "Opening\u2026";
     else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, err = true;
     else if (this.speed?.first) t = "First build", m = this.speed.ms < 1e3 ? `${Math.round(this.speed.ms)} ms` : `${(this.speed.ms / 1e3).toFixed(this.speed.ms < 1e4 ? 1 : 0)} s`;
     else t = "Built", m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
@@ -2309,12 +2412,19 @@ var Panel = class {
   culpritsOn = true;
   culpritDiags = [];
   culpritsDrawn = [];
+  /** What the underlines drawn (or being looked up) are of: the problems and the pages' hashes. A build's every status repeats them. */
+  culpritsOf = "";
+  /** The pages' hashes as last laid out. */
+  pageHashes = [];
   async underline(diags) {
     if (!this.ev.onBoxes) return;
     this.culpritDiags = diags;
-    const seq = ++this.culpritsSeq;
-    if (!this.culpritsOn) return void (this.viewer.culprits([]), this.$("#ctip").hidden = true);
+    if (!this.culpritsOn) return void (++this.culpritsSeq, this.culpritsOf = "", this.viewer.culprits([]), this.$("#ctip").hidden = true);
     const want = diags.filter((d) => !!d.problem?.file && !!d.problem.range && d.problem.severity !== "note").map((d) => ({ file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? "warning" : "error", message: d.message })).sort((a, b) => a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1).slice(0, 20);
+    const of = JSON.stringify([want, this.pageHashes]);
+    if (of === this.culpritsOf) return;
+    this.culpritsOf = of;
+    const seq = ++this.culpritsSeq;
     const found = await Promise.all(want.map((w, i) => this.ev.onBoxes(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i })), () => [])));
     if (seq !== this.culpritsSeq) return;
     this.culpritsDrawn = want;
@@ -2470,14 +2580,18 @@ var Panel = class {
     if (this.firstPending()) {
       if (!p.loading.length && !p.building) {
         this.pkgBusy = false;
-        if (!this.stopped()) this.step(this.words.steps[2], void 0, `with ${done} package file${done === 1 ? "" : "s"}${mb(p.bytes)}`);
+        if (this.stopped()) return;
+        if (this.typesetting) this.step(this.words.steps[2], void 0, downloaded(done, p.bytes));
+        else if (done) this.step(this.words.steps[1], pct, `${done} of ${total}${mb(p.bytes)}`);
         return;
       }
       this.pkgBusy = true;
       if (p.loading.length) {
         const name = p.loading[0];
-        this.step(this.words.steps[1], pct, `${name} \xB7 ${done} of ${total}${mb(p.bytes)}${p.unavailable.length ? ` \xB7 ${p.unavailable.length} not found` : ""}`);
-      } else this.step(this.words.steps[2], void 0, `with ${done} package file${done === 1 ? "" : "s"}; a build may ask for more`);
+        const what = `${name} \xB7 ${done} of ${total}${mb(p.bytes)}${p.unavailable.length ? ` \xB7 ${p.unavailable.length} not found` : ""}`;
+        if (this.typesetting) this.step(this.words.steps[2], void 0, `fetching ${what}`);
+        else this.step(this.words.steps[1], pct, what);
+      } else this.typesetting = true, this.step(this.words.steps[2], void 0, downloaded(done, p.bytes));
       return;
     }
     this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source, failed: p.failed ?? [] } : void 0;
@@ -2509,6 +2623,8 @@ var Panel = class {
     return this.reopen || !this.last && this.viewer.pages === 0 && this.$("#empty").hidden === true;
   }
   /** The sheet's step: what, how far (undefined: not known), and the detail; the sheet put up first if it isn't. */
+  /** This opening's typesetting has begun (the build running, or pages shipped): a later fetch said under it. */
+  typesetting = false;
   step(what, pct, detail = "") {
     if (!this.firstPending()) return;
     this.sheetUp();
@@ -2531,7 +2647,8 @@ var Panel = class {
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
     this.fitSheet();
     const dark = this.win.classList.contains("dark-pdf") || this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark");
-    this.anim = opening(el.querySelector(".sheet"), dark ? "#e4e6ea" : "#1d3e72", dark ? "#2c2e33" : "#ffffff");
+    const sheet = el.querySelector(".sheet"), look2 = this.openingLook();
+    this.anim = look2 === "off" ? still() : look2 === "retro" ? retro(sheet) : opening(sheet, dark ? "#e4e6ea" : "#1d3e72", dark ? "#2c2e33" : "#ffffff");
     this.animSince = performance.now();
   }
   /** When the opening began: a page there within 400 ms (a project already built) is shown at once, no opening. */
@@ -2571,8 +2688,10 @@ var Panel = class {
       follow();
       el.classList.add("in");
     });
-    void this.anim.done().then(() => this.stopSheet());
-    setTimeout(() => this.stopSheet(), 900);
+    const a = this.anim;
+    const stop = () => this.anim === a && this.stopSheet();
+    void a.done().then(stop);
+    setTimeout(stop, 900);
   }
   /** The sheet gone (played out, or a card in its place). */
   stopSheet() {
@@ -2588,7 +2707,7 @@ var Panel = class {
       this.opened = true;
       this.stepNow = "";
       this.renderStatus();
-      setTimeout(() => this.tips(false), 600);
+      setTimeout(() => this.tips("unseen"), 600);
     }
   }
   /** The zoom the user has from here: the opening's whole page made theirs (a gesture starts from it), the sheet's ease stopped. */
@@ -2715,16 +2834,22 @@ var Panel = class {
    * height in the stage's (12 px above and below) too.
    */
   /** Device pixels per PDF point at the current zoom: the size pages are drawn at. */
+  /** The part of page `k` on screen (the viewer's `view`): what a zoomed-in page is drawn sharp around. */
+  pageView(k) {
+    return this.viewer?.view(k) ?? null;
+  }
   pixelsPerPoint() {
     return 96 / 72 * this.scale() * (window.devicePixelRatio || 1);
   }
+  /** The stage's client size, kept by its ResizeObserver (null until it is first laid out). */
+  stageSize = null;
   scale() {
     const z = this.zoomNow ?? this.prefs.zoom;
     if (z !== "fit" && z !== "page") return Number(z);
-    const st = this.$("#stage");
-    const width = Math.max(st.clientWidth - 40, 200) / ((this.last?.w ?? 595) * (96 / 72));
+    const st = this.stageSize ??= { w: this.$("#stage").clientWidth, h: this.$("#stage").clientHeight };
+    const width = Math.max(st.w - 40, 200) / ((this.last?.w ?? 595) * (96 / 72));
     if (z === "fit") return width;
-    return Math.min(width, Math.max(st.clientHeight - 24, 100) / ((this.last?.h ?? 842) * (96 / 72)));
+    return Math.min(width, Math.max(st.h - 24, 100) / ((this.last?.h ?? 842) * (96 / 72)));
   }
   goPage(k) {
     this.viewer.goTo(k);
@@ -3064,6 +3189,20 @@ var Panel = class {
     this.msg(this.debugOn ? "Debug check on" : "Debug check off", false, true);
     this.emit();
   }
+  /**
+   * The timing popover under a host's own control (Overleaf's toolbar
+   * status, where the panel's bar is hidden): moved out of the bar into the
+   * window, at the control's left, just under it. Again: closed.
+   */
+  timingAt(anchor) {
+    const el = this.$("#m-time");
+    if (!el.hidden) return this.menu(null);
+    if (el.parentElement !== this.win) this.win.append(el);
+    const a = anchor.getBoundingClientRect(), w = this.win.getBoundingClientRect();
+    el.style.left = `${Math.max(6, Math.min(a.left - w.left, w.width - el.offsetWidth - 6, w.width - 346))}px`;
+    el.style.top = `${Math.max(4, a.bottom - w.top + 4)}px`;
+    this.menu("#m-time");
+  }
   /** The settings (docked under a host's toolbar: the main file, the debug check, reload, the latency's details). */
   sheet(on = this.$("#sheet").hidden) {
     this.$("#sheet").hidden = !(on && !!this.docked);
@@ -3071,12 +3210,24 @@ var Panel = class {
   }
   /** Repaints so far: the first is the first build's. */
   paints = 0;
-  /** Kept for hosts that call it: the speed is the bar's status now. */
-  speedChip(_on) {
+  /** The ⚡ chip shown or not (the host's setting: Overleaf's popup, on by default). */
+  speedChip(on) {
+    this.win.classList.toggle("nospeed", !on);
+  }
+  /** Where the pages' strips say the last frame's numbers (drawn, kept, watch, probe, draw, fetch, compose): under the ⚡ chip's. */
+  stripsChip() {
+    return this.$("#stripsline");
   }
   /** A repaint reached the screen, `ms` after its keystroke: the status says how fast. */
   painted(ms) {
     this.speed = { ms, at: performance.now(), first: this.paints++ === 0 };
+    const chip2 = this.$("#speedchip");
+    chip2.hidden = false;
+    this.$("#speedms").textContent = `\u26A1 ${this.speed.first ? "first build " : ""}${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+    chip2.classList.toggle("slow", !this.speed.first && ms > 100);
+    chip2.classList.remove("flash");
+    void chip2.offsetWidth;
+    chip2.classList.add("flash");
     this.renderStatus();
     this.emit();
   }
@@ -3102,6 +3253,19 @@ var Panel = class {
     this.root.querySelectorAll("#darkpdf [data-dark]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.dark === d)));
     this.darkQuery.onchange = () => this.applyDark();
     this.applyDark();
+  }
+  /** The loading animation chosen (`set`: chosen now, kept in this browser), as it is. */
+  openingLook(set) {
+    let l = "phitex";
+    try {
+      if (set) localStorage.setItem("phitex.opening", set);
+      const v = localStorage.getItem("phitex.opening");
+      if (v === "retro" || v === "off") l = v;
+    } catch {
+      l = set ?? "phitex";
+    }
+    this.root.querySelectorAll("#openlook [data-look]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.look === l)));
+    return l;
   }
   /** The host page's own theme (theme()): undefined, never said. */
   pageTheme = void 0;
@@ -3129,21 +3293,38 @@ var Panel = class {
   // ---- Feature tips, each once (own-bar hosts; Overleaf's toolbar has the extension's) ----
   tipAt = -1;
   tipList = [];
-  /** The tips not seen yet, now, where the host keeps them from showing by themselves (PanelOptions.tips false: after its own). */
-  tour() {
-    this.tips(false, true);
+  /**
+   * The tips now: those not seen yet, where the host keeps them from showing
+   * by themselves (PanelOptions.tips false: after its own); `all`, the tour
+   * itself, every tip from the first (a host's own "Take the tour").
+   */
+  tour(all = false) {
+    this.tips(all ? "all" : "unseen", true);
   }
-  /** The tips not seen yet (`all`: every one, What's new), from the first; `asked`: the host's tour(). */
-  tips(all, asked = false) {
-    if (!this.ownBar || this.prefs.collapsed || !all && !asked && !this.autoTips) return;
+  /**
+   * The tips, from the first: those not seen yet (a first visit), the new
+   * features' (What's new: `fresh`), or every one (the tour); `asked`: the
+   * host's tour().
+   */
+  tips(which, asked = false) {
+    if (!this.ownBar || this.prefs.collapsed || which === "unseen" && !asked && !this.autoTips) return;
     let seen = [];
     try {
       seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
     } catch {
     }
     const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
-    this.tipList = all ? offered : offered.filter((t) => !seen.includes(t.id));
+    this.tipList = which === "all" ? offered : which === "fresh" ? offered.filter((t) => t.fresh) : offered.filter((t) => !seen.includes(t.id));
     this.tip(0);
+  }
+  /** Tips seen: not offered by themselves again (What's new and the tour still show them). */
+  seen(ids) {
+    try {
+      const seen = new Set(JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]"));
+      for (const id of ids) seen.add(id);
+      localStorage.setItem("phitex.tips.seen", JSON.stringify([...seen]));
+    } catch {
+    }
   }
   tip(i) {
     const el = this.$("#tip");
@@ -3151,12 +3332,7 @@ var Panel = class {
     this.tipAt = i;
     const t = this.tipList[i];
     if (!t) return void (el.hidden = true);
-    try {
-      const seen = new Set(JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]"));
-      seen.add(t.id);
-      localStorage.setItem("phitex.tips.seen", JSON.stringify([...seen]));
-    } catch {
-    }
+    this.seen([t.id]);
     let target = this.$(t.at);
     if (!target || !target.offsetParent) target = this.$("#b-more");
     target.classList.add("ringed");
@@ -3169,6 +3345,7 @@ var Panel = class {
     el.onclick = (e) => {
       e.stopPropagation();
       const a = e.target.closest("[data-t]")?.dataset.t;
+      if (a === "skip") this.seen(this.tipList.map((t2) => t2.id));
       if (a) this.tip(a === "next" ? i + 1 : -1);
     };
   }
@@ -3186,7 +3363,7 @@ var Panel = class {
     }
     const esc5 = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
     const n = d.busy ? `<span class="n busy">${esc5(d.busy)}</span>` : `<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
-    el.innerHTML = `<span class="what" title="${esc5(d.title)}">Diff vs ${esc5(d.title)} <small>${esc5(d.when)}</small></span><button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>\u2039</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>\u203A</button><span class="sep"></span><button data-a="toggle" class="${d.showing === "current" ? "cur" : ""}" title="Show the ${d.showing === "diff" ? "current version" : "diff"} (D)">${d.showing === "diff" ? "Current" : "Diff"}</button><button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>\u2B07 PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>\u2B07 .tex</button><button data-a="settings" title="Diff style: colors, markup" aria-label="Diff style">\u2699</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">\u2715</button>`;
+    el.innerHTML = `<span class="what" title="${esc5(d.title)} against the current version">${esc5(d.title)} vs current <small>${esc5(d.when)}</small></span><button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>\u2039</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>\u203A</button><span class="sep"></span><button data-a="toggle" class="${d.showing === "current" ? "cur" : ""}" title="Show the ${d.showing === "diff" ? "current version" : "diff"} (D)">${d.showing === "diff" ? "Current" : "Diff"}</button><button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>\u2B07 PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>\u2B07 .tex</button><button data-a="settings" title="Diff style: colors, markup" aria-label="Diff style">\u2699</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">\u2715</button>`;
     el.className = "diffbar on";
     el.onclick = (e) => {
       const a = e.target.closest("button[data-a]")?.dataset.a;
@@ -3288,7 +3465,7 @@ var Panel = class {
   /** The timing popover: the last build's line, its parts as the session lists them, the last message. */
   timing() {
     const el = this.$("#m-time");
-    const parts = this.timingParts().map(([k, v]) => part(k, v));
+    const parts = this.timingParts().map(([k, v]) => part2(k, v));
     const e2e = parts.find((p) => p.key === "keystroke\u2192page")?.ms ?? this.speed?.ms;
     const head = this.speed?.first ? ["First build", this.speed.ms] : e2e !== void 0 ? ["Keystroke to page", e2e] : null;
     const rows = parts.map((p) => {
@@ -3373,6 +3550,7 @@ var Panel = class {
   }
   /** The pages there are, by hash (the viewer draws the changed ones it shows). */
   layout(hashes) {
+    this.pageHashes = hashes;
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
     this.viewer.layout(hashes);
@@ -3433,6 +3611,7 @@ var Panel = class {
     this.nav();
   }
 };
+var downloaded = (n, bytes) => n ? `${n} package${n === 1 ? "" : "s"} downloaded${mb(bytes)}` : "";
 function foldedDetail(text, label) {
   const d = document.createElement("details");
   d.className = "folded";
@@ -3575,12 +3754,20 @@ function nearest(gs, x, y) {
 function from(gs, file, lo, hi) {
   return gs.filter((g) => g.file === file && !g.synth && g.start < hi && g.end > lo);
 }
-function boxes(gs, all) {
-  const next = /* @__PURE__ */ new Map();
+var widthsOf = /* @__PURE__ */ new WeakMap();
+function widths(all) {
+  let next = widthsOf.get(all);
+  if (next) return next;
+  next = /* @__PURE__ */ new Map();
   for (let i = 0; i < all.length; i++) {
     const n = all[i + 1];
     next.set(all[i], n && Math.abs(n.y - all[i].y) < 0.5 && n.x > all[i].x && n.x - all[i].x < 15 ? n.x - all[i].x : 5);
   }
+  widthsOf.set(all, next);
+  return next;
+}
+function boxes(gs, all) {
+  const next = widths(all);
   const lines2 = /* @__PURE__ */ new Map();
   for (const g of gs) {
     const k = Math.round(g.y * 2) / 2;
@@ -3931,7 +4118,11 @@ var PreviewSession = class {
         const builds = r.op === "edit" || r.op === "status" || r.op === "open";
         if (builds && this.building++ === 0) this.sink.busy?.(true);
         if (r.op === "open" || r.op === "set_file") this.glyphCache.clear();
-        if (r.op === "edit") this.mapGlyphs(r.file, r.start, r.end, new TextEncoder().encode(r.text).length);
+        if (r.op === "edit") {
+          const len = new TextEncoder().encode(r.text).length;
+          this.mapCulprits(r.file, r.start, r.end, len);
+          this.mapGlyphs(r.file, r.start, r.end, len);
+        }
         const res = await core.request(r).finally(() => {
           this.inflight--;
           if (builds && --this.building === 0) this.sink.busy?.(false);
@@ -4397,6 +4588,33 @@ var PreviewSession = class {
       }
     }
   }
+  /**
+   * boxesOf's answers, by page (its glyph list: a page changed has a new
+   * one) and range (`file\0start\0end`): the range's boxes there and the
+   * page's glyph nearest it. Mapped through edits as the glyphs are, so a
+   * build's problems are looked up only on the pages it changed.
+   */
+  culprits = /* @__PURE__ */ new Map();
+  /** The culprits' answers moved with an edit (before the glyphs are): one the edit touches, between its range and its nearest glyph, dropped. */
+  mapCulprits(file, start, end, len) {
+    const live = new Set(this.glyphCache.values());
+    for (const [all, memo] of this.culprits) {
+      if (!live.has(all)) {
+        this.culprits.delete(all);
+        continue;
+      }
+      const moved = [];
+      for (const [id, m] of memo) {
+        const [f, a, b] = id.split("\0");
+        if (f !== file) continue;
+        const lo = Math.min(+a, m.g?.start ?? +a), hi = Math.max(+b, m.g?.end ?? +b);
+        if (start > hi) continue;
+        memo.delete(id);
+        if (end < lo) moved.push([`${f}\0${+a + len - (end - start)}\0${+b + len - (end - start)}`, m]);
+      }
+      for (const [id, m] of moved) memo.set(id, m);
+    }
+  }
   /** Page `k`'s glyphs if they are here, at once (no request, no waiting on a build). */
   cached(k) {
     return this.glyphCache.get(`${k}:${this.hashes[k] ?? ""}`);
@@ -4669,13 +4887,23 @@ var PreviewSession = class {
     for (const k of order) {
       if (k >= this.hashes.length) continue;
       const all = this.cached(k) ?? await this.glyphsOf(k);
-      const hit = from(all, file, start, Math.max(end, start + 1));
-      if (hit.length) out.push({ k, boxes: boxes(hit, all) });
-      for (const g of all) {
-        if (g.file !== file || g.synth) continue;
-        const d = g.start >= end ? g.start - end : start - g.end;
-        if (d >= 0 && (!near || d < near.d)) near = { k, g, d, all };
+      const memo = this.culprits.get(all) ?? this.culprits.set(all, /* @__PURE__ */ new Map()).get(all);
+      const id = `${file}\0${start}\0${end}`;
+      let m = memo.get(id);
+      if (!m) {
+        const hi = Math.max(end, start + 1), hit = [];
+        m = { boxes: null, g: null, d: Infinity };
+        for (const g of all) {
+          if (g.file !== file || g.synth) continue;
+          if (g.start < hi && g.end > start) hit.push(g);
+          const d = g.start >= end ? g.start - end : start - g.end;
+          if (d >= 0 && d < m.d) m.g = g, m.d = d;
+        }
+        if (hit.length) m.boxes = boxes(hit, all);
+        memo.set(id, m);
       }
+      if (m.boxes) out.push({ k, boxes: m.boxes });
+      if (m.g && (!near || m.d < near.d)) near = { k, g: m.g, d: m.d, all };
     }
     if (!out.length && near && near.d <= NEAR_CULPRIT) {
       const mine = near.all.filter((x) => x.file === file && !x.synth).sort((x, y) => x.start - y.start);
@@ -4848,7 +5076,11 @@ var PreviewSession = class {
         this.status();
         return;
       case "settled":
-        if (!e.settling) this.watchBusy(false), this.sink.preparing?.(false);
+        if (!e.settling) {
+          this.watchBusy(false);
+          this.sink.preparing?.(false);
+          if (this.pkg.building) this.pkg.building = false, this.tellPackages();
+        }
         this.chain = this.chain.then(() => this.layout()).then(() => (this.status(), this.watchOutline()));
         return;
       case "sync":
@@ -5068,6 +5300,8 @@ function search(pages2, q, max = 1e3) {
 }
 
 // viewer/src/strips.ts
+var BUDGET = 16e6;
+var BASE = 4e6;
 var Strips = class {
   /** The bitmaps kept, by key (the oldest dropped past `max`). */
   kept = /* @__PURE__ */ new Map();
@@ -5081,46 +5315,96 @@ var Strips = class {
   }
   /** Each page's bands' keys as last shown (what a frame of it most likely keeps). */
   shown = /* @__PURE__ */ new Map();
-  /** Page `k` at `scale` pixels a point: its element (canvas and text), size and links. */
-  async page(k, scale) {
+  /** Each page's size in points, as its last frame gave it. */
+  sizes = /* @__PURE__ */ new Map();
+  /**
+   * Page `k` at `scale` pixels a point: its element (canvas and text),
+   * size and links. `view`: the part of it on screen (the viewer's
+   * `view(k)`); zoomed past `BUDGET` pixels a page, the page drawn small
+   * and stretched and the part on screen (and as much again around it)
+   * drawn at `scale` over it, its element's `data-win` that part.
+   */
+  async page(k, scale, view) {
+    const size = this.sizes.get(k) ?? this.sizes.values().next().value;
+    if (view && !size) await this.frame(k, Math.min(scale, 1));
+    const sz = this.sizes.get(k) ?? size;
+    const px = sz ? sz.w * sz.h * scale * scale : 0;
+    if (!view || !sz || px <= BUDGET) {
+      const f = await this.frame(k, sz && px > BUDGET ? Math.sqrt(BUDGET / (sz.w * sz.h)) : scale);
+      if (!f) return null;
+      const el2 = document.createElement("div");
+      el2.className = "phx-page";
+      el2.append(this.canvas(f), textLayer(f.text.map(composeLine), f.w, f.h));
+      return { el: el2, w: f.w, h: f.h, links: f.links };
+    }
+    const grow = (a, b2, most2) => {
+      const m = (a + b2) / 2, half = Math.min((b2 - a) * 2, most2) / 2;
+      return [Math.max(0, m - half), Math.min(1, m + half)];
+    };
+    const most = Math.sqrt(BUDGET / px);
+    const [l, r] = grow(view[0], view[2], most);
+    const [t, b] = grow(view[1], view[3], most);
+    const win = [l, t, r, b];
+    const [base, part3] = await Promise.all([this.frame(k, Math.min(scale, Math.sqrt(BASE / (sz.w * sz.h)))), this.frame(k, scale, win)]);
+    if (!base || !part3?.win) return null;
+    const el = document.createElement("div");
+    el.className = "phx-page";
+    el.dataset.win = win.join(",");
+    const tile = this.canvas(part3);
+    const [x, y, w, h] = part3.win;
+    tile.className = "phx-tile";
+    Object.assign(tile.style, {
+      position: "absolute",
+      left: `${x / part3.pw * 100}%`,
+      top: `${y / part3.ph * 100}%`,
+      width: `${w / part3.pw * 100}%`,
+      height: `${h / part3.ph * 100}%`
+    });
+    el.append(this.canvas(base), tile, textLayer(base.text.map(composeLine), base.w, base.h));
+    return { el, w: base.w, h: base.h, links: base.links };
+  }
+  /** Page `k`'s frame at `scale` (only `win` of it, if given), its strips fetched and kept. */
+  async frame(k, scale, win) {
     const t0 = performance.now();
     let f = null;
     let t1 = t0;
     if (this.src.frameWith) {
       const have = (this.shown.get(k) ?? []).filter((key) => this.kept.has(key));
-      const buf = await this.src.frameWith(k, scale, have);
+      const buf = await this.src.frameWith(k, scale, have, win);
       if (!buf || buf.byteLength < 4) return null;
       const n = new DataView(buf).getUint32(0, true);
       f = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
       t1 = performance.now();
       await this.take(f.sent ?? [], buf, 4 + n);
     } else {
-      f = await this.src.frame(k, scale);
+      f = await this.src.frame(k, scale, win);
       if (!f) return null;
       t1 = performance.now();
     }
     if (!f) return null;
-    this.shown.set(k, f.bands.map((b) => b[0]));
+    this.sizes.set(k, { w: f.w, h: f.h });
+    if (!win) this.shown.set(k, f.bands.map((b) => b[0]));
     const want = [...new Set(f.bands.map((b) => b[0]).filter((key) => !this.kept.has(key)))];
     if (want.length) await this.fetch(want);
     const t2 = performance.now();
+    if (this.chip)
+      this.chip.textContent = `p${k + 1}${win ? " (in view)" : ""}: ${f.drawn} drawn, ${f.kept} kept \xB7 watch ${(f.us.all / 1e3).toFixed(1)} ms (probe ${(f.us.probe / 1e3).toFixed(1)}, draw ${(f.us.draw / 1e3).toFixed(1)}) \xB7 fetch ${(t1 - t0).toFixed(1)}+${(t2 - t1).toFixed(1)} ms`;
+    return f;
+  }
+  /** `f` composed: a canvas of its window (the page, but for a window's frame), white under its strips. */
+  canvas(f) {
+    const [, y, w, h] = f.win ?? [0, 0, f.pw, f.ph];
     const c = document.createElement("canvas");
-    c.width = f.pw;
-    c.height = f.ph;
+    c.width = w;
+    c.height = h;
     const g = c.getContext("2d");
     g.fillStyle = "#fff";
-    g.fillRect(0, 0, f.pw, f.ph);
-    for (const [key, y] of f.bands) {
+    g.fillRect(0, 0, w, h);
+    for (const [key, top] of f.bands) {
       const b = this.kept.get(key);
-      if (b) g.drawImage(b, 0, y);
+      if (b) g.drawImage(b, 0, top - y);
     }
-    const t3 = performance.now();
-    if (this.chip)
-      this.chip.textContent = `p${k + 1}: ${f.drawn} drawn, ${f.kept} kept \xB7 watch ${(f.us.all / 1e3).toFixed(1)} ms (probe ${(f.us.probe / 1e3).toFixed(1)}, draw ${(f.us.draw / 1e3).toFixed(1)}) \xB7 fetch ${(t1 - t0).toFixed(1)}+${(t2 - t1).toFixed(1)} \xB7 compose ${(t3 - t2).toFixed(1)} ms`;
-    const el = document.createElement("div");
-    el.className = "phx-page";
-    el.append(c, textLayer(f.text.map(composeLine), f.w, f.h));
-    return { el, w: f.w, h: f.h, links: f.links };
+    return c;
   }
   /** The strips of `keys`, made bitmaps and kept. */
   async fetch(keys) {
@@ -5564,7 +5848,7 @@ var Pages = class {
   async request(op) {
     const o = op;
     if (o.op === "png") {
-      const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint()).catch(() => null);
+      const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint(), panel.pageView(o.page ?? 0)).catch(() => null);
       if (!p) return { ok: false, json: { error: "no such page" } };
       this.painted();
       return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links };
@@ -5597,8 +5881,9 @@ var Pages = class {
   }
 };
 var stripSource = {
-  async frame(k, scale) {
-    const r = await fetch(new URL(`frame/${k}/${Math.round(scale * 1e3)}`, location.href), { cache: "no-store" });
+  async frame(k, scale, win) {
+    const part3 = win ? `/${win.map((x) => x.toFixed(5)).join(",")}` : "";
+    const r = await fetch(new URL(`frame/${k}/${Math.round(scale * 1e3)}${part3}`, location.href), { cache: "no-store" });
     return r.ok ? await r.json() : null;
   },
   async strips(keys) {
