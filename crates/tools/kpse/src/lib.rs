@@ -284,9 +284,12 @@ fn os(b: &[u8]) -> &Path {
     Path::new(std::ffi::OsStr::from_bytes(b))
 }
 
-/// `readable.c`: a readable regular file.
+/// `readable.c`, `READABLE`: a name that is readable and not a
+/// directory (`access (fn, R_OK) == 0 && stat (fn, &st) == 0 &&
+/// !S_ISDIR (st.st_mode)`): a device such as `/dev/null` is one, which
+/// LaTeX's `\IfFileExists{/dev/null}` tests to tell Unix from Windows.
 fn readable_file(name: &[u8]) -> bool {
-    std::fs::metadata(os(name)).is_ok_and(|m| m.is_file()) && std::fs::File::open(os(name)).is_ok()
+    std::fs::metadata(os(name)).is_ok_and(|m| !m.is_dir()) && std::fs::File::open(os(name)).is_ok()
 }
 
 /// `path-elt.c`, `element`: split `path` at separators outside braces.
@@ -1824,6 +1827,16 @@ mod tests {
         assert!(k.out_name_ok(b".bashrc").is_err());
         k.env_overlay.insert(b"openout_any".to_vec(), b"a".to_vec());
         assert!(k.out_name_ok(b".bashrc").is_ok());
+    }
+
+    /// kpathsea's `READABLE` is "not a directory", not "a regular
+    /// file": `/dev/null` is readable (thuthesis and ctex tell Unix by
+    /// `\IfFileExists{/dev/null}`), a directory is not.
+    #[test]
+    fn a_device_is_readable_a_directory_not() {
+        assert!(readable_file(b"/dev/null"));
+        assert!(!readable_file(b"/dev"));
+        assert!(!readable_file(b"/dev/phitex-no-such-file"));
     }
 
     #[test]

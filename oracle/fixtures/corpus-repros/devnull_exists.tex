@@ -1,0 +1,7 @@
+% kpathsea finds a name that is readable and not a directory: /dev/null
+% exists (thuthesis and ctex tell Unix from Windows by it), null: not.
+\documentclass{article}
+\begin{document}
+/dev/null: \IfFileExists{/dev/null}{exists}{missing}.
+null:: \IfFileExists{null:}{exists}{missing}.
+\end{document}

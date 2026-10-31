@@ -163,3 +163,7 @@ repro!(
     imakeidx_index,
     "amsldoc (index): imakeidx's \\printindex runs \\write18{makeindex ...} under TeX Live's restricted shell escape (\\pdfshellescape 2) and inputs the .ind at once; our makeindex runs in process on the .idx the job wrote"
 );
+repro!(
+    devnull_exists,
+    "research corpus (thuthesis, ctex): kpathsea's READABLE is a name readable and not a directory, so \\IfFileExists{/dev/null} is true on Unix (\\pdffilesize/\\filesize, expl3's file test); PhiTeX's kpse asked for a regular file, and thuthesis took the Windows fontset (SimSun, not loadable)"
+);

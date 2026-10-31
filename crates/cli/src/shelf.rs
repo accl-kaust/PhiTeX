@@ -308,10 +308,13 @@ pub fn files(
 }
 
 /// A project's file `name` (from the directory the build runs in, as
-/// kpathsea's `.` finds it): its path.
+/// kpathsea's `.` finds it, or an absolute name): its path, where it is
+/// readable and not a directory (kpathsea's `READABLE`: `/dev/null` is
+/// one).
 fn project(name: &str) -> Option<PathBuf> {
     let p = Path::new(name);
-    p.is_file().then(|| p.to_path_buf())
+    (std::fs::metadata(p).is_ok_and(|m| !m.is_dir()) && std::fs::File::open(p).is_ok())
+        .then(|| p.to_path_buf())
 }
 
 /// dvipdfmx's `format` as kpathsea names it (a release's `search` key;
