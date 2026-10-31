@@ -405,6 +405,10 @@ fn fail_line(program: &str, e: &phitex_pdf::PdfError) -> String {
             file: None,
             message,
         } => format!("!pdfTeX error: {program}: {message}"),
+        // (`pdf_error`: `print_err("pdfTeX error")`, its context in
+        // parentheses, then `succumb`)
+        phitex_pdf::PdfError::Pdf(..) => format!("! {e}"),
+        phitex_pdf::PdfError::Font(m) => format!("!pdfTeX error: {program}: {m}"),
         other => format!("!pdfTeX error: {program}: {other}"),
     }
 }
@@ -1004,8 +1008,9 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     // a page the link shipped and the writer could not write is the
     // job's error, in the log and loudly, naming the node that shipped
     // the page
-    for (msg, node) in &l.errors {
-        let e = v.list(vec![v.str("error"), v.str(msg), v.int(-1)]);
+    for (err, node) in &l.errors {
+        let msg = err.to_string();
+        let e = v.list(vec![v.str("error"), v.str(&msg), v.int(-1)]);
         cx.contribute(v.field("log"), v.seq_unit(e));
         cx.contribute(v.field(crate::run::LOG_ERRORS), v.int(1));
         let d = v.list(vec![

@@ -350,8 +350,13 @@ fn page_box(p: &phitex_codecs::pdfread::Page, spec: PageBox) -> [f64; 4] {
     }
 }
 
+/// `pdftex_fail` while an image is read or written (`writepng.c`,
+/// `pdftoepdf.cc`): `cur_file_name` the image's file, the job ends.
 fn fail(name: &[u8], msg: &str) -> PdfError {
-    pdf_error("", &format!("{}: {msg}", String::from_utf8_lossy(name)))
+    PdfError::Fail {
+        file: Some(String::from_utf8_lossy(name).into_owned()),
+        message: msg.to_owned(),
+    }
 }
 
 /// `read_APP1_Exif`: the resolution.

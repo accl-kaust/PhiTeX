@@ -3914,7 +3914,7 @@ struct LinkMemo {
     chunks: Vec<Vec<phitex_pdf::Chunk>>,
     snaps: Vec<LinkSnap>,
     got: Vec<ValueId>,
-    errors: Vec<(String, i64)>,
+    errors: Vec<(phitex_pdf::PdfError, i64)>,
     /// The writer after the last record (before the file's end).
     end: LinkSnap,
     /// The record `chunks[0]` is (its earlier records moved out).
@@ -4105,18 +4105,31 @@ fn link_memo() -> &'static Mutex<Option<LinkMemo>> {
     M.get_or_init(|| Mutex::new(None))
 }
 
+/// Whether a writer's error ends the job, as pdfTeX's `pdftex_fail` and
+/// `pdf_error` (`succumb`) do; a huge page is TeX's error (§641), the
+/// page flushed and the job going on.
+fn fatal_write(e: &phitex_pdf::PdfError) -> bool {
+    matches!(
+        e,
+        phitex_pdf::PdfError::Fail { .. }
+            | phitex_pdf::PdfError::Pdf(..)
+            | phitex_pdf::PdfError::Font(_)
+    )
+}
+
 /// What the link made: the file's layout (none: no file), the exact
 /// file made from it when asked ([`phitex_pdf::Layout::exact`]).
 pub(crate) struct Linked {
     pub layout: Option<phitex_pdf::Layout>,
     /// The file's hash, from its chunks' ([`phitex_pdf::Layout::hash`]).
     pub hash: Option<u64>,
-    /// The writer's errors where the link shipped a page again (pdfTeX's,
-    /// `PDF-BACKEND-GAP`: a fatal error there, here logged, the job going
-    /// on), with the node that shipped the page.
-    pub errors: Vec<(String, i64)>,
-    /// Why the file's end could not be written (pdfTeX's fatal
-    /// `pdftex_fail`, a font without a map entry among them): no file.
+    /// The writer's errors on the pages the link wrote that do not end
+    /// the job ([`fatal_write`]'s others: a huge page, a thing not
+    /// supported), with the node that shipped the page.
+    pub errors: Vec<(phitex_pdf::PdfError, i64)>,
+    /// Why the file could not be written (pdfTeX's fatal `pdftex_fail` or
+    /// `pdf_error`: a font without a map entry, an image that cannot be
+    /// written): no file.
     pub fail: Option<phitex_pdf::PdfError>,
     /// The pages the link placed as their own steps wrote them, and those
     /// it shipped again ([`PdfState::replay_page`]'s refusals).
@@ -4216,7 +4229,7 @@ fn link(
     nums.seed(&f.seed);
     let mut bytes = PdfBytes::new();
     let mut got: Vec<ValueId> = Vec::new();
-    let mut errors: Vec<(String, i64)> = Vec::new();
+    let mut errors: Vec<(phitex_pdf::PdfError, i64)> = Vec::new();
     let (mut placed, mut shipped) = (0usize, 0usize);
     // (the line's records, their pages and their lines' units: the
     // last link's where the line is the same, the hashes of the pages
@@ -4458,14 +4471,14 @@ fn link(
                 if let Some(Err(e)) = with_page_box(v, pc, &h, &mut line, |bx| {
                     st.ship_out_with(bx, &src, &mut wh)
                 }) {
-                    errors.push((format!("pdfTeX error: {e}"), pc.node));
+                    errors.push((e, pc.node));
                 }
                 shipped += 1;
             } else {
                 // (an image the placed page holds that the writer could
                 // not write: the job's error, as where it ships it)
                 if let Some(e) = st.take_error() {
-                    errors.push((format!("pdfTeX error: {e}"), pc.node));
+                    errors.push((e, pc.node));
                 }
                 placed += 1;
             }
@@ -4714,6 +4727,17 @@ fn link(
     let (tail, fail) = match tail {
         Ok(t) => (t, None),
         Err(e) => (None, Some(e)),
+    };
+    // (a page's write that fails as pdfTeX's `pdftex_fail` or `pdf_error`
+    // do, an image that cannot be written among them, ends the job there:
+    // that error, no file, none of the errors after it)
+    let (tail, fail) = match errors.iter().position(|(e, _)| fatal_write(e)) {
+        Some(i) => {
+            let (e, _) = errors.remove(i);
+            errors.truncate(i);
+            (None, Some(e))
+        }
+        None => (tail, fail),
     };
     let layout = tail.map(|t| phitex_pdf::Layout::new(t, bytes));
     let hash = layout.as_ref().map(phitex_pdf::Layout::hash);

@@ -2702,7 +2702,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                         )?;
                     }
                     if let Some(e) = err {
-                        r.log("error", &format!("pdfTeX error: {e}"))?;
+                        r.log("error", &e)?;
                     }
                     n
                 }
@@ -2961,7 +2961,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 )
             })?;
             if let Some(e) = got.and_then(|g| g.err) {
-                r.log("error", &format!("pdfTeX error: {e}"))?;
+                r.log("error", &e)?;
             }
             // (pdfTeX §1560: the action's object, written now; the
             // destination it names, made if new; the entry's; the title's,
@@ -3495,7 +3495,7 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
     let (i, wobjs, wos) = match ximage_own_info(&spec, &set, ocl, &fs) {
         Ok(i) => i,
         Err(e) => {
-            r.log("error", &format!("pdfTeX error: {e}"))?;
+            r.log("error", &e.to_string())?;
             return Ok(None);
         }
     };
@@ -3517,7 +3517,7 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
         }
     })?;
     if let Some(e) = got.as_ref().and_then(|g| g.err.clone()) {
-        r.log("error", &format!("pdfTeX error: {e}"))?;
+        r.log("error", &e)?;
     }
     Ok(Some((num_of(got), i, wobjs, wos)))
 }
@@ -3586,7 +3586,7 @@ fn xform_step(
         }
     })?;
     if let Some(e) = got.as_ref().and_then(|g| g.err.clone()) {
-        r.log("error", &format!("pdfTeX error: {e}"))?;
+        r.log("error", &e)?;
     }
     Ok(num_of(got))
 }

@@ -239,20 +239,33 @@ repro!(
 );
 
 /// An image the writer cannot write where the link writes it (a PNG
-/// whose header reads and whose data does not): the job's error at every
-/// thread count, on a page the link places whole as on one it ships
-/// again (pdftex: `!pdfTeX error: pdftex (file ./bad.png): libpng:
-/// internal error`, fatal, mc 77541). The link placing a page whole
-/// dropped the error (`PdfState::replay_page`); this page, its image's
-/// number read-time, is shipped again, which reported it already.
+/// whose header reads and whose data does not) ends the job at every
+/// thread count as pdftex's `pdftex_fail` does: `!pdfTeX error: pdftex
+/// (file ./bad.png): libpng: internal error` and ` ==> Fatal error
+/// occurred, no output PDF file produced!`, no PDF (mc 77541). The CLI
+/// wrote the PDF with an error said twice ("pdfTeX error: pdfTeX error:
+/// ./bad.png: ..."); the link placing a page whole also dropped the error
+/// (`PdfState::replay_page`).
 #[test]
 fn pdf_image_write_error() {
+    let fail = "!pdfTeX error: pdftex (file ./bad.png): libpng: internal error";
     for j in [1, 4] {
-        let (_, term) = build_j("pdf_image_write_error", j);
+        let (pdf, term) = build_j("pdf_image_write_error", j);
+        assert!(pdf.is_empty(), "-j{j}: a PDF was written:\n{term}");
+        let log = std::fs::read_to_string(
+            scratch("pdf_image_write_error", j).join("pdf_image_write_error.log"),
+        )
+        .unwrap_or_default();
+        // (the lines between them, the input files closed, are the
+        // engine's: the .log need not match)
         assert!(
-            term.lines()
-                .any(|l| l.starts_with("error") && l.contains("bad.png: libpng: internal error")),
-            "-j{j}: no error for the image:\n{term}"
+            log.lines().any(|l| l == fail)
+                && log.contains(" ==> Fatal error occurred, no output PDF file produced!"),
+            "-j{j}: the log has not pdftex's fatal error:\n{log}"
+        );
+        assert!(
+            !term.contains("pdfTeX error: pdfTeX error"),
+            "-j{j}: the error said twice:\n{term}"
         );
     }
 }
