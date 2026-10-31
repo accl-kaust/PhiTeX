@@ -868,6 +868,8 @@ export class Panel {
     const errs = this.lastStatus?.diagnostics?.filter((d) => d.severity === "error").length ?? 0;
     let t: string, m = "", err = false;
     if (this.offline) (t = "Disconnected"), (err = true);
+    // (an opening up: its step (loading the compiler, fetching, typesetting), not "Building…")
+    else if (this.firstPending() && this.stepNow) t = this.stepNow;
     else if (this.pkgNow) (t = "Fetching packages…"), (m = `${this.pkgNow.done} of ${this.pkgNow.total}`);
     else if (running) {
       const s = (now - (this.buildSince || this.prepSince)) / 1000;
@@ -1190,7 +1192,7 @@ export class Panel {
         if (this.stopped()) return;
         // (between two downloads, the build not yet begun: still fetching, not typesetting;
         // nothing downloaded at all (all kept on this machine): the step as it is)
-        if (this.typesetting) this.step(this.words.steps[2], undefined, `with ${done} package file${done === 1 ? "" : "s"}${mb(p.bytes)}`);
+        if (this.typesetting) this.step(this.words.steps[2], undefined, downloaded(done, p.bytes));
         else if (done) this.step(this.words.steps[1], pct, `${done} of ${total}${mb(p.bytes)}`);
         return;
       }
@@ -1201,7 +1203,7 @@ export class Panel {
         // (typesetting under way asks for a package as it reads: said under its step, not a step back to fetching and on again)
         if (this.typesetting) this.step(this.words.steps[2], undefined, `fetching ${what}`);
         else this.step(this.words.steps[1], pct, what);
-      } else (this.typesetting = true), this.step(this.words.steps[2], undefined, `with ${done} package file${done === 1 ? "" : "s"}; a build may ask for more`);
+      } else (this.typesetting = true), this.step(this.words.steps[2], undefined, downloaded(done, p.bytes));
       return;
     }
     this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source, failed: p.failed ?? [] } : undefined;
@@ -2052,7 +2054,7 @@ export class Panel {
     const esc = (t: string) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
     const n = d.busy ? `<span class="n busy">${esc(d.busy)}</span>` : `<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
     el.innerHTML =
-      `<span class="what" title="${esc(d.title)}">Diff vs ${esc(d.title)} <small>${esc(d.when)}</small></span>` +
+      `<span class="what" title="${esc(d.title)} against the current version">${esc(d.title)} vs current <small>${esc(d.when)}</small></span>` +
       `<button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>‹</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>›</button>` +
       `<span class="sep"></span><button data-a="toggle" class="${d.showing === "current" ? "cur" : ""}" title="Show the ${d.showing === "diff" ? "current version" : "diff"} (D)">${d.showing === "diff" ? "Current" : "Diff"}</button>` +
       `<button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>⬇ PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>⬇ .tex</button>` +
@@ -2349,6 +2351,9 @@ export class Panel {
 }
 
 type DarkPdf = "off" | "on" | "theme";
+
+/** The packages a first build downloaded, said under its step ("" when all were kept on this machine: none to count). */
+const downloaded = (n: number, bytes?: number) => (n ? `${n} package${n === 1 ? "" : "s"} downloaded${mb(bytes)}` : "");
 
 /** The loading animation: PhiTeX's opening, a Windows 98 setup dialog, or none. */
 type OpeningLook = "phitex" | "retro" | "off";
