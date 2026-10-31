@@ -88,12 +88,12 @@ differing object (`scripts/ci/pdfdiff.py`). Two lanes, one list:
   image's TeX Live.
 - **B, Shelf** (`research-shelf.yml`, nightly, not required): the same
   CLI with `--shelf`, a clean cache, from v1.shelf.phitex.org, against
-  the same TeX Live PDFs: what Shelf's release lacks shows here first.
-  A red is reported and fixed in Shelf, never waived. Shelf's release
-  (tl2026.7) is built from a later TeX Live revision than the image's
-  (packages such as pgf newer), so this lane also shows that skew
-  (ToUnicode CMaps, pgf's rule widths) until the oracle is built from the
-  same files Shelf serves (pending the user's decision).
+  TeX Live's own engines building each document from a texmf tree of the
+  same release's files alone, their formats made there by fmtutil
+  (`shelf/scripts/tl-tree.sh`, shared with Shelf's release check
+  `shelf/scripts/check.sh`), never the image's own tree: what Shelf's
+  release lacks or PhiTeX reads otherwise from it shows here. A red is
+  reported and fixed, never waived.
 Shelf's release check can read the same list. On mc: `CLUSTER=mc
 scripts/accl/gate-fast research`.
 

@@ -17,55 +17,14 @@
 set -u
 root=$ROOT rel=$REL label=$LABEL new=$NEW bin=$BIN w=$W out=$OUT
 mkdir -p "$w" "$out"
-tl() { # TeX Live's own, over the release's tree alone (and its web2c/: tcx)
-  env TEXMFDIST="$w/tree/texmf-dist" TEXMFLOCAL="$w/empty" TEXMFSYSVAR="$w/tlvar" TEXMFSYSCONFIG="$w/empty" \
-    TEXMFVAR="$w/tlvar" TEXMFCONFIG="$w/empty" TEXMFHOME="$w/empty" WEB2C="$tlroot/texmf-dist/web2c" \
-    TEXFORMATS="$w/fmt" FONTCONFIG_FILE="$w/fonts.conf" SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1 "$@"
-}
-cat > "$w/fonts.conf" <<CONF
-<?xml version="1.0"?>
-<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
-<fontconfig>
-  <dir>$FTREE/fonts/opentype</dir>
-  <dir>$FTREE/fonts/truetype</dir>
-  <cachedir>$w/fc-cache</cachedir>
-</fontconfig>
-CONF
+# (TeX Live's own over the release's tree alone: tl-tree.sh)
+. "$root/shelf/scripts/tl-tree.sh"
+mapfile -t tlenv < <(tl_vars "$w" "$w/tree/texmf-dist" "$FTREE")
+tl() { env "${tlenv[@]}" SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1 "$@"; }
 
 # (5) a texmf tree of the release's files, with its ls-R
-python3 - "$rel/$label" "$new" "$w/tree/texmf-dist" <<'PY' | tee -a "$out/summary.txt"
-import sys, os, gzip, struct
-rel, name, tree = sys.argv[1:]
-meta = __import__('json').load(open(f'{rel}/release-{name}.json'))
-rows = gzip.decompress(open(f"{rel}/{meta['index']}", 'rb').read()).decode().splitlines()
-table = gzip.decompress(open(f"{rel}/{meta['pack_table']}", 'rb').read()).decode().splitlines()
-packs = {r.split('\t')[1] for r in rows if '\t' in r}
-size = sum(int(t.split('\t')[2]) for t in table if t)
-dirs = {}
-for p in sorted(packs):
-    b = gzip.decompress(open(f'{rel}/h/{p}.pack', 'rb').read())
-    n = struct.unpack('<I', b[:4])[0]; at = 4
-    for _ in range(n):
-        k = struct.unpack('<I', b[at:at+4])[0]; path = b[at+4:at+4+k].decode(); at += 4 + k
-        l = struct.unpack('<I', b[at:at+4])[0]; data = b[at+4:at+4+l]; at += 4 + l
-        f = os.path.join(tree, path); os.makedirs(os.path.dirname(f), exist_ok=True)
-        open(f, 'wb').write(data)
-        d, base = os.path.split(path); dirs.setdefault(d, []).append(base)
-kids = {}
-for d in list(dirs):
-    parts = d.split('/')
-    for i in range(len(parts)):
-        kids.setdefault('/'.join(parts[:i]), set()).add(parts[i])
-with open(os.path.join(tree, 'ls-R'), 'w') as o:
-    o.write('% ls-R -- filename database for kpathsea; do not change this line.\n')
-    for d in sorted(set(dirs) | set(kids)):
-        o.write(f"\n./{d}:\n" if d else "\n./:\n")
-        for e in sorted(set(dirs.get(d, [])) | kids.get(d, set())):
-            o.write(e + '\n')
-print(f"{name}: {len(rows)} paths in {len(packs)} packs, {size / 1e6:.0f} MB as served")
-PY
+tree_unpack "$rel/$label" "$new" "$w/tree/texmf-dist" | tee -a "$out/summary.txt"
 
-tlroot=$(kpsewhich -var-value=TEXMFROOT)
 # (5b) every font of TeX Live's own pdftex.map (the CI image's install) in the release's
 fails=0
 sh -c 'cat "$(kpsewhich pdftex.map)"' > "$w/tl-pdftex.map"
@@ -95,11 +54,8 @@ engine() { e=$(sed -n 's/^% engine: \([a-z]*\).*/\1/p' "$w/docs/$1" | head -1); 
 # (6a) TeX Live's engines: their formats made by fmtutil (TeX Live's
 # fmtutil.cnf) from the release's tree, then each document, run until its
 # .aux settles
-sh -c 'cat "$(kpsewhich fmtutil.cnf)"' > "$w/fmtutil.cnf"
-for f in pdftex pdflatex xetex xelatex; do
-  tl fmtutil-sys --cnffile "$w/fmtutil.cnf" --fmtdir "$w/fmt" --byfmt $f >> "$out/fmt.log" 2>&1 || true
-done
-find "$w/fmt" -mindepth 2 -name '*.fmt' -exec mv {} "$w/fmt/" \;
+tl_formats "$w"
+cp "$w/fmt.log" "$out/fmt.log" 2>/dev/null
 echo "TeX Live's formats from the release: $(cd "$w/fmt" && ls *.fmt 2>/dev/null | tr '\n' ' ')" | tee -a "$out/summary.txt"
 for d in $docs; do
   n=${d%.tex} e=$(engine "$d")

@@ -1,8 +1,10 @@
 # The research corpus with --shelf (docs/ci.md, Lane B): ci/research.json
 # built by the users' CLI from Shelf as served (v1.shelf.phitex.org, this
 # commit's shelf::RELEASE, a clean cache) and compared byte for byte with
-# TeX Live's own PDFs of the same documents (the oracle, built here in the
-# CI image as the gate's research shard builds it). Nightly and by hand;
+# TeX Live's own engines building the same documents from a texmf tree of
+# that release's files alone, their formats made there
+# (shelf/scripts/tl-tree.sh, as Shelf's release check makes it; the
+# release fetched from the host). Nightly and by hand;
 # not a check main requires: Shelf is released on its own schedule, so a
 # red here says what Shelf's release lacks (for example the base fonts'
 # map lines), to be fixed in Shelf, not waived here.

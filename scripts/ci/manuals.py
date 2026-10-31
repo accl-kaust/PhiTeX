@@ -276,6 +276,14 @@ def side_env(engine, extra=None, phitex=False, formats=None):
         if formats:
             e["TEXFORMATS"] = f"{formats}:"
             e["PHITEX_FORMATS"] = str(formats)
+    if not phitex and os.environ.get("CI_ORACLE_ENV"):
+        # (the oracle's TeX Live over another tree: VAR=VALUE lines, as
+        # shelf/scripts/tl-tree.sh's tl_vars writes them for a Shelf
+        # release's files alone)
+        for line in Path(os.environ["CI_ORACLE_ENV"]).read_text().splitlines():
+            k, sep, v = line.partition("=")
+            if sep:
+                e[k] = v
     if extra:
         e.update(extra)
     return common.env(e)

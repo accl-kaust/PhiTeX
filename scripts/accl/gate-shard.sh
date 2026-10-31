@@ -28,7 +28,8 @@
 #                                       differs, a build or an oracle that
 #                                       fails. `shelf`: the CLI with --shelf
 #                                       (Shelf as served, the network), against
-#                                       the same TeX Live PDFs (not the gate:
+#                                       TeX Live's engines over the same
+#                                       release's files alone (not the gate:
 #                                       research-shelf.yml). In the -doc image
 #                                       (its language collections)
 #   gate-shard.sh manuals K N           TeX Live's manuals (ci/manuals.json), shard
@@ -581,6 +582,26 @@ PY
     else
       export CI_WORK=$w/ci
       mkdir -p "$CI_WORK" "$r/oracle"
+      if [ "$mode" = shelf ]; then
+        # (the oracle: TeX Live's own engines over a texmf tree of the
+        # release this commit builds in, as served, and nothing else
+        # (shelf/scripts/tl-tree.sh, as Shelf's release check makes it),
+        # their formats made there; the release fetched from the host)
+        rel=$(sed -n 's/^pub const RELEASE: &str = "\(.*\)";/\1/p' crates/cli/src/shelf.rs)
+        s0=$(date +%s)
+        python3 -I shelf/scripts/fetch-live.py "${SHELF_HOST:-https://v1.shelf.phitex.org}" "${rel%%.*}" "$w/releases" > "$r/shelf-tree.txt" 2>&1 ||
+          red "research: fetching Shelf's releases failed: $(tail -1 "$r/shelf-tree.txt")"
+        . shelf/scripts/tl-tree.sh
+        tree_unpack "$w/releases/${rel%%.*}" "$rel" "$w/tl/tree/texmf-dist" >> "$r/shelf-tree.txt" 2>&1 ||
+          red "research: unpacking $rel failed: $(tail -1 "$r/shelf-tree.txt")"
+        tl_vars "$w/tl" "$w/tl/tree/texmf-dist" "$w/tl/tree/texmf-dist" > "$w/tl/env.txt"
+        mapfile -t tlenv < "$w/tl/env.txt"
+        tl() { env "${tlenv[@]}" SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1 "$@"; }
+        tl_formats "$w/tl"
+        cp "$w/tl/fmt.log" "$r/shelf-fmt.log" 2>/dev/null
+        echo "$rel: TeX Live's formats from its files: $(cd "$w/tl/fmt" && ls *.fmt 2>/dev/null | tr '\n' ' ') ($(( $(date +%s) - s0 )) s)" >> "$r/shelf-tree.txt"
+        export CI_ORACLE_ENV=$w/tl/env.txt
+      fi
       P=${GATE_RESEARCH_PAR:-4}
       s0=$(date +%s)
       for ((i = 0; i < P; i++)); do
