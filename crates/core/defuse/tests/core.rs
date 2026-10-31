@@ -467,6 +467,8 @@ fn a_fold_is_a_monoid_over_segments() {
     let (e, o) = engine();
     let v = e.values();
     let s = f(v, "s");
+    let seq = Arc::new(CountedSeq::default());
+    e.declare_accumulator(Field(s), seq.clone());
     let u = e.new_unit();
     let cs: Vec<NodeId> = (0..5000).map(|i| e.push(u, o.contrib, vec![s, v.int(i)])).collect();
     let r = e.push(u, o.fold, vec![s]);
@@ -483,12 +485,27 @@ fn a_fold_is_a_monoid_over_segments() {
     );
 
     e.replace(cs[2500], o.contrib, vec![s, v.int(-1)]);
+    seq.0.store(0, Ordering::SeqCst);
+    seq.1.store(0, Ordering::SeqCst);
     let t = Instant::now();
     let rep = e.evaluate(4).unwrap();
+    let (combined, folds) = (seq.0.load(Ordering::SeqCst), seq.1.load(Ordering::SeqCst));
+    // (the time measured, not asserted: a loaded machine's)
+    eprintln!(
+        "the fold again after an edit: {:?}, {folds} folds, {combined} combines over {} segments",
+        t.elapsed(),
+        rep.segments
+    );
+    // (a fold over the items would combine 4999 a fold; over segment sums
+    // it combines one a segment, and reduces at most two segments' own
+    // contributions, the edited one's sum made again and the reader's
+    // part of its own: a segment holds at most 64 nodes, `order::SEG_CAP`)
+    assert!(folds >= 1, "the reader folded again");
     assert!(
-        !timing() || t.elapsed() < Duration::from_millis(10),
-        "a fold over segment sums, not over 5000 items: {:?}",
-        t.elapsed()
+        combined <= folds * (u64::from(rep.segments) + 2 * 64),
+        "a fold over segment sums, not over 5000 items: {combined} combines in {folds} folds \
+         over {} segments",
+        rep.segments
     );
     let xs = e.values().seq_to_vec(e.output(r).unwrap());
     assert_eq!(e.values().as_int(xs[2500]), Some(-1));
@@ -1270,8 +1287,28 @@ fn a_claim_reads_its_siblings_in_one_pass() {
     );
 }
 
-/// Integer sum whose every combine takes 300 microseconds.
-struct SlowSum;
+/// Sequence concatenation, the default fold, its combines counted, and
+/// its folds (each starts from the empty sequence, `read::fold`).
+#[derive(Default)]
+struct CountedSeq(AtomicU64, AtomicU64);
+
+impl phitex_defuse::Monoid for CountedSeq {
+    fn empty(&self, v: &Values) -> ValueId {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        phitex_defuse::SeqMonoid.empty(v)
+    }
+
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        phitex_defuse::SeqMonoid.combine(v, a, b)
+    }
+}
+
+/// Integer sum whose every combine takes 300 microseconds; its combines
+/// counted, and those made with one of the engine's locks held
+/// ([`phitex_defuse::locks_held`]).
+#[derive(Default)]
+struct SlowSum(AtomicU64, AtomicU64);
 
 impl phitex_defuse::Monoid for SlowSum {
     fn empty(&self, v: &Values) -> ValueId {
@@ -1279,6 +1316,10 @@ impl phitex_defuse::Monoid for SlowSum {
     }
 
     fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        if phitex_defuse::locks_held() > 0 {
+            self.1.fetch_add(1, Ordering::SeqCst);
+        }
         spin(Duration::from_micros(300));
         v.int(v.as_int(a).unwrap_or(0) + v.as_int(b).unwrap_or(0))
     }
@@ -1292,7 +1333,8 @@ fn a_fold_sums_a_segment_outside_its_lock() {
     let (e, o) = engine();
     let v = e.values();
     let s = f(v, "s");
-    e.declare_accumulator(Field(s), Arc::new(SlowSum));
+    let sum = Arc::new(SlowSum::default());
+    e.declare_accumulator(Field(s), sum.clone());
     let u = e.new_unit();
     for i in 0..60 {
         e.push(u, o.contrib, vec![s, v.int(i)]);
@@ -1301,10 +1343,13 @@ fn a_fold_sums_a_segment_outside_its_lock() {
         }
     }
     let r = e.evaluate(8).unwrap();
-    assert!(
-        !timing() || r.times.lock_wait_max_ns < 3_000_000,
-        "a lock waited for a fold's sum: {:?}",
-        r.times
+    // (the longest lock wait measured, not asserted: a loaded machine's)
+    eprintln!("the longest lock wait: {} ns", r.times.lock_wait_max_ns);
+    let (combined, locked) = (sum.0.load(Ordering::SeqCst), sum.1.load(Ordering::SeqCst));
+    assert!(combined > 0, "the folds combined their sums");
+    assert_eq!(
+        locked, 0,
+        "of {combined} combines, {locked} ran with one of the engine's locks held"
     );
 }
 

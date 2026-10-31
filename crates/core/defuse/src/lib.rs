@@ -83,6 +83,7 @@ pub use api::{
 };
 pub use ctx::{Ctx, View};
 pub use engine::Engine;
+pub use lock::held as locks_held;
 pub use read::{alias_of, alias_value};
 
 /// The stack of every thread a run is made on (the evaluation's own and

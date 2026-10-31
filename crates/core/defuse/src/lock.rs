@@ -28,16 +28,60 @@
 //! hundred times before it blocks, and adds its wait to the thread's count, which the pool sums into [`crate::Times::lock_wait_ns`].
 
 use std::cell::Cell;
+use std::ops::{Deref, DerefMut};
 use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 use std::time::Instant;
-
-/// A held write guard of a [`Lock`].
-pub(crate) type WriteGuard<'a, T> = RwLockWriteGuard<'a, T>;
 
 thread_local! {
     static WAIT_NS: Cell<u64> = const { Cell::new(0) };
     static WAIT_MAX_NS: Cell<u64> = const { Cell::new(0) };
+    /// The guards of the table's locks this thread holds ([`held`]).
+    static HELD: Cell<u32> = const { Cell::new(0) };
 }
+
+/// How many of the table's locks this thread holds now: none while an
+/// operation runs, nor while a monoid combines (`read::segment_part`);
+/// what a check of either asks (a client's test, a debug assertion).
+#[must_use]
+pub fn held() -> u32 {
+    HELD.with(Cell::get)
+}
+
+/// A guard counted in [`held`] while it lives.
+pub(crate) struct Held<G>(G);
+
+impl<G> Held<G> {
+    fn new(g: G) -> Held<G> {
+        HELD.with(|c| c.set(c.get() + 1));
+        Held(g)
+    }
+}
+
+impl<G> Drop for Held<G> {
+    fn drop(&mut self) {
+        HELD.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+impl<G: Deref> Deref for Held<G> {
+    type Target = G::Target;
+    fn deref(&self) -> &G::Target {
+        &self.0
+    }
+}
+
+impl<G: DerefMut> DerefMut for Held<G> {
+    fn deref_mut(&mut self) -> &mut G::Target {
+        &mut self.0
+    }
+}
+
+/// A held shared guard of a [`Lock`].
+pub(crate) type ReadGuard<'a, T> = Held<RwLockReadGuard<'a, T>>;
+/// A held write guard of a [`Lock`].
+pub(crate) type WriteGuard<'a, T> = Held<RwLockWriteGuard<'a, T>>;
+/// A held guard of an [`Mx`].
+pub(crate) type MxGuard<'a, T> = Held<MutexGuard<'a, T>>;
 
 pub(crate) struct Lock<T>(RwLock<T>);
 
@@ -48,7 +92,12 @@ impl<T> Lock<T> {
 
     /// A shared guard: `try_read` first, and only a refused try is timed.
     #[cfg_attr(feature = "profile", track_caller)]
-    pub(crate) fn read(&self) -> RwLockReadGuard<'_, T> {
+    pub(crate) fn read(&self) -> ReadGuard<'_, T> {
+        Held::new(self.read_inner())
+    }
+
+    #[cfg_attr(feature = "profile", track_caller)]
+    fn read_inner(&self) -> RwLockReadGuard<'_, T> {
         match self.0.try_read() {
             Ok(g) => return g,
             Err(TryLockError::Poisoned(p)) => return p.into_inner(),
@@ -69,7 +118,12 @@ impl<T> Lock<T> {
 
     /// An exclusive guard, timed as `read`.
     #[cfg_attr(feature = "profile", track_caller)]
-    pub(crate) fn write(&self) -> RwLockWriteGuard<'_, T> {
+    pub(crate) fn write(&self) -> WriteGuard<'_, T> {
+        Held::new(self.write_inner())
+    }
+
+    #[cfg_attr(feature = "profile", track_caller)]
+    fn write_inner(&self) -> RwLockWriteGuard<'_, T> {
         match self.0.try_write() {
             Ok(g) => return g,
             Err(TryLockError::Poisoned(p)) => return p.into_inner(),
@@ -98,7 +152,12 @@ impl<T> Mx<T> {
 
     /// A guard, timed as `Lock::read`.
     #[cfg_attr(feature = "profile", track_caller)]
-    pub(crate) fn lock(&self) -> MutexGuard<'_, T> {
+    pub(crate) fn lock(&self) -> MxGuard<'_, T> {
+        Held::new(self.lock_inner())
+    }
+
+    #[cfg_attr(feature = "profile", track_caller)]
+    fn lock_inner(&self) -> MutexGuard<'_, T> {
         match self.0.try_lock() {
             Ok(g) => return g,
             Err(TryLockError::Poisoned(p)) => return p.into_inner(),
@@ -118,10 +177,10 @@ impl<T> Mx<T> {
     }
 
     /// A guard if it is free now, never waited for.
-    pub(crate) fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+    pub(crate) fn try_lock(&self) -> Option<MxGuard<'_, T>> {
         match self.0.try_lock() {
-            Ok(g) => Some(g),
-            Err(TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Ok(g) => Some(Held::new(g)),
+            Err(TryLockError::Poisoned(p)) => Some(Held::new(p.into_inner())),
             Err(TryLockError::WouldBlock) => None,
         }
     }
@@ -260,3 +319,26 @@ pub(crate) const SITE_FILES: [&str; 10] = [
 
 /// (`profile`) The lock waits by [`SITE_FILES`], nanoseconds.
 pub(crate) static SITE_WAITS: [std::sync::atomic::AtomicU64; 11] = [const { std::sync::atomic::AtomicU64::new(0) }; 11];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each guard of the table's locks counts in [`held`] while it lives.
+    #[test]
+    fn guards_are_counted_while_held() {
+        let (a, b) = (Lock::new(1), Mx::new(2));
+        assert_eq!(held(), 0);
+        let r = a.read();
+        let m = b.lock();
+        assert_eq!((*r, *m, held()), (1, 2, 2));
+        drop(r);
+        assert_eq!(held(), 1);
+        drop(m);
+        let w = a.write();
+        assert_eq!(held(), 1);
+        drop(w);
+        assert!(b.try_lock().is_some());
+        assert_eq!(held(), 0);
+    }
+}
