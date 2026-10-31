@@ -1676,9 +1676,15 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         out.vfs.insert(f, VirtualFont { fonts, packets });
     }
     // the expanded virtual fonts: the base's packets, each local font the
-    // base's expanded anew (`auto_expand_vf`)
-    for k in 0..known.len() {
+    // base's expanded anew (`auto_expand_vf`); a local font so expanded
+    // whose base is virtual too is an expanded virtual font in turn
+    // (`do_vf` of it calls `auto_expand_vf` again: microtype's
+    // letter-spaced small caps, a virtual font over mathpazo's virtual
+    // `pplrc9d`, expanded), so the fonts pushed here are walked as well
+    let mut k = 0;
+    while k < known.len() {
         let (f, ex) = (known[k].0, known[k].1.ex);
+        k += 1;
         let Some((b, e, true)) = ex else { continue };
         let Some(bvf) = u32::try_from(b).ok().and_then(|b| out.vfs.get(&b)).cloned() else {
             continue;

@@ -175,3 +175,7 @@ repro!(
     pdftexbanner_producer,
     "research corpus (acmart): hyperxmp makes /Producer of \\pdftexbanner, pdfTeX's pdftex_banner with TeX Live's and kpathsea's versions; PhiTeX's lacked ' (TeX Live 2026/Arch Linux) kpathsea version 6.4.2'"
 );
+repro!(
+    letterspaced_vf_expansion,
+    "research corpus (classicthesis): microtype's \\textls (\\letterspacefont, a virtual font) over mathpazo's virtual small caps pplrc9d, with font expansion: the expanded local font of an expanded virtual font is an expanded virtual font in turn (pdfTeX's auto_expand_vf through do_vf); PhiTeX took 'pplrc9d-9' for a real font, 'Font pplrc9d+7 not found (no entry in the font map)', no PDF"
+);
