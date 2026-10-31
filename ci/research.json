@@ -468,20 +468,20 @@
    "id": "chicago-notes",
    "field": "history / humanities",
    "class": "article + biblatex-chicago (notes)",
-   "engine": "xelatex",
+   "engine": "pdflatex",
    "dir": "chicago-notes",
-   "main": "cms-notes-sample.tex",
-   "path": "chicago-notes/cms-notes-sample.tex",
+   "main": "chicago-notes.tex",
+   "path": "chicago-notes/chicago-notes.tex",
    "source": {
+    "written": "written for this corpus (PhiTeX's own); notes-test.bib is TeX Live's",
     "texlive_package": "biblatex-chicago",
     "texlive_files": [
-     "doc/latex/biblatex-chicago/cms-notes-sample.tex",
      "doc/latex/biblatex-chicago/notes-test.bib"
     ],
     "ctan": "https://ctan.org/pkg/biblatex-chicago"
    },
-   "licence": "lppl1.3",
-   "note": "biber; fontspec (Gentium Plus, Clear Sans, Latin Modern Mono, AR PL BSMI by file): XeLaTeX"
+   "licence": "AGPL-3.0-only (this repository's); notes-test.bib lppl1.3",
+   "note": "biber; TeX Live's cms-notes-sample.tex needs Gentium Plus, which TeX Live does not ship (its oracle: \\textfont errors)"
   },
   {
    "id": "koma-humanities",
@@ -665,6 +665,598 @@
    },
    "licence": "AGPL-3.0-only (this repository's)",
    "note": "Chinese in Fandol, Japanese in IPAex"
+  },
+  {
+   "id": "ieee-conf-xe",
+   "field": "CS / electrical engineering",
+   "class": "IEEEtran (conference)",
+   "engine": "xelatex",
+   "dir": "ieeetran",
+   "main": "bare_conf.tex",
+   "path": "ieeetran/bare_conf.tex",
+   "source": {
+    "texlive_package": "ieeetran",
+    "texlive_files": [
+     "doc/latex/ieeetran/bare_conf.tex"
+    ],
+    "ctan": "https://ctan.org/pkg/ieeetran"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as ieee-conf, under XeLaTeX"
+  },
+  {
+   "id": "classicthesis-xe",
+   "field": "thesis (any field)",
+   "class": "scrreprt + classicthesis",
+   "engine": "xelatex",
+   "dir": "classicthesis",
+   "main": "ClassicThesis.tex",
+   "path": "classicthesis/ClassicThesis.tex",
+   "source": {
+    "texlive_package": "classicthesis",
+    "texlive_files": [
+     "doc/latex/classicthesis/ (ClassicThesis.tex, classicthesis-config.tex, Bibliography.bib, AMiede_Publications.bib, Chapters/, FrontBackmatter/, gfx/, Examples/)"
+    ],
+    "ctan": "https://ctan.org/pkg/classicthesis"
+   },
+   "licence": "gpl2+",
+   "note": "the same file as classicthesis, under XeLaTeX"
+  },
+  {
+   "id": "ieee-jrnl-xe",
+   "field": "CS / electrical engineering",
+   "class": "IEEEtran (journal)",
+   "engine": "xelatex",
+   "dir": "ieeetran",
+   "main": "bare_jrnl.tex",
+   "path": "ieeetran/bare_jrnl.tex",
+   "source": {
+    "texlive_package": "ieeetran",
+    "texlive_files": [
+     "doc/latex/ieeetran/bare_jrnl.tex"
+    ],
+    "ctan": "https://ctan.org/pkg/ieeetran"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as ieee-jrnl, under XeLaTeX"
+  },
+  {
+   "id": "acm-sigconf-xe",
+   "field": "CS",
+   "class": "acmart (sigconf)",
+   "engine": "xelatex",
+   "dir": "acmart",
+   "main": "sample-sigconf.tex",
+   "path": "acmart/sample-sigconf.tex",
+   "source": {
+    "texlive_package": "acmart",
+    "texlive_files": [
+     "doc/latex/acmart/samples/sample-sigconf.tex",
+     "doc/latex/acmart/samples/sample-base.bib",
+     "doc/latex/acmart/samples/software.bib",
+     "doc/latex/acmart/samples/sampleteaser.pdf",
+     "doc/latex/acmart/samples/sample-franklin.png"
+    ],
+    "ctan": "https://ctan.org/pkg/acmart"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as acm-sigconf, under XeLaTeX"
+  },
+  {
+   "id": "ieee-compsoc-xe",
+   "field": "CS",
+   "class": "IEEEtran (Computer Society journal)",
+   "engine": "xelatex",
+   "dir": "ieeetran",
+   "main": "bare_jrnl_compsoc.tex",
+   "path": "ieeetran/bare_jrnl_compsoc.tex",
+   "source": {
+    "texlive_package": "ieeetran",
+    "texlive_files": [
+     "doc/latex/ieeetran/bare_jrnl_compsoc.tex"
+    ],
+    "ctan": "https://ctan.org/pkg/ieeetran"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as ieee-compsoc, under XeLaTeX"
+  },
+  {
+   "id": "acm-acmsmall-xe",
+   "field": "CS",
+   "class": "acmart (acmsmall)",
+   "engine": "xelatex",
+   "dir": "acmart",
+   "main": "sample-acmsmall.tex",
+   "path": "acmart/sample-acmsmall.tex",
+   "source": {
+    "texlive_package": "acmart",
+    "texlive_files": [
+     "doc/latex/acmart/samples/sample-acmsmall.tex"
+    ],
+    "ctan": "https://ctan.org/pkg/acmart"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as acm-acmsmall, under XeLaTeX"
+  },
+  {
+   "id": "acm-sigplan-xe",
+   "field": "CS (programming languages)",
+   "class": "acmart (sigplan)",
+   "engine": "xelatex",
+   "dir": "acmart",
+   "main": "sample-sigplan.tex",
+   "path": "acmart/sample-sigplan.tex",
+   "source": {
+    "texlive_package": "acmart",
+    "texlive_files": [
+     "doc/latex/acmart/samples/sample-sigplan.tex"
+    ],
+    "ctan": "https://ctan.org/pkg/acmart"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as acm-sigplan, under XeLaTeX"
+  },
+  {
+   "id": "acm-sigconf-biblatex-xe",
+   "field": "CS",
+   "class": "acmart (sigconf) + biblatex",
+   "engine": "xelatex",
+   "dir": "acmart",
+   "main": "sample-sigconf-biblatex.tex",
+   "path": "acmart/sample-sigconf-biblatex.tex",
+   "source": {
+    "texlive_package": "acmart",
+    "texlive_files": [
+     "doc/latex/acmart/samples/sample-sigconf-biblatex.tex"
+    ],
+    "ctan": "https://ctan.org/pkg/acmart"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as acm-sigconf-biblatex, under XeLaTeX"
+  },
+  {
+   "id": "llncs-xe",
+   "field": "CS",
+   "class": "llncs (Springer LNCS)",
+   "engine": "xelatex",
+   "dir": "llncs-paper",
+   "main": "llncs-paper.tex",
+   "path": "llncs-paper/llncs-paper.tex",
+   "source": {
+    "written": "written for this corpus (PhiTeX's own)"
+   },
+   "licence": "AGPL-3.0-only (this repository's)",
+   "note": "the same file as llncs, under XeLaTeX"
+  },
+  {
+   "id": "elsarticle-xe",
+   "field": "any (Elsevier journals)",
+   "class": "elsarticle (preprint, numeric)",
+   "engine": "xelatex",
+   "dir": "elsarticle",
+   "main": "elsarticle-template-num.tex",
+   "path": "elsarticle/elsarticle-template-num.tex",
+   "source": {
+    "texlive_package": "elsarticle",
+    "texlive_files": [
+     "doc/latex/elsarticle/elsarticle-template-num.tex"
+    ],
+    "ctan": "https://ctan.org/pkg/elsarticle"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as elsarticle, under XeLaTeX"
+  },
+  {
+   "id": "els-cas-dc-xe",
+   "field": "any (Elsevier journals)",
+   "class": "cas-dc (Elsevier CAS, two columns)",
+   "engine": "xelatex",
+   "dir": "els-cas-dc",
+   "main": "cas-dc-sample.tex",
+   "path": "els-cas-dc/cas-dc-sample.tex",
+   "source": {
+    "texlive_package": "els-cas-templates",
+    "texlive_files": [
+     "doc/latex/els-cas-templates/cas-dc-sample.tex",
+     "doc/latex/els-cas-templates/cas-refs.bib",
+     "doc/latex/els-cas-templates/figs/"
+    ],
+    "ctan": "https://ctan.org/pkg/els-cas-templates"
+   },
+   "licence": "lppl",
+   "note": "the same file as els-cas-dc, under XeLaTeX"
+  },
+  {
+   "id": "jmlr-pmlr-xe",
+   "field": "machine learning",
+   "class": "jmlr [pmlr] (JMLR / PMLR proceedings)",
+   "engine": "xelatex",
+   "dir": "jmlr-pmlr",
+   "main": "pmlr-sample.tex",
+   "path": "jmlr-pmlr/pmlr-sample.tex",
+   "source": {
+    "texlive_package": "jmlr",
+    "texlive_files": [
+     "doc/latex/jmlr/pmlr-sample.tex",
+     "doc/latex/jmlr/pmlr-sample.bib"
+    ],
+    "ctan": "https://ctan.org/pkg/jmlr"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as jmlr-pmlr, under XeLaTeX"
+  },
+  {
+   "id": "asmeconf-xe",
+   "field": "mechanical engineering",
+   "class": "asmeconf",
+   "engine": "xelatex",
+   "dir": "asmeconf",
+   "main": "asmeconf-template.tex",
+   "path": "asmeconf/asmeconf-template.tex",
+   "source": {
+    "texlive_package": "asmeconf",
+    "texlive_files": [
+     "doc/latex/asmeconf/asmeconf-template.tex",
+     "doc/latex/asmeconf/asmeconf-sample.bib",
+     "doc/latex/asmeconf/sample-figure-1.pdf",
+     "doc/latex/asmeconf/sample-figure-2a.pdf",
+     "doc/latex/asmeconf/sample-figure-2b.pdf"
+    ],
+    "ctan": "https://ctan.org/pkg/asmeconf"
+   },
+   "licence": "mit",
+   "note": "the same file as asmeconf, under XeLaTeX"
+  },
+  {
+   "id": "revtex-aps-xe",
+   "field": "physics",
+   "class": "revtex4-2 (APS)",
+   "engine": "xelatex",
+   "dir": "revtex-aps",
+   "main": "apssamp.tex",
+   "path": "revtex-aps/apssamp.tex",
+   "source": {
+    "texlive_package": "revtex",
+    "texlive_files": [
+     "doc/latex/revtex/sample/aps/apssamp.tex",
+     "doc/latex/revtex/sample/aps/apssamp.bib",
+     "doc/latex/revtex/sample/aps/fig_1.eps",
+     "doc/latex/revtex/sample/aps/fig_2.eps",
+     "doc/latex/revtex/sample/aps/vid_1a.eps",
+     "doc/latex/revtex/sample/aps/vid_1b.eps"
+    ],
+    "ctan": "https://ctan.org/pkg/revtex"
+   },
+   "licence": "lppl1.3c",
+   "note": "the same file as revtex-aps, under XeLaTeX"
+  },
+  {
+   "id": "revtex-aip-xe",
+   "field": "physics",
+   "class": "revtex4-2 (AIP)",
+   "engine": "xelatex",
+   "dir": "revtex-aip",
+   "main": "aipsamp.tex",
+   "path": "revtex-aip/aipsamp.tex",
+   "source": {
+    "texlive_package": "revtex",
+    "texlive_files": [
+     "doc/latex/revtex/sample/aip/aipsamp.tex",
+     "doc/latex/revtex/sample/aip/aipsamp.bib",
+     "doc/latex/revtex/sample/aip/fig_1.eps",
+     "doc/latex/revtex/sample/aip/fig_2.eps"
+    ],
+    "ctan": "https://ctan.org/pkg/revtex"
+   },
+   "licence": "lppl1.3c",
+   "note": "the same file as revtex-aip, under XeLaTeX"
+  },
+  {
+   "id": "aastex-xe",
+   "field": "astronomy",
+   "class": "aastex701 (AAS journals)",
+   "engine": "xelatex",
+   "dir": "aastex",
+   "main": "aastex701-sample.tex",
+   "path": "aastex/aastex701-sample.tex",
+   "source": {
+    "texlive_package": "aastex",
+    "texlive_files": [
+     "doc/latex/aastex/aastex701-sample.tex",
+     "doc/latex/aastex/aastex701-sample.bib",
+     "doc/latex/aastex/AuthorChargeInfographic.png",
+     "doc/latex/aastex/orcid-ID.png"
+    ],
+    "ctan": "https://ctan.org/pkg/aastex"
+   },
+   "licence": "lppl1.3c",
+   "note": "the same file as aastex, under XeLaTeX"
+  },
+  {
+   "id": "mnras-xe",
+   "field": "astronomy",
+   "class": "mnras",
+   "engine": "xelatex",
+   "dir": "mnras",
+   "main": "mnras_template.tex",
+   "path": "mnras/mnras_template.tex",
+   "source": {
+    "texlive_package": "mnras",
+    "texlive_files": [
+     "doc/latex/mnras/mnras_template.tex",
+     "doc/latex/mnras/example.bib",
+     "doc/latex/mnras/example.png"
+    ],
+    "ctan": "https://ctan.org/pkg/mnras"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as mnras, under XeLaTeX"
+  },
+  {
+   "id": "amsart-xe",
+   "field": "mathematics",
+   "class": "amsart",
+   "engine": "xelatex",
+   "dir": "amscls",
+   "main": "amsart-template.tex",
+   "path": "amscls/amsart-template.tex",
+   "source": {
+    "texlive_package": "amscls",
+    "texlive_files": [
+     "doc/latex/amscls/amsart-template.tex"
+    ],
+    "ctan": "https://ctan.org/pkg/amscls"
+   },
+   "licence": "lppl1.3c",
+   "note": "the same file as amsart, under XeLaTeX"
+  },
+  {
+   "id": "amsbook-xe",
+   "field": "mathematics",
+   "class": "amsbook",
+   "engine": "xelatex",
+   "dir": "amsbook",
+   "main": "amsbook-monograph.tex",
+   "path": "amsbook/amsbook-monograph.tex",
+   "source": {
+    "written": "written for this corpus (PhiTeX's own)"
+   },
+   "licence": "AGPL-3.0-only (this repository's)",
+   "note": "the same file as amsbook, under XeLaTeX"
+  },
+  {
+   "id": "aomart-xe",
+   "field": "mathematics",
+   "class": "aomart (Annals of Mathematics)",
+   "engine": "xelatex",
+   "dir": "aomart",
+   "main": "aomsample.tex",
+   "path": "aomart/aomsample.tex",
+   "source": {
+    "texlive_package": "aomart",
+    "texlive_files": [
+     "doc/latex/aomart/aomsample.tex",
+     "doc/latex/aomart/aomsample.bib"
+    ],
+    "ctan": "https://ctan.org/pkg/aomart"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as aomart, under XeLaTeX"
+  },
+  {
+   "id": "achemso-xe",
+   "field": "chemistry",
+   "class": "achemso (ACS journals)",
+   "engine": "xelatex",
+   "dir": "achemso",
+   "main": "achemso-demo.tex",
+   "path": "achemso/achemso-demo.tex",
+   "source": {
+    "texlive_package": "achemso",
+    "texlive_files": [
+     "doc/latex/achemso/achemso-demo.tex",
+     "doc/latex/achemso/achemso-demo.bib"
+    ],
+    "ctan": "https://ctan.org/pkg/achemso"
+   },
+   "licence": "lppl1.3c other-free",
+   "note": "the same file as achemso, under XeLaTeX"
+  },
+  {
+   "id": "chem-common-xe",
+   "field": "chemistry / biology",
+   "class": "article + mhchem, chemfig, siunitx",
+   "engine": "xelatex",
+   "dir": "chem-common",
+   "main": "chem-common.tex",
+   "path": "chem-common/chem-common.tex",
+   "source": {
+    "written": "written for this corpus (PhiTeX's own)"
+   },
+   "licence": "AGPL-3.0-only (this repository's)",
+   "note": "the same file as chem-common, under XeLaTeX"
+  },
+  {
+   "id": "nature-xe",
+   "field": "biology / general science",
+   "class": "nature",
+   "engine": "xelatex",
+   "dir": "nature",
+   "main": "nature-template.tex",
+   "path": "nature/nature-template.tex",
+   "source": {
+    "texlive_package": "nature",
+    "texlive_files": [
+     "doc/latex/nature/nature-template.tex"
+    ],
+    "ctan": "https://ctan.org/pkg/nature"
+   },
+   "licence": "lppl",
+   "note": "the same file as nature, under XeLaTeX"
+  },
+  {
+   "id": "apa7-xe",
+   "field": "psychology / social sciences",
+   "class": "apa7 (man) + biblatex-apa",
+   "engine": "xelatex",
+   "dir": "apa7",
+   "main": "longsample.tex",
+   "path": "apa7/longsample.tex",
+   "source": {
+    "texlive_package": "apa7",
+    "texlive_files": [
+     "doc/latex/apa7/samples/longsample.tex",
+     "doc/latex/apa7/samples/bibliography.bib",
+     "doc/latex/apa7/samples/Figure1.pdf"
+    ],
+    "ctan": "https://ctan.org/pkg/apa7"
+   },
+   "licence": "lppl1.3c",
+   "note": "the same file as apa7, under XeLaTeX"
+  },
+  {
+   "id": "chicago-notes-xe",
+   "field": "history / humanities",
+   "class": "article + biblatex-chicago (notes)",
+   "engine": "xelatex",
+   "dir": "chicago-notes",
+   "main": "chicago-notes.tex",
+   "path": "chicago-notes/chicago-notes.tex",
+   "source": {
+    "written": "written for this corpus (PhiTeX's own); notes-test.bib is TeX Live's",
+    "texlive_package": "biblatex-chicago",
+    "texlive_files": [
+     "doc/latex/biblatex-chicago/notes-test.bib"
+    ],
+    "ctan": "https://ctan.org/pkg/biblatex-chicago"
+   },
+   "licence": "AGPL-3.0-only (this repository's); notes-test.bib lppl1.3",
+   "note": "the same file as chicago-notes, under XeLaTeX"
+  },
+  {
+   "id": "koma-humanities-xe",
+   "field": "humanities",
+   "class": "scrartcl + babel, csquotes, biblatex authoryear",
+   "engine": "xelatex",
+   "dir": "koma-humanities",
+   "main": "koma-humanities.tex",
+   "path": "koma-humanities/koma-humanities.tex",
+   "source": {
+    "written": "written for this corpus (PhiTeX's own)"
+   },
+   "licence": "AGPL-3.0-only (this repository's)",
+   "note": "the same file as koma-humanities, under XeLaTeX"
+  },
+  {
+   "id": "cleanthesis-xe",
+   "field": "thesis (any field)",
+   "class": "scrbook + cleanthesis",
+   "engine": "xelatex",
+   "dir": "cleanthesis",
+   "main": "my-thesis.tex",
+   "path": "cleanthesis/my-thesis.tex",
+   "source": {
+    "texlive_package": "cleanthesis",
+    "texlive_files": [
+     "doc/latex/cleanthesis/ (my-thesis.tex, my-thesis-setup.tex, bib-refs.bib, content/, gfx/)"
+    ],
+    "ctan": "https://ctan.org/pkg/cleanthesis"
+   },
+   "licence": "lppl1.3",
+   "note": "the same file as cleanthesis, under XeLaTeX"
+  },
+  {
+   "id": "uwthesis-xe",
+   "field": "thesis (any field)",
+   "class": "uwthesis (University of Washington)",
+   "engine": "xelatex",
+   "dir": "uwthesis",
+   "main": "uwthesis.tex",
+   "path": "uwthesis/uwthesis.tex",
+   "source": {
+    "texlive_package": "uwthesis",
+    "texlive_files": [
+     "doc/latex/uwthesis/uwthesis.tex",
+     "doc/latex/uwthesis/uwthesis.bib"
+    ],
+    "ctan": "https://ctan.org/pkg/uwthesis"
+   },
+   "licence": "apache2",
+   "note": "the same file as uwthesis, under XeLaTeX"
+  },
+  {
+   "id": "memoir-thesis-xe",
+   "field": "thesis (any field)",
+   "class": "memoir",
+   "engine": "xelatex",
+   "dir": "memoir-thesis",
+   "main": "memoir-thesis.tex",
+   "path": "memoir-thesis/memoir-thesis.tex",
+   "source": {
+    "written": "written for this corpus (PhiTeX's own)"
+   },
+   "licence": "AGPL-3.0-only (this repository's)",
+   "note": "the same file as memoir-thesis, under XeLaTeX"
+  },
+  {
+   "id": "beamer-ornate-xe",
+   "field": "slides (any field)",
+   "class": "beamer",
+   "engine": "xelatex",
+   "dir": "beamer-ornate",
+   "main": "conference-ornate-20min.en.tex",
+   "path": "beamer-ornate/conference-ornate-20min.en.tex",
+   "source": {
+    "texlive_package": "beamer",
+    "texlive_files": [
+     "doc/latex/beamer/solutions/conference-talks/conference-ornate-20min.en.tex"
+    ],
+    "ctan": "https://ctan.org/pkg/beamer"
+   },
+   "licence": "lppl1.3c gpl2+ fdl",
+   "note": "the same file as beamer-ornate, under XeLaTeX"
+  },
+  {
+   "id": "common-times-xe",
+   "field": "common content",
+   "class": "article + mathptmx, helvet, courier",
+   "engine": "xelatex",
+   "dir": "common-times",
+   "main": "common-times.tex",
+   "path": "common-times/common-times.tex",
+   "source": {
+    "written": "written for this corpus (PhiTeX's own)"
+   },
+   "licence": "AGPL-3.0-only (this repository's)",
+   "note": "the same file as common-times, under XeLaTeX"
+  },
+  {
+   "id": "common-newtx-xe",
+   "field": "common content",
+   "class": "article (two columns) + newtx",
+   "engine": "xelatex",
+   "dir": "common-newtx",
+   "main": "common-newtx.tex",
+   "path": "common-newtx/common-newtx.tex",
+   "source": {
+    "written": "written for this corpus (PhiTeX's own)"
+   },
+   "licence": "AGPL-3.0-only (this repository's)",
+   "note": "the same file as common-newtx, under XeLaTeX"
+  },
+  {
+   "id": "common-palatino-xe",
+   "field": "common content",
+   "class": "article + mathpazo, helvet",
+   "engine": "xelatex",
+   "dir": "common-palatino",
+   "main": "common-palatino.tex",
+   "path": "common-palatino/common-palatino.tex",
+   "source": {
+    "written": "written for this corpus (PhiTeX's own)"
+   },
+   "licence": "AGPL-3.0-only (this repository's)",
+   "note": "the same file as common-palatino, under XeLaTeX"
   }
  ]
 }
