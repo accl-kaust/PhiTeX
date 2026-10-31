@@ -1795,6 +1795,24 @@ pub(crate) fn unit_shape(
     changed.then(|| v.list(out))
 }
 
+/// The pieces of the sealed lines in value `x` (a page, a box), each
+/// as often as it stands.
+pub(crate) fn sealed_pieces(v: &Values, x: ValueId, out: &mut Vec<i64>) {
+    let Some(xs) = v.with_list(x, <[ValueId]>::to_vec) else {
+        return;
+    };
+    if xs.len() == 10
+        && v.as_int(xs[0]) == Some(T_BOX)
+        && let Some(s) = sealed_of(v, xs[9])
+    {
+        out.push(s.piece);
+        return;
+    }
+    for e in xs {
+        sealed_pieces(v, e, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1999,23 +2017,5 @@ mod tests {
         let mut hs = Vec::new();
         handles(&l.list, &mut hs);
         assert_eq!(hs, [1, 2, 3]);
-    }
-}
-
-/// The pieces of the sealed lines in value `x` (a page, a box), each
-/// as often as it stands.
-pub(crate) fn sealed_pieces(v: &Values, x: ValueId, out: &mut Vec<i64>) {
-    let Some(xs) = v.with_list(x, <[ValueId]>::to_vec) else {
-        return;
-    };
-    if xs.len() == 10
-        && v.as_int(xs[0]) == Some(T_BOX)
-        && let Some(s) = sealed_of(v, xs[9])
-    {
-        out.push(s.piece);
-        return;
-    }
-    for e in xs {
-        sealed_pieces(v, e, out);
     }
 }
