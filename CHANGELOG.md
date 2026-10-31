@@ -32,8 +32,8 @@ and XeLaTeX, built by graph reduction, with exact output.
   `\rpcode`), letterspacing (`\letterspacefont`), extra kerns
   (`\pdfprependkern`, `\pdfappendkern`) and interword spacing
   (`\pdfadjustinterwordglue`, `\knbscode` …): microtype's every option
-  gives pdfLaTeX's PDF, and under XeLaTeX its protrusion and tracking
-  give xelatex's (XeTeX has no font expansion).
+  gives pdfLaTeX's PDF, and under XeLaTeX (protrusion: XeTeX has no
+  font expansion) xelatex's.
 - **latexmk's job, in one build.** `phitex build` re-reads the files the
   document writes until they settle. It takes no more rounds than
   latexmk's pdflatex runs, and stops after 5 (latexmk's `max_repeat`)
