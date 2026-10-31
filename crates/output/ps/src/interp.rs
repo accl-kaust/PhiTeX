@@ -266,6 +266,8 @@ pub struct Ps<'a> {
     pub showpages: u32,
     /// `nulldevice` in effect: nothing is drawn.
     pub null_device: bool,
+    /// Glyph names' ranks in gs's name table (`crate::cff::glyph_key`).
+    pub name_ranks: Option<BTreeMap<Vec<u8>, u64>>,
 }
 
 pub fn ok() -> R {
@@ -310,6 +312,7 @@ impl<'a> Ps<'a> {
             eps_state: 5,
             showpages: 0,
             null_device: false,
+            name_ranks: None,
         };
         ps.d = vec![
             ps.systemdict.clone(),

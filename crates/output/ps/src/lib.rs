@@ -82,6 +82,7 @@ mod feed;
 mod file;
 mod flatten;
 mod font;
+mod gsnames;
 mod gstate;
 mod image;
 mod init;
