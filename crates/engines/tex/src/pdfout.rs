@@ -4526,6 +4526,11 @@ fn link(
                 }
                 shipped += 1;
             } else {
+                // (an image the placed page holds that the writer could
+                // not write: the job's error, as where it ships it)
+                if let Some(e) = st.take_error() {
+                    errors.push((format!("pdfTeX error: {e}"), pc.node));
+                }
                 placed += 1;
             }
             if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {

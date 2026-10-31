@@ -238,6 +238,25 @@ repro!(
     "TeX Live manual gillcm (its sample's \\pdfmapfile{+cmg.map}): \\pdfmapfile's kind was read after its text was scanned, from the text's last token, and the file was taken for a \\pdfmapline: no entry for the map's fonts, 'Font cmgbiu8r at 600 not found'"
 );
 
+/// An image the writer cannot write where the link writes it (a PNG
+/// whose header reads and whose data does not): the job's error at every
+/// thread count, on a page the link places whole as on one it ships
+/// again (pdftex: `!pdfTeX error: pdftex (file ./bad.png): libpng:
+/// internal error`, fatal, mc 77541). The link placing a page whole
+/// dropped the error (`PdfState::replay_page`); this page, its image's
+/// number read-time, is shipped again, which reported it already.
+#[test]
+fn pdf_image_write_error() {
+    for j in [1, 4] {
+        let (_, term) = build_j("pdf_image_write_error", j);
+        assert!(
+            term.lines()
+                .any(|l| l.starts_with("error") && l.contains("bad.png: libpng: internal error")),
+            "-j{j}: no error for the image:\n{term}"
+        );
+    }
+}
+
 repro!(
     pdfthread_in_hlist,
     "\\pdfthread in a paragraph: the command's kind was read after its specification was scanned, and \\pdfthread was taken for \\pdfstartthread ('\\pdfstartthread ended up in hlist')"

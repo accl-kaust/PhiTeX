@@ -1082,6 +1082,13 @@ impl PdfState {
         self.total_pages
     }
 
+    /// The first error a page placed whole met writing what it holds
+    /// ([`PdfState::replay_page`]: an image `pdf_write_image` could not
+    /// write), taken: the page is in the file, the error is the job's.
+    pub fn take_error(&mut self) -> Option<PdfError> {
+        self.error.take()
+    }
+
     /// Records the first fatal error met in a list walk.
     fn fail(&mut self, e: PdfError) {
         if self.error.is_none() {

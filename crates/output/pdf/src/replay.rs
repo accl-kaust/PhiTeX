@@ -763,8 +763,9 @@ impl PdfState {
             if !self.is_written(k)
                 && let Err(e) = self.pdf_write_image(k, fonts)
             {
-                // (the step's write logged it)
-                let _ = e;
+                // (the image this file holds is not written: the job's
+                // error, which the caller takes, [`PdfState::take_error`])
+                self.fail(e);
             }
         }
         self.font_list.clone_from(&rec.font_list);
