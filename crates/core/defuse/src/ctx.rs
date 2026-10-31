@@ -578,7 +578,7 @@ impl<'a> Ctx<'a> {
         // (the bound's label and the search from it on one layout)
         let Some(n) = read::on_one_layout(self.eng, || {
             self.bound(after)
-                .map(|ap| read::next_contribution(self.eng, f, Some(ap)))
+                .map(|ap| read::next_contribution(self.eng, f, Some(ap), self.me.id))
         }) else {
             self.record(ReadKind::Next { f, after }, PathId::WHOLE, None);
             return Ok(None);

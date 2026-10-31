@@ -1081,7 +1081,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                             Some(n) => Some(read::pos_of(eng, *n).unwrap_or_else(|| eng.node(*n).pos_hint())),
                             None => Some(read::unit_start(eng, node)),
                         };
-                        next_contribution(eng, *f, from)
+                        next_contribution(eng, *f, from, node.id)
                     });
                     next_answers.insert(range_reads.len(), read::next_value(eng, &n));
                     range_reads.push((
@@ -2009,7 +2009,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         match k {
             ReadKind::Next { f, after: Some(n) } => {
                 let answer = read::on_one_layout(eng, || {
-                    read::pos_of(eng, *n).and_then(|at| read::next_contribution(eng, *f, Some(at)).stop)
+                    read::pos_of(eng, *n).and_then(|at| read::next_contribution(eng, *f, Some(at), node.id).stop)
                 });
                 if p.woken_at != Some(*n) && (answer.is_none() || p.woken_at != answer) {
                     causes.push(cause_of(k));
@@ -2791,13 +2791,13 @@ fn reask_range(
             let resume = (r.hole && r.to == Some(by))
                 .then(|| read::pos_of(eng, by).map_or(eng.node(by).pos_hint(), |p| Pos(p.0 - 1)))
                 .filter(|p| *p > from);
-            let mut n = read::next_contribution(eng, f, Some(resume.unwrap_or(from)));
+            let mut n = read::next_contribution(eng, f, Some(resume.unwrap_or(from)), r.node);
             let mut v = read::next_value(eng, &n);
             // (a node placed since before the one it stopped at, a
             // continuation made anew in place of a removed one, is found
             // only from the start: the answer asked again in full)
             if resume.is_some() && !r.seen.iter().all(|&(p, s)| read::apply_path(eng, v, p) == s) {
-                n = read::next_contribution(eng, f, Some(from));
+                n = read::next_contribution(eng, f, Some(from), r.node);
                 v = read::next_value(eng, &n);
             }
             Some((n, v))

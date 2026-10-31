@@ -380,7 +380,7 @@ pub(crate) fn fold(eng: &Engine, f: Field, from: Option<Pos>, to: Option<Pos>) -
 /// first node after it that has not committed yet and whose operation may
 /// contribute `f` (`Operation::contributes`): a contribution that may still
 /// come is not the first.
-pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>) -> Next {
+pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>, me: NodeId) -> Next {
     let mut cur: Option<SegId> = match after {
         Some(p) => eng.seg_for_pos(p).map(|s| s.id).or_else(|| eng.order.first()),
         None => eng.order.first(),
@@ -395,6 +395,12 @@ pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>) -> N
             let mut stepped = 0;
             for (p, id) in inner.nodes.range((lo, Unbounded)) {
                 stepped += 1;
+                // (the reader itself, running or committing, is neither
+                // a stop of its own search nor its answer: it would wait
+                // for itself, its commit re-asking it for ever)
+                if *id == me {
+                    continue;
+                }
                 // (a node to run, again or for the first time: its
                 // contribution is not known, the one it made last may go)
                 let open = eng.node(*id).is_open();
@@ -842,7 +848,7 @@ fn answer_on_layout(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, memo
                 Some(n) => Some(pos_of(eng, *n)?),
                 None => Some(unit_start(eng, me)),
             };
-            let n = next_contribution(eng, *f, after);
+            let n = next_contribution(eng, *f, after, me.id);
             apply_path(eng, next_value(eng, &n), path)
         }
         ReadKind::Placed { i, .. } => {
@@ -965,7 +971,7 @@ fn range_value_on_layout(eng: &Engine, f: Field, r: &RangeReader, memo: &mut Fol
         None => unit_start(eng, me),
     };
     if r.next {
-        let n = next_contribution(eng, f, Some(from));
+        let n = next_contribution(eng, f, Some(from), r.node);
         return Some(next_value(eng, &n));
     }
     let to = match r.to {
