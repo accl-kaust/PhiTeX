@@ -116,8 +116,21 @@ fn fill_sealed_pages(
                     units.push((p, x));
                 }
             }
-            units.sort_unstable_by_key(|e| e.0);
         }
+        // (the lines a routine gave back from pieces outside the window:
+        // their pieces' units, each read by itself)
+        let mut named = Vec::new();
+        crate::nodes::sealed_pieces(v, page, &mut named);
+        named.sort_unstable();
+        named.dedup();
+        for p in named {
+            if !units.iter().any(|e| e.0 == p)
+                && let Some(x) = crate::pages::unit_items_of(cx, p)?
+            {
+                units.push((p, x));
+            }
+        }
+        units.sort_unstable_by_key(|e| e.0);
         // (filled once per page and units, its identity with it: a page
         // an edit left as it was is not walked again)
         let key: Vec<u64> = [v.instance(), page.raw()]

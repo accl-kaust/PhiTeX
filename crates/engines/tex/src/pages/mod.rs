@@ -634,3 +634,23 @@ pub(crate) const PAGE_FIELDS: [&str; 5] = [
     crate::build::MAIN_SINCE,
     crate::run::COND_STACK,
 ];
+
+/// Piece `piece`'s unit's items, read by themselves (whole): the last
+/// of the units up to the piece. A page's writer reads the units of its
+/// finisher's window by their places; a line a routine gave back from a
+/// piece outside that window is found here.
+pub(crate) fn unit_items_of(
+    cx: &mut phitex_defuse::Ctx<'_>,
+    piece: i64,
+) -> Result<Option<ValueId>, phitex_defuse::Stop> {
+    use phitex_defuse::Step;
+    let v = cx.values();
+    let w = cx.view_through(v.field(PITEMS), None, node_of(piece))?;
+    let Some(u) = cx.at(w, Step::Last) else {
+        return Ok(None);
+    };
+    if cx.get(u, Step::Index(0)).and_then(|x| v.as_int(x)) != Some(piece) {
+        return Ok(None);
+    }
+    Ok(cx.at(u, Step::Index(2)).map(|x| cx.whole(x)))
+}

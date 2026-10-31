@@ -2692,6 +2692,15 @@ fn sealed_units(
             out.insert(p, x);
         }
     }
+    // (a line a routine gave back from a piece outside the window: its
+    // piece's unit, read by itself)
+    for &p in want {
+        if !out.contains_key(&p)
+            && let Some(x) = crate::pages::unit_items_of(cx, p)?
+        {
+            out.insert(p, x);
+        }
+    }
     Ok(out)
 }
 
