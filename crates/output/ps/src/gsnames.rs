@@ -5,7 +5,7 @@
 //! by these indices. Measured in the CI image (a 2^20-slot dictionary
 //! enumerates its name keys in index order).
 
-pub const E2P: [&str; 4411] = [
+pub static E2P: [&str; 4411] = [
     "A",
     "n",
     "X",
@@ -4419,7 +4419,7 @@ pub const E2P: [&str; 4411] = [
     "MacGlyphEncoding",
 ];
 
-pub const DPX: [&str; 4411] = [
+pub static DPX: [&str; 4411] = [
     "A",
     "n",
     "X",

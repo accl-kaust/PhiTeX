@@ -214,7 +214,7 @@ fn curve_is_point(x0: Fixed, y0: Fixed, s: &Seg) -> bool {
 }
 fn curve_is_line(x0: Fixed, y0: Fixed, s: &Seg) -> bool {
     match *s {
-        Seg::Curve(a, b, c) => (a.x == x0 && a.y == y0 && b.x == c.x && b.y == c.y),
+        Seg::Curve(a, b, c) => a.x == x0 && a.y == y0 && b.x == c.x && b.y == c.y,
         _ => false,
     }
 }

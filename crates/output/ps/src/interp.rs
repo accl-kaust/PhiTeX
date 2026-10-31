@@ -362,13 +362,13 @@ impl<'a> Ps<'a> {
             V::Bool(b) => Key::Bool(*b),
             V::Null => return Err(E::TypeCheck.into()),
             V::Mark => Key::Mark,
-            V::Arr(a) => Key::Id(Rc::as_ptr(&a.b) as *const u8 as usize ^ a.off),
-            V::Dict(d) => Key::Id(Rc::as_ptr(d) as *const u8 as usize),
+            V::Arr(a) => Key::Id(Rc::as_ptr(&a.b).cast::<u8>() as usize ^ a.off),
+            V::Dict(d) => Key::Id(Rc::as_ptr(d).cast::<u8>() as usize),
             V::Op(i) => Key::Id(0x8000_0000_0000 + usize::from(*i)),
-            V::File(f) => Key::Id(Rc::as_ptr(f) as *const u8 as usize),
+            V::File(f) => Key::Id(Rc::as_ptr(f).cast::<u8>() as usize),
             V::Save(s) => Key::Id(0x9000_0000_0000 + *s as usize),
             V::FontId(s) => Key::Id(0xa000_0000_0000 + *s as usize),
-            V::GState(g) => Key::Id(Rc::as_ptr(g) as *const u8 as usize),
+            V::GState(g) => Key::Id(Rc::as_ptr(g).cast::<u8>() as usize),
         })
     }
     /// The key object stored for `o` (a string key as its name).
@@ -1614,7 +1614,7 @@ fn op_dictbegin(ps: &mut Ps<'_>) -> R {
 fn op_dictend(ps: &mut Ps<'_>) -> R {
     let p = mark_pos(ps)?;
     let items = ps.o.split_off(p + 1);
-    if items.len() % 2 != 0 {
+    if !items.len().is_multiple_of(2) {
         return Err(E::RangeCheck.into());
     }
     ps.o.pop();

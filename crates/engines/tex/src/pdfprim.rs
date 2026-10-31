@@ -674,10 +674,16 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             } else {
                 format!("{name}.tex")
             };
-            if name == format!("{job}.log") || r.get(&format!("wopen:{key}"))?.is_some() {
+            // (a file found: the build's clock too, as pdfTeX's under
+            // FORCE_SOURCE_DATE gives SOURCE_DATE_EPOCH for every file
+            // (utils.c `getfilemoddate`); epstopdf-base compares an EPS's
+            // date with its PDF's and converts only a source it can date)
+            if name == format!("{job}.log")
+                || r.get(&format!("wopen:{key}"))?.is_some()
+                || file_size(r, &name)?.is_some()
+            {
                 creation_date(r)?
             } else {
-                let _ = file_size(r, &name)?;
                 String::new()
             }
         }

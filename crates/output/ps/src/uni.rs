@@ -1,7 +1,7 @@
 //! Ghostscript's `/Unicode /Decoding` resource (Resource/Decoding/Unicode):
 //! a glyph name's Unicode value, for the ToUnicode CMaps; sorted by name.
 
-pub const UNI: [(&str, u32); 6519] = [
+pub static UNI: [(&str, u32); 6519] = [
     (".null", 0x0000),
     ("0.0", 0x0E00),
     ("0script", 0x2134),

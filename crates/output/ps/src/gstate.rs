@@ -259,7 +259,7 @@ impl Ps<'_> {
         arc.sin = sc.sin;
         arc.cos = sc.cos;
         arc.p3 = (xc + ar * sc.cos, yc + ar * sc.sin);
-        let p3;
+        
         'last: {
             if clockwise {
                 if ang1 < ang2 {
@@ -328,7 +328,7 @@ impl Ps<'_> {
             }
         }
         self.next_arc_curve(&mut arc, ang2)?;
-        p3 = arc.p3;
+        let p3 = arc.p3;
         self.arc_done(p3)
     }
 
@@ -1300,7 +1300,7 @@ pub fn rect_operands(ps: &mut Ps<'_>) -> R<Vec<[f64; 4]>> {
         let v = ps.nums_of(&t)?;
         ps.o.pop();
         return Ok(v
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|c| [c[0], c[1], c[2], c[3]])
             .collect());
     }

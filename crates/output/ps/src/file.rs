@@ -305,7 +305,7 @@ fn predict(d: Vec<u8>, p: &FilterParams) -> Vec<u8> {
             cur[i] = match t {
                 1 => cur[i].wrapping_add(a),
                 2 => cur[i].wrapping_add(b),
-                3 => cur[i].wrapping_add(((u16::from(a) + u16::from(b)) / 2) as u8),
+                3 => cur[i].wrapping_add(u16::midpoint(u16::from(a), u16::from(b)) as u8),
                 4 => {
                     let pp = i16::from(a) + i16::from(b) - i16::from(c);
                     let (pa, pb, pc) = (

@@ -100,10 +100,7 @@ fn compatible(a: &M, b: &M) -> bool {
 
 /// `set_text_distance`.
 fn text_distance(dx: f64, dy: f64, m: &M) -> (f64, f64) {
-    let (mut x, mut y) = match m.idtransform(dx, dy) {
-        Some(p) => p,
-        None => (0.0, 0.0),
-    };
+    let (mut x, mut y) = m.idtransform(dx, dy).unwrap_or((0.0, 0.0));
     let r = libm::floor(x + 0.5);
     if (x - r).abs() < 0.0005 {
         x = r;

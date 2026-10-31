@@ -908,7 +908,7 @@ impl Ps<'_> {
                     let e = *code.get(i).unwrap_or(&0);
                     i += 1;
                     match e {
-                        0 | 1 | 2 => s.clear(),
+                        0..=2 => s.clear(),
                         6 => {
                             // seac
                             g.seac = Some((

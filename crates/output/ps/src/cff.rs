@@ -1483,7 +1483,7 @@ pub fn write(
         let mut charstrings_offset = charset_offset + charset_size;
         let mut private_offset = charstrings_offset + index_size(charstrings.len(), cs_total);
         let mut subrs_offset = private_size;
-        let mut write = |final_: bool,
+        let write = |final_: bool,
                          top_size: &mut usize,
                          private_size: &mut usize,
                          cso: &mut usize,

@@ -21,7 +21,7 @@ pub fn dos_eps_section(d: &[u8]) -> Vec<u8> {
 }
 
 /// The lines of `d`, each with its end (`$/`).
-fn lines<'a>(d: &'a [u8], eol: u8) -> Vec<&'a [u8]> {
+fn lines(d: &[u8], eol: u8) -> Vec<&[u8]> {
     let mut v = Vec::new();
     let mut s = 0;
     for (i, &c) in d.iter().enumerate() {
