@@ -6,7 +6,7 @@
 //! the step takes what was asked, builds when something changed (the
 //! first step always: the cold build), writes the outputs through the
 //! session's sink, and returns the events the viewers are told
-//! (`preparing`, `diagnostics`, `settled`, `console`, `reveal`, ...) and
+//! (`building`, `diagnostics`, `settled`, `console`, `reveal`, ...) and
 //! `{"event": "build", ...}`, the build's facts; or, made with
 //! [`Document::new_with_emit`], gives each event to the host as it
 //! happens. The main file's edits reach a build while it runs: every ask
@@ -124,7 +124,7 @@ impl Document {
 
     /// A document whose events go to `emit` as they happen (on the thread
     /// that makes them: the step's, the build's), the viewer's
-    /// (`preparing`, `diagnostics`, `settled`, ...) and the document's
+    /// (`building`, `diagnostics`, `settled`, ...) and the document's
     /// (`build`, `failed`); [`Document::step`] returns none. The viewer's
     /// own hook ([`Viewer::on_emit`]) is the document's: a host that sets
     /// it takes the events from the document.
@@ -837,19 +837,26 @@ mod tests {
         let ev = events.clone();
         let sink = Arc::new(Memory::default());
         let mut d = Document::new_with_emit(session(&pages(1), sink), "doc.tex", move |v| {
-            if v["event"] == "preparing" && v["on"] == true {
+            if v["event"] == "building" && v["on"] == true {
                 let _ = lock(&tx).send(());
             }
             lock(&ev).push(v);
         });
         d.step();
-        assert_eq!(rx.recv().ok(), Some(()), "the cold build's");
+        // (a bound, not a wait for ever: an event never sent fails, named)
+        let began = std::time::Duration::from_secs(60);
+        assert_eq!(
+            rx.recv_timeout(began).ok(),
+            Some(()),
+            "the cold build's {{\"event\": \"building\", \"on\": true}}"
+        );
         let edited = pages(3);
         let absorb = d.absorber();
         let e2 = edited.clone();
         // (sent once the edit's build has run a while)
         let sender = std::thread::spawn(move || {
-            rx.recv().expect("the edit's build began");
+            rx.recv_timeout(began)
+                .expect("the edit's build began: {\"event\": \"building\", \"on\": true}");
             std::thread::sleep(std::time::Duration::from_millis(300));
             absorb(Ask::SetFile {
                 file: "doc.tex".into(),
