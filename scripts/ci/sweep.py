@@ -168,10 +168,19 @@ def run_one(c, j, args):
     base = {"id": c["id"], "path": c["path"], "tools": c.get("tools", []), "j": j,
             "oracle_passes": c.get("passes"), "oracle_wall_s": c.get("oracle_wall_s")}
     key, ores, why = oracle(c, args.cache, args.doc)
-    if why:
+    pinned = why == "no oracle in the cache" and c.get("oracle_md5")
+    if why and not pinned:
         return {**base, "status": "no-oracle", "note": why}
-    opdf = key / "files" / ores["pdf"]
-    base.update(oracle_md5=md5(opdf), oracle_pages=npages(opdf))
+    if pinned:
+        # (the list's pinned md5 of the oracle's PDF, built where the
+        # list was pinned from the same image: the oracle is built here
+        # only for a PDF that differs, for where it differs)
+        opdf = None
+        ores = {"pdf": Path(c["main"]).stem + ".pdf"}
+        base.update(oracle_md5=c["oracle_md5"], oracle_pages=c.get("oracle_pages"), oracle="pinned")
+    else:
+        opdf = key / "files" / ores["pdf"]
+        base.update(oracle_md5=md5(opdf), oracle_pages=npages(opdf))
     tag = f"{c['id']}-j{j}"
     run_dir = WORK / "run" / tag
     common.fresh_copy(Path(args.doc) / c["dir"], run_dir)
@@ -212,6 +221,20 @@ def run_one(c, j, args):
             res["note"] = "exit {}: {}".format(r["exit"], first_error(text, logb))
     else:
         res["status"] = "differs"
+        if opdf is None and args.diff_oracle and c["id"] not in args.known_ids:
+            # (the oracle built now, for where the PDFs differ; its md5
+            # against the pinned one: another says the image is not the
+            # one the list was pinned from)
+            k2, r2 = manuals.oracle_one(args.doc, c, Path(args.out) / "oracle")
+            if r2.get("status") == "ok":
+                opdf = k2 / "files" / r2["pdf"]
+                if md5(opdf) != c["oracle_md5"]:
+                    res["oracle_rebuilt_md5"] = md5(opdf)
+    if res["status"] == "differs" and opdf is None:
+        res["note"] = (f"exit {r['exit']}: " if r["exit"] else "") + "md5 differs from the pinned oracle's"
+        if r["exit"] != 0:
+            res["error"] = first_error(text, logb)
+    elif res["status"] == "differs":
         d = pdfdiff.diff(opdf, pdf)
         res["diff"] = d
         res.update(text_diff(opdf, pdf))
@@ -251,6 +274,9 @@ def prewarm(args, engines):
 
 
 def cmd_run(args):
+    args.known_ids = set()
+    if args.known:
+        args.known_ids = {l.split()[0] for l in open(args.known) if l.strip() and not l.startswith("#")}
     items = manuals.shard(manuals.load_list(args.list), args.shard)
     engines, tools = set(args.engines.split(",")), set(args.tools.split(","))
     items = [c for c in items if c["engine"] in engines and not (set(c.get("tools", [])) - tools)]
@@ -331,6 +357,9 @@ def main():
     p.add_argument("--engines", default="pdflatex")
     p.add_argument("--tools", default="bibtex,makeindex")
     p.add_argument("--shelf", action="store_true")
+    p.add_argument("--diff-oracle", action="store_true",
+                   help="a document whose oracle is only pinned (oracle_md5) and whose PDF differs: its oracle built, for pdfdiff")
+    p.add_argument("--known", help="a file of ids (first word a line) not identical when pinned: no oracle built for them")
     p.add_argument("--jobs", default="1,8")
     p.add_argument("--par", default="1:20,8:5")
     p.add_argument("--timeout", type=int, default=120)

@@ -31,6 +31,16 @@
 #                                       the same TeX Live PDFs (not the gate:
 #                                       research-shelf.yml). In the -doc image
 #                                       (its language collections)
+#   gate-shard.sh manuals K N           TeX Live's manuals (ci/manuals.json), shard
+#                                       K of N, by the users' CLI at -j 1 and 4,
+#                                       each PDF's md5 against its pinned
+#                                       oracle's; red: one not identical,
+#                                       unless ci/manuals-not-identical.tsv
+#                                       names it (reported apart with its
+#                                       cause). In the -doc image
+#   gate-shard.sh wasm                  scripts/wasm.sh check: phitex-wasm built
+#                                       (its own build, no store), its documents
+#                                       in Node at -j 4 and 1 against pdfTeX's
 #   gate-shard.sh tests                 every other test binary of the workspace
 #                                       (each crate's integration tests, the CLI's
 #                                       on TeX Live among them, and phitex-live's
@@ -586,36 +596,49 @@ PY
         ${mode:+--$mode} > "$r/sweep.txt" 2>&1 || red "research: the sweep failed: $(tail -1 "$r/sweep.txt")"
       echo "sweep_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
       python3 -I scripts/ci/sweep.py table "$r/research" --json "$r/research/table.json" > "$r/table.txt" 2>&1
-      # (every document of the shard has a result at every -j: one
-      # without is red, never a pass of nothing)
-      python3 -I - ci/research.json "$k/$n" "${GATE_RESEARCH_JOBS:-1,4}" "$r/research" "$mode" >> "$r/red.txt" <<'PY'
-import json, sys
-from pathlib import Path
-docs = json.load(open(sys.argv[1]))["documents"]
-k, n = map(int, sys.argv[2].split("/"))
-mine = [d for i, d in enumerate(docs) if i % n == k]
-lane = " (--shelf)" if sys.argv[5] else ""
-for d in mine:
-    no_oracle = False
-    for j in sys.argv[3].split(","):
-        p = Path(sys.argv[4]) / f"{d['id']}-j{j}.json"
-        try:
-            r = json.loads(p.read_text())
-        except (OSError, ValueError):
-            print(f"research: {d['id']} -j{j}{lane}: no result")
-            continue
-        st = r.get("status")
-        if st == "exact":
-            continue
-        if st == "no-oracle":
-            if not no_oracle:
-                print(f"research: {d['id']}: no oracle: {r.get('note')}")
-            no_oracle = True
-            continue
-        df = r.get("diff") or {}
-        first = df.get("summary") or ""
-        print(f"research: {d['id']} -j{j}{lane}: {st}: {(r.get('note') or '')[:200]}" + (f" [{first[:200]}]" if first and first not in (r.get('note') or '') else ""))
-PY
+      # (each document identical at every -j, else red: verdict.py)
+      python3 -I scripts/ci/verdict.py ci/research.json "$k/$n" "${GATE_RESEARCH_JOBS:-1,4}" "$r/research" \
+        --prefix "research: " ${mode:+--lane "$mode"} >> "$r/red.txt"
+      grep -q . "$r/red.txt" && status=red
+    fi
+    ;;
+  wasm)
+    # the engine as wasm32-wasip1-threads (scripts/wasm.sh check: built
+    # here, then a plain TeX, a LaTeX and an -ini document in Node at 4 and
+    # 1 threads, each PDF byte for byte against pdfTeX's fixture)
+    cache_on
+    scripts/wasm.sh check > "$r/wasm.txt" 2>&1
+    built
+    cache_off
+    grep -q '^WASM_OK$' "$r/wasm.txt" || red "wasm: $(grep -m1 -E '^FAIL|^error' "$r/wasm.txt" | cut -c1-200)"
+    ;;
+  manuals)
+    # manuals K N: shard K of N of ci/manuals.json, TeX Live's own
+    # documentation (the -doc image's /usr/share/doc/texlive), each by the
+    # users' CLI cold at each -j of GATE_MANUALS_JOBS against its oracle's
+    # md5 pinned in the list (TeX Live's engines to the fixpoint, built on
+    # mc from the same image: manuals.py); a PDF that differs gets its
+    # oracle built here, for pdfdiff. The manuals not identical when the
+    # gate took them (ci/manuals-not-identical.tsv, with the cause) are
+    # built too and reported apart (known-red.txt), never red; every other
+    # one is red unless identical
+    k=$1 n=$2
+    fetched
+    bin=$w/bin/cli/rel/phitex
+    if [ ! -x "$bin" ]; then
+      red "manuals: no CLI at \$w/bin/cli/rel/phitex"
+    else
+      export CI_WORK=$w/ci
+      mkdir -p "$CI_WORK" "$w/no-oracle"
+      s0=$(date +%s)
+      python3 -I scripts/ci/sweep.py run --list ci/manuals.json --doc /usr/share/doc/texlive --cache "$w/no-oracle" --bin "$bin" \
+        --out "$r/manuals" --shard "$k/$n" --engines pdflatex,xelatex --tools bibtex,biber,makeindex,glossaries \
+        --jobs "${GATE_MANUALS_JOBS:-1,4}" --par "${GATE_MANUALS_PAR:-1:4,4:1}" --timeout "${GATE_MANUALS_TIMEOUT:-300}" \
+        --diff-oracle --known ci/manuals-not-identical.tsv > "$r/sweep.txt" 2>&1 || red "manuals: the sweep failed: $(tail -1 "$r/sweep.txt")"
+      echo "sweep_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
+      python3 -I scripts/ci/sweep.py table "$r/manuals" --json "$r/manuals/table.json" > "$r/table.txt" 2>&1
+      python3 -I scripts/ci/verdict.py ci/manuals.json "$k/$n" "${GATE_MANUALS_JOBS:-1,4}" "$r/manuals" --prefix "manuals: " \
+        --known ci/manuals-not-identical.tsv --known-out "$r/known-red.txt" >> "$r/red.txt"
       grep -q . "$r/red.txt" && status=red
     fi
     ;;

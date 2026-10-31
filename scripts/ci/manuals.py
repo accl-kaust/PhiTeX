@@ -19,6 +19,7 @@ job's scratch), so absolute paths are the same for every engine.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -411,8 +412,11 @@ def cmd_pin(args):
             excluded.append({"id": c["id"], "path": c["path"], "reason": "no oracle result"})
             continue
         if res["status"] == "ok":
+            # (the oracle PDF's md5: the gate's manuals shards compare with
+            # it, building the oracle only for a PDF that differs)
+            omd5 = hashlib.md5((hits[-1].parent / "files" / res["pdf"]).read_bytes()).hexdigest()
             pinned.append({**{k: c[k] for k in ("id", "path", "dir", "main", "engine")},
-                           "input_hash": res["input_hash"], "tools": res.get("tools", []),
+                           "input_hash": res["input_hash"], "oracle_md5": omd5, "tools": res.get("tools", []),
                            "passes": res.get("passes"), "oracle_wall_s": res.get("wall_s"),
                            "oracle_errors": res.get("errors")})
         else:
