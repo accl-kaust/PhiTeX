@@ -243,10 +243,16 @@ def run_one(c, j, args):
             res["error"] = first_error(text, logb)
     res["term_tail"] = text[-2500:].decode("utf-8", "replace")
     if res["status"] != "exact" or r["exit"] != 0:
-        keep(Path(args.out) / "files" / tag, [
+        res_files = Path(args.out) / "files" / tag
+        res_files.mkdir(parents=True, exist_ok=True)
+        # (what the run left, and the files it read back: a tool's output
+        # is often where a difference starts)
+        (res_files / "files.txt").write_text("".join(f + "\n" for f in common.tree_files(run_dir)))
+        keep(res_files, [
             (term, "term.txt", 400_000),
             (run_dir / f"{job}.log", f"{job}.log", 400_000),
             (pdf, f"{job}.pdf", 8_000_000),
+            *((run_dir / f"{job}.{x}", f"{job}.{x}", 400_000) for x in ("aux", "bbl", "blg", "bcf", "ind", "toc")),
         ])
     shutil.rmtree(run_dir, ignore_errors=True)
     shutil.rmtree(cdir, ignore_errors=True)
@@ -314,10 +320,12 @@ def load(d):
 
 def cmd_table(args):
     rs = load(args.dir)
+    js = sorted({j for by in rs.values() for j in by})
+    hi = js[-1] if len(js) > 1 else 8
     tot = {"docs": 0, "exact1": 0, "exact8": 0, "same18": 0, "exit0_1": 0, "exit0_8": 0, "rounds_le": 0, "rounds_n": 0}
     rows = []
     for i, by in sorted(rs.items()):
-        a, b = by.get(1, {}), by.get(8, {})
+        a, b = by.get(1, {}), by.get(hi, {})
         if a.get("status") == "no-oracle":
             continue
         tot["docs"] += 1
@@ -330,15 +338,15 @@ def cmd_table(args):
             tot["rounds_n"] += 1
             tot["rounds_le"] += a["rounds"] <= a["oracle_passes"]
         rows.append((i, a, b))
-    print(f"{'document':<50} {'st j1':<8} {'st j8':<8} {'1=8':>3} {'ex1':>3} {'pg/or':>9} {'rd/or':>5} {'w1':>6} {'w8':>6}  note")
+    print(f"{'document':<50} {'st j1':<8} {'st j' + str(hi):<8} {'1=' + str(hi):>3} {'ex1':>3} {'pg/or':>9} {'rd/or':>5} {'w1':>6} {'w8':>6}  note")
     order = {"panic": 0, "error": 1, "timeout": 2, "harness": 3, "differs": 4, "exact": 5}
     for i, a, b in sorted(rows, key=lambda x: (order.get(x[1].get("status"), 9), x[0])):
         same = "y" if a.get("md5") and a.get("md5") == b.get("md5") else "n"
         print(f"{i[:50]:<50} {str(a.get('status')):<8} {str(b.get('status')):<8} {same:>3} {str(a.get('exit')):>3} "
               f"{str(a.get('pages')) + '/' + str(a.get('oracle_pages')):>9} {str(a.get('rounds')) + '/' + str(a.get('oracle_passes')):>5} "
-              f"{str(a.get('wall_s')):>6} {str(b.get('wall_s')):>6}  {(a.get('note') or '')[:110]}")
-    print(f"\n{tot['docs']} documents: exact j1 {tot['exact1']}, exact j8 {tot['exact8']}, md5 j1 == j8 {tot['same18']}, "
-          f"exit 0 j1 {tot['exit0_1']}, exit 0 j8 {tot['exit0_8']}, rounds <= oracle passes {tot['rounds_le']}/{tot['rounds_n']}")
+              f"{str(a.get('wall_s')):>6} {str(b.get('wall_s')):>6}  {(a.get('note') or b.get('note') or '')[:110]}")
+    print(f"\n{tot['docs']} documents: exact j1 {tot['exact1']}, exact j{hi} {tot['exact8']}, md5 j1 == j{hi} {tot['same18']}, "
+          f"exit 0 j1 {tot['exit0_1']}, exit 0 j{hi} {tot['exit0_8']}, rounds <= oracle passes {tot['rounds_le']}/{tot['rounds_n']}")
     if args.json:
         common.write_json(args.json, {"totals": tot, "docs": {i: {"j1": a, "j8": b} for i, a, b in rows}})
 

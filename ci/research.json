@@ -77,7 +77,8 @@
      "doc/latex/acmart/samples/sample-sigconf.tex",
      "doc/latex/acmart/samples/sample-base.bib",
      "doc/latex/acmart/samples/software.bib",
-     "doc/latex/acmart/samples/sampleteaser.pdf"
+     "doc/latex/acmart/samples/sampleteaser.pdf",
+     "doc/latex/acmart/samples/sample-franklin.png"
     ],
     "ctan": "https://ctan.org/pkg/acmart"
    },
@@ -175,18 +176,14 @@
    "field": "CS",
    "class": "llncs (Springer LNCS)",
    "engine": "pdflatex",
-   "dir": "llncs",
-   "main": "llncsdoc.tex",
-   "path": "llncs/llncsdoc.tex",
+   "dir": "llncs-paper",
+   "main": "llncs-paper.tex",
+   "path": "llncs-paper/llncs-paper.tex",
    "source": {
-    "texlive_package": "llncs",
-    "texlive_files": [
-     "doc/latex/llncs/llncsdoc.tex"
-    ],
-    "ctan": "https://ctan.org/pkg/llncs"
+    "written": "written for this corpus (PhiTeX's own)"
    },
-   "licence": "cc-by-4",
-   "note": "TeX Live ships no samplepaper.tex; llncsdoc is written in llncs"
+   "licence": "AGPL-3.0-only (this repository's)",
+   "note": "Springer's samplepaper.tex is not in TeX Live, and its llncsdoc.tex needs llncsdoc.sty, which TeX Live does not ship; written in samplepaper's shape, splncs04.bst through BibTeX"
   },
   {
    "id": "elsarticle",
@@ -320,7 +317,9 @@
     "texlive_package": "aastex",
     "texlive_files": [
      "doc/latex/aastex/aastex701-sample.tex",
-     "doc/latex/aastex/aastex701-sample.bib"
+     "doc/latex/aastex/aastex701-sample.bib",
+     "doc/latex/aastex/AuthorChargeInfographic.png",
+     "doc/latex/aastex/orcid-ID.png"
     ],
     "ctan": "https://ctan.org/pkg/aastex"
    },
@@ -368,17 +367,14 @@
    "field": "mathematics",
    "class": "amsbook",
    "engine": "pdflatex",
-   "dir": "amscls",
-   "main": "amsbook-template.tex",
-   "path": "amscls/amsbook-template.tex",
+   "dir": "amsbook",
+   "main": "amsbook-monograph.tex",
+   "path": "amsbook/amsbook-monograph.tex",
    "source": {
-    "texlive_package": "amscls",
-    "texlive_files": [
-     "doc/latex/amscls/amsbook-template.tex"
-    ],
-    "ctan": "https://ctan.org/pkg/amscls"
+    "written": "written for this corpus (PhiTeX's own)"
    },
-   "licence": "lppl1.3c"
+   "licence": "AGPL-3.0-only (this repository's)",
+   "note": "TeX Live's amsbook-template.tex does not build as shipped (its \\include{} placeholders)"
   },
   {
    "id": "aomart",
@@ -472,7 +468,7 @@
    "id": "chicago-notes",
    "field": "history / humanities",
    "class": "article + biblatex-chicago (notes)",
-   "engine": "pdflatex",
+   "engine": "xelatex",
    "dir": "chicago-notes",
    "main": "cms-notes-sample.tex",
    "path": "chicago-notes/cms-notes-sample.tex",
@@ -485,7 +481,7 @@
     "ctan": "https://ctan.org/pkg/biblatex-chicago"
    },
    "licence": "lppl1.3",
-   "note": "biber"
+   "note": "biber; fontspec (Gentium Plus, Clear Sans, Latin Modern Mono, AR PL BSMI by file): XeLaTeX"
   },
   {
    "id": "koma-humanities",
