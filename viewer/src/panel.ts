@@ -138,8 +138,6 @@ export interface PanelWords {
   about: string;
   /** The strip while the first build runs past 400 ms (`{s}`: the seconds so far); empty: no strip for builds at all (the host shows them). */
   preparing: string;
-  /** The strip, quieter, while a later build runs on past 400 ms (an edit's page already shown: the rest of the document settling). */
-  updating?: string;
   /** Where the full license is. */
   license: string;
   /** Where the real PDF is, after a stop, an approximation or an engine not yet run. */
@@ -165,7 +163,6 @@ const OVERLEAF_WORDS: PanelWords = {
       <a id="license" target="_blank" rel="noopener">full license</a>), provided as is, without any warranty.
       To turn it off: <code>chrome://extensions</code>.</div>`,
   preparing: "Getting ready for instant edits… {s} s (pages still scroll)",
-  updating: "Updating the other pages…",
   license: "LICENSE.txt",
   realPdf: "Overleaf's PDF is the real one.",
   stopped: "Open ⓘ diagnostics for the details. Overleaf's PDF is one click away (PDF).",
@@ -426,7 +423,7 @@ export class Panel {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div>
+    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div class="speedchip" id="speedchip" hidden aria-live="off" title="From the keystroke to the page on screen; under it, the last page's strips: drawn and kept, the core's watch (probe, draw), fetch and compose"><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -807,13 +804,10 @@ export class Panel {
   private actTick: ReturnType<typeof setInterval> | undefined;
 
   private prepSince = 0;
-  /** A build has ended with pages: a later one is the quiet "updating", never "getting ready". */
-  private built = false;
   /** A build of the core's (`on`) or its end: past 400 ms the status says so. */
   preparing(on: boolean): void {
     // (a host that shows its builds itself, the CLI's status bar: not said here)
     if (!this.words.preparing) return;
-    if (!on && (this.last || this.viewer.pages > 0)) this.built = true;
     this.prepSince = on ? this.prepSince || performance.now() : 0;
     this.activity();
   }
@@ -830,7 +824,6 @@ export class Panel {
   }
 
   busy(on: boolean): void {
-    if (!on && (this.last || this.viewer.pages > 0)) this.built = true;
     this.buildSince = on ? this.buildSince || performance.now() : 0;
     this.activity();
   }
@@ -855,7 +848,8 @@ export class Panel {
     if (this.ownBar) return;
     if (long && this.words.preparing) {
       const s = ((now - (this.buildSince || this.prepSince)) / 1000) | 0;
-      const what = this.making ? `${MAKING}…` : this.built ? (this.words.updating ?? "Updating the other pages…") : this.streamed ? `Typesetting page ${this.streamed + 1}…` : "Typesetting…";
+      // (what the core says it does: the format, the pages it ships, else typesetting; nothing guessed from earlier builds)
+      const what = this.making ? `${MAKING}…` : this.streamed ? `Typesetting page ${this.streamed + 1}…` : "Typesetting…";
       this.toast("build", { title: what, detail: s >= 2 ? `${s} s` : "", pct: null, icon: "refresh" });
     } else if (this.toastKind === "build") this.toast("build", null);
   }
@@ -873,7 +867,7 @@ export class Panel {
     else if (this.pkgNow) (t = "Fetching packages…"), (m = `${this.pkgNow.done} of ${this.pkgNow.total}`);
     else if (running) {
       const s = (now - (this.buildSince || this.prepSince)) / 1000;
-      t = this.making ? `${MAKING}…` : this.built ? "Building…" : this.streamed ? `Typesetting page ${this.streamed + 1}…` : "Building…";
+      t = this.making ? `${MAKING}…` : this.streamed ? `Typesetting page ${this.streamed + 1}…` : "Typesetting…";
       m = s >= 1 ? `${s < 10 ? s.toFixed(1) : Math.round(s)} s` : "";
     } else if (this.warm) (t = "Preparing instant typing…"), (m = `${Math.round((Date.now() - this.warm.since) / 1000)} s`);
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) (t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet"), (err = !!errs);
@@ -1883,6 +1877,21 @@ export class Panel {
     this.emit();
   }
 
+  /**
+   * The timing popover under a host's own control (Overleaf's toolbar
+   * status, where the panel's bar is hidden): moved out of the bar into the
+   * window, at the control's left, just under it. Again: closed.
+   */
+  timingAt(anchor: Element): void {
+    const el = this.$("#m-time");
+    if (!el.hidden) return this.menu(null);
+    if (el.parentElement !== this.win) this.win.append(el);
+    const a = anchor.getBoundingClientRect(), w = this.win.getBoundingClientRect();
+    el.style.left = `${Math.max(6, Math.min(a.left - w.left, w.width - el.offsetWidth - 6, w.width - 346))}px`;
+    el.style.top = `${Math.max(4, a.bottom - w.top + 4)}px`;
+    this.menu("#m-time");
+  }
+
   /** The settings (docked under a host's toolbar: the main file, the debug check, reload, the latency's details). */
   sheet(on = this.$("#sheet").hidden): void {
     this.$("#sheet").hidden = !(on && !!this.docked);
@@ -1892,13 +1901,28 @@ export class Panel {
   /** Repaints so far: the first is the first build's. */
   private paints = 0;
 
-  /** Kept for hosts that call it: the speed is the bar's status now. */
-  speedChip(_on: boolean): void {}
+  /** The ⚡ chip shown or not (the host's setting: Overleaf's popup, on by default). */
+  speedChip(on: boolean): void {
+    this.win.classList.toggle("nospeed", !on);
+  }
+
+  /** Where the pages' strips say the last frame's numbers (drawn, kept, watch, probe, draw, fetch, compose): under the ⚡ chip's. */
+  stripsChip(): HTMLElement {
+    return this.$("#stripsline");
+  }
 
   /** A repaint reached the screen, `ms` after its keystroke: the status says how fast. */
   painted(ms: number): void {
     // (the first paint is the first build's: downloads, the format, the whole document; the status says so, not "Built · 14906 ms")
     this.speed = { ms, at: performance.now(), first: this.paints++ === 0 };
+    // (the ⚡ chip: each repaint's time, keystroke to screen, in the corner; a flash as it changes)
+    const chip = this.$("#speedchip");
+    chip.hidden = false;
+    this.$("#speedms").textContent = `⚡ ${this.speed.first ? "first build " : ""}${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+    chip.classList.toggle("slow", !this.speed.first && ms > 100);
+    chip.classList.remove("flash");
+    void chip.offsetWidth;
+    chip.classList.add("flash");
     this.renderStatus();
     this.emit();
   }

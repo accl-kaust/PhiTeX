@@ -352,6 +352,18 @@ header:active { cursor: grabbing; }
 .tip .demo .mmenu span { display: flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 2px; white-space: nowrap; }
 .tip .demo .mmenu b { margin-left: auto; padding-left: 6px; }
 
+/* the ⚡ chip: each repaint's keystroke-to-screen time over the pages' corner, the strips' numbers under it */
+.speedchip { position: absolute; right: 12px; bottom: 12px; z-index: 3; pointer-events: none; display: flex; flex-direction: column; align-items: flex-end;
+  gap: 2px; max-width: calc(100% - 24px); padding: 4px 9px; border-radius: 8px; color: #fff; background: rgb(20 24 32 / 82%);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 25%); font: 700 12px/1.3 var(--ph-font); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.speedchip[hidden], .win.nospeed .speedchip { display: none; }
+.speedchip.slow b { color: #ffb366; }
+.speedchip span { overflow: hidden; text-overflow: ellipsis; max-width: 100%; font: 400 11px/1.3 ui-monospace, monospace; opacity: .85; }
+.speedchip span:empty { display: none; }
+.speedchip.flash { animation: phx-chipflash .5s ease-out; }
+@keyframes phx-chipflash { 0% { filter: brightness(1.6); } 100% { filter: none; } }
+@media (prefers-reduced-motion: reduce) { .speedchip.flash { animation: none; } }
+
 /* compare: "good" struck out, "excellent" added, then the navigator */
 .tip .demo.cmp { height: auto; padding: 10px 12px 30px; background: #fff; color: #1b222c; font: 13px/1.5 "Noto Serif", Georgia, serif; }
 .tip .cmp .del { animation: phx-del 6s ease-in-out infinite; }
