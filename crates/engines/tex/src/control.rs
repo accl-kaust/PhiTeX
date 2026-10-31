@@ -21,6 +21,11 @@ const BOX_FLAG: i64 = 0o10000000000;
 /// units (`[LAZY_OPEN, name]`): open, its lines not read yet
 /// ([`Run::next_read_line`] reads them).
 const LAZY_OPEN: i64 = 3;
+/// A read stream's state when it opened a file the job writes and reads
+/// back as its text (`[LAZY_LINES, name, position]`): each line read
+/// alone, through a path into its lines ([`crate::tools::lines_field`]),
+/// so that the run depends on the lines it read, not the whole text.
+const LAZY_LINES: i64 = 4;
 pub(crate) const SHIP_OUT_FLAG: i64 = BOX_FLAG + 512;
 pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
 
@@ -1780,6 +1785,16 @@ impl Run<'_, '_> {
                 }
                 return Ok(());
             }
+            // (a file the job wrote a round before and reads back as its
+            // text: its lines read one by one, `Run::next_read_line`)
+            if self.get(&format!("wopen:{key}"))?.is_none() && self.written_lines(&key)? {
+                self.set(
+                    &field,
+                    v.list(vec![v.int(LAZY_LINES), v.str(&key), v.int(0)]),
+                    true,
+                );
+                return Ok(());
+            }
             let Some(x) = self.read_file(&key)? else {
                 return Ok(());
             };
@@ -1803,6 +1818,24 @@ impl Run<'_, '_> {
     /// they were read in; only the position changes per line.
     pub(crate) fn next_read_line(&mut self, field: &str, st: ValueId) -> R<Option<String>> {
         let v = self.v;
+        // (a stream on a written file's lines: the line at its position
+        // read alone, its absence the file's end)
+        if let Value::List(xs) = &*v.get(st)
+            && xs
+                .first()
+                .is_some_and(|&c| crate::val::int_of(v, c) == LAZY_LINES)
+        {
+            let key = xs.get(1).map(|&k| str_of(v, k)).unwrap_or_default();
+            let pos = xs.get(2).map_or(0, |&p| crate::val::int_of(v, p));
+            let line = self.written_line(&key, u32::try_from(pos).unwrap_or(u32::MAX))?;
+            let next = if line.is_some() {
+                v.list(vec![v.int(LAZY_LINES), v.str(&key), v.int(pos + 1)])
+            } else {
+                ValueId::UNIT
+            };
+            self.set(field, next, true);
+            return Ok(line);
+        }
         // (a stream opened on a file's units: its lines read now)
         let st = match &*v.get(st) {
             Value::List(xs)

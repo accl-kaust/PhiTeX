@@ -2280,6 +2280,40 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(Some(x))
     }
 
+    /// Whether `key` is a file the job writes, read back as its text
+    /// ([`Run::file`] reads it whole there), whose lines a `\\read` reads
+    /// one by one ([`crate::tools::lines_field`], [`Run::written_line`]):
+    /// its lines published, no tool making it, its size not what is asked.
+    pub(crate) fn written_lines(&mut self, key: &str) -> R<bool> {
+        let v = self.v;
+        if self.size_read {
+            return Ok(false);
+        }
+        let k = self.keyed(crate::fields::Fam::Wkeys, key);
+        if !self.lb_known(key, k)? || self.lb(k)? != Some(crate::api::text_mark(v)) {
+            return Ok(false);
+        }
+        if self.tool_makes(key)? {
+            return Ok(false);
+        }
+        let p = self.cx.path(&[phitex_defuse::Step::Present]);
+        let present = self
+            .cx
+            .read_final_path(crate::tools::lines_field(v, key), p)?;
+        Ok(present.and_then(|x| v.as_bool(x)) == Some(true))
+    }
+
+    /// Line `i` of file `key`, one [`Run::written_lines`] reads: that
+    /// line alone read (none: past its last).
+    pub(crate) fn written_line(&mut self, key: &str, i: u32) -> R<Option<String>> {
+        let v = self.v;
+        let p = self.cx.path(&[phitex_defuse::Step::Index(i)]);
+        let x = self
+            .cx
+            .read_final_path(crate::tools::lines_field(v, key), p)?;
+        Ok(x.map(|l| str_of(v, l)))
+    }
+
     /// Whether `key` is a file the job writes that is read back per
     /// field (its text not read by the read-back) and no tool makes.
     pub(crate) fn written_per_field(&mut self, key: &str) -> R<bool> {

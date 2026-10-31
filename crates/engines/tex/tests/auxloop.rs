@@ -384,3 +384,61 @@ Status \st.
         "the node that looked the tool's output up ran again: {reran:?}"
     );
 }
+
+/// A `\read` of a file the job writes and reads back as its text (here
+/// its first line, as logreq's `\lrq@writeout` reads the `.run.xml`'s
+/// first three before writing it again): the reader depends on the
+/// lines it read, not the whole text. A later line changed runs the
+/// file's node again, not the node that read the first line; the first
+/// line changed runs it again.
+#[test]
+fn a_read_of_a_written_file_depends_on_the_lines_read() {
+    let doc = |head: &str, word: &str| {
+        format!(
+            r"\openin15=\jobname.xml \ifeof15 \gdef\st{{none}}\else\readline15 to\st \closein15 \fi
+
+\immediate\openout1=\jobname.xml
+
+
+\immediate\write1{{{head}}}\immediate\write1{{{word}}}
+Status \st.
+\bye
+"
+        )
+    };
+    let dir = common::fixtures().join("plain");
+    let opts = || Options {
+        fixpoint: true,
+        ..common::options("./x.tex", "x", "", &dir)
+    };
+    let reran = |b: &phitex_tex::Build| -> Vec<String> {
+        b.stats
+            .reruns
+            .iter()
+            .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+            .collect()
+    };
+    let mut b = common::build(opts(), Some(&common::plain()), &doc("head", "one"));
+    eprintln!("cold: {} loop rounds", b.stats.loop_rounds);
+    b.edit(&doc("head", "two"));
+    let r = reran(&b);
+    for x in &r {
+        eprintln!("  rerun {x}");
+    }
+    let cold = common::build(opts(), Some(&common::plain()), &doc("head", "two"));
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+    assert!(
+        !r.iter().any(|x| x.contains("openin")),
+        "the node that read the file's first line ran again: {r:?}"
+    );
+    b.edit(&doc("tail", "two"));
+    let r = reran(&b);
+    let cold = common::build(opts(), Some(&common::plain()), &doc("tail", "two"));
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "first line's edit differs from cold: {d:?}");
+    assert!(
+        r.iter().any(|x| x.contains("openin")),
+        "the node that read the file's first line did not run again: {r:?}"
+    );
+}

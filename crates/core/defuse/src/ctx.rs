@@ -392,6 +392,26 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// [`Ctx::read_at`] at the line's end (`At::Final`, a loop-back
+    /// read) through a path: the run depends only on the path's answer
+    /// (an alias definition: on all of it, followed). None: no value
+    /// there, or the path does not apply.
+    pub fn read_final_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
+        self.check()?;
+        self.before_read(f);
+        let r = crate::read::final_read(self.eng, f);
+        if let Some(x) = r.value
+            && read::alias_of(self.values(), x).is_some()
+        {
+            self.record(ReadKind::Field { f, at: Anchor::Final }, PathId::WHOLE, r.value);
+            let y = self.follow_aliases(r.value)?;
+            return Ok(read::apply_path(self.eng, y, p));
+        }
+        let x = through(self.eng, r, p);
+        self.record(ReadKind::Field { f, at: Anchor::Final }, p, x);
+        Ok(x)
+    }
+
     /// `read` through a path: the run depends only on the path's answer
     /// (an alias definition: on all of it, followed).
     pub fn read_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {

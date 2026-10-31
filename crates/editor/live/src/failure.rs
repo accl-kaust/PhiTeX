@@ -38,7 +38,7 @@ fn node_of(m: &str) -> String {
 
 /// A read-back field's engine name said as its file (and the key, for
 /// one of a file's definitions): `wdef:F\u{1}cs:name` is `F (\name)`,
-/// `wtext:F`, `wkeys:F`, `wfile:F`, `wstream:F`, `wunit:F:…` are `F`.
+/// `wtext:F`, `wlines:F`, `wkeys:F`, `wfile:F`, `wstream:F`, `wunit:F:…` are `F`.
 pub fn field(f: &str) -> String {
     let f = f.trim();
     if let Some(d) = f.strip_prefix("wdef:") {
@@ -55,7 +55,7 @@ pub fn field(f: &str) -> String {
             format!("{file} ({key})")
         };
     }
-    for p in ["wtext:", "wkeys:", "wfile:", "wstream:"] {
+    for p in ["wtext:", "wlines:", "wkeys:", "wfile:", "wstream:"] {
         if let Some(file) = f.strip_prefix(p) {
             return file.to_owned();
         }

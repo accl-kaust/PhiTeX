@@ -88,6 +88,17 @@ pub(crate) fn text_field(v: &Values, name: &str) -> Field {
     v.field(&format!("wtext:{name}"))
 }
 
+/// The loop-back of a file the job writes and reads back as its text
+/// (`wkeys:` the text mark), its lines as `\\read` takes them
+/// ([`crate::expand::split_lines`], a list), published with
+/// [`text_field`]: a `\\read` of a line reads that line through a path,
+/// so that a reader of a file's first lines depends on those lines, not
+/// on every byte (logreq's `\\lrq@writeout` reads three lines of the
+/// `.run.xml` it then writes again).
+pub(crate) fn lines_field(v: &Values, name: &str) -> Field {
+    v.field(&format!("wlines:{name}"))
+}
+
 /// The loop-back of a file the job writes, the size of its text in
 /// bytes as the round before wrote it (`UNIT`: not written), published
 /// with [`text_field`]: what `\\pdffilesize` reads of it, so that a reader

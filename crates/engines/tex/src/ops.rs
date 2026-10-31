@@ -933,6 +933,17 @@ fn file_node(
     // as its text once one does more, `wkeys:` then marked so)
     if as_text {
         define_traced(cx, k, crate::api::text_mark(v));
+        // (its lines, each read by a `\\read` of it alone,
+        // [`crate::tools::lines_field`])
+        let lines = text.as_deref().map_or(ValueId::UNIT, |t| {
+            v.list(
+                crate::expand::split_lines(t)
+                    .iter()
+                    .map(|l| v.str(l))
+                    .collect(),
+            )
+        });
+        define_traced(cx, crate::tools::lines_field(v, name), lines);
     } else {
         let ds = ds.as_deref().unwrap_or_default();
         // (the file exists, whatever its lines define; a nested file's
@@ -1002,8 +1013,8 @@ fn seed_text(cx: &mut Ctx<'_>, name: &str) -> Result<Option<ValueId>, Stop> {
 }
 
 /// A written file not opened now ([`file_node`]): what it held defined
-/// again, its text, size, key set and each key's definitions, its units
-/// and order, as the readers read them; a file whose text the client
+/// again, its text, size, lines, key set and each key's definitions, its
+/// units and order, as the readers read them; a file whose text the client
 /// gave, never written, that text (`wsame:` stays true).
 fn keep_file(cx: &mut Ctx<'_>, name: &str) -> Result<ValueId, Stop> {
     let v = cx.values();
@@ -1014,6 +1025,7 @@ fn keep_file(cx: &mut Ctx<'_>, name: &str) -> Result<ValueId, Stop> {
         v.field(&format!("wfile:{name}")),
         crate::tools::size_field(v, name),
         v.field(&format!("{WSAME}:{name}")),
+        crate::tools::lines_field(v, name),
     ];
     if let Some(keys) = lb_read(cx, k)?
         && keys != crate::api::text_mark(v)
