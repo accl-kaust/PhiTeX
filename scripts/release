@@ -22,7 +22,7 @@ die() { echo "release: $*" >&2; exit 1; }
 cur=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)
 milestone=${cur%.*} patch=${cur##*.}
 case $cur in
-  0.*) next=1.6 update= ;;
+  0.*|1.0.*) next=1.6 update= ;; # (1.0: a release to try upgrading with, before the alpha)
   *) next=${PHI:0:$((${#milestone} + 1))} update=$milestone.$((patch + 1)) ;;
 esac
 [ "$v" = "$next" ] || [ "$v" = "$update" ] \
