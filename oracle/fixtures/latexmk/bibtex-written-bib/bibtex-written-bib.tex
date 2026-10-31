@@ -1,0 +1,14 @@
+% A bibliography database the job writes (as revtex4-2 writes its
+% <job>Notes.bib and achemso its control entries), read by BibTeX
+% after the run that wrote it, with one on disk beside it.
+\documentclass{article}
+\newwrite\notes
+\immediate\openout\notes=\jobname-notes.bib
+\immediate\write\notes{@misc{note1, note = {A note the run wrote.}}}
+\immediate\closeout\notes
+\begin{document}
+Literate programming is due to Knuth~\cite{knuth84}; see also the
+note~\cite{note1}.
+\bibliographystyle{plain}
+\bibliography{refs,\jobname-notes}
+\end{document}

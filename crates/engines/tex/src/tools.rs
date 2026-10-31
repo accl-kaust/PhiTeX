@@ -189,6 +189,12 @@ enum Need {
     File(String),
     /// Through the tool's search.
     Support(ToolSearch, String),
+    /// A bibliography database: a file the job writes, by its text the
+    /// round before (a class's control entries, revtex's notes: BibTeX
+    /// runs after the run that wrote it, and finds it in the current
+    /// directory, `BIBINPUTS`' first element), else through BibTeX's
+    /// search.
+    Data(String),
 }
 
 /// The files a tool's run is served: what was looked up so far, and what
@@ -239,8 +245,8 @@ impl phitex_bibtex::Files for Served {
         } else {
             format!("{n}.bib")
         };
-        self.get(Need::Support(ToolSearch::BibData, n))
-            .map(|(_, b)| b)
+        let n = n.strip_prefix("./").unwrap_or(&n).to_owned();
+        self.get(Need::Data(n)).map(|(_, b)| b)
     }
 }
 
@@ -307,6 +313,14 @@ fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop
             Ok(file(cx.env(v.field(&format!("file:{name}")))?))
         }
         Need::Support(s, name) => Ok(file(cx.env(support_field(v, *s, name))?)),
+        Need::Data(name) => {
+            if let Some(x) = crate::ops::lb_read(cx, text_field(v, name))?
+                && x != ValueId::UNIT
+            {
+                return Ok(Some((format!("./{name}"), bytes(&str_of(v, x)))));
+            }
+            Ok(file(cx.env(support_field(v, ToolSearch::BibData, name))?))
+        }
     }
 }
 

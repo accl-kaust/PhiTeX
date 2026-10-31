@@ -1297,6 +1297,10 @@ latexmk_tests! {
     latexmk_class_index_shell_j8: "class-index-shell", 8;
     latexmk_bibtex_j1: "bibtex", 1;
     latexmk_bibtex_j8: "bibtex", 8;
+    // (a database the job writes, revtex4-2's Notes.bib, achemso's
+    // control entries: BibTeX reads it as the run before wrote it)
+    latexmk_bibtex_written_bib_j1: "bibtex-written-bib", 1;
+    latexmk_bibtex_written_bib_j8: "bibtex-written-bib", 8;
     latexmk_biber_j1: "biber", 1;
     latexmk_biber_j8: "biber", 8;
     latexmk_index_j1: "index", 1;
