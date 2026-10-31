@@ -89,7 +89,11 @@ differing object (`scripts/ci/pdfdiff.py`). Two lanes, one list:
 - **B, Shelf** (`research-shelf.yml`, nightly, not required): the same
   CLI with `--shelf`, a clean cache, from v1.shelf.phitex.org, against
   the same TeX Live PDFs: what Shelf's release lacks shows here first.
-  A red is reported and fixed in Shelf, never waived.
+  A red is reported and fixed in Shelf, never waived. Shelf's release
+  (tl2026.7) is built from a later TeX Live revision than the image's
+  (packages such as pgf newer), so this lane also shows that skew
+  (ToUnicode CMaps, pgf's rule widths) until the oracle is built from the
+  same files Shelf serves (pending the user's decision).
 Shelf's release check can read the same list. On mc: `CLUSTER=mc
 scripts/accl/gate-fast research`.
 
