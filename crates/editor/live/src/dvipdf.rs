@@ -78,41 +78,62 @@ impl Files for Cached {
     }
 }
 
-/// `files` with the job's own files behind them: a name dvipdfmx's
-/// finder does not find (a picture of the project, `./logo.pdf`, where
-/// the host's dvipdfmx files are TeX Live's alone: the frontends' Shelf)
-/// is the file the host gives TeX itself by that name, read by the host,
-/// as kpathsea finds the document's directory's files (`.` first in its
-/// paths) for xdvipdfmx as for TeX.
-pub fn with_job_files(files: FilesFor, host: Arc<dyn crate::host::Host>) -> FilesFor {
+/// `files` with the job's own files before them, as kpathsea searches
+/// for xdvipdfmx as for TeX: the job's directory (`.`, first in every
+/// path of `texmf.cnf`) and then the tree. A relative name the job's
+/// directory `dir` has is that file, read by the host (a picture of the
+/// project, `./logo.pdf`; a project's own `.map` or `.enc` over TeX
+/// Live's); any other is the finder's (the CLI's kpathsea, the frontends'
+/// Shelf).
+pub fn with_job_files(
+    files: FilesFor,
+    host: Arc<dyn crate::host::Host>,
+    dir: std::path::PathBuf,
+) -> FilesFor {
     Arc::new(move || -> Arc<dyn Files> {
         Arc::new(JobFiles {
             files: files(),
             host: host.clone(),
+            dir: dir.clone(),
+            read: Mutex::default(),
         })
     })
 }
 
-/// [`with_job_files`]'s view.
+/// [`with_job_files`]'s view: the job's files found, by path, with
+/// their bytes.
 struct JobFiles {
     files: Arc<dyn Files>,
     host: Arc<dyn crate::host::Host>,
+    dir: std::path::PathBuf,
+    read: Mutex<HashMap<Vec<u8>, Arc<[u8]>>>,
 }
 
 impl Files for JobFiles {
     fn find(&self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>> {
-        self.files.find(name, format, progname).or_else(|| {
-            let n = String::from_utf8_lossy(name);
-            let p = self.host.locate(n.trim_start_matches("./"))?;
-            Some(p.to_string_lossy().into_owned().into_bytes())
-        })
+        let n = String::from_utf8_lossy(name);
+        if !n.starts_with('/') {
+            let p = self.dir.join(n.trim_start_matches("./"));
+            if let Some(b) = self.host.read(&p) {
+                let key = p.to_string_lossy().into_owned().into_bytes();
+                self.read
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(key.clone(), b.into());
+                return Some(key);
+            }
+        }
+        self.files.find(name, format, progname)
     }
 
     fn read(&self, path: &[u8]) -> Option<Arc<[u8]>> {
-        self.files.read(path).or_else(|| {
-            let p = std::path::PathBuf::from(String::from_utf8_lossy(path).into_owned());
-            self.host.read(&p).map(Into::into)
-        })
+        let kept = self
+            .read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)
+            .cloned();
+        kept.or_else(|| self.files.read(path))
     }
 
     fn apply_filter(&self, template: &[u8], input: &[u8], version: i32) -> Option<Arc<[u8]>> {
@@ -155,37 +176,61 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    /// The project's picture, as the host gives TeX its files.
+    /// The project's files, as the host reads them: a picture and its
+    /// own font map.
     struct Project;
 
     impl crate::host::Host for Project {
-        fn locate(&self, name: &str) -> Option<PathBuf> {
-            (name == "logo.pdf").then(|| PathBuf::from("/p/logo.pdf"))
+        fn locate(&self, _name: &str) -> Option<PathBuf> {
+            None
         }
         fn read(&self, path: &Path) -> Option<Vec<u8>> {
-            (path == Path::new("/p/logo.pdf")).then(|| b"%PDF-1.5 logo".to_vec())
+            match path.to_str()? {
+                "/p/logo.pdf" => Some(b"%PDF-1.5 logo".to_vec()),
+                "/p/pdftex.map" => Some(b"the project's map".to_vec()),
+                _ => None,
+            }
         }
     }
 
-    /// A picture of the job's directory that dvipdfmx's finder (TeX
-    /// Live's files alone) does not have is the job's file, read by the
-    /// host; what the finder finds stays its.
+    /// The job's directory first, then the finder's tree, as kpathsea
+    /// searches: a project file the tree lacks, one that shadows the
+    /// tree's, and one only the tree has.
     #[test]
-    fn a_job_file_the_finder_lacks_is_the_hosts() {
+    fn the_jobs_files_come_before_the_finders() {
         let finder = Arc::new(DpxFinder::new(
-            Box::new(|name, _, _| (name == b"pdftex.map").then(|| b"/tl/pdftex.map".to_vec())),
-            Box::new(|path| (path == b"/tl/pdftex.map").then(|| Arc::from(&b"map"[..]))),
+            Box::new(|name, _, _| match name {
+                b"pdftex.map" => Some(b"/tl/pdftex.map".to_vec()),
+                b"cmr10.pfb" => Some(b"/tl/cmr10.pfb".to_vec()),
+                _ => None,
+            }),
+            Box::new(|path| match path {
+                b"/tl/pdftex.map" => Some(Arc::from(&b"TeX Live's map"[..])),
+                b"/tl/cmr10.pfb" => Some(Arc::from(&b"pfb"[..])),
+                _ => None,
+            }),
         ));
-        let f = with_job_files(Arc::new(move || finder.files()), Arc::new(Project))();
-        let p = f
-            .find(b"./logo.pdf", Format::Pict, b"dvipdfmx")
-            .expect("found");
-        assert_eq!(p, b"/p/logo.pdf");
-        assert_eq!(f.read(&p).as_deref(), Some(&b"%PDF-1.5 logo"[..]));
+        let f = with_job_files(
+            Arc::new(move || finder.files()),
+            Arc::new(Project),
+            PathBuf::from("/p"),
+        )();
+        let found = |n: &[u8], k| f.find(n, k, b"dvipdfmx").map(|p| (p.clone(), f.read(&p)));
+        let (p, b) = found(b"./logo.pdf", Format::Pict).expect("the project's picture");
         assert_eq!(
-            f.find(b"pdftex.map", Format::Fontmap, b"dvipdfmx")
-                .as_deref(),
-            Some(&b"/tl/pdftex.map"[..])
+            (p.as_slice(), b.as_deref()),
+            (&b"/p/logo.pdf"[..], Some(&b"%PDF-1.5 logo"[..]))
+        );
+        let (p, b) = found(b"pdftex.map", Format::Fontmap).expect("a map");
+        assert_eq!(
+            (p.as_slice(), b.as_deref()),
+            (&b"/p/pdftex.map"[..], Some(&b"the project's map"[..])),
+            "the project's own map over TeX Live's"
+        );
+        let (p, b) = found(b"cmr10.pfb", Format::Type1).expect("the tree's font");
+        assert_eq!(
+            (p.as_slice(), b.as_deref()),
+            (&b"/tl/cmr10.pfb"[..], Some(&b"pfb"[..]))
         );
         assert_eq!(f.find(b"nothing.pdf", Format::Pict, b"dvipdfmx"), None);
     }

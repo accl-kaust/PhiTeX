@@ -1390,7 +1390,11 @@ impl Session {
         Some(phitex_tex::XdvPdf {
             name: format!("{}.pdf", self.job.jobname),
             date: self.job.pdf_date,
-            files: crate::dvipdf::with_job_files(self.host.xdv_files(&dir)?, self.host.clone()),
+            files: crate::dvipdf::with_job_files(
+                self.host.xdv_files(&dir)?,
+                self.host.clone(),
+                dir.clone(),
+            ),
             live: self.sink.updates(),
         })
     }
