@@ -135,6 +135,12 @@ for each version tag.
 **`phitex upgrade`:**
 - Does the same download and checks, with the public key built into the
   binary. It replaces the binary atomically (write beside it, then rename).
+- Follows the user's `update-channel`: `stable` (the default: GitHub's
+  latest release) or `nightly` (the pre-release tagged `nightly`, checked
+  against the nightly key built in, `ci/nightly.pub`; a later stable
+  release is taken instead). An install by `PHITEX_CHANNEL=nightly`
+  install.sh records `"channel": "nightly"` in `install.json`, followed
+  until the user sets `update-channel`.
 - It runs only for the `script` method. Otherwise it prints the command for
   the method that installed it (`cargo install …`, the package manager).
 

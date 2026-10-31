@@ -97,7 +97,27 @@ there is no override.
 3. **`CHANGELOG.md`** gets the version's entry in the same pull request. The
    site (PhiTeX.org) regenerates `news.json` from it at its next deploy
    (docs/spec-distribution.md §4).
-4. **Shelf** is released on its own schedule (built on mc, deployed by
-   `deploy.sh`). A PhiTeX release names the Shelf release it builds in
-   (`shelf::RELEASE`), and the gate's Shelf check runs against that
-   release as served.
+4. **Shelf** is released first, on its own schedule: by hand on GitHub
+   (`.github/workflows/shelf.yml`: made in the CI image, checked against
+   TeX Live's own engines, deployed to v1.shelf.phitex.org with the input
+   `deploy`, then a pull request to dev naming it), or on mc
+   (`shelf/scripts/accl-*.sbatch`). A PhiTeX release names the Shelf
+   release it builds from (`shelf::RELEASE`), so Shelf is deployed before
+   the PhiTeX that names it.
+5. **1.0** (2026-10-31) is not a milestone: a release made to try
+   `phitex upgrade` end to end before 1.6.
+
+## Nightly
+
+`.github/workflows/nightly.yml`, each night (and by hand): dev's newest
+commit whose `checks` passed (and whose `gate`, if one ran, did not fail),
+built as a release is, published as one pre-release tagged `nightly`,
+replaced each time. Its version is the next update's with the build's
+time (crates/cli at 1.6.0 builds `1.6.1-nightly.YYYYMMDDHHMM`): after 1.6,
+before 1.6.1. GitHub's "latest" never names a pre-release, so the stable
+channel never sees it. `SHA256SUMS` is signed in the environment
+`nightly` with a key of its own (`NIGHTLY_MINISIGN_KEY`; public
+`ci/nightly.pub`), never the release key. `phitex upgrade` follows it
+only with `update-channel = "nightly"` in the user's `phitex.toml`, or for
+an install made by `PHITEX_CHANNEL=nightly` install.sh; it then takes the
+nightly, or a stable release when one is later.

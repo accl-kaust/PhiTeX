@@ -23,6 +23,9 @@ use crate::ui::Ui;
 
 const REPO: &str = "accl-kaust/PhiTeX";
 const PUBKEY: &str = include_str!("../../../ci/minisign.pub");
+/// The nightly's key (nightly.yml signs with it): a nightly is never
+/// checked against the release key, nor a release against this one.
+const NIGHTLY_PUBKEY: &str = include_str!("../../../ci/nightly.pub");
 const NEWS: [&str; 2] = [
     "https://phitex.org/news.json",
     "https://phitex-org.pages.dev/news.json",
@@ -44,15 +47,19 @@ fn asset() -> Option<String> {
 }
 
 /// `a` is a later version than `b` (`1.61` after `1.6.9`: φ's digits,
-/// the minor growing; `1.6.1` after `1.6`: an update; a missing part is 0).
+/// the minor growing; `1.6.1` after `1.6`: an update; a missing part is
+/// 0). A nightly (`1.6.1-nightly.202611010230`, nightly.yml) comes after
+/// the version before it and before the one it leads to; nightlies by
+/// their build's time.
 fn later(a: &str, b: &str) -> bool {
-    let parts = |v: &str| -> Vec<u64> {
-        v.trim_start_matches('v')
-            .split('.')
-            .map(|p| p.parse().unwrap_or(0))
-            .collect()
+    let parts = |v: &str| -> (Vec<u64>, Option<u64>) {
+        let v = v.trim_start_matches('v');
+        let (n, pre) = v.split_once('-').map_or((v, None), |(n, p)| (n, Some(p)));
+        let nums = n.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+        let built = pre.map(|p| p.rsplit('.').next().and_then(|t| t.parse().ok()).unwrap_or(0));
+        (nums, built)
     };
-    let (a, b) = (parts(a), parts(b));
+    let ((a, pa), (b, pb)) = (parts(a), parts(b));
     for i in 0..a.len().max(b.len()) {
         let (x, y) = (
             a.get(i).copied().unwrap_or(0),
@@ -62,7 +69,11 @@ fn later(a: &str, b: &str) -> bool {
             return x > y;
         }
     }
-    false
+    match (pa, pb) {
+        (None, Some(_)) => true,
+        (Some(x), Some(y)) => x > y,
+        _ => false,
+    }
 }
 
 /// `v` is in `range`: `<X`, `<=X`, `>=X`, `>X`, `=X` or a bare `X`.
@@ -95,17 +106,77 @@ fn get(url: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("{url}: {e}"))
 }
 
-/// The latest release's version (GitHub's `releases/latest`: the newest
-/// not marked a pre-release).
-fn latest() -> Result<String, String> {
+/// A release to upgrade to: its version, its tag, and the key its
+/// `SHA256SUMS` is signed with.
+struct Release {
+    version: String,
+    tag: String,
+    key: &'static str,
+}
+
+/// The latest release (GitHub's `releases/latest`: the newest not marked
+/// a pre-release).
+fn latest() -> Result<Release, String> {
     let b = get(&format!(
         "https://api.github.com/repos/{REPO}/releases/latest"
     ))?;
     let v: Value = serde_json::from_slice(&b).map_err(|e| format!("GitHub's answer: {e}"))?;
-    v["tag_name"]
+    let tag = v["tag_name"]
         .as_str()
-        .map(|t| t.trim_start_matches('v').to_owned())
-        .ok_or_else(|| "GitHub's answer names no release".to_owned())
+        .ok_or_else(|| "GitHub's answer names no release".to_owned())?;
+    Ok(Release {
+        version: tag.trim_start_matches('v').to_owned(),
+        tag: tag.to_owned(),
+        key: PUBKEY,
+    })
+}
+
+/// The nightly (the pre-release tagged `nightly`, its version the last
+/// word of its title, `PhiTeX nightly 1.6.1-nightly.202611010230`).
+fn nightly() -> Result<Release, String> {
+    let b = get(&format!(
+        "https://api.github.com/repos/{REPO}/releases/tags/nightly"
+    ))?;
+    let v: Value = serde_json::from_slice(&b).map_err(|e| format!("GitHub's answer: {e}"))?;
+    let version = v["name"]
+        .as_str()
+        .and_then(|n| n.split_whitespace().last())
+        .filter(|n| n.contains("-nightly."))
+        .ok_or_else(|| "GitHub's nightly names no version".to_owned())?;
+    Ok(Release {
+        version: version.to_owned(),
+        tag: "nightly".to_owned(),
+        key: NIGHTLY_PUBKEY,
+    })
+}
+
+/// What `phitex upgrade` follows: the user's `update-channel`, else what
+/// install.sh recorded (`PHITEX_CHANNEL=nightly`), else `stable`.
+fn channel() -> Result<&'static str, String> {
+    let set = crate::config::user().ok().and_then(|c| c.update_channel);
+    match set.as_deref() {
+        Some("stable") => Ok("stable"),
+        Some("nightly") => Ok("nightly"),
+        Some(other) => Err(format!(
+            "update-channel is '{other}': it is \"stable\" or \"nightly\" (phitex config update-channel stable)"
+        )),
+        None if install_record().is_some_and(|r| r["channel"] == "nightly") => Ok("nightly"),
+        None => Ok("stable"),
+    }
+}
+
+/// The release `phitex upgrade` takes on `channel`: the latest stable
+/// one; on `nightly`, the nightly unless a stable release is later.
+fn newest(channel: &str) -> Result<Release, String> {
+    let stable = latest();
+    if channel != "nightly" {
+        return stable;
+    }
+    match (stable, nightly()) {
+        (Ok(s), Ok(n)) => Ok(if later(&s.version, &n.version) { s } else { n }),
+        (Ok(s), Err(_)) => Ok(s),
+        (Err(_), n) => n,
+    }
 }
 
 /// The file named `name` in tar archive `tar`.
@@ -132,14 +203,14 @@ fn untar<'a>(tar: &'a [u8], name: &str) -> Option<&'a [u8]> {
     None
 }
 
-/// Release `v`'s binary for this machine, verified: `SHA256SUMS` signed
-/// by the key built in, the tarball's hash in it.
-fn fetch(v: &str, asset: &str) -> Result<Vec<u8>, String> {
-    let base = format!("https://github.com/{REPO}/releases/download/v{v}");
+/// Release `r`'s binary for this machine, verified: `SHA256SUMS` signed
+/// by its channel's key built in, the tarball's hash in it.
+fn fetch(r: &Release, asset: &str) -> Result<Vec<u8>, String> {
+    let base = format!("https://github.com/{REPO}/releases/download/{}", r.tag);
     let sums = get(&format!("{base}/SHA256SUMS"))?;
     let sig = get(&format!("{base}/SHA256SUMS.minisig"))?;
     let pk =
-        minisign_verify::PublicKey::decode(PUBKEY).map_err(|e| format!("the key built in: {e}"))?;
+        minisign_verify::PublicKey::decode(r.key).map_err(|e| format!("the key built in: {e}"))?;
     let sig = minisign_verify::Signature::decode(&String::from_utf8_lossy(&sig))
         .map_err(|e| format!("SHA256SUMS.minisig: {e}"))?;
     pk.verify(&sums, &sig, false)
@@ -188,15 +259,16 @@ fn replace(exe: &Path, bytes: &[u8]) -> Result<(), String> {
 /// `phitex upgrade`: the exit status.
 pub fn upgrade(ui: &Ui) -> i32 {
     let have = crate::version();
-    let v = match latest() {
-        Ok(v) => v,
+    let r = match channel().and_then(|c| newest(c).map_err(|e| format!("no release found: {e}"))) {
+        Ok(r) => r,
         Err(e) => {
-            ui.error(&format!("no release found: {e}"));
+            ui.error(&e);
             return crate::EXIT_FAILED;
         }
     };
+    let v = r.version.clone();
     if !later(&v, have) {
-        ui.line(&format!("phitex {have} is the latest release"));
+        ui.line(&format!("phitex {have} is the latest {}", if r.tag == "nightly" { "nightly" } else { "release" }));
         return 0;
     }
     let exe = std::env::current_exe().ok();
@@ -210,7 +282,7 @@ pub fn upgrade(ui: &Ui) -> i32 {
         return crate::EXIT_FAILED;
     };
     ui.line(&format!("downloading phitex {v} ({asset})"));
-    match fetch(&v, &asset).and_then(|b| replace(&exe, &b)) {
+    match fetch(&r, &asset).and_then(|b| replace(&exe, &b)) {
         Ok(()) => {
             ui.line(&format!(
                 "phitex {v} installed in {} (signature verified)",
@@ -434,5 +506,20 @@ mod tests {
     #[test]
     fn the_key_built_in_reads() {
         assert!(minisign_verify::PublicKey::decode(PUBKEY).is_ok());
+        assert!(minisign_verify::PublicKey::decode(NIGHTLY_PUBKEY).is_ok());
+        assert_ne!(PUBKEY.trim(), NIGHTLY_PUBKEY.trim());
+    }
+
+    #[test]
+    fn nightlies_between_versions() {
+        let n = "1.6.1-nightly.202611010230";
+        assert!(later(n, "1.6"));
+        assert!(later(n, "1.6.0"));
+        assert!(!later(n, "1.6.1"));
+        assert!(later("1.6.1", n));
+        assert!(later("1.6.1-nightly.202611020230", n));
+        assert!(!later(n, n));
+        assert!(later("1.0.1-nightly.202610310230", "1.0"));
+        assert!(later("1.6", "1.0.1-nightly.202610310230"));
     }
 }

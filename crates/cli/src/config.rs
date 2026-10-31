@@ -55,6 +55,11 @@ pub struct Config {
     /// The opt-in update check (`crate::upgrade::check`), read from the
     /// user's file only: a project's never turns it on.
     pub update_check: Option<bool>,
+    /// What `phitex upgrade` follows (`crate::upgrade::Channel`):
+    /// `"stable"` (the default: GitHub's latest release) or `"nightly"`
+    /// (dev's nightly build, or a later stable release), read from the
+    /// user's file only.
+    pub update_channel: Option<String>,
     /// What reading the files warned of (unknown keys).
     #[serde(skip)]
     pub warnings: Vec<String>,
@@ -78,6 +83,7 @@ const KEYS: &[&str] = &[
     "files",
     "phitex",
     "update-check",
+    "update-channel",
 ];
 
 /// `copy-pdf`'s value.
@@ -336,6 +342,7 @@ impl Config {
             files: self.files.or(under.files),
             phitex: self.phitex.or(under.phitex),
             update_check: self.update_check.or(under.update_check),
+            update_channel: self.update_channel.or(under.update_channel),
             warnings: [self.warnings, under.warnings].concat(),
         }
     }
@@ -614,6 +621,7 @@ mod tests {
                 files: None,
                 phitex: None,
                 update_check: None,
+                update_channel: None,
                 warnings: vec![],
             }
         );
