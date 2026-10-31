@@ -1,0 +1,14 @@
+% A virtual font's local fonts whose map entries a \pdfmapfile gives
+% (gillcm's cmgmi8r in cmg.map, jamtimes' jtmr8rw in jtm.map): a page is
+% written apart on a writer of its own, which had not read the map items
+% the link's writer had there; the local fonts had no entry on it, their
+% characters advanced as a PK font's do (getpkcharwidth), and the TJ
+% strings had kerns of 1 inside the words (the TeX Live manuals of gillcm
+% and jamtimes).
+\pdfmapfile{+cmg.map}\pdfmapfile{+jtm.map}
+\hsize=300pt \parindent=0pt
+\font\a=cmgmi7t at 10pt \a Lorem ipsum dolor sit amet, consectetuer adipiscing elit. Ut purus elit, vestibulum ut, placerat ac, adipiscing vitae, felis. Curabitur dictum gravida mauris.\par
+\font\b=cmgbiu7t at 10pt \b Lorem ipsum dolor sit amet, consectetuer adipiscing elit.\par
+\font\c=jtmr7tw at 10.5pt \c notice the different spacing produces bold\par
+\font\d=jtmr7te at 10.5pt \d notice the different spacing produces bold\par
+\end

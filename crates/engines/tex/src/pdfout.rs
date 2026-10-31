@@ -1035,11 +1035,13 @@ fn base_inputs(r: &mut Run<'_, '_>) -> R<BaseIn> {
         .unwrap_or_default();
     let g2u = r.get("pdf:glyphtounicode")?;
     let stacks = r.get_loc(crate::fields::cell::PDF_COLORSTACKS)?;
+    let maps = r.get_loc(crate::fields::cell::PDF_MAPS)?;
     Ok(BaseIn {
         date,
         jobname,
         g2u,
         stacks,
+        maps,
         first: r.first_page(),
     })
 }
@@ -1054,6 +1056,10 @@ pub(crate) struct BaseIn {
     jobname: String,
     g2u: Option<ValueId>,
     stacks: Option<ValueId>,
+    /// The `\\pdfmapfile`s and `\\pdfmapline`s read before the page
+    /// (`[kind, text]` each, `pdf:maps`): the link's writer has read them
+    /// there, its fonts' entries theirs.
+    maps: Option<ValueId>,
     first: bool,
 }
 
@@ -1061,8 +1067,24 @@ pub(crate) struct BaseIn {
 /// the first page; for a later one, a fresh one that has shipped an
 /// empty page, as the link's writer stands between two pages (the header
 /// written, the version fixed).
-fn base_fold(v: &Values, b: &BaseIn, params: &[ValueId], wparams: WParams) -> Fold {
+fn base_fold(v: &Values, b: &BaseIn, fonts: &Fonts, params: &[ValueId], wparams: WParams) -> Fold {
     let mut st = fresh(v, b.date.clone(), &b.jobname, b.g2u);
+    // (the map files and lines read before the page, as the link's writer
+    // has read them there (`process_map_item`): a font the page loads has
+    // their entry, as there; the files from the page's fonts,
+    // [`map_line_files`])
+    for e in b.maps.map(|x| list_of(v, x)).unwrap_or_default() {
+        let ys = list_of(v, e);
+        let text = ys
+            .get(1)
+            .map(|&t| crate::pdfprim::bytes(&str_of(v, t)))
+            .unwrap_or_default();
+        if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("file") {
+            st.map_file(&text, fonts);
+        } else {
+            st.map_line(&text);
+        }
+    }
     // (the color stacks made before the page, as the link's writer has
     // them there: their page start colors are the page's bytes)
     for s in b.stacks.map(|x| list_of(v, x)).unwrap_or_default() {
@@ -2031,6 +2053,7 @@ pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn F
             .g2u
             .into_iter()
             .chain(pc.base_in.stacks)
+            .chain(pc.base_in.maps)
             .for_each(&mut *keep);
     }
     let mut rs = records().locked();
@@ -2527,7 +2550,7 @@ fn write_page_with(
     bx: &BoxNode,
     tap: bool,
 ) -> (Made, Option<crate::origins::PageGlyphs>) {
-    let Fold { mut st, forms } = base_fold(v, &pc.base_in, &pc.params, pc.wparams);
+    let Fold { mut st, forms } = base_fold(v, &pc.base_in, &pc.fonts, &pc.params, pc.wparams);
     let out = tap.then(|| {
         let (r, out) = crate::origins::Recorder::new();
         st.set_tap(Some(Box::new(r)));

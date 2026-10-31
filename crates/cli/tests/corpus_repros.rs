@@ -311,6 +311,30 @@ fn vf_objects_by_real_font() {
     }
 }
 
+/// A virtual font's local fonts whose map entries a `\pdfmapfile` gives
+/// (gillcm's `cmgmi8r`, jamtimes' `jtmr8rw`): a page written apart is
+/// written on a writer that has read the map items before the page, as
+/// the link's has there (`pdfout::base_fold`); it had read none, the
+/// local fonts had no entry there and their characters advanced as a PK
+/// font's do (`getpkcharwidth`): kerns of 1 inside the words of the TJ
+/// strings (the TeX Live manuals of gillcm and jamtimes). At -j1 and -j4
+/// (oracle: pdftex, mc 77658).
+#[test]
+fn pdfmapfile_vf_local_fonts() {
+    let name = "pdfmapfile_vf_local_fonts";
+    let want = std::fs::read(fixtures().join(format!("{name}.pdf"))).expect("the oracle");
+    for j in [1, 4] {
+        let (got, term) = build_j(name, j);
+        assert!(
+            got == want,
+            "{name} -j{j}: the PDF differs from pdftex's ({} vs {} bytes): {}",
+            got.len(),
+            want.len(),
+            term.lines().last().unwrap_or("")
+        );
+    }
+}
+
 /// The research corpus's amsbook at -j4 (2 pages more than -j1 in about
 /// half the builds): the piece that ends a title page whose `\topskip`
 /// `\@maketitle` set in a group puts the page parameters on the main

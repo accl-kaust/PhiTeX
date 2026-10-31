@@ -402,7 +402,7 @@ fn ext_string(r: &mut Run<'_, '_>) -> R<String> {
     Ok(s)
 }
 
-fn bytes(s: &str) -> Vec<u8> {
+pub(crate) fn bytes(s: &str) -> Vec<u8> {
     s.chars()
         .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
         .collect()
