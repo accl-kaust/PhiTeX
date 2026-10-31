@@ -219,6 +219,12 @@ fn ini_pics() {
     run_owned(&ini_cases(&["pics"]));
 }
 
+/// `\pdfsavepos` after native words: `\pdflastxpos` counts their widths.
+#[test]
+fn ini_savepos() {
+    run_owned(&ini_cases(&["savepos"]));
+}
+
 /// plain.tex's documents under XeTeX (TFM fonts).
 #[test]
 fn plain_docs() {

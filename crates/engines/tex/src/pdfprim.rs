@@ -3824,6 +3824,9 @@ impl Walk<'_> {
                     h += x.width;
                 }
                 Node::Rule(x) => h += x.width,
+                // (XeTeX's native word or glyph: `cur_h` past its width,
+                // xetex.web's `hlist_out`)
+                Node::Native(x) => h += x.width,
                 Node::Whatsit(k, size) => {
                     self.at.insert(*k, (h, base));
                     h += size.map_or(0, |s| s.width);
