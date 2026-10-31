@@ -170,6 +170,11 @@ impl Files for XdvFiles {
         let mut d = self.dpx.lock().unwrap_or_else(PoisonError::into_inner);
         d.read(path)
     }
+
+    fn gs_font(&self, name: &[u8]) -> Option<Arc<[u8]>> {
+        let p = crate::tex::gs_font(std::str::from_utf8(name).ok()?)?;
+        std::fs::read(p).ok().map(Arc::from)
+    }
 }
 
 /// The files XeTeX's PDF reads, its pictures named from `dir`: a fresh

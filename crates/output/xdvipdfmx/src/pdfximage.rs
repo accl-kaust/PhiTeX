@@ -442,6 +442,24 @@ fn res_name(prefix: &[u8], id: i32) -> Vec<u8> {
     b.0
 }
 
+/// Whether a `D` line is TeX Live's dvipdfmx.cfg's: Ghostscript's
+/// pdfwrite with `-dEPSCrop` (what `phitex-ps` does as gs does).
+fn is_texlive_gs(t: &[u8]) -> bool {
+    let has = |w: &[u8]| t.windows(w.len()).any(|x| x == w);
+    (t.starts_with(b"rungs ") || t.starts_with(b"gs "))
+        && has(b"-sDEVICE=pdfwrite")
+        && has(b"-dEPSCrop")
+}
+
+/// Ghostscript's fonts through the host ([`crate::io::Files::gs_font`]).
+struct GsFonts<'a>(&'a crate::ctx::FilesRef);
+
+impl phitex_ps::Resources for GsFonts<'_> {
+    fn font(&self, name: &[u8]) -> Option<alloc::rc::Rc<alloc::vec::Vec<u8>>> {
+        self.0.gs_font(name).map(|b| alloc::rc::Rc::new(b.to_vec()))
+    }
+}
+
 impl Dpx {
     /// `CHECK_ID`.
     fn ximage_check_id(&self, id: i32) -> Result<()> {
@@ -1052,10 +1070,26 @@ impl Dpx {
             return Ok(-1);
         };
         let version = self.o.get_version();
-        let Some(data) = self
-            .files
-            .apply_filter(&distiller_template, filename, version)
-        else {
+        // (TeX Live's `D` line, Ghostscript's pdfwrite: run in process,
+        // `phitex-ps`; any other command through the host)
+        let data = if is_texlive_gs(&distiller_template) {
+            self.files.read(filename).map(|eps| {
+                let epoch = match self.session.source_date_epoch {
+                    Some(e) if e >= 0 => e,
+                    _ => self.session.now,
+                };
+                let out = phitex_ps::convert(
+                    &eps,
+                    phitex_ps::Settings::dvipdfmx(version, epoch),
+                    &GsFonts(&self.files),
+                );
+                alloc::sync::Arc::from(out.pdf)
+            })
+        } else {
+            self.files
+                .apply_filter(&distiller_template, filename, version)
+        };
+        let Some(data) = data else {
             warn!(
                 "Image format conversion for \"{}\" failed...",
                 String::from_utf8_lossy(filename)

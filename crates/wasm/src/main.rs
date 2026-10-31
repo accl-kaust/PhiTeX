@@ -203,6 +203,8 @@ fn tool_finder(k: Kpse) -> ToolFinder {
             ToolSearch::BibStyle => Format::Bst,
             ToolSearch::BibData => Format::Bib,
             ToolSearch::IndexStyle => Format::Ist,
+            // (Ghostscript's fonts by their file names)
+            ToolSearch::GsFont => Format::Type1,
         };
         found(&k, name, format)
     })

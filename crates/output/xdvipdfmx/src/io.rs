@@ -66,6 +66,14 @@ pub trait Files: Send + Sync {
         let _ = (template, input, version);
         None
     }
+
+    /// A font of Ghostscript's `Resource/Font` by its file name
+    /// (`NimbusRoman-Regular`): what the built-in distiller (`phitex-ps`,
+    /// for the `D` line's gs) reads for the base 35. `None`: not given.
+    fn gs_font(&self, name: &[u8]) -> Option<Arc<[u8]>> {
+        let _ = name;
+        None
+    }
 }
 
 /// `dpx_file_apply_filter`'s command: `template` with `%o` the output

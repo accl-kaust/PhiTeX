@@ -89,6 +89,7 @@ enum Asked {
     Find(Vec<u8>, Format, Vec<u8>),
     Read(Vec<u8>),
     Filter(Vec<u8>, Vec<u8>, i32),
+    GsFont(Vec<u8>),
 }
 
 /// Its answer.
@@ -148,6 +149,14 @@ impl Files for Logged {
         );
         r
     }
+
+    fn gs_font(&self, name: &[u8]) -> Option<Arc<[u8]>> {
+        let r = self.files.gs_font(name);
+        self.log
+            .locked()
+            .insert(Asked::GsFont(name.to_vec()), Answer::Bytes(r.clone()));
+        r
+    }
 }
 
 /// Whether every logged question has the same answer from `files`.
@@ -162,6 +171,7 @@ fn still(log: &Log, files: &dyn Files) -> bool {
             Asked::Find(n, f, p) => Answer::Path(files.find(n, *f, p)),
             Asked::Read(p) => Answer::Bytes(files.read(p)),
             Asked::Filter(t, i, v) => Answer::Bytes(files.apply_filter(t, i, *v)),
+            Asked::GsFont(n) => Answer::Bytes(files.gs_font(n)),
         };
         now.same(a)
     })

@@ -209,6 +209,9 @@ impl Tree {
             phitex_tex::ToolSearch::BibStyle => Format::Bst,
             phitex_tex::ToolSearch::BibData => Format::Bib,
             phitex_tex::ToolSearch::IndexStyle => Format::Ist,
+            // (Ghostscript's own fonts, where the system's gs keeps them,
+            // as TeX Live's epstopdf runs the system's gs)
+            phitex_tex::ToolSearch::GsFont => return gs_font(name),
         };
         let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
         let found = k
@@ -224,6 +227,24 @@ impl Tree {
         }
     }
 }
+
+/// A font of the system Ghostscript's `Resource/Font` by its file name.
+pub fn gs_font(name: &str) -> Option<PathBuf> {
+    if name.contains('/') {
+        return None;
+    }
+    GS_FONT_DIRS
+        .iter()
+        .map(|d| Path::new(d).join(name))
+        .find(|p| p.is_file())
+}
+
+/// Where a system's Ghostscript keeps its `Resource/Font`.
+const GS_FONT_DIRS: [&str; 3] = [
+    "/usr/share/ghostscript/Resource/Font",
+    "/usr/share/ghostscript/10.08.0/Resource/Font",
+    "/usr/local/share/ghostscript/Resource/Font",
+];
 
 /// The formats [`Tree::input`] looks files up in.
 const FORMATS: [Format; 8] = [

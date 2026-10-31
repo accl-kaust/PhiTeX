@@ -1,6 +1,8 @@
 //! The programs a job's reads run, as latexmk runs them between
 //! pdflatex's runs: BibTeX, biber and makeindex, in process
-//! (`phitex-bibtex`, `phitex-biber`, `phitex-makeindex`).
+//! (`phitex-bibtex`, `phitex-biber`, `phitex-makeindex`); and the one
+//! `\write18` runs for an EPS figure, `repstopdf` (epstopdf with
+//! Ghostscript, `phitex-ps`).
 //!
 //! A file the job writes is its tools' input: its node
 //! (`crate::ops::Files`) asks each tool's crate whether a name is its
@@ -104,10 +106,12 @@ pub(crate) enum Tool {
     Biber,
     Bibtex,
     Makeindex,
+    /// epstopdf-base's `repstopdf --outfile=X-eps-converted-to.pdf X.eps`.
+    Repstopdf,
 }
 
 impl Tool {
-    const ALL: [Tool; 3] = [Tool::Biber, Tool::Bibtex, Tool::Makeindex];
+    const ALL: [Tool; 4] = [Tool::Biber, Tool::Bibtex, Tool::Makeindex, Tool::Repstopdf];
 
     /// The program's name (a `\write18` command's first word).
     pub(crate) fn name(self) -> &'static str {
@@ -115,6 +119,7 @@ impl Tool {
             Tool::Biber => "biber",
             Tool::Bibtex => "bibtex",
             Tool::Makeindex => "makeindex",
+            Tool::Repstopdf => "repstopdf",
         }
     }
 
@@ -129,6 +134,7 @@ impl Tool {
             Tool::Biber => phitex_biber::default_input_for(output),
             Tool::Bibtex => phitex_bibtex::default_input_for(output),
             Tool::Makeindex => phitex_makeindex::default_input_for(output),
+            Tool::Repstopdf => None,
         }
     }
 
@@ -143,7 +149,50 @@ impl Tool {
             }
             Tool::Bibtex => phitex_bibtex::command_files(args),
             Tool::Makeindex => phitex_makeindex::command_files(args),
+            Tool::Repstopdf => epstopdf_files(args),
         }
+    }
+}
+
+/// epstopdf's output and input from its arguments: `--outfile=O` (or
+/// `-o O`) and the one non-option argument, the output by default the
+/// input with `.pdf` for its suffix.
+fn epstopdf_files(args: &[String]) -> Option<(String, String)> {
+    let mut out = None;
+    let mut input = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if let Some(o) = a
+            .strip_prefix("--outfile=")
+            .or_else(|| a.strip_prefix("-outfile="))
+        {
+            out = Some(o.to_owned());
+        } else if a == "--outfile" || a == "-o" {
+            out = it.next().cloned();
+        } else if a.starts_with('-') {
+        } else {
+            input = Some(a.clone());
+        }
+    }
+    let input = input?;
+    let out = out.unwrap_or_else(|| {
+        let b = input.rsplit_once('.').map_or(input.as_str(), |(b, _)| b);
+        format!("{b}.pdf")
+    });
+    Some((out, input))
+}
+
+/// The base 35 fonts Ghostscript's `Resource/Font` gives the converter,
+/// by file name, through the tool's lookup ([`crate::ToolSearch::GsFont`]).
+struct GsFonts<'a>(std::cell::RefCell<&'a mut Served>);
+
+impl phitex_ps::Resources for GsFonts<'_> {
+    fn font(&self, name: &[u8]) -> Option<std::rc::Rc<Vec<u8>>> {
+        let n = chars(name);
+        self.0
+            .borrow_mut()
+            .get(Need::Support(ToolSearch::GsFont, n))
+            .map(|(_, b)| std::rc::Rc::new(b))
     }
 }
 
@@ -366,6 +415,10 @@ impl Operation for ToolRun {
         if tool == Tool::Bibtex && !phitex_bibtex::requests_data(&text) {
             return Ok(ValueId::UNIT);
         }
+        let epoch = match cx.env(v.field("env:SOURCE_DATE_EPOCH"))? {
+            Some(x) => crate::val::int_of(v, x),
+            None => crate::pdfprim::source_date_epoch(),
+        };
         served.got.insert(
             Need::File(input.clone()),
             Some((format!("./{input}"), text.clone())),
@@ -391,6 +444,19 @@ impl Operation for ToolRun {
                         .chain(o.warnings.iter().map(|w| (false, w.clone())))
                         .collect();
                     (o.bbl.map(String::into_bytes), said)
+                }
+                Tool::Repstopdf => {
+                    // (epstopdf.pl's rewrite of the header, then gs reading
+                    // it from stdin; gs's error, if any, ends its run, the
+                    // page so far written)
+                    let feed = phitex_ps::epstopdf_feed(&text);
+                    let o = phitex_ps::convert(
+                        &feed,
+                        phitex_ps::Settings::epstopdf(epoch),
+                        &GsFonts(std::cell::RefCell::new(&mut served)),
+                    );
+                    let said = o.error.into_iter().map(|e| (false, e)).collect();
+                    (Some(o.pdf), said)
                 }
             };
             let missing = std::mem::take(&mut served.missing);

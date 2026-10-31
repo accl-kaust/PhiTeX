@@ -2222,6 +2222,7 @@ dependencies = [
  "phitex-makeindex",
  "phitex-otf",
  "phitex-pdf",
+ "phitex-ps",
  "phitex-source",
  "phitex-tfm",
  "phitex-typeset",
@@ -2262,6 +2263,7 @@ dependencies = [
  "libm",
  "phitex-codecs",
  "phitex-kpse",
+ "phitex-ps",
 ]
 
 [[package]]

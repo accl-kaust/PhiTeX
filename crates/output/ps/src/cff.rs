@@ -27,7 +27,11 @@ fn int2fixed(i: i32) -> Fixed {
 pub fn glyph_key(ps: &mut Ps<'_>, name: &[u8]) -> u64 {
     let e2p = ps.dev.s.prepress;
     if ps.name_ranks.is_none() {
-        let t: &[&str] = if e2p { &crate::gsnames::E2P } else { &crate::gsnames::DPX };
+        let t: &[&str] = if e2p {
+            &crate::gsnames::E2P
+        } else {
+            &crate::gsnames::DPX
+        };
         let mut m = alloc::collections::BTreeMap::new();
         for (i, n) in t.iter().enumerate() {
             m.insert(n.as_bytes().to_vec(), i as u64);
@@ -127,7 +131,17 @@ enum Next {
 
 impl St<'_> {
     fn new<'a>(src: &'a T1Src<'a>, prog: Rc<Vec<u8>>) -> St<'a> {
-        St { ips: vec![(prog, 0)], os: Vec::new(), lsb: (0, 0), width: (0, 0), sb_set: false, width_set: false, ignore_pops: 0, flex_count: FLEX_MAX, src }
+        St {
+            ips: vec![(prog, 0)],
+            os: Vec::new(),
+            lsb: (0, 0),
+            width: (0, 0),
+            sb_set: false,
+            width_set: false,
+            ignore_pops: 0,
+            flex_count: FLEX_MAX,
+            src,
+        }
     }
     fn sbw(&mut self, lx: Fixed, ly: Fixed, wx: Fixed, wy: Fixed) {
         if !self.sb_set {
@@ -148,20 +162,28 @@ impl St<'_> {
     /// `type1_next`.
     fn next(&mut self) -> Next {
         loop {
-            let Some(c) = self.byte() else { return Next::End };
+            let Some(c) = self.byte() else {
+                return Next::End;
+            };
             if c >= 32 {
                 let v = if c <= 246 {
                     int2fixed(c - 139)
                 } else if c <= 250 {
-                    let Some(c2) = self.byte() else { return Next::End };
+                    let Some(c2) = self.byte() else {
+                        return Next::End;
+                    };
                     int2fixed((c - 247) * 256 + c2 + 108)
                 } else if c <= 254 {
-                    let Some(c2) = self.byte() else { return Next::End };
+                    let Some(c2) = self.byte() else {
+                        return Next::End;
+                    };
                     int2fixed(-(c - 251) * 256 - c2 - 108)
                 } else {
                     let mut lw: i32 = 0;
                     for _ in 0..4 {
-                        let Some(b) = self.byte() else { return Next::End };
+                        let Some(b) = self.byte() else {
+                            return Next::End;
+                        };
                         lw = (lw << 8) | b;
                     }
                     int2fixed(lw)
@@ -175,9 +197,13 @@ impl St<'_> {
             match c {
                 0 | 2 | 17 => return Next::Err,
                 C_CALLSUBR => {
-                    let Some(n) = self.os.pop() else { return Next::Err };
+                    let Some(n) = self.os.pop() else {
+                        return Next::Err;
+                    };
                     let k = n >> 8;
-                    let Some(Some(s)) = self.src.subrs.get(k as usize).cloned() else { return Next::Err };
+                    let Some(Some(s)) = self.src.subrs.get(k as usize).cloned() else {
+                        return Next::Err;
+                    };
                     if self.ips.len() > 10 {
                         return Next::Err;
                     }
@@ -196,7 +222,9 @@ impl St<'_> {
                     continue;
                 }
                 C_ESCAPE => {
-                    let Some(e) = self.byte() else { return Next::End };
+                    let Some(e) = self.byte() else {
+                        return Next::End;
+                    };
                     match e {
                         CE1_DIV => {
                             if self.os.len() < 2 {
@@ -249,7 +277,9 @@ fn stem1(t: &mut Hints, v: Fixed, dv: Fixed, lsb: Fixed, active: Option<&mut [u8
         return false;
     }
     let mut top = t.data.len();
-    while top > 0 && (v0 < t.data[top - 1].v0 || (v0 == t.data[top - 1].v0 && v1 < t.data[top - 1].v1)) {
+    while top > 0
+        && (v0 < t.data[top - 1].v0 || (v0 == t.data[top - 1].v0 && v1 < t.data[top - 1].v1))
+    {
         top -= 1;
     }
     if top > 0 && v0 == t.data[top - 1].v0 && v1 == t.data[top - 1].v1 {
@@ -376,7 +406,11 @@ fn convert(src: &T1Src<'_>, prog: Rc<Vec<u8>>) -> Option<Vec<u8>> {
                         return None;
                     }
                     let v: Vec<Fixed> = st.os[n - 6..].to_vec();
-                    let (t, l) = if x == CE + CE1_VSTEM3 { (&mut vstem, st.lsb.0) } else { (&mut hstem, st.lsb.1) };
+                    let (t, l) = if x == CE + CE1_VSTEM3 {
+                        (&mut vstem, st.lsb.0)
+                    } else {
+                        (&mut hstem, st.lsb.1)
+                    };
                     for k in 0..3 {
                         if !stem1(t, v[2 * k], v[2 * k + 1], l, None) {
                             break;
@@ -421,7 +455,11 @@ fn convert(src: &T1Src<'_>, prog: Rc<Vec<u8>>) -> Option<Vec<u8>> {
     for (i, h) in vstem.data.iter_mut().enumerate() {
         h.index = (i + nh) as u16;
     }
-    let hintmask_size = if replace_hints { (nh + vstem.data.len()).div_ceil(8) } else { 0 };
+    let hintmask_size = if replace_hints {
+        (nh + vstem.data.len()).div_ceil(8)
+    } else {
+        0
+    };
     let mut active = vec![0u8; MAX_HINTS.div_ceil(8)];
     let mut dot_save = vec![0u8; MAX_HINTS.div_ceil(8)];
     // (the second pass: the result)
@@ -469,7 +507,9 @@ fn convert(src: &T1Src<'_>, prog: Rc<Vec<u8>>) -> Option<Vec<u8>> {
             }
             Next::Err => return None,
         };
-        if need_moveto && ((C_RLINETO..=C_RRCURVETO).contains(&c) || c == C_VHCURVETO || c == C_HVCURVETO) {
+        if need_moveto
+            && ((C_RLINETO..=C_RRCURVETO).contains(&c) || c == C_VHCURVETO || c == C_HVCURVETO)
+        {
             let (mut mx, mut my) = (0, 0);
             need_moveto = false;
             check_op!();
@@ -529,7 +569,11 @@ fn convert(src: &T1Src<'_>, prog: Rc<Vec<u8>>) -> Option<Vec<u8>> {
                     return None;
                 }
                 let v: Vec<Fixed> = st.os[n - 6..].to_vec();
-                let (t, l) = if x == CE + CE1_VSTEM3 { (&mut vstem, st.lsb.0) } else { (&mut hstem, st.lsb.1) };
+                let (t, l) = if x == CE + CE1_VSTEM3 {
+                    (&mut vstem, st.lsb.0)
+                } else {
+                    (&mut hstem, st.lsb.1)
+                };
                 for k in 0..3 {
                     if !stem1(t, v[2 * k], v[2 * k + 1], l, Some(&mut active)) {
                         break;
@@ -716,7 +760,11 @@ fn convert(src: &T1Src<'_>, prog: Rc<Vec<u8>>) -> Option<Vec<u8>> {
                 if n < 1 {
                     return None;
                 }
-                let (odd, even) = if c == C_HLINETO { (C_VLINETO, C_HLINETO) } else { (C_HLINETO, C_VLINETO) };
+                let (odd, even) = if c == C_HLINETO {
+                    (C_VLINETO, C_HLINETO)
+                } else {
+                    (C_HLINETO, C_VLINETO)
+                };
                 if depth > OSTACK - 1 || prev_op != (if depth & 1 != 0 { odd } else { even }) {
                     Do::Copy
                 } else {
@@ -728,8 +776,15 @@ fn convert(src: &T1Src<'_>, prog: Rc<Vec<u8>>) -> Option<Vec<u8>> {
                 if n < 4 {
                     return None;
                 }
-                let (a, b) = if c == C_HVCURVETO { (C_VHCURVETO, C_HVCURVETO) } else { (C_HVCURVETO, C_VHCURVETO) };
-                if depth & 1 != 0 || depth > OSTACK - 4 || prev_op != (if depth & 4 != 0 { a } else { b }) {
+                let (a, b) = if c == C_HVCURVETO {
+                    (C_VHCURVETO, C_HVCURVETO)
+                } else {
+                    (C_HVCURVETO, C_VHCURVETO)
+                };
+                if depth & 1 != 0
+                    || depth > OSTACK - 4
+                    || prev_op != (if depth & 4 != 0 { a } else { b })
+                {
                     Do::Copy
                 } else {
                     c = prev_op;
@@ -792,7 +847,11 @@ fn convert(src: &T1Src<'_>, prog: Rc<Vec<u8>>) -> Option<Vec<u8>> {
                         }
                         C_HVCURVETO | C_VHCURVETO => {
                             // (vrc / hrc)
-                            let vrc = if prev_op == C_HVCURVETO { depth & 4 != 0 } else { depth & 4 == 0 };
+                            let vrc = if prev_op == C_HVCURVETO {
+                                depth & 4 != 0
+                            } else {
+                                depth & 4 == 0
+                            };
                             if depth & 1 != 0 {
                                 Do::Copy
                             } else if vrc {
@@ -853,7 +912,12 @@ fn convert(src: &T1Src<'_>, prog: Rc<Vec<u8>>) -> Option<Vec<u8>> {
                 if let Some(&w) = st.os.first() {
                     put_fixed(&mut s, w);
                 }
-                put_stems(&mut s, st.os.len(), &hstem, if replace_hints { C2_HSTEMHM } else { C_HSTEM });
+                put_stems(
+                    &mut s,
+                    st.os.len(),
+                    &hstem,
+                    if replace_hints { C2_HSTEMHM } else { C_HSTEM },
+                );
                 st.os.clear();
                 width_on_stack = false;
             }
@@ -861,7 +925,12 @@ fn convert(src: &T1Src<'_>, prog: Rc<Vec<u8>>) -> Option<Vec<u8>> {
                 if let Some(&w) = st.os.first() {
                     put_fixed(&mut s, w);
                 }
-                put_stems(&mut s, st.os.len(), &vstem, if replace_hints { C2_VSTEMHM } else { C_VSTEM });
+                put_stems(
+                    &mut s,
+                    st.os.len(),
+                    &vstem,
+                    if replace_hints { C2_VSTEMHM } else { C_VSTEM },
+                );
                 st.os.clear();
                 width_on_stack = false;
             }
@@ -894,7 +963,10 @@ struct Strings {
 
 impl Strings {
     fn sid(&mut self, s: &[u8]) -> i32 {
-        if let Some(i) = crate::enc::CFF_STANDARD_STRINGS.iter().position(|x| x.as_bytes() == s) {
+        if let Some(i) = crate::enc::CFF_STANDARD_STRINGS
+            .iter()
+            .position(|x| x.as_bytes() == s)
+        {
             return i as i32;
         }
         if let Some(i) = self.items.iter().position(|x| x == s) {
@@ -937,7 +1009,11 @@ fn index_header(s: &mut Vec<u8>, count: usize, total: usize) -> usize {
 }
 
 fn index_size(count: usize, total: usize) -> usize {
-    if count == 0 { 2 } else { 3 + offset_size(total + 1) * (count + 1) + total }
+    if count == 0 {
+        2
+    } else {
+        3 + offset_size(total + 1) * (count + 1) + total
+    }
 }
 
 fn d_int(s: &mut Vec<u8>, i: i32) {
@@ -1157,7 +1233,12 @@ fn write_private(s: &mut Vec<u8>, info: &Info, subrs_offset: usize) {
 
 fn floats(ps: &mut Ps<'_>, d: &PDict, k: &str) -> Vec<f32> {
     match ps.dget_s(d, k) {
-        Some(o) => ps.nums_of(&o).unwrap_or_default().into_iter().map(|x| x as f32).collect(),
+        Some(o) => ps
+            .nums_of(&o)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|x| x as f32)
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -1171,12 +1252,23 @@ fn info_string(ps: &mut Ps<'_>, fi: &Option<PDict>, k: &str) -> Option<Vec<u8>> 
 }
 
 fn decrypt_cs(b: &[u8], len_iv: i64) -> Vec<u8> {
-    if len_iv < 0 { b.to_vec() } else { crate::font::decrypt(b, 4330, len_iv as usize) }
+    if len_iv < 0 {
+        b.to_vec()
+    } else {
+        crate::font::decrypt(b, 4330, len_iv as usize)
+    }
 }
 
 /// The CFF of `font`'s `glyphs` (`.notdef` among them), with the codes
 /// `used` encoded through `enc`, its FontBBox `bbox`.
-pub fn write(ps: &mut Ps<'_>, font: &Font, glyphs: &[Vec<u8>], enc: &[Option<Vec<u8>>], used: &[bool; 256], bbox: &[i32; 4]) -> Vec<u8> {
+pub fn write(
+    ps: &mut Ps<'_>,
+    font: &Font,
+    glyphs: &[Vec<u8>],
+    enc: &[Option<Vec<u8>>],
+    used: &[bool; 256],
+    bbox: &[i32; 4],
+) -> Vec<u8> {
     let d = font.dict.clone();
     let private = match ps.dget_s(&d, "Private").map(|o| o.v) {
         Some(V::Dict(p)) => Some(p),
@@ -1186,7 +1278,11 @@ pub fn write(ps: &mut Ps<'_>, font: &Font, glyphs: &[Vec<u8>], enc: &[Option<Vec
         Some(V::Dict(p)) => Some(p),
         _ => None,
     };
-    let len_iv = private.as_ref().and_then(|p| ps.dget_s(p, "lenIV")).and_then(|o| o.num()).unwrap_or(4.0) as i64;
+    let len_iv = private
+        .as_ref()
+        .and_then(|p| ps.dget_s(p, "lenIV"))
+        .and_then(|o| o.num())
+        .unwrap_or(4.0) as i64;
     // (the Subrs, decrypted)
     let mut subrs: Vec<Option<Rc<Vec<u8>>>> = Vec::new();
     if let Some(p) = &private
@@ -1200,7 +1296,11 @@ pub fn write(ps: &mut Ps<'_>, font: &Font, glyphs: &[Vec<u8>], enc: &[Option<Vec
         }
     }
     // (the glyph order: .notdef, the encoded sorted, the rest sorted)
-    let mut keyed: Vec<(u64, Vec<u8>)> = glyphs.iter().filter(|g| g.as_slice() != b".notdef").map(|g| (glyph_key(ps, g), g.clone())).collect();
+    let mut keyed: Vec<(u64, Vec<u8>)> = glyphs
+        .iter()
+        .filter(|g| g.as_slice() != b".notdef")
+        .map(|g| (glyph_key(ps, g), g.clone()))
+        .collect();
     keyed.sort();
     let mut encoded: Vec<(u64, Vec<u8>)> = Vec::new();
     for c in 0..256 {
@@ -1229,11 +1329,17 @@ pub fn write(ps: &mut Ps<'_>, font: &Font, glyphs: &[Vec<u8>], enc: &[Option<Vec
     let mut charstrings: Vec<Vec<u8>> = Vec::new();
     for g in &order {
         let cs = ps.charstring(&d, g).map(|b| decrypt_cs(&b, len_iv));
-        let t2 = cs.and_then(|b| convert(&src, Rc::new(b))).unwrap_or_else(|| vec![C_ENDCHAR as u8]);
+        let t2 = cs
+            .and_then(|b| convert(&src, Rc::new(b)))
+            .unwrap_or_else(|| vec![C_ENDCHAR as u8]);
         charstrings.push(t2);
     }
     // (the font's values)
-    let num = |ps: &mut Ps<'_>, dd: &Option<PDict>, k: &str| dd.as_ref().and_then(|p| ps.dget_s(p, k)).and_then(|o| o.num());
+    let num = |ps: &mut Ps<'_>, dd: &Option<PDict>, k: &str| {
+        dd.as_ref()
+            .and_then(|p| ps.dget_s(p, k))
+            .and_then(|o| o.num())
+    };
     let matrix = {
         let m = font.matrix;
         let o = font.orig_matrix;
@@ -1283,19 +1389,46 @@ pub fn write(ps: &mut Ps<'_>, font: &Font, glyphs: &[Vec<u8>], enc: &[Option<Vec
             _ => None,
         }),
         blues: [
-            private.as_ref().map(|p| floats(ps, p, "BlueValues")).unwrap_or_default(),
-            private.as_ref().map(|p| floats(ps, p, "OtherBlues")).unwrap_or_default(),
-            private.as_ref().map(|p| floats(ps, p, "FamilyBlues")).unwrap_or_default(),
-            private.as_ref().map(|p| floats(ps, p, "FamilyOtherBlues")).unwrap_or_default(),
+            private
+                .as_ref()
+                .map(|p| floats(ps, p, "BlueValues"))
+                .unwrap_or_default(),
+            private
+                .as_ref()
+                .map(|p| floats(ps, p, "OtherBlues"))
+                .unwrap_or_default(),
+            private
+                .as_ref()
+                .map(|p| floats(ps, p, "FamilyBlues"))
+                .unwrap_or_default(),
+            private
+                .as_ref()
+                .map(|p| floats(ps, p, "FamilyOtherBlues"))
+                .unwrap_or_default(),
         ],
-        std_hw: private.as_ref().map(|p| floats(ps, p, "StdHW")).and_then(|v| v.first().copied()),
-        std_vw: private.as_ref().map(|p| floats(ps, p, "StdVW")).and_then(|v| v.first().copied()),
+        std_hw: private
+            .as_ref()
+            .map(|p| floats(ps, p, "StdHW"))
+            .and_then(|v| v.first().copied()),
+        std_vw: private
+            .as_ref()
+            .map(|p| floats(ps, p, "StdVW"))
+            .and_then(|v| v.first().copied()),
         blue_scale: num(ps, &private, "BlueScale").map_or(0.039625, |x| x as f32),
         blue_shift: num(ps, &private, "BlueShift").map_or(7.0, |x| x as f32),
         blue_fuzz: num(ps, &private, "BlueFuzz").map_or(1, |x| x as i32),
-        snap_h: private.as_ref().map(|p| floats(ps, p, "StemSnapH")).unwrap_or_default(),
-        snap_v: private.as_ref().map(|p| floats(ps, p, "StemSnapV")).unwrap_or_default(),
-        force_bold: private.as_ref().and_then(|p| ps.dget_s(p, "ForceBold")).is_some_and(|o| matches!(o.v, V::Bool(true))),
+        snap_h: private
+            .as_ref()
+            .map(|p| floats(ps, p, "StemSnapH"))
+            .unwrap_or_default(),
+        snap_v: private
+            .as_ref()
+            .map(|p| floats(ps, p, "StemSnapV"))
+            .unwrap_or_default(),
+        force_bold: private
+            .as_ref()
+            .and_then(|p| ps.dget_s(p, "ForceBold"))
+            .is_some_and(|o| matches!(o.v, V::Bool(true))),
         language_group: num(ps, &private, "LanguageGroup").map_or(0, |x| x as i32),
         expansion: num(ps, &private, "ExpansionFactor").map_or(0.06, |x| x as f32),
         // (the copied font gs writes from has no Subrs: no Subrs entry)
@@ -1319,7 +1452,9 @@ pub fn write(ps: &mut Ps<'_>, font: &Font, glyphs: &[Vec<u8>], enc: &[Option<Vec
         if !used[c] || g.as_slice() == b".notdef" {
             continue;
         }
-        let Some(i) = encoded.iter().position(|(_, e)| e == g) else { continue };
+        let Some(i) = encoded.iter().position(|(_, e)| e == g) else {
+            continue;
+        };
         if i >= 255 || seen[i] {
             let sid = strings.sid(g);
             supplement.push((c as u8, sid));
@@ -1330,20 +1465,31 @@ pub fn write(ps: &mut Ps<'_>, font: &Font, glyphs: &[Vec<u8>], enc: &[Option<Vec
         }
     }
     let _ = num_enc;
-    let encoding_size = 2 + (max_enc + 1) + 3 * supplement.len() + usize::from(!supplement.is_empty());
+    let encoding_size =
+        2 + (max_enc + 1) + 3 * supplement.len() + usize::from(!supplement.is_empty());
     let cs_total: usize = charstrings.iter().map(Vec::len).sum();
     let font_name = font.name.clone();
     // (the offsets, iterated to convergence)
-    let (mut top_size, mut private_size, mut end_offset) = (0x7f_ffffusize, 0x7f_ffffusize, 0x7f_ffffusize);
+    let (mut top_size, mut private_size, mut end_offset) =
+        (0x7f_ffffusize, 0x7f_ffffusize, 0x7f_ffffusize);
     let subrs_size = usize::from(info.has_subrs);
     loop {
-        let gsubrs_offset = 4 + index_size(1, font_name.len()) + index_size(1, top_size) + index_size(strings.items.len(), strings.total());
+        let gsubrs_offset = 4
+            + index_size(1, font_name.len())
+            + index_size(1, top_size)
+            + index_size(strings.items.len(), strings.total());
         let encoding_offset = gsubrs_offset + index_size(0, 0);
         let charset_offset = encoding_offset + encoding_size;
         let mut charstrings_offset = charset_offset + charset_size;
         let mut private_offset = charstrings_offset + index_size(charstrings.len(), cs_total);
         let mut subrs_offset = private_size;
-        let mut write = |final_: bool, top_size: &mut usize, private_size: &mut usize, cso: &mut usize, po: &mut usize, so: &mut usize| -> Vec<u8> {
+        let mut write = |final_: bool,
+                         top_size: &mut usize,
+                         private_size: &mut usize,
+                         cso: &mut usize,
+                         po: &mut usize,
+                         so: &mut usize|
+         -> Vec<u8> {
             let _ = final_;
             let mut s = Vec::new();
             s.extend_from_slice(&[1, 0, 4]);
@@ -1354,8 +1500,16 @@ pub fn write(ps: &mut Ps<'_>, font: &Font, glyphs: &[Vec<u8>], enc: &[Option<Vec
             let os = index_header(&mut s, 1, *top_size);
             put_offset(&mut s, os, *top_size + 1);
             let t0 = s.len();
-            let mut st2 = Strings { items: strings.items.clone() };
-            write_top(&mut s, &mut st2, &info, bbox, [encoding_offset, charset_offset, *cso, *po, *private_size]);
+            let mut st2 = Strings {
+                items: strings.items.clone(),
+            };
+            write_top(
+                &mut s,
+                &mut st2,
+                &info,
+                bbox,
+                [encoding_offset, charset_offset, *cso, *po, *private_size],
+            );
             *top_size = s.len() - t0;
             // (the strings)
             if strings.items.is_empty() {
@@ -1408,9 +1562,23 @@ pub fn write(ps: &mut Ps<'_>, font: &Font, glyphs: &[Vec<u8>], enc: &[Option<Vec
             s.extend_from_slice(&[0, 0]);
             s
         };
-        let out = write(false, &mut top_size, &mut private_size, &mut charstrings_offset, &mut private_offset, &mut subrs_offset);
+        let out = write(
+            false,
+            &mut top_size,
+            &mut private_size,
+            &mut charstrings_offset,
+            &mut private_offset,
+            &mut subrs_offset,
+        );
         if out.len() == end_offset {
-            return write(true, &mut top_size, &mut private_size, &mut charstrings_offset, &mut private_offset, &mut subrs_offset);
+            return write(
+                true,
+                &mut top_size,
+                &mut private_size,
+                &mut charstrings_offset,
+                &mut private_offset,
+                &mut subrs_offset,
+            );
         }
         end_offset = out.len();
     }

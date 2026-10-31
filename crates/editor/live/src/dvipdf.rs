@@ -29,11 +29,25 @@ pub type FilesFor = Arc<dyn Fn() -> Arc<dyn Files> + Send + Sync>;
 pub struct DpxFinder {
     pub find: Find,
     pub read: Read,
+    /// Ghostscript's fonts by file name, for the `D` line's built-in
+    /// distiller (`Files::gs_font`).
+    pub gs_font: Option<Read>,
 }
 
 impl DpxFinder {
     pub fn new(find: Find, read: Read) -> DpxFinder {
-        DpxFinder { find, read }
+        DpxFinder {
+            find,
+            read,
+            gs_font: None,
+        }
+    }
+
+    /// With Ghostscript's fonts from `gs_font` ([`Files::gs_font`]).
+    #[must_use]
+    pub fn with_gs_font(mut self, gs_font: Read) -> DpxFinder {
+        self.gs_font = Some(gs_font);
+        self
     }
 
     /// dvipdfmx's files over the finder: each lookup and read once a
@@ -74,6 +88,18 @@ impl Files for Cached {
             .unwrap_or_else(PoisonError::into_inner)
             .entry(path.to_vec())
             .or_insert_with(|| (f.read)(path))
+            .clone()
+    }
+
+    fn gs_font(&self, name: &[u8]) -> Option<Arc<[u8]>> {
+        let g = self.finder.gs_font.as_ref()?;
+        let mut key = b"gs-font:".to_vec();
+        key.extend_from_slice(name);
+        self.read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(key)
+            .or_insert_with(|| g(name))
             .clone()
     }
 }

@@ -202,4 +202,8 @@ impl FilesRef {
     ) -> Option<alloc::sync::Arc<[u8]>> {
         self.0.apply_filter(template, input, version)
     }
+    /// [`Files::gs_font`].
+    pub fn gs_font(&self, name: &[u8]) -> Option<alloc::sync::Arc<[u8]>> {
+        self.0.gs_font(name)
+    }
 }

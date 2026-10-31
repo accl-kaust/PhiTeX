@@ -68,6 +68,7 @@ pub fn tool_finder(dir: &Path) -> phitex_tex::ToolFinder {
             phitex_tex::ToolSearch::BibStyle => (phitex_kpse::Format::Bst, "bst"),
             phitex_tex::ToolSearch::BibData => (phitex_kpse::Format::Bib, "bib"),
             phitex_tex::ToolSearch::IndexStyle => (phitex_kpse::Format::Ist, "ist"),
+            phitex_tex::ToolSearch::GsFont => (phitex_kpse::Format::Type1, ""),
         };
         for n in [name.to_owned(), format!("{name}.{ext}")] {
             let p = dir.join(&n);

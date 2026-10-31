@@ -45,6 +45,10 @@ pub enum ToolSearch {
     BibData,
     /// An index style (kpathsea's `ist` format).
     IndexStyle,
+    /// A font of Ghostscript's `Resource/Font` by its file name
+    /// (`NimbusRoman-Regular`), what the EPS converter
+    /// (`repstopdf`, `phitex-ps`) reads for the base 35.
+    GsFont,
 }
 
 impl ToolSearch {
@@ -54,6 +58,7 @@ impl ToolSearch {
             ToolSearch::BibStyle => 0,
             ToolSearch::BibData => 1,
             ToolSearch::IndexStyle => 2,
+            ToolSearch::GsFont => 3,
         }
     }
 
@@ -62,6 +67,7 @@ impl ToolSearch {
             "0" => Some(ToolSearch::BibStyle),
             "1" => Some(ToolSearch::BibData),
             "2" => Some(ToolSearch::IndexStyle),
+            "3" => Some(ToolSearch::GsFont),
             _ => None,
         }
     }

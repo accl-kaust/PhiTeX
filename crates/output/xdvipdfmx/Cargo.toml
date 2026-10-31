@@ -8,6 +8,7 @@ description = "xdvipdfmx (dvipdfm-x 20260113) ported: XDV in, PDF out, byte for 
 
 [dependencies]
 phitex-codecs = { path = "../../codecs" }
+phitex-ps = { path = "../ps" }
 libm = "0.2"
 phitex-kpse = { path = "../../tools/kpse", optional = true }
 

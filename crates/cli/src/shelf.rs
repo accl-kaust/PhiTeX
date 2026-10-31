@@ -463,6 +463,8 @@ impl Host for ShelfHost {
                     phitex_tex::ToolSearch::BibStyle => ".bst",
                     phitex_tex::ToolSearch::BibData => ".bib",
                     phitex_tex::ToolSearch::IndexStyle => ".ist",
+                    // (Ghostscript's fonts by their file names, no suffix)
+                    phitex_tex::ToolSearch::GsFont => "",
                 };
                 let name = if name.ends_with(ext) {
                     name.to_owned()
@@ -491,32 +493,44 @@ impl Host for ShelfHost {
     /// its format (its suffix added where the name has none).
     fn dpx_finder(&self) -> Option<Arc<phitex_live::dvipdf::DpxFinder>> {
         let (f1, f2) = (self.files.clone(), self.files.clone());
-        Some(Arc::new(phitex_live::dvipdf::DpxFinder::new(
-            Box::new(move |name, format, _prog| {
-                let n = String::from_utf8_lossy(name).into_owned();
-                if let Some(p) = project(&n) {
-                    return Some(p.to_string_lossy().into_owned().into_bytes());
-                }
-                let suffix = dpx_suffix(format);
-                let n = if suffix.is_empty() || n.contains('.') {
-                    n
-                } else {
-                    format!("{n}{suffix}")
-                };
-                f1.find_in(&n, dpx_format(format))
-                    .map(|(p, _)| p.into_bytes())
-            }),
-            Box::new(move |path| {
-                let p = String::from_utf8_lossy(path).into_owned();
-                match f2.read(&p) {
-                    Some(b) => Some(Arc::from(b.as_slice())),
-                    None if p.starts_with(phitex_shelf::TL) => {
-                        f2.find(&p).map(|(_, b)| Arc::from(b.as_slice()))
+        Some(Arc::new(
+            phitex_live::dvipdf::DpxFinder::new(
+                Box::new(move |name, format, _prog| {
+                    let n = String::from_utf8_lossy(name).into_owned();
+                    if let Some(p) = project(&n) {
+                        return Some(p.to_string_lossy().into_owned().into_bytes());
                     }
-                    None => std::fs::read(&p).ok().map(Arc::from),
-                }
+                    let suffix = dpx_suffix(format);
+                    let n = if suffix.is_empty() || n.contains('.') {
+                        n
+                    } else {
+                        format!("{n}{suffix}")
+                    };
+                    f1.find_in(&n, dpx_format(format))
+                        .map(|(p, _)| p.into_bytes())
+                }),
+                Box::new(move |path| {
+                    let p = String::from_utf8_lossy(path).into_owned();
+                    match f2.read(&p) {
+                        Some(b) => Some(Arc::from(b.as_slice())),
+                        None if p.starts_with(phitex_shelf::TL) => {
+                            f2.find(&p).map(|(_, b)| Arc::from(b.as_slice()))
+                        }
+                        None => std::fs::read(&p).ok().map(Arc::from),
+                    }
+                }),
+            )
+            .with_gs_font({
+                let f3 = self.files.clone();
+                Box::new(move |name| {
+                    // (Ghostscript's fonts by their file names)
+                    let n = String::from_utf8_lossy(name).into_owned();
+                    ShelfHost { files: f3.clone() }
+                        .find(&n)
+                        .map(|(_, b)| Arc::from(b.as_slice()))
+                })
             }),
-        )))
+        ))
     }
 
     /// XeTeX's fonts: the release's font index ([`font_index`]), the

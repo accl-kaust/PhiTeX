@@ -833,7 +833,7 @@ fn creation_date(r: &mut Run<'_, '_>) -> R<String> {
 
 /// `SOURCE_DATE_EPOCH` as the process was started with it (0 unset),
 /// read once.
-fn source_date_epoch() -> i64 {
+pub(crate) fn source_date_epoch() -> i64 {
     static T: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *T.get_or_init(|| {
         std::env::var("SOURCE_DATE_EPOCH")
