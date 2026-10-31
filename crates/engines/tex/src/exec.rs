@@ -211,9 +211,10 @@ impl Progress {
     }
 
     /// `hook(ready)` called on the building thread when the format is
-    /// found not cached and is being made (false), and when it is ready,
-    /// made or read (true), before the document's first evaluation (once
-    /// per progress: whether it was set).
+    /// found not cached and is being made (false; never for a build
+    /// without a prelude: INITEX's bare state is no format), and when it
+    /// is ready, made or read (true), before the document's first
+    /// evaluation (once per progress: whether it was set).
     pub fn on_format(&self, hook: Box<dyn Fn(bool) + Send + Sync>) -> bool {
         self.on_format.set(FormatHook(hook)).is_ok()
     }

@@ -5189,8 +5189,9 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         }
         Err(known) => known,
     };
-    // (made here: the host says so while it is, `Progress::on_format`)
-    if let Some(p) = &opts.progress {
+    // (made here: the host says so while it is, `Progress::on_format`;
+    // INITEX's bare state, no prelude, is no format: not told)
+    if let (Some(p), Some(_)) = (&opts.progress, prelude) {
         p.note_format(false);
     }
     let t_check = t_start.elapsed();
