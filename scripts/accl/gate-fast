@@ -8,6 +8,10 @@
 #   scripts/accl/gate-fast edits [COMMIT]   amsldoc's edit histories at
 #                                       -j 8 and 16 with 50 edits (the
 #                                       measurement; the gate runs 10)
+#   scripts/accl/gate-fast research [COMMIT]   the research corpus
+#                                       (gate-shard.sh research 0 1: ci/research.json
+#                                       against TeX Live, one job in the -doc
+#                                       image, GATE_RESEARCH_IMAGE)
 #   scripts/accl/gate-fast control CTL  build control commit CTL, time its
 #                                       cold watch builds, record them in
 #                                       scripts/accl/gate-control/CTL (commit
@@ -264,6 +268,22 @@ one_job() {
   echo "$id"
 }
 
+# the research corpus in one job (its own: the -doc image, which the
+# other shards do not run in; on the build's users' CLI)
+research() {
+  local opts img=${GATE_RESEARCH_IMAGE:-phitex-ci-2026-09-25}
+  c=$(git rev-parse "${1:-HEAD}^{commit}")
+  order=""
+  stage
+  ids=()
+  build_first
+  opts="-c ${GATE_RESEARCH_CPUS:-16} --mem=64G -t 03:00:00 -J gf-research $(on_bins cli)"
+  opts=${opts/--export=ALL,/--export=ALL,ACCL_IMAGE=$img,}
+  ids+=("$(sub "$opts" research 0 1)")
+  echo "gate-fast: research corpus of $c in $img, jobs ${ids[*]}" >&2
+  echo "${ids[*]}"
+}
+
 # the 50-edit histories (a measurement, not the gate)
 edits50() {
   c=$(git rev-parse "${1:-HEAD}^{commit}")
@@ -406,6 +426,7 @@ table() {
 case ${1:-} in
   wait) shift; wait_all "$@" ;;
   edits) shift; edits50 "$@" ;;
+  research) shift; research "$@" ;;
   control) shift; control "$@" ;;
   table) shift; table "$@" ;;
   -h | --help) sed -n '2,20p' "$0" ;;

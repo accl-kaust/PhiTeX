@@ -2,10 +2,14 @@
 """The corpus sweep (scripts/accl/corpus-sweep): every pinned pdfLaTeX
 manual of ci/manuals.json built cold by `phitex build --exact-pdf` at
 -j 1 and at -j 8, each against the oracle (TeX Live's pdflatex run to a
-settled fixpoint, the manuals.py oracle cache).
+settled fixpoint, the manuals.py oracle cache). The research corpus
+(ci/research.json, gate-shard.sh's research shard) is swept the same
+way, its XeLaTeX and biber documents included (--engines, --tools), and
+with --shelf against Shelf's files instead of TeX Live's.
 
     sweep.py run   --list ci/manuals.json --doc DIR --cache DIR --bin PHITEX --out DIR
-                   [--ids a,b] [--jobs 1,8] [--par 1:20,8:5] [--timeout 120]
+                   [--ids a,b] [--shard K/N] [--jobs 1,8] [--par 1:20,8:5] [--timeout 120]
+                   [--engines pdflatex] [--tools bibtex,makeindex] [--shelf]
     sweep.py table RESULTS_DIR [--json OUT]
 
 Per build: exit, the PDF's md5 against the oracle's, pages against the
@@ -177,9 +181,13 @@ def run_one(c, j, args):
     shutil.rmtree(cdir, ignore_errors=True)
     cdir.mkdir(parents=True)
     os.symlink(WORK / "fcache" / "formats", cdir / "formats")
+    if args.shelf:
+        # (Shelf's packs fetched once a sweep, kept beside the formats)
+        os.symlink(WORK / "fcache" / "shelf", cdir / "shelf")
     env = manuals.side_env(c["engine"], {"PHITEX_TEX_TIME": "1", "PHITEX_CACHE_DIR": str(cdir)}, phitex=True)
     term = run_dir / "term-phitex.txt"
-    cmd = [args.bin, "build", "--exact-pdf", "-j", str(j), "--no-synctex", c["main"]]
+    cmd = [args.bin, "build", "--exact-pdf", "-j", str(j), "--no-synctex", "--engine", c["engine"],
+           *(["--shelf"] if args.shelf else []), c["main"]]
     r = common.run(cmd, run_dir, env, args.timeout, out=term, cpu_s=args.timeout * (j + 4))
     text = term.read_bytes() if term.exists() else b""
     logb = b""
@@ -222,30 +230,37 @@ def run_one(c, j, args):
     return res
 
 
-def prewarm(args):
-    """The format, built once into the shared format cache."""
+def prewarm(args, engines):
+    """Each engine's format, built once into the shared format cache
+    (with --shelf from Shelf's files, its packs kept there too)."""
     d = WORK / "fcache"
     (d / "formats").mkdir(parents=True, exist_ok=True)
-    w = WORK / "run" / "prewarm"
-    w.mkdir(parents=True, exist_ok=True)
-    (w / "p.tex").write_text("\\documentclass{article}\n\\begin{document}\nx\n\\end{document}\n")
-    env = manuals.side_env("pdflatex", {"PHITEX_CACHE_DIR": str(d)}, phitex=True)
-    r = common.run([args.bin, "build", "--exact-pdf", "-j", "1", "--no-synctex", "p.tex"], w, env, 600, out=w / "term.txt")
-    print(f"prewarm: exit {r['exit']} wall {r['wall_s']} s; formats: {sorted(os.listdir(d / 'formats'))}", flush=True)
-    if r["exit"] != 0:
-        print((w / "term.txt").read_text(errors="replace")[-3000:], flush=True)
+    if args.shelf:
+        (d / "shelf").mkdir(parents=True, exist_ok=True)
+    for e in engines:
+        w = WORK / "run" / f"prewarm-{e}"
+        w.mkdir(parents=True, exist_ok=True)
+        (w / "p.tex").write_text("\\documentclass{article}\n\\begin{document}\nx\n\\end{document}\n")
+        env = manuals.side_env(e, {"PHITEX_CACHE_DIR": str(d)}, phitex=True)
+        cmd = [args.bin, "build", "--exact-pdf", "-j", "1", "--no-synctex", "--engine", e,
+               *(["--shelf"] if args.shelf else []), "p.tex"]
+        r = common.run(cmd, w, env, 900, out=w / "term.txt")
+        print(f"prewarm {e}: exit {r['exit']} wall {r['wall_s']} s; formats: {sorted(os.listdir(d / 'formats'))}", flush=True)
+        if r["exit"] != 0:
+            print((w / "term.txt").read_text(errors="replace")[-3000:], flush=True)
 
 
 def cmd_run(args):
-    items = manuals.load_list(args.list)
-    items = [c for c in items if c["engine"] == "pdflatex" and not (set(c.get("tools", [])) - {"bibtex", "makeindex"})]
+    items = manuals.shard(manuals.load_list(args.list), args.shard)
+    engines, tools = set(args.engines.split(",")), set(args.tools.split(","))
+    items = [c for c in items if c["engine"] in engines and not (set(c.get("tools", [])) - tools)]
     if args.ids:
         want = set(args.ids.split(","))
         items = [c for c in items if c["id"] in want]
     items = sorted(items, key=lambda c: (-(c.get("oracle_wall_s") or 0), c["id"]))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    prewarm(args)
+    prewarm(args, sorted({c["engine"] for c in items}))
     par = dict((int(a), int(b)) for a, b in (x.split(":") for x in args.par.split(",")))
     print(f"{len(items)} documents, jobs {args.jobs}, parallel {par}, timeout {args.timeout} s", flush=True)
     for j in (int(x) for x in args.jobs.split(",")):
@@ -312,6 +327,10 @@ def main():
     p.add_argument("--bin", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--ids")
+    p.add_argument("--shard")
+    p.add_argument("--engines", default="pdflatex")
+    p.add_argument("--tools", default="bibtex,makeindex")
+    p.add_argument("--shelf", action="store_true")
     p.add_argument("--jobs", default="1,8")
     p.add_argument("--par", default="1:20,8:5")
     p.add_argument("--timeout", type=int, default=120)

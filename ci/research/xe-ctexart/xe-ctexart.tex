@@ -1,0 +1,45 @@
+% !TEX program = xelatex
+% The research corpus (ci/research.json): a Chinese paper in ctexart
+% (xeCJK, TeX Live's Fandol fonts), with a Japanese line in IPAex.
+\documentclass[UTF8,fontset=fandol,zihao=-4]{ctexart}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\setCJKfamilyfont{jp}{IPAexMincho}
+\newcommand{\jp}{\CJKfamily{jp}}
+\title{并行排版系统的设计与实现}
+\author{张三 \and 李四}
+\date{2026年1月1日}
+\begin{document}
+\maketitle
+\begin{abstract}
+本文介绍一种并行排版系统。文档被表示为一个依赖图，图中的节点可以并行执行，
+其输出与串行排版逐字节相同。
+\end{abstract}
+\section{引言}
+排版是一个古老的问题。\TeX{} 由高德纳（Donald E. Knuth）设计，至今仍被广泛使用。
+中文排版需要处理标点挤压、中西文间距等问题，例如 PhiTeX 与 \LaTeX{} 混排。
+\section{方法}
+设文档有 $n$ 个段落，串行排版的时间为 $T_1 = \sum_{i=1}^{n} t_i$，
+并行排版的时间为
+\begin{equation}
+  T_p \ge \max\Bigl(\frac{T_1}{p}, T_\infty\Bigr),
+\end{equation}
+其中 $T_\infty$ 为关键路径的长度。
+\section{实验}
+\begin{table}[h]
+\centering
+\caption{排版时间（秒）}
+\begin{tabular}{lrr}
+\toprule
+文档 & 页数 & 时间 \\
+\midrule
+论文 & 12 & 0.8 \\
+学位论文 & 180 & 6.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\section{日本語}
+{\jp 日本語の文章も同じ文書に含めることができる。「かぎ括弧」と句読点。}
+\section{结论}
+并行排版是可行的；其结果与串行排版完全一致。
+\end{document}

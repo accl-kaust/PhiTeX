@@ -381,7 +381,7 @@ def load_list(path):
     data = common.read_json(path)
     if data is None:
         sys.exit(f"cannot read {path}")
-    return data.get("manuals") or data.get("candidates")
+    return data.get("manuals") or data.get("documents") or data.get("candidates")
 
 
 def shard(items, spec):

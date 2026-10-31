@@ -6,15 +6,31 @@
 #
 #   gate-shard.sh all SPEC...           the whole gate in one job (below:
 #                                       mc caps a user's submitted jobs)
-#   gate-shard.sh build                 the commit's binaries, once: phitex-tex's
+#   gate-shard.sh build [PARTS]         the commit's binaries, once: phitex-tex's
 #                                       test binaries (fastdev) and the release
 #                                       CLI, built side by side, left in
 #                                       $r/store for the other shards
-#                                       (job.sbatch ACCL_STORE_OUT/IN)
+#                                       (job.sbatch ACCL_STORE_OUT/IN); PARTS
+#                                       main, tests (both by default) or cli
+#                                       (the users' CLI alone, cli/rel)
 #   gate-shard.sh lint                  clippy -D warnings (no fmt: version skew),
 #                                       phitex-live checked for wasm32-wasip1-threads
 #   gate-shard.sh suites                the local suites of phitex-tex
 #   gate-shard.sh latex K N             the latex target's tests, shard K of N
+#   gate-shard.sh research K N [shelf]  the research corpus (ci/research.json:
+#                                       the templates researchers start from,
+#                                       ci/research/), shard K of N: each built
+#                                       by TeX Live's engines to its fixpoint
+#                                       (scripts/ci/manuals.py's oracle) and by
+#                                       the users' CLI (cli/rel) --exact-pdf at
+#                                       -j 1 and 4 (scripts/ci/sweep.py), the
+#                                       PDFs byte for byte; red: a PDF that
+#                                       differs, a build or an oracle that
+#                                       fails. `shelf`: the CLI with --shelf
+#                                       (Shelf as served, the network), against
+#                                       the same TeX Live PDFs (not the gate:
+#                                       research-shelf.yml). In the -doc image
+#                                       (its language collections)
 #   gate-shard.sh tests                 every other test binary of the workspace
 #                                       (each crate's integration tests, the CLI's
 #                                       on TeX Live among them, and phitex-live's
@@ -322,7 +338,8 @@ case $shard in
   build)
     # build [PARTS]: main (the CLIs and phitex-tex's suites and latex
     # test binaries), tests (the tests shard's binaries), both unless
-    # named: GitHub builds them in two jobs at once
+    # named: GitHub builds them in two jobs at once; cli: the users' CLI
+    # alone (research-shelf.yml's)
     parts=" ${*:-main tests} "
     # (each in its own target directory, side by side: one cargo would
     # hold the other's lock)
@@ -338,6 +355,9 @@ case $shard in
       # the engine's recorder) and the users' (no feature))
       ( CARGO_TARGET_DIR=$PWD/target-cli cargo build -q --release -p phitex-cli --features phitex-tex/profile,phitex-tex/observe > "$r/build.txt" 2>&1; echo "EXIT $?" >> "$r/build.txt" ) &
       ( CARGO_TARGET_DIR=$PWD/target-cli-prof cargo build -q --release -p phitex-cli --features phitex-tex/profile > "$r/build-prof.txt" 2>&1; echo "EXIT $?" >> "$r/build-prof.txt" ) &
+      ( CARGO_TARGET_DIR=$PWD/target-cli-rel cargo build -q --release -p phitex-cli > "$r/build-rel.txt" 2>&1; echo "EXIT $?" >> "$r/build-rel.txt" ) &
+    fi
+    if [[ $parts == *" cli "* ]] && [[ $parts != *" main "* ]]; then
       ( CARGO_TARGET_DIR=$PWD/target-cli-rel cargo build -q --release -p phitex-cli > "$r/build-rel.txt" 2>&1; echo "EXIT $?" >> "$r/build-rel.txt" ) &
     fi
     if [[ $parts == *" tests "* ]]; then
@@ -357,6 +377,9 @@ case $shard in
     fi
     if [[ $parts == *" tests "* ]]; then
       grep -q '^EXIT 0$' "$r/build-wtests.txt" || red "build (the tests shard's): $(grep -m1 '^error' "$r/build-wtests.txt")"
+    fi
+    if [[ $parts == *" cli "* ]] && [[ $parts != *" main "* ]]; then
+      grep -q '^EXIT 0$' "$r/build-rel.txt" || red "build (cli, release): $(grep -m1 '^error' "$r/build-rel.txt")"
     fi
     if [ $status = green ]; then
       mkdir -p "$r/store.tmp"
@@ -378,6 +401,11 @@ for l in open(sys.argv[1]):
         cp target-cli-prof/release/phitex "$r/store.tmp/cli/prof/phitex"
         cp target-cli-rel/release/phitex "$r/store.tmp/cli/rel/phitex"
         sed -n 's/^build_s //p' "$r/times.txt" | tee "$r/store.tmp/tests/build_s" > "$r/store.tmp/cli/build_s"
+      fi
+      if [[ $parts == *" cli "* ]] && [[ $parts != *" main "* ]]; then
+        mkdir -p "$r/store.tmp/cli/rel"
+        cp target-cli-rel/release/phitex "$r/store.tmp/cli/rel/phitex"
+        sed -n 's/^build_s //p' "$r/times.txt" > "$r/store.tmp/cli/build_s"
       fi
       if [[ $parts == *" tests "* ]]; then
         mkdir -p "$r/store.tmp/wtests/bin"
@@ -524,6 +552,71 @@ PY
       awk '$3 == 0 {print $1 " (passes now)"} $3 == 124 || $3 == 137 {print $1 " (timed out)"} $3 != 0 && $3 != 124 && $3 != 137 {print $1}' "$r/t-known/walls.txt" > "$r/known-red.txt"
       cp "$w/red.keep" "$r/red.txt"
       status=$s
+    fi
+    ;;
+  research)
+    # research K N [shelf]: shard K of N of ci/research.json. The oracle
+    # (TeX Live's pdflatex/xelatex, BibTeX, biber, makeindex to the
+    # fixpoint) built here, GATE_RESEARCH_PAR processes at once (each a
+    # slice of the shard: its documents k, k+n, ... dealt out again); then
+    # the users' CLI cold at each -j of GATE_RESEARCH_JOBS against it
+    k=$1 n=$2 mode=${3:-}
+    fetched
+    bin=$w/bin/cli/rel/phitex
+    if [ ! -x "$bin" ]; then
+      red "research: no CLI at \$w/bin/cli/rel/phitex"
+    else
+      export CI_WORK=$w/ci
+      mkdir -p "$CI_WORK" "$r/oracle"
+      P=${GATE_RESEARCH_PAR:-4}
+      s0=$(date +%s)
+      for ((i = 0; i < P; i++)); do
+        python3 -I scripts/ci/manuals.py oracle --list ci/research.json --doc ci/research --cache "$w/oracle" \
+          --shard "$((k + n * i))/$((n * P))" > "$r/oracle/oracle-$i.txt" 2>&1 &
+      done
+      wait
+      echo "oracle_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
+      # (the oracle kept whole: its PDFs beside PhiTeX's for a red, and
+      # the TeX Live PDFs research-shelf.yml compares with)
+      cp -a "$w/oracle/." "$r/oracle/"
+      s0=$(date +%s)
+      python3 -I scripts/ci/sweep.py run --list ci/research.json --doc ci/research --cache "$w/oracle" --bin "$bin" \
+        --out "$r/research" --shard "$k/$n" --engines pdflatex,xelatex --tools bibtex,biber,makeindex,glossaries \
+        --jobs "${GATE_RESEARCH_JOBS:-1,4}" --par "${GATE_RESEARCH_SWEEP_PAR:-1:4,4:1}" --timeout "${GATE_RESEARCH_TIMEOUT:-900}" \
+        ${mode:+--$mode} > "$r/sweep.txt" 2>&1 || red "research: the sweep failed: $(tail -1 "$r/sweep.txt")"
+      echo "sweep_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
+      python3 -I scripts/ci/sweep.py table "$r/research" --json "$r/research/table.json" > "$r/table.txt" 2>&1
+      # (every document of the shard has a result at every -j: one
+      # without is red, never a pass of nothing)
+      python3 -I - ci/research.json "$k/$n" "${GATE_RESEARCH_JOBS:-1,4}" "$r/research" "$mode" >> "$r/red.txt" <<'PY'
+import json, sys
+from pathlib import Path
+docs = json.load(open(sys.argv[1]))["documents"]
+k, n = map(int, sys.argv[2].split("/"))
+mine = [d for i, d in enumerate(docs) if i % n == k]
+lane = " (--shelf)" if sys.argv[5] else ""
+for d in mine:
+    no_oracle = False
+    for j in sys.argv[3].split(","):
+        p = Path(sys.argv[4]) / f"{d['id']}-j{j}.json"
+        try:
+            r = json.loads(p.read_text())
+        except (OSError, ValueError):
+            print(f"research: {d['id']} -j{j}{lane}: no result")
+            continue
+        st = r.get("status")
+        if st == "exact":
+            continue
+        if st == "no-oracle":
+            if not no_oracle:
+                print(f"research: {d['id']}: no oracle: {r.get('note')}")
+            no_oracle = True
+            continue
+        df = r.get("diff") or {}
+        first = df.get("summary") or ""
+        print(f"research: {d['id']} -j{j}{lane}: {st}: {(r.get('note') or '')[:200]}" + (f" [{first[:200]}]" if first and first not in (r.get('note') or '') else ""))
+PY
+      grep -q . "$r/red.txt" && status=red
     fi
     ;;
   ams)

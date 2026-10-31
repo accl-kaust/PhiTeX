@@ -1,0 +1,47 @@
+% !TEX program = xelatex
+% The research corpus (ci/research.json): a XeLaTeX paper with fontspec
+% and unicode-math on TeX Live's OpenType fonts, by name and by file.
+\documentclass[11pt,a4paper]{article}
+\usepackage{fontspec}
+\usepackage{unicode-math}
+\setmainfont{TeX Gyre Termes}
+\setsansfont{TeX Gyre Heros}[Scale=MatchLowercase]
+\setmonofont{TeX Gyre Cursor}[Scale=MatchLowercase]
+\setmathfont{TeX Gyre Termes Math}
+\newfontfamily\libertinus{LibertinusSerif}[Extension=.otf,UprightFont=*-Regular,ItalicFont=*-Italic,BoldFont=*-Bold]
+\newfontfamily\pagella{TeX Gyre Pagella}[Numbers=OldStyle]
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\title{Unicode Text and Mathematics in XeLaTeX}
+\author{J. Typographer}
+\date{2026}
+\begin{document}
+\maketitle
+\section{Text}
+Unicode input — “quotes”, ‘single’, en–dash, em—dash, ellipsis…, ligatures
+fi fl ffi, accents àéîõü ç ñ ø å, and \textsf{sans serif}, \texttt{mono},
+\textit{italic}, \textbf{bold}, \textsc{Small Caps}.
+
+{\libertinus Libertinus by its file name: \textit{italic} and \textbf{bold}.}
+
+{\pagella Old-style figures in Pagella: 0123456789.}
+\section{Mathematics}
+With unicode-math, $α + β = γ$, $∀x ∈ ℝ: x² ≥ 0$ and
+\[
+  \int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}, \qquad
+  \mathbf{A}\mathbf{x} = \mathbf{b}, \qquad
+  \mathcal{F}\{f\}(\xi) = \int f(x)\,e^{-2\pi i x \xi}\,dx .
+\]
+\begin{equation}
+  \sum_{k=0}^{n} \binom{n}{k} = 2^n , \qquad \mathbb{E}[X] = \sum_x x\,P(X=x).
+\end{equation}
+\section{Table}
+\begin{tabular}{lrr}
+\toprule
+Font & Glyphs & Scripts \\
+\midrule
+TeX Gyre Termes & 1200 & Latin \\
+Libertinus Serif & 2700 & Latin, Greek, Cyrillic \\
+\bottomrule
+\end{tabular}
+\end{document}

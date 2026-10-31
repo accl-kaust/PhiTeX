@@ -1,0 +1,104 @@
+% The research corpus (ci/research.json): what a typical paper loads,
+% in Times (mathptmx), Helvetica and Courier: the 35 base fonts.
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage{mathptmx}
+\usepackage[scaled=0.92]{helvet}
+\usepackage{courier}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage[ruled,linesnumbered]{algorithm2e}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{makeidx}
+\usepackage{hyperref}
+\makeindex
+\lstset{basicstyle=\ttfamily\small,keywordstyle=\bfseries,columns=fullflexible,frame=single,numbers=left,numberstyle=\tiny}
+\title{On the Typesetting of Research Papers in Times}
+\author{A. Researcher\thanks{Department of Examples, University of Nowhere.} \and B. Colleague}
+\date{1 January 2026}
+\begin{document}
+\maketitle
+\begin{abstract}
+We typeset a short paper with the fonts most journals ask for: Times for
+the text and mathematics, Helvetica for headings in \textsf{sans serif},
+and Courier for \texttt{code}. Tables, algorithms, listings, a picture,
+citations and an index follow.
+\end{abstract}
+
+\section{Introduction}\label{sec:intro}
+Literate programming\index{literate programming} \citep{knuth1984} and
+document preparation\index{document preparation} \citep{lamport1994} are
+older than most of their users. Structured programming
+\citep{dijkstra1968} and information theory \citep{shannon1948,turing1938}
+are older still. Section~\ref{sec:method} gives the method and
+Table~\ref{tab:results} its results.
+
+\section{Method}\label{sec:method}
+Let $f\colon \mathbb{R}^n \to \mathbb{R}$ be convex\index{convexity}. Then
+\begin{equation}
+  f\Bigl(\sum_{i=1}^{k} \lambda_i x_i\Bigr) \le \sum_{i=1}^{k} \lambda_i f(x_i),
+  \qquad \sum_{i=1}^k \lambda_i = 1,\ \lambda_i \ge 0 .
+  \label{eq:jensen}
+\end{equation}
+Equation~\eqref{eq:jensen} is Jensen's inequality\index{Jensen's inequality}.
+Algorithm~\ref{alg:gd} minimises $f$ by gradient descent\index{gradient descent}.
+
+\begin{algorithm}
+\caption{Gradient descent}\label{alg:gd}
+\KwIn{$x_0$, step size $\eta > 0$, tolerance $\varepsilon$}
+\KwOut{an approximate minimiser $x$}
+$x \gets x_0$\;
+\While{$\lVert \nabla f(x) \rVert > \varepsilon$}{
+  $x \gets x - \eta \nabla f(x)$\;
+}
+\Return{$x$}\;
+\end{algorithm}
+
+\begin{lstlisting}[language=Python,caption={The same in Python}]
+def descend(grad, x, eta=0.1, eps=1e-6):
+    while norm(grad(x)) > eps:
+        x = x - eta * grad(x)
+    return x
+\end{lstlisting}
+
+\section{Results}
+\begin{table}[ht]
+\centering
+\caption{Measured run times and speed-ups.}\label{tab:results}
+\begin{tabular}{l S[table-format=3.2] S[table-format=1.2e1] r}
+\toprule
+Method & {Time (\si{\milli\second})} & {Error} & Iterations \\
+\midrule
+Baseline & 412.50 & 1.20e-3 & 1000 \\
+Ours     &  87.25 & 3.40e-4 &  210 \\
+\bottomrule
+\end{tabular}
+\end{table}
+The speed-up is \num{4.73} at \SI{2.4}{\giga\hertz}; Figure~\ref{fig:pic}
+draws the iterates.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[scale=1.2]
+  \draw[->] (-0.2,0) -- (4.2,0) node[right] {$x$};
+  \draw[->] (0,-0.2) -- (0,3.2) node[above] {$f(x)$};
+  \draw[thick,domain=0.2:3.9,smooth] plot (\x,{0.3*(\x-2)^2+0.5});
+  \foreach \p in {0.4,1.1,1.6,1.9} \fill[red] (\p,{0.3*(\p-2)^2+0.5}) circle (1.5pt);
+\end{tikzpicture}
+\caption{Iterates of Algorithm~\ref{alg:gd} on a quadratic.}\label{fig:pic}
+\end{figure}
+
+\section{Conclusion}
+\textbf{Bold}, \textit{italic}, \textsc{Small Caps}, \textsf{\textbf{bold
+sans}} and \texttt{typewriter} all come from the base fonts. See
+\url{https://www.ctan.org} for more.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+\printindex
+\end{document}

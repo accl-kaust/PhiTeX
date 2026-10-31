@@ -1,0 +1,42 @@
+% !TEX program = xelatex
+% The research corpus (ci/research.json): polyglossia with Arabic,
+% Hebrew (right to left, bidi), Greek and Russian, on TeX Live's fonts.
+\documentclass[11pt,a4paper]{article}
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage{english}
+\setotherlanguages{arabic,hebrew,greek,russian}
+\setmainfont{Libertinus Serif}
+\setsansfont{Libertinus Sans}
+\newfontfamily\arabicfont[Script=Arabic]{Amiri}
+\newfontfamily\hebrewfont[Script=Hebrew]{David CLM}
+\newfontfamily\hebrewfontsf[Script=Hebrew]{Frank Ruehl CLM}
+\title{Four Scripts in One Paper}
+\author{K. Linguist}
+\date{2026}
+\begin{document}
+\maketitle
+\section{Greek}
+\begin{greek}
+Ἐν ἀρχῇ ἦν ὁ λόγος, καὶ ὁ λόγος ἦν πρὸς τὸν θεόν. Η γλώσσα είναι
+ζωντανή, και οι λέξεις αλλάζουν με τον χρόνο· η συλλαβοποίηση ακολουθεί
+τους κανόνες της ελληνικής γλώσσας.
+\end{greek}
+\section{Russian}
+\begin{russian}
+Все счастливые семьи похожи друг на друга, каждая несчастливая семья
+несчастлива по-своему. Перенос слов следует правилам русского языка.
+\end{russian}
+\section{Arabic}
+\begin{arabic}
+بسم الله الرحمن الرحيم. اللغة العربية من أقدم اللغات السامية، وتكتب من
+اليمين إلى اليسار، والأرقام ١٢٣٤٥٦٧٨٩٠.
+\end{arabic}
+\section{Hebrew}
+\begin{hebrew}
+בראשית ברא אלהים את השמים ואת הארץ. העברית נכתבת מימין לשמאל.
+\end{hebrew}
+\section{Mixed}
+English with an inline \textgreek{λόγος}, \textrussian{слово},
+\textarabic{كلمة} and \texthebrew{מילה}, then back to English.
+\end{document}
