@@ -11,6 +11,7 @@ phitex-defuse = { path = "../../core/defuse" }
 phitex-typeset = { path = "../../core/typeset" }
 phitex-source = { path = "../../core/source" }
 phitex-tfm = { path = "../../fonts/tfm" }
+phitex-mf = { path = "../../fonts/mf" }
 phitex-dvi = { path = "../../output/dvi" }
 phitex-pdf = { path = "../../output/pdf" }
 phitex-xdvipdfmx = { path = "../../output/xdvipdfmx" }

@@ -75,6 +75,15 @@ pub trait Host: Send + Sync {
         phitex_bibtex::Options::default()
     }
 
+    /// Where the METAFONT runs that make the fonts the finder misses are
+    /// kept, and their settings (`phitex_tex::Options::mktex`; none: in
+    /// the process's memory). The runs read their files through the
+    /// finder (`.mf`, `.tcx`): a host that serves METAFONT's sources gets
+    /// its PK and TFM files made.
+    fn mktex(&self) -> Option<phitex_tex::Mktex> {
+        None
+    }
+
     /// XeTeX's native fonts, for a job whose engine is XeTeX.
     fn xetex(&self) -> Option<phitex_tex::XeTeX> {
         None

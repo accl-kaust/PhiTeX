@@ -2220,6 +2220,7 @@ dependencies = [
  "phitex-dvi",
  "phitex-kpse",
  "phitex-makeindex",
+ "phitex-mf",
  "phitex-otf",
  "phitex-pdf",
  "phitex-ps",

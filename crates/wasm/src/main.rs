@@ -205,6 +205,9 @@ fn tool_finder(k: Kpse) -> ToolFinder {
             ToolSearch::IndexStyle => Format::Ist,
             // (Ghostscript's fonts by their file names)
             ToolSearch::GsFont => Format::Type1,
+            // (METAFONT's and web2c's, for the fonts the engine makes)
+            ToolSearch::Mf => Format::Mf,
+            ToolSearch::Web2c => Format::Web2c,
         };
         found(&k, name, format)
     })

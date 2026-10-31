@@ -2572,9 +2572,14 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             // (a name a tool makes from a file the job writes: that
             // tool's output, `crate::tools`; else the file system's)
+            // (a TFM or PK file found nowhere: kpathsea's mktex,
+            // [`Run::font_made`])
             match self.tool_output(key)? {
                 Some(x) => Some(x),
-                None => self.cx.env(f)?,
+                None => match self.cx.env(f)? {
+                    Some(x) if !crate::val::list_of(v, x).is_empty() => Some(x),
+                    _ => self.font_made(key)?,
+                },
             }
         };
         let x = x.filter(|&x| !crate::val::list_of(v, x).is_empty());
@@ -2645,6 +2650,22 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let x = self.lb(crate::tools::made_field(self.v, key))?;
         Ok(x.filter(|&x| x != ValueId::UNIT))
+    }
+
+    /// The file kpathsea makes where its search misses `key` (`mktextfm`
+    /// for `NAME.tfm`, `mktexpk` for the writer's `NAME.DPIpk@BDPI:MODE`):
+    /// METAFONT on `NAME.mf`, as the job writes it or the finder finds it,
+    /// a memoised run ([`crate::tools::Tool::Mktex`]); `None` where it
+    /// makes none (no source, METAFONT's failure). One path for every
+    /// client: the CLI's kpathsea, a Shelf host's files.
+    pub(crate) fn font_made(&mut self, key: &str) -> R<Option<ValueId>> {
+        let Some(req) = phitex_mf::mktex::Request::of(key) else {
+            return Ok(None);
+        };
+        let a =
+            crate::tools::command_args(self.v, crate::tools::Tool::Mktex, key, &req.source(), &[]);
+        let x = self.cx.apply(self.ops.tool, a)?;
+        Ok((x != ValueId::UNIT).then_some(x))
     }
 
     /// Whether a tool makes file `key` ([`Run::tool_output`]): its text is

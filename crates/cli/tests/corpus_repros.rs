@@ -258,6 +258,16 @@ fn pdf_image_write_error() {
 }
 
 repro!(
+    mktex_written_source,
+    "TeX Live manual feynmf (its template): a font whose METAFONT source the job writes is made by kpathsea's `mktextfm` and `mktexpk` from the file the run before wrote; only the CLI's finder made fonts, from sources on disk: 'Metric (TFM) file not found' at every round"
+);
+
+repro!(
+    mktex_metafont_font,
+    "a font with only a METAFONT source (dancers), its TFM and PK made where the finder misses them: by the engine (one path, its sources through the finder), not the CLI's finder alone, so a Shelf host (the browser) makes them too ('Font dancers at 600 not found' there)"
+);
+
+repro!(
     pdfthread_in_hlist,
     "\\pdfthread in a paragraph: the command's kind was read after its specification was scanned, and \\pdfthread was taken for \\pdfstartthread ('\\pdfstartthread ended up in hlist')"
 );

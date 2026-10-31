@@ -114,6 +114,12 @@ pub(crate) enum Tool {
     Makeindex,
     /// epstopdf-base's `repstopdf --outfile=X-eps-converted-to.pdf X.eps`.
     Repstopdf,
+    /// kpathsea's `mktextfm` and `mktexpk` where the finder misses a TFM
+    /// or PK file (`phitex_mf::mktex::make`, `Run::font_made`): METAFONT
+    /// on the font's source, one the job writes first (feynmf's), as
+    /// `MFINPUTS` has the current directory first. No command's: not in
+    /// [`Tool::ALL`].
+    Mktex,
 }
 
 impl Tool {
@@ -126,11 +132,18 @@ impl Tool {
             Tool::Bibtex => "bibtex",
             Tool::Makeindex => "makeindex",
             Tool::Repstopdf => "repstopdf",
+            Tool::Mktex => "mktex",
         }
     }
 
     pub(crate) fn of_name(s: &str) -> Option<Tool> {
         Tool::ALL.into_iter().find(|t| t.name() == s)
+    }
+
+    /// The tool of a [`ToolRun`]'s first argument: a command's, or
+    /// [`Tool::Mktex`].
+    fn of_run(s: &str) -> Option<Tool> {
+        Tool::of_name(s).or_else(|| (s == Tool::Mktex.name()).then_some(Tool::Mktex))
     }
 
     /// The input the tool makes `output` from by default (its crate's
@@ -140,7 +153,7 @@ impl Tool {
             Tool::Biber => phitex_biber::default_input_for(output),
             Tool::Bibtex => phitex_bibtex::default_input_for(output),
             Tool::Makeindex => phitex_makeindex::default_input_for(output),
-            Tool::Repstopdf => None,
+            Tool::Repstopdf | Tool::Mktex => None,
         }
     }
 
@@ -156,6 +169,7 @@ impl Tool {
             Tool::Bibtex => phitex_bibtex::command_files(args),
             Tool::Makeindex => phitex_makeindex::command_files(args),
             Tool::Repstopdf => epstopdf_files(args),
+            Tool::Mktex => None,
         }
     }
 }
@@ -202,6 +216,73 @@ impl phitex_ps::Resources for GsFonts<'_> {
     }
 }
 
+/// METAFONT's files for [`Tool::Mktex`]: its inputs as `MFINPUTS` has
+/// them, a file the job writes first ([`mf_need`]); web2c's through
+/// their search.
+#[derive(Clone)]
+struct MfFiles(std::rc::Rc<std::cell::RefCell<Served>>);
+
+/// How METAFONT's input `name` is looked up: the current directory
+/// first, `MFINPUTS`' first element, where the job's written files are.
+fn mf_need(name: &str) -> Need {
+    Need::Data(ToolSearch::Mf, name.to_owned())
+}
+
+impl phitex_mf::mktex::Files for MfFiles {
+    fn find(&mut self, name: &[u8], kind: phitex_mf::mktex::Kind) -> Option<(Vec<u8>, Vec<u8>)> {
+        let n = chars(name);
+        let n = n.strip_prefix("./").unwrap_or(&n);
+        let mut served = self.0.borrow_mut();
+        match kind {
+            // (kpathsea's `mf` format: the name with its suffix `.mf`
+            // first, then as it is, METAFONT asking `plain`, `fgraphs`)
+            phitex_mf::mktex::Kind::Mf => {
+                let suffixed = (std::path::Path::new(n).extension()
+                    != Some(std::ffi::OsStr::new("mf")))
+                .then(|| format!("{n}.mf"));
+                suffixed
+                    .into_iter()
+                    .chain(std::iter::once(n.to_owned()))
+                    .find_map(|c| served.get(mf_need(&c)))
+            }
+            phitex_mf::mktex::Kind::Web2c => {
+                served.get(Need::Support(ToolSearch::Web2c, n.to_owned()))
+            }
+        }
+        .map(|(p, b)| (p.into_bytes(), b))
+    }
+
+    fn pending(&self) -> bool {
+        !self.0.borrow().missing.is_empty()
+    }
+}
+
+/// The runs of METAFONT kept in the process's memory, for a client that
+/// gives no cache ([`crate::Options::mktex`]).
+fn memory_cache() -> std::sync::Arc<dyn phitex_mf::mktex::Cache> {
+    static C: std::sync::OnceLock<std::sync::Arc<dyn phitex_mf::mktex::Cache>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Arc::new(phitex_mf::mktex::MemoryCache::default()))
+        .clone()
+}
+
+/// [`Tool::Mktex`]'s run: the file kpathsea makes of a miss of `output`
+/// (`NAME.tfm`, `NAME.DPIpk@BDPI:MODE`), none where METAFONT made none
+/// (as kpathsea's mktex scripts fail: the font not found).
+fn mktex_run(output: &str, opts: &ToolOptions, served: &mut Served) -> Option<Vec<u8>> {
+    let req = phitex_mf::mktex::Request::of(output)?;
+    let (cache, settings) = opts.mktex.as_ref().map_or_else(
+        || (memory_cache(), phitex_mf::mktex::Settings::default()),
+        |m| (m.cache.clone(), m.settings.clone()),
+    );
+    let files = MfFiles(std::rc::Rc::new(std::cell::RefCell::new(std::mem::take(
+        served,
+    ))));
+    let made = phitex_mf::mktex::make(&req, &files, &*cache, &settings);
+    *served = std::mem::take(&mut *files.0.borrow_mut());
+    made.ok().flatten()
+}
+
 /// The tools that may make `output` by default, each with its input.
 pub(crate) fn claims(output: &str) -> Vec<(Tool, String)> {
     Tool::ALL
@@ -214,6 +295,8 @@ pub(crate) fn claims(output: &str) -> Vec<(Tool, String)> {
 #[derive(Clone, Default)]
 pub(crate) struct ToolOptions {
     pub bibtex: phitex_bibtex::Options,
+    /// Where METAFONT's runs are kept ([`crate::Options::mktex`]).
+    pub mktex: Option<crate::api::Mktex>,
     /// The host's runner of other commands ([`crate::Options::shell_hook`]).
     pub shell_hook: Option<std::sync::Arc<dyn crate::shell::ShellHook>>,
     /// What restricted mode allows ([`crate::Options::shell_commands`]).
@@ -244,12 +327,13 @@ enum Need {
     File(String),
     /// Through the tool's search.
     Support(ToolSearch, String),
-    /// A bibliography database: a file the job writes, by its text the
-    /// round before (a class's control entries, revtex's notes: BibTeX
-    /// runs after the run that wrote it, and finds it in the current
-    /// directory, `BIBINPUTS`' first element), else through BibTeX's
-    /// search.
-    Data(String),
+    /// A file of a search whose first element is the current directory:
+    /// a file the job writes, by its text the round before, else through
+    /// the search. A bibliography database (a class's control entries,
+    /// revtex's notes: BibTeX runs after the run that wrote it, and finds
+    /// it there, `BIBINPUTS`' first element); METAFONT's input (feynmf's
+    /// graphs, `MFINPUTS`).
+    Data(ToolSearch, String),
 }
 
 /// The files a tool's run is served: what was looked up so far, and what
@@ -301,7 +385,7 @@ impl phitex_bibtex::Files for Served {
             format!("{n}.bib")
         };
         let n = n.strip_prefix("./").unwrap_or(&n).to_owned();
-        self.get(Need::Data(n)).map(|(_, b)| b)
+        self.get(Need::Data(ToolSearch::BibData, n)).map(|(_, b)| b)
     }
 }
 
@@ -368,13 +452,13 @@ fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop
             Ok(file(cx.env(v.field(&format!("file:{name}")))?))
         }
         Need::Support(s, name) => Ok(file(cx.env(support_field(v, *s, name))?)),
-        Need::Data(name) => {
+        Need::Data(s, name) => {
             if let Some(x) = crate::ops::lb_read(cx, text_field(v, name))?
                 && x != ValueId::UNIT
             {
                 return Ok(Some((format!("./{name}"), bytes(&str_of(v, x)))));
             }
-            Ok(file(cx.env(support_field(v, ToolSearch::BibData, name))?))
+            Ok(file(cx.env(support_field(v, *s, name))?))
         }
     }
 }
@@ -398,7 +482,7 @@ impl Operation for ToolRun {
         let v = cx.values();
         let args = cx.args().to_vec();
         let s = |i: usize| args.get(i).map(|&x| str_of(v, x)).unwrap_or_default();
-        let Some(tool) = Tool::of_name(&s(0)) else {
+        let Some(tool) = Tool::of_run(&s(0)) else {
             return Ok(ValueId::UNIT);
         };
         let (output, input) = (s(1), s(2));
@@ -413,8 +497,16 @@ impl Operation for ToolRun {
         let given = args
             .get(4)
             .map(|&t| (format!("./{input}"), bytes(&str_of(v, t))));
+        // (METAFONT's source as `MFINPUTS` finds it: the run goes on
+        // without one, mktexmf writing one where it can)
+        if tool == Tool::Mktex {
+            let need = mf_need(&input);
+            let found = look_up(cx, &need)?;
+            served.got.insert(need, found);
+        }
         let Some((_, text)) = (match given {
             Some(x) => Some(x),
+            None if tool == Tool::Mktex => Some((String::new(), Vec::new())),
             None => look_up(cx, &Need::File(input.clone()))?,
         }) else {
             return Ok(ValueId::UNIT);
@@ -426,10 +518,12 @@ impl Operation for ToolRun {
             Some(x) => crate::val::int_of(v, x),
             None => crate::pdfprim::source_date_epoch(),
         };
-        served.got.insert(
-            Need::File(input.clone()),
-            Some((format!("./{input}"), text.clone())),
-        );
+        if tool != Tool::Mktex {
+            served.got.insert(
+                Need::File(input.clone()),
+                Some((format!("./{input}"), text.clone())),
+            );
+        }
         // (run, then the files it asked for and had not looked up, and
         // again until it asks for none new)
         let mut fail: Option<String> = None;
@@ -469,6 +563,7 @@ impl Operation for ToolRun {
                     fail = o.error.map(|e| format!("repstopdf: {input}: {e}"));
                     (Some(o.pdf), Vec::new())
                 }
+                Tool::Mktex => (mktex_run(&output, &opts, &mut served), Vec::new()),
             };
             let missing = std::mem::take(&mut served.missing);
             if missing.is_empty() {

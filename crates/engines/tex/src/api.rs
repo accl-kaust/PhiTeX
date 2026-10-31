@@ -49,6 +49,13 @@ pub enum ToolSearch {
     /// (`NimbusRoman-Regular`), what the EPS converter
     /// (`repstopdf`, `phitex-ps`) reads for the base 35.
     GsFont,
+    /// METAFONT's input (kpathsea's `mf` format: `MFINPUTS`, a font's
+    /// source, `mf.ini`), for the fonts the engine makes where the finder
+    /// misses them ([`Options::mktex`]).
+    Mf,
+    /// web2c's files (kpathsea's `web2c files` format: `cp227.tcx`, the
+    /// TCX file METAFONT's base is built with).
+    Web2c,
 }
 
 impl ToolSearch {
@@ -59,6 +66,8 @@ impl ToolSearch {
             ToolSearch::BibData => 1,
             ToolSearch::IndexStyle => 2,
             ToolSearch::GsFont => 3,
+            ToolSearch::Mf => 4,
+            ToolSearch::Web2c => 5,
         }
     }
 
@@ -68,6 +77,8 @@ impl ToolSearch {
             "1" => Some(ToolSearch::BibData),
             "2" => Some(ToolSearch::IndexStyle),
             "3" => Some(ToolSearch::GsFont),
+            "4" => Some(ToolSearch::Mf),
+            "5" => Some(ToolSearch::Web2c),
             _ => None,
         }
     }
@@ -81,6 +92,15 @@ pub type ToolFinder = Arc<dyn Fn(ToolSearch, &str) -> Option<(String, Vec<u8>)> 
 /// client's `kpse_out_name_ok` (its `openout_any`, its output
 /// directories).
 pub type OutNameOk = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// How the fonts a finder misses are made ([`Options::mktex`]): where
+/// METAFONT's runs are kept between builds and the runs' settings (the
+/// date in the GF and PK files' comments).
+#[derive(Clone)]
+pub struct Mktex {
+    pub cache: Arc<dyn phitex_mf::mktex::Cache>,
+    pub settings: phitex_mf::mktex::Settings,
+}
 
 /// How a document is run.
 #[derive(Clone)]
@@ -235,6 +255,12 @@ pub struct Options {
     /// `max_strings`, `ent_str_size`, ...), for the BibTeX runs a read
     /// makes (`crate::tools`).
     pub bibtex: phitex_bibtex::Options,
+    /// How a TFM or PK file the finder misses is made (kpathsea's
+    /// `mktextfm`, `mktexpk`: METAFONT on the font's source, a source the
+    /// job writes first, `crate::tools`): where the runs are kept and
+    /// their settings. `None`: kept in the process's memory, at the job's
+    /// date.
+    pub mktex: Option<Mktex>,
     /// Whether `\openout` may write a file under a name (pdfTeX asks
     /// kpathsea, §1374; a refused name ends a nonstop job); `None`:
     /// TeX Live's default, `openout_any = p` with no output directory
@@ -868,6 +894,7 @@ impl Default for Options {
             speculation: Speculation::Predicted,
             tool_finder: None,
             bibtex: phitex_bibtex::Options::default(),
+            mktex: None,
             out_name_ok: None,
             xetex: None,
             origins: false,
@@ -5728,6 +5755,7 @@ impl Build {
         {
             let mut t = g.ops.tool_opts.locked();
             t.bibtex.clone_from(&opts.bibtex);
+            t.mktex.clone_from(&opts.mktex);
             t.shell_hook.clone_from(&opts.shell_hook);
             t.shell_commands.clone_from(&opts.shell_commands);
         }

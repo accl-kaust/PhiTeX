@@ -455,6 +455,11 @@ impl Host for ShelfHost {
 
     /// BibTeX's and makeindex's files, the format's suffix added where the
     /// name has none: the project's, else Shelf's.
+    /// METAFONT's runs (on Shelf's sources) kept in the cache directory.
+    fn mktex(&self) -> Option<phitex_tex::Mktex> {
+        Some(crate::mkfont::maker())
+    }
+
     fn tool_finder(&self) -> Option<ToolFinder> {
         let f = self.files.clone();
         Some(Arc::new(
@@ -468,6 +473,19 @@ impl Host for ShelfHost {
                     phitex_tex::ToolSearch::GsFont => {
                         return gs_font_path(name)
                             .and_then(|p| ShelfHost { files: f.clone() }.find(&p));
+                    }
+                    // (METAFONT's inputs and web2c's files, in their
+                    // formats whatever the suffix: `mf.ini`, `cp227.tcx`)
+                    // (`MFINPUTS` has the project's directory first)
+                    phitex_tex::ToolSearch::Mf => {
+                        if let Some(p) = project(name) {
+                            let b = std::fs::read(&p).ok()?;
+                            return Some((p.to_string_lossy().into_owned(), b));
+                        }
+                        return f.find_in(name, "mf").map(|(p, b)| (p, b.to_vec()));
+                    }
+                    phitex_tex::ToolSearch::Web2c => {
+                        return f.find_in(name, "web2c").map(|(p, b)| (p, b.to_vec()));
                     }
                 };
                 let name = if name.ends_with(ext) {

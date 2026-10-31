@@ -223,6 +223,11 @@ impl Host for Machine {
         crate::tools::bib_options(&mut crate::tex::kpse("bibtex", ""), false, 2)
     }
 
+    /// METAFONT's runs kept in the cache directory.
+    fn mktex(&self) -> Option<phitex_tex::Mktex> {
+        Some(crate::mkfont::maker())
+    }
+
     /// XeTeX's native fonts: TeX Live's, by file and by name.
     fn xetex(&self) -> Option<phitex_tex::XeTeX> {
         Some(crate::xefonts::xetex())

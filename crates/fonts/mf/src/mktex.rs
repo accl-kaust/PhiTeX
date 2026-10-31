@@ -407,9 +407,559 @@ pub fn font_run(io: Box<dyn Io>, base: &[u8], line: &str, s: &Settings) -> Run {
     run(cfg, io, Some((base, "mf")))
 }
 
+// ---- kpathsea's miss: a font made where its file is asked for ----
+
+/// A font file kpathsea makes where its search finds none (`kpse_make_tex`
+/// for `kpse_tfm_format` and `kpse_pk_format`): what a finder that missed
+/// is asked for, by the name it was asked ([`Request::of`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    /// `mktextfm NAME`: `NAME.tfm`.
+    Tfm { font: String },
+    /// `mktexpk --dpi DPI --bdpi BDPI --mfmode MODE NAME`: `NAME.DPIpk`,
+    /// asked as `NAME.DPIpk@BDPI[:MODE]` (the glyph settings pdfTeX gives
+    /// `kpse_init_prog`; `phitex_pdf::pk_request`). A plain `NAME.DPIpk`
+    /// has none: kpathsea makes none.
+    Pk {
+        font: String,
+        dpi: u32,
+        bdpi: u32,
+        mode: Option<String>,
+    },
+}
+
+impl Request {
+    /// The request a finder's miss of `name` is, if kpathsea would make
+    /// that file (`cmr10.tfm`; `cmr10.600pk@600:ljfour`).
+    #[must_use]
+    pub fn of(name: &str) -> Option<Request> {
+        if let Some(font) = name.strip_suffix(".tfm") {
+            return (!font.is_empty() && !font.contains('/')).then(|| Request::Tfm {
+                font: font.to_owned(),
+            });
+        }
+        let (file, settings) = name.split_once('@')?;
+        let (font, ext) = file.rsplit_once('.')?;
+        let dpi = ext.strip_suffix("pk")?;
+        if font.is_empty() || font.contains('/') || dpi.is_empty() {
+            return None;
+        }
+        let (bdpi, mode) = settings
+            .split_once(':')
+            .map_or((settings, None), |(b, m)| (b, Some(m.to_owned())));
+        Some(Request::Pk {
+            font: font.to_owned(),
+            dpi: dpi.parse().ok()?,
+            bdpi: bdpi.parse().ok()?,
+            mode,
+        })
+    }
+
+    /// The font's name.
+    #[must_use]
+    pub fn font(&self) -> &str {
+        match self {
+            Request::Tfm { font } | Request::Pk { font, .. } => font,
+        }
+    }
+
+    /// The METAFONT source the request needs (mktex's `kpsewhich
+    /// NAME.mf`): none found, no font made.
+    #[must_use]
+    pub fn source(&self) -> String {
+        format!("{}.mf", self.font())
+    }
+
+    /// The file made: `NAME.tfm`, `NAME.DPIpk`.
+    #[must_use]
+    pub fn output(&self) -> String {
+        match self {
+            Request::Tfm { font } => format!("{font}.tfm"),
+            Request::Pk { font, dpi, .. } => format!("{font}.{dpi}pk"),
+        }
+    }
+
+    /// The run's key in a [`Cache`] (`mktexpk cmr10 600 600 ljfour`).
+    #[must_use]
+    pub fn key(&self) -> String {
+        match self {
+            Request::Tfm { font } => format!("mktextfm {font}"),
+            Request::Pk {
+                font,
+                dpi,
+                bdpi,
+                mode,
+            } => format!(
+                "mktexpk {font} {dpi} {bdpi} {}",
+                mode.as_deref().unwrap_or("/")
+            ),
+        }
+    }
+}
+
+/// The search a file of a run is found by: METAFONT's inputs
+/// (`MFINPUTS`, `mf.ini` and the fonts' sources) or web2c's files
+/// (`cp227.tcx`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    Mf,
+    Web2c,
+}
+
+impl Kind {
+    fn tag(self) -> &'static str {
+        match self {
+            Kind::Mf => "mf",
+            Kind::Web2c => "web2c",
+        }
+    }
+
+    fn of_tag(t: &str) -> Option<Kind> {
+        match t {
+            "mf" => Some(Kind::Mf),
+            "web2c" => Some(Kind::Web2c),
+            _ => None,
+        }
+    }
+}
+
+/// Where a run's files come from, as `mf-nowin -progname=mf` finds them
+/// (kpathsea on a machine, Shelf, a job's own written files first): the
+/// path found and the bytes.
+pub trait Files {
+    fn find(&mut self, name: &[u8], kind: Kind) -> Option<(Vec<u8>, Vec<u8>)>;
+
+    /// Whether a lookup was put off (a file not had yet: the engine looks
+    /// it up and runs again, `phitex_tex`'s tool runs): a kept run is not
+    /// made anew while its files are not all had.
+    fn pending(&self) -> bool {
+        false
+    }
+}
+
+/// What a run made, kept: the files it looked up (their search, name and
+/// content hash, none where not found) and its outputs by name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Kept {
+    pub reads: Vec<(Kind, Vec<u8>, Option<u64>)>,
+    pub outputs: Vec<(String, Vec<u8>)>,
+}
+
+impl Kept {
+    /// The manifest of the reads, a line each: `search<TAB>hash<TAB>name`
+    /// (`-` for a file not found).
+    #[must_use]
+    pub fn manifest(&self) -> String {
+        let mut m = String::new();
+        for (k, name, h) in &self.reads {
+            let h = h.map_or_else(|| "-".to_owned(), |h| format!("{h:016x}"));
+            m.push_str(&format!(
+                "{}\t{h}\t{}\n",
+                k.tag(),
+                String::from_utf8_lossy(name)
+            ));
+        }
+        m
+    }
+
+    /// The reads of a [`Kept::manifest`].
+    #[must_use]
+    pub fn reads_of(manifest: &str) -> Option<Vec<(Kind, Vec<u8>, Option<u64>)>> {
+        manifest
+            .lines()
+            .map(|l| {
+                let mut w = l.splitn(3, '\t');
+                let k = Kind::of_tag(w.next()?)?;
+                let h = w.next()?;
+                let h = if h == "-" {
+                    None
+                } else {
+                    Some(u64::from_str_radix(h, 16).ok()?)
+                };
+                Some((k, w.next()?.as_bytes().to_vec(), h))
+            })
+            .collect()
+    }
+}
+
+/// Where runs' results are kept between builds (the CLI's cache
+/// directory; a process's memory, [`MemoryCache`]). A result is given
+/// again only while every file its run looked up still has its content.
+pub trait Cache: Send + Sync {
+    fn get(&self, key: &str) -> Option<Kept>;
+    fn put(&self, key: &str, kept: &Kept);
+}
+
+/// A [`Cache`] in the process's memory.
+#[derive(Default)]
+pub struct MemoryCache(std::sync::Mutex<std::collections::HashMap<String, Kept>>);
+
+impl Cache for MemoryCache {
+    fn get(&self, key: &str) -> Option<Kept> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .cloned()
+    }
+    fn put(&self, key: &str, kept: &Kept) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.to_owned(), kept.clone());
+    }
+}
+
+/// A content hash of a file a run read (FNV-1a, 64 bits).
+#[must_use]
+pub fn content_hash(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325, |h, &c| {
+        (h ^ u64::from(c)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// A run's lookups through [`Files`], each kept for the [`Kept`]
+/// manifest: METAFONT's [`Io`] ([`Rec::io`]) and the run's own reads.
+#[derive(Clone)]
+struct Rec<F> {
+    files: F,
+    reads: std::rc::Rc<std::cell::RefCell<Vec<(Kind, Vec<u8>, Option<u64>)>>>,
+}
+
+impl<F: Files + Clone + 'static> Rec<F> {
+    /// `name` as `files` finds it: its path and bytes.
+    fn find(&mut self, name: &[u8], kind: Kind) -> Option<(Vec<u8>, Vec<u8>)> {
+        let found = self.files.find(name, kind);
+        self.reads.borrow_mut().push((
+            kind,
+            name.to_vec(),
+            found.as_ref().map(|(_, b)| content_hash(b)),
+        ));
+        found
+    }
+
+    /// METAFONT's files through these lookups.
+    fn io(&self) -> Box<dyn Io> {
+        Box::new(self.clone())
+    }
+}
+
+impl<F: Files + Clone + 'static> Io for Rec<F> {
+    fn open_in(&mut self, name: &[u8], kind: FileKind) -> Option<(Vec<u8>, Vec<u8>)> {
+        (kind == FileKind::Mf)
+            .then(|| self.find(name, Kind::Mf))
+            .flatten()
+            .map(|(p, b)| (b, p))
+    }
+}
+
+/// The outputs of the run keyed `key`: from `cache` where every file it
+/// looked up is as it read it (looked up again through `files`), else
+/// made by `make` and kept.
+fn cached<F: Files + Clone + 'static>(
+    key: &str,
+    files: &F,
+    cache: &dyn Cache,
+    make: impl FnOnce(&mut Rec<F>) -> Result<Vec<(String, Vec<u8>)>, String>,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    if let Some(k) = cache.get(key) {
+        let mut f = files.clone();
+        if k.reads
+            .iter()
+            .all(|(kind, name, h)| f.find(name, *kind).map(|(_, b)| content_hash(&b)) == *h)
+        {
+            return Ok(k.outputs);
+        }
+        if f.pending() {
+            return Err(format!("{key}: its files not had yet"));
+        }
+    }
+    let mut rec = Rec {
+        files: files.clone(),
+        reads: std::rc::Rc::default(),
+    };
+    let outputs = make(&mut rec)?;
+    let kept = Kept {
+        reads: std::mem::take(&mut *rec.reads.borrow_mut()),
+        outputs,
+    };
+    // (a run that missed a file not had yet is not the run: not kept)
+    if files.pending() {
+        return Err(format!("{key}: its files not had yet"));
+    }
+    cache.put(key, &kept);
+    Ok(kept.outputs)
+}
+
+/// The output named `name` of a run's outputs.
+fn output_of(out: Vec<(String, Vec<u8>)>, name: &str) -> Result<Vec<u8>, String> {
+    out.into_iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, b)| b)
+        .ok_or_else(|| format!("{name}: not made"))
+}
+
+/// `mf.base` as fmtutil builds it (`mf.ini` with `cp227.tcx`), through
+/// `files`, kept in `cache`.
+///
+/// # Errors
+/// What went wrong: no TCX file, METAFONT's terminal output.
+pub fn base<F: Files + Clone + 'static>(
+    files: &F,
+    cache: &dyn Cache,
+    s: &Settings,
+) -> Result<Vec<u8>, String> {
+    let out = cached("mf.base", files, cache, |rec| {
+        let (_, tcx) = rec
+            .find(b"cp227.tcx", Kind::Web2c)
+            .ok_or("mf: cp227.tcx not found")?;
+        let b = build_base(rec.io(), Some(("cp227.tcx", &tcx)), s)?;
+        Ok(vec![("mf.base".into(), b)])
+    })?;
+    output_of(out, "mf.base")
+}
+
+/// `mktexmf NAME`: the source TeX Live's script writes for a font whose
+/// own `NAME.mf` is not found, from its root (`NAME` without its last
+/// digits, the point size): a Sauter font's `b-ROOT.mf`, else by the
+/// name's family (EC and TC, DC, CS, LH, CB Greek), else `ROOT.mf` at the
+/// size (`cmti5`: `design_size := 5; input cmti;`). None where the root
+/// has no source (the script's `exit 1`).
+pub fn mktexmf<F: Files>(name: &str, files: &mut F) -> Option<Vec<u8>> {
+    let root = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    let size = &name[root.len()..];
+    let has = |files: &mut F, n: &str| files.find(n.as_bytes(), Kind::Mf).is_some();
+    let sauter = format!("b-{root}");
+    let (root, found) = if has(files, &format!("{sauter}.mf")) {
+        (sauter.as_str(), true)
+    } else {
+        let b = name.as_bytes();
+        let at = |i: usize, set: &[u8]| b.get(i).is_some_and(|c| set.contains(c));
+        let source = if name.starts_with("csso12")
+            && b.len() == 8
+            && at(6, b"012345")
+            && b[7].is_ascii_digit()
+        {
+            None
+        } else if ["cs", "lcsss", "icscsc", "icstt", "ilcsss"]
+            .iter()
+            .any(|p| root.starts_with(p))
+        {
+            Some("cscode.mf".to_owned())
+        } else if lh_name(root) {
+            Some(format!("{}codes.mf", &name[..2]))
+        } else {
+            Some(format!("{root}.mf"))
+        };
+        (root, source.is_some_and(|s| has(files, &s)))
+    };
+    if !found {
+        return None;
+    }
+    let real = match size {
+        "" => return None,
+        "11" => "10.95".to_owned(),
+        "14" => "14.4".to_owned(),
+        "17" => "17.28".to_owned(),
+        "20" => "20.74".to_owned(),
+        "25" => "24.88".to_owned(),
+        "30" => "29.86".to_owned(),
+        "36" => "35.83".to_owned(),
+        s if s.len() == 4 || s.len() == 5 => format!("{}.{}", &s[..s.len() - 2], &s[s.len() - 2..]),
+        s => s.to_owned(),
+    };
+    let text = if name.starts_with("ec") || name.starts_with("tc") {
+        format!("if unknown exbase: input exbase fi;\ngensize:={real};\ngenerate {root};\n")
+    } else if name.starts_with("dc") {
+        format!("if unknown dxbase: input dxbase fi;\ngensize:={real};\ngenerate {root};\n")
+    } else if ["cs", "lcsss", "icscsc", "icstt", "ilcsss"]
+        .iter()
+        .any(|p| name.starts_with(p))
+    {
+        "input cscode\nuse_driver;\n".to_owned()
+    } else if lh_name(name) {
+        "input fikparm;\n".to_owned()
+    } else if cbgreek_name(name) {
+        "% generated by mktexmf\ninput cbgreek;\n".to_owned()
+    } else {
+        format!("design_size := {real};\ninput {root};\n")
+    };
+    Some(text.into_bytes())
+}
+
+/// mktexmf's LH names: `wn[bcdfirstuv]*`, `rx[bcdfiorstuvx][bcfhilmostx]*`,
+/// `l[abcdhl][bcdfiorstuvx]*`.
+fn lh_name(n: &str) -> bool {
+    let b = n.as_bytes();
+    let at = |i: usize, set: &[u8]| b.get(i).is_some_and(|c| set.contains(c));
+    (n.starts_with("wn") && at(2, b"bcdfirstuv"))
+        || (n.starts_with("rx") && at(2, b"bcdfiorstuvx") && at(3, b"bcfhilmostx"))
+        || (n.starts_with('l') && at(1, b"abcdhl") && at(2, b"bcdfiorstuvx"))
+}
+
+/// mktexmf's CB Greek names: `g[lmorst][bijmtwx][cilnoru]*`.
+fn cbgreek_name(n: &str) -> bool {
+    let b = n.as_bytes();
+    let at = |i: usize, set: &[u8]| b.get(i).is_some_and(|c| set.contains(c));
+    n.starts_with('g') && at(1, b"lmorst") && at(2, b"bijmtwx") && at(3, b"cilnoru")
+}
+
+/// [`Files`] with a source mktexmf wrote ([`mktexmf`]) found first.
+#[derive(Clone)]
+struct WithSource<F> {
+    files: F,
+    name: Vec<u8>,
+    text: std::sync::Arc<[u8]>,
+}
+
+impl<F: Files> Files for WithSource<F> {
+    fn find(&mut self, name: &[u8], kind: Kind) -> Option<(Vec<u8>, Vec<u8>)> {
+        // (as METAFONT asks for it, `input cmti5`, or by its file name)
+        let asked = name == &self.name[..]
+            || self
+                .name
+                .strip_suffix(b".mf")
+                .is_some_and(|stem| name == stem);
+        if kind == Kind::Mf && asked {
+            return Some((name.to_vec(), self.text.to_vec()));
+        }
+        self.files.find(name, kind)
+    }
+
+    fn pending(&self) -> bool {
+        self.files.pending()
+    }
+}
+
+/// The file kpathsea's miss `req` makes (`mktextfm`, `mktexpk`), as TeX
+/// Live's scripts make it: none where the font has no METAFONT source
+/// (`kpsewhich NAME.mf` finds none and [`mktexmf`] writes none; not
+/// here: the PostScript fonts gsftopk renders); else METAFONT on the
+/// source with the base ([`base`]), every file through `files`, the runs
+/// kept in `cache`.
+///
+/// # Errors
+/// What went wrong where the source is found: METAFONT's terminal output
+/// where it made no font, no mode for the resolution.
+pub fn make<F: Files + Clone + 'static>(
+    req: &Request,
+    files: &F,
+    cache: &dyn Cache,
+    s: &Settings,
+) -> Result<Option<Vec<u8>>, String> {
+    let source = req.source();
+    if files.clone().find(source.as_bytes(), Kind::Mf).is_some() {
+        return make_from(req, files, cache, s).map(Some);
+    }
+    let Some(text) = mktexmf(req.font(), &mut files.clone()) else {
+        return Ok(None);
+    };
+    let with = WithSource {
+        files: files.clone(),
+        name: source.into_bytes(),
+        text: text.into(),
+    };
+    make_from(req, &with, cache, s).map(Some)
+}
+
+/// [`make`] where the font's source is found.
+fn make_from<F: Files + Clone + 'static>(
+    req: &Request,
+    files: &F,
+    cache: &dyn Cache,
+    s: &Settings,
+) -> Result<Vec<u8>, String> {
+    let base = base(files, cache, s)?;
+    let name = req.output();
+    // (the base the run is made with in its key: a font kept is one
+    // made from this base)
+    let key = format!("{} base {:016x}", req.key(), content_hash(&base));
+    let out = cached(&key, files, cache, |rec| match req {
+        Request::Tfm { font } => {
+            let b = mktextfm(rec.io(), &base, font, s)?;
+            Ok(vec![(name.clone(), b)])
+        }
+        Request::Pk {
+            font,
+            dpi,
+            bdpi,
+            mode,
+        } => {
+            let (dpi, bdpi) = (
+                i32::try_from(*dpi).map_err(|e| e.to_string())?,
+                i32::try_from(*bdpi).map_err(|e| e.to_string())?,
+            );
+            let mode = mktexpk_mode(rec.io(), &base, mode.as_deref(), bdpi, s)?;
+            let s = Settings { mode, ..s.clone() };
+            let made = mktexpk(rec.io(), &base, font, dpi, bdpi, &s)?;
+            Ok(vec![(made.pk_name, made.pk)])
+        }
+    })?;
+    output_of(out, &name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Files of these names only, empty.
+    #[derive(Clone)]
+    struct Names(&'static [&'static str]);
+
+    impl Files for Names {
+        fn find(&mut self, name: &[u8], _: Kind) -> Option<(Vec<u8>, Vec<u8>)> {
+            self.0
+                .iter()
+                .any(|n| n.as_bytes() == name)
+                .then(|| (name.to_vec(), Vec::new()))
+        }
+    }
+
+    #[test]
+    fn requests() {
+        assert_eq!(
+            Request::of("cmr10.tfm"),
+            Some(Request::Tfm {
+                font: "cmr10".into()
+            })
+        );
+        assert_eq!(
+            Request::of("dancers.600pk@600:ljfour"),
+            Some(Request::Pk {
+                font: "dancers".into(),
+                dpi: 600,
+                bdpi: 600,
+                mode: Some("ljfour".into())
+            })
+        );
+        // (a PK file asked with no glyph settings: kpathsea makes none)
+        assert_eq!(Request::of("cmr10.600pk"), None);
+        assert_eq!(Request::of("article.cls"), None);
+    }
+
+    /// mktexmf's sources (TeX Live's script): a Sauter font's root first,
+    /// else the root at the size, the magsteps' sizes and four digits'
+    /// hundredths; none without a root.
+    #[test]
+    fn mktexmf_sources() {
+        let text = |n: &str, f: &'static [&'static str]| {
+            mktexmf(n, &mut Names(f)).map(|b| String::from_utf8(b).unwrap())
+        };
+        assert_eq!(
+            text("cmti5", &["b-cmti.mf", "cmti.mf"]).as_deref(),
+            Some("design_size := 5;\ninput b-cmti;\n")
+        );
+        assert_eq!(
+            text("cmr14", &["cmr.mf"]).as_deref(),
+            Some("design_size := 14.4;\ninput cmr;\n")
+        );
+        assert_eq!(
+            text("ecrm1095", &["ecrm.mf"]).as_deref(),
+            Some("if unknown exbase: input exbase fi;\ngensize:=10.95;\ngenerate ecrm;\n")
+        );
+        assert_eq!(text("cmtt5", &[]), None);
+        assert_eq!(text("cmr", &["cmr.mf"]), None);
+    }
 
     #[test]
     fn maketex_mags() {

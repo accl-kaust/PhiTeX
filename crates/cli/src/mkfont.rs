@@ -1,17 +1,16 @@
-//! mktexpk and mktextfm as kpathsea runs them on a miss, in process:
-//! METAFONT (`phitex_mf`) on the font's `.mf` source found as
-//! `mf-nowin -progname=mf` finds it, with the base fmtutil builds
-//! (`mf.ini`, `cp227.tcx`). What a run made is kept in the cache
-//! directory with the files it read and their hashes, and given again
-//! while every one of them still has its content: a font is made once,
-//! not once a build.
+//! mktexpk and mktextfm as kpathsea runs them on a miss, in process: the
+//! one path the engine takes where its finder misses a TFM or a PK file
+//! (`phitex_mf::mktex::make`), with kpathsea as `mf-nowin -progname=mf`
+//! finds METAFONT's files ([`KpseFiles`]), for the CLI's DVI and XDV
+//! paths (dvipdfmx's fonts); and the cache directory keeping what a run
+//! made ([`DiskCache`], the engine's too): a font is made once, not once
+//! a build.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_kpse::{Format, Kpse};
-use phitex_mf::mktex::{self, Settings};
-use phitex_mf::{FileKind, Io};
+use phitex_mf::mktex::{self, Cache, Files, Kept, Kind, Request, Settings};
 
 use crate::tex::{cache_dir, fingerprint, kpse, os};
 
@@ -21,49 +20,85 @@ fn mf_kpse() -> &'static Mutex<Kpse> {
     K.get_or_init(|| Mutex::new(kpse("mf", "metafont")))
 }
 
-/// Where kpathsea finds `name` in `format` for METAFONT.
-fn find(name: &[u8], format: Format) -> Option<Vec<u8>> {
+/// Where kpathsea as `mf-nowin -progname=mf` finds `name` of `kind`
+/// (the engine's [`phitex_tex::ToolSearch::Mf`] and `Web2c`).
+pub fn find(name: &str, kind: Kind) -> Option<PathBuf> {
+    found(name.as_bytes(), kind).map(|p| os(&p).to_path_buf())
+}
+
+fn found(name: &[u8], kind: Kind) -> Option<Vec<u8>> {
+    let format = match kind {
+        Kind::Mf => Format::Mf,
+        Kind::Web2c => Format::Web2c,
+    };
     mf_kpse()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .find_file(name, format, false)
 }
 
-/// A file a run looked up: its format (`mf`, `web2c`), its name as
-/// asked, and its content's hash (none where it was not found).
-type Looked = (&'static str, Vec<u8>, Option<u64>);
+/// METAFONT's files by kpathsea.
+#[derive(Clone, Copy, Default)]
+pub struct KpseFiles;
 
-fn format_of(tag: &str) -> Option<Format> {
-    match tag {
-        "mf" => Some(Format::Mf),
-        "web2c" => Some(Format::Web2c),
-        _ => None,
+impl Files for KpseFiles {
+    fn find(&mut self, name: &[u8], kind: Kind) -> Option<(Vec<u8>, Vec<u8>)> {
+        let p = found(name, kind)?;
+        let b = std::fs::read(os(&p)).ok()?;
+        Some((p, b))
     }
 }
 
-/// METAFONT's files by kpathsea, each lookup kept ([`Looked`]).
-#[derive(Clone, Default)]
-struct Files(Arc<Mutex<Vec<Looked>>>);
+/// The runs' results in the cache directory (`mf/<key's hash>/`): the
+/// outputs, `made` (their names) and `read` (the manifest of the files
+/// the run looked up, [`Kept::manifest`]).
+pub struct DiskCache;
 
-impl Files {
-    fn read(&self, tag: &'static str, name: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-        let found = format_of(tag)
-            .and_then(|f| find(name, f))
-            .and_then(|p| Some((std::fs::read(os(&p)).ok()?, p)));
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).push((
-            tag,
-            name.to_vec(),
-            found.as_ref().map(|(b, _)| fingerprint(b)),
-        ));
-        found
+impl DiskCache {
+    fn dir(key: &str) -> PathBuf {
+        let key = format!("{key} phitex {}", env!("CARGO_PKG_VERSION"));
+        cache_dir()
+            .join("mf")
+            .join(format!("{:016x}", fingerprint(key.as_bytes())))
     }
 }
 
-impl Io for Files {
-    fn open_in(&mut self, name: &[u8], kind: FileKind) -> Option<(Vec<u8>, Vec<u8>)> {
-        (kind == FileKind::Mf)
-            .then(|| self.read("mf", name))
-            .flatten()
+impl Cache for DiskCache {
+    fn get(&self, key: &str) -> Option<Kept> {
+        let dir = Self::dir(key);
+        let reads = Kept::reads_of(&std::fs::read_to_string(dir.join("read")).ok()?)?;
+        let outputs = std::fs::read_to_string(dir.join("made"))
+            .ok()?
+            .lines()
+            .map(|n| Some((n.to_owned(), std::fs::read(dir.join(n)).ok()?)))
+            .collect::<Option<_>>()?;
+        Some(Kept { reads, outputs })
+    }
+
+    fn put(&self, key: &str, kept: &Kept) {
+        let dir = Self::dir(key);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        // (each file whole or not at all: written aside, then renamed;
+        // the manifest last, so a run cut short is no result)
+        let put = |name: &str, b: &[u8]| -> Option<()> {
+            let tmp = dir.join(format!(".{name}.{}", std::process::id()));
+            std::fs::write(&tmp, b).ok()?;
+            std::fs::rename(&tmp, dir.join(name)).ok()
+        };
+        for (name, b) in &kept.outputs {
+            if put(name, b).is_none() {
+                return;
+            }
+        }
+        let names: String = kept
+            .outputs
+            .iter()
+            .flat_map(|(n, _)| [n.as_str(), "\n"])
+            .collect();
+        let _ =
+            put("made", names.as_bytes()).and_then(|()| put("read", kept.manifest().as_bytes()));
     }
 }
 
@@ -90,124 +125,53 @@ fn settings() -> Settings {
     }
 }
 
-/// What a run keyed `key` made (its `outputs`, by name), from the cache
-/// where every file it looked up still has its content, else made by
-/// `make` and kept. The directory they are in.
-fn cached(
-    key: &str,
-    outputs: &[&str],
-    make: impl FnOnce(&Files) -> Result<Vec<(String, Vec<u8>)>, String>,
-) -> Option<PathBuf> {
-    let key = format!("{key} phitex {}", env!("CARGO_PKG_VERSION"));
-    let dir = cache_dir()
-        .join("mf")
-        .join(format!("{:016x}", fingerprint(key.as_bytes())));
-    let manifest = dir.join("read");
-    if let Ok(m) = std::fs::read_to_string(&manifest)
-        && outputs.iter().all(|o| dir.join(o).is_file())
-        && m.lines().all(|l| {
-            let mut w = l.splitn(3, '\t');
-            let (Some(tag), Some(hash), Some(name)) = (w.next(), w.next(), w.next()) else {
-                return false;
-            };
-            let now = format_of(tag)
-                .and_then(|f| find(name.as_bytes(), f))
-                .and_then(|p| std::fs::read(os(&p)).ok())
-                .map_or_else(|| "-".to_string(), |b| format!("{:016x}", fingerprint(&b)));
-            now == hash
-        })
-    {
-        return Some(dir);
+/// The engine's maker of fonts: METAFONT's runs kept in the cache
+/// directory, at the date of [`settings`] (`phitex_tex::Options::mktex`).
+pub fn maker() -> phitex_tex::Mktex {
+    phitex_tex::Mktex {
+        cache: Arc::new(DiskCache),
+        settings: settings(),
     }
-    let files = Files::default();
-    let outs = match make(&files) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("{e}");
-            return None;
-        }
-    };
-    std::fs::create_dir_all(&dir).ok()?;
-    let put = |name: &str, b: &[u8]| -> Option<()> {
-        let tmp = dir.join(format!(".{name}.{}", std::process::id()));
-        std::fs::write(&tmp, b).ok()?;
-        std::fs::rename(&tmp, dir.join(name)).ok()
-    };
-    for (name, b) in &outs {
-        put(name, b)?;
-    }
-    let mut m = String::new();
-    for (tag, name, hash) in files
-        .0
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter()
-    {
-        let hash = hash.map_or_else(|| "-".to_string(), |h| format!("{h:016x}"));
-        m.push_str(&format!(
-            "{tag}\t{hash}\t{}\n",
-            String::from_utf8_lossy(name)
-        ));
-    }
-    put("read", m.as_bytes())?;
-    Some(dir)
-}
-
-/// `mf.base` as fmtutil builds it, once a process.
-fn base() -> Option<Arc<Vec<u8>>> {
-    static B: OnceLock<Option<Arc<Vec<u8>>>> = OnceLock::new();
-    B.get_or_init(|| {
-        let dir = cached("mf.base", &["mf.base"], |files| {
-            let (tcx, _) = files
-                .read("web2c", b"cp227.tcx")
-                .ok_or("mf: cp227.tcx not found")?;
-            let b = mktex::build_base(
-                Box::new(files.clone()),
-                Some(("cp227.tcx", &tcx)),
-                &settings(),
-            )?;
-            Ok(vec![("mf.base".into(), b)])
-        })?;
-        std::fs::read(dir.join("mf.base")).ok().map(Arc::new)
-    })
-    .clone()
 }
 
 /// One run at a time: two pages asking for one font make it once.
 static MAKING: Mutex<()> = Mutex::new(());
 
+/// `req` made ([`mktex::make`]), its file in the cache directory: where
+/// it is.
+fn made(req: &Request) -> Option<PathBuf> {
+    let _one = MAKING.lock().unwrap_or_else(PoisonError::into_inner);
+    let b = match mktex::make(req, &KpseFiles, &DiskCache, &settings()) {
+        Ok(b) => b?,
+        Err(e) => {
+            eprintln!("{e}");
+            return None;
+        }
+    };
+    let p = DiskCache::dir(&format!("file {}", req.key())).join(req.output());
+    std::fs::create_dir_all(p.parent()?).ok()?;
+    if std::fs::read(&p).ok().as_deref() != Some(&b[..]) {
+        let tmp = p.with_extension(format!("tmp{}", std::process::id()));
+        std::fs::write(&tmp, &b).ok()?;
+        std::fs::rename(&tmp, &p).ok()?;
+    }
+    Some(p)
+}
+
 /// `mktexpk --dpi DPI --bdpi BDPI --mag MAKETEX_MAG --mfmode MODE NAME`
 /// for a font with a METAFONT source: its `NAME.DPIpk`.
 pub fn mktexpk(font: &str, dpi: u32, bdpi: u32, mode: Option<&str>) -> Option<PathBuf> {
-    let _one = MAKING.lock().unwrap_or_else(PoisonError::into_inner);
-    // (`kpsewhich $NAME.mf`; not here: mktexmf's sources and the
-    // PostScript fonts gsftopk renders)
-    find(format!("{font}.mf").as_bytes(), Format::Mf)?;
-    let base = base()?;
-    let pk = format!("{font}.{dpi}pk");
-    let key = format!("mktexpk {font} {dpi} {bdpi} {}", mode.unwrap_or("/"));
-    let dir = cached(&key, &[&pk], |files| {
-        let (dpi, bdpi) = (
-            i32::try_from(dpi).map_err(|e| e.to_string())?,
-            i32::try_from(bdpi).map_err(|e| e.to_string())?,
-        );
-        let mode = mktex::mktexpk_mode(Box::new(files.clone()), &base, mode, bdpi, &settings())?;
-        let s = Settings { mode, ..settings() };
-        let font_made = mktex::mktexpk(Box::new(files.clone()), &base, font, dpi, bdpi, &s)?;
-        Ok(vec![(font_made.pk_name, font_made.pk)])
-    })?;
-    Some(dir.join(pk))
+    made(&Request::Pk {
+        font: font.to_owned(),
+        dpi,
+        bdpi,
+        mode: mode.map(str::to_owned),
+    })
 }
 
 /// `mktextfm NAME` for a font with a METAFONT source: its `NAME.tfm`.
 pub fn mktextfm(font: &str) -> Option<PathBuf> {
-    let _one = MAKING.lock().unwrap_or_else(PoisonError::into_inner);
-    find(format!("{font}.mf").as_bytes(), Format::Mf)?;
-    let base = base()?;
-    let tfm = format!("{font}.tfm");
-    let dir = cached(&format!("mktextfm {font}"), &[&tfm], |files| {
-        let b = mktex::mktextfm(Box::new(files.clone()), &base, font, &settings())?;
-        Ok(vec![(tfm.clone(), b)])
-    })?;
-    Some(dir.join(tfm))
+    made(&Request::Tfm {
+        font: font.to_owned(),
+    })
 }

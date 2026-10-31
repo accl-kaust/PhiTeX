@@ -161,17 +161,8 @@ impl Tree {
             _ => Format::Tex,
         };
         let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
-        let found = k
-            .find_file(name.as_bytes(), format, false)
-            .map(|b| os(&b).to_path_buf());
-        drop(k);
-        // (kpathsea's mktextfm on a TFM it finds none of)
-        match (found, format) {
-            (None, Format::Tfm) => {
-                crate::mkfont::mktextfm(name.strip_suffix(".tfm").unwrap_or(name))
-            }
-            (found, _) => found,
-        }
+        k.find_file(name.as_bytes(), format, false)
+            .map(|b| os(&b).to_path_buf())
     }
 }
 
@@ -180,8 +171,8 @@ impl Tree {
     /// `cmr10.600pk` a PK font's lookup asks for, [`phitex_kpse::pk_name`]):
     /// kpathsea's PK search, `kpse_find_pk` ([`Kpse::find_pk`]) with the
     /// glyph settings `glyph` the writer gave (`kpse_init_prog`'s base
-    /// resolution and mode, [`phitex_kpse::pk_settings`]), and on a miss
-    /// mktexpk ([`crate::mkfont::mktexpk`]).
+    /// resolution and mode, [`phitex_kpse::pk_settings`]); a miss is the
+    /// engine's to make (mktexpk, `phitex_mf::mktex::make`).
     pub fn pk(&self, font: &str, dpi: u32, glyph: Option<(u32, Option<&str>)>) -> Option<PathBuf> {
         let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some((bdpi, mode)) = glyph {
@@ -192,14 +183,8 @@ impl Tree {
                 *g = Some(want);
             }
         }
-        let found = k
-            .find_pk(font.as_bytes(), dpi)
-            .map(|(p, _)| os(&p).to_path_buf());
-        drop(k);
-        match (found, glyph) {
-            (None, Some((bdpi, mode))) => crate::mkfont::mktexpk(font, dpi, bdpi, mode),
-            (found, _) => found,
-        }
+        k.find_pk(font.as_bytes(), dpi)
+            .map(|(p, _)| os(&p).to_path_buf())
     }
 
     /// Where a tool's support file `name` is, by kpathsea in the format
@@ -212,19 +197,18 @@ impl Tree {
             // (Ghostscript's own fonts, where the system's gs keeps them,
             // as TeX Live's epstopdf runs the system's gs)
             phitex_tex::ToolSearch::GsFont => return gs_font(name),
+            // (METAFONT's and web2c's files as `mf-nowin -progname=mf`
+            // finds them, for the fonts the engine makes)
+            phitex_tex::ToolSearch::Mf => {
+                return crate::mkfont::find(name, phitex_mf::mktex::Kind::Mf);
+            }
+            phitex_tex::ToolSearch::Web2c => {
+                return crate::mkfont::find(name, phitex_mf::mktex::Kind::Web2c);
+            }
         };
         let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
-        let found = k
-            .find_file(name.as_bytes(), format, false)
-            .map(|b| os(&b).to_path_buf());
-        drop(k);
-        // (kpathsea's mktextfm on a TFM it finds none of)
-        match (found, format) {
-            (None, Format::Tfm) => {
-                crate::mkfont::mktextfm(name.strip_suffix(".tfm").unwrap_or(name))
-            }
-            (found, _) => found,
-        }
+        k.find_file(name.as_bytes(), format, false)
+            .map(|b| os(&b).to_path_buf())
     }
 }
 
