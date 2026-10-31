@@ -228,7 +228,14 @@ impl Run<'_, '_> {
             }
             self.st.close(l.save_base, l.def_base);
         }
+        // (§282: each one put back by `back_input`, so a brace among
+        // them is counted in `align_state` once more when read, §325: an
+        // `\aftergroup}` closing a box in an alignment's entry, LaTeX's
+        // `lrbox`)
         let toks: Vec<Tok> = l.ag.clone();
+        for &t in &toks {
+            self.uncount_brace(t);
+        }
         self.push_toks(toks);
         Some(l)
     }

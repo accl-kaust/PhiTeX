@@ -676,7 +676,14 @@ impl Run<'_, '_> {
         if self.aopen != 0 {
             self.end_spent_lists();
         }
-        // §325: a brace put back is counted again when read
+        self.uncount_brace(t);
+        self.input.back(t);
+    }
+
+    /// §325: a brace put back is counted again when read, so its count
+    /// in `align_state` is undone now.
+    #[inline]
+    pub(crate) fn uncount_brace(&mut self, t: Tok) {
         if self.aopen != 0
             && let Some(s) = self.astate
             && !t.is_cs_or_active()
@@ -687,7 +694,6 @@ impl Run<'_, '_> {
                 _ => {}
             }
         }
-        self.input.back(t);
     }
 
     // --------------------------------------------------------- the text
