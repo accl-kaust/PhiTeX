@@ -112,7 +112,13 @@ pub enum Key {
     Bool(bool),
     Null,
     Mark,
-    Id(usize),
+    /// A dictionary, file or graphics state, by its address.
+    Ptr(usize),
+    /// An array by its storage's address and its start in it.
+    Arr(usize, usize),
+    Op(u16),
+    Save(u32),
+    Font(u32),
 }
 
 /// A dictionary's entries, in the order they were first defined.

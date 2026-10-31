@@ -377,13 +377,13 @@ impl<'a> Ps<'a> {
             V::Bool(b) => Key::Bool(*b),
             V::Null => return Err(E::TypeCheck.into()),
             V::Mark => Key::Mark,
-            V::Arr(a) => Key::Id(Rc::as_ptr(&a.b).cast::<u8>() as usize ^ a.off),
-            V::Dict(d) => Key::Id(Rc::as_ptr(d).cast::<u8>() as usize),
-            V::Op(i) => Key::Id(0x8000_0000_0000 + usize::from(*i)),
-            V::File(f) => Key::Id(Rc::as_ptr(f).cast::<u8>() as usize),
-            V::Save(s) => Key::Id(0x9000_0000_0000 + *s as usize),
-            V::FontId(s) => Key::Id(0xa000_0000_0000 + *s as usize),
-            V::GState(g) => Key::Id(Rc::as_ptr(g).cast::<u8>() as usize),
+            V::Arr(a) => Key::Arr(Rc::as_ptr(&a.b).cast::<u8>() as usize, a.off),
+            V::Dict(d) => Key::Ptr(Rc::as_ptr(d).cast::<u8>() as usize),
+            V::Op(i) => Key::Op(*i),
+            V::File(f) => Key::Ptr(Rc::as_ptr(f).cast::<u8>() as usize),
+            V::Save(s) => Key::Save(*s),
+            V::FontId(s) => Key::Font(*s),
+            V::GState(g) => Key::Ptr(Rc::as_ptr(g).cast::<u8>() as usize),
         })
     }
     /// The key object stored for `o` (a string key as its name).
