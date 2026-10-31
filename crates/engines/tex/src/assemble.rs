@@ -985,6 +985,24 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         ]);
         cx.contribute(v.field("diags"), v.seq_unit(d));
     }
+    // the file's end the writer could not make (a font with no map
+    // entry): pdfTeX's fatal error (`Font X not found`, then `==> Fatal
+    // error occurred, no output PDF file produced!`, pdfTeX §794), the
+    // job's error in the log (its `! ` line is the error shown: it has
+    // no place in the document, as pdfTeX's has none); the output is
+    // then no file at all, never a file with no bytes passed as the pages
+    if let Some(why) = &l.fatal {
+        let msg = if why.starts_with("pdfTeX error") {
+            why.clone()
+        } else {
+            format!("pdfTeX error: {why}")
+        };
+        let e = v.list(vec![v.str("error"), v.str(&msg), v.int(-1)]);
+        cx.contribute(v.field("log"), v.seq_unit(e));
+        cx.contribute(v.field(crate::run::LOG_ERRORS), v.int(1));
+        let f = v.list(vec![v.str("fatal"), v.str("pdf")]);
+        cx.contribute(v.field("log"), v.seq_unit(f));
+    }
     cx.contribute(
         v.field(crate::pdfout::LINKED),
         v.seq_unit(v.list(vec![

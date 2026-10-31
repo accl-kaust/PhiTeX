@@ -39,6 +39,28 @@ the old one. So the layout stays as it is:
 <root>/tl2026/h/<hash>.pack               content-named, shared by the prefix's releases
 ```
 
+**The font map a release ships** (the `pdftex-map` pack's
+`fonts/map/pdftex/updmap/pdftex.map`) is updmap's output, not the `Map`
+and `MixedMap` files of `updmap.cfg` joined. updmap (`updmap.pl`,
+"Generating output for pdftex") puts first the 35 PostScript base fonts
+from `ps2pk35.map` with their names and files translated for the `LW35`
+mode (`URWkb` in TeX Live: `ptmr8r Times-Roman` becomes
+`ptmr8r NimbusRomNo9L-Regu "TeXBase1Encoding ReEncodeFont" <8r.enc
+<utmr8a.pfb`), as `pdftexDownloadBase14 true` asks, then the
+`MixedMap` files, then the `Map` files, then `to_pdftex`. tl2026.7's map
+lacks that first part: no `ptmr8r`, `phvr8r`, `pcrr8r`, … (1365 of TeX
+Live's names, the base-35 families among them), so every document in
+Times, Helvetica or Courier (IEEEtran, `\usepackage{times}`, psnfss)
+fails on `Font ptmr8r not found` under `--shelf` and in the frontends'
+engine; the engine reads `pdftex.map` alone, as pdfTeX does, and the
+index has no `fonts/map/dvips/` file it could fall back on. `release.py`
+is to run updmap over the release's tree (or do its LW35 step), and a
+release is checked before it is deployed:
+
+```
+gzip -dc h/<pdftex-map pack>.pack | grep -c '^ptmr8r '    # 1, not 0
+```
+
 - **The hostname carries the public protocol**, counted from 1 at the
   alpha: `v1.shelf.phitex.org` serves index schema 1. The schemas before it (1 to 4 of development)
   were never released.
@@ -231,6 +253,7 @@ for each version tag.
    - add the custom domain `v1.shelf.phitex.org` to the Pages project `shelf-phitex-v1` (made by the first deploy);
    - build tl2026.7 from the xetex-trees branch on mc, with TRACE and FONT_INDEX;
    - `release.py` writes `shelf.json`;
+   - `release.py` makes `pdftex.map` as updmap does, the LW35 fonts first (§2: tl2026.7's has none, so Times documents fail), and the deploy checks `^ptmr8r ` is in it;
    - `deploy.sh` to `shelf-phitex-v1`.
 3. **`CHANGELOG.md` → `news.json`** generator, the update check and `phitex
    upgrade`, and the release workflow (targets, `SHA256SUMS`, minisign).
