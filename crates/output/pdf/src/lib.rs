@@ -87,7 +87,7 @@ mod color;
 mod digest;
 pub mod enc;
 mod finish;
-pub use finish::{Chunk, PdfBytes, Tail, finish};
+pub use finish::{Chunk, PdfBytes, Tail, duplicate_objects, finish};
 mod update;
 pub use update::{Layout, Linked, MakeExact, Place, Section, Updater};
 mod encodings;

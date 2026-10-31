@@ -189,8 +189,124 @@ impl Tail {
                 st.objs.len()
             );
         }
+        // (a number defined twice is a broken file whatever reader takes
+        // it: every file the link writes is checked in debug builds)
+        debug_assert!(
+            duplicate_objects(&out).is_empty(),
+            "the PDF defines objects {:?} more than once",
+            duplicate_objects(&out)
+        );
         Ok(out)
     }
+}
+
+/// The object numbers `pdf` defines more than once, at the top level or
+/// in an object stream (PDF 32000-1 §7.5.3, §7.5.7: a number names one
+/// object). The file is walked object after object from its header,
+/// each stream skipped by its direct `/Length`; a file it cannot walk
+/// (an indirect length, bytes it does not know) gives none.
+#[must_use]
+pub fn duplicate_objects(pdf: &[u8]) -> Vec<usize> {
+    let mut seen = std::collections::BTreeMap::<usize, u32>::new();
+    let mut i = 0;
+    loop {
+        while pdf.get(i).copied().is_some_and(pdf_ws) {
+            i += 1;
+        }
+        match pdf.get(i) {
+            // (the header and the comment lines after it)
+            Some(b'%') => match find(pdf, i, b"\n") {
+                Some(k) => i = k + 1,
+                None => return Vec::new(),
+            },
+            Some(c) if c.is_ascii_digit() => {
+                let Some((n, next)) = walk_object(pdf, i, &mut seen) else {
+                    return Vec::new();
+                };
+                *seen.entry(n).or_default() += 1;
+                i = next;
+            }
+            // (`xref`, `trailer`, `startxref`: the objects are over)
+            _ => break,
+        }
+    }
+    seen.into_iter()
+        .filter(|&(_, k)| k > 1)
+        .map(|(n, _)| n)
+        .collect()
+}
+
+fn pdf_ws(c: u8) -> bool {
+    matches!(c, b' ' | b'\n' | b'\r' | b'\t' | b'\x0c' | 0)
+}
+
+fn find(pdf: &[u8], from: usize, pat: &[u8]) -> Option<usize> {
+    pdf.get(from..)?
+        .windows(pat.len())
+        .position(|w| w == pat)
+        .map(|k| from + k)
+}
+
+/// The direct integer after `key` in `dict` (none: absent, or an
+/// indirect reference).
+fn key_int(dict: &[u8], key: &[u8]) -> Option<usize> {
+    let k = dict.windows(key.len()).position(|w| w == key)? + key.len();
+    let t = dict[k..].iter().position(|&c| !pdf_ws(c))? + k;
+    let e = dict[t..]
+        .iter()
+        .position(|c| !c.is_ascii_digit())
+        .map_or(dict.len(), |x| x + t);
+    let n = std::str::from_utf8(&dict[t..e]).ok()?.parse().ok()?;
+    let rest = &dict[e..];
+    let r = rest.iter().position(|&c| !pdf_ws(c)).unwrap_or(rest.len());
+    if rest.get(r).is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(n)
+}
+
+/// The object beginning at `i` (`N G obj`): its number and where the
+/// next one may begin; an object stream's members counted in `seen`.
+fn walk_object(
+    pdf: &[u8],
+    i: usize,
+    seen: &mut std::collections::BTreeMap<usize, u32>,
+) -> Option<(usize, usize)> {
+    let j = i + pdf[i..].iter().position(|c| !c.is_ascii_digit())?;
+    let n: usize = std::str::from_utf8(&pdf[i..j]).ok()?.parse().ok()?;
+    let h = find(pdf, j, b"obj").filter(|&h| h <= j + 8)?;
+    let body = h + 3;
+    let end = find(pdf, body, b"endobj")?;
+    let Some(s) = find(pdf, body, b"stream").filter(|&s| s < end) else {
+        return Some((n, end + 6));
+    };
+    let dict = &pdf[body..s];
+    let len = key_int(dict, b"/Length")?;
+    let mut d0 = s + 6;
+    if pdf.get(d0) == Some(&b'\r') {
+        d0 += 1;
+    }
+    if pdf.get(d0) == Some(&b'\n') {
+        d0 += 1;
+    }
+    let data = pdf.get(d0..d0 + len)?;
+    if dict.windows(7).any(|w| w == b"/ObjStm") {
+        let (k, first) = (key_int(dict, b"/N")?, key_int(dict, b"/First")?);
+        let dec = if dict.windows(12).any(|w| w == b"/FlateDecode") {
+            phitex_codecs::inflate::inflate(data)?
+        } else {
+            data.to_vec()
+        };
+        let head = std::str::from_utf8(dec.get(..first)?).ok()?;
+        let nums: Vec<usize> = head
+            .split_ascii_whitespace()
+            .filter_map(|t| t.parse().ok())
+            .collect();
+        for pair in nums.chunks(2).take(k) {
+            *seen.entry(pair[0]).or_default() += 1;
+        }
+    }
+    Some((n, find(pdf, d0 + len, b"endobj")? + 6))
 }
 
 /// A hash of bytes, a word at a time.
@@ -687,5 +803,35 @@ impl PdfState {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::duplicate_objects;
+
+    #[test]
+    fn a_number_defined_twice_is_found_in_object_streams_too() {
+        let os_head = b"3 0 4 9 ";
+        let os_body = b"<< /A 1 >><< /B 2 >>";
+        let mut os = os_head.to_vec();
+        os.extend_from_slice(os_body);
+        let mut pdf = b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Length 4 >>\nstream\nabcd\nendstream\nendobj\n2 0 obj\n[1 0 R]\nendobj\n".to_vec();
+        pdf.extend_from_slice(
+            format!(
+                "5 0 obj\n<< /Type /ObjStm /N 2 /First {} /Length {} >>\nstream\n",
+                os_head.len(),
+                os.len()
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(&os);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        assert_eq!(duplicate_objects(&pdf), Vec::<usize>::new());
+        let mut twice = pdf.clone();
+        twice.extend_from_slice(b"4 0 obj\n<< /Type /Metadata /Length 2 >>\nstream\nxy\nendstream\nendobj\n2 0 obj\n[]\nendobj\n");
+        assert_eq!(duplicate_objects(&twice), vec![2, 4]);
+        twice.extend_from_slice(b"xref\n0 1\ntrailer\n<< >>\n");
+        assert_eq!(duplicate_objects(&twice), vec![2, 4]);
     }
 }
