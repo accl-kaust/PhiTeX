@@ -51,6 +51,11 @@ pub(crate) struct Level {
     pub par: Option<(i64, i64)>,
     /// `\prevgraf` of the vertical list this level builds.
     pub prev_graf: i64,
+    /// `mode_line` (§213): the input line this level began on (a
+    /// paragraph's, its box reports' `pack_begin_line`, §816).
+    pub mode_line: i64,
+    /// Where it began, for its box reports' diagnostics.
+    pub mode_place: Option<crate::run::DiagPlace>,
     /// What the opener recorded for the closer (a box's context and
     /// spec, an insert's number, …): as the scope kind's extra.
     pub extra: Vec<ValueId>,
@@ -137,6 +142,8 @@ impl Level {
             },
             par: None,
             prev_graf: 0,
+            mode_line: 0,
+            mode_place: None,
             extra,
             gid: 0,
             save_base: 0,

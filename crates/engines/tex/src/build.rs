@@ -842,8 +842,12 @@ impl Run<'_, '_> {
         let packed = (lhm * 64 + rhm) * 65536 + lang;
         // the paragraph: a level of the nest (§1091 `push_nest`)
         let lid = self.push_list(102, 0, Vec::new());
+        let line = i64::from(self.input_line_no()?);
+        let place = self.diag_place();
         if let Some(l) = self.top_mut() {
             l.par = Some((lang, packed));
+            l.mode_line = line;
+            l.mode_place = Some(place);
         }
         if indented {
             let w = self.ipar(Par::parindent)?;
@@ -915,6 +919,8 @@ impl Run<'_, '_> {
                     let l = self.pop_level().expect("the paragraph's level");
                     self.muts += 1;
                     self.last_par = l.par.unwrap_or((0, 0));
+                    self.last_par_line = l.mode_line;
+                    self.last_par_place = l.mode_place;
                     l.list
                 }
                 _ => match self.par_level_under_groups() {
@@ -974,6 +980,8 @@ impl Run<'_, '_> {
         }
         self.muts += 1;
         self.last_par = l.par.unwrap_or((0, 0));
+        self.last_par_line = l.mode_line;
+        self.last_par_place = l.mode_place;
         Ok(l.list)
     }
 
@@ -1459,8 +1467,14 @@ impl Run<'_, '_> {
         let tv = v.int(nodes::T_VBOX);
         let mut out = Vec::with_capacity(para.lines.len() * 2);
         let mut memo = nodes::LineMemo::default();
+        // (`pack_begin_line`, §815: the paragraph's first line, kept as
+        // its level was popped; one begun in another node's run, this one)
+        let begin = match self.last_par_line {
+            l if l > 0 => l,
+            _ => i64::from(self.input_line_no()?),
+        };
         for (k, mut line) in para.lines.into_iter().enumerate() {
-            self.box_report(true, line.packed.report, true);
+            self.box_report(true, line.packed.report, begin, &line.packed.node, &side)?;
             let (list, seen, line_fonts) =
                 nodes::encode_line(v, &line.packed.node.list, &side, &mut memo);
             let b = nodes::encode_box_with(v, &line.packed.node, list);
@@ -2258,7 +2272,7 @@ impl Run<'_, '_> {
                     true,
                 );
                 let h = md.group == group::HBOX || adjusted;
-                self.box_report(h, packed.report, false);
+                self.box_report(h, packed.report, 0, &packed.node, &side)?;
                 // packaging without adjustments keeps the list as it was:
                 // its value is the items' (encoded once, when appended)
                 let b = if !adjusted && packed.node.list.len() == kept.len() {
@@ -3712,29 +3726,145 @@ impl Run<'_, '_> {
         }
     }
 
-    /// The box reports of §660–§667 and §674–§678, as diagnostics (the
-    /// log keeps the oracle's text).
-    fn box_report(&mut self, h: bool, r: Option<phitex_typeset::pack::Report>, in_par: bool) {
+    /// The box reports of §660–§667 and §674–§678 of box `b` (its marks
+    /// and whatsits in `side`): TeX's lines in the log (§663, §675: the
+    /// report and where, the list's `short_display` for an `\hbox`, the
+    /// box `show_box`ed, `begin_diagnostic` … `end_diagnostic(true)`), and
+    /// a warning diagnostic. `begin` is `pack_begin_line` (§661): a
+    /// paragraph's first line, an alignment's negated, 0 elsewhere.
+    fn box_report(
+        &mut self,
+        h: bool,
+        r: Option<phitex_typeset::pack::Report>,
+        begin: i64,
+        b: &BoxNode,
+        side: &Side,
+    ) -> R<()> {
         use phitex_typeset::pack::Report;
-        let Some(r) = r else { return };
+        let Some(r) = r else { return Ok(()) };
         let what = if h { "\\hbox" } else { "\\vbox" };
-        let mut s = match r {
-            Report::Underfull(b) => format!("Underfull {what} (badness {b})"),
-            Report::Loose(b) => format!("Loose {what} (badness {b})"),
-            Report::Tight(b) => format!("Tight {what} (badness {b})"),
+        let head = match r {
+            Report::Underfull(b) => format!("Underfull {what} (badness {b}"),
+            Report::Loose(b) => format!("Loose {what} (badness {b}"),
+            Report::Tight(b) => format!("Tight {what} (badness {b}"),
             Report::Overfull(x) => {
                 let mut d = String::new();
                 crate::print::print_scaled(&mut d, x);
                 format!(
-                    "Overfull {what} ({d}pt too {})",
+                    "Overfull {what} ({d}pt too {}",
                     if h { "wide" } else { "high" }
                 )
             }
         };
-        if in_par {
+        let mut s = format!("{head})");
+        // (a paragraph's at its start, where it began; another box's where
+        // it ends, as TeX's `line`)
+        let place = if begin > 0 {
             s.push_str(" in paragraph");
+            self.last_par_place.clone()
+        } else {
+            None
+        };
+        let place = place.unwrap_or_else(|| self.diag_place());
+        self.diag_at(0, &s, place);
+        let line = self.input_line_no()?;
+        let output =
+            self.cx.op() == self.ops.finish || self.nest.iter().any(|l| l.group == group::OUTPUT);
+        let at = if output {
+            ") has occurred while \\output is active".to_owned()
+        } else if begin != 0 {
+            format!(
+                ") in {} at lines {}--{line}",
+                if begin > 0 { "paragraph" } else { "alignment" },
+                begin.abs()
+            )
+        } else {
+            format!(") detected at line {line}")
+        };
+        let sep = crate::log::BOX_LINE.to_string();
+        let mut text = format!("{head}{at}");
+        if h {
+            text.push_str(&sep);
+            let mut f = 0;
+            self.short_display(&mut text, &b.list, &mut f)?;
         }
-        self.diag(false, &s);
+        let shown = self.show_node_lines(&Node::Box(Box::new(b.clone())), side)?;
+        text.push_str(&sep);
+        text.push_str(&shown.join(&sep));
+        self.log(
+            if h {
+                crate::log::HREPORT
+            } else {
+                crate::log::VREPORT
+            },
+            &text,
+        )
+    }
+
+    /// `short_display` (§174–§175, XeTeX's native words): the list's
+    /// characters, each font's identifier before its first (`f`, the
+    /// font shown last, `font_in_short_display`, starts at the null
+    /// font), `[]` for a box or other item, `|` a rule, a space for glue
+    /// but `zero_glue`, `$` a math node.
+    fn short_display(&mut self, out: &mut String, list: &[Node], f: &mut u32) -> R<()> {
+        for x in list {
+            match x {
+                Node::Char { font, ch } => self.short_char(out, *font, u32::from(*ch), f)?,
+                Node::Lig(l) => {
+                    for &c in &l.original {
+                        self.short_char(out, l.font, u32::from(c), f)?;
+                    }
+                }
+                Node::Native(n) if n.kind != phitex_typeset::node::NativeKind::Glyph => {
+                    if n.font != *f {
+                        self.short_font(out, n.font)?;
+                        *f = n.font;
+                    }
+                    out.push_str(&String::from_utf16_lossy(&n.text));
+                }
+                Node::Box(_)
+                | Node::Ins(_)
+                | Node::Mark(_)
+                | Node::Adjust(_)
+                | Node::Unset(_)
+                | Node::Whatsit(..)
+                | Node::Language { .. }
+                | Node::Native(_) => out.push_str("[]"),
+                Node::Rule(_) => out.push('|'),
+                Node::Glue(g) => {
+                    // (`zero_glue` itself: all zero and not a spec of its own)
+                    if g.own_spec || g.spec != Glue::ZERO {
+                        out.push(' ');
+                    }
+                }
+                Node::Math(k, _) => out.push_str(if k.is_lr() { "[]" } else { "$" }),
+                Node::Disc(d) => {
+                    self.short_display(out, &d.pre, f)?;
+                    self.short_display(out, &d.post, f)?;
+                }
+                Node::Kern(..) | Node::Penalty(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn short_char(&mut self, out: &mut String, font: u32, c: u32, f: &mut u32) -> R<()> {
+        if font != *f {
+            self.short_font(out, font)?;
+            *f = font;
+        }
+        crate::print::push_code(out, c);
+        Ok(())
+    }
+
+    /// The font's identifier and a space (§174).
+    fn short_font(&mut self, out: &mut String, font: u32) -> R<()> {
+        let x = self.font_get(i64::from(font), crate::fields::FontCell::Id)?;
+        let name = x.map_or_else(|| "nullfont".to_owned(), |x| crate::val::str_of(self.v, x));
+        let esc = i64::from(self.ipar(Par::escapechar)?);
+        crate::print::print_esc(out, &name, esc);
+        out.push(' ');
+        Ok(())
     }
 
     /// `char_warning` (§581).

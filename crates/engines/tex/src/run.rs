@@ -550,6 +550,11 @@ impl Cur {
 /// A decoded scope kind: `(group, sid, lid, mode, depth, extra)`.
 pub(crate) type KindFields = (i64, i64, i64, i32, i64, Vec<ValueId>);
 
+/// Where a diagnostic is ([`Run::diag_place`]): the line's file, its
+/// start in that file (-1: not a document's line), its unit, its text and
+/// the column.
+pub(crate) type DiagPlace = (ValueId, i64, ValueId, String, usize);
+
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Run<'c, 'a> {
     /// Encodings through the worker's cache at this run's values epoch
@@ -637,6 +642,12 @@ pub(crate) struct Run<'c, 'a> {
     pub next_lid: i64,
     /// The `(language, packed hyphen minima)` of the paragraph being
     /// broken (`end_graf` pops its level before `line_break`, §1096).
+    /// The `mode_line` of the paragraph `end_graf` just popped, its box
+    /// reports' `pack_begin_line` (§815).
+    pub last_par_line: i64,
+    /// And where it began ([`Run::diag_place`] at `new_graf`): its box
+    /// reports' place.
+    pub last_par_place: Option<DiagPlace>,
     pub last_par: (i64, i64),
     /// Whether the node is a piece of a document's text (its segments
     /// carry their origin): a document file `\input` there is sliced
@@ -1071,6 +1082,8 @@ impl<'c, 'a> Run<'c, 'a> {
             nest: Vec::new(),
             next_lid: 0,
             last_par: (0, 0),
+            last_par_line: 0,
+            last_par_place: None,
             doc: false,
             fread: Vec::new(),
             fmiss: Vec::new(),
@@ -3745,7 +3758,13 @@ impl<'c, 'a> Run<'c, 'a> {
     /// [`Self::diag`] of kind `kind`: 0 a warning, 1 TeX's error, 2 the
     /// engine's diagnostic.
     fn diag_kind(&mut self, kind: i64, msg: &str) {
-        let v = self.v;
+        let at = self.diag_place();
+        self.diag_at(kind, msg, at);
+    }
+
+    /// Where a diagnostic made now is: the input line being read (its
+    /// file, the line's start in it, its unit, its text and the column).
+    pub(crate) fn diag_place(&self) -> DiagPlace {
         let src = self
             .input
             .levels
@@ -3758,7 +3777,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     _ => None,
                 })
             });
-        let (file, at, unit, seg, loc) = match &src {
+        match &src {
             Some(s) => {
                 let mut buf = s.buf.clone();
                 if s.endch >= 0 && buf.len() > s.loc && s.ends {
@@ -3776,7 +3795,14 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
             }
             None => (ValueId::UNIT, -1, ValueId::UNIT, String::new(), 0),
-        };
+        }
+    }
+
+    /// A diagnostic of kind `kind` (0 a warning, 1 TeX's error, 2 the
+    /// engine's) at place `p` ([`Self::diag_place`]).
+    pub(crate) fn diag_at(&mut self, kind: i64, msg: &str, p: DiagPlace) {
+        let v = self.v;
+        let (file, at, unit, seg, loc) = p;
         let node = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
         let e = v.list(vec![
             v.int(kind),

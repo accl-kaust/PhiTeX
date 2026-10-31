@@ -376,3 +376,36 @@ fn a_show_is_an_error_for_the_history() {
         assert!(b.error_lines().is_empty(), "{doc:?}: no \"! \" line");
     }
 }
+
+/// A box report as TeX logs it (§663): the report and where (a
+/// paragraph's lines, an `\hbox`'s line), its list's `short_display`,
+/// the box shown; a paragraph's diagnostic at its start. After an edit
+/// of another paragraph, the log has it still, and the diagnostic.
+#[test]
+fn box_reports_are_in_the_log_as_tex_writes_them() {
+    let doc = "\\hsize=100pt \\font\\tt=cmtt10 \\parindent=0pt\nIts packs come from \\hbox{\\tt https://shelf.phitex.org/tl2026/packs}.\n\nOther text.\n\n\\hbox to 10pt{Far too wide}\n\\bye\n";
+    let mut b = build(doc, |o| o);
+    let check = |b: &Build, what: &str| {
+        let (_, log) = b.output();
+        for want in [
+            "\nOverfull \\hbox (183.83177pt too wide) in paragraph at lines 2--3\n[]\\tenrm Its packs come from []. |\n\n\\hbox(6.94444+2.22223)x100.0, glue set - 1.0\n",
+            "\nOverfull \\hbox (43.22232pt too wide) detected at line 6\n\\tenrm Far too wide|\n\n\\hbox(6.94444+0.0)x10.0, glue set - 1.0\n",
+        ] {
+            assert!(log.contains(want), "{what}: no {want:?} in the log:\n{log}");
+        }
+        let ds = b.diagnostics();
+        show(&ds);
+        let lines: Vec<(usize, &str)> = ds.iter().map(|d| (d.line, d.message.as_str())).collect();
+        assert_eq!(
+            lines,
+            [
+                (2, "Overfull \\hbox (183.83177pt too wide) in paragraph"),
+                (6, "Overfull \\hbox (43.22232pt too wide)")
+            ],
+            "{what}"
+        );
+    };
+    check(&b, "cold");
+    common::rebuild(&mut b, &doc.replace("Other text.", "Other words."));
+    check(&b, "after an edit of the paragraph between");
+}

@@ -314,6 +314,8 @@ impl Run<'_, '_> {
             let l = self.pop_level().expect("the paragraph's level");
             self.muts += 1;
             self.last_par = l.par.unwrap_or((0, 0));
+            self.last_par_line = l.mode_line;
+            self.last_par_place = l.mode_place;
         } else if let Some(k) = self.par_level_under_groups() {
             self.end_graf_under_groups(k)?;
         }

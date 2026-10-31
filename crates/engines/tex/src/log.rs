@@ -135,6 +135,29 @@ impl Log {
                 self.print_nl("", nl);
                 self.print_ln();
             }
+            // §663 and §675: `print_ln`, the report and where, `print_ln`;
+            // an `\hbox`'s `short_display` and `print_ln`; then the box
+            // `show_box`ed between `begin_diagnostic` and
+            // `end_diagnostic(true)`
+            HREPORT | VREPORT => {
+                let mut parts = text.split(BOX_LINE);
+                self.print_ln();
+                self.print_nl(parts.next().unwrap_or_default(), nl);
+                self.print_ln();
+                if kind == HREPORT {
+                    self.print(parts.next().unwrap_or_default(), nl);
+                    self.print_ln();
+                }
+                if let Some(first) = parts.next() {
+                    self.print(first, nl);
+                }
+                for l in parts {
+                    self.print_ln();
+                    self.print(l, nl);
+                }
+                self.print_nl("", nl);
+                self.print_ln();
+            }
             "diag" => {
                 // begin_diagnostic … end_diagnostic(false) (§245)
                 self.print_nl(text, nl);
@@ -187,6 +210,12 @@ impl Log {
 /// text (`!pdfTeX error: pdflatex (file ptmr8r): Font ptmr8r at 600 not
 /// found`), the output's (`crate::assemble`).
 pub(crate) const FAIL: &str = "fail";
+
+/// Log events' kinds: an `\hbox`'s or a `\vbox`'s report (§663,
+/// §675), its parts apart by [`BOX_LINE`]: the report and where, an
+/// `\hbox`'s `short_display`, the `show_box` lines.
+pub(crate) const HREPORT: &str = "hreport";
+pub(crate) const VREPORT: &str = "vreport";
 
 /// A log event's kind: the PDF driver's fatal error (xdvipdfmx's
 /// `ERROR`, `xdvipdfmx:fatal: ...`), its line the event's text: XeTeX

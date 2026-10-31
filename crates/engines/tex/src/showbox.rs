@@ -102,6 +102,26 @@ impl Run<'_, '_> {
         Ok(sh.lines)
     }
 
+    /// `show_box` (§198) of a node not encoded (a box just packed, its
+    /// marks and whatsits in `side`).
+    pub(crate) fn show_node_lines(&mut self, node: &Node, side: &Side) -> R<Vec<String>> {
+        let depth = i64::from(self.param("showboxdepth")?);
+        let mut breadth = i64::from(self.param("showboxbreadth")?);
+        if breadth <= 0 {
+            breadth = 5;
+        }
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
+        let mut sh = Shower {
+            lines: vec![String::new()],
+            prefix: String::new(),
+            depth,
+            breadth,
+            esc,
+        };
+        self.show_node_list(&mut sh, std::slice::from_ref(node), side)?;
+        Ok(sh.lines)
+    }
+
     /// `show_node_list` (§182).
     fn show_node_list(&mut self, sh: &mut Shower, list: &[Node], side: &Side) -> R<()> {
         if i64::try_from(sh.prefix.chars().count()).unwrap_or(i64::MAX) > sh.depth {
