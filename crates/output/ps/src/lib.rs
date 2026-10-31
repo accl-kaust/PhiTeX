@@ -69,8 +69,29 @@
     clippy::comparison_chain,
     clippy::neg_multiply,
     clippy::suboptimal_flops,
-    clippy::imprecise_flops
+    clippy::imprecise_flops,
+    clippy::format_push_string,
+    clippy::format_collect,
+    clippy::needless_continue,
+    clippy::if_same_then_else,
+    clippy::ptr_cast_constness,
+    clippy::large_const_arrays,
+    clippy::manual_midpoint,
+    clippy::manual_is_multiple_of,
+    clippy::wrong_self_convention,
+    clippy::only_used_in_recursion,
+    clippy::redundant_guards,
+    clippy::needless_lifetimes,
+    clippy::chunks_exact_with_const_size,
+    clippy::verbose_bit_mask,
+    clippy::needless_late_init,
+    clippy::manual_unwrap_or,
+    clippy::struct_field_names,
+    clippy::manual_range_patterns
 )]
+// (gs's state kept whole where this port reads only part of it yet, and
+// the operand stack left as gdevpsfx.c leaves it)
+#![allow(dead_code, unused_assignments)]
 
 extern crate alloc;
 

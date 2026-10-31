@@ -364,7 +364,12 @@ impl Ps<'_> {
             return self.alias_font(name, &sd, Some(res_name));
         }
         // (substitution: the substitute's font copied under the requested name)
+        // (a base 35 font itself missing, or its substitute: no font, as
+        // gs without its Resource/Font; never a loop)
         let sub = substitute(&n);
+        if sub.as_bytes() == n.as_slice() || FONTMAP.iter().any(|(a, _)| a.as_bytes() == n.as_slice()) {
+            return Err(E::InvalidFont.into());
+        }
         let sname = self.nobj(sub);
         let f = self.findfont(&sname)?;
         let V::Dict(sd) = &f.v else {
