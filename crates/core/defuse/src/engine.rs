@@ -1451,6 +1451,7 @@ impl Engine {
             rep.wasted_ns += load(&w.wasted_ns);
             rep.predictions_confirmed += load(&w.predictions_confirmed);
             rep.relative_resolved += load(&w.relative_resolved);
+            rep.walked += load(&w.walked);
             rep.shaped += load(&w.shaped);
             rep.commits += load(&w.commits);
             rep.final_reruns = rep

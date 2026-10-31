@@ -2017,7 +2017,7 @@ version = "0.0.0"
 
 [[package]]
 name = "phitex-cli"
-version = "1.6.0"
+version = "1.0.0"
 dependencies = [
  "annotate-snippets",
  "bytesize",

@@ -65,6 +65,17 @@
   --line: rgba(255, 255, 255, .20);
   --term-bg: #0b0f15;
 }
+/* ?site: phitex.org's own colours (its cards), not GitHub's page */
+:root[data-site] { --bg: #ffffff; }
+:root[data-site][data-theme="dark"] {
+  --bg: #2f3a4c;
+  --rule: #495365;
+  --card: #252e3c;
+  --card-edge: #3a4659;
+  --page: #3a4659;
+  --page-edge: #495365;
+  --term-bg: #1b222c;
+}
 * { box-sizing: border-box; }
 html, body { margin: 0; background: transparent; }
 body { font-family: var(--sans); color: var(--ink); -webkit-font-smoothing: antialiased; }
@@ -108,6 +119,7 @@ body { font-family: var(--sans); color: var(--ink); -webkit-font-smoothing: anti
 <script>
 const P = new URLSearchParams(location.search);
 if (P.get('theme') === 'dark') document.documentElement.dataset.theme = 'dark';
+if (P.has('site')) document.documentElement.dataset.site = '';
 
 // Figures shown in the pictures. TODO(number): replace from the published perf run (phitex.org/perf/latest.json).
 const FIG = {

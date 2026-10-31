@@ -54,6 +54,10 @@ type RangeOf = (Field, Option<NodeId>, Option<NodeId>, bool, bool);
 #[derive(Default, Clone, Copy)]
 pub(crate) struct CommitStats {
     pub(crate) woken: u64,
+    /// The reader records the definitions' walks looked at (`walk_here`,
+    /// `reask_from`: each segment's readers of the field, those it passed
+    /// by included).
+    pub(crate) walked: u64,
     pub(crate) relative_resolved: u64,
     pub(crate) predictions_confirmed: u64,
     pub(crate) shaped: u64,
@@ -70,6 +74,7 @@ pub(crate) struct CommitStats {
 impl CommitStats {
     pub(crate) fn add(&mut self, o: &CommitStats) {
         self.woken += o.woken;
+        self.walked += o.walked;
         self.relative_resolved += o.relative_resolved;
         self.predictions_confirmed += o.predictions_confirmed;
         self.shaped += o.shaped;
@@ -2147,6 +2152,7 @@ fn walk_here(
         }
         let stop = hole.map(|h| h.0).or(next.map(|x| x.0));
         if let Some(rs) = inner.readers.get(&f) {
+            st.walked += rs.len() as u64;
             for r in rs {
                 let ap = eng.node(r.anchor).pos_hint();
                 let inside = (ap > from || (ap == from && r.inclusive))
@@ -2422,15 +2428,17 @@ pub(crate) fn reask_from(
             let stop = hole.map(|h| h.0).or(next.map(|x| x.0));
             deeper.retain(|x| stop.is_none_or(|s| x.0 < s));
             let readers: Vec<Reader> = match inner.readers.get(&f) {
-                Some(rs) => rs
-                    .iter()
-                    .filter(|r| {
-                        let ap = eng.node(r.anchor).pos_hint();
-                        (ap > from || (ap == from && r.inclusive))
-                            && stop.is_none_or(|s| ap < s || (ap == s && !r.inclusive))
-                    })
-                    .cloned()
-                    .collect(),
+                Some(rs) => {
+                    st.walked += rs.len() as u64;
+                    rs.iter()
+                        .filter(|r| {
+                            let ap = eng.node(r.anchor).pos_hint();
+                            (ap > from || (ap == from && r.inclusive))
+                                && stop.is_none_or(|s| ap < s || (ap == s && !r.inclusive))
+                        })
+                        .cloned()
+                        .collect()
+                }
                 None => Vec::new(),
             };
             (readers, next, hole, deeper)

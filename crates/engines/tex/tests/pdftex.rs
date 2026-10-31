@@ -393,6 +393,36 @@ fn openout_refused() {
     }
 }
 
+/// A font no map file has an entry for (`nomap10.tfm`: cmr10's metrics
+/// under a name pdftex.map lacks): pdfTeX finds no Type 1 file and makes
+/// a bitmap (PK) font through mktexpk, which this engine does not; as
+/// pdfTeX without one (`Font nomap10 at 72 not found`), the job ends on
+/// a fatal pdfTeX error with no output PDF file, the error among the
+/// log's error lines (it has no place in the document, as pdfTeX's has
+/// none). (The build was reported fine, its output a file
+/// of no bytes with the pages' count: a viewer showed them blank.)
+#[test]
+fn font_without_map_entry_is_fatal() {
+    let dir = common::fixtures().join("pdf");
+    let doc = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\font\\r=nomap10 \\r Hello.\\end\n";
+    let opts = common::options("./t.tex", "t", "", &dir);
+    let b = common::build(opts, None, doc);
+    let (pdf, log) = b.output();
+    assert!(pdf.is_empty(), "a PDF file was written:\n{log}");
+    assert!(b.fatal(), "the job did not end:\n{log}");
+    for want in [
+        "Font nomap10 not found",
+        "==> Fatal error occurred, no output PDF file produced!",
+    ] {
+        assert!(log.contains(want), "no {want:?} in the log:\n{log}");
+    }
+    let lines = b.error_lines();
+    assert!(
+        lines.iter().any(|l| l.contains("Font nomap10 not found")),
+        "not among the error lines: {lines:?}"
+    );
+}
+
 /// A plain pdfTeX document for glyph origins: paragraphs of varied
 /// words over a few pages, a logo, a footnote, ligatures.
 fn origins_doc() -> String {

@@ -39,6 +39,7 @@
   --serif: "CMU Serif", "Latin Modern Roman", Georgia, serif;
   --mono: "DM Mono", ui-monospace, Menlo, monospace;
   --bg: #ffffff;               /* GitHub's page, light */
+  color-scheme: light;
   --bg-glow: rgba(54, 108, 191, .10);
   --ink: #1b222c;
   --muted: #495365;
@@ -69,6 +70,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0d1117;             /* GitHub's page, dark */
+    color-scheme: dark;
     --bg-glow: rgba(101, 151, 224, .14);
     --ink: #ffffff;
     --muted: #d0d5dd;
@@ -94,6 +96,7 @@
 }
 :root[data-theme="dark"] {
   --bg: #0d1117;
+  color-scheme: dark;
   --bg-glow: rgba(101, 151, 224, .14);
   --ink: #ffffff;
   --muted: #d0d5dd;
@@ -238,6 +241,8 @@ body { font-family: var(--sans); overflow: hidden; -webkit-font-smoothing: antia
 #controls input[type=range] { flex: 1; accent-color: var(--accent); }
 #clock { width: 92px; font-variant-numeric: tabular-nums; text-align: right; }
 body.render #controls { display: none; }
+html:has(body.embed), body.embed, body.embed #stage { background: transparent; }
+body.embed #stage::after { display: none; }
 </style>
 </head>
 <body>
@@ -432,6 +437,17 @@ const renderMode = params.has('render');
 // ?embed: playing, without the controls, fitted to the frame's width (the README preview shows it in an iframe)
 const embed = params.has('embed');
 if (renderMode || embed) document.body.classList.add('render');
+if (embed) {
+  // on phitex.org: the page's background shows through, and the page's theme (its toggle too) is followed
+  document.body.classList.add('embed');
+  try {
+    const host = parent.document.documentElement, follow = () => {
+      if (host.dataset.theme) document.documentElement.dataset.theme = host.dataset.theme;
+      else delete document.documentElement.dataset.theme;
+    };
+    if (parent !== window) { follow(); new MutationObserver(follow).observe(host, { attributes: true, attributeFilter: ['data-theme'] }); }
+  } catch { /* another origin's page: the system's theme */ }
+}
 if (params.get('theme')) document.documentElement.dataset.theme = params.get('theme');
 function fit() {
   const s = renderMode ? 1 : embed ? innerWidth / 1600 : Math.min(innerWidth / 1600, (innerHeight - 52) / 600);
@@ -441,7 +457,11 @@ function fit() {
 addEventListener('resize', fit);
 let playing = !renderMode && !params.has('t'), t0 = performance.now(), cur = Number(params.get('t')) || 0;
 const scrub = $('scrub'); scrub.max = D;
+// off screen (scrolled away, or a hidden tab) it draws nothing: an iframe's observer sees the top page's viewport
+let onScreen = true;
+new IntersectionObserver(es => { onScreen = es[es.length - 1].isIntersecting; }).observe($('stage'));
 function frame(now) {
+  if (!onScreen || document.hidden) { requestAnimationFrame(frame); return; }
   if (playing) cur = ((now - t0) / 1000) % D;
   render(cur);
   scrub.value = cur; $('clock').textContent = `${cur.toFixed(2)} / ${D.toFixed(1)} s`;

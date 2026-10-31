@@ -60,7 +60,7 @@ button { font: inherit; padding: 4px 14px; border: 1px solid var(--rule); border
 const DEG = Math.PI / 180;
 const K = Math.tan(36 * DEG);          // a stripe leans to 54° from horizontal
 const S = 1 / Math.sin(54 * DEG);      // a slanted stripe's horizontal width per unit measured square
-const STRIPES = [[8, 'var(--orange)'], [6.17, 'var(--gold)'], [4.33, 'var(--lime)'], [2.5, 'var(--teal)']];
+const STRIPES = [[8, '#f58f2d'], [6.17, '#f0b225'], [4.33, '#d3c72a'], [2.5, '#00a8a4']];   // ACCL's orange, gold, lime, teal (literal, so an exported SVG keeps them)
 const GAP = 2.5;
 
 // the word: caps CAP units tall, baseline at y = CAP; kerns in em as TeX's macros give them
@@ -165,8 +165,11 @@ function stemPath(rows, ox, oy) {
   return { d: `M${[...L, ...R].map(p => p.map(f2).join(',')).join(' L')} Z`, cx: ox + (stem[0] + stem[1]) / 2 };
 }
 
-// lays out ΦTeX: each letter's character, origin, baseline and ink box
-let WORD_CACHE = null;
+// lays out ΦTeX: each letter's character, origin, baseline and ink box. The search below takes ~1.3 s at load, and its
+// result never changes for the bundled CMU Serif Bold, so it is a constant: ?dump runs the search again and prints the
+// new value (after a change to WORD, STRIPE or the font), to paste here.
+const DUMP = new URLSearchParams(location.search).has('dump');
+let WORD_CACHE = DUMP ? null : {"size":95.52238805970148,"letters":[{"ch":"Φ","x":-7,"y":85,"l":0,"r":71,"t":20,"b":85},{"ch":"T","x":55.514207299075906,"y":64,"l":59.514207299075906,"r":128.5142072990759,"t":0,"b":64},{"ch":"E","x":116.0032076069846,"y":85,"l":119.0032076069846,"r":186.0032076069846,"t":20,"b":85},{"ch":"X","x":176.1772889823344,"y":64,"l":179.1772889823344,"r":256.1772889823344,"t":-1,"b":65}]};
 function word() {
   if (WORD_CACHE) return WORD_CACHE;
   const size = SIZE(), ex = metrics(size, 'x').actualBoundingBoxAscent;
@@ -341,6 +344,13 @@ function render(style, fill) {
 //      that letter's crossings with that stripe, where it lies on the stripe.
 // Nothing is measured: the weave is the table CROSS (above). To animate a stripe, animate its path in both layers alike.
 //
+// the letters' outlines, CMU Serif Bold (OFL) in font units (1000 an em), y down: the logo is plain paths, no font needed
+const GLYPH = {
+  'Φ': 'M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z',
+  'T': 'M42 -434 63 -675H736L757 -434H710Q706 -476 703 -498.5Q700 -521 689.5 -550.5Q679 -580 663 -594Q647 -608 618 -618Q589 -628 547 -628H471V-47H624V0Q570 -3 400 -3Q230 -3 176 0V-47H329V-628H252Q210 -628 180.5 -617.5Q151 -607 135 -593Q119 -579 109 -550Q99 -521 95.5 -498.5Q92 -476 89 -434Z',
+  'E': 'M39 0V-47H147V-633H39V-680H660L691 -439H644Q639 -480 632.5 -506.5Q626 -533 612 -559Q598 -585 577 -600Q556 -615 522 -624Q488 -633 441 -633H289V-376H344Q411 -376 430.5 -403Q450 -430 450 -493H497V-212H450Q450 -275 430.5 -302Q411 -329 344 -329H289V-47H441Q486 -47 520.5 -53.5Q555 -60 579 -75.5Q603 -91 619.5 -108.5Q636 -126 647 -154.5Q658 -183 664 -209Q670 -235 676 -274H723L677 0Z',
+  'X': 'M34 0V-47H63Q94 -47 124 -50Q147 -52 153.5 -55Q160 -58 167 -67L369 -332L147 -639H49V-686Q84 -683 211 -683Q351 -683 392 -686V-639H309L452 -442L584 -617Q585 -618 588 -622.5Q591 -627 592 -628Q557 -639 500 -639V-686Q536 -683 652 -683Q744 -683 786 -686V-639H757Q723 -639 699 -636Q673 -634 666.5 -631.5Q660 -629 652 -618L484 -397L737 -47H835V0Q800 -3 673 -3Q533 -3 492 0V-47H575L401 -288L236 -69Q235 -68 232 -63.5Q229 -59 228 -58Q263 -47 320 -47V0Q284 -3 168 -3Q76 -3 34 0Z',
+};
 const BOXES = /boxes/.test(location.search);
 function layered(w, stripes, cross, fill) {
   const id = 'v' + (uid++), BIG = 'x="-500" y="-500" width="2000" height="1500"', size = w.size;
@@ -353,11 +363,11 @@ function layered(w, stripes, cross, fill) {
   const ends = stripes.map(s => def('clipPath', `<rect x="-500" y="${s.clip[0]}" width="2000" height="${s.clip[1] - s.clip[0]}"/>`));
   // every path of stripe j (the stripe and its gaps) is class phx-sj and length 1, so one dash animation moves them alike
   const line = (j, col, wd) => `<path class="phx-s${j}" pathLength="1" clip-path="${ends[j]}" d="${stripes[j].d}" fill="none" stroke="${col}" stroke-width="${f2(wd)}"/>`;
-  const text = (l, extra) => `<text x="${f2(l.x)}" y="${f2(l.y)}" style="font: 700 ${size}px ${CMU}" ${extra}>${l.ch}</text>`;
+  const em = size / 1000, text = (l, extra) => `<path d="${GLYPH[l.ch]}" transform="translate(${f2(l.x)} ${f2(l.y)}) scale(${+em.toFixed(5)})" ${extra}/>`;
   const on = j => cross.filter(c => c.over.includes(j));
   // 1. the stripes, each cut round the letters lying on it
   let body = stripes.map((s, j) => {
-    const cut = on(j).map(c => `<g clip-path="${def('clipPath', rect(c, ''))}">${text(at[c.at], `fill="#000" stroke="#000" stroke-width="${f2(2 * g)}" stroke-linejoin="miter" stroke-miterlimit="4"`)}</g>`).join('');
+    const cut = on(j).map(c => `<g clip-path="${def('clipPath', rect(c, ''))}">${text(at[c.at], `fill="#000" stroke="#000" stroke-width="${f2(2 * g / em)}" stroke-linejoin="miter" stroke-miterlimit="4"`)}</g>`).join('');
     return cut ? `<g ${mask(cut)}>${line(j, s.c, s.w)}</g>` : line(j, s.c, s.w);
   }).join('');
   // 2. the letters, each with each stripe's gap cut out of it but in its own crossings with that stripe
@@ -374,7 +384,7 @@ function layered(w, stripes, cross, fill) {
 }
 const logo = (style, fill, h) => svg(render(style, fill), h);
 const svg = (r, h, pad = 3) =>
-  `<svg viewBox="${f2(r.x0 - pad)} ${f2(r.y0 - pad)} ${f2(r.x1 - r.x0 + 2 * pad)} ${f2(r.y1 - r.y0 + 2 * pad)}" height="${h}" width="${f2(h * (r.x1 - r.x0 + 2 * pad) / (r.y1 - r.y0 + 2 * pad))}">${r.body}</svg>`;
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${f2(r.x0 - pad)} ${f2(r.y0 - pad)} ${f2(r.x1 - r.x0 + 2 * pad)} ${f2(r.y1 - r.y0 + 2 * pad)}" height="${h}" width="${f2(h * (r.x1 - r.x0 + 2 * pad) / (r.y1 - r.y0 + 2 * pad))}">${r.body}</svg>`;
 
 // The loading animation, in three acts on one logo <svg>:
 //   start   the stripes draw in from the bottom, orange first;
@@ -562,6 +572,14 @@ function opening(box, fill, bg) {
 }
 
 Promise.all([document.fonts.load(`700 20px ${CMU}`, 'ΦTEX'), document.fonts.load("400 20px 'Noto Sans'", 'by'), document.fonts.load("700 20px 'Noto Sans'", 'KAUST')]).then(() => {
+  if (DUMP) { document.body.innerHTML = `<pre id="dump">${JSON.stringify(word())}</pre>`; return; }
+  // ?export: the logos as standalone SVG files' text, one <pre> each (light: ACCL navy letters; dark: white)
+  if (new URLSearchParams(location.search).has('export')) {
+    const files = { 'phitex-logo.svg': logo(STYLES[0], '#1d3e72', 160), 'phitex-logo-dark.svg': logo(STYLES[0], '#ffffff', 160),
+                    'phitex-mark.svg': logo(MARK, '#1d3e72', 160), 'phitex-mark-dark.svg': logo(MARK, '#ffffff', 160) };
+    document.body.innerHTML = Object.entries(files).map(([n, v]) => `<pre data-file="${n}">${v.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</pre>`).join('');
+    return;
+  }
   const sizes = (s, fill, hs) => `<div class="sizes">${hs.map(h => logo(s, fill, h)).join('')}</div>`;
   const pair = (a, b) => `<div class="row"><div class="panel light">${a}</div><div class="panel dark">${b}</div></div>`;
   document.getElementById('styles').innerHTML = STYLES.map(s =>

@@ -31,7 +31,8 @@ rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
 net=(--unshare-net)
 offline=true
 if [ "${1:-}" = "--net" ]; then
-  net=(--share-net)
+  # /etc/resolv.conf may point into systemd-resolved's /run directory.
+  net=(--share-net --ro-bind-try /run/systemd/resolve /run/systemd/resolve)
   offline=false
   shift
 fi
@@ -39,12 +40,17 @@ fi
 
 mkdir -p "$cargo_home/registry" "$cargo_home/git"
 
+# The dynamic loader's /lib64: usr/lib64 where the host has it (Debian and
+# Ubuntu keep ld-linux there; Arch's usr/lib64 points to lib), else usr/lib.
+lib64=usr/lib
+[ -e /usr/lib64 ] && lib64=usr/lib64
+
 args=(
   --unshare-all "${net[@]}"
   --die-with-parent --new-session
   --ro-bind /usr /usr
   --symlink usr/bin /bin --symlink usr/bin /sbin
-  --symlink usr/lib /lib --symlink usr/lib /lib64
+  --symlink usr/lib /lib --symlink "$lib64" /lib64
   --ro-bind /etc /etc
   --ro-bind-try /var/lib/texmf /var/lib/texmf
   --proc /proc --dev /dev

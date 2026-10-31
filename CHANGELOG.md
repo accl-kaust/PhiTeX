@@ -6,9 +6,10 @@ PhiTeX's versions converge to φ, a digit a milestone: 1.6 is the alpha,
 whose first paragraph is its summary: `phitex` says it once on the first
 run of that version, `phitex news` prints the whole entry, and the
 GitHub release's notes are the entry. The entries before 1.6 name
-milestones, not versions.
+milestones, not versions. 1.0 is not a milestone: a release made to
+try `phitex upgrade` and the update check end to end before 1.6.
 
-## 1.6 (2026-10-31)
+## 1.6 (unreleased)
 
 The first build of PhiTeX meant for use: pdfTeX's plain TeX and LaTeX,
 and XeLaTeX, built by graph reduction, with exact output.
@@ -223,3 +224,9 @@ fonts (found through kpathsea from the `tex` on `PATH`). The first
 build with each engine makes its format and takes longer. The README's
 "latexmk compatibility" section describes the rounds, the tools and shell
 escape.
+
+## 1.0 (2026-10-31)
+
+A release to try upgrading with: install it, then `phitex upgrade` takes
+the newest release. Not meant for use; the alpha is 1.6, whose entry
+above says what works.
