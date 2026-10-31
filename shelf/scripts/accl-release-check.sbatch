@@ -34,7 +34,8 @@ w=/tmp/$USER-$SLURM_JOB_ID
 out=$HOME/code/flinner/shelf-runs/check-release-$SLURM_JOB_ID
 arch=$HOME/shared-cache/shelf/archives
 prior=${PRIOR:-$HOME/code/flinner/shelf-releases-v1}
-tlpdb=${TLPDB:-$HOME/code/flinner/shelf-runs/full-75761/texlive.tlpdb.xz}
+traces=${TRACES:-$HOME/code/flinner/shelf-runs/full-75761}
+tlpdb=${TLPDB:-$traces/texlive.tlpdb.xz}
 jobs=$((${SLURM_CPUS_ON_NODE:-8} - 2))
 mkdir -p "$out" "$arch" "$w/noresolve" "$w/ftree" "$w/results"
 trap 'cp -a "$w/results/." "$out/" 2>/dev/null; rm -rf "$w"' EXIT
@@ -50,7 +51,7 @@ key=$(sha256sum "$w/phitex/Cargo.lock" | cut -c1-16)
 cp "$tlpdb" "$w/phitex/shelf/cache/texlive.tlpdb.xz"
 cp -a "$arch/." "$w/phitex/shelf/cache/"
 # (the kept traces: a column whose inputs match is reused, else empty)
-cp "$HOME"/code/flinner/shelf-runs/full-75761/trace-*.json "$w/phitex/shelf/cache/" 2>/dev/null || true
+cp "$traces"/trace-*.json "$w/phitex/shelf/cache/" 2>/dev/null || true
 
 command -v apptainer > /dev/null || PATH=$HOME/shared-cache/apptainer/usr/bin:$PATH
 net() {
