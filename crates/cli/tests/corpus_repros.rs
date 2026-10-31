@@ -209,6 +209,11 @@ repro!(
     "research corpus (revtex-aps, ltxgrid's \\do@output@MVL): a forced penalty an \\unvbox puts on the contributions (§1110: no build_page) fires at the next paragraph's start (new_graf's build_page, §1091), so the routine's \\global\\hsize is that paragraph's; PhiTeX's paragraph-start candidate was not cut when the penalty came from an earlier piece, and the paragraph was set at the old width (revtex's title at the column's width)"
 );
 
+repro!(
+    aftergroup_brace_in_alignment,
+    "TeX Live manual othelloboard (LaTeX's lrbox in a tabular's entry): an \\aftergroup} closes the box begun with {; the brace put back where the group ends is counted as back_input counts it (§282, §326), and PhiTeX's put it back uncounted, so align_state stayed off by one and the & after the environment was 'You can't use & in restricted horizontal mode'"
+);
+
 /// The research corpus's amsbook at -j4 (2 pages more than -j1 in about
 /// half the builds): the piece that ends a title page whose `\topskip`
 /// `\@maketitle` set in a group puts the page parameters on the main

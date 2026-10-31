@@ -244,10 +244,7 @@ impl Run<'_, '_> {
         // `\aftergroup}` closing a box in an alignment's entry, LaTeX's
         // `lrbox`)
         let toks: Vec<Tok> = l.ag.clone();
-        for &t in &toks {
-            self.uncount_brace(t);
-        }
-        self.push_toks(toks);
+        self.back_toks(toks);
         Some(l)
     }
 

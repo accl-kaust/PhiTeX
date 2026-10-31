@@ -406,7 +406,7 @@ impl Run<'_, '_> {
     pub(crate) fn unsave_extras(&mut self, md: &Mode) -> R<()> {
         let ag = self.scope_list("ag", md)?;
         let toks: Vec<Tok> = ag.iter().map(|&t| Tok::decode(self.v, t)).collect();
-        self.push_toks(toks);
+        self.back_toks(toks);
         let fix = self.scope_list("lvlfix", md)?;
         if !fix.is_empty() {
             let v = self.v;

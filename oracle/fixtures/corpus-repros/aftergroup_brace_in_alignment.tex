@@ -1,0 +1,10 @@
+% An \aftergroup} that closes a box begun with { (LaTeX's lrbox, as
+% othelloboard's environment uses it in a tabular's entry): the brace put
+% back where the group ends is counted as back_input counts it (TeX
+% §282, §326), so align_state is the entry's again and the & after it
+% ends the entry.
+\def\x{\endgroup\setbox0\hbox{\begingroup\aftergroup}}
+\halign{#\hfil&\quad#\hfil\cr
+\begingroup\x A\endgroup\box0 B&C\cr
+D&E\cr}
+\end

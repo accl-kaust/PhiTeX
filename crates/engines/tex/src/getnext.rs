@@ -668,6 +668,25 @@ impl Run<'_, '_> {
         self.input.arena.body(body)
     }
 
+    /// A group's `\aftergroup` tokens put back where it closes (§282,
+    /// §326): each counted as [`Run::back_input`] counts it, a brace
+    /// read again when its turn comes (an `\aftergroup}` that closes a
+    /// box begun with `{`, LaTeX's `lrbox`, leaves `align_state` as it
+    /// was in an alignment's entry).
+    pub(crate) fn back_toks(&mut self, toks: Vec<Tok>) {
+        if toks.is_empty() {
+            return;
+        }
+        // (as `back_input`: the lists read to their end popped first)
+        if self.aopen != 0 {
+            self.end_spent_lists();
+        }
+        for &t in &toks {
+            self.uncount_brace(t);
+        }
+        self.push_toks(toks);
+    }
+
     /// `back_input` (§325).
     #[inline]
     pub(crate) fn back_input(&mut self, t: Tok) {
