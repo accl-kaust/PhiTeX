@@ -1,0 +1,24 @@
+% A font that microtype expands automatically (\pdffontexpand ...
+% autoexpand: cmr10+5, cmr10-10, ... where the lines stretch and shrink)
+% has its base's font object (pdf_init_font's second case, the base's
+% name): the read-time count of the pages' objects counted one for each
+% expansion's name, and a \pdfobj after the pages was numbered too high
+% (acmart: hyperxmp's /Metadata).
+\documentclass{article}
+\usepackage{microtype}
+\begin{document}
+\newcount\n
+\def\para{Lorem ipsum dolor sit amet, consectetuer adipiscing elit. Ut purus
+elit, vestibulum ut, placerat ac, adipiscing vitae, felis. Curabitur dictum
+gravida mauris. Nam arcu libero, nonummy eget, consectetuer id, vulputate a,
+magna. Donec vehicula augue eu neque. Pellentesque habitant morbi tristique
+senectus et netus et malesuada fames ac turpis egestas. \textbf{Mauris ut
+leo.} Cras viverra metus rhoncus sem. \textit{Nulla et lectus vestibulum urna
+fringilla ultrices.} Phasellus eu tellus sit amet tortor gravida placerat.
+\par}
+\loop\para\advance\n by 1 \ifnum\n<12 \repeat
+\clearpage
+\immediate\pdfobj{(after the pages)}\edef\o{\the\pdflastobj}
+\pdfcatalog{/PhiTeXCheck \o\space 0 R}
+Object \o.
+\end{document}

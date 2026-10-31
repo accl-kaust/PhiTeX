@@ -2935,9 +2935,16 @@ pub(crate) fn page_allocs(
             }
         }
     }
+    // (an auto-expanded font's object is its base's, `pdf_init_font`'s
+    // second case: the base's name, `pdf_font_blink`)
     let names: Vec<ValueId> = real
         .into_iter()
         .map(|id| {
+            let id = fonts
+                .exp
+                .get(&id)
+                .filter(|x| x.auto && fonts.by_id.contains_key(&x.base))
+                .map_or(id, |x| x.base);
             v.str(&String::from_utf8_lossy(phitex_pdf::FontSource::name(
                 fonts, id,
             )))

@@ -359,6 +359,29 @@ fn fontattr_vf_not_read_in() {
     }
 }
 
+/// A font microtype expands automatically (`\pdffontexpand ...
+/// autoexpand`: `cmr10+5`, `cmr10-10`, ... where lines stretch and
+/// shrink) has its base's font object (`pdf_init_font`'s second case):
+/// the read-time count of the pages' objects counted an object for each
+/// expansion's name, and a `\pdfobj` after the pages was numbered too high
+/// (acmart: hyperxmp's `/Metadata`, 369 for 316). At -j1 and -j4 (oracle:
+/// pdflatex in the CI image, mc 77682; the base differs at byte 2145).
+#[test]
+fn expanded_fonts_one_object() {
+    let name = "expanded_fonts_one_object";
+    let want = std::fs::read(fixtures().join(format!("{name}.pdf"))).expect("the oracle");
+    for j in [1, 4] {
+        let (got, term) = build_j(name, j);
+        assert!(
+            got == want,
+            "{name} -j{j}: the PDF differs from pdflatex's ({} vs {} bytes): {}",
+            got.len(),
+            want.len(),
+            term.lines().last().unwrap_or("")
+        );
+    }
+}
+
 /// The research corpus's amsbook at -j4 (2 pages more than -j1 in about
 /// half the builds): the piece that ends a title page whose `\topskip`
 /// `\@maketitle` set in a group puts the page parameters on the main
