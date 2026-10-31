@@ -88,6 +88,12 @@ texmf paths (dir/fonts/opentype/...), for the tracer's font index (made by
 phitex-otf's otf-index with a fonts.conf naming those two directories:
 scripts/accl-trace.sbatch).
 
+METAFONT's inputs are served too (fonts/source and metafont/: .mf and
+mf.ini; web2c/: .tcx), so a PK or TFM font made on demand is made from
+Shelf as from TeX Live (formats mf and web2c: MFINPUTS, WEB2C). And
+Ghostscript's own fonts, at GS_FONTS/<name> (see GS_FONTS below; the
+build stops unless `gs --version` is GS_VERSION).
+
 The engine's font index (FONT_INDEX=path: the PhiTeX engine's builder over
 fonts/opentype and fonts/truetype) is served, when given, at the path
 FONT_INDEX_PATH, in a pack of its own.
@@ -111,6 +117,10 @@ TREES = [
     # CJK CMaps and subfont definitions, dvipdfmx's own maps, TECkit's
     # compiled mappings)
     "dvipdfmx", "fonts/cmap", "fonts/sfd", "fonts/misc/xetex/fontmapping",
+    # (what METAFONT reads to make a PK or TFM font on demand, mktexpk as
+    # PhiTeX runs it in process: the fonts' .mf sources, the base's
+    # mf.ini and its .mf files, and the base's translation table)
+    "fonts/source", "metafont", "web2c",
 ]
 OPEN = ("fonts/opentype/", "fonts/truetype/")
 XETEX = ("tex/xelatex/", "tex/xetex/")
@@ -129,7 +139,17 @@ FORMATS = {
     "map": "TEXFONTMAPS", "opentype": "OPENTYPEFONTS", "truetype": "TTFONTS",
     "bst": "BSTINPUTS", "bib": "BIBINPUTS", "ist": "INDEXSTYLE",
     "cmap": "CMAPFONTS", "sfd": "SFDFONTS", "misc": "MISCFONTS",
+    "mf": "MFINPUTS", "web2c": "WEB2C",
 }
+# Ghostscript's own fonts (its Resource/Font: the URW base 35 under
+# Ghostscript's names, NimbusRoman-Regular ...), which PhiTeX's
+# PostScript converter (crates/output/ps) embeds as Ghostscript's pdfwrite
+# does: the very files of the Ghostscript the converter matches, not TeX
+# Live's fonts/type1/urw (other bytes, so another PDF). Served at
+# GS_FONTS/<name>, from GS_FONT_DIR (default: the build machine's, the CI
+# image's), which must be Ghostscript GS_VERSION's.
+GS_FONTS = "ghostscript/Resource/Font"
+GS_VERSION = "10.08.0"
 DEPS = ["pdftex", "xetex"]  # (the index's dependency columns, in order)
 
 
@@ -149,6 +169,10 @@ def wanted(path: str) -> bool:
         return path.endswith(".sfd")
     if path.startswith("fonts/misc/xetex/fontmapping/"):
         return path.endswith(".tec")
+    if path.startswith(("fonts/source/", "metafont/")):
+        return path.endswith((".mf", ".ini"))
+    if path.startswith("web2c/"):
+        return path.endswith(".tcx")
     if path.startswith(OPEN):
         return path.lower().endswith((".otf", ".ttf", ".ttc"))
     if path.startswith("fonts/"):
@@ -162,6 +186,19 @@ def wanted(path: str) -> bool:
     # logo, LineBreak.txt; a package's documentation is under doc/, which
     # is not in TREES)
     return True
+
+
+def ghostscript_fonts() -> dict[str, bytes]:
+    """Ghostscript GS_VERSION's Resource/Font, each font at GS_FONTS/<its name> (links followed)."""
+    got = subprocess.run(["gs", "--version"], capture_output=True, text=True).stdout.strip()
+    if got != GS_VERSION:
+        raise SystemExit(f"Ghostscript {got or 'missing'}: Shelf serves {GS_VERSION}'s fonts, which PhiTeX's converter matches")
+    d = Path(os.environ.get("GS_FONT_DIR", "/usr/share/ghostscript/Resource/Font"))
+    out = {f"{GS_FONTS}/{f.name}": f.read_bytes() for f in sorted(d.iterdir()) if f.is_file()}
+    if len(out) < 35:
+        raise SystemExit(f"{d}: {len(out)} fonts, not Ghostscript's 35")
+    print(f"ghostscript {GS_VERSION}: {len(out)} fonts from {d}", file=sys.stderr)
+    return out
 
 
 def packages(db: str) -> tuple[list[dict], dict[str, dict]]:
@@ -592,6 +629,8 @@ def main() -> None:
     for path in [q for q in files if q.startswith(merged)]:
         del files[path]
     files[PDFTEX_MAP] = ({"name": "pdftex-map", "rev": "updmap"}, pdftex_map)
+    for path, b in ghostscript_fonts().items():
+        files[path] = ({"name": "ghostscript-fonts", "rev": GS_VERSION}, b)
     if os.environ.get("FONT_INDEX"):
         files[FONT_INDEX_PATH] = ({"name": "partex-fonts", "rev": "build"}, Path(os.environ["FONT_INDEX"]).read_bytes())
 

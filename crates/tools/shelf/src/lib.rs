@@ -45,6 +45,11 @@ use serde_json::Value;
 /// files are named under it.
 pub const TL: &str = "/usr/share/texmf-dist/";
 
+/// Where Shelf serves Ghostscript's own fonts (its `Resource/Font`, by
+/// Ghostscript's names: `NimbusRoman-Regular` ...), which the PostScript
+/// converter embeds as Ghostscript does (`shelf/build.py`'s `GS_FONTS`).
+pub const GS_FONTS: &str = "ghostscript/Resource/Font";
+
 /// The schemas this crate reads: Shelf's public protocol, the `N` of
 /// `vN.shelf.phitex.org`, counted from 1 at the alpha (the formats before
 /// it, 1 to 4 of development, were never released).
@@ -102,6 +107,8 @@ pub fn format_of(name: &str) -> &'static str {
         "bib" => "bib",
         "ist" => "ist",
         "tec" => "misc",
+        "mf" => "mf",
+        "tcx" => "web2c",
         _ => "tex",
     }
 }

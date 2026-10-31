@@ -463,8 +463,11 @@ impl Host for ShelfHost {
                     phitex_tex::ToolSearch::BibStyle => ".bst",
                     phitex_tex::ToolSearch::BibData => ".bib",
                     phitex_tex::ToolSearch::IndexStyle => ".ist",
-                    // (Ghostscript's fonts by their file names, no suffix)
-                    phitex_tex::ToolSearch::GsFont => "",
+                    // (Ghostscript's fonts by their file names, where
+                    // Shelf serves them)
+                    phitex_tex::ToolSearch::GsFont => {
+                        return gs_font_path(name).and_then(|p| ShelfHost { files: f.clone() }.find(&p));
+                    }
                 };
                 let name = if name.ends_with(ext) {
                     name.to_owned()
@@ -523,10 +526,11 @@ impl Host for ShelfHost {
             .with_gs_font({
                 let f3 = self.files.clone();
                 Box::new(move |name| {
-                    // (Ghostscript's fonts by their file names)
-                    let n = String::from_utf8_lossy(name).into_owned();
+                    // (Ghostscript's fonts by their file names, where
+                    // Shelf serves them)
+                    let p = gs_font_path(std::str::from_utf8(name).ok()?)?;
                     ShelfHost { files: f3.clone() }
-                        .find(&n)
+                        .find(&p)
                         .map(|(_, b)| Arc::from(b.as_slice()))
                 })
             }),
@@ -581,4 +585,10 @@ impl Host for ShelfHost {
         crate::failure::report_file(file, why, threads, internal, errors)
             .map(|p| crate::cache::home_relative(&p))
     }
+}
+
+/// Where Shelf serves Ghostscript's font `name` (a file name, no
+/// directory): [`phitex_shelf::GS_FONTS`].
+fn gs_font_path(name: &str) -> Option<String> {
+    (!name.is_empty() && !name.contains('/')).then(|| format!("{}/{name}", phitex_shelf::GS_FONTS))
 }
