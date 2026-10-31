@@ -49,6 +49,9 @@ pub(crate) struct Level {
     pub fold: FoldState,
     /// A paragraph's `(language, packed hyphen minima)` (§1091).
     pub par: Option<(i64, i64)>,
+    /// `clang` (§1091, §1376–§1377): the language of the paragraph's
+    /// last language whatsit, or its own.
+    pub clang: i64,
     /// `\prevgraf` of the vertical list this level builds.
     pub prev_graf: i64,
     /// `mode_line` (§213): the input line this level began on (a
@@ -141,6 +144,7 @@ impl Level {
                 since_bp: 0,
             },
             par: None,
+            clang: 0,
             prev_graf: 0,
             mode_line: 0,
             mode_place: None,

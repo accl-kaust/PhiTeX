@@ -1590,9 +1590,18 @@ impl Run<'_, '_> {
         // design size scaled, `l.at.size` both ways)
         let size = l.at.size;
         let mut held = false;
+        // (pdfTeX: a font given expansion parameters, `\pdffontexpand`'s,
+        // is no longer one §1260 finds: a later `\font` of its name and
+        // size loads it anew, a font of its own)
         let k = crate::fonts::pick_key(name, size, &mut |k| {
             let info = self.font_get(k, crate::fields::FontCell::Info)?;
-            let other = crate::fonts::info(v, info).map(|i| i.name != name || i.size != size);
+            let other = match crate::fonts::info(v, info) {
+                Some(i) if i.name == name && i.size == size => {
+                    Some(crate::pdfprim::expand_params(self, i64::from(k))?.is_some())
+                }
+                Some(_) => Some(true),
+                None => None,
+            };
             held = other == Some(false);
             Ok::<_, crate::run::Halt>(other)
         })?;
@@ -1953,6 +1962,24 @@ impl Run<'_, '_> {
         self.log("show", &s)
     }
 
+    /// `\setlanguage` (§1377): a language whatsit in horizontal mode,
+    /// the paragraph's `clang` set.
+    fn set_language(&mut self, md: &crate::build::Mode) -> R<()> {
+        if md.m.abs() != 102 {
+            return self.report_illegal_case(md);
+        }
+        let v = self.v;
+        let n = self.scan_int()?;
+        let lang = i64::from(phitex_typeset::hyph::cur_lang(n));
+        let node = self.language_node(lang)?;
+        if let Some(l) = self.level_of(md.lid) {
+            l.clang = lang;
+        }
+        let x = crate::nodes::encode(v, &node, &crate::nodes::Side::default());
+        self.append(md.lid, x);
+        Ok(())
+    }
+
     /// `do_extension` (§1348).
     fn do_extension(&mut self, md: &crate::build::Mode) -> R<()> {
         let v = self.v;
@@ -2046,8 +2073,8 @@ impl Run<'_, '_> {
                     self.back_cur();
                 }
             }
+            5 => self.set_language(md)?,
             _ => {
-                // \setlanguage (§1377)
                 let _ = self.scan_int()?;
             }
         }

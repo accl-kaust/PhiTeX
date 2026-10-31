@@ -535,6 +535,9 @@ impl Run<'_, '_> {
                         self.chars_eff = crate::build::sf_compose(self.chars_eff, sf);
                         sf = SF_UNREAD;
                     }
+                    // (xetex.web: `if mode>0 then if language<>clang then
+                    // fix_language`, before the word is collected)
+                    self.fix_language(md, &mut out)?;
                     self.flush_chars(md.lid, &mut out, std::mem::take(&mut raws));
                     let next =
                         self.native_collect(md, i64::from(f), nf, ch.cast_unsigned(), &mut sf)?;

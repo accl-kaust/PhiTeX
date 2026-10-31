@@ -1411,6 +1411,7 @@ impl Run<'_, '_> {
                         i64::from_ne_bytes(st_of(l.open_stamp).to_ne_bytes())
                     }),
                     toks_value(v, &l.ag),
+                    v.int(l.clang),
                 ])
             })
             .collect();
@@ -1713,6 +1714,7 @@ impl Run<'_, '_> {
             l.def_base = usize::try_from(n(14)).unwrap_or(0);
             l.open_stamp = u(ys[15]);
             l.ag = toks_of(v, Some(ys[16]));
+            l.clang = ys.get(17).map_or(0, |&x| int_of(v, x));
             self.nest.push(l);
         }
         self.conds = list_of(v, a(2))

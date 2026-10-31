@@ -1383,6 +1383,7 @@ impl Run<'_, '_> {
         self.push_list(102, 0, Vec::new());
         if let Some(l) = self.top_mut() {
             l.par = Some((lang, packed));
+            l.clang = lang;
         }
         // §443: an optional space
         self.get_x_token();

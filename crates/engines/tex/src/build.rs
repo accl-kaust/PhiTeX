@@ -822,6 +822,39 @@ impl Run<'_, '_> {
         i64::from(h.clamp(1, 63))
     }
 
+    /// A language whatsit of language `lang` (§1376–§1377), the hyphen
+    /// minima in force.
+    pub(crate) fn language_node(&mut self, lang: i64) -> R<Node> {
+        Ok(Node::Language {
+            lang: u16::try_from(lang).unwrap_or(0),
+            lhm: u8::try_from(Self::norm_min(self.ipar(Par::lefthyphenmin)?)).unwrap_or(1),
+            rhm: u8::try_from(Self::norm_min(self.ipar(Par::righthyphenmin)?)).unwrap_or(1),
+        })
+    }
+
+    /// `fix_language` (§1376) where a character is appended to a
+    /// paragraph (`if mode>0 then if language<>clang`, §1034): a
+    /// language whatsit on `out` when `\language` is not the
+    /// paragraph's current language.
+    pub(crate) fn fix_language(&mut self, md: &Mode, out: &mut Vec<crate::nest::Item>) -> R<()> {
+        if md.m <= 0 {
+            return Ok(());
+        }
+        let lang = i64::from(phitex_typeset::hyph::cur_lang(self.ipar(Par::language)?));
+        let Some(clang) = self.level_of(md.lid).map(|l| l.clang) else {
+            return Ok(());
+        };
+        if lang == clang {
+            return Ok(());
+        }
+        let node = self.language_node(lang)?;
+        if let Some(l) = self.level_of(md.lid) {
+            l.clang = lang;
+        }
+        out.push(crate::nest::Item::N(node));
+        Ok(())
+    }
+
     /// `new_graf` (§1091).
     pub(crate) fn new_graf(&mut self, md: &Mode, indented: bool) -> R<()> {
         let v = self.v;
@@ -848,6 +881,7 @@ impl Run<'_, '_> {
             l.par = Some((lang, packed));
             l.mode_line = line;
             l.mode_place = Some(place);
+            l.clang = lang;
         }
         if indented {
             let w = self.ipar(Par::parindent)?;
@@ -2975,6 +3009,9 @@ impl Run<'_, '_> {
             let line = &mut self.input.lines[li];
             line.loc = e;
             line.state = crate::input::SKIP_BLANKS;
+            if !done {
+                self.fix_language(md, out)?;
+            }
             for j in 0..n {
                 if k[j] != 0 {
                     out.push(crate::nest::Item::N(Node::Kern(k[j], KernKind::Normal)));
@@ -3293,6 +3330,7 @@ impl Run<'_, '_> {
         // (XeTeX's `\XeTeXinterchartoks` look at each character)
         let ic = self.xe && self.param("XeTeXinterchartokenstate")? > 0;
         self.adjust_sf(md, ch, sf)?;
+        self.fix_language(md, out)?;
         let mut lig_stack = std::mem::take(&mut self.lig_buf);
         lig_stack.clear();
         lig_stack.push(Item {
