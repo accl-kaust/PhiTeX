@@ -167,6 +167,8 @@ export class Compare<V> implements DiffRunner<V> {
     const s = new PreviewSession(new DiffHost({ "diff.tex": d.tex }), t, mapped, this.h.options);
     this.c = { session: s, transport: t, base: old, d };
     this.showing = "diff";
+    // (the marked-up document is another one: never the current version's pages as its "last complete render")
+    mapped.opening?.();
     say("Typesetting the diff…");
     await s.start();
     return { changes: d.changes.length };

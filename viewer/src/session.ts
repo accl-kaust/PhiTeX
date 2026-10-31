@@ -193,6 +193,8 @@ export interface PreviewSink {
   page(img: PageImage | null, k: number, n: number, hash?: string | null): void;
   /** The pages there are, by their boxes' hashes (a continuous view draws the changed ones it shows). */
   layout?(hashes: string[]): void;
+  /** Another document's pages from here (a compare's diff): the last one's gone, the opening until this one's first page. */
+  opening?(): void;
   status(s: Status): void;
   /** A one-line summary, and (optionally) the details behind it. */
   latency(summary: string, details?: string): void;

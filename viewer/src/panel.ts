@@ -644,6 +644,8 @@ export class Panel {
    * build's first page (no "last complete render" meanwhile).
    */
   private again(): void {
+    // (the last opening's sheet still diving into its page: gone now, so this one's sheet plays and that one's end never closes it)
+    if (this.ending) this.stopSheet();
     this.reopen = true;
     // (the new build's packages counted from none: the sheet says its own, not the last document's)
     this.loadPct = 0;
@@ -658,11 +660,22 @@ export class Panel {
 
   /**
    * Another document opens in this panel (a host's project switched): the
-   * opening plays over the last one's pages until the new first page, as a
-   * cold build's does; no "last complete render" meanwhile.
+   * opening plays until the new first page, as a cold build's does. Nothing
+   * of the last document stays: its pages, its status and its timing are
+   * not this one's (never "last complete render" of another document).
    */
   opening(): void {
+    this.last = null;
+    this.lastStatus = null;
+    this.speed = undefined;
+    this.at = 0;
+    clearTimeout(this.staleTimer);
+    this.staleSince = 0;
+    this.$("#stage").classList.remove("stale");
+    this.viewer.layout([]);
     this.again();
+    this.renderStatus();
+    this.nav();
   }
 
   /** A rebuild's opening is up (firstPending, whatever pages are here). */
@@ -854,7 +867,8 @@ export class Panel {
       m = s >= 1 ? `${s < 10 ? s.toFixed(1) : Math.round(s)} s` : "";
     } else if (this.warm) (t = "Preparing instant typing…"), (m = `${Math.round((Date.now() - this.warm.since) / 1000)} s`);
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) (t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet"), (err = !!errs);
-    else if (!this.last && this.viewer.pages === 0) t = this.stepNow || "Opening…";
+    // (an opening up, a rebuild's too: its step, not the last build's status)
+    else if (this.reopen || (!this.last && this.viewer.pages === 0)) t = this.stepNow || "Opening…";
     else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (err = true);
     else if (this.speed?.first) (t = "First build"), (m = this.speed.ms < 1000 ? `${Math.round(this.speed.ms)} ms` : `${(this.speed.ms / 1000).toFixed(this.speed.ms < 10000 ? 1 : 0)} s`);
     else (t = "Built"), (m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "");
@@ -1280,8 +1294,11 @@ export class Panel {
     });
     // (the dive at once, whatever the opening's act; gone 650 ms on, and at most 900 ms on
     // even where frames stall, a tab in the background: never left over the pages)
-    void this.anim.done().then(() => this.stopSheet());
-    setTimeout(() => this.stopSheet(), 900);
+    // (each its own sheet's: a later opening's sheet, up meanwhile, is never closed by this one's)
+    const a = this.anim;
+    const stop = () => this.anim === a && this.stopSheet();
+    void a.done().then(stop);
+    setTimeout(stop, 900);
   }
 
   /** The sheet gone (played out, or a card in its place). */
