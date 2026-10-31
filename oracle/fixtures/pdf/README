@@ -7,3 +7,5 @@ imgloop.tex (with png-gray.png): oracle .log made by `pdftex -ini -interaction=b
 nomap10.tfm: cmr10.tfm under a name no map file has an entry for, for tests/pdftex.rs's font_without_map_entry_is_fatal (no oracle output: `pdftex -ini` ends on `Font nomap10 at 72 not found`, a fatal error, with no PDF file).
 
 nomap.tex (with nomap10.tfm): scripts/wasm.sh check's fatal error, an -ini job pdfTeX ends on `!pdfTeX error: pdftex (file nomap10): Font nomap10 at 72 not found` (exit status 1, no PDF file).
+
+kernfont.tex: golden `pdftex -ini -interaction=batchmode kernfont.tex` (pdfTeX 1.40.29, the CI image, mc 77386) in this directory with SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1: a font loaded in a box after a `\kern` on the main list, then a forced break (§1000: the kern's next node is the box, not the font's marker).

@@ -744,8 +744,11 @@ impl ScanState {
                 PItem::Node(ref n) => n.clone(),
                 _ => continue,
             };
+            // (§1000's `link(p)` of a kern: the node after it in TeX's
+            // list, past the builder's markers, which are none of its
+            // nodes: a font loaded after `\kern` waited on forever)
             let next = if matches!(p, Node::Kern(..)) {
-                match queue.last() {
+                match queue.iter().rev().find(|y| !is_marker(y)) {
                     Some(PItem::Node(n)) => Some(n.clone()),
                     _ => None,
                 }

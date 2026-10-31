@@ -193,19 +193,6 @@ and XeLaTeX, built by graph reduction, with exact output.
 - **pgf/TikZ-heavy documents:** some time out (32 documents in the
   corpus sweep). The cause is not found yet, and there is no minimal
   repro yet.
-- **Documents set only in `multicols`:** some ship no page ("No pages
-  of output") where pdfLaTeX ships them. No minimal repro yet.
-- **A local definition new in a later round:** where a region that
-  opens a group runs again in a later round and now defines something
-  locally (LaTeX's file-writing environment once its file exists lets
-  `\write` gobble its arguments), the definition outlives the group, and
-  the `.aux` loses `\begin{document}`'s `\relax`. An engine bug of the
-  round core, fixed in the clean core (`docs/alpha-checklist.md`).
-  Repro: `bench/corpus-repro/written-text-lost-write.tex`; test
-  `corpus_repros::written_text_lost_write` (with the clean core).
-- **Alignments:** 57 documents in the corpus sweep stop with an
-  alignment error (a misplaced `&` or `\cr`) that pdfLaTeX does not
-  give. No minimal repro yet.
 
 ### How to run it
 

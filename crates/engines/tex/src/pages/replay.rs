@@ -547,8 +547,9 @@ pub(crate) fn build_t(
             PItem::Node(n) => n,
             _ => continue,
         };
+        // (§1000's `link(p)` of a kern: past the builder's markers)
         let next = if matches!(p, Node::Kern(..)) {
-            match queue.front() {
+            match queue.iter().find(|(y, _)| !is_marker_p(y)) {
                 Some((PItem::Node(n), _)) => Some(n.clone()),
                 _ => None,
             }
@@ -1430,9 +1431,12 @@ impl PageState {
                 continue;
             };
             // §1000: only a kern looks at what follows it
+            // (its `link(p)`: past the builder's markers)
             let next = if matches!(p, Node::Kern(..)) {
                 queue
-                    .last()
+                    .iter()
+                    .rev()
+                    .find(|&&y| !crate::build::is_marker(v, y))
                     .and_then(|&y| nodes::decode(v, y, &mut Side::default()))
             } else {
                 None
