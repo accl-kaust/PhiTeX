@@ -80,9 +80,9 @@ collections.
 ### The dependency traces (trace/)
 
 `trace/` is `shelf-trace`, a small Rust program on PhiTeX's
-`phitex_tex::Build`; the engine is the `trace/phitex` submodule (PhiTeX's
-`dev`, at the commit the columns are traced with: `git submodule update
---init trace/phitex`). For each name it runs one job, as the old
+`phitex_tex::Build`; the engine is this repository's (Shelf is PhiTeX's
+`shelf/`; the tracer builds on the workspace's crates, at the commit the
+columns are traced with). For each name it runs one job, as the old
 `trace-deps` did (`\documentclass{article}\usepackage{X}` for a .sty,
 `\documentclass{X}` for a .cls, a body that typesets the usual shapes),
 on pdfTeX (pdflatex.ini's format) or XeTeX (xelatex.ini's), the format
@@ -111,8 +111,10 @@ The results (`build/`, `MANIFEST.tsv`, the traces, the database) land in
 `release.py`.
 
 At most 19,500 files a project (Cloudflare Pages allows 20k files,
-25 MiB each). `build/`, `releases*/` and `public/tl*/` are generated, not
-committed; `MANIFEST.tsv` is, so a release is reproducible and checkable.
+25 MiB each). `build/`, `releases*/`, `public/tl*/` and `MANIFEST.tsv`
+are generated, not committed; `release.py` publishes `MANIFEST.tsv` with
+the release (`manifest-<release>.tsv.gz` beside its index), so a release
+is reproducible and checkable without 20 MB in the history each time.
 
 ## Retention
 

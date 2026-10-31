@@ -76,6 +76,11 @@ crate's own docs say what it is; keep them current.
   `wasm32-wasip1-threads`): `scripts/wasm.sh check` keeps it byte-identical.
 - The scheduler affects speed, never results: every schedule gives
   byte-identical output.
+- `shelf/` is Shelf, TeX Live's files packed for the `--shelf` engines
+  (v1.shelf.phitex.org): its build runs TeX Live's own tools (updmap,
+  fmtutil), never a rewrite of them, and its release check compares with
+  TeX Live's own engines, never with the release itself
+  (`shelf/README.md`; releases built on mc, deployed by the user).
 
 ## Quality
 

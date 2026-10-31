@@ -14,19 +14,20 @@
 # font of TeX Live's own pdftex.map must be in the release's. Any
 # difference fails the job.
 #
-#   rsync -a --delete --exclude-from=scripts/accl-exclude ./ mcmgt01:code/flinner/shelf-accl-check/
+#   scp shelf/scripts/*.sbatch mcmgt01:code/flinner/shelf-scripts/
 #   ssh mcmgt01 'export PATH=/opt/slurm/current/bin:$PATH; cd code/flinner/shelf-runs &&
 #     sbatch -p mc -C cpu_amd_epyc_9754 -c 32 --mem=96G -t 04:00:00 \
-#       ~/code/flinner/shelf-accl-check/scripts/accl-release-check.sbatch ~/code/flinner/shelf-accl-check COMMIT'
+#       ~/code/flinner/shelf-scripts/accl-release-check.sbatch COMMIT'
 #
 # COMMIT: a PhiTeX commit in ~/code/flinner/phitex.git (a branch's, or a
-# snapshot PhiTeX's scripts/accl pushed as refs/wip/COMMIT). Results in
+# snapshot PhiTeX's scripts/accl pushed as refs/wip/COMMIT): Shelf is its
+# shelf/, the release check's PhiTeX the same commit's. Results in
 # ~/code/flinner/shelf-runs/check-release-<job>/: summary.txt (the
 # release's numbers, each document's comparison), build.log, the new
 # release's release.json, the logs of the documents that differ.
 #SBATCH -J shelf-check -o shelf-check-%j.out
 set -euo pipefail
-src=$1 commit=$2 label=${3:-tl2026}
+commit=$1 label=${2:-tl2026}
 sif=$HOME/shared-cache/phitex/${ACCL_IMAGE:-phitex-2026-09-25-tools}.sif
 tlsif=$HOME/shared-cache/phitex/${TL_IMAGE:-phitex-ci-2026-09-25}.sif
 w=/tmp/$USER-$SLURM_JOB_ID
@@ -35,25 +36,25 @@ arch=$HOME/shared-cache/shelf/archives
 prior=${PRIOR:-$HOME/code/flinner/shelf-releases-v1}
 tlpdb=${TLPDB:-$HOME/code/flinner/shelf-runs/full-75761/texlive.tlpdb.xz}
 jobs=$((${SLURM_CPUS_ON_NODE:-8} - 2))
-mkdir -p "$w/shelf/cache" "$out" "$arch" "$w/noresolve" "$w/ftree" "$w/results"
+mkdir -p "$out" "$arch" "$w/noresolve" "$w/ftree" "$w/results"
 trap 'cp -a "$w/results/." "$out/" 2>/dev/null; rm -rf "$w"' EXIT
 exec > >(tee "$out/job.log") 2>&1
 echo "node $(hostname), $jobs jobs, PhiTeX $commit, start $(date +%T)"
 
-cp -a "$src/." "$w/shelf/"
 git clone -q "$HOME/code/flinner/phitex.git" "$w/phitex"
 git -C "$w/phitex" fetch -q origin "+refs/wip/$commit:refs/wip/$commit" 2>/dev/null || true
 git -C "$w/phitex" -c advice.detachedHead=false checkout -q "$commit"
+mkdir -p "$w/phitex/shelf/cache"
 key=$(sha256sum "$w/phitex/Cargo.lock" | cut -c1-16)
 [ -d "$HOME/shared-cache/phitex/cargo-$key" ] && cp -a "$HOME/shared-cache/phitex/cargo-$key" "$w/cargo"
-cp "$tlpdb" "$w/shelf/cache/texlive.tlpdb.xz"
-cp -a "$arch/." "$w/shelf/cache/"
+cp "$tlpdb" "$w/phitex/shelf/cache/texlive.tlpdb.xz"
+cp -a "$arch/." "$w/phitex/shelf/cache/"
 # (the kept traces: a column whose inputs match is reused, else empty)
-cp "$HOME"/code/flinner/shelf-runs/full-75761/trace-*.json "$w/shelf/cache/" 2>/dev/null || true
+cp "$HOME"/code/flinner/shelf-runs/full-75761/trace-*.json "$w/phitex/shelf/cache/" 2>/dev/null || true
 
 command -v apptainer > /dev/null || PATH=$HOME/shared-cache/apptainer/usr/bin:$PATH
 net() {
-  apptainer exec --containall --bind "$w" --home "$w" --pwd "$w/shelf" "$sif" "$@"
+  apptainer exec --containall --bind "$w" --home "$w" --pwd "$w/phitex/shelf" "$sif" "$@"
 }
 tl() { # TeX Live's own, over the release's tree alone (and its web2c/: tcx), no network
   apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w" \
@@ -62,7 +63,7 @@ tl() { # TeX Live's own, over the release's tree alone (and its web2c/: tcx), no
 }
 box() {
   apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w" \
-    --home "$w" --pwd "$w/shelf" --env CARGO_HOME="$w/cargo",CARGO_NET_OFFLINE=true "$sif" "$@"
+    --home "$w" --pwd "$w/phitex/shelf" --env CARGO_HOME="$w/cargo",CARGO_NET_OFFLINE=true "$sif" "$@"
 }
 if box getent hosts mirror.ctan.org >/dev/null 2>&1; then echo "FAILED: the box resolves names"; exit 76; fi
 if [ ! -d "$w/cargo" ]; then
@@ -73,7 +74,7 @@ fi
 
 # (1) the archives (the network: those of packages taken now and not before)
 net env FETCH_ONLY=1 FONT_TREE="$w/ftree" TLPDB=cache/texlive.tlpdb.xz python3 build.py "$label"
-cp -n "$w/shelf/cache/"*.tar.xz "$arch/" 2>/dev/null || true
+cp -n "$w/phitex/shelf/cache/"*.tar.xz "$arch/" 2>/dev/null || true
 echo "fetched $(date +%T)"
 
 # (2) PhiTeX and the release's font index (fontconfig's order, in the box)
@@ -96,17 +97,17 @@ box env TLPDB=cache/texlive.tlpdb.xz FONT_INDEX="$w/fontindex-rel.pxfi" PACK_JOB
   python3 build.py "$label" > "$w/results/build.log" 2>&1 || status=$?
 tail -15 "$w/results/build.log"
 [ "$status" = 0 ] || { echo "FAILED: build.py exit $status"; exit "$status"; }
-cp -a "$prior/." "$w/shelf/releases-v1/"
-before=$(ls "$w/shelf/releases-v1/$label/h" | wc -l)
-old=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['release'])" "$w/shelf/releases-v1/$label/release.json")
+cp -a "$prior/." "$w/phitex/shelf/releases-v1/"
+before=$(ls "$w/phitex/shelf/releases-v1/$label/h" | wc -l)
+old=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['release'])" "$w/phitex/shelf/releases-v1/$label/release.json")
 box python3 release.py "$label" --releases releases-v1 2>&1 | tail -5
-new=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['release'])" "$w/shelf/releases-v1/$label/release.json")
-cp "$w/shelf/releases-v1/$label/release.json" "$w/results/"
-after=$(ls "$w/shelf/releases-v1/$label/h" | wc -l)
+new=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['release'])" "$w/phitex/shelf/releases-v1/$label/release.json")
+cp "$w/phitex/shelf/releases-v1/$label/release.json" "$w/results/"
+after=$(ls "$w/phitex/shelf/releases-v1/$label/h" | wc -l)
 echo "release $new (after $old): $after pack files kept, $((after - before)) new" | tee "$w/results/summary.txt"
 
 # (5) a texmf tree of the release's files, with its ls-R
-box python3 - "$w/shelf/releases-v1/$label" "$new" "$w/tree/texmf-dist" <<'PY' | tee -a "$w/results/summary.txt"
+box python3 - "$w/phitex/shelf/releases-v1/$label" "$new" "$w/tree/texmf-dist" <<'PY' | tee -a "$w/results/summary.txt"
 import sys, os, gzip, struct
 rel, name, tree = sys.argv[1:]
 meta = __import__('json').load(open(f'{rel}/release-{name}.json'))
@@ -158,11 +159,11 @@ echo "pdftex.map: $n of TeX Live's fonts missing from the release$([ "$n" = 0 ] 
 mkdir -p "$w/docs" "$w/empty" "$w/runs" "$w/fmt" "$w/tlvar"
 cp -a "$w/phitex/oracle/fixtures/xetex/docs/." "$w/docs/"
 cp "$w/phitex/oracle/fixtures/xetex/cjk/"*.tex "$w/docs/" 2>/dev/null || true
-cp -a "$src/scripts/release-docs/." "$w/docs/"
+cp -a "$w/phitex/shelf/scripts/release-docs/." "$w/docs/"
 printf '%s\n' '% engine: xetex' '\font\lm="Latin Modern Roman" at 11pt \lm Hello, Ünïcödé — XeTeX. \font\hv="TeX Gyre Heros/B" at 11pt \hv Bold sans.' '\bye' > "$w/docs/plainxe.tex"
 printf '%s\n' '% engine: pdftex' 'Hello {\bf plain} {\it \TeX} $x^2+\sqrt{y}$ and $$\sum_{k=1}^n k = {n(n+1)\over 2}.$$' '\bye' > "$w/docs/plainpdf.tex"
 docs=$(cd "$w/docs" && for d in fontspec.tex lang.tex umath.tex pics.tex xecjk.tex ctex.tex plainxe.tex plainpdf.tex; do [ -f "$d" ] && echo "$d"; done
-       ls "$src/scripts/release-docs/" 2>/dev/null | grep '\.tex$' | sort)
+       ls "$w/phitex/shelf/scripts/release-docs/" 2>/dev/null | grep '\.tex$' | sort)
 engine() { e=$(sed -n 's/^% engine: \([a-z]*\).*/\1/p' "$w/docs/$1" | head -1); echo "${e:-xelatex}"; }
 
 # (6a) TeX Live's engines: their formats made by fmtutil (TeX Live's
@@ -185,7 +186,7 @@ cat > "$w/check.sh" <<CHECK
 set -u
 cd $w/runs
 export SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1
-python3 $w/shelf/serve.py --root $w/shelf/releases-v1 --port 8124 > $w/serve.log 2>&1 &
+python3 $w/phitex/shelf/serve.py --root $w/phitex/shelf/releases-v1 --port 8124 > $w/serve.log 2>&1 &
 sleep 1
 bin=$w/phitex/target/fastdev/phitex
 bad=0

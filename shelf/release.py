@@ -142,6 +142,9 @@ def main() -> None:
         index, pack_table = f"index-{release}.tsv.gz", f"packs-{release}.tsv.gz"
         (rel / index).write_bytes(gzip.compress(body, 9, mtime=0))
         (rel / pack_table).write_bytes(gzip.compress(packs, 9, mtime=0))
+        # (the build's MANIFEST.tsv, published beside the index, not committed)
+        if (here / "MANIFEST.tsv").exists():
+            (rel / f"manifest-{release}.tsv.gz").write_bytes(gzip.compress((here / "MANIFEST.tsv").read_bytes(), 9, mtime=0))
         doc = {"schema": SCHEMA, "release": release, "index": index, "pack_table": pack_table, "packs": len(names),
                **{k: want[k] for k in ("min_extension", "notice", "deps", "traced_by", "search")}}
         text = json.dumps(doc, indent=1) + "\n"
