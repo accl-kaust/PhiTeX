@@ -772,9 +772,11 @@ impl PdfState {
                 match self.font(f).map.clone() {
                     Some(fm) if !fm.is_pk() => self.create_fontdictionary(fm, k, f, &mut t)?,
                     _ => {
-                        return Err(PdfError::Unsupported(format!(
-                            "PK (Type 3) font {}",
-                            String::from_utf8_lossy(&self.font(f).name)
+                        // (pdfTeX: `Font X at N not found` once mktexpk
+                        // fails; no bitmap (PK, Type 3) font is made here)
+                        let name = String::from_utf8_lossy(&self.font(f).name);
+                        return Err(PdfError::Font(format!(
+                            "Font {name} not found (no entry for it in the font map, and a PK (Type 3) font is not made)"
                         )));
                     }
                 }

@@ -4075,6 +4075,10 @@ pub(crate) struct Linked {
     /// `PDF-BACKEND-GAP`: a fatal error there, here logged, the job going
     /// on), with the node that shipped the page.
     pub errors: Vec<(String, i64)>,
+    /// Why the file's end (its fonts, the pages tree) could not be
+    /// written (a font without a map entry): pdfTeX's fatal error, no
+    /// file (pdfTeX §794); `layout` is none.
+    pub fatal: Option<String>,
     /// The pages the link placed as their own steps wrote them, and those
     /// it shipped again ([`PdfState::replay_page`]'s refusals).
     pub placed: u64,
@@ -4157,6 +4161,7 @@ fn link(
         layout: None,
         hash: None,
         errors: Vec::new(),
+        fatal: None,
         placed: 0,
         shipped: 0,
         shown: Vec::new(),
@@ -4659,11 +4664,11 @@ fn link(
     let t2 = std::time::Instant::now();
     // (the file's layout: the exact file, its cross-reference section
     // by the chunks' places, made when asked, `phitex_pdf::Layout::exact`)
+    let mut fatal = None;
     let layout = tail
         .unwrap_or_else(|e| {
-            if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
-                eprintln!("pdf: {e}");
-            }
+            // (no file: the job's fatal error, logged by the end node)
+            fatal = Some(e.to_string());
             None
         })
         .map(|t| phitex_pdf::Layout::new(t, bytes));
@@ -4694,6 +4699,7 @@ fn link(
         layout,
         hash,
         errors,
+        fatal,
         placed: u64::try_from(placed).unwrap_or(0),
         shipped: u64::try_from(shipped).unwrap_or(0),
         shown,
