@@ -38,7 +38,8 @@ fn norm(d: &[u8]) -> Vec<u8> {
     }
     if let Some(i) = find(&d, b"DocumentID='uuid:") {
         let s = i + 17;
-        for b in &mut d[s..(s + 36).min(d.len())] {
+        let e = (s + 36).min(d.len());
+        for b in &mut d[s..e] {
             *b = b'X';
         }
     }

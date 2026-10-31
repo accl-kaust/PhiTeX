@@ -2325,9 +2325,19 @@ impl Run<'_, '_> {
             return Ok(());
         };
         self.log("wlog", &format!("runsystem({cmd})...{done}."))?;
+        let a = crate::tools::command_args(self.v, tool, &output, &input, &args[1..]);
+        if tool == crate::tools::Tool::Repstopdf {
+            // (epstopdf reads a file the job does not write: it runs here,
+            // in this run, as a command through the host does, and the
+            // reads after it read what it made, `Run::shell_run`)
+            let made = self.cx.apply(self.ops.tool, a)?;
+            if made != phitex_defuse::ValueId::UNIT {
+                self.set(&crate::tools::out_name(&output), made, true);
+            }
+            return Ok(());
+        }
         // (the command runs here, in this round: a node of its own where
         // the command is, reading the input as written up to there)
-        let a = crate::tools::command_args(self.v, tool, &output, &input, &args[1..]);
         self.tool_command(a)
     }
 
