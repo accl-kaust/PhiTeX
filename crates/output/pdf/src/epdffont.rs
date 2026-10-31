@@ -95,6 +95,203 @@ fn cstr(buf: &[u8]) -> &[u8] {
     &buf[..buf.iter().position(|&c| c == 0).unwrap_or(buf.len())]
 }
 
+/// `FoFiType1C::getEncoding` of a bare CFF program (xpdf FoFiType1C.cc,
+/// `parse`, `readTopDict`, `readCharset`, `buildEncoding`): `None` for a
+/// CID-keyed font (it has none), for a program it cannot read, and for
+/// the predefined Expert charsets.
+#[allow(clippy::too_many_lines)]
+fn fofi_type1c_encoding(f: &[u8]) -> Option<Names> {
+    let u8_at = |p: usize| f.get(p).copied().map(usize::from);
+    let u16_at = |p: usize| Some(u8_at(p)? << 8 | u8_at(p + 1)?);
+    let off_at = |p: usize, n: usize| (0..n).try_fold(0usize, |a, k| Some(a << 8 | u8_at(p + k)?));
+    // an INDEX at `p`: its items' ranges and where it ends
+    let index = |p: usize| -> Option<(Vec<(usize, usize)>, usize)> {
+        let count = u16_at(p)?;
+        if count == 0 {
+            return Some((Vec::new(), p + 2));
+        }
+        let os = u8_at(p + 2)?;
+        if !(1..=4).contains(&os) {
+            return None;
+        }
+        let base = p + 3 + (count + 1) * os - 1;
+        let offs: Vec<usize> = (0..=count)
+            .map(|i| off_at(p + 3 + i * os, os))
+            .collect::<Option<_>>()?;
+        let items = offs
+            .windows(2)
+            .map(|w| (base + w[0], base + w[1]))
+            .collect();
+        Some((items, base + offs[count]))
+    };
+    let hdr = u8_at(2)?;
+    let (_, after_names) = index(hdr)?;
+    let (tops, after_tops) = index(after_names)?;
+    let (strings, _) = index(after_tops)?;
+    let &(t0, t1) = tops.first()?;
+    // the Top DICT's operands: charset (15), Encoding (16), CharStrings
+    // (17), ROS (12 30)
+    let (mut charset_off, mut enc_off, mut cs_off, mut cid) = (0usize, 0usize, 0usize, false);
+    let mut ops: Vec<i64> = Vec::new();
+    let mut p = t0;
+    while p < t1.min(f.len()) {
+        let b0 = f[p];
+        match b0 {
+            0..=21 => {
+                let op = if b0 == 12 {
+                    p += 1;
+                    1200 + i64::from(*f.get(p)?)
+                } else {
+                    i64::from(b0)
+                };
+                p += 1;
+                let last = ops.last().copied().and_then(|x| usize::try_from(x).ok());
+                match op {
+                    15 => charset_off = last?,
+                    16 => enc_off = last?,
+                    17 => cs_off = last?,
+                    1230 => cid = true,
+                    _ => {}
+                }
+                ops.clear();
+            }
+            28 => {
+                ops.push(i64::from(i16::from_be_bytes([
+                    *f.get(p + 1)?,
+                    *f.get(p + 2)?,
+                ])));
+                p += 3;
+            }
+            29 => {
+                ops.push(i64::from(i32::from_be_bytes(
+                    f.get(p + 1..p + 5)?.try_into().ok()?,
+                )));
+                p += 5;
+            }
+            30 => {
+                // a real: its nibbles up to an 0xf
+                p += 1;
+                while p < f.len() && f[p] & 0x0f != 0x0f && f[p] >> 4 != 0x0f {
+                    p += 1;
+                }
+                p += 1;
+                ops.push(0);
+            }
+            32..=246 => {
+                ops.push(i64::from(b0) - 139);
+                p += 1;
+            }
+            247..=250 => {
+                ops.push((i64::from(b0) - 247) * 256 + i64::from(*f.get(p + 1)?) + 108);
+                p += 2;
+            }
+            251..=254 => {
+                ops.push(-(i64::from(b0) - 251) * 256 - i64::from(*f.get(p + 1)?) - 108);
+                p += 2;
+            }
+            _ => p += 1,
+        }
+    }
+    if cid || cs_off == 0 {
+        return None;
+    }
+    let n_glyphs = u16_at(cs_off)?;
+    let string = |sid: usize| -> Option<Vec<u8>> {
+        if sid < crate::cffstd::CFF_STDSTR.len() {
+            return Some(crate::cffstd::CFF_STDSTR[sid].to_vec());
+        }
+        let &(a, b) = strings.get(sid - crate::cffstd::CFF_STDSTR.len())?;
+        f.get(a..b).map(<[u8]>::to_vec)
+    };
+    // the charset: glyph -> string id
+    let charset: Vec<usize> = match charset_off {
+        // ISOAdobe: the identity on 0..=228
+        0 => (0..n_glyphs.min(229)).collect(),
+        1 | 2 => return None,
+        o => {
+            let mut cs = vec![0usize];
+            let mut q = o + 1;
+            match u8_at(o)? {
+                0 => {
+                    while cs.len() < n_glyphs {
+                        cs.push(u16_at(q)?);
+                        q += 2;
+                    }
+                }
+                fmt @ (1 | 2) => {
+                    while cs.len() < n_glyphs {
+                        let first = u16_at(q)?;
+                        let left = if fmt == 1 {
+                            u8_at(q + 2)?
+                        } else {
+                            u16_at(q + 2)?
+                        };
+                        q += if fmt == 1 { 3 } else { 4 };
+                        for k in 0..=left {
+                            if cs.len() >= n_glyphs {
+                                break;
+                            }
+                            cs.push(first + k);
+                        }
+                    }
+                }
+                _ => return None,
+            }
+            cs
+        }
+    };
+    match enc_off {
+        0 => Some(table(&STANDARD)),
+        1 => None,
+        o => {
+            let mut enc: Names = vec![None; 256];
+            let fmt = u8_at(o)?;
+            let mut q = o + 1;
+            if fmt & 0x7f == 0 {
+                let n_codes = (1 + u8_at(q)?).min(n_glyphs);
+                q += 1;
+                for i in 1..n_codes.min(charset.len()) {
+                    let c = u8_at(q)?;
+                    q += 1;
+                    enc[c] = string(charset[i]);
+                }
+            } else if fmt & 0x7f == 1 {
+                let n_ranges = u8_at(q)?;
+                q += 1;
+                let mut n_codes = 1;
+                for _ in 0..n_ranges {
+                    let mut c = u8_at(q)?;
+                    let left = u8_at(q + 1)?;
+                    q += 2;
+                    for _ in 0..=left {
+                        if n_codes >= n_glyphs {
+                            break;
+                        }
+                        if c < 256
+                            && let Some(&sid) = charset.get(n_codes)
+                        {
+                            enc[c] = string(sid);
+                        }
+                        n_codes += 1;
+                        c += 1;
+                    }
+                }
+            }
+            if fmt & 0x80 != 0 {
+                let n_sups = u8_at(q)?;
+                q += 1;
+                for _ in 0..n_sups {
+                    let c = u8_at(q)?;
+                    let sid = u16_at(q + 1)?;
+                    q += 3;
+                    enc[c] = string(sid);
+                }
+            }
+            Some(enc)
+        }
+    }
+}
+
 /// `FoFiType1::parse`'s encoding: `None` when the program has none.
 // xpdf FoFiType1.cc
 #[allow(clippy::too_many_lines)]
@@ -231,7 +428,12 @@ fn fofi_type1_encoding(file: &[u8]) -> Option<Names> {
 
 /// `Gfx8BitFont`'s `enc` for a Type 1 font with an embedded program.
 // xpdf GfxFont.cc, "build the font encoding"
-pub(crate) fn char_names(doc: &Doc, font: &Dict, font_file: Option<&[u8]>) -> Names {
+pub(crate) fn char_names(
+    doc: &Doc,
+    font: &Dict,
+    font_file: Option<&[u8]>,
+    cff: Option<&[u8]>,
+) -> Names {
     let enc_obj = doc.lookup(font, b"Encoding");
     let named = |n: &[u8]| -> Option<Names> {
         match n {
@@ -250,6 +452,20 @@ pub(crate) fn char_names(doc: &Doc, font: &Dict, font_file: Option<&[u8]>) -> Na
         && let Some(f) = font_file
     {
         base = fofi_type1_encoding(f);
+    }
+    // (an embedded Type 1C program's own, Gfx8BitFont's `ffT1C`, its
+    // gaps filled from StandardEncoding: "some Type 1C font files have
+    // empty encodings")
+    if base.is_none()
+        && let Some(f) = cff
+        && let Some(mut b) = fofi_type1c_encoding(f)
+    {
+        for (e, s) in b.iter_mut().zip(table(&STANDARD)) {
+            if e.is_none() {
+                *e = s;
+            }
+        }
+        base = Some(b);
     }
     let mut enc = base.unwrap_or_else(|| table(&STANDARD));
     if let Obj::Dict(d) = &enc_obj
@@ -416,27 +632,27 @@ impl PdfState {
             Obj::Stream(s) => Some(doc.decode(&s)),
             _ => None,
         };
-        if file1.is_none() {
-            let t1c = matches!(doc.lookup(&desc, b"FontFile3"),
-                Obj::Stream(s) if doc.lookup(&s.dict, b"Subtype").as_name() == Some(b"Type1C"));
-            if !t1c {
-                return Ok(None);
+        // (else a Type 1C program, `REPLACE_TYPE1C`: replaced as well,
+        // its own encoding read from it)
+        let cff = if file1.is_none() {
+            match doc.lookup(&desc, b"FontFile3") {
+                Obj::Stream(s) if doc.lookup(&s.dict, b"Subtype").as_name() == Some(b"Type1C") => {
+                    Some(doc.decode(&s))
+                }
+                _ => return Ok(None),
             }
-        }
+        } else {
+            None
+        };
         let Some((fm, file)) = self.lookup_fontmap(&base, src) else {
             return Ok(None);
         };
-        if file1.is_none() {
-            return Err(PdfError::Unsupported(
-                "replacing an included PDF's Type 1C font".into(),
-            ));
-        }
         let stemv = zround(doc.lookup(&desc, b"StemV").as_num().unwrap_or(0.0));
         let charset = match doc.lookup(&desc, b"CharSet") {
             Obj::Str(s) => Some(s),
             _ => None,
         };
-        let names = char_names(doc, &font, file1.as_deref());
+        let names = char_names(doc, &font, file1.as_deref(), cff.as_deref());
         Ok(Some(Replacement {
             fm,
             stemv,

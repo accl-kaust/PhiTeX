@@ -82,6 +82,7 @@
     clippy::similar_names
 )]
 
+mod cffstd;
 mod color;
 mod digest;
 pub mod enc;

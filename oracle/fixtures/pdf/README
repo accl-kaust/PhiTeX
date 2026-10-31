@@ -9,3 +9,5 @@ nomap10.tfm: cmr10.tfm under a name no map file has an entry for, for tests/pdft
 nomap.tex (with nomap10.tfm): scripts/wasm.sh check's fatal error, an -ini job pdfTeX ends on `!pdfTeX error: pdftex (file nomap10): Font nomap10 at 72 not found` (exit status 1, no PDF file).
 
 kernfont.tex: golden `pdftex -ini -interaction=batchmode kernfont.tex` (pdfTeX 1.40.29, the CI image, mc 77386) in this directory with SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1: a font loaded in a box after a `\kern` on the main list, then a forced break (§1000: the kern's next node is the box, not the font's marker).
+
+t1cinc.tex (with t1c.pdf): golden `pdftex -ini -interaction=batchmode t1cinc.tex` (pdfTeX 1.40.29, the CI image, mc 77430) in this directory with SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1: an included PDF whose CMR10 is a Type 1C program (FontFile3), replaced by the map's Type 1 font (pdftoepdf.cc's copyFont, REPLACE_TYPE1C). t1c.pdf is t1csrc.tex's `pdftex -ini` PDF rewritten by Ghostscript 10 (`gs -dSAFER -sDEVICE=pdfwrite -dCompatibilityLevel=1.4`), which embeds the font as Type 1C.
