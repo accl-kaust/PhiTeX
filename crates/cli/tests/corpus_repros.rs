@@ -217,6 +217,11 @@ repro!(
     "TeX Live manual othelloboard (LaTeX's lrbox in a tabular's entry): an \\aftergroup} closes the box begun with {; the brace put back where the group ends is counted as back_input counts it (§282, §326), and PhiTeX's put it back uncounted, so align_state stayed off by one and the & after the environment was 'You can't use & in restricted horizontal mode'"
 );
 
+repro!(
+    unvbox_penalty_fires_in_cond,
+    "research corpus (revtex-aps's widetext equation): the forced penalty ltxgrid's \\unvbox left fires at the next paragraph's start inside a conditional too (amsmath's display begins in \\ifmmode's \\else): the routine's \\global\\hsize is the display's width; PhiTeX cut a paragraph's start only outside conditionals, and the equation was set at the column's width"
+);
+
 /// The research corpus's amsbook at -j4 (2 pages more than -j1 in about
 /// half the builds): the piece that ends a title page whose `\topskip`
 /// `\@maketitle` set in a group puts the page parameters on the main

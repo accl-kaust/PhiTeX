@@ -128,12 +128,11 @@ impl Run<'_, '_> {
         // only groups the run opened on the main vertical list, which own
         // no list: the continuation carries every level, §1091's list
         // and the input `\everypar` left, as a cut inside such groups)
-        let restartable = can
-            || (newgraf
-                && self.conds.is_empty()
-                && self.nest.split_last().is_some_and(|(top, below)| {
-                    top.owns && top.group == 0 && below.iter().all(|l| !l.owns && l.group != 0)
-                }));
+        let par_start = newgraf
+            && self.nest.split_last().is_some_and(|(top, below)| {
+                top.owns && top.group == 0 && below.iter().all(|l| !l.owns && l.group != 0)
+            });
+        let restartable = can || (par_start && self.conds.is_empty());
         // (a rest of blank input makes no node: the piece runs it, spaces
         // and an empty line's `\par` in vertical mode, §1070)
         let open_cut = self.open_span() && self.cuttable_open();
@@ -143,14 +142,15 @@ impl Run<'_, '_> {
         // the rest of the paragraph reads what it sets (ltxgrid's
         // `\onecolumngrid`: a `\global\hsize` its routine sets on a
         // penalty an `\unvbox` left): the rest is a node after the page's
-        // finisher, as at a forced candidate outside a paragraph)
-        let forced_par = newgraf
-            && restartable
+        // finisher, as at a forced candidate outside a paragraph; inside
+        // conditionals of the run's own too, which the continuation
+        // carries: amsmath's display begins in `\ifmmode`'s `\else`)
+        let forced_par = par_start
             && (self.forced_since(self.cand_marks.last().map_or(0, |m| m.contribs))
                 || (self.cand_marks.is_empty() && self.forced_pending_before()?));
         let cuttable = fresh
             && (((can || forced_par) && !self.rest_blank()?)
-                || ((restartable || open_cut) && self.stop_at == Some(k)));
+                || ((restartable || open_cut || forced_par) && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,
             stamp: self.st.stamp(),
