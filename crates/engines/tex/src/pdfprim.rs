@@ -3011,14 +3011,16 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             whatsit(r, md, vec![s("pdf:dest"), id, kind]);
         }
         ex::THREAD | ex::START_THREAD => {
-            let (w, h, d) = alt_rule(r)?;
-            let at = attr(r)?;
-            let id = identifier(r)?;
+            // (which of the two, before the specification is scanned:
+            // the scan leaves its last token current)
             let k = if r.cur.chr == ex::THREAD {
                 "pdf:thread"
             } else {
                 "pdf:startthread"
             };
+            let (w, h, d) = alt_rule(r)?;
+            let at = attr(r)?;
+            let id = identifier(r)?;
             whatsit(
                 r,
                 md,
@@ -3107,12 +3109,14 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             })?;
         }
         ex::MAP_FILE | ex::MAP_LINE => {
-            let t = ext_value(r)?;
+            // (which of the two, before the text is scanned: the scan
+            // leaves the text's last token current)
             let k = if r.cur.chr == ex::MAP_FILE {
                 "file"
             } else {
                 "line"
             };
+            let t = ext_value(r)?;
             let e = v.list(vec![s(k), t]);
             append_text(r, "pdf:maps", e)?;
             let input = v.list(vec![s("map"), s(k), t]);

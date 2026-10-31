@@ -233,6 +233,16 @@ repro!(
     "research corpus (asmeconf: hyperxmp's /Metadata, the /OutputIntents and /ViewerPreferences objects numbered 336, 353 and 354, each the number of a destination too, a broken file): the objects writing an included PDF page makes after the page that shows it first (pdf_write_image: its fonts, streams and resources copied) are counted where a \\pdfobj after it is numbered; the pages' fold of allocations left them out"
 );
 
+repro!(
+    pdfmapfile_applied,
+    "TeX Live manual gillcm (its sample's \\pdfmapfile{+cmg.map}): \\pdfmapfile's kind was read after its text was scanned, from the text's last token, and the file was taken for a \\pdfmapline: no entry for the map's fonts, 'Font cmgbiu8r at 600 not found'"
+);
+
+repro!(
+    pdfthread_in_hlist,
+    "\\pdfthread in a paragraph: the command's kind was read after its specification was scanned, and \\pdfthread was taken for \\pdfstartthread ('\\pdfstartthread ended up in hlist')"
+);
+
 /// The research corpus's amsbook at -j4 (2 pages more than -j1 in about
 /// half the builds): the piece that ends a title page whose `\topskip`
 /// `\@maketitle` set in a group puts the page parameters on the main

@@ -1,0 +1,8 @@
+% \pdfthread in a paragraph (a thread node, which an hlist may hold,
+% unlike \pdfstartthread's: "ext4: \pdfstartthread ended up in hlist"):
+% the command's kind was read after its specification was scanned, from
+% its last token, and \pdfthread was taken for \pdfstartthread.
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parindent=0pt
+\pdfstartthread width 150pt name{t}\hbox{one}\pdfendthread
+Two \pdfthread width 100pt height 8pt depth 2pt name{t}three.\par
+\end
