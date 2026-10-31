@@ -1,0 +1,133 @@
+# The nightly (docs/ci.md): dev's newest commit whose checks passed (and
+# whose gate, if one ran, did not fail), built as a release is, published
+# as ONE pre-release tagged `nightly`, replaced each time (GitHub's
+# "latest" never names a pre-release, so the stable channel never sees
+# it). Its version is the one it leads to, with the build's time: the
+# CLI's own while that is not released yet (crates/cli at 1.0.0 with no
+# tag v1.0 builds 1.0.0-nightly.YYYYMMDDHHMM, before 1.0), else the next
+# update's (1.0.0 released: 1.0.1-nightly.…, after 1.0 and before 1.0.1;
+# crates/cli/src/upgrade.rs `later`).
+# `phitex upgrade` takes it only with `update-channel = "nightly"` (or an
+# install by `PHITEX_CHANNEL=nightly` install.sh), checked against the
+# nightly key (ci/nightly.pub), never the release key. Signing runs in
+# the environment `nightly` (its secret NIGHTLY_MINISIGN_KEY).
+name: nightly
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+jobs:
+  which:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+      version: ${{ steps.pick.outputs.version }}
+    steps:
+      - name: dev's commit, if it is green and not built yet
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/dev" -q .sha)
+          runs() { gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=$1" -q '[.check_runs[].conclusion] | join(" ")'; }
+          checks=$(runs checks) gate=$(runs gate)
+          echo "dev $sha: checks [$checks] gate [$gate]"
+          case " $checks " in *" success "*) ;; *) echo "dev's checks are not green: no nightly"; exit 0 ;; esac
+          case " $gate " in *" failure "*) echo "dev's gate failed: no nightly"; exit 0 ;; esac
+          built=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" -q .object.sha 2>/dev/null || true)
+          if [ "$built" = "$sha" ] && [ "$GITHUB_EVENT_NAME" = schedule ]; then echo "nightly is $sha already"; exit 0; fi
+          v=$(gh api "repos/$GITHUB_REPOSITORY/contents/crates/cli/Cargo.toml?ref=$sha" -q .content | base64 -d | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          IFS=. read -r a b c <<< "$v"
+          # (the tag a release of $v has: a milestone's without its .0)
+          tag=v$v; [ "$c" = 0 ] && tag=v$a.$b
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > /dev/null 2>&1; then c=$((c + 1)); fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$a.$b.$c-nightly.$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+  build:
+    needs: which
+    if: needs.which.outputs.sha != ''
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-22.04, asset: x86_64-linux }
+          - { os: ubuntu-22.04-arm, asset: aarch64-linux }
+          - { os: macos-15, asset: aarch64-macos }
+          - { os: macos-15-intel, asset: x86_64-macos }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.which.outputs.sha }}
+          persist-credentials: false
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang mold
+      - run: rustup show active-toolchain || rustup toolchain install
+      # (the nightly's version in the CLI's manifest and the lock, so
+      # `phitex --version` names it)
+      - run: |
+          v=${{ needs.which.outputs.version }}
+          perl -0pi -e 's/^version = "[^"]*"/version = "'"$v"'"/m' crates/cli/Cargo.toml
+          perl -0pi -e 's/(name = "phitex-cli"\nversion = )"[^"]*"/$1"'"$v"'"/' Cargo.lock
+      - run: cargo build --release --locked -p phitex-cli
+      - run: |
+          ./target/release/phitex --version
+          ./target/release/phitex --version | grep -qF "${{ needs.which.outputs.version }}"
+          tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C target/release phitex
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phitex-${{ matrix.asset }}
+          path: phitex-${{ matrix.asset }}.tar.gz
+          retention-days: 3
+  publish:
+    needs: [which, build]
+    runs-on: ubuntu-24.04
+    environment: nightly
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.which.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS, signed with the nightly key
+        env:
+          KEY: ${{ secrets.NIGHTLY_MINISIGN_KEY }}
+          PASS: ${{ secrets.NIGHTLY_MINISIGN_PASSWORD }}
+        run: |
+          cd dist
+          sha256sum phitex-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          [ -n "$KEY" ] || { echo "no NIGHTLY_MINISIGN_KEY: the nightly is not signed"; exit 1; }
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          umask 077
+          printf '%s\n' "$KEY" > "$RUNNER_TEMP/nightly.key"
+          printf '%s\n' "$PASS" | minisign -S -s "$RUNNER_TEMP/nightly.key" -m SHA256SUMS -t "phitex nightly ${{ needs.which.outputs.version }}"
+          rm -f "$RUNNER_TEMP/nightly.key"
+          minisign -Vm SHA256SUMS -p ../ci/nightly.pub
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/phitex-*.tar.gz
+      - name: the nightly, in place of the last
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${{ needs.which.outputs.version }} sha=${{ needs.which.outputs.sha }}
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          printf 'PhiTeX %s, built from dev %s (its checks green). A development build: `phitex upgrade` takes it only with `update-channel = "nightly"`; the stable releases never point here.\n' "$v" "$sha" > notes.md
+          gh release create nightly --prerelease --target "$sha" --title "PhiTeX nightly $v" --notes-file notes.md dist/*

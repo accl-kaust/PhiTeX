@@ -1,0 +1,19 @@
+\documentclass{article}
+\usepackage{polyglossia}
+\setmainlanguage{english}
+\setotherlanguage{japanese}
+\setotherlanguage{chinese}
+\setmainfont{Latin Modern Roman}
+\newfontfamily\japanesefont{Latin Modern Roman}
+\newfontfamily\chinesefont{Latin Modern Roman}
+\begin{document}
+English text first.
+\textjapanese{「こんにちは」、世界。日本語の文章です。句読点、括弧（かっこ）や「かぎ括弧」も。ちょっと待ってください……ねえ、ゃゅょっァィゥェォ。東京は２０２６年１０月６日（火）です。}
+Back to English.
+
+\begin{japanese}
+吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。何でも薄暗いじめじめした所でニャーニャー泣いていた事だけは記憶している。
+\end{japanese}
+
+\textchinese{这是一个测试：中文、英文（English）和数字123混排。《三国演义》第一回——宴桃园豪杰三结义。}
+\end{document}

@@ -1,0 +1,1565 @@
+//! Answering reads: the reaching definition, a fold, a path.
+
+use std::ops::Bound::{Excluded, Unbounded};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use crate::api::{Brackets, NodeId, PathId, ProjId, Step};
+use crate::engine::Engine;
+use crate::node::{Anchor, Node, ReadKind, State};
+use crate::order::{Pos, SegId};
+use crate::segment::{Def, GLOBAL, Inner, RangeReader, Reader, Segment, reduce};
+use crate::values::{Field, FxHashSet, Value, ValueId, Values};
+
+/// A path that is no path: the defining node's id as an integer
+/// (`Ctx::def_site`).
+pub(crate) const SITE: PathId = PathId(u32::MAX);
+
+/// What reaches a position.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Reaching {
+    /// None: no definition and no environment value.
+    pub(crate) value: Option<ValueId>,
+    /// The defining node; None for the environment.
+    pub(crate) by: Option<NodeId>,
+    pub(crate) provisional: bool,
+}
+
+impl Reaching {
+    pub(crate) fn of(d: &crate::segment::Def) -> Reaching {
+        Reaching {
+            value: Some(d.value),
+            by: Some(d.by),
+            provisional: d.provisional,
+        }
+    }
+}
+
+/// The first contribution after a position, or where the search stopped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Next {
+    pub(crate) item: Option<(NodeId, ValueId)>,
+    /// The contribution's node, or the uncommitted node the search stopped
+    /// at; None at the end of the line.
+    pub(crate) stop: Option<NodeId>,
+}
+
+fn env_reaching(eng: &Engine, f: Field) -> Reaching {
+    Reaching {
+        value: env_value(eng, f),
+        by: None,
+        provisional: false,
+    }
+}
+
+/// The environment's value of `f`: the client's settings, then its
+/// provider once, cached.
+pub(crate) fn env_value(eng: &Engine, f: Field) -> Option<ValueId> {
+    if let Some(x) = eng.env.values.read().get(&f) {
+        return *x;
+    }
+    let x = eng
+        .env
+        .provider
+        .read()
+        .as_ref()
+        .and_then(|p| p(eng.values(), f))
+        .flatten();
+    eng.env.values.write().entry(f).or_insert(x);
+    x
+}
+
+/// The last definition of `f` in the last indexed segment before the one
+/// starting at `lo`, else the environment.
+fn before_segment(eng: &Engine, f: Field, lo: Pos) -> Reaching {
+    let mut lo = lo;
+    while let Some(s) = last_def_before(eng, f, lo) {
+        let seg = eng.seg(s);
+        {
+            let inner = seg.inner.read();
+            if let Some((_, d)) = inner.defs.get(&f).and_then(|m| m.iter().next_back()) {
+                let d = d.plain(&eng.values);
+                return Reaching {
+                    value: Some(d.value),
+                    by: Some(d.by),
+                    provisional: d.provisional,
+                };
+            }
+        }
+        lo = seg.lo;
+    }
+    env_reaching(eng, f)
+}
+
+/// The definition of `f` reaching `at` (at `at` too when `inclusive`):
+/// `at`'s segment first, then the last earlier segment the field index
+/// names, then the environment. Two short read locks at most.
+pub(crate) fn reaching(eng: &Engine, f: Field, at: Pos, inclusive: bool) -> Reaching {
+    let Some(seg) = eng.seg_for_pos(at) else {
+        return env_reaching(eng, f);
+    };
+    {
+        let inner = seg.inner.read();
+        if let Some((_, d)) = Segment::reaching(&inner, f, at, inclusive) {
+            let d = d.plain(&eng.values);
+            return Reaching {
+                value: Some(d.value),
+                by: Some(d.by),
+                provisional: d.provisional,
+            };
+        }
+    }
+    before_segment(eng, f, seg.lo)
+}
+
+/// `reaching` at a node's label, read under its segment's lock, under
+/// scopes ([`reaching_visible`]); None when the node is gone.
+/// What a read on one layout met ([`on_one_layout`]): a segment, with its
+/// count of moves then ([`Segment::moved`]); a field index's answer, which
+/// segments before a label define a field or which between two labels
+/// contribute to it (the answer's hash).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Met {
+    Seg(SegId, u64),
+    LastDef(Field, Pos, Option<SegId>),
+    Contributors(Field, Pos, Pos, u64),
+}
+
+thread_local! {
+    /// What the reads on one layout running on this thread met, innermost
+    /// last ([`on_one_layout`]).
+    static MET: std::cell::RefCell<Vec<Met>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many reads on one layout are running on this thread.
+    static WATCHING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// (tests) The reads on one layout computed again on this thread.
+    static RETRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Segment `s` met (`Engine::seg`), noted while a read on one layout runs.
+#[inline]
+pub(crate) fn met(s: &Segment) {
+    if WATCHING.get() != 0 {
+        let e = s.moved.load(Ordering::Acquire);
+        MET.with_borrow_mut(|m| m.push(Met::Seg(s.id, e)));
+    }
+}
+
+/// The last segment before `lo` defining `f` (the field index), noted
+/// while a read on one layout runs.
+fn last_def_before(eng: &Engine, f: Field, lo: Pos) -> Option<SegId> {
+    let s = eng.defs.last_before(f, lo);
+    if WATCHING.get() != 0 {
+        MET.with_borrow_mut(|m| m.push(Met::LastDef(f, lo, s)));
+    }
+    s
+}
+
+/// The segments in `[from, to)` contributing to `f` (the field index),
+/// noted while a read on one layout runs.
+fn contributors(eng: &Engine, f: Field, from: Pos, to: Pos) -> Vec<SegId> {
+    let ss = eng.contribs.between(f, from, to);
+    if WATCHING.get() != 0 {
+        let h = segs_hash(&ss);
+        MET.with_borrow_mut(|m| m.push(Met::Contributors(f, from, to, h)));
+    }
+    ss
+}
+
+fn segs_hash(ss: &[SegId]) -> u64 {
+    ss.iter()
+        .fold(crate::values::hash_words(0, &[ss.len() as u64]), |h, s| {
+            crate::values::hash_words(h, &[u64::from(s.0)])
+        })
+}
+
+/// Whether what a read met has not moved since: the segment's count is
+/// the same, the index answers the same. (A move between segments the
+/// index names alike moves a segment the read met, or meets one after
+/// it, whose index answer the move had already changed when it was let
+/// go.)
+fn stands(eng: &Engine, m: &Met) -> bool {
+    match *m {
+        Met::Seg(id, e) => eng.seg_unmet(id).moved.load(Ordering::Acquire) == e,
+        Met::LastDef(f, lo, s) => eng.defs.last_before(f, lo) == s,
+        Met::Contributors(f, from, to, h) => segs_hash(&eng.contribs.between(f, from, to)) == h,
+    }
+}
+
+/// (tests) The reads on one layout computed again on this thread so far.
+#[cfg(test)]
+pub(crate) fn retries() -> u64 {
+    RETRIES.get()
+}
+
+/// Ends a read's watch however it ends.
+struct Watch;
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        WATCHING.set(WATCHING.get() - 1);
+    }
+}
+
+/// `f` computed on one layout of the line's labels: what it met (each
+/// segment it took labels from or looked into, each field index it asked
+/// which segments hold a field) did not move while it ran, else it is
+/// computed again. A read that takes labels (a fold's bounds, a search's
+/// start) and then looks between them in segments locked one at a time
+/// would otherwise answer for a range the line never had: the labels taken
+/// before a relabel, the segments looked into after it (issue #5: a
+/// finisher read its page's window across a relabel as empty, filed that,
+/// and shipped no page). A move bumps only the counts of the segments it
+/// moves (under their locks): a read meeting none of them, whose index
+/// answers stand, is never computed again, and nothing waits.
+pub(crate) fn on_one_layout<T>(eng: &Engine, mut f: impl FnMut() -> T) -> T {
+    loop {
+        let start = MET.with_borrow(Vec::len);
+        WATCHING.set(WATCHING.get() + 1);
+        let x = {
+            let _w = Watch;
+            f()
+        };
+        let ok = MET.with_borrow(|m| m[start..].iter().all(|x| stands(eng, x)));
+        if ok {
+            // (an outer read checks what this one met too)
+            if WATCHING.get() == 0 {
+                MET.with_borrow_mut(Vec::clear);
+            }
+            return x;
+        }
+        MET.with_borrow_mut(|m| m.truncate(start));
+        RETRIES.set(RETRIES.get() + 1);
+        std::hint::spin_loop();
+    }
+}
+
+pub(crate) fn reaching_at(eng: &Engine, f: Field, anchor: NodeId, inclusive: bool) -> Option<Reaching> {
+    if scoped(eng) {
+        return reaching_at_visible(eng, f, anchor, inclusive);
+    }
+    let n = eng.node(anchor);
+    loop {
+        if n.state() == State::Gone {
+            return None;
+        }
+        let seg = eng.seg(n.seg_hint());
+        let lo = {
+            let inner = seg.inner.read();
+            let p = n.pos_hint();
+            if inner.nodes.get(&p) != Some(&anchor) {
+                if n.state() == State::Gone {
+                    return None;
+                }
+                continue;
+            }
+            if let Some((_, d)) = Segment::reaching(&inner, f, p, inclusive) {
+                return Some(Reaching {
+                    value: Some(d.value),
+                    by: Some(d.by),
+                    provisional: d.provisional,
+                });
+            }
+            seg.lo
+        };
+        return Some(before_segment(eng, f, lo));
+    }
+}
+
+/// The contributions of a segment in `(from, to)`, reduced; the cached
+/// sum when the range covers the whole segment. The monoid runs under no
+/// lock: the contributions are copied out under the read lock, and a whole
+/// segment's sum is kept after (a short write lock) unless one of its sums
+/// was dropped meanwhile.
+fn segment_part(
+    eng: &Engine,
+    mono: &dyn crate::api::Monoid,
+    seg: &Segment,
+    f: Field,
+    from: Option<Pos>,
+    to: Option<Pos>,
+) -> ValueId {
+    let (xs, whole) = {
+        let inner = seg.inner.read();
+        let covers = from.is_none_or(|p| p < seg.lo) && to.is_none_or(|p| p >= inner.hi);
+        if covers && let Some(&x) = inner.sums.get(&f) {
+            return x;
+        }
+        let Some(m) = inner.contribs.get(&f) else {
+            return mono.empty(eng.values());
+        };
+        let xs: Vec<ValueId> = if covers {
+            m.values().copied().collect()
+        } else {
+            let lo = from.map_or(Unbounded, Excluded);
+            let hi = to.map_or(Unbounded, Excluded);
+            m.range((lo, hi)).map(|(_, &x)| x).collect()
+        };
+        (xs, covers.then_some(inner.sums_gen))
+    };
+    let x = reduce(eng, mono, xs);
+    if let Some(seen) = whole {
+        let mut inner = seg.inner.write();
+        if inner.sums_gen == seen {
+            inner.sums.insert(f, x);
+        }
+    }
+    x
+}
+
+/// The declared monoid's fold over the contributions to `f` after `from`
+/// (None: the start) and before `to` (None: the end): partial sums at the
+/// two ends, the segment sums between, combined in order.
+/// (`PHITEX_FOLD_TRACE=1`) A fold read whose `from` stands at or after its
+/// end, the empty range: the reader, its bounds' nodes and labels.
+pub(crate) fn trace_inverted(
+    eng: &Engine,
+    at: &str,
+    me: &Node,
+    f: Field,
+    from: (Option<NodeId>, Pos),
+    to: (Option<NodeId>, Pos),
+) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if from.1 < to.1 || !*ON.get_or_init(|| std::env::var_os("PHITEX_FOLD_TRACE").is_some()) {
+        return;
+    }
+    let name = |n: Option<NodeId>| n.map(|n| (n.raw(), eng.op(eng.node(n).op()).name()));
+    eprintln!(
+        "fold-trace: {at}: reader {} {} reads {} from {:?} at {:?} to {:?} at {:?}",
+        me.id.raw(),
+        eng.op(me.op()).name(),
+        eng.values().render(f.0),
+        name(from.0),
+        from.1,
+        name(to.0),
+        to.1
+    );
+}
+
+pub(crate) fn fold(eng: &Engine, f: Field, from: Option<Pos>, to: Option<Pos>) -> ValueId {
+    let mono = eng.monoid(f);
+    let v = eng.values();
+    // (bounds the wrong way round, a reader's `from` placed after its `to`
+    // as the line stands: nothing between them; a search of the range
+    // from the one past the other panicked, the worker gone with its node
+    // still counted outstanding, and the evaluation never ended)
+    if let (Some(a), Some(b)) = (from, to)
+        && a >= b
+    {
+        return mono.empty(v);
+    }
+    let fs = from.and_then(|p| eng.seg_for_pos(p));
+    let ts = to.and_then(|p| eng.seg_for_pos(p));
+    if let (Some(a), Some(b)) = (&fs, &ts)
+        && a.id == b.id
+    {
+        return segment_part(eng, &*mono, a, f, from, to);
+    }
+    let mut acc = mono.empty(v);
+    let start = match &fs {
+        Some(s) => {
+            acc = segment_part(eng, &*mono, s, f, from, None);
+            Pos(s.lo.0 + 1)
+        }
+        None => Pos(0),
+    };
+    let end = ts.as_ref().map_or(Pos(u64::MAX), |s| s.lo);
+    for sid in contributors(eng, f, start, end) {
+        let s = eng.seg(sid);
+        let x = segment_part(eng, &*mono, s, f, None, None);
+        acc = mono.combine(v, acc, x);
+    }
+    if let Some(s) = &ts {
+        let x = segment_part(eng, &*mono, s, f, None, to);
+        acc = mono.combine(v, acc, x);
+    }
+    acc
+}
+
+/// The first contribution to `f` after `after` (None: the start), or the
+/// first node after it that has not committed yet and whose operation may
+/// contribute `f` (`Operation::contributes`): a contribution that may still
+/// come is not the first.
+pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>, me: NodeId) -> Next {
+    let mut cur: Option<SegId> = match after {
+        Some(p) => eng.seg_for_pos(p).map(|s| s.id).or_else(|| eng.order.first()),
+        None => eng.order.first(),
+    };
+    let mut lower = after;
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        let found = {
+            let inner = seg.inner.read();
+            let lo = lower.map_or(Unbounded, Excluded);
+            let mut hit = None;
+            let mut stepped = 0;
+            for (p, id) in inner.nodes.range((lo, Unbounded)) {
+                stepped += 1;
+                // (the reader itself, running or committing, is neither
+                // a stop of its own search nor its answer: it would wait
+                // for itself, its commit re-asking it for ever)
+                if *id == me {
+                    continue;
+                }
+                // (a node to run, again or for the first time: its
+                // contribution is not known, the one it made last may go)
+                let open = eng.node(*id).is_open();
+                if !open && let Some(&x) = inner.contribs.get(&f).and_then(|m| m.get(p)) {
+                    hit = Some((
+                        Next {
+                            item: Some((*id, x)),
+                            stop: Some(*id),
+                        },
+                        false,
+                    ));
+                    break;
+                }
+                if open {
+                    hit = Some((
+                        Next {
+                            item: None,
+                            stop: Some(*id),
+                        },
+                        true,
+                    ));
+                    break;
+                }
+            }
+            eng.scanned.fetch_add(stepped, Ordering::Relaxed);
+            hit
+        };
+        match found {
+            Some((n, false)) => return n,
+            Some((n, true)) => {
+                // (asked outside the segment's lock: the node's text has
+                // its own)
+                let id = n.stop.expect("a hole");
+                let h = eng.node(id);
+                if eng.op(h.op()).contributes(&h.args(), eng.values(), f) {
+                    return n;
+                }
+                let Some(p) = pos_of(eng, id) else {
+                    // (gone meanwhile: searched again from where it was)
+                    lower = Some(h.pos_hint());
+                    cur = eng.seg_for_pos(h.pos_hint()).map(|s| s.id);
+                    continue;
+                };
+                lower = Some(p);
+                cur = eng.seg_for_pos(p).map(|s| s.id);
+            }
+            None => {
+                lower = None;
+                cur = eng.order.next(sid, seg.lo);
+            }
+        }
+    }
+    Next { item: None, stop: None }
+}
+
+/// A `next` as a value: `[node, value]`.
+pub(crate) fn next_value(eng: &Engine, n: &Next) -> Option<ValueId> {
+    let v = eng.values();
+    n.item
+        .map(|(id, x)| v.list(vec![v.int(i64::try_from(id.raw()).unwrap_or(0)), x]))
+}
+
+pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId> {
+    let vals = eng.values();
+    match s {
+        Step::Present => Some(vals.bool(v.is_some())),
+        Step::Index(i) => {
+            let x = v?;
+            vals.with_list(x, |xs| xs.get(i as usize).copied())
+                .unwrap_or_else(|| vals.seq_nth(x, u64::from(i)))
+        }
+        Step::Last => {
+            let x = v?;
+            vals.with_list(x, |xs| xs.last().copied()).unwrap_or_else(|| {
+                let n = vals.seq_len(x);
+                (n > 0).then(|| vals.seq_nth(x, n - 1)).flatten()
+            })
+        }
+        Step::Len => {
+            let x = v?;
+            vals.with(x, |val| match val {
+                Value::List(xs) => Some(vals.int(xs.len() as i64)),
+                Value::Str(s) => Some(vals.int(s.len() as i64)),
+                Value::Nil => Some(vals.int(0)),
+                Value::Seq(n) => Some(vals.int(i64::try_from(n.len).unwrap_or(i64::MAX))),
+                _ => None,
+            })
+        }
+        Step::Key(k) => {
+            let x = v?;
+            vals.with_list(x, |xs| {
+                xs.iter()
+                    .find_map(|&e| {
+                        vals.with_list(e, |kv| (kv.first() == Some(&k)).then(|| kv.get(1).copied()))
+                            .flatten()
+                    })
+                    .flatten()
+            })
+            .flatten()
+        }
+        Step::Has(k) => {
+            let x = v?;
+            vals.with_list(x, |xs| {
+                xs.iter()
+                    .any(|&e| vals.with_list(e, |kv| kv.first() == Some(&k)).unwrap_or(false))
+            })
+            .map(|b| vals.bool(b))
+        }
+        Step::Proj(p) => {
+            let x = v?;
+            let proj = eng.projection(p)?;
+            Some(proj(x, vals))
+        }
+        Step::Eq(k) => Some(vals.bool(v == Some(k))),
+        Step::Cmp(k) => {
+            let a = vals.as_int(v?)?;
+            let b = vals.as_int(k)?;
+            Some(vals.int(match a.cmp(&b) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            }))
+        }
+        Step::Each(_) | Step::Indices(_) | Step::Keys(_) | Step::Rank(_) | Step::Ranks(_) | Step::Distinct => {
+            unimplemented!("path step: next run")
+        }
+    }
+}
+
+/// `true` for an empty, zero, nil or unit value, `false` otherwise
+/// (`ProjId::IS_EMPTY`).
+pub(crate) fn is_empty_proj(x: ValueId, v: &crate::values::Values) -> ValueId {
+    let e = v.with(x, |val| match val {
+        Value::Unit | Value::Nil => true,
+        Value::Bool(b) => !*b,
+        Value::Int(i) => *i == 0,
+        Value::Str(s) => s.is_empty(),
+        Value::List(xs) => xs.is_empty(),
+        Value::Seq(_) => false,
+    });
+    v.bool(e)
+}
+
+/// `p` applied to `v` (`PathId::WHOLE`: `v`).
+pub(crate) fn apply_path(eng: &Engine, v: Option<ValueId>, p: PathId) -> Option<ValueId> {
+    if p == PathId::WHOLE {
+        return v;
+    }
+    if p == SITE {
+        return v;
+    }
+    let steps = eng.path_steps(p)?;
+    let mut cur = v;
+    // (a step that does not apply gives none, and the steps after it
+    // apply to none: `Present` and `Eq` answer false there, as a view's
+    // step that found nothing recorded it, `Ctx::at`)
+    for s in steps {
+        cur = step(eng, cur, *s);
+    }
+    cur
+}
+
+/// Whether path `p` runs the client's code (a projection's step): a
+/// commit applies it after its segment's lock, never under it, where a
+/// projection's allocations would take the allocator's lock while the
+/// other threads wait for the segment.
+pub(crate) fn client_path(eng: &Engine, p: PathId) -> bool {
+    p != PathId::WHOLE
+        && p != SITE
+        && eng
+            .path_steps(p)
+            .is_some_and(|s| s.iter().any(|x| matches!(x, Step::Proj(_))))
+}
+
+/// `Reaching` through a path, `SITE` giving the defining node.
+pub(crate) fn through(eng: &Engine, r: Reaching, p: PathId) -> Option<ValueId> {
+    if p == SITE {
+        return r.by.map(|n| eng.values().int(i64::try_from(n.raw()).unwrap_or(0)));
+    }
+    apply_path(eng, r.value, p)
+}
+
+/// A node's label now, under its segment's read lock; None when gone.
+pub(crate) fn pos_of(eng: &Engine, n: NodeId) -> Option<Pos> {
+    let node = eng.node(n);
+    loop {
+        if node.state() == State::Gone {
+            return None;
+        }
+        let seg = eng.seg(node.seg_hint());
+        let inner = seg.inner.read();
+        let p = node.pos_hint();
+        if inner.nodes.get(&p) == Some(&n) {
+            return Some(p);
+        }
+        if node.state() == State::Gone {
+            return None;
+        }
+    }
+}
+
+/// The unit's start as an exclusive lower bound.
+pub(crate) fn unit_start(eng: &Engine, me: &Node) -> Pos {
+    Pos(eng.unit(me.unit).start.0 - 1)
+}
+
+/// The `i`-th pushed sibling after `me` (placements skipped), as a value
+/// naming its text: `[op, node, args]`; None past the unit's end.
+pub(crate) fn following(eng: &Engine, me: &Node, i: usize) -> Option<Arc<Node>> {
+    following_on(eng, me, i, &mut None)
+}
+
+/// `following`, going on from `at`, the `j`-th sibling an earlier call
+/// found, where `j < i` (siblings read one after another cost one pass,
+/// not one from `me` each); `at` becomes this answer.
+pub(crate) fn following_on(eng: &Engine, me: &Node, i: usize, at: &mut Option<(usize, NodeId)>) -> Option<Arc<Node>> {
+    let (mut k, from): (usize, &Node) = match *at {
+        Some((j, n)) if j < i => (j + 1, eng.node(n)),
+        _ => (0, me),
+    };
+    let mut cur = Some(from.seg_hint());
+    let mut lower = Some(from.pos_hint());
+    let hit = following_from(eng, me, from, i, &mut k, &mut cur, &mut lower);
+    *at = hit.as_ref().map(|n| (i, n.id));
+    hit
+}
+
+fn following_from(
+    eng: &Engine,
+    me: &Node,
+    from: &Node,
+    i: usize,
+    k: &mut usize,
+    cur: &mut Option<SegId>,
+    lower: &mut Option<Pos>,
+) -> Option<Arc<Node>> {
+    let mut ps = SiblingParents::of(me);
+    let mut first = true;
+    while let Some(sid) = *cur {
+        let seg = eng.seg(sid);
+        if seg.unit != me.unit {
+            return None;
+        }
+        let hit = {
+            let inner = seg.inner.read();
+            // (where the walk starts, read under the lock: a label read
+            // before a relabel would start it before `from`)
+            if first {
+                let p = from.pos_hint();
+                if from.state() != State::Gone && (from.seg_hint() != sid || inner.nodes.get(&p) != Some(&from.id)) {
+                    drop(inner);
+                    *cur = Some(from.seg_hint());
+                    *lower = Some(from.pos_hint());
+                    continue;
+                }
+                first = false;
+                *lower = Some(p);
+                ps = SiblingParents::of(me);
+            }
+            let lo = lower.map_or(Unbounded, Excluded);
+            let mut hit = None;
+            let mut stepped = 0;
+            for (_, id) in inner.nodes.range((lo, Unbounded)) {
+                stepped += 1;
+                let n = eng.node(*id);
+                if !ps.takes(eng, n) {
+                    continue;
+                }
+                if *k == i {
+                    hit = Some(n.clone());
+                    break;
+                }
+                *k += 1;
+            }
+            eng.scanned.fetch_add(stepped, Ordering::Relaxed);
+            hit
+        };
+        if hit.is_some() {
+            return hit;
+        }
+        *lower = None;
+        *cur = eng.order.next(sid, seg.lo);
+    }
+    None
+}
+
+/// The parents a sibling of `me` may have: `me`'s, then its parent's,
+/// up to the line's top (a placed node's siblings are the later
+/// placements of its parent and, past them, its parent's siblings); the
+/// chain above `me`'s parent found once, when a candidate needs it.
+pub(crate) struct SiblingParents {
+    me: NodeId,
+    at: Pos,
+    parent: Option<NodeId>,
+    above: Option<FxHashSet<NodeId>>,
+}
+
+impl SiblingParents {
+    pub(crate) fn of(me: &Node) -> SiblingParents {
+        SiblingParents {
+            me: me.id,
+            at: me.pos_hint(),
+            parent: me.parent,
+            above: None,
+        }
+    }
+
+    fn has(&mut self, eng: &Engine, p: Option<NodeId>) -> bool {
+        let Some(q) = p else {
+            return true;
+        };
+        if p == self.parent {
+            return true;
+        }
+        let parent = self.parent;
+        self.above
+            .get_or_insert_with(|| {
+                let mut s = FxHashSet::default();
+                let mut p = parent;
+                while let Some(x) = p {
+                    p = eng.node(x).parent;
+                    if let Some(y) = p {
+                        s.insert(y);
+                    }
+                }
+                s
+            })
+            .contains(&q)
+    }
+
+    /// Whether `n` is a sibling a claim of `me` may take.
+    pub(crate) fn takes(&mut self, eng: &Engine, n: &Node) -> bool {
+        n.state() != State::Gone
+            && eng.op(n.op()).sibling()
+            && !n.held_before(eng, self.me, self.at)
+            && self.has(eng, n.parent)
+    }
+}
+
+pub(crate) fn text_value(eng: &Engine, n: &Node) -> ValueId {
+    let v = eng.values();
+    let args = n.args();
+    v.list(vec![
+        v.int(i64::from(n.op().0)),
+        v.int(i64::try_from(n.id.raw()).unwrap_or(0)),
+        v.list_from(&args),
+    ])
+}
+
+/// The current answer to a recorded read of `me`, through its path: what a
+/// re-ask compares with `seen`. A re-ask that finds the same answer leaves
+/// the reader standing; that is the whole of validation.
+pub(crate) fn answer(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId) -> Option<ValueId> {
+    answer_in(eng, me, kind, path, &mut FoldMemo::new())
+}
+
+/// The folds one pass of answers computed, by range: a node's reads
+/// through many paths of one range fold it once. Each with what it met
+/// ([`on_one_layout`]): a range's labels name other nodes once one of
+/// those moved.
+pub(crate) type FoldMemo = Vec<((Field, Pos, Pos), ValueId, Box<[Met]>)>;
+
+/// `fold`, from `memo` where this pass computed it and nothing it met
+/// moved since; what that met is met again by the read asking.
+pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut FoldMemo) -> ValueId {
+    if WATCHING.get() == 0 {
+        return fold(eng, f, Some(from), Some(to));
+    }
+    let key = (f, from, to);
+    if let Some(e) = memo.iter().find(|e| e.0 == key && e.2.iter().all(|m| stands(eng, m))) {
+        MET.with_borrow_mut(|m| m.extend_from_slice(&e.2));
+        return e.1;
+    }
+    let start = MET.with_borrow(Vec::len);
+    let x = fold(eng, f, Some(from), Some(to));
+    let seen: Box<[Met]> = MET.with_borrow(|m| m[start..].into());
+    memo.retain(|e| e.0 != key);
+    memo.push((key, x, seen));
+    x
+}
+
+/// Whether recorded read `rd` of `me` still holds: its answer is what it
+/// saw, or it read a guess of a placement's output that has not run yet
+/// (`Ctx::placed_output_or`).
+pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &mut FoldMemo) -> bool {
+    if let ReadKind::Placed { i, guess: true } = rd.kind
+        && let Some(r) = me.run_record()
+        && let Some(&c) = r.placed.get(i)
+        && eng.node(c).state() != State::Gone
+        && eng.node(c).run_record().is_none()
+    {
+        return true;
+    }
+    answer_in(eng, me, &rd.kind, rd.path, memo) == rd.seen
+}
+
+/// [`answer`], its folds from `memo`, on one layout ([`on_one_layout`]).
+pub(crate) fn answer_in(
+    eng: &Engine,
+    me: &Node,
+    kind: &ReadKind,
+    path: PathId,
+    memo: &mut FoldMemo,
+) -> Option<ValueId> {
+    on_one_layout(eng, || answer_on_layout(eng, me, kind, path, memo))
+}
+
+fn answer_on_layout(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, memo: &mut FoldMemo) -> Option<ValueId> {
+    match kind {
+        ReadKind::Field { f, at } => {
+            if *f == eng.depth_field {
+                let d = depth_of(eng, me.id)?;
+                return apply_path(eng, Some(eng.values().int(i64::from(d))), path);
+            }
+            let r = match *at {
+                Anchor::Me => reaching_at(eng, *f, me.id, false)?,
+                Anchor::Before(n) => reaching_at(eng, *f, n, false)?,
+                Anchor::AfterOwn(n) => reaching_at(eng, *f, n, true)?,
+                Anchor::End(u) => reaching_visible(eng, *f, Pos(eng.unit(u).end.0 - 1), true),
+                Anchor::Final => final_reaching(eng, *f),
+            };
+            through(eng, r, path)
+        }
+        ReadKind::Env { f } => apply_path(eng, env_value(eng, *f), path),
+        ReadKind::Fold { f, from, to, incl } => {
+            let (from_n, to_n) = (from, to);
+            // (a bound gone: no value, through the path as the run took
+            // it, `Ctx::fold_value`; a view's step on none answers too)
+            let from = match from {
+                Some(n) => pos_of(eng, *n),
+                None => Some(unit_start(eng, me)),
+            };
+            let to = match to {
+                Some(n) => pos_of(eng, *n),
+                None => pos_of(eng, me.id),
+            };
+            let (Some(from), Some(to)) = (from, to) else {
+                return apply_path(eng, None, path);
+            };
+            trace_inverted(eng, "answer", me, *f, (*from_n, from), (*to_n, end_of(to, *incl)));
+            apply_path(eng, Some(fold_in(eng, *f, from, end_of(to, *incl), memo)), path)
+        }
+        ReadKind::Next { f, after } => {
+            let after = match after {
+                Some(n) => Some(pos_of(eng, *n)?),
+                None => Some(unit_start(eng, me)),
+            };
+            let n = next_contribution(eng, *f, after, me.id);
+            apply_path(eng, next_value(eng, &n), path)
+        }
+        ReadKind::Placed { i, .. } => {
+            let r = me.run_record()?;
+            let c = *r.placed.get(*i)?;
+            let child = eng.node(c);
+            if child.state() == State::Gone {
+                return None;
+            }
+            apply_path(eng, child.run_record().map(|r| r.output), path)
+        }
+        ReadKind::Following { i } => {
+            let n = following(eng, me, *i)?;
+            apply_path(eng, Some(text_value(eng, &n)), path)
+        }
+        ReadKind::Hole => apply_path(eng, hole_value(eng, hole_before(eng, me)), path),
+    }
+}
+
+/// The first text node (`Operation::text`) of `me`'s unit before it that
+/// has not committed (`Node::is_hole`); None when every one has. Each
+/// segment's count of such nodes passes over the segments without one.
+/// Not the unit's other nodes (what the client sets beside the text to
+/// work on it: its pages, finishers, writers, which may wait on text
+/// after `me`), nor another unit's (a file read back, made after a node
+/// of this one, is read at the end of the text it follows).
+pub(crate) fn hole_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let from = unit_start(eng, me);
+    // (none before the line's first segment: from it)
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            return None;
+        }
+        // (a unit made after one of my unit's nodes lies inside its range)
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            if inner.holes > 0 {
+                for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
+                    let n = eng.node(*id);
+                    if *id != me.id && n.unit == me.unit && n.is_hole() && eng.op(n.op()).text() {
+                        return Some(*id);
+                    }
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    None
+}
+
+/// The first node before `me` in its unit that is to run, again or for
+/// the first time (`Node::is_open`): while one is, what `me` read before
+/// it may be a guess its run will change.
+pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let from = unit_start(eng, me);
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            return None;
+        }
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
+                let n = eng.node(*id);
+                if *id != me.id && n.unit == me.unit && n.is_open() {
+                    return Some(*id);
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    None
+}
+
+/// [`hole_before`]'s answer as a read's value: the node's id.
+pub(crate) fn hole_value(eng: &Engine, h: Option<NodeId>) -> Option<ValueId> {
+    h.map(|h| eng.values().int(i64::from_ne_bytes(h.raw().to_ne_bytes())))
+}
+
+/// A segment-side reader record's current answer.
+pub(crate) fn reader_answer(eng: &Engine, f: Field, r: &Reader) -> Option<ValueId> {
+    on_one_layout(eng, || {
+        if f == eng.depth_field {
+            let d = depth_of(eng, r.anchor)?;
+            return apply_path(eng, Some(eng.values().int(i64::from(d))), r.path);
+        }
+        let rc = reaching_at(eng, f, r.anchor, r.inclusive)?;
+        through(eng, rc, r.path)
+    })
+}
+
+/// Whether a range reader record's every path still gives what it saw, its
+/// folds from `memo`.
+pub(crate) fn range_stands(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) -> bool {
+    let v = range_value_in(eng, f, r, memo);
+    r.seen.iter().all(|&(p, s)| v.and_then(|v| apply_path(eng, v, p)) == s)
+}
+
+/// A range reader's value before its paths (None where an end is gone:
+/// every path gives none).
+fn range_value_in(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) -> Option<Option<ValueId>> {
+    on_one_layout(eng, || range_value_on_layout(eng, f, r, memo))
+}
+
+fn range_value_on_layout(eng: &Engine, f: Field, r: &RangeReader, memo: &mut FoldMemo) -> Option<Option<ValueId>> {
+    let me = eng.node(r.node);
+    // (a bound gone: no value, as the run had it (`Ctx::fold_value`,
+    // `Ctx::next_contribution`): a reader filed over a removed bound
+    // stands on that, not asked again for ever)
+    let from = match r.from {
+        Some(n) => match pos_of(eng, n) {
+            Some(p) => p,
+            None => return Some(None),
+        },
+        None => unit_start(eng, me),
+    };
+    if r.next {
+        let n = next_contribution(eng, f, Some(from), r.node);
+        return Some(next_value(eng, &n));
+    }
+    let to = match r.to {
+        Some(n) => match pos_of(eng, n) {
+            Some(p) => p,
+            None => return Some(None),
+        },
+        None => pos_of(eng, me.id)?,
+    };
+    trace_inverted(eng, "re-ask", me, f, (r.from, from), (r.to, end_of(to, r.incl)));
+    Some(Some(fold_in(eng, f, from, end_of(to, r.incl), memo)))
+}
+
+/// A fold's exclusive end at `to`, or just past it where `to`'s own is in
+/// (labels are integers: nothing lies between `to` and the next).
+pub(crate) fn end_of(to: Pos, incl: bool) -> Pos {
+    if incl { Pos(to.0 + 1) } else { to }
+}
+
+/// The built-in projections.
+pub(crate) fn builtin_projection(p: ProjId) -> Option<crate::api::Projection> {
+    (p == ProjId::IS_EMPTY).then(|| Arc::new(is_empty_proj) as crate::api::Projection)
+}
+
+/// What an `At::Final` reader of `f` is answered: the value published
+/// when the line was last quiet (`commit::publish_finals`), the same for
+/// every reader between two quiet points, whatever lands meanwhile, so a
+/// pass of the loop reads what the pass before it wrote, never a part of
+/// what this one is writing; else the environment.
+pub(crate) fn final_reaching(eng: &Engine, f: Field) -> Reaching {
+    eng.ranges.published(f).unwrap_or_else(|| env_reaching(eng, f))
+}
+
+/// `final_reaching` for a run: a field none published yet is published
+/// now, as its last definition if that is a prediction (a value from
+/// before the evaluation, `Operation::predicted_defs`), else as the
+/// environment, and checked at the next quiet point.
+pub(crate) fn final_read(eng: &Engine, f: Field) -> Reaching {
+    if let Some(r) = eng.ranges.published(f) {
+        return r;
+    }
+    if !eng.has_finals.load(Ordering::Acquire) {
+        eng.has_finals.store(true, Ordering::Release);
+    }
+    let live = last_definition(eng, f);
+    eng.ranges
+        .publish_first(f, if live.provisional { live } else { env_reaching(eng, f) })
+}
+
+/// The last definition of `f` on the whole line, else the
+/// environment: the field index's last segment, its last entry. Globals
+/// and locals alike: whatever is last, since a loop-back reader asks what
+/// the back of the document left.
+pub(crate) fn last_definition(eng: &Engine, f: Field) -> Reaching {
+    let mut lo = Pos(u64::MAX);
+    while let Some(s) = last_def_before(eng, f, lo) {
+        let seg = eng.seg(s);
+        if let Some((_, d)) = seg.inner.read().defs.get(&f).and_then(|m| m.iter().next_back()) {
+            return Reaching::of(&d.plain(&eng.values));
+        }
+        lo = seg.lo;
+    }
+    env_reaching(eng, f)
+}
+
+/// A scope's identity: the node that opened it and which of its opens.
+pub(crate) fn opener(n: NodeId, j: u8) -> u64 {
+    (n.raw() << 8) | u64::from(j)
+}
+
+/// A node's closes applied to the scopes open: one at the root does
+/// nothing (TeX's extra `}`, an error it ignores).
+pub(crate) fn close(chain: &mut Vec<u64>, b: &Brackets) {
+    chain.truncate(chain.len().saturating_sub(usize::from(b.closes)));
+}
+
+pub(crate) fn open(chain: &mut Vec<u64>, n: NodeId, b: &Brackets) {
+    chain.extend((0..b.opens).map(|j| opener(n, j)));
+}
+
+/// Whether any node on the line has brackets: without, every definition
+/// reaches every later position and no scope is walked.
+pub(crate) fn scoped(eng: &Engine) -> bool {
+    eng.bracket_nodes.load(Ordering::Acquire) > 0
+}
+
+/// The scopes open at the start of `s`, outermost first: its cached
+/// chain if no bracket changed since, else the last segment before it
+/// whose chain is known, and on from there through each segment's
+/// brackets, each chain found kept. One segment's lock at a time.
+pub(crate) fn chain_start(eng: &Engine, s: &Arc<Segment>) -> Arc<[u64]> {
+    loop {
+        if let Some(c) = try_chain_start(eng, s) {
+            return c;
+        }
+        // (a segment absorbed by its neighbour since the caller found it
+        // is no longer on the line: none, and the caller, which checks its
+        // node is there under the lock, looks again)
+        if eng.order.at_or_after(s.lo) != Some(s.id) {
+            return Arc::from(Vec::new());
+        }
+    }
+}
+
+/// [`chain_start`], None where a segment walked through was split or
+/// absorbed meanwhile (its end is no longer the next one's start: its
+/// brackets read now are not all those before the next).
+fn try_chain_start(eng: &Engine, s: &Arc<Segment>) -> Option<Arc<[u64]>> {
+    let g = eng.scope_gen.load(Ordering::Acquire);
+    let cached = |t: &Segment| t.chain.lock().as_ref().filter(|c| c.0 == g).map(|c| c.1.clone());
+    if let Some(c) = cached(s) {
+        return Some(c);
+    }
+    let mut todo: Vec<&Arc<Segment>> = vec![s];
+    let mut known: Option<(&Arc<Segment>, Arc<[u64]>)> = None;
+    loop {
+        let t = *todo.last().expect("a segment");
+        let Some(p) = eng.order.prev(t.id, t.lo) else {
+            break;
+        };
+        let ps = eng.seg(p);
+        if let Some(c) = cached(ps) {
+            known = Some((ps, c));
+            break;
+        }
+        todo.push(ps);
+    }
+    let store = |t: &Segment, c: &Arc<[u64]>| {
+        if eng.scope_gen.load(Ordering::Acquire) == g {
+            *t.chain.lock() = Some((g, c.clone()));
+        }
+    };
+    let (mut prev, mut c) = match known {
+        Some(k) => k,
+        None => {
+            let first = todo.pop().expect("a segment");
+            let c: Arc<[u64]> = Arc::from(Vec::new());
+            store(first, &c);
+            (first, c)
+        }
+    };
+    while let Some(t) = todo.pop() {
+        c = chain_end(eng, prev, &c, t.id)?;
+        store(t, &c);
+        prev = t;
+    }
+    Some(c)
+}
+
+/// The scopes open at the end of `s`, from those at its start; None
+/// where `next` no longer follows `s` on the line (one of them split, or
+/// absorbed, since it was found before it): read under `s`'s lock,
+/// which a split or a rebalance of `s` takes.
+fn chain_end(eng: &Engine, s: &Segment, start: &Arc<[u64]>, next: SegId) -> Option<Arc<[u64]>> {
+    let inner = s.inner.read();
+    if eng.order.next(s.id, s.lo) != Some(next) {
+        return None;
+    }
+    if inner.brackets.is_empty() {
+        return Some(start.clone());
+    }
+    let mut c = start.to_vec();
+    for (_, (n, b)) in inner.brackets.iter() {
+        close(&mut c, b);
+        open(&mut c, *n, b);
+    }
+    Some(Arc::from(c))
+}
+
+/// The scopes open at `at` in a segment whose start's are `start`: those
+/// before it, with its closes where `closes` says, and its opens too
+/// where `opens` does.
+pub(crate) fn chain_at(inner: &Inner, start: &[u64], at: Pos, closes: bool, opens: bool) -> Vec<u64> {
+    let mut c = start.to_vec();
+    for (_, (n, b)) in inner.brackets.range(..at) {
+        close(&mut c, b);
+        open(&mut c, *n, b);
+    }
+    if let Some((n, b)) = inner.brackets.get(&at) {
+        if closes || opens {
+            close(&mut c, b);
+        }
+        if opens {
+            open(&mut c, *n, b);
+        }
+    }
+    c
+}
+
+/// Where a reader at `at` looks from: after the closes its node makes
+/// before its reads, or, `inclusive`, after the node altogether.
+pub(crate) fn reader_chain(inner: &Inner, start: &[u64], at: Pos, inclusive: bool) -> Vec<u64> {
+    let before = inner.brackets.get(&at).is_some_and(|(_, b)| b.before);
+    chain_at(inner, start, at, inclusive || before, inclusive)
+}
+
+/// A definition's scope: its depth (0: it reaches every later position)
+/// and the scope it lives in. `closed`: the scopes open where its node
+/// makes it (after the node's closes where they come before its
+/// definitions, [`Brackets::before`]); `own`: the node's brackets.
+pub(crate) fn level(d: &Def, closed: &[u64], own: Option<&(NodeId, Brackets)>) -> (usize, u64) {
+    if d.depth == GLOBAL {
+        return (0, 0);
+    }
+    let k = closed.len();
+    if d.depth > 0
+        && let Some((n, b)) = own
+        && b.opens > 0
+    {
+        let j = u8::try_from(d.depth - 1).unwrap_or(u8::MAX).min(b.opens - 1);
+        return (k + usize::from(j) + 1, opener(*n, j));
+    }
+    (k, if k == 0 { 0 } else { closed[k - 1] })
+}
+
+/// Whether a definition in scope `lv` reaches a reader whose open scopes
+/// are `target`: its scope is still open there.
+pub(crate) fn visible(target: &[u64], lv: (usize, u64)) -> bool {
+    lv.0 == 0 || (target.len() >= lv.0 && target[lv.0 - 1] == lv.1)
+}
+
+/// Each definition of `f` in the segment before `limit` (at it too when
+/// `incl`; None: all of them), in order, with its scope; `start`: the
+/// scopes open at the segment's start.
+/// A multi definition gives each of its parts, outermost first.
+pub(crate) fn levels(
+    v: &Values,
+    inner: &Inner,
+    f: Field,
+    start: &[u64],
+    limit: Option<Pos>,
+    incl: bool,
+) -> Vec<(Pos, Def, (usize, u64))> {
+    let Some(m) = inner.defs.get(&f) else {
+        return Vec::new();
+    };
+    let defs = match limit {
+        None => m.iter(),
+        Some(p) if incl => m.range(..=p),
+        Some(p) => m.range(..p),
+    };
+    let mut chain = start.to_vec();
+    let mut brs = inner.brackets.iter().peekable();
+    let mut out = Vec::new();
+    for (q, d) in defs {
+        while let Some((bp, (n, b))) = brs.peek() {
+            if **bp >= *q {
+                break;
+            }
+            close(&mut chain, b);
+            open(&mut chain, *n, b);
+            brs.next();
+        }
+        let own = brs.peek().filter(|(bp, _)| **bp == *q).map(|(_, x)| *x);
+        let closed = match own {
+            Some(x) if x.1.closes > 0 => {
+                let mut c = chain.clone();
+                close(&mut c, &x.1);
+                Some(c)
+            }
+            _ => None,
+        };
+        // (the node's closes come before its definitions with `before`,
+        // after them without: a local definition of a node that closes
+        // after it lives in the scope it closes and dies with it; a
+        // definition in a scope the node opens is in it, after the closes)
+        let lv = |p: &Def| {
+            let after = own.is_some_and(|x| x.1.before || (p.depth > 0 && x.1.opens > 0));
+            let c = if after {
+                closed.as_deref().unwrap_or(&chain)
+            } else {
+                &chain
+            };
+            level(p, c, own)
+        };
+        if d.multi {
+            for p in d.parts(v) {
+                out.push((*q, p, lv(&p)));
+            }
+        } else {
+            out.push((*q, *d, lv(d)));
+        }
+    }
+    out
+}
+
+/// The last definition in `levels` a reader with open scopes `target` sees.
+fn last_visible(ls: &[(Pos, Def, (usize, u64))], target: &[u64]) -> Option<Def> {
+    ls.iter().rev().find(|x| visible(target, x.2)).map(|x| x.1)
+}
+
+/// The definitions of `f` before the segment starting at `lo`, by the
+/// field index, the last one visible to `target`; else the environment.
+fn visible_before(eng: &Engine, f: Field, target: &[u64], lo: Pos) -> Reaching {
+    let mut lo = lo;
+    while let Some(s) = last_def_before(eng, f, lo) {
+        let seg = eng.seg(s);
+        let start = chain_start(eng, seg);
+        {
+            let inner = seg.inner.read();
+            if let Some(d) = last_visible(&levels(&eng.values, &inner, f, &start, None, false), target) {
+                return Reaching::of(&d);
+            }
+        }
+        lo = seg.lo;
+    }
+    env_reaching(eng, f)
+}
+
+/// The scope depth at `p`: scopes open just before the node there, its
+/// own closes not applied.
+pub(crate) fn depth_at(eng: &Engine, p: Pos) -> u32 {
+    if !scoped(eng) {
+        return 0;
+    }
+    loop {
+        let Some(seg) = eng.seg_for_pos(p) else {
+            return 0;
+        };
+        let start = chain_start(eng, seg);
+        let inner = seg.inner.read();
+        if p < seg.lo || (p >= inner.hi && eng.order.at_or_after(p) != Some(seg.id)) {
+            continue;
+        }
+        return u32::try_from(chain_at(&inner, &start, p, false, false).len()).unwrap_or(u32::MAX);
+    }
+}
+
+/// The scope depth at a node (its closes not applied); None when gone.
+pub(crate) fn depth_of(eng: &Engine, n: NodeId) -> Option<u32> {
+    let node = eng.node(n);
+    if !scoped(eng) {
+        return (node.state() != State::Gone).then_some(0);
+    }
+    loop {
+        if node.state() == State::Gone {
+            return None;
+        }
+        let seg = eng.seg(node.seg_hint());
+        let start = chain_start(eng, seg);
+        let inner = seg.inner.read();
+        let p = node.pos_hint();
+        if inner.nodes.get(&p) != Some(&n) {
+            continue;
+        }
+        return Some(u32::try_from(chain_at(&inner, &start, p, false, false).len()).unwrap_or(u32::MAX));
+    }
+}
+
+/// [`reaching`] under scopes: the last definition of `f` before `at` that
+/// is visible there (`visible`); an invisible one is passed over and the
+/// walk goes on to the one before it, across segments by the field index.
+pub(crate) fn reaching_visible(eng: &Engine, f: Field, at: Pos, inclusive: bool) -> Reaching {
+    if !scoped(eng) {
+        return reaching(eng, f, at, inclusive);
+    }
+    loop {
+        let Some(seg) = eng.seg_for_pos(at) else {
+            return env_reaching(eng, f);
+        };
+        let start = chain_start(eng, seg);
+        let target = {
+            let inner = seg.inner.read();
+            if at < seg.lo || (at >= inner.hi && eng.order.at_or_after(at) != Some(seg.id)) {
+                continue;
+            }
+            let target = reader_chain(&inner, &start, at, inclusive);
+            if let Some(d) = last_visible(&levels(&eng.values, &inner, f, &start, Some(at), inclusive), &target) {
+                return Reaching::of(&d);
+            }
+            target
+        };
+        return visible_before(eng, f, &target, seg.lo);
+    }
+}
+
+/// [`reaching_at`] under scopes.
+fn reaching_at_visible(eng: &Engine, f: Field, anchor: NodeId, inclusive: bool) -> Option<Reaching> {
+    let n = eng.node(anchor);
+    loop {
+        if n.state() == State::Gone {
+            return None;
+        }
+        let seg = eng.seg(n.seg_hint());
+        let start = chain_start(eng, seg);
+        let target = {
+            let inner = seg.inner.read();
+            let p = n.pos_hint();
+            if inner.nodes.get(&p) != Some(&anchor) {
+                continue;
+            }
+            let target = reader_chain(&inner, &start, p, inclusive);
+            if let Some(d) = last_visible(&levels(&eng.values, &inner, f, &start, Some(p), inclusive), &target) {
+                return Some(Reaching::of(&d));
+            }
+            target
+        };
+        return Some(visible_before(eng, f, &target, seg.lo));
+    }
+}
+
+/// The tag of an alias definition's value (`Ctx::define_alias`): `[ALIAS,
+/// g, at]`, "the value of `g` reaching node `at`".
+pub(crate) const ALIAS: &str = "\u{10FFFF}alias";
+
+/// The field and node an alias definition's value names, if `x` is one.
+#[must_use]
+pub fn alias_of(v: &Values, x: ValueId) -> Option<(Field, NodeId)> {
+    v.with_list(x, |xs| {
+        if xs.len() != 3 || !v.with_str(xs[0], |s| s == ALIAS).unwrap_or(false) {
+            return None;
+        }
+        let n = v.as_int(xs[2])?;
+        Some((Field(xs[1]), NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes()))))
+    })
+    .flatten()
+}
+
+/// The value an alias definition files (`Ctx::define_alias`): `f`'s
+/// definition is "the value of `g` reaching `at`". A client that keeps
+/// such a definition in its own state publishes this value with
+/// `Ctx::define_with` to the same effect, and knows it again by
+/// [`alias_of`].
+#[must_use]
+pub fn alias_value(v: &Values, g: Field, at: NodeId) -> ValueId {
+    v.list(vec![
+        v.str(ALIAS),
+        g.0,
+        v.int(i64::from_ne_bytes(at.raw().to_ne_bytes())),
+    ])
+}
+
+/// `x` with its alias definitions followed (`Ctx::define_alias`), as a
+/// read before each alias's node gives them, unrecorded: what a relation
+/// on an aliased field adds to.
+pub(crate) fn through_aliases(eng: &Engine, mut x: Option<ValueId>) -> Option<ValueId> {
+    for _ in 0..32 {
+        let Some((g, at)) = x.and_then(|y| alias_of(&eng.values, y)) else {
+            return x;
+        };
+        x = reaching_at(eng, g, at, false).and_then(|r| r.value);
+    }
+    x
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use crate::api::{NodeId, Operation, PathId, Stop};
+    use crate::ctx::Ctx;
+    use crate::engine::Engine;
+    use crate::node::ReadKind;
+    use crate::values::{Field, ValueId};
+
+    /// `[x]`: contributes x to the field `acc`.
+    struct Contrib(Field);
+
+    impl Operation for Contrib {
+        fn name(&self) -> &'static str {
+            "contrib"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            cx.contribute(self.0, cx.args()[0]);
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// `[]`: nothing.
+    struct Idle;
+
+    impl Operation for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(&self, _: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// The answers of fold reads over ranges of unit `reads` while another
+    /// thread moves the labels of unit `moved` for 2 s (rebalancing its
+    /// segments and filling gaps in them, relabelling and moving nodes
+    /// between segments): how many reads, how many wrong, how many moves,
+    /// and how many reads were computed again (`on_one_layout`).
+    fn reads_while_moving(both_units: bool) -> (u64, u64, usize, u64) {
+        let e = Arc::new(Engine::new());
+        let f = e.values().field("acc");
+        let op = e.register(Arc::new(Contrib(f)));
+        let idle = e.register(Arc::new(Idle));
+        let (u, w) = (e.new_unit(), e.new_unit());
+        let ids: Vec<NodeId> = (0..3000).map(|i| e.push(u, op, vec![e.values().int(i)])).collect();
+        let others: Vec<NodeId> = (0..3000).map(|i| e.push(w, op, vec![e.values().int(i)])).collect();
+        e.evaluate(1).expect("the contributions filed");
+        let ranges: Vec<(NodeId, NodeId)> = (0..64)
+            .map(|k| {
+                let a = (k * 61) % 2900;
+                (ids[a], ids[a + 1 + (k * 13) % 90])
+            })
+            .collect();
+        let kind = |(a, b): (NodeId, NodeId)| ReadKind::Fold {
+            f,
+            from: Some(a),
+            to: Some(b),
+            incl: true,
+        };
+        let me = Arc::clone(e.node(ids[0]));
+        let truth: Vec<Option<ValueId>> = ranges
+            .iter()
+            .map(|&r| super::answer(&e, &me, &kind(r), PathId::WHOLE))
+            .collect();
+        let stop = Arc::new(AtomicBool::new(false));
+        let mover = {
+            let (e, stop) = (Arc::clone(&e), Arc::clone(&stop));
+            let ids = if both_units { ids.clone() } else { others.clone() };
+            std::thread::spawn(move || {
+                let mut k = 0usize;
+                while !stop.load(Ordering::Acquire) {
+                    let s = e.seg(e.node(ids[k.wrapping_mul(7919) % ids.len()]).seg_hint());
+                    if k.is_multiple_of(2) {
+                        e.order.rebalance(&e, s.id, 1 + k % 97);
+                    } else {
+                        // (nodes put in one gap until it closes, the
+                        // segment relabelled for the next, then taken out:
+                        // the next relabel spreads the labels otherwise)
+                        let at = ids[k.wrapping_mul(104_729) % ids.len()];
+                        let put: Vec<NodeId> = (0..24).map(|_| e.insert_after(at, idle, Vec::new())).collect();
+                        for n in put {
+                            e.remove(n);
+                        }
+                    }
+                    k += 1;
+                }
+                k
+            })
+        };
+        let retries0 = super::retries();
+        let t0 = Instant::now();
+        let (mut reads, mut wrong) = (0u64, 0u64);
+        while t0.elapsed() < Duration::from_secs(2) {
+            for (r, want) in ranges.iter().zip(&truth) {
+                reads += 1;
+                if super::answer(&e, &me, &kind(*r), PathId::WHOLE) != *want {
+                    wrong += 1;
+                }
+            }
+        }
+        stop.store(true, Ordering::Release);
+        let moves = mover.join().expect("the moving thread");
+        (reads, wrong, moves, super::retries() - retries0)
+    }
+
+    /// A fold read takes its bounds' labels and then folds the segments
+    /// between them, each under its own lock, as a run's read does
+    /// (`Ctx::fold_value`) and a commit's check of it (`answer`): while
+    /// another thread rebalances the segments and fills gaps in them,
+    /// relabelling and moving nodes, every answer is the fold of the range
+    /// as the line has it, never one over labels a move took away (issue
+    /// #5: a finisher read its page's window empty across a relabel, the
+    /// read filed as it was, and the page never shipped: objstm a page
+    /// short in 7 of 1800 runs at 64 threads).
+    #[test]
+    fn a_fold_read_while_labels_move_answers_the_range_the_line_has() {
+        let (reads, wrong, moves, retries) = reads_while_moving(true);
+        assert!(moves > 0, "no move during {reads} reads");
+        assert_eq!(
+            wrong, 0,
+            "{wrong} of {reads} fold reads wrong during {moves} moves ({retries} computed again)"
+        );
+    }
+
+    /// Moves in another unit's segments touch nothing a fold read in
+    /// this unit met: no read is computed again (a move bumps only the
+    /// segments it moves, `Segment::moving`; the field index's answer for
+    /// the read's range stands though the other unit contributes to the
+    /// same field).
+    #[test]
+    fn a_fold_read_is_not_computed_again_for_moves_outside_what_it_met() {
+        let (reads, wrong, moves, retries) = reads_while_moving(false);
+        assert!(moves > 0, "no move during {reads} reads");
+        assert_eq!(wrong, 0, "{wrong} of {reads} fold reads wrong");
+        assert_eq!(
+            retries, 0,
+            "{retries} of {reads} fold reads computed again for {moves} moves elsewhere"
+        );
+    }
+}

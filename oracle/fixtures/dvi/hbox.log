@@ -1,0 +1,43 @@
+(./hbox.tex
+Underfull \hbox (badness 853) detected at line 6
+\tenrm Spread to a hundred
+
+\hbox(6.94444+1.94444)x100.0, glue set 2.04442 []
+
+
+Underfull \hbox (badness 10000) detected at line 7
+\tenrm Too loose
+
+\hbox(6.94444+0.0)x200.0, glue set 95.13387 []
+
+
+Overfull \hbox (65.80571pt too wide) detected at line 8
+\tenrm Far too wide for this
+
+\hbox(6.94444+0.0)x20.0, glue set - 1.0 []
+
+
+Underfull \hbox (badness 2698) detected at line 9
+\tenrm Spread ten more
+
+\hbox(6.94444+1.94444)x82.27791, glue set 3.00002 []
+
+
+Overfull \hbox (53.11127pt too wide) detected at line 15
+\tenrm Overfull with a rule|
+
+\hbox(6.94444+0.0)x30.0, glue set - 1.0 []
+
+
+Overfull \hbox (50.38898pt too wide) detected at line 18
+\tenrm fuzz hides this
+
+\hbox(6.94444+0.0)x10.0, glue set - 1.0 []
+
+
+Underfull \hbox (badness 10000) detected at line 19
+\tenrm badness hides this
+
+\hbox(6.94444+0.0)x120.0, glue set 12.26671 []
+
+[0] )

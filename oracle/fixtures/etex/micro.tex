@@ -1,0 +1,64 @@
+% pdfTeX's font expansion, character protrusion and their friends: the
+% codes, \pdffontexpand, \pdfadjustspacing, \pdfprotrudechars (margin
+% kerns, \leftmarginkern, \rightmarginkern), \pdfprependkern,
+% \pdfappendkern, \pdfadjustinterwordglue, \pdfcopyfont,
+% \letterspacefont, \pdfnoligatures, \pdffontattr; seen by \showbox.
+\pdfoutput=1
+\font\tenrm=cmr10 \font\ninerm=cmr9 \tenrm \hyphenchar\tenrm=`-
+\showboxdepth=100 \showboxbreadth=10000
+\def\text{A quick brown fox jumps over the lazy dog, and then (again) it
+jumps over the lazy dog once more. ``Quick,'' said the fox -- and it
+jumped. The end of the story: dogs are lazy, foxes are quick; and so on,
+and so forth, until the end of the paragraph is reached at last.\par}
+\def\para{\setbox0\vbox{\hsize=150pt \parindent=0pt \tolerance=10000 \text}}
+\message{[\the\efcode\tenrm`a,\the\lpcode\tenrm`a,\the\rpcode\tenrm`a,\the\knbscode\tenrm`a,\the\pdfnoligatures\tenrm]}
+\efcode\tenrm`a=2000 \lpcode\tenrm`(=-2000 \knaccode\tenrm`a=-5
+\message{[\the\efcode\tenrm`a,\the\lpcode\tenrm`(,\the\knaccode\tenrm`a,\the\efcode\tenrm`b,\the\efcode\ninerm`a]}
+\efcode\tenrm`a=1000 \knaccode\tenrm`a=0
+% (copies and letter-spaced fonts, before any expansion)
+\pdfcopyfont\cpy=\tenrm \letterspacefont\ls=\tenrm 100 \letterspacefont\lsn=\ninerm -50 nolig
+\message{[\fontname\cpy,\fontname\ls,\fontname\lsn,\the\fontdimen6\ls,\the\fontdimen2\cpy]}
+\setbox0\hbox{\cpy fi ff \ls fi ff \lsn fi ff}\showbox0
+\pdfnoligatures\cpy
+\message{[\the\pdfnoligatures\cpy,\the\pdfnoligatures\tenrm,\the\pdfnoligatures\lsn]}
+\setbox0\hbox{\cpy fi ff office \tenrm fi}\showbox0
+\pdffontattr\tenrm{/Flags 4}
+% (character protrusion)
+\rpcode\tenrm`.=700 \rpcode\tenrm`,=500 \rpcode\tenrm`-=700 \rpcode\tenrm`;=500
+\rpcode\tenrm`:=500 \rpcode\tenrm`'=600 \lpcode\tenrm``=600 \lpcode\tenrm`A=100
+\rpcode\tenrm`y=50 \lpcode\tenrm`(=200 \rpcode\tenrm`)=200
+\pdfprotrudechars=1 \para\showbox0
+\pdfprotrudechars=2 \para\showbox0
+\setbox2\vbox{\unvcopy0 \setbox4\lastbox \unskip\unpenalty \global\setbox3\lastbox}
+\message{[\leftmarginkern3,\rightmarginkern3]}
+\setbox2\vbox{\unvcopy0 \unskip\unpenalty \setbox4\lastbox \unskip\unpenalty \setbox4\lastbox
+  \unskip\unpenalty \global\setbox3\lastbox}
+\message{[\leftmarginkern3,\rightmarginkern3]}
+\setbox3\hbox{\unhcopy3}\message{[\leftmarginkern3,\rightmarginkern3]}
+\pdfprotrudechars=0
+% (font expansion)
+\pdffontexpand\tenrm 30 20 10 autoexpand
+\pdffontexpand\tenrm 30 20 10 autoexpand
+\efcode\tenrm`o=500 \efcode\tenrm`i=0
+\pdfadjustspacing=2 \para\showbox0
+\pdfadjustspacing=1 \para\showbox0
+\pdfadjustspacing=2 \pdfprotrudechars=2 \para\showbox0
+\setbox0\hbox to 100pt{\tenrm quick brown fox}\showbox0
+\pdfadjustspacing=0 \pdfprotrudechars=0
+% (kerns before and after characters)
+\knbccode\tenrm`o=100 \knaccode\tenrm`o=50 \knbccode\tenrm`f=30 \knaccode\tenrm`-=20
+\knbccode\tenrm`-=10
+\pdfprependkern=1 \pdfappendkern=1
+\setbox0\hbox{foo of off fox fi o\-o x-y}\showbox0
+\pdfprependkern=0
+\setbox0\hbox{foo off}\showbox0
+\pdfappendkern=0
+% (interword glue after a character)
+\knbscode\tenrm`,=200 \stbscode\tenrm`,=100 \shbscode\tenrm`,=-50 \knbscode\tenrm`.=-100
+\pdfadjustinterwordglue=1
+\setbox0\hbox{a, b. c, d e\ f.\ g}\showbox0
+\spaceskip=3pt plus 1pt minus 1pt
+\setbox0\hbox{a, b}\showbox0
+\pdfadjustinterwordglue=0
+\setbox0\hbox{a, b. c}\showbox0
+\message{done}

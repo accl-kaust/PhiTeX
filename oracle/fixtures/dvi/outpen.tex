@@ -1,0 +1,12 @@
+\catcode`\{=1 \catcode`\}=2
+\font\rm=cmr10 \rm \hsize=100pt \vsize=40pt \maxdepth=2pt \topskip=10pt
+\baselineskip=12pt \outputpenalty=7
+\hbox{a \number\outputpenalty}\penalty-10001 \hbox{b \number\outputpenalty}
+\hbox{c \number\outputpenalty}\hbox{d \number\outputpenalty}\hbox{e \number\outputpenalty}
+\hbox{f \number\outputpenalty}\penalty50 \hbox{g \number\outputpenalty}
+\message{[\the\outputpenalty]}
+\hbox{h \number\outputpenalty}\penalty-10000 \hbox{i \number\outputpenalty}
+
+\hbox{j \number\outputpenalty}\hbox{k \number\outputpenalty}
+\message{[\the\outputpenalty]}
+\end

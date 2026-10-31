@@ -1,0 +1,20 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=300pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\showboxdepth=10 \showboxbreadth=100 \vbadness=0
+\splittopskip=10pt plus 2pt \splitmaxdepth=2pt
+\setbox1\vbox{\hbox{line one}\mark{m1}\penalty0\hbox{line two}\mark{m2}\hbox{line three}\kern3pt
+\hbox{line four}\vskip 4pt plus 1pt\hbox{line five}\mark{m3}\hbox{line six}\penalty-50\hbox{line seven}}
+\setbox2\vsplit1 to 30pt
+\message{[\splitfirstmark][\splitbotmark]}
+\box2
+\setbox3\vsplit1 to 25pt
+\message{[\splitfirstmark][\splitbotmark]}
+\box3 \box1
+\setbox4\vbox{\hbox{alone}}\setbox5\vsplit4 to 100pt \message{[\splitfirstmark]}\ifvoid4 \message{void}\fi
+\box5
+\setbox6\vsplit7 to 10pt \message{[\splitfirstmark]}\ifvoid6 \message{void too}\fi
+\setbox8\vbox{\vskip 5pt\penalty-10000\hbox{after a forced break}\vskip 3pt\hbox{and more}}
+\setbox9\vsplit8 to 50pt \box9 \box8
+\end

@@ -1,0 +1,5 @@
+(./core.tex open [macro:->line one ] [macro:->indented line two ] [macro:->{bra
+ced over two lines} ] [macro:->ab] [macro:->\relax \foo {x}] [macro:->] [macro:
+->\par ] [macro:->last] [macro:->\par ] closed at the end still closed no such 
+file closed again lines.tex is not lines.dat [undefined] [macro:->{braced over 
+two lines} ] [macro:->ab] texput line 25, line 25 [macro:->line one ] )

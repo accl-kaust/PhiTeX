@@ -1,0 +1,19 @@
+phitex-flow fuzz repro
+doc latex-rules
+seed 1 step 5
+before threads=8 reads=Suspend order=Priority lean=true
+schedule threads=1 reads=Suspend order=Random(637) lean=true
+fail mismatch dvi
+history threads=1,8 doc=latex-rules
+edit - 86 4 cell
+ins
+zebra
+text
+\documentclass{article}
+\begin{table}[h]
+\begin{tabular}{lrr}
+
+Apples & 12 quick & 0.30\\
+\end{tabular}
+\end{table}
+\end{document}

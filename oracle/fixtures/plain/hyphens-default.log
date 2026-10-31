@@ -1,0 +1,188 @@
+(./hyphens-default.tex Preloading the plain format: codes, registers,
+\maxdimen=\dimen10
+\hideskip=\skip10
+\centering=\skip11
+\p@=\dimen11
+\z@=\dimen12
+\z@skip=\skip12
+\voidb@x=\box10
+parameters,
+\smallskipamount=\skip13
+\medskipamount=\skip14
+\bigskipamount=\skip15
+\normalbaselineskip=\skip16
+\normallineskip=\skip17
+\normallineskiplimit=\dimen13
+\jot=\dimen14
+\interdisplaylinepenalty=\count23
+\interfootnotelinepenalty=\count24
+fonts, more fonts,
+\itfam=\fam4
+\slfam=\fam5
+\bffam=\fam6
+\ttfam=\fam7
+macros,
+\strutbox=\box11
+\mscount=\count25
+\tabs=\box12
+\tabsyet=\box13
+\tabsdone=\box14
+math definitions,
+\rootbox=\box15
+\p@renwd=\dimen15
+output routines,
+\headline=\toks10
+\footline=\toks11
+\footins=\insert254
+\topins=\insert253
+hyphenation
+Overfull \hbox (10.6904pt too wide) in paragraph at lines 5719--5719
+[]\tenrm Typographical con-sid-er-a-tions demon-strate char-|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\hbox(0.0+0.0)x20.0
+.\tenrm T
+.\kern-0.27779
+.\tenrm y
+.\tenrm p
+.etc.
+
+
+Overfull \hbox (13.16275pt too wide) in paragraph at lines 5719--5719
+\tenrm ac-ter-is-ti-cally ex-traor-di-nary math-e-mat-i-cal al-go-rithms;|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\tenrm a
+.\tenrm c
+.\discretionary
+..\tenrm -
+.\tenrm t
+.\tenrm e
+.etc.
+
+
+Overfull \hbox (10.6904pt too wide) in paragraph at lines 5719--5719
+[]\tenrm Typographical con-sid-er-a-tions demon-strate char-|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\hbox(0.0+0.0)x20.0
+.\tenrm T
+.\kern-0.27779
+.\tenrm y
+.\tenrm p
+.etc.
+
+
+Overfull \hbox (13.16275pt too wide) in paragraph at lines 5719--5719
+\tenrm ac-ter-is-ti-cally ex-traor-di-nary math-e-mat-i-cal al-go-rithms;|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\tenrm a
+.\tenrm c
+.\discretionary
+..\tenrm -
+.\tenrm t
+.\tenrm e
+.etc.
+
+
+Overfull \hbox (10.6904pt too wide) in paragraph at lines 5719--5719
+[]\tenrm Typographical con-sid-er-a-tions demon-strate char-|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\hbox(0.0+0.0)x20.0
+.\tenrm T
+.\kern-0.27779
+.\tenrm y
+.\tenrm p
+.etc.
+
+
+Overfull \hbox (13.16275pt too wide) in paragraph at lines 5719--5719
+\tenrm ac-ter-is-ti-cally ex-traor-di-nary math-e-mat-i-cal al-go-rithms;|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\tenrm a
+.\tenrm c
+.\discretionary
+..\tenrm -
+.\tenrm t
+.\tenrm e
+.etc.
+
+[1]
+Overfull \hbox (10.6904pt too wide) in paragraph at lines 5719--5719
+[]\tenrm Typographical con-sid-er-a-tions demon-strate char-|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\hbox(0.0+0.0)x20.0
+.\tenrm T
+.\kern-0.27779
+.\tenrm y
+.\tenrm p
+.etc.
+
+
+Overfull \hbox (13.16275pt too wide) in paragraph at lines 5719--5719
+\tenrm ac-ter-is-ti-cally ex-traor-di-nary math-e-mat-i-cal al-go-rithms;|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\tenrm a
+.\tenrm c
+.\discretionary
+..\tenrm -
+.\tenrm t
+.\tenrm e
+.etc.
+
+
+Overfull \hbox (10.6904pt too wide) in paragraph at lines 5719--5719
+[]\tenrm Typographical con-sid-er-a-tions demon-strate char-|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\hbox(0.0+0.0)x20.0
+.\tenrm T
+.\kern-0.27779
+.\tenrm y
+.\tenrm p
+.etc.
+
+
+Overfull \hbox (13.16275pt too wide) in paragraph at lines 5719--5719
+\tenrm ac-ter-is-ti-cally ex-traor-di-nary math-e-mat-i-cal al-go-rithms;|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\tenrm a
+.\tenrm c
+.\discretionary
+..\tenrm -
+.\tenrm t
+.\tenrm e
+.etc.
+
+[1]
+Overfull \hbox (10.6904pt too wide) in paragraph at lines 5719--5719
+[]\tenrm Typographical con-sid-er-a-tions demon-strate char-|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\hbox(0.0+0.0)x20.0
+.\tenrm T
+.\kern-0.27779
+.\tenrm y
+.\tenrm p
+.etc.
+
+
+Overfull \hbox (13.16275pt too wide) in paragraph at lines 5719--5719
+\tenrm ac-ter-is-ti-cally ex-traor-di-nary math-e-mat-i-cal al-go-rithms;|
+
+\hbox(6.94444+1.94444)x216.81, glue set - 1.0
+.\tenrm a
+.\tenrm c
+.\discretionary
+..\tenrm -
+.\tenrm t
+.\tenrm e
+.etc.
+
+[1] )

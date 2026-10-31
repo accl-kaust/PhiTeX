@@ -1,0 +1,48 @@
+[package]
+name = "phitex-tex"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "TeX's semantics on the reduction core: 21-bit tokens, expansion, macros, conditionals, registers, groups, modes; the Engine trait the engines implement"
+
+[dependencies]
+phitex-defuse = { path = "../../core/defuse" }
+phitex-typeset = { path = "../../core/typeset" }
+phitex-source = { path = "../../core/source" }
+phitex-tfm = { path = "../../fonts/tfm" }
+phitex-mf = { path = "../../fonts/mf" }
+phitex-dvi = { path = "../../output/dvi" }
+phitex-pdf = { path = "../../output/pdf" }
+phitex-xdvipdfmx = { path = "../../output/xdvipdfmx" }
+phitex-otf = { path = "../../fonts/otf" }
+phitex-codecs = { path = "../../codecs" }
+libm = "0.2"
+icu_segmenter = { version = "=2.1.0", default-features = false, features = ["compiled_data"] }
+icu_locale_core = "2.1"
+phitex-makeindex = { path = "../../tools/makeindex" }
+phitex-bibtex = { path = "../../tools/bibtex" }
+phitex-biber = { path = "../../tools/biber" }
+phitex-ps = { path = "../../output/ps" }
+rayon = { version = "=1.10.0", optional = true }
+
+
+[features]
+default = ["rayon"]
+# the engine's batches on a persistent pool (else threads per batch)
+rayon = ["dep:rayon"]
+# the engine's probes, printed after each evaluation with PHITEX_OBS=1
+profile = ["phitex-defuse/profile", "phitex-pdf/profile"]
+# the engine's scheduler dumps: DEFUSE_DUMP=<file>, DEFUSE_DUMP_EVERY=<s>
+observe = ["phitex-defuse/observe", "phitex-pdf/observe"]
+
+[dev-dependencies]
+phitex-kpse = { path = "../../tools/kpse" }
+
+# the profile measures run on the CLI's allocator (`phitex-cli`'s
+# `jemalloc`), not the system's
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tikv-jemallocator = "0.6"
+
+[lints]
+workspace = true

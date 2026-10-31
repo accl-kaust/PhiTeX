@@ -1,0 +1,8 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=300pt \vsize=500pt \parindent=0pt \baselineskip=12pt \hbadness=10000 \vbadness=10000
+\pdfinclusioncopyfonts=0
+\pdfximage{hello.pdf}\edef\a{\the\pdflastximage}
+\pdfximage width 100pt page 2 {objstm.pdf}\edef\b{\the\pdflastximage}
+\pdfximage trimbox {colorstack.pdf}\edef\c{\the\pdflastximage}
+A\pdfrefximage\a\par \pdfrefximage\b\ \pdfrefximage\c\ \pdfrefximage\a\par
+\end

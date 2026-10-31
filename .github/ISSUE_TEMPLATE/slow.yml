@@ -1,0 +1,27 @@
+name: Slow builds or edits
+description: A cold build or an edit takes longer than it should
+labels: ["performance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run `phitex watch --report` (or `phitex build --report`), make the slow edit, quit,
+        and attach the `.phitex-report.txt`: it has each build's time, the threads and the machine.
+  - type: textarea
+    id: what
+    attributes:
+      label: What is slow
+      description: Cold build or edit, what you typed, the times you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: The report
+    validations:
+      required: true
+  - type: input
+    id: doc
+    attributes:
+      label: A public document that shows it, if any
+      description: A link to one (arXiv, CTAN), so we can measure it.

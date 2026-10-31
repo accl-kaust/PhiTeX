@@ -1,0 +1,12 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=300pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\message{before}\input inc-a \message{after}
+Text \input inc-b more text on the calling line.\par
+\count1=\input inc-num \relax \message{\the\count1}
+\message{line \the\inputlineno}
+
+\message{line \the\inputlineno}
+{\def\x{group}\input inc-c }\message{\x}
+\end

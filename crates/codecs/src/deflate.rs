@@ -1,0 +1,1905 @@
+//! zlib's deflate, copied (madler zlib 1.3, `deflate.c` and `trees.c`):
+//! the library pdfTeX links, so a stream compressed here is byte for byte
+//! the stream pdfTeX writes (`writezip.c`: `deflateInit(level)`, the
+//! default window and memory level, one stream at a time). A pure
+//! function of the bytes and the level.
+//!
+//! What zlib keeps between calls (the window, the hash chains, the
+//! pending symbols) is the state of one compression, local to
+//! [`compress`]. The input is given whole: zlib's output does not depend
+//! on how it is split into calls (`deflate_slow` and `deflate_fast` decide
+//! only once `MIN_LOOKAHEAD` bytes are ahead or the input has ended, and
+//! a match never reaches past the input's end: `nice_match` is capped by
+//! the lookahead).
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+const MIN_MATCH: usize = 3;
+const MAX_MATCH: usize = 258;
+const MIN_LOOKAHEAD: usize = MAX_MATCH + MIN_MATCH + 1;
+const W_SIZE: usize = 1 << 15;
+const W_MASK: usize = W_SIZE - 1;
+const WINDOW_SIZE: usize = 2 * W_SIZE;
+/// `memLevel` 8: `hash_bits` = 8 + 7.
+const HASH_BITS: u32 = 15;
+const HASH_SIZE: usize = 1 << HASH_BITS;
+const HASH_MASK: u32 = (1 << HASH_BITS) - 1;
+/// `hash_shift`: (`hash_bits` + `MIN_MATCH` - 1) / `MIN_MATCH`.
+const HASH_SHIFT: u32 = HASH_BITS.div_ceil(3);
+const LIT_BUFSIZE: usize = 1 << (8 + 6);
+const MAX_DIST: usize = W_SIZE - MIN_LOOKAHEAD;
+const TOO_FAR: usize = 4096;
+const NIL: usize = 0;
+
+const LENGTH_CODES: usize = 29;
+const LITERALS: usize = 256;
+const L_CODES: usize = LITERALS + 1 + LENGTH_CODES;
+const D_CODES: usize = 30;
+const BL_CODES: usize = 19;
+const HEAP_SIZE: usize = 2 * L_CODES + 1;
+const MAX_BITS: usize = 15;
+const MAX_BL_BITS: usize = 7;
+const END_BLOCK: usize = 256;
+const REP_3_6: usize = 16;
+const REPZ_3_10: usize = 17;
+const REPZ_11_138: usize = 18;
+const STORED_BLOCK: u32 = 0;
+const STATIC_TREES: u32 = 1;
+const DYN_TREES: u32 = 2;
+/// The window's allocation: a power of two above `WINDOW_SIZE` +
+/// `MAX_MATCH`, so an index masked by `WIN_AMASK` (the same index: every
+/// window position is below it) needs no bounds check, and eight bytes
+/// more for a word read at any such index.
+const WIN_ALLOC: usize = 1 << 17;
+const WIN_AMASK: usize = WIN_ALLOC - 1;
+const WIN_LEN: usize = WIN_ALLOC + 8;
+/// The symbol buffer's allocation (`lit_bufsize` * 4, a power of two,
+/// three bytes more for a symbol at any masked index).
+const SYM_ALLOC: usize = LIT_BUFSIZE * 4;
+const SYM_LEN: usize = SYM_ALLOC + 3;
+
+type Window = Box<[u8; WIN_LEN]>;
+
+/// A zeroed array on the heap.
+fn zbox<T: Copy + Default, const N: usize>() -> Box<[T; N]> {
+    alloc::vec![T::default(); N]
+        .into_boxed_slice()
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("a vector of N elements"))
+}
+
+/// The window's byte at `i` (a window position).
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn wb(w: &[u8; WIN_LEN], i: usize) -> u8 {
+    w[i & WIN_AMASK]
+}
+
+/// The window's two bytes at `i`, as a number.
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn w16(w: &[u8; WIN_LEN], i: usize) -> u16 {
+    let i = i & WIN_AMASK;
+    u16::from_le_bytes([w[i], w[i + 1]])
+}
+
+const EXTRA_LBITS: [u32; LENGTH_CODES] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+];
+const EXTRA_DBITS: [u32; D_CODES] = [
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
+];
+const EXTRA_BLBITS: [u32; BL_CODES] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 7];
+const BL_ORDER: [usize; BL_CODES] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
+
+/// `configuration_table`: good, lazy, nice, chain; levels 1–3 are
+/// `deflate_fast`, 4–9 `deflate_slow`.
+const CONFIG: [(usize, usize, usize, usize); 10] = [
+    (0, 0, 0, 0),
+    (4, 4, 8, 4),
+    (4, 5, 16, 8),
+    (4, 6, 32, 32),
+    (4, 4, 16, 16),
+    (8, 16, 32, 32),
+    (8, 16, 128, 128),
+    (8, 32, 128, 256),
+    (32, 128, 258, 1024),
+    (32, 258, 258, 4096),
+];
+
+/// `ct_data`: `fc` is the frequency or the code, `dl` the father or the
+/// length (C's unions: `build_tree` writes `Dad` over `Len` and
+/// `gen_codes` `Code` over `Freq`, as zlib does).
+#[derive(Clone, Copy, Default)]
+struct Ct {
+    fc: u16,
+    dl: u16,
+}
+
+/// The tables `tr_static_init` makes.
+#[derive(Clone)]
+struct Static {
+    ltree: [Ct; L_CODES + 2],
+    dtree: [Ct; D_CODES],
+    dist_code: [u8; 512],
+    length_code: [u8; MAX_MATCH - MIN_MATCH + 1],
+    base_length: [usize; LENGTH_CODES],
+    base_dist: [usize; D_CODES],
+}
+
+/// `bi_reverse`: the first `len` bits of `code` reversed (`len` ≤ 15).
+fn bi_reverse(mut code: u16, mut len: usize) -> u16 {
+    let mut res = 0;
+    loop {
+        res |= code & 1;
+        code >>= 1;
+        res <<= 1;
+        len -= 1;
+        if len == 0 {
+            break;
+        }
+    }
+    res >> 1
+}
+
+fn gen_codes(tree: &mut [Ct], max_code: usize, bl_count: &[u16; MAX_BITS + 1]) {
+    let mut next_code = [0u16; MAX_BITS + 1];
+    let mut code: u32 = 0;
+    for bits in 1..=MAX_BITS {
+        code = (code + u32::from(bl_count[bits - 1])) << 1;
+        // (`gen_codes`' Assert: the counts are those of a complete code
+        // of at most `MAX_BITS` bits, so a length's first code fits them)
+        next_code[bits] = u16::try_from(code).expect("a code of at most 15 bits");
+    }
+    for ct in &mut tree[..=max_code] {
+        let len = usize::from(ct.dl);
+        if len == 0 {
+            continue;
+        }
+        ct.fc = bi_reverse(next_code[len], len);
+        next_code[len] = next_code[len].wrapping_add(1);
+    }
+}
+
+impl Static {
+    fn new() -> Box<Static> {
+        let mut s = Box::new(Static {
+            ltree: [Ct::default(); L_CODES + 2],
+            dtree: [Ct::default(); D_CODES],
+            dist_code: [0; 512],
+            length_code: [0; MAX_MATCH - MIN_MATCH + 1],
+            base_length: [0; LENGTH_CODES],
+            base_dist: [0; D_CODES],
+        });
+        let mut length = 0usize;
+        let mut code = 0usize;
+        while code < LENGTH_CODES - 1 {
+            s.base_length[code] = length;
+            for _ in 0..(1 << EXTRA_LBITS[code]) {
+                s.length_code[length] = code_u8(code);
+                length += 1;
+            }
+            code += 1;
+        }
+        s.length_code[length - 1] = code_u8(code);
+        let mut dist = 0usize;
+        code = 0;
+        while code < 16 {
+            s.base_dist[code] = dist;
+            for _ in 0..(1 << EXTRA_DBITS[code]) {
+                s.dist_code[dist] = code_u8(code);
+                dist += 1;
+            }
+            code += 1;
+        }
+        dist >>= 7;
+        while code < D_CODES {
+            s.base_dist[code] = dist << 7;
+            for _ in 0..(1 << (EXTRA_DBITS[code] - 7)) {
+                s.dist_code[256 + dist] = code_u8(code);
+                dist += 1;
+            }
+            code += 1;
+        }
+        let mut bl_count = [0u16; MAX_BITS + 1];
+        let mut n = 0;
+        while n <= 143 {
+            s.ltree[n].dl = 8;
+            bl_count[8] += 1;
+            n += 1;
+        }
+        while n <= 255 {
+            s.ltree[n].dl = 9;
+            bl_count[9] += 1;
+            n += 1;
+        }
+        while n <= 279 {
+            s.ltree[n].dl = 7;
+            bl_count[7] += 1;
+            n += 1;
+        }
+        while n <= 287 {
+            s.ltree[n].dl = 8;
+            bl_count[8] += 1;
+            n += 1;
+        }
+        gen_codes(&mut s.ltree, L_CODES + 1, &bl_count);
+        for (n, ct) in (0u16..).zip(&mut s.dtree) {
+            ct.dl = 5;
+            ct.fc = bi_reverse(n, 5);
+        }
+        s
+    }
+
+    fn d_code(&self, dist: usize) -> usize {
+        if dist < 256 {
+            usize::from(self.dist_code[dist])
+        } else {
+            // (`dist` < 32K: `dist >> 7` < 256)
+            usize::from(self.dist_code[256 + ((dist >> 7) & 0xff)])
+        }
+    }
+}
+
+/// A length or distance code (< `D_CODES`) as `tr_static_init` stores it.
+fn code_u8(code: usize) -> u8 {
+    u8::try_from(code).expect("a code is below 30")
+}
+
+/// A count or length below `1 << length` as `send_bits` takes it.
+fn bits(v: usize) -> u32 {
+    u32::try_from(v).expect("send_bits' value is at most 16 bits")
+}
+
+/// A tree node (< `HEAP_SIZE`) as `ct_data`'s `Dad` stores it.
+fn node_u16(n: usize) -> u16 {
+    u16::try_from(n).expect("a node is below HEAP_SIZE")
+}
+
+/// `smaller`: `n` sorts before `m` (by frequency, then depth).
+fn smaller(tree: &[Ct], n: usize, m: usize, depth: &[u8]) -> bool {
+    tree[n].fc < tree[m].fc || (tree[n].fc == tree[m].fc && depth[n] <= depth[m])
+}
+
+/// `pqdownheap`: restore the heap property from node `k` down.
+fn pqdownheap(tree: &[Ct], heap: &mut [usize], heap_len: usize, depth: &[u8], mut k: usize) {
+    let v = heap[k];
+    let mut j = k << 1;
+    while j <= heap_len {
+        if j < heap_len && smaller(tree, heap[j + 1], heap[j], depth) {
+            j += 1;
+        }
+        if smaller(tree, v, heap[j], depth) {
+            break;
+        }
+        heap[k] = heap[j];
+        k = j;
+        j <<= 1;
+    }
+    heap[k] = v;
+}
+
+/// Which tree a `tree_desc` describes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Which {
+    L,
+    D,
+    Bl,
+}
+
+/// The longest-match search of levels 8 and 9 without walking the hash
+/// chain candidate by candidate where it can be helped (an addition to
+/// zlib's state; the matches chosen are zlib's, [`State::fast_match`]):
+/// beside the three-byte chains, chains of the positions by their first
+/// `k` bytes for `k` = 4 to 8 (`head`, `prev`, as zlib's `head` and
+/// `prev`), and each position's place in its three-byte chain (`seq`,
+/// from the count of positions its chain had when it joined, `count`).
+#[derive(Clone)]
+struct Fast {
+    head: [Vec<u16>; 5],
+    prev: [Vec<u16>; 5],
+    seq: Vec<u32>,
+    count: Vec<u32>,
+}
+
+/// The `k`-byte chains' table size.
+const FAST_BITS: u32 = 15;
+
+impl Fast {
+    fn new() -> Box<Fast> {
+        Box::new(Fast {
+            head: core::array::from_fn(|_| alloc::vec![0; 1 << FAST_BITS]),
+            prev: core::array::from_fn(|_| alloc::vec![0; W_SIZE]),
+            seq: alloc::vec![0; W_SIZE],
+            count: alloc::vec![0; HASH_SIZE],
+        })
+    }
+
+    /// The tables as [`Fast::new`] makes them, in this allocation.
+    fn zero(&mut self) {
+        for v in self.head.iter_mut().chain(self.prev.iter_mut()) {
+            v.fill(0);
+        }
+        self.seq.fill(0);
+        self.count.fill(0);
+    }
+
+    /// The first `k` bytes at `p` of `w`, as a number.
+    fn key(w: &[u8], p: usize, k: usize) -> u64 {
+        let x = u64::from_le_bytes(w[p..p + 8].try_into().unwrap_or([0; 8]));
+        if k == 8 {
+            x
+        } else {
+            x & ((1u64 << (8 * k)) - 1)
+        }
+    }
+
+    fn slot(key: u64) -> usize {
+        usize::try_from(key.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - FAST_BITS)).unwrap_or(0)
+    }
+
+    /// Position `p` joins its chains (`h` its three-byte hash).
+    fn insert(&mut self, w: &[u8], p: usize, h: usize) {
+        self.count[h] = self.count[h].wrapping_add(1);
+        self.seq[p & W_MASK] = self.count[h];
+        for k in 4..=8 {
+            let i = Self::slot(Self::key(w, p, k));
+            self.prev[k - 4][p & W_MASK] = self.head[k - 4][i];
+            self.head[k - 4][i] = pos_u16(p);
+        }
+    }
+
+    fn slide(&mut self) {
+        let w = pos_u16(W_SIZE);
+        for v in self.head.iter_mut().chain(self.prev.iter_mut()) {
+            for p in v.iter_mut() {
+                *p = p.saturating_sub(w);
+            }
+        }
+    }
+}
+
+/// One compression: zlib's `deflate_state` with its `z_stream`'s input.
+struct State<'a> {
+    st: Box<Static>,
+    level: usize,
+    input: &'a [u8],
+    next_in: usize,
+    adler: u32,
+    out: Vec<u8>,
+    window: Window,
+    prev: Box<[u16; W_SIZE]>,
+    head: Box<[u16; HASH_SIZE]>,
+    ins_h: u32,
+    /// `block_start` (C's `long`): negative once the window slid past
+    /// the block's start.
+    block_start: isize,
+    match_length: usize,
+    prev_match: usize,
+    match_available: bool,
+    strstart: usize,
+    match_start: usize,
+    lookahead: usize,
+    prev_length: usize,
+    max_chain_length: usize,
+    max_lazy_match: usize,
+    good_match: usize,
+    nice_match: usize,
+    dyn_ltree: [Ct; HEAP_SIZE],
+    dyn_dtree: [Ct; 2 * D_CODES + 1],
+    bl_tree: [Ct; 2 * BL_CODES + 1],
+    l_max_code: usize,
+    d_max_code: usize,
+    bl_max_code: usize,
+    bl_count: [u16; MAX_BITS + 1],
+    heap: [usize; 2 * L_CODES + 1],
+    heap_len: usize,
+    heap_max: usize,
+    depth: [u8; 2 * L_CODES + 1],
+    sym_buf: Box<[u8; SYM_LEN]>,
+    sym_next: usize,
+    sym_end: usize,
+    opt_len: u64,
+    static_len: u64,
+    insert: usize,
+    /// The bits not yet written (zlib's `bi_buf`, wider: written four
+    /// bytes at a time, the stream the same) and their count (< 32).
+    bi_buf: u64,
+    bi_valid: u32,
+    /// The input read at most this many bytes at a time, the state kept
+    /// before each read past `snap_step` bytes after the last one kept
+    /// (0: read whole, nothing kept): see [`Resumable`].
+    snap_step: usize,
+    /// The states kept, each with the length of the output then.
+    snaps: Vec<(usize, State<'static>)>,
+    /// The search by longer prefixes ([`Fast`]), where it is kept.
+    fast: Option<Box<Fast>>,
+    /// [`FAST_CHECK`], read once per compression.
+    check: bool,
+}
+
+enum Block {
+    NeedMore,
+    Done,
+    FinishDone,
+}
+
+/// A window position (< `WINDOW_SIZE` = 64K) as `head` and `prev` keep
+/// it (C's `Pos`, an `ush`).
+fn pos_u16(s: usize) -> u16 {
+    u16::try_from(s).expect("a position in the window")
+}
+
+/// A window position as `block_start` (C's `long`) counts it.
+fn isize_of(s: usize) -> isize {
+    isize::try_from(s).expect("a position in the window")
+}
+
+/// The index of the first byte in 3..`MAX_MATCH` where the window's
+/// bytes at `a` and at `b` differ, or `MAX_MATCH` (eight bytes at a
+/// time: the lowest set byte of their XOR). (Not inlined: the chain's
+/// walk calls it for a few of its candidates.)
+#[inline(never)]
+fn common_len(w: &[u8; WIN_LEN], a: usize, b: usize) -> usize {
+    let (x, y) = (&w[a + 3..=a + MAX_MATCH], &w[b + 3..=b + MAX_MATCH]);
+    let mut i = 3;
+    for (x, y) in x.as_chunks::<8>().0.iter().zip(y.as_chunks::<8>().0) {
+        let d = u64::from_le_bytes(*x) ^ u64::from_le_bytes(*y);
+        if d != 0 {
+            return i + (d.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    MAX_MATCH
+}
+
+impl State<'_> {
+    // ---- trees.c ----
+
+    fn put_short(&mut self, w: u16) {
+        self.out.extend_from_slice(&w.to_le_bytes());
+    }
+
+    /// `send_bits`: `value` (below `1 << length`, `length` ≤ 16, as
+    /// zlib's Assert in `send_bits` has it) appended to the bit buffer,
+    /// its low 32 bits written once they are full.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn send_bits(&mut self, value: u32, length: u32) {
+        self.bi_buf |= u64::from(value) << self.bi_valid;
+        self.bi_valid += length;
+        if self.bi_valid >= 32 {
+            #[allow(clippy::cast_possible_truncation)]
+            let low = self.bi_buf as u32;
+            self.out.extend_from_slice(&low.to_le_bytes());
+            self.bi_buf >>= 32;
+            self.bi_valid -= 32;
+        }
+    }
+
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn send_ct(&mut self, ct: Ct) {
+        self.send_bits(u32::from(ct.fc), u32::from(ct.dl));
+    }
+
+    /// `bi_windup`: the bits left written, to the byte boundary.
+    fn bi_windup(&mut self) {
+        let n = self.bi_valid.div_ceil(8) as usize;
+        let b = self.bi_buf.to_le_bytes();
+        self.out.extend_from_slice(&b[..n]);
+        self.bi_buf = 0;
+        self.bi_valid = 0;
+    }
+
+    fn init_block(&mut self) {
+        for n in 0..L_CODES {
+            self.dyn_ltree[n].fc = 0;
+        }
+        for n in 0..D_CODES {
+            self.dyn_dtree[n].fc = 0;
+        }
+        for n in 0..BL_CODES {
+            self.bl_tree[n].fc = 0;
+        }
+        self.dyn_ltree[END_BLOCK].fc = 1;
+        self.opt_len = 0;
+        self.static_len = 0;
+        self.sym_next = 0;
+    }
+
+    fn tree(&mut self, w: Which) -> &mut [Ct] {
+        match w {
+            Which::L => &mut self.dyn_ltree,
+            Which::D => &mut self.dyn_dtree,
+            Which::Bl => &mut self.bl_tree,
+        }
+    }
+
+    fn pqdownheap(&mut self, w: Which, k: usize) {
+        let tree: &[Ct] = match w {
+            Which::L => &self.dyn_ltree,
+            Which::D => &self.dyn_dtree,
+            Which::Bl => &self.bl_tree,
+        };
+        pqdownheap(tree, &mut self.heap, self.heap_len, &self.depth, k);
+    }
+
+    fn gen_bitlen(&mut self, w: Which) {
+        let max_code = match w {
+            Which::L => self.l_max_code,
+            Which::D => self.d_max_code,
+            Which::Bl => self.bl_max_code,
+        };
+        let (extra, base, max_length): (&[u32], usize, usize) = match w {
+            Which::L => (&EXTRA_LBITS, LITERALS + 1, MAX_BITS),
+            Which::D => (&EXTRA_DBITS, 0, MAX_BITS),
+            Which::Bl => (&EXTRA_BLBITS, 0, MAX_BL_BITS),
+        };
+        let mut overflow = 0i32;
+        for bits in 0..=MAX_BITS {
+            self.bl_count[bits] = 0;
+        }
+        let root = self.heap[self.heap_max];
+        self.tree(w)[root].dl = 0;
+        let mut h = self.heap_max + 1;
+        while h < HEAP_SIZE {
+            let n = self.heap[h];
+            let tree = self.tree(w);
+            let mut bits = usize::from(tree[usize::from(tree[n].dl)].dl) + 1;
+            if bits > max_length {
+                bits = max_length;
+                overflow += 1;
+            }
+            tree[n].dl = node_u16(bits);
+            h += 1;
+            if n > max_code {
+                continue;
+            }
+            let f = u64::from(tree[n].fc);
+            self.bl_count[bits] += 1;
+            let xbits = if n >= base {
+                u64::from(extra[n - base])
+            } else {
+                0
+            };
+            self.opt_len = self.opt_len.wrapping_add(f * (bits as u64 + xbits));
+            let stree_len = match w {
+                Which::L => Some(u64::from(self.st.ltree[n].dl)),
+                Which::D => Some(u64::from(self.st.dtree[n].dl)),
+                Which::Bl => None,
+            };
+            if let Some(sl) = stree_len {
+                self.static_len = self.static_len.wrapping_add(f * (sl + xbits));
+            }
+        }
+        if overflow == 0 {
+            return;
+        }
+        loop {
+            let mut bits = max_length - 1;
+            while self.bl_count[bits] == 0 {
+                bits -= 1;
+            }
+            self.bl_count[bits] -= 1;
+            self.bl_count[bits + 1] += 2;
+            self.bl_count[max_length] -= 1;
+            overflow -= 2;
+            if overflow <= 0 {
+                break;
+            }
+        }
+        let mut h = HEAP_SIZE;
+        let mut bits = max_length;
+        while bits != 0 {
+            let mut n = self.bl_count[bits];
+            while n != 0 {
+                h -= 1;
+                let m = self.heap[h];
+                if m > max_code {
+                    continue;
+                }
+                let tree = self.tree(w);
+                if usize::from(tree[m].dl) != bits {
+                    let fr = u64::from(tree[m].fc);
+                    let old = u64::from(tree[m].dl);
+                    tree[m].dl = node_u16(bits);
+                    self.opt_len = self
+                        .opt_len
+                        .wrapping_add((bits as u64).wrapping_sub(old).wrapping_mul(fr));
+                }
+                n -= 1;
+            }
+            bits -= 1;
+        }
+    }
+
+    fn build_tree(&mut self, w: Which) {
+        let elems = match w {
+            Which::L => L_CODES,
+            Which::D => D_CODES,
+            Which::Bl => BL_CODES,
+        };
+        // (C's `max_code = -1`: `None`; at least two codes are made
+        // nonzero below, so it is a code after)
+        let mut max_code: Option<usize> = None;
+        self.heap_len = 0;
+        self.heap_max = HEAP_SIZE;
+        for n in 0..elems {
+            if self.tree(w)[n].fc != 0 {
+                self.heap_len += 1;
+                self.heap[self.heap_len] = n;
+                max_code = Some(n);
+                self.depth[n] = 0;
+            } else {
+                self.tree(w)[n].dl = 0;
+            }
+        }
+        while self.heap_len < 2 {
+            let node = match max_code {
+                Some(m) if m >= 2 => 0,
+                m => {
+                    let next = m.map_or(0, |m| m + 1);
+                    max_code = Some(next);
+                    next
+                }
+            };
+            self.heap_len += 1;
+            self.heap[self.heap_len] = node;
+            self.tree(w)[node].fc = 1;
+            self.depth[node] = 0;
+            self.opt_len = self.opt_len.wrapping_sub(1);
+            let static_bits = match w {
+                Which::L => u64::from(self.st.ltree[node].dl),
+                Which::D => u64::from(self.st.dtree[node].dl),
+                Which::Bl => 0,
+            };
+            self.static_len = self.static_len.wrapping_sub(static_bits);
+        }
+        let max_code = max_code.expect("two codes at least");
+        match w {
+            Which::L => self.l_max_code = max_code,
+            Which::D => self.d_max_code = max_code,
+            Which::Bl => self.bl_max_code = max_code,
+        }
+        let mut n = self.heap_len / 2;
+        while n >= 1 {
+            self.pqdownheap(w, n);
+            n -= 1;
+        }
+        let mut node = elems;
+        loop {
+            // (pqremove)
+            let n = self.heap[1];
+            self.heap[1] = self.heap[self.heap_len];
+            self.heap_len -= 1;
+            self.pqdownheap(w, 1);
+            let m = self.heap[1];
+            self.heap_max -= 1;
+            self.heap[self.heap_max] = n;
+            self.heap_max -= 1;
+            self.heap[self.heap_max] = m;
+            let (nu, mu) = (n, m);
+            let (dn, dm) = (self.depth[nu], self.depth[mu]);
+            let tree = self.tree(w);
+            tree[node].fc = tree[nu].fc.wrapping_add(tree[mu].fc);
+            tree[nu].dl = node_u16(node);
+            tree[mu].dl = node_u16(node);
+            self.depth[node] = (if dn >= dm { dn } else { dm }).wrapping_add(1);
+            self.heap[1] = node;
+            node += 1;
+            self.pqdownheap(w, 1);
+            if self.heap_len < 2 {
+                break;
+            }
+        }
+        self.heap_max -= 1;
+        self.heap[self.heap_max] = self.heap[1];
+        self.gen_bitlen(w);
+        let bl_count = self.bl_count;
+        gen_codes(self.tree(w), max_code, &bl_count);
+    }
+
+    fn scan_tree(&mut self, w: Which, max_code: usize) {
+        // (C's `prevlen = -1`: no length yet)
+        let mut prevlen: Option<usize> = None;
+        let mut nextlen = usize::from(self.tree(w)[0].dl);
+        let mut count: usize = 0;
+        let (mut max_count, mut min_count) = (7, 4);
+        if nextlen == 0 {
+            max_count = 138;
+            min_count = 3;
+        }
+        self.tree(w)[max_code + 1].dl = 0xffff;
+        for n in 0..=max_code {
+            let curlen = nextlen;
+            nextlen = usize::from(self.tree(w)[n + 1].dl);
+            count += 1;
+            if count < max_count && curlen == nextlen {
+                continue;
+            }
+            if count < min_count {
+                // (`count` < `min_count` ≤ 4)
+                let c = u16::try_from(count).expect("a short run");
+                self.bl_tree[curlen].fc = self.bl_tree[curlen].fc.wrapping_add(c);
+            } else if curlen != 0 {
+                if Some(curlen) != prevlen {
+                    self.bl_tree[curlen].fc = self.bl_tree[curlen].fc.wrapping_add(1);
+                }
+                self.bl_tree[REP_3_6].fc = self.bl_tree[REP_3_6].fc.wrapping_add(1);
+            } else if count <= 10 {
+                self.bl_tree[REPZ_3_10].fc = self.bl_tree[REPZ_3_10].fc.wrapping_add(1);
+            } else {
+                self.bl_tree[REPZ_11_138].fc = self.bl_tree[REPZ_11_138].fc.wrapping_add(1);
+            }
+            count = 0;
+            prevlen = Some(curlen);
+            if nextlen == 0 {
+                max_count = 138;
+                min_count = 3;
+            } else if curlen == nextlen {
+                max_count = 6;
+                min_count = 3;
+            } else {
+                max_count = 7;
+                min_count = 4;
+            }
+        }
+    }
+
+    fn send_tree(&mut self, w: Which, max_code: usize) {
+        // (C's `prevlen = -1`: no length yet)
+        let mut prevlen: Option<usize> = None;
+        let mut nextlen = usize::from(self.tree(w)[0].dl);
+        let mut count: usize = 0;
+        let (mut max_count, mut min_count) = (7, 4);
+        if nextlen == 0 {
+            max_count = 138;
+            min_count = 3;
+        }
+        for n in 0..=max_code {
+            let curlen = nextlen;
+            nextlen = usize::from(self.tree(w)[n + 1].dl);
+            count += 1;
+            if count < max_count && curlen == nextlen {
+                continue;
+            }
+            if count < min_count {
+                loop {
+                    self.send_ct(self.bl_tree[curlen]);
+                    count -= 1;
+                    if count == 0 {
+                        break;
+                    }
+                }
+            } else if curlen != 0 {
+                if Some(curlen) != prevlen {
+                    self.send_ct(self.bl_tree[curlen]);
+                    count -= 1;
+                }
+                self.send_ct(self.bl_tree[REP_3_6]);
+                self.send_bits(bits(count - 3), 2);
+            } else if count <= 10 {
+                self.send_ct(self.bl_tree[REPZ_3_10]);
+                self.send_bits(bits(count - 3), 3);
+            } else {
+                self.send_ct(self.bl_tree[REPZ_11_138]);
+                self.send_bits(bits(count - 11), 7);
+            }
+            count = 0;
+            prevlen = Some(curlen);
+            if nextlen == 0 {
+                max_count = 138;
+                min_count = 3;
+            } else if curlen == nextlen {
+                max_count = 6;
+                min_count = 3;
+            } else {
+                max_count = 7;
+                min_count = 4;
+            }
+        }
+    }
+
+    fn build_bl_tree(&mut self) -> usize {
+        self.scan_tree(Which::L, self.l_max_code);
+        self.scan_tree(Which::D, self.d_max_code);
+        self.build_tree(Which::Bl);
+        let mut max_blindex = BL_CODES - 1;
+        while max_blindex >= 3 {
+            if self.bl_tree[BL_ORDER[max_blindex]].dl != 0 {
+                break;
+            }
+            max_blindex -= 1;
+        }
+        self.opt_len = self
+            .opt_len
+            .wrapping_add(3 * (max_blindex as u64 + 1) + 5 + 5 + 4);
+        max_blindex
+    }
+
+    fn send_all_trees(&mut self, lcodes: usize, dcodes: usize, blcodes: usize) {
+        self.send_bits(bits(lcodes - 257), 5);
+        self.send_bits(bits(dcodes - 1), 5);
+        self.send_bits(bits(blcodes - 4), 4);
+        for &r in &BL_ORDER[..blcodes] {
+            let l = u32::from(self.bl_tree[r].dl);
+            self.send_bits(l, 3);
+        }
+        self.send_tree(Which::L, lcodes - 1);
+        self.send_tree(Which::D, dcodes - 1);
+    }
+
+    fn stored_block(&mut self, buf: Option<usize>, stored_len: usize, last: bool) {
+        self.send_bits((STORED_BLOCK << 1) + u32::from(last), 3);
+        self.bi_windup();
+        // (`_tr_stored_block` writes `(ush)stored_len`: a block is at most
+        // the window, and a stored one at most `MAX_STORED`)
+        let len = u16::try_from(stored_len).expect("a stored block fits 16 bits");
+        self.put_short(len);
+        self.put_short(!len);
+        if let Some(b) = buf {
+            let w = self.window[b..b + stored_len].to_vec();
+            self.out.extend_from_slice(&w);
+        }
+    }
+
+    /// `compress_block`: the block's symbols in the trees `ltree` and
+    /// `dtree` (the static ones or the block's own).
+    fn compress_block(&mut self, dynamic: bool) {
+        let (ltree, dtree): (&[Ct; L_CODES + 2], &[Ct; D_CODES]) = if dynamic {
+            (
+                self.dyn_ltree[..L_CODES + 2]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!()),
+                self.dyn_dtree[..D_CODES]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!()),
+            )
+        } else {
+            (&self.st.ltree, &self.st.dtree)
+        };
+        let st = &self.st;
+        let (mut buf, mut valid) = (self.bi_buf, self.bi_valid);
+        let out = &mut self.out;
+        // (`send_bits` on the locals)
+        let mut send = |v: u32, n: u32| {
+            buf |= u64::from(v) << valid;
+            valid += n;
+            if valid >= 32 {
+                #[allow(clippy::cast_possible_truncation)]
+                let low = buf as u32;
+                out.extend_from_slice(&low.to_le_bytes());
+                buf >>= 32;
+                valid -= 32;
+            }
+        };
+        for sym in self.sym_buf[..self.sym_next].as_chunks::<3>().0 {
+            let mut dist = usize::from(sym[0]) | usize::from(sym[1]) << 8;
+            let mut lc = usize::from(sym[2]);
+            if dist == 0 {
+                let ct = ltree[lc];
+                send(u32::from(ct.fc), u32::from(ct.dl));
+            } else {
+                let code = usize::from(st.length_code[lc]);
+                let ct = ltree[code + LITERALS + 1];
+                send(u32::from(ct.fc), u32::from(ct.dl));
+                let extra = EXTRA_LBITS[code];
+                if extra != 0 {
+                    lc -= st.base_length[code];
+                    send(bits(lc), extra);
+                }
+                dist -= 1;
+                let code = st.d_code(dist);
+                let ct = dtree[code];
+                send(u32::from(ct.fc), u32::from(ct.dl));
+                let extra = EXTRA_DBITS[code];
+                if extra != 0 {
+                    dist -= st.base_dist[code];
+                    send(bits(dist), extra);
+                }
+            }
+        }
+        let ct = ltree[END_BLOCK];
+        send(u32::from(ct.fc), u32::from(ct.dl));
+        self.bi_buf = buf;
+        self.bi_valid = valid;
+    }
+
+    fn flush_block(&mut self, buf: Option<usize>, stored_len: usize, last: bool) {
+        self.build_tree(Which::L);
+        self.build_tree(Which::D);
+        let max_blindex = self.build_bl_tree();
+        let mut opt_lenb = self.opt_len.wrapping_add(3 + 7) >> 3;
+        let static_lenb = self.static_len.wrapping_add(3 + 7) >> 3;
+        if static_lenb <= opt_lenb {
+            opt_lenb = static_lenb;
+        }
+        if stored_len as u64 + 4 <= opt_lenb && buf.is_some() {
+            self.stored_block(buf, stored_len, last);
+        } else if static_lenb == opt_lenb {
+            self.send_bits((STATIC_TREES << 1) + u32::from(last), 3);
+            self.compress_block(false);
+        } else {
+            self.send_bits((DYN_TREES << 1) + u32::from(last), 3);
+            let (l, d) = (self.l_max_code + 1, self.d_max_code + 1);
+            self.send_all_trees(l, d, max_blindex + 1);
+            self.compress_block(true);
+        }
+        self.init_block();
+        if last {
+            self.bi_windup();
+        }
+    }
+
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn tally_lit(&mut self, c: u8) -> bool {
+        let i = self.sym_next & (SYM_ALLOC - 1);
+        self.sym_buf[i..i + 3].copy_from_slice(&[0, 0, c]);
+        self.sym_next += 3;
+        self.dyn_ltree[usize::from(c)].fc = self.dyn_ltree[usize::from(c)].fc.wrapping_add(1);
+        self.sym_next == self.sym_end
+    }
+
+    fn tally_dist(&mut self, dist: usize, len: usize) -> bool {
+        // (`_tr_tally_dist`: `dist` ≤ `MAX_DIST`, `len` ≤ `MAX_MATCH` - `MIN_MATCH`)
+        let [d0, d1] = u16::try_from(dist)
+            .expect("dist below the window")
+            .to_le_bytes();
+        let i = self.sym_next & (SYM_ALLOC - 1);
+        #[allow(clippy::cast_possible_truncation)]
+        self.sym_buf[i..i + 3].copy_from_slice(&[d0, d1, len as u8]);
+        self.sym_next += 3;
+        let lc = usize::from(self.st.length_code[len & 0xff]) + LITERALS + 1;
+        self.dyn_ltree[lc].fc = self.dyn_ltree[lc].fc.wrapping_add(1);
+        let dc = self.st.d_code(dist - 1);
+        self.dyn_dtree[dc].fc = self.dyn_dtree[dc].fc.wrapping_add(1);
+        self.sym_next == self.sym_end
+    }
+
+    // ---- deflate.c ----
+
+    fn update_hash(&mut self, c: u8) {
+        self.ins_h = ((self.ins_h << HASH_SHIFT) ^ u32::from(c)) & HASH_MASK;
+    }
+
+    /// `INSERT_STRING`: returns the chain's previous head.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn insert_string(&mut self, s: usize) -> usize {
+        let c = wb(&self.window, s + MIN_MATCH - 1);
+        let ih = ((self.ins_h << HASH_SHIFT) ^ u32::from(c)) & HASH_MASK;
+        self.ins_h = ih;
+        let h = self.head[ih as usize];
+        self.prev[s & W_MASK] = h;
+        #[allow(clippy::cast_possible_truncation)]
+        let p = s as u16;
+        self.head[ih as usize] = p;
+        if let Some(f) = self.fast.as_mut() {
+            f.insert(&*self.window, s, ih as usize);
+        }
+        usize::from(h)
+    }
+
+    fn slide_hash(&mut self) {
+        // (`slide_hash`: `m >= wsize ? m - wsize : NIL`, `NIL` being 0)
+        let w = pos_u16(W_SIZE);
+        for p in self.head.iter_mut().chain(&mut self.prev) {
+            *p = p.saturating_sub(w);
+        }
+        if let Some(f) = self.fast.as_mut() {
+            f.slide();
+        }
+    }
+
+    fn read_buf(&mut self, at: usize, size: usize) -> usize {
+        let mut len = (self.input.len() - self.next_in).min(size);
+        if self.snap_step != 0 {
+            len = len.min(self.snap_step);
+        }
+        if len == 0 {
+            return 0;
+        }
+        let src = &self.input[self.next_in..self.next_in + len];
+        self.window[at..at + len].copy_from_slice(src);
+        self.adler = adler32(self.adler, src);
+        self.next_in += len;
+        len
+    }
+
+    fn avail_in(&self) -> usize {
+        self.input.len() - self.next_in
+    }
+
+    fn fill_window(&mut self) {
+        loop {
+            let mut more = WINDOW_SIZE - self.lookahead - self.strstart;
+            if self.strstart >= W_SIZE + MAX_DIST {
+                self.window.copy_within(W_SIZE..W_SIZE + W_SIZE - more, 0);
+                self.match_start = self.match_start.wrapping_sub(W_SIZE);
+                self.strstart -= W_SIZE;
+                self.block_start -= isize_of(W_SIZE);
+                if self.insert > self.strstart {
+                    self.insert = self.strstart;
+                }
+                self.slide_hash();
+                more += W_SIZE;
+            }
+            if self.avail_in() == 0 {
+                break;
+            }
+            let n = self.read_buf(self.strstart + self.lookahead, more);
+            self.lookahead += n;
+            if self.lookahead + self.insert >= MIN_MATCH {
+                let mut str = self.strstart - self.insert;
+                self.ins_h = u32::from(self.window[str]);
+                let c = self.window[str + 1];
+                self.update_hash(c);
+                while self.insert != 0 {
+                    let c = self.window[str + MIN_MATCH - 1];
+                    self.update_hash(c);
+                    let ih = (self.ins_h & HASH_MASK) as usize;
+                    self.prev[str & W_MASK] = self.head[ih];
+                    self.head[ih] = pos_u16(str);
+                    if let Some(f) = self.fast.as_mut() {
+                        f.insert(&*self.window, str, ih);
+                    }
+                    str += 1;
+                    self.insert -= 1;
+                    if self.lookahead + self.insert < MIN_MATCH {
+                        break;
+                    }
+                }
+            }
+            if !(self.lookahead < MIN_LOOKAHEAD && self.avail_in() != 0) {
+                break;
+            }
+        }
+        // (the window is zeroed beyond the data from the start: zlib's
+        // `high_water` zeroing changes nothing a match can read, as the
+        // matches are capped by the lookahead)
+    }
+
+    /// Before a read: the state kept if `snap_step` bytes were read
+    /// since the last one kept (a state that has read exactly
+    /// `next_in` bytes: it resumes on any input those bytes begin).
+    fn keep_state(&mut self) {
+        if self.snap_step == 0 || self.avail_in() == 0 {
+            return;
+        }
+        let last = self.snaps.last().map_or(0, |(_, s)| s.next_in);
+        if self.next_in >= last + self.snap_step {
+            let s = self.copy_static();
+            self.snaps.push((self.out.len(), s));
+        }
+    }
+
+    /// This state without its input, output and kept states.
+    fn copy_static(&self) -> State<'static> {
+        State {
+            st: self.st.clone(),
+            level: self.level,
+            input: &[],
+            next_in: self.next_in,
+            adler: self.adler,
+            out: Vec::new(),
+            window: self.window.clone(),
+            prev: self.prev.clone(),
+            head: self.head.clone(),
+            ins_h: self.ins_h,
+            block_start: self.block_start,
+            match_length: self.match_length,
+            prev_match: self.prev_match,
+            match_available: self.match_available,
+            strstart: self.strstart,
+            match_start: self.match_start,
+            lookahead: self.lookahead,
+            prev_length: self.prev_length,
+            max_chain_length: self.max_chain_length,
+            max_lazy_match: self.max_lazy_match,
+            good_match: self.good_match,
+            nice_match: self.nice_match,
+            dyn_ltree: self.dyn_ltree,
+            dyn_dtree: self.dyn_dtree,
+            bl_tree: self.bl_tree,
+            l_max_code: self.l_max_code,
+            d_max_code: self.d_max_code,
+            bl_max_code: self.bl_max_code,
+            bl_count: self.bl_count,
+            heap: self.heap,
+            heap_len: self.heap_len,
+            heap_max: self.heap_max,
+            depth: self.depth,
+            sym_buf: self.sym_buf.clone(),
+            sym_next: self.sym_next,
+            sym_end: self.sym_end,
+            opt_len: self.opt_len,
+            static_len: self.static_len,
+            insert: self.insert,
+            bi_buf: self.bi_buf,
+            bi_valid: self.bi_valid,
+            snap_step: self.snap_step,
+            snaps: Vec::new(),
+            fast: self.fast.clone(),
+            check: self.check,
+        }
+    }
+
+    /// [`State::longest_match`] by the longer prefixes' chains ([`Fast`]):
+    /// the match zlib's walk finds is the first candidate, in chain order,
+    /// of the longest length beyond `prev_length` among the first
+    /// `chain_length` candidates of the three-byte chain (`hash_head`
+    /// first; the others past `limit`); a position with its first `k`
+    /// bytes equal to the current one's is found as the most recent of
+    /// its `k`-byte chain, and the candidates are a run of the most
+    /// recent ones, so the longest length below 8 is the largest `k` whose
+    /// most recent position is a candidate, and that position the match;
+    /// from 8 on, the candidates with 8 equal bytes are compared as zlib
+    /// does. `None` where this does not apply (no fast chains; a match
+    /// that can stop short of 258 bytes, near the input's end).
+    fn fast_match(&mut self, cur_match: usize) -> Option<usize> {
+        let f = self.fast.as_ref()?;
+        if self.nice_match < MAX_MATCH || self.lookahead < MIN_LOOKAHEAD {
+            return None;
+        }
+        let s = self.strstart;
+        let w: &[u8; WIN_LEN] = &self.window;
+        let mut chain = self.max_chain_length;
+        if self.prev_length >= self.good_match {
+            chain >>= 2;
+        }
+        let limit = if s > MAX_DIST { s - MAX_DIST } else { NIL };
+        let top = f.seq[cur_match & W_MASK];
+        // (a candidate: the head, or a later one past the limit, within
+        // the chain's length; `p` of the same three-byte chain)
+        let candidate = |p: usize| -> bool {
+            p != NIL
+                && (p == cur_match || (p > limit && p < cur_match))
+                && (top.wrapping_sub(f.seq[p & W_MASK]) as usize) < chain
+        };
+        // (the most recent position before `s` whose first `k` bytes are
+        // `s`'s, if a candidate)
+        let recent = |k: usize| -> Option<usize> {
+            let key = Fast::key(w, s, k);
+            let mut p = usize::from(f.head[k - 4][Fast::slot(key)]);
+            while p != NIL && (p >= s || Fast::key(w, p, k) != key) {
+                if p < s && p <= limit {
+                    return None;
+                }
+                p = usize::from(f.prev[k - 4][p & W_MASK]);
+            }
+            (p != NIL && candidate(p)).then_some(p)
+        };
+        // (three bytes: the three-byte chain from its head, the colliding
+        // positions passed over)
+        let mut p3 = None;
+        let mut p = cur_match;
+        for _ in 0..chain {
+            if w[p] == w[s] && w[p + 1] == w[s + 1] {
+                p3 = Some(p);
+                break;
+            }
+            p = usize::from(self.prev[p & W_MASK]);
+            if p <= limit {
+                break;
+            }
+        }
+        let mut best = (self.prev_length, self.match_start);
+        let Some(mut at) = p3.filter(|&p| candidate(p)) else {
+            return Some(best.0.min(self.lookahead));
+        };
+        let mut len = 3;
+        for k in 4..=8 {
+            match recent(k) {
+                Some(p) => {
+                    at = p;
+                    len = k;
+                }
+                None => break,
+            }
+        }
+        if len < 8 {
+            if len > best.0 {
+                best = (len, at);
+            }
+        } else {
+            // (eight bytes or more: each such candidate compared, from the
+            // most recent, as zlib's walk does)
+            let key = Fast::key(w, s, 8);
+            let mut p = at;
+            while p != NIL && p < s && (p > limit || p == cur_match) {
+                if Fast::key(w, p, 8) == key {
+                    if !candidate(p) {
+                        break;
+                    }
+                    let l = common_len(w, s, p);
+                    if l > best.0 {
+                        best = (l, p);
+                        if l >= self.nice_match {
+                            break;
+                        }
+                    }
+                }
+                p = usize::from(f.prev[4][p & W_MASK]);
+            }
+        }
+        self.match_start = best.1;
+        Some(best.0.min(self.lookahead))
+    }
+
+    /// `longest_match`: by the longer prefixes' chains where they are
+    /// kept ([`State::fast_match`]), else zlib's walk.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn longest_match(&mut self, cur_match: usize) -> usize {
+        if self.fast.is_some() {
+            self.fast_or_walk(cur_match)
+        } else {
+            self.chain_match(cur_match)
+        }
+    }
+
+    #[inline(never)]
+    fn fast_or_walk(&mut self, cur_match: usize) -> usize {
+        let ms0 = self.match_start;
+        if let Some(n) = self.fast_match(cur_match) {
+            if cfg!(debug_assertions) || self.check {
+                let ms = self.match_start;
+                self.match_start = ms0;
+                let n2 = self.chain_match(cur_match);
+                assert_eq!(
+                    (n, ms),
+                    (n2, self.match_start),
+                    "fast_match differs at {}",
+                    self.strstart
+                );
+            }
+            return n;
+        }
+        self.chain_match(cur_match)
+    }
+
+    /// zlib's walk of the three-byte chain from `cur_match`.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn chain_match(&mut self, mut cur_match: usize) -> usize {
+        let mut chain_length = self.max_chain_length;
+        let scan0 = self.strstart;
+        let mut best_len = self.prev_length;
+        let mut nice_match = self.nice_match;
+        let limit = if self.strstart > MAX_DIST {
+            self.strstart - MAX_DIST
+        } else {
+            NIL
+        };
+        let w: &[u8; WIN_LEN] = &self.window;
+        let prev: &[u16; W_SIZE] = &self.prev;
+        // (zlib's four compares, `match[best_len]`, `match[best_len-1]`,
+        // `match[0]` and `match[1]` against `scan`'s, as two of two bytes)
+        let scan_start = w16(w, scan0);
+        let mut scan_end = w16(w, scan0 + best_len - 1);
+        if self.prev_length >= self.good_match {
+            chain_length >>= 2;
+        }
+        if nice_match > self.lookahead {
+            nice_match = self.lookahead;
+        }
+        let mut match_start = self.match_start;
+        loop {
+            let m = cur_match;
+            if w16(w, m + best_len - 1) == scan_end && w16(w, m) == scan_start {
+                // (the bytes from 3 on, as zlib's loop compares them: it
+                // steps eight at a time from `scan + 2` and stops at the
+                // first byte that differs or at `strend` (256 bytes on,
+                // a multiple of eight), so the length is the index of the
+                // first differing byte in 3..258, or 258)
+                let len = common_len(w, scan0, m);
+                if len > best_len {
+                    match_start = cur_match;
+                    best_len = len;
+                    if len >= nice_match {
+                        break;
+                    }
+                    scan_end = w16(w, scan0 + best_len - 1);
+                }
+            }
+            cur_match = usize::from(prev[cur_match & W_MASK]);
+            if cur_match <= limit {
+                break;
+            }
+            chain_length -= 1;
+            if chain_length == 0 {
+                break;
+            }
+        }
+        self.match_start = match_start;
+        if best_len <= self.lookahead {
+            best_len
+        } else {
+            self.lookahead
+        }
+    }
+
+    fn block_ptr(&self) -> Option<usize> {
+        usize::try_from(self.block_start).ok()
+    }
+
+    fn flush_block_only(&mut self, last: bool) {
+        let buf = self.block_ptr();
+        let len = usize::try_from(isize_of(self.strstart) - self.block_start)
+            .expect("the block starts before strstart");
+        self.flush_block(buf, len, last);
+        self.block_start = isize_of(self.strstart);
+    }
+
+    fn deflate_fast(&mut self, finish: bool) -> Block {
+        loop {
+            if self.lookahead < MIN_LOOKAHEAD {
+                self.keep_state();
+                self.fill_window();
+                if self.lookahead < MIN_LOOKAHEAD && !finish {
+                    return Block::NeedMore;
+                }
+                if self.lookahead == 0 {
+                    break;
+                }
+            }
+            let mut hash_head = NIL;
+            if self.lookahead >= MIN_MATCH {
+                hash_head = self.insert_string(self.strstart);
+            }
+            if hash_head != NIL && self.strstart - hash_head <= MAX_DIST {
+                self.match_length = self.longest_match(hash_head);
+            }
+            let bflush;
+            if self.match_length >= MIN_MATCH {
+                bflush = self.tally_dist(
+                    self.strstart - self.match_start,
+                    self.match_length - MIN_MATCH,
+                );
+                self.lookahead -= self.match_length;
+                // (`max_insert_length` is `max_lazy_match`)
+                if self.match_length <= self.max_lazy_match && self.lookahead >= MIN_MATCH {
+                    self.match_length -= 1;
+                    loop {
+                        self.strstart += 1;
+                        self.insert_string(self.strstart);
+                        self.match_length -= 1;
+                        if self.match_length == 0 {
+                            break;
+                        }
+                    }
+                    self.strstart += 1;
+                } else {
+                    self.strstart += self.match_length;
+                    self.match_length = 0;
+                    self.ins_h = u32::from(wb(&self.window, self.strstart));
+                    let c = wb(&self.window, self.strstart + 1);
+                    self.update_hash(c);
+                }
+            } else {
+                let c = wb(&self.window, self.strstart);
+                bflush = self.tally_lit(c);
+                self.lookahead -= 1;
+                self.strstart += 1;
+            }
+            if bflush {
+                self.flush_block_only(false);
+            }
+        }
+        self.insert = if self.strstart < MIN_MATCH - 1 {
+            self.strstart
+        } else {
+            MIN_MATCH - 1
+        };
+        if finish {
+            self.flush_block_only(true);
+            return Block::FinishDone;
+        }
+        if self.sym_next != 0 {
+            self.flush_block_only(false);
+        }
+        Block::Done
+    }
+
+    fn deflate_slow(&mut self, finish: bool) -> Block {
+        loop {
+            if self.lookahead < MIN_LOOKAHEAD {
+                self.keep_state();
+                self.fill_window();
+                if self.lookahead < MIN_LOOKAHEAD && !finish {
+                    return Block::NeedMore;
+                }
+                if self.lookahead == 0 {
+                    break;
+                }
+            }
+            let mut hash_head = NIL;
+            if self.lookahead >= MIN_MATCH {
+                hash_head = self.insert_string(self.strstart);
+            }
+            self.prev_length = self.match_length;
+            self.prev_match = self.match_start;
+            self.match_length = MIN_MATCH - 1;
+            if hash_head != NIL
+                && self.prev_length < self.max_lazy_match
+                && self.strstart - hash_head <= MAX_DIST
+            {
+                self.match_length = self.longest_match(hash_head);
+                if self.match_length <= 5
+                    && self.match_length == MIN_MATCH
+                    && self.strstart.wrapping_sub(self.match_start) > TOO_FAR
+                {
+                    self.match_length = MIN_MATCH - 1;
+                }
+            }
+            if self.prev_length >= MIN_MATCH && self.match_length <= self.prev_length {
+                let max_insert = self.strstart + self.lookahead - MIN_MATCH;
+                let bflush = self.tally_dist(
+                    self.strstart - 1 - self.prev_match,
+                    self.prev_length - MIN_MATCH,
+                );
+                self.lookahead -= self.prev_length - 1;
+                self.prev_length -= 2;
+                loop {
+                    self.strstart += 1;
+                    if self.strstart <= max_insert {
+                        self.insert_string(self.strstart);
+                    }
+                    self.prev_length -= 1;
+                    if self.prev_length == 0 {
+                        break;
+                    }
+                }
+                self.match_available = false;
+                self.match_length = MIN_MATCH - 1;
+                self.strstart += 1;
+                if bflush {
+                    self.flush_block_only(false);
+                }
+            } else if self.match_available {
+                let c = wb(&self.window, self.strstart - 1);
+                if self.tally_lit(c) {
+                    self.flush_block_only(false);
+                }
+                self.strstart += 1;
+                self.lookahead -= 1;
+            } else {
+                self.match_available = true;
+                self.strstart += 1;
+                self.lookahead -= 1;
+            }
+        }
+        if self.match_available {
+            let c = self.window[self.strstart - 1];
+            self.tally_lit(c);
+            self.match_available = false;
+        }
+        self.insert = if self.strstart < MIN_MATCH - 1 {
+            self.strstart
+        } else {
+            MIN_MATCH - 1
+        };
+        if finish {
+            self.flush_block_only(true);
+            return Block::FinishDone;
+        }
+        if self.sym_next != 0 {
+            self.flush_block_only(false);
+        }
+        Block::Done
+    }
+}
+
+/// Adler-32 (RFC 1950), continued from `a`.
+#[must_use]
+pub fn adler32(a: u32, data: &[u8]) -> u32 {
+    let (mut s1, mut s2) = (a & 0xffff, a >> 16);
+    for chunk in data.chunks(5552) {
+        for &c in chunk {
+            s1 += u32::from(c);
+            s2 += s1;
+        }
+        s1 %= 65521;
+        s2 %= 65521;
+    }
+    (s2 << 16) | s1
+}
+
+/// `data` compressed by zlib at `level` (1–9), as `compress2` and
+/// pdfTeX's `writezip` make it: the zlib header, the deflate stream, the
+/// Adler-32 of the data.
+///
+/// # Panics
+///
+/// Never: its checked conversions hold zlib's own invariants (positions
+/// within the 64K window, codes of at most 15 bits).
+#[must_use]
+pub fn compress(data: &[u8], level: i32) -> Vec<u8> {
+    compress_with(&mut Scratch::default(), data, level)
+}
+
+/// What one compression allocates, kept for the next by a caller that
+/// compresses many streams: the static trees and the window, hash
+/// chains and symbol buffer (zeroed again where zlib's fresh state is
+/// zero: the window, `head` and `prev`; the symbol buffer is written
+/// before it is read).
+#[derive(Default)]
+pub struct Scratch {
+    st: Option<Box<Static>>,
+    window: Option<Window>,
+    prev: Option<Box<[u16; W_SIZE]>>,
+    head: Option<Box<[u16; HASH_SIZE]>>,
+    sym_buf: Option<Box<[u8; SYM_LEN]>>,
+    /// ([`Resumable`]'s: the states to keep and those kept, and whether
+    /// the search keeps its longer chains, [`Fast`].)
+    snap_step: usize,
+    snaps: Vec<(usize, State<'static>)>,
+    fast: bool,
+    /// The longer chains' tables of the last compression, zeroed again
+    /// for the next (a megabyte: allocated each time, its pages were
+    /// faulted in again for every stream).
+    fast_tables: Option<Box<Fast>>,
+}
+
+/// Every [`Fast`] match checked against zlib's walk (a test's switch;
+/// always in debug builds).
+pub static FAST_CHECK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+impl State<'_> {
+    /// The rest of the compression: the input's end and the adler.
+    fn run(&mut self) {
+        let _ = if self.level <= 3 {
+            self.deflate_fast(true)
+        } else {
+            self.deflate_slow(true)
+        };
+        let a = self.adler;
+        self.out.extend(a.to_be_bytes());
+    }
+}
+
+/// A compression kept to be done again on an input that begins as the
+/// last one did: the states it went through, one every
+/// [`Resumable::STEP`] bytes of input, so that the next starts from the
+/// last state that read only bytes both inputs share. The bytes are
+/// [`compress`]'s (zlib's output does not depend on how the input is
+/// split into reads).
+#[derive(Default)]
+pub struct Resumable {
+    level: i32,
+    input: Vec<u8>,
+    out: Vec<u8>,
+    snaps: Vec<(usize, State<'static>)>,
+    /// The buffers of a compression from the start, kept for the next.
+    scratch: Scratch,
+}
+
+impl Resumable {
+    /// The input bytes between two states kept.
+    pub const STEP: usize = 16 << 10;
+
+    /// [`compress`] of `data` at `level`, resumed from the last state
+    /// kept that read no byte where `data` differs from the last input;
+    /// with the number of input bytes compressed again.
+    #[must_use]
+    pub fn compress(&mut self, data: &[u8], level: i32) -> (Vec<u8>, usize) {
+        let same = if level == self.level {
+            self.input
+                .iter()
+                .zip(data)
+                .position(|(a, b)| a != b)
+                .unwrap_or(self.input.len().min(data.len()))
+        } else {
+            0
+        };
+        if same == data.len() && same == self.input.len() && !self.out.is_empty() {
+            return (self.out.clone(), 0);
+        }
+        let keep = self.snaps.partition_point(|(_, s)| s.next_in <= same);
+        self.snaps.truncate(keep);
+        let last = self
+            .snaps
+            .last()
+            .map(|(at, snap)| (*at, snap.copy_static()));
+        let (out, from) = if let Some((at, mut s)) = last {
+            s.input = data;
+            s.out = Vec::with_capacity(data.len() / 2 + 64);
+            s.out.extend_from_slice(&self.out[..at]);
+            s.snaps = core::mem::take(&mut self.snaps);
+            let from = s.next_in;
+            s.run();
+            self.snaps = s.snaps;
+            (s.out, from)
+        } else {
+            let sc = &mut self.scratch;
+            sc.snap_step = Self::STEP;
+            sc.fast = true;
+            sc.snaps.clear();
+            let out = compress_with(sc, data, level);
+            self.snaps = core::mem::take(&mut sc.snaps);
+            (out, 0)
+        };
+        self.level = level;
+        self.input.clear();
+        self.input.extend_from_slice(data);
+        self.out.clone_from(&out);
+        (out, data.len() - from)
+    }
+}
+
+/// `b` (a fresh zeroed array if `None`) with its first `k` elements
+/// zeroed (above them, what the last use left or zero).
+fn zeroed_to<T: Copy + Default, const N: usize>(b: Option<Box<[T; N]>>, k: usize) -> Box<[T; N]> {
+    zeroed_from(b, 0..k)
+}
+
+/// `b` (a fresh zeroed array if `None`) with the elements `r` zeroed.
+fn zeroed_from<T: Copy + Default, const N: usize>(
+    b: Option<Box<[T; N]>>,
+    r: core::ops::Range<usize>,
+) -> Box<[T; N]> {
+    match b {
+        Some(mut b) => {
+            b[r.start.min(N)..r.end.min(N)].fill(T::default());
+            b
+        }
+        None => zbox(),
+    }
+}
+
+/// [`compress`] with the buffers of `sc` (the same bytes).
+///
+/// # Panics
+///
+/// As [`compress`]: never.
+#[must_use]
+pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
+    let level = level.clamp(1, 9).unsigned_abs() as usize;
+    let (good, lazy, nice, chain) = CONFIG[level];
+    // (data the window holds whole, never slid: every byte of the
+    // window read is the data's or, past its end, within a match's
+    // reach, which is zeroed (zlib's `high_water`); `prev` is written
+    // before it is read (a chain holds only positions inserted); `head`
+    // is zeroed whole)
+    let reach = (data.len() + MIN_LOOKAHEAD <= W_SIZE).then_some(data.len());
+    let mut s = State {
+        st: sc.st.take().unwrap_or_else(Static::new),
+        level,
+        input: data,
+        next_in: 0,
+        adler: 1,
+        out: Vec::with_capacity(data.len() / 2 + 64),
+        window: zeroed_from(
+            sc.window.take(),
+            reach.map_or(0..WINDOW_SIZE + MAX_MATCH + 8, |n| {
+                n..n + MAX_MATCH + MIN_MATCH + 8
+            }),
+        ),
+        prev: sc.prev.take().unwrap_or_else(zbox),
+        head: zeroed_to(sc.head.take(), HASH_SIZE),
+        ins_h: 0,
+        block_start: 0,
+        match_length: MIN_MATCH - 1,
+        prev_match: 0,
+        match_available: false,
+        strstart: 0,
+        match_start: 0,
+        lookahead: 0,
+        prev_length: MIN_MATCH - 1,
+        max_chain_length: chain,
+        max_lazy_match: lazy,
+        good_match: good,
+        nice_match: nice,
+        dyn_ltree: [Ct::default(); HEAP_SIZE],
+        dyn_dtree: [Ct::default(); 2 * D_CODES + 1],
+        bl_tree: [Ct::default(); 2 * BL_CODES + 1],
+        l_max_code: 0,
+        d_max_code: 0,
+        bl_max_code: 0,
+        bl_count: [0; MAX_BITS + 1],
+        heap: [0; 2 * L_CODES + 1],
+        heap_len: 0,
+        heap_max: 0,
+        depth: [0; 2 * L_CODES + 1],
+        sym_buf: sc.sym_buf.take().unwrap_or_else(zbox),
+        sym_next: 0,
+        sym_end: (LIT_BUFSIZE - 1) * 3,
+        opt_len: 0,
+        static_len: 0,
+        insert: 0,
+        bi_buf: 0,
+        bi_valid: 0,
+        snap_step: 0,
+        snaps: Vec::new(),
+        fast: sc.fast.then(|| match sc.fast_tables.take() {
+            Some(mut f) => {
+                f.zero();
+                f
+            }
+            None => Fast::new(),
+        }),
+        check: FAST_CHECK.load(core::sync::atomic::Ordering::Relaxed),
+    };
+    s.init_block();
+    // (the zlib header: deflate, a 32K window, the level's flags)
+    let level_flags = if level < 2 {
+        0
+    } else if level < 6 {
+        1
+    } else if level == 6 {
+        2
+    } else {
+        3
+    };
+    let mut header: u16 = (8 + ((15 - 8) << 4)) << 8;
+    header |= level_flags << 6;
+    header += 31 - header % 31;
+    s.out.extend_from_slice(&header.to_be_bytes());
+    s.snap_step = sc.snap_step;
+    s.run();
+    sc.snaps = core::mem::take(&mut s.snaps);
+    sc.st = Some(s.st);
+    sc.window = Some(s.window);
+    sc.prev = Some(s.prev);
+    sc.head = Some(s.head);
+    sc.sym_buf = Some(s.sym_buf);
+    sc.fast_tables = s.fast.take();
+    s.out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adler() {
+        assert_eq!(adler32(1, b"Wikipedia"), 0x11E6_0398);
+    }
+
+    #[test]
+    fn empty_and_small() {
+        // (`python3 -c "import zlib; print(zlib.compress(b'', 9).hex())"`)
+        assert_eq!(
+            compress(b"", 9),
+            [0x78, 0xda, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]
+        );
+        assert_eq!(
+            compress(b"hello hello hello", 9),
+            [
+                120, 218, 203, 72, 205, 201, 201, 87, 200, 64, 144, 0, 58, 46, 6, 125
+            ]
+        );
+    }
+
+    /// Every `/FlateDecode` stream pdfTeX wrote into the output tests'
+    /// fixtures (zlib at `\pdfcompresslevel` 9) is reproduced byte for byte.
+    #[test]
+    fn as_pdftex_zlib() {
+        // (`hi9.pdf` is the fixture pdfTeX compressed: its page and its
+        // embedded Type 1 font.)
+        let pdf: &[u8] = include_bytes!("../../output/pdf/tests/fixtures/hi9.pdf");
+        let mut checked = 0;
+        let mut at = 0;
+        while let Some(k) = find(&pdf[at..], b"stream\n") {
+            let start = at + k + 7;
+            let Some(len) = find(&pdf[start..], b"\nendstream") else {
+                break;
+            };
+            let z = &pdf[start..start + len];
+            at = start + len + b"\nendstream".len();
+            if z.starts_with(&[0x78, 0xda]) {
+                let data = crate::inflate::inflate(z).expect("a zlib stream");
+                assert!(compress(&data, 9) == z, "stream at byte {start}");
+                checked += 1;
+            }
+        }
+        assert!(checked == 2, "{checked} streams");
+    }
+
+    /// A scratch a long stream left (its window, chains and symbols
+    /// full) compresses short ones as a fresh state does.
+    #[test]
+    fn reused_scratch_after_long_stream() {
+        let mut x: u32 = 12345;
+        let mut word = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                    b"abcde fghij\n()"[(x >> 16) as usize % 14]
+                })
+                .collect()
+        };
+        let long = word(200_000);
+        let mut sc = Scratch::default();
+        for n in [0, 1, 3, 100, 5000, 30_000, 32_500, 40_000] {
+            let _ = compress_with(&mut sc, &long, 9);
+            let short = word(n);
+            assert!(
+                compress_with(&mut sc, &short, 9) == compress(&short, 9),
+                "{n}"
+            );
+            let mut rep = short.clone();
+            rep.extend_from_slice(&short);
+            assert!(
+                compress_with(&mut sc, &rep, 9) == compress(&rep, 9),
+                "{n} twice"
+            );
+        }
+    }
+
+    /// (measure, differential) Every file in `PHITEX_DEFLATE_DIR`
+    /// compressed at levels 1, 6 and 9: the MD5 of each stream (to
+    /// compare two builds of the compressor) and the time per call.
+    #[test]
+    #[ignore = "needs PHITEX_DEFLATE_DIR"]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::unchecked_time_subtraction,
+        clippy::format_collect
+    )]
+    fn dir_digests() {
+        extern crate std;
+        use alloc::string::String;
+        use std::{format, println};
+        let Some(dir) = std::env::var_os("PHITEX_DEFLATE_DIR") else {
+            return;
+        };
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .expect("a directory")
+            .map(|e| e.expect("an entry").path())
+            .collect();
+        names.sort();
+        let reps: usize = std::env::var("PHITEX_DEFLATE_REPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let mut total = std::time::Duration::ZERO;
+        let mut sc = Scratch::default();
+        for n in names {
+            let data = std::fs::read(&n).expect("a file");
+            for level in [1, 6, 9] {
+                let t0 = std::time::Instant::now();
+                let mut z = Vec::new();
+                for _ in 0..reps {
+                    z = compress_with(&mut sc, &data, level);
+                }
+                let t = t0.elapsed();
+                assert!(
+                    z == compress(&data, level),
+                    "{n:?} at {level}: a reused scratch"
+                );
+                let t0 = std::time::Instant::now() - t;
+                let t = t0.elapsed();
+                if level == 9 {
+                    total += t;
+                }
+                let d: String = crate::md5::md5(&z)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                println!(
+                    "{} {level} {} {d} {:.1}us",
+                    n.file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    z.len(),
+                    t.as_secs_f64() * 1e6 / reps as f64
+                );
+            }
+        }
+        println!(
+            "level 9 total {:.1} ms per rep",
+            total.as_secs_f64() * 1e3 / reps as f64
+        );
+    }
+
+    fn find(h: &[u8], n: &[u8]) -> Option<usize> {
+        h.windows(n.len()).position(|w| w == n)
+    }
+}

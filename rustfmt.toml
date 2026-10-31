@@ -1,0 +1,2 @@
+unstable_features = true
+ignore = ["crates/core/defuse"]

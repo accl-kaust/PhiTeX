@@ -1,0 +1,14 @@
+% siunitx's S column (jmlr's pmlr-sample, chemistry tables): the cell
+% collects its tokens from the end of its u template on, reading the
+% template's last token as a macro's delimiter (§390 pops the template
+% there, align_state 0), and redefines \cr inside \if_false: { \fi:.
+\documentclass{article}
+\usepackage{siunitx}
+\begin{document}
+\begin{tabular}{lS}
+  Dataset & {Result}\\
+  Data1 & 0.12345\\
+  Data2 & 10.6789\\
+  Data4 & 200.09876
+\end{tabular}
+\end{document}

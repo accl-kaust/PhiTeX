@@ -1,0 +1,22 @@
+% \expandafter chains, \noexpand, \csname, \string, \escapechar.
+\def\a{A}\def\b{B}\def\c{C}
+\def\x#1{[\string#1]}
+\message{\expandafter\x\a}
+\expandafter\def\csname name with spaces\endcsname{NWS}
+\message{\csname name with spaces\endcsname}
+\message{\expandafter\string\csname name with spaces\endcsname}
+\expandafter\expandafter\expandafter\def\expandafter\expandafter\csname x\a\endcsname\expandafter{\b}
+\message{\meaning\xA}
+\message{\expandafter\meaning\csname undefinedname\endcsname}
+\edef\y{\noexpand\a\a}\message{\meaning\y}
+\message{\string\a\string\ \string~\string\{}
+\escapechar=`\/ \message{\string\a\meaning\a}
+\escapechar=-1 \message{\string\a\meaning\relax}
+\escapechar=`\\
+\message{\expandafter\string\csname\endcsname}
+\def\d{\e}\def\e{\f}\def\f{F}
+\message{\expandafter\expandafter\expandafter\meaning\d}
+\message{\expandafter\meaning\noexpand\a}
+\def\q{\expandafter\r\noexpand}\def\r#1{(\meaning#1)}\message{\q\a}
+\count1=12 \message{\expandafter\number\the\count1 34}
+\message{\number\expandafter\count\expandafter1\the\count1}

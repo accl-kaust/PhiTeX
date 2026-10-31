@@ -1,6 +1,19 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask"]
+members = [
+    "crates/cli",
+    "crates/codecs",
+    "crates/core/*",
+    "crates/engines/*",
+    "crates/engines/luatex/lua",
+    "crates/fonts/*",
+    "crates/output/*",
+    "crates/tools/*",
+    "crates/editor/*",
+    "crates/editor/diff/git",
+    "crates/wasm",
+    "xtask",
+]
 
 [workspace.package]
 edition = "2024"
@@ -25,10 +38,6 @@ codegen-units = 1
 inherits = "release"
 debug = true
 
-# (the φ core's property tests run thousands of builds)
-[profile.dev.package.phi]
-opt-level = 2
-
 # Debug iterations: release speed without fat LTO's link (minutes -> seconds);
 # `cargo build --profile fastdev`, binary in target/fastdev/.
 [profile.fastdev]
@@ -36,3 +45,8 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 incremental = true
+
+# METAFONT's integer arithmetic is web2c's C: it wraps where Pascal's
+# would trap (mf.web leans on it in a few places), in every profile.
+[profile.dev.package.phitex-mf]
+overflow-checks = false

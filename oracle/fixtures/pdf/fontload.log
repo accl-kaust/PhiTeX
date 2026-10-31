@@ -1,0 +1,68 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  28 OCT 2026 17:32
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**fontload.tex
+(./fontload.tex
+! Font \x=nosuchfont not loadable: Metric (TFM) file not found.
+<to be read again> 
+                   \font 
+l.3 \font
+         \y=nosuchfont at 12pt
+I wasn't able to read the size data for this font,
+so I will ignore the font specification.
+[Wizards can fix TFM files using TFtoPL/PLtoTF.]
+You might try inserting a different font spec;
+e.g., type `I\font<same font id>=<substitute font name>'.
+
+! Font \y=nosuchfont at 12.0pt not loadable: Metric (TFM) file not found.
+l.3 \font\y=nosuchfont at 12pt
+                              
+I wasn't able to read the size data for this font,
+so I will ignore the font specification.
+[Wizards can fix TFM files using TFtoPL/PLtoTF.]
+You might try inserting a different font spec;
+e.g., type `I\font<same font id>=<substitute font name>'.
+
+! Font \z=nosuchfont scaled 2000 not loadable: Metric (TFM) file not found.
+l.4 \font\z=nosuchfont scaled 2000
+                                  
+I wasn't able to read the size data for this font,
+so I will ignore the font specification.
+[Wizards can fix TFM files using TFtoPL/PLtoTF.]
+You might try inserting a different font spec;
+e.g., type `I\font<same font id>=<substitute font name>'.
+
+! Font \w="no such font" not loadable: Metric (TFM) file not found.
+<to be read again> 
+                   \font 
+l.6 \font
+         \v=fontloadbad
+I wasn't able to read the size data for this font,
+so I will ignore the font specification.
+[Wizards can fix TFM files using TFtoPL/PLtoTF.]
+You might try inserting a different font spec;
+e.g., type `I\font<same font id>=<substitute font name>'.
+
+! Font \v=fontloadbad not loadable: Bad metric (TFM) file.
+<to be read again> 
+                   \font 
+...
+l.7 \expandafter\font\csname a b\endcsname
+                                          =nosuchfont at 7.5pt
+I wasn't able to read the size data for this font,
+so I will ignore the font specification.
+[Wizards can fix TFM files using TFtoPL/PLtoTF.]
+You might try inserting a different font spec;
+e.g., type `I\font<same font id>=<substitute font name>'.
+
+! Font \a b=nosuchfont at 7.5pt not loadable: Metric (TFM) file not found.
+l.7 ...nt\csname a b\endcsname=nosuchfont at 7.5pt
+                                                  
+I wasn't able to read the size data for this font,
+so I will ignore the font specification.
+[Wizards can fix TFM files using TFtoPL/PLtoTF.]
+You might try inserting a different font spec;
+e.g., type `I\font<same font id>=<substitute font name>'.
+
+ )
+No pages of output.

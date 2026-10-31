@@ -1,0 +1,34 @@
+% \the of every kind of quantity, \meaning of every kind of meaning.
+\message{\the\tolerance,\the\mag,\the\escapechar,\the\endlinechar,\the\hangafter,\the\maxdeadcycles,\the\pretolerance}
+\message{\the\hsize,\the\parindent,\the\hoffset,\the\emergencystretch}
+\message{\the\baselineskip,\the\parskip,\the\leftskip}
+\message{\the\thinmuskip,\the\medmuskip}
+\pretolerance=-5 \hfuzz=0.1pt \parskip=0pt plus 1pt \thickmuskip=5mu plus 5mu
+\message{\the\pretolerance,\the\hfuzz,\the\parskip,\the\thickmuskip}
+\everypar{\a\b}\message{\the\everypar}
+\toks5={x \y{z}}\message{\the\toks5}
+\toks6=\toks5 \message{\the\toks6} \everyhbox=\toks6 \message{\the\everyhbox}
+\message{\the\catcode`\a,\the\catcode`\\,\the\catcode`\%,\the\catcode`\ ,\the\catcode`\^^@,\the\catcode`\^^?,\the\catcode`1}
+\message{\the\lccode`A,\the\lccode`a,\the\lccode`1,\the\uccode`a,\the\uccode`Z,\the\uccode`!}
+\message{\the\sfcode`A,\the\sfcode`a,\the\sfcode`.}
+\message{\the\mathcode`a,\the\mathcode`Z,\the\mathcode`5,\the\mathcode`+,\the\mathcode`\^^@}
+\message{\the\delcode`.,\the\delcode`(}
+\mathcode`\+="202B \delcode`\(="028300 \sfcode`\.=3000 \lccode`\A=`\A
+\message{\the\mathcode`+,\the\delcode`(,\the\sfcode`.,\the\lccode`A}
+\chardef\cd=65 \mathchardef\md="7161 \countdef\ct=10 \dimendef\dd=11 \skipdef\sd=12 \muskipdef\msd=13 \toksdef\td=14
+\ct=5 \dd=2pt \sd=1pt plus 1pt \msd=1mu \td={tt}
+\message{\the\cd,\the\md,\the\ct,\the\dd,\the\sd,\the\msd,\the\td}
+\message{\meaning\cd,\meaning\md,\meaning\ct,\meaning\dd,\meaning\sd,\meaning\msd,\meaning\td}
+\message{\the\count10,\the\dimen11,\the\skip12,\the\muskip13,\the\toks14}
+\parshape 2 1pt 2pt 3pt 4pt \message{\the\parshape}
+\message{\the\prevdepth,\the\prevgraf,\the\deadcycles,\the\insertpenalties}
+\message{\the\pagegoal,\the\pagetotal,\the\pagedepth,\the\pageshrink}
+\message{\the\badness,\the\lastpenalty,\the\lastkern,\the\lastskip}
+\message{\the\wd0,\the\ht1,\the\dp2}
+\message{\meaning\relax,\meaning\par,\meaning\count,\meaning\hbox,\meaning\ ,\meaning\/}
+\message{\meaning\tolerance,\meaning\hsize,\meaning\parskip,\meaning\everypar,\meaning\catcode}
+\let\bg={ \let\eg=} \let\mm=$ \let\aa=& \let\hh=# \let\ss=^ \let\uu=_ \let\ll=a \let\oo=1
+\message{\meaning\bg,\meaning\eg,\meaning\mm,\meaning\aa,\meaning\hh,\meaning\ss,\meaning\ll,\meaning\oo}
+\message{\meaning\uu}
+\message{\jobname}
+\message{\meaning a\meaning{\meaning}}

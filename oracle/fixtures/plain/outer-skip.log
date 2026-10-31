@@ -1,0 +1,21 @@
+This is TeX, Version 3.141592653 (TeX Live 2026/Arch Linux) (preloaded format=tex 2026.10.13)  20 OCT 2026 18:43
+**outer-skip.tex
+(./outer-skip.tex
+! Incomplete \iffalse; all text was ignored after line 2.
+<inserted text> 
+                \fi 
+<to be read again> 
+                   \o 
+l.2 \iffalse a \o
+                  b\fi c
+A forbidden control sequence occurred in skipped text.
+This kind of error happens when you say `\if...' and forget
+the matching `\fi'. I've inserted a `\fi'; this might work.
+
+! Extra \fi.
+l.2 \iffalse a \o b\fi
+                       c
+I'm ignoring this; it doesn't match any \if.
+
+[1] )
+Output written on outer-skip.dvi (1 page, 212 bytes).

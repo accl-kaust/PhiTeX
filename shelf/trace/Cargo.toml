@@ -1,0 +1,20 @@
+[package]
+name = "shelf-trace"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "What loading a package reads on PhiTeX (phitex_tex::Build), for Shelf's dependency columns"
+
+[dependencies]
+phitex-tex = { path = "../../crates/engines/tex" }
+phitex-kpse = { path = "../../crates/tools/kpse" }
+
+# (its own workspace: not a member of the engine's)
+[workspace]
+
+# (PhiTeX's fastdev: release speed without fat LTO's long link)
+[profile.release]
+lto = "thin"
+codegen-units = 16
+debug = false

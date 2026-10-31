@@ -1,0 +1,144 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input bera
+(./bera.tex
+Loose \hbox (badness 37) in paragraph at lines 4--4
+[]\r Bera Serif: fi fl ``quotes'' \c _ ` \m mono \b bold
+
+\hbox(8.04999+1.99998)x200.0, glue set 0.72044
+.\hbox(0.0+0.0)x0.0
+.\r B
+.\r e
+.\r r
+.\r a
+.\glue 3.18 plus 1.90999 minus 0.76
+.\r S
+.\r e
+.\r r
+.\r i
+.\r f
+.\r :
+.\glue 3.18 plus 1.90999 minus 0.76
+.\r ^^\ (ligature fi)
+.\glue 3.18 plus 1.90999 minus 0.76
+.\r ^^] (ligature fl)
+.\glue 3.18 plus 1.90999 minus 0.76
+.\r ^^P (ligature ``)
+.\r q
+.\r u
+.\r o
+.\r t
+.\r e
+.\r s
+.\r ^^Q (ligature '')
+.\glue 3.18 plus 1.90999 minus 0.76
+.\c _
+.\glue 3.18
+.\c `
+.\glue 3.18
+.\m m
+.\m o
+.\m n
+.\m o
+.\glue 5.418
+.\b b
+.\b o
+.\b l
+.\b d
+.\glue(\rightskip) 0.0
+
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0, glue set 269.89005fill
+.\glue(\topskip) 0.0
+.\hbox(8.04999+1.99998)x200.0, glue set 0.72044
+..\hbox(0.0+0.0)x0.0
+..\r B
+..\r e
+..\r r
+..\r a
+..\glue 3.18 plus 1.90999 minus 0.76
+..\r S
+..\r e
+..\r r
+..\r i
+..\r f
+..\r :
+..\glue 3.18 plus 1.90999 minus 0.76
+..\r ^^\ (ligature fi)
+..\glue 3.18 plus 1.90999 minus 0.76
+..\r ^^] (ligature fl)
+..\glue 3.18 plus 1.90999 minus 0.76
+..\r ^^P (ligature ``)
+..\r q
+..\r u
+..\r o
+..\r t
+..\r e
+..\r s
+..\r ^^Q (ligature '')
+..\glue 3.18 plus 1.90999 minus 0.76
+..\c _
+..\glue 3.18
+..\c `
+..\glue 3.18
+..\m m
+..\m o
+..\m n
+..\m o
+..\glue 5.418
+..\b b
+..\b o
+..\b l
+..\b d
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 4.52502
+.\hbox(7.47499+0.20499)x200.0, glue set 137.04007fil
+..\s s
+..\s a
+..\s n
+..\s s
+..\glue 3.0 plus 1.8 minus 0.71999
+..\o s
+..\o l
+..\o a
+..\o n
+..\o t
+..\o e
+..\o d
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\pdfrefxform(7.65+0.20499)x52.99596
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}{/usr/share/texmf-dist/fonts
+/enc/dvips/base/8r.enc}
+
+Completed box being shipped out
+\hbox(7.65+0.20499)x52.99596
+.\r a
+.\glue 3.18 plus 1.90999 minus 0.76
+.\c _
+.\glue 3.18
+.\m b
+.\glue 5.418
+.\b c
+.\glue 3.48 plus 2.09 minus 0.84
+.\s d
+.\glue 3.0 plus 1.8 minus 0.71999
+.\o e
+
+ )</usr/share/texmf-dist/fonts/type1/public/bera/fveb8a.pfb></usr/share/texmf-d
+ist/fonts/type1/public/bera/fver8a.pfb></usr/share/texmf-dist/fonts/type1/publi
+c/bera/fver8a.pfb></usr/share/texmf-dist/fonts/type1/public/bera/fvmr8a.pfb></u
+sr/share/texmf-dist/fonts/type1/public/bera/fvsr8a.pfb>
+Output written on bera-trace.pdf (1 page, 18840 bytes).
+PDF statistics:
+ 29 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 7 words of extra memory for PDF output out of 10000 (max. 10000000)
+

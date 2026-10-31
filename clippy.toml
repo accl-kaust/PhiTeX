@@ -1,0 +1,2 @@
+# (the engines' names are words in prose, not code)
+doc-valid-idents = ["TeX", "LaTeX", "XeTeX", "XeLaTeX", "LuaTeX", "LuaLaTeX", "pdfTeX", "pdfLaTeX", "MetaPost", ".."]

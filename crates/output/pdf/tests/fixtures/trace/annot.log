@@ -1,0 +1,807 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input annot
+(./annot.tex
+Loose \hbox (badness 17) in paragraph at lines 8--12
+[]\r A []link text that spans the line break of this
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.56116
+.\hbox(0.0+0.0)x0.0
+.\r A
+.\glue 3.33333 plus 1.66498 minus 1.11221
+.\pdfstartlink(*+*)x* attr{/Border [0 0 0]} action goto name{one}
+.\r l
+.\r i
+.\r n
+.\r k
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r e
+.\r x
+.\r t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r h
+.\r a
+.\r t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r s
+.\r p
+.\r a
+.\r n
+.\r s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r h
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r l
+.\r i
+.\r n
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r b
+.\r r
+.\r e
+.\r a
+.\r k
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r o
+.\r f
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r h
+.\r i
+.\r s
+.\glue(\rightskip) 0.0
+
+
+Tight \hbox (badness 23) in paragraph at lines 8--12
+\r paragraph because it is long and long and long
+
+\hbox(6.94444+1.94444)x200.0, glue set - 0.61255
+.\r p
+.\r a
+.\r r
+.\r a
+.\r g
+.\r r
+.\r a
+.\r p
+.\r h
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r b
+.\kern0.27779
+.\r e
+.\r c
+.\r a
+.\r u
+.\r s
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r i
+.\r t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r i
+.\r s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r l
+.\r o
+.\r n
+.\r g
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r a
+.\r n
+.\r d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r l
+.\r o
+.\r n
+.\r g
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r a
+.\r n
+.\r d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r l
+.\r o
+.\r n
+.\r g
+.\glue(\rightskip) 0.0
+
+
+Tight \hbox (badness 12) in paragraph at lines 16--17
+[]\r Now a link across the page: []start of a link that
+
+\hbox(6.94444+1.94444)x200.0, glue set - 0.49503
+.\hbox(0.0+0.0)x0.0
+.\r N
+.\r o
+.\kern-0.27779
+.\r w
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r a
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r l
+.\r i
+.\r n
+.\r k
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r a
+.\r c
+.\r r
+.\r o
+.\r s
+.\r s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r h
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r p
+.\r a
+.\r g
+.\r e
+.\r :
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\pdfstartlink(*+*)x* action goto name{two}
+.\r s
+.\r t
+.\r a
+.\r r
+.\r t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r o
+.\r f
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r a
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r l
+.\r i
+.\r n
+.\r k
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r h
+.\r a
+.\r t
+.\glue(\rightskip) 0.0
+
+
+Loose \hbox (badness 1) in paragraph at lines 16--17
+\r runs over many lines of text so that the page
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.18887
+.\r r
+.\r u
+.\r n
+.\r s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r o
+.\kern-0.27779
+.\r v
+.\kern-0.27779
+.\r e
+.\r r
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r m
+.\r a
+.\r n
+.\kern-0.27779
+.\r y
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r l
+.\r i
+.\r n
+.\r e
+.\r s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r o
+.\r f
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r e
+.\r x
+.\r t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r s
+.\r o
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r h
+.\r a
+.\r t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r h
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r p
+.\r a
+.\r g
+.\r e
+.\glue(\rightskip) 0.0
+
+
+Loose \hbox (badness 2) in paragraph at lines 16--17
+\r breaks inside it and the rest of it goes to the
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.26665
+.\r b
+.\r r
+.\r e
+.\r a
+.\r k
+.\r s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r i
+.\r n
+.\r s
+.\r i
+.\r d
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r i
+.\r t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r a
+.\r n
+.\r d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r h
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r r
+.\r e
+.\r s
+.\r t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r o
+.\r f
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r i
+.\r t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r g
+.\r o
+.\kern0.27779
+.\r e
+.\r s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r o
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r h
+.\r e
+.\glue(\rightskip) 0.0
+
+
+Tight \hbox (badness 51) in paragraph at lines 16--17
+\r next page where it ends after a few more words
+
+\hbox(6.94444+1.94444)x200.0, glue set - 0.80003
+.\r n
+.\r e
+.\r x
+.\r t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r p
+.\r a
+.\r g
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r w
+.\r h
+.\r e
+.\r r
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r i
+.\r t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r e
+.\r n
+.\r d
+.\r s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r a
+.\r f
+.\r t
+.\r e
+.\r r
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r a
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r f
+.\r e
+.\r w
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r m
+.\r o
+.\r r
+.\r e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r w
+.\kern-0.27779
+.\r o
+.\r r
+.\r d
+.\r s
+.\glue(\rightskip) 0.0
+
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0
+.\pdfannot(5.0+2.0)x10.0{/Subtype /Text /Contents (Hi)}
+.\pdfannot(*+*)x*{/Subtype /Text /Contents (Reserved)}
+.\pdfdest name{one} xyz zoom2000
+.\pdfdest num5 fit
+.\pdfdest name{two} fith
+.\pdfdest name{three} fitr(10.0+0.0)x10.0
+.\pdfdest name{f1} fitb
+.\pdfdest name{f2} fitbh
+.\pdfdest name{f3} fitbv
+.\pdfdest name{f4} fitv
+.\pdfdest name{one} xyz
+.\glue(\topskip) 0.0
+.\hbox(6.94444+1.94444)x200.0, glue set 0.56116
+..\hbox(0.0+0.0)x0.0
+..\r A
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\pdfstartlink(*+*)x* attr{/Border [0 0 0]} action goto name{one}
+..\r l
+..\r i
+..\r n
+..\r k
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r e
+..\r x
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r a
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r s
+..\r p
+..\r a
+..\r n
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r l
+..\r i
+..\r n
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r b
+..\r r
+..\r e
+..\r a
+..\r k
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r o
+..\r f
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r i
+..\r s
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+1.94444)x200.0, glue set - 0.61255
+..\r p
+..\r a
+..\r r
+..\r a
+..\r g
+..\r r
+..\r a
+..\r p
+..\r h
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r b
+..\kern0.27779
+..\r e
+..\r c
+..\r a
+..\r u
+..\r s
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r i
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r i
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r l
+..\r o
+..\r n
+..\r g
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r n
+..\r d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r l
+..\r o
+..\r n
+..\r g
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r n
+..\r d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r l
+..\r o
+..\r n
+..\r g
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+1.94444)x200.0, glue set 92.91649fil
+..\r a
+..\r n
+..\r d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r l
+..\r o
+..\r n
+..\r g
+..\pdfendlink
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r B
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\pdfstartlink(*+*)x* action user{/Subtype /Link /A << /S /URI /URI (http://x)
+ >>}
+..\r U
+..\pdfendlink
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\pdfstartlink(*+*)x* action goto num5
+..\r N
+..\pdfendlink
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfstartlink(*+*)x* action page1{/Fit}
+..\r P
+..\pdfendlink
+..\pdfstartlink(*+*)x* action goto name{missing}
+..\r M
+..\pdfendlink
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfstartlink(8.0+1.0)x20.0 action file{other.pdf} goto name{x}
+..\r R
+..\pdfendlink
+..\pdfstartlink(*+*)x* action thread name{t1}
+..\r T
+..\pdfendlink
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+0.0)x79.55568
+..\pdfstartlink(*+*)x* action goto name{two}
+..\r n
+..\r e
+..\r s
+..\r t
+..\r e
+..\r d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfstartlink(*+*)x* action goto name{three}
+..\r i
+..\r n
+..\r n
+..\r e
+..\r r
+..\pdfendlink
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r o
+..\r u
+..\r t
+..\r e
+..\r r
+..\pdfendlink
+.\pdfthread(20.0+0.0)x50.0 name{t1}
+.\pdfstartthread(*+*)x* name{t2}
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+0.0)x20.83339
+..\r b
+..\kern0.27779
+..\r e
+..\r a
+..\r d
+.\pdfendthread
+.\glue(\parskip) 0.0
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+1.94444)x200.0, glue set - 0.49503
+..\hbox(0.0+0.0)x0.0
+..\r N
+..\r o
+..\kern-0.27779
+..\r w
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r l
+..\r i
+..\r n
+..\r k
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r c
+..\r r
+..\r o
+..\r s
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r p
+..\r a
+..\r g
+..\r e
+..\r :
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfstartlink(*+*)x* action goto name{two}
+..\r s
+..\r t
+..\r a
+..\r r
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r o
+..\r f
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r l
+..\r i
+..\r n
+..\r k
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r a
+..\r t
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+1.94444)x200.0, glue set 0.18887
+..\r r
+..\r u
+..\r n
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r o
+..\kern-0.27779
+..\r v
+..\kern-0.27779
+..\r e
+..\r r
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r m
+..\r a
+..\r n
+..\kern-0.27779
+..\r y
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r l
+..\r i
+..\r n
+..\r e
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r o
+..\r f
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r e
+..\r x
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r s
+..\r o
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r a
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r p
+..\r a
+..\r g
+..\r e
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+1.94444)x200.0, glue set 0.26665
+..\r b
+..\r r
+..\r e
+..\r a
+..\r k
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r i
+..\r n
+..\r s
+..\r i
+..\r d
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r i
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r n
+..\r d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r r
+..\r e
+..\r s
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r o
+..\r f
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r i
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r g
+..\r o
+..\kern0.27779
+..\r e
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r o
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r e
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+1.94444)x200.0, glue set - 0.80003
+..\r n
+..\r e
+..\r x
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r p
+..\r a
+..\r g
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r w
+..\r h
+..\r e
+..\r r
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r i
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r e
+..\r n
+..\r d
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r f
+..\r t
+..\r e
+..\r r
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r f
+..\r e
+..\r w
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r m
+..\r o
+..\r r
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r w
+..\kern-0.27779
+..\r o
+..\r r
+..\r d
+..\r s
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+0.0)x200.0, glue set 33.97194fil
+..\r a
+..\r n
+..\r d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r s
+..\r o
+..\r m
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r m
+..\r o
+..\r r
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r w
+..\kern-0.27779
+..\r o
+..\r r
+..\r d
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r n
+..\r d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r m
+..\r o
+..\r r
+..\r e
+..\pdfendlink
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r d
+..\r o
+..\r n
+..\r e
+..\r .
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+
+
+pdfTeX warning (ext4): destination with the same identifier (name{one}) has bee
+n already used, duplicate ignored
+l.18 \penalty-10000 
+                    \pdfdest name{one} fit D\par{/var/lib/texmf/fonts/map/pdfte
+x/updmap/pdftex.map}
+pdfTeX warning (ext4): destination with the same identifier (name{one}) has bee
+n already used, duplicate ignored
+<recently read>  
+                 
+l.18 \penalty-10000 \pdfdest name{one} fit 
+                                           D\par 24
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0, glue set 293.16669fill
+.\glue(\topskip) 0.0
+.\hbox(6.83331+0.0)x200.0, glue set 192.3611fil
+..\hbox(0.0+0.0)x0.0
+..\r D
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+ )
+pdfTeX warning (dest): name{missing} has been referenced but does not exist, re
+placed by a fixed one
+
+</usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on annot-trace.pdf (2 pages, 23952 bytes).
+PDF statistics:
+ 51 PDF objects out of 1000 (max. 8388607)
+ 8 named destinations out of 1000 (max. 500000)
+ 11 words of extra memory for PDF output out of 10000 (max. 10000000)
+

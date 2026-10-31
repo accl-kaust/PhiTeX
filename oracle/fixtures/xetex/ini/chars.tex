@@ -1,0 +1,25 @@
+% The Unicode reader: UTF-8 input, ^^ notations of two to six characters,
+% codes of wide characters, \uppercase, \Uchar, \Ucharcat, \char past 255,
+% XeTeX's \mathcode and \sfcode/\XeTeXcharclass encodings, set in a TFM
+% font (the characters it lacks are dropped).
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\^=7
+\def\loop#1\repeat{\def\body{#1}\iterate}\def\iterate{\body\let\next\iterate\else\let\next\relax\fi\next}
+\hsize=300pt \vsize=500pt \parindent=0pt \baselineskip=12pt \tolerance=10000
+\parfillskip=0pt plus 1fil \font\rm=cmr10 \rm
+\def\space{ }\def\n#1{\number#1\space}
+\catcode`é=11 \lccode`É=`é \uccode`é=`É
+\def\ét{étude}
+\count1=`é \count2=`^^^^03b1 \count3=`^^^^^^01d400 \count4=`ß
+A: \n{\count1}\n{\count2}\n{\count3}\n{\count4}\n{\catcode`é}\n{\catcode`α}\par
+B: \n{\lccode`É}\n{\uccode`é}\n{\sfcode`A}\n{\sfcode`a}\n{\mathcode`a}\n{\mathcode`1}\n{\mathcode`é}\par
+\uppercase{\def\x{étude}}\expandafter\ifx\csname x\endcsname\relax\else C: yes\fi\par
+\XeTeXcharclass`b=7 \sfcode`b=500 D: \n{\sfcode`b}\n{\XeTeXcharclass`b}\par
+\Umathcode`c="2 "5 "1D44E E: \n{\Umathcodenum`c}\n{\mathcode`d}\par
+\Umathchardef\um="1 "3 "222B F: \n{\um}\par
+\edef\u{\Uchar"41\Uchar"03B1\Ucharcat"42 11 \Ucharcat`x 12 } G: \u\par
+\def\h{^^41^^42^^^^0043^^^0044^^^^^^000045} H: \h\par
+I: \n{"10FFFF}\n{\XeTeXversion}\XeTeXrevision\par
+\count5=0 \loop \ifnum\count5<4 \advance\count5 1 \char\count5 \repeat
+J: \count5=`A \loop\ifnum\count5<`G \char\count5 \advance\count5 1 \repeat\par
+K: \message{\ét}\char"E9\char"1D400 x\par
+\end

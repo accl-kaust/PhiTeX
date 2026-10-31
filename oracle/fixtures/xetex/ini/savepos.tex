@@ -1,0 +1,14 @@
+% \pdfsavepos after native words (xetex.web's hlist_out: cur_h moves past
+% a native word's width): each page typesets the \pdflastxpos and
+% \pdflastypos the page before it saved.
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\hsize=200pt \vsize=600pt \parindent=10pt \baselineskip=12pt
+\parfillskip=0pt plus 1fil
+\font\x="[lmroman10-regular]" at 10pt \x
+\def\space{ }\def\pos{\number\pdflastxpos\space\number\pdflastypos\space}
+Some words\pdfsavepos{} and more.\par
+\penalty-10000
+\pos Native words in a box, then the position.\par
+\shipout\hbox{\kern3pt office affluent\pdfsavepos{} x}
+\pos\par
+\end

@@ -1,0 +1,16 @@
+% A font whose METAFONT source the job writes (TeX Live manual feynmf's
+% template): the first run writes fgraphs.mf and finds no fgraphs.tfm;
+% the next run's \font has kpathsea's mktextfm make it from the file the
+% run before wrote (MFINPUTS has the current directory first), and the
+% page's characters are a PK font mktexpk makes from it too. PhiTeX's
+% mktex looked for the source on disk only: "Metric (TFM) file not
+% found" at every round.
+\documentclass{article}
+\usepackage{feynmf}
+\begin{document}
+\begin{fmffile}{fgraphs}
+\begin{fmfgraph}(40,25)
+\fmfleft{i}\fmfright{o}\fmf{fermion}{i,o}
+\end{fmfgraph}
+\end{fmffile}
+\end{document}

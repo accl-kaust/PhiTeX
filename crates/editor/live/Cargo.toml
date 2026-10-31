@@ -1,0 +1,22 @@
+[package]
+name = "phitex-live"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "A live document: the session a watch keeps (one phitex-tex Build, its files, store and outputs the host's), the viewer's protocol and the watch's edits, shared by the phitex CLI and the frontends' wasm core"
+
+[dependencies]
+phitex-tex = { path = "../../engines/tex" }
+phitex-pdf = { path = "../../output/pdf" }
+phitex-render = { path = "../../output/render" }
+phitex-bibtex = { path = "../../tools/bibtex" }
+phitex-codecs = { path = "../../codecs" }
+phitex-xdvipdfmx = { path = "../../output/xdvipdfmx" }
+serde_json = "=1.0.154"
+
+[dev-dependencies]
+phitex-otf = { path = "../../fonts/otf" }
+
+[lints]
+workspace = true

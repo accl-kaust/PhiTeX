@@ -1,0 +1,19 @@
+\documentclass{article}
+\begin{document}
+Inline math $a^2+b^2=c^2$ and $\frac{1}{2}\sum_{i=1}^n x_i$.
+\begin{equation}\label{eq:one}
+  \int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}
+\end{equation}
+By (\ref{eq:one}) we have
+\begin{displaymath}
+  \left( \begin{array}{cc} a & b \\ c & d \end{array} \right)
+  \cdot \sqrt[3]{x+y}
+\end{displaymath}
+and
+\begin{eqnarray}
+  x & = & y + z \\
+  y & \leq & \alpha\beta\gamma \nonumber \\
+  \lim_{n\to\infty} \frac{1}{n} & = & 0
+\end{eqnarray}
+\[ f(x) = \cases{0 & if $x<0$\cr 1 & otherwise} \]
+\end{document}

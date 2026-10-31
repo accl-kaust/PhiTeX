@@ -55,7 +55,10 @@ function viaImports(cmd, inputs) {
   const out = new Uint8Array(memory.buffer).slice(at, at + n);
   const status = new DataView(out.buffer).getInt32(0, true);
   const wrote = unframe(out.subarray(4));
-  return { status, wrote: new Map(wrote) };
+  // (the names removed follow, framed with no bytes)
+  const used = frame(wrote).length;
+  const removed = unframe(out.subarray(4 + used)).map(([name]) => name);
+  return { status, wrote: new Map(wrote), removed };
 }
 
 const native = fs.mkdtempSync(path.join(os.tmpdir(), 'minted-native-'));
@@ -64,6 +67,9 @@ const steps = fs
   .map(Number)
   .sort((a, b) => a - b);
 let failures = 0;
+// (the job's files as the engine holds them: each call is handed what
+// the calls before it wrote, and the data files minted wrote since)
+const job = new Map();
 for (const n of steps) {
   const args = fs.readFileSync(path.join(cap, `${n}`, 'args'), 'utf8').trim().split(/\s+/);
   const inputs = new Map(
@@ -74,7 +80,10 @@ for (const n of steps) {
   );
   const cmd = quote(args);
   t = performance.now();
-  const { status, wrote } = viaImports(cmd, inputs);
+  for (const [f, b] of inputs) job.set(f, b);
+  const { status, wrote, removed } = viaImports(cmd, job);
+  for (const [f, b] of wrote) job.set(f, b);
+  for (const f of removed) job.delete(f);
   const ms = performance.now() - t;
   // the same, natively
   for (const [f, b] of inputs) fs.writeFileSync(path.join(native, f), b);

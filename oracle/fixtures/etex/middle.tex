@@ -1,0 +1,11 @@
+% \middle between \left and \right: the delimiters grow to the inner
+% list, the inner noad's size.
+\font\tenrm=cmr10 \font\teni=cmmi10 \font\tensy=cmsy10 \font\tenex=cmex10
+\textfont0=\tenrm \textfont1=\teni \textfont2=\tensy \textfont3=\tenex
+\scriptfont0=\tenrm \scriptfont1=\teni \scriptfont2=\tensy \scriptfont3=\tenex
+\scriptscriptfont0=\tenrm \scriptscriptfont1=\teni \scriptscriptfont2=\tensy \scriptscriptfont3=\tenex
+\delcode`(="028300 \delcode`)="029301 \delcode`|="26A30C \mathcode`a="7161 \mathcode`b="7162
+\setbox0\hbox{$\left(a\middle|b\right)$}\message{\the\wd0,\the\ht0,\the\dp0}
+\setbox0\hbox{$\left(a\over b\middle|b\right)$}\message{\the\wd0,\the\ht0,\the\dp0}
+\setbox0\hbox{$\left(a\middle|{a\over b}\middle|b\right)$}\message{\the\wd0,\the\ht0,\the\dp0}
+\setbox0\hbox{$\left.a\middle|b\right.$}\message{\the\wd0,\the\ht0,\the\dp0}

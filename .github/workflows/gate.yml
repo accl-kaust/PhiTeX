@@ -1,0 +1,146 @@
+# The gate (docs/ci.md): what a merge to main needs, on GitHub's hosted
+# runners, in the CI image (ci-image.yml). The build shard makes the
+# binaries once; the other shards run them (scripts/ci/gate-gh.sh, the
+# shards of scripts/accl/gate-shard.sh). The job `gate` is the one
+# main's branch protection requires: green only when every shard is.
+# Speed is not gated here (shared runners): exactness only.
+name: gate
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  # (the CI image on GHCR: private, read with the workflow's token)
+  packages: read
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  IMAGE: ghcr.io/accl-kaust/phitex-ci:2026-09-25
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE"
+      # (the compiler cache, on GitHub's cache: only what changed compiles)
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - run: scripts/ci/gate-gh.sh build main
+      # (a tar: an artifact's zip drops the executable bits)
+      - run: tar -C out/r/store -cf store.tar .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store
+          path: store.tar
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r-build
+          path: |
+            out/r
+            !out/r/store
+          retention-days: 14
+  shard:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: suites, args: "suites" }
+          - { name: latex-0, args: "latex 0 4" }
+          - { name: latex-1, args: "latex 1 4" }
+          - { name: latex-2, args: "latex 2 4" }
+          - { name: latex-3, args: "latex 3 4" }
+          # (amsldoc --exact-pdf at -j1, 8 and 16 against TeX Live's
+          # build at SOURCE_DATE_EPOCH 1700000000 in this image)
+          - { name: ams, args: "ams 98c96e004c1c82db1e3d562cf0181a3e" }
+          - { name: amsedit, args: "amsedit 4" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE"
+      - uses: actions/download-artifact@v4
+        with:
+          name: store
+      - run: mkdir -p out/store && tar -C out/store -xf store.tar
+      - run: scripts/ci/gate-gh.sh ${{ matrix.args }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r-${{ matrix.name }}
+          path: out/r
+          retention-days: 14
+  # (every other test binary: each crate's integration tests, the CLI's
+  # on TeX Live among them, and phitex-live's unit tests, as `cargo test`
+  # builds them; checks.yml runs the unit tests only, without TeX Live.
+  # Built in a job of their own, beside the build, and run by one shard)
+  build-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE"
+      # (the compiler cache, on GitHub's cache: only what changed compiles)
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - run: scripts/ci/gate-gh.sh build tests
+      - run: tar -C out/r/store -cf store.tar .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store-tests
+          path: store.tar
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r-build-tests
+          path: |
+            out/r
+            !out/r/store
+          retention-days: 14
+  tests:
+    needs: build-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE"
+      - uses: actions/download-artifact@v4
+        with:
+          name: store-tests
+      - run: mkdir -p out/store && tar -C out/store -xf store.tar
+      - run: scripts/ci/gate-gh.sh tests
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r-tests
+          path: out/r
+          retention-days: 14
+  gate:
+    needs: [build, shard, build-tests, tests]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          echo "build ${{ needs.build.result }}, shards ${{ needs.shard.result }}, build-tests ${{ needs.build-tests.result }}, tests ${{ needs.tests.result }}"
+          [ "${{ needs.build.result }}" = success ] && [ "${{ needs.shard.result }}" = success ] &&
+            [ "${{ needs.build-tests.result }}" = success ] && [ "${{ needs.tests.result }}" = success ]

@@ -1,0 +1,15 @@
+% \interlinepenalties, \clubpenalties, \widowpenalties between the lines
+% of paragraphs; \lastlinefit.
+\font\tenrm=cmr10 \tenrm \hbadness=10000
+\def\p{\setbox0\vbox{\hsize=60pt \parindent=0pt \tolerance=10000 \tenrm
+  one two three four five six seven eight nine ten eleven twelve\par
+  \loop}}
+\def\loop{\setbox1\lastbox \ifvoid1 \else \unskip \message{\the\lastpenalty}\unpenalty \expandafter\loop\fi}
+\p
+\interlinepenalties=3 1 2 3 \p
+\clubpenalties=2 100 200 \widowpenalties=3 1000 2000 3000 \p
+\interlinepenalties=0 \clubpenalties=0 \widowpenalties=0 \clubpenalty=7 \widowpenalty=9 \p
+\lastlinefit=500 \parfillskip=0pt plus 1fil
+\setbox0\vbox{\hsize=60pt \parindent=0pt \tolerance=10000 \tenrm one two three four five six seven\par
+  \setbox1\lastbox \global\setbox3\hbox{\unhbox1}}
+\message{\the\wd3}

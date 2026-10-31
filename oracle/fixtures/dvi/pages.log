@@ -1,0 +1,73 @@
+(./pages.tex
+Overfull \hbox (3.6948pt too wide) in paragraph at lines 6--9
+[]\tenrm First paragraph of a document with several
+
+\hbox(6.94444+1.94444)x200.0, glue set - 1.0 []
+
+
+Loose \hbox (badness 3) in paragraph at lines 6--9
+\tenrm pages, long enough to run over a few lines of
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.30368 []
+
+
+Loose \hbox (badness 14) in paragraph at lines 6--9
+\tenrm the narrow measure, so the page builder has
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.52379 []
+
+
+Underfull \hbox (badness 111) in paragraph at lines 6--9
+\tenrm lines to consider breaking between, and the
+
+\hbox(6.94444+1.94444)x200.0, glue set 1.03886 []
+
+
+Loose \hbox (badness 90) in paragraph at lines 11--13
+[]\tenrm Second paragraph, on to the next page
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.96664 []
+
+
+Tight \hbox (badness 60) in paragraph at lines 11--13
+\tenrm perhaps, continuing for a while with words and
+
+\hbox(6.94444+1.94444)x200.0, glue set - 0.84648 []
+
+
+Loose \hbox (badness 1) in paragraph at lines 11--13
+\tenrm more words until the page is full and a break
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.1722 []
+
+[3.7]
+Underfull \hbox (badness 10000) in paragraph at lines 15--15
+[]\tenrm Third paragraph.
+
+\hbox(6.94444+1.94444)x200.0, glue set 62.61694 []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 15--15
+
+
+\hbox(0.0+0.0)x200.0 []
+
+
+Underfull \hbox (badness 201) in paragraph at lines 17--19
+[]\tenrm Fourth paragraph after a forced break,
+
+\hbox(6.94444+1.94444)x200.0, glue set 1.2633 []
+
+
+Loose \hbox (badness 1) in paragraph at lines 17--19
+\tenrm also long enough to need lines of its own and
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.21109 []
+
+
+Tight \hbox (badness 29) in paragraph at lines 17--19
+\tenrm to fill the rest of the page and possibly another
+
+\hbox(6.94444+1.94444)x200.0, glue set - 0.66115 []
+
+[3.0.0.4] [-5] )

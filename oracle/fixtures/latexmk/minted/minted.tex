@@ -1,0 +1,30 @@
+\documentclass{article}
+\usepackage{minted}
+\begin{document}
+\section{Listings}
+Some text before the first listing, long enough to make a line or two
+of a paragraph before the code starts.
+\begin{minted}{python}
+def fib(n):
+    """The n-th Fibonacci number."""
+    return n if n < 2 else fib(n - 1) + fib(n - 2)
+\end{minted}
+A paragraph between the listings, with \mintinline{c}{int x = 42;}
+inline in its text.
+\begin{minted}{c}
+#include <stdio.h>
+
+int main(void)
+{
+    printf("hello, world\n");
+    return 0;
+}
+\end{minted}
+\begin{minted}[linenos]{rust}
+fn main() {
+    let v: Vec<u32> = (1..10).map(|x| x * x).collect();
+    println!("{:?}", v);
+}
+\end{minted}
+Final words after the last listing.
+\end{document}

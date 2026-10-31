@@ -1,0 +1,15 @@
+% An amsbook title page: \@maketitle sets \topskip in a group, so the
+% piece that ends it puts the page parameters on the main list at its
+% end; reading them may stop the run, which must then run again (at -j4
+% a marker of zeros was committed without that read: two pages more).
+\documentclass{amsbook}
+\begin{document}
+\frontmatter
+\title{Lectures}
+\author{L. Algebraist}
+\begin{abstract}
+A short monograph.
+\end{abstract}
+\maketitle
+Text.
+\end{document}

@@ -16,6 +16,8 @@ export interface Problem {
   file: string | null;
   line: number | null;
   col: number | null;
+  /** The culprit's bytes in `file` (the engine's problems): its boxes on the pages, PreviewSession.boxesOf. */
+  range?: [number, number];
   /** The line as far as TeX read it and after, the culprit at [start, start+len) (characters). */
   excerpt: { text: string; start: number; len: number } | null;
   /** The macros it happened in, innermost first. */
@@ -120,6 +122,8 @@ export function problemHtml(p: Problem): string {
 
 /** A problem as diagnostics.ts's Diagnostic, the whole problem kept for the drawer to show. */
 export function asDiagnostic(p: Problem): { severity: "error" | "warning" | "info"; code: string; message: string; file?: string; line?: number; problem: Problem } {
+  // (from the wire: what a sender left out, empty, so one short item never stops the view)
+  p = Object.assign({ notes: [], help: [], suggestions: [], file: null, line: null, col: null, excerpt: null, context: [], included: [], box: null }, p);
   const severity = p.severity === "fatal" || p.severity === "error" ? "error" : p.severity === "warning" ? "warning" : "info";
   return { severity, code: p.code, message: p.message, file: p.file ?? undefined, line: p.line ?? undefined, problem: p };
 }
@@ -144,37 +148,35 @@ function item(p: Problem): string {
   const inc = p.included.length ? `<div class="phx-inc">included from ${p.included.map((i) => place(i.file, i.line, 1)).join(", ")}</div>` : "";
   const box = p.box ? `<pre class="phx-excerpt">${esc(p.box.excerpt)}</pre>` : "";
   const list = (cls: string, xs: string[]) => (xs.length ? `<ul class="${cls}">${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "");
-  return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help, ...p.suggestions])}</li>`;
+  return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...(p.help.length ? [p.help.join(" ").replace(/\s+/g, " ").trim()] : []), ...p.suggestions])}</li>`;
 }
 
-/** The panel's CSS, in the host's tokens where it has them (fallbacks otherwise). */
+/** The problems' CSS, in the panel's tokens (print.ts), with fallbacks for a page without them (the modal Problems). */
 export const PROBLEMS_CSS = `
-.phx-problems { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, 0.45); overflow: auto; padding: 48px 16px; }
-.phx-card { max-width: 960px; margin: 0 auto; background: #1b1c1f; color: #e6e6e6; border-radius: 10px; border-top: 6px solid #e5484d;
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5); font: 13px/1.5 system-ui, sans-serif; }
-.phx-card header { display: flex; align-items: center; gap: 8px; padding: 14px 18px; border-bottom: 1px solid #2c2e33; font-size: 15px; }
-.phx-card header b { color: #ff6369; }
-.phx-close { margin-left: auto; background: #2c2e33; color: #bbb; border: 0; border-radius: 6px; padding: 3px 10px; font: 12px ui-monospace, monospace; cursor: pointer; }
+.phx-problems { position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / 45%); overflow: auto; padding: 48px 16px; }
+.phx-card { max-width: 900px; margin: 0 auto; background: var(--ph-menu, #fff); color: var(--ph-fg, #1b222c); border-radius: var(--ph-radius, 4px);
+  font: 13px/1.45 var(--ph-font, "Noto Sans", system-ui, sans-serif); }
+.phx-card header { display: flex; align-items: baseline; gap: 10px; padding: 12px 16px 10px; border-bottom: 1px solid var(--ph-border, #e7e9ee); font-weight: 600; }
+.phx-close { margin-left: auto; background: none; color: var(--ph-fg2, #495365); border: 1px solid var(--ph-border, #e7e9ee); border-radius: var(--ph-radius, 4px);
+  padding: 1px 8px; font: inherit; font-size: 12px; cursor: pointer; }
 .phx-card ol { list-style: none; margin: 0; padding: 0; }
-.phx-card li { padding: 14px 18px; border-bottom: 1px solid #2c2e33; }
-.phx-msg { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-size: 14px; }
-.phx-sev { text-transform: uppercase; font-size: 11px; letter-spacing: 0.06em; font-weight: 700; padding: 1px 6px; border-radius: 4px; }
-.phx-error .phx-sev { background: #e5484d; color: #fff; }
-.phx-warning .phx-sev { background: #f5a524; color: #1b1c1f; }
-.phx-note .phx-sev { background: #3e63dd; color: #fff; }
-.phx-code { color: #9a9a9a; font: 12px ui-monospace, monospace; }
-.phx-where { margin-top: 4px; font: 12px ui-monospace, monospace; }
-.phx-place { color: #70b8ff; text-decoration: none; }
+.phx-card li { padding: 9px 14px 10px; border-bottom: 1px solid var(--ph-border, #e7e9ee); border-left: 3px solid var(--sev, var(--ph-fg2, #495365)); }
+.phx-card li.phx-error { --sev: var(--ph-danger, #b83a33); }
+.phx-card li.phx-warning { --sev: var(--ph-warning, #8f5514); }
+.phx-card li.phx-note { --sev: var(--ph-info, #366cbf); }
+.phx-msg { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-weight: 600; }
+.phx-sev { display: none; }
+.phx-code { color: var(--ph-fg2, #495365); font: 400 12px ui-monospace, monospace; }
+.phx-where { margin-top: 2px; font-size: 12px; }
+.phx-place { color: var(--ph-link, #366cbf); text-decoration: none; }
 .phx-place:hover { text-decoration: underline; }
-.phx-excerpt, .phx-ctx pre { margin: 8px 0 0; padding: 8px 10px; background: #111214; border-radius: 6px; overflow-x: auto;
-  font: 12px/1.45 ui-monospace, monospace; white-space: pre; color: #cfcfcf; }
-.phx-excerpt mark, .phx-ctx mark { background: none; color: #ff6369; text-decoration: underline wavy #ff6369; text-underline-offset: 3px; }
-.phx-ln { color: #666; }
-.phx-notes, .phx-help { margin: 8px 0 0; padding-left: 18px; color: #b5b5b5; }
-.phx-help li::marker { content: "→ "; color: #70b8ff; }
-.phx-ctx { margin-top: 8px; color: #b5b5b5; }
+.phx-excerpt, .phx-ctx pre { margin: 6px 0 0; padding: 0; overflow-x: auto; font: 12px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre;
+  color: var(--ph-fg2, #495365); background: none; }
+.phx-excerpt mark, .phx-ctx mark { background: none; color: var(--sev, var(--ph-danger, #b83a33)); text-decoration: underline wavy; text-underline-offset: 3px; }
+.phx-ln { opacity: .6; }
+.phx-notes, .phx-help { margin: 6px 0 0; padding-left: 16px; color: var(--ph-fg2, #495365); }
+.phx-ctx { margin-top: 6px; color: var(--ph-fg2, #495365); }
 .phx-ctx summary { cursor: pointer; }
-.phx-ctx code { color: #e6e6e6; }
-.phx-inc { margin-top: 6px; color: #9a9a9a; font-size: 12px; }
-.phx-card footer { padding: 10px 18px; color: #8a8a8a; font-size: 12px; }
+.phx-inc { margin-top: 6px; color: var(--ph-fg2, #495365); font-size: 12px; }
+.phx-card footer { padding: 10px 16px; color: var(--ph-fg2, #495365); font-size: 12px; }
 `;

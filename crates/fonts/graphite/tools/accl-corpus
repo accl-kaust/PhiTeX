@@ -1,0 +1,37 @@
+#!/bin/bash
+# The Graphite corpus on accl (a `cmd` job; graphite2's tests/ staged as
+# ~/code/tmp/r9-gr2-tests and passed in with ACCL_STORE_IN):
+#   ACCL_STORE_IN=code/tmp/r9-gr2-tests scripts/accl/accl submit cmd \
+#     bash crates/fonts/graphite/tools/accl-corpus
+# With GCORPUS=DIR (a corpus built before, also passed in with
+# ACCL_STORE_IN) the documents are not run again. The corpus built is
+# published as $r/store (ACCL_STORE_OUT) for later jobs.
+set -u
+cd "$(dirname "$0")/../../../.."
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+C=crates/fonts/graphite/tools/corpus.sh
+t0=$(date +%s)
+cargo build -q --release -p phitex-otf --example otf-index --example otf-xdv > "$r/build.txt" 2>&1 || { grep -E "^error|-->" -A5 "$r/build.txt" | head -40 | tee "$r/summary.txt"; exit 1; }
+t1=$(date +%s)
+if [ -n "${GCORPUS:-}" ]; then
+  gc=$w/bin/$GCORPUS
+  echo "corpus: $GCORPUS (built before)" > "$r/corpus-build.txt"
+else
+  gc=$w/gc
+  extra=
+  [ -d "$w/bin/r9-gr2-tests" ] && extra=$w/bin/r9-gr2-tests
+  $C build "$gc" "$extra" > "$r/corpus-build.txt" 2>&1
+  mkdir -p "$r/store"
+  cp -a "$gc" "$r/store/r9-gcorpus"
+fi
+t2=$(date +%s)
+target/release/examples/otf-index "$w/index" > "$r/otf-index.txt" 2>&1
+$C check "$gc" "$w/index" > "$r/otf-xdv.txt" 2>&1
+t3=$(date +%s)
+{
+  echo "graphite corpus: build $((t1 - t0)) s, corpus $((t2 - t1)) s, check $((t3 - t2)) s"
+  echo "oracle: $(xetex --version 2>&1 | grep -i -E 'graphite|harfbuzz' | tr '\n' ' ')"
+  cat "$r/corpus-build.txt"
+  grep -E '^(fonts|words|time):|words differ' "$r/otf-xdv.txt"
+  true
+} > "$r/summary.txt"

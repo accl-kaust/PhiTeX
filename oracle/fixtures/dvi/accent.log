@@ -1,0 +1,16 @@
+(./accent.tex
+Underfull \hbox (badness 10000) detected at line 9
+\bf ^^?a[]O
+
+\hbox(8.37776+0.0)x100.0
+.\kern -0.07988 (for accent)
+.\bf ^^?
+.\kern -5.67009 (for accent)
+.\bf a
+.\kern 1.44444 (for accent)
+.\hbox(5.96109+0.0)x5.74997, shifted -2.41667
+..\bf ^^V
+.\kern -7.19441 (for accent)
+.\bf O
+
+5 [0.0.0.5] )

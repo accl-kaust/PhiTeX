@@ -1,0 +1,14 @@
+% \edef, \xdef, \noexpand, \the in an \edef.
+\def\a{A}\def\b{\a B}
+\edef\c{\a\b}\message{\meaning\c}
+\edef\d{\noexpand\a\noexpand\b}\message{\meaning\d}
+\count3=42 \edef\e{\the\count3x}\message{\meaning\e}
+\toks0={\a\b}\edef\f{\the\toks0 \a}\message{\meaning\f}
+\edef\g#1#2{#2\a#1}\message{\meaning\g}\message{\g12}
+\edef\h{##\a}\message{\meaning\h}
+{\xdef\i{\b}}\message{\meaning\i}
+\def\j{\k}\def\k{K}\edef\l{\expandafter\noexpand\j}\message{\meaning\l}
+\edef\m{\string\a\romannumeral 12}\message{\meaning\m}
+\edef\n{\ifnum1<2 yes\else no\fi}\message{\meaning\n}
+\edef\o{\csname a\endcsname\csname zz\endcsname}\message{\meaning\o}
+\message{\meaning\zz}

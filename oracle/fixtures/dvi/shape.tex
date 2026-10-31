@@ -1,0 +1,39 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=250pt \vsize=600pt \parindent=20pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\parskip=4pt plus 2pt
+A first paragraph with the default parameters, long enough for two
+lines or perhaps three at this measure.
+
+\parindent=40pt \baselineskip=14pt \parskip=0pt
+A second paragraph, indented more, with a larger baselineskip between
+its lines than the first one had.
+
+\noindent\hangindent=30pt \hangafter=1 A hanging paragraph, the lines after
+the first indented by thirty points on the left as hangindent asks.
+
+\hangindent=-30pt \hangafter=-2 A paragraph whose first two lines are
+indented on the right, and the rest at the full measure, and on and on.
+
+\parshape 3 10pt 200pt 20pt 180pt 0pt 250pt A parshape paragraph with
+three line specifications given, the last one repeating for the rest of
+the paragraph which goes on.
+
+\leftskip=10pt \rightskip=10pt plus 20pt
+A ragged paragraph with leftskip and rightskip set, which makes it ragged
+right because the rightskip can stretch quite a lot.
+
+\leftskip=0pt \rightskip=0pt
+\looseness=1 A loose paragraph with looseness one, which TeX makes a line
+longer if it can do so without exceeding the tolerance.
+
+\emergencystretch=10pt \tolerance=100 \pretolerance=-1
+An emergency paragraph with a low tolerance, where emergency stretch helps
+the line breaker find a solution.
+
+\tolerance=1000 \emergencystretch=0pt \pretolerance=0
+\clubpenalty=150 \widowpenalty=150 \interlinepenalty=10 \brokenpenalty=100
+Penalties between lines: club, widow and interline penalties appear
+in the vertical list between the lines of this paragraph which is long.
+\end

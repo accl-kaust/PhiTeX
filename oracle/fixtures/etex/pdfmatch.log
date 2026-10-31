@@ -1,0 +1,78 @@
+(./core.tex [1, 0] [1: 1->bccdx, 2->cc, 4->d, -1->] [1: 1->b7] [1: 0->ab, -1->]
+[0: -1->] [1] [1, 1, -1, 0] [0, 0]
+> \box0=
+\hbox(6.94444+0.0)x44.72232
+.\tenrm f
+.\tenrm i
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm f
+.\tenrm f
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm f
+.\tenrm f
+.\tenrm i
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm A
+.\kern-1.11113
+.\tenrm V
+
+! OK.
+l.14 \setbox0\hbox{fi ff ffi AV}\showbox0
+                                         
+
+[1]
+> \box0=
+\hbox(6.25+0.0)x22.35121
+.\nine f
+.\nine i
+.\glue 3.08331 plus 1.54166 minus 1.02777
+.\nine A
+.\nine V
+
+! OK.
+l.17 \setbox0\hbox{\nine fi AV}\showbox0
+                                        
+
+[0pt] [12.0pt, 0pt] [15.0pt] [42, m, p] [p] [mypar]
+Underfull \hbox (badness 10000) in paragraph at lines 35--35
+[]\tenrm a paragraph
+
+\hbox(6.94444+1.94444)x100.0, glue set 16.30002
+.\hbox(0.0+0.0)x20.0
+.\tenrm a
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm p
+.\tenrm a
+.\tenrm r
+.\tenrm a
+.\tenrm g
+.\tenrm r
+.\tenrm a
+.\tenrm p
+.\tenrm h
+.\penalty 10000
+.\glue(\parfillskip) 0.0
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 37--37
+[]\tenrm another one
+
+\hbox(6.94444+0.0)x100.0, glue set 16.98337
+.\hbox(0.0+0.0)x20.0
+.\tenrm a
+.\tenrm n
+.\tenrm o
+.\tenrm t
+.\tenrm h
+.\tenrm e
+.\tenrm r
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm o
+.\tenrm n
+.\tenrm e
+.\penalty 10000
+.\glue(\parfillskip) 0.0
+.\glue(\rightskip) 0.0
+
+[0] )

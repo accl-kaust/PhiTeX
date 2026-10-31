@@ -1,0 +1,11 @@
+% A package the document writes where it is missing, then loads (latexmk: 2 runs).
+% Round 2 reads it back as text (unit pieces): the follow node that runs \begin{document}
+% executes \openout of the aux but not the \write right after it (the aux loses \relax; 3 rounds).
+\begin{filecontents}{localpkg.sty}
+\newcommand\localcmd{OK}
+\end{filecontents}
+\documentclass{article}
+\usepackage{localpkg}
+\begin{document}
+\localcmd
+\end{document}

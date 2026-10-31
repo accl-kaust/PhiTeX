@@ -1,0 +1,23 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**imgloop.tex
+(./imgloop.tex [I1=1] [I2=2] [I3=3] [I4=4] [I5=5] [I6=6] [I7=7] [I8=8] [I9=9] [
+0.10{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map} <./png-gray.png (PNG co
+py)> <./png-gray.png (PNG copy)> <./png-gray.png (PNG copy)> <./png-gray.png (P
+NG copy)> <./png-gray.png (PNG copy)> <./png-gray.png (PNG copy)> <./png-gray.p
+ng (PNG copy)> <./png-gray.png (PNG copy)>] [I10=15] [I11=16] [I12=17] [I13=18]
+[I14=19] [I15=20] [I16=21] [I17=22] [0.18 <./png-gray.png (PNG copy)> <./png-gr
+ay.png (PNG copy)> <./png-gray.png (PNG copy)> <./png-gray.png (PNG copy)> <./p
+ng-gray.png (PNG copy)> <./png-gray.png (PNG copy)> <./png-gray.png (PNG copy)>
+ <./png-gray.png (PNG copy)>] [I18=26] [I19=27] [I20=28] [I21=29] [I22=30] [I23
+=31] [I24=32] [0.25 <./png-gray.png (PNG copy)> <./png-gray.png (PNG copy)> <./
+png-gray.png (PNG copy)> <./png-gray.png (PNG copy)> <./png-gray.png (PNG copy)
+> <./png-gray.png (PNG copy)> <./png-gray.png (PNG copy)> <./png-gray.png (PNG 
+copy)>] )</usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on imgloop.pdf (3 pages, 24928 bytes).
+PDF statistics:
+ 40 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 121 words of extra memory for PDF output out of 10000 (max. 10000000)
+

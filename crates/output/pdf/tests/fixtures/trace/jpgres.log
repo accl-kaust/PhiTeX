@@ -1,0 +1,40 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input jpgres
+(./jpgres.tex jpg-jfif0.jpg: 64.24ptx 48.18pt jpg-jfif0.jpg: 48.18ptx 36.135pt 
+jpg-jfifcm.jpg: 15.46916ptx 23.28162pt jpg-exif.jpg: 15.4176ptx 23.1264pt jpg-e
+xifcm.jpg: 15.46916ptx 19.06023pt jpg-exifcm.jpg: 15.46916ptx 19.06023pt
+
+Completed box being shipped out [0]
+\vbox(500.0+0.0)x300.0, glue set 331.15654fill
+.\glue(\topskip) 0.0
+.\hbox(48.18+0.0)x64.24
+..\pdfrefximage(48.18+0.0)x64.24
+.\glue(\lineskip) 0.0
+.\hbox(36.135+0.0)x48.18
+..\pdfrefximage(36.135+0.0)x48.18
+.\glue(\lineskip) 0.0
+.\hbox(23.28162+0.0)x15.46916
+..\pdfrefximage(23.28162+0.0)x15.46916
+.\glue(\lineskip) 0.0
+.\hbox(23.1264+0.0)x15.4176
+..\pdfrefximage(23.1264+0.0)x15.4176
+.\glue(\lineskip) 0.0
+.\hbox(19.06023+0.0)x15.46916
+..\pdfrefximage(19.06023+0.0)x15.46916
+.\glue(\lineskip) 0.0
+.\hbox(19.06023+0.0)x15.46916
+..\pdfrefximage(19.06023+0.0)x15.46916
+.\hbox(0.0+0.0)x300.0
+.\glue 0.0 plus 1.0fill
+
+ <./jpg-jfif0.jpg> <./jpg-jfif0.jpg> <./jpg-jfifcm.jpg> <./jpg-exif.jpg> <./jpg
+-exifcm.jpg> <./jpg-exifcm.jpg> )
+Output written on jpgres-trace.pdf (1 page, 4825 bytes).
+PDF statistics:
+ 12 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 31 words of extra memory for PDF output out of 10000 (max. 10000000)
+

@@ -1,0 +1,13 @@
+\documentclass{article}
+\usepackage{microtype}
+% (a numbered heading: \@hangfrom puts \hskip\z@ before the number in its
+% box, glue of a spec of its own, which pdfTeX's margin protrusion does
+% not pass over: the number does not protrude; a paragraph's 1 does)
+\begin{document}
+\section{Introduction}
+1 stands at the start of this paragraph, which runs long enough to fill
+more than one line of the page so that its lines break and the margin
+kerns of their first and last characters come into play.
+\section{Usage}
+Text after the second heading.
+\end{document}

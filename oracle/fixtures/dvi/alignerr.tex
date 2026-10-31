@@ -1,0 +1,18 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\&=4
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=300pt \parindent=10pt \baselineskip=12pt \topskip=10pt
+\tolerance=10000 \parfillskip=0pt plus 1fil \hbadness=10000
+Text a&b.\par
+\cr
+\omit
+\noalign{}
+\halign{#&#\cr
+a&b&c\cr
+d\cr}
+\halign{x&#\cr
+1&2\cr}
+\halign{#y#\cr
+3\cr}
+\halign{#\cr
+e}
+\end

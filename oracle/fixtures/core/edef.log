@@ -1,0 +1,3 @@
+(./core.tex macro:->AAB macro:->\a \b  macro:->42x macro:->\a \b A macro:#1#2->
+#2A#1 2A1 macro:->##A macro:->AB macro:->\k  macro:->\axii macro:->yes macro:->
+A\zz  \relax )

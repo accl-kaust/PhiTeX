@@ -1,0 +1,270 @@
+<!doctype html>
+<!--
+  The README's still pictures, one per ?art=NAME (&theme=dark for the dark variant).
+  scripts/readme-art.sh renders each to assets/readme/NAME.png and NAME-dark.png at 2×,
+  so the same files serve the README and phitex.org.
+  Figures marked TODO are placeholders until a measured run replaces them.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>PhiTeX README art</title>
+<style>
+@font-face { font-family: "CMU Serif"; font-weight: 700; src: url("banner/fonts/cmu-serif-700-roman.woff2") format("woff2"); }
+@font-face { font-family: "CMU Serif"; font-weight: 400; src: url("banner/fonts/cmu-serif-500-roman.woff2") format("woff2"); }
+@font-face { font-family: "CMU Serif"; font-weight: 400; font-style: italic; src: url("banner/fonts/cmu-serif-500-italic.woff2") format("woff2"); }
+@font-face { font-family: "Noto Sans"; font-weight: 400; src: url("banner/fonts/noto-sans-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Noto Sans"; font-weight: 600; src: url("banner/fonts/noto-sans-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Noto Sans"; font-weight: 700; src: url("banner/fonts/noto-sans-latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "DM Mono"; font-weight: 400; src: url("banner/fonts/dm-mono-latin-400-normal.woff2") format("woff2"); }
+
+/* The banner's tokens, so the pictures and the banner read as one set. */
+:root {
+  --sans: "Noto Sans", system-ui, sans-serif;
+  --serif: "CMU Serif", "Latin Modern Roman", Georgia, serif;
+  --mono: "DM Mono", ui-monospace, Menlo, monospace;
+  --bg: #f7f8fa;
+  --ink: #1b222c;
+  --muted: #495365;
+  --faint: #8d96a5;
+  --rule: #e7e9ee;
+  --accent: #366cbf;
+  --accent-soft: rgba(54, 108, 191, .12);
+  --green: #1e6b41;
+  --green-soft: rgba(30, 107, 65, .10);
+  --amber: #e09a00;
+  --card: #ffffff;
+  --card-edge: #e7e9ee;
+  --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 8px 22px rgb(16 24 40 / 9%);
+  --page: #ffffff;
+  --page-edge: #d0d5dd;
+  --line: rgba(27, 34, 44, .16);
+  --term-bg: #12171f;
+  --term-ink: #e8ebf0;
+  --term-dim: #8d96a5;
+  --term-green: #53b57f;
+  /* ACCL's four stripes, as in the logo */
+  --s1: #f58f2d; --s2: #f0b225; --s3: #d3c72a; --s4: #00a8a4;
+}
+:root[data-theme="dark"] {
+  --bg: #12171f;
+  --ink: #ffffff;
+  --muted: #d0d5dd;
+  --faint: #8d96a5;
+  --rule: #2f3a4c;
+  --accent: #6597e0;
+  --accent-soft: rgba(101, 151, 224, .16);
+  --green: #53b57f;
+  --green-soft: rgba(83, 181, 127, .14);
+  --amber: #f2b83b;
+  --card: #1b222c;
+  --card-edge: #2f3a4c;
+  --shadow: 0 1px 3px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 35%);
+  --page: #252e3c;
+  --page-edge: #3a4659;
+  --line: rgba(255, 255, 255, .20);
+  --term-bg: #0b0f15;
+}
+/* ?site: phitex.org's own colours (its cards), not GitHub's page */
+:root[data-site] { --bg: #ffffff; }
+:root[data-site][data-theme="dark"] {
+  --bg: #2f3a4c;
+  --rule: #495365;
+  --card: #252e3c;
+  --card-edge: #3a4659;
+  --page: #3a4659;
+  --page-edge: #495365;
+  --term-bg: #1b222c;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: transparent; }
+body { font-family: var(--sans); color: var(--ink); -webkit-font-smoothing: antialiased; }
+
+#art { position: relative; overflow: hidden; background: var(--bg); border-radius: 18px; }
+#art.tile { width: 600px; height: 340px; }
+#art.wide { width: 1600px; height: 520px; border-radius: 28px; }
+.abs { position: absolute; }
+
+/* A page of a paper: grey lines, with real words only where they are the point. */
+.page { position: absolute; background: var(--page); border: 1px solid var(--page-edge); border-radius: 3px;
+        box-shadow: var(--shadow); padding: 16px 16px; display: flex; flex-direction: column; gap: 7px; }
+.page .t { height: 9px; width: 55%; margin: 2px auto 6px; border-radius: 2px; background: var(--ink); opacity: .55; }
+.page .l { height: 5px; border-radius: 2px; background: var(--line); }
+.page .gap { height: 4px; }
+.page .hl { margin: -4px -6px; padding: 4px 6px; border-radius: 4px; background: var(--accent-soft);
+            outline: 1.5px solid var(--accent); display: flex; flex-direction: column; gap: 7px; }
+.page .hl .l { background: var(--accent); opacity: .55; }
+
+.big { font-family: var(--mono); letter-spacing: -.02em; line-height: 1; }
+.label { font-size: 15px; color: var(--muted); letter-spacing: .01em; }
+.chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+        font-size: 15px; font-weight: 600; }
+.ok { color: var(--green); background: var(--green-soft); }
+.win { position: absolute; border-radius: 8px; overflow: hidden; box-shadow: var(--shadow); background: var(--card);
+       border: 1px solid var(--card-edge); }
+.win .bar { height: 24px; display: flex; align-items: center; gap: 6px; padding: 0 9px; font-size: 12px; font-weight: 600; color: #fff; }
+.win .bar i { width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,.55); }
+.win .code { padding: 9px 10px; overflow: hidden; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; color: var(--muted); white-space: pre; }
+.page.mini { padding: 9px 7px; gap: 5px; }
+.page.mini .l { height: 4px; }
+.page.mini .l:nth-child(-n+3) { background: var(--s4); opacity: .8 }
+.page.mini.f1 .l:nth-child(-n+5), .page.mini.f3 .l:nth-child(-n+6) { background: var(--s1); opacity: .8 }
+.page.mini.f2 .l:nth-child(-n+7), .page.mini.f4 .l:nth-child(-n+4) { background: var(--s2); opacity: .8 }
+.page.mini.f5 .l:nth-child(-n+2) { background: var(--s3); opacity: .9 }
+.win .code b { font-weight: 400; color: var(--accent); }
+</style>
+</head>
+<body>
+<div id="art"></div>
+<script>
+const P = new URLSearchParams(location.search);
+if (P.get('theme') === 'dark') document.documentElement.dataset.theme = 'dark';
+if (P.has('site')) document.documentElement.dataset.site = '';
+
+// Figures shown in the pictures. TODO(number): replace from the published perf run (phitex.org/perf/latest.json).
+const FIG = {
+  editMs: '5 ms',                       // a word edit, save → page; today 46–80 ms (18 pp, -j16, mc 76801)
+  cores: 16,
+  hash: '9c41 e07a 3b5d 22f8 … 6ad0 71c3',  // TODO(number): amsldoc's real sha256
+};
+
+// lines: an array of widths in %, 0 for a paragraph gap; hl: [from, to) indices drawn as the edited paragraph
+function page(x, y, w, h, lines, hl, title = true) {
+  const L = i => lines[i] === 0 ? '<div class="gap"></div>' : `<div class="l" style="width:${lines[i]}%"></div>`;
+  let body = title ? '<div class="t"></div>' : '';
+  for (let i = 0; i < lines.length; i++) {
+    if (hl && i === hl[0]) { body += '<div class="hl">'; for (; i < hl[1]; i++) body += L(i); body += '</div>'; i--; continue; }
+    body += L(i);
+  }
+  return `<div class="page" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px">${body}</div>`;
+}
+const PARA = [100, 96, 100, 98, 62, 0, 100, 97, 100, 94, 100, 45, 0, 100, 99, 96, 100, 71, 0, 100, 95, 100, 88];
+
+const ART = {
+  // Edits in milliseconds: one paragraph lights up, the number is big.
+  edit: { size: 'tile', html: () => `
+    ${page(44, 34, 196, 272, PARA, [6, 12])}
+    <div class="abs" style="left:280px;top:58px;font-family:var(--serif);font-size:30px;color:var(--muted)">
+      as <span style="text-decoration:line-through;opacity:.55">fast</span>
+      <span style="color:var(--accent);font-style:italic">faster</span> as</div>
+    <div class="abs label" style="left:282px;top:118px">one paragraph rebuilt</div>
+    <div class="abs big" style="left:276px;top:168px;font-size:92px;color:var(--accent)">${FIG.editMs.replace(' ', '<span style="font-size:.55em;margin-left:.12em">')}</span></div>
+    <div class="abs label" style="left:282px;top:276px">from save to the page</div>` },
+
+  // Exactly as {pdf,Xe}LaTeX: two pages, one hash.
+  exact: { size: 'tile', html: () => `
+    ${page(46, 40, 150, 206, PARA.slice(0, 16), null)}
+    ${page(96, 74, 150, 206, PARA.slice(0, 16), null)}
+    <div class="abs label" style="left:46px;top:20px">PhiTeX</div>
+    <div class="abs label" style="left:96px;top:290px">pdfLaTeX</div>
+    <div class="abs" style="left:286px;top:66px;display:flex;flex-direction:column;gap:12px">
+      <div><div class="label" style="font-size:13px">PhiTeX</div><div class="big" style="font-size:15px;color:var(--ink)">${FIG.hash}</div></div>
+      <div><div class="label" style="font-size:13px">pdfLaTeX</div><div class="big" style="font-size:15px;color:var(--ink)">${FIG.hash}</div></div>
+      <div style="margin-top:14px"><span class="chip ok" style="font-size:22px;padding:9px 18px">✓ same bytes</span></div>
+      <div class="label">every thread count, every edit</div>
+    </div>` },
+
+  // Any editor, Overleaf included: four editors around one page.
+  editors: { size: 'tile', html: () => {
+    const w = (x, y, name, color, code) => `<div class="win" style="left:${x}px;top:${y}px;width:178px">
+      <div class="bar" style="background:${color}"><i></i>${name}</div><div class="code">${code}</div></div>`;
+    return `
+    <svg class="abs" style="left:0;top:0" width="600" height="340"><g stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 5" fill="none" opacity=".7">
+      <path d="M200 80 L262 128"/><path d="M200 262 L262 214"/><path d="M400 80 L338 128"/><path d="M400 262 L338 214"/></g></svg>
+    ${page(244, 74, 112, 156, PARA.slice(0, 13), [6, 12])}
+    ${w(20, 28, 'Overleaf', '#138a36', 'as <b>faster</b> as\nthe page follows')}
+    ${w(402, 28, 'VS Code', '#2c5aa0', 'as <b>faster</b> as\nProblems: 0')}
+    ${w(20, 214, 'Neovim', '#3b4252', 'as <b>faster</b> as\n-- INSERT --')}
+    ${w(402, 214, 'Emacs', '#7a5aa8', 'as <b>faster</b> as\nphitex-mode')}
+    <div class="abs label" style="left:0;width:600px;top:300px;text-align:center">one compiler, the same page</div>`; } },
+
+  // Private and offline: a laptop in flight mode, still building.
+  offline: { size: 'tile', html: () => `
+    <div class="abs" style="left:110px;top:44px;width:250px;height:170px;border-radius:12px 12px 4px 4px;background:var(--card);border:3px solid var(--muted);box-shadow:var(--shadow)"></div>
+    ${page(174, 58, 122, 146, PARA.slice(0, 15), [6, 11])}
+    <div class="abs" style="left:76px;top:214px;width:318px;height:14px;border-radius:2px 2px 10px 10px;background:var(--muted)"></div>
+    <svg class="abs" style="left:420px;top:52px" width="130" height="130" viewBox="0 0 130 130" fill="none" stroke="var(--faint)" stroke-width="7" stroke-linecap="round">
+      <path d="M18 52 a66 66 0 0 1 94 0"/><path d="M36 72 a40 40 0 0 1 58 0"/><path d="M54 92 a14 14 0 0 1 22 0"/>
+      <circle cx="65" cy="108" r="4" fill="var(--faint)"/><path d="M20 20 L110 112" stroke="var(--amber)"/></svg>
+    <div class="abs" style="left:76px;top:262px;width:448px;text-align:center">
+      <span class="chip ok" style="font-size:19px">✓ built, no network</span></div>
+    <div class="abs label" style="left:0;width:600px;top:306px;text-align:center">your paper never leaves your machine</div>` },
+
+  // TeX Live optional: a shelf where only what the paper uses is filled in.
+  texlive: { size: 'tile', html: () => {
+    const used = { 3: 'amsmath', 9: 'graphicx', 18: 'hyperref', 27: 'biblatex', 31: 'tikz' };
+    let cells = '';
+    for (let i = 0; i < 40; i++) {
+      const x = 40 + (i % 8) * 66, y = 40 + Math.floor(i / 8) * 46;
+      cells += used[i]
+        ? `<div class="abs" style="left:${x}px;top:${y}px;width:60px;height:38px;border-radius:5px;background:var(--accent);color:#fff;font:600 10.5px var(--mono);display:grid;place-items:center">${used[i]}</div>`
+        : `<div class="abs" style="left:${x}px;top:${y}px;width:60px;height:38px;border-radius:5px;border:1.5px dashed var(--line)"></div>`;
+    }
+    return cells + `
+    <div class="abs" style="left:30px;top:272px;width:540px;height:4px;border-radius:2px;background:var(--muted);opacity:.5"></div>
+    <div class="abs label" style="left:0;width:600px;top:292px;text-align:center;font-size:17px;color:var(--ink)">only what your paper uses, downloaded once</div>`; } },
+
+  // Multi-threaded: lanes of work in the stripe colours, the pages filling.
+  cores: { size: 'tile', html: () => {
+    const cols = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)'];
+    let lanes = '';
+    for (let c = 0; c < FIG.cores; c++) {
+      let x = 40 + (c * 7) % 23;
+      for (let k = 0; x < 330; k++) {
+        const w = 26 + ((c * 13 + k * 29) % 47);
+        lanes += `<div class="abs" style="left:${x}px;top:${34 + c * 15}px;width:${Math.min(w, 330 - x)}px;height:10px;border-radius:3px;background:${cols[(c + k) % 4]};opacity:.9"></div>`;
+        x += w + 4;
+      }
+    }
+    let pages = '';
+    for (let i = 0; i < 6; i++) pages += page(376 + (i % 3) * 64, 40 + Math.floor(i / 3) * 96, 56, 80, PARA.slice(0, 8), null, false).replace('class="page"', `class="page mini f${i}"`);
+    return lanes + pages + `
+    <div class="abs" style="left:40px;top:286px;font:400 15px var(--sans);color:var(--muted)"><b class="big" style="font-size:30px;color:var(--ink)">${FIG.cores}</b>&nbsp; cores</div>
+    <div class="abs" style="left:300px;top:288px;width:270px;text-align:right"><span class="chip ok" style="white-space:nowrap">✓ same bytes at -j1 and -j${FIG.cores}</span></div>`; } },
+
+  // The Exact section's picture: the two PDFs, the command, the hashes.
+  'exact-wide': { size: 'wide', html: () => `
+    ${page(70, 60, 260, 360, PARA, null)}
+    ${page(350, 60, 260, 360, PARA, null)}
+    <div class="abs label" style="left:70px;top:436px;font-size:20px">phitex build</div>
+    <div class="abs label" style="left:350px;top:436px;font-size:20px">pdflatex (latexmk)</div>
+    <div class="abs" style="left:690px;top:96px;width:840px;border-radius:14px;background:var(--term-bg);padding:28px 32px;font:400 24px/1.7 var(--mono);color:var(--term-ink);box-shadow:var(--shadow)">
+      <div><span style="color:var(--term-dim)">$</span> sha256sum phitex/paper.pdf pdflatex/paper.pdf</div>
+      <div>${FIG.hash.replace(' … ', '…')}  phitex/paper.pdf</div>
+      <div>${FIG.hash.replace(' … ', '…')}  pdflatex/paper.pdf</div>
+    </div>
+    <div class="abs" style="left:690px;top:330px"><span class="chip ok" style="font-size:28px;padding:12px 24px">✓ the same bytes, object numbers included</span></div>
+    <div class="abs label" style="left:694px;top:406px;font-size:20px">cold, after every edit, at every thread count</div>` },
+
+  // How it works: an edit, what it reaches, the pages that move.
+  how: { size: 'wide', html: () => {
+    const box = (x, y, w, title, sub, on) => `<div class="abs" style="left:${x}px;top:${y}px;width:${w}px;padding:18px 22px;border-radius:14px;
+      background:${on ? 'var(--accent-soft)' : 'var(--card)'};border:2px solid ${on ? 'var(--accent)' : 'var(--card-edge)'};box-shadow:var(--shadow)">
+      <div style="font:700 26px var(--sans);color:${on ? 'var(--accent)' : 'var(--ink)'}">${title}</div>
+      <div style="font:400 18px var(--sans);color:var(--muted);margin-top:4px">${sub}</div></div>`;
+    let pages = '';
+    for (let i = 0; i < 8; i++) {
+      const on = i === 2 || i === 3;
+      pages += `<div class="abs" style="left:${1010 + (i % 4) * 128}px;top:${120 + Math.floor(i / 4) * 170}px;opacity:${on ? 1 : .35}">${page(0, 0, 104, 146, PARA.slice(0, 12), on ? [6, 11] : null, true).replace('position: absolute', 'position: relative')}</div>`;
+    }
+    return `
+    <svg class="abs" style="left:0;top:0" width="1600" height="520" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round">
+      <path d="M330 240 C370 240 370 182 400 182"/><path d="M391 175 l10 7 -10 7"/><path d="M330 280 C370 280 370 340 400 340" opacity=".35" stroke-dasharray="6 7"/>
+      <path d="M690 182 C730 182 730 240 760 240"/><path d="M751 233 l10 7 -10 7"/><path d="M970 240 H996"/><path d="M987 233 l10 7 -10 7"/></svg>
+    ${box(60, 190, 270, 'Your edit', 'one word in section 2', true)}
+    ${box(410, 120, 280, 'What it reaches', 'its paragraph, a reference, nothing else', true)}
+    ${box(410, 290, 280, 'Everything else', 'reused as it was', false)}
+    ${box(770, 190, 200, 'Pages', '3 and 4 move', true)}
+    ${pages}
+    <div class="abs label" style="left:1010px;top:470px;font-size:18px">rebuilt on all cores; the PDF is a full rebuild's, byte for byte</div>`; } },
+};
+
+const name = P.get('art') || 'edit';
+const a = ART[name];
+const el = document.getElementById('art');
+el.className = a.size;
+el.innerHTML = a.html();
+document.fonts.ready.then(() => document.body.dataset.ready = '1');
+</script>
+</body>
+</html>

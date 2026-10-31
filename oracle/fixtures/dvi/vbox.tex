@@ -1,0 +1,21 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=300pt \vsize=500pt \parindent=20pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\lineskip=1pt \lineskiplimit=0pt
+\vbox{\hrule\hbox{Ruled}\hrule width 50pt height 2pt depth 1pt}
+\vbox to 50pt{\hbox{Top}\vfil\hbox{Bottom}}
+\vbox to 20pt{\hbox{Underfull vbox}}
+\vbox to 5pt{\hbox{Over}\hbox{full}}
+\vtop{\hbox{Vtop one}\hbox{Vtop two}}
+\hrule
+\vbox{\hsize=150pt Paragraph text inside a vbox, long enough to need more
+than one line of the narrower measure given to it here.}
+\hbox{\vrule width 1pt height 10pt depth 2pt\vrule\ text \vrule height 3pt}
+\vbox{\boxmaxdepth=1pt \hbox{Deep descender gy}}
+\vbox spread 10pt{\hbox{spread}\vss}
+\moveright 20pt\vbox{\hbox{moved vbox}}
+\prevdepth=-1000pt
+\hbox{No interline glue above}
+\vbox{\noindent Unindented\par\vskip 3pt Indented}
+\end

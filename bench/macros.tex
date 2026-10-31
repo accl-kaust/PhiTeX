@@ -1,0 +1,44 @@
+\hsize=6in \vsize=8.5in \parindent=0pt
+% the token layer: 200000 iterations of one \loop that expands (macro
+% calls with and without delimited arguments, \ifx, \edef, \csname,
+% counters, \expandafter chains, the LaTeX kernel's hook and key-value
+% idioms) and typesets one line per 1000 iterations
+\catcode`\@=11
+\newcount\n \newcount\m \newcount\p \newcount\keys
+\expandafter\def\csname w0\endcsname{zero}
+\expandafter\def\csname w1\endcsname{one}
+\expandafter\def\csname w2\endcsname{two}
+\expandafter\def\csname w3\endcsname{three}
+\expandafter\def\csname w4\endcsname{four}
+\expandafter\def\csname w5\endcsname{five}
+\expandafter\def\csname w6\endcsname{six}
+\expandafter\def\csname w7\endcsname{seven}
+\expandafter\def\csname w8\endcsname{eight}
+\expandafter\def\csname w9\endcsname{nine}
+\long\def\@firstoftwo#1#2{#1}
+\long\def\@secondoftwo#1#2{#2}
+\def\@empty{}
+\def\@nil{\@nil}
+\def\ifempty#1{\def\@tmp{#1}\ifx\@tmp\@empty
+  \expandafter\@firstoftwo\else\expandafter\@secondoftwo\fi}
+\def\pair#1#2{\ifnum#1>4 #2\else #2s\fi}
+% a hook: code added to a macro, then run
+\def\addhook#1{\expandafter\def\expandafter\hook\expandafter{\hook#1}}
+% key=value lists: each key's value in \kv@<key>
+\def\setkeys#1{\kv@loop#1,\relax,}
+\def\kv@loop#1,{\ifx\relax#1\else\kv@set#1\@nil\expandafter\kv@loop\fi}
+\def\kv@set#1=#2\@nil{\expandafter\edef\csname kv@#1\endcsname{#2}%
+  \advance\keys by 1 }
+\def\step{%
+  \advance\n by 1
+  \ifnum\m>8 \m=0 \else \advance\m by 1 \fi
+  \edef\x{\number\m}%
+  \edef\y{\expandafter\noexpand\csname w\x\endcsname}%
+  \edef\z{\expandafter\pair\expandafter{\x}\y}%
+  \ifempty\z{}{\let\last\z}%
+  \def\hook{}\addhook{\advance\p by 1 }\addhook{\relax}\hook
+  \setkeys{a=\x,b=\y,c=z}%
+  \expandafter\ifx\csname kv@a\endcsname\x \else \advance\keys by -1 \fi
+  \ifnum\p>999 \p=0 \line{\the\n\ \last\ \kv@b\ \the\keys\hfil}\fi}
+\n=0 \loop \step \ifnum\n<200000 \repeat
+\bye

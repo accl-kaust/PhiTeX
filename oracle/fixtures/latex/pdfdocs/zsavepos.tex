@@ -1,0 +1,11 @@
+\documentclass{article}
+\makeatletter
+\newcommand\savepos[1]{\pdfsavepos
+  \write\@auxout{\string\pos{#1}{\the\pdflastxpos}{\the\pdflastypos}}}
+\makeatother
+\newcommand\pos[3]{}
+\begin{document}
+A\savepos{a} line with a mark and \hbox{\kern 1cm\savepos{b}}.
+
+\vspace{3cm}\noindent\savepos{c}Another.
+\end{document}

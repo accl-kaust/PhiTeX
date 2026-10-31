@@ -1,0 +1,29 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\&=4
+\font\tenrm=cmr10 \tenrm \font\bf=cmbx10
+\hsize=300pt \vsize=500pt \parindent=20pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\lineskip=1pt \lineskiplimit=0pt
+\countdef\mscount=10
+\def\multispan#1{\omit\mscount=#1 \msloop}
+\def\msloop{\ifnum\mscount>1 \spanomit\expandafter\msloop\fi}
+\def\spanomit{\span\omit\advance\mscount by-1 }
+\tabskip=0pt plus 2pt
+\halign{\hfil#\tabskip=6pt&#\hfil&\hfil#\hfil\cr
+One&Two&Three\cr
+\noalign{\hrule}
+Left&right aligned&centered\cr
+\omit\hfil omitted&x\span y\cr
+\noalign{\vskip 4pt}
+\multispan2\hfil two columns\hfil&last\cr
+a&b\cr
+\multispan3 all three columns spanned by one entry here\cr
+\noalign{\hrule height 1pt}
+}
+Text after the alignment.
+\par
+\halign{#\tabskip=3pt&{\bf #}\cr
+\hbox{boxed}&\vrule width 2pt height 5pt\cr
+{\bf x}&y\cr
+\noalign{\hbox{a box in a noalign}}
+\vbox{\hsize=60pt A paragraph in a box}&z\cr}
+\end

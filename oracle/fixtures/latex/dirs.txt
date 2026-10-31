@@ -1,0 +1,13 @@
+/usr/share/texmf-dist/tex/latex/base
+/usr/share/texmf-dist/tex/latex/l3kernel
+/usr/share/texmf-dist/fonts/map/fontname
+/usr/share/texmf-dist/tex/generic/unicode-data
+/usr/share/texmf-dist/tex/latex/atveryend
+/usr/share/texmf-dist/tex/generic/atbegshi
+/usr/share/texmf-dist/tex/generic/knuth-lib
+/usr/share/texmf-dist/tex/generic/babel
+/etc/texmf/tex/generic/config
+/usr/share/texmf-dist/tex/generic/hyphen
+/usr/share/texmf-dist/tex/generic/hyph-utf8/patterns/tex
+/usr/share/texmf-dist/tex/generic/pdftex
+/usr/share/texmf-dist/tex/latex/firstaid

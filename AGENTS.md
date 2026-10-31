@@ -1,24 +1,9 @@
 # AGENTS.md
 
-Rules for coding agents (and people) working in this repository. Read
-`DESIGN.md` first: it is the whole design and is self-contained. Keep it
-current. When a design changes, or a measurement changes what the design
-should be, update its section in the same branch. Don't add other design
-documents.
+Rules for coding agents (and people) working in this repository. Each
+crate's own docs say what it is; keep them current.
 
 ## Workflow
-
-- Work on your own branch, in a git worktree under `~/code/tmp/` (never
-  `/tmp`). Make small commits, each with its tests passing. Commit
-  messages say what changed and why, with the measured numbers. They
-  carry no tool or session links.
-- Before reporting a change done, run:
-  - `scripts/sandbox cargo fmt` and `scripts/sandbox cargo clippy --all-targets` (clean);
-  - the gates, on the pushed commit:
-
-        ACCL_COMMIT=<rev> scripts/accl/accl submit gate
-        ACCL_COMMIT=<rev> scripts/accl/accl submit edits --brief --fixpoint
-        scripts/accl/accl wait <job>
 
 - Fix bugs at their root, never at the symptom: a guard that hides a
   wrong value is not a fix.
@@ -32,17 +17,25 @@ documents.
 - Private documents used for testing (for example a thesis) stay under
   `target/` or outside the repo, and are never committed.
 - Versions: like TeX's, whose version numbers converge to π, PhiTeX's
-  will converge to φ, the golden ratio (1.6, 1.61, 1.618, 1.6180, …).
-  Until the first such release, every crate stays at 0.0.x: don't bump
-  versions, tag releases or adopt another scheme.
+  converge to φ, the golden ratio, a digit a milestone: the first
+  release is 1.0 (the user's decision of 2026-10-31: the alpha's
+  milestones moved to 1.0), then 1.6, 1.61, 1.618 (TeX adds its digits
+  rarely, PhiTeX ships fixes often). A milestone's updates count in a
+  third part: 1.0.1, 1.0.2, …, then 1.6, 1.6.1, … Only the CLI crate
+  carries it (Cargo `1.0.0`, `1.0.1`, `1.6.0`, `1.61.0`, …: the minor
+  grows by digits, 0 < 6 < 61 < 618, so semver orders them); a milestone
+  is named and tagged without its `.0` (`v1.0`, `v1.6`), an update with
+  it (`v1.0.1`); the other crates stay 0.0.x. Versions are
+  bumped and tags made only by a release (docs/ci.md).
 - `scripts/sandbox` shares one sccache cache among all worktrees (the
   server runs inside the sandbox). `PHITEX_NO_SCCACHE=1` turns it off.
-- The draw list's renderer lives here, in `viewer/src` (viewer.ts,
-  page2.ts, sync.ts, css.ts): `phitex watch` bundles it
-  (`scripts/viewer-bundle.sh`, its bundle committed and checked in CI),
-  and the Overleaf extension copies it from the PhiTeX commit it pins.
-  Change the draw list (phitex-draw) and its rendering together, here;
-  never copy the renderer back from the extension.
+- The viewer lives here, in `viewer/src`; its pages are drawn as strips
+  by the core (`crates/output/render`, hayro; `viewer/src/strips.ts`
+  composes them; docs/spec-display-list.md):
+  `phitex watch` bundles the viewer (`scripts/viewer-bundle.sh`, the
+  bundle committed unminified and checked in CI), and the Overleaf extension
+  copies it from the PhiTeX commit it pins. Change the viewer here;
+  never copy it back from the extension.
 
 ## Sandbox
 
@@ -65,31 +58,36 @@ documents.
   specifications. Cite their sections (`// §123`; pdfTeX's as
   "pdfTeX §N").
 - Don't emulate internal statistics (memory, pool, hash, stack counts,
-  exact capacity limits). They are masked in comparisons
-  (`xtask/src/mask.rs`).
+  exact capacity limits) beyond what the oracle's outputs show.
 
 ## Architecture
 
-- Core crates build for `wasm32-unknown-unknown`. `partex-core` is
-  `no_std` + `alloc`, and every effect goes through the `Host` trait.
-- Engine state is reached only through accessors that call the
-  `Tracker` (DESIGN 3.2, 3.15).
-- Dynamic SSA (DESIGN 3.1): "a step runs again if and only if a version
-  it read changed" is the invariant. Any change to the SSA runtime, the
-  tracker or the records reports a one-word edit's rebuild on a real
-  document: its ms, steps run and reads checked. A rebuild whose work
-  grows with the document instead of with the edit is a bug in the
-  dependency graph.
-- Every acceleration (memos, speculation, parallelism) can be switched
-  off and gives byte-identical output.
-- Every IR has a canonical, round-tripping text form (DESIGN 5.3).
+- The engines are layers, each depending only on those below:
+  `phitex-defuse` (the core, no TeX) and `phitex-typeset` (Knuth's
+  algorithms, pure: never depends on defuse or tex) under `phitex-tex`
+  (TeX's semantics, the `Engine` trait) under `phitex-pdftex`,
+  `phitex-xetex`, `phitex-luatex`. Engines add behaviour through
+  `Engine`, never fork `phitex-tex`; only `phitex-luatex` links
+  `phitex-lua`.
+- TeX state lives only in the engine crates. There is no second source
+  of truth, the CLI included: the build is the document's state.
+- A cold build is an edit from nothing: there is no separate cold path.
+- Pure crates build for `wasm32-unknown-unknown` (`cargo xtask check`).
+- The engine runs as WebAssembly with threads (`phitex-wasm`,
+  `wasm32-wasip1-threads`): `scripts/wasm.sh check` keeps it byte-identical.
+- The scheduler affects speed, never results: every schedule gives
+  byte-identical output.
+- `shelf/` is Shelf, TeX Live's files packed for the `--shelf` engines
+  (v1.shelf.phitex.org): its build runs TeX Live's own tools (updmap,
+  fmtutil), never a rewrite of them, and its release check compares with
+  TeX Live's own engines, never with the release itself
+  (`shelf/README.md`; releases built on mc, deployed by the user).
 
 ## Quality
 
 - `cargo fmt` and `cargo clippy` (pedantic, workspace lints) are clean;
   `unsafe_code` is denied.
-- Performance claims need a benchmark. Keep the `tracing` spans and the
-  TeX-level profiler working.
+- Performance claims need a benchmark on the accl cluster.
 - `upstream/` is fetched from pinned commits by
   `scripts/fetch-upstream.sh` and isn't committed. To change a pin,
   update the script and run `scripts/sandbox cargo xtask corpus`.
