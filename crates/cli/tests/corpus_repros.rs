@@ -226,3 +226,7 @@ fn amsbook_title_threads() {
         );
     }
 }
+repro!(
+    type3_pk_font,
+    "bitmap fonts: a font with only a METAFONT source (yinit, no map line) is a Type 3 font in the PDF, from the PK file mktexpk makes (in process: phitex-mf with the base fmtutil builds, gftopk), at its design size and magnified (kpathsea's MAKETEX_MAG 1+264/600, 0+264/600); was a DVI file instead (oracle: pdflatex in the CI image, its PKs made by TeX Live's mktexpk, mc 77344)"
+);

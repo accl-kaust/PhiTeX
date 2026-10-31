@@ -244,19 +244,20 @@ pub(crate) fn recs(v: &Values, xs: &[ValueId]) -> Vec<Rec> {
 }
 
 /// The writer's parameters a step reads as it writes (the compression,
-/// the digits, the version: pdfTeX fixes them at the first write,
-/// §792), as TeX has them where the step runs.
-pub(crate) type WParams = [i32; 5];
+/// the digits, the version, the PK resolution: pdfTeX fixes them at the
+/// first write, §792), as TeX has them where the step runs.
+pub(crate) type WParams = [i32; 6];
 
 /// The writer's parameters where this run is.
 pub(crate) fn writer_params(r: &mut Run<'_, '_>) -> R<WParams> {
-    let mut ps = [0; 5];
+    let mut ps = [0; 6];
     for (p, n) in ps.iter_mut().zip([
         "pdfcompresslevel",
         "pdfobjcompresslevel",
         "pdfdecimaldigits",
         "pdfminorversion",
         "pdfmajorversion",
+        "pdfpkresolution",
     ]) {
         *p = r.param(n)?;
     }
@@ -271,6 +272,7 @@ fn set_writer_params(st: &mut PdfState, ps: WParams) {
     pm.decimal_digits = ps[2];
     pm.minor_version = ps[3];
     pm.major_version = ps[4];
+    pm.pk_resolution = ps[5];
 }
 
 /// What the link gave a read-time command: the numbers TeX reads back
@@ -638,7 +640,7 @@ fn doc_op_params(v: &Values, e: ValueId) -> Option<WParams> {
     if xs.first().map(|&k| str_of(v, k)).as_deref() != Some(DOC_WP) {
         return None;
     }
-    let mut ps = [0; 5];
+    let mut ps = [0; 6];
     for (p, &x) in ps.iter_mut().zip(xs.get(1..)?) {
         *p = i32::try_from(int_of(v, x)).unwrap_or(0);
     }
@@ -1770,6 +1772,19 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         };
         let ff = get(entry.as_ref().and_then(|e| e.ff_name.as_deref()))?;
         let enc = get(entry.as_ref().and_then(|e| e.encname.as_deref()))?;
+        // a real font that is not scalable (no map line, or a PK one):
+        // its PK file at the resolution `writepk` asks for ([`pk_request`])
+        if entry.as_ref().is_none_or(MapEntry::is_pk)
+            && Some(id) != out.space
+            && i.ls.is_none()
+            && i.ex.is_none()
+            && !out.vfs.contains_key(&id)
+        {
+            let (key, request) = pk_request(r, &name, l.at.size, l.at.design_size)?;
+            if let Some(b) = file_bytes(r, &request)? {
+                out.files.insert(key.into_bytes(), b);
+            }
+        }
         out.by_id.insert(
             id,
             Font {
@@ -1783,6 +1798,37 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
     }
     map_line_files(r, &mut out)?;
     Ok(out)
+}
+
+/// The PK file a font that is not scalable asks for (`writepk`'s
+/// `kpse_find_pk`): `<name>.<dpi>pk` (`cmr10.600pk`), the resolution
+/// `kpse_magstep_fix` of `\pdfpkresolution` scaled by the font's size
+/// over its design size ([`phitex_pdf::pk_dpi`]); and the name the finder
+/// is asked for, with the glyph settings pdfTeX gives `kpse_init_prog`
+/// (`\pdfpkresolution`, `\pdfpkmode`, [`phitex_pdf::pk_request`]). The
+/// finder looks it up as kpathsea's PK search does (`$PKFONTS`), and
+/// makes a missing one (mktexpk) where it can.
+pub(crate) fn pk_request(
+    r: &mut Run<'_, '_>,
+    name: &str,
+    size: i32,
+    design_size: i32,
+) -> R<(String, String)> {
+    let res = phitex_pdf::fixed_pk_resolution(r.param("pdfpkresolution")?);
+    let dpi = phitex_pdf::pk_dpi(size, design_size, res);
+    let v = r.v;
+    let f = r.ops.fields.param(v, "pdfpkmode");
+    let toks = crate::val::toks_of(v, r.get_f(f)?);
+    let mut mode = String::new();
+    r.show_toks_into(&mut mode, &toks)?;
+    let key = String::from_utf8_lossy(&phitex_pdf::pk_file_name(name.as_bytes(), dpi)).into_owned();
+    let request = phitex_pdf::pk_request(
+        name.as_bytes(),
+        dpi,
+        u32::try_from(res).unwrap_or(0),
+        Some(mode.as_str()),
+    );
+    Ok((key, request))
 }
 
 /// The files of the `\pdfmapline`s and `\pdfmapfile`s read so far, into
@@ -2081,6 +2127,7 @@ pub(crate) fn page_params(v: &Values, p: &mut PdfParams, xs: &[ValueId]) {
     p.mag = param(v, xs, 11);
     p.obj_compress_level = param(v, xs, 13);
     p.gen_tounicode = param(v, xs, 14);
+    p.pk_resolution = param(v, xs, 18);
     let text = |k: usize| {
         xs.get(k)
             .map(|&t| bytes_of(&str_of(v, t)))
@@ -4745,7 +4792,7 @@ mod tests {
                 },
             )),
             fonts: Fonts::default(),
-            wparams: [0; 5],
+            wparams: [0; 6],
             words: vec![1, 1, input].into(),
             node: 1,
         };

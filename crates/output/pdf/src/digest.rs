@@ -472,6 +472,8 @@ mod tests {
             kind: FontType::Real,
             vf: None,
             expand: None,
+            pk: None,
+            tag: None,
         })
     }
 

@@ -208,7 +208,8 @@ pub fn build_base(
 }
 
 /// `kpse_magstep_fix(dpi, bdpi)` (kpathsea `magstep.c`): the resolution
-/// and the magstep it is (doubled: an odd number a half step), 0 if none.
+/// and kpathsea's `m_ret` (a comparison, so 0 but where the resolution is
+/// the magstep's number).
 #[must_use]
 pub fn magstep_fix(dpi: i32, bdpi: i32) -> (i32, i32) {
     let sign = if dpi < bdpi { -1 } else { 1 };
@@ -224,7 +225,12 @@ pub fn magstep_fix(dpi: i32, bdpi: i32) -> (i32, i32) {
         }
         m += 1;
     }
-    let mret = if real == mdpi { (m - 1) * sign } else { 0 };
+    // (`*m_ret = real_dpi == (unsigned) (mdpi ? (m - 1) * sign : 0)`: a
+    // comparison, 1 only where the resolution is the magstep's number
+    // itself, so MAKETEX_MAG is `DPI/BDPI+DPI%BDPI/BDPI` at magsteps too,
+    // as TeX Live's mktexpk is run: `--mag 1+264/600 --dpi 864`, mc job
+    // 77344)
+    let mret = i32::from(real == if mdpi == 0 { 0 } else { (m - 1) * sign });
     (if real == 0 { dpi } else { real }, mret)
 }
 
@@ -275,6 +281,64 @@ pub fn maketex_mag(dpi: i32, bdpi: i32) -> String {
         let (sign, m) = if m < 0 { ("-", -m) } else { ("", m) };
         format!("magstep({sign}{}.{})", m / 2, (m & 1) * 5)
     }
+}
+
+/// mktexpk's guess of a mode from base resolution `bdpi`.
+#[must_use]
+pub fn guess_mode(bdpi: i32) -> Option<&'static str> {
+    Some(match bdpi {
+        85 => "sun",
+        100 => "nextscrn",
+        180 => "toshiba",
+        300 => "cx",
+        360 => "epstylus",
+        400 => "nexthi",
+        600 => "ljfour",
+        720 => "epscszz",
+        1200 => "ultre",
+        1270 => "linoone",
+        8000 => "dpdfezzz",
+        _ => return None,
+    })
+}
+
+/// The mode mktexpk runs METAFONT in: `mode` (`--mfmode`, else mktex.opt's
+/// `ljfour`) where METAFONT's `pixels_per_inch` for it is `bdpi`, else
+/// its guess from `bdpi` ([`guess_mode`]).
+///
+/// # Errors
+/// mktexpk's message where it can guess none.
+pub fn mktexpk_mode(
+    io: Box<dyn Io>,
+    base: &[u8],
+    mode: Option<&str>,
+    bdpi: i32,
+    s: &Settings,
+) -> Result<String, String> {
+    let mode = mode
+        .filter(|m| !m.is_empty() && *m != "/")
+        .unwrap_or("ljfour");
+    let line =
+        format!("\\mode:={mode};mode_setup;message\"BDPI= \"&decimal round pixels_per_inch;end.");
+    let r = font_run(io, base, &line, s);
+    // (`awk '/DPI=/ {print $2}'`)
+    let mf_bdpi = r
+        .term
+        .split(|&b| b == b'\n')
+        .filter(|l| l.windows(4).any(|w| w == b"DPI="))
+        .filter_map(|l| {
+            l.split(|b| b.is_ascii_whitespace())
+                .filter(|w| !w.is_empty())
+                .nth(1)
+                .map(<[u8]>::to_vec)
+        })
+        .next_back();
+    if mf_bdpi.as_deref() == Some(bdpi.to_string().as_bytes()) && mode != "default" {
+        return Ok(mode.to_string());
+    }
+    guess_mode(bdpi)
+        .map(str::to_string)
+        .ok_or_else(|| format!("mktexpk: Can't guess mode for {bdpi} dpi devices."))
 }
 
 /// A font METAFONT made: the PK at the resolution asked for, and the TFM.
@@ -350,10 +414,11 @@ mod tests {
     #[test]
     fn maketex_mags() {
         assert_eq!(maketex_mag(600, 600), "1+0/600");
-        assert_eq!(maketex_mag(720, 600), "magstep(1.0)");
-        assert_eq!(maketex_mag(657, 600), "magstep(0.5)");
-        assert_eq!(maketex_mag(500, 600), "magstep(-1.0)");
+        // (kpathsea's, at magsteps too: TeX Live's mktexpk runs, mc job 77344)
+        assert_eq!(maketex_mag(864, 600), "1+264/600");
+        assert_eq!(maketex_mag(264, 600), "0+264/600");
+        assert_eq!(maketex_mag(720, 600), "1+120/600");
         assert_eq!(maketex_mag(1000, 600), "1+400/600");
-        assert_eq!(maketex_mag(60, 600), "magstep(-12.5)");
+        assert_eq!(maketex_mag(60, 600), "0+60/600");
     }
 }

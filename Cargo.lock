@@ -2033,6 +2033,7 @@ dependencies = [
  "phitex-kpse",
  "phitex-live",
  "phitex-makeindex",
+ "phitex-mf",
  "phitex-otf",
  "phitex-pdf",
  "phitex-shelf",

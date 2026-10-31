@@ -41,6 +41,11 @@ pub enum Format {
     Enc,
     /// `kpse_vf_format`: virtual fonts.
     Vf,
+    /// `kpse_mf_format`: METAFONT sources.
+    Mf,
+    /// `kpse_pk_format`: PK bitmap fonts, looked up by
+    /// [`Kpse::find_pk`] (`kpse_find_pk`).
+    Pk,
     /// `kpse_truetype_format`: TrueType fonts.
     TrueType,
     /// `kpse_bib_format`: BibTeX databases.
@@ -129,6 +134,13 @@ fn format_info(f: Format) -> FormatInfo {
             suffix_search_only: false,
             default_path: "",
         },
+        Format::Mf => FormatInfo {
+            envs: &["MFINPUTS"],
+            suffixes: &[".mf"],
+            alt_suffixes: &[],
+            suffix_search_only: false,
+            default_path: "",
+        },
         Format::Web2c => FormatInfo {
             envs: &["WEB2C"],
             suffixes: &[],
@@ -166,6 +178,15 @@ fn format_info(f: Format) -> FormatInfo {
         Format::Vf => FormatInfo {
             envs: &["VFFONTS", "TEXFONTS"],
             suffixes: &[".vf"],
+            alt_suffixes: &[],
+            suffix_search_only: true,
+            default_path: "",
+        },
+        // (`PK_ENVS`; the suffix is `$KPATHSEA_FORMAT` in the bitmap
+        // specs, `find_pk`)
+        Format::Pk => FormatInfo {
+            envs: &["PKFONTS", "TEXPKS", "GLYPHFONTS", "TEXFONTS"],
+            suffixes: &["pk"],
             alt_suffixes: &[],
             suffix_search_only: true,
             default_path: "",
@@ -257,6 +278,30 @@ fn format_info(f: Format) -> FormatInfo {
             default_path: "",
         },
     }
+}
+
+/// A PK file's name as a font's lookup asks for it (`cmr10.600pk`): the
+/// font's name and the resolution.
+#[must_use]
+pub fn pk_name(file: &str) -> Option<(&str, u32)> {
+    let file = file.split_once('@').map_or(file, |(f, _)| f);
+    let (name, ext) = file.rsplit_once('.')?;
+    let dpi = ext.strip_suffix("pk")?;
+    if name.is_empty() || dpi.is_empty() || !dpi.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((name, dpi.parse().ok()?))
+}
+
+/// The glyph settings of a PK file request (`phitex_pdf::pk_request`,
+/// `cmr10.600pk@600`, `cmr10.600pk@600:ljfour`): the base resolution and
+/// mode `kpse_init_prog` was given (none for a plain `NAME.DPIpk`).
+#[must_use]
+pub fn pk_settings(file: &str) -> Option<(u32, Option<&str>)> {
+    pk_name(file)?;
+    let (_, s) = file.split_once('@')?;
+    let (bdpi, mode) = s.split_once(':').map_or((s, None), |(b, m)| (b, Some(m)));
+    Some((bdpi.parse().ok()?, mode))
 }
 
 /// `c-pathch.h`: `IS_KPSE_SEP` (Unix accepts `;` too).
@@ -1406,6 +1451,66 @@ impl Kpse {
         self.trail = Some(Vec::new());
         let found = self.find_file(name, format, must_exist);
         (found, self.trail.take().unwrap_or_default())
+    }
+
+    /// `proginit.c`, `kpathsea_init_prog`'s glyph settings: base
+    /// resolution `dpi` (`MAKETEX_BASE_DPI`) and mode `mode`
+    /// (`MAKETEX_MODE`, `/` without one: every mode's directory), as
+    /// pdfTeX sets them at its first shipout (`\pdfpkresolution`,
+    /// `\pdfpkmode`). The PK path is made again with them.
+    pub fn init_prog(&mut self, dpi: u32, mode: Option<&[u8]>) {
+        self.env_overlay
+            .insert(b"MAKETEX_BASE_DPI".to_vec(), dpi.to_string().into_bytes());
+        self.env_overlay.insert(
+            b"MAKETEX_MODE".to_vec(),
+            mode.filter(|m| !m.is_empty()).unwrap_or(b"/").to_vec(),
+        );
+        self.paths.remove(&Format::Pk);
+        self.made.retain(|(_, f), _| *f != Format::Pk);
+    }
+
+    /// `tex-glyph.c`, `kpathsea_find_glyph` for `kpse_pk_format` as far
+    /// as `try_resolution` goes: font `name` at `dpi`, then at the
+    /// resolutions within `KPSE_BITMAP_TOLERANCE` of it (`dpi/500 + 1`),
+    /// each as `NAME.DPIpk` and `dpiDPI/NAME.pk` in `$PKFONTS`, first
+    /// from the databases, then on the disk. The file and the resolution
+    /// it was found at. Not here: `texfonts.map` aliases, mktexpk (the
+    /// caller's on a miss), the fallback resolutions and font.
+    pub fn find_pk(&mut self, name: &[u8], dpi: u32) -> Option<(Bytes, u32)> {
+        if let Some(p) = self.try_pk_size(name, dpi) {
+            return Some((p, dpi));
+        }
+        // (`(unsigned) (dpi / 500.0 + 1)`)
+        let tolerance = dpi / 500 + 1;
+        let lower = dpi.saturating_sub(tolerance);
+        for r in lower..=dpi + tolerance {
+            if r != dpi
+                && let Some(p) = self.try_pk_size(name, r)
+            {
+                return Some((p, r));
+            }
+        }
+        None
+    }
+
+    /// `try_size` and `try_format` for the PK format.
+    fn try_pk_size(&mut self, name: &[u8], dpi: u32) -> Option<Bytes> {
+        self.cnf_get(b"");
+        let path = self.init_format(Format::Pk);
+        let unix = [name, format!(".{dpi}pk").as_bytes()].concat();
+        let dpidir = [format!("dpi{dpi}/").as_bytes(), name, b".pk"].concat();
+        for must_exist in [false, true] {
+            for spec in [&unix, &dpidir] {
+                if let Some(p) = self
+                    .search_list(&path, std::slice::from_ref(spec), must_exist, false)
+                    .into_iter()
+                    .next()
+                {
+                    return Some(p);
+                }
+            }
+        }
+        None
     }
 
     /// `tex-file.c`, `kpathsea_find_file_generic` (`all` = false):

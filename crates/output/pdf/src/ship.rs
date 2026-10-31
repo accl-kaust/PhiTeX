@@ -257,6 +257,8 @@ impl PdfState {
                 kind: FontType::New,
                 vf: None,
                 expand: src.expansion(f),
+                pk: None,
+                tag: None,
             }),
         );
     }
@@ -345,8 +347,17 @@ impl PdfState {
             }
         }
         let n = self.create_obj(OBJ_TYPE_FONT, i64::from(f));
+        // (a font that is not scalable, a real one: its PK file now, at
+        // the resolution `writepk` will ask for, `pk_dpi_of`: the writer
+        // has no files at the end)
+        if !self.font(f).scalable() {
+            let dpi = self.pk_dpi_of(f);
+            let b = src.pk_file(f, dpi);
+            self.font_mut(f).pk = Some((dpi, b));
+        }
         let space = self.has_space_char(f) && self.font(f).width(32) > ONE_BP;
         self.font_mut(f).has_space = space;
+        self.font_mut(f).tag = Some(Self::font_tag(f, src));
         self.use_font(f, int(n));
     }
 
@@ -614,7 +625,19 @@ impl PdfState {
     fn adv_char_width(&mut self, f: FontId, c: u16) -> (i32, Scaled) {
         let st = self.font(f);
         let (w, size) = (st.width(c), st.size);
-        self.adv_width(w, size)
+        self.adv_width_of(f, w, size)
+    }
+
+    /// [`PdfState::adv_width`] for a character of font `f`: a font that
+    /// is not scalable advances by `getpkcharwidth` (pdfTeX §726), the
+    /// returned values left 0 as pdfTeX leaves them.
+    fn adv_width_of(&mut self, f: FontId, w: Scaled, size: Scaled) -> (i32, Scaled) {
+        if self.font(f).scalable() {
+            self.adv_width(w, size)
+        } else {
+            self.delta_h += self.pk_char_advance(f, w);
+            (0, 0)
+        }
     }
 
     /// [`PdfState::adv_char_width`] of a character of width `w` in a
@@ -786,7 +809,7 @@ impl PdfState {
             let size = self.begin_string(f, src);
             self.print_char(f, c);
             let w = self.font(f).width(u16::from(c));
-            self.adv_width(w, size);
+            self.adv_width_of(f, w, size);
         }
     }
 
@@ -817,7 +840,7 @@ impl PdfState {
             } else {
                 self.print_char(f, c8);
             }
-            self.adv_width(w, size);
+            self.adv_width_of(f, w, size);
             self.cur_h += w;
             return;
         }
@@ -852,7 +875,9 @@ impl PdfState {
         let Some(st) = self.fonts.get(&f).cloned() else {
             return i;
         };
-        if st.kind != FontType::Real || st.auto_expand_ratio() != 0 {
+        // (a PK font's characters advance by `getpkcharwidth`: one at a
+        // time, `char_out`)
+        if st.kind != FontType::Real || st.auto_expand_ratio() != 0 || !st.scalable() {
             return i;
         }
         let size = st.size;
@@ -1489,6 +1514,8 @@ impl PdfState {
             self.dd = self.p.decimal_digits.clamp(0, 4);
             let ten = TEN_POW[usize::try_from(self.dd + 2).unwrap_or(0)];
             self.min_bp_val = divide_scaled(ONE_HUNDRED_BP, i32::try_from(ten).unwrap_or(1), 0).0;
+            self.fixed_pk_resolution = crate::t3::fixed_pk_resolution(self.p.pk_resolution);
+            self.pk_scale_factor = divide_scaled(72, self.fixed_pk_resolution, 5 + self.dd).0;
             self.initialized = true;
         }
     }

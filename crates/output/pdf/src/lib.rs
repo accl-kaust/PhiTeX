@@ -72,7 +72,7 @@
 //! moves the position past them; the writer places the form or image at
 //! the whatsit as pdfTeX places its node.
 //!
-//! Not in this crate: PK (Type 3) fonts, OpenType (CFF) font files, TrueType subfonts,
+//! Not in this crate: `.pgc` (PDF glyph code) Type 3 fonts, OpenType (CFF) font files, TrueType subfonts,
 //! `\pdfimageapplygamma`, JBIG2 images, the replacement of included PDF
 //! files' Type 1C fonts, `\pdfsnapy`, `\pdfuniqueresname`.
 
@@ -142,6 +142,8 @@ mod replay;
 pub use replay::{PageRecord, Part};
 mod ship;
 pub mod t1;
+mod t3;
+pub use t3::{fixed_pk_resolution, magstep_fix, pk_dpi, pk_file_name, pk_request};
 mod tap;
 pub use tap::GlyphTap;
 mod tounicode;
@@ -261,6 +263,9 @@ pub struct PdfParams {
     pub page_resources: Option<Vec<u8>>,
     /// `\pdfgentounicode`.
     pub gen_tounicode: i32,
+    /// `\pdfpkresolution` (0: web2c's `pk_dpi`, 72), fixed at the first
+    /// shipout (pdfTeX §792).
+    pub pk_resolution: i32,
     /// `\pdfdraftmode`.
     pub draftmode: i32,
     /// `\pdfimagehicolor`.
@@ -287,8 +292,6 @@ pub struct PdfParams {
     pub info_omit_date: i32,
     /// `\pdfsuppresswarningpagegroup`.
     pub suppress_warning_page_group: i32,
-    /// `\pdfpkresolution` (0: `pk_dpi`, `texmf.cnf`'s, 72 unset there).
-    pub pk_resolution: i32,
     /// `start_time_str` (`texmfmp.c` `makepdftime`), e.g.
     /// `D:19700101000001Z`; see [`pdf_date`].
     pub date: String,
@@ -322,6 +325,7 @@ impl Default for PdfParams {
             pages_attr: None,
             page_resources: None,
             gen_tounicode: 0,
+            pk_resolution: 0,
             draftmode: 0,
             image_hicolor: 1,
             image_apply_gamma: 0,
@@ -335,7 +339,6 @@ impl Default for PdfParams {
             omit_charset: 0,
             info_omit_date: 0,
             suppress_warning_page_group: 0,
-            pk_resolution: 0,
             date: pdf_date(0),
             banner: String::new(),
             output_file_name: String::new(),
@@ -416,6 +419,13 @@ pub trait FontSource {
     /// map lines given with `\pdfmapline`).
     fn file(&self, _name: &[u8]) -> Option<Vec<u8>> {
         None
+    }
+    /// The PK file of font `f` at `dpi` dots per inch, for a font that
+    /// is not scalable (no map entry, or a PK one: `writepk`'s
+    /// `kpse_find_pk`): by default [`FontSource::file_shared`] of
+    /// [`pk_file_name`] (`cmr10.600pk`).
+    fn pk_file(&self, f: FontId, dpi: u32) -> Option<std::sync::Arc<[u8]>> {
+        self.file_shared(&pk_file_name(self.name(f), dpi))
     }
     /// [`FontSource::font_file`], shared where the source holds it so
     /// (no copy for each page that loads the font).
@@ -545,6 +555,12 @@ struct FontState {
     vf: Option<VirtualFont>,
     /// The font's expansion.
     expand: Option<Expansion>,
+    /// A font that is not scalable (a PK font): its PK file
+    /// ([`FontSource::pk_file`]) and the resolution it was asked for at.
+    pk: Option<(u32, Option<Arc<[u8]>>)>,
+    /// The number in its name (`/F<n>`) where the font object was made
+    /// ([`PdfState::font_tag`]): a Type 3 font's `/Name`.
+    tag: Option<FontId>,
 }
 
 impl std::fmt::Debug for FontState {
@@ -565,6 +581,11 @@ impl std::fmt::Debug for FontState {
             .field("kind", &self.kind)
             .field("vf", &self.vf)
             .field("expand", &self.expand)
+            .field(
+                "pk",
+                &self.pk.as_ref().map(|(d, b)| (d, digest::opt(b.as_ref()))),
+            )
+            .field("tag", &self.tag)
             .finish_non_exhaustive()
     }
 }
@@ -805,6 +826,9 @@ pub struct PdfState {
     /// `fixed_decimal_digits`.
     dd: i32,
     min_bp_val: Scaled,
+    /// `fixed_pk_resolution` and `pk_scale_factor` (pdfTeX §792).
+    fixed_pk_resolution: i32,
+    pk_scale_factor: i32,
     total_pages: i64,
     last_pages: usize,
     last_page: usize,
@@ -957,6 +981,8 @@ impl PdfState {
             initialized: false,
             dd: 3,
             min_bp_val: 0,
+            fixed_pk_resolution: 0,
+            pk_scale_factor: 0,
             total_pages: 0,
             last_pages: 0,
             last_page: 0,

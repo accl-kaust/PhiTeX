@@ -23,6 +23,7 @@ phitex-bibtex = { path = "../tools/bibtex" }
 phitex-biber = { path = "../tools/biber" }
 phitex-kpse = { path = "../tools/kpse" }
 phitex-makeindex = { path = "../tools/makeindex" }
+phitex-mf = { path = "../fonts/mf" }
 phitex-tex = { path = "../engines/tex" }
 phitex-pdf = { path = "../output/pdf" }
 phitex-otf = { path = "../fonts/otf" }

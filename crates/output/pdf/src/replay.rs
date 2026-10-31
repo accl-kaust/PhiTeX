@@ -51,6 +51,7 @@ struct Scratch {
     p: crate::PdfParams,
     dd: i32,
     min_bp_val: i32,
+    pk: (i32, i32),
     initialized: bool,
     version_written: bool,
     fixed: [i32; 6],
@@ -75,6 +76,7 @@ impl PdfState {
             p: self.p.clone(),
             dd: self.dd,
             min_bp_val: self.min_bp_val,
+            pk: (self.fixed_pk_resolution, self.pk_scale_factor),
             initialized: self.initialized,
             version_written: self.version_written,
             fixed: [
@@ -162,6 +164,7 @@ impl PdfState {
             "{:?}",
             (
                 (self.dd, self.min_bp_val),
+                (self.fixed_pk_resolution, self.pk_scale_factor),
                 (self.initialized, self.version_written),
                 [
                     self.fixed_major,
@@ -191,6 +194,7 @@ impl PdfState {
         self.p = s.p.clone();
         self.dd = s.dd;
         self.min_bp_val = s.min_bp_val;
+        (self.fixed_pk_resolution, self.pk_scale_factor) = s.pk;
         self.initialized = s.initialized;
         self.version_written = s.version_written;
         [

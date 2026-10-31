@@ -608,6 +608,7 @@ impl Run<'_, '_> {
             self.show_toks_into(&mut s, &toks)?;
             xs.push(v.str(&s));
         }
+        xs.push(v.int(i64::from(self.param("pdfpkresolution")?)));
         Ok(v.list(xs))
     }
 }

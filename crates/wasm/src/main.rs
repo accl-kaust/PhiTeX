@@ -181,7 +181,19 @@ fn found(k: &Mutex<Kpse>, name: &str, format: Format) -> Option<(String, Vec<u8>
 
 fn finder(k: Kpse) -> Finder {
     let k = Mutex::new(k);
-    Arc::new(move |name: &str| found(&k, name, format_of(name)))
+    Arc::new(move |name: &str| {
+        // (a PK font, `cmr10.600pk`: kpathsea's PK search)
+        if let Some((font, dpi)) = phitex_kpse::pk_name(name) {
+            let (p, _) = k
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .find_pk(font.as_bytes(), dpi)?;
+            let p = String::from_utf8(p).ok()?;
+            let bytes = std::fs::read(&p).ok()?;
+            return Some((p, bytes));
+        }
+        found(&k, name, format_of(name))
+    })
 }
 
 fn tool_finder(k: Kpse) -> ToolFinder {

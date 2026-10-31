@@ -104,6 +104,8 @@ pub fn cache_dir() -> PathBuf {
 pub struct Tree {
     /// kpathsea as the engine's program (its `progname`, `$engine`).
     kpse: Mutex<Kpse>,
+    /// The glyph settings kpathsea was last given (`kpse_init_prog`).
+    glyph: Mutex<Option<(u32, Option<String>)>>,
 }
 
 impl Tree {
@@ -112,6 +114,7 @@ impl Tree {
     pub fn open(e: &Engine) -> Tree {
         Tree {
             kpse: Mutex::new(kpse(e.name, e.kpse_engine)),
+            glyph: Mutex::new(None),
         }
     }
 
@@ -126,6 +129,7 @@ impl Tree {
         }
         Tree {
             kpse: Mutex::new(k),
+            glyph: Mutex::new(None),
         }
     }
 
@@ -133,6 +137,9 @@ impl Tree {
     /// names (pdfTeX's choices: a TFM, a VF, a map, a Type 1 font, an
     /// encoding, else an input).
     pub fn input(&self, name: &str) -> Option<PathBuf> {
+        if let Some((font, dpi)) = phitex_kpse::pk_name(name) {
+            return self.pk(font, dpi, phitex_kpse::pk_settings(name));
+        }
         let ext = Path::new(name)
             .extension()
             .and_then(|e| e.to_str())
@@ -148,12 +155,47 @@ impl Tree {
             _ => Format::Tex,
         };
         let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
-        k.find_file(name.as_bytes(), format, false)
-            .map(|b| os(&b).to_path_buf())
+        let found = k
+            .find_file(name.as_bytes(), format, false)
+            .map(|b| os(&b).to_path_buf());
+        drop(k);
+        // (kpathsea's mktextfm on a TFM it finds none of)
+        match (found, format) {
+            (None, Format::Tfm) => {
+                crate::mkfont::mktextfm(name.strip_suffix(".tfm").unwrap_or(name))
+            }
+            (found, _) => found,
+        }
     }
 }
 
 impl Tree {
+    /// Where font `font`'s PK file at `dpi` dots per inch is (the name
+    /// `cmr10.600pk` a PK font's lookup asks for, [`phitex_kpse::pk_name`]):
+    /// kpathsea's PK search, `kpse_find_pk` ([`Kpse::find_pk`]) with the
+    /// glyph settings `glyph` the writer gave (`kpse_init_prog`'s base
+    /// resolution and mode, [`phitex_kpse::pk_settings`]), and on a miss
+    /// mktexpk ([`crate::mkfont::mktexpk`]).
+    pub fn pk(&self, font: &str, dpi: u32, glyph: Option<(u32, Option<&str>)>) -> Option<PathBuf> {
+        let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((bdpi, mode)) = glyph {
+            let mut g = self.glyph.lock().unwrap_or_else(PoisonError::into_inner);
+            let want = (bdpi, mode.map(str::to_string));
+            if g.as_ref() != Some(&want) {
+                k.init_prog(bdpi, mode.map(str::as_bytes));
+                *g = Some(want);
+            }
+        }
+        let found = k
+            .find_pk(font.as_bytes(), dpi)
+            .map(|(p, _)| os(&p).to_path_buf());
+        drop(k);
+        match (found, glyph) {
+            (None, Some((bdpi, mode))) => crate::mkfont::mktexpk(font, dpi, bdpi, mode),
+            (found, _) => found,
+        }
+    }
+
     /// Where a tool's support file `name` is, by kpathsea in the format
     /// of its search (`bst`, `bib`, `ist`, which add their suffixes).
     pub fn tool_input(&self, search: phitex_tex::ToolSearch, name: &str) -> Option<PathBuf> {
@@ -163,8 +205,17 @@ impl Tree {
             phitex_tex::ToolSearch::IndexStyle => Format::Ist,
         };
         let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
-        k.find_file(name.as_bytes(), format, false)
-            .map(|b| os(&b).to_path_buf())
+        let found = k
+            .find_file(name.as_bytes(), format, false)
+            .map(|b| os(&b).to_path_buf());
+        drop(k);
+        // (kpathsea's mktextfm on a TFM it finds none of)
+        match (found, format) {
+            (None, Format::Tfm) => {
+                crate::mkfont::mktextfm(name.strip_suffix(".tfm").unwrap_or(name))
+            }
+            (found, _) => found,
+        }
     }
 }
 
@@ -180,6 +231,6 @@ const FORMATS: [Format; 8] = [
     Format::Tex,
 ];
 
-fn os(b: &[u8]) -> &Path {
+pub(crate) fn os(b: &[u8]) -> &Path {
     Path::new(OsStr::from_bytes(b))
 }

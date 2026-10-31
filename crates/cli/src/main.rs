@@ -37,6 +37,7 @@ mod editor;
 mod failure;
 mod keys;
 mod lsp;
+mod mkfont;
 mod modern;
 mod news;
 mod problems;

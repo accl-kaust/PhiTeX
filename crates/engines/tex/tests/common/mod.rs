@@ -33,6 +33,12 @@ pub fn finder(dir: &Path) -> Finder {
         if p.is_file() {
             return Some((format!("./{name}"), std::fs::read(&p).ok()?));
         }
+        if let Some((font, dpi)) = phitex_kpse::pk_name(name) {
+            let mut k = kpse().lock().ok()?;
+            let (path, _) = k.as_mut()?.find_pk(font.as_bytes(), dpi)?;
+            let path = String::from_utf8(path).ok()?;
+            return Some((path.clone(), std::fs::read(&path).ok()?));
+        }
         let ext = Path::new(name)
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
