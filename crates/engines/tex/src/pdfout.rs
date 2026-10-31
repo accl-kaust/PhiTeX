@@ -1008,7 +1008,6 @@ pub(crate) fn fontload_key(v: &Values, x: ValueId) -> Option<i64> {
 
 pub(crate) fn font_load(r: &mut Run<'_, '_>, name: &str, size: i32, id: i64) {
     let v = r.v;
-    r.contribute(FONT_LOADS, v.seq_unit(v.int(id)));
     let e = v.list(vec![
         v.str("fontload"),
         v.str(name),
@@ -1239,18 +1238,7 @@ pub(crate) struct Fonts {
     /// An expandable virtual font's stretch and shrink limits: its local
     /// fonts are expanded where it is read in (`vf_def_font`).
     vf_exp: FxHashMap<FontId, (i32, i32)>,
-    /// The fonts' numbers as the step sees them, by key (TeX's: their
-    /// ranks in the order of the loads before it, [`FONT_LOADS`]): the
-    /// names its content gives them, which the link rewrites only where
-    /// the fonts the shipouts loaded moved them ([`FontNums`]).
-    nums: FxHashMap<FontId, FontId>,
 }
-
-/// The fonts' loads, by key, where they ran (a sequence): the order a
-/// step reads its fonts' provisional numbers from ([`Fonts::nums`]); the
-/// line's `fontload` records ([`font_load`]) are the exact order, in
-/// TeX's order of runs ([`order_line`]).
-pub(crate) const FONT_LOADS: &str = "fontloads";
 
 /// The first handle of a virtual font's local font in a step's fonts
 /// ([`Fonts::locals`]); the link's own for the local fonts it numbers
@@ -1309,11 +1297,6 @@ impl Fonts {
         for (n, b) in files {
             h = phitex_defuse::hash_words(phitex_defuse::hash_bytes(h, n), &[blob_hash(b)]);
         }
-        let mut nums: Vec<(FontId, FontId)> = self.nums.iter().map(|(&k, &n)| (k, n)).collect();
-        nums.sort_unstable();
-        for (k, n) in nums {
-            h = phitex_defuse::hash_words(h, &[u64::from(k), u64::from(n)]);
-        }
         phitex_defuse::hash_words(h, &[u64::from(self.space.unwrap_or(0))])
     }
 
@@ -1329,7 +1312,6 @@ impl Fonts {
             }
         }
         self.space.unwrap_or(0) == o.space.unwrap_or(0)
-            && self.nums == o.nums
             && self.by_id.len() == o.by_id.len()
             && self.by_id.iter().all(|(f, x)| {
                 o.by_id.get(f).is_some_and(|y| {
@@ -1467,8 +1449,15 @@ impl FontSource for Fonts {
     fn expansion(&self, f: FontId) -> Option<Expansion> {
         self.exp.get(&f).copied()
     }
-    fn tag(&self, f: FontId) -> Option<FontId> {
-        self.nums.get(&f).copied()
+    /// None: a step names a font by its key, whatever fonts were
+    /// loaded before it; the link names it as pdfTeX numbers it, by the
+    /// line's loads in TeX's order ([`FontNums`]), and rewrites the
+    /// page's content where the two differ ([`PdfState::replay_page`],
+    /// its compression memoised by content): no step reads the order of
+    /// the loads, so a font loaded earlier (an expanded instance a
+    /// keystroke makes) runs no step after it again.
+    fn tag(&self, _f: FontId) -> Option<FontId> {
+        None
     }
 }
 
@@ -1547,12 +1536,6 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
     // (`vf_def_font`): a local font of a name and size this step has is
     // that font, else a handle of its own ([`Fonts::locals`]); nothing of
     // the document's font table is read, the link numbers the local fonts
-    let nums = load_numbers(r)?;
-    for &f in ids {
-        if let Some(&n) = nums.get(&i64::from(f)) {
-            out.nums.insert(f, FontId::try_from(n).unwrap_or(0));
-        }
-    }
     let mut known: Vec<(u32, crate::fonts::Info)> = Vec::new();
     for &f in ids {
         if let Some(i) = crate::fonts::info(v, r.font_get(f, crate::fields::FontCell::Info)?)
@@ -1587,9 +1570,6 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
                 else {
                     continue;
                 };
-                if let Some(&n) = nums.get(&b) {
-                    out.nums.insert(g, FontId::try_from(n).unwrap_or(0));
-                }
                 known.push((g, i));
             }
             out.exp.insert(
@@ -1614,9 +1594,6 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
                 else {
                     continue;
                 };
-                if let Some(&n) = nums.get(&ls.base) {
-                    out.nums.insert(g, FontId::try_from(n).unwrap_or(0));
-                }
                 known.push((g, i));
             }
             let Some(l) = crate::fonts::load_info(v, &known[k - 1].1) else {
@@ -3587,56 +3564,6 @@ pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, f: i64) -> R<i64> {
     let v = r.v;
     let range = allocs_range(r, "font_tag_read")?;
     Ok(n + fold_allocs(v, range).ship_fonts)
-}
-
-/// The fonts' numbers as a step sees them: their ranks in the order of
-/// first loads, the format's fonts first ([`crate::api::FONT_ORDER`]),
-/// then the loads before this run ([`FONT_LOADS`], in the order of the
-/// runs' places) and this run's own. A provisional numbering (a page
-/// written apart names its fonts by it): the link numbers by the line's
-/// records in TeX's order ([`FontNums`]) and rewrites a name it moved.
-pub(crate) fn load_numbers(r: &mut Run<'_, '_>) -> R<FxHashMap<i64, i64>> {
-    type Numbers = Once<Arc<FxHashMap<i64, i64>>, (u64, u64)>;
-    static M: OnceLock<Numbers> = OnceLock::new();
-    let v = r.v;
-    let put = |k: i64, out: &mut FxHashMap<i64, i64>| {
-        let n = i64::try_from(out.len()).unwrap_or(0) + 1;
-        out.entry(k).or_insert(n);
-    };
-    let order = r.get(crate::api::FONT_ORDER)?;
-    let f = v.field(FONT_LOADS);
-    let before = r.cx.fold(f, None, None)?;
-    // (the numbers of the format's fonts and of the loads before the run:
-    // a pure function's memo by those values, every page step asks)
-    let key = (order.map_or(0, ValueId::raw), before.raw());
-    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-    {
-        let mut g = m.locked();
-        if g.len() > 1 << 10 {
-            g.clear();
-        }
-    }
-    let base = once(m, key, || {
-        let mut out: FxHashMap<i64, i64> = FxHashMap::default();
-        if let Some(x) = order {
-            for k in list_of(v, x) {
-                put(int_of(v, k), &mut out);
-            }
-        }
-        for k in v.seq_to_vec(before) {
-            put(int_of(v, k), &mut out);
-        }
-        Arc::new(out)
-    });
-    let mut out = (*base).clone();
-    for &(g, x) in &r.contribs {
-        if g == f {
-            for k in v.seq_to_vec(x) {
-                put(int_of(v, k), &mut out);
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// The number TeX gives font `f` (a key, [`crate::fonts::key_of`]): its

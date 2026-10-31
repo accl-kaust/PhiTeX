@@ -8591,11 +8591,6 @@ fn declare_fields(eng: &Engine) {
     }
     let lines = eng.values().field("lines");
     eng.declare_accumulator(lines, Arc::new(LinesMonoid));
-    // (a page written apart reads the fonts' loads before it for its
-    // provisional numbers, which the link corrects: read past the pieces
-    // in work, as few of them load a font, not waiting for all)
-    let loads = eng.values().field(crate::pdfout::FONT_LOADS);
-    eng.declare_accumulator(loads, Arc::new(crate::pages::MissMonoid));
     let allocs = eng.values().field(crate::pdfout::ALLOCS);
     eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
     let shown = eng.values().field(crate::pdfout::SHOWN);

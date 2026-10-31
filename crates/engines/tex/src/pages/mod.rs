@@ -398,24 +398,6 @@ pub(crate) const DEAD_SLOT: i64 = 8;
 /// leaves it for the build after it ([`Run::rtn_page_markers`]).
 pub(crate) const INSPEN_SLOT: i64 = 9;
 
-/// A sequence read past its contributors still in work as they last
-/// contributed (nothing, for a node that never did,
-/// [`phitex_defuse::Monoid::speculate`]); a contribution that comes in
-/// otherwise re-asks the reader. For an accumulator few nodes contribute
-/// to, read where waiting for every node in the window would chain the
-/// readers on the text: the fonts' loads (`crate::pdfout::FONT_LOADS`,
-/// a page written apart's provisional numbers, which the link corrects).
-pub(crate) struct MissMonoid;
-
-impl phitex_defuse::Monoid for MissMonoid {
-    fn empty(&self, _: &Values) -> ValueId {
-        ValueId::NIL
-    }
-    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
-        v.seq_concat(a, b)
-    }
-}
-
 /// The page accumulators' declared contributions of a node that gives
 /// none of them: so a range read of a window holding it does not wait
 /// for it, only for the pieces.
