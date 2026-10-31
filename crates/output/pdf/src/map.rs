@@ -375,6 +375,12 @@ pub fn parse_map_ps(bytes: &[u8]) -> BTreeMap<(Vec<u8>, i32, i32), MapEntry> {
 pub struct MapIndex {
     bytes: std::sync::Arc<[u8]>,
     got: std::sync::Mutex<std::collections::HashMap<Vec<u8>, Option<MapEntry>>>,
+    /// The lines by their first field, in order (each line's start and
+    /// end), made at the first name asked for: one pass over the map,
+    /// not one a name (a document with expanded or virtual fonts asks
+    /// for hundreds of names the map lacks, each a pass over its 46 000
+    /// lines: 13% of a paper's warm build).
+    lines: std::sync::OnceLock<std::collections::HashMap<Box<[u8]>, Vec<(usize, usize)>>>,
 }
 
 impl MapIndex {
@@ -385,7 +391,38 @@ impl MapIndex {
         MapIndex {
             bytes,
             got: std::sync::Mutex::new(std::collections::HashMap::new()),
+            lines: std::sync::OnceLock::new(),
         }
+    }
+
+    /// [`MapIndex::lines`]: every line not blank and not a comment, by
+    /// its first field (up to a blank, `<` or `"`).
+    fn lines(&self) -> &std::collections::HashMap<Box<[u8]>, Vec<(usize, usize)>> {
+        self.lines.get_or_init(|| {
+            let b = &self.bytes[..];
+            let mut m: std::collections::HashMap<Box<[u8]>, Vec<(usize, usize)>> =
+                std::collections::HashMap::new();
+            let mut pos = 0;
+            while pos < b.len() {
+                let end = b[pos..]
+                    .iter()
+                    .position(|&c| c == b'\n' || c == b'\r')
+                    .map_or(b.len(), |i| pos + i);
+                let mut a = pos;
+                while a < end && matches!(b[a], b' ' | b'\t') {
+                    a += 1;
+                }
+                if a < end && !is_cfg_comment(b[a]) {
+                    let z = b[a..end]
+                        .iter()
+                        .position(|&c| matches!(c, b' ' | b'\t' | b'<' | b'"'))
+                        .map_or(end, |i| a + i);
+                    m.entry(b[a..z].into()).or_default().push((pos, end));
+                }
+                pos = end + 1;
+            }
+            m
+        })
     }
 
     /// The entry of TFM name `name`, as [`parse_map`]'s: the first line
@@ -401,31 +438,13 @@ impl MapIndex {
             return x.clone();
         }
         let b = &self.bytes[..];
-        let mut x = None;
-        let mut pos = 0;
-        while pos < b.len() {
-            let end = b[pos..]
-                .iter()
-                .position(|&c| c == b'\n' || c == b'\r')
-                .map_or(b.len(), |i| pos + i);
-            let mut a = pos;
-            while a < end && matches!(b[a], b' ' | b'\t') {
-                a += 1;
-            }
-            if a < end
-                && !is_cfg_comment(b[a])
-                && b[a..end].starts_with(name)
-                && (a + name.len() == end
-                    || matches!(b[a + name.len()], b' ' | b'\t' | b'<' | b'"'))
-                && let Some(fm) = map_lines(&b[pos..end])
+        let x = self.lines().get(name).and_then(|ls| {
+            ls.iter().find_map(|&(pos, end)| {
+                map_lines(&b[pos..end])
                     .into_iter()
                     .find(|fm| fm.tfm_name == name)
-            {
-                x = Some(fm);
-                break;
-            }
-            pos = end + 1;
-        }
+            })
+        });
         got.insert(name.to_vec(), x.clone());
         x
     }
@@ -479,5 +498,43 @@ mod tests {
         assert_eq!(fm.slant, 167);
         assert!(fm.is_included() && !fm.is_subsetted());
         assert!(parse_line(b"% comment").is_none());
+    }
+
+    /// [`MapIndex::get`] answers every name as [`parse_map`] does: the
+    /// first valid line of a name (a later duplicate ignored, an invalid
+    /// first line passed over), none for a name only a comment or a
+    /// longer name holds, lines ending in `\r` and indented ones.
+    #[test]
+    fn index_answers_as_the_whole_map() {
+        let map = b"% cmr10 CMR10 <cmr10.pfb\n\
+cmr10 CMR10 <cmr10.pfb\n\
+cmr10 CMR10X <cmr10x.pfb\n\
+  cmr12 CMR12 <cmr12.pfb\r\n\
+cmr17\n\
+cmr17 CMR17 <cmr17.pfb\n\
+cmr7x CMR7X <cmr7x.pfb\n\
+cmbx10<cmbx10.pfb\n\
+* cmti10 CMTI10 <cmti10.pfb\n";
+        let whole = parse_map(map);
+        let index = MapIndex::new(std::sync::Arc::from(&map[..]));
+        for name in [
+            &b"cmr10"[..],
+            b"cmr12",
+            b"cmr17",
+            b"cmr7",
+            b"cmr7x",
+            b"cmbx10",
+            b"cmti10",
+            b"absent",
+        ] {
+            let got = index.get(name);
+            let want = whole.get(name);
+            assert_eq!(
+                got.as_ref().map(|f| (&f.ps_name, &f.ff_name)),
+                want.map(|f| (&f.ps_name, &f.ff_name)),
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
     }
 }
