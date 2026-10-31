@@ -3827,7 +3827,12 @@ impl<'c, 'a> Run<'c, 'a> {
         if !t.is_cs_or_active() || self.cur.cmd == cmd::RELAX {
             return None;
         }
-        if let Some(l) = crate::fields::mean_loc(t).and_then(|l| Loc::try_from(l).ok())
+        // (not while a written line is interpreted: its macros are those
+        // at its read-back point, [`Run::revert_read_back`]; a line
+        // written after `\AtBeginDocument` let `\HyPL@Entry` be
+        // `\@gobble` reads it back where it still gathers the labels)
+        if self.interp.is_none()
+            && let Some(l) = crate::fields::mean_loc(t).and_then(|l| Loc::try_from(l).ok())
             && let Some(m) = self.st.macro_at(l)
         {
             return Some(m);
@@ -3931,8 +3936,11 @@ impl<'c, 'a> Run<'c, 'a> {
     #[inline(always)]
     fn set_cur_cs(&mut self, tok: Tok) -> R<()> {
         // (the common case: a control sequence whose meaning this run
-        // has read and decoded: one slot access)
+        // has read and decoded: one slot access; not while a written line
+        // is interpreted, whose meanings are those at its read-back
+        // point, [`Run::revert_read_back`], through [`Run::mean_loc`])
         if !self.bare
+            && self.interp.is_none()
             && let Some(i) = tok.cs_index()
             && let Some((c, h)) = self
                 .st
@@ -3972,8 +3980,10 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         }
         // (the common case: a control sequence whose meaning this run
-        // has read and decoded: one slot access)
-        if let Some(i) = tok.cs_index()
+        // has read and decoded: one slot access; not while a line is
+        // interpreted, as above)
+        if self.interp.is_none()
+            && let Some(i) = tok.cs_index()
             && let Ok(l) = Loc::try_from(crate::fields::MEAN_BASE + i)
             && let Some((c, h)) = self.st.cmd_chr_fast(l)
         {

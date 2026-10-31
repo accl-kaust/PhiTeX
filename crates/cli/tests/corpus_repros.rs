@@ -179,3 +179,7 @@ repro!(
     letterspaced_vf_expansion,
     "research corpus (classicthesis): microtype's \\textls (\\letterspacefont, a virtual font) over mathpazo's virtual small caps pplrc9d, with font expansion: the expanded local font of an expanded virtual font is an expanded virtual font in turn (pdfTeX's auto_expand_vf through do_vf); PhiTeX took 'pplrc9d-9' for a real font, 'Font pplrc9d+7 not found (no entry in the font map)', no PDF"
 );
+repro!(
+    aux_line_read_back_meaning,
+    "research corpus under XeLaTeX (aomart, memoir, classicthesis: no /PageLabels): a line written to the .aux is interpreted with the meanings at its read-back point, \\begin{document}; a meaning this run had already loaded took the slot's fast path (set_cur_cs, cur_macro) and was read as the writer had it: hyperref's \\HyPL@Entry, let to \\@gobble after the read-back, gathered no labels"
+);
