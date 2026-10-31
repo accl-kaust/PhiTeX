@@ -12,9 +12,17 @@ pub fn dsc_comment(ps: &mut Ps<'_>, line: &[u8]) {
     // (pdfwrite's DSC processing, gdevpdfp.c: %%Title, %%Creator and
     // %%For into the Info dictionary; %%Orientation other than portrait
     // turns the page, not done here)
-    for (c, k) in [(&b"%%Title:"[..], "Title"), (b"%%Creator:", "Creator"), (b"%%For:", "Author")] {
+    for (c, k) in [
+        (&b"%%Title:"[..], "Title"),
+        (b"%%Creator:", "Creator"),
+        (b"%%For:", "Author"),
+    ] {
         if let Some(r) = line.strip_prefix(c) {
-            let v: Vec<u8> = r.iter().copied().skip_while(|&b| b == b' ' || b == b'\t').collect();
+            let v: Vec<u8> = r
+                .iter()
+                .copied()
+                .skip_while(|&b| b == b' ' || b == b'\t')
+                .collect();
             match ps.dev.dsc_info.iter_mut().find(|(n, _)| *n == k) {
                 Some(e) => e.1 = v,
                 None => ps.dev.dsc_info.push((k, v)),
@@ -23,9 +31,16 @@ pub fn dsc_comment(ps: &mut Ps<'_>, line: &[u8]) {
         }
     }
     if let Some(r) = line.strip_prefix(b"%%Orientation:") {
-        let v: Vec<u8> = r.iter().copied().skip_while(|&b| b == b' ' || b == b'\t').collect();
+        let v: Vec<u8> = r
+            .iter()
+            .copied()
+            .skip_while(|&b| b == b' ' || b == b'\t')
+            .collect();
         if !v.starts_with(b"Portrait") && !v.starts_with(b"portrait") && ps.unsupported.is_none() {
-            ps.unsupported = Some(alloc::format!("%%Orientation: {}", alloc::string::String::from_utf8_lossy(&v)));
+            ps.unsupported = Some(alloc::format!(
+                "%%Orientation: {}",
+                alloc::string::String::from_utf8_lossy(&v)
+            ));
         }
     }
     if ps.eps_state >= 3 {

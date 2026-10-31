@@ -492,7 +492,8 @@ impl Device {
             Space::Cmyk => self.put(&format!("{s} {}\n", if stroke { "K" } else { "k" })),
             _ => {
                 if self.unsupported.is_none() {
-                    self.unsupported = Some("color spaces other than DeviceGray, DeviceRGB and DeviceCMYK".into());
+                    self.unsupported =
+                        Some("color spaces other than DeviceGray, DeviceRGB and DeviceCMYK".into());
                 }
                 crate::pdfcolor::write_color(self, c, stroke);
             }
@@ -592,7 +593,7 @@ impl Device {
                     if segs > 0 {
                         self.put(&format!("{} n\n", if l.rule <= 0 { "W" } else { "W*" }));
                     }
-                    e.clone_from(&l.next);
+                    e = l.next.clone();
                 }
             }
         }
@@ -866,7 +867,12 @@ impl Device {
         info.extend_from_slice(b">>");
         let meta_id = self.alloc();
         self.write_separate(2, info);
-        let get = |k: &str| self.dsc_info.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
+        let get = |k: &str| {
+            self.dsc_info
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.clone())
+        };
         let xmp = xmp(self.s.epoch, &self.file_id(), get("Title"), get("Creator"));
         let mut m = format!(
             "{meta_id} 0 obj\n<</Type/Metadata\n/Subtype/XML/Length {}>>stream\n",
@@ -1052,7 +1058,9 @@ pub fn civil(t: i64) -> (i64, i64, i64, i64, i64, i64) {
 /// `>` escaped, the bytes as UTF-8 where they are).
 fn xml_text(v: &[u8]) -> String {
     let s = String::from_utf8_lossy(v);
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn xmp(t: i64, id: &[u8; 16], title: Option<Vec<u8>>, creator: Option<Vec<u8>>) -> Vec<u8> {
@@ -1071,13 +1079,20 @@ fn xmp(t: i64, id: &[u8; 16], title: Option<Vec<u8>>, creator: Option<Vec<u8>>) 
     x.push_str(&format!("<xmp:CreateDate>{date}</xmp:CreateDate>\n"));
     x.push_str(&format!("<xmp:MetadataDate>{date}</xmp:MetadataDate>\n"));
     match &creator {
-        Some(c) => x.push_str(&format!("<xmp:CreatorTool>{}</xmp:CreatorTool></rdf:Description>\n", xml_text(c))),
-        None => x.push_str("<xmp:CreatorTool>'UnknownApplication'</xmp:CreatorTool></rdf:Description>\n"),
+        Some(c) => x.push_str(&format!(
+            "<xmp:CreatorTool>{}</xmp:CreatorTool></rdf:Description>\n",
+            xml_text(c)
+        )),
+        None => x.push_str(
+            "<xmp:CreatorTool>'UnknownApplication'</xmp:CreatorTool></rdf:Description>\n",
+        ),
     }
     x.push_str(&format!("<rdf:Description rdf:about=\"\" xmlns:xmpMM='http://ns.adobe.com/xap/1.0/mm/' xmpMM:DocumentID='{uuid}'/>\n"));
     x.push_str("<rdf:Description rdf:about=\"\" xmlns:xmpMM='http://ns.adobe.com/xap/1.0/mm/' xmpMM:RenditionClass='default'/>\n");
     x.push_str("<rdf:Description rdf:about=\"\" xmlns:xmpMM='http://ns.adobe.com/xap/1.0/mm/' xmpMM:VersionID='1'/>\n");
-    let tl = title.as_ref().map_or_else(|| String::from("'Untitled'"), |t| xml_text(t));
+    let tl = title
+        .as_ref()
+        .map_or_else(|| String::from("'Untitled'"), |t| xml_text(t));
     x.push_str(&format!("<rdf:Description rdf:about=\"\" xmlns:dc='http://purl.org/dc/elements/1.1/' dc:format='application/pdf'><dc:title><rdf:Alt><rdf:li xml:lang='x-default'>{tl}</rdf:li></rdf:Alt></dc:title></rdf:Description>\n"));
     x.push_str("</rdf:RDF>\n</x:xmpmeta>\n");
     let pad = " ".repeat(72);

@@ -367,7 +367,9 @@ impl Ps<'_> {
         // (a base 35 font itself missing, or its substitute: no font, as
         // gs without its Resource/Font; never a loop)
         let sub = substitute(&n);
-        if sub.as_bytes() == n.as_slice() || FONTMAP.iter().any(|(a, _)| a.as_bytes() == n.as_slice()) {
+        if sub.as_bytes() == n.as_slice()
+            || FONTMAP.iter().any(|(a, _)| a.as_bytes() == n.as_slice())
+        {
             return Err(E::InvalidFont.into());
         }
         let sname = self.nobj(sub);

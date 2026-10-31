@@ -86,7 +86,8 @@
     clippy::needless_late_init,
     clippy::manual_unwrap_or,
     clippy::struct_field_names,
-    clippy::manual_range_patterns
+    clippy::manual_range_patterns,
+    clippy::assigning_clones
 )]
 // (gs's state kept whole where this port reads only part of it yet, and
 // the operand stack left as gdevpsfx.c leaves it)
@@ -238,10 +239,16 @@ pub fn convert(input: &[u8], s: Settings, res: &dyn Resources) -> Output {
     ps.run_file(Rc::new(data), eps);
     let unsupported = ps.unsupported.take().or_else(|| ps.dev.unsupported.take());
     if let Some(u) = unsupported {
-        return Output { pdf: Vec::new(), error: Some(alloc::format!("unsupported PostScript: {u}")) };
+        return Output {
+            pdf: Vec::new(),
+            error: Some(alloc::format!("unsupported PostScript: {u}")),
+        };
     }
     if let Some(e) = ps.failed.take() {
-        return Output { pdf: Vec::new(), error: Some(e) };
+        return Output {
+            pdf: Vec::new(),
+            error: Some(e),
+        };
     }
     ps.dev.finish_page();
     pdffont::write_fonts(&mut ps);

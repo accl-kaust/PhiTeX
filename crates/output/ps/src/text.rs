@@ -485,7 +485,9 @@ impl Ps<'_> {
             }
         }
         if emulate {
-            return Err(self.unsupported("ashow/widthshow spacing gs emulates character by character"));
+            return Err(
+                self.unsupported("ashow/widthshow spacing gs emulates character by character")
+            );
         }
         if emulate {
             // (process_text_modify_width: a character at a time)
@@ -574,7 +576,11 @@ impl Ps<'_> {
     /// as graphics (pdfwrite makes a Type 3 font of them; not ported).
     fn show_type3(&mut self, font: &crate::font::Font, s: &[u8], adj: Adjust) -> R {
         if self.marking() {
-            return Err(self.unsupported(if font.font_type == 0 { "composite (Type 0) fonts" } else { "Type 3 fonts" }));
+            return Err(self.unsupported(if font.font_type == 0 {
+                "composite (Type 0) fonts"
+            } else {
+                "Type 3 fonts"
+            }));
         }
         let d = font.dict.clone();
         for &c in s {
@@ -832,7 +838,9 @@ fn op_glyphshow(ps: &mut Ps<'_>) -> R {
     let code = (0..=255u8).find(|&c| ps.glyph_name(&d, c) == name);
     match code {
         Some(c) => ps.show_pdf(&[c], Adjust::default()),
-        None if ps.marking() => Err(ps.unsupported("glyphshow of a glyph the font's Encoding lacks")),
+        None if ps.marking() => {
+            Err(ps.unsupported("glyphshow of a glyph the font's Encoding lacks"))
+        }
         None => Ok(()),
     }
 }

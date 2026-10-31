@@ -54,7 +54,9 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
 #[test]
 fn eps_fixtures_as_ghostscript() {
     let Some(fonts) = fonts() else {
-        eprintln!("eps_fixtures_as_ghostscript: no Ghostscript Resource/Font (PHITEX_GS_FONTS): skipped");
+        eprintln!(
+            "eps_fixtures_as_ghostscript: no Ghostscript Resource/Font (PHITEX_GS_FONTS): skipped"
+        );
         return;
     };
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
@@ -68,19 +70,34 @@ fn eps_fixtures_as_ghostscript() {
         .collect();
     eps.sort();
     for f in eps {
-        let b = f.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_owned();
+        let b = f
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_owned();
         let input = std::fs::read(&f).expect("eps");
         for mode in ["e2p", "dpx"] {
             let out = if mode == "e2p" {
-                phitex_ps::convert(&phitex_ps::epstopdf_feed(&input), phitex_ps::Settings::epstopdf(epoch), &Dir(fonts.clone()))
+                phitex_ps::convert(
+                    &phitex_ps::epstopdf_feed(&input),
+                    phitex_ps::Settings::epstopdf(epoch),
+                    &Dir(fonts.clone()),
+                )
             } else {
-                phitex_ps::convert(&input, phitex_ps::Settings::dvipdfmx(15, epoch), &Dir(fonts.clone()))
+                phitex_ps::convert(
+                    &input,
+                    phitex_ps::Settings::dvipdfmx(15, epoch),
+                    &Dir(fonts.clone()),
+                )
             };
             n += 1;
             match std::fs::read(dir.join(format!("{b}-{mode}.pdf"))) {
                 Ok(want) => {
                     if out.error.is_some() || norm(&out.pdf) != norm(&want) {
-                        bad.push(format!("{b} {mode}: {}", out.error.unwrap_or_else(|| "differs".into())));
+                        bad.push(format!(
+                            "{b} {mode}: {}",
+                            out.error.unwrap_or_else(|| "differs".into())
+                        ));
                     }
                 }
                 Err(_) => {
@@ -91,5 +108,10 @@ fn eps_fixtures_as_ghostscript() {
             }
         }
     }
-    assert!(bad.is_empty(), "{} of {n} conversions differ from gs's:\n{}", bad.len(), bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "{} of {n} conversions differ from gs's:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
 }

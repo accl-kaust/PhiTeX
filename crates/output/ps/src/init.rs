@@ -383,7 +383,10 @@ impl Ps<'_> {
             Err(_) => {
                 // (an error no `stopped` caught: gs reports it, ends the job)
                 if self.failed.is_none() {
-                    self.failed = self.last_error.take().or_else(|| Some("Error: the job stopped".into()));
+                    self.failed = self
+                        .last_error
+                        .take()
+                        .or_else(|| Some("Error: the job stopped".into()));
                 }
                 self.e.clear();
                 true

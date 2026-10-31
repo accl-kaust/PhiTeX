@@ -1484,11 +1484,11 @@ pub fn write(
         let mut private_offset = charstrings_offset + index_size(charstrings.len(), cs_total);
         let mut subrs_offset = private_size;
         let write = |final_: bool,
-                         top_size: &mut usize,
-                         private_size: &mut usize,
-                         cso: &mut usize,
-                         po: &mut usize,
-                         so: &mut usize|
+                     top_size: &mut usize,
+                     private_size: &mut usize,
+                     cso: &mut usize,
+                     po: &mut usize,
+                     so: &mut usize|
          -> Vec<u8> {
             let _ = final_;
             let mut s = Vec::new();
