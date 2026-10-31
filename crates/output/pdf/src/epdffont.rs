@@ -269,10 +269,10 @@ fn fofi_type1c_encoding(f: &[u8]) -> Option<Names> {
                         if n_codes >= n_glyphs {
                             break;
                         }
-                        if c < 256
+                        if let Some(slot) = enc.get_mut(c)
                             && let Some(&sid) = charset.get(n_codes)
                         {
-                            enc[c] = string(sid);
+                            *slot = string(sid);
                         }
                         n_codes += 1;
                     }
@@ -619,9 +619,7 @@ impl PdfState {
         if doc.lookup(&font, b"Subtype").as_name() != Some(b"Type1") {
             return None;
         }
-        let Some(base) = doc.lookup(&font, b"BaseFont").as_name().map(<[u8]>::to_vec) else {
-            return None;
-        };
+        let base = doc.lookup(&font, b"BaseFont").as_name().map(<[u8]>::to_vec)?;
         let Some(Obj::Ref(desc_ref)) = font.get(b"FontDescriptor") else {
             return None;
         };
@@ -645,9 +643,7 @@ impl PdfState {
         } else {
             None
         };
-        let Some((fm, file)) = self.lookup_fontmap(&base, src) else {
-            return None;
-        };
+        let (fm, file) = self.lookup_fontmap(&base, src)?;
         let stemv = zround(doc.lookup(&desc, b"StemV").as_num().unwrap_or(0.0));
         let charset = match doc.lookup(&desc, b"CharSet") {
             Obj::Str(s) => Some(s),
