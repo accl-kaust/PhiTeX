@@ -25,6 +25,7 @@ fn kpse_format(format: Format) -> KpseFormat {
         Format::Tex => KpseFormat::Tex,
         Format::ProgramText => KpseFormat::ProgramText,
         Format::ProgramBinary => KpseFormat::ProgramBinary,
+        Format::Pk => KpseFormat::Pk,
     }
 }
 
@@ -53,7 +54,32 @@ impl DpxFiles {
             return r.clone();
         }
         self.kpse.reset_program_name(progname);
-        let r = self.kpse.find_file(name, kpse_format(format), false);
+        let r = if format == Format::Pk {
+            // (`kpse_find_glyph`, mktexpk on a miss)
+            let request = String::from_utf8_lossy(name);
+            self.kpse.find_pk_request(&request).or_else(|| {
+                let (font, dpi) = phitex_kpse::pk_name(&request)?;
+                let (bdpi, mode) = phitex_kpse::pk_settings(&request)?;
+                let p = crate::mkfont::mktexpk(font, dpi, bdpi, mode)?;
+                Some(
+                    <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::as_bytes(p.as_os_str())
+                        .to_vec(),
+                )
+            })
+        } else {
+            self.kpse.find_file(name, kpse_format(format), false)
+        };
+        // (kpathsea's mktextfm on a TFM it finds none of)
+        let r = match (r, format) {
+            (None, Format::Tfm) => {
+                let n = String::from_utf8_lossy(name);
+                crate::mkfont::mktextfm(n.strip_suffix(".tfm").unwrap_or(&n)).map(|p| {
+                    <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::as_bytes(p.as_os_str())
+                        .to_vec()
+                })
+            }
+            (r, _) => r,
+        };
         self.kpse.reset_program_name(b"dvipdfmx");
         self.found.insert(key, r.clone());
         r

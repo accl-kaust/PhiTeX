@@ -82,6 +82,7 @@ pub mod pdfnames;
 pub mod pdfread;
 pub mod pdfresource;
 pub mod pdfximage;
+pub mod pkfont;
 pub mod pngimage;
 pub mod pst;
 pub mod pst_obj;

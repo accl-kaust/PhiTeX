@@ -249,7 +249,7 @@ impl Session {
             d.pdf_filename = None;
         }
         let font_dpi = d.session.font_dpi;
-        d.pdf_font_set_dpi(font_dpi);
+        d.pdf_font_set_dpi(font_dpi)?;
         let (id1, id2) = if ext.has_id != 0 {
             (ext.id1, ext.id2)
         } else {

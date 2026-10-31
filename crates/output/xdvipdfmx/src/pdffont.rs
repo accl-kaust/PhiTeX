@@ -250,6 +250,8 @@ pub struct State {
     pub capacity: i32,
     /// `unique_tag_count`.
     pub unique_tag_count: i32,
+    /// pkfont.c's `base_dpi` (0: `PKFONT_DPI_DEFAULT`, until set).
+    pub pk_base_dpi: u32,
 }
 
 /// `add_to_used_chars2`: set bit `c` (MSB first).
@@ -278,8 +280,14 @@ pub fn pdf_init_font_struct(font: &mut PdfFont) {
 }
 
 impl Dpx {
-    /// `pdf_font_set_dpi`: only PK fonts use it (pkfont.c is not ported).
-    pub fn pdf_font_set_dpi(&mut self, _font_dpi: i32) {}
+    /// `pdf_font_set_dpi`: PK fonts' base resolution
+    /// ([`Dpx::pkfont_set_dpi`]).
+    ///
+    /// # Errors
+    /// `PKFont_set_dpi`'s, a resolution not positive.
+    pub fn pdf_font_set_dpi(&mut self, font_dpi: i32) -> Result<()> {
+        self.pkfont_set_dpi(font_dpi)
+    }
 
     /// `pdf_font_make_uniqueTag`: six letters from an MD5 of the DVI and
     /// PDF file names and a counter.
@@ -416,7 +424,7 @@ impl Dpx {
                     self.pdf_font_load_truetype(fid)?;
                 }
                 PDF_FONT_FONTTYPE_TYPE3 => {
-                    crate::fatal!("PK fonts are not supported");
+                    self.pdf_font_load_pkfont(fid)?;
                 }
                 PDF_FONT_FONTTYPE_TYPE0 => {
                     self.pdf_font_load_type0(fid)?;
@@ -898,8 +906,17 @@ impl Dpx {
             )? >= 0
             {
                 PDF_FONT_FONTTYPE_TRUETYPE
+            } else if self.pdf_font_open_pkfont(
+                font_id,
+                &fontname,
+                index,
+                encoding_id,
+                embedding,
+                font_scale,
+            )? >= 0
+            {
+                PDF_FONT_FONTTYPE_TYPE3
             } else {
-                // (PK fonts, pdf_font_open_pkfont: not ported)
                 self.pdf_clean_font_struct(font_id);
                 self.font.fonts.pop();
                 return Ok(-1);

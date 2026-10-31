@@ -75,6 +75,7 @@ fn kpse_format(format: Format) -> KpseFormat {
         Format::Tex => KpseFormat::Tex,
         Format::ProgramText => KpseFormat::ProgramText,
         Format::ProgramBinary => KpseFormat::ProgramBinary,
+        Format::Pk => KpseFormat::Pk,
     }
 }
 
@@ -136,7 +137,11 @@ impl Kpsewhich {
             return r.clone();
         }
         self.kpse.reset_program_name(progname);
-        let r = self.kpse.find_file(name, kpse_format(format), false);
+        let r = if format == Format::Pk {
+            self.kpse.find_pk_request(&String::from_utf8_lossy(name))
+        } else {
+            self.kpse.find_file(name, kpse_format(format), false)
+        };
         self.kpse.reset_program_name(b"dvipdfmx");
         self.found.insert(key, r.clone());
         r

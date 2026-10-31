@@ -85,6 +85,9 @@ and XeLaTeX, built by graph reduction, with exact output.
   `synctex` tool reads. In the live viewer a double-click on a word opens
   its place in the editor, and the editor's cursor and selection are
   highlighted on the page. Its places are approximate (below).
+- **METAFONT fonts.** Fonts with only a METAFONT source are made in
+  process as mktextfm/mktexpk make them (TeX Live-identical GF/TFM/PK) and
+  embedded as Type 3 fonts by pdfLaTeX and XeLaTeX, as TeX Live does.
 - **pdflatex's command line.** Under an engine's name, or with
   `--compat=NAME`, `phitex` takes web2c's options and makes one run, so
   latexmk, editors and scripts can call it as pdflatex.
@@ -187,9 +190,6 @@ and XeLaTeX, built by graph reduction, with exact output.
   again at 16 (3.20 s); para4000 is 2.1 times faster at 8 threads than
   at 1, and no faster at 16 or 32. Speculative runs are wasted: amsldoc
   runs each node 4.5 times on average at 8 threads.
-- **Type 3 (bitmap, PK) fonts in PDF:** pdfTeX embeds them; PhiTeX
-  writes a DVI file instead of the PDF.
-  Repro: `bench/corpus-repro/type3-font.tex`.
 - **pgf/TikZ-heavy documents:** some time out (32 documents in the
   corpus sweep). The cause is not found yet, and there is no minimal
   repro yet.

@@ -337,6 +337,7 @@ fn dpx_format(format: phitex_live::dvipdf::Format) -> &'static str {
         F::Tex => "tex",
         F::ProgramText => "other text files",
         F::ProgramBinary => "other binary files",
+        F::Pk => "pk",
     }
 }
 
@@ -354,7 +355,7 @@ fn dpx_suffix(format: phitex_live::dvipdf::Format) -> &'static str {
         F::Sfd => ".sfd",
         F::Ofm => ".ofm",
         F::Ovf => ".ovf",
-        F::Cmap | F::Pict | F::Tex | F::ProgramText | F::ProgramBinary => "",
+        F::Cmap | F::Pict | F::Tex | F::ProgramText | F::ProgramBinary | F::Pk => "",
     }
 }
 

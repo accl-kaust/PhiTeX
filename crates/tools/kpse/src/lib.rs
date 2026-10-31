@@ -1459,12 +1459,15 @@ impl Kpse {
     /// pdfTeX sets them at its first shipout (`\pdfpkresolution`,
     /// `\pdfpkmode`). The PK path is made again with them.
     pub fn init_prog(&mut self, dpi: u32, mode: Option<&[u8]>) {
-        self.env_overlay
-            .insert(b"MAKETEX_BASE_DPI".to_vec(), dpi.to_string().into_bytes());
-        self.env_overlay.insert(
-            b"MAKETEX_MODE".to_vec(),
-            mode.filter(|m| !m.is_empty()).unwrap_or(b"/").to_vec(),
-        );
+        let dpi = dpi.to_string().into_bytes();
+        let mode = mode.filter(|m| !m.is_empty()).unwrap_or(b"/").to_vec();
+        if self.env_overlay.get(b"MAKETEX_BASE_DPI".as_slice()) == Some(&dpi)
+            && self.env_overlay.get(b"MAKETEX_MODE".as_slice()) == Some(&mode)
+        {
+            return;
+        }
+        self.env_overlay.insert(b"MAKETEX_BASE_DPI".to_vec(), dpi);
+        self.env_overlay.insert(b"MAKETEX_MODE".to_vec(), mode);
         self.paths.remove(&Format::Pk);
         self.made.retain(|(_, f), _| *f != Format::Pk);
     }
@@ -1491,6 +1494,17 @@ impl Kpse {
             }
         }
         None
+    }
+
+    /// [`Kpse::find_pk`] for a PK request (`cmr10.600pk@600`,
+    /// [`pk_name`], [`pk_settings`]), its glyph settings given to
+    /// [`Kpse::init_prog`] first: the file found.
+    pub fn find_pk_request(&mut self, request: &str) -> Option<Bytes> {
+        let (font, dpi) = pk_name(request)?;
+        if let Some((bdpi, mode)) = pk_settings(request) {
+            self.init_prog(bdpi, mode.map(str::as_bytes));
+        }
+        self.find_pk(font.as_bytes(), dpi).map(|(p, _)| p)
     }
 
     /// `try_size` and `try_format` for the PK format.

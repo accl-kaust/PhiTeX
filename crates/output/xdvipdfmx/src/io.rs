@@ -37,6 +37,10 @@ pub enum Format {
     ProgramText,
     /// `kpse_program_binary_format`.
     ProgramBinary,
+    /// `kpse_pk_format` by `kpse_find_glyph`: the name is a PK request,
+    /// `NAME.DPIpk@BDPI` ([`crate::pkfont::pk_request`]); the host
+    /// searches `$PKFONTS` and makes a missing one as mktexpk does.
+    Pk,
 }
 
 /// What the host gives xdvipdfmx: shared by a session's snapshots and
