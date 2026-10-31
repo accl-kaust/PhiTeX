@@ -647,6 +647,7 @@ export class Panel {
     // (the last opening's sheet still diving into its page: gone now, so this one's sheet plays and that one's end never closes it)
     if (this.ending) this.stopSheet();
     this.reopen = true;
+    this.typesetting = false;
     // (the new build's packages counted from none: the sheet says its own, not the last document's)
     this.loadPct = 0;
     this.loadDone = -1;
@@ -817,7 +818,7 @@ export class Panel {
   streaming(s: { pages: number; phase: string } | null): void {
     this.streamed = s ? s.pages : undefined;
     this.making = s?.phase === "format";
-    if (s && this.firstPending()) this.step(this.words.steps[2], undefined, this.making ? MAKING : `Page ${s.pages + 1}`);
+    if (s && this.firstPending()) (this.typesetting = true), this.step(this.words.steps[2], undefined, this.making ? MAKING : `Page ${s.pages + 1}`);
     this.activity();
   }
 
@@ -1179,14 +1180,21 @@ export class Panel {
         // (done: the build's own state says the rest. Files not found are optional ones LaTeX
         // only checks for (amsart.cfg, …): the problems list them, and an error says when one was needed)
         this.pkgBusy = false;
-        if (!this.stopped()) this.step(this.words.steps[2], undefined, `with ${done} package file${done === 1 ? "" : "s"}${mb(p.bytes)}`);
+        if (this.stopped()) return;
+        // (between two downloads, the build not yet begun: still fetching, not typesetting;
+        // nothing downloaded at all (all kept on this machine): the step as it is)
+        if (this.typesetting) this.step(this.words.steps[2], undefined, `with ${done} package file${done === 1 ? "" : "s"}${mb(p.bytes)}`);
+        else if (done) this.step(this.words.steps[1], pct, `${done} of ${total}${mb(p.bytes)}`);
         return;
       }
       this.pkgBusy = true;
       if (p.loading.length) {
         const name = p.loading[0];
-        this.step(this.words.steps[1], pct, `${name} · ${done} of ${total}${mb(p.bytes)}${p.unavailable.length ? ` · ${p.unavailable.length} not found` : ""}`);
-      } else this.step(this.words.steps[2], undefined, `with ${done} package file${done === 1 ? "" : "s"}; a build may ask for more`);
+        const what = `${name} · ${done} of ${total}${mb(p.bytes)}${p.unavailable.length ? ` · ${p.unavailable.length} not found` : ""}`;
+        // (typesetting under way asks for a package as it reads: said under its step, not a step back to fetching and on again)
+        if (this.typesetting) this.step(this.words.steps[2], undefined, `fetching ${what}`);
+        else this.step(this.words.steps[1], pct, what);
+      } else (this.typesetting = true), this.step(this.words.steps[2], undefined, `with ${done} package file${done === 1 ? "" : "s"}; a build may ask for more`);
       return;
     }
     this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source, failed: p.failed ?? [] } : undefined;
@@ -1224,6 +1232,9 @@ export class Panel {
   }
 
   /** The sheet's step: what, how far (undefined: not known), and the detail; the sheet put up first if it isn't. */
+  /** This opening's typesetting has begun (the build running, or pages shipped): a later fetch said under it. */
+  private typesetting = false;
+
   private step(what: string, pct: number | undefined, detail = ""): void {
     if (!this.firstPending()) return;
     this.sheetUp();
