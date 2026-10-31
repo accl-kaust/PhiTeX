@@ -84,6 +84,13 @@ pub trait Host: Send + Sync {
         None
     }
 
+    /// Where the analyses of the files a job reads by `\input` are kept
+    /// between builds (`phitex_tex::Options::analyses`; none: in the
+    /// process's memory).
+    fn analyses(&self) -> Option<std::sync::Arc<dyn phitex_tex::AnalysisStore>> {
+        None
+    }
+
     /// XeTeX's native fonts, for a job whose engine is XeTeX.
     fn xetex(&self) -> Option<phitex_tex::XeTeX> {
         None

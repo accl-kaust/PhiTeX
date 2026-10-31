@@ -868,6 +868,7 @@ impl Session {
                     tool_finder,
                     bibtex,
                     mktex: self.host.mktex(),
+                    analyses: self.host.analyses(),
                     epoch: Some(self.job.pdf_date),
                     fixpoint: self.job.fixpoint,
                     prelude_jobname: self.job.engine.name.to_owned(),

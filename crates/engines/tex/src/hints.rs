@@ -56,6 +56,8 @@ use phitex_source::pass::{self, Atom, AtomKind, Def, DefSet, Definitions, FileKi
 use crate::run::{R, Run};
 use crate::val::{Mean, Tok, int_of, list_of, str_of};
 
+mod kept;
+
 /// The definitions the hints may bind calls to besides the text's own:
 /// the format's (shared by every text of a build).
 pub(crate) type Defs = Arc<pass::Definitions>;
@@ -3937,6 +3939,9 @@ pub(crate) struct Registry {
     decoded: Shards<Arc<Hint>>,
     /// [`may_define`]'s answer by the hint string's value.
     answers: Shards<MayDefine>,
+    /// Where the files' analyses are kept between builds
+    /// ([`crate::AnalysisStore`], [`file_hints`]).
+    pub(crate) store: OnceLock<Arc<dyn crate::AnalysisStore>>,
 }
 
 /// An answer kept for its one question, or taken.
@@ -4481,10 +4486,26 @@ pub(crate) fn file_hints(reg: &Registry, v: &Values, id: ValueId, name: ValueId)
         None => {
             let text = str_of(v, id);
             let nm = str_of(v, name);
+            let kind = FileKind::from_path(&nm);
             // (a file read by `\input`: analysed without the format's
             // definitions, which the frame does not name; a call it
-            // cannot bound answers `Any`, never a narrower set)
-            let t = text_hints(&text, FileKind::from_path(&nm), no_defs());
+            // cannot bound answers `Any`, never a narrower set. So its
+            // analysis is its text's and kind's alone: kept between
+            // builds by them, `kept`)
+            let store = reg.store.get();
+            let key = store.map(|_| kept::key(&text, kind));
+            let found = store
+                .zip(key.as_deref())
+                .and_then(|(s, k)| s.get(k))
+                .and_then(|b| TextHints::decode(&b))
+                .map(Arc::new);
+            let t = found.unwrap_or_else(|| {
+                let t = text_hints(&text, kind, no_defs());
+                if let (Some(s), Some(k)) = (store, key.as_deref()) {
+                    s.put(k, &t.encode());
+                }
+                t
+            });
             by_id().locked().insert(id.raw(), t.clone());
             t
         }

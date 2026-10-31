@@ -72,9 +72,9 @@ mod xetex;
 mod xpic;
 
 pub use api::{
-    Build, ContentKey, Diagnostic, EditSender, FAIL_END, Finder, Hint, Mktex, Options, PageSettled,
-    RunReport as Report, Severity, Speculation, Stats, ToolFinder, ToolSearch, byte_ends,
-    engine_id, file_stat_key,
+    AnalysisStore, Build, ContentKey, Diagnostic, EditSender, FAIL_END, Finder, Hint, Mktex,
+    Options, PageSettled, RunReport as Report, Severity, Speculation, Stats, ToolFinder,
+    ToolSearch, byte_ends, engine_id, file_stat_key,
 };
 pub use exec::{Progress, SpawnWorker, cpus as exec_cpus, set_spawn_worker};
 pub use native::NativeFonts;

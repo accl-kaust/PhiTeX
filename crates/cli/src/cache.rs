@@ -1,7 +1,8 @@
 //! The cache on disk: `formats/` (a format's evaluated state, shared by
 //! every document; named by its engine and its ini text's hash, and
 //! stored with `phitex-tex`'s prelude key, which the engine checks against
-//! the files the prelude read) and `docs/ID/`
+//! the files the prelude read), `analyses/` (the analyses of files jobs
+//! read by `\input`, by text, [`Analyses`]) and `docs/ID/`
 //! (one document's, ID a hash of its main file's path). Entries are
 //! written whole (a temporary file renamed), so processes can share the
 //! cache. A size limit holds it: after each write the entries used least
@@ -34,6 +35,47 @@ static MISSES: AtomicU64 = AtomicU64::new(0);
 
 /// The package cache's directory in the cache's (`phitex-shelf`'s).
 pub const SHELF: &str = "shelf";
+
+/// The analyses of the files jobs read by `\input`, in the cache's
+/// `analyses/` (`phitex_tex::AnalysisStore`): one file per key (the
+/// text's hash, its kind and the engine's identity), shared by every
+/// document, held to the cache's limit with the rest of it.
+pub struct Analyses;
+
+impl Analyses {
+    fn path(key: &str) -> Option<PathBuf> {
+        // (a key is the engine's: hex digits, a kind letter and dashes)
+        key.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            .then(|| tex::cache_dir().join("analyses").join(key))
+    }
+}
+
+impl phitex_tex::AnalysisStore for Analyses {
+    fn get(&self, key: &str) -> Option<Vec<u8>> {
+        let p = Self::path(key)?;
+        let b = std::fs::read(&p).ok()?;
+        // (its use noted, as `Cache::get` notes one: the least recently
+        // used go first)
+        if let Ok(f) = std::fs::File::options().write(true).open(&p) {
+            let _ = f.set_modified(SystemTime::now());
+        }
+        Some(b)
+    }
+
+    fn put(&self, key: &str, bytes: &[u8]) {
+        let Some(p) = Self::path(key) else { return };
+        let Some(d) = p.parent() else { return };
+        if std::fs::create_dir_all(d).is_err() {
+            return;
+        }
+        // (whole or not at all: written aside, then renamed)
+        let tmp = d.join(format!(".{key}.{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, &p).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
 
 /// What a cache holds: its bytes, its files, its newest use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -93,6 +93,16 @@ pub type ToolFinder = Arc<dyn Fn(ToolSearch, &str) -> Option<(String, Vec<u8>)> 
 /// directories).
 pub type OutNameOk = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Where the analyses of the files a job reads by `\input` are kept
+/// between builds ([`Options::analyses`]): bytes by a key that names the
+/// text, its kind and the engine (the CLI's cache directory). A class or
+/// package in the document's directory, which no format holds, is then
+/// analysed once per text, not once per process.
+pub trait AnalysisStore: Send + Sync {
+    fn get(&self, key: &str) -> Option<Vec<u8>>;
+    fn put(&self, key: &str, bytes: &[u8]);
+}
+
 /// How the fonts a finder misses are made ([`Options::mktex`]): where
 /// METAFONT's runs are kept between builds and the runs' settings (the
 /// date in the GF and PK files' comments).
@@ -261,6 +271,9 @@ pub struct Options {
     /// their settings. `None`: kept in the process's memory, at the job's
     /// date.
     pub mktex: Option<Mktex>,
+    /// Where the files' analyses are kept between builds
+    /// ([`AnalysisStore`]); `None`: in the process's memory only.
+    pub analyses: Option<Arc<dyn AnalysisStore>>,
     /// Whether `\openout` may write a file under a name (pdfTeX asks
     /// kpathsea, §1374; a refused name ends a nonstop job); `None`:
     /// TeX Live's default, `openout_any = p` with no output directory
@@ -895,6 +908,7 @@ impl Default for Options {
             tool_finder: None,
             bibtex: phitex_bibtex::Options::default(),
             mktex: None,
+            analyses: None,
             out_name_ok: None,
             xetex: None,
             origins: false,
@@ -5754,6 +5768,9 @@ impl Build {
             .node_rec
             .store(opts.node_records, std::sync::atomic::Ordering::Relaxed);
         (*g.ops.out_ok.locked()).clone_from(&opts.out_name_ok);
+        if let Some(s) = &opts.analyses {
+            let _ = g.ops.hints.store.set(s.clone());
+        }
         {
             let mut t = g.ops.tool_opts.locked();
             t.bibtex.clone_from(&opts.bibtex);

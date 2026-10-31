@@ -228,6 +228,11 @@ impl Host for Machine {
         Some(crate::mkfont::maker())
     }
 
+    /// The files' analyses kept in the cache directory.
+    fn analyses(&self) -> Option<Arc<dyn phitex_tex::AnalysisStore>> {
+        Some(Arc::new(crate::cache::Analyses))
+    }
+
     /// XeTeX's native fonts: TeX Live's, by file and by name.
     fn xetex(&self) -> Option<phitex_tex::XeTeX> {
         Some(crate::xefonts::xetex())
