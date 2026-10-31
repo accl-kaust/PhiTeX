@@ -202,7 +202,11 @@ impl Operation for Finish {
             clippy::redundant_closure_for_method_calls,
             reason = "the method is not general enough over the run's lifetimes"
         )]
-        let out = run_node(cx, o, |r| r.finish_page());
+        let out = run_node(cx, o, |r| {
+            let out = r.finish_page();
+            r.report_macros(t_fin.elapsed());
+            out
+        });
         if phitex_pdf::phase::on() {
             phitex_pdf::phase::add(0, t_fin);
             let a = phitex_pdf::phase::take();

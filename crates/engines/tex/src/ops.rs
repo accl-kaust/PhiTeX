@@ -115,28 +115,7 @@ pub(crate) fn run_node(
     }
     let t_body = t_body.elapsed();
     COMMANDS.fetch_add(r.cmds, std::sync::atomic::Ordering::Relaxed);
-    // (`PHITEX_MACRO_PROF`: a run of 5 ms or more, the macros it
-    // expanded most)
-    if t_body.as_micros() >= 5000
-        && let Some(p) = r.mprof.take()
-    {
-        let mut xs: Vec<(u64, crate::val::Tok)> = p.into_iter().map(|(t, n)| (n, t)).collect();
-        xs.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
-        let top: Vec<String> = xs
-            .iter()
-            .take(40)
-            .map(|&(n, t)| format!("{}:{n}", t.as_cs().map_or("?", |c| c.name())))
-            .collect();
-        eprintln!(
-            "macro prof: node {} {} {t_body:?}, {} commands, {} expansions of {} macros: {}",
-            r.cx.node().raw(),
-            r.op_name(),
-            r.cmds,
-            xs.iter().map(|x| x.0).sum::<u64>(),
-            xs.len(),
-            top.join(" ")
-        );
-    }
+    r.report_macros(t_body);
     // (an edit's exec run of 2 ms or more: its input's size, its
     // commands, its passes and where its time went)
     if t_body.as_micros() >= 2000
@@ -1295,4 +1274,33 @@ fn define_traced(cx: &mut Ctx<'_>, f: Field, x: ValueId) {
         );
     }
     cx.define_with(f, x, Locality::Global);
+}
+
+impl Run<'_, '_> {
+    /// (`PHITEX_MACRO_PROF`) A run of 5 ms or more: the macros it
+    /// expanded most, on stderr.
+    pub(crate) fn report_macros(&mut self, t_body: std::time::Duration) {
+        if t_body.as_micros() < 5000 {
+            return;
+        }
+        let Some(p) = self.mprof.take() else {
+            return;
+        };
+        let mut xs: Vec<(u64, crate::val::Tok)> = p.into_iter().map(|(t, n)| (n, t)).collect();
+        xs.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
+        let top: Vec<String> = xs
+            .iter()
+            .take(40)
+            .map(|&(n, t)| format!("{}:{n}", t.as_cs().map_or("?", |c| c.name())))
+            .collect();
+        eprintln!(
+            "macro prof: node {} {} {t_body:?}, {} commands, {} expansions of {} macros: {}",
+            self.cx.node().raw(),
+            self.op_name(),
+            self.cmds,
+            xs.iter().map(|x| x.0).sum::<u64>(),
+            xs.len(),
+            top.join(" ")
+        );
+    }
 }
