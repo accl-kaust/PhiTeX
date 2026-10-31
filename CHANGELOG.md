@@ -203,8 +203,6 @@ and XeLaTeX, built by graph reduction, with exact output.
   round core, fixed in the clean core (`docs/alpha-checklist.md`).
   Repro: `bench/corpus-repro/written-text-lost-write.tex`; test
   `corpus_repros::written_text_lost_write` (with the clean core).
-- **`\inputlineno` across files:** it counts the lines of every file
-  together, not each file's own. Test `etex::io` (ignored).
 - **Alignments:** 57 documents in the corpus sweep stop with an
   alignment error (a misplaced `&` or `\cr`) that pdfLaTeX does not
   give. No minimal repro yet.

@@ -79,10 +79,13 @@ fn middle() {
     run(&["middle"]);
 }
 
-/// `\inputlineno` counts the lines of every file together, not each
-/// file's own (and a pseudo file's).
+/// `\readline`, `\everyeof`, `\scantokens`, `\inputlineno` (each
+/// file's own lines, and a pseudo file's), and `\vsplit`'s marks and its
+/// `vpackage` report (§977: the split-off box's Underfull `\vbox`).
+/// Everything up to that report equals the oracle's log; the report
+/// itself, with its box display (§663, `show_box`), is not in the log.
 #[test]
-#[ignore = "\\inputlineno is not per file"]
+#[ignore = "the log's Underfull \\vbox report of \\vsplit, with its box display"]
 fn io() {
     run(&["io"]);
 }

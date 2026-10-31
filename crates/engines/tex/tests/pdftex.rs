@@ -68,6 +68,44 @@ fn banner() {
     assert!(log.replace('\n', "").contains(want), "{log}");
 }
 
+/// pdfTeX's unit `px` (pdfTeX §455: `v:=pdf_px_dimen`, then an optional
+/// space): a dimension in units of `\pdfpxdimen` (INITEX's `one_bp`,
+/// 65782sp, pdfTeX §1128).
+/// It was an illegal unit, `pt` inserted and the `px` typeset (the
+/// manuals of eoldef, visualtoks and freemath).
+#[test]
+fn px_unit() {
+    let dir = common::fixtures().join("pdf");
+    let doc = format!(
+        "{PRELUDE}\\ifdim 1px=65782sp \\message{{[one]}}\\fi \\pdfpxdimen=2pt \\dimen0=1.5px \\message{{[\\the\\dimen0][\\the\\dimexpr 3 px\\relax][\\the\\dimexpr 2.5\\dimen0\\relax]}}\\end\n"
+    );
+    let opts = common::options("./core.tex", "texput", "", &dir);
+    let b = common::build(opts, None, &doc);
+    let (_, log) = b.output();
+    let log = log.replace('\n', "");
+    assert!(
+        log.contains("[one] [3.0pt][6.0pt][7.5pt]"),
+        "px: the log {log:?}"
+    );
+    assert!(!log.contains("Illegal unit"), "px: the log {log:?}");
+}
+
+/// `\vsplit` sets `\badness` (§977: the split-off box is made by
+/// `vpackage`, after the rest's `vpack`): 5pt of rule in a box of 10pt
+/// without stretch is underfull, 10000.
+#[test]
+fn vsplit_badness() {
+    let dir = common::fixtures().join("pdf");
+    let doc = format!(
+        "{PRELUDE}\\vbadness=10000 \\setbox1\\vbox{{\\hrule height 5pt\\penalty-10000 \\hrule height 5pt}}\\message{{[\\the\\badness]}}\\setbox2\\vsplit1 to 10pt \\message{{[\\the\\badness]}}\\end\n"
+    );
+    let opts = common::options("./core.tex", "texput", "", &dir);
+    let b = common::build(opts, None, &doc);
+    let (_, log) = b.output();
+    let log = log.replace('\n', "");
+    assert!(log.contains("[0] [10000]"), "vsplit: the log {log:?}");
+}
+
 #[test]
 fn random() {
     log_gate("pdfrandom").unwrap_or_else(|e| panic!("{e}"));

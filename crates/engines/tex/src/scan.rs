@@ -493,6 +493,12 @@ impl Run<'_, '_> {
                 let q = self.font_param_cur(5)?;
                 self.optional_space()?;
                 Some(q)
+            } else if !self.xe && self.scan_keyword("px")? {
+                // pdfTeX §455: `else if scan_keyword("px") then
+                // v:=pdf_px_dimen` (XeTeX has no `px`)
+                let q = self.param("pdfpxdimen")?;
+                self.optional_space()?;
+                Some(q)
             } else {
                 None
             }

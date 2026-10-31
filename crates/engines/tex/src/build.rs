@@ -3858,6 +3858,15 @@ impl Run<'_, '_> {
         let smd = self.ipar(Par::splitmaxdepth)?;
         let pp = self.pack_params(false)?;
         let r = phitex_typeset::page::vsplit(bx.list, h, smd, stk, false, &pp);
+        // (§977's `vpackage(p,h,exactly,split_max_depth)`, after the
+        // rest's `vpack`: its badness is `\badness`, its report the log's,
+        // §674-§678)
+        self.set_cell(
+            crate::fields::cell::BADNESS,
+            v.int(i64::from(r.page.badness)),
+            true,
+        );
+        self.box_report(false, r.page.report, false);
         crate::etex::split_marks(self, &r.marks, &side)?;
         let rest = r.rest.map(|rb| nodes::encode_box(v, &rb, &side));
         self.modify_box_reg(n, rest)?;
