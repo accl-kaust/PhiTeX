@@ -381,6 +381,20 @@ fn spawn_tree<'s, 'e: 's>(
     });
 }
 
+/// `PHITEX_HELD_TRACE` (`profile` builds): the quiet points' re-asked
+/// readers printed, with the reads that moved.
+fn held_trace() -> bool {
+    #[cfg(feature = "profile")]
+    {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("PHITEX_HELD_TRACE").is_some())
+    }
+    #[cfg(not(feature = "profile"))]
+    {
+        false
+    }
+}
+
 /// Spins before parking.
 const SPINS: u32 = 64;
 /// A block is stolen from only with this much left, half of it at a time
@@ -964,6 +978,32 @@ fn run_worker(
                         .is_some_and(|r| r.reads.iter().any(|rd| !crate::read::holds(eng, node, rd, &mut memo)));
                     if !moved {
                         continue;
+                    }
+                    // (`PHITEX_HELD_TRACE`: each pass's re-asked readers and
+                    // the reads that moved)
+                    if held_trace() {
+                        let v = eng.values();
+                        let what: Vec<String> = node.record().map_or_else(Vec::new, |r| {
+                            r.reads
+                                .iter()
+                                .filter(|rd| !crate::read::holds(eng, node, rd, &mut memo))
+                                .map(|rd| {
+                                    let f = rd.kind.field().map_or_else(|| "-".to_owned(), |f| v.render(f.0));
+                                    let seen = rd
+                                        .seen
+                                        .map_or_else(String::new, |x| v.render(x).chars().take(160).collect());
+                                    format!("{f} (seen {seen})")
+                                })
+                                .collect()
+                        });
+                        eprintln!(
+                            "held: pass {} node {} ({}) at {}: {}",
+                            w.held_passes.load(Ordering::Relaxed) + 1,
+                            n.raw(),
+                            eng.op(node.op()).name(),
+                            node.pos_hint().0,
+                            what.join("; ")
+                        );
                     }
                     if mark_stale_now(eng, Some(w), node, wake) {
                         k += 1;
