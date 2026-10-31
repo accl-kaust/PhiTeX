@@ -1481,7 +1481,14 @@ export class PreviewSession {
       case "settled":
         // (a pass shown while the job's own files settle: still building;
         // the watch's `preparing` ends here, it sends no `off`)
-        if (!e.settling) (this.watchBusy(false), this.sink.preparing?.(false));
+        if (!e.settling) {
+          this.watchBusy(false);
+          this.sink.preparing?.(false);
+          // (the build is in: nothing is building for the packages now, as
+          // the local open says after its first build; a remote session's
+          // `progress` set it, and nothing else cleared it)
+          if (this.pkg.building) (this.pkg.building = false), this.tellPackages();
+        }
         this.chain = this.chain.then(() => this.layout()).then(() => (this.status(), this.watchOutline()));
         return;
       case "sync":
