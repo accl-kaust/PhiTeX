@@ -314,7 +314,8 @@ impl CmdOut {
 }
 
 /// A read-time command's step on the writer, as the link applies it.
-pub(crate) type CmdFn = Box<dyn FnMut(&mut PdfState, &mut Forms, &dyn FontSource) -> CmdOut + Send>;
+pub(crate) type CmdFn =
+    Box<dyn FnMut(&mut PdfState, &mut Forms, &dyn FontSource, &Reloc) -> CmdOut + Send>;
 
 /// A read-time command as the build keeps it for the link ([`command`]):
 /// its step, the fonts it names, the writer's parameters where it ran.
@@ -1955,15 +1956,17 @@ pub(crate) fn command(
     fonts: &[u32],
     mut f: impl FnMut(&mut PdfState, &dyn FontSource) -> CmdOut + Send + 'static,
 ) -> R<Option<CmdOut>> {
-    command_forms(r, input, fonts, move |st, _, fs| f(st, fs))
+    command_forms(r, input, fonts, move |st, _, fs, _| f(st, fs))
 }
 
-/// [`command`], the forms' table in reach.
+/// [`command`], the forms' table in reach, and the read-time numbers
+/// the link numbered otherwise ([`Reloc`]: a number TeX read back that
+/// the command names, `\pdfobj useobjnum`, is the writer's object).
 pub(crate) fn command_forms(
     r: &mut Run<'_, '_>,
     input: ValueId,
     fonts: &[u32],
-    f: impl FnMut(&mut PdfState, &mut Forms, &dyn FontSource) -> CmdOut + Send + 'static,
+    f: impl FnMut(&mut PdfState, &mut Forms, &dyn FontSource, &Reloc) -> CmdOut + Send + 'static,
 ) -> R<Option<CmdOut>> {
     if r.param("pdfoutput")? <= 0 {
         return Ok(None);
@@ -3771,7 +3774,7 @@ struct LinkSnap {
 /// ([`crate::pdfprim::REL`]) is always mapped: the link numbers its object.
 /// Keyed by the number as read (a [`crate::pdfprim::REL`] identity has
 /// 41 bits and more: `u64` on every target, wasm32's `usize` included).
-type Reloc = std::collections::BTreeMap<u64, usize>;
+pub(crate) type Reloc = std::collections::BTreeMap<u64, usize>;
 
 /// A form's whatsits (`data`, from the read-time ones `raw`) with the
 /// [`crate::pdfprim::REL`] numbers they name as TeX reads them: a form is
@@ -4612,7 +4615,7 @@ fn link(
                     let src = Mapped::new(&c.fonts, &nums, &fwd);
                     let out = {
                         let mut g = c.f.locked();
-                        (*g)(&mut st, &mut forms, &src)
+                        (*g)(&mut st, &mut forms, &src, &reloc)
                     };
                     let rt = xs.get(3).map_or(0, |&n| int_of(v, n));
                     if let (rt @ 1.., Some(&m)) = (rt, out.nums.first())
@@ -4898,7 +4901,7 @@ mod tests {
         let memo = CmdMemo::default();
         let cmd = |input: u64, n: i64| Cmd {
             f: Mutex::new(Box::new(
-                move |_: &mut PdfState, _: &mut Forms, _: &dyn FontSource| CmdOut {
+                move |_: &mut PdfState, _: &mut Forms, _: &dyn FontSource, _: &Reloc| CmdOut {
                     nums: vec![n],
                     err: None,
                 },

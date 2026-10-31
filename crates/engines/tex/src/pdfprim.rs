@@ -2513,6 +2513,39 @@ fn identifier(r: &mut Run<'_, '_>) -> R<ValueId> {
     Ok(v.list(vec![v.str("num"), v.int(0)]))
 }
 
+/// `\pdfobj`'s step in the link's writer (pdfTeX §1544): `useobjnum
+/// n`'s number TeX read back as the writer numbered its object
+/// ([`crate::pdfout::Reloc`]: a `reserveobjnum` the link numbered
+/// otherwise), so a reserved number and its use name one object.
+pub(crate) fn obj_cmd(
+    use_n: Option<i64>,
+    stream: bool,
+    attr: Option<Vec<u8>>,
+    body: phitex_pdf::ObjBody,
+    immediate: bool,
+) -> impl FnMut(&mut phitex_pdf::PdfState, &crate::pdfout::Reloc) -> crate::pdfout::CmdOut + Send + 'static
+{
+    move |st, reloc| {
+        let n = use_n.map(|n| {
+            u64::try_from(n)
+                .ok()
+                .and_then(|k| reloc.get(&k))
+                .and_then(|&m| i64::try_from(m).ok())
+                .unwrap_or(n)
+        });
+        let (n, refused) = st.obj(n, stream, attr.clone(), body.clone());
+        let err = if immediate {
+            st.write_obj(n).err()
+        } else {
+            None
+        };
+        crate::pdfout::CmdOut {
+            nums: vec![i64::try_from(n).unwrap_or(0), i64::from(refused)],
+            err: err.map(|e| e.to_string()),
+        }
+    }
+}
+
 /// An optional `reserveobjnum` or `useobjnum n` (pdfTeX §1349): the
 /// number `useobjnum` gives, and whether the number is only reserved.
 fn obj_num_option(r: &mut Run<'_, '_>) -> R<(Option<i64>, bool)> {
@@ -2679,18 +2712,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             ]);
             // (a record in the line where it runs: the link writes it
             // after the pages before it, `pdfout::finish_exact`)
-            let got = crate::pdfout::command(r, input, &[], move |st, _| {
-                let (n, refused) = st.obj(use_n, stream, attr_b.clone(), body.clone());
-                let err = if immediate {
-                    st.write_obj(n).err()
-                } else {
-                    None
-                };
-                crate::pdfout::CmdOut {
-                    nums: vec![i64::try_from(n).unwrap_or(0), i64::from(refused)],
-                    err: err.map(|e| e.to_string()),
-                }
-            })?;
+            let mut f = obj_cmd(use_n, stream, attr_b, body, immediate);
+            let got =
+                crate::pdfout::command_forms(r, input, &[], move |st, _, _, reloc| f(st, reloc))?;
             let got = got.and_then(|g| Some((g.at(0)?, g.at(1)? != 0, g.err)));
             let n = match got {
                 Some((n, refused, err)) => {
@@ -3561,7 +3585,7 @@ fn xform_step(
         b,
         v.int(i64::from(immediate)),
     ]);
-    let got = crate::pdfout::command_forms(r, input, &all, move |st, forms, fs| {
+    let got = crate::pdfout::command_forms(r, input, &all, move |st, forms, fs, _| {
         let base = forms.next_handle();
         let mut bx = bx.clone();
         remap_whatsits(&mut bx.list, base);
@@ -4025,4 +4049,34 @@ pub(crate) fn writer_data(r: &mut Run<'_, '_>, xs: &[ValueId]) -> R<Option<Value
         }
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::obj_cmd;
+
+    /// `\pdfobj useobjnum n` names the object the link's writer made for
+    /// the `reserveobjnum` TeX read back as `n`: TeX's number mapped
+    /// where the link numbered it otherwise ([`crate::pdfout::Reloc`]),
+    /// taken as it is elsewhere.
+    #[test]
+    fn useobjnum_takes_the_writers_number() {
+        let n = |k: usize| i64::try_from(k).expect("a number");
+        let mut st = phitex_pdf::PdfState::new(phitex_pdf::PdfParams::default());
+        let a = st.obj_reserve();
+        let b = st.obj_reserve();
+        // (TeX read `a` back as a + 7: the link's writer made it `a`)
+        let mut reloc = crate::pdfout::Reloc::new();
+        reloc.insert(u64::try_from(a + 7).expect("a number"), a);
+        let body = || phitex_pdf::ObjBody::Text(b"(x)".to_vec());
+        let mut f = obj_cmd(Some(n(a + 7)), false, None, body(), false);
+        assert_eq!(f(&mut st, &reloc).nums, vec![n(a), 0]);
+        // (a number the link did not renumber: TeX's)
+        let mut g = obj_cmd(Some(n(b)), false, None, body(), false);
+        assert_eq!(g(&mut st, &reloc).nums, vec![n(b), 0]);
+        // (without the map, TeX's number names no reserved object: refused)
+        let c = st.obj_reserve();
+        let mut h = obj_cmd(Some(n(c + 7)), false, None, body(), false);
+        assert_eq!(h(&mut st, &crate::pdfout::Reloc::new()).nums[1], 1);
+    }
 }
