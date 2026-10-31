@@ -19,10 +19,13 @@ a release of it (content-named packs under h/, an index, release.json):
 Every file is keyed by its texmf path (tex/latex/fontspec/fontspec.sty,
 fonts/tfm/public/lm/rm-lmr10.tfm, fonts/opentype/public/lm/lmroman10-regular.otf),
 in the index and inside packs. The one file not from a package, pdftex.map,
-is made as updmap makes it (every package's Map and MixedMap files, in
-package order) at the path updmap gives it,
-fonts/map/pdftex/updmap/pdftex.map; the map files it is made from are not
-served (dvipdfmx's own, fonts/map/dvipdfmx/, are: its dvipdfmx.cfg names
+is made by TeX Live's own updmap.pl (texlive-scripts), run with TeX Live's
+updmap.cfg, kpsewhich (kpathsea.x86_64-linux) and Perl modules
+(texlive.infra) of the same tlnet over the release's map files, so it is
+the pdftex.map an install of that tlnet has (the 35 PostScript fonts
+translated for LW35 URWkb, then every Map and MixedMap), at the path
+updmap gives it, fonts/map/pdftex/updmap/pdftex.map; the map files it is
+made from are not served (dvipdfmx's own, fonts/map/dvipdfmx/, are: its dvipdfmx.cfg names
 them). Beyond what TeX reads, what xdvipdfmx and XeTeX read is taken:
 dvipdfmx/ (dvipdfmx.cfg), fonts/cmap/ and fonts/sfd/ (CJK), and TECkit's
 compiled mappings (fonts/misc/xetex/fontmapping/, .tec).
@@ -187,8 +190,8 @@ def packages(db: str) -> tuple[list[dict], dict[str, dict]]:
     return out, every
 
 
-def fetch(p: dict, want: set[str] | None = None) -> dict[str, bytes]:
-    """The package's files (or `want`), by path, from its (cached, checked) archive."""
+def fetch(p: dict, want=None) -> dict[str, bytes]:
+    """The package's files (or `want`: a set of paths, or a test of a path), by path, from its (cached, checked) archive."""
     f = CACHE / f"{p['name']}.r{p['rev']}.tar.xz"
     if not f.exists():
         data = get(f"{MIRROR}/archive/{p['name']}.tar.xz")
@@ -197,13 +200,49 @@ def fetch(p: dict, want: set[str] | None = None) -> dict[str, bytes]:
         tmp = f.with_suffix(".part")
         tmp.write_bytes(data)
         tmp.replace(f)
-    want, got = want or set(p["files"]), {}
+    want, got = set(p["files"]) if want is None else want, {}
+    keep = want if callable(want) else want.__contains__
     with tarfile.open(f, "r:xz") as t:
         for m in t:
             name = m.name.removeprefix("texmf-dist/")
-            if m.isfile() and name in want:
+            if m.isfile() and keep(name):
                 got[name] = t.extractfile(m).read()
     return got
+
+
+# (what updmap.pl runs with, from the same tlnet: the package, its paths)
+UPDMAP = {
+    "texlive-scripts": lambda n: n in ("web2c/updmap.cfg", "scripts/texlive/updmap.pl", "scripts/texlive/mktexlsr.pl"),
+    "texlive.infra": lambda n: n.startswith("tlpkg/TeXLive/"),
+    "kpathsea": lambda n: n == "web2c/texmf.cnf",
+    "kpathsea.x86_64-linux": lambda n: n == "bin/x86_64-linux/kpsewhich",
+}
+
+
+def updmap(files: dict, every: dict) -> bytes:
+    """pdftex.map as TeX Live makes it: its updmap.pl over the map files taken (see the module doc)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "tl"
+        tree = {f"texmf-dist/{k}": b for k, (_, b) in files.items() if k.startswith("fonts/map/")}
+        for name, keep in UPDMAP.items():
+            for k, b in fetch(every[name], keep).items():
+                tree[k if k.startswith(("tlpkg/", "bin/")) else f"texmf-dist/{k}"] = b
+        for k, b in tree.items():
+            (root / k).parent.mkdir(parents=True, exist_ok=True)
+            (root / k).write_bytes(b)
+        (root / "bin/x86_64-linux/kpsewhich").chmod(0o755)
+        # (nothing of this machine's: HOME empty, no TEXMF* of the caller's)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("TEXMF", "TEXINPUTS", "TEXFONTMAPS"))}
+        env.update(HOME=tmp, LC_ALL="C", PATH=f"{root}/bin/x86_64-linux:{os.environ.get('PATH', '/usr/bin:/bin')}")
+        scripts = root / "texmf-dist/scripts/texlive"
+        for cmd in (["perl", scripts / "mktexlsr.pl", "--quiet", root / "texmf-dist"],
+                    ["perl", scripts / "updmap.pl", "--sys", "--nohash"]):
+            r = subprocess.run([str(c) for c in cmd], env=env, capture_output=True, text=True)
+            if r.returncode:
+                raise SystemExit(f"{cmd[1].name} failed ({r.returncode}):\n{r.stdout[-3000:]}{r.stderr[-3000:]}")
+        print(r.stdout[-1500:], file=sys.stderr)
+        return (root / "texmf-var" / PDFTEX_MAP).read_bytes()
 
 
 def expand(s: str) -> list[str]:
@@ -533,7 +572,8 @@ def main() -> None:
                 (Path(os.environ["FONT_TREE"]) / path).parent.mkdir(parents=True, exist_ok=True)
                 (Path(os.environ["FONT_TREE"]) / path).write_bytes(b)
     if os.environ.get("FETCH_ONLY"):
-        fetch(every["kpathsea"], {"web2c/texmf.cnf"})
+        for name, keep in UPDMAP.items():
+            fetch(every[name], keep)
         return
 
     # the search orders, from TeX Live's own texmf.cnf
@@ -543,23 +583,11 @@ def main() -> None:
         for fmt, prefixes in order[engine].items():
             print(f"search {engine} {fmt}: {prefixes}", file=sys.stderr)
 
-    # pdftex.map, as updmap makes it: every package's Map and MixedMap
-    # files, in package order (a font named twice: the first wins)
+    # pdftex.map, made by TeX Live's updmap.pl (see the module doc)
     merged = ("fonts/map/dvips/", "fonts/map/pdftex/")
-    maps = {path.rsplit("/", 1)[1]: b for path, (_, b) in files.items() if path.startswith(merged)}
-    seen, lines = set(), []
-    # (updmap's default, pdftexDownloadBase14: the base 14 fonts embedded,
-    # URW's, from pdftex_dl14.map, ahead of everything)
-    for p in [{"maps": ["pdftex_dl14.map"]}] + pkgs:
-        for m in p["maps"]:
-            for line in maps.get(m, b"").decode("latin-1").splitlines():
-                t = line.split()
-                if not t or line.lstrip().startswith(("%", "#")) or t[0] in seen:
-                    continue
-                seen.add(t[0])
-                lines.append(line)
-    pdftex_map = ("\n".join(lines) + "\n").encode("latin-1")
-    print(f"pdftex.map: {len(lines)} fonts, {len(pdftex_map) / 1e6:.1f} MB", file=sys.stderr)
+    pdftex_map = updmap(files, every)
+    fonts = sum(1 for line in pdftex_map.splitlines() if line.strip() and not line.startswith((b"%", b"#")))
+    print(f"pdftex.map: {fonts} fonts, {len(pdftex_map) / 1e6:.1f} MB", file=sys.stderr)
     # (dvipdfmx's own maps, fonts/map/dvipdfmx/, stay: its dvipdfmx.cfg names them)
     for path in [q for q in files if q.startswith(merged)]:
         del files[path]
