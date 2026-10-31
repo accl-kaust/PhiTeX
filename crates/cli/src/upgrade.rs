@@ -520,6 +520,8 @@ mod tests {
         assert!(later("1.6.1-nightly.202611020230", n));
         assert!(!later(n, n));
         assert!(later("1.0.1-nightly.202610310230", "1.0"));
+        assert!(later("1.0", "1.0.0-nightly.202610310230"));
+        assert!(later("1.0.0-nightly.202610310230", "0.9"));
         assert!(later("1.6", "1.0.1-nightly.202610310230"));
     }
 }

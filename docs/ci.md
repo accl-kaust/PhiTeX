@@ -113,9 +113,10 @@ there is no override.
 `.github/workflows/nightly.yml`, each night (and by hand): dev's newest
 commit whose `checks` passed (and whose `gate`, if one ran, did not fail),
 built as a release is, published as one pre-release tagged `nightly`,
-replaced each time. Its version is the next update's with the build's
-time (crates/cli at 1.6.0 builds `1.6.1-nightly.YYYYMMDDHHMM`): after 1.6,
-before 1.6.1. GitHub's "latest" never names a pre-release, so the stable
+replaced each time. Its version is the one it leads to, with the build's
+time: the CLI's own while that is unreleased (1.0.0 before v1.0:
+`1.0.0-nightly.YYYYMMDDHHMM`, before 1.0), else the next update's
+(`1.0.1-nightly.…`, after 1.0, before 1.0.1). GitHub's "latest" never names a pre-release, so the stable
 channel never sees it. `SHA256SUMS` is signed in the environment
 `nightly` with a key of its own (`NIGHTLY_MINISIGN_KEY`; public
 `ci/nightly.pub`), never the release key. `phitex upgrade` follows it

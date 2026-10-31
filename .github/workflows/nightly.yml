@@ -2,9 +2,11 @@
 # whose gate, if one ran, did not fail), built as a release is, published
 # as ONE pre-release tagged `nightly`, replaced each time (GitHub's
 # "latest" never names a pre-release, so the stable channel never sees
-# it). Its version is the next update's with the build's time:
-# crates/cli at 1.6.0 builds 1.6.1-nightly.YYYYMMDDHHMM, which comes
-# before 1.6.1 and after 1.6 (crates/cli/src/upgrade.rs `later`).
+# it). Its version is the one it leads to, with the build's time: the
+# CLI's own while that is not released yet (crates/cli at 1.0.0 with no
+# tag v1.0 builds 1.0.0-nightly.YYYYMMDDHHMM, before 1.0), else the next
+# update's (1.0.0 released: 1.0.1-nightly.…, after 1.0 and before 1.0.1;
+# crates/cli/src/upgrade.rs `later`).
 # `phitex upgrade` takes it only with `update-channel = "nightly"` (or an
 # install by `PHITEX_CHANNEL=nightly` install.sh), checked against the
 # nightly key (ci/nightly.pub), never the release key. Signing runs in
@@ -44,8 +46,11 @@ jobs:
           if [ "$built" = "$sha" ] && [ "$GITHUB_EVENT_NAME" = schedule ]; then echo "nightly is $sha already"; exit 0; fi
           v=$(gh api "repos/$GITHUB_REPOSITORY/contents/crates/cli/Cargo.toml?ref=$sha" -q .content | base64 -d | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
           IFS=. read -r a b c <<< "$v"
+          # (the tag a release of $v has: a milestone's without its .0)
+          tag=v$v; [ "$c" = 0 ] && tag=v$a.$b
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > /dev/null 2>&1; then c=$((c + 1)); fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "version=$a.$b.$((c + 1))-nightly.$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+          echo "version=$a.$b.$c-nightly.$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
   build:
     needs: which
     if: needs.which.outputs.sha != ''
