@@ -378,6 +378,24 @@ pub(crate) fn link(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Sto
     Ok(ValueId::UNIT)
 }
 
+/// `pdftex_fail`'s line (pdfTeX's `utils.c`): `!pdfTeX error: `, the
+/// program, ` (file <file>)` where one is at fault, `: ` and the message;
+/// a failure of this writer's own (a font file it cannot embed) said as
+/// one of pdfTeX's, with what it is.
+fn fail_line(program: &str, e: &phitex_pdf::PdfError) -> String {
+    match e {
+        phitex_pdf::PdfError::Fail {
+            file: Some(f),
+            message,
+        } => format!("!pdfTeX error: {program} (file {f}): {message}"),
+        phitex_pdf::PdfError::Fail {
+            file: None,
+            message,
+        } => format!("!pdfTeX error: {program}: {message}"),
+        other => format!("!pdfTeX error: {program}: {other}"),
+    }
+}
+
 /// A field reaching the end node.
 pub(crate) fn field(cx: &mut Ctx<'_>, name: &str) -> Result<Option<ValueId>, Stop> {
     let f = cx.values().field(name);
@@ -960,6 +978,12 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         seed,
         info_omit_date: i32::try_from(int_field(cx, "param:pdfinfoomitdate")?).unwrap_or(0),
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
+        // (pdfTeX fixes it when it opens the file, §695; read here at the
+        // end: the same unless a document changes it after that)
+        pk_resolution: cx
+            .read(o.fields.param(v, "pdfpkresolution"))?
+            .and_then(|x| i32::try_from(int_of(v, x)).ok())
+            .unwrap_or(0),
     };
     let t_seed = t0.elapsed();
     let l = crate::pdfout::finish_exact(v, &f, &xpages, &units, changed.as_ref(), &o.pdf_cmds);
@@ -985,23 +1009,19 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         ]);
         cx.contribute(v.field("diags"), v.seq_unit(d));
     }
-    // the file's end the writer could not make (a font with no map
-    // entry): pdfTeX's fatal error (`Font X not found`, then `==> Fatal
-    // error occurred, no output PDF file produced!`, pdfTeX §794), the
-    // job's error in the log (its `! ` line is the error shown: it has
-    // no place in the document, as pdfTeX's has none); the output is
-    // then no file at all, never a file with no bytes passed as the pages
-    if let Some(why) = &l.fatal {
-        let msg = if why.starts_with("pdfTeX error") {
-            why.clone()
-        } else {
-            format!("pdfTeX error: {why}")
-        };
-        let e = v.list(vec![v.str("error"), v.str(&msg), v.int(-1)]);
+    // the file's end not written is the job's end: pdfTeX's fatal
+    // `pdftex_fail`, its line in the log (`!pdfTeX error: pdflatex (file
+    // ptmr8r): Font ptmr8r at 600 not found`), no file (`Build::output`)
+    if let Some(e) = &l.fail {
+        let program = field(cx, crate::api::PROGRAM)?
+            .map(|x| str_of(v, x))
+            .unwrap_or_default();
+        let e = v.list(vec![
+            v.str(crate::log::FAIL),
+            v.str(&fail_line(&program, e)),
+        ]);
         cx.contribute(v.field("log"), v.seq_unit(e));
         cx.contribute(v.field(crate::run::LOG_ERRORS), v.int(1));
-        let f = v.list(vec![v.str("fatal"), v.str("pdf")]);
-        cx.contribute(v.field("log"), v.seq_unit(f));
     }
     cx.contribute(
         v.field(crate::pdfout::LINKED),

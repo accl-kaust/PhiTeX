@@ -72,7 +72,7 @@ mod xetex;
 mod xpic;
 
 pub use api::{
-    Build, ContentKey, Diagnostic, EditSender, Finder, Hint, Options, PageSettled,
+    Build, ContentKey, Diagnostic, EditSender, FAIL_END, Finder, Hint, Options, PageSettled,
     RunReport as Report, Severity, Speculation, Stats, ToolFinder, ToolSearch, byte_ends,
     engine_id, file_stat_key,
 };

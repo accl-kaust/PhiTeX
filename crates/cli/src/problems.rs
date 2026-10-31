@@ -73,7 +73,11 @@ pub fn show(ui: &Ui, errors: &[String], log: &str, main: &str) {
     let problems = parse(log, main);
     let mut used = vec![false; problems.len()];
     // (the engine's failures are shown on their own lines before)
-    for e in errors.iter().filter(|e| e.starts_with("! ")).take(max) {
+    for e in errors
+        .iter()
+        .filter(|e| phitex_live::session::transcript_error(e))
+        .take(max)
+    {
         let m = bare(e);
         let key = m.trim_end_matches('.');
         match (0..problems.len()).find(|&k| !used[k] && problems[k].message == key) {

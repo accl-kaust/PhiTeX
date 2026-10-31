@@ -168,34 +168,74 @@ impl Log {
             }
             "println" => self.print_ln(),
             "fatal" => {}
+            // `pdftex_fail` (pdfTeX's `utils.c`): `println`, its line,
+            // `println`; the job ends there ([`LayoutMemo::finish`]'s end)
+            // (and xdvipdfmx's fatal error, on xelatex's terminal: laid
+            // out the same; XeTeX's own words end the log, [`driver_end`];
+            // either whole on its line, the line the front ends show)
+            FAIL | DRIVER => {
+                self.print_ln();
+                self.text.push_str(text);
+                self.print_ln();
+            }
             _ => self.print(text, nl),
         }
     }
 }
 
+/// A log event's kind: pdfTeX's fatal `pdftex_fail`, its line the event's
+/// text (`!pdfTeX error: pdflatex (file ptmr8r): Font ptmr8r at 600 not
+/// found`), the output's (`crate::assemble`).
+pub(crate) const FAIL: &str = "fail";
+
+/// A log event's kind: the PDF driver's fatal error (xdvipdfmx's
+/// `ERROR`, `xdvipdfmx:fatal: ...`), its line the event's text: XeTeX
+/// made no PDF file (`crate::xdvpdf`).
+pub(crate) const DRIVER: &str = "driver";
+
+/// What XeTeX says when its driver failed (xetex.ch, §642's change:
+/// `dvi_close` gave xdvipdfmx's exit status, 1, as `pclose` does), the
+/// PDF file named, `history` then `output_failure`.
+pub(crate) fn driver_end(pdf: &str) -> String {
+    format!("Error 256 (driver return code) generating output;\nfile {pdf} may not be valid.")
+}
+
+/// A fatal error in a log, the worst last: TeX's (§93), TeX's in a PDF
+/// job (pdfTeX §1335 says no PDF file was produced), pdfTeX's
+/// `pdftex_fail` (no PDF file either, said otherwise).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Fatal {
+    Tex,
+    TexPdf,
+    Fail,
+    /// XeTeX's driver failed: no PDF file, the job not ended by it.
+    Driver,
+}
+
 /// A document's log kept from one build to the next ([`LayoutMemo::update`],
 /// [`LayoutMemo::finish`]): its events, the log's length and column after
-/// each, and the fatal errors among them (`(event, whether pdfTeX's)`).
+/// each, and the fatal errors among them (`(event, kind)`: TeX's, TeX's
+/// in a PDF job, or pdfTeX's `pdftex_fail`).
 #[derive(Default)]
 pub(crate) struct LayoutMemo {
     name: String,
     events: Vec<ValueId>,
     after: Vec<(usize, usize)>,
-    fatal: Vec<(usize, bool)>,
+    fatal: Vec<(usize, Fatal)>,
     text: String,
     offset: usize,
 }
 
 impl LayoutMemo {
     /// The log of a document: the file opened, the events (laid out
-    /// again from the first that differs from the last ones'); whether a
-    /// fatal error is among them, and whether one is pdfTeX's.
+    /// again from the first that differs from the last ones'); the worst
+    /// fatal error among them, if any.
     pub(crate) fn update(
         &mut self,
         v: &Values,
         name: &str,
         events: Option<ValueId>,
-    ) -> (bool, bool) {
+    ) -> Option<Fatal> {
         let evs = events.map(|e| v.seq_to_vec(e)).unwrap_or_default();
         let same = if self.name == name {
             self.events
@@ -219,11 +259,22 @@ impl LayoutMemo {
             self.after.truncate(same);
         }
         self.fatal.retain(|f| f.0 < same);
-        let (fatal, pdf) = (v.str("fatal"), v.str("pdf"));
+        let (fatal, pdf, fail, driver) = (v.str("fatal"), v.str("pdf"), v.str(FAIL), v.str(DRIVER));
         for (k, &x) in evs.iter().enumerate().skip(same) {
             let xs = list_of(v, x);
             if xs.first() == Some(&fatal) {
-                self.fatal.push((k, xs.get(1) == Some(&pdf)));
+                self.fatal.push((
+                    k,
+                    if xs.get(1) == Some(&pdf) {
+                        Fatal::TexPdf
+                    } else {
+                        Fatal::Tex
+                    },
+                ));
+            } else if xs.first() == Some(&fail) {
+                self.fatal.push((k, Fatal::Fail));
+            } else if xs.first() == Some(&driver) {
+                self.fatal.push((k, Fatal::Driver));
             }
             let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
             let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
@@ -235,7 +286,7 @@ impl LayoutMemo {
         self.events = evs;
         self.text = log.text;
         self.offset = log.offset;
-        (!self.fatal.is_empty(), self.fatal.iter().any(|f| f.1))
+        self.fatal.iter().map(|f| f.1).max()
     }
 
     /// The log [`LayoutMemo::update`] laid out, then the end
@@ -247,7 +298,10 @@ impl LayoutMemo {
         };
         let len = log.text.len();
         log.print(" )", -1);
-        log.print_nl(end, -1);
+        // (each of its lines `print_nl`'s)
+        for l in end.split('\n') {
+            log.print_nl(l, -1);
+        }
         let out = log.text.clone();
         log.text.truncate(len);
         self.text = log.text;

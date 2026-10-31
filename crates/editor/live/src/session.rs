@@ -323,6 +323,15 @@ pub struct Report {
     pub format_failed: bool,
 }
 
+/// Whether `e`, one of a build's errors ([`Output::errors`]), is a line of
+/// TeX's transcript (`! ...`, pdfTeX's fatal `pdftex_fail`, `!pdfTeX
+/// error: ...`, or XeTeX's driver's, `xdvipdfmx:fatal: ...`), not the
+/// engine's own failure.
+#[must_use]
+pub fn transcript_error(e: &str) -> bool {
+    e.starts_with("! ") || e.starts_with("!pdfTeX error: ") || e.starts_with("xdvipdfmx:fatal: ")
+}
+
 /// An engine's stop said in a sentence: what gave out, without its dump
 /// (`RunawayCreation { node: …, depth: 4097, … }` as "it nested deeper than
 /// its limit (4097 levels)").
@@ -857,6 +866,7 @@ impl Session {
                     epoch: Some(self.job.pdf_date),
                     fixpoint: self.job.fixpoint,
                     prelude_jobname: self.job.engine.name.to_owned(),
+                    program: self.job.engine.name.to_owned(),
                     prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
                     threads: self.job.threads,
                     progress: Some(progress),
@@ -1126,8 +1136,10 @@ impl Session {
             .chain(if self.watching {
                 b.error_lines()
             } else {
+                // (TeX's errors, and pdfTeX's fatal `pdftex_fail` with the
+                // line under it)
                 log.lines()
-                    .filter(|l| l.starts_with("! "))
+                    .filter(|l| transcript_error(l))
                     .map(str::to_owned)
                     .collect()
             })

@@ -294,6 +294,7 @@ fn main() {
         epoch: Some(epoch),
         fixpoint: a.fixpoint,
         prelude_jobname: name.to_owned(),
+        program: name.to_owned(),
         prelude_bytes: cached,
         threads: a.threads,
         // (the format's first build in WebAssembly takes its time)
@@ -336,7 +337,10 @@ fn main() {
     write("log", &bytes(&log));
     let pages = b.pages().len();
     if out.is_empty() {
-        println!("No pages of output.");
+        // (a fatal error said its own last words: no PDF file produced)
+        if !b.fatal() {
+            println!("No pages of output.");
+        }
     } else {
         let p = write(if b.is_pdf() { "pdf" } else { "dvi" }, &out);
         println!(

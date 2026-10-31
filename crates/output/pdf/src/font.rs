@@ -771,14 +771,11 @@ impl PdfState {
             if first <= last {
                 match self.font(f).map.clone() {
                     Some(fm) if !fm.is_pk() => self.create_fontdictionary(fm, k, f, &mut t)?,
-                    _ => {
-                        // (pdfTeX: `Font X at N not found` once mktexpk
-                        // fails; no bitmap (PK, Type 3) font is made here)
-                        let name = String::from_utf8_lossy(&self.font(f).name);
-                        return Err(PdfError::Font(format!(
-                            "Font {name} not found (no entry for it in the font map, and a PK (Type 3) font is not made)"
-                        )));
-                    }
+                    // (`writet3`: no map entry, or a bitmap one: a Type 3
+                    // font from the `.pgc` or PK file, which this writer
+                    // never has (no `mktexpk`): pdfTeX's failure when
+                    // `kpse_find_pk` finds none)
+                    _ => return Err(self.pk_not_found(f)),
                 }
             }
             k = self.objs[k].link;
@@ -825,5 +822,110 @@ impl PdfState {
             self.write_fontdictionary(&fo, &t)?;
         }
         Ok(())
+    }
+}
+
+impl PdfState {
+    /// `writepk`'s failure for font `f` (`writet3.c`): `Font <name> at
+    /// <dpi> not found`, `cur_file_name` the TFM name; the resolution
+    /// `fixed_pk_resolution` scaled by the font's size over its design
+    /// size, at its nearest magstep (`kpse_magstep_fix`).
+    fn pk_not_found(&self, f: FontId) -> PdfError {
+        let st = self.font(f);
+        let name = String::from_utf8_lossy(&st.name).into_owned();
+        // pdfTeX §695: `\pdfpkresolution`, or `pk_dpi` where it is 0,
+        // fixed between 72 and 8000
+        let res = match self.p.pk_resolution {
+            0 => 72,
+            r => r,
+        }
+        .clamp(72, 8000);
+        let dpi = magstep_fix(pk_dpi(res, st.size, st.metrics.design_size), res);
+        PdfError::Fail {
+            file: Some(name.clone()),
+            message: format!("Font {name} at {dpi} not found"),
+        }
+    }
+}
+
+/// `round(fixedpkresolution * (((float) pdffontsize[f]) / fontdsize[f]))`
+/// (`writet3.c`): in single precision, rounded as `zround` (half away
+/// from zero, held to 32 bits).
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn pk_dpi(res: i32, size: Scaled, dsize: Scaled) -> i32 {
+    let r = f64::from(res as f32 * (size as f32 / dsize as f32));
+    if r > 2_147_483_647.0 {
+        i32::MAX
+    } else if r < -2_147_483_647.0 {
+        -i32::MAX
+    } else if r >= 0.0 {
+        (r + 0.5) as i32
+    } else {
+        (r - 0.5) as i32
+    }
+}
+
+/// `magstep(n, bdpi)` (kpathsea `magstep.c`): `bdpi` at magstep `n/2`
+/// (an odd `n` a half step, `1.095445115`).
+#[allow(clippy::cast_possible_truncation)]
+fn magstep(n: i32, bdpi: i32) -> i32 {
+    let neg = n < 0;
+    let mut n = n.abs();
+    let mut t = if n & 1 == 1 {
+        n &= !1;
+        1.095_445_115
+    } else {
+        1.0
+    };
+    while n > 8 {
+        n -= 8;
+        t *= 2.0736;
+    }
+    while n > 0 {
+        n -= 2;
+        t *= 1.2;
+    }
+    let b = f64::from(bdpi);
+    (0.5 + if neg { b / t } else { b * t }) as i32
+}
+
+/// `kpse_magstep_fix(dpi, bdpi)` (kpathsea `magstep.c`): the resolution
+/// of the magstep of `bdpi` within one of `dpi`, else `dpi`.
+fn magstep_fix(dpi: i32, bdpi: i32) -> i32 {
+    let sign = if dpi < bdpi { -1 } else { 1 };
+    let mut real = 0;
+    let mut m = 0;
+    while real == 0 && m < 40 {
+        let mdpi = magstep(m * sign, bdpi);
+        if (mdpi - dpi).abs() <= 1 {
+            real = mdpi;
+        } else if (mdpi - dpi) * sign > 0 {
+            real = dpi;
+        }
+        m += 1;
+    }
+    if real == 0 { dpi } else { real }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `writepk`'s resolution: `\pdfpkresolution` scaled by the font's
+    /// size over its design size, put on a magstep within one dpi of it
+    /// (`kpse_magstep_fix`), else kept.
+    #[test]
+    fn pk_resolution_at_magsteps() {
+        let pt = 65_536;
+        let dpi = |res, size, dsize| magstep_fix(pk_dpi(res, size * pt, dsize * pt), res);
+        assert_eq!(dpi(600, 10, 10), 600);
+        // (magstep 1: 600 × 1.2)
+        assert_eq!(dpi(600, 12, 10), 720);
+        // (between magstep 0.5, 657, and 1: kept)
+        assert_eq!(dpi(600, 11, 10), 660);
+        assert_eq!(dpi(600, 5, 10), 300);
+        // (magstep -2, 416.7 → 417, is three away)
+        assert_eq!(dpi(600, 7, 10), 420);
+        assert_eq!(dpi(72, 10, 10), 72);
     }
 }

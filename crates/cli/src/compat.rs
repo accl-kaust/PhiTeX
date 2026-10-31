@@ -272,7 +272,12 @@ pub fn main(progname: &str, args: &[String]) -> ! {
     print!("{}", phitex_live::session::Session::terminal(&r));
     // (the engine's own failures and warnings, which TeX's transcript
     // does not have: on standard error, said as sentences)
-    for e in r.out.errors.iter().filter(|e| !e.starts_with("! ")) {
+    for e in r
+        .out
+        .errors
+        .iter()
+        .filter(|e| !phitex_live::session::transcript_error(e))
+    {
         eprintln!("{progname}: {e}");
     }
     for w in &r.warnings {

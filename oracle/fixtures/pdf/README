@@ -5,3 +5,5 @@ ttf.tex (Arvo, TrueType), ownpdf0.tex (font replacement), png.tex, png8.tex, jpe
 imgloop.tex (with png-gray.png): oracle .log made by `pdftex -ini -interaction=batchmode imgloop.tex` (pdfTeX 1.40.29) in this directory with SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1: `\pdflastximage` after pages fired at paragraphs' starts.
 
 nomap10.tfm: cmr10.tfm under a name no map file has an entry for, for tests/pdftex.rs's font_without_map_entry_is_fatal (no oracle output: `pdftex -ini` ends on `Font nomap10 at 72 not found`, a fatal error, with no PDF file).
+
+nomap.tex (with nomap10.tfm): scripts/wasm.sh check's fatal error, an -ini job pdfTeX ends on `!pdfTeX error: pdftex (file nomap10): Font nomap10 at 72 not found` (exit status 1, no PDF file).

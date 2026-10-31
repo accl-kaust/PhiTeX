@@ -416,9 +416,9 @@ fn batch() -> phitex_xdvipdfmx::obj::BatchDeflate {
     })
 }
 
-/// A fatal error of xdvipdfmx's, or a page it could not be given.
+/// A fatal error of xdvipdfmx's, as it says it (`xdvipdfmx:fatal: ...`).
 fn fatal(e: &phitex_xdvipdfmx::ctx::Fatal) -> String {
-    format!("xdvipdfmx: {e}")
+    e.to_string()
 }
 
 /// What a fold takes beyond the pages.
@@ -1203,7 +1203,10 @@ fn layout(chunks: &[Arc<[u8]>], tail: &[u8], s: &Session) -> Option<phitex_pdf::
 /// and there is no file, as after `xdvipdfmx` failing.
 fn failed(cx: &mut Ctx<'_>, msg: &str) -> ValueId {
     let v = cx.values();
-    let e = v.list(vec![v.str("error"), v.str(msg), v.int(-1)]);
+    // (xelatex: the driver's error on the terminal, then XeTeX's
+    // `Error 256 (driver return code) generating output;`, no PDF file,
+    // `crate::log::driver_end`)
+    let e = v.list(vec![v.str(crate::log::DRIVER), v.str(msg)]);
     cx.contribute(v.field("log"), v.seq_unit(e));
     cx.contribute(v.field(crate::run::LOG_ERRORS), v.int(1));
     v.str("")

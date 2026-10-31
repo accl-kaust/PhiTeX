@@ -926,6 +926,67 @@ mod tests {
         assert_eq!(built["pages"], 3, "{ev:?}");
     }
 
+    /// A TFM no font map has an entry for (`oracle/fixtures/pdf`'s
+    /// nomap10.tfm, cmr10's metrics), and no other file.
+    struct NoMap;
+
+    impl Host for NoMap {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            (name.trim_end_matches(".tfm") == "nomap10").then(|| PathBuf::from("nomap10.tfm"))
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            (path == Path::new("nomap10.tfm"))
+                .then(|| include_bytes!("../../../../oracle/fixtures/pdf/nomap10.tfm").to_vec())
+        }
+    }
+
+    /// A font with no map entry: pdfTeX's fatal error at the end of the
+    /// job (`pdftex_fail`), given the viewer and the language server as a
+    /// diagnostic at the document's last line, its words exactly; the
+    /// build failed, no PDF.
+    #[test]
+    fn a_font_without_a_map_entry_is_a_diagnostic() {
+        let text =
+            "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1\n\\font\\r=nomap10 \\r Hello.\\end\n";
+        let s = Session::new(
+            Job {
+                engine: crate::tex::engine("pdftex").unwrap(),
+                ..job()
+            },
+            Arc::from(text),
+            Arc::new(NoMap),
+            None,
+            Arc::new(Memory::default()),
+            Arc::new(Status::default()),
+        );
+        let mut d = Document::new(s, "doc.tex");
+        let ev = d.step();
+        let line = "!pdfTeX error: pdftex (file nomap10): Font nomap10 at 72 not found";
+        let diags = ev
+            .iter()
+            .rev()
+            .find(|e| e["event"] == "diagnostics")
+            .expect("the diagnostics");
+        let errors: Vec<&Value> = diags["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["severity"] == "error")
+            .collect();
+        assert_eq!(errors.len(), 1, "{diags}");
+        assert_eq!(errors[0]["message"], line[1..], "{diags}");
+        assert_eq!(errors[0]["line"], 2, "the document's last line: {diags}");
+        assert_eq!(errors[0]["help"], json!([phitex_tex::FAIL_END]), "{diags}");
+        let built = ev.iter().find(|e| e["event"] == "build").expect("built");
+        assert_eq!(built["ok"], false, "{ev:?}");
+        assert_eq!(built["errors"], json!([line]), "{ev:?}");
+        assert!(
+            d.output().is_none_or(|o| o.1.is_empty()),
+            "no PDF: {:?}",
+            d.output().map(|o| o.1.len())
+        );
+    }
+
     /// No files but dvipdfmx's finder, which finds nothing and counts
     /// what it was asked.
     struct Dpx(Arc<std::sync::atomic::AtomicUsize>);

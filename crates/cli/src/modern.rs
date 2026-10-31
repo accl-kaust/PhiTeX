@@ -732,7 +732,12 @@ pub fn report(
     // (the engine's failures — a deadline, no fixpoint, an evaluation
     // error — each on its own line first: the result is not the
     // document's, whatever TeX's errors and pages say)
-    for f in r.out.errors.iter().filter(|e| !e.starts_with("! ")) {
+    for f in r
+        .out
+        .errors
+        .iter()
+        .filter(|e| !phitex_live::session::transcript_error(e))
+    {
         ui.error(f);
     }
     // (the engine's places when it gave them, else the transcript's)

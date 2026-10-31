@@ -181,6 +181,14 @@ pub enum PdfError {
     Pdf(String, String),
     /// Something this crate does not do yet.
     Unsupported(String),
+    /// `pdftex_fail` (`utils.c`): the job stops there, no PDF file made;
+    /// `cur_file_name` (the file or font at fault) and the message.
+    /// pdfTeX says `!pdfTeX error: <program> (file <file>): <message>`,
+    /// then ` ==> Fatal error occurred, no output PDF file produced!`.
+    Fail {
+        file: Option<String>,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for PdfError {
@@ -191,6 +199,14 @@ impl std::fmt::Display for PdfError {
             PdfError::Pdf(t, m) if t.is_empty() => write!(f, "pdfTeX error: {m}"),
             PdfError::Pdf(t, m) => write!(f, "pdfTeX error ({t}): {m}"),
             PdfError::Unsupported(m) => write!(f, "not supported: {m}"),
+            PdfError::Fail {
+                file: Some(n),
+                message,
+            } => write!(f, "pdfTeX error (file {n}): {message}"),
+            PdfError::Fail {
+                file: None,
+                message,
+            } => write!(f, "pdfTeX error: {message}"),
         }
     }
 }
@@ -271,6 +287,8 @@ pub struct PdfParams {
     pub info_omit_date: i32,
     /// `\pdfsuppresswarningpagegroup`.
     pub suppress_warning_page_group: i32,
+    /// `\pdfpkresolution` (0: `pk_dpi`, `texmf.cnf`'s, 72 unset there).
+    pub pk_resolution: i32,
     /// `start_time_str` (`texmfmp.c` `makepdftime`), e.g.
     /// `D:19700101000001Z`; see [`pdf_date`].
     pub date: String,
@@ -317,6 +335,7 @@ impl Default for PdfParams {
             omit_charset: 0,
             info_omit_date: 0,
             suppress_warning_page_group: 0,
+            pk_resolution: 0,
             date: pdf_date(0),
             banner: String::new(),
             output_file_name: String::new(),

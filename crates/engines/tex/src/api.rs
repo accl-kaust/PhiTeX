@@ -113,6 +113,9 @@ pub struct Options {
     pub fixpoint: bool,
     /// `\jobname` while the prelude runs (`latex` for `latex.ini`).
     pub prelude_jobname: String,
+    /// The program's name as invoked (`pdflatex`, kpathsea's
+    /// `kpse_invocation_name`): what pdfTeX's fatal `pdftex_fail` names.
+    pub program: String,
     /// A prelude's environment from [`Build::export_prelude`]: used
     /// instead of evaluating the prelude when its key matches (the same
     /// prelude text, every file it read unchanged).
@@ -834,6 +837,7 @@ impl Default for Options {
             shell_hook: None,
             shell_passes: LATEXMK_MAX_REPEAT as usize - 1,
             prelude_jobname: "texput".to_owned(),
+            program: "pdftex".to_owned(),
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
             stuck_after: None,
@@ -1435,6 +1439,14 @@ fn engine_identity() -> u64 {
 /// an environment field): TeX numbers a document's fonts after them,
 /// in the order of the document's first loads ([`font_order`]).
 pub(crate) const FONT_ORDER: &str = "fontorder";
+
+/// What pdfTeX's `pdftex_fail` says after its line (`utils.c`): the
+/// job's last words, no PDF file written.
+pub const FAIL_END: &str = " ==> Fatal error occurred, no output PDF file produced!";
+
+/// The program's name ([`Options::program`]), a job binding: what the
+/// output's fatal errors name (`pdftex_fail`, `crate::assemble`).
+pub(crate) const PROGRAM: &str = "program";
 
 /// The fonts' keys in the order of their first `fontload` records in
 /// `line` (the line's accumulator, a sequence), each once.
@@ -7021,8 +7033,9 @@ impl Build {
             .is_some_and(|x| int_of(v, x) > 0)
     }
 
-    /// The log's error lines (`! ...`), read without laying the log out:
-    /// none unless the errors' count says there are some.
+    /// The log's error lines (`! ...`, and pdfTeX's fatal `pdftex_fail`'s
+    /// `!pdfTeX error: ...`), read without laying the log out: none
+    /// unless the errors' count says there are some.
     #[must_use]
     pub fn error_lines(&self) -> Vec<String> {
         let v = self.g.eng.values();
@@ -7035,21 +7048,26 @@ impl Build {
             return Vec::new();
         }
         let (error, errmsg) = (v.str("error"), v.str("errmsg"));
+        let (fail, driver) = (v.str(crate::log::FAIL), v.str(crate::log::DRIVER));
         self.g
             .eng
             .acc_value(self.unit, v.field("log"))
             .map(|e| v.seq_to_vec(e))
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|x| {
+            .flat_map(|x| {
                 let xs = list_of(v, x);
-                let k = *xs.first()?;
-                (k == error || k == errmsg).then(|| {
-                    format!(
-                        "! {}.",
-                        xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default()
-                    )
-                })
+                let k = xs.first().copied();
+                let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
+                if k == Some(fail) || k == Some(driver) {
+                    // (`pdftex_fail`'s line, or xdvipdfmx's, as the log
+                    // has it)
+                    vec![text]
+                } else if k == Some(error) || k == Some(errmsg) {
+                    vec![format!("! {text}.")]
+                } else {
+                    Vec::new()
+                }
             })
             .collect()
     }
@@ -7075,11 +7093,14 @@ impl Build {
             .eng
             .acc_value(self.unit, v.field("log"))
             .is_some_and(|e| {
-                // (the kind compared as a value: no string made per entry)
-                let fatal = v.str("fatal");
-                v.seq_to_vec(e)
-                    .into_iter()
-                    .any(|x| list_of(v, x).first() == Some(&fatal))
+                // (the kind compared as a value: no string made per entry;
+                // pdfTeX's `pdftex_fail` ends the job as fatally)
+                let (fatal, fail) = (v.str("fatal"), v.str(crate::log::FAIL));
+                v.seq_to_vec(e).into_iter().any(|x| {
+                    list_of(v, x)
+                        .first()
+                        .is_some_and(|&k| k == fatal || k == fail)
+                })
             })
     }
 
@@ -7133,20 +7154,29 @@ impl Build {
         crate::timeline::note("output: the pages", t0.elapsed());
         let t0 = std::time::Instant::now();
         let mut memo = self.memo.locked();
-        let (fatal, fatal_pdf) = memo.log.update(
+        let fatal = memo.log.update(
             v,
             &self.opts.name,
             self.g.eng.acc_value(self.unit, v.field("log")),
         );
-        let fatal = fatal && (dvi.starts_with(b"%PDF") || fatal_pdf);
+        // (TeX's fatal error removes a PDF file only; pdfTeX's
+        // `pdftex_fail` stops the job before its PDF file is written)
+        let fatal = fatal.filter(|&f| f != crate::log::Fatal::Tex || dvi.starts_with(b"%PDF"));
         crate::timeline::note(
             "output: the log laid out (fatal errors found)",
             t0.elapsed(),
         );
-        // (pdfTeX §794: after a fatal error the PDF file is removed)
-        let end = if fatal {
+        // (pdfTeX §794: after a fatal error the PDF file is removed;
+        // `pdftex_fail` (`utils.c`) says so on a line of its own)
+        let end = if let Some(f) = fatal {
             dvi = Arc::default();
-            "!  ==> Fatal error occurred, no output PDF file produced!".to_owned()
+            if f == crate::log::Fatal::Fail {
+                FAIL_END.to_owned()
+            } else if f == crate::log::Fatal::Driver {
+                crate::log::driver_end(&format!("{}.pdf", self.opts.jobname))
+            } else {
+                "!  ==> Fatal error occurred, no output PDF file produced!".to_owned()
+            }
         } else if n == 0 {
             "No pages of output.".to_owned()
         } else {
@@ -7490,6 +7520,40 @@ impl Build {
                 message,
                 context,
                 help,
+            });
+        }
+        // pdfTeX's fatal `pdftex_fail` (the output's: a font without a
+        // map entry), or XeTeX's driver's: at no place of the text, so at
+        // its end, where the job stopped; its message as pdfTeX's line has
+        // it but for the `!`, what pdfTeX (XeTeX) says under it its help
+        let (fail, driver) = (v.str(crate::log::FAIL), v.str(crate::log::DRIVER));
+        for x in self
+            .g
+            .eng
+            .acc_value(self.unit, v.field("log"))
+            .map(|e| v.seq_to_vec(e))
+            .unwrap_or_default()
+        {
+            let xs = list_of(v, x);
+            // (xdvipdfmx's fatal error: XeTeX's words after it its help)
+            let help = match xs.first() {
+                Some(&k) if k == fail => FAIL_END.to_owned(),
+                Some(&k) if k == driver => {
+                    crate::log::driver_end(&format!("{}.pdf", self.opts.jobname))
+                }
+                _ => continue,
+            };
+            let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
+            let end = doc.trim_end_matches(['\n', '\r']).len();
+            let at = to_raw(end);
+            out.push(Diagnostic {
+                file: docname.clone(),
+                range: (at, at),
+                line: doc_lines.partition_point(|&k| k <= end).max(1),
+                severity: Severity::Error,
+                message: text.strip_prefix('!').unwrap_or(&text).to_owned(),
+                context: String::new(),
+                help: Some(help),
             });
         }
         crate::timeline::note(
@@ -8254,6 +8318,7 @@ fn job_env(
     let v = g.eng.values();
     let mut sets = vec![
         (v.field("jobname"), v.str(&opts.jobname)),
+        (v.field(PROGRAM), v.str(&opts.program)),
         (v.field("dvicomment"), v.str(&opts.comment)),
         (v.field("shellescape"), v.int(i64::from(opts.shell_escape))),
         (

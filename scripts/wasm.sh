@@ -6,7 +6,8 @@
 #   scripts/sandbox scripts/wasm.sh build   # target/wasm32-wasip1-threads/fastdev/phitex-wasm.wasm
 #   scripts/sandbox scripts/wasm.sh check   # build, then a plain TeX and a LaTeX document,
 #                                           # byte for byte against pdfTeX's (oracle/fixtures),
-#                                           # at 1 and 4 threads, the formats made in wasm
+#                                           # at 1 and 4 threads, the formats made in wasm;
+#                                           # a fatal error's exit status, log and no PDF
 #   scripts/sandbox scripts/wasm.sh run [phitex-wasm's arguments] FILE   # in FILE's directory
 #
 # Needs the pinned toolchain's wasm32-wasip1-threads target (not in
@@ -77,6 +78,26 @@ check_ini() {
   done
 }
 
+# check_fatal NAME FIXTURE-DIR FILE LINE: an -ini job pdfTeX stops with a
+# fatal error at its end (pdftex_fail): exit status 1, no PDF, the error's
+# LINE in the log and said on standard error.
+check_fatal() {
+  local name=$1 src=$2 file=$3 line=$4
+  local dir=$repo/target/wasm-check/$name job=${file%.tex}
+  rm -rf "$dir" && mkdir -p "$dir"
+  cp "$src/$file" "$src"/*.tfm "$dir"/
+  local rc=0
+  (cd "$dir" && run --ini --epoch 0 -j 4 "$file") >"$dir/run.txt" 2>&1 || rc=$?
+  if [ "$rc" = 1 ] && [ ! -e "$dir/$job.pdf" ] && grep -qxF -- "$line" "$dir/$job.log" \
+      && grep -qF -- "${line#!}" "$dir/run.txt"; then
+    echo "ok $name: exit 1, no PDF, '$line'"
+  else
+    cat "$dir/run.txt" "$dir/$job.log" 2>/dev/null
+    echo "FAIL $name: exit $rc (1 wanted), $(ls "$dir")"
+    return 1
+  fi
+}
+
 case "${1:-check}" in
   build) build ;;
   run) shift; run "$@" ;;
@@ -88,6 +109,8 @@ case "${1:-check}" in
     # (links: their object numbers are read-time identities past 32
     # bits, which wasm32's usize does not hold)
     check_ini linkbreak "$fx/pdf" linkbreak.tex "$fx/pdf/linkbreak.pdf"
+    # (a font with no map entry: pdfTeX's fatal error, no PDF)
+    check_fatal nomap "$fx/pdf" nomap.tex '!pdfTeX error: pdftex (file nomap10): Font nomap10 at 72 not found'
     echo WASM_OK
     ;;
   *) echo "usage: $0 build|check|run [arguments]" >&2; exit 2 ;;

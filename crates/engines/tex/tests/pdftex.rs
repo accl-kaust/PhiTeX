@@ -403,24 +403,54 @@ fn openout_refused() {
 /// of no bytes with the pages' count: a viewer showed them blank.)
 #[test]
 fn font_without_map_entry_is_fatal() {
+    // (pdfTeX's `writet3`: no PK font found at `\pdfpkresolution` scaled
+    // by the font's size over its design size, on a magstep; 0 is
+    // `pk_dpi`, 72; `pdftex_fail`'s two lines, no PDF file)
     let dir = common::fixtures().join("pdf");
-    let doc = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\font\\r=nomap10 \\r Hello.\\end\n";
-    let opts = common::options("./t.tex", "t", "", &dir);
-    let b = common::build(opts, None, doc);
-    let (pdf, log) = b.output();
-    assert!(pdf.is_empty(), "a PDF file was written:\n{log}");
-    assert!(b.fatal(), "the job did not end:\n{log}");
-    for want in [
-        "Font nomap10 not found",
-        "==> Fatal error occurred, no output PDF file produced!",
+    for (set, at) in [
+        ("", 72),
+        ("\\pdfpkresolution=600 ", 600),
+        ("\\pdfpkresolution=600 ", 720),
     ] {
-        assert!(log.contains(want), "no {want:?} in the log:\n{log}");
+        let size = if at == 720 { " at 12pt" } else { "" };
+        let doc = format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\pdfoutput=1 {set}\\font\\r=nomap10{size} \\r Hello.\\end\n"
+        );
+        let opts = phitex_tex::Options {
+            program: "pdflatex".to_owned(),
+            ..common::options("./t.tex", "t", "", &dir)
+        };
+        let b = common::build(opts, None, &doc);
+        let (pdf, log) = b.output();
+        assert!(pdf.is_empty(), "a PDF file was written:\n{log}");
+        assert!(b.fatal(), "the job did not end:\n{log}");
+        let line =
+            format!("!pdfTeX error: pdflatex (file nomap10): Font nomap10 at {at} not found");
+        let lines: Vec<&str> = log.lines().collect();
+        let k = lines.iter().position(|l| *l == line);
+        assert!(k.is_some(), "no {line:?} in the log:\n{log}");
+        assert_eq!(
+            lines.last(),
+            Some(&phitex_tex::FAIL_END),
+            "the log's last line:\n{log}"
+        );
+        assert!(
+            !log.contains("!  ==>"),
+            "TeX's fatal line, not pdfTeX's:\n{log}"
+        );
+        assert_eq!(b.error_lines(), std::slice::from_ref(&line));
+        // (a diagnostic: the error at the document's end, its help the
+        // line pdfTeX says under it)
+        let d: Vec<_> = b
+            .diagnostics()
+            .into_iter()
+            .filter(|d| d.severity == phitex_tex::Severity::Error)
+            .collect();
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].message, line[1..]);
+        assert_eq!(d[0].help.as_deref(), Some(phitex_tex::FAIL_END));
+        assert_eq!(d[0].line, 1);
     }
-    let lines = b.error_lines();
-    assert!(
-        lines.iter().any(|l| l.contains("Font nomap10 not found")),
-        "not among the error lines: {lines:?}"
-    );
 }
 
 /// A plain pdfTeX document for glyph origins: paragraphs of varied
