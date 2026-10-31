@@ -1,0 +1,13 @@
+/.git
+/cache/
+/build/
+/releases*/
+/public/tl*/
+/.home/
+/.wrangler/
+/trace/phitex/
+/trace/target/
+/MANIFEST.tsv
+__pycache__/
+/phitex.bundle
+/texlive.tlpdb.xz
