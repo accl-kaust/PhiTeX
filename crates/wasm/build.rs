@@ -1,5 +1,5 @@
-//! The WebAssembly program's memory and stack (wasm32 only): memory at
-//! its maximum from the start, 65535 pages (4 GiB less one page), shared
+//! The WebAssembly program's memory and stack (wasm32 only): with threads
+//! (wasm32-wasip1-threads), memory at its maximum from the start, 65535 pages (4 GiB less one page), shared
 //! with the host's workers (their imports name these limits,
 //! `scripts/wasm-run.mjs`), and the main thread's stack as large as a
 //! native process's (8 MiB). The memory never grows, so V8's race cannot
@@ -15,12 +15,15 @@
 
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
-        for a in [
-            "--initial-memory=4294901760",
-            "--max-memory=4294901760",
-            "-zstack-size=8388608",
-        ] {
-            println!("cargo:rustc-link-arg-bins={a}");
+        println!("cargo:rustc-link-arg-bins=-zstack-size=8388608");
+        // (the memory at its maximum only where threads share it; the
+        // single-threaded build, wasm32-wasip1, has no race: its memory
+        // grows as it needs)
+        let atomics = std::env::var("CARGO_CFG_TARGET_FEATURE").is_ok_and(|f| f.split(',').any(|x| x == "atomics"));
+        if atomics {
+            for a in ["--initial-memory=4294901760", "--max-memory=4294901760"] {
+                println!("cargo:rustc-link-arg-bins={a}");
+            }
         }
     }
 }

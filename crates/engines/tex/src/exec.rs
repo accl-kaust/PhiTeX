@@ -109,15 +109,41 @@ pub fn set_spawn_worker(f: SpawnWorker) {
     let _ = SPAWN.set(f);
 }
 
+/// Whether this target has threads at all: WebAssembly without atomics
+/// (`wasm32-wasip1`, the single-threaded core a browser without shared
+/// memory between threads runs, Firefox's extensions) has none, and
+/// everything runs on the one thread there is.
+pub(crate) const THREADED: bool = !cfg!(all(target_arch = "wasm32", not(target_feature = "atomics")));
+
 /// A thread of the engine's own beside the evaluation, with the workers'
-/// stack ([`phitex_defuse::WORKER_STACK`]), not std's default.
-pub(crate) fn thread<T: Send + 'static>(
-    f: impl FnOnce() -> T + Send + 'static,
-) -> std::thread::JoinHandle<T> {
-    std::thread::Builder::new()
-        .stack_size(phitex_defuse::WORKER_STACK)
-        .spawn(f)
-        .expect("a thread")
+/// stack ([`phitex_defuse::WORKER_STACK`]), not std's default; on a
+/// target without threads ([`THREADED`]), `f` runs here, at once.
+pub(crate) fn thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Beside<T> {
+    if !THREADED {
+        return Beside::Done(f());
+    }
+    Beside::Thread(
+        std::thread::Builder::new()
+            .stack_size(phitex_defuse::WORKER_STACK)
+            .spawn(f)
+            .expect("a thread"),
+    )
+}
+
+/// [`thread`]'s work: running beside, or done in place.
+pub(crate) enum Beside<T> {
+    Thread(std::thread::JoinHandle<T>),
+    Done(T),
+}
+
+impl<T> Beside<T> {
+    /// Its result, once the thread has ended ([`std::thread::JoinHandle::join`]).
+    pub(crate) fn join(self) -> std::thread::Result<T> {
+        match self {
+            Beside::Thread(h) => h.join(),
+            Beside::Done(t) => Ok(t),
+        }
+    }
 }
 
 /// A clock for the executor's counters: nanoseconds from some fixed
@@ -499,7 +525,9 @@ pub fn cpus() -> usize {
 
 /// Whether this target can run workers at all.
 fn threads_possible() -> bool {
-    if cfg!(target_arch = "wasm32") {
+    if !THREADED {
+        false
+    } else if cfg!(target_arch = "wasm32") {
         cfg!(target_feature = "atomics") && cfg!(feature = "rayon") && SPAWN.get().is_some()
     } else {
         true

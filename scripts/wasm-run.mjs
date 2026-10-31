@@ -108,6 +108,14 @@ if (isMainThread) {
     process.exit(2);
   }
   const module = new WebAssembly.Module(readFileSync(wasmPath));
+  // (the single-threaded build, wasm32-wasip1: its own memory, no threads)
+  if (!WebAssembly.Module.imports(module).some((i) => i.kind === "memory")) {
+    const wasi = wasiFor(["phitex-wasm", ...rest], { ...process.env });
+    const instance = new WebAssembly.Instance(module, wasi.getImportObject());
+    const code = wasi.start(instance);
+    if (process.env.PHITEX_WASM_HEAP) heapReport(instance.exports.memory);
+    process.exit(code ?? 0);
+  }
   const memory = new WebAssembly.Memory({
     initial: PAGES_INITIAL,
     maximum: PAGES_MAX,

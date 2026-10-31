@@ -20,10 +20,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo=$PWD
-wasm=$repo/target/wasm32-wasip1-threads/fastdev/phitex-wasm.wasm
+# (WASM_TARGET=wasm32-wasip1: the single-threaded build, for a browser
+# without shared memory between threads, Firefox's extensions)
+target=${WASM_TARGET:-wasm32-wasip1-threads}
+wasm=$repo/target/$target/fastdev/phitex-wasm.wasm
 
 build() {
-  cargo build --profile fastdev --target wasm32-wasip1-threads -p phitex-wasm
+  cargo build --profile fastdev --target "$target" -p phitex-wasm
 }
 
 run() {

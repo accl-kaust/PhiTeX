@@ -242,9 +242,10 @@ fn bytes(s: &str) -> Vec<u8> {
 
 #[allow(clippy::too_many_lines, reason = "one job, in order")]
 fn main() {
-    // (WebAssembly: std's threads are the host's workers; natively the
-    // engine starts its own)
-    if cfg!(target_family = "wasm") {
+    // (WebAssembly with threads: std's threads are the host's workers;
+    // natively the engine starts its own; wasm32-wasip1, no atomics: none
+    // at all, everything on this one thread)
+    if cfg!(all(target_family = "wasm", target_feature = "atomics")) {
         phitex_tex::set_spawn_worker(Box::new(|f| {
             std::thread::Builder::new()
                 .stack_size(8 << 20)

@@ -5059,7 +5059,7 @@ impl Options {
 
 /// The check of a format read from the cache ([`cached_prelude`]),
 /// running.
-static FORMAT_CHECK: Mutex<Option<std::thread::JoinHandle<bool>>> = Mutex::new(None);
+static FORMAT_CHECK: Mutex<Option<crate::exec::Beside<bool>>> = Mutex::new(None);
 
 /// Whether the format read from the cache, if one was, still has every
 /// file it read as the finder gives it now.
