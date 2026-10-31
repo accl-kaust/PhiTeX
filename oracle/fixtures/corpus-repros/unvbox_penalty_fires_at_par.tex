@@ -1,0 +1,11 @@
+% A forced penalty an \unvbox puts on the contributions (no build_page,
+% TeX §1110) fires at the next paragraph's start (new_graf, §1091):
+% the routine's \global\hsize is the paragraph's (revtex's ltxgrid).
+\hsize=300pt
+\output={\ifnum\outputpenalty=-10002 \global\hsize=100pt \unvbox255 \else\shipout\box255 \fi}
+\message{[before \the\hsize]}
+\setbox2\vbox{\hbox{}\penalty-10002}\unvbox2
+\message{[after unvbox \the\hsize]}
+Text \message{[in par \the\hsize]}of a paragraph.\par
+\message{[after par \the\hsize]}
+\end

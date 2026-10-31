@@ -137,8 +137,19 @@ impl Run<'_, '_> {
         // (a rest of blank input makes no node: the piece runs it, spaces
         // and an empty line's `\par` in vertical mode, §1070)
         let open_cut = self.open_span() && self.cuttable_open();
+        // (a paragraph's start where a page is made to fire: a penalty of
+        // `eject_penalty` or less contributed since the candidate before,
+        // pending until §1091's `build_page`; the routine runs there and
+        // the rest of the paragraph reads what it sets (ltxgrid's
+        // `\onecolumngrid`: a `\global\hsize` its routine sets on a
+        // penalty an `\unvbox` left): the rest is a node after the page's
+        // finisher, as at a forced candidate outside a paragraph)
+        let forced_par = newgraf
+            && restartable
+            && (self.forced_since(self.cand_marks.last().map_or(0, |m| m.contribs))
+                || (self.cand_marks.is_empty() && self.forced_pending_before()?));
         let cuttable = fresh
-            && ((can && !self.rest_blank()?)
+            && (((can || forced_par) && !self.rest_blank()?)
                 || ((restartable || open_cut) && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,
@@ -184,6 +195,34 @@ impl Run<'_, '_> {
             return Err(Halt::Cut);
         }
         Ok(())
+    }
+
+    /// Whether the pieces before this run left a page made to fire
+    /// pending on the main list: their last item a penalty of
+    /// `eject_penalty` or less contributed after the page builder's last
+    /// call (§1005; an `\unvbox`'s, which calls no `build_page`, §1110),
+    /// so this run's first candidate fires it. Read as the main list's
+    /// tail projection ([`crate::val::tail_projection`]: a penalty whole,
+    /// a box as its kind) and the count since that call.
+    fn forced_pending_before(&mut self) -> R<bool> {
+        use crate::build::{MAIN_LAST, MAIN_SINCE};
+        let v = self.v;
+        let last = self.cx.read_path(
+            v.field(MAIN_LAST),
+            phitex_defuse::PathId::of_proj(self.ops.tail_proj),
+        )?;
+        let Some(last) = last.filter(|&x| x != ValueId::UNIT) else {
+            return Ok(false);
+        };
+        if nodes::tag(v, last) != nodes::T_PENALTY
+            || list_of(v, last)
+                .get(1)
+                .is_none_or(|&p| int_of(v, p) > i64::from(phitex_typeset::linebreak::EJECT_PENALTY))
+        {
+            return Ok(false);
+        }
+        let since = self.eng_read(v.field(MAIN_SINCE))?;
+        Ok(since.is_some_and(|n| int_of(v, n) != 0))
     }
 
     /// What the builder reads of eqtb at candidate `k` noted on the main

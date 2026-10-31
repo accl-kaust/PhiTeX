@@ -204,6 +204,11 @@ repro!(
     "microtype with every option under pdfLaTeX: expansion, protrusion, tracking (\\textls, \\letterspacefont), kerning (\\pdfprependkern, \\pdfappendkern: French punctuation, auto kerns in the main loop) and spacing (\\pdfadjustinterwordglue, \\knbscode...), in two columns"
 );
 
+repro!(
+    unvbox_penalty_fires_at_par,
+    "research corpus (revtex-aps, ltxgrid's \\do@output@MVL): a forced penalty an \\unvbox puts on the contributions (§1110: no build_page) fires at the next paragraph's start (new_graf's build_page, §1091), so the routine's \\global\\hsize is that paragraph's; PhiTeX's paragraph-start candidate was not cut when the penalty came from an earlier piece, and the paragraph was set at the old width (revtex's title at the column's width)"
+);
+
 /// The research corpus's amsbook at -j4 (2 pages more than -j1 in about
 /// half the builds): the piece that ends a title page whose `\topskip`
 /// `\@maketitle` set in a group puts the page parameters on the main
