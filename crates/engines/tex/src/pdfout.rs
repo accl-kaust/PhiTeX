@@ -2796,6 +2796,10 @@ pub(crate) fn page_allocs(
     }
     let mut dests: Vec<ValueId> = Vec::new();
     let mut annots = 0i64;
+    // (the images the page shows: each written after the page by the
+    // first page that shows it, unless `\immediate` wrote it, with what
+    // writing it makes, [`crate::pdfprim`]'s `ximage_own_info`)
+    let mut images: Vec<ValueId> = Vec::new();
     for &w in side_whats {
         let xs = list_of(v, w);
         match xs.first().map(|&k| str_of(v, k)).as_deref() {
@@ -2805,6 +2809,15 @@ pub(crate) fn page_allocs(
                 }
             }
             Some("pdf:annot" | "pdf:startlink") => annots += 1,
+            Some("pdf:refximage") => {
+                let n = xs.get(1).and_then(|&x| v.as_int(x)).unwrap_or(0);
+                if let Some(x) = r.get(&format!("pdf:ximage:{n}"))? {
+                    let at = |k: usize| crate::val::int_at(v, x, k);
+                    if at(12) == 0 {
+                        images.push(v.list(vec![v.int(n), v.int(at(10)), v.int(at(11))]));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2872,6 +2885,7 @@ pub(crate) fn page_allocs(
         brk,
         v.list(forms),
         rt_forms,
+        v.list(images),
     ]);
     if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
         eprintln!("alloc: page (node {}): {}", r.cx.node().raw(), v.render(e));
@@ -3356,6 +3370,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     let mut defined: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_ship: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_forms: BTreeSet<ValueId> = BTreeSet::new();
+    let mut seen_images: BTreeSet<i64> = BTreeSet::new();
     let mut ms = MarkState::default();
     for (pages, e) in v.seq_to_vec(range).into_iter().enumerate() {
         let xs = list_of(v, e);
@@ -3424,11 +3439,22 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         // thread or page a piece's action or a bead names first)
         let made = ms.page(v, &l(9), &mut seen_dest);
         out.objects += made.objects;
+        // (the images first shown here, written after the page: what
+        // writing each makes, `pdf_write_image`)
+        let mut images_os = 0i64;
+        for x in l(15) {
+            let ys = list_of(v, x);
+            let y = |k: usize| ys.get(k).and_then(|&a| v.as_int(a)).unwrap_or(0);
+            if seen_images.insert(y(0)) {
+                out.objects += y(1);
+                images_os += y(2);
+            }
+        }
         // (the read-time writes into object streams before the page
         // count toward a stream's 100; a link piece's, a bead
         // rectangle's and a destination's object go into one too)
         let os = if i(4) > 0 {
-            i(4) + made.compressible + dests_written + forms_written
+            i(4) + made.compressible + dests_written + forms_written + images_os
         } else {
             0
         };
@@ -3461,6 +3487,15 @@ pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
     let range = allocs_range(r, "page_offset")?;
     let f = fold_allocs(v, range);
     let (fonts, dests) = (r.get(RT_FONTS)?, r.get(RT_DESTS)?);
+    if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
+        eprintln!(
+            "alloc-offset: node {}: {} pages' records, {} objects, {} new read-time",
+            r.cx.node().raw(),
+            v.seq_to_vec(range).len(),
+            f.objects,
+            rt_new(v, &f, fonts, dests)
+        );
+    }
     Ok(f.objects + rt_new(v, &f, fonts, dests))
 }
 

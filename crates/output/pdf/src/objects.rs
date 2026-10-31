@@ -114,6 +114,23 @@ impl PdfState {
         self.sys_obj_ptr()
     }
 
+    /// The objects numbered after object `n` (an image's written after
+    /// its own, [`PdfState::write_ximage`]): how many, object streams
+    /// apart, and how many of them went into an object stream.
+    #[must_use]
+    pub fn objects_after(&self, n: usize) -> (usize, usize) {
+        let mut streams = std::collections::BTreeSet::new();
+        let mut in_streams = 0;
+        for o in self.objs.iter().skip(n + 1) {
+            if o.os_idx >= 0 && o.offset > 0 {
+                in_streams += 1;
+                streams.insert(o.offset);
+            }
+        }
+        let after = self.objs.len().saturating_sub(n + 1);
+        (after - streams.len(), in_streams)
+    }
+
     pub(crate) fn sys_obj_ptr(&self) -> usize {
         self.objs.len() - 1
     }

@@ -40,6 +40,12 @@ fn build_j(name: &str, threads: usize) -> (Vec<u8>, String) {
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let tex = format!("{name}.tex");
     std::fs::copy(fixtures().join(&tex), dir.join(&tex)).expect("the repro");
+    // (the files it reads beside it: `NAME/`'s)
+    if let Ok(files) = std::fs::read_dir(fixtures().join(name)) {
+        for f in files.flatten() {
+            std::fs::copy(f.path(), dir.join(f.file_name())).expect("a file of the repro");
+        }
+    }
     let out = Command::new(env!("CARGO_BIN_EXE_phitex"))
         .args([
             "build",
@@ -220,6 +226,11 @@ repro!(
 repro!(
     unvbox_penalty_fires_in_cond,
     "research corpus (revtex-aps's widetext equation): the forced penalty ltxgrid's \\unvbox left fires at the next paragraph's start inside a conditional too (amsmath's display begins in \\ifmmode's \\else): the routine's \\global\\hsize is the display's width; PhiTeX cut a paragraph's start only outside conditionals, and the equation was set at the column's width"
+);
+
+repro!(
+    pdf_image_objects_counted,
+    "research corpus (asmeconf: hyperxmp's /Metadata, the /OutputIntents and /ViewerPreferences objects numbered 336, 353 and 354, each the number of a destination too, a broken file): the objects writing an included PDF page makes after the page that shows it first (pdf_write_image: its fonts, streams and resources copied) are counted where a \\pdfobj after it is numbered; the pages' fold of allocations left them out"
 );
 
 /// The research corpus's amsbook at -j4 (2 pages more than -j1 in about

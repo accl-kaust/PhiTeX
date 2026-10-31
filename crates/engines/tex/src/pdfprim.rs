@@ -1023,6 +1023,12 @@ fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
         let off = crate::pdfout::page_offset(r)?;
         crate::pdfout::bump_cell(r)?;
         let n = before + r.rt_made + off;
+        if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
+            eprintln!(
+                "alloc-obj: node {me} number {n}: read-time before {before}, this run's {}, the pages' {off}",
+                r.rt_made
+            );
+        }
         crate::pdfout::note_read_time(r, n);
         return Ok(n);
     }
@@ -3278,13 +3284,14 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     } else {
         None
     };
-    if let Some((_, i)) = &got {
+    if let Some((_, i, _, _)) = &got {
         w = i.width;
         h = i.height;
         d = i.depth;
         pages = i.pages;
         depth = i.colordepth;
     }
+    let (wobjs, wos) = got.as_ref().map_or((0, 0), |g| (g.2, g.3));
     let n = or_alloc(r, got.and_then(|g| g.0))?;
     // (pdfTeX's writepng, reading a PNG with an alpha channel for PDF 1.4
     // and later after the image's object: the document's transparency
@@ -3294,6 +3301,17 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
         if (major > 1 || minor >= 4) && r.get("pdf:pnggroup")?.is_none() {
             let g = alloc_obj(r)?;
             r.set("pdf:pnggroup", v.int(g), true);
+        }
+    }
+    // (`\immediate`: written now, its objects read-time ones; else
+    // written by the first page that uses it, counted by the pages'
+    // fold, [`crate::pdfout::page_allocs`])
+    if immediate {
+        for k in 0..wobjs {
+            let _ = alloc_obj(r)?;
+            if k < wos {
+                crate::pdfout::os_write(r)?;
+            }
         }
     }
     r.set(
@@ -3309,6 +3327,9 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
             v.int(0),
             v.int(i64::from(x)),
             v.int(i64::from(y)),
+            v.int(wobjs),
+            v.int(wos),
+            v.int(i64::from(immediate)),
         ]),
         true,
     );
@@ -3341,17 +3362,42 @@ fn image_params(st: &mut phitex_pdf::PdfState, ps: &[i32]) {
 
 /// What TeX reads of an image (its size, pages, color depth): the
 /// image's own, read on a writer of its own (its number is the link's,
-/// `pdfout::command`).
+/// `pdfout::command`); and what writing it makes after its own object
+/// (`pdf_write_image`: an included PDF page's objects copied, a PNG's
+/// soft mask), how many and how many of them in object streams, under
+/// the document's object compression (`ocl`: `\pdfobjcompresslevel`,
+/// `\pdfmajorversion`, `\pdfminorversion`), for the pages' count of
+/// objects ([`crate::pdfout::ALLOCS`]).
 fn ximage_own_info(
     spec: &phitex_pdf::ImageSpec,
     set: impl Fn(&mut phitex_pdf::PdfState),
-) -> Result<phitex_pdf::XImageInfo, phitex_pdf::PdfError> {
+    ocl: (i32, i32, i32),
+    fonts: &crate::pdfout::Fonts,
+) -> Result<(phitex_pdf::XImageInfo, i64, i64), phitex_pdf::PdfError> {
     let mut st = phitex_pdf::PdfState::new(phitex_pdf::PdfParams::default());
     set(&mut st);
-    st.ximage(spec.clone()).and_then(|n| {
-        st.ximage_info(n)
-            .ok_or_else(|| phitex_pdf::PdfError::Unsupported("image without its data".to_owned()))
-    })
+    {
+        let pm = st.params_mut();
+        pm.obj_compress_level = ocl.0;
+        pm.major_version = ocl.1;
+        pm.minor_version = ocl.2;
+    }
+    let n = st.ximage(spec.clone())?;
+    let info = st
+        .ximage_info(n)
+        .ok_or_else(|| phitex_pdf::PdfError::Unsupported("image without its data".to_owned()))?;
+    // (from the objects reading made on: a PNG's transparency group is
+    // the read's, counted where it is read)
+    let before = st.objects_numbered();
+    let (objs, os) = match st.write_ximage(n, fonts) {
+        Ok(()) => st.objects_after(before),
+        Err(_) => (0, 0),
+    };
+    Ok((
+        info,
+        i64::try_from(objs).unwrap_or(0),
+        i64::try_from(os).unwrap_or(0),
+    ))
 }
 
 /// What `\\pdfximage` scanned.
@@ -3372,7 +3418,7 @@ struct XImageScan {
 fn ximage_step(
     r: &mut Run<'_, '_>,
     x: XImageScan,
-) -> R<Option<(Option<usize>, phitex_pdf::XImageInfo)>> {
+) -> R<Option<(Option<usize>, phitex_pdf::XImageInfo, i64, i64)>> {
     let v = r.v;
     let fv = r.file(&x.name)?.unwrap_or(ValueId::UNIT);
     let mut ps = Vec::new();
@@ -3432,7 +3478,16 @@ fn ximage_step(
     let immediate = x.immediate;
     let set = move |st: &mut phitex_pdf::PdfState| image_params(st, &ps);
     crate::pdfout::note_image_files(r, &spec, &set)?;
-    let i = match ximage_own_info(&spec, &set) {
+    let ocl = (
+        i32::try_from(r.param("pdfobjcompresslevel")?).unwrap_or(0),
+        i32::try_from(r.param("pdfmajorversion")?).unwrap_or(1),
+        i32::try_from(r.param("pdfminorversion")?).unwrap_or(4),
+    );
+    // (the fonts writing it replaces an included PDF's by, as the
+    // link's writer has them: `pdfout::command`'s)
+    let mut fs = crate::pdfout::fonts_for(r, &[], false)?;
+    crate::pdfout::image_fonts(r, &mut fs)?;
+    let (i, wobjs, wos) = match ximage_own_info(&spec, &set, ocl, &fs) {
         Ok(i) => i,
         Err(e) => {
             r.log("error", &format!("pdfTeX error: {e}"))?;
@@ -3459,7 +3514,7 @@ fn ximage_step(
     if let Some(e) = got.as_ref().and_then(|g| g.err.clone()) {
         r.log("error", &format!("pdfTeX error: {e}"))?;
     }
-    Ok(Some((num_of(got), i)))
+    Ok(Some((num_of(got), i, wobjs, wos)))
 }
 
 /// `\\pdfxform` as a step (pdfTeX §1357): the box goes to the writer,
