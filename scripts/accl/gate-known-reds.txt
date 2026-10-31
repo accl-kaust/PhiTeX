@@ -16,3 +16,4 @@ phitex-tex--fatal::a_read_on_waits_for_the_text_before_it	1.61, speed: at -j8, 6
 phitex-tex--pages2::a_word_edit_reruns_the_piece_its_finisher_and_the_writers	1.61: a word edit reruns 0 finishers where the test expects 1 (the run accounting; each edit's PDF equals a cold build in the gate's edit histories), red before the alpha (77044)
 phitex-tex--xetex::ini_features	the CI image has not the test's font (Amiri: "Font not loadable"), red before the alpha (77044); the image gets the font after the alpha
 phitex-tex--xetex::ini_bidi	the CI image has not the test's font (Amiri), as ini_features
+phitex-defuse--block_heads::a_blocks_definers_run_before_the_readers_they_re_ask	speed (recorded, not gated: the user's 2026-10-31 decision): wasted reader runs at -j8 on a 4-core runner, 421 for 200 readers against the bound 400 (GitHub gate run 41201269355); every result exact
