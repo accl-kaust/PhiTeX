@@ -160,8 +160,8 @@
    "class": "acmart (sigconf), XeLaTeX",
    "engine": "xelatex",
    "dir": "acmart",
-   "main": "sample-sigconf-xelatex.tex",
-   "path": "acmart/sample-sigconf-xelatex.tex",
+   "main": "xe-sample-sigconf-xelatex.tex",
+   "path": "acmart/xe-sample-sigconf-xelatex.tex",
    "source": {
     "texlive_package": "acmart",
     "texlive_files": [
@@ -169,7 +169,8 @@
     ],
     "ctan": "https://ctan.org/pkg/acmart"
    },
-   "licence": "lppl1.3"
+   "licence": "lppl1.3",
+   "note": "; a wrapper (xe-<sample>.tex) pins hyperxmp's dates and InstanceID to SOURCE_DATE_EPOCH: under XeTeX hyperxmp seeds them from the .log file's modification time, so TeX Live's xelatex never settles (each pass's PDF differs); the sample is unchanged"
   },
   {
    "id": "llncs",
@@ -726,8 +727,8 @@
    "class": "acmart (sigconf)",
    "engine": "xelatex",
    "dir": "acmart",
-   "main": "sample-sigconf.tex",
-   "path": "acmart/sample-sigconf.tex",
+   "main": "xe-sample-sigconf.tex",
+   "path": "acmart/xe-sample-sigconf.tex",
    "source": {
     "texlive_package": "acmart",
     "texlive_files": [
@@ -740,7 +741,7 @@
     "ctan": "https://ctan.org/pkg/acmart"
    },
    "licence": "lppl1.3",
-   "note": "the same file as acm-sigconf, under XeLaTeX"
+   "note": "the same file as acm-sigconf, under XeLaTeX; a wrapper (xe-<sample>.tex) pins hyperxmp's dates and InstanceID to SOURCE_DATE_EPOCH: under XeTeX hyperxmp seeds them from the .log file's modification time, so TeX Live's xelatex never settles (each pass's PDF differs); the sample is unchanged"
   },
   {
    "id": "ieee-compsoc-xe",
@@ -766,8 +767,8 @@
    "class": "acmart (acmsmall)",
    "engine": "xelatex",
    "dir": "acmart",
-   "main": "sample-acmsmall.tex",
-   "path": "acmart/sample-acmsmall.tex",
+   "main": "xe-sample-acmsmall.tex",
+   "path": "acmart/xe-sample-acmsmall.tex",
    "source": {
     "texlive_package": "acmart",
     "texlive_files": [
@@ -776,7 +777,7 @@
     "ctan": "https://ctan.org/pkg/acmart"
    },
    "licence": "lppl1.3",
-   "note": "the same file as acm-acmsmall, under XeLaTeX"
+   "note": "the same file as acm-acmsmall, under XeLaTeX; a wrapper (xe-<sample>.tex) pins hyperxmp's dates and InstanceID to SOURCE_DATE_EPOCH: under XeTeX hyperxmp seeds them from the .log file's modification time, so TeX Live's xelatex never settles (each pass's PDF differs); the sample is unchanged"
   },
   {
    "id": "acm-sigplan-xe",
@@ -784,8 +785,8 @@
    "class": "acmart (sigplan)",
    "engine": "xelatex",
    "dir": "acmart",
-   "main": "sample-sigplan.tex",
-   "path": "acmart/sample-sigplan.tex",
+   "main": "xe-sample-sigplan.tex",
+   "path": "acmart/xe-sample-sigplan.tex",
    "source": {
     "texlive_package": "acmart",
     "texlive_files": [
@@ -794,7 +795,7 @@
     "ctan": "https://ctan.org/pkg/acmart"
    },
    "licence": "lppl1.3",
-   "note": "the same file as acm-sigplan, under XeLaTeX"
+   "note": "the same file as acm-sigplan, under XeLaTeX; a wrapper (xe-<sample>.tex) pins hyperxmp's dates and InstanceID to SOURCE_DATE_EPOCH: under XeTeX hyperxmp seeds them from the .log file's modification time, so TeX Live's xelatex never settles (each pass's PDF differs); the sample is unchanged"
   },
   {
    "id": "acm-sigconf-biblatex-xe",
@@ -802,8 +803,8 @@
    "class": "acmart (sigconf) + biblatex",
    "engine": "xelatex",
    "dir": "acmart",
-   "main": "sample-sigconf-biblatex.tex",
-   "path": "acmart/sample-sigconf-biblatex.tex",
+   "main": "xe-sample-sigconf-biblatex.tex",
+   "path": "acmart/xe-sample-sigconf-biblatex.tex",
    "source": {
     "texlive_package": "acmart",
     "texlive_files": [
@@ -812,7 +813,7 @@
     "ctan": "https://ctan.org/pkg/acmart"
    },
    "licence": "lppl1.3",
-   "note": "the same file as acm-sigconf-biblatex, under XeLaTeX"
+   "note": "the same file as acm-sigconf-biblatex, under XeLaTeX; a wrapper (xe-<sample>.tex) pins hyperxmp's dates and InstanceID to SOURCE_DATE_EPOCH: under XeTeX hyperxmp seeds them from the .log file's modification time, so TeX Live's xelatex never settles (each pass's PDF differs); the sample is unchanged"
   },
   {
    "id": "llncs-xe",
@@ -884,28 +885,6 @@
    },
    "licence": "lppl1.3",
    "note": "the same file as jmlr-pmlr, under XeLaTeX"
-  },
-  {
-   "id": "asmeconf-xe",
-   "field": "mechanical engineering",
-   "class": "asmeconf",
-   "engine": "xelatex",
-   "dir": "asmeconf",
-   "main": "asmeconf-template.tex",
-   "path": "asmeconf/asmeconf-template.tex",
-   "source": {
-    "texlive_package": "asmeconf",
-    "texlive_files": [
-     "doc/latex/asmeconf/asmeconf-template.tex",
-     "doc/latex/asmeconf/asmeconf-sample.bib",
-     "doc/latex/asmeconf/sample-figure-1.pdf",
-     "doc/latex/asmeconf/sample-figure-2a.pdf",
-     "doc/latex/asmeconf/sample-figure-2b.pdf"
-    ],
-    "ctan": "https://ctan.org/pkg/asmeconf"
-   },
-   "licence": "mit",
-   "note": "the same file as asmeconf, under XeLaTeX"
   },
   {
    "id": "revtex-aps-xe",
@@ -1199,24 +1178,6 @@
    "note": "the same file as memoir-thesis, under XeLaTeX"
   },
   {
-   "id": "beamer-ornate-xe",
-   "field": "slides (any field)",
-   "class": "beamer",
-   "engine": "xelatex",
-   "dir": "beamer-ornate",
-   "main": "conference-ornate-20min.en.tex",
-   "path": "beamer-ornate/conference-ornate-20min.en.tex",
-   "source": {
-    "texlive_package": "beamer",
-    "texlive_files": [
-     "doc/latex/beamer/solutions/conference-talks/conference-ornate-20min.en.tex"
-    ],
-    "ctan": "https://ctan.org/pkg/beamer"
-   },
-   "licence": "lppl1.3c gpl2+ fdl",
-   "note": "the same file as beamer-ornate, under XeLaTeX"
-  },
-  {
    "id": "common-times-xe",
    "field": "common content",
    "class": "article + mathptmx, helvet, courier",
@@ -1258,5 +1219,9 @@
    "licence": "AGPL-3.0-only (this repository's)",
    "note": "the same file as common-palatino, under XeLaTeX"
   }
- ]
+ ],
+ "not_under_xelatex": {
+  "asmeconf": "its template under TeX Live's xelatex: 130 fontspec errors (asmeconf's XeLaTeX path wants fonts TeX Live does not ship)",
+  "beamer-ornate": "conference-ornate-20min.en.tex loads inputenc with latin1: \"inputenc is not designed for xetex or luatex\" under TeX Live's xelatex"
+ }
 }

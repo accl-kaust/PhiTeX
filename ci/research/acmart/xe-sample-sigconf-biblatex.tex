@@ -1,0 +1,14 @@
+% !TEX program = xelatex
+% The research corpus (ci/research.json): TeX Live's sample-sigconf-biblatex.tex under
+% XeLaTeX. hyperxmp (loaded by acmart) takes its XMP dates and the seed of
+% its InstanceID from the .log file's modification time under XeTeX
+% (\filemoddate: there is no \pdfcreationdate), which SOURCE_DATE_EPOCH
+% does not fix, so TeX Live's own xelatex never settles on one PDF (each
+% pass's differs). They are pinned here to SOURCE_DATE_EPOCH
+% (1758800000, 2025-09-25T11:33:20Z); the sample itself is unchanged.
+\AtBeginDocument{\hypersetup{%
+  pdfcreationdate={D:20250925113320Z},
+  pdfmoddate={D:20250925113320Z},
+  pdfmetadatetime={2025-09-25T11:33:20Z},
+  pdfinstanceid={uuid:00000000-0000-4000-8000-000000000000}}}
+\input{sample-sigconf-biblatex}

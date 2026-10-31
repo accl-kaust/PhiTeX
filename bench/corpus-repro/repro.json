@@ -16,13 +16,6 @@
    "path": "devnull/devnull.tex"
   },
   {
-   "id": "bookmark-neg",
-   "engine": "pdflatex",
-   "dir": "bookmark-neg",
-   "main": "bookmark-neg.tex",
-   "path": "bookmark-neg/bookmark-neg.tex"
-  },
-  {
    "id": "bibtex8-refsection",
    "engine": "pdflatex",
    "dir": "bibtex8-refsection",
@@ -44,13 +37,6 @@
    "path": "achemso-bib/achemso-bib.tex"
   },
   {
-   "id": "natbib-crossref-dest",
-   "engine": "pdflatex",
-   "dir": "natbib-crossref-dest",
-   "main": "natbib-crossref-dest.tex",
-   "path": "natbib-crossref-dest/natbib-crossref-dest.tex"
-  },
-  {
    "id": "pdftexbanner",
    "engine": "pdflatex",
    "dir": "pdftexbanner",
@@ -58,11 +44,18 @@
    "path": "pdftexbanner/pdftexbanner.tex"
   },
   {
-   "id": "lineno-par",
+   "id": "font-dvi-palladio",
    "engine": "pdflatex",
-   "dir": "lineno-par",
-   "main": "lineno-par.tex",
-   "path": "lineno-par/lineno-par.tex"
+   "dir": "font-dvi-palladio",
+   "main": "font-dvi-palladio.tex",
+   "path": "font-dvi-palladio/font-dvi-palladio.tex"
+  },
+  {
+   "id": "font-dvi-bera",
+   "engine": "pdflatex",
+   "dir": "font-dvi-bera",
+   "main": "font-dvi-bera.tex",
+   "path": "font-dvi-bera/font-dvi-bera.tex"
   }
  ]
 }
