@@ -622,6 +622,19 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
             .file_name()
             .map_or(file.clone(), |f| f.to_string_lossy().into_owned());
     }
+    let files = match (o.files, &cfg.files) {
+        (Some(f), _) => f,
+        (None, Some(f)) => tex::Files::of(f)?,
+        (None, None) => tex::Files::TexLive,
+    };
+    // (TeX Live asked for, none here: said, with the way to Shelf; never
+    // a switch to it on our own, one source a run)
+    if files == tex::Files::TexLive && !tex::has_texlive() {
+        return Err("no TeX Live found on this machine (kpathsea finds no texmf.cnf); \
+             PhiTeX can fetch TeX's files from Shelf instead: phitex config files shelf \
+             (or --shelf for this run)"
+            .to_owned());
+    }
     Ok(Target {
         file,
         engine,
@@ -634,11 +647,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
         cache_limit: cfg.cache_limit,
-        files: match (o.files, &cfg.files) {
-            (Some(f), _) => f,
-            (None, Some(f)) => tex::Files::of(f)?,
-            (None, None) => tex::Files::TexLive,
-        },
+        files,
         warnings: cfg.warnings,
     })
 }

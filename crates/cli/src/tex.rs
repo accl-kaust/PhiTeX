@@ -41,6 +41,12 @@ pub fn kpse(progname: &str, engine: &str) -> Kpse {
     Kpse::new(&dir, progname, engine)
 }
 
+/// Whether this machine has a TeX Live kpathsea finds (a `texmf.cnf`
+/// naming `TEXMF`), as [`kpse`] looks for it.
+pub fn has_texlive() -> bool {
+    kpse("pdftex", "pdftex").var_value("TEXMF").is_some()
+}
+
 /// [`fingerprint`] of the file at `p`, reading only what it needs.
 pub fn fingerprint_file(p: &std::path::Path) -> Option<u64> {
     use std::io::{Read, Seek, SeekFrom};
