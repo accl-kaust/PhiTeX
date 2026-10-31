@@ -1,0 +1,13 @@
+% revtex4-2's bibliography: apsrev4-2.bst and the control entry revtex
+% writes during the run (<job>Notes.bib, first in \bibdata) and a
+% footnote that becomes a note in the bibliography. PhiTeX's revtex
+% samples come out with fewer pages (apssamp 6 of 7, aipsamp 7 of 9).
+\documentclass[aps,prl,twocolumn]{revtex4-2}
+\begin{document}
+\title{A Title}
+\author{A. Author}
+\affiliation{A University}
+\maketitle
+Text cites \cite{epr}.\footnote{A note that revtex puts in the bibliography.}
+\bibliography{revtex-bib}
+\end{document}

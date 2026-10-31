@@ -1,0 +1,8 @@
+% \IfFileExists{/dev/null}: true in TeX Live (thuthesis decides the system
+% is unix by it, and so the Fandol fontset); PhiTeX: false (thuthesis
+% then takes the Windows fontset: "Font not loadable").
+\documentclass{article}
+\begin{document}
+/dev/null: \IfFileExists{/dev/null}{exists}{does not exist}.
+null: \IfFileExists{null:}{exists}{does not exist}.
+\end{document}

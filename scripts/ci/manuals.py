@@ -250,6 +250,8 @@ def loop(run_dir, engine_cmd, tools, environ, job, base, inputs_ist, log):
         if new == state:
             res["settled"] = True
             break
+        # (the files the last pass changed: what keeps a job from settling)
+        res["changed"] = sorted(k for k in set(new) | set(state) if new.get(k) != state.get(k))
         state = new
     else:
         res["settled"] = False
@@ -354,7 +356,7 @@ def oracle_one(doc, c, cache, new_cache=None):
         elif not pdf.exists():
             res.update(status="excluded", reason="the oracle fails: " + why_failed(run_dir, job, run_dir / f"term-pass{r['passes']}.txt"))
         elif not r.get("settled"):
-            res.update(status="excluded", reason=f"the oracle does not settle in {MAX_PASSES} passes")
+            res.update(status="excluded", reason=f"the oracle does not settle in {MAX_PASSES} passes (the last pass changed {', '.join(res.get('changed', []))})")
         elif res["errors"]:
             res.update(status="excluded", reason=f"the oracle has errors ({res['errors']}): "
                        + why_failed(run_dir, job, run_dir / f"term-pass{r['passes']}.txt"))

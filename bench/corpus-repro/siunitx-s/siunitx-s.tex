@@ -1,0 +1,11 @@
+% siunitx's S column with a braced header cell: PhiTeX "Extra alignment
+% tab", "Paragraph ended before \__siunitx_table_collect_token:N" (the
+% research corpus's jmlr-pmlr and chem-common); pdflatex builds it.
+\documentclass{article}
+\usepackage{siunitx}
+\begin{document}
+\begin{tabular}{S S}
+{A} & {B} \\
+1.2 & 3.4 \\
+\end{tabular}
+\end{document}

@@ -571,6 +571,9 @@ PY
     # slice of the shard: its documents k, k+n, ... dealt out again); then
     # the users' CLI cold at each -j of GATE_RESEARCH_JOBS against it
     k=$1 n=$2 mode=${3:-}
+    # (GATE_RESEARCH_LIST and _DOC: another list in the same form, as
+    # bench/corpus-repro/repro.json)
+    list=${GATE_RESEARCH_LIST:-ci/research.json} docs=${GATE_RESEARCH_DOC:-ci/research}
     fetched
     bin=$w/bin/cli/rel/phitex
     if [ ! -x "$bin" ]; then
@@ -581,7 +584,7 @@ PY
       P=${GATE_RESEARCH_PAR:-4}
       s0=$(date +%s)
       for ((i = 0; i < P; i++)); do
-        python3 -I scripts/ci/manuals.py oracle --list ci/research.json --doc ci/research --cache "$w/oracle" \
+        python3 -I scripts/ci/manuals.py oracle --list "$list" --doc "$docs" --cache "$w/oracle" \
           --shard "$((k + n * i))/$((n * P))" > "$r/oracle/oracle-$i.txt" 2>&1 &
       done
       wait
@@ -590,14 +593,14 @@ PY
       # the TeX Live PDFs research-shelf.yml compares with)
       cp -a "$w/oracle/." "$r/oracle/"
       s0=$(date +%s)
-      python3 -I scripts/ci/sweep.py run --list ci/research.json --doc ci/research --cache "$w/oracle" --bin "$bin" \
+      python3 -I scripts/ci/sweep.py run --list "$list" --doc "$docs" --cache "$w/oracle" --bin "$bin" \
         --out "$r/research" --shard "$k/$n" --engines pdflatex,xelatex --tools bibtex,biber,makeindex,glossaries \
         --jobs "${GATE_RESEARCH_JOBS:-1,4}" --par "${GATE_RESEARCH_SWEEP_PAR:-1:4,4:1}" --timeout "${GATE_RESEARCH_TIMEOUT:-900}" \
         ${mode:+--$mode} > "$r/sweep.txt" 2>&1 || red "research: the sweep failed: $(tail -1 "$r/sweep.txt")"
       echo "sweep_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
       python3 -I scripts/ci/sweep.py table "$r/research" --json "$r/research/table.json" > "$r/table.txt" 2>&1
       # (each document identical at every -j, else red: verdict.py)
-      python3 -I scripts/ci/verdict.py ci/research.json "$k/$n" "${GATE_RESEARCH_JOBS:-1,4}" "$r/research" \
+      python3 -I scripts/ci/verdict.py "$list" "$k/$n" "${GATE_RESEARCH_JOBS:-1,4}" "$r/research" \
         --prefix "research: " ${mode:+--lane "$mode"} >> "$r/red.txt"
       grep -q . "$r/red.txt" && status=red
     fi
