@@ -99,9 +99,12 @@ impl Run<'_, '_> {
         // (and `\deadcycles` as it leaves it where not 0, a page not
         // shipped: what `\end` reads after it, §1054)
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
+        // (its sealed lines stay sealed: the loop measures them by their
+        // heads, the next page's finisher meets them as it meets its own
+        // pieces' and the writers fill them from their pieces; unsealed,
+        // a page LaTeX's \@specialoutput gives back changed with every
+        // character typed in it, and re-ran the next page's finisher)
         let x = rtn_value(v, v.list(raw), v.list(list), dead);
-        // (what it gives back leaves the run: its sealed lines' lists)
-        let x = self.unseal(x);
         self.cx.define_with(v.field(RTN), x, Locality::Global);
         // (what the page builder folded the next page on, and a miss, it
         // counts where it reads this output, [`Feedback::RoutineGivesBack`])
