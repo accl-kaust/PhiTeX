@@ -551,6 +551,7 @@ impl Run<'_, '_> {
                     // (`othercases`: `check_for_post_char_toks(big_switch)`)
                     if !self.ic_post()? {
                         self.char_space(
+                            md.lid,
                             f,
                             self.cur.cmd == cmd::EX_SPACE,
                             &mut sf,

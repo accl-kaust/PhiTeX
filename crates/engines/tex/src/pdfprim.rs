@@ -129,6 +129,15 @@ const FONT_CODES: [&str; 12] = [
 ];
 const NO_LIG: i32 = 11;
 const TAG: i32 = 5;
+/// `\knbscode`, `\stbscode`, `\shbscode`: a space's width, stretch and
+/// shrink after a character (`adjust_interword_glue`).
+pub(crate) const KN_BS: i32 = 6;
+pub(crate) const ST_BS: i32 = 7;
+pub(crate) const SH_BS: i32 = 8;
+/// `\knbccode`, `\knaccode`: a kern before and after a character
+/// (`get_auto_kern`).
+pub(crate) const KN_BC: i32 = 9;
+pub(crate) const KN_AC: i32 = 10;
 
 const I: i32 = 1100;
 const D: i32 = 1100;
@@ -1872,6 +1881,14 @@ pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
 fn code_field(m: i32, f: i64, c: i32) -> String {
     let name = FONT_CODES[usize::try_from(m).unwrap_or(0).min(11)];
     format!("fcode:{name}:{f}:{c}")
+}
+
+/// Code `m` (one of [`KN_BS`] .. [`KN_AC`], kept by character) of
+/// character `c` of font `f`: 0 where none was given (pdfTeX's
+/// `get_kn_bs_code` and its kin).
+pub(crate) fn char_code(r: &mut Run<'_, '_>, m: i32, f: i64, c: i32) -> R<i32> {
+    let x = r.get(&code_field(m, f, c))?;
+    Ok(x.map_or(0, |x| i32::try_from(int_of(r.v, x)).unwrap_or(0)))
 }
 
 /// The codes of `\lpcode`, `\rpcode` and `\efcode` of font `f`: a

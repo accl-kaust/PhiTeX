@@ -15,6 +15,7 @@ use crate::exec::LockWait as _;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use phitex_defuse::{Effect, Value, ValueId, Values};
+use phitex_typeset::arith::Scaled;
 use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{BoxKind, BoxNode, Disc, GlueKind, KernKind, Ligature, List, Node};
 use phitex_typeset::pack::{PackParams, Spec};
@@ -2506,6 +2507,12 @@ impl Run<'_, '_> {
         // transitions and waiting spaces, each before `out[k]`
         let mut raws: Vec<(usize, ValueId)> = Vec::new();
         let mut cancel_boundary = cancel;
+        // (pdfTeX's `\pdfprependkern` and `\pdfappendkern`, read once)
+        let mut ak = AutoKerns::default();
+        if !self.xe {
+            ak.prepend = self.param("pdfprependkern")? > 0;
+            ak.append = self.param("pdfappendkern")? > 0;
+        }
         // (the space parameters, read once: no command of this loop
         // changes them)
         loop {
@@ -2522,6 +2529,7 @@ impl Run<'_, '_> {
                     let plain = c != cmd::CHAR_GIVEN
                         && c != cmd::CHAR_NUM
                         && !ic
+                        && !ak.on()
                         && self
                             .plain_words(md, f, &view, &mut sf, &mut out, &mut raws, &mut space)?;
                     if plain {
@@ -2551,8 +2559,9 @@ impl Run<'_, '_> {
                                 &view,
                                 u32::try_from(ch).unwrap_or(0),
                                 &mut sf,
-                                &mut out,
+                                (&mut out, &mut raws),
                                 &mut cancel_boundary,
+                                &mut ak,
                             )?;
                         if next {
                             continue;
@@ -2580,6 +2589,7 @@ impl Run<'_, '_> {
                     // (XeTeX's `othercases`: `check_for_post_char_toks`)
                     if !(self.xe && self.ic_post()?) {
                         self.char_space(
+                            md.lid,
                             f,
                             c == cmd::EX_SPACE,
                             &mut sf,
@@ -2641,8 +2651,10 @@ impl Run<'_, '_> {
     /// A space in a run of characters (§1041–§1044): its glue where the
     /// space factor is known (or not needed, `\\ `), else a waiting space
     /// after the factor's transition.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn char_space(
         &mut self,
+        lid: i64,
         f: u32,
         ex: bool,
         sf: &mut i32,
@@ -2650,6 +2662,26 @@ impl Run<'_, '_> {
         raws: &mut Vec<(usize, ValueId)>,
         space: &mut SpaceMemo,
     ) -> R<()> {
+        let adjust = if let Some(a) = space.adjust {
+            a
+        } else {
+            let a = !self.xe && self.param("pdfadjustinterwordglue")? > 0;
+            space.adjust = Some(a);
+            a
+        };
+        if adjust {
+            // pdfTeX's `hmode+spacer`: with `\pdfadjustinterwordglue>0`
+            // every space is a normal one (`append_normal_space`), the
+            // space factor aside, adjusted by the character before it
+            // (`adjust_interword_glue`)
+            let g = self.space_glue_memo(f, 1000, true, space)?;
+            let g = match self.space_char(lid, out)? {
+                Some((cf, c)) => self.adjust_interword_glue(g, cf, c)?,
+                None => g,
+            };
+            out.push(crate::nest::Item::N(g));
+            return Ok(());
+        }
         if ex || *sf >= 0 {
             // the factor is known here (or not needed)
             let normal = ex || *sf == 1000;
@@ -2671,6 +2703,166 @@ impl Run<'_, '_> {
             raws.push((out.len(), p));
         }
         Ok(())
+    }
+
+    /// `get_auto_kern(f, l, r)` (pdfTeX): the kern between characters
+    /// `l` and `r` of font `f` (`None`: `non_char`), `\knaccode` of `l`
+    /// where `\pdfappendkern>0` and `\knbccode` of `r` where
+    /// `\pdfprependkern>0`, in thousandths of the font's quad; none if 0.
+    fn auto_kern(
+        &mut self,
+        ak: &mut AutoKerns,
+        f: u32,
+        l: Option<u32>,
+        r: Option<u32>,
+    ) -> R<Option<Scaled>> {
+        use crate::pdfprim::{KN_AC, KN_BC};
+        let mut w = 0;
+        for (on, m, c) in [(ak.append, KN_AC, l), (ak.prepend, KN_BC, r)] {
+            let Some(c) = c.filter(|_| on) else { continue };
+            let k = if let Some(&k) = ak.codes.get(&(m, c)) {
+                k
+            } else {
+                let k = crate::pdfprim::char_code(
+                    self,
+                    m,
+                    i64::from(f),
+                    i32::try_from(c).unwrap_or(0),
+                )?;
+                ak.codes.insert((m, c), k);
+                k
+            };
+            if k != 0 {
+                let q = if let Some(q) = ak.quad {
+                    q
+                } else {
+                    let q = self.font_dimen(i64::from(f), 6)?;
+                    ak.quad = Some(q);
+                    q
+                };
+                w += phitex_typeset::arith::round_xn_over_d(q, k, 1000);
+            }
+        }
+        Ok((w != 0).then_some(w))
+    }
+
+    /// `pack_lig`'s kern before a ligature of character `cur_l` made
+    /// (`get_auto_kern(main_f, non_char, cur_l)` where
+    /// `\pdfprependkern>0`).
+    fn lig_auto_kern(
+        &mut self,
+        ak: &mut AutoKerns,
+        f: u32,
+        lig_present: bool,
+        cur_l: Option<u32>,
+    ) -> R<Option<Scaled>> {
+        if !(ak.prepend && lig_present && cur_l.is_some()) {
+            return Ok(None);
+        }
+        // (`l` is `non_char`: `\pdfappendkern` adds nothing)
+        self.auto_kern(ak, f, None, cur_l)
+    }
+
+    /// pdfTeX's auto kern `w` appended to list `lid` after this run's
+    /// items `out` (`tail_append`), or before its tail where that is an
+    /// empty discretionary (`insert_before_tail`): in `out`, or on the
+    /// list (its tail taken off, `raws`' deletion, and put back after
+    /// the kern).
+    fn push_auto_kern(
+        &mut self,
+        lid: i64,
+        out: &mut Vec<crate::nest::Item>,
+        raws: &mut Vec<(usize, ValueId)>,
+        w: Scaled,
+    ) -> R<()> {
+        let v = self.v;
+        let empty_disc = |n: &Node| matches!(n, Node::Disc(d) if d.pre.is_empty() && d.post.is_empty() && d.replace.is_empty());
+        let is_empty_disc = |it: &crate::nest::Item| match it {
+            crate::nest::Item::N(n) => empty_disc(n),
+            crate::nest::Item::V(x) => {
+                nodes::tag(v, *x) == nodes::T_DISC
+                    && nodes::decode(v, *x, &mut Side::default()).is_some_and(|n| empty_disc(&n))
+            }
+        };
+        let k = crate::nest::Item::N(Node::Kern(w, KernKind::Auto));
+        if let Some(last) = out.last() {
+            if is_empty_disc(last) {
+                out.insert(out.len() - 1, k);
+            } else {
+                out.push(k);
+            }
+            return Ok(());
+        }
+        let tail = if let Some(l) = self.level_of(lid) {
+            l.list.last_mut().map(|x| x.value(v))
+        } else {
+            self.list_last(lid)?.0
+        };
+        if let Some(t) = tail.filter(|&t| is_empty_disc(&crate::nest::Item::V(t))) {
+            raws.push((0, nodes::marker(v, T_DELETE)));
+            out.push(k);
+            out.push(crate::nest::Item::V(t));
+        } else {
+            out.push(k);
+        }
+        Ok(())
+    }
+
+    /// The character whose codes adjust a space appended to list `lid`
+    /// after this run's items `out` (pdfTeX's `adjust_interword_glue(tail,
+    /// g)`): the tail's, a character or a ligature; at an `auto_kern`,
+    /// the one before it.
+    fn space_char(&mut self, lid: i64, out: &[crate::nest::Item]) -> R<Option<(u32, u16)>> {
+        let v = self.v;
+        let mut kinds: Vec<TailKind> = out.iter().rev().take(2).map(|i| tail_kind(v, i)).collect();
+        let need = match kinds.as_slice() {
+            [] => 2,
+            [TailKind::Auto] => 1,
+            _ => 0,
+        };
+        if need > 0 {
+            if let Some(l) = self.level_of(lid) {
+                kinds.extend(l.list.iter().rev().take(need).map(|i| tail_kind(v, i)));
+            } else {
+                let (items, _) = self.list_items(lid)?;
+                kinds.extend(
+                    items
+                        .iter()
+                        .rev()
+                        .take(need)
+                        .map(|&x| tail_kind(v, &crate::nest::Item::V(x))),
+                );
+            }
+        }
+        Ok(match kinds.as_slice() {
+            [TailKind::Char(f, c), ..] | [TailKind::Auto, TailKind::Char(f, c), ..] => {
+                Some((*f, *c))
+            }
+            _ => None,
+        })
+    }
+
+    /// `adjust_interword_glue` (pdfTeX): space `g` after character `c`
+    /// of font `f`, its width, stretch and shrink changed by the
+    /// character's `\knbscode`, `\stbscode` and `\shbscode`
+    /// (thousandths of the font's quad), its spec a new one.
+    fn adjust_interword_glue(&mut self, g: Node, f: u32, c: u16) -> R<Node> {
+        use crate::pdfprim::{KN_BS, SH_BS, ST_BS, char_code};
+        let fi = i64::from(f);
+        let kn = char_code(self, KN_BS, fi, i32::from(c))?;
+        let st = char_code(self, ST_BS, fi, i32::from(c))?;
+        let sh = char_code(self, SH_BS, fi, i32::from(c))?;
+        if kn == 0 && st == 0 && sh == 0 {
+            return Ok(g);
+        }
+        let Node::Glue(mut gn) = g else { return Ok(g) };
+        let quad = self.font_dimen(fi, 6)?;
+        let part = |k: i32| phitex_typeset::arith::round_xn_over_d(quad, k, 1000);
+        gn.spec.width += part(kn);
+        gn.spec.stretch += part(st);
+        gn.spec.shrink += part(sh);
+        gn.own_spec = true;
+        Ok(Node::Glue(gn))
     }
 
     /// The words of plain characters from `cur` on, each followed by a
@@ -2785,7 +2977,7 @@ impl Run<'_, '_> {
                 cmd: cmd::SPACER,
                 chr: 32,
             };
-            self.char_space(f, false, sf, out, raws, space)?;
+            self.char_space(md.lid, f, false, sf, out, raws, space)?;
             done = true;
             first = None;
         }
@@ -3057,8 +3249,9 @@ impl Run<'_, '_> {
         view: &crate::fonts::View,
         ch: u32,
         sf: &mut i32,
-        out: &mut Vec<crate::nest::Item>,
+        (out, raws): (&mut Vec<crate::nest::Item>, &mut Vec<(usize, ValueId)>),
         cancel_boundary: &mut bool,
+        ak: &mut AutoKerns,
     ) -> R<bool> {
         type Item = LigItem;
         #[derive(Clone, Copy, PartialEq)]
@@ -3068,6 +3261,9 @@ impl Run<'_, '_> {
             Move1,
             Move2,
             Lookahead,
+            /// `main_lig_loop`: pdfTeX's auto kern first.
+            LigK,
+            /// `main_lig_loop+1`.
             Lig,
             MoveLig,
         }
@@ -3114,7 +3310,8 @@ impl Run<'_, '_> {
                       lft_hit: &mut bool,
                       rt_hit: &mut bool,
                       ins_disc: &mut bool,
-                      stack_empty: bool| {
+                      stack_empty: bool,
+                      pk: Option<Scaled>| {
             // §1035
             let Some(cl) = cur_l else { return };
             if out.len() > cur_q
@@ -3146,6 +3343,11 @@ impl Run<'_, '_> {
                     *rt_hit = false;
                 }
                 out.truncate(cur_q);
+                // (pdfTeX's `pack_lig`: the ligature's kern before it,
+                // `\pdfprependkern`)
+                if let Some(w) = pk {
+                    out.push(crate::nest::Item::N(Node::Kern(w, KernKind::Auto)));
+                }
                 out.push(crate::nest::Item::N(Node::Lig(lg)));
                 *lig_present = false;
             }
@@ -3156,7 +3358,20 @@ impl Run<'_, '_> {
                 }
             }
         };
-        let mut at = if *cancel_boundary {
+        // pdfTeX: a kern before the first character
+        // (`get_auto_kern(main_f, non_char, cur_l)`), then `goto
+        // main_loop_move`: no left boundary, `cancel_boundary` as it was
+        let first = if ak.on() {
+            self.auto_kern(ak, f, None, cur_l)?
+        } else {
+            None
+        };
+        if let Some(w) = first {
+            self.push_auto_kern(md.lid, out, raws, w)?;
+        }
+        let mut at = if first.is_some() {
+            L::Move
+        } else if *cancel_boundary {
             *cancel_boundary = false;
             L::Move2
         } else if tfm.bchar_label().is_some() {
@@ -3177,6 +3392,7 @@ impl Run<'_, '_> {
                             || (out.len() > cur_q
                                 && matches!(out.last(), Some(crate::nest::Item::N(Node::Char { ch, .. })) if i32::from(*ch) == hyphen_char)));
                     if busy {
+                        let pk = self.lig_auto_kern(ak, f, lig_present, cur_l)?;
                         wrapup(
                             rt_hit,
                             cur_l,
@@ -3187,6 +3403,7 @@ impl Run<'_, '_> {
                             &mut rt_hit,
                             &mut ins_disc,
                             lig_stack.is_empty(),
+                            pk,
                         );
                     }
                     at = L::Move;
@@ -3233,7 +3450,7 @@ impl Run<'_, '_> {
                     // lookahead, §1039's lookup finding nothing, nothing
                     // to wrap up, §1036's move; the first that is not
                     // plain is left to them)
-                    if lig_stack.is_empty() && !lig_present && !ins_disc && !ic {
+                    if lig_stack.is_empty() && !lig_present && !ins_disc && !ic && !ak.on() {
                         self.plain_letters(
                             md,
                             f,
@@ -3311,7 +3528,7 @@ impl Run<'_, '_> {
                         cur_r = bchar;
                         lig_stack.clear();
                     }
-                    at = L::Lig;
+                    at = L::LigK;
                 }
                 L::MoveLig => {
                     // §1037
@@ -3329,13 +3546,39 @@ impl Run<'_, '_> {
                     lig_present = true;
                     if let Some(t) = lig_stack.last() {
                         cur_r = Some(t.ch);
-                        at = L::Lig;
+                        at = L::LigK;
                     } else if top.ptr.is_some() {
                         at = L::Lookahead;
                     } else {
                         cur_r = bchar;
-                        at = L::Lig;
+                        at = L::LigK;
                     }
+                }
+                L::LigK => {
+                    // pdfTeX: a kern between `cur_l` and `cur_r`
+                    // (`get_auto_kern`) instead of their ligature or kern
+                    at = L::Lig;
+                    if !ak.on() {
+                        continue;
+                    }
+                    let Some(w) = self.auto_kern(ak, f, cur_l, cur_r)? else {
+                        continue;
+                    };
+                    let pk = self.lig_auto_kern(ak, f, lig_present, cur_l)?;
+                    wrapup(
+                        rt_hit,
+                        cur_l,
+                        cur_q,
+                        out,
+                        &mut lig_present,
+                        &mut lft_hit,
+                        &mut rt_hit,
+                        &mut ins_disc,
+                        lig_stack.is_empty(),
+                        pk,
+                    );
+                    self.push_auto_kern(md.lid, out, raws, w)?;
+                    at = L::Move;
                 }
                 L::Lig => {
                     // §1039–§1040
@@ -3367,6 +3610,7 @@ impl Run<'_, '_> {
                         continue;
                     };
                     if step.is_kern() {
+                        let pk = self.lig_auto_kern(ak, f, lig_present, cur_l)?;
                         wrapup(
                             rt_hit,
                             cur_l,
@@ -3377,6 +3621,7 @@ impl Run<'_, '_> {
                             &mut rt_hit,
                             &mut ins_disc,
                             lig_stack.is_empty(),
+                            pk,
                         );
                         out.push(crate::nest::Item::N(Node::Kern(
                             loaded.at.char_kern(step),
@@ -3427,6 +3672,7 @@ impl Run<'_, '_> {
                             });
                         }
                         7 | 11 => {
+                            let pk = self.lig_auto_kern(ak, f, lig_present, cur_l)?;
                             wrapup(
                                 false,
                                 cur_l,
@@ -3437,6 +3683,7 @@ impl Run<'_, '_> {
                                 &mut rt_hit,
                                 &mut ins_disc,
                                 lig_stack.is_empty(),
+                                pk,
                             );
                             cur_q = out.len();
                             cur_l = Some(rem);
@@ -3457,7 +3704,9 @@ impl Run<'_, '_> {
                         at = L::Wrapup;
                         continue;
                     }
-                    at = L::Lig;
+                    // (`main_lig_loop` after a character, `+1` at the
+                    // left boundary)
+                    at = if cur_l.is_some() { L::LigK } else { L::Lig };
                 }
             }
         }
@@ -3796,6 +4045,51 @@ pub(crate) struct SpaceMemo {
     xs: Option<Glue>,
     d: [Option<i32>; 4],
     waiting: Option<ValueId>,
+    /// `\pdfadjustinterwordglue>0` (pdfTeX), read at the run's first
+    /// space.
+    adjust: Option<bool>,
+}
+
+/// pdfTeX's `\pdfprependkern` and `\pdfappendkern` as a character run
+/// read them, and the codes and quad its auto kerns read
+/// ([`Run::auto_kern`]).
+#[derive(Default)]
+pub(crate) struct AutoKerns {
+    prepend: bool,
+    append: bool,
+    quad: Option<Scaled>,
+    codes: std::collections::HashMap<(i32, u32), i32>,
+}
+
+impl AutoKerns {
+    fn on(&self) -> bool {
+        self.prepend || self.append
+    }
+}
+
+/// A list's tail as a space's adjustment sees it ([`Run::space_char`]).
+enum TailKind {
+    Char(u32, u16),
+    Auto,
+    Other,
+}
+
+fn tail_kind(v: &Values, it: &crate::nest::Item) -> TailKind {
+    let of = |n: &Node| match n {
+        Node::Char { font, ch } => TailKind::Char(*font, *ch),
+        Node::Lig(l) => TailKind::Char(l.font, l.ch),
+        Node::Kern(_, KernKind::Auto) => TailKind::Auto,
+        _ => TailKind::Other,
+    };
+    match it {
+        crate::nest::Item::N(n) => of(n),
+        crate::nest::Item::V(x) => match nodes::tag(v, *x) {
+            nodes::T_CHAR | nodes::T_LIG | nodes::T_KERN => {
+                nodes::decode(v, *x, &mut Side::default()).map_or(TailKind::Other, |n| of(&n))
+            }
+            _ => TailKind::Other,
+        },
+    }
 }
 
 /// An entry of the main loop's `lig_stack` (§1034): a character, whether

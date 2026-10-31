@@ -257,6 +257,11 @@ pub enum KernKind {
     AccKern,
     /// `\mkern`.
     Mu,
+    /// pdfTeX's `auto_kern`: a kern `\pdfprependkern` or
+    /// `\pdfappendkern` put between characters (`get_auto_kern`); no
+    /// break at it, no part of a word to hyphenate, no font kern to
+    /// expand.
+    Auto,
     /// pdfTeX's `margin_kern_node`: a character's protrusion at a line's
     /// edge, with the character (`margin_char`).
     Margin {

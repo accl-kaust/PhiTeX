@@ -239,6 +239,7 @@ fn kern_kind(c: i64) -> KernKind {
         1 => KernKind::Explicit,
         2 => KernKind::AccKern,
         3 => KernKind::Mu,
+        -1 => KernKind::Auto,
         // (a margin kern: its side and character, `4 + left + 2*(font<<16 | ch)`)
         c if c >= 4 => KernKind::Margin {
             left: (c - 4) & 1 == 1,
@@ -255,6 +256,7 @@ fn kern_code(k: KernKind) -> i64 {
         KernKind::Explicit => 1,
         KernKind::AccKern => 2,
         KernKind::Mu => 3,
+        KernKind::Auto => -1,
         KernKind::Margin { left, font, ch } => {
             4 + i64::from(left) + 2 * ((i64::from(font) << 16) | i64::from(ch))
         }
