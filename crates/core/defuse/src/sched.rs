@@ -1478,7 +1478,21 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             },
             Err(_) => "panicked".to_owned(),
         };
-        eprintln!("run: node {} ({}) at {}: {how}", n.raw(), op.name(), node.pos_hint().0);
+        // (and how it began: going on from a park, the cause that woke
+        // it and the field it parked on)
+        let parked = node
+            .parked_on
+            .lock()
+            .and_then(|f| eng.values().as_str(f.0))
+            .unwrap_or_default();
+        eprintln!(
+            "run: node {} ({}) at {}: {how}; goes on {}, woken by {:?}, parked on {parked:?}",
+            n.raw(),
+            op.name(),
+            node.pos_hint().0,
+            cx.goes_on,
+            cx.woke
+        );
     }
     // (a resumption: the run woken by the answer its node's last run
     // parked on, going on from there; else the last run's work, if any,
