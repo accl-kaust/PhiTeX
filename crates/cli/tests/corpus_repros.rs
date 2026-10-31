@@ -183,3 +183,11 @@ repro!(
     aux_line_read_back_meaning,
     "research corpus under XeLaTeX (aomart, memoir, classicthesis: no /PageLabels): a line written to the .aux is interpreted with the meanings at its read-back point, \\begin{document}; a meaning this run had already loaded took the slot's fast path (set_cur_cs, cur_macro) and was read as the writer had it: hyperref's \\HyPL@Entry, let to \\@gobble after the read-back, gathered no labels"
 );
+repro!(
+    microtype_expansion,
+    "corpus (about 120 documents in sweep 14495): microtype's defaults, font expansion (\\pdfadjustspacing 2, \\pdffontexpand autoexpand: the paragraph broken with the expanded fonts' stretch and shrink, the lines set at a horizontal scale) and character protrusion; bench/corpus-repro/microtype-expansion.tex"
+);
+repro!(
+    microtype_options,
+    "microtype with every option under pdfLaTeX: expansion, protrusion, tracking (\\textls, \\letterspacefont), kerning (\\pdfprependkern, \\pdfappendkern: French punctuation, auto kerns in the main loop) and spacing (\\pdfadjustinterwordglue, \\knbscode...), in two columns"
+);

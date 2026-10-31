@@ -27,6 +27,13 @@ and XeLaTeX, built by graph reduction, with exact output.
   reference document is the AMS's `amsldoc` (44 pages, with a table of
   contents, an index, cross-references and hyperlinks). Its PDF equals
   the one pdflatex makes when latexmk runs it, at 1, 8 and 16 threads.
+- **Micro-typography.** pdfTeX's font expansion (`\pdfadjustspacing`,
+  `\pdffontexpand`, `\efcode`), character protrusion (`\lpcode`,
+  `\rpcode`), letterspacing (`\letterspacefont`), extra kerns
+  (`\pdfprependkern`, `\pdfappendkern`) and interword spacing
+  (`\pdfadjustinterwordglue`, `\knbscode` …): microtype's every option
+  gives pdfLaTeX's PDF, and under XeLaTeX its protrusion and tracking
+  give xelatex's (XeTeX has no font expansion).
 - **latexmk's job, in one build.** `phitex build` re-reads the files the
   document writes until they settle. It takes no more rounds than
   latexmk's pdflatex runs, and stops after 5 (latexmk's `max_repeat`)
@@ -180,13 +187,6 @@ and XeLaTeX, built by graph reduction, with exact output.
   again at 16 (3.20 s); para4000 is 2.1 times faster at 8 threads than
   at 1, and no faster at 16 or 32. Speculative runs are wasted: amsldoc
   runs each node 4.5 times on average at 8 threads.
-- **Font expansion:** micro-typography's `\pdfadjustspacing` and
-  `\pdffontexpand` are stored but not applied: pdfLaTeX breaks the
-  paragraph with expanded fonts (and writes the scale), PhiTeX with the
-  fonts as they are, so the lines differ. The largest cause of
-  difference in the corpus sweep (about 120 documents; sweep job 14495,
-  dev b89bb387, 2026-10-20).
-  Repro: `bench/corpus-repro/microtype-expansion.tex`.
 - **Type 3 (bitmap, PK) fonts in PDF:** pdfTeX embeds them; PhiTeX
   writes a DVI file instead of the PDF.
   Repro: `bench/corpus-repro/type3-font.tex`.
