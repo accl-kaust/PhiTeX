@@ -876,6 +876,9 @@ pub(crate) struct Run<'c, 'a> {
     /// read back here next round, where the lines written to it are read
     /// ([`Run::note_absent_read_point`]), as when the file is there.
     pub vain_after_point: Vec<String>,
+    /// The tool failures this run reported ([`Run::tool_output`]): each
+    /// once.
+    pub tool_failures: Vec<String>,
     /// The values at a pending read-back point of the locations defined
     /// or restored after it ([`Run::note_pre`]).
     pub pending_pre: Vec<(Loc, ValueId)>,
@@ -1158,6 +1161,7 @@ impl<'c, 'a> Run<'c, 'a> {
             close_cont: None,
             read_point_pending: None,
             vain_after_point: Vec::new(),
+            tool_failures: Vec::new(),
             pending_pre: Vec::new(),
             pending_locs: phitex_defuse::FxHashSet::default(),
             scanner: None,
@@ -2626,6 +2630,17 @@ impl<'c, 'a> Run<'c, 'a> {
         // (through the run's state: a command this run made before here
         // defined it, `crate::shell`)
         if let Some(x) = self.get(&crate::tools::out_name(key))? {
+            // (a tool that failed, `[message]`: no file, as when the
+            // program fails, and its message an error where the name is
+            // read)
+            if let [m] = list_of(self.v, x)[..] {
+                let msg = str_of(self.v, m);
+                if !self.tool_failures.contains(&msg) {
+                    self.diag(true, &msg);
+                    self.tool_failures.push(msg);
+                }
+                return Ok(Some(self.v.list(Vec::new())));
+            }
             return Ok((x != ValueId::UNIT).then_some(x));
         }
         let x = self.lb(crate::tools::made_field(self.v, key))?;
@@ -2636,7 +2651,8 @@ impl<'c, 'a> Run<'c, 'a> {
     /// then not the file system's units.
     fn tool_makes(&mut self, key: &str) -> R<bool> {
         if let Some(x) = self.get(&crate::tools::out_name(key))? {
-            return Ok(x != ValueId::UNIT);
+            // (a failed tool's `[message]`: no file)
+            return Ok(x != ValueId::UNIT && list_of(self.v, x).len() != 1);
         }
         Ok(self.lb(crate::tools::made_field(self.v, key))?.is_some())
     }

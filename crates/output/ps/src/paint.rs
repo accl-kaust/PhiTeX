@@ -9,8 +9,16 @@ impl Ps<'_> {
     pub fn marking(&self) -> bool {
         !self.dev.page_done && !self.null_device
     }
+    /// A mark after the first `showpage`: gs writes a second page.
+    pub fn second_page(&mut self) -> R {
+        if self.dev.page_done && !self.null_device {
+            return Err(self.unsupported("more than one page"));
+        }
+        Ok(())
+    }
     /// `gs_fill` / `gs_eofill`: the device's fill, then newpath.
     pub fn fill(&mut self, eo: bool) -> R {
+        self.second_page()?;
         if self.marking() {
             if let Some(p) = self.gs.color.pattern.clone() {
                 crate::pattern::before_paint(self, &p)?;
@@ -23,6 +31,7 @@ impl Ps<'_> {
         Ok(())
     }
     pub fn stroke(&mut self) -> R {
+        self.second_page()?;
         if self.marking() {
             if let Some(p) = self.gs.color.pattern.clone() {
                 crate::pattern::before_paint(self, &p)?;

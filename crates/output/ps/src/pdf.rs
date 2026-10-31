@@ -159,6 +159,11 @@ pub struct Device {
     pub page_open: bool,
     /// The first `showpage` ran: later marks go to pages not written.
     pub page_done: bool,
+    /// What the page used that is not written as gs writes it.
+    pub unsupported: Option<String>,
+    /// The DSC comments gs puts in the Info dictionary (`%%Title`,
+    /// `%%Creator`, `%%For` as `/Author`), in the order first seen.
+    pub dsc_info: Vec<(&'static str, Vec<u8>)>,
 }
 
 pub fn initial_viewer() -> Viewer {
@@ -222,6 +227,8 @@ impl Device {
             images: crate::image::Images::default(),
             page_open: false,
             page_done: false,
+            unsupported: None,
+            dsc_info: Vec::new(),
         };
         let p = d.s.paper;
         d.set_page_size(p.0, p.1);
@@ -483,7 +490,12 @@ impl Device {
             Space::Gray => self.put(&format!("{s} {}\n", if stroke { "G" } else { "g" })),
             Space::Rgb => self.put(&format!("{s} {}\n", if stroke { "RG" } else { "rg" })),
             Space::Cmyk => self.put(&format!("{s} {}\n", if stroke { "K" } else { "k" })),
-            _ => crate::pdfcolor::write_color(self, c, stroke),
+            _ => {
+                if self.unsupported.is_none() {
+                    self.unsupported = Some("color spaces other than DeviceGray, DeviceRGB and DeviceCMYK".into());
+                }
+                crate::pdfcolor::write_color(self, c, stroke);
+            }
         }
         if stroke {
             self.v.stroke = Saved::Client(c.clone());
@@ -843,12 +855,19 @@ impl Device {
     /// stream and the cross-reference stream.
     pub fn document(&mut self) -> Vec<u8> {
         let date = pdf_date(self.s.epoch);
-        let info = format!(
-            "<</Producer(GPL Ghostscript 10.08.0)\n/CreationDate({date})\n/ModDate({date})>>"
-        );
+        let mut info = format!(
+            "<</Producer(GPL Ghostscript 10.08.0)\n/CreationDate({date})\n/ModDate({date})"
+        )
+        .into_bytes();
+        for (k, v) in &self.dsc_info {
+            info.extend_from_slice(format!("\n/{k}").as_bytes());
+            info.extend_from_slice(&crate::text::pdf_string(v));
+        }
+        info.extend_from_slice(b">>");
         let meta_id = self.alloc();
-        self.write_separate(2, info.into_bytes());
-        let xmp = xmp(self.s.epoch, &self.file_id());
+        self.write_separate(2, info);
+        let get = |k: &str| self.dsc_info.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
+        let xmp = xmp(self.s.epoch, &self.file_id(), get("Title"), get("Creator"));
         let mut m = format!(
             "{meta_id} 0 obj\n<</Type/Metadata\n/Subtype/XML/Length {}>>stream\n",
             xmp.len()
@@ -1029,7 +1048,14 @@ pub fn civil(t: i64) -> (i64, i64, i64, i64, i64, i64) {
 }
 
 /// The XMP metadata packet.
-fn xmp(t: i64, id: &[u8; 16]) -> Vec<u8> {
+/// XML text of a DSC value (gs's `pdf_xmp_write_translated`: `&`, `<`,
+/// `>` escaped, the bytes as UTF-8 where they are).
+fn xml_text(v: &[u8]) -> String {
+    let s = String::from_utf8_lossy(v);
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn xmp(t: i64, id: &[u8; 16], title: Option<Vec<u8>>, creator: Option<Vec<u8>>) -> Vec<u8> {
     let (y, mo, d, h, mi, s) = civil(t);
     let date = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
     let uuid = crate::xmp::uuid(id, t);
@@ -1044,11 +1070,15 @@ fn xmp(t: i64, id: &[u8; 16]) -> Vec<u8> {
     x.push_str(&format!("<rdf:Description rdf:about=\"\" xmlns:xmp='http://ns.adobe.com/xap/1.0/'><xmp:ModifyDate>{date}</xmp:ModifyDate>\n"));
     x.push_str(&format!("<xmp:CreateDate>{date}</xmp:CreateDate>\n"));
     x.push_str(&format!("<xmp:MetadataDate>{date}</xmp:MetadataDate>\n"));
-    x.push_str("<xmp:CreatorTool>'UnknownApplication'</xmp:CreatorTool></rdf:Description>\n");
+    match &creator {
+        Some(c) => x.push_str(&format!("<xmp:CreatorTool>{}</xmp:CreatorTool></rdf:Description>\n", xml_text(c))),
+        None => x.push_str("<xmp:CreatorTool>'UnknownApplication'</xmp:CreatorTool></rdf:Description>\n"),
+    }
     x.push_str(&format!("<rdf:Description rdf:about=\"\" xmlns:xmpMM='http://ns.adobe.com/xap/1.0/mm/' xmpMM:DocumentID='{uuid}'/>\n"));
     x.push_str("<rdf:Description rdf:about=\"\" xmlns:xmpMM='http://ns.adobe.com/xap/1.0/mm/' xmpMM:RenditionClass='default'/>\n");
     x.push_str("<rdf:Description rdf:about=\"\" xmlns:xmpMM='http://ns.adobe.com/xap/1.0/mm/' xmpMM:VersionID='1'/>\n");
-    x.push_str("<rdf:Description rdf:about=\"\" xmlns:dc='http://purl.org/dc/elements/1.1/' dc:format='application/pdf'><dc:title><rdf:Alt><rdf:li xml:lang='x-default'>'Untitled'</rdf:li></rdf:Alt></dc:title></rdf:Description>\n");
+    let tl = title.as_ref().map_or_else(|| String::from("'Untitled'"), |t| xml_text(t));
+    x.push_str(&format!("<rdf:Description rdf:about=\"\" xmlns:dc='http://purl.org/dc/elements/1.1/' dc:format='application/pdf'><dc:title><rdf:Alt><rdf:li xml:lang='x-default'>{tl}</rdf:li></rdf:Alt></dc:title></rdf:Description>\n"));
     x.push_str("</rdf:RDF>\n</x:xmpmeta>\n");
     let pad = " ".repeat(72);
     x.push_str(&pad);

@@ -111,11 +111,15 @@ pub use feed::{epstopdf_feed, perl_num};
 pub use interp::Resources;
 pub use pdf::Settings;
 
-/// What a conversion gives: the PDF, and Ghostscript's error message if
-/// the program stopped on one (gs then still writes what was drawn, and
-/// exits nonzero).
+/// What a conversion gives: the PDF, or why there is none. A program
+/// that uses what this converter does not write as Ghostscript writes it
+/// (patterns, shadings, Type 3 and TrueType fonts, images, color spaces
+/// past the device ones, more than one page, ...), or that stops on a
+/// PostScript error, gives no PDF: never one that differs from gs's.
 pub struct Output {
     pub pdf: Vec<u8>,
+    /// `unsupported PostScript: <feature>`, or gs's error message
+    /// (`Error: /undefined in foo`): no PDF.
     pub error: Option<String>,
 }
 
@@ -212,11 +216,17 @@ pub fn convert(input: &[u8], s: Settings, res: &dyn Resources) -> Output {
     };
     let eps = !stdin && is_epsf(&data);
     ps.run_file(Rc::new(data), eps);
-    let error = ps.failed.take();
+    let unsupported = ps.unsupported.take().or_else(|| ps.dev.unsupported.take());
+    if let Some(u) = unsupported {
+        return Output { pdf: Vec::new(), error: Some(alloc::format!("unsupported PostScript: {u}")) };
+    }
+    if let Some(e) = ps.failed.take() {
+        return Output { pdf: Vec::new(), error: Some(e) };
+    }
     ps.dev.finish_page();
     pdffont::write_fonts(&mut ps);
     let pdf = ps.dev.document();
-    Output { pdf, error }
+    Output { pdf, error: None }
 }
 
 /// gs's `run`: `%!PS-Adobe-` then, within the 23 bytes `%!PS-Adobe-X.X

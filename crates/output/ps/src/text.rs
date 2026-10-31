@@ -443,6 +443,7 @@ impl Ps<'_> {
 
     /// Shows string `s` through pdfwrite (`pdf_process_string`).
     fn show_pdf(&mut self, s: &[u8], adj: Adjust) -> R {
+        self.second_page()?;
         let font = self.cur_font()?;
         if font.font_type == 3 || font.font_type == 0 {
             return self.show_type3(&font, s, adj);
@@ -482,6 +483,9 @@ impl Ps<'_> {
                 Some((x, y)) if y == 0.0 && ch == 32 => v.word_spacing = (x * size) as f32,
                 _ => emulate = s.contains(&ch),
             }
+        }
+        if emulate {
+            return Err(self.unsupported("ashow/widthshow spacing gs emulates character by character"));
         }
         if emulate {
             // (process_text_modify_width: a character at a time)
@@ -569,6 +573,9 @@ impl Ps<'_> {
     /// A Type 3 (or composite) font's characters: their procedures run
     /// as graphics (pdfwrite makes a Type 3 font of them; not ported).
     fn show_type3(&mut self, font: &crate::font::Font, s: &[u8], adj: Adjust) -> R {
+        if self.marking() {
+            return Err(self.unsupported(if font.font_type == 0 { "composite (Type 0) fonts" } else { "Type 3 fonts" }));
+        }
         let d = font.dict.clone();
         for &c in s {
             let (cx, cy) = self.gs.cur.ok_or(Sig::Err(E::NoCurrentPoint))?;
@@ -742,6 +749,9 @@ fn op_awidthshow(ps: &mut Ps<'_>) -> R {
 /// `xshow`, `yshow`, `xyshow`: each character, then a move by the
 /// numbers given.
 fn xyshow(ps: &mut Ps<'_>, mode: u8) -> R {
+    if ps.marking() {
+        return Err(ps.unsupported("xshow, yshow and xyshow"));
+    }
     let nums = ps.top(0)?.clone();
     let s = str_arg(ps, 1)?;
     let v: Vec<f64> = match &nums.v {
@@ -778,6 +788,9 @@ fn op_xyshow(ps: &mut Ps<'_>) -> R {
     xyshow(ps, 2)
 }
 fn op_kshow(ps: &mut Ps<'_>) -> R {
+    if ps.marking() {
+        return Err(ps.unsupported("kshow"));
+    }
     let s = str_arg(ps, 0)?;
     let p = ps.top(1)?.clone();
     ps.o.truncate(ps.o.len() - 2);
@@ -819,6 +832,7 @@ fn op_glyphshow(ps: &mut Ps<'_>) -> R {
     let code = (0..=255u8).find(|&c| ps.glyph_name(&d, c) == name);
     match code {
         Some(c) => ps.show_pdf(&[c], Adjust::default()),
+        None if ps.marking() => Err(ps.unsupported("glyphshow of a glyph the font's Encoding lacks")),
         None => Ok(()),
     }
 }
@@ -836,6 +850,9 @@ fn op_stringwidth(ps: &mut Ps<'_>) -> R {
     Ok(())
 }
 fn op_charpath(ps: &mut Ps<'_>) -> R {
+    if ps.marking() {
+        return Err(ps.unsupported("charpath (glyph outlines as paths)"));
+    }
     let _stroke = ps.pop_bool()?;
     let s = str_arg(ps, 0)?;
     ps.o.pop();

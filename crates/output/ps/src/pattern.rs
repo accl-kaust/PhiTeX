@@ -34,8 +34,8 @@ pub fn instance(ps: &mut Ps<'_>, d: &PDict) -> R<Rc<Pattern>> {
 }
 
 /// Before a fill or stroke with a pattern color.
-pub fn before_paint(_ps: &mut Ps<'_>, _p: &Rc<Pattern>) -> R {
-    Ok(())
+pub fn before_paint(ps: &mut Ps<'_>, _p: &Rc<Pattern>) -> R {
+    Err(ps.unsupported("patterns"))
 }
 
 /// The pattern color's operators (none yet).
@@ -59,6 +59,9 @@ fn op_makepattern(ps: &mut Ps<'_>) -> R {
 }
 fn op_shfill(ps: &mut Ps<'_>) -> R {
     ps.pop_dict()?;
+    if ps.marking() {
+        return Err(ps.unsupported("shadings (shfill)"));
+    }
     Ok(())
 }
 

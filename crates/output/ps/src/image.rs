@@ -163,6 +163,9 @@ impl Ps<'_> {
         mask: Option<bool>,
         cs: Option<Rc<Cs>>,
     ) -> R {
+        if self.marking() {
+            return Err(self.unsupported("images"));
+        }
         if w <= 0 || h <= 0 {
             return Ok(());
         }

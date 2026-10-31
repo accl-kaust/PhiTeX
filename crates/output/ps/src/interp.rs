@@ -266,6 +266,11 @@ pub struct Ps<'a> {
     pub showpages: u32,
     /// `nulldevice` in effect: nothing is drawn.
     pub null_device: bool,
+    /// What the program used that this converter does not write as gs
+    /// does: the run stops there (`crate::Output::error`).
+    pub unsupported: Option<String>,
+    /// The last error raised (`default_error`), reported if it ends the job.
+    pub last_error: Option<String>,
     /// Glyph names' ranks in gs's name table (`crate::cff::glyph_key`).
     pub name_ranks: Option<BTreeMap<Vec<u8>, u64>>,
 }
@@ -313,6 +318,8 @@ impl<'a> Ps<'a> {
             showpages: 0,
             null_device: false,
             name_ranks: None,
+            unsupported: None,
+            last_error: None,
         };
         ps.d = vec![
             ps.systemdict.clone(),
@@ -321,6 +328,14 @@ impl<'a> Ps<'a> {
         ];
         crate::init::init(&mut ps);
         ps
+    }
+
+    /// Stops the run on a feature not written as gs writes it.
+    pub fn unsupported(&mut self, what: &str) -> Sig {
+        if self.unsupported.is_none() {
+            self.unsupported = Some(what.into());
+        }
+        Sig::Quit
     }
 
     // ------ objects ------
@@ -619,7 +634,7 @@ impl<'a> Ps<'a> {
             }
             self.steps += 1;
             if self.steps > self.max_steps {
-                return Err(Sig::Quit);
+                return Err(self.unsupported("a program running past its step limit"));
             }
             let r = self.step(base);
             match r {
@@ -655,11 +670,10 @@ impl<'a> Ps<'a> {
         self.dput_s(&de, "newerror", Obj::bool(true));
         let en = self.nobj(e.name());
         self.dput_s(&de, "errorname", en);
-        self.dput_s(&de, "command", cmd.clone());
-        if self.failed.is_none() {
-            let c = self.show_obj(&cmd);
-            self.failed = Some(format!("Error: /{} in {}", e.name(), c));
-        }
+        // (the message gs prints if nothing stops it: kept until a
+        // `stopped` catches it, `crate::init`'s top level reports it)
+        let c = self.show_obj(&cmd);
+        self.last_error = Some(format!("Error: /{} in {}", e.name(), c));
         Err(Sig::Stop)
     }
 

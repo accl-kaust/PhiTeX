@@ -230,6 +230,9 @@ impl Ps<'_> {
             .dget_s(d, "FontType")
             .and_then(|o| o.num())
             .ok_or(Sig::Err(E::InvalidFont))? as i32;
+        if !matches!(ft, 0 | 1 | 3) {
+            return Err(self.unsupported(&alloc::format!("FontType {ft} fonts")));
+        }
         let m = self
             .dget_s(d, "FontMatrix")
             .ok_or(Sig::Err(E::InvalidFont))?;

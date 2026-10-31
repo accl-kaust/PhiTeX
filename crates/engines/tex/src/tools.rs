@@ -425,6 +425,7 @@ impl Operation for ToolRun {
         );
         // (run, then the files it asked for and had not looked up, and
         // again until it asks for none new)
+        let mut fail: Option<String> = None;
         let (made, said) = loop {
             let (made, said) = match tool {
                 Tool::Makeindex => {
@@ -455,19 +456,26 @@ impl Operation for ToolRun {
                         phitex_ps::Settings::epstopdf(epoch),
                         &GsFonts(std::cell::RefCell::new(&mut served)),
                     );
-                    let said = o.error.into_iter().map(|e| (false, e)).collect();
-                    (Some(o.pdf), said)
+                    // (what the converter does not write as gs does: no
+                    // file, as a failed repstopdf leaves, and an error
+                    // where its output is looked for, `Run::tool_output`)
+                    fail = o.error.map(|e| format!("repstopdf: {input}: {e}"));
+                    (Some(o.pdf), Vec::new())
                 }
             };
             let missing = std::mem::take(&mut served.missing);
             if missing.is_empty() {
                 break (made, said);
             }
+            fail = None;
             for n in missing {
                 let x = look_up(cx, &n)?;
                 served.got.insert(n, x);
             }
         };
+        if let Some(m) = fail {
+            return Ok(v.list(vec![v.str(&m)]));
+        }
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "tool {} for {output}: read {:?}, made {:?} bytes",

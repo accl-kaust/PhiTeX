@@ -1073,18 +1073,26 @@ impl Dpx {
         // (TeX Live's `D` line, Ghostscript's pdfwrite: run in process,
         // `phitex-ps`; any other command through the host)
         let data = if is_texlive_gs(&distiller_template) {
-            self.files.read(filename).map(|eps| {
-                let epoch = match self.session.source_date_epoch {
-                    Some(e) if e >= 0 => e,
-                    _ => self.session.now,
-                };
-                let out = phitex_ps::convert(
-                    &eps,
-                    phitex_ps::Settings::dvipdfmx(version, epoch),
-                    &GsFonts(&self.files),
-                );
-                alloc::sync::Arc::from(out.pdf)
-            })
+            match self.files.read(filename) {
+                Some(eps) => {
+                    let epoch = match self.session.source_date_epoch {
+                        Some(e) if e >= 0 => e,
+                        _ => self.session.now,
+                    };
+                    let out = phitex_ps::convert(
+                        &eps,
+                        phitex_ps::Settings::dvipdfmx(version, epoch),
+                        &GsFonts(&self.files),
+                    );
+                    // (what the converter does not write as gs does stops
+                    // the run: never a figure that differs)
+                    if let Some(e) = out.error {
+                        crate::fatal!("{}: {e}", String::from_utf8_lossy(filename));
+                    }
+                    Some(alloc::sync::Arc::from(out.pdf))
+                }
+                None => None,
+            }
         } else {
             self.files
                 .apply_filter(&distiller_template, filename, version)
