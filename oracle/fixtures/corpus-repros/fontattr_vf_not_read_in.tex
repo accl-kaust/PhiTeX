@@ -1,0 +1,13 @@
+% \pdffontattr and \pdfnobuiltintounicode of a virtual font (cmap.sty's,
+% for every font it loads: libertine's T1 fonts are virtual) set its
+% fields and do not read it in (no do_vf): pdfTeX numbers its local
+% fonts where the first page that shows it reads it in, after the fonts
+% loaded before. The link numbered them where the commands ran (acmart:
+% /F86 for pdfTeX's /F228, every font of the file another number).
+\documentclass{article}
+\usepackage{cmap}
+\usepackage[tt=false, type1=true]{libertine}
+\begin{document}
+\textsf{\textbf{Title}} Lorem ipsum dolor sit amet, \textit{consectetuer}
+adipiscing elit.
+\end{document}

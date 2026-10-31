@@ -1542,8 +1542,16 @@ fn default_map(r: &mut Run<'_, '_>) -> R<Option<Arc<Map>>> {
 
 /// The fonts `ids` as the writer asks for them, with the files of the
 /// map lines read so far; `space`: with `pdftexspace` too.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Fonts> {
+    fonts_for_with(r, ids, space, true)
+}
+
+/// [`fonts_for`]; `read_in`: the virtual fonts read in (`do_vf`: their
+/// packets, their local fonts), else each font as its metrics alone (a
+/// step that reads no font in, `\\pdffontattr`'s: the link numbers no
+/// local font for it, [`FontNums::resolve`]).
+#[allow(clippy::too_many_lines)]
+fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) -> R<Fonts> {
     let v = r.v;
     let mut out = Fonts::default();
     // (no font asked, a PDF command's (a link, a destination): nothing of
@@ -1603,6 +1611,9 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
                     auto,
                 },
             );
+            continue;
+        }
+        if !read_in {
             continue;
         }
         if let Some(ls) = ls {
@@ -1981,6 +1992,21 @@ pub(crate) fn command(
     command_forms(r, input, fonts, move |st, _, fs, _| f(st, fs))
 }
 
+/// [`command`] for a step that reads no font in (`\\pdffontattr`,
+/// `\\pdfnobuiltintounicode`: pdfTeX sets the font's field, no
+/// `do_vf`): its fonts without their virtual files, so the link numbers
+/// no virtual font's local fonts where it runs (pdfTeX numbers them where
+/// a page or a command that calls `pdf_check_vf_cur_val` reads the font
+/// in).
+pub(crate) fn command_unread(
+    r: &mut Run<'_, '_>,
+    input: ValueId,
+    fonts: &[u32],
+    mut f: impl FnMut(&mut PdfState, &dyn FontSource) -> CmdOut + Send + 'static,
+) -> R<Option<CmdOut>> {
+    command_with(r, input, fonts, false, move |st, _, fs, _| f(st, fs))
+}
+
 /// [`command`], the forms' table in reach, and the read-time numbers
 /// the link numbered otherwise ([`Reloc`]: a number TeX read back that
 /// the command names, `\pdfobj useobjnum`, is the writer's object).
@@ -1990,11 +2016,23 @@ pub(crate) fn command_forms(
     fonts: &[u32],
     f: impl FnMut(&mut PdfState, &mut Forms, &dyn FontSource, &Reloc) -> CmdOut + Send + 'static,
 ) -> R<Option<CmdOut>> {
+    command_with(r, input, fonts, true, f)
+}
+
+/// [`command_forms`]; `read_in`: its fonts' virtual files read
+/// ([`fonts_for_with`]).
+fn command_with(
+    r: &mut Run<'_, '_>,
+    input: ValueId,
+    fonts: &[u32],
+    read_in: bool,
+    f: impl FnMut(&mut PdfState, &mut Forms, &dyn FontSource, &Reloc) -> CmdOut + Send + 'static,
+) -> R<Option<CmdOut>> {
     if r.param("pdfoutput")? <= 0 {
         return Ok(None);
     }
     let v = r.v;
-    let mut fs = fonts_for(r, fonts, false)?;
+    let mut fs = fonts_for_with(r, fonts, false, read_in)?;
     // (an image the command writes: the files its fonts ask for)
     image_fonts(r, &mut fs)?;
     let wparams = writer_params(r)?;

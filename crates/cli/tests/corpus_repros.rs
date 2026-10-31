@@ -335,6 +335,30 @@ fn pdfmapfile_vf_local_fonts() {
     }
 }
 
+/// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
+/// for every font it loads; libertine's T1 fonts are virtual) set its
+/// fields without reading it in (no `do_vf`): pdfTeX numbers its local
+/// fonts where a page first reads it in, after the fonts loaded before.
+/// Their steps were given the font's virtual file and the link numbered
+/// its local fonts where they ran (acmart: `/F86` for pdfTeX's `/F228`,
+/// every font of the file another number). At -j1 and -j4 (oracle:
+/// pdflatex in the CI image, mc 77664; the base differs at byte 702).
+#[test]
+fn fontattr_vf_not_read_in() {
+    let name = "fontattr_vf_not_read_in";
+    let want = std::fs::read(fixtures().join(format!("{name}.pdf"))).expect("the oracle");
+    for j in [1, 4] {
+        let (got, term) = build_j(name, j);
+        assert!(
+            got == want,
+            "{name} -j{j}: the PDF differs from pdflatex's ({} vs {} bytes): {}",
+            got.len(),
+            want.len(),
+            term.lines().last().unwrap_or("")
+        );
+    }
+}
+
 /// The research corpus's amsbook at -j4 (2 pages more than -j1 in about
 /// half the builds): the piece that ends a title page whose `\topskip`
 /// `\@maketitle` set in a group puts the page parameters on the main

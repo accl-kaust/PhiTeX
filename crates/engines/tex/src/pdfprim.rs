@@ -3123,14 +3123,20 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let fid = u32::try_from(f).unwrap_or(0);
             let tb = bytes(&str_of(v, t));
             let input = pdf_input(r, if attr { "fontattr" } else { "includechars" }, f, t)?;
-            crate::pdfout::command(r, input, &[fid], move |st, fs| {
-                if attr {
+            if attr {
+                // (no `pdf_check_vf_cur_val`: the font is not read in)
+                crate::pdfout::command_unread(r, input, &[fid], move |st, fs| {
                     st.font_attr(fid, &tb, fs);
-                } else {
+                    crate::pdfout::CmdOut::default()
+                })?;
+            } else {
+                // (`pdf_check_vf_cur_val`: a virtual font read in, its
+                // local fonts loaded)
+                crate::pdfout::command(r, input, &[fid], move |st, fs| {
                     let _ = st.include_chars(fid, &tb, fs);
-                }
-                crate::pdfout::CmdOut::default()
-            })?;
+                    crate::pdfout::CmdOut::default()
+                })?;
+            }
         }
         ex::MAP_FILE | ex::MAP_LINE => {
             // (which of the two, before the text is scanned: the scan
@@ -3178,7 +3184,8 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             r.set(&format!("pdf:nobuiltintounicode:{f}"), v.int(1), true);
             let fid = u32::try_from(f).unwrap_or(0);
             let input = pdf_input(r, "nobuiltintounicode", f, ValueId::UNIT)?;
-            crate::pdfout::command(r, input, &[fid], move |st, fs| {
+            // (the font not read in, as `\pdffontattr`)
+            crate::pdfout::command_unread(r, input, &[fid], move |st, fs| {
                 st.no_builtin_tounicode(fid, fs);
                 crate::pdfout::CmdOut::default()
             })?;
