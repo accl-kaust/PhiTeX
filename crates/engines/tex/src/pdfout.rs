@@ -3353,6 +3353,27 @@ impl MarkState {
 
 type AllocMemo = Mutex<FxHashMap<(u64, u64), AllocFold>>;
 
+/// The objects writing the images a page shows first makes (each
+/// image's record: its number, its objects, those in object streams),
+/// added to `objects`; those in object streams returned.
+fn images_written(
+    v: &Values,
+    images: &[ValueId],
+    seen: &mut BTreeSet<i64>,
+    objects: &mut i64,
+) -> i64 {
+    let mut os = 0i64;
+    for &x in images {
+        let ys = list_of(v, x);
+        let y = |k: usize| ys.get(k).and_then(|&a| v.as_int(a)).unwrap_or(0);
+        if seen.insert(y(0)) {
+            *objects += y(1);
+            os += y(2);
+        }
+    }
+    os
+}
+
 fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     static M: OnceLock<AllocMemo> = OnceLock::new();
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
@@ -3441,15 +3462,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         out.objects += made.objects;
         // (the images first shown here, written after the page: what
         // writing each makes, `pdf_write_image`)
-        let mut images_os = 0i64;
-        for x in l(15) {
-            let ys = list_of(v, x);
-            let y = |k: usize| ys.get(k).and_then(|&a| v.as_int(a)).unwrap_or(0);
-            if seen_images.insert(y(0)) {
-                out.objects += y(1);
-                images_os += y(2);
-            }
-        }
+        let images_os = images_written(v, &l(15), &mut seen_images, &mut out.objects);
         // (the read-time writes into object streams before the page
         // count toward a stream's 100; a link piece's, a bead
         // rectangle's and a destination's object go into one too)

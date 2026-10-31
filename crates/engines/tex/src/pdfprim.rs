@@ -3413,12 +3413,13 @@ struct XImageScan {
     immediate: bool,
 }
 
+/// What [`ximage_step`] gives: the image's object number, what TeX reads
+/// of it, and the objects its write makes (all, those in object streams).
+type XImageStep = Option<(Option<usize>, phitex_pdf::XImageInfo, i64, i64)>;
+
 /// `\\pdfximage` as a step (pdfTeX §1358, writeimg.c `read_image`):
 /// the image's object number and what TeX reads of it.
-fn ximage_step(
-    r: &mut Run<'_, '_>,
-    x: XImageScan,
-) -> R<Option<(Option<usize>, phitex_pdf::XImageInfo, i64, i64)>> {
+fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
     let v = r.v;
     let fv = r.file(&x.name)?.unwrap_or(ValueId::UNIT);
     let mut ps = Vec::new();
@@ -3479,9 +3480,9 @@ fn ximage_step(
     let set = move |st: &mut phitex_pdf::PdfState| image_params(st, &ps);
     crate::pdfout::note_image_files(r, &spec, &set)?;
     let ocl = (
-        i32::try_from(r.param("pdfobjcompresslevel")?).unwrap_or(0),
-        i32::try_from(r.param("pdfmajorversion")?).unwrap_or(1),
-        i32::try_from(r.param("pdfminorversion")?).unwrap_or(4),
+        r.param("pdfobjcompresslevel")?,
+        r.param("pdfmajorversion")?,
+        r.param("pdfminorversion")?,
     );
     // (the fonts writing it replaces an included PDF's by, as the
     // link's writer has them: `pdfout::command`'s)
