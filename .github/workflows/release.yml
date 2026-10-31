@@ -1,4 +1,4 @@
-# A release (docs/ci.md): a tag v1.6, v1.61, … on main whose commit passed the
+# A release (docs/ci.md): a tag v1.6, v1.6.1, v1.61, … on main whose commit passed the
 # gate. The CLI built for Linux (x86_64, aarch64; glibc 2.35, Ubuntu
 # 22.04's) and macOS (arm64, x86_64), each a tarball phitex-<arch>-<os>.tar.gz
 # (the names phitex.org/install.sh asks for), SHA256SUMS of them, signed
@@ -41,10 +41,12 @@ jobs:
           case $st in identical | behind) ;; *) echo "$GITHUB_REF_NAME is not on main ($st)"; exit 1 ;; esac
           gate=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=gate" -q '[.check_runs[].conclusion] | map(select(. == "success")) | length')
           [ "$gate" -gt 0 ] || { echo "no green gate on $sha"; exit 1; }
-          # (Cargo's 1.61.0 is named and tagged 1.61)
+          # (a milestone's .0 left out: Cargo's 1.61.0 is tagged 1.61, an
+          # update's kept: 1.6.1 is tagged 1.6.1)
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)
-          [ "${v%.0}" = "$tag" ] || { echo "the tag says $tag, crates/cli/Cargo.toml $v"; exit 1; }
-          grep -q "^## $tag " CHANGELOG.md || { echo "CHANGELOG.md has no '## $tag' entry"; exit 1; }
+          case $v in *.*.0) v=${v%.0} ;; esac
+          [ "$v" = "$tag" ] || { echo "the tag says $tag, crates/cli/Cargo.toml $v"; exit 1; }
+          grep -q "^## $tag (" CHANGELOG.md || { echo "CHANGELOG.md has no '## $tag (date)' entry"; exit 1; }
   build:
     needs: gated
     strategy:

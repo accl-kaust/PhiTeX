@@ -60,8 +60,12 @@ use phitex_live::warnings;
 /// then 1.61, 1.618, …, a digit a release (Cargo 1.6.0, 1.61.0, …: the
 /// minor grows, so semver orders them).
 pub fn version() -> &'static str {
+    // (a milestone's `.0` left out, 1.6.0 named 1.6; 1.6.10 kept whole)
     let v = env!("CARGO_PKG_VERSION");
-    v.strip_suffix(".0").unwrap_or(v)
+    match v.rsplit_once('.') {
+        Some((m, "0")) if m.contains('.') => m,
+        _ => v,
+    }
 }
 
 #[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]

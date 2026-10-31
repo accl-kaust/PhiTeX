@@ -16,7 +16,7 @@ no merge waits on them.
 | checks | `checks.yml` | every push to dev and main, every pull request | fmt, clippy -D warnings, the wasm builds, the viewer's bundle, types and tests, the unit tests (every crate's but phitex-live's; no TeX Live on the runner) |
 | gate | `gate.yml` | every pull request to main, and by hand | the shards below, in the CI image, a job each |
 | image | `ci-image.yml` | by hand, when the image changes | builds the CI image and pushes it to GHCR |
-| release | `release.yml` | a tag `v1.6`, `v1.61`, … on main | binaries, `SHA256SUMS`, the minisign signature, the GitHub release |
+| release | `release.yml` | a tag `v1.6`, `v1.6.1`, `v1.61`, … on main | binaries, `SHA256SUMS`, the minisign signature, the GitHub release |
 
 **The CI image:** `ghcr.io/accl-kaust/phitex-ci:<snapshot>`.
 - It is `scripts/accl/phitex.def` as a Dockerfile (`ci/Dockerfile`): Arch
@@ -75,8 +75,9 @@ there is no override.
 
 ## Releasing
 
-1. **Tag `v<version>` on main**: `v1.6` (the alpha), then `v1.61`,
-   `v1.618`, …, a digit a release (AGENTS.md). The tag's commit must
+1. **Tag `v<version>` on main**: `v1.6` (the alpha), its updates
+   `v1.6.1`, `v1.6.2`, …, then the milestones `v1.61`, `v1.618`, … (a
+   digit a milestone: AGENTS.md). The tag's commit must
    carry a green `gate`. The release workflow checks this and stops
    otherwise.
 2. **`.github/workflows/release.yml`** builds the CLI for x86_64 and

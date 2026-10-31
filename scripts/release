@@ -5,8 +5,9 @@
 #
 #   scripts/release 1.6
 #
-# The version must be the next of φ's (AGENTS.md: 1.6, 1.61, 1.618, …,
-# one digit more than the last release), and CHANGELOG.md must have its
+# The version must be the next milestone (one more of φ's digits: 1.6,
+# 1.61, 1.618, …) or the next update of this one (1.6.1, 1.6.2, …:
+# AGENTS.md), and CHANGELOG.md must have its
 # entry, '## <version> (<YYYY-MM-DD>)' with a summary paragraph. Then
 # crates/cli/Cargo.toml says <version>.0, Cargo.lock follows, and the
 # change is committed on dev.
@@ -16,12 +17,17 @@ cd "$repo"
 PHI=1.6180339887498948482045868343656381177203
 v=${1:-}
 die() { echo "release: $*" >&2; exit 1; }
-[ -n "$v" ] || die "usage: scripts/release <version> (1.6, 1.61, …)"
+[ -n "$v" ] || die "usage: scripts/release <version> (1.6, 1.6.1, 1.61, …)"
 
 cur=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)
-cur=${cur%.0}
-case $cur in 0.*) want=1.6 ;; *) want=${PHI:0:$((${#cur} + 1))} ;; esac
-[ "$v" = "$want" ] || die "the next version after $cur is $want, not $v"
+milestone=${cur%.*} patch=${cur##*.}
+case $cur in
+  0.*) next=1.6 update= ;;
+  *) next=${PHI:0:$((${#milestone} + 1))} update=$milestone.$((patch + 1)) ;;
+esac
+[ "$v" = "$next" ] || [ "$v" = "$update" ] \
+  || die "after $cur comes the milestone $next${update:+ or the update $update}, not $v"
+case $v in *.*.*) cargo_v=$v ;; *) cargo_v=$v.0 ;; esac
 
 [ "$(git branch --show-current)" = dev ] || die "on $(git branch --show-current): releases are prepared on dev"
 git diff --quiet HEAD -- crates/cli/Cargo.toml Cargo.lock CHANGELOG.md \
@@ -31,11 +37,11 @@ grep -Eq "^## $v \([0-9]{4}-[0-9]{2}-[0-9]{2}\)" CHANGELOG.md || die "CHANGELOG.
 summary=$(awk -v h="## $v (" 'index($0, h) == 1 {on = 1; next} on && /^## / {exit} on && NF {print; got = 1; next} on && got {exit}' CHANGELOG.md)
 [ -n "$summary" ] || die "CHANGELOG.md's $v entry has no summary paragraph"
 
-sed -i "0,/^version = \".*\"/s//version = \"$v.0\"/" crates/cli/Cargo.toml
+sed -i "0,/^version = \".*\"/s//version = \"$cargo_v\"/" crates/cli/Cargo.toml
 # (Cargo.lock's entry for phitex-cli follows, nothing else moves)
 scripts/sandbox cargo metadata --offline --format-version 1 > /dev/null
 git diff --stat -- crates/cli/Cargo.toml Cargo.lock
-git commit -q -m "release $v: crates/cli at $v.0 ($summary)" -- crates/cli/Cargo.toml Cargo.lock
+git commit -q -m "release $v: crates/cli at $cargo_v ($summary)" -- crates/cli/Cargo.toml Cargo.lock
 echo "release: $v committed on dev. Next:"
 echo "  1. push dev, open the pull request dev -> main; merge when checks and gate are green"
 echo "  2. the user tags it: git tag v$v origin/main && git push github v$v"

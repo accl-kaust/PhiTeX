@@ -43,8 +43,8 @@ fn asset() -> Option<String> {
     Some(format!("phitex-{arch}-{os}.tar.gz"))
 }
 
-/// `a` is a later version than `b` (`1.61` after `1.6`: φ's digits, the
-/// minor growing; a missing part is 0).
+/// `a` is a later version than `b` (`1.61` after `1.6.9`: φ's digits,
+/// the minor growing; `1.6.1` after `1.6`: an update; a missing part is 0).
 fn later(a: &str, b: &str) -> bool {
     let parts = |v: &str| -> Vec<u64> {
         v.trim_start_matches('v')
@@ -379,6 +379,12 @@ mod tests {
         assert!(later("1.6180", "1.618"));
         assert!(!later("1.6", "1.6.0"));
         assert!(later("1.6", "0.0.0"));
+        // (a milestone's updates: 1.6.1 … 1.6.10, then the next milestone)
+        assert!(later("1.6.1", "1.6"));
+        assert!(later("1.6.10", "1.6.9"));
+        assert!(later("1.61", "1.6.10"));
+        assert!(!later("1.6.2", "1.61"));
+        assert!(affects("<1.6.2", "1.6.1"));
         assert!(affects("<1.618", "1.61"));
         assert!(!affects("<1.618", "1.618"));
         assert!(affects(">=1.61", "1.618"));

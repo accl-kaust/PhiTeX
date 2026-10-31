@@ -1,13 +1,14 @@
 # Changelog
 
-PhiTeX's versions converge to φ: 1.6 is the alpha, then 1.61, 1.618,
-… (`AGENTS.md`). A release's entry is a `## <version> (<date>)` heading
+PhiTeX's versions converge to φ, a digit a milestone: 1.6 is the alpha,
+1.61 the beta, 1.618 the first stable; a milestone's updates are 1.6.1,
+1.6.2, … (`AGENTS.md`). A release's entry is a `## <version> (<date>)` heading
 whose first paragraph is its summary: `phitex` says it once on the first
 run of that version, `phitex news` prints the whole entry, and the
 GitHub release's notes are the entry. The entries before 1.6 name
 milestones, not versions.
 
-## Alpha: plain TeX, LaTeX and XeLaTeX
+## 1.6 (2026-10-31)
 
 The first build of PhiTeX meant for use: pdfTeX's plain TeX and LaTeX,
 and XeLaTeX, built by graph reduction, with exact output.
