@@ -545,10 +545,13 @@ const IEND: i32 = 0x4945_4E44;
 /// file's bytes).
 const OPENED_KEEP: usize = 4;
 
+/// A file [`open_doc`] opened: its bytes' address and length, the bytes
+/// (kept so the address is not reused), and the opened file.
+type Opened = ((usize, usize), Arc<[u8]>, Doc);
+
 thread_local! {
-    /// The files [`open_doc`] opened last on this thread, by their
-    /// bytes' address and length, newest first.
-    static OPENED: std::cell::RefCell<Vec<((usize, usize), Arc<[u8]>, Doc)>> =
+    /// The files [`open_doc`] opened last on this thread, newest first.
+    static OPENED: std::cell::RefCell<Vec<Opened>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
