@@ -1000,6 +1000,8 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         seed,
         info_omit_date: i32::try_from(int_field(cx, "param:pdfinfoomitdate")?).unwrap_or(0),
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
+        ptex_use_underscore: i32::try_from(int_field(cx, "param:pdfptexuseunderscore")?)
+            .unwrap_or(0),
         // (pdfTeX fixes it when it opens the file, §695; read here at the
         // end: the same unless a document changes it after that)
         pk_resolution: cx

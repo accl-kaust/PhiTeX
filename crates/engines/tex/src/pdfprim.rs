@@ -3440,8 +3440,10 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
 }
 
 /// The image parameters `ps` (`\\pdfimagehicolor`, `\\pdfimageapplygamma`,
-/// `\\pdfgamma`, `\\pdfimagegamma`, `\\pdfinclusioncopyfonts`, from the
-/// third) on `st`.
+/// `\\pdfgamma`, `\\pdfimagegamma`, `\\pdfinclusioncopyfonts`,
+/// `\\pdfsuppressptexinfo`, `\\pdfptexuseunderscore`, from the third) on
+/// `st`: an included PDF's `/PTEX.FileName` and the others as `write_epdf`
+/// writes them.
 fn image_params(st: &mut phitex_pdf::PdfState, ps: &[i32]) {
     let p = |k: usize| ps.get(k).copied().unwrap_or(0);
     let pm = st.params_mut();
@@ -3450,6 +3452,8 @@ fn image_params(st: &mut phitex_pdf::PdfState, ps: &[i32]) {
     pm.gamma = p(4);
     pm.image_gamma = p(5);
     pm.inclusion_copy_fonts = p(6);
+    pm.suppress_ptex_info = p(7);
+    pm.ptex_use_underscore = p(8);
 }
 
 /// What TeX reads of an image (its size, pages, color depth): the
@@ -3523,6 +3527,8 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
         "pdfgamma",
         "pdfimagegamma",
         "pdfinclusioncopyfonts",
+        "pdfsuppressptexinfo",
+        "pdfptexuseunderscore",
     ] {
         ps.push(r.param(p)?);
     }

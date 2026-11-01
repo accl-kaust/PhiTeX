@@ -188,6 +188,7 @@ params!(
     pdfpagebox,
     pdfpageheight,
     pdfpagewidth,
+    pdfptexuseunderscore,
     pdfsuppressptexinfo,
     pdfthreadmargin,
     pdfvorigin,

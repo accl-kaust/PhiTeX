@@ -3828,6 +3828,9 @@ pub(crate) struct EndFields {
     pub seed: Vec<(FontId, String, i32)>,
     pub info_omit_date: i32,
     pub suppress_ptex_info: i32,
+    /// `\pdfptexuseunderscore`: the Info dictionary's `/PTEX_Fullbanner`
+    /// for `/PTEX.Fullbanner`.
+    pub ptex_use_underscore: i32,
     /// `\pdfpkresolution`: what a font without a map entry's failure
     /// names ([`phitex_pdf::PdfError::Fail`]).
     pub pk_resolution: i32,
@@ -4900,6 +4903,7 @@ fn link(
     }
     st.params_mut().info_omit_date = f.info_omit_date;
     st.params_mut().suppress_ptex_info = f.suppress_ptex_info;
+    st.params_mut().ptex_use_underscore = f.ptex_use_underscore;
     st.params_mut().pk_resolution = f.pk_resolution;
     // the end of the file: its objects (the fonts embedded, the pages
     // tree, ...) a function of the state alone, kept by its digest (an
