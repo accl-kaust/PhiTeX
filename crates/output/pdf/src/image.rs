@@ -565,7 +565,9 @@ pub fn open_doc(data: &Arc<[u8]>) -> Result<Doc, phitex_codecs::pdfread::Error> 
     let key = (Arc::as_ptr(data).cast::<u8>() as usize, data.len());
     let hit = OPENED.with(|o| {
         let mut o = o.borrow_mut();
-        let i = o.iter().position(|(k, b, _)| *k == key && Arc::ptr_eq(b, data))?;
+        let i = o
+            .iter()
+            .position(|(k, b, _)| *k == key && Arc::ptr_eq(b, data))?;
         let e = o.remove(i);
         let d = e.2.clone();
         o.insert(0, e);
@@ -739,8 +741,7 @@ impl PdfState {
             });
             self.epdf_docs.len() - 1
         };
-        let doc =
-            open_doc(&spec.data).map_err(|_| fail(name, "xpdf: reading PDF image failed"))?;
+        let doc = open_doc(&spec.data).map_err(|_| fail(name, "xpdf: reading PDF image failed"))?;
         let found = doc.version as f32;
         let wanted = (f64::from(self.fixed_major) + f64::from(self.fixed_minor) * 0.1) as f32;
         if f64::from(found) > f64::from(wanted) + 0.01 && spec.inclusion_errorlevel > 0 {
@@ -1820,7 +1821,11 @@ mod tests {
         assert_eq!(OPENED.with(|o| o.borrow().len()), n + 1, "kept once");
         let b: Arc<[u8]> = Arc::from(f);
         assert_eq!(open_doc(&b).unwrap().num_pages(), d1.num_pages());
-        assert_eq!(OPENED.with(|o| o.borrow().len()), n + 2, "another copy: opened anew");
+        assert_eq!(
+            OPENED.with(|o| o.borrow().len()),
+            n + 2,
+            "another copy: opened anew"
+        );
         for _ in 0..OPENED_KEEP {
             let c: Arc<[u8]> = Arc::from(&*a);
             open_doc(&c).unwrap();
