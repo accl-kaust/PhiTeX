@@ -5,7 +5,6 @@ generic_tex-locale_samples_sample-locale-xeltx	error: error: I can't find file
 latex_abntex2_abntex2	differs: page 9: obj 1614 (untyped) line 5: oracle "<end>", phitex "<end>"
 latex_amsldoc-vn_amsldoc-vi	differs: page 10: obj 346 (untyped) line 6: oracle "643.413", phitex "643.831"
 latex_asmejour_asmejour-template	-j1 error: error: the build stopped: it made no progress (the build passed its time limit of 600 s; at asmejour-template.tex:379, on \else: , input 4 levels deep, 14 lists; -j4 error: killed (-9)
-latex_atableau_atableau	error: error: Undefined control sequence
 latex_base_ltnews	differs: page 55: obj 1331 (Action) line 20: oracle "117.941", phitex "107.121" (not the same in each run: the first sweep had -j1 differs, -j4 timeout)
 latex_beamertheme-csh_example-csh	differs: page 5: obj 202 (Catalog) line 70: oracle "<end>", phitex "<end>"
 latex_beamertheme-cuerna_template	differs: page 5: obj 137 (Catalog) line 34: oracle "<end>", phitex "<end>"
@@ -22,7 +21,6 @@ latex_circuitikz_circuitikzmanual	-j1 differs: page 2: obj 1 (Catalog) line 7: o
 latex_cje_cjeguide	differs: obj 244 (untyped) line 5: oracle "347.069", phitex "347.369"
 latex_cjk-ko_cjk-ko-doc	error: error: I can't find file
 latex_classicthesis_ClassicThesis	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)
-latex_coursepaper_coursepaper	differs: page 1: obj 29 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 2 vs 1)
 latex_cqjtuthesis_cqjtuthesis-doc	differs: page 3: obj 1 (Catalog) line 8: oracle "/PageLabels <<", phitex "/PageMode /UseOutlines"
 latex_cs-techrep_template_cs-techrep-example-ctan	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes); -j4 differs: page 1: obj 66 (page 1, untyped) line 119: oracle "q", phitex "Q"
 latex_cursolatex_cursolatex	differs: page 9: obj 8042 (untyped) line 765: oracle "<end>", phitex "<end>"
@@ -106,9 +104,7 @@ latex_typstfun_typstfun	differs: page 2: obj 46 (page 2, untyped) line 61: oracl
 latex_ualberta_ualberta	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes); -j4 differs: page 7: obj 2221 (Catalog) line 18: oracle "<end>", phitex "<end>" (pages 110 vs 109)
 latex_ufrgscca_ufrgscca	differs: page 1: obj 179 (page 1, untyped) line 17: oracle "/F88 10.9091 Tf 1.02 0 0 1 187.354 520.241 Tm [(This)-389(bundled)-376", phitex "/F88 10.9091 Tf 1.02 0 0 1 187.354 520.241 Tm [(This)-384(bundled)-384"
 latex_verifiche_verifiche-example	differs: page 2: obj 26 (page 2, untyped) line 27: oracle "[-500(Calcolare)-333(il)-334(seguen)28(te)-333(in)28(tegrale)-334(de\f", phitex "[-500(Calcolare)-333(il)-334(seguen)28(te)-333(in)28(tegrale)-334(de\f"
-latex_webquiz_webquiz	differs: exit 1: bytes differ at 15
 latex_windycity_windycity	-j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 exact, -j4 timeout)
-latex_wordle_wordle-doc-en	differs: page 1: obj 586 (Catalog) line 10: oracle "<end>", phitex "<end>"
 latex_zed-csp_zed2e	differs: page 6: obj 146 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 13 vs 12)
 latex_zhlineskip_zhlineskip	differs: page 6: obj 201 (untyped) line 18: oracle "57 beginbfchar", phitex "87 beginbfchar"
 latex_zx-calculus_zx-calculus	error: error: You can't use `&' in restricted horizontal mode
