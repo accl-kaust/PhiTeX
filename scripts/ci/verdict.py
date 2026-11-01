@@ -60,7 +60,9 @@ def main():
             except (OSError, ValueError):
                 bad.append(f"{d['id']} -j{j}{lane}: no result")
                 continue
-            if r.get("status") == "exact":
+            # (documented: differs from the oracle only where
+            # ci/manuals-pdftex-bugs.tsv lets it, pdfTeX's bug not copied)
+            if r.get("status") in ("exact", "documented"):
                 continue
             if r.get("status") == "no-oracle":
                 no_oracle = f"{d['id']}{lane}: no oracle: {r.get('note')}"

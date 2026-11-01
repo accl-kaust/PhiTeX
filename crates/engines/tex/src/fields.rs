@@ -81,6 +81,7 @@ const STATIC: &[&str] = &[
     "pdf:match",
     "pdf:objnum",
     "pdf:openaction",
+    "pdf:opened",
     "pdf:pieces",
     "pdf:random",
     "pdf:relaxed",
@@ -323,6 +324,12 @@ pub(crate) mod cell {
     pub(crate) const PDF_MATCH: u32 = (STATIC0 + static_index("pdf:match")) as u32;
     pub(crate) const PDF_OBJNUM: u32 = (STATIC0 + static_index("pdf:objnum")) as u32;
     pub(crate) const PDF_OPENACTION: u32 = (STATIC0 + static_index("pdf:openaction")) as u32;
+    /// pdfTeX's PDF file opened (`check_pdfversion`, pdftex.web:
+    /// `ensure_pdf_open`) by a read-time write: an `\\immediate`
+    /// `\\pdfobj` or `\\pdfxform`, `\\pdfximage`, the first
+    /// `\\pdfcatalog ... openaction`. With no page shipped pdfTeX leaves
+    /// that file with no bytes (its buffer never flushed).
+    pub(crate) const PDF_OPENED: u32 = (STATIC0 + static_index("pdf:opened")) as u32;
     pub(crate) const PDF_PIECES: u32 = (STATIC0 + static_index("pdf:pieces")) as u32;
     pub(crate) const PDF_RANDOM: u32 = (STATIC0 + static_index("pdf:random")) as u32;
     pub(crate) const PDF_RELAXED: u32 = (STATIC0 + static_index("pdf:relaxed")) as u32;
