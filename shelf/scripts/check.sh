@@ -27,33 +27,43 @@ tl() { env "${tlenv[@]}" SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1 "$@"; }
 # (5) a texmf tree of the release's files, with its ls-R
 tree_unpack "$rel/$label" "$new" "$w/tree/texmf-dist" | tee -a "$out/summary.txt"
 
-# (5b) every map file the release's TeX Live enables (each package's
-# `execute addMap` / `addMixedMap` in its database) in the release, and
-# every font of those maps in its pdftex.map. (Not the CI image's own
-# pdftex.map: that install is older than the tlnet the release is made
-# from, and named 910 fonts the newer one had renamed or dropped,
-# SourceSansPro, SourceSerifPro, mfb-oldstyle's ts1, run 41296048903)
+# (5b) every font of the maps the release's TeX Live enables (each
+# package's `execute addMap` / `addMixedMap` in its database, TLPDB) in
+# the release's pdftex.map, each map read from its package's archive as
+# the build fetched it (beside TLPDB: the release serves pdftex.map, not
+# the maps). (Not the CI image's own pdftex.map: that install is older
+# than the tlnet the release is made from, and named 910 fonts the newer
+# one had renamed or dropped, SourceSansPro, SourceSerifPro,
+# mfb-oldstyle's ts1, run 41296048903)
 fails=0
-python3 - "$tlpdb" "$w/tree/texmf-dist" "$w/tree/texmf-dist/fonts/map/pdftex/updmap/pdftex.map" > "$out/map-missing.txt" <<'NAMES'
-import lzma, os, sys
-db, tree, pdfmap = sys.argv[1:4]
-maps = {l.split()[-1] for l in lzma.decompress(open(db, 'rb').read()).decode().splitlines()
-        if l.startswith(('execute addMap ', 'execute addMixedMap '))}
-where = {}
-for d, _, fs in os.walk(os.path.join(tree, 'fonts/map')):
-    for f in fs:
-        where.setdefault(f, os.path.join(d, f))
-names = lambda f: {l.split()[0] for l in open(f, encoding='latin-1') if l.strip() and l[0] not in '%#'}
-rel = names(pdfmap)
-for m in sorted(maps):
-    if m not in where:
-        print(f'{m} (the map file)')
-    else:
-        for n in sorted(names(where[m]) - rel):
-            print(f'{n} ({m})')
+python3 - "$tlpdb" "$w/tree/texmf-dist/fonts/map/pdftex/updmap/pdftex.map" > "$out/map-missing.txt" <<'NAMES'
+import lzma, os, sys, tarfile
+db, pdfmap = sys.argv[1:3]
+cache = os.path.dirname(db)
+names = lambda b: {l.split()[0] for l in b.decode('latin-1').splitlines() if l.strip() and l[0] not in '%#'}
+rel = names(open(pdfmap, 'rb').read())
+for block in lzma.decompress(open(db, 'rb').read()).decode().split('\n\n'):
+    lines = block.splitlines()
+    head = dict(l.split(' ', 1) for l in lines if l and not l.startswith(' ') and ' ' in l)
+    maps = {l.split()[-1] for l in lines if l.startswith(('execute addMap ', 'execute addMixedMap '))}
+    if not maps:
+        continue
+    name, rev = head.get('name'), head.get('revision')
+    arch = os.path.join(cache, f'{name}.r{rev}.tar.xz')
+    if not os.path.exists(arch):
+        print(f'{name} r{rev} (its archive, not fetched by the build)')
+        continue
+    with tarfile.open(arch, 'r:xz') as t:
+        found = {os.path.basename(m.name): m for m in t if m.isfile() and '/fonts/map/' in m.name}
+        for m in sorted(maps):
+            if m not in found:
+                print(f'{m} (the map file, not in {name})')
+                continue
+            for n in sorted(names(t.extractfile(found[m]).read()) - rel):
+                print(f'{n} ({m})')
 NAMES
 n=$(wc -l < "$out/map-missing.txt")
-echo "pdftex.map: $n of TeX Live's maps and fonts missing from the release$([ "$n" = 0 ] || echo ": $(head -8 "$out/map-missing.txt" | tr '\n' ' ')...")" | tee -a "$out/summary.txt"
+echo "pdftex.map: $n of TeX Live's fonts missing from the release$([ "$n" = 0 ] || echo ": $(head -8 "$out/map-missing.txt" | tr '\n' ' ')...")" | tee -a "$out/summary.txt"
 [ "$n" = 0 ] || fails=$((fails + 1))
 
 # (6) the documents: PhiTeX's fixtures, plain TeX for each engine, and
