@@ -15,7 +15,6 @@ latex_bibbreeze_BibBreeze	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)
 latex_biblatex-caspervector_caspervector	differs: page 2: obj 54 (page 2, untyped) line 5: oracle "q 1 0 0 1 72 720 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 15 Tf 192.278 3.757", phitex "q 1 0 0 1 72 720 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 15 Tf 192.278 3.757"
 latex_biblatex-cheatsheet_biblatex-cheatsheet	differs: page 1: obj 150 (Catalog) line 2: oracle "/OpenAction 3 0 R", phitex "/Names 3 0 R" (pages 2 vs 3)
 latex_biblatex-iso690_biblatex-iso690	differs: page 1: obj 524 (untyped) line 5: oracle "<end>", phitex "<end>" (pages 18 vs 15)
-latex_biblatex-musuos_biblatex-musuos	differs: page 1: obj 245 (Catalog) line 10: oracle "<end>", phitex "<end>" (pages 9 vs 8)
 latex_biblatex_biblatex	-j1 differs: page 6: obj 172 (page 6, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 10.9091 Tf 41.32", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 10.9091 Tf 41.32"; -j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 timeout, -j4 timeout)
 latex_braids_braids	differs: page 17: obj 397 (page 17, untyped) line 11: oracle "[-500(Scoping)-452(is)-452(handl)1(ed)-452(b)27(y)-452(u)1(sing)-452(b", phitex "[-500(Scoping)-452(is)-452(handl)1(ed)-452(b)27(y)-452(u)1(sing)-452(b"
 latex_cidarticle_cidarticle-author-template	differs: page 1: obj 28 (page 1, untyped) line 10: oracle "/F159 14 Tf 70.866 512.746 Td [(Ein)-250(sehr)-250(langer)-250(T)18(it", phitex "/F55 14 Tf 70.866 512.746 Td [(Ein)-250(sehr)-250(langer)-250(T)18(ite"
@@ -41,16 +40,7 @@ latex_fragoli_fragoli_doc	-j1 differs: page 5: obj 426 (page 5, untyped) line 31
 latex_gammas_gammas_template	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes); -j4 differs: page 1: obj 17 (page 1, untyped) line 97: oracle "/F119 5.9776 Tf 1 0 0 1 111.245 384.391 Tm [(13)]TJ", phitex "/F119 5.9776 Tf 1 0 0 1 111.245 384.391 Tm [(12)]TJ"
 latex_glosmathtools_sample_glosmathtools_en	differs: page 2: obj 266 (Catalog) line 22: oracle "<end>", phitex "<end>"
 latex_gu_gudoc	differs: page 1: obj 358 (Catalog) line 5: oracle "/PageMode /UseOutlines", phitex "/PageLabels <<"
-latex_hagenberg-thesis_hagenberg-thesis	differs: obj 580 (untyped) line 6: oracle "/PTEX_Fullbanner (This is pdfTeX, Version 3.141592653-2.6-1.40.29 \(Te", phitex "/PTEX.Fullbanner (This is pdfTeX, Version 3.141592653-2.6-1.40.29 \(Te"
-latex_hep-acronym_hep-acronym-documentation	differs: page 1: obj 135 (Catalog) line 9: oracle "<end>", phitex "<end>" (pages 2 vs 1)
-latex_hep-bibliography_hep-bibliography-documentation	differs: page 1: obj 128 (Catalog) line 9: oracle "<end>", phitex "<end>"
-latex_hep-float_hep-float-documentation	differs: page 1: obj 150 (Catalog) line 9: oracle "<end>", phitex "<end>"
-latex_hep-graphic_hep-graphic-documentation	differs: page 1: obj 137 (Catalog) line 10: oracle "<end>", phitex "<end>"
-latex_hep-math_hep-math-documentation	differs: page 1: obj 276 (Catalog) line 10: oracle "<end>", phitex "<end>"
 latex_hep-paper_hep-paper-documentation	differs: page 2: obj 531 (Catalog) line 10: oracle "<end>", phitex "<end>" (pages 7 vs 6)
-latex_hep-reference_hep-reference-documentation	differs: page 1: obj 115 (Catalog) line 10: oracle "<end>", phitex "<end>"
-latex_hep-text_hep-text-documentation	differs: page 1: obj 193 (Catalog) line 9: oracle "<end>", phitex "<end>" (pages 2 vs 1)
-latex_hep-title_hep-title-documentation	differs: page 1: obj 145 (Catalog) line 10: oracle "<end>", phitex "<end>"
 latex_heria_heria-proposal	differs: page 13: obj 169 (page 13, untyped) line 72: oracle "/F51 10.9091 Tf 132.769 737.854 Td [(Cost)-250(\()]TJ/F51 7.6363 Tf 27", phitex "/F51 10.9091 Tf 132.769 737.854 Td [(Cost)-250(\()]TJ/F51 7.6363 Tf [("
 latex_hhtensor_getversion	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)
 latex_highlightx_highlightx-doc	differs: page 1: obj 25 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g"
@@ -110,7 +100,6 @@ latex_tikzcodeblocks_tikzcodeblocks-documentation	differs: page 2: obj 461 (page
 latex_tkz-bernoulli_tkz-bernoulli-doc	differs: page 2: obj 115 (untyped) line 5: oracle "390.51", phitex "388.39"
 latex_tkz-tab_TKZdoc-tab-main	differs: page 3: obj 123 (page 3, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0.098 0.098 0.44 RG 0.0", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0.098 0.098 0.44 RG 0.0"
 latex_translation-enumitem-de_enumitem-de	differs: page 11: obj 237 (page 16, Page) line 17: oracle "<end>", phitex "<end>"
-latex_tufte-latex_sample-book	differs: obj 760 (Catalog) line 10: oracle "<end>", phitex "<end>"
 latex_typog_typog-example	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)
 latex_typogrid_testtypogrid	differs: page 2: obj 12 (page 2, untyped) line 143: oracle "0 0 69.449 1.993 re f", phitex "0 0 104.173 1.993 re f"
 latex_typstfun_typstfun	differs: page 2: obj 46 (page 2, untyped) line 61: oracle "/F62 10.9091 Tf 56.693 308.139 Td [(\\arccos)-7368(arccos)-7894(\\arcs", phitex "/F62 10.9091 Tf 56.693 308.139 Td [(\\arccos)-7368(arccos)-7894(\\arcs"
