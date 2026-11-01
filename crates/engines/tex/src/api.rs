@@ -6202,6 +6202,16 @@ impl Build {
         self.dump_claims();
         self.dump_readers();
         self.tell_settled_pages();
+        // (a debug or observe build stops on a defect of the settled
+        // line, not on a run's it does not keep: `Run::order_after_pages`)
+        if cfg!(any(debug_assertions, feature = "observe"))
+            && let Some(d) = self.diagnostics().into_iter().find(|d| {
+                d.severity == Severity::Diagnostic
+                    && d.message.starts_with(crate::pages::PAGES_OBJECTS_DEFECT)
+            })
+        {
+            panic!("{}:{}: {}", d.file, d.line, d.message);
+        }
     }
 
     /// A handle to send this build new texts from another thread

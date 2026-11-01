@@ -68,6 +68,9 @@ pub(crate) struct CandMark {
     pub open_cut: bool,
 }
 
+/// The start of [`Run::order_after_pages`]' engine diagnostic.
+pub(crate) const PAGES_OBJECTS_DEFECT: &str = "the pages' objects read in a piece after a candidate a page can fire at and no pass can end at";
+
 impl Run<'_, '_> {
     /// Whether the run is on the main vertical list, at most a paragraph
     /// just begun above it (`nest_ptr <= 1` of §1091, §1200; `mode =
@@ -346,10 +349,15 @@ impl Run<'_, '_> {
     /// run's own), the read stands where no page fires at the run's
     /// candidates ([`Run::page_fires_in_own`]). (`why`: the reader, for
     /// the trace.)
-    #[allow(
-        clippy::assertions_on_constants,
-        reason = "a debug or observe build stops on the defect"
-    )]
+    ///
+    /// The defect is an engine diagnostic of the run, which stands only
+    /// where the settled line keeps the run: a run on a page state that
+    /// moves since (a page firing at its candidate where the settled
+    /// pages fire none) is gone with its diagnostic. A debug or observe
+    /// build stops on one that stands ([`PAGES_OBJECTS_DEFECT`],
+    /// `Build::settle`), not on a run's: a panic withholds the run's
+    /// output, the pages it reads move again, and the line never
+    /// settles (asmeconf at -j1).
     pub(crate) fn order_after_pages(&mut self, why: &str) -> R<()> {
         let op = self.cx.op();
         let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
@@ -371,10 +379,9 @@ impl Run<'_, '_> {
             // (a candidate inside a span of the run's own no pass can end
             // at: a page firing there would be missing from the number)
             let msg = format!(
-                "the pages' objects read in a piece after a candidate a page can fire at and no pass can end at ({why}, candidate {k}): a number here may miss that page's objects (node {})",
+                "{PAGES_OBJECTS_DEFECT} ({why}, candidate {k}): a number here may miss that page's objects (node {})",
                 self.cx.node().raw()
             );
-            assert!(!cfg!(any(debug_assertions, feature = "observe")), "{msg}");
             self.engine_diag(&msg);
             return Ok(());
         }
