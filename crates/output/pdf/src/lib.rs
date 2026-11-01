@@ -160,7 +160,7 @@ use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::node::BoxNode;
 
-pub use crate::image::{ImageSpec, PageBox, XImageInfo};
+pub use crate::image::{ImageSpec, PageBox, XImageInfo, open_doc};
 use crate::map::MapEntry;
 use crate::num::ONE_HUNDRED_INCH;
 pub use crate::objects::ObjBody;

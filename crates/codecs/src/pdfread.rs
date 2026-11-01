@@ -694,7 +694,9 @@ pub struct Page {
     pub resources: Option<Dict>,
 }
 
-/// An open PDF file.
+/// An open PDF file (a clone shares its bytes and the object streams
+/// read so far).
+#[derive(Clone)]
 pub struct Doc {
     /// The file's bytes; its offsets count from its `%PDF-` header
     /// (`base`: xpdf moves its start there).
