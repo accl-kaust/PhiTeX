@@ -541,6 +541,48 @@ fn getint(d: &[u8], pos: usize) -> Option<i32> {
 const IDAT: i32 = 0x4944_4154;
 const IEND: i32 = 0x4945_4E44;
 
+/// How many opened files [`open_doc`] keeps a thread (each holds its
+/// file's bytes).
+const OPENED_KEEP: usize = 4;
+
+thread_local! {
+    /// The files [`open_doc`] opened last on this thread, by their
+    /// bytes' address and length, newest first.
+    static OPENED: std::cell::RefCell<Vec<((usize, usize), Arc<[u8]>, Doc)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `data` opened (`Doc::open`), a pure function of the bytes: the files
+/// this thread opened last, by their shared copy, given again as a
+/// clone. Each `\pdfximage` of a page of one PDF opens the file a few
+/// times over (what TeX reads of it, the objects its write makes, the
+/// writer's record and the link's replay of it): hwemoji's 3600 pages
+/// of one 7 MB file read its cross-reference some 20 000 times.
+///
+/// # Errors
+/// What `Doc::open` meets.
+pub fn open_doc(data: &Arc<[u8]>) -> Result<Doc, phitex_codecs::pdfread::Error> {
+    let key = (Arc::as_ptr(data).cast::<u8>() as usize, data.len());
+    let hit = OPENED.with(|o| {
+        let mut o = o.borrow_mut();
+        let i = o.iter().position(|(k, b, _)| *k == key && Arc::ptr_eq(b, data))?;
+        let e = o.remove(i);
+        let d = e.2.clone();
+        o.insert(0, e);
+        Some(d)
+    });
+    if let Some(d) = hit {
+        return Ok(d);
+    }
+    let d = Doc::open(data)?;
+    OPENED.with(|o| {
+        let mut o = o.borrow_mut();
+        o.insert(0, (key, data.clone(), d.clone()));
+        o.truncate(OPENED_KEEP);
+    });
+    Ok(d)
+}
+
 /// A copy of an included page in progress (`write_epdf`'s locals and
 /// the document's `inObjList`).
 struct Copy<'d> {
@@ -698,7 +740,7 @@ impl PdfState {
             self.epdf_docs.len() - 1
         };
         let doc =
-            Doc::open(&spec.data).map_err(|_| fail(name, "xpdf: reading PDF image failed"))?;
+            open_doc(&spec.data).map_err(|_| fail(name, "xpdf: reading PDF image failed"))?;
         let found = doc.version as f32;
         let wanted = (f64::from(self.fixed_major) + f64::from(self.fixed_minor) * 0.1) as f32;
         if f64::from(found) > f64::from(wanted) + 0.01 && spec.inclusion_errorlevel > 0 {
@@ -1512,7 +1554,7 @@ impl PdfState {
             std::mem::take(&mut d.objs)
         };
         let doc =
-            Doc::open(&image.data).map_err(|_| fail(&file, "xpdf: reading PDF image failed"))?;
+            open_doc(&image.data).map_err(|_| fail(&file, "xpdf: reading PDF image failed"))?;
         let page = doc
             .page(usize::try_from(im.page).unwrap_or(0))
             .ok_or_else(|| fail(&file, "xpdf: reading PDF image failed"))?;
@@ -1757,6 +1799,33 @@ mod tests {
         assert_eq!(num_to_pdf(1.5), b"1.5");
         assert_eq!(num_to_pdf(-0.25), b"-0.25");
         assert_eq!(num_to_pdf(3.0), b"3");
+    }
+
+    /// `open_doc`: a file opened again by its shared bytes is the
+    /// thread's kept copy (one entry, the same answers), another copy of
+    /// the same bytes is opened anew, and the thread keeps at most
+    /// `OPENED_KEEP` files.
+    #[test]
+    fn open_doc_keeps_the_files_opened_last() {
+        let f = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../oracle/fixtures/corpus-repros/pdf_image_objects_counted/hello.pdf"
+        ))
+        .unwrap();
+        let a: Arc<[u8]> = Arc::from(f.clone());
+        let n = OPENED.with(|o| o.borrow().len());
+        let d1 = open_doc(&a).unwrap();
+        let d2 = open_doc(&a).unwrap();
+        assert_eq!(d1.num_pages(), d2.num_pages());
+        assert_eq!(OPENED.with(|o| o.borrow().len()), n + 1, "kept once");
+        let b: Arc<[u8]> = Arc::from(f);
+        assert_eq!(open_doc(&b).unwrap().num_pages(), d1.num_pages());
+        assert_eq!(OPENED.with(|o| o.borrow().len()), n + 2, "another copy: opened anew");
+        for _ in 0..OPENED_KEEP {
+            let c: Arc<[u8]> = Arc::from(&*a);
+            open_doc(&c).unwrap();
+        }
+        assert_eq!(OPENED.with(|o| o.borrow().len()), OPENED_KEEP);
     }
 
     #[test]

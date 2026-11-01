@@ -449,6 +449,16 @@ fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
     Ok(xs.get(1).map(|&t| bytes(&str_of(r.v, t))))
 }
 
+/// [`file_bytes`], the one shared copy of the file's text
+/// (`pdfout::text_bytes`): an image's, which its record keeps.
+fn file_bytes_shared(r: &mut Run<'_, '_>, name: &str) -> R<Option<std::sync::Arc<[u8]>>> {
+    let Some(x) = file_found(r, name)? else {
+        return Ok(None);
+    };
+    let xs = list_of(r.v, x);
+    Ok(xs.get(1).map(|&t| crate::pdfout::text_bytes(r.v, t)))
+}
+
 /// A file's size in bytes, as [`file_bytes`] finds it. A document file
 /// the client cut (`Run::read_cut`): the size the environment holds
 /// beside it (`fsize:<name>`), so the run reads not its text: an edit
@@ -3290,7 +3300,7 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     }
     let rule = (w, h, d);
     let name = ext_string(r)?;
-    let data = file_bytes(r, &name)?.unwrap_or_default();
+    let data = file_bytes_shared(r, &name)?.unwrap_or_else(|| std::sync::Arc::from(&[][..]));
     let img = image_info(&data, page);
     let running = phitex_typeset::node::RUNNING;
     let (x, y, mut xr, mut yr, pdf, pages, depth) = img;
@@ -3491,7 +3501,7 @@ struct XImageScan {
     colorspace: i32,
     page_box: usize,
     name: String,
-    data: Vec<u8>,
+    data: std::sync::Arc<[u8]>,
     immediate: bool,
 }
 
@@ -3554,7 +3564,7 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
                 .first()
                 .map_or_else(|| x.name.clone(), |&p| str_of(v, p)),
         ),
-        data: std::sync::Arc::from(x.data),
+        data: x.data,
         image_resolution: ps[0],
         inclusion_errorlevel: ps[1],
     };
@@ -3731,7 +3741,7 @@ fn png_alpha(data: &[u8]) -> bool {
     data.starts_with(b"\x89PNG") && matches!(data.get(25), Some(4 | 6))
 }
 
-fn image_info(data: &[u8], page: i32) -> (i32, i32, i32, i32, bool, i32, i32) {
+fn image_info(data: &std::sync::Arc<[u8]>, page: i32) -> (i32, i32, i32, i32, bool, i32, i32) {
     if data.starts_with(b"\x89PNG")
         && let Ok(i) = phitex_codecs::png::read_info(data)
     {
@@ -3760,8 +3770,7 @@ fn image_info(data: &[u8], page: i32) -> (i32, i32, i32, i32, bool, i32, i32) {
         return jpeg_info(data);
     }
     if data.starts_with(b"%PDF") {
-        let arc: std::sync::Arc<[u8]> = std::sync::Arc::from(data);
-        if let Ok(doc) = phitex_codecs::pdfread::Doc::open(&arc) {
+        if let Ok(doc) = phitex_pdf::open_doc(data) {
             let n = doc.num_pages();
             let k = usize::try_from(page.max(1) - 1).unwrap_or(0);
             if let Some(p) = doc.page(k) {

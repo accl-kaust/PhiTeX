@@ -1509,19 +1509,23 @@ fn store_scaled_f(sq: i32, z: i32) -> i32 {
 
 /// A file's bytes, `None` if absent.
 pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
-    static M: OnceLock<Once<Arc<[u8]>>> = OnceLock::new();
     let v = r.v;
     // (the writer's lookup: a file absent here is no read-back point)
     let was = std::mem::replace(&mut r.writer_lookup, true);
     let found = r.file(name);
     r.writer_lookup = was;
-    Ok(found?.and_then(|x| {
-        let &t = list_of(v, x).get(1)?;
-        // (a pure function's memo by the text's value: every page step
-        // asks for its fonts' files)
-        let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-        Some(once(m, t.raw(), || Arc::from(bytes_of(&str_of(v, t)))))
-    }))
+    Ok(found?.and_then(|x| list_of(v, x).get(1).map(|&t| text_bytes(v, t))))
+}
+
+/// A file's text `t` as its bytes, one shared copy per text: a pure
+/// function's memo by the text's value. Every page step asks for its
+/// fonts' files, and every `\pdfximage` of a page of one PDF for that
+/// file (hwemoji's 3600 pages of one 7 MB file: a copy each, kept by
+/// each image's record to the link, held 27 GB).
+pub(crate) fn text_bytes(v: &Values, t: ValueId) -> Arc<[u8]> {
+    static M: OnceLock<Once<Arc<[u8]>>> = OnceLock::new();
+    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
+    once(m, t.raw(), || Arc::from(bytes_of(&str_of(v, t))))
 }
 
 /// `pdftex.map`, parsed.
@@ -4973,6 +4977,18 @@ fn link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file's text as bytes is one shared copy (every `\pdfximage` of
+    /// a page of one PDF keeps it in its record): the same allocation
+    /// for the same text, its bytes the characters'.
+    #[test]
+    fn a_files_bytes_are_one_shared_copy() {
+        let v = Values::new();
+        let t = v.str("%PDF-1.5\n\u{e9}\u{ff}");
+        let (a, b) = (text_bytes(&v, t), text_bytes(&v, t));
+        assert!(Arc::ptr_eq(&a, &b));
+        assert_eq!(&*a, b"%PDF-1.5\n\xe9\xff");
+    }
 
     #[test]
     fn a_command_record_carries_its_read_time_number() {
