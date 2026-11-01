@@ -1786,7 +1786,25 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     for id in removed {
         // (one a commit cut short never placed is not on the line)
         if let Some(n) = eng.placed_node(id) {
+            // (one a sibling's claim took: that claimer read its text,
+            // `Ctx::following`, and now reads another's there, as for a
+            // client's removal, `Engine::remove`. A paragraph whose line
+            // a rerun of its placer remade kept the old line, and the new
+            // one ran as a paragraph of its own after it)
+            let claimer = n.claimer().filter(|&c| n.taken() && c != node.id);
             unfile(eng, ww, n);
+            if let Some(c) = claimer.and_then(|c| eng.placed_node(c)) {
+                mark_dirty(
+                    eng,
+                    ww,
+                    c,
+                    Wake {
+                        by: Some(id),
+                        cause: Cause::Structure,
+                        at_ns: eng.now_ns(),
+                    },
+                );
+            }
         }
     }
     if p.claim > 0 || last.as_ref().is_some_and(|r| r.claim > 0) {
