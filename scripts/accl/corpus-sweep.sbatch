@@ -1,7 +1,7 @@
 #!/bin/bash
 # The corpus sweep on accl (submitted by scripts/accl/corpus-sweep):
 #
-#   sbatch [slurm options] corpus-sweep.sbatch <run> <phitex binary> <jobs> <par> <timeout> [ids]
+#   sbatch [slurm options] corpus-sweep.sbatch <run> <phitex binary> <jobs> <par> <timeout> [ids|-] [sweep.py options]
 #
 # ONE job: every pinned pdfLaTeX manual built cold by <phitex binary> at
 # -j 1 and -j 8 (scripts/ci/sweep.py), against the oracle cache, in the
@@ -14,6 +14,8 @@ set -euo pipefail
 # (mc's nodes have no apptainer: the user-space one, apptainer-user.sbatch)
 command -v apptainer > /dev/null || PATH=$HOME/shared-cache/apptainer/usr/bin:$PATH
 run=$1 bin=$2 jobs=$3 par=$4 tmo=$5 ids=${6:-}
+[ "$ids" = - ] && ids=
+shift $(($# < 6 ? $# : 6))
 CI=$HOME/code/flinner/phitex-ci
 image=${CI_IMAGE:-phitex-ci-2026-09-25}
 sif=$HOME/shared-cache/phitex/$image.sif
@@ -37,6 +39,6 @@ if box getent hosts export.arxiv.org >/dev/null 2>&1; then echo "FAILED: the box
 box sh -c 'command -v qpdf pdftotext pdfinfo; true'
 box python3 /h/ci/sweep.py run --list /h/data/manuals.json --doc /usr/share/doc/texlive \
   --cache /o --bin /b/phitex --out /w/results ${ids:+--ids "$ids"} \
-  --jobs "$jobs" --par "$par" --timeout "$tmo"
+  --jobs "$jobs" --par "$par" --timeout "$tmo" "$@"
 box python3 /h/ci/sweep.py table /w/results --json /w/results/table.json > "$w/results/table.txt" 2>&1 || true
 echo "end $(date -Is)"

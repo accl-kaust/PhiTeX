@@ -1,0 +1,61 @@
+{
+ "about": "Minimal repros of the research corpus's differences (ci/research.json), each a directory here; run as the research shard runs its list: GATE_RESEARCH_LIST=bench/corpus-repro/repro.json GATE_RESEARCH_DOC=bench/corpus-repro gate-shard.sh research 0 1",
+ "documents": [
+  {
+   "id": "siunitx-s",
+   "engine": "pdflatex",
+   "dir": "siunitx-s",
+   "main": "siunitx-s.tex",
+   "path": "siunitx-s/siunitx-s.tex"
+  },
+  {
+   "id": "devnull",
+   "engine": "pdflatex",
+   "dir": "devnull",
+   "main": "devnull.tex",
+   "path": "devnull/devnull.tex"
+  },
+  {
+   "id": "bibtex8-refsection",
+   "engine": "pdflatex",
+   "dir": "bibtex8-refsection",
+   "main": "bibtex8-refsection.tex",
+   "path": "bibtex8-refsection/bibtex8-refsection.tex"
+  },
+  {
+   "id": "revtex-bib",
+   "engine": "pdflatex",
+   "dir": "revtex-bib",
+   "main": "revtex-bib.tex",
+   "path": "revtex-bib/revtex-bib.tex"
+  },
+  {
+   "id": "achemso-bib",
+   "engine": "pdflatex",
+   "dir": "achemso-bib",
+   "main": "achemso-bib.tex",
+   "path": "achemso-bib/achemso-bib.tex"
+  },
+  {
+   "id": "pdftexbanner",
+   "engine": "pdflatex",
+   "dir": "pdftexbanner",
+   "main": "pdftexbanner.tex",
+   "path": "pdftexbanner/pdftexbanner.tex"
+  },
+  {
+   "id": "font-dvi-palladio",
+   "engine": "pdflatex",
+   "dir": "font-dvi-palladio",
+   "main": "font-dvi-palladio.tex",
+   "path": "font-dvi-palladio/font-dvi-palladio.tex"
+  },
+  {
+   "id": "font-dvi-bera",
+   "engine": "pdflatex",
+   "dir": "font-dvi-bera",
+   "main": "font-dvi-bera.tex",
+   "path": "font-dvi-bera/font-dvi-bera.tex"
+  }
+ ]
+}

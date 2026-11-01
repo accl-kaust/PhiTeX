@@ -1,0 +1,67 @@
+% book example for classicthesis.sty
+\RequirePackage{silence} % :-\
+    \WarningFilter{scrbook}{Usage of package `titlesec'}
+    \WarningFilter{titlesec}{Non standard sectioning command detected}
+\documentclass[11pt,a5paper,footinclude,headinclude]{scrbook} % KOMA-Script book
+\usepackage[T1]{fontenc}
+\usepackage{lipsum}
+%\usepackage{hyperref}
+\usepackage[parts,eulerchapternumbers=true,beramono=false,eulermath=true]{../classicthesis} % ,manychapters
+%\usepackage[osf]{libertine}
+%\hypersetup{linktocpage=true,bookmarksnumbered=true,pageanchor=true,hypertexnames=false,naturalnames=true,plainpages=false}
+
+\begin{document}
+%   \pagestyle{scrheadings}
+%   \manualmark
+%   \markboth{\spacedlowsmallcaps{\contentsname}}{\spacedlowsmallcaps{\contentsname}}
+
+    \tableofcontents
+
+%   \automark[section]{chapter}
+%   \renewcommand{\chaptermark}[1]{\markboth{\spacedlowsmallcaps{#1}}{\spacedlowsmallcaps{#1}}}
+%   \renewcommand{\sectionmark}[1]{\markright{\thesection\enspace\spacedlowsmallcaps{#1}}}
+
+    % use \cleardoublepage here to avoid problems with pdfbookmark
+    \cleardoublepage\part{Test Part}
+    \chapter{Test Chapter}
+    \lipsum[1]
+
+    \section{A Section}
+    \begin{equation}
+    	\kappa =\frac{\xi}{E_{\textrm{max}}} %\mathbb{ZNR}
+    \end{equation}
+    $E_{\textrm{max}}$ is the maximum transferable energy in a single
+    collision with an atomic electron.
+    \[
+    E_{\textrm{max}} =\frac{2 m_{\textrm{e}} \beta^2\gamma^2 }{1 +
+    	2\gamma m_{\textrm{e}}/m_{\textrm{x}} + \left ( m_{\textrm{e}}
+    	/m_{\textrm{x}}\right)^2}\ ,
+    \]
+    where $\gamma = E/m_{\textrm{x}}$, $E$ is energy and
+    $m_{\textrm{x}}$ the mass of the incident particle,
+    $\beta^2 = 1 - 1/\gamma^2$ and $m_{\textrm{e}}$ is the electron mass.
+    $\xi$ comes from the Rutherford scattering cross section
+    and is defined as:
+    \begin{eqnarray*} \xi  = \frac{2\pi z^2 e^4 N_{\textrm{Av}} Z \rho
+    		\delta x}{m_{\textrm{e}} \beta^2 c^2 A} =  153.4 \frac{z^2}{\beta^2}
+    	\frac{Z}{A}
+    	\rho \delta x \quad\textrm{keV},
+    \end{eqnarray*}
+
+    \chapter{Test Chapter}
+    \lipsum[1]
+
+    \section{A Section}
+    \lipsum[1]
+
+%   \include{multiToC}
+
+    \appendix
+    \cleardoublepage\part{Appendix}
+    \chapter{Appendix Chapter}
+    \lipsum[1]
+
+    \section{A Section}
+    \lipsum[1]
+
+\end{document}

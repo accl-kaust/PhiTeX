@@ -6,15 +6,42 @@
 #
 #   gate-shard.sh all SPEC...           the whole gate in one job (below:
 #                                       mc caps a user's submitted jobs)
-#   gate-shard.sh build                 the commit's binaries, once: phitex-tex's
+#   gate-shard.sh build [PARTS]         the commit's binaries, once: phitex-tex's
 #                                       test binaries (fastdev) and the release
 #                                       CLI, built side by side, left in
 #                                       $r/store for the other shards
-#                                       (job.sbatch ACCL_STORE_OUT/IN)
+#                                       (job.sbatch ACCL_STORE_OUT/IN); PARTS
+#                                       main, tests (both by default) or cli
+#                                       (the users' CLI alone, cli/rel)
 #   gate-shard.sh lint                  clippy -D warnings (no fmt: version skew),
 #                                       phitex-live checked for wasm32-wasip1-threads
 #   gate-shard.sh suites                the local suites of phitex-tex
 #   gate-shard.sh latex K N             the latex target's tests, shard K of N
+#   gate-shard.sh research K N [shelf]  the research corpus (ci/research.json:
+#                                       the templates researchers start from,
+#                                       ci/research/), shard K of N: each built
+#                                       by TeX Live's engines to its fixpoint
+#                                       (scripts/ci/manuals.py's oracle) and by
+#                                       the users' CLI (cli/rel) --exact-pdf at
+#                                       -j 1 and 4 (scripts/ci/sweep.py), the
+#                                       PDFs byte for byte; red: a PDF that
+#                                       differs, a build or an oracle that
+#                                       fails. `shelf`: the CLI with --shelf
+#                                       (Shelf as served, the network), against
+#                                       TeX Live's engines over the same
+#                                       release's files alone (not the gate:
+#                                       research-shelf.yml). In the -doc image
+#                                       (its language collections)
+#   gate-shard.sh manuals K N           TeX Live's manuals (ci/manuals.json), shard
+#                                       K of N, by the users' CLI at -j 1 and 4,
+#                                       each PDF's md5 against its pinned
+#                                       oracle's; red: one not identical,
+#                                       unless ci/manuals-not-identical.tsv
+#                                       names it (reported apart with its
+#                                       cause). In the -doc image
+#   gate-shard.sh wasm                  scripts/wasm.sh check: phitex-wasm built
+#                                       (its own build, no store), its documents
+#                                       in Node at -j 4 and 1 against pdfTeX's
 #   gate-shard.sh tests                 every other test binary of the workspace
 #                                       (each crate's integration tests, the CLI's
 #                                       on TeX Live among them, and phitex-live's
@@ -322,7 +349,8 @@ case $shard in
   build)
     # build [PARTS]: main (the CLIs and phitex-tex's suites and latex
     # test binaries), tests (the tests shard's binaries), both unless
-    # named: GitHub builds them in two jobs at once
+    # named: GitHub builds them in two jobs at once; cli: the users' CLI
+    # alone (research-shelf.yml's)
     parts=" ${*:-main tests} "
     # (each in its own target directory, side by side: one cargo would
     # hold the other's lock)
@@ -338,6 +366,9 @@ case $shard in
       # the engine's recorder) and the users' (no feature))
       ( CARGO_TARGET_DIR=$PWD/target-cli cargo build -q --release -p phitex-cli --features phitex-tex/profile,phitex-tex/observe > "$r/build.txt" 2>&1; echo "EXIT $?" >> "$r/build.txt" ) &
       ( CARGO_TARGET_DIR=$PWD/target-cli-prof cargo build -q --release -p phitex-cli --features phitex-tex/profile > "$r/build-prof.txt" 2>&1; echo "EXIT $?" >> "$r/build-prof.txt" ) &
+      ( CARGO_TARGET_DIR=$PWD/target-cli-rel cargo build -q --release -p phitex-cli > "$r/build-rel.txt" 2>&1; echo "EXIT $?" >> "$r/build-rel.txt" ) &
+    fi
+    if [[ $parts == *" cli "* ]] && [[ $parts != *" main "* ]]; then
       ( CARGO_TARGET_DIR=$PWD/target-cli-rel cargo build -q --release -p phitex-cli > "$r/build-rel.txt" 2>&1; echo "EXIT $?" >> "$r/build-rel.txt" ) &
     fi
     if [[ $parts == *" tests "* ]]; then
@@ -357,6 +388,9 @@ case $shard in
     fi
     if [[ $parts == *" tests "* ]]; then
       grep -q '^EXIT 0$' "$r/build-wtests.txt" || red "build (the tests shard's): $(grep -m1 '^error' "$r/build-wtests.txt")"
+    fi
+    if [[ $parts == *" cli "* ]] && [[ $parts != *" main "* ]]; then
+      grep -q '^EXIT 0$' "$r/build-rel.txt" || red "build (cli, release): $(grep -m1 '^error' "$r/build-rel.txt")"
     fi
     if [ $status = green ]; then
       mkdir -p "$r/store.tmp"
@@ -378,6 +412,11 @@ for l in open(sys.argv[1]):
         cp target-cli-prof/release/phitex "$r/store.tmp/cli/prof/phitex"
         cp target-cli-rel/release/phitex "$r/store.tmp/cli/rel/phitex"
         sed -n 's/^build_s //p' "$r/times.txt" | tee "$r/store.tmp/tests/build_s" > "$r/store.tmp/cli/build_s"
+      fi
+      if [[ $parts == *" cli "* ]] && [[ $parts != *" main "* ]]; then
+        mkdir -p "$r/store.tmp/cli/rel"
+        cp target-cli-rel/release/phitex "$r/store.tmp/cli/rel/phitex"
+        sed -n 's/^build_s //p' "$r/times.txt" > "$r/store.tmp/cli/build_s"
       fi
       if [[ $parts == *" tests "* ]]; then
         mkdir -p "$r/store.tmp/wtests/bin"
@@ -524,6 +563,107 @@ PY
       awk '$3 == 0 {print $1 " (passes now)"} $3 == 124 || $3 == 137 {print $1 " (timed out)"} $3 != 0 && $3 != 124 && $3 != 137 {print $1}' "$r/t-known/walls.txt" > "$r/known-red.txt"
       cp "$w/red.keep" "$r/red.txt"
       status=$s
+    fi
+    ;;
+  research)
+    # research K N [shelf]: shard K of N of ci/research.json. The oracle
+    # (TeX Live's pdflatex/xelatex, BibTeX, biber, makeindex to the
+    # fixpoint) built here, GATE_RESEARCH_PAR processes at once (each a
+    # slice of the shard: its documents k, k+n, ... dealt out again); then
+    # the users' CLI cold at each -j of GATE_RESEARCH_JOBS against it
+    k=$1 n=$2 mode=${3:-}
+    # (GATE_RESEARCH_LIST and _DOC: another list in the same form, as
+    # bench/corpus-repro/repro.json)
+    list=${GATE_RESEARCH_LIST:-ci/research.json} docs=${GATE_RESEARCH_DOC:-ci/research}
+    fetched
+    bin=$w/bin/cli/rel/phitex
+    if [ ! -x "$bin" ]; then
+      red "research: no CLI at \$w/bin/cli/rel/phitex"
+    else
+      export CI_WORK=$w/ci
+      mkdir -p "$CI_WORK" "$r/oracle"
+      if [ "$mode" = shelf ]; then
+        # (the oracle: TeX Live's own engines over a texmf tree of the
+        # release this commit builds in, as served, and nothing else
+        # (shelf/scripts/tl-tree.sh, as Shelf's release check makes it),
+        # their formats made there; the release fetched from the host)
+        rel=$(sed -n 's/^pub const RELEASE: &str = "\(.*\)";/\1/p' crates/cli/src/shelf.rs)
+        s0=$(date +%s)
+        python3 -I shelf/scripts/fetch-live.py "${SHELF_HOST:-https://v1.shelf.phitex.org}" "${rel%%.*}" "$w/releases" > "$r/shelf-tree.txt" 2>&1 ||
+          red "research: fetching Shelf's releases failed: $(tail -1 "$r/shelf-tree.txt")"
+        . shelf/scripts/tl-tree.sh
+        tree_unpack "$w/releases/${rel%%.*}" "$rel" "$w/tl/tree/texmf-dist" >> "$r/shelf-tree.txt" 2>&1 ||
+          red "research: unpacking $rel failed: $(tail -1 "$r/shelf-tree.txt")"
+        tl_vars "$w/tl" "$w/tl/tree/texmf-dist" "$w/tl/tree/texmf-dist" > "$w/tl/env.txt"
+        mapfile -t tlenv < "$w/tl/env.txt"
+        tl() { env "${tlenv[@]}" SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1 "$@"; }
+        tl_formats "$w/tl"
+        cp "$w/tl/fmt.log" "$r/shelf-fmt.log" 2>/dev/null
+        echo "$rel: TeX Live's formats from its files: $(cd "$w/tl/fmt" && ls *.fmt 2>/dev/null | tr '\n' ' ') ($(( $(date +%s) - s0 )) s)" >> "$r/shelf-tree.txt"
+        export CI_ORACLE_ENV=$w/tl/env.txt
+      fi
+      P=${GATE_RESEARCH_PAR:-4}
+      s0=$(date +%s)
+      for ((i = 0; i < P; i++)); do
+        python3 -I scripts/ci/manuals.py oracle --list "$list" --doc "$docs" --cache "$w/oracle" \
+          --shard "$((k + n * i))/$((n * P))" > "$r/oracle/oracle-$i.txt" 2>&1 &
+      done
+      wait
+      echo "oracle_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
+      # (the oracle kept whole: its PDFs beside PhiTeX's for a red, and
+      # the TeX Live PDFs research-shelf.yml compares with)
+      cp -a "$w/oracle/." "$r/oracle/"
+      s0=$(date +%s)
+      python3 -I scripts/ci/sweep.py run --list "$list" --doc "$docs" --cache "$w/oracle" --bin "$bin" \
+        --out "$r/research" --shard "$k/$n" --engines pdflatex,xelatex --tools bibtex,biber,makeindex,glossaries \
+        --jobs "${GATE_RESEARCH_JOBS:-1,4}" --par "${GATE_RESEARCH_SWEEP_PAR:-1:4,4:1}" --timeout "${GATE_RESEARCH_TIMEOUT:-900}" \
+        ${mode:+--$mode} > "$r/sweep.txt" 2>&1 || red "research: the sweep failed: $(tail -1 "$r/sweep.txt")"
+      echo "sweep_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
+      python3 -I scripts/ci/sweep.py table "$r/research" --json "$r/research/table.json" > "$r/table.txt" 2>&1
+      # (each document identical at every -j, else red: verdict.py)
+      python3 -I scripts/ci/verdict.py "$list" "$k/$n" "${GATE_RESEARCH_JOBS:-1,4}" "$r/research" \
+        --prefix "research: " ${mode:+--lane "$mode"} >> "$r/red.txt"
+      grep -q . "$r/red.txt" && status=red
+    fi
+    ;;
+  wasm)
+    # the engine as wasm32-wasip1-threads (scripts/wasm.sh check: built
+    # here, then a plain TeX, a LaTeX and an -ini document in Node at 4 and
+    # 1 threads, each PDF byte for byte against pdfTeX's fixture)
+    cache_on
+    scripts/wasm.sh check > "$r/wasm.txt" 2>&1
+    built
+    cache_off
+    grep -q '^WASM_OK$' "$r/wasm.txt" || red "wasm: $(grep -m1 -E '^FAIL|^error' "$r/wasm.txt" | cut -c1-200)"
+    ;;
+  manuals)
+    # manuals K N: shard K of N of ci/manuals.json, TeX Live's own
+    # documentation (the -doc image's /usr/share/doc/texlive), each by the
+    # users' CLI cold at each -j of GATE_MANUALS_JOBS against its oracle's
+    # md5 pinned in the list (TeX Live's engines to the fixpoint, built on
+    # mc from the same image: manuals.py); a PDF that differs gets its
+    # oracle built here, for pdfdiff. The manuals not identical when the
+    # gate took them (ci/manuals-not-identical.tsv, with the cause) are
+    # built too and reported apart (known-red.txt), never red; every other
+    # one is red unless identical
+    k=$1 n=$2
+    fetched
+    bin=$w/bin/cli/rel/phitex
+    if [ ! -x "$bin" ]; then
+      red "manuals: no CLI at \$w/bin/cli/rel/phitex"
+    else
+      export CI_WORK=$w/ci
+      mkdir -p "$CI_WORK" "$w/no-oracle"
+      s0=$(date +%s)
+      python3 -I scripts/ci/sweep.py run --list ci/manuals.json --doc /usr/share/doc/texlive --cache "$w/no-oracle" --bin "$bin" \
+        --out "$r/manuals" --shard "$k/$n" --engines pdflatex,xelatex --tools bibtex,biber,makeindex,glossaries \
+        --jobs "${GATE_MANUALS_JOBS:-1,4}" --par "${GATE_MANUALS_PAR:-1:4,4:1}" --timeout "${GATE_MANUALS_TIMEOUT:-300}" \
+        --diff-oracle --known ci/manuals-not-identical.tsv > "$r/sweep.txt" 2>&1 || red "manuals: the sweep failed: $(tail -1 "$r/sweep.txt")"
+      echo "sweep_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
+      python3 -I scripts/ci/sweep.py table "$r/manuals" --json "$r/manuals/table.json" > "$r/table.txt" 2>&1
+      python3 -I scripts/ci/verdict.py ci/manuals.json "$k/$n" "${GATE_MANUALS_JOBS:-1,4}" "$r/manuals" --prefix "manuals: " \
+        --known ci/manuals-not-identical.tsv --known-out "$r/known-red.txt" >> "$r/red.txt"
+      grep -q . "$r/red.txt" && status=red
     fi
     ;;
   ams)

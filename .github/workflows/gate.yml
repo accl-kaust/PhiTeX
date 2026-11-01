@@ -82,6 +82,67 @@ jobs:
           name: r-${{ matrix.name }}
           path: out/r
           retention-days: 14
+  # (the corpora, in the -doc image: TeX Live's documentation and the
+  # language collections their XeLaTeX documents need. research: the
+  # templates researchers start from, ci/research.json, built here by TeX
+  # Live's engines and by the users' CLI, the PDFs byte for byte;
+  # manuals: TeX Live's manuals, ci/manuals.json, against their oracles'
+  # pinned md5s, ci/manuals-not-identical.tsv's reported apart)
+  corpus:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: research-0, args: "research 0 2" }
+          - { name: research-1, args: "research 1 2" }
+          - { name: manuals-0, args: "manuals 0 8" }
+          - { name: manuals-1, args: "manuals 1 8" }
+          - { name: manuals-2, args: "manuals 2 8" }
+          - { name: manuals-3, args: "manuals 3 8" }
+          - { name: manuals-4, args: "manuals 4 8" }
+          - { name: manuals-5, args: "manuals 5 8" }
+          - { name: manuals-6, args: "manuals 6 8" }
+          - { name: manuals-7, args: "manuals 7 8" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE-doc"
+      - uses: actions/download-artifact@v4
+        with:
+          name: store
+      - run: mkdir -p out/store && tar -C out/store -xf store.tar
+      - run: IMAGE="$IMAGE-doc" scripts/ci/gate-gh.sh ${{ matrix.args }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r-${{ matrix.name }}
+          path: out/r
+          retention-days: 14
+  # (the engine as wasm32-wasip1-threads, its documents in Node against
+  # pdfTeX's: its own build, beside the others)
+  wasm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE"
+      - run: scripts/ci/gate-gh.sh wasm
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r-wasm
+          path: out/r
+          retention-days: 14
   # (every other test binary: each crate's integration tests, the CLI's
   # on TeX Live among them, and phitex-live's unit tests, as `cargo test`
   # builds them; checks.yml runs the unit tests only, without TeX Live.
@@ -136,11 +197,12 @@ jobs:
           path: out/r
           retention-days: 14
   gate:
-    needs: [build, shard, build-tests, tests]
+    needs: [build, shard, corpus, wasm, build-tests, tests]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - run: |
-          echo "build ${{ needs.build.result }}, shards ${{ needs.shard.result }}, build-tests ${{ needs.build-tests.result }}, tests ${{ needs.tests.result }}"
+          echo "build ${{ needs.build.result }}, shards ${{ needs.shard.result }}, corpus ${{ needs.corpus.result }}, wasm ${{ needs.wasm.result }}, build-tests ${{ needs.build-tests.result }}, tests ${{ needs.tests.result }}"
           [ "${{ needs.build.result }}" = success ] && [ "${{ needs.shard.result }}" = success ] &&
+            [ "${{ needs.corpus.result }}" = success ] && [ "${{ needs.wasm.result }}" = success ] &&
             [ "${{ needs.build-tests.result }}" = success ] && [ "${{ needs.tests.result }}" = success ]
