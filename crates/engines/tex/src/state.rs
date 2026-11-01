@@ -2077,13 +2077,14 @@ impl State {
             // steps make from the one read: `\global\advance\@listdepth
             // \@ne`, then `\advance\@listdepth\m@ne` in a group left
             // open, KOMA's addmargin, inside it 0 and outside 1)
-            let what = if s.map.keep && !(self.steps_under_scope(l) && !s.base_unread) {
-                Pub::Rel(i64::from(s.map.add))
-            } else if s.map.keep {
+            let made = s.map.keep && !s.base_unread && self.steps_under_scope(l);
+            let what = if made {
                 Pub::Value(crate::val::int_id(
                     v,
                     i64::from(s.map.apply(crate::val::i32_of(v, s.base))),
                 ))
+            } else if s.map.keep {
+                Pub::Rel(i64::from(s.map.add))
             } else {
                 Pub::Value(crate::val::int_id(v, i64::from(s.map.add)))
             };
