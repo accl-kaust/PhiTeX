@@ -270,6 +270,20 @@ fn pdf_image_write_error() {
     }
 }
 
+/// `\inputlineno` in the output routine is the line the page builder
+/// was called at (the file stays on the input stack under the routine's
+/// tokens, §1025): each page's routine writes it to the `.aux`, read back
+/// into the text. A finisher's routine read only token lists and gave 0
+/// (the user's acmart paper: every routine at line 0, pdfTeX's at the
+/// lines it fired at). pdflatex's PDF at -j1 and -j4.
+#[test]
+fn output_inputlineno() {
+    check("output_inputlineno");
+    let want = std::fs::read(fixtures().join("output_inputlineno.pdf")).expect("the oracle");
+    let (got, term) = build_j("output_inputlineno", 4);
+    assert!(got == want, "-j4: the PDF differs from pdflatex's:\n{term}");
+}
+
 repro!(
     mktex_written_source,
     "TeX Live manual feynmf (its template): a font whose METAFONT source the job writes is made by kpathsea's `mktextfm` and `mktexpk` from the file the run before wrote; only the CLI's finder made fonts, from sources on disk: 'Metric (TFM) file not found' at every round"

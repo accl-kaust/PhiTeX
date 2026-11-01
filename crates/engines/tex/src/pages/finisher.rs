@@ -1168,6 +1168,14 @@ impl Run<'_, '_> {
         // on: the piece's items after it are on the next page, read
         // there, [`PageStart::tail`], not here)
         let tail = !fin.in_material && !at_end && !own.is_empty();
+        // (the line the builder was called at where the page fired: the
+        // routine's `\inputlineno`, [`Run::fire_line`])
+        self.fire_line = units.iter().find(|u| u.0 == pid).and_then(|u| {
+            let k = i64::from(fin.k);
+            u.2.iter()
+                .find(|&&x| nodes::tag(v, x) == nodes::T_BUILD_PAGE && int_at(v, x, 1) == k)
+                .and_then(|&x| nodes::build_page_line(v, x))
+        });
         // (the own unit's other parts read as they are used: its locals
         // always, its check only where the candidate is inside it; of a
         // local or a name standing at the candidate, which it is, and its

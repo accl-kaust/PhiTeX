@@ -650,6 +650,11 @@ pub(crate) struct Run<'c, 'a> {
     /// reports' `pack_begin_line` (§815), marked (None: the paragraph
     /// began in another node's run).
     pub last_par_line: Option<LineMark>,
+    /// A finisher's: the line the page builder was called at where its
+    /// page fired (`nodes::build_page_line`), what TeX's `line` is while
+    /// the routine reads only token lists (§1025: the file stays on the
+    /// input stack under them).
+    pub fire_line: Option<LineMark>,
     /// And where it began ([`Run::diag_place`] at `new_graf`): its box
     /// reports' place.
     pub last_par_place: Option<DiagPlace>,
@@ -1096,6 +1101,7 @@ impl<'c, 'a> Run<'c, 'a> {
             next_lid: 0,
             last_par: (0, 0),
             last_par_line: None,
+            fire_line: None,
             last_par_place: None,
             doc: false,
             fread: Vec::new(),

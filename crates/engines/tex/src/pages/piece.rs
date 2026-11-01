@@ -252,7 +252,21 @@ impl Run<'_, '_> {
             };
             self.contribute("items", v.seq_unit(v.list(vec![v.int(0), m])));
         }
-        let m = v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(i64::from(k))]);
+        // (with the line the builder is called at, as its node's text
+        // has it: a routine run here reads it as `\inputlineno`, §1025's
+        // input stack holding the file under the routine's tokens;
+        // `nodes::build_page_line`)
+        let mut m = vec![v.int(nodes::T_BUILD_PAGE), v.int(i64::from(k))];
+        match self.line_mark() {
+            (Some(n), ..) => m.extend([v.int(1), v.int(n)]),
+            (None, _, _, Some((node, l))) => m.extend([
+                v.int(2),
+                v.int(i64::from_ne_bytes(node.to_ne_bytes())),
+                v.int(i64::from(l)),
+            ]),
+            _ => {}
+        }
+        let m = v.list(m);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), m])));
         Ok(())
     }

@@ -40,6 +40,24 @@ pub(crate) const T_NATIVE: i64 = 83;
 pub(crate) const T_DELETE: i64 = 99;
 /// A point where tex.web calls `build_page` (§994).
 pub(crate) const T_BUILD_PAGE: i64 = 98;
+
+/// The line a `T_BUILD_PAGE` marker `[tag, k, ...]` was put at
+/// ([`crate::run::LineMark`]): `[.., 1, n]` a file's line `n`, `[.., 2,
+/// node, l]` line `l` of a document node's text (its number read from
+/// the lines before that node only where it is used); none else.
+pub(crate) fn build_page_line(v: &Values, x: ValueId) -> Option<crate::run::LineMark> {
+    let xs = v.with_list(x, <[ValueId]>::to_vec)?;
+    let at = |i: usize| xs.get(i).and_then(|&y| v.as_int(y));
+    match at(2)? {
+        1 => Some((Some(at(3)?), 0, None, None)),
+        2 => {
+            let node = u64::from_ne_bytes(at(3)?.to_ne_bytes());
+            let l = u32::try_from(at(4)?).ok()?;
+            Some((None, 0, Some(ValueId::UNIT), Some((node, l))))
+        }
+        _ => None,
+    }
+}
 /// A space factor transition in a horizontal list (§1034, §1043): `[t,
 /// kind, n]`, kind 0 sets the factor to `n`, kind 1 is §1034's update by
 /// an `sf_code` `n` above 1000 (1000 if the factor was below 1000, else

@@ -1,0 +1,152 @@
+% \inputlineno in the output routine: pdfTeX gives the line the page
+% builder was called at (the file stays on the input stack under the
+% routine's tokens, tex.web §1025). Each page's routine writes it to the
+% .aux, read back into the text on the next run.
+\documentclass{article}
+\makeatletter
+\let\repro@outputpage\@outputpage
+\def\@outputpage{\immediate\write\@auxout{\string\repro@fired{\the\c@page}{\the\inputlineno}}\repro@outputpage}
+\def\repro@fired#1#2{\expandafter\gdef\csname repro@line#1\endcsname{#2}}
+\def\firedat#1{\expandafter\ifx\csname repro@line#1\endcsname\relax ??\else\csname repro@line#1\endcsname\fi}
+\makeatother
+\begin{document}
+Pages fired at lines \firedat{1}, \firedat{2}, \firedat{3} and \firedat{4}.
+
+Paragraph 1 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 2 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 3 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 4 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 5 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 6 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 7 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 8 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 9 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 10 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 11 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 12 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 13 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 14 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 15 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 16 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 17 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 18 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 19 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 20 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 21 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 22 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 23 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 24 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 25 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 26 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 27 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 28 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 29 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 30 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+\newpage
+
+Paragraph 31 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 32 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 33 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 34 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 35 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 36 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 37 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 38 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 39 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 40 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 41 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 42 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 43 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 44 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+Paragraph 45 of the text, long enough to make a few lines of the page so that the
+pages fill at their own lines, one after another, as the paragraphs come in turn.
+
+\end{document}

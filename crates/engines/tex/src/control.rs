@@ -2786,7 +2786,12 @@ impl Run<'_, '_> {
                     before + mine
                 }
             }
-            None => 0,
+            // (no file on the input stack: a finisher's routine reads the
+            // line its page fired at, the file under the routine's tokens)
+            None => match self.fire_line {
+                Some(m) => self.line_of_mark(m)?,
+                None => 0,
+            },
         };
         if crate::exec::obs_flag!("PHITEX_LINE_TRACE") {
             let levels: Vec<String> = self
