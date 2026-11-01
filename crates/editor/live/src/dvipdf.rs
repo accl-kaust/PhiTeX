@@ -165,6 +165,10 @@ impl Files for JobFiles {
     fn apply_filter(&self, template: &[u8], input: &[u8], version: i32) -> Option<Arc<[u8]>> {
         self.files.apply_filter(template, input, version)
     }
+
+    fn gs_font(&self, name: &[u8]) -> Option<Arc<[u8]>> {
+        self.files.gs_font(name)
+    }
 }
 
 /// The PDF dvipdfmx makes of `dvi` (`dvipdfmx -q`, named `pdf_name`,

@@ -123,6 +123,11 @@ impl Files for Shared {
             .unwrap_or_else(PoisonError::into_inner)
             .read(path)
     }
+
+    fn gs_font(&self, name: &[u8]) -> Option<Arc<[u8]>> {
+        let p = crate::tex::gs_font(std::str::from_utf8(name).ok()?)?;
+        std::fs::read(p).ok().map(Arc::from)
+    }
 }
 
 /// The PDF dvipdfmx makes of `dvi` (named `pdf_name`), or why not.
