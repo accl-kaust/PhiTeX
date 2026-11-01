@@ -1115,9 +1115,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 v.building(false);
             }
             if let Some(l) = &lsp {
-                l.built(&b);
                 // (what phitex.savePdf copies: the PDF file, else a DVI's
-                // PDF made for the viewer)
+                // PDF made for the viewer; set before the build is told
+                // ready, which an editor may answer with phitex.savePdf at
+                // once, on the LSP's own thread: told first, it was asked
+                // before the PDF was set, "no PDF yet", cli's
+                // watch_lsp_commands on gate 41348842123)
                 let pdf = match &written {
                     Some(p) if p.extension().is_some_and(|e| e == "pdf") => {
                         Some(crate::lsp::Pdf::File(p.clone()))
@@ -1127,6 +1130,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 if pdf.is_some() {
                     l.set_pdf(pdf);
                 }
+                l.built(&b);
             }
             status.set("");
             phitex_tex::timeline::lap("watch: the viewer's PDF and its diagnostics");
