@@ -775,18 +775,18 @@ fn xyz_dests(pdf: &str) -> Vec<(String, String, String)> {
     out
 }
 
-/// `\pdfdest ... xyz` under `\pdfsetmatrix` (pdfTeX's do_dest,
-/// pdftex.web, `do_dest`: "pdf_dest_xyz: if matrixused then set_rect_dimens(p,
-/// parent_box, x, y, pdf_width(p), pdf_height(p), pdf_depth(p), ...)"):
+/// `\pdfdest ... xyz` under `\pdfsetmatrix` (pdftex.web, `do_dest`:
+/// "`pdf_dest_xyz`: if `matrixused` then `set_rect_dimens(p,
+/// parent_box, x, y, pdf_width(p), pdf_height(p), pdf_depth(p), ...)`"):
 /// pdfTeX reads the node's width, height and depth, which only `fitr`
 /// sets, so its point is leftover node memory (heria's targets 4096pt
-/// above the page; docs/differences.md, "Destinations under a matrix"),
-/// and no pdftex oracle can be had. PhiTeX takes them as zero: the
+/// above the page; `docs/differences.md`, "Destinations under a matrix"),
+/// and no pdftex oracle can be had. `PhiTeX` takes them as zero: the
 /// dest's own point, transformed. Under the identity matrix that is the
 /// point written without one (`b` = `a`); a rotation about the
 /// `\pdfsave` point leaves that point where it is (`c` = `a`), and a
 /// point 20pt right of a save point raised 30pt, turned a quarter turn
-/// counterclockwise, is 50pt above `a` (`d`). PhiTeX wrote the corner
+/// counterclockwise, is 50pt above `a` (`d`). `PhiTeX` wrote the corner
 /// of the rotated parent box's bounding box (the box's whole extent
 /// taken as the dest's: heria's vertical-mode target at its canvas's
 /// corner, accl 22566, 22579).
@@ -827,7 +827,7 @@ fn dests_under_a_matrix() {
 /// buffer. pdflatex leaves `getversion.pdf` (hhtensor) and
 /// `BibBreeze.pdf` of 0 bytes, an empty article with hyperref too, and
 /// no file for an empty article without it (accl 22606, 22615).
-/// PhiTeX wrote no file.
+/// `PhiTeX` wrote no file.
 #[test]
 fn an_opened_pdf_without_pages_is_empty() {
     let dir = common::scratch("opened-pdf-without-pages");

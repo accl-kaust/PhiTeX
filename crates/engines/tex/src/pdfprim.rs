@@ -3334,9 +3334,6 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
     Ok(())
 }
 
-/// `\pdfximage` (pdfTeX §1358, `scale_image` §1359): the image's size
-/// from its header.
-#[allow(clippy::too_many_lines)]
 /// pdfTeX's `check_pdfversion` at read time: the PDF file opened
 /// ([`crate::fields::cell::PDF_OPENED`]).
 fn opened(r: &mut Run<'_, '_>) {
@@ -3344,6 +3341,9 @@ fn opened(r: &mut Run<'_, '_>) {
     r.set_cell(crate::fields::cell::PDF_OPENED, x, true);
 }
 
+/// `\pdfximage` (pdfTeX §1358, `scale_image` §1359): the image's size
+/// from its header.
+#[allow(clippy::too_many_lines)]
 fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     let v = r.v;
     let (mut w, mut h, mut d) = alt_rule(r)?;
@@ -3439,8 +3439,6 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     let mut pages = pages;
     let mut depth = depth;
     let got = if pdf_mode(r)? {
-        // (`check_pdfversion` before `read_image`, pdftex.web)
-        opened(r);
         ximage_step(
             r,
             XImageScan {
@@ -3598,6 +3596,8 @@ type XImageStep = Option<(Option<usize>, phitex_pdf::XImageInfo, i64, i64)>;
 /// `\\pdfximage` as a step (pdfTeX §1358, writeimg.c `read_image`):
 /// the image's object number and what TeX reads of it.
 fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
+    // (`check_pdfversion` before `read_image`, pdftex.web)
+    opened(r);
     let v = r.v;
     let fv = r.file(&x.name)?.unwrap_or(ValueId::UNIT);
     let mut ps = Vec::new();
