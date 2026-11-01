@@ -2026,11 +2026,11 @@ mod frontier_tests {
             at_ns: 0,
         };
         let at = |n: NodeId| n.raw() + 1;
-        super::frontier_back(&e, &ln, &range(b));
+        super::frontier_back(&e, ln, &range(b));
         assert_eq!(e.frontier.load(Ordering::Acquire), at(b));
-        super::frontier_back(&e, &ln, &range(a));
+        super::frontier_back(&e, ln, &range(a));
         assert_eq!(e.frontier.load(Ordering::Acquire), at(a));
-        super::frontier_back(&e, &ln, &range(b));
+        super::frontier_back(&e, ln, &range(b));
         assert_eq!(e.frontier.load(Ordering::Acquire), at(a), "past the frontier: stays");
         e.frontier.store(0, Ordering::Release);
         let changed = Wake {
@@ -2041,10 +2041,10 @@ mod frontier_tests {
             },
             at_ns: 0,
         };
-        super::frontier_back(&e, &ln, &changed);
-        super::frontier_back(&e, &an, &range(b));
+        super::frontier_back(&e, ln, &changed);
+        super::frontier_back(&e, an, &range(b));
         assert_eq!(e.frontier.load(Ordering::Acquire), 0, "no range of the layer's");
-        super::mark_stale_now(&e, None, &ln, range(b));
+        super::mark_stale_now(&e, None, ln, range(b));
         assert_eq!(e.frontier.load(Ordering::Acquire), at(b));
         e.evaluate(1).unwrap();
         assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(3));
