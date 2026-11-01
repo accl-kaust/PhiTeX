@@ -41,7 +41,9 @@ pub fn finder(dir: &Path) -> Finder {
         }
         if !font {
             let mut k = kpse().lock().ok()?;
-            let path = k.as_mut()?.find_file(name.as_bytes(), phitex_kpse::Format::Tex, false)?;
+            let path = k
+                .as_mut()?
+                .find_file(name.as_bytes(), phitex_kpse::Format::Tex, false)?;
             let path = String::from_utf8(path).ok()?;
             return Some((path.clone(), std::fs::read(&path).ok()?));
         }
