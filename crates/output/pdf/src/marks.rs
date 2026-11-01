@@ -408,7 +408,14 @@ impl PdfState {
         }
         let margin = self.p.dest_margin;
         let matrix = self.stacks.matrix_used();
-        let running = [RUNNING; 3];
+        // (pdfTeX passes the dest node's pdf_width, pdf_height and
+        // pdf_depth here, which `scan_pdf_dest` sets only for fitr: for
+        // the other kinds they are whatever `get_node` left in the node's
+        // memory, so its target lands anywhere, often 4096pt off the page.
+        // PhiTeX takes them as zero, the dest's own point transformed:
+        // what the branch without a matrix writes when the matrix is the
+        // identity. docs/differences.md, "Destinations under a matrix")
+        let point = [0; 3];
         let mut rect = Rect::default();
         match kind {
             DestKind::Xyz(_)
@@ -418,7 +425,7 @@ impl PdfState {
             | DestKind::FitBV
                 if matrix =>
             {
-                rect = self.set_rect_dimens(fr, x, y, running, margin);
+                rect = self.set_rect_dimens(fr, x, y, point, margin);
             }
             DestKind::Xyz(_) => {
                 rect.left = self.cur_h;

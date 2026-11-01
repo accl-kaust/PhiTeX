@@ -7178,6 +7178,23 @@ impl Build {
                 .is_some_and(|x| crate::assemble::file_bytes_shared(v, x).starts_with(b"%PDF"))
     }
 
+    /// Whether pdfTeX leaves a PDF file of no bytes: a read-time write
+    /// (`\immediate\pdfobj`, `\pdfximage`, `\pdfcatalog ...
+    /// openaction`: hyperref's at `\begin{document}`) opened it
+    /// (`check_pdfversion`), no page was shipped, and the job did not end
+    /// on a fatal error. pdfTeX's header sits in its buffer, which only
+    /// the finished file flushes ("No pages of output.").
+    #[must_use]
+    pub fn empty_pdf(&self) -> bool {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .def_value(self.dvi, v.field(crate::assemble::END_OPENED))
+            .is_some_and(|x| v.as_int(x).is_some_and(|n| n != 0))
+            && self.pages().is_empty()
+            && !self.fatal()
+    }
+
     /// The PDF file's layout, the link's (none: a DVI file, or no file):
     /// its exact bytes made when asked ([`phitex_pdf::Layout::exact`]),
     /// or an update section of a file holding an earlier one

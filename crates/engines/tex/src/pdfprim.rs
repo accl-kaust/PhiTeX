@@ -2856,6 +2856,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 },
             };
             r.set(&format!("pdf:objbody:{n}"), v.int(1), true);
+            if immediate && pdf_mode(r)? {
+                opened(r);
+            }
             // (`\immediate`, not a stream: written now, into an object
             // stream where they compress)
             if immediate && !stream && pdf_mode(r)? {
@@ -2888,6 +2891,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             // (`\immediate`: the form written now, pdfTeX §1357: its
             // resources' object, then each font it uses first)
             if immediate && pdf_mode(r)? {
+                opened(r);
                 let _ = alloc_obj(r)?;
                 let names = box_font_names(r, b)?;
                 crate::pdfout::fonts_first_used(r, &names)?;
@@ -3213,6 +3217,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     .is_none_or(|x| x == ValueId::UNIT);
                 r.set_cell(crate::fields::cell::PDF_OPENACTION, oa, true);
                 if first && pdf_mode(r)? {
+                    opened(r);
                     let _ = alloc_obj(r)?;
                     crate::pdfout::os_write(r)?;
                     action_target(r, oa)?;
@@ -3327,6 +3332,13 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// pdfTeX's `check_pdfversion` at read time: the PDF file opened
+/// ([`crate::fields::cell::PDF_OPENED`]).
+fn opened(r: &mut Run<'_, '_>) {
+    let x = r.v.int(1);
+    r.set_cell(crate::fields::cell::PDF_OPENED, x, true);
 }
 
 /// `\pdfximage` (pdfTeX §1358, `scale_image` §1359): the image's size
@@ -3584,6 +3596,8 @@ type XImageStep = Option<(Option<usize>, phitex_pdf::XImageInfo, i64, i64)>;
 /// `\\pdfximage` as a step (pdfTeX §1358, writeimg.c `read_image`):
 /// the image's object number and what TeX reads of it.
 fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
+    // (`check_pdfversion` before `read_image`, pdftex.web)
+    opened(r);
     let v = r.v;
     let fv = r.file(&x.name)?.unwrap_or(ValueId::UNIT);
     let mut ps = Vec::new();
