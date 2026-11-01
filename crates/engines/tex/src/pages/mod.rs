@@ -330,12 +330,13 @@ impl Page {
 }
 
 /// A span in a page's value, inline: `tag, a, b, c, len` (tags 0 piece,
-/// 1 routine, 2 held), flat in the list.
+/// 1 routine, 2 held, 3 held from a routine's), flat in the list.
 fn span_ints(v: &Values, src: Src, len: u32) -> [ValueId; 5] {
     let (t, a, b, c) = match src {
         Src::Piece { piece, item } => (0, piece, i64::from(item), 0),
         Src::Rtn { page, item } => (1, page, i64::from(item), 0),
         Src::Held { piece, item, from } => (2, piece, i64::from(item), i64::from(from)),
+        Src::HeldRtn { page, item, from } => (3, page, i64::from(item), i64::from(from)),
     };
     [
         v.int(t),
@@ -361,6 +362,11 @@ fn span_of_ints(v: &Values, c: &[ValueId]) -> Option<Span> {
         },
         2 => Src::Held {
             piece: n(1),
+            item: u(2),
+            from: u(3),
+        },
+        3 => Src::HeldRtn {
+            page: n(1),
             item: u(2),
             from: u(3),
         },

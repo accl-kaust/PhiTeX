@@ -960,6 +960,28 @@ impl Run<'_, '_> {
             x
         };
         let unit_of = |piece: i64| unit_ix.get(&piece).map(|&i| &units[i]);
+        // (§1021: the rest of insertion `x` from item `from` of its list,
+        // its top pruned; the whole where `from` is 0)
+        let rest = |x: ValueId, from: u32| -> Option<ValueId> {
+            if from == 0 {
+                return Some(x);
+            }
+            let mut side = Side::default();
+            let Some(Node::Ins(mut ins)) = nodes::decode(v, x, &mut side) else {
+                return None;
+            };
+            let tail = ins.list.split_off((from as usize).min(ins.list.len()));
+            let (rem, _) = phitex_typeset::page::prune_page_top(tail, ins.split_top_skip, false);
+            let b = phitex_typeset::pack::vpack(
+                rem.clone(),
+                Spec::Additional(0),
+                &PackParams::default(),
+            )
+            .node;
+            ins.height = b.height + b.depth;
+            ins.list = rem;
+            Some(nodes::encode(v, &Node::Ins(ins), &side))
+        };
         // (an item a source names, real)
         let item_raw = |src: Src| -> Option<ValueId> {
             match src {
@@ -974,28 +996,10 @@ impl Run<'_, '_> {
                 }
                 Src::Rtn { page, item } => rtn_items(page).get(item as usize).copied(),
                 Src::Held { piece, item, from } => {
-                    let raw = &unit_of(piece)?.2;
-                    let x = *raw.get(item as usize)?;
-                    if from == 0 {
-                        return Some(x);
-                    }
-                    let mut side = Side::default();
-                    let Some(Node::Ins(mut ins)) = nodes::decode(v, x, &mut side) else {
-                        return None;
-                    };
-                    // (§1021: the rest of a split, its top pruned)
-                    let tail = ins.list.split_off((from as usize).min(ins.list.len()));
-                    let (rem, _) =
-                        phitex_typeset::page::prune_page_top(tail, ins.split_top_skip, false);
-                    let b = phitex_typeset::pack::vpack(
-                        rem.clone(),
-                        Spec::Additional(0),
-                        &PackParams::default(),
-                    )
-                    .node;
-                    ins.height = b.height + b.depth;
-                    ins.list = rem;
-                    Some(nodes::encode(v, &Node::Ins(ins), &side))
+                    rest(*unit_of(piece)?.2.get(item as usize)?, from)
+                }
+                Src::HeldRtn { page, item, from } => {
+                    rest(*rtn_items(page).get(item as usize)?, from)
                 }
             }
         };
@@ -1612,7 +1616,7 @@ fn named_items(fin: &Page) -> phitex_defuse::FxHashMap<i64, Vec<u32>> {
                     crate::pages::end_sub_of(item).map_or(item, |(e, _)| e),
                 ),
                 Src::Held { piece, item, .. } => (piece, item),
-                Src::Rtn { .. } => continue,
+                Src::Rtn { .. } | Src::HeldRtn { .. } => continue,
             };
             named.entry(piece).or_default().push(ix);
         }

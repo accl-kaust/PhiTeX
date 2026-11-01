@@ -1688,7 +1688,7 @@ impl Run<'_, '_> {
         for s in &spans {
             let p = match s.src {
                 Src::Piece { piece, .. } | Src::Held { piece, .. } => piece,
-                Src::Rtn { .. } => continue,
+                Src::Rtn { .. } | Src::HeldRtn { .. } => continue,
             };
             let o = lc.order.get(&p).copied().unwrap_or(u64::MAX);
             if first.is_none_or(|f| o < f.0) {
@@ -1727,19 +1727,20 @@ impl Run<'_, '_> {
             let mut pages: Vec<i64> = spans
                 .iter()
                 .filter_map(|s| match s.src {
-                    Src::Rtn { page, .. } => Some(page),
+                    Src::Rtn { page, .. } | Src::HeldRtn { page, .. } => Some(page),
                     _ => None,
                 })
                 .collect();
+            pages.sort_unstable();
             pages.dedup();
             pages
                 .into_iter()
                 .filter_map(|p| lc.rtns.iter().rev().find(|r| r.0 == p).map(|r| (p, r.1)))
                 .collect()
         };
-        if !f.held_named {
+        if let Some(why) = f.held_unnamed {
             let msg = format!(
-                "page {}: an insertion held over is no piece's item from an index on (split twice, or a routine's): its finisher's page may part from the builder's",
+                "page {}: an insertion held over is no piece's item from an index on ({why}): its finisher's page may part from the builder's",
                 j + 1
             );
             assert!(!cfg!(any(debug_assertions, feature = "observe")), "{msg}");
@@ -1774,6 +1775,11 @@ impl Run<'_, '_> {
             Src::Rtn { page, item } => Src::Rtn {
                 page: j - page,
                 item,
+            },
+            Src::HeldRtn { page, item, from } => Src::HeldRtn {
+                page: j - page,
+                item,
+                from,
             },
             s => s,
         };
@@ -2150,6 +2156,7 @@ impl Enc<'_> {
             Src::Piece { piece, item } => (0, piece, i64::from(item), 0),
             Src::Rtn { page, item } => (1, page, i64::from(item), 0),
             Src::Held { piece, item, from } => (2, piece, i64::from(item), i64::from(from)),
+            Src::HeldRtn { page, item, from } => (3, page, i64::from(item), i64::from(from)),
         };
         self.i(t);
         self.i(a);
@@ -2445,6 +2452,11 @@ impl Dec<'_> {
             1 => Some(Src::Rtn { page: a, item: b }),
             2 => Some(Src::Held {
                 piece: a,
+                item: b,
+                from: c,
+            }),
+            3 => Some(Src::HeldRtn {
+                page: a,
                 item: b,
                 from: c,
             }),
@@ -2758,7 +2770,7 @@ fn decode_fire(d: &mut Dec<'_>) -> FireNote {
 fn state_names(lc: &LoopCarry, p: &FireNote) -> (usize, Vec<i64>, Vec<i64>) {
     let piece = |s: &Src| match *s {
         Src::Piece { piece, .. } | Src::Held { piece, .. } => Some(piece),
-        Src::Rtn { .. } => None,
+        Src::Rtn { .. } | Src::HeldRtn { .. } => None,
     };
     let named: Vec<i64> = p
         .carried
@@ -2783,11 +2795,17 @@ fn state_names(lc: &LoopCarry, p: &FireNote) -> (usize, Vec<i64>, Vec<i64>) {
         .carried
         .iter()
         .filter_map(|c| match c.src {
-            Some(Src::Rtn { page, .. }) => Some(page),
+            Some(Src::Rtn { page, .. } | Src::HeldRtn { page, .. }) => Some(page),
             _ => None,
         })
         .chain(lc.inf.iter().filter_map(|s| match *s {
-            Src::Rtn { page, .. } => Some(page),
+            Src::Rtn { page, .. } | Src::HeldRtn { page, .. } => Some(page),
+            _ => None,
+        }))
+        // (a routine's insertion held over: its list, where the next
+        // page splits it again)
+        .chain(p.held.iter().filter_map(|h| match h.0 {
+            Src::HeldRtn { page, .. } => Some(page),
             _ => None,
         }))
         .collect();
@@ -2823,7 +2841,7 @@ pub(crate) fn encode_state(v: &Values, st: &ScanState, lc: &LoopCarry, p: &FireN
         .iter()
         .copied()
         .filter(|s| match *s {
-            Src::Rtn { page, .. } => pages.binary_search(&page).is_ok(),
+            Src::Rtn { page, .. } | Src::HeldRtn { page, .. } => pages.binary_search(&page).is_ok(),
             Src::Piece { piece, .. } | Src::Held { piece, .. } => {
                 pieces.binary_search(&piece).is_ok()
             }

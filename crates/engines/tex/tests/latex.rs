@@ -1279,6 +1279,8 @@ latexmk_tests! {
     latexmk_corpus_center_after_item_j8: "corpus-center-after-item", 8;
     latexmk_corpus_center_small_j1: "corpus-center-small", 1;
     latexmk_corpus_center_small_j8: "corpus-center-small", 8;
+    latexmk_corpus_footnote_split_marginpar_j1: "corpus-footnote-split-marginpar", 1;
+    latexmk_corpus_footnote_split_marginpar_j8: "corpus-footnote-split-marginpar", 8;
 }
 
 /// The paragraph after `\end{center}` edited (one word): the build equals

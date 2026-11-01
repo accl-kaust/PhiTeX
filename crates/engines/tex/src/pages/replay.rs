@@ -240,6 +240,11 @@ pub(crate) enum Src {
     /// `from` on: held over to the next page (§1021: what a split left,
     /// or the whole insertion with `from` 0).
     Held { piece: i64, item: u32, from: u32 },
+    /// [`Src::Held`] of an insertion page `page`'s routine gave back
+    /// (item `item` of its list, [`Src::Rtn`]): LaTeX's `\@reinserts`
+    /// puts a page's footnotes back as insertions of the routine's own,
+    /// which the next page may split again.
+    HeldRtn { page: i64, item: u32, from: u32 },
 }
 
 /// `len` items from consecutive positions of one source ([`Src::Held`]:
@@ -329,10 +334,10 @@ pub(crate) struct LoopFire {
     pub holding: bool,
     pub classes: Vec<u16>,
     /// The insertions held over (§1022), measured, with their sources;
-    /// `held_named` false where a source could not be named (a defect,
-    /// said where the page is noted).
+    /// `held_unnamed` why a source could not be named (a defect, said
+    /// where the page is noted).
     pub held: Vec<(Src, Node)>,
-    pub held_named: bool,
+    pub held_unnamed: Option<&'static str>,
     /// The marks on the page, in order (ids in [`LoopCarry::marks`]).
     pub marks: Vec<u32>,
     /// The best break where it is a penalty (§1013: 10000 after this
@@ -383,7 +388,7 @@ pub(crate) fn loop_item_raw(lc: &LoopCarry, src: Src) -> Option<crate::vprof::PI
             let (_, _, items) = lc.rtns.iter().rev().find(|r| r.0 == page)?;
             items.get(item as usize).cloned()
         }
-        Src::Held { .. } => None,
+        Src::Held { .. } | Src::HeldRtn { .. } => None,
     }
 }
 
@@ -608,8 +613,17 @@ pub(crate) fn build_t(
                 // goes back too)
                 let topskip = f.contributions.len() == before.saturating_sub(f.best) + 2;
                 let holding = params.holding_inserts > 0;
-                let held = held_srcs(&f, &srcs, &ins, holding);
-                let held_named = held.is_some();
+                // (a piece's insertion's own list, where a rest of it is
+                // split again)
+                let lcr: &LoopCarry = lc;
+                let list_of_ins = |whole: Src| -> Option<Vec<Node>> {
+                    match loop_item_raw(lcr, whole)? {
+                        PItem::Node(Node::Ins(i)) => Some(i.list),
+                        _ => None,
+                    }
+                };
+                let held = held_srcs(&f, &srcs, &ins, holding, &list_of_ins);
+                let held_unnamed = held.as_ref().err().copied();
                 // (§1013: the best break, a penalty, is 10000 from here on)
                 let mut brk = None;
                 if f.output_penalty < phitex_typeset::linebreak::INF_PENALTY {
@@ -652,7 +666,7 @@ pub(crate) fn build_t(
                     holding,
                     classes: f.ins_records.iter().map(|r| r.n).collect(),
                     held,
-                    held_named,
+                    held_unnamed,
                     marks: f.marks.clone(),
                     brk,
                     carried,
@@ -668,34 +682,52 @@ pub(crate) fn build_t(
 /// The sources of the insertions a fire holds over (§1020–§1022), in
 /// order: each insertion before the best break whose class has no best
 /// insertion or comes after it, all of them where `\holdinginserts` is
-/// positive, and the rest of the one split where a rest is left. `None`
-/// where one cannot be named by a piece's item ([`Src::Held`]): a defect,
-/// said by the caller.
+/// positive, and the rest of the one split where a rest is left. `Err`
+/// (why) where one cannot be named by a piece's or a routine's item
+/// ([`Src::Held`], [`Src::HeldRtn`]): a defect, said by the caller.
 pub(crate) fn held_srcs(
     f: &Fired,
     page_src: &[SrcRef],
     page_ins: &[Option<u16>],
     holding: bool,
-) -> Option<Vec<Src>> {
+    list_of_ins: &dyn Fn(Src) -> Option<Vec<Node>>,
+) -> Result<Vec<Src>, &'static str> {
     if f.held_inserts.is_empty() {
-        return Some(Vec::new());
+        return Ok(Vec::new());
     }
     let mut recs = f.ins_records.clone();
     // (sure ones, and the rest of a split, which pruning may leave empty)
     let mut out: Vec<(Src, bool)> = Vec::new();
     for (idx, ins) in page_ins.iter().enumerate().take(f.best) {
         let Some(n) = *ins else { continue };
-        let src = page_src.get(idx).and_then(|s| s.src)?;
-        let (piece, item, from) = match src {
-            Src::Piece { piece, item } if end_sub_of(item).is_none() => (piece, item, 0),
-            Src::Held { piece, item, from } => (piece, item, from),
-            _ => return None,
+        let src = page_src
+            .get(idx)
+            .and_then(|s| s.src)
+            .ok_or("an insertion the builder made")?;
+        // (the whole insertion's source, and where its list is from)
+        let (whole, from) = match src {
+            Src::Piece { item, .. } if end_sub_of(item).is_some() => {
+                return Err("an item of an \\end marker's own");
+            }
+            Src::Piece { .. } | Src::Rtn { .. } => (src, 0),
+            Src::Held { piece, item, from } => (Src::Piece { piece, item }, from),
+            Src::HeldRtn { page, item, from } => (Src::Rtn { page, item }, from),
+        };
+        let held = |from: u32| match whole {
+            Src::Rtn { page, item } => Src::HeldRtn { page, item, from },
+            Src::Piece { piece, item } | Src::Held { piece, item, .. } => {
+                Src::Held { piece, item, from }
+            }
+            h @ Src::HeldRtn { .. } => h,
         };
         if holding {
-            out.push((Src::Held { piece, item, from }, true));
+            out.push((held(from), true));
             continue;
         }
-        let r = recs.iter_mut().find(|r| r.n == n)?;
+        let r = recs
+            .iter_mut()
+            .find(|r| r.n == n)
+            .ok_or("a class with no record")?;
         let mut wait = true;
         let mut maybe = false;
         let mut at = from;
@@ -706,40 +738,60 @@ pub(crate) fn held_srcs(
                     && r.broken_ins == Some(idx)
                     && let Some(q) = r.broken_ptr
                 {
-                    // (a rest held again after a split of a rest: its
-                    // items are not the piece's from an index on)
-                    if from != 0 {
-                        return None;
-                    }
+                    // (a rest split again: its own rest is the piece's
+                    // insertion from the index its break is at there)
+                    let q = if from == 0 {
+                        Some(q)
+                    } else {
+                        list_of_ins(whole).and_then(|l| rest_origin(&l, from as usize, q))
+                    };
                     wait = true;
                     maybe = true;
-                    at = u32::try_from(q).ok()?;
+                    at = q
+                        .and_then(|q| u32::try_from(q).ok())
+                        .ok_or("the rest of a split split again, its insertion not found")?;
                 }
                 r.best_ins = None;
             }
         }
         if wait {
-            out.push((
-                Src::Held {
-                    piece,
-                    item,
-                    from: at,
-                },
-                !maybe,
-            ));
+            out.push((held(at), !maybe));
         }
     }
     let sure = out.iter().filter(|x| x.1).count();
     let keep_maybe = out.len() == f.held_inserts.len();
     if !keep_maybe && sure != f.held_inserts.len() {
-        return None;
+        return Err("the held insertions counted otherwise");
     }
-    Some(
-        out.into_iter()
-            .filter(|x| x.1 || keep_maybe)
-            .map(|x| x.0)
-            .collect(),
-    )
+    Ok(out
+        .into_iter()
+        .filter(|x| x.1 || keep_maybe)
+        .map(|x| x.0)
+        .collect())
+}
+
+/// Where item `q` of the rest of an insertion from `from` on (§1021:
+/// `list[from..]` pruned, §968: its discardables before the first box
+/// dropped, `\\splittopskip`'s glue put before that box) is in the
+/// insertion's own `list`: a rest of the rest from `q` is that list's
+/// rest from there (its glue, where the break is at it, the first box's).
+pub(crate) fn rest_origin(list: &[Node], from: usize, q: usize) -> Option<usize> {
+    let mut r = 0;
+    for (i, n) in list.iter().enumerate().skip(from) {
+        match n {
+            Node::Box(_) | Node::Rule(_) => {
+                return Some(if q <= r { i } else { i + (q - r - 1) });
+            }
+            Node::Whatsit(..) | Node::Language { .. } | Node::Mark(_) | Node::Ins(_) => {
+                if q == r {
+                    return Some(i);
+                }
+                r += 1;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Consecutive sources as spans.
@@ -760,7 +812,7 @@ pub(crate) fn spans_of(srcs: &[Src]) -> Vec<Span> {
                 Src::Rtn { page, item } => {
                     matches!(s, Src::Rtn { page: p, item: i } if p == page && i == item + last.len)
                 }
-                Src::Held { .. } => false,
+                Src::Held { .. } | Src::HeldRtn { .. } => false,
             };
             if next {
                 last.len += 1;
@@ -783,7 +835,7 @@ pub(crate) fn span_srcs(s: &Span) -> impl Iterator<Item = Src> + '_ {
             page,
             item: item + d,
         },
-        h @ Src::Held { .. } => h,
+        h @ (Src::Held { .. } | Src::HeldRtn { .. }) => h,
     })
 }
 
@@ -1099,7 +1151,7 @@ impl Run<'_, '_> {
     /// A held-over insertion as the loop measured it (the source names it).
     pub(crate) fn loop_node(lc: &LoopCarry, src: Src) -> Option<crate::vprof::PItem> {
         match src {
-            Src::Held { .. } => lc
+            Src::Held { .. } | Src::HeldRtn { .. } => lc
                 .held_nodes
                 .iter()
                 .find(|h| h.0 == src)
@@ -1147,7 +1199,7 @@ impl Run<'_, '_> {
             let mut keep: phitex_defuse::FxHashSet<i64> = lc.units.iter().map(|u| u.pid).collect();
             let piece = |s: &Src| match *s {
                 Src::Piece { piece, .. } | Src::Held { piece, .. } => Some(piece),
-                Src::Rtn { .. } => None,
+                Src::Rtn { .. } | Src::HeldRtn { .. } => None,
             };
             keep.extend(lc.srcs.iter().filter_map(piece));
             keep.extend(
