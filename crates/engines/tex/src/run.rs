@@ -325,6 +325,12 @@ impl FileRest {
     }
 
     pub(crate) fn new(v: &Values, id: ValueId, off: usize, name: ValueId) -> FileRest {
+        // (a line ends at a carriage return alone too, as web2c's
+        // `input_line` reads: a file with old Mac line ends, coursepaper.cls)
+        let id = match &*v.get(id) {
+            phitex_defuse::Value::Str(s) => crate::expand::cr_lines(s).map_or(id, |t| v.str(&t)),
+            _ => id,
+        };
         let text = v.get(id);
         let (pos, line) = match &*text {
             phitex_defuse::Value::Str(s) => s.get(..off).map_or((0, 0), |p| {

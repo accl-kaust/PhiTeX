@@ -1621,11 +1621,29 @@ impl Run<'_, '_> {
 
 /// The lines of a file's text, each with its end of line.
 pub(crate) fn split_lines(text: &str) -> Vec<String> {
+    let crs = cr_lines(text);
+    let text = crs.as_deref().unwrap_or(text);
     let mut out: Vec<String> = text.split_inclusive('\n').map(str::to_owned).collect();
     if out.last().is_some_and(std::string::String::is_empty) {
         out.pop();
     }
     out
+}
+
+/// `text` with each carriage return that no line feed follows made a
+/// line feed, `None` if it has none: web2c's `input_line` ends a line at
+/// either (a CR LF is one end, its CR trimmed with the line's trailing
+/// blanks). The same length, so places in it stay.
+pub(crate) fn cr_lines(text: &str) -> Option<String> {
+    let b = text.as_bytes();
+    let lone = |i: usize| b[i] == b'\r' && b.get(i + 1) != Some(&b'\n');
+    if !b.contains(&b'\r') || !(0..b.len()).any(lone) {
+        return None;
+    }
+    let out: Vec<u8> = (0..b.len())
+        .map(|i| if lone(i) { b'\n' } else { b[i] })
+        .collect();
+    String::from_utf8(out).ok()
 }
 
 /// `str_toks` (§464).
@@ -1649,5 +1667,17 @@ fn order(a: i32, b: i32) -> i64 {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A line ends at LF, CR or CR LF, as web2c's `input_line` reads.
+    #[test]
+    fn a_carriage_return_alone_ends_a_line() {
+        assert_eq!(super::cr_lines("a\nb\r\nc"), None);
+        assert_eq!(super::cr_lines("%a\r\\x\r").as_deref(), Some("%a\n\\x\n"));
+        assert_eq!(super::cr_lines("x\r\r\ny").as_deref(), Some("x\n\r\ny"));
+        assert_eq!(super::split_lines("%a\r\\x"), ["%a\n", "\\x"]);
     }
 }
