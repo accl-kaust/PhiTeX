@@ -297,6 +297,13 @@ impl Run<'_, '_> {
     /// candidate folded in (the contributions after it are not on the
     /// page), read, not defined.
     pub(crate) fn page_dimen(&mut self, m: i32) -> R<i32> {
+        let i = usize::try_from(m).unwrap_or(0).min(7);
+        // (§421: while the output routine is active, `page_so_far` as
+        // its page's fire left it, the page emptied or not: ltxgrid's
+        // `\@add@float` takes `\vsize-\pagegoal` into `\@pageht`)
+        if let Some(p) = self.fin.as_ref().and_then(|f| f.page.as_ref()) {
+            return Ok(p.so_far[i]);
+        }
         let (st, fired, own_k) = self.page_so_far()?;
         if fired == Some(true)
             && let Some(k) = own_k
@@ -306,7 +313,7 @@ impl Run<'_, '_> {
         if st.pb.contents == Contents::Empty {
             return Ok(if m == 0 { MAX_DIMEN } else { 0 });
         }
-        Ok(st.pb.so_far[usize::try_from(m).unwrap_or(0).min(7)])
+        Ok(st.pb.so_far[i])
     }
 
     /// `\insertpenalties` (§419) outside the output routine: the page

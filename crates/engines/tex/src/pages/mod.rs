@@ -196,6 +196,11 @@ pub(crate) struct Page {
     /// version runs on a page fired before that piece ran again, and
     /// makes no page ([`Run::assemble_page`]).
     pub vers: Vec<(i64, ValueId)>,
+    /// `page_so_far` as the fire left it (§1005–§1017: the goal, total,
+    /// stretch and shrink of the page up to the item that fired it, the
+    /// depth 0 again, §991): what `\\pagegoal` and its kin read while
+    /// the output routine is active (§421).
+    pub so_far: [i32; 8],
 }
 
 impl Page {
@@ -244,13 +249,14 @@ impl Page {
             raw(self.at),
             v.int(i64::from(self.nth)),
             v.list(self.ins.clone()),
+            v.list(self.so_far.iter().map(|&x| v.int(i64::from(x))).collect()),
         ])
     }
 
     /// [`Page::encode`]'s page; `None` on any other value.
     pub(crate) fn decode(v: &Values, x: ValueId) -> Option<Page> {
         let p = list_of(v, x);
-        if p.len() != 30 {
+        if p.len() != 31 {
             return None;
         }
         let n = |i: usize| int_of(v, p[i]);
@@ -312,6 +318,13 @@ impl Page {
                 .map(|c| (int_of(v, c[0]), c[1]))
                 .collect(),
             ins: ints(29),
+            so_far: {
+                let mut a = [0; 8];
+                for (d, &x) in a.iter_mut().zip(&ints(30)) {
+                    *d = i32::try_from(int_of(v, x)).unwrap_or(0);
+                }
+                a
+            },
         })
     }
 }

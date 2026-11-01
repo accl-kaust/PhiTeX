@@ -517,3 +517,7 @@ repro!(
     mparhack_page_numbers,
     "mparhack's page numbers (classicthesis): \\c@page lost the output routine's step, so \\cleardoublepage made no blank page (oracle: pdflatex in the CI image)"
 );
+repro!(
+    output_pagegoal,
+    "research corpus (aastex, aastex-xe: Table 1 at the top of page 4, pdfTeX's on page 5): while the output routine is active \\pagegoal and its kin read page_so_far as the page's fire left it (§421), and PhiTeX read the emptied page's \\maxdimen and 0; ltxgrid's \\@add@float takes \\vsize-\\pagegoal into \\@pageht, which came out near -\\maxdimen, so every float fitted where it was met (oracle: pdflatex in the CI image, mc 77786)"
+);

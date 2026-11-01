@@ -342,6 +342,8 @@ pub(crate) struct LoopFire {
     /// the page from its best break on, the item that fired it, the
     /// contributions after it.
     pub carried: Vec<SrcRef>,
+    /// `page_so_far` as the fire left it ([`super::Page::so_far`]).
+    pub so_far: [i32; 8],
 }
 
 /// The profile item a source names, as the loop has it.
@@ -630,6 +632,7 @@ pub(crate) fn build_t(
                 if let Some((_, s)) = end_seen {
                     carried.push(s);
                 }
+                let so_far = st.pb.so_far;
                 st.pb = PageBuilder::new();
                 st.pb.measure_only = true;
                 st.j += 1;
@@ -653,6 +656,7 @@ pub(crate) fn build_t(
                     marks: f.marks.clone(),
                     brk,
                     carried,
+                    so_far,
                 });
             }
         }

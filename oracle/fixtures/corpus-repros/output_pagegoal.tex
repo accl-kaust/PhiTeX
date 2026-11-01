@@ -1,0 +1,31 @@
+% \pagegoal and its kin read in the output routine (§421: while the
+% routine is active, page_so_far as the page's fire left it, not
+% \maxdimen and 0 for an empty page): each page's head prints them, a
+% footnote shortening the goal, a float's penalty firing a special
+% output; AASTeX's ltxgrid takes \vsize-\pagegoal into \@pageht to place
+% a float.
+\documentclass{article}
+\makeatletter
+\def\ps@probe{\def\@oddfoot{}\def\@evenfoot{}%
+  \def\@oddhead{\footnotesize goal \the\pagegoal\ total \the\pagetotal\
+    stretch \the\pagestretch\ fil \the\pagefilstretch\ shrink \the\pageshrink\
+    depth \the\pagedepth}\let\@evenhead\@oddhead}
+\let\probe@addtocurcol\@addtocurcol
+\def\@addtocurcol{\xdef\probe@log{\probe@log\space[\the\pagegoal/\the\pagetotal]}\probe@addtocurcol}
+\def\probe@log{}
+\makeatother
+\pagestyle{probe}
+\newcommand\para{Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed
+do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad
+minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea
+commodo consequat.\par}
+\begin{document}
+\para\para\para\para Text with a note.\footnote{A footnote that takes some
+room at the foot of the page.}\par
+\para\para
+\begin{figure}[t]\centering\rule{4cm}{3cm}\caption{A float.}\end{figure}
+\para\para\para\para\para\para\para\para\para\para\para\para\para\para
+\begin{figure}[t]\centering\rule{4cm}{8cm}\caption{A second float.}\end{figure}
+\para\para\para\para\para\para\para\para\para\para\para\para
+\makeatletter Floats placed at \probe@log.\makeatother
+\end{document}
