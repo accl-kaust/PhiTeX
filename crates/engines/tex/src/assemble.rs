@@ -205,6 +205,9 @@ pub(crate) const LINKED: &str = "pdf:file";
 /// The output file the end node made ([`output`]), which the build reads
 /// (`Build::output`); no node reads it.
 pub(crate) const END_FILE: &str = "end:file";
+/// Whether a read-time write opened pdfTeX's PDF file (the
+/// `pdf:opened` cell as the end node read it).
+pub(crate) const END_OPENED: &str = "end:pdfopened";
 
 /// The bytes of the files the link made, by their values table and hash:
 /// the file's value is `["bytes", hash, length]`, not the file as a string

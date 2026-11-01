@@ -764,7 +764,10 @@ fn xyz_dests(pdf: &str) -> Vec<(String, String, String)> {
         let Some(k) = pdf.find(&format!("({name}) ")) else {
             continue;
         };
-        let n = pdf[k + name.len() + 3..].split_whitespace().next().unwrap_or("");
+        let n = pdf[k + name.len() + 3..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
         if let Some((x, y)) = obj(n) {
             out.push((name.to_owned(), x, y));
         }
@@ -802,9 +805,57 @@ fn dests_under_a_matrix() {
     assert_eq!(d.len(), 4, "the four destinations:\n{pdf}\n{log}");
     let (a, b, c, dd) = (&d[0], &d[1], &d[2], &d[3]);
     assert_eq!((&b.1, &b.2), (&a.1, &a.2), "identity matrix: {d:?}");
-    assert_eq!((&c.1, &c.2), (&a.1, &a.2), "rotation about the point: {d:?}");
+    assert_eq!(
+        (&c.1, &c.2),
+        (&a.1, &a.2),
+        "rotation about the point: {d:?}"
+    );
     let num = |s: &str| s.parse::<f64>().expect("a number");
     assert_eq!(dd.1, a.1, "x of the turned point: {d:?}");
     let up = num(&dd.2) - num(&a.2);
-    assert!((up - 50.0 * 72.0 / 72.27).abs() < 0.002, "50pt above: {d:?}");
+    assert!(
+        (up - 50.0 * 72.0 / 72.27).abs() < 0.002,
+        "50pt above: {d:?}"
+    );
+}
+
+/// A PDF file of no bytes where pdfTeX opens it and ships no page:
+/// `check_pdfversion` (pdftex.web) opens the file at a read-time write,
+/// `\immediate\pdfobj`, `\immediate\pdfxform`, `\pdfximage` or the first
+/// `\pdfcatalog ... openaction` (hyperref's at `\begin{document}`), and
+/// with no page "Finish the PDF file" never flushes the header from its
+/// buffer. pdflatex leaves `getversion.pdf` (hhtensor) and
+/// `BibBreeze.pdf` of 0 bytes, an empty article with hyperref too, and
+/// no file for an empty article without it (accl 22606, 22615).
+/// PhiTeX wrote no file.
+#[test]
+fn an_opened_pdf_without_pages_is_empty() {
+    let dir = common::scratch("opened-pdf-without-pages");
+    for (doc, want) in [
+        ("\\pdfoutput=1 \\immediate\\pdfobj{1}\\end\n", true),
+        (
+            "\\pdfoutput=1 \\pdfcatalog{/PageMode /UseNone} openaction goto page 1 {/Fit}\\end\n",
+            true,
+        ),
+        (
+            "\\pdfoutput=1 \\setbox0\\hbox{x}\\immediate\\pdfxform0 \\end\n",
+            true,
+        ),
+        // (not written at read time: no file)
+        (
+            "\\pdfoutput=1 \\pdfobj{1}\\pdfobj reserveobjnum \\pdfcatalog{/PageMode /UseNone}\\end\n",
+            false,
+        ),
+        ("\\pdfoutput=0 \\immediate\\pdfobj{1}\\end\n", false),
+        ("\\pdfoutput=1 \\end\n", false),
+    ] {
+        let opts = phitex_tex::Options {
+            epoch: Some(0),
+            ..common::options("./texput.tex", "texput", "", &dir)
+        };
+        let b = common::build(opts, Some(PRELUDE), doc);
+        let (pdf, log) = b.output();
+        assert!(pdf.is_empty(), "{doc}: no page, no bytes:\n{log}");
+        assert_eq!(b.empty_pdf(), want, "{doc}:\n{log}");
+    }
 }

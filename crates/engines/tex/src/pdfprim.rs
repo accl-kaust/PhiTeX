@@ -2856,6 +2856,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 },
             };
             r.set(&format!("pdf:objbody:{n}"), v.int(1), true);
+            if immediate && pdf_mode(r)? {
+                opened(r);
+            }
             // (`\immediate`, not a stream: written now, into an object
             // stream where they compress)
             if immediate && !stream && pdf_mode(r)? {
@@ -2888,6 +2891,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             // (`\immediate`: the form written now, pdfTeX §1357: its
             // resources' object, then each font it uses first)
             if immediate && pdf_mode(r)? {
+                opened(r);
                 let _ = alloc_obj(r)?;
                 let names = box_font_names(r, b)?;
                 crate::pdfout::fonts_first_used(r, &names)?;
@@ -3213,6 +3217,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     .is_none_or(|x| x == ValueId::UNIT);
                 r.set_cell(crate::fields::cell::PDF_OPENACTION, oa, true);
                 if first && pdf_mode(r)? {
+                    opened(r);
                     let _ = alloc_obj(r)?;
                     crate::pdfout::os_write(r)?;
                     action_target(r, oa)?;
@@ -3332,6 +3337,13 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
 /// `\pdfximage` (pdfTeX §1358, `scale_image` §1359): the image's size
 /// from its header.
 #[allow(clippy::too_many_lines)]
+/// pdfTeX's `check_pdfversion` at read time: the PDF file opened
+/// ([`crate::fields::cell::PDF_OPENED`]).
+fn opened(r: &mut Run<'_, '_>) {
+    let x = r.v.int(1);
+    r.set_cell(crate::fields::cell::PDF_OPENED, x, true);
+}
+
 fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     let v = r.v;
     let (mut w, mut h, mut d) = alt_rule(r)?;
@@ -3427,6 +3439,8 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     let mut pages = pages;
     let mut depth = depth;
     let got = if pdf_mode(r)? {
+        // (`check_pdfversion` before `read_image`, pdftex.web)
+        opened(r);
         ximage_step(
             r,
             XImageScan {
