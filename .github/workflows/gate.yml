@@ -98,6 +98,9 @@ jobs:
         include:
           - { name: research-0, args: "research 0 2" }
           - { name: research-1, args: "research 1 2" }
+          # (the research templates edited under the watch: scripts/ci/editsweep.py)
+          - { name: edits-0, args: "edits 0 2" }
+          - { name: edits-1, args: "edits 1 2" }
           - { name: manuals-0, args: "manuals 0 8" }
           - { name: manuals-1, args: "manuals 1 8" }
           - { name: manuals-2, args: "manuals 2 8" }

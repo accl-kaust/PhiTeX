@@ -11,11 +11,13 @@ the history's PDF against a cold build of the final text.
 Red (one line each on stdout, `editsweep: ...`; exit 1 if any):
 - the history's PDF is not the cold build's;
 - an edit's build never came, or the watch stopped;
-- an edit ran more than once a node a round: at one thread nothing is
-  guessed, so a node runs again only when its input changed, once a
-  loop round (latexmk's runs). More is a chain of finishers re-asked on
-  the same field (the user's paper: 513 finisher runs for 154 nodes,
-  an edit of 60 s, a field flipping between the last pages' routines).
+- an edit ran more than twice a node a round. At one thread an edit's
+  runs still go ahead of their inputs on the last build's predictions,
+  so a node may run twice; the research templates' worst edits run 1.8
+  times a node (revtex-aip, acm-sigconf-biblatex, mc 78030). Past that is
+  a chain of finishers re-asked on the same field (the user's paper: 513
+  finisher runs for 154 nodes, an edit of 60 s, a field flipping between
+  the last pages' routines).
 Each edit's wall, nodes run, runs and rounds go to OUT/<id>.json and the
 table OUT/edits.txt, the times reported, not judged (a runner's clock).
 """
@@ -35,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 import manuals  # noqa: E402
+import pdfdiff  # noqa: E402
 
 WORK = manuals.WORK
 WORD = re.compile(r"(?<=[ ])([a-z]{4,12})(?=[ .,;])")
@@ -127,7 +130,7 @@ def one(args, c):
             else:
                 e.update(nodes=ev.get("nodes_run") or 0, runs=ev.get("runs") or 0,
                          rounds=ev.get("rounds") or 0, engine_ms=ev.get("wall_ms"), ok=ev.get("ok"))
-                if e["runs"] > max(e["nodes"], 1) * max(e["rounds"], 1):
+                if e["runs"] > 2 * max(e["nodes"], 1) * max(e["rounds"], 1):
                     res["red"].append(f"line {line}: {e['runs']} runs for {e['nodes']} nodes in "
                                       f"{e['rounds']} rounds ({e['wall_ms']:.0f} ms)")
             res["edits"].append(e)
@@ -158,7 +161,19 @@ def one(args, c):
                cold, cenv, args.timeout, out=cold / "term.txt")
     res["history_md5"], res["cold_md5"] = hist, md5(cold / f"{job}.pdf")
     if len(res["edits"]) == len(PLACES) and hist != res["cold_md5"]:
-        res["red"].append(f"the history's PDF {hist} is not the cold build's {res['cold_md5']}")
+        # (both PDFs kept, with where they first differ, and the files
+        # each build read back)
+        keep = Path(args.out) / "files" / tag
+        keep.mkdir(parents=True, exist_ok=True)
+        for src, name in ((d, "history"), (cold, "cold")):
+            for x in ("pdf", "aux", "log", "bbl", "toc", "out"):
+                if (src / f"{job}.{x}").exists():
+                    shutil.copy(src / f"{job}.{x}", keep / f"{name}.{x}")
+        (WORK / "tmp").mkdir(parents=True, exist_ok=True)
+        where = pdfdiff.diff(d / f"{job}.pdf", cold / f"{job}.pdf", WORK / "tmp") if hist and res["cold_md5"] else {}
+        res["diff"] = where
+        res["red"].append(f"the history's PDF is not the cold build's: "
+                          f"{where.get('summary') or where.get('byte') or 'one is missing'}")
     for x in (d, cold, cdir, ccache):
         shutil.rmtree(x, ignore_errors=True)
     return res
@@ -171,6 +186,7 @@ def main():
     ap.add_argument("--bin", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--shard")
+    ap.add_argument("--ids")
     ap.add_argument("--engines", default="pdflatex,xelatex")
     ap.add_argument("--tools", default="bibtex,biber,makeindex,glossaries")
     ap.add_argument("--par", type=int, default=4)
@@ -179,6 +195,8 @@ def main():
     items = manuals.shard(manuals.load_list(args.list), args.shard)
     engines, tools = set(args.engines.split(",")), set(args.tools.split(","))
     items = [c for c in items if c["engine"] in engines and not (set(c.get("tools", [])) - tools)]
+    if args.ids:
+        items = [c for c in items if c["id"] in set(args.ids.split(","))]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     # (each engine's format once, shared: sweep.py's prewarm)

@@ -565,6 +565,27 @@ PY
       status=$s
     fi
     ;;
+  edits)
+    # edits K N: shard K of N of ci/research.json under the watch, a word
+    # typed early, midway and late (scripts/ci/editsweep.py): red when
+    # the history's PDF is not a cold build's or an edit ran a node more
+    # than twice a round
+    k=$1 n=$2
+    fetched
+    bin=$w/bin/cli/rel/phitex
+    if [ ! -x "$bin" ]; then
+      red "edits: no CLI at \$w/bin/cli/rel/phitex"
+    else
+      export CI_WORK=$w/ci
+      mkdir -p "$CI_WORK"
+      python3 -I scripts/ci/editsweep.py --list ci/research.json --doc ci/research --bin "$bin" \
+        --out "$r/edits" --shard "$k/$n" --par "${GATE_EDITS_PAR:-4}" --timeout "${GATE_EDITS_TIMEOUT:-600}" \
+        > "$r/editsweep.txt" 2>&1
+      grep '^editsweep:' "$r/editsweep.txt" | head -60 >> "$r/red.txt"
+      grep -q . "$r/red.txt" && status=red
+      grep -q "documents, " "$r/editsweep.txt" || red "edits: the sweep did not start: $(tail -1 "$r/editsweep.txt")"
+    fi
+    ;;
   research)
     # research K N [shelf]: shard K of N of ci/research.json. The oracle
     # (TeX Live's pdflatex/xelatex, BibTeX, biber, makeindex to the
