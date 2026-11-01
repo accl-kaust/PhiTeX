@@ -2952,7 +2952,7 @@ pub(crate) fn page_allocs(
     }
     // (an auto-expanded font's object is its base's, `pdf_init_font`'s
     // second case: the base's name, `pdf_font_blink`)
-    let names: Vec<ValueId> = real
+    let mut names: Vec<ValueId> = real
         .into_iter()
         .map(|id| {
             let id = fonts
@@ -2993,6 +2993,12 @@ pub(crate) fn page_allocs(
     let mut ship_fonts = shipout_fonts(v, fonts);
     if fonts.space.is_some() {
         ship_fonts.push(v.str("pdftexspace@0"));
+        // (and its font object, made where the page first uses it as
+        // any font's, `pdf_use_font`: the fold counted the fonts the
+        // list names only, so a page of `\pdfinterwordspaceon` spaces
+        // was an object short, tex-vpat's struct elements one number
+        // low from its first page on)
+        names.push(v.str("pdftexspace@0"));
     }
     // (the page's dictionary and resources, and each annotation it
     // writes, go into an object stream where they compress; its

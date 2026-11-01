@@ -469,6 +469,19 @@ fn read_back_after_vain_lookup() {
     check_threads("read_back_after_vain_lookup", "pdf");
 }
 
+/// `\pdfinterwordspaceon`'s space font: its font object is made where a
+/// page first uses it, as any font's (`pdf_use_font`); the fold of the
+/// pages' objects counted the fonts the list names only, so an object
+/// number TeX read after such a page was one short (tex-vpat's
+/// structure elements, one number low from its first page on). Its
+/// page also has `\pdfobj reserveobjnum` in the text, whose optional
+/// space after the keyword was a space of the paragraph. At -j1 and -j4
+/// (oracle: pdflatex in the CI image, accl 22529; passing in 22533).
+#[test]
+fn interword_space_font_object() {
+    check_threads("interword_space_font_object", "pdf");
+}
+
 /// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
 /// for every font it loads; libertine's T1 fonts are virtual) set its
 /// fields without reading it in (no `do_vf`): pdfTeX numbers its local

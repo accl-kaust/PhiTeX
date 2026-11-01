@@ -2611,6 +2611,9 @@ pub(crate) fn obj_cmd(
 /// number `useobjnum` gives, and whether the number is only reserved.
 fn obj_num_option(r: &mut Run<'_, '_>) -> R<(Option<i64>, bool)> {
     if r.scan_keyword("reserveobjnum")? {
+        // ("Scan an optional space", `\\pdfobj`'s and `\\pdfannot`'s: the
+        // space after the keyword was a space of the text)
+        r.optional_space()?;
         return Ok((None, true));
     }
     if r.scan_keyword("useobjnum")? {

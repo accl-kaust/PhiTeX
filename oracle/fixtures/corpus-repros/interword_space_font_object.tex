@@ -1,0 +1,12 @@
+% \pdfinterwordspaceon: the space font's object is made where a page first
+% uses it, as any font's; an object number TeX reads later counts it
+\documentclass{article}
+\begin{document}
+\pdfinterwordspaceon
+Some words with spaces between them.
+\newpage
+Page three is object \pdfpageref3, a reserved object
+\pdfobj reserveobjnum \the\pdflastobj.
+\newpage
+Three.
+\end{document}
