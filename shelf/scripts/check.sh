@@ -40,7 +40,7 @@ python3 - "$tlpdb" "$w/tree/texmf-dist/fonts/map/pdftex/updmap/pdftex.map" > "$o
 import lzma, os, sys, tarfile
 db, pdfmap = sys.argv[1:3]
 cache = os.path.dirname(db)
-names = lambda b: {l.split()[0] for l in b.decode('latin-1').splitlines() if l.strip() and l[0] not in '%#'}
+names = lambda b: {l.split()[0] for l in b.decode('latin-1').split('\n') if l.strip() and l[0] not in '%#'}
 rel = names(open(pdfmap, 'rb').read())
 for block in lzma.decompress(open(db, 'rb').read()).decode().split('\n\n'):
     lines = block.splitlines()
