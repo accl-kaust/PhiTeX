@@ -1,7 +1,8 @@
 #!/bin/bash
 # Shelf's release check: a release against TeX Live. The release's files
-# unpacked into a texmf tree of their own (with its ls-R); every font of
-# TeX Live's own pdftex.map must be in the release's; TeX Live's own
+# unpacked into a texmf tree of their own (with its ls-R); every map file
+# the release's TeX Live enables (its package database, TLPDB) must be in
+# the release, and every font of those maps in its pdftex.map; TeX Live's own
 # engines (this environment's: kpsewhich, fmtutil-sys, pdftex, xetex)
 # make their formats from that tree alone and build each document from
 # it; PhiTeX (BIN) builds each with --shelf from the release, served on
@@ -13,9 +14,10 @@
 #
 #   ROOT=<PhiTeX checkout> REL=<releases dir> LABEL=tl2026 NEW=tl2026.N \
 #   BIN=<phitex> FTREE=<the release's fonts tree> W=<scratch> OUT=<results> \
+#   TLPDB=<the release's texlive.tlpdb.xz> \
 #     shelf/scripts/check.sh
 set -u
-root=$ROOT rel=$REL label=$LABEL new=$NEW bin=$BIN w=$W out=$OUT
+root=$ROOT rel=$REL label=$LABEL new=$NEW bin=$BIN w=$W out=$OUT tlpdb=$TLPDB
 mkdir -p "$w" "$out"
 # (TeX Live's own over the release's tree alone: tl-tree.sh)
 . "$root/shelf/scripts/tl-tree.sh"
@@ -25,17 +27,33 @@ tl() { env "${tlenv[@]}" SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1 "$@"; }
 # (5) a texmf tree of the release's files, with its ls-R
 tree_unpack "$rel/$label" "$new" "$w/tree/texmf-dist" | tee -a "$out/summary.txt"
 
-# (5b) every font of TeX Live's own pdftex.map (the CI image's install) in the release's
+# (5b) every map file the release's TeX Live enables (each package's
+# `execute addMap` / `addMixedMap` in its database) in the release, and
+# every font of those maps in its pdftex.map. (Not the CI image's own
+# pdftex.map: that install is older than the tlnet the release is made
+# from, and named 910 fonts the newer one had renamed or dropped,
+# SourceSansPro, SourceSerifPro, mfb-oldstyle's ts1, run 41296048903)
 fails=0
-sh -c 'cat "$(kpsewhich pdftex.map)"' > "$w/tl-pdftex.map"
-python3 - "$w/tl-pdftex.map" "$w/tree/texmf-dist/fonts/map/pdftex/updmap/pdftex.map" > "$out/map-missing.txt" <<'NAMES'
-import sys
+python3 - "$tlpdb" "$w/tree/texmf-dist" "$w/tree/texmf-dist/fonts/map/pdftex/updmap/pdftex.map" > "$out/map-missing.txt" <<'NAMES'
+import lzma, os, sys
+db, tree, pdfmap = sys.argv[1:4]
+maps = {l.split()[-1] for l in lzma.decompress(open(db, 'rb').read()).decode().splitlines()
+        if l.startswith(('execute addMap ', 'execute addMixedMap '))}
+where = {}
+for d, _, fs in os.walk(os.path.join(tree, 'fonts/map')):
+    for f in fs:
+        where.setdefault(f, os.path.join(d, f))
 names = lambda f: {l.split()[0] for l in open(f, encoding='latin-1') if l.strip() and l[0] not in '%#'}
-tl, rel = names(sys.argv[1]), names(sys.argv[2])
-for n in sorted(tl - rel): print(n)
+rel = names(pdfmap)
+for m in sorted(maps):
+    if m not in where:
+        print(f'{m} (the map file)')
+    else:
+        for n in sorted(names(where[m]) - rel):
+            print(f'{n} ({m})')
 NAMES
 n=$(wc -l < "$out/map-missing.txt")
-echo "pdftex.map: $n of TeX Live's fonts missing from the release$([ "$n" = 0 ] || echo ": $(head -8 "$out/map-missing.txt" | tr '\n' ' ')...")" | tee -a "$out/summary.txt"
+echo "pdftex.map: $n of TeX Live's maps and fonts missing from the release$([ "$n" = 0 ] || echo ": $(head -8 "$out/map-missing.txt" | tr '\n' ' ')...")" | tee -a "$out/summary.txt"
 [ "$n" = 0 ] || fails=$((fails + 1))
 
 # (6) the documents: PhiTeX's fixtures, plain TeX for each engine, and

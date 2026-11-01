@@ -64,7 +64,7 @@ fi
 
 # (6) the check against TeX Live
 ROOT="$root" REL="$s/releases-v1" LABEL="$label" NEW="$new" BIN="$root/target/fastdev/phitex" \
-  FTREE="$w/ftree" W="$w/check" OUT="$out" bash scripts/check.sh
+  FTREE="$w/ftree" W="$w/check" OUT="$out" TLPDB="$s/cache/texlive.tlpdb.xz" bash scripts/check.sh
 
 # (7) the site, as deploy.sh makes it
 rm -rf "public/$label"

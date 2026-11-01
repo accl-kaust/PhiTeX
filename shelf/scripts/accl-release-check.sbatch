@@ -104,7 +104,7 @@ echo "release $new (after $old): $after pack files kept, $((after - before)) new
 
 # (5)-(6) the check (scripts/check.sh) in TeX Live's image, without the network
 apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w" \
-  --home "$w" --pwd "$w" --env ROOT="$w/phitex",REL="$w/phitex/shelf/releases-v1",LABEL="$label",NEW="$new",BIN="$w/phitex/target/fastdev/phitex",FTREE="$w/ftree",W="$w/check",OUT="$w/results" \
+  --home "$w" --pwd "$w" --env ROOT="$w/phitex",REL="$w/phitex/shelf/releases-v1",LABEL="$label",NEW="$new",BIN="$w/phitex/target/fastdev/phitex",FTREE="$w/ftree",W="$w/check",OUT="$w/results",TLPDB="$w/phitex/shelf/cache/texlive.tlpdb.xz" \
   "$tlsif" bash "$w/phitex/shelf/scripts/check.sh"; st=$?
 echo "end $(date +%T)"
 exit $st
