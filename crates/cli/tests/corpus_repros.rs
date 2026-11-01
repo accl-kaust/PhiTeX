@@ -545,3 +545,18 @@ repro!(
     pdf_fontname_share,
     "\\pdffontname and \\pdffontobjnum of one scalable TFM at several sizes: pdfTeX's `pdf_init_font` makes one object for them, named by the first font's number (`obj_info`); each font made an object of its own and was named by its own number (32 41 42 and objects 1 2 3 for pdfTeX's 32 32 32 and 1 1 1) (oracle: pdflatex in the CI image, mc 77924)"
 );
+
+/// TeX Live manuals euromoney, heria, pygmentex and zed2e (`\valign`):
+/// "this alignment is not supported" (control.rs REDUCE-GAP). Now the
+/// alignment's vertical variant, §768-§812 with tex.web's modes swapped:
+/// the alignment in -hmode, its entries in -vmode (depth limit 0, a
+/// paragraph in one ended by its `&`), columns on the horizontal list
+/// with space factor 1000; \noalign, \tabskip, \span, \omit, \crcr,
+/// \everycr, `to` and `spread`, nested in and around \halign. The next
+/// entry's first token is read after the entry's group ends (§791), so
+/// its \aftergroup tokens come first and its local definitions are
+/// undone, \halign's too. At -j1 and -j4 (oracle: pdftex in the CI image).
+#[test]
+fn valign_columns() {
+    check_threads("valign_columns", "pdf");
+}

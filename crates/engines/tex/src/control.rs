@@ -679,12 +679,14 @@ impl Run<'_, '_> {
                 }
             }
             cmd::HALIGN | cmd::VALIGN => {
+                // §1130: `vmode+halign, hmode+valign: init_align`; the
+                // other mode starts or ends a paragraph (§1090, §1094)
                 if c == cmd::VALIGN && v {
                     self.back_cur();
                     self.new_graf(&md, true)?;
                 } else if c == cmd::HALIGN && h {
                     self.head_for_vmode(&md);
-                } else if c == cmd::HALIGN && v {
+                } else if (c == cmd::HALIGN && v) || (c == cmd::VALIGN && h) {
                     self.init_align(&md)?;
                 } else if c == cmd::HALIGN && md.m == 203 {
                     // §1130: `mmode+halign`: privileged (a display), and
@@ -698,8 +700,8 @@ impl Run<'_, '_> {
                     // §1130 `privileged` (§1051)
                     self.report_illegal_case(&md)?;
                 } else {
-                    // REDUCE-GAP: \valign
-                    self.log("error", "this alignment is not supported")?;
+                    // §1046: `mmode+valign`: insert_dollar_sign
+                    self.insert_dollar_sign()?;
                 }
             }
             cmd::INSERT => self.begin_insert_or_adjust(&md, false)?,
