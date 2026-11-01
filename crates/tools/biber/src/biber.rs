@@ -241,9 +241,9 @@ impl<'f> Biber<'f> {
             if remaining.is_empty() && !self.secr().allkeys {
                 break;
             }
-            if !ds.encoding.is_empty() && !matches!(lc(&ds.encoding).as_str(), "utf8" | "utf-8") {
+            if !ds.encoding.is_empty() && crate::recode::Encoding::of(&ds.encoding).is_none() {
                 return Err(self.unsupported(&alloc::format!(
-                    "data source encoding '{}' (only UTF-8)",
+                    "data source encoding '{}' (UTF-8, ascii or latin1)",
                     ds.encoding
                 )));
             }
@@ -267,7 +267,7 @@ impl<'f> Biber<'f> {
                 ds.name,
                 self.cur
             ));
-            remaining = self.extract_entries(&path, &bytes, &remaining)?;
+            remaining = self.extract_entries(&path, &bytes, &ds.encoding, &remaining)?;
         }
         let secnum = self.cur.clone();
         for k in remaining {
@@ -375,7 +375,7 @@ impl<'f> Biber<'f> {
                     let Some((path, bytes)) = self.files.datasource(&ds.name) else {
                         return Err(self.fatal(alloc::format!("Cannot find '{}'!", ds.name)));
                     };
-                    missing = self.extract_entries(&path, &bytes, &missing)?;
+                    missing = self.extract_entries(&path, &bytes, &ds.encoding, &missing)?;
                 }
             }
             new_deps.retain(|d| !missing.contains(d));

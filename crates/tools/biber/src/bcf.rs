@@ -659,12 +659,21 @@ impl Biber<'_> {
                 self.cfg.opts.insert(k.into(), "UTF-8".into());
             }
         }
-        for k in ["input_encoding", "output_encoding"] {
-            if self.cfg.opt(k) != "UTF-8" {
-                return Err(
-                    self.unsupported(&alloc::format!("{k} '{}' (only UTF-8)", self.cfg.opt(k)))
-                );
-            }
+        // (UTF-8, ascii and latin1 read; UTF-8 and ascii written)
+        let inenc = crate::recode::Encoding::of(&self.cfg.opt("input_encoding"));
+        if inenc.is_none() {
+            let v = self.cfg.opt("input_encoding");
+            return Err(self.unsupported(&alloc::format!(
+                "input_encoding '{v}' (UTF-8, ascii or latin1)"
+            )));
+        }
+        let outenc = crate::recode::Encoding::of(&self.cfg.opt("output_encoding"));
+        if !matches!(
+            outenc,
+            Some(crate::recode::Encoding::Utf8 | crate::recode::Encoding::Ascii)
+        ) {
+            let v = self.cfg.opt("output_encoding");
+            return Err(self.unsupported(&alloc::format!("output_encoding '{v}' (UTF-8 or ascii)")));
         }
         for (k, v) in [("sortcase", "sortcase"), ("sortupper", "sortupper")] {
             let x = self.cfg.opt(k);
@@ -677,9 +686,6 @@ impl Biber<'_> {
                 return Err(self.fatal(alloc::format!("Invalid value for option '{v}'")));
             }
             self.cfg.opts.insert(k.into(), n);
-        }
-        if self.cfg.opt_true("output_safechars") {
-            return Err(self.unsupported("output_safechars"));
         }
         if self.cfg.opt_true("wraplines") {
             return Err(self.unsupported("wraplines"));

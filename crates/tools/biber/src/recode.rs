@@ -4,7 +4,7 @@
 //! out as a scanner here, keeping Perl's match order (longest
 //! alternative first, then backtracking into what follows).
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -553,4 +553,266 @@ fn pre_char(t: &[char]) -> Vec<char> {
     let a = pass(t, 0);
     let b = pass(&a, 1);
     pass(&b, 2)
+}
+
+/// The types `latex_encode` recodes, in its order.
+const ENCODE_TYPES: [&str; 9] = [
+    "greek",
+    "dings",
+    "negatedsymbols",
+    "superscripts",
+    "cmdsuperscripts",
+    "diacritics",
+    "letters",
+    "punctuation",
+    "symbols",
+];
+
+/// Biber::LaTeX::Recode `latex_encode`: Unicode to LaTeX macros with an
+/// encode set of `recode_data.xml` (`output_safecharsset`), as biber
+/// writes a `.bbl` in an encoding a character is not in. Each type's
+/// map is its `to` → `from` (a `preferred` `from` winning), less
+/// `encode_exclude`; its alternation tries the keys in sorted order.
+pub struct Encoder {
+    maps: BTreeMap<&'static str, (BTreeMap<Vec<char>, String>, Vec<Vec<char>>)>,
+    /// The characters written as their `from` alone (`raw`).
+    raw: BTreeSet<Vec<char>>,
+    null: bool,
+}
+
+impl Encoder {
+    pub fn new(set: &str) -> Encoder {
+        let doc = crate::xml::parse(DATA).expect("recode data");
+        let excl: Vec<Vec<char>> = doc
+            .kid("encode_exclude")
+            .map(|d| {
+                d.kids("char")
+                    .map(|c| unicode::nfd(&c.text).chars().collect())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut maps = BTreeMap::new();
+        let mut raw = BTreeSet::new();
+        for t in ENCODE_TYPES {
+            let mut m: BTreeMap<Vec<char>, String> = BTreeMap::new();
+            let mut present = false;
+            for maps_el in doc.kids("maps").filter(|e| e.attr("type") == Some(t)) {
+                let sets = crate::config::split_comma(maps_el.attr("set").unwrap_or(""));
+                if !sets.iter().any(|s| s == set) {
+                    continue;
+                }
+                present = true;
+                let pairs = || {
+                    maps_el
+                        .kids("map")
+                        .filter_map(|map| Some((map.kid("from")?, map.kid("to")?)))
+                };
+                for (f, to) in pairs() {
+                    m.insert(
+                        unicode::nfd(&to.text).chars().collect(),
+                        unicode::nfd(&f.text),
+                    );
+                }
+                for (f, to) in pairs().filter(|(f, _)| f.attr("preferred").is_some()) {
+                    m.insert(
+                        unicode::nfd(&to.text).chars().collect(),
+                        unicode::nfd(&f.text),
+                    );
+                }
+                for (_, to) in pairs().filter(|(f, _)| f.attr("raw").is_some()) {
+                    raw.insert(unicode::nfd(&to.text).chars().collect());
+                }
+            }
+            for e in &excl {
+                m.remove(e);
+            }
+            if !present || m.is_empty() {
+                continue;
+            }
+            let keys: Vec<Vec<char>> = m.keys().cloned().collect();
+            maps.insert(t, (m, keys));
+        }
+        Encoder {
+            maps,
+            raw,
+            null: set == "null",
+        }
+    }
+
+    /// `latex_encode`.
+    pub fn encode(&self, text: &str) -> String {
+        if self.null {
+            return text.into();
+        }
+        let mut t: Vec<char> = text.chars().collect();
+        for ty in ENCODE_TYPES {
+            let Some((map, keys)) = self.maps.get(ty) else {
+                continue;
+            };
+            // (the alternation: the first key in sorted order there)
+            let at = |t: &[char], p: usize| -> Option<(usize, String)> {
+                keys.iter()
+                    .find(|k| t.len() >= p + k.len() && t[p..p + k.len()] == k[..])
+                    .map(|k| (p + k.len(), map[k].clone()))
+            };
+            let is_raw = |t: &[char], p: usize, e: usize| self.raw.contains(&t[p..e]);
+            t = match ty {
+                "negatedsymbols" => subst(&t, |t, p| {
+                    at(t, p).map(|(e, v)| (e, alloc::format!("{{$\\not\\{v}$}}")))
+                }),
+                "superscripts" => subst(&t, |t, p| {
+                    at(t, p).map(|(e, v)| (e, alloc::format!("\\textsuperscript{{{v}}}")))
+                }),
+                "cmdsuperscripts" => subst(&t, |t, p| {
+                    at(t, p).map(|(e, v)| (e, alloc::format!("\\textsuperscript{{\\{v}}}")))
+                }),
+                "dings" => subst(&t, |t, p| {
+                    at(t, p).map(|(e, v)| (e, alloc::format!("\\ding{{{v}}}")))
+                }),
+                "letters" => subst(&t, |t, p| {
+                    at(t, p).map(|(e, v)| {
+                        if is_raw(t, p, e) {
+                            (e, v)
+                        } else {
+                            (e, alloc::format!("\\{v}{{}}"))
+                        }
+                    })
+                }),
+                "punctuation" | "symbols" | "greek" => subst(&t, |t, p| {
+                    at(t, p).map(|(e, v)| {
+                        // `_wrap`
+                        if v.starts_with("text") || v.starts_with("guil") {
+                            (e, alloc::format!("\\{v}{{}}"))
+                        } else if is_raw(t, p, e) {
+                            (e, v)
+                        } else {
+                            (e, alloc::format!("{{$\\{v}$}}"))
+                        }
+                    })
+                }),
+                "diacritics" => diacritics(&t, &at),
+                _ => t,
+            };
+        }
+        t.into_iter().collect()
+    }
+}
+
+/// `latex_encode`'s diacritics: `at` the alternation of the marks.
+fn diacritics(t: &[char], at: &dyn Fn(&[char], usize) -> Option<(usize, String)>) -> Vec<char> {
+    // s/i($re)/"\\" . $map->{$1} . '{\i}'/ge
+    let t = subst(t, |t, p| {
+        if t[p] != 'i' {
+            return None;
+        }
+        at(t, p + 1).map(|(e, v)| (e, alloc::format!("\\{v}{{\\i}}")))
+    });
+    // s/\{(\pL\pM*)\}($re)/"\\" . $map->{$2} . "{$1}"/ge
+    let t = subst(&t, |t, p| {
+        if t[p] != '{' || !t.get(p + 1).is_some_and(|&c| is_l(c)) {
+            return None;
+        }
+        let mut q = p + 2;
+        while q < t.len() && is_m(t[q]) {
+            q += 1;
+        }
+        if t.get(q) != Some(&'}') {
+            return None;
+        }
+        let base: String = t[p + 1..q].iter().collect();
+        at(t, q + 1).map(|(e, v)| (e, alloc::format!("\\{v}{{{base}}}")))
+    });
+    // s/(\pL\pM*)($re)/"\\" . $map->{$2} . "{$1}"/ge (\pM* backtracking)
+    let t = subst(&t, |t, p| {
+        if !is_l(t[p]) {
+            return None;
+        }
+        let mut q = p + 1;
+        while q < t.len() && is_m(t[q]) {
+            q += 1;
+        }
+        (p + 1..=q).rev().find_map(|k| {
+            at(t, k).map(|(e, v)| {
+                let base: String = t[p..k].iter().collect();
+                (e, alloc::format!("\\{v}{{{base}}}"))
+            })
+        })
+    });
+    // (\PM)($re){3,2,1}: the innermost mark first
+    let mut t = t;
+    for n in [3usize, 2, 1] {
+        t = subst(&t, |t, p| {
+            if is_m(t[p]) {
+                return None;
+            }
+            let mut q = p + 1;
+            let mut vs = Vec::new();
+            for _ in 0..n {
+                let (e, v) = at(t, q)?;
+                vs.push(v);
+                q = e;
+            }
+            let mut o = alloc::format!("{}", t[p]);
+            for v in vs {
+                o = alloc::format!("\\{v}{{{o}}}");
+            }
+            Some((q, o))
+        });
+    }
+    t
+}
+
+/// An encoding the native biber reads a data source in or writes the
+/// `.bbl` in (Perl Encode's names, any case).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Encoding {
+    Utf8,
+    /// `ascii`: read as UTF-8 (`preprocess_file`), written with what it
+    /// lacks recoded into macros (`Output::bbl`).
+    Ascii,
+    /// ISO-8859-1, a byte a character.
+    Latin1,
+}
+
+impl Encoding {
+    pub fn of(name: &str) -> Option<Encoding> {
+        match unicode::lc(name).as_str() {
+            "utf-8" | "utf8" => Some(Encoding::Utf8),
+            "ascii" | "us-ascii" => Some(Encoding::Ascii),
+            "latin1" | "iso-8859-1" | "iso8859-1" | "l1" => Some(Encoding::Latin1),
+            _ => None,
+        }
+    }
+
+    /// A data source's bytes as text (`slurp_switchr`), `None` if they
+    /// are not in the encoding.
+    pub fn read(self, bytes: &[u8]) -> Option<String> {
+        match self {
+            Encoding::Utf8 | Encoding::Ascii => core::str::from_utf8(bytes).ok().map(Into::into),
+            Encoding::Latin1 => Some(bytes.iter().map(|&b| char::from(b)).collect()),
+        }
+    }
+
+    /// Whether `c` can be written in the encoding.
+    pub fn has(self, c: char) -> bool {
+        match self {
+            Encoding::Utf8 => true,
+            Encoding::Ascii => c.is_ascii(),
+            Encoding::Latin1 => u32::from(c) < 256,
+        }
+    }
+
+    /// `text` as the `.bbl`'s `:encoding()` layer writes it: a character
+    /// the encoding lacks as Encode's `\x{....}` (`FB_PERLQQ`).
+    pub fn write(self, text: &str) -> String {
+        let mut o = String::with_capacity(text.len());
+        for c in text.chars() {
+            if self.has(c) {
+                o.push(c);
+            } else {
+                o.push_str(&alloc::format!("\\x{{{:04x}}}", u32::from(c)));
+            }
+        }
+        o
+    }
 }

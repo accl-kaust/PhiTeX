@@ -217,6 +217,7 @@ impl Biber<'_> {
         &mut self,
         filename: &str,
         bytes: &[u8],
+        encoding: &str,
         keys: &[String],
     ) -> Result<Vec<String>, Fatal> {
         let mut rkeys: Vec<String> = keys.to_vec();
@@ -226,11 +227,20 @@ impl Biber<'_> {
             ));
             return Ok(rkeys);
         }
-        let Ok(text) = core::str::from_utf8(bytes) else {
+        // (the source's encoding, the input's by default: ascii read as
+        // UTF-8, `preprocess_file`)
+        let enc = crate::recode::Encoding::of(encoding).unwrap_or(crate::recode::Encoding::Utf8);
+        let Some(text) = enc.read(bytes) else {
+            let shown = if enc == crate::recode::Encoding::Ascii {
+                "UTF-8"
+            } else {
+                encoding
+            };
             return Err(self.fatal(alloc::format!(
-                "Data file '{filename}' cannot be read in encoding 'UTF-8'"
+                "Data file '{filename}' cannot be read in encoding '{shown}'"
             )));
         };
+        let text = text.as_str();
         if !text.contains('@') {
             self.warnings.push(alloc::format!(
                 "Data source '{filename}' contains no BibTeX entries/macros, ignoring"
