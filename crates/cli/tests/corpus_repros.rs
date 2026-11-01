@@ -430,3 +430,7 @@ repro!(
     eps_base35_font_xe,
     "an EPS figure with text in a base 35 font under XeLaTeX (revtex-aps-xe, revtex-aip-xe: `fig_1.eps`): the job's view of xdvipdfmx's files (phitex-live's `JobFiles`) did not pass Ghostscript's fonts on, so the in-process distiller's findfont found no Times-Roman and xdvipdfmx stopped (/invalidfont); no PDF (oracle: xelatex in the CI image)"
 );
+repro!(
+    biber_macro_case,
+    "biber: an @string macro used in another case than its definition's (acm-sigconf-biblatex: `journal = CACM` for `@String{CACM = ...}`) was undefined, the field lost (82 destinations moved); btparse defines them lowercased and looks them up lowercased (oracle: latexmk, pdflatex and biber in the CI image)"
+);
