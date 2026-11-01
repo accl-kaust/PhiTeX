@@ -10,9 +10,9 @@
 \tableofcontents
 \section{Définition}
 \section{Création d’une ligne}
-\newread\r
-\openin\r=\jobname.toc
-\readline\r to\x \readline\r to\x
+\newread\tocin
+\openin\tocin=\jobname.toc
+\readline\tocin to\x \readline\tocin to\x
 \texttt{\meaning\x}
-\closein\r
+\closein\tocin
 \end{document}
