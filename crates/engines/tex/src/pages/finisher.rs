@@ -202,6 +202,14 @@ impl Operation for Finish {
         true
     }
 
+    /// A routine run again waits for the text before its page: each
+    /// commit of a piece before it moved what it read once more (Grail,
+    /// one `\cite` removed: its last page's 4.5 s routine run 10 times,
+    /// once for each bibliography piece's `\@pdfpublisher`, accl 22666).
+    fn reruns_after_text(&self) -> bool {
+        true
+    }
+
     /// 1. `args` = [`FinishArgs::decode`]; the page =
     ///    `read_at(PAGE_OF:<piece>:<nth>, At::End(unit))` decoded as
     ///    [`Page`]. Unset: the loop has not fired this page (the

@@ -1511,7 +1511,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // every commit before it, up to 74 times (Grail, accl 22515), each run
     // thrown away and each one taking a core from the chain. Its first run
     // is still a guess on what stands; a resumption goes on.)
-    if !first && pool.n > 1 && op_is_text(eng, node) && refuted_wake(node)
+    if !first && waits_for_text(eng, node) && refuted_wake(node)
         && let Some(x) = crate::read::open_before(eng, node)
     {
         park_waiting(eng, pool, w, node, Some(x));
@@ -1750,9 +1750,10 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     }
 }
 
-/// Whether `n`'s operation runs the unit's text (`Operation::text`).
-fn op_is_text(eng: &Engine, n: &Node) -> bool {
-    eng.op(n.op()).text()
+/// Whether `n`'s operation runs again only after the text before it
+/// (`Operation::reruns_after_text`).
+fn waits_for_text(eng: &Engine, n: &Node) -> bool {
+    eng.op(n.op()).reruns_after_text()
 }
 
 /// Whether `n`, run before in this evaluation, runs again because what it
