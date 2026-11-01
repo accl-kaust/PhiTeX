@@ -2945,9 +2945,7 @@ pub(crate) fn page_allocs(
                 .get(&id)
                 .filter(|x| x.auto && fonts.by_id.contains_key(&x.base))
                 .map_or(id, |x| x.base);
-            v.str(&String::from_utf8_lossy(phitex_pdf::FontSource::name(
-                fonts, id,
-            )))
+            v.str(&object_key(fonts, id))
         })
         .collect();
     let mut dests: Vec<ValueId> = Vec::new();
@@ -3182,6 +3180,21 @@ fn mark_events(
     w.boxed(bx);
     w.flush();
     v.list(w.ev.into_iter().map(|e| v.list(e)).collect())
+}
+
+/// What the read-time fold knows a real font's object by
+/// (`pdf_init_font`): a scalable font's TFM name, which every font of
+/// that name shares (loaded at another size), and the font itself where
+/// it is not scalable (a PK font, an object at each size: pdfTeX never
+/// shares one).
+pub(crate) fn object_key(fonts: &Fonts, id: FontId) -> String {
+    let name = String::from_utf8_lossy(phitex_pdf::FontSource::name(fonts, id)).into_owned();
+    let scalable = phitex_pdf::FontSource::map_entry(fonts, id).is_some_and(|m| !m.is_pk());
+    if scalable || fonts.vfs.contains_key(&id) {
+        name
+    } else {
+        format!("{name}\u{0}{id}")
+    }
 }
 
 /// The fonts a read-time write uses (an `\\immediate\\pdfxform`'s):

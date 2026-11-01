@@ -443,6 +443,10 @@ repro!(
     "AASTeX's abstract with line numbers: lineno's \\linenumberpar puts its penalty after a paragraph only when \\prevgraf grew, which read 0 in the abstract's \\vbox; each paragraph's last line went unnumbered, every number after one less (aastex, aastex-xe; oracle: pdflatex in the CI image)"
 );
 repro!(
+    pk_fonts_own_objects,
+    "bitmap (PK) fonts never share an object (`pdf_init_font` shares only scalable fonts of a TFM name): yinit at two sizes is two objects, and the read-time fold counted one, numbering an object after the page one too low (oracle: pdflatex in the CI image)"
+);
+repro!(
     output_step_then_local_group,
     "a register stepped globally by a constant it never read (the output routine's \\global\\advance\\c@page), then set locally in a group (mparhack's hook, {\\advance\\c@page\\m@ne}): the set dropped the step, the run published nothing and every page was page 1 (classicthesis: a blank page missing, every page number after it off; oracle: pdflatex in the CI image)"
 );

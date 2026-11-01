@@ -707,3 +707,44 @@ fn a_written_files_date_is_the_builds_clock() {
     );
     assert_eq!(dates[2], dates[3], "the log's date:\n{log}");
 }
+
+/// pdfTeX's commands in DVI mode (`\pdfoutput=0`), `check_pdfoutput`
+/// (pdfTeX §1349): `\pdfmapfile`, `\pdfmapline`, `\pdfliteral` and the
+/// others writing the PDF are `pdf_error`, which ends the job (`! pdfTeX
+/// error (\pdfmapfile): not allowed in DVI mode (\pdfoutput <= 0).`);
+/// `\pdfinfo` a warning, the job going on, as `pdftex -ini` (TeX Live
+/// 2026). They ran as in PDF mode, the job going on.
+#[test]
+fn pdf_commands_in_dvi_mode() {
+    let dir = common::fixtures().join("pdf");
+    for (cmd, fatal) in [
+        ("\\pdfmapfile{+foo.map}", true),
+        ("\\pdfmapline{=cmr10 CMR10 <cmr10.pfb}", true),
+        ("\\pdfliteral{0 g}", true),
+        ("\\pdfinfo{/Title (x)}", false),
+    ] {
+        let doc = format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\pdfoutput=0 \\font\\r=cmr10 \\r \\hsize=100pt \\vsize=100pt\nBefore. {cmd} After.\\par\n\\end\n"
+        );
+        let opts = common::options("./t.tex", "t", "", &dir);
+        let b = common::build(opts, None, &doc);
+        let (_, log) = b.output();
+        let name = cmd.split('{').next().unwrap_or_default();
+        if fatal {
+            assert!(b.fatal(), "{cmd}: the job did not end:\n{log}");
+            let want =
+                format!("! pdfTeX error ({name}): not allowed in DVI mode (\\pdfoutput <= 0).");
+            assert!(log.contains(&want), "{cmd}: no {want:?} in the log:\n{log}");
+        } else {
+            assert!(!b.fatal(), "{cmd}: the job ended:\n{log}");
+            let want = format!(
+                "pdfTeX warning ({name}): not allowed in DVI mode (\\pdfoutput <= 0); ignoring it"
+            );
+            // (the log's lines broken at `max_print_line`)
+            assert!(
+                log.replace('\n', "").contains(&want),
+                "{cmd}: no {want:?} in the log:\n{log}"
+            );
+        }
+    }
+}

@@ -2589,6 +2589,42 @@ pub(crate) fn immediate(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     }
 }
 
+/// `check_pdfoutput` (pdfTeX §1349) for the extension `r.cur.chr`, before
+/// it scans anything: in DVI mode (`\pdfoutput` <= 0) most are
+/// `pdf_error`, fatal ("not allowed in DVI mode"); `\pdfinfo`,
+/// `\pdfcatalog`, `\pdftrailer` and `\pdftrailerid` a warning, and
+/// carried on; the others (`\pdfsavepos`, `\pdfresettimer`, ...) not
+/// checked.
+fn check_pdfoutput(r: &mut Run<'_, '_>) -> R<()> {
+    let c = r.cur.chr;
+    let error = match c {
+        ex::INFO | ex::CATALOG | ex::TRAILER | ex::TRAILER_ID => false,
+        ex::LITERAL..=ex::END_THREAD
+        | ex::SNAP_REF_POINT..=ex::SNAPY_COMP
+        | ex::NAMES..=ex::MAP_LINE
+        | ex::NOBUILTIN_TOUNICODE..=ex::SPACE_FONT => true,
+        _ => return Ok(()),
+    };
+    if pdf_mode(r)? {
+        return Ok(());
+    }
+    let name = PRIMS
+        .iter()
+        .find(|p| p.1 == cmd::EXTENSION && p.2 == c)
+        .map_or("", |p| p.0);
+    if error {
+        return r.fatal(&format!(
+            "pdfTeX error (\\{name}): not allowed in DVI mode (\\pdfoutput <= 0)"
+        ));
+    }
+    r.log(
+        "wlog",
+        &format!(
+            "pdfTeX warning (\\{name}): not allowed in DVI mode (\\pdfoutput <= 0); ignoring it"
+        ),
+    )
+}
+
 /// Whether the file is PDF (the writer's steps run).
 fn pdf_mode(r: &mut Run<'_, '_>) -> R<bool> {
     Ok(r.param("pdfoutput")? > 0)
@@ -2613,6 +2649,7 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::match_same_arms)]
 fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
+    check_pdfoutput(r)?;
     let v = r.v;
     let s = |x: &str| v.str(x);
     match r.cur.chr {
@@ -3665,13 +3702,14 @@ fn box_font_names(r: &mut Run<'_, '_>, b: Option<ValueId>) -> R<Vec<String>> {
         return Ok(Vec::new());
     };
     let view = r.font_view(std::slice::from_ref(&Node::Box(bx)))?;
+    let ids: Vec<u32> = view.fonts.ids();
+    // (by the key their objects have in the fold: a PK font its own)
+    let fonts = crate::pdfout::fonts_for(r, &ids, false)?;
     let mut out = Vec::new();
-    for f in view.fonts.ids() {
-        let x = r.font_get(i64::from(f), crate::fields::FontCell::Info)?;
-        if let Some(i) = crate::fonts::info(v, x)
-            && !out.contains(&i.name)
-        {
-            out.push(i.name);
+    for f in ids {
+        let k = crate::pdfout::object_key(&fonts, f);
+        if !out.contains(&k) {
+            out.push(k);
         }
     }
     Ok(out)
