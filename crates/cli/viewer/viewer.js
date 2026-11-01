@@ -922,18 +922,6 @@ header:active { cursor: grabbing; }
 .tip .demo .mmenu span { display: flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 2px; white-space: nowrap; }
 .tip .demo .mmenu b { margin-left: auto; padding-left: 6px; }
 
-/* the \u26A1 chip: each repaint's keystroke-to-screen time over the pages' corner, the strips' numbers under it */
-.speedchip { position: absolute; right: 12px; bottom: 12px; z-index: 3; pointer-events: none; display: flex; flex-direction: column; align-items: flex-end;
-  gap: 2px; max-width: calc(100% - 24px); padding: 4px 9px; border-radius: 8px; color: #fff; background: rgb(20 24 32 / 82%);
-  box-shadow: 0 4px 12px rgb(0 0 0 / 25%); font: 700 12px/1.3 var(--ph-font); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.speedchip[hidden], .win.nospeed .speedchip { display: none; }
-.speedchip.slow b { color: #ffb366; }
-.speedchip span { overflow: hidden; text-overflow: ellipsis; max-width: 100%; font: 400 11px/1.3 ui-monospace, monospace; opacity: .85; }
-.speedchip span:empty { display: none; }
-.speedchip.flash { animation: phx-chipflash .5s ease-out; }
-@keyframes phx-chipflash { 0% { filter: brightness(1.6); } 100% { filter: none; } }
-@media (prefers-reduced-motion: reduce) { .speedchip.flash { animation: none; } }
-
 /* compare: "good" struck out, "excellent" added, then the navigator */
 .tip .demo.cmp { height: auto; padding: 10px 12px 30px; background: #fff; color: #1b222c; font: 13px/1.5 "Noto Serif", Georgia, serif; }
 .tip .cmp .del { animation: phx-del 6s ease-in-out infinite; }
@@ -1900,7 +1888,7 @@ var Panel = class {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div class="speedchip" id="speedchip" hidden aria-live="off" title="From the keystroke to the page on screen; under it, the last page's strips: drawn and kept, the core's watch (probe, draw), fetch and compose"><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -3210,10 +3198,6 @@ var Panel = class {
   }
   /** Repaints so far: the first is the first build's. */
   paints = 0;
-  /** The ⚡ chip shown or not (the host's setting: Overleaf's popup, on by default). */
-  speedChip(on) {
-    this.win.classList.toggle("nospeed", !on);
-  }
   /** Where the pages' strips say the last frame's numbers (drawn, kept, watch, probe, draw, fetch, compose): under the ⚡ chip's. */
   stripsChip() {
     return this.$("#stripsline");
@@ -3221,14 +3205,9 @@ var Panel = class {
   /** A repaint reached the screen, `ms` after its keystroke: the status says how fast. */
   painted(ms) {
     this.speed = { ms, at: performance.now(), first: this.paints++ === 0 };
-    const chip2 = this.$("#speedchip");
-    chip2.hidden = false;
     this.$("#speedms").textContent = `\u26A1 ${this.speed.first ? "first build " : ""}${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
-    chip2.classList.toggle("slow", !this.speed.first && ms > 100);
-    chip2.classList.remove("flash");
-    void chip2.offsetWidth;
-    chip2.classList.add("flash");
     this.renderStatus();
+    if (!this.$("#m-time").hidden) this.timing();
     this.emit();
   }
   // ---- Dark PDF: the user's choice, Off by default (a static filter: it inverts figures too) ----
@@ -3472,7 +3451,8 @@ var Panel = class {
       const bar2 = p.split?.length ? `<div class="tbar">${p.split.map(([n, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${p.split.map(([n, ms], i) => `<span><i class="c${i}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div>` : "";
       return `<div class="row"><span class="k">${esc3(p.label)}</span><span class="v">${esc3(p.value)}</span>${bar2}${p.note ? `<span class="note">${esc3(p.note)}</span>` : ""}</div>`;
     }).join("");
-    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + rows + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+    const strips2 = this.$("#stripsline").textContent;
+    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + rows + (strips2 ? `<div class="row"><span class="k">Page drawn</span><span class="v">${esc3(strips2)}</span></div>` : "") + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
     el.querySelector(".foot").textContent = parts.length ? "" : this.lat?.summary ?? "";
     el.querySelector(".msg").textContent = this.msgText;
   }
