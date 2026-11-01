@@ -423,7 +423,7 @@ export class Panel {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div class="speedchip" id="speedchip" hidden aria-live="off" title="From the keystroke to the page on screen; under it, the last page's strips: drawn and kept, the core's watch (probe, draw), fetch and compose"><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -1916,11 +1916,6 @@ export class Panel {
   /** Repaints so far: the first is the first build's. */
   private paints = 0;
 
-  /** The ⚡ chip shown or not (the host's setting: Overleaf's popup, on by default). */
-  speedChip(on: boolean): void {
-    this.win.classList.toggle("nospeed", !on);
-  }
-
   /** Where the pages' strips say the last frame's numbers (drawn, kept, watch, probe, draw, fetch, compose): under the ⚡ chip's. */
   stripsChip(): HTMLElement {
     return this.$("#stripsline");
@@ -1930,15 +1925,11 @@ export class Panel {
   painted(ms: number): void {
     // (the first paint is the first build's: downloads, the format, the whole document; the status says so, not "Built · 14906 ms")
     this.speed = { ms, at: performance.now(), first: this.paints++ === 0 };
-    // (the ⚡ chip: each repaint's time, keystroke to screen, in the corner; a flash as it changes)
-    const chip = this.$("#speedchip");
-    chip.hidden = false;
+    // (each repaint's time is the status's, "Built · 14 ms", and its popover's
+    // with the build's parts and the strips' numbers: nothing over the pages, the user's)
     this.$("#speedms").textContent = `⚡ ${this.speed.first ? "first build " : ""}${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
-    chip.classList.toggle("slow", !this.speed.first && ms > 100);
-    chip.classList.remove("flash");
-    void chip.offsetWidth;
-    chip.classList.add("flash");
     this.renderStatus();
+    if (!this.$("#m-time").hidden) this.timing();
     this.emit();
   }
 
@@ -2227,9 +2218,12 @@ export class Panel {
         return `<div class="row"><span class="k">${esc(p.label)}</span><span class="v">${esc(p.value)}</span>${bar}${p.note ? `<span class="note">${esc(p.note)}</span>` : ""}</div>`;
       })
       .join("");
+    // (the last page drawn: its strips drawn and kept, the core's watch, fetch and compose)
+    const strips = this.$("#stripsline").textContent;
     el.innerHTML =
       (head ? `<div class="head"><span>${esc(String(head[0]))}</span><b>${esc(dur(head[1] as number))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) +
       rows +
+      (strips ? `<div class="row"><span class="k">Page drawn</span><span class="v">${esc(strips)}</span></div>` : "") +
       `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
     // (the summary line only when there are no parts to say it)
     el.querySelector(".foot")!.textContent = parts.length ? "" : (this.lat?.summary ?? "");
