@@ -3769,27 +3769,27 @@ fn image_info(data: &std::sync::Arc<[u8]>, page: i32) -> (i32, i32, i32, i32, bo
     if data.starts_with(&[0xFF, 0xD8]) {
         return jpeg_info(data);
     }
-    if data.starts_with(b"%PDF") {
-        if let Ok(doc) = phitex_pdf::open_doc(data) {
-            let n = doc.num_pages();
-            let k = usize::try_from(page.max(1) - 1).unwrap_or(0);
-            if let Some(p) = doc.page(k) {
-                let m = p.media;
-                let sp = |bp: f64| -> i32 {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let x = (bp * 65781.76 + 0.5).floor() as i32;
-                    x
-                };
-                return (
-                    sp(m[2] - m[0]),
-                    sp(m[3] - m[1]),
-                    0,
-                    0,
-                    true,
-                    i32::try_from(n).unwrap_or(0),
-                    0,
-                );
-            }
+    if data.starts_with(b"%PDF")
+        && let Ok(doc) = phitex_pdf::open_doc(data)
+    {
+        let n = doc.num_pages();
+        let k = usize::try_from(page.max(1) - 1).unwrap_or(0);
+        if let Some(p) = doc.page(k) {
+            let m = p.media;
+            let sp = |bp: f64| -> i32 {
+                #[allow(clippy::cast_possible_truncation)]
+                let x = (bp * 65781.76 + 0.5).floor() as i32;
+                x
+            };
+            return (
+                sp(m[2] - m[0]),
+                sp(m[3] - m[1]),
+                0,
+                0,
+                true,
+                i32::try_from(n).unwrap_or(0),
+                0,
+            );
         }
     }
     (0, 0, 0, 0, false, 0, 0)
