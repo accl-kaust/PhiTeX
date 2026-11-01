@@ -1386,6 +1386,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             "pages": r.pages(),
             "pages_changed": changed,
             "nodes_run": nodes,
+            // (runs in all, a node run again counted again: past
+            // nodes_run, the work an edit did again)
+            "runs": r.runs.last().map(|x| x.runs),
+            "rounds": r.runs.last().map(|x| x.rounds),
             "absorbed": r.runs.last().map(|x| x.absorbed),
             "parallel": r.runs.last().map(|x| json!({
                 "threads": x.threads,
