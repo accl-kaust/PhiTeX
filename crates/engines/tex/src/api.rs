@@ -5733,6 +5733,9 @@ impl Build {
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn with(opts: Options, prelude: Option<&str>, document: &str) -> Build {
+        // (its lines as web2c's `input_line` ends them, a CR alone too)
+        let crs = crate::expand::cr_lines(document);
+        let document = crs.as_deref().unwrap_or(document);
         let t0 = std::time::Instant::now();
         let cached = prelude_env(prelude, &opts);
         if let Some(p) = &opts.progress {
@@ -6258,6 +6261,8 @@ impl Build {
     /// The document changed to `text`: the nodes whose slices differ are
     /// replaced, inserted or removed, and the graph re-evaluated.
     pub fn edit(&mut self, text: &str) {
+        let crs = crate::expand::cr_lines(text);
+        let text = crs.as_deref().unwrap_or(text);
         let t0 = std::time::Instant::now();
         self.stats.last = RunReport::default();
         let _ = self.edits.send(text);
