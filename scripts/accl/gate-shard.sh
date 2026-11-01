@@ -620,9 +620,12 @@ PY
         ${mode:+--$mode} > "$r/sweep.txt" 2>&1 || red "research: the sweep failed: $(tail -1 "$r/sweep.txt")"
       echo "sweep_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
       python3 -I scripts/ci/sweep.py table "$r/research" --json "$r/research/table.json" > "$r/table.txt" 2>&1
-      # (each document identical at every -j, else red: verdict.py)
+      # (each document identical at every -j, else red: verdict.py; those
+      # not identical when the gate took them, ci/research-not-identical.tsv,
+      # reported apart as the manuals' are, never red)
       python3 -I scripts/ci/verdict.py "$list" "$k/$n" "${GATE_RESEARCH_JOBS:-1,4}" "$r/research" \
-        --prefix "research: " ${mode:+--lane "$mode"} >> "$r/red.txt"
+        --prefix "research: " ${mode:+--lane "$mode"} \
+        --known ci/research-not-identical.tsv --known-out "$r/known-red.txt" >> "$r/red.txt"
       grep -q . "$r/red.txt" && status=red
     fi
     ;;
