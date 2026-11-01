@@ -634,3 +634,7 @@ repro!(
 fn valign_columns() {
     check_threads("valign_columns", "pdf");
 }
+repro!(
+    marginpar_after_display,
+    "manuals (hep-paper, verifiche: 'Float(s) lost'): a \\marginpar before a display in a paragraph and another after it; the first one's -10004 fires at the display's start (§1145's build_page) and its routine takes it off \\@currlist before the text after the display conses the second on. The piece ran on through the display's start (a list of its own open), its \\@currlist still holding the first, and that definition stood over the routine's: the second was never output. A display's start is now a cut where a page is made to fire, as a paragraph's start is (oracle: pdflatex in the CI image, accl 22589)"
+);
