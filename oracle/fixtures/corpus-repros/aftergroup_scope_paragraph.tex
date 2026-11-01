@@ -1,0 +1,24 @@
+% A group opened in vertical mode whose \aftergroup tokens wait for its
+% end, a paragraph begun inside it, the group ended inside the paragraph
+% (§1063, §282): classicthesis's title, \begingroup\color{CTtitle}
+% \spacedallcaps{...}\endgroup in a center environment; the colour's pop
+% (\reset@color, by \aftergroup) belongs to the paragraph, and the space
+% before it stays on its line.
+\documentclass{article}
+\usepackage{xcolor}
+\newcommand\after{[after]}
+\begin{document}
+\begin{center}
+    A B \\ \medskip
+
+    \begingroup
+        \color{red}TITLE
+    \endgroup
+\end{center}
+Before.\par
+\begingroup\color{blue}\leavevmode Words \endgroup\par
+\begingroup\aftergroup\after\leavevmode Text\endgroup{} more.\par
+Text {\color{green}x} y.
+\clearpage
+Text {\color{blue}x} y.
+\end{document}

@@ -521,3 +521,7 @@ repro!(
     output_pagegoal,
     "research corpus (aastex, aastex-xe: Table 1 at the top of page 4, pdfTeX's on page 5): while the output routine is active \\pagegoal and its kin read page_so_far as the page's fire left it (§421), and PhiTeX read the emptied page's \\maxdimen and 0; ltxgrid's \\@add@float takes \\vsize-\\pagegoal into \\@pageht, which came out near -\\maxdimen, so every float fitted where it was met (oracle: pdflatex in the CI image, mc 77786)"
 );
+repro!(
+    aftergroup_scope_paragraph,
+    "research corpus (classicthesis, classicthesis-xe: the title 2.277 pt right of pdfTeX's, the title's colour on every page after): a group opened in vertical mode ends inside a paragraph begun in it (\\begingroup\\color{CTtitle}\\spacedallcaps{...}\\endgroup); the scope's \\aftergroup tokens (\\reset@color's pop) were read by the paragraph's level's id, not the scope's, and dropped, the space before them taken off the line (oracle: pdflatex in the CI image, mc 77793)"
+);

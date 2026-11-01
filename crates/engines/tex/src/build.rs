@@ -227,7 +227,13 @@ impl Run<'_, '_> {
                     .collect::<Vec<_>>()
             );
         }
-        self.unsave_extras(md)?;
+        // (the scope's own lists, `ag` and `lvlfix`, are tagged with its
+        // sid: read as level 0 has it, not as the innermost level does,
+        // a paragraph the run began inside the scope (`\begingroup
+        // \color{red}`, then `\leavevmode ... \endgroup`): its sid is its
+        // list's, and the `\aftergroup` tokens were dropped)
+        let base = self.base_mode()?;
+        self.unsave_extras(&base)?;
         self.kind_outer(md)
     }
 
