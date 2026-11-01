@@ -527,9 +527,13 @@ repro!(
 );
 repro!(
     lineno_last_page_xe,
-    "research corpus (aastex-xe: page 8's text gone, its line numbers left): under XeLaTeX a page's sealed lines are filled by the end node from their pieces' units; lineno's routine gives every line back, so the last page's lines all came back from routines before and its finisher sealed none of its own: the page carried no places, and its lines were never filled (the PDF writer's sealed_units too); now an empty window, each line's piece's unit read by itself (oracle: xelatex in the CI image, mc 77824)"
+    "research corpus (aastex-xe: page 8's text gone, its line numbers left): under XeLaTeX a page's sealed lines are filled by the end node from their pieces' units; lineno's routine gives every line back, so the last page's lines all came back from routines before and its finisher sealed none of its own: the page carried no places, and its lines were never filled (the PDF writer's `sealed_units` too); now an empty window, each line's piece's unit read by itself (oracle: xelatex in the CI image, mc 77824)"
 );
 repro!(
     protrusion_math_glue,
     "research corpus (acm-sigconf-biblatex: a bibliography line's spacing, -250 for -248, other expanded fonts made, one font fewer numbered, /F460 for /F461): margin protrusion passes over glue only when its spec is the shared zero_glue (cp_skipable); a math glue made ordinary (§732, biblatex's URLs' \\mskip; §766, the spacing between atoms) has a spec of its own, and PhiTeX took it for zero_glue and protruded the character before it (oracle: pdflatex in the CI image, mc 77829)"
+);
+repro!(
+    list_depth_scope,
+    "research corpus (classicthesis, classicthesis-xe: the title page's list one level deeper than pdfTeX's): a list's \\global\\advance\\@listdepth\\@ne, then a local \\advance\\@listdepth\\m@ne in the group the run leaves open (KOMA's addmargin); the run published the step as a relation and the scope's 0 beside it, a field holds a relation or values, not both, so inside it read 1; now the step is published as the value it makes beneath the scope's own (oracle: pdflatex in the CI image, mc 77852)"
 );
