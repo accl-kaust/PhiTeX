@@ -339,14 +339,22 @@ impl Ready {
     }
 }
 
-/// Where a node stands for the order it runs in: its label; a node of the
-/// settling layer past the layer's frontier (`Ctx::set_frontier`) at the
-/// frontier, where its work is (the page loop stands after the whole text
-/// and folds the piece at its hole, a rest folds from the page its loop
-/// node waited at).
+/// Where a node stands for the order it runs in: its label; a node whose
+/// work is at the settling layer's frontier (`Operation::works_at_frontier`)
+/// past the frontier (`Ctx::set_frontier`) at the frontier (the page loop
+/// stands after the whole text and folds the piece at its hole, a rest
+/// folds from the page its loop node waited at). A finisher keeps its
+/// label: keyed at the frontier, a finisher of a page past it, re-asked
+/// by the finisher before (a counter, a mark), ran ahead of the loop
+/// still remaking the pages before it, and re-asked the finishers after
+/// it for every intermediate state of each one before: lineno's numbered
+/// lines, a routine fired at every line, ran the finishers of the
+/// pages after the loop's 100 to 150 times each a pass (-j1, 60 000
+/// finisher runs for 2 900 pages; more than 600 s where pdflatex takes
+/// 4.4 s; accl 22446).
 fn sched_key(eng: &Engine, n: &Node) -> u64 {
     let p = n.pos_hint().0;
-    if !eng.op(n.op()).settles_at_quiet() {
+    if !eng.op(n.op()).works_at_frontier() {
         return p;
     }
     let fr = eng.frontier.load(Ordering::Acquire);
@@ -1996,6 +2004,10 @@ mod frontier_tests {
         }
 
         fn settles_at_quiet(&self) -> bool {
+            true
+        }
+
+        fn works_at_frontier(&self) -> bool {
             true
         }
     }

@@ -1876,3 +1876,60 @@ fn latex_aux_on_disk_outside_a_fixpoint() {
         );
     }
 }
+
+/// `lineno`'s numbered lines: its routine is fired at a special penalty
+/// (`\penalty-32000`) at every line, gives the lines back numbered and
+/// ships nothing; only an ordinary break's routine ships a page and steps
+/// `\c@page`. Its `.aux` lines (`\@LN`) read back run the pages a second
+/// round. A finisher of a line's fire is predicted to step no counter
+/// (`Finish::alike`: no relation learned for the operation from a
+/// shipping finisher's), and one past the loop's frontier waits its turn
+/// by place (`sched::sched_key`): the finishers run a few times each, not
+/// once for every finisher placed before them on their page (lineno's
+/// manual: 60 000 finisher runs for 2 900 fires, more than 600 s where
+/// pdflatex takes 4.4 s; 92 s after).
+#[test]
+fn lineno_numbered_lines_run_their_finishers_a_few_times() {
+    use std::fmt::Write as _;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lineno-lines");
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let mut src = String::from(
+        "\\documentclass{article}\n\\usepackage{lineno}\n\\linenumbers\n\\begin{document}\nSee line \\lineref{l:last} on page \\pageref{l:last}.\n\n",
+    );
+    for i in 0..60 {
+        let _ = write!(
+            src,
+            "Paragraph {i} of numbered lines, long enough to be set as three or four lines of the article class's text width, so that the pages fill and every line has its number.\n\n"
+        );
+    }
+    src.push_str("The last line.\\linelabel{l:last}\n\\end{document}\n");
+    for threads in [1, 4] {
+        let opts = Options {
+            threads: Some(threads),
+            fixpoint: true,
+            ..pdf_opts("lines", &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let pages = b.pages().len() as u64;
+        let fin = b.stats.placements_of("finish") as u64;
+        let runs = common::runs_of(&b, "finish");
+        eprintln!(
+            "-j{threads}: {pages} pages, {fin} finishers placed, {runs} finisher runs: {}",
+            report("lines", &b)
+        );
+        let errors: Vec<String> = b
+            .diagnostics()
+            .iter()
+            .filter(|d| d.severity == phitex_tex::Severity::Error)
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(pages >= 4, "a document of several pages: {pages}");
+        assert!(fin >= 150, "a finisher per numbered line: {fin}");
+        assert!(
+            runs <= 3 * fin,
+            "-j{threads}: {runs} finisher runs for {fin} finishers placed: {}",
+            report("lines", &b)
+        );
+    }
+}
