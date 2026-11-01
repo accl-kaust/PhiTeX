@@ -193,6 +193,9 @@ const K_TOKS: u8 = 4;
 const K_MEAN0: u8 = 8;
 const K_PRIM: u8 = 8;
 const K_MACRO: u8 = 9;
+
+/// The macro store's length before [`State::compact_macros`] first looks.
+const MACROS_AT: usize = 1 << 16;
 const K_CHAR: u8 = 10;
 const K_UNDEF: u8 = 11;
 const K_FONT: u8 = 12;
@@ -425,6 +428,11 @@ pub(crate) struct State {
     glues: Vec<Glue>,
     toks: Vec<Rc<[Tok]>>,
     macros: Vec<Rc<crate::val::Macro>>,
+    /// The store's length at which [`State::compact_macros`] next looks:
+    /// a macro redefined leaves its old body behind (TeX frees it, §275),
+    /// and a run defining in a loop grew the store without end
+    /// (lisp-on-tex's div2: 60 GB at 470 MB/s; pegmatch, codehigh: 8 GB).
+    macros_at: usize,
     save: Vec<Saved>,
     /// Locations defined locally inside a group of the run (for a group
     /// left open: its definitions become the run's).
@@ -564,6 +572,7 @@ impl Clone for State {
             glues: self.glues.clone(),
             toks: self.toks.clone(),
             macros: self.macros.clone(),
+            macros_at: self.macros_at,
             cat_gen: new_cat_gen(),
             any_gen: new_cat_gen(),
             font_gen: new_cat_gen(),
@@ -684,6 +693,7 @@ impl State {
             glues: Vec::new(),
             toks: Vec::new(),
             macros: Vec::new(),
+            macros_at: MACROS_AT,
             cat_gen: new_cat_gen(),
             any_gen: new_cat_gen(),
             font_gen: new_cat_gen(),
@@ -697,6 +707,68 @@ impl State {
     }
 
     // ------------------------------------------------------------ undo
+
+    /// Every entry the table holds that may name a macro by handle: the
+    /// slots, the definition records' published entries, the groups'
+    /// saves, the scope's extra definitions and the candidates' entries.
+    fn each_entry(&mut self, mut f: impl FnMut(&mut Entry)) {
+        for s in self.eq.iter_mut().chain(self.spill.iter_mut()) {
+            f(&mut s.e);
+        }
+        for m in &mut self.metas {
+            if let Some((e, _)) = &mut m.publ {
+                f(e);
+            }
+        }
+        for s in &mut self.save {
+            f(&mut s.prev);
+        }
+        for (_, e, _) in &mut self.scope_extra {
+            f(e);
+        }
+        for (_, es) in &mut self.cands {
+            for (_, e) in es {
+                f(e);
+            }
+        }
+    }
+
+    /// The macro store without the bodies no entry names any more, the
+    /// handles renumbered, once it has doubled since it was last looked
+    /// at; never while a checkpoint keeps the store's length for a
+    /// [`State::rollback`]. Called between commands
+    /// (`Run::command`), where no entry is held outside the table.
+    pub(crate) fn compact_macros(&mut self) {
+        if self.macros.len() < self.macros_at || self.undo.is_some() {
+            return;
+        }
+        let mut new = vec![u32::MAX; self.macros.len()];
+        self.each_entry(|e| {
+            if e.kind == K_MACRO
+                && let Some(n) = new.get_mut(e.payload as usize)
+            {
+                *n = 0;
+            }
+        });
+        let mut kept = Vec::new();
+        for (i, n) in new.iter_mut().enumerate() {
+            if *n == 0 {
+                *n = u32::try_from(kept.len()).unwrap_or(u32::MAX);
+                kept.push(self.macros[i].clone());
+            }
+        }
+        self.each_entry(|e| {
+            if e.kind == K_MACRO
+                && let Some(&n) = new.get(e.payload as usize)
+            {
+                e.payload = n;
+            }
+        });
+        self.macros = kept;
+        self.macros_at = (2 * self.macros.len()).max(MACROS_AT);
+        // (a memo of decoded state stands only while nothing changed)
+        self.any_gen = new_cat_gen();
+    }
 
     /// Starts keeping the table's changes for a [`State::rollback`]
     /// (instead of a copy of the whole table): false if it keeps them

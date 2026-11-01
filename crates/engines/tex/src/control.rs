@@ -52,6 +52,7 @@ impl Run<'_, '_> {
     pub(crate) fn command(&mut self) -> R<()> {
         loop {
             phitex_pdf::phase::bump(23);
+            self.st.compact_macros();
             // (spec-final §2.4: a run-local count and one branch; the
             // heartbeat's own work every `HB_BATCH` commands)
             self.cmds += 1;
