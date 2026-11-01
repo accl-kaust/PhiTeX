@@ -189,6 +189,10 @@ pub(crate) const PRIMS: &[(&str, u8, i32)] = &[
     ("pdfomitinfodict", cmd::ASSIGN_INT, I + 32),
     ("pdfomitprocset", cmd::ASSIGN_INT, I + 33),
     ("pdfptexuseunderscore", cmd::ASSIGN_INT, I + 34),
+    // (web2c's `synctex_code`, pdfTeX's and XeTeX's: a parameter a
+    // document sets, `\\synctex=1`; the SyncTeX file is the build's
+    // option, written from the build's own records)
+    ("synctex", cmd::ASSIGN_INT, I + 35),
     ("pdfhorigin", cmd::ASSIGN_DIMEN, D),
     ("pdfvorigin", cmd::ASSIGN_DIMEN, D + 1),
     ("pdfpagewidth", cmd::ASSIGN_DIMEN, D + 2),

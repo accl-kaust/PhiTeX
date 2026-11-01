@@ -304,6 +304,7 @@ pub(crate) const KEPT: &[&str] = &[
     "pdfsavepos",
     "rightmarginkern",
     "rpcode",
+    "synctex",
 ];
 
 /// XeTeX's own entries of the primitive table: the renamed ones with
