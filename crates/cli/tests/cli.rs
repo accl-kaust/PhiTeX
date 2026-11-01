@@ -2880,7 +2880,7 @@ fn plain_tfms(text: &str) -> Vec<(String, Vec<u8>)> {
 
 /// The release the test Shelf serves, named to each build
 /// (`PHITEX_SHELF_RELEASE`): the tests stand apart from the release this
-/// PhiTeX is pinned to, which moves with every Shelf release.
+/// binary is pinned to, which moves with every Shelf release.
 const SHELF_RELEASE: &str = "tl2026.7";
 
 /// A Shelf release of `files` (texmf path, bytes) in one pack, its table
