@@ -1,0 +1,15 @@
+phitex-flow fuzz repro
+doc story
+seed 0 step 1
+before threads=1 reads=Suspend order=Priority lean=false
+schedule threads=1 reads=Suspend order=Priority lean=false
+fail mismatch log
+history threads=1 doc=-
+edit - 40 0 char-insert
+ins
+X
+text
+\catcode`\{=1 \catcode`\}=2
+\hsize=3iin \tolerance=1000
+\message{done}
+\end

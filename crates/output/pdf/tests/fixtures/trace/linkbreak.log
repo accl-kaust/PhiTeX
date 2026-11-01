@@ -1,0 +1,262 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input linkbreak
+(../../oracle/fixtures/pdf/linkbreak.tex
+
+Completed box being shipped out [0]
+\vbox(40.0+0.0)x150.0
+.\pdfdest name{top} fit
+.\glue(\topskip) 0.0
+.\hbox(6.83331+1.94444)x150.0, glue set 133.05553fil
+..\hbox(0.0+0.0)x0.0
+..\r T
+..\kern-0.83334
+..\r o
+..\r p
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\glue(\parskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+0.0)x150.0, glue set 0.32776
+..\hbox(0.0+0.0)x0.0
+..\r B
+..\r e
+..\r f
+..\r o
+..\r r
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfstartlink(*+*)x* attr{/C [0 1 0]} action goto name{top}
+..\r a
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r l
+..\r i
+..\r n
+..\r k
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r a
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r s
+..\r t
+..\r a
+..\r r
+..\r t
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r h
+..\r e
+..\r r
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r n
+..\r d
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+0.0)x150.0, glue set 0.60832
+..\r r
+..\r u
+..\r n
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r o
+..\r n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r o
+..\kern-0.27779
+..\r v
+..\kern-0.27779
+..\r e
+..\r r
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r s
+..\r e
+..\r v
+..\kern-0.27779
+..\r e
+..\r r
+..\r a
+..\r l
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r l
+..\r i
+..\r n
+..\r e
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r s
+..\r o
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r a
+..\r t
+..\glue(\rightskip) 0.0
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}
+
+Completed box being shipped out [0]
+\vbox(40.0+0.0)x150.0
+.\glue(\topskip) 0.0
+.\hbox(6.94444+1.94444)x150.0, glue set 2.04999
+..\r t
+..\r h
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r p
+..\r a
+..\r g
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r b
+..\r r
+..\r e
+..\r a
+..\r k
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r i
+..\r n
+..\r s
+..\r i
+..\r d
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r i
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\kern-0.27779
+..\r w
+..\r i
+..\r c
+..\r e
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+0.0)x150.0, glue set 64.0554fil
+..\r b
+..\kern0.27779
+..\r e
+..\r f
+..\r o
+..\r r
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r i
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r e
+..\r n
+..\r d
+..\r s
+..\pdfendlink
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r f
+..\r t
+..\r e
+..\r r
+..\r .
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\glue(\parskip) 0.0
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+0.0)x150.0, glue set 0.03998
+..\hbox(0.0+0.0)x0.0
+..\r T
+..\r h
+..\r e
+..\r n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfstartlink(*+*)x* action user{/Subtype /Link /A << /S /URI /URI (http://z)
+ >>}
+..\r a
+..\r n
+..\r o
+..\r t
+..\r h
+..\r e
+..\r r
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r o
+..\r n
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r c
+..\r r
+..\r o
+..\r s
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r l
+..\r i
+..\r n
+..\r e
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r n
+..\r d
+..\glue(\rightskip) 0.0
+
+
+Completed box being shipped out [0]
+\vbox(40.0+0.0)x150.0, glue set 31.11111fill
+.\glue(\topskip) 0.0
+.\hbox(6.94444+1.94444)x150.0, glue set 3.80533fil
+..\r p
+..\r a
+..\r g
+..\r e
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r o
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r e
+..\r n
+..\r d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r o
+..\r f
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r e
+..\r x
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r h
+..\r e
+..\r r
+..\r e
+..\pdfendlink
+..\r .
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\hbox(0.0+0.0)x150.0
+.\glue 0.0 plus 1.0fill
+
+ )</usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on linkbreak-trace.pdf (3 pages, 18514 bytes).
+PDF statistics:
+ 25 PDF objects out of 1000 (max. 8388607)
+ 1 named destinations out of 1000 (max. 500000)
+ 1 words of extra memory for PDF output out of 10000 (max. 10000000)
+

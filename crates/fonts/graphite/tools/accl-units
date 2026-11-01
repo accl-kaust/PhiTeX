@@ -1,0 +1,27 @@
+#!/bin/bash
+# The unit check on accl: graphite2 (the system library XeTeX runs
+# with) and phitex-graphite over the same segments, slot by slot.
+#   ACCL_OPTS=--export=ALL,ACCL_ROOT=/gw,ACCL_STORE_IN=code/tmp/r9-gr2-tests \
+#     scripts/accl/accl submit cmd bash crates/fonts/graphite/tools/accl-units
+set -u
+cd "$(dirname "$0")/../../../.."
+H=crates/fonts/graphite/tools/harness
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+cc -O2 -o "$w/gr2dump" $H/gr2dump.c -lgraphite2 > "$r/cc.txt" 2>&1 || { cat "$r/cc.txt" > "$r/summary.txt"; exit 1; }
+cargo build -q --release -p phitex-graphite --example gr-dump > "$r/build.txt" 2>&1 || { grep -E '^error' -A12 "$r/build.txt" | head -80 > "$r/summary.txt"; exit 1; }
+export FONTCONFIG_FILE=$PWD/scripts/xetex/fonts.conf
+mapfile -t fonts < <(fc-list -f '%{file}|%{capability}\n' | grep 'ttable:Silf' | cut -d'|' -f1 | sort -u)
+extra=; [ -d "$w/bin/r9-gr2-tests" ] && extra="--extra $w/bin/r9-gr2-tests"
+python3 -I $H/gentasks.py "$w/tasks.txt" crates/fonts/graphite/corpus/texts "${fonts[@]}" $extra --max "${MAXW:-3000}" > "$r/tasks.txt"
+t0=$(date +%s%N)
+"$w/gr2dump" "$w/tasks.txt" > "$w/oracle.txt" 2> "$r/oracle-err.txt"
+t1=$(date +%s%N)
+timeout 3000 target/release/examples/gr-dump "$w/tasks.txt" > "$w/ours.txt" 2> "$r/ours-err.txt"
+t2=$(date +%s%N)
+{
+  cat "$r/tasks.txt"
+  echo "time: graphite2 $(( (t1 - t0) / 1000000 )) ms, port $(( (t2 - t1) / 1000000 )) ms"
+  python3 -I $H/compare.py "$w/tasks.txt" "$w/oracle.txt" "$w/ours.txt" "${EXAMPLES:-40}"
+  tail -5 "$r/ours-err.txt"
+} > "$r/summary.txt" 2>&1
+true

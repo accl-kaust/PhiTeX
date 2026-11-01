@@ -1,0 +1,21 @@
+% XeTeX's \XeTeXlinebreaklocale for Japanese and Chinese with and without
+% ICU's lb keyword: their locale's line rules are ICU's line_normal (no
+% break before a wave dash or a double hyphen), the _cj rules only under
+% lb=normal and lb=loose (a break before them). Latin Modern: the CJK
+% glyphs missing, as in the oracle; breaks do not depend on glyphs.
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\^=7
+\showboxdepth=100 \showboxbreadth=100000 \tracingonline=1 \tracinglostchars=0
+\hsize=100pt \vsize=600pt \parfillskip=0pt plus 1fil \baselineskip=12pt
+\tolerance=10000 \parindent=0pt \output={\shipout\box255}
+\font\x="[lmroman10-regular.otf]" \x
+\def\t#1#2{\XeTeXlinebreaklocale "#1"\relax #2\par}
+\t{ja}{ラーメン・カレー・ソバ〜！？カナ゠カナ。ちょっと〜まって}
+\t{zh}{价格〜约。中文゠英文〜测试}
+\t{ja@lb=normal}{ラーメン・カレー・ソバ〜！？カナ゠カナ}
+\t{zh-u-lb-normal}{价格〜约。中文゠英文〜测试}
+\t{ja@lb=loose}{ソバ〜！？カナ゠カナ}
+\t{ja@lb=strict}{ソバ〜！？カナ゠カナ}
+\t{ja_JP}{ソバ〜！？カナ゠カナ}
+\t{zh_TW}{價格〜約。中文゠英文}
+\XeTeXlinebreaklocale "" \XeTeXlinebreakskip=0pt
+\end

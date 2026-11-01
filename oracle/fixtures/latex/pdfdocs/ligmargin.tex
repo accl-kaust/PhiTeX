@@ -1,0 +1,16 @@
+\documentclass[11pt]{book}
+\usepackage[a4paper,textwidth=150mm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{newpxtext}
+\usepackage{microtype}
+% font expansion with protrusion: a line ending in a ligature (T1's
+% closing quotes) varies its marginal kern by pdfTeX's char_pw of the
+% ligature's lig_char, which is no char node: 0, not the character's
+% left protrusion (line_break's "Calculate variations of marginal
+% kerns"); the item's lines break as pdfTeX's
+\begin{document}
+\begin{itemize}
+\item \textbf{Cost of an implementation.} The only expensive step is the Kirchhoff solve. The paper points to nearly-linear-time Laplacian solvers (Spielman and Teng), to the correspondence between electrical networks and random walks (which would allow a fully decentralised solver), to auction algorithms, and to Baum's ``knee-jerk'' algorithm as possible relatives.
+\item The paper points to the correspondence between electrical networks and random walks (which would allow a fully decentralised solver), to auction algorithms, and to Baum's knee-jerk'' algorithm as relatives, fine'' and final'' ones.
+\end{itemize}
+\end{document}

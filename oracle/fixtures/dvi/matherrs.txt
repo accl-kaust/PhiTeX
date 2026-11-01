@@ -1,0 +1,24 @@
+Math formula deleted: Insufficient symbol fonts
+Display math should end with $$
+Math formula deleted: Insufficient symbol fonts
+You can't use `\eqno' in math mode
+Math formula deleted: Insufficient symbol fonts
+Math formula deleted: Insufficient symbol fonts
+Missing $ inserted
+Missing delimiter (. inserted)
+Extra \right
+Math formula deleted: Insufficient symbol fonts
+Missing delimiter (. inserted)
+Missing \right. inserted
+Math formula deleted: Insufficient symbol fonts
+Missing delimiter (. inserted)
+Missing \right. inserted
+Missing $ inserted
+Math formula deleted: Insufficient symbol fonts
+Missing } inserted
+Extra \endgroup
+Math formula deleted: Insufficient symbol fonts
+Missing $ inserted
+Math formula deleted: Insufficient symbol fonts
+Missing $ inserted
+Math formula deleted: Insufficient symbol fonts

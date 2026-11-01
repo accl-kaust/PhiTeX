@@ -1,0 +1,22 @@
+% pdfTeX's expandable commands under INITEX: \pdfstrcmp, the escapes,
+% \pdfmdfivesum, \pdffilesize, \pdffiledump, \pdfmatch, \expanded,
+% \pdfprimitive, the new conditionals, versions; run as core.tex.
+\message{[\pdfstrcmp{abc}{abd}, \pdfstrcmp{b}{a}, \pdfstrcmp{\relax x}{\relax x}, \pdfstrcmp{}{}]}
+\message{[\pdfescapestring{a(b)c\string\\d e}] [\pdfescapename{a b#c/d}] [\pdfescapehex{AZ az}] [\pdfunescapehex{415a2}]}
+\message{[\pdfmdfivesum{abc}] [\pdfmdfivesum file{pdfexpand.dat}] [\pdffilesize{pdfexpand.dat}]}
+\message{[\pdffiledump offset 2 length 4{pdfexpand.dat}] [\pdffiledump length 3{pdfexpand.dat}]}
+\message{[\pdfmatch{^a(b|c)+d$}{abcbd}: \pdflastmatch0, \pdflastmatch1, \pdflastmatch 5]}
+\message{[\pdfmatch{x[^0-9]*y}{1x23xaby}: \pdflastmatch0]}
+\def\a{A}\def\b{\a B}
+\edef\x{\expanded{\a\noexpand\b}}\message{\meaning\x}
+\message{\expanded{\b\unexpanded{\b}}}
+\def\number{N}\message{[\pdfprimitive\number 7, \ifpdfprimitive\number y\else n\fi, \ifpdfprimitive\relax y\else n\fi, \ifpdfprimitive\a y\else n\fi]}
+\message{[\ifpdfabsnum -5=5 y\else n\fi, \ifpdfabsnum 3<-4 y\else n\fi, \ifpdfabsdim -2pt>1pt y\else n\fi]}
+\message{[\ifincsname y\else n\fi, \csname\ifincsname y\else n\fi\endcsname, \ifcsname\ifincsname y\else n\fi\endcsname Y\else N\fi]}
+\message{[\the\pdftexversion, \pdftexrevision]}
+\message{[\the\pdfhorigin, \the\pdfvorigin, \the\pdfcompresslevel, \the\pdfdecimaldigits, \the\pdfminorversion, \the\pdfmajorversion, \the\pdfimageresolution, \the\pdfpxdimen, \the\pdfgamma, \the\pdfimagegamma, \the\pdfimagehicolor]}
+\font\tenrm=cmr10 \font\big=cmr10 at 12pt
+\message{[\pdffontsize\tenrm, \pdffontsize\big]}
+\pdfoptionpdfminorversion=6 \message{[\the\pdfminorversion]}
+\message{[\the\efcode\tenrm`a, \the\lpcode\tenrm`a, \the\tagcode\tenrm`f, \the\tagcode\tenrm`a, \the\tagcode\tenrm 200]}
+\lpcode\tenrm`a=-2000 \knbscode\tenrm`a=300 \message{[\the\lpcode\tenrm`a, \the\knbscode\tenrm`a]}

@@ -1,0 +1,46 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input ximage
+(./ximage.tex
+
+pdfTeX warning: pdftex (file /usr/share/texmf-dist/tex/latex/mwe/example-image.
+pdf): PDF inclusion: found PDF version <1.5>, but at most version <1.4> allowed
+
+1,2,3,1,8,0.0pt,321.2pt
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x401.5
+.\pdfrefximage(301.125+0.0)x401.5
+.\glue(\topskip) 0.0
+.\hbox(40.0+5.0)x200.0, glue set 45.83333fil
+..\hbox(0.0+0.0)x0.0
+..\r A
+..\pdfrefximage(37.5+0.0)x50.0
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfrefximage(40.0+5.0)x60.0
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfrefximage(20.0+0.0)x30.0
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\glue(\lineskip) 0.0
+.\hbox(37.5+0.0)x50.0
+..\pdfrefximage(37.5+0.0)x50.0
+.\pdfrefximage(40.0+5.0)x60.0
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map} </usr/share/texmf-dist/tex/
+latex/mwe/example-image.png> </usr/share/texmf-dist/tex/latex/mwe/example-image
+.jpg> </usr/share/texmf-dist/tex/latex/mwe/example-image.pdf> </usr/share/texmf
+-dist/tex/latex/mwe/example-image-a.png> )</usr/share/texmf-dist/fonts/type1/pu
+blic/amsfonts/cm/cmr10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmss17.
+pfb>
+Output written on ximage-trace.pdf (1 page, 282152 bytes).
+PDF statistics:
+ 21 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 21 words of extra memory for PDF output out of 10000 (max. 10000000)
+

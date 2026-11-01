@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Type-check the renderer (viewer/src) and the CLI's host for it
-# (crates/partex-cli/viewer/cli.ts) with viewer/tsconfig.json: strict,
+# (crates/cli/viewer/cli.ts) with viewer/tsconfig.json: strict,
 # erasable syntax only, as the Overleaf extension, which runs these files
 # in Node with the types stripped, needs them.
 #

@@ -1,0 +1,23 @@
+(./vbox.tex
+Underfull \vbox (badness 10000) detected at line 8
+
+\vbox(20.0+0.0)x65.58351 []
+
+
+Overfull \vbox (13.83331pt too high) detected at line 9
+
+\vbox(5.0+0.0)x21.13893 []
+
+
+Tight \hbox (badness 43) in paragraph at lines 12--13
+\tenrm long enough to need more than one
+
+\hbox(6.94444+1.94444)x150.0, glue set - 0.75421 []
+
+
+Tight \hbox (badness 1) in paragraph at lines 12--13
+\tenrm line of the narrower measure given
+
+\hbox(6.94444+1.94444)x150.0, glue set - 0.18004 []
+
+[0] )

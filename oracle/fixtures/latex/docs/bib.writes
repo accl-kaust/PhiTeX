@@ -1,0 +1,17 @@
+=== bib.idx 101
+\indexentry{Knuth}{1}
+\indexentry{Lamport}{1}
+\indexentry{LaTeX@\LaTeX}{1}
+\indexentry{Knuth!TeX}{1}
+=== bib.aux 273
+\relax 
+\citation{knuth}
+\citation{lamport}
+\citation{knuth}
+\citation{lamport}
+\bibstyle{plain}
+\bibdata{refs}
+\bibcite{knuth}{1}
+\bibcite{lamport}{2}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Citations}{1}{}\protected@file@percent }
+\gdef \@abspage@last{1}

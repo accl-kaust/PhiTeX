@@ -1,0 +1,37 @@
+% pdfTeX's \pdfmatch and \pdflastmatch (POSIX extended expressions),
+% \tagcode and \pdfnoligatures (tags cleared, the main loop's ligatures).
+\font\tenrm=cmr10 \tenrm \showboxdepth=10 \showboxbreadth=100
+\message{[\pdfmatch{^-*[0-9]+ *$}{12}, \pdfmatch{^-*[0-9]+ *$}{1.5}]}
+\message{[\pdfmatch{b(c+)(d?)x}{abccdx}: \pdflastmatch0, \pdflastmatch1, \pdflastmatch2, \pdflastmatch3]}
+\message{[\pdfmatch icase{B[[:digit:]]}{xb7y}: \pdflastmatch0]}
+\message{[\pdfmatch subcount 1 {a(b)}{ab}: \pdflastmatch0, \pdflastmatch1]}
+\message{[\pdfmatch{zz}{abc}: \pdflastmatch0]}
+\message{[\pdfmatch{^([0-9]+([.,][0-9]+)?|[.,][0-9]+)(em|pt)? *$}{1,5em}]}
+\message{[\the\tagcode\tenrm`f, \the\tagcode\tenrm`a, \the\tagcode\tenrm 200, \the\pdfnoligatures\tenrm]}
+\tagcode\tenrm`f=-1
+\message{[\the\tagcode\tenrm`f, \the\pdfnoligatures\tenrm]}
+\setbox0\hbox{fi ff ffi AV}\showbox0
+\font\nine=cmr9 \pdfnoligatures\nine
+\message{[\the\pdfnoligatures\nine]}
+\setbox0\hbox{\nine fi AV}\showbox0
+% \pdfinsertht: an insertion class's height on the page so far.
+\output={\global\setbox1\box255 \global\setbox2\box100 \deadcycles=0 }
+\count100=1000 \dimen100=16383pt \skip100=0pt
+\message{[\pdfinsertht100]}
+\insert100{\hrule height 10pt depth 2pt}
+\message{[\pdfinsertht100, \pdfinsertht99]}
+\insert100{\hrule height 3pt}
+\message{[\pdfinsertht100]}
+% \pdfprimitive, \ifpdfprimitive: a primitive under a redefined name.
+\begingroup
+\def\number{Y}\def\message#1{\immediate\write16{(redefined)}}
+\pdfprimitive\message{[\pdfprimitive\number 42, \ifpdfprimitive\number p\else m\fi, \ifpdfprimitive\par p\else m\fi]}
+\endgroup
+\message{[\ifpdfprimitive\number p\else m\fi]}
+% \partokenname, \partokencontext: the paragraph token at a box's end.
+\def\mypar{\message{[mypar]}\par}\partokenname\mypar
+\partokencontext=1
+\setbox0\vbox{\hsize=100pt \tenrm a paragraph}
+\partokencontext=0
+\setbox0\vbox{\hsize=100pt \tenrm another one}
+\message{[\the\partokencontext]}

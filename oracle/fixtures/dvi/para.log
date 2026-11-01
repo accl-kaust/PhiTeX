@@ -1,0 +1,19 @@
+(./para.tex
+Underfull \hbox (badness 165) in paragraph at lines 5--8
+[]\tenrm Office affairs -- and --- To AVoid the ffi ligatures and kerns.
+
+\hbox(6.94444+1.94444)x300.0, glue set 1.18332 []
+
+
+Loose \hbox (badness 17) in paragraph at lines 5--8
+\tenrm to break into several lines, with more words to fill them up nicely.
+
+\hbox(6.94444+1.94444)x300.0, glue set 0.55554 []
+
+hello
+Underfull \hbox (badness 10000) in paragraph at lines 10--11
+[]\tenrm A short one.
+
+\hbox(6.94444+0.0)x300.0, glue set 67.7595 []
+
+[0] )

@@ -1,0 +1,11 @@
+\catcode`\{=1 \catcode`\}=2 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\pdfinterwordspaceon
+Words with faked spaces between them, and a fake\pdffakespace space.\par
+\font\t=ptmr8r \t Times words use their own space character. \r Back to roman.\par
+\penalty-10000
+
+Still on at the next page: \t mixed \r fonts here.\par
+\pdfinterwordspaceoff
+No more faked spaces.\pdffakespace\par
+\end

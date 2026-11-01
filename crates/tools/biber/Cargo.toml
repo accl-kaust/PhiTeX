@@ -1,0 +1,17 @@
+[package]
+name = "phitex-biber"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "biber 2.22 in process: .bcf/.bib in, .bbl/.blg out"
+
+[dependencies]
+# MD5 for biber's name hashes and sortinit hashes.
+phitex-codecs = { path = "../../codecs" }
+# NFD/NFC: biber normalises every string it reads (Unicode::Normalize).
+# Already in the lock file (gix); pure, no_std.
+unicode-normalization = { version = "0.1.25", default-features = false }
+
+[lints]
+workspace = true

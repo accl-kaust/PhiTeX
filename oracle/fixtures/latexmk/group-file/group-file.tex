@@ -1,0 +1,15 @@
+\documentclass{article}
+\makeatletter
+\newcommand*{\ai}[1]{[#1]}
+\newwrite\tw
+\def\readit{\begingroup\let\ai\@gobble\makeatletter
+  \@input{\jobname.tst}\immediate\openout\tw=\jobname.tst\relax\endgroup}
+\makeatother
+\begin{document}
+\readit
+Before \ai{X} after.
+\immediate\write\tw{\string\section{Written}}
+\immediate\write\tw{Some written text.}
+
+Next \ai{Y} paragraph.
+\end{document}

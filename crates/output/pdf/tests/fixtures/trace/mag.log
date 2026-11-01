@@ -1,0 +1,80 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input mag
+(./mag.tex
+Underfull \hbox (badness 10000) in paragraph at lines 4--4
+[]\tenrm Hello
+
+\hbox(6.94444+0.0)x66.66666
+.\hbox(0.0+0.0)x0.0
+.\tenrm H
+.\tenrm e
+.\tenrm l
+.\tenrm l
+.\tenrm o
+.\glue(\rightskip) 0.0
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 4--4
+\tenrm magnified
+
+\hbox(6.94444+1.94444)x66.66666
+.\tenrm m
+.\tenrm a
+.\tenrm g
+.\tenrm n
+.\tenrm i
+.\tenrm ^^L (ligature fi)
+.\tenrm e
+.\tenrm d
+.\glue(\rightskip) 0.0
+
+
+Completed box being shipped out [0]
+\vbox(66.66666+0.0)x66.66666, glue set 42.88889fill
+.\glue(\topskip) 0.0
+.\hbox(6.94444+0.0)x66.66666
+..\hbox(0.0+0.0)x0.0
+..\tenrm H
+..\tenrm e
+..\tenrm l
+..\tenrm l
+..\tenrm o
+..\glue(\rightskip) 0.0
+.\glue(\lineskip) 0.0
+.\hbox(6.94444+1.94444)x66.66666
+..\tenrm m
+..\tenrm a
+..\tenrm g
+..\tenrm n
+..\tenrm i
+..\tenrm ^^L (ligature fi)
+..\tenrm e
+..\tenrm d
+..\glue(\rightskip) 0.0
+.\glue(\lineskip) 0.0
+.\hbox(6.94444+0.0)x66.66666, glue set 39.69438fil
+..\tenrm w
+..\kern-0.27779
+..\tenrm o
+..\tenrm r
+..\tenrm l
+..\tenrm d
+..\tenrm .
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\rule(1.0+0.0)x*
+.\hbox(0.0+0.0)x66.66666
+.\glue 0.0 plus 1.0fill
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map} )</usr/share/texmf-dist/fon
+ts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on mag-trace.pdf (1 page, 14187 bytes).
+PDF statistics:
+ 10 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 1 words of extra memory for PDF output out of 10000 (max. 10000000)
+

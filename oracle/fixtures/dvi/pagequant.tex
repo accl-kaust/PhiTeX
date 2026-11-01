@@ -1,0 +1,40 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=120pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\def\space{ }
+\def\q#1{\message{[#1: goal \the\pagegoal\space total \the\pagetotal\space
+  stretch \the\pagestretch\space fil \the\pagefilstretch\space
+  fill \the\pagefillstretch\space filll \the\pagefilllstretch\space
+  shrink \the\pageshrink\space depth \the\pagedepth\space
+  dead \the\deadcycles\space ins \the\insertpenalties]}}
+\count100=1000 \dimen100=30pt \skip100=6pt plus 2pt minus 1pt
+\count101=500 \dimen101=8pt \skip101=4pt
+\q{empty page}
+A first paragraph, long enough to make two lines of text on this narrow
+page, read before anything is on it.\par
+\q{after a paragraph}
+\vskip 3pt plus 1pt minus 2pt
+\vskip 4pt plus 2fil
+\vskip 5pt plus 3fill
+\vskip 6pt plus 4filll minus 1pt
+\penalty0
+\q{after skips}
+\insert100{\hbox{an insertion}}
+\penalty0
+\q{after an insertion}
+\floatingpenalty=7
+\insert101{\vbox to 20pt{}}\insert101{\vbox to 20pt{}}
+\penalty0
+\q{after a split insertion}
+\hbox{a box\vrule depth 3pt}
+\penalty0
+\q{after a deep box}
+Another paragraph. \pagegoal=90pt \q{in a paragraph after an assignment}
+\par
+\q{after the assignment's paragraph}
+\vfill\penalty-10000
+\q{after a page break}
+A last paragraph.\par
+\q{at the end}
+\end

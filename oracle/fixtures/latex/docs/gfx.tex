@@ -1,0 +1,23 @@
+\documentclass{article}
+\usepackage[dvips]{graphicx}
+\usepackage[dvips]{color}
+\begin{document}
+\section{Pictures}
+A picture by its bounding box:
+\includegraphics{gfx-box.eps}
+and scaled: \includegraphics[width=2cm]{gfx-box.eps}.
+
+Some \scalebox{2}{big} text, \rotatebox{90}{turned} text,
+\reflectbox{mirror} and \resizebox{3cm}{!}{resized to 3cm}.
+
+\textcolor{red}{Red text}, \textcolor[rgb]{0,0.5,0}{dark green},
+\colorbox{yellow}{a yellow box} and \fcolorbox{blue}{white}{framed}.
+{\color{blue} A blue paragraph, long enough to break across a line or two
+so that the colour stack is pushed and popped around the line breaks.}
+
+\begin{figure}[h]
+\centering
+\includegraphics[angle=45,scale=0.5]{gfx-box.eps}
+\caption{A turned box.}
+\end{figure}
+\end{document}

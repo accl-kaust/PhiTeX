@@ -1,0 +1,34 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0 \pdfobjcompresslevel=0
+\font\r=cmr10 \font\t=ptmr8t at 10pt \font\b=cmbx10
+\letterspacefont\rl=\r 120
+\hyphenchar\r=`- \hyphenchar\t=`- \hyphenchar\rl=`-
+\def\codes#1{\rpcode#1`.=700 \rpcode#1`,=500 \rpcode#1`-=700 \lpcode#1`A=50 \rpcode#1`A=50
+  \lpcode#1`T=70 \rpcode#1`y=40 \lpcode#1`W=60 \efcode#1`a=700 \efcode#1`e=0 \efcode#1`o=800}
+\codes\r \codes\t \codes\rl
+\pdffontexpand\r 20 20 1 autoexpand
+\pdffontexpand\t 30 25 5 autoexpand
+\pdffontexpand\rl 20 20 1 autoexpand
+\message{[\the\rpcode\r`. \the\efcode\r`a \the\efcode\r`b \the\lpcode\t`A]}
+\pdfprotrudechars=2 \pdfadjustspacing=2
+\hsize=180pt \vsize=600pt \parfillskip=0pt plus 1fil \parindent=10pt \baselineskip=12pt \tolerance=9999
+\pretolerance=-1
+\r A Table, of contents. Wavy lines of type, with kerning AV and fi ligatures.
+Typesetting with ex\-pan\-sion and pro\-tru\-sion: the right margin hangs dots.
+Ano\-ther line, yes, ``quoted'' text; Toward the end, office affairs.
+We want to see many lines here, so the paragraph needs to be long enough for
+several breaks, with hyphens at line ends, sure.\par
+\t A Table, of contents. Wavy lines of type, with kerning AV and fi ligatures.
+Typesetting with ex\-pan\-sion and pro\-tru\-sion: the right margin hangs dots.
+Ano\-ther line, yes, quoted text; Toward the end, office affairs.\par
+\rl A Table, of contents. Wavy lines, AV and fi.
+Typesetting ex\-pan\-sion, pro\-tru\-sion.\par
+\pdfprotrudechars=1 \pdfadjustspacing=1 \hsize=150pt
+\r A Table, of contents. Wavy lines of type, with kerning AV and fi ligatures.
+Typesetting with ex\-pan\-sion and pro\-tru\-sion: the right margin hangs dots.\par
+\setbox1=\vbox{\r \hsize=120pt \pdfprotrudechars=2 \pdfadjustspacing=2 Another, test. Yes. Wavy lines of type, with kerning AV.\par
+  \setbox2=\lastbox \global\setbox3=\copy2 \message{[\leftmarginkern2 \rightmarginkern2]}}
+\setbox4=\hbox{\unhcopy3}\message{[\the\wd3 \the\wd4]}
+\box3 \box4
+\pdfprotrudechars=0 \pdfadjustspacing=0
+\b A Table, of contents, bold.\par
+\end

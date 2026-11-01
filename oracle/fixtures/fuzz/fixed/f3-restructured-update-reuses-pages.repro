@@ -1,0 +1,13 @@
+phitex-flow fuzz repro
+doc story
+seed 0 step 1
+before threads=1 reads=Suspend order=Priority lean=false
+schedule threads=1 reads=Suspend order=Priority lean=false
+fail mismatch log
+history threads=1 doc=-
+edit - 8 1 char-replace
+ins
+0
+text
+\count1=1 \hsize=100pt
+A\par\end

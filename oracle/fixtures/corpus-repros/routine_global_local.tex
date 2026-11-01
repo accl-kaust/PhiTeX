@@ -1,0 +1,12 @@
+\documentclass{article}
+\begin{document}
+\begingroup
+\def\X{one}
+\output{\shipout\vbox{\hbox{head \X}\unvbox255}\global\def\X{global}}
+Page one text.\newpage
+\def\X{two}
+Page two text.\newpage
+Page three text.\newpage
+\endgroup
+After: \X.
+\end{document}

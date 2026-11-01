@@ -1,0 +1,22 @@
+(./fonts.tex
+cmr10, cmr10 at 12.0pt, cmr10 at 5.0pt, cmbx10, cmr10, cmr10, select font cmr10
+ at 12.0pt, select font nullfont 3.33333pt, 12.00003pt, 0, 0, \same, \same
+Underfull \hbox (badness 263) in paragraph at lines 11--19
+[]\same Roman \big big \small small \bf bold face \sl slanted \same and same ag
+ain, with ffl
+
+\hbox(8.33333+2.33333)x300.0, glue set 1.38095 []
+
+
+Underfull \hbox (badness 111) in paragraph at lines 11--19
+\same and ffi in \bf bold ffl\same . Wider spaces now in roman text after the
+
+\hbox(6.94444+1.94444)x300.0, glue set 1.03772 []
+
+
+Loose \hbox (badness 19) in paragraph at lines 11--19
+\same fontdimen change here. Hyphen- ated and dis-cre-tionary prepost
+
+\hbox(6.94444+1.94444)x300.0, glue set 0.5809 []
+
+[0] )

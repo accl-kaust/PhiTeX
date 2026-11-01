@@ -1,0 +1,10 @@
+% A font with only a METAFONT source (yinit, no map line): pdfTeX embeds
+% it as a Type 3 font from the PK file mktexpk makes, at the design size
+% and magnified (the PK's resolution kpse_magstep_fix of 600 dpi scaled).
+\documentclass{article}
+\font\y=yinit
+\font\ybig=yinit scaled 1440
+\font\ysmall=yinit at 17pt
+\begin{document}
+{\y AB} text {\ybig CD} more {\ysmall EFZ}.
+\end{document}

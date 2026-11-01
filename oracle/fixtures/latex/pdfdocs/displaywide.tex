@@ -1,0 +1,10 @@
+\documentclass{article}
+% a display wider than the line: packed as \hbadness, \hfuzz and
+% \overfullrule say (§1199, §1201), LaTeX's final \overfullrule=0pt
+% drawing no rule
+\begin{document}
+Text before.
+\[ \rule{20cm}{1pt} \]
+Text after, and a rule of its own after:
+{\overfullrule=5pt \[ \rule{19cm}{2pt} \]}
+\end{document}

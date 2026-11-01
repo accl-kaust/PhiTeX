@@ -1,0 +1,18 @@
+% A line written to the .aux is read back at \begin{document} with the
+% meanings it has there: hyperref under XeTeX gathers \HyPL@Entry lines
+% into its /PageLabels there, then lets \HyPL@Entry be \@gobble before
+% the next lines are written.
+\documentclass{article}
+\makeatletter
+\gdef\Labels{}
+\def\Acc#1{\expandafter\gdef\expandafter\Labels\expandafter{\Labels #1}}
+\AtBeginDocument{\immediate\write\@mainaux{\string\providecommand\string*\string\Acc[1]{}}%
+  \xdef\Got{[\meaning\Labels]}\let\Acc\@gobble}
+\makeatother
+\begin{document}
+\makeatletter
+\immediate\write\@mainaux{\string\Acc{a}}
+\immediate\write\@mainaux{\string\Acc{b}}
+\makeatother
+Got: \Got
+\end{document}

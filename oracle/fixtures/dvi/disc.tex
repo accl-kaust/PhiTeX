@@ -1,0 +1,18 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\defaulthyphenchar=`- \font\tenrm=cmr10 \tenrm
+\hsize=100pt \vsize=500pt \parindent=10pt \baselineskip=12pt \topskip=10pt
+\tolerance=10000 \pretolerance=-1 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\hyphenpenalty=-100 \exhyphenpenalty=-200 \brokenpenalty=33 \hbadness=0
+Words with dis\-cre\-tion\-ary hy\-phens and ex\-plicit self-contained
+com\-pound-words, then \discretionary{pre-}{post}{whole}break\-able and
+\discretionary{}{}{} empty and \discretionary{a}{}{b} replacements
+\discretionary{x}{y}{} only and an over\-full\-ly\-long\-word\-here too.
+\mark{in a paragraph} A mark inside a paragraph moves out of its line.
+
+\noindent\hbox to 0pt{\hss lapped}text with zero-width boxes at the start and
+a \vrule height 20pt depth 10pt\ tall rule changing the line's height.
+
+\lineskiplimit=2pt \lineskip=3pt plus 1pt
+A paragraph whose lines are close: \vrule height 15pt\ lineskip glue is used
+between these lines instead of the baselineskip glue, \vrule depth 8pt\ twice.
+\end

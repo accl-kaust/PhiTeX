@@ -4,3 +4,11 @@ xtask = "run --quiet --package xtask --"
 [target.'cfg(target_os = "linux")']
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=/usr/bin/mold"]
+
+# jemalloc's defaults, compiled in (tikv-jemalloc-sys): transparent huge
+# pages for its arenas and metadata. The kernel's setting is `madvise` on
+# the hosts measured: without this the heap is in 4 KiB pages, the
+# page walks of a large build cost time in its runs, and its exit spends
+# 0.27 s unmapping para40000's 3.5 GB (18 ms with it).
+[env]
+JEMALLOC_SYS_WITH_MALLOC_CONF = "thp:always,metadata_thp:always"

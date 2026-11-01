@@ -1,0 +1,36 @@
+name: Output differs from pdflatex
+description: PhiTeX's PDF (or pages, or .aux) is not what pdflatex or xelatex makes
+labels: ["output differs"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A PDF that differs from pdfTeX's is a bug. Thank you for reporting it.
+        Run your command again with `--report` (for example `phitex build --report paper.tex`)
+        and attach the `.phitex-report.txt` it writes beside your PDF. It holds no text of
+        your document; `--report=full` adds the log and your sources if you can share them.
+  - type: textarea
+    id: what
+    attributes:
+      label: What differs
+      description: The page and what you see there, against pdflatex's (screenshots of both help).
+    validations:
+      required: true
+  - type: textarea
+    id: tex
+    attributes:
+      label: The smallest .tex that shows it
+      description: Cut your document down to a few lines that still show the difference.
+      render: latex
+  - type: textarea
+    id: report
+    attributes:
+      label: The report
+      description: Attach the .phitex-report.txt file, or paste it here.
+    validations:
+      required: true
+  - type: input
+    id: texlive
+    attributes:
+      label: The TeX Live you compared with
+      placeholder: "pdfTeX 3.141592653-2.6-1.40.29 (TeX Live 2026)"

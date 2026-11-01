@@ -1,0 +1,28 @@
+% microtype with every option it has under pdfLaTeX: expansion and protrusion (its defaults),
+% tracking (\textls, \letterspacefont), kerning (\pdfprependkern, \pdfappendkern: French
+% punctuation) and spacing (\pdfadjustinterwordglue, \knbscode...), in two columns.
+\documentclass[twocolumn]{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[tracking=true,kerning=true,spacing=true,stretch=30,shrink=30,step=1]{microtype}
+\def\fewwords{The quick brown fox jumps over the lazy dog, and the lazy dog watches the quick
+brown fox jump again; typesetting systems break such paragraphs into lines by minimising
+badness, and a small stretch or shrink of each font lets the lines come out more even than
+the interword glue alone allows. Hyphenation, protrusion of punctuation into the margin and
+expansion of the glyphs all take part in the choice of the breakpoints.}
+\def\somewords{\fewwords\par ``Quoted text,'' she said --- and (in brackets) a few more words:
+efficient office affairs, fluffy waffles; differentiation, internationalisation,
+characteristically incomprehensible. \fewwords\par}
+\begin{document}
+\section{All of microtype}
+\somewords \textls{LETTERSPACED CAPITALS} and \textls[200]{more of them}, then
+\textsc{Small Capitals, Tracked}. Interword spacing after punctuation: a, b; c. D: e! F? g.
+\textbf{Bold.} next {\itshape italic,} next.
+
+\microtypecontext{kerning=french}
+French kerning before colons : semicolons ; and exclamation marks ! or questions ?
+\fewwords: a; b! c? \textbf{bold!} next.
+\microtypecontext{kerning=}
+\somewords
+\begin{minipage}{0.8\columnwidth}\fewwords\end{minipage}
+\end{document}

@@ -1,0 +1,26 @@
+\documentclass{article}
+\usepackage[most]{tcolorbox}
+% a breakable box whose page fires inside it, at a candidate no group of
+% it closes at, and whose next page begins with a float its routine
+% placed: the box reads the page and \vsize after that routine (§1026,
+% LaTeX's \@colroom), so its next part is as tall as the column left
+\tcbset{exstyle/.style={enhanced,breakable,colback=white,colframe=black,
+  boxrule=0pt,leftrule=2.5pt,arc=0pt,outer arc=0pt,left=7pt,right=6pt,top=4pt,bottom=4pt,
+  before skip=10pt,after skip=6pt}}
+\newenvironment{exercise}{\begin{tcolorbox}[exstyle]}{\end{tcolorbox}}
+\def\words{Some words to fill a line or two of text so that the pages fill up and break between and inside the boxes here and there. }
+\def\fillw#1{\ifnum#1>0 \words\expandafter\fillw\expandafter{\the\numexpr#1-1\relax}\fi}
+\def\many{\words\words\words\words\words\words\words\words\words\words}
+\begin{document}
+\def\n{0}
+\loop
+\section{Part \n}
+\words\words\words\par
+\fillw{\numexpr\n-(\n/7)*7\relax}\par
+\begin{figure}[t]\centering\rule{3cm}{4cm}\caption{A float \n.}\end{figure}
+\words\par
+\begin{exercise}\many\many\par\many\end{exercise}
+\begin{exercise}\many\many\many\par\many\many\many\many\end{exercise}
+\edef\n{\the\numexpr\n+1}
+\ifnum\n<24 \repeat
+\end{document}

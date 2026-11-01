@@ -1,0 +1,35 @@
+% Arithmetic: \advance, \multiply, \divide, coercions, units, constants.
+\count1=7 \advance\count1 by -10 \message{\the\count1}
+\multiply\count1 by -4 \message{\the\count1}
+\divide\count1 by 5 \message{\the\count1}
+\count2=-7 \divide\count2 2 \message{\the\count2}
+\count3='777 \count4="FF \count5=`A \count6=`\% \message{\the\count3,\the\count4,\the\count5,\the\count6}
+\dimen0=1in \message{\the\dimen0}
+\dimen0=1cm \message{\the\dimen0} \dimen0=1mm \message{\the\dimen0}
+\dimen0=1bp \message{\the\dimen0} \dimen0=1dd \message{\the\dimen0}
+\dimen0=1cc \message{\the\dimen0} \dimen0=1pc \message{\the\dimen0}
+\dimen0=100sp \message{\the\dimen0} \dimen0=1truept \message{\the\dimen0}
+\dimen0=-.5pt \message{\the\dimen0} \dimen0=1,25pt \message{\the\dimen0}
+\dimen0=3.14159265358979pt \message{\the\dimen0}
+\dimen1=2\dimen0 \message{\the\dimen1} \dimen1=-1.5\dimen0 \message{\the\dimen1}
+\count1=\dimen0 \message{\the\count1}
+\skip0=1pt plus 2pt minus 3pt \dimen2=\skip0 \message{\the\dimen2}
+\count1=3 \dimen3=\count1 pt \message{\the\dimen3}
+\advance\dimen3 by 1.5pt \multiply\dimen3 by 3 \message{\the\dimen3}
+\divide\dimen3 by 7 \message{\the\dimen3}
+\skip1=1pt plus 1fil minus 1fill \advance\skip1 by 2pt plus 3pt minus 1filll \message{\the\skip1}
+\multiply\skip1 by 2 \message{\the\skip1} \divide\skip1 by 3 \message{\the\skip1}
+\skip2=-\skip0 \message{\the\skip2}
+\muskip0=1mu plus 2fill \message{\the\muskip0}
+\advance\muskip0 by 3mu minus 1mu \message{\the\muskip0}
+\count1=1 \ifnum\count1<2 \advance\count1 1 \fi \message{\the\count1}
+\dimen4=16383.99999pt \message{\the\dimen4}
+\message{\romannumeral 3999 \romannumeral 0 x\romannumeral 49}
+\message{\number -0017 \number`\a \number"7FFFFFFF \number'17777777777}
+\count7=2147483647 \message{\the\count7}
+\count7=-\count7 \message{\the\count7}
+\message{\number\dimen0}
+\count9=100 \divide\count9 by -7 \message{\the\count9}
+\dimen5=7pt \divide\dimen5 by -2 \message{\the\dimen5}
+\dimen6=0.00001pt \message{\the\dimen6} \dimen6=0.000005pt \message{\the\dimen6}
+\dimen7=1.99999pt \message{\the\dimen7}

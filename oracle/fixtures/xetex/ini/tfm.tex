@@ -1,0 +1,17 @@
+% XDV of TFM fonts only: characters, ligatures, kerns, rules, glue,
+% leaders, a special, two pages (the writer's XDV opcodes, id byte 7).
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\$=3 \catcode`\^=7
+\hsize=300pt \vsize=200pt \parindent=15pt \baselineskip=12pt \tolerance=10000
+\parfillskip=0pt plus 1fil \topskip=10pt \maxdepth=2pt
+\font\rm=cmr10 \font\bf=cmbx10 \font\big=cmr10 at 14pt \rm
+\setbox0\hbox{\bf Bold office fluffy} \copy0
+Hello world, office affluent ``quotes'' -- and --- dashes. {\big Larger
+type} again \vrule width 2pt height 6pt depth 1pt\ and \special{color push gray 0.5}grey\special{color pop}.
+\par
+\hbox to 200pt{\leaders\hbox to 10pt{\hss.\hss}\hfill end}
+\hrule height 1pt
+\moveright 20pt\vbox{\hsize=100pt \noindent A narrow paragraph in a box that
+wraps over several lines of text.}
+\vfill\penalty-10000
+Second page.\par
+\end

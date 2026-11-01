@@ -1,0 +1,12 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r
+\hsize=200pt \vsize=100pt \maxdepth=2pt \topskip=10pt
+\parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+% an insertion class whose \count (the magnification of its material on
+% the page, TeX §1008) a top-level \advance changes before the text
+\count100=1000 \dimen100=16383pt \skip100=6pt
+\advance\count100 by 1500
+\output={\shipout\vbox{\box255 \box100}}
+\def\p{Words in a line.\insert100{\hbox{note}}\par}
+\p\p\p\p\p\p\p\p\p\p\p\p\p\p
+\end

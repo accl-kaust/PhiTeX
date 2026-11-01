@@ -1,0 +1,366 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input interword
+(./interword.tex
+Tight \hbox (badness 3) in paragraph at lines 4--4
+[]\r Words with faked spaces between them, and a
+
+\hbox(6.94444+1.94444)x200.0, glue set - 0.31076
+.\hbox(0.0+0.0)x0.0
+.\r W
+.\kern-0.83334
+.\r o
+.\r r
+.\r d
+.\r s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r w
+.\r i
+.\r t
+.\r h
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r f
+.\r a
+.\r k
+.\kern-0.27779
+.\r e
+.\r d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r s
+.\r p
+.\r a
+.\r c
+.\r e
+.\r s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r b
+.\kern0.27779
+.\r e
+.\r t
+.\kern-0.27779
+.\r w
+.\kern-0.27779
+.\r e
+.\r e
+.\r n
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r t
+.\r h
+.\r e
+.\r m
+.\r ,
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r a
+.\r n
+.\r d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\r a
+.\glue(\rightskip) 0.0
+
+
+Loose \hbox (badness 1) in paragraph at lines 5--5
+[]\t Times words use their own space character. \r Back
+
+\hbox(6.94444+2.16492)x200.0, glue set 0.24324
+.\hbox(0.0+0.0)x0.0
+.\t T
+.\kern-0.34999
+.\t i
+.\t m
+.\t e
+.\t s
+.\glue 2.5 plus 1.49998 minus 0.59998
+.\t w
+.\kern-0.09999
+.\t o
+.\t r
+.\t d
+.\t s
+.\glue 2.5 plus 1.49998 minus 0.59998
+.\t u
+.\t s
+.\t e
+.\glue 2.5 plus 1.49998 minus 0.59998
+.\t t
+.\t h
+.\t e
+.\t i
+.\t r
+.\glue 2.5 plus 1.49998 minus 0.59998
+.\t o
+.\kern-0.25
+.\t w
+.\t n
+.\glue 2.5 plus 1.49998 minus 0.59998
+.\t s
+.\t p
+.\t a
+.\t c
+.\t e
+.\glue 2.5 plus 1.49998 minus 0.59998
+.\t c
+.\t h
+.\t a
+.\t r
+.\t a
+.\t c
+.\t t
+.\t e
+.\t r
+.\kern-0.54993
+.\t .
+.\glue 2.5 plus 1.49998 minus 0.59998
+.\r B
+.\r a
+.\r c
+.\kern-0.27779
+.\r k
+.\glue(\rightskip) 0.0
+
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0
+.\pdfinterwordspaceon
+.\glue(\topskip) 0.0
+.\hbox(6.94444+1.94444)x200.0, glue set - 0.31076
+..\hbox(0.0+0.0)x0.0
+..\r W
+..\kern-0.83334
+..\r o
+..\r r
+..\r d
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r w
+..\r i
+..\r t
+..\r h
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r f
+..\r a
+..\r k
+..\kern-0.27779
+..\r e
+..\r d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r s
+..\r p
+..\r a
+..\r c
+..\r e
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r b
+..\kern0.27779
+..\r e
+..\r t
+..\kern-0.27779
+..\r w
+..\kern-0.27779
+..\r e
+..\r e
+..\r n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r e
+..\r m
+..\r ,
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r n
+..\r d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+1.94444)x200.0, glue set 156.33325fil
+..\r f
+..\r a
+..\r k
+..\kern-0.27779
+..\r e
+..\pdffakespace
+..\r s
+..\r p
+..\r a
+..\r c
+..\r e
+..\r .
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\glue(\parskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+2.16492)x200.0, glue set 0.24324
+..\hbox(0.0+0.0)x0.0
+..\t T
+..\kern-0.34999
+..\t i
+..\t m
+..\t e
+..\t s
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t w
+..\kern-0.09999
+..\t o
+..\t r
+..\t d
+..\t s
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t u
+..\t s
+..\t e
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t t
+..\t h
+..\t e
+..\t i
+..\t r
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t o
+..\kern-0.25
+..\t w
+..\t n
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t s
+..\t p
+..\t a
+..\t c
+..\t e
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t c
+..\t h
+..\t a
+..\t r
+..\t a
+..\t c
+..\t t
+..\t e
+..\t r
+..\kern-0.54993
+..\t .
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\r B
+..\r a
+..\r c
+..\kern-0.27779
+..\r k
+..\glue(\rightskip) 0.0
+.\glue(\baselineskip) 3.6843
+.\hbox(6.15079+0.0)x200.0, glue set 157.19434fil
+..\r t
+..\r o
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r r
+..\r o
+..\r m
+..\r a
+..\r n
+..\r .
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}{/usr/share/texmf-dist/fonts
+/enc/dvips/base/8r.enc}
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0, glue set 279.11111fill
+.\glue(\topskip) 0.0
+.\hbox(6.94444+1.94444)x200.0, glue set 13.95544fil
+..\hbox(0.0+0.0)x0.0
+..\r S
+..\r t
+..\r i
+..\r l
+..\r l
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r o
+..\r n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r a
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r t
+..\r h
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r n
+..\r e
+..\r x
+..\r t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r p
+..\r a
+..\r g
+..\r e
+..\r :
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\t m
+..\t i
+..\t x
+..\kern-0.1499
+..\t e
+..\t d
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\r f
+..\r o
+..\r n
+..\kern-0.27779
+..\r t
+..\r s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r h
+..\r e
+..\r r
+..\r e
+..\r .
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\pdfinterwordspaceoff
+.\glue(\parskip) 0.0
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+1.94444)x200.0, glue set 102.63873fil
+..\hbox(0.0+0.0)x0.0
+..\r N
+..\r o
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r m
+..\r o
+..\r r
+..\r e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r f
+..\r a
+..\r k
+..\kern-0.27779
+..\r e
+..\r d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\r s
+..\r p
+..\r a
+..\r c
+..\r e
+..\r s
+..\r .
+..\pdffakespace
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+ )</usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/share/t
+exmf-dist/fonts/type1/public/pdftex/pdftexspace.pfb></usr/share/texmf-dist/font
+s/type1/urw/times/utmr8a.pfb>
+Output written on interword-trace.pdf (2 pages, 32971 bytes).
+PDF statistics:
+ 22 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 1 words of extra memory for PDF output out of 10000 (max. 10000000)
+

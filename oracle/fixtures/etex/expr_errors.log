@@ -1,0 +1,54 @@
+(./core.tex
+! Arithmetic overflow.
+<recently read> \relax 
+                       
+l.3 \message{\the\numexpr 2147483647+1\relax
+                                            }
+I can't evaluate this expression,
+since the result is out of range.
+
+0
+! Arithmetic overflow.
+<recently read> \relax 
+                       
+l.4 \message{\the\numexpr 1/0\relax
+                                   }
+I can't evaluate this expression,
+since the result is out of range.
+
+0
+! Arithmetic overflow.
+<recently read> \relax 
+                       
+l.5 \message{\the\dimexpr 16383pt*2\relax
+                                         }
+I can't evaluate this expression,
+since the result is out of range.
+
+0.0pt
+! Arithmetic overflow.
+<recently read> \relax 
+                       
+l.6 \message{\the\numexpr 65536*65536\relax
+                                           }
+I can't evaluate this expression,
+since the result is out of range.
+
+0
+! Missing ) inserted for expression.
+<to be read again> 
+                   \relax 
+l.7 \message{\the\numexpr 2*(3+4\relax
+                                      }
+I was expecting to see `+', `-', `*', `/', or `)'. Didn't.
+
+14
+! Arithmetic overflow.
+<recently read> \relax 
+                       
+l.8 ...sage{\the\glueexpr 1pt plus 16000pt*2\relax
+                                                  }
+I can't evaluate this expression,
+since the result is out of range.
+
+0.0pt )

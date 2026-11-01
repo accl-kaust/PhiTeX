@@ -1,0 +1,29 @@
+name: An error, a crash or a stuck build
+description: phitex fails, stops, or reports an error pdflatex does not
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run the command again with `--report` and attach the `.phitex-report.txt` it writes
+        beside your output. If phitex itself failed, it also printed the path of a failure
+        report in its cache's `reports/` folder: attach that too.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command, what you expected, and what phitex printed.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: The report
+      description: Attach the .phitex-report.txt file (and the failure report, if any).
+    validations:
+      required: true
+  - type: textarea
+    id: tex
+    attributes:
+      label: The smallest .tex that shows it, if you have one
+      render: latex

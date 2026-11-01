@@ -1,0 +1,17 @@
+[package]
+name = "phitex-xetex"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "XeTeX (and XeLaTeX): UTF-8 input, the \\U and \\XeTeX primitives, OpenType fonts, XDV through xdvipdfmx"
+
+[dependencies]
+phitex-tex = { path = "../tex" }
+phitex-tfm = { path = "../../fonts/tfm" }
+phitex-dvi = { path = "../../output/dvi" }
+phitex-otf = { path = "../../fonts/otf" }
+phitex-xdvipdfmx = { path = "../../output/xdvipdfmx" }
+
+[lints]
+workspace = true

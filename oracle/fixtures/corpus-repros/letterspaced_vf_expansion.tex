@@ -1,0 +1,18 @@
+% microtype letter-spacing (pdfTeX \letterspacefont: a virtual font over
+% its font) of mathpazo's virtual small caps pplrc9d, with font expansion:
+% the expanded local font of an expanded virtual font is itself an
+% expanded virtual font (auto_expand_vf through do_vf), classicthesis's
+% \spacedlowsmallcaps.
+\documentclass{article}
+\usepackage[T1]{fontenc}
+\usepackage[sc,osf]{mathpazo}
+\usepackage[protrusion=true,expansion=true]{microtype}
+\begin{document}
+Some text then \textls[80]{\scshape spaced small caps 2026} in a long
+justified paragraph so that the lines need stretching and shrinking, with
+words \textls[80]{\scshape more spaced caps} of many lengths to make the
+line breaker pick expanded fonts here and there, \textls[80]{\scshape and
+again spaced small caps} until the paragraph has several lines.
+
+\textls[160]{\scshape A Heading Line}
+\end{document}

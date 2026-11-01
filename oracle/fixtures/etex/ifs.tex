@@ -1,0 +1,20 @@
+% \ifdefined, \ifcsname (defines nothing), \unless, \iffontchar, nested,
+% with \currentiflevel, \currentiftype, \currentifbranch.
+\message{\ifdefined\undefined Y\else N\fi, \ifdefined\relax Y\else N\fi, \ifdefined a Y\else N\fi}
+\message{\ifcsname relax\endcsname Y\else N\fi, \ifcsname zzz\endcsname Y\else N\fi, \ifdefined\zzz Y\else N\fi}
+\message{\expandafter\ifx\csname zzz\endcsname\relax Y\else N\fi, \ifcsname zzz\endcsname Y\else N\fi}
+\message{\unless\ifx aa Y\else N\fi, \unless\ifdefined\undefined Y\else N\fi, \unless\ifcsname yyy\endcsname Y\else N\fi}
+\message{\expandafter\ifdefined\noexpand\undefined Y\else N\fi, \ifcsname\endcsname Y\else N\fi, \ifcsname a\endcsname Y\else N\fi}
+\message{\the\currentiflevel, \the\currentiftype, \the\currentifbranch}
+\message{\iftrue \the\currentiflevel, \the\currentiftype, \the\currentifbranch\fi}
+\message{\iffalse\else \the\currentiflevel, \the\currentiftype, \the\currentifbranch\fi}
+\message{\unless\iftrue\else\the\currentiftype, \the\currentifbranch\fi}
+\message{\unless\ifnum1>2 \the\currentiftype\fi, \ifcase 1 \or\the\currentiftype, \the\currentifbranch\fi}
+\message{\ifnum\currentifbranch=0 \the\currentiftype\fi, \ifnum\currentiflevel=1 a\fi, \iftrue\ifnum\currentiflevel=2 b\fi\fi}
+\iftrue \message{\the\currentiflevel, \the\currentiftype}\ifodd 3 \message{\the\currentiflevel, \the\currentiftype}\else\fi\fi
+\message{\iftrue\unless\ifcat a1\the\currentiflevel, \the\currentiftype\fi\fi}
+\message{\ifcase 2 \or\or\unless\ifdim1pt<2pt \else\the\currentiftype, \the\currentifbranch, \the\currentiflevel\fi\fi}
+\def\m{\ifdefined\m defined\fi}\message{\m}
+\font\tenrm=cmr10
+\message{\iffontchar\tenrm`A Y\else N\fi, \iffontchar\tenrm 200 Y\else N\fi, \iffontchar\nullfont`A Y\else N\fi, \unless\iffontchar\tenrm`A Y\else N\fi}
+\message{\the\fontcharwd\tenrm`A, \the\fontcharht\tenrm`g, \the\fontchardp\tenrm`g, \the\fontcharic\tenrm`f, \the\fontcharwd\tenrm 200}

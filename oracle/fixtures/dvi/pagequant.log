@@ -1,0 +1,33 @@
+(./pagequant.tex
+[empty page: goal 16383.99998pt total 0.0pt stretch 0.0pt fil 0.0pt fill 0.0pt 
+filll 0.0pt shrink 0.0pt depth 0.0pt dead 0 ins 0]
+Tight \hbox (badness 75) in paragraph at lines 14--15
+[]\tenrm A first paragraph, long enough to make two
+
+\hbox(6.94444+1.94444)x200.0, glue set - 0.91063 []
+
+
+Loose \hbox (badness 1) in paragraph at lines 14--15
+\tenrm lines of text on this narrow page, read before
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.21248 []
+
+
+[after a paragraph: goal 120.0pt total 34.0pt stretch 0.0pt fil 0.0pt fill 0.0p
+t filll 0.0pt shrink 0.0pt depth 1.94444pt dead 0 ins 0]
+[after skips: goal 120.0pt total 53.94444pt stretch 1.0pt fil 2.0pt fill 3.0pt 
+filll 4.0pt shrink 3.0pt depth 0.0pt dead 0 ins 0]
+[after an insertion: goal 107.32141pt total 53.94444pt stretch 3.0pt fil 2.0pt 
+fill 3.0pt filll 4.0pt shrink 4.0pt depth 0.0pt dead 0 ins 0]
+[after a split insertion: goal 93.3269pt total 53.94444pt stretch 3.0pt fil 2.0
+pt fill 3.0pt filll 4.0pt shrink 4.0pt depth 0.0pt dead 0 ins -9993]
+[after a deep box: goal 93.3269pt total 65.0pt stretch 3.0pt fil 2.0pt fill 3.0
+pt filll 4.0pt shrink 4.0pt depth 2.0pt dead 0 ins -9993]
+[in a paragraph after an assignment: goal 90.0pt total 67.0pt stretch 3.0pt fil
+ 2.0pt fill 3.0pt filll 4.0pt shrink 4.0pt depth 0.0pt dead 0 ins -9993]
+[after the assignment's paragraph: goal 90.0pt total 76.0pt stretch 3.0pt fil 2
+.0pt fill 3.0pt filll 4.0pt shrink 4.0pt depth 1.94444pt dead 0 ins -9993] [0]
+[after a page break: goal 96.01099pt total 0.0pt stretch 0.0pt fil 0.0pt fill 0
+.0pt filll 0.0pt shrink 0.0pt depth 0.0pt dead 0 ins -9999]
+[at the end: goal 96.01099pt total 10.0pt stretch 0.0pt fil 0.0pt fill 0.0pt fi
+lll 0.0pt shrink 0.0pt depth 1.94444pt dead 0 ins -9999] [0] )

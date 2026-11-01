@@ -1,0 +1,52 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input mixed2
+(./mixed2.tex
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0, glue set 282.3889fill
+.\glue(\topskip) 0.0
+.\hbox(8.33333+2.33333)x200.0, glue set 144.63322fil
+..\hbox(0.0+0.0)x0.0
+..\tenrm T
+..\kern-0.83334
+..\tenrm e
+..\tenrm x
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\big b
+..\big i
+..\big g
+..\big g
+..\big e
+..\big r
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\glue(\parskip) 0.0
+.\glue(\lineskip) 0.0
+.\hbox(6.94444+0.0)x200.0, glue set 167.95015fil
+..\hbox(0.0+0.0)x0.0
+..\tenrm x
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\mi m
+..\mi a
+..\mi t
+..\mi h
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map} )</usr/share/texmf-dist/fon
+ts/type1/public/amsfonts/cm/cmmi10.pfb></usr/share/texmf-dist/fonts/type1/publi
+c/amsfonts/cm/cmr10.pfb>
+Output written on mixed2-trace.pdf (1 page, 21498 bytes).
+PDF statistics:
+ 14 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 1 words of extra memory for PDF output out of 10000 (max. 10000000)
+

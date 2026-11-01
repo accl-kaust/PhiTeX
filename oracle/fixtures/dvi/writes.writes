@@ -1,0 +1,8 @@
+== writes.aux
+deferred second\ on page 1
+explicit page 2
+on page 2: second
+== writes.out
+immediate line writes
+last
+immediate

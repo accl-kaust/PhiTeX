@@ -1,0 +1,12 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\$=3 \catcode`\^=7
+\font\tenrm=cmr10 \tenrm \textfont0=\tenrm \scriptfont0=\tenrm \scriptscriptfont0=\tenrm
+\font\teni=cmmi10 \textfont1=\teni \scriptfont1=\teni \scriptscriptfont1=\teni
+\font\tensy=cmsy10 \textfont2=\tensy \scriptfont2=\tensy \scriptscriptfont2=\tensy
+\font\tenex=cmex10 \textfont3=\tenex \scriptfont3=\tenex \scriptscriptfont3=\tenex
+\hsize=200pt \vsize=300pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+Text $a\par b$ more.\par
+Text $c\vskip1pt d$ more.\par
+Text $e{f\par g}h$ more.\par
+Text \begingroup i{j\endgroup k} more.\par
+\end

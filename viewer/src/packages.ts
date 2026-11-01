@@ -54,6 +54,8 @@ export interface PackageState {
   building?: boolean;
   /** Fetches that failed (the network, the package server), with why: asked again on the next build. */
   failed?: { name: string; error: string }[];
+  /** The bytes of the packs fetched so far (where the host says their size). */
+  bytes?: number;
 }
 
 /** A name a TeX distribution might have (not an .aux, a .bbl, a .toc: the build's own). A .tex the project lacks is asked for too: shelf.ts sends Shelf only names it lists. */

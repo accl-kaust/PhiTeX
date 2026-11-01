@@ -1,0 +1,13 @@
+% A stream closed and opened again on another file in the same run
+% (§1374): what is written after the second open goes to the second file.
+\documentclass{article}
+\newwrite\w
+\begin{document}
+\immediate\openout\w=first.tmp
+\immediate\write\w{One.}
+\immediate\closeout\w
+\immediate\openout\w=second.tmp
+\immediate\write\w{Text of the second file.}
+\immediate\closeout\w
+\input{second.tmp}
+\end{document}

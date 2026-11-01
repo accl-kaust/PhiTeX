@@ -1,0 +1,10 @@
+% Now (dev 36fc97dc, 2026-10-20): the text and objects equal pdfLaTeX's after qpdf --qdf; the files differ in
+% their objects' numbers and order.
+% zero-pages-title.tex with link annotations on.
+\documentclass{article}
+\usepackage{hyperref}
+\title{T\thanks{A note.}}\author{A}
+\begin{document}
+\maketitle
+Text.\footnote{\url{http://example.org/}}
+\end{document}

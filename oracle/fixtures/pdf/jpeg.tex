@@ -1,0 +1,8 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=300pt \vsize=500pt \parindent=0pt \baselineskip=12pt \hbadness=10000 \vbadness=10000
+\pdfximage{jpg-jfif0.jpg}\edef\a{\the\pdflastximage}
+\pdfximage width 40pt attr{/Interpolate true} {example-image.jpg}\edef\b{\the\pdflastximage}
+\pdfximage height 30pt depth 3pt {jpg-exif.jpg}\edef\c{\the\pdflastximage}
+A\pdfrefximage\a\ \pdfrefximage\b\ \pdfrefximage\c\par
+\penalty-10000 \pdfrefximage\b\ \hbox{\pdfrefximage\a}\par
+\end

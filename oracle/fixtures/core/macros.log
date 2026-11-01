@@ -1,0 +1,4 @@
+(./core.tex (y,x) (cd,ab) (y,x) [ab|cd][x|y][{x}y|z] <abc>{d} macro:#1#2->(#2,#
+1) macro:#1.#2\stop ->[#1|#2] macro:#1{-><#1>{ \long macro:#1->#1 \outer macro:
+-> \long\outer macro:#1#2.->##1 987654321 deep q r-q r /\par / one two\ one two
+bac undefined )

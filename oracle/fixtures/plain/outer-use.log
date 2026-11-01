@@ -1,0 +1,25 @@
+This is TeX, Version 3.141592653 (TeX Live 2026/Arch Linux) (preloaded format=tex 2026.10.13)  20 OCT 2026 18:43
+**outer-use.tex
+(./outer-use.tex
+Runaway argument?
+{x
+! Forbidden control sequence found while scanning use of \b.
+<inserted text> 
+                \par 
+<to be read again> 
+                   \o 
+l.3 \b{x\o
+           z}
+I suspect you have forgotten a `}', causing me
+to read past where you wanted me to stop.
+I'll try to recover; but if the error is serious,
+you'd better type `E' or `X' now and fix your file.
+
+! Too many }'s.
+l.3 \b{x\o z}
+             
+You've closed more groups than you opened.
+Such booboos are generally harmless, so keep going.
+
+[1] )
+Output written on outer-use.dvi (1 page, 208 bytes).

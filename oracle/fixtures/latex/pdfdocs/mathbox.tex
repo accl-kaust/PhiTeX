@@ -1,0 +1,13 @@
+\documentclass{article}
+% a limit or script that is a box narrower than its operator is packed
+% again (`rebox`, §715): its characters keep their fonts' dimensions
+\usepackage{amsmath}
+\newcommand\M[1]{\sbox0{#1}\noindent\copy0\ [\the\ht0, \the\dp0, \the\wd0]\par}
+\begin{document}
+\M{$\displaystyle \sum_{\text{legs}}$}
+\M{$\displaystyle \sum_{\hbox{g}}$}
+\M{$\displaystyle \sum_{\text{lee}} x$}
+\M{$\displaystyle \mathop{\sum}\limits^{\hbox{y}}_{\mbox{legs and arms}}$}
+\M{$\displaystyle \lim_{\text{g}\to0}$}
+\M{$\displaystyle \sqrt{\tfrac{\sigma^2}{4}+\lVert z\rVert^2}$}
+\end{document}

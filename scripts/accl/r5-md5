@@ -1,0 +1,13 @@
+#!/bin/bash
+# amsldoc's -j 1 and -j 8 md5 and node count of a tree (on accl, in a job):
+#   scripts/accl/accl submit cmd bash scripts/accl/r5-md5
+set -u
+cd "$(dirname "$0")/../.."
+export CARGO_BUILD_JOBS=16
+cargo build -q --release -p phitex-cli > "$r/build.txt" 2>&1 || { grep -E "^error|-->" -A5 "$r/build.txt" | head -40 | tee "$r/summary.txt"; exit 1; }
+for j in 1 8; do
+  rm -rf "$w/a$j" && cp -a bench/amsldoc "$w/a$j"
+  ( cd "$w/a$j" && env ${R5_ENV:-} SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_CACHE_DIR=$w/cache "$OLDPWD/target/release/phitex" build --exact-pdf -j $j amsldoc.tex > "$r/ams-j$j.log" 2>&1 )
+  echo "j$j md5 $(md5sum < "$w/a$j/amsldoc.pdf" | cut -c1-32) $(grep -o '[0-9]* nodes run of [0-9]* live' "$r/ams-j$j.log" | tail -1)" | tee -a "$r/summary.txt"
+  cp "$w/a$j/amsldoc.pdf" "$r/ams-j$j.pdf"
+done

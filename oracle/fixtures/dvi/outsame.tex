@@ -1,0 +1,15 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\rm=cmr10 \rm \hsize=100pt \vsize=40pt \maxdepth=2pt \topskip=10pt
+\baselineskip=12pt \countdef\pageno=0 \pageno=1 \count1=0 \def\last{none}
+\output={\shipout\box255 \global\advance\pageno by1 \advance\count1 by5
+  \xdef\last{\number\pageno}}
+\hbox{a \number\pageno}\hbox{b \number\pageno}\hbox{c \number\pageno}\hbox{d \last}
+\hbox{e \number\pageno}\hbox{f \number\pageno}\hbox{g \number\pageno}\hbox{h \last}
+\hbox{i \number\pageno}\hbox{j \number\count1}\hbox{k \number\pageno}
+\message{[\number\pageno,\number\count1,\last,\number\deadcycles]}
+\pageno=20
+\hbox{l \number\pageno}\hbox{m \number\pageno}\hbox{n \number\pageno}\hbox{o \last}
+
+\hbox{p \number\pageno}\hbox{q \last}
+\message{[\number\pageno,\last]}
+\end

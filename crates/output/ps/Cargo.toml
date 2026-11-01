@@ -1,0 +1,14 @@
+[package]
+name = "phitex-ps"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "PostScript (EPS) to PDF, as Ghostscript's pdfwrite writes it: the converter behind repstopdf and xdvipdfmx's D line"
+
+[dependencies]
+phitex-codecs = { path = "../../codecs" }
+libm = "0.2"
+
+[lints]
+workspace = true

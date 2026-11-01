@@ -1,0 +1,9 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\chardef\csa=\pdfcolorstackinit page direct{0 g 0 G}
+\setbox0\hbox{\pdfcolorstack\csa push{1 0 0 rg}X\pdfcolorstack0 push{0 0 1 rg}Y\pdfcolorstack0 pop\pdfcolorstack\csa pop Z}
+\pdfxform0 \edef\f{\the\pdflastxform}
+\setbox0\hbox{\pdfcolorstack\csa current W\pdfcolorstack\csa set{0.5 g}V}\pdfxform0 \edef\g{\the\pdflastxform}
+\pdfcolorstack\csa push{0 1 0 rg}A\pdfrefxform\f B\pdfrefxform\g\pdfcolorstack\csa pop C\par
+\pdfcolorstack0 push{0.3 g}\penalty-10000 D\pdfrefxform\g\pdfrefxform\f\pdfcolorstack0 pop\par
+\end

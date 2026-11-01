@@ -1,0 +1,10 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\&=4 \catcode`\$=3
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=300pt \parindent=10pt \baselineskip=12pt \topskip=10pt
+\tolerance=10000 \parfillskip=0pt plus 1fil \hbadness=10000
+\abovedisplayskip=3pt \belowdisplayskip=3pt
+\halign{#&#\cr
+\hbox{a&b}
+Text $$\halign{#\cr a\cr} x and more.\par
+Text $$\halign{#\cr b\cr}$y.\par
+\end

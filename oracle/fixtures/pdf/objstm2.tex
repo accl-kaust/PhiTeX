@@ -1,0 +1,10 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfminorversion=5 \pdfobjcompresslevel=2
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\pdfobj{<< /A 1 >>}\edef\a{\the\pdflastobj}\immediate\pdfobj{[1 2]}
+\pdfobj stream {q Q}\edef\d{\the\pdflastobj}
+\pdfoutline goto name{a} {First}\pdfoutline goto name{b} {Second}
+\setbox0\hbox{form}\pdfxform0 \edef\f{\the\pdflastxform}
+\pdfinfo{/Title (Streams)}\pdfcatalog{/PageMode /UseOutlines}
+\pdfdest name{a} fit A\pdfrefobj\a\pdfrefobj\d\pdfrefxform\f\par
+\pdfannot width 10pt height 5pt depth 0pt {/Subtype /Text}\penalty-10000 \pdfdest name{b} xyz B\par
+\end

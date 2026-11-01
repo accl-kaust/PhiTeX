@@ -43,7 +43,7 @@ export interface BuildFacts {
   unavailable?: string[];
   /** Where packages come from ("TeX Live 2025"); undefined: nowhere yet. */
   packageSource?: string;
-  /** The core runs LaTeX (partex's pdfTeX): no "LaTeX is dropped" or non-ASCII warnings. */
+  /** The core runs LaTeX (phitex's pdfTeX): no "LaTeX is dropped" or non-ASCII warnings. */
   latex?: boolean;
   /** The last build's first error. */
   texError?: TexError;

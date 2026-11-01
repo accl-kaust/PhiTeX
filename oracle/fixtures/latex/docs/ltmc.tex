@@ -1,0 +1,32 @@
+\documentclass{article}
+\usepackage{longtable}
+\usepackage{multicol}
+\begin{document}
+\section{Columns}
+\begin{multicols}{2}
+This text runs in two columns. The quick brown fox jumps over the lazy
+dog. The quick brown fox jumps over the lazy dog. The quick brown fox
+jumps over the lazy dog. The quick brown fox jumps over the lazy dog.
+The quick brown fox jumps over the lazy dog. The quick brown fox jumps
+over the lazy dog. The quick brown fox jumps over the lazy dog.
+\end{multicols}
+\section{A long table}
+\begin{longtable}{lr}
+\caption{A long table.}\\
+\hline
+Item & Value\\
+\hline
+\endfirsthead
+\hline
+Item & Value\\
+\hline
+\endhead
+\hline
+\endfoot
+One & 1\\
+Two & 2\\
+Three & 3\\
+Four & 4\\
+Five & 5\\
+\end{longtable}
+\end{document}

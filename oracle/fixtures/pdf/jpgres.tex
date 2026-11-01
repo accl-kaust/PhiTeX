@@ -1,0 +1,11 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0 \def\sp{ }
+\font\r=cmr10 \r \hsize=300pt \vsize=500pt \parindent=0pt \baselineskip=12pt
+\def\show#1{\pdfximage{#1}\setbox0\hbox{\pdfrefximage\pdflastximage}%
+  \message{#1: \the\wd0\sp x \the\ht0}\box0\par}
+\show{jpg-jfif0.jpg}
+\pdfimageresolution=96 \show{jpg-jfif0.jpg}
+\pdfimageresolution=0 \show{jpg-jfifcm.jpg}
+\show{jpg-exif.jpg}
+\show{jpg-exifcm.jpg}
+\pdfimageresolution=72 \show{jpg-exifcm.jpg}
+\end

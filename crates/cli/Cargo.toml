@@ -1,0 +1,55 @@
+[package]
+name = "phitex-cli"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The phitex command line: TeX documents built and watched"
+
+[[bin]]
+name = "phitex"
+path = "src/main.rs"
+
+[features]
+default = ["jemalloc"]
+# jemalloc as the global allocator (native only): N threads building
+# nodes contend on glibc's arenas.
+jemalloc = ["dep:tikv-jemallocator"]
+
+[dependencies]
+annotate-snippets = "=0.11.5"
+clap = { version = "=4.6.7", features = ["derive", "wrap_help"] }
+phitex-bibtex = { path = "../tools/bibtex" }
+phitex-biber = { path = "../tools/biber" }
+phitex-kpse = { path = "../tools/kpse" }
+phitex-makeindex = { path = "../tools/makeindex" }
+phitex-mf = { path = "../fonts/mf" }
+phitex-tex = { path = "../engines/tex" }
+phitex-pdf = { path = "../output/pdf" }
+phitex-otf = { path = "../fonts/otf" }
+phitex-codecs = { path = "../codecs" }
+phitex-diff = { path = "../editor/diff" }
+phitex-git = { path = "../editor/diff/git" }
+phitex-live = { path = "../editor/live" }
+phitex-shelf = { path = "../tools/shelf" }
+serde_json = "=1.0.154"
+notify = "=8.2.0"
+tungstenite = "=0.30.0"
+toml = "=1.1.8"
+serde = { version = "=1.0.229", features = ["derive"] }
+bytesize = "=2.7.0"
+jiff = "=0.2.38"
+# (Shelf's packs over HTTPS, `files = "shelf"`: approved 2026-10-29)
+ureq = { version = "=3.5.0", default-features = false, features = ["rustls"] }
+# (phitex upgrade: a release's SHA256SUMS signature against ci/minisign.pub;
+# minisign's author's verify-only crate, no dependencies: approved 2026-10-30)
+minisign-verify = "=0.3.0"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.5", features = ["termios", "param"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,6 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=150pt \vsize=40pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt \tolerance=10000 \hbadness=10000 \vbadness=10000
+\pdfdest name{top} fit Top\par
+Before \pdfstartlink attr{/C [0 1 0]} goto name{top}a link that starts here and runs on over several lines so that the page breaks inside it twice before it ends\pdfendlink\ after.\par
+Then \pdfstartlink user{/Subtype /Link /A << /S /URI /URI (http://z) >>}another one across lines and pages to the end of the text here\pdfendlink.\par
+\end

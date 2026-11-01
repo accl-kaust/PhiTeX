@@ -1,0 +1,47 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\$=3 \catcode`\&=4 \catcode`\#=6 \catcode`\^=7 \catcode`\_=8
+\hsize=300pt \vsize=600pt \parindent=20pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=4pt \parfillskip=0pt plus 1fil
+\font\tenrm=cmr10 \font\sevenrm=cmr7 \font\fiverm=cmr5
+\font\teni=cmmi10 \font\seveni=cmmi7 \font\fivei=cmmi5
+\font\tensy=cmsy10 \font\sevensy=cmsy7 \font\fivesy=cmsy5
+\font\tenex=cmex10
+\textfont0=\tenrm \scriptfont0=\sevenrm \scriptscriptfont0=\fiverm
+\textfont1=\teni \scriptfont1=\seveni \scriptscriptfont1=\fivei
+\textfont2=\tensy \scriptfont2=\sevensy \scriptscriptfont2=\fivesy
+\textfont3=\tenex \scriptfont3=\tenex \scriptscriptfont3=\tenex
+\skewchar\teni='177 \skewchar\seveni='177 \skewchar\fivei='177
+\skewchar\tensy='60 \skewchar\sevensy='60 \skewchar\fivesy='60
+\thinmuskip=3mu \medmuskip=4mu plus 2mu minus 4mu \thickmuskip=5mu plus 5mu
+\scriptspace=0.5pt \nulldelimiterspace=1.2pt \delimiterfactor=901 \delimitershortfall=5pt
+\binoppenalty=700 \relpenalty=500
+\mathcode`+="202B \mathcode`=="303D \mathcode`(="4028 \mathcode`)="5029
+\mathcode`,="613B \mathcode`-="2200 \mathcode`<="313C \mathcode`>="313E
+\delcode`(="028300 \delcode`)="029301 \delcode`[="05B302 \delcode`]="05D303
+\delcode`|="26A30C \delcode`.=0
+\tenrm
+\mathchardef\sum="1350 \mathchardef\alpha="010B \mathchardef\cdot="2201
+\def\sqrt{\radical"270370 } \def\hat{\mathaccent"705E }
+\hsize=150pt \mathsurround=1pt
+A paragraph with $a+b+c+d+e+f=g+h+i$ and $x=y+z$ formulas, long
+enough that its lines break inside the formulas at the binary
+operators and relations, $\alpha\cdot\alpha\cdot\alpha=\alpha+\alpha$ and
+$p+q$ again, with text between $u=v$ and after it all.
+
+\hbadness=0 \showboxdepth=1 \showboxbreadth=100
+Math in lines that are reported: $a+b=c$ here, and $x$ there,
+and $y=z$ at the end of a line maybe, $q$.
+\par\hbadness=10000
+
+\hsize=300pt \mathsurround=0pt
+Inner: \hbox{$a+b=c$} and \hbox to 50pt{$x=y$\hfil}.
+Tall: $\left(\vbox to 40pt{}\right)$ and $\left[\vbox to 24pt{}\right.$ and
+$\sqrt{\vbox to 30pt{}}$ and $\left(\vbox to 9pt{}\right)$, $\left(x\right)$.
+Skew: $\hat a$, $\hat A$, $\hat{\hat a}$ and $\hat\alpha_1^2$.
+Scripts: $x^{a\over b}$ and $x_{\sqrt y}$ and $2^{2^{2^2}}$, and
+$\sum_{\mathchoice{d}{t}{s}{ss}}$, $x^{a\nonscript\mskip 18mu b}$,
+$a\mskip 0mu plus 1fil b$ and $\vcenter to 20pt{\vfil\hbox{v}\vfil}$.
+\delimiterfactor=500 \delimitershortfall=0pt
+$\left(\vbox to 40pt{}\right)$ and $\left.\vbox to 4pt{}\right)$ and
+${a\over b}\atopwithdelims[] c$ and $a\overwithdelims() b$.
+
+\end

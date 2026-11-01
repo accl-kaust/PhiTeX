@@ -1,0 +1,19 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=300pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\hoffset=10pt \voffset=-5pt
+\shipout\hbox{An explicit hbox page}
+\count1=3
+\shipout\vbox{\hbox{A vbox page}\hrule\hbox{with a rule}}
+A paragraph in the middle \shipout\hbox{shipped from a paragraph} of the text
+which continues after the shipout.
+\setbox1=\vbox{\hbox{Set and shipped}}
+\shipout\box1
+\count0=7 \count9=1
+\shipout\copy1
+\message{\ifvoid1 void\else set\fi}
+\vbox{\shipout\hbox{inside a vbox}\hbox{after}}
+More text on the main page.
+\shipout\hbox{last}
+\end

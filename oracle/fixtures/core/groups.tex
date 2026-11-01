@@ -1,0 +1,15 @@
+% Grouping: local and \global definitions, \begingroup, \aftergroup,
+% \afterassignment, \globaldefs.
+\count1=1 {\count1=2 \message{\the\count1}}\message{\the\count1}
+{\global\count1=3 }\message{\the\count1}
+\begingroup\count1=4 \def\a{inner}\global\let\b\a\endgroup\message{\the\count1,\meaning\a,\meaning\b}
+{\def\c{1}{\def\c{2}{\gdef\c{3}}\message{\c}}\message{\c}}\message{\c}
+\def\x{\message{X}}\def\y{\message{Y}}{\aftergroup\x\aftergroup\y\message{in}}
+\begingroup\aftergroup\y\endgroup
+\def\z{\message{Z}}\afterassignment\z\count2=5 \message{\the\count2}
+\afterassignment\z\def\w{}
+{\globaldefs=1 \count3=7 \def\v{V}}\message{\the\count3,\meaning\v}
+{\globaldefs=-1 \global\count4=9 \gdef\u{U}}\message{\the\count4,\meaning\u}
+{\count5=1 {\global\advance\count5 by 1 }\message{\the\count5}}\message{\the\count5}
+\count6=0 {\advance\count6 1 {\advance\count6 1 \message{\the\count6}}\message{\the\count6}}\message{\the\count6}
+\begingroup \global\skip7=1pt plus 1fil \toks7={a} \endgroup\message{\the\skip7,\the\toks7}

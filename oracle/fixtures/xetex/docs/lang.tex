@@ -1,0 +1,15 @@
+\documentclass{article}
+\usepackage{polyglossia}
+\setdefaultlanguage{english}
+\setotherlanguages{greek,arabic}
+\setmainfont{Libertinus Serif}
+\newfontfamily\arabicfont[Script=Arabic]{Amiri}
+\begin{document}
+English text. \textgreek{Ελληνικά κείμενο με τόνους, και περισσότερο κείμενο εδώ.}
+
+\begin{arabic}
+مرحبا بالعالم، هذا نص عربي للاختبار ١٢٣.
+\end{arabic}
+
+Back to English with fi ligature and Greek \textgreek{αβγ}.
+\end{document}

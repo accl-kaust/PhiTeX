@@ -1,0 +1,8 @@
+% \pdfmapfile reads a map file's lines (TeX Live manual gillcm's sample:
+% cmg.map gives its fonts, cmgbiu8r among them, Type 1 files); the
+% command's kind was read after its text was scanned, from the text's
+% last token, and the file's name was taken for a map line: no entry,
+% the font a PK one, "Font cmgbiu8r at 600 not found".
+\pdfmapfile{+cmg.map}
+\font\x=cmgbiu8r \x Hello
+\end

@@ -1,0 +1,13 @@
+(./display.tex
+Tight \hbox (badness 5) in paragraph at lines 9--11
+[]\tenrm Some text before the display alignment, long enough to fill a line
+
+\hbox(6.94444+1.94444)x300.0, glue set - 0.3705 []
+
+display display
+Underfull \hbox (badness 10000) in alignment at lines 16--16
+[]
+
+\hbox(0.0+0.0)x300.0 []
+
+display [0] )

@@ -1,0 +1,44 @@
+# Apptainer image for phitex runs on the accl cluster: Arch Linux pinned to
+# an Arch Linux Archive snapshot, so pdfTeX, TeX Live, zlib and the fonts
+# are the versions the oracle outputs come from, and the repository's Rust
+# toolchain. Built by build-image.sbatch (kept outside the repository).
+# phitex-2026-09-25-tools was built from this file before nodejs and the
+# wasm32-wasip1-threads target were added (10-18); phitex-2026-09-25-node26
+# is built from it as it is (on mc: CLUSTER=mc, user-space Apptainer):
+#   sbatch -p mc -C cpu_amd_epyc_9754 -c 16 --mem=48G -t 02:00:00 \
+#     --export=ALL,BUILD_FLAGS="--ignore-fakeroot-command --ignore-proot" build-image.sbatch phitex-2026-09-25-node26
+Bootstrap: docker
+From: archlinux:base
+
+%post
+    set -eu
+    snapshot=2026/09/25
+    echo "Server = https://archive.archlinux.org/repos/$snapshot/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist
+    sed -i 's/^#\?CheckSpace/#CheckSpace/; s/^#DisableSandbox/DisableSandbox/' /etc/pacman.conf
+    grep -q '^DisableSandbox' /etc/pacman.conf || sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+    # (archive.archlinux.org stalls downloads past pacman's 10 s low-speed limit:
+    # job 75714 lost harfbuzz, texlive-latex and others that way)
+    pacman -Syyuu --noconfirm --disable-download-timeout
+    pacman -S --noconfirm --needed --disable-download-timeout base-devel git time nodejs npm rustup clang mold biber ghostscript valgrind qpdf \
+        texlive-basic texlive-bibtexextra texlive-bin texlive-binextra texlive-context \
+        texlive-fontsextra texlive-fontsrecommended texlive-fontutils texlive-formatsextra \
+        texlive-latex texlive-latexextra texlive-latexrecommended texlive-luatex \
+        texlive-mathscience texlive-metapost texlive-pictures texlive-plaingeneric \
+        texlive-pstricks texlive-publishers texlive-xetex texlive-humanities texlive-langarabic
+    export RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo
+    rustup toolchain install nightly-2026-08-08 --profile minimal \
+        --component rustfmt,clippy --target wasm32-unknown-unknown,wasm32-wasip1,wasm32-wasip1-threads
+    rustup default nightly-2026-08-08
+    # (what the frontends' core build and the lint shard's wasm check
+    # need: Node 26, the snapshot's nodejs, npm, and the std of wasip1
+    # (their core, scripts/build.sh) and wasip1-threads (phitex-wasm))
+    node --version | grep -q '^v26\.'
+    npm --version
+    test -d /opt/rust/rustup/toolchains/nightly-2026-08-08-x86_64-unknown-linux-gnu/lib/rustlib/wasm32-wasip1-threads/lib
+    test -f /opt/rust/rustup/toolchains/nightly-2026-08-08-x86_64-unknown-linux-gnu/lib/rustlib/wasm32-wasip1/lib/self-contained/crt1-reactor.o
+    pacman -Scc --noconfirm
+
+%environment
+    export RUSTUP_HOME=/opt/rust/rustup
+    export PATH=/opt/rust/cargo/bin:$PATH
+    export LANG=C.UTF-8

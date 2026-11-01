@@ -1,0 +1,20 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\pdfannot width 10pt height 5pt depth 2pt {/Subtype /Text /Contents (Hi)}
+\pdfannot reserveobjnum \edef\ra{\the\pdflastannot}
+\pdfannot useobjnum\ra {/Subtype /Text /Contents (Reserved)}
+\pdfdest name{one} xyz zoom 2000 \pdfdest num 5 fit \pdfdest name{two} fith \pdfdest name{three} fitr width 10pt height 10pt depth 0pt
+\pdfdest name{f1} fitb \pdfdest name{f2} fitbh \pdfdest name{f3} fitbv \pdfdest name{f4} fitv \pdfdest name{one} xyz
+A \pdfstartlink attr{/Border [0 0 0]} goto name{one}link text that spans the line break of this paragraph because it is long and long and long and long\pdfendlink\ B
+\pdfstartlink user{/Subtype /Link /A << /S /URI /URI (http://x) >>}U\pdfendlink\edef\l{\the\pdflastlink}
+\pdfstartlink goto num 5 N\pdfendlink\ \pdfstartlink goto page 1 {/Fit}P\pdfendlink
+\pdfstartlink goto name{missing}M\pdfendlink\ \pdfstartlink width 20pt height 8pt depth 1pt goto file {other.pdf} name{x} newwindow R\pdfendlink
+\pdfstartlink thread name{t1}T\pdfendlink\par
+\hbox{\pdfstartlink goto name{two}nested \pdfstartlink goto name{three}inner\pdfendlink\ outer\pdfendlink}
+\pdfthread width 50pt height 20pt depth 0pt name{t1}
+\pdfstartthread name{t2}\hbox{bead}\pdfendthread
+Now a link across the page: \pdfstartlink goto name{two}start of a link that runs over many lines of text so that the page breaks inside it and the rest of it goes to the next page where it ends after a few more words and some more words and more\pdfendlink\ done.
+\par
+\penalty-10000 \pdfdest name{one} fit D\par
+\message{\ra\l}
+\end

@@ -1,0 +1,11 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0 \def\sp{ }
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\pdfximage{example-image.png}\edef\p{\the\pdflastximage}
+\pdfximage width 50pt {example-image.jpg}\edef\j{\the\pdflastximage}
+\pdfximage height 40pt depth 5pt page 1 {example-image.pdf}\edef\f{\the\pdflastximage}
+\pdfximage width 30pt height 20pt attr{/Interpolate true} {example-image-a.png}\edef\q{\the\pdflastximage}
+\pdfrefximage\p\par
+A\pdfrefximage\j\ \pdfrefximage\f\ \pdfrefximage\q\par
+\hbox{\pdfrefximage\j}\pdfrefximage\f
+\message{\p,\j,\f,\the\pdflastximagepages,\the\pdflastximagecolordepth,\pdfximagebbox\f\sp 1,\pdfximagebbox\f\sp 3}
+\end

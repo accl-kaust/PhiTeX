@@ -1,0 +1,15 @@
+% \showtokens, \showifs, \showgroups: their displays, `! OK.' and the
+% error's context, in the log.
+\showtokens{a#b \x}
+\showifs
+\iftrue \unless\ifnum1>2 \showifs\fi\fi
+\iffalse\else\showifs\fi
+{\begingroup
+\showgroups
+\endgroup}
+\setbox0\hbox to 10pt{\vbox{\showgroups}\hfil}
+\setbox0\vbox{\moveright 2pt\vtop spread 3pt{\showgroups}}
+\message{x}\showtokens{abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789}
+\showtokens{a}\message{a long text after the command, longer than an error line can show at all}
+\setbox0\hbox{\discretionary{}{\showgroups}{}}
+\message{done}

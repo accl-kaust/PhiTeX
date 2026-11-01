@@ -1,0 +1,33 @@
+\documentclass{article}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{enumerate}
+\captionsetup{font=small,labelfont=bf}
+\begin{document}
+\section{Rules and captions}
+\begin{table}[h]
+\centering
+\caption{A table with booktabs rules.}
+\label{tab:one}
+\begin{tabular}{lrr}
+\toprule
+Name & Count & Share\\
+\midrule
+Apples & 12 & 0.30\\
+Pears & 28 & 0.70\\
+\cmidrule(lr){2-3}
+Total & 40 & 1.00\\
+\bottomrule
+\end{tabular}
+\end{table}
+Table~\ref{tab:one} uses the rules.
+\begin{enumerate}[(i)]
+\item One.
+\item Two.
+\end{enumerate}
+\begin{enumerate}[A.]
+\item Alpha.
+\item Beta.
+\end{enumerate}
+\captionof{figure}{A caption outside a float.}
+\end{document}

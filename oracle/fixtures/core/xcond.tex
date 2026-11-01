@@ -1,0 +1,54 @@
+\catcode`\@=11
+\long\def\@firstofone#1{#1}\long\def\@gobble#1{}
+\long\def\@firstoftwo#1#2{#1}\long\def\@secondoftwo#1#2{#2}
+\def\m#1{\message{[#1]}}
+% \expandafter over \else / \fi in true and false branches
+\iftrue\expandafter\@firstofone\else\expandafter\@gobble\fi{\m{a1}}
+\iffalse\expandafter\@firstofone\else\expandafter\@gobble\fi{\m{a2}}
+\iftrue\expandafter\@firstofone\else\@gobble\fi{\m{a3}}\m{a3b}
+\iftrue \expandafter\@firstofone \else
+  \expandafter\@gobble
+\fi {\begingroup\catcode`\:=12 \m{a4:\the\catcode`\:}}\m{a4o:\the\catcode`\:}\endgroup
+\catcode`\:=11 \iftrue\expandafter\@firstofone\else\fi{\catcode`\:=12 }\m{a5:\the\catcode`\:}\catcode`\:=11
+% kernel idioms
+\def\t#1{\ifnum#1>0 \expandafter\@firstoftwo\else\expandafter\@secondoftwo\fi{\m{pos}}{\m{neg}}}
+\t1 \t0
+\def\g#1{\ifnum#1>0 \expandafter\@gobble\fi{\m{g#1}}}\g1 \g0
+% \or
+\ifcase1 \m{c0}\or\expandafter\@firstofone\or\m{c2}\else\m{ce}\fi{\m{c1}}
+\ifcase2 \m{c0}\or\m{c1}\or\expandafter\@firstofone\fi{\m{c2}}
+\ifcase5 \m{c0}\or\m{c1}\else\expandafter\@firstofone\fi{\m{c5}}
+% \expandafter\fi
+\iftrue\expandafter\m\fi{f1}
+\def\x{X}\iftrue\expandafter\expandafter\expandafter\m\expandafter\fi\expandafter{\x}
+% nested \if in skipped text
+\iffalse \ifnum1=1 \m{bad}\else\m{bad}\fi \expandafter\@gobble\else\m{n1}\fi
+\iftrue \m{n2}\else \iffalse\fi \ifx ab\else\fi \m{bad}\fi\relax
+\ifnum1=2 \iftrue\else\fi\m{bad}\else\expandafter\@firstofone\fi{\m{n3}}
+% \else at end of line
+\iffalse \m{bad}\else
+\m{eol}\fi
+% \csname in conditional
+\iftrue\expandafter\def\csname cs1\endcsname{C1}\fi\m{\csname cs1\endcsname}
+\expandafter\ifx\csname undefinedzz\endcsname\relax\m{undef}\else\m{def}\fi
+\expandafter\ifx\csname cs1\endcsname\relax\m{undef}\else\m{def}\fi
+\ifx\undefinedyy\relax\m{u}\else\m{d}\fi
+% \fi inside a macro argument
+\def\a#1{#1}\iftrue\a{\m{fa}\else}\m{bad}\fi
+\iftrue \a{\fi}\m{fb}
+% braces through \expandafter into a group
+\def\y{\iftrue\expandafter\@firstofone\else\expandafter\@gobble\fi}
+\y{\catcode`\:=12 }\m{y:\the\catcode`\:}\catcode`\:=11
+\m{level ok}
+% latex.ltx 1114-1120, literally
+\expandafter\ifx\csname tex\string _let:D\endcsname\relax
+  \expandafter\@firstofone
+\else
+  \m{skipping}%
+  \expandafter\endinput
+\fi
+  {%
+    \catcode`\:=12 \catcode`\_=12
+    \m{inside:\the\catcode`\:}%
+  }
+\m{after:\the\catcode`\:,\the\catcode`\_}

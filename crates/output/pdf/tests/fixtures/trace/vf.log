@@ -1,0 +1,163 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input vf
+(./vf.tex
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0
+.\glue(\topskip) 0.0
+.\hbox(6.81989+0.11491)x200.0, glue set 111.36072fil
+..\hbox(0.0+0.0)x0.0
+..\t T
+..\kern-0.34999
+..\t i
+..\t m
+..\t e
+..\t s
+..\t :
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t ^^L (ligature fi)
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t ^^M (ligature fl)
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t \ (ligature ``)
+..\kern-0.79994
+..\t A
+..\kern-1.11
+..\t " (ligature '')
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t T
+..\kern-0.79994
+..\t o
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t A
+..\kern-1.34999
+..\t V
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\glue(\parskip) 0.0
+.\glue(\baselineskip) 5.2152
+.\hbox(8.66989+2.16492)x200.0, glue set 50.78227fil
+..\hbox(0.0+0.0)x0.0
+..\r r
+..\r o
+..\r m
+..\r a
+..\r n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\h H
+..\h e
+..\h l
+..\h v
+..\kern-0.3
+..\h e
+..\h t
+..\h i
+..\h c
+..\h a
+..\glue 3.33588 plus 1.99188 minus 0.79189
+..\t a
+..\t n
+..\t d
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t T
+..\kern-0.34999
+..\t i
+..\t m
+..\t e
+..\t s
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\t a
+..\t g
+..\kern-0.04994
+..\t a
+..\t i
+..\t n
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}{/usr/share/texmf-dist/fonts
+/enc/dvips/base/8r.enc}
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0, glue set 282.99855fill
+.\glue(\topskip) 0.0
+.\hbox(7.73332+2.33333)x200.0, glue set 4.67767fil
+..\hbox(0.0+0.0)x0.0
+..\tb B
+..\tb o
+..\tb l
+..\tb d
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\tb a
+..\tb f
+..\tb t
+..\tb e
+..\tb r
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\tb a
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\tb p
+..\tb a
+..\tb g
+..\tb e
+..\tb :
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\tb A
+..\kern-1.44995
+..\tb V
+..\glue 2.5 plus 1.49847 minus 0.60057
+..\tb T
+..\kern-0.91994
+..\tb o
+..\glue 2.5 plus 1.49998 minus 0.59998
+..\r c
+..\r m
+..\r r
+..\glue 4.0 plus 2.0 minus 1.33333
+..\r a
+..\r t
+..\glue 4.0 plus 2.0 minus 1.33333
+..\r 1
+..\r 2
+..\r p
+..\r t
+..\glue 4.0 plus 2.0 minus 1.33333
+..\t t
+..\t i
+..\t m
+..\t e
+..\t s
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\pdfrefxform(6.81989+0.11491)x36.65964
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+
+Completed box being shipped out
+\hbox(6.81989+0.11491)x36.65964
+.\t i
+.\t n
+.\glue 2.5 plus 1.49998 minus 0.59998
+.\t a
+.\glue 2.5 plus 1.49998 minus 0.59998
+.\t f
+.\t o
+.\t r
+.\t m
+
+ )</usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/share/t
+exmf-dist/fonts/type1/urw/helvetic/uhvr8a.pfb></usr/share/texmf-dist/fonts/type
+1/urw/times/utmb8a.pfb></usr/share/texmf-dist/fonts/type1/urw/times/utmr8a.pfb>
+Output written on vf-trace.pdf (2 pages, 40748 bytes).
+PDF statistics:
+ 28 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 7 words of extra memory for PDF output out of 10000 (max. 10000000)
+

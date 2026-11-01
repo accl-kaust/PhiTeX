@@ -1,0 +1,9 @@
+% \uppercase, \lowercase.
+\uppercase{\message{abc XYZ 123 \relax}}
+\lowercase{\message{ABC xyz}}
+\uccode`1=`i \uccode`2=`f \uppercase{\def\if@12{IF}}\message{\meaning\if@}
+\lccode`\~=`a \lowercase{\def~{tilde}\message{\meaning~}}
+\begingroup\lccode`A=`z \lowercase{\message{AB}}\endgroup\lowercase{\message{AB}}
+\def\x{\uppercase\expandafter{\y}}\def\y{\message{why}}\x
+\uppercase{\message}{lower}
+\let\bgroup={ \uppercase\bgroup\message{x}}

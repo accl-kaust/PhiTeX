@@ -26,13 +26,17 @@ export const KEYS: [string, string][] = [
   ["j k  ↓ ↑", "scroll down, up"],
   ["h l", "scroll left, right"],
   ["Ctrl+d  Ctrl+u", "half a screen down, up"],
-  ["Ctrl+f  Ctrl+b", "a screen down, up"],
+  ["Ctrl+b", "a screen up"],
+  ["Ctrl+f  /", "find in the pages"],
+  ["Enter  n / Shift+Enter  N", "next, previous match"],
   ["Space  Shift+Space", "next, previous page"],
   ["→ ←  PgDn PgUp", "next, previous page"],
   ["gg  Home", "first page"],
   ["G  End", "last page"],
   ["12G  12gg", "page 12"],
   ["K J  + −", "zoom in, out"],
+  ["Ctrl+wheel  pinch", "zoom at the pointer"],
+  ["Ctrl+ +  Ctrl+ −  Ctrl+0", "zoom in, out, fit"],
   ["0  w", "fit the page's width"],
   ["f", "fit the whole page"],
   ["?", "these keys"],
@@ -63,7 +67,6 @@ export function bindKeys(on: Window | HTMLElement, t: KeyTarget): () => void {
       const act: Record<string, () => void> = {
         d: () => by(0, (n * h) / 2),
         u: () => by(0, (-n * h) / 2),
-        f: () => by(0, n * h),
         b: () => by(0, -n * h),
       };
       if (!act[k]) return;

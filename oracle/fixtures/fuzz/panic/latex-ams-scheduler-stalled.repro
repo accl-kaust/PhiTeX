@@ -1,0 +1,16 @@
+phitex-flow fuzz repro
+doc latex-ams
+seed 10 step 3
+before threads=1 reads=Suspend order=Priority lean=true
+schedule threads=1 reads=Speculate order=Random(14) lean=true
+fail panic the scheduler stalled: 0 running (0 parked), settled 3/23, due at Some(2), scan at 3 (free true, done false), 0 to ship, 0 logs queued (0 running), 0 breaks queued; piece 3: Unstarted entry Rest(1, Some(2)) enterable true dirty 0 parked false run false; piece 4: Unstarted entry After(3, Some(0)) enterable true dirty 0 parked false run false; piece 5: Unstarted entry After(4, Some(0)) enterable true dirty 15 parked false run true; piece 6: Unstarted entry Rest(0, Some(5)) enterable false dirty 3 parked false run true; piece 7: Unstarted entry File(6) enterable false dirty 1 parked false run false; piece 8: Unstarted entry After(7, Some(6)) enterable true dirty 0 parked false run false; piece 9: Unstarted entry After(8, Some(6)) enterable true dirty 3 parked false run true; piece 10: Unstarted entry After(9, Some(6)) enterable false dirty 0 parked false run false; piece 11: Unstarted entry After(10, Some(6)) enterable true dirty 0 parked false run false; piece 12: Unstarted entry After(11, Some(6)) enterable true dirty 0 parked false run false; piece 13: Unstarted entry After(12, Some(6)) enterable true dirty 0 parked false run false; piece 14: Unstarted entry After(13, Some(6)) enterable true dirty 0 parked false run false; piece 15: Unstarted entry After(14, Some(6)) enterable true dirty 0 parked false run false; piece 16: Unstarted entry After(15, Some(6)) enterable true dirty 0 parked false run false; piece 17: Unstarted entry After(16, Some(6)) enterable true dirty 0 parked false run false; piece 18: Unstarted entry After(17, Some(6)) enterable true dirty 1 parked false run true; piece 19: Unstarted entry After(18, Some(6)) enterable true dirty 0 parked false run false; piece 20: Unstarted entry After(19, Some(6)) enterable true dirty 0 parked false run false; piece 21: Unstarted entry Rest(6, Some(20)) enterable false dirty 0 parked false run false; piece 22: Unstarted entry After(21, None) enterable true dirty 14 parked false run true;
+history threads=1,8 doc=latex-ams
+edit - 33 0 blank-out
+ins
+
+
+text
+\documentclass[11pt]{article}
+
+  \binom{n}{k} &= \frac{n!}{k!\,(n-k)!}, & \sqrt[3]{8} &= 2.
+\end{document}

@@ -1,0 +1,18 @@
+% \numexpr, \dimexpr, \glueexpr, \muexpr: every operator, precedence,
+% parentheses, rounding, termination, coercion.
+\message{\the\numexpr 1+2*3\relax, \the\numexpr (1+2)*3\relax, \the\numexpr 7/2\relax, \the\numexpr -7/2\relax, \the\numexpr 7/-2\relax}
+\message{\the\numexpr 5/3\relax, \the\numexpr 4/3\relax, \the\numexpr 7*3/2\relax, \the\numexpr -7*3/2\relax, \the\numexpr 2147483647*2/2\relax}
+\message{\the\numexpr 10-3-2\relax, \the\numexpr 2*(3+(4-1))*2\relax, \the\numexpr 100/7*7\relax, \the\numexpr 1 + 2 * 3 \relax}
+\message{\the\numexpr 3*5/4\relax, \the\numexpr -3*5/4\relax, \the\numexpr 2*7/-4\relax, \the\numexpr 0-(3)\relax}
+\count1=\numexpr 3*4 \message{\the\count1}
+\count2=\numexpr\count1/5\relax \advance\count2 by \numexpr 2*\count1\relax \message{\the\count2}
+\message{\ifnum\numexpr 2*3=6 yes\else no\fi, \ifnum\numexpr 2*3\relax>5 yes\else no\fi}
+\dimen1=\dimexpr 1pt*3/4\relax \message{\the\dimen1, \the\dimexpr (1pt+2pt)/3\relax, \the\dimexpr 1pt/3\relax, \the\dimexpr 2pt*-3\relax}
+\message{\the\dimexpr 1pt + 1pt * 2 - 0.5pt\relax, \the\dimexpr \dimen1 * 2\relax, \the\numexpr\dimexpr 1pt\relax\relax}
+\message{\the\dimexpr 1pt*7/3\relax, \the\dimexpr -1sp/2\relax, \the\dimexpr 3sp/2\relax, \the\dimexpr 1.5pt*(2+1)\relax}
+\skip1=1pt plus 2fil minus 3pt
+\message{\the\glueexpr\skip1*2\relax, \the\glueexpr 1pt plus 1fil + 2pt plus 3fill\relax, \the\glueexpr \skip1 - 1pt plus 1fil\relax}
+\message{\the\glueexpr (\skip1)/2\relax, \the\glueexpr 1pt plus 0fil\relax, \the\glueexpr 1pt*3/2\relax, \the\glueexpr 1pt minus 2pt - 1pt minus 2pt\relax}
+\skip2=\glueexpr\skip1*3\relax \message{\the\skip2}
+\message{\the\muexpr 3mu plus 1fil*2\relax, \the\muexpr\thinmuskip+1mu\relax, \the\muexpr (1mu+2mu)*(1+1)\relax}
+\muskip1=\muexpr 1mu minus 1fill/2\relax \message{\the\muskip1}

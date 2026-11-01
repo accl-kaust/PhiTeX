@@ -1,0 +1,8 @@
+(./input.tex before (./inc-a.tex in a: line 1 a two same line) after (./inc-b.t
+ex)
+Loose \hbox (badness 19) in paragraph at lines 6--6
+[]\tenrm Text from file b more text on the calling
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.57915 []
+
+(./inc-num.tex) 42 line 8 line 10 (./inc-c.tex group) global [0.42] )

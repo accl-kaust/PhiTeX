@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 
 # One fixed time and locale for both sides (as xtask/src/e2e.rs pins it),
 # and the security settings of docs/ci.md: kpathsea reads these variables
-# before texmf.cnf, in TeX Live's engines, BibTeX, makeindex and partex.
+# before texmf.cnf, in TeX Live's engines, BibTeX, makeindex and phitex.
 PINNED = {
     "SOURCE_DATE_EPOCH": "1758800000",
     "FORCE_SOURCE_DATE": "1",
@@ -142,7 +142,7 @@ def snapshot(root, base=None):
     changed (not in `base`, or with other contents), the compared ones."""
     snap = {}
     for rel in tree_files(root):
-        if rel.endswith(NOT_COMPARED) or rel.startswith((".partex", "term")):
+        if rel.endswith(NOT_COMPARED) or rel.startswith((".phitex", "term")):
             continue
         d = sha256_file(Path(root) / rel)
         if base is None or base.get(rel) != d:

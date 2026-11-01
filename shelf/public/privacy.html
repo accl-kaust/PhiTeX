@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy — PhiTeX Instant</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fff; --mute: #666; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #eee; --bg: #161616; --mute: #999; } }
+  body { font: 16px/1.55 system-ui, sans-serif; color: var(--fg); background: var(--bg); max-width: 42rem; margin: 3rem auto; padding: 0 16px; }
+  h2 { font-size: 1.1rem; margin-top: 2rem; } p.m { color: var(--mute); }
+</style>
+<h1>Privacy policy</h1>
+<p><b>PhiTeX Instant for Overleaf (unofficial)</b>, a Chrome extension. Not made, endorsed or supported by Overleaf.</p>
+<p class="m">Effective 2 October 2026.</p>
+
+<h2>Summary</h2>
+<p>The extension collects no personal data. Your documents never leave your browser. There are no analytics, accounts, ads or tracking.</p>
+
+<h2>What the extension reads</h2>
+<p>On Overleaf project pages (<code>https://www.overleaf.com/project/…</code>) it reads the project you are editing (its files and the editor's text) to typeset a preview. This happens entirely in your browser, in WebAssembly. Your documents are kept in memory only while the tab is open, and are never sent to us or anyone else.</p>
+
+<h2>Network requests</h2>
+<ul>
+  <li><b>overleaf.com</b>: your own project's files, fetched as you, the same way Overleaf's editor fetches them. The extension never writes to Overleaf.</li>
+  <li><b>Shelf</b> (<code>shelf-phitex.pages.dev</code>, static files on Cloudflare Pages): when a document uses a TeX package the extension doesn't bundle, it downloads that package's file, e.g. <code>tikz.sty</code>, and a list of the package names available. Only names in that list are requested, never your own file names, and no document text or identifier is sent. Each file is downloaded once and then kept in your browser. As with any website, Cloudflare receives your IP address and the requested file name. Shelf keeps no logs of its own. See <a href="https://www.cloudflare.com/privacypolicy/">Cloudflare's privacy policy</a>.</li>
+</ul>
+
+<h2>What is stored</h2>
+<p>In your browser only: your settings (preview on or off, zoom, layout, output format), whether you accepted the first-run notice, and downloaded TeX package files. Nothing is stored on any server. Removing the extension deletes all of it.</p>
+
+<h2>Sharing</h2>
+<p>No user data is collected, so none is sold, shared or transferred, or used for anything other than showing the preview.</p>
+
+<h2>Changes and contact</h2>
+<p>Changes to this policy will be posted on this page. Questions: open an issue at <a href="https://forgejo.cloud.ammar.engineer/flinner/phitex-overleaf/issues">the extension's source repository</a>.</p>
+<p class="m">© 2026 Ammar Seliaman. The extension is free software under the GNU AGPL, version 3 only.</p>

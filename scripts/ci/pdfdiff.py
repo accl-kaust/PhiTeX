@@ -1,5 +1,6 @@
-"""Where two PDFs first differ, as an object: the scoreboard's "first
-differing object" (docs/ci.md).
+"""Where two PDFs first differ: the first page whose content differs, and
+the first differing object (the corpus run's "first differing page",
+scripts/accl/corpus-run).
 
 Both files are put in qpdf's QDF form (object streams unpacked, streams
 decoded, objects renumbered in traversal order, each marked with its
@@ -76,6 +77,35 @@ def first_line_diff(a, b):
         (lb[i] if i < len(lb) else b"<end>")[:160].decode("latin-1")
 
 
+def pages(text):
+    """[content of page 1, page 2, ...]: each page's content streams as
+    QDF writes them (`%% Contents for page N`)."""
+    out = {}
+    for head, body in objects(text):
+        for m in re.finditer(rb"%% Page (\d+)\n", head):
+            out.setdefault(int(m.group(1)), b"")
+        for m in re.finditer(rb"%% Contents for page (\d+)", head):
+            n = int(m.group(1))
+            # (the stream's data only: object numbers shift after any
+            # earlier extra object)
+            a = body.find(b"stream\n")
+            e = body.rfind(b"endstream")
+            out[n] = out.get(n, b"") + (body[a + 7:e] if a >= 0 and e > a else body)
+    return [out[k] for k in sorted(out)]
+
+
+def first_page(qa, qb):
+    """The first page (1-based) whose content differs, and the page
+    counts; None when every page's content agrees."""
+    pa, pb = pages(qa), pages(qb)
+    for i, (x, y) in enumerate(zip(pa, pb)):
+        if x != y:
+            return i + 1, len(pa), len(pb)
+    if len(pa) != len(pb):
+        return min(len(pa), len(pb)) + 1, len(pa), len(pb)
+    return None, len(pa), len(pb)
+
+
 def diff(a, b):
     a, b = Path(a), Path(b)
     da, db = a.read_bytes(), b.read_bytes()
@@ -93,6 +123,8 @@ def diff(a, b):
         res["content_same"] = True
         res["summary"] = "bytes differ, content the same (compression, packing or numbering)"
         return res
+    fp, na, nb = first_page(qa, qb)
+    res.update({"first_page": fp, "pages": [na, nb]})
     oa, ob = objects(qa), objects(qb)
     for i, ((ha, ba), (hb, bb)) in enumerate(zip(oa, ob)):
         if ha + ba != hb + bb:
@@ -101,17 +133,17 @@ def diff(a, b):
             res.update({
                 "qdf_index": i + 1,
                 "oracle_obj": d["obj"],
-                "partex_obj": describe(hb, bb)["obj"],
+                "phitex_obj": describe(hb, bb)["obj"],
                 "type": d["type"],
                 "page": d["page"],
                 "line": line,
                 "oracle": xa,
-                "partex": xb,
+                "phitex": xb,
             })
             where = f"page {d['page']}, " if d["page"] else ""
-            res["summary"] = f"obj {d['obj']} ({where}{d['type'] or 'untyped'}) line {line}"
+            res["summary"] = (f"page {fp}: " if fp else "") + f"obj {d['obj']} ({where}{d['type'] or 'untyped'}) line {line}"
             return res
-    res["summary"] = f"object count differs: {len(oa)} vs {len(ob)}"
+    res["summary"] = (f"page {fp}: " if fp else "") + f"object count differs: {len(oa)} vs {len(ob)}"
     return res
 
 

@@ -1,0 +1,13 @@
+% A forced penalty an \unvbox left fires at the next paragraph's start
+% (new_graf's build_page, TeX §1091) inside a conditional too: amsmath's
+% equation starts its display in \ifmmode's \else branch, and the
+% routine's \global\hsize (revtex's widetext, ltxgrid's \onecolumngrid)
+% is the display's width.
+\hsize=300pt
+\output={\ifnum\outputpenalty=-10002 \global\hsize=100pt \unvbox255 \else\shipout\box255 \fi}
+\setbox2\vbox{\hbox{}\penalty-10002}\unvbox2
+\ifnum1=1 $$\hbox{x}\message{[display \the\displaywidth]}$$\fi
+\message{[after \the\hsize]}
+\setbox2\vbox{\hbox{}\penalty-10002}\unvbox2
+\ifnum1=1 \global\hsize=300pt Text \message{[in par \the\hsize]}of a paragraph.\par\fi
+\end

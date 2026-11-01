@@ -1,0 +1,22 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=100pt \parindent=20pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\parskip=2pt plus 1pt
+First paragraph of a document with several pages, long enough to run
+over a few lines of the narrow measure, so the page builder has lines to
+consider breaking between, and the club and widow penalties are zero.
+
+\count0=2
+Second paragraph, on to the next page perhaps, continuing for a while
+with words and more words until the page is full and a break comes.
+
+\count0=3 \count1=7
+Third paragraph.\penalty-10000 \par
+\count1=0 \count3=4
+Fourth paragraph after a forced break, also long enough to need lines of
+its own and to fill the rest of the page and possibly another one too.
+\vfill\penalty-10000
+\count0=-5 \count3=0
+Last words.
+\end

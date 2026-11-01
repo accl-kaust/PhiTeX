@@ -1,0 +1,3 @@
+Metafont 2.71828182 (TeX Live 2026/Arch Linux)
+GFtoPK 2.4 (TeX Live 2026/Arch Linux)
+TFtoPL 3.3 (TeX Live 2026/Arch Linux)

@@ -1,0 +1,22 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=300pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\def\leavevmode{\unhbox9 }
+\leavevmode\hbox{boxed} starts a paragraph without indentation's box?
+No: with it, since unhbox begins the paragraph with the indent.
+
+\hbox{A box on its own in vertical mode}
+\leavevmode\hbox{A box at the start of a paragraph}
+
+\indent\indent Two indents. \noindent a noindent in horizontal mode is
+ignored, \indent an indent is a box.
+
+\noindent\vrule width 2pt height 6pt\ a rule begins this one.
+
+\char`A\char`V starts with char, \char`f\char`f\char`i ligature.
+
+\ starts with a control space.
+
+\-starts with a discretionary.
+\end

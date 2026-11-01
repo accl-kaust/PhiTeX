@@ -1,0 +1,219 @@
+{
+ "j": 8,
+ "process_s": 22.221,
+ "event": {
+  "absorbed": 0,
+  "build": 1,
+  "diagnostics": 0,
+  "edit": null,
+  "errors": [],
+  "event": "build",
+  "nodes_run": 1838,
+  "notes": [
+   "1838 nodes run of 1562 live, 1921 runs, 545 cutoffs, 4 loop rounds",
+   "engine tables: 1562 nodes, 1 units, 390123 values, 940704 kB resident, 0 us collecting (0 nodes freed)"
+  ],
+  "ok": true,
+  "output": "./amsldoc.pdf",
+  "pages": 44,
+  "pages_changed": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15,
+   16,
+   17,
+   18,
+   19,
+   20,
+   21,
+   22,
+   23,
+   24,
+   25,
+   26,
+   27,
+   28,
+   29,
+   30,
+   31,
+   32,
+   33,
+   34,
+   35,
+   36,
+   37,
+   38,
+   39,
+   40,
+   41,
+   42,
+   43,
+   44
+  ],
+  "parallel": {
+   "batches": 4,
+   "batches_inline": 0,
+   "busy_ms": 5680.715209,
+   "critical_path": 790,
+   "engine_ms": 8978.329155000001,
+   "gated": 39216,
+   "hints": {
+    "any": 422,
+    "bounded": 376,
+    "pending_waits": 405,
+    "stops": 301,
+    "undeclared": 0,
+    "violations": 0
+   },
+   "max_batch": 64,
+   "max_ready": 38,
+   "peak_running": 3,
+   "ready_mean": 1.326118326118326,
+   "speculation": {
+    "confirmed": 500,
+    "fuel_outs": 212,
+    "mispredicted": 4,
+    "raises": 4267,
+    "run": 1570
+   },
+   "threads": 8,
+   "top_waited": [
+    {
+     "node": 14852615990600071463,
+     "waits": 446
+    },
+    {
+     "node": 1624060152675884599,
+     "waits": 409
+    },
+    {
+     "node": 17267466338327054801,
+     "waits": 402
+    },
+    {
+     "node": 599005797407908361,
+     "waits": 399
+    },
+    {
+     "node": 652699326923439145,
+     "waits": 391
+    },
+    {
+     "node": 15719452285350510351,
+     "waits": 381
+    },
+    {
+     "node": 8331952788804385314,
+     "waits": 363
+    },
+    {
+     "node": 16378695831907586333,
+     "waits": 361
+    },
+    {
+     "node": 8427781968081493722,
+     "waits": 358
+    },
+    {
+     "node": 9042059716898062271,
+     "waits": 352
+    },
+    {
+     "node": 5334260795757843370,
+     "waits": 333
+    },
+    {
+     "node": 17733536720212328006,
+     "waits": 308
+    },
+    {
+     "node": 6065417571335206484,
+     "waits": 291
+    },
+    {
+     "node": 2188288521972253618,
+     "waits": 275
+    },
+    {
+     "node": 14455161874751966285,
+     "waits": 271
+    },
+    {
+     "node": 18297681353400137104,
+     "waits": 255
+    }
+   ],
+   "waits_by_kind": [
+    {
+     "kind": "claim",
+     "waits": 38475
+    },
+    {
+     "kind": "gated",
+     "waits": 264
+    },
+    {
+     "kind": "pending set",
+     "waits": 405
+    },
+    {
+     "kind": "range",
+     "waits": 263
+    },
+    {
+     "kind": "scope effect",
+     "waits": 36
+    },
+    {
+     "kind": "definition",
+     "waits": 73
+    },
+    {
+     "kind": "environment",
+     "waits": 1
+    }
+   ]
+  },
+  "wall_ms": 22010.909896,
+  "why": "cold"
+ },
+ "rounds": 4,
+ "round_walls_s": [
+  0.008,
+  11.907,
+  3.866,
+  5.059
+ ],
+ "eval_s": 20.84,
+ "runs": 1924,
+ "runs_by_op": {
+  "exec": 1335,
+  "fold": 544,
+  "mark": 1,
+  "resume": 169,
+  "finish": 185,
+  "dvi": 4,
+  "files": 3
+ },
+ "live": 1562,
+ "runs_per_live": 1.232,
+ "hint_s": 0.813,
+ "busy_by_op_s": null,
+ "engine_s": null,
+ "wall_s": 22.011,
+ "pages": 44,
+ "ok": true,
+ "nodes_run": 1838
+}

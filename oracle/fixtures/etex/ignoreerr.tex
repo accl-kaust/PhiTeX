@@ -1,0 +1,11 @@
+% pdfTeX's \ignoreprimitiveerror (bit 0): "Infinite glue shrinkage found
+% in box being split" only logged, as LaTeX's marks split to \maxdimen.
+\font\tenrm=cmr10 \tenrm \showboxdepth=10 \showboxbreadth=100
+\ignoreprimitiveerror=1
+\setbox1=\vbox{\hbox{a}\vskip 0pt minus 1fil\hbox{b}\vskip 2pt plus 1pt minus 1fill\hbox{c}}
+\setbox2=\vsplit1 to 5pt
+\message{[\the\ht2, \the\ht1]}
+\setbox1=\vbox{\hbox{a}\vskip 0pt minus 1fil\hbox{b}}
+\setbox2=\vsplit1 to 1000pt
+\showbox2
+\end

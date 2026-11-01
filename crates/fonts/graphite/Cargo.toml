@@ -1,0 +1,14 @@
+[package]
+name = "phitex-graphite"
+version = "0.0.0"
+edition.workspace = true
+# A port of graphite2 1.3.15 (see NOTICE), taken under graphite2's
+# LGPL-2.1-or-later option.
+license = "LGPL-2.1-or-later"
+publish = false
+description = "Graphite smart-font shaping: a Rust port of graphite2 1.3.15 (no C, no I/O)"
+
+[dependencies]
+
+[lints]
+workspace = true

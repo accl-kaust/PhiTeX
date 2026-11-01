@@ -1,0 +1,20 @@
+\documentclass{article}
+\usepackage[a6paper,margin=1cm]{geometry}
+\usepackage[pdftitle={Links},pdfauthor={Q},bookmarksopen]{hyperref}
+\begin{document}
+\section{First}\label{sec:first}
+See section~\ref{sec:second} on page~\pageref{sec:second}, the web at
+\url{http://example.org/a/very/long/path/that/goes/on}, and
+\href{http://example.org}{a link whose text is long enough to run over the
+end of this line and onto the next one}.
+\subsection{Inside}
+Text. \hyperlink{target}{to the target} and \hypertarget{target}{here}.
+\section{Second}\label{sec:second}
+Some words. \href{http://example.org/page}{This link starts near the
+bottom of the page and its text keeps going for a while, over several
+lines of text, so that the page ends inside it and it ends on the next
+page after some more words and more words and more words and even more
+words and words}. After it.
+\subsection{Third}
+Footnote\footnote{A note.} and more.
+\end{document}

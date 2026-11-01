@@ -1,0 +1,18 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\pdfobj{<< /A 1 >>}\edef\a{\the\pdflastobj}
+\immediate\pdfobj{[1 2 3]}\edef\b{\the\pdflastobj}
+\pdfobj reserveobjnum \edef\c{\the\pdflastobj}
+\pdfobj useobjnum \c {(reserved)}
+\pdfobj stream attr{/X 1}{q Q}\edef\d{\the\pdflastobj}
+\immediate\pdfobj stream {BT ET}
+\immediate\pdfobj file {obj.tex}
+\pdfobj stream file {obj.tex}\edef\e{\the\pdflastobj}
+A\pdfrefobj\a \pdfrefobj\d \pdfrefobj\e \pdfrefobj\c \par
+\pdfobj useobjnum 999 {bad}\message{\the\pdfretval}
+\pdfcatalog{/PageMode /UseNone} \pdfinfo{/Title (Objects) /Author (Q)}
+\pdfnames{/EmbeddedFiles << /Names [] >>}\pdftrailer{/Extra 1}
+\pdfpageattr{/Rotate 0}\pdfpagesattr{/CropBox [0 0 200 300]}\pdfpageresources{/Pattern << >>}
+B\par
+\message{\a\b\c\d\e}
+\end

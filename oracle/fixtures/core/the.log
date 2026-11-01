@@ -1,0 +1,12 @@
+(./core.tex 200,1000,92,13,1,25,0 468.0pt,20.0pt,0.0pt,0.0pt 12.0pt,0.0pt,0.0pt
+0.0mu,0.0mu -5,0.1pt,0.0pt plus 1.0pt,5.0mu plus 5.0mu \a \b  x \y {z} x \y {z}
+x \y {z} 11,0,14,10,9,15,12 97,97,0,65,90,0 999,1000,1000 29025,29018,28725,43,
+0 0,-1 8235,164608,3000,65 65,29025,5,2.0pt,1.0pt plus 1.0pt,1.0mu,tt \char"41,
+\mathchar"7161,\count10,\dimen11,\skip12,\muskip13,\toks14 5,2.0pt,1.0pt plus 1
+.0pt,1.0mu,tt 2 -1000.0pt,0,0,0 16383.99998pt,0.0pt,0.0pt,0.0pt 0,0,0.0pt,0.0pt
+0.0pt,0.0pt,0.0pt \relax,\par,\count,\hbox,\ ,\/ \tolerance,\hsize,\parskip,\ev
+erypar,\catcode
+begin-group character {,end-group character },math shift character $,alignment 
+tab character &,macro parameter character #,superscript character ^,the letter 
+a,the character 1 the character _ texput the letter abegin-group character {end
+-group character } )

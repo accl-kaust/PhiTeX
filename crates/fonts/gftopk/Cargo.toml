@@ -1,0 +1,12 @@
+[package]
+name = "phitex-gftopk"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "GFtoPK: METAFONT's generic font (GF) files packed into PK files, gftopk.web as TeX Live builds it"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=300pt \vsize=400pt \parindent=20pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\setbox0=\hbox{Boxed text}
+\setbox1=\vbox{\hbox{One}\hbox{Two}}
+\message{\the\wd0,\the\ht0,\the\dp0;\the\wd1,\the\ht1,\the\dp1}
+\message{\ifvoid0 void\else full\fi,\ifhbox0 h\fi,\ifvbox1 v\fi,\ifvoid2 void\fi}
+\copy0
+\box0
+\message{\ifvoid0 void\else full\fi}
+\box1
+\setbox2=\hbox{Width changed}\wd2=10pt \ht2=20pt \dp2=5pt
+\box2
+{\setbox3=\hbox{local}}\message{\ifvoid3 void\fi}
+{\global\setbox3=\hbox{global}}\message{\ifvoid3 \else set\fi}
+\setbox4=\hbox{Unboxed}
+A paragraph with \unhbox4 and \unhcopy3 text.
+
+\setbox5=\vbox{\hbox{Inner one}\hbox{Inner two}}
+\unvbox5
+\setbox6=\hbox{\setbox7=\hbox{nested}\box7\box7 twice}
+\box6
+\end

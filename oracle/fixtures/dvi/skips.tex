@@ -1,0 +1,21 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=250pt \vsize=300pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parskip=3pt plus 1pt
+\parfillskip=0pt plus 1fil \hbadness=10000
+Words\hskip 10pt plus 5pt minus 2pt then a kern\kern 3pt here and
+a penalty\penalty 50 there, then a forced\penalty-10000 break and more
+text\hfil after a fil, then\hfill fill\hskip 0pt plus -1fil done.
+\hfilneg Finally a long run of words to make the line break algorithm
+work for its living on this paragraph of moderate length again and again.
+
+\vskip 20pt plus 2pt minus 1pt
+\kern 5pt
+\penalty 100
+Next paragraph after vertical glue,\/ a kern and a penalty\unskip.
+Some text\hskip 3pt\unskip\ with an unskip\kern1pt\unkern\ and an
+unkern\penalty7\unpenalty\ and an unpenalty.
+
+\vskip 1pt\unskip \kern 2pt\unkern
+\noindent A noindent paragraph with \indent an indent inside it.
+\end

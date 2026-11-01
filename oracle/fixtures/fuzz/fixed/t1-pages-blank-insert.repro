@@ -1,0 +1,47 @@
+phitex-flow fuzz repro
+doc pages
+seed 134 step 4
+before threads=1 reads=Suspend order=Random(840) lean=false
+schedule threads=1 reads=Speculate order=Random(469) lean=false
+fail timeout
+history threads=1 doc=pages
+edit - 673 0 blank-insert
+ins
+
+
+text
+\catcode`\{=1 % left brace is begin-group character
+\catcode`\}=2 % right brace is end-group character
+\catcode`\$=3 % dollar sign is math shift
+\catcode`\&=4 % ampersand is alignment tab
+\catcode`\#=6 % hash mark is macro parameter character
+\catcode`\^=7 \catcode`\^^K=7 % circumflex and uparrow are for superscripts
+\catcode`\_=8 \catcode`\^^A=8 % underline and downarrow are for subscripts
+\catcode`\^^I=10 % ascii tab is a blank space
+\chardef\active=13 \catcode`\~=\active % tilde is active
+\catcode`\^^L=\active \outer\def^^L{\par} % ascii form-feed is "\outer\par"
+
+% ---- the text layer, with the default output routine
+\def\fz{lazy}\newif\iffz \fztrue
+\vsize=3in
+\input fzsub
+\def\para#1{#1 This paragraph is one of many that fill several pages of
+text set with plain \TeX's macros and its output routine, which adds a
+footline with the page number to every page. The page builder breaks the
+pages, and the lines are broken by the paragraph builder as usual: with
+glue that stretches and shrinks, and penalties for clubs and widows.\par}
+\para{One.}\para{Two.}\para{Three.}
+\medskip
+\para{Four.}\para{Five.}
+\bigskip
+
+\para{Six.}\para{Seven.}\para{Eight.}
+\smallbreak
+\para{Nine.}\para{Ten.}\para{Eleven.}\para{Twelve.}
+\para{Thirteen.}\para{Fourteen.}
+\bye
+
+file fzsub.tex
+Sub file text one.
+
+Sub file text two, with \fz.

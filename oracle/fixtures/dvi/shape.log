@@ -1,0 +1,91 @@
+(./shape.tex
+Loose \hbox (badness 5) in paragraph at lines 6--8
+[]\tenrm A first paragraph with the default parameters, long
+
+\hbox(6.94444+1.94444)x250.0, glue set 0.35954 []
+
+
+Underfull \hbox (badness 779) in paragraph at lines 10--12
+[]\tenrm A second paragraph, indented more, with a
+
+\hbox(6.94444+1.94444)x250.0, glue set 1.98642 []
+
+
+Tight \hbox (badness 43) in paragraph at lines 10--12
+\tenrm larger baselineskip between its lines than the first one had. 
+
+\hbox(6.94444+1.94444)x250.0, glue set - 0.75838 []
+
+
+Tight \hbox (badness 1) in paragraph at lines 13--15
+\tenrm A hanging paragraph, the lines after the first indented by
+
+\hbox(6.94444+1.94444)x250.0, glue set - 0.21669 []
+
+
+Underfull \hbox (badness 417) in paragraph at lines 16--18
+[]\tenrm A paragraph whose first two lines are
+
+\hbox(6.94444+1.94444)x220.0, glue set 1.61137 []
+
+
+Underfull \hbox (badness 285) in paragraph at lines 16--18
+\tenrm indented on the right, and the rest at the full
+
+\hbox(6.94444+1.94444)x220.0, glue set 1.4185 []
+
+
+Tight \hbox (badness 80) in paragraph at lines 19--22
+[]\tenrm A parshape paragraph with three line
+
+\hbox(6.94444+1.94444)x200.0, glue set - 0.92987 []
+
+
+Tight \hbox (badness 81) in paragraph at lines 19--22
+\tenrm specifications given, the last one repeating
+
+\hbox(6.94444+1.94444)x180.0, glue set - 0.93506 []
+
+
+Loose \hbox (badness 69) in paragraph at lines 24--26
+ []\tenrm A ragged paragraph with leftskip and 
+
+\hbox(6.94444+1.94444)x250.0, glue set 0.8873 []
+
+
+Loose \hbox (badness 4) in paragraph at lines 24--26
+ \tenrm rightskip set, which makes it ragged right because 
+
+\hbox(6.94444+1.94444)x250.0, glue set 0.34999 []
+
+
+Tight \hbox (badness 71) in paragraph at lines 28--30
+[]\tenrm A loose paragraph with looseness one, which TeX
+
+\hbox(6.94444+1.94444)x250.0, glue set - 0.89278 []
+
+
+Loose \hbox (badness 14) in paragraph at lines 32--34
+[]\tenrm An emergency paragraph with a low tolerance,
+
+\hbox(6.94444+1.94444)x250.0, glue set 0.51663 []
+
+
+Underfull \hbox (badness 185) in paragraph at lines 32--34
+\tenrm where emergency stretch helps the line breaker find a
+
+\hbox(6.94444+1.94444)x250.0, glue set 1.23123 []
+
+
+Overfull \hbox (0.83363pt too wide) in paragraph at lines 37--39
+[]\tenrm Penalties between lines: club, widow and interline
+
+\hbox(6.94444+1.94444)x250.0, glue set - 1.0 []
+
+
+Loose \hbox (badness 10) in paragraph at lines 37--39
+\tenrm penalties appear in the vertical list between the lines of
+
+\hbox(6.94444+1.94444)x250.0, glue set 0.46664 []
+
+[0] )

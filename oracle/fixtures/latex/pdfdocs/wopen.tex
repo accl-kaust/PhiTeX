@@ -1,0 +1,11 @@
+\documentclass{article}
+\begin{document}
+\makeatletter
+\immediate\write\@mainaux{\string\@input{wopen-a.aux}}
+\immediate\openout\@partaux "wopen-a.aux"
+\immediate\write\@partaux{\string\@setckpt{wopen-a}\@charlb}
+\immediate\write\@partaux{\string\setcounter{page}{7}}
+\immediate\closeout\@partaux
+Read back: \expandafter\meaning\csname cp@wopen-a\endcsname.
+\makeatother
+\end{document}

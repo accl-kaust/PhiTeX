@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# libpng 1.6 (the system's, which pdfTeX links) against partex's port
-# (crates/partex-engine/src/png.rs), reading PNGs as pdfTeX's writepng.c
+# libpng 1.6 (the system's, which pdfTeX links) against the port
+# (crates/codecs/src/png.rs), reading PNGs as pdfTeX's writepng.c
 # does (harness.c and the png_dump example print the same report): run
 # from the repository,
 #
@@ -15,7 +15,7 @@ w=${1:?usage: compare.sh WORK}
 mkdir -p "$w"
 cc -O2 -o "$w/harness" "$here/harness.c" -lpng
 python3 "$here/gen_edge.py" "$w/edge"
-CARGO_TARGET_DIR="$w/ct" cargo build -q -p partex-engine --example png_dump
+CARGO_TARGET_DIR="$w/ct" cargo build -q -p phitex-codecs --example png_dump
 files=$(ls "$w"/suite/*.png "$w"/edge/*.png 2>/dev/null)
 "$w/harness" $files > "$w/out.libpng"
 "$w/ct/debug/examples/png_dump" $files > "$w/out.port"

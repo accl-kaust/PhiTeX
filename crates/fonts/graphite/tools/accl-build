@@ -1,0 +1,11 @@
+#!/bin/bash
+# (r9) build, lint (clippy -D warnings, all targets) and the wasm32 check
+# of phitex-graphite and phitex-otf; errors in summary.txt
+cd "$(dirname "$0")/../../../.."
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+{ cargo clippy -q -p phitex-graphite -p phitex-otf --all-targets -- -D warnings 2>&1 \
+  && cargo check -q --target wasm32-unknown-unknown -p phitex-graphite -p phitex-otf 2>&1; } > "$r/build.txt"
+s=$?
+grep -E '^(error|warning)' -A12 "$r/build.txt" | head -400 > "$r/summary.txt"
+echo "status $s" >> "$r/summary.txt"
+exit $s

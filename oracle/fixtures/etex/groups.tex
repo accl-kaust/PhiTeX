@@ -1,0 +1,12 @@
+% \currentgrouplevel, \currentgrouptype through {, \begingroup, boxes and
+% discretionaries.
+\message{\the\currentgrouplevel, \the\currentgrouptype}
+{\message{\the\currentgrouplevel, \the\currentgrouptype}%
+ \begingroup\message{\the\currentgrouplevel, \the\currentgrouptype}%
+  {\message{\the\currentgrouplevel}}\endgroup}
+\setbox0\hbox{\message{\the\currentgrouptype}\vbox{\message{\the\currentgrouptype}}\vtop{\message{\the\currentgrouptype}}%
+  \discretionary{\message{\the\currentgrouptype}}{\message{\the\currentgrouptype}}{\message{\the\currentgrouptype}}}
+\setbox0\vbox{\message{\the\currentgrouptype}\hbox{\message{\the\currentgrouptype, \the\currentgrouplevel}}%
+  \setbox1\hbox{\message{\the\currentgrouptype}}\moveright1pt\hbox{\message{\the\currentgrouptype}}}
+\message{\the\currentgrouplevel}
+\begingroup\message{\the\currentgrouptype}\aftergroup\x\def\x{\message{\the\currentgrouplevel}}\global\let\x\x\endgroup

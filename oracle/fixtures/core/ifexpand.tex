@@ -1,0 +1,17 @@
+% \expandafter on \else/\fi skips to and consumes the \fi (§510), so the
+% macro takes the brace group that follows as its argument.
+\long\def\first#1{#1}
+\iftrue\expandafter\first\else x\fi{\message{[A]}}\message{[B]}
+\expandafter\ifx\csname tex\string _let:D\endcsname\relax
+  \expandafter\first
+\else
+  \expandafter\message\expandafter{\string\else}%
+\fi
+{\catcode`\:=11 \message{[C\the\catcode`\:]}
+\input ifsub.dat
+\catcode`\_=11
+}\message{[D\the\catcode`\:\the\catcode`\_]}
+\ifnum1<2 \expandafter\first\fi{\message{[E]}}\message{[F]}
+\iftrue\expandafter\first\else
+x\fi{\count1=7 }\message{[G\the\count1]}
+\iffalse x\else\expandafter\first\fi{\count2=8 }\message{[H\the\count2]}

@@ -1,0 +1,13 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\&=4
+\font\tenrm=cmr10 \tenrm
+\hsize=300pt \vsize=500pt \parindent=0pt \baselineskip=12pt \topskip=10pt
+\def\a#{\hbox}
+\def\b#1#{\hbox}
+\def\c#1{#1}
+\def\d#1.#2#{\hbox}
+\halign{#&#\cr
+\relax\a{A}&\relax\b x{B}\cr
+\relax\c{C}&\relax\d y.{z}{D}\cr
+\relax\b{}{E}&\relax\a{\c{F}}\cr
+\a{G}&\b{}{H}\cr}
+\end

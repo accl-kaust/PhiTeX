@@ -1,0 +1,9 @@
+\documentclass{article}
+\usepackage{tikz}
+\usetikzlibrary{fadings}
+\begin{document}
+A fading to the east: \tikz\fill[blue,path fading=east] (0,0) rectangle (3,1);
+
+\newpage
+And one to the north: \tikz\fill[red,path fading=north] (0,0) rectangle (2,1);
+\end{document}

@@ -1,0 +1,100 @@
+#!/bin/bash
+# The XeTeX libraries' speed on accl, one node (a `cmd` job):
+#   ACCL_STORE_IN=code/tmp/r9-gr2-tests ACCL_OPTS="-c 32 -w acclnode05" \
+#     scripts/accl/accl submit cmd bash crates/output/xdvipdfmx/tools/accl-bench
+# Measured one process at a time, after the corpora are built:
+# - xdv2pdf on the amsldoc fontspec XDV and on every corpus XDV, cold (a
+#   process's first conversion, its start included) and warm (a later
+#   conversion in the same process, `--repeat`): wall (median of 5 on
+#   amsldoc, the sum on the corpus) and callgrind's instructions; the
+#   profiles of amsldoc's (cg-*.txt);
+# - the corpus checked (byte-identical to xdvipdfmx's PDFs);
+# - phitex-otf: otf-xdv on the corpus's traced documents and on the
+#   Graphite corpus (memo on and off): font loads and shaping per word;
+#   callgrind's profiles of the font loads and of the shaping alone.
+# summary.txt: every number; the profiles in cg-*.txt (inclusive) and
+# cg-*.self.txt.
+set -u
+cd "$(dirname "$0")/../../../.."
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-32}
+export FORCE_SOURCE_DATE=1 SOURCE_DATE_EPOCH=1700000000
+t0=$(date +%s)
+{ cargo build -q --release -p phitex-xdvipdfmx --features cli --bin xdv2pdf && cargo build -q --release -p phitex-otf --example otf-index --example otf-xdv; } > "$r/build.txt" 2>&1 || { grep -E "^error|-->" -A5 "$r/build.txt" | head -40 | tee "$r/summary.txt"; exit 1; }
+B=$PWD/target/release
+C=crates/output/xdvipdfmx/tools/corpus.sh
+$C build "$w/corpus" > /dev/null 2> "$r/corpus-build.txt"
+$C shapes "$w/shapes" > /dev/null 2> "$r/shapes-build.txt"
+gx=
+[ -d "$w/bin/r9-gr2-tests" ] && gx=$w/bin/r9-gr2-tests
+crates/fonts/graphite/tools/corpus.sh build "$w/gc" "$gx" > "$r/gcorpus-build.txt" 2>&1
+$B/examples/otf-index "$w/index" > "$r/otf-index.txt" 2>&1
+t1=$(date +%s)
+# (byte-identical at one thread and at every CPU's: the end's streams
+# compressed one by one, then in a parallel batch)
+res1=$(PHITEX_THREADS=1 $C check "$w/corpus" "$B/xdv2pdf")
+cp "$w/corpus/FAIL.txt" "$r/FAIL-1.txt" 2> /dev/null
+res=$($C check "$w/corpus" "$B/xdv2pdf")
+ann() { callgrind_annotate --inclusive=yes --threshold=99 "$1" | head -${2:-70}; }
+A=$(find "$w/corpus" -name 'amsldoc-fs.xdv' | head -1)
+{
+  echo "node ${SLURMD_NODENAME:-$(cat /proc/sys/kernel/hostname)}, $(nproc) CPUs, commit $(git rev-parse --short=12 HEAD)"
+  echo "xdvipdfmx corpus: $res at $(nproc) threads, $res1 at 1"
+  # amsldoc: wall (5 processes, each 1 cold + 4 warm)
+  ad=$(dirname "$A")
+  for i in 1 2 3 4 5; do
+    (cd "$ad" && "$B/xdv2pdf" --repeat 5 -o amsldoc-fs.pdf amsldoc-fs.xdv 2>&1 >/dev/null | sed -n 's/.*conversion \([0-9]*\): \(.*\) ms/\1 \2/p')
+  done > "$r/amsldoc-walls.txt"
+  med() { sort -n | awk '{a[NR]=$1} END {print a[int((NR+1)/2)]}'; }
+  echo "amsldoc xdv2pdf wall: cold $(awk '$1==1{print $2}' "$r/amsldoc-walls.txt" | med) ms, warm $(awk '$1>1{print $2}' "$r/amsldoc-walls.txt" | med) ms (medians)"
+  for i in 1 2 3 4 5; do
+    (cd "$ad" && PHITEX_THREADS=1 "$B/xdv2pdf" --repeat 5 -o amsldoc-fs.pdf amsldoc-fs.xdv 2>&1 >/dev/null | sed -n 's/.*conversion \([0-9]*\): \(.*\) ms/\1 \2/p')
+  done > "$r/amsldoc-walls-1.txt"
+  echo "amsldoc xdv2pdf wall at 1 thread: cold $(awk '$1==1{print $2}' "$r/amsldoc-walls-1.txt" | med) ms, warm $(awk '$1>1{print $2}' "$r/amsldoc-walls-1.txt" | med) ms (medians)"
+  (cd "$ad" && valgrind --tool=callgrind --callgrind-out-file="$r/cg-cold.out" "$B/xdv2pdf" -o amsldoc-fs.pdf amsldoc-fs.xdv 2> "$r/cg-cold.err" > /dev/null)
+  (cd "$ad" && valgrind --tool=callgrind --toggle-collect='*warm_run*' --callgrind-out-file="$r/cg-warm.out" "$B/xdv2pdf" --repeat 2 -o amsldoc-fs.pdf amsldoc-fs.xdv 2> "$r/cg-warm.err" > /dev/null)
+  (cd "$ad" && valgrind --tool=callgrind --callgrind-out-file=/dev/null "$B/xdv2pdf" --repeat 2 -o amsldoc-fs.pdf amsldoc-fs.xdv 2> "$r/cg-two.err" > /dev/null)
+  # (warm: two conversions less the cold one)
+  c1=$(sed -n 's/.*Collected : //p' "$r/cg-cold.err") c2=$(sed -n 's/.*Collected : //p' "$r/cg-two.err")
+  echo "amsldoc xdv2pdf instructions: cold $c1, warm $((c2 - c1))"
+  # the corpus: wall sums, one process at a time; instructions
+  find "$w/corpus" -name '*.xdv' | sort > "$w/xdvs.txt"
+  : > "$r/corpus-walls.txt"
+  while read -r f; do
+    d=$(dirname "$f") n=$(basename "$f" .xdv)
+    [ -s "$d/$n.pdf" ] || continue
+    (cd "$d" && "$B/xdv2pdf" --repeat 2 -o "$n.pdf" "$n.xdv" 2>&1 >/dev/null | sed -n "s|.*conversion \([0-9]*\): \(.*\) ms|$n \1 \2|p") >> "$r/corpus-walls.txt"
+  done < "$w/xdvs.txt"
+  echo "corpus xdv2pdf wall: cold $(awk '$2==1{s+=$3} END{printf "%.0f", s}' "$r/corpus-walls.txt") ms, warm $(awk '$2==2{s+=$3} END{printf "%.0f", s}' "$r/corpus-walls.txt") ms ($(awk '$2==1' "$r/corpus-walls.txt" | wc -l) XDVs, sums)"
+  export B
+  cgone() { # XDV: "cold warm" instructions
+    local d n c wm; d=$(dirname "$1") n=$(basename "$1" .xdv)
+    [ -s "$d/$n.pdf" ] || return 0
+    c=$(cd "$d" && valgrind --tool=callgrind --callgrind-out-file=/dev/null "$B/xdv2pdf" -o "$n.pdf" "$n.xdv" 2>&1 >/dev/null | sed -n 's/.*Collected : //p')
+    wm=$(cd "$d" && valgrind --tool=callgrind --callgrind-out-file=/dev/null "$B/xdv2pdf" --repeat 2 -o "$n.pdf" "$n.xdv" 2>&1 >/dev/null | sed -n 's/.*Collected : //p')
+    echo "$n $c $((wm - c))"
+  }
+  export -f cgone
+  xargs -d '\n' -P "$(nproc)" -I{} bash -c 'cgone "$1"' _ {} < "$w/xdvs.txt" > "$r/corpus-instr.txt"
+  echo "corpus xdv2pdf instructions: cold $(awk '{s+=$2} END{printf "%.3f G", s/1e9}' "$r/corpus-instr.txt"), warm $(awk '{s+=$3} END{printf "%.3f G", s/1e9}' "$r/corpus-instr.txt")"
+  # phitex-otf
+  for m in "" --no-memo; do
+    $B/examples/otf-xdv "$w/index" "$w/shapes" --examples 5 $m > "$r/otf-xdv$m.txt" 2>&1
+    echo "otf $m: $(grep -E '^words:' "$r/otf-xdv$m.txt" | cut -d, -f1-2); $(grep -E '^time:' "$r/otf-xdv$m.txt")"
+    $B/examples/otf-xdv "$w/index" "$w/gc" --examples 5 $m > "$r/gr-xdv$m.txt" 2>&1
+    echo "graphite $m: $(grep -E '^words:' "$r/gr-xdv$m.txt" | cut -d, -f1-2); $(grep -E '^time:' "$r/gr-xdv$m.txt")"
+  done
+  valgrind --tool=callgrind --toggle-collect='*load_font*' --callgrind-out-file="$r/cg-otf-load.out" $B/examples/otf-xdv "$w/index" "$w/shapes" --examples 0 > /dev/null 2> "$r/cg-otf-load.err"
+  valgrind --tool=callgrind --toggle-collect='*shape_word*' --callgrind-out-file="$r/cg-otf-shape.out" $B/examples/otf-xdv "$w/index" "$w/shapes" --examples 0 --no-memo > /dev/null 2> "$r/cg-otf-shape.err"
+  valgrind --tool=callgrind --toggle-collect='*shape_word*' --callgrind-out-file="$r/cg-gr-shape.out" $B/examples/otf-xdv "$w/index" "$w/gc" --examples 0 --no-memo > /dev/null 2> "$r/cg-gr-shape.err"
+  valgrind --tool=callgrind --toggle-collect='*load_font*' --callgrind-out-file="$r/cg-gr-load.out" $B/examples/otf-xdv "$w/index" "$w/gc" --examples 0 > /dev/null 2> "$r/cg-gr-load.err"
+  for k in otf-load otf-shape gr-shape gr-load; do
+    echo "instructions $k: $(sed -n 's/.*Collected : //p' "$r/cg-$k.err")"
+  done
+  echo "times: build+corpora $((t1 - t0)) s, measures $(($(date +%s) - t1)) s"
+} > "$r/summary.txt" 2>&1
+for k in cold warm otf-load otf-shape gr-shape gr-load; do
+  [ -s "$r/cg-$k.out" ] && ann "$r/cg-$k.out" 90 > "$r/cg-$k.txt"
+  callgrind_annotate --threshold=99 "$r/cg-$k.out" 2> /dev/null | head -60 > "$r/cg-$k.self.txt"
+done
+cp "$w/corpus/FAIL.txt" "$w/corpus/DIFFS.txt" "$r/" 2> /dev/null
+true

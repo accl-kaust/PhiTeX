@@ -1,0 +1,22 @@
+phitex-flow fuzz repro
+doc story
+seed 0 step 1
+before threads=1 reads=Suspend order=Priority lean=false
+schedule threads=1 reads=Suspend order=Priority lean=false
+fail mismatch dvi
+history threads=1 doc=-
+edit - 131 0 input-add
+ins
+\input fzsub
+
+text
+\catcode`\{=1 \catcode`\}=2 \def\fz{lazy}\hsize=100pt \vsize=100pt \parfillskip=0pt plus 1fil
+\font\x=cmr10 \x A first paragraph.
+
+B second paragraph.
+
+\end
+file fzsub.tex
+Sub file text one.
+
+Sub file text two, with \fz.

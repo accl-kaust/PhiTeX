@@ -1,0 +1,6 @@
+== readback.aux
+\def \a {written at once}
+\def \b {deferred two on page 1}
+\def \c {on page 2}
+== readback.two
+first

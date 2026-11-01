@@ -1,0 +1,12 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\@=11
+\catcode`\%=12 \def\@percentchar{%}\catcode`\%=14
+\font\rm=cmr10 \rm \hsize=100pt \vsize=100pt \parindent=0pt
+\hbox{one}
+
+\hbox{two \@percentchar}
+
+{\hbox{three}}
+\message{[three]}
+
+\hbox{four}
+\end

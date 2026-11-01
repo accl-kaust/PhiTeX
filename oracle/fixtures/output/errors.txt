@@ -1,0 +1,7 @@
+unbalanced: Unbalanced output routine
+unbalanced: Your sneaky output routine has problematic {'s and/or }'s.
+unbalanced: I can't handle that very well; good luck.
+unused: Output routine didn't use all of \box255
+unused: Your \output commands should empty \box255,
+unused: e.g., by saying `\shipout\box255'.
+unused: Proceed; I'll discard its present contents.

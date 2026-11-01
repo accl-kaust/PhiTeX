@@ -1,0 +1,10 @@
+% A PNG whose header reads but whose image data does not (a palette
+% image, decoded where it is written: writepng.c's png_read_image fails,
+% pdftex_fail "libpng: internal error"): the job's error, on the page
+% the link places whole as on one it ships.
+\font\r=cmr10 \r
+\pdfximage{bad.png}\edef\img{\the\pdflastximage}
+\shipout\hbox{before}
+\shipout\hbox{\pdfrefximage\img}
+\shipout\hbox{after}
+\end

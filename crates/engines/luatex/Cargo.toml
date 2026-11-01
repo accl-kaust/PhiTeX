@@ -1,0 +1,17 @@
+[package]
+name = "phitex-luatex"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "LuaTeX (and LuaLaTeX): UTF-8 input, \\directlua and callbacks, the node library, Lua font loading, LuaTeX's PDF backend"
+
+[dependencies]
+phitex-tex = { path = "../tex" }
+phitex-tfm = { path = "../../fonts/tfm" }
+phitex-otf = { path = "../../fonts/otf" }
+phitex-pdf = { path = "../../output/pdf" }
+phitex-lua = { path = "lua" }
+
+[lints]
+workspace = true

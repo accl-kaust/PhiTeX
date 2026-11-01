@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhiTeX Banner</title>
+<!--
+  PhiTeX animated banner. One clock drives everything: render(t) draws the
+  banner at story time t (seconds, 0..DURATION), so a renderer can step it
+  frame by frame. The numbers live in CONFIG, the beats in TIMELINE.
+
+  Story, left to right: `phitex watch paper.tex` builds the paper cold on every
+  core (its live tree as phitex prints it, the logo's ribbon flowing) and the
+  page appears; a word in it changes, and only its paragraph runs again, in
+  milliseconds; the PDF is byte for byte pdflatex's. Then the
+  terminal and the page clear, so the last frame equals the first and it loops.
+
+  URL parameters:
+    ?theme=light|dark   force a theme (default: the system's)
+    ?t=3.2              freeze at one time
+    ?render=1           no controls, no autoplay (for frame capture)
+
+  Fonts and logos are local (banner/, logo/), so it renders offline:
+  CMU Serif, Noto Sans and DM Mono from PhiTeX.org (OFL, banner/fonts);
+  the ACCL lockup and KAUST's seeds from github.com/accl-kaust/logo;
+  the PhiTeX logo from logo-concepts.html ?export.
+-->
+<style>
+@font-face { font-family: "CMU Serif"; font-weight: 700; src: url("banner/fonts/cmu-serif-700-roman.woff2") format("woff2"); }
+@font-face { font-family: "CMU Serif"; font-weight: 400; src: url("banner/fonts/cmu-serif-500-roman.woff2") format("woff2"); }
+@font-face { font-family: "CMU Serif"; font-weight: 400; font-style: italic; src: url("banner/fonts/cmu-serif-500-italic.woff2") format("woff2"); }
+@font-face { font-family: "Noto Sans"; font-weight: 400; src: url("banner/fonts/noto-sans-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Noto Sans"; font-weight: 600; src: url("banner/fonts/noto-sans-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Noto Sans"; font-weight: 700; src: url("banner/fonts/noto-sans-latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "DM Mono"; font-weight: 400; src: url("banner/fonts/dm-mono-latin-400-normal.woff2") format("woff2"); }
+
+:root {
+  --sans: "Noto Sans", system-ui, sans-serif;
+  --serif: "CMU Serif", "Latin Modern Roman", Georgia, serif;
+  --mono: "DM Mono", ui-monospace, Menlo, monospace;
+  --bg: #ffffff;               /* GitHub's page, light */
+  color-scheme: light;
+  --bg-glow: rgba(54, 108, 191, .10);
+  --ink: #1b222c;
+  --muted: #495365;
+  --faint: #8d96a5;
+  --rule: #e7e9ee;
+  --accent: #366cbf;
+  --accent-soft: rgba(54, 108, 191, .10);
+  --green: #1e6b41;
+  --amber: #e09a00;
+  --card: #ffffff;
+  --card-edge: #e7e9ee;
+  --card-shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 10px 28px rgb(16 24 40 / 8%);
+  --page: #ffffff;
+  --page-edge: #d0d5dd;
+  --cell-done: rgba(27, 34, 44, .50);
+  --dot: rgba(27, 34, 44, .07);
+  --kaust: #80715e;               /* KAUST's lettering colour */
+  --viewer-bg: #e7e9ee;
+  --term-bg: #12171f;
+  --term-bar: #1b222c;
+  --term-edge: transparent;
+  --term-ink: #e8ebf0;
+  --term-dim: #8d96a5;
+  --term-blue: #6fa3ec;
+  --term-green: #53b57f;
+  --term-amber: #f2b83b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1117;             /* GitHub's page, dark */
+    color-scheme: dark;
+    --bg-glow: rgba(101, 151, 224, .14);
+    --ink: #ffffff;
+    --muted: #d0d5dd;
+    --faint: #8d96a5;
+    --rule: #2f3a4c;
+    --accent: #6597e0;
+    --accent-soft: rgba(101, 151, 224, .14);
+    --green: #53b57f;
+    --amber: #f2b83b;
+    --card: #1b222c;
+    --card-edge: #2f3a4c;
+    --card-shadow: 0 1px 3px rgb(0 0 0 / 40%), 0 10px 30px rgb(0 0 0 / 35%);
+    --page: #252e3c;
+    --page-edge: #3a4659;
+    --cell-done: rgba(255, 255, 255, .55);
+    --dot: rgba(255, 255, 255, .05);
+    --kaust: #ffffff;
+    --viewer-bg: #1b222c;
+    --term-bg: #0b0f15;
+    --term-bar: #141a23;
+    --term-edge: rgba(255, 255, 255, .09);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1117;
+  color-scheme: dark;
+  --bg-glow: rgba(101, 151, 224, .14);
+  --ink: #ffffff;
+  --muted: #d0d5dd;
+  --faint: #8d96a5;
+  --rule: #2f3a4c;
+  --accent: #6597e0;
+  --accent-soft: rgba(101, 151, 224, .14);
+  --green: #53b57f;
+  --amber: #f2b83b;
+  --card: #1b222c;
+  --card-edge: #2f3a4c;
+  --card-shadow: 0 1px 3px rgb(0 0 0 / 40%), 0 10px 30px rgb(0 0 0 / 35%);
+  --page: #252e3c;
+  --page-edge: #3a4659;
+  --cell-done: rgba(255, 255, 255, .55);
+  --dot: rgba(255, 255, 255, .05);
+  --kaust: #ffffff;
+  --viewer-bg: #1b222c;
+  --term-bg: #0b0f15;
+  --term-bar: #141a23;
+  --term-edge: rgba(255, 255, 255, .09);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: var(--bg); color: var(--ink); }
+body { font-family: var(--sans); overflow: hidden; -webkit-font-smoothing: antialiased; }
+
+#viewport { position: relative; transform-origin: 0 0; }
+#stage {
+  position: relative; width: 1600px; height: 640px; overflow: hidden;
+  background: var(--bg);
+}
+/* the glow and the dots fade out well before the edges: the GIF's border is GitHub's own page colour, so it has no edge */
+#stage::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    radial-gradient(700px 460px at 460px 300px, var(--bg-glow), transparent 70%),
+    radial-gradient(640px 460px at 1260px 300px, var(--bg-glow), transparent 70%),
+    radial-gradient(var(--dot) 1px, transparent 1.2px) 0 0 / 22px 22px;
+  -webkit-mask-image: radial-gradient(closest-side, #000 60%, transparent);
+}
+/* over everything: the last pixels at each edge are exactly the page colour, whatever runs into them (a shadow, the page) */
+#stage::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 50;
+  background: linear-gradient(transparent calc(100% - 36px), var(--bg));
+  box-shadow: inset 0 0 0 3px var(--bg);
+}
+.abs { position: absolute; }
+#stage .dark { display: none; }
+:root[data-theme="dark"] #stage .light { display: none; }
+:root[data-theme="dark"] #stage .dark { display: block; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) #stage .light { display: none; }
+  :root:not([data-theme="light"]) #stage .dark { display: block; }
+}
+
+/* ── left: the logo, the byline, what it is ──────────────── */
+/* the logo (logo/phitex-logo*.svg, made by logo-concepts.html ?export): ΦTeX woven with ACCL's stripes */
+#logo { left: 58px; top: 70px; }
+#logo svg { display: block; height: 178px; width: auto; }
+#byline { left: 72px; top: 272px; display: flex; align-items: center; gap: 10px; height: 36px; }
+#byline .by { font-size: 18px; color: var(--faint); margin-right: 4px; }
+#byline img { height: 34px; display: block; }
+#byline img.seeds { height: 38px; margin: -2px 0; }  /* round, so a touch taller to look as tall as the lockup's A */
+#byline .name { font-size: 25px; font-weight: 700; letter-spacing: .05em; line-height: 1; }
+#byline .kaust { color: var(--kaust); }
+#byline .sep { width: 1.5px; height: 34px; background: var(--faint); margin: 0 14px; }
+#tagline { left: 68px; top: 334px; font-size: 40px; font-weight: 700; letter-spacing: -.8px; }
+#tagline .hl { color: var(--accent); }
+#subtitle { left: 70px; top: 392px; width: 600px; font-size: 17.5px; line-height: 1.45; color: var(--muted); }
+
+/* ── left: one editor window, in four editors' looks (their names, no logos) ── */
+.ed { position: absolute; left: 40px; top: 40px; width: 860px; height: 520px; border-radius: 14px; overflow: hidden;
+      box-shadow: 0 0 0 1px var(--card-edge), var(--card-shadow); font-family: var(--mono); font-size: 16px; }
+.ed .src { white-space: pre; line-height: 27px; }
+.ed .ln { display: inline-block; width: 44px; padding-right: 14px; text-align: right; opacity: .45; }
+.ed .cs { color: var(--c-cs); } .ed .br { opacity: .55; } .ed .new { color: var(--c-new); }
+.ed .caret { display: inline-block; width: 2px; height: 20px; vertical-align: -4px; margin-right: -2px; background: var(--c-caret); }
+.ed .caret.block { width: 10px; margin-right: -10px; opacity: .7; }
+.ed .cur { background: var(--c-line); }
+/* Overleaf, with the extension's switch */
+#overleaf { background: #fff; color: #1b222c; --c-cs: #2a6db0; --c-new: #138a36; --c-caret: #1b222c; --c-line: #eef4ec; }
+#overleaf .top { height: 46px; background: #1e2530; color: #fff; display: flex; align-items: center; gap: 14px; padding: 0 16px; font: 600 15px var(--sans); }
+#overleaf .top .sw { margin-left: auto; display: flex; border-radius: 6px; overflow: hidden; font-size: 13px; }
+#overleaf .top .sw span { padding: 5px 12px; background: #3b4452; color: #c9d1dc; } #overleaf .top .sw .on { background: #138a36; color: #fff; }
+#overleaf .side { position: absolute; left: 0; top: 46px; bottom: 0; width: 170px; background: #f3f5f7; border-right: 1px solid #dde1e6; padding: 14px; font: 14px/30px var(--sans); color: #495365; }
+#overleaf .side .on { background: #dfe6ee; border-radius: 4px; padding: 0 8px; margin: 0 -8px; color: #1b222c; font-weight: 600; }
+#overleaf .src { position: absolute; left: 170px; top: 58px; }
+/* VS Code */
+#vscode { background: #1e1e1e; color: #d4d4d4; --c-cs: #569cd6; --c-new: #4ec9b0; --c-caret: #aeafad; --c-line: #2a2d2e; }
+#vscode .act { position: absolute; left: 0; top: 0; bottom: 26px; width: 52px; background: #181818; display: flex; flex-direction: column; align-items: center; gap: 22px; padding-top: 16px; }
+#vscode .act i { width: 22px; height: 22px; border-radius: 4px; border: 2px solid #6e6e6e; } #vscode .act i:first-child { border-color: #d4d4d4; }
+#vscode .tabs { position: absolute; left: 52px; right: 0; top: 0; height: 40px; background: #181818; display: flex; font: 14px var(--sans); }
+#vscode .tabs span { padding: 0 18px; display: flex; align-items: center; color: #9d9d9d; } #vscode .tabs .on { background: #1e1e1e; color: #fff; border-top: 2px solid #0078d4; }
+#vscode .src { position: absolute; left: 52px; top: 52px; }
+#vscode .status { position: absolute; left: 0; right: 0; bottom: 0; height: 26px; background: #0078d4; color: #fff; font: 13px var(--sans); display: flex; align-items: center; gap: 18px; padding: 0 12px; }
+/* Neovim, in a terminal */
+#nvim { background: #11151c; color: #c8d0dc; --c-cs: #7fb4ca; --c-new: #98c379; --c-caret: #c8d0dc; --c-line: #1b2129; }
+#nvim .src { position: absolute; left: 0; top: 16px; }
+#nvim .tilde { position: absolute; left: 14px; top: 355px; color: #3d4b5c; white-space: pre; line-height: 27px; }
+#nvim .stl { position: absolute; left: 0; right: 0; bottom: 30px; height: 28px; background: #263040; display: flex; align-items: center; font-size: 14px; }
+#nvim .stl b { background: #98c379; color: #11151c; padding: 0 12px; height: 28px; display: flex; align-items: center; }
+#nvim .stl span { padding: 0 12px; } #nvim .stl .r { margin-left: auto; }
+#nvim .cmd { position: absolute; left: 12px; bottom: 6px; font-size: 14px; color: #c8d0dc; }
+/* Emacs */
+#emacs { background: #fbfaf6; color: #2b2b2b; --c-cs: #7a3e9d; --c-new: #2e7d32; --c-caret: #2b2b2b; --c-line: #efeadf; }
+#emacs .menu { height: 32px; background: #e9e6df; border-bottom: 1px solid #cfcac0; display: flex; gap: 20px; align-items: center; padding: 0 14px; font: 14px var(--sans); color: #3a3a3a; }
+#emacs .src { position: absolute; left: 0; top: 44px; }
+#emacs .mode { position: absolute; left: 0; right: 0; bottom: 28px; height: 28px; background: #d9d4c7; border-top: 1px solid #b9b3a5; display: flex; align-items: center; gap: 18px; padding: 0 12px; font-size: 14px; }
+#emacs .echo { position: absolute; left: 12px; bottom: 5px; font-size: 14px; color: #555; }
+/* the editors' names as buttons, the one in use filled; a click plays from that editor's turn */
+#names { left: 40px; top: 574px; width: 1520px; display: flex; justify-content: center; gap: 14px; font: 600 19px var(--sans); }
+#names span { padding: 10px 22px; border-radius: 999px; border: 1.5px solid var(--card-edge); background: var(--card); color: var(--muted);
+  cursor: pointer; user-select: none; }
+#names span:hover { border-color: var(--accent); color: var(--accent); }
+#names .on, #names .on:hover { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+/* ── right: the PDF's first page ─────────────────────────── */
+#pdf { left: 940px; top: 40px; width: 620px; height: 520px; border-radius: 14px; overflow: hidden; background: var(--viewer-bg);
+       box-shadow: 0 0 0 1px var(--card-edge), var(--card-shadow); }
+#pdf .chrome { height: 42px; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: var(--card); border-bottom: 1px solid var(--card-edge); }
+#pdf .chrome i { width: 12px; height: 12px; border-radius: 50%; display: block; background: var(--rule); }
+#pdf .url { margin-left: 14px; flex: 1; height: 26px; border-radius: 13px; background: var(--viewer-bg); display: flex; align-items: center; padding: 0 14px;
+            font: 13px var(--mono); color: var(--muted); }
+#sheet { position: absolute; left: 114px; top: 70px; transform: scale(1.5); transform-origin: 0 0; }
+#pdf .chrome b { margin-left: auto; font: 600 13px var(--sans); }
+#vbar { position: absolute; left: 0; right: 0; bottom: 0; height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px;
+        font: 12.5px var(--mono); color: var(--muted); background: var(--card); border-top: 1px solid var(--card-edge); white-space: nowrap; overflow: hidden; }
+#vbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: none; }
+#pdflabel { display: none; justify-content: space-between; font-size: 11.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); height: 24px; }
+#pdflabel b { font-weight: 600; letter-spacing: .02em; text-transform: none; }
+#page {
+  position: relative; width: 262px; height: 504px; background: #fff; border-radius: 2px 2px 0 0; overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(16,24,40,.08), 0 2px 4px rgba(16,24,40,.06), 0 18px 44px rgba(16,24,40,.16);
+  padding: 28px 22px 0; font-family: var(--serif); color: #111; font-size: 7.3px; line-height: 9.3px; text-align: justify; hyphens: auto;
+  -webkit-mask-image: linear-gradient(#000 88%, transparent);   /* the page goes on below: the viewer is scrolled to its top */
+}
+#page h1 { font-size: 13.6px; line-height: 16px; font-weight: 400; text-align: center; white-space: nowrap; margin: 6px 0 10px; }
+#page .au { text-align: center; font-size: 9px; line-height: 11px; margin-bottom: 14px; word-spacing: 2px; }
+#page .tex-e { position: relative; top: .22em; margin: 0 -.12em; font-size: 1em; }
+#page .eq { position: relative; display: flex; align-items: center; justify-content: center; gap: 2px; margin: 7px 0 8px; font-size: 7.6px; }
+#page .frac { display: inline-flex; flex-direction: column; align-items: center; line-height: 1.2; }
+#page .frac > span + span { border-top: .5px solid #111; padding: 0 2px; }
+#page .frac.small { font-size: .85em; } #page .frac.tiny { font-size: .75em; }
+#page .sum { font-size: 1.25em; } #page sup { font-size: .7em; vertical-align: .6em; }
+#page .paren { font-size: 2.3em; font-weight: 300; line-height: 1; transform: scaleX(.6); }
+#page .eq .no { position: absolute; right: 0; }
+#page .fig { display: flex; justify-content: center; margin: 6px 0 3px; }
+#page .cap { text-align: center; margin: 0 0 6px; }
+#page .abs-t { font-weight: 700; text-align: center; font-size: 7.6px; margin-bottom: 3px; }
+#page .abstract { margin: 0 14px 10px; }
+#page h2 { font-size: 9.4px; font-weight: 700; margin: 11px 0 4px; text-align: left; }
+#page p + p { text-indent: 1.4em; }
+#page .para { border-radius: 2px; box-shadow: 0 0 0 3px rgba(242,184,59,var(--dirty,0)); background: rgba(242,184,59,calc(var(--dirty,0) * .12)); }
+#page .w { border-radius: 1.5px; background: rgba(54,108,191,var(--hl,0)); box-shadow: 0 0 0 1.5px rgba(54,108,191,var(--hl,0)); }
+#page .folio { position: absolute; left: 0; right: 0; bottom: 18px; text-align: center; }
+#veil { position: absolute; inset: 0; background: #fff; }   /* covers the page until it is built, top down */
+
+/* ── controls (preview only) ─────────────────────────────── */
+#controls {
+  position: fixed; left: 0; right: 0; bottom: 0; height: 52px; display: flex; align-items: center; gap: 12px;
+  padding: 0 16px; background: color-mix(in srgb, var(--bg) 88%, transparent); border-top: 1px solid var(--rule);
+  font-size: 13px; color: var(--muted); backdrop-filter: blur(6px);
+}
+#controls button {
+  font: inherit; font-weight: 600; color: var(--ink); background: var(--card); border: 1px solid var(--card-edge);
+  border-radius: 8px; padding: 6px 12px; cursor: pointer;
+}
+#controls input[type=range] { flex: 1; accent-color: var(--accent); }
+#clock { width: 92px; font-variant-numeric: tabular-nums; text-align: right; }
+body.render #controls { display: none; }
+html:has(body.embed), body.embed, body.embed #stage { background: transparent; }
+body.embed #stage::after { display: none; }
+</style>
+</head>
+<body>
+<div id="viewport">
+<div id="stage">
+
+  <div id="overleaf" class="ed"><div class="top">Overleaf <span style="font-weight:400;opacity:.7">paper</span><span class="sw"><span>PDF</span><span class="on">⚡ Instant</span></span></div>
+    <div class="side">▾ paper<br><div class="on">paper.tex</div>refs.bib<br>figures/</div><div class="src"></div></div>
+  <div id="vscode" class="ed"><div class="act"><i></i><i></i><i></i><i></i></div><div class="tabs"><span class="on">paper.tex</span><span>refs.bib</span><span>PhiTeX preview</span></div>
+    <div class="src"></div><div class="status"><span>main</span><span>⊘ 0 ⚠ 0</span><span style="margin-left:auto">PhiTeX</span><span>LaTeX</span></div></div>
+  <div id="nvim" class="ed"><div class="src"></div><div class="tilde">~<br>~<br>~<br>~</div>
+    <div class="stl"><b>INSERT</b><span>paper.tex</span><span class="r">tex · phitex</span><span>14:25</span></div><div class="cmd">-- INSERT --</div></div>
+  <div id="emacs" class="ed"><div class="menu"><span>File</span><span>Edit</span><span>Options</span><span>Buffers</span><span>LaTeX</span><span>PhiTeX</span></div><div class="src"></div>
+    <div class="mode"><span>-UU-:**-</span><span><b>paper.tex</b></span><span>Top L14</span><span>(LaTeX PhiTeX)</span></div><div class="echo"></div></div>
+  <div id="names" class="abs"><span>Overleaf</span><span>VS Code</span><span>Neovim</span><span>Emacs</span><span>any LSP editor</span><span>a browser tab</span></div>
+  <div id="pdf" class="abs">
+    <div class="chrome"><span style="font:600 14px var(--sans);color:var(--muted)">paper.pdf</span><b id="state"></b></div>
+    <div id="sheet">
+    <div id="pdflabel"><span data-k="pdfName"></span><b data-k="pdfState"></b></div>
+    <div id="page">
+      <h1 id="edited">Typesetting at the Speed of <span class="w" id="word">Thought</span></h1>
+      <div class="au">Ammar Seliaman &emsp;&emsp; Suhaib Fahmy</div>
+      <div class="abs-t">Abstract</div>
+      <div class="abstract">We show that a T<span class="tex-e">E</span>X engine can follow a writer keystroke by keystroke. The page is typeset again after every edit, in milliseconds, for papers and for books.</div>
+      <h2>1&nbsp;&nbsp;&nbsp;Introduction</h2>
+      <p>Every writer knows the rhythm: change a word, press Recompile, wait, look, and change the next word. The wait is short, but it is paid thousands of times, and each payment breaks the thought being written.</p>
+      <div class="eq"><span class="frac"><span>&Phi; &minus; <i>&omega;</i></span><span><span class="sum">&sum;</span><sup><i>N</i>&minus;1</sup> <i>paths</i></span></span><span class="paren">(</span><span class="frac small"><span><span class="frac tiny"><span>1</span><span>2</span></span></span><span>2</span></span><span class="paren">)</span><span class="no">(1)</span></div>
+      <div class="fig"><svg viewBox="-36 -36 72 72" width="72" height="72"><path transform="rotate(-51.43)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-102.86)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-154.29)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-205.71)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-257.14)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-308.57)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><path transform="rotate(-360.00)" d="M0 0 C9.799999999999999 -6.3 23.8 -4.8999999999999995 28 0 C23.8 4.8999999999999995 9.799999999999999 6.3 0 0Z" fill="#d9d9ff" stroke="#0000cc" stroke-width="1"/><line x1="0" y1="0" x2="27.9" y2="-16.1" stroke="#3333ff" stroke-width=".8"/><circle cx="27.9" cy="-16.1" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="16.1" y2="-27.9" stroke="#3333ff" stroke-width=".8"/><circle cx="16.1" cy="-27.9" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="0.0" y2="-32.2" stroke="#3333ff" stroke-width=".8"/><circle cx="0.0" cy="-32.2" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-16.1" y2="-27.9" stroke="#3333ff" stroke-width=".8"/><circle cx="-16.1" cy="-27.9" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-27.9" y2="-16.1" stroke="#3333ff" stroke-width=".8"/><circle cx="-27.9" cy="-16.1" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-32.2" y2="-0.0" stroke="#3333ff" stroke-width=".8"/><circle cx="-32.2" cy="-0.0" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-27.9" y2="16.1" stroke="#3333ff" stroke-width=".8"/><circle cx="-27.9" cy="16.1" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-16.1" y2="27.9" stroke="#3333ff" stroke-width=".8"/><circle cx="-16.1" cy="27.9" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="-0.0" y2="32.2" stroke="#3333ff" stroke-width=".8"/><circle cx="-0.0" cy="32.2" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="16.1" y2="27.9" stroke="#3333ff" stroke-width=".8"/><circle cx="16.1" cy="27.9" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="27.9" y2="16.1" stroke="#3333ff" stroke-width=".8"/><circle cx="27.9" cy="16.1" r="1.9" fill="#ff0000"/><line x1="0" y1="0" x2="32.2" y2="0.0" stroke="#3333ff" stroke-width=".8"/><circle cx="32.2" cy="0.0" r="1.9" fill="#ff0000"/></svg></div>
+      <div class="cap">Figure 1: A figure redrawn on every keystroke.</div>
+      <p>This paper asks what a typesetting system would look like if the page were simply always correct. Not eventually, not after a build, but on the next frame after every keystroke. Section 2 describes the method and Section 3 the results [1].</p>
+      <div class="folio">1</div>
+      <div id="veil"></div>
+    </div>
+    </div>
+    <div id="vbar"><span class="dot"></span><span id="vtext"></span></div>
+  </div>
+
+</div>
+</div>
+
+<div id="controls">
+  <button id="play">Pause</button>
+  <input id="scrub" type="range" min="0" step="0.01">
+  <span id="clock"></span>
+  <button id="theme">Theme</button>
+</div>
+<script>
+// ── the story: the same paper in four editors, one after another; each types or takes out a word, the page follows ──
+const CONFIG = {
+  file: 'paper.tex',
+  pages: 10,
+  words: ['Thought', 'Typing'],  // the title's last word: typed over in one editor, typed back in the next
+};
+// ── story beats, seconds: one turn per editor, the word typed in one and taken out in the next ──────────────────
+const EDITORS = ['overleaf', 'vscode', 'nvim', 'emacs'];
+const TURN = 2.4, FADE = .3;
+const TIMELINE = { duration: TURN * EDITORS.length };
+const C = CONFIG, T = TIMELINE, D = T.duration;
+const PDF = C.file.replace(/\.tex$/, '.pdf');
+// ── helpers ────────────────────────────────────────────────────────────────
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lin = (t, [a, b]) => clamp((t - a) / (b - a));
+const ease = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+function mulberry(seed) {
+  return () => {
+    seed = seed + 0x6D2B79F5 | 0;
+    let x = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    x = x + Math.imul(x ^ x >>> 7, 61 | x) ^ x;
+    return ((x ^ x >>> 14) >>> 0) / 4294967296;
+  };
+}
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+const sp = (cls, s) => `<span class="${cls}">${s}</span>`;
+const pad = (s, n) => String(s).padEnd(n);
+const fmtS = s => s < 1 ? `${(s * 1000).toFixed(1)} ms` : `${s.toFixed(2)} s`;
+
+// ── DOM ────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const setK = (k, html) => document.querySelectorAll(`[data-k="${k}"]`).forEach(e => { if (e.innerHTML !== html) e.innerHTML = html; });
+const setH = (el, html) => { if (el.innerHTML !== html) el.innerHTML = html; };
+const params = new URLSearchParams(location.search);
+setK('pdfName', PDF);
+
+// ── the editor's text: paper.tex's preamble and the start of the document ────────────────────────────────────
+const SRC = [
+  [1, '\\documentclass[11pt]{article}'], [2, '\\usepackage{amsmath,amssymb}'], [3, '\\usepackage{tikz}'], [4, ''],
+  [5, null], [6, '\\author{Ammar Seliaman \\and Suhaib Fahmy}'], [7, '\\date{}'], [8, ''],
+  [9, '\\begin{document}'], [10, '\\maketitle'], [11, ''], [12, '\\begin{abstract}'],
+  [13, 'We show that a \\TeX{} engine can follow a writer'], [14, 'keystroke by keystroke.'],
+];
+const tex = s => esc(s).replace(/(\\[a-zA-Z]+)/g, '<span class="cs">$1</span>').replace(/([{}])/g, '<span class="br">$1</span>');
+// within a turn: the keys from .55 s, one each KEY; the page has each a moment (LAG) later
+const START = .55, KEY = .075, LAG = .05;
+function wordIn(k, u) {                       // the title's word in turn k at u seconds into it
+  const from = C.words[k % 2], to = C.words[(k + 1) % 2];
+  if (u < START) return from;
+  const n = Math.floor((u - START) / KEY) + 1;
+  return n <= from.length ? from.slice(0, from.length - n) : to.slice(0, Math.min(n - from.length, to.length));
+}
+const END = START + (C.words[0].length + C.words[1].length) * KEY;
+function source(k, u, block) {
+  const w = wordIn(k, u), blink = (u >= START && u < END) || Math.floor(u * 2) % 2 === 0;
+  return SRC.map(([no, text]) => {
+    const ln = `<span class="ln">${no}</span>`;
+    if (text !== null) return ln + tex(text);
+    return `<span class="cur">${ln}${tex('\\title{Typesetting at the Speed of ')}<span class="new">${esc(w)}</span>${blink ? `<span class="caret${block ? ' block' : ''}"></span>` : ''}<span class="br">}</span>${' '.repeat(40)}</span>`;
+  }).join('\n');
+}
+// ── render(t): the one entry point ─────────────────────────────────────────
+function render(t) {
+  t = ((t % D) + D) % D;
+  const k = Math.floor(t / TURN), u = t - k * TURN;
+  EDITORS.forEach((id, j) => {
+    const el = $(id);
+    // this turn's editor fades in over the last one's
+    const shown = j === k ? (k === 0 && u < FADE ? 1 : ease(clamp(u / FADE))) : j === (k + EDITORS.length - 1) % EDITORS.length && u < FADE ? 1 : 0;
+    el.style.opacity = shown; el.style.zIndex = j === k ? 2 : 1;
+    if (shown) setH(el.querySelector('.src'), source(j === k ? k : j, j === k ? u : TURN, id === 'nvim'));
+  });
+  $('emacs').querySelector('.echo').textContent = k === 3 && u >= END && u < END + 1 ? 'PhiTeX: page 1 updated' : '';
+  document.querySelectorAll('#names span').forEach((e, j) => e.classList.toggle('on', j === k));
+  // the page: the title's word a moment after the editor's, lit while it changes
+  setH($('word'), esc(wordIn(k, u - LAG)) || '&#8203;');
+  const typing = u >= START && u < END;
+  $('edited').style.setProperty('--dirty', 0);
+  $('word').style.setProperty('--hl', (typing ? .3 : u >= END ? .3 * clamp(1 - (u - END - .5) / .6) : 0).toFixed(3));
+  $('veil').style.display = 'none';
+  setH($('state'), u >= START && u < END + 1 ? '<span style="color:var(--green)">✓ updated</span>' : '');
+  $('vtext').textContent = `page 1 of ${C.pages} · followed from ${$('names').children[k].textContent}`;
+}
+window.render = render;
+
+// ── preview: fit, play, scrub ──────────────────────────────────────────────
+const renderMode = params.has('render');
+// ?embed: playing, without the controls, fitted to the frame's width (the README preview shows it in an iframe)
+const embed = params.has('embed');
+if (renderMode || embed) document.body.classList.add('render');
+if (embed) {
+  // on phitex.org: the page's background shows through, and the page's theme (its toggle too) is followed
+  document.body.classList.add('embed');
+  try {
+    const host = parent.document.documentElement, follow = () => {
+      if (host.dataset.theme) document.documentElement.dataset.theme = host.dataset.theme;
+      else delete document.documentElement.dataset.theme;
+    };
+    if (parent !== window) { follow(); new MutationObserver(follow).observe(host, { attributes: true, attributeFilter: ['data-theme'] }); }
+  } catch { /* another origin's page: the system's theme */ }
+}
+if (params.get('theme')) document.documentElement.dataset.theme = params.get('theme');
+function fit() {
+  const s = renderMode ? 1 : embed ? innerWidth / 1600 : Math.min(innerWidth / 1600, (innerHeight - 52) / 640);
+  $('viewport').style.transform = `scale(${s})`;
+  if (!renderMode && !embed) $('viewport').style.marginTop = `${Math.max(0, (innerHeight - 52 - 640 * s) / 2)}px`;
+}
+addEventListener('resize', fit);
+let playing = !renderMode && !params.has('t'), t0 = performance.now(), cur = Number(params.get('t')) || 0;
+const scrub = $('scrub'); scrub.max = D;
+// off screen (scrolled away, or a hidden tab) it draws nothing: an iframe's observer sees the top page's viewport
+let onScreen = true;
+new IntersectionObserver(es => { onScreen = es[es.length - 1].isIntersecting; }).observe($('stage'));
+function frame(now) {
+  if (!onScreen || document.hidden) { requestAnimationFrame(frame); return; }
+  if (playing) cur = ((now - t0) / 1000) % D;
+  render(cur);
+  scrub.value = cur; $('clock').textContent = `${cur.toFixed(2)} / ${D.toFixed(1)} s`;
+  requestAnimationFrame(frame);
+}
+// an editor's name: play from its turn
+document.querySelectorAll('#names span').forEach((e, j) => e.addEventListener('click', () => {
+  cur = j * TURN; t0 = performance.now() - cur * 1000; render(cur);
+}));
+$('play').onclick = () => { playing = !playing; t0 = performance.now() - cur * 1000; $('play').textContent = playing ? 'Pause' : 'Play'; };
+scrub.oninput = () => { cur = Number(scrub.value); playing = false; $('play').textContent = 'Play'; };
+$('theme').onclick = () => {
+  const dark = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() !== '#f7f8fa';
+  document.documentElement.dataset.theme = dark ? 'light' : 'dark';
+};
+addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); $('play').click(); } });
+window.bannerReady = document.fonts.ready.then(() => {
+  fit();
+  if (renderMode) render(cur); else requestAnimationFrame(frame);
+});
+</script>
+</body>
+</html>

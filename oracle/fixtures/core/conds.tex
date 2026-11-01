@@ -1,0 +1,30 @@
+% Conditionals: nesting, \or, \ifcase, \if, \ifcat, \ifx, \ifodd, \ifdim,
+% modes, \ifvoid, \ifeof.
+\def\t{\message{T}}\def\f{\message{F}}
+\ifnum 1<2 \t\else\f\fi
+\ifnum 2<1 \t\else\f\fi
+\ifnum 1=1 \ifnum 2=3 \f\else\t\fi\else\f\fi
+\iffalse \ifnum 1=1 \f\else\f\fi \else \t \fi
+\ifcase 0 \t\or\f\or\f\else\f\fi
+\ifcase 3 \f\or\f\or\f\else\t\fi
+\ifcase 1 \f\or\ifcase 1 \f\or\t\fi\or\f\fi
+\ifcase -1 \f\or\f\fi\message{none}
+\if aa\t\else\f\fi \if ab\f\else\t\fi
+\ifcat a b\t\else\f\fi \ifcat a 1\f\else\t\fi
+\def\x{a}\if\x a\t\else\f\fi
+\if\relax\noexpand\x\t\else\f\fi
+\ifcat\noexpand~\noexpand~\t\else\f\fi
+\let\y=a \if\y a\t\else\f\fi \ifx\y a\t\else\f\fi
+\def\p{abc}\def\q{abc}\def\r{abd}\long\def\s{abc}
+\ifx\p\q\t\else\f\fi \ifx\p\r\f\else\t\fi \ifx\p\s\f\else\t\fi
+\ifx\undefineda\undefinedb\t\else\f\fi \ifx\relax\par\f\else\t\fi
+\ifodd 3 \t\else\f\fi \ifodd -2 \f\else\t\fi
+\ifdim 1pt<2pt \t\else\f\fi \ifdim 1in=72.27pt \t\else\f\fi
+\ifvmode\t\else\f\fi \ifhmode\f\else\t\fi \ifmmode\f\else\t\fi \ifinner\f\else\t\fi
+\ifvoid 0 \t\else\f\fi \ifhbox 0 \f\else\t\fi \ifeof 3 \t\else\f\fi
+\iftrue\t\fi \iffalse\f\fi
+\count1=\ifnum2>1 7\else 8\fi \message{\the\count1}
+\message{\ifnum1=1 a\else b\fi\ifnum1=2 c\else d\fi}
+\let\myfi=\fi \iftrue\t\myfi
+\iffalse \iftrue \f \fi \else \t \fi
+\def\z#1{\ifx#1\relax R\else N\fi}\message{\z\relax\z a}

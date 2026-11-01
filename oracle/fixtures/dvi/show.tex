@@ -1,0 +1,18 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm \font\bf=cmbx10
+\hsize=200pt \vsize=300pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\showboxdepth=10 \showboxbreadth=100 \hbadness=0 \vbadness=0
+\hyphenchar\tenrm=`-
+\hbox to 300pt{ffi -- {\bf AV}\kern 2pt\penalty 7\hskip 3pt plus 1pt minus 2pt
+\vrule width 1pt\mark{a \relax mark}\discretionary{pre}{post}{no}\-x\raise 2pt\hbox{r}%
+\vbox{\hrule\hbox{in}}}
+\hbox to 10pt{\hskip 0pt minus 1pt Tight and overfull}
+\hbox spread -1pt{Tight a b c d}
+\setbox0\hbox{x}\showboxdepth=1 \showboxbreadth=2
+\hbox to 50pt{A list longer than the breadth: a b c d e f}
+\vbox to 30pt{\hbox{one}\vskip 2pt plus 1pt\hbox{two}\kern 1pt\penalty 5}
+\vbox to 5pt{\hrule height 10pt}
+\showboxdepth=-1
+\hbox to 50pt{Depth below zero}
+\end

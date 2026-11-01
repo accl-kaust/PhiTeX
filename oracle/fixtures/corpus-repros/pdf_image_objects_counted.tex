@@ -1,0 +1,12 @@
+% The objects writing an included PDF page makes (its fonts, streams and
+% resources copied, pdf_write_image) come after the page that shows it
+% first; a \pdfobj after that page is numbered after them (asmeconf:
+% hyperxmp's /Metadata in the last page's hook took a destination's
+% number).
+\pdfximage{hello.pdf}\edef\img{\the\pdflastximage}
+\setbox0\hbox{\pdfrefximage\img}\shipout\box0
+\immediate\pdfobj{(after the image)}\edef\o{\the\pdflastobj}
+\pdfcatalog{/PhiTeXCheck \o\space 0 R}
+\font\r=cmr10 \r
+\shipout\hbox{object \o}
+\end

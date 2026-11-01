@@ -1,0 +1,14 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\pdfoutline goto num 1 count 3 {One}
+\pdfoutline goto num 2 count -2 {One.A}
+\pdfoutline goto num 3 {One.A.i}
+\pdfoutline goto num 4 {One.A.ii}
+\pdfoutline goto num 5 {One.B}
+\pdfoutline goto name{x} count 1 {Two}
+\pdfoutline goto page 2 {/Fit} count 1 {Two.A}
+\pdfoutline goto num 1 {Two.A.i}
+\pdfoutline attr{/F 2} goto name{x} {Three}
+\pdfdest num 1 xyz A\par\pdfdest num 2 fit B\par\pdfdest num 3 fith C\par\penalty-10000
+\pdfdest num 4 fitv D\par\pdfdest num 5 xyz zoom 1500 E\pdfdest name{x} fitb\par
+\end

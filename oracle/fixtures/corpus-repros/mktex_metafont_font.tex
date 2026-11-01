@@ -1,0 +1,10 @@
+% A font that has only a METAFONT source (dancers): its TFM and its PK
+% file at the writer's resolution are made as kpathsea's mktextfm and
+% mktexpk make them, by the engine where the finder misses them, the
+% METAFONT sources through the finder (the CLI's kpathsea here, Shelf's
+% files in the browser, where "Font dancers at 600 not found" stopped
+% the job: only the CLI's finder made fonts).
+\documentclass{article}
+\begin{document}
+\font\d=dancers {\d abcde}
+\end{document}

@@ -1,0 +1,23 @@
+% Font specifications: by name through the font index (fontconfig's
+% list of TeX Live's fonts), styles, features (+smcp, +onum, -liga),
+% TECkit's tex-text mapping, letterspace, colour, extend, slant, sizes.
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\hsize=300pt \vsize=600pt \parindent=0pt \baselineskip=14pt \tolerance=10000
+\parfillskip=0pt plus 1fil
+\font\a="Latin Modern Roman" at 10pt
+\font\b="Latin Modern Roman/B" at 10pt
+\font\c="Latin Modern Roman/I:+smcp" at 10pt
+\font\d="TeX Gyre Pagella:+onum;+smcp" at 11pt
+\font\e="TeX Gyre Pagella:-liga;mapping=tex-text" at 11pt
+\font\f="TeX Gyre Heros:letterspace=10;color=FF000080" at 9pt
+\font\g="[texgyretermes-regular.otf]:extend=1.2;slant=0.2;embolden=1.5"
+\font\h="TeX Gyre Termes" scaled 1200
+\font\i="Latin Modern Mono:mapping=tex-text" at 10pt
+\a Roman fi ffi 0123 office. \b Bold fi ffi office. \c Italic Small Caps 0123.\par
+\d Pagella Old Style 0123456789 Small Caps fi.\par
+\e Pagella ``tex-text'' -- --- fi fl office.\par
+\f Heros letterspaced and coloured.\par
+\g Termes extended slanted emboldened.\par
+\h Termes scaled 1200.\par
+\i Mono ``quotes'' --- dashes.\par
+\end

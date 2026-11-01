@@ -1,0 +1,17 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\^=7
+\let\bgroup={ \let\egroup=}
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=300pt \parindent=0pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\catcode`\%=12 \xdef\x{\string%}\hbox{[\meaning\x]}\catcode`\%=14 % a comment again
+\input catline-inc
+\catcode`\[=1 \catcode`\]=2 \hbox[two]\catcode`\[=12 \catcode`\]=12 [three]
+\catcode`\!=0 !hbox{four}\catcode`\!=12 !five
+\catcode`\q=12 \hbox{\string\q q}\catcode`\q=11 \hbox{again}
+\catcode`\^^M=12 \hbox{six}\catcode`\^^M=5 seven
+\endlinechar=-1 \hbox{eight}
+nine\endlinechar=`\x
+ten\endlinechar=13
+\par eleven
+\catcode`\^^M=9 \hbox{thirteen}\catcode`\^^M=5
+\end

@@ -1,0 +1,132 @@
+(./leaders.tex
+Overfull \hbox (5.2778pt too wide) detected at line 11
+\tenrm x
+
+\hbox(4.30554+0.0)x0.0
+.\tenrm x
+
+
+Tight \hbox (badness 2) in paragraph at lines 13--14
+\tenrm its text and more words so that its lines
+
+\hbox(6.94444+0.0)x200.0, glue set - 0.25717
+.\tenrm i
+.\tenrm t
+.\tenrm s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm e
+.\tenrm x
+.\tenrm t
+.\leaders 30.0 plus 10.0
+..\rule(0.4+0.0)x*
+.\tenrm a
+.\tenrm n
+.\tenrm d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm m
+.\tenrm o
+.\tenrm r
+.\tenrm e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm w
+.\kern-0.27779
+.\tenrm o
+.\tenrm r
+.\tenrm d
+.\tenrm s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm s
+.\tenrm o
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm h
+.\tenrm a
+.\tenrm t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm i
+.\tenrm t
+.\tenrm s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm l
+.\tenrm i
+.\tenrm n
+.\tenrm e
+.\tenrm s
+.\glue(\rightskip) 0.0
+
+
+Loose \hbox (badness 32) in paragraph at lines 13--14
+\tenrm break near the leaders or after them, as the
+
+\hbox(6.94444+1.94444)x200.0, glue set 0.68956
+.\tenrm b
+.\tenrm r
+.\tenrm e
+.\tenrm a
+.\tenrm k
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm n
+.\tenrm e
+.\tenrm a
+.\tenrm r
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm h
+.\tenrm e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm l
+.\tenrm e
+.\tenrm a
+.\tenrm d
+.\tenrm e
+.\tenrm r
+.\tenrm s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm o
+.\tenrm r
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm a
+.\tenrm f
+.\tenrm t
+.\tenrm e
+.\tenrm r
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm h
+.\tenrm e
+.\tenrm m
+.\tenrm ,
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm a
+.\tenrm s
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm h
+.\tenrm e
+.\glue(\rightskip) 0.0
+
+
+Overfull \hbox (10.0pt too wide) detected at line 19
+ 
+
+\hbox(0.4+0.0)x10.0
+.\leaders 20.0
+..\rule(0.4+0.0)x*
+
+
+Overfull \hbox (0.2778pt too wide) detected at line 20
+\tenrm x
+
+\hbox(4.30554+0.0)x5.0
+.\tenrm x
+
+
+Overfull \vbox (10.0pt too high) detected at line 20
+
+\vbox(10.0+0.0)x5.0
+.\leaders 20.0
+..\hbox(4.30554+0.0)x5.0
+...\tenrm x
+
+[0] )

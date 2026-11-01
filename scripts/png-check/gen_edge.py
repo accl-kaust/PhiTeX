@@ -1,4 +1,4 @@
-"""Hand-made PNG edge cases for comparing libpng with partex's port.
+"""Hand-made PNG edge cases for comparing libpng with phitex's port.
 
     gen_edge.py DIR     writes DIR/*.png
 """

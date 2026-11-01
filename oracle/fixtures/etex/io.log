@@ -1,0 +1,9 @@
+(./core.tex [macro:->a {b} c%  \x^^M] [macro:->   second line^^M] more [macro:-
+>^^M] eof [macro:->a {b} c%  \x] (./inc-eof.tex in file 1 line two 2 EOF) in sc
+an (./inc-eof.tex in file 1 line two 2 EOF) after file in scan EOF after scan s
+1 s1b l1 l2 EOF main 17 [three-a][three-b][zero][zero][]
+Underfull \vbox (badness 10000) detected at line 22
+
+\vbox(10.0+0.0)x0.0 []
+
+[three-c][three-c][] [] )

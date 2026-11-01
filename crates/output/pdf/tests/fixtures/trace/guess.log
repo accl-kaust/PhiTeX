@@ -1,0 +1,87 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input guess
+(./guess.tex
+
+Completed box being shipped out [0]
+\hbox(6.94444+1.94444)x54.25009
+.\tenrm A
+.\glue 3.33333 plus 1.66498 minus 1.11221
+.\tenrm ^^L (ligature fi)
+.\tenrm r
+.\tenrm s
+.\tenrm t
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm p
+.\tenrm a
+.\tenrm g
+.\tenrm e
+.\tenrm .
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}
+
+Completed box being shipped out [0]
+\hbox(8.19998+2.33333)x178.85294
+.\big B
+.\big i
+.\big g
+.\big g
+.\big e
+.\big r
+.\glue 4.0 plus 2.0 minus 1.33333
+.\bf b
+.\kern0.31944
+.\bf o
+.\bf l
+.\bf d
+.\glue 3.83331 plus 1.91666 minus 1.27777
+.\tenrm s
+.\tenrm m
+.\tenrm a
+.\tenrm l
+.\tenrm l
+.\tenrm ,
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm o
+.\tenrm n
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm t
+.\tenrm h
+.\tenrm e
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm s
+.\tenrm e
+.\tenrm c
+.\tenrm o
+.\tenrm n
+.\tenrm d
+.\glue 3.33333 plus 1.66666 minus 1.11111
+.\tenrm p
+.\tenrm a
+.\tenrm g
+.\tenrm e
+.\tenrm .
+
+
+Completed box being shipped out [0]
+\hbox(8.33333+2.33333)x46.68047
+.\bf B
+.\bf o
+.\bf l
+.\bf d
+.\glue 3.83331 plus 1.91666 minus 1.27777
+.\big b
+.\big i
+.\big g
+.\big .
+
+ )</usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb></usr/share/
+texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on guess-trace.pdf (3 pages, 26507 bytes).
+PDF statistics:
+ 20 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 1 words of extra memory for PDF output out of 10000 (max. 10000000)
+

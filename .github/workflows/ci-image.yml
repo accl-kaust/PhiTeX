@@ -1,0 +1,40 @@
+# The CI image (docs/ci.md): ci/Dockerfile, scripts/accl/phitex.def's
+# pinned Arch Linux Archive snapshot with TeX Live and the repository's
+# toolchain, pushed to GHCR as phitex-ci:<tag> (the gate's) and
+# phitex-ci:<tag>-doc (with TeX Live's documentation: the manual
+# corpus's). Run by hand when ci/Dockerfile changes; the gate names the tag.
+name: ci-image
+on:
+  # (dispatch needs the workflow on main, the default branch: until the
+  # first merge, a push to dev that changes the image builds it)
+  push:
+    branches: [dev]
+    paths: [ci/Dockerfile, .github/workflows/ci-image.yml]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: image tag (the snapshot's date)
+        default: "2026-09-25"
+permissions:
+  contents: read
+  packages: write
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: base
+        run: |
+          img=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/phitex-ci:${{ inputs.tag || '2026-09-25' }}
+          docker build --target base -t "$img" ci
+          docker push "$img"
+      - name: doc
+        run: |
+          img=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/phitex-ci:${{ inputs.tag || '2026-09-25' }}
+          docker build --target doc -t "$img-doc" ci
+          docker push "$img-doc"

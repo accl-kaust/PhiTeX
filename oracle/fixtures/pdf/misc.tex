@@ -1,0 +1,10 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\message{\pdfcreationdate}\message{\pdffilemoddate{misc.tex}}\message{\pdffilesize{misc.tex}}
+\message{\pdfmdfivesum{abc}}\message{\pdfmdfivesum file{misc.tex}}\message{\pdffiledump offset 1 length 5{misc.tex}}
+\edef\x{\pdfcreationdate\pdffilemoddate{misc.tex}\pdfmdfivesum{x}}
+\font\b=cmbx10 \pdffontattr\b{/Extra (bold)}\pdfincludechars\b{xyz}
+\message{\pdffontname\r,\pdffontobjnum\r,\pdffontsize\r,\pdffontname\b,\pdffontobjnum\b}
+\pdfmapline{+cmbx10 CMBX10 <cmbx10.pfb}
+\message{\the\pdfelapsedtime}\pdfresettimer A\b B\par
+\end

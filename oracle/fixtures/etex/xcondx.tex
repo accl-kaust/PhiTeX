@@ -1,0 +1,16 @@
+\catcode`\@=11
+\long\def\@firstofone#1{#1}\long\def\@gobble#1{}
+\long\def\@firstoftwo#1#2{#1}\long\def\@secondoftwo#1#2{#2}
+\def\m#1{\message{[#1]}}
+\def\e#1{\if\relax\detokenize{#1}\relax\expandafter\@firstoftwo\else\expandafter\@secondoftwo\fi{\m{empty}}{\m{full}}}
+\e{} \e{x} \e{ } \e{\relax}
+\unless\iftrue\m{bad}\else\expandafter\@firstofone\fi{\m{u1}}
+\unless\ifx ab\expandafter\@firstofone\else\expandafter\@gobble\fi{\m{u2}}
+\ifcsname zz\endcsname\m{bad}\else\expandafter\@firstofone\fi{\m{cs1}}
+\ifcsname @gobble\endcsname\expandafter\@firstofone\else\expandafter\@gobble\fi{\m{cs2}}
+\ifdefined\@gobble\expandafter\@firstofone\else\expandafter\@gobble\fi{\m{d1}}
+\ifdefined\nope\expandafter\@firstofone\else\expandafter\@gobble\fi{\m{bad}}\m{d2}
+\unless\ifdefined\nope\expandafter\@firstofone\fi{\m{d3}}
+\expandafter\unless\csname ifdefined\endcsname\nope\m{d4}\fi
+\iftrue\expandafter\@firstofone\else\fi{\begingroup\catcode`\:=12 }\m{g\the\currentgrouplevel}\endgroup\m{g\the\currentgrouplevel}
+\m{level\the\currentgrouplevel}

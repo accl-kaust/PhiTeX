@@ -1,0 +1,16 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\begin{document}
+Text before.
+\begin{align}
+x& = y_1-y_2 && \text{by \href{https://example.org/c}{C}}\\
+ & = y'\circ y^* && \text{by \hyperlink{top}{D}}\\
+ & = y(0) y' && \text{by Axiom 1.}
+\end{align}
+\begin{alignat}{2}
+x& = y &\quad& \text{by \href{https://example.org/e}{E}}\\
+ & = z && \text{by Axiom 2.}
+\end{alignat}
+More text.\hypertarget{top}{}
+\end{document}

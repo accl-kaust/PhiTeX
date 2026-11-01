@@ -40,7 +40,59 @@ export interface DiffReq extends DiffStyle {
   main: string;
 }
 
-export type DiffReply = { tex: string; changes: DiffChange[] } | { error: string };
+/**
+ * The diff: the marked-up text, its changes, and the map back to the
+ * user's files (phitex-diff's DiffOut): `map`'s runs `[out, len, file,
+ * src]` are `len` bytes of `tex` at `out` that are those at `src` in
+ * `files[file]`, in order.
+ */
+export interface DiffOut {
+  tex: string;
+  changes: DiffChange[];
+  files?: string[];
+  map?: [number, number, number, number][];
+}
+
+export type DiffReply = DiffOut | { error: string };
+
+/**
+ * Where byte `out` of the marked-up text is in the user's files, as
+ * phitex-diff's DiffOut::source: in a run copied as it is, its very place;
+ * in a change's markup, the change's place in the new version; in
+ * latexdiff's own markup, the end of the run before it.
+ */
+export function diffSource(d: DiffOut, out: number): { file: string; at: number } | null {
+  const map = d.map ?? [], files = d.files ?? [];
+  let lo = 0, hi = map.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (map[mid][0] <= out) lo = mid + 1;
+    else hi = mid;
+  }
+  const r = map[lo - 1];
+  if (r && out < r[0] + r[1] && files[r[2]] !== undefined) return { file: files[r[2]], at: r[3] + (out - r[0]) };
+  const c = d.changes.find((c) => out >= c.out[0] && out < c.out[1]);
+  if (c) return { file: c.new.file, at: c.new.start };
+  return r && files[r[2]] !== undefined ? { file: files[r[2]], at: r[3] + r[1] } : null;
+}
+
+/**
+ * Where byte `at` of the user's `file` is in the marked-up text (the
+ * editor's cursor followed on the diff's pages): in a run copied as it is,
+ * its place; else in a change there, the change's markup; else the end of
+ * the run before it in that file.
+ */
+export function diffPlace(d: DiffOut, file: string, at: number): number | null {
+  const map = d.map ?? [], files = d.files ?? [];
+  let before: number | null = null, best = -1;
+  for (const [out, len, f, src] of map) {
+    if (files[f] !== file) continue;
+    if (at >= src && at < src + len) return out + (at - src);
+    if (src + len <= at && src > best) [best, before] = [src, out + len];
+  }
+  const c = d.changes.find((c) => c.new.file === file && at >= c.new.start && at <= c.new.end);
+  return c ? c.out[0] : before;
+}
 
 interface Exports {
   memory: WebAssembly.Memory;

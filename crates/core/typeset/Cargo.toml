@@ -1,0 +1,12 @@
+[package]
+name = "phitex-typeset"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Knuth's typesetting algorithms as pure functions: glue arithmetic, packaging, line breaking, hyphenation, math layout, alignment, page decisions"
+
+[dependencies]
+
+[lints]
+workspace = true

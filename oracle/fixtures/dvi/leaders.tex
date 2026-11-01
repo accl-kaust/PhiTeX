@@ -1,0 +1,24 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=400pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\showboxdepth=10 \showboxbreadth=100
+\hbox to 200pt{A\leaders\hbox to 7pt{\hss.\hss}\hfill B}
+\hbox to 200pt{A\cleaders\hbox to 7pt{\hss.\hss}\hfill B}
+\hbox to 200pt{A\xleaders\hbox to 7pt{\hss.\hss}\hfill B}
+\hbox to 200pt{A\leaders\hrule\hfill B\leaders\vrule height 2pt depth 1pt\hskip 20pt C}
+\hbox to 200pt{\leaders\hbox{\vrule width 3pt height 1pt\kern2pt}\hskip 50pt plus 1fil minus 2pt}
+\hbox to 200pt{\kern 3pt\leaders\hbox to 0pt{x}\hfill\leaders\hbox{\raise 2pt\hbox{y}}\hfill}
+Chapter one\leaders\hbox to 10pt{\hss.\hss}\hfill 5\par
+A paragraph with leaders in the middle of its text\leaders\hrule\hskip 30pt plus 10pt and
+more words so that its lines break near the leaders or after them, as the line breaker likes.\par
+\vbox to 60pt{\hbox{top}\leaders\vbox to 8pt{\vss\hbox{-}}\vfill\hbox{bottom}}
+\vbox to 40pt{\hbox{x}\cleaders\vbox to 7pt{\vss\hbox{+}}\vfill\hbox{y}}
+\vbox to 40pt{\hbox{x}\xleaders\vbox to 7pt{\vss\hbox{+}}\vfill\hbox{y}}
+\vbox to 30pt{\hbox{x}\leaders\vrule\vfill\hbox{y}}
+\setbox1\hbox to 10pt{\leaders\hrule\hskip 20pt}
+\setbox2\vbox to 10pt{\leaders\hbox to 5pt{x}\vskip 20pt}
+\leaders\hbox to 20pt{\hss!\hss}\vskip 30pt
+\leaders\hrule\vskip 5pt
+\moveright 20pt\vbox{\cleaders\hbox{\hbox{a}\kern1pt}\vskip 25pt}
+\end

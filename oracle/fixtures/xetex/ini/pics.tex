@@ -1,0 +1,13 @@
+% \XeTeXpicfile and \XeTeXpdffile: sizes from the files, scaled, widths
+% and heights, rotation, pages and boxes, in a paragraph and alone.
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\hsize=400pt \vsize=600pt \parindent=0pt \baselineskip=12pt \tolerance=10000
+\parfillskip=0pt plus 1fil \font\rm=cmr10 \rm
+Text \XeTeXpicfile "xpic-plain.png" \ and \XeTeXpicfile "xpic-dpi300.png" width 2cm
+and \XeTeXpicfile "xpic-jfif200.jpg" height 1cm \ after.\par
+\XeTeXpicfile "xpic-exif300.jpg" scaled 500 rotated 30 \par
+\XeTeXpdffile "xpic-three.pdf" page 2 \XeTeXpdffile "xpic-three.pdf" page 3 crop width 3cm\par
+\XeTeXpdffile "xpic-inherit.pdf" media rotated 90 \par
+\setbox0\hbox{\XeTeXpdffile "xpic-three.pdf" page 1 width 2cm height 1cm}\box0
+\count1=\XeTeXpdfpagecount "xpic-three.pdf"\relax pages: \number\count1\par
+\end

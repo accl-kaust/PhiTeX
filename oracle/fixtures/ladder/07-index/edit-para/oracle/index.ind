@@ -1,0 +1,95 @@
+\begin{theindex}
+
+  \item a, 1--3
+    \subitem computer, 3
+  \item accent, 1
+    \subitem hyphen, 1
+
+  \indexspace
+
+  \item baseline, 2
+  \item beautiful, 2
+  \item box, 1
+    \subitem glue, 1
+  \item break, 3
+
+  \indexspace
+
+  \item computer, 2, 3
+  \item craftsman, 1, 2
+    \subitem typesetting, 2
+
+  \indexspace
+
+  \item depth, 2
+
+  \indexspace
+
+  \item figure, 1
+    \subitem index, 1
+  \item font, 1
+    \subitem shape, 1
+
+  \indexspace
+
+  \item galaxy, 1
+    \subitem craftsman, 1
+  \item glue, 1, 2
+    \subitem penalty, 2
+  \item group, 2
+    \subitem mode, 2
+
+  \indexspace
+
+  \item height, 1, 2
+  \item hyphen, 1, 2
+    \subitem margin, 2
+
+  \indexspace
+
+  \item index, 1, 2
+    \subitem reference, 2
+
+  \indexspace
+
+  \item list, 2, 3
+
+  \indexspace
+
+  \item margin, 1, 2
+  \item mode, 2, 3
+    \subitem list, 3
+
+  \indexspace
+
+  \item node, 3
+
+  \indexspace
+
+  \item of, 1, 2
+    \subitem a, 2
+
+  \indexspace
+
+  \item page, 3
+  \item paragraph, 2, 3
+  \item penalty, 1--3
+    \subitem paragraph, 3
+
+  \indexspace
+
+  \item reference, 1, 2
+
+  \indexspace
+
+  \item section, 2
+  \item shape, 1, 2
+    \subitem height, 2
+
+  \indexspace
+
+  \item the, 1
+    \subitem of, 1
+  \item typesetting, 1, 2
+
+\end{theindex}

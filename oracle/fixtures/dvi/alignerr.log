@@ -1,0 +1,67 @@
+(./alignerr.tex
+! Misplaced alignment tab character &.
+l.5 Text a&
+           b.\par
+I can't figure out why you would want to use a tab mark
+here. If you just want an ampersand, the remedy is
+simple: Just type `I\&' now. But if some right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Misplaced \cr.
+l.6 \cr
+       
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Misplaced \omit.
+l.7 \omit
+         
+I expect to see \omit only after tab marks or the \cr of
+an alignment. Proceed, and I'll ignore this case.
+
+! Misplaced \noalign.
+l.8 \noalign
+            {}
+I expect to see \noalign only after the \cr of
+an alignment. Proceed, and I'll ignore this case.
+
+! Extra alignment tab has been changed to \cr.
+<recently read> \endtemplate 
+                             
+...
+l.10 a&b&
+         c\cr
+You have given more \span or & marks than there were
+in the preamble to the \halign or \valign now in progress.
+So I'll assume that you meant to type \cr instead.
+
+! Missing # inserted in alignment preamble.
+<to be read again> 
+                   &
+l.12 \halign{x&
+               #\cr
+There should be exactly one # between &'s, when an
+\halign or \valign is being set up. In this case you had
+none, so I've put one in; maybe that will work.
+
+! Only one # is allowed per tab.
+l.14 \halign{#y#
+                \cr
+There should be exactly one # between &'s, when an
+\halign or \valign is being set up. In this case you had
+more than one, so I'm ignoring all but the first.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+...
+l.17 e}
+       
+I'm guessing that you meant to end an alignment here.
+
+[0] )

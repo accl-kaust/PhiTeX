@@ -1,0 +1,20 @@
+\documentclass{article}
+\newcommand\lno{\the\inputlineno}
+\begin{document}
+Line \lno.
+
+A paragraph over
+two lines: \lno.
+
+\begin{itemize}
+\item item at \lno
+\end{itemize}
+
+\input{lnsub}
+After the input: \lno.
+
+\begin{center}
+centred \lno
+\end{center}
+Last: \lno.
+\end{document}

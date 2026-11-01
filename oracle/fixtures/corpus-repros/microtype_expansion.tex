@@ -1,0 +1,12 @@
+% Font expansion (\pdfadjustspacing, \pdffontexpand) and character protrusion as the micro-typography
+% package sets them: pdfLaTeX breaks the paragraph with expanded fonts and writes the expansion as a
+% horizontal scale (Tm); PhiTeX breaks it with the fonts as they are (other line breaks, no Tm).
+\documentclass{article}
+\usepackage{microtype}
+\begin{document}
+The quick brown fox jumps over the lazy dog, and the lazy dog watches the quick brown fox
+jump again; typesetting systems break such paragraphs into lines by minimising badness,
+and a small stretch or shrink of each font lets the lines come out more even than the
+interword glue alone allows. Hyphenation, protrusion of punctuation into the margin and
+expansion of the glyphs all take part in the choice of the breakpoints.
+\end{document}

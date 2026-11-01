@@ -1,0 +1,53 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input objstm2
+(../../oracle/fixtures/pdf/objstm2.tex
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0
+.\pdfdest name{a} fit
+.\glue(\topskip) 0.0
+.\hbox(6.94444+0.0)x200.0, glue set 172.19437fil
+..\hbox(0.0+0.0)x0.0
+..\r A
+..\pdfrefobj{<< /A 1 >>}
+..\pdfrefobj stream{q Q}
+..\pdfrefxform(6.94444+0.0)x20.30562
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\pdfannot(5.0+0.0)x10.0{/Subtype /Text}
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}
+
+Completed box being shipped out
+\hbox(6.94444+0.0)x20.30562
+.\r f
+.\r o
+.\r r
+.\r m
+
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0, glue set 293.16669fill
+.\pdfdest name{b} xyz
+.\glue(\topskip) 0.0
+.\hbox(6.83331+0.0)x200.0, glue set 192.91664fil
+..\hbox(0.0+0.0)x0.0
+..\r B
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+ )</usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on objstm2-trace.pdf (2 pages, 12358 bytes).
+PDF statistics:
+ 32 PDF objects out of 1000 (max. 8388607)
+ 24 compressed objects within 1 object stream
+ 2 named destinations out of 1000 (max. 500000)
+ 35 words of extra memory for PDF output out of 10000 (max. 10000000)
+

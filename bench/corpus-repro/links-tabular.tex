@@ -1,0 +1,13 @@
+% Now (dev 36fc97dc, 2026-10-20): the text and objects equal pdfLaTeX's after qpdf --qdf; the files differ in
+% their objects' numbers and order.
+% Link annotations on, extended column types, a table: pdfLaTeX builds it; the sweep's PhiTeX stopped with
+% "You can't use \cr in restricted horizontal mode".
+\documentclass{article}
+\usepackage{array}
+\usepackage{hyperref}
+\begin{document}
+\begin{tabular}{cc}
+a & b \\
+c & d \\
+\end{tabular}
+\end{document}

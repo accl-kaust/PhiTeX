@@ -1,0 +1,75 @@
+(./core.tex
+> a##b \x .
+l.4 \showtokens{a#b \x}
+                       
+
+
+### no active conditionals
+
+! OK.
+l.5 \showifs
+            
+
+
+### level 2: \unless\ifnum entered on line 6
+### level 1: \iftrue entered on line 6
+
+! OK.
+l.6 \iftrue \unless\ifnum1>2 \showifs
+                                     \fi\fi
+
+
+### level 1: \iffalse\else entered on line 7
+
+! OK.
+l.7 \iffalse\else\showifs
+                         \fi
+
+
+### semi simple group (level 2) entered at line 8 (\begingroup)
+### simple group (level 1) entered at line 8 ({)
+### bottom level
+
+! OK.
+l.9 \showgroups
+               
+
+
+### vbox group (level 2) entered at line 11 (\vbox{)
+### hbox group (level 1) entered at line 11 (\setbox0=\hbox to10.0pt{)
+### bottom level
+
+! OK.
+l.11 \setbox0\hbox to 10pt{\vbox{\showgroups
+                                            }\hfil}
+
+
+### vtop group (level 2) entered at line 12 (\moveright2.0pt\vtop spread3.0pt{)
+### vbox group (level 1) entered at line 12 (\setbox0=\vbox{)
+### bottom level
+
+! OK.
+l.12 ...\moveright 2pt\vtop spread 3pt{\showgroups
+                                                  }}
+
+x
+> abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789.
+l.13 ...vwxyzabcdefghijklmnopqrstuvwxyz0123456789}
+                                                  
+
+> a.
+l.14 \showtokens{a}
+                   \message{a long text after the command, longer than an er...
+
+
+a long text after the command, longer than an error line can show at all
+
+### disc group (level 2) entered at line 15 (\discretionary{}{)
+### hbox group (level 1) entered at line 15 (\setbox0=\hbox{)
+### bottom level
+
+! OK.
+l.15 \setbox0\hbox{\discretionary{}{\showgroups
+                                               }{}}
+
+done )

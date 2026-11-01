@@ -1,0 +1,10 @@
+% Now (dev 36fc97dc, 2026-10-20): the text and objects equal pdfLaTeX's after qpdf --qdf; the files differ in
+% their objects' numbers and order.
+% \cmd\barwidth (ltxdoc's \cmd: \string, then \char\number` of the name's first letter) and
+% \char`\{...\char`\}: pdfLaTeX prints "\barwidth" and "{demonstration text}".
+\documentclass{ltxdoc}
+\begin{document}
+The width is \cmd\barwidth.
+
+\texttt{\char`\{demonstration text\char`\}}
+\end{document}

@@ -1,0 +1,60 @@
+(./plainout.tex Preloading the plain format: codes, registers,
+\maxdimen=\dimen10
+\hideskip=\skip10
+\centering=\skip11
+\p@=\dimen11
+\z@=\dimen12
+\z@skip=\skip12
+\voidb@x=\box10
+parameters,
+\smallskipamount=\skip13
+\medskipamount=\skip14
+\bigskipamount=\skip15
+\normalbaselineskip=\skip16
+\normallineskip=\skip17
+\normallineskiplimit=\dimen13
+\jot=\dimen14
+\interdisplaylinepenalty=\count23
+\interfootnotelinepenalty=\count24
+fonts, more fonts,
+\itfam=\fam4
+\slfam=\fam5
+\bffam=\fam6
+\ttfam=\fam7
+macros,
+\strutbox=\box11
+\mscount=\count25
+\tabs=\box12
+\tabsyet=\box13
+\tabsdone=\box14
+math definitions,
+\rootbox=\box15
+\p@renwd=\dimen15
+output routines,
+\headline=\toks10
+\footline=\toks11
+\footins=\insert254
+\topins=\insert253
+hyphenation [1] [2] [3] [4] [5]
+Underfull \vbox (badness 10000) has occurred while \output is active
+\vbox(216.81+1.94444)x469.75499, glue set 8.93666
+.\glue(\topskip) 3.05556
+.\hbox(6.94444+1.94444)x469.75499, glue set 0.44304
+..\hbox(0.0+0.0)x20.0
+..\tenrm d
+..\tenrm o
+..\tenrm g
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..etc.
+.\penalty 150
+.\glue(\baselineskip) 3.11111
+.\hbox(6.94444+1.94444)x469.75499, glue set 0.1347
+..\tenrm f
+..\tenrm o
+..\kern0.27779
+..\tenrm o
+..\tenrm t
+..etc.
+.etc.
+
+[6] [7] )

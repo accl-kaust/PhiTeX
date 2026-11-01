@@ -1,0 +1,11 @@
+% \let, \futurelet.
+\def\show#1{\message{[\meaning#1]}}
+\futurelet\a\show\b\show\a
+\futurelet\a\show{}\show\a
+\def\look{\futurelet\next\report}\def\report{\message{\meaning\next}}
+\look\par\look\relax\look{}\look\message{m}
+\let\c=\relax\show\c \let\d\par\show\d \let\e= x\show\e \let\f=\undefinedthing\show\f
+\def\g{G}\let\h\g\show\h \def\g{H}\show\h
+\let\i=  =\show\i
+\def\:{\let\spacetoken= } \: \show\spacetoken
+\let\j\spacetoken\relax\show\j

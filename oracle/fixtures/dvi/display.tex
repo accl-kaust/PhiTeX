@@ -1,0 +1,23 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\&=4 \catcode`\$=3
+\font\tenrm=cmr10 \tenrm
+\hsize=300pt \vsize=500pt \parindent=20pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+\lineskip=1pt \lineskiplimit=0pt
+\abovedisplayskip=6pt plus 3pt minus 1pt \belowdisplayskip=4pt plus 2pt
+\predisplaypenalty=10000 \postdisplaypenalty=0 \displaywidowpenalty=50
+\everydisplay{\message{display}}
+Some text before the display alignment, long enough to fill a line or so
+of the paragraph that is broken before it.
+$$\halign{#\hfil\tabskip=10pt&\hfil#\cr
+first&1\cr
+second&22\cr}$$
+and the paragraph goes on after the display.
+\par
+\noindent$$\halign to\displaywidth{#\cr \hfil centered\hfil\cr}$$
+\par
+A paragraph with an alignment inside it:
+\halign{#\cr x\cr} which ends the paragraph.
+\par
+\hangindent=30pt \hangafter=0 Hanging text then a display
+$$\tabskip=0pt \halign{#\cr hang\cr}$$ after.\par
+\end

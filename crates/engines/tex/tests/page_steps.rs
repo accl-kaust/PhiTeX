@@ -1,0 +1,327 @@
+//! The light page steps (OUTPUT.md §4.2a, §4.7): `\vsize` set by the
+//! output routine reaches the next page, and an edit that moves no page
+//! break re-runs no later page step.
+
+mod common;
+
+use std::fmt::Write as _;
+
+fn vsize_doc() -> (std::path::PathBuf, String, Vec<u8>) {
+    let dir = common::fixtures().join("plain/vsize");
+    let src = common::read(&dir.join("vs.tex"));
+    let want = std::fs::read(dir.join("vs.dvi")).expect("the oracle");
+    (dir, src, want)
+}
+
+#[test]
+fn vsize_from_the_output_routine() {
+    let (dir, src, want) = vsize_doc();
+    let opts = common::options("./vs.tex", "vs", &common::dvi_comment(&want), &dir);
+    let b = common::build(opts, Some(&common::plain()), &src);
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("vs.dvi: {d}");
+    }
+    assert!(b.stats.page_steps > 0, "no light page steps");
+}
+
+#[test]
+fn an_edit_on_the_last_page_reruns_no_earlier_page() {
+    let (dir, src, want) = vsize_doc();
+    let comment = common::dvi_comment(&want);
+    let opts = || common::options("./vs.tex", "vs", &comment, &dir);
+    let mut b = common::build(opts(), Some(&common::plain()), &src);
+    let pages = b.pages();
+    let cold_steps = b.stats.page_steps;
+    // a word of the last paragraph, same length: no break moves
+    let at = src
+        .rfind("Paragraph 39: the quick")
+        .expect("the last paragraph")
+        + 18;
+    let new = format!("{}kciuq{}", &src[..at], &src[at + 5..]);
+    b.edit(&new);
+    let after = b.pages();
+    assert_eq!(pages.len(), after.len());
+    assert_eq!(pages[..pages.len() - 1], after[..after.len() - 1]);
+    let cold = common::build(opts(), Some(&common::plain()), &new);
+    assert!(
+        common::first_difference(&b.output().0, &cold.output().0).is_none(),
+        "edit != cold"
+    );
+    eprintln!(
+        "page steps: cold {cold_steps}, after the edit {}",
+        b.stats.page_steps
+    );
+    assert!(
+        b.stats.page_steps * 4 <= cold_steps.max(4),
+        "an edit at the end re-ran {} of {cold_steps} page steps",
+        b.stats.page_steps
+    );
+}
+
+/// The generated documents of `PHITEX_GEN` (a directory with
+/// `para400.tex`, `para4000.tex`): loop-back rounds, the critical path
+/// and the runs, cold and after a one-word edit in the middle
+/// paragraph (same length: no break moves).
+#[test]
+#[ignore = "needs PHITEX_GEN"]
+fn generated_documents() {
+    let Ok(dir) = std::env::var("PHITEX_GEN") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    for name in ["para400", "para4000"] {
+        let Ok(src) = std::fs::read_to_string(dir.join(format!("{name}.tex"))) else {
+            continue;
+        };
+        let want = std::fs::read(dir.join(format!("{name}.dvi"))).ok();
+        let comment = want.as_deref().map(common::dvi_comment).unwrap_or_default();
+        let opts = || common::options(&format!("./{name}.tex"), name, &comment, &dir);
+        for t in [1, 4, 8] {
+            let o = phitex_tex::Options {
+                threads: Some(t),
+                ..opts()
+            };
+            let b = common::build(o, Some(&common::plain()), &src);
+            eprintln!(
+                "{name} at {t} threads: wall {:?}, loop rounds {}, critical path {:?}, mispredictions {}",
+                b.stats.wall, b.stats.loop_rounds, b.stats.critical_path, b.stats.mispredictions
+            );
+        }
+        let mut b = common::build(opts(), Some(&common::plain()), &src);
+        if let Some(want) = &want {
+            eprintln!(
+                "{name} vs tex: {:?}",
+                common::first_difference(&b.output().0, want)
+            );
+        }
+        let s = &b.stats;
+        eprintln!(
+            "{name} cold: pages {}, loop rounds {}, critical path {:?}, runs {}, nodes run {}, page steps {}",
+            b.pages().len(),
+            s.loop_rounds,
+            s.critical_path,
+            s.runs,
+            s.nodes_run,
+            s.page_steps
+        );
+        {
+            let mut by = std::collections::BTreeMap::<String, usize>::new();
+            for (_, kind, field) in b.critical_chain() {
+                *by.entry(format!("{kind} {field}")).or_default() += 1;
+            }
+            eprintln!("{name} chain by cause: {by:?}");
+            if std::env::var_os("PHITEX_CHAIN_WAITS").is_some() {
+                for l in b.critical_chain_lines().iter().take(6) {
+                    eprintln!("{name} wait: {l}");
+                }
+            }
+        }
+        let (cold_runs, cold_steps) = (s.runs, s.page_steps);
+        let mid = src.len() / 2;
+        let at = mid + src[mid..].find(" the ").expect("a word") + 1;
+        let new = format!("{}eht{}", &src[..at], &src[at + 3..]);
+        b.edit(&new);
+        // `stats` is what the last build or edit ran: the edit's own
+        // counts, not a running total.
+        let s = &b.stats;
+        eprintln!(
+            "{name} edit: loop rounds {}, critical path {:?}, runs {}, nodes run {}, page steps {}",
+            s.loop_rounds, s.critical_path, s.runs, s.nodes_run, s.page_steps
+        );
+        assert!(
+            s.runs <= cold_runs && s.page_steps <= cold_steps,
+            "{name}: a one-word edit ran more than the cold build \
+             (runs {} vs {cold_runs}, page steps {} vs {cold_steps})",
+            s.runs,
+            s.page_steps
+        );
+        if name == "para400" {
+            let cold = common::build(opts(), Some(&common::plain()), &new);
+            assert!(
+                common::first_difference(&b.output().0, &cold.output().0).is_none(),
+                "{name}: edit != cold"
+            );
+        }
+    }
+}
+
+/// One cold build per run of `PHITEX_GEN_DOC` (in `PHITEX_GEN`) at
+/// `PHITEX_GEN_THREADS` threads: its wall, critical path, runs and
+/// loop rounds, for timings that alternate builds.
+#[test]
+#[ignore = "needs PHITEX_GEN"]
+fn generated_wall() {
+    let (Ok(dir), Ok(name)) = (std::env::var("PHITEX_GEN"), std::env::var("PHITEX_GEN_DOC")) else {
+        return;
+    };
+    let t: usize = std::env::var("PHITEX_GEN_THREADS")
+        .ok()
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(1);
+    let dir = std::path::PathBuf::from(dir);
+    let src = std::fs::read_to_string(dir.join(format!("{name}.tex"))).expect("the document");
+    let o = phitex_tex::Options {
+        threads: Some(t),
+        ..common::options(&format!("./{name}.tex"), &name, "", &dir)
+    };
+    let b = common::build(o, Some(&common::plain()), &src);
+    eprintln!(
+        "WALL {name} t={t} wall_ms={:.1} cp={:?} runs={} rounds={} steps={}",
+        b.stats.wall.as_secs_f64() * 1000.0,
+        b.stats.critical_path,
+        b.stats.runs,
+        b.stats.loop_rounds,
+        b.stats.page_steps
+    );
+}
+
+/// `selfdep.tex` in `PHITEX_GEN` (400 paragraphs, a routine that
+/// advances a count it reads): the page chain's delta depends on the
+/// previous one, one page per loop round; the DVI equals tex's
+/// (`selfdep.dvi`).
+#[test]
+#[ignore = "needs PHITEX_GEN"]
+fn self_dependent_routine() {
+    let Ok(dir) = std::env::var("PHITEX_GEN") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let src = std::fs::read_to_string(dir.join("selfdep.tex")).expect("the document");
+    let want = std::fs::read(dir.join("selfdep.dvi")).expect("the oracle");
+    let opts = common::options(
+        "./selfdep.tex",
+        "selfdep",
+        &common::dvi_comment(&want),
+        &dir,
+    );
+    let mut b = common::build(opts.clone(), Some(&common::plain()), &src);
+    let s = &b.stats;
+    eprintln!(
+        "selfdep: pages {}, loop rounds {}, critical path {:?}",
+        b.pages().len(),
+        s.loop_rounds,
+        s.critical_path
+    );
+    assert!(
+        common::first_difference(&b.output().0, &want).is_none(),
+        "selfdep.dvi differs: {:?}",
+        common::first_difference(&b.output().0, &want)
+    );
+    let mid = src.len() / 2;
+    let at = mid + src[mid..].find(" the ").expect("a word") + 1;
+    let new = format!("{}eht{}", &src[..at], &src[at + 3..]);
+    b.edit(&new);
+    eprintln!(
+        "selfdep edit: loop rounds {}, page steps re-run {}",
+        b.stats.loop_rounds, b.stats.page_steps
+    );
+    let cold = common::build(opts, Some(&common::plain()), &new);
+    assert!(
+        common::first_difference(&b.output().0, &cold.output().0).is_none(),
+        "selfdep edit != cold"
+    );
+}
+
+/// `PHITEX_GEN_DOC` in `PHITEX_GEN`, cold and after a one-word edit and
+/// a paragraph inserted near the middle: the edits' walls (a measure;
+/// `PHITEX_PLAN_TIME=1` prints the page plan's phases).
+#[test]
+#[ignore = "needs PHITEX_GEN"]
+fn generated_edit_wall() {
+    let (Ok(dir), Ok(name)) = (std::env::var("PHITEX_GEN"), std::env::var("PHITEX_GEN_DOC")) else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let src = std::fs::read_to_string(dir.join(format!("{name}.tex"))).expect("the document");
+    let o = common::options(&format!("./{name}.tex"), &name, "", &dir);
+    let mut b = common::build(o, Some(&common::plain()), &src);
+    eprintln!(
+        "EDITWALL {name} cold wall_ms={:.1}",
+        b.stats.wall.as_secs_f64() * 1000.0
+    );
+    let mid = src.len() / 2;
+    let at = mid + src[mid..].find(" the ").expect("a word") + 1;
+    let word = format!("{}eht{}", &src[..at], &src[at + 3..]);
+    let t = std::time::Instant::now();
+    b.edit(&word);
+    eprintln!(
+        "EDITWALL {name} word wall_ms={:.1} nodes={} page_steps={}",
+        t.elapsed().as_secs_f64() * 1000.0,
+        b.stats.nodes_run,
+        b.stats.page_steps
+    );
+    let at2 = at + 40 + word[at + 40..].find(" the ").expect("a word") + 1;
+    let word2 = format!("{}eht{}", &word[..at2], &word[at2 + 3..]);
+    let t = std::time::Instant::now();
+    b.edit(&word2);
+    eprintln!(
+        "EDITWALL {name} word2 wall_ms={:.1} nodes={} page_steps={}",
+        t.elapsed().as_secs_f64() * 1000.0,
+        b.stats.nodes_run,
+        b.stats.page_steps
+    );
+    let word = word2;
+    let par = mid + word[mid..].find("\n\n").expect("a paragraph end") + 2;
+    let ins = format!(
+        "{}{}\n\n{}",
+        &word[..par],
+        "An inserted paragraph of a few words, long enough for two lines of text, so that every later page moves by those lines.",
+        &word[par..]
+    );
+    let t = std::time::Instant::now();
+    b.edit(&ins);
+    eprintln!(
+        "EDITWALL {name} insert wall_ms={:.1} nodes={} page_steps={}",
+        t.elapsed().as_secs_f64() * 1000.0,
+        b.stats.nodes_run,
+        b.stats.page_steps
+    );
+    let o = common::options(&format!("./{name}.tex"), &name, "", &dir);
+    let cold = common::build(o, Some(&common::plain()), &ins);
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        panic!("{name}: the edits differ from a cold build: {d}");
+    }
+    eprintln!("EDITWALL {name} edits equal cold");
+}
+
+/// The DVI writer keeps each page's bytes between runs (§640): an edit
+/// that uses a font for the first time on page 300 defines it there
+/// (§621), so a later page that defined it no longer does; and an
+/// inserted paragraph moves every later page in the file. Both equal a
+/// cold build.
+#[test]
+fn a_new_font_on_page_300_equals_cold() {
+    let dir = common::fixtures().join("plain/vsize");
+    let mut src = String::from("\\hsize=200pt \\vsize=30pt \\parindent=0pt\n");
+    for k in 0..400 {
+        let bold = if k == 380 { "{\\bf bold} " } else { "" };
+        let _ = write!(
+            src,
+            "Paragraph {k}: {bold}the quick brown fox jumps over the lazy dog.\n\n"
+        );
+    }
+    src.push_str("\\bye\n");
+    let opts = || common::options("./fonts.tex", "fonts", "", &dir);
+    let mut b = common::build(opts(), Some(&common::plain()), &src);
+    assert!(b.pages().len() > 350, "{} pages", b.pages().len());
+    let at = src.find("Paragraph 300: ").expect("paragraph 300") + 15;
+    let edits = [
+        format!("{}{{\\bf new}} {}", &src[..at], &src[at..]),
+        format!("{}{{\\bf new}} {}", &src[..at + 2], &src[at + 2..]),
+        format!("{}{}", &src[..at], &src[at..]),
+    ];
+    for (n, new) in edits.iter().enumerate() {
+        b.edit(new);
+        let cold = common::build(opts(), Some(&common::plain()), new);
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("edit {n}: {d}");
+        }
+    }
+    let at = src.find("Paragraph 200: ").expect("paragraph 200");
+    let ins = format!("{}An inserted paragraph.\n\n{}", &src[..at], &src[at..]);
+    b.edit(&ins);
+    let cold = common::build(opts(), Some(&common::plain()), &ins);
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        panic!("insert: {d}");
+    }
+}

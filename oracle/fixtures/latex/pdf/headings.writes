@@ -1,0 +1,11 @@
+=== headings.aux 489
+\relax 
+\@writefile{toc}{\contentsline {chapter}{\numberline {1}A}{1}{}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\p@ }}
+\@writefile{lot}{\addvspace {10\p@ }}
+\newlabel{x}{{1}{1}{}{chapter.1}{}}
+\@writefile{toc}{\contentsline {chapter}{\numberline {2}B}{3}{}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\p@ }}
+\@writefile{lot}{\addvspace {10\p@ }}
+\@writefile{toc}{\contentsline {section}{\numberline {2.1}C}{3}{}\protected@file@percent }
+\gdef \@abspage@last{3}

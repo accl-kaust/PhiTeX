@@ -1,0 +1,8 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\pdfliteral{0 0 1 rg}A\pdfliteral direct{1 0 0 rg}B\pdfliteral page{0 1 0 rg}C\hbox{\pdfliteral{0.5 g}D}\par
+\vbox{\pdfliteral{0 g}\hrule width 10pt}
+\pdfsave\pdfsetmatrix{1 0 0 1}\hbox{E}\pdfrestore
+\hbox{\pdfsave\pdfsetmatrix{0.5 0 0 2}F\pdfrestore G}
+\special{pdf:0 0 1 RG}\special{PDF:direct:1 w}\special{pdf:page:2 w}\special{ps:ignored}\special{}H\par
+\end

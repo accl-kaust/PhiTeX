@@ -1,0 +1,12 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\rm=cmr10 \rm \hsize=100pt \vsize=100pt \parindent=0pt
+\hbox{before the end}
+
+\message{[ending]}
+\end
+
+\def\loop{\loop}\loop
+
+\count22=-1 \def\step{\ifnum\count1<1 \hbox{x}\expandafter\step\fi}\step
+
+\hbox{after the end}\message{[never]}

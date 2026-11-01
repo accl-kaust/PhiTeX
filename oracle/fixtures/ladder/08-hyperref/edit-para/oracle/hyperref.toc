@@ -1,0 +1,10 @@
+\contentsline {section}{\numberline {1}The line and the penalty}{1}{section.1}%
+\contentsline {subsection}{\numberline {1.1}Accents: caf\'e, na\"ive, \c {c}a, $\alpha $}{2}{subsection.1.1}%
+\contentsline {section}{\numberline {2}The word and the paragraph}{2}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Accents: caf\'e, na\"ive, \c {c}a, $\alpha $}{2}{subsection.2.1}%
+\contentsline {section}{\numberline {3}The box and the break}{2}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Accents: caf\'e, na\"ive, \c {c}a, $\alpha $}{3}{subsection.3.1}%
+\contentsline {section}{\numberline {4}The glue and the measure}{3}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Accents: caf\'e, na\"ive, \c {c}a, $\alpha $}{3}{subsection.4.1}%
+\contentsline {section}{\numberline {5}The penalty and the document}{3}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Accents: caf\'e, na\"ive, \c {c}a, $\alpha $}{4}{subsection.5.1}%

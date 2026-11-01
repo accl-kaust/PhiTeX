@@ -1,0 +1,12 @@
+[package]
+name = "phitex-source"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Source text as units with identities: positions that edits never move"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+phitex-flow fuzz repro
+doc pages
+seed 134 step 4
+before threads=1 reads=Suspend order=Random(840) lean=false
+schedule threads=1 reads=Speculate order=Random(469) lean=false
+fail panic the scheduler stalled: 0 running (0 parked), settled 138/138, scan at 137 (free true, done false), 0 to ship, 0 logs queued (0 running), 0 breaks queued;
+history threads=1 doc=-
+edit - 99 0 blank-insert
+ins
+
+
+text
+% ---- the text layer, with the default output routine
+\def\fz{lazy}\newif\iffz \fztrue
+\vsize=3in
+\input fzsub
+\def\para#1{#1 This paragraph is one of many that fill several pages of
+text set with plain \TeX's macros and its output routine, which adds a
+footline with the page number to every page. The page builder breaks the
+pages, and the lines are broken by the paragraph builder as usual: with
+glue that stretches and shrinks, and penalties for clubs and widows.\par}
+\para{One.}\para{Two.}\para{Three.}
+\medskip
+\para{Four.}\para{Five.}
+\bigskip
+
+\para{Six.}\para{Seven.}\para{Eight.}
+\smallbreak
+\para{Nine.}\para{Ten.}\para{Eleven.}\para{Twelve.}
+\para{Thirteen.}\para{Fourteen.}
+\bye
+
+file fzsub.tex
+Sub file text one.
+
+Sub file text two, with \fz.

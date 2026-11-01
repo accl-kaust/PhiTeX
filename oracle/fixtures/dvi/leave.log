@@ -1,0 +1,19 @@
+(./leave.tex
+Overfull \hbox (16.36154pt too wide) in paragraph at lines 6--8
+[][] \tenrm starts a paragraph without indentation's
+
+\hbox(6.94444+1.94444)x200.0, glue set - 1.0 []
+
+
+Underfull \hbox (badness 314) in paragraph at lines 6--8
+\tenrm box? No: with it, since unhbox begins the
+
+\hbox(6.94444+1.94444)x200.0, glue set 1.46664 []
+
+
+Loose \hbox (badness 20) in paragraph at lines 12--14
+[][]\tenrm Two indents. a noindent in horizontal
+
+\hbox(6.94444+0.0)x200.0, glue set 0.58997 []
+
+[0] )

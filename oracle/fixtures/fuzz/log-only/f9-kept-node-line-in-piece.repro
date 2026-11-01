@@ -1,0 +1,19 @@
+phitex-flow fuzz repro
+doc story
+seed 0 step 1
+before threads=1 reads=Suspend order=Priority lean=false
+schedule threads=1 reads=Suspend order=Priority lean=false
+fail mismatch log-numbers
+history threads=1 doc=-
+edit - 42 10 line-remove
+ins
+
+text
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\count2=2
+\count1=1
+\message{[\the\inputlineno]}
+
+B
+
+\end

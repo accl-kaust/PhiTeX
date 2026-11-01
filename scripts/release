@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Prepares a release on dev (docs/ci.md "Releasing"): the CLI's version set,
+# checked first. It never tags; the tag is the user's, on main, after the
+# pull request dev -> main has merged with a green gate.
+#
+#   scripts/release 1.6
+#
+# The version must be the next milestone (one more of φ's digits: 1.6,
+# 1.61, 1.618, …) or the next update of this one (1.6.1, 1.6.2, …:
+# AGENTS.md), and CHANGELOG.md must have its
+# entry, '## <version> (<YYYY-MM-DD>)' with a summary paragraph. Then
+# crates/cli/Cargo.toml says <version>.0, Cargo.lock follows, and the
+# change is committed on dev.
+set -euo pipefail
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo"
+PHI=1.6180339887498948482045868343656381177203
+v=${1:-}
+die() { echo "release: $*" >&2; exit 1; }
+[ -n "$v" ] || die "usage: scripts/release <version> (1.6, 1.6.1, 1.61, …)"
+
+cur=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)
+milestone=${cur%.*} patch=${cur##*.}
+case $cur in
+  0.*|1.0.*) next=1.6 update= ;; # (1.0: a release to try upgrading with, before the alpha)
+  *) next=${PHI:0:$((${#milestone} + 1))} update=$milestone.$((patch + 1)) ;;
+esac
+[ "$v" = "$next" ] || [ "$v" = "$update" ] \
+  || die "after $cur comes the milestone $next${update:+ or the update $update}, not $v"
+case $v in *.*.*) cargo_v=$v ;; *) cargo_v=$v.0 ;; esac
+
+[ "$(git branch --show-current)" = dev ] || die "on $(git branch --show-current): releases are prepared on dev"
+git diff --quiet HEAD -- crates/cli/Cargo.toml Cargo.lock CHANGELOG.md \
+  || die "crates/cli/Cargo.toml, Cargo.lock or CHANGELOG.md has changes not committed"
+head=$(grep -n "^## $v (" CHANGELOG.md | head -1) || die "CHANGELOG.md has no '## $v (<date>)' entry"
+grep -Eq "^## $v \([0-9]{4}-[0-9]{2}-[0-9]{2}\)" CHANGELOG.md || die "CHANGELOG.md's '$head' needs a date: '## $v (YYYY-MM-DD)'"
+summary=$(awk -v h="## $v (" 'index($0, h) == 1 {on = 1; next} on && /^## / {exit} on && NF {print; got = 1; next} on && got {exit}' CHANGELOG.md)
+[ -n "$summary" ] || die "CHANGELOG.md's $v entry has no summary paragraph"
+
+sed -i "0,/^version = \".*\"/s//version = \"$cargo_v\"/" crates/cli/Cargo.toml
+# (Cargo.lock's entry for phitex-cli follows, nothing else moves)
+scripts/sandbox cargo metadata --offline --format-version 1 > /dev/null
+git diff --stat -- crates/cli/Cargo.toml Cargo.lock
+git commit -q -m "release $v: crates/cli at $cargo_v ($summary)" -- crates/cli/Cargo.toml Cargo.lock
+echo "release: $v committed on dev. Next:"
+echo "  1. push dev, open the pull request dev -> main; merge when checks and gate are green"
+echo "  2. the user tags it: git tag v$v origin/main && git push github v$v"
+echo "  3. approve the release run (environment 'release') on GitHub"

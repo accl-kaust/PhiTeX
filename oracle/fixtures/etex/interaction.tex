@@ -1,0 +1,4 @@
+% \interactionmode, read and assigned; \batchmode and friends begin a line.
+\batchmode\message{\the\interactionmode}\interactionmode=2 \message{\the\interactionmode}
+\scrollmode\message{\the\interactionmode}\interactionmode=0 \message{\the\interactionmode}
+\nonstopmode\message{a}\batchmode\message{\the\interactionmode}

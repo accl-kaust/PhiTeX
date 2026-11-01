@@ -1,0 +1,1323 @@
+case 0
+text=difficult official affluent efficient baffling shuffling
+expect
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15786.88844fil
+..\tenrm d
+..\tenrm i
+..\tenrm ^^N (ligature ffi)
+..\tenrm c
+..\tenrm u
+..\tenrm l
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm o
+..\tenrm ^^N (ligature ffi)
+..\tenrm c
+..\tenrm i
+..\tenrm a
+..\tenrm l
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\tenrm ^^O (ligature ffl)
+..\tenrm u
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm e
+..\tenrm ^^N (ligature ffi)
+..\tenrm c
+..\tenrm i
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm b
+..\tenrm a
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm n
+..\tenrm g
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm h
+..\kern-0.27779
+..\tenrm u
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm n
+..\tenrm g
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15786.88844fil
+..\tenrm d
+..\tenrm i
+..\tenrm ^^N (ligature ffi)
+..\tenrm c
+..\tenrm u
+..\tenrm l
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm o
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^L (ligature fi)
+..\tenrm ^^N (ligature ffi)
+..\discretionary
+...\tenrm -
+..\tenrm c
+..\tenrm i
+..\tenrm a
+..\tenrm l
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^M (ligature fl)
+..\tenrm ^^O (ligature ffl)
+..\tenrm u
+..\discretionary
+...\tenrm -
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm e
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^L (ligature fi)
+..\tenrm ^^N (ligature ffi)
+..\discretionary
+...\tenrm -
+..\tenrm c
+..\tenrm i
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm b
+..\tenrm a
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^M (ligature fl)
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm n
+..\tenrm g
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm h
+..\kern-0.27779
+..\tenrm u
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^M (ligature fl)
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm n
+..\tenrm g
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+end
+case 1
+text=Effective OFFICIAL (difficult) ``offline'' affirmation
+expect
+\vbox(7.5+2.5)x16000.0
+.\hbox(7.5+2.5)x16000.0, glue set 15774.97171fil
+..\tenrm E
+..\tenrm ^^K (ligature ff)
+..\tenrm e
+..\tenrm c
+..\tenrm t
+..\tenrm i
+..\tenrm v
+..\kern-0.27779
+..\tenrm e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm O
+..\tenrm F
+..\tenrm F
+..\tenrm I
+..\tenrm C
+..\tenrm I
+..\tenrm A
+..\tenrm L
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\tenrm (
+..\tenrm d
+..\tenrm i
+..\tenrm ^^N (ligature ffi)
+..\tenrm c
+..\tenrm u
+..\tenrm l
+..\tenrm t
+..\tenrm )
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm \ (ligature ``)
+..\tenrm o
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm n
+..\tenrm e
+..\tenrm " (ligature '')
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\tenrm ^^N (ligature ffi)
+..\tenrm r
+..\tenrm m
+..\tenrm a
+..\tenrm t
+..\tenrm i
+..\tenrm o
+..\tenrm n
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+\vbox(7.5+2.5)x16000.0
+.\hbox(7.5+2.5)x16000.0, glue set 15774.97171fil
+..\tenrm E
+..\tenrm ^^K (ligature ff)
+..\tenrm e
+..\tenrm c
+..\tenrm t
+..\tenrm i
+..\tenrm v
+..\kern-0.27779
+..\tenrm e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm O
+..\tenrm F
+..\discretionary
+...\tenrm -
+..\tenrm F
+..\tenrm I
+..\discretionary
+...\tenrm -
+..\tenrm C
+..\tenrm I
+..\tenrm A
+..\tenrm L
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\tenrm (
+..\tenrm d
+..\tenrm i
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^L (ligature fi)
+..\tenrm ^^N (ligature ffi)
+..\discretionary
+...\tenrm -
+..\tenrm c
+..\tenrm u
+..\tenrm l
+..\tenrm t
+..\tenrm )
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm \ (ligature ``)
+..\tenrm o
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^M (ligature fl)
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm n
+..\tenrm e
+..\tenrm " (ligature '')
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^L (ligature fi)
+..\tenrm ^^N (ligature ffi)
+..\tenrm r
+..\discretionary
+...\tenrm -
+..\tenrm m
+..\tenrm a
+..\discretionary
+...\tenrm -
+..\tenrm t
+..\tenrm i
+..\tenrm o
+..\tenrm n
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+end
+case 2
+text=manuscript manuscripts reciprocity university table
+expect
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15774.36069fil
+..\tenrm m
+..\tenrm a
+..\tenrm n
+..\kern-0.27779
+..\tenrm u
+..\tenrm s
+..\tenrm c
+..\tenrm r
+..\tenrm i
+..\tenrm p
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm m
+..\tenrm a
+..\tenrm n
+..\kern-0.27779
+..\tenrm u
+..\tenrm s
+..\tenrm c
+..\tenrm r
+..\tenrm i
+..\tenrm p
+..\tenrm t
+..\tenrm s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm r
+..\tenrm e
+..\tenrm c
+..\tenrm i
+..\tenrm p
+..\tenrm r
+..\tenrm o
+..\kern0.27779
+..\tenrm c
+..\tenrm i
+..\tenrm t
+..\kern-0.27779
+..\tenrm y
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm u
+..\tenrm n
+..\tenrm i
+..\tenrm v
+..\kern-0.27779
+..\tenrm e
+..\tenrm r
+..\tenrm s
+..\tenrm i
+..\tenrm t
+..\kern-0.27779
+..\tenrm y
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm t
+..\tenrm a
+..\tenrm b
+..\tenrm l
+..\tenrm e
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15774.36069fil
+..\tenrm m
+..\tenrm a
+..\tenrm n
+..\kern-0.27779
+..\tenrm u
+..\tenrm s
+..\tenrm c
+..\tenrm r
+..\tenrm i
+..\tenrm p
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm m
+..\tenrm a
+..\tenrm n
+..\kern-0.27779
+..\tenrm u
+..\tenrm s
+..\tenrm c
+..\tenrm r
+..\tenrm i
+..\tenrm p
+..\tenrm t
+..\tenrm s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm r
+..\tenrm e
+..\tenrm c
+..\tenrm i
+..\discretionary
+...\tenrm -
+..\tenrm p
+..\tenrm r
+..\tenrm o
+..\kern0.27779
+..\tenrm c
+..\tenrm i
+..\tenrm t
+..\kern-0.27779
+..\tenrm y
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm u
+..\tenrm n
+..\tenrm i
+..\discretionary
+...\tenrm -
+..\tenrm v
+..\kern-0.27779
+..\tenrm e
+..\tenrm r
+..\discretionary
+...\tenrm -
+..\tenrm s
+..\tenrm i
+..\tenrm t
+..\kern-0.27779
+..\tenrm y
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm t
+..\tenrm a
+..\discretionary
+...\tenrm -
+..\tenrm b
+..\tenrm l
+..\tenrm e
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+end
+case 3
+text=hyphenation algorithm characteristically representation
+expect
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15757.80505fil
+..\tenrm h
+..\kern-0.27779
+..\tenrm y
+..\tenrm p
+..\tenrm h
+..\tenrm e
+..\tenrm n
+..\tenrm a
+..\tenrm t
+..\tenrm i
+..\tenrm o
+..\tenrm n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\tenrm l
+..\tenrm g
+..\tenrm o
+..\tenrm r
+..\tenrm i
+..\tenrm t
+..\tenrm h
+..\tenrm m
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm c
+..\kern-0.27779
+..\tenrm h
+..\tenrm a
+..\tenrm r
+..\tenrm a
+..\tenrm c
+..\tenrm t
+..\tenrm e
+..\tenrm r
+..\tenrm i
+..\tenrm s
+..\tenrm t
+..\tenrm i
+..\tenrm c
+..\tenrm a
+..\tenrm l
+..\tenrm l
+..\tenrm y
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm r
+..\tenrm e
+..\tenrm p
+..\tenrm r
+..\tenrm e
+..\tenrm s
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\tenrm a
+..\tenrm t
+..\tenrm i
+..\tenrm o
+..\tenrm n
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15757.80505fil
+..\tenrm h
+..\kern-0.27779
+..\tenrm y
+..\tenrm p
+..\tenrm h
+..\tenrm e
+..\tenrm n
+..\tenrm a
+..\tenrm t
+..\tenrm i
+..\tenrm o
+..\tenrm n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\tenrm l
+..\discretionary
+...\tenrm -
+..\tenrm g
+..\tenrm o
+..\discretionary
+...\tenrm -
+..\tenrm r
+..\tenrm i
+..\tenrm t
+..\tenrm h
+..\tenrm m
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm c
+..\kern-0.27779
+..\tenrm h
+..\tenrm a
+..\tenrm r
+..\discretionary
+...\tenrm -
+..\tenrm a
+..\tenrm c
+..\discretionary
+...\tenrm -
+..\tenrm t
+..\tenrm e
+..\tenrm r
+..\discretionary
+...\tenrm -
+..\tenrm i
+..\tenrm s
+..\discretionary
+...\tenrm -
+..\tenrm t
+..\tenrm i
+..\discretionary
+...\tenrm -
+..\tenrm c
+..\tenrm a
+..\tenrm l
+..\tenrm l
+..\tenrm y
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm r
+..\tenrm e
+..\tenrm p
+..\discretionary
+...\tenrm -
+..\tenrm r
+..\tenrm e
+..\discretionary
+...\tenrm -
+..\tenrm s
+..\tenrm e
+..\discretionary replacing 2
+...\tenrm n
+...\tenrm -
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\tenrm a
+..\discretionary
+...\tenrm -
+..\tenrm t
+..\tenrm i
+..\tenrm o
+..\tenrm n
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+end
+case 4
+text=Typewriter AVAILABILITY waffle-iron stuffiness
+expect
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15783.49968fil
+..\tenrm T
+..\kern-0.27779
+..\tenrm y
+..\tenrm p
+..\kern0.27779
+..\tenrm e
+..\tenrm w
+..\tenrm r
+..\tenrm i
+..\tenrm t
+..\tenrm e
+..\tenrm r
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm A
+..\kern-1.11113
+..\tenrm V
+..\kern-1.11113
+..\tenrm A
+..\tenrm I
+..\tenrm L
+..\tenrm A
+..\tenrm B
+..\tenrm I
+..\tenrm L
+..\tenrm I
+..\tenrm T
+..\tenrm Y
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\tenrm w
+..\kern-0.27779
+..\tenrm a
+..\tenrm ^^O (ligature ffl)
+..\tenrm e
+..\tenrm -
+..\discretionary
+..\tenrm i
+..\tenrm r
+..\tenrm o
+..\tenrm n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm t
+..\tenrm u
+..\tenrm ^^N (ligature ffi)
+..\tenrm n
+..\tenrm e
+..\tenrm s
+..\tenrm s
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15783.49968fil
+..\tenrm T
+..\kern-0.27779
+..\tenrm y
+..\tenrm p
+..\kern0.27779
+..\tenrm e
+..\tenrm w
+..\tenrm r
+..\tenrm i
+..\tenrm t
+..\tenrm e
+..\tenrm r
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm A
+..\kern-1.11113
+..\tenrm V
+..\kern-1.11113
+..\tenrm A
+..\tenrm I
+..\tenrm L
+..\discretionary
+...\tenrm -
+..\tenrm A
+..\tenrm B
+..\tenrm I
+..\tenrm L
+..\discretionary
+...\tenrm -
+..\tenrm I
+..\tenrm T
+..\tenrm Y
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\tenrm w
+..\kern-0.27779
+..\tenrm a
+..\tenrm ^^O (ligature ffl)
+..\tenrm e
+..\tenrm -
+..\discretionary
+..\tenrm i
+..\tenrm r
+..\tenrm o
+..\tenrm n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm t
+..\tenrm u
+..\tenrm ^^N (ligature ffi)
+..\discretionary
+...\tenrm -
+..\tenrm n
+..\tenrm e
+..\tenrm s
+..\tenrm s
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+end
+case 5
+text=fluffier sufficiently traffickers ineffectual diffident
+expect
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15788.97183fil
+..\tenrm ^^M (ligature fl)
+..\tenrm u
+..\tenrm ^^N (ligature ffi)
+..\tenrm e
+..\tenrm r
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm u
+..\tenrm ^^N (ligature ffi)
+..\tenrm c
+..\tenrm i
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\tenrm l
+..\tenrm y
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm t
+..\tenrm r
+..\tenrm a
+..\tenrm ^^N (ligature ffi)
+..\tenrm c
+..\kern-0.27779
+..\tenrm k
+..\kern-0.27779
+..\tenrm e
+..\tenrm r
+..\tenrm s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm i
+..\tenrm n
+..\tenrm e
+..\tenrm ^^K (ligature ff)
+..\tenrm e
+..\tenrm c
+..\tenrm t
+..\tenrm u
+..\tenrm a
+..\tenrm l
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm d
+..\tenrm i
+..\tenrm ^^N (ligature ffi)
+..\tenrm d
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15788.97183fil
+..\tenrm ^^M (ligature fl)
+..\tenrm u
+..\tenrm ^^N (ligature ffi)
+..\tenrm e
+..\tenrm r
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm u
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^L (ligature fi)
+..\tenrm ^^N (ligature ffi)
+..\discretionary
+...\tenrm -
+..\tenrm c
+..\tenrm i
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\tenrm l
+..\tenrm y
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm t
+..\tenrm r
+..\tenrm a
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^L (ligature fi)
+..\tenrm ^^N (ligature ffi)
+..\tenrm c
+..\kern-0.27779
+..\discretionary replacing 2
+...\tenrm k
+...\tenrm -
+..\tenrm k
+..\kern-0.27779
+..\tenrm e
+..\tenrm r
+..\tenrm s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm i
+..\tenrm n
+..\discretionary
+...\tenrm -
+..\tenrm e
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm f
+..\tenrm ^^K (ligature ff)
+..\tenrm e
+..\tenrm c
+..\discretionary
+...\tenrm -
+..\tenrm t
+..\tenrm u
+..\tenrm a
+..\tenrm l
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm d
+..\tenrm i
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^L (ligature fi)
+..\tenrm ^^N (ligature ffi)
+..\discretionary
+...\tenrm -
+..\tenrm d
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+end
+case 6
+text=office--ffi coffee toffee buffalo affliction suffix
+expect
+\vbox(6.94444+0.0)x16000.0
+.\hbox(6.94444+0.0)x16000.0, glue set 15809.38849fil
+..\tenrm o
+..\tenrm ^^N (ligature ffi)
+..\tenrm c
+..\tenrm e
+..\tenrm { (ligature --)
+..\discretionary
+..\tenrm ^^N (ligature ffi)
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm c
+..\tenrm o
+..\tenrm ^^K (ligature ff)
+..\tenrm e
+..\tenrm e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm t
+..\tenrm o
+..\tenrm ^^K (ligature ff)
+..\tenrm e
+..\tenrm e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm b
+..\tenrm u
+..\tenrm ^^K (ligature ff)
+..\tenrm a
+..\tenrm l
+..\tenrm o
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm c
+..\tenrm t
+..\tenrm i
+..\tenrm o
+..\tenrm n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm u
+..\tenrm ^^N (ligature ffi)
+..\tenrm x
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+\vbox(6.94444+0.0)x16000.0
+.\hbox(6.94444+0.0)x16000.0, glue set 15809.38849fil
+..\tenrm o
+..\tenrm ^^N (ligature ffi)
+..\tenrm c
+..\tenrm e
+..\tenrm { (ligature --)
+..\discretionary
+..\tenrm ^^N (ligature ffi)
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm c
+..\tenrm o
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm f
+..\tenrm ^^K (ligature ff)
+..\tenrm e
+..\tenrm e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm t
+..\tenrm o
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm f
+..\tenrm ^^K (ligature ff)
+..\tenrm e
+..\tenrm e
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm b
+..\tenrm u
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm f
+..\tenrm ^^K (ligature ff)
+..\tenrm a
+..\tenrm l
+..\tenrm o
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm a
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^M (ligature fl)
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm c
+..\discretionary
+...\tenrm -
+..\tenrm t
+..\tenrm i
+..\tenrm o
+..\tenrm n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm u
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^L (ligature fi)
+..\tenrm ^^N (ligature ffi)
+..\tenrm x
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+end
+case 7
+text=Wolfflin schiffahrt ofttimes ``Afflict'' finally
+expect
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15812.91624fil
+..\tenrm W
+..\kern-0.83334
+..\tenrm o
+..\tenrm l
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm c
+..\kern-0.27779
+..\tenrm h
+..\tenrm i
+..\tenrm ^^K (ligature ff)
+..\tenrm a
+..\tenrm h
+..\tenrm r
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm o
+..\tenrm f
+..\tenrm t
+..\tenrm t
+..\tenrm i
+..\tenrm m
+..\tenrm e
+..\tenrm s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm \ (ligature ``)
+..\tenrm A
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm c
+..\tenrm t
+..\tenrm " (ligature '')
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm ^^L (ligature fi)
+..\tenrm n
+..\tenrm a
+..\tenrm l
+..\tenrm l
+..\tenrm y
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15812.91624fil
+..\tenrm W
+..\kern-0.83334
+..\tenrm o
+..\tenrm l
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm n
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm c
+..\kern-0.27779
+..\tenrm h
+..\tenrm i
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm f
+..\tenrm ^^K (ligature ff)
+..\tenrm a
+..\tenrm h
+..\tenrm r
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm o
+..\tenrm f
+..\tenrm t
+..\discretionary
+...\tenrm -
+..\tenrm t
+..\tenrm i
+..\tenrm m
+..\tenrm e
+..\tenrm s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm \ (ligature ``)
+..\tenrm A
+..\discretionary replacing 1
+...\tenrm f
+...\tenrm -
+..|\tenrm ^^M (ligature fl)
+..\tenrm ^^O (ligature ffl)
+..\tenrm i
+..\tenrm c
+..\tenrm t
+..\tenrm " (ligature '')
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm ^^L (ligature fi)
+..\discretionary
+...\tenrm -
+..\tenrm n
+..\tenrm a
+..\tenrm l
+..\tenrm l
+..\tenrm y
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+end
+case 8
+text=disestablishmentarianism supercalifragilisticexpialidocious
+expect
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15747.02722fil
+..\tenrm d
+..\tenrm i
+..\tenrm s
+..\tenrm e
+..\tenrm s
+..\tenrm t
+..\tenrm a
+..\tenrm b
+..\tenrm l
+..\tenrm i
+..\tenrm s
+..\tenrm h
+..\tenrm m
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\tenrm a
+..\tenrm r
+..\tenrm i
+..\tenrm a
+..\tenrm n
+..\tenrm i
+..\tenrm s
+..\tenrm m
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm u
+..\tenrm p
+..\kern0.27779
+..\tenrm e
+..\tenrm r
+..\tenrm c
+..\tenrm a
+..\tenrm l
+..\tenrm i
+..\tenrm f
+..\tenrm r
+..\tenrm a
+..\tenrm g
+..\tenrm i
+..\tenrm l
+..\tenrm i
+..\tenrm s
+..\tenrm t
+..\tenrm i
+..\tenrm c
+..\tenrm e
+..\tenrm x
+..\tenrm p
+..\tenrm i
+..\tenrm a
+..\tenrm l
+..\tenrm i
+..\tenrm d
+..\tenrm o
+..\kern0.27779
+..\tenrm c
+..\tenrm i
+..\tenrm o
+..\tenrm u
+..\tenrm s
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15747.02722fil
+..\tenrm d
+..\tenrm i
+..\tenrm s
+..\tenrm e
+..\tenrm s
+..\tenrm t
+..\tenrm a
+..\tenrm b
+..\tenrm l
+..\tenrm i
+..\tenrm s
+..\tenrm h
+..\tenrm m
+..\tenrm e
+..\tenrm n
+..\kern-0.27779
+..\tenrm t
+..\tenrm a
+..\tenrm r
+..\tenrm i
+..\tenrm a
+..\tenrm n
+..\tenrm i
+..\tenrm s
+..\tenrm m
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm s
+..\tenrm u
+..\discretionary
+...\tenrm -
+..\tenrm p
+..\kern0.27779
+..\tenrm e
+..\tenrm r
+..\discretionary
+...\tenrm -
+..\tenrm c
+..\tenrm a
+..\tenrm l
+..\discretionary
+...\tenrm -
+..\tenrm i
+..\tenrm f
+..\tenrm r
+..\tenrm a
+..\tenrm g
+..\discretionary
+...\tenrm -
+..\tenrm i
+..\tenrm l
+..\tenrm i
+..\tenrm s
+..\discretionary
+...\tenrm -
+..\tenrm t
+..\tenrm i
+..\tenrm c
+..\discretionary
+...\tenrm -
+..\tenrm e
+..\tenrm x
+..\discretionary
+...\tenrm -
+..\tenrm p
+..\tenrm i
+..\discretionary
+...\tenrm -
+..\tenrm a
+..\tenrm l
+..\tenrm i
+..\discretionary
+...\tenrm -
+..\tenrm d
+..\discretionary replacing 2
+...\tenrm o
+...\tenrm -
+..\tenrm o
+..\kern0.27779
+..\tenrm c
+..\tenrm i
+..\tenrm o
+..\tenrm u
+..\tenrm s
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+end
+case 9
+text=tomorrow's VAT-WAVE YYAvA AVoid overwhelmingly
+expect
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15755.83295fil
+..\tenrm t
+..\tenrm o
+..\tenrm m
+..\tenrm o
+..\tenrm r
+..\tenrm r
+..\tenrm o
+..\kern-0.27779
+..\tenrm w
+..\tenrm '
+..\tenrm s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm V
+..\kern-1.11113
+..\tenrm A
+..\kern-0.83334
+..\tenrm T
+..\tenrm -
+..\discretionary
+..\tenrm W
+..\kern-1.11113
+..\tenrm A
+..\kern-1.11113
+..\tenrm V
+..\tenrm E
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\tenrm Y
+..\tenrm Y
+..\kern-0.83334
+..\tenrm A
+..\tenrm v
+..\tenrm A
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\tenrm A
+..\kern-1.11113
+..\tenrm V
+..\kern-0.83334
+..\tenrm o
+..\tenrm i
+..\tenrm d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm o
+..\kern-0.27779
+..\tenrm v
+..\kern-0.27779
+..\tenrm e
+..\tenrm r
+..\tenrm w
+..\tenrm h
+..\tenrm e
+..\tenrm l
+..\tenrm m
+..\tenrm i
+..\tenrm n
+..\tenrm g
+..\tenrm l
+..\tenrm y
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+\vbox(6.94444+1.94444)x16000.0
+.\hbox(6.94444+1.94444)x16000.0, glue set 15755.83295fil
+..\tenrm t
+..\tenrm o
+..\tenrm m
+..\tenrm o
+..\tenrm r
+..\tenrm r
+..\tenrm o
+..\kern-0.27779
+..\tenrm w
+..\tenrm '
+..\tenrm s
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm V
+..\kern-1.11113
+..\tenrm A
+..\kern-0.83334
+..\tenrm T
+..\tenrm -
+..\discretionary
+..\tenrm W
+..\kern-1.11113
+..\tenrm A
+..\kern-1.11113
+..\tenrm V
+..\tenrm E
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\tenrm Y
+..\tenrm Y
+..\kern-0.83334
+..\tenrm A
+..\tenrm v
+..\tenrm A
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\tenrm A
+..\kern-1.11113
+..\tenrm V
+..\kern-0.83334
+..\tenrm o
+..\tenrm i
+..\tenrm d
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\tenrm o
+..\kern-0.27779
+..\tenrm v
+..\kern-0.27779
+..\tenrm e
+..\tenrm r
+..\discretionary
+...\tenrm -
+..\tenrm w
+..\tenrm h
+..\tenrm e
+..\tenrm l
+..\tenrm m
+..\discretionary
+...\tenrm -
+..\tenrm i
+..\tenrm n
+..\tenrm g
+..\tenrm l
+..\tenrm y
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+end

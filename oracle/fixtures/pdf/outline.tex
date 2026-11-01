@@ -1,0 +1,10 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\pdfoutline goto name{a} count 2 {First}
+\pdfoutline goto name{b} {Sub one}
+\pdfoutline attr{/C [1 0 0]} goto name{c} count -1 {Sub two}
+\pdfoutline goto num 3 {Deep}
+\pdfoutline user{<< /S /URI /URI (http://y) >>}{Second}
+\pdfoutline goto page 1 {/XYZ 0 0 null} {Third (with) parens}
+\pdfdest name{a} xyz A\par\pdfdest name{b} fit B\par\penalty-10000 \pdfdest name{c} fith C\pdfdest num 3 xyz\par
+\end

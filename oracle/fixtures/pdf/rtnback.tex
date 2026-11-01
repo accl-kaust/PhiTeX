@@ -1,0 +1,9 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0 \pdfobjcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=100pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt \topskip=10pt
+\output={\ifnum\outputpenalty=-10006 \global\setbox1\vbox{\unvbox255}\unvbox1 \else\shipout\box255\fi}
+\count1=1
+\def\next{Line \the\count1\par\advance\count1 by 1 \ifnum\count1<12 \expandafter\next\fi}
+\begingroup\next
+\begingroup\penalty-10006 \endgroup\endgroup
+After.\par
+\end

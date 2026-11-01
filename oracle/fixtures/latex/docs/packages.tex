@@ -1,0 +1,26 @@
+\documentclass{article}
+\usepackage{ifthen}
+\usepackage{calc}
+\usepackage{array}
+\usepackage{verbatim}
+\newcounter{k}
+\newlength{\w}
+\begin{document}
+\setlength{\w}{2cm + 3pt * 2}
+\setcounter{k}{3 * 4 - 2}
+The counter is \thek{} and the length is \the\w.
+\ifthenelse{\value{k} > 5}{Big.}{Small.}
+\begin{tabular}{>{\bfseries}l|p{3cm}}
+Bold & A paragraph column with some longer text in it. \\
+Again & Short.
+\end{tabular}
+
+\verb|\verb| shows \verb+$x_1$+ as it is.
+\begin{verbatim}
+  Verbatim text, $&#^_ all shown.
+\end{verbatim}
+\begin{comment}
+This is not typeset.
+\end{comment}
+After the comment.
+\end{document}

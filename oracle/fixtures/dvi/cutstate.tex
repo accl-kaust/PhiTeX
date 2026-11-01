@@ -1,0 +1,47 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\rm=cmr10 \rm \hsize=200pt \vsize=300pt \parindent=10pt
+\baselineskip=12pt \tolerance=10000 \parfillskip=0pt plus 1fil
+\def\two#1#2{[#1|#2]}
+\count1=1
+
+\begingroup \count1=2 \def\inner{inner}
+
+\message{\the\count1 \inner}
+A paragraph inside the group. \the\count1
+
+\endgroup
+\message{\the\count1}
+\ifx\undefined\inner \message{inner gone}\fi
+
+\iftrue
+\message{in the conditional}
+
+\message{still in it}
+\else
+\message{never}
+
+\message{never either}
+\fi
+\global
+\def\g{global}
+\message{\g}
+\two
+{first}
+{second}
+\def\longdef{a definition
+whose body goes on
+over lines}
+\message{\longdef}
+A paragraph
+whose lines
+go on and on
+past the cut
+\count1=7
+\message{\the\count1}
+and on.
+
+\catcode`\%=12 \def\pct{%}\catcode`\%=14
+\message{\pct}
+
+The end.
+\end

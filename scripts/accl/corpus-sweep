@@ -1,0 +1,75 @@
+#!/bin/bash
+# The corpus sweep (run locally, in a worktree):
+#
+#   scripts/accl/corpus-sweep [COMMIT]   ONE job on accl: the pinned pdfLaTeX
+#                                        manuals cold at -j 1 and -j 8 by the
+#                                        commit's gate store (its profile CLI,
+#                                        gate-bin/<sha>/cli/prof/phitex);
+#                                        prints the run name
+#   scripts/accl/corpus-sweep wait RUN   wait, fetch, print the table
+#   scripts/accl/corpus-sweep fetch RUN  fetch what is there so far
+#   scripts/accl/corpus-sweep table RUN  the table of a fetched run
+#
+# SWEEP_IDS=a,b limits the documents; SWEEP_JOBS, SWEEP_PAR and
+# SWEEP_TIMEOUT pass to scripts/ci/sweep.py; SWEEP_SLURM overrides the
+# job's size. Local copy: ~/code/flinner/phitex-runs/<run>/.
+#
+# CLUSTER=mc sweeps on the mc cluster (cluster.sh): the commit's gate
+# store there (a mc gate-fast builds it), mc's copy of the CI image and
+# of the oracle cache; local copy under ~/code/flinner/phitex-runs/mc/.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(git -C "$here" rev-parse --show-toplevel)
+# (H, part, runs: cluster.sh)
+. "$here/cluster.sh"
+slurm='export PATH=/opt/slurm/current/bin:$PATH;'
+export PATH="$here/sshmux":$PATH
+export RSYNC_RSH=$here/sshmux/ssh
+CI=code/flinner/phitex-ci
+reg=$runs/sweep-runs.txt
+
+submit() {
+  local c run j
+  c=$(git rev-parse "${1:-HEAD}^{commit}")
+  run=sweep-${c:0:12}-$(date +%Y%m%d-%H%M%S)
+  ssh $H "test -x code/flinner/phitex-runs/gate-bin/$c/cli/prof/phitex" || { echo "corpus-sweep: no gate store for $c" >&2; exit 1; }
+  ssh $H "mkdir -p $CI/runs/$run/harness/ci $CI/runs/$run/harness/xetex $CI/runs/$run/harness/data $CI/runs/$run/docs"
+  rsync -a --exclude=__pycache__ "$repo/scripts/ci/" "$H:$CI/runs/$run/harness/ci/"
+  rsync -a "$repo/scripts/xetex/fonts.conf" "$H:$CI/runs/$run/harness/xetex/"
+  rsync -a "$repo/ci/" "$H:$CI/runs/$run/harness/data/"
+  rsync -a "$here/corpus-sweep.sbatch" "$H:$CI/runs/$run/harness/"
+  j=$(ssh $H "$slurm cd $CI/runs/$run && sbatch --parsable -J sweep ${SWEEP_SLURM:-$part -c 48 --mem=128G -t 08:00:00} \
+    \$HOME/$CI/runs/$run/harness/corpus-sweep.sbatch $run \$HOME/code/flinner/phitex-runs/gate-bin/$c/cli/prof/phitex \
+    ${SWEEP_JOBS:-1,8} ${SWEEP_PAR:-1:20,8:5} ${SWEEP_TIMEOUT:-120} ${SWEEP_IDS:-}")
+  mkdir -p "$runs"
+  echo "$run $c job=$j" >> "$reg"
+  echo "corpus-sweep: $run, commit $c, job $j" >&2
+  echo "$run"
+}
+
+fetch() {
+  mkdir -p "$runs/$1"
+  rsync -a "$H:$CI/runs/$1/docs" "$runs/$1/" 2>/dev/null || true
+  rsync -a "$H:$CI/runs/$1/phitex-sweep-*.out" "$runs/$1/" 2>/dev/null || true
+}
+
+table() {
+  fetch "$1"
+  python3 -I "$repo/scripts/ci/sweep.py" table "$runs/$1/docs" --json "$runs/$1/table.json" | tee "$runs/$1/table.txt"
+}
+
+wait_run() {
+  local j
+  j=$(grep "^$1 " "$reg" | sed -n 's/.*job=\([0-9]*\).*/\1/p' | tail -1)
+  while [ "$(ssh $H "$slurm squeue -h -j $j -o %i" 2>/dev/null | wc -l)" != 0 ]; do sleep 120; done
+  ssh $H "$slurm sacct -j $j -X -n -P -o JobID,State,Elapsed,TotalCPU,MaxRSS,NodeList" 2>/dev/null || true
+  table "$1"
+}
+
+case ${1:-} in
+  wait) wait_run "$2" ;;
+  fetch) fetch "$2" ;;
+  table) table "$2" ;;
+  -h | --help) sed -n '2,18p' "$0" ;;
+  *) submit "${1:-HEAD}" ;;
+esac

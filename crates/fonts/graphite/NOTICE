@@ -1,0 +1,32 @@
+phitex-graphite is a port to Rust of graphite2 1.3.15, the Graphite
+smart-font rendering engine by SIL International
+(https://github.com/silnrsi/graphite, release 1.3.15, the version the
+TeX Live 2026 XeTeX this port is checked against runs with).
+
+    Copyright 2010-2026, SIL International, All rights reserved.
+
+graphite2 is offered under the terms of the MIT license, the Mozilla
+Public License 2.0, the GNU Lesser General Public License version 2.1 or
+(at your option) any later version, or the GNU General Public License
+version 2 or (at your option) any later version. This port takes it
+under the GNU Lesser General Public License, version 2.1 or later
+(LICENSE-graphite2 holds graphite2's license texts, the LGPL-2.1 among them), and is itself distributed under those terms; as part
+of PhiTeX (AGPL-3.0-only) it is used under version 3 of the GNU GPL
+terms the LGPL's section 3 allows, which the AGPL-3.0 is compatible with.
+
+From graphite2's licensing notice:
+
+    This library is free software; you can redistribute it and/or modify
+    it under the terms of the GNU Lesser General Public License as
+    published by the Free Software Foundation; either version 2.1 of
+    License, or (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+    Lesser General Public License for more details.
+
+Each ported source file names the graphite2 files it comes from and
+keeps their copyright line. The test texts in corpus/texts are the
+Universal Declaration of Human Rights in several languages (the
+"UDHR in Unicode" plain texts) and graphite2's tests/texts/awami_tests.txt.
