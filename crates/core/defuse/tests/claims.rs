@@ -614,3 +614,54 @@ fn a_commit_that_stops_defining_a_field_its_placement_predicts_keeps_its_segment
     assert_eq!(e.output(r), Some(v.int(5)));
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[x, y]`: places a `Claimer` of one sibling, then a `Text` of x and
+/// one of y: a paragraph's first line reading on into the next, as a
+/// document region's run places its lines.
+struct Lines(std::sync::OnceLock<(OpId, OpId)>);
+
+impl Operation for Lines {
+    fn name(&self) -> &'static str {
+        "lines"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let (claimer, text) = *self.0.get().expect("registered");
+        let (x, y) = (cx.args()[0], cx.args()[1]);
+        let one = cx.values().int(1);
+        cx.child(claimer, vec![one]);
+        cx.child(text, vec![x]);
+        cx.child(text, vec![y]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn a_taken_placement_remade_re_asks_its_claimer() {
+    // L places C (claiming one sibling), X and Y; C takes X. L's text
+    // edited, its run remakes X as X' (other args) and keeps C and Y: C
+    // reads X' and takes it, not keeping X's text while X' runs on its own.
+    for threads in [1, 4] {
+        let (e, o) = engine();
+        let v = e.values();
+        let lines = Arc::new(Lines(std::sync::OnceLock::new()));
+        let l_op = e.register(lines.clone());
+        let _ = lines.0.set((o.claimer, o.text));
+        let u = e.new_unit();
+        let l = e.push(u, l_op, vec![v.str("x"), v.str("y")]);
+        e.evaluate(threads).unwrap();
+        let c = op_nodes(&e, u, "claimer")[0];
+        let out = |c| v.with_list(e.output(c).unwrap(), <[ValueId]>::to_vec).unwrap();
+        assert_eq!(out(c), vec![v.str("x")], "-j{threads}");
+        e.replace(l, l_op, vec![v.str("x2"), v.str("y")]);
+        e.evaluate(threads).unwrap();
+        assert_eq!(op_nodes(&e, u, "claimer"), vec![c], "-j{threads}");
+        assert_eq!(out(c), vec![v.str("x2")], "-j{threads}");
+        let texts = op_nodes(&e, u, "text");
+        assert_eq!(texts.len(), 2, "-j{threads}");
+        assert_eq!(e.claimed(c), vec![texts[0]], "-j{threads}");
+        assert_eq!(e.node_info(texts[0]).unwrap().state, NodeState::Inert, "-j{threads}");
+        assert_eq!(e.node_info(texts[1]).unwrap().state, NodeState::Done, "-j{threads}");
+        assert!(e.check_invariants().is_empty());
+    }
+}

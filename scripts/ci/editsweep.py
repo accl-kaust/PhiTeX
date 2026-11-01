@@ -146,12 +146,15 @@ def one(args, c):
             p.kill()
         err.close()
     hist = md5(d / f"{job}.pdf")
-    # (the final text built cold, in a directory and cache of its own)
+    # (the final text built cold, in a directory and cache of its own: the
+    # document's own files as they came, the main file's final text. Not
+    # the watch's directory with its outputs deleted by their extensions:
+    # that deleted the documents' own PDF figures too (apa7's Figure1.pdf,
+    # asmeconf's sample-figure-*.pdf, acmart's sampleteaser.pdf), and the
+    # cold build drew draft boxes where the history had the figures)
     cold = WORK / "edit-cold" / tag
-    common.fresh_copy(d, cold)
-    for f in cold.iterdir():
-        if f.suffix in (".pdf", ".aux", ".toc", ".log", ".out", ".bbl", ".blg", ".bcf", ".idx", ".ind", ".ilg"):
-            f.unlink()
+    common.fresh_copy(Path(args.doc) / c["dir"], cold)
+    (cold / main).write_text(text, encoding="latin-1")
     ccache = WORK / "edit-cache" / f"{tag}-cold"
     shutil.rmtree(ccache, ignore_errors=True)
     ccache.mkdir(parents=True)
