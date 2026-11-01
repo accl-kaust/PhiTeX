@@ -1862,6 +1862,40 @@ mod tests {
         ])
     }
 
+    /// A line whose virtual fonts' characters reach real fonts keeps their
+    /// paths in its stand-in (its seventh word, the skeleton's place
+    /// `UNIT`), read back as they were; a line whose characters reach none
+    /// keeps its five words; the same paths give the same stand-in.
+    #[test]
+    fn unit_shape_keeps_the_reached_fonts() {
+        let v = Values::new();
+        let ch = |f: i64, c: i64| v.list(vec![v.int(T_CHAR), v.int(f), v.int(c)]);
+        let a = line(&v, vec![ch(3, 65), ch(3, 66)]);
+        let b = line(&v, vec![ch(3, 67)]);
+        let paths: std::collections::BTreeSet<Vec<u32>> = [vec![3, 0], vec![3, 1]].into();
+        let reached = crate::vfreach::paths_value(&v, &paths);
+        let none = crate::FxHashMap::default();
+        let stand_in = |items: &[ValueId], r: ValueId| {
+            let shape =
+                unit_shape(&v, 5, items, &none, false, &mut |_, _| r).expect("a line sealed");
+            list_of(&v, list_of(&v, list_of(&v, shape)[0])[1])[9]
+        };
+        let x = stand_in(&[a], reached);
+        assert_eq!(list_of(&v, x).len(), 7);
+        let s = sealed_of(&v, x).expect("a stand-in");
+        assert_eq!((s.skel, s.reached), (ValueId::UNIT, reached));
+        assert_eq!(
+            crate::vfreach::paths_of_value(&v, s.reached),
+            [vec![3, 0], vec![3, 1]]
+        );
+        // (another line of the same paths: the same words but its head's)
+        let y = stand_in(&[b], crate::vfreach::paths_value(&v, &paths));
+        assert_eq!(sealed_of(&v, y).map(|s| s.reached), Some(reached));
+        let z = stand_in(&[a], ValueId::UNIT);
+        assert_eq!(list_of(&v, z).len(), 5);
+        assert_eq!(sealed_of(&v, z).map(|s| s.reached), Some(ValueId::UNIT));
+    }
+
     /// A line of characters is sealed (its glue setting zero, its list a
     /// stand-in naming the piece, the item and the fonts); a line with a
     /// whatsit that reads its position at shipping is not; a stand-in
