@@ -2686,21 +2686,25 @@ impl<'c, 'a> Run<'c, 'a> {
         // (through the run's state: a command this run made before here
         // defined it, `crate::shell`)
         if let Some(x) = self.get(&crate::tools::out_name(key))? {
-            // (a tool that failed, `[message]`: no file, as when the
-            // program fails, and its message an error where the name is
-            // read)
-            if let [m] = list_of(self.v, x)[..] {
-                let msg = str_of(self.v, m);
-                if !self.tool_failures.contains(&msg) {
-                    self.diag(true, &msg);
-                    self.tool_failures.push(msg);
-                }
-                return Ok(Some(self.v.list(Vec::new())));
-            }
-            return Ok((x != ValueId::UNIT).then_some(x));
+            return Ok(self.tool_failed(x).or((x != ValueId::UNIT).then_some(x)));
         }
         let x = self.lb(crate::tools::made_field(self.v, key))?;
-        Ok(x.filter(|&x| x != ValueId::UNIT))
+        Ok(x.filter(|&x| x != ValueId::UNIT)
+            .map(|x| self.tool_failed(x).unwrap_or(x)))
+    }
+
+    /// A tool that failed, `[message]`: no file, as when the program
+    /// fails, and its message an error where the name is read (once).
+    fn tool_failed(&mut self, x: ValueId) -> Option<ValueId> {
+        let [m] = list_of(self.v, x)[..] else {
+            return None;
+        };
+        let msg = str_of(self.v, m);
+        if !self.tool_failures.contains(&msg) {
+            self.diag(true, &msg);
+            self.tool_failures.push(msg);
+        }
+        Some(self.v.list(Vec::new()))
     }
 
     /// The file kpathsea makes where its search misses `key` (`mktextfm`

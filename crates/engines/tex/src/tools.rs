@@ -586,6 +586,19 @@ impl Operation for ToolRun {
                 served.got.insert(n, x);
             }
         };
+        // (a tool that made nothing and said why: its errors where its
+        // output is read, as a failed run's are, not an absent file alone,
+        // biber's refusal of what it does not support)
+        if made.is_none() && fail.is_none() {
+            let errs: Vec<&str> = said.iter().filter(|s| s.0).map(|s| s.1.as_str()).collect();
+            if !errs.is_empty() {
+                fail = Some(format!(
+                    "{}: {output} not made: {}",
+                    tool.name(),
+                    errs.join("; ")
+                ));
+            }
+        }
         if let Some(m) = fail {
             return Ok(v.list(vec![v.str(&m)]));
         }
