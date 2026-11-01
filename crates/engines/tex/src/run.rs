@@ -2303,6 +2303,27 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(Some(x))
     }
 
+    /// The file `\\pdffilesize` and `\\filemoddate` find for `name`
+    /// ([`tex_names`]): `name.tex` where kpathsea tries it first and it is
+    /// there (the client's, cut, or one the job writes), else `name`.
+    pub(crate) fn tex_lookup(&mut self, name: &str) -> R<String> {
+        let (key, alt) = tex_names(name);
+        let Some(alt) = alt else {
+            return Ok(key);
+        };
+        if self.read_cut(&key)?.is_some() || self.file_lazy(&key)?.is_some() {
+            return Ok(key);
+        }
+        Ok(alt)
+    }
+
+    /// Font file `name` as the font side finds it (a TFM, a VF, a map,
+    /// an encoding, a font file, a PK font: [`crate::api::FONT_KEY`]),
+    /// as [`Run::file`] finds TeX's.
+    pub(crate) fn font_file(&mut self, name: &str) -> R<Option<ValueId>> {
+        self.file(&crate::api::font_key(name))
+    }
+
     /// Whether `key` is a file the job writes, read back as its text
     /// ([`Run::file`] reads it whole there), whose lines a `\\read` reads
     /// one by one ([`crate::tools::lines_field`], [`Run::written_line`]):
@@ -2720,7 +2741,9 @@ impl<'c, 'a> Run<'c, 'a> {
     /// makes none (no source, METAFONT's failure). One path for every
     /// client: the CLI's kpathsea, a Shelf host's files.
     pub(crate) fn font_made(&mut self, key: &str) -> R<Option<ValueId>> {
-        let Some(req) = phitex_mf::mktex::Request::of(key) else {
+        // (the font side's misses only: TeX's `\\input` of a `.tfm` runs
+        // no mktex, [`crate::api::FONT_KEY`])
+        let Some(req) = crate::api::font_name(key).and_then(phitex_mf::mktex::Request::of) else {
             return Ok(None);
         };
         let a =
@@ -3014,6 +3037,25 @@ impl<'c, 'a> Run<'c, 'a> {
         self.set(&f, self.v.int(i64::from_ne_bytes(n.to_ne_bytes())), true);
         self.read_point_here = true;
         self.read_back_done = true;
+        // (a file looked for in vain before, pending: this run is the
+        // read-back point now, the definitions from here keep their
+        // values here for this file's lines, [`Run::note_pre`]; the
+        // pending one, opened for writing later, is read back here too,
+        // [`Run::note_absent_read_point`]. Left pending, it kept the
+        // values of the definitions the file's own read-back made for a
+        // file never written: milog's `.aux` read back as its text
+        // defined `\TRP.5` after a vain lookup of a font's `.fd`, the
+        // lines written later read it as defined, and the rounds
+        // alternated between reading the file per field and as its
+        // text)
+        if let Some(p) = self.read_point_pending.take() {
+            self.muts += 1;
+            self.pending_pre.clear();
+            self.pending_locs.clear();
+            if !self.vain_after_point.contains(&p) {
+                self.vain_after_point.push(p);
+            }
+        }
         Ok(())
     }
 
@@ -6074,3 +6116,39 @@ pub(crate) const CLOSE: Effect = Effect::Scope(phitex_defuse::Brackets {
     opens: 0,
     before: false,
 });
+
+/// The names kpathsea's `tex` format tries for TeX's file `name`
+/// (`kpse_find_tex`, TeX Live's `try_std_extension_first`): `name.tex`
+/// unless `name` ends in one of the format's suffixes (`.tex`, `.sty`,
+/// `.cls`, `.fd`, `.aux`, `.bbl`, `.def`, `.clo`, `.ldf`), then, where
+/// its last component has an extension of another kind
+/// (`1.0.0.0.0.0-1`, `CJK.enc`), `name` itself (the second, `None`
+/// where there is none to try). A name without an extension is looked
+/// up as `name.tex` only.
+pub(crate) fn tex_names(name: &str) -> (String, Option<String>) {
+    const SUFFIXES: [&str; 9] = [
+        ".tex", ".sty", ".cls", ".fd", ".aux", ".bbl", ".def", ".clo", ".ldf",
+    ];
+    // (`./name` is the file `name` the job writes: one file, one key)
+    let name = same_dir(name);
+    if SUFFIXES.iter().any(|s| name.ends_with(s)) {
+        return (name.to_owned(), None);
+    }
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let alt = base.contains('.').then(|| name.to_owned());
+    (format!("{name}.tex"), alt)
+}
+
+/// File name `name` without its leading `./`s: the file of the current
+/// directory the job writes as `name` and reads as `./name`
+/// (`\\input{./example-spel/1.0.0.0.0.0-1}` of spelatex's
+/// `\\openout` of `example-spel/1.0.0.0.0.0-1.tex`), one key. (Looked
+/// up by the finder without it: kpathsea finds the current directory's
+/// first.)
+pub(crate) fn same_dir(name: &str) -> &str {
+    let mut n = name;
+    while let Some(r) = n.strip_prefix("./") {
+        n = r;
+    }
+    n
+}

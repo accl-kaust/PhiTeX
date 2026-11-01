@@ -966,11 +966,11 @@ impl Session {
             for (n, found) in b.reads() {
                 if let Some(e) = self.inputs.iter_mut().find(|(m, ..)| *m == n) {
                     if found && e.2.is_none() {
-                        e.2 = self.host.locate(&n);
+                        e.2 = self.host.locate_key(&n);
                     }
                     e.1 = found;
                 } else {
-                    let p = found.then(|| self.host.locate(&n)).flatten();
+                    let p = found.then(|| self.host.locate_key(&n)).flatten();
                     self.inputs.push((n, found, p));
                 }
             }
@@ -1728,7 +1728,7 @@ impl Session {
         }
         let host = self.host.clone();
         Arc::new(move |name: &str| {
-            let p = host.locate(name)?;
+            let p = host.locate_key(name)?;
             let bytes = host.read(&p)?;
             Some((p.to_string_lossy().into_owned(), bytes))
         })
@@ -1740,7 +1740,7 @@ impl Session {
         let host = self.host.clone();
         let buffers = self.buffers.clone();
         Arc::new(move |name: &str| {
-            let p = host.locate(name)?;
+            let p = host.locate_key(name)?;
             let shown = p.to_string_lossy().into_owned();
             let key = plain_name(&shown);
             let buffered = buffers

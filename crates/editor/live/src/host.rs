@@ -24,9 +24,28 @@ use crate::session::Job;
 
 /// The machine a session runs on.
 pub trait Host: Send + Sync {
-    /// Where the job's file `name` (as TeX names it) is found (kpathsea's
-    /// lookup, in the format its extension names); none: nowhere.
+    /// Where the job's file `name` (as TeX names it, `\\input`'s and
+    /// `\\openin`'s) is found (kpathsea's lookup in its `tex` format);
+    /// none: nowhere.
     fn locate(&self, name: &str) -> Option<PathBuf>;
+
+    /// Where the font side's file `name` (a TFM, a VF, a map, an
+    /// encoding, a font file, a PK font: [`phitex_tex::FONT_KEY`]) is
+    /// found (kpathsea's lookup in the format its extension names);
+    /// [`Host::locate`]'s by default.
+    fn locate_font(&self, name: &str) -> Option<PathBuf> {
+        self.locate(name)
+    }
+
+    /// Where the file a finder's key `key` names is
+    /// ([`phitex_tex::Finder`]): [`Host::locate_font`] for the font
+    /// side's, [`Host::locate`] for TeX's.
+    fn locate_key(&self, key: &str) -> Option<PathBuf> {
+        match phitex_tex::font_name(key) {
+            Some(name) => self.locate_font(name),
+            None => self.locate(key),
+        }
+    }
 
     /// The bytes of the file at `path` (as [`Host::locate`] found it, or
     /// as a diagnostic names it); none: not readable.

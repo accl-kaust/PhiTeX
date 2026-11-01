@@ -966,8 +966,10 @@ mod tests {
                 .find(|d| d.join("tex").is_file())
                 .map(|d| phitex_kpse::Kpse::new(&d, "tex", "tex"))
         });
-        let finder: crate::Finder = Arc::new(move |name: &str| {
-            let fmt = match name.rsplit('.').next() {
+        let finder: crate::Finder = Arc::new(move |key: &str| {
+            let font = crate::font_name(key);
+            let name = font.unwrap_or(key);
+            let fmt = match font.and_then(|n| n.rsplit('.').next()) {
                 Some("tfm") => phitex_kpse::Format::Tfm,
                 Some("map") => phitex_kpse::Format::FontMap,
                 Some("pfb" | "pfa") => phitex_kpse::Format::Type1,
