@@ -630,3 +630,18 @@ repro!(
 fn valign_columns() {
     check_threads("valign_columns", "pdf");
 }
+
+/// research corpus (classicthesis: a font number on page 31 three above
+/// pdfTeX's): microtype's letter-spaced small caps over mathpazo's virtual
+/// `pplrc9d`, expanded (`pplrc9d+80ls+20`), has a local font made anew
+/// (`pplrc9d+20`, `auto_expand_vf`) that is an expanded virtual font in
+/// turn, with local fonts of its own. pdfTeX makes them where the font is
+/// first shipped and never again; the engine keyed the inner ones by the
+/// page's handle of their virtual font, another on each page, and made
+/// them again on a later page whose step read other local fonts first.
+/// At -j1 and -j4 (oracle: pdflatex in the CI image, accl 22577; the base
+/// differs at byte 974).
+#[test]
+fn vf_expanded_local_vf() {
+    check_threads("vf_expanded_local_vf", "pdf");
+}
