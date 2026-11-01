@@ -1546,11 +1546,7 @@ impl PdfState {
         src: &dyn FontSource,
     ) -> Result<(), PdfError> {
         let file = image.name.clone();
-        let sep: &[u8] = if self.p.ptex_use_underscore > 0 {
-            b"_"
-        } else {
-            b"."
-        };
+        let sep: &[u8] = if self.p.ptex_underscore() { b"_" } else { b"." };
         let suppress = self.p.suppress_ptex_info;
         let objs = {
             let d = &mut self.epdf_docs[im.doc];

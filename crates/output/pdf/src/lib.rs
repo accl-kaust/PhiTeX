@@ -303,6 +303,16 @@ pub struct PdfParams {
     pub output_file_name: String,
 }
 
+impl PdfParams {
+    /// pdfTeX's `get_ptex_use_underscore`: `/PTEX_Fullbanner` and an
+    /// included PDF's `/PTEX_FileName` (for `.`) under
+    /// `\\pdfptexuseunderscore`, and always in a PDF 2.0 file.
+    #[must_use]
+    pub fn ptex_underscore(&self) -> bool {
+        self.ptex_use_underscore > 0 || self.major_version >= 2
+    }
+}
+
 impl Default for PdfParams {
     /// `IniTeX`'s values (pdfTeX §672).
     fn default() -> Self {

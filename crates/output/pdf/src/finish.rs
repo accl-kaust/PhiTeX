@@ -621,7 +621,7 @@ impl PdfState {
         }
         if self.p.suppress_ptex_info % 2 == 0 {
             let banner = self.p.banner.clone();
-            if self.p.ptex_use_underscore > 0 {
+            if self.p.ptex_underscore() {
                 self.print(b"/PTEX_Fullbanner ");
             } else {
                 self.print(b"/PTEX.Fullbanner ");
