@@ -35,6 +35,11 @@ fn scratch(name: &str, threads: usize) -> PathBuf {
 
 /// [`build`] at `threads` threads.
 fn build_j(name: &str, threads: usize) -> (Vec<u8>, String) {
+    build_out(name, threads, "pdf")
+}
+
+/// [`build_j`]'s output file `NAME.ext` (a DVI's, `ext` `dvi`).
+fn build_out(name: &str, threads: usize, ext: &str) -> (Vec<u8>, String) {
     let dir = scratch(name, threads);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
@@ -64,7 +69,7 @@ fn build_j(name: &str, threads: usize) -> (Vec<u8>, String) {
         .env_remove("PHITEX_COMPAT")
         .output()
         .expect("phitex runs");
-    let pdf = std::fs::read(dir.join(format!("{name}.pdf"))).unwrap_or_default();
+    let pdf = std::fs::read(dir.join(format!("{name}.{ext}"))).unwrap_or_default();
     let term =
         String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     (pdf, term)
@@ -121,6 +126,64 @@ fn check_aux(name: &str) {
 fn written_text_lost_write() {
     check_aux("written_text_lost_write");
 }
+
+/// `NAME.tex` built at one and at four threads: its output file
+/// (`NAME.ext`) equals the oracle's at both.
+fn check_threads(name: &str, ext: &str) {
+    let want = std::fs::read(fixtures().join(format!("{name}.{ext}"))).expect("the oracle");
+    for j in [1, 4] {
+        let (got, term) = build_out(name, j, ext);
+        if got != want {
+            let n = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
+            let errors: Vec<&str> = term
+                .lines()
+                .filter(|l| l.starts_with("error"))
+                .take(5)
+                .collect();
+            panic!(
+                "{name} -j{j}: the {ext} file differs from the oracle's at byte {n} ({} vs {} bytes); first errors: {errors:?}",
+                got.len(),
+                want.len()
+            );
+        }
+    }
+}
+
+/// A plain TeX repro whose lines a box register carries out of the
+/// output routine that sealed them (`crate::pages::seal`): its PDF
+/// (pdftex's) and its DVI (`NAME_dvi.tex`, etex's), each at one and at
+/// four threads.
+macro_rules! sealed_repro {
+    ($name:ident, $why:literal) => {
+        #[doc = $why]
+        #[test]
+        fn $name() {
+            check_threads(stringify!($name), "pdf");
+            check_threads(concat!(stringify!($name), "_dvi"), "dvi");
+        }
+    };
+}
+
+sealed_repro!(
+    sealed_box_held,
+    "a routine's page lines kept in a box register and placed by the next piece of the document (\\box): sealed in the register, read from their pieces' units where the page is written (oracles: pdftex and etex in the CI image)"
+);
+sealed_repro!(
+    sealed_unvbox_held,
+    "a routine's page lines kept in a box register and unboxed by the next piece (\\unvbox outside the finisher that sealed them, `Run::unseal_open`; oracles: pdftex and etex in the CI image)"
+);
+sealed_repro!(
+    sealed_lastbox_held,
+    "one line of a routine's page (\\lastbox) kept in a box register and placed by the next piece: a sealed line itself carried out of its finisher (oracles: pdftex and etex in the CI image)"
+);
+sealed_repro!(
+    sealed_lastbox_copied,
+    "one line of a routine's page kept in a box register, copied and unhboxed by the next piece (\\copy, \\unhcopy; oracles: pdftex and etex in the CI image)"
+);
+sealed_repro!(
+    sealed_given_back,
+    "a routine's page lines kept in a box register and given back by the next routine (\\unvbox in the output routine): the last page's lines all from other finishers' pieces, shipped by a finisher with no sealed window of its own, written with its lines read by piece; the DVI's lines were empty boxes with the finishers' definitions sealed and no places on such a page (oracles: pdftex and etex in the CI image)"
+);
 
 macro_rules! repro {
     ($name:ident, $why:literal) => {
