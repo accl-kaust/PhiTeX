@@ -505,7 +505,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
         cv::PDFTEX_BANNER => crate::pdfout::BANNER.to_owned(),
         cv::FONT_NAME | cv::FONT_OBJNUM => {
             let f = r.scan_font_ident()?;
-            let (name, obj) = font_num(r, f)?;
+            let (tag, obj) = font_num(r, f)?;
             let fid = u32::try_from(f).unwrap_or(0);
             {
                 let input = pdf_input(r, "fontobjnum", f, ValueId::UNIT)?;
@@ -518,14 +518,12 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                         _ => crate::pdfout::CmdOut::default(),
                     }
                 })?;
-                let (name, obj) = got
-                    .and_then(|g| Some((g.at(0)?, g.at(1)?)))
-                    .unwrap_or((name, obj));
+                let obj = got.and_then(|g| g.at(1)).unwrap_or(obj);
                 if c == cv::FONT_NAME {
-                    // (pdfTeX's number: the font's, after the fonts the
+                    // (pdfTeX's number: `obj_info` of the font's object,
+                    // the font that made it, after the fonts the
                     // shipouts before loaded)
-                    let _ = name;
-                    crate::pdfout::font_tag_read(r, f)?.to_string()
+                    tag.to_string()
                 } else {
                     obj.to_string()
                 }
@@ -874,6 +872,11 @@ fn pdf_date(t: i64) -> String {
 
 /// A font's resource number and object number (`pdf_init_font`),
 /// allocated when first asked.
+/// Font `f`'s object as a read-time command makes it (`pdf_init_font`):
+/// the number in its name and its object's. A scalable font shares the
+/// object of the font of its TFM name a command made one for before
+/// (`cmr10` and `cmr10 at 12pt`: one object, named by the first font's
+/// number, pdfTeX's `obj_info`), else it makes one, named by its own.
 fn font_num(r: &mut Run<'_, '_>, f: i64) -> R<(i64, i64)> {
     let v = r.v;
     if f == 0 {
@@ -883,10 +886,17 @@ fn font_num(r: &mut Run<'_, '_>, f: i64) -> R<(i64, i64)> {
     if let Some(x) = r.get(&field)? {
         return Ok((crate::val::int_at(v, x, 0), crate::val::int_at(v, x, 1)));
     }
-    let n = r.cint(crate::fields::cell::PDF_FONTCOUNT)? + 1;
-    r.set_cell(crate::fields::cell::PDF_FONTCOUNT, v.int(n), true);
+    let key = crate::pdfout::read_object_key(r, f)?;
+    let kf = format!("pdf:fontobj:{key}");
+    if let Some(x) = r.get(&kf)? {
+        r.set(&field, x, true);
+        return Ok((crate::val::int_at(v, x, 0), crate::val::int_at(v, x, 1)));
+    }
+    let n = crate::pdfout::font_tag_read(r, f)?;
     let o = alloc_obj(r)?;
-    r.set(&field, v.list(vec![v.int(n), v.int(o)]), true);
+    let x = v.list(vec![v.int(n), v.int(o)]);
+    r.set(&field, x, true);
+    r.set(&kf, x, true);
     Ok((n, o))
 }
 

@@ -3203,6 +3203,13 @@ pub(crate) fn object_key(fonts: &Fonts, id: FontId) -> String {
     }
 }
 
+/// Font `f`'s [`object_key`] as a read-time command sees it.
+pub(crate) fn read_object_key(r: &mut Run<'_, '_>, f: i64) -> R<String> {
+    let id = u32::try_from(f).unwrap_or(0);
+    let fs = fonts_for_with(r, &[id], false, false)?;
+    Ok(object_key(&fs, id))
+}
+
 /// The fonts a read-time write uses (an `\\immediate\\pdfxform`'s):
 /// an object made for each name no page shipped before and no read-time
 /// write before used (`pdf:rtfonts`, which the pages' allocations carry,

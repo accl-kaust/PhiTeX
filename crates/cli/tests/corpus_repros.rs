@@ -541,3 +541,7 @@ repro!(
     output_aftergroup,
     "research corpus (thuthesis: the text after a float placed here 3.488 pt higher than pdfTeX's): the output group's \\aftergroup tokens are read in the main vertical mode after the routine, before the text's next ones (§1100); thuthesis's \\@addtocurcol leaves \\vskip\\intextsep\\nointerlineskip there, and the finisher ran them on its own list, dropped. Now the finisher defines them and the first piece after it reads them first (oracle: pdflatex in the CI image, mc 77860)"
 );
+repro!(
+    pdf_fontname_share,
+    "\\pdffontname and \\pdffontobjnum of one scalable TFM at several sizes: pdfTeX's `pdf_init_font` makes one object for them, named by the first font's number (`obj_info`); PhiTeX made an object per font and named each by its own number (32 41 42 and objects 1 2 3 for pdfTeX's 32 32 32 and 1 1 1) (oracle: pdflatex in the CI image, mc 77924)"
+);
