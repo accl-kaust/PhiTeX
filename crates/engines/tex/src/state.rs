@@ -1566,9 +1566,14 @@ impl State {
         self.muts += 1;
         let mi = self.meta(loc);
         // (a register only stepped so far: its steps are no binding once
-        // it is set, the value replaces them)
+        // it is set at the run's base level or globally, the value
+        // replaces them; a local write in a group keeps them, the run's
+        // base binding, which the group's close restores to and the run
+        // publishes (§283: `\global\advance\c@page\@ne` then
+        // `{\advance\c@page\m@ne}` in an output routine, mparhack's))
         if let Some(s) = self.slot_ref(loc)
             && s.mapped != MAP_NONE
+            && (global || grp.is_none())
         {
             let s = self.slot(loc);
             s.map = Map::ID;
@@ -1998,7 +2003,9 @@ impl State {
         }
         for &l in &self.touched {
             let Some(s) = self.slot_ref(l) else { continue };
-            if s.mapped == MAP_NONE || s.meta != 0 {
+            // (steps a set has not replaced: a local write in a group
+            // since, [`State::set`], left them the base binding)
+            if s.mapped == MAP_NONE {
                 continue;
             }
             if s.map == Map::ID {
@@ -3075,5 +3082,36 @@ mod tests {
         st.restore(13);
         let (p, _) = st.publication(&v, true);
         assert!(p.iter().all(|p| p.loc != 13));
+    }
+
+    /// A global step, then a local write in a group (§283: mparhack's
+    /// `\global\advance\c@page\@ne` then `{\advance\c@page\m@ne}` in the
+    /// output routine): the close restores the stepped value, and the
+    /// step is still the run's global binding, read or not.
+    #[test]
+    fn a_local_write_in_a_group_keeps_a_global_step() {
+        let v = Values::new();
+        for read in [true, false] {
+            let mut st = State::new();
+            assert!(st.add(&v, 12, 1, true));
+            if read {
+                st.load_read(&v, 12, Some(v.int(1)));
+                assert_eq!(st.int_of(12, &v), 2);
+            }
+            let (g, sb, db, _) = st.open();
+            st.set(12, Entry::int(1), false, Some(g));
+            assert_eq!(st.int_of(12, &v), 1);
+            st.close(sb, db);
+            let p = st.publication(&v, true).0;
+            assert!(
+                p.iter()
+                    .any(|p| p.loc == 12 && p.what == Pub::Rel(1) && p.at == Locality::Global),
+                "read {read}: the step is not published"
+            );
+            if !read {
+                st.load_read(&v, 12, Some(v.int(1)));
+            }
+            assert_eq!(st.int_of(12, &v), 2, "read {read}");
+        }
     }
 }
