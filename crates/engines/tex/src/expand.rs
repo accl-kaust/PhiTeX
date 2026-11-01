@@ -1438,6 +1438,21 @@ impl Run<'_, '_> {
     /// prints its `)` when it ends.
     fn start_input(&mut self) -> R<()> {
         let name = self.scan_file_name()?;
+        // (a pipe, with shell escape on: the command's output read as the
+        // file, its name the whole `|cmd`, tex.ch's `open_in_or_pipe`)
+        if let Some(cmd) = name.strip_prefix('|')
+            && self.int32("shellescape")? != 0
+        {
+            let Some(text) = self.pipe_text(cmd)? else {
+                self.log("error", "I can't find file")?;
+                return self.fatal("*** (job aborted, file error in nonstop mode)");
+            };
+            self.log("open", &name)?;
+            self.push_toks([Tok::cs("\u{10FFFE}eof")]);
+            let f = crate::run::FileRest::new(self.v, self.v.str(&text), 0, self.v.str(&name));
+            self.input.push_file(f);
+            return Ok(());
+        }
         let key = if name.contains('.') {
             name.clone()
         } else {

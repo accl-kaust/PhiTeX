@@ -38,6 +38,9 @@ pub struct ShellRan {
     /// The names of the given files it read or looked at, if the host
     /// can tell; `None`: all of them.
     pub read: Option<Vec<String>>,
+    /// What it wrote to its standard output: the text a piped input
+    /// (`\\input|cmd`, web2c's `open_in_or_pipe`) reads.
+    pub stdout: Vec<u8>,
 }
 
 /// Runs the commands `\write18` allows ([`crate::Options::shell_hook`]).
@@ -87,6 +90,20 @@ pub(crate) enum Decision {
     Any(String),
     /// 2: restricted and allowed: the command runs as quoted here.
     Allowed(String),
+}
+
+/// texmfmp.c's `runpopen` (a piped input's command, `open_in_or_pipe`):
+/// as [`runsystem`] decides, but a quoted command with a `|` is not
+/// refused.
+pub(crate) fn runpopen(cmd: &str, restricted: bool, allowed: &[String]) -> Decision {
+    if !restricted {
+        return Decision::Any(cmd.to_owned());
+    }
+    match shell_cmd_is_allowed(cmd, allowed) {
+        Ok(Some(safe)) => Decision::Allowed(safe),
+        Ok(None) => Decision::Restricted,
+        Err(()) => Decision::QuotationError,
+    }
 }
 
 /// C's `isspace` in the C locale.
@@ -236,6 +253,7 @@ pub(crate) struct Made {
     status: i32,
     wrote: Vec<(String, String)>,
     removed: Vec<String>,
+    stdout: String,
 }
 
 /// One call remembered: the files it read with their texts' keys (`None`:
@@ -381,6 +399,7 @@ fn call(ops: &crate::run::Ops, cmd: &str, files: &[(String, String)]) -> Option<
         status: r.status,
         wrote,
         removed,
+        stdout: chars(&r.stdout),
     });
     memo.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -447,10 +466,16 @@ impl Run<'_, '_> {
     /// The host's call is memoised by the command and the files it read
     /// ([`Memo`]).
     pub(crate) fn shell_run(&mut self, cmd: &str) -> R<()> {
+        self.shell_call(cmd).map(|_| ())
+    }
+
+    /// [`Run::shell_run`]'s call, what it made given back; `None` with
+    /// no hook.
+    fn shell_call(&mut self, cmd: &str) -> R<Option<Arc<Made>>> {
         let v = self.v;
         let files = self.shell_view()?;
         let Some(made) = call(self.ops, cmd, &files) else {
-            return Ok(());
+            return Ok(None);
         };
         if made.status != 0 && crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!("shell: {cmd:?} returned {}", made.status);
@@ -468,7 +493,50 @@ impl Run<'_, '_> {
             self.contribute(NAMES, v.seq_unit(name));
             self.contribute(OUTS, v.seq_unit(v.list(vec![name, x])));
         }
-        Ok(())
+        Ok(Some(made))
+    }
+
+    /// A piped input's text (`\\input|cmd`, `\\openin`'s, web2c's
+    /// `open_in_or_pipe` with shell escape on): `cmd` as [`runpopen`]
+    /// allows it, run through the host as a `\\write18` is, here in TeX's
+    /// order, its standard output read as the file's text; `None` where
+    /// the pipe does not open (the command refused, or no host to run
+    /// it), said.
+    pub(crate) fn pipe_text(&mut self, cmd: &str) -> R<Option<String>> {
+        let restricted = self.int32("shellescape")? == 2;
+        let allowed = self
+            .ops
+            .tool_opts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shell_commands
+            .clone();
+        let name = cmd.split_whitespace().next().unwrap_or_default().to_owned();
+        let quoted = match runpopen(cmd, restricted, &allowed) {
+            Decision::Any(c) | Decision::Allowed(c) => c,
+            Decision::QuotationError => {
+                self.diag(
+                    true,
+                    &format!("runpopen quotation error in command line: {cmd}"),
+                );
+                return Ok(None);
+            }
+            Decision::Restricted => {
+                self.diag(
+                    true,
+                    &format!("the piped input |{cmd}: `{name}' needs shell escape, so it was not run; to run it, build with the command-line phitex --shell-escape (never in the browser)"),
+                );
+                return Ok(None);
+            }
+        };
+        let Some(made) = self.shell_call(&quoted)? else {
+            self.diag(
+                true,
+                &format!("the piped input |{cmd}: `{name}' is a program, and this build runs none (the browser and the editors' built-in engine never run programs); to run it, build with the command-line phitex"),
+            );
+            return Ok(None);
+        };
+        Ok(Some(made.stdout.clone()))
     }
 }
 

@@ -1763,6 +1763,21 @@ impl Run<'_, '_> {
         if c != 0 {
             self.scan_optional_equals()?;
             let name = self.scan_file_name()?;
+            // (a pipe, with shell escape on: the command's output read as
+            // the stream's lines, `open_in_or_pipe`; a pipe that does not
+            // open leaves the stream closed)
+            if let Some(cmd) = name.strip_prefix('|')
+                && self.int32("shellescape")? != 0
+            {
+                if let Some(text) = self.pipe_text(cmd)? {
+                    let lines: Vec<ValueId> = crate::expand::split_lines(&text)
+                        .iter()
+                        .map(|l| v.str(l))
+                        .collect();
+                    self.set(&field, v.list(vec![v.int(1), v.list(lines)]), true);
+                }
+                return Ok(());
+            }
             let key = if name.contains('.') {
                 name.clone()
             } else {

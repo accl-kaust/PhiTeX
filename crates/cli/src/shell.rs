@@ -192,13 +192,16 @@ impl ShellHook for ProcessHook {
             .arg(command)
             .current_dir(&dir)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
         // (`system`'s status: the shell's own 127 when it cannot start)
-        let status = cmd.status().map_or(127 << 8, ExitStatusExt::into_raw);
+        // (and its standard output, which a piped input reads)
+        let (status, stdout) = cmd
+            .output()
+            .map_or((127 << 8, Vec::new()), |o| (o.status.into_raw(), o.stdout));
         // (what it read, before this reads anything back: a directory
         // listed, all of it)
         let read = if track && !dirs.iter().any(|d| d.is_dir() && was_read(d)) {
@@ -249,6 +252,7 @@ impl ShellHook for ProcessHook {
             wrote,
             removed,
             read,
+            stdout,
         }
     }
 }

@@ -76,6 +76,7 @@ impl ShellHook for Fake {
                     )],
                     removed: Vec::new(),
                     read: Some(vec![arg(2)]),
+                    stdout: Vec::new(),
                 }
             }
             "hl" => {
@@ -90,8 +91,14 @@ impl ShellHook for Fake {
                     wrote: vec![(arg(3), format!("\\gdef\\made{{[{t}]}}\n").into_bytes())],
                     removed: vec![arg(2)],
                     read: Some(vec![arg(2)]),
+                    stdout: Vec::new(),
                 }
             }
+            "echo" => ShellRan {
+                read: Some(Vec::new()),
+                stdout: format!("{}\n", w[2..].join(" ")).into_bytes(),
+                ..ShellRan::default()
+            },
             "sleep" => {
                 let p = self.progress.lock().unwrap().clone();
                 let before = p.as_ref().map_or(0, |p| p.done());
@@ -159,6 +166,31 @@ fn got(log: &str) -> Vec<String> {
     log.lines()
         .filter_map(|l| l.strip_prefix("GOT:").map(str::to_owned))
         .collect()
+}
+
+/// A piped input (`\input|cmd`, `\openin`'s, web2c's `open_in_or_pipe`)
+/// reads the command's output as the file's text, the command allowed in
+/// restricted mode as a `\write18`'s is (hardwrap.sty's
+/// `\@@input"|kpsewhich -var-value=max_print_line"`); one not allowed
+/// leaves the stream closed. At -j1 and -j8.
+#[test]
+fn a_piped_input_reads_the_commands_output() {
+    let doc = r#"\count1=\input|"fakecmd echo 79"\relax
+\openin2=|"fakecmd echo 42" \read2 to\x \closein2
+\openin3=|"rm -rf nothing" \ifeof3 \def\y{closed}\else\def\y{open}\fi
+\immediate\write16{GOT:\the\count1,\x,\y}
+\bye
+"#;
+    for threads in [1, 8] {
+        let fake = Arc::new(Fake::default());
+        let b = common::build(
+            options("pipe", Some(fake.clone()), threads),
+            Some(&common::plain()),
+            doc,
+        );
+        let (_, log) = b.output();
+        assert_eq!(got(&log), ["79,42 ,closed"], "-j{threads}: {log}");
+    }
 }
 
 /// What a command made is read right after it in TeX's order; a call is
