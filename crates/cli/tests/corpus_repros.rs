@@ -454,6 +454,21 @@ fn pdfdest_struct() {
     check_threads("pdfdest_struct", "pdf");
 }
 
+/// A file looked for in vain, then the `.aux` read back as its text
+/// (transparent's `\transparent@use` lines, the first defining
+/// `\TRP.5`, which the next read): the lines written later are read
+/// under the state at the read-back point, the values the read-back's
+/// own definitions replaced. The vain lookup left a pending read-back
+/// point that took those values for a file never written, so the lines
+/// read `\TRP.5` as defined and the rounds alternated between reading
+/// the `.aux` per field and as its text, never settling (the milog
+/// manual: "still changed after 5 rounds"). At -j1 and -j4 (oracle:
+/// pdflatex in the CI image, accl 22529, passing there).
+#[test]
+fn read_back_after_vain_lookup() {
+    check_threads("read_back_after_vain_lookup", "pdf");
+}
+
 /// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
 /// for every font it loads; libertine's T1 fonts are virtual) set its
 /// fields without reading it in (no `do_vf`): pdfTeX numbers its local

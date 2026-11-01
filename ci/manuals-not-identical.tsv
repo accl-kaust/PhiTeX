@@ -52,7 +52,6 @@ latex_lie-hasse_lie-hasse	differs: page 10: obj 182 (page 10, untyped) line 6730
 latex_lineno_lineno	-j1 differs: page 1: obj 204 (page 1, untyped) line 6: oracle "/F44 20.6625 Tf 148.918 652.829 Td [(lineno.sty)-1050(v5.7)-525(2026/0", phitex "/F44 20.6625 Tf 148.918 652.829 Td [(lineno.sty)-1050(v5.7)-525(2026/0"; -j4 differs: page 3: obj 253 (page 3, untyped) line 6: oracle "/F66 11.9552 Tf 102.884 738.009 Td [(1)-979(INTR)27(ODUCTIONS)]TJ/F47 ", phitex "/F66 11.9552 Tf 102.884 738.009 Td [(1)-979(INTR)27(ODUCTIONS)]TJ/F47 " (not the same in each run: the first sweep had -j1 timeout, -j4 exact)
 latex_mathfont_mathfont-user-guide	differs: page 3: obj 184 (Catalog) line 9: oracle "<end>", phitex "<end>"
 latex_metacapture_metacapture-doc	differs: page 25: obj 848 (Catalog) line 23: oracle "<end>", phitex "<end>"
-latex_milog_milog-formular	differs: page 1: obj 6 (page 1, untyped) line 24: oracle "/TRP.5 gs", phitex "q"
 latex_milsymb_milsymb	differs: page 48: obj 926 (page 48, untyped) line 27: oracle "q", phitex "Q"
 latex_minitoc_examples_mtc-2c	differs: page 1: obj 47 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 9 vs 10)
 latex_minutes_Protokol	differs: page 3: obj 393 (Catalog) line 4: oracle "/PageLabels <<", phitex "/Pages 5 0 R" (pages 33 vs 31)

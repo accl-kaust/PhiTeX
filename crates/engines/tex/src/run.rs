@@ -3037,6 +3037,25 @@ impl<'c, 'a> Run<'c, 'a> {
         self.set(&f, self.v.int(i64::from_ne_bytes(n.to_ne_bytes())), true);
         self.read_point_here = true;
         self.read_back_done = true;
+        // (a file looked for in vain before, pending: this run is the
+        // read-back point now, the definitions from here keep their
+        // values here for this file's lines, [`Run::note_pre`]; the
+        // pending one, opened for writing later, is read back here too,
+        // [`Run::note_absent_read_point`]. Left pending, it kept the
+        // values of the definitions the file's own read-back made for a
+        // file never written: milog's `.aux` read back as its text
+        // defined `\TRP.5` after a vain lookup of a font's `.fd`, the
+        // lines written later read it as defined, and the rounds
+        // alternated between reading the file per field and as its
+        // text)
+        if let Some(p) = self.read_point_pending.take() {
+            self.muts += 1;
+            self.pending_pre.clear();
+            self.pending_locs.clear();
+            if !self.vain_after_point.contains(&p) {
+                self.vain_after_point.push(p);
+            }
+        }
         Ok(())
     }
 
