@@ -437,6 +437,13 @@ def cmd_pin(args):
                          "(no \\documentclass and \\begin{document}: its source is elsewhere, e.g. a .dtx "
                          "in texmf-dist/source, which the Arch packages leave out)"})
     old = common.read_json(args.out, {})
+    # (a document's own time limit and its reason, set by hand beside
+    # its entry, kept across a re-pin)
+    own = {c["id"]: c for c in old.get("manuals", [])}
+    for c in pinned:
+        for k in ("time_limit_s", "time_limit_why"):
+            if k in own.get(c["id"], {}):
+                c[k] = own[c["id"]][k]
     doc = {
         "image": args.image or old.get("image"),
         "texlive": "TeX Live 2026.1 (svn r78408), Arch Linux packages of the 2026-09-25 archive snapshot, texlive-doc",
