@@ -213,7 +213,7 @@ impl Run<'_, '_> {
                     },
                 }
             }
-            VKey::Named(name) => match self.file(&format!("{name}.tfm"))? {
+            VKey::Named(name) => match self.font_file(&format!("{name}.tfm"))? {
                 // (`read_font_info` failing: the null font)
                 None => none(),
                 Some(file) => {

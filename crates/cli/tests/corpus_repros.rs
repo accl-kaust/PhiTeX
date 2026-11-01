@@ -412,6 +412,34 @@ fn pdfmapfile_vf_local_fonts() {
     }
 }
 
+/// `\input` of a name with a font's extension: CJK.sty's `\input
+/// CJK.enc` is TeX's lookup, kpathsea's `tex` format (TEXINPUTS), as
+/// `\openin`'s; the font side's lookups (a map line's encoding, a TFM)
+/// are in the format the extension names. The finders took the format
+/// from the extension for both, so CJK.enc was looked for among the
+/// encodings and not found ("I can't find file": the manuals of cjk-ko,
+/// kotex-utf and nstc-proposal). At -j1 and -j4 (oracle: pdflatex in
+/// the CI image, accl 22458; passing in 22464).
+#[test]
+fn input_enc_named_file() {
+    check_threads("input_enc_named_file", "pdf");
+}
+
+/// TeX's lookup of a name whose last component has an extension the
+/// `tex` format does not know (`1.0.0-1`, spelatex's chunk files): as
+/// kpathsea (TeX Live's `try_std_extension_first`), `name.tex` first,
+/// then the name itself, for `\input`, `\openin` and `\pdffilesize`;
+/// and `./name` the file the job writes as `name`. A dot anywhere in the
+/// name (`./` too) took it as given, and `./` made another file than the
+/// job's, so `\input{./example-spel/1.0.0.0.0.0-1}` found nothing and
+/// LaTeX asked the terminal for another name (the spelatex manual:
+/// "cannot \read from terminal in nonstop modes"). At -j1 and -j4
+/// (oracle: pdflatex in the CI image, accl 22475; passing in 22505).
+#[test]
+fn input_dotted_name() {
+    check_threads("input_dotted_name", "pdf");
+}
+
 /// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
 /// for every font it loads; libertine's T1 fonts are virtual) set its
 /// fields without reading it in (no `do_vf`): pdfTeX numbers its local

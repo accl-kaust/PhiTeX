@@ -405,6 +405,16 @@ fn font_suffix(format: phitex_tex::KpseFormat) -> &'static str {
     }
 }
 
+/// The name and the kpathsea format of a finder's key
+/// ([`phitex_tex::Finder`]): the font side's in the format its extension
+/// names, TeX's own (`\\input`, `\\openin`) in the `tex` format.
+fn lookup(key: &str) -> (&str, &'static str) {
+    match phitex_tex::font_name(key) {
+        Some(name) => (name, phitex_shelf::format_of(name)),
+        None => (key, "tex"),
+    }
+}
+
 impl ShelfHost {
     fn find(&self, name: &str) -> Option<(String, Vec<u8>)> {
         if let Some(p) = project(name) {
@@ -417,6 +427,10 @@ impl ShelfHost {
 
 impl Host for ShelfHost {
     fn locate(&self, name: &str) -> Option<PathBuf> {
+        project(name).or_else(|| self.files.find_in(name, "tex").map(|(p, _)| PathBuf::from(p)))
+    }
+
+    fn locate_font(&self, name: &str) -> Option<PathBuf> {
         project(name).or_else(|| self.files.locate(name).map(PathBuf::from))
     }
 
@@ -448,8 +462,9 @@ impl Host for ShelfHost {
     /// files, not the project's, as fmtutil builds it elsewhere).
     fn format_finder(&self) -> Option<Finder> {
         let f = self.files.clone();
-        Some(Arc::new(move |name: &str| {
-            f.find(name).map(|(p, b)| (p, b.to_vec()))
+        Some(Arc::new(move |key: &str| {
+            let (name, format) = lookup(key);
+            f.find_in(name, format).map(|(p, b)| (p, b.to_vec()))
         }))
     }
 
@@ -457,7 +472,10 @@ impl Host for ShelfHost {
     /// warm start checks the format against them without fetching them.
     fn content_key(&self) -> Option<phitex_tex::ContentKey> {
         let f = self.files.clone();
-        Some(Arc::new(move |name: &str| f.key(name)))
+        Some(Arc::new(move |key: &str| {
+            let (name, format) = lookup(key);
+            f.key_in(name, format)
+        }))
     }
 
     /// BibTeX's and makeindex's files, the format's suffix added where the

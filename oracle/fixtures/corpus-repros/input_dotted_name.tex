@@ -1,0 +1,14 @@
+% A name whose last component has an extension TeX's format does not know
+% (`1.0.0-1`, spelatex's chunk files): kpathsea's tex format tries
+% `name.tex` first, then the name itself.
+\documentclass{article}
+\begin{document}
+\immediate\openout9=1.0.0-1.tex
+\immediate\write9{Written text.}
+\immediate\closeout9
+\input{1.0.0-1}
+\IfFileExists{./1.0.0-1}{Found.}{Not found.}
+\input{./2.0-1}
+Size \pdffilesize{2.0-1}.
+\IfFileExists{3.0-1}{Found as is.}{Not found.}
+\end{document}

@@ -24,8 +24,31 @@ use crate::run::{Ops, slice_args, slice_args_in_file};
 use crate::val::{field_name, int_of, list_of, str_of};
 
 /// Finds a file by the name TeX asks for: the name to print and the
-/// bytes.
+/// bytes. The key is TeX's own lookup (`\\input`, `\\openin`,
+/// `\\pdfximage`, `\\pdffilesize`: kpathsea's `tex` format whatever the
+/// name's extension), or the font side's, its name behind [`FONT_KEY`]
+/// ([`font_name`]: in the format the extension names, a TFM, a VF, a
+/// map, an encoding, a font file or a PK font).
 pub type Finder = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
+
+/// What a font-side lookup's key starts with ([`Finder`]): pdfTeX finds
+/// `\\font`'s TFM, a VF, a map and a map line's encoding and font file
+/// in kpathsea's font formats, TeX's `\\input` and `\\openin` in its
+/// `tex` format, so `\\input CJK.enc` reads TEXINPUTS's `CJK.enc`, not an
+/// encoding of ENCFONTS's: two lookups, two keys.
+pub const FONT_KEY: &str = "\u{1}font:";
+
+/// The key of the font side's lookup of file `name` ([`FONT_KEY`]).
+pub(crate) fn font_key(name: &str) -> String {
+    format!("{FONT_KEY}{name}")
+}
+
+/// A [`Finder`]'s key as its lookup: the name the font side asks for,
+/// or `None` for TeX's own lookup of the key as it is.
+#[must_use]
+pub fn font_name(key: &str) -> Option<&str> {
+    key.strip_prefix(FONT_KEY)
+}
 
 /// A file located and keyed by the name TeX asks for, no bytes read
 /// ([`Options::content_key`]): the path the finder would give and its

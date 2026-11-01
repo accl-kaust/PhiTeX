@@ -1392,7 +1392,7 @@ fn ps_maps() -> &'static PsCache {
 /// `pdftex.map` by PostScript name: a pure function's memo.
 pub(crate) fn default_ps_map(r: &mut Run<'_, '_>) -> R<Option<Arc<PsMap>>> {
     let v = r.v;
-    let Some(x) = r.file("pdftex.map")? else {
+    let Some(x) = r.font_file("pdftex.map")? else {
         return Ok(None);
     };
     let Some(&m) = list_of(v, x).get(1) else {
@@ -1512,7 +1512,7 @@ pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>
     let v = r.v;
     // (the writer's lookup: a file absent here is no read-back point)
     let was = std::mem::replace(&mut r.writer_lookup, true);
-    let found = r.file(name);
+    let found = r.font_file(name);
     r.writer_lookup = was;
     Ok(found?.and_then(|x| list_of(v, x).get(1).map(|&t| text_bytes(v, t))))
 }
@@ -1531,7 +1531,7 @@ pub(crate) fn text_bytes(v: &Values, t: ValueId) -> Arc<[u8]> {
 /// `pdftex.map`, parsed.
 fn default_map(r: &mut Run<'_, '_>) -> R<Option<Arc<Map>>> {
     let v = r.v;
-    let Some(x) = r.file("pdftex.map")? else {
+    let Some(x) = r.font_file("pdftex.map")? else {
         return Ok(None);
     };
     let Some(&m) = list_of(v, x).get(1) else {
@@ -1662,7 +1662,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
             let lname = String::from_utf8_lossy(&lf.name).into_owned();
             let g = if let Some(x) = known.iter().find(|x| x.1.name == lname && x.1.size == fs) {
                 x.0
-            } else if let Some(file) = r.file(&format!("{lname}.tfm"))? {
+            } else if let Some(file) = r.font_file(&format!("{lname}.tfm"))? {
                 let g = LOCAL_FONTS + u32::try_from(out.locals.len()).unwrap_or(0);
                 out.locals.push((lname.clone(), fs, None));
                 known.push((
@@ -1743,7 +1743,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
         out.vf_base.insert(f, u32::try_from(b).unwrap_or(0));
     }
     let mut wanted = known;
-    if space && let Some(x) = r.file("pdftexspace.tfm")? {
+    if space && let Some(x) = r.font_file("pdftexspace.tfm")? {
         // pdfTeX loads the space font at the shipout that first needs
         // it, as the next internal font number (the engine numbers no
         // font for it)
@@ -2506,7 +2506,7 @@ fn ship_apart(
     let maps = r
         .get_loc(crate::fields::cell::PDF_MAPS)?
         .map_or(0, ValueId::raw);
-    let pdfmap = r.file("pdftex.map")?.map_or(0, ValueId::raw);
+    let pdfmap = r.font_file("pdftex.map")?.map_or(0, ValueId::raw);
     let b = &pc.base_in;
     let mut words = vec![
         page_v.raw(),

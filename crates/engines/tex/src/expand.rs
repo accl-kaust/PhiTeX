@@ -1453,11 +1453,9 @@ impl Run<'_, '_> {
             self.input.push_file(f);
             return Ok(());
         }
-        let key = if name.contains('.') {
-            name.clone()
-        } else {
-            format!("{name}.tex")
-        };
+        // (kpathsea's `tex` format: `name.tex` first unless the name has
+        // one of its suffixes, then `name`, [`crate::run::tex_names`])
+        let key = crate::run::tex_names(&name).0;
         // (a file the job writes whose text the client gave, not read
         // back yet: read back from that text here, its read-back point,
         // `Run::seed_written`)
@@ -1477,10 +1475,11 @@ impl Run<'_, '_> {
         let x = match x {
             Some(x) => Some(x),
             None => {
+                let name = crate::run::same_dir(&name);
                 if key == name {
                     None
                 } else {
-                    self.read_file_lazy(&name)?
+                    self.read_file_lazy(name)?
                 }
             }
         };
