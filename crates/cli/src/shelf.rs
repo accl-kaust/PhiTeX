@@ -132,7 +132,9 @@ fn base_urls() -> Vec<String> {
     }
 }
 
-/// The first of [`base_urls`] not known to be unreachable this process.
+/// The host of [`base_urls`] asked first: the last one that answered
+/// (one a request could not reach hands it to the next, round to the
+/// first after the last).
 static HOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub(crate) fn agent() -> &'static ureq::Agent {
@@ -147,31 +149,36 @@ pub(crate) fn agent() -> &'static ureq::Agent {
     })
 }
 
-/// `name` of the release's directory on the server: its bytes. A host
-/// that cannot be reached (no connection, TLS refused) is passed over
-/// for the next for the rest of the process; one that answers, with
-/// anything, is the answer.
+/// `name` of the release's directory on the server: its bytes. Each
+/// host is asked once, from [`HOST`] on; one that cannot be reached (no
+/// connection, TLS refused, the connection dropped) is passed over for
+/// the next, here and for the requests after; one that answers, with
+/// anything, is the answer. A failure is this request's only: the next
+/// asks the hosts again (one dropped connection had made every later
+/// fetch of the process fail, the Shelf release's check, run 41296048903).
 fn get(name: &str) -> Result<Vec<u8>, String> {
     use std::sync::atomic::Ordering;
     let bases = base_urls();
     let mut failed = Vec::new();
-    let (mut r, url) = loop {
-        let k = HOST.load(Ordering::Relaxed);
-        let Some(base) = bases.get(k) else {
-            return Err(format!(
-                "{name}: no Shelf host reached: {}",
-                failed.join("; ")
-            ));
-        };
-        let url = format!("{base}{name}");
-        match agent().get(&url).call() {
-            Ok(r) => break (r, url),
-            Err(e @ ureq::Error::StatusCode(_)) => return Err(format!("{url}: {e}")),
-            Err(e) => {
-                failed.push(format!("{url}: {e}"));
-                let _ = HOST.compare_exchange(k, k + 1, Ordering::Relaxed, Ordering::Relaxed);
+    let first = HOST.load(Ordering::Relaxed) % bases.len();
+    let (mut r, url) = 'hosts: {
+        for i in 0..bases.len() {
+            let k = (first + i) % bases.len();
+            let url = format!("{}{name}", bases[k]);
+            match agent().get(&url).call() {
+                Ok(r) => break 'hosts (r, url),
+                Err(e @ ureq::Error::StatusCode(_)) => return Err(format!("{url}: {e}")),
+                Err(e) => {
+                    failed.push(format!("{url}: {e}"));
+                    let next = (k + 1) % bases.len();
+                    let _ = HOST.compare_exchange(k, next, Ordering::Relaxed, Ordering::Relaxed);
+                }
             }
         }
+        return Err(format!(
+            "{name}: no Shelf host reached: {}",
+            failed.join("; ")
+        ));
     };
     r.body_mut()
         .with_config()
