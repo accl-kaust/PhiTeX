@@ -1819,7 +1819,7 @@ fn frontier_back(eng: &Engine, n: &Node, wake: &Wake) {
     }
     let mut fr = eng.frontier.load(Ordering::Acquire);
     loop {
-        if fr == by.raw() + 1 || (fr != 0 && !past_frontier(eng, &b, fr)) {
+        if fr == by.raw() + 1 || (fr != 0 && !past_frontier(eng, b, fr)) {
             return;
         }
         match eng
