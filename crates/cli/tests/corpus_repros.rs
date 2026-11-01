@@ -615,6 +615,10 @@ repro!(
     pdf_fontname_share,
     "\\pdffontname and \\pdffontobjnum of one scalable TFM at several sizes: pdfTeX's `pdf_init_font` makes one object for them, named by the first font's number (`obj_info`); each font made an object of its own and was named by its own number (32 41 42 and objects 1 2 3 for pdfTeX's 32 32 32 and 1 1 1) (oracle: pdflatex in the CI image, mc 77924)"
 );
+repro!(
+    page_counter_after_own_page,
+    "manuals (gu's gudoc: pages 10-14 numbered 8,9,8,9,10, /PageLabels written): a page fires at a candidate inside a conditional the text's run opens, and a float after it reads \\c@page and puts it back (tabularx's trial runs, \\TX@ckpt); the run read the register at its own position, the value before that page, and the restore took the page's steps back; now a piece's read of a page-layer register after a candidate of its own a page fires at ends the run there, its rest a resume after the page's finisher (oracle: pdflatex in the CI image, accl 22558)"
+);
 
 /// TeX Live manuals euromoney, heria, pygmentex and zed2e (`\valign`):
 /// "this alignment is not supported" (control.rs REDUCE-GAP). Now the
@@ -630,3 +634,22 @@ repro!(
 fn valign_columns() {
     check_threads("valign_columns", "pdf");
 }
+
+/// research corpus (classicthesis: a font number on page 31 three above
+/// pdfTeX's): microtype's letter-spaced small caps over mathpazo's virtual
+/// `pplrc9d`, expanded (`pplrc9d+80ls+20`), has a local font made anew
+/// (`pplrc9d+20`, `auto_expand_vf`) that is an expanded virtual font in
+/// turn, with local fonts of its own. pdfTeX makes them where the font is
+/// first shipped and never again; the engine keyed the inner ones by the
+/// page's handle of their virtual font, another on each page, and made
+/// them again on a later page whose step read other local fonts first.
+/// At -j1 and -j4 (oracle: pdflatex in the CI image, accl 22577; the base
+/// differs at byte 974).
+#[test]
+fn vf_expanded_local_vf() {
+    check_threads("vf_expanded_local_vf", "pdf");
+}
+repro!(
+    marginpar_after_display,
+    "manuals (hep-paper, verifiche: 'Float(s) lost'): a \\marginpar before a display in a paragraph and another after it; the first one's -10004 fires at the display's start (§1145's build_page) and its routine takes it off \\@currlist before the text after the display conses the second on. The piece ran on through the display's start (a list of its own open), its \\@currlist still holding the first, and that definition stood over the routine's: the second was never output. A display's start is now a cut where a page is made to fire, as a paragraph's start is (oracle: pdflatex in the CI image, accl 22589)"
+);

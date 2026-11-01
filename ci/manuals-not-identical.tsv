@@ -10,7 +10,6 @@ latex_beamertheme-csh_example-csh	differs: page 5: obj 202 (Catalog) line 70: or
 latex_beamertheme-cuerna_template	differs: page 5: obj 137 (Catalog) line 34: oracle "<end>", phitex "<end>"
 latex_beamertheme-focus_focus-demo	differs: page 1: obj 1 (Catalog) line 8: oracle "/PageLabels <<", phitex "/PageMode /UseOutlines"
 latex_beautybook_beautybook-en	differs: page 6: obj 1 (untyped) line 98: oracle "/pgfsmask298 <<", phitex "/pgfsmask297 <<"
-latex_bibbreeze_BibBreeze	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)
 latex_biblatex-caspervector_caspervector	differs: page 2: obj 54 (page 2, untyped) line 5: oracle "q 1 0 0 1 72 720 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 15 Tf 192.278 3.757", phitex "q 1 0 0 1 72 720 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 15 Tf 192.278 3.757"
 latex_biblatex-cheatsheet_biblatex-cheatsheet	differs: page 1: obj 150 (Catalog) line 2: oracle "/OpenAction 3 0 R", phitex "/Names 3 0 R" (pages 2 vs 3)
 latex_biblatex-iso690_biblatex-iso690	differs: page 1: obj 524 (untyped) line 5: oracle "<end>", phitex "<end>" (pages 18 vs 15)
@@ -35,10 +34,6 @@ latex_forest-quickstart_forest-quickstart	differs: page 2: obj 385 (untyped) lin
 latex_fragoli_fragoli_doc	-j1 differs: page 5: obj 426 (page 5, untyped) line 318: oracle "q", phitex "Q"; -j4 differs: page 1: obj 1826 (Catalog) line 10: oracle "<end>", phitex "<end>" (not the same in each run: the first sweep had -j1 differs, -j4 timeout)
 latex_gammas_gammas_template	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes); -j4 differs: page 1: obj 17 (page 1, untyped) line 97: oracle "/F119 5.9776 Tf 1 0 0 1 111.245 384.391 Tm [(13)]TJ", phitex "/F119 5.9776 Tf 1 0 0 1 111.245 384.391 Tm [(12)]TJ"
 latex_glosmathtools_sample_glosmathtools_en	differs: page 2: obj 266 (Catalog) line 22: oracle "<end>", phitex "<end>"
-latex_gu_gudoc	differs: page 1: obj 358 (Catalog) line 5: oracle "/PageMode /UseOutlines", phitex "/PageLabels <<"
-latex_hep-paper_hep-paper-documentation	differs: page 2: obj 531 (Catalog) line 10: oracle "<end>", phitex "<end>" (pages 7 vs 6)
-latex_heria_heria-proposal	differs: obj 125 (figure.1 and tcbrasternum.* destinations on the \rotatebox{90} page) line 5: oracle "334.252 4466.239", phitex "334.469 385.542" (pages identical; a \pdfdest under \pdfsetmatrix: \hypertarget in \rotatebox reproduces it, accl 22456, 22467)
-latex_hhtensor_getversion	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)
 latex_highlightx_highlightx-doc	differs: page 1: obj 25 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g"
 latex_huaz_huaz	differs: page 1: obj 54 (page 1, untyped) line 64: oracle "[<11>]TJ 0 -14.446 Td [(v)54(agy)-337<12>]TJ", phitex "[<11>]TJ 0 -14.446 Td [(v)54(agy)-325<12>]TJ"
 latex_iacrj_iacrj-doc	differs: page 1: obj 344 (Catalog) line 4: oracle "/Names 5 0 R", phitex "/Names 4 0 R"
@@ -96,7 +91,6 @@ latex_typogrid_testtypogrid	differs: page 2: obj 12 (page 2, untyped) line 143: 
 latex_typstfun_typstfun	differs: page 2: obj 46 (page 2, untyped) line 61: oracle "/F62 10.9091 Tf 56.693 308.139 Td [(\\arccos)-7368(arccos)-7894(\\arcs", phitex "/F62 10.9091 Tf 56.693 308.139 Td [(\\arccos)-7368(arccos)-7894(\\arcs"
 latex_ualberta_ualberta	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes); -j4 differs: page 7: obj 2221 (Catalog) line 18: oracle "<end>", phitex "<end>" (pages 110 vs 109)
 latex_ufrgscca_ufrgscca	differs: page 1: obj 179 (page 1, untyped) line 17: oracle "/F88 10.9091 Tf 1.02 0 0 1 187.354 520.241 Tm [(This)-389(bundled)-376", phitex "/F88 10.9091 Tf 1.02 0 0 1 187.354 520.241 Tm [(This)-384(bundled)-384"
-latex_verifiche_verifiche-example	differs: page 2: obj 26 (page 2, untyped) line 27: oracle "[-500(Calcolare)-333(il)-334(seguen)28(te)-333(in)28(tegrale)-334(de\f", phitex "[-500(Calcolare)-333(il)-334(seguen)28(te)-333(in)28(tegrale)-334(de\f"
 latex_windycity_windycity	-j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 exact, -j4 timeout)
 latex_zhlineskip_zhlineskip	differs: page 6: obj 201 (untyped) line 18: oracle "57 beginbfchar", phitex "87 beginbfchar"
 latex_zx-calculus_zx-calculus	error: error: You can't use `&' in restricted horizontal mode

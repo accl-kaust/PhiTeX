@@ -1,7 +1,3 @@
 # The research corpus's documents (ci/research.json) not identical at -j1 and -j4 when the gate took them (mc sweep 77753, dev's crates before the research-fixes-5 batch, 2026-11-01): the research shards build them and report them apart (known-red.txt), never red, and say one that is identical again. Each id, a tab, the first difference or error. v1.0 ships when this list and ci/manuals-not-identical.tsv are empty.
-aastex	differs: byte 465861 (page 4: Table 1 placed at the top where pdfTeX puts a text line first; fixed on research-fixes-5, \pagegoal in the output routine)
-aastex-xe	differs: byte 531451 (as aastex; and page 8's sealed lines from earlier routines, fixed on research-fixes-5)
-acm-sigconf-biblatex	differs: byte 135893 (page 5 /F460 vs /F461, a line's spacing -250 vs -248; fixed on research-fixes-5, math glue and protrusion)
-classicthesis	differs: byte 37 (a font number on page 31, /F583 vs /F586: three fonts more at the \clearpage after Chapter01)
-classicthesis-xe	differs: byte 54 (not diagnosed)
-thuthesis	differs: byte 50341, 1 error (cross-references settle in more than 5 rounds; the text after a float 3.488 pt high; fixed on research-fixes-5, the output routine's \aftergroup)
+classicthesis-xe	differs: page 18, footnote 3's mark 0.11 pt low: XeTeX's cur_f is the OpenType math font after an \item, so the superscript rule takes superscriptBottomMin; PhiTeX's is not (accl 22578)
+thuthesis	identical PDF at -j1 and -j4, but exit 1: the files the document reads back still change after 5 rounds (thuthesis-example-appendix-a.aux: \reserved@c at -j1, \NAT@space at -j4; accl 22482)

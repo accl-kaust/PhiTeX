@@ -1,0 +1,21 @@
+% A \marginpar before a display in a paragraph, another after it (TeX
+% Live manuals hep-paper and verifiche: "Float(s) lost"): the first one's
+% -10004 penalty fires at the display's start (§1145's build_page), and
+% the routine takes it off \@currlist before the text after the display
+% conses the second one on. The piece ran on through the display's start,
+% its \@currlist still holding the first, and its definition stood over
+% the routine's: the second was never output.
+\documentclass{article}
+\begin{document}
+Text\marginpar{A} one:
+\[ x = \]
+Text\marginpar{B} two:
+\[ y = \]
+End.
+
+\begin{enumerate}
+\item\leavevmode\marginpar{C}Text three:
+\[ z = \]
+\item\leavevmode\marginpar{D}Text four.
+\end{enumerate}
+\end{document}
