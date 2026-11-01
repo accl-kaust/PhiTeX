@@ -33,13 +33,13 @@ use phitex_defuse::{At, Ctx, Effect, MayDefine, Operation, Stop, ValueId, Values
 use super::*;
 
 /// A page's give-back, defined by its finisher alone:
-/// `pages:out:<piece>:<nth>` = `[piece, nth, [markers, list, \deadcycles]]`
+/// `pages:out:<owner>:<piece>:<nth>` = `[piece, nth, [markers, list, \deadcycles]]`
 /// (`SPEC.md` §3.2 "give-back"). The loop reads it through its placement
 /// ([`phitex_defuse::Ctx::placed_output_or`]); the field is for the
 /// text's tools and traces.
 pub(crate) const PAGE_OUT: &str = "pages:out";
 
-/// The finisher's arguments: `[piece, nth]`, the page's key and its
+/// The finisher's arguments: `[owner, piece, nth]`, the page's key and its
 /// placement's identity, nothing else: an argument that changed between
 /// the loop's runs would make the finisher anew. The routine's hint and
 /// the page's class it predicts by (`SPEC.md` §3.3: by routine and page
@@ -53,15 +53,17 @@ pub(crate) struct FinishArgs {
 impl FinishArgs {
     pub(crate) fn encode(&self, v: &Values) -> Vec<ValueId> {
         vec![
+            raw_value(v, Some(self.key.owner)),
             raw_value(v, Some(self.key.piece)),
             v.int(i64::from(self.key.nth)),
         ]
     }
 
     pub(crate) fn decode(v: &Values, args: &[ValueId]) -> Option<FinishArgs> {
-        let [p, n] = args else { return None };
+        let [o, p, n] = args else { return None };
         Some(FinishArgs {
             key: PageKey {
+                owner: raw_node(v, *o)?,
                 piece: raw_node(v, *p)?,
                 nth: u32::try_from(v.as_int(*n)?).ok()?,
             },
@@ -151,7 +153,7 @@ impl Operation for Finish {
     /// goes on only from the give-back made on its own page
     /// (`Pages::rest_begins`), so a guess of it was never read as one and
     /// was refuted by every run that defined it (pkgrec's
-    /// `prediction_is_right_when_nothing_changed`: `pages:out:<piece>:0`
+    /// `prediction_is_right_when_nothing_changed`: `pages:out:<owner>:<piece>:0`
     /// refuted in a build where nothing else was).
     fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         let r = self.predicted_defs_(args, v);
@@ -631,15 +633,16 @@ pub(crate) fn substitute_page(v: &Values, x: ValueId, from: i64, to: i64) -> Opt
 }
 
 /// A page's place among the pages a routine ran on ([`FinDefs::pages`]):
-/// its piece and the pages fired in that piece before it ([`PageKey`]
-/// as integers). No page's index among all the pages: none is an
-/// argument.
-pub(crate) type FinPageKey = (i64, i64);
+/// its loop node, its piece and the pages fired in that piece before it
+/// ([`PageKey`] as integers). No page's index among all the pages: none
+/// is an argument.
+pub(crate) type FinPageKey = (i64, i64, i64);
 
 /// [`FinPageKey`] of a finisher with arguments `args` ([`FinishArgs`]).
 pub(crate) fn fin_page_key(v: &Values, args: &[ValueId]) -> FinPageKey {
-    FinishArgs::decode(v, args).map_or((-1, 0), |a| {
+    FinishArgs::decode(v, args).map_or((-1, -1, 0), |a| {
         (
+            i64::from_ne_bytes(a.key.owner.raw().to_ne_bytes()),
             i64::from_ne_bytes(a.key.piece.raw().to_ne_bytes()),
             i64::from(a.key.nth),
         )
@@ -1529,6 +1532,7 @@ impl Run<'_, '_> {
         self.trace_fin_rel(&page, &rels);
         let mut m = self.ops.fin_defs.locked();
         let idx = (
+            i64::from_ne_bytes(page.key.owner.raw().to_ne_bytes()),
             i64::from_ne_bytes(page.key.piece.raw().to_ne_bytes()),
             i64::from(page.key.nth),
         );

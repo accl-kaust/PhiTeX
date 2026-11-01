@@ -46,7 +46,8 @@ use super::*;
 use crate::vprof::{PItem, ScanState};
 
 /// The page of a fired page, as its finisher reads it:
-/// `pages:page:<piece raw id>:<nth>`, defined by the [`Pages`] node,
+/// `pages:page:<owner>:<piece>:<nth>` (raw ids, [`PageKey`]), defined by
+/// the [`Pages`] node that fired it,
 /// read `At::End(unit)` (the loop node is the last of the unit that
 /// defines it).
 pub(crate) const PAGE_OF: &str = "pages:page";
@@ -85,11 +86,13 @@ pub(crate) struct Checkpoint {
     pub start: Option<(i64, u32)>,
 }
 
-/// The page keys of one run of the loop ([`PageKey`]): the last run's
-/// pages by their start, the keys this run has placed, and the next
-/// fresh key per piece.
+/// The page keys of one run of the loop ([`PageKey`]): the loop node
+/// that mints them, the last run's pages by their start, the keys this
+/// run has placed, and the next fresh key per piece.
 #[derive(Default)]
 pub(crate) struct LoopKeys {
+    /// The loop node: every key it mints is its own ([`PageKey::owner`]).
+    owner: Option<NodeId>,
     /// The last run's pages by where each began ([`Checkpoint::start`]):
     /// the key a page fired again from there keeps.
     old: Vec<((i64, u32), PageKey)>,
@@ -98,14 +101,14 @@ pub(crate) struct LoopKeys {
     /// Per piece, the next fresh key's number: past every key of the last
     /// run in that piece, so that a fresh key never takes an old page's.
     next: phitex_defuse::FxHashMap<NodeId, u32>,
-    /// A loop rest's: per contributor, the first key number no loop node
-    /// before it has ([`RestStart::floors`]).
-    floors: phitex_defuse::FxHashMap<NodeId, u32>,
 }
 
 impl LoopKeys {
-    fn of(old: &LoopState) -> LoopKeys {
-        let mut k = LoopKeys::default();
+    fn of(old: &LoopState, owner: NodeId) -> LoopKeys {
+        let mut k = LoopKeys {
+            owner: Some(owner),
+            ..LoopKeys::default()
+        };
         for c in old.checkpoints.iter().chain(&old.beyond) {
             if let Some(s) = c.start {
                 k.old.push((s, c.key));
@@ -128,6 +131,7 @@ impl LoopKeys {
         }
         let e = self.next.entry(node).or_default();
         let mut k = PageKey {
+            owner: self.owner.expect("the loop node, LoopKeys::of"),
             piece: node,
             nth: *e,
         };
@@ -145,8 +149,11 @@ impl LoopKeys {
     /// it the same key (a fresh one each run made its finisher, and a
     /// loop rest after it, anew each run); a fresh one where taken.
     fn key_at(&mut self, node: NodeId, nth: u32) -> PageKey {
-        let nth = self.floors.get(&node).map_or(nth, |&f| nth.max(f));
-        let k = PageKey { piece: node, nth };
+        let k = PageKey {
+            owner: self.owner.expect("the loop node, LoopKeys::of"),
+            piece: node,
+            nth,
+        };
         if self.taken.contains(&k) {
             return self.key(node, None);
         }
@@ -215,7 +222,7 @@ pub(crate) struct LoopState {
 }
 
 /// The tag of a parked [`LoopState`] of this version.
-const STATE_TAG: &str = "\u{1}pages-loop-10";
+const STATE_TAG: &str = "\u{1}pages-loop-11";
 
 /// The placement of checkpoint `i`'s finisher: after the rest, placement
 /// 0 ([`Run::page_loop`]).
@@ -253,43 +260,36 @@ fn rest_field(v: &Values, parent: NodeId) -> Field {
 
 /// Where a loop rest starts ([`REST_OF`]'s value): the page the loop
 /// node before it stopped at (its key, the state before its give-back,
-/// the page and the guess), the pages before, and per
-/// contributor the first key number no loop node before it has.
+/// the page and the guess) and the pages before.
 pub(crate) struct RestStart {
     pub key: PageKey,
     pub state: ValueId,
     pub page: ValueId,
     pub guess: ValueId,
     pub base: usize,
-    pub floors: Vec<(NodeId, u32)>,
 }
 
 impl RestStart {
     fn encode(&self, v: &Values) -> ValueId {
-        let mut fl: Vec<ValueId> = Vec::with_capacity(self.floors.len() * 2);
-        for &(n, k) in &self.floors {
-            fl.push(raw_value(v, Some(n)));
-            fl.push(v.int(i64::from(k)));
-        }
         v.list(vec![
+            raw_value(v, Some(self.key.owner)),
             raw_value(v, Some(self.key.piece)),
             v.int(i64::from(self.key.nth)),
             self.state,
             self.page,
             self.guess,
             v.int(i64::try_from(self.base).unwrap_or(0)),
-            v.list(fl),
         ])
     }
 
     fn decode(v: &Values, x: ValueId) -> Option<RestStart> {
         let xs = list_of(v, x);
-        let [kp, kn, state, page, guess, base, fl] = xs[..] else {
+        let [ko, kp, kn, state, page, guess, base] = xs[..] else {
             return None;
         };
-        let fl = list_of(v, fl);
         Some(RestStart {
             key: PageKey {
+                owner: raw_node(v, ko)?,
                 piece: raw_node(v, kp)?,
                 nth: u32::try_from(int_of(v, kn)).ok()?,
             },
@@ -297,15 +297,6 @@ impl RestStart {
             page,
             guess,
             base: usize::try_from(int_of(v, base)).ok()?,
-            floors: fl
-                .chunks(2)
-                .filter_map(|c| {
-                    Some((
-                        raw_node(v, c[0])?,
-                        u32::try_from(int_of(v, *c.get(1)?)).ok()?,
-                    ))
-                })
-                .collect(),
         })
     }
 }
@@ -337,6 +328,7 @@ impl LoopState {
             cs.iter()
                 .map(|c| {
                     v.list(vec![
+                        raw_value(v, Some(c.key.owner)),
                         raw_value(v, Some(c.key.piece)),
                         v.int(i64::from(c.key.nth)),
                         c.page,
@@ -359,7 +351,11 @@ impl LoopState {
             v.list(cps(&self.beyond)),
             v.int(i64::try_from(self.base).unwrap_or(0)),
             self.rest_at.map_or(ValueId::UNIT, |k| {
-                v.list(vec![raw_value(v, Some(k.piece)), v.int(i64::from(k.nth))])
+                v.list(vec![
+                    raw_value(v, Some(k.owner)),
+                    raw_value(v, Some(k.piece)),
+                    v.int(i64::from(k.nth)),
+                ])
             }),
             self.after.map_or(ValueId::UNIT, |(c, f)| {
                 v.list(vec![raw_value(v, Some(c)), raw_value(v, Some(f))])
@@ -379,27 +375,24 @@ impl LoopState {
             let mut checkpoints = Vec::new();
             for (i, c) in list_of(v, x).into_iter().enumerate() {
                 let cs = list_of(v, c);
-                if cs.len() != 10 {
+                let [o, p, n, page, args, cursor, state, guess, gave, s0, s1] = cs[..] else {
                     return None;
-                }
+                };
                 checkpoints.push(Checkpoint {
                     key: PageKey {
-                        piece: raw_node(v, cs[0])?,
-                        nth: u32::try_from(int_of(v, cs[1])).ok()?,
+                        owner: raw_node(v, o)?,
+                        piece: raw_node(v, p)?,
+                        nth: u32::try_from(int_of(v, n)).ok()?,
                     },
-                    page: cs[2],
-                    args: cs[3],
+                    page,
+                    args,
                     placement: at + i,
-                    cursor: raw_node(v, cs[4])?,
-                    state: cs[5],
-                    guess: cs[6],
-                    gave: cs[7],
-                    start: (int_of(v, cs[8]) != -1).then(|| {
-                        (
-                            int_of(v, cs[8]),
-                            u32::try_from(int_of(v, cs[9])).unwrap_or(0),
-                        )
-                    }),
+                    cursor: raw_node(v, cursor)?,
+                    state,
+                    guess,
+                    gave,
+                    start: (int_of(v, s0) != -1)
+                        .then(|| (int_of(v, s0), u32::try_from(int_of(v, s1)).unwrap_or(0))),
                 });
             }
             Some(checkpoints)
@@ -413,7 +406,8 @@ impl LoopState {
             beyond,
             base: usize::try_from(int_of(v, xs[5])).unwrap_or(0),
             rest_at: match list_of(v, xs[6])[..] {
-                [p, n] => Some(PageKey {
+                [o, p, n] => Some(PageKey {
+                    owner: raw_node(v, o)?,
                     piece: raw_node(v, p)?,
                     nth: u32::try_from(int_of(v, n)).ok()?,
                 }),
@@ -659,15 +653,7 @@ impl Run<'_, '_> {
             .resumed()
             .and_then(|x| LoopState::decode(v, x))
             .unwrap_or_default();
-        self.loop_keys = LoopKeys::of(&old);
-        if let Some(r) = &rest {
-            // (no fresh key a page of the loop nodes before it has)
-            for &(n, f) in &r.floors {
-                let e = self.loop_keys.next.entry(n).or_default();
-                *e = (*e).max(f);
-                self.loop_keys.floors.insert(n, f);
-            }
-        }
+        self.loop_keys = LoopKeys::of(&old, me);
         // 2. where to start
         let n_old = old.checkpoints.len();
         let mut ls = LoopState {
@@ -698,21 +684,11 @@ impl Run<'_, '_> {
                     // taken back, every finisher and rest after it went
                     // and was made anew with new nodes once the give-back
                     // came, the same as before (Grail, a word typed on
-                    // page 1: 55 rests and 55 finishers placed anew))
-                    // (but not pages whose keys the loop nodes before it
-                    // now fire, its start moved past them: kept, its
-                    // definition of such a page stood after theirs, read
-                    // at the line's end by that page's own finisher, which
-                    // found its placement stale and gave nothing back, the
-                    // give-back this rest waits for: no pass finished every
-                    // page, and the file was empty (revtex4-2's apssamp))
-                    let taken = |c: &Checkpoint| {
-                        r.floors
-                            .iter()
-                            .any(|&(n, f)| n == c.key.piece && c.key.nth < f)
-                    };
-                    let overlaps = old.checkpoints.iter().chain(&old.beyond).any(taken);
-                    if (old.checkpoints.is_empty() && old.tail.is_none()) || overlaps {
+                    // page 1: 55 rests and 55 finishers placed anew; its
+                    // pages' keys are its own, [`PageKey::owner`], so no
+                    // page of the loop nodes before it is hidden by one
+                    // kept here)
+                    if old.checkpoints.is_empty() && old.tail.is_none() {
                         self.cx.park(ls.encode(v));
                     } else {
                         self.cx.unchanged();
@@ -969,26 +945,12 @@ impl Run<'_, '_> {
         let me = self.cx.node();
         let c = ls.checkpoints[i].clone();
         ls.rest_at = Some(c.key);
-        // (every key number this node and those before it have taken,
-        // per contributor: its own pages', and its fresh keys' next)
-        let mut floors = self.loop_keys.floors.clone();
-        for (&n, &k) in &self.loop_keys.next {
-            let e = floors.entry(n).or_default();
-            *e = (*e).max(k);
-        }
-        for p in &ls.checkpoints {
-            let e = floors.entry(p.key.piece).or_default();
-            *e = (*e).max(p.key.nth.saturating_add(1));
-        }
-        let mut floors: Vec<(NodeId, u32)> = floors.into_iter().collect();
-        floors.sort_unstable_by_key(|e| e.0.raw());
         let r = RestStart {
             key: c.key,
             state: c.state,
             page: c.page,
             guess: c.guess,
             base: ls.base + i + 1,
-            floors,
         };
         let x = r.encode(v);
         ls.rest_def = Some(x);
@@ -1408,6 +1370,7 @@ impl Run<'_, '_> {
         // class, the page's, not its placement's)
         self.ops.fin_class.locked().insert(
             (
+                i64::from_ne_bytes(page.key.owner.raw().to_ne_bytes()),
                 i64::from_ne_bytes(page.key.piece.raw().to_ne_bytes()),
                 i64::from(page.key.nth),
             ),

@@ -85,7 +85,9 @@ Where it stands, at wip12 (5112f74c on branch docs-spec):
 
 - A page loop that has to wait for a routine's give-back stops there. It
   places a loop rest: its own node, `pages:rest:<parent>`, holding the
-  state, the page key and per-contributor key floors. Each rest folds
+  state and the page key (keys are their loop node's own,
+  `PageKey::owner`, since 2026-11-01; per-contributor key floors before
+  that). Each rest folds
   the pages after that page, so a loop run re-emits only its own pages.
 - The speculation depth adapts. It is 0 on one thread and after a miss,
   and doubles after each give-back the guess got right.
