@@ -672,9 +672,8 @@ pub(crate) fn varies_by_page(name: &str) -> bool {
 /// What a finisher defines besides its routine's definitions
 /// (`fire_page`, `output_end`, `ship_out`): field prefixes.
 /// The fields every finisher defines itself, whatever its routine.
-pub(crate) const FIN_OWN: [&str; 12] = [
+pub(crate) const FIN_OWN: [&str; 11] = [
     RTN,
-    RTN_AFTER,
     PAGE_START_ANCHOR,
     PAGE_START_FOLD,
     PAGE_START_PARAMS,

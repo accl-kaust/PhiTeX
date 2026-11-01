@@ -52,8 +52,12 @@ pub(crate) const RTN: &str = "rtn";
 /// `\@addtocurcol` leaves `\vskip\intextsep\nointerlineskip` after a
 /// float placed here. The finisher defines them at its place; the first
 /// piece after it reads them first and defines nothing again
-/// ([`Run::take_rtn_after`]).
-pub(crate) const RTN_AFTER: &str = "rtn:after";
+/// ([`Run::take_rtn_after`]). No operation declares it (a finisher's
+/// `FIN_OWN`, a piece's `PAGE_FIELDS`, no prefix of
+/// theirs): every piece reads it, and a declaration would make each read
+/// wait on every finisher and piece before it; the rare run that defines
+/// it re-asks only its readers.
+pub(crate) const RTN_AFTER: &str = "outafter";
 
 /// A finisher's page: its index and what the routine leaves for the
 /// next page (§1026: the held-over insertions, then its list; the page
