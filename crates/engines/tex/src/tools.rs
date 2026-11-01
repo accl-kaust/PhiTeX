@@ -556,7 +556,7 @@ impl Operation for ToolRun {
                     let said = (o.errors.iter().map(|e| (true, e.clone())))
                         .chain(o.warnings.iter().map(|w| (false, w.clone())))
                         .collect();
-                    (o.bbl.map(String::into_bytes), said)
+                    (o.bbl_bytes(), said)
                 }
                 Tool::Repstopdf => {
                     // (epstopdf.pl's rewrite of the header, then gs reading
