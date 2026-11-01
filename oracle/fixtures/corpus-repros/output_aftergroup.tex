@@ -1,0 +1,40 @@
+% The output group's \aftergroup tokens are read in the main vertical mode
+% after the routine, before the text's next tokens (§1100): thuthesis patches
+% \@addtocurcol so that a float placed here leaves \vskip\intextsep
+% \nointerlineskip after the routine; the glue follows the float and the next
+% line has no interline glue. The second float's routine leaves them inside
+% the figure environment's group, where the text after it is in the same node.
+\documentclass{article}
+\usepackage{etoolbox}
+\makeatletter
+\patchcmd{\@addtocurcol}%
+  {\vskip\intextsep \ifnum\outputpenalty <-\@Mii \vskip -\parskip\fi}%
+  {\ifnum\outputpenalty <-\@Mii
+     \aftergroup\vskip\aftergroup\intextsep
+     \aftergroup\nointerlineskip
+   \else
+     \vskip\intextsep
+   \fi}%
+  {}{\typeout{PATCH FAILED}}
+\makeatother
+\begin{document}
+Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
+incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam.
+
+\begin{figure}[h]
+\centering
+\rule{4cm}{3cm}
+\caption{A caption}
+\end{figure}
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
+incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam.
+
+\begin{figure}[h]
+\centering
+\rule{4cm}{2cm}
+\caption{Another caption}
+\end{figure}
+Text right after the second float.
+
+\end{document}

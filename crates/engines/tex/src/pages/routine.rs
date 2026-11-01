@@ -46,6 +46,15 @@ pub(crate) fn rtn_as_guess(v: &Values, x: ValueId) -> ValueId {
 /// finisher's output, this value ([`PAGE_OUT`]), says otherwise.
 pub(crate) const RTN: &str = "rtn";
 
+/// The output group's `\aftergroup` tokens (§1100: its `unsave` puts
+/// them back, then `pop_nest` and `build_page`), read in the main
+/// vertical mode before the text's next ones: thuthesis's
+/// `\@addtocurcol` leaves `\vskip\intextsep\nointerlineskip` after a
+/// float placed here. The finisher defines them at its place; the first
+/// piece after it reads them first and defines nothing again
+/// ([`Run::take_rtn_after`]).
+pub(crate) const RTN_AFTER: &str = "rtn:after";
+
 /// A finisher's page: its index and what the routine leaves for the
 /// next page (§1026: the held-over insertions, then its list; the page
 /// after it begins with them, with the material carried over and the
@@ -380,7 +389,21 @@ impl Run<'_, '_> {
         let v = self.v;
         let (items, _) = self.list_items(md.lid)?;
         let mut left = md.extra.first().map(|&x| list_of(v, x)).unwrap_or_default();
+        // (its `\aftergroup` tokens are the text's after the page, not
+        // the finisher's: [`RTN_AFTER`])
+        let after = match self.nest.last_mut() {
+            Some(l) if l.group == group::OUTPUT && !l.ag.is_empty() => std::mem::take(&mut l.ag),
+            _ => Vec::new(),
+        };
+        self.muts += 1;
         self.close_group(md)?;
+        if !after.is_empty() {
+            self.cx.define_with(
+                v.field(RTN_AFTER),
+                crate::val::toks_value(v, &after),
+                Locality::Global,
+            );
+        }
         if self.st.take_page_params() {
             self.put_page_params()?;
         }
@@ -398,6 +421,22 @@ impl Run<'_, '_> {
         if let Some(c) = self.fin.as_mut() {
             c.pending = left;
         }
+        Ok(())
+    }
+
+    /// A piece's start: the tokens the output routine of a page fired
+    /// before it left after its group ([`RTN_AFTER`]), read first, as
+    /// TeX reads them after the routine (§1100), and taken: the pieces
+    /// after it read none.
+    pub(crate) fn take_rtn_after(&mut self) -> R<()> {
+        let v = self.v;
+        let f = v.field(RTN_AFTER);
+        let toks = toks_of(v, self.eng_read(f)?);
+        if toks.is_empty() {
+            return Ok(());
+        }
+        self.cx.define_with(f, ValueId::UNIT, Locality::Global);
+        self.back_toks(toks);
         Ok(())
     }
 

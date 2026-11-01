@@ -4772,6 +4772,9 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         self.top = k & 1 != 0;
         self.doc = k & 2 != 0;
+        if (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc) {
+            self.take_rtn_after()?;
+        }
         loop {
             while self.has_input() {
                 if self.give_back_peeked()? {

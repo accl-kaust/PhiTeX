@@ -622,8 +622,10 @@ pub(crate) fn is_page_field(name: &str) -> bool {
 /// The fields a piece with items on the main list may define for the
 /// pages (its hint names them, `crate::hints`): what it leaves the next
 /// piece of the main list (the previous depth, the space factor, the
-/// last item), the conditionals it leaves open.
-pub(crate) const PAGE_FIELDS: [&str; 5] = [
+/// last item), the conditionals it leaves open, the tokens an output
+/// routine left that it read ([`RTN_AFTER`]).
+pub(crate) const PAGE_FIELDS: [&str; 6] = [
+    RTN_AFTER,
     crate::build::MAIN_PD,
     crate::build::MAIN_SF,
     crate::build::MAIN_LAST,

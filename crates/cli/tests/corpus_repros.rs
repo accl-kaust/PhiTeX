@@ -537,3 +537,7 @@ repro!(
     list_depth_scope,
     "research corpus (classicthesis, classicthesis-xe: the title page's list one level deeper than pdfTeX's): a list's \\global\\advance\\@listdepth\\@ne, then a local \\advance\\@listdepth\\m@ne in the group the run leaves open (KOMA's addmargin); the run published the step as a relation and the scope's 0 beside it, a field holds a relation or values, not both, so inside it read 1; now the step is published as the value it makes beneath the scope's own (oracle: pdflatex in the CI image, mc 77852)"
 );
+repro!(
+    output_aftergroup,
+    "research corpus (thuthesis: the text after a float placed here 3.488 pt higher than pdfTeX's): the output group's \\aftergroup tokens are read in the main vertical mode after the routine, before the text's next ones (§1100); thuthesis's \\@addtocurcol leaves \\vskip\\intextsep\\nointerlineskip there, and the finisher ran them on its own list, dropped. Now the finisher defines them and the first piece after it reads them first (oracle: pdflatex in the CI image, mc 77860)"
+);
