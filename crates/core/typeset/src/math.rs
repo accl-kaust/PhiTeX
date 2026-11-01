@@ -1765,6 +1765,11 @@ impl Ctx<'_> {
                             if g.kind == GlueKind::Mu {
                                 g.spec = Self::math_glue(&g.spec, self.cur_mu);
                                 g.kind = GlueKind::Normal;
+                                // (a new spec, `math_glue`'s: never the
+                                // shared `zero_glue`, all of it zero or
+                                // not, which pdfTeX's protrusion passes
+                                // over, `cp_skipable`; url's `\mskip`)
+                                g.own_spec = true;
                             } else if self.cur_size != 0
                                 && g.kind == GlueKind::CondMath
                                 && matches!(
@@ -2002,10 +2007,11 @@ impl Ctx<'_> {
                         MED_MU_SKIP => self.p.med_mu_skip,
                         _ => self.p.thick_mu_skip,
                     };
+                    // (§766: `new_glue` of a new spec, `math_glue`'s)
                     hl.push(Node::Glue(GlueNode {
                         spec: Self::math_glue(&g, self.cur_mu),
                         kind: GlueKind::Param(x),
-                        own_spec: false,
+                        own_spec: true,
                         leader: None,
                     }));
                 }
