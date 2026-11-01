@@ -37,7 +37,6 @@ latex_gammas_gammas_template	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 
 latex_glosmathtools_sample_glosmathtools_en	differs: page 2: obj 266 (Catalog) line 22: oracle "<end>", phitex "<end>"
 latex_gu_gudoc	differs: page 1: obj 358 (Catalog) line 5: oracle "/PageMode /UseOutlines", phitex "/PageLabels <<"
 latex_hep-paper_hep-paper-documentation	differs: page 2: obj 531 (Catalog) line 10: oracle "<end>", phitex "<end>" (pages 7 vs 6)
-latex_heria_heria-proposal	differs: obj 125 (figure.1 and tcbrasternum.* destinations on the \rotatebox{90} page) line 5: oracle "334.252 4466.239", phitex "334.469 385.542" (pages identical; a \pdfdest under \pdfsetmatrix: \hypertarget in \rotatebox reproduces it, accl 22456, 22467)
 latex_hhtensor_getversion	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)
 latex_highlightx_highlightx-doc	differs: page 1: obj 25 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g"
 latex_huaz_huaz	differs: page 1: obj 54 (page 1, untyped) line 64: oracle "[<11>]TJ 0 -14.446 Td [(v)54(agy)-337<12>]TJ", phitex "[<11>]TJ 0 -14.446 Td [(v)54(agy)-325<12>]TJ"
