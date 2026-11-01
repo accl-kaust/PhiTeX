@@ -485,9 +485,12 @@ fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
         return Ok(None);
     };
     let v = r.v;
+    // (the text's length from its one shared copy, `pdfout::text_bytes`:
+    // graphics asks `\\pdffilesize` of an icon font's PDF at each of its
+    // thousands of pages, a count of its 5 MB of characters each)
     Ok(list_of(v, x).get(1).map(|&t| match v.as_int(t) {
         Some(n) => usize::try_from(n).unwrap_or(0),
-        None => v.with_str(t, |s| s.chars().count()).unwrap_or(0),
+        None => crate::pdfout::text_bytes(v, t).len(),
     }))
 }
 
