@@ -525,3 +525,7 @@ repro!(
     aftergroup_scope_paragraph,
     "research corpus (classicthesis, classicthesis-xe: the title 2.277 pt right of pdfTeX's, the title's colour on every page after): a group opened in vertical mode ends inside a paragraph begun in it (\\begingroup\\color{CTtitle}\\spacedallcaps{...}\\endgroup); the scope's \\aftergroup tokens (\\reset@color's pop) were read by the paragraph's level's id, not the scope's, and dropped, the space before them taken off the line (oracle: pdflatex in the CI image, mc 77793)"
 );
+repro!(
+    lineno_last_page_xe,
+    "research corpus (aastex-xe: page 8's text gone, its line numbers left): under XeLaTeX a page's sealed lines are filled by the end node from their pieces' units; lineno's routine gives every line back, so the last page's lines all came back from routines before and its finisher sealed none of its own: the page carried no places, and its lines were never filled (the PDF writer's sealed_units too); now an empty window, each line's piece's unit read by itself (oracle: xelatex in the CI image, mc 77824)"
+);
