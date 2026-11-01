@@ -2550,7 +2550,10 @@ fn struct_ident(v: &phitex_defuse::Values, id: ValueId) -> ValueId {
         Some("name") => "sname",
         _ => "snum",
     };
-    v.list(vec![v.str(tag), xs.get(1).copied().unwrap_or(ValueId::UNIT)])
+    v.list(vec![
+        v.str(tag),
+        xs.get(1).copied().unwrap_or(ValueId::UNIT),
+    ])
 }
 
 /// `\pdfdest`'s and `\pdfthread`'s identifier: `num n` or `name {…}`.
@@ -3116,7 +3119,11 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 None
             };
             let id = identifier(r)?;
-            let id = if snum.is_some() { struct_ident(v, id) } else { id };
+            let id = if snum.is_some() {
+                struct_ident(v, id)
+            } else {
+                id
+            };
             let kind = if r.scan_keyword("xyz")? {
                 if r.scan_keyword("zoom")? {
                     let z = r.scan_int()?;

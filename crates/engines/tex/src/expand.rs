@@ -1471,18 +1471,11 @@ impl Run<'_, '_> {
             self.input.push_file(f);
             return Ok(());
         }
-        let x = self.read_file_lazy(&key)?;
-        let x = match x {
-            Some(x) => Some(x),
-            None => {
-                let name = crate::run::same_dir(&name);
-                if key == name {
-                    None
-                } else {
-                    self.read_file_lazy(name)?
-                }
-            }
-        };
+        let mut x = self.read_file_lazy(&key)?;
+        let bare = crate::run::same_dir(&name);
+        if x.is_none() && key != bare {
+            x = self.read_file_lazy(bare)?;
+        }
         let Some(x) = x else {
             // §530: in the nonstop modes (a build's, [`Run::fatal`]) the
             // job ends

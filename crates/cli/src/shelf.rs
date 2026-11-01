@@ -427,7 +427,11 @@ impl ShelfHost {
 
 impl Host for ShelfHost {
     fn locate(&self, name: &str) -> Option<PathBuf> {
-        project(name).or_else(|| self.files.find_in(name, "tex").map(|(p, _)| PathBuf::from(p)))
+        project(name).or_else(|| {
+            self.files
+                .find_in(name, "tex")
+                .map(|(p, _)| PathBuf::from(p))
+        })
     }
 
     fn locate_font(&self, name: &str) -> Option<PathBuf> {
