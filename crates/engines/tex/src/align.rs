@@ -1,9 +1,11 @@
-//! Alignment (§768–§812): `\halign` as groups. The whole alignment is a
+//! Alignment (§768–§812): `\halign` and `\valign` as groups. The whole alignment is a
 //! group whose list holds the rows; each entry is a group of its own
 //! whose kind carries the row so far. The preamble is the field
 //! `align:<id>`; `align_state` (§309) and the alignments open are the
 //! run's own (`Run::astate`, `Run::aopen`): an alignment never crosses
-//! a node.
+//! a node. tex.web's modes tell the two apart: an `\halign`'s level is
+//! in -vmode and its entries in -hmode, a `\valign`'s the other way
+//! round (§775, §786).
 //!
 //! The kinds' extras: the alignment `["align", spec code, size, saved
 //! align_state]`; an entry `["cell", column, first column of its span,
@@ -211,11 +213,13 @@ impl Run<'_, '_> {
 
     // ------------------------------------------------------ init_align
 
-    /// `init_align` (§774–§784): in vertical mode, or in a display
-    /// (§775: the rows go to the vertical list around it, §1206).
+    /// `init_align` (§774–§784): `\halign` in vertical mode or in a
+    /// display (§775: the rows go to the vertical list around it, §1206),
+    /// `\valign` in horizontal mode.
     pub(crate) fn init_align(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
         let display = md.m == 203;
+        let valign = md.m.abs() == 102;
         // §776: an alignment in a display must come first in it
         if display {
             let open = self.level_of(md.lid).is_some_and(|l| !l.list.is_empty())
@@ -254,10 +258,17 @@ impl Run<'_, '_> {
             v.int(saved),
             v.int(i64::from(display)),
         ];
-        // the alignment: a level of the nest owning the rows' list
-        let asid = self.push_list(-1, group::ALIGN, extra);
-        let pd = self.prev_depth(md)?;
-        let m = v.list(vec![v.int(crate::nodes::T_PD), v.int(i64::from(pd))]);
+        // the alignment: a level of the nest owning the rows' list, its
+        // `aux` the list's around it (§774 `push_nest`; §775: a display's
+        // the vertical list's)
+        let m = if valign {
+            let sf = self.space_factor(md)?;
+            crate::build::sf_value(v, sf)
+        } else {
+            let pd = self.prev_depth(md)?;
+            v.list(vec![v.int(crate::nodes::T_PD), v.int(i64::from(pd))])
+        };
+        let asid = self.push_list(if valign { -102 } else { -1 }, group::ALIGN, extra);
         self.append(asid, m);
         // §777
         let mut tab = self.gpar(Par::tabskip)?;
@@ -370,8 +381,11 @@ impl Run<'_, '_> {
                 cmd::NO_ALIGN => {
                     self.scan_left_brace()?;
                     // §785: a group sharing the alignment's list
-                    self.push_group(-1, md.lid, group::NO_ALIGN, vec![v.int(md.lid)]);
-                    return self.normal_paragraph();
+                    self.push_group(md.m, md.lid, group::NO_ALIGN, vec![v.int(md.lid)]);
+                    if md.m == -1 {
+                        self.normal_paragraph()?;
+                    }
+                    return Ok(());
                 }
                 cmd::RIGHT_BRACE => return self.fin_align(md),
                 cmd::CAR_RET if self.cur.chr == CR_CR_CODE => {}
@@ -394,10 +408,30 @@ impl Run<'_, '_> {
                         v.int(i64::from(omit)),
                         v.int(md.lid),
                     ];
-                    self.push_list(-102, group::ALIGN, extra);
-                    return Ok(());
+                    return self.push_entry(md.m == -102, extra);
                 }
             }
+        }
+    }
+
+    /// `init_span` (§787): an entry's level, in -hmode for `\halign`
+    /// (space factor 1000), in -vmode for `\valign` (depth ignored,
+    /// `normal_paragraph`).
+    fn push_entry(&mut self, valign: bool, extra: Vec<ValueId>) -> R<()> {
+        self.push_list(if valign { -1 } else { -102 }, group::ALIGN, extra);
+        if valign {
+            self.normal_paragraph()?;
+        }
+        Ok(())
+    }
+
+    /// The innermost entry's `\omit` (its kind extra's).
+    fn set_cell_omit(&mut self, omit: bool) {
+        let v = self.v;
+        if let Some(l) = self.top_mut()
+            && let Some(x) = l.extra.get_mut(6)
+        {
+            *x = v.int(i64::from(omit));
         }
     }
 
@@ -421,6 +455,14 @@ impl Run<'_, '_> {
     /// `do_endv` (§1131): the end of an entry's v template.
     pub(crate) fn do_endv(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
+        // `end_graf`: a paragraph begun in a `\valign`'s entry ends
+        // (its group is the entry's)
+        let mut md = md.clone();
+        if md.m == 102 && md.group == group::ALIGN {
+            self.end_graf(&md)?;
+            md = self.mode()?;
+        }
+        let md = &md;
         let is_cell = md.group == group::ALIGN
             && md.extra.first().map(|&t| str_of(v, t)).as_deref() == Some("cell");
         if !is_cell {
@@ -436,6 +478,8 @@ impl Run<'_, '_> {
         let x = |i: usize| md.extra.get(i).map_or(0, |&y| int_of(v, y));
         let l = |i: usize| md.extra.get(i).map(|&y| list_of(v, y)).unwrap_or_default();
         let (col, first, asid) = (usize::try_from(x(1)).unwrap_or(0), x(2), x(7));
+        // (§796: `mode=-hmode`, an `\halign`'s entry)
+        let valign = md.m == -1;
         let mut prefix = l(3);
         let mut row = l(4);
         let mut adjust = l(5);
@@ -478,16 +522,18 @@ impl Run<'_, '_> {
         let (items, _) = self.list_items(md.lid)?;
         prefix.extend(items);
         // the entry's level closes (its items read above) and the next
-        // column's opens
+        // column's opens (§791: `unsave`, `init_span`), then the next
+        // column's first token is read (its `\aftergroup` tokens first)
         let next = |r: &mut Self, extra: Vec<ValueId>| -> R<()> {
             r.pop_level();
-            r.push_list(-102, group::ALIGN, extra);
+            r.push_entry(valign, extra)?;
+            let omit = r.next_col(asid, col + 1)?;
+            r.set_cell_omit(omit);
             Ok(())
         };
         if kind == SPAN_CODE {
             // (an entry whose list is not this run's: its items go on in
             // a level of their own)
-            let omit = self.next_col(asid, col + 1)?;
             let extra = vec![
                 v.str("cell"),
                 v.int(i64::try_from(col + 1).unwrap_or(0)),
@@ -495,7 +541,7 @@ impl Run<'_, '_> {
                 v.list(prefix),
                 v.list(row),
                 v.list(adjust),
-                v.int(i64::from(omit)),
+                v.int(0),
                 v.int(asid),
             ];
             return next(self, extra);
@@ -507,10 +553,10 @@ impl Run<'_, '_> {
             .filter_map(|&y| nodes::decode(v, y, &mut side))
             .collect();
         let view = self.font_view(&list)?;
-        let pp = self.pack_params(true)?;
+        let pp = self.pack_params(!valign)?;
         let span = u16::try_from(i64::try_from(col).unwrap_or(0) - first).unwrap_or(0);
         let mut rec = AlignColumn::default();
-        let (u, adj) = pack_entry(list, true, span, &mut rec, &view, &pp);
+        let (u, adj) = pack_entry(list, !valign, span, &mut rec, &view, &pp);
         row.push(nodes::encode(v, &Node::Unset(Box::new(u)), &side));
         let g = pre.cols.get(col).map_or(Glue::ZERO, |c| c.2);
         row.push(nodes::encode(v, &tab_glue(g), &side));
@@ -525,16 +571,22 @@ impl Run<'_, '_> {
                 .filter_map(|&y| nodes::decode(v, y, &mut s2))
                 .collect();
             let view = self.font_view(&rl)?;
-            let r = pack_row(rl, true, &view, &pp);
+            let r = pack_row(rl, !valign, &view, &pp);
             let amd = self.close_group(md)?;
             let rv = nodes::encode(v, &Node::Unset(Box::new(r)), &s2);
-            self.append_to_vlist(&amd, rv)?;
-            for a in adjust {
-                self.append(amd.lid, a);
+            if valign {
+                // a column of a `\valign`: on the horizontal list, space
+                // factor 1000
+                self.append(amd.lid, rv);
+                self.set_space_factor(&amd, 1000);
+            } else {
+                self.append_to_vlist(&amd, rv)?;
+                for a in adjust {
+                    self.append(amd.lid, a);
+                }
             }
             return self.every_cr_then_peek();
         }
-        let omit = self.next_col(asid, col + 1)?;
         let extra = vec![
             v.str("cell"),
             v.int(i64::try_from(col + 1).unwrap_or(0)),
@@ -542,7 +594,7 @@ impl Run<'_, '_> {
             v.list(Vec::new()),
             v.list(row),
             v.list(adjust),
-            v.int(i64::from(omit)),
+            v.int(0),
             v.int(asid),
         ];
         next(self, extra)
@@ -592,6 +644,8 @@ impl Run<'_, '_> {
             Spec::Additional(i32::try_from(x(2)).unwrap_or(0))
         };
         let saved = x(3);
+        // (§804: `mode=-vmode`, an `\halign`)
+        let valign = md.m == -102;
         let pre = self.preamble(md.lid)?;
         let (items, _) = self.list_items(md.lid)?;
         let mut side = Side::default();
@@ -607,7 +661,7 @@ impl Run<'_, '_> {
                 for e in &r.list {
                     if let Node::Unset(e) = e {
                         if let Some(col) = cols.get_mut(c) {
-                            col.record(e.span_count, e.width);
+                            col.record(e.span_count, if valign { e.height } else { e.width });
                         }
                         c += usize::from(e.span_count) + 1;
                     }
@@ -619,9 +673,14 @@ impl Run<'_, '_> {
             .collect();
         let widths = column_widths(&mut cols, &mut tabs);
         let view = self.font_view(&list)?;
-        let pp = self.pack_params(true)?;
-        let proto = prototype(&widths, &tabs, spec, true, &view, &pp).node;
-        let pd = self.prev_depth(md)?;
+        let pp = self.pack_params(!valign)?;
+        let proto = prototype(&widths, &tabs, spec, !valign, &view, &pp).node;
+        // §812: the alignment's `aux` goes to the list around it
+        let (pd, sf) = if valign {
+            (0, self.space_factor(md)?)
+        } else {
+            (self.prev_depth(md)?, 0)
+        };
         let outer = self.close_group(md)?;
         self.aopen = (self.aopen - 1).max(0);
         self.set_astate(saved);
@@ -632,13 +691,17 @@ impl Run<'_, '_> {
         } else {
             0
         };
-        let out = set_alignment(list, &proto, true, o, &view);
+        let out = set_alignment(list, &proto, !valign, o, &view);
         if display {
             return self.fin_display_align(&outer, &out, &side, pd);
         }
         for n in &out {
             let y = nodes::encode(v, n, &side);
             self.append(outer.lid, y);
+        }
+        if valign {
+            self.set_space_factor(&outer, sf);
+            return Ok(());
         }
         self.set_prev_depth(&outer, pd);
         // §812: `if mode=vmode then build_page`

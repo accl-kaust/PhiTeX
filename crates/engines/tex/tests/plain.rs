@@ -136,6 +136,7 @@ fn dvi_fixtures() {
         ("dvi", "mathpar", false, false),
         ("dvi", "errors100", false, false),
         ("dvi", "catline", false, false),
+        ("dvi", "valign", false, false),
     ]);
 }
 

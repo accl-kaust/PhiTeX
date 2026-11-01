@@ -31,7 +31,6 @@ latex_els-cas-templates_doc_elsdoc-cas	differs: page 9: obj 203 (page 9, untyped
 latex_elsarticle_elsdoc	differs: page 12: obj 344 (page 12, untyped) line 14: oracle "0.75 0.5 0.25 rg 0.75 0.5 0.25 RG", phitex "0 g 0 G"
 latex_elteiktdk_elteiktdk_en	-j1 error: error: the files the document reads back still changed after 5 rounds, latexmk's limit: pdf:alloc, elteiktdk_en.lol (\bbl@hk@biblatex@langsetup), wsize:elteiktd; -j4 error: error: the files the document reads back still changed after 5 rounds, latexmk's limit: cs:blx@bbl@mdfivesum@old, cs:c@conpageno, font, lines, skind, elteiktdk_
 latex_elteikthesis_elteikthesis_en	-j1 error: error: the files the document reads back still changed after 5 rounds, latexmk's limit: pdf:alloc, elteikthesis_en.lol (\bbl@hk@biblatex@langsetup), elteikthesi; -j4 error: error: the files the document reads back still changed after 5 rounds, latexmk's limit: cs:blx@bbl@mdfivesum@old, dimen:123, font, lines, pdf:alloc, elteikthesi
-latex_euromoney_euromoney-doc	differs: exit 1: bytes differ at 1789202
 latex_fariscovernew_guide_fariscovernew_full	differs: page 3: obj 57 (page 3, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 17.2154 Tf 212.5", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 17.2154 Tf 212.5"
 latex_forest-quickstart_forest-quickstart	differs: page 2: obj 385 (untyped) line 5: oracle "<end>", phitex "<end>"
 latex_fragoli_fragoli_doc	-j1 differs: page 5: obj 426 (page 5, untyped) line 318: oracle "q", phitex "Q"; -j4 differs: page 1: obj 1826 (Catalog) line 10: oracle "<end>", phitex "<end>" (not the same in each run: the first sweep had -j1 differs, -j4 timeout)
@@ -39,7 +38,7 @@ latex_gammas_gammas_template	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 
 latex_glosmathtools_sample_glosmathtools_en	differs: page 2: obj 266 (Catalog) line 22: oracle "<end>", phitex "<end>"
 latex_gu_gudoc	differs: page 1: obj 358 (Catalog) line 5: oracle "/PageMode /UseOutlines", phitex "/PageLabels <<"
 latex_hep-paper_hep-paper-documentation	differs: page 2: obj 531 (Catalog) line 10: oracle "<end>", phitex "<end>" (pages 7 vs 6)
-latex_heria_heria-proposal	differs: page 13: obj 169 (page 13, untyped) line 72: oracle "/F51 10.9091 Tf 132.769 737.854 Td [(Cost)-250(\()]TJ/F51 7.6363 Tf 27", phitex "/F51 10.9091 Tf 132.769 737.854 Td [(Cost)-250(\()]TJ/F51 7.6363 Tf [("
+latex_heria_heria-proposal	differs: obj 125 (figure.1 and tcbrasternum.* destinations on the \rotatebox{90} page) line 5: oracle "334.252 4466.239", phitex "334.469 385.542" (pages identical; a \pdfdest under \pdfsetmatrix: \hypertarget in \rotatebox reproduces it, accl 22456, 22467)
 latex_hhtensor_getversion	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)
 latex_highlightx_highlightx-doc	differs: page 1: obj 25 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g"
 latex_huaz_huaz	differs: page 1: obj 54 (page 1, untyped) line 64: oracle "[<11>]TJ 0 -14.446 Td [(v)54(agy)-337<12>]TJ", phitex "[<11>]TJ 0 -14.446 Td [(v)54(agy)-325<12>]TJ"
@@ -74,7 +73,6 @@ latex_pinlabel_src_pinlabdoc	differs: page 3: obj 352 (Catalog) line 10: oracle 
 latex_polski_sample-polski	differs: page 1: obj 3 (page 1, untyped) line 6: oracle "/F43 14.3462 Tf 133.768 657.235 Td [(Spis)-375(tre±ci)]TJ/F44 9.9626 T", phitex "/F43 14.3462 Tf 133.768 657.235 Td [(Spis)-375(tre±ci)]TJ/F44 9.9626 T"
 latex_proofread_example	differs: page 1: obj 6 (page 1, untyped) line 1364: oracle "-371.1494 7.97021 m", phitex "-371.47456 7.97021 m"
 latex_przechlewski-book_wkmgr1	differs: page 1: obj 97 (page 1, untyped) line 6: oracle "/F81 11.9552 Tf 190.624 723.203 Td [(Uniwersytet)-250(Kaszubski)-250<9", phitex "/F81 11.9552 Tf 190.624 723.203 Td [(Uniwersytet)-250(Kaszubski)-250<9"
-latex_pygmentex_pygmentex_demo	differs: page 4: obj 145 (page 4, untyped) line 57: oracle "/F63 4.9813 Tf 109.458 136.266 Td [(1)]TJ/F58 6.9738 Tf [-1714(\\begin", phitex "/F63 4.9813 Tf 109.458 136.266 Td [(1)]TJ/F58 6.9738 Tf [-1714(\\begin"
 latex_pythonimmediate_pythonimmediate	differs: page 2: obj 319 (Catalog) line 10: oracle "<end>", phitex "<end>"
 latex_repeatindex_testrepeatindex	differs: page 2: obj 30 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 4 vs 3)
 latex_rvwrite_rvwrite-doc	differs: page 2: obj 63 (page 2, untyped) line 13: oracle "0 0.83 1 0.7 k 0 0.83 1 0.7 K", phitex "0 g 0 G"
@@ -104,7 +102,6 @@ latex_ualberta_ualberta	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes
 latex_ufrgscca_ufrgscca	differs: page 1: obj 179 (page 1, untyped) line 17: oracle "/F88 10.9091 Tf 1.02 0 0 1 187.354 520.241 Tm [(This)-389(bundled)-376", phitex "/F88 10.9091 Tf 1.02 0 0 1 187.354 520.241 Tm [(This)-384(bundled)-384"
 latex_verifiche_verifiche-example	differs: page 2: obj 26 (page 2, untyped) line 27: oracle "[-500(Calcolare)-333(il)-334(seguen)28(te)-333(in)28(tegrale)-334(de\f", phitex "[-500(Calcolare)-333(il)-334(seguen)28(te)-333(in)28(tegrale)-334(de\f"
 latex_windycity_windycity	-j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 exact, -j4 timeout)
-latex_zed-csp_zed2e	differs: page 6: obj 146 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 13 vs 12)
 latex_zhlineskip_zhlineskip	differs: page 6: obj 201 (untyped) line 18: oracle "57 beginbfchar", phitex "87 beginbfchar"
 latex_zx-calculus_zx-calculus	error: error: You can't use `&' in restricted horizontal mode
 xelatex_facture-belge-simple-sans-tva_facture-belge-simple-sans-tva-doc	differs: page 2: obj 56 (page 2, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F11 14.3462 Tf 52.8", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F11 14.3462 Tf 52.8"
