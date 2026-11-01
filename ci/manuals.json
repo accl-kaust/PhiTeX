@@ -14405,6 +14405,8 @@
    "oracle_wall_s": 2420.622,
    "passes": 4,
    "path": "latex/lie-hasse/lie-hasse.tex",
+   "time_limit_s": 2420,
+   "time_limit_why": "pdflatex itself takes 2420 s on it (oracle_wall_s, its 4 passes): PhiTeX is held to pdflatex's own time here, not to the sweep's 300 s and the engine's 600 s (accl 22444: PhiTeX 707 s at -j1, 1010 s at -j4)",
    "tools": [
     "bibtex"
    ]

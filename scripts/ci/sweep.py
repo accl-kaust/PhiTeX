@@ -193,11 +193,19 @@ def run_one(c, j, args):
     if args.shelf:
         # (Shelf's packs fetched once a sweep, kept beside the formats)
         os.symlink(WORK / "fcache" / "shelf", cdir / "shelf")
-    env = manuals.side_env(c["engine"], {"PHITEX_TEX_TIME": "1", "PHITEX_CACHE_DIR": str(cdir)}, phitex=True)
+    # (a document with a time limit of its own, `time_limit_s` beside
+    # its entry with the reason in `time_limit_why`: the sweep's wall
+    # limit and the engine's, PHITEX_TIME_LIMIT_SECS, both raised to it
+    # for that document alone)
+    limit = max(args.timeout, c.get("time_limit_s") or 0)
+    extra = {"PHITEX_TEX_TIME": "1", "PHITEX_CACHE_DIR": str(cdir)}
+    if c.get("time_limit_s"):
+        extra["PHITEX_TIME_LIMIT_SECS"] = str(c["time_limit_s"])
+    env = manuals.side_env(c["engine"], extra, phitex=True)
     term = run_dir / "term-phitex.txt"
     cmd = [args.bin, "build", "--exact-pdf", "-j", str(j), "--no-synctex", "--engine", c["engine"],
            *(["--shelf"] if args.shelf else []), c["main"]]
-    r = common.run(cmd, run_dir, env, args.timeout, out=term, cpu_s=args.timeout * (j + 4))
+    r = common.run(cmd, run_dir, env, limit, out=term, cpu_s=limit * (j + 4))
     text = term.read_bytes() if term.exists() else b""
     logb = b""
     try:
@@ -210,7 +218,7 @@ def run_one(c, j, args):
     res["md5"] = md5(pdf) if pdf.exists() else None
     res["pages"] = npages(pdf) if pdf.exists() else None
     if r["timeout"]:
-        res.update(status="timeout", note=f"over {args.timeout} s")
+        res.update(status="timeout", note=f"over {limit} s")
     elif b"panicked at" in text:
         res.update(status="panic", note=first_error(text))
     elif res["md5"] is None:

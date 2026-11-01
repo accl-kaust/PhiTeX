@@ -679,12 +679,14 @@ impl Run<'_, '_> {
                 }
             }
             cmd::HALIGN | cmd::VALIGN => {
+                // §1130: `vmode+halign, hmode+valign: init_align`; the
+                // other mode starts or ends a paragraph (§1090, §1094)
                 if c == cmd::VALIGN && v {
                     self.back_cur();
                     self.new_graf(&md, true)?;
                 } else if c == cmd::HALIGN && h {
                     self.head_for_vmode(&md);
-                } else if c == cmd::HALIGN && v {
+                } else if (c == cmd::HALIGN && v) || (c == cmd::VALIGN && h) {
                     self.init_align(&md)?;
                 } else if c == cmd::HALIGN && md.m == 203 {
                     // §1130: `mmode+halign`: privileged (a display), and
@@ -698,8 +700,8 @@ impl Run<'_, '_> {
                     // §1130 `privileged` (§1051)
                     self.report_illegal_case(&md)?;
                 } else {
-                    // REDUCE-GAP: \valign
-                    self.log("error", "this alignment is not supported")?;
+                    // §1046: `mmode+valign`: insert_dollar_sign
+                    self.insert_dollar_sign()?;
                 }
             }
             cmd::INSERT => self.begin_insert_or_adjust(&md, false)?,
@@ -1570,7 +1572,7 @@ impl Run<'_, '_> {
             m.push_str(" scaled ");
             m.push_str(&(-s).to_string());
         }
-        m.push_str(if self.file(&format!("{name}.tfm"))?.is_some() {
+        m.push_str(if self.font_file(&format!("{name}.tfm"))?.is_some() {
             " not loadable: Bad metric (TFM) file"
         } else if name.len() > 255 {
             " not loadable: Metric (TFM) file name too long"
@@ -1585,7 +1587,7 @@ impl Run<'_, '_> {
     /// had.
     pub(crate) fn tfm_font_info(&mut self, name: &str, s: i32) -> R<Option<i64>> {
         let key = format!("{name}.tfm");
-        let Some(file) = self.file(&key)? else {
+        let Some(file) = self.font_file(&key)? else {
             return Ok(None);
         };
         let v = self.v;
@@ -1778,54 +1780,66 @@ impl Run<'_, '_> {
                 }
                 return Ok(());
             }
-            let key = if name.contains('.') {
-                name.clone()
-            } else {
-                format!("{name}.tex")
-            };
-            // (a document's file the client cut: open, its text read by
-            // the first line read from it, `Run::next_read_line`; a run
-            // that only tests the stream, `\ifeof` after it opens, reads
-            // whether it is cut, not its text, so an edit inside the file
-            // reaches only the runs that read its lines)
-            if self.read_cut(&key)?.is_some() {
-                self.set(&field, v.list(vec![v.int(LAZY_OPEN), v.str(&key)]), true);
-                return Ok(());
-            }
-            // (so too a file the job wrote a round before and reads back
-            // per field: a test of the stream reads whether it exists,
-            // not its text)
-            if self.get(&format!("wopen:{key}"))?.is_none() && self.written_per_field(&key)? {
-                if self.file_lazy(&key)?.is_some() {
-                    self.set(&field, v.list(vec![v.int(LAZY_OPEN), v.str(&key)]), true);
-                }
-                return Ok(());
-            }
-            // (a file the job wrote a round before and reads back as its
-            // text: its lines read one by one, `Run::next_read_line`)
-            if self.get(&format!("wopen:{key}"))?.is_none() && self.written_lines(&key)? {
-                self.set(
-                    &field,
-                    v.list(vec![v.int(LAZY_LINES), v.str(&key), v.int(0)]),
-                    true,
-                );
-                return Ok(());
-            }
-            let Some(x) = self.read_file(&key)? else {
-                return Ok(());
-            };
-            let xs = list_of(v, x);
-            if xs.len() >= 2 {
-                let text = str_of(v, xs[1]);
-                let lines: Vec<ValueId> = crate::expand::split_lines(&text)
-                    .iter()
-                    .map(|l| v.str(l))
-                    .collect();
-                let st = v.list(vec![v.int(1), v.list(lines)]);
-                self.set(&field, st, true);
+            // (kpathsea's `tex` format: `name.tex` first unless the name has
+            // one of its suffixes, then a name with another extension as
+            // it is, [`crate::run::tex_names`])
+            let (key, alt) = crate::run::tex_names(&name);
+            if !self.open_in_at(&field, &key)?
+                && let Some(alt) = alt
+            {
+                self.open_in_at(&field, &alt)?;
             }
         }
         Ok(())
+    }
+
+    /// `\\openin`'s stream `field` opened on file `key`: whether it
+    /// opened (a file there, the client's, cut, or one the job writes).
+    fn open_in_at(&mut self, field: &str, key: &str) -> R<bool> {
+        let v = self.v;
+        // (a document's file the client cut: open, its text read by
+        // the first line read from it, `Run::next_read_line`; a run
+        // that only tests the stream, `\ifeof` after it opens, reads
+        // whether it is cut, not its text, so an edit inside the file
+        // reaches only the runs that read its lines)
+        if self.read_cut(key)?.is_some() {
+            self.set(field, v.list(vec![v.int(LAZY_OPEN), v.str(key)]), true);
+            return Ok(true);
+        }
+        // (so too a file the job wrote a round before and reads back
+        // per field: a test of the stream reads whether it exists,
+        // not its text)
+        if self.get(&format!("wopen:{key}"))?.is_none() && self.written_per_field(key)? {
+            let there = self.file_lazy(key)?.is_some();
+            if there {
+                self.set(field, v.list(vec![v.int(LAZY_OPEN), v.str(key)]), true);
+            }
+            return Ok(there);
+        }
+        // (a file the job wrote a round before and reads back as its
+        // text: its lines read one by one, `Run::next_read_line`)
+        if self.get(&format!("wopen:{key}"))?.is_none() && self.written_lines(key)? {
+            self.set(
+                field,
+                v.list(vec![v.int(LAZY_LINES), v.str(key), v.int(0)]),
+                true,
+            );
+            return Ok(true);
+        }
+        let Some(x) = self.read_file(key)? else {
+            return Ok(false);
+        };
+        let xs = list_of(v, x);
+        if xs.len() >= 2 {
+            let text = str_of(v, xs[1]);
+            let lines: Vec<ValueId> = crate::expand::split_lines(&text)
+                .iter()
+                .map(|l| v.str(l))
+                .collect();
+            let st = v.list(vec![v.int(1), v.list(lines)]);
+            self.set(field, st, true);
+        }
+        Ok(true)
     }
 
     /// The next line of the open stream whose state `st` field `field`
@@ -2490,6 +2504,7 @@ impl Run<'_, '_> {
     /// of the file that this run wrote it.
     pub(crate) fn open_out(&mut self, n: i64, name: &str) -> R<()> {
         let v = self.v;
+        let name = crate::run::same_dir(name);
         let base = name.rsplit('/').next().unwrap_or(name);
         let name = if base.contains('.') {
             name.to_owned()

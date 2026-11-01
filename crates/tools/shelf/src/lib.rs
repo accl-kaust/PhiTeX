@@ -556,7 +556,13 @@ impl Files {
     /// content) and its texmf path.
     #[must_use]
     pub fn key(&self, name: &str) -> Option<(String, Vec<u8>)> {
-        let rel = self.path_of(name)?;
+        self.key_in(name, format_of(name))
+    }
+
+    /// [`Files::key`] in kpathsea format `format`.
+    #[must_use]
+    pub fn key_in(&self, name: &str, format: &str) -> Option<(String, Vec<u8>)> {
+        let rel = self.path_in(name, format)?;
         let pack = self.index.pack_of(rel)?;
         Some((
             format!("{TL}{rel}"),

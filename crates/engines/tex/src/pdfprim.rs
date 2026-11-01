@@ -434,12 +434,10 @@ fn hex_upper(b: &[u8]) -> String {
 /// File `name` as `\\pdffilesize` and its kin find it (`name.tex` first
 /// where it has no extension): `[path, text]`.
 fn file_found(r: &mut Run<'_, '_>, name: &str) -> R<Option<ValueId>> {
-    let base = name.rsplit('/').next().unwrap_or(name);
-    let mut found = None;
-    if !base.contains('.') {
-        found = r.read_file(&format!("{name}.tex"))?;
-    }
-    if found.is_none() {
+    let key = crate::run::tex_names(name).0;
+    let name = crate::run::same_dir(name);
+    let mut found = r.read_file(&key)?;
+    if found.is_none() && key != name {
         found = r.read_file(name)?;
     }
     Ok(found)
@@ -468,12 +466,7 @@ fn file_bytes_shared(r: &mut Run<'_, '_>, name: &str) -> R<Option<std::sync::Arc
 /// beside it (`fsize:<name>`), so the run reads not its text: an edit
 /// inside the file that keeps its length reaches only its pieces.
 fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
-    let base = name.rsplit('/').next().unwrap_or(name);
-    let key = if base.contains('.') {
-        name.to_owned()
-    } else {
-        format!("{name}.tex")
-    };
+    let key = r.tex_lookup(name)?;
     if r.read_cut(&key)?.is_some() {
         let v = r.v;
         if let Some(n) = r.cx.env(v.field(&format!("fsize:{key}")))? {
@@ -683,12 +676,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             let job = r
                 .get_loc(crate::fields::cell::JOBNAME)?
                 .map_or_else(|| "texput".to_owned(), |x| str_of(r.v, x));
-            let base = name.rsplit('/').next().unwrap_or(&name);
-            let key = if base.contains('.') {
-                name.clone()
-            } else {
-                format!("{name}.tex")
-            };
+            let key = r.tex_lookup(&name)?;
             // (a file found: the build's clock too, as pdfTeX's under
             // FORCE_SOURCE_DATE gives SOURCE_DATE_EPOCH for every file
             // (utils.c `getfilemoddate`); epstopdf-base compares an EPS's
@@ -955,12 +943,16 @@ fn action_target(r: &mut Run<'_, '_>, act: ValueId) -> R<()> {
     {
         let n = list_of(v, p).first().map_or(0, |&n| int_of(v, n));
         page_obj(r, i32::try_from(n).unwrap_or(0))?;
-        return Ok(());
-    }
-    if let Some(&id) = xs.get(3)
+    } else if let Some(&id) = xs.get(3)
         && !list_of(v, id).is_empty()
     {
         crate::pdfout::dest_first_named(r, id)?;
+    }
+    // (then its structure destination's, `/SD`)
+    if let Some(&sid) = xs.get(5)
+        && sid != ValueId::UNIT
+    {
+        crate::pdfout::dest_first_named(r, sid)?;
     }
     Ok(())
 }
@@ -2475,6 +2467,36 @@ fn action(r: &mut Run<'_, '_>) -> R<ValueId> {
     } else {
         v.str("")
     };
+    // `struct`, pdfTeX 1.40.26's structure destination (a `goto`'s
+    // `/SD`): with `file`, its text as given; else `name {…}` or `num n`,
+    // a structure destination of its own namespace (`obj_type_struct_dest`,
+    // [`struct_ident`])
+    let sid = if r.scan_keyword("struct")? {
+        if kind != "goto" {
+            r.log(
+                "error",
+                "pdfTeX error (ext1): only GoTo action can be used with `struct'",
+            )?;
+        }
+        if !str_of(v, file).is_empty() || r.scan_keyword("name")? {
+            let s = ext_value(r)?;
+            v.list(vec![v.str("sname"), s])
+        } else if r.scan_keyword("num")? {
+            let n = r.scan_int()?;
+            if n <= 0 {
+                r.log(
+                    "error",
+                    "pdfTeX error (ext1): num identifier must be positive",
+                )?;
+            }
+            v.list(vec![v.str("snum"), v.int(i64::from(n))])
+        } else {
+            r.log("error", "pdfTeX error (ext1): identifier type missing")?;
+            ValueId::UNIT
+        }
+    } else {
+        ValueId::UNIT
+    };
     let page = if kind == "goto" && r.scan_keyword("page")? {
         let n = r.scan_int()?;
         let s = ext_value(r)?;
@@ -2490,9 +2512,6 @@ fn action(r: &mut Run<'_, '_>) -> R<ValueId> {
     } else if r.scan_keyword("num")? {
         let n = r.scan_int()?;
         v.list(vec![v.str("num"), v.int(i64::from(n))])
-    } else if kind == "goto" && r.scan_keyword("struct")? {
-        let s = ext_value(r)?;
-        v.list(vec![v.str("struct"), s])
     } else {
         v.str("")
     };
@@ -2516,7 +2535,25 @@ fn action(r: &mut Run<'_, '_>) -> R<ValueId> {
         page.unwrap_or(ValueId::UNIT),
         id,
         v.int(window),
+        sid,
     ]))
+}
+
+/// A structure destination's identifier, `\pdfdest struct`'s and a
+/// `goto struct`'s: `["snum", n]` or `["sname", text]`, apart from the
+/// destinations' `["num", n]` and `["name", text]` (pdfTeX's
+/// `obj_type_struct_dest`, its own objects: `num 1` and `struct … num 1`
+/// are two).
+fn struct_ident(v: &phitex_defuse::Values, id: ValueId) -> ValueId {
+    let xs = list_of(v, id);
+    let tag = match xs.first().map(|&k| str_of(v, k)).as_deref() {
+        Some("name") => "sname",
+        _ => "snum",
+    };
+    v.list(vec![
+        v.str(tag),
+        xs.get(1).copied().unwrap_or(ValueId::UNIT),
+    ])
 }
 
 /// `\pdfdest`'s and `\pdfthread`'s identifier: `num n` or `name {…}`.
@@ -2577,6 +2614,9 @@ pub(crate) fn obj_cmd(
 /// number `useobjnum` gives, and whether the number is only reserved.
 fn obj_num_option(r: &mut Run<'_, '_>) -> R<(Option<i64>, bool)> {
     if r.scan_keyword("reserveobjnum")? {
+        // ("Scan an optional space", `\\pdfobj`'s and `\\pdfannot`'s: the
+        // space after the keyword was a space of the text)
+        r.optional_space()?;
         return Ok((None, true));
     }
     if r.scan_keyword("useobjnum")? {
@@ -3064,7 +3104,26 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             }
         }
         ex::DEST => {
+            // `struct n` (pdfTeX 1.40.26): the structure element's object
+            // the destination names in place of its page's
+            let snum = if r.scan_keyword("struct")? {
+                let n = r.scan_int()?;
+                if n <= 0 {
+                    r.log(
+                        "error",
+                        "pdfTeX error (ext1): struct identifier must be positive",
+                    )?;
+                }
+                Some(n)
+            } else {
+                None
+            };
             let id = identifier(r)?;
+            let id = if snum.is_some() {
+                struct_ident(v, id)
+            } else {
+                id
+            };
             let kind = if r.scan_keyword("xyz")? {
                 if r.scan_keyword("zoom")? {
                     let z = r.scan_int()?;
@@ -3096,7 +3155,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 r.log("error", "pdfTeX error (ext1): destination type missing")?;
                 v.list(vec![s("xyz")])
             };
-            whatsit(r, md, vec![s("pdf:dest"), id, kind]);
+            let mut w = vec![s("pdf:dest"), id, kind];
+            w.extend(snum.map(|n| v.int(i64::from(n))));
+            whatsit(r, md, w);
         }
         ex::THREAD | ex::START_THREAD => {
             // (which of the two, before the specification is scanned:

@@ -28,10 +28,22 @@ fn kpse() -> &'static Mutex<Option<phitex_kpse::Kpse>> {
 /// Files from `dir` (printed as `./name`), fonts through kpathsea.
 pub fn finder(dir: &Path) -> Finder {
     let dir = dir.to_path_buf();
-    Arc::new(move |name: &str| {
+    Arc::new(move |key: &str| {
+        // (the font side's lookup in the format its extension names,
+        // TeX's own in the `tex` format, `phitex_tex::FONT_KEY`)
+        let (name, font) = match phitex_tex::font_name(key) {
+            Some(n) => (n, true),
+            None => (key, false),
+        };
         let p = dir.join(name);
         if p.is_file() {
             return Some((format!("./{name}"), std::fs::read(&p).ok()?));
+        }
+        if !font {
+            let mut k = kpse().lock().ok()?;
+            let path = k.as_mut()?.find_file(name.as_bytes(), phitex_kpse::Format::Tex, false)?;
+            let path = String::from_utf8(path).ok()?;
+            return Some((path.clone(), std::fs::read(&path).ok()?));
         }
         if let Some((font, dpi)) = phitex_kpse::pk_name(name) {
             let mut k = kpse().lock().ok()?;
