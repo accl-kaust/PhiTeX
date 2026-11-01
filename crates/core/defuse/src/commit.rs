@@ -1971,19 +1971,30 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // (a range from a node, or a read at a node: the change lies
         // there; one from the unit's start names no node a run could go
         // back before, nor one from the site the run was told to go back
-        // before, which it did not read again)
-        let range = |k: &ReadKind| match k {
-            ReadKind::Fold { from: Some(n), .. }
-            | ReadKind::Next { after: Some(n), .. }
-            | ReadKind::Field {
-                at: Anchor::Before(n) | Anchor::AfterOwn(n),
-                ..
-            } => p.woken_at != Some(*n),
+        // before, which it did not read again. That site is the one the
+        // read's cause names (`cause_of_read`: for a `next` that answered
+        // none, the contribution or stop it answers now, not its start):
+        // a run woken there that rests on the kept read again would be
+        // sent back there at every commit, never from nothing)
+        let range = |k: &ReadKind, c: &Cause| match (k, c) {
+            (ReadKind::Next { after: Some(_), .. }, Cause::Range { by, .. }) => p.woken_at != Some(*by),
+            (
+                ReadKind::Fold { from: Some(n), .. }
+                | ReadKind::Next { after: Some(n), .. }
+                | ReadKind::Field {
+                    at: Anchor::Before(n) | Anchor::AfterOwn(n),
+                    ..
+                },
+                _,
+            ) => p.woken_at != Some(*n),
             _ => false,
         };
-        causes.push(cause_of_read(&rec.reads[i]));
+        let c = cause_of_read(&rec.reads[i]);
         if i >= own_reads {
-            stale = !range(&rec.reads[i].kind);
+            stale = !range(&rec.reads[i].kind, &c);
+        }
+        causes.push(c);
+        if i >= own_reads {
             let mut memo = read::FoldMemo::new();
             for (j, r) in rec.reads.iter().enumerate().skip(own_reads) {
                 if j == i || stale {
@@ -2006,8 +2017,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 if !moved {
                     continue;
                 }
-                if range(&r.kind) {
-                    causes.push(cause_of_read(r));
+                let c = cause_of_read(r);
+                if range(&r.kind, &c) {
+                    causes.push(c);
                 } else {
                     stale = true;
                 }
