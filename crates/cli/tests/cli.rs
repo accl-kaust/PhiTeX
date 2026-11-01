@@ -2878,6 +2878,11 @@ fn plain_tfms(text: &str) -> Vec<(String, Vec<u8>)> {
     files
 }
 
+/// The release the test Shelf serves, named to each build
+/// (`PHITEX_SHELF_RELEASE`): the tests stand apart from the release this
+/// PhiTeX is pinned to, which moves with every Shelf release.
+const SHELF_RELEASE: &str = "tl2026.7";
+
 /// A Shelf release of `files` (texmf path, bytes) in one pack, its table
 /// and `release-tl2026.7.json` of schema 1, served over HTTP on 127.0.0.1
 /// by a thread of the test's: the port, and how many requests it
@@ -2983,6 +2988,7 @@ fn build_from_shelf() {
             .args(args)
             .arg("doc.tex")
             .env("PHITEX_CACHE_DIR", dir.join("cache"))
+            .env("PHITEX_SHELF_RELEASE", SHELF_RELEASE)
             .env_remove("PHITEX_SHELF_URL");
         if let Some(p) = url {
             c.env("PHITEX_SHELF_URL", format!("http://127.0.0.1:{p}/tl2026"));
@@ -3082,6 +3088,7 @@ fn xetex_from_shelf() {
                 "doc.tex",
             ])
             .env("PHITEX_CACHE_DIR", dir.join("cache"))
+            .env("PHITEX_SHELF_RELEASE", SHELF_RELEASE)
             .env(
                 "PHITEX_SHELF_URL",
                 format!("http://127.0.0.1:{port}/tl2026/"),
