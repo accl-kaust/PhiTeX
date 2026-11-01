@@ -1831,7 +1831,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         walk_stopped(eng, ww, node, node.pos_hint(), seg_id, &defined, &mut st);
     }
     for &f in &changed_contribs {
-        reask_ranges(eng, ww, f, seg_pos, node.id, &mut st);
+        reask_ranges(eng, ww, f, seg_pos, node.id, &holes, &mut st);
     }
     let mut memo = read::FoldMemo::new();
     for (f, k, r) in holes {
@@ -2757,25 +2757,60 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
 }
 
 /// Re-asks the readers of folds over `f` whose range covers `at`, `by`'s
-/// label (its last where it is gone).
-pub(crate) fn reask_ranges(eng: &Engine, w: Option<&Worker>, f: Field, at: Pos, by: NodeId, st: &mut CommitStats) {
+/// label (its last where it is gone), but the `next` readers stopped at
+/// `by` (`stops`, taken from it): the change re-asks those after, with
+/// its stops.
+pub(crate) fn reask_ranges(
+    eng: &Engine,
+    w: Option<&Worker>,
+    f: Field,
+    at: Pos,
+    by: NodeId,
+    stops: &[(Field, RangeKey, RangeReader)],
+    st: &mut CommitStats,
+) {
     let at = read::pos_of(eng, by).unwrap_or(at);
-    reask_ranges_in(eng, w, f, at, by, false, st);
+    reask_ranges_in(eng, w, f, (at, by), false, stops, st);
 }
 
 /// `reask_ranges` at label `at` whatever `by`'s label is now (its old
 /// one, `relocate`).
-fn reask_ranges_at(eng: &Engine, w: Option<&Worker>, f: Field, at: Pos, by: NodeId, st: &mut CommitStats) {
-    reask_ranges_in(eng, w, f, at, by, true, st);
+fn reask_ranges_at(
+    eng: &Engine,
+    w: Option<&Worker>,
+    f: Field,
+    at: Pos,
+    by: NodeId,
+    stops: &[(Field, RangeKey, RangeReader)],
+    st: &mut CommitStats,
+) {
+    reask_ranges_in(eng, w, f, (at, by), true, stops, st);
 }
 
 /// The range readers holding `at` (the index's spans are segments',
 /// which a relabel keeps) whose range covers `by` ([`covers`]),
-/// re-asked.
-fn reask_ranges_in(eng: &Engine, w: Option<&Worker>, f: Field, at: Pos, by: NodeId, fixed: bool, st: &mut CommitStats) {
+/// re-asked; a `next` stopped at `by` (one of `stops`) is not: the
+/// change re-asks it once, with the stops after. Re-asked here too, the
+/// run the first re-ask woke could end and commit before the second,
+/// which, asking the record that run replaces, ran it again for the same
+/// change from before `by` (a page loop parked at a hole folded `by`,
+/// then started its pages again from nothing: pages2's park test, a few
+/// builds in a hundred with the CPUs loaded).
+fn reask_ranges_in(
+    eng: &Engine,
+    w: Option<&Worker>,
+    f: Field,
+    (at, by): (Pos, NodeId),
+    fixed: bool,
+    stops: &[(Field, RangeKey, RangeReader)],
+    st: &mut CommitStats,
+) {
     let readers = eng.ranges.holding(f, at);
     let mut memo = read::FoldMemo::new();
     for (k, r) in readers {
+        if stops.iter().any(|s| s.0 == f && s.1 == k) {
+            continue;
+        }
         if covers(eng, &r, by, at, fixed) {
             reask_range(eng, w, f, k, &r, by, st, &mut memo);
         }
@@ -3327,7 +3362,7 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
         reask(eng, w, f, pos, seg_id, node.id, &mut st);
     }
     for f in changed_contribs {
-        reask_ranges(eng, w, f, pos, node.id, &mut st);
+        reask_ranges(eng, w, f, pos, node.id, &stops, &mut st);
     }
     for (f, r) in &anchored {
         reask_reader(eng, w, *f, r, Some(node.id), &mut st);
@@ -4113,7 +4148,7 @@ fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, left: Left, st:
         reask_from(eng, w, f, left.pos, left.seg, None, Some(m.op()), 0, st);
     }
     for &f in &left.contribs {
-        reask_ranges_at(eng, w, f, left.pos, m.id, st);
+        reask_ranges_at(eng, w, f, left.pos, m.id, &left.stops, st);
     }
     reask_stops(eng, w, left.stops, m.id, st);
     if left.hole {
