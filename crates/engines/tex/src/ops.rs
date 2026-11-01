@@ -685,8 +685,16 @@ impl Operation for Dvi {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
         let file = crate::assemble::output(cx, o)?;
+        // (whether pdfTeX's PDF file was opened at read time: with no
+        // page, a file of no bytes, [`crate::fields::cell::PDF_OPENED`])
+        let opened = crate::assemble::field(cx, "pdf:opened")?.unwrap_or(ValueId::UNIT);
         let v = cx.values();
         cx.define_with(v.field(crate::assemble::END_FILE), file, Locality::Global);
+        cx.define_with(
+            v.field(crate::assemble::END_OPENED),
+            opened,
+            Locality::Global,
+        );
         Ok(ValueId::UNIT)
     }
 }

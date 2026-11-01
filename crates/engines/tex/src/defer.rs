@@ -47,6 +47,21 @@ pub(crate) fn deferrable(r: &mut Run<'_, '_>, loc: Loc) -> bool {
     if r.count_reg(loc) == Some(0) {
         return true;
     }
+    routine_regs(r);
+    r.defer_regs.as_ref().is_some_and(|ls| ls.contains(&loc))
+}
+
+/// The page-layer registers ([`deferrable`]): `count:0` and the integer
+/// registers the output routine may define.
+pub(crate) fn page_regs(r: &mut Run<'_, '_>) -> Vec<Loc> {
+    routine_regs(r);
+    let mut ls = vec![r.reg_loc(0, 0)];
+    ls.extend(r.defer_regs.iter().flatten().copied());
+    ls
+}
+
+/// [`Run::defer_regs`], made once per run.
+fn routine_regs(r: &mut Run<'_, '_>) {
     if r.defer_regs.is_none() {
         // (the integer registers the finishers defined as the evaluation
         // began, `Ops::fin_defs_start`: what a routine defines, by name;
@@ -73,7 +88,6 @@ pub(crate) fn deferrable(r: &mut Run<'_, '_>, loc: Loc) -> bool {
         }
         r.defer_regs = Some(locs);
     }
-    r.defer_regs.as_ref().is_some_and(|ls| ls.contains(&loc))
 }
 
 /// `\the`/`\number` on register `loc` alone, in a piece, where the

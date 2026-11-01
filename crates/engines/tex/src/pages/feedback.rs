@@ -347,6 +347,70 @@ impl Run<'_, '_> {
         Ok(fired == Some(true))
     }
 
+    /// At a candidate a page can fire at ([`Run::finish_candidate`]), or
+    /// a checkpoint taken after one restored: the page-layer registers the
+    /// run holds (loaded, or its own definitions or maps), whose next read
+    /// is ordered after a page firing there ([`Run::page_regs_held`]).
+    pub(crate) fn note_page_regs_held(&mut self) {
+        let op = self.cx.op();
+        if !(op == self.ops.exec || op == self.ops.resume)
+            || !(self.top || self.doc)
+            || !self.cand_marks.iter().any(|m| m.fresh)
+        {
+            return;
+        }
+        for l in crate::defer::page_regs(self) {
+            if (self.st.is_loaded(l) || self.st.has_map(l) || self.st.defined_after(l, 0))
+                && !self.page_regs_held.contains(&l)
+            {
+                self.page_regs_held.push(l);
+            }
+        }
+    }
+
+    /// A read of page-layer register `loc` (`\count0`, a register the
+    /// output routine defines: [`crate::defer::deferrable`]) by a piece,
+    /// the digits or a symbol, after a candidate of its own a page fires
+    /// at: TeX ran that page's routine there, and the register the text
+    /// reads after it is the one the routine stepped (tabularx's
+    /// `\TX@ckpt`, `\edef`'d from `\the\value{page}` in a float after
+    /// the page broke, then put back with `\global`). The value reaching
+    /// the piece's position, or a symbol resolved there, is the one
+    /// before that page: the run ends at the candidate instead
+    /// ([`Run::order_after_own_page`]), its rest a resume after the
+    /// page's finisher, which reads the routine's value.
+    pub(crate) fn order_page_reg_read(&mut self, loc: crate::state::Loc) -> R<()> {
+        let op = self.cx.op();
+        if !(op == self.ops.exec || op == self.ops.resume)
+            || !(self.top || self.doc)
+            || self.cut.is_some()
+            || self.stop_at.is_some()
+            || self.interp.is_some()
+            || !self.cand_marks.iter().any(|m| m.fresh)
+            || self.count_reg(loc).is_none()
+            || !crate::defer::deferrable(self, loc)
+        {
+            return Ok(());
+        }
+        let (_, fired, own_k) = self.page_so_far()?;
+        if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
+            eprintln!(
+                "page-trace: node {} reads page register {loc} after its candidates: fired {fired:?} at {own_k:?}, marks {:?}",
+                self.cx.node().raw(),
+                self.cand_marks
+                    .iter()
+                    .map(|m| (m.k, m.fresh, m.restartable, m.open_cut))
+                    .collect::<Vec<_>>()
+            );
+        }
+        if fired == Some(true)
+            && let Some(k) = own_k
+        {
+            self.order_after_own_page(k)?;
+        }
+        Ok(())
+    }
+
     /// The `[tag]` page parameter markers of piece `pid`'s `items` on a
     /// page after the first (`cur`, the parameters in force, some): those
     /// and what the text set since the page before fired in piece

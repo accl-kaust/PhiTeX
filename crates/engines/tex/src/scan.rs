@@ -823,7 +823,7 @@ impl Run<'_, '_> {
             }
             cmd::ASSIGN_INT => {
                 let l = self.quantity_loc(c, m);
-                if defer && self.defer_at(l) {
+                if defer && self.defer_at(l)? {
                     IVal::Int(0)
                 } else {
                     IVal::Int(crate::val::i32_of(self.v, self.get_loc(l)?))
@@ -918,7 +918,7 @@ impl Run<'_, '_> {
                 match m {
                     0 => {
                         let l = self.reg_loc(0, n);
-                        if defer && self.defer_at(l) {
+                        if defer && self.defer_at(l)? {
                             IVal::Int(0)
                         } else {
                             IVal::Int(crate::val::i32_of(self.v, self.get_loc(l)?))

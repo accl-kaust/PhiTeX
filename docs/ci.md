@@ -67,7 +67,12 @@ differing object, and an oracle built there whose md5 is not the pinned
 one is said (the image is not the one pinned from). Every manual is red
 unless identical, but those in `ci/manuals-not-identical.tsv` (its id, a
 tab, the cause, as the user decides): they run and are reported apart
-(`known-red.txt`), and one identical again is said. On mc, every manual
+(`known-red.txt`), and one identical again is said. A manual in
+`ci/manuals-pdftex-bugs.tsv` differs only where pdfTeX has a bug PhiTeX
+does not copy (`docs/differences.md`). Its row lists that entry, a mask
+and the oracle's objects the mask may change, and the manual passes as
+`documented` only when everything else is identical: the objects'
+places, every other object, and the listed objects once masked. On mc, every manual
 at once: `CLUSTER=mc SWEEP_ARGS="--engines pdflatex,xelatex --tools
 bibtex,biber,makeindex,glossaries" scripts/accl/corpus-sweep`.
 
