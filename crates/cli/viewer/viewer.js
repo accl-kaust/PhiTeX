@@ -5420,7 +5420,7 @@ var Strips = class {
       const w = dv.getUint32(at, true), h = dv.getUint32(at + 4, true);
       at += 8;
       if (w && h) {
-        const px = new Uint8ClampedArray(buf, at, w * h * 4);
+        const px = pagewise(new Uint8ClampedArray(buf, at, w * h * 4));
         made.push(
           createImageBitmap(new ImageData(px, w, h)).then((b) => {
             this.kept.set(key, b);
@@ -5437,6 +5437,10 @@ var Strips = class {
     }
   }
 };
+function pagewise(px) {
+  const clone = globalThis.cloneInto;
+  return clone ? clone(px, window) : px;
+}
 var SVG = "http://www.w3.org/2000/svg";
 function textLayer(lines2, w, h) {
   const svg = document.createElementNS(SVG, "svg");
