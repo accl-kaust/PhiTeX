@@ -1765,6 +1765,15 @@ impl Run<'_, '_> {
         if c != 0 {
             self.scan_optional_equals()?;
             let name = self.scan_file_name()?;
+            // (XeTeX: the stream's lines read in the input mode
+            // `\XeTeXdefaultencoding` names now, `u_open_in`'s
+            // `XeTeX_default_input_mode`; `auto` where none was)
+            if self.xe {
+                let m = self
+                    .get("xdefenc")?
+                    .map_or(crate::xetex::mode::AUTO, |x| crate::val::int_of(v, x));
+                self.set(&format!("{field}:enc"), v.int(m), true);
+            }
             // (a pipe, with shell escape on: the command's output read as
             // the stream's lines, `open_in_or_pipe`; a pipe that does not
             // open leaves the stream closed)
@@ -1840,6 +1849,33 @@ impl Run<'_, '_> {
             self.set(field, st, true);
         }
         Ok(true)
+    }
+
+    /// [`Run::next_read_line`], its bytes made characters as XeTeX's
+    /// `input_line` makes a `\read` file's: in the mode the stream was
+    /// opened in (a UTF-8 byte-order mark skipped on its first line in
+    /// `auto`, [`crate::xetex::decode_line`]). pdfTeX's lines are bytes.
+    pub(crate) fn next_read_line_decoded(&mut self, field: &str, st: ValueId) -> R<Option<String>> {
+        if !self.xe {
+            return self.next_read_line(field, st);
+        }
+        let v = self.v;
+        let first = match &*v.get(st) {
+            Value::List(xs) => match xs.first().map(|&c| crate::val::int_of(v, c)) {
+                Some(LAZY_OPEN | 1) => true,
+                Some(LAZY_LINES) => xs.get(2).is_some_and(|&p| crate::val::int_of(v, p) == 0),
+                _ => xs.get(2).is_none_or(|&p| crate::val::int_of(v, p) == 0),
+            },
+            _ => false,
+        };
+        let m = self
+            .get(&format!("{field}:enc"))?
+            .map_or(crate::xetex::mode::AUTO, |x| crate::val::int_of(v, x));
+        Ok(self.next_read_line(field, st)?.map(|text| {
+            let mut buf: Vec<u32> = text.chars().map(u32::from).collect();
+            crate::xetex::decode_line(&mut buf, m, first);
+            buf.into_iter().filter_map(char::from_u32).collect()
+        }))
     }
 
     /// The next line of the open stream whose state `st` field `field`
@@ -1926,7 +1962,7 @@ impl Run<'_, '_> {
                 // modes; a build has no terminal ([`Run::fatal`])
                 return self.fatal("*** (cannot \\read from terminal in nonstop modes)");
             };
-            let line = self.next_read_line(&field, st)?;
+            let line = self.next_read_line_decoded(&field, st)?;
             let text = line.unwrap_or_default();
             let e = i64::from(self.ipar(Par::endlinechar)?);
             let line = crate::input::Line::of_str(&text, e, true);

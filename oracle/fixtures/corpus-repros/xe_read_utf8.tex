@@ -1,0 +1,18 @@
+% !TEX program = xelatex
+% Files read with \read and \readline under XeLaTeX: XeTeX's input_line
+% decodes their lines from UTF-8 (the mode \XeTeXdefaultencoding named
+% when the stream opened, auto by default), as it does \input's. etoc
+% reads the .toc with \read; the accented titles were their bytes.
+\documentclass{article}
+\usepackage{etoc}
+\usepackage{fontspec}
+\begin{document}
+\tableofcontents
+\section{Définition}
+\section{Création d’une ligne}
+\newread\r
+\openin\r=\jobname.toc
+\readline\r to\x \readline\r to\x
+\texttt{\meaning\x}
+\closein\r
+\end{document}
