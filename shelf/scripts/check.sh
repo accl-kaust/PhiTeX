@@ -54,7 +54,7 @@ for block in lzma.decompress(open(db, 'rb').read()).decode().split('\n\n'):
         print(f'{name} r{rev} (its archive, not fetched by the build)')
         continue
     with tarfile.open(arch, 'r:xz') as t:
-        found = {os.path.basename(m.name): m for m in t if m.isfile() and '/fonts/map/' in m.name}
+        found = {os.path.basename(m.name): m for m in t if m.isfile() and ('/' + m.name).find('/fonts/map/') >= 0}
         for m in sorted(maps):
             if m not in found:
                 print(f'{m} (the map file, not in {name})')
