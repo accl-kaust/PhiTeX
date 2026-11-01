@@ -1890,15 +1890,17 @@ fn latex_aux_on_disk_outside_a_fixpoint() {
 /// pdflatex takes 4.4 s; 92 s after).
 #[test]
 fn lineno_numbered_lines_run_their_finishers_a_few_times() {
+    use std::fmt::Write as _;
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lineno-lines");
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let mut src = String::from(
         "\\documentclass{article}\n\\usepackage{lineno}\n\\linenumbers\n\\begin{document}\nSee line \\lineref{l:last} on page \\pageref{l:last}.\n\n",
     );
     for i in 0..60 {
-        src.push_str(&format!(
+        let _ = write!(
+            src,
             "Paragraph {i} of numbered lines, long enough to be set as three or four lines of the article class's text width, so that the pages fill and every line has its number.\n\n"
-        ));
+        );
     }
     src.push_str("The last line.\\linelabel{l:last}\n\\end{document}\n");
     for threads in [1, 4] {
