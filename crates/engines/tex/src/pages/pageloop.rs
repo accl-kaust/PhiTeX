@@ -541,6 +541,11 @@ impl Operation for Pages {
         true
     }
 
+    /// It stands after the whole text and folds the piece at its hole.
+    fn works_at_frontier(&self) -> bool {
+        true
+    }
+
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }

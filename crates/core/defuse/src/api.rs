@@ -293,6 +293,17 @@ pub trait Operation: Send + Sync {
         false
     }
 
+    /// Whether its nodes' work is at the settling layer's frontier
+    /// (`Ctx::set_frontier`) wherever they stand (default no): one past
+    /// the frontier runs in the order of a node at it. The page loop
+    /// does: it stands after the whole text and folds the piece at its
+    /// hole. A finisher does not: its work is its page, where it stands;
+    /// one past the frontier is a page the loop has not come to again,
+    /// whose run waits for the text and the pages before it.
+    fn works_at_frontier(&self) -> bool {
+        false
+    }
+
     /// Whether its nodes define alike (default yes): a relation one of
     /// them makes (`Ctx::define_rel`) is then predicted for the others
     /// that have not run (`commit::learn_shape`). An operation whose nodes
