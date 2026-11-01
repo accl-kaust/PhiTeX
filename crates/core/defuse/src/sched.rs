@@ -1186,6 +1186,7 @@ fn note_stale(n: &Node, wake: Wake) {
 
 /// `mark_stale` with no wake held.
 pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    frontier_back(eng, n, &wake);
     if n.committing.load(Ordering::Acquire) {
         return mark_dirty_now(eng, w, n, wake);
     }
@@ -1244,6 +1245,7 @@ pub(crate) fn hold_wake(eng: &Engine, w: Option<&Worker>, n: NodeId, wake: Wake)
 
 /// `mark_dirty` with no wake held.
 pub(crate) fn mark_dirty_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    frontier_back(eng, n, &wake);
     loop {
         match n.state() {
             State::Clean => {
@@ -1795,6 +1797,42 @@ fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<N
     pool.shared.done_one();
 }
 
+/// A node of the settling layer re-asked by a change of a range it folds
+/// at `by`, a node outside the layer (the text's contribution to the
+/// page list): the layer may place nodes again anywhere past `by` (a page
+/// fired elsewhere, its finisher), so its frontier goes back to `by`
+/// until the layer's next run sets it (`Ctx::set_frontier`). Left where
+/// the layer's last run put it (past `by`, or none once the fold reached
+/// the text's end), a reader past `by` of what a routine defines read
+/// the give-back of a routine about to run again on another page, and
+/// ran again with every give-back after it.
+fn frontier_back(eng: &Engine, n: &Node, wake: &Wake) {
+    let (Cause::Range { .. }, Some(by)) = (&wake.cause, wake.by) else {
+        return;
+    };
+    if !eng.op(n.op()).settles_at_quiet() {
+        return;
+    }
+    let Some(b) = eng.placed_node(by) else { return };
+    if eng.op(b.op()).settles_at_quiet() {
+        return;
+    }
+    let mut fr = eng.frontier.load(Ordering::Acquire);
+    loop {
+        // (at `by` already, or before it; none is the fold's end)
+        if fr == by.raw() + 1 || (fr != 0 && past_frontier(eng, b, fr)) {
+            return;
+        }
+        match eng
+            .frontier
+            .compare_exchange(fr, by.raw() + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return,
+            Err(x) => fr = x,
+        }
+    }
+}
+
 /// Whether `node` stands past the settling layer's frontier `fr` (its
 /// raw id plus one, `Engine::frontier`): after it, which stands.
 pub(crate) fn past_frontier(eng: &Engine, node: &Node, fr: u64) -> bool {
@@ -1909,4 +1947,106 @@ pub(crate) fn allow_final_rerun(eng: &Engine, w: &Worker, node: &Node) -> bool {
     }
     w.log.lock().capped.push(node.id);
     false
+}
+
+#[cfg(test)]
+mod frontier_tests {
+    //! The settling layer's frontier goes back to a change of the range
+    //! it folds (`frontier_back`).
+
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use crate::node::Wake;
+    use crate::{Cause, Ctx, Engine, Field, NodeId, Operation, Stop, SumMonoid, ValueId, Values};
+
+    /// `[x]`: text, contributes `vp` := x.
+    struct Piece;
+
+    impl Operation for Piece {
+        fn name(&self) -> &'static str {
+            "piece"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let vp = cx.values().field("vp");
+            cx.contribute(vp, cx.args()[0]);
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// The page layer: folds `vp` before it and ends its fold (no
+    /// frontier).
+    struct Layer;
+
+    impl Operation for Layer {
+        fn name(&self) -> &'static str {
+            "layer"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let vp = cx.values().field("vp");
+            let x = cx.fold(vp, None, None)?;
+            cx.set_frontier(None);
+            Ok(x)
+        }
+
+        fn contributes(&self, _: &[ValueId], _: &Values, _: Field) -> bool {
+            false
+        }
+
+        fn settles_at_quiet(&self) -> bool {
+            true
+        }
+    }
+
+    /// Line: piece A, piece B, the layer L, whose fold ended (no
+    /// frontier). L re-asked by B's contribution: the frontier is B. Then
+    /// by A's: A, before it. By B's again: it stays at A. A wake of L
+    /// for another cause, or of a piece, moves nothing; the wake itself
+    /// moves it, and the line runs quiet again.
+    #[test]
+    fn a_change_of_the_range_the_layer_folds_moves_its_frontier_back_to_it() {
+        let e = Engine::new();
+        let (piece, layer) = (e.register(Arc::new(Piece)), e.register(Arc::new(Layer)));
+        let v = e.values();
+        let vp = v.field("vp");
+        e.declare_accumulator(vp, Arc::new(SumMonoid));
+        let u = e.new_unit();
+        let a = e.push(u, piece, vec![v.int(1)]);
+        let b = e.push(u, piece, vec![v.int(2)]);
+        let l = e.push(u, layer, vec![]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(3));
+        assert_eq!(e.frontier.load(Ordering::Acquire), 0, "the fold ended");
+        let (ln, an) = (e.placed_node(l).unwrap(), e.placed_node(a).unwrap());
+        let range = |by: NodeId| Wake {
+            by: Some(by),
+            cause: Cause::Range { field: vp, by },
+            at_ns: 0,
+        };
+        let at = |n: NodeId| n.raw() + 1;
+        super::frontier_back(&e, ln, &range(b));
+        assert_eq!(e.frontier.load(Ordering::Acquire), at(b));
+        super::frontier_back(&e, ln, &range(a));
+        assert_eq!(e.frontier.load(Ordering::Acquire), at(a));
+        super::frontier_back(&e, ln, &range(b));
+        assert_eq!(e.frontier.load(Ordering::Acquire), at(a), "past the frontier: stays");
+        e.frontier.store(0, Ordering::Release);
+        let changed = Wake {
+            by: Some(b),
+            cause: Cause::Changed {
+                field: vp,
+                site: Some(b),
+            },
+            at_ns: 0,
+        };
+        super::frontier_back(&e, ln, &changed);
+        super::frontier_back(&e, an, &range(b));
+        assert_eq!(e.frontier.load(Ordering::Acquire), 0, "no range of the layer's");
+        super::mark_stale_now(&e, None, ln, range(b));
+        assert_eq!(e.frontier.load(Ordering::Acquire), at(b));
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(3));
+    }
 }

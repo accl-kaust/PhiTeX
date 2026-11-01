@@ -818,8 +818,45 @@ fn floats2col_routines_run_once_per_fire() {
             runs * 10 <= fires * 11
         };
         if !ok {
+            // (why the nodes ran again, by operation and cause, most
+            // first: what a schedule that ran them too often read)
+            let mut why: std::collections::BTreeMap<(&str, &str), u64> =
+                std::collections::BTreeMap::new();
+            for (_, op, c) in &b.stats.reruns {
+                *why.entry((op, c.as_str())).or_default() += 1;
+            }
+            let mut why: Vec<_> = why.into_iter().collect();
+            why.sort_by_key(|e| std::cmp::Reverse(e.1));
+            let why: Vec<String> = why
+                .iter()
+                .take(40)
+                .map(|((op, c), n)| format!("{n} {op} {c}"))
+                .collect();
+            // (and the nodes run again most, with what they are)
+            let mut by_node: std::collections::BTreeMap<u64, Vec<&str>> =
+                std::collections::BTreeMap::new();
+            for (n, _, c) in &b.stats.reruns {
+                by_node.entry(*n).or_default().push(c.as_str());
+            }
+            let mut by_node: Vec<_> = by_node.into_iter().collect();
+            by_node.sort_by_key(|e| std::cmp::Reverse(e.1.len()));
+            let nodes: Vec<String> = by_node
+                .iter()
+                .take(12)
+                .map(|(n, cs)| {
+                    let mut d = b.describe_node(*n);
+                    d.truncate(d.char_indices().nth(300).map_or(d.len(), |(i, _)| i));
+                    let k = cs.len();
+                    let mut cs = cs.clone();
+                    cs.sort_unstable();
+                    cs.dedup();
+                    format!("node {n} ({k} reruns: {cs:?}): {d}")
+                })
+                .collect();
             bad.push(format!(
-                "-j {threads}: {runs} finisher runs for {fires} fires"
+                "-j {threads}: {runs} finisher runs for {fires} fires; reruns:\n{}\nnodes:\n{}",
+                why.join("\n"),
+                nodes.join("\n")
             ));
         }
     }

@@ -316,6 +316,10 @@ struct Slot {
     /// The value the run read of a register it steps ([`State::add`]):
     /// what reached it, the steps applied to it in [`Slot::e`].
     base: Option<ValueId>,
+    /// Steps kept under a local write in a group the run made before it
+    /// read the register ([`State::set`]): [`Slot::base`] unknown until
+    /// the run reads it ([`State::set_step_base`]).
+    base_unread: bool,
     /// A value given for the slot where the run first uses it, read then
     /// (a finisher's state at its candidate, `Run::fin_lazy_value`).
     lazy: Option<ValueId>,
@@ -336,6 +340,7 @@ impl Default for Slot {
             map: Map::ID,
             mapped: MAP_NONE,
             base: None,
+            base_unread: false,
             lazy: None,
             sym: false,
         }
@@ -1573,12 +1578,17 @@ impl State {
         // `{\advance\c@page\m@ne}` in an output routine, mparhack's))
         if let Some(s) = self.slot_ref(loc)
             && s.mapped != MAP_NONE
-            && (global || grp.is_none())
         {
+            let unread = s.e.flags & LOADED == 0;
             let s = self.slot(loc);
-            s.map = Map::ID;
-            s.mapped = MAP_NONE;
-            s.base = None;
+            if global || grp.is_none() {
+                s.map = Map::ID;
+                s.mapped = MAP_NONE;
+                s.base = None;
+                s.base_unread = false;
+            } else if unread {
+                s.base_unread = true;
+            }
         }
         self.stamp += 1;
         let st = self.stamp;
@@ -1678,8 +1688,49 @@ impl State {
                 s.e = e;
             }
             s.base = None;
+            s.base_unread = false;
         }
         self.muts += 1;
+    }
+
+    /// The integer registers whose steps the run publishes beneath a
+    /// scope's value of its own ([`State::steps_under_scope`]) and has not
+    /// read: the run reads them ([`State::set_step_base`]) before it
+    /// publishes the steps as the value they make.
+    pub(crate) fn unread_steps_under_scope(&self) -> Vec<Loc> {
+        self.touched
+            .iter()
+            .copied()
+            .filter(|&l| {
+                self.slot_ref(l)
+                    .is_some_and(|s| s.base_unread && s.mapped != MAP_NONE && s.map.keep)
+                    && self.steps_under_scope(l)
+            })
+            .collect()
+    }
+
+    /// The value the run reads of register `loc` it stepped before a
+    /// local write in a group ([`State::unread_steps_under_scope`]).
+    pub(crate) fn set_step_base(&mut self, loc: Loc, x: Option<ValueId>) {
+        self.changing(loc);
+        self.muts += 1;
+        let s = self.slot(loc);
+        s.base = x;
+        s.base_unread = false;
+    }
+
+    /// Whether register `loc`'s steps lie beneath a value of its own in
+    /// a scope the run opens after itself (a group's local write left
+    /// open, [`State::abandon_to_scope`], [`State::abandon_to_frames`]):
+    /// one field holds a relation or values, not both, so the steps are
+    /// published as the value they make ([`State::publication`]).
+    fn steps_under_scope(&self, loc: Loc) -> bool {
+        let scoped = |l: &Locality| matches!(l, Locality::Scope | Locality::ScopeAt(_));
+        self.slot_ref(loc)
+            .and_then(|s| (s.meta as usize).checked_sub(1))
+            .and_then(|mi| self.metas.get(mi))
+            .is_some_and(|m| m.publ.as_ref().is_some_and(|(_, l)| scoped(l)))
+            || self.scope_extra.iter().any(|e| e.0 == loc && scoped(&e.2))
     }
 
     /// Whether the run holds steps of register `loc` that change it
@@ -1941,11 +1992,15 @@ impl State {
     /// of the document, `top`, as inside one a global write of a scope's
     /// local value outlives the scope, §283), nor where it is the
     /// command's transient state left as it was read; else its value
-    /// (rule 4).
+    /// (rule 4). A scope's local value over steps the run publishes
+    /// beneath it ([`State::add`]: `\global\advance\@listdepth\@ne`
+    /// then `\advance\@listdepth\m@ne` in a group left open, KOMA's
+    /// addmargin) restores nothing: the steps changed what it hides.
     fn base_value(&self, m: &Meta, v: &Values, top: bool) -> Option<(ValueId, Locality)> {
         let (val, l) = m.publ.as_ref()?;
         let x = self.encode(val, v)?;
-        if ((top || *l != Locality::Global) && m.eng == Some(Some(x))) || unchanged_transient(m, x)
+        if ((top || *l != Locality::Global) && m.eng == Some(Some(x)) && !self.has_map(m.loc))
+            || unchanged_transient(m, x)
         {
             return None;
         }
@@ -1978,6 +2033,7 @@ impl State {
             if let Some((val, _)) = &m.publ
                 && m.eng
                     .is_some_and(|e| e.is_some() && self.encode(val, v) == e)
+                && !self.has_map(m.loc)
             {
                 restored.push(m.loc);
             }
@@ -2017,7 +2073,17 @@ impl State {
             } else {
                 Locality::Local
             };
-            let what = if s.map.keep {
+            // (beneath a scope's value of the run's own, the value the
+            // steps make from the one read: `\global\advance\@listdepth
+            // \@ne`, then `\advance\@listdepth\m@ne` in a group left
+            // open, KOMA's addmargin, inside it 0 and outside 1)
+            let made = s.map.keep && !s.base_unread && self.steps_under_scope(l);
+            let what = if made {
+                Pub::Value(crate::val::int_id(
+                    v,
+                    i64::from(s.map.apply(crate::val::i32_of(v, s.base))),
+                ))
+            } else if s.map.keep {
                 Pub::Rel(i64::from(s.map.add))
             } else {
                 Pub::Value(crate::val::int_id(v, i64::from(s.map.add)))

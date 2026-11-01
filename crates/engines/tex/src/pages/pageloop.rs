@@ -1810,6 +1810,7 @@ impl Run<'_, '_> {
             prev_fire: lc.prev_fire,
             inf: inf.into_iter().map(rel).collect(),
             vers: page_vers(lc, &spans_pieces),
+            so_far: f.so_far,
         };
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(

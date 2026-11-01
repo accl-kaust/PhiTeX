@@ -223,15 +223,16 @@ fn glue_kind_code(k: GlueKind) -> i64 {
 }
 
 /// The bit of a glue node's kind code that says its spec is its own
-/// (`GlueNode::own_spec`): set only on ordinary glue, so the code of
-/// every other kind reads as before.
+/// (`GlueNode::own_spec`): set only on ordinary glue and a parameter's
+/// (math spacing's, §766), so the code of every other kind reads as
+/// before.
 const OWN_SPEC: i64 = 1 << 16;
 
 /// A glue node's kind code: the kind's, with [`OWN_SPEC`] for an
-/// ordinary glue of its own spec.
+/// ordinary or a parameter's glue of its own spec.
 fn glue_code(g: &GlueNode) -> i64 {
     let k = glue_kind_code(g.kind);
-    if g.own_spec && g.kind == GlueKind::Normal {
+    if g.own_spec && matches!(g.kind, GlueKind::Normal | GlueKind::Param(_)) {
         k | OWN_SPEC
     } else {
         k

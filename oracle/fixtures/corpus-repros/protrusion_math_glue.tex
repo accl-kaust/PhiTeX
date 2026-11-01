@@ -1,0 +1,27 @@
+% Margin protrusion passes over glue only when its spec is the shared
+% zero_glue (pdfTeX's cp_skipable): a math glue made ordinary in
+% mlist_to_hlist (§732, an \mskip; §766, the spacing between atoms) has a
+% spec of its own, all of it zero or not, so a line ending with a
+% character, then such a glue, then a penalty does not protrude it
+% (acm-sigconf-biblatex: biblatex's URLs, \mskip and \penalty after each
+% character; a line set wider, other expanded fonts made, one font fewer
+% numbered). Beside it: an unset \skip register (zero_glue itself) and
+% \hskip 0pt (a spec of its own).
+\documentclass{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[protrusion=true,expansion=true]{microtype}
+\newcommand\brk{\mskip 0mu\penalty100 }
+\begin{document}
+Words that fill a good part of the line, more words here, and at its end.$\mskip0mu$\penalty-10000
+Words that fill a good part of the line, more words here, and at its end.\hskip\skip99\penalty-10000
+Words that fill a good part of the line, more words here, and at its end.\hskip 0pt\penalty-10000
+A run set in math with a break after each character:
+$\mathrm{h}\brk\mathrm{t}\brk\mathrm{t}\brk\mathrm{p}\brk\mathrm{s}\brk\mathrm{:}\brk\mathrm{/}\brk\mathrm{/}\brk
+\mathrm{e}\brk\mathrm{x}\brk\mathrm{a}\brk\mathrm{m}\brk\mathrm{p}\brk\mathrm{l}\brk\mathrm{e}\brk\mathrm{.}\brk
+\mathrm{o}\brk\mathrm{r}\brk\mathrm{g}\brk\mathrm{/}\brk\mathrm{a}\brk\mathrm{,}\brk\mathrm{b}\brk\mathrm{-}\brk
+\mathrm{c}\brk\mathrm{.}\brk\mathrm{d}\brk\mathrm{,}\brk\mathrm{e}\brk\mathrm{-}\brk\mathrm{f}\brk\mathrm{.}\brk
+\mathrm{g}\brk\mathrm{h}\brk\mathrm{i}\brk\mathrm{j}\brk\mathrm{k}\brk\mathrm{l}\brk\mathrm{m}\brk\mathrm{n}\brk
+\mathrm{o}\brk\mathrm{p}\brk\mathrm{q}\brk\mathrm{r}\brk\mathrm{s}\brk\mathrm{t}\brk\mathrm{u}\brk\mathrm{v}$,
+and more text after it to the end of the paragraph.
+\end{document}

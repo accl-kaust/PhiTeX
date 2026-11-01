@@ -2338,12 +2338,14 @@ fn print_accounting(
 }
 
 /// An evaluation's counters (`PHITEX_TEX_TIME`).
-fn print_round(t: std::time::Duration, r: &Report) {
+fn print_round(eng: &Engine, t: std::time::Duration, r: &Report) {
     // (why nodes ran again, by kind: `Report::rerun_causes`)
     let mut causes = std::collections::BTreeMap::<&'static str, usize>::new();
     if crate::exec::obs_flag!("PHITEX_RERUN_SHOW") {
         for (n, c) in &r.rerun_causes {
-            eprintln!("rerun: node {} {c:?}", n.raw());
+            // (the field by name)
+            let f = cause_parts(c).1.map(|f| field_name(eng.values(), f));
+            eprintln!("rerun: node {} {c:?} {}", n.raw(), f.unwrap_or_default());
         }
     }
     for (_, c) in &r.rerun_causes {
@@ -3983,7 +3985,7 @@ impl Graph {
                 );
             }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
-                print_round(t0.elapsed(), &r);
+                print_round(&self.eng, t0.elapsed(), &r);
                 // (`PHITEX_PRED_MISSES`: the refuted predictions by field)
                 phitex_defuse::obs::flush_pred_misses(self.eng.values());
                 crate::exec::flush_later();

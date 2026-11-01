@@ -517,3 +517,31 @@ repro!(
     mparhack_page_numbers,
     "mparhack's page numbers (classicthesis): \\c@page lost the output routine's step, so \\cleardoublepage made no blank page (oracle: pdflatex in the CI image)"
 );
+repro!(
+    output_pagegoal,
+    "research corpus (aastex, aastex-xe: Table 1 at the top of page 4, pdfTeX's on page 5): while the output routine is active \\pagegoal and its kin read page_so_far as the page's fire left it (§421), and PhiTeX read the emptied page's \\maxdimen and 0; ltxgrid's \\@add@float takes \\vsize-\\pagegoal into \\@pageht, which came out near -\\maxdimen, so every float fitted where it was met (oracle: pdflatex in the CI image, mc 77786)"
+);
+repro!(
+    aftergroup_scope_paragraph,
+    "research corpus (classicthesis, classicthesis-xe: the title 2.277 pt right of pdfTeX's, the title's colour on every page after): a group opened in vertical mode ends inside a paragraph begun in it (\\begingroup\\color{CTtitle}\\spacedallcaps{...}\\endgroup); the scope's \\aftergroup tokens (\\reset@color's pop) were read by the paragraph's level's id, not the scope's, and dropped, the space before them taken off the line (oracle: pdflatex in the CI image, mc 77793)"
+);
+repro!(
+    lineno_last_page_xe,
+    "research corpus (aastex-xe: page 8's text gone, its line numbers left): under XeLaTeX a page's sealed lines are filled by the end node from their pieces' units; lineno's routine gives every line back, so the last page's lines all came back from routines before and its finisher sealed none of its own: the page carried no places, and its lines were never filled (the PDF writer's `sealed_units` too); now an empty window, each line's piece's unit read by itself (oracle: xelatex in the CI image, mc 77824)"
+);
+repro!(
+    protrusion_math_glue,
+    "research corpus (acm-sigconf-biblatex: a bibliography line's spacing, -250 for -248, other expanded fonts made, one font fewer numbered, /F460 for /F461): margin protrusion passes over glue only when its spec is the shared zero_glue (cp_skipable); a math glue made ordinary (§732, biblatex's URLs' \\mskip; §766, the spacing between atoms) has a spec of its own, and PhiTeX took it for zero_glue and protruded the character before it (oracle: pdflatex in the CI image, mc 77829)"
+);
+repro!(
+    list_depth_scope,
+    "research corpus (classicthesis, classicthesis-xe: the title page's list one level deeper than pdfTeX's): a list's \\global\\advance\\@listdepth\\@ne, then a local \\advance\\@listdepth\\m@ne in the group the run leaves open (KOMA's addmargin); the run published the step as a relation and the scope's 0 beside it, a field holds a relation or values, not both, so inside it read 1; now the step is published as the value it makes beneath the scope's own (oracle: pdflatex in the CI image, mc 77852)"
+);
+repro!(
+    output_aftergroup,
+    "research corpus (thuthesis: the text after a float placed here 3.488 pt higher than pdfTeX's): the output group's \\aftergroup tokens are read in the main vertical mode after the routine, before the text's next ones (§1100); thuthesis's \\@addtocurcol leaves \\vskip\\intextsep\\nointerlineskip there, and the finisher ran them on its own list, dropped. Now the finisher defines them and the first piece after it reads them first (oracle: pdflatex in the CI image, mc 77860)"
+);
+repro!(
+    pdf_fontname_share,
+    "\\pdffontname and \\pdffontobjnum of one scalable TFM at several sizes: pdfTeX's `pdf_init_font` makes one object for them, named by the first font's number (`obj_info`); each font made an object of its own and was named by its own number (32 41 42 and objects 1 2 3 for pdfTeX's 32 32 32 and 1 1 1) (oracle: pdflatex in the CI image, mc 77924)"
+);

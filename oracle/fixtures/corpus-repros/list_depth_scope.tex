@@ -1,0 +1,19 @@
+% A list's \global\advance\@listdepth\@ne, then a local \advance\@listdepth\m@ne in the
+% group the run leaves open (KOMA's addmargin): inside, \@listdepth is the local value
+% (0), not the global step's (1); a nested list's labels and margins follow it.
+\documentclass{article}
+\begin{document}
+\makeatletter
+Before the list, depth \the\@listdepth.\par
+\begingroup\list{}{\advance\@listdepth\m@ne}
+\item First item.
+
+Inside, depth \the\@listdepth.
+\begin{itemize}
+\item A nested item, depth \the\@listdepth.
+\end{itemize}
+
+\endlist\endgroup
+After the list, depth \the\@listdepth.
+\makeatother
+\end{document}

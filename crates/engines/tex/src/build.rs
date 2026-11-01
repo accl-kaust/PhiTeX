@@ -227,7 +227,13 @@ impl Run<'_, '_> {
                     .collect::<Vec<_>>()
             );
         }
-        self.unsave_extras(md)?;
+        // (the scope's own lists, `ag` and `lvlfix`, are tagged with its
+        // sid: read as level 0 has it, not as the innermost level does,
+        // a paragraph the run began inside the scope (`\begingroup
+        // \color{red}`, then `\leavevmode ... \endgroup`): its sid is its
+        // list's, and the `\aftergroup` tokens were dropped)
+        let base = self.base_mode()?;
+        self.unsave_extras(&base)?;
         self.kind_outer(md)
     }
 
@@ -281,7 +287,7 @@ impl Run<'_, '_> {
         let parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
         if self.nest.len() > 1 {
             self.leave_frames(&base, parent);
-            return Ok(());
+            return self.read_step_bases();
         }
         self.muts += 1;
         let Some(l) = self.nest.pop() else {
@@ -291,6 +297,7 @@ impl Run<'_, '_> {
         // level's stay the run's: `Locality::Scope`)
         self.st
             .abandon_to_scope(v, l.save_base, l.def_base, l.open_stamp, self.rec_load);
+        self.read_step_bases()?;
         // (the scope's tag, its `ag` and `lvlfix` lists' too: its depth,
         // which no other scope open at a reader has; never the opener's
         // node, which a re-cut changes, its readers asked again for it)
@@ -344,6 +351,18 @@ impl Run<'_, '_> {
             opens: 1,
             before: false,
         });
+        Ok(())
+    }
+
+    /// The registers the run stepped and then wrote locally in a group
+    /// it leaves open, unread: read, the steps published as the value
+    /// they make beneath the scope's ([`crate::state::State::publication`]).
+    fn read_step_bases(&mut self) -> R<()> {
+        for loc in self.st.unread_steps_under_scope() {
+            let f = self.loc_field(loc);
+            let x = self.eng_read(f)?;
+            self.st.set_step_base(loc, x);
+        }
         Ok(())
     }
 
