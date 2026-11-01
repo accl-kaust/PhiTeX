@@ -25,7 +25,6 @@ the format alone shared (built once before the pool).
 import argparse
 import hashlib
 import json
-import math
 import os
 import re
 import shutil
@@ -198,11 +197,7 @@ def run_one(c, j, args):
     term = run_dir / "term-phitex.txt"
     cmd = [args.bin, "build", "--exact-pdf", "-j", str(j), "--no-synctex", "--engine", c["engine"],
            *(["--shelf"] if args.shelf else []), c["main"]]
-    # (a build is given at least what TeX Live's own fixpoint took: the
-    # bar is pdflatex's wall, and a manual pdflatex needs 800 s for is
-    # not slow at 300)
-    limit = max(args.timeout, math.ceil(c.get("oracle_wall_s") or 0))
-    r = common.run(cmd, run_dir, env, limit, out=term, cpu_s=limit * (j + 4))
+    r = common.run(cmd, run_dir, env, args.timeout, out=term, cpu_s=args.timeout * (j + 4))
     text = term.read_bytes() if term.exists() else b""
     logb = b""
     try:
@@ -215,7 +210,7 @@ def run_one(c, j, args):
     res["md5"] = md5(pdf) if pdf.exists() else None
     res["pages"] = npages(pdf) if pdf.exists() else None
     if r["timeout"]:
-        res.update(status="timeout", note=f"over {limit} s")
+        res.update(status="timeout", note=f"over {args.timeout} s")
     elif b"panicked at" in text:
         res.update(status="panic", note=first_error(text))
     elif res["md5"] is None:
@@ -376,8 +371,7 @@ def main():
     p.add_argument("--known", help="a file of ids (first word a line) not identical when pinned: no oracle built for them")
     p.add_argument("--jobs", default="1,8")
     p.add_argument("--par", default="1:20,8:5")
-    p.add_argument("--timeout", type=int, default=120,
-                   help="seconds a build may take; at least the oracle's own wall (oracle_wall_s)")
+    p.add_argument("--timeout", type=int, default=120)
     p = sub.add_parser("table")
     p.add_argument("dir")
     p.add_argument("--json")
