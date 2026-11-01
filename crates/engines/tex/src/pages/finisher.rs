@@ -97,6 +97,22 @@ impl Operation for Finish {
         "finish"
     }
 
+    /// No: a finisher runs its page's routine, the class of its page's
+    /// fire picking what that routine does ([`Finish::predicted_rels`]
+    /// predicts by that class). One that ships a page steps `\c@page`;
+    /// one fired at a special penalty (lineno's line numbering at
+    /// -32000) steps nothing. Learned for the operation, the one
+    /// shipping finisher's +1 on `count:0` was predicted for every
+    /// finisher not run yet, each line's among them: the finishers after
+    /// it on its page read the page number one too high until it ran,
+    /// and ran twice for each line before them (lineno: 2 153 of its
+    /// finishers' predictions of `count:0` the learned +1, 34 180 of
+    /// 39 589 re-asks of `count:0` by such a prediction, accl 22509,
+    /// 22501).
+    fn alike(&self) -> bool {
+        false
+    }
+
     /// The finisher's contributions (gdefs, pages:fin, the PDF side's),
     /// never `vprof`/`pitems`.
     fn contributes(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
