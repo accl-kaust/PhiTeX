@@ -1494,6 +1494,21 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         node.reruns.store(0, Ordering::Relaxed);
         Worker::add(&w.nodes_run, 1);
     }
+    // (a text node run again in this evaluation because a definition it
+    // read moved, while a text node before it on its unit is still open:
+    // its run would read that one's definitions as they stand, which its
+    // commit may move again, so it waits for that commit. LaTeX's text is
+    // one chain of state (\everypar, \if@nobreak, \par, the space
+    // factor's kind, the line count): at -j8 a node ahead ran once for
+    // every commit before it, up to 74 times (Grail, accl 22515), each run
+    // thrown away and each one taking a core from the chain. Its first run
+    // is still a guess on what stands; a resumption goes on.)
+    if !first && pool.n > 1 && op_is_text(eng, node) && refuted_wake(node)
+        && let Some(x) = crate::read::open_before(eng, node)
+    {
+        park_waiting(eng, pool, w, node, Some(x));
+        return Ok(());
+    }
     let last_ns = node.run_ns.load(Ordering::Relaxed);
     let runs = node.runs.fetch_add(1, Ordering::Relaxed) + 1;
     let op = eng.op(node.op()).clone();
@@ -1724,6 +1739,21 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             }
             Ok(())
         }
+    }
+}
+
+/// Whether `n`'s operation runs the unit's text (`Operation::text`).
+fn op_is_text(eng: &Engine, n: &Node) -> bool {
+    eng.op(n.op()).text()
+}
+
+/// Whether `n` was woken by a definition it read that moved (not its
+/// creation, an edit, or the answer it parked on: a resumption).
+fn refuted_wake(n: &Node) -> bool {
+    let parked = *n.parked_on.lock();
+    match n.woke.lock().as_ref().map(|w| &w.cause) {
+        Some(Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => parked != Some(*field),
+        _ => false,
     }
 }
 
