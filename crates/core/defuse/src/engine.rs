@@ -1401,6 +1401,14 @@ impl Engine {
                 .iter()
                 .flat_map(|w| std::mem::take(&mut w.log.lock().panicked))
                 .collect();
+            if crate::sched::run_log() && !panicked.is_empty() {
+                let commits: u64 = workers.iter().map(|w| w.commits.load(Ordering::Relaxed)).sum();
+                eprintln!(
+                    "defuse: a pass ended with {} panicked runs (nodes {:?}) and {commits} commits",
+                    panicked.len(),
+                    panicked.iter().map(|p| p.0.raw()).collect::<Vec<_>>()
+                );
+            }
             all.extend(workers);
             if panicked.is_empty() {
                 break;

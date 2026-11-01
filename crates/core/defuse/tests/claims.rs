@@ -311,6 +311,47 @@ fn a_panic_on_a_value_about_to_move_is_run_again_and_one_on_settled_values_fails
     }
 }
 
+/// `[text]`: places a `Text` child, reads its output (a guess until it
+/// has run), then panics: a read of the run's own placement, which the
+/// panic never commits.
+struct PlacesThenPanics(OpId);
+
+impl Operation for PlacesThenPanics {
+    fn name(&self) -> &'static str {
+        "places_then_panics"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let i = cx.child(self.0, vec![cx.values().int(5)]);
+        let _ = cx.placed_output_or(i, ValueId::UNIT);
+        panic!("always");
+    }
+}
+
+#[test]
+fn a_panic_after_a_guess_of_its_own_placement_fails_not_runs_forever() {
+    // R, never committed, panics after reading a guess of its own
+    // placement's output: no run before placed it, so a run again is
+    // answered the guess again; the read holds, and the evaluation fails
+    // with R's panic (it ran R again forever, the read judged against a
+    // last run R never had).
+    let threads = std::thread::available_parallelism().map_or(1, usize::from).clamp(2, 8);
+    for j in [1, threads] {
+        let (e, o) = engine();
+        let pp = e.register(Arc::new(PlacesThenPanics(o.text)));
+        let v = e.values();
+        let fv = v.field("f").0;
+        let u = e.new_unit();
+        e.push(u, o.def, vec![fv, v.int(1)]);
+        let r = e.push(u, pp, vec![]);
+        let err = e.evaluate(j).unwrap_err();
+        assert!(
+            matches!(err, phitex_defuse::EvalError::OpPanicked { node, .. } if node == r),
+            "-j{j}: {err:?}"
+        );
+    }
+}
+
 /// `[f]`: outputs f's published last definition, keeping every value it
 /// was answered.
 struct SeenFinal(Arc<std::sync::Mutex<Vec<ValueId>>>);
