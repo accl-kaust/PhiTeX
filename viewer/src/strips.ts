@@ -189,7 +189,10 @@ export class Strips {
       const w = dv.getUint32(at, true), h = dv.getUint32(at + 4, true);
       at += 8;
       if (w && h) {
-        const px = new Uint8ClampedArray(buf, at, w * h * 4);
+        // (in a Firefox content script the pixels are copied to the page's
+        // side first, cloneInto: an ImageData over this script's own array
+        // is refused there, "failed to extract Uint8ClampedArray")
+        const px = pagewise(new Uint8ClampedArray(buf, at, w * h * 4));
         made.push(
           createImageBitmap(new ImageData(px, w, h)).then((b) => {
             this.kept.set(key, b);
@@ -205,6 +208,12 @@ export class Strips {
       this.kept.delete(k);
     }
   }
+}
+
+/** `px` where the page's own objects are (Firefox's content scripts' cloneInto; elsewhere as it is). */
+function pagewise(px: Uint8ClampedArray<ArrayBuffer>): Uint8ClampedArray<ArrayBuffer> {
+  const clone = (globalThis as { cloneInto?: <T>(v: T, scope: object) => T }).cloneInto;
+  return clone ? clone(px, window) : px;
 }
 
 const SVG = "http://www.w3.org/2000/svg";
