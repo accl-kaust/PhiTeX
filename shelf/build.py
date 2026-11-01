@@ -586,10 +586,22 @@ def safe(s: str) -> str:
 
 
 def main() -> None:
+    global MIRROR
     t0 = time.time()
     CACHE.mkdir(exist_ok=True)
     # (the database used kept beside the archives: TLPDB=it repeats the build)
-    raw = Path(os.environ["TLPDB"]).read_bytes() if os.environ.get("TLPDB") else get(f"{MIRROR}/tlpkg/texlive.tlpdb.xz")
+    if os.environ.get("TLPDB"):
+        raw = Path(os.environ["TLPDB"]).read_bytes()
+    else:
+        with urllib.request.urlopen(f"{MIRROR}/tlpkg/texlive.tlpdb.xz", timeout=300) as r:
+            raw = r.read()
+            # (the archives from the mirror that served the database: the
+            # redirector picks a mirror per request, so 4500 archives went
+            # to as many mirrors, each maybe at another revision than the
+            # database, and one unreachable stopped the release, release
+            # run 41294066307)
+            MIRROR = r.geturl().removesuffix("/tlpkg/texlive.tlpdb.xz").rstrip("/")
+        print(f"mirror {MIRROR}", file=sys.stderr)
     if not (CACHE / "texlive.tlpdb.xz").exists() or (CACHE / "texlive.tlpdb.xz").read_bytes() != raw:
         (CACHE / "texlive.tlpdb.xz").write_bytes(raw)
     db = lzma.decompress(raw).decode()
