@@ -1747,14 +1747,13 @@ fn op_is_text(eng: &Engine, n: &Node) -> bool {
     eng.op(n.op()).text()
 }
 
-/// Whether `n` was woken by a definition it read that moved (not its
-/// creation, an edit, or the answer it parked on: a resumption).
+/// Whether `n`, run before in this evaluation, runs again because what it
+/// read moved: not an edit of its text, and not a run that parked on an
+/// answer and goes on from there (a resumption). (A run stopped while it
+/// ran keeps the wake it was queued by, its creation: the move is in
+/// `stale_wake`, so the cause is not asked here.)
 fn refuted_wake(n: &Node) -> bool {
-    let parked = *n.parked_on.lock();
-    match n.woke.lock().as_ref().map(|w| &w.cause) {
-        Some(Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => parked != Some(*field),
-        _ => false,
-    }
+    n.parked_on.lock().is_none() && !matches!(n.woke.lock().as_ref().map(|w| &w.cause), Some(Cause::Edited))
 }
 
 /// A node whose run a failure stopped (a limit, a panic), `Dirty` again on
