@@ -685,6 +685,15 @@ fn a_commit_walks_only_to_the_next_definition() {
             }
         }
         e.evaluate(4).unwrap();
+        // (the records of runs refuted at four threads, a reader run
+        // before its definition committed, stay filed until a sweep
+        // (`Engine::sweep_readers`: a collection's, or a quiet point's
+        // once they outnumber the standing ones): how many a segment
+        // holds is the first evaluation's timing, which the walk counts
+        // with the standing ones (31 and 29 under a gate's load, 4 runs
+        // in 720 on accl 22541). Swept: the walk's count is what it
+        // walks to)
+        e.collect();
         e.replace(defs[5000], o.def, vec![x, v.int(-1)]);
         let t = Instant::now();
         let r = e.evaluate(4).unwrap();

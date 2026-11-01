@@ -281,7 +281,7 @@ fn memory_cache() -> std::sync::Arc<dyn phitex_mf::mktex::Cache> {
 /// (`NAME.tfm`, `NAME.DPIpk@BDPI:MODE`), none where METAFONT made none
 /// (as kpathsea's mktex scripts fail: the font not found).
 fn mktex_run(output: &str, opts: &ToolOptions, served: &mut Served) -> Option<Vec<u8>> {
-    let req = phitex_mf::mktex::Request::of(output)?;
+    let req = phitex_mf::mktex::Request::of(crate::api::font_name(output).unwrap_or(output))?;
     let (cache, settings) = opts.mktex.as_ref().map_or_else(
         || (memory_cache(), phitex_mf::mktex::Settings::default()),
         |m| (m.cache.clone(), m.settings.clone()),

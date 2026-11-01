@@ -136,7 +136,10 @@ fn kpse(progname: &str, engine: &str) -> Kpse {
     Kpse::new(&dir, progname, engine)
 }
 
-/// The kpathsea format a file's extension names (pdfTeX's choices).
+/// The kpathsea format of the font side's file `name`
+/// ([`phitex_tex::FONT_KEY`]): the one its extension names (pdfTeX's
+/// choices). TeX's own lookups are in the `tex` format whatever the
+/// extension.
 fn format_of(name: &str) -> Format {
     let ext = Path::new(name)
         .extension()
@@ -181,7 +184,11 @@ fn found(k: &Mutex<Kpse>, name: &str, format: Format) -> Option<(String, Vec<u8>
 
 fn finder(k: Kpse) -> Finder {
     let k = Mutex::new(k);
-    Arc::new(move |name: &str| {
+    Arc::new(move |key: &str| {
+        // (TeX's own lookup, `\\input CJK.enc`'s: its `tex` format)
+        let Some(name) = phitex_tex::font_name(key) else {
+            return found(&k, key, Format::Tex);
+        };
         // (a PK font, `cmr10.600pk`: kpathsea's PK search)
         if let Some((font, dpi)) = phitex_kpse::pk_name(name) {
             let (p, _) = k

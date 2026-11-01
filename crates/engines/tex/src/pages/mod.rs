@@ -78,9 +78,10 @@ pub(crate) use routine::*;
 pub(crate) use seal::*;
 
 /// A page's key: the identity of its finisher and the name of its
-/// fields (`pages:page:<piece raw id>:<nth>`, `pages:out:<piece>:<nth>`),
-/// minted when the page first fires (the piece it fired in and a number
-/// past every key the loop's last run had in that piece) and **kept by
+/// fields (`pages:page:<owner>:<piece>:<nth>`, `pages:out:<owner>:<piece>:<nth>`,
+/// raw ids), minted when the page first fires (the loop node that fires
+/// it, the piece it fired in and a number past every key that node's
+/// last run had in that piece) and **kept by
 /// the page's start** ([`Checkpoint::start`], [`LoopKeys`]): a page
 /// fired again from the same first item takes the key it had, wherever
 /// it fires now. A fire that moves to another piece then keeps its node:
@@ -94,15 +95,31 @@ pub(crate) use seal::*;
 /// definitions and re-asking every finisher after it through the page
 /// counters; keyed by the fire's ordinal, a page appearing or vanishing
 /// moved every finisher after it: 2322 relocations, 2046 runs.)
+///
+/// Each loop node ([`Pages`]) mints its own keys (`owner`): no key is
+/// ever two loop nodes' at once. Its fields are read at the line's end,
+/// where the later of two definitions hides the earlier: a node before
+/// that minted a key a rest after it held (each counting only the keys
+/// of the nodes before it) had its page's finisher assemble the rest's
+/// page, and the rest between them wait for a give-back the rest's
+/// finisher hid, keeping its old pages, so that the key was never given
+/// up (jmlr-pmlr at -j4: a page twice and another missing, "invalid
+/// object number being reused", 4 builds in 40).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct PageKey {
+    pub owner: phitex_defuse::NodeId,
     pub piece: phitex_defuse::NodeId,
     pub nth: u32,
 }
 
 impl PageKey {
     pub(crate) fn field(self, v: &Values, family: &str) -> Field {
-        v.field(&format!("{family}:{}:{}", self.piece.raw(), self.nth))
+        v.field(&format!(
+            "{family}:{}:{}:{}",
+            self.owner.raw(),
+            self.piece.raw(),
+            self.nth
+        ))
     }
 }
 
@@ -250,19 +267,21 @@ impl Page {
             v.int(i64::from(self.nth)),
             v.list(self.ins.clone()),
             v.list(self.so_far.iter().map(|&x| v.int(i64::from(x))).collect()),
+            raw(self.key.owner),
         ])
     }
 
     /// [`Page::encode`]'s page; `None` on any other value.
     pub(crate) fn decode(v: &Values, x: ValueId) -> Option<Page> {
         let p = list_of(v, x);
-        if p.len() != 31 {
+        if p.len() != 32 {
             return None;
         }
         let n = |i: usize| int_of(v, p[i]);
         let ints = |i: usize| list_of(v, p[i]);
         Some(Page {
             key: PageKey {
+                owner: node_of(n(31)),
                 piece: node_of(n(0)),
                 nth: u32::try_from(n(15)).unwrap_or(0),
             },

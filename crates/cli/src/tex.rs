@@ -139,10 +139,28 @@ impl Tree {
         }
     }
 
-    /// Where file `name` is, by kpathsea in the format its extension
-    /// names (pdfTeX's choices: a TFM, a VF, a map, a Type 1 font, an
-    /// encoding, else an input).
+    /// Where the file a finder's key `key` names is
+    /// ([`phitex_tex::Finder`]): the font side's by [`Tree::font`], TeX's
+    /// own by [`Tree::input`].
+    pub fn find(&self, key: &str) -> Option<PathBuf> {
+        match phitex_tex::font_name(key) {
+            Some(name) => self.font(name),
+            None => self.input(key),
+        }
+    }
+
+    /// Where TeX's file `name` is (`\\input`, `\\openin`): kpathsea's
+    /// `tex` format whatever its extension (`kpse_find_tex`).
     pub fn input(&self, name: &str) -> Option<PathBuf> {
+        let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
+        k.find_file(name.as_bytes(), Format::Tex, false)
+            .map(|b| os(&b).to_path_buf())
+    }
+
+    /// Where the font side's file `name` is, by kpathsea in the format
+    /// its extension names (pdfTeX's choices: a PK font, a TFM, a VF, a
+    /// map, a Type 1 font, an encoding, an OpenType or TrueType font).
+    pub fn font(&self, name: &str) -> Option<PathBuf> {
         if let Some((font, dpi)) = phitex_kpse::pk_name(name) {
             return self.pk(font, dpi, phitex_kpse::pk_settings(name));
         }

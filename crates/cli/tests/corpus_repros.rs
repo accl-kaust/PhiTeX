@@ -412,6 +412,76 @@ fn pdfmapfile_vf_local_fonts() {
     }
 }
 
+/// `\input` of a name with a font's extension: CJK.sty's `\input
+/// CJK.enc` is TeX's lookup, kpathsea's `tex` format (TEXINPUTS), as
+/// `\openin`'s; the font side's lookups (a map line's encoding, a TFM)
+/// are in the format the extension names. The finders took the format
+/// from the extension for both, so CJK.enc was looked for among the
+/// encodings and not found ("I can't find file": the manuals of cjk-ko,
+/// kotex-utf and nstc-proposal). At -j1 and -j4 (oracle: pdflatex in
+/// the CI image, accl 22458; passing in 22464).
+#[test]
+fn input_enc_named_file() {
+    check_threads("input_enc_named_file", "pdf");
+}
+
+/// TeX's lookup of a name whose last component has an extension the
+/// `tex` format does not know (`1.0.0-1`, spelatex's chunk files): as
+/// kpathsea (TeX Live's `try_std_extension_first`), `name.tex` first,
+/// then the name itself, for `\input`, `\openin` and `\pdffilesize`;
+/// and `./name` the file the job writes as `name`. A dot anywhere in the
+/// name (`./` too) took it as given, and `./` made another file than the
+/// job's, so `\input{./example-spel/1.0.0.0.0.0-1}` found nothing and
+/// LaTeX asked the terminal for another name (the spelatex manual:
+/// "cannot \read from terminal in nonstop modes"). At -j1 and -j4
+/// (oracle: pdflatex in the CI image, accl 22475; passing in 22505).
+#[test]
+fn input_dotted_name() {
+    check_threads("input_dotted_name", "pdf");
+}
+
+/// pdfTeX 1.40.26's structure destinations: `\pdfdest struct n` (a
+/// destination naming structure element `n`'s object, not its page's)
+/// and a `goto` action's `struct` (its `/SD`, with `file` the text as
+/// given), each identifier of a namespace of its own (`num 3` and
+/// `struct … num 3` two objects), one named by a link before its page
+/// defines it and one by an outline. `\pdfdest struct` was an error
+/// ("identifier type missing": the tex-vpat manual) and an action's
+/// `struct` was read as its identifier. At -j1 and -j4 (oracle:
+/// pdflatex, pdfTeX 1.40.29 in the CI image, accl 22464, passing there).
+#[test]
+fn pdfdest_struct() {
+    check_threads("pdfdest_struct", "pdf");
+}
+
+/// A file looked for in vain, then the `.aux` read back as its text
+/// (transparent's `\transparent@use` lines, the first defining
+/// `\TRP.5`, which the next read): the lines written later are read
+/// under the state at the read-back point, the values the read-back's
+/// own definitions replaced. The vain lookup left a pending read-back
+/// point that took those values for a file never written, so the lines
+/// read `\TRP.5` as defined and the rounds alternated between reading
+/// the `.aux` per field and as its text, never settling (the milog
+/// manual: "still changed after 5 rounds"). At -j1 and -j4 (oracle:
+/// pdflatex in the CI image, accl 22529, passing there).
+#[test]
+fn read_back_after_vain_lookup() {
+    check_threads("read_back_after_vain_lookup", "pdf");
+}
+
+/// `\pdfinterwordspaceon`'s space font: its font object is made where a
+/// page first uses it, as any font's (`pdf_use_font`); the fold of the
+/// pages' objects counted the fonts the list names only, so an object
+/// number TeX read after such a page was one short (tex-vpat's
+/// structure elements, one number low from its first page on). Its
+/// page also has `\pdfobj reserveobjnum` in the text, whose optional
+/// space after the keyword was a space of the paragraph. At -j1 and -j4
+/// (oracle: pdflatex in the CI image, accl 22529; passing in 22533).
+#[test]
+fn interword_space_font_object() {
+    check_threads("interword_space_font_object", "pdf");
+}
+
 /// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
 /// for every font it loads; libertine's T1 fonts are virtual) set its
 /// fields without reading it in (no `do_vf`): pdfTeX numbers its local
@@ -545,6 +615,10 @@ repro!(
     pdf_fontname_share,
     "\\pdffontname and \\pdffontobjnum of one scalable TFM at several sizes: pdfTeX's `pdf_init_font` makes one object for them, named by the first font's number (`obj_info`); each font made an object of its own and was named by its own number (32 41 42 and objects 1 2 3 for pdfTeX's 32 32 32 and 1 1 1) (oracle: pdflatex in the CI image, mc 77924)"
 );
+repro!(
+    page_counter_after_own_page,
+    "manuals (gu's gudoc: pages 10-14 numbered 8,9,8,9,10, /PageLabels written): a page fires at a candidate inside a conditional the text's run opens, and a float after it reads \\c@page and puts it back (tabularx's trial runs, \\TX@ckpt); the run read the register at its own position, the value before that page, and the restore took the page's steps back; now a piece's read of a page-layer register after a candidate of its own a page fires at ends the run there, its rest a resume after the page's finisher (oracle: pdflatex in the CI image, accl 22558)"
+);
 
 /// TeX Live manuals euromoney, heria, pygmentex and zed2e (`\valign`):
 /// "this alignment is not supported" (control.rs REDUCE-GAP). Now the
@@ -560,3 +634,22 @@ repro!(
 fn valign_columns() {
     check_threads("valign_columns", "pdf");
 }
+
+/// research corpus (classicthesis: a font number on page 31 three above
+/// pdfTeX's): microtype's letter-spaced small caps over mathpazo's virtual
+/// `pplrc9d`, expanded (`pplrc9d+80ls+20`), has a local font made anew
+/// (`pplrc9d+20`, `auto_expand_vf`) that is an expanded virtual font in
+/// turn, with local fonts of its own. pdfTeX makes them where the font is
+/// first shipped and never again; the engine keyed the inner ones by the
+/// page's handle of their virtual font, another on each page, and made
+/// them again on a later page whose step read other local fonts first.
+/// At -j1 and -j4 (oracle: pdflatex in the CI image, accl 22577; the base
+/// differs at byte 974).
+#[test]
+fn vf_expanded_local_vf() {
+    check_threads("vf_expanded_local_vf", "pdf");
+}
+repro!(
+    marginpar_after_display,
+    "manuals (hep-paper, verifiche: 'Float(s) lost'): a \\marginpar before a display in a paragraph and another after it; the first one's -10004 fires at the display's start (§1145's build_page) and its routine takes it off \\@currlist before the text after the display conses the second on. The piece ran on through the display's start (a list of its own open), its \\@currlist still holding the first, and that definition stood over the routine's: the second was never output. A display's start is now a cut where a page is made to fire, as a paragraph's start is (oracle: pdflatex in the CI image, accl 22589)"
+);

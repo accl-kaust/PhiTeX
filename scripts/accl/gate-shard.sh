@@ -682,7 +682,7 @@ PY
       python3 -I scripts/ci/sweep.py run --list ci/manuals.json --doc /usr/share/doc/texlive --cache "$w/no-oracle" --bin "$bin" \
         --out "$r/manuals" --shard "$k/$n" --engines pdflatex,xelatex --tools bibtex,biber,makeindex,glossaries \
         --jobs "${GATE_MANUALS_JOBS:-1,4}" --par "${GATE_MANUALS_PAR:-1:4,4:1}" --timeout "${GATE_MANUALS_TIMEOUT:-300}" \
-        --diff-oracle --known ci/manuals-not-identical.tsv > "$r/sweep.txt" 2>&1 || red "manuals: the sweep failed: $(tail -1 "$r/sweep.txt")"
+        --diff-oracle --known ci/manuals-not-identical.tsv --documented ci/manuals-pdftex-bugs.tsv > "$r/sweep.txt" 2>&1 || red "manuals: the sweep failed: $(tail -1 "$r/sweep.txt")"
       echo "sweep_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
       python3 -I scripts/ci/sweep.py table "$r/manuals" --json "$r/manuals/table.json" > "$r/table.txt" 2>&1
       python3 -I scripts/ci/verdict.py ci/manuals.json "$k/$n" "${GATE_MANUALS_JOBS:-1,4}" "$r/manuals" --prefix "manuals: " \

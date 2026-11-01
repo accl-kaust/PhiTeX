@@ -164,6 +164,10 @@ impl Host for Machine {
         self.tree.input(name)
     }
 
+    fn locate_font(&self, name: &str) -> Option<PathBuf> {
+        self.tree.font(name)
+    }
+
     fn read(&self, path: &Path) -> Option<Vec<u8>> {
         std::fs::read(path).ok()
     }
@@ -188,7 +192,7 @@ impl Host for Machine {
     fn format_finder(&self) -> Option<Finder> {
         let tree = self.format_tree.clone();
         Some(Arc::new(move |name: &str| {
-            let p = tree.input(name)?;
+            let p = tree.find(name)?;
             let bytes = std::fs::read(&p).ok()?;
             Some((p.to_string_lossy().into_owned(), bytes))
         }))
@@ -200,7 +204,7 @@ impl Host for Machine {
     fn content_key(&self) -> Option<phitex_tex::ContentKey> {
         let tree = self.format_tree.clone();
         Some(Arc::new(move |name: &str| {
-            let p = tree.input(name)?.to_string_lossy().into_owned();
+            let p = tree.find(name)?.to_string_lossy().into_owned();
             let k = phitex_tex::file_stat_key(&p);
             (!k.is_empty()).then_some((p, k))
         }))

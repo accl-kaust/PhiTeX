@@ -107,7 +107,8 @@ impl Run<'_, '_> {
 
     /// [`Run::finish_candidate`]; `newgraf`: the candidate of a
     /// paragraph's start (§1091), after its level is pushed, its indent
-    /// box appended and `\everypar` put on the input.
+    /// box appended and `\everypar` put on the input; or of a display's
+    /// start (§1145), its math level pushed and `\everydisplay` on the input.
     pub(crate) fn finish_candidate_at(&mut self, newgraf: bool) -> R<()> {
         if !self.at_outer()? {
             return Ok(());
@@ -131,9 +132,17 @@ impl Run<'_, '_> {
         // only groups the run opened on the main vertical list, which own
         // no list: the continuation carries every level, §1091's list
         // and the input `\everypar` left, as a cut inside such groups)
+        // (a display's start, §1145, is one too: the paragraph before it
+        // broken into lines, its math level just pushed on top, empty,
+        // `\everydisplay` on the input; the routine of a page made to fire
+        // there runs before the display and the rest of the paragraph,
+        // which read what it defines: a `\marginpar` after the display
+        // conses `\@currlist` as the routine of the one before left it)
         let par_start = newgraf
             && self.nest.split_last().is_some_and(|(top, below)| {
-                top.owns && top.group == 0 && below.iter().all(|l| !l.owns && l.group != 0)
+                top.owns
+                    && (top.group == 0 || (top.group == group::MATH_SHIFT && top.mode == 203))
+                    && below.iter().all(|l| !l.owns && l.group != 0)
             });
         let restartable = can || (par_start && self.conds.is_empty());
         // (a rest of blank input makes no node: the piece runs it, spaces
@@ -169,6 +178,9 @@ impl Run<'_, '_> {
             open_cut,
         });
         self.st.mark_candidate();
+        if fresh {
+            self.note_page_regs_held();
+        }
         if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
             self.trace_candidate(k, newgraf, fresh, cuttable);
         }

@@ -766,8 +766,8 @@ pub(crate) struct FontNums {
     map: BTreeMap<FontId, FontId>,
     /// The local fonts this fold gave ids ([`LINK_LOCALS`] on).
     locals: FontId,
-    /// The local fonts made anew ([`Fresh`]), by virtual font and index.
-    fresh: BTreeMap<(FontId, usize), FontId>,
+    /// The local fonts made anew ([`Fresh`]), by their path.
+    fresh: BTreeMap<(FontId, Vec<usize>), FontId>,
 }
 
 impl FontNums {
@@ -776,6 +776,10 @@ impl FontNums {
             self.next += 1;
             if id != self.next {
                 self.map.insert(id, self.next);
+            }
+            // (`PHITEX_FONTNUM_TRACE`, observe: each number as it is given)
+            if crate::exec::obs_flag!("PHITEX_FONTNUM_TRACE") {
+                eprintln!("fontnum {} {name} {size} local={local}", self.next);
             }
             self.known.push((Arc::from(name), size, id, local));
         }
@@ -826,13 +830,13 @@ impl FontNums {
             {
                 let d = match fresh {
                     Some(key) => {
-                        if let Some(&d) = self.fresh.get(&key) {
+                        if let Some(&d) = self.fresh.get(key) {
                             d
                         } else {
                             let id = LINK_LOCALS + self.locals;
                             self.locals += 1;
                             self.put(id, n, sz, true);
-                            self.fresh.insert(key, id);
+                            self.fresh.insert(key.clone(), id);
                             id
                         }
                     }
@@ -1271,17 +1275,25 @@ const LOCAL_FONTS: FontId = 0x6000_0000;
 
 /// A local font made anew where its virtual font is read in, whatever
 /// fonts there are (`auto_expand_vf`: an expanded virtual font's local
-/// fonts, each its base's expanded): the virtual font and the local
-/// font's index.
-type Fresh = Option<(FontId, usize)>;
+/// fonts, each its base's expanded): its path, the expanded virtual
+/// font of the step's own fonts it is reached from and the local fonts'
+/// indices from there. A local font so made is an expanded virtual font
+/// in turn where its base is virtual (microtype's letter-spaced
+/// `pplrc9d`, expanded): its local fonts' paths go on from its own, for
+/// its handle is the step's ([`LOCAL_FONTS`]), another on each page, and
+/// pdfTeX makes them once, where the font is first shipped.
+///
+/// Example: `pplrc9d+80ls+20`'s local font `pplrc9d+20` is `(f, [0])`,
+/// and that one's local `pplrc8r+20` is `(f, [0, 0])` on every page.
+type Fresh = Option<(FontId, Vec<usize>)>;
 const LINK_LOCALS: FontId = 0x7000_0000;
 
 impl Fonts {
     /// Local font `g`'s name and size, and whether it is made anew
     /// ([`Fresh`]), if `g` is a handle of one.
-    fn local(&self, g: FontId) -> Option<(&str, i32, Fresh)> {
+    fn local(&self, g: FontId) -> Option<(&str, i32, &Fresh)> {
         let i = usize::try_from(g.checked_sub(LOCAL_FONTS)?).ok()?;
-        self.locals.get(i).map(|(n, s, f)| (n.as_str(), *s, *f))
+        self.locals.get(i).map(|(n, s, f)| (n.as_str(), *s, f))
     }
 
     /// Font `g`'s name and size: a local font's, or one of the step's.
@@ -1392,7 +1404,7 @@ fn ps_maps() -> &'static PsCache {
 /// `pdftex.map` by PostScript name: a pure function's memo.
 pub(crate) fn default_ps_map(r: &mut Run<'_, '_>) -> R<Option<Arc<PsMap>>> {
     let v = r.v;
-    let Some(x) = r.file("pdftex.map")? else {
+    let Some(x) = r.font_file("pdftex.map")? else {
         return Ok(None);
     };
     let Some(&m) = list_of(v, x).get(1) else {
@@ -1512,7 +1524,7 @@ pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>
     let v = r.v;
     // (the writer's lookup: a file absent here is no read-back point)
     let was = std::mem::replace(&mut r.writer_lookup, true);
-    let found = r.file(name);
+    let found = r.font_file(name);
     r.writer_lookup = was;
     Ok(found?.and_then(|x| list_of(v, x).get(1).map(|&t| text_bytes(v, t))))
 }
@@ -1531,7 +1543,7 @@ pub(crate) fn text_bytes(v: &Values, t: ValueId) -> Arc<[u8]> {
 /// `pdftex.map`, parsed.
 fn default_map(r: &mut Run<'_, '_>) -> R<Option<Arc<Map>>> {
     let v = r.v;
-    let Some(x) = r.file("pdftex.map")? else {
+    let Some(x) = r.font_file("pdftex.map")? else {
         return Ok(None);
     };
     let Some(&m) = list_of(v, x).get(1) else {
@@ -1662,7 +1674,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
             let lname = String::from_utf8_lossy(&lf.name).into_owned();
             let g = if let Some(x) = known.iter().find(|x| x.1.name == lname && x.1.size == fs) {
                 x.0
-            } else if let Some(file) = r.file(&format!("{lname}.tfm"))? {
+            } else if let Some(file) = r.font_file(&format!("{lname}.tfm"))? {
                 let g = LOCAL_FONTS + u32::try_from(out.locals.len()).unwrap_or(0);
                 out.locals.push((lname.clone(), fs, None));
                 known.push((
@@ -1714,7 +1726,15 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
             };
             let h = LOCAL_FONTS + u32::try_from(out.locals.len()).unwrap_or(0);
             let name = crate::fonts::expanded_name(&gi.name, e);
-            out.locals.push((name.clone(), gi.size, Some((f, idx))));
+            let path = match out.local(f) {
+                Some((_, _, Some((root, path)))) => {
+                    let mut path = path.clone();
+                    path.push(idx);
+                    (*root, path)
+                }
+                _ => (f, vec![idx]),
+            };
+            out.locals.push((name.clone(), gi.size, Some(path)));
             out.exp.insert(
                 h,
                 Expansion {
@@ -1743,7 +1763,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
         out.vf_base.insert(f, u32::try_from(b).unwrap_or(0));
     }
     let mut wanted = known;
-    if space && let Some(x) = r.file("pdftexspace.tfm")? {
+    if space && let Some(x) = r.font_file("pdftexspace.tfm")? {
         // pdfTeX loads the space font at the shipout that first needs
         // it, as the next internal font number (the engine numbers no
         // font for it)
@@ -2247,7 +2267,7 @@ pub(crate) fn whatsit(v: &Values, d: ValueId) -> Option<Whatsit> {
             let ki = |j: usize| dim(k.get(j).map_or(0, |&x| int_of(v, x)));
             Whatsit::Dest {
                 id: ident(v, ys.get(1).copied()?),
-                struct_num: None,
+                struct_num: ys.get(3).map(|&n| dim(int_of(v, n))),
                 kind: match kn.as_str() {
                     "fit" => DestKind::Fit,
                     "fith" => DestKind::FitH,
@@ -2284,11 +2304,11 @@ fn some(t: Vec<u8>) -> Option<Vec<u8>> {
 }
 
 /// An identifier as [`crate::pdfprim`] scans it: `["num", n]` or
-/// `["name", text]`.
+/// `["name", text]` (a structure destination's, `snum` and `sname`).
 fn ident(v: &Values, x: ValueId) -> Ident {
     let ys = list_of(v, x);
     match ys.first().map(|&k| str_of(v, k)).as_deref() {
-        Some("name" | "struct") => Ident::Name(
+        Some("name" | "sname") => Ident::Name(
             ys.get(1)
                 .map(|&t| bytes_of(&str_of(v, t)))
                 .unwrap_or_default(),
@@ -2312,6 +2332,11 @@ fn action(v: &Values, x: ValueId) -> Option<Action> {
     }
     let file = some(text(1));
     let window = u8::try_from(ys.get(4).map_or(0, |&n| int_of(v, n))).unwrap_or(0);
+    let struct_id = ys
+        .get(5)
+        .copied()
+        .filter(|&x| x != ValueId::UNIT)
+        .map(|x| ident(v, x));
     match kind.as_str() {
         "goto" => {
             let page = ys.get(2).copied().filter(|&p| p != ValueId::UNIT);
@@ -2325,14 +2350,14 @@ fn action(v: &Values, x: ValueId) -> Option<Action> {
                         .map(|&t| bytes_of(&str_of(v, t)))
                         .unwrap_or_default(),
                     new_window: window,
-                    struct_id: None,
+                    struct_id: struct_id.clone(),
                 });
             }
             Some(Action::Goto {
                 file,
                 id: ident(v, ys.get(3).copied()?),
                 new_window: window,
-                struct_id: None,
+                struct_id,
             })
         }
         "thread" => Some(Action::Thread {
@@ -2506,7 +2531,7 @@ fn ship_apart(
     let maps = r
         .get_loc(crate::fields::cell::PDF_MAPS)?
         .map_or(0, ValueId::raw);
-    let pdfmap = r.file("pdftex.map")?.map_or(0, ValueId::raw);
+    let pdfmap = r.font_file("pdftex.map")?.map_or(0, ValueId::raw);
     let b = &pc.base_in;
     let mut words = vec![
         page_v.raw(),
@@ -2808,7 +2833,10 @@ fn shipout_fonts(v: &Values, fonts: &Fonts) -> Vec<ValueId> {
         .locals
         .iter()
         .map(|(n, sz, fresh)| match fresh {
-            Some((k, i)) => v.str(&format!("{n}@{sz}#{k}.{i}")),
+            Some((k, path)) => {
+                let path: Vec<String> = path.iter().map(ToString::to_string).collect();
+                v.str(&format!("{n}@{sz}#{k}.{}", path.join(".")))
+            }
             None => v.str(&format!("{n}@{sz}")),
         })
         .collect();
@@ -2947,7 +2975,7 @@ pub(crate) fn page_allocs(
     }
     // (an auto-expanded font's object is its base's, `pdf_init_font`'s
     // second case: the base's name, `pdf_font_blink`)
-    let names: Vec<ValueId> = real
+    let mut names: Vec<ValueId> = real
         .into_iter()
         .map(|id| {
             let id = fonts
@@ -2988,6 +3016,12 @@ pub(crate) fn page_allocs(
     let mut ship_fonts = shipout_fonts(v, fonts);
     if fonts.space.is_some() {
         ship_fonts.push(v.str("pdftexspace@0"));
+        // (and its font object, made where the page first uses it as
+        // any font's, `pdf_use_font`: the fold counted the fonts the
+        // list names only, so a page of `\pdfinterwordspaceon` spaces
+        // was an object short, tex-vpat's struct elements one number
+        // low from its first page on)
+        names.push(v.str("pdftexspace@0"));
     }
     // (the page's dictionary and resources, and each annotation it
     // writes, go into an object stream where they compress; its
@@ -3133,7 +3167,13 @@ fn mark_events(
                         ("thread", _) if local && named => (2, id),
                         _ => (0, ValueId::UNIT),
                     };
-                    self.push(vec![v.int(1), v.int(self.cur_s), v.int(target), what]);
+                    // (a local `goto`'s structure destination, `/SD`)
+                    let sid = a
+                        .get(5)
+                        .copied()
+                        .filter(|&x| local && ak == "goto" && x != ValueId::UNIT)
+                        .unwrap_or(ValueId::UNIT);
+                    self.push(vec![v.int(1), v.int(self.cur_s), v.int(target), what, sid]);
                 }
                 "pdf:endlink" if !vertical => self.push(vec![v.int(2)]),
                 "rloff" => self.push(vec![v.int(3), v.int(0)]),
@@ -3432,8 +3472,9 @@ struct AllocFold {
 /// their mark events ([`mark_events`]) runs them.
 #[derive(Default)]
 struct MarkState {
-    /// Each running link's level and its action's target (kind, id).
-    links: Vec<(i64, i64, ValueId)>,
+    /// Each running link's level, its action's target (kind, id) and
+    /// its structure destination (`UNIT`: none).
+    links: Vec<(i64, i64, ValueId, ValueId)>,
     /// Running links off (`\\pdfrunninglinkoff`).
     off: bool,
     thread_level: i64,
@@ -3470,23 +3511,25 @@ impl MarkState {
             let id = |k: usize| ys.get(k).copied().unwrap_or(ValueId::UNIT);
             match n(0) {
                 0 if !self.off => {
-                    let pieces: Vec<(i64, ValueId)> = self
+                    let pieces: Vec<(i64, ValueId, ValueId)> = self
                         .links
                         .iter()
                         .filter(|l| l.0 == n(1))
-                        .map(|l| (l.1, l.2))
+                        .map(|l| (l.1, l.2, l.3))
                         .collect();
-                    for (kind, target) in pieces {
+                    for (kind, target, sid) in pieces {
                         made.objects += n(2);
                         made.compressible += n(2);
                         if n(2) > 0 {
                             made.objects += self.target(v, kind, target, dests);
+                            made.objects += self.target(v, 1, sid, dests);
                         }
                     }
                 }
                 1 => {
-                    self.links.push((n(1), n(2), id(3)));
+                    self.links.push((n(1), n(2), id(3), id(4)));
                     made.objects += self.target(v, n(2), id(3), dests);
+                    made.objects += self.target(v, 1, id(4), dests);
                 }
                 2 => {
                     self.links.pop();
@@ -3524,6 +3567,9 @@ impl MarkState {
     /// written): an object where it is named first (a page's where it
     /// has not shipped and nothing made it).
     fn target(&mut self, v: &Values, kind: i64, id: ValueId, dests: &mut BTreeSet<ValueId>) -> i64 {
+        if id == ValueId::UNIT {
+            return 0;
+        }
         let new = match kind {
             1 => dests.insert(id),
             2 => self.threads.insert(id),

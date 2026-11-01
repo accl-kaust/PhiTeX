@@ -73,9 +73,9 @@ mod xetex;
 mod xpic;
 
 pub use api::{
-    AnalysisStore, Build, ContentKey, Diagnostic, EditSender, FAIL_END, Finder, Hint, Mktex,
-    Options, PageSettled, RunReport as Report, Severity, Speculation, Stats, ToolFinder,
-    ToolSearch, byte_ends, engine_id, file_stat_key,
+    AnalysisStore, Build, ContentKey, Diagnostic, EditSender, FAIL_END, FONT_KEY, Finder, Hint,
+    Mktex, Options, PageSettled, RunReport as Report, Severity, Speculation, Stats, ToolFinder,
+    ToolSearch, byte_ends, engine_id, file_stat_key, font_name,
 };
 pub use exec::{Progress, SpawnWorker, cpus as exec_cpus, set_spawn_worker};
 pub use native::NativeFonts;

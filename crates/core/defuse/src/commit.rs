@@ -579,7 +579,7 @@ fn file_ranges(eng: &Engine, w: Option<&Worker>, mut rs: Vec<(Field, RangeReader
     }
     let mut memo = read::FoldMemo::new();
     for (f, k, r) in again {
-        reask_range(eng, w, f, k, &r, by, st, &mut memo);
+        reask_range(eng, w, f, k, &r, by, false, st, &mut memo);
     }
 }
 
@@ -1865,7 +1865,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     let mut memo = read::FoldMemo::new();
     for (f, k, r) in holes {
-        reask_range(eng, ww, f, k, &r, node.id, &mut st, &mut memo);
+        reask_range(eng, ww, f, k, &r, node.id, false, &mut st, &mut memo);
     }
     if !made.is_empty() {
         let mut log = w.log.lock();
@@ -2893,12 +2893,15 @@ fn reask_ranges_in(
             continue;
         }
         if covers(eng, &r, by, at, fixed) {
-            reask_range(eng, w, f, k, &r, by, st, &mut memo);
+            reask_range(eng, w, f, k, &r, by, true, st, &mut memo);
         }
     }
 }
 
-/// Re-asks one range reader after `by`'s change.
+/// Re-asks one range reader after `by`'s change. `filed`: a `next`'s
+/// filing at the node it stopped at stands (a reader the range index
+/// holds); not where that filing was taken (its stop committed, was
+/// taken or went) or never made (`file_stop` found the stop not open).
 #[allow(clippy::too_many_arguments)]
 fn reask_range(
     eng: &Engine,
@@ -2907,6 +2910,7 @@ fn reask_range(
     k: RangeKey,
     r: &RangeReader,
     by: NodeId,
+    filed: bool,
     st: &mut CommitStats,
     memo: &mut read::FoldMemo,
 ) {
@@ -2948,7 +2952,16 @@ fn reask_range(
         });
         if let Some((n, v)) = found {
             if r.seen.iter().all(|&(p, s)| read::apply_path(eng, v, p) == s) {
-                if n.stop != r.to && eng.ranges.remove(f, k) {
+                // (a search that stops at the same node again, its filing
+                // there taken by that node's commit or never made because
+                // the node was committing when it was filed, while the node
+                // is open again: filed there again. Left unfiled, the
+                // node's next commit re-asked nobody and the reader kept
+                // its answer of none before a contribution: review's next
+                // readers across splits, 52 of 4000 readers wrong at 16
+                // threads, accl 22384)
+                let refile = n.stop != r.to || (!filed && n.item.is_none() && n.stop.is_some());
+                if refile && eng.ranges.remove(f, k) {
                     let mut again = r.clone();
                     again.to = n.stop;
                     again.hole = n.item.is_none() && n.stop.is_some();
@@ -2958,6 +2971,7 @@ fn reask_range(
                     // a reader held at the frontier waited for a run of it
                     // that never came)
                     if let Some(to) = r.to
+                        && n.stop != r.to
                         && eng.frontier_by.load(Ordering::Acquire) == r.node.raw() + 1
                         && eng
                             .frontier
@@ -3033,7 +3047,7 @@ fn reask_stops(
 ) {
     let mut memo = read::FoldMemo::new();
     for (f, k, r) in stops {
-        reask_range(eng, w, f, k, &r, by, st, &mut memo);
+        reask_range(eng, w, f, k, &r, by, false, st, &mut memo);
     }
 }
 

@@ -268,15 +268,22 @@ fn xelatex_kpse() -> &'static Mutex<Option<phitex_kpse::Kpse>> {
 /// Files from the document's directories (printed as `./name`), the
 /// rest through kpathsea as `xelatex` finds them.
 fn xelatex_finder(dirs: Vec<std::path::PathBuf>) -> Finder {
-    Arc::new(move |name: &str| {
+    Arc::new(move |key: &str| {
+        // (the font side's lookup in the format its extension names,
+        // TeX's own in the `tex` format, `phitex_tex::FONT_KEY`)
+        let (name, font) = match phitex_tex::font_name(key) {
+            Some(n) => (n, true),
+            None => (key, false),
+        };
         for dir in &dirs {
             let p = dir.join(name);
             if p.is_file() {
                 return Some((format!("./{name}"), std::fs::read(&p).ok()?));
             }
         }
-        let ext = Path::new(name)
-            .extension()
+        let ext = font
+            .then(|| Path::new(name).extension())
+            .flatten()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
         let fmt = match ext.as_str() {

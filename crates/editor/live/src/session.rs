@@ -299,6 +299,11 @@ pub struct Output {
     /// The PDF file's layout, where the session writes update sections
     /// ([`Session::updates`]; `pdf` is then empty).
     pub layout: Option<phitex_pdf::Layout>,
+    /// No page, and a PDF file of no bytes all the same: pdfTeX opened
+    /// it at read time (hyperref's open action, an `\immediate\pdfobj`,
+    /// `\pdfximage`) and never flushed its header
+    /// ([`phitex_tex::Build::empty_pdf`]).
+    pub empty_pdf: bool,
 }
 
 /// What a build made.
@@ -373,6 +378,8 @@ impl Report {
             Some(("pdf", self.out.pdf.as_slice()))
         } else if !self.out.dvi.is_empty() {
             Some(("dvi", self.out.dvi.as_slice()))
+        } else if self.out.empty_pdf {
+            Some(("pdf", &[]))
         } else {
             None
         }
@@ -966,11 +973,11 @@ impl Session {
             for (n, found) in b.reads() {
                 if let Some(e) = self.inputs.iter_mut().find(|(m, ..)| *m == n) {
                     if found && e.2.is_none() {
-                        e.2 = self.host.locate(&n);
+                        e.2 = self.host.locate_key(&n);
                     }
                     e.1 = found;
                 } else {
-                    let p = found.then(|| self.host.locate(&n)).flatten();
+                    let p = found.then(|| self.host.locate_key(&n)).flatten();
                     self.inputs.push((n, found, p));
                 }
             }
@@ -1203,6 +1210,7 @@ impl Session {
             let shown: Vec<String> = phases.iter().map(|(n, d)| format!("{n} {d:?}")).collect();
             eprintln!("session phases ({why}): {}", shown.join(", "));
         }
+        let empty_pdf = pages == 0 && b.empty_pdf();
         let mut report = Report {
             out: Output {
                 pdf: pdf_bytes,
@@ -1216,6 +1224,7 @@ impl Session {
                 history_error,
                 log,
                 layout,
+                empty_pdf,
             },
             edit_line,
             runs: vec![RunInfo {
@@ -1728,7 +1737,7 @@ impl Session {
         }
         let host = self.host.clone();
         Arc::new(move |name: &str| {
-            let p = host.locate(name)?;
+            let p = host.locate_key(name)?;
             let bytes = host.read(&p)?;
             Some((p.to_string_lossy().into_owned(), bytes))
         })
@@ -1740,7 +1749,7 @@ impl Session {
         let host = self.host.clone();
         let buffers = self.buffers.clone();
         Arc::new(move |name: &str| {
-            let p = host.locate(name)?;
+            let p = host.locate_key(name)?;
             let shown = p.to_string_lossy().into_owned();
             let key = plain_name(&shown);
             let buffered = buffers

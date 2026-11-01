@@ -1,0 +1,23 @@
+% A letter-spaced small-caps font (microtype's \textls over mathpazo's
+% virtual pplrc9d) expanded at a line's stretch limit on two pages: pdfTeX
+% makes the expanded font's local font (pplrc9d+20, itself an expanded
+% virtual font) and that one's local fonts where the font is first shipped,
+% and never again, whatever local fonts the page reads in before them; a
+% font loaded after them is numbered after them.
+\documentclass{article}
+\usepackage[T1]{fontenc}
+\usepackage[osf,sc]{mathpazo}
+\usepackage[protrusion=true,expansion=true]{microtype}
+\begin{document}
+\textls[80]{\scshape important note:} Some text\linebreak
+More words to make a paragraph of several lines of ordinary text, set
+in the document's roman font, long enough to break into lines.
+\newpage
+\textit{Italic words} and \textbf{bold words} first, in virtual fonts of their own.
+
+\textls[80]{\scshape yet another note:} Some text\linebreak
+More words to make a paragraph of several lines of ordinary text, set
+in the document's roman font, long enough to break into lines.
+\newpage
+{\usefont{T1}{cmss}{m}{n} A line in another font.}
+\end{document}
