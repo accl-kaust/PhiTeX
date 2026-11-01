@@ -482,6 +482,20 @@ fn interword_space_font_object() {
     check_threads("interword_space_font_object", "pdf");
 }
 
+/// A raw object a page names with `\pdfrefobj`, neither a stream nor
+/// `\immediate`, is written with the page ("Write out pending raw
+/// objects", `pdf_begin_obj(k, 1)`), into an object stream. The pages'
+/// fold of the objects counted the page's dictionary, resources and
+/// annotations toward a stream's 100 but not those, so the next stream's
+/// number fell later and every object number TeX read after it was one
+/// short: iacrj's `/Metadata 183 0 R` for pdfTeX's 184 (its raw /Group
+/// and info objects on page 1; `PHITEX_ALLOC_TRACE`, accl 22639). At -j1
+/// and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn raw_objects_in_object_streams() {
+    check_threads("raw_objects_in_object_streams", "pdf");
+}
+
 /// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
 /// for every font it loads; libertine's T1 fonts are virtual) set its
 /// fields without reading it in (no `do_vf`): pdfTeX numbers its local

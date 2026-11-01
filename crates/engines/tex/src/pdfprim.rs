@@ -2855,7 +2855,11 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     None => alloc_obj(r)?,
                 },
             };
-            r.set(&format!("pdf:objbody:{n}"), v.int(1), true);
+            // (1, with 2 for a stream and 4 for `\immediate`: a page that
+            // names it with `\pdfrefobj` writes a raw object that is
+            // neither into an object stream, `page_allocs`)
+            let kind = 1 + 2 * i64::from(stream) + 4 * i64::from(immediate);
+            r.set(&format!("pdf:objbody:{n}"), v.int(kind), true);
             if immediate && pdf_mode(r)? {
                 opened(r);
             }
