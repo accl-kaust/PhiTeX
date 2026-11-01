@@ -88,7 +88,6 @@ latex_spath3_spath3	differs: obj 2 (untyped) line 2: oracle "/pgfpat11 280 0 R",
 latex_spelatex_Example_example	error: error: *** (cannot \read from terminal in nonstop modes)
 latex_spotcolor_readme	differs: obj 2202 (Type1) line 3: oracle "/Encoding 1136 0 R", phitex "/Encoding 1137 0 R"
 latex_tablefootnote_tablefootnote-example	differs: obj 125 (untyped) line 5: oracle "323.574", phitex "323.686"
-latex_tamefloats_deml3541	differs: page 1: obj 34 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 2 vs 1)
 latex_teubner_teubner-doc	differs: page 1: obj 12 (Pages) line 15: oracle "<end>", phitex "<end>"
 latex_tex-vpat_texlive-vpat	error: error: pdfTeX error (ext1): identifier type missing
 latex_texpower_manual	-j1 differs: page 1: obj 806 (Catalog) line 13: oracle "<end>", phitex "<end>" (pages 37 vs 36); -j4 differs: page 1: obj 806 (Catalog) line 13: oracle "<end>", phitex "<end>"
