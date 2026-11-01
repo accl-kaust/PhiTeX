@@ -434,3 +434,11 @@ repro!(
     biber_macro_case,
     "biber: an @string macro used in another case than its definition's (acm-sigconf-biblatex: `journal = CACM` for `@String{CACM = ...}`) was undefined, the field lost (82 destinations moved); btparse defines them lowercased and looks them up lowercased (oracle: latexmk, pdflatex and biber in the CI image)"
 );
+repro!(
+    prevgraf_vbox,
+    "\\prevgraf in a \\vbox: read and assigned through the field of the enclosing list's name, never the level the run builds the box on, where the paragraph's end put its lines: 0 for 4 (oracle: pdflatex in the CI image)"
+);
+repro!(
+    lineno_vbox_abstract,
+    "AASTeX's abstract with line numbers: lineno's \\linenumberpar puts its penalty after a paragraph only when \\prevgraf grew, which read 0 in the abstract's \\vbox; each paragraph's last line went unnumbered, every number after one less (aastex, aastex-xe; oracle: pdflatex in the CI image)"
+);

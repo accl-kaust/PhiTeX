@@ -859,8 +859,9 @@ impl Run<'_, '_> {
                 if self.mode_zero {
                     IVal::Int(0)
                 } else {
+                    // (the level's, a list the run builds: a `\vbox`'s)
                     let md = self.mode()?;
-                    IVal::Int(self.int32(&format!("pg:{}", md.vlid))?)
+                    IVal::Int(self.prev_graf(&md)?)
                 }
             }
             cmd::SET_PAGE_INT | cmd::SET_SHAPE | cmd::ASSIGN_FONT_INT

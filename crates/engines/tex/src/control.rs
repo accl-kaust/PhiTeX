@@ -1104,7 +1104,7 @@ impl Run<'_, '_> {
                 self.scan_optional_equals()?;
                 let n = self.scan_int()?;
                 if n >= 0 {
-                    self.set(&format!("pg:{}", md.vlid), v.int(i64::from(n)), true);
+                    self.set_prev_graf(&md, n);
                 }
             }
             cmd::SET_PAGE_DIMEN => {
