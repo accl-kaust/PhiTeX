@@ -440,6 +440,20 @@ fn input_dotted_name() {
     check_threads("input_dotted_name", "pdf");
 }
 
+/// pdfTeX 1.40.26's structure destinations: `\pdfdest struct n` (a
+/// destination naming structure element `n`'s object, not its page's)
+/// and a `goto` action's `struct` (its `/SD`, with `file` the text as
+/// given), each identifier of a namespace of its own (`num 3` and
+/// `struct … num 3` two objects), one named by a link before its page
+/// defines it and one by an outline. `\pdfdest struct` was an error
+/// ("identifier type missing": the tex-vpat manual) and an action's
+/// `struct` was read as its identifier. At -j1 and -j4 (oracle:
+/// pdflatex, pdfTeX 1.40.29 in the CI image, accl 22464, passing there).
+#[test]
+fn pdfdest_struct() {
+    check_threads("pdfdest_struct", "pdf");
+}
+
 /// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
 /// for every font it loads; libertine's T1 fonts are virtual) set its
 /// fields without reading it in (no `do_vf`): pdfTeX numbers its local

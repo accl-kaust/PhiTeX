@@ -2247,7 +2247,7 @@ pub(crate) fn whatsit(v: &Values, d: ValueId) -> Option<Whatsit> {
             let ki = |j: usize| dim(k.get(j).map_or(0, |&x| int_of(v, x)));
             Whatsit::Dest {
                 id: ident(v, ys.get(1).copied()?),
-                struct_num: None,
+                struct_num: ys.get(3).map(|&n| dim(int_of(v, n))),
                 kind: match kn.as_str() {
                     "fit" => DestKind::Fit,
                     "fith" => DestKind::FitH,
@@ -2284,11 +2284,11 @@ fn some(t: Vec<u8>) -> Option<Vec<u8>> {
 }
 
 /// An identifier as [`crate::pdfprim`] scans it: `["num", n]` or
-/// `["name", text]`.
+/// `["name", text]` (a structure destination's, `snum` and `sname`).
 fn ident(v: &Values, x: ValueId) -> Ident {
     let ys = list_of(v, x);
     match ys.first().map(|&k| str_of(v, k)).as_deref() {
-        Some("name" | "struct") => Ident::Name(
+        Some("name" | "sname") => Ident::Name(
             ys.get(1)
                 .map(|&t| bytes_of(&str_of(v, t)))
                 .unwrap_or_default(),
@@ -2312,6 +2312,11 @@ fn action(v: &Values, x: ValueId) -> Option<Action> {
     }
     let file = some(text(1));
     let window = u8::try_from(ys.get(4).map_or(0, |&n| int_of(v, n))).unwrap_or(0);
+    let struct_id = ys
+        .get(5)
+        .copied()
+        .filter(|&x| x != ValueId::UNIT)
+        .map(|x| ident(v, x));
     match kind.as_str() {
         "goto" => {
             let page = ys.get(2).copied().filter(|&p| p != ValueId::UNIT);
@@ -2325,14 +2330,14 @@ fn action(v: &Values, x: ValueId) -> Option<Action> {
                         .map(|&t| bytes_of(&str_of(v, t)))
                         .unwrap_or_default(),
                     new_window: window,
-                    struct_id: None,
+                    struct_id: struct_id.clone(),
                 });
             }
             Some(Action::Goto {
                 file,
                 id: ident(v, ys.get(3).copied()?),
                 new_window: window,
-                struct_id: None,
+                struct_id,
             })
         }
         "thread" => Some(Action::Thread {
@@ -3133,7 +3138,13 @@ fn mark_events(
                         ("thread", _) if local && named => (2, id),
                         _ => (0, ValueId::UNIT),
                     };
-                    self.push(vec![v.int(1), v.int(self.cur_s), v.int(target), what]);
+                    // (a local `goto`'s structure destination, `/SD`)
+                    let sid = a
+                        .get(5)
+                        .copied()
+                        .filter(|&x| local && ak == "goto" && x != ValueId::UNIT)
+                        .unwrap_or(ValueId::UNIT);
+                    self.push(vec![v.int(1), v.int(self.cur_s), v.int(target), what, sid]);
                 }
                 "pdf:endlink" if !vertical => self.push(vec![v.int(2)]),
                 "rloff" => self.push(vec![v.int(3), v.int(0)]),
@@ -3432,8 +3443,9 @@ struct AllocFold {
 /// their mark events ([`mark_events`]) runs them.
 #[derive(Default)]
 struct MarkState {
-    /// Each running link's level and its action's target (kind, id).
-    links: Vec<(i64, i64, ValueId)>,
+    /// Each running link's level, its action's target (kind, id) and
+    /// its structure destination (`UNIT`: none).
+    links: Vec<(i64, i64, ValueId, ValueId)>,
     /// Running links off (`\\pdfrunninglinkoff`).
     off: bool,
     thread_level: i64,
@@ -3470,23 +3482,25 @@ impl MarkState {
             let id = |k: usize| ys.get(k).copied().unwrap_or(ValueId::UNIT);
             match n(0) {
                 0 if !self.off => {
-                    let pieces: Vec<(i64, ValueId)> = self
+                    let pieces: Vec<(i64, ValueId, ValueId)> = self
                         .links
                         .iter()
                         .filter(|l| l.0 == n(1))
-                        .map(|l| (l.1, l.2))
+                        .map(|l| (l.1, l.2, l.3))
                         .collect();
-                    for (kind, target) in pieces {
+                    for (kind, target, sid) in pieces {
                         made.objects += n(2);
                         made.compressible += n(2);
                         if n(2) > 0 {
                             made.objects += self.target(v, kind, target, dests);
+                            made.objects += self.target(v, 1, sid, dests);
                         }
                     }
                 }
                 1 => {
-                    self.links.push((n(1), n(2), id(3)));
+                    self.links.push((n(1), n(2), id(3), id(4)));
                     made.objects += self.target(v, n(2), id(3), dests);
+                    made.objects += self.target(v, 1, id(4), dests);
                 }
                 2 => {
                     self.links.pop();
@@ -3524,6 +3538,9 @@ impl MarkState {
     /// written): an object where it is named first (a page's where it
     /// has not shipped and nothing made it).
     fn target(&mut self, v: &Values, kind: i64, id: ValueId, dests: &mut BTreeSet<ValueId>) -> i64 {
+        if id == ValueId::UNIT {
+            return 0;
+        }
         let new = match kind {
             1 => dests.insert(id),
             2 => self.threads.insert(id),
