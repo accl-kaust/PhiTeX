@@ -2,6 +2,5 @@
 aastex	differs: byte 465861 (page 4: Table 1 placed at the top where pdfTeX puts a text line first; fixed on research-fixes-5, \pagegoal in the output routine)
 aastex-xe	differs: byte 531451 (as aastex; and page 8's sealed lines from earlier routines, fixed on research-fixes-5)
 acm-sigconf-biblatex	differs: byte 135893 (page 5 /F460 vs /F461, a line's spacing -250 vs -248; fixed on research-fixes-5, math glue and protrusion)
-classicthesis	differs: byte 37 (a font number on page 31, /F583 vs /F586: three fonts more at the \clearpage after Chapter01)
 classicthesis-xe	differs: byte 54 (not diagnosed)
 thuthesis	differs: byte 50341, 1 error (cross-references settle in more than 5 rounds; the text after a float 3.488 pt high; fixed on research-fixes-5, the output routine's \aftergroup)

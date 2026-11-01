@@ -766,8 +766,8 @@ pub(crate) struct FontNums {
     map: BTreeMap<FontId, FontId>,
     /// The local fonts this fold gave ids ([`LINK_LOCALS`] on).
     locals: FontId,
-    /// The local fonts made anew ([`Fresh`]), by virtual font and index.
-    fresh: BTreeMap<(FontId, usize), FontId>,
+    /// The local fonts made anew ([`Fresh`]), by their path.
+    fresh: BTreeMap<(FontId, Vec<usize>), FontId>,
 }
 
 impl FontNums {
@@ -776,6 +776,10 @@ impl FontNums {
             self.next += 1;
             if id != self.next {
                 self.map.insert(id, self.next);
+            }
+            // (`PHITEX_FONTNUM_TRACE`, observe: each number as it is given)
+            if crate::exec::obs_flag!("PHITEX_FONTNUM_TRACE") {
+                eprintln!("fontnum {} {name} {size} local={local}", self.next);
             }
             self.known.push((Arc::from(name), size, id, local));
         }
@@ -826,13 +830,13 @@ impl FontNums {
             {
                 let d = match fresh {
                     Some(key) => {
-                        if let Some(&d) = self.fresh.get(&key) {
+                        if let Some(&d) = self.fresh.get(key) {
                             d
                         } else {
                             let id = LINK_LOCALS + self.locals;
                             self.locals += 1;
                             self.put(id, n, sz, true);
-                            self.fresh.insert(key, id);
+                            self.fresh.insert(key.clone(), id);
                             id
                         }
                     }
@@ -1271,17 +1275,25 @@ const LOCAL_FONTS: FontId = 0x6000_0000;
 
 /// A local font made anew where its virtual font is read in, whatever
 /// fonts there are (`auto_expand_vf`: an expanded virtual font's local
-/// fonts, each its base's expanded): the virtual font and the local
-/// font's index.
-type Fresh = Option<(FontId, usize)>;
+/// fonts, each its base's expanded): its path, the expanded virtual
+/// font of the step's own fonts it is reached from and the local fonts'
+/// indices from there. A local font so made is an expanded virtual font
+/// in turn where its base is virtual (microtype's letter-spaced
+/// `pplrc9d`, expanded): its local fonts' paths go on from its own, for
+/// its handle is the step's ([`LOCAL_FONTS`]), another on each page, and
+/// pdfTeX makes them once, where the font is first shipped.
+///
+/// Example: `pplrc9d+80ls+20`'s local font `pplrc9d+20` is `(f, [0])`,
+/// and that one's local `pplrc8r+20` is `(f, [0, 0])` on every page.
+type Fresh = Option<(FontId, Vec<usize>)>;
 const LINK_LOCALS: FontId = 0x7000_0000;
 
 impl Fonts {
     /// Local font `g`'s name and size, and whether it is made anew
     /// ([`Fresh`]), if `g` is a handle of one.
-    fn local(&self, g: FontId) -> Option<(&str, i32, Fresh)> {
+    fn local(&self, g: FontId) -> Option<(&str, i32, &Fresh)> {
         let i = usize::try_from(g.checked_sub(LOCAL_FONTS)?).ok()?;
-        self.locals.get(i).map(|(n, s, f)| (n.as_str(), *s, *f))
+        self.locals.get(i).map(|(n, s, f)| (n.as_str(), *s, f))
     }
 
     /// Font `g`'s name and size: a local font's, or one of the step's.
@@ -1714,7 +1726,15 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
             };
             let h = LOCAL_FONTS + u32::try_from(out.locals.len()).unwrap_or(0);
             let name = crate::fonts::expanded_name(&gi.name, e);
-            out.locals.push((name.clone(), gi.size, Some((f, idx))));
+            let path = match out.local(f) {
+                Some((_, _, Some((root, path)))) => {
+                    let mut path = path.clone();
+                    path.push(idx);
+                    (*root, path)
+                }
+                _ => (f, vec![idx]),
+            };
+            out.locals.push((name.clone(), gi.size, Some(path)));
             out.exp.insert(
                 h,
                 Expansion {
@@ -2808,7 +2828,10 @@ fn shipout_fonts(v: &Values, fonts: &Fonts) -> Vec<ValueId> {
         .locals
         .iter()
         .map(|(n, sz, fresh)| match fresh {
-            Some((k, i)) => v.str(&format!("{n}@{sz}#{k}.{i}")),
+            Some((k, path)) => {
+                let path: Vec<String> = path.iter().map(ToString::to_string).collect();
+                v.str(&format!("{n}@{sz}#{k}.{}", path.join(".")))
+            }
             None => v.str(&format!("{n}@{sz}")),
         })
         .collect();
