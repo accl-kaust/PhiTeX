@@ -2711,18 +2711,24 @@ fn sealed_units(
     use phitex_defuse::Step;
     let v = cx.values();
     let mut out = FxHashMap::default();
-    let Some((after, to, at)) = &pc.places else {
-        return Ok(out);
-    };
     // (the units of its own lines only, in the finisher's window, each
-    // at its place: its piece checked)
+    // at its place: its piece checked; a finisher with no window, its
+    // page's sealed lines all from other finishers' pieces: by piece
+    // below)
     let want = &pc.pieces;
     if want.is_empty() {
         return Ok(out);
     }
     let node = crate::pages::node_of;
-    let w = cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(*to))?;
+    let (w, at) = match &pc.places {
+        Some((after, to, at)) => (
+            Some(cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(*to))?),
+            &at[..],
+        ),
+        None => (None, &[][..]),
+    };
     for &(p, i) in at.iter().filter(|x| want.binary_search(&x.0).is_ok()) {
+        let Some(w) = w else { break };
         let Some(u) = cx.at(w, Step::Index(i)) else {
             continue;
         };

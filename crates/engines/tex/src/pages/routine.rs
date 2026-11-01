@@ -530,10 +530,11 @@ impl Run<'_, '_> {
         // are, for the end node that fills them in,
         // [`crate::assemble::fill_sealed_pages`]; a PDF page's writer
         // has them from this run)
-        if !pos.pdf
-            && side.lazy.iter().any(|&l| nodes::is_sealed(v, l))
-            && let Some((after, to, at)) = self.sealed.places()
-        {
+        // (a run with no window of its own, its page's sealed lines all
+        // given back or carried in a register from other finishers:
+        // `[-1, -1]`, each line's unit read by its piece there)
+        if !pos.pdf && side.lazy.iter().any(|&l| nodes::is_sealed(v, l)) {
+            let (after, to, at) = self.sealed.places().unwrap_or((None, -1, Vec::new()));
             let mut w = vec![v.int(after.unwrap_or(-1)), v.int(to)];
             for (p, i) in at {
                 w.extend([v.int(p), v.int(i64::from(i))]);

@@ -4987,16 +4987,9 @@ impl<'c, 'a> Run<'c, 'a> {
         // whose stop runs the node again)
         let op = self.cx.op();
         let t_pub = std::time::Instant::now();
-        let mut publication = self.publication();
-        // (a finisher's sealed lines in what leaves it: their own lists,
-        // read now, `crate::pages::Run::unseal`)
-        if !self.sealed.is_empty() {
-            for d in &mut publication {
-                if let crate::state::Pub::Value(x) = d.1 {
-                    d.1 = crate::state::Pub::Value(self.unseal(x));
-                }
-            }
-        }
+        // (a finisher's sealed lines in a definition stay sealed: a run
+        // that opens the box reads their lists then, `crate::pages::seal`)
+        let publication = self.publication();
         let published: Vec<(Field, ValueId, Locality)> = publication
             .iter()
             .filter_map(|&(f, w, l)| match w {

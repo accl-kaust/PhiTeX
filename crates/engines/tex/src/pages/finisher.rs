@@ -1488,7 +1488,6 @@ impl Run<'_, '_> {
                     if is_page_field(&name) {
                         continue;
                     }
-                    let x = self.unseal(x);
                     out.push((f, x));
                 }
                 crate::state::Pub::Rel(c) => rels.push((f, c)),

@@ -102,18 +102,23 @@ fn fill_sealed_pages(
             let w = list_of(v, places);
             let at = |k: usize| w.get(k).map_or(-1, |&x| int_of(v, x));
             let after = Some(at(0)).filter(|&a| a >= 0);
-            let view =
-                cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(at(1)))?;
-            for &[p, i] in w[2.min(w.len())..].as_chunks::<2>().0 {
-                let (p, i) = (int_of(v, p), int_of(v, i));
-                let Some(u) = cx.at(view, Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) else {
-                    continue;
-                };
-                if cx.get(u, Step::Index(0)).and_then(|x| v.as_int(x)) != Some(p) {
-                    continue;
-                }
-                if let Some(x) = cx.at(u, Step::Index(2)).map(|x| cx.whole(x)) {
-                    units.push((p, x));
+            // (no window: a finisher whose page's sealed lines all came
+            // from other finishers' pieces, read by piece below)
+            if at(1) >= 0 {
+                let view =
+                    cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(at(1)))?;
+                for &[p, i] in w[2.min(w.len())..].as_chunks::<2>().0 {
+                    let (p, i) = (int_of(v, p), int_of(v, i));
+                    let Some(u) = cx.at(view, Step::Index(u32::try_from(i).unwrap_or(u32::MAX)))
+                    else {
+                        continue;
+                    };
+                    if cx.get(u, Step::Index(0)).and_then(|x| v.as_int(x)) != Some(p) {
+                        continue;
+                    }
+                    if let Some(x) = cx.at(u, Step::Index(2)).map(|x| cx.whole(x)) {
+                        units.push((p, x));
+                    }
                 }
             }
         }

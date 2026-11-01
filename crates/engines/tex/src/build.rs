@@ -2030,7 +2030,7 @@ impl Run<'_, '_> {
             .get(9)
             .is_some_and(|&l| nodes::is_sealed(v, l))
         {
-            self.unseal(b)
+            self.unseal_open(b)
         } else {
             b
         };
