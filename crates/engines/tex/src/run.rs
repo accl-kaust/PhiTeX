@@ -974,6 +974,11 @@ pub(crate) struct Run<'c, 'a> {
     /// main list since, a finisher's page, and the cut its fold found.
     pub cand: u32,
     pub cand_marks: Vec<crate::pages::CandMark>,
+    /// The page-layer registers (`\count0`, those the output routine
+    /// defines) the run held as it passed its last candidate a page can
+    /// fire at, loaded or its own: its next read of one asks first whether
+    /// a page fired there ([`Run::order_page_reg_read`]).
+    pub page_regs_held: Vec<Loc>,
     /// The serial of the writer command the command in progress recorded
     /// ([`crate::pdfout::command`]), until a read-time allocation takes
     /// it as its own ([`crate::pdfout::note_read_time`]); 0: none.
@@ -1209,6 +1214,7 @@ impl<'c, 'a> Run<'c, 'a> {
             halt: None,
             cand: 0,
             cand_marks: Vec::new(),
+            page_regs_held: Vec::new(),
             pdf_cmd: 0,
             scope_kind_memo: None,
             pubs: None,
@@ -1265,6 +1271,10 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn load(&mut self, loc: Loc) -> R<()> {
         if self.interp.is_some() {
             self.revert_read_back(loc)?;
+        }
+        if !self.page_regs_held.is_empty() && self.page_regs_held.contains(&loc) {
+            self.page_regs_held.retain(|&l| l != loc);
+            self.order_page_reg_read(loc)?;
         }
         match self.st.load_state(loc) {
             1 => Ok(()),
@@ -1521,6 +1531,9 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             return Ok(());
         }
+        // (a page-layer register read after a candidate of the run's own
+        // a page fires at: the run ends there, [`Run::order_page_reg_read`])
+        self.order_page_reg_read(loc)?;
         let f = self.loc_field(loc);
         let r = self.st.get(self.cx, self.v, loc, f);
         if r.is_err() {
@@ -1656,18 +1669,23 @@ impl<'c, 'a> Run<'c, 'a> {
     /// `loc` ([`Run::defer_ok`] was set): true, and [`Run::defer_hit`]
     /// set, where it is a page-layer register the run has not loaded and
     /// holds no map of (its own write makes it concrete): no read.
-    pub(crate) fn defer_at(&mut self, loc: Loc) -> bool {
+    pub(crate) fn defer_at(&mut self, loc: Loc) -> R<bool> {
         if self.st.is_loaded(loc) || self.st.has_map(loc) || self.st.lazy(loc).is_some() {
-            return false;
+            return Ok(false);
         }
         if loc as usize >= crate::fields::NSLOT {
             self.loc_field(loc);
         }
         if self.count_reg(loc).is_none() || !crate::defer::deferrable(self, loc) {
-            return false;
+            return Ok(false);
         }
+        // (a symbol is resolved as of the piece's position: made after a
+        // candidate of its own a page fires at, it would stand for the
+        // value before that page; the run ends there instead,
+        // [`Run::order_page_reg_read`])
+        self.order_page_reg_read(loc)?;
         self.defer_hit = Some(loc);
-        true
+        Ok(true)
     }
 
     /// Field `f` as it reaches node `at` (right after its own run, or

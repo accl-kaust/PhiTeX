@@ -37,7 +37,6 @@ latex_forest-quickstart_forest-quickstart	differs: page 2: obj 385 (untyped) lin
 latex_fragoli_fragoli_doc	-j1 differs: page 5: obj 426 (page 5, untyped) line 318: oracle "q", phitex "Q"; -j4 differs: page 1: obj 1826 (Catalog) line 10: oracle "<end>", phitex "<end>" (not the same in each run: the first sweep had -j1 differs, -j4 timeout)
 latex_gammas_gammas_template	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes); -j4 differs: page 1: obj 17 (page 1, untyped) line 97: oracle "/F119 5.9776 Tf 1 0 0 1 111.245 384.391 Tm [(13)]TJ", phitex "/F119 5.9776 Tf 1 0 0 1 111.245 384.391 Tm [(12)]TJ"
 latex_glosmathtools_sample_glosmathtools_en	differs: page 2: obj 266 (Catalog) line 22: oracle "<end>", phitex "<end>"
-latex_gu_gudoc	differs: page 1: obj 358 (Catalog) line 5: oracle "/PageMode /UseOutlines", phitex "/PageLabels <<"
 latex_hep-paper_hep-paper-documentation	differs: page 2: obj 531 (Catalog) line 10: oracle "<end>", phitex "<end>" (pages 7 vs 6)
 latex_heria_heria-proposal	differs: page 13: obj 169 (page 13, untyped) line 72: oracle "/F51 10.9091 Tf 132.769 737.854 Td [(Cost)-250(\()]TJ/F51 7.6363 Tf 27", phitex "/F51 10.9091 Tf 132.769 737.854 Td [(Cost)-250(\()]TJ/F51 7.6363 Tf [("
 latex_hhtensor_getversion	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)

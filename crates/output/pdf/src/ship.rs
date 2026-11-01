@@ -758,6 +758,17 @@ impl PdfState {
             ColorStackCmd::Pop => self.stacks.pop(stack),
             ColorStackCmd::Current => self.stacks.current(stack),
         };
+        // (`PHITEX_COLOR_TRACE` (observe): each color stack command, the
+        // value it writes and the page stacks' depths it leaves)
+        if cfg!(feature = "observe") && std::env::var_os("PHITEX_COLOR_TRACE").is_some() {
+            eprintln!(
+                "color: stack {stack} {cmd:?} page_mode {} form {} -> {:?} depths {:?}",
+                self.stacks.page_mode,
+                self.cur_form,
+                String::from_utf8_lossy(&s),
+                self.stacks.page_depths()
+            );
+        }
         if !s.is_empty() {
             self.literal(&s, mode);
         }
@@ -1617,6 +1628,15 @@ impl PdfState {
             self.print_ln(b" 0 0 cm");
         }
         self.stacks.ship_begin(shipping_page);
+        if cfg!(feature = "observe") && std::env::var_os("PHITEX_COLOR_TRACE").is_some() {
+            eprintln!(
+                "color: ship {} {} total {} stacks {:?}",
+                if shipping_page { "page" } else { "form" },
+                if shipping_page { self.total_pages + 1 } else { i64::try_from(self.cur_form).unwrap_or(-1) },
+                self.total_pages,
+                self.stacks
+            );
+        }
         if shipping_page {
             self.out_colorstack_startpage();
         }

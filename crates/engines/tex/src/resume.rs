@@ -419,6 +419,8 @@ impl Run<'_, '_> {
             .iter()
             .filter_map(|&m| cand_of(v, m))
             .collect();
+        self.page_regs_held.clear();
+        self.note_page_regs_held();
         self.muts += 1;
         self.resumed_at = Some(self.cmds);
         self.ops

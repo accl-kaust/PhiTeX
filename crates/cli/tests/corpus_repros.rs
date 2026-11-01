@@ -545,3 +545,7 @@ repro!(
     pdf_fontname_share,
     "\\pdffontname and \\pdffontobjnum of one scalable TFM at several sizes: pdfTeX's `pdf_init_font` makes one object for them, named by the first font's number (`obj_info`); each font made an object of its own and was named by its own number (32 41 42 and objects 1 2 3 for pdfTeX's 32 32 32 and 1 1 1) (oracle: pdflatex in the CI image, mc 77924)"
 );
+repro!(
+    page_counter_after_own_page,
+    "manuals (gu's gudoc: pages 10-14 numbered 8,9,8,9,10, /PageLabels written): a page fires at a candidate inside a conditional the text's run opens, and a float after it reads \\c@page and puts it back (tabularx's trial runs, \\TX@ckpt); the run read the register at its own position, the value before that page, and the restore took the page's steps back; now a piece's read of a page-layer register after a candidate of its own a page fires at ends the run there, its rest a resume after the page's finisher (oracle: pdflatex in the CI image, accl 22558)"
+);

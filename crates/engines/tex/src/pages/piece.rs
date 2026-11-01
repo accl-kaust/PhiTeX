@@ -169,6 +169,9 @@ impl Run<'_, '_> {
             open_cut,
         });
         self.st.mark_candidate();
+        if fresh {
+            self.note_page_regs_held();
+        }
         if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
             self.trace_candidate(k, newgraf, fresh, cuttable);
         }
