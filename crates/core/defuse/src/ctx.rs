@@ -100,6 +100,7 @@ impl<'a> Ctx<'a> {
                 unchanged: false,
                 state: None,
                 resumed: std::cell::Cell::new(false),
+                kept_reads: std::cell::Cell::new(None),
                 woken_at: None,
                 settle_now: false,
                 waits: Vec::new(),
@@ -1027,6 +1028,52 @@ impl<'a> Ctx<'a> {
     /// point it went on from still asks it again.
     pub fn goes_on_from_edit(&self) {
         self.product.resumed.set(true);
+    }
+
+    /// What my last run stored with `park`, whatever woke me (not an
+    /// edit: [`Ctx::parked_before_edit`]), for a run that goes on from a
+    /// point of it reached before the read that moved
+    /// ([`Ctx::last_reads_hold`], [`Ctx::goes_on_after_reads`]). `None`
+    /// for an edit, a stale state or none stored.
+    pub fn parked_state(&self) -> Option<ValueId> {
+        if matches!(self.woken_by(), Some(Cause::Edited))
+            || self.me.state_stale.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        self.last.as_ref().filter(|r| !r.provisional).and_then(|r| r.state)
+    }
+
+    /// How many reads this run has made so far: stored with a point of
+    /// the run it may go on from next time ([`Ctx::last_reads_hold`]).
+    pub fn reads_made(&self) -> usize {
+        self.product.kept_reads.get().unwrap_or(0) + self.product.reads.len()
+    }
+
+    /// Whether the first `k` reads of my last run all still give what
+    /// they gave (`read::holds`): a point of that run reached after them
+    /// stands, and a run may go on from there. Not a read.
+    pub fn last_reads_hold(&self, k: usize) -> bool {
+        let Some(r) = self.last.as_ref().filter(|r| !r.provisional) else {
+            return false;
+        };
+        if k > r.reads.len() {
+            return false;
+        }
+        let mut memo = crate::read::FoldMemo::new();
+        r.reads[..k].iter().all(|rd| {
+            !matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
+                && crate::read::holds(self.eng, self.me, rd, &mut memo)
+        })
+    }
+
+    /// The run goes on from a point of my last run reached after its
+    /// first `k` reads (which hold, [`Ctx::last_reads_hold`]): those
+    /// reads stand with this run's (those it reads again replaced), the
+    /// rest of the last run's are dropped.
+    pub fn goes_on_after_reads(&self, k: usize) {
+        self.product.resumed.set(true);
+        self.product.kept_reads.set(Some(k));
     }
 
     /// Whether node `a` stands before node `b` on the line (both alive). A

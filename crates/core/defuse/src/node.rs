@@ -570,6 +570,10 @@ pub(crate) struct Product {
     /// The run took its last run's state (`Ctx::resumed`): that run's
     /// reads stand with this one's.
     pub(crate) resumed: std::cell::Cell<bool>,
+    /// With `resumed`: only the first this many of the last run's reads
+    /// stand with this one's (`Ctx::goes_on_after_reads`): the run went on
+    /// from a point of its last run reached after those reads.
+    pub(crate) kept_reads: std::cell::Cell<Option<usize>>,
     /// The site the run was woken by (`Ctx::woken_by`: a range's start,
     /// a changed definition's node): a kept read from it that still moved
     /// at the commit is one the run did not read again where it was told
