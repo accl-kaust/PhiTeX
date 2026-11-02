@@ -573,7 +573,11 @@ impl Operation for Exec {
                     r.cx.node().raw(),
                     if why.is_empty() { "B" } else { "A" },
                     why.replace(['\t', '\n'], " "),
-                    hint.excerpt.chars().take(100).collect::<String>().replace(['\t', '\n'], " ")
+                    hint.excerpt
+                        .chars()
+                        .take(100)
+                        .collect::<String>()
+                        .replace(['\t', '\n'], " ")
                 );
             }
             if hint.bound.is_some() && !r.hint_void && claimed.iter().all(|h| h.bound.is_some()) {

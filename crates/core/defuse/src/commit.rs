@@ -1634,7 +1634,14 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 && let Some((_, d)) = Segment::reaching(&inner, f, pos, false)
             {
                 if refuted.is_none() && through(eng, Reaching::of(&d.plain(&eng.values)), r.path) != r.seen {
-                    note_refute(eng, f, node.id, Some(d.by), r.seen, through(eng, Reaching::of(&d.plain(&eng.values)), r.path));
+                    note_refute(
+                        eng,
+                        f,
+                        node.id,
+                        Some(d.by),
+                        r.seen,
+                        through(eng, Reaching::of(&d.plain(&eng.values)), r.path),
+                    );
                     refuted = Some(i);
                 }
             } else {
@@ -1658,8 +1665,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             let same = o.output == rec.output
                 && o.contribs == rec.contribs
                 && o.defs.len() == rec.defs.len()
-                && o.defs.iter().zip(&rec.defs).all(|(a, b)| a.f == b.f && a.value == b.value && a.rel == b.rel);
-            eprintln!("redo:\t{}\t{}\t{}", node.id.raw(), eng.op(node.op()).name(), u8::from(same));
+                && o.defs
+                    .iter()
+                    .zip(&rec.defs)
+                    .all(|(a, b)| a.f == b.f && a.value == b.value && a.rel == b.rel);
+            eprintln!(
+                "redo:\t{}\t{}\t{}",
+                node.id.raw(),
+                eng.op(node.op()).name(),
+                u8::from(same)
+            );
         }
         // (`PHITEX_KREAD_KEYS=a|b|…` or `*`, with `PHITEX_REFUTE_LOG`: each
         // committed text run's reads of those fields, the value's id, for
@@ -2797,12 +2812,25 @@ fn kread_keys() -> &'static [String] {
     K.get_or_init(|| {
         std::env::var("PHITEX_KREAD_KEYS").map_or_else(
             |_| vec!["\u{0}".to_owned()],
-            |v| if v == "*" { Vec::new() } else { v.split('|').map(str::to_owned).collect() },
+            |v| {
+                if v == "*" {
+                    Vec::new()
+                } else {
+                    v.split('|').map(str::to_owned).collect()
+                }
+            },
         )
     })
 }
 
-fn note_refute(eng: &Engine, f: Field, reader: NodeId, by: Option<NodeId>, seen: Option<ValueId>, now: Option<ValueId>) {
+fn note_refute(
+    eng: &Engine,
+    f: Field,
+    reader: NodeId,
+    by: Option<NodeId>,
+    seen: Option<ValueId>,
+    now: Option<ValueId>,
+) {
     if !refute_log() {
         return;
     }
@@ -2820,7 +2848,13 @@ fn note_refute(eng: &Engine, f: Field, reader: NodeId, by: Option<NodeId>, seen:
     let show = |x: Option<ValueId>| {
         x.map_or_else(
             || "-".to_owned(),
-            |x| v.render(x).chars().take(160).collect::<String>().replace(['\t', '\n'], " "),
+            |x| {
+                v.render(x)
+                    .chars()
+                    .take(160)
+                    .collect::<String>()
+                    .replace(['\t', '\n'], " ")
+            },
         )
     };
     let op = |n: NodeId| eng.op(eng.node(n).op()).name();
