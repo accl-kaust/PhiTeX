@@ -945,27 +945,42 @@ pub(crate) fn pending_definer(eng: &Engine, me: &Node, f: Field, after: Option<P
     if from >= to {
         return None;
     }
-    // (the unit's segments from its start with no hole, passed once an
-    // evaluation: a hole made there since is missed, which costs a guess,
-    // never a wrong answer)
+    // (the unit's nodes from its start that are no hole, passed once an
+    // evaluation: the cursor moves on node by node, so a reader on the
+    // line's frontier (each at one thread) looks at no node at all; a hole
+    // made behind the cursor since is missed, which costs a guess, never a
+    // wrong answer)
     let unit = eng.unit(me.unit);
     let epoch = eng.epoch.load(Ordering::Acquire);
     let mut clear = if unit.clear_epoch.load(Ordering::Acquire) == epoch {
         Pos(unit.clear_to.load(Ordering::Acquire))
     } else {
-        unit_start(eng, me)
+        let s = unit_start(eng, me);
+        unit.clear_to.store(s.0, Ordering::Release);
+        unit.clear_epoch.store(epoch, Ordering::Release);
+        s
     };
+    let start = clear;
     let mut seg = eng.seg_for_pos(Pos(clear.0 + 1)).map(|s| s.id);
-    while let Some(sid) = seg {
+    'walk: while let Some(sid) = seg {
         let s = eng.seg(sid);
-        if s.unit != me.unit || s.lo >= to || s.inner.read().holes > 0 {
+        if s.unit != me.unit || s.lo >= to {
             break;
         }
-        clear = Pos(clear.0.max(s.inner.read().hi.0.saturating_sub(1)));
+        {
+            let inner = s.inner.read();
+            for (p, id) in inner.nodes.range((Excluded(clear), Excluded(to))) {
+                if eng.node(*id).is_hole() {
+                    break 'walk;
+                }
+                clear = *p;
+            }
+        }
         seg = eng.order.next(sid, s.lo);
     }
-    unit.clear_to.store(clear.0, Ordering::Release);
-    unit.clear_epoch.store(epoch, Ordering::Release);
+    if clear > start {
+        unit.clear_to.fetch_max(clear.0, Ordering::AcqRel);
+    }
     let from = from.max(clear);
     if from >= to {
         return None;

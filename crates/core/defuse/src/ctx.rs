@@ -274,6 +274,7 @@ impl<'a> Ctx<'a> {
             None => None,
         };
         if let Some(x) = crate::read::pending_definer(self.eng, self.me, f, after) {
+            *self.me.waited.lock() = Some((f, r.by));
             self.wait_on = Some(x);
             return Err(stop());
         }

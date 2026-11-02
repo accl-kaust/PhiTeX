@@ -1511,6 +1511,21 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // every commit before it, up to 74 times (Grail, accl 22515), each run
     // thrown away and each one taking a core from the chain. Its first run
     // is still a guess on what stands; a resumption goes on.)
+    // (a run that stopped to wait for a node not yet run that may define
+    // what it read (`Ctx::wait_for_pending`), released by that node's
+    // commit: if another such node now stands between it and that
+    // definition, it waits for that one, without a run)
+    let waited = node.waited.lock().take();
+    if let Some((f, by)) = waited {
+        let after = by.and_then(|b| crate::read::pos_of(eng, b));
+        if (by.is_none() || after.is_some())
+            && let Some(x) = crate::read::pending_definer(eng, node, f, after)
+        {
+            *node.waited.lock() = waited;
+            park_waiting(eng, pool, w, node, Some(x));
+            return Ok(());
+        }
+    }
     if !first && waits_for_text(eng, node) && refuted_wake(node)
         && let Some(x) = crate::read::open_before(eng, node)
     {

@@ -65,6 +65,11 @@ pub(crate) struct Node {
     /// asked once, when a reader past it while it has not run asks
     /// (`Ctx::wait_for_pending`).
     pub(crate) may: std::sync::OnceLock<crate::api::MayDefine>,
+    /// The read its last run stopped at to wait for a node not yet run
+    /// (`Ctx::wait_for_pending`): the field and the definition it would
+    /// have taken. Asked again before its next run (`sched::work`): a
+    /// run still waiting is not started.
+    pub(crate) waited: Mx<Option<(crate::values::Field, Option<crate::api::NodeId>)>>,
     /// Bumped at each commit; a reader record carrying an older serial is
     /// stale and dropped when met, so a commit never visits other segments
     /// to retract its node's old reads. Zero: never committed.
@@ -205,6 +210,7 @@ impl Node {
     ) -> Node {
         Node {
             may: std::sync::OnceLock::new(),
+            waited: Mx::new(None),
             final_reruns: AtomicU32::new(0),
             final_epoch: AtomicU64::new(0),
             awaited: AtomicBool::new(false),
