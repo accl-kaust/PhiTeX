@@ -1340,17 +1340,28 @@ pub(crate) fn mark_dirty_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
 /// loop resuming from its state past a change behind it would keep a sum
 /// that change made stale.
 fn merge_woke(eng: &Engine, n: &Node, wake: Wake) {
-    fn site(c: &Cause) -> Option<NodeId> {
-        match c {
-            Cause::Changed { site, .. } => *site,
-            Cause::Range { by, .. } => Some(*by),
-            Cause::Output { of } => Some(*of),
-            Cause::Rebind { from, to, .. } => from.or(*to),
-            Cause::Environment { .. } | Cause::Structure | Cause::Created { .. } | Cause::Edited => None,
-        }
-    }
     let mut w = n.woke.lock();
-    let keep = match (&*w, &wake.cause) {
+    if !keeps_woke(eng, w.as_ref(), &wake.cause) {
+        *w = Some(wake);
+    }
+}
+
+/// The site a wake's cause names, where its run goes back before.
+fn wake_site(c: &Cause) -> Option<NodeId> {
+    match c {
+        Cause::Changed { site, .. } => *site,
+        Cause::Range { by, .. } => Some(*by),
+        Cause::Output { of } => Some(*of),
+        Cause::Rebind { from, to, .. } => from.or(*to),
+        Cause::Environment { .. } | Cause::Structure | Cause::Created { .. } | Cause::Edited => None,
+    }
+}
+
+/// Whether a dirty node's wake `old` stands over a new one for `c`
+/// ([`merge_woke`]): an edit's or a creation's, or one whose site is no
+/// later.
+fn keeps_woke(eng: &Engine, old: Option<&Wake>, c: &Cause) -> bool {
+    match (old, c) {
         (_, Cause::Edited) | (None, _) => false,
         (Some(o), _) if matches!(o.cause, Cause::Edited | Cause::Created { .. }) => true,
         (Some(o), c) => {
@@ -1358,12 +1369,19 @@ fn merge_woke(eng: &Engine, n: &Node, wake: Wake) {
                 s.and_then(|s| eng.placed_node(s))
                     .map_or(crate::order::Pos(0), |x| x.pos_hint())
             };
-            at(site(&o.cause)) <= at(site(c))
+            at(wake_site(&o.cause)) <= at(wake_site(c))
         }
-    };
-    if !keep {
-        *w = Some(wake);
     }
+}
+
+/// Whether asking `n` again for `c` would change nothing: it is queued
+/// to run (not running), its wake stands over this one ([`keeps_woke`]),
+/// and it is no settling node (whose re-ask moves the frontier back,
+/// [`frontier_back`]). A change's re-ask need not then compute whether
+/// `n`'s read moved (`commit::reask_range`): its run comes after the
+/// change, and goes back at least as far.
+pub(crate) fn wake_redundant(eng: &Engine, n: &Node, c: &Cause) -> bool {
+    n.state() == State::Dirty && !eng.op(n.op()).settles_at_quiet() && keeps_woke(eng, n.woke.lock().as_ref(), c)
 }
 
 /// (`PHITEX_STALL_SECS=n`, profile) No run has ended for `n` seconds

@@ -3007,15 +3007,38 @@ fn reask_ranges_in(
     stops: &[(Field, RangeKey, RangeReader)],
     st: &mut CommitStats,
 ) {
-    let readers = eng.ranges.holding(f, at);
+    let mut readers = eng.ranges.holding(f, at);
+    // (in order of their ends: the folds of readers from one start go on
+    // from one another's, `read::fold_in`)
+    readers.sort_by_cached_key(|(_, r)| read::pos_of(eng, r.to.unwrap_or(r.node)).map_or(u64::MAX, |p| p.0));
     let mut memo = read::FoldMemo::new();
+    let t0 = std::time::Instant::now();
+    let held = readers.len();
+    let mut asked = 0usize;
+    let mut starts: Vec<Option<NodeId>> = Vec::new();
     for (k, r) in readers {
         if stops.iter().any(|s| s.0 == f && s.1 == k) {
             continue;
         }
         if covers(eng, &r, by, at, fixed) {
+            asked += 1;
+            if crate::obs::enabled() && !starts.contains(&r.from) {
+                starts.push(r.from);
+            }
             reask_range(eng, w, f, k, &r, by, true, st, &mut memo);
         }
+    }
+    // (`PHITEX_REASK_TRACE`, profile: a re-ask of 10 ms or more, its
+    // field, the readers held, those asked and their starts)
+    if crate::obs::enabled() && t0.elapsed().as_millis() >= 10 && std::env::var_os("PHITEX_REASK_TRACE").is_some() {
+        eprintln!(
+            "reask-trace: {} by {} at {}: {held} held, {asked} asked from {} starts, {:?}",
+            eng.values().render(f.0),
+            by.raw(),
+            at.0,
+            starts.len(),
+            t0.elapsed()
+        );
     }
 }
 
@@ -3036,6 +3059,14 @@ fn reask_range(
     memo: &mut read::FoldMemo,
 ) {
     if !live(eng, r.node, r.serial) {
+        return;
+    }
+    // (a reader queued to run, gone back before this change already: its
+    // run reads it, and asking again changes nothing; the fold that would
+    // say whether its answer moved is not made. openmoji: a run claiming
+    // a sibling asked every `lines` reader after it, 4292 folds of every
+    // file's counts at each of 7129 claims, accl 23273)
+    if !r.next && crate::sched::wake_redundant(eng, eng.node(r.node), &Cause::Range { field: f, by }) {
         return;
     }
     // a `next` whose answer stands but whose search now stops further on
