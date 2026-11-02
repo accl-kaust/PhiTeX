@@ -185,7 +185,16 @@ impl Dpx {
                 }
             }
         }
-        self.do_eop()
+        self.do_eop()?;
+        // (the registers and the stack's entries as the next `bop` finds
+        // them, `clear_state` there: what the page left in them is read by
+        // nothing after its `eop`, and two pages that leave other values
+        // there leave the same state otherwise, `Session::converged`)
+        self.dvi.dvi_state = crate::dvi::DviRegisters::default();
+        for e in &mut self.dvi.dvi_stack {
+            *e = crate::dvi::DviRegisters::default();
+        }
+        Ok(())
     }
 }
 
