@@ -8,6 +8,7 @@
 //! [`PdfOut::ref_obj`] does not hold its target, as in C.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -92,8 +93,12 @@ pub enum Data {
     Free,
 }
 
+/// An object's slot, kept for a graft ([`crate::api::Graft`]).
 #[derive(PartialEq, Clone, Debug)]
-struct Slot {
+pub struct Kept(Slot);
+
+#[derive(PartialEq, Clone, Debug)]
+pub(crate) struct Slot {
     data: Data,
     label: u32,
     generation: u16,
@@ -176,6 +181,13 @@ impl PdfOut {
     /// write from here on ([`PdfOut`]'s equality), the cheap parts
     /// compared first.
     pub(crate) fn differs_first(&self, o: &Self) -> Option<&'static str> {
+        self.differs_but(o, false)
+            .or_else(|| (self.slots != o.slots).then_some("objects"))
+    }
+
+    /// [`PdfOut::differs_first`] but for the objects' values (their slots
+    /// in use alike: [`PdfOut::objects_differing`]).
+    pub(crate) fn differs_but(&self, o: &Self, objects: bool) -> Option<&'static str> {
         let entry = |a: &XrefEntry, b: &XrefEntry| {
             a.kind == b.kind && a.field3 == b.field3 && (a.kind == 1 || a.field2 == b.field2)
         };
@@ -232,9 +244,43 @@ impl PdfOut {
                 (&self.rec, self.rec_depth) == (&o.rec, o.rec_depth)
             }),
             ("files", &|| self.files == o.files),
-            ("objects", &|| self.slots == o.slots),
+            ("objects in use", &|| {
+                !objects || self.slots.len() == o.slots.len()
+            }),
         ];
         parts.iter().find(|(_, same)| !same()).map(|(w, _)| *w)
+    }
+
+    /// The objects (by index) whose slots differ from `o`'s as `over`
+    /// gives some of them ([`crate::api::Graft`]'s), the arenas as long.
+    pub(crate) fn objects_differing(&self, o: &Self, over: &BTreeMap<u32, Kept>) -> Vec<u32> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(k, a)| {
+                let k = u32::try_from(k).ok()?;
+                (a != o.kept(k, over)?).then_some(k)
+            })
+            .collect()
+    }
+
+    /// Object `k`'s slot as `over` gives it, else as here.
+    pub(crate) fn kept<'a>(&'a self, k: u32, over: &'a BTreeMap<u32, Kept>) -> Option<&'a Slot> {
+        over.get(&k)
+            .map(|x| &x.0)
+            .or_else(|| self.slots.get(k as usize))
+    }
+
+    /// Object `k` as kept here.
+    pub(crate) fn kept_slot(&self, k: u32) -> Option<Kept> {
+        self.slots.get(k as usize).cloned().map(Kept)
+    }
+
+    /// Object `k` set to `x`.
+    pub(crate) fn set_kept(&mut self, k: u32, x: &Kept) {
+        if let Some(s) = self.slots.get_mut(k as usize) {
+            *s = x.0.clone();
+        }
     }
 }
 

@@ -601,7 +601,7 @@ fn fold(
             && w.same_ahead(&x.w)
         {
             let t0 = std::time::Instant::now();
-            let g = s.converged(&x.s, &x.grafts);
+            let g = s.converged(&x.s, &x.grafts, &b.post.s, &b.post.grafts);
             t.converge += t0.elapsed();
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t.checks == 0 {
                 let c = std::time::Instant::now();

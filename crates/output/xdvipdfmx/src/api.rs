@@ -886,7 +886,12 @@ impl Session {
     /// after the same point, `base` a session of the same document there
     /// whose pages before it went otherwise (an edit's): the same state,
     /// the bytes written so far aside ([`crate::obj::PdfOut`]'s
-    /// equality), its fonts' glyphs those of `base` and perhaps more.
+    /// equality), its fonts' glyphs those of `base` and perhaps more, and
+    /// the values of objects that differ only those of objects `base`'s
+    /// pages after the point left as they were (`post`, `base`'s state
+    /// after its last page, and the grafts of each: the end writes such
+    /// an object, with this way's value; a destination's place, an
+    /// outline entry's title).
     /// Then the pages after are `base`'s, each object `delta` bytes
     /// further, and the end is the end of `base`'s session after them
     /// with the glyphs added ([`Session::graft`] of the [`Graft`]); else
@@ -897,6 +902,8 @@ impl Session {
         &mut self,
         base: &Session,
         grafts: &[alloc::sync::Arc<Graft>],
+        post: &Session,
+        post_grafts: &[alloc::sync::Arc<Graft>],
     ) -> Option<Graft> {
         if (self.argv != base.argv)
             || (self.page_no, self.page_count, self.opened)
@@ -951,7 +958,7 @@ impl Session {
                 a.store(y);
             }
         }
-        let same = *self.dpx == *base.dpx;
+        let same = self.dpx.same_but_objects(&base.dpx);
         for (a, x) in mine.iter().zip(&kept) {
             if let Some(a) = a {
                 a.store(x);
@@ -959,6 +966,27 @@ impl Session {
         }
         if !same {
             return None;
+        }
+        // (the objects whose values differ: each one the base's pages
+        // after here left as it was here, to the end's state, which
+        // writes it: the same pages after with this way's value)
+        let over = |gs: &[alloc::sync::Arc<Graft>]| {
+            let mut m = alloc::collections::BTreeMap::new();
+            for g in gs {
+                for (k, x) in &g.objects {
+                    m.insert(*k, x.clone());
+                }
+            }
+            m
+        };
+        let (at_over, post_over) = (over(grafts), over(post_grafts));
+        let differ = self.dpx.o.objects_differing(&base.dpx.o, &at_over);
+        let mut objects = Vec::with_capacity(differ.len());
+        for k in differ {
+            if base.dpx.o.kept(k, &at_over) != post.dpx.o.kept(k, &post_over) {
+                return None;
+            }
+            objects.push((k, self.dpx.o.kept_slot(k)?));
         }
         // (where `base` stands and its objects' places, as its grafts made
         // them)
@@ -974,6 +1002,7 @@ impl Session {
             direct: base.dpx.o.direct_labels(),
             moved: self.dpx.o.moved_from(&xref),
             used,
+            objects,
         })
     }
 
@@ -984,6 +1013,9 @@ impl Session {
     /// glyphs this way used added.
     pub fn graft(&mut self, g: &Graft) {
         self.dpx.o.graft(g.delta, &g.direct, &g.moved);
+        for (k, x) in &g.objects {
+            self.dpx.o.set_kept(*k, x);
+        }
         let tables = self.used_tables();
         for (k, extra) in &g.used {
             if let Some(Some(t)) = tables.get(*k) {
@@ -1114,6 +1146,9 @@ pub struct Graft {
     /// The glyphs this way used and the other had not, by used-glyph
     /// table ([`Session::used_tables`]).
     used: Vec<(usize, Vec<u8>)>,
+    /// The objects whose values this way gave otherwise, which no page
+    /// after changed the other way: this way's values.
+    objects: Vec<(u32, crate::obj::Kept)>,
 }
 
 impl Graft {
