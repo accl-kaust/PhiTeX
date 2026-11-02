@@ -1575,6 +1575,21 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         node.reruns.store(0, Ordering::Relaxed);
         Worker::add(&w.nodes_run, 1);
     }
+    // (a text node asked again in this evaluation by a definition that
+    // changed waits for the first text node before it that has never
+    // committed: that node's first run defines what this one read past
+    // it, and each such node made before it, a cut's rest after a cut's
+    // rest, asked it again on its own (ltnews -j4: 98 486 exec runs where
+    // -j1 makes a tenth, readers re-asked by every new definer before
+    // them, docs/scaling-2026-11.md §9). Its first run is the guess, not
+    // its reruns; at the quiet point it goes on whatever is left)
+    if !first
+        && rerun_waits_for_holes(eng, node)
+        && let Some(h) = crate::read::on_one_layout(eng, || crate::read::hole_before(eng, node))
+    {
+        park_waiting(eng, pool, w, node, Some(h));
+        return Ok(());
+    }
     let last_ns = node.run_ns.load(Ordering::Relaxed);
     let runs = node.runs.fetch_add(1, Ordering::Relaxed) + 1;
     let op = eng.op(node.op()).clone();
@@ -1912,6 +1927,17 @@ fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<N
     m.entry(on).or_default().push(node.id);
     drop(m);
     pool.shared.done_one();
+}
+
+/// Whether `n`, a text node (`Operation::text`), was woken by a definition
+/// that changed (not an edit, a structure change, its park's output or
+/// its creation).
+fn rerun_waits_for_holes(eng: &Engine, n: &Node) -> bool {
+    eng.op(n.op()).text()
+        && matches!(
+            n.woke.lock().as_ref().map(|w| &w.cause),
+            Some(Cause::Changed { .. } | Cause::Rebind { .. })
+        )
 }
 
 /// A node of the settling layer re-asked by a change of a range it folds
