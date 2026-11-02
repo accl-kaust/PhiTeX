@@ -120,13 +120,21 @@ fn a_run_past_the_memory_or_time_limit_ends_the_build_stuck() {
     // (a loop that assigns at every step and reads no new line: the
     // clock's bound is 300 s here, so only the limit under test stops it)
     let src = "Before the loop.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\iftrue\\repeat\n\nAfter it.\n\n\\bye\n";
+    // (the memory limit is the build's values': a loop that defines a new
+    // macro of a kilobyte at every step, each holding its step's number,
+    // the run's values growing past it)
+    let grows = "Before the loop.\n\n\\def\\k{0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJ}\\count1=0 \\loop\\advance\\count1 by 1 \\expandafter\\edef\\csname a\\the\\count1\\endcsname{\\the\\count1 \\k\\k\\k\\k\\k}\\iftrue\\repeat\n\nAfter it.\n\n\\bye\n";
+    // (the limit 8 MB past what a build of one paragraph holds: the
+    // format's values are the build's too)
+    let (small, _) = build_limited("memory-base", 1, None, None, "A paragraph.\n\n\\bye\n");
+    let limit = small.stats.values_bytes + (8 << 20);
     for threads in [1, 8] {
         let (b, t) = build_limited(
             "memory",
             threads,
-            Some(1 << 20),
+            Some(limit),
             Some(Duration::from_secs(600)),
-            src,
+            grows,
         );
         let m = stuck(&b).unwrap_or_else(|| {
             panic!(
@@ -174,4 +182,38 @@ fn a_run_past_the_memory_or_time_limit_ends_the_build_stuck() {
             "-j{threads}: stuck found after {t:?}: {m}"
         );
     }
+}
+
+/// The memory limit is the build's own: its values
+/// (`phitex_defuse::Limits::memory_bytes`), not the process's resident
+/// memory, which the other builds of a test binary, or anything else the
+/// process holds, share. Here the process holds 512 MB of its own
+/// beside a small build limited to 256 MB: the build ends, not stuck.
+/// Measured on the process, a build in a 32 GB job was stopped "stuck"
+/// at -j1 by its neighbours' 24 GB and wrote an empty PDF
+/// (latexmk_corpus_protrude_koma, latexmk_ams_index, latexmk_minted;
+/// accl 22597).
+#[test]
+fn the_memory_limit_is_the_builds_own_not_the_processs() {
+    let held: Vec<u8> = (0..512usize << 20).map(|i| (i % 251) as u8).collect();
+    // (a run of a few million commands, so the guard looks: every 64
+    // heartbeats of 4096 commands)
+    let src = "A paragraph.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\ifnum\\count1<300000 \\repeat\n\nAnother.\n\n\\bye\n";
+    for threads in [1, 8] {
+        let (b, t) = build_limited(
+            "memory-own",
+            threads,
+            Some(256 << 20),
+            Some(Duration::from_secs(600)),
+            src,
+        );
+        assert_eq!(
+            stuck(&b),
+            None,
+            "-j{threads}: stuck after {t:?} with the process holding {} MB",
+            held.len() >> 20
+        );
+        assert_eq!(b.pages().len(), 1, "-j{threads}: the page");
+    }
+    assert_eq!(held[1000], (1000 % 251) as u8);
 }
