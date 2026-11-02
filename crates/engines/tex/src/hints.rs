@@ -41,13 +41,16 @@
 //! it is called (OUTPUT.md §5).
 //!
 //! `PHITEX_HINTS=1` prints each distinct node text's answer and cause;
-//! `PHITEX_HINTS_OFF=1` answers `Any` for every node (the comparison).
+//! `PHITEX_HINTS=any` answers `Any` for every node (the comparison), and
+//! `PHITEX_HINTS=adversarial` bounds every node to define nothing, open
+//! no scope and claim nothing: the output must not change in either
+//! ([`HintsMode`]).
 
 use crate::exec::LockWait as _;
 use phitex_defuse::FxHashMap;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{Field, MayDefine, Value, ValueId, Values};
@@ -817,7 +820,7 @@ fn excerpt_at(text: &str, s: usize) -> &str {
 
 /// Whether a trace that prints hints' excerpts is on.
 fn excerpts() -> bool {
-    crate::exec::obs_flag!("PHITEX_HINTS")
+    print_hints()
         || crate::exec::obs_flag!("PHITEX_SLICES_TRACE")
         || crate::exec::obs_flag!("PHITEX_TEX_TRACE")
 }
@@ -4042,9 +4045,14 @@ pub(crate) fn kind_of(text: &str, named: FileKind) -> FileKind {
 /// `crate::pages`), read whole under the format's definitions: what
 /// the finisher running it may define.
 pub(crate) fn routine_hint(text: &str, defs: &Defs) -> Hint {
+    match mode() {
+        HintsMode::Normal => {}
+        HintsMode::Any => return Hint::any("hints off", text),
+        HintsMode::Adversarial => return (*adversarial_hint()).clone(),
+    }
     let t = text_hints(text, FileKind::Document, defs);
     let mut h = t.at_until(0, text.len());
-    if crate::exec::obs_flag!("PHITEX_HINTS") {
+    if print_hints() {
         eprintln!(
             "hint (output routine) {:?}: {:?} ({})",
             short(text),
@@ -4531,7 +4539,7 @@ pub(crate) fn prepare(reg: &Registry, v: &Values, args: &[ValueId]) {
     let _ = hint_of_args(reg, v, args);
     let p = Prepared {
         // (`PHITEX_HINTS` prints each answer where the engine asks)
-        may: (!crate::exec::obs_flag!("PHITEX_HINTS")).then(|| may_define_now(reg, v, args)),
+        may: (!print_hints()).then(|| may_define_now(reg, v, args)),
         reads: Kept::Ready(reads_now(reg, v, args)),
     };
     let k = args_key(args);
@@ -4568,11 +4576,15 @@ pub(crate) fn prepared_done(reg: &Registry) {
 pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<Hint> {
     // (the hints off: every node's answers `Any`, its claim, effect and
     // reads unknown, [`set_hints_enabled`])
-    if OFF.load(Ordering::Relaxed) {
-        static ANY: OnceLock<Arc<Hint>> = OnceLock::new();
-        return ANY
-            .get_or_init(|| Arc::new(Hint::any("hints off", "")))
-            .clone();
+    match mode() {
+        HintsMode::Normal => {}
+        HintsMode::Any => {
+            static ANY: OnceLock<Arc<Hint>> = OnceLock::new();
+            return ANY
+                .get_or_init(|| Arc::new(Hint::any("hints off", "")))
+                .clone();
+        }
+        HintsMode::Adversarial => return adversarial_hint(),
     }
     let key = args_key(args);
     if let Some((_, h)) = reg.hints.of(key).get(&key).filter(|(a, _)| **a == *args) {
@@ -5397,18 +5409,99 @@ fn plain_catcode(b: u8, at: bool) -> u8 {
 // ---------------------------------------------------------------------
 // At the node.
 
-static OFF: AtomicBool = AtomicBool::new(false);
+/// How far the hints are trusted ([`set_hints_mode`]; `PHITEX_HINTS` for
+/// a process: `any` or `adversarial`, read once).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintsMode {
+    /// The text's hints, as the pass made them.
+    Normal,
+    /// None: every node may define anything, its claim, scope effect and
+    /// reads unknown, every output routine unbounded (the comparison).
+    Any,
+    /// Wrong on purpose: every node and output routine bounded to define
+    /// nothing, to open and close no scope and to claim no sibling. A
+    /// hint only decides what waits and what is predicted, so a build
+    /// in this mode must make the normal build's output: a difference is
+    /// a hint trusted without a check (the user's invariant).
+    Adversarial,
+}
+
+const MODE_UNSET: u8 = u8::MAX;
+static MODE: AtomicU8 = AtomicU8::new(MODE_UNSET);
+
+/// The hints' mode: [`set_hints_mode`]'s, else `PHITEX_HINTS`'s.
+fn mode() -> HintsMode {
+    let m = match MODE.load(Ordering::Relaxed) {
+        MODE_UNSET => {
+            let m = match std::env::var("PHITEX_HINTS").as_deref() {
+                Ok("any") => 1,
+                Ok("adversarial") => 2,
+                _ => 0,
+            };
+            let _ = MODE.compare_exchange(MODE_UNSET, m, Ordering::Relaxed, Ordering::Relaxed);
+            MODE.load(Ordering::Relaxed)
+        }
+        m => m,
+    };
+    match m {
+        1 => HintsMode::Any,
+        2 => HintsMode::Adversarial,
+        _ => HintsMode::Normal,
+    }
+}
+
+/// Every hint `Any` ([`HintsMode::Any`]).
+fn off() -> bool {
+    mode() == HintsMode::Any
+}
+
+/// Sets how far the hints are trusted, for a process (comparisons, the
+/// hint check mode's tests).
+pub fn set_hints_mode(m: HintsMode) {
+    let x = match m {
+        HintsMode::Normal => 0,
+        HintsMode::Any => 1,
+        HintsMode::Adversarial => 2,
+    };
+    MODE.store(x, Ordering::Relaxed);
+}
 
 /// Turns the hints off (every node may define anything, as without
-/// them) or on again, for comparisons; `PHITEX_HINTS_OFF=1` does the
-/// same for a process.
+/// them) or on again, for comparisons ([`set_hints_mode`]).
 pub fn set_hints_enabled(on: bool) {
-    OFF.store(!on, Ordering::Relaxed);
+    set_hints_mode(if on { HintsMode::Normal } else { HintsMode::Any });
+}
+
+/// The adversarial mode's hint ([`HintsMode::Adversarial`]): defines
+/// nothing, no scope, claims none.
+fn adversarial_hint() -> Arc<Hint> {
+    static ADV: OnceLock<Arc<Hint>> = OnceLock::new();
+    ADV.get_or_init(|| {
+        let b = Bound {
+            state: Some(Vec::new()),
+            no_scope: true,
+            claim: Some(0),
+            ..Bound::default()
+        };
+        Arc::new(Hint {
+            bound: Some(b.clone()),
+            cause: "hints adversarial".to_owned(),
+            excerpt: String::new(),
+            guess: Some(b),
+        })
+    })
+    .clone()
+}
+
+/// `PHITEX_HINTS` set to print (observe): any value but a mode's.
+fn print_hints() -> bool {
+    cfg!(feature = "observe")
+        && crate::exec::env_str!("PHITEX_HINTS").is_some_and(|v| !matches!(v, "0" | "any" | "adversarial"))
 }
 
 /// Whether the node's text says its command opens and closes no scope.
 pub(crate) fn effect_none(reg: &Registry, v: &Values, args: &[ValueId]) -> bool {
-    if OFF.load(Ordering::Relaxed) {
+    if off() {
         return false;
     }
     hint_of_args(reg, v, args)
@@ -5430,7 +5523,7 @@ pub(crate) fn reads(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<
 
 /// [`reads`], answered now.
 fn reads_now(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
-    if OFF.load(Ordering::Relaxed) {
+    if off() {
         return None;
     }
     let h = hint_of_args(reg, v, args);
@@ -5457,11 +5550,13 @@ pub(crate) fn may_define(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDef
 
 /// [`may_define`], answered now.
 fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
-    if OFF.load(Ordering::Relaxed) {
-        return MayDefine::Any;
+    match mode() {
+        HintsMode::Normal => {}
+        HintsMode::Any => return MayDefine::Any,
+        HintsMode::Adversarial => return MayDefine::Nothing,
     }
     // (an answer is the hint's alone: made once per hint string)
-    let hv = hint_value(v, args).filter(|_| !crate::exec::obs_flag!("PHITEX_HINTS"));
+    let hv = hint_value(v, args).filter(|_| !print_hints());
     if let Some(hv) = hv
         && let Some(m) = reg.answers.of(hv.raw()).get(&hv.raw())
     {
@@ -5481,7 +5576,7 @@ fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
 /// [`may_define_now`], made.
 fn may_define_answer(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     let h = hint_of_args(reg, v, args);
-    if crate::exec::obs_flag!("PHITEX_HINTS") {
+    if print_hints() {
         let answer = match &h.bound {
             None => "Any".to_owned(),
             Some(b) => cat(&[
