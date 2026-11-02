@@ -1530,6 +1530,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     }
     let t = Instant::now();
     let version = eng.version.load(Ordering::Acquire);
+    node.held_panic.store(false, Ordering::Release);
     let mut cx = Ctx::new(eng, Some(w), node);
     let r = catch_unwind(AssertUnwindSafe(|| op.run(&mut cx)));
     if run_log() {
@@ -1622,6 +1623,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
                 .unwrap_or_else(|| "panic".to_owned());
             let reads = std::mem::take(&mut cx.product.reads);
             drop(cx);
+            node.held_panic.store(true, Ordering::Release);
             give_back(eng, node);
             pool.shared
                 .panicked_roots
@@ -1784,7 +1786,13 @@ pub(crate) fn settled_node(eng: &Engine, n: NodeId) -> bool {
     eng.placed_node(n).is_none_or(|x| match x.state() {
         State::Gone | State::Inert => true,
         State::Clean => x.run_record().is_some_and(|r| !r.provisional),
-        _ => false,
+        // (a run that panicked on inputs that hold, held for the
+        // evaluation's decision: no commit of it comes in this pool. Waited
+        // for, its readers waited again each time the quiet point let them
+        // go, and the line never ended: latex_minutes_Protokol's finisher
+        // 872 panicked once, its readers 197 and 227 ran 80 000 times each
+        // in 150 s at -j1, accl 22791)
+        _ => x.held_panic.load(Ordering::Acquire),
     })
 }
 
