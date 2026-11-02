@@ -313,3 +313,138 @@ Only then is resuming worth measuring. Size: 3-5 agent-days.
 - **The new path fails only past a page candidate.** Change resumptions refused from any checkpoint that has a page candidate marked before it: 0 resumptions are left in amsldoc and Grail cold at -j1 and -j8, and the PDFs are identical again (98c96e00, 004bb415; accl 22834).
 - **Every checkpoint in practice is past a candidate.** The state there holds what the page's routine left at that candidate. It is loaded (`Held::Loaded`, "a finisher's state at its candidate … no read recorded"), not read. So a moved page state passes `last_reads_hold`, and the resumed run goes on from a stale state. That is the cause of all the differences in 22814.
 - **What P2 needs first:** record a loaded candidate state as a read of the fields it was loaded from (or file the candidate's state digest with the checkpoint, and refuse a resumption when it moved). Only then is a resumption past a candidate valid. Edits never meet this, because an edit's resumption keeps every read of the last run, and a moved page state wakes the node for that reason.
+
+## 10. Cold -j8 on LaTeX: where the wall goes (agent "coldscale", branch `coldscale`)
+
+Every number below comes from accl. The jobs ran on 16 CPUs (8 cores; -j16 runs on 32 CPUs) with release builds, unless the row says "po" (a profile+observe build with `PHITEX_RUN_LOG`). The scripts are in the agent's worktree: `bench/{dist,gaps,gapwhy,held,big,storm}-tmp.py` read the run logs, and `bench/{ab,envab}-tmp.sh` run the A/B jobs.
+
+**One caveat for every Grail number.** Grail's -j8 wall is bimodal on the same node and build. It comes out 27-31 s in some jobs (accl 23045, 23073) and 38-48 s in others (23010, 23059). The difference is whether pass 2 cascades: in 23010, pass 2 re-ran 1310 text nodes against 501 at -j1. Two Grail numbers are comparable only when they come from interleaved runs in one job.
+
+### 10.1 Where -j8's wall goes (accl 23010, po, dev b951e87e1)
+
+Passes, in ms. Each cell is the span (the busy CPU in brackets):
+
+| | pass 1 | pass 2 | pass 3 | wall (release, median of 3) |
+|---|---|---|---|---|
+| Grail -j1 | 16 264 (15 407) | 10 999 (10 528) | 10 568 (10 285) | 36.2 s |
+| Grail -j8 | 19 381 (47 430) | 24 918 (33 467) | 11 584 (12 006) | 39.9 s |
+| Grail -j16 | 20 222 (64 380) | 16 943 (35 580) | 12 360 (13 465) | 41.5 s |
+| amsldoc -j1 | 1 489 | 579 | – | 2.27 s |
+| amsldoc -j8 | 3 049 | 998 | – | 3.43 s |
+
+The text chain is the kept text runs in place order (`gaps-tmp.py`). Its runs and the gaps between them:
+
+| | text chain runs | gaps in the chain | what runs in the gaps |
+|---|---|---|---|
+| Grail -j1, each pass | 10.7 / 5.8 / 5.6 s | 4.95 / 4.89 / 4.84 s | finishers: 4.6 s each pass |
+| Grail -j8 | 17.2 / 11.8 / 6.2 s | 8.1 / 19.1 / 5.3 s | wasted exec/resume runs, and the finishers |
+| amsldoc -j8 | 1.9 / 0.4 s | 1.5 / 0.6 s | wasted exec runs |
+
+Three causes, measured:
+
+1. **A 4.4 s finisher on the chain in every pass, at every -j.** Grail's page-1 finisher runs hyperxmp's XMP packet: 41.9 M commands (docs/note-page-layer-2026-11.md §3). The text after page 1 cannot start until it commits: it reads `deadcycles` and the routine's globals, and `Ctx::wait_for_settling` waits for the commit. The finisher is a new node in every pass (`Created`: nodes 537, 1952, 2395), so it runs 3 times. That is 13 s of Grail's 36 s at -j1, and a 4.5 s gap in every -j8 pass.
+2. **Runs released at a quiet point were serialised on one worker.** Fixed (f192245ad, §10.2).
+3. **The page frontier's holds serialise the text behind the page loop.** At -j8, 841 runs are held at the frontier in one Grail build; 330 of them wait 1 s or more, and the longest waits 16 s (`held-tmp.py`). In pass 2, Grail's TikZ figures (0.7-1.3 s each) read `\@freelist` at `\begin{figure}`, are held, and run one after another as the loop passes them (accl 23065, `PHITEX_RUN_LOG` names each held field). The fields held, counted over one build: `marks:splitfirst:1` 458, `__hook …` 354, `MT@font@list` 260, `if@newlist` 157, `pages:start:anchor` 151, `count:31` 136, `if@ignore` 93, `@freelist` 47.
+
+**Waste by distance past the text frontier** (the coordinator's question; `dist-tmp.py`, accl 23010, pass 1). d is the number of kept text nodes between a run and the frontier when the run started. "Kept" is the share of the CPU at that distance that was not thrown away.
+
+| d | Grail -j8 CPU / kept | Grail -j16 | amsldoc -j8 | amsldoc -j16 |
+|---|---|---|---|---|
+| 0 | 9.9 s / 1.00 | 9.3 s / 1.00 | 1.38 s / 0.83 | 1.20 s / 1.00 |
+| 2-7 | 0.48 s / 0.55 | 0.44 s / 0.40 | 0.16 s / 0.46 | 0.18 s / 0.42 |
+| 8-31 | 2.3 s / 0.17 | 2.6 s / 0.13 | 0.61 s / 0.19 | 0.62 s / 0.17 |
+| 32-255 | 15.3 s / 0.25 | 16.6 s / 0.19 | 3.5 s / 0.11 | 6.0 s / 0.07 |
+| ≥ 256 | 14.4 s / 0.21 | 30.2 s / 0.14 | 4.4 s / 0.04 | 14.1 s / 0.06 |
+
+The frontier's own runs (d = 0) take as long as -j1's whole text: 9.9 s against 9.9 s. The far runs are mostly waste, but they do not lengthen the d = 0 runs. The wall is lost in the gaps (causes 1 and 3), not in the far speculation.
+
+### 10.2 Fixed: runs released at a quiet point go on the ready heap (f192245ad, in dev-next)
+
+At a quiet point inside a pass, the runs held at the frontier or waiting for a commit were seeded into the quiet worker's block. A block is stolen from only past `BLOCK_MIN` (96), so that one worker ran them one after another while the others idled. Grail -j8 (accl 23051, frontier trace): worker 0 was busy 7.5 s of 10.3 s, the other seven 0.9-2 s each. Node 1550 was released at 10.5 s and ran at 20.9 s.
+
+The fix puts them on the ready heap, by place, where every idle worker takes the earliest (`Worker::ready_all`). A/B in one job, median of 5 (accl 23059):
+
+| | base | fix |
+|---|---|---|
+| Grail -j1 / -j8 | 32.27 / 41.84 s | 32.39 / 38.34 s |
+| amsldoc -j1 / -j8 | 2.14 / 3.62 s | 2.13 / 3.64 s |
+
+md5s identical. Scoped tests are green (accl 23058). defuse `review::next_readers_follow_their_stops_across_splits` fails 1 in 30 on the base and 2 in 30 on the fix (accl 23071): it was red before this change (gate's claim).
+
+### 10.3 Measured and not built
+
+| experiment | result | verdict |
+|---|---|---|
+| **Window past the frontier**: deal the first nodes round-robin, so every worker starts near the front (`PHITEX_DEAL=1`: a window of n nodes; `=8`: 8n) | Grail -j8 28.99 / 28.54 / 28.93 s, -j16 30.20 / 29.69 / 31.29 s (blocks / n / 8n); amsldoc -j8 3.32 / 3.16 / 3.37 s, -j16 3.62 / 3.40 / 3.81 s; busy within ±10% (accl 23045). ltnews -j4: 330 s with the window, where blocks timed out past 700 s in the same job (23169) | **Same result as P1.** It cuts or moves the waste but not the wall. The wall is the d = 0 chain plus its gaps; neither the window nor P1 touches the gaps. |
+| **Never hold at the frontier** (`PHITEX_HOLD=0`); hold in pass 1 only (`=1`) | amsldoc -j8 3.36 → 2.74 s (=1: 3.42 s); Grail -j8 29.7 → 25.7 s (=1: 28.3 s), PDFs identical (23073). Repeated in 23092: amsldoc 3.42 → 3.07 s, Grail 29.4 → 26.6 s, Grail busy 57 → 116 s. beautybook-en -j4 18.5 → 16.5 s, lineno -j4 49.7 → 38.8 s, but lineno -j1 64 → 75 s and numerica -j4 39.3 → 40.8 s with busy doubled (23091); md5s identical on all five | The holds cost 10-18% of -j8's wall on amsldoc and Grail. Removing them doubles the wasted CPU, and they were added for convergence (3dd09934a, c24aff9c3: beautybook-en never settled). Not committed. The page-layer-sensitive sample (classicthesis, ArsClassica, elsarticle, kotex-utf, tex-vpat, spath3 at -j4/-j8 ×5) has not been run, so nothing here shows that a hold is unnecessary. |
+| Text runs on a finisher's prediction instead of waiting for its commit (`PHITEX_WAITSETTLE=0`, together with HOLD=0) | amsldoc -j8 2.74 s, Grail -j8 26.4 s against 26.6 s with HOLD=0 alone (23092) | Grail's 4.4 s finisher stays on the chain: the text after it is refuted when it commits. |
+| A re-asked text rerun waits for the first never-committed text node before it (`read::hole_before`; a98670c25) | ltnews -j4 318 → 509 s; amsldoc and Grail within noise (23119, 23120) | Reverted (4ef68fa02). The readers re-asked in ltnews meet committed definers running again, not holes. |
+| WP0 again: a re-asked text rerun waits for the first open node before it (`read::open_before`) | ltnews -j4 601 s, past the limit, with a stopped evaluation's PDF; numerica -j4 past 700 s; amsldoc -j8 past 1500 s (23142, 23143) | It stalls on today's dev. Dropped. |
+
+### 10.4 The hint pass: computed, and not on -j8's critical path
+
+At -j8 the analyses already run on the pool. amsldoc's walk takes 141 ms at -j1 but 25.7 ms of wall at -j8 (183 ms busy). What stays serial is the chain of definitions (13.5 ms) and the engine push of 988 nodes (32 ms). Grail's is 18 ms + 38 ms (accl 23010).
+
+So at -j8 the hint pass costs amsldoc about 80 ms of its 3.4 s, and Grail about 80 ms of its 30-40 s.
+
+Making the bounds drive the schedule (P1's pending sets, or a "final read" rule) cuts wasted runs. But the wall is lost in the frontier holds and the finisher chain (§10.1), which no bound touches, and P1 measured exactly that: waste down, wall unchanged. Nothing in this branch trusts `may_define`.
+
+So the answer is option (2): the hint pass does not pay for the schedule today. Its serial remainder is 45-55 ms (the definitions' chain and the engine push). That remainder is worth cutting only once the gaps are gone.
+
+### 10.5 The -j4 storms (ltnews, numerica, atableau, …)
+
+ltnews: -j1 19.8 s; -j4 166, 183, 208, 318 s, past 700 s and past 900 s in six builds of the same commit (accl 23116, 23142, 23120, 23169, 23192). The md5 is the same whenever a build finishes.
+
+Pass 1 at -j4 (po, 23116) makes 157 237 text runs for 10 852 kept nodes:
+- Kept runs at the frontier (d = 0) take 29.6 s of CPU. -j1's whole text chain takes 5.3 s.
+- Small resume pieces take 180-260 ms per kept run, against under 1 ms at -j1.
+- The Changed wakes: 90 018 come from a definer's first commit (a new piece) and 39 552 from a definer's rerun.
+- By field: `count:301` 28 126 runs (70 s of CPU), `toks:12` 16 491, `skind` 73 253, `if@nobreak` 3 103.
+
+The storm is therefore two things:
+- re-asks on every new or re-run definer before a reader;
+- the kept runs themselves running far slower than at -j1.
+
+The second needs measuring first. A probe is on the branch (80b0d564f): `PHITEX_RUN_LOG` now prints, for each run, the reads computed again on a moved layout (`read::on_one_layout`) and the reads it filed.
+
+What the probe ruled out (accl 23210, ltnews -j4, 505 s; 267 252 runs): a moved layout is not the cause. There were 270 retries in the whole build. The runs over 100 ms (610 of them) file the same median 1147 reads as the runs of 1-10 ms (96 844 of them). The same work takes 100x longer in some runs, so the time goes to waiting inside a run (locks, values interning), not to work. The lock accounting is accl 23222.
+
+### 10.6 WP-T, the first measurement (accl 23146)
+
+| | phitex -j1 | pdflatex |
+|---|---|---|
+| course cover, all 880 art statements | 4.37 s | 2.80 s |
+| the first 441 statements | 3.89 s | 2.45 s |
+| no art | 2.17 s | 1.24 s |
+
+Every one of the 880 statements is a literal `\draw` (505) or `\fill` (375) of `figs/cover_art.tex`. So 100% of the art qualifies by syntax, and the art is 2.2 s, 50% of the build.
+
+But the statements are not independent:
+- each `opacity=` registers an ExtGState in pgf's global resource list;
+- the first `Stealth` tip fills the arrow cache.
+
+So per-statement nodes need those two as folds (a set union, a cache filled once), or they chain the way `count:301` chains ltnews.
+
+Ceiling with a perfect WP-T: cover -j8 ≥ 2.17 s + 2.2/8 s ≈ 2.5 s, 1.75x. The preamble stays serial.
+
+TikZ manuals, -j1 / -j8, median of 3, against one oracle pass:
+
+| manual | -j1 | -j8 | oracle |
+|---|---|---|---|
+| tikz-cd-doc | 7.2 s | 10.0 s | pdflatex 2.9 s |
+| circuitikzmanual | 307 s | 468 s | xelatex 123 s |
+| pgfplotsexample | 1.13 s | 1.12 s | pdflatex 0.67 s |
+
+On all three, -j8 is at best equal to -j1, for the reasons of §10.1, before granularity matters. WP-T comes after the gaps.
+
+### 10.7 Ranked levers (measured ceiling first)
+
+1. **Grail's hyperxmp finisher: 4.4 s × 3 passes, on the chain at every -j.**
+   - The finisher should keep its identity across passes, so that a pass whose page-1 inputs held does not run it. That is page keys and loop rests: the pages area.
+   - The text after it should not wait for it when what it reads is the routine's prediction from the last pass.
+   - Ceiling: Grail -j1 −8.8 s, -j8 −9 to −13 s.
+2. **Frontier holds that serialise the text** (−10-18% measured on -j8 with no holds; the wasted CPU doubles).
+   - The rule has to keep the convergence the holds give (beautybook-en, lineno) and stop the serialisation.
+   - With pages3 (adf163503416eac99), who changes the cut policy next to it.
+3. **-j4 storms:** first find why kept runs are 200x slower at -j4 (23210), then the rule for re-asks on new definers.
+4. **WP-T** (cover ≤ 1.75x), after 1-3.
