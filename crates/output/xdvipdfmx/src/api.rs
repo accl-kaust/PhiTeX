@@ -869,15 +869,15 @@ impl Session {
     /// The fonts' used-glyph tables, in the order [`Session::snapshot`]
     /// takes them (a shared one as often as it is shared; none where a
     /// font has none).
-    fn used_tables(&self) -> Vec<Option<crate::pdffont::UsedChars>> {
+    fn used_tables(&self) -> Vec<(UsedKey, Option<crate::pdffont::UsedChars>)> {
         let d = &*self.dpx;
         let mut out = Vec::new();
-        for f in &d.font.fonts {
-            out.push(f.usedchars.clone());
-            out.push(f.cid.usedchars_v.clone());
+        for (i, f) in d.font.fonts.iter().enumerate() {
+            out.push(((0, i, 0), f.usedchars.clone()));
+            out.push(((0, i, 1), f.cid.usedchars_v.clone()));
         }
-        for f in &d.dev.pdev.fonts {
-            out.push(f.used_chars.clone());
+        for (i, f) in d.dev.pdev.fonts.iter().enumerate() {
+            out.push(((1, i, 0), f.used_chars.clone()));
         }
         out
     }
@@ -914,13 +914,15 @@ impl Session {
             return None;
         }
         let (mine, theirs) = (self.used_tables(), base.used_tables());
-        if mine.len() != theirs.len() {
+        if mine.len() != theirs.len() || mine.iter().zip(&theirs).any(|(a, b)| a.0 != b.0) {
             return None;
         }
+        let mine: Vec<(UsedKey, Option<crate::pdffont::UsedChars>)> = mine;
         let mut used = Vec::new();
         let mut kept: Vec<Vec<u8>> = Vec::with_capacity(mine.len());
         let mut as_base: Vec<Vec<u8>> = Vec::with_capacity(mine.len());
-        for (k, (a, b)) in mine.iter().zip(&theirs).enumerate() {
+        for ((k, a), (_, b)) in mine.iter().zip(&theirs) {
+            let k = *k;
             match (a, b) {
                 (None, None) => {
                     kept.push(Vec::new());
@@ -953,13 +955,13 @@ impl Session {
             }
         }
         // (the rest compared with the glyphs set as `base`'s, then set back)
-        for (a, y) in mine.iter().zip(&as_base) {
+        for ((_, a), y) in mine.iter().zip(&as_base) {
             if let Some(a) = a {
                 a.store(y);
             }
         }
         let same = self.dpx.same_but_objects(&base.dpx);
-        for (a, x) in mine.iter().zip(&kept) {
+        for ((_, a), x) in mine.iter().zip(&kept) {
             if let Some(a) = a {
                 a.store(x);
             }
@@ -1018,7 +1020,7 @@ impl Session {
         }
         let tables = self.used_tables();
         for (k, extra) in &g.used {
-            if let Some(Some(t)) = tables.get(*k) {
+            if let Some((_, Some(t))) = tables.iter().find(|t| t.0 == *k) {
                 let mut b = t.to_vec();
                 for (x, e) in b.iter_mut().zip(extra) {
                     *x |= e;
@@ -1130,6 +1132,10 @@ impl Session {
     }
 }
 
+/// A used-glyph table's place: the fonts' (0) or the device's (1) list,
+/// the font's index there, which of its tables.
+type UsedKey = (u8, usize, u8);
+
 /// What a session that went another way to a page boundary and came to
 /// the same state there, but for where it stands, changes in the
 /// sessions the other way made after it ([`Session::converged`],
@@ -1144,8 +1150,9 @@ pub struct Graft {
     /// Those of them this way placed elsewhere, with this way's entries.
     moved: Vec<(u32, crate::obj::XrefEntry)>,
     /// The glyphs this way used and the other had not, by used-glyph
-    /// table ([`Session::used_tables`]).
-    used: Vec<(usize, Vec<u8>)>,
+    /// table ([`Session::used_tables`], by font: a session with more
+    /// fonts after the point numbers the same tables alike).
+    used: Vec<(UsedKey, Vec<u8>)>,
     /// The objects whose values this way gave otherwise, which no page
     /// after changed the other way: this way's values.
     objects: Vec<(u32, crate::obj::Kept)>,
