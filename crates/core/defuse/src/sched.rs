@@ -1853,6 +1853,11 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
             continue;
         }
         node.committing.store(false, Ordering::Release);
+        // (not open any more: the readers filed at it after its commit
+        // took its stops, re-asked)
+        if to != State::Dirty {
+            crate::commit::reask_late_stops(eng, Some(w), node);
+        }
         if to == State::Dirty && !defer(eng, &pool.shared, node.id) {
             w.ready().push(eng, node);
             w.shared.wake_one();
