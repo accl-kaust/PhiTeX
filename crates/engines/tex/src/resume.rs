@@ -28,7 +28,7 @@
 //! again from its start, and the two runs' products compared
 //! ([`Run::product_signature`]); the full run's stands.
 
-use phitex_defuse::{Field, ValueId};
+use phitex_defuse::{Cause, Field, ValueId};
 
 use crate::input::Seg;
 use crate::run::{R, Run};
@@ -65,10 +65,13 @@ impl Run<'_, '_> {
     pub(crate) fn ck_begin(&mut self) {
         // (an edited node's run, or a run of a node whose last run took
         // them: they stay for its next edit)
-        // (every exec run: a run asked again because a read of it moved
-        // goes on from its last checkpoint before that read, `resume_edit`;
-        // their cost, accl 22812: amsldoc -j1 +6%, Grail +2%)
-        if self.cx.op() != self.ops.exec {
+        // (`PHITEX_CK_ALL`, observe: every exec run takes them, the cost a
+        // resumption of refuted runs would pay, measured for the report)
+        if self.cx.op() != self.ops.exec
+            || !(matches!(self.cx.woken_by(), Some(Cause::Edited))
+                || self.cx.last_parked()
+                || crate::exec::obs_flag!("PHITEX_CK_ALL"))
+        {
             return;
         }
         let taken = self.ck.take().map(|c| c.taken).unwrap_or_default();
@@ -271,7 +274,6 @@ impl Run<'_, '_> {
             base,
             v.list(self.cand_marks.iter().map(|m| cand_value(v, m)).collect()),
             v.list(ahead),
-            int(i64::try_from(self.cx.reads_made()).unwrap_or(i64::MAX)),
         ]);
         if let Some(c) = self.ck.as_mut() {
             c.taken.push(ck);
@@ -309,25 +311,15 @@ impl Run<'_, '_> {
         if self.no_resume || self.cx.op() != self.ops.exec {
             return Ok(false);
         }
-        // (an edit of the node's text, or another wake: a read of the last
-        // run that moved, with the text the same; then the checkpoint must
-        // stand before every read that moved: the reads made before it
-        // all hold, `Ctx::last_reads_hold`)
-        let (p, edit) = match self.cx.parked_before_edit() {
-            Some(p) => (p, true),
-            None => match self.cx.parked_state() {
-                Some(p) if self.cx.woken_by().is_some() => (p, false),
-                _ => {
-                    if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
-                        eprintln!(
-                            "ck: node {} woken by {:?}: no checkpoints",
-                            self.cx.node().raw(),
-                            self.cx.woken_by()
-                        );
-                    }
-                    return Ok(false);
-                }
-            },
+        let Some(p) = self.cx.parked_before_edit() else {
+            if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
+                eprintln!(
+                    "ck: node {} woken by {:?}: no checkpoints",
+                    self.cx.node().raw(),
+                    self.cx.woken_by()
+                );
+            }
+            return Ok(false);
         };
         let v = self.v;
         let xs = list_of(v, p);
@@ -336,7 +328,7 @@ impl Run<'_, '_> {
         };
         let old_args = list_of(v, old);
         let args = self.cx.args().to_vec();
-        if old_args.len() != args.len() || old_args.get(1..) != args.get(1..) || (!edit && old_args != args) {
+        if old_args.len() != args.len() || old_args.get(1..) != args.get(1..) {
             return Ok(false);
         }
         let old_segs = crate::input::joined(crate::run::decode_segs(v, &old_args));
@@ -350,16 +342,6 @@ impl Run<'_, '_> {
         for (k, &ck) in cks.iter().enumerate().rev() {
             let c = list_of(v, ck);
             if c.len() < 14 {
-                continue;
-            }
-            if !edit {
-                // (the same text: the checkpoint stands if the reads made
-                // before it hold)
-                let made = c.get(14).map_or(usize::MAX, |&x| usize::try_from(int_of(v, x)).unwrap_or(usize::MAX));
-                if made != usize::MAX && self.cx.last_reads_hold(made) {
-                    found = Some((k, c));
-                    break;
-                }
                 continue;
             }
             let Ok(li) = usize::try_from(int_of(v, c[0])) else {
@@ -448,12 +430,7 @@ impl Run<'_, '_> {
         self.ops
             .resumed_edits
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if edit {
-            self.cx.goes_on_from_edit();
-        } else {
-            let made = c.get(14).map_or(0, |&x| usize::try_from(int_of(v, x)).unwrap_or(0));
-            self.cx.goes_on_after_reads(made);
-        }
+        self.cx.goes_on_from_edit();
         // (the checkpoints up to this one stand for the next run)
         let conds0 = self.conds.clone();
         self.ck = Some(Box::new(Checkpoints {
