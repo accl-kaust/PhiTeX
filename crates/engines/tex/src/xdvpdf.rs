@@ -1183,6 +1183,34 @@ pub(crate) fn file(
                     .unwrap_or_default(),
             );
             let at = a.iter().zip(b.iter()).position(|(x, y)| x != y);
+            if let Some(k) = at {
+                // (the bytes around the first difference: the object it is in)
+                let around = |x: &[u8]| {
+                    let from = x[..k]
+                        .windows(4)
+                        .rposition(|w| w == b" obj")
+                        .map_or(k.saturating_sub(120), |p| p.saturating_sub(16));
+                    String::from_utf8_lossy(&x[from..(k + 80).min(x.len())]).into_owned()
+                };
+                eprintln!(
+                    "xdv pdf: converge check: at byte {k} (chunks end {:?}), kept: {:?}\n  whole: {:?}",
+                    nb.chunks
+                        .iter()
+                        .scan(0usize, |n, c| {
+                            *n += c.len();
+                            Some(*n)
+                        })
+                        .last(),
+                    around(&a),
+                    around(&b)
+                );
+                if let Some(d) = std::env::var_os("PHITEX_XDV_CONVERGE_DIR") {
+                    let d = std::path::PathBuf::from(d);
+                    let _ = std::fs::create_dir_all(&d);
+                    let _ = std::fs::write(d.join(format!("kept-{k}.pdf")), a.as_slice());
+                    let _ = std::fs::write(d.join(format!("whole-{k}.pdf")), b.as_slice());
+                }
+            }
             eprintln!(
                 "xdv pdf: converge check: {} (pages {}..{} folded, the base's from {}; {} bytes)",
                 if a == b {

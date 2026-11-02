@@ -19,6 +19,7 @@
 use crate::exec::LockWait as _;
 use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
 use phitex_typeset::node::Node;
+use std::sync::Arc;
 
 use crate::fonts::bytes_of;
 use crate::nodes::{self, Side};
@@ -145,11 +146,8 @@ fn fill_sealed_pages(
         let t0 = std::time::Instant::now();
         // (the lines a routine gave back from pieces outside the window:
         // their pieces' units, each read by itself)
-        let mut named = Vec::new();
-        crate::nodes::sealed_pieces(v, page, &mut named);
-        named.sort_unstable();
-        named.dedup();
-        for p in named {
+        let named = named_pieces(v, page);
+        for &p in named.iter() {
             if units.iter().any(|e| e.0 == p) {
                 continue;
             }
@@ -223,6 +221,31 @@ fn fill_sealed_pages(
         );
     }
     Ok((out, ids))
+}
+
+/// The pieces of a page's sealed lines ([`crate::nodes::sealed_pieces`],
+/// each once, sorted), kept by the page's value: a walk of every node of
+/// the page, 0.5 ms a page of Grail's, done again for every page at every
+/// edit (accl 22879).
+fn named_pieces(v: &Values, page: ValueId) -> Arc<[i64]> {
+    type Named = std::sync::Mutex<phitex_defuse::FxHashMap<(u64, u64), Arc<[i64]>>>;
+    static M: std::sync::OnceLock<Named> = std::sync::OnceLock::new();
+    let m = M.get_or_init(Default::default);
+    let key = (v.instance(), page.raw());
+    if let Some(x) = m.locked().get(&key) {
+        return x.clone();
+    }
+    let mut named = Vec::new();
+    crate::nodes::sealed_pieces(v, page, &mut named);
+    named.sort_unstable();
+    named.dedup();
+    let named: Arc<[i64]> = named.into();
+    let mut m = m.locked();
+    if m.len() > 1 << 14 {
+        m.clear();
+    }
+    m.insert(key, named.clone());
+    named
 }
 
 /// Each piece's items (its last [`crate::pages::PITEMS`] unit's, as
