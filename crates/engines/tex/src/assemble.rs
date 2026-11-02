@@ -110,6 +110,9 @@ fn fill_sealed_pages(
         std::time::Duration::ZERO,
         0usize,
     );
+    // (the pieces' items, read once all of them where a page names a
+    // piece outside its window: [`pieces_items`])
+    let mut all: Option<phitex_defuse::FxHashMap<i64, ValueId>> = None;
     for page in pages {
         let t0 = std::time::Instant::now();
         let xs = list_of(v, page);
@@ -147,9 +150,13 @@ fn fill_sealed_pages(
         named.sort_unstable();
         named.dedup();
         for p in named {
-            if !units.iter().any(|e| e.0 == p)
-                && let Some(x) = crate::pages::unit_items_of(cx, p)?
-            {
+            if units.iter().any(|e| e.0 == p) {
+                continue;
+            }
+            if all.is_none() {
+                all = Some(pieces_items(cx)?);
+            }
+            if let Some(&x) = all.as_ref().and_then(|m| m.get(&p)) {
                 units.push((p, x));
             }
         }
@@ -216,6 +223,28 @@ fn fill_sealed_pages(
         );
     }
     Ok((out, ids))
+}
+
+/// Each piece's items (its last [`crate::pages::PITEMS`] unit's, as
+/// [`crate::pages::unit_items_of`] reads it), by piece: the whole field
+/// read once, as the output's writer reads every page's lines (a unit is
+/// its piece's own, `[piece, ...]` its raw node id). A page of a
+/// two-column document names most of its lines' pieces outside its
+/// finisher's window, and reading each piece's unit by itself folded the
+/// field from the line's start each time: Grail's 257 units, 8.7 ms an
+/// edit (accl 22872).
+fn pieces_items(cx: &mut Ctx<'_>) -> Result<phitex_defuse::FxHashMap<i64, ValueId>, Stop> {
+    let v = cx.values();
+    let all = cx.fold(v.field(crate::pages::PITEMS), None, None)?;
+    let mut m = phitex_defuse::FxHashMap::default();
+    for u in v.seq_to_vec(all) {
+        v.with_list(u, |xs| {
+            if let (Some(p), Some(&items)) = (xs.first().and_then(|&p| v.as_int(p)), xs.get(2)) {
+                m.insert(p, items);
+            }
+        });
+    }
+    Ok(m)
 }
 
 /// [`fill_sealed_pages`]' pages filled and their identities, by the
