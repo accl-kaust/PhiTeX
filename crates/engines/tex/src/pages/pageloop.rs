@@ -87,78 +87,53 @@ pub(crate) struct Checkpoint {
 }
 
 /// The page keys of one run of the loop ([`PageKey`]): the loop node
-/// that mints them, the last run's pages by their start, the keys this
-/// run has placed, and the next fresh key per piece.
+/// that mints them and the keys this run has placed. A page's key is its
+/// place among the document's fires (§994's fires counted from the first,
+/// `ScanState::j`): text inserted or deleted before a page moves where it
+/// begins and where it fires, not its place, so it keeps its key, its
+/// finisher is the same node asked again with its new page, and its
+/// placement moves to the piece it fires in now (a key by the item it
+/// began at, or by the piece it fired in, was new for every page after
+/// such an edit: every finisher after it made anew, cuts'
+/// `a_moved_page_fire_relocates_the_rest_and_keeps_the_finisher`, and on
+/// Grail a \cite removed made each bibliography page's finisher anew, the
+/// last page's 4.4 s routine run again after each).
 #[derive(Default)]
 pub(crate) struct LoopKeys {
     /// The loop node: every key it mints is its own ([`PageKey::owner`]).
     owner: Option<NodeId>,
-    /// The last run's pages by where each began ([`Checkpoint::start`]):
-    /// the key a page fired again from there keeps.
-    old: Vec<((i64, u32), PageKey)>,
     /// The keys placed in this run: each is one page's.
     taken: phitex_defuse::FxHashSet<PageKey>,
-    /// Per piece, the next fresh key's number: past every key of the last
-    /// run in that piece, so that a fresh key never takes an old page's.
-    next: phitex_defuse::FxHashMap<NodeId, u32>,
+    /// The next key past the places, for a place taken (a page kept from
+    /// the last run that holds it).
+    spare: u32,
 }
 
+/// The first spare key's number ([`LoopKeys::spare`]): past any place.
+const SPARE_KEYS: u32 = 1 << 30;
+
 impl LoopKeys {
-    fn of(old: &LoopState, owner: NodeId) -> LoopKeys {
-        let mut k = LoopKeys {
+    fn of(_old: &LoopState, owner: NodeId) -> LoopKeys {
+        LoopKeys {
             owner: Some(owner),
+            spare: SPARE_KEYS,
             ..LoopKeys::default()
-        };
-        for c in old.checkpoints.iter().chain(&old.beyond) {
-            if let Some(s) = c.start {
-                k.old.push((s, c.key));
-            }
-            let e = k.next.entry(c.key.piece).or_default();
-            *e = (*e).max(c.key.nth.saturating_add(1));
         }
-        k
     }
 
-    /// The key of a page firing in `node` that begins at `start`: the
-    /// last run's page beginning there keeps its key, where this run has
-    /// not placed it yet; else a fresh one of `node`.
-    fn key(&mut self, node: NodeId, start: Option<(i64, u32)>) -> PageKey {
-        if let Some(s) = start
-            && let Some(&(_, k)) = self.old.iter().find(|e| e.0 == s)
-            && !self.taken.contains(&k)
-        {
-            return k;
-        }
-        let e = self.next.entry(node).or_default();
+    /// The key of the page fired `j`-th (from 0) in the document: its
+    /// place, else (taken by a page kept) a spare one.
+    fn key(&mut self, j: i64) -> PageKey {
+        let owner = self.owner.expect("the loop node, LoopKeys::of");
         let mut k = PageKey {
-            owner: self.owner.expect("the loop node, LoopKeys::of"),
-            piece: node,
-            nth: *e,
+            owner,
+            piece: owner,
+            nth: u32::try_from(j).unwrap_or(u32::MAX),
         };
         while self.taken.contains(&k) {
-            k.nth += 1;
+            k.nth = self.spare;
+            self.spare += 1;
         }
-        *e = k.nth + 1;
-        k
-    }
-
-    /// The key of a page firing in `node` that begins in a routine's
-    /// material (no piece's item to keep a key by): its place among the
-    /// pages fired in `node`, `nth`, which the state it fired from
-    /// carries, so a run that fires it again from the same state gives
-    /// it the same key (a fresh one each run made its finisher, and a
-    /// loop rest after it, anew each run); a fresh one where taken.
-    fn key_at(&mut self, node: NodeId, nth: u32) -> PageKey {
-        let k = PageKey {
-            owner: self.owner.expect("the loop node, LoopKeys::of"),
-            piece: node,
-            nth,
-        };
-        if self.taken.contains(&k) {
-            return self.key(node, None);
-        }
-        let e = self.next.entry(node).or_default();
-        *e = (*e).max(nth.saturating_add(1));
         k
     }
 
@@ -1733,10 +1708,7 @@ impl Run<'_, '_> {
         // is the one it had where it began, else fresh, [`LoopKeys`])
         let nth = if lc.nth.0 == Some(node) { lc.nth.1 } else { 0 };
         lc.nth = (Some(node), nth + 1);
-        let pkey = match page_start(&spans) {
-            Some(s) => self.loop_keys.key(node, Some(s)),
-            None => self.loop_keys.key_at(node, nth),
-        };
+        let pkey = self.loop_keys.key(j);
         // (a routine's material by the pages before this one counted back
         // from it, not by their index among all the pages)
         let rel = |src: Src| match src {
