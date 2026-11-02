@@ -133,8 +133,14 @@ pub fn default_input_for(output: &str) -> Option<String> {
 pub fn run(bcf: &[u8], files: &mut dyn Files) -> Outcome {
     let mut b = biber::Biber::new(files);
     let text = String::from_utf8_lossy(bcf).into_owned();
-    let r = b.parse_ctrlfile(&text).and_then(|()| b.prepare());
+    // (no data sources: biber's "Be friendly to latexmk" exit, `EXIT_OK`
+    // after `parse_ctrlfile`, its .bbl opened and truncated before it and
+    // left empty)
+    let r = b
+        .parse_ctrlfile(&text)
+        .and_then(|()| if b.no_data { Ok(()) } else { b.prepare() });
     let bbl = match r {
+        Ok(()) if b.no_data => Some(String::new()),
         Ok(()) => Some(b.bbl_text()),
         Err(f) => {
             if !b.errors.contains(&f.0) {

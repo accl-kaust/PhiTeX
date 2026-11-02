@@ -704,3 +704,39 @@ repro!(
     marginpar_after_display,
     "manuals (hep-paper, verifiche: 'Float(s) lost'): a \\marginpar before a display in a paragraph and another after it; the first one's -10004 fires at the display's start (§1145's build_page) and its routine takes it off \\@currlist before the text after the display conses the second on. The piece ran on through the display's start (a list of its own open), its \\@currlist still holding the first, and that definition stood over the routine's: the second was never output. A display's start is now a cut where a page is made to fire, as a paragraph's start is (oracle: pdflatex in the CI image, accl 22589)"
 );
+
+/// TeX Live manual proofread: soul's highlighting puts a `TikZ` mark
+/// (`\pdfsavepos` and a `\write` of `\pgfsyspdfmark`) into the pre-break
+/// text of a discretionary at each hyphenation point; where the line does
+/// not break there, `hlist_out` never meets it (§622) and nothing is
+/// written. The shipout ran every whatsit the page's decoding held, a
+/// discretionary's pre-break and post-break text's too: the .aux had a
+/// mark at x 0 for each (oracle: pdflatex in the CI image, accl 22640).
+#[test]
+fn write_in_unbroken_discretionary() {
+    check_aux("write_in_unbroken_discretionary");
+    check_threads("write_in_unbroken_discretionary", "pdf");
+}
+
+/// TeX Live manuals hfutthesis, zhlineskip, highlightx, caspervector
+/// (xelatex): a document line's comment read as text (verbatim's `%` is
+/// no comment) is spliced back from the canonical text's mark as the
+/// file's bytes; under XeTeX they are decoded in the file's input mode as
+/// the line around them was. They were the bytes' characters ("Missing
+/// character: There is no ^^80"). At -j1 and -j4 (oracle: xelatex in the
+/// CI image, accl 22729; the base differs).
+#[test]
+fn xe_verbatim_comment() {
+    check_threads("xe_verbatim_comment", "pdf");
+}
+
+/// TeX Live manual tkz-tab (xelatex): etoc reads the .toc with `\read`;
+/// XeTeX's `input_line` decodes a `\read` or `\readline` line from UTF-8
+/// (the input mode `\XeTeXdefaultencoding` named when the stream
+/// opened), and the line's bytes were its characters: "DÃ©finition" in
+/// the contents. At -j1 and -j4 (oracle: xelatex in the CI image, accl
+/// 22748; the base differs).
+#[test]
+fn xe_read_utf8() {
+    check_threads("xe_read_utf8", "pdf");
+}

@@ -155,7 +155,7 @@ pub(crate) struct Skel {
 /// The handles of a shallow box's list stand-in: `LAZY + k` is
 /// `side.lazy[k]` (a whatsit handle no list has: those number the
 /// decode's whatsits from 0).
-const LAZY: u32 = 0xF000_0000;
+pub(crate) const LAZY: u32 = 0xF000_0000;
 
 /// The value of a shallow box's list, if `b` is one ([`decode_shallow`]).
 fn lazy_list(b: &BoxNode, side: &Side) -> Option<ValueId> {
