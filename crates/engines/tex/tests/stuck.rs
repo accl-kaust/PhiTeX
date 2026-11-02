@@ -79,13 +79,23 @@ fn a_run_that_makes_no_progress_ends_the_build_stuck() {
             m.contains("the main file byte 28"),
             "-j{threads}: the place is named, the loop's line: {m}"
         );
-        // (a loop that assigns at every step and reads no new line: the
-        // clock, 3 s here)
-        let (b, t) = build(
+        // (an edit that makes a loop that assigns at every step and reads
+        // no new line: the edit's bound, set from the cold build's time
+        // as a front end sets it (`Build::set_stuck_after`), 3 s here. A
+        // cold build has no such bound: from inside a run, a long
+        // computation reading no input (lisp-on-tex's div2, minutes) is
+        // no different, and the build's time limit stops a cold one,
+        // `a_run_past_the_memory_or_time_limit_ends_the_build_stuck`)
+        let (mut b, _) = build(
             "assign",
             threads,
-            "Before the loop.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\iftrue\\repeat\n\nAfter it.\n\n\\bye\n",
+            "Before the loop.\n\nAfter it.\n\n\\bye\n",
         );
+        assert_eq!(stuck(&b), None, "-j{threads}: the cold build ends");
+        b.set_stuck_after(Some(Duration::from_secs(3)));
+        let t = Instant::now();
+        b.edit("Before the loop.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\iftrue\\repeat\n\nAfter it.\n\n\\bye\n");
+        let t = t.elapsed();
         let m = stuck(&b).unwrap_or_else(|| panic!("-j{threads}: no stuck error after {t:?}"));
         assert!(
             m.contains("read no new line of its input"),
@@ -95,6 +105,18 @@ fn a_run_that_makes_no_progress_ends_the_build_stuck() {
             t < Duration::from_secs(30),
             "-j{threads}: stuck found after {t:?}: {m}"
         );
+    }
+    // (a cold build that computes, assigning, reading no new line for
+    // longer than the bound, then ends: not stuck, as pdflatex would
+    // finish it; lisp-on-tex's div2 was stopped so after 300 s)
+    for threads in [1, 8] {
+        let (b, t) = build(
+            "compute",
+            threads,
+            "Before.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\ifnum\\count1<40000000 \\repeat Counted \\the\\count1.\n\n\\bye\n",
+        );
+        assert_eq!(stuck(&b), None, "-j{threads}: after {t:?}");
+        assert!(!b.output().0.is_empty(), "-j{threads}: the output is made");
     }
     // (a document that ends is not stuck)
     let mut src = String::new();
