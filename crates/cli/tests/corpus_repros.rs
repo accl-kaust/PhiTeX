@@ -482,6 +482,57 @@ fn interword_space_font_object() {
     check_threads("interword_space_font_object", "pdf");
 }
 
+/// A raw object a page names with `\pdfrefobj`, neither a stream nor
+/// `\immediate`, is written with the page ("Write out pending raw
+/// objects", `pdf_begin_obj(k, 1)`), into an object stream. The pages'
+/// fold of the objects counted the page's dictionary, resources and
+/// annotations toward a stream's 100 but not those, so the next stream's
+/// number fell later and every object number TeX read after it was one
+/// short: iacrj's `/Metadata 183 0 R` for pdfTeX's 184 (its raw /Group
+/// and info objects on page 1; `PHITEX_ALLOC_TRACE`, accl 22639). At -j1
+/// and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn raw_objects_in_object_streams() {
+    check_threads("raw_objects_in_object_streams", "pdf");
+}
+
+/// An included PDF page with a `/Group`: the page that first shows it
+/// numbers the group's object (`out_image`), and the image's write puts
+/// it into an object stream. The image's own writer (`ximage_own_info`),
+/// showing no page, wrote the group in the image's dictionary and
+/// counted no object for it, so every object number TeX read after that
+/// page was one short: iacrj's logo, `/Metadata 183 0 R` for pdfTeX's 184
+/// (`PHITEX_ALLOC_TRACE`, page 1's objects in object streams 21 for 22,
+/// accl 22754). At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdf_image_page_group() {
+    check_threads("pdf_image_page_group", "pdf");
+}
+
+/// A line a node boundary cuts right after a control word: its
+/// continuation, the next sibling's first segment, began in a state of
+/// its own, so the space after the name (skipped on one line, §354) was a
+/// space token there. smartunits' `pdfinfo={Title={ smartunits -
+/// \smart@version }}` ended in a space (`/Title <...0020>`), the cut
+/// falling there once a `\NewDocumentCommand` was in the preamble
+/// (`\showtokens` of the line: `\smart@version  .`, accl 22792). At -j1
+/// and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn cut_after_control_word() {
+    check_threads("cut_after_control_word", "pdf");
+}
+
+/// `\pdfnoligatures` (pdfTeX's `set_no_ligatures`): the font's
+/// characters lose their lig/kern programs, no ligature and no kern. The
+/// primitive set a mark nothing read, so microtype's tracked small caps
+/// kept their ligatures: lie-hasse's section title "Three dimensional
+/// effect" had the ff ligature and sat 0.275bp off pdfTeX's, centred
+/// (accl 22608, 22724). At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdfnoligatures() {
+    check_threads("pdfnoligatures", "pdf");
+}
+
 /// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
 /// for every font it loads; libertine's T1 fonts are virtual) set its
 /// fields without reading it in (no `do_vf`): pdfTeX numbers its local

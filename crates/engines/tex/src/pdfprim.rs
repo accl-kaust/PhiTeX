@@ -2032,8 +2032,22 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
     if c == cmd::ASSIGN_FONT_INT && chr >= 2 {
         let f = r.scan_font_ident()?;
         if chr == NO_LIG {
-            // \pdfnoligatures (pdfTeX §1253)
+            // \pdfnoligatures (pdfTeX §1253, `set_no_ligatures`): the
+            // font's characters lose their lig/kern programs (the font's
+            // info marked, [`crate::fonts::Info::nolig`]; the mark was
+            // set and nothing read it: microtype's tracked small caps kept
+            // their ligatures, lie-hasse's "ff" in a section title)
             r.set(&format!("fcode:nolig:{f}"), v.int(1), true);
+            let x = r.font_get(f, crate::fields::FontCell::Info)?;
+            if let Some(x) = x {
+                let mut xs = list_of(v, x);
+                if xs.len() >= 4 {
+                    xs.resize(7, ValueId::UNIT);
+                    xs.push(v.int(1));
+                    xs.truncate(8);
+                    r.font_set(f, crate::fields::FontCell::Info, v.list(xs), true);
+                }
+            }
             return Ok(true);
         }
         let ch = scan_code_index(r, f)?;
@@ -2855,7 +2869,11 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     None => alloc_obj(r)?,
                 },
             };
-            r.set(&format!("pdf:objbody:{n}"), v.int(1), true);
+            // (1, with 2 for a stream and 4 for `\immediate`: a page that
+            // names it with `\pdfrefobj` writes a raw object that is
+            // neither into an object stream, `page_allocs`)
+            let kind = 1 + 2 * i64::from(stream) + 4 * i64::from(immediate);
+            r.set(&format!("pdf:objbody:{n}"), v.int(kind), true);
             if immediate && pdf_mode(r)? {
                 opened(r);
             }
@@ -3565,8 +3583,24 @@ fn ximage_own_info(
     // (from the objects reading made on: a PNG's transparency group is
     // the read's, counted where it is read)
     let before = st.objects_numbered();
+    // (an included PDF page's `/Group`: the page that first shows the
+    // image numbers its object (`out_image`, `pdf_new_objnum`), and the
+    // image's write puts it into an object stream at
+    // `\pdfobjcompresslevel` 2 and more (`pdf_begin_obj(group, 2)`). This
+    // writer shows no page, so it writes the group in the image's
+    // dictionary: counted here. Not counted, iacrj's logo's group (object
+    // 63, in stream 24) left every read-time number after page 1 one
+    // short and the second stream's number late: the XMP stream's
+    // number TeX read, 184, was 183)
+    let group = st.ximage_page_group(n);
     let (objs, os) = match st.write_ximage(n, fonts) {
-        Ok(()) => st.objects_after(before),
+        Ok(()) => {
+            let (objs, os) = st.objects_after(before);
+            (
+                objs + usize::from(group),
+                os + usize::from(group && ocl.0 >= 2),
+            )
+        }
         Err(_) => (0, 0),
     };
     Ok((

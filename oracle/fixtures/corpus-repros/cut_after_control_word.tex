@@ -1,0 +1,12 @@
+% a line a node boundary cuts right after a control word: the space after
+% the name is skipped in its continuation as on one line (smartunits:
+% its pdfinfo Title ended in a space, the cut placed there once a
+% \NewDocumentCommand was in the preamble)
+\documentclass{report}
+\usepackage{smartunits}
+\NewDocumentCommand{\Verb}{v}{#1}
+\usepackage{hyperref}
+\makeatletter
+\hypersetup{pdfinfo={Title={ smartunits - \smart@version }}}
+\makeatother
+\begin{document}x\end{document}

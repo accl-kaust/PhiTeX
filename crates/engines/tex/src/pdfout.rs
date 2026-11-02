@@ -1687,6 +1687,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
                         s: fs,
                         ls: None,
                         ex: None,
+                        nolig: false,
                     },
                 ));
                 g
@@ -1781,6 +1782,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
                 s: -1000,
                 ls: None,
                 ex: None,
+                nolig: false,
             },
         ));
         out.space = Some(id);
@@ -2992,9 +2994,24 @@ pub(crate) fn page_allocs(
     // first page that shows it, unless `\immediate` wrote it, with what
     // writing it makes, [`crate::pdfprim`]'s `ximage_own_info`)
     let mut images: Vec<ValueId> = Vec::new();
+    // (the raw objects the page names, `\pdfrefobj`, that are neither
+    // streams nor written by `\immediate`: pdfTeX writes each after the
+    // page's dictionary where a page first names it ("Write out pending
+    // raw objects", `pdf_write_obj`'s `pdf_begin_obj(k, 1)`), into an
+    // object stream where they compress)
+    let mut raw: Vec<ValueId> = Vec::new();
     for &w in side_whats {
         let xs = list_of(v, w);
         match xs.first().map(|&k| str_of(v, k)).as_deref() {
+            Some("pdf:refobj") => {
+                let n = xs.get(1).and_then(|&x| v.as_int(x)).unwrap_or(0);
+                let kind = r
+                    .get(&format!("pdf:objbody:{n}"))?
+                    .and_then(|x| v.as_int(x));
+                if kind.is_some_and(|k| k & 6 == 0) {
+                    raw.push(v.int(n));
+                }
+            }
             Some("pdf:dest") => {
                 if let Some(&id) = xs.get(1) {
                     dests.push(id);
@@ -3084,6 +3101,7 @@ pub(crate) fn page_allocs(
         v.list(forms),
         rt_forms,
         v.list(images),
+        v.list(raw),
     ]);
     if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
         eprintln!("alloc: page (node {}): {}", r.cx.node().raw(), v.render(e));
@@ -3606,6 +3624,10 @@ fn images_written(
     os
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fold over the pages' records: each record's objects counted in pdfTeX's order"
+)]
 fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     static M: OnceLock<AllocMemo> = OnceLock::new();
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
@@ -3624,6 +3646,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     let mut seen_ship: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_forms: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_images: BTreeSet<i64> = BTreeSet::new();
+    let mut seen_raw: BTreeSet<i64> = BTreeSet::new();
     let mut ms = MarkState::default();
     for (pages, e) in v.seq_to_vec(range).into_iter().enumerate() {
         let xs = list_of(v, e);
@@ -3698,11 +3721,27 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         // (the read-time writes into object streams before the page
         // count toward a stream's 100; a link piece's, a bead
         // rectangle's and a destination's object go into one too)
+        // (the raw objects it names first: their numbers TeX's, read
+        // time, but each goes into an object stream with the page)
+        let raw_written = l(16)
+            .into_iter()
+            .filter(|&n| seen_raw.insert(v.as_int(n).unwrap_or(0)))
+            .count();
+        let raw_written = i64::try_from(raw_written).unwrap_or(0);
         let os = if i(4) > 0 {
-            i(4) + made.compressible + dests_written + forms_written + images_os
+            i(4) + made.compressible + dests_written + forms_written + images_os + raw_written
         } else {
             0
         };
+        if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
+            eprintln!(
+                "alloc-fold: page {pno}: os {os} (page {}, marks {}, dests {dests_written}, forms {forms_written}, images {images_os}, raw {raw_written}), written before {written}, read-time os {}, objects {}",
+                i(4),
+                made.compressible,
+                i(8),
+                out.objects
+            );
+        }
         for _ in 0..os {
             if (written + i(8)) % 100 == 0 {
                 out.objects += 1;

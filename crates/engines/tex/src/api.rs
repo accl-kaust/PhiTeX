@@ -189,8 +189,10 @@ pub struct Options {
     /// build's bound (a front end sets an edit's from the cold build's
     /// time, [`Build::set_stuck_after`]).
     pub stuck_after: Option<std::time::Duration>,
-    /// The resident memory in bytes past which a run is stuck
-    /// (`phitex_defuse::Limits::memory_bytes`, [`crate::run::Run::watchdog`]):
+    /// The bytes of the build's own values past which a run is stuck
+    /// (`phitex_defuse::Limits::memory_bytes`, [`crate::run::Run::watchdog`];
+    /// the build's value store, not the process's resident memory, which
+    /// other builds in the process share):
     /// `None` takes `PHITEX_STUCK_MB` (0: never), else the smaller of half
     /// the machine's memory and three quarters of its cgroup's limit.
     pub memory_limit: Option<u64>,

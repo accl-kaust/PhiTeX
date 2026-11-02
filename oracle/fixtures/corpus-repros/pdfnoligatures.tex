@@ -1,0 +1,14 @@
+% \pdfnoligatures: the font's characters lose their lig/kern programs.
+% microtype's tracking sets it on a tracked font (lie-hasse's amsart
+% section titles in tracked small caps: "effect" without the ff ligature),
+% and plain use on a font of its own
+\documentclass{amsart}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[kerning=true,tracking=true]{microtype}
+\begin{document}
+\section{Three dimensional effect}
+Office affairs, efficient and fluffy.
+\font\nl=ecrm1000 \pdfnoligatures\nl
+{\nl Office affairs, efficient AVAVA fluffy.} [\the\pdfnoligatures\nl]
+\end{document}
