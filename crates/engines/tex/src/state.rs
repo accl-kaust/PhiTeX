@@ -2917,6 +2917,15 @@ impl State {
         self.touched.len()
     }
 
+    /// How long a base table of it is ([`State::base_of`]): its lists'
+    /// entries, the locations twice (their slots and their order).
+    pub(crate) fn base_len(&self) -> usize {
+        2 * self.touched.len()
+            + self.defined.len()
+            + self.save.len()
+            + self.cands.iter().map(|c| c.1.len()).sum::<usize>()
+    }
+
     /// Why [`State::base_of`] gives none (a trace's).
     pub(crate) fn base_why(&self) -> String {
         let saved = self
@@ -3100,32 +3109,6 @@ impl BaseSlot {
 }
 
 impl Base {
-    /// (observe, `PHITEX_CK_SIZE`) The slots whose values are largest,
-    /// by the bytes their encoding makes now.
-    pub(crate) fn debug_sizes(&self, v: &Values, field: &mut dyn FnMut(Loc) -> Field) {
-        let mut big: Vec<(u64, String)> = Vec::new();
-        for s in &self.slots {
-            let b0 = v.payload_bytes();
-            let _ = v.list(vec![s.cur.unwrap_or(ValueId::UNIT)]);
-            let w = v.render(s.cur.unwrap_or(ValueId::UNIT)).len() as u64;
-            let _ = b0;
-            big.push((w, crate::val::field_name(v, field(s.loc))));
-        }
-        big.sort_unstable_by(|a, b| b.0.cmp(&a.0));
-        big.truncate(5);
-        eprintln!(
-            "ck-part slots {} cands {:?} extra {} defined {} font_slow {} save {} carried {} touched {} biggest {big:?}",
-            self.slots.len(),
-            self.cands.iter().map(|c| c.1.len()).collect::<Vec<_>>(),
-            self.extra.len(),
-            self.defined.len(),
-            self.font_slow.len(),
-            self.save.len(),
-            self.carried.len(),
-            self.touched.len()
-        );
-    }
-
     /// As a value, each location as its field (`field`).
     #[allow(clippy::too_many_lines)]
     pub(crate) fn to_value(&self, v: &Values, field: &mut dyn FnMut(Loc) -> Field) -> ValueId {

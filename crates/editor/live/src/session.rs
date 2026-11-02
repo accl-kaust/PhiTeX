@@ -1322,19 +1322,7 @@ impl Session {
             // text, said as its line)
             if let Some(text) = &self.built_text {
                 let file = self.job.file.clone();
-                let at_line = |s: &str| -> String {
-                    let key = "the main file byte ";
-                    let Some(k) = s.find(key) else {
-                        return s.to_owned();
-                    };
-                    let rest = &s[k + key.len()..];
-                    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-                    let Ok(pos) = digits.parse::<usize>() else {
-                        return s.to_owned();
-                    };
-                    let lineno = text[..pos.min(text.len())].matches('\n').count() + 1;
-                    format!("{}{file}:{lineno}{}", &s[..k], &rest[digits.len()..])
-                };
+                let at_line = |s: &str| main_byte_as_line(s, text, &file);
                 report.out.errors = report.out.errors.iter().map(|e| at_line(e)).collect();
                 report.internal = Some(at_line(&internal));
             }
@@ -2086,8 +2074,44 @@ fn wnames_of(b: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// `the main file byte N` in `s`, the engine's place in the main text
+/// `text`, said as `file:line`; `s` as it is where it names none.
+fn main_byte_as_line(s: &str, text: &str, file: &str) -> String {
+    let key = "the main file byte ";
+    let Some(k) = s.find(key) else {
+        return s.to_owned();
+    };
+    let rest = &s[k + key.len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let Ok(pos) = digits.parse::<usize>() else {
+        return s.to_owned();
+    };
+    // (a byte inside a character, the engine's place in a line of UTF-8
+    // text: the character's line; slicing there panicked over the
+    // failure it reports, circularglyphs-doc's `©`, gate 41484960160)
+    let lineno = text[..text.floor_char_boundary(pos.min(text.len()))]
+        .matches('\n')
+        .count()
+        + 1;
+    format!("{}{file}:{lineno}{}", &s[..k], &rest[digits.len()..])
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_main_file_byte_inside_a_character_is_its_line() {
+        let text = "a\n\u{a9} b\nc";
+        // (byte 3 is inside `©`, bytes 2..4)
+        assert_eq!(
+            super::main_byte_as_line("stuck at the main file byte 3 here", text, "m.tex"),
+            "stuck at m.tex:2 here"
+        );
+        assert_eq!(
+            super::main_byte_as_line("stuck at the main file byte 99", text, "m.tex"),
+            "stuck at m.tex:3"
+        );
+    }
+
     use super::*;
 
     /// The document's records' encodings as [`crate::host::RECORDS_VERSION`]

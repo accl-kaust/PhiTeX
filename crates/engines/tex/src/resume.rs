@@ -426,7 +426,7 @@ impl Run<'_, '_> {
         // long, at least `every`: what checkpoints cost stays a share of
         // what the run does, however deep its lists and input)
         let spacing = enc_cost
-            + self.st.touched_len() as u64 / 4
+            + self.st.base_len() as u64
             + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
             c.next = self.cmds + every().max(spacing);
@@ -478,21 +478,6 @@ impl Run<'_, '_> {
         let base = base.to_value(v, &mut |l| self.loc_field(l));
         if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
             eprintln!("ck-part base {}", v.payload_bytes().saturating_sub(bytes0));
-        }
-        if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
-            let b1 = v.payload_bytes();
-            let again = self
-                .st
-                .base_of(v)
-                .map(|b| b.to_value(v, &mut |l| self.loc_field(l)));
-            eprintln!(
-                "ck-part base again {} same {}",
-                v.payload_bytes().saturating_sub(b1),
-                again == Some(base)
-            );
-            if let Some(b) = self.st.base_of(v) {
-                b.debug_sizes(v, &mut |l| self.loc_field(l));
-            }
         }
         let (cont, locals) = self.cont_encode_with(false, false)?;
         if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
