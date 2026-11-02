@@ -3624,6 +3624,10 @@ fn images_written(
     os
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fold over the pages' records: each record's objects counted in pdfTeX's order"
+)]
 fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     static M: OnceLock<AllocMemo> = OnceLock::new();
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
