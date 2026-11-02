@@ -143,48 +143,98 @@ struct Pending {
 /// equal to another's but for where it stands writes the same pages,
 /// each object placed as far again from the other's
 /// (`crate::api::Session::converged`).
+/// [`PdfOut::graft`]'s cross-reference entries: those written directly
+/// and not among `direct` moved by `delta` bytes, those of `moved` set.
+pub(crate) fn graft_xref(
+    xref: &mut [XrefEntry],
+    delta: i64,
+    direct: &[u64],
+    moved: &[(u32, XrefEntry)],
+) {
+    for (i, e) in xref.iter_mut().enumerate() {
+        let before = direct.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0);
+        if e.kind == 1 && !before {
+            let x = i64::from(e.field2) + delta;
+            e.field2 = u32::try_from(x).unwrap_or(u32::MAX);
+        }
+    }
+    for &(l, e) in moved {
+        if let Some(x) = xref.get_mut(l as usize) {
+            *x = e;
+        }
+    }
+}
+
 impl PartialEq for PdfOut {
     fn eq(&self, o: &Self) -> bool {
+        self.differs_first(o).is_none()
+    }
+}
+
+impl PdfOut {
+    /// The first part in which this writer and `o` differ in what they
+    /// write from here on ([`PdfOut`]'s equality), the cheap parts
+    /// compared first.
+    pub(crate) fn differs_first(&self, o: &Self) -> Option<&'static str> {
         let entry = |a: &XrefEntry, b: &XrefEntry| {
             a.kind == b.kind && a.field3 == b.field3 && (a.kind == 1 || a.field2 == b.field2)
         };
         let pending = |a: &Pending, b: &Pending| {
             (a.at, &a.dicts, a.level, &a.data) == (b.at, &b.dicts, b.level, &b.data)
         };
-        self.slots == o.slots
-            && self.free_slots == o.free_slots
-            && (
-                self.version_major,
-                self.version_minor,
-                self.compression_level,
-            ) == (o.version_major, o.version_minor, o.compression_level)
-            && (self.use_predictor, self.enable_encrypt, self.use_objstm)
-                == (o.use_predictor, o.enable_encrypt, o.use_objstm)
-            && self.out == o.out
-            && self.line_position == o.line_position
-            && self.output_stream == o.output_stream
-            && self.open == o.open
-            && self.next_label == o.next_label
-            && self.trailer == o.trailer
-            && self.startxref == o.startxref
-            && self.xref.len() == o.xref.len()
-            && self.xref.iter().zip(&o.xref).all(|(a, b)| entry(a, b))
-            && self.xref_stream == o.xref_stream
-            && self.current_objstm == o.current_objstm
-            && self.free_list == o.free_list
-            && self.pending.len() == o.pending.len()
-            && self
-                .pending
-                .iter()
-                .zip(&o.pending)
-                .all(|(a, b)| pending(a, b))
-            && self.deferring == o.deferring
-            && self.files == o.files
-            && self.trailer_pos == o.trailer_pos
-            && self.xref_written == o.xref_written
-            && self.live == o.live
-            && self.rec == o.rec
-            && self.rec_depth == o.rec_depth
+        let parts: [(&'static str, &dyn Fn() -> bool); 13] = [
+            ("labels", &|| {
+                (
+                    self.next_label,
+                    self.line_position,
+                    self.open,
+                    self.output_stream,
+                ) == (o.next_label, o.line_position, o.open, o.output_stream)
+            }),
+            ("settings", &|| {
+                (
+                    self.version_major,
+                    self.version_minor,
+                    self.compression_level,
+                ) == (o.version_major, o.version_minor, o.compression_level)
+                    && (self.use_predictor, self.enable_encrypt, self.use_objstm)
+                        == (o.use_predictor, o.enable_encrypt, o.use_objstm)
+            }),
+            ("bytes not taken", &|| self.out == o.out),
+            ("trailer", &|| {
+                (
+                    self.trailer,
+                    self.startxref,
+                    self.xref_stream,
+                    self.trailer_pos,
+                ) == (o.trailer, o.startxref, o.xref_stream, o.trailer_pos)
+            }),
+            ("object stream", &|| self.current_objstm == o.current_objstm),
+            ("cross-reference", &|| {
+                self.xref.len() == o.xref.len()
+                    && self.xref.iter().zip(&o.xref).all(|(a, b)| entry(a, b))
+            }),
+            ("free", &|| {
+                self.free_list == o.free_list && self.free_slots == o.free_slots
+            }),
+            ("pending streams", &|| {
+                self.deferring == o.deferring
+                    && self.pending.len() == o.pending.len()
+                    && self
+                        .pending
+                        .iter()
+                        .zip(&o.pending)
+                        .all(|(a, b)| pending(a, b))
+            }),
+            ("written", &|| self.xref_written == o.xref_written),
+            ("live", &|| self.live == o.live),
+            ("record", &|| {
+                (&self.rec, self.rec_depth) == (&o.rec, o.rec_depth)
+            }),
+            ("files", &|| self.files == o.files),
+            ("objects", &|| self.slots == o.slots),
+        ];
+        parts.iter().find(|(_, same)| !same()).map(|(w, _)| *w)
     }
 }
 
@@ -628,12 +678,17 @@ impl PdfOut {
         b
     }
 
-    /// The objects written directly whose place differs from `o`'s, with
-    /// this writer's entry for each.
-    pub(crate) fn moved_from(&self, o: &PdfOut) -> Vec<(u32, XrefEntry)> {
+    /// The cross-reference entries so far and where the writer stands.
+    pub(crate) fn places(&self) -> (Vec<XrefEntry>, usize) {
+        (self.xref.clone(), self.file_position)
+    }
+
+    /// The objects written directly whose place differs from `xref`'s
+    /// (another writer's entries), with this writer's entry for each.
+    pub(crate) fn moved_from(&self, xref: &[XrefEntry]) -> Vec<(u32, XrefEntry)> {
         self.xref
             .iter()
-            .zip(&o.xref)
+            .zip(xref)
             .enumerate()
             .filter(|(_, (a, b))| a.kind == 1 && a.field2 != b.field2)
             .filter_map(|(i, (a, _))| Some((u32::try_from(i).ok()?, *a)))
@@ -647,17 +702,7 @@ impl PdfOut {
     pub(crate) fn graft(&mut self, delta: i64, direct: &[u64], moved: &[(u32, XrefEntry)]) {
         let shift =
             |x: usize| usize::try_from(i64::try_from(x).unwrap_or(i64::MAX) + delta).unwrap_or(0);
-        for (i, e) in self.xref.iter_mut().enumerate() {
-            let before = direct.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0);
-            if e.kind == 1 && !before {
-                e.field2 = u32::try_from(shift(e.field2 as usize)).unwrap_or(u32::MAX);
-            }
-        }
-        for &(l, e) in moved {
-            if let Some(x) = self.xref.get_mut(l as usize) {
-                *x = e;
-            }
-        }
+        graft_xref(&mut self.xref, delta, direct, moved);
         self.file_position = shift(self.file_position);
         for p in &mut self.pending {
             p.pos = shift(p.pos);

@@ -506,6 +506,7 @@ struct Times {
     to: Option<usize>,
     done: usize,
     replayed: bool,
+    checks: usize,
     converge: std::time::Duration,
     start: std::time::Duration,
     layout: std::time::Duration,
@@ -601,9 +602,24 @@ fn fold(
             && w.same_ahead(&x.w)
         {
             let t0 = std::time::Instant::now();
-            let there = x.session();
-            let g = s.converged(&there);
+            let g = s.converged(&x.s, &x.grafts);
             t.converge += t0.elapsed();
+            if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t.checks == 0 {
+                let c = std::time::Instant::now();
+                let clock = || u64::try_from(c.elapsed().as_micros()).unwrap_or(u64::MAX);
+                let parts: Vec<String> = s
+                    .compare_timed(&x.s, &clock)
+                    .into_iter()
+                    .filter(|p| p.1 >= 50)
+                    .map(|(w, us)| format!("{w} {us} µs"))
+                    .collect();
+                eprintln!(
+                    "xdv pdf: the state compared before page {}: {}",
+                    i + 1,
+                    parts.join(", ")
+                );
+            }
+            t.checks += 1;
             if let Some(g) = g {
                 grafted = Some((i, Arc::new(g)));
                 break;
@@ -612,7 +628,7 @@ fn fold(
                 eprintln!(
                     "xdv pdf: not the base's state before page {}: {}",
                     i + 1,
-                    s.differs(&there)
+                    s.differs(&x.s)
                 );
             }
         }

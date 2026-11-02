@@ -893,7 +893,11 @@ impl Session {
     /// `None`. `base`'s state is compared whole, every field of every
     /// part of xdvipdfmx's (its fonts, objects, resources, colours,
     /// annotations, outline, ...), so no part a page reads is missed.
-    pub fn converged(&mut self, base: &Session) -> Option<Graft> {
+    pub fn converged(
+        &mut self,
+        base: &Session,
+        grafts: &[alloc::sync::Arc<Graft>],
+    ) -> Option<Graft> {
         if (self.argv != base.argv)
             || (self.page_no, self.page_count, self.opened)
                 != (base.page_no, base.page_count, base.opened)
@@ -908,11 +912,24 @@ impl Session {
         }
         let mut used = Vec::new();
         let mut kept: Vec<Vec<u8>> = Vec::with_capacity(mine.len());
+        let mut as_base: Vec<Vec<u8>> = Vec::with_capacity(mine.len());
         for (k, (a, b)) in mine.iter().zip(&theirs).enumerate() {
             match (a, b) {
-                (None, None) => kept.push(Vec::new()),
+                (None, None) => {
+                    kept.push(Vec::new());
+                    as_base.push(Vec::new());
+                }
                 (Some(a), Some(b)) => {
-                    let (x, y) = (a.to_vec(), b.to_vec());
+                    let x = a.to_vec();
+                    // (`base`'s glyphs as its grafts made them)
+                    let mut y = b.to_vec();
+                    for g in grafts {
+                        if let Some((_, e)) = g.used.iter().find(|u| u.0 == k) {
+                            for (q, e) in y.iter_mut().zip(e) {
+                                *q |= e;
+                            }
+                        }
+                    }
                     // (a glyph of `base`'s this session has not: the end's
                     // fonts could hold fewer, not graftable)
                     if x.len() != y.len() || x.iter().zip(&y).any(|(p, q)| q & !p != 0) {
@@ -923,14 +940,15 @@ impl Session {
                         used.push((k, extra));
                     }
                     kept.push(x);
+                    as_base.push(y);
                 }
                 _ => return None,
             }
         }
         // (the rest compared with the glyphs set as `base`'s, then set back)
-        for (a, b) in mine.iter().zip(&theirs) {
-            if let (Some(a), Some(b)) = (a, b) {
-                a.store(&b.to_vec());
+        for (a, y) in mine.iter().zip(&as_base) {
+            if let Some(a) = a {
+                a.store(y);
             }
         }
         let same = *self.dpx == *base.dpx;
@@ -942,12 +960,19 @@ impl Session {
         if !same {
             return None;
         }
-        let delta = i64::try_from(self.dpx.o.file_position).unwrap_or(i64::MAX)
-            - i64::try_from(base.dpx.o.file_position).unwrap_or(i64::MAX);
+        // (where `base` stands and its objects' places, as its grafts made
+        // them)
+        let (mut xref, at) = base.dpx.o.places();
+        let mut there = i64::try_from(at).unwrap_or(i64::MAX);
+        for g in grafts {
+            crate::obj::graft_xref(&mut xref, g.delta, &g.direct, &g.moved);
+            there += g.delta;
+        }
+        let delta = i64::try_from(self.dpx.o.file_position).unwrap_or(i64::MAX) - there;
         Some(Graft {
             delta,
             direct: base.dpx.o.direct_labels(),
-            moved: self.dpx.o.moved_from(&base.dpx.o),
+            moved: self.dpx.o.moved_from(&xref),
             used,
         })
     }
@@ -971,6 +996,56 @@ impl Session {
         }
     }
 
+    /// The time `clock` gives each part of the state's comparison with
+    /// `o`'s ([`Session::converged`]'s), by part.
+    #[must_use]
+    pub fn compare_timed(&self, o: &Session, clock: &dyn Fn() -> u64) -> Vec<(&'static str, u64)> {
+        let (a, b) = (&*self.dpx, &*o.dpx);
+        let mut out = Vec::new();
+        macro_rules! time {
+            ($($f:ident),*) => {
+                $({
+                    let t = clock();
+                    let _ = core::hint::black_box(a.$f == b.$f);
+                    out.push((stringify!($f), clock().saturating_sub(t)));
+                })*
+            };
+        }
+        time!(
+            o,
+            conf,
+            dvi_filename,
+            pdf_filename,
+            dvi,
+            dev,
+            doc,
+            draw,
+            color,
+            resource,
+            font,
+            fontmap,
+            tfm,
+            vf,
+            agl,
+            encoding,
+            cmap,
+            cid,
+            ximage,
+            spc,
+            pdfm,
+            xtx,
+            misc,
+            html,
+            dvips,
+            mpost,
+            t1_char,
+            cs_type2,
+            session,
+            runs
+        );
+        out
+    }
+
     /// The parts of the state in which this session and `o` differ,
     /// named (a diagnostic of [`Session::converged`]).
     #[must_use]
@@ -982,8 +1057,10 @@ impl Session {
                 $(if a.$f != b.$f { out.push(stringify!($f)); })*
             };
         }
+        if let Some(w) = a.o.differs_first(&b.o) {
+            out.push(w);
+        }
         cmp!(
-            o,
             conf,
             dvi_filename,
             pdf_filename,
