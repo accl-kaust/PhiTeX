@@ -267,6 +267,8 @@ struct Base {
     /// The label xdvipdfmx would give next before each page, and after
     /// the last.
     labels: Vec<u32>,
+    /// The glyphs each page marked used ([`Session::take_usage`]).
+    usage: Vec<Arc<[u64]>>,
     /// Each page's bytes (empty: a page not shipped).
     chunks: Vec<Arc<[u8]>>,
     /// The session and the writer after the last page, before the end:
@@ -561,6 +563,7 @@ fn fold(
         ),
     };
     s.set_files(f.files.clone());
+    s.record_usage(true);
     w.set_font_numbers(f.nums.clone());
     let mut t = Times {
         from: k,
@@ -586,6 +589,7 @@ fn fold(
             &[][..],
         ),
     };
+    let mut usage: Vec<Arc<[u64]>> = f.base.map_or_else(Vec::new, |b| b.usage[..k].to_vec());
     t.start = t_fold.elapsed();
     let every = n.div_ceil(SNAPS).max(1);
     let mut grafted: Option<(usize, Arc<Graft>)> = None;
@@ -620,7 +624,7 @@ fn fold(
             }
             t.checks += 1;
             if let Some(g) = g {
-                grafted = Some((i, Arc::new(g)));
+                grafted = Some((i, Arc::new(g.with_after(b.usage[i..].to_vec()))));
                 break;
             }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -662,6 +666,7 @@ fn fold(
         };
         t.pages += t0.elapsed();
         t.done += 1;
+        usage.push(Arc::from(s.take_usage()));
         // (a page whose bytes are the last file's: that file's bytes, the
         // same allocation, so that an update finds them unchanged at once)
         match old.get(i) {
@@ -681,6 +686,7 @@ fn fold(
             docs.extend(b.docs[i..].iter().cloned());
             states.extend(b.states[i..].iter().cloned());
             labels.extend(b.labels[i..].iter().copied());
+            usage.extend(b.usage[i..].iter().cloned());
             snaps.extend(
                 b.snaps
                     .iter()
@@ -731,6 +737,7 @@ fn fold(
             states,
             snaps,
             labels,
+            usage,
             chunks,
             post,
             size: s.next_label(),

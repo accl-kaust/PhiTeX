@@ -866,6 +866,50 @@ impl Session {
         self.page_no
     }
 
+    /// Whether the glyphs each page marks used are recorded
+    /// ([`Session::take_usage`]).
+    pub fn record_usage(&mut self, on: bool) {
+        let p = &mut self.dpx.dev.pdev.page_used;
+        if on != p.is_some() {
+            *p = on.then(Vec::new);
+        }
+    }
+
+    /// The glyphs marked used since the last call (a page's), each once,
+    /// in order ([`crate::pdfdev::usage_key`]).
+    pub fn take_usage(&mut self) -> Vec<u64> {
+        let mut x = self
+            .dpx
+            .dev
+            .pdev
+            .page_used
+            .as_mut()
+            .map(core::mem::take)
+            .unwrap_or_default();
+        x.sort_unstable();
+        x.dedup();
+        x
+    }
+
+    /// The glyphs of `rec` ([`Session::take_usage`]) marked used again.
+    pub fn apply_usage(&mut self, rec: &[u64]) {
+        let fonts = &self.dpx.dev.pdev.fonts;
+        for &k in rec {
+            let (fi, composite, code) = (
+                (k >> 33) as usize,
+                k & (1 << 32) != 0,
+                (k & 0xffff_ffff) as u32,
+            );
+            if let Some(Some(uc)) = fonts.get(fi).map(|f| f.used_chars.as_ref()) {
+                if composite {
+                    uc.add2(code);
+                } else {
+                    uc.set(code as usize, 1);
+                }
+            }
+        }
+    }
+
     /// The fonts' used-glyph tables, in the order [`Session::snapshot`]
     /// takes them (a shared one as often as it is shared; none where a
     /// font has none).
@@ -886,15 +930,16 @@ impl Session {
     /// after the same point, `base` a session of the same document there
     /// whose pages before it went otherwise (an edit's): the same state,
     /// the bytes written so far aside ([`crate::obj::PdfOut`]'s
-    /// equality), its fonts' glyphs those of `base` and perhaps more, and
-    /// the values of objects that differ only those of objects `base`'s
+    /// equality; the glyphs used compared apart, given the end from this
+    /// way's and the pages' after, [`Graft`]), and the values of objects
+    /// that differ only those of objects `base`'s
     /// pages after the point left as they were (`post`, `base`'s state
     /// after its last page, and the grafts of each: the end writes such
     /// an object, with this way's value; a destination's place, an
     /// outline entry's title).
     /// Then the pages after are `base`'s, each object `delta` bytes
     /// further, and the end is the end of `base`'s session after them
-    /// with the glyphs added ([`Session::graft`] of the [`Graft`]); else
+    /// with this way's glyphs ([`Session::graft`] of the [`Graft`]); else
     /// `None`. `base`'s state is compared whole, every field of every
     /// part of xdvipdfmx's (its fonts, objects, resources, colours,
     /// annotations, outline, ...), so no part a page reads is missed.
@@ -917,47 +962,28 @@ impl Session {
         if mine.len() != theirs.len() || mine.iter().zip(&theirs).any(|(a, b)| a.0 != b.0) {
             return None;
         }
-        let mine: Vec<(UsedKey, Option<crate::pdffont::UsedChars>)> = mine;
+        // (the glyphs used, compared apart: they are written at the end
+        // only, and the graft gives the end this way's, [`Graft::used`])
         let mut used = Vec::new();
         let mut kept: Vec<Vec<u8>> = Vec::with_capacity(mine.len());
-        let mut as_base: Vec<Vec<u8>> = Vec::with_capacity(mine.len());
         for ((k, a), (_, b)) in mine.iter().zip(&theirs) {
-            let k = *k;
             match (a, b) {
-                (None, None) => {
-                    kept.push(Vec::new());
-                    as_base.push(Vec::new());
-                }
+                (None, None) => kept.push(Vec::new()),
                 (Some(a), Some(b)) => {
                     let x = a.to_vec();
-                    // (`base`'s glyphs as its grafts made them)
-                    let mut y = b.to_vec();
-                    for g in grafts {
-                        if let Some((_, e)) = g.used.iter().find(|u| u.0 == k) {
-                            for (q, e) in y.iter_mut().zip(e) {
-                                *q |= e;
-                            }
-                        }
-                    }
-                    // (a glyph of `base`'s this session has not: the end's
-                    // fonts could hold fewer, not graftable)
-                    if x.len() != y.len() || x.iter().zip(&y).any(|(p, q)| q & !p != 0) {
+                    if x.len() != b.to_vec().len() {
                         return None;
                     }
-                    let extra: Vec<u8> = x.iter().zip(&y).map(|(p, q)| p & !q).collect();
-                    if extra.iter().any(|&e| e != 0) {
-                        used.push((k, extra));
-                    }
+                    used.push((*k, x.clone()));
                     kept.push(x);
-                    as_base.push(y);
                 }
                 _ => return None,
             }
         }
         // (the rest compared with the glyphs set as `base`'s, then set back)
-        for ((_, a), y) in mine.iter().zip(&as_base) {
-            if let Some(a) = a {
-                a.store(y);
+        for ((_, a), (_, b)) in mine.iter().zip(&theirs) {
+            if let (Some(a), Some(b)) = (a, b) {
+                a.store(&b.to_vec());
             }
         }
         let same = self.dpx.same_but_objects(&base.dpx);
@@ -1004,6 +1030,8 @@ impl Session {
             direct: base.dpx.o.direct_labels(),
             moved: self.dpx.o.moved_from(&xref),
             used,
+            from: self.page_no,
+            after: alloc::sync::Arc::from(Vec::new()),
             objects,
         })
     }
@@ -1018,15 +1046,17 @@ impl Session {
         for (k, x) in &g.objects {
             self.dpx.o.set_kept(*k, x);
         }
+        // (the glyphs: those of the fonts there as this way used them, and
+        // those the pages after it used, up to here)
         let tables = self.used_tables();
-        for (k, extra) in &g.used {
+        for (k, x) in &g.used {
             if let Some((_, Some(t))) = tables.iter().find(|t| t.0 == *k) {
-                let mut b = t.to_vec();
-                for (x, e) in b.iter_mut().zip(extra) {
-                    *x |= e;
-                }
-                t.store(&b);
+                t.store(x);
             }
+        }
+        let n = usize::try_from(self.page_no - g.from).unwrap_or(0);
+        for rec in g.after.iter().take(n) {
+            self.apply_usage(rec);
         }
     }
 
@@ -1149,10 +1179,15 @@ pub struct Graft {
     direct: Vec<u64>,
     /// Those of them this way placed elsewhere, with this way's entries.
     moved: Vec<(u32, crate::obj::XrefEntry)>,
-    /// The glyphs this way used and the other had not, by used-glyph
-    /// table ([`Session::used_tables`], by font: a session with more
-    /// fonts after the point numbers the same tables alike).
+    /// The glyphs of the fonts there as this way had used them, by
+    /// used-glyph table ([`Session::used_tables`], by font: a session with
+    /// more fonts after the point numbers the same tables alike).
     used: Vec<(UsedKey, Vec<u8>)>,
+    /// The page the point is before, and the glyphs each page from there
+    /// on used the other way ([`Session::take_usage`]): a session that
+    /// many pages further has them too.
+    from: i32,
+    after: alloc::sync::Arc<[alloc::sync::Arc<[u64]>]>,
     /// The objects whose values this way gave otherwise, which no page
     /// after changed the other way: this way's values.
     objects: Vec<(u32, crate::obj::Kept)>,
@@ -1163,6 +1198,14 @@ impl Graft {
     #[must_use]
     pub fn delta(&self) -> i64 {
         self.delta
+    }
+
+    /// With the glyphs each page from the point on used the other way, in
+    /// order ([`Session::take_usage`]).
+    #[must_use]
+    pub fn with_after(mut self, after: Vec<alloc::sync::Arc<[u64]>>) -> Graft {
+        self.after = after.into();
+        self
     }
 }
 
