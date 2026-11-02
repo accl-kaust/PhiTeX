@@ -1,2 +1,6 @@
 # TeX Live manuals (ci/manuals.json) whose PDF differs from the oracle's only where pdfTeX has a bug PhiTeX does not copy (docs/differences.md). Each id, a tab, the entry in docs/differences.md, a tab, the mask (scripts/ci/pdfdiff.py MASKS) of what may differ, a tab, the oracle's object numbers it may differ in (space-separated; python3 scripts/ci/pdfdiff.py ORACLE PHITEX MASK lists them). sweep.py --documented compares such a manual with the oracle built in the job: the objects' places, every other object, and the listed objects once masked must be identical (status documented); anything else is red.
+generic_hologo_hologo-example	docs/differences.md#dest-under-matrix	dest-under-matrix	7 8 10 13 16 23 24 25 27 28 29 30 31 36 37 38 39 40 41 42 44 46 47 48 49 50 51 57 58 59 60 61 62 63 64 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110
+latex_cje_cjeguide	docs/differences.md#dest-under-matrix	dest-under-matrix	231 244
 latex_heria_heria-proposal	docs/differences.md#dest-under-matrix	dest-under-matrix	119 120 121 122 123 124 125
+latex_mnras_mnras_guide	docs/differences.md#dest-under-matrix	dest-under-matrix	248
+latex_tablefootnote_tablefootnote-example	docs/differences.md#dest-under-matrix	dest-under-matrix	39 122 123 124 125 126 127 128 129 130

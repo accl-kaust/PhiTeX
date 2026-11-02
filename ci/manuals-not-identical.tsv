@@ -1,5 +1,4 @@
 # TeX Live's manuals (ci/manuals.json) not identical at -j1 and -j4 when the gate took them (mc sweeps 77254, every manual at -j1 and -j4 with a 300 s limit, and 77264, its timeouts, kills and mixed results again with a 900 s limit, 2026-10-31, dev's crates at 6c9199131): the manuals shards run them and report them apart (known-red.txt), never red, and say one that is identical again. Each id, a tab, the first difference or error at each -j. The user decides which may stay; the rest are fixed in the engine.
-generic_hologo_hologo-example	differs: obj 16 (untyped) line 5: oracle "213.989", phitex "214.006"
 generic_pgf_pgfmanual	error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 timeout, -j4 timeout)
 generic_tex-locale_samples_sample-locale-xeltx	error: error: I can't find file
 latex_abntex2_abntex2	differs: page 9: obj 1614 (untyped) line 5: oracle "<end>", phitex "<end>"
@@ -17,7 +16,6 @@ latex_biblatex_biblatex	-j1 differs: page 6: obj 172 (page 6, untyped) line 5: o
 latex_braids_braids	differs: page 17: obj 397 (page 17, untyped) line 11: oracle "[-500(Scoping)-452(is)-452(handl)1(ed)-452(b)27(y)-452(u)1(sing)-452(b", phitex "[-500(Scoping)-452(is)-452(handl)1(ed)-452(b)27(y)-452(u)1(sing)-452(b"
 latex_cidarticle_cidarticle-author-template	differs: page 1: obj 28 (page 1, untyped) line 10: oracle "/F159 14 Tf 70.866 512.746 Td [(Ein)-250(sehr)-250(langer)-250(T)18(it", phitex "/F55 14 Tf 70.866 512.746 Td [(Ein)-250(sehr)-250(langer)-250(T)18(ite"
 latex_circuitikz_circuitikzmanual	-j1 differs: page 2: obj 1 (Catalog) line 7: oracle "/Outlines 5 0 R", phitex "/PageMode /UseOutlines" (pages 306 vs 299); -j4 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes) (not the same in each run: the first sweep had -j1 timeout, -j4 timeout)
-latex_cje_cjeguide	differs: obj 244 (untyped) line 5: oracle "347.069", phitex "347.369"
 latex_classicthesis_ClassicThesis	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)
 latex_cqjtuthesis_cqjtuthesis-doc	differs: page 3: obj 1 (Catalog) line 8: oracle "/PageLabels <<", phitex "/PageMode /UseOutlines"
 latex_cs-techrep_template_cs-techrep-example-ctan	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes); -j4 differs: page 1: obj 66 (page 1, untyped) line 119: oracle "q", phitex "Q"
@@ -48,7 +46,6 @@ latex_metacapture_metacapture-doc	differs: page 25: obj 848 (Catalog) line 23: o
 latex_milsymb_milsymb	differs: page 48: obj 926 (page 48, untyped) line 27: oracle "q", phitex "Q"
 latex_minitoc_examples_mtc-2c	differs: page 1: obj 47 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 9 vs 10)
 latex_minutes_Protokol	differs: page 3: obj 393 (Catalog) line 4: oracle "/PageLabels <<", phitex "/Pages 5 0 R" (pages 33 vs 31)
-latex_mnras_mnras_guide	differs: obj 248 (untyped) line 5: oracle "41.895", phitex "42.112"
 latex_modeles-factures-belges-assocs_doc-modeles-factures-belges-assocs	differs: page 2: obj 41 (page 2, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F11 14.3462 Tf 52.8", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F11 14.3462 Tf 52.8"
 latex_moderncv_manual_moderncv_userguide	differs: page 1: obj 650 (Catalog) line 5: oracle "/PageMode /UseNone", phitex "/PageLabels <<"
 latex_montex_montex	error: error: Font T1/cmss/sbc/n/10.95=ecssdc10 at 10.95pt not loadable: Metric (TFM) file not found
@@ -73,7 +70,6 @@ latex_snaptodo_snaptodo	differs: page 3: obj 79 (page 3, untyped) line 194: orac
 latex_soulpos_soulpos	differs: page 2: obj 23 (page 2, untyped) line 196: oracle "242.85463 0.99628 l", phitex "27.0695 0.99628 l"
 latex_spath3_spath3	differs: obj 2 (untyped) line 2: oracle "/pgfpat11 280 0 R", phitex "/pgfpat11 152 0 R"
 latex_spotcolor_readme	differs: obj 2202 (Type1) line 3: oracle "/Encoding 1136 0 R", phitex "/Encoding 1137 0 R"
-latex_tablefootnote_tablefootnote-example	differs: obj 125 (untyped) line 5: oracle "323.574", phitex "323.686"
 latex_teubner_teubner-doc	differs: page 1: obj 12 (Pages) line 15: oracle "<end>", phitex "<end>"
 latex_tex-vpat_texlive-vpat	differs: page 1: obj 4369 (Catalog) line 4: oracle "/MarkInfo 4 0 R", phitex "/MarkInfo 5 0 R" (past \pdfdest struct, accl 22465)
 latex_texpower_manual	-j1 differs: page 1: obj 806 (Catalog) line 13: oracle "<end>", phitex "<end>" (pages 37 vs 36); -j4 differs: page 1: obj 806 (Catalog) line 13: oracle "<end>", phitex "<end>"
