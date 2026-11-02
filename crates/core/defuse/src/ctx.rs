@@ -243,42 +243,11 @@ impl<'a> Ctx<'a> {
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
         self.wait_for_settling(&r)?;
-        self.wait_for_pending(f, &r)?;
         self.hold_at_frontier(f)?;
         self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
         let x = self.follow_aliases(r.value)?;
         self.seen.insert(f, x);
         Ok(x)
-    }
-
-    /// A read of `f` that passes a text node not yet run whose operation
-    /// says it may define `f` (`Operation::may_define`;
-    /// `read::pending_definer`): the run stops and runs again once that
-    /// node commits, instead of going on on the definition before it,
-    /// which that node's commit will likely move (the body of a LaTeX
-    /// document read the preamble's `\everypar{\@nodocument}` 2589
-    /// times at -j8 before `\begin{document}` had run, Grail, accl
-    /// 22611). Asked by a reader whose reruns wait for the text
-    /// (`Operation::reruns_after_text`). One node not yet run is waited
-    /// for: no lock, no order of commits.
-    fn wait_for_pending(&mut self, f: Field, r: &crate::read::Reaching) -> Result<(), Stop> {
-        if !self.eng.op(self.me.op()).reruns_after_text() {
-            return Ok(());
-        }
-        let after = match r.by {
-            Some(b) if b == self.me.id => return Ok(()),
-            Some(b) => match crate::read::pos_of(self.eng, b) {
-                Some(p) => Some(p),
-                None => return Ok(()),
-            },
-            None => None,
-        };
-        if let Some(x) = crate::read::pending_definer(self.eng, self.me, f, after) {
-            *self.me.waited.lock() = Some((f, r.by));
-            self.wait_on = Some(x);
-            return Err(stop());
-        }
-        Ok(())
     }
 
     /// A definition reaching me that is a settling node's prediction

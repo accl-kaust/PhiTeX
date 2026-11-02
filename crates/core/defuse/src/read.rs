@@ -4,7 +4,7 @@ use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::api::{Brackets, MayDefine, NodeId, PathId, ProjId, Step};
+use crate::api::{Brackets, NodeId, PathId, ProjId, Step};
 use crate::engine::Engine;
 use crate::node::{Anchor, Node, ReadKind, State};
 use crate::order::{Pos, SegId};
@@ -929,94 +929,6 @@ pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
             }
         }
         cur = eng.order.next(sid, seg.lo);
-    }
-    None
-}
-
-/// The nearest text node before `me` on its unit, after `after` (the
-/// reaching definition's place; none: the unit's start), that has never
-/// committed (a hole) and may define `f` by its operation's
-/// `may_define`: a read of `f` past it guesses what it will define
-/// (`Ctx::wait_for_pending`). Segments with no hole are passed over on
-/// their count (`Inner::holes`).
-pub(crate) fn pending_definer(eng: &Engine, me: &Node, f: Field, after: Option<Pos>) -> Option<NodeId> {
-    let to = pos_of(eng, me.id)?;
-    let from = after.unwrap_or_else(|| unit_start(eng, me));
-    if from >= to {
-        return None;
-    }
-    // (the unit's nodes from its start that are no hole, passed once an
-    // evaluation: the cursor moves on node by node, so a reader on the
-    // line's frontier (each at one thread) looks at no node at all; a hole
-    // made behind the cursor since is missed, which costs a guess, never a
-    // wrong answer)
-    let unit = eng.unit(me.unit);
-    let epoch = eng.epoch.load(Ordering::Acquire);
-    let mut clear = if unit.clear_epoch.load(Ordering::Acquire) == epoch {
-        Pos(unit.clear_to.load(Ordering::Acquire))
-    } else {
-        let s = unit_start(eng, me);
-        unit.clear_to.store(s.0, Ordering::Release);
-        unit.clear_epoch.store(epoch, Ordering::Release);
-        s
-    };
-    let start = clear;
-    let mut seg = eng.seg_for_pos(Pos(clear.0 + 1)).map(|s| s.id);
-    'walk: while let Some(sid) = seg {
-        let s = eng.seg(sid);
-        if s.unit != me.unit || s.lo >= to {
-            break;
-        }
-        {
-            let inner = s.inner.read();
-            for (p, id) in inner.nodes.range((Excluded(clear), Excluded(to))) {
-                if eng.node(*id).is_hole() {
-                    break 'walk;
-                }
-                clear = *p;
-            }
-        }
-        seg = eng.order.next(sid, s.lo);
-    }
-    if clear > start {
-        unit.clear_to.fetch_max(clear.0, Ordering::AcqRel);
-    }
-    let from = from.max(clear);
-    if from >= to {
-        return None;
-    }
-    let mut cur = Some(eng.seg(me.seg_hint()).id);
-    let mut name: Option<Option<String>> = None;
-    while let Some(sid) = cur {
-        let seg = eng.seg(sid);
-        if seg.unit == me.unit {
-            let inner = seg.inner.read();
-            if inner.holes > 0 {
-                for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))).rev() {
-                    let n = eng.node(*id);
-                    if *id == me.id || n.unit != me.unit || !n.is_hole() || !eng.op(n.op()).text() {
-                        continue;
-                    }
-                    let may = n.may.get_or_init(|| eng.op(n.op()).may_define(&n.args(), eng.values()));
-                    let covers = match may {
-                        MayDefine::Nothing => false,
-                        MayDefine::Any => true,
-                        MayDefine::Names(ns) => ns.contains(&f),
-                        MayDefine::Prefixes(ps) => {
-                            let nm = name.get_or_insert_with(|| eng.values().as_str(f.0));
-                            nm.as_deref().is_some_and(|x| ps.iter().any(|p| x.starts_with(p.as_str())))
-                        }
-                    };
-                    if covers {
-                        return Some(*id);
-                    }
-                }
-            }
-        }
-        if seg.lo <= from {
-            return None;
-        }
-        cur = eng.order.prev(sid, seg.lo);
     }
     None
 }

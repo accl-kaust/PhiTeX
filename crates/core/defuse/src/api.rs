@@ -320,16 +320,6 @@ pub trait Operation: Send + Sync {
         true
     }
 
-    /// Whether a node of it, run again in an evaluation because what it
-    /// read moved, waits for the open text node before it on its unit
-    /// (default: its nodes are text, [`Operation::text`]): what it reads
-    /// of the text before it is still to change, and a run before that
-    /// commit is thrown away (`sched::work`). A page's routine says yes:
-    /// TeX runs it after the text before its break.
-    fn reruns_after_text(&self) -> bool {
-        self.text()
-    }
-
     /// Whether its nodes are pieces of the unit's text, the rest of which
     /// a run's `Ctx::claim_rest` takes (default no): what a client sets
     /// beside or after the text to work on it (its marks, writers, links)
