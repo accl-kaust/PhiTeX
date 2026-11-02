@@ -1195,10 +1195,25 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
         let h = crate::hints::text_hints(t, phitex_source::pass::FileKind::Document, defs);
         h.slices.iter().map(|&(_, e)| e).collect()
     };
+    let t_cut = std::time::Instant::now();
     let mut ends: Vec<usize> = match &before {
         Some((old, (_, old_ends, _))) => units_again(old, old_ends, text, cut),
         None => cut(text),
     };
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "files-node: {name}: cut {} ({} bytes) in {:?}",
+            if before.is_some() {
+                "again from the last cut"
+            } else if last.locked().contains_key(name) {
+                "whole: the last cut under other definitions"
+            } else {
+                "whole"
+            },
+            text.len(),
+            t_cut.elapsed()
+        );
+    }
     // (the units cover the text: each from the end of the one before to
     // its slice's end, the last to the text's end)
     ends.retain(|&e| e > 0 && e <= text.len());
@@ -1300,6 +1315,9 @@ fn units_again(
         return cut(text);
     }
     let mid = cut(&text[l_at..r_at]);
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        eprintln!("files-node: cut again: bytes {l_at}..{r_at} of {}", n.len());
+    }
     let mut ends = kept;
     ends.extend(mid.into_iter().map(|e| e + l_at));
     ends.push(r_at);
