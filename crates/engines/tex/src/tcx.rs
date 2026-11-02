@@ -13,6 +13,9 @@ use phitex_defuse::ValueId;
 
 use crate::run::{R, Run};
 
+/// The job's TCX tables with the `tcx` value they were parsed from.
+pub(crate) type TcxCell = std::sync::Mutex<Option<(ValueId, Arc<Tcx>)>>;
+
 /// The tables a TCX makes: `xord`, `xchr`, `xprn` (tex.ch's defaults,
 /// printable ASCII only, with the file's lines applied).
 pub(crate) struct Tcx {
@@ -145,11 +148,7 @@ impl Run<'_, '_> {
 }
 
 /// The tables of the `tcx` value `x`, parsed once per build.
-fn tables(
-    cell: &std::sync::Mutex<Option<(ValueId, Arc<Tcx>)>>,
-    v: &phitex_defuse::Values,
-    x: ValueId,
-) -> Arc<Tcx> {
+fn tables(cell: &TcxCell, v: &phitex_defuse::Values, x: ValueId) -> Arc<Tcx> {
     let mut c = cell
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

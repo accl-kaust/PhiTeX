@@ -118,9 +118,7 @@ pub(crate) struct Ops {
     pub xe: std::sync::Arc<std::sync::OnceLock<crate::xetex::XeTeX>>,
     /// The job's TCX tables, parsed from the `tcx` field's value once
     /// (`crate::tcx`).
-    pub tcx: std::sync::Arc<
-        std::sync::Mutex<Option<(phitex_defuse::ValueId, std::sync::Arc<crate::tcx::Tcx>)>>,
-    >,
+    pub tcx: std::sync::Arc<crate::tcx::TcxCell>,
     /// The format's definitions the build analyses document texts with
     /// (set by `api::Build::with`; none while a format is built): a
     /// document file `\input` is sliced with them ([`Run::leftover`]).
