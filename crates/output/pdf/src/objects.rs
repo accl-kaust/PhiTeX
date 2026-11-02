@@ -116,32 +116,24 @@ impl PdfState {
 
     /// The objects numbered after object `n` (an image's written after
     /// its own, [`PdfState::write_ximage`]): how many, object streams
-    /// apart, and how many of them went into an object stream. An object
-    /// stream is apart whichever object opened it: one opened for an
-    /// object numbered before `n` too (a PNG's transparency group, which
-    /// reading the PNG numbered and its write writes into one: counted as
-    /// the image's own, every object number TeX read after the page that
-    /// first showed an alpha PNG was one past pdfTeX's).
+    /// apart, and how many objects went into an object stream opened
+    /// after it, those numbered before it among them (a PNG's
+    /// transparency group, numbered where the image is read and written
+    /// with it, `pdf_begin_obj(group, 2)`: an object of the document's
+    /// stream, not one of its own).
     #[must_use]
     pub fn objects_after(&self, n: usize) -> (usize, usize) {
-        let streams: std::collections::BTreeSet<i64> = self
-            .objs
-            .iter()
-            .filter(|o| o.os_idx >= 0 && o.offset > 0)
-            .map(|o| o.offset)
-            .collect();
-        let mut objs = 0;
+        let mut streams = std::collections::BTreeSet::new();
         let mut in_streams = 0;
-        for (i, o) in self.objs.iter().enumerate().skip(n + 1) {
-            if streams.contains(&int(i)) {
-                continue;
-            }
-            objs += 1;
-            if o.os_idx >= 0 && o.offset > 0 {
+        let after = |c: i64| usize::try_from(c).is_ok_and(|c| c > n);
+        for o in self.objs.iter() {
+            if o.os_idx >= 0 && after(o.offset) {
                 in_streams += 1;
+                streams.insert(o.offset);
             }
         }
-        (objs, in_streams)
+        let after = self.objs.len().saturating_sub(n + 1);
+        (after - streams.len(), in_streams)
     }
 
     pub(crate) fn sys_obj_ptr(&self) -> usize {

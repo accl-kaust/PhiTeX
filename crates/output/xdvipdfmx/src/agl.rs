@@ -22,7 +22,7 @@ pub const AGL_VAR_SMCP_IDX: i32 = 0;
 pub const WBUF_SIZE: usize = 1024;
 
 /// `agl_name`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct AglName {
     pub name: Option<Vec<u8>>,
     pub suffix: Option<Vec<u8>>,
@@ -34,7 +34,7 @@ pub struct AglName {
 }
 
 /// agl.c's statics.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `aglmap`.
     pub aglmap: HtTable<AglName>,

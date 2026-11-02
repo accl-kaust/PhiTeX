@@ -544,7 +544,9 @@ fn pdf_image_page_group_ref() {
 /// object number TeX read after the page showing it was one past
 /// pdfTeX's (beautynote's `/pgfsmask76` for 75, elegantnote-en; hidden
 /// there until df0d049ac counted the included PDF's page group, one
-/// short, beside it). At -j1 and -j4 (oracle: pdflatex in the CI image).
+/// short, beside it; `objects_after`'s fix is 9dd4e3020's, as
+/// png_alpha_objects_counted's). At -j1 and -j4 (oracle: pdflatex in the
+/// CI image).
 #[test]
 fn pdf_image_png_group() {
     check_threads("pdf_image_png_group", "pdf");
@@ -809,4 +811,18 @@ repro!(
 #[test]
 fn tcx_first_line() {
     check_threads("tcx_il2pl", "pdf");
+}
+
+/// TeX Live manual beautybook-en (pdflatex): a PNG with an alpha channel
+/// shown on a page; pdfTeX writes its soft mask after the page (an object
+/// of its own) and its transparency group, numbered when it was read,
+/// into the document's object stream. The image's own writer, measuring
+/// what writing it makes, counted the object stream it opened for the
+/// group as an object: every read-time number after the page was one
+/// past pdfTeX's (pgf's `/pgfsmask146` for 144; here the `\pdflastobj`
+/// typeset). At -j1 and -j4 (oracle: pdftex in the CI image, accl 22935;
+/// the base differs).
+#[test]
+fn png_alpha_objects_counted() {
+    check_threads("png_alpha_count", "pdf");
 }

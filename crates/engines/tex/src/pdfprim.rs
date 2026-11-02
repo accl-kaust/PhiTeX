@@ -1030,7 +1030,9 @@ pub(crate) fn rt_before(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
 /// ([`rt_before`]: the cell's, those only PDF bytes name) and this
 /// run's, and the objects the pages shipped before this run made
 /// (`pdfout::page_offset`, a fold of their write sides' allocations).
+#[track_caller]
 fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
+    let caller = std::panic::Location::caller();
     if r.param("pdfoutput")? > 0 {
         let me = r.cx.node().raw();
         let before = rt_before(r, me)?;
@@ -1039,7 +1041,7 @@ fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
         let n = before + r.rt_made + off;
         if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
             eprintln!(
-                "alloc-obj: node {me} number {n}: read-time before {before}, this run's {}, the pages' {off}",
+                "alloc-obj: node {me} number {n}: read-time before {before}, this run's {}, the pages' {off} at {caller}",
                 r.rt_made
             );
         }
@@ -2689,6 +2691,7 @@ fn num_of(got: Option<crate::pdfout::CmdOut>) -> Option<usize> {
         .and_then(|n| usize::try_from(n).ok())
 }
 
+#[track_caller]
 fn or_alloc(r: &mut Run<'_, '_>, n: Option<usize>) -> R<i64> {
     match n {
         Some(n) => Ok(i64::try_from(n).unwrap_or(0)),
@@ -4275,6 +4278,69 @@ pub(crate) fn writer_data(r: &mut Run<'_, '_>, xs: &[ValueId]) -> R<Option<Value
 #[cfg(test)]
 mod tests {
     use super::obj_cmd;
+
+    /// An RGBA PNG, `w` by 1, as bytes.
+    fn rgba_png(w: u32) -> Vec<u8> {
+        let chunk = |out: &mut Vec<u8>, kind: &[u8], data: &[u8]| {
+            out.extend_from_slice(&u32::try_from(data.len()).expect("a length").to_be_bytes());
+            let mut c = kind.to_vec();
+            c.extend_from_slice(data);
+            out.extend_from_slice(&c);
+            out.extend_from_slice(&phitex_codecs::zlib::crc32(&c).to_be_bytes());
+        };
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&1u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        chunk(&mut png, b"IHDR", &ihdr);
+        let mut raw = vec![0u8];
+        for x in 0..w {
+            raw.extend_from_slice(&[u8::try_from(x % 256).expect("a byte"), 0, 0, 128]);
+        }
+        chunk(
+            &mut png,
+            b"IDAT",
+            &phitex_codecs::deflate::compress(&raw, 6),
+        );
+        chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
+    /// Writing a PNG with an alpha channel makes one object after its
+    /// own, its soft mask; its transparency group, numbered where it was
+    /// read, goes into the document's object stream at
+    /// `\\pdfobjcompresslevel` 2 (an object in a stream, none of its
+    /// own). The stream it opened on the image's writer was counted as an
+    /// object: every read-time number after a page that first showed such
+    /// a PNG was one past pdfTeX's (beautybook's `/pgfsmask146` for 144).
+    #[test]
+    fn png_alpha_objects_after() {
+        let spec = phitex_pdf::ImageSpec {
+            width: -(1 << 30),
+            height: -(1 << 30),
+            depth: -(1 << 30),
+            attr: None,
+            page: 1,
+            named: None,
+            colorspace: 0,
+            page_box: phitex_pdf::PageBox::Crop,
+            name: b"a.png".to_vec(),
+            data: rgba_png(4).into(),
+            image_resolution: 0,
+            inclusion_errorlevel: 0,
+        };
+        let fonts = crate::pdfout::Fonts::default();
+        for (ocl, want) in [
+            ((2, 1, 5), (1, 1)),
+            ((0, 1, 5), (1, 0)),
+            ((2, 1, 7), (1, 1)),
+        ] {
+            let got = super::ximage_own_info(&spec, |_| {}, ocl, &fonts)
+                .map(|(_, o, s)| (o, s))
+                .expect("the image");
+            assert_eq!(got, want, "at {ocl:?}");
+        }
+    }
 
     /// `\pdfobj useobjnum n` names the object the link's writer made for
     /// the `reserveobjnum` TeX read back as `n`: TeX's number mapped

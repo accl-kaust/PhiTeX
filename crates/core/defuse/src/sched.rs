@@ -1024,10 +1024,16 @@ fn run_worker(
                     continue;
                 }
             }
-            let mut rel: Vec<NodeId> = std::mem::take(&mut *pool.shared.deferred.lock())
+            // (the writers whose definitions are read back first; the
+            // others, the output's (a page's PDF side, the link, the end's
+            // file), feed no pass: kept until a quiet point that starts no
+            // pass, below, so that a pass's output is not written only to
+            // be written again by the next pass)
+            let (mut rel, outs): (Vec<NodeId>, Vec<NodeId>) = std::mem::take(&mut *pool.shared.deferred.lock())
                 .into_iter()
                 .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty))
-                .collect();
+                .partition(|&n| eng.op(eng.node(n).op()).read_back());
+            pool.shared.deferred.lock().extend(outs);
             // (and the runs that waited for a node that has not committed:
             // they go on, on its prediction)
             // (and those at the frontier: the layer is quiet, nothing
@@ -1069,6 +1075,16 @@ fn run_worker(
             // (a wake held since the drain above, by anything run at this
             // quiet point: the next quiet point drains it, never the end)
             if !eng.held.lock().is_empty() {
+                continue;
+            }
+            // (no pass follows: the output's writers kept above run now)
+            let outs: Vec<NodeId> = std::mem::take(&mut *pool.shared.deferred.lock())
+                .into_iter()
+                .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty))
+                .collect();
+            if !outs.is_empty() {
+                w.seed(&outs);
+                pool.shared.wake_all();
                 continue;
             }
             if let Some(s) = src.as_deref_mut() {

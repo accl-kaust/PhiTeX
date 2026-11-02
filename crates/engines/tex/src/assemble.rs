@@ -19,6 +19,7 @@
 use crate::exec::LockWait as _;
 use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
 use phitex_typeset::node::Node;
+use std::sync::Arc;
 
 use crate::fonts::bytes_of;
 use crate::nodes::{self, Side};
@@ -48,7 +49,14 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
             .unwrap_or_else(|| v.str("")))
     } else {
         let pages = v.seq_to_vec(cx.fold(v.field("pages"), None, None)?);
+        let t_fill = std::time::Instant::now();
         let (pages, ids) = fill_sealed_pages(cx, pages)?;
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "output file: the pages' sealed lines filled in {:?}",
+                t_fill.elapsed()
+            );
+        }
         n = pages.len();
         let origins = o.origins.load(std::sync::atomic::Ordering::Relaxed);
         // (XeTeX's PDF written from the pages, where the client asks for
@@ -95,7 +103,19 @@ fn fill_sealed_pages(
     let node = crate::pages::node_of;
     let mut out = Vec::with_capacity(pages.len());
     let mut ids = Vec::with_capacity(pages.len());
+    // (`PHITEX_TEX_TIME`: the windows' reads, the pieces named, the pages
+    // filled; units read)
+    let (mut t_win, mut t_named, mut t_fill, mut n_units) = (
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+        0usize,
+    );
+    // (the pieces' items, read once all of them where a page names a
+    // piece outside its window: [`pieces_items`])
+    let mut all: Option<phitex_defuse::FxHashMap<i64, ValueId>> = None;
     for page in pages {
+        let t0 = std::time::Instant::now();
         let xs = list_of(v, page);
         let mut units: Vec<(i64, ValueId)> = Vec::new();
         if let Some(&places) = xs.get(5) {
@@ -122,20 +142,26 @@ fn fill_sealed_pages(
                 }
             }
         }
+        t_win += t0.elapsed();
+        let t0 = std::time::Instant::now();
         // (the lines a routine gave back from pieces outside the window:
         // their pieces' units, each read by itself)
-        let mut named = Vec::new();
-        crate::nodes::sealed_pieces(v, page, &mut named);
-        named.sort_unstable();
-        named.dedup();
-        for p in named {
-            if !units.iter().any(|e| e.0 == p)
-                && let Some(x) = crate::pages::unit_items_of(cx, p)?
-            {
+        let named = named_pieces(v, page);
+        for &p in named.iter() {
+            if units.iter().any(|e| e.0 == p) {
+                continue;
+            }
+            if all.is_none() {
+                all = Some(pieces_items(cx)?);
+            }
+            if let Some(&x) = all.as_ref().and_then(|m| m.get(&p)) {
                 units.push((p, x));
             }
         }
         units.sort_unstable_by_key(|e| e.0);
+        n_units += units.len();
+        t_named += t0.elapsed();
+        let t0 = std::time::Instant::now();
         // (filled once per page and units, its identity with it: a page
         // an edit left as it was is not walked again)
         let key: Vec<u64> = [v.instance(), page.raw()]
@@ -149,6 +175,7 @@ fn fill_sealed_pages(
         if let Some(&(y, id)) = filled().locked().get(&key) {
             out.push(y);
             ids.push(id);
+            t_fill += t0.elapsed();
             continue;
         }
         let y = if xs.len() > 5 {
@@ -186,8 +213,61 @@ fn fill_sealed_pages(
         }
         out.push(y);
         ids.push(id);
+        t_fill += t0.elapsed();
+    }
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "output file: sealed lines: windows read {t_win:?}, pieces named and read {t_named:?} ({n_units} units), pages filled {t_fill:?}"
+        );
     }
     Ok((out, ids))
+}
+
+/// The pieces of a page's sealed lines ([`crate::nodes::sealed_pieces`],
+/// each once, sorted), kept by the page's value: a walk of every node of
+/// the page, 0.5 ms a page of Grail's, done again for every page at every
+/// edit (accl 22879).
+fn named_pieces(v: &Values, page: ValueId) -> Arc<[i64]> {
+    type Named = std::sync::Mutex<phitex_defuse::FxHashMap<(u64, u64), Arc<[i64]>>>;
+    static M: std::sync::OnceLock<Named> = std::sync::OnceLock::new();
+    let m = M.get_or_init(Default::default);
+    let key = (v.instance(), page.raw());
+    if let Some(x) = m.locked().get(&key) {
+        return x.clone();
+    }
+    let mut named = Vec::new();
+    crate::nodes::sealed_pieces(v, page, &mut named);
+    named.sort_unstable();
+    named.dedup();
+    let named: Arc<[i64]> = named.into();
+    let mut m = m.locked();
+    if m.len() > 1 << 14 {
+        m.clear();
+    }
+    m.insert(key, named.clone());
+    named
+}
+
+/// Each piece's items (its last [`crate::pages::PITEMS`] unit's, as
+/// [`crate::pages::unit_items_of`] reads it), by piece: the whole field
+/// read once, as the output's writer reads every page's lines (a unit is
+/// its piece's own, `[piece, ...]` its raw node id). A page of a
+/// two-column document names most of its lines' pieces outside its
+/// finisher's window, and reading each piece's unit by itself folded the
+/// field from the line's start each time: Grail's 257 units, 8.7 ms an
+/// edit (accl 22872).
+fn pieces_items(cx: &mut Ctx<'_>) -> Result<phitex_defuse::FxHashMap<i64, ValueId>, Stop> {
+    let v = cx.values();
+    let all = cx.fold(v.field(crate::pages::PITEMS), None, None)?;
+    let mut m = phitex_defuse::FxHashMap::default();
+    for u in v.seq_to_vec(all) {
+        v.with_list(u, |xs| {
+            if let (Some(p), Some(&items)) = (xs.first().and_then(|&p| v.as_int(p)), xs.get(2)) {
+                m.insert(p, items);
+            }
+        });
+    }
+    Ok(m)
 }
 
 /// [`fill_sealed_pages`]' pages filled and their identities, by the
