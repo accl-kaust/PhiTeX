@@ -58,6 +58,9 @@ pub(crate) struct Checkpoints {
     /// `unread` had taken out then ([`phitex_defuse::Ctx::unread_count`]),
     /// to make their count of reads the record's at the park.
     fresh: Vec<(usize, usize)>,
+    /// `PHITEX_CK_WHY` (observe): why no checkpoint was taken where one
+    /// was due, by reason, the commands it was refused at.
+    why: Vec<(&'static str, u64)>,
 }
 
 /// The paragraph's mode (tex.web's `hmode`, unrestricted).
@@ -95,6 +98,7 @@ impl Run<'_, '_> {
             taken,
             conds0: self.conds.clone(),
             fresh: Vec::new(),
+            why: Vec::new(),
         }));
     }
 
@@ -125,6 +129,15 @@ impl Run<'_, '_> {
         if self.cmds < c.next || self.conds != c.conds0 {
             return Ok(());
         }
+        if crate::exec::obs_flag!("PHITEX_CK_WHY") && self.ck_where().is_none() {
+            let why = self.ck_refusal();
+            if let Some(c) = self.ck.as_mut() {
+                match c.why.iter_mut().find(|w| w.0 == why) {
+                    Some(w) => w.1 += 1,
+                    None => c.why.push((why, 1)),
+                }
+            }
+        }
         let Some(at) = self.ck_where() else {
             if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
                 eprintln!(
@@ -150,6 +163,64 @@ impl Run<'_, '_> {
             return Ok(());
         };
         self.ck_take(at)
+    }
+
+    /// `PHITEX_CK_WHY`: the first reason [`Run::ck_where`] refuses here.
+    fn ck_refusal(&self) -> &'static str {
+        let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
+        let checks: [(bool, &'static str); 26] = [
+            (self.input.levels.is_empty(), "no input"),
+            (
+                !self.input.levels.iter().skip(1).all(toks)
+                    && self.input.levels.iter().any(|l| {
+                        l.kind != crate::input::kind::TOKS && l.kind != crate::input::kind::LINE
+                    }),
+                "a file level",
+            ),
+            (
+                !self.input.levels.iter().skip(1).all(toks),
+                "a line above the text's",
+            ),
+            (self.pulled != 0, "siblings pulled"),
+            (!self.kids.is_empty(), "children"),
+            (self.claim_rest, "claim rest"),
+            (self.fatal_hit, "fatal"),
+            (self.cut.is_some(), "cut"),
+            (self.close_cont.is_some(), "close cont"),
+            (self.fin.is_some(), "finisher"),
+            (!self.sealed.is_empty(), "sealed"),
+            (!self.lig_buf.is_empty(), "ligature"),
+            (self.chars_live.is_some(), "chars live"),
+            (self.interp.is_some(), "interpreting a line"),
+            (self.scanner.is_some(), "scanner"),
+            (!self.pending_pre.is_empty(), "pending pre"),
+            (!self.incs.is_empty(), "incompleat noad"),
+            (
+                self.read_point_pending.is_some() || !self.vain_after_point.is_empty(),
+                "read point",
+            ),
+            (!self.seeded.is_empty(), "seeded"),
+            (self.defer_hit.is_some(), "defer"),
+            (self.mode_zero, "mode zero"),
+            (
+                self.fin_box.is_some() || self.tool_cut.is_some(),
+                "fin box/tool",
+            ),
+            (self.lt.sink.is_some(), "lines sink"),
+            (
+                self.nest.len() != 1 && self.nest.iter().any(|l| l.owns && l.mode != HMODE),
+                "inside a box of its own",
+            ),
+            (
+                self.nest.len() != 1 || self.nest[0].mode != HMODE,
+                "not in a paragraph",
+            ),
+            (self.nest.iter().any(|l| l.group != 0), "inside a group"),
+        ];
+        checks
+            .iter()
+            .find(|c| c.0)
+            .map_or("the line, the base table or locals", |c| c.1)
     }
 
     /// Where the run stands, if a checkpoint can be taken there: the
@@ -582,6 +653,15 @@ impl Run<'_, '_> {
                 c.taken.len()
             );
         }
+        if crate::exec::obs_flag!("PHITEX_CK_WHY") && !c.why.is_empty() {
+            eprintln!(
+                "ck-why: node {} {} commands, {} taken, refused: {:?}",
+                self.cx.node().raw(),
+                self.cmds,
+                c.taken.len(),
+                c.why
+            );
+        }
         if c.taken.is_empty() {
             return;
         }
@@ -837,6 +917,7 @@ impl Run<'_, '_> {
             taken: cks[..=k].to_vec(),
             conds0,
             fresh: Vec::new(),
+            why: Vec::new(),
         }));
         Ok(true)
     }
