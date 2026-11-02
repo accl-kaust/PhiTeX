@@ -818,6 +818,9 @@ impl Run<'_, '_> {
                 None => v.list(Vec::new()),
                 Some(k) => v.list(vec![v.list(k.into_iter().collect())]),
             },
+            // (the streams an `\immediate\closeout` closed: closed for
+            // the run's later writes, `Run::closed`)
+            v.list(self.closed.iter().map(|&k| int(i64::from(k))).collect()),
         ])
     }
 
@@ -836,10 +839,15 @@ impl Run<'_, '_> {
             written,
             lt,
             skind,
+            closed,
         ] = xs[..]
         else {
             return;
         };
+        self.closed = list_of(v, closed)
+            .iter()
+            .filter_map(|&k| i32::try_from(int_of(v, k)).ok())
+            .collect();
         let pair = |e: ValueId| match list_of(v, e)[..] {
             [a, b] => Some((a, b)),
             _ => None,
