@@ -422,14 +422,16 @@ impl Run<'_, '_> {
                 (-1, 0, 0, 0, Vec::new(), Vec::new(), input, cost)
             }
         };
-        // (the next one after as many commands as this one's parts are
-        // long, at least `every`: what checkpoints cost stays a share of
-        // what the run does, however deep its lists and input)
+        // (the next one after four times as many commands as this one's
+        // parts are long, at least `every`: what checkpoints cost stays a
+        // share of what the run does, however large its table, lists and
+        // input; at once as many, tikzpeople -j1 made 518 MB of values
+        // in 4213 checkpoints, 15% of its time)
         let spacing = enc_cost
             + self.st.base_len() as u64
             + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
-            c.next = self.cmds + every().max(spacing);
+            c.next = self.cmds + every().max(4 * spacing);
         }
         if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
             eprintln!(
