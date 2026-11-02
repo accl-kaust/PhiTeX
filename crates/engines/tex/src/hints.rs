@@ -5730,13 +5730,38 @@ pub(crate) fn verify(r: &mut Run<'_, '_>, h: &Hint) -> R<Option<String>> {
         }
     }
     for (name, class) in &b.means {
-        let x = r.get(name)?;
-        let m = r.decode_mean(x);
+        // (its class alone, through the engine's projection, where the
+        // run holds nothing of it: a redefinition keeping the class leaves
+        // this read standing, and a run asked again for the name's
+        // meaning goes on from its checkpoint before its use, P2)
+        let f = r.ops.fields.get_at(r.v, r.cx.values_epoch(), name);
+        let loc = r.loc_of(f);
+        let projected =
+            if r.st.held(loc) == crate::state::Held::Absent && r.interp.is_none() && !r.rec_load {
+                r.cx.read_path(f, phitex_defuse::PathId::of_proj(r.ops.mean_class_proj))?
+                    .map(|x| int_of(r.v, x))
+            } else {
+                None
+            };
+        // (0 a primitive, 2 undefined, 1 anything else)
+        let k = if let Some(k) = projected {
+            k
+        } else {
+            let x = r.get(name)?;
+            match r.decode_mean(x) {
+                Mean::Prim(..) => 0,
+                Mean::Undefined => 2,
+                _ => 1,
+            }
+        };
         let ok = match class {
-            0 => matches!(m, Mean::Prim(..)),
-            _ => !matches!(m, Mean::Undefined),
+            0 => k == 0,
+            _ => k != 2,
         };
         if !ok {
+            // (the meaning in full, for the message)
+            let x = r.get(name)?;
+            let m = r.decode_mean(x);
             return Ok(Some(cat(&[
                 name,
                 " is ",

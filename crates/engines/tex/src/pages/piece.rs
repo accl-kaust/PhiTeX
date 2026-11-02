@@ -1930,7 +1930,13 @@ impl Operation for Resume {
                 .and_then(|&g| v.as_int(g))
                 .and_then(|n| usize::try_from(n).ok());
             text = cont;
-            r.cont_load(cont, a(1))?;
+            // (on from a checkpoint of its last run on this continuation,
+            // `crate::resume`; checkpoints taken as it goes)
+            r.cont_text(cont)?;
+            if !r.resume_edit()? {
+                r.cont_state(cont, a(1))?;
+            }
+            r.ck_begin();
             r.run_all()
         });
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
