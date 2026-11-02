@@ -260,7 +260,13 @@ impl Run<'_, '_> {
     /// Where the run stands, if a checkpoint can be taken there
     /// ([`At`]).
     fn ck_where(&self) -> Option<At> {
+        // (none once the run has closed or left the scope it runs in, its
+        // effect decided: the command that closed it ends the run, which
+        // `Run::run_all` sees after the command, after this; a run that
+        // went on from a checkpoint taken there read on past `\end{note}`,
+        // enumitem -j4)
         if self.input.levels.is_empty()
+            || self.effect != phitex_defuse::Effect::None
             || !self.kids.is_empty()
             || self.claim_rest
             || self.fatal_hit
@@ -300,6 +306,28 @@ impl Run<'_, '_> {
             || crate::exec::obs_flag!("PHITEX_CK_LINE_ONLY")
         {
             return None;
+        }
+        // (`PHITEX_CK_NO=pulled:file:group:vmode:box:line`, observe: no
+        // checkpoint anywhere in those places, to find which one a
+        // difference comes from)
+        if let Some(no) = crate::exec::obs_str!("PHITEX_CK_NO") {
+            use crate::input::kind;
+            let has = |w: &str| no.split(':').any(|x| x == w);
+            if (has("pulled") && self.pulled != 0)
+                || (has("file") && self.input.levels.iter().any(|l| l.kind == kind::FILE))
+                || (has("line")
+                    && self
+                        .input
+                        .levels
+                        .iter()
+                        .skip(1)
+                        .any(|l| l.kind == kind::LINE))
+                || (has("group") && self.nest.iter().any(|l| l.group != 0))
+                || (has("box") && self.nest.iter().any(|l| l.owns))
+                || (has("vmode") && self.nest.first().is_none_or(|l| l.mode != HMODE))
+            {
+                return None;
+            }
         }
         Some(At::Anywhere)
     }
@@ -394,6 +422,26 @@ impl Run<'_, '_> {
             + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
             c.next = self.cmds + every().max(spacing);
+        }
+        if li < 0 && crate::exec::obs_flag!("PHITEX_CK_TRACE") {
+            eprintln!(
+                "ck: node {} at command {}: anywhere: levels {:?} text_at {} of {} pulled {} pull_at {:?} nest {:?}",
+                self.cx.node().raw(),
+                self.cmds,
+                self.input
+                    .levels
+                    .iter()
+                    .map(|l| (l.kind, l.ty))
+                    .collect::<Vec<_>>(),
+                self.input.text_at,
+                self.input.text.len(),
+                self.pulled,
+                self.pull_at,
+                self.nest
+                    .iter()
+                    .map(|l| (l.mode, l.group, l.owns))
+                    .collect::<Vec<_>>()
+            );
         }
         // (the table at the run's base level: what it defined and stepped;
         // none where a group of its own saved a value)
@@ -547,7 +595,7 @@ impl Run<'_, '_> {
         self.ops
             .cut_offs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_CK_RESUMED") {
             eprintln!(
                 "ck: node {} cut off at command {}: its last run's products stand",
                 self.cx.node().raw(),
@@ -1030,16 +1078,22 @@ impl Run<'_, '_> {
                     usize::try_from(int_of(v, x)).unwrap_or(usize::MAX)
                 });
                 if made != usize::MAX && self.cx.last_reads_hold(made) {
-                    if check() {
+                    if check() || crate::exec::obs_flag!("PHITEX_CK_RESUMED") {
                         eprintln!(
-                            "ck-change: node {} woken by {:?} goes on from checkpoint {k} after {made} reads{}",
+                            "ck-change: node {} woken by {:?} goes on from checkpoint {k} after {made} reads at command {}{}: {:?}",
                             self.cx.node().raw(),
                             self.cx.woken_by(),
+                            int_of(v, c[5]),
                             if int_of(v, c[0]) < 0 {
                                 " (anywhere)"
                             } else {
                                 ""
-                            }
+                            },
+                            self.cx
+                                .args()
+                                .first()
+                                .map(|&x| v.render(x).chars().take(160).collect::<String>())
+                                .unwrap_or_default()
                         );
                     }
                     found = Some((k, c));

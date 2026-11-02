@@ -1035,10 +1035,10 @@ fn an_edit_resumed_paragraph_reports_the_lines_it_began_on() {
             "edit {k}: the overfull box names the paragraph's lines: {}",
             common::log_excerpt(&log)
         );
-        // (the first edit's run takes the checkpoints, the next go on)
-        assert_eq!(
+        // (every exec run takes checkpoints, the cold build's too: every
+        // edit goes on from one, its log the cold build's)
+        assert!(
             b.stats.resumed_at_mark > 0,
-            k > 0,
             "edit {k}: went on from a checkpoint"
         );
     }
