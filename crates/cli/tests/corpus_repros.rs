@@ -678,3 +678,14 @@ fn write_in_unbroken_discretionary() {
 fn xe_verbatim_comment() {
     check_threads("xe_verbatim_comment", "pdf");
 }
+
+/// TeX Live manual tkz-tab (xelatex): etoc reads the .toc with `\read`;
+/// XeTeX's `input_line` decodes a `\read` or `\readline` line from UTF-8
+/// (the input mode `\XeTeXdefaultencoding` named when the stream
+/// opened), and the line's bytes were its characters: "DÃ©finition" in
+/// the contents. At -j1 and -j4 (oracle: xelatex in the CI image, accl
+/// 22748; the base differs).
+#[test]
+fn xe_read_utf8() {
+    check_threads("xe_read_utf8", "pdf");
+}
