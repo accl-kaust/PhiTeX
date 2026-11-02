@@ -1093,10 +1093,202 @@ impl<'a> Ctx<'a> {
         self.product.resumed.set(true);
     }
 
+    /// What my last run stored with `park`, whatever woke me (not an
+    /// edit: [`Ctx::parked_before_edit`]), for a run that goes on from a
+    /// point of it reached before the read that moved
+    /// ([`Ctx::last_reads_hold`], [`Ctx::goes_on_after_reads`]). `None`
+    /// for an edit, a stale state or none stored.
+    pub fn parked_state(&self) -> Option<ValueId> {
+        if matches!(self.woken_by(), Some(Cause::Edited))
+            || self.me.state_stale.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        self.last.as_ref().filter(|r| !r.provisional).and_then(|r| r.state)
+    }
+
     /// How many reads this run has made so far: stored with a point of
     /// the run it may go on from next time ([`Ctx::last_reads_hold`]).
     pub fn reads_made(&self) -> usize {
         self.product.kept_reads.get().unwrap_or(0) + self.product.reads.len()
+    }
+
+    /// Whether the first `k` reads of my last run all still give what
+    /// they gave (`read::holds`): a point of that run reached after them
+    /// stands, and a run may go on from there. Not a read.
+    pub fn last_reads_hold(&self, k: usize) -> bool {
+        let Some(r) = self.last.as_ref().filter(|r| !r.provisional) else {
+            return false;
+        };
+        if k > r.reads.len() {
+            return false;
+        }
+        let mut memo = crate::read::FoldMemo::new();
+        r.reads[..k].iter().all(|rd| {
+            !matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
+                && crate::read::holds(self.eng, self.me, rd, &mut memo)
+        })
+    }
+
+    /// Whether my last run's reads from its `m`-th on all still give
+    /// what they gave, none of them a placement's output or a hole: what
+    /// that run made after a point of it reached after `m` reads stands
+    /// for a run that reaches that point in the same state
+    /// ([`Ctx::goes_on_as_last`]). Not a read.
+    pub fn last_reads_hold_from(&self, m: usize) -> bool {
+        let Some(r) = self.last.as_ref().filter(|r| !r.provisional) else {
+            return false;
+        };
+        let Some(tail) = r.reads.get(m..) else {
+            return false;
+        };
+        let mut memo = crate::read::FoldMemo::new();
+        tail.iter().all(|rd| {
+            !matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
+                && crate::read::holds(self.eng, self.me, rd, &mut memo)
+        })
+    }
+
+    /// The run reached a point of my last run, after that run's first
+    /// `m` reads, in the state that run had there, its reads after it
+    /// holding ([`Ctx::last_reads_hold_from`]): it ends there, and what
+    /// my last run made stands ([`Ctx::unchanged`]), resting on this
+    /// run's reads and that run's after the point. The cutoff.
+    pub fn goes_on_as_last(&mut self, m: usize) {
+        let Some(r) = self.last.as_ref() else { return };
+        let tail = r.reads.get(m..).unwrap_or_default().to_vec();
+        self.product.reads.extend(tail);
+        self.product.unchanged = true;
+    }
+
+    /// `PHITEX_RESUME_CHECK`: whether what this run made so far, its
+    /// output `output`, is what my last run made: its definitions (the
+    /// last of each field), contributions and output.
+    pub fn same_as_last(&self, output: ValueId) -> Result<(), String> {
+        let Some(r) = self.last.as_ref().filter(|r| !r.provisional) else {
+            return Err("no last run".to_owned());
+        };
+        let v = &self.eng.values;
+        if r.output != output {
+            return Err(format!(
+                "output {} against {}",
+                v.render(output).chars().take(100).collect::<String>(),
+                v.render(r.output).chars().take(100).collect::<String>()
+            ));
+        }
+        let cs = crate::commit::combine_dups(self.eng, self.product.contribs.clone());
+        if cs != r.contribs {
+            let k = cs.iter().zip(&r.contribs).take_while(|(a, b)| a == b).count();
+            let name = |x: Option<&(Field, ValueId)>| x.map(|c| v.render(c.0.0)).unwrap_or_default();
+            let val = |x: Option<&(Field, ValueId)>| x.map(|c| v.render(c.1)).unwrap_or_default();
+            let (a, b) = (val(cs.get(k)), val(r.contribs.get(k)));
+            let at = a.bytes().zip(b.bytes()).take_while(|(p, q)| p == q).count();
+            let cut = |s: &str| {
+                let lo = s.floor_char_boundary(at.saturating_sub(60));
+                let hi = s.floor_char_boundary((at + 240).min(s.len()));
+                s[lo..hi].to_owned()
+            };
+            return Err(format!(
+                "contribs: {} against {}, apart at {k}: {} / {}: this run's …{}… last run's …{}…",
+                cs.len(),
+                r.contribs.len(),
+                name(cs.get(k)),
+                name(r.contribs.get(k)),
+                cut(&a),
+                cut(&b)
+            ));
+        }
+        let defs = crate::commit::dedup_defs(self.product.defs.clone());
+        let mut a: Vec<String> = defs
+            .iter()
+            .map(|d| {
+                format!(
+                    "{}{:?}{:?}{}",
+                    v.render(d.f.0),
+                    d.loc,
+                    d.rel,
+                    if d.rel.is_some() { 0 } else { d.value.raw() }
+                )
+            })
+            .collect();
+        let mut b: Vec<String> = r
+            .defs
+            .iter()
+            .map(|d| {
+                format!(
+                    "{}{:?}{:?}{}",
+                    v.render(d.f.0),
+                    d.loc,
+                    d.rel,
+                    if d.rel.is_some() { 0 } else { d.value.raw() }
+                )
+            })
+            .collect();
+        a.sort();
+        b.sort();
+        if a != b {
+            let only_a: Vec<&String> = a.iter().filter(|x| !b.contains(x)).take(3).collect();
+            let only_b: Vec<&String> = b.iter().filter(|x| !a.contains(x)).take(3).collect();
+            return Err(format!("defs: this run's {only_a:?} last run's {only_b:?}"));
+        }
+        Ok(())
+    }
+
+    /// `PHITEX_RESUME_CHECK`: the fields my last run defined.
+    pub fn last_def_fields(&self) -> Vec<Field> {
+        self.last
+            .as_ref()
+            .map(|r| r.defs.iter().map(|d| d.f).collect())
+            .unwrap_or_default()
+    }
+
+    /// `PHITEX_RESUME_CHECK`: my last run's and this run's reads of `f`
+    /// and definitions of it, as one line.
+    pub fn reads_of(&self, f: Field) -> String {
+        let v = &self.eng.values;
+        let show = |rs: &[ReadRec]| -> Vec<String> {
+            rs.iter()
+                .enumerate()
+                .filter(|(_, r)| r.kind.field() == Some(f))
+                .map(|(i, r)| format!("#{i} {:?} {:?}", r.kind, r.seen.map(|x| v.render(x))))
+                .collect()
+        };
+        let last = self.last.as_ref();
+        format!(
+            "last run reads {:?} defs {:?}; this run reads {:?} defs {:?}",
+            last.map(|r| show(&r.reads)).unwrap_or_default(),
+            last.map(|r| r
+                .defs
+                .iter()
+                .filter(|d| d.f == f)
+                .map(|d| format!("{:?} {:?} {}", d.loc, d.rel, v.render(d.value)))
+                .collect::<Vec<_>>())
+                .unwrap_or_default(),
+            show(&self.product.reads),
+            self.product
+                .defs
+                .iter()
+                .filter(|d| d.f == f)
+                .map(|d| format!("{:?} {:?} {}", d.loc, d.rel, v.render(d.value)))
+                .collect::<Vec<_>>()
+        )
+    }
+
+    /// The first of my last run's first `k` reads that no longer gives
+    /// what it gave, as one line (`PHITEX_CK_TRACE`: why a run asked
+    /// again goes on from no checkpoint).
+    pub fn first_moved_read(&self, k: usize) -> Option<String> {
+        let r = self.last.as_ref()?;
+        let v = &self.eng.values;
+        let mut memo = crate::read::FoldMemo::new();
+        r.reads.iter().take(k).enumerate().find_map(|(i, rd)| {
+            let bad = matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
+                || !crate::read::holds(self.eng, self.me, rd, &mut memo);
+            bad.then(|| {
+                let f = rd.kind.field().map(|f| v.render(f.0)).unwrap_or_default();
+                format!("read {i} of {k}: {f} {:?}", rd.kind)
+            })
+        })
     }
 
     /// The run goes on from a point of my last run reached after its
@@ -1218,6 +1410,22 @@ impl<'a> Ctx<'a> {
         self.stashed.iter().chain(&self.product.reads).all(|rd| {
             matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
                 || crate::read::holds(self.eng, self.me, rd, &mut memo)
+        })
+    }
+
+    /// Whether this run's reads so far all still give what they gave,
+    /// and no field it read has changed since, even back
+    /// (`PHITEX_RESUME_CHECK`: at -j8 a field can move and move back
+    /// while a run reads it in two places).
+    pub fn own_reads_hold(&self) -> bool {
+        let mut memo = crate::read::FoldMemo::new();
+        self.product.reads.iter().all(|rd| {
+            matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
+                || (crate::read::holds(self.eng, self.me, rd, &mut memo)
+                    && rd
+                        .kind
+                        .field()
+                        .is_none_or(|f| rd.epoch == u64::MAX || self.eng.field_epoch(f) == rd.epoch))
         })
     }
 

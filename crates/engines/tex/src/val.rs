@@ -1188,6 +1188,19 @@ pub(crate) fn defined_projection(x: ValueId, v: &Values) -> ValueId {
     v.int(i64::from(Mean::decode(v, Some(x)) != Mean::Undefined))
 }
 
+/// A meaning's class as a hint's check reads it ([`crate::hints::verify`]):
+/// `0` a primitive, `2` undefined, `1` anything else. A pure projection
+/// for the engine: a redefinition that keeps the class leaves a run whose
+/// hint named the name standing, and its read where it uses the name is
+/// where it rests on the meaning.
+pub(crate) fn mean_class_projection(x: ValueId, v: &Values) -> ValueId {
+    v.int(match Mean::decode(v, Some(x)) {
+        Mean::Prim(..) => 0,
+        Mean::Undefined => 2,
+        _ => 1,
+    })
+}
+
 /// What a reader of the main list's last item by its kind needs of it
 /// ([`crate::build::MAIN_LAST`]: `\\lastskip`, `\\lastkern`,
 /// `\\lastpenalty`, §424; `\\unskip` and its kind, §1105;

@@ -1775,6 +1775,9 @@ pub struct Stats {
     /// Runs of an edited node that went on from a checkpoint of their
     /// last run (`crate::resume`); runs cut off at one.
     pub resumed_at_mark: u64,
+    /// Runs that ended at a checkpoint of their last run reached in its
+    /// state (the cutoff, `crate::resume`): that run's products stand.
+    pub cut_offs: u64,
     pub cut_in_run: u64,
     pub restarted: u64,
     /// Stopped runs restarted instead of resumed, by the first read that
@@ -3146,6 +3149,7 @@ impl Graph {
         let outer_proj = eng.register_projection(Arc::new(crate::val::outer_projection));
         let step_proj = eng.register_projection(Arc::new(crate::val::step_projection));
         let defined_proj = eng.register_projection(Arc::new(crate::val::defined_projection));
+        let mean_class_proj = eng.register_projection(Arc::new(crate::val::mean_class_projection));
         let tail_proj = eng.register_projection(Arc::new(crate::val::tail_projection));
         let forced_proj = eng.register_projection(Arc::new(crate::val::forced_projection));
         let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
@@ -3179,6 +3183,7 @@ impl Graph {
             origins: origins_on,
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             resumed_edits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cut_offs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             siblings_pulled: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
             scope_learned: Arc::default(),
@@ -3195,6 +3200,7 @@ impl Graph {
             outer_proj,
             step_proj,
             defined_proj,
+            mean_class_proj,
             tail_proj,
             forced_proj,
             num_proj,
@@ -4057,6 +4063,10 @@ impl Graph {
             stats.resumed_at_mark += self
                 .ops
                 .resumed_edits
+                .swap(0, std::sync::atomic::Ordering::Relaxed);
+            stats.cut_offs += self
+                .ops
+                .cut_offs
                 .swap(0, std::sync::atomic::Ordering::Relaxed);
             stats.siblings_pulled = self
                 .ops

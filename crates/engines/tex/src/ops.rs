@@ -209,6 +209,7 @@ pub(crate) fn run_node(
                 Err(Halt::Fatal) => "fatal",
                 Err(Halt::Cut) => "cut",
                 Err(Halt::Recut(_)) => "recut",
+                Err(Halt::Same) => "same",
             },
             r.cx.is_speculative(),
             crate::api::mem_mb()
@@ -225,6 +226,7 @@ pub(crate) fn run_node(
                 Err(Halt::Fatal) => "fatal".to_owned(),
                 Err(Halt::Cut) => "cut".to_owned(),
                 Err(Halt::Recut(k)) => format!("recut at {k}"),
+                Err(Halt::Same) => "same as the last run (cut off)".to_owned(),
             }
         );
     }
@@ -372,6 +374,9 @@ pub(crate) fn run_node(
             Ok(x)
         }
         Err(Halt::Stop(s)) => Err(s),
+        // (the cutoff: the last run's products stand, its checkpoints
+        // parked with this run's, `crate::resume`)
+        Err(Halt::Same) => Ok(ValueId::UNIT),
         // (a second pass ends at its candidate, before the read that
         // asked for it)
         Err(Halt::Recut(k)) => unreachable!("a second pass passed its candidate {k}"),

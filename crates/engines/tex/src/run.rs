@@ -44,6 +44,11 @@ pub(crate) enum Halt {
     /// a node before it has not run yet: it waits for that node
     /// (`Ctx::hole_before`), ending as a starved run does.
     Hole,
+    /// The run reached a checkpoint of its last run in the state that
+    /// run had there, that run's reads after it holding: what that run
+    /// made stands, and the run ends (the cutoff, `crate::resume`,
+    /// `Ctx::goes_on_as_last`).
+    Same,
 }
 
 impl From<Stop> for Halt {
@@ -179,6 +184,10 @@ pub(crate) struct Ops {
     /// Runs of an edited node that went on from a checkpoint of their
     /// last run (`crate::resume`; `Stats::resumed_at_mark`).
     pub resumed_edits: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Runs that ended at a checkpoint of their last run reached in its
+    /// state, that run's products standing (`crate::resume`'s cutoff;
+    /// `Stats::cut_offs`).
+    pub cut_offs: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The siblings runs read on into over all runs (`Run::pull`;
     /// `Stats::siblings_pulled`).
     pub siblings_pulled: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -229,6 +238,9 @@ pub(crate) struct Ops {
     /// ([`crate::val::defined_projection`]): `\csname` reads only whether
     /// the name it makes is defined ([`Run::defined_lookup`]).
     pub defined_proj: phitex_defuse::ProjId,
+    /// A meaning's class as a hint's check reads it
+    /// ([`crate::val::mean_class_projection`]).
+    pub mean_class_proj: phitex_defuse::ProjId,
     /// The kind projection of the main list's last item
     /// ([`crate::val::tail_projection`]): a reader of its kind reads that,
     /// not the item ([`Run::list_last_kind`]).
@@ -982,6 +994,14 @@ pub(crate) struct Run<'c, 'a> {
     /// compare with the whole run's at the same command
     /// ([`Run::ck_compare`]).
     pub(crate) resumed_ck: Option<ValueId>,
+    /// The checkpoints of the node's last run on the same text (not an
+    /// edit's), to end at one reached in its state (the cutoff,
+    /// [`Run::ck_take`]).
+    pub(crate) last_cks: Option<Vec<ValueId>>,
+    /// `PHITEX_RESUME_CHECK`: the command a cutoff would have ended the
+    /// run at; the run goes on, and its products are compared with the
+    /// last run's.
+    pub(crate) would_cut: Option<(u64, usize)>,
     /// A halt raised on the token path ([`Run::raise`]), returned by the
     /// next `get_next` of the command in progress.
     pub(crate) halt: Option<Halt>,
@@ -1230,6 +1250,8 @@ impl<'c, 'a> Run<'c, 'a> {
             no_resume: false,
             resumed_at: None,
             resumed_ck: None,
+            last_cks: None,
+            would_cut: None,
             halt: None,
             cand: 0,
             cand_marks: Vec::new(),
@@ -5593,6 +5615,44 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cx.node().raw(),
                 out.raw(),
                 self.effect
+            );
+        }
+        // (`PHITEX_RESUME_CHECK`: a run the cutoff would have ended made
+        // what its last run made, `crate::resume`)
+        if let Some((at, m)) = self.would_cut {
+            // (at -j8 what either run read after the point may have moved
+            // since: then they may differ, and the commit refutes this run)
+            let moved = if self.cx.last_reads_hold_from(m) && self.cx.own_reads_hold() {
+                ""
+            } else {
+                " (reads moved meanwhile)"
+            };
+            if moved.is_empty() && self.cx.same_as_last(out).is_err() {
+                let mine: Vec<Field> = self.publication().into_iter().map(|d| d.0).collect();
+                let last = self.cx.last_def_fields();
+                for f in mine
+                    .iter()
+                    .filter(|f| !last.contains(f))
+                    .chain(last.iter().filter(|f| !mine.contains(f)))
+                {
+                    let loc = self.loc_of(*f);
+                    eprintln!(
+                        "cutoff apart: node {} {}: state {} | {}",
+                        self.cx.node().raw(),
+                        crate::val::field_name(self.v, *f),
+                        self.st.debug_marks(loc),
+                        self.cx.reads_of(*f)
+                    );
+                }
+            }
+            eprintln!(
+                "cutoff check: node {} at command {at} of {}: {}",
+                self.cx.node().raw(),
+                self.cmds,
+                match self.cx.same_as_last(out) {
+                    Ok(()) => "same".to_owned(),
+                    Err(e) => format!("DIFFERENT{moved} {e}"),
+                }
             );
         }
         out

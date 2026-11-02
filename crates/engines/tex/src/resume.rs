@@ -28,7 +28,7 @@
 //! again from its start, and the two runs' products compared
 //! ([`Run::product_signature`]); the full run's stands.
 
-use phitex_defuse::{Cause, Field, ValueId};
+use phitex_defuse::{Field, ValueId};
 
 use crate::input::Seg;
 use crate::run::{R, Run};
@@ -69,22 +69,51 @@ impl Run<'_, '_> {
     pub(crate) fn ck_begin(&mut self) {
         // (an edited node's run, or a run of a node whose last run took
         // them: they stay for its next edit)
-        // (`PHITEX_CK_ALL`, observe: every exec run takes them, the cost a
-        // resumption of refuted runs would pay, measured for the report)
-        if self.cx.op() != self.ops.exec
-            || !(matches!(self.cx.woken_by(), Some(Cause::Edited))
-                || self.cx.last_parked()
-                || crate::exec::obs_flag!("PHITEX_CK_ALL"))
-        {
+        // (every exec run: a run asked again because a read of it moved
+        // goes on from its last checkpoint before that read, `resume_edit`;
+        // their cost, accl 22812: amsldoc -j1 +6%, Grail +2%)
+        if !self.ck_op() {
             return;
         }
         let taken = self.ck.take().map(|c| c.taken).unwrap_or_default();
+        // (the last run's checkpoints on this text, for the cutoff: not
+        // a second pass's, which ends at its candidate whatever the
+        // state there)
+        if self.stop_at.is_none()
+            && let Some(p) = self.cx.parked_state()
+        {
+            let v = self.v;
+            let xs = list_of(v, p);
+            if let Some((&old, cks)) = xs.split_first()
+                && list_of(v, old) == self.ck_key()
+            {
+                self.last_cks = Some(cks.to_vec());
+            }
+        }
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
             taken,
             conds0: self.conds.clone(),
             fresh: Vec::new(),
         }));
+    }
+
+    /// Whether the run's operation takes checkpoints: a piece's run, a
+    /// document node's text (exec) or the rest of a piece cut at a
+    /// candidate (resume).
+    fn ck_op(&self) -> bool {
+        let op = self.cx.op();
+        op == self.ops.exec || op == self.ops.resume
+    }
+
+    /// What a run's checkpoints are taken on: the node's arguments, and
+    /// a resume's continuation (a field it reads, not an argument).
+    fn ck_key(&self) -> Vec<ValueId> {
+        let mut k = self.cx.args().to_vec();
+        if self.cx.op() == self.ops.resume {
+            k.push(self.cont_val.unwrap_or(ValueId::UNIT));
+        }
+        k
     }
 
     /// At a command's end: a checkpoint if one is due and the run stands
@@ -296,7 +325,79 @@ impl Run<'_, '_> {
             c.fresh.push((c.taken.len(), unread));
             c.taken.push(ck);
         }
-        Ok(())
+        self.cut_off(ck)
+    }
+
+    /// The cutoff: at checkpoint `ck`, the node's last run on the same
+    /// text had one at the same command in the same state (its count of
+    /// reads aside), and its reads after it all hold: the rest of this
+    /// run would make what that run made after it. The run ends
+    /// ([`Halt::Same`]): that run's products stand
+    /// ([`phitex_defuse::Ctx::goes_on_as_last`]), and its checkpoints
+    /// after this one go with this run's, their counts of reads moved by
+    /// the difference here.
+    fn cut_off(&mut self, ck: ValueId) -> R<()> {
+        if self.would_cut.is_some() || self.stop_at.is_some() {
+            return Ok(());
+        }
+        let Some(last) = self.last_cks.as_ref() else {
+            return Ok(());
+        };
+        let v = self.v;
+        let a = list_of(v, ck);
+        let Some(&at) = a.get(5) else { return Ok(()) };
+        let Some((j, b)) = last
+            .iter()
+            .enumerate()
+            .map(|(j, &x)| (j, list_of(v, x)))
+            .find(|(_, b)| b.get(5) == Some(&at))
+        else {
+            return Ok(());
+        };
+        if a.len() != b.len() || (0..a.len()).any(|i| i != 14 && a[i] != b[i]) {
+            return Ok(());
+        }
+        let Some(m) = b.get(14).and_then(|&x| usize::try_from(int_of(v, x)).ok()) else {
+            return Ok(());
+        };
+        if !self.cx.last_reads_hold_from(m) {
+            return Ok(());
+        }
+        if check() {
+            self.would_cut = Some((self.cmds, m));
+            return Ok(());
+        }
+        let made = i64::try_from(self.cx.reads_made()).unwrap_or(i64::MAX);
+        let delta = made - i64::try_from(m).unwrap_or(0);
+        let rest: Vec<ValueId> = last[j + 1..]
+            .iter()
+            .map(|&x| {
+                let mut ys = list_of(v, x);
+                if let Some(c) = ys.get_mut(14) {
+                    *c = v.int(int_of(v, *c) + delta);
+                }
+                v.list(ys)
+            })
+            .collect();
+        let Some(mut c) = self.ck.take() else {
+            return Ok(());
+        };
+        c.taken.extend(rest);
+        let mut xs = vec![v.list(self.ck_key())];
+        xs.extend(c.taken);
+        self.cx.park(v.list(xs));
+        self.cx.goes_on_as_last(m);
+        self.ops
+            .cut_offs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
+            eprintln!(
+                "ck: node {} cut off at command {}: its last run's products stand",
+                self.cx.node().raw(),
+                self.cmds
+            );
+        }
+        Err(crate::run::Halt::Same)
     }
 
     /// A checkpoint's parts from its 15th on: the count of the reads
@@ -500,7 +601,7 @@ impl Run<'_, '_> {
                 }
             }
         }
-        let mut xs = vec![v.list(self.cx.args().to_vec())];
+        let mut xs = vec![v.list(self.ck_key())];
         xs.extend(taken);
         self.cx.park(v.list(xs));
     }
@@ -510,18 +611,28 @@ impl Run<'_, '_> {
     /// node's new text, appended) is set to the checkpoint's place.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn resume_edit(&mut self) -> R<bool> {
-        if self.no_resume || self.cx.op() != self.ops.exec {
+        if self.no_resume || !self.ck_op() {
             return Ok(false);
         }
-        let Some(p) = self.cx.parked_before_edit() else {
-            if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
-                eprintln!(
-                    "ck: node {} woken by {:?}: no checkpoints",
-                    self.cx.node().raw(),
-                    self.cx.woken_by()
-                );
-            }
-            return Ok(false);
+        // (an edit of the node's text, or another wake: a read of the last
+        // run that moved, with the text the same; then the checkpoint must
+        // stand before every read that moved: the reads made before it
+        // all hold, `Ctx::last_reads_hold`)
+        let (p, edit) = match self.cx.parked_before_edit() {
+            Some(p) => (p, true),
+            None => match self.cx.parked_state() {
+                Some(p) if self.cx.woken_by().is_some() => (p, false),
+                _ => {
+                    if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
+                        eprintln!(
+                            "ck: node {} woken by {:?}: no checkpoints",
+                            self.cx.node().raw(),
+                            self.cx.woken_by()
+                        );
+                    }
+                    return Ok(false);
+                }
+            },
         };
         let v = self.v;
         let xs = list_of(v, p);
@@ -529,8 +640,11 @@ impl Run<'_, '_> {
             return Ok(false);
         };
         let old_args = list_of(v, old);
-        let args = self.cx.args().to_vec();
-        if old_args.len() != args.len() || old_args.get(1..) != args.get(1..) {
+        let args = self.ck_key();
+        if old_args.len() != args.len()
+            || old_args.get(1..) != args.get(1..)
+            || (!edit && old_args != args)
+        {
             if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
                 eprintln!(
                     "ck: node {} woken by {:?}: its arguments moved ({} {:?})",
@@ -563,6 +677,25 @@ impl Run<'_, '_> {
                 if cand > i64::from(k) {
                     continue;
                 }
+            }
+            if !edit {
+                // (the same text: the checkpoint stands if the reads made
+                // before it hold)
+                let made = c.get(14).map_or(usize::MAX, |&x| {
+                    usize::try_from(int_of(v, x)).unwrap_or(usize::MAX)
+                });
+                if made != usize::MAX && self.cx.last_reads_hold(made) {
+                    if check() {
+                        eprintln!(
+                            "ck-change: node {} woken by {:?} goes on from checkpoint {k} after {made} reads",
+                            self.cx.node().raw(),
+                            self.cx.woken_by()
+                        );
+                    }
+                    found = Some((k, c));
+                    break;
+                }
+                continue;
             }
             let Ok(li) = usize::try_from(int_of(v, c[0])) else {
                 continue;
@@ -603,6 +736,21 @@ impl Run<'_, '_> {
             break;
         }
         let Some((k, c)) = found else {
+            if crate::exec::obs_flag!("PHITEX_CK_TRACE") && !edit {
+                let made = cks
+                    .first()
+                    .and_then(|&x| list_of(v, x).get(14).copied())
+                    .map_or(0, |x| usize::try_from(int_of(v, x)).unwrap_or(0));
+                eprintln!(
+                    "ck: node {} woken by {:?}: no checkpoint of {} stands: {}",
+                    self.cx.node().raw(),
+                    self.cx.woken_by(),
+                    cks.len(),
+                    self.cx
+                        .first_moved_read(made)
+                        .unwrap_or_else(|| "(its reads hold)".to_owned())
+                );
+            }
             return Ok(false);
         };
         let li = usize::try_from(int_of(v, c[0])).unwrap_or(0);
@@ -610,6 +758,9 @@ impl Run<'_, '_> {
         let Some(base) = crate::state::Base::of_value(v, c[11], &mut |f| self.loc_of(f)) else {
             return Ok(false);
         };
+        // (a resume's segments' file lines, as its continuation gave
+        // them: the checkpoint's continuation holds those of its rest)
+        let lines = std::mem::take(&mut self.cont_lines);
         self.cont_load(c[6], ValueId::UNIT)?;
         self.st.with_base(v, base);
         if let Some(&ls) = c.get(15) {
@@ -645,7 +796,7 @@ impl Run<'_, '_> {
                     .push_toks(r, u8::try_from(int_of(v, ty)).unwrap_or(0));
             }
         }
-        self.cont_lines.clear();
+        self.cont_lines = lines;
         self.ck_restore(&c);
         if let Some(&x) = c.get(18) {
             self.ck_run_restore(x);
