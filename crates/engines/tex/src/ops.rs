@@ -324,6 +324,11 @@ pub(crate) fn run_node(
                         r.cmds,
                         crate::resume::first_difference(&resumed, &whole)
                     );
+                    // (`PHITEX_RESUME_DUMP=<dir>`: both signatures whole)
+                    if let Some(d) = crate::exec::obs_str!("PHITEX_RESUME_DUMP") {
+                        let _ = std::fs::write(format!("{d}/{node}-{at}-resumed.txt"), &resumed);
+                        let _ = std::fs::write(format!("{d}/{node}-{at}-whole.txt"), &whole);
+                    }
                 }
             }
             r.ck_park();
