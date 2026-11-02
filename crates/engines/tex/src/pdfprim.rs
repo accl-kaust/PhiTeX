@@ -4031,12 +4031,12 @@ pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
         (r.param("hoffset")?, r.param("voffset")?)
     };
     let ph = r.param("pdfpageheight")?;
-    let page_height = if pdf {
-        if ph != 0 {
-            ph
-        } else {
-            b.height + b.depth + 2 * v0
-        }
+    // pdfTeX §1192 / "Calculate DVI page dimensions and margins", and
+    // XeTeX's: a nonzero \pdfpageheight is the page's height in both
+    let page_height = if ph != 0 {
+        ph
+    } else if pdf {
+        b.height + b.depth + 2 * v0
     } else {
         b.height + b.depth + 2 * v0 + 2 * 4_736_286
     };
