@@ -2742,6 +2742,10 @@ pub(crate) struct Base {
     /// The locations a resume piece's table carried
     /// ([`State::from_cont`]).
     carried: Vec<Loc>,
+    /// Every location touched, in order (those only read among them):
+    /// what iterates them goes in the run's order after a resumption too
+    /// (a cut's group-local bindings, [`State::cont`]).
+    touched: Vec<Loc>,
 }
 
 /// A save of [`Base`]'s.
@@ -2874,7 +2878,14 @@ impl State {
                 })
                 .collect(),
             carried: self.cont_locs.clone(),
+            touched: self.touched.clone(),
         })
+    }
+
+    /// How many locations the table holds (what a base table costs to
+    /// make, [`State::base_of`]).
+    pub(crate) fn touched_len(&self) -> usize {
+        self.touched.len()
     }
 
     /// Why [`State::base_of`] gives none (a trace's).
@@ -2902,6 +2913,10 @@ impl State {
                 | if x.is_some() { HAS_ID } else { 0 };
             e
         };
+        // (the locations touched in the run's order first)
+        for &l in &b.touched {
+            self.slot(l);
+        }
         // (the metas in their order in the run, [`BaseMeta::ix`])
         let mut order: Vec<(u32, usize)> = b
             .slots
@@ -3140,6 +3155,7 @@ impl Base {
             })
             .collect();
         let carried = self.carried.iter().map(|&l| field(l).0).collect();
+        let touched = self.touched.iter().map(|&l| field(l).0).collect();
         v.list(vec![
             v.list(slots),
             v.list(cands),
@@ -3151,6 +3167,7 @@ impl Base {
             v.int(i64::from(self.pp_dirty)),
             v.list(save),
             v.list(carried),
+            v.list(touched),
         ])
     }
 
@@ -3173,6 +3190,7 @@ impl Base {
             pp_dirty,
             save,
             carried,
+            touched,
         ] = xs[..]
         else {
             return None;
@@ -3196,6 +3214,10 @@ impl Base {
             pp_dirty: int_of(v, pp_dirty) != 0,
             save: Vec::new(),
             carried: Vec::new(),
+            touched: list_of(v, touched)
+                .into_iter()
+                .map(|f| loc(Field(f)))
+                .collect(),
         };
         for e in list_of(v, save) {
             let [f, prev, flags, gid, stamp, at_, ls, ll, lg] = list_of(v, e)[..] else {
