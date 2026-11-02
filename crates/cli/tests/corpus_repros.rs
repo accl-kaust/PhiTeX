@@ -842,3 +842,18 @@ fn png_alpha_objects_counted() {
 fn pages_objects_in_conditional() {
     check_threads("pages_objects_in_conditional", "pdf");
 }
+
+/// TeX Live manual huaz (pdflatex): the text analysis took `\lstinline`
+/// in `\newcommand{\code}{\lstinline}` for a verbatim run and cut the
+/// body into pieces of a few tokens, one cut inside the word `''.` that
+/// `\huqq{az asztal}.` makes. A run ending its piece inside a character
+/// run (§1038's lookahead at the end of the node's text) ended the word
+/// there, as if no character followed, and read the next piece on only
+/// after: pdfTeX's kern between `''` (the ligature) and `.` was missing.
+/// The run now reads the next piece on inside the lookahead, so a cut the
+/// analysis put inside a word costs nothing. At -j1 and -j4 (oracle:
+/// pdftex in the CI image, accl 23105; the base differs).
+#[test]
+fn word_across_cut() {
+    check_threads("word_across_cut", "pdf");
+}
