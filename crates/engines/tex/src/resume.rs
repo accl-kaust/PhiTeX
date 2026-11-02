@@ -76,6 +76,12 @@ struct CkInput {
     cut_state: Option<u8>,
 }
 
+/// (tests) For each checkpoint taken in this process, whether its run
+/// had closed or left its scope by then ([`Run::ck_where`] refuses one
+/// there).
+#[cfg(test)]
+static TAKEN: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
+
 /// Where a checkpoint is taken ([`Run::ck_where`]).
 enum At {
     /// In a paragraph of the node's own text, its line at the bottom of
@@ -552,6 +558,11 @@ impl Run<'_, '_> {
         ys.extend(self.ck_more());
         ys.push(whole_input);
         let ck = v.list(ys);
+        #[cfg(test)]
+        TAKEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(self.effect != phitex_defuse::Effect::None);
         if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
             eprintln!(
                 "ck-bytes: node {} at command {}: {} bytes made",
@@ -1667,4 +1678,78 @@ fn cand_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::pages::CandMa
         open_cut: b & 8 != 0,
         par_cut: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    /// A paragraph that closes the group an earlier node opened, its
+    /// first checkpoint due inside a conditional of its own that the
+    /// closing command's expansion ends: the checkpoint came at that
+    /// command, where the run's scope effect is set and the run ends
+    /// (its rest runs outside the scope); a run that went on from it read
+    /// on inside the closed group (enumitem -j4: `\end{note}` lost). No
+    /// checkpoint is taken once a run has closed its scope, at -j1.
+    #[test]
+    fn no_checkpoint_after_the_run_closed_its_scope() {
+        use std::fmt::Write as _;
+        use std::sync::Arc;
+        let fx = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../oracle/fixtures");
+        let read = |p: &std::path::Path| -> String {
+            std::fs::read(p)
+                .expect("a file")
+                .iter()
+                .map(|&c| char::from(c))
+                .collect()
+        };
+        let s = read(&fx.join("dvi/plaintext.tex"));
+        let at = s.find("\\output={}\n").expect("plaintext.tex's body");
+        let prelude = s[..at].replace(
+            "% (\\input hyphen: no hyphenation patterns on the graph yet)\n",
+            &read(&fx.join("hyph/hyphen.tex")),
+        );
+        let kp = std::sync::Mutex::new({
+            let p = std::env::var("PATH").unwrap_or_default();
+            std::env::split_paths(&p)
+                .find(|d| d.join("tex").is_file())
+                .map(|d| phitex_kpse::Kpse::new(&d, "tex", "tex"))
+        });
+        let finder: crate::Finder = Arc::new(move |key: &str| {
+            let font = crate::font_name(key);
+            let name = font.unwrap_or(key);
+            let fmt = match font.and_then(|n| n.rsplit('.').next()) {
+                Some("tfm") => phitex_kpse::Format::Tfm,
+                Some("map") => phitex_kpse::Format::FontMap,
+                Some("vf") => phitex_kpse::Format::Vf,
+                _ => phitex_kpse::Format::Tex,
+            };
+            let mut k = kp.lock().ok()?;
+            let p = k.as_mut()?.find_file(name.as_bytes(), fmt, false)?;
+            let p = String::from_utf8(p).ok()?;
+            Some((p.clone(), std::fs::read(&p).ok()?))
+        });
+        let mut doc = String::from(
+            "\\hsize=300pt\n\\def\\close{\\fi\\endgroup}\\begingroup\\count1=5 Set.\n\n\\iftrue ",
+        );
+        for k in 0..700 {
+            let _ = write!(doc, "w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            doc.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        doc.push_str("\\relax\\close then \\the\\count1.\n\n\\bye\n");
+        let opts = crate::Options {
+            finder,
+            threads: Some(1),
+            ..crate::Options::default()
+        };
+        let b = crate::Build::with(opts, Some(&prelude), &doc);
+        assert!(b.stats.nodes_run > 0, "the document ran");
+        let taken = super::TAKEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(!taken.is_empty(), "checkpoints were taken");
+        assert!(
+            !taken.iter().any(|&closed| closed),
+            "a checkpoint was taken after its run closed its scope"
+        );
+    }
 }
