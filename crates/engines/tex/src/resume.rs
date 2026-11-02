@@ -389,7 +389,9 @@ impl Run<'_, '_> {
         // (the next one after as many commands as this one's parts are
         // long, at least `every`: what checkpoints cost stays a share of
         // what the run does, however deep its lists and input)
-        let spacing = enc_cost + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
+        let spacing = enc_cost
+            + self.st.touched_len() as u64 / 4
+            + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
             c.next = self.cmds + every().max(spacing);
         }
