@@ -14,14 +14,14 @@ pub const HASH_TABLE_SIZE: usize = 503;
 pub const INVALID_EPOCH_VALUE: i64 = -1;
 
 /// `struct ht_entry`.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct HtEntry<V> {
     pub key: Vec<u8>,
     pub value: V,
 }
 
 /// `struct ht_table`: `table[hash]` is the chain, in C's order.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct HtTable<V> {
     pub count: i32,
     pub table: Vec<Vec<HtEntry<V>>>,
@@ -162,7 +162,7 @@ impl<V> HtTable<V> {
 }
 
 /// `dpx_stack`: the top is the end of `items`.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct DpxStack<T> {
     pub items: Vec<T>,
 }

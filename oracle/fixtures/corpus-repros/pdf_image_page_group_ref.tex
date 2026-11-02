@@ -1,0 +1,10 @@
+% an included PDF page whose /Group is an indirect object: the page that
+% first shows it numbers the group's object, which the image's write
+% writes in place of copying the page's; one object, not two
+\documentclass{article}
+\usepackage{graphicx}
+\begin{document}
+\includegraphics{grpref.pdf}
+\newpage
+\immediate\pdfobj{<< /After 1 >>}After the image: object \the\pdflastobj.
+\end{document}

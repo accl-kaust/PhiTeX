@@ -20,7 +20,7 @@ pub enum CompatMode {
     Mpost,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct DpxConf {
     pub is_xbb: bool,
     pub verbose_level: i32,
@@ -30,7 +30,7 @@ pub struct DpxConf {
 }
 
 /// The whole program.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Dpx {
     /// The objects and the writer (pdfobj.c).
     pub o: PdfOut,
@@ -69,6 +69,78 @@ pub struct Dpx {
     pub session: crate::session::State,
     /// The glyph runs (a side output).
     pub runs: crate::glyphrun::State,
+}
+
+impl Dpx {
+    /// Whether this state and `x` are equal but for the values of their
+    /// objects (their arenas as long, [`crate::obj::PdfOut::differs_but`]):
+    /// every other part compared whole (a part added to the program's
+    /// state must be named here: the pattern lists them all).
+    pub(crate) fn same_but_objects(&self, x: &Dpx) -> bool {
+        let Dpx {
+            o,
+            files: _,
+            conf,
+            dvi_filename,
+            pdf_filename,
+            dvi,
+            dev,
+            doc,
+            draw,
+            color,
+            resource,
+            font,
+            fontmap,
+            tfm,
+            vf,
+            agl,
+            encoding,
+            cmap,
+            cid,
+            ximage,
+            spc,
+            pdfm,
+            xtx,
+            misc,
+            html,
+            dvips,
+            mpost,
+            t1_char,
+            cs_type2,
+            session,
+            runs,
+        } = self;
+        o.differs_but(&x.o, true).is_none()
+            && *conf == x.conf
+            && *dvi_filename == x.dvi_filename
+            && *pdf_filename == x.pdf_filename
+            && *dvi == x.dvi
+            && *dev == x.dev
+            && *doc == x.doc
+            && *draw == x.draw
+            && *color == x.color
+            && *resource == x.resource
+            && *font == x.font
+            && *fontmap == x.fontmap
+            && *tfm == x.tfm
+            && *vf == x.vf
+            && *agl == x.agl
+            && *encoding == x.encoding
+            && *cmap == x.cmap
+            && *cid == x.cid
+            && *ximage == x.ximage
+            && *spc == x.spc
+            && *pdfm == x.pdfm
+            && *xtx == x.xtx
+            && *misc == x.misc
+            && *html == x.html
+            && *dvips == x.dvips
+            && *mpost == x.mpost
+            && *t1_char == x.t1_char
+            && *cs_type2 == x.cs_type2
+            && *session == x.session
+            && *runs == x.runs
+    }
 }
 
 /// dvipdfm-x's `WARN`: dropped (the transcript is not output). The
@@ -178,6 +250,13 @@ impl Dpx {
 /// The host's files, shared by a session's snapshots.
 #[derive(Clone)]
 pub struct FilesRef(pub alloc::sync::Arc<dyn Files>);
+
+/// The host's files are not the session's state: any two are equal.
+impl PartialEq for FilesRef {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
 
 impl FilesRef {
     /// [`Files::find`].

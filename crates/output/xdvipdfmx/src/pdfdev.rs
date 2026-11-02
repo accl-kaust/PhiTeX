@@ -110,7 +110,7 @@ pub const TEN_POW_INV: [f64; 10] = [
 ];
 
 /// `struct dev_param`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct DevParam {
     pub autorotate: i32,
     /// 0: ignore colors.
@@ -118,7 +118,7 @@ pub struct DevParam {
 }
 
 /// `text_state.matrix`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct TextMatrix {
     pub slant: f64,
     pub extend: f64,
@@ -143,7 +143,7 @@ pub fn text_matrix(slant: f64, extend: f64, rotate: i32) -> [f64; 4] {
 }
 
 /// `struct text_state`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct TextState {
     /// Index into `PdfDev::fonts` (-1: none).
     pub font_id: i32,
@@ -164,7 +164,7 @@ pub struct TextState {
 /// C's `used_chars` (a pointer into the pdf_font's usedchars) is not a
 /// field: mark glyphs through `font_id` (`pdf_get_font_usedchars`
 /// semantics, the descendant's for a Type0 font).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct DevFont {
     /// The pdf_font's used-glyph table (C's `used_chars`), once the font
     /// is set.
@@ -189,7 +189,7 @@ pub struct DevFont {
 }
 
 /// `struct dev_unit`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct DevUnit {
     /// DVI unit to bp multiplier.
     pub dvi2pts: f64,
@@ -200,7 +200,7 @@ pub struct DevUnit {
 }
 
 /// `struct pdf_dev`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfDev {
     pub motion_state: i32,
     pub param: DevParam,
@@ -216,7 +216,7 @@ pub struct PdfDev {
 }
 
 /// pdfdev.c's statics.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `pdev`.
     pub pdev: PdfDev,

@@ -521,6 +521,35 @@ impl DviWriter {
         w
     }
 
+    /// Whether a writer that keeps no bytes says the same operations as
+    /// `o` for the same pages from here: the same fonts defined, margins,
+    /// registers and state between pages, wherever in the file each
+    /// stands. Not compared: the bytes written and their count (the
+    /// buffer's state with them: which `down` and `right` commands become
+    /// `w`, `x`, `y` and `z` follows from it, the places they move to do
+    /// not), and the postamble's totals (the pages, the maxima).
+    #[must_use]
+    pub fn same_ahead(&self, o: &DviWriter) -> bool {
+        !self.keep
+            && !o.keep
+            && self.down.is_empty()
+            && self.right.is_empty()
+            && o.down.is_empty()
+            && o.right.is_empty()
+            && self.rec.is_none()
+            && o.rec.is_none()
+            && self.ops == o.ops
+            && (self.buf_size, self.mag, self.xdv) == (o.buf_size, o.mag, o.xdv)
+            && (self.h_offset, self.v_offset, self.page_size)
+                == (o.h_offset, o.v_offset, o.page_size)
+            && self.fonts == o.fonts
+            && self.nums == o.nums
+            && (self.dvi_h, self.dvi_v, self.cur_h, self.cur_v)
+                == (o.dvi_h, o.dvi_v, o.cur_h, o.cur_v)
+            && (self.dvi_f, self.cur_s, self.doing_leaders, self.cur_dir)
+                == (o.dvi_f, o.cur_s, o.doing_leaders, o.cur_dir)
+    }
+
     /// The operations written since the last call (a page's, after
     /// [`DviWriter::ship_out`]).
     pub fn take_ops(&mut self) -> Vec<Op> {

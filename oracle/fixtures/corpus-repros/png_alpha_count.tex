@@ -1,0 +1,8 @@
+\documentclass{article}
+\usepackage{graphicx}
+\begin{document}
+A PNG with an alpha channel: \includegraphics[width=2cm]{a.png}
+\newpage
+An object made after the page that first showed it:
+\immediate\pdfobj{<</X 1>>}\the\pdflastobj.
+\end{document}

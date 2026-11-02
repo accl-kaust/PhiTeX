@@ -108,7 +108,7 @@ pub fn LOOKUP_END(f: i32) -> bool {
 }
 
 /// cmap.c's statics.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `__silent`.
     pub silent: i32,
@@ -118,7 +118,7 @@ pub struct State {
 }
 
 /// `rangeDef`: a codespace range (`dim` bytes each).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct RangeDef {
     pub dim: i32,
     /// `codeLo`.
@@ -128,7 +128,7 @@ pub struct RangeDef {
 }
 
 /// `mapDef`: one entry of a 256-entry mapping table.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct MapDef {
     pub flag: i32,
     /// 2 for a CID, variable for a code.
@@ -148,7 +148,7 @@ pub struct MapData {
 }
 
 /// `CMap.profile`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct CMapProfile {
     /// `minBytesIn`.
     pub min_bytes_in: i32,
@@ -162,7 +162,7 @@ pub struct CMapProfile {
 
 /// `struct CMap`. `Default` is not `CMap_new` (use that for C's initial
 /// values: the profile's minima are 65535, the type CODE_TO_CID).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct CMap {
     pub name: Option<Vec<u8>>,
     /// `type`: CMapType.

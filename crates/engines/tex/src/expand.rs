@@ -1454,8 +1454,9 @@ impl Run<'_, '_> {
             return Ok(());
         }
         // (kpathsea's `tex` format: `name.tex` first unless the name has
-        // one of its suffixes, then `name`, [`crate::run::tex_names`])
-        let key = crate::run::tex_names(&name).0;
+        // one of its suffixes, then `name`, [`Run::tex_key`]: the name
+        // found is the key its read-back and its cut are read by)
+        let key = self.tex_key(&name)?;
         // (a file the job writes whose text the client gave, not read
         // back yet: read back from that text here, its read-back point,
         // `Run::seed_written`)
@@ -1471,12 +1472,7 @@ impl Run<'_, '_> {
             self.input.push_file(f);
             return Ok(());
         }
-        let mut x = self.read_file_lazy(&key)?;
-        let bare = crate::run::same_dir(&name);
-        if x.is_none() && key != bare {
-            x = self.read_file_lazy(bare)?;
-        }
-        let Some(x) = x else {
+        let Some(x) = self.read_file_lazy(&key)? else {
             // §530: in the nonstop modes (a build's, [`Run::fatal`]) the
             // job ends
             self.log("error", "I can't find file")?;

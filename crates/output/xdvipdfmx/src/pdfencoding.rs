@@ -15,7 +15,7 @@ pub const CACHE_ALLOC_SIZE: u32 = 16;
 pub const WBUF_SIZE: usize = 1024;
 
 /// `pdf_encoding`.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct PdfEncoding {
     pub ident: Vec<u8>,
     pub enc_name: Vec<u8>,
@@ -43,7 +43,7 @@ impl Default for PdfEncoding {
 
 /// pdfencoding.c's statics: `enc_cache` (count = `encodings.len()`), and
 /// `wbuf`, `range_min`, `range_max` (scratch for the ToUnicode CMaps).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `enc_cache.encodings`.
     pub encodings: Vec<PdfEncoding>,

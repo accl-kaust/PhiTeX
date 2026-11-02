@@ -26,6 +26,7 @@
 
 use crate::exec::LockWait as _;
 use phitex_defuse::{Ctx, Field, Locality, Operation, Stop, ValueId, Values};
+use std::sync::Arc;
 
 use crate::api::ToolSearch;
 use crate::ops::{Shared, ops};
@@ -535,6 +536,30 @@ impl Operation for ToolRun {
                 Some((format!("./{input}"), text.clone())),
             );
         }
+        // (a run on the same contents of the same files: its outcome
+        // again, each file it read looked up again, [`Outcomes`])
+        let key = outcome_key(tool, &output, &input, &targs, &opts, epoch);
+        if let Some(k) = key {
+            let input_key = content_key(
+                tool,
+                &Need::File(input.clone()),
+                Some(&(format!("./{input}"), text.clone())),
+            );
+            let entries: Vec<Arc<Outcome>> =
+                outcomes().locked().get(&k).cloned().unwrap_or_default();
+            'entries: for e in entries {
+                if e.input != input_key {
+                    continue;
+                }
+                for (n, h) in &e.read {
+                    let x = look_up(cx, n)?;
+                    if content_key(tool, n, x.as_ref()) != *h {
+                        continue 'entries;
+                    }
+                }
+                return Ok(outcome_value(v, tool, &output, &e.out));
+            }
+        }
         // (run, then the files it asked for and had not looked up, and
         // again until it asks for none new)
         let mut fail: Option<String> = None;
@@ -599,10 +624,7 @@ impl Operation for ToolRun {
                 ));
             }
         }
-        if let Some(m) = fail {
-            return Ok(v.list(vec![v.str(&m)]));
-        }
-        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && fail.is_none() {
             eprintln!(
                 "tool {} for {output}: read {:?}, made {:?} bytes",
                 tool.name(),
@@ -610,27 +632,181 @@ impl Operation for ToolRun {
                 made.as_ref().map(Vec::len)
             );
         }
-        // (`[path, text, 0, said]`: a whole text, read inline where it is
-        // opened, `Run::start_input`, which reports what the tool said
-        // there: `[error, message]` each, in the tool's order)
-        Ok(made.map_or(ValueId::UNIT, |b| {
+        let out = match fail {
+            Some(m) => Err(m),
+            None => Ok((made, said)),
+        };
+        if let Some(k) = key {
+            let input = Need::File(input);
+            let input_key = content_key(
+                tool,
+                &input,
+                served.got.get(&input).and_then(Option::as_ref),
+            );
+            let mut read: Vec<(Need, u64)> = served
+                .got
+                .iter()
+                .filter(|(n, _)| **n != input)
+                .map(|(n, x)| (n.clone(), content_key(tool, n, x.as_ref())))
+                .collect();
+            read.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+            let e = Arc::new(Outcome {
+                input: input_key,
+                read,
+                out: out.clone(),
+            });
+            let mut m = outcomes().locked();
+            if m.len() > 256 {
+                m.clear();
+            }
+            let es = m.entry(k).or_default();
+            es.retain(|x| x.input != e.input || x.read != e.read);
+            es.insert(0, e);
+            es.truncate(OUTCOMES_KEPT);
+        }
+        Ok(outcome_value(v, tool, &output, &out))
+    }
+}
+
+/// A tool run's outcome: what it made and what it said, or why it failed
+/// (`Err`).
+type Made = Result<(Option<Vec<u8>>, Vec<(bool, String)>), String>;
+
+/// A tool run kept ([`outcomes`]): its input's content ([`content_key`]),
+/// each other file it read and its content, and its outcome.
+struct Outcome {
+    input: u64,
+    read: Vec<(Need, u64)>,
+    out: Made,
+}
+
+/// The runs kept per key: a watch's edit and its revert.
+const OUTCOMES_KEPT: usize = 2;
+
+/// The tools' runs kept, by [`outcome_key`]: a tool is a function of the
+/// files it reads, so a run whose input and every file the kept run read
+/// have the same contents makes what that run made, and says what it
+/// said. The `.aux` file's writer runs BibTeX on each pass's text, and
+/// every edit that moves a label wrote a new one (Grail's heading edit:
+/// 10 ms a pass, accl 22839).
+fn outcomes() -> &'static std::sync::Mutex<crate::FxHashMap<u64, Vec<Arc<Outcome>>>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<crate::FxHashMap<u64, Vec<Arc<Outcome>>>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// What a run of `tool` depends on beyond the files it reads: the tool,
+/// its output, input and arguments, its settings and the date; `None`
+/// for a tool whose runs are not kept (one that runs other programs,
+/// METAFONT's whose runs the client keeps).
+fn outcome_key(
+    tool: Tool,
+    output: &str,
+    input: &str,
+    targs: &[String],
+    opts: &ToolOptions,
+    epoch: i64,
+) -> Option<u64> {
+    let settings = match tool {
+        Tool::Bibtex => format!("{:?}", opts.bibtex),
+        Tool::Makeindex => String::from_utf8_lossy(MAKEINDEX_VERSION).into_owned(),
+        Tool::Biber => String::new(),
+        Tool::Repstopdf | Tool::Mktex => return None,
+    };
+    let text = format!(
+        "{}\0{output}\0{input}\0{targs:?}\0{settings}\0{epoch}",
+        tool.name()
+    );
+    Some(phitex_defuse::hash_bytes(
+        0x746f_6f6c_7275_6e00,
+        text.as_bytes(),
+    ))
+}
+
+/// What of file `x` (looked up as `n`; none: absent) a run of `tool`
+/// depends on, hashed: its name and contents; for BibTeX's `.aux` files,
+/// the lines it reads ([`bibtex_lines`]).
+fn content_key(tool: Tool, n: &Need, x: Option<&(String, Vec<u8>)>) -> u64 {
+    let Some((path, b)) = x else {
+        return 0;
+    };
+    let h = phitex_defuse::hash_bytes(0x6669_6c65_7061_7468, path.as_bytes());
+    let aux = matches!(n, Need::File(f) if f.ends_with(".aux"));
+    match (tool == Tool::Bibtex && aux)
+        .then(|| bibtex_lines(b))
+        .flatten()
+    {
+        Some(lines) => phitex_defuse::hash_bytes(h ^ 1, &lines),
+        None => phitex_defuse::hash_bytes(h, b),
+    }
+}
+
+/// The lines of an `.aux` file BibTeX reads (§116): those whose text
+/// before their first `{` is `\citation`, `\bibdata`, `\bibstyle` or
+/// `\@input`, the others emptied (BibTeX skips them; their count stays,
+/// for its messages' line numbers). `None` where one of those lines does
+/// not end in `}` (white space after it aside): BibTeX's scan of such a
+/// line looks past its end, at what a longer line before it left in its
+/// buffer, so the lines emptied would change what it reads.
+fn bibtex_lines(aux: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(aux.len() / 4);
+    let mut start = 0;
+    loop {
+        let end = aux[start..]
+            .iter()
+            .position(|&c| c == b'\n' || c == b'\r')
+            .map_or(aux.len(), |i| start + i);
+        let line = &aux[start..end];
+        let cmd = line.iter().position(|&c| c == b'{').map(|i| &line[..i]);
+        if matches!(
+            cmd,
+            Some(b"\\citation" | b"\\bibdata" | b"\\bibstyle" | b"\\@input")
+        ) {
+            let kept = line
+                .iter()
+                .rposition(|&c| !matches!(c, b' ' | b'\t'))
+                .map_or(&line[..0], |i| &line[..=i]);
+            if kept.last() != Some(&b'}') {
+                return None;
+            }
+            out.extend_from_slice(line);
+        }
+        let Some(&sep) = aux.get(end) else {
+            break;
+        };
+        // (the line's end as it was: BibTeX ends a line at either)
+        out.push(sep);
+        start = end + 1;
+    }
+    Some(out)
+}
+
+/// [`ToolRun`]'s value for outcome `out`: `[message]` for a failure;
+/// `[path, text, 0, said]` for a file made, a whole text read inline where
+/// it is opened (`Run::start_input`, which reports what the tool said
+/// there: `[error, message]` each, in the tool's order); `UNIT` for none.
+fn outcome_value(v: &Values, tool: Tool, output: &str, out: &Made) -> ValueId {
+    match out {
+        Err(m) => v.list(vec![v.str(m)]),
+        Ok((None, _)) => ValueId::UNIT,
+        Ok((Some(b), said)) => {
             let said = said
-                .into_iter()
+                .iter()
                 .map(|(e, m)| {
-                    let what = if e { "error" } else { "warning" };
+                    let what = if *e { "error" } else { "warning" };
                     v.list(vec![
-                        v.int(i64::from(e)),
+                        v.int(i64::from(*e)),
                         v.str(&format!("{} {what}: {m}", tool.name())),
                     ])
                 })
                 .collect();
             v.list(vec![
                 v.str(&format!("./{output}")),
-                v.str(&chars(&b)),
+                v.str(&chars(b)),
                 v.int(0),
                 v.list(said),
             ])
-        }))
+        }
     }
 }
 
@@ -753,5 +929,76 @@ impl Operation for ToolNode {
         }
         cx.define_with(out_field(v, &out), made, Locality::Global);
         Ok(ValueId::UNIT)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bibtex_lines;
+
+    struct Mem(Vec<(&'static [u8], Vec<u8>)>);
+
+    impl phitex_bibtex::Files for Mem {
+        fn aux(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+            self.0.iter().find(|e| e.0 == name).map(|e| e.1.clone())
+        }
+        fn bst(&mut self, _: &[u8]) -> Option<Vec<u8>> {
+            Some(
+                b"ENTRY { title } {} { label }\n\
+                  FUNCTION {article} { \"\\bibitem{\" cite$ * \"}\" * write$ newline$ title write$ newline$ }\n\
+                  FUNCTION {default.type} { article }\n\
+                  READ\nITERATE {call.type$}\n"
+                    .to_vec(),
+            )
+        }
+        fn bib(&mut self, _: &[u8]) -> Option<Vec<u8>> {
+            Some(b"@article{a, title={Alpha}}\n@article{b, title={Beta}}\n@article{c, title={Gamma}}\n".to_vec())
+        }
+    }
+
+    /// BibTeX on an `.aux` file and on the lines of it it reads
+    /// ([`bibtex_lines`]): the same `.bbl` and `.blg`, its messages' line
+    /// numbers among them (a second `\\bibstyle`, an error, and a
+    /// citation in a nested file, read through `\\@input`), whatever the
+    /// other lines are (long ones, CR LF ends); and a line of the four it
+    /// reads that does not end in `}` keeps the whole file.
+    #[test]
+    fn bibtex_reads_the_same_from_its_lines() {
+        let long = format!(
+            "\\@writefile{{toc}}{{\\contentsline {{section}}{{{}}}}}",
+            "x".repeat(300)
+        );
+        let main = format!(
+            "\\relax\n{long}\n\\citation{{a}}\r\n\\newlabel{{s}}{{{{1}}{{2}}}}\n\\@input{{sub.aux}}\n\\bibstyle{{plain}}\n{long}\n\\bibstyle{{plain}}\n\\bibdata{{refs}}\n  \n"
+        );
+        let sub = "\\newlabel{t}{{3}{4}}\n\\citation{c,b}  \n".to_owned();
+        let run = |m: &[u8], s: &[u8]| {
+            let mut f = Mem(vec![(b"t.aux", m.to_vec()), (b"sub.aux", s.to_vec())]);
+            let o = phitex_bibtex::run(b"t.aux", &phitex_bibtex::Options::default(), &mut f);
+            (o.bbl.map(|f| f.contents), o.blg.map(|f| f.contents), o.term)
+        };
+        let lines = bibtex_lines(main.as_bytes()).expect("its commands end in }");
+        let sub_lines = bibtex_lines(sub.as_bytes()).expect("its commands end in }");
+        assert!(lines.len() < main.len() / 2, "the other lines emptied");
+        assert_eq!(
+            lines.iter().filter(|&&c| c == b'\n' || c == b'\r').count(),
+            main.bytes().filter(|&c| c == b'\n' || c == b'\r').count(),
+            "the lines kept, the line ends with them"
+        );
+        let whole = run(main.as_bytes(), sub.as_bytes());
+        let blg = String::from_utf8_lossy(whole.1.as_deref().unwrap_or_default()).into_owned();
+        assert!(
+            blg.contains("Illegal, another \\bibstyle command---line "),
+            "an error at its line: {blg}"
+        );
+        assert!(whole.0.as_ref().is_some_and(|b| !b.is_empty()));
+        assert_eq!(run(&lines, &sub_lines), whole);
+        // (a command line not ended: BibTeX looks past it)
+        assert_eq!(bibtex_lines(b"\\relax\n\\citation{a\n"), None);
+        assert_eq!(bibtex_lines(b"\\bibdata{refs} x\n"), None);
+        assert!(
+            bibtex_lines(b"\\citation {a\n\\cite{x\n").is_some(),
+            "not BibTeX's commands"
+        );
     }
 }

@@ -1795,14 +1795,9 @@ impl Run<'_, '_> {
                 return Ok(());
             }
             // (kpathsea's `tex` format: `name.tex` first unless the name has
-            // one of its suffixes, then a name with another extension as
-            // it is, [`crate::run::tex_names`])
-            let (key, alt) = crate::run::tex_names(&name);
-            if !self.open_in_at(&field, &key)?
-                && let Some(alt) = alt
-            {
-                self.open_in_at(&field, &alt)?;
-            }
+            // one of its suffixes, then `name`, [`Run::tex_key`])
+            let key = self.tex_key(&name)?;
+            self.open_in_at(&field, &key)?;
         }
         Ok(())
     }
