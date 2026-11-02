@@ -973,6 +973,10 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) no_resume: bool,
     /// The command count the run went on from a checkpoint at.
     pub(crate) resumed_at: Option<u64>,
+    /// `PHITEX_RESUME_CHECK`: the checkpoint the run went on from, to
+    /// compare with the whole run's at the same command
+    /// ([`Run::ck_compare`]).
+    pub(crate) resumed_ck: Option<ValueId>,
     /// A halt raised on the token path ([`Run::raise`]), returned by the
     /// next `get_next` of the command in progress.
     pub(crate) halt: Option<Halt>,
@@ -1220,6 +1224,7 @@ impl<'c, 'a> Run<'c, 'a> {
             ck: None,
             no_resume: false,
             resumed_at: None,
+            resumed_ck: None,
             halt: None,
             cand: 0,
             cand_marks: Vec::new(),

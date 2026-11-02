@@ -249,12 +249,29 @@ pub(crate) fn run_node(
                 let resumed = r.product_signature();
                 let at = r.resumed_at.unwrap_or(0);
                 let node = r.cx.node().raw();
+                let rck = r.resumed_ck;
                 let cx = r.cx;
+                cx.stash_reads();
+                let held = cx.stashed_hold();
+                cx.begin_again();
                 r = Run::new(cx, o);
                 r.no_resume = true;
                 let mut res = body(&mut r);
+                if let Some(ck) = rck {
+                    let made = crate::val::list_of(r.v, ck)
+                        .get(14)
+                        .and_then(|&x| usize::try_from(int_of(r.v, x)).ok())
+                        .unwrap_or(0);
+                    eprintln!(
+                        "resume check: node {node} checkpoint at {at}: {} | reads before it: {}",
+                        r.ck_compare(ck),
+                        r.cx.first_read_apart(made)
+                            .unwrap_or_else(|| "the same".to_owned())
+                    );
+                }
                 if let Err(Halt::Recut(k)) = res {
                     let cx = r.cx;
+                    cx.begin_again();
                     r = Run::new(cx, o);
                     r.no_resume = true;
                     r.stop_at = Some(k);
@@ -273,7 +290,7 @@ pub(crate) fn run_node(
                             _ => "fatal",
                         };
                         eprintln!(
-                            "resume check: node {node} went on at command {at}: DIFFERENT, the whole run ended otherwise ({how})"
+                            "resume check: node {node} went on at command {at}: INCOMPLETE, the whole run met what is not there yet ({how})"
                         );
                         return Ok(r.stall(how, ValueId::UNIT));
                     }
@@ -286,6 +303,14 @@ pub(crate) fn run_node(
                 }
                 r.settle_lines();
                 let whole = r.product_signature();
+                // (at -j8 what the resumed run read may have moved while
+                // the two ran: then they may differ, and the commit
+                // refutes the run)
+                let moved = if held && r.cx.stashed_hold() {
+                    ""
+                } else {
+                    " (its reads moved meanwhile)"
+                };
                 if resumed == whole {
                     eprintln!(
                         "resume check: node {node} went on at command {at} of {}: same",
@@ -293,7 +318,7 @@ pub(crate) fn run_node(
                     );
                 } else {
                     eprintln!(
-                        "resume check: node {node} went on at command {at} of {}: DIFFERENT {}",
+                        "resume check: node {node} went on at command {at} of {}: DIFFERENT{moved} {}",
                         r.cmds,
                         crate::resume::first_difference(&resumed, &whole)
                     );
@@ -332,6 +357,7 @@ pub(crate) fn run_node(
             let tf = pp.and_then(|_| crate::prof::start());
             let x = r.finish();
             crate::prof::add(crate::prof::FINISH, tf);
+
             if pp.is_some() {
                 crate::prof::add(crate::prof::RUN, pp);
                 crate::prof::run();

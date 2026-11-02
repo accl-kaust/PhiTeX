@@ -65,6 +65,14 @@ pub struct Ctx<'a> {
     pub(crate) goes_on: bool,
     /// Its checks so far ([`Ctx::tick`]).
     ticks: u64,
+    /// The reads `unread` took out, each by its index in the reads as
+    /// they were then, in order: a point's count of reads made before it
+    /// ([`Ctx::reads_made`]) taken before them is moved to the record's
+    /// by [`Ctx::reads_kept_of`].
+    unread_log: Vec<usize>,
+    /// `PHITEX_RESUME_CHECK`: the reads of the run checked
+    /// ([`Ctx::stash_reads`]).
+    stashed: Vec<ReadRec>,
 }
 
 /// The check ([`Ctx::tick`]) from which a run's reads are looked at
@@ -100,6 +108,7 @@ impl<'a> Ctx<'a> {
                 unchanged: false,
                 state: None,
                 resumed: std::cell::Cell::new(false),
+                kept_reads: std::cell::Cell::new(None),
                 woken_at: None,
                 settle_now: false,
                 waits: Vec::new(),
@@ -110,6 +119,8 @@ impl<'a> Ctx<'a> {
             ep: u64::MAX,
             follow_at: None,
             seen: FxHashMap::default(),
+            unread_log: Vec::new(),
+            stashed: Vec::new(),
             stop_at: None,
             woke: me.woke.lock().as_ref().map(|w| w.cause.clone()),
             placed_keys: None,
@@ -1029,6 +1040,21 @@ impl<'a> Ctx<'a> {
         self.product.resumed.set(true);
     }
 
+    /// How many reads this run has made so far: stored with a point of
+    /// the run it may go on from next time ([`Ctx::last_reads_hold`]).
+    pub fn reads_made(&self) -> usize {
+        self.product.kept_reads.get().unwrap_or(0) + self.product.reads.len()
+    }
+
+    /// The run goes on from a point of my last run reached after its
+    /// first `k` reads (which hold, [`Ctx::last_reads_hold`]): those
+    /// reads stand with this run's (those it reads again replaced), the
+    /// rest of the last run's are dropped.
+    pub fn goes_on_after_reads(&self, k: usize) {
+        self.product.resumed.set(true);
+        self.product.kept_reads.set(Some(k));
+    }
+
     /// Whether node `a` stands before node `b` on the line (both alive). A
     /// loop resumed after a contribution moved asks whether the mover lies
     /// behind its cursor (then it goes back to the checkpoint before it)
@@ -1080,13 +1106,116 @@ impl<'a> Ctx<'a> {
     /// Forgets my reads of `f` in this run: the commit records none.
     pub fn unread(&mut self, f: Field) {
         self.seen.remove(&f);
-        self.product.reads.retain(|r| match &r.kind {
-            ReadKind::Field { f: g, .. }
-            | ReadKind::Env { f: g }
-            | ReadKind::Fold { f: g, .. }
-            | ReadKind::Next { f: g, .. } => *g != f,
-            ReadKind::Placed { .. } | ReadKind::Following { .. } | ReadKind::Hole => true,
+        let mut i = 0;
+        let log = &mut self.unread_log;
+        self.product.reads.retain(|r| {
+            let keep = match &r.kind {
+                ReadKind::Field { f: g, .. }
+                | ReadKind::Env { f: g }
+                | ReadKind::Fold { f: g, .. }
+                | ReadKind::Next { f: g, .. } => *g != f,
+                ReadKind::Placed { .. } | ReadKind::Following { .. } | ReadKind::Hole => true,
+            };
+            if keep {
+                i += 1;
+            } else {
+                log.push(i);
+            }
+            keep
         });
+    }
+
+    /// Starts the run's product again, as at its start (its wake and
+    /// last run kept): a check that runs the node again whole after a
+    /// run that went on from a checkpoint (`PHITEX_RESUME_CHECK`), so the
+    /// whole run's product is what is committed.
+    pub fn begin_again(&mut self) {
+        let scope_gen = self.product.scope_gen;
+        let fresh = Ctx::new(self.eng, self.worker, self.me);
+        self.product = fresh.product;
+        self.product.scope_gen = scope_gen;
+        self.views.clear();
+        self.follow_at = None;
+        self.seen.clear();
+        self.unread_log.clear();
+        self.stop_at = None;
+        self.placed_keys = None;
+        self.stuck = None;
+        self.wait_on = None;
+        self.wait_frontier = false;
+        self.goes_on = false;
+    }
+
+    /// `PHITEX_RESUME_CHECK`: the run's reads so far kept aside, with
+    /// the last run's it rests on ([`Ctx::stashed_hold`]).
+    pub fn stash_reads(&mut self) {
+        let mut xs: Vec<ReadRec> = match (self.product.kept_reads.get(), self.last.as_ref()) {
+            (Some(k), Some(r)) => r.reads[..k.min(r.reads.len())].to_vec(),
+            _ => Vec::new(),
+        };
+        xs.extend(self.product.reads.iter().cloned());
+        self.stashed = xs;
+    }
+
+    /// Whether the reads [`Ctx::stash_reads`] kept aside, and this run's,
+    /// all still give what they gave: runs on them, made now, would make
+    /// what they made.
+    pub fn stashed_hold(&self) -> bool {
+        let mut memo = crate::read::FoldMemo::new();
+        self.stashed.iter().chain(&self.product.reads).all(|rd| {
+            matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
+                || crate::read::holds(self.eng, self.me, rd, &mut memo)
+        })
+    }
+
+    /// The first of my last run's first `k` reads this run's reads
+    /// differ from, in order (kind, path, answer), as one line; `None`
+    /// where they all agree (`PHITEX_RESUME_CHECK`: what a whole run read
+    /// before a checkpoint a run went on from, against what that
+    /// checkpoint's run read).
+    pub fn first_read_apart(&self, k: usize) -> Option<String> {
+        let last = self.last.as_ref()?;
+        let v = &self.eng.values;
+        let show = |r: &ReadRec| {
+            let f = r.kind.field().map(|f| v.render(f.0)).unwrap_or_default();
+            let seen = r.seen.map(|x| {
+                let s = v.render(x);
+                s.chars().take(120).collect::<String>()
+            });
+            format!("{f} {:?} seen {seen:?}", r.kind)
+        };
+        let n = k.min(last.reads.len());
+        for i in 0..n {
+            let Some(b) = self.product.reads.get(i) else {
+                return Some(format!("read {i} of {n}: the whole run made only {i}"));
+            };
+            let a = &last.reads[i];
+            if a.kind != b.kind || a.path != b.path || a.seen != b.seen {
+                return Some(format!("read {i} of {n}: before {} | whole {}", show(a), show(b)));
+            }
+        }
+        None
+    }
+
+    /// How many reads `unread` has taken out so far (with a count of
+    /// [`Ctx::reads_made`], for [`Ctx::reads_kept_of`]).
+    pub fn unread_count(&self) -> usize {
+        self.unread_log.len()
+    }
+
+    /// A count of reads made before a point of this run
+    /// ([`Ctx::reads_made`], taken then) as the record will have them:
+    /// less those `unread` took out since from before it.
+    /// (`at`: `unread`'s count of take-outs then, [`Ctx::unread_count`]).
+    pub fn reads_kept_of(&self, made: usize, at: usize) -> usize {
+        let kept = self.product.kept_reads.get().unwrap_or(0);
+        let mut c = made;
+        for &i in self.unread_log.get(at..).unwrap_or_default() {
+            if kept + i < c {
+                c -= 1;
+            }
+        }
+        c
     }
 
     /// A path interned for `read_path` and friends.
