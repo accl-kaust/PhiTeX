@@ -2330,18 +2330,37 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(Some(x))
     }
 
-    /// The file `\\pdffilesize` and `\\filemoddate` find for `name`
-    /// ([`tex_names`]): `name.tex` where kpathsea tries it first and it is
-    /// there (the client's, cut, or one the job writes), else `name`.
-    pub(crate) fn tex_lookup(&mut self, name: &str) -> R<String> {
+    /// The file TeX's lookups (`\\input`, `\\openin`, `\\pdffilesize`,
+    /// `\\pdfximage`, `\\filemoddate`) find for `name`: the first of
+    /// kpathsea's names for it ([`tex_names`]: `name.tex` first, then
+    /// `name`) that is there (open for writing in this run, cut, the
+    /// client's, or one the job writes); neither there, the one
+    /// `\\openout` writes for `name` (`name` where it has an extension,
+    /// else `name.tex`), whose lookup in vain is where the job's file is
+    /// read back once it writes it. The lookup reads the file by this
+    /// name, and so does all it keeps of it: its read-back, its read-back
+    /// point, its cut, its seed.
+    pub(crate) fn tex_key(&mut self, name: &str) -> R<String> {
         let (key, alt) = tex_names(name);
-        let Some(alt) = alt else {
-            return Ok(key);
-        };
-        if self.read_cut(&key)?.is_some() || self.file_lazy(&key)?.is_some() {
+        let bare = same_dir(name);
+        if self.tex_there(&key)? {
             return Ok(key);
         }
-        Ok(alt)
+        if let Some(alt) = alt {
+            return Ok(alt);
+        }
+        if key != bare && self.tex_there(bare)? {
+            return Ok(bare.to_owned());
+        }
+        Ok(key)
+    }
+
+    /// Whether TeX's file `key` is there for [`Run::tex_key`].
+    fn tex_there(&mut self, key: &str) -> R<bool> {
+        if self.get(&format!("wopen:{key}"))?.is_some() || self.read_cut(key)?.is_some() {
+            return Ok(true);
+        }
+        Ok(self.file_lazy(key)?.is_some())
     }
 
     /// Font file `name` as the font side finds it (a TFM, a VF, a map,

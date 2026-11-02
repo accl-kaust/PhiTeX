@@ -434,13 +434,8 @@ fn hex_upper(b: &[u8]) -> String {
 /// File `name` as `\\pdffilesize` and its kin find it (`name.tex` first
 /// where it has no extension): `[path, text]`.
 fn file_found(r: &mut Run<'_, '_>, name: &str) -> R<Option<ValueId>> {
-    let key = crate::run::tex_names(name).0;
-    let name = crate::run::same_dir(name);
-    let mut found = r.read_file(&key)?;
-    if found.is_none() && key != name {
-        found = r.read_file(name)?;
-    }
-    Ok(found)
+    let key = r.tex_key(name)?;
+    r.read_file(&key)
 }
 
 fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
@@ -466,7 +461,7 @@ fn file_bytes_shared(r: &mut Run<'_, '_>, name: &str) -> R<Option<std::sync::Arc
 /// beside it (`fsize:<name>`), so the run reads not its text: an edit
 /// inside the file that keeps its length reaches only its pieces.
 fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
-    let key = r.tex_lookup(name)?;
+    let key = r.tex_key(name)?;
     if r.read_cut(&key)?.is_some() {
         let v = r.v;
         if let Some(n) = r.cx.env(v.field(&format!("fsize:{key}")))? {
@@ -676,7 +671,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             let job = r
                 .get_loc(crate::fields::cell::JOBNAME)?
                 .map_or_else(|| "texput".to_owned(), |x| str_of(r.v, x));
-            let key = r.tex_lookup(&name)?;
+            let key = r.tex_key(&name)?;
             // (a file found: the build's clock too, as pdfTeX's under
             // FORCE_SOURCE_DATE gives SOURCE_DATE_EPOCH for every file
             // (utils.c `getfilemoddate`); epstopdf-base compares an EPS's
