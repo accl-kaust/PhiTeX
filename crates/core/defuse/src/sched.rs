@@ -1038,7 +1038,8 @@ fn run_worker(
             // they go on, on its prediction)
             // (and those at the frontier: the layer is quiet, nothing
             // places a node before them now)
-            eng.frontier.store(0, Ordering::Release);
+            let old = eng.frontier.swap(0, Ordering::AcqRel);
+            log_frontier(eng, old, 0, None, "quiet");
             rel.extend(
                 std::mem::take(&mut *pool.shared.frontier_waiting.lock())
                     .into_iter()
@@ -1419,9 +1420,31 @@ pub(crate) fn run_log() -> bool {
 
 /// (`PHITEX_RUN_LOG`) `t` on the run log's clock: ns since the first
 /// time asked, one clock for the process (every evaluation's runs on it).
-fn log_clock(t: Instant) -> u128 {
+pub(crate) fn log_clock(t: Instant) -> u128 {
     static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     t.saturating_duration_since(*T0.get_or_init(Instant::now)).as_nanos()
+}
+
+/// (`PHITEX_RUN_LOG`) The settling layer's frontier moved: from `old` to
+/// `new` (raw ids plus one, 0 none), by `by`, `why`; with the place of
+/// the node it names.
+pub(crate) fn log_frontier(eng: &Engine, old: u64, new: u64, by: Option<NodeId>, why: &str) {
+    if !run_log() || old == new {
+        return;
+    }
+    let pos = |f: u64| {
+        f.checked_sub(1)
+            .and_then(|r| eng.placed_node(NodeId::from_raw(r)))
+            .map_or(0, |x| x.pos_hint().0)
+    };
+    eprintln!(
+        "frontier: {} -> {} (at {}) by {} {why} t {}",
+        old.saturating_sub(1),
+        new.saturating_sub(1),
+        pos(new),
+        by.map_or(0, NodeId::raw),
+        log_clock(Instant::now())
+    );
 }
 
 pub(crate) fn wake_log() -> bool {
@@ -1901,7 +1924,10 @@ fn frontier_back(eng: &Engine, n: &Node, wake: &Wake) {
             .frontier
             .compare_exchange(fr, by.raw() + 1, Ordering::AcqRel, Ordering::Acquire)
         {
-            Ok(_) => return,
+            Ok(_) => {
+                log_frontier(eng, fr, by.raw() + 1, Some(n.id), "back");
+                return;
+            }
             Err(x) => fr = x,
         }
     }
@@ -1937,6 +1963,14 @@ fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
     }
     m.push(node.id);
     drop(m);
+    if run_log() {
+        eprintln!(
+            "frontier: hold {} at {} t {}",
+            node.id.raw(),
+            eng.frontier.load(Ordering::Acquire).saturating_sub(1),
+            log_clock(Instant::now())
+        );
+    }
     pool.shared.done_one();
 }
 
@@ -1956,6 +1990,14 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
         *m = keep;
         go
     };
+    if run_log() && !go.is_empty() {
+        eprintln!(
+            "frontier: released {} at {} t {}",
+            go.len(),
+            fr.saturating_sub(1),
+            log_clock(Instant::now())
+        );
+    }
     for n in go {
         if let Some(x) = eng.placed_node(n).filter(|x| x.state() == State::Dirty) {
             enqueue(
